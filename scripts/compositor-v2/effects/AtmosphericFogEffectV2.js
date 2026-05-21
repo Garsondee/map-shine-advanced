@@ -587,7 +587,6 @@ export class AtmosphericFogEffectV2 {
         uDebugForceFog: { value: 0.0 },
         uFogAirLiftMin: { value: 0.12 },
         uUseRoofDistanceFeather: { value: 1.0 },
-        uErodeRadiusPx: { value: 0.0 }
       },
       vertexShader: `
         varying vec2 vUv;
@@ -642,7 +641,6 @@ export class AtmosphericFogEffectV2 {
         uniform float uDebugForceFog;
         uniform float uFogAirLiftMin;
         uniform float uUseRoofDistanceFeather;
-        uniform float uErodeRadiusPx;
 
         // Depth pass integration
         uniform sampler2D uDepthTexture;
@@ -723,49 +721,10 @@ export class AtmosphericFogEffectV2 {
         }
 
         // Min-filter _Outdoors: pull fog away from building silhouettes by N scene pixels.
-        float outdoorsErodeMin(vec2 sceneUv, float inScene) {
-          float m = sampleOutdoors01(sceneUv, inScene);
-          float px = clamp(uErodeRadiusPx, 0.0, 128.0);
-          if (px < 0.5) return m;
-
-          vec2 texel = vec2(
-            1.0 / max(uSceneBounds.z, 1.0),
-            1.0 / max(uSceneBounds.w, 1.0)
-          );
-          vec2 reach = texel * px;
-
-          // 3×3 immediate neighbors (anti-alias mask edge)
-          for (int j = -1; j <= 1; j++) {
-            for (int i = -1; i <= 1; i++) {
-              vec2 o = clamp(sceneUv + vec2(float(i), float(j)) * texel, vec2(0.0), vec2(1.0));
-              m = min(m, sampleOutdoors01(o, inScene));
-            }
-          }
-
-          // 8 directions at full clearance distance
-          m = min(m, sampleOutdoors01(clamp(sceneUv + vec2(reach.x, 0.0), vec2(0.0), vec2(1.0)), inScene));
-          m = min(m, sampleOutdoors01(clamp(sceneUv + vec2(-reach.x, 0.0), vec2(0.0), vec2(1.0)), inScene));
-          m = min(m, sampleOutdoors01(clamp(sceneUv + vec2(0.0, reach.y), vec2(0.0), vec2(1.0)), inScene));
-          m = min(m, sampleOutdoors01(clamp(sceneUv + vec2(0.0, -reach.y), vec2(0.0), vec2(1.0)), inScene));
-          vec2 rd = reach * 0.70710678;
-          m = min(m, sampleOutdoors01(clamp(sceneUv + vec2(rd.x, rd.y), vec2(0.0), vec2(1.0)), inScene));
-          m = min(m, sampleOutdoors01(clamp(sceneUv + vec2(-rd.x, rd.y), vec2(0.0), vec2(1.0)), inScene));
-          m = min(m, sampleOutdoors01(clamp(sceneUv + vec2(rd.x, -rd.y), vec2(0.0), vec2(1.0)), inScene));
-          m = min(m, sampleOutdoors01(clamp(sceneUv + vec2(-rd.x, -rd.y), vec2(0.0), vec2(1.0)), inScene));
-
-          vec2 halfReach = reach * 0.5;
-          m = min(m, sampleOutdoors01(clamp(sceneUv + vec2(halfReach.x, 0.0), vec2(0.0), vec2(1.0)), inScene));
-          m = min(m, sampleOutdoors01(clamp(sceneUv + vec2(-halfReach.x, 0.0), vec2(0.0), vec2(1.0)), inScene));
-          m = min(m, sampleOutdoors01(clamp(sceneUv + vec2(0.0, halfReach.y), vec2(0.0), vec2(1.0)), inScene));
-          m = min(m, sampleOutdoors01(clamp(sceneUv + vec2(0.0, -halfReach.y), vec2(0.0), vec2(1.0)), inScene));
-
-          return m;
-        }
-
-        // Cheaper warping vector than 4-tap curl — enables iterated domain warping.
+        // Single-octave warp — domain offset only needs coarse turbulence, not full FBM.
         vec2 warp(vec2 p) {
-          float x = fbm(p);
-          float y = fbm(p + vec2(13.5, 82.1));
+          float x = noise2(p);
+          float y = noise2(p + vec2(13.5, 82.1));
           return vec2(x, y) * 2.0 - 1.0;
         }
 
@@ -795,6 +754,18 @@ export class AtmosphericFogEffectV2 {
           float radial = clamp(sqrt(dx * dx + dy * dy) / 1.41421356, 0.0, 1.0);
           float fogFalloff = mix(0.72, 1.0, smoothstep(uFalloffStart, uFalloffEnd, radial));
 
+          // Sample outdoors once up front — skip all noise on fully indoor pixels.
+          float fogGate = 1.0;
+          float distClear = 1.0;
+          if (uUseIndoorMask > 0.5) {
+            float rawOutdoors = sampleOutdoors01(sceneUvRaw, inScene);
+            fogGate = smoothstep(0.18, 0.72, rawOutdoors);
+            if (fogGate < 0.01) {
+              gl_FragColor = sceneColor;
+              return;
+            }
+          }
+
           float noiseVal = 0.0;
           float noiseShape = 0.5;
           float macroShape = 1.0;
@@ -804,10 +775,15 @@ export class AtmosphericFogEffectV2 {
           vec2 w1 = vec2(0.0);
 
           if (uNoiseEnabled > 0.5) {
-            // 1. Macro shape — large fog banks and clear-air gaps
-            vec2 p_macro = p * uMacroScale + uWindOffsetNoise * 0.5;
-            macroShape = fbm(p_macro + vec2(t * 0.02, -t * 0.015));
-            macroShape = smoothstep(0.2, 0.8, macroShape);
+            // 1. Macro shape — large fog banks, rain churn, and building encroachment
+            bool needMacro = uMacroStrength > 0.001
+              || uRainIntensity > 0.01
+              || (uUseIndoorMask > 0.5 && uBuildingEncroachment > 0.001 && uUseRoofDistanceFeather > 0.5);
+            if (needMacro) {
+              vec2 p_macro = p * uMacroScale + uWindOffsetNoise * 0.5;
+              macroShape = fbm(p_macro + vec2(t * 0.02, -t * 0.015));
+              macroShape = smoothstep(0.2, 0.8, macroShape);
+            }
 
             // 2. Curls on curls — iterated domain warping
             vec2 p_micro = p * uNoiseScale + uWindOffsetNoise;
@@ -834,9 +810,7 @@ export class AtmosphericFogEffectV2 {
               p_micro += warp(p_micro * 5.0 + uTime) * (0.2 * uRainIntensity);
             }
 
-            float nA = fbm(p_micro);
-            float nB = fbm(p_micro * 2.07 + w1 * 1.5);
-            float n = mix(nA, nB, 0.6);
+            float n = fbm(p_micro);
             n = pow(clamp(n, 0.0, 1.0), max(uNoiseContrast, 0.01));
 
             noiseShape = n;
@@ -844,12 +818,7 @@ export class AtmosphericFogEffectV2 {
           }
 
           // Dynamic indoor masking — macro fog pushes against buildings
-          float fogGate = 1.0;
-          float distClear = 1.0;
           if (uUseIndoorMask > 0.5) {
-            float rawOutdoors = sampleOutdoors01(sceneUvRaw, inScene);
-            fogGate = smoothstep(0.18, 0.72, rawOutdoors);
-
             if (uUseRoofDistanceFeather > 0.5 && uRoofDistanceMaxPx > 1.5) {
               float distNorm = texture2D(tRoofDistance, roofDistanceUv(sceneUvRaw)).r;
               float distPx = distNorm * uRoofDistanceMaxPx;
@@ -877,13 +846,15 @@ export class AtmosphericFogEffectV2 {
           // This reduces the "painted on" look when density is low/medium.
           if (uCutoutEnabled > 0.5 && uCutoutStrength > 0.001) {
             float fade = pow(clamp(1.0 - d, 0.0, 1.0), 1.35);
-            vec2 q = vec2(worldX, worldY) * (max(uCutoutScale, 0.001) * 0.00008);
-            q += uWindOffsetNoise * 0.10;
-            q += vec2(uCutoutTime * 0.05, -uCutoutTime * 0.04);
-            float c = fbm(q);
-            c = pow(clamp(c, 0.0, 1.0), max(uCutoutContrast, 0.01));
-            float cut = smoothstep(0.35, 0.75, c);
-            fogStrength *= (1.0 - (uCutoutStrength * fade * cut));
+            if (fade > 0.01) {
+              vec2 q = vec2(worldX, worldY) * (max(uCutoutScale, 0.001) * 0.00008);
+              q += uWindOffsetNoise * 0.10;
+              q += vec2(uCutoutTime * 0.05, -uCutoutTime * 0.04);
+              float c = fbm(q);
+              c = pow(clamp(c, 0.0, 1.0), max(uCutoutContrast, 0.01));
+              float cut = smoothstep(0.35, 0.75, c);
+              fogStrength *= (1.0 - (uCutoutStrength * fade * cut));
+            }
           }
 
           // Depth-based fog modulation: elevated objects get less fog.
@@ -1128,8 +1099,6 @@ export class AtmosphericFogEffectV2 {
     u.uUseRoofDistanceFeather.value = this.params.useRoofDistanceFeather === true ? 1.0 : 0.0;
     u.uIndoorBufferPx.value = this.params.indoorBufferPx ?? 48;
     u.uIndoorSoftnessPx.value = this.params.indoorSoftnessPx ?? 120;
-    // Mask erosion is deprecated — it produced binary edges; distance field handles wall softness.
-    u.uErodeRadiusPx.value = 0.0;
     u.uNoiseEnabled.value = this.params.noiseEnabled ? 1.0 : 0.0;
     u.uNoiseScale.value = this.params.noiseScale;
     u.uNoiseStrength.value = this.params.noiseStrength;
@@ -1334,6 +1303,11 @@ export class AtmosphericFogEffectV2 {
       this._lastFogDensity = d;
       uPre.uFogDensity.value = d;
     }
+
+    // Skip the full-screen pass when fog is effectively off (shader would early-out anyway).
+    if (this._lastFogDensity <= 0.001 && this.params.debugForceFog !== true) return false;
+    if ((this.params.maxOpacity ?? 0.72) <= 0.001) return false;
+
     this._updateViewBounds();
     this._updateSceneBounds();
 

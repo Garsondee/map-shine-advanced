@@ -404,6 +404,21 @@ export class RenderLoop {
     this._presentationDueImmediately = true;
   }
 
+  /**
+   * Extend cinematic presentation (never shortens an active window).
+   * @param {number} durationMs
+   */
+  extendCinematicMode(durationMs) {
+    const d = Math.max(0, Number(durationMs) || 0);
+    if (d <= 0) return;
+    const until = performance.now() + d;
+    if (until > (this._cinematicModeUntilMs || 0)) {
+      this._cinematicModeUntilMs = until;
+    }
+    this._forceNextRender = true;
+    this._presentationDueImmediately = true;
+  }
+
   stopCinematicMode() {
     this._cinematicModeUntilMs = 0;
   }

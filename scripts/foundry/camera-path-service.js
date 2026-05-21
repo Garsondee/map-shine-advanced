@@ -26,6 +26,7 @@ import {
   createSignificantLocationId,
   normalizeSignificantLocations,
   SIG_LOC_FADE_CUT_MS,
+  computePlaybackCinematicWallMs,
 } from './camera-path-types.js';
 
 const log = createLogger('CameraPathService');
@@ -1182,6 +1183,22 @@ export class CameraPathService {
       this._applyPresentation(settings);
       this._applyPlaybackTimeScale(playbackTimeScale);
 
+      const cinematicWallMs = computePlaybackCinematicWallMs({
+        timelineClips,
+        visibleMotionMs: timeline.visibleMotionMs,
+        pathMotionMs,
+        preHoldMs: CAMERA_PATH_PRE_HOLD_MS,
+        segmentHoldMs: CAMERA_PATH_SEGMENT_HOLD_MS,
+        playbackTimeScale,
+        fadeFromBlack,
+        fadeToBlack,
+        fadeMs,
+        fadeHoldMs,
+      });
+      try {
+        window.MapShine?.renderLoop?.startCinematicMode?.(cinematicWallMs);
+      } catch (_) {}
+
       if (envRamp.enabled && !isCancelled()) {
         environmentControlApi.beginExternalDrive(ENV_DRIVE_TOKEN);
         envDriveActive = true;
@@ -1224,6 +1241,7 @@ export class CameraPathService {
             this._runSigLocFadeCut(toView, fadeMs, getClipCancelled)
           ),
           playbackTimeScale,
+          manageCinematicMode: false,
         });
       }
 

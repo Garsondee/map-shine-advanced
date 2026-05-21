@@ -94,6 +94,7 @@ function percentile(arr, p) {
  *   lastSeenMs: number,
  *   gpuDisjointDropped: number,
  *   gpuMissingPool: number,
+ *   gpuSlotBlocked: number,
  * }} EffectAggregate
  */
 
@@ -116,6 +117,7 @@ function makeEffectAggregate() {
     lastSeenMs: 0,
     gpuDisjointDropped: 0,
     gpuMissingPool: 0,
+    gpuSlotBlocked: 0,
   };
 }
 
@@ -579,9 +581,14 @@ export class PerformanceRecorder {
    *
    * @param {string} effectKey - Stable identifier (e.g. `'lighting'`).
    * @param {'update'|'render'} phase
+   * @param {{ cpuOnly?: boolean, gpuSlot?: { index: number, count: number } }} [options]
+   *   - `cpuOnly`: never acquire a GPU timer query (allows nested child spans
+   *     to use the single active-query slot during this span).
+   *   - `gpuSlot`: when set, only probe GPU on frames where
+   *     `frameSeq % count === index` (round-robin for multi-pass effects).
    * @returns {EffectCallToken|null}
    */
-  beginEffectCall(effectKey, phase) {
+  beginEffectCall(effectKey, phase, options = {}) {
     if (!this.enabled) return null;
 
     const info = this.renderer?.info;
@@ -596,10 +603,23 @@ export class PerformanceRecorder {
       linesBefore: info?.render?.lines ?? 0,
       pointsBefore: info?.render?.points ?? 0,
       gpuQuery: null,
+      gpuWanted: false,
+      gpuSlotBlocked: false,
     };
 
+    const cpuOnly = options?.cpuOnly === true;
+    const gpuSlot = options?.gpuSlot;
+    const slotCount = Math.max(1, Number(gpuSlot?.count) || 0);
+    const slotIndex = Math.max(0, Number(gpuSlot?.index) || 0);
+    const slotOpen = !gpuSlot || ((this._frameSeq % slotCount) === slotIndex);
+    token.gpuWanted = !cpuOnly && slotOpen
+      && this.gpuTimingSupported
+      && this.gpuTimingEnabled
+      && !!this._gl
+      && !!this._gpuExt;
+
     // WebGL2 spec: only one TIME_ELAPSED_EXT query may be active at a time.
-    if (this.gpuTimingSupported && this.gpuTimingEnabled && this._gl && this._gpuExt && this._activeQuery === null) {
+    if (token.gpuWanted && this._activeQuery === null) {
       const q = this._acquireQuery();
       if (q) {
         try {
@@ -618,6 +638,8 @@ export class PerformanceRecorder {
       } else {
         this._gpuPoolStarvations += 1;
       }
+    } else if (token.gpuWanted && this._activeQuery !== null) {
+      token.gpuSlotBlocked = true;
     }
 
     return token;
@@ -646,6 +668,7 @@ export class PerformanceRecorder {
     addSample(slot.points, pointsDelta);
     if (agg.firstSeenMs === 0) agg.firstSeenMs = performance.now() - this._startedAtMs;
     agg.lastSeenMs = performance.now() - this._startedAtMs;
+    if (token.gpuSlotBlocked) agg.gpuSlotBlocked += 1;
 
     // Close the GPU query and queue it for deferred read. GPU result attribution
     // is deferred until `gl.getQueryParameter(QUERY_RESULT_AVAILABLE)` flips.
@@ -955,6 +978,7 @@ export class PerformanceRecorder {
           pointsAvg: statAvg(slot.points),
           gpuDisjointDropped: agg.gpuDisjointDropped,
           gpuMissing: agg.gpuMissingPool,
+          gpuBlocked: agg.gpuSlotBlocked,
         });
       }
     }
@@ -971,6 +995,7 @@ export class PerformanceRecorder {
       pointsAvg: 0,
       gpuDisjointDropped: 0,
       gpuMissing: 0,
+      gpuBlocked: 0,
     });
 
     /** @type {{ phase: string, lastMs: number, avgMs: number, maxMs: number, totalMs: number, count: number }[]} */

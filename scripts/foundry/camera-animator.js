@@ -7,6 +7,7 @@
  * @module foundry/camera-animator
  */
 import { createLogger } from '../core/log.js';
+import { scalePlaybackWallDurationMs } from './camera-path-types.js';
 
 const log = createLogger('CameraAnimator');
 
@@ -221,7 +222,15 @@ export class CameraAnimator {
    * @param {() => boolean} [options.getIsCancelled]
    * @returns {Promise<void>}
    */
-  async animateTo({ x, y, scale, durationMs, easing = 'trapezoidal', getIsCancelled = null }) {
+  async animateTo({
+    x,
+    y,
+    scale,
+    durationMs,
+    easing = 'trapezoidal',
+    getIsCancelled = null,
+    playbackTimeScale = 1,
+  }) {
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale)) {
       throw new Error('Invalid camera target');
     }
@@ -239,7 +248,14 @@ export class CameraAnimator {
     }
 
     try {
-      window.MapShine?.renderLoop?.requestContinuousRender?.(dur + 500);
+      const renderLoop = window.MapShine?.renderLoop;
+      const wallMs = scalePlaybackWallDurationMs(dur + 500, playbackTimeScale);
+      if (typeof renderLoop?.extendCinematicMode === 'function') {
+        renderLoop.extendCinematicMode(wallMs);
+      } else {
+        renderLoop?.startCinematicMode?.(wallMs);
+      }
+      renderLoop?.requestContinuousRender?.(wallMs);
     } catch (_) {}
 
     await new Promise((resolve) => {
@@ -362,6 +378,7 @@ export class CameraAnimator {
    * @param {() => void} [options.onCancel]
    * @param {(view: import('./camera-path-types.js').CameraView, fadeMs: number, getIsCancelled: () => boolean) => Promise<void>} [options.runFadeCutTransition]
    * @param {number} [options.playbackTimeScale=1]
+   * @param {boolean} [options.manageCinematicMode=true]
    * @returns {Promise<void>}
    */
   async animateTimeline(clips, options = {}) {
@@ -374,6 +391,7 @@ export class CameraAnimator {
       onCancel = null,
       runFadeCutTransition = null,
       playbackTimeScale = 1,
+      manageCinematicMode = true,
     } = options;
 
     if (!Array.isArray(clips) || !clips.length) return;
@@ -400,9 +418,12 @@ export class CameraAnimator {
       try {
         pixiInputBridge?.setInputBlocker?.(() => true);
       } catch (_) {}
-      try {
-        renderLoop?.startCinematicMode?.(totalMs + 1500);
-      } catch (_) {}
+      if (manageCinematicMode) {
+        try {
+          const cinematicWallMs = scalePlaybackWallDurationMs(totalMs + 1500, playbackTimeScale);
+          renderLoop?.startCinematicMode?.(cinematicWallMs);
+        } catch (_) {}
+      }
 
       const first = clips[0];
       if (!skipInitialPan) {
@@ -446,6 +467,7 @@ export class CameraAnimator {
             durationMs: clip.durationMs,
             easing,
             getIsCancelled: isCancelled,
+            playbackTimeScale,
           });
         } else if (clip.type === 'sigHold' && clip.view) {
           this.instantPan(clip.view);
@@ -462,6 +484,7 @@ export class CameraAnimator {
               durationMs: clip.durationMs,
               easing,
               getIsCancelled: isCancelled,
+              playbackTimeScale,
             });
           }
         }
@@ -472,7 +495,9 @@ export class CameraAnimator {
       this._active = false;
       this._removeEscapeListener();
 
-      try { renderLoop?.stopCinematicMode?.(); } catch (_) {}
+      if (manageCinematicMode) {
+        try { renderLoop?.stopCinematicMode?.(); } catch (_) {}
+      }
       try {
         pixiInputBridge?.setInputBlocker?.(null);
         cinematicCameraManager?._bindInputBridge?.();

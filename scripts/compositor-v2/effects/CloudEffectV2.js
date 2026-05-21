@@ -249,6 +249,82 @@ export class CloudEffectV2 {
     this._lastFullH     = 0;
     this._lastInternalW = 0;
     this._lastInternalH = 0;
+
+    /** @type {object|null} Active PerformanceRecorder when enabled */
+    this._activePerfRecorder = null;
+  }
+
+  // ── Performance Recorder ───────────────────────────────────────────────────
+
+  /** @private */
+  _bindPerfRecorder() {
+    try {
+      const recorder = window.MapShine?.performanceRecorder;
+      this._activePerfRecorder = recorder?.enabled ? recorder : null;
+    } catch (_) {
+      this._activePerfRecorder = null;
+    }
+  }
+
+  /**
+   * Begin a nested Performance Recorder span. Keys appear as
+   * `cloud.<phase>.<name>` (e.g. `cloud.render.shadowMasked`).
+   *
+   * @param {string} name
+   * @param {'update'|'render'} [phase]
+   * @param {{ cpuOnly?: boolean }} [options]
+   * @returns {object|null}
+   * @private
+   */
+  _beginPerfSpan(name, phase = 'render', options = {}) {
+    try {
+      const recorder = this._activePerfRecorder;
+      if (!recorder?.enabled || typeof recorder.beginEffectCall !== 'function') return null;
+      return recorder.beginEffectCall(`cloud.${phase}.${name}`, phase, options);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * CPU-only aggregate span for legacy top-level keys (`cloud`, `cloud.blitTops`).
+   * @param {string} effectKey
+   * @param {'update'|'render'} phase
+   * @returns {object|null}
+   * @private
+   */
+  _beginLegacyAggregateSpan(effectKey, phase) {
+    try {
+      const recorder = this._activePerfRecorder;
+      if (!recorder?.enabled || typeof recorder.beginEffectCall !== 'function') return null;
+      return recorder.beginEffectCall(effectKey, phase, { cpuOnly: true });
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /** @param {object|null} token @private */
+  _endPerfSpan(token) {
+    if (!token) return;
+    try {
+      const recorder = this._activePerfRecorder ?? window.MapShine?.performanceRecorder;
+      recorder?.endEffectCall?.(token);
+    } catch (_) {}
+  }
+
+  /**
+   * @param {string} name
+   * @param {'update'|'render'} phase
+   * @param {() => void} fn
+   * @private
+   */
+  _perfPass(name, phase, fn) {
+    const token = this._beginPerfSpan(name, phase);
+    try {
+      fn();
+    } finally {
+      this._endPerfSpan(token);
+    }
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -436,18 +512,23 @@ export class CloudEffectV2 {
   /** @param {{ elapsed: number, delta: number }} timeInfo */
   update(timeInfo) {
     if (!this._initialized || !this.params.enabled) return;
+    this._bindPerfRecorder();
     this._lastElapsed = timeInfo?.elapsed ?? 0;
 
+    let _perfToken = this._beginPerfSpan('weatherGate', 'update');
     const ws = this._getWeatherState();
     if (!ws.weatherEnabled || this._isCoverZero(ws.cloudCover)) {
       if (!this._cloudCoverZeroLF) this._needsNeutralClear = true;
       this._cloudCoverZeroLF = true;
       if (this._densityMat?.uniforms?.uCloudCover) this._densityMat.uniforms.uCloudCover.value = 0;
+      this._endPerfSpan(_perfToken);
       return;
     }
     this._cloudCoverZeroLF  = false;
     this._needsNeutralClear = false;
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('sunAndViewBounds', 'update');
     this._calcSunDir();
 
     const sceneRect = canvas?.dimensions?.sceneRect;
@@ -482,8 +563,10 @@ export class CloudEffectV2 {
         vMaxY = cam.position.y + halfH;
       }
     }
+    this._endPerfSpan(_perfToken);
 
     const p  = this.params;
+    _perfToken = this._beginPerfSpan('densityUniforms', 'update');
     const du = this._densityMat?.uniforms;
     if (du) {
       du.uTime.value               = this._lastElapsed;
@@ -509,8 +592,10 @@ export class CloudEffectV2 {
       du.uLayerNoiseScaleMult.value = this._layerNoiseScaleMult;
       du.uLayerWeight.value         = this._layerWeight;
     }
+    this._endPerfSpan(_perfToken);
 
     const zoom = this._getZoom();
+    _perfToken = this._beginPerfSpan('shadowUniforms', 'update');
     const su   = this._shadowMat?.uniforms;
     if (su) {
       su.uShadowOpacity.value  = p.shadowOpacity;
@@ -569,7 +654,9 @@ export class CloudEffectV2 {
       su.uOutdoorsMaskFlipY.value = anyTex?.flipY ? 1.0 : 0.0;
       su.uSunDir.value.copy(this._sunDir);
     }
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('cloudTopUniforms', 'update');
     const tu = this._cloudTopMat?.uniforms;
     if (tu) {
       tu.uTime.value            = this._lastElapsed;
@@ -636,8 +723,11 @@ export class CloudEffectV2 {
         canvas?.dimensions?.height ?? sceneH
       );
     }
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('layerUniforms', 'update');
     this._updateCloudLayerUniforms(vMinX, vMinY, vMaxX, vMaxY);
+    this._endPerfSpan(_perfToken);
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -653,18 +743,27 @@ export class CloudEffectV2 {
   render(renderer) {
     if (!this._initialized || !this.params.enabled) return;
 
+    this._bindPerfRecorder();
+    const _legacyToken = this._beginLegacyAggregateSpan('cloud', 'render');
+    let _perfToken = this._beginPerfSpan('ensureTargets', 'render', { cpuOnly: true });
     renderer.getDrawingBufferSize(this._tempSize);
     const fullW = Math.max(1, this._tempSize.x);
     const fullH = Math.max(1, this._tempSize.y);
     this._ensureRenderTargets(fullW, fullH);
+    this._endPerfSpan(_perfToken);
 
     const prevTarget = renderer.getRenderTarget();
 
     try {
       const ws = this._getWeatherState();
       if (!ws.weatherEnabled || this._isCoverZero(ws.cloudCover) || this._needsNeutralClear) {
-        this._renderNeutral(renderer);
-        this._needsNeutralClear = false;
+        _perfToken = this._beginPerfSpan('neutralClear', 'render', { cpuOnly: true });
+        try {
+          this._renderNeutral(renderer);
+          this._needsNeutralClear = false;
+        } finally {
+          this._endPerfSpan(_perfToken);
+        }
         return;
       }
 
@@ -672,36 +771,44 @@ export class CloudEffectV2 {
       const su = this._shadowMat.uniforms;
 
       // ── Pass 1a: Overscanned density for shadow offset+blur ──────────
-      du.uClipToScene.value   = 0;
-      du.uParallaxScale.value = 0;
-      du.uCompositeMode.value = 0;
+      _perfToken = this._beginPerfSpan('densityShadowOverscan', 'render');
+      try {
+        du.uClipToScene.value   = 0;
+        du.uParallaxScale.value = 0;
+        du.uCompositeMode.value = 0;
 
-      // Temporarily widen view bounds to the pre-computed overscanned region
-      const prevMinX = du.uViewBoundsMin.value.x;
-      const prevMinY = du.uViewBoundsMin.value.y;
-      const prevMaxX = du.uViewBoundsMax.value.x;
-      const prevMaxY = du.uViewBoundsMax.value.y;
-      if (su.uDensityBoundsMin) du.uViewBoundsMin.value.copy(su.uDensityBoundsMin.value);
-      if (su.uDensityBoundsMax) du.uViewBoundsMax.value.copy(su.uDensityBoundsMax.value);
+        const prevMinX = du.uViewBoundsMin.value.x;
+        const prevMinY = du.uViewBoundsMin.value.y;
+        const prevMaxX = du.uViewBoundsMax.value.x;
+        const prevMaxY = du.uViewBoundsMax.value.y;
+        if (su.uDensityBoundsMin) du.uViewBoundsMin.value.copy(su.uDensityBoundsMin.value);
+        if (su.uDensityBoundsMax) du.uViewBoundsMax.value.copy(su.uDensityBoundsMax.value);
 
-      this._quad.material = this._densityMat;
-      renderer.setRenderTarget(this._shadowDensityRT);
-      renderer.setClearColor(0x000000, 1); renderer.clear();
-      renderer.render(this._quadScene, this._quadCam);
+        this._quad.material = this._densityMat;
+        renderer.setRenderTarget(this._shadowDensityRT);
+        renderer.setClearColor(0x000000, 1); renderer.clear();
+        renderer.render(this._quadScene, this._quadCam);
 
-      // Restore normal view bounds for subsequent passes
-      du.uViewBoundsMin.value.set(prevMinX, prevMinY);
-      du.uViewBoundsMax.value.set(prevMaxX, prevMaxY);
+        du.uViewBoundsMin.value.set(prevMinX, prevMinY);
+        du.uViewBoundsMax.value.set(prevMaxX, prevMaxY);
+      } finally {
+        this._endPerfSpan(_perfToken);
+      }
 
       // ── Pass 1b: Normal-bounds density (cloud tops + other consumers) ─
-      this._quad.material = this._densityMat;
-      renderer.setRenderTarget(this._densityRT);
-      renderer.setClearColor(0x000000, 1); renderer.clear();
-      renderer.render(this._quadScene, this._quadCam);
+      _perfToken = this._beginPerfSpan('density', 'render');
+      try {
+        this._quad.material = this._densityMat;
+        renderer.setRenderTarget(this._densityRT);
+        renderer.setClearColor(0x000000, 1); renderer.clear();
+        renderer.render(this._quadScene, this._quadCam);
+      } finally {
+        this._endPerfSpan(_perfToken);
+      }
 
       // ── Pass 2a: Raw shadow (no _Outdoors gating) ─────────────────────
-      // Used by indoor consumers (e.g. window-light projection).
-      {
+      _perfToken = this._beginPerfSpan('shadowRaw', 'render');
+      try {
         const prevHasMask = su.uHasOutdoorsMask.value;
         const prevMaskTex = su.tOutdoorsMask.value;
         su.uDensityMode.value    = 0;
@@ -714,57 +821,69 @@ export class CloudEffectV2 {
         renderer.render(this._quadScene, this._quadCam);
         su.uHasOutdoorsMask.value = prevHasMask;
         su.tOutdoorsMask.value    = prevMaskTex;
+      } finally {
+        this._endPerfSpan(_perfToken);
       }
 
       // ── Pass 2b: _Outdoors-masked shadow (fed into LightingEffectV2) ─
-      su.uDensityMode.value    = 0;
-      su.tCloudDensity.value   = this._shadowDensityRT.texture;
-      this._quad.material = this._shadowMat;
-      renderer.setRenderTarget(this._shadowRT);
-      renderer.setClearColor(0xffffff, 1); renderer.clear();
-      renderer.render(this._quadScene, this._quadCam);
+      _perfToken = this._beginPerfSpan('shadowMasked', 'render');
+      try {
+        su.uDensityMode.value    = 0;
+        su.tCloudDensity.value   = this._shadowDensityRT.texture;
+        this._quad.material = this._shadowMat;
+        renderer.setRenderTarget(this._shadowRT);
+        renderer.setClearColor(0xffffff, 1); renderer.clear();
+        renderer.render(this._quadScene, this._quadCam);
+      } finally {
+        this._endPerfSpan(_perfToken);
+      }
 
       // ── Pass 3: Parallaxed multi-layer density for cloud tops ─────────
       if (this._topDensityRT) {
-        // Keep cloud-top density un-clipped so elevated cloud layers can extend
-        // beyond the scene rect with soft edge falloff.
-        du.uClipToScene.value   = 0;
-        // Cloud-top parallax only. Shadow passes above keep uParallaxScale=0
-        // so shadows remain anchored in world space.
-        const topParallaxFactor = Math.max(0, Number(this.params.cloudTopParallaxFactor) || 0);
-        const depthStrength = Math.max(0, Number(this.params.cloudTopDepthParallaxStrength) || 0);
-        for (let i = 0; i < 5; i++) {
-          // Foreground layers get more camera-relative drift, background layers less.
-          const depthWeight = 1 - (i / 4);
-          this._layerTopParallax[i] = Math.max(0, this._layerParallax[i] + (depthStrength * depthWeight));
+        _perfToken = this._beginPerfSpan('densityTopParallax', 'render');
+        try {
+          du.uClipToScene.value   = 0;
+          const topParallaxFactor = Math.max(0, Number(this.params.cloudTopParallaxFactor) || 0);
+          const depthStrength = Math.max(0, Number(this.params.cloudTopDepthParallaxStrength) || 0);
+          for (let i = 0; i < 5; i++) {
+            const depthWeight = 1 - (i / 4);
+            this._layerTopParallax[i] = Math.max(0, this._layerParallax[i] + (depthStrength * depthWeight));
+          }
+          du.uLayerParallax.value = this._layerTopParallax;
+          du.uParallaxScale.value = topParallaxFactor;
+          du.uCompositeMode.value = 1;
+          this._quad.material = this._densityMat;
+          renderer.setRenderTarget(this._topDensityRT);
+          renderer.setClearColor(0x000000, 1); renderer.clear();
+          renderer.render(this._quadScene, this._quadCam);
+          du.uLayerParallax.value = this._layerParallax;
+          this._cloudTopDensityValid = true;
+        } finally {
+          this._endPerfSpan(_perfToken);
         }
-        du.uLayerParallax.value = this._layerTopParallax;
-        du.uParallaxScale.value = topParallaxFactor;
-        du.uCompositeMode.value = 1;
-        this._quad.material = this._densityMat;
-        renderer.setRenderTarget(this._topDensityRT);
-        renderer.setClearColor(0x000000, 1); renderer.clear();
-        renderer.render(this._quadScene, this._quadCam);
-        // Restore canonical layer parallax array for future shadow-oriented passes.
-        du.uLayerParallax.value = this._layerParallax;
-        this._cloudTopDensityValid = true;
       }
 
       // ── Pass 4: Cloud-top RGBA ─────────────────────────────────────────
       if (this._cloudTopRT && this._cloudTopMat) {
-        const usePacked = this._cloudTopDensityValid && !!this._topDensityRT;
-        this._cloudTopMat.uniforms.uDensityMode.value  = usePacked ? 1 : 0;
-        this._cloudTopMat.uniforms.tCloudDensity.value = usePacked
-          ? this._topDensityRT.texture
-          : this._densityRT.texture;
-        this._quad.material = this._cloudTopMat;
-        renderer.setRenderTarget(this._cloudTopRT);
-        renderer.setClearColor(0x000000, 0); renderer.clear();
-        renderer.render(this._quadScene, this._quadCam);
+        _perfToken = this._beginPerfSpan('cloudTop', 'render');
+        try {
+          const usePacked = this._cloudTopDensityValid && !!this._topDensityRT;
+          this._cloudTopMat.uniforms.uDensityMode.value  = usePacked ? 1 : 0;
+          this._cloudTopMat.uniforms.tCloudDensity.value = usePacked
+            ? this._topDensityRT.texture
+            : this._densityRT.texture;
+          this._quad.material = this._cloudTopMat;
+          renderer.setRenderTarget(this._cloudTopRT);
+          renderer.setClearColor(0x000000, 0); renderer.clear();
+          renderer.render(this._quadScene, this._quadCam);
+        } finally {
+          this._endPerfSpan(_perfToken);
+        }
       }
 
     } finally {
       renderer.setRenderTarget(prevTarget);
+      this._endPerfSpan(_legacyToken);
     }
   }
 
@@ -780,20 +899,40 @@ export class CloudEffectV2 {
     if (!ws.weatherEnabled || this._isCoverZero(ws.cloudCover)) return;
     if (this.params.cloudTopOpacity <= 0) return;
 
+    this._bindPerfRecorder();
+    const _legacyToken = this._beginLegacyAggregateSpan('cloud.blitTops', 'render');
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
     const prevLayerMask = this._mainCamera.layers.mask;
     try {
-      this._syncCloudLayerTexture();
-      this._updateCloudLayerTransforms();
-      renderer.setRenderTarget(outputRT);
-      renderer.autoClear = false;
-      this._mainCamera.layers.enable(0);
-      renderer.render(this._cloudLayerScene, this._mainCamera);
+      let _perfToken = this._beginPerfSpan('blitTops.syncTexture', 'render', { cpuOnly: true });
+      try {
+        this._syncCloudLayerTexture();
+      } finally {
+        this._endPerfSpan(_perfToken);
+      }
+
+      _perfToken = this._beginPerfSpan('blitTops.updateTransforms', 'render', { cpuOnly: true });
+      try {
+        this._updateCloudLayerTransforms();
+      } finally {
+        this._endPerfSpan(_perfToken);
+      }
+
+      _perfToken = this._beginPerfSpan('blitTops.layerDraw', 'render');
+      try {
+        renderer.setRenderTarget(outputRT);
+        renderer.autoClear = false;
+        this._mainCamera.layers.enable(0);
+        renderer.render(this._cloudLayerScene, this._mainCamera);
+      } finally {
+        this._endPerfSpan(_perfToken);
+      }
     } finally {
       this._mainCamera.layers.mask = prevLayerMask;
       renderer.autoClear = prevAutoClear;
       renderer.setRenderTarget(prevTarget);
+      this._endPerfSpan(_legacyToken);
     }
   }
 

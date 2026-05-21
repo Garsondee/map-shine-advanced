@@ -257,3 +257,55 @@ export function computeTimelineVisibleMotionMs(clips) {
   if (!Array.isArray(clips)) return 0;
   return clips.reduce((sum, clip) => sum + Math.max(0, Number(clip?.durationMs) || 0), 0);
 }
+
+/**
+ * Convert logical playback duration to wall-clock time at a given scene time scale.
+ *
+ * @param {number} logicalMs
+ * @param {number} [playbackTimeScale=1]
+ * @returns {number}
+ */
+export function scalePlaybackWallDurationMs(logicalMs, playbackTimeScale = 1) {
+  const scale = Math.max(0.1, Number(playbackTimeScale) || 1);
+  const logical = Math.max(0, Number(logicalMs) || 0);
+  return logical / scale;
+}
+
+/**
+ * Estimate total wall-clock cinematic window for a camera-path playback session.
+ *
+ * @param {object} opts
+ * @param {CameraTimelineClip[]} opts.timelineClips
+ * @param {number} opts.visibleMotionMs
+ * @param {number} opts.pathMotionMs
+ * @param {number} opts.preHoldMs
+ * @param {number} opts.segmentHoldMs
+ * @param {number} opts.playbackTimeScale
+ * @param {boolean} opts.fadeFromBlack
+ * @param {boolean} opts.fadeToBlack
+ * @param {number} opts.fadeMs
+ * @param {number} opts.fadeHoldMs
+ * @param {number} [opts.paddingMs=3000]
+ * @returns {number}
+ */
+export function computePlaybackCinematicWallMs(opts) {
+  const clips = Array.isArray(opts.timelineClips) ? opts.timelineClips : [];
+  const sweepCount = clips.filter((clip) => clip?.type === 'sweep').length;
+  const clipsLogicalMs = Math.max(0, Number(opts.visibleMotionMs) || Number(opts.pathMotionMs) || 0);
+  const timelineLogicalMs = clipsLogicalMs
+    + Math.max(0, Number(opts.preHoldMs) || 0)
+    + Math.max(0, sweepCount - 1) * Math.max(0, Number(opts.segmentHoldMs) || 0);
+
+  let wallMs = scalePlaybackWallDurationMs(timelineLogicalMs, opts.playbackTimeScale);
+
+  const fadeMs = Math.max(0, Number(opts.fadeMs) || 0);
+  const fadeHoldMs = Math.max(0, Number(opts.fadeHoldMs) || 0);
+  if (opts.fadeFromBlack === true) {
+    wallMs += scalePlaybackWallDurationMs(fadeHoldMs, opts.playbackTimeScale) + fadeMs;
+  }
+  if (opts.fadeToBlack === true) {
+    wallMs += fadeMs + scalePlaybackWallDurationMs(fadeHoldMs, opts.playbackTimeScale);
+  }
+
+  return wallMs + Math.max(0, Number(opts.paddingMs) || 0);
+}

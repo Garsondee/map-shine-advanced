@@ -3649,7 +3649,7 @@ export class FloorCompositor {
 
       if (!navigationLite) {
         // Wind must advance before update() so accumulation is 1× per frame.
-        this._profileEffectCall('cloud', 'update', () => this._cloudEffect.advanceWind(timeInfo.delta ?? 0.016), 'CloudEffectV2 advanceWind');
+        this._profileEffectCall('cloud.update.advanceWind', 'update', () => this._cloudEffect.advanceWind(timeInfo.delta ?? 0.016), 'CloudEffectV2 advanceWind');
         this._profileEffectCall('specular', 'update', () => this._specularEffect.update(timeInfo), 'SpecularEffectV2 update');
         this._profileEffectCall('fluid', 'update', () => this._fluidEffect.update(timeInfo), 'FluidEffectV2 update');
         this._profileEffectCall('iridescence', 'update', () => this._iridescenceEffect.update(timeInfo), 'IridescenceEffectV2 update');
@@ -3670,7 +3670,7 @@ export class FloorCompositor {
           this._candleFlamesEffect?.update?.(timeInfo);
         }, 'CandleFlamesEffectV2 update');
         this._profileEffectCall('playerLight', 'update', () => this._playerLightEffect?.update?.(timeInfo), 'PlayerLightEffectV2 update');
-        this._profileEffectCall('cloud', 'update', () => this._cloudEffect.update(timeInfo), 'CloudEffectV2 update');
+        this._profileEffectCall('cloud', 'update', () => this._cloudEffect.update(timeInfo), 'CloudEffectV2 update', { cpuOnly: true });
       } else {
         // Decorative overlays: uTime advances in shaders on present frames; skip CPU sim while panning.
         this._profileEffectCall('bush', 'update', () => this._bushEffect.updateNavigationLite?.(timeInfo), 'BushEffectV2 navigationLite');
@@ -4000,7 +4000,7 @@ export class FloorCompositor {
     if (_profiling) _profileT0 = performance.now();
     const cloudEnabled = !_skipCloudPass && resolveEffectEnabled(this._cloudEffect);
     if (cloudEnabled) {
-      this._profileEffectCall('cloud', 'render', () => this._cloudEffect.render(this.renderer), 'CloudEffectV2 render');
+      this._cloudEffect.render(this.renderer);
     }
     {
       const cloudTex = cloudEnabled
@@ -4319,9 +4319,11 @@ export class FloorCompositor {
     // drawing overlays, interaction aids routed through OVERLAY_THREE_LAYER).
     // Keep PIXI UI overlay above clouds so HUD/control affordances stay readable.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: cloudTops.blit'); } catch (_) {} }
+    if (_profiling) _profileT0 = performance.now();
     if (resolveEffectEnabled(this._cloudEffect)) {
       this._cloudEffect.blitCloudTops(this.renderer, null);
     }
+    if (_profiling) this._recordPassTiming('cloudBlitTops', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: cloudTops.blit DONE'); } catch (_) {} }
 
     // PIXI UI-channel overlay: render last so it remains above bloom/fog/lens.
@@ -4552,12 +4554,14 @@ export class FloorCompositor {
    * @param {() => void} fn - Wrapped call (must NOT throw asynchronously).
    * @param {string} [errorLabel] - Used by the existing per-effect log warn
    *   when `fn` throws. Defaults to `${effectKey} ${phase}`.
+   * @param {{ cpuOnly?: boolean }} [options] - Forwarded to the recorder when
+   *   this wrapper should not consume the sole GPU timer query (nested spans).
    * @private
    */
-  _profileEffectCall(effectKey, phase, fn, errorLabel) {
+  _profileEffectCall(effectKey, phase, fn, errorLabel, options = {}) {
     const recorder = (typeof window !== 'undefined') ? window?.MapShine?.performanceRecorder : null;
     const recording = recorder?.enabled === true;
-    const token = recording ? recorder.beginEffectCall(effectKey, phase) : null;
+    const token = recording ? recorder.beginEffectCall(effectKey, phase, options) : null;
     try {
       fn();
     } catch (err) {

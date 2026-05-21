@@ -26,7 +26,7 @@
  *   - **AshDisturbanceEffectV2**: Token-movement ash bursts on `_Ash` masks (Quarks).
  *
  * Post-processing effects (per-level and composite passes):
- *   - **CloudEffectV2**: Procedural clouds — generates shadow RT (fed into Lighting)
+   *   - **CloudEffectV2**: Sprite-based clouds — generates shadow RT (fed into Lighting)
  *     and cloud-top RT (blitted after lighting). Shadow occlusion uses overhead
  *     blockers plus a cross-floor mask for slabs above the active band.
  *   - **LightingEffectV2**: Ambient + dynamic lights + darkness, with cloud shadow.
@@ -3066,7 +3066,7 @@ export class FloorCompositor {
   _buildDynamicLightOverridePayload() {
     const le = this._lightingEffect;
     const tex = le?.dynamicLightTexture ?? null;
-    const winTex = le?.windowLightTexture ?? null;
+    const winTex = le?.windowLightOverrideTexture ?? le?.windowLightTexture ?? null;
     if (!tex && !winTex) return null;
 
     const dims = globalThis.canvas?.dimensions;
@@ -3412,6 +3412,7 @@ export class FloorCompositor {
       this._treeEffect,
       this._windowLightEffect,
     ]);
+    this._cloudEffect?.syncSunFromDriver?.();
     try {
       if (window.MapShine) window.MapShine.__shadowDriverState = driver;
     } catch (_) {}
@@ -4030,10 +4031,12 @@ export class FloorCompositor {
     // Shadow/cloud texture references for per-level lighting passes.
     const cloudShadowTexLegacy = cloudEnabled
       ? this._cloudEffect.cloudShadowTexture : null;
-    const windowCloudShadowTexLegacy = cloudEnabled
+    const cloudShadowRawTexLegacy = cloudEnabled
       ? (this._cloudEffect.cloudShadowRawTexture ?? this._cloudEffect.cloudShadowTexture)
       : null;
-    const cloudShadowRawTexLegacy = windowCloudShadowTexLegacy;
+    const windowCloudShadowTexLegacy = cloudEnabled
+      ? (this._cloudEffect.cloudShadowWindowTexture ?? cloudShadowTexLegacy)
+      : null;
     const windowCloudShadowViewBounds = cloudEnabled
       ? (this._cloudEffect.cloudShadowViewBounds ?? null) : null;
     const buildingShadowTex = resolveEffectEnabled(this._buildingShadowEffect)
@@ -4112,6 +4115,7 @@ export class FloorCompositor {
       overheadRoofBlockTex,
       ceilingTransmittanceTex,
       overheadRoofRestrictLightTex,
+      windowCloudShadowTexLegacy,
       windowCloudShadowViewBounds,
     });
     if (!_compositeOut) {
@@ -4757,6 +4761,9 @@ export class FloorCompositor {
         // must not poison effect.params and propagate into GPU uniforms.
         if (typeof value === 'number' && !Number.isFinite(value)) return;
         effect.params[paramId] = value;
+        if (typeof effect.applyParamChange === 'function') {
+          try { effect.applyParamChange(paramId, value); } catch (_) {}
+        }
       }
     } catch (_) {}
   }
@@ -6160,6 +6167,7 @@ export class FloorCompositor {
       overheadRoofBlockTex,
       ceilingTransmittanceTex,
       overheadRoofRestrictLightTex,
+      windowCloudShadowTexLegacy,
       windowCloudShadowViewBounds,
     } = ctx;
     let _profileT0 = 0;
@@ -6332,9 +6340,9 @@ export class FloorCompositor {
         this._windowLightEffect?.setRenderFloorIndex?.(levelIndex, true);
         const winScene = resolveEffectEnabled(this._windowLightEffect)
           ? this._windowLightEffect._scene : null;
-        const shadowW = Number(combinedShadowRawTex?.image?.width) || levelSceneRT.width || 1;
-        const shadowH = Number(combinedShadowRawTex?.image?.height) || levelSceneRT.height || 1;
-        this._windowLightEffect?.setCloudShadowTexture?.(combinedShadowRawTex, shadowW, shadowH, windowCloudShadowViewBounds);
+        const shadowW = Number(windowCloudShadowTexLegacy?.image?.width) || levelSceneRT.width || 1;
+        const shadowH = Number(windowCloudShadowTexLegacy?.image?.height) || levelSceneRT.height || 1;
+        this._windowLightEffect?.setCloudShadowTexture?.(windowCloudShadowTexLegacy, shadowW, shadowH, windowCloudShadowViewBounds);
         this._windowLightEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex, windowLightBufW, windowLightBufH);
         this._windowLightEffect?.setCeilingTransmittanceTexture?.(ceilingTransmittanceTex);
         this._windowLightEffect?.syncFrameOcclusion?.(this);

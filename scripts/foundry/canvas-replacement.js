@@ -8803,7 +8803,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
         // it visually with other weather-adjacent controls.
         safeCall(() => {
           uiManager.registerEffect(
-            'cloud', 'Cloud and Cloud Shadow Appearance',
+            'cloud', 'Sprite Clouds',
             CloudEffectV2.getControlSchema(), _makeV2Callback('_cloudEffect'), 'atmospheric'
           );
         }, 'v2.registerCloudUI', Severity.DEGRADED);

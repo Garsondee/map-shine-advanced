@@ -18,7 +18,7 @@ import {
 } from '../../foundry/levels-scene-flags.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { resolveEffectShadowSun2D } from '../shadow-system/ShadowSunDirection.js';
-import { MAX_INTRA_ROLE_OFFSET, tileAlbedoOrder, tileStackedOverlayOrder } from '../LayerOrderPolicy.js';
+import { MAX_INTRA_ROLE_OFFSET, tileAlbedoOrder, tileStackedOverlayOrder, effectTopOfFloorStackOrder } from '../LayerOrderPolicy.js';
 
 const log = createLogger('BushEffectV2');
 
@@ -44,7 +44,7 @@ export class BushEffectV2 {
 
     /**
      * Overlay entries keyed by tileId.
-     * @type {Map<string, {mesh: THREE.Mesh, material: THREE.ShaderMaterial, floorIndex: number}>}
+     * @type {Map<string, {mesh: THREE.Mesh, shadowMesh: THREE.Mesh, material: THREE.ShaderMaterial, shadowMaterial: THREE.ShaderMaterial, floorIndex: number}>}
      */
     this._overlays = new Map();
     /** @type {number|null} */
@@ -899,8 +899,10 @@ export class BushEffectV2 {
 
   clear() {
     for (const [tileId, entry] of this._overlays) {
+      this._renderBus.removeEffectOverlay(`${tileId}_bush_shadow`);
       this._renderBus.removeEffectOverlay(`${tileId}_bush`);
       entry.material.dispose();
+      entry.shadowMaterial.dispose();
       entry.mesh.geometry.dispose();
       const tex = entry.material.uniforms.uBushMask?.value;
       if (tex && tex.dispose) {
@@ -920,8 +922,10 @@ export class BushEffectV2 {
     if (!tileId || String(tileId).startsWith('__bg_image__')) return;
     const entry = this._overlays.get(tileId);
     if (!entry) return;
+    this._renderBus.removeEffectOverlay(`${tileId}_bush_shadow`);
     this._renderBus.removeEffectOverlay(`${tileId}_bush`);
     try { entry.material.dispose(); } catch (_) {}
+    try { entry.shadowMaterial.dispose(); } catch (_) {}
     try { entry.mesh.geometry.dispose(); } catch (_) {}
     const tex = entry.material.uniforms.uBushMask?.value;
     if (tex && tex.dispose) {
@@ -977,8 +981,12 @@ export class BushEffectV2 {
     if (!this._enabled || !this._initialized) return [];
     const out = [];
     for (const entry of this._overlays.values()) {
-      if (!entry?.mesh?.visible || !entry.material?.uniforms) continue;
-      out.push({ mesh: entry.mesh, uniforms: entry.material.uniforms });
+      if (!entry?.shadowMesh?.visible || !entry.shadowMaterial?.uniforms) continue;
+      out.push({
+        mesh: entry.shadowMesh,
+        uniforms: entry.shadowMaterial.uniforms,
+        material: entry.shadowMaterial,
+      });
     }
     return out;
   }
@@ -1039,6 +1047,7 @@ export class BushEffectV2 {
       uShadowSoftness: { value: this.params.shadowSoftness },
 
       uBillboardShadowMode: { value: 0.0 },
+      uShadowLitCapture: { value: 0.0 },
 
       uExposure: { value: this.params.exposure },
       uBrightness: { value: this.params.brightness },
@@ -1163,6 +1172,13 @@ export class BushEffectV2 {
       ...this._sharedUniforms,
       uBushMask: { value: null },
       uDeriveAlpha: { value: 0.0 },
+      uVegetationPass: { value: 2.0 },
+    };
+    const shadowUniforms = {
+      ...this._sharedUniforms,
+      uBushMask: { value: null },
+      uDeriveAlpha: { value: 0.0 },
+      uVegetationPass: { value: 1.0 },
     };
 
     const material = new THREE.ShaderMaterial({
@@ -1218,6 +1234,7 @@ export class BushEffectV2 {
         uniform float uShadowLength;
         uniform float uShadowSoftness;
         uniform float uBillboardShadowMode;
+        uniform float uShadowLitCapture;
         uniform vec2  uSceneMin;
         uniform vec2  uSceneMax;
 
@@ -1229,6 +1246,7 @@ export class BushEffectV2 {
         uniform float uTint;
 
         uniform float uDeriveAlpha;
+        uniform float uVegetationPass;
 
         varying vec2 vUv;
         varying vec2 vWorldPos;
@@ -1399,17 +1417,27 @@ export class BushEffectV2 {
           if (uBillboardShadowMode > 0.5) shadowA = 0.0;
           shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
 
+          // Pass 1: shadow decal — canopy mesh draws above and occludes naturally.
+          if (uVegetationPass < 1.5) {
+            if (uShadowLitCapture > 0.5) {
+              float lit = clamp(1.0 - shadowA, 0.0, 1.0);
+              gl_FragColor = vec4(lit, lit, lit, 1.0);
+              return;
+            }
+            if (shadowA <= 0.001) discard;
+            gl_FragColor = vec4(0.0, 0.0, 0.0, shadowA);
+            return;
+          }
+
           float mainAlpha = texA * uIntensity;
-          float shadowOnlyAlpha = shadowA * (1.0 - clamp(mainAlpha, 0.0, 1.0));
-          float finalAlpha = clamp(mainAlpha + shadowOnlyAlpha, 0.0, 1.0);
-          if (finalAlpha <= 0.001) discard;
+          if (mainAlpha <= 0.001) discard;
 
           float ccDelta = abs(uExposure) + abs(uBrightness) + abs(uContrast - 1.0)
                         + abs(uSaturation - 1.0) + abs(uTemperature) + abs(uTint);
           vec3 c = bushSample.rgb;
           if (ccDelta > 0.0001) c = applyCC(c);
           c *= texA;
-          gl_FragColor = vec4(c * uIntensity, finalAlpha);
+          gl_FragColor = vec4(c * uIntensity, mainAlpha);
         }
       `,
       transparent: true,
@@ -1420,37 +1448,63 @@ export class BushEffectV2 {
       blending: THREE.NormalBlending,
     });
 
+    const shadowMaterial = new THREE.ShaderMaterial({
+      uniforms: shadowUniforms,
+      vertexShader: material.vertexShader,
+      fragmentShader: material.fragmentShader,
+      transparent: true,
+      premultipliedAlpha: true,
+      depthWrite: false,
+      depthTest: false,
+      side: THREE.DoubleSide,
+      blending: THREE.NormalBlending,
+    });
+
     const geometry = new THREE.PlaneGeometry(tileW, tileH);
+    const shadowMesh = new THREE.Mesh(geometry, shadowMaterial);
     const mesh = new THREE.Mesh(geometry, material);
+    shadowMesh.name = `BushV2Shadow_${tileId}`;
     mesh.name = `BushV2_${tileId}`;
+    shadowMesh.frustumCulled = false;
     mesh.frustumCulled = false;
+    shadowMesh.userData = shadowMesh.userData || {};
     mesh.userData = mesh.userData || {};
+    shadowMesh.userData.floorIndex = floorIndex;
     mesh.userData.floorIndex = floorIndex;
+    shadowMesh.position.set(centerX, centerY, z);
     mesh.position.set(centerX, centerY, z);
+    shadowMesh.rotation.z = rotation;
     mesh.rotation.z = rotation;
 
-    try {
-      const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
-      const isBgPlane = /^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId));
-      if (isBgPlane) {
-        const baseAlbedoOrder = tileAlbedoOrder(fi, 0);
-        mesh.renderOrder = tileStackedOverlayOrder(baseAlbedoOrder, fi, 2);
-      } else {
-        const baseEntry = this._renderBus?._tiles?.get?.(tileId);
-        const baseOrder = Number(baseEntry?.mesh?.renderOrder);
-        if (Number.isFinite(baseOrder)) {
-          mesh.renderOrder = tileStackedOverlayOrder(baseOrder, fi, 2);
+    const applyOverlayRenderOrders = (shadowM, canopyM) => {
+      try {
+        const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
+        const maxBushShadowOrder = effectTopOfFloorStackOrder(fi, 2);
+        const isBgPlane = /^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId));
+        if (isBgPlane) {
+          const baseAlbedoOrder = tileAlbedoOrder(fi, 0);
+          shadowM.renderOrder = Math.min(tileStackedOverlayOrder(baseAlbedoOrder, fi, 1), maxBushShadowOrder);
+          canopyM.renderOrder = tileStackedOverlayOrder(baseAlbedoOrder, fi, 2);
         } else {
-          // Bus tile not registered yet (populate races). Sort slot 0 sits under every
-          // real tile in the transparent pass — use the top albedo intra slot instead.
-          const fallbackBase = tileAlbedoOrder(fi, MAX_INTRA_ROLE_OFFSET);
-          mesh.renderOrder = tileStackedOverlayOrder(fallbackBase, fi, 2);
+          const baseEntry = this._renderBus?._tiles?.get?.(tileId);
+          const baseOrder = Number(baseEntry?.mesh?.renderOrder);
+          if (Number.isFinite(baseOrder)) {
+            shadowM.renderOrder = Math.min(tileStackedOverlayOrder(baseOrder, fi, 1), maxBushShadowOrder);
+            canopyM.renderOrder = tileStackedOverlayOrder(baseOrder, fi, 2);
+          } else {
+            const fallbackBase = tileAlbedoOrder(fi, MAX_INTRA_ROLE_OFFSET);
+            shadowM.renderOrder = Math.min(tileStackedOverlayOrder(fallbackBase, fi, 1), maxBushShadowOrder);
+            canopyM.renderOrder = tileStackedOverlayOrder(fallbackBase, fi, 2);
+          }
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    };
 
+    applyOverlayRenderOrders(shadowMesh, mesh);
+
+    this._renderBus.addEffectOverlay(`${tileId}_bush_shadow`, shadowMesh, floorIndex);
     this._renderBus.addEffectOverlay(`${tileId}_bush`, mesh, floorIndex);
-    this._overlays.set(tileId, { mesh, material, floorIndex });
+    this._overlays.set(tileId, { mesh, shadowMesh, material, shadowMaterial, floorIndex });
     this._applyOverlayFloorVisibility();
 
     // Load mask texture.
@@ -1462,19 +1516,23 @@ export class BushEffectV2 {
       tex.needsUpdate = true;
       if (this._overlays.has(tileId)) {
         material.uniforms.uBushMask.value = tex;
+        shadowMaterial.uniforms.uBushMask.value = tex;
         const derive = this._detectDerivedAlpha(tex);
         this._deriveAlphaByTileId.set(tileId, derive);
         material.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
-        // Late bus registration: snap renderOrder to the real albedo stack slot once available.
+        shadowMaterial.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
         try {
           const entry = this._overlays.get(tileId);
-          const m = entry?.mesh;
-          if (m && !/^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId))) {
+          const canopyMesh = entry?.mesh;
+          const shadowM = entry?.shadowMesh;
+          if (canopyMesh && shadowM && !/^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId))) {
             const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
             const baseEntry = this._renderBus?._tiles?.get?.(tileId);
             const baseOrder = Number(baseEntry?.mesh?.renderOrder);
             if (Number.isFinite(baseOrder)) {
-              m.renderOrder = tileStackedOverlayOrder(baseOrder, fi, 2);
+              const maxBushShadowOrder = effectTopOfFloorStackOrder(fi, 2);
+              shadowM.renderOrder = Math.min(tileStackedOverlayOrder(baseOrder, fi, 1), maxBushShadowOrder);
+              canopyMesh.renderOrder = tileStackedOverlayOrder(baseOrder, fi, 2);
             }
           }
         } catch (_) {}
@@ -1519,8 +1577,9 @@ export class BushEffectV2 {
   _applyOverlayFloorVisibility() {
     const maxFloor = this._getSafeVisibleMaxFloorIndex();
     for (const entry of this._overlays.values()) {
-      if (!entry?.mesh) continue;
-      entry.mesh.visible = this._enabled && Number(entry.floorIndex) <= maxFloor;
+      const visible = this._enabled && Number(entry.floorIndex) <= maxFloor;
+      if (entry?.mesh) entry.mesh.visible = visible;
+      if (entry?.shadowMesh) entry.shadowMesh.visible = visible;
     }
   }
 }

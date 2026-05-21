@@ -53,6 +53,16 @@ const MAX_BUILDING_SHADOW_EDGE_PX = 2560;
 /** Internal RT downsample — shadows are low-frequency; half-res is visually equivalent. */
 const INTERNAL_SHADOW_DOWNSAMPLE = 0.5;
 
+/** Camera/world view bounds snap for cache keys (avoids per-frame float jitter). */
+const BUILDING_SHADOW_VIEW_BOUNDS_QUANTIZE = 24;
+const BUILDING_SHADOW_DRIVER_EPS = 0.002;
+const BUILDING_SHADOW_SUN_EPS_DEG = 0.1;
+/** Throttle dynamic-light coupling (texture.version bumps every lighting frame). */
+const BUILDING_SHADOW_THROTTLE_DYNAMIC_MS = 50;
+const BUILDING_SHADOW_THROTTLE_STATIC_MS = 400;
+const BUILDING_SHADOW_SAFETY_DYNAMIC_MS = 1000;
+const BUILDING_SHADOW_SAFETY_STATIC_MS = 3000;
+
 export class BuildingShadowsEffectV2 {
   constructor() {
     this.params = {
@@ -157,6 +167,42 @@ export class BuildingShadowsEffectV2 {
     this._floorKeysCache = null;
     /** @type {string} Signature when {@link #_floorKeysCache} remains valid */
     this._floorKeysSigCache = '';
+
+    /** @type {Record<string, unknown>} Last-seen UI params (dirty detection) */
+    this._lastParams = {};
+    /** @type {object} Inputs that affect the shadow RT; drives cache + throttle */
+    this._renderState = {
+      time: 0,
+      sunAz: null,
+      sunEl: null,
+      driverLen: null,
+      driverSoft: null,
+      driverSmear: null,
+      rtWidth: 0,
+      rtHeight: 0,
+      floorKeys: '',
+      recvUuid: null,
+      fallbackUuid: null,
+      outdoorsUuid: null,
+      dynTexVersion: -1,
+      winTexVersion: -1,
+      dloStrength: -1,
+      dloEnabled: null,
+      vbX: 0,
+      vbY: 0,
+      vbZ: 0,
+      vbW: 0,
+      srX: 0,
+      srY: 0,
+      srZ: 0,
+      srW: 0,
+      sdimX: 0,
+      sdimY: 0,
+      sw: 0,
+      sh: 0,
+      outdoorsRoute: null,
+      outdoorsKey: null,
+    };
   }
 
   /**
@@ -993,6 +1039,243 @@ export class BuildingShadowsEffectV2 {
     return floorStackFloors.length > 1 && Number.isFinite(idx) && idx > 0;
   }
 
+  /** Force next {@link #render} to run GPU passes (e.g. after clearing shadowTarget). */
+  _invalidateShadowRenderCache() {
+    this._renderState.time = 0;
+  }
+
+  /** @param {number} v @param {number} step */
+  _quantizeForCache(v, step) {
+    if (!Number.isFinite(v) || step <= 0) return 0;
+    return Math.round(v / step) * step;
+  }
+
+  /** @param {number|null|undefined} a @param {number|null|undefined} b @param {number} eps */
+  _numChanged(a, b, eps) {
+    const na = Number(a);
+    const nb = Number(b);
+    if (!Number.isFinite(na) && !Number.isFinite(nb)) return false;
+    if (!Number.isFinite(na) || !Number.isFinite(nb)) return true;
+    return Math.abs(na - nb) > eps;
+  }
+
+  /**
+   * Snap camera view bounds so sub-texel camera jitter does not bust the cache.
+   * @param {{x:number,y:number,z:number,w:number}|null|undefined} vb
+   * @returns {{x:number,y:number,z:number,w:number}|null}
+   */
+  _quantizeViewBoundsForCache(vb) {
+    if (!vb) return null;
+    const step = BUILDING_SHADOW_VIEW_BOUNDS_QUANTIZE;
+    return {
+      x: this._quantizeForCache(vb.x, step),
+      y: this._quantizeForCache(vb.y, step),
+      z: this._quantizeForCache(vb.z, step),
+      w: this._quantizeForCache(vb.w, step),
+    };
+  }
+
+  /**
+   * @param {number} now
+   * @param {object} snap
+   */
+  _commitRenderState(now, snap) {
+    const rs = this._renderState;
+    rs.time = now;
+    rs.sunAz = snap.sunAz;
+    rs.sunEl = snap.sunEl;
+    rs.driverLen = snap.driverLen;
+    rs.driverSoft = snap.driverSoft;
+    rs.driverSmear = snap.driverSmear;
+    rs.rtWidth = snap.rtWidth;
+    rs.rtHeight = snap.rtHeight;
+    rs.floorKeys = snap.floorKeys;
+    rs.recvUuid = snap.recvUuid;
+    rs.fallbackUuid = snap.fallbackUuid;
+    rs.outdoorsUuid = snap.outdoorsUuid;
+    rs.dynTexVersion = snap.dynTexVersion;
+    rs.winTexVersion = snap.winTexVersion;
+    rs.dloStrength = snap.dloStrength;
+    rs.dloEnabled = snap.dloEnabled;
+    rs.sw = snap.sw;
+    rs.sh = snap.sh;
+    rs.vbX = snap.vbX;
+    rs.vbY = snap.vbY;
+    rs.vbZ = snap.vbZ;
+    rs.vbW = snap.vbW;
+    rs.srX = snap.srX;
+    rs.srY = snap.srY;
+    rs.srZ = snap.srZ;
+    rs.srW = snap.srW;
+    rs.sdimX = snap.sdimX;
+    rs.sdimY = snap.sdimY;
+    rs.outdoorsRoute = snap.outdoorsRoute;
+    rs.outdoorsKey = snap.outdoorsKey;
+  }
+
+  /**
+   * @param {string[]} floorKeys
+   * @param {THREE.Texture|null} receiverMaskTex
+   * @param {THREE.Texture|null} fallbackMask
+   * @param {{route:string|null, resolvedKey:string|null}|null} [outdoorResolve]
+   * @returns {boolean}
+   */
+  _buildRenderSnapshot(floorKeys, receiverMaskTex, fallbackMask, outdoorResolve = null) {
+    const keysStr = floorKeys ? floorKeys.join('|') : '';
+    const dlo = this._dynamicLightOverride;
+    const dynTex = dlo?.texture ?? null;
+    const winTex = dlo?.windowTexture ?? null;
+    const vbQ = this._quantizeViewBoundsForCache(dlo?.viewBounds);
+    const sr = dlo?.sceneRect;
+    const sdim = dlo?.sceneDimensions;
+    const dims = canvas?.dimensions;
+    const sw = dims?.sceneWidth || dims?.width || 1;
+    const sh = dims?.sceneHeight || dims?.height || 1;
+
+    return {
+      sunAz: this._sunAzimuthDeg,
+      sunEl: this._sunElevationDeg,
+      driverLen: this._driverShadowLengthScale,
+      driverSoft: this._driverShadowSoftnessScale,
+      driverSmear: this._driverShadowSmearScale,
+      rtWidth: this._strengthTarget?.width,
+      rtHeight: this._strengthTarget?.height,
+      floorKeys: keysStr,
+      recvUuid: receiverMaskTex?.uuid ?? null,
+      fallbackUuid: fallbackMask?.uuid ?? null,
+      outdoorsUuid: this._outdoorsMask?.uuid ?? null,
+      dynTexVersion: dynTex ? dynTex.version : -1,
+      winTexVersion: winTex ? winTex.version : -1,
+      dloStrength: dlo?.strength ?? -1,
+      dloEnabled: dlo?.enabled !== false,
+      sw,
+      sh,
+      vbX: vbQ?.x ?? 0,
+      vbY: vbQ?.y ?? 0,
+      vbZ: vbQ?.z ?? 0,
+      vbW: vbQ?.w ?? 0,
+      srX: sr?.x ?? 0,
+      srY: sr?.y ?? 0,
+      srZ: sr?.z ?? 0,
+      srW: sr?.w ?? 0,
+      sdimX: sdim?.x ?? 0,
+      sdimY: sdim?.y ?? 0,
+      outdoorsRoute: outdoorResolve?.route ?? null,
+      outdoorsKey: outdoorResolve?.resolvedKey ?? null,
+    };
+  }
+
+  /**
+   * Hard dirty = rebuild immediately. Soft dirty = sun/driver/viewBounds/tex.version (throttled).
+   * @param {object} snap
+   * @returns {{hard:boolean, soft:boolean}}
+   */
+  _classifyRenderDirty(snap) {
+    const rs = this._renderState;
+    let hard = false;
+    let soft = false;
+
+    if (
+      rs.rtWidth !== snap.rtWidth ||
+      rs.rtHeight !== snap.rtHeight ||
+      rs.floorKeys !== snap.floorKeys ||
+      rs.recvUuid !== snap.recvUuid ||
+      rs.fallbackUuid !== snap.fallbackUuid ||
+      rs.outdoorsUuid !== snap.outdoorsUuid ||
+      rs.dloEnabled !== snap.dloEnabled ||
+      rs.sw !== snap.sw ||
+      rs.sh !== snap.sh ||
+      rs.outdoorsRoute !== snap.outdoorsRoute ||
+      rs.outdoorsKey !== snap.outdoorsKey
+    ) {
+      hard = true;
+    }
+
+    if (this._numChanged(rs.dloStrength, snap.dloStrength, 1e-5)) hard = true;
+
+    if (
+      this._numChanged(rs.sunAz, snap.sunAz, BUILDING_SHADOW_SUN_EPS_DEG) ||
+      this._numChanged(rs.sunEl, snap.sunEl, BUILDING_SHADOW_SUN_EPS_DEG) ||
+      this._numChanged(rs.driverLen, snap.driverLen, BUILDING_SHADOW_DRIVER_EPS) ||
+      this._numChanged(rs.driverSoft, snap.driverSoft, BUILDING_SHADOW_DRIVER_EPS) ||
+      this._numChanged(rs.driverSmear, snap.driverSmear, BUILDING_SHADOW_DRIVER_EPS)
+    ) {
+      soft = true;
+    }
+
+    if (
+      rs.vbX !== snap.vbX ||
+      rs.vbY !== snap.vbY ||
+      rs.vbZ !== snap.vbZ ||
+      rs.vbW !== snap.vbW ||
+      rs.srX !== snap.srX ||
+      rs.srY !== snap.srY ||
+      rs.srZ !== snap.srZ ||
+      rs.srW !== snap.srW ||
+      rs.sdimX !== snap.sdimX ||
+      rs.sdimY !== snap.sdimY ||
+      rs.dynTexVersion !== snap.dynTexVersion ||
+      rs.winTexVersion !== snap.winTexVersion
+    ) {
+      soft = true;
+    }
+
+    return { hard, soft };
+  }
+
+  /**
+   * Returns true when shadow inputs changed or the throttle window elapsed.
+   * @param {string[]} floorKeys
+   * @param {THREE.Texture|null} receiverMaskTex
+   * @param {THREE.Texture|null} fallbackMask
+   * @param {{route:string|null, resolvedKey:string|null}|null} [outdoorResolve]
+   * @returns {boolean}
+   */
+  _shouldRender(floorKeys, receiverMaskTex, fallbackMask, outdoorResolve = null) {
+    const now = performance.now();
+
+    for (const k in this.params) {
+      if (this.params[k] !== this._lastParams[k]) {
+        this._lastParams[k] = this.params[k];
+        this._commitRenderState(now, this._buildRenderSnapshot(floorKeys, receiverMaskTex, fallbackMask, outdoorResolve));
+        return true;
+      }
+    }
+
+    const snap = this._buildRenderSnapshot(floorKeys, receiverMaskTex, fallbackMask, outdoorResolve);
+    const { hard, soft } = this._classifyRenderDirty(snap);
+
+    const dlo = this._dynamicLightOverride;
+    const hasDynamicLights =
+      (dlo?.texture || dlo?.windowTexture) &&
+      snap.dloEnabled &&
+      this.params.dynamicLightShadowOverrideEnabled !== false;
+    const throttleMs = hasDynamicLights
+      ? BUILDING_SHADOW_THROTTLE_DYNAMIC_MS
+      : BUILDING_SHADOW_THROTTLE_STATIC_MS;
+    const safetyMs = hasDynamicLights
+      ? BUILDING_SHADOW_SAFETY_DYNAMIC_MS
+      : BUILDING_SHADOW_SAFETY_STATIC_MS;
+    const elapsed = now - this._renderState.time;
+
+    if (hard) {
+      this._commitRenderState(now, snap);
+      return true;
+    }
+
+    if (soft && elapsed >= throttleMs) {
+      this._commitRenderState(now, snap);
+      return true;
+    }
+
+    if (elapsed >= safetyMs) {
+      this._commitRenderState(now, snap);
+      return true;
+    }
+
+    return false;
+  }
+
   render(renderer, camera) {
     if (camera) this.mainCamera = camera;
     if (!renderer || !this._projectMaterial || !this._invertMaterial || !this._scene || !this._quad || !this.shadowTarget || !this._strengthTarget) {
@@ -1009,6 +1292,7 @@ export class BuildingShadowsEffectV2 {
         floorKeyCount: 0,
         note: 'Building shadows disabled',
       });
+      this._invalidateShadowRenderCache();
       this._clearShadowTargetToWhite(renderer);
       return;
     }
@@ -1025,6 +1309,7 @@ export class BuildingShadowsEffectV2 {
         floorKeyCount: 0,
         note: 'GpuSceneMaskCompositor missing',
       });
+      this._invalidateShadowRenderCache();
       this._clearShadowTargetToWhite(renderer);
       return;
     }
@@ -1084,9 +1369,38 @@ export class BuildingShadowsEffectV2 {
       this.onResize(targetSize.x, targetSize.y);
     }
 
+    const receiverMaskTex = this._resolveReceiverMaskTexture(compositor);
+
+    if (!this._shouldRender(floorKeys, receiverMaskTex, fallbackMask, outdoorResolve)) {
+      const rs = this._renderState;
+      const usedBundleFallback = floorKeys.includes('bundle') || (outdoorResolve.route === 'bundle');
+      const usedFullOutdoorsFallback = floorKeys.includes('full-outdoors');
+      const keyedDrewSim = floorKeys.length > 0 && !usedFullOutdoorsFallback;
+
+      this._patchHealthDiagnostics({
+        timestamp: Date.now(),
+        paramsEnabled: true,
+        compositorPresent: true,
+        floorKeys,
+        floorKeyCount: floorKeys.length,
+        syncOutdoorsMaskUuid: this._outdoorsMask?.uuid ?? null,
+        fallbackUsed: !keyedDrewSim && !!fallbackMask,
+        fallbackMaskUuid: (!keyedDrewSim && fallbackMask) ? (fallbackMask?.uuid ?? null) : null,
+        bundleFallbackUsed: usedBundleFallback,
+        fullOutdoorsFallbackUsed: usedFullOutdoorsFallback,
+        outdoorsResolveRoute: rs.outdoorsRoute ?? outdoorResolve.route,
+        outdoorsResolveKey: rs.outdoorsKey ?? outdoorResolve.resolvedKey,
+        drewAny: true,
+        receiverMaskUuid: receiverMaskTex?.uuid ?? null,
+        shadowFactorTextureUuid: this.shadowTarget?.texture?.uuid ?? null,
+        dynamicLightOverrideBound: !!(this._dynamicLightOverride?.texture || this._dynamicLightOverride?.windowTexture),
+        note: 'Cached render (optimization)',
+      });
+      return;
+    }
+
     this.update(null);
 
-    const receiverMaskTex = this._resolveReceiverMaskTexture(compositor);
     if (this._projectMaterial?.uniforms) {
       const pu = this._projectMaterial.uniforms;
       pu.uReceiverOutdoorsMask.value = receiverMaskTex;
@@ -1182,6 +1496,7 @@ export class BuildingShadowsEffectV2 {
         drewAny: false,
         note: 'Keyed passes produced no draw (mask textures null?)',
       });
+      this._invalidateShadowRenderCache();
       this._clearShadowTargetToWhite(renderer);
       renderer.autoClear = prevAutoClear;
       renderer.setRenderTarget(prevTarget);

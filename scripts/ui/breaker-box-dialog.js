@@ -6,7 +6,7 @@ const STATUS_WEIGHT = { unknown: 0, healthy: 1, degraded: 2, broken: 3, critical
 const SOURCE_DEFS = [
   { id: 'src:waterMasks', label: 'Water Masks', effects: ['WaterEffectV2'], keywords: ['floorDataMap', 'mask'] },
   { id: 'src:waterData', label: 'Water Data Builder', effects: ['WaterEffectV2'], keywords: ['composeMaterial', 'floorData'] },
-  { id: 'src:cloudField', label: 'Cloud Field Generator', effects: ['CloudEffectV2'], keywords: ['initialized', 'shadowTarget'] },
+  { id: 'src:cloudField', label: 'Cloud Sprite Field', effects: ['CloudEffectV2'], keywords: ['initialized', 'shadowTarget'] },
   { id: 'src:roofCapture', label: 'Roof Capture Targets', effects: ['OverheadShadowsEffectV2'], keywords: ['targets', 'roof', 'shadow'] },
   { id: 'src:windowMasks', label: 'Window Masks', effects: ['WindowLightEffectV2'], keywords: ['overlayMap', 'window', 'overlay'] },
   { id: 'src:fireMasks', label: 'Fire Masks + Spawn Data', effects: ['FireEffectV2'], keywords: ['batchRenderer', 'initialized', 'mask'] },

@@ -1,7 +1,10 @@
 /**
  * @fileoverview Renders vegetation canopy self-shadow into a screen-sized lit
  * factor texture (R=1 full light, lower = darker) for ShadowManagerV2.
- * Uses a wind-free offset+blur approximation so the pass stays cheap.
+ *
+ * Prefer each effect's wind-aware shadow shader ({@link TreeEffectV2} /
+ * {@link BushEffectV2} shadow mesh + `uShadowLitCapture`) so ground darkening
+ * tracks swaying foliage. Falls back to a cheap internal pass when needed.
  */
 
 export class VegetationBillboardShadowPass {
@@ -142,7 +145,7 @@ export class VegetationBillboardShadowPass {
   /**
    * @param {THREE.WebGLRenderer} renderer
    * @param {THREE.Camera} camera
-   * @param {Iterable<{mesh: THREE.Mesh, uniforms: object}>} overlayEntries
+   * @param {Iterable<{mesh: THREE.Mesh, uniforms: object, material?: THREE.Material}>} overlayEntries
    * @param {{ clear?: boolean }} [options]
    */
   render(renderer, camera, overlayEntries, options = {}) {
@@ -153,11 +156,7 @@ export class VegetationBillboardShadowPass {
     renderer.getClearColor(prevClear);
     const prevAlpha = renderer.getClearAlpha();
     const prevAuto = renderer.autoClear;
-    this._material.blending = THREE.CustomBlending;
-    this._material.blendEquation = THREE.AddEquation;
-    this._material.blendSrc = THREE.DstColorFactor;
-    this._material.blendDst = THREE.ZeroFactor;
-    this._material.transparent = false;
+    const captureStates = [];
     try {
       renderer.setRenderTarget(this._target);
       renderer.setClearColor(0xffffff, 1.0);
@@ -165,24 +164,55 @@ export class VegetationBillboardShadowPass {
         renderer.clear(true, true, true);
       }
       renderer.autoClear = false;
-      const u = this._material.uniforms;
-      for (const { mesh, uniforms } of overlayEntries) {
+
+      for (const entry of overlayEntries) {
+        const mesh = entry?.mesh;
+        const uniforms = entry?.uniforms;
         if (!mesh || !uniforms) continue;
-        const mask = uniforms.uTreeMask?.value ?? uniforms.uBushMask?.value ?? null;
-        if (!mask) continue;
-        u.uMask.value = mask;
-        if (uniforms.uSunDir?.value) u.uSunDir.value.copy(uniforms.uSunDir.value);
-        u.uShadowOpacity.value = Number(uniforms.uShadowOpacity?.value ?? 0.5);
-        u.uShadowLength.value = Number(uniforms.uShadowLength?.value ?? 0.01);
-        u.uShadowSoftness.value = Number(uniforms.uShadowSoftness?.value ?? 0.5);
-        u.uIntensity.value = Number(uniforms.uIntensity?.value ?? 1.0);
-        u.uDeriveAlpha.value = Number(uniforms.uDeriveAlpha?.value ?? 0.0);
+
+        const effectMaterial = entry?.material ?? null;
+        const useEffectShader = !!(
+          effectMaterial
+          && effectMaterial.uniforms?.uShadowLitCapture
+          && effectMaterial.uniforms?.uVegetationPass
+        );
+
+        let drawMaterial = this._material;
+        if (useEffectShader) {
+          drawMaterial = effectMaterial;
+          const captureU = drawMaterial.uniforms.uShadowLitCapture;
+          captureStates.push({ uniform: captureU, prev: Number(captureU.value) || 0 });
+          captureU.value = 1.0;
+        } else {
+          const mask = uniforms.uTreeMask?.value ?? uniforms.uBushMask?.value ?? null;
+          if (!mask) continue;
+          const u = this._material.uniforms;
+          u.uMask.value = mask;
+          if (uniforms.uSunDir?.value) u.uSunDir.value.copy(uniforms.uSunDir.value);
+          u.uShadowOpacity.value = Number(uniforms.uShadowOpacity?.value ?? 0.5);
+          u.uShadowLength.value = Number(uniforms.uShadowLength?.value ?? 0.01);
+          u.uShadowSoftness.value = Number(uniforms.uShadowSoftness?.value ?? 0.5);
+          u.uIntensity.value = Number(uniforms.uIntensity?.value ?? 1.0);
+          u.uDeriveAlpha.value = Number(uniforms.uDeriveAlpha?.value ?? 0.0);
+        }
+
+        const prevBlending = drawMaterial.blending;
+        const prevTransparent = drawMaterial.transparent;
+        const prevBlendEquation = drawMaterial.blendEquation;
+        const prevBlendSrc = drawMaterial.blendSrc;
+        const prevBlendDst = drawMaterial.blendDst;
+        drawMaterial.blending = THREE.CustomBlending;
+        drawMaterial.blendEquation = THREE.AddEquation;
+        drawMaterial.blendSrc = THREE.DstColorFactor;
+        drawMaterial.blendDst = THREE.ZeroFactor;
+        drawMaterial.transparent = false;
+
         if (!this._clone) {
-          this._clone = new THREE.Mesh(mesh.geometry, this._material);
+          this._clone = new THREE.Mesh(mesh.geometry, drawMaterial);
           this._clone.frustumCulled = false;
         } else {
           this._clone.geometry = mesh.geometry;
-          this._clone.material = this._material;
+          this._clone.material = drawMaterial;
         }
         this._clone.position.copy(mesh.position);
         this._clone.rotation.copy(mesh.rotation);
@@ -191,8 +221,17 @@ export class VegetationBillboardShadowPass {
         this._scene.add(this._clone);
         renderer.render(this._scene, camera);
         this._scene.remove(this._clone);
+
+        drawMaterial.blending = prevBlending;
+        drawMaterial.transparent = prevTransparent;
+        drawMaterial.blendEquation = prevBlendEquation;
+        drawMaterial.blendSrc = prevBlendSrc;
+        drawMaterial.blendDst = prevBlendDst;
       }
     } finally {
+      for (const { uniform, prev } of captureStates) {
+        uniform.value = prev;
+      }
       this._material.blending = THREE.NoBlending;
       renderer.autoClear = prevAuto;
       renderer.setClearColor(prevClear, prevAlpha);

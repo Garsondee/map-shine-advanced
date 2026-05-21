@@ -527,6 +527,45 @@ globalValidator.registerSanityChecker('specular', (params, schema) => {
 });
 globalValidator.registerSanityChecker('iridescence', createIridescenceSanityChecker);
 
+globalValidator.registerSanityChecker('cloud', (params) => {
+  const warnings = [];
+  const errors = [];
+  const fixes = {};
+
+  const scaleMin = Number(params.spriteScaleMin);
+  const scaleMax = Number(params.spriteScaleMax);
+  if (Number.isFinite(scaleMin) && Number.isFinite(scaleMax) && scaleMin > scaleMax) {
+    warnings.push(`Min sprite size (${scaleMin}) exceeds max (${scaleMax})`);
+    fixes.spriteScaleMin = scaleMax;
+  }
+
+  const opMin = Number(params.spriteOpacityMin);
+  const opMax = Number(params.spriteOpacityMax);
+  if (Number.isFinite(opMin) && Number.isFinite(opMax) && opMin > opMax) {
+    warnings.push(`Min sprite opacity (${opMin}) exceeds max (${opMax})`);
+    fixes.spriteOpacityMin = opMax;
+  }
+
+  const fadeStart = Number(params.cloudTopFadeStart);
+  const fadeEnd = Number(params.cloudTopFadeEnd);
+  if (Number.isFinite(fadeStart) && Number.isFinite(fadeEnd) && fadeStart >= fadeEnd) {
+    warnings.push('Cloud top fade start should be below fade end (zoomed-out visibility band)');
+  }
+
+  const alphaStart = Number(params.cloudTopAlphaStart);
+  const alphaEnd = Number(params.cloudTopAlphaEnd);
+  if (Number.isFinite(alphaStart) && Number.isFinite(alphaEnd) && alphaStart >= alphaEnd) {
+    warnings.push('Cloud top alpha start should be below alpha end');
+  }
+
+  return {
+    valid: errors.length === 0,
+    warnings,
+    errors,
+    fixes: Object.keys(fixes).length > 0 ? fixes : null,
+  };
+});
+
 // Register existing stripe width custom validators (if needed elsewhere)
 globalValidator.registerValidator('stripe1Width', (value, paramDef) => {
   const warnings = [];

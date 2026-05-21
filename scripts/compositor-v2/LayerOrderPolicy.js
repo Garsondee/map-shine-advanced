@@ -10,7 +10,9 @@
  * - **tileRelativeEffectOrder** — Places overlays in **FLOOR_EFFECTS** while preserving
  *   sort — rarely needed; most per-tile FX should use tileStackedOverlayOrder instead.
  * - **effectUnderOverheadOrder** / **effectAboveOverheadOrder** — Floor-wide batches
- *   (particles, splashes, trees) that are not tied to a single tile’s sort slot.
+ *   (particles, splashes) that are not tied to a single tile’s sort slot.
+ * - **effectTopOfFloorStackOrder** — Canopy-level sprites (trees) above motion-top
+ *   tiles and all {@link tileStackedOverlayOrder} overlays on the same floor.
  *
  * The policy divides each floor into fixed role bands so that the visual stack is
  * deterministic regardless of which floor the viewer is on:
@@ -145,6 +147,24 @@ export function effectAboveOverheadOrder(floorIndex, intraOffset = 0) {
  */
 export function motionAboveTokensOrder(floorIndex, intraOffset = 0) {
   return computeRenderOrder(floorIndex, 'FLOOR_MOTION_TOP', intraOffset);
+}
+
+/** Fractional step packed below the next floor boundary (see {@link effectTopOfFloorStackOrder}). */
+const TOP_OF_FLOOR_STACK_STEP = 0.001;
+
+/**
+ * Render order at the top of a floor — above motion-top tiles and
+ * {@link tileStackedOverlayOrder} overlays (bushes, specular, prism, …).
+ * Uses fractional slots just below `(floorIndex + 1) * RENDER_ORDER_PER_FLOOR`.
+ *
+ * @param {number} floorIndex
+ * @param {number} [slotFromTop=0] - 0 = highest slot (canopy); larger = lower
+ * @returns {number}
+ */
+export function effectTopOfFloorStackOrder(floorIndex, slotFromTop = 0) {
+  const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
+  const slot = Math.max(0, Math.min(9, Math.round(Number(slotFromTop) || 0)));
+  return (fi + 1) * RENDER_ORDER_PER_FLOOR - TOP_OF_FLOOR_STACK_STEP * (1 + slot);
 }
 
 // ── External effects ordering (Sequencer / JB2A) ─────────────────────────────

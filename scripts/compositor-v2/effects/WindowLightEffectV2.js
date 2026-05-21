@@ -186,7 +186,7 @@ export class WindowLightEffectV2 {
       flickerSpeed: 0.35,
       flickerAmount: 0.15,
       cloudInfluence: 1.0,
-      cloudShadowContrast: 0.9,
+      cloudShadowContrast: 1.0,
       cloudShadowBias: 0.05,
       cloudShadowGamma: 2.28,
       cloudShadowMinLight: 0.0,
@@ -351,7 +351,7 @@ export class WindowLightEffectV2 {
         skyTintStrength: { type: 'slider', label: 'Sky Tint Strength', min: 0.0, max: 5.0, step: 0.01, default: 0.05, tooltip: 'Moderate sky color coupling for weather/night ambience without replacing Camera Grade.' },
         useTodCameraTint: { type: 'boolean', label: 'Use ToD Camera Tint', default: true, tooltip: 'When Color Correction time-of-day camera timeline is on, multiply window light by the timeline global tint (same style as the CC grade).' },
         todCameraTintStrength: { type: 'slider', label: 'ToD Camera Tint Strength', min: 0.0, max: 5.0, step: 0.01, default: 5.0, throttle: 50, tooltip: 'Intensity of the timeline tint on window light (0 = no effect). Independent from Sky Tint Strength.' },
-        cloudShadowContrast: { type: 'slider', label: 'Shadow Contrast', min: 0.0, max: 4.0, step: 0.01, default: 0.9 },
+        cloudShadowContrast: { type: 'slider', label: 'Shadow Contrast', min: 0.0, max: 4.0, step: 0.01, default: 1.0 },
         cloudShadowBias: { type: 'slider', label: 'Shadow Bias', min: -1.0, max: 1.0, step: 0.01, default: 0.05 },
         cloudShadowGamma: { type: 'slider', label: 'Shadow Gamma', min: 0.1, max: 4.0, step: 0.01, default: 2.28 },
         cloudShadowMinLight: { type: 'slider', label: 'Min Light', min: 0.0, max: 1.0, step: 0.01, default: 0.0 },
@@ -1006,8 +1006,9 @@ export class WindowLightEffectV2 {
   }
 
   /**
-   * Bind cloud / ShadowManager combined shadow factor texture for screen-space occlusion.
-   * Textures are laid out per drawing-buffer pixel; UVs always use `gl_FragCoord` / `uCloudShadowBufferSize`.
+   * Bind cloud shadow factor texture for screen-space window-light dimming.
+   * Uses the cloud-only masked RT (no indoors/outdoors gate). Textures are laid out
+   * per drawing-buffer pixel; UVs use `gl_FragCoord` / `uCloudShadowBufferSize`.
    * @param {THREE.Texture|null} texture
    * @param {number} screenW
    * @param {number} screenH

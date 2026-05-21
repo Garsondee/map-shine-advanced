@@ -104,7 +104,7 @@ export function captureRenderStack(fc, runtime = {}) {
       : 'Single renderTo(sceneRT); tiles Z = busMeta.tileZFormula.',
   });
 
-  addPass('cloudShadow', 'CloudEffectV2 (shadow + blockers)', 'post', {
+  addPass('cloudShadow', 'CloudEffectV2 (sprite shadow + tops RT)', 'post', {
     enabled: cloudOn,
     outputs: ['cloudShadowTexture', 'cloudTop (later blit)'],
     effectIds: ['CloudEffectV2'],

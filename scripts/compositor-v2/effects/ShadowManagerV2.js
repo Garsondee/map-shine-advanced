@@ -237,11 +237,15 @@ export class ShadowManagerV2 {
         }
 
         float readCloudShadow() {
-          if (uUseRawCloud > 0.5 && uHasCloudShadowRaw > 0.5) {
-            return clamp(texture2D(tCloudShadowRaw, vUv).r, 0.0, 1.0);
-          }
+          // Masked cloud RT (CloudEffectV2 _shadowRT) is view-aligned with world-stable
+          // sampling via the mask pass. Always prefer it over raw scene capture.
           if (uHasCloudShadow > 0.5) {
             return clamp(texture2D(tCloudShadow, vUv).r, 0.0, 1.0);
+          }
+          // Fallback: scene-space raw capture — must not use screen vUv directly.
+          if (uUseRawCloud > 0.5 && uHasCloudShadowRaw > 0.5) {
+            vec2 sceneUv = smSceneUvForWorldTextures(vUv);
+            return clamp(texture2D(tCloudShadowRaw, sceneUv).r, 0.0, 1.0);
           }
           return 1.0;
         }

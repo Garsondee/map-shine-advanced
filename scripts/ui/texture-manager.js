@@ -677,7 +677,7 @@ export class TextureManagerUI {
       'windowLight.screen': 'WindowLightEffect output',
       'cloudShadow.screen': 'CloudEffect output',
       'cloudShadowRaw.screen': 'CloudEffect debug',
-      'cloudDensity.screen': 'CloudEffect density',
+      'cloudDensity.screen': 'CloudEffect tops (legacy density slot)',
       'indoor.scene': 'Derived from outdoors.scene',
       'roofVisible.screen': 'Derived from roofAlpha.screen',
       'roofClear.screen': 'Derived from roofVisible.screen',

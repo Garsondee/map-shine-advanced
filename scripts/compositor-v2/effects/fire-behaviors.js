@@ -15,6 +15,7 @@
  */
 
 import { weatherController } from '../../core/WeatherController.js';
+import { LightingDirector } from '../../core/LightingDirector.js';
 import { CurlNoiseField, Vector3 } from '../../libs/quarks.core.module.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -111,10 +112,20 @@ export const FIRE_HDR_LINEAR_GAIN = 2.75;
 /** Smoke emission tint scale vs flame (diffuse body stays subdued). */
 export const FIRE_SMOKE_HDR_EMISSION_GAIN = 1.35;
 
-/** @returns {number} HDR multiplier from pipeline gain × Environment lightIntensity (0–5 UI → 0–1). */
+/** @returns {number} HDR multiplier from pipeline gain × day/night HDR brightness (0–5 UI → 0–1). */
 function resolveFireHdrMultiplier(ownerEffect) {
-  const raw = Number(ownerEffect?.params?.lightIntensity);
-  const userGain = Number.isFinite(raw) && raw > 0 ? raw / 5.0 : 1.0;
+  const p = ownerEffect?.params;
+  const dayRaw = Number(p?.lightIntensity);
+  const nightRaw = Number(p?.nightHdrBrightness);
+  const dayGain = Number.isFinite(dayRaw) && dayRaw > 0 ? dayRaw / 5.0 : 1.0;
+  const nightGain = Number.isFinite(nightRaw) && nightRaw > 0 ? nightRaw / 5.0 : dayGain;
+
+  let darkness = 0;
+  try {
+    darkness = clamp01(LightingDirector.get().masterDarkness);
+  } catch (_) {}
+
+  const userGain = dayGain + (nightGain - dayGain) * darkness;
   return FIRE_HDR_LINEAR_GAIN * userGain;
 }
 

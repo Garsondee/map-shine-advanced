@@ -492,6 +492,47 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._nvBloomHeight = 0;
 
     this._appliedVisionProfileMode = null;
+
+    /** @type {import('../../core/diagnostics/PerformanceRecorder.js').PerformanceRecorder|null} */
+    this._activePerfRecorder = null;
+  }
+
+  // ── Performance Recorder ───────────────────────────────────────────────────
+
+  /** @private */
+  _bindPerfRecorder() {
+    try {
+      const recorder = window.MapShine?.performanceRecorder;
+      this._activePerfRecorder = recorder?.enabled ? recorder : null;
+    } catch (_) {
+      this._activePerfRecorder = null;
+    }
+  }
+
+  /**
+   * @param {string} name
+   * @param {'update'|'render'} [phase='update']
+   * @param {{ cpuOnly?: boolean }} [options={}]
+   * @returns {object|null}
+   * @private
+   */
+  _beginPerfSpan(name, phase = 'update', options = {}) {
+    try {
+      const recorder = this._activePerfRecorder;
+      if (!recorder?.enabled || typeof recorder.beginEffectCall !== 'function') return null;
+      return recorder.beginEffectCall(`playerLight.${phase}.${name}`, phase, options);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /** @param {object|null} token @private */
+  _endPerfSpan(token) {
+    if (!token) return;
+    try {
+      const recorder = this._activePerfRecorder ?? window.MapShine?.performanceRecorder;
+      recorder?.endEffectCall?.(token);
+    } catch (_) {}
   }
 
   static getControlSchema() {
@@ -1448,6 +1489,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
   }
 
   update(timeInfo) {
+    this._bindPerfRecorder();
+
+    let _perfToken = this._beginPerfSpan('reattachScene', 'update', { cpuOnly: true });
     // V2 bus repopulation can temporarily detach effect-owned objects.
     // Reattach defensively so torch particles keep rendering.
     if (this.scene) {
@@ -1466,52 +1510,72 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         }
       }
     }
+    this._endPerfSpan(_perfToken);
 
     const torchWasActiveLastFrame = this._torchWasActiveLastFrame;
     const torchPrevTokenId = this._torchPrevTokenId;
     this._torchWasActiveLastFrame = false;
 
     if (this._torchWindDownActive) {
+      _perfToken = this._beginPerfSpan('torchWindDown', 'update', { cpuOnly: true });
       this._tickNightVisionPower(timeInfo, false);
       this._hideDynamicLightSources();
       if (this._tickTorchWindDown(timeInfo)) {
         this._setVisible(false, false, { keepTorchVisible: true });
+        this._endPerfSpan(_perfToken);
         return;
       }
+      this._endPerfSpan(_perfToken);
     }
 
     if (window.MapShine?.isMapMakerMode) {
+      _perfToken = this._beginPerfSpan('mapMakerSkip', 'update', { cpuOnly: true });
       this._tickNightVisionPower(timeInfo, false);
       this._setVisible(false);
       this._hideDynamicLightSources();
+      this._endPerfSpan(_perfToken);
       return;
     }
 
     if (!this.enabled) {
-      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) return;
+      _perfToken = this._beginPerfSpan('disabledSkip', 'update', { cpuOnly: true });
+      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) {
+        this._endPerfSpan(_perfToken);
+        return;
+      }
       this._tickNightVisionPower(timeInfo, false);
       this._setVisible(false);
       this._hideDynamicLightSources();
+      this._endPerfSpan(_perfToken);
       return;
     }
 
     const THREE = window.THREE;
     if (!THREE) {
+      _perfToken = this._beginPerfSpan('threeMissing', 'update', { cpuOnly: true });
       this._tickNightVisionPower(timeInfo, false);
+      this._endPerfSpan(_perfToken);
       return;
     }
 
+    _perfToken = this._beginPerfSpan('screenMaskUniforms', 'update', { cpuOnly: true });
     try {
       this._updateScreenMaskUniforms();
     } catch (_) {
     }
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('tokenGate', 'update', { cpuOnly: true });
     const tokenId = this._getActiveTokenId();
     if (!tokenId) {
-      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) return;
+      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) {
+        this._endPerfSpan(_perfToken);
+        return;
+      }
       this._tickNightVisionPower(timeInfo, false);
       this._setVisible(false);
       this._hideDynamicLightSources();
+      this._endPerfSpan(_perfToken);
       return;
     }
 
@@ -1527,10 +1591,14 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     // NVG post-pass does not need a MapShine token sprite; fall back to canvas token doc.
     const tokenDoc = tokenSprite?.userData?.tokenDoc ?? tokenObj?.document ?? null;
     if (!tokenDoc || !tokenObj) {
-      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) return;
+      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) {
+        this._endPerfSpan(_perfToken);
+        return;
+      }
       this._tickNightVisionPower(timeInfo, false);
       this._setVisible(false);
       this._hideDynamicLightSources();
+      this._endPerfSpan(_perfToken);
       return;
     }
 
@@ -1550,22 +1618,31 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         ?? tokenDoc?.flags?.['map-shine-advanced']?.playerLightEnabled;
       const enabled = (enabledFlag === undefined || enabledFlag === null) ? false : !!enabledFlag;
       if (!enabled) {
-        if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) return;
+        if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) {
+          this._endPerfSpan(_perfToken);
+          return;
+        }
         this._tickNightVisionPower(timeInfo, false);
         this._setVisible(false);
         this._hideDynamicLightSources();
+        this._endPerfSpan(_perfToken);
         return;
       }
     } catch (_) {
     }
 
     if (!this._isAllowedForUser(tokenDoc)) {
-      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) return;
+      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) {
+        this._endPerfSpan(_perfToken);
+        return;
+      }
       this._tickNightVisionPower(timeInfo, false);
       this._setVisible(false);
       this._hideDynamicLightSources();
+      this._endPerfSpan(_perfToken);
       return;
     }
+    this._endPerfSpan(_perfToken);
 
     const mode = this.params.mode;
     const nvOnlyMode = NV_ONLY_MODES.has(mode);
@@ -1573,37 +1650,52 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     const useFlashlight = FLASHLIGHT_MODES.has(mode);
 
     if (nvPostMode) {
+      _perfToken = this._beginPerfSpan('visionProfile', 'update', { cpuOnly: true });
       this._applyVisionProfile(mode);
+      this._endPerfSpan(_perfToken);
     } else {
       this._appliedVisionProfileMode = null;
     }
 
     if (nvOnlyMode) {
+      _perfToken = this._beginPerfSpan('nvOnlyMode', 'update', { cpuOnly: true });
       this._tickNightVisionPower(timeInfo, true);
       this._flashlightFinalIntensity = 0;
       this._setVisible(false, false);
       this._hideDynamicLightSources();
       this._updateDebugOverlay(this._getVisionDebugLabel(mode), 0, false, this._nvEffectivePower);
+      this._endPerfSpan(_perfToken);
       return;
     }
 
+    _perfToken = this._beginPerfSpan('nvPowerTick', 'update', { cpuOnly: true });
     if (nvPostMode && useFlashlight) {
       this._tickNightVisionPower(timeInfo, true);
     } else {
       this._tickNightVisionPower(timeInfo, false);
     }
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('inputGate', 'update', { cpuOnly: true });
     if (!tokenSprite) {
-      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) return;
+      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) {
+        this._endPerfSpan(_perfToken);
+        return;
+      }
       this._setVisible(false);
       this._hideDynamicLightSources();
+      this._endPerfSpan(_perfToken);
       return;
     }
 
     if (this._pointerClientX === null || this._pointerClientY === null) {
-      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) return;
+      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) {
+        this._endPerfSpan(_perfToken);
+        return;
+      }
       this._setVisible(false);
       this._hideDynamicLightSources();
+      this._endPerfSpan(_perfToken);
       return;
     }
 
@@ -1616,14 +1708,20 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       : null;
 
     if (!cursorWorld) {
-      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) return;
+      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo)) {
+        this._endPerfSpan(_perfToken);
+        return;
+      }
       this._setVisible(false);
       this._hideDynamicLightSources();
+      this._endPerfSpan(_perfToken);
       return;
     }
+    this._endPerfSpan(_perfToken);
 
     const tokenCenterWorld = tokenSprite.position;
 
+    _perfToken = this._beginPerfSpan('aimAndDistance', 'update', { cpuOnly: true });
     const aimWorld = useFlashlight
       ? this._getFlashlightAimWorld(timeInfo, tokenCenterWorld, cursorWorld, groundZ)
       : cursorWorld;
@@ -1681,9 +1779,13 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         }
 
         if (this._torchExtinguished && !touching) {
-          if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo, groundZ)) return;
+          if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo, groundZ)) {
+            this._endPerfSpan(_perfToken);
+            return;
+          }
           this._setVisible(false);
           this._hideDynamicLightSources();
+          this._endPerfSpan(_perfToken);
           return;
         }
 
@@ -1695,9 +1797,13 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     }
 
     if (fade <= 0.0001) {
-      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo, groundZ)) return;
+      if (this._tryBeginTorchWindDown(torchWasActiveLastFrame, timeInfo, groundZ)) {
+        this._endPerfSpan(_perfToken);
+        return;
+      }
       this._setVisible(false);
       this._hideDynamicLightSources();
+      this._endPerfSpan(_perfToken);
       return;
     }
 
@@ -1711,7 +1817,10 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       : aimWorld;
     let safeWallDistanceUnits = wallDistanceUnits;
 
+    this._endPerfSpan(_perfToken);
+
     if (this.params.wallBlockEnabled) {
+      _perfToken = this._beginPerfSpan('wallCollision', 'update', { cpuOnly: true });
       try {
         const destFoundry = Coordinates.toFoundry(aimWorld.x, aimWorld.y);
         let collision = null;
@@ -1748,10 +1857,12 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         }
       } catch (_) {
       }
+      this._endPerfSpan(_perfToken);
     }
 
     this._torchGuttering = isTorchMode && distanceUnits > maxU;
 
+    _perfToken = this._beginPerfSpan('particlesAndBatch', 'update', { cpuOnly: true });
     // Update debug overlay with current state
     const state = fade <= 0.0001 ? 'HIDDEN' : (blocked || distanceUnits > maxU ? 'EMBER' : 'ACTIVE');
     this._updateDebugOverlay(state, distanceUnits, blocked, fade);
@@ -1762,24 +1873,37 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     }
 
     this._updateTorchBatchRenderer(timeInfo);
+    this._endPerfSpan(_perfToken);
 
     if (useFlashlight) {
       const flashlightMaxU = maxU;
       const flashlightConeMaxLenU = Math.max(0.5, this.params.flashlightLengthUnits) * 4.0;
+      _perfToken = this._beginPerfSpan('flashlightUpdate', 'update', { cpuOnly: true });
       this._updateFlashlight(timeInfo, tokenCenterWorld, aimWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc, flashlightMaxU, flashlightConeMaxLenU, tokenRadiusPx);
+      this._endPerfSpan(_perfToken);
+      _perfToken = this._beginPerfSpan('dynamicLights', 'update', { cpuOnly: true });
       this._updateDynamicLightSources(timeInfo, tokenCenterWorld, clampedTargetWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc);
+      this._endPerfSpan(_perfToken);
+      _perfToken = this._beginPerfSpan('visibility', 'update', { cpuOnly: true });
       this._setVisible(true, false);
       if (mode === 'activeIR') {
         this._updateDebugOverlay('ACTIVE_IR', distanceUnits, blocked, this._nvEffectivePower);
       }
+      this._endPerfSpan(_perfToken);
       return;
     }
 
     const torchReignited = torchExtinguishedBefore && !this._torchExtinguished;
     const snapTorchNow = tokenIdChanged || !torchWasActiveLastFrame || torchReignited;
+    _perfToken = this._beginPerfSpan('torchUpdate', 'update', { cpuOnly: true });
     this._updateTorch(timeInfo, tokenCenterWorld, clampedTargetWorld, blocked, distanceUnits, groundZ, fade, maxU, snapTorchNow);
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('dynamicLights', 'update', { cpuOnly: true });
     this._updateDynamicLightSources(timeInfo, tokenCenterWorld, clampedTargetWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc);
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('visibility', 'update', { cpuOnly: true });
     this._setVisible(true, true);
+    this._endPerfSpan(_perfToken);
 
     this._torchWasActiveLastFrame = true;
   }
@@ -1999,7 +2123,11 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
   }
 
   _findClosestWallCollision(tokenObj, destinationFoundry, collisionTypes = ['move'], options = null) {
-    if (!tokenObj || !destinationFoundry) return null;
+    const _perfToken = this._beginPerfSpan('wallCollision.query', 'update', { cpuOnly: true });
+    if (!tokenObj || !destinationFoundry) {
+      this._endPerfSpan(_perfToken);
+      return null;
+    }
 
     const tokenElevation = Number.isFinite(Number(tokenObj?.document?.elevation))
       ? Number(tokenObj.document.elevation)
@@ -2040,6 +2168,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       }
     }
 
+    this._endPerfSpan(_perfToken);
     return bestCollision;
   }
 
@@ -2062,11 +2191,16 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         + (aimX - cache.aimX) * (aimX - cache.aimX)
         + (aimY - cache.aimY) * (aimY - cache.aimY);
       if (moveSq <= this._collisionCacheMinMoveSq) {
-        return cache.collision;
+        const _cacheHitToken = this._beginPerfSpan('wallCollision.cacheHit', 'update', { cpuOnly: true });
+        const cached = cache.collision;
+        this._endPerfSpan(_cacheHitToken);
+        return cached;
       }
     }
 
+    const _cacheMissToken = this._beginPerfSpan('wallCollision.cacheMiss', 'update', { cpuOnly: true });
     const collision = this._findClosestWallCollision(tokenObj, destinationFoundry, collisionTypes, options);
+    this._endPerfSpan(_cacheMissToken);
     this._collisionCache = {
       tokenId,
       mode,
@@ -2493,6 +2627,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
   }
 
   _updateTorchBatchRenderer(timeInfo) {
+    const _perfToken = this._beginPerfSpan('torchBatch.update', 'update', { cpuOnly: true });
     try {
       if (this._torchBatchRenderer && typeof this._torchBatchRenderer.update === 'function') {
         const deltaSec = typeof timeInfo?.motionDelta === 'number'
@@ -2516,6 +2651,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       }
     } catch (err) {
       log.error('[TORCH DEBUG] Batch update threw:', err);
+    } finally {
+      this._endPerfSpan(_perfToken);
     }
   }
 
@@ -3352,6 +3489,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
   _updateTorch(timeInfo, tokenCenterWorld, cursorWorld, blocked, distanceUnits, groundZ, distanceFade = 1.0, maxDistanceUnitsOverride = null, snapNow = false) {
     if (!this._torchParticleSystem || !this._torchPos || !this._torchVel) return;
 
+    let _perfToken = this._beginPerfSpan('torch.springAndIntensity', 'update', { cpuOnly: true });
     const dt = typeof timeInfo?.motionDelta === 'number'
       ? timeInfo.motionDelta
       : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
@@ -3427,7 +3565,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       : Math.max(0, base + flicker);
 
     this._torchFinalIntensity = finalIntensity;
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('torch.particles', 'update', { cpuOnly: true });
     const particleSystem = this._torchParticleSystem;
     particleSystem.emitter.visible = true;
     particleSystem.emitter.position.set(this._torchPos.x, this._torchPos.y, groundZ + 3.5);
@@ -3496,6 +3636,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     }
 
     this._updateTorchSparks(timeInfo, groundZ, finalIntensity, distanceFade);
+    this._endPerfSpan(_perfToken);
   }
 
   _updateFlashlight(timeInfo, tokenCenterWorld, cursorWorld, blocked, wallDistanceUnits, groundZ, distanceFade = 1.0, tokenDoc = null, maxDistanceUnitsOverride = null, coneMaxLenUOverride = null, tokenRadiusPxOverride = null) {
@@ -3505,6 +3646,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
     const lighting = this._getLightingEffect();
 
+    let _perfToken = this._beginPerfSpan('flashlight.intensity', 'update', { cpuOnly: true });
     const dt = typeof timeInfo?.motionDelta === 'number'
       ? timeInfo.motionDelta
       : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
@@ -3593,7 +3735,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     const beamRefLenPx = beamRefLenU / Math.max(pxToUnits, 1e-6);
     const widthPx = Math.tan(halfAngle) * beamRefLenPx * 2 * widthScale;
     const wallT = (coneLenU > 0.0001) ? Math.max(0, Math.min(1, edgeWallDistanceU / coneLenU)) : 0.0;
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('flashlight.beamMesh', 'update', { cpuOnly: true });
     const beamMesh = this._flashlightBeamMesh;
     const cookieMesh = this._flashlightCookieMesh;
     const originMesh = this._flashlightOriginMesh;
@@ -3656,7 +3800,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       const starSizePx = Math.max(22, tokenRadiusPx * 0.85);
       originMesh.scale.set(starSizePx, starSizePx, 1);
     }
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('flashlight.cookie', 'update', { cpuOnly: true });
     const cookieName = this.params.flashlightCookieTexture;
     if (cookieName && !this._cookieTextures[cookieName]) {
       this._requestCookieTexture(cookieName);
@@ -3733,6 +3879,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     if (this._flashlightCookieWorld) {
       this._flashlightCookieWorld.copy(cookieMesh.position);
     }
+    this._endPerfSpan(_perfToken);
   }
 
   _getLightingEffect() {
@@ -3826,6 +3973,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     const torchId = 'ms-player-light-torch';
     const flashId = 'ms-player-light-flashlight';
 
+    let _perfToken = this._beginPerfSpan('dynamicLights.torch', 'update', { cpuOnly: true });
     // Torch light
     const torchSrc = this._ensureLightSource(torchId, '_torchLightDoc', '_torchLightSource', lightScene);
     if (torchSrc && torchSrc.mesh) {
@@ -3891,7 +4039,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         }
       }
     }
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('dynamicLights.flashlight', 'update', { cpuOnly: true });
     // Flashlight light
     const flashSrc = this._ensureLightSource(flashId, '_flashlightLightDoc', '_flashlightLightSource', lightScene);
     if (flashSrc && flashSrc.mesh) {
@@ -3911,6 +4061,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           if (flashSrc.mesh.parent) {
             flashSrc.mesh.parent.remove(flashSrc.mesh);
           }
+          this._endPerfSpan(_perfToken);
           return;
         }
 
@@ -3982,6 +4133,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         }
       }
     }
+    this._endPerfSpan(_perfToken);
   }
 
   /**
@@ -3992,9 +4144,13 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
    * @returns {Array<{x:number,y:number,z:number,r:number,g:number,b:number,radius:number,brightRadiusPx:number,attenuation:number}>}
    */
   getSpecularAnalyticLightSnapshots() {
+    this._bindPerfRecorder();
+    const _perfToken = this._beginPerfSpan('specularSnapshots', 'update', { cpuOnly: true });
     const a = this._threeLightSourceToSpecularSnapshot(this._torchLightSource);
     const b = this._threeLightSourceToSpecularSnapshot(this._flashlightLightSource);
-    return [...(a ? [a] : []), ...(b ? [b] : [])];
+    const result = [...(a ? [a] : []), ...(b ? [b] : [])];
+    this._endPerfSpan(_perfToken);
+    return result;
   }
 
   /**
@@ -4321,9 +4477,16 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
   _updateNvBloomMap(renderer, inputRT, dtSec, darknessGate = 1.0, hdrInputRT = null) {
     if (!renderer || !inputRT || !this.params.nightVisionBloomEnabled) return;
-    if (!this._ensureNvBloomResources(inputRT.width, inputRT.height)) return;
+
+    let _perfToken = this._beginPerfSpan('nvBloom.ensureResources', 'render', { cpuOnly: true });
+    if (!this._ensureNvBloomResources(inputRT.width, inputRT.height)) {
+      this._endPerfSpan(_perfToken);
+      return;
+    }
+    this._endPerfSpan(_perfToken);
     if (!this._nvBloomMaterial || !this._nvBloomReadRT || !this._nvBloomWriteRT) return;
 
+    _perfToken = this._beginPerfSpan('nvBloom.uniforms', 'render', { cpuOnly: true });
     const persist = Math.max(0.05, Number(this.params.nightVisionBloomPersistenceSeconds) || 0.6);
     const dt = Math.max(1 / 240, Number(dtSec) || (1 / 60));
     const decay = Math.exp(-dt / persist);
@@ -4337,7 +4500,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     u.uResponse.value = Math.max(0, Number(this.params.nightVisionBloomResponse) || 1.4);
     u.uDecayFactor.value = this._clamp01Nv(decay);
     u.uBurnWriteGain.value = this._clamp01Nv(darknessGate);
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('nvBloom.draw', 'render');
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
     renderer.setRenderTarget(this._nvBloomWriteRT);
@@ -4349,6 +4514,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     const tmp = this._nvBloomReadRT;
     this._nvBloomReadRT = this._nvBloomWriteRT;
     this._nvBloomWriteRT = tmp;
+    this._endPerfSpan(_perfToken);
   }
 
   shouldRenderNightVision() {
@@ -4410,17 +4576,32 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
   }
 
   renderNightVision(renderer, camera, inputRT, outputRT, hdrInputRT = null) {
-    if (!this.shouldRenderNightVision() || !renderer || !inputRT || !outputRT) return false;
+    this._bindPerfRecorder();
+    let _perfToken = this._beginPerfSpan('nightVision.gate', 'render', { cpuOnly: true });
+    if (!this.shouldRenderNightVision() || !renderer || !inputRT || !outputRT) {
+      this._endPerfSpan(_perfToken);
+      return false;
+    }
+    this._endPerfSpan(_perfToken);
 
     const hdrRT = (hdrInputRT && hdrInputRT !== inputRT) ? hdrInputRT : null;
+    _perfToken = this._beginPerfSpan('nightVision.darknessGate', 'render', { cpuOnly: true });
     const darknessGate = this._computeNightVisionDarknessGate();
+    this._endPerfSpan(_perfToken);
+
     if (this.params.nightVisionBloomEnabled) {
-      this._updateNvBloomMap(renderer, inputRT, this._lastNvDt, darknessGate, hdrRT);
+      _perfToken = this._beginPerfSpan('nightVision.bloom', 'render');
+      try {
+        this._updateNvBloomMap(renderer, inputRT, this._lastNvDt, darknessGate, hdrRT);
+      } finally {
+        this._endPerfSpan(_perfToken);
+      }
     }
 
     const w = Math.max(1, Number(inputRT.width) || 1);
     const h = Math.max(1, Number(inputRT.height) || 1);
 
+    _perfToken = this._beginPerfSpan('nightVision.uniforms', 'render', { cpuOnly: true });
     const u = this._nvComposeMaterial.uniforms;
     u.tDiffuse.value = inputRT.texture;
     u.tHdrLinear.value = hdrRT?.texture ?? inputRT.texture;
@@ -4428,7 +4609,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     u.tBloomBurnMap.value = this._nvBloomReadRT?.texture ?? this._nvFallbackBlack;
 
     this._syncNightVisionUniforms(w, h);
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('nightVision.composeDraw', 'render');
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
 
@@ -4438,6 +4621,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
     renderer.autoClear = prevAutoClear;
     renderer.setRenderTarget(prevTarget);
+    this._endPerfSpan(_perfToken);
 
     return true;
   }

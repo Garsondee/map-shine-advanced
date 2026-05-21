@@ -232,6 +232,13 @@ export class LightingEffectV2 {
     this._lightRT = null;
     /** @type {THREE.WebGLRenderTarget|null} Window glow accumulation RT (compose combines with {@link #_lightRT}) */
     this._windowLightRT = null;
+    /**
+     * Shadow-prepass window glow RT — stripped occlusion bindings for source shadow
+     * override. Kept separate from {@link #_windowLightRT} so compose can draw window
+     * glow once with full roof/ceiling/cloud masks.
+     * @type {THREE.WebGLRenderTarget|null}
+     */
+    this._lightOverrideWindowRT = null;
     /** @type {THREE.WebGLRenderTarget|null} Darkness accumulation RT */
     this._darknessRT = null;
 
@@ -321,6 +328,24 @@ export class LightingEffectV2 {
      */
     this._renderFloorIndexForLights = null;
 
+    /**
+     * Which floor's Foundry lights currently occupy {@link #_lightRT}.
+     * @type {number|null}
+     */
+    this._lightRtContentFloor = null;
+    /**
+     * Validity snapshot for {@link #renderLightOverrideMasks} foundry draw reuse in
+     * {@link #render}.
+     * @type {{valid:boolean,floorIndex:number,rtW:number,rtH:number,lightGain:number}}
+     */
+    this._lightMaskPrepassCache = {
+      valid: false,
+      floorIndex: -1,
+      rtW: 0,
+      rtH: 0,
+      lightGain: NaN,
+    };
+
     this._viewProjectionCache = {
       isValid: false,
       isOrtho: false,
@@ -331,6 +356,47 @@ export class LightingEffectV2 {
       vMinX: 0, vMinY: 0, vMaxX: 1, vMaxY: 1,
       c00x: 0, c00y: 0, c10x: 1, c10y: 0, c01x: 0, c01y: 1, c11x: 1, c11y: 1,
     };
+
+    /** @type {import('../../core/diagnostics/PerformanceRecorder.js').PerformanceRecorder|null} */
+    this._activePerfRecorder = null;
+  }
+
+  // ── Performance Recorder ───────────────────────────────────────────────────
+
+  /** @private */
+  _bindPerfRecorder() {
+    try {
+      const recorder = window.MapShine?.performanceRecorder;
+      this._activePerfRecorder = recorder?.enabled ? recorder : null;
+    } catch (_) {
+      this._activePerfRecorder = null;
+    }
+  }
+
+  /**
+   * @param {string} name
+   * @param {'update'|'render'} [phase='update']
+   * @param {{ cpuOnly?: boolean }} [options={}]
+   * @returns {object|null}
+   * @private
+   */
+  _beginPerfSpan(name, phase = 'update', options = {}) {
+    try {
+      const recorder = this._activePerfRecorder;
+      if (!recorder?.enabled || typeof recorder.beginEffectCall !== 'function') return null;
+      return recorder.beginEffectCall(`lighting.${phase}.${name}`, phase, options);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /** @param {object|null} token @private */
+  _endPerfSpan(token) {
+    if (!token) return;
+    try {
+      const recorder = this._activePerfRecorder ?? window.MapShine?.performanceRecorder;
+      recorder?.endEffectCall?.(token);
+    } catch (_) {}
   }
 
   /**
@@ -390,6 +456,9 @@ export class LightingEffectV2 {
     }
     if (this._windowLightRT && (this._windowLightRT.width !== this._windowSize.w || this._windowLightRT.height !== this._windowSize.h)) {
       this._windowLightRT.setSize(this._windowSize.w, this._windowSize.h);
+    }
+    if (this._lightOverrideWindowRT && (this._lightOverrideWindowRT.width !== this._windowSize.w || this._lightOverrideWindowRT.height !== this._windowSize.h)) {
+      this._lightOverrideWindowRT.setSize(this._windowSize.w, this._windowSize.h);
     }
     if (this._darknessRT && (this._darknessRT.width !== this._darknessSize.w || this._darknessRT.height !== this._darknessSize.h)) {
       this._darknessRT.setSize(this._darknessSize.w, this._darknessSize.h);
@@ -520,9 +589,12 @@ export class LightingEffectV2 {
     if (!renderer || !roofVisTex || !roofBlockTex || !this.ceilingTransmittanceTarget) {
       return;
     }
+    this._bindPerfRecorder();
+    const _perfToken = this._beginPerfSpan('ceilingTransmittance.draw', 'render');
     this._ensureCeilingTransmittancePass();
     if (!this._ceilingTransmittanceMaterial || !this._ceilingTransmittanceScene
       || !this._ceilingTransmittanceCamera) {
+      this._endPerfSpan(_perfToken);
       return;
     }
     const m = this._ceilingTransmittanceMaterial;
@@ -540,6 +612,7 @@ export class LightingEffectV2 {
       this._ceilingTransmittanceWritten = true;
     } finally {
       renderer.setRenderTarget(prev);
+      this._endPerfSpan(_perfToken);
     }
   }
 
@@ -901,6 +974,15 @@ export class LightingEffectV2 {
     return this._windowLightRT?.texture ?? null;
   }
 
+  /**
+   * Window glow captured during {@link #renderLightOverrideMasks} for source shadow
+   * override (stripped occlusion). Not used by compose — see {@link #windowLightTexture}.
+   * @returns {THREE.Texture|null}
+   */
+  get windowLightOverrideTexture() {
+    return this._lightOverrideWindowRT?.texture ?? null;
+  }
+
   setSkyOcclusionTexture(texture) {
     const u = this._composeMaterial?.uniforms;
     if (!u?.tSkyOcclusion || !u?.uHasSkyOcclusion) return;
@@ -1232,6 +1314,8 @@ export class LightingEffectV2 {
     };
     this._windowLightRT = new THREE.WebGLRenderTarget(this._windowSize.w, this._windowSize.h, windowRtOpts);
     this._windowLightRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
+    this._lightOverrideWindowRT = new THREE.WebGLRenderTarget(this._windowSize.w, this._windowSize.h, windowRtOpts);
+    this._lightOverrideWindowRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
     this._darknessRT = new THREE.WebGLRenderTarget(this._darknessSize.w, this._darknessSize.h, {
       ...rtOpts,
       type: THREE.UnsignedByteType,
@@ -1857,7 +1941,14 @@ export class LightingEffectV2 {
             ambSkySunPortion = ambientAfterDark * wSkySunSlice;
             ambRestPortion = ambientAfterDark * (1.0 - wSkySunSlice);
             ambientPortionLit = ambSkySunPortion * shadowSunSlice + ambRestPortion * shadowFactorMix;
-            totalIllumination = ambientPortionLit + attenuatedDirect;
+            {
+              float cloudDirectW = clamp(uCloudShadowAmbientInfluence, 0.0, 1.0)
+                * 0.5
+                * calendarDayWeight
+                * isOutdoorForInteriorDimSafe;
+              totalIllumination = ambientPortionLit
+                + attenuatedDirect * mix(1.0, shadowFactor, cloudDirectW);
+            }
             ambientShadowMixOut = shadowFactorMix;
           }
 
@@ -2058,7 +2149,9 @@ export class LightingEffectV2 {
    */
   syncAllLights() {
     if (!this._initialized) return;
+    this._bindPerfRecorder();
 
+    const _perfToken = this._beginPerfSpan('syncAllLights', 'update', { cpuOnly: true });
     // `_lightScene` is shared with PlayerLightEffectV2 (torch/flashlight) and
     // CandleFlamesEffectV2 (glow group). Those meshes are not in `_lights`, so a
     // normal "clear _lights" pass would leave them parented — looks like a Foundry
@@ -2108,6 +2201,7 @@ export class LightingEffectV2 {
     this._perspectiveRefreshDirty = true;
     this._pushComposeLightGainToFoundryMeshes();
     log.info(`LightingEffectV2: synced ${this._lights.size} lights, ${this._darknessSources.size} darkness sources`);
+    this._endPerfSpan(_perfToken);
   }
 
   /**
@@ -2129,6 +2223,7 @@ export class LightingEffectV2 {
    */
   _refreshLightsForLevelsPerspective() {
     if (!this._initialized) return;
+    const _perfToken = this._beginPerfSpan('perspectiveRefresh.apply', 'update', { cpuOnly: true });
     // Phase 3: per-light "is this light visible at the current darkness?"
     // gating reads the canonical master darkness, so user-selected priority
     // (calendar/weather/slider/max) consistently drives which torches appear.
@@ -2147,6 +2242,7 @@ export class LightingEffectV2 {
       const doc = this._liveAmbientDocForGating(ds);
       ds.mesh.visible = this._isDocVisibleForLighting(doc, sceneDarkness);
     }
+    this._endPerfSpan(_perfToken);
   }
 
   /** @private */
@@ -2506,7 +2602,9 @@ export class LightingEffectV2 {
    */
   update(timeInfo) {
     if (!this._initialized || !this._enabled) return;
+    this._bindPerfRecorder();
 
+    let _perfToken = this._beginPerfSpan('envAmbient', 'update', { cpuOnly: true });
     // Sync darkness level and ambient colors from Foundry canvas environment.
     // canvas.environment exposes darknessLevel (0=bright, 1=dark) and the
     // scene's configured ambient colors for brightest/darkest lighting states.
@@ -2549,8 +2647,11 @@ export class LightingEffectV2 {
         }
       }
     }
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('composeDarknessUniforms', 'update', { cpuOnly: true });
     this._syncComposeDarknessUniforms();
+    this._endPerfSpan(_perfToken);
 
     // Phase 3: master darkness drives both ambient-light animation
     // (`light.updateAnimation`) and per-light visibility gating, so a single
@@ -2559,6 +2660,7 @@ export class LightingEffectV2 {
     const foundrySceneDarkness = sceneDarkness;
     const tSec = (timeInfo && typeof timeInfo.elapsed === 'number') ? timeInfo.elapsed : 0;
 
+    _perfToken = this._beginPerfSpan('lightLoop', 'update', { cpuOnly: true });
     // OPTIMIZATION: Array iteration is thousands of times faster than Map.values()
     const lights = this._lightList;
     for (let i = 0; i < lights.length; i++) {
@@ -2571,7 +2673,9 @@ export class LightingEffectV2 {
         light.mesh.visible = this._isDocVisibleForLighting(doc, foundrySceneDarkness);
       }
     }
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('darknessLoop', 'update', { cpuOnly: true });
     const darks = this._darknessList;
     for (let i = 0; i < darks.length; i++) {
       const ds = darks[i];
@@ -2583,11 +2687,53 @@ export class LightingEffectV2 {
         ds.mesh.visible = this._isDocVisibleForLighting(doc, foundrySceneDarkness);
       }
     }
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('staticParamUniforms', 'update', { cpuOnly: true });
     this._syncStaticParamUniforms();
+    this._endPerfSpan(_perfToken);
   }
 
   // ── Render ────────────────────────────────────────────────────────────
+
+  /** @private */
+  _invalidateLightMaskPrepassCache() {
+    this._lightMaskPrepassCache.valid = false;
+  }
+
+  /**
+   * @param {number} w
+   * @param {number} h
+   * @param {number} renderFloor
+   * @returns {boolean}
+   * @private
+   */
+  _canReuseLightMaskPrepassFoundryDraw(w, h, renderFloor) {
+    const cache = this._lightMaskPrepassCache;
+    if (!cache?.valid) return false;
+    if (cache.floorIndex !== renderFloor) return false;
+    if (cache.rtW !== w || cache.rtH !== h) return false;
+    const lightGain = Math.max(0, Number(this.params.lightIntensity) || 0);
+    if (cache.lightGain !== lightGain) return false;
+    if (this._lightRtContentFloor !== renderFloor) return false;
+    return true;
+  }
+
+  /**
+   * @param {number} w
+   * @param {number} h
+   * @param {number} floorIndex
+   * @private
+   */
+  _markLightMaskPrepassFoundryDraw(w, h, floorIndex) {
+    const lightGain = Math.max(0, Number(this.params.lightIntensity) || 0);
+    this._lightMaskPrepassCache.valid = true;
+    this._lightMaskPrepassCache.floorIndex = floorIndex;
+    this._lightMaskPrepassCache.rtW = w;
+    this._lightMaskPrepassCache.rtH = h;
+    this._lightMaskPrepassCache.lightGain = lightGain;
+    this._lightRtContentFloor = floorIndex;
+  }
 
   /**
    * Refresh current-frame light textures before source shadow passes run.
@@ -2595,7 +2741,9 @@ export class LightingEffectV2 {
    * The full lighting render normally accumulates `_lightRT` and `_windowLightRT`
    * immediately before compose, which is too late for Building/SkyReach/Overhead
    * shadow shaders that need light presence to clear shadow strength. This pass
-   * draws only the light masks, not darkness or final composition.
+   * draws Foundry lights to `_lightRT` and stripped window glow to
+   * `_lightOverrideWindowRT` (not compose's `_windowLightRT`) so compose only
+   * draws window glow once with full roof/ceiling/cloud masks.
    *
    * @param {THREE.WebGLRenderer} renderer
    * @param {THREE.Camera} camera
@@ -2603,10 +2751,18 @@ export class LightingEffectV2 {
    * @returns {boolean} true when at least the render targets were refreshed
    */
   renderLightOverrideMasks(renderer, camera, windowLightScene = null) {
-    if (!this._initialized || !this._enabled || !renderer || !camera) return false;
-    if (!this._lightRT || !this._windowLightRT) return false;
+    if (!this._initialized || !this._enabled || !renderer || !camera) {
+      this._invalidateLightMaskPrepassCache();
+      return false;
+    }
+    if (!this._lightRT || !this._lightOverrideWindowRT) {
+      this._invalidateLightMaskPrepassCache();
+      return false;
+    }
+    this._bindPerfRecorder();
     this._lastCompositorRenderer = renderer;
 
+    let _perfToken = this._beginPerfSpan('lightOverride.setup', 'render', { cpuOnly: true });
     if (!this._lightsSynced) {
       this.syncAllLights();
     }
@@ -2629,6 +2785,12 @@ export class LightingEffectV2 {
         ? (performance.now() / 1000)
         : 0
     );
+    this._pushComposeLightGainToFoundryMeshes();
+    this._endPerfSpan(_perfToken);
+
+    const prepassFloor = Number.isFinite(this._renderFloorIndexForLights)
+      ? Number(this._renderFloorIndexForLights)
+      : (this._lightingPerspectiveContext?.activeFloorIndex ?? 0);
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
@@ -2637,31 +2799,36 @@ export class LightingEffectV2 {
     try {
       camera.layers.enableAll();
 
+      _perfToken = this._beginPerfSpan('lightOverride.foundryDraw', 'render');
       renderer.setRenderTarget(this._lightRT);
       renderer.setClearColor(0x000000, 1);
       renderer.autoClear = true;
       if (this._lightScene) {
         renderer.render(this._lightScene, camera);
       }
+      this._endPerfSpan(_perfToken);
 
-      renderer.setRenderTarget(this._windowLightRT);
+      _perfToken = this._beginPerfSpan('lightOverride.windowDraw', 'render');
+      renderer.setRenderTarget(this._lightOverrideWindowRT);
       renderer.setClearColor(0x000000, 1);
       renderer.autoClear = true;
       if (windowLightScene) {
         try {
           windowLightScene.userData?.onBindWindowLightPass?.(
-            this._windowLightRT.width,
-            this._windowLightRT.height,
+            this._lightOverrideWindowRT.width,
+            this._lightOverrideWindowRT.height,
           );
         } catch (_) {}
         renderer.render(windowLightScene, camera);
       }
+      this._endPerfSpan(_perfToken);
     } finally {
       camera.layers.mask = prevLayerMask;
       renderer.autoClear = prevAutoClear;
       renderer.setRenderTarget(prevTarget);
     }
 
+    this._markLightMaskPrepassFoundryDraw(w, h, prepassFloor);
     return true;
   }
 
@@ -2717,12 +2884,16 @@ export class LightingEffectV2 {
   render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, cloudShadowRawTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null, overheadRoofBlockTexture = null, outdoorsMaskTexture = null, ceilingTransmittanceTexture = null, overheadRoofRestrictLightTexture = null, combinedShadowTexture = null, combinedShadowRawTexture = null, paintedShadowLitTexture = null, paintedShadowMgrOpacity = 1.0, paintedShadowAtAndAboveLitTexture = null, paintedShadowInCombined = true, vegetationBillboardShadowTexture = null, vegetationBillboardOpacity = 1.0) {
     if (!this._initialized || !this._enabled || !sceneRT) return;
     if (!this._lightRT || !this._windowLightRT || !this._darknessRT || !this._composeMaterial) return;
+    this._bindPerfRecorder();
     if (renderer) this._lastCompositorRenderer = renderer;
 
+    let _perfToken = this._beginPerfSpan('composeDarknessUniforms', 'render', { cpuOnly: true });
     // FloorCompositor can call render() on multiple levels per frame; keep calendar
     // darkness/day-weight current even if update() was skipped (populate-slim path).
     this._syncComposeDarknessUniforms();
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('syncLights', 'render', { cpuOnly: true });
     // Lazy sync lights on first render frame
     if (!this._lightsSynced) {
       this.syncAllLights();
@@ -2744,17 +2915,21 @@ export class LightingEffectV2 {
       this._invalidateEnhancementCache();
       this.syncAllLights();
     }
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('syncRtSizes', 'render', { cpuOnly: true });
     // Ensure RTs match drawing buffer size
     renderer.getDrawingBufferSize(this._sizeVec);
     const w = Math.max(1, this._sizeVec.x);
     const h = Math.max(1, this._sizeVec.y);
 
     this._syncRenderTargetSizes(w, h);
+    this._endPerfSpan(_perfToken);
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
 
+    _perfToken = this._beginPerfSpan('roofOcclusionUniforms', 'render', { cpuOnly: true });
     const persp = this._lightingPerspectiveContext ?? createLightingPerspectiveContext();
     const cu0 = this._composeMaterial.uniforms;
     const transmissionEnabled = this.params.upperFloorTransmissionEnabled === true;
@@ -2772,7 +2947,9 @@ export class LightingEffectV2 {
       : persp.getRoofScreenOcclusionScale(restrictRoofToTop);
     cu0.uApplyRoofOcclusionToSources.value = occlusionWeight * roofScreenOcclusionScale;
     cu0.uApplyRoofOcclusionToWindow.value = 0.0;
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('perspectiveRefresh', 'render', { cpuOnly: true });
     // FloorCompositor may invoke render() once per visible level per frame; an earlier pass
     // clears _perspectiveRefreshDirty so later passes must not skip visibility refresh.
     this._markPerspectiveRefreshDirty();
@@ -2781,22 +2958,39 @@ export class LightingEffectV2 {
         ? (performance.now() / 1000)
         : 0
     );
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('pushLightGain', 'render', { cpuOnly: true });
     this._pushComposeLightGainToFoundryMeshes();
+    this._endPerfSpan(_perfToken);
+
+    const renderFloorForLights = Number.isFinite(this._renderFloorIndexForLights)
+      ? Number(this._renderFloorIndexForLights)
+      : (persp.activeFloorIndex ?? 0);
+    const reuseFoundryPrepass = this._canReuseLightMaskPrepassFoundryDraw(w, h, renderFloorForLights);
 
     // ── Pass 1: Accumulate Foundry light mesh contributions ───────────
     // Save camera layer mask — ThreeLightSource meshes live on layer 0.
     const prevLayerMask = camera.layers.mask;
     camera.layers.enableAll();
 
-    renderer.setRenderTarget(this._lightRT);
-    renderer.setClearColor(0x000000, 1);
-    renderer.autoClear = true;
-    if (this._lightScene) {
-      renderer.render(this._lightScene, camera);
+    if (reuseFoundryPrepass) {
+      _perfToken = this._beginPerfSpan('lightSourcesDraw.reusePrepass', 'render', { cpuOnly: true });
+      this._endPerfSpan(_perfToken);
+    } else {
+      _perfToken = this._beginPerfSpan('lightSourcesDraw', 'render');
+      renderer.setRenderTarget(this._lightRT);
+      renderer.setClearColor(0x000000, 1);
+      renderer.autoClear = true;
+      if (this._lightScene) {
+        renderer.render(this._lightScene, camera);
+      }
+      this._lightRtContentFloor = renderFloorForLights;
+      this._endPerfSpan(_perfToken);
     }
 
     // ── Pass 1b: Window glow → separate RT (compose merges with roof gating) ─
+    _perfToken = this._beginPerfSpan('windowLightDraw', 'render');
     renderer.setRenderTarget(this._windowLightRT);
     renderer.setClearColor(0x000000, 1);
     renderer.autoClear = true;
@@ -2817,19 +3011,23 @@ export class LightingEffectV2 {
         log.error('LightingEffectV2: window light render failed:', err);
       }
     }
+    this._endPerfSpan(_perfToken);
 
     // ── Pass 2: Accumulate darkness contributions ─────────────────────
+    _perfToken = this._beginPerfSpan('darknessDraw', 'render');
     renderer.setRenderTarget(this._darknessRT);
     renderer.setClearColor(0x000000, 1);
     renderer.autoClear = true;
     if (this._darknessScene) {
       renderer.render(this._darknessScene, camera);
     }
+    this._endPerfSpan(_perfToken);
 
     // Restore camera layer mask
     camera.layers.mask = prevLayerMask;
 
     // ── Pass 3: Compose ───────────────────────────────────────────────
+    _perfToken = this._beginPerfSpan('composeUniforms', 'render', { cpuOnly: true });
     const cu = this._composeMaterial.uniforms;
     cu.tScene.value = sceneRT.texture;
     cu.tLightSources.value = this._lightRT.texture;
@@ -2927,11 +3125,14 @@ export class LightingEffectV2 {
     }
     // Phase 4: legacy `tOverheadShadow` binding removed. OverheadShadowsEffectV2
     // now contributes through ShadowManagerV2's combined shadow texture only.
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('composeDraw', 'render');
     renderer.setRenderTarget(outputRT);
     renderer.setClearColor(0x000000, 1);
     renderer.autoClear = true;
     renderer.render(this._composeScene, this._composeCamera);
+    this._endPerfSpan(_perfToken);
 
     // Restore renderer state
     renderer.autoClear = prevAutoClear;
@@ -3079,6 +3280,7 @@ export class LightingEffectV2 {
     // Dispose GPU resources
     try { this._lightRT?.dispose(); } catch (_) {}
     try { this._windowLightRT?.dispose(); } catch (_) {}
+    try { this._lightOverrideWindowRT?.dispose(); } catch (_) {}
     try { this._darknessRT?.dispose(); } catch (_) {}
     try {
       this.ceilingTransmittanceTarget?.dispose();
@@ -3097,6 +3299,7 @@ export class LightingEffectV2 {
     this._darknessScene = null;
     this._lightRT = null;
     this._windowLightRT = null;
+    this._lightOverrideWindowRT = null;
     this._darknessRT = null;
     this.ceilingTransmittanceTarget = null;
     this._ceilingTransmittanceMaterial = null;
@@ -3113,6 +3316,8 @@ export class LightingEffectV2 {
     this._initialized = false;
     this._lightingPerspectiveContext = null;
     this._renderFloorIndexForLights = null;
+    this._lightRtContentFloor = null;
+    this._invalidateLightMaskPrepassCache();
     this._legacyGlobalIlluminationSeeded = false;
 
     log.info('LightingEffectV2 disposed');

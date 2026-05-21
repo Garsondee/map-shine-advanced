@@ -21,7 +21,7 @@ import { resolveEffectShadowSun2D } from '../shadow-system/ShadowSunDirection.js
 
 import {
   GROUND_Z,
-  effectAboveOverheadOrder,
+  effectTopOfFloorStackOrder,
 } from '../LayerOrderPolicy.js';
 
 const log = createLogger('TreeEffectV2');
@@ -47,7 +47,7 @@ export class TreeEffectV2 {
 
     /**
      * Overlay entries keyed by tileId.
-     * @type {Map<string, {mesh: THREE.Mesh, material: THREE.ShaderMaterial, floorIndex: number}>}
+     * @type {Map<string, {mesh: THREE.Mesh, shadowMesh: THREE.Mesh, material: THREE.ShaderMaterial, shadowMaterial: THREE.ShaderMaterial, floorIndex: number}>}
      */
     this._overlays = new Map();
 
@@ -889,6 +889,7 @@ export class TreeEffectV2 {
     let hoverFadeInProgress = false;
     for (const [tileId, entry] of this._overlays) {
       const hoverUniform = entry?.material?.uniforms?.uHoverFade;
+      const shadowHoverUniform = entry?.shadowMaterial?.uniforms?.uHoverFade;
       if (!hoverUniform) continue;
 
       const hoverHidden = this._hoverHidden || !!tileManager?.getTileSpriteData?.(tileId)?.hoverHidden;
@@ -899,6 +900,7 @@ export class TreeEffectV2 {
 
       if (absDiff <= 0.0005) {
         hoverUniform.value = targetFade;
+        if (shadowHoverUniform) shadowHoverUniform.value = targetFade;
         continue;
       }
       hoverFadeInProgress = true;
@@ -906,6 +908,7 @@ export class TreeEffectV2 {
       const maxStep = delta / 2.0;
       const step = Math.sign(diff) * Math.min(absDiff, maxStep);
       hoverUniform.value = currentFade + step;
+      if (shadowHoverUniform) shadowHoverUniform.value = hoverUniform.value;
     }
     this._hoverFadeInProgress = hoverFadeInProgress;
 
@@ -1075,8 +1078,10 @@ export class TreeEffectV2 {
 
   clear() {
     for (const [tileId, entry] of this._overlays) {
+      this._renderBus.removeEffectOverlay(`${tileId}_tree_shadow`);
       this._renderBus.removeEffectOverlay(`${tileId}_tree`);
       entry.material.dispose();
+      entry.shadowMaterial.dispose();
       entry.mesh.geometry.dispose();
       const tex = entry.material.uniforms.uTreeMask?.value;
       if (tex && tex.dispose) {
@@ -1097,8 +1102,10 @@ export class TreeEffectV2 {
     if (!tileId || String(tileId).startsWith('__bg_image__')) return;
     const entry = this._overlays.get(tileId);
     if (!entry) return;
+    this._renderBus.removeEffectOverlay(`${tileId}_tree_shadow`);
     this._renderBus.removeEffectOverlay(`${tileId}_tree`);
     try { entry.material.dispose(); } catch (_) {}
+    try { entry.shadowMaterial.dispose(); } catch (_) {}
     try { entry.mesh.geometry.dispose(); } catch (_) {}
     const tex = entry.material.uniforms.uTreeMask?.value;
     if (tex && tex.dispose) {
@@ -1155,8 +1162,12 @@ export class TreeEffectV2 {
     if (!this._enabled || !this._initialized) return [];
     const out = [];
     for (const entry of this._overlays.values()) {
-      if (!entry?.mesh?.visible || !entry.material?.uniforms) continue;
-      out.push({ mesh: entry.mesh, uniforms: entry.material.uniforms });
+      if (!entry?.shadowMesh?.visible || !entry.shadowMaterial?.uniforms) continue;
+      out.push({
+        mesh: entry.shadowMesh,
+        uniforms: entry.shadowMaterial.uniforms,
+        material: entry.shadowMaterial,
+      });
     }
     return out;
   }
@@ -1219,6 +1230,7 @@ export class TreeEffectV2 {
       uShadowSoftness: { value: this.params.shadowSoftness },
 
       uBillboardShadowMode: { value: 0.0 },
+      uShadowLitCapture: { value: 0.0 },
 
       uExposure: { value: this.params.exposure },
       uBrightness: { value: this.params.brightness },
@@ -1396,6 +1408,14 @@ export class TreeEffectV2 {
       uTreeMask: { value: null },
       uDeriveAlpha: { value: 0.0 },
       uHoverFade: { value: 1.0 },
+      uVegetationPass: { value: 2.0 },
+    };
+    const shadowUniforms = {
+      ...this._sharedUniforms,
+      uTreeMask: { value: null },
+      uDeriveAlpha: { value: 0.0 },
+      uHoverFade: { value: 1.0 },
+      uVegetationPass: { value: 1.0 },
     };
 
     const material = new THREE.ShaderMaterial({
@@ -1453,6 +1473,7 @@ export class TreeEffectV2 {
         uniform float uShadowLength;
         uniform float uShadowSoftness;
         uniform float uBillboardShadowMode;
+        uniform float uShadowLitCapture;
         uniform vec2  uSceneMin;
         uniform vec2  uSceneMax;
 
@@ -1465,6 +1486,7 @@ export class TreeEffectV2 {
 
         uniform float uDeriveAlpha;
         uniform float uHoverFade;
+        uniform float uVegetationPass;
         uniform sampler2D uRoofAlphaMap;
         uniform sampler2D uRoofBlockMap;
         uniform float uHasRoofAlphaMap;
@@ -1670,20 +1692,21 @@ export class TreeEffectV2 {
           shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
 
           float hf = clamp(uHoverFade, 0.0, 1.0);
-
           float mainAlpha = texA * uIntensity;
-
-          // This is the canopy alpha after hover fade.
-          // The shadow should be masked by this, not by the original full-strength tree.
           float visibleMainAlpha = mainAlpha * hf;
 
-          // As the canopy disappears, the shadow is gradually allowed to appear underneath it.
-          float shadowOnlyAlpha = shadowA * (1.0 - clamp(visibleMainAlpha, 0.0, 1.0));
+          // Pass 1: shadow decal — canopy mesh draws above and occludes naturally.
+          if (uVegetationPass < 1.5) {
+            if (uShadowLitCapture > 0.5) {
+              float lit = clamp(1.0 - shadowA, 0.0, 1.0);
+              gl_FragColor = vec4(lit, lit, lit, 1.0);
+              return;
+            }
+            if (shadowA <= 0.001) discard;
+            gl_FragColor = vec4(0.0, 0.0, 0.0, shadowA);
+            return;
+          }
 
-          float finalAlpha = clamp(visibleMainAlpha + shadowOnlyAlpha, 0.0, 1.0);
-
-          // Match weather masking: suppress only when blocker exists and its visible
-          // alpha is hidden/fading (rb * (1-rv)), not while the roof/tree is visible.
           if (uRoofRainHardBlockEnabled > 0.5) {
             float rv = 1.0;
             if (uHasRoofAlphaMap > 0.5) {
@@ -1697,21 +1720,18 @@ export class TreeEffectV2 {
             }
             float hiddenBlock = rb * (1.0 - rv);
             hiddenBlock = smoothstep(0.02, 0.28, hiddenBlock);
-            finalAlpha *= (1.0 - hiddenBlock);
+            visibleMainAlpha *= (1.0 - hiddenBlock);
           }
 
-          if (finalAlpha <= 0.001) discard;
+          // Pass 2: canopy only.
+          if (visibleMainAlpha <= 0.001) discard;
 
           float ccDelta = abs(uExposure) + abs(uBrightness) + abs(uContrast - 1.0)
                         + abs(uSaturation - 1.0) + abs(uTemperature) + abs(uTint);
           vec3 c = treeSample.rgb;
           if (ccDelta > 0.0001) c = applyCC(c);
-
-          // Premultiplied canopy RGB fades with the canopy.
-          // Shadow contributes black via alpha, so it does not need RGB.
           c *= texA;
-
-          gl_FragColor = vec4(c * uIntensity * hf, finalAlpha);
+          gl_FragColor = vec4(c * uIntensity * hf, visibleMainAlpha);
         }
       `,
       transparent: true,
@@ -1722,32 +1742,48 @@ export class TreeEffectV2 {
       blending: THREE.NormalBlending,
     });
 
+    const shadowMaterial = new THREE.ShaderMaterial({
+      uniforms: shadowUniforms,
+      vertexShader: material.vertexShader,
+      fragmentShader: material.fragmentShader,
+      transparent: true,
+      premultipliedAlpha: true,
+      depthWrite: false,
+      depthTest: false,
+      side: THREE.DoubleSide,
+      blending: THREE.NormalBlending,
+    });
+
     const geometry = new THREE.PlaneGeometry(tileW, tileH);
+    const shadowMesh = new THREE.Mesh(geometry, shadowMaterial);
     const mesh = new THREE.Mesh(geometry, material);
+    shadowMesh.name = `TreeV2Shadow_${tileId}`;
     mesh.name = `TreeV2_${tileId}`;
+    shadowMesh.frustumCulled = false;
     mesh.frustumCulled = false;
+    shadowMesh.userData = shadowMesh.userData || {};
     mesh.userData = mesh.userData || {};
     mesh.userData.mapShineTreeTileId = tileId;
+    shadowMesh.userData.mapShineTreeTileId = tileId;
+    shadowMesh.userData.floorIndex = floorIndex;
     mesh.userData.floorIndex = floorIndex;
+    shadowMesh.position.set(centerX, centerY, z);
     mesh.position.set(centerX, centerY, z);
+    shadowMesh.rotation.z = rotation;
     mesh.rotation.z = rotation;
 
-    // Above overhead tiles (canopy). Do not rely on a silent try/catch — a
-    // thrown helper would leave Three's default renderOrder 0 and paint under
-    // the whole albedo stack (same symptom as async __bg_image__ races for
-    // surface-stacked effects).
     const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
-    mesh.renderOrder = effectAboveOverheadOrder(fi, 200);
+    shadowMesh.renderOrder = effectTopOfFloorStackOrder(fi, 1);
+    mesh.renderOrder = effectTopOfFloorStackOrder(fi, 0);
 
-    // WEATHER_ROOF_LAYER (21): must match OverheadShadowsEffectV2 roof capture /
-    // rain occlusion passes (camera enables 20+21). Without this, tree meshes are
-    // invisible to those passes unless temporarily patched each frame.
     try {
+      shadowMesh.layers.enable(21);
       mesh.layers.enable(21);
     } catch (_) {}
 
+    this._renderBus.addEffectOverlay(`${tileId}_tree_shadow`, shadowMesh, floorIndex);
     this._renderBus.addEffectOverlay(`${tileId}_tree`, mesh, floorIndex);
-    this._overlays.set(tileId, { mesh, material, floorIndex });
+    this._overlays.set(tileId, { mesh, shadowMesh, material, shadowMaterial, floorIndex });
     this._applyOverlayFloorVisibility();
 
     // Load mask texture.
@@ -1759,9 +1795,11 @@ export class TreeEffectV2 {
       tex.needsUpdate = true;
       if (this._overlays.has(tileId)) {
         material.uniforms.uTreeMask.value = tex;
+        shadowMaterial.uniforms.uTreeMask.value = tex;
         const derive = this._detectDerivedAlpha(tex);
         this._deriveAlphaByTileId.set(tileId, derive);
         material.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
+        shadowMaterial.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
         this._cacheAlphaSamples(tileId, tex);
       } else {
         try { tex.dispose(); } catch (_) {}
@@ -1824,8 +1862,9 @@ export class TreeEffectV2 {
   _applyOverlayFloorVisibility() {
     const maxFloor = this._getSafeVisibleMaxFloorIndex();
     for (const entry of this._overlays.values()) {
-      if (!entry?.mesh) continue;
-      entry.mesh.visible = this._enabled && Number(entry.floorIndex) <= maxFloor;
+      const visible = this._enabled && Number(entry.floorIndex) <= maxFloor;
+      if (entry?.mesh) entry.mesh.visible = visible;
+      if (entry?.shadowMesh) entry.shadowMesh.visible = visible;
     }
   }
 }

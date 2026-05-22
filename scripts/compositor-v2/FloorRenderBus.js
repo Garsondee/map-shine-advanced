@@ -815,7 +815,8 @@ export class FloorRenderBus {
       if (tileId.startsWith('__')) continue;
       // Tree/Bush V2 shaders output premultiplied RGB + manage their own fringes; do not
       // force floor-based premultipliedAlpha (would break ground-floor blending).
-      if (tileId.endsWith('_tree') || tileId.endsWith('_bush')) continue;
+      if (tileId.endsWith('_tree') || tileId.endsWith('_bush')
+        || tileId.endsWith('_tree_shadow') || tileId.endsWith('_bush_shadow')) continue;
 
       const sourceTileId = entry.attachedToTileId || tileId;
       const data = tileManager.getTileSpriteData(sourceTileId);
@@ -1077,7 +1078,8 @@ export class FloorRenderBus {
     for (const [tileId, entry] of this._tiles) {
       if (!entry?.material) continue;
       if (tileId.startsWith('__')) continue;
-      if (tileId.endsWith('_tree') || tileId.endsWith('_bush')) continue;
+      if (tileId.endsWith('_tree') || tileId.endsWith('_bush')
+        || tileId.endsWith('_tree_shadow') || tileId.endsWith('_bush_shadow')) continue;
 
       const sourceTileId = entry.attachedToTileId || tileId;
       const data = tileManager.getTileSpriteData(sourceTileId);

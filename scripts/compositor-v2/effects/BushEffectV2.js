@@ -18,7 +18,9 @@ import {
 } from '../../foundry/levels-scene-flags.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { resolveEffectShadowSun2D } from '../shadow-system/ShadowSunDirection.js';
-import { MAX_INTRA_ROLE_OFFSET, tileAlbedoOrder, tileStackedOverlayOrder, effectTopOfFloorStackOrder } from '../LayerOrderPolicy.js';
+import {
+  bushOverlayRenderOrders,
+} from '../LayerOrderPolicy.js';
 
 const log = createLogger('BushEffectV2');
 
@@ -975,6 +977,23 @@ export class BushEffectV2 {
   }
 
   /**
+   * Screen-space tree canopy alpha used to suppress bush ground shadows on foliage.
+   * @param {import('three').Texture|null} texture
+   * @param {number} [width]
+   * @param {number} [height]
+   */
+  setTreeCanopyOcclusionTexture(texture, width = 0, height = 0) {
+    if (!this._sharedUniforms) return;
+    this._sharedUniforms.uTreeCanopyOcclusion.value = texture ?? null;
+    this._sharedUniforms.uHasTreeCanopyOcclusion.value = texture ? 1.0 : 0.0;
+    const w = Number(width);
+    const h = Number(height);
+    if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+      this._sharedUniforms.uScreenSize.value.set(w, h);
+    }
+  }
+
+  /**
    * @returns {{mesh: import('three').Mesh, uniforms: object}[]}
    */
   collectBillboardShadowOverlayEntries() {
@@ -1048,6 +1067,9 @@ export class BushEffectV2 {
 
       uBillboardShadowMode: { value: 0.0 },
       uShadowLitCapture: { value: 0.0 },
+      uTreeCanopyOcclusion: { value: null },
+      uHasTreeCanopyOcclusion: { value: 0.0 },
+      uScreenSize: { value: new THREE.Vector2(1920, 1080) },
 
       uExposure: { value: this.params.exposure },
       uBrightness: { value: this.params.brightness },
@@ -1235,6 +1257,9 @@ export class BushEffectV2 {
         uniform float uShadowSoftness;
         uniform float uBillboardShadowMode;
         uniform float uShadowLitCapture;
+        uniform sampler2D uTreeCanopyOcclusion;
+        uniform float uHasTreeCanopyOcclusion;
+        uniform vec2  uScreenSize;
         uniform vec2  uSceneMin;
         uniform vec2  uSceneMax;
 
@@ -1419,8 +1444,15 @@ export class BushEffectV2 {
 
           // Pass 1: shadow decal — canopy mesh draws above and occludes naturally.
           if (uVegetationPass < 1.5) {
+            if (uHasTreeCanopyOcclusion > 0.5) {
+              vec2 screenUv = gl_FragCoord.xy / max(uScreenSize, vec2(1.0));
+              float treeBlock = clamp(texture2D(uTreeCanopyOcclusion, screenUv).a, 0.0, 1.0);
+              shadowA *= (1.0 - treeBlock);
+            }
             if (uShadowLitCapture > 0.5) {
               float lit = clamp(1.0 - shadowA, 0.0, 1.0);
+              // Ground-only lit factor — never darken pixels where foliage exists.
+              lit = mix(lit, 1.0, clamp(texA * uIntensity, 0.0, 1.0));
               gl_FragColor = vec4(lit, lit, lit, 1.0);
               return;
             }
@@ -1476,31 +1508,7 @@ export class BushEffectV2 {
     shadowMesh.rotation.z = rotation;
     mesh.rotation.z = rotation;
 
-    const applyOverlayRenderOrders = (shadowM, canopyM) => {
-      try {
-        const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
-        const maxBushShadowOrder = effectTopOfFloorStackOrder(fi, 2);
-        const isBgPlane = /^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId));
-        if (isBgPlane) {
-          const baseAlbedoOrder = tileAlbedoOrder(fi, 0);
-          shadowM.renderOrder = Math.min(tileStackedOverlayOrder(baseAlbedoOrder, fi, 1), maxBushShadowOrder);
-          canopyM.renderOrder = tileStackedOverlayOrder(baseAlbedoOrder, fi, 2);
-        } else {
-          const baseEntry = this._renderBus?._tiles?.get?.(tileId);
-          const baseOrder = Number(baseEntry?.mesh?.renderOrder);
-          if (Number.isFinite(baseOrder)) {
-            shadowM.renderOrder = Math.min(tileStackedOverlayOrder(baseOrder, fi, 1), maxBushShadowOrder);
-            canopyM.renderOrder = tileStackedOverlayOrder(baseOrder, fi, 2);
-          } else {
-            const fallbackBase = tileAlbedoOrder(fi, MAX_INTRA_ROLE_OFFSET);
-            shadowM.renderOrder = Math.min(tileStackedOverlayOrder(fallbackBase, fi, 1), maxBushShadowOrder);
-            canopyM.renderOrder = tileStackedOverlayOrder(fallbackBase, fi, 2);
-          }
-        }
-      } catch (_) {}
-    };
-
-    applyOverlayRenderOrders(shadowMesh, mesh);
+    this._applyBushOverlayRenderOrders(shadowMesh, mesh, floorIndex);
 
     this._renderBus.addEffectOverlay(`${tileId}_bush_shadow`, shadowMesh, floorIndex);
     this._renderBus.addEffectOverlay(`${tileId}_bush`, mesh, floorIndex);
@@ -1523,17 +1531,8 @@ export class BushEffectV2 {
         shadowMaterial.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
         try {
           const entry = this._overlays.get(tileId);
-          const canopyMesh = entry?.mesh;
-          const shadowM = entry?.shadowMesh;
-          if (canopyMesh && shadowM && !/^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId))) {
-            const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
-            const baseEntry = this._renderBus?._tiles?.get?.(tileId);
-            const baseOrder = Number(baseEntry?.mesh?.renderOrder);
-            if (Number.isFinite(baseOrder)) {
-              const maxBushShadowOrder = effectTopOfFloorStackOrder(fi, 2);
-              shadowM.renderOrder = Math.min(tileStackedOverlayOrder(baseOrder, fi, 1), maxBushShadowOrder);
-              canopyMesh.renderOrder = tileStackedOverlayOrder(baseOrder, fi, 2);
-            }
+          if (entry?.shadowMesh && entry?.mesh) {
+            this._applyBushOverlayRenderOrders(entry.shadowMesh, entry.mesh, floorIndex);
           }
         } catch (_) {}
       } else {
@@ -1572,6 +1571,15 @@ export class BushEffectV2 {
     if (Number.isFinite(busIdx)) return busIdx;
     if (Number.isFinite(activeIdx)) return activeIdx;
     return 0;
+  }
+
+  _applyBushOverlayRenderOrders(shadowM, canopyM, floorIndex) {
+    try {
+      const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
+      const { shadowOrder, canopyOrder } = bushOverlayRenderOrders(0, fi);
+      shadowM.renderOrder = shadowOrder;
+      canopyM.renderOrder = canopyOrder;
+    } catch (_) {}
   }
 
   _applyOverlayFloorVisibility() {

@@ -23,9 +23,8 @@ function asNumber(value, fallback) {
  * @param {() => boolean} [shouldCancel]
  * @returns {Promise<void>}
  */
-async function sleep(ms, shouldCancel = null, playbackTimeScale = 1) {
-  const scale = Math.max(0.1, Number(playbackTimeScale) || 1);
-  const duration = Math.max(0, scale >= 0.999 ? ms : ms / scale);
+async function sleep(ms, shouldCancel = null) {
+  const duration = Math.max(0, Number(ms) || 0);
   if (duration <= 0) return;
 
   const start = performance.now();
@@ -123,6 +122,9 @@ export class CameraAnimator {
     /** EffectComposer camera pipeline (after input bridge, before cinematic follow). */
     this.updatePhase = 'camera';
     this.cameraPipelineOrder = 1;
+
+    /** @private Wall-clock fallback when presentation gate skips sim delta. */
+    this._lastAnimWallMs = 0;
   }
 
   /** @returns {boolean} */
@@ -161,6 +163,34 @@ export class CameraAnimator {
     this._cancelled = false;
   }
 
+  /** @private @param {object} timeInfo @returns {number} */
+  _animDeltaMs(timeInfo) {
+    const simMs = Math.max(0, Number(timeInfo?.delta) || 0) * 1000;
+    let pathPlaying = false;
+    try {
+      if (window.MapShine?.environmentControlApi?.isExternallyDriven?.()) pathPlaying = true;
+      const cps = window.MapShine?.cameraPathService;
+      if (cps?.isPlaying === true || cps?.animator?.isActive === true) pathPlaying = true;
+    } catch (_) {}
+    if (!pathPlaying) {
+      this._lastAnimWallMs = performance.now();
+      return simMs;
+    }
+
+    const now = performance.now();
+    if (!this._lastAnimWallMs) this._lastAnimWallMs = now;
+    const wallMs = Math.max(0, now - this._lastAnimWallMs);
+    this._lastAnimWallMs = now;
+
+    const tm = window.MapShine?.effectComposer?.getTimeManager?.();
+    let scale = Number(timeInfo?.scale);
+    if (!Number.isFinite(scale) || scale <= 0) {
+      scale = Number(tm?.getEffectiveScale?.() ?? tm?.scale) || 1;
+    }
+    const wallSimMs = (wallMs / 1000) * scale * 1000;
+    return Math.max(simMs, wallSimMs);
+  }
+
   /**
    * Per-frame animation tick (EffectComposer camera pipeline).
    * @param {object} timeInfo
@@ -174,7 +204,7 @@ export class CameraAnimator {
       return;
     }
 
-    const dtMs = Math.max(0, Number(timeInfo?.delta) || 0) * 1000;
+    const dtMs = this._animDeltaMs(timeInfo);
     anim.elapsedMs += dtMs;
 
     const te = applyEasing(anim.easing, anim.elapsedMs, anim.durationMs);
@@ -229,7 +259,6 @@ export class CameraAnimator {
     durationMs,
     easing = 'trapezoidal',
     getIsCancelled = null,
-    playbackTimeScale = 1,
   }) {
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale)) {
       throw new Error('Invalid camera target');
@@ -249,7 +278,7 @@ export class CameraAnimator {
 
     try {
       const renderLoop = window.MapShine?.renderLoop;
-      const wallMs = scalePlaybackWallDurationMs(dur + 500, playbackTimeScale);
+      const wallMs = scalePlaybackWallDurationMs(dur + 500);
       if (typeof renderLoop?.extendCinematicMode === 'function') {
         renderLoop.extendCinematicMode(wallMs);
       } else {
@@ -377,7 +406,6 @@ export class CameraAnimator {
    * @param {() => boolean} [options.getIsCancelled]
    * @param {() => void} [options.onCancel]
    * @param {(view: import('./camera-path-types.js').CameraView, fadeMs: number, getIsCancelled: () => boolean) => Promise<void>} [options.runFadeCutTransition]
-   * @param {number} [options.playbackTimeScale=1]
    * @param {boolean} [options.manageCinematicMode=true]
    * @returns {Promise<void>}
    */
@@ -390,7 +418,6 @@ export class CameraAnimator {
       getIsCancelled = null,
       onCancel = null,
       runFadeCutTransition = null,
-      playbackTimeScale = 1,
       manageCinematicMode = true,
     } = options;
 
@@ -420,7 +447,7 @@ export class CameraAnimator {
       } catch (_) {}
       if (manageCinematicMode) {
         try {
-          const cinematicWallMs = scalePlaybackWallDurationMs(totalMs + 1500, playbackTimeScale);
+          const cinematicWallMs = scalePlaybackWallDurationMs(totalMs + 1500);
           renderLoop?.startCinematicMode?.(cinematicWallMs);
         } catch (_) {}
       }
@@ -438,7 +465,7 @@ export class CameraAnimator {
         this.instantPan(first.from);
       }
 
-      if (preHoldMs > 0) await sleep(preHoldMs, isCancelled, playbackTimeScale);
+      if (preHoldMs > 0) await sleep(preHoldMs, isCancelled);
       if (isCancelled()) return;
 
       for (let i = 0; i < clips.length; i += 1) {
@@ -455,7 +482,7 @@ export class CameraAnimator {
           && segmentHoldMs > 0
         ) {
           if (clip.from) this.instantPan(clip.from);
-          await sleep(segmentHoldMs, isCancelled, playbackTimeScale);
+          await sleep(segmentHoldMs, isCancelled);
           if (isCancelled()) break;
         }
 
@@ -467,11 +494,10 @@ export class CameraAnimator {
             durationMs: clip.durationMs,
             easing,
             getIsCancelled: isCancelled,
-            playbackTimeScale,
           });
         } else if (clip.type === 'sigHold' && clip.view) {
           this.instantPan(clip.view);
-          await sleep(clip.durationMs, isCancelled, playbackTimeScale);
+          await sleep(clip.durationMs, isCancelled);
         } else if (clip.type === 'transition' && clip.to) {
           if (clip.transitionStyle === 'fade' && runFadeCutTransition) {
             const fadeHalfMs = Math.max(250, Math.round(clip.durationMs / 2));
@@ -484,7 +510,6 @@ export class CameraAnimator {
               durationMs: clip.durationMs,
               easing,
               getIsCancelled: isCancelled,
-              playbackTimeScale,
             });
           }
         }

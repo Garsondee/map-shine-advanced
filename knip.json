@@ -1,0 +1,27 @@
+{
+  "$schema": "https://unpkg.com/knip@latest/schema.json",
+  "entry": [
+    "scripts/module.js",
+    "scripts/vendor/tweakpane-loader.js",
+    "scripts/lib/lib.js",
+    "scripts/build/build.js",
+    "scripts/build/entry.js",
+    "scripts/release/release.js",
+    "scripts/tools/*.mjs",
+    "tests/playwright/**/*.js",
+    "map_macros/**/*.js",
+    "V3_module/scripts/module.js"
+  ],
+  "project": [
+    "scripts/**/*.js",
+    "scripts/**/*.mjs",
+    "tests/**/*.js",
+    "map_macros/**/*.js",
+    "V3_module/**/*.js"
+  ],
+  "ignore": [
+    "scripts/vendor/**",
+    "scripts/libs/**"
+  ],
+  "ignoreDependencies": ["three"]
+}

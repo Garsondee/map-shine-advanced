@@ -41,7 +41,9 @@
  * global tint multiplier so window glow tracks graded time of day.
  *
  * Indoor-only: {@link #setOutdoorsMask} gates overlays with the active-floor
- * `_Outdoors` mask (white = outdoor, no window glow).
+ * `_Outdoors` mask (white = outdoor, no window glow). After the overlay draw,
+ * {@link #applyOutdoorsClip} runs a fullscreen post-pass on `_windowLightRT`
+ * that zeroes any surviving light on outdoor (white) mask pixels.
  *
  * @module compositor-v2/effects/WindowLightEffectV2
  */
@@ -60,6 +62,13 @@ import { weatherController, PrecipitationType } from '../../core/WeatherControll
 import { LightingDirector } from '../../core/LightingDirector.js';
 import { resolveEffectShadowSun2D } from '../shadow-system/ShadowSunDirection.js';
 import { GROUND_Z } from '../LayerOrderPolicy.js';
+import {
+  GLSL_DECODE_OUTDOORS_MASK,
+  GLSL_SCREEN_TO_SCENE_UV,
+  applySceneViewProjectionToUniforms,
+  createSceneViewProjectionCache,
+  updateSceneViewProjectionFromCamera,
+} from '../scene-view-projection.js';
 
 const log = createLogger('WindowLightEffectV2');
 
@@ -156,6 +165,17 @@ export class WindowLightEffectV2 {
 
     /** @type {WeakSet<object>} Tracks normalized outdoors mask textures. */
     this._normalizedOutdoorsTextures = new WeakSet();
+
+    /** Fullscreen post-pass: zero window light wherever _Outdoors reads outdoor (white). */
+    this._outdoorsClipScene = null;
+    this._outdoorsClipCamera = null;
+    this._outdoorsClipMaterial = null;
+    this._outdoorsClipScratchRT = null;
+    this._outdoorsClipScratchSize = { w: 0, h: 0 };
+    this._viewProjectionCache = createSceneViewProjectionCache();
+    this._clipTmpNdcVec = null;
+    this._clipTmpWorldVec = null;
+    this._clipTmpDirVec = null;
 
     /** @type {{ skyTintColor: {r:number,g:number,b:number}, sunAzimuthDeg: number, skyIntensity01: number, sceneDarkness01: (number|null), effectiveDarkness01: (number|null), skyTintDarknessLightsEnabled: (boolean|null), skyTintDarknessLightsIntensity: (number|null), todCameraTimelineActive: boolean, todCameraTintColor: {r:number,g:number,b:number} }} */
     this._driverSunDir = null;
@@ -468,8 +488,9 @@ export class WindowLightEffectV2 {
     this._scene.sortObjects = false;
 
     this._buildSharedUniforms();
+    this._buildOutdoorsClipPass();
 
-    this._scene.userData.onBindWindowLightPass = (rw, rh) => {
+    this._scene.userData.onBindWindowLightPass = (rw, rh, renderCamera) => {
       const u = this._sharedUniforms;
       if (!u?.uScreenSize) return;
       const w = Math.max(1, Math.floor(Number(rw) || 1));
@@ -478,6 +499,12 @@ export class WindowLightEffectV2 {
       // Combined/cloud shadow RTs are authored for this same buffer; keep the divisor
       // identical to gl_FragCoord space for Pass 1b (avoids texel drift vs texture.image).
       if (u.uCloudShadowBufferSize) u.uCloudShadowBufferSize.value.set(w, h);
+      this._syncViewProjectionUniforms(renderCamera ?? null);
+      this._updateSceneBounds();
+    };
+
+    this._scene.userData.onAfterWindowLightPass = (renderer, camera, targetRT, outdoorsMask) => {
+      this.applyOutdoorsClip(renderer, camera, targetRT, outdoorsMask);
     };
 
     this._initialized = true;
@@ -495,7 +522,17 @@ export class WindowLightEffectV2 {
 
   dispose() {
     this.clear();
-    if (this._scene?.userData) delete this._scene.userData.onBindWindowLightPass;
+    if (this._scene?.userData) {
+      delete this._scene.userData.onBindWindowLightPass;
+      delete this._scene.userData.onAfterWindowLightPass;
+    }
+    try { this._outdoorsClipScratchRT?.dispose(); } catch (_) {}
+    try { this._outdoorsClipMaterial?.dispose(); } catch (_) {}
+    try { this._outdoorsClipScene?.children?.[0]?.geometry?.dispose(); } catch (_) {}
+    this._outdoorsClipScene = null;
+    this._outdoorsClipCamera = null;
+    this._outdoorsClipMaterial = null;
+    this._outdoorsClipScratchRT = null;
     this._scene = null;
     this._initialized = false;
     this._sharedUniforms = null;
@@ -551,7 +588,7 @@ export class WindowLightEffectV2 {
     this._lastPopulatedFloorBandCount = floors.length;
     // worldH must match FloorRenderBus and SpecularEffectV2: use foundrySceneData.height
     // (full canvas height including padding), NOT canvas.scene.height (scene rect only).
-    const worldH = foundrySceneData?.height ?? canvas?.scene?.height ?? 0;
+    const worldH = foundrySceneData?.height ?? canvas?.dimensions?.height ?? 0;
 
     let overlayCount = 0;
     const perFloorCounts = new Map();
@@ -918,18 +955,66 @@ export class WindowLightEffectV2 {
       if (overlayUniform) overlayUniform.value = overlayIntensity;
     }
 
+    this._updateViewBounds();
     this._updateSceneBounds();
   }
 
   /**
    * API parity with other V2 effects.
-   * Window light is rendered via bus overlay meshes, so no explicit render pass
-   * is required here.
+   * Overlay draws are handled by LightingEffectV2; this effect's render() is unused.
    *
    * @param {THREE.WebGLRenderer} _renderer
    * @param {THREE.Camera} _camera
    */
   render(_renderer, _camera) {
+  }
+
+  /**
+   * Final authoritative gate: multiply the window-light RT by (1 - outdoors).
+   * Uses the same view→scene UV mapping as {@link LightingEffectV2} compose so
+   * alignment matches the rest of the lighting stack.
+   *
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {THREE.Camera} camera
+   * @param {THREE.WebGLRenderTarget|null} targetRT
+   * @param {THREE.Texture|null} [outdoorsMaskOverride] - Same mask as lighting compose when provided.
+   */
+  applyOutdoorsClip(renderer, camera, targetRT, outdoorsMaskOverride = null) {
+    if (!this._enabled || !renderer || !camera || !targetRT?.texture) return;
+    const mask = outdoorsMaskOverride ?? this._outdoorsMask;
+    if (!mask || !this._outdoorsClipMaterial || !this._outdoorsClipScene) return;
+
+    const w = Math.max(1, Math.floor(Number(targetRT.width) || 1));
+    const h = Math.max(1, Math.floor(Number(targetRT.height) || 1));
+    this._ensureOutdoorsClipScratchRT(w, h, targetRT.texture?.type);
+
+    const u = this._outdoorsClipMaterial.uniforms;
+    if (mask !== this._outdoorsMask) this._normalizeOutdoorsMaskTexture(mask);
+    u.uOutdoorsMask.value = mask;
+    u.uHasOutdoorsMask.value = 1.0;
+    u.uOutdoorsMaskFlipY.value = mask.flipY ? 1.0 : 0.0;
+    this._syncViewProjectionUniforms(camera);
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    try {
+      renderer.autoClear = false;
+
+      // Pass A: clip source RT → scratch.
+      u.tWindowLight.value = targetRT.texture;
+      renderer.setRenderTarget(this._outdoorsClipScratchRT);
+      renderer.clear();
+      renderer.render(this._outdoorsClipScene, this._outdoorsClipCamera);
+
+      // Pass B: copy clipped scratch → source RT.
+      u.tWindowLight.value = this._outdoorsClipScratchRT.texture;
+      renderer.setRenderTarget(targetRT);
+      renderer.clear();
+      renderer.render(this._outdoorsClipScene, this._outdoorsClipCamera);
+    } finally {
+      renderer.autoClear = prevAutoClear;
+      renderer.setRenderTarget(prevTarget);
+    }
   }
 
   /**
@@ -1066,8 +1151,8 @@ export class WindowLightEffectV2 {
   setOutdoorsMask(texture) {
     this._outdoorsMask = texture ?? null;
     const u = this._sharedUniforms;
-    if (!u) return;
     if (texture) this._normalizeOutdoorsMaskTexture(texture);
+    if (!u) return;
     u.uOutdoorsMask.value = texture ?? null;
     u.uHasOutdoorsMask.value = texture ? 1.0 : 0.0;
     u.uOutdoorsMaskFlipY.value = texture?.flipY ? 1.0 : 0.0;
@@ -1120,32 +1205,202 @@ export class WindowLightEffectV2 {
   }
 
   /** @private */
+  _buildOutdoorsClipPass() {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    this._clipTmpNdcVec = new THREE.Vector3();
+    this._clipTmpWorldVec = new THREE.Vector3();
+    this._clipTmpDirVec = new THREE.Vector3();
+
+    this._outdoorsClipMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tWindowLight: { value: null },
+        uOutdoorsMask: { value: null },
+        uHasOutdoorsMask: { value: 0.0 },
+        uOutdoorsMaskFlipY: { value: 0.0 },
+        uViewCorner00: { value: new THREE.Vector2(0, 0) },
+        uViewCorner10: { value: new THREE.Vector2(1, 0) },
+        uViewCorner01: { value: new THREE.Vector2(0, 1) },
+        uViewCorner11: { value: new THREE.Vector2(1, 1) },
+        uSceneOrigin: { value: new THREE.Vector2(0, 0) },
+        uSceneSize: { value: new THREE.Vector2(1, 1) },
+        uSceneDimensions: { value: new THREE.Vector2(1, 1) },
+      },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        uniform sampler2D tWindowLight;
+        uniform sampler2D uOutdoorsMask;
+        uniform float uHasOutdoorsMask;
+        uniform float uOutdoorsMaskFlipY;
+        uniform vec2 uViewCorner00;
+        uniform vec2 uViewCorner10;
+        uniform vec2 uViewCorner01;
+        uniform vec2 uViewCorner11;
+        uniform vec2 uSceneOrigin;
+        uniform vec2 uSceneSize;
+        uniform vec2 uSceneDimensions;
+        varying vec2 vUv;
+
+        ${GLSL_SCREEN_TO_SCENE_UV}
+        ${GLSL_DECODE_OUTDOORS_MASK}
+
+        void main() {
+          vec4 light = texture2D(tWindowLight, vUv);
+          if (uHasOutdoorsMask < 0.5) {
+            gl_FragColor = light;
+            return;
+          }
+
+          vec2 sceneUvRaw = msScreenUvToSceneUvRaw(
+            vUv, uViewCorner00, uViewCorner10, uViewCorner01, uViewCorner11,
+            uSceneOrigin, uSceneSize, uSceneDimensions
+          );
+          float inScene = msInSceneBounds(sceneUvRaw);
+          vec2 maskUv = clamp(sceneUvRaw, 0.0, 1.0);
+          if (uOutdoorsMaskFlipY > 0.5) maskUv.y = 1.0 - maskUv.y;
+
+          vec4 od = texture2D(uOutdoorsMask, maskUv);
+          float isOutdoor = msDecodeOutdoorsMaskSample(od) * inScene;
+          float keepIndoor = 1.0 - isOutdoor;
+          gl_FragColor = vec4(light.rgb * keepIndoor, light.a * keepIndoor);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+    });
+
+    this._outdoorsClipScene = new THREE.Scene();
+    this._outdoorsClipCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._outdoorsClipMaterial);
+    this._outdoorsClipScene.add(quad);
+  }
+
+  /**
+   * @private
+   * @param {number} w
+   * @param {number} h
+   * @param {number} [pixelType]
+   */
+  _ensureOutdoorsClipScratchRT(w, h, pixelType) {
+    const THREE = window.THREE;
+    if (!THREE) return;
+    const type = pixelType ?? THREE.UnsignedByteType;
+    const size = this._outdoorsClipScratchSize;
+    if (this._outdoorsClipScratchRT
+      && size.w === w
+      && size.h === h
+      && this._outdoorsClipScratchRT.texture?.type === type) {
+      return;
+    }
+    try { this._outdoorsClipScratchRT?.dispose(); } catch (_) {}
+    this._outdoorsClipScratchRT = new THREE.WebGLRenderTarget(w, h, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type,
+      depthBuffer: false,
+      stencilBuffer: false,
+    });
+    this._outdoorsClipScratchRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
+    size.w = w;
+    size.h = h;
+  }
+
+  /** @private Match LightingEffectV2 compose: bilinear view corners + scene rect. */
+  _syncViewProjectionUniforms(camera) {
+    const dims = canvas?.dimensions;
+    if (!dims) return;
+
+    const sc = window.MapShine?.sceneComposer;
+    const cam = camera ?? sc?.camera;
+    if (!cam) return;
+
+    const groundZ = sc?.basePlaneMesh?.position?.z ?? (sc?.groundZ ?? 0);
+    const THREE = window.THREE;
+    if (!this._clipTmpNdcVec && THREE) {
+      this._clipTmpNdcVec = new THREE.Vector3();
+      this._clipTmpWorldVec = new THREE.Vector3();
+      this._clipTmpDirVec = new THREE.Vector3();
+    }
+
+    updateSceneViewProjectionFromCamera(
+      cam,
+      groundZ,
+      this._viewProjectionCache,
+      {
+        ndc: this._clipTmpNdcVec,
+        world: this._clipTmpWorldVec,
+        dir: this._clipTmpDirVec,
+      },
+    );
+
+    applySceneViewProjectionToUniforms(this._viewProjectionCache, this._sharedUniforms);
+    applySceneViewProjectionToUniforms(this._viewProjectionCache, this._outdoorsClipMaterial?.uniforms);
+
+    const fd = this._lastFoundrySceneData
+      ?? sc?.foundrySceneData
+      ?? null;
+    const sr = dims.sceneRect ?? dims;
+    const sceneX = Number(fd?.sceneX ?? sr?.x ?? 0);
+    const sceneY = Number(fd?.sceneY ?? sr?.y ?? 0);
+    const sceneW = Number(fd?.sceneWidth ?? fd?.width ?? sr?.width ?? dims.width ?? 1);
+    const sceneH = Number(fd?.sceneHeight ?? fd?.height ?? sr?.height ?? dims.height ?? 1);
+    const canvasW = Number(fd?.width ?? dims.width ?? 1);
+    const canvasH = Number(fd?.height ?? dims.height ?? 1);
+
+    const sceneTargets = [this._sharedUniforms, this._outdoorsClipMaterial?.uniforms];
+    for (const u of sceneTargets) {
+      if (!u) continue;
+      u.uSceneOrigin?.value?.set(sceneX, sceneY);
+      u.uSceneSize?.value?.set(sceneW, sceneH);
+      u.uSceneDimensions?.value?.set(canvasW, canvasH);
+    }
+  }
+
+  /** @private */
+  _updateViewBounds() {
+    this._syncViewProjectionUniforms(null);
+  }
+
+  /** @private */
   _updateSceneBounds() {
     const u = this._sharedUniforms;
     if (!u?.uSceneBounds || !u?.uSceneDimensions) return;
 
-    const fd = window.MapShine?.sceneComposer?.foundrySceneData ?? null;
+    const fd = this._lastFoundrySceneData
+      ?? window.MapShine?.sceneComposer?.foundrySceneData
+      ?? null;
+    const dims = canvas?.dimensions;
+    const sr = dims?.sceneRect ?? dims;
+    const sceneX = Number(fd?.sceneX ?? sr?.x ?? 0);
+    const sceneY = Number(fd?.sceneY ?? sr?.y ?? 0);
+    const sceneW = Number(fd?.sceneWidth ?? fd?.width ?? sr?.width ?? dims?.width ?? 1);
+    const sceneH = Number(fd?.sceneHeight ?? fd?.height ?? sr?.height ?? dims?.height ?? 1);
+    const canvasW = Number(fd?.width ?? dims?.width ?? 1);
+    const canvasH = Number(fd?.height ?? dims?.height ?? 1);
+
     if (fd && Number(fd.height) > 0 && Number(fd.width) > 0) {
+      u.uSceneBounds.value.set(sceneX, sceneY, sceneW, sceneH);
+      u.uSceneDimensions.value.set(canvasW, canvasH);
+    } else if (dims) {
       u.uSceneBounds.value.set(
-        Number(fd.sceneX ?? 0),
-        Number(fd.sceneY ?? 0),
-        Number(fd.sceneWidth ?? fd.width ?? 1),
-        Number(fd.sceneHeight ?? fd.height ?? 1),
+        sr?.x ?? 0,
+        sr?.y ?? 0,
+        sr?.width ?? dims.width ?? 1,
+        sr?.height ?? dims.height ?? 1,
       );
-      u.uSceneDimensions.value.set(Number(fd.width), Number(fd.height));
-      return;
+      u.uSceneDimensions.value.set(dims.width ?? 1, dims.height ?? 1);
     }
 
-    const dims = canvas?.dimensions;
-    if (!dims) return;
-    const rect = dims.sceneRect;
-    u.uSceneBounds.value.set(
-      rect?.x ?? 0,
-      rect?.y ?? 0,
-      rect?.width ?? dims.width ?? 1,
-      rect?.height ?? dims.height ?? 1,
-    );
-    u.uSceneDimensions.value.set(dims.width ?? 1, dims.height ?? 1);
+    u.uSceneOrigin?.value?.set(sceneX, sceneY);
+    u.uSceneSize?.value?.set(sceneW, sceneH);
   }
 
   /** @private */
@@ -1200,6 +1455,8 @@ export class WindowLightEffectV2 {
     const cg = (c && typeof c === 'object') ? (Number(c.g) || 0) : 0.96;
     const cb = (c && typeof c === 'object') ? (Number(c.b) || 0) : 0.85;
 
+    if (this._outdoorsMask) this._normalizeOutdoorsMaskTexture(this._outdoorsMask);
+
     this._sharedUniforms = {
       uEffectEnabled: { value: this._enabled ? 1.0 : 0.0 },
       uTime: { value: 0.0 },
@@ -1244,9 +1501,17 @@ export class WindowLightEffectV2 {
       // RGB shift (chromatic dispersion) — pixel offset split into R/B channels.
       uRgbShiftAmount: { value: Math.max(0.0, Number(this.params.rgbShiftAmount) || 0) },
       uRgbShiftAngle: { value: (Number(this.params.rgbShiftAngle) || 0) * (Math.PI / 180.0) },
-      uOutdoorsMask: { value: null },
-      uHasOutdoorsMask: { value: 0.0 },
+      uOutdoorsMask: { value: this._outdoorsMask },
+      uHasOutdoorsMask: { value: this._outdoorsMask ? 1.0 : 0.0 },
       uOutdoorsMaskFlipY: { value: 0.0 },
+      uViewBoundsMin: { value: new THREE.Vector2(0, 0) },
+      uViewBoundsMax: { value: new THREE.Vector2(1, 1) },
+      uViewCorner00: { value: new THREE.Vector2(0, 0) },
+      uViewCorner10: { value: new THREE.Vector2(1, 0) },
+      uViewCorner01: { value: new THREE.Vector2(0, 1) },
+      uViewCorner11: { value: new THREE.Vector2(1, 1) },
+      uSceneOrigin: { value: new THREE.Vector2(0, 0) },
+      uSceneSize: { value: new THREE.Vector2(1, 1) },
       uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
       uSceneDimensions: { value: new THREE.Vector2(1, 1) },
       // uWindowTexelSize and uMask are per-overlay only (set in _createOverlay).
@@ -1358,36 +1623,37 @@ export class WindowLightEffectV2 {
         uniform sampler2D uOutdoorsMask;
         uniform float uHasOutdoorsMask;
         uniform float uOutdoorsMaskFlipY;
+        uniform vec2 uViewBoundsMin;
+        uniform vec2 uViewBoundsMax;
+        uniform vec2 uViewCorner00;
+        uniform vec2 uViewCorner10;
+        uniform vec2 uViewCorner01;
+        uniform vec2 uViewCorner11;
+        uniform vec2 uSceneOrigin;
+        uniform vec2 uSceneSize;
         uniform vec4 uSceneBounds;
         uniform vec2 uSceneDimensions;
         varying vec2 vUv;
         varying vec2 vWorldXY;
+
+        ${GLSL_SCREEN_TO_SCENE_UV}
+        ${GLSL_DECODE_OUTDOORS_MASK}
 
         float msLuminance(vec3 c) {
           return dot(c, vec3(0.2126, 0.7152, 0.0722));
         }
 
         vec2 worldToSceneUv(vec2 worldXY) {
-          float foundryY = uSceneDimensions.y - worldXY.y;
-          return vec2(
-            (worldXY.x - uSceneBounds.x) / max(uSceneBounds.z, 1.0),
-            (foundryY - uSceneBounds.y) / max(uSceneBounds.w, 1.0)
-          );
+          return msWorldToSceneUvRaw(worldXY, uSceneOrigin, uSceneSize, uSceneDimensions);
         }
 
-        float sampleOutdoorStrength(vec2 sceneUvFoundry, float inScene) {
+        float sampleOutdoorStrength(vec2 sceneUvRaw) {
           if (uHasOutdoorsMask < 0.5) return 0.0;
-          // Outside the authored scene rect: never emit window glow.
+          float inScene = msInSceneBounds(sceneUvRaw);
           if (inScene < 0.5) return 1.0;
-          vec2 maskUv = clamp(sceneUvFoundry, 0.0, 1.0);
+          vec2 maskUv = clamp(sceneUvRaw, 0.0, 1.0);
           if (uOutdoorsMaskFlipY > 0.5) maskUv.y = 1.0 - maskUv.y;
-          vec4 od = texture2D(uOutdoorsMask, maskUv);
-          float outdoorRaw = clamp(max(od.r, max(od.g, od.b)), 0.0, 1.0);
-          float outdoorMid = smoothstep(0.18, 0.82, outdoorRaw);
-          float outdoorClass = (outdoorRaw <= 0.10) ? 0.0 : ((outdoorRaw >= 0.90) ? 1.0 : outdoorMid);
-          float outdoorsAlphaValid = step(0.5, clamp(od.a, 0.0, 1.0));
-          float isOutdoor = mix(1.0, outdoorClass, outdoorsAlphaValid);
-          return isOutdoor;
+          return msDecodeOutdoorsMaskSample(texture2D(uOutdoorsMask, maskUv));
         }
 
         vec2 uvOffsetToWorld(vec2 uvDelta) {
@@ -1395,11 +1661,15 @@ export class WindowLightEffectV2 {
         }
 
         float outdoorStrengthAtWorld(vec2 worldXY) {
-          vec2 sceneUvRaw = worldToSceneUv(worldXY);
-          float inSceneBounds =
-            step(0.0, sceneUvRaw.x) * step(sceneUvRaw.x, 1.0) *
-            step(0.0, sceneUvRaw.y) * step(sceneUvRaw.y, 1.0);
-          return sampleOutdoorStrength(sceneUvRaw, inSceneBounds);
+          return sampleOutdoorStrength(worldToSceneUv(worldXY));
+        }
+
+        float outdoorStrengthAtScreen(vec2 screenUv) {
+          vec2 sceneUvRaw = msScreenUvToSceneUvRaw(
+            screenUv, uViewCorner00, uViewCorner10, uViewCorner01, uViewCorner11,
+            uSceneOrigin, uSceneSize, uSceneDimensions
+          );
+          return sampleOutdoorStrength(sceneUvRaw);
         }
 
         float msHash12(vec2 p) {
@@ -1422,10 +1692,10 @@ export class WindowLightEffectV2 {
           vec2 rainOffset = rainDir * (uRainMaxOffsetPx * rainStrand) * uWindowTexelSize;
           vec2 maskOffsetUv = sunOffset + rainOffset;
 
-          // _Outdoors: gate both the floor pixel (destination) and the world
-          // position that owns the shifted mask sample (sun/rain scroll the mask
-          // under the quad — without this, indoor mask texels paint onto outdoor ground).
-          float outdoorAtDest = outdoorStrengthAtWorld(vWorldXY);
+          // _Outdoors: gate destination screen pixel (bilinear ground projection)
+          // and the world position that owns the shifted mask sample.
+          vec2 screenUv = gl_FragCoord.xy / max(uScreenSize, vec2(1.0));
+          float outdoorAtDest = outdoorStrengthAtScreen(screenUv);
           float outdoorAtSrc = outdoorStrengthAtWorld(vWorldXY + uvOffsetToWorld(maskOffsetUv));
           if (max(outdoorAtDest, outdoorAtSrc) > 0.45) discard;
 

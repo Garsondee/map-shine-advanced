@@ -19,7 +19,6 @@ import {
 import {
   createDefaultEnvironmentSnapshot,
   normalizeEnvironmentSnapshot,
-  clampEnvironmentTimeScale,
 } from '../ui/environment-override-specs.js';
 import { buildCameraTimeline, getCameraPathPlacementOptions } from './camera-path-timeline.js';
 import {
@@ -54,7 +53,6 @@ const ENV_DRIVE_TOKEN = 'camera-path';
  * @property {import('../ui/environment-control-api.js').EnvironmentRampConfig} [environmentRamp]
  * @property {number} [defaultSigHoldSec]
  * @property {number} [sigTransitionSec]
- * @property {number} [playbackTimeScale]
  */
 
 /**
@@ -97,16 +95,6 @@ function normalizeSettings(raw) {
   const src = raw && typeof raw === 'object' ? /** @type {Record<string, unknown>} */ (raw) : {};
   const ramp = normalizeEnvironmentRamp(src.environmentRamp);
 
-  let playbackTimeScale = clampEnvironmentTimeScale(src.playbackTimeScale);
-  if (src.playbackTimeScale === undefined || src.playbackTimeScale === null) {
-    const legacyRamp = src.environmentRamp && typeof src.environmentRamp === 'object'
-      ? /** @type {Record<string, unknown>} */ (src.environmentRamp)
-      : null;
-    if (legacyRamp?.timeScale !== undefined) {
-      playbackTimeScale = clampEnvironmentTimeScale(legacyRamp.timeScale);
-    }
-  }
-
   return {
     duration: asNumber(src.duration, base.duration),
     easing: src.easing === 'easeInOutCosine' ? 'easeInOutCosine' : 'trapezoidal',
@@ -120,7 +108,6 @@ function normalizeSettings(raw) {
     fadeHoldMs: Math.max(0, asNumber(src.fadeHoldMs, base.fadeHoldMs)),
     defaultSigHoldSec: Math.max(0.5, asNumber(src.defaultSigHoldSec, base.defaultSigHoldSec)),
     sigTransitionSec: Math.max(0, asNumber(src.sigTransitionSec, base.sigTransitionSec)),
-    playbackTimeScale,
     environmentRamp: ramp,
   };
 }
@@ -139,7 +126,6 @@ function defaultSettings() {
     fadeHoldMs: 4000,
     defaultSigHoldSec: 8,
     sigTransitionSec: 2,
-    playbackTimeScale: 1,
     environmentRamp: defaultEnvironmentRamp(),
   };
 }
@@ -200,9 +186,6 @@ export class CameraPathService {
     /** @type {CameraPathSettings|null} */
     this._activePlaybackSettings = null;
 
-    /** @type {boolean} */
-    this._playbackScaleActive = false;
-
     this._purgeOrphanLetterboxDom();
     this._purgeOrphanFadeDom();
     this._registerCanvasHooks();
@@ -218,7 +201,6 @@ export class CameraPathService {
         if (wasPlaying || environmentControlApi.isExternallyDriven()) {
           this._cleanupEnvironmentPlayback({ broadcastRelease: true, settings: this._activePlaybackSettings });
         }
-        this._clearPlaybackTimeScale();
         this._forceReleasePlaybackPresentation();
         this._purgeOrphanLetterboxDom();
         this._purgeOrphanFadeDom();
@@ -228,7 +210,6 @@ export class CameraPathService {
       Hooks.on('canvasReady', () => {
         this._purgeOrphanLetterboxDom();
         this._purgeOrphanFadeDom();
-        this._clearPlaybackTimeScale();
         if (!this._playing) {
           document.body.classList.remove('map-shine-camera-path-hide-ui');
           if (environmentControlApi.isExternallyDriven()) {
@@ -636,6 +617,7 @@ export class CameraPathService {
     this._showDoorControls();
 
     try { window.MapShine?.renderLoop?.stopCinematicMode?.(); } catch (_) {}
+    try { window.MapShine?.renderLoop?.clearContinuousRender?.(); } catch (_) {}
     try {
       window.MapShine?.pixiInputBridge?.setInputBlocker?.(null);
       window.MapShine?.cinematicCameraManager?._bindInputBridge?.();
@@ -722,7 +704,6 @@ export class CameraPathService {
     this.animator.cancel();
     this._playing = false;
     this._removePlaybackEscapeListener();
-    this._clearPlaybackTimeScale();
     this._forceReleasePlaybackPresentation();
     this._cleanupEnvironmentPlayback({
       broadcastRelease: true,
@@ -784,54 +765,13 @@ export class CameraPathService {
   }
 
   /**
-   * @returns {import('../core/time.js').TimeManager|null}
-   * @private
-   */
-  _getTimeManager() {
-    try {
-      return window.MapShine?.timeManager
-        ?? window.MapShine?.effectComposer?.getTimeManager?.()
-        ?? null;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  /**
-   * @param {number} scale
-   * @private
-   */
-  _applyPlaybackTimeScale(scale) {
-    const tm = this._getTimeManager();
-    if (!tm || typeof tm.setPlaybackScale !== 'function') return;
-    tm.setPlaybackScale(clampEnvironmentTimeScale(scale));
-    this._playbackScaleActive = true;
-  }
-
-  /** @private */
-  _clearPlaybackTimeScale() {
-    if (!this._playbackScaleActive) {
-      try {
-        this._getTimeManager()?.clearPlaybackScale?.();
-      } catch (_) {}
-      return;
-    }
-    try {
-      this._getTimeManager()?.clearPlaybackScale?.();
-    } catch (_) {}
-    this._playbackScaleActive = false;
-  }
-
-  /**
    * @param {number} ms
    * @param {() => boolean} [getIsCancelled]
-   * @param {number} [playbackTimeScale=1]
    * @returns {Promise<void>}
    * @private
    */
-  async _sleepMs(ms, getIsCancelled = null, playbackTimeScale = 1) {
-    const scale = Math.max(0.1, Number(playbackTimeScale) || 1);
-    const duration = Math.max(0, scale >= 0.999 ? ms : ms / scale);
+  async _sleepMs(ms, getIsCancelled = null) {
+    const duration = Math.max(0, Number(ms) || 0);
     if (duration <= 0) return;
 
     const start = performance.now();
@@ -1147,7 +1087,6 @@ export class CameraPathService {
     const fadeToBlack = settings.fadeToBlack === true;
     const useFadeOverlay = fadeFromBlack || fadeToBlack;
     const envRamp = normalizeEnvironmentRamp(settings.environmentRamp);
-    const playbackTimeScale = clampEnvironmentTimeScale(settings.playbackTimeScale ?? 1);
     const pathMotionMs = timeline.visibleMotionMs > 0
       ? timeline.visibleMotionMs
       : computeCameraPathMotionDurationMs(
@@ -1168,7 +1107,6 @@ export class CameraPathService {
     const requestAbort = () => {
       cancelled = true;
       this.animator.cancel();
-      this._clearPlaybackTimeScale();
       this._forceReleasePlaybackPresentation();
     };
     const isCancelled = () => cancelled || this.animator.wasCancelled;
@@ -1181,7 +1119,6 @@ export class CameraPathService {
       }
 
       this._applyPresentation(settings);
-      this._applyPlaybackTimeScale(playbackTimeScale);
 
       const cinematicWallMs = computePlaybackCinematicWallMs({
         timelineClips,
@@ -1189,7 +1126,6 @@ export class CameraPathService {
         pathMotionMs,
         preHoldMs: CAMERA_PATH_PRE_HOLD_MS,
         segmentHoldMs: CAMERA_PATH_SEGMENT_HOLD_MS,
-        playbackTimeScale,
         fadeFromBlack,
         fadeToBlack,
         fadeMs,
@@ -1197,10 +1133,11 @@ export class CameraPathService {
       });
       try {
         window.MapShine?.renderLoop?.startCinematicMode?.(cinematicWallMs);
+        window.MapShine?.renderLoop?.requestContinuousRender?.(cinematicWallMs + 120000);
       } catch (_) {}
 
       if (envRamp.enabled && !isCancelled()) {
-        environmentControlApi.beginExternalDrive(ENV_DRIVE_TOKEN);
+        await environmentControlApi.beginExternalDrive(ENV_DRIVE_TOKEN);
         envDriveActive = true;
         await environmentPlaybackDriver.armStart(envRamp.start);
       }
@@ -1214,7 +1151,7 @@ export class CameraPathService {
         } else if (first.from) {
           this.animator.instantPan(first.from);
         }
-        await this._sleepMs(fadeHoldMs, isCancelled, playbackTimeScale);
+        await this._sleepMs(fadeHoldMs, isCancelled);
         if (!isCancelled()) {
           await this._animateFadeOverlayOpacity(0, fadeMs, isCancelled);
         }
@@ -1240,7 +1177,6 @@ export class CameraPathService {
           runFadeCutTransition: (toView, fadeMs, getClipCancelled) => (
             this._runSigLocFadeCut(toView, fadeMs, getClipCancelled)
           ),
-          playbackTimeScale,
           manageCinematicMode: false,
         });
       }
@@ -1255,7 +1191,7 @@ export class CameraPathService {
         if (!this._fadeOverlayEl) this._showFadeOverlay(0);
         await this._animateFadeOverlayOpacity(1, fadeMs, isCancelled);
         if (!isCancelled()) {
-          await this._sleepMs(fadeHoldMs, isCancelled, playbackTimeScale);
+          await this._sleepMs(fadeHoldMs, isCancelled);
           endedOnBlack = !isCancelled();
         }
       }
@@ -1269,7 +1205,6 @@ export class CameraPathService {
     } finally {
       this._removePlaybackEscapeListener();
       this.animator.resetCancellationState();
-      this._clearPlaybackTimeScale();
 
       if (session !== this._playbackSession) return { cancelled };
 
@@ -1300,7 +1235,6 @@ export class CameraPathService {
     this._removePlaybackEscapeListener();
     this.stopPlayback();
     this.cancelHideUiTemporary();
-    this._clearPlaybackTimeScale();
     this._cleanupEnvironmentPlayback({ broadcastRelease: false });
     this._restorePresentation();
     this._purgeOrphanLetterboxDom();

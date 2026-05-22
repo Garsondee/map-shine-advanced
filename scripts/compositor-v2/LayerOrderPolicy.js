@@ -13,6 +13,8 @@
  *   (particles, splashes) that are not tied to a single tile’s sort slot.
  * - **effectTopOfFloorStackOrder** — Canopy-level sprites (trees) above motion-top
  *   tiles and all {@link tileStackedOverlayOrder} overlays on the same floor.
+ *   Prefer {@link treeOverlayRenderOrders} / {@link bushOverlayRenderOrders} for
+ *   split shadow + canopy meshes.
  *
  * The policy divides each floor into fixed role bands so that the visual stack is
  * deterministic regardless of which floor the viewer is on:
@@ -150,7 +152,7 @@ export function motionAboveTokensOrder(floorIndex, intraOffset = 0) {
 }
 
 /** Fractional step packed below the next floor boundary (see {@link effectTopOfFloorStackOrder}). */
-const TOP_OF_FLOOR_STACK_STEP = 0.001;
+const TOP_OF_FLOOR_STACK_STEP = 0.01;
 
 /**
  * Render order at the top of a floor — above motion-top tiles and
@@ -165,6 +167,56 @@ export function effectTopOfFloorStackOrder(floorIndex, slotFromTop = 0) {
   const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
   const slot = Math.max(0, Math.min(9, Math.round(Number(slotFromTop) || 0)));
   return (fi + 1) * RENDER_ORDER_PER_FLOOR - TOP_OF_FLOOR_STACK_STEP * (1 + slot);
+}
+
+/** Reserved top-of-floor slots (see {@link effectTopOfFloorStackOrder}). */
+export const TOP_OF_FLOOR_SLOTS = Object.freeze({
+  TREE_CANOPY: 0,
+  TREE_SHADOW: 1,
+  BUSH_CANOPY: 2,
+  BUSH_SHADOW: 3,
+});
+
+/**
+ * Bush shadow + canopy render orders: fixed top-of-floor slots below all tree
+ * overlays on the same floor (no tile-stacking — that let bush decals interleave
+ * with tree layers and show clipped shadows on tree foliage).
+ *
+ * @param {number} _tileRenderOrder - ignored; kept for call-site parity
+ * @param {number} floorIndex
+ * @returns {{ shadowOrder: number, canopyOrder: number }}
+ */
+export function bushOverlayRenderOrders(_tileRenderOrder, floorIndex) {
+  const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
+  const treeShadowOrder = effectTopOfFloorStackOrder(fi, TOP_OF_FLOOR_SLOTS.TREE_SHADOW);
+  const canopyOrder = Math.min(
+    effectTopOfFloorStackOrder(fi, TOP_OF_FLOOR_SLOTS.BUSH_CANOPY),
+    treeShadowOrder - TOP_OF_FLOOR_STACK_STEP,
+  );
+  const shadowOrder = Math.min(
+    effectTopOfFloorStackOrder(fi, TOP_OF_FLOOR_SLOTS.BUSH_SHADOW),
+    canopyOrder - TOP_OF_FLOOR_STACK_STEP,
+  );
+  return { shadowOrder, canopyOrder };
+}
+
+/**
+ * Tree shadow + canopy render orders: always at the reserved top-of-floor tree
+ * slots so every tree draws above all bush overlays on the same floor.
+ * (Do not tile-stack trees — that let bush shadows outrank distant trees.)
+ *
+ * @param {number} _tileRenderOrder - ignored; kept for call-site parity with bush
+ * @param {number} floorIndex
+ * @returns {{ shadowOrder: number, canopyOrder: number }}
+ */
+export function treeOverlayRenderOrders(_tileRenderOrder, floorIndex) {
+  const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
+  const canopyOrder = effectTopOfFloorStackOrder(fi, TOP_OF_FLOOR_SLOTS.TREE_CANOPY);
+  const shadowOrder = effectTopOfFloorStackOrder(fi, TOP_OF_FLOOR_SLOTS.TREE_SHADOW);
+  return {
+    shadowOrder: Math.min(shadowOrder, canopyOrder - TOP_OF_FLOOR_STACK_STEP),
+    canopyOrder,
+  };
 }
 
 // ── External effects ordering (Sequencer / JB2A) ─────────────────────────────
@@ -271,21 +323,25 @@ export function tileStackedOverlayOrder(tileRenderOrder, floorIndex, delta = 1) 
   // Motion-above-tokens (foreground / above-token tiles)
   if (localOrder >= ROLE_OFFSETS.FLOOR_MOTION_TOP) {
     const intra = localOrder - ROLE_OFFSETS.FLOOR_MOTION_TOP;
-    const maxMotionLocal = RENDER_ORDER_PER_FLOOR - ROLE_OFFSETS.FLOOR_MOTION_TOP - overlayOffset;
-    const next = Math.max(0, Math.min(maxMotionLocal, intra + overlayOffset));
+    // One shared ceiling for every stacked overlay on the tile. Per-delta ceilings
+    // let delta-1 (shadow) outrank delta-2 (canopy) near the motion-top limit.
+    const motionBandTop = RENDER_ORDER_PER_FLOOR - ROLE_OFFSETS.FLOOR_MOTION_TOP - 0.99;
+    const next = Math.max(0, Math.min(motionBandTop, intra + overlayOffset));
     return floorBase + ROLE_OFFSETS.FLOOR_MOTION_TOP + next;
   }
 
   // Overhead / roof / foreground layer (above ground albedo, below overhead-FX slot reserved for FX)
   if (localOrder >= ROLE_OFFSETS.FLOOR_OVERHEAD) {
     const intra = localOrder - ROLE_OFFSETS.FLOOR_OVERHEAD;
-    const next = Math.max(0, Math.min(MAX_INTRA_ROLE_OFFSET + overlayOffset, intra + overlayOffset));
+    const overheadBandTop = MAX_INTRA_ROLE_OFFSET + 0.99;
+    const next = Math.max(0, Math.min(overheadBandTop, intra + overlayOffset));
     return floorBase + ROLE_OFFSETS.FLOOR_OVERHEAD + next;
   }
 
   // Ground albedo band — includes `__bg_image__` at intra 0 and regular tiles.
   const intra = Math.max(0, localOrder - ROLE_OFFSETS.FLOOR_ALBEDO);
-  const next = Math.max(0, Math.min(MAX_INTRA_ROLE_OFFSET + overlayOffset, intra + overlayOffset));
+  const albedoBandTop = MAX_INTRA_ROLE_OFFSET + 0.99;
+  const next = Math.max(0, Math.min(albedoBandTop, intra + overlayOffset));
   return floorBase + ROLE_OFFSETS.FLOOR_ALBEDO + next;
 }
 

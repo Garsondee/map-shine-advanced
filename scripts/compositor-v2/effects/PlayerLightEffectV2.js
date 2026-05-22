@@ -71,6 +71,53 @@ const log = createLogger('PlayerLightEffect');
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
+/** Token-shaped occlusion for flashlight VFX (screen UV 0–1, matches uInvScreenSize). */
+const FLASHLIGHT_TOKEN_MASK_FRAG = `
+        float msFlashlightTokenOcclusion(vec2 fragN) {
+          if (uHasTokenMaskScreen > 0.5) {
+            return smoothstep(0.1, 0.75, texture2D(uTokenMaskTex, fragN).a);
+          }
+          if (uHasTokenTex > 0.5) {
+            vec2 d = fragN - uTokenScreenCenter;
+            float lx = dot(d, uTokenAxisU) / max(1e-5, dot(uTokenAxisU, uTokenAxisU));
+            float ly = dot(d, uTokenAxisV) / max(1e-5, dot(uTokenAxisV, uTokenAxisV));
+            if (abs(lx) > 1.04 || abs(ly) > 1.04) return 0.0;
+            vec2 tokenUv = vec2(lx * 0.5 + 0.5, ly * 0.5 + 0.5);
+            float a = texture2D(uTokenTex, tokenUv).a;
+            return smoothstep(uTokenAlphaLow, uTokenAlphaHigh, a);
+          }
+          if (uHasTokenMask > 0.5) {
+            float dist = distance(fragN, uTokenScreenCenter);
+            float soft = max(0.001, uTokenMaskSoft * uTokenScreenRadius);
+            return 1.0 - smoothstep(uTokenScreenRadius - soft, uTokenScreenRadius, dist);
+          }
+          return 0.0;
+        }
+`;
+
+const FLASHLIGHT_TOKEN_MASK_UNIFORMS = `
+        uniform sampler2D uTokenMaskTex;
+        uniform float uHasTokenMaskScreen;
+        uniform sampler2D uTokenTex;
+        uniform float uHasTokenTex;
+        uniform vec2 uTokenScreenCenter;
+        uniform vec2 uTokenAxisU;
+        uniform vec2 uTokenAxisV;
+        uniform float uTokenAlphaLow;
+        uniform float uTokenAlphaHigh;
+        uniform float uTokenScreenRadius;
+        uniform float uTokenMaskSoft;
+        uniform float uHasTokenMask;
+`;
+
+const FLASHLIGHT_TOKEN_MASK_APPLY = `
+          {
+            vec2 fragN = gl_FragCoord.xy * uInvScreenSize;
+            float tokOcc = msFlashlightTokenOcclusion(fragN);
+            if (tokOcc > 0.98) discard;
+          }
+`;
+
 const NV_ONLY_MODES = new Set(NV_ONLY_PLAYER_LIGHT_MODES);
 const NV_POST_MODES = new Set(NV_POST_PLAYER_LIGHT_MODES);
 const FLASHLIGHT_MODES = new Set(FLASHLIGHT_PLAYER_LIGHT_MODES);
@@ -184,6 +231,9 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       dayIntensityScale: 0.28,
       nightIntensityScale: 1.65,
       dayNightCurve: 1.15,
+      lightDarknessCancel: 3.0,
+      lightDarknessNightBoost: 2.0,
+      lightFollowLightIntensity: true,
 
       springStiffness: 55,
       springDamping: 16,
@@ -204,31 +254,31 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
       flashlightAngleDeg: 38,
       flashlightLengthUnits: 18,
-      flashlightIntensity: 5.4,
+      flashlightIntensity: 0.09,
       flashlightBrokenness: 0.0,
       flashlightWobble: 0.0,
 
       flashlightBeamAngleDeg: 38,
       flashlightBeamLengthUnits: 18,
-      flashlightBeamWidthScale: 1.36,
+      flashlightBeamWidthScale: 1.25,
       flashlightBeamNearWidth: 0.01,
-      flashlightBeamFarWidth: 1.0,
-      flashlightBeamWidthCurve: 1.25,
-      flashlightBeamEdgeSoftness: 0.18,
-      flashlightBeamCoreIntensity: 1.25,
-      flashlightBeamCoreSharpness: 10.0,
+      flashlightBeamFarWidth: 1.28,
+      flashlightBeamWidthCurve: 0.96,
+      flashlightBeamEdgeSoftness: 0.8,
+      flashlightBeamCoreIntensity: 4.0,
+      flashlightBeamCoreSharpness: 0.1,
       flashlightBeamMidIntensity: 0.25,
       flashlightBeamMidSharpness: 2.2,
       flashlightBeamRimIntensity: 0.6,
       flashlightBeamRimSharpness: 14.0,
-      flashlightBeamNearBoost: 1.6,
-      flashlightBeamNearBoostCurve: 1.6,
-      flashlightBeamLongFalloffExp: 1.7,
+      flashlightBeamNearBoost: 6.0,
+      flashlightBeamNearBoostCurve: 0.1,
+      flashlightBeamLongFalloffExp: 4.35,
       flashlightBeamNoiseIntensity: 0.06,
       flashlightBeamNoiseScale: 7.0,
       flashlightBeamNoiseSpeed: 1.2,
 
-      flashlightCookieIntensity: 1.68,
+      flashlightCookieIntensity: 6.0,
       flashlightCookieSizePx: 338,
       flashlightCookieSizeFromBeam: 0.48,
       flashlightCookieMaskRadius: 0.92,
@@ -252,8 +302,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       torchLightColor: { r: 1.0, g: 0.42, b: 0.12 },
       torchLightDim: 19.5,
       torchLightBright: 3,
-      torchLightAlpha: 0.87,
-      torchLightAttenuation: 0.55,
+      torchLightAlpha: 0.18,
+      torchLightAttenuation: 1,
       torchLightLuminosity: 2.2,
       torchLightAnimType: 'none',
       torchLightAnimSpeed: 2.7,
@@ -278,15 +328,15 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       torchSparksSpeedFactor: 0.03,
 
       flashlightLightEnabled: true,
-      flashlightLightColor: { r: 3.0, g: 3.0, b: 3.0 },
-      flashlightLightDim: 30.5,
+      flashlightLightColor: { r: 1.0, g: 0.9460786716550282, b: 0.8201783163066584 },
+      flashlightLightDim: 14,
       flashlightLightBright: 5,
-      flashlightLightAlpha: 0.26,
+      flashlightLightAlpha: 0.25,
       flashlightLightAttenuation: 1,
-      flashlightLightLuminosity: 3,
-      flashlightLightAnimType: 'none',
+      flashlightLightLuminosity: 0.6,
+      flashlightLightAnimType: 'torch',
       flashlightLightAnimSpeed: 5,
-      flashlightLightAnimIntensity: 18.7,
+      flashlightLightAnimIntensity: 5,
       flashlightLightUseCookiePosition: true,
       flashlightLightDistanceScaleEnabled: true,
       flashlightLightDistanceScaleNear: 0.28,
@@ -562,7 +612,10 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
             'autoDayNightBalance',
             'dayIntensityScale',
             'nightIntensityScale',
-            'dayNightCurve'
+            'dayNightCurve',
+            'lightDarknessCancel',
+            'lightDarknessNightBoost',
+            'lightFollowLightIntensity'
           ]
         },
         {
@@ -899,6 +952,30 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           label: 'Darkness Curve',
           tooltip: 'Above 1 = lights stay dim longer into dusk; below 1 = ramp up earlier.',
         },
+        lightDarknessCancel: {
+          type: 'slider',
+          min: 0,
+          max: 8,
+          step: 0.1,
+          default: 3.0,
+          label: 'Darkness Cancel',
+          tooltip: 'HDR punch into the light buffer (alpha). Higher = torch/flash erase Foundry darkness and CC tint more aggressively. Matches candle glow behaviour.',
+        },
+        lightDarknessNightBoost: {
+          type: 'slider',
+          min: 1,
+          max: 4,
+          step: 0.05,
+          default: 2.0,
+          label: 'Night Cancel Boost',
+          tooltip: 'Extra darkness-cancel strength at full night (master darkness ≈ 1).',
+        },
+        lightFollowLightIntensity: {
+          type: 'boolean',
+          default: true,
+          label: 'Follow Point Light Gain',
+          tooltip: 'Multiply cancel strength by Lighting → Point light gain so player pools track scene lamp brightness.',
+        },
         springStiffness: { type: 'slider', label: 'Spring Stiffness', min: 1, max: 300, step: 1, default: 55, throttle: 50 },
         springDamping: { type: 'slider', label: 'Spring Damping', min: 0, max: 90, step: 1, default: 16, throttle: 50 },
         torchBaseIntensity: { type: 'slider', label: 'Base Intensity', min: 0, max: 6, step: 0.01, default: 0.66, throttle: 50 },
@@ -915,27 +992,27 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         wanderSpeed: { type: 'slider', label: 'Wander Speed', min: 0.1, max: 20, step: 0.1, default: 2.3, throttle: 50 },
         flashlightAngleDeg: { type: 'slider', label: 'Legacy Cone Angle (deg)', min: 5, max: 140, step: 1, default: 38, throttle: 50 },
         flashlightLengthUnits: { type: 'slider', label: 'Legacy Cone Length (u)', min: 1, max: 160, step: 1, default: 18, throttle: 50 },
-        flashlightIntensity: { type: 'slider', label: 'Intensity', min: 0, max: 6, step: 0.01, default: 5.4, throttle: 50 },
+        flashlightIntensity: { type: 'slider', label: 'Intensity', min: 0, max: 6, step: 0.01, default: 0.09, throttle: 50 },
         flashlightBrokenness: { type: 'slider', label: 'Brokenness', min: 0, max: 1, step: 0.01, default: 0.0, throttle: 50, hidden: true },
         flashlightWobble: { type: 'slider', label: 'Wobble', min: 0, max: 1, step: 0.01, default: 0.0, throttle: 50, hidden: true },
 
         flashlightBeamAngleDeg: { type: 'slider', label: 'Angle (deg)', min: 1, max: 160, step: 1, default: 38, throttle: 50 },
         flashlightBeamLengthUnits: { type: 'slider', label: 'Length (u)', min: 0.5, max: 240, step: 0.5, default: 18, throttle: 50 },
-        flashlightBeamWidthScale: { type: 'slider', label: 'Width Scale', min: 0.05, max: 3.0, step: 0.01, default: 1.36, throttle: 50 },
+        flashlightBeamWidthScale: { type: 'slider', label: 'Width Scale', min: 0.05, max: 3.0, step: 0.01, default: 1.25, throttle: 50 },
         flashlightBeamNearWidth: { type: 'slider', label: 'Near Width', min: 0.01, max: 1.5, step: 0.01, default: 0.01, throttle: 50 },
-        flashlightBeamFarWidth: { type: 'slider', label: 'Far Width', min: 0.05, max: 3.0, step: 0.01, default: 1.0, throttle: 50 },
-        flashlightBeamWidthCurve: { type: 'slider', label: 'Width Curve', min: 0.25, max: 4.0, step: 0.01, default: 1.25, throttle: 50 },
-        flashlightBeamEdgeSoftness: { type: 'slider', label: 'Edge Softness', min: 0.01, max: 0.8, step: 0.01, default: 0.18, throttle: 50 },
+        flashlightBeamFarWidth: { type: 'slider', label: 'Far Width', min: 0.05, max: 3.0, step: 0.01, default: 1.28, throttle: 50 },
+        flashlightBeamWidthCurve: { type: 'slider', label: 'Width Curve', min: 0.25, max: 4.0, step: 0.01, default: 0.96, throttle: 50 },
+        flashlightBeamEdgeSoftness: { type: 'slider', label: 'Edge Softness', min: 0.01, max: 0.95, step: 0.01, default: 0.8, throttle: 50, tooltip: 'Feather width at the beam edge as a fraction of beam radius (0.01 = hard, 0.95 = very soft).' },
 
-        flashlightBeamCoreIntensity: { type: 'slider', label: 'Core Intensity', min: 0.0, max: 4.0, step: 0.01, default: 1.25, throttle: 50 },
-        flashlightBeamCoreSharpness: { type: 'slider', label: 'Core Sharpness', min: 0.1, max: 40.0, step: 0.1, default: 10.0, throttle: 50 },
+        flashlightBeamCoreIntensity: { type: 'slider', label: 'Core Intensity', min: 0.0, max: 4.0, step: 0.01, default: 4.0, throttle: 50 },
+        flashlightBeamCoreSharpness: { type: 'slider', label: 'Core Sharpness', min: 0.1, max: 40.0, step: 0.1, default: 0.1, throttle: 50 },
         flashlightBeamMidIntensity: { type: 'slider', label: 'Mid Intensity', min: 0.0, max: 2.0, step: 0.01, default: 0.25, throttle: 50 },
         flashlightBeamMidSharpness: { type: 'slider', label: 'Mid Sharpness', min: 0.1, max: 20.0, step: 0.1, default: 2.2, throttle: 50 },
         flashlightBeamRimIntensity: { type: 'slider', label: 'Rim Intensity', min: 0.0, max: 4.0, step: 0.01, default: 0.6, throttle: 50 },
         flashlightBeamRimSharpness: { type: 'slider', label: 'Rim Sharpness', min: 0.1, max: 60.0, step: 0.1, default: 14.0, throttle: 50 },
-        flashlightBeamNearBoost: { type: 'slider', label: 'Near Boost', min: 0.0, max: 6.0, step: 0.01, default: 1.6, throttle: 50 },
-        flashlightBeamNearBoostCurve: { type: 'slider', label: 'Near Boost Curve', min: 0.1, max: 6.0, step: 0.01, default: 1.6, throttle: 50 },
-        flashlightBeamLongFalloffExp: { type: 'slider', label: 'Long Falloff', min: 0.1, max: 6.0, step: 0.01, default: 1.7, throttle: 50 },
+        flashlightBeamNearBoost: { type: 'slider', label: 'Near Boost', min: 0.0, max: 6.0, step: 0.01, default: 6.0, throttle: 50 },
+        flashlightBeamNearBoostCurve: { type: 'slider', label: 'Near Boost Curve', min: 0.1, max: 6.0, step: 0.01, default: 0.1, throttle: 50 },
+        flashlightBeamLongFalloffExp: { type: 'slider', label: 'Long Falloff', min: 0.1, max: 6.0, step: 0.01, default: 4.35, throttle: 50 },
         flashlightBeamNoiseIntensity: { type: 'slider', label: 'Noise Amount', min: 0.0, max: 0.6, step: 0.01, default: 0.06, throttle: 50 },
         flashlightBeamNoiseScale: { type: 'slider', label: 'Noise Scale', min: 0.1, max: 30.0, step: 0.1, default: 7.0, throttle: 50 },
         flashlightBeamNoiseSpeed: { type: 'slider', label: 'Noise Speed', min: 0.0, max: 10.0, step: 0.01, default: 1.2, throttle: 50 },
@@ -943,7 +1020,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         flashlightCookieRotation: { type: 'boolean', label: 'Rotate Cookie', default: true },
         flashlightCookieRotationSpeed: { type: 'slider', label: 'Rotation Speed', min: 0.0, max: 4, step: 0.05, default: 0.3, throttle: 50 },
 
-        flashlightCookieIntensity: { type: 'slider', label: 'Intensity Mult', min: 0.0, max: 6.0, step: 0.01, default: 1.68, throttle: 50 },
+        flashlightCookieIntensity: { type: 'slider', label: 'Intensity Mult', min: 0.0, max: 6.0, step: 0.01, default: 6.0, throttle: 50 },
         flashlightCookieSizePx: { type: 'slider', label: 'Size (px)', min: 1, max: 600, step: 1, default: 338, throttle: 50 },
         flashlightCookieSizeFromBeam: { type: 'slider', label: 'Size From Beam', min: 0.0, max: 3.0, step: 0.01, default: 0.48, throttle: 50 },
         flashlightCookieMaskRadius: { type: 'slider', label: 'Mask Radius', min: 0.1, max: 1.0, step: 0.01, default: 0.92, throttle: 50 },
@@ -964,8 +1041,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         torchLightColor: { type: 'color', label: 'Color', default: { r: 1.0, g: 0.42, b: 0.12 } },
         torchLightDim: { type: 'slider', label: 'Dim Radius (u)', min: 0, max: 160, step: 0.5, default: 19.5, throttle: 50 },
         torchLightBright: { type: 'slider', label: 'Bright Radius (u)', min: 0, max: 120, step: 0.5, default: 3, throttle: 50 },
-        torchLightAlpha: { type: 'slider', label: 'Alpha', min: 0, max: 2, step: 0.01, default: 0.87, throttle: 50 },
-        torchLightAttenuation: { type: 'slider', label: 'Attenuation', min: 0, max: 1, step: 0.01, default: 0.55, throttle: 50 },
+        torchLightAlpha: { type: 'slider', label: 'Alpha', min: 0, max: 2, step: 0.01, default: 0.18, throttle: 50 },
+        torchLightAttenuation: { type: 'slider', label: 'Attenuation', min: 0, max: 1, step: 0.01, default: 1, throttle: 50 },
         torchLightLuminosity: { type: 'slider', label: 'Luminosity', min: 0, max: 3, step: 0.01, default: 2.2, throttle: 50 },
         torchLightAnimType: {
           type: 'list',
@@ -995,20 +1072,20 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         torchSparksSpeedFactor: { type: 'slider', label: 'Streak Factor', min: 0, max: 0.15, step: 0.001, default: 0.03, throttle: 50 },
 
         flashlightLightEnabled: { type: 'boolean', label: 'Enabled', default: true },
-        flashlightLightColor: { type: 'color', label: 'Color', default: { r: 3.0, g: 3.0, b: 3.0 } },
-        flashlightLightDim: { type: 'slider', label: 'Dim Radius (u)', min: 0, max: 240, step: 0.5, default: 30.5, throttle: 50 },
+        flashlightLightColor: { type: 'color', label: 'Color', default: { r: 1.0, g: 0.9460786716550282, b: 0.8201783163066584 } },
+        flashlightLightDim: { type: 'slider', label: 'Dim Radius (u)', min: 0, max: 240, step: 0.5, default: 14, throttle: 50 },
         flashlightLightBright: { type: 'slider', label: 'Bright Radius (u)', min: 0, max: 200, step: 0.5, default: 5, throttle: 50 },
-        flashlightLightAlpha: { type: 'slider', label: 'Alpha', min: 0, max: 2, step: 0.01, default: 0.26, throttle: 50 },
+        flashlightLightAlpha: { type: 'slider', label: 'Alpha', min: 0, max: 2, step: 0.01, default: 0.25, throttle: 50 },
         flashlightLightAttenuation: { type: 'slider', label: 'Attenuation', min: 0, max: 1, step: 0.01, default: 1, throttle: 50 },
-        flashlightLightLuminosity: { type: 'slider', label: 'Luminosity', min: 0, max: 3, step: 0.01, default: 3, throttle: 50 },
+        flashlightLightLuminosity: { type: 'slider', label: 'Luminosity', min: 0, max: 3, step: 0.01, default: 0.6, throttle: 50 },
         flashlightLightAnimType: {
           type: 'list',
           label: 'Animation',
           options: { None: 'none', Flame: 'flame', Pulse: 'pulse', Torch: 'torch' },
-          default: 'none'
+          default: 'torch'
         },
         flashlightLightAnimSpeed: { type: 'slider', label: 'Anim Speed', min: 0.0, max: 40, step: 0.1, default: 5, throttle: 50 },
-        flashlightLightAnimIntensity: { type: 'slider', label: 'Anim Intensity', min: 0, max: 25, step: 0.1, default: 18.7, throttle: 50 },
+        flashlightLightAnimIntensity: { type: 'slider', label: 'Anim Intensity', min: 0, max: 25, step: 0.1, default: 5, throttle: 50 },
         flashlightLightUseCookiePosition: { type: 'boolean', label: 'Use Cookie Pos', default: true },
         flashlightLightDistanceScaleEnabled: { type: 'boolean', label: 'Distance Scaling', default: true },
         flashlightLightDistanceScaleNear: { type: 'slider', label: 'Near Scale', min: 0.1, max: 3, step: 0.01, default: 0.28, throttle: 50 },
@@ -1307,11 +1384,12 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       || hasRopeMask !== this._lastRopeMaskHas;
     if (!changed) return;
 
+    const flashInv = this._resolveFlashlightScreenInvSize();
     const flashlightUniforms = this._screenUniformFlashlight || [];
     for (let i = 0; i < flashlightUniforms.length; i++) {
       const u = flashlightUniforms[i];
       if (!u) continue;
-      if (u.uInvScreenSize) u.uInvScreenSize.value.set(invW, invH);
+      if (u.uInvScreenSize) u.uInvScreenSize.value.set(flashInv.x, flashInv.y);
       if (u.uRopeMask) u.uRopeMask.value = ropeMaskTex;
       if (u.uHasRopeMask) u.uHasRopeMask.value = hasRopeMask;
     }
@@ -1331,6 +1409,211 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._lastRopeMaskHas = hasRopeMask;
   }
 
+  /**
+   * Inverse screen size for flashlight screen-space masks (matches `_lightRT` when attached).
+   * @returns {{ x: number, y: number }}
+   * @private
+   */
+  _resolveFlashlightScreenInvSize() {
+    const lighting = this._getLightingEffect();
+    let w = 1;
+    let h = 1;
+    if (this._flashlightBeamInLightScene && lighting?._lightRT) {
+      w = Math.max(1, lighting._lightRT.width);
+      h = Math.max(1, lighting._lightRT.height);
+    } else if (this.renderer && this._tempScreenSize) {
+      this.renderer.getDrawingBufferSize(this._tempScreenSize);
+      w = Math.max(1, this._tempScreenSize.x);
+      h = Math.max(1, this._tempScreenSize.y);
+    }
+    return { x: 1.0 / w, y: 1.0 / h };
+  }
+
+  /**
+   * @param {object|null} uniforms
+   * @private
+   */
+  _clearFlashlightTokenScreenMask(uniforms) {
+    if (!uniforms) return;
+    if (uniforms.uHasTokenMask) uniforms.uHasTokenMask.value = 0.0;
+    if (uniforms.uHasTokenMaskScreen) uniforms.uHasTokenMaskScreen.value = 0.0;
+    if (uniforms.uHasTokenTex) uniforms.uHasTokenTex.value = 0.0;
+  }
+
+  /**
+   * @returns {THREE.Texture|null}
+   * @private
+   */
+  _getFlashlightTokenMaskScreenTexture() {
+    try {
+      const mm = window.MapShine?.maskManager;
+      let tex = mm?.getTexture?.('tokenMask.screen') ?? null;
+      if (!tex) {
+        tex = window.MapShine?.lightingEffect?.tokenMaskTarget?.texture ?? null;
+      }
+      return tex || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * @param {THREE.Sprite|null} tokenSprite
+   * @returns {THREE.Texture|null}
+   * @private
+   */
+  _getTokenSpriteAlphaTexture(tokenSprite) {
+    try {
+      const map = tokenSprite?.material?.map ?? null;
+      return map || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * Screen-space basis for sampling the controlled token sprite alpha.
+   * @param {{ x: number, y: number }} tokenCenterWorld
+   * @param {THREE.Sprite|null} tokenSprite
+   * @param {number} groundZ
+   * @returns {{ centerU: number, centerV: number, axisU: { x: number, y: number }, axisV: { x: number, y: number }, radiusN: number }|null}
+   * @private
+   */
+  _computeTokenScreenSpriteBasis(tokenCenterWorld, tokenSprite, groundZ) {
+    const camera = this.camera;
+    if (!camera || !this._tempA || !this._tempB || !this._tempC) return null;
+
+    const z = groundZ + 0.11;
+    const cx = Number(tokenCenterWorld?.x) || 0;
+    const cy = Number(tokenCenterWorld?.y) || 0;
+    let hw = 0;
+    let hh = 0;
+    if (tokenSprite?.scale) {
+      hw = Math.max(1, Number(tokenSprite.scale.x) || 0) * 0.5;
+      hh = Math.max(1, Number(tokenSprite.scale.y) || 0) * 0.5;
+    }
+
+    this._tempA.set(cx, cy, z);
+    this._tempA.project(camera);
+    if (!Number.isFinite(this._tempA.x) || !Number.isFinite(this._tempA.y)
+      || this._tempA.z < -1 || this._tempA.z > 1) {
+      return null;
+    }
+
+    const centerU = this._tempA.x * 0.5 + 0.5;
+    const centerV = this._tempA.y * 0.5 + 0.5;
+
+    if (hw <= 0 || hh <= 0) {
+      return { centerU, centerV, axisU: { x: 0.02, y: 0 }, axisV: { x: 0, y: 0.02 }, radiusN: 0.02 };
+    }
+
+    this._tempB.set(cx + hw, cy, z);
+    this._tempB.project(camera);
+    if (!Number.isFinite(this._tempB.x) || !Number.isFinite(this._tempB.y)
+      || this._tempB.z < -1 || this._tempB.z > 1) {
+      return null;
+    }
+
+    this._tempC.set(cx, cy + hh, z);
+    this._tempC.project(camera);
+    if (!Number.isFinite(this._tempC.x) || !Number.isFinite(this._tempC.y)
+      || this._tempC.z < -1 || this._tempC.z > 1) {
+      return null;
+    }
+
+    const shrink = 0.96;
+    const axisUx = ((this._tempB.x * 0.5 + 0.5) - centerU) * shrink;
+    const axisUy = ((this._tempB.y * 0.5 + 0.5) - centerV) * shrink;
+    const axisVx = ((this._tempC.x * 0.5 + 0.5) - centerU) * shrink;
+    const axisVy = ((this._tempC.y * 0.5 + 0.5) - centerV) * shrink;
+
+    const radiusN = Math.max(
+      Math.hypot(axisUx, axisUy),
+      Math.hypot(axisVx, axisVy)
+    ) * 0.88;
+
+    return {
+      centerU,
+      centerV,
+      axisU: { x: axisUx, y: axisUy },
+      axisV: { x: axisVx, y: axisVy },
+      radiusN: Math.max(radiusN, 0.01)
+    };
+  }
+
+  /**
+   * Screen-space mask so flashlight VFX in the light buffer does not wash out the token.
+   * Prefers tokenMask.screen, else token sprite alpha, else soft circle fallback.
+   * @param {object|null} uniforms
+   * @param {{ x: number, y: number }} tokenCenterWorld
+   * @param {THREE.Sprite|null} tokenSprite
+   * @param {number} groundZ
+   * @private
+   */
+  _updateFlashlightTokenScreenMask(uniforms, tokenCenterWorld, tokenSprite, groundZ) {
+    if (!uniforms?.uTokenScreenCenter) {
+      this._clearFlashlightTokenScreenMask(uniforms);
+      return;
+    }
+
+    const flashInv = this._resolveFlashlightScreenInvSize();
+    if (uniforms.uInvScreenSize) {
+      uniforms.uInvScreenSize.value.set(flashInv.x, flashInv.y);
+    }
+
+    if (uniforms.uHasTokenMaskScreen) uniforms.uHasTokenMaskScreen.value = 0.0;
+    if (uniforms.uHasTokenTex) uniforms.uHasTokenTex.value = 0.0;
+    if (uniforms.uHasTokenMask) uniforms.uHasTokenMask.value = 0.0;
+
+    const screenMaskTex = this._getFlashlightTokenMaskScreenTexture();
+    if (screenMaskTex && uniforms.uTokenMaskTex) {
+      uniforms.uTokenMaskTex.value = screenMaskTex;
+      uniforms.uHasTokenMaskScreen.value = 1.0;
+      return;
+    }
+
+    const tokenTex = this._getTokenSpriteAlphaTexture(tokenSprite);
+    const basis = this._computeTokenScreenSpriteBasis(tokenCenterWorld, tokenSprite, groundZ);
+    if (tokenTex && basis && uniforms.uTokenTex && uniforms.uTokenAxisU && uniforms.uTokenAxisV) {
+      uniforms.uTokenTex.value = tokenTex;
+      uniforms.uTokenScreenCenter.value.set(basis.centerU, basis.centerV);
+      uniforms.uTokenAxisU.value.set(basis.axisU.x, basis.axisU.y);
+      uniforms.uTokenAxisV.value.set(basis.axisV.x, basis.axisV.y);
+      if (uniforms.uTokenAlphaLow) uniforms.uTokenAlphaLow.value = 0.12;
+      if (uniforms.uTokenAlphaHigh) uniforms.uTokenAlphaHigh.value = 0.72;
+      uniforms.uHasTokenTex.value = 1.0;
+      return;
+    }
+
+    if (basis && uniforms.uTokenScreenRadius) {
+      uniforms.uTokenScreenCenter.value.set(basis.centerU, basis.centerV);
+      uniforms.uTokenScreenRadius.value = basis.radiusN;
+      if (uniforms.uTokenMaskSoft) uniforms.uTokenMaskSoft.value = 0.42;
+      uniforms.uHasTokenMask.value = 1.0;
+      return;
+    }
+
+    this._clearFlashlightTokenScreenMask(uniforms);
+  }
+
+  /** @param {object} uniforms @private */
+  _flashlightTokenMaskUniforms(THREE) {
+    return {
+      uTokenMaskTex: { value: null },
+      uHasTokenMaskScreen: { value: 0.0 },
+      uTokenTex: { value: null },
+      uHasTokenTex: { value: 0.0 },
+      uTokenScreenCenter: { value: new THREE.Vector2() },
+      uTokenAxisU: { value: new THREE.Vector2(0.05, 0.0) },
+      uTokenAxisV: { value: new THREE.Vector2(0.0, 0.05) },
+      uTokenAlphaLow: { value: 0.12 },
+      uTokenAlphaHigh: { value: 0.72 },
+      uTokenScreenRadius: { value: 0.0 },
+      uTokenMaskSoft: { value: 0.42 },
+      uHasTokenMask: { value: 0.0 }
+    };
+  }
+
   _tryAttachFlashlightToLightScene() {
     if (this._flashlightBeamInLightScene) return;
     const lighting = this._getLightingEffect();
@@ -1345,6 +1628,10 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       if (this._flashlightCookieMesh) {
         this._flashlightCookieMesh.parent?.remove?.(this._flashlightCookieMesh);
         lightScene.add(this._flashlightCookieMesh);
+      }
+      if (this._flashlightOriginMesh) {
+        this._flashlightOriginMesh.parent?.remove?.(this._flashlightOriginMesh);
+        lightScene.add(this._flashlightOriginMesh);
       }
       this._flashlightBeamInLightScene = true;
     } catch (_) {
@@ -1879,7 +2166,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       const flashlightMaxU = maxU;
       const flashlightConeMaxLenU = Math.max(0.5, this.params.flashlightLengthUnits) * 4.0;
       _perfToken = this._beginPerfSpan('flashlightUpdate', 'update', { cpuOnly: true });
-      this._updateFlashlight(timeInfo, tokenCenterWorld, aimWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc, flashlightMaxU, flashlightConeMaxLenU, tokenRadiusPx);
+      this._updateFlashlight(timeInfo, tokenCenterWorld, aimWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc, tokenSprite, flashlightMaxU, flashlightConeMaxLenU, tokenRadiusPx);
       this._endPerfSpan(_perfToken);
       _perfToken = this._beginPerfSpan('dynamicLights', 'update', { cpuOnly: true });
       this._updateDynamicLightSources(timeInfo, tokenCenterWorld, clampedTargetWorld, blocked, safeWallDistanceUnits, groundZ, fade, tokenDoc);
@@ -1919,6 +2206,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       if (lightScene) {
         if (this._flashlightBeamMesh) lightScene.remove(this._flashlightBeamMesh);
         if (this._flashlightCookieMesh) lightScene.remove(this._flashlightCookieMesh);
+        if (this._flashlightOriginMesh) lightScene.remove(this._flashlightOriginMesh);
       }
     } catch (_) {
     }
@@ -2574,6 +2862,42 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     return day + (night - day) * t;
   }
 
+  /**
+   * HDR emission gain for torch/flash dynamic lights (compose alpha → darkness punch + direct light).
+   * Mirrors CandleFlamesEffectV2._computeGlowEmissionGain().
+   * @param {number} [visualMul=1.0] - Per-light intensity / day-night scale already baked into alpha.
+   * @returns {number}
+   */
+  _computePlayerLightEmissionGain(visualMul = 1.0) {
+    const cancel = Math.max(0, Number(this.params.lightDarknessCancel) || 0);
+    if (cancel <= 0) return 0;
+
+    let lightMul = 1.0;
+    if (this.params.lightFollowLightIntensity) {
+      const li = Number(this._getLightingEffect()?.params?.lightIntensity);
+      lightMul = Number.isFinite(li) ? Math.max(0.25, li) : 2.0;
+    }
+
+    const darkness = clamp01(LightingDirector.get().masterDarkness);
+    const nightBoost = Math.max(1, Number(this.params.lightDarknessNightBoost) || 1);
+    const nightMul = 1.0 + darkness * (nightBoost - 1.0);
+
+    const vis = Math.max(0, Number(visualMul) || 0);
+    return cancel * lightMul * nightMul * vis;
+  }
+
+  /** Split-channel additive blend for `_lightRT` (matches ThreeLightSource / candle glow). */
+  _applyLightBufferBlending(material) {
+    const THREE = window.THREE;
+    if (!THREE || !material) return;
+    material.blending = THREE.CustomBlending;
+    material.blendEquation = THREE.AddEquation;
+    material.blendSrc = THREE.OneFactor;
+    material.blendDst = THREE.OneFactor;
+    material.blendSrcAlpha = THREE.OneFactor;
+    material.blendDstAlpha = THREE.OneFactor;
+  }
+
   _getTorchWindDownMaxSec() {
     const flameUd = this._torchParticleSystem?.userData;
     const flameMax = Math.max(
@@ -3058,14 +3382,18 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       depthTest: false,
       depthWrite: false,
       blending: THREE.CustomBlending,
-      blendSrc: THREE.SrcAlphaFactor,
+      blendSrc: THREE.OneFactor,
       blendDst: THREE.OneFactor,
       blendEquation: THREE.AddEquation,
+      blendSrcAlpha: THREE.OneFactor,
+      blendDstAlpha: THREE.OneFactor,
       uniforms: {
         uIntensity: { value: 0.0 },
+        uEmissionGain: { value: 1.0 },
         uRopeMask: { value: null },
         uHasRopeMask: { value: 0.0 },
         uInvScreenSize: { value: new THREE.Vector2(1, 1) },
+        ...this._flashlightTokenMaskUniforms(THREE),
         uNearWidth: { value: 0.12 },
         uFarWidth: { value: 1.0 },
         uWidthCurve: { value: 1.25 },
@@ -3097,6 +3425,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         uniform sampler2D uRopeMask;
         uniform float uHasRopeMask;
         uniform vec2 uInvScreenSize;
+        ${FLASHLIGHT_TOKEN_MASK_UNIFORMS}
         uniform float uNearWidth;
         uniform float uFarWidth;
         uniform float uWidthCurve;
@@ -3115,6 +3444,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         uniform float uNoiseSpeed;
         uniform float uWallT;
         uniform float uTime;
+        uniform float uEmissionGain;
         varying vec2 vUv;
 
         float hash21(vec2 p) {
@@ -3122,6 +3452,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           p += dot(p, p + 34.345);
           return fract(p.x * p.y);
         }
+
+        ${FLASHLIGHT_TOKEN_MASK_FRAG}
 
         void main() {
           if (uIntensity <= 0.0001) discard;
@@ -3132,6 +3464,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
             float ropeMask = rm.a;
             if (ropeMask > 0.001) discard;
           }
+          ${FLASHLIGHT_TOKEN_MASK_APPLY}
 
           float t = clamp(vUv.x, 0.0, 1.0);
           float wallT = clamp(uWallT, 0.0, 1.0);
@@ -3140,16 +3473,19 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           float centered = abs(vUv.y - 0.5) * 2.0;
 
           float tw = pow(clamp(t, 0.0, 1.0), max(0.01, uWidthCurve));
-          float localW = mix(uNearWidth, uFarWidth, tw);
+          float localW = max(1e-4, mix(uNearWidth, uFarWidth, tw));
 
-          float soft = max(1e-5, uEdgeSoftness);
-          float edge = smoothstep(localW - soft, localW + soft, centered);
-          float beamMask = 1.0 - edge;
+          // Cross-section coordinate: 0 at beam centerline, 1 at authored beam edge.
+          float beamCoord = clamp(centered / localW, 0.0, 1.0);
 
-          float core = exp(-centered * centered * max(0.01, uCoreSharpness)) * uCoreIntensity;
-          float mid = exp(-centered * centered * max(0.01, uMidSharpness)) * uMidIntensity;
-          float rim = exp(-(1.0 - centered) * (1.0 - centered) * max(0.01, uRimSharpness)) * uRimIntensity;
-          float lateral = max(0.0, core + rim - mid);
+          // Edge softness as a fraction of beam radius (stable for narrow near-end beams).
+          float soft = clamp(uEdgeSoftness, 0.01, 0.95);
+          float edgeFade = 1.0 - smoothstep(1.0 - soft, 1.0, beamCoord);
+
+          float core = exp(-beamCoord * beamCoord * max(0.01, uCoreSharpness)) * uCoreIntensity;
+          float mid = exp(-beamCoord * beamCoord * max(0.01, uMidSharpness)) * uMidIntensity;
+          float rim = exp(-(1.0 - beamCoord) * (1.0 - beamCoord) * max(0.01, uRimSharpness)) * uRimIntensity;
+          float lateral = max(0.0, core + rim - mid) * edgeFade;
 
           float longFalloff = pow(max(0.0, 1.0 - t / max(wallT, 1e-3)), max(0.01, uLongFalloffExp));
           float nearBoost = mix(1.0, uNearBoost, pow(1.0 - t, max(0.01, uNearBoostCurve)));
@@ -3157,16 +3493,18 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           float n = hash21((vUv * uNoiseScale) + vec2(uTime * uNoiseSpeed, uTime * 0.07));
           float noise = 1.0 - uNoiseIntensity + (uNoiseIntensity * (0.5 + 0.5 * n));
 
-          float alpha = beamMask * lateral * longFalloff * nearBoost;
+          float alpha = lateral * longFalloff * nearBoost;
           alpha *= noise;
 
           vec3 col = vec3(1.0, 0.95, 0.8) * uIntensity;
-          gl_FragColor = vec4(col, alpha);
+          float gain = max(uEmissionGain, 0.0);
+          gl_FragColor = vec4(col * alpha * gain, alpha * gain);
         }
       `
     });
 
     beamMat.toneMapped = false;
+    this._applyLightBufferBlending(beamMat);
 
     this._flashlightBeamMat = beamMat;
     const beamMesh = new THREE.Mesh(geom, beamMat);
@@ -3195,7 +3533,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         uColor: { value: new THREE.Color(0xffffff) },
         uRopeMask: { value: null },
         uHasRopeMask: { value: 0.0 },
-        uInvScreenSize: { value: new THREE.Vector2(1, 1) }
+        uInvScreenSize: { value: new THREE.Vector2(1, 1) },
+        ...this._flashlightTokenMaskUniforms(THREE)
       },
       vertexShader: `
         varying vec2 vUv;
@@ -3211,7 +3550,10 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         uniform sampler2D uRopeMask;
         uniform float uHasRopeMask;
         uniform vec2 uInvScreenSize;
+        ${FLASHLIGHT_TOKEN_MASK_UNIFORMS}
         varying vec2 vUv;
+
+        ${FLASHLIGHT_TOKEN_MASK_FRAG}
 
         void main() {
           if (uOpacity <= 0.0001) discard;
@@ -3222,6 +3564,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
             float ropeMask = rm.a;
             if (ropeMask > 0.001) discard;
           }
+          ${FLASHLIGHT_TOKEN_MASK_APPLY}
 
           vec4 tex = texture2D(uMap, vUv);
           float a = tex.a * uOpacity;
@@ -3235,9 +3578,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
     const originMesh = new THREE.Mesh(geom, originMat);
     originMesh.name = 'PlayerLight_FlashlightOriginCap';
-    originMesh.renderOrder = 201;
+    originMesh.renderOrder = 199;
     originMesh.visible = false;
-    originMesh.layers.set(OVERLAY_THREE_LAYER);
     this._flashlightOriginMesh = originMesh;
     this._group.add(originMesh);
 
@@ -3251,6 +3593,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         uRopeMask: { value: null },
         uHasRopeMask: { value: 0.0 },
         uInvScreenSize: { value: new THREE.Vector2(1, 1) },
+        ...this._flashlightTokenMaskUniforms(THREE),
         uConeAngle: { value: 0.7 },
         uWallT: { value: 1.0 },
         uTime: { value: 0.0 },
@@ -3271,6 +3614,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         uniform sampler2D uRopeMask;
         uniform float uHasRopeMask;
         uniform vec2 uInvScreenSize;
+        ${FLASHLIGHT_TOKEN_MASK_UNIFORMS}
         uniform float uConeAngle;
         uniform float uWallT;
         uniform float uTime;
@@ -3280,8 +3624,17 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         uniform float uCookieRotationSpeed;
         varying vec2 vUv;
 
+        ${FLASHLIGHT_TOKEN_MASK_FRAG}
+
         void main() {
           if (uIntensity <= 0.0001) discard;
+
+          if (uHasRopeMask > 0.5) {
+            vec2 suv = gl_FragCoord.xy * uInvScreenSize;
+            vec4 rm = texture2D(uRopeMask, suv);
+            if (rm.a > 0.001) discard;
+          }
+          ${FLASHLIGHT_TOKEN_MASK_APPLY}
 
           // Cone-local coordinates:
           // - vUv.x in [0,1] is distance along cone (0 = origin)
@@ -3339,14 +3692,18 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       depthTest: false,
       depthWrite: false,
       blending: THREE.CustomBlending,
-      blendSrc: THREE.SrcAlphaFactor,
+      blendSrc: THREE.OneFactor,
       blendDst: THREE.OneFactor,
       blendEquation: THREE.AddEquation,
+      blendSrcAlpha: THREE.OneFactor,
+      blendDstAlpha: THREE.OneFactor,
       uniforms: {
         uIntensity: { value: 0.0 },
+        uEmissionGain: { value: 1.0 },
         uRopeMask: { value: null },
         uHasRopeMask: { value: 0.0 },
         uInvScreenSize: { value: new THREE.Vector2(1, 1) },
+        ...this._flashlightTokenMaskUniforms(THREE),
         uTime: { value: 0.0 },
         uCookieTexture: { value: this._defaultCookieTexture },
         uCookieRotationEnabled: { value: true },
@@ -3379,9 +3736,11 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       `,
       fragmentShader: `
         uniform float uIntensity;
+        uniform float uEmissionGain;
         uniform sampler2D uRopeMask;
         uniform float uHasRopeMask;
         uniform vec2 uInvScreenSize;
+        ${FLASHLIGHT_TOKEN_MASK_UNIFORMS}
         uniform float uTime;
         uniform sampler2D uCookieTexture;
         uniform bool uCookieRotationEnabled;
@@ -3403,6 +3762,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         uniform float uCanvasHeight;
         varying vec2 vUv;
         varying vec2 vWorld;
+
+        ${FLASHLIGHT_TOKEN_MASK_FRAG}
 
         float sampleBlur4(sampler2D tex, vec2 uv, vec2 texel) {
           float c = texture2D(tex, uv).r;
@@ -3442,6 +3803,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
             float ropeMask = rm.a;
             if (ropeMask > 0.001) discard;
           }
+          ${FLASHLIGHT_TOKEN_MASK_APPLY}
           vec2 uv = vUv;
           if (uCookieRotationEnabled) {
             float angle = uTime * uCookieRotationSpeed;
@@ -3470,12 +3832,14 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
             alpha *= sampleVisionVisible(vWorld);
           }
           vec3 col = vec3(1.0, 0.95, 0.8) * uIntensity * radial;
-          gl_FragColor = vec4(col, alpha);
+          float gain = max(uEmissionGain, 0.0);
+          gl_FragColor = vec4(col * alpha * gain, alpha * gain);
         }
       `
     });
 
     cookieMat.toneMapped = false;
+    this._applyLightBufferBlending(cookieMat);
 
     this._flashlightCookieMat = cookieMat;
     const cookieMesh = new THREE.Mesh(geom, cookieMat);
@@ -3639,7 +4003,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._endPerfSpan(_perfToken);
   }
 
-  _updateFlashlight(timeInfo, tokenCenterWorld, cursorWorld, blocked, wallDistanceUnits, groundZ, distanceFade = 1.0, tokenDoc = null, maxDistanceUnitsOverride = null, coneMaxLenUOverride = null, tokenRadiusPxOverride = null) {
+  _updateFlashlight(timeInfo, tokenCenterWorld, cursorWorld, blocked, wallDistanceUnits, groundZ, distanceFade = 1.0, tokenDoc = null, tokenSprite = null, maxDistanceUnitsOverride = null, coneMaxLenUOverride = null, tokenRadiusPxOverride = null) {
     if (!this._flashlightBeamMesh || !this._flashlightBeamMat || !this._flashlightCookieMesh || !this._flashlightCookieMat) return;
 
     this._tryAttachFlashlightToLightScene();
@@ -3764,11 +4128,13 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     const timeStep = Math.min(dt, 0.1);
 
     const bu = this._flashlightBeamMat.uniforms;
+    const beamEmissionGain = this._computePlayerLightEmissionGain(Math.max(0.25, intensityFactor));
     bu.uIntensity.value = intensity;
+    if (bu.uEmissionGain) bu.uEmissionGain.value = beamEmissionGain;
     bu.uNearWidth.value = Math.max(0.0, Math.min(1.5, this.params.flashlightBeamNearWidth ?? 0.12));
     bu.uFarWidth.value = Math.max(0.0, Math.min(3.0, this.params.flashlightBeamFarWidth ?? 1.0));
     bu.uWidthCurve.value = Math.max(0.01, this.params.flashlightBeamWidthCurve ?? 1.25);
-    bu.uEdgeSoftness.value = Math.max(0.0, this.params.flashlightBeamEdgeSoftness ?? 0.18);
+    bu.uEdgeSoftness.value = Math.max(0.01, Math.min(0.95, this.params.flashlightBeamEdgeSoftness ?? 0.18));
     bu.uCoreIntensity.value = Math.max(0.0, this.params.flashlightBeamCoreIntensity ?? 1.25);
     bu.uCoreSharpness.value = Math.max(0.01, this.params.flashlightBeamCoreSharpness ?? 10.0);
     bu.uMidIntensity.value = Math.max(0.0, this.params.flashlightBeamMidIntensity ?? 0.25);
@@ -3811,6 +4177,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
     const cu = this._flashlightCookieMat.uniforms;
     cu.uIntensity.value = intensity * Math.max(0.0, this.params.flashlightCookieIntensity ?? 1.0);
+    if (cu.uEmissionGain) cu.uEmissionGain.value = beamEmissionGain;
     cu.uTime.value += timeStep;
     cu.uCookieTexture.value = cTex;
     cu.uCookieRotationEnabled.value = this.params.flashlightCookieRotation;
@@ -3879,6 +4246,23 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     if (this._flashlightCookieWorld) {
       this._flashlightCookieWorld.copy(cookieMesh.position);
     }
+
+    const maskTargets = [
+      bu,
+      cu,
+      this._flashlightMat?.uniforms,
+      this._flashlightOriginMat?.uniforms
+    ];
+    if (visible) {
+      for (let i = 0; i < maskTargets.length; i++) {
+        this._updateFlashlightTokenScreenMask(maskTargets[i], tokenCenterWorld, tokenSprite, groundZ);
+      }
+    } else {
+      for (let i = 0; i < maskTargets.length; i++) {
+        this._clearFlashlightTokenScreenMask(maskTargets[i]);
+      }
+    }
+
     this._endPerfSpan(_perfToken);
   }
 
@@ -4000,6 +4384,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
           const dim = Math.max(0, this.params.torchLightDim) * lightScale;
           const bright = Math.max(0, this.params.torchLightBright) * lightScale;
+          const outputGain = this._computePlayerLightEmissionGain(Math.max(0.25, lightScale));
 
           const animType = this.params.torchLightAnimType === 'none' ? null : this.params.torchLightAnimType;
 
@@ -4013,6 +4398,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
             alpha: this.params.torchLightAlpha * lightScale,
             attenuation: this.params.torchLightAttenuation,
             luminosity: this.params.torchLightLuminosity * lightScale,
+            outputGain,
             animation: {
               type: animType,
               speed: this.params.torchLightAnimSpeed,
@@ -4096,6 +4482,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         const c = this.params.flashlightLightColor;
         const dim = Math.max(0, this.params.flashlightLightDim) * scale;
         const bright = Math.max(0, this.params.flashlightLightBright) * scale;
+        const outputGain = this._computePlayerLightEmissionGain(Math.max(0.25, scale));
         const animType = this.params.flashlightLightAnimType === 'none' ? null : this.params.flashlightLightAnimType;
 
         const doc = this._flashlightLightDoc;
@@ -4108,6 +4495,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           alpha: this.params.flashlightLightAlpha * flashlightIntensityFactor * wallScale,
           attenuation: this.params.flashlightLightAttenuation,
           luminosity: this.params.flashlightLightLuminosity * flashlightIntensityFactor * wallScale,
+          outputGain,
           animation: {
             type: animType,
             speed: this.params.flashlightLightAnimSpeed,

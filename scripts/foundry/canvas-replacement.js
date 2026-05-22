@@ -5348,9 +5348,14 @@ function _attachFrameCoordinatorPostPixiForV2() {
       }
 
       const due = typeof rl.isPresentationDueNow === 'function' && rl.isPresentationDueNow();
-      if (moved) {
+      const playbackActive = (
+        window.MapShine?.cameraPathService?.isPlaying === true
+        || window.MapShine?.cameraPathService?.animator?.isActive === true
+        || window.MapShine?.environmentControlApi?.isExternallyDriven?.() === true
+      );
+      if (playbackActive || moved) {
         try { rl.requestRender?.(); } catch (_) {}
-        try { rl.requestContinuousRender?.(120); } catch (_) {}
+        try { rl.requestContinuousRender?.(playbackActive ? 5000 : 120); } catch (_) {}
       } else if (due) {
         try { rl.requestRender?.(); } catch (_) {}
       }
@@ -7923,7 +7928,8 @@ async function createThreeCanvas(scene, createOptions = {}) {
       mouseStateManager: interactionManager?.mouseStateManager ?? null,
       overlayUIManager, lightEditor, gridRenderer, mapPointsManager,
       tileMotionManager,
-      weatherController, renderLoop, sceneDebug, controlsIntegration,
+      weatherController, renderLoop, timeManager: effectComposer?.getTimeManager?.() ?? null,
+      sceneDebug, controlsIntegration,
       dynamicExposureManager, physicsRopeManager, assetLoader,
       externalEffects,
       setMapMakerMode, resetScene, isMapMakerMode

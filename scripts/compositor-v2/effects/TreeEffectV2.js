@@ -21,7 +21,9 @@ import { resolveEffectShadowSun2D } from '../shadow-system/ShadowSunDirection.js
 
 import {
   GROUND_Z,
-  effectTopOfFloorStackOrder,
+  MAX_INTRA_ROLE_OFFSET,
+  tileAlbedoOrder,
+  treeOverlayRenderOrders,
 } from '../LayerOrderPolicy.js';
 
 const log = createLogger('TreeEffectV2');
@@ -901,6 +903,7 @@ export class TreeEffectV2 {
       if (absDiff <= 0.0005) {
         hoverUniform.value = targetFade;
         if (shadowHoverUniform) shadowHoverUniform.value = targetFade;
+        this._applyTreeHoverRevealStacking(entry, tileId, targetFade);
         continue;
       }
       hoverFadeInProgress = true;
@@ -909,6 +912,7 @@ export class TreeEffectV2 {
       const step = Math.sign(diff) * Math.min(absDiff, maxStep);
       hoverUniform.value = currentFade + step;
       if (shadowHoverUniform) shadowHoverUniform.value = hoverUniform.value;
+      this._applyTreeHoverRevealStacking(entry, tileId, hoverUniform.value);
     }
     this._hoverFadeInProgress = hoverFadeInProgress;
 
@@ -1167,6 +1171,23 @@ export class TreeEffectV2 {
         mesh: entry.shadowMesh,
         uniforms: entry.shadowMaterial.uniforms,
         material: entry.shadowMaterial,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Live tree canopy meshes for screen-space occlusion masks (e.g. bush shadows).
+   * @returns {{mesh: import('three').Mesh, material: import('three').Material}[]}
+   */
+  collectCanopyOcclusionEntries() {
+    if (!this._enabled || !this._initialized) return [];
+    const out = [];
+    for (const entry of this._overlays.values()) {
+      if (!entry?.mesh?.visible || !entry?.material) continue;
+      out.push({
+        mesh: entry.mesh,
+        material: entry.material,
       });
     }
     return out;
@@ -1699,11 +1720,19 @@ export class TreeEffectV2 {
           if (uVegetationPass < 1.5) {
             if (uShadowLitCapture > 0.5) {
               float lit = clamp(1.0 - shadowA, 0.0, 1.0);
+              // Ground-only lit factor — never darken pixels where foliage exists.
+              lit = mix(lit, 1.0, clamp(texA * uIntensity, 0.0, 1.0));
               gl_FragColor = vec4(lit, lit, lit, 1.0);
               return;
             }
-            if (shadowA <= 0.001) discard;
-            gl_FragColor = vec4(0.0, 0.0, 0.0, shadowA);
+            float outShadow = shadowA;
+            // Hover reveal: canopy fades but ground shadow must stay continuous (no silhouette hole).
+            if (hf < 0.999) {
+              float localSilhouette = texA * clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
+              outShadow = max(outShadow, localSilhouette);
+            }
+            if (outShadow <= 0.001) discard;
+            gl_FragColor = vec4(0.0, 0.0, 0.0, outShadow);
             return;
           }
 
@@ -1772,9 +1801,7 @@ export class TreeEffectV2 {
     shadowMesh.rotation.z = rotation;
     mesh.rotation.z = rotation;
 
-    const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
-    shadowMesh.renderOrder = effectTopOfFloorStackOrder(fi, 1);
-    mesh.renderOrder = effectTopOfFloorStackOrder(fi, 0);
+    this._applyTreeOverlayRenderOrders(shadowMesh, mesh, tileId, floorIndex);
 
     try {
       shadowMesh.layers.enable(21);
@@ -1801,6 +1828,12 @@ export class TreeEffectV2 {
         material.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
         shadowMaterial.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
         this._cacheAlphaSamples(tileId, tex);
+        try {
+          const entry = this._overlays.get(tileId);
+          if (entry?.shadowMesh && entry?.mesh) {
+            this._applyTreeOverlayRenderOrders(entry.shadowMesh, entry.mesh, tileId, floorIndex);
+          }
+        } catch (_) {}
       } else {
         try { tex.dispose(); } catch (_) {}
       }
@@ -1866,5 +1899,55 @@ export class TreeEffectV2 {
       if (entry?.mesh) entry.mesh.visible = visible;
       if (entry?.shadowMesh) entry.shadowMesh.visible = visible;
     }
+  }
+
+  /**
+   * During hover reveal, draw the shadow decal above the fading canopy so partial
+   * alpha does not punch holes in the ground shadow. Restore normal stacking when
+   * the canopy is fully visible again.
+   * @param {{ mesh?: import('three').Mesh, shadowMesh?: import('three').Mesh, floorIndex?: number }} entry
+   * @param {string} tileId
+   * @param {number} hoverFade
+   * @private
+   */
+  _applyTreeHoverRevealStacking(entry, tileId, hoverFade) {
+    if (!entry?.shadowMesh || !entry?.mesh) return;
+    const hf = Number.isFinite(Number(hoverFade)) ? Number(hoverFade) : 1.0;
+    if (hf < 0.999) {
+      const fi = Number.isFinite(Number(entry.floorIndex)) ? Math.max(0, Number(entry.floorIndex)) : 0;
+      const { canopyOrder } = treeOverlayRenderOrders(0, fi);
+      entry.shadowMesh.renderOrder = canopyOrder + 0.005;
+      return;
+    }
+    this._applyTreeOverlayRenderOrders(entry.shadowMesh, entry.mesh, tileId, entry.floorIndex);
+  }
+
+  /**
+   * Tile-stack tree shadow/canopy orders: shadow always below its own canopy,
+   * both capped at the reserved top-of-floor tree slots.
+   * @param {import('three').Mesh} shadowM
+   * @param {import('three').Mesh} canopyM
+   * @param {string} tileId
+   * @param {number} floorIndex
+   * @private
+   */
+  _applyTreeOverlayRenderOrders(shadowM, canopyM, tileId, floorIndex) {
+    try {
+      const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
+      const isBgPlane = /^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId));
+      let baseOrder = null;
+      if (isBgPlane) {
+        baseOrder = tileAlbedoOrder(fi, 0);
+      } else {
+        const baseEntry = this._renderBus?._tiles?.get?.(tileId);
+        const fromTile = Number(baseEntry?.mesh?.renderOrder);
+        baseOrder = Number.isFinite(fromTile)
+          ? fromTile
+          : tileAlbedoOrder(fi, MAX_INTRA_ROLE_OFFSET);
+      }
+      const { shadowOrder, canopyOrder } = treeOverlayRenderOrders(baseOrder, fi);
+      shadowM.renderOrder = shadowOrder;
+      canopyM.renderOrder = canopyOrder;
+    } catch (_) {}
   }
 }

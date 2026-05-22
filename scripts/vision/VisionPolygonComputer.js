@@ -67,7 +67,7 @@ export class VisionPolygonComputer {
    * @param {number} radius - Vision radius in pixels
    * @param {Wall[]} walls - Array of wall placeables (optional, defaults to canvas.walls.placeables)
    * @param {{x: number, y: number, width: number, height: number}} [sceneBounds] - Optional scene bounds to clip vision
-   * @param {{sense?: 'sight'|'light', blockGeometry?: boolean, elevation?: number, forceClosedDoorWallIds?: Set<string>, skipDoorWallIds?: Set<string>, additionalSegments?: Array<{x0:number,y0:number,x1:number,y1:number}>}|null} [options] - Optional compute mode, viewer elevation, and door walls to treat as closed or replaced by animated blocker segments. When `blockGeometry` is true, every wall segment blocks (except open doors), ignoring Foundry sight/light/window threshold rules — for candle glow and similar effects.
+   * @param {{sense?: 'sight'|'light', blockGeometry?: boolean, elevation?: number, wallPaddingPx?: number, forceClosedDoorWallIds?: Set<string>, skipDoorWallIds?: Set<string>, additionalSegments?: Array<{x0:number,y0:number,x1:number,y1:number}>}|null} [options] - Optional compute mode, viewer elevation, and door walls to treat as closed or replaced by animated blocker segments. When `blockGeometry` is true, every wall segment blocks (except open doors), ignoring Foundry sight/light/window threshold rules — for candle glow and similar effects. `wallPaddingPx` expands each blocking segment into a padded quad before raycasting (reduces light bleed through thin walls).
    * @returns {number[]} Flat array [x0, y0, x1, y1, ...] in Foundry coordinates
    */
   compute(center, radius, walls = null, sceneBounds = null, options = null) {
@@ -106,6 +106,11 @@ export class VisionPolygonComputer {
     }
     if (sense === 'light' || blockGeometry) {
       this.restrictLightTilesToSegments(center, radius, segments, elevation);
+    }
+
+    const wallPaddingPx = Math.max(0, Number(options?.wallPaddingPx) || 0);
+    if (wallPaddingPx > 0 && segments.length > 0) {
+      this._replaceSegmentsWithPaddedQuads(segments, wallPaddingPx);
     }
 
     // Add scene boundary segments if provided (clips vision to scene interior)
@@ -376,6 +381,72 @@ export class VisionPolygonComputer {
 
     segments.length = writeIndex;
     return segments;
+  }
+
+  /**
+   * Replace thin wall segments with padded quads so light polygons do not bleed
+   * through sub-pixel wall gaps.
+   * @param {Array<{a:{x:number,y:number},b:{x:number,y:number}}>} segments
+   * @param {number} padPx
+   * @private
+   */
+  _replaceSegmentsWithPaddedQuads(segments, padPx) {
+    const pad = Math.max(0, Number(padPx) || 0);
+    if (pad <= 0 || !segments?.length) return;
+
+    const sourceCount = segments.length;
+    let writeIndex = 0;
+
+    for (let i = 0; i < sourceCount; i++) {
+      const src = segments[i];
+      if (!src?.a || !src?.b) continue;
+
+      const ax = src.a.x;
+      const ay = src.a.y;
+      const bx = src.b.x;
+      const by = src.b.y;
+      const dx = bx - ax;
+      const dy = by - ay;
+      const len = Math.hypot(dx, dy);
+      if (len <= 1e-6) continue;
+
+      const nx = (-dy / len) * pad;
+      const ny = (dx / len) * pad;
+
+      const a1x = ax + nx;
+      const a1y = ay + ny;
+      const b1x = bx + nx;
+      const b1y = by + ny;
+      const a2x = ax - nx;
+      const a2y = ay - ny;
+      const b2x = bx - nx;
+      const b2y = by - ny;
+
+      const edges = [
+        [a1x, a1y, b1x, b1y],
+        [a2x, a2y, b2x, b2y],
+        [a1x, a1y, a2x, a2y],
+        [b1x, b1y, b2x, b2y]
+      ];
+
+      for (let e = 0; e < edges.length; e++) {
+        let seg = segments[writeIndex];
+        if (!seg || typeof seg !== 'object') {
+          seg = { a: { x: 0, y: 0 }, b: { x: 0, y: 0 } };
+          segments[writeIndex] = seg;
+        } else {
+          if (!seg.a) seg.a = { x: 0, y: 0 };
+          if (!seg.b) seg.b = { x: 0, y: 0 };
+        }
+        seg.a.x = edges[e][0];
+        seg.a.y = edges[e][1];
+        seg.b.x = edges[e][2];
+        seg.b.y = edges[e][3];
+        writeIndex++;
+      }
+    }
+
+    segments.length = writeIndex;
   }
 
   /**

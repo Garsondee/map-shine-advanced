@@ -1114,6 +1114,16 @@ export class PerformanceRecorder {
       }
     } catch (_) {}
 
+    let cloudShadowCache = null;
+    try {
+      const cloud = window?.MapShine?.effectComposer?._floorCompositorV2?._cloudEffect
+        ?? window?.MapShine?.floorCompositorV2?._cloudEffect
+        ?? window?.MapShine?.cloudEffectV2;
+      if (cloud && typeof cloud.getShadowCacheStats === 'function') {
+        cloudShadowCache = cloud.getShadowCacheStats();
+      }
+    } catch (_) {}
+
     const infoCurrent = this._snapshotRendererInfo();
     const avgDrawCallsPerFrame = this._totalRecordedFrames > 0
       ? frameTimes.length > 0
@@ -1174,6 +1184,7 @@ export class PerformanceRecorder {
       sequencer,
       v2PassTimings,
       vramBudget,
+      cloudShadowCache,
       rendererInfo: {
         start: this._infoStart,
         current: infoCurrent,

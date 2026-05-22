@@ -112,6 +112,7 @@ import { ShadowDriverState } from './shadow-system/ShadowDriverState.js';
 import { UpperFloorAlphaCompositor } from './shadow-system/UpperFloorAlphaCompositor.js';
 import { SkyOcclusionPrimitive } from './shadow-system/SkyOcclusionPrimitive.js';
 import { VegetationBillboardShadowPass } from './shadow-system/VegetationBillboardShadowPass.js';
+import { TreeCanopyOcclusionPass } from './shadow-system/TreeCanopyOcclusionPass.js';
 import { resolveEffectShadowSun2D } from './shadow-system/ShadowSunDirection.js';
 import { resolveEffectEnabled, resolveOverlayEffectActive, resolveFloorEffectActive } from '../effects/resolve-effect-enabled.js';
 
@@ -327,6 +328,8 @@ export class FloorCompositor {
     this._treeVegetationBillboardPass = new VegetationBillboardShadowPass();
     /** @type {VegetationBillboardShadowPass} */
     this._bushVegetationBillboardPass = new VegetationBillboardShadowPass();
+    /** @type {TreeCanopyOcclusionPass} */
+    this._treeCanopyOcclusionPass = new TreeCanopyOcclusionPass();
     /** @type {THREE.Texture|null} */
     this._treeBillboardShadowTexture = null;
     /** @type {THREE.Texture|null} */
@@ -1686,8 +1689,10 @@ export class FloorCompositor {
       () => {
         this._treeVegetationBillboardPass.initialize();
         this._bushVegetationBillboardPass.initialize();
+        this._treeCanopyOcclusionPass.initialize();
         this._treeVegetationBillboardPass.onResize(w, h);
         this._bushVegetationBillboardPass.onResize(w, h);
+        this._treeCanopyOcclusionPass.onResize(w, h);
       },
     );
     await initEffect('UpperFloorAlphaCompositor', () => this._upperFloorAlphaCompositor.initialize(this.renderer, w, h));
@@ -1716,6 +1721,7 @@ export class FloorCompositor {
     try { this._lightningEffect?.initialize?.(this.renderer, this._renderBus._scene, this.camera); } catch (err) {
       log.warn('FloorCompositor: LightningEffectV2 initialize failed:', err);
     }
+    try { this._lightningEffect?.setLightingEffect?.(this._lightingEffect); } catch (_) {}
     _reportProgress('LightningEffectV2');
     await yieldToMain();
     try {
@@ -3224,6 +3230,55 @@ export class FloorCompositor {
   }
 
   /**
+   * Renders a live wind-aware tree canopy alpha mask for bush shadow suppression.
+   */
+  _prepareTreeCanopyOcclusionPass() {
+    const pass = this._treeCanopyOcclusionPass;
+    const bush = this._bushEffect;
+    if (!pass || !this.renderer || !this.camera) {
+      bush?.setTreeCanopyOcclusionTexture?.(null);
+      return;
+    }
+
+    try {
+      pass.initialize();
+    } catch (_) {
+      bush?.setTreeCanopyOcclusionTexture?.(null);
+      return;
+    }
+
+    const v = this._drawingBufferSizeTmp || (this._drawingBufferSizeTmp = new window.THREE.Vector2());
+    this.renderer.getDrawingBufferSize(v);
+    const bw = Math.max(2, Math.floor(Number(v.x) || 2));
+    const bh = Math.max(2, Math.floor(Number(v.y) || 2));
+    try {
+      pass.onResize(bw, bh);
+    } catch (_) {}
+
+    const treeEnabled = resolveEffectEnabled(this._treeEffect);
+    const bushEnabled = resolveEffectEnabled(this._bushEffect);
+    if (!treeEnabled || !bushEnabled) {
+      bush?.setTreeCanopyOcclusionTexture?.(null);
+      return;
+    }
+
+    const entries = this._treeEffect?.collectCanopyOcclusionEntries?.() ?? [];
+    if (entries.length === 0) {
+      bush?.setTreeCanopyOcclusionTexture?.(null);
+      return;
+    }
+
+    try {
+      pass.render(this.renderer, this.camera, entries);
+      const tex = pass.texture ?? null;
+      bush?.setTreeCanopyOcclusionTexture?.(tex, pass.width || bw, pass.height || bh);
+    } catch (err) {
+      log.warn('FloorCompositor: tree canopy occlusion pass failed:', err);
+      bush?.setTreeCanopyOcclusionTexture?.(null);
+    }
+  }
+
+  /**
    * Combine cloud (may be null / previous frame) + overhead + building into
    * ShadowManagerV2's screen-space RT for consumers that draw before the cloud pass.
    * @param {THREE.Texture|null} cloudTex
@@ -3339,8 +3394,8 @@ export class FloorCompositor {
         { id: 'building', texture: buildingTex, uvSpace: 'scene', opacity: sm.params?.buildingOpacity ?? 1 },
         { id: 'painted', texture: paintedTex, uvSpace: 'scene', opacity: sm.params?.paintedOpacity ?? 1, preservesDeep: true },
         { id: 'skyReach', texture: skyReachTex, uvSpace: 'scene', opacity: sm.params?.skyReachOpacity ?? 1 },
-        { id: 'tree', texture: this._treeBillboardShadowTexture ?? null, uvSpace: 'screen', opacity: sm.params?.treeBillboardOpacity ?? 1 },
-        { id: 'bush', texture: this._bushBillboardShadowTexture ?? null, uvSpace: 'screen', opacity: sm.params?.bushBillboardOpacity ?? 1 },
+        { id: 'tree', texture: this._treeBillboardShadowTexture ?? null, uvSpace: 'screen', opacity: 0 },
+        { id: 'bush', texture: this._bushBillboardShadowTexture ?? null, uvSpace: 'screen', opacity: 0 },
       ]);
     } else {
       sm.setInputs({
@@ -3747,6 +3802,15 @@ export class FloorCompositor {
           sunAzimuthDeg: this._skyColorEffect?.currentSunAzimuthDeg,
         });
       } catch (_) {}
+      try {
+        this._cloudEffect?.setSkyState?.({
+          skyTintColor: this._skyColorEffect?.currentSkyTintColor,
+          sunAzimuthDeg: this._skyColorEffect?.currentSunAzimuthDeg,
+          sunElevationDeg: this._skyColorEffect?.currentSunElevationDeg,
+          skyIntensity01: Number.isFinite(skyIntensity01) ? Math.max(0.0, Math.min(1.0, skyIntensity01)) : 1.0,
+          sceneDarkness01,
+        });
+      } catch (_) {}
       this._profileEffectCall('windowLight', 'update', () => this._windowLightEffect.update(timeInfo), 'WindowLightEffectV2 update');
       // Keep TileManager linked even if managers are re-created during canvas/scene transitions.
       try {
@@ -3966,6 +4030,12 @@ export class FloorCompositor {
       this._prepareVegetationBillboardShadowPasses();
     } catch (err) {
       log.warn('FloorCompositor: vegetation billboard shadow prep failed:', err);
+    }
+
+    try {
+      this._prepareTreeCanopyOcclusionPass();
+    } catch (err) {
+      log.warn('FloorCompositor: tree canopy occlusion prep failed:', err);
     }
 
     try {
@@ -4908,7 +4978,7 @@ export class FloorCompositor {
     try {
       const THREE = window.THREE;
       if (!THREE?.DataTexture || !THREE?.RGBAFormat || !THREE?.UnsignedByteType) return null;
-      const data = new Uint8Array([0, 0, 0, 255]);
+      const data = new Uint8Array([0, 0, 0, 0]);
       const tex = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
       tex.name = 'MapShineNeutralOutdoorsMask';
       tex.needsUpdate = true;
@@ -5250,6 +5320,7 @@ export class FloorCompositor {
       this._filterEffect?.setOutdoorsMask?.(outdoorsTex);
       this._atmosphericFogEffect?.setOutdoorsMask?.(outdoorsTex);
       this._windowLightEffect?.setOutdoorsMask?.(outdoorsTex);
+      this._bloomEffect?.setOutdoorsMask?.(outdoorsTex);
       this._overheadShadowEffect?.setOutdoorsMask?.(outdoorsTex);
       this._buildingShadowEffect?.setOutdoorsMask?.(outdoorsTex);
       this._paintedShadowEffect?.setOutdoorsMask?.(paintedOutdoorsTex);
@@ -5723,6 +5794,7 @@ export class FloorCompositor {
     try {
       this._treeVegetationBillboardPass?.onResize?.(w, h);
       this._bushVegetationBillboardPass?.onResize?.(w, h);
+      this._treeCanopyOcclusionPass?.onResize?.(w, h);
     } catch (_) {}
     try { this._skyOcclusionPrimitive?.onResize?.(w, h); } catch (_) {}
     try { this._bushEffect?.onResize?.(w, h); } catch (_) {}
@@ -6354,10 +6426,9 @@ export class FloorCompositor {
         let outdoorsForLightingTex = null;
         try {
           const floorCount = (floorStack?.getFloors?.() ?? []).length;
-          // Bind the rendered slice's own _Outdoors (skyReach-first, same as water).
-          // Using activeLevelContext here applied the *viewed* floor mask to every
-          // visible band, so Day ambient / interior-darkness gated wrong on stacks.
-          outdoorsForLightingTex = resolveWaterOutdoorsForFloor(levelIndex);
+          // Authored `_Outdoors` first (not skyReach) so window glow + interior dim
+          // agree on indoor/outdoor classification for this level slice.
+          outdoorsForLightingTex = resolveWaterShelterOutdoorsForFloor(levelIndex);
           if (!outdoorsForLightingTex && floorCount <= 1) {
             const lightingCtx = window.MapShine?.activeLevelContext ?? null;
             outdoorsForLightingTex = this._resolveOutdoorsMask(lightingCtx, { allowWeatherRoofMap: false }).texture ?? null;
@@ -6366,6 +6437,8 @@ export class FloorCompositor {
             outdoorsForLightingTex = this._getNeutralOutdoorsTexture();
           }
         } catch (_) {}
+
+        this._windowLightEffect?.setOutdoorsMask?.(outdoorsForLightingTex);
 
         // Lighting composes screen-space occlusion/window terms using gl_FragCoord.
         // Keep this pass unscissored so elevated/parallax overhead pixels outside the
@@ -6394,15 +6467,8 @@ export class FloorCompositor {
               paintedForLevel, paintedShadowMgrOpacity,
               paintedShadowAtAndAboveLitTex,
               paintedShadowInCombined,
-              this._vegetationBillboardShadowTexture ?? null,
-              (() => {
-                const sm = this._shadowManagerEffect;
-                const to = Number(sm?.params?.treeBillboardOpacity ?? 1);
-                const bo = Number(sm?.params?.bushBillboardOpacity ?? 1);
-                const t = Number.isFinite(to) ? Math.max(0, Math.min(1, to)) : 1;
-                const b = Number.isFinite(bo) ? Math.max(0, Math.min(1, bo)) : 1;
-                return Math.min(t, b);
-              })(),
+              null,
+              0,
             );
           });
         }, 'LightingEffectV2 render');
@@ -6843,8 +6909,25 @@ export class FloorCompositor {
       const bloomOut = _pickOtherPost();
       let bloomWrote = false;
       if (_profiling) _profileT0 = performance.now();
+      // Stacked outdoors for multi-floor spill suppress (same source as CC grade).
+      let outdoorsForBloom = this._lastOutdoorsTexture ?? null;
+      try {
+        const maskCompositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+        const floorKeys = visibleFloors
+          .map((f) => (f?.compositorKey != null ? String(f.compositorKey) : ''))
+          .filter((k) => k.length > 0);
+        if (maskCompositor && floorKeys.length > 1) {
+          outdoorsForBloom = maskCompositor.composeStackedOutdoorsMask?.(
+            this.renderer,
+            floorKeys,
+          ) ?? outdoorsForBloom;
+        }
+      } catch (_) {}
+      this._bloomEffect?.setOutdoorsMask?.(outdoorsForBloom ?? null);
       this._profileEffectCall('bloom.postMerge', 'render', () => {
-        bloomWrote = !!this._bloomEffect.render(this.renderer, mergedCompositeOut, bloomOut);
+        bloomWrote = !!this._bloomEffect.render(
+          this.renderer, mergedCompositeOut, bloomOut, this.camera,
+        );
       }, 'BloomEffectV2 postMerge render');
       if (_profiling) this._recordPassTiming('postMerge_bloom', _profileT0);
       if (bloomWrote) mergedCompositeOut = bloomOut;
@@ -6972,6 +7055,7 @@ export class FloorCompositor {
     try {
       this._treeVegetationBillboardPass?.dispose?.();
       this._bushVegetationBillboardPass?.dispose?.();
+      this._treeCanopyOcclusionPass?.dispose?.();
     } catch (_) {}
     this._lightingPerspectiveContext = null;
     try { this._lightingEffect?.setLightingPerspectiveContext?.(null); } catch (_) {}

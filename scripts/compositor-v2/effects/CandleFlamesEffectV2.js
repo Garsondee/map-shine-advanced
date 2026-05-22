@@ -48,8 +48,11 @@ export class CandleFlamesEffectV2 {
       flameFlickerSpeedJitter: 0.45,
       flameFlickerStrengthJitter: 0.35,
       flameOvality: 0.31,
-      flameWobble: 0.0,
+      flameWobble: 0.24,
       flameWobbleSpeed: 5.95,
+      flameWobbleNoise: 0.2,
+      flameShapeDistort: 1.0,
+      flameIndoorSway: 0.12,
       draftiness: 0.12,
       outdoorWindInfluence: 0.66,
       outdoorSway: 0.25,
@@ -60,6 +63,9 @@ export class CandleFlamesEffectV2 {
       glowRadiusPx: 172.0,
       glowInnerRadiusScale: 0.2,
       glowIntensity: 0.42,
+      glowDarknessCancel: 3.0,
+      glowDarknessNightBoost: 2.0,
+      glowFollowLightIntensity: true,
       glowFlickerStrength: 2.25,
       glowFlickerSpeed: 6.0,
       glowFlickerStrengthJitter: 0.75,
@@ -140,6 +146,9 @@ export class CandleFlamesEffectV2 {
             'flameOvality',
             'flameWobble',
             'flameWobbleSpeed',
+            'flameWobbleNoise',
+            'flameShapeDistort',
+            'flameIndoorSway',
             'draftiness',
             'outdoorWindInfluence',
             'outdoorSway'
@@ -166,6 +175,9 @@ export class CandleFlamesEffectV2 {
           parameters: [
             'glowEnabled',
             'glowIntensity',
+            'glowDarknessCancel',
+            'glowDarknessNightBoost',
+            'glowFollowLightIntensity',
             'glowFlickerStrength',
             'glowFlickerSpeed',
             'glowFlickerStrengthJitter',
@@ -192,11 +204,38 @@ export class CandleFlamesEffectV2 {
         flameFlickerSpeedJitter: { type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.45, label: 'Flicker Speed Jitter' },
         flameFlickerStrengthJitter: { type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.35, label: 'Flicker Strength Jitter' },
         flameOvality: { type: 'slider', min: 0, max: 0.85, step: 0.01, default: 0.31, label: 'Ovality' },
-        flameWobble: { type: 'slider', min: 0, max: 0.4, step: 0.01, default: 0.24, label: 'Wobble' },
-        flameWobbleSpeed: { type: 'slider', min: 0, max: 6.0, step: 0.05, default: 5.95, label: 'Wobble Speed' },
-        draftiness: { type: 'slider', min: 0, max: 0.4, step: 0.01, default: 0.12, label: 'Draftiness (Indoor)' },
-        outdoorWindInfluence: { type: 'slider', min: 0, max: 1.0, step: 0.02, default: 0.66, label: 'Wind Influence (Outdoor)' },
-        outdoorSway: { type: 'slider', min: 0, max: 0.25, step: 0.005, default: 0.25, label: 'Outdoor Sway' },
+        flameWobble: {
+          type: 'slider', min: 0, max: 0.8, step: 0.01, default: 0.24, label: 'Wobble',
+          tooltip: 'UV bend + tip lean. Higher = flames feel more restless.',
+        },
+        flameWobbleSpeed: {
+          type: 'slider', min: 0, max: 12.0, step: 0.05, default: 5.95, label: 'Wobble Speed',
+          tooltip: 'How fast the flame shape oscillates.',
+        },
+        flameWobbleNoise: {
+          type: 'slider', min: 0, max: 0.5, step: 0.01, default: 0.2, label: 'Shape Chaos',
+          tooltip: 'Organic pulsing of flame outline (smooth noise on radius).',
+        },
+        flameShapeDistort: {
+          type: 'slider', min: 0, max: 2.0, step: 0.05, default: 1.0, label: 'Shape Distort',
+          tooltip: 'Multiplier on UV wobble displacement.',
+        },
+        flameIndoorSway: {
+          type: 'slider', min: 0, max: 0.25, step: 0.005, default: 0.12, label: 'Indoor Sway',
+          tooltip: 'Horizontal tip sway for indoor candles (draft-like).',
+        },
+        draftiness: {
+          type: 'slider', min: 0, max: 0.4, step: 0.01, default: 0.12, label: 'Draftiness (Indoor)',
+          tooltip: 'Vertex lean from indoor air currents (stronger at flame tip).',
+        },
+        outdoorWindInfluence: {
+          type: 'slider', min: 0, max: 1.0, step: 0.02, default: 0.66, label: 'Wind Influence (Outdoor)',
+          tooltip: 'How much weather wind bends outdoor candle tips.',
+        },
+        outdoorSway: {
+          type: 'slider', min: 0, max: 0.25, step: 0.005, default: 0.25, label: 'Outdoor Sway',
+          tooltip: 'Horizontal tip sway for outdoor candles.',
+        },
 
         autoDayNightBalance: {
           type: 'boolean',
@@ -243,6 +282,18 @@ export class CandleFlamesEffectV2 {
 
         glowEnabled: { type: 'boolean', default: true, label: 'Enabled' },
         glowIntensity: { type: 'slider', min: 0, max: 2.5, step: 0.01, default: 0.42, label: 'Intensity' },
+        glowDarknessCancel: {
+          type: 'slider', min: 0, max: 8, step: 0.1, default: 3.0, label: 'Darkness Cancel',
+          tooltip: 'HDR punch into the light buffer (alpha). Higher = candles erase Foundry darkness and shadows more aggressively. Matches torch Point light gain behaviour.',
+        },
+        glowDarknessNightBoost: {
+          type: 'slider', min: 1, max: 4, step: 0.05, default: 2.0, label: 'Night Cancel Boost',
+          tooltip: 'Extra darkness-cancel strength at full night (master darkness ≈ 1).',
+        },
+        glowFollowLightIntensity: {
+          type: 'boolean', default: true, label: 'Follow Point Light Gain',
+          tooltip: 'Multiply cancel strength by Lighting → Point light gain so candle pools track torch brightness.',
+        },
         glowFlickerStrength: { type: 'slider', min: 0, max: 10.0, step: 0.05, default: 2.25, label: 'Flicker Strength' },
         glowFlickerSpeed: { type: 'slider', min: 0, max: 25.0, step: 0.1, default: 6.0, label: 'Flicker Speed' },
         glowFlickerStrengthJitter: { type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.75, label: 'Flicker Strength Jitter' },
@@ -308,6 +359,18 @@ export class CandleFlamesEffectV2 {
       this._flameMaterial.uniforms.uWobbleSpeed.value = this.params.flameWobbleSpeed;
     }
 
+    if (paramId === 'flameWobbleNoise' && this._flameMaterial?.uniforms?.uWobbleNoise) {
+      this._flameMaterial.uniforms.uWobbleNoise.value = this.params.flameWobbleNoise;
+    }
+
+    if (paramId === 'flameShapeDistort' && this._flameMaterial?.uniforms?.uShapeDistort) {
+      this._flameMaterial.uniforms.uShapeDistort.value = this.params.flameShapeDistort;
+    }
+
+    if (paramId === 'flameIndoorSway' && this._flameMaterial?.uniforms?.uIndoorSway) {
+      this._flameMaterial.uniforms.uIndoorSway.value = this.params.flameIndoorSway;
+    }
+
     if (paramId === 'draftiness' && this._flameMaterial?.uniforms?.uDraftiness) {
       this._flameMaterial.uniforms.uDraftiness.value = this.params.draftiness;
     }
@@ -348,7 +411,7 @@ export class CandleFlamesEffectV2 {
       return;
     }
 
-    if (paramId === 'glowIntensity') {
+    if (paramId === 'glowIntensity' || paramId === 'glowDarknessCancel' || paramId === 'glowDarknessNightBoost' || paramId === 'glowFollowLightIntensity') {
       return;
     }
 
@@ -529,6 +592,18 @@ export class CandleFlamesEffectV2 {
       this._flameMaterial.uniforms.uWobbleSpeed.value = this.params.flameWobbleSpeed;
     }
 
+    if (this._flameMaterial?.uniforms?.uWobbleNoise) {
+      this._flameMaterial.uniforms.uWobbleNoise.value = this.params.flameWobbleNoise;
+    }
+
+    if (this._flameMaterial?.uniforms?.uShapeDistort) {
+      this._flameMaterial.uniforms.uShapeDistort.value = this.params.flameShapeDistort;
+    }
+
+    if (this._flameMaterial?.uniforms?.uIndoorSway) {
+      this._flameMaterial.uniforms.uIndoorSway.value = this.params.flameIndoorSway;
+    }
+
     if (this._flameMaterial?.uniforms?.uDraftiness) {
       this._flameMaterial.uniforms.uDraftiness.value = this.params.draftiness;
     }
@@ -699,6 +774,29 @@ export class CandleFlamesEffectV2 {
     return day + (night - day) * t;
   }
 
+  /**
+   * HDR emission gain for glow buckets (compose alpha → darkness punch + direct light).
+   * @param {number} visualMul - Per-bucket flicker / intensity / day-night colour scale.
+   * @returns {number}
+   */
+  _computeGlowEmissionGain(visualMul) {
+    const cancel = Math.max(0, Number(this.params.glowDarknessCancel) || 0);
+    if (cancel <= 0) return 0;
+
+    let lightMul = 1.0;
+    if (this.params.glowFollowLightIntensity) {
+      const li = Number(this._lightingEffect?.params?.lightIntensity);
+      lightMul = Number.isFinite(li) ? Math.max(0.25, li) : 2.0;
+    }
+
+    const darkness = clamp01(LightingDirector.get().masterDarkness);
+    const nightBoost = Math.max(1, Number(this.params.glowDarknessNightBoost) || 1);
+    const nightMul = 1.0 + darkness * (nightBoost - 1.0);
+
+    const vis = Math.max(0, Number(visualMul) || 0);
+    return cancel * lightMul * nightMul * vis;
+  }
+
   /** Extra glow indoors at night (uses per-bucket roof mask). */
   _computeIndoorNightGlowBoost(outdoor01) {
     if (!this.params.autoDayNightBalance) return 1.0;
@@ -765,6 +863,9 @@ export class CandleFlamesEffectV2 {
         uOvality: { value: this.params.flameOvality },
         uWobble: { value: this.params.flameWobble },
         uWobbleSpeed: { value: this.params.flameWobbleSpeed },
+        uWobbleNoise: { value: this.params.flameWobbleNoise },
+        uShapeDistort: { value: this.params.flameShapeDistort },
+        uIndoorSway: { value: this.params.flameIndoorSway },
         uDraftiness: { value: this.params.draftiness },
         uOutdoorWindInfluence: { value: this.params.outdoorWindInfluence },
         uOutdoorSway: { value: this.params.outdoorSway },
@@ -844,13 +945,33 @@ export class CandleFlamesEffectV2 {
         uniform float uFlickerSpeedJitter;
         uniform float uFlickerStrengthJitter;
         uniform float uOutdoorSway;
+        uniform float uIndoorSway;
         uniform float uOvality;
         uniform float uWobble;
         uniform float uWobbleSpeed;
+        uniform float uWobbleNoise;
+        uniform float uShapeDistort;
         uniform float uWindSpeed;
         uniform sampler2D uFloorPresenceMap;
         uniform float uHasFloorPresenceMap;
         uniform vec2 uResolution;
+
+        float hash21(vec2 p) {
+          p = fract(p * vec2(123.34, 456.21));
+          p += dot(p, p + 78.233);
+          return fract(p.x * p.y);
+        }
+
+        float smoothNoise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          float a = hash21(i);
+          float b = hash21(i + vec2(1.0, 0.0));
+          float c = hash21(i + vec2(0.0, 1.0));
+          float d = hash21(i + vec2(1.0, 1.0));
+          vec2 u = f * f * (3.0 - 2.0 * f);
+          return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+        }
 
         void main() {
           vec2 uv = vUv;
@@ -858,6 +979,8 @@ export class CandleFlamesEffectV2 {
           float sway = 0.0;
           if (vOutdoor > 0.5) {
             sway = uOutdoorSway * (sin(uTime * 1.7 + vPhase * 6.2831) * 0.5 + sin(uTime * 2.9 + vPhase * 9.1) * 0.5);
+          } else {
+            sway = uIndoorSway * (sin(uTime * 1.4 + vPhase * 5.1) * 0.5 + sin(uTime * 2.2 + vPhase * 8.3) * 0.5);
           }
           uv.x += sway;
 
@@ -867,6 +990,16 @@ export class CandleFlamesEffectV2 {
           p.x *= (1.0 + oval);
           p.y *= (1.0 - 0.55 * oval);
 
+          float wobbleSpeed = uWobbleSpeed;
+          float wTime = uTime * wobbleSpeed + vPhase * 19.7;
+          float wAmp = uWobble * (0.35 + 0.65 * (0.5 + 0.5 * uWindSpeed));
+
+          vec2 wob = vec2(
+            sin(wTime * 1.31 + p.y * 6.0),
+            sin(wTime * 1.77 + p.x * 5.0)
+          );
+          float distort = max(0.0, uShapeDistort);
+          p += wob * wAmp * distort * (0.35 + 0.65 * p.y);
           float r = length(p) * 2.0;
 
           // Use vPhase (stable per candle) to vary flicker per-instance.
@@ -883,6 +1016,10 @@ export class CandleFlamesEffectV2 {
           float flickerStrength = uFlickerStrength * strengthVar;
 
           float t = uTime * flickerSpeed + vPhase * 25.0;
+          float noiseAmp = clamp(uWobbleNoise, 0.0, 0.5);
+          float n = smoothNoise(p * 6.0 + vec2(t * 0.15, t * 0.11));
+          float wobble = mix(1.0 - noiseAmp, 1.0 + noiseAmp, n);
+          r *= wobble;
 
           float alpha = smoothstep(1.0, 0.0, r);
 
@@ -897,10 +1034,10 @@ export class CandleFlamesEffectV2 {
 
           col *= vColor;
 
-          float flickerBase = 0.92 + 0.08 * sin(t * 0.7 + vPhase * 2.0);
+          float flickerBase = 0.9 + 0.1 * sin(t * 0.7 + vPhase * 2.0);
           float flickerShape = sin(t) * 0.65 + sin(t * 1.73 + 2.0) * 0.35;
-          float flicker = flickerBase + flickerStrength * 0.12 * flickerShape;
-          flicker = max(0.78, flicker);
+          float flicker = flickerBase + flickerStrength * 0.35 * flickerShape;
+          flicker = max(0.55, flicker);
           float finalAlpha = alpha * uOpacity * clamp(vIntensity, 0.0, 3.0) * flicker;
 
           // Floor-presence gate: occlude candle flames under current-floor
@@ -1292,13 +1429,20 @@ export class CandleFlamesEffectV2 {
 
       const dayNightMul = this._computeDayNightIntensityMul();
       const indoorMul = this._computeIndoorNightGlowBoost(outdoor);
-      const mult = Math.max(
+      const visualMul = Math.max(
         0.0,
         this.params.glowIntensity * Math.max(0.25, entry.intensity) * flicker * dayNightMul * indoorMul
       );
 
-      this._tempColor.copy(entry.baseColor).multiplyScalar(mult);
+      this._tempColor.copy(entry.baseColor).multiplyScalar(visualMul);
       u.uColor.value.copy(this._tempColor);
+
+      const emissionGain = this._computeGlowEmissionGain(visualMul);
+      if (typeof lm.setEmissionGain === 'function') {
+        lm.setEmissionGain(emissionGain);
+      } else if (lm.material?.uniforms?.uEmissionGain) {
+        lm.material.uniforms.uEmissionGain.value = emissionGain;
+      }
     }
   }
 }

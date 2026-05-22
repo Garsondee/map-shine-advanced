@@ -52,6 +52,7 @@ const log = createLogger('EnvironmentControlApi');
  * @property {boolean} [applyDarkness=true]
  * @property {boolean} [syncFoundryTime=false]
  * @property {boolean} [syncMainTweakpane] Mirror weather scalars into the main Weather Tweakpane folder
+ * @property {boolean} [transient=false] Lightweight per-frame apply (Camera Path ramp); skips scene I/O
  */
 
 export class EnvironmentControlApi {
@@ -64,6 +65,12 @@ export class EnvironmentControlApi {
 
     /** @type {boolean|null} */
     this._preDriveDynamicPaused = null;
+
+    /** @type {boolean|undefined} */
+    this._preDriveWeatherEnabled = undefined;
+
+    /** @type {number} */
+    this._lastTransientDarknessMs = 0;
   }
 
   /** @returns {boolean} */
@@ -123,17 +130,37 @@ export class EnvironmentControlApi {
   }
 
   /**
+   * Ensure WeatherController is ready before Camera Path / remote environment drives.
+   * @private
+   */
+  async _ensureWeatherControllerReady() {
+    const wc = resolveWeatherController();
+    if (!wc || wc.initialized === true) return;
+    if (typeof wc.initialize !== 'function') return;
+    try {
+      await wc.initialize();
+    } catch (err) {
+      log.warn('WeatherController initialize failed during external drive', err);
+    }
+  }
+
+  /**
    * @param {string} token
    */
-  beginExternalDrive(token) {
+  async beginExternalDrive(token) {
     if (!token) return;
     if (this._driveTokens.size === 0) {
+      await this._ensureWeatherControllerReady();
       this._preDriveSnapshot = this.captureSnapshot();
       const wc = resolveWeatherController();
       this._preDriveDynamicPaused = wc?.dynamicPaused === true;
+      this._preDriveWeatherEnabled = wc?.enabled;
       try {
         wc?.setDynamicPaused?.(true);
       } catch (_) {}
+      if (wc && wc.enabled === false) {
+        wc.enabled = true;
+      }
     }
     this._driveTokens.add(token);
   }
@@ -153,6 +180,9 @@ export class EnvironmentControlApi {
         wc.setDynamicPaused(this._preDriveDynamicPaused);
       } catch (_) {}
     }
+    if (wc && this._preDriveWeatherEnabled !== undefined) {
+      wc.enabled = this._preDriveWeatherEnabled;
+    }
 
     if (restore && this._preDriveSnapshot) {
       void this.applySnapshot(this._preDriveSnapshot, {
@@ -165,6 +195,81 @@ export class EnvironmentControlApi {
 
     this._preDriveSnapshot = null;
     this._preDriveDynamicPaused = null;
+    this._preDriveWeatherEnabled = undefined;
+  }
+
+  /**
+   * Throttled darkness push during transient ramps (no scene flag writes).
+   * @private
+   * @param {number} hour
+   */
+  _scheduleTransientDarkness(hour) {
+    const now = performance.now();
+    if (now - this._lastTransientDarknessMs < 180) return;
+    this._lastTransientDarknessMs = now;
+    const sa = window.MapShine?.stateApplier;
+    if (!sa || typeof sa.applyTimeOfDay !== 'function') return;
+    void sa.applyTimeOfDay(hour, false, true, false).catch((err) => {
+      log.warn('Transient darkness apply failed', err);
+    });
+  }
+
+  /**
+   * Apply a fully-resolved snapshot without merging capture() (hot path).
+   * @param {import('./environment-control-api.js').EnvironmentSnapshot} snap
+   * @param {EnvironmentApplyOptions} [options]
+   * @returns {import('./environment-control-api.js').EnvironmentSnapshot}
+   */
+  applySnapshotDirect(snap, options = {}) {
+    refreshMsaSameSceneRedrawPredict();
+    const normalized = normalizeEnvironmentSnapshot(snap);
+    this._applySnapshotCore(normalized, options);
+    return normalized;
+  }
+
+  /**
+   * @param {import('./environment-control-api.js').EnvironmentSnapshot} snap
+   * @param {EnvironmentApplyOptions} [options]
+   * @private
+   */
+  _applySnapshotCore(snap, options = {}) {
+    const {
+      syncUi = false,
+      applyDarkness = true,
+      syncFoundryTime = false,
+      persist = false,
+      transient = false,
+    } = options;
+    const syncMainTweakpane = options.syncMainTweakpane ?? syncUi;
+
+    const wc = resolveWeatherController();
+    if (wc) {
+      applyDirectedCustomPresetToWeather(wc, snap.weather, { syncMainTweakpane: !transient && syncMainTweakpane });
+      this._syncCloudEffectFromWeatherSnapshot(snap.weather);
+    }
+
+    applyManualFogDensityToEffect(snap.manualFogDensity);
+    applyLightningIntensityToEffect(snap.lightning);
+
+    if (transient) {
+      wc?.setTime?.(snap.timeOfDay);
+      if (applyDarkness) this._scheduleTransientDarkness(snap.timeOfDay);
+    }
+  }
+
+  /**
+   * Mirror ramped cloud cover into the sprite effect param bucket.
+   * @private
+   * @param {import('./environment-control-api.js').EnvironmentWeatherSnapshot} weather
+   */
+  _syncCloudEffectFromWeatherSnapshot(weather) {
+    if (!weather || typeof weather !== 'object') return;
+    const cover = Number(weather.cloudCover);
+    if (!Number.isFinite(cover)) return;
+    const cloudFx = window.MapShine?.effectComposer?._floorCompositorV2?._cloudEffect
+      ?? window.MapShine?.floorCompositorV2?._cloudEffect;
+    if (!cloudFx?.params) return;
+    cloudFx.params.cloudCover = Math.max(0, Math.min(1, cover));
   }
 
   /**
@@ -173,7 +278,18 @@ export class EnvironmentControlApi {
    * @returns {Promise<void>}
    */
   async applySnapshot(patch, options = {}) {
-    refreshMsaSameSceneRedrawPredict();
+    if (options.transient === true) {
+      const snap = normalizeEnvironmentSnapshot(
+        patch && typeof patch === 'object' && 'timeOfDay' in patch
+          ? patch
+          : { ...this.captureSnapshot(), ...patch },
+      );
+      this._applySnapshotCore(snap, options);
+      if (options.syncUi) this.syncControlPanelDomFromSnapshot(snap);
+      return;
+    }
+
+    await this._ensureWeatherControllerReady();
 
     const snap = normalizeEnvironmentSnapshot({ ...this.captureSnapshot(), ...patch });
     const {
@@ -182,21 +298,15 @@ export class EnvironmentControlApi {
       applyDarkness = true,
       syncFoundryTime = false,
     } = options;
-    const syncMainTweakpane = options.syncMainTweakpane ?? syncUi;
+
+    this._applySnapshotCore(snap, { ...options, syncUi, applyDarkness, syncFoundryTime, persist, transient: false });
 
     const wc = resolveWeatherController();
-    if (wc) {
-      applyDirectedCustomPresetToWeather(wc, snap.weather, { syncMainTweakpane });
-    }
-
-    applyManualFogDensityToEffect(snap.manualFogDensity);
-    applyLightningIntensityToEffect(snap.lightning);
-
     const sa = window.MapShine?.stateApplier;
     if (sa && typeof sa.applyTimeOfDay === 'function') {
       await sa.applyTimeOfDay(snap.timeOfDay, persist, applyDarkness, syncFoundryTime);
-    } else if (wc?.setTime) {
-      wc.setTime(snap.timeOfDay);
+    } else {
+      wc?.setTime?.(snap.timeOfDay);
     }
 
     if (syncUi) {
@@ -213,6 +323,16 @@ export class EnvironmentControlApi {
    */
   async applyInterpolated(start, end, t, options = {}) {
     const snap = lerpEnvironmentSnapshots(start, end, t);
+    if (options.transient === true) {
+      return this.applySnapshotDirect(snap, {
+        persist: false,
+        syncUi: false,
+        applyDarkness: true,
+        syncFoundryTime: false,
+        transient: true,
+        ...options,
+      });
+    }
     await this.applySnapshot(snap, {
       persist: false,
       syncUi: false,

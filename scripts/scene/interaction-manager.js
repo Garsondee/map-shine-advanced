@@ -415,6 +415,14 @@ export class InteractionManager {
     /** @type {SelectionBoxEffectV2|null} */
     this.selectionBoxEffect = new SelectionBoxEffectV2(this);
 
+    /** Throttle overlay reattach + context sync when no interaction is active. */
+    this._interactionIdleOverlayTick = 0;
+    this._interactionContextVisibility = {
+      lighting: null,
+      walls: null,
+      sounds: null,
+    };
+
     // Right Click State (for HUD)
     this.rightClickState = {
       active: false,
@@ -1131,7 +1139,7 @@ export class InteractionManager {
     }
 
     // Delegate all Three.js rendering to MovementPreviewEffectV2 which lives in
-    // the FloorRenderBus scene at the correct Z (1004, above tokens at 1003).
+    // the FloorRenderBus scene below token sprites (Z ≈ 1003).
     const v2Effect = window.MapShine?.movementPreviewEffectV2;
     if (!v2Effect) {
       // Effect not yet initialized (first few render frames). Nothing to draw.
@@ -4533,12 +4541,46 @@ export class InteractionManager {
   }
 
   /**
+   * True when interaction overlays, gizmos, or edit-context sync must run every frame.
+   * @returns {boolean}
+   * @private
+   */
+  _needsActiveInteractionUpdate() {
+    if (this._pendingWorldPick) return true;
+    if (this.selection?.size > 0) return true;
+    if (this.dragState?.active || this.dragState?.mode) return true;
+    if (this.dragSelect?.active || this.dragSelect?.dragging) return true;
+    if (this.movementPathPreview?.active || this.rightClickMovePreview?.active) return true;
+    if (canvas.tokens?.hud?.rendered && canvas.tokens.hud.object) return true;
+    if (this._debugOverheadHover?.enabled) return true;
+    if (this._isLightingContextActive() || this._isWallsEditingMode() || this._isSoundsContextActive()) return true;
+    const movementManager = this.tokenManager?.movementManager
+      || window.MapShine?.tokenManager?.movementManager
+      || null;
+    if (Number(movementManager?.activeTracks?.size || 0) > 0) return true;
+    if (this.wallDraw?.active || this.lightPlacement?.active || this.soundPlacement?.active) return true;
+    if (this.mapPointDrawHandler?.state?.active) return true;
+    if (this._lightRadiusRings?.dragging) return true;
+    if (this._lightTranslate?.group?.visible) return true;
+    if (this._selectedLightOutline?.line?.visible) return true;
+    return false;
+  }
+
+  /**
    * Update loop called by EffectComposer
    * @param {TimeInfo} timeInfo 
    */
   update(timeInfo) {
-    // Keep interaction overlays bound to the actively-rendered scene (V2 bus).
-    this._ensureInteractionOverlaysInActiveScene();
+    const active = this._needsActiveInteractionUpdate();
+    if (active) {
+      this._interactionIdleOverlayTick = 0;
+      this._ensureInteractionOverlaysInActiveScene();
+    } else {
+      this._interactionIdleOverlayTick++;
+      if (this._interactionIdleOverlayTick === 1 || (this._interactionIdleOverlayTick % 30) === 0) {
+        this._ensureInteractionOverlaysInActiveScene();
+      }
+    }
 
     // Defensive sync: if layer/control transitions race with hook-driven visibility,
     // keep Three wall/light visuals aligned with the currently active editing context.
@@ -4550,36 +4592,47 @@ export class InteractionManager {
       // edit visuals in gameplay.
       const showWalls = this._isWallsEditingMode() && movingTokenCount === 0;
       const showSounds = this._isSoundsContextActive();
+      const vis = this._interactionContextVisibility;
+      if (active
+        || vis.lighting !== showLighting
+        || vis.walls !== showWalls
+        || vis.sounds !== showSounds) {
+        vis.lighting = showLighting;
+        vis.walls = showWalls;
+        vis.sounds = showSounds;
 
-      this.lightIconManager?.setVisibility?.(showLighting);
+        this.lightIconManager?.setVisibility?.(showLighting);
 
-      const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
-      enhancedLightIconManager?.setVisibility?.(showLighting);
+        const enhancedLightIconManager = window.MapShine?.enhancedLightIconManager;
+        enhancedLightIconManager?.setVisibility?.(showLighting);
 
-      this.soundIconManager?.setVisibility?.(showSounds);
+        this.soundIconManager?.setVisibility?.(showSounds);
 
-      this.wallManager?.setVisibility?.(showWalls);
+        this.wallManager?.setVisibility?.(showWalls);
+      }
     }, 'update.syncWallLightSoundVisibility', Severity.COSMETIC);
 
-    safeCall(() => {
-      this._syncControlsOverlayContext();
-    }, 'update.syncControlsOverlayContext', Severity.COSMETIC);
+    if (active) {
+      safeCall(() => {
+        this._syncControlsOverlayContext();
+      }, 'update.syncControlsOverlayContext', Severity.COSMETIC);
 
-    // Keep HUD positioned correctly if open
-    if (canvas.tokens?.hud?.rendered && canvas.tokens.hud.object) {
-      this.updateHUDPosition();
+      // Keep HUD positioned correctly if open
+      if (canvas.tokens?.hud?.rendered && canvas.tokens.hud.object) {
+        this.updateHUDPosition();
+      }
+
+      // Animate selection overlay styles (marching ants, pulsing glow)
+      safeCall(() => this.selectionBoxEffect?.update?.(timeInfo), 'update.selectionBox', Severity.COSMETIC);
+
+      this._updateSelectedLightOutline();
+      this._updateLightTranslateGizmo();
+      this._updateLightRadiusRingsGizmo();
+
+      // Overhead hover debug: keep an always-on marker + label so we can diagnose
+      // pointer-to-ray mapping even when there are no sprite hits.
+      safeCall(() => this._updateOverheadHoverDebugIdle(), 'update.overheadDebugIdle', Severity.COSMETIC);
     }
-
-    // Animate selection overlay styles (marching ants, pulsing glow)
-    safeCall(() => this.selectionBoxEffect?.update?.(timeInfo), 'update.selectionBox', Severity.COSMETIC);
-
-    this._updateSelectedLightOutline();
-    this._updateLightTranslateGizmo();
-    this._updateLightRadiusRingsGizmo();
-
-    // Overhead hover debug: keep an always-on marker + label so we can diagnose
-    // pointer-to-ray mapping even when there are no sprite hits.
-    safeCall(() => this._updateOverheadHoverDebugIdle(), 'update.overheadDebugIdle', Severity.COSMETIC);
   }
 
   _updateOverheadHoverDebugIdle() {

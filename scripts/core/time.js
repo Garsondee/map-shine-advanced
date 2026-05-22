@@ -49,8 +49,6 @@ export class TimeManager {
     this.scale = 1.0;
 
     this._userScale = 1.0;
-    /** @type {number} Temporary multiplier for camera-path playback (does not touch user/Tweakpane scale). */
-    this._playbackScale = 1.0;
     this._pauseFactor = 1.0;
     this._pauseTarget = 1.0;
     this._pauseFrom = 1.0;
@@ -75,6 +73,9 @@ export class TimeManager {
     /** @type {number} - FPS update interval in ms */
     this._fpsUpdateInterval = 1000;
 
+    /** @type {number} Dedupe key for once-per-rAF updates from RenderLoop + EffectComposer */
+    this._dedupeFrameKey = -1;
+
     // PERFORMANCE: Reuse timeInfo object to avoid per-frame allocations
     this._timeInfo = {
       elapsed: 0,
@@ -90,10 +91,16 @@ export class TimeManager {
   }
 
   /**
-   * Update time state (called once per frame by EffectComposer)
+   * Update time state (called once per frame by EffectComposer / RenderLoop)
+   * @param {number|null} [frameKey=null] Optional rAF frame id for deduplication
    * @returns {TimeInfo} Current time information
    */
-  update() {
+  update(frameKey = null) {
+    if (frameKey != null && frameKey === this._dedupeFrameKey) {
+      return this.getTimeInfo();
+    }
+    if (frameKey != null) this._dedupeFrameKey = frameKey;
+
     const now = performance.now();
     let realDelta = (now - this.lastUpdate) / 1000; // Convert ms to seconds
     this.lastUpdate = now;
@@ -117,7 +124,8 @@ export class TimeManager {
       this._pauseFactor = this._pauseTarget;
     }
 
-    this.scale = this._userScale * this._pauseFactor * this._playbackScale;
+    const effectivePauseFactor = this._shouldBypassFoundryPause() ? 1.0 : this._pauseFactor;
+    this.scale = this._userScale * effectivePauseFactor;
     this.delta = realDelta * this.scale;
     this.elapsed += this.delta;
     this.frameCount++;
@@ -132,6 +140,20 @@ export class TimeManager {
     }
 
     return this.getTimeInfo();
+  }
+
+  /**
+   * Camera Path / environment ramps must keep sim time moving even when Foundry is paused.
+   * @private
+   */
+  _shouldBypassFoundryPause() {
+    try {
+      if (window.MapShine?.environmentControlApi?.isExternallyDriven?.()) return true;
+      const cps = window.MapShine?.cameraPathService;
+      if (cps?.isPlaying === true) return true;
+      if (cps?.animator?.isActive === true) return true;
+    } catch (_) {}
+    return false;
   }
 
   /**
@@ -211,7 +233,7 @@ export class TimeManager {
       this._pauseT = 1.0;
       this._pauseDuration = 0.0;
       this._pauseFactor = target;
-      this.scale = this._userScale * this._pauseFactor * this._playbackScale;
+      this.scale = this._userScale * this._pauseFactor;
       this.delta = 0.0;
       this.paused = this.scale <= 0.000001;
       if (!wantPaused) {
@@ -237,21 +259,12 @@ export class TimeManager {
   }
 
   /**
-   * Temporary slow-motion multiplier for camera-path playback only.
-   * Does not modify the user/Tweakpane time scale.
-   *
-   * @param {number} scale
+   * Effective sim scale after pause bypass and user scale.
+   * @returns {number}
    */
-  setPlaybackScale(scale) {
-    const n = Number(scale);
-    this._playbackScale = Number.isFinite(n) ? Math.max(0, n) : 1;
-    this.scale = this._userScale * this._pauseFactor * this._playbackScale;
-  }
-
-  /** Reset camera-path playback multiplier to normal speed. */
-  clearPlaybackScale() {
-    this._playbackScale = 1;
-    this.scale = this._userScale * this._pauseFactor * this._playbackScale;
+  getEffectiveScale() {
+    const effectivePauseFactor = this._shouldBypassFoundryPause() ? 1.0 : this._pauseFactor;
+    return this._userScale * effectivePauseFactor;
   }
 
   /**
@@ -264,7 +277,8 @@ export class TimeManager {
       scale = 0;
     }
     this._userScale = scale;
-    this.scale = this._userScale * this._pauseFactor * this._playbackScale;
+    const effectivePauseFactor = this._shouldBypassFoundryPause() ? 1.0 : this._pauseFactor;
+    this.scale = this._userScale * effectivePauseFactor;
     log.info(`Time scale set to ${scale.toFixed(2)}x`);
   }
 
@@ -283,8 +297,8 @@ export class TimeManager {
     this._pauseFrom = 1.0;
     this._pauseT = 1.0;
     this._pauseDuration = 0.0;
-    this._playbackScale = 1;
     this.paused = false;
+    this._dedupeFrameKey = -1;
     log.info('Time reset');
   }
 

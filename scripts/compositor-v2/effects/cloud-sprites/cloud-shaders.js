@@ -3,6 +3,30 @@
  * @module compositor-v2/effects/cloud-sprites/cloud-shaders
  */
 
+/** Shared GLSL: lightning strike brightening + contrast punch for cloud passes. */
+const CLOUD_LIGHTNING_FLASH_GLSL = /* glsl */`
+  vec3 applyCloudLightningFlash(
+    vec3 rgb,
+    float flash01,
+    vec3 flashColor,
+    float brightnessBoost,
+    float contrastBoost,
+    float tintStrength
+  ) {
+    float f = clamp(flash01, 0.0, 1.0);
+    if (f <= 0.0005) return rgb;
+    float contrast = 1.0 + max(contrastBoost, 0.0) * f;
+    rgb = (rgb - 0.5) * contrast + 0.5;
+    rgb = max(rgb, vec3(0.0));
+    rgb *= 1.0 + max(brightnessBoost, 0.0) * f;
+    vec3 flashCol = max(flashColor, vec3(0.01));
+    rgb = mix(rgb, rgb * flashCol, clamp(tintStrength, 0.0, 1.0) * f);
+    float peak = max(max(rgb.r, rgb.g), rgb.b);
+    rgb += flashCol * f * peak * 0.42;
+    return rgb;
+  }
+`;
+
 /** @param {typeof import('three')} THREE */
 export function createShadowMaskMaterial(THREE) {
   const mat = new THREE.ShaderMaterial({
@@ -148,6 +172,9 @@ export function createCloudLayerMaterialTemplate(THREE) {
       uNoiseSeed: { value: new THREE.Vector2(0, 0) },
       uNoiseScale: { value: 0.0002 },
       uNoiseSoftness: { value: 0.015 },
+      uWarpTime: { value: 0 },
+      uWarpStrength: { value: 0.035 },
+      uWarpSpeed: { value: 1.0 },
     },
     vertexShader: /* glsl */`
       varying vec2 vWorldXY;
@@ -172,6 +199,9 @@ export function createCloudLayerMaterialTemplate(THREE) {
       uniform vec2 uNoiseSeed;
       uniform float uNoiseScale;
       uniform float uNoiseSoftness;
+      uniform float uWarpTime;
+      uniform float uWarpStrength;
+      uniform float uWarpSpeed;
       varying vec2 vWorldXY;
 
       float hash12(vec2 p) {
@@ -191,15 +221,32 @@ export function createCloudLayerMaterialTemplate(THREE) {
         return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
       }
 
+      vec2 domainWarpUv(vec2 uv, vec2 worldPos, vec2 seed, float t, float strength) {
+        if (strength <= 0.0005) return uv;
+        vec2 q = worldPos * 0.0014 + seed * 0.17;
+        vec2 flow = vec2(
+          sin(q.y * 1.9 + t * 0.35),
+          cos(q.x * 1.7 + t * 0.31)
+        );
+        vec2 flow2 = vec2(
+          sin(q.x * 2.8 - t * 0.22 + seed.x),
+          cos(q.y * 2.5 + t * 0.19 + seed.y)
+        );
+        return uv + (flow + flow2 * 0.55) * strength * 0.014;
+      }
+
       void main() {
         vec2 captureSize = max(uCaptureBoundsMax - uCaptureBoundsMin, vec2(1e-3));
         vec2 uv = (vWorldXY - uCaptureBoundsMin) / captureSize + uUvOffset;
+
+        float warpT = uWarpTime * max(uWarpSpeed, 0.0);
+        vec2 warpedUv = domainWarpUv(uv, vWorldXY, uNoiseSeed, warpT, uWarpStrength);
 
         vec2 meshSize = max(uViewBoundsMax - uViewBoundsMin, vec2(1e-3));
         vec2 edgeDist = min(vWorldXY - uViewBoundsMin, uViewBoundsMax - vWorldXY) / meshSize;
         float edgeFade = smoothstep(0.0, max(uEdgeSoftness, 0.001), min(edgeDist.x, edgeDist.y));
 
-        vec4 sampleCol = texture2D(tCloudTop, clamp(uv, 0.0, 1.0));
+        vec4 sampleCol = texture2D(tCloudTop, clamp(warpedUv, 0.0, 1.0));
         float alpha = sampleCol.a * uOpacityMul * edgeFade;
         float edgeSoft = smoothstep(uAlphaStart, uAlphaEnd, sampleCol.a);
         alpha *= edgeSoft;
@@ -232,6 +279,114 @@ export function createCloudLayerMaterialTemplate(THREE) {
     premultipliedAlpha: true,
   });
   mat.toneMapped = false;
+  return mat;
+}
+
+/**
+ * Lit billboard cloud sprite — sky tint + soft sun-side shading in the capture RT.
+ * @param {typeof import('three')} THREE
+ */
+export function createCloudDisplaySpriteMaterial(THREE) {
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      map: { value: null },
+      opacity: { value: 1.0 },
+      uSkyTint: { value: new THREE.Vector3(1, 1, 1) },
+      uSkyTintStrength: { value: 0.85 },
+      uSunDir: { value: new THREE.Vector2(0, 1) },
+      uSunElevation01: { value: 1.0 },
+      uSkyIntensity: { value: 1.0 },
+      uSunLightingStrength: { value: 0.65 },
+      uBrightness: { value: 1.0 },
+      uNightDim: { value: 0.0 },
+      uWarpSeed: { value: new THREE.Vector2(0, 0) },
+      uWarpStrength: { value: 0.025 },
+      uTime: { value: 0 },
+      uLightningFlash01: { value: 0 },
+      uLightningFlashColor: { value: new THREE.Vector3(0.43, 0.5, 0.67) },
+      uLightningBrightnessBoost: { value: 3.0 },
+      uLightningContrastBoost: { value: 2.5 },
+      uLightningTintStrength: { value: 0.8 },
+    },
+    vertexShader: /* glsl */`
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */`
+      uniform sampler2D map;
+      uniform float opacity;
+      uniform vec3 uSkyTint;
+      uniform float uSkyTintStrength;
+      uniform vec2 uSunDir;
+      uniform float uSunElevation01;
+      uniform float uSkyIntensity;
+      uniform float uSunLightingStrength;
+      uniform float uBrightness;
+      uniform float uNightDim;
+      uniform vec2 uWarpSeed;
+      uniform float uWarpStrength;
+      uniform float uTime;
+      uniform float uLightningFlash01;
+      uniform vec3 uLightningFlashColor;
+      uniform float uLightningBrightnessBoost;
+      uniform float uLightningContrastBoost;
+      uniform float uLightningTintStrength;
+      varying vec2 vUv;
+
+      ${CLOUD_LIGHTNING_FLASH_GLSL}
+
+      vec2 boilUv(vec2 uv, vec2 seed, float t, float strength) {
+        if (strength <= 0.0005) return uv;
+        vec2 w = vec2(
+          sin(uv.y * 8.0 + t * 0.45 + seed.x * 6.283),
+          cos(uv.x * 7.0 + t * 0.38 + seed.y * 6.283)
+        );
+        vec2 w2 = vec2(
+          sin(uv.x * 11.0 - t * 0.29 + seed.y * 4.71),
+          cos(uv.y * 9.5 + t * 0.33 + seed.x * 3.14)
+        );
+        return uv + (w + w2 * 0.45) * strength * 0.018;
+      }
+
+      void main() {
+        vec2 sampleUv = boilUv(vUv, uWarpSeed, uTime, uWarpStrength);
+        vec4 tex = texture2D(map, clamp(sampleUv, 0.0, 1.0));
+        if (tex.a < 0.02) discard;
+
+        vec3 skyBase = mix(vec3(1.0), max(uSkyTint, vec3(0.01)), clamp(uSkyTintStrength, 0.0, 1.5));
+
+        vec2 centered = vUv - 0.5;
+        vec2 sunDirN = normalize(uSunDir + vec2(1e-4));
+        vec2 puffDir = normalize(centered + vec2(1e-4));
+        float sunSide = dot(puffDir, sunDirN) * 0.5 + 0.5;
+        float direct = mix(0.74, 1.10, sunSide);
+        direct = mix(1.0, direct, clamp(uSunLightingStrength, 0.0, 1.0) * clamp(uSunElevation01, 0.0, 1.0));
+
+        float ambient = mix(0.32, 0.95, clamp(uSkyIntensity, 0.0, 1.0));
+        float lum = (ambient + direct * clamp(uSunElevation01, 0.0, 1.0) * 0.34) * max(uBrightness, 0.05);
+        float flash01 = clamp(uLightningFlash01, 0.0, 1.0);
+        lum *= mix(1.0, 0.48, clamp(uNightDim, 0.0, 1.0) * (1.0 - flash01 * 0.94));
+
+        vec3 rgb = tex.rgb * skyBase * lum;
+        rgb = applyCloudLightningFlash(
+          rgb,
+          uLightningFlash01,
+          uLightningFlashColor,
+          uLightningBrightnessBoost,
+          uLightningContrastBoost,
+          uLightningTintStrength
+        );
+        gl_FragColor = vec4(rgb, tex.a * clamp(opacity, 0.0, 1.0));
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+    toneMapped: false,
+  });
   return mat;
 }
 

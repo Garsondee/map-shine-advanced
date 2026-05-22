@@ -112,7 +112,7 @@ export function exposeGlobals(mapShine, refs) {
     'mouseStateManager',
     'overlayUIManager', 'lightEditor', 'gridRenderer', 'mapPointsManager',
     'tileMotionManager',
-    'weatherController', 'renderLoop', 'sceneDebug', 'controlsIntegration',
+    'weatherController', 'renderLoop', 'timeManager', 'sceneDebug', 'controlsIntegration',
     'dynamicExposureManager', 'physicsRopeManager', 'assetLoader',
     'externalEffects',
   ];

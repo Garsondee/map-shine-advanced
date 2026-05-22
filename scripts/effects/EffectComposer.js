@@ -594,7 +594,8 @@ export class EffectComposer {
     const effects = this.resolveRenderOrder();
 
     // Update centralized time (single source of truth)
-    const timeInfo = this.timeManager.update();
+    const frameKey = window.MapShine?.renderLoop?.frameCount ?? null;
+    const timeInfo = this.timeManager.update(frameKey);
 
     const profiler = globalProfiler;
     const doProfile = !!profiler?.enabled;
@@ -1061,7 +1062,8 @@ export class EffectComposer {
     const t0 = performance.now();
     const programCount = () => Array.isArray(this.renderer.info?.programs) ? this.renderer.info.programs.length : 0;
     const startPrograms = programCount();
-    const timeInfo = this.timeManager.update();
+    const frameKey = window.MapShine?.renderLoop?.frameCount ?? null;
+    const timeInfo = this.timeManager.update(frameKey);
     const compositor = this._getFloorCompositorV2();
     compositor.render({
       floorStack: window.MapShine?.floorStack ?? null,

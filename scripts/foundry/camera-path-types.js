@@ -259,16 +259,13 @@ export function computeTimelineVisibleMotionMs(clips) {
 }
 
 /**
- * Convert logical playback duration to wall-clock time at a given scene time scale.
+ * Wall-clock duration for cinematic/continuous render windows (ms).
  *
  * @param {number} logicalMs
- * @param {number} [playbackTimeScale=1]
  * @returns {number}
  */
-export function scalePlaybackWallDurationMs(logicalMs, playbackTimeScale = 1) {
-  const scale = Math.max(0.1, Number(playbackTimeScale) || 1);
-  const logical = Math.max(0, Number(logicalMs) || 0);
-  return logical / scale;
+export function scalePlaybackWallDurationMs(logicalMs) {
+  return Math.max(0, Number(logicalMs) || 0);
 }
 
 /**
@@ -280,7 +277,6 @@ export function scalePlaybackWallDurationMs(logicalMs, playbackTimeScale = 1) {
  * @param {number} opts.pathMotionMs
  * @param {number} opts.preHoldMs
  * @param {number} opts.segmentHoldMs
- * @param {number} opts.playbackTimeScale
  * @param {boolean} opts.fadeFromBlack
  * @param {boolean} opts.fadeToBlack
  * @param {number} opts.fadeMs
@@ -296,15 +292,15 @@ export function computePlaybackCinematicWallMs(opts) {
     + Math.max(0, Number(opts.preHoldMs) || 0)
     + Math.max(0, sweepCount - 1) * Math.max(0, Number(opts.segmentHoldMs) || 0);
 
-  let wallMs = scalePlaybackWallDurationMs(timelineLogicalMs, opts.playbackTimeScale);
+  let wallMs = scalePlaybackWallDurationMs(timelineLogicalMs);
 
   const fadeMs = Math.max(0, Number(opts.fadeMs) || 0);
   const fadeHoldMs = Math.max(0, Number(opts.fadeHoldMs) || 0);
   if (opts.fadeFromBlack === true) {
-    wallMs += scalePlaybackWallDurationMs(fadeHoldMs, opts.playbackTimeScale) + fadeMs;
+    wallMs += scalePlaybackWallDurationMs(fadeHoldMs) + fadeMs;
   }
   if (opts.fadeToBlack === true) {
-    wallMs += fadeMs + scalePlaybackWallDurationMs(fadeHoldMs, opts.playbackTimeScale);
+    wallMs += fadeMs + scalePlaybackWallDurationMs(fadeHoldMs);
   }
 
   return wallMs + Math.max(0, Number(opts.paddingMs) || 0);

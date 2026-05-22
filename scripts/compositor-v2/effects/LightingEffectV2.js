@@ -63,6 +63,12 @@ import {
 } from '../../core/foundry-time-phases.js';
 import { getAuthoritativeAmbientLightDocuments } from '../../foundry/ambient-light-documents.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
+import {
+  GLSL_DECODE_OUTDOORS_MASK,
+  applySceneViewProjectionToUniforms,
+  createSceneViewProjectionCache,
+  updateSceneViewProjectionFromCamera,
+} from '../scene-view-projection.js';
 
 const log = createLogger('LightingEffectV2');
 const MODULE_ID = 'map-shine-advanced';
@@ -346,16 +352,7 @@ export class LightingEffectV2 {
       lightGain: NaN,
     };
 
-    this._viewProjectionCache = {
-      isValid: false,
-      isOrtho: false,
-      px: NaN, py: NaN, pz: NaN,
-      qx: NaN, qy: NaN, qz: NaN, qw: NaN,
-      zoom: NaN, left: NaN, right: NaN, top: NaN, bottom: NaN,
-      fov: NaN, aspect: NaN, near: NaN, far: NaN, groundZ: NaN,
-      vMinX: 0, vMinY: 0, vMaxX: 1, vMaxY: 1,
-      c00x: 0, c00y: 0, c10x: 1, c10y: 0, c01x: 0, c01y: 1, c11x: 1, c11y: 1,
-    };
+    this._viewProjectionCache = createSceneViewProjectionCache();
 
     /** @type {import('../../core/diagnostics/PerformanceRecorder.js').PerformanceRecorder|null} */
     this._activePerfRecorder = null;
@@ -625,111 +622,29 @@ export class LightingEffectV2 {
 
     const sc = window.MapShine?.sceneComposer;
     const groundZ = sc?.basePlaneMesh?.position?.z ?? (sc?.groundZ ?? 0);
-    const q = cam.quaternion;
-    const cache = this._viewProjectionCache;
-    const isOrtho = cam.isOrthographicCamera === true;
-    const cameraChanged = !cache.isValid
-      || cache.isOrtho !== isOrtho
-      || cache.px !== cam.position.x || cache.py !== cam.position.y || cache.pz !== cam.position.z
-      || cache.qx !== (q?.x ?? 0) || cache.qy !== (q?.y ?? 0) || cache.qz !== (q?.z ?? 0) || cache.qw !== (q?.w ?? 1)
-      || cache.zoom !== cam.zoom
-      || cache.left !== (cam.left ?? 0) || cache.right !== (cam.right ?? 0)
-      || cache.top !== (cam.top ?? 0) || cache.bottom !== (cam.bottom ?? 0)
-      || cache.fov !== (cam.fov ?? 0) || cache.aspect !== (cam.aspect ?? 0)
-      || cache.near !== (cam.near ?? 0) || cache.far !== (cam.far ?? 0)
-      || cache.groundZ !== groundZ;
 
-    if (cameraChanged) {
-      let vMinX = 0, vMinY = 0, vMaxX = 1, vMaxY = 1;
-      let c00x = 0, c00y = 0, c10x = 1, c10y = 0, c01x = 0, c01y = 1, c11x = 1, c11y = 1;
-      if (isOrtho) {
-        vMinX = cam.position.x + cam.left   / cam.zoom;
-        vMinY = cam.position.y + cam.bottom / cam.zoom;
-        vMaxX = cam.position.x + cam.right  / cam.zoom;
-        vMaxY = cam.position.y + cam.top    / cam.zoom;
+    updateSceneViewProjectionFromCamera(
+      cam,
+      groundZ,
+      this._viewProjectionCache,
+      {
+        ndc: this._tmpNdcVec,
+        world: this._tmpWorldVec,
+        dir: this._tmpDirVec,
+      },
+    );
 
-        c00x = vMinX; c00y = vMinY;
-        c10x = vMaxX; c10y = vMinY;
-        c01x = vMinX; c01y = vMaxY;
-        c11x = vMaxX; c11y = vMaxY;
-      } else {
-        const THREE = window.THREE;
-        const ndc = this._tmpNdcVec;
-        const world = this._tmpWorldVec;
-        const dir = this._tmpDirVec;
-        if (THREE && ndc && world && dir) {
-          let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-          let validCornerCount = 0;
+    applySceneViewProjectionToUniforms(this._viewProjectionCache, cu);
 
-          const cX = [-1, 1, -1, 1];
-          const cY = [-1, -1, 1, 1];
-
-          for (let i = 0; i < 4; i++) {
-            ndc.set(cX[i], cY[i], 0.5);
-            world.copy(ndc).unproject(cam);
-            dir.copy(world).sub(cam.position);
-
-            const dz = dir.z;
-            if (dz > -1e-6 && dz < 1e-6) continue;
-
-            const t = (groundZ - cam.position.z) / dz;
-            if (t !== t || t <= 0) continue;
-
-            const ix = cam.position.x + dir.x * t;
-            const iy = cam.position.y + dir.y * t;
-
-            if (ix < minX) minX = ix; if (iy < minY) minY = iy;
-            if (ix > maxX) maxX = ix; if (iy > maxY) maxY = iy;
-            validCornerCount += 1;
-
-            if (i === 0) { c00x = ix; c00y = iy; }
-            else if (i === 1) { c10x = ix; c10y = iy; }
-            else if (i === 2) { c01x = ix; c01y = iy; }
-            else if (i === 3) { c11x = ix; c11y = iy; }
-          }
-
-          if (minX !== Infinity) {
-            vMinX = minX; vMinY = minY; vMaxX = maxX; vMaxY = maxY;
-          }
-          if (validCornerCount < 4 && minX !== Infinity) {
-            c00x = minX; c00y = minY;
-            c10x = maxX; c10y = minY;
-            c01x = minX; c01y = maxY;
-            c11x = maxX; c11y = maxY;
-          }
-        }
-      }
-
-      cache.isValid = true;
-      cache.isOrtho = isOrtho;
-      cache.px = cam.position.x; cache.py = cam.position.y; cache.pz = cam.position.z;
-      cache.qx = q?.x ?? 0; cache.qy = q?.y ?? 0; cache.qz = q?.z ?? 0; cache.qw = q?.w ?? 1;
-      cache.zoom = cam.zoom;
-      cache.left = cam.left ?? 0; cache.right = cam.right ?? 0;
-      cache.top = cam.top ?? 0; cache.bottom = cam.bottom ?? 0;
-      cache.fov = cam.fov ?? 0; cache.aspect = cam.aspect ?? 0;
-      cache.near = cam.near ?? 0; cache.far = cam.far ?? 0;
-      cache.groundZ = groundZ;
-      cache.vMinX = vMinX; cache.vMinY = vMinY; cache.vMaxX = vMaxX; cache.vMaxY = vMaxY;
-      cache.c00x = c00x; cache.c00y = c00y; cache.c10x = c10x; cache.c10y = c10y;
-      cache.c01x = c01x; cache.c01y = c01y; cache.c11x = c11x; cache.c11y = c11y;
-    }
-
-    cu.uBldViewBoundsMin.value.set(cache.vMinX, cache.vMinY);
-    cu.uBldViewBoundsMax.value.set(cache.vMaxX, cache.vMaxY);
-    cu.uBldViewCorner00.value.set(cache.c00x, cache.c00y);
-    cu.uBldViewCorner10.value.set(cache.c10x, cache.c10y);
-    cu.uBldViewCorner01.value.set(cache.c01x, cache.c01y);
-    cu.uBldViewCorner11.value.set(cache.c11x, cache.c11y);
     const sr = dims.sceneRect ?? dims;
     cu.uBldSceneOrigin.value.set(sr.x ?? 0, sr.y ?? 0);
     cu.uBldSceneSize.value.set(
-      sr.width  ?? dims.sceneWidth  ?? 1,
-      sr.height ?? dims.sceneHeight ?? 1
+      sr.width ?? dims.sceneWidth ?? 1,
+      sr.height ?? dims.sceneHeight ?? 1,
     );
     cu.uSceneDimensions.value.set(
-      dims.width  ?? 1,
-      dims.height ?? 1
+      dims.width ?? 1,
+      dims.height ?? 1,
     );
   }
 
@@ -1459,6 +1374,9 @@ export class LightingEffectV2 {
       fragmentShader: /* glsl */`
         precision highp float;
         precision highp int;
+
+        ${GLSL_DECODE_OUTDOORS_MASK}
+
         uniform sampler2D tScene;
         uniform sampler2D tLightSources;
         uniform sampler2D tLightWindow;
@@ -1655,6 +1573,13 @@ export class LightingEffectV2 {
             isOutdoorForInteriorDim = mix(1.0, outdoorLoHi, outdoorsAlphaValid);
           }
 
+          // Window glow: hard outdoor block (canonical decode — not interior-dim soft snap).
+          float windowOutdoorBlock = 0.0;
+          if (uHasOutdoorsForRoofLight > 0.5) {
+            windowOutdoorBlock = msDecodeOutdoorsMaskSample(outdoorsRoofSample) * inSceneBounds;
+            winLights *= (1.0 - windowOutdoorBlock);
+          }
+
           // Roof / tree canopy: prefer packed ceiling transmittance T (half-res blit from
           // OverheadShadows) so geometric gating matches one source; else derive from
           // roof alpha + block. _Outdoors still applies bounded indoor relief.
@@ -1753,10 +1678,12 @@ export class LightingEffectV2 {
           visW = mix(visW, visRestrict, restrictLightRoof);
           vec3 srcSafe = srcLights * visS;
           vec3 winSafe = winLights * visW;
+          winSafe *= (1.0 - windowOutdoorBlock);
           // Foundry HDR buffer already carries lightIntensity via ThreeLightSource uComposeLightGain;
           // no second multiply here (that lifted every texel with buffer energy).
           float c = max(srcSample.a, 0.0) * visS;
           float winWhite = max(max(winLights.r, winLights.g), winLights.b) * visW;
+          winWhite *= (1.0 - windowOutdoorBlock);
           float lightIVisible = max(c, winWhite);
           vec3 directLight = vec3(c + winWhite);
 
@@ -2138,6 +2065,15 @@ export class LightingEffectV2 {
       for (const src of [pl?._torchLightSource, pl?._flashlightLightSource]) {
         const u = src?.material?.uniforms?.uComposeLightGain;
         if (u) u.value = safe;
+      }
+    } catch (_) {
+      /* noop */
+    }
+    // Candle glow buckets share _lightScene; refresh HDR emission when point-light gain changes.
+    try {
+      const candles = window.MapShine?.candleFlamesEffectV2;
+      if (candles?.params?.glowFollowLightIntensity && candles._glowBuckets?.size) {
+        candles._updateGlowFlicker?.({ elapsed: performance.now() * 0.001 });
       }
     } catch (_) {
       /* noop */
@@ -2817,9 +2753,17 @@ export class LightingEffectV2 {
           windowLightScene.userData?.onBindWindowLightPass?.(
             this._lightOverrideWindowRT.width,
             this._lightOverrideWindowRT.height,
+            camera,
           );
         } catch (_) {}
         renderer.render(windowLightScene, camera);
+        try {
+          windowLightScene.userData?.onAfterWindowLightPass?.(
+            renderer,
+            camera,
+            this._lightOverrideWindowRT,
+          );
+        } catch (_) {}
       }
       this._endPerfSpan(_perfToken);
     } finally {
@@ -2863,9 +2807,8 @@ export class LightingEffectV2 {
    * @param {THREE.Texture|null} [overheadRoofBlockTexture=null] - Screen-space
    *   overhead roof blocker mask. Used for hard direct-light blocking so lights
    *   do not leak through overhead tiles that block light.
-   * @param {THREE.Texture|null} [outdoorsMaskTexture=null] - _Outdoors mask in
-   *   scene UV (same as CloudEffectV2). When set, roof/tree light occlusion
-   *   applies only on outdoor pixels so interior lights survive under roofs.
+   * @param {THREE.Texture|null} [outdoorsMaskTexture=null] - Authored `_Outdoors`
+   *   mask in scene UV. Also gates window glow at compose (outdoors-first per level).
    * @param {THREE.Texture|null} [ceilingTransmittanceTexture=null] - Half-res R
    *   packed T from {@link LightingEffectV2#ceilingTransmittanceTextureForLighting}
    *   (roof visibility × blocker), or null.
@@ -3004,9 +2947,18 @@ export class LightingEffectV2 {
           windowLightScene.userData?.onBindWindowLightPass?.(
             this._windowLightRT.width,
             this._windowLightRT.height,
+            camera,
           );
         } catch (_) {}
         renderer.render(windowLightScene, camera);
+        try {
+          windowLightScene.userData?.onAfterWindowLightPass?.(
+            renderer,
+            camera,
+            this._windowLightRT,
+            outdoorsMaskTexture ?? null,
+          );
+        } catch (_) {}
       } catch (err) {
         log.error('LightingEffectV2: window light render failed:', err);
       }

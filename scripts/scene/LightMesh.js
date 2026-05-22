@@ -76,6 +76,8 @@ export class LightMesh {
         uCoreContrast: { value: 1.0 },
         uHaloContrast: { value: 1.0 },
         uAttenuation: { value: this.attenuation },
+        /** HDR scale for rgb + alpha (compose reads alpha for darkness punch / direct light). */
+        uEmissionGain: { value: 1.0 },
         // Global softness multiplier driven by LightingEffect.falloffSoftness
         // (0.25 = hardest, 4.0 = softest in the UI). 1.0 is neutral.
         uGlobalSoftness: { value: 1.0 },
@@ -101,6 +103,7 @@ export class LightMesh {
         uniform float uInnerRadius;
         uniform float uOuterRadius;
         uniform float uAttenuation;
+        uniform float uEmissionGain;
         void main() {
           float dist = length(vLocalPos);
           if (dist >= uOuterRadius) discard;
@@ -124,8 +127,9 @@ export class LightMesh {
 
           // Combine bright + dim contributions and clamp.
           float finalIntensity = clamp(dimFalloff + brightFalloff, 0.0, 1.0);
+          float gain = max(uEmissionGain, 0.0);
 
-          gl_FragColor = vec4(uColor * finalIntensity, finalIntensity);
+          gl_FragColor = vec4(uColor * finalIntensity * gain, finalIntensity * gain);
         }
       `,
       transparent: true,
@@ -231,6 +235,17 @@ export class LightMesh {
     this.material.uniforms.uOuterRadius.value = this.outerRadiusPx;
     this.material.uniforms.uInnerRadius.value = this.innerRadiusPx;
     this.material.uniforms.uAttenuation.value = this.attenuation;
+  }
+
+  /**
+   * HDR emission multiplier (rgb + alpha). Compose uses alpha for darkness punch.
+   * @param {number} gain
+   */
+  setEmissionGain(gain) {
+    const g = Number.isFinite(gain) ? Math.max(0, gain) : 0;
+    if (this.material?.uniforms?.uEmissionGain) {
+      this.material.uniforms.uEmissionGain.value = g;
+    }
   }
 
   /** Dispose geometry and material. */

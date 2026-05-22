@@ -149,6 +149,26 @@ export class RenderLoop {
   }
 
   /**
+   * Camera Path / environment ramps must keep the compositor presenting every tick.
+   * Skipped presents freeze TimeManager delta and all animated effects.
+   * @private
+   */
+  _isTimeCriticalPlaybackActive() {
+    try {
+      if (window.MapShine?.environmentControlApi?.isExternallyDriven?.()) return true;
+      const cps = window.MapShine?.cameraPathService;
+      if (cps?.isPlaying === true) return true;
+      if (cps?.animator?.isActive === true) return true;
+    } catch (_) {}
+    return false;
+  }
+
+  /** @private */
+  _isCinematicPresentationActive(nowMs = performance.now()) {
+    return nowMs < (this._cinematicModeUntilMs || 0) || this._isTimeCriticalPlaybackActive();
+  }
+
+  /**
    * Cheap camera motion probe (PIXI pivot/scale preferred).
    * @private
    */
@@ -206,7 +226,7 @@ export class RenderLoop {
     const { cameraChanged = false, inContinuousWindow = false, effectWantsContinuous = false } = opts;
     const fps = this._readRuntimeFps();
     const ms = window.MapShine;
-    const inCinematicMode = now < (this._cinematicModeUntilMs || 0);
+    const inCinematicMode = this._isCinematicPresentationActive(now);
     const cameraActive = cameraChanged || now < (this._cameraActiveUntilMs || 0);
 
     if (inCinematicMode) return { targetFps: 120, tier: 'cinematic' };
@@ -241,7 +261,7 @@ export class RenderLoop {
   isPresentationDueNow(nowMs = performance.now()) {
     if (!this.isRunning || !this.effectComposer) return false;
     if (!this._isPresentationPacingEnabled()) return true;
-    if (nowMs < (this._cinematicModeUntilMs || 0)) return true;
+    if (this._isCinematicPresentationActive(nowMs)) return true;
     if (this._presentationDueImmediately || this._forceNextRender) return true;
 
     const effectWantsContinuous = this._getEffectWantsContinuous(nowMs);
@@ -439,6 +459,10 @@ export class RenderLoop {
     this._forceNextRender = true;
   }
 
+  clearContinuousRender() {
+    this._continuousRenderUntilMs = 0;
+  }
+
   stop() {
     if (!this.isRunning) return;
     log.info('Stopping render loop');
@@ -503,13 +527,24 @@ export class RenderLoop {
       try {
         const ms = window.MapShine;
         const pacingEnabled = this._isPresentationPacingEnabled();
-        const inCinematicMode = now < (this._cinematicModeUntilMs || 0);
+        const timeCriticalPlayback = this._isTimeCriticalPlaybackActive();
+        const inCinematicMode = this._isCinematicPresentationActive(now);
+        const forcePresent = inCinematicMode;
         const strictSync = this._isStrictSyncEnabled();
         const fc = ms?.frameCoordinator;
         const pendingPixiToken = strictSync && fc?.hasPendingPixiToken?.() === true;
 
+        // Advance sim time once per rAF even if a downstream gate skips the present.
+        try {
+          this.effectComposer.getTimeManager?.()?.update(this.frameCount);
+        } catch (_) {}
+
         let gate = null;
-        if (pacingEnabled && !inCinematicMode) {
+        if (forcePresent) {
+          gate = this._evaluatePresentationGate(now);
+          gate.shouldPresent = true;
+          gate.skipReason = 'none';
+        } else if (pacingEnabled) {
           gate = this._evaluatePresentationGate(now);
           this._publishPresentationState({
             presented: false,
@@ -533,7 +568,7 @@ export class RenderLoop {
             }
             return;
           }
-        } else if (!pacingEnabled) {
+        } else {
           gate = this._evaluateLegacyAdaptivePath(now, ms, strictSync, fc, pendingPixiToken);
           if (!gate.shouldPresent) {
             if (tickToken != null) {
@@ -547,10 +582,6 @@ export class RenderLoop {
             }
             return;
           }
-        } else {
-          gate = this._evaluatePresentationGate(now);
-          gate.shouldPresent = true;
-          gate.skipReason = 'none';
         }
 
         if (!gate) {
@@ -565,7 +596,7 @@ export class RenderLoop {
         const holdFrame = strictSync ? this._getStrictHoldState() : this._strictHoldState;
         const holdAgeMs = holdFrame.active ? (now - holdFrame.updatedAtMs) : 0;
         const holdExpired = holdFrame.active && holdAgeMs > STRICT_HOLD_MAX_MS;
-        if (holdFrame.active && !holdExpired) {
+        if (holdFrame.active && !holdExpired && !timeCriticalPlayback) {
           this._publishPresentationState({
             presented: false,
             skipReason: 'strict_hold',
@@ -690,6 +721,14 @@ export class RenderLoop {
    * @private
    */
   _evaluateLegacyAdaptivePath(now, ms, strictSync, fc, pendingPixiToken) {
+    if (this._isTimeCriticalPlaybackActive()) {
+      const gate = this._evaluatePresentationGate(now);
+      gate.shouldPresent = true;
+      gate.skipReason = 'none';
+      gate.tier = 'cinematic';
+      return gate;
+    }
+
     const { cameraChanged, pixiPivotX, pixiPivotY, pixiZoom } = this._detectCameraChanged();
     const adaptiveFpsEnabled = strictSync ? false : (ms?.renderAdaptiveFpsEnabled !== false);
     const inContinuousWindow = now < (this._continuousRenderUntilMs || 0);

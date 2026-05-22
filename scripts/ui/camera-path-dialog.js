@@ -40,18 +40,6 @@ function formatDurationHuman(seconds) {
 }
 
 /**
- * @param {number} scale
- * @returns {string}
- */
-function formatTimeScaleLabel(scale) {
-  const n = Number(scale);
-  if (!Number.isFinite(n)) return '1.00×';
-  if (Math.abs(n - 1) < 0.005) return '1× normal';
-  if (n < 1) return `${n.toFixed(2)}× slower`;
-  return `${n.toFixed(2)}× faster`;
-}
-
-/**
  * @param {string} value
  */
 function escapeHtml(value) {
@@ -190,17 +178,6 @@ export class CameraPathDialog {
                   </select>
                 </label>
               </div>
-              <div class="msa-cpath__time-scale" data-bind="playbackTimeScaleWrap">
-                <div class="msa-cpath__time-scale-row">
-                  <span class="msa-cpath__time-scale-label">Scene time scale</span>
-                  <span class="msa-cpath__time-scale-readout" data-bind="timeScaleHuman">1× normal</span>
-                </div>
-                <div class="msa-cpath__time-scale-controls">
-                  <input type="range" min="0.1" max="3" step="0.05" data-input="playbackTimeScale" aria-label="Scene time scale during playback">
-                  <input type="number" class="msa-cpath__time-scale-num" min="0.1" max="3" step="0.05" data-input="playbackTimeScaleNum" aria-label="Scene time scale value">
-                </div>
-                <p class="msa-cpath__hint msa-cpath__hint--tight">Slow motion for the whole scene during playback — weather, particles, camera, and holds.</p>
-              </div>
             </section>
 
             <section class="msa-cpath__card">
@@ -337,7 +314,6 @@ export class CameraPathDialog {
     this._setCheckbox('environmentRampEnabled', settings.environmentRamp?.enabled === true);
 
     this._syncEnvironmentInputs(settings.environmentRamp);
-    this._syncTimeScaleInputs(settings.playbackTimeScale ?? 1);
     this._syncSigLocSettings(settings);
     this._renderSignificantLocations(data.significantLocations || []);
     this._renderTimeline();
@@ -455,41 +431,6 @@ export class CameraPathDialog {
   _updateDurationReadout(seconds) {
     const el = this.container?.querySelector('[data-bind="durationHuman"]');
     if (el) el.textContent = formatDurationHuman(seconds);
-  }
-
-  /**
-   * @param {number} scale
-   * @private
-   */
-  _updateTimeScaleReadout(scale) {
-    const el = this.container?.querySelector('[data-bind="timeScaleHuman"]');
-    if (el) el.textContent = formatTimeScaleLabel(scale);
-  }
-
-  /**
-   * @param {number} scale
-   * @private
-   */
-  _syncTimeScaleInputs(scale) {
-    const v = Math.max(0.1, Math.min(3, Number(scale) || 1));
-    const range = this.container?.querySelector('[data-input="playbackTimeScale"]');
-    const num = this.container?.querySelector('[data-input="playbackTimeScaleNum"]');
-    if (range instanceof HTMLInputElement) range.value = String(v);
-    if (num instanceof HTMLInputElement) num.value = String(v);
-    this._updateTimeScaleReadout(v);
-  }
-
-  /**
-   * @returns {number}
-   * @private
-   */
-  _readTimeScaleFromUi() {
-    const num = this.container?.querySelector('[data-input="playbackTimeScaleNum"]');
-    const raw = num instanceof HTMLInputElement ? Number(num.value) : NaN;
-    if (Number.isFinite(raw)) return Math.max(0.1, Math.min(3, raw));
-    const range = this.container?.querySelector('[data-input="playbackTimeScale"]');
-    const rawRange = range instanceof HTMLInputElement ? Number(range.value) : NaN;
-    return Number.isFinite(rawRange) ? Math.max(0.1, Math.min(3, rawRange)) : 1;
   }
 
   /**
@@ -801,7 +742,6 @@ export class CameraPathDialog {
       syncToPlayers: !!root.querySelector('[data-input="syncToPlayers"]')?.checked,
       defaultSigHoldSec: Math.max(0.5, Number(root.querySelector('[data-input="defaultSigHoldSec"]')?.value) || 8),
       sigTransitionSec: Math.max(0, Number(root.querySelector('[data-input="sigTransitionSec"]')?.value) || 2),
-      playbackTimeScale: this._readTimeScaleFromUi(),
       environmentRamp: this._collectEnvironmentRampFromUi(),
     };
   }
@@ -1022,17 +962,6 @@ export class CameraPathDialog {
 
       if (target.dataset.input === 'duration') {
         this._updateDurationReadout(Number(target.value));
-      }
-
-      if (target.dataset.input === 'playbackTimeScale' || target.dataset.input === 'playbackTimeScaleNum') {
-        const pairId = target.dataset.input === 'playbackTimeScale'
-          ? 'playbackTimeScaleNum'
-          : 'playbackTimeScale';
-        const pair = root.querySelector(`[data-input="${pairId}"]`);
-        if (pair instanceof HTMLInputElement) {
-          pair.value = target.value;
-        }
-        this._updateTimeScaleReadout(Number(target.value));
       }
 
       if (target.dataset.input) {

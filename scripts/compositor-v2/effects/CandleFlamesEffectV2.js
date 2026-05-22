@@ -17,6 +17,10 @@ const CANDLE_FLAME_RENDER_ORDER = 200100;
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
+/** Glow colour endpoints for warmth slider (0 = neutral, 1 = deep candle / torch amber). */
+const GLOW_COLOR_COOL = { r: 1.0, g: 1.0, b: 1.0 };
+const GLOW_COLOR_WARM = { r: 1.0, g: 0.45, b: 0.06 };
+
 export class CandleFlamesEffectV2 {
   constructor() {
     // Keep EffectBase-compatible fields local to avoid importing EffectComposer
@@ -63,7 +67,9 @@ export class CandleFlamesEffectV2 {
       glowRadiusPx: 172.0,
       glowInnerRadiusScale: 0.2,
       glowFalloffExponent: 2.0,
+      glowEdgeSoftness: 0.28,
       glowIntensity: 0.42,
+      glowWarmth: 1.0,
       glowDarknessCancel: 3.0,
       glowDarknessNightBoost: 2.0,
       glowFollowLightIntensity: true,
@@ -176,6 +182,7 @@ export class CandleFlamesEffectV2 {
           parameters: [
             'glowEnabled',
             'glowIntensity',
+            'glowWarmth',
             'glowDarknessCancel',
             'glowDarknessNightBoost',
             'glowFollowLightIntensity',
@@ -186,6 +193,7 @@ export class CandleFlamesEffectV2 {
             'glowRadiusPx',
             'glowInnerRadiusScale',
             'glowFalloffExponent',
+            'glowEdgeSoftness',
             'glowBucketSizePx',
             'glowMaxBuckets',
             'wallClipEnabled',
@@ -284,6 +292,10 @@ export class CandleFlamesEffectV2 {
 
         glowEnabled: { type: 'boolean', default: true, label: 'Enabled' },
         glowIntensity: { type: 'slider', min: 0, max: 2.5, step: 0.01, default: 0.42, label: 'Intensity' },
+        glowWarmth: {
+          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 1.0, label: 'Color Warmth',
+          tooltip: 'Blends glow from neutral white (0) to deep candle amber (1). Warmth tints the direct light pool as well as surface coloration.',
+        },
         glowDarknessCancel: {
           type: 'slider', min: 0, max: 8, step: 0.1, default: 3.0, label: 'Darkness Cancel',
           tooltip: 'HDR punch into the light buffer (alpha). Higher = candles erase Foundry darkness and shadows more aggressively. Matches torch Point light gain behaviour.',
@@ -303,8 +315,12 @@ export class CandleFlamesEffectV2 {
         glowRadiusPx: { type: 'slider', min: 8, max: 1200, step: 2, default: 172.0, label: 'Radius (px)' },
         glowInnerRadiusScale: { type: 'slider', min: 0.05, max: 1.0, step: 0.01, default: 0.2, label: 'Inner Radius Scale' },
         glowFalloffExponent: {
-          type: 'slider', min: 1.0, max: 5.0, step: 0.05, default: 2.0, label: 'Falloff (1/r²)',
-          tooltip: 'Physical inverse-square dropoff. 2 ≈ real-world point light; higher = tighter hot core.',
+          type: 'slider', min: 0.5, max: 5.0, step: 0.05, default: 2.0, label: 'Falloff Exponent',
+          tooltip: 'Core tightness for unified radial falloff. Lower = wider soft pool; higher ≈ inverse-square hot core.',
+        },
+        glowEdgeSoftness: {
+          type: 'slider', min: 0, max: 0.75, step: 0.01, default: 0.28, label: 'Edge Softness',
+          tooltip: 'Feathers the glow rim in the HDR light buffer. Drives shader attenuation + rim geometry (higher = wider, softer pool).',
         },
         glowBucketSizePx: { type: 'slider', min: 64, max: 2048, step: 16, default: 384.0, label: 'Bucket Size (px)' },
         glowMaxBuckets: { type: 'slider', min: 1, max: 512, step: 1, default: 256, label: 'Max Buckets' },
@@ -421,6 +437,18 @@ export class CandleFlamesEffectV2 {
       return;
     }
 
+    if (paramId === 'glowWarmth') {
+      const color = this._computeGlowColor();
+      for (const entry of this._glowBuckets.values()) {
+        entry?.baseColor?.setRGB?.(color.r, color.g, color.b);
+        entry?.lightMesh?.setAchromaticRgb?.(false);
+      }
+      for (const cluster of this._clusters) {
+        if (cluster) cluster.color = color;
+      }
+      return;
+    }
+
     if (paramId === 'glowFlickerStrength' || paramId === 'glowFlickerSpeed' || paramId === 'glowFlickerStrengthJitter' || paramId === 'glowFlickerSpeedJitter') {
       return;
     }
@@ -429,6 +457,14 @@ export class CandleFlamesEffectV2 {
       const exp = Math.max(0.5, Number(this.params.glowFalloffExponent) || 2.0);
       for (const entry of this._glowBuckets.values()) {
         entry?.lightMesh?.setFalloffExponent?.(exp);
+      }
+      return;
+    }
+
+    if (paramId === 'glowEdgeSoftness') {
+      const soft = Math.max(0, Math.min(0.75, Number(this.params.glowEdgeSoftness) || 0));
+      for (const entry of this._glowBuckets.values()) {
+        entry?.lightMesh?.setEdgeSoftness?.(soft);
       }
       return;
     }
@@ -811,6 +847,16 @@ export class CandleFlamesEffectV2 {
     return cancel * lightMul * nightMul * vis;
   }
 
+  /** Linear RGB glow tint from warmth slider (0 = neutral, 1 = candle amber). */
+  _computeGlowColor(warmth = this.params.glowWarmth) {
+    const w = clamp01(Number(warmth) || 0);
+    return {
+      r: GLOW_COLOR_COOL.r + (GLOW_COLOR_WARM.r - GLOW_COLOR_COOL.r) * w,
+      g: GLOW_COLOR_COOL.g + (GLOW_COLOR_WARM.g - GLOW_COLOR_COOL.g) * w,
+      b: GLOW_COLOR_COOL.b + (GLOW_COLOR_WARM.b - GLOW_COLOR_COOL.b) * w,
+    };
+  }
+
   /** Extra glow indoors at night (uses per-bucket roof mask). */
   _computeIndoorNightGlowBoost(outdoor01) {
     if (!this.params.autoDayNightBalance) return 1.0;
@@ -823,8 +869,16 @@ export class CandleFlamesEffectV2 {
 
   /** Clip glow to physical wall segments (blocks light-pass-through / window walls). */
   _buildGlowWallClipOptions() {
-    const opts = { blockGeometry: true };
+    const opts = {
+      blockGeometry: true,
+      // Smooth glow pool boundary (default VisionPolygonComputer uses 32).
+      circleSegments: 96,
+    };
     try {
+      const pad = window.MapShine?.lightingEffect?.params?.wallPaddingPx;
+      if (typeof pad === 'number' && isFinite(pad) && pad > 0) {
+        opts.wallPaddingPx = Math.max(0, pad);
+      }
       if (hasV14NativeLevels(canvas?.scene)) {
         const pe = getPerspectiveElevation();
         if (Number.isFinite(pe?.losHeight)) {
@@ -1233,7 +1287,7 @@ export class CandleFlamesEffectV2 {
 
     const take = Math.min(list.length, maxBuckets);
 
-    const baseGlowColor = { r: 1.0, g: 0.72, b: 0.26 };
+    const baseGlowColor = this._computeGlowColor();
 
     for (let i = 0; i < take; i++) {
       const b = list[i];
@@ -1370,18 +1424,25 @@ export class CandleFlamesEffectV2 {
           const wp = Coordinates.toWorld(foundryPoly[i], foundryPoly[i + 1]);
           worldPoints.push(wp.x, wp.y);
         }
+      } else if (this.params.wallClipEnabled) {
+        // Avoid circle fallback when wall clip was requested — prevents bleed-through.
+        continue;
       }
 
       const innerRadiusPx = Math.max(1, radiusPx * this.params.glowInnerRadiusScale);
       const falloffExponent = Math.max(0.5, Number(this.params.glowFalloffExponent) || 2.0);
+      const edgeSoftness = Math.max(0, Math.min(0.75, Number(this.params.glowEdgeSoftness) || 0));
 
       const lm = new LightMesh(centerWorld, radiusPx, c.color, {
         innerRadiusPx,
         worldPoints,
-        attenuation: 0.95,
-        falloffProfile: 'inverseSquare',
-        falloffExponent
+        falloffExponent,
+        achromaticRgb: false,
+        edgeSoftness,
       });
+
+      lm.setAchromaticRgb?.(false);
+      lm.setEmissionGain?.(0);
 
       if (lm?.mesh) {
         lm.mesh.renderOrder = 90;
@@ -1451,8 +1512,10 @@ export class CandleFlamesEffectV2 {
         this.params.glowIntensity * Math.max(0.25, entry.intensity) * flicker * dayNightMul * indoorMul
       );
 
-      this._tempColor.copy(entry.baseColor).multiplyScalar(visualMul);
-      u.uColor.value.copy(this._tempColor);
+      const glowColor = this._computeGlowColor();
+      // Hue only in uColor — intensity/flicker scales uEmissionGain (matches point-light buffer model).
+      u.uColor.value.setRGB(glowColor.r, glowColor.g, glowColor.b);
+      lm.setAchromaticRgb?.(false);
 
       const emissionGain = this._computeGlowEmissionGain(visualMul);
       if (typeof lm.setEmissionGain === 'function') {

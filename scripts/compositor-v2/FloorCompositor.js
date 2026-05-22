@@ -1737,6 +1737,7 @@ export class FloorCompositor {
     try {
       this._candleFlamesEffect?.initialize?.(this.renderer, this._renderBus._scene, this.camera);
       this._candleFlamesEffect?.setLightingEffect?.(this._lightingEffect);
+      this._fireEffect?.setLightingEffect?.(this._lightingEffect);
     } catch (err) {
       log.warn('FloorCompositor: CandleFlamesEffectV2 initialize failed:', err);
     }
@@ -6976,11 +6977,17 @@ export class FloorCompositor {
             if (outdoorsForCc) {
               this._colorCorrectionEffect.setOutdoorsMask(outdoorsForCc);
             }
+            try {
+              this._colorCorrectionEffect.setLocalLightTexture?.(
+                this._lightingEffect?.dynamicLightTexture ?? null
+              );
+            } catch (_) {}
             this._colorCorrectionEffect.render(
               this.renderer, mergedCompositeOut, ccOut,
             );
           } finally {
             try {
+              this._colorCorrectionEffect.setLocalLightTexture?.(null);
               if (this._lastOutdoorsTexture) {
                 this._colorCorrectionEffect.setOutdoorsMask(this._lastOutdoorsTexture);
               }

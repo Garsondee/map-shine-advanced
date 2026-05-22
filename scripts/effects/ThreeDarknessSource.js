@@ -226,9 +226,9 @@ export class ThreeDarknessSource {
           if (r >= 1.0) discard;
 
           float softness = clamp(uAttenuation, 0.0, 1.0);
-          float outerStart = 1.0 - softness;
-          float outerEnd = 1.0 + 0.0001;
-          float outerAlpha = 1.0 - smoothstep(outerStart, outerEnd, r);
+          float fadeWidth = max(softness, 0.001);
+          float outerStart = 1.0 - fadeWidth;
+          float outerAlpha = 1.0 - smoothstep(outerStart, 1.0, r);
 
           vec2 vUvs = (vPos / (max(uRadius, 1.0) * 2.0)) + vec2(0.5);
           float dist = r;

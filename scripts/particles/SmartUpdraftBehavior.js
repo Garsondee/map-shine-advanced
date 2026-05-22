@@ -7,6 +7,7 @@ import { weatherController } from '../core/WeatherController.js';
  *
  * Magnitude is read from `system.userData.updraftForce` (typically an ApplyForce kept
  * off the behavior list so `_updateSystemParams` can drive the base strength).
+ * Smoke systems set `userData.isSmoke` and use a map-plane updraft direction (XY+Z).
  */
 export class SmartUpdraftBehavior {
   constructor() {

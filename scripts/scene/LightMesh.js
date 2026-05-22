@@ -1,3 +1,13 @@
+import {
+  DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT,
+  POINT_LIGHT_FALLOFF_GLSL,
+  POINT_LIGHT_WALL_VERTEX_EDGE_MIN,
+  applyPointLightBufferBlending,
+  computePointLightFadeWidth,
+  computePointLightGeomScale,
+  glowShaderAttenuationFromEdgeSoftness,
+} from './point-light-falloff.js';
+
 /**
  * @fileoverview LightMesh - helper for rendering a single ambient light as a polygonal mesh.
  *
@@ -44,8 +54,14 @@ export class LightMesh {
    * @param {{r:number,g:number,b:number}} color - Linear RGB color (0..1).
    * @param {Object} [options]
    * @param {number} [options.innerRadiusPx] - Bright radius in pixels. Defaults to 0.5 * outerRadiusPx.
-   * @param {'smooth'|'inverseSquare'} [options.falloffProfile] - Radial falloff curve. Default 'smooth'.
-   * @param {number} [options.falloffExponent] - Sharpness for inverseSquare (2 ≈ physical 1/r²). Default 2.
+   * @param {'smooth'|'inverseSquare'} [options.falloffProfile] - Legacy alias; unified power-law is always used.
+   * @param {number} [options.falloffExponent] - Core tightness (2 ≈ inverse-square feel). Default 2.
+   * @param {boolean} [options.achromaticRgb] - When true, RGB is forced to neutral white while alpha
+   *   keeps full HDR punch. Use for darkness-cancel pools that must not pick up compose coloration
+   *   or Color Correction timeline channel tints (alpha still drives direct illumination).
+   * @param {number} [options.rgbGain] - Legacy multiplier on rgb and alpha together. Keep at 1.
+   * @param {number} [options.edgeSoftness] - Fraction of outer radius (0–0.5) faded at the rim.
+   *   Prevents a hard circular cutoff in the light buffer.
    * @param {Array<number>} [options.worldPoints] - Optional initial polygon points as [x0,y0,x1,y1,...] in world space.
    */
   constructor(centerWorld, outerRadiusPx, color, options = {}) {
@@ -60,14 +76,28 @@ export class LightMesh {
         : this.outerRadiusPx * 0.5
     );
     this.color = { r: color?.r ?? 1, g: color?.g ?? 1, b: color?.b ?? 1 };
-    this.attenuation = typeof options.attenuation === 'number' ? options.attenuation : 0.5;
-    this.falloffProfile = options.falloffProfile === 'inverseSquare' ? 'inverseSquare' : 'smooth';
+    this.edgeSoftness = Number.isFinite(Number(options.edgeSoftness))
+      ? Math.max(0, Math.min(0.75, Number(options.edgeSoftness)))
+      : 0.12;
+    this.attenuation = typeof options.attenuation === 'number'
+      ? options.attenuation
+      : glowShaderAttenuationFromEdgeSoftness(this.edgeSoftness);
+    this.falloffProfile = 'inverseSquare';
     this.falloffExponent = typeof options.falloffExponent === 'number' && options.falloffExponent > 0
       ? options.falloffExponent
-      : 2.0;
+      : DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT;
+    this.achromaticRgb = options.achromaticRgb === true;
+    this.rgbGain = Number.isFinite(Number(options.rgbGain)) && Number(options.rgbGain) > 0
+      ? Number(options.rgbGain)
+      : 1.0;
+    this._lastEffectiveRim = this._getEffectiveRimSoftness();
 
     /** @type {THREE.Mesh} */
     this.mesh = null;
+    /** @type {boolean} */
+    this._usesCircleFallback = false;
+    /** @type {number[]|null} Unexpanded wall-clip polygon (for rim rebuild). */
+    this._baseWorldPoints = null;
 
     // Basic additive radial falloff material.
     this.material = new THREE.ShaderMaterial({
@@ -75,6 +105,7 @@ export class LightMesh {
         uColor: { value: new THREE.Color(this.color.r, this.color.g, this.color.b) },
         uInnerRadius: { value: this.innerRadiusPx },
         uOuterRadius: { value: this.outerRadiusPx },
+        uGeomRadius: { value: this._computeGeomRadius() },
         // Scene-driven per-radius boosts for bright vs dim regions.
         uBrightRadiusBoost: { value: 3.0 },
         uDimRadiusBoost:    { value: 2.6 },
@@ -82,21 +113,15 @@ export class LightMesh {
         uCoreContrast: { value: 1.0 },
         uHaloContrast: { value: 1.0 },
         uAttenuation: { value: this.attenuation },
-        // 0 = dual smoothstep (legacy), 1 = inverse-square (physically motivated).
-        uFalloffProfile: { value: this.falloffProfile === 'inverseSquare' ? 1.0 : 0.0 },
         uFalloffExponent: { value: this.falloffExponent },
         /** HDR scale for rgb + alpha (compose reads alpha for darkness punch / direct light). */
-        uEmissionGain: { value: 1.0 },
-        // Global softness multiplier driven by LightingEffect.falloffSoftness
-        // (0.25 = hardest, 4.0 = softest in the UI). 1.0 is neutral.
-        uGlobalSoftness: { value: 1.0 },
-        // Normalized fade controls (0..1)
-        // Bright fade is inside the bright radius: fractions of inner radius.
-        uBrightFadeStart: { value: 0.8 },
-        uBrightFadeEnd:   { value: 1.0 },
-        // Dim fade is between bright and dim radii: 0 = at bright radius, 1 = at dim.
-        uDimFadeStart:    { value: 0.2 },
-        uDimFadeEnd:      { value: 1.0 }
+        uEmissionGain: { value: 0.0 },
+        /** 1 = neutral white RGB (alpha unchanged) — bypasses chromatic compose coloration. */
+        uAchromaticRgb: { value: this.achromaticRgb ? 1.0 : 0.0 },
+        /** RGB-only boost (alpha unchanged). */
+        uRgbGain: { value: this.rgbGain },
+        /** Rim fade width as a fraction of outer radius (0 = hard edge). */
+        uEdgeSoftness: { value: this.edgeSoftness },
       },
       vertexShader: `
         varying vec2 vLocalPos;
@@ -111,67 +136,96 @@ export class LightMesh {
         uniform vec3 uColor;
         uniform float uInnerRadius;
         uniform float uOuterRadius;
+        uniform float uGeomRadius;
         uniform float uAttenuation;
-        uniform float uFalloffProfile;
         uniform float uFalloffExponent;
         uniform float uEmissionGain;
+        uniform float uAchromaticRgb;
+        uniform float uRgbGain;
+        uniform float uEdgeSoftness;
+        ${POINT_LIGHT_FALLOFF_GLSL}
         void main() {
           float dist = length(vLocalPos);
-          if (dist >= uOuterRadius) discard;
+          float outerR = max(uOuterRadius, 1e-4);
+          float d = dist / outerR;
 
-          // Normalize distance so 0 = center, 1 = dim edge.
-          float d = dist / max(uOuterRadius, 1e-4);
           float att = clamp(uAttenuation, 0.0, 1.0);
+          float b = clamp(uInnerRadius / outerR, 0.0, 1.0);
+          float cover = msaPointLightFalloff(
+            d, b, att, uEdgeSoftness, uFalloffExponent, 0.5, 0.5
+          );
 
-          float finalIntensity;
-
-          if (uFalloffProfile > 0.5) {
-            // Inverse-square falloff: bright at center, rapid drop with distance (1/r²).
-            // Inner clamp avoids singularity; attenuation tightens the hot core.
-            float exp = max(uFalloffExponent, 0.5);
-            float innerClamp = mix(0.07, 0.02, att);
-            float r = max(d, innerClamp);
-            float invSq = 1.0 / (r * r);
-            float invEdge = 1.0;
-            float invCore = 1.0 / (innerClamp * innerClamp);
-            finalIntensity = clamp((invSq - invEdge) / (invCore - invEdge), 0.0, 1.0);
-            // Exponent > 2 sharpens further; < 2 softens the tail.
-            finalIntensity = pow(finalIntensity, 2.0 / exp);
-          } else {
-            // Bright radius ratio: where the inner (bright) circle ends.
-            float brightRatio = clamp(uInnerRadius / max(uOuterRadius, 1e-4), 0.0, 1.0);
-
-            // Attenuation drives edge hardness for BOTH radii, matching Foundry.
-            float hardness = mix(0.05, 1.0, att);
-
-            // Dim falloff: outer halo from center (0) to dim edge (1).
-            float dimFalloff = 1.0 - smoothstep(1.0 - hardness, 1.0, d);
-
-            // Bright falloff: remap so bright edge is treated as 1.0.
-            float brightDist = d / max(0.001, brightRatio);
-            float brightFalloff = 1.0 - smoothstep(1.0 - hardness, 1.0, brightDist);
-
-            // Combine bright + dim contributions and clamp.
-            finalIntensity = clamp(dimFalloff + brightFalloff, 0.0, 1.0);
-          }
+          // Feather through geometry pad beyond photometric radius (mesh extends past outerR).
+          float geomR = max(uGeomRadius, outerR);
+          float dGeom = dist / geomR;
+          float photFrac = outerR / geomR;
+          cover *= 1.0 - smoothstep(photFrac * 0.50, 1.04, dGeom);
 
           float gain = max(uEmissionGain, 0.0);
+          float rgbGain = max(uRgbGain, 0.0);
+          // Match ThreeLightSource: alpha = scalar illumination, RGB = hue * same mag.
+          // uColor is a tint direction only — magnitude lives in uEmissionGain.
+          float illumMag = cover * gain * rgbGain;
+          float srcMx = max(max(uColor.r, uColor.g), uColor.b);
+          vec3 hue = (srcMx > 1e-4) ? (uColor / srcMx) : vec3(1.0);
+          vec3 rgbOut = (uAchromaticRgb > 0.5) ? vec3(illumMag) : (hue * illumMag);
+          float alphaOut = illumMag;
 
-          gl_FragColor = vec4(uColor * finalIntensity * gain, finalIntensity * gain);
+          float edgeFade = smoothstep(0.0, 0.018, cover);
+          alphaOut *= edgeFade;
+          rgbOut *= edgeFade;
+          if (alphaOut <= 0.000001 && max(max(rgbOut.r, rgbOut.g), rgbOut.b) <= 0.000001) discard;
+
+          gl_FragColor = vec4(rgbOut, alphaOut);
         }
       `,
       transparent: true,
       depthWrite: false,
       depthTest: false,
-      blending: THREE.AdditiveBlending
     });
 
-    // Optional initial polygon.
+    applyPointLightBufferBlending(this.material);
+    this.material.toneMapped = false;
     if (options.worldPoints?.length) {
       this._buildMeshFromWorldPoints(options.worldPoints);
     } else {
       this._buildFallbackCircle();
     }
+  }
+
+  /** @private Effective rim softness for geometry expansion (matches fragment shader). */
+  _getEffectiveRimSoftness() {
+    return computePointLightFadeWidth({
+      attenuation: this.attenuation,
+      edgeSoftness: this.edgeSoftness,
+      falloffExponent: this.falloffExponent,
+    });
+  }
+
+  /** @private */
+  _computeGeomRadius() {
+    return Math.max(1, this.outerRadiusPx * computePointLightGeomScale(this._getEffectiveRimSoftness()));
+  }
+
+  /** @private */
+  _syncRadiusUniforms() {
+    if (!this.material?.uniforms) return;
+    this.material.uniforms.uOuterRadius.value = this.outerRadiusPx;
+    this.material.uniforms.uInnerRadius.value = this.innerRadiusPx;
+    if (this.material.uniforms.uGeomRadius) {
+      this.material.uniforms.uGeomRadius.value = this._computeGeomRadius();
+    }
+  }
+
+  /** @private */
+  _rebuildCircleGeometryIfNeeded() {
+    if (!this._usesCircleFallback || !this.mesh) return;
+    const THREE = window.THREE;
+    if (!THREE) return;
+    const geomRadius = this._computeGeomRadius();
+    const geometry = new THREE.CircleGeometry(geomRadius, 128);
+    this.mesh.geometry.dispose();
+    this.mesh.geometry = geometry;
   }
 
   /**
@@ -181,25 +235,80 @@ export class LightMesh {
    */
   updatePolygon(worldPoints) {
     if (!worldPoints || worldPoints.length < 6) {
+      this._baseWorldPoints = null;
       this._buildFallbackCircle();
       return;
     }
-    this._buildMeshFromWorldPoints(worldPoints);
+    this._buildMeshFromWorldPoints(worldPoints, true);
+  }
+
+  /**
+   * Radially expand wall-clip vertices so fragment rim fade (d > 1) has geometry.
+   * @param {Array<number>} worldPoints
+   * @returns {Array<number>}
+   * @private
+   */
+  _expandWorldPointsForSoftRim(worldPoints) {
+    const fadeWidth = this._getEffectiveRimSoftness();
+    if (!worldPoints?.length || fadeWidth < 0.0001) return worldPoints;
+
+    const cx = this.center.x;
+    const cy = this.center.y;
+    const outerR = Math.max(this.outerRadiusPx, 1e-4);
+    const rimScale = computePointLightGeomScale(fadeWidth);
+    const out = new Array(worldPoints.length);
+
+    for (let i = 0; i < worldPoints.length; i += 2) {
+      const wx = worldPoints[i];
+      const wy = worldPoints[i + 1];
+      const lx = wx - cx;
+      const ly = wy - cy;
+      const len = Math.hypot(lx, ly);
+      if (len < 1e-4) {
+        out[i] = wx;
+        out[i + 1] = wy;
+        continue;
+      }
+      const edgeW = Math.min(1.0, len / outerR);
+      // Wall-clipped vertices well inside the nominal radius must not expand through occluders.
+      // Open-circle rim vertices (edgeW >= ~0.88) still need pad for fragment rim fade.
+      if (edgeW < POINT_LIGHT_WALL_VERTEX_EDGE_MIN) {
+        out[i] = wx;
+        out[i + 1] = wy;
+        continue;
+      }
+      const rimT = Math.max(0, Math.min(1,
+        (edgeW - POINT_LIGHT_WALL_VERTEX_EDGE_MIN) / Math.max(1e-4, 1.0 - POINT_LIGHT_WALL_VERTEX_EDGE_MIN)
+      ));
+      const scale = 1.0 + (rimScale - 1.0) * rimT;
+      out[i] = cx + lx * scale;
+      out[i + 1] = cy + ly * scale;
+    }
+    return out;
   }
 
   /**
    * Internal: build mesh geometry from world-space polygon points.
    * @param {Array<number>} worldPoints
+   * @param {boolean} [storeBase=true] - Cache unexpanded points for rim rebuilds.
    */
-  _buildMeshFromWorldPoints(worldPoints) {
+  _buildMeshFromWorldPoints(worldPoints, storeBase = true) {
     const THREE = window.THREE;
+    this._usesCircleFallback = false;
+
+    if (storeBase && worldPoints?.length >= 6) {
+      this._baseWorldPoints = worldPoints.slice();
+    }
+    const buildPoints = this._expandWorldPointsForSoftRim(
+      this._baseWorldPoints ?? worldPoints
+    );
 
     // Compute local-space polygon around origin, with mesh positioned at center.
     const shape = new THREE.Shape();
 
-    for (let i = 0; i < worldPoints.length; i += 2) {
-      const wx = worldPoints[i];
-      const wy = worldPoints[i + 1];
+    for (let i = 0; i < buildPoints.length; i += 2) {
+      const wx = buildPoints[i];
+      const wy = buildPoints[i + 1];
       const lx = wx - this.center.x;
       const ly = wy - this.center.y;
 
@@ -227,8 +336,10 @@ export class LightMesh {
    */
   _buildFallbackCircle() {
     const THREE = window.THREE;
-    const segments = 32;
-    const geometry = new THREE.CircleGeometry(this.outerRadiusPx, segments);
+    this._usesCircleFallback = true;
+    this._baseWorldPoints = null;
+    const geomRadius = this._computeGeomRadius();
+    const geometry = new THREE.CircleGeometry(geomRadius, 128);
 
     // Position at ground plane Z level (plus small offset)
     const lightZ = LightMesh._getGroundZ() + 0.1;
@@ -260,15 +371,29 @@ export class LightMesh {
     );
 
     this.material.uniforms.uColor.value.setRGB(this.color.r, this.color.g, this.color.b);
-    this.material.uniforms.uOuterRadius.value = this.outerRadiusPx;
-    this.material.uniforms.uInnerRadius.value = this.innerRadiusPx;
+    this._syncRadiusUniforms();
     this.material.uniforms.uAttenuation.value = this.attenuation;
-    if (this.material.uniforms.uFalloffProfile) {
-      this.material.uniforms.uFalloffProfile.value = this.falloffProfile === 'inverseSquare' ? 1.0 : 0.0;
+    const newRim = this._getEffectiveRimSoftness();
+    const rimChanged = Math.abs(newRim - (this._lastEffectiveRim ?? -1)) > 0.004;
+    this._lastEffectiveRim = newRim;
+    if (rimChanged) {
+      if (this._usesCircleFallback) {
+        this._rebuildCircleGeometryIfNeeded();
+      } else if (this._baseWorldPoints?.length >= 6) {
+        this._buildMeshFromWorldPoints(this._baseWorldPoints, false);
+      }
     }
     if (this.material.uniforms.uFalloffExponent) {
       this.material.uniforms.uFalloffExponent.value = this.falloffExponent;
     }
+  }
+
+  /**
+   * @param {'smooth'|'inverseSquare'} profile
+   */
+  /** @deprecated Unified power-law falloff is always active; kept for call-site compatibility. */
+  setFalloffProfile(_profile) {
+    this.falloffProfile = 'inverseSquare';
   }
 
   /**
@@ -279,6 +404,16 @@ export class LightMesh {
     this.falloffExponent = exp;
     if (this.material?.uniforms?.uFalloffExponent) {
       this.material.uniforms.uFalloffExponent.value = exp;
+    }
+    const prevRim = this._lastEffectiveRim;
+    this._lastEffectiveRim = this._getEffectiveRimSoftness();
+    if (Math.abs((prevRim ?? -1) - this._lastEffectiveRim) > 0.004) {
+      this._syncRadiusUniforms();
+      if (this._usesCircleFallback) {
+        this._rebuildCircleGeometryIfNeeded();
+      } else if (this._baseWorldPoints?.length >= 6) {
+        this._buildMeshFromWorldPoints(this._baseWorldPoints, false);
+      }
     }
   }
 
@@ -291,6 +426,69 @@ export class LightMesh {
     if (this.material?.uniforms?.uEmissionGain) {
       this.material.uniforms.uEmissionGain.value = g;
     }
+    if (this.mesh) {
+      this.mesh.visible = g > 1e-4;
+    }
+  }
+
+  /**
+   * Force neutral white RGB output (alpha unchanged). See {@link constructor} `achromaticRgb`.
+   * @param {boolean} enabled
+   */
+  setAchromaticRgb(enabled) {
+    this.achromaticRgb = !!enabled;
+    if (this.material?.uniforms?.uAchromaticRgb) {
+      this.material.uniforms.uAchromaticRgb.value = this.achromaticRgb ? 1.0 : 0.0;
+    }
+  }
+
+  /**
+   * @param {number} gain - Legacy multiplier on rgb + alpha together.
+   */
+  setRgbGain(gain) {
+    const g = Number.isFinite(gain) && gain > 0 ? gain : 1.0;
+    this.rgbGain = g;
+    if (this.material?.uniforms?.uRgbGain) {
+      this.material.uniforms.uRgbGain.value = g;
+    }
+  }
+
+  /** @private Rebuild geometry when rim/attenuation changes. */
+  _rebuildGeometryForRimChange() {
+    this._syncRadiusUniforms();
+    if (this._usesCircleFallback) {
+      this._rebuildCircleGeometryIfNeeded();
+    } else if (this._baseWorldPoints?.length >= 6) {
+      this._buildMeshFromWorldPoints(this._baseWorldPoints, false);
+    }
+  }
+
+  /**
+   * @param {number} attenuation - Shader softness 0..1 (stay below 1 for glow sliders).
+   */
+  setAttenuation(attenuation) {
+    const a = Math.max(0, Math.min(1, Number(attenuation) || 0));
+    this.attenuation = a;
+    if (this.material?.uniforms?.uAttenuation) {
+      this.material.uniforms.uAttenuation.value = a;
+    }
+    const prevRim = this._lastEffectiveRim;
+    this._lastEffectiveRim = this._getEffectiveRimSoftness();
+    if (Math.abs((prevRim ?? -1) - this._lastEffectiveRim) > 0.004) {
+      this._rebuildGeometryForRimChange();
+    }
+  }
+
+  /**
+   * @param {number} softness - Rim fade as fraction of outer radius (0–0.75).
+   */
+  setEdgeSoftness(softness) {
+    const s = Number.isFinite(softness) ? Math.max(0, Math.min(0.75, softness)) : 0.12;
+    this.edgeSoftness = s;
+    if (this.material?.uniforms?.uEdgeSoftness) {
+      this.material.uniforms.uEdgeSoftness.value = s;
+    }
+    this.setAttenuation(glowShaderAttenuationFromEdgeSoftness(s));
   }
 
   /** Dispose geometry and material. */

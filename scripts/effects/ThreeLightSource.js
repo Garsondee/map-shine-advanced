@@ -10,6 +10,16 @@ import { weatherController } from '../core/WeatherController.js';
 import { createLogger } from '../core/log.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { hasV14NativeLevels } from '../foundry/levels-scene-flags.js';
+import {
+  DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT,
+  POINT_LIGHT_FALLOFF_GLSL,
+  POINT_LIGHT_WALL_VERTEX_EDGE_MIN,
+  applyPointLightBufferBlending,
+  computePointLightFadeWidth,
+  computePointLightGeomRadiusPx,
+  computePointLightGeomScale,
+  foundryShaderAttenuationFromData,
+} from '../scene/point-light-falloff.js';
 
 const _lightLosComputer = new VisionPolygonComputer();
 const log = createLogger('ThreeLightSource');
@@ -126,6 +136,11 @@ export class ThreeLightSource {
      */
     this._usingCircleFallback = false;
 
+    /** @type {number} Shader softness mapped from Foundry attenuation [0..1]. */
+    this._shaderSoftness = 0.5;
+    /** @type {THREE.Vector2[]|null} Unexpanded wall-clip polygon in light-local space. */
+    this._baseShapePointsLocal = null;
+
     this._lastInsetWorldPx = null;
     this._lastInsetUpdateAtSec = -Infinity;
     this._lastInsetZoom = null;
@@ -194,6 +209,15 @@ export class ThreeLightSource {
     try {
       const inset = window.MapShine?.lightingEffect?.params?.wallInsetPx;
       return (typeof inset === 'number' && isFinite(inset)) ? Math.max(0, inset) : 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  _getWallPaddingPx() {
+    try {
+      const pad = window.MapShine?.lightingEffect?.params?.wallPaddingPx;
+      return (typeof pad === 'number' && isFinite(pad)) ? Math.max(0, pad) : 0;
     } catch (_) {
       return 0;
     }
@@ -286,6 +310,8 @@ export class ThreeLightSource {
         uCenterOffset: { value: new THREE.Vector2(0, 0) },
         uAlpha: { value: 0.5 },
         uAttenuation: { value: 0.5 },
+        uFalloffExponent: { value: DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT },
+        uEdgeSoftness: { value: 0.0 },
         uOutputGain: { value: 1.0 },
         uOuterWeight: { value: 0.5 },
         uInnerWeight: { value: 0.5 },
@@ -336,6 +362,8 @@ export class ThreeLightSource {
         uniform vec2  uCenterOffset;
         uniform float uAlpha;
         uniform float uAttenuation;
+        uniform float uFalloffExponent;
+        uniform float uEdgeSoftness;
         uniform float uOutputGain;
         uniform float uOuterWeight;
         uniform float uInnerWeight;
@@ -515,15 +543,16 @@ export class ThreeLightSource {
           return smoothstep(0.0, smoothness, max(lg, clg * sign(va.y * coord.x - va.x * coord.y)));
         }
 
+        ${POINT_LIGHT_FALLOFF_GLSL}
+
         void main() {
           vec2 p = vPos - uCenterOffset;
+          float outerR = max(uRadius, 1e-4);
           float distPx = length(p);
-          // Normalized distance [0..1]
-          float r = distPx / uRadius; 
-          vec2 vUvs = (p / (max(uRadius, 1.0) * 2.0)) + vec2(0.5);
+          // Normalized distance [0..1] — guard uRadius=0 (UI drag / animation) to avoid NaN.
+          float r = distPx / outerR;
+          vec2 vUvs = (p / (outerR * 2.0)) + vec2(0.5);
           float dist = r;
-
-          if (r >= 1.0) discard;
 
           // Animation intensity 1..10 → 0..1 (5 ≈ comfortable midpoint for fire tuning).
           float iAnimDrive = clamp((clamp(uAnimIntensity, 0.0, 10.0) - 1.0) / 9.0, 0.0, 1.0);
@@ -533,10 +562,9 @@ export class ThreeLightSource {
           float isFlame = step(20.5, uAnimType) * (1.0 - step(21.5, uAnimType));
           float isFireCore = max(isTorch, isFlame);
 
-          // uAttenuation acts as a "Softness" factor [0..1]
-          // 0.0 = Hard Edges (Plateaus)
-          // 1.0 = Soft Edges (Linear Gradients)
-          float softness = uAttenuation;
+          // uAttenuation maps Foundry attenuation → rim width (see updateData).
+          float att = clamp(uAttenuation, 0.0, 1.0);
+          float brightNorm = clamp(uBrightRadius / outerR, 0.0, 1.0);
 
           float intensity;
 
@@ -546,7 +574,7 @@ export class ThreeLightSource {
             float ai = mix(0.03, 1.0, pow(iAnimDrive, 0.78));
             float coreGrowth = smoothstep(0.0, 1.0, iAnimDrive);
             float brPx = max(uBrightRadius, 1.5);
-            float uRad = max(uRadius, 1.0);
+            float uRad = outerR;
 
             float wTime = uTime * mix(2.4, 14.0, pow(iAnimDrive, 0.85));
             float seedK = fract(uSeed * 0.001 + 0.37) * 200.0;
@@ -574,9 +602,10 @@ export class ThreeLightSource {
             float t = fireDistPx / max(ballPx, 0.5);
             float ember = pow(max(0.0, 1.0 - t), fallPow);
 
-            float rn = fireDistPx / uRad;
-            float dOut = max(0.0, 1.0 - rn);
-            float disk = pow(dOut, 0.88) * 0.62 + pow(dOut, 1.75) * 0.22;
+            float rn = clamp(fireDistPx / uRad, 0.0, 1.35);
+            float disk = msaPointLightFalloff(
+              rn, brightNorm, att, uEdgeSoftness, uFalloffExponent, uOuterWeight, uInnerWeight
+            );
 
             float twoPi = 6.283185307179586;
             float ph1 = fract(uSeed * 0.1031 + 0.17) * twoPi;
@@ -640,22 +669,9 @@ export class ThreeLightSource {
             float radialBase = ember + disk * 0.52;
             intensity = radialBase * fireRadialMul * flickStable;
           } else {
-            // 1. OUTER CIRCLE (Dim Radius)
-            float outerStart = 1.0 - softness;
-            float outerEnd = 1.0 + 0.0001;
-            float outerAlpha = 1.0 - smoothstep(outerStart, outerEnd, r);
-
-            // 2. INNER CIRCLE (Bright Radius)
-            float b = uBrightRadius / uRadius;
-            float innerStart = b * (1.0 - softness);
-            float innerEnd = b + (softness * (1.0 - b)) + 0.0001;
-            float innerAlpha = 1.0 - smoothstep(innerStart, innerEnd, r);
-
-            // 3. COMPOSITION
-            float wOuter = max(uOuterWeight, 0.0);
-            float wInner = max(uInnerWeight, 0.0);
-            float wSum = max(0.0001, wOuter + wInner);
-            intensity = (wOuter * outerAlpha + wInner * innerAlpha) / wSum;
+            intensity = msaPointLightFalloff(
+              r, brightNorm, att, uEdgeSoftness, uFalloffExponent, uOuterWeight, uInnerWeight
+            );
           }
 
           // Shader-driven animation factor and potential color shift.
@@ -774,68 +790,49 @@ export class ThreeLightSource {
             ${FoundryLightingShaderChunks.pulse}
           }
 
-          // Final Alpha calculation
+          // Falloff shape (0..1) shared by RGB coloration + alpha direct channel.
           float uAlphaEff = mix(uAlpha, min(1.0, max(uAlpha, 0.92)), isFireCore);
-          float alphaBase = intensity * uAlphaEff * uIntensity * animAlphaMul * cookieFactor * max(uOutputGain, 0.0);
+          float cover = intensity * uAlphaEff * uIntensity * animAlphaMul * cookieFactor * max(uOutputGain, 0.0);
 
           float fairyBoost = (uAnimType > 1.5 && uAnimType < 2.5) ? 3.0 : 1.0;
-          alphaBase *= fairyBoost;
-          // Torch + flame: extra punch scales up with animation intensity (low at 1, full at 10).
-          alphaBase *= mix(1.0, 1.75, isFireCore * iAnimDrive);
+          cover *= fairyBoost;
+          cover *= mix(1.0, 1.75, isFireCore * iAnimDrive);
 
-          // Apply Foundry-like luminosity as a direct strength control.
-          // This ensures low luminosity visibly reduces emitted light.
           float lumMul = clamp(uLuminosity, 0.0, 1.0);
-          float alpha = alphaBase * lumMul;
+          float ci = clamp(uColoration, 0.0, 1.0);
+          // Single attenuation envelope: alpha = scalar illumination, RGB = hue * same mag.
+          // Color-only lights (lum≈0, ci>0) keep RGB reach without alpha direct punch.
+          float illumMag = cover * lumMul;
+          float colorOnly = (1.0 - step(0.02, lumMul)) * ci;
+          float colorMag = cover * mix(lumMul, 1.0, colorOnly);
 
-          // Apply cookie factor to color output to keep cookies visible even if
-          // downstream compositing ignores alpha modulation for the light buffer.
           float cookieColorMul = (uHasCookie > 0.5) ? cookieFactor : 1.0;
 
-          // Foundry "Color Intensity" (uniform uColoration): tint vs neutral luma.
-          float ci = clamp(uColoration, 0.0, 1.0);
-          float outLum = dot(outColor, vec3(0.2126, 0.7152, 0.0722));
-          vec3 tintedColor = mix(vec3(outLum), outColor, ci);
-          // Compose treats RGB as a separate coloration path (scaled by albedo); a plain
-          // luma blend at ci=1 matches hue but can read weaker than Foundry. Emphasize
-          // chroma at high ci so max slider gives clearly saturated tints (HDR-safe).
-          vec3 lumaAxis = vec3(outLum);
-          vec3 chr = tintedColor - lumaAxis;
-          float chromaEmphasis = 1.0 + 0.72 * ci * ci;
-          tintedColor = lumaAxis + chr * chromaEmphasis;
-          vec3 rgbOut = tintedColor * uBrightness * (0.75 + 0.25 * fairyBoost) * cookieColorMul;
-          // Keep color falloff/shape attenuation identical to the white channel profile,
-          // but do not multiply by luminosity so "color-only" lights remain visible.
-          rgbOut *= alphaBase;
+          float srcMx = max(max(outColor.r, outColor.g), outColor.b);
+          vec3 hue = (srcMx > 1e-4) ? (outColor / srcMx) : vec3(1.0);
+          vec3 rgbOut = mix(vec3(illumMag), hue * colorMag, ci);
+          rgbOut *= uBrightness * (0.75 + 0.25 * fairyBoost) * cookieColorMul;
           if (isFireCore > 0.5) {
             float hotHi = mix(1.05, 3.35, pow(iAnimDrive, 1.04));
             vec3 fire = vec3(1.0, 0.52, 0.14);
             rgbOut = mix(rgbOut * hotHi, rgbOut * fire * hotHi * 0.42, mix(0.22, 0.38, iAnimDrive));
           }
 
-          // Map Shine LightingEffect Point light gain: scale emission before _lightRT accumulation.
-          // (Name must not shadow cg from the cookie-gamma block above — GLSL ES 1.0 uses function scope.)
+          float alpha = illumMag;
           float composeGain = clamp(uComposeLightGain, 0.0, 8.0);
+          float edgeFade = smoothstep(0.0, 0.012, cover);
+          alpha *= edgeFade;
+          rgbOut *= edgeFade;
+          if (alpha <= 0.000001 && max(max(rgbOut.r, rgbOut.g), rgbOut.b) <= 0.000001) discard;
           gl_FragColor = vec4(rgbOut * composeGain, alpha * composeGain);
         }
       `,
       transparent: true,
-      // Split-channel additive:
-      // - RGB uses src color directly (so colored-only lights can render even when
-      //   luminosity drives alpha to 0)
-      // - Alpha accumulates separately as the white/direct-light channel read by
-      //   LightingEffectV2 compose.
-      blending: THREE.CustomBlending,
-      blendEquation: THREE.AddEquation,
-      blendSrc: THREE.OneFactor,
-      blendDst: THREE.OneFactor,
-      // Keep destination alpha as linear accumulation of source alpha so
-      // compose can read it as the direct/white-light channel.
-      blendSrcAlpha: THREE.OneFactor,
-      blendDstAlpha: THREE.OneFactor,
       depthWrite: false,
       depthTest: false,
     });
+
+    applyPointLightBufferBlending(this.material);
 
     this.material.toneMapped = false;
 
@@ -997,8 +994,11 @@ export class ThreeLightSource {
     this._baseRatio = rPxBase > 0 ? (brightPxBase / rPxBase) : 1;
     this._renderRadiusPx = renderRadiusPx;
 
-    this.material.uniforms.uRadius.value = rPxBase;
-    this.material.uniforms.uBrightRadius.value = brightPxBase;
+    const rPxSafe = Math.max(rPxBase, 1e-4);
+    const brightPxSafe = Math.max(0, Math.min(brightPxBase, rPxSafe));
+
+    this.material.uniforms.uRadius.value = rPxSafe;
+    this.material.uniforms.uBrightRadius.value = brightPxSafe;
     const alphaRaw = Number(config.alpha);
     this.material.uniforms.uAlpha.value = Number.isFinite(alphaRaw) ? this._clamp(alphaRaw, 0.0, 1.0) : 0.5;
 
@@ -1017,9 +1017,14 @@ export class ThreeLightSource {
 
     // --- FOUNDRY ATTENUATION MATH ---
     // Maps user input [0,1] to a non-linear shader curve [0,1]
-    const rawAttenuation = config.attenuation ?? 0.5;
-    const computedAttenuation = (Math.cos(Math.PI * Math.pow(rawAttenuation, 1.5)) - 1) / -2;
+    const rawAttenuation = config.attenuation ?? doc?.attenuation ?? 0.5;
+    const computedAttenuation = foundryShaderAttenuationFromData(rawAttenuation);
+    const prevShaderSoftness = this._shaderSoftness;
+    this._shaderSoftness = computedAttenuation;
     this.material.uniforms.uAttenuation.value = computedAttenuation;
+    if (this.material.uniforms.uFalloffExponent) {
+      this.material.uniforms.uFalloffExponent.value = DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT;
+    }
 
     // Cable Swing uses shader-space offsets. Reset them here so stale state doesn't
     // persist across config edits or geometry rebuilds.
@@ -1062,8 +1067,13 @@ export class ThreeLightSource {
       }
     }
 
+    const softnessChanged = Number.isFinite(prevShaderSoftness)
+      && Math.abs(prevShaderSoftness - computedAttenuation) > 0.004;
+
     if (forceRebuild || !this.mesh || radiusChanged || positionChanged) {
       this.rebuildGeometry(worldPos.x, worldPos.y, renderRadiusPx, lightZ);
+    } else if (softnessChanged) {
+      this._reapplyShapeSoftnessGeometry(worldPos.x, worldPos.y, lightZ);
     } else {
       this.mesh.position.set(worldPos.x, worldPos.y, lightZ);
     }
@@ -1823,6 +1833,82 @@ export class ThreeLightSource {
     }
   }
 
+  /**
+   * Radially expand wall-clip vertices so attenuation rim fade has mesh coverage.
+   * @param {THREE.Vector2[]} localPoints
+   * @param {number} outerRadiusPx
+   * @param {number} softness
+   * @returns {THREE.Vector2[]}
+   * @private
+   */
+  _expandLocalShapePointsForSoftRim(localPoints, outerRadiusPx, attenuation) {
+    const fadeWidth = computePointLightFadeWidth({
+      attenuation,
+      falloffExponent: DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT,
+    });
+    if (!localPoints?.length || fadeWidth < 0.0001) return localPoints;
+
+    const outerR = Math.max(Number(outerRadiusPx) || 0, 1e-4);
+    const rimScale = computePointLightGeomScale(fadeWidth);
+    return localPoints.map((p) => {
+      const len = Math.hypot(p.x, p.y);
+      if (len < 1e-4) return p.clone();
+      const edgeW = Math.min(1.0, len / outerR);
+      if (edgeW < POINT_LIGHT_WALL_VERTEX_EDGE_MIN) return p.clone();
+      const rimT = Math.max(0, Math.min(1,
+        (edgeW - POINT_LIGHT_WALL_VERTEX_EDGE_MIN) / Math.max(1e-4, 1.0 - POINT_LIGHT_WALL_VERTEX_EDGE_MIN)
+      ));
+      const scale = 1.0 + (rimScale - 1.0) * rimT;
+      return new THREE.Vector2(p.x * scale, p.y * scale);
+    });
+  }
+
+  /** @private Circle fallback radius: photometric base + rim margin (wall clip absent). */
+  _computeCircleFallbackGeomRadius(renderRadiusPx) {
+    const geomR = computePointLightGeomRadiusPx(this._baseRadiusPx, {
+      attenuation: this._shaderSoftness,
+      falloffExponent: DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT,
+    });
+    return Math.max(Number(renderRadiusPx) || 1, geomR);
+  }
+
+  /**
+   * Rebuild only the shape geometry when Foundry attenuation changes.
+   * @private
+   */
+  _reapplyShapeSoftnessGeometry(worldX, worldY, lightZ) {
+    const THREE = window.THREE;
+    if (!THREE || !this.mesh) return;
+
+    if (this._usingCircleFallback || !this._baseShapePointsLocal?.length) {
+      const geomRadius = this._computeCircleFallbackGeomRadius(this._renderRadiusPx);
+      const geometry = new THREE.CircleGeometry(geomRadius, 128);
+      try {
+        this.mesh.geometry?.dispose?.();
+      } catch (_) {}
+      this.mesh.geometry = geometry;
+      this.mesh.position.set(worldX, worldY, lightZ);
+      this._usingCircleFallback = true;
+      return;
+    }
+
+    const softness = Number.isFinite(this._shaderSoftness) ? this._shaderSoftness : 0;
+    const buildPoints = this._expandLocalShapePointsForSoftRim(
+      this._baseShapePointsLocal,
+      this._baseRadiusPx,
+      softness
+    );
+    const shape = new THREE.Shape(buildPoints);
+    const geometry = new THREE.ShapeGeometry(shape);
+
+    try {
+      this.mesh.geometry?.dispose?.();
+    } catch (_) {}
+    this.mesh.geometry = geometry;
+    this.mesh.position.set(worldX, worldY, lightZ);
+    this._usingCircleFallback = false;
+  }
+
   rebuildGeometry(worldX, worldY, radiusPx, lightZ) {
     const THREE = window.THREE;
     const prevMeshParent = this.mesh?.parent ?? this._meshParent;
@@ -1893,6 +1979,8 @@ export class ThreeLightSource {
         // the intended radius.
         const computeRadiusPx = Math.max(0, (Number(radiusPx) || 0) + wallInsetPx);
         const computeOpts = { sense: 'light' };
+        const wallPaddingPx = this._getWallPaddingPx();
+        if (wallPaddingPx > 0) computeOpts.wallPaddingPx = wallPaddingPx;
         try {
           if (hasV14NativeLevels(canvas?.scene)) {
             const docElev = Number(this.document?.elevation);
@@ -1981,12 +2069,20 @@ export class ThreeLightSource {
     }
 
     if (shapePoints && shapePoints.length > 2) {
-      const shape = new THREE.Shape(shapePoints);
+      this._baseShapePointsLocal = shapePoints.map((p) => p.clone());
+      const softness = Number.isFinite(this._shaderSoftness) ? this._shaderSoftness : 0;
+      const buildPoints = this._expandLocalShapePointsForSoftRim(
+        this._baseShapePointsLocal,
+        this._baseRadiusPx,
+        softness
+      );
+      const shape = new THREE.Shape(buildPoints);
       geometry = new THREE.ShapeGeometry(shape);
       this._usingCircleFallback = false;
     } else {
-      // Circle Fallback - bumped segments to 128 for smoother large radii
-      geometry = new THREE.CircleGeometry(radiusPx, 128);
+      this._baseShapePointsLocal = null;
+      const geomRadius = this._computeCircleFallbackGeomRadius(radiusPx);
+      geometry = new THREE.CircleGeometry(geomRadius, 128);
       this._usingCircleFallback = true;
     }
 

@@ -3478,14 +3478,16 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           // Cross-section coordinate: 0 at beam centerline, 1 at authored beam edge.
           float beamCoord = clamp(centered / localW, 0.0, 1.0);
 
-          // Edge softness as a fraction of beam radius (stable for narrow near-end beams).
-          float soft = clamp(uEdgeSoftness, 0.01, 0.95);
-          float edgeFade = 1.0 - smoothstep(1.0 - soft, 1.0, beamCoord);
+          // Feather: normalized fraction + world-width mask (pre-4bdeba3 lateral soft edge).
+          float softFrac = clamp(uEdgeSoftness, 0.01, 0.95);
+          float edgeFade = 1.0 - smoothstep(1.0 - softFrac, 1.0, beamCoord);
+          float softW = max(1e-4, softFrac * localW);
+          float beamMask = 1.0 - smoothstep(localW - softW, localW + softW, centered);
 
           float core = exp(-beamCoord * beamCoord * max(0.01, uCoreSharpness)) * uCoreIntensity;
           float mid = exp(-beamCoord * beamCoord * max(0.01, uMidSharpness)) * uMidIntensity;
           float rim = exp(-(1.0 - beamCoord) * (1.0 - beamCoord) * max(0.01, uRimSharpness)) * uRimIntensity;
-          float lateral = max(0.0, core + rim - mid) * edgeFade;
+          float lateral = max(0.0, core + rim - mid) * min(edgeFade, beamMask);
 
           float longFalloff = pow(max(0.0, 1.0 - t / max(wallT, 1e-3)), max(0.01, uLongFalloffExp));
           float nearBoost = mix(1.0, uNearBoost, pow(1.0 - t, max(0.01, uNearBoostCurve)));

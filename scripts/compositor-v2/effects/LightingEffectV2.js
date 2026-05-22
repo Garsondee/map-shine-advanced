@@ -165,6 +165,8 @@ export class LightingEffectV2 {
        */
       colorationAchromaticMix: 1.0,
       wallInsetPx: 6.0,
+      /** Padded wall segments for light LOS raycast (reduces bleed through thin walls). */
+      wallPaddingPx: 2.0,
       upperFloorTransmissionEnabled: false,
       upperFloorTransmissionStrength: 0.6,
       /**
@@ -696,6 +698,7 @@ export class LightingEffectV2 {
     this.params[paramId] = value;
     this._paramsDirty = true;
     if (paramId === 'lightIntensity') this._pushComposeLightGainToFoundryMeshes();
+    if (paramId === 'wallInsetPx' || paramId === 'wallPaddingPx') this.syncAllLights();
   }
 
   /** @private */
@@ -880,6 +883,11 @@ export class LightingEffectV2 {
     return this._lightRT?.texture ?? null;
   }
 
+  /** @returns {THREE.Texture|null} Alias for {@link dynamicLightTexture} (Camera Grade warm-light preserve). */
+  get lightTexture() {
+    return this.dynamicLightTexture;
+  }
+
   /**
    * Latest window-glow accumulation texture, used by downstream post passes
    * that need to identify directly illuminated pixels.
@@ -975,6 +983,7 @@ export class LightingEffectV2 {
           expanded: false,
           parameters: [
             'wallInsetPx',
+            'wallPaddingPx',
             'restrictRoofScreenLightOcclusionToTopFloor',
             'upperFloorTransmissionEnabled',
             'upperFloorTransmissionStrength',
@@ -1166,6 +1175,15 @@ export class LightingEffectV2 {
             'Darkens the Foundry HDR light accumulation (ambient disks/torches/colour spill) wherever building+painted shadows are dark. Strong gameplay lights clear this via Structural shadow override. Set to 0 to restore fills that bypass structural shadows entirely.',
         },
         wallInsetPx: { type: 'slider', min: 0, max: 40, step: 0.5, default: 6.0, label: 'Wall Inset (px)' },
+        wallPaddingPx: {
+          type: 'slider',
+          min: 0,
+          max: 12,
+          step: 0.5,
+          default: 2.0,
+          label: 'Wall Padding (px)',
+          tooltip: 'Expands blocking wall segments during light LOS raycasts. Reduces glow bleeding through thin or diagonal walls. Also applies to candle/fire glow pools.',
+        },
         restrictRoofScreenLightOcclusionToTopFloor: {
           type: 'boolean',
           default: true,
@@ -1685,15 +1703,28 @@ export class LightingEffectV2 {
           float winWhite = max(max(winLights.r, winLights.g), winLights.b) * visW;
           winWhite *= (1.0 - windowOutdoorBlock);
           float lightIVisible = max(c, winWhite);
-          vec3 directLight = vec3(c + winWhite);
+          // When the RGB buffer carries saturated hue (candles, torches, tinted lamps),
+          // use it for ambient retint and coloration — direct punch stays scalar white.
+          float srcSatForDirect = rgbSaturation(srcSafe);
+          float srcChromaMax = max(max(srcSafe.r, srcSafe.g), srcSafe.b);
+          vec3 srcDirectHue = (srcChromaMax > 1e-4) ? (srcSafe / srcChromaMax) : vec3(1.0);
+          float directTintW = smoothstep(0.04, 0.28, srcSatForDirect);
+          vec3 directFromSources = vec3(c);
+          vec3 directLight = directFromSources + vec3(winWhite);
 
           // Darkness punch: strong nearby lights reduce the effective darkness
           // level locally, letting the ambient brighten under torches/lamps.
           float lightTermI = max(lightIVisible, 0.0);
+          float punchLightI = pow(max(lightTermI, 0.0), 0.82);
+          float localLightPresenceA = smoothstep(0.001, 0.38, max(srcSample.a, 0.0));
+          if (localLightPresenceA > 0.001) {
+            lightTermI = pow(max(lightTermI, 0.0), mix(0.82, 0.72, localLightPresenceA));
+            punchLightI = pow(max(punchLightI, 0.0), mix(0.82, 0.62, localLightPresenceA));
+          }
           // Shadow override should react as soon as gameplay lights are visibly present.
           // Use a lower activation band than darkness-punch so torch/flashlight beams
           // can clear shadows instead of being visibly darkened by them.
-          float dynamicLightPresence = smoothstep(0.015, 0.22, lightIVisible);
+          float dynamicLightPresence = smoothstep(0.008, 0.38, lightIVisible);
           float dynamicShadowLift = clamp(
             dynamicLightPresence * clamp(uDynamicLightShadowOverrideStrength, 0.0, 1.0),
             0.0,
@@ -1715,12 +1746,23 @@ export class LightingEffectV2 {
             0.0,
             1.0
           );
-          float punch = 1.0 - exp(-lightTermI * max(uDarknessPunchGain, 0.0));
+          float punchGainEff = max(uDarknessPunchGain, 0.0) * mix(1.0, 0.40, localLightPresenceA);
+          float punchEnvelope = smoothstep(0.0, mix(0.48, 0.72, localLightPresenceA), lightTermI);
+          float punch = (1.0 - exp(-punchLightI * punchGainEff)) * punchEnvelope;
           float localDarknessLevel = clamp(
             baseDarknessLevel * (1.0 - punch * max(uNegativeDarknessStrength, 0.0)),
             0.0, 1.0
           );
           vec3 punchedAmbient = mix(ambientDay, ambientNight, localDarknessLevel);
+          // Outdoors at night: darkness punch reveals Foundry ambientDarkness (cool blue/purple).
+          // Retint that fill toward the direct light hue from the buffer (any authored colour).
+          float localOutdoorAmb = localLightPresenceA * punch * isOutdoorForInteriorDim * inSceneBounds;
+          if (localOutdoorAmb > 0.0001) {
+            float ambLuma = dot(punchedAmbient, vec3(0.2126, 0.7152, 0.0722));
+            vec3 fillHue = mix(vec3(1.0), srcDirectHue, directTintW);
+            vec3 localFill = fillHue * max(ambLuma * (1.02 + punch * 0.22), 0.012);
+            punchedAmbient = mix(punchedAmbient, localFill, clamp(localOutdoorAmb * 0.94, 0.0, 0.96));
+          }
 
           // Darkness mask from ThreeDarknessSource meshes.
           float punchedMask = clamp(
@@ -1932,7 +1974,9 @@ export class LightingEffectV2 {
           chromaW = mix(chromaW, 1.0, clamp(uColorationAchromaticMix, 0.0, 1.0));
 
           float reflection = perceivedBrightness(baseColor.rgb) * max(uColorationReflectivity, 0.0);
-          vec3 coloration = safeForColor * reflection
+          // Tint only the chromatic residual — scalar direct (alpha) already carries white illumination.
+          vec3 chromaResidual = safeForColor - greySL;
+          vec3 coloration = chromaResidual * reflection
             * max(uColorationStrength, 0.0) * chromaW * structuralDirectMul;
           litColor += coloration;
 
@@ -2645,14 +2689,9 @@ export class LightingEffectV2 {
    * @private
    */
   _canReuseLightMaskPrepassFoundryDraw(w, h, renderFloor) {
-    const cache = this._lightMaskPrepassCache;
-    if (!cache?.valid) return false;
-    if (cache.floorIndex !== renderFloor) return false;
-    if (cache.rtW !== w || cache.rtH !== h) return false;
-    const lightGain = Math.max(0, Number(this.params.lightIntensity) || 0);
-    if (cache.lightGain !== lightGain) return false;
-    if (this._lightRtContentFloor !== renderFloor) return false;
-    return true;
+    // Always redraw for compose: prepass can run before torch/candle animation updates
+    // and skips attenuation/softness changes — stale buffers read as hard on/off rims.
+    return false;
   }
 
   /**

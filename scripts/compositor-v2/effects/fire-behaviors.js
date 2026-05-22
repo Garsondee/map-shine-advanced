@@ -915,3 +915,42 @@ export function generateFirePoints(image, threshold = 0.1) {
   if (coords.length === 0) return null;
   return new Float32Array(coords);
 }
+
+const OUTDOOR_SMOKE_POINT_THRESHOLD = 0.5;
+
+/**
+ * Split packed fire-mask spawn points by roof/outdoor mask intensity.
+ *
+ * @param {Float32Array} points - Packed (u, v, brightness) triples
+ * @param {'outdoor'|'indoor'} mode
+ * @returns {Float32Array|null}
+ */
+export function filterFirePointsByOutdoor(points, mode = 'outdoor') {
+  if (!points || points.length < 3) return null;
+
+  const out = [];
+  for (let i = 0; i < points.length; i += 3) {
+    const u = points[i];
+    const v = points[i + 1];
+    const brightness = points[i + 2];
+    if (!Number.isFinite(u) || !Number.isFinite(v) || !Number.isFinite(brightness) || brightness <= 0) {
+      continue;
+    }
+
+    let outdoorFactor = 1.0;
+    try {
+      if (weatherController && typeof weatherController.getRoofMaskIntensity === 'function') {
+        outdoorFactor = weatherController.getRoofMaskIntensity(u, v);
+      }
+    } catch (_) {
+      outdoorFactor = 1.0;
+    }
+    outdoorFactor = clamp01(outdoorFactor);
+    const isOutdoor = outdoorFactor > OUTDOOR_SMOKE_POINT_THRESHOLD;
+
+    if (mode === 'outdoor' && isOutdoor) out.push(u, v, brightness);
+    else if (mode === 'indoor' && !isOutdoor) out.push(u, v, brightness);
+  }
+
+  return out.length >= 3 ? new Float32Array(out) : null;
+}

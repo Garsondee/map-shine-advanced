@@ -67,7 +67,7 @@ export class VisionPolygonComputer {
    * @param {number} radius - Vision radius in pixels
    * @param {Wall[]} walls - Array of wall placeables (optional, defaults to canvas.walls.placeables)
    * @param {{x: number, y: number, width: number, height: number}} [sceneBounds] - Optional scene bounds to clip vision
-   * @param {{sense?: 'sight'|'light', blockGeometry?: boolean, elevation?: number, wallPaddingPx?: number, forceClosedDoorWallIds?: Set<string>, skipDoorWallIds?: Set<string>, additionalSegments?: Array<{x0:number,y0:number,x1:number,y1:number}>}|null} [options] - Optional compute mode, viewer elevation, and door walls to treat as closed or replaced by animated blocker segments. When `blockGeometry` is true, every wall segment blocks (except open doors), ignoring Foundry sight/light/window threshold rules — for candle glow and similar effects. `wallPaddingPx` expands each blocking segment into a padded quad before raycasting (reduces light bleed through thin walls).
+   * @param {{sense?: 'sight'|'light', blockGeometry?: boolean, elevation?: number, wallPaddingPx?: number, circleSegments?: number, forceClosedDoorWallIds?: Set<string>, skipDoorWallIds?: Set<string>, additionalSegments?: Array<{x0:number,y0:number,x1:number,y1:number}>}|null} [options] - Optional compute mode, viewer elevation, and door walls to treat as closed or replaced by animated blocker segments. When `blockGeometry` is true, every wall segment blocks (except open doors), ignoring Foundry sight/light/window threshold rules — for candle glow and similar effects. `wallPaddingPx` expands each blocking segment into a padded quad before raycasting (reduces light bleed through thin walls). `circleSegments` overrides the default boundary-circle segment count (glow pools use a higher value for smoother rims).
    * @returns {number[]} Flat array [x0, y0, x1, y1, ...] in Foundry coordinates
    */
   compute(center, radius, walls = null, sceneBounds = null, options = null) {
@@ -113,13 +113,15 @@ export class VisionPolygonComputer {
       this._replaceSegmentsWithPaddedQuads(segments, wallPaddingPx);
     }
 
+    const circleSegments = Math.max(8, Math.min(256, Math.floor(Number(options?.circleSegments) || this.circleSegments)));
+
     // Add scene boundary segments if provided (clips vision to scene interior)
     if (sceneBounds) {
       this.createRectangleBoundary(sceneBounds, center, radius, segments);
     }
     
     // Add boundary circle segments
-    this.createBoundaryCircle(center, radius, this.circleSegments, segments);
+    this.createBoundaryCircle(center, radius, circleSegments, segments);
     
     if (Math.random() < 0.01) {
       log.debug(`compute(): center=(${center.x.toFixed(0)}, ${center.y.toFixed(0)}), radius=${radius.toFixed(0)}, walls=${allWalls.length}, segments=${segments.length}`);
@@ -127,7 +129,7 @@ export class VisionPolygonComputer {
     
     // If no segments at all, return a simple circle
     if (segments.length === 0) {
-      return this.createCirclePolygon(center, radius, this.circleSegments, this._pointsPool);
+      return this.createCirclePolygon(center, radius, circleSegments, this._pointsPool);
     }
     
     // Collect unique endpoints within radius
@@ -156,7 +158,7 @@ export class VisionPolygonComputer {
     // Validate polygon
     if (points.length < 6) {
       // Fallback to circle if polygon is degenerate
-      return this.createCirclePolygon(center, radius, this.circleSegments, points);
+      return this.createCirclePolygon(center, radius, circleSegments, points);
     }
     
     return points;

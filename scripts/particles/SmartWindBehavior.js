@@ -47,18 +47,20 @@ export class SmartWindBehavior {
       windSpeed = Math.max(0.0, Math.min(1.0, state.windSpeed));
     }
     if (!Number.isFinite(windSpeed) || windSpeed <= 0.001) {
-      if (isSmoke && particle.velocity) {
-        particle.velocity.x *= 0.987;
-        particle.velocity.y *= 0.987;
+      if (particle.velocity) {
+        const decay = isSmoke ? 0.992 : 0.85;
+        particle.velocity.x *= decay;
+        particle.velocity.y *= decay;
       }
       return;
     }
 
     const windDir = state && state.windDirection; // Vector2
     if (!windDir || !Number.isFinite(windDir.x) || !Number.isFinite(windDir.y)) {
-      if (isSmoke && particle.velocity) {
-        particle.velocity.x *= 0.987;
-        particle.velocity.y *= 0.987;
+      if (particle.velocity) {
+        const decay = isSmoke ? 0.992 : 0.85;
+        particle.velocity.x *= decay;
+        particle.velocity.y *= decay;
       }
       return;
     }
@@ -87,9 +89,8 @@ export class SmartWindBehavior {
       return;
     }
 
-    // Smoke uses the same 300× base as fire, but lives much longer so XY velocity
-    // integrates into large drift; scale gusts down (after per-system windInfluence).
-    const smokeWindMul = isSmoke ? 0.06 : 1.0;
+    // Smoke lives much longer than flames; use a reduced base so drift stays map-scale.
+    const smokeWindMul = isSmoke ? 0.42 : 1.0;
 
     const forceMag = windSpeed * 300.0 * influence * susceptibility * smokeWindMul;
     if (!Number.isFinite(forceMag)) return;
@@ -97,12 +98,8 @@ export class SmartWindBehavior {
     // 4. Apply to Velocity
     // Standard Euler integration: v += a * dt
     // Wind acts as a force (acceleration).
-    
+
     if (particle.velocity) {
-      if (isSmoke) {
-        particle.velocity.x *= 0.987;
-        particle.velocity.y *= 0.987;
-      }
       const dvx = windDir.x * forceMag * dt;
       const dvy = windDir.y * forceMag * dt;
 

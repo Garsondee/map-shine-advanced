@@ -178,6 +178,19 @@ export const TOP_OF_FLOOR_SLOTS = Object.freeze({
 });
 
 /**
+ * Outdoor campfire smoke — above tree/bush canopies on the same floor, below the
+ * next floor's albedo band.
+ *
+ * @param {number} floorIndex
+ * @returns {number}
+ */
+export function outdoorSmokeRenderOrder(floorIndex) {
+  const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
+  const treeCanopy = effectTopOfFloorStackOrder(fi, TOP_OF_FLOOR_SLOTS.TREE_CANOPY);
+  return treeCanopy + TOP_OF_FLOOR_STACK_STEP * 0.5;
+}
+
+/**
  * Bush shadow + canopy render orders: fixed top-of-floor slots below all tree
  * overlays on the same floor (no tile-stacking — that let bush decals interleave
  * with tree layers and show clipped shadows on tree foliage).

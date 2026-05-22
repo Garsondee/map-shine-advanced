@@ -47,8 +47,8 @@ import {
   FlameLifecycleBehavior,
   EmberLifecycleBehavior,
   SmokeLifecycleBehavior,
-  FireSpinBehavior,
   ParticleTimeScaledBehavior,
+  FlameShapeFrameBehavior,
   generateFirePoints,
 } from './fire-behaviors.js';
 import {
@@ -89,6 +89,294 @@ const REBUILD_PARAM_KEYS = [
 ];
 const REBUILD_PARAM_SET = new Set(REBUILD_PARAM_KEYS);
 
+// Procedural flame flipbook — 4×4 atlas: rows = fluid shape archetypes, cols = anim frames.
+const FIRE_ATLAS_COLS = 4;
+const FIRE_ATLAS_ROWS = 4;
+const FIRE_ATLAS_SHAPE_COUNT = FIRE_ATLAS_ROWS;
+const FIRE_ATLAS_ANIM_FRAMES = FIRE_ATLAS_COLS;
+const FIRE_ATLAS_FRAMES = FIRE_ATLAS_COLS * FIRE_ATLAS_ROWS;
+const FIRE_ATLAS_CELL_SIZE = 64;
+const SMOKE_TEXTURE_SIZE = 256;
+
+/**
+ * Generates noise-driven flame atlases and wispy smoke sprites on offscreen canvases.
+ * Flame frames are bird's-eye fire pools (Map Shine is top-down), not side-view teardrops.
+ */
+class ProceduralTextureBuilder {
+  static _hash12(x, y) {
+    let h = (x * 374761393 + y * 668265263) | 0;
+    h = (h ^ (h >>> 13)) | 0;
+    h = (h * 1274126177) | 0;
+    return (h ^ (h >>> 16)) >>> 0;
+  }
+
+  static _valueNoise(x, y) {
+    const ix = Math.floor(x);
+    const iy = Math.floor(y);
+    const fx = x - ix;
+    const fy = y - iy;
+    const ux = fx * fx * (3 - 2 * fx);
+    const uy = fy * fy * (3 - 2 * fy);
+    const a = this._hash12(ix, iy) / 4294967295;
+    const b = this._hash12(ix + 1, iy) / 4294967295;
+    const c = this._hash12(ix, iy + 1) / 4294967295;
+    const d = this._hash12(ix + 1, iy + 1) / 4294967295;
+    const ab = a + (b - a) * ux;
+    const cd = c + (d - c) * ux;
+    return ab + (cd - ab) * uy;
+  }
+
+  static _fbm(x, y, octaves = 4) {
+    let sum = 0;
+    let amp = 0.55;
+    let freq = 1;
+    for (let i = 0; i < octaves; i++) {
+      sum += (this._valueNoise(x * freq, y * freq) - 0.5) * 2 * amp;
+      freq *= 2;
+      amp *= 0.55;
+    }
+    return sum;
+  }
+
+  static _smoothstep(edge0, edge1, x) {
+    const t = Math.max(0, Math.min(1, (x - edge0) / Math.max(1e-5, edge1 - edge0)));
+    return t * t * (3 - 2 * t);
+  }
+
+  static _fireAtlasEdgeFadeCell(nx, ny, pad = 0.06) {
+    return Math.min(1, nx / pad, ny / pad, (1 - nx) / pad, (1 - ny) / pad);
+  }
+
+  /** @private Circular noise drift for one animation column within a shape row. */
+  static _fireAtlasAnimDrift(animCol, animCols) {
+    const t = (animCol / animCols) * Math.PI * 2;
+    return {
+      t,
+      tX: Math.cos(t) * 1.1,
+      tY: Math.sin(t) * 1.1,
+      tX2: Math.cos(t * 2.0 + 0.8) * 0.72,
+      tY2: Math.sin(t * 2.0 + 0.8) * 0.72,
+    };
+  }
+
+  /** @private Shape 0 — Fluid Rolling Core: Dense, boiling hot center with warped edges. */
+  static _fireShapeRollingCore(nx, ny, animCol, animCols, baseSeed) {
+    const { tX, tY } = this._fireAtlasAnimDrift(animCol, animCols);
+
+    // Domain Warping: distort space before calculating distance to center
+    const warpX = this._fbm(nx * 3.5 + tX + baseSeed, ny * 3.5 + tY, 2) * 0.25;
+    const warpY = this._fbm(nx * 3.5 - tY, ny * 3.5 + tX + baseSeed, 2) * 0.25;
+
+    const dx = (nx - 0.5 + warpX) * 2.0;
+    const dy = (ny - 0.5 + warpY) * 2.0;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    // Exponential hot plasma core
+    const core = Math.exp(-dist * dist * 6.0);
+
+    // Crisp but turbulent outer edge
+    const detailN = this._fbm(nx * 7.0 - tX, ny * 7.0 - tY, 3);
+    const edge = 1.0 - this._smoothstep(0.4, 0.8, dist - detailN * 0.15);
+
+    let alpha = core * 0.7 + edge * 0.5;
+    // Hard fade at canvas boundaries
+    alpha *= 1.0 - this._smoothstep(0.85, 1.0, dist);
+    return Math.pow(Math.max(0, Math.min(1, alpha)), 1.2);
+  }
+
+  /** @private Shape 1 — Licking Tendrils: Organic, asymmetric tongues of flame reaching outward. */
+  static _fireShapeLickingTendrils(nx, ny, animCol, animCols, baseSeed) {
+    const { tX2, tY2 } = this._fireAtlasAnimDrift(animCol, animCols);
+
+    const dx = (nx - 0.5) * 2.0;
+    const dy = (ny - 0.5) * 2.0;
+    const baseDist = Math.sqrt(dx * dx + dy * dy);
+    const angle = Math.atan2(dy, dx);
+
+    // Polar noise pulls the perimeter outward into spiky licks
+    const polarN = this._fbm(Math.cos(angle) * 2.2 + tX2 + baseSeed, Math.sin(angle) * 2.2 + tY2, 3);
+    const dist = baseDist - polarN * 0.35;
+
+    const core = Math.exp(-dist * dist * 8.0);
+    const edge = 1.0 - this._smoothstep(0.3, 0.7, dist);
+
+    let alpha = core * 0.6 + edge * 0.6;
+    alpha *= 1.0 - this._smoothstep(0.9, 1.0, baseDist);
+    return Math.pow(Math.max(0, Math.min(1, alpha)), 1.4);
+  }
+
+  /** @private Shape 2 — Splitting Flame: Heavy turbulence that bifurcates the core blob. */
+  static _fireShapeSplitting(nx, ny, animCol, animCols, baseSeed) {
+    const { tX, tY } = this._fireAtlasAnimDrift(animCol, animCols);
+
+    // Low frequency, high amplitude warp to pull the blob apart
+    const splitN = this._fbm(nx * 2.0 - tX + baseSeed, ny * 2.0 - tY, 2);
+    const dx = (nx - 0.5 + splitN * 0.3) * 2.0;
+    const dy = (ny - 0.5 - splitN * 0.3) * 2.0;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    const core = Math.exp(-dist * dist * 5.0);
+
+    // Add medium detail to the torn edges
+    const detailN = this._fbm(nx * 5.0 + tX, ny * 5.0 + tY, 2);
+    const mask = 1.0 - this._smoothstep(0.4, 0.8, dist + detailN * 0.2);
+
+    let alpha = core * 0.5 + mask * 0.6;
+    alpha *= 1.0 - this._smoothstep(0.8, 1.0, Math.sqrt((nx - 0.5) ** 2 + (ny - 0.5) ** 2) * 2.0);
+    return Math.pow(Math.max(0, Math.min(1, alpha)), 1.3);
+  }
+
+  /** @private Shape 3 — Scattered Wisps: High contrast noise that breaks the blob into detached islands. */
+  static _fireShapeScatteredWisps(nx, ny, animCol, animCols, baseSeed) {
+    const { tX, tY } = this._fireAtlasAnimDrift(animCol, animCols);
+
+    const dx = (nx - 0.5) * 2.0;
+    const dy = (ny - 0.5) * 2.0;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    // Broad, soft underlying heat pool
+    const basePool = 1.0 - this._smoothstep(0.2, 0.9, dist);
+
+    // High-frequency "cellular" style noise to chop the pool into wisps
+    const wispN = this._fbm(nx * 4.5 + tX * 1.5 + baseSeed, ny * 4.5 + tY * 1.5, 3);
+
+    // Sharpen the noise to create distinct islands
+    const wispMask = this._smoothstep(-0.1, 0.4, wispN);
+
+    // Keep a tiny faint core so the particle doesn't entirely vanish
+    const faintCore = Math.exp(-dist * dist * 12.0) * 0.4;
+
+    let alpha = (basePool * wispMask * 1.2) + faintCore;
+    alpha *= 1.0 - this._smoothstep(0.85, 1.0, dist);
+    return Math.pow(Math.max(0, Math.min(1, alpha)), 1.5);
+  }
+
+  /** @private Dispatch to one of four fluid silhouette families. */
+  static _fireAtlasShapeAlpha(shapeType, nx, ny, animCol, animCols, baseSeed) {
+    switch (shapeType) {
+      case 0: return this._fireShapeRollingCore(nx, ny, animCol, animCols, baseSeed);
+      case 1: return this._fireShapeLickingTendrils(nx, ny, animCol, animCols, baseSeed);
+      case 2: return this._fireShapeSplitting(nx, ny, animCol, animCols, baseSeed);
+      case 3: return this._fireShapeScatteredWisps(nx, ny, animCol, animCols, baseSeed);
+      default: return this._fireShapeRollingCore(nx, ny, animCol, animCols, baseSeed);
+    }
+  }
+
+  /**
+   * Build a cols×rows flipbook of top-down campfire pools.
+   * Rows = four fluid shape archetypes (rolling core, licking tendrils, splitting, scattered wisps); cols = flicker frames.
+   * @param {number} cols Animation frames per shape.
+   * @param {number} rows Shape archetype count.
+   * @param {number} cellSize Pixel size of each atlas cell.
+   * @returns {HTMLCanvasElement}
+   */
+  static buildFireAtlas(cols, rows, cellSize) {
+    const w = cols * cellSize;
+    const h = rows * cellSize;
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return canvas;
+
+    const imageData = ctx.createImageData(w, h);
+    const data = imageData.data;
+    const baseSeed = 42.1337;
+
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        for (let py = 0; py < cellSize; py++) {
+          for (let px = 0; px < cellSize; px++) {
+            const nx = (px + 0.5) / cellSize;
+            const ny = (py + 0.5) / cellSize;
+            const edgeFadeCell = this._fireAtlasEdgeFadeCell(nx, ny);
+
+            let alpha = this._fireAtlasShapeAlpha(row, nx, ny, col, cols, baseSeed);
+            alpha *= edgeFadeCell;
+
+            const idx = ((row * cellSize + py) * w + (col * cellSize + px)) * 4;
+            data[idx] = 255;
+            data[idx + 1] = 255;
+            data[idx + 2] = 255;
+            data[idx + 3] = Math.floor(Math.max(0, Math.min(1, alpha)) * 255);
+          }
+        }
+      }
+    }
+
+    ctx.putImageData(imageData, 0, 0);
+    return canvas;
+  }
+
+  /**
+   * Soft circular smoke puff — white RGB, alpha defines shape (vertex colour tints).
+   * Aggressive edge fade prevents visible square quad corners at large particle sizes.
+   * @param {number} size
+   * @returns {HTMLCanvasElement}
+   */
+  static buildSmokeTexture(size) {
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return canvas;
+
+    const imageData = ctx.createImageData(size, size);
+    const data = imageData.data;
+
+    for (let py = 0; py < size; py++) {
+      for (let px = 0; px < size; px++) {
+        const nx = (px + 0.5) / size;
+        const ny = (py + 0.5) / size;
+
+        const pad = 0.09;
+        const edgeFade = Math.min(
+          1,
+          nx / pad,
+          ny / pad,
+          (1 - nx) / pad,
+          (1 - ny) / pad
+        );
+
+        const dx = nx - 0.5;
+        const dy = ny - 0.5;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        const radial = 1 - this._smoothstep(0.28, 0.44, dist);
+
+        const nLow = this._fbm(nx * 2.0 + 12.7, ny * 2.0 + 4.3, 3);
+        const nDetail = this._fbm(nx * 4.8 + 1.1, ny * 4.8 + 8.9, 2);
+        const noise01 = Math.max(0, Math.min(1, ((nLow * 0.72 + nDetail * 0.28) + 1) * 0.5));
+
+        let alpha = radial * (0.38 + noise01 * 0.62) * edgeFade;
+        alpha = Math.pow(Math.max(0, Math.min(1, alpha)), 1.08);
+
+        const idx = (py * size + px) * 4;
+        data[idx] = 255;
+        data[idx + 1] = 255;
+        data[idx + 2] = 255;
+        data[idx + 3] = Math.floor(alpha * 255);
+      }
+    }
+
+    ctx.putImageData(imageData, 0, 0);
+    return canvas;
+  }
+
+  /** @param {HTMLCanvasElement} canvas @param {typeof THREE} THREE */
+  static toTexture(canvas, THREE) {
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.generateMipmaps = false;
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.flipY = false;
+    tex.needsUpdate = true;
+    return tex;
+  }
+}
+
 // ─── FireEffectV2 ────────────────────────────────────────────────────────────
 
 export class FireEffectV2 {
@@ -120,8 +408,10 @@ export class FireEffectV2 {
 
     /** @type {THREE.Texture|null} Fire sprite texture */
     this._fireTexture = null;
-    /** @type {THREE.Texture|null} Ember/smoke sprite texture */
+    /** @type {THREE.Texture|null} Ember sprite texture */
     this._emberTexture = null;
+    /** @type {THREE.Texture|null} Dedicated smoke puff texture */
+    this._smokeTexture = null;
     /** @type {Promise<void>|null} Resolves when sprite textures are loaded */
     this._texturesReady = null;
     /** @type {object|null} Last foundrySceneData used to populate systems */
@@ -182,7 +472,7 @@ export class FireEffectV2 {
       smokeRatio: 3,
       smokeOpacity: 1,
       smokeColorWarmth: 1,
-      smokeColorBrightness: 0.46,
+      smokeColorBrightness: 0.72,
       smokeDarknessResponse: 0,
       smokeSizeMin: 200,
       smokeSizeMax: 400,
@@ -195,23 +485,22 @@ export class FireEffectV2 {
       smokeWindInfluence: 10,
       indoorSmokeSuppression: 0.9,
       smokeAlphaStart: 0,
-      smokeAlphaPeak: 0.75,
-      smokeAlphaEnd: 1,
+      smokeAlphaPeak: 0.45,
+      smokeAlphaEnd: 0.92,
       // Gradient-over-lifespan: colour and emission tracks.
       // When non-null with ≥2 stops, the gradient overrides the legacy COOL/WARM blend.
       // Legacy warmth/brightness sliders remain in effect whenever gradient is null.
       smokeColorGradient: [
-        { t: 0, r: 0.9, g: 0.45, b: 0.1 },
-        { t: 0.1061011893408639, r: 0.44, g: 0.38, b: 0.32 },
-        { t: 0.24895833219800675, r: 0.36, g: 0.34, b: 0.32 },
-        { t: 1, r: 0, g: 0, b: 0 },
+        { t: 0, r: 0.55, g: 0.32, b: 0.14 },
+        { t: 0.12, r: 0.52, g: 0.48, b: 0.42 },
+        { t: 0.45, r: 0.42, g: 0.4, b: 0.38 },
+        { t: 1, r: 0.28, g: 0.27, b: 0.26 },
       ],
       // Emission tint is linear HDR (see SmokeLifecycleBehavior); diffuse smoke RGB stays ≤1.
       smokeEmissionGradient: [
-        { t: 0, r: 0, g: 0, b: 0 },
-        { t: 0.09782565829710174, r: 1, g: 0.6197895136979354, b: 0 },
-        { t: 0.4961058700157523, r: 0, g: 0, b: 0 },
-        { t: 0.4961058700157523, r: 0, g: 0, b: 0 },
+        { t: 0, r: 0.15, g: 0.08, b: 0.02 },
+        { t: 0.08, r: 1, g: 0.55, b: 0.08 },
+        { t: 0.35, r: 0.25, g: 0.18, b: 0.12 },
         { t: 1, r: 0, g: 0, b: 0 },
       ],
       heatDistortionEnabled: true,
@@ -293,9 +582,9 @@ export class FireEffectV2 {
         fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 200.0, step: 1.0, default: 156 },
         fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 6.0, step: 0.05, default: 5 },
         fireLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 5.45 },
-        fireSpinEnabled: { type: 'checkbox', label: 'Spin Enabled', default: true },
-        fireSpinSpeedMin: { type: 'slider', label: 'Spin Speed Min', min: 0.0, max: 50.0, step: 0.1, default: 0 },
-        fireSpinSpeedMax: { type: 'slider', label: 'Spin Speed Max', min: 0.0, max: 50.0, step: 0.1, default: 0.3 },
+        fireSpinEnabled: { type: 'checkbox', label: 'Spin Enabled', default: true, hidden: true },
+        fireSpinSpeedMin: { type: 'slider', label: 'Spin Speed Min', min: 0.0, max: 50.0, step: 0.1, default: 0, hidden: true },
+        fireSpinSpeedMax: { type: 'slider', label: 'Spin Speed Max', min: 0.0, max: 50.0, step: 0.1, default: 0.3, hidden: true },
         fireUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 1.15 },
         fireCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0 },
         flameTextureOpacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 1 },
@@ -330,17 +619,17 @@ export class FireEffectV2 {
         indoorSmokeSuppression: { type: 'slider', label: 'Indoor Smoke Suppression', min: 0.0, max: 1.0, step: 0.01, default: 0.9 },
         // Legacy colour controls — used when smokeColorGradient is null.
         smokeColorWarmth: { type: 'slider', label: 'Color Warmth', min: 0.0, max: 1.0, step: 0.01, default: 1 },
-        smokeColorBrightness: { type: 'slider', label: 'Brightness', min: 0.05, max: 2.0, step: 0.01, default: 0.46 },
+        smokeColorBrightness: { type: 'slider', label: 'Brightness', min: 0.05, max: 2.0, step: 0.01, default: 0.72 },
         smokeDarknessResponse: { type: 'slider', label: 'Darkness Response', min: 0.0, max: 1.0, step: 0.01, default: 0 },
         // Colour-over-life gradient. When set, overrides the warmth/brightness sliders.
         smokeColorGradient: {
           type: 'gradient',
           label: 'Colour Over Life',
           default: [
-            { t: 0, r: 0.9, g: 0.45, b: 0.1 },
-            { t: 0.1061011893408639, r: 0.44, g: 0.38, b: 0.32 },
-            { t: 0.24895833219800675, r: 0.36, g: 0.34, b: 0.32 },
-            { t: 1, r: 0, g: 0, b: 0 },
+            { t: 0, r: 0.55, g: 0.32, b: 0.14 },
+            { t: 0.12, r: 0.52, g: 0.48, b: 0.42 },
+            { t: 0.45, r: 0.42, g: 0.4, b: 0.38 },
+            { t: 1, r: 0.28, g: 0.27, b: 0.26 },
           ]
         },
         // Added on top of base smoke RGB in the lifecycle (black = no extra glow).
@@ -348,10 +637,9 @@ export class FireEffectV2 {
           type: 'gradient',
           label: 'Emission tint over life',
           default: [
-            { t: 0, r: 0, g: 0, b: 0 },
-            { t: 0.09782565829710174, r: 1, g: 0.6197895136979354, b: 0 },
-            { t: 0.4961058700157523, r: 0, g: 0, b: 0 },
-            { t: 0.4961058700157523, r: 0, g: 0, b: 0 },
+            { t: 0, r: 0.15, g: 0.08, b: 0.02 },
+            { t: 0.08, r: 1, g: 0.55, b: 0.08 },
+            { t: 0.35, r: 0.25, g: 0.18, b: 0.12 },
             { t: 1, r: 0, g: 0, b: 0 },
           ]
         },
@@ -365,8 +653,8 @@ export class FireEffectV2 {
         smokeTurbulence: { type: 'slider', label: 'Turbulence', min: 0.0, max: 5.0, step: 0.05, default: 0 },
         smokeWindInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 10.0, step: 0.1, default: 10 },
         smokeAlphaStart: { type: 'slider', label: 'Opacity ramp from (life %)', min: 0.0, max: 1.0, step: 0.01, default: 0 },
-        smokeAlphaPeak: { type: 'slider', label: 'Peak opacity at (life %)', min: 0.0, max: 1.0, step: 0.01, default: 0.75 },
-        smokeAlphaEnd: { type: 'slider', label: 'Opacity reaches zero at (life %)', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
+        smokeAlphaPeak: { type: 'slider', label: 'Peak opacity at (life %)', min: 0.0, max: 1.0, step: 0.01, default: 0.45 },
+        smokeAlphaEnd: { type: 'slider', label: 'Opacity reaches zero at (life %)', min: 0.0, max: 1.0, step: 0.01, default: 0.92 },
         windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 3.9 },
         timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 3.0 },
         lightIntensity: {
@@ -780,8 +1068,10 @@ export class FireEffectV2 {
     this.clear();
     this._fireTexture?.dispose();
     this._emberTexture?.dispose();
+    this._smokeTexture?.dispose();
     this._fireTexture = null;
     this._emberTexture = null;
+    this._smokeTexture = null;
     this._initialized = false;
     log.info('FireEffectV2 disposed');
   }
@@ -890,6 +1180,7 @@ export class FireEffectV2 {
       blending: THREE.AdditiveBlending,
       color: 0xffffff,
       side: THREE.DoubleSide,
+      alphaTest: 0.02,
     });
     material.toneMapped = false;
     const texBright = Math.max(0, Number(this.params.flameTextureBrightness) || 1);
@@ -906,9 +1197,9 @@ export class FireEffectV2 {
 
     const flameLifecycle = new FlameLifecycleBehavior(this);
     const sizeOverLife = new SizeOverLife(new PiecewiseBezier([
-      [new Bezier(0.3, 0.9, 1.0, 1.1), 0],
-      [new Bezier(1.1, 1.0, 0.7, 0.4), 0.5],
+      [new Bezier(0.0, 0.2, 1.0, 0.0), 0],
     ]));
+    const flameShapeFrames = new FlameShapeFrameBehavior(FIRE_ATLAS_SHAPE_COUNT, FIRE_ATLAS_ANIM_FRAMES);
     const buoyancy = new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(p.fireHeight * 0.125));
     const updraftBehavior = new SmartUpdraftBehavior();
     const windForce = new SmartWindBehavior();
@@ -930,13 +1221,15 @@ export class FireEffectV2 {
       emissionOverTime: new IntervalValue(10.0 * weight, 20.0 * weight),
       shape,
       material,
+      // Map Shine is Z-up with XY ground; quarks HorizontalBillBoard lies in XZ (Y-up) and
+      // reads edge-on as horizontal streaks. Camera-facing billboards match top-down play.
       renderMode: RenderMode.BillBoard,
       renderOrder: this._computeParticleRenderOrder(floorIndex, 0),
-      uTileCount: 1,
-      vTileCount: 1,
+      uTileCount: FIRE_ATLAS_COLS,
+      vTileCount: FIRE_ATLAS_ROWS,
       startTileIndex: new ConstantValue(0),
       startRotation: new IntervalValue(0, Math.PI * 2),
-      behaviors: [windForce, updraftBehavior, turbulence, new FireSpinBehavior(), sizeOverLife, flameLifecycle],
+      behaviors: [flameShapeFrames, windForce, buoyancy, updraftBehavior, turbulence, sizeOverLife, flameLifecycle],
     });
 
     system.userData = {
@@ -988,7 +1281,7 @@ export class FireEffectV2 {
     const emberCurlStrength = new THREE.Vector3(150, 150, 50);
     const turbulence = new FixedCurlNoiseField(new THREE.Vector3(30, 30, 30), emberCurlStrength.clone(), 4.0);
     const emberSizeOverLife = new SizeOverLife(new PiecewiseBezier([
-      [new Bezier(1.0, 0.85, 0.5, 0.2), 0],
+      [new Bezier(0.0, 0.14, 0.9, 0.0), 0],
     ]));
 
     const system = new QuarksParticleSystem({
@@ -1009,6 +1302,7 @@ export class FireEffectV2 {
       renderMode: RenderMode.BillBoard,
       renderOrder: this._computeParticleRenderOrder(floorIndex, 1),
       behaviors: [
+        buoyancy,
         updraftBehavior,
         windForce,
         new ParticleTimeScaledBehavior(turbulence),
@@ -1041,13 +1335,14 @@ export class FireEffectV2 {
 
     const p = this.params;
     const material = new THREE.MeshBasicMaterial({
-      map: this._emberTexture,
+      map: this._smokeTexture || this._emberTexture,
       transparent: true,
       blending: THREE.NormalBlending,
       color: 0xffffff,
       depthWrite: false,
       depthTest: false,
       side: THREE.DoubleSide,
+      alphaTest: 0.04,
     });
     material.toneMapped = false;
 
@@ -1084,12 +1379,12 @@ export class FireEffectV2 {
       material,
       renderMode: RenderMode.BillBoard,
       renderOrder: this._computeParticleRenderOrder(floorIndex, 2),
-      startRotation: new IntervalValue(0, Math.PI * 2),
+      startRotation: new ConstantValue(0),
       behaviors: [
         windForce,
+        smokeUpdraft,
         updraftBehavior,
         new ParticleTimeScaledBehavior(turbulence),
-        new FireSpinBehavior(),
         smokeLifecycle,
       ],
     });
@@ -1313,28 +1608,31 @@ export class FireEffectV2 {
   // ── Private: Texture loading ───────────────────────────────────────────────
 
   /**
-   * Load fire and ember sprite textures. Returns a promise that resolves
-   * when both are loaded so populate() can safely reference them.
+   * Build procedural flame/smoke atlases and load the ember sprite.
+   * Returns a promise that resolves when textures are ready for populate().
    * @returns {Promise<void>}
    * @private
    */
   _loadTextures() {
     const THREE = window.THREE;
     if (!THREE) return Promise.resolve();
+
+    try {
+      const fireCanvas = ProceduralTextureBuilder.buildFireAtlas(
+        FIRE_ATLAS_COLS,
+        FIRE_ATLAS_ROWS,
+        FIRE_ATLAS_CELL_SIZE
+      );
+      this._fireTexture = ProceduralTextureBuilder.toTexture(fireCanvas, THREE);
+
+      const smokeCanvas = ProceduralTextureBuilder.buildSmokeTexture(SMOKE_TEXTURE_SIZE);
+      this._smokeTexture = ProceduralTextureBuilder.toTexture(smokeCanvas, THREE);
+    } catch (err) {
+      log.warn('Failed to build procedural fire/smoke textures', err);
+    }
+
     const loader = new THREE.TextureLoader();
-
-    const fireP = new Promise((resolve) => {
-      loader.load('modules/map-shine-advanced/assets/flame.webp', (tex) => {
-        tex.minFilter = THREE.LinearFilter;
-        tex.magFilter = THREE.LinearFilter;
-        tex.generateMipmaps = false;
-        tex.needsUpdate = true;
-        this._fireTexture = tex;
-        resolve();
-      }, undefined, () => { log.warn('Failed to load flame.webp'); resolve(); });
-    });
-
-    const emberP = new Promise((resolve) => {
+    return new Promise((resolve) => {
       loader.load('modules/map-shine-advanced/assets/particle.webp', (tex) => {
         tex.minFilter = THREE.LinearFilter;
         tex.magFilter = THREE.LinearFilter;
@@ -1342,11 +1640,12 @@ export class FireEffectV2 {
         tex.needsUpdate = true;
         this._emberTexture = tex;
         resolve();
-      }, undefined, () => { log.warn('Failed to load particle.webp'); resolve(); });
-    });
-
-    return Promise.all([fireP, emberP]).then(() => {
-      log.info('Fire textures loaded');
+      }, undefined, () => {
+        log.warn('Failed to load particle.webp for embers');
+        resolve();
+      });
+    }).then(() => {
+      log.info('Fire textures ready (procedural flame/smoke + ember sprite)');
     });
   }
 

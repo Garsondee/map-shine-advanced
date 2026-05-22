@@ -62,6 +62,7 @@ export class CandleFlamesEffectV2 {
       glowMaxBuckets: 256,
       glowRadiusPx: 172.0,
       glowInnerRadiusScale: 0.2,
+      glowFalloffExponent: 2.0,
       glowIntensity: 0.42,
       glowDarknessCancel: 3.0,
       glowDarknessNightBoost: 2.0,
@@ -184,6 +185,7 @@ export class CandleFlamesEffectV2 {
             'glowFlickerSpeedJitter',
             'glowRadiusPx',
             'glowInnerRadiusScale',
+            'glowFalloffExponent',
             'glowBucketSizePx',
             'glowMaxBuckets',
             'wallClipEnabled',
@@ -300,6 +302,10 @@ export class CandleFlamesEffectV2 {
         glowFlickerSpeedJitter: { type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.65, label: 'Flicker Speed Jitter' },
         glowRadiusPx: { type: 'slider', min: 8, max: 1200, step: 2, default: 172.0, label: 'Radius (px)' },
         glowInnerRadiusScale: { type: 'slider', min: 0.05, max: 1.0, step: 0.01, default: 0.2, label: 'Inner Radius Scale' },
+        glowFalloffExponent: {
+          type: 'slider', min: 1.0, max: 5.0, step: 0.05, default: 2.0, label: 'Falloff (1/r²)',
+          tooltip: 'Physical inverse-square dropoff. 2 ≈ real-world point light; higher = tighter hot core.',
+        },
         glowBucketSizePx: { type: 'slider', min: 64, max: 2048, step: 16, default: 384.0, label: 'Bucket Size (px)' },
         glowMaxBuckets: { type: 'slider', min: 1, max: 512, step: 1, default: 256, label: 'Max Buckets' },
         wallClipEnabled: { type: 'boolean', default: true, label: 'Wall Clip' },
@@ -416,6 +422,14 @@ export class CandleFlamesEffectV2 {
     }
 
     if (paramId === 'glowFlickerStrength' || paramId === 'glowFlickerSpeed' || paramId === 'glowFlickerStrengthJitter' || paramId === 'glowFlickerSpeedJitter') {
+      return;
+    }
+
+    if (paramId === 'glowFalloffExponent') {
+      const exp = Math.max(0.5, Number(this.params.glowFalloffExponent) || 2.0);
+      for (const entry of this._glowBuckets.values()) {
+        entry?.lightMesh?.setFalloffExponent?.(exp);
+      }
       return;
     }
 
@@ -1359,11 +1373,14 @@ export class CandleFlamesEffectV2 {
       }
 
       const innerRadiusPx = Math.max(1, radiusPx * this.params.glowInnerRadiusScale);
+      const falloffExponent = Math.max(0.5, Number(this.params.glowFalloffExponent) || 2.0);
 
       const lm = new LightMesh(centerWorld, radiusPx, c.color, {
         innerRadiusPx,
         worldPoints,
-        attenuation: 0.95
+        attenuation: 0.95,
+        falloffProfile: 'inverseSquare',
+        falloffExponent
       });
 
       if (lm?.mesh) {

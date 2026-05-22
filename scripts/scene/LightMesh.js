@@ -44,6 +44,8 @@ export class LightMesh {
    * @param {{r:number,g:number,b:number}} color - Linear RGB color (0..1).
    * @param {Object} [options]
    * @param {number} [options.innerRadiusPx] - Bright radius in pixels. Defaults to 0.5 * outerRadiusPx.
+   * @param {'smooth'|'inverseSquare'} [options.falloffProfile] - Radial falloff curve. Default 'smooth'.
+   * @param {number} [options.falloffExponent] - Sharpness for inverseSquare (2 ≈ physical 1/r²). Default 2.
    * @param {Array<number>} [options.worldPoints] - Optional initial polygon points as [x0,y0,x1,y1,...] in world space.
    */
   constructor(centerWorld, outerRadiusPx, color, options = {}) {
@@ -59,6 +61,10 @@ export class LightMesh {
     );
     this.color = { r: color?.r ?? 1, g: color?.g ?? 1, b: color?.b ?? 1 };
     this.attenuation = typeof options.attenuation === 'number' ? options.attenuation : 0.5;
+    this.falloffProfile = options.falloffProfile === 'inverseSquare' ? 'inverseSquare' : 'smooth';
+    this.falloffExponent = typeof options.falloffExponent === 'number' && options.falloffExponent > 0
+      ? options.falloffExponent
+      : 2.0;
 
     /** @type {THREE.Mesh} */
     this.mesh = null;
@@ -76,6 +82,9 @@ export class LightMesh {
         uCoreContrast: { value: 1.0 },
         uHaloContrast: { value: 1.0 },
         uAttenuation: { value: this.attenuation },
+        // 0 = dual smoothstep (legacy), 1 = inverse-square (physically motivated).
+        uFalloffProfile: { value: this.falloffProfile === 'inverseSquare' ? 1.0 : 0.0 },
+        uFalloffExponent: { value: this.falloffExponent },
         /** HDR scale for rgb + alpha (compose reads alpha for darkness punch / direct light). */
         uEmissionGain: { value: 1.0 },
         // Global softness multiplier driven by LightingEffect.falloffSoftness
@@ -103,6 +112,8 @@ export class LightMesh {
         uniform float uInnerRadius;
         uniform float uOuterRadius;
         uniform float uAttenuation;
+        uniform float uFalloffProfile;
+        uniform float uFalloffExponent;
         uniform float uEmissionGain;
         void main() {
           float dist = length(vLocalPos);
@@ -110,23 +121,40 @@ export class LightMesh {
 
           // Normalize distance so 0 = center, 1 = dim edge.
           float d = dist / max(uOuterRadius, 1e-4);
-
-          // Bright radius ratio: where the inner (bright) circle ends.
-          float brightRatio = clamp(uInnerRadius / max(uOuterRadius, 1e-4), 0.0, 1.0);
-
-          // Attenuation drives edge hardness for BOTH radii, matching Foundry.
           float att = clamp(uAttenuation, 0.0, 1.0);
-          float hardness = mix(0.05, 1.0, att);
 
-          // Dim falloff: outer halo from center (0) to dim edge (1).
-          float dimFalloff = 1.0 - smoothstep(1.0 - hardness, 1.0, d);
+          float finalIntensity;
 
-          // Bright falloff: remap so bright edge is treated as 1.0.
-          float brightDist = d / max(0.001, brightRatio);
-          float brightFalloff = 1.0 - smoothstep(1.0 - hardness, 1.0, brightDist);
+          if (uFalloffProfile > 0.5) {
+            // Inverse-square falloff: bright at center, rapid drop with distance (1/r²).
+            // Inner clamp avoids singularity; attenuation tightens the hot core.
+            float exp = max(uFalloffExponent, 0.5);
+            float innerClamp = mix(0.07, 0.02, att);
+            float r = max(d, innerClamp);
+            float invSq = 1.0 / (r * r);
+            float invEdge = 1.0;
+            float invCore = 1.0 / (innerClamp * innerClamp);
+            finalIntensity = clamp((invSq - invEdge) / (invCore - invEdge), 0.0, 1.0);
+            // Exponent > 2 sharpens further; < 2 softens the tail.
+            finalIntensity = pow(finalIntensity, 2.0 / exp);
+          } else {
+            // Bright radius ratio: where the inner (bright) circle ends.
+            float brightRatio = clamp(uInnerRadius / max(uOuterRadius, 1e-4), 0.0, 1.0);
 
-          // Combine bright + dim contributions and clamp.
-          float finalIntensity = clamp(dimFalloff + brightFalloff, 0.0, 1.0);
+            // Attenuation drives edge hardness for BOTH radii, matching Foundry.
+            float hardness = mix(0.05, 1.0, att);
+
+            // Dim falloff: outer halo from center (0) to dim edge (1).
+            float dimFalloff = 1.0 - smoothstep(1.0 - hardness, 1.0, d);
+
+            // Bright falloff: remap so bright edge is treated as 1.0.
+            float brightDist = d / max(0.001, brightRatio);
+            float brightFalloff = 1.0 - smoothstep(1.0 - hardness, 1.0, brightDist);
+
+            // Combine bright + dim contributions and clamp.
+            finalIntensity = clamp(dimFalloff + brightFalloff, 0.0, 1.0);
+          }
+
           float gain = max(uEmissionGain, 0.0);
 
           gl_FragColor = vec4(uColor * finalIntensity * gain, finalIntensity * gain);
@@ -235,6 +263,23 @@ export class LightMesh {
     this.material.uniforms.uOuterRadius.value = this.outerRadiusPx;
     this.material.uniforms.uInnerRadius.value = this.innerRadiusPx;
     this.material.uniforms.uAttenuation.value = this.attenuation;
+    if (this.material.uniforms.uFalloffProfile) {
+      this.material.uniforms.uFalloffProfile.value = this.falloffProfile === 'inverseSquare' ? 1.0 : 0.0;
+    }
+    if (this.material.uniforms.uFalloffExponent) {
+      this.material.uniforms.uFalloffExponent.value = this.falloffExponent;
+    }
+  }
+
+  /**
+   * @param {number} exponent - Sharpness for inverseSquare profile (2 ≈ physical 1/r²).
+   */
+  setFalloffExponent(exponent) {
+    const exp = Number.isFinite(exponent) && exponent > 0 ? exponent : 2.0;
+    this.falloffExponent = exp;
+    if (this.material?.uniforms?.uFalloffExponent) {
+      this.material.uniforms.uFalloffExponent.value = exp;
+    }
   }
 
   /**

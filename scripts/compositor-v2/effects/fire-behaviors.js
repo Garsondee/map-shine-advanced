@@ -131,8 +131,9 @@ function resolveFireHdrMultiplier(ownerEffect) {
 
 // HDR emission multiplier curve — drives bloom.
 export const FLAME_EMISSION_STOPS = [
-  { t: 0.00, v: 4.0 },
-  { t: 0.12, v: 3.2 },
+  { t: 0.00, v: 0.0 },
+  { t: 0.12, v: 4.0 },
+  { t: 0.15, v: 3.2 },
   { t: 0.35, v: 2.0 },
   { t: 0.55, v: 1.0 },
   { t: 0.70, v: 0.35 },
@@ -141,13 +142,10 @@ export const FLAME_EMISSION_STOPS = [
 
 // Alpha envelope for flames.
 export const FLAME_ALPHA_STOPS = [
-  { t: 0.00, v: 0.00 },
-  { t: 0.04, v: 0.85 },
-  { t: 0.15, v: 1.00 },
-  { t: 0.50, v: 0.90 },
-  { t: 0.70, v: 0.50 },
-  { t: 0.90, v: 0.15 },
-  { t: 1.00, v: 0.00 },
+  { t: 0.00, v: 1.00 },
+  { t: 0.50, v: 0.92 },
+  { t: 0.70, v: 0.55 },
+  { t: 1.00, v: 0.85 },
 ];
 
 // Ember color gradient (hot yellow-white → dark red → black).
@@ -160,20 +158,19 @@ export const EMBER_COLOR_STOPS = [
 ];
 
 export const EMBER_EMISSION_STOPS = [
-  { t: 0.00, v: 5.0 },
-  { t: 0.10, v: 3.5 },
+  { t: 0.00, v: 0.0 },
+  { t: 0.12, v: 5.0 },
+  { t: 0.15, v: 3.5 },
   { t: 0.30, v: 1.8 },
   { t: 0.60, v: 0.55 },
   { t: 1.00, v: 0.0 },
 ];
 
 export const EMBER_ALPHA_STOPS = [
-  { t: 0.00, v: 0.0 },
-  { t: 0.03, v: 0.90 },
-  { t: 0.20, v: 1.0 },
-  { t: 0.60, v: 0.80 },
-  { t: 0.85, v: 0.30 },
-  { t: 1.00, v: 0.0 },
+  { t: 0.00, v: 1.00 },
+  { t: 0.55, v: 0.88 },
+  { t: 0.80, v: 0.45 },
+  { t: 1.00, v: 0.70 },
 ];
 
 // Smoke color gradients (cool grey vs warm brown).
@@ -213,6 +210,34 @@ function clamp01(v) {
 function smoothstep01(x) {
   const u = x < 0 ? 0 : x > 1 ? 1 : x;
   return u * u * (3.0 - 2.0 * u);
+}
+
+/** @returns {number} 0→1→0 fade over normalized life; fractions are span at birth/death. */
+function particleSpawnDeathFade(t, fadeIn = 0.14, fadeOut = 0.16) {
+  const u = t < 0 ? 0 : t > 1 ? 1 : t;
+  if (u <= 0) return 0;
+  if (u >= 1) return 0;
+  const inSpan = Math.max(1e-4, fadeIn);
+  const outSpan = Math.max(1e-4, fadeOut);
+  if (u < inSpan) return smoothstep01(u / inSpan);
+  if (u > 1 - outSpan) return smoothstep01((1 - u) / outSpan);
+  return 1;
+}
+
+/** Hide particle until lifecycle/size behaviors run on the first frame. */
+function zeroParticleVisual(particle) {
+  if (!particle) return;
+  if (particle.color) {
+    particle.color.x = 0;
+    particle.color.y = 0;
+    particle.color.z = 0;
+    particle.color.w = 0;
+  }
+  if (typeof particle.size === 'number') {
+    particle.size = 0;
+  } else if (particle.size?.set) {
+    particle.size.set(0, 0, 0);
+  }
 }
 
 function finiteOr(v, fallback = 0) {
@@ -408,6 +433,8 @@ export class FireMaskShape {
     // Reset velocity.
     if (p.velocity) p.velocity.set(0, 0, 0);
 
+    zeroParticleVisual(p);
+
     // Final sanity check.
     const tooBig = (val) => !Number.isFinite(val) || Math.abs(val) > 1e6;
     if ((p.position && (tooBig(p.position.x) || tooBig(p.position.y) || tooBig(p.position.z))) ||
@@ -440,6 +467,7 @@ export class FlameLifecycleBehavior {
   initialize(particle) {
     particle._flameHeat = 0.7 + Math.random() * 0.5;
     if (particle._flameBrightness === undefined) particle._flameBrightness = 1.0;
+    zeroParticleVisual(particle);
   }
 
   update(particle, delta) {
@@ -447,6 +475,7 @@ export class FlameLifecycleBehavior {
     const age = particle.age;
     if (life <= 0) return;
     const t = age / Math.max(0.001, life);
+    const lifeFade = particleSpawnDeathFade(t, 0.14, 0.16);
 
     const heat = particle._flameHeat ?? 1.0;
     // Fire masks often contain soft falloff pixels. A low brightness floor keeps
@@ -455,8 +484,8 @@ export class FlameLifecycleBehavior {
     const brightness = Math.max(minBrightness, particle._flameBrightness ?? 1.0);
 
     const color = lerpColorStops(this._colorStops, t, _flameColorTemp);
-    const emission = lerpScalarStops(FLAME_EMISSION_STOPS, t) * heat * this._emissionScale * this._hdrGain;
-    const alpha = lerpScalarStops(FLAME_ALPHA_STOPS, t) * this._peakOpacity;
+    const emission = lerpScalarStops(FLAME_EMISSION_STOPS, t) * heat * this._emissionScale * this._hdrGain * lifeFade;
+    const alpha = lerpScalarStops(FLAME_ALPHA_STOPS, t) * this._peakOpacity * lifeFade;
 
     particle.color.x = color.r * emission * brightness;
     particle.color.y = color.g * emission * brightness;
@@ -515,6 +544,7 @@ export class EmberLifecycleBehavior {
   initialize(particle) {
     particle._emberHeat = 0.85 + Math.random() * 0.30;
     if (particle._flameBrightness === undefined) particle._flameBrightness = 1.0;
+    zeroParticleVisual(particle);
   }
 
   update(particle, delta) {
@@ -522,13 +552,14 @@ export class EmberLifecycleBehavior {
     const age = particle.age;
     if (life <= 0) return;
     const t = age / Math.max(0.001, life);
+    const lifeFade = particleSpawnDeathFade(t, 0.16, 0.20);
 
     const heat = particle._emberHeat ?? 1.0;
     const brightness = Math.max(0.3, particle._flameBrightness ?? 1.0);
 
     const color = lerpColorStops(this._colorStops, t, _emberColorTemp);
-    const emission = lerpScalarStops(EMBER_EMISSION_STOPS, t) * heat * this._emissionScale * this._hdrGain;
-    const alpha = lerpScalarStops(EMBER_ALPHA_STOPS, t) * this._peakOpacity;
+    const emission = lerpScalarStops(EMBER_EMISSION_STOPS, t) * heat * this._emissionScale * this._hdrGain * lifeFade;
+    const alpha = lerpScalarStops(EMBER_ALPHA_STOPS, t) * this._peakOpacity * lifeFade;
 
     particle.color.x = color.r * emission * brightness;
     particle.color.y = color.g * emission * brightness;
@@ -589,8 +620,12 @@ export class SmokeLifecycleBehavior {
   initialize(particle) {
     const brightness = particle._flameBrightness ?? 1.0;
     // Softer than 0.5× so bright-mask spawns stay readable as smoke, not paper-thin.
-    particle._smokeDensity = Math.max(0.55, 1.0 - brightness * 0.32);
+    particle._smokeDensity = Math.max(0.65, 1.0 - brightness * 0.28);
     particle._smokeStartSize = particle.size;
+    // Lift slightly above the fire plane so smoke reads above ground art (top-down view).
+    if (particle.position && typeof particle.position.z === 'number') {
+      particle.position.z += 12 + Math.random() * 18;
+    }
   }
 
   update(particle, delta) {
@@ -702,6 +737,57 @@ export class SmokeLifecycleBehavior {
 
   reset() {}
   clone() { return new SmokeLifecycleBehavior(this.ownerEffect); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FlameShapeFrameBehavior — random shape row + animate within that row only
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Fire atlas layout: rows = shape archetypes, cols = animation frames.
+// FrameOverLife drives absolute tile 0..N and ignores startTileIndex, so every
+// particle cycled the full atlas. This behavior picks one shape row at spawn and
+// advances only across that row's animation frames.
+
+export class FlameShapeFrameBehavior {
+  /**
+   * @param {number} [shapeCount=4] Atlas rows — distinct silhouette families.
+   * @param {number} [animFrames=4] Atlas cols — flicker frames per shape.
+   */
+  constructor(shapeCount = 4, animFrames = 4) {
+    this.shapeCount = Math.max(1, shapeCount | 0);
+    this.animFrames = Math.max(1, animFrames | 0);
+    this.type = 'FlameShapeFrameBehavior';
+  }
+
+  initialize(particle) {
+    if (!particle) return;
+    particle._flameShapeRow = Math.floor(Math.random() * this.shapeCount);
+    particle._flameAnimOffset = Math.floor(Math.random() * this.animFrames);
+    this._applyTile(particle, 0);
+  }
+
+  update(particle, delta) {
+    if (!particle) return;
+    const life = particle.life;
+    if (!Number.isFinite(life) || life <= 0) return;
+    const t = Math.max(0, Math.min(1, particle.age / life));
+    const animFrame = Math.min(this.animFrames - 1, Math.floor(t * this.animFrames));
+    this._applyTile(particle, animFrame);
+  }
+
+  /** @private */
+  _applyTile(particle, animFrame) {
+    const row = particle._flameShapeRow ?? 0;
+    const offset = particle._flameAnimOffset ?? 0;
+    const col = (animFrame + offset) % this.animFrames;
+    particle.uvTile = row * this.animFrames + col;
+  }
+
+  frameUpdate() {}
+  reset() {}
+  clone() {
+    return new FlameShapeFrameBehavior(this.shapeCount, this.animFrames);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

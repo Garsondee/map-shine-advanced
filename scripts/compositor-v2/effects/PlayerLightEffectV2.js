@@ -71,7 +71,22 @@ const log = createLogger('PlayerLightEffect');
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
-/** Token-shaped occlusion for flashlight VFX (screen UV 0–1, matches uInvScreenSize). */
+const FLASHLIGHT_TOKEN_MASK_UNIFORMS = `
+        uniform sampler2D uTokenMaskTex;
+        uniform float uHasTokenMaskScreen;
+        uniform sampler2D uTokenTex;
+        uniform float uHasTokenTex;
+        uniform vec2 uTokenScreenCenter;
+        uniform vec2 uTokenAxisU;
+        uniform vec2 uTokenAxisV;
+        uniform float uTokenAlphaLow;
+        uniform float uTokenAlphaHigh;
+        uniform float uTokenScreenRadius;
+        uniform float uTokenMaskSoft;
+        uniform float uHasTokenMask;
+`;
+
+/** Token-shaped occlusion for flashlight VFX (screen UV 0–1, matches uInvScreenSize). Must live at global scope (before main). */
 const FLASHLIGHT_TOKEN_MASK_FRAG = `
         float msFlashlightTokenOcclusion(vec2 fragN) {
           if (uHasTokenMaskScreen > 0.5) {
@@ -95,26 +110,11 @@ const FLASHLIGHT_TOKEN_MASK_FRAG = `
         }
 `;
 
-const FLASHLIGHT_TOKEN_MASK_UNIFORMS = `
-        uniform sampler2D uTokenMaskTex;
-        uniform float uHasTokenMaskScreen;
-        uniform sampler2D uTokenTex;
-        uniform float uHasTokenTex;
-        uniform vec2 uTokenScreenCenter;
-        uniform vec2 uTokenAxisU;
-        uniform vec2 uTokenAxisV;
-        uniform float uTokenAlphaLow;
-        uniform float uTokenAlphaHigh;
-        uniform float uTokenScreenRadius;
-        uniform float uTokenMaskSoft;
-        uniform float uHasTokenMask;
-`;
-
-const FLASHLIGHT_TOKEN_MASK_APPLY = `
-          {
-            vec2 fragN = gl_FragCoord.xy * uInvScreenSize;
-            float tokOcc = msFlashlightTokenOcclusion(fragN);
-            if (tokOcc > 0.98) discard;
+/** Sample token occlusion once per fragment; multiply into alpha (do not hard-discard the whole beam). */
+const FLASHLIGHT_TOKEN_MASK_OCC = `
+          float msTokOcc = 0.0;
+          if (uHasTokenMaskScreen > 0.5 || uHasTokenTex > 0.5 || uHasTokenMask > 0.5) {
+            msTokOcc = msFlashlightTokenOcclusion(gl_FragCoord.xy * uInvScreenSize);
           }
 `;
 
@@ -3447,13 +3447,13 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         uniform float uEmissionGain;
         varying vec2 vUv;
 
+        ${FLASHLIGHT_TOKEN_MASK_FRAG}
+
         float hash21(vec2 p) {
           p = fract(p * vec2(123.34, 345.45));
           p += dot(p, p + 34.345);
           return fract(p.x * p.y);
         }
-
-        ${FLASHLIGHT_TOKEN_MASK_FRAG}
 
         void main() {
           if (uIntensity <= 0.0001) discard;
@@ -3464,7 +3464,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
             float ropeMask = rm.a;
             if (ropeMask > 0.001) discard;
           }
-          ${FLASHLIGHT_TOKEN_MASK_APPLY}
+          ${FLASHLIGHT_TOKEN_MASK_OCC}
 
           float t = clamp(vUv.x, 0.0, 1.0);
           float wallT = clamp(uWallT, 0.0, 1.0);
@@ -3495,6 +3495,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
 
           float alpha = lateral * longFalloff * nearBoost;
           alpha *= noise;
+          alpha *= (1.0 - clamp(msTokOcc, 0.0, 1.0));
 
           vec3 col = vec3(1.0, 0.95, 0.8) * uIntensity;
           float gain = max(uEmissionGain, 0.0);
@@ -3564,10 +3565,10 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
             float ropeMask = rm.a;
             if (ropeMask > 0.001) discard;
           }
-          ${FLASHLIGHT_TOKEN_MASK_APPLY}
+          ${FLASHLIGHT_TOKEN_MASK_OCC}
 
           vec4 tex = texture2D(uMap, vUv);
-          float a = tex.a * uOpacity;
+          float a = tex.a * uOpacity * (1.0 - clamp(msTokOcc, 0.0, 1.0));
           if (a <= 0.0001) discard;
           gl_FragColor = vec4(tex.rgb * uColor, a);
         }
@@ -3634,7 +3635,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
             vec4 rm = texture2D(uRopeMask, suv);
             if (rm.a > 0.001) discard;
           }
-          ${FLASHLIGHT_TOKEN_MASK_APPLY}
+          ${FLASHLIGHT_TOKEN_MASK_OCC}
 
           // Cone-local coordinates:
           // - vUv.x in [0,1] is distance along cone (0 = origin)
@@ -3667,6 +3668,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           float cookie = texture2D(uCookieTexture, uv).r;
 
           float alpha = beam * falloff;
+          alpha *= (1.0 - clamp(msTokOcc, 0.0, 1.0));
           vec3 col = vec3(1.0, 0.95, 0.8) * uIntensity * cookie;
           gl_FragColor = vec4(col * alpha, alpha);
         }
@@ -3803,7 +3805,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
             float ropeMask = rm.a;
             if (ropeMask > 0.001) discard;
           }
-          ${FLASHLIGHT_TOKEN_MASK_APPLY}
+          ${FLASHLIGHT_TOKEN_MASK_OCC}
           vec2 uv = vUv;
           if (uCookieRotationEnabled) {
             float angle = uTime * uCookieRotationSpeed;
@@ -3831,6 +3833,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           if (uHasVisionMap > 0.5) {
             alpha *= sampleVisionVisible(vWorld);
           }
+          alpha *= (1.0 - clamp(msTokOcc, 0.0, 1.0));
           vec3 col = vec3(1.0, 0.95, 0.8) * uIntensity * radial;
           float gain = max(uEmissionGain, 0.0);
           gl_FragColor = vec4(col * alpha * gain, alpha * gain);

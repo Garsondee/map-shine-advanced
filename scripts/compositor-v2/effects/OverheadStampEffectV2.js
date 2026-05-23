@@ -2195,6 +2195,7 @@ export class OverheadStampEffectV2 {
         const entry = frameCasters[i];
         if (!entry.isTree) continue;
         const object = entry.object;
+        if (object?.userData?.mapShineTreeGroundShadow || object?.name?.startsWith('TreeV2Shadow_')) continue;
         const layers = object?.layers;
         if (!layers) continue;
         if (debugProbeEnabled) {

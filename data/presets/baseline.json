@@ -1,8 +1,8 @@
 {
   "msaVersion": "scene-settings-v1",
   "id": "baseline",
-  "name": "Basic Preset",
-  "description": "Atmospheric preset for Mythica Machina Mad Scientist Compound — fog, lightning, fire glow, sepia lens, flashlight exploration, and storm-ready weather tuning.",
+  "name": "Baseline",
+  "description": "Reference preset with production-tuned defaults for every Map Shine effect. Core atmosphere is active (lighting, weather, clouds, atmospheric and exploration fog, building shadows, vegetation, window lights, weather lightning, flashlight exploration, bloom, and color grading). Optional or map-specific effects (fire, particles, lens, water, and similar) stay disabled but retain ready-to-use tuning when you enable them on a scene.",
   "enabled": true,
   "settings": {
     "mapMaker": {
@@ -597,7 +597,7 @@
           "lightningWindowRgbBoost": 0.35
         },
         "fire-sparks": {
-          "enabled": true,
+          "enabled": false,
           "globalFireRate": 20,
           "fireHeight": 600,
           "fireTemperature": 0,
@@ -779,7 +779,7 @@
           "curlScale": 140
         },
         "dust": {
-          "enabled": true,
+          "enabled": false,
           "density": 3,
           "maxParticles": 20000,
           "brightness": 1.95,
@@ -801,7 +801,7 @@
           "motionCurlScale": 1770
         },
         "water-splashes": {
-          "enabled": true,
+          "enabled": false,
           "tintStrength": 2,
           "tintJitter": 0.75,
           "tintAColorR": 1.24,
@@ -834,7 +834,7 @@
           "interiorScanStride": 4
         },
         "underwater-bubbles": {
-          "enabled": true,
+          "enabled": false,
           "tintStrength": 1.41,
           "tintJitter": 1,
           "tintAColorR": 0.74,
@@ -864,7 +864,7 @@
           "splashWindDriftScale": 1
         },
         "smelly-flies": {
-          "enabled": true,
+          "enabled": false,
           "maxParticles": 10,
           "flying": {
             "noiseStrength": 1500,
@@ -885,7 +885,7 @@
           "speedMultiplier": 2.75
         },
         "lightning": {
-          "enabled": true,
+          "enabled": false,
           "outsideFlashEnabled": true,
           "outsideFlashGain": 4.37,
           "outsideFlashAttackMs": 111,
@@ -1000,7 +1000,7 @@
           "bigStrikeDecayMs": 4500
         },
         "candle-flames": {
-          "enabled": true,
+          "enabled": false,
           "flamesEnabled": true,
           "maxFlames": 20000,
           "flameSizePx": 14.5,
@@ -1560,7 +1560,7 @@
           "strength": 0.7
         },
         "lens": {
-          "enabled": true,
+          "enabled": false,
           "dynamicLayersEnabled": true,
           "layerCycleSeconds": 36,
           "lumaSmoothingSeconds": 1,

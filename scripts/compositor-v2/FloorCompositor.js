@@ -4813,6 +4813,7 @@ export class FloorCompositor {
       if (paramId === 'enabled' || paramId === 'masterEnabled') {
         if (typeof effect.setEnabled === 'function') {
           try { effect.setEnabled(!!value); } catch (_) {}
+          return;
         }
         const proto = Object.getPrototypeOf(effect);
         const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, 'enabled') : null;

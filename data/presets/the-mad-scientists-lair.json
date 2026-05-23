@@ -801,7 +801,7 @@
           "motionCurlScale": 1770
         },
         "water-splashes": {
-          "enabled": true,
+          "enabled": false,
           "tintStrength": 2,
           "tintJitter": 0.75,
           "tintAColorR": 1.24,
@@ -834,7 +834,7 @@
           "interiorScanStride": 4
         },
         "underwater-bubbles": {
-          "enabled": true,
+          "enabled": false,
           "tintStrength": 1.41,
           "tintJitter": 1,
           "tintAColorR": 0.74,

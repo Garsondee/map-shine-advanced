@@ -161,7 +161,7 @@ export class TreeEffectV2 {
           Turbulence: 'Extra high-frequency wobble mixed into distortion (trees only).',
           'Canopy shadow': 'Darkening from a blurred, offset sample of the mask opposite the sun (same as bushes).',
           'Edge safety': 'Pulls motion and shadow down near scene edges to hide UV seams.',
-          'Hover fade': 'When hover-hide is active, RGB and alpha are scaled together so the canopy does not pick up an extra dark fringe.',
+          'Hover fade': 'When hover-hide is active, the canopy fades out but the offset ground shadow stays at full strength.',
         },
       },
       presetApplyDefaults: true,
@@ -892,6 +892,7 @@ export class TreeEffectV2 {
     for (const [tileId, entry] of this._overlays) {
       const hoverUniform = entry?.material?.uniforms?.uHoverFade;
       const shadowHoverUniform = entry?.shadowMaterial?.uniforms?.uHoverFade;
+      const shadowCanopyFadeUniform = entry?.shadowMaterial?.uniforms?.uCanopyHoverFade;
       if (!hoverUniform) continue;
 
       const hoverHidden = this._hoverHidden || !!tileManager?.getTileSpriteData?.(tileId)?.hoverHidden;
@@ -902,7 +903,8 @@ export class TreeEffectV2 {
 
       if (absDiff <= 0.0005) {
         hoverUniform.value = targetFade;
-        if (shadowHoverUniform) shadowHoverUniform.value = targetFade;
+        if (shadowHoverUniform) shadowHoverUniform.value = 1.0;
+        if (shadowCanopyFadeUniform) shadowCanopyFadeUniform.value = targetFade;
         this._applyTreeHoverRevealStacking(entry, tileId, targetFade);
         continue;
       }
@@ -911,7 +913,11 @@ export class TreeEffectV2 {
       const maxStep = delta / 2.0;
       const step = Math.sign(diff) * Math.min(absDiff, maxStep);
       hoverUniform.value = currentFade + step;
-      if (shadowHoverUniform) shadowHoverUniform.value = hoverUniform.value;
+      // Ground shadow stays full strength during hover reveal — only the canopy fades.
+      if (shadowHoverUniform) shadowHoverUniform.value = 1.0;
+      // Billboard lit-capture must follow canopy fade so lighting does not lift shadow
+      // under foliage and leave a masked canopy-shaped ring.
+      if (shadowCanopyFadeUniform) shadowCanopyFadeUniform.value = hoverUniform.value;
       this._applyTreeHoverRevealStacking(entry, tileId, hoverUniform.value);
     }
     this._hoverFadeInProgress = hoverFadeInProgress;
@@ -1429,6 +1435,7 @@ export class TreeEffectV2 {
       uTreeMask: { value: null },
       uDeriveAlpha: { value: 0.0 },
       uHoverFade: { value: 1.0 },
+      uCanopyHoverFade: { value: 1.0 },
       uVegetationPass: { value: 2.0 },
     };
     const shadowUniforms = {
@@ -1436,6 +1443,7 @@ export class TreeEffectV2 {
       uTreeMask: { value: null },
       uDeriveAlpha: { value: 0.0 },
       uHoverFade: { value: 1.0 },
+      uCanopyHoverFade: { value: 1.0 },
       uVegetationPass: { value: 1.0 },
     };
 
@@ -1507,6 +1515,7 @@ export class TreeEffectV2 {
 
         uniform float uDeriveAlpha;
         uniform float uHoverFade;
+        uniform float uCanopyHoverFade;
         uniform float uVegetationPass;
         uniform sampler2D uRoofAlphaMap;
         uniform sampler2D uRoofBlockMap;
@@ -1720,17 +1729,14 @@ export class TreeEffectV2 {
           if (uVegetationPass < 1.5) {
             if (uShadowLitCapture > 0.5) {
               float lit = clamp(1.0 - shadowA, 0.0, 1.0);
-              // Ground-only lit factor — never darken pixels where foliage exists.
-              lit = mix(lit, 1.0, clamp(texA * uIntensity, 0.0, 1.0));
+              // Ground-only lit factor — skip foliage punch-out while canopy is hover-faded
+              // (shadow uHoverFade stays 1; uCanopyHoverFade tracks canopy reveal).
+              float canopyFade = clamp(uCanopyHoverFade, 0.0, 1.0);
+              lit = mix(lit, 1.0, clamp(texA * uIntensity * canopyFade, 0.0, 1.0));
               gl_FragColor = vec4(lit, lit, lit, 1.0);
               return;
             }
             float outShadow = shadowA;
-            // Hover reveal: canopy fades but ground shadow must stay continuous (no silhouette hole).
-            if (hf < 0.999) {
-              float localSilhouette = texA * clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
-              outShadow = max(outShadow, localSilhouette);
-            }
             if (outShadow <= 0.001) discard;
             gl_FragColor = vec4(0.0, 0.0, 0.0, outShadow);
             return;
@@ -1794,6 +1800,8 @@ export class TreeEffectV2 {
     mesh.userData = mesh.userData || {};
     mesh.userData.mapShineTreeTileId = tileId;
     shadowMesh.userData.mapShineTreeTileId = tileId;
+    shadowMesh.userData.mapShineTreeGroundShadow = true;
+    mesh.userData.mapShineTreeCanopy = true;
     shadowMesh.userData.floorIndex = floorIndex;
     mesh.userData.floorIndex = floorIndex;
     shadowMesh.position.set(centerX, centerY, z);
@@ -1804,7 +1812,9 @@ export class TreeEffectV2 {
     this._applyTreeOverlayRenderOrders(shadowMesh, mesh, tileId, floorIndex);
 
     try {
-      shadowMesh.layers.enable(21);
+      // Canopy only — ground shadow stays on the bus albedo pass (layer 0). BushEffectV2
+      // never tags shadow meshes for roof/weather capture; doing so here made hover-faded
+      // canopies leave a mask-shaped shadow in roof RTs that overhead lighting projects.
       mesh.layers.enable(21);
     } catch (_) {}
 
@@ -1897,7 +1907,11 @@ export class TreeEffectV2 {
     for (const entry of this._overlays.values()) {
       const visible = this._enabled && Number(entry.floorIndex) <= maxFloor;
       if (entry?.mesh) entry.mesh.visible = visible;
-      if (entry?.shadowMesh) entry.shadowMesh.visible = visible;
+      if (entry?.shadowMesh) {
+        entry.shadowMesh.visible = visible;
+        // Ground shadow is bus-only; never participate in roof/weather layer captures.
+        try { entry.shadowMesh.layers.disable(21); } catch (_) {}
+      }
     }
   }
 

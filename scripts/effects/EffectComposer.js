@@ -901,6 +901,7 @@ export class EffectComposer {
         'tree':             '_treeEffect',
         'water-splashes':   '_waterSplashesEffect',
         'underwater-bubbles':'_underwaterBubblesEffect',
+        'smelly-flies':     '_smellyFliesEffect',
         'candle-flames':    '_candleFlamesEffect',
         'player-light':     '_playerLightEffect',
         'bloom':            '_bloomEffect',

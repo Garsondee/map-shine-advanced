@@ -20,6 +20,7 @@ import {
 } from '../libs/three.quarks.module.js';
 import Coordinates from '../utils/coordinates.js';
 import { weatherController } from '../core/WeatherController.js';
+import { resolveEffectEnabled } from '../effects/resolve-effect-enabled.js';
 
 const log = createLogger('SmellyFliesEffect');
 
@@ -1223,12 +1224,28 @@ export class SmellyFliesEffect {
   }
 
   _queueRebuildSystems() {
+    if (!resolveEffectEnabled(this)) return;
     if (this._rebuildQueued) return;
     this._rebuildQueued = true;
     setTimeout(() => {
       this._rebuildQueued = false;
       this._rebuildSystems();
     }, 0);
+  }
+
+  /**
+   * Toggle effect on/off and tear down or rebuild GPU systems immediately.
+   * @param {boolean} value
+   */
+  setEnabled(value) {
+    const next = !!value;
+    this.enabled = next;
+    if (this.params) this.params.enabled = next;
+    if (!resolveEffectEnabled(this)) {
+      this._disposeSystems();
+      return;
+    }
+    this._queueRebuildSystems();
   }
 
   /**
@@ -1297,6 +1314,10 @@ export class SmellyFliesEffect {
   _rebuildSystems() {
     // Dispose existing systems
     this._disposeSystems();
+
+    if (!resolveEffectEnabled(this)) {
+      return;
+    }
     
     if (!this.mapPointsManager || !this.batchRenderer || !this.atlasTexture) {
       return;
@@ -1568,7 +1589,21 @@ export class SmellyFliesEffect {
    * @param {TimeInfo} timeInfo
    */
   update(timeInfo) {
-    if (!this.enabled) return;
+    if (!resolveEffectEnabled(this)) {
+      if (this.flySystems.size > 0) {
+        this._disposeSystems();
+      }
+      return;
+    }
+
+    if (
+      this.flySystems.size === 0
+      && this.mapPointsManager
+      && this.batchRenderer
+      && this.atlasTexture
+    ) {
+      this._queueRebuildSystems();
+    }
     
     // Fly systems are updated by the BatchedRenderer in ParticleSystem.update()
     // We only need to handle parameter changes here
@@ -1602,6 +1637,11 @@ export class SmellyFliesEffect {
    * @param {*} value
    */
   applyParamChange(paramId, value) {
+    if (paramId === 'enabled' || paramId === 'masterEnabled') {
+      this.setEnabled(value);
+      return;
+    }
+
     // Update params
     const parts = paramId.split('.');
     let target = this.params;
@@ -1611,8 +1651,10 @@ export class SmellyFliesEffect {
     }
     target[parts[parts.length - 1]] = value;
     
-    // Rebuild systems to apply changes
-    this._rebuildSystems();
+    // Rebuild systems to apply changes (skip work while disabled)
+    if (resolveEffectEnabled(this)) {
+      this._rebuildSystems();
+    }
   }
 
   /**

@@ -4304,6 +4304,50 @@ Current Weather:
   }
 
   /**
+   * Reload control + weather state from scene flags after an external settings apply (preset).
+   * @returns {Promise<void>}
+   * @public
+   */
+  async resyncFromSceneFlags() {
+    try {
+      await this._loadControlState();
+
+      const snap = canvas?.scene?.getFlag?.('map-shine-advanced', 'weather-snapshot');
+      if (snap && typeof snap === 'object') {
+        if (snap.controlState && typeof snap.controlState === 'object' && !Array.isArray(snap.controlState)) {
+          Object.assign(this.controlState, cloneAndSanitizeControlState(snap.controlState, { silent: true }));
+          this._ensureDirectedCustomPreset();
+        }
+        if (Number.isFinite(snap.timeOfDay)) {
+          this.controlState.timeOfDay = snap.timeOfDay % 24;
+        }
+        if (typeof snap.linkTimeToFoundry === 'boolean') {
+          this.controlState.linkTimeToFoundry = snap.linkTimeToFoundry;
+        }
+        const tt = Number(snap.timeTransitionMinutes);
+        if (Number.isFinite(tt)) {
+          this.controlState.timeTransitionMinutes = tt;
+        }
+      }
+
+      this._sanitizeControlStateForTweakpaneBindings();
+      this._updateCustomTimeControls();
+      this._syncTileMotionSpeedFromManager();
+      this._lastWeatherControlFingerprint = null;
+      this._lastTimeTargetApplied = null;
+      this._lastTimeTransitionMinutesApplied = null;
+
+      if (this.pane) {
+        this.pane.refresh();
+      }
+
+      await this._applyControlState();
+    } catch (error) {
+      log.warn('resyncFromSceneFlags failed:', error);
+    }
+  }
+
+  /**
    * Load control state from scene flags
    * @private
    */

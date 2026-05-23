@@ -1,7 +1,7 @@
 {
   "msaVersion": "scene-settings-v1",
-  "id": "the-mad-scientists-lair",
-  "name": "The Mad Scientist's Lair",
+  "id": "baseline",
+  "name": "Basic Preset",
   "description": "Atmospheric preset for Mythica Machina Mad Scientist Compound — fog, lightning, fire glow, sepia lens, flashlight exploration, and storm-ready weather tuning.",
   "enabled": true,
   "settings": {
@@ -38,7 +38,7 @@
           "transitionDuration": 0,
           "simulationSpeed": 1,
           "precipitation": 0,
-          "cloudCover": 0.53,
+          "cloudCover": 0,
           "fogDensity": 0.35,
           "wetness": 0,
           "freezeLevel": 0,
@@ -137,10 +137,10 @@
           "ambientDayScale": 0.5,
           "ambientNightScale": 0,
           "minIlluminationScale": 0,
-          "lightIntensity": 2,
-          "colorationStrength": 1.8,
-          "colorationReflectivity": 1.3,
-          "colorationSaturation": 2,
+          "lightIntensity": 1.8,
+          "colorationStrength": 1.5,
+          "colorationReflectivity": 0.8,
+          "colorationSaturation": 1,
           "colorationChromaCurve": 0.25,
           "colorationAchromaticMix": 1,
           "composeToneMapping": 0,
@@ -479,15 +479,15 @@
           "enabled": true,
           "hasWindowMask": true,
           "intensity": 4,
-          "tod4IntensityPercent": 30,
+          "tod4IntensityPercent": 65,
           "tod5IntensityPercent": 13,
           "tod6IntensityPercent": 100,
           "tod7IntensityPercent": 128,
-          "tod0IntensityPercent": 100,
+          "tod0IntensityPercent": 93,
           "tod1IntensityPercent": 100,
           "tod2IntensityPercent": 100,
           "tod3IntensityPercent": 26,
-          "falloff": 2,
+          "falloff": 1.75,
           "color": {
             "r": 1,
             "g": 1,
@@ -503,7 +503,7 @@
           "cloudShadowBias": -1,
           "cloudShadowGamma": 4,
           "cloudShadowMinLight": 0,
-          "rgbShiftAmount": 9.49,
+          "rgbShiftAmount": 4.42,
           "rgbShiftAngle": 30,
           "specularBoost": 2,
           "lightOverheadTiles": true,
@@ -1367,7 +1367,7 @@
           "tint": 0,
           "brightness": 0,
           "contrast": 1,
-          "saturation": 1,
+          "saturation": 0.73,
           "vibrance": 0,
           "liftColor": {
             "r": 0,
@@ -1384,7 +1384,7 @@
             "g": 1,
             "b": 1
           },
-          "masterGamma": 2,
+          "masterGamma": 2.6,
           "toneMapping": 0,
           "vignetteStrength": 0,
           "vignetteSoftness": 0,
@@ -1556,7 +1556,7 @@
           "strength": 1
         },
         "sepia": {
-          "enabled": true,
+          "enabled": false,
           "strength": 0.7
         },
         "lens": {

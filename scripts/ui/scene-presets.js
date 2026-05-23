@@ -10,8 +10,12 @@ import {
   repairSceneControlStateFlag
 } from '../settings/control-state-sanitize.js';
 import { createLogger } from '../core/log.js';
+import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
 
 const log = createLogger('ScenePresets');
+
+/** Scene id stored on `window.MapShine.__msaForceFullSceneReload` during preset apply. */
+export const FORCE_FULL_SCENE_RELOAD_FLAG = '__msaForceFullSceneReload';
 
 /** @type {string} */
 export const PRESETS_DIRECTORY = 'modules/map-shine-advanced/data/presets';
@@ -315,6 +319,40 @@ export function buildPresetReadyJsonForScene(scene) {
 }
 
 /**
+ * Preset apply replaces the entire effect stack — force a full compositor rebuild
+ * instead of the same-scene resync path used for slider / map-point saves.
+ *
+ * @param {Scene|null|undefined} scene
+ */
+function _armPresetFullSceneReload(scene) {
+  try {
+    const sid = scene?.id != null ? String(scene.id) : '';
+    if (!sid) return;
+    if (!window.MapShine) window.MapShine = {};
+    window.MapShine[FORCE_FULL_SCENE_RELOAD_FLAG] = sid;
+    window.MapShine.__msaPredictSameSceneRedrawUntil = 0;
+    try {
+      delete window.MapShine.__msaPredictSameSceneRedrawSceneId;
+    } catch (_) {}
+    window.MapShine.__nativeSameSceneRedraw = false;
+    window.MapShine.__nativeSameSceneLevelSwitch = false;
+  } catch (_) {}
+}
+
+/**
+ * @param {Scene|null|undefined} scene
+ */
+function _clearPresetFullSceneReload(scene) {
+  try {
+    const sid = scene?.id != null ? String(scene.id) : '';
+    if (!sid) return;
+    if (String(window.MapShine?.[FORCE_FULL_SCENE_RELOAD_FLAG] ?? '') === sid) {
+      delete window.MapShine[FORCE_FULL_SCENE_RELOAD_FLAG];
+    }
+  } catch (_) {}
+}
+
+/**
  * Apply a loaded preset to a scene (flags + full redraw).
  *
  * @param {Scene} scene
@@ -329,14 +367,18 @@ export async function applyPresetToScene(scene, preset, options = {}) {
     return false;
   }
 
+  _armPresetFullSceneReload(scene);
+
   try {
     if (!skipUndoCapture && preset.id !== PRESET_UNDO_SNAPSHOT_ID) {
       capturePresetUndoSnapshot(scene);
     }
 
+    extendMsaLocalFlagWriteGuard(4000);
+
     const enabledFlag = typeof preset.enabled === 'boolean' ? preset.enabled : false;
     await scene.setFlag('map-shine-advanced', 'enabled', enabledFlag);
-    await sceneSettings.setSceneSettings(scene, preset.settings);
+    await sceneSettings.setSceneSettings(scene, preset.settings, { replace: true });
 
     const hasControlStatePaste =
       preset.controlState && _isPlainObject(preset.controlState) && !Array.isArray(preset.controlState);
@@ -368,6 +410,7 @@ export async function applyPresetToScene(scene, preset, options = {}) {
     }
     return true;
   } catch (e) {
+    _clearPresetFullSceneReload(scene);
     log.error('applyPresetToScene failed:', e);
     ui.notifications?.error?.('Map Shine: Failed to apply preset — see console');
     return false;

@@ -214,13 +214,10 @@ export class CloudEffectV2 {
     this._lastRTSceneKey = '';
     this._activePerfRecorder = null;
 
-    /** Cached shadow pass keys — skip RT work when inputs are unchanged. */
+    /** Cached shadow pass keys — skip RT work when inputs are unchanged (no active sprites only). */
     this._shadowRawCacheKey = '';
     this._shadowMaskCacheKey = '';
     this._cloudTopCacheKey = '';
-    /** Re-render shadow RTs at this interval while sprites drift; static scenes only refresh on key change. */
-    this._shadowPassMaxStaleFrames = 12;
-    this._shadowPassStaleFrames = 0;
     /** World-space bucket size for view-bound driven shadow mask UVs. */
     this._shadowViewQuant = 2.5;
     this._shadowCacheStats = {
@@ -1033,25 +1030,21 @@ export class CloudEffectV2 {
       const topFade = this._smoothstep(fadeEnd, fadeStart, zoom);
       const topVisible = topFade > 0.01;
 
-      this._shadowPassStaleFrames++;
       const staticKey = this._computeShadowStaticCacheKey();
-      const staleBudget = this._getShadowPassStaleBudget();
-      const forceShadowRefresh = Number.isFinite(staleBudget)
-        && this._shadowPassStaleFrames >= staleBudget;
-      const rawCacheHit = !forceShadowRefresh && staticKey === this._shadowRawCacheKey && !!this._shadowRawCacheKey;
+      const perFrameShadow = this._requiresPerFrameShadowPasses();
+      const rawCacheHit = !perFrameShadow && staticKey === this._shadowRawCacheKey && !!this._shadowRawCacheKey;
       const maskKey = this._computeShadowMaskCacheKey(staticKey);
       const maskCacheHit = rawCacheHit && maskKey === this._shadowMaskCacheKey && !!this._shadowMaskCacheKey;
       const cloudTopKey = this._computeCloudTopCacheKey(staticKey, topFade);
       const animatedCloudTop = this._isAnimatedCloudTop();
-      const cloudTopCacheHit = !animatedCloudTop && !forceShadowRefresh
+      const cloudTopCacheHit = !animatedCloudTop && !perFrameShadow
         && cloudTopKey === this._cloudTopCacheKey && !!this._cloudTopCacheKey;
 
       if (rawCacheHit) this._shadowCacheStats.rawHit++;
       else {
         this._shadowCacheStats.rawMiss++;
-        if (forceShadowRefresh && staticKey === this._shadowRawCacheKey) {
-          this._shadowCacheStats.rawStale++;
-          this._shadowCacheStats.lastMissReason = 'staleRefresh';
+        if (perFrameShadow) {
+          this._shadowCacheStats.lastMissReason = 'motionActive';
         } else if (!this._shadowRawCacheKey) {
           this._shadowCacheStats.lastMissReason = 'coldStart';
         } else if (staticKey !== this._shadowRawCacheKey) {
@@ -1080,7 +1073,6 @@ export class CloudEffectV2 {
           this._shadowRawCacheKey = staticKey;
           this._shadowMaskCacheKey = '';
           this._cloudTopCacheKey = '';
-          this._shadowPassStaleFrames = 0;
         } finally {
           this._endPerfSpan(_perfToken);
         }
@@ -1187,18 +1179,16 @@ export class CloudEffectV2 {
     this._shadowRawCacheKey = '';
     this._shadowMaskCacheKey = '';
     this._cloudTopCacheKey = '';
-    this._shadowPassStaleFrames = 0;
   }
 
   /**
-   * How many render passes may reuse cached shadow RTs before a forced refresh.
-   * Active sprites use `_shadowPassMaxStaleFrames`; empty cover only refreshes on static-key change.
+   * Drifting sprites, fades, and panning all need fresh shadow RTs every frame.
+   * Cache only when no sprites are visible (neutral / zero-cover clears).
    * @private
-   * @returns {number}
+   * @returns {boolean}
    */
-  _getShadowPassStaleBudget() {
-    if ((this._lastActiveTotal ?? 0) <= 0) return Number.POSITIVE_INFINITY;
-    return Math.max(1, Number(this._shadowPassMaxStaleFrames) || 12);
+  _requiresPerFrameShadowPasses() {
+    return (this._lastActiveTotal ?? 0) > 0;
   }
 
   /** @private @param {string} paramId */
@@ -1238,7 +1228,7 @@ export class CloudEffectV2 {
     return String(tex.uuid ?? tex.id ?? tex);
   }
 
-  /** @private — static inputs only; sprite motion requires per-frame raw capture when active. */
+  /** @private — static inputs only; active sprites bypass cache via `_requiresPerFrameShadowPasses`. */
   _computeShadowStaticCacheKey() {
     const p = this.params;
     return [
@@ -1302,11 +1292,7 @@ export class CloudEffectV2 {
       rawHitPct: rawTotal > 0 ? (s.rawHit / rawTotal) * 100 : 0,
       maskHitPct: maskTotal > 0 ? (s.maskHit / maskTotal) * 100 : 0,
       cloudTopHitPct: topTotal > 0 ? (s.cloudTopHit / topTotal) * 100 : 0,
-      staleMaxFrames: (() => {
-        const budget = this._getShadowPassStaleBudget();
-        return Number.isFinite(budget) ? budget : null;
-      })(),
-      staleFrames: this._shadowPassStaleFrames,
+      perFrameShadow: this._requiresPerFrameShadowPasses(),
       spritesActive: (this._lastActiveTotal ?? 0) > 0,
     };
   }

@@ -271,6 +271,22 @@
   color: rgba(255, 190, 190, 0.95);
 }
 
+/* Scene presets row — native <select> list must stay readable on dark UI */
+#map-shine-ui .ms-scene-presets-bar {
+  color: rgba(245, 248, 255, 0.95);
+}
+
+#map-shine-ui .ms-scene-presets-select {
+  color-scheme: dark;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+#map-shine-ui .ms-scene-presets-select option {
+  background-color: #1a1f28;
+  color: rgba(245, 248, 255, 0.95);
+}
+
 /* Highlighted match text within filtered sections */
 .ms-filter-match {
   font-weight: 700;

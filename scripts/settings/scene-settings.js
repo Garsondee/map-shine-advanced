@@ -327,15 +327,55 @@ export function getSceneSettings(scene) {
  *
  * @param {Scene} scene
  * @param {any} settings
+ * @param {{ replace?: boolean }} [options]
  * @returns {Promise<SceneSettings>}
  * @public
  */
-export async function setSceneSettings(scene, settings) {
+export async function setSceneSettings(scene, settings, options = {}) {
+  const { replace = false } = options;
   const defaults = createDefaultSettings();
   const normalized = getSceneSettings(scene);
 
   try {
     if (!scene) return defaults;
+
+    if (replace && _isPlainObject(settings)) {
+      const next = {
+        ...defaults,
+        ...settings,
+        version: CURRENT_VERSION,
+        mapMaker: {
+          ...defaults.mapMaker,
+          ...(_isPlainObject(settings.mapMaker) ? settings.mapMaker : {}),
+          version: CURRENT_VERSION,
+          effects: _isPlainObject(settings.mapMaker?.effects) ? { ...settings.mapMaker.effects } : {},
+          renderer: {
+            ...defaults.mapMaker.renderer,
+            ...(_isPlainObject(settings.mapMaker?.renderer) ? settings.mapMaker.renderer : {}),
+          },
+          performance: {
+            ...defaults.mapMaker.performance,
+            ...(_isPlainObject(settings.mapMaker?.performance) ? settings.mapMaker.performance : {}),
+          },
+        },
+        gm: settings?.gm === null ? null : (
+          _isPlainObject(settings?.gm)
+            ? {
+              ...(defaults.gm && _isPlainObject(defaults.gm) ? defaults.gm : {}),
+              ...settings.gm,
+              effects: _isPlainObject(settings.gm.effects) ? { ...settings.gm.effects } : {},
+            }
+            : null
+        ),
+        player: {
+          ...defaults.player,
+          ...(_isPlainObject(settings.player) ? settings.player : {}),
+        },
+      };
+
+      await scene.setFlag(FLAG_NAMESPACE, 'settings', next);
+      return next;
+    }
 
     const merged = {
       ...normalized,

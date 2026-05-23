@@ -2067,25 +2067,54 @@ export class TweakpaneManager {
       return;
     }
 
+    this._discardPendingEffectSaves();
     this._applyingPreset = true;
     this._presetSuppressCustomForSaves = true;
+    let restored = false;
     try {
-      const restored = await scenePresets.revertPresetChange(scene);
-      if (!restored) return;
+      restored = await scenePresets.revertPresetChange(scene);
     } finally {
-      try {
-        this.lastSave = 0;
-        await this.flushSaveQueue();
-        await Promise.resolve();
-        this.lastSave = 0;
-        await this.flushSaveQueue();
-      } catch (_) {
-      }
+      this._discardPendingEffectSaves();
       this._presetSuppressCustomForSaves = false;
       this._applyingPreset = false;
     }
 
+    if (restored) {
+      await this._resyncUiAfterPresetApply();
+    }
+
     await this._hydratePresetsSelect({ forceLoad: false });
+  }
+
+  /**
+   * Drop queued autosaves without writing stale UI values back to the scene.
+   * @private
+   */
+  _discardPendingEffectSaves() {
+    this.saveQueue.clear();
+    this.dirtyParams.clear();
+    this.lastSave = 0;
+  }
+
+  /**
+   * Reload configuration UI from scene flags after a preset apply/revert.
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _resyncUiAfterPresetApply() {
+    this.reloadAllEffectParameters();
+
+    try {
+      hydrateMainWeatherTweakpaneFromController(resolveWeatherController(), this);
+    } catch (e) {
+      log.warn('hydrateMainWeatherTweakpaneFromController after preset failed:', e);
+    }
+
+    try {
+      await window.MapShine?.controlPanel?.resyncFromSceneFlags?.();
+    } catch (e) {
+      log.warn('controlPanel.resyncFromSceneFlags after preset failed:', e);
+    }
   }
 
   /**
@@ -2116,21 +2145,20 @@ export class TweakpaneManager {
       return;
     }
 
+    this._discardPendingEffectSaves();
     this._applyingPreset = true;
     this._presetSuppressCustomForSaves = true;
+    let applied = false;
     try {
-      await scenePresets.applyPresetToScene(scene, preset);
+      applied = await scenePresets.applyPresetToScene(scene, preset);
     } finally {
-      try {
-        this.lastSave = 0;
-        await this.flushSaveQueue();
-        await Promise.resolve();
-        this.lastSave = 0;
-        await this.flushSaveQueue();
-      } catch (_) {
-      }
+      this._discardPendingEffectSaves();
       this._presetSuppressCustomForSaves = false;
       this._applyingPreset = false;
+    }
+
+    if (applied) {
+      await this._resyncUiAfterPresetApply();
     }
 
     await this._hydratePresetsSelect({ forceLoad: false });

@@ -3604,6 +3604,9 @@ function computeNativeSameSceneDrawIntent(drawArgs) {
     if (!targetId) {
       return { sameSceneRedraw: false, sameSceneLevelSwitch: false };
     }
+    if (_msaForceFullSceneReloadRequested(targetId)) {
+      return { sameSceneRedraw: false, sameSceneLevelSwitch: false };
+    }
 
     const cur = canvas?.scene;
     let viewedId = null;
@@ -3681,10 +3684,12 @@ function installCanvasDrawWrapper() {
           _targetSid = t?.id != null ? String(t.id) : null;
         } catch (_) { _targetSid = null; }
         if (!_targetSid) _targetSid = _msaEffectiveSceneIdForLifecycle();
-        const _predictMatches = _msaSameSceneRedrawPredicted(_targetSid);
-        const _mapPointInFlight = _msaMapPointWriteInFlight();
+        const forceFullPresetReload = _msaForceFullSceneReloadRequested(_targetSid);
+        const _predictMatches = !forceFullPresetReload && _msaSameSceneRedrawPredicted(_targetSid);
+        const _mapPointInFlight = !forceFullPresetReload && _msaMapPointWriteInFlight();
         const sameSceneRedrawEffective =
-          drawIntent.sameSceneRedraw === true || _predictMatches || _mapPointInFlight;
+          !forceFullPresetReload
+          && (drawIntent.sameSceneRedraw === true || _predictMatches || _mapPointInFlight);
         window.MapShine.__nativeSameSceneRedraw = sameSceneRedrawEffective;
         window.MapShine.__nativeSameSceneLevelSwitch = drawIntent.sameSceneLevelSwitch === true;
         if (sameSceneRedrawEffective) {
@@ -3958,6 +3963,17 @@ function installCanvasDrawWrapper() {
   }, 'installCanvasDrawWrapper', Severity.COSMETIC);
 }
 
+function _msaForceFullSceneReloadRequested(sceneId) {
+  try {
+    const want = window.MapShine?.__msaForceFullSceneReload;
+    if (!want) return false;
+    const sid = sceneId != null ? String(sceneId) : '';
+    return !!sid && String(want) === sid;
+  } catch (_) {
+    return false;
+  }
+}
+
 /**
  * Resolve the scene id the user is actually on (v12: `current` / `canvas.scene`; v13+: `viewed`).
  * TearDown must not rely on `game.scenes.viewed` alone — in v12 it is often undefined, so every
@@ -4022,7 +4038,10 @@ function installCanvasTransitionWrapper() {
         const _tearDownSidForPredict = canvas?.scene?.id != null
           ? String(canvas.scene.id)
           : _msaEffectiveSceneIdForLifecycle();
-        if (_msaSameSceneRedrawPredicted(_tearDownSidForPredict)) {
+        if (
+          !_msaForceFullSceneReloadRequested(_tearDownSidForPredict)
+          && _msaSameSceneRedrawPredicted(_tearDownSidForPredict)
+        ) {
           return wrapped(...args);
         }
       } catch (_) {}
@@ -4039,7 +4058,12 @@ function installCanvasTransitionWrapper() {
           lastRes = lr != null ? String(lr) : null;
         } catch (_) {}
         const effectiveSid = liveSid || lastRes || currentDocId;
-        if (viewedSid && effectiveSid && viewedSid === effectiveSid) {
+        if (
+          viewedSid
+          && effectiveSid
+          && viewedSid === effectiveSid
+          && !_msaForceFullSceneReloadRequested(effectiveSid)
+        ) {
           return wrapped(...args);
         }
       } catch (_) {}
@@ -5525,7 +5549,7 @@ async function onCanvasReady(canvas) {
     // stale armed window from leaking across a real scene switch.
     if (!nativeSameSceneRedrawAtReady && _hasLiveMapShineRuntime()) {
       const _readySid = canvas?.scene?.id != null ? String(canvas.scene.id) : _msaEffectiveSceneIdForLifecycle();
-      if (_msaSameSceneRedrawPredicted(_readySid)) {
+      if (!_msaForceFullSceneReloadRequested(_readySid) && _msaSameSceneRedrawPredicted(_readySid)) {
         nativeSameSceneRedrawAtReady = true;
       }
     }
@@ -5762,6 +5786,14 @@ async function onCanvasReady(canvas) {
 
   log.info(`Initializing Map Shine canvas for scene: ${scene.name}`);
 
+  if (_msaForceFullSceneReloadRequested(scene?.id)) {
+    try {
+      delete window.MapShine.__msaForceFullSceneReload;
+    } catch (_) {}
+    nativeSameSceneRedrawAtReady = false;
+    skipNativeLevelSwitchOverlay = false;
+  }
+
   if (nativeSameSceneRedrawAtReady && _hasLiveMapShineRuntime()) {
     log.info(`${MSA_V14_LIFECYCLE_TRACE} canvasReady same-scene redraw: resyncing without loading overlay/full create`, {
       sceneId: scene.id,
@@ -5932,12 +5964,15 @@ function onCanvasTearDown(canvas) {
   // fallback can run — by the time canvasReady fires, `_hasLiveMapShineRuntime()` is
   // false and we fall into the full createThreeCanvas path (the user-visible "scene
   // appears to reload" symptom on map-point saves).
-  const _predictMatches = _msaSameSceneRedrawPredicted(_tearDownSid);
-  const _mapPointInFlight = _msaMapPointWriteInFlight();
+  const forceFullPresetReload = _msaForceFullSceneReloadRequested(_tearDownSid);
+  const _predictMatches = !forceFullPresetReload && _msaSameSceneRedrawPredicted(_tearDownSid);
+  const _mapPointInFlight = !forceFullPresetReload && _msaMapPointWriteInFlight();
   const lightNativeSameSceneRedraw =
-    !!window.MapShine.__nativeSameSceneRedraw
-    || (_predictMatches && _hasLiveMapShineRuntime())
-    || (_mapPointInFlight && _hasLiveMapShineRuntime());
+    !forceFullPresetReload && (
+      !!window.MapShine.__nativeSameSceneRedraw
+      || (_predictMatches && _hasLiveMapShineRuntime())
+      || (_mapPointInFlight && _hasLiveMapShineRuntime())
+    );
   const lightNativeSameScenePath = lightNativeLevelSwitch || lightNativeSameSceneRedraw;
   if (_mapPointInFlight) {
     try {

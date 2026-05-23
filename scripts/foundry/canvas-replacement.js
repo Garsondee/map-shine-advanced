@@ -8095,17 +8095,32 @@ async function createThreeCanvas(scene, createOptions = {}) {
             performanceRecorder = new PerformanceRecorder(renderer);
             if (window.MapShine) window.MapShine.performanceRecorder = performanceRecorder;
           }
-          if (performanceRecorder && !performanceRecorderDialog) {
-            performanceRecorderDialog = new PerformanceRecorderDialog(performanceRecorder);
-            performanceRecorderDialog.initialize();
-            if (window.MapShine) window.MapShine.performanceRecorderDialog = performanceRecorderDialog;
+          if (performanceRecorder) {
+            const needsDialog = !performanceRecorderDialog?.container?.isConnected;
+            if (needsDialog) {
+              if (performanceRecorderDialog) {
+                try { performanceRecorderDialog.destroy(); } catch (_) {}
+              }
+              performanceRecorderDialog = new PerformanceRecorderDialog(performanceRecorder);
+            }
+            try {
+              performanceRecorderDialog?.initialize?.();
+            } catch (err) {
+              log.warn('Performance recorder dialog initialize failed:', err);
+              try { performanceRecorderDialog?.destroy?.(); } catch (_) {}
+              performanceRecorderDialog = null;
+            }
+            if (window.MapShine) {
+              window.MapShine.performanceRecorder = performanceRecorder;
+              window.MapShine.performanceRecorderDialog = performanceRecorderDialog;
+            }
           }
           if (window.MapShine) {
             window.MapShine.cameraPathService = cameraPathService;
             window.MapShine.environmentControlApi = environmentControlApi;
             window.MapShine.environmentPlaybackDriver = environmentPlaybackDriver;
           }
-        }, 'performanceRecorder.initialize', Severity.COSMETIC);
+        }, 'performanceRecorder.initialize', Severity.DEGRADED);
 
         // Weather should register before the GM control panel so `hydrateMainWeatherTweakpaneFromController`
         // and live-override DOM sync see `effectFolders.weather` + WC in a consistent order.

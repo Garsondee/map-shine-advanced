@@ -17,6 +17,19 @@ const CANDLE_FLAME_RENDER_ORDER = 200100;
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
+const GLOW_REBUILD_PARAMS = new Set([
+  'glowBucketSizePx',
+  'glowMaxBuckets',
+  'glowRadiusPx',
+  'glowInnerRadiusScale',
+  'glowNightRadiusPx',
+  'glowNightInnerRadiusScale',
+  'glowIndoorRadiusScale',
+  'glowOutdoorRadiusScale',
+  'wallClipEnabled',
+  'wallClipRadiusScale',
+]);
+
 /** Glow colour endpoints for warmth slider (0 = neutral, 1 = deep candle / torch amber). */
 const GLOW_COLOR_COOL = { r: 1.0, g: 1.0, b: 1.0 };
 const GLOW_COLOR_WARM = { r: 1.0, g: 0.45, b: 0.06 };
@@ -77,13 +90,33 @@ export class CandleFlamesEffectV2 {
       glowFlickerSpeed: 6.0,
       glowFlickerStrengthJitter: 0.75,
       glowFlickerSpeedJitter: 0.65,
+      glowDayIntensityScale: 0.62,
+      glowNightIntensityScale: 1.55,
+      glowIndoorIntensityScale: 0.78,
+      glowOutdoorIntensityScale: 2.0,
+      glowIndoorCancelScale: 0.75,
+      glowOutdoorCancelScale: 1.85,
+      glowIndoorRadiusScale: 0.92,
+      glowOutdoorRadiusScale: 1.28,
+      glowIndoorNightBoost: 0.30,
+      glowOutdoorNightBoost: 1.15,
+      glowNightWarmth: 0.95,
+      glowNightIntensity: 0.58,
+      glowNightDarknessCancel: 4.8,
+      glowNightRadiusPx: 210.0,
+      glowNightInnerRadiusScale: 0.22,
+      glowNightFalloffExponent: 1.35,
+      glowNightEdgeSoftness: 0.52,
+      glowNightFlickerStrength: 2.6,
+      glowNightFlickerSpeed: 6.5,
+      glowNightFlickerStrengthJitter: 0.78,
+      glowNightFlickerSpeedJitter: 0.68,
       wallClipEnabled: true,
 
       autoDayNightBalance: true,
-      dayIntensityScale: 0.32,
+      dayIntensityScale: 0.62,
       nightIntensityScale: 1.55,
       dayNightCurve: 1.15,
-      indoorNightBoost: 0.45,
 
       indoorThreshold: 0.5,
       wallClipRadiusScale: 1.0,
@@ -163,7 +196,7 @@ export class CandleFlamesEffectV2 {
         },
         {
           name: 'dayNight',
-          label: 'Day / Night',
+          label: 'Day / Night (Flames)',
           type: 'folder',
           expanded: false,
           parameters: [
@@ -171,21 +204,58 @@ export class CandleFlamesEffectV2 {
             'dayIntensityScale',
             'nightIntensityScale',
             'dayNightCurve',
-            'indoorNightBoost',
           ],
         },
         {
           name: 'glow',
-          label: 'Glow',
+          label: 'Glow (Gameplay Light)',
           type: 'folder',
           expanded: false,
           parameters: [
             'glowEnabled',
-            'glowIntensity',
-            'glowWarmth',
-            'glowDarknessCancel',
-            'glowDarknessNightBoost',
             'glowFollowLightIntensity',
+            'glowDayIntensityScale',
+            'glowNightIntensityScale',
+            'glowDarknessNightBoost',
+            'glowBucketSizePx',
+            'glowMaxBuckets',
+            'wallClipEnabled',
+            'wallClipRadiusScale',
+          ],
+        },
+        {
+          name: 'glow-indoor',
+          label: 'Glow — Indoor Balance',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'glowIndoorIntensityScale',
+            'glowIndoorCancelScale',
+            'glowIndoorRadiusScale',
+            'glowIndoorNightBoost',
+          ],
+        },
+        {
+          name: 'glow-outdoor',
+          label: 'Glow — Outdoor Balance',
+          type: 'folder',
+          expanded: true,
+          parameters: [
+            'glowOutdoorIntensityScale',
+            'glowOutdoorCancelScale',
+            'glowOutdoorRadiusScale',
+            'glowOutdoorNightBoost',
+          ],
+        },
+        {
+          name: 'glow-day',
+          label: 'Glow — Day Pool',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'glowWarmth',
+            'glowIntensity',
+            'glowDarknessCancel',
             'glowFlickerStrength',
             'glowFlickerSpeed',
             'glowFlickerStrengthJitter',
@@ -194,11 +264,26 @@ export class CandleFlamesEffectV2 {
             'glowInnerRadiusScale',
             'glowFalloffExponent',
             'glowEdgeSoftness',
-            'glowBucketSizePx',
-            'glowMaxBuckets',
-            'wallClipEnabled',
-            'wallClipRadiusScale'
-          ]
+          ],
+        },
+        {
+          name: 'glow-night',
+          label: 'Glow — Night Pool',
+          type: 'folder',
+          expanded: true,
+          parameters: [
+            'glowNightWarmth',
+            'glowNightIntensity',
+            'glowNightDarknessCancel',
+            'glowNightFlickerStrength',
+            'glowNightFlickerSpeed',
+            'glowNightFlickerStrengthJitter',
+            'glowNightFlickerSpeedJitter',
+            'glowNightRadiusPx',
+            'glowNightInnerRadiusScale',
+            'glowNightFalloffExponent',
+            'glowNightEdgeSoftness',
+          ],
         }
       ],
       parameters: {
@@ -251,16 +336,16 @@ export class CandleFlamesEffectV2 {
           type: 'boolean',
           default: true,
           label: 'Auto Day/Night',
-          tooltip: 'Scales flame + glow with scene darkness so candles stay subtle by day and readable at night after Color Correction.',
+          tooltip: 'Scales flame sprites with scene darkness. Gameplay glow uses Glow (Gameplay Light) day/night scales.',
         },
         dayIntensityScale: {
           type: 'slider',
           min: 0,
           max: 1.5,
           step: 0.01,
-          default: 0.32,
+          default: 0.62,
           label: 'Day Scale',
-          tooltip: 'Multiplier at full daylight (master darkness ≈ 0).',
+          tooltip: 'Flame sprite strength at full daylight (master darkness ≈ 0).',
         },
         nightIntensityScale: {
           type: 'slider',
@@ -269,7 +354,7 @@ export class CandleFlamesEffectV2 {
           step: 0.01,
           default: 1.55,
           label: 'Night Scale',
-          tooltip: 'Multiplier at full night (master darkness ≈ 1).',
+          tooltip: 'Flame sprite multiplier at full night (master darkness ≈ 1).',
         },
         dayNightCurve: {
           type: 'slider',
@@ -278,51 +363,127 @@ export class CandleFlamesEffectV2 {
           step: 0.05,
           default: 1.15,
           label: 'Darkness Curve',
-          tooltip: 'Above 1 = candles stay dim longer into dusk; below 1 = ramp up earlier.',
-        },
-        indoorNightBoost: {
-          type: 'slider',
-          min: 0,
-          max: 2.5,
-          step: 0.01,
-          default: 0.45,
-          label: 'Indoor Night Boost',
-          tooltip: 'Extra glow indoors at night (roof mask). Helps when CC interior grades pull rooms darker than the candle HDR pass.',
+          tooltip: 'Above 1 = flame sprites stay dim longer into dusk; below 1 = ramp up earlier.',
         },
 
         glowEnabled: { type: 'boolean', default: true, label: 'Enabled' },
-        glowIntensity: { type: 'slider', min: 0, max: 2.5, step: 0.01, default: 0.42, label: 'Intensity' },
         glowWarmth: {
-          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 1.0, label: 'Color Warmth',
-          tooltip: 'Blends glow from neutral white (0) to deep candle amber (1). Warmth tints the direct light pool as well as surface coloration.',
+          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 1.0, label: 'Pool Warmth',
+          tooltip: 'Daylight pool hue at full day. Blends toward Glow — Night Pool at darkness.',
+        },
+        glowIntensity: {
+          type: 'slider', min: 0, max: 2.5, step: 0.01, default: 0.42, label: 'Pool Intensity',
+          tooltip: 'Day flicker/intensity at full daylight.',
         },
         glowDarknessCancel: {
-          type: 'slider', min: 0, max: 8, step: 0.1, default: 3.0, label: 'Darkness Cancel',
-          tooltip: 'HDR punch into the light buffer (alpha). Higher = candles erase Foundry darkness and shadows more aggressively. Matches torch Point light gain behaviour.',
+          type: 'slider', min: 0, max: 8, step: 0.1, default: 3.0, label: 'Darkness Cancel (HDR)',
+          tooltip: 'Day HDR punch into the light buffer. Night value is in Glow — Night Pool.',
         },
         glowDarknessNightBoost: {
           type: 'slider', min: 1, max: 4, step: 0.05, default: 2.0, label: 'Night Cancel Boost',
-          tooltip: 'Extra darkness-cancel strength at full night (master darkness ≈ 1).',
+          tooltip: 'Extra darkness-cancel strength at full scene night.',
         },
         glowFollowLightIntensity: {
           type: 'boolean', default: true, label: 'Follow Point Light Gain',
           tooltip: 'Multiply cancel strength by Lighting → Point light gain so candle pools track torch brightness.',
         },
+        glowDayIntensityScale: {
+          type: 'slider', min: 0, max: 2, step: 0.01, default: 0.62, label: 'Day Pool Scale',
+          tooltip: 'Gameplay-light pool strength at full daylight. Candles always emit; night adds darkness-cancel on top.',
+        },
+        glowNightIntensityScale: {
+          type: 'slider', min: 0, max: 3, step: 0.01, default: 1.55, label: 'Night Pool Scale',
+          tooltip: 'Brightness multiplier at full night (master darkness ≈ 1). Does not change glow hue.',
+        },
+        glowIndoorIntensityScale: {
+          type: 'slider', min: 0, max: 4, step: 0.01, default: 0.78, label: 'Intensity Scale',
+          tooltip: 'Multiplies day/night pool intensity under roof. Outdoor candles use Glow — Outdoor Balance.',
+        },
+        glowIndoorCancelScale: {
+          type: 'slider', min: 0, max: 4, step: 0.01, default: 0.75, label: 'Cancel Scale',
+          tooltip: 'HDR darkness-cancel multiplier for indoor pools (after day/night cancel blend).',
+        },
+        glowIndoorRadiusScale: {
+          type: 'slider', min: 0.25, max: 3, step: 0.01, default: 0.92, label: 'Radius Scale',
+          tooltip: 'Indoor pool reach multiplier (after day/night radius blend).',
+        },
+        glowIndoorNightBoost: {
+          type: 'slider', min: 0, max: 4, step: 0.01, default: 0.30, label: 'Night Boost',
+          tooltip: 'Extra indoor glow at full darkness. Usually lower than outdoor — interior CC already lifts local light.',
+        },
+        glowOutdoorIntensityScale: {
+          type: 'slider', min: 0, max: 4, step: 0.01, default: 2.0, label: 'Intensity Scale',
+          tooltip: 'Multiplies day/night pool intensity in open air. Push high for torches vs midnight ToD.',
+        },
+        glowOutdoorCancelScale: {
+          type: 'slider', min: 0, max: 4, step: 0.01, default: 1.85, label: 'Cancel Scale',
+          tooltip: 'HDR darkness-cancel multiplier for outdoor pools. Primary control for bright outdoor candle rings.',
+        },
+        glowOutdoorRadiusScale: {
+          type: 'slider', min: 0.25, max: 3, step: 0.01, default: 1.28, label: 'Radius Scale',
+          tooltip: 'Outdoor pool reach multiplier — wider lit area under open sky.',
+        },
+        glowOutdoorNightBoost: {
+          type: 'slider', min: 0, max: 4, step: 0.01, default: 1.15, label: 'Night Boost',
+          tooltip: 'Extra outdoor glow at full darkness, on top of intensity/cancel scales.',
+        },
+        glowNightWarmth: {
+          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.95, label: 'Pool Warmth',
+          tooltip: 'Night-only pool hue. Blends toward this at full darkness; day warmth is in Glow — Day Pool.',
+        },
+        glowNightIntensity: {
+          type: 'slider', min: 0, max: 2.5, step: 0.01, default: 0.58, label: 'Pool Intensity',
+          tooltip: 'Night flicker/intensity scale at full darkness.',
+        },
+        glowNightDarknessCancel: {
+          type: 'slider', min: 0, max: 8, step: 0.1, default: 4.8, label: 'Darkness Cancel (HDR)',
+          tooltip: 'Night HDR punch into the light buffer. Usually higher than the day value for midnight scenes.',
+        },
+        glowNightFlickerStrength: {
+          type: 'slider', min: 0, max: 10.0, step: 0.05, default: 2.6, label: 'Flicker Strength',
+        },
+        glowNightFlickerSpeed: {
+          type: 'slider', min: 0, max: 25.0, step: 0.1, default: 6.5, label: 'Flicker Speed',
+        },
+        glowNightFlickerStrengthJitter: {
+          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.78, label: 'Flicker Strength Jitter',
+        },
+        glowNightFlickerSpeedJitter: {
+          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.68, label: 'Flicker Speed Jitter',
+        },
+        glowNightRadiusPx: {
+          type: 'slider', min: 8, max: 1200, step: 2, default: 210.0, label: 'Pool Radius (px)',
+          tooltip: 'Night pool reach at full darkness. Blends from day radius as scene darkens.',
+        },
+        glowNightInnerRadiusScale: {
+          type: 'slider', min: 0.05, max: 1.0, step: 0.01, default: 0.22, label: 'Hot Core Scale',
+        },
+        glowNightFalloffExponent: {
+          type: 'slider', min: 0.5, max: 5.0, step: 0.05, default: 1.35, label: 'Falloff Exponent',
+          tooltip: 'Night core tightness. Lower = wider soft midnight pool.',
+        },
+        glowNightEdgeSoftness: {
+          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.52, label: 'Pool Edge Softness',
+          tooltip: 'Night rim feather in the HDR light buffer.',
+        },
         glowFlickerStrength: { type: 'slider', min: 0, max: 10.0, step: 0.05, default: 2.25, label: 'Flicker Strength' },
         glowFlickerSpeed: { type: 'slider', min: 0, max: 25.0, step: 0.1, default: 6.0, label: 'Flicker Speed' },
         glowFlickerStrengthJitter: { type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.75, label: 'Flicker Strength Jitter' },
         glowFlickerSpeedJitter: { type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.65, label: 'Flicker Speed Jitter' },
-        glowRadiusPx: { type: 'slider', min: 8, max: 1200, step: 2, default: 172.0, label: 'Radius (px)' },
-        glowInnerRadiusScale: { type: 'slider', min: 0.05, max: 1.0, step: 0.01, default: 0.2, label: 'Inner Radius Scale' },
+        glowRadiusPx: { type: 'slider', min: 8, max: 1200, step: 2, default: 172.0, label: 'Pool Radius (px)' },
+        glowInnerRadiusScale: { type: 'slider', min: 0.05, max: 1.0, step: 0.01, default: 0.2, label: 'Hot Core Scale' },
         glowFalloffExponent: {
           type: 'slider', min: 0.5, max: 5.0, step: 0.05, default: 2.0, label: 'Falloff Exponent',
           tooltip: 'Core tightness for unified radial falloff. Lower = wider soft pool; higher ≈ inverse-square hot core.',
         },
         glowEdgeSoftness: {
-          type: 'slider', min: 0, max: 0.75, step: 0.01, default: 0.28, label: 'Edge Softness',
+          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.28, label: 'Pool Edge Softness',
           tooltip: 'Feathers the glow rim in the HDR light buffer. Drives shader attenuation + rim geometry (higher = wider, softer pool).',
         },
-        glowBucketSizePx: { type: 'slider', min: 64, max: 2048, step: 16, default: 384.0, label: 'Bucket Size (px)' },
+        glowBucketSizePx: {
+          type: 'slider', min: 64, max: 2048, step: 16, default: 384.0, label: 'Bucket Size (px)',
+          tooltip: 'Spatial cluster size for glow pools. Lower values improve wall clipping; large buckets merge distant candles and can bleed through walls.',
+        },
         glowMaxBuckets: { type: 'slider', min: 1, max: 512, step: 1, default: 256, label: 'Max Buckets' },
         wallClipEnabled: { type: 'boolean', default: true, label: 'Wall Clip' },
         wallClipRadiusScale: { type: 'slider', min: 0.1, max: 2.0, step: 0.01, default: 1.0, label: 'Clip Radius Scale' }
@@ -424,48 +585,30 @@ export class CandleFlamesEffectV2 {
       return;
     }
 
+    if (paramId.startsWith('glow') || paramId === 'wallClipEnabled' || paramId === 'wallClipRadiusScale') {
+      this._applyGlowParamChange(paramId);
+    }
+  }
+
+  _applyGlowParamChange(paramId) {
     if (paramId === 'glowEnabled') {
-      if (!this.params.glowEnabled) {
-        this._clearGlowBuckets();
-      } else {
-        this._rebuildFromMapPoints();
-      }
+      if (!this.params.glowEnabled) this._clearGlowBuckets();
+      else this._rebuildFromMapPoints();
+      this._applyVisibility();
       return;
     }
 
-    if (paramId === 'glowIntensity' || paramId === 'glowDarknessCancel' || paramId === 'glowDarknessNightBoost' || paramId === 'glowFollowLightIntensity') {
+    if (paramId === 'glowFalloffExponent' || paramId === 'glowNightFalloffExponent') {
+      this._applyLiveGlowMeshParams();
       return;
     }
 
-    if (paramId === 'glowWarmth') {
-      const color = this._computeGlowColor();
-      for (const entry of this._glowBuckets.values()) {
-        entry?.baseColor?.setRGB?.(color.r, color.g, color.b);
-        entry?.lightMesh?.setAchromaticRgb?.(false);
-      }
-      for (const cluster of this._clusters) {
-        if (cluster) cluster.color = color;
-      }
+    if (paramId === 'glowEdgeSoftness' || paramId === 'glowNightEdgeSoftness') {
+      this._applyLiveGlowMeshParams();
       return;
     }
 
-    if (paramId === 'glowFlickerStrength' || paramId === 'glowFlickerSpeed' || paramId === 'glowFlickerStrengthJitter' || paramId === 'glowFlickerSpeedJitter') {
-      return;
-    }
-
-    if (paramId === 'glowFalloffExponent') {
-      const exp = Math.max(0.5, Number(this.params.glowFalloffExponent) || 2.0);
-      for (const entry of this._glowBuckets.values()) {
-        entry?.lightMesh?.setFalloffExponent?.(exp);
-      }
-      return;
-    }
-
-    if (paramId === 'glowEdgeSoftness') {
-      const soft = Math.max(0, Math.min(0.75, Number(this.params.glowEdgeSoftness) || 0));
-      for (const entry of this._glowBuckets.values()) {
-        entry?.lightMesh?.setEdgeSoftness?.(soft);
-      }
+    if (paramId === 'glowWarmth' || paramId === 'glowNightWarmth') {
       return;
     }
 
@@ -474,15 +617,13 @@ export class CandleFlamesEffectV2 {
       return;
     }
 
-    if (
-      paramId === 'glowBucketSizePx' ||
-      paramId === 'glowMaxBuckets' ||
-      paramId === 'glowRadiusPx' ||
-      paramId === 'glowInnerRadiusScale' ||
-      paramId === 'wallClipRadiusScale'
-    ) {
+    if (paramId === 'glowBucketSizePx' || paramId === 'glowMaxBuckets') {
       this._rebuildFromMapPoints();
       return;
+    }
+
+    if (GLOW_REBUILD_PARAMS.has(paramId)) {
+      this._rebuildFromMapPoints();
     }
   }
 
@@ -810,27 +951,152 @@ export class CandleFlamesEffectV2 {
   }
 
   /**
-   * Darkness-driven scale for flames + glow (single static sliders cannot track CC interior grades).
+   * Darkness-driven scale for flame sprites only.
    * @returns {number}
    */
   _computeDayNightIntensityMul() {
     if (!this.params.autoDayNightBalance) return 1.0;
 
     const darkness = clamp01(LightingDirector.get().masterDarkness);
-    const day = Math.max(0, Number(this.params.dayIntensityScale) || 0);
-    const night = Math.max(0, Number(this.params.nightIntensityScale) || 0);
+    const dayFloor = 0.55;
+    const day = Math.max(dayFloor, Math.max(0, Number(this.params.dayIntensityScale) || 0));
+    const night = Math.max(day, Math.max(0, Number(this.params.nightIntensityScale) || 0));
     const curve = Math.max(0.05, Number(this.params.dayNightCurve) || 1);
     const t = Math.pow(darkness, curve);
     return day + (night - day) * t;
   }
 
+  /** @private @param {number} [darkness] */
+  _blendGlowDayNightParam(dayKey, nightKey, fallback = 0, darkness = null) {
+    const t = clamp01(Number.isFinite(Number(darkness))
+      ? Number(darkness)
+      : LightingDirector.get().masterDarkness);
+    const dayRaw = Number(this.params[dayKey]);
+    const day = Number.isFinite(dayRaw) ? dayRaw : fallback;
+    const nightRaw = Number(this.params[nightKey]);
+    const night = Number.isFinite(nightRaw) ? nightRaw : day;
+    return day + (night - day) * t;
+  }
+
+  /** @private @param {number} outdoor01 */
+  _blendGlowIndoorOutdoorParam(indoorKey, outdoorKey, fallback = 1.0, outdoor01 = 0.5) {
+    const o = clamp01(Number(outdoor01) || 0);
+    const indoorRaw = Number(this.params[indoorKey]);
+    const indoor = Number.isFinite(indoorRaw) ? indoorRaw : fallback;
+    const outdoorRaw = Number(this.params[outdoorKey]);
+    const outdoor = Number.isFinite(outdoorRaw) ? outdoorRaw : fallback;
+    return indoor + (outdoor - indoor) * o;
+  }
+
+  /**
+   * Effective gameplay-light pool params blended by master darkness (day → night)
+   * and roof mask (indoor → outdoor).
+   * @param {number} [darkness]
+   * @param {number|null} [outdoor01]
+   * @returns {object}
+   * @private
+   */
+  _resolveGlowParams(darkness = LightingDirector.get().masterDarkness, outdoor01 = null) {
+    const t = clamp01(Number(darkness) || 0);
+    const base = {
+      t,
+      warmth: clamp01(this._blendGlowDayNightParam('glowWarmth', 'glowNightWarmth', 1.0, t)),
+      intensity: Math.max(0, this._blendGlowDayNightParam('glowIntensity', 'glowNightIntensity', 0.42, t)),
+      cancel: Math.max(0, this._blendGlowDayNightParam('glowDarknessCancel', 'glowNightDarknessCancel', 3.0, t)),
+      radiusPx: Math.max(32, this._blendGlowDayNightParam('glowRadiusPx', 'glowNightRadiusPx', 172.0, t)),
+      innerScale: Math.max(0.05, Math.min(1, this._blendGlowDayNightParam(
+        'glowInnerRadiusScale',
+        'glowNightInnerRadiusScale',
+        0.2,
+        t,
+      ))),
+      falloffExponent: Math.min(5.0, Math.max(0.5, this._blendGlowDayNightParam(
+        'glowFalloffExponent',
+        'glowNightFalloffExponent',
+        2.0,
+        t,
+      ))),
+      edgeSoftness: Math.max(0, Math.min(1.0, this._blendGlowDayNightParam(
+        'glowEdgeSoftness',
+        'glowNightEdgeSoftness',
+        0.28,
+        t,
+      ))),
+      flickerStrength: Math.max(0, this._blendGlowDayNightParam(
+        'glowFlickerStrength',
+        'glowNightFlickerStrength',
+        2.25,
+        t,
+      )),
+      flickerSpeed: Math.max(0, this._blendGlowDayNightParam('glowFlickerSpeed', 'glowNightFlickerSpeed', 6.0, t)),
+      flickerStrengthJitter: clamp01(this._blendGlowDayNightParam(
+        'glowFlickerStrengthJitter',
+        'glowNightFlickerStrengthJitter',
+        0.75,
+        t,
+      )),
+      flickerSpeedJitter: clamp01(this._blendGlowDayNightParam(
+        'glowFlickerSpeedJitter',
+        'glowNightFlickerSpeedJitter',
+        0.65,
+        t,
+      )),
+    };
+
+    if (outdoor01 == null || !Number.isFinite(Number(outdoor01))) return base;
+
+    const intensityScale = Math.max(0, this._blendGlowIndoorOutdoorParam(
+      'glowIndoorIntensityScale',
+      'glowOutdoorIntensityScale',
+      1.0,
+      outdoor01,
+    ));
+    const cancelScale = Math.max(0, this._blendGlowIndoorOutdoorParam(
+      'glowIndoorCancelScale',
+      'glowOutdoorCancelScale',
+      1.0,
+      outdoor01,
+    ));
+    const radiusScale = Math.max(0.25, this._blendGlowIndoorOutdoorParam(
+      'glowIndoorRadiusScale',
+      'glowOutdoorRadiusScale',
+      1.0,
+      outdoor01,
+    ));
+
+    return {
+      ...base,
+      intensity: base.intensity * intensityScale,
+      cancel: base.cancel * cancelScale,
+      radiusPx: Math.max(32, base.radiusPx * radiusScale),
+    };
+  }
+
+  /** Push current darkness-blended falloff/edge to all glow meshes (UI tweak). @private */
+  _applyLiveGlowMeshParams() {
+    for (const entry of this._glowBuckets.values()) {
+      const glow = this._resolveGlowParams(undefined, entry?.outdoor ?? 1.0);
+      entry?.lightMesh?.setFalloffExponent?.(glow.falloffExponent);
+      entry?.lightMesh?.setEdgeSoftness?.(glow.edgeSoftness);
+    }
+  }
+
+  _computeGlowDayNightIntensityMul() {
+    const darkness = clamp01(LightingDirector.get().masterDarkness);
+    const dayFloor = 0.55;
+    const day = Math.max(dayFloor, Math.max(0, Number(this.params.glowDayIntensityScale) || 0));
+    const night = Math.max(day, Math.max(0, Number(this.params.glowNightIntensityScale) || 0));
+    return day + (night - day) * darkness;
+  }
+
   /**
    * HDR emission gain for glow buckets (compose alpha → darkness punch + direct light).
    * @param {number} visualMul - Per-bucket flicker / intensity / day-night colour scale.
+   * @param {number} [cancelOverride]
    * @returns {number}
    */
-  _computeGlowEmissionGain(visualMul) {
-    const cancel = Math.max(0, Number(this.params.glowDarknessCancel) || 0);
+  _computeGlowEmissionGain(visualMul, cancelOverride = null) {
+    const cancel = Math.max(0, Number(cancelOverride ?? this.params.glowDarknessCancel) || 0);
     if (cancel <= 0) return 0;
 
     let lightMul = 1.0;
@@ -858,13 +1124,22 @@ export class CandleFlamesEffectV2 {
   }
 
   /** Extra glow indoors at night (uses per-bucket roof mask). */
-  _computeIndoorNightGlowBoost(outdoor01) {
-    if (!this.params.autoDayNightBalance) return 1.0;
-    const boost = Math.max(0, Number(this.params.indoorNightBoost) || 0);
+  _computeGlowIndoorNightBoost(outdoor01) {
+    const legacy = Number(this.params.indoorNightBoost);
+    const boost = Math.max(0, Number(this.params.glowIndoorNightBoost ?? legacy) || 0);
     if (boost <= 0) return 1.0;
     const darkness = clamp01(LightingDirector.get().masterDarkness);
     const indoor = 1.0 - clamp01(outdoor01);
     return 1.0 + boost * indoor * darkness;
+  }
+
+  /** Extra glow outdoors at night (uses per-bucket roof mask). */
+  _computeGlowOutdoorNightBoost(outdoor01) {
+    const boost = Math.max(0, Number(this.params.glowOutdoorNightBoost) || 0);
+    if (boost <= 0) return 1.0;
+    const darkness = clamp01(LightingDirector.get().masterDarkness);
+    const outdoor = clamp01(outdoor01);
+    return 1.0 + boost * outdoor * darkness;
   }
 
   /** Clip glow to physical wall segments (blocks light-pass-through / window walls). */
@@ -1287,7 +1562,14 @@ export class CandleFlamesEffectV2 {
 
     const take = Math.min(list.length, maxBuckets);
 
-    const baseGlowColor = this._computeGlowColor();
+    const dayRadius = Math.max(32, Number(this.params.glowRadiusPx) || 172);
+    const nightRadius = Math.max(32, Number(this.params.glowNightRadiusPx) || dayRadius);
+    const indoorRadiusScale = Math.max(0.25, Number(this.params.glowIndoorRadiusScale) || 1.0);
+    const outdoorRadiusScale = Math.max(0.25, Number(this.params.glowOutdoorRadiusScale) || 1.0);
+    const clipRadiusScale = Math.max(0.1, Number(this.params.wallClipRadiusScale) || 1.0);
+    const clipBaseRadius = Math.max(dayRadius, nightRadius)
+      * Math.max(indoorRadiusScale, outdoorRadiusScale)
+      * clipRadiusScale;
 
     for (let i = 0; i < take; i++) {
       const b = list[i];
@@ -1297,8 +1579,8 @@ export class CandleFlamesEffectV2 {
       const phase = this._hash2(cxWorld, cyWorld);
 
       const intensity = b.sumI / Math.max(1, b.count);
-
-      const radiusPx = Math.max(32, this.params.glowRadiusPx * this.params.wallClipRadiusScale);
+      const glow = this._resolveGlowParams(undefined, avgOutdoor);
+      const radiusPx = Math.max(32, glow.radiusPx * clipRadiusScale);
 
       const foundryCenter = Coordinates.toFoundry(cxWorld, cyWorld);
 
@@ -1309,10 +1591,11 @@ export class CandleFlamesEffectV2 {
         cxFoundry: foundryCenter.x,
         cyFoundry: foundryCenter.y,
         radiusPx,
+        clipRadiusPx: clipBaseRadius,
         intensity,
         phase,
         outdoor: avgOutdoor,
-        color: baseGlowColor
+        color: this._computeGlowColor(glow.warmth),
       });
     }
 
@@ -1364,6 +1647,29 @@ export class CandleFlamesEffectV2 {
     }
   }
 
+  /** Refresh glow pool outdoor classification + meshes after _Outdoors CPU decode updates. */
+  onOutdoorsMaskUpdated() {
+    if (!this.params.glowEnabled || !this._clusters?.length) return;
+    const d = canvas?.dimensions;
+    const sceneX = d?.sceneX ?? 0;
+    const sceneY = d?.sceneY ?? 0;
+    const sceneW = Math.max(1, d?.sceneWidth ?? d?.width ?? 1);
+    const sceneH = Math.max(1, d?.sceneHeight ?? d?.height ?? 1);
+    for (const c of this._clusters) {
+      if (!c) continue;
+      const u = Math.max(0, Math.min(1, (c.cxFoundry - sceneX) / sceneW));
+      const v = Math.max(0, Math.min(1, (c.cyFoundry - sceneY) / sceneH));
+      let outdoor = 1.0;
+      try {
+        outdoor = weatherController.getRoofMaskIntensity(u, v);
+      } catch (_) {
+        outdoor = 1.0;
+      }
+      c.outdoor = Math.max(0, Math.min(1, Number(outdoor) || 0));
+    }
+    this._rebuildGlowMeshes();
+  }
+
   _rebuildGlowMeshes() {
     if (!this.params.glowEnabled) {
       this._clearGlowBuckets();
@@ -1396,16 +1702,19 @@ export class CandleFlamesEffectV2 {
     for (const c of this._clusters) {
       if (!c) continue;
 
+      const outdoor = Math.max(0, Math.min(1, Number(c.outdoor) ?? 1));
+      const glow = this._resolveGlowParams(undefined, outdoor);
       const cxFoundry = c.cxFoundry;
       const cyFoundry = c.cyFoundry;
-      const radiusPx = c.radiusPx;
+      const clipRadiusPx = Math.max(32, Number(c.clipRadiusPx) || c.radiusPx || glow.radiusPx);
+      const radiusPx = Math.max(32, Number(c.radiusPx) || glow.radiusPx);
 
       let foundryPoly = null;
       if (this.params.wallClipEnabled) {
         try {
           foundryPoly = this._visionComputer.compute(
             { x: cxFoundry, y: cyFoundry },
-            radiusPx,
+            clipRadiusPx,
             walls,
             sceneBounds,
             wallClipOptions
@@ -1425,20 +1734,21 @@ export class CandleFlamesEffectV2 {
           worldPoints.push(wp.x, wp.y);
         }
       } else if (this.params.wallClipEnabled) {
-        // Avoid circle fallback when wall clip was requested — prevents bleed-through.
-        continue;
+        if (outdoor < 0.45) {
+          // Indoor: no circle fallback — prevents wall bleed-through.
+          continue;
+        }
+        // Outdoor: radial pool when wall clip fails (open yard / partial geometry).
       }
 
-      const innerRadiusPx = Math.max(1, radiusPx * this.params.glowInnerRadiusScale);
-      const falloffExponent = Math.max(0.5, Number(this.params.glowFalloffExponent) || 2.0);
-      const edgeSoftness = Math.max(0, Math.min(0.75, Number(this.params.glowEdgeSoftness) || 0));
+      const innerRadiusPx = Math.max(1, radiusPx * glow.innerScale);
 
       const lm = new LightMesh(centerWorld, radiusPx, c.color, {
         innerRadiusPx,
         worldPoints,
-        falloffExponent,
+        falloffExponent: glow.falloffExponent,
         achromaticRgb: false,
-        edgeSoftness,
+        edgeSoftness: glow.edgeSoftness,
       });
 
       lm.setAchromaticRgb?.(false);
@@ -1469,11 +1779,7 @@ export class CandleFlamesEffectV2 {
     if (!THREE) return;
 
     const t = timeInfo.elapsed;
-
-    const strength = Math.max(0.0, Number(this.params.glowFlickerStrength) || 0.0);
-    const speed = Math.max(0.0, Number(this.params.glowFlickerSpeed) || 0.0);
-    const speedJ = Math.max(0.0, Math.min(1.0, Number(this.params.glowFlickerSpeedJitter) || 0.0));
-    const strengthJ = Math.max(0.0, Math.min(1.0, Number(this.params.glowFlickerStrengthJitter) || 0.0));
+    const dayNightMul = this._computeGlowDayNightIntensityMul();
 
     for (const entry of this._glowBuckets.values()) {
       const lm = entry?.lightMesh;
@@ -1481,10 +1787,23 @@ export class CandleFlamesEffectV2 {
       if (!u?.uColor?.value) continue;
 
       const phase = entry.phase || 0;
-      const outdoor = entry.outdoor || 1.0;
+      const outdoor = entry.outdoor ?? 1.0;
+      const glow = this._resolveGlowParams(undefined, outdoor);
+      const strength = glow.flickerStrength;
+      const speed = glow.flickerSpeed;
+      const speedJ = glow.flickerSpeedJitter;
+      const strengthJ = glow.flickerStrengthJitter;
+      const clipScale = Math.max(0.1, Number(this.params.wallClipRadiusScale) || 1.0);
+      const radiusPx = Math.max(32, glow.radiusPx * clipScale);
+      const innerRadiusPx = Math.max(1, radiusPx * glow.innerScale);
+
+      lm.setOuterRadiusPx?.(radiusPx);
+      lm.setInnerRadiusPx?.(innerRadiusPx);
+      lm.setFalloffExponent?.(glow.falloffExponent);
+      lm.setEdgeSoftness?.(glow.edgeSoftness);
 
       // Stable per-bucket jitter so nearby candles can still share a glow bucket,
-      // but buckets wonΓÇÖt flicker in perfect sync.
+      // but buckets won't flicker in perfect sync.
       const r1 = Math.sin((phase + 0.17) * 1000.0) * 43758.5453;
       const r2 = Math.sin((phase + 0.61) * 1000.0) * 24631.1337;
       const rand01 = r1 - Math.floor(r1);
@@ -1505,19 +1824,24 @@ export class CandleFlamesEffectV2 {
       const chaos = (0.55 * n1 + 0.30 * n2 + 0.15 * n3);
       const flicker = Math.max(0.05, 1.0 + (baseAmp * strength * Math.max(0.05, strengthVar)) * chaos);
 
-      const dayNightMul = this._computeDayNightIntensityMul();
-      const indoorMul = this._computeIndoorNightGlowBoost(outdoor);
+      const indoorMul = this._computeGlowIndoorNightBoost(outdoor);
+      const outdoorMul = this._computeGlowOutdoorNightBoost(outdoor);
       const visualMul = Math.max(
         0.0,
-        this.params.glowIntensity * Math.max(0.25, entry.intensity) * flicker * dayNightMul * indoorMul
+        glow.intensity
+          * Math.max(0.25, entry.intensity)
+          * flicker
+          * dayNightMul
+          * indoorMul
+          * outdoorMul
       );
 
-      const glowColor = this._computeGlowColor();
+      const glowColor = this._computeGlowColor(glow.warmth);
       // Hue only in uColor — intensity/flicker scales uEmissionGain (matches point-light buffer model).
       u.uColor.value.setRGB(glowColor.r, glowColor.g, glowColor.b);
       lm.setAchromaticRgb?.(false);
 
-      const emissionGain = this._computeGlowEmissionGain(visualMul);
+      const emissionGain = this._computeGlowEmissionGain(visualMul, glow.cancel);
       if (typeof lm.setEmissionGain === 'function') {
         lm.setEmissionGain(emissionGain);
       } else if (lm.material?.uniforms?.uEmissionGain) {

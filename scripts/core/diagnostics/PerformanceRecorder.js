@@ -21,6 +21,8 @@
  */
 
 import { createLogger } from '../log.js';
+import { buildPerformanceInsights, formatInsightsMarkdown } from './performance-recorder-insights.js';
+import { analyzeStutters } from './performance-recorder-stutters.js';
 
 const log = createLogger('PerfRecorder');
 
@@ -30,7 +32,13 @@ const DEFAULT_MAX_FRAMES = 600;
 /** Pool size for WebGL2 timer-query handles. */
 const DEFAULT_QUERY_POOL_SIZE = 512;
 
-/** Max age (frames) a pending GPU query may live before forced recycling. */
+/** Max long-task entries retained per session. */
+const MAX_LONG_TASKS = 100;
+
+/** Max compositor spike detail records (ring buffer). */
+const MAX_SPIKE_DETAILS = 64;
+
+/** Max frames a GPU timer query may remain pending before it is discarded. */
 const MAX_PENDING_QUERY_AGE = 10;
 
 /**
@@ -197,6 +205,21 @@ export class PerformanceRecorder {
     /** @type {Map<string, number>} */
     this._skipReasonHistogram = new Map();
 
+    /** @type {Map<string, { effect: string, phase: string, cpuMs: number }>} Per-frame effect CPU scratch. */
+    this._currentFrameEffects = new Map();
+
+    /** @type {Array<{ seq: number, tMs: number, frameTimeMs: number, topEffects: object[] }>} */
+    this._spikeFrameDetails = [];
+    /** @type {number} */
+    this._spikeWriteIndex = 0;
+
+    /** @type {Array<{ startMs: number, endMs: number, durationMs: number, name: string|null }>} */
+    this._longTasks = [];
+    /** @type {PerformanceObserver|null} */
+    this._longTaskObserver = null;
+    /** @type {boolean} */
+    this._longTaskObserverWarned = false;
+
     /** @type {number} Performance-now ms at session start. */
     this._startedAtMs = 0;
     /** @type {number} Date.now() at session start, for export metadata. */
@@ -249,6 +272,18 @@ export class PerformanceRecorder {
     this._frameBeginTriangles = 0;
     this._frameBeginLines = 0;
     this._frameBeginPoints = 0;
+
+    /** Per-frame draw stats summed from render-phase effect spans (Three autoReset-safe). */
+    this._frameDrawAccum = 0;
+    this._frameTriAccum = 0;
+    this._frameLinesAccum = 0;
+    this._framePointsAccum = 0;
+
+    /** @type {string|null} Cached module version for export context. */
+    this._moduleVersion = null;
+    try {
+      this._moduleVersion = game?.modules?.get?.('map-shine-advanced')?.version ?? null;
+    } catch (_) {}
 
     this._detectGpuCapability();
   }
@@ -340,6 +375,8 @@ export class PerformanceRecorder {
 
     this.enabled = true;
 
+    this._startLongTaskObserver();
+
     // Mirror the existing pass profiler flag so __v2PassTimings is populated
     // for cross-reference in the export.
     try {
@@ -365,6 +402,8 @@ export class PerformanceRecorder {
     this._abortAllPendingQueries('sessionStopped');
 
     this._infoEnd = this._snapshotRendererInfo();
+
+    this._stopLongTaskObserver();
 
     this.enabled = false;
 
@@ -401,6 +440,11 @@ export class PerformanceRecorder {
     this._judderTransitions = 0;
     this._lastTickPresented = false;
     this._skipReasonHistogram.clear();
+
+    this._currentFrameEffects.clear();
+    this._spikeFrameDetails.length = 0;
+    this._spikeWriteIndex = 0;
+    this._longTasks.length = 0;
 
     this._abortAllPendingQueries('reset');
 
@@ -443,6 +487,8 @@ export class PerformanceRecorder {
     const targetFps = Number(meta.targetFps) || 0;
     const sinceLastPresentMs = Number(meta.sinceLastPresentMs) || 0;
     const tickMs = now - token;
+    const compositorMs = Number(meta.compositorMs) || 0;
+    const handlerOverheadMs = compositorMs > 0 ? Math.max(0, tickMs - compositorMs) : 0;
 
     if (presented) this._presentedTickCount++;
     else this._skippedTickCount++;
@@ -463,6 +509,8 @@ export class PerformanceRecorder {
       sinceLastPresentMs,
       renderPath: meta.renderPath ?? null,
       continuousReason: meta.continuousReason ?? null,
+      compositorMs: compositorMs > 0 ? compositorMs : undefined,
+      handlerOverheadMs: compositorMs > 0 ? handlerOverheadMs : undefined,
     };
     this._pushTickRecord(record);
     this._totalTickRecords++;
@@ -494,12 +542,18 @@ export class PerformanceRecorder {
 
     this._frameSeq += 1;
     this._frameBeginMs = performance.now();
+    this._frameDrawAccum = 0;
+    this._frameTriAccum = 0;
+    this._frameLinesAccum = 0;
+    this._framePointsAccum = 0;
 
     const info = this.renderer?.info;
     this._frameBeginCalls = info?.render?.calls ?? 0;
     this._frameBeginTriangles = info?.render?.triangles ?? 0;
     this._frameBeginLines = info?.render?.lines ?? 0;
     this._frameBeginPoints = info?.render?.points ?? 0;
+
+    this._currentFrameEffects.clear();
   }
 
   /**
@@ -522,10 +576,20 @@ export class PerformanceRecorder {
     const lines = info?.render?.lines ?? this._frameBeginLines;
     const points = info?.render?.points ?? this._frameBeginPoints;
 
-    const drawCallsFrame = Math.max(0, calls - this._frameBeginCalls);
-    const trianglesFrame = Math.max(0, tris - this._frameBeginTriangles);
-    const linesFrame = Math.max(0, lines - this._frameBeginLines);
-    const pointsFrame = Math.max(0, points - this._frameBeginPoints);
+    // Prefer per-effect span sums — Three.js autoReset zeros renderer.info between
+    // internal render() calls, so a whole-frame delta is usually 0.
+    const drawCallsFrame = this._frameDrawAccum > 0
+      ? this._frameDrawAccum
+      : Math.max(0, calls - this._frameBeginCalls);
+    const trianglesFrame = this._frameTriAccum > 0
+      ? this._frameTriAccum
+      : Math.max(0, tris - this._frameBeginTriangles);
+    const linesFrame = this._frameLinesAccum > 0
+      ? this._frameLinesAccum
+      : Math.max(0, lines - this._frameBeginLines);
+    const pointsFrame = this._framePointsAccum > 0
+      ? this._framePointsAccum
+      : Math.max(0, points - this._frameBeginPoints);
 
     this._drawCallsAccumLast = calls;
     this._trianglesAccumLast = tris;
@@ -553,6 +617,7 @@ export class PerformanceRecorder {
       decimationActive: decimationActive === true,
     };
     this._pushFrameRecord(record);
+    this._pushSpikeFrameDetailIfNeeded(record);
 
     // Pump GPU query results for samples completed since last frame.
     this._pumpPendingQueries();
@@ -570,6 +635,109 @@ export class PerformanceRecorder {
       this._frames[this._frameWriteIndex] = record;
     }
     this._frameWriteIndex = (this._frameWriteIndex + 1) % this.maxFrames;
+  }
+
+  /**
+   * When a compositor frame exceeds the spike threshold, retain top effect spans.
+   * @param {FrameRecord} record
+   * @private
+   */
+  _pushSpikeFrameDetailIfNeeded(record) {
+    const frameTimes = [];
+    for (const f of this._frames) {
+      if (f) frameTimes.push(f.frameTimeMs);
+    }
+    const p95 = percentile(frameTimes.slice(), 0.95);
+    const threshold = Math.max(20, p95 * 1.5);
+    if (record.frameTimeMs < threshold) return;
+
+    const topEffects = [...this._currentFrameEffects.values()]
+      .sort((a, b) => b.cpuMs - a.cpuMs)
+      .slice(0, 5)
+      .map(({ effect, phase, cpuMs }) => ({ effect, phase, cpuMs }));
+
+    /** @type {{ seq: number, tMs: number, frameTimeMs: number, topEffects: object[] }} */
+    const detail = {
+      seq: record.seq,
+      tMs: record.tMs,
+      frameTimeMs: record.frameTimeMs,
+      topEffects,
+    };
+
+    if (this._spikeFrameDetails.length < MAX_SPIKE_DETAILS) {
+      this._spikeFrameDetails.push(detail);
+    } else {
+      this._spikeFrameDetails[this._spikeWriteIndex] = detail;
+    }
+    this._spikeWriteIndex = (this._spikeWriteIndex + 1) % MAX_SPIKE_DETAILS;
+  }
+
+  /**
+   * @returns {{ stutterSummary: object, stutterEvents: object[], longTasks: object[], spikeFrameDetails: object[] }}
+   * @private
+   */
+  _buildStutterPayload() {
+    const frames = this._frames.slice();
+    const ticks = this._tickRecords.slice();
+    /** @type {Map<number, object>} */
+    const spikeDetailsBySeq = new Map();
+    for (const row of this._spikeFrameDetails) {
+      if (row && Number.isFinite(row.seq)) spikeDetailsBySeq.set(row.seq, row);
+    }
+    const analysis = analyzeStutters(frames, ticks, {
+      longTasks: this._longTasks,
+      spikeDetailsBySeq,
+    });
+    return {
+      stutterSummary: analysis.summary,
+      stutterEvents: analysis.events,
+      longTasks: this._longTasks.slice(),
+      spikeFrameDetails: this._spikeFrameDetails.filter(Boolean),
+    };
+  }
+
+  /** @private */
+  _startLongTaskObserver() {
+    if (this._longTaskObserver || typeof PerformanceObserver === 'undefined') return;
+    try {
+      this._longTaskObserver = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          const startMs = entry.startTime;
+          const durationMs = entry.duration;
+          let name = entry.name ?? null;
+          try {
+            const attr = entry.attribution?.[0];
+            if (attr?.name) name = attr.name;
+          } catch (_) {}
+          const row = {
+            startMs,
+            endMs: startMs + durationMs,
+            durationMs,
+            name,
+            tMs: performance.now() - this._startedAtMs,
+          };
+          if (this._longTasks.length < MAX_LONG_TASKS) {
+            this._longTasks.push(row);
+          } else {
+            this._longTasks.shift();
+            this._longTasks.push(row);
+          }
+        }
+      });
+      this._longTaskObserver.observe({ entryTypes: ['longtask'] });
+    } catch (err) {
+      if (!this._longTaskObserverWarned) {
+        this._longTaskObserverWarned = true;
+        log.info('Long-task observer unavailable:', err);
+      }
+    }
+  }
+
+  /** @private */
+  _stopLongTaskObserver() {
+    if (!this._longTaskObserver) return;
+    try { this._longTaskObserver.disconnect(); } catch (_) {}
+    this._longTaskObserver = null;
   }
 
   // ────────────────────────────────────────────────────────────────────────
@@ -597,6 +765,7 @@ export class PerformanceRecorder {
       id: ++this._tokenSeq,
       key: effectKey || 'unknown',
       phase: phase === 'render' ? 'render' : 'update',
+      frameSeq: this._frameSeq,
       cpuStart: performance.now(),
       drawsBefore: info?.render?.calls ?? 0,
       trianglesBefore: info?.render?.triangles ?? 0,
@@ -669,6 +838,23 @@ export class PerformanceRecorder {
     if (agg.firstSeenMs === 0) agg.firstSeenMs = performance.now() - this._startedAtMs;
     agg.lastSeenMs = performance.now() - this._startedAtMs;
     if (token.gpuSlotBlocked) agg.gpuSlotBlocked += 1;
+
+    if (token.phase === 'render' && token.frameSeq === this._frameSeq) {
+      this._frameDrawAccum += drawsDelta;
+      this._frameTriAccum += trianglesDelta;
+      this._frameLinesAccum += linesDelta;
+      this._framePointsAccum += pointsDelta;
+    }
+
+    if (token.frameSeq === this._frameSeq) {
+      const effectId = `${token.key}|${token.phase}`;
+      let frameRow = this._currentFrameEffects.get(effectId);
+      if (!frameRow) {
+        frameRow = { effect: token.key, phase: token.phase, cpuMs: 0 };
+        this._currentFrameEffects.set(effectId, frameRow);
+      }
+      frameRow.cpuMs += cpuMs;
+    }
 
     // Close the GPU query and queue it for deferred read. GPU result attribution
     // is deferred until `gl.getQueryParameter(QUERY_RESULT_AVAILABLE)` flips.
@@ -1134,6 +1320,8 @@ export class PerformanceRecorder {
       ? this._frames.reduce((sum, f) => sum + (f?.triangles ?? 0), 0) / this._frames.length
       : 0;
 
+    const stutterPayload = this._buildStutterPayload();
+
     return {
       meta: {
         enabled: this.enabled,
@@ -1144,6 +1332,7 @@ export class PerformanceRecorder {
         gpuDisjointEvents: this._gpuDisjointEvents,
         gpuPoolStarvations: this._gpuPoolStarvations,
         startedAtWallClockMs: this._startedAtWallClockMs,
+        context: this._collectContext(),
       },
       session: {
         frameTime: {
@@ -1189,6 +1378,7 @@ export class PerformanceRecorder {
         start: this._infoStart,
         current: infoCurrent,
       },
+      ...stutterPayload,
     };
   }
 
@@ -1320,7 +1510,7 @@ export class PerformanceRecorder {
     lines.push('## section,tick-timeline');
     lines.push([
       't_ms', 'tick_ms', 'presented', 'skip_reason', 'target_fps', 'since_last_present_ms',
-      'render_path', 'continuous_reason',
+      'compositor_ms', 'handler_overhead_ms', 'render_path', 'continuous_reason',
     ].join(','));
     for (const t of this._tickRecords) {
       if (!t) continue;
@@ -1331,8 +1521,54 @@ export class PerformanceRecorder {
         csvEscape(t.skipReason),
         t.targetFps,
         t.sinceLastPresentMs.toFixed(2),
+        t.compositorMs != null ? t.compositorMs.toFixed(3) : '',
+        t.handlerOverheadMs != null ? t.handlerOverheadMs.toFixed(3) : '',
         csvEscape(t.renderPath ?? ''),
         csvEscape(t.continuousReason ?? ''),
+      ].join(','));
+    }
+    lines.push('');
+
+    lines.push('## section,stutter-events');
+    lines.push([
+      'kind', 'severity', 't_ms', 'seq', 'gap_ms', 'tick_ms', 'frame_time_ms',
+      'since_last_present_ms', 'continuous_reason',
+    ].join(','));
+    for (const ev of snapshot.stutterEvents ?? []) {
+      lines.push([
+        csvEscape(ev.kind),
+        csvEscape(ev.severity),
+        Number(ev.tMs ?? 0).toFixed(2),
+        ev.seq ?? '',
+        ev.gapMs != null ? Number(ev.gapMs).toFixed(2) : '',
+        ev.tickMs != null ? Number(ev.tickMs).toFixed(3) : '',
+        ev.frameTimeMs != null ? Number(ev.frameTimeMs).toFixed(3) : '',
+        ev.sinceLastPresentMs != null ? Number(ev.sinceLastPresentMs).toFixed(2) : '',
+        csvEscape(ev.continuousReason ?? ''),
+      ].join(','));
+    }
+    lines.push('');
+
+    lines.push('## section,long-tasks');
+    lines.push(['start_ms', 'duration_ms', 'name', 't_ms'].join(','));
+    for (const lt of snapshot.longTasks ?? []) {
+      lines.push([
+        Number(lt.startMs ?? 0).toFixed(2),
+        Number(lt.durationMs ?? 0).toFixed(2),
+        csvEscape(lt.name ?? ''),
+        Number(lt.tMs ?? 0).toFixed(2),
+      ].join(','));
+    }
+    lines.push('');
+
+    lines.push('## section,spike-frame-details');
+    lines.push(['seq', 't_ms', 'frame_time_ms', 'top_effects_json'].join(','));
+    for (const row of snapshot.spikeFrameDetails ?? []) {
+      lines.push([
+        row.seq,
+        Number(row.tMs ?? 0).toFixed(2),
+        Number(row.frameTimeMs ?? 0).toFixed(3),
+        csvEscape(JSON.stringify(row.topEffects ?? [])),
       ].join(','));
     }
     lines.push('');
@@ -1361,6 +1597,191 @@ export class PerformanceRecorder {
     const filename = this._buildFilename('csv');
     this._triggerDownload(blob, filename);
     return { blob, filename };
+  }
+
+  /**
+   * Build actionable insights for the current session.
+   * @returns {import('./performance-recorder-insights.js').PerformanceInsight[]}
+   */
+  getInsights() {
+    return buildPerformanceInsights(
+      this.getSnapshot(),
+      this._frames.slice(),
+      this._tickRecords.slice(),
+    );
+  }
+
+  /**
+   * Build a human-readable markdown report (also used by Copy report).
+   * @returns {string}
+   */
+  buildMarkdownReport() {
+    const snapshot = this.getSnapshot();
+    const frames = this._frames.slice();
+    const ticks = this._tickRecords.slice();
+    const insights = buildPerformanceInsights(snapshot, frames, ticks);
+    const ctx = snapshot.meta?.context ?? {};
+    const session = snapshot.session ?? {};
+    const ft = session.frameTime ?? {};
+    const fps = session.fps ?? {};
+
+    const lines = [];
+    lines.push('# Map Shine Performance Report');
+    lines.push('');
+    lines.push(`**Generated:** ${new Date().toISOString()}`);
+    lines.push(`**Duration:** ${(snapshot.meta.durationMs / 1000).toFixed(2)}s · **Frames:** ${snapshot.meta.framesRecorded}`);
+    if (ctx.sceneName || ctx.sceneId) {
+      lines.push(`**Scene:** ${ctx.sceneName ?? '?'} (${ctx.sceneId ?? '?'})`);
+    }
+    if (ctx.presetId) lines.push(`**Preset:** ${ctx.presetId}`);
+    if (ctx.viewport) {
+      lines.push(`**Viewport:** ${ctx.viewport.w}×${ctx.viewport.h} @ ${ctx.viewport.dpr}x DPR`);
+    }
+    if (ctx.targetFps) lines.push(`**Target FPS:** ${ctx.targetFps} (${ctx.tier ?? 'tier unknown'})`);
+    lines.push('');
+    lines.push('## Summary');
+    lines.push(`- FPS avg **${(fps.avg ?? 0).toFixed(1)}** (p05 ${(fps.p05 ?? 0).toFixed(0)}, p50 ${(fps.p50 ?? 0).toFixed(0)})`);
+    lines.push(`- Frame time avg **${(ft.avg ?? 0).toFixed(2)} ms** (p95 ${(ft.p95 ?? 0).toFixed(2)}, max ${(ft.max ?? 0).toFixed(2)})`);
+    lines.push(`- Draws/frame **${Math.round(session.avgDrawCallsPerFrame ?? 0)}** · Tris/frame **${Math.round(session.avgTrianglesPerFrame ?? 0)}**`);
+    const reasons = session.continuousReasons ?? {};
+    const topReason = Object.entries(reasons).sort((a, b) => b[1] - a[1])[0];
+    if (topReason) lines.push(`- Top continuous reason: **${topReason[0]}** (${topReason[1]} frames)`);
+    const pacing = session.pacing ?? {};
+    if (pacing.overBudgetPresentPct > 0) {
+      lines.push(`- Over-budget rAF ticks: **${pacing.overBudgetPresentPct.toFixed(1)}%** (>34 ms)`);
+    }
+    lines.push('');
+    lines.push('## Key findings');
+    lines.push(formatInsightsMarkdown(insights));
+    const stutterSummary = snapshot.stutterSummary ?? {};
+    const stutterCounts = stutterSummary.countsByKind ?? {};
+    const stutterEvents = snapshot.stutterEvents ?? [];
+    if (Object.keys(stutterCounts).length > 0) {
+      lines.push('## Stutter summary');
+      const countParts = Object.entries(stutterCounts)
+        .map(([k, v]) => `${k}: ${v}`)
+        .join(', ');
+      lines.push(`- Events by kind: ${countParts}`);
+      const rafGap = stutterSummary.rafGapMs ?? {};
+      const presentGap = stutterSummary.sinceLastPresentMs ?? {};
+      if (rafGap.count > 0) lines.push(`- rAF gap p95 **${(rafGap.p95 ?? 0).toFixed(2)} ms** (max ${(rafGap.max ?? 0).toFixed(2)} ms)`);
+      if (presentGap.count > 0) lines.push(`- Present spacing p95 **${(presentGap.p95 ?? 0).toFixed(2)} ms**`);
+      if (stutterEvents.length > 0) {
+        lines.push('');
+        lines.push('### Worst stutter events');
+        for (const ev of stutterEvents.slice(0, 10)) {
+          const ms = ev.gapMs ?? ev.frameTimeMs ?? ev.tickMs ?? ev.sinceLastPresentMs ?? 0;
+          lines.push(`- **${ev.kind}** @ ${(ev.tMs / 1000).toFixed(2)}s (${ms.toFixed(2)} ms)${ev.seq != null ? ` frame #${ev.seq}` : ''}`);
+          if (ev.topEffects?.length) {
+            const tops = ev.topEffects.slice(0, 3).map((e) => `${e.effect}/${e.phase} ${e.cpuMs.toFixed(2)}ms`).join(', ');
+            lines.push(`  - top effects: ${tops}`);
+          }
+          if (ev.longTasks?.length) {
+            const lt = ev.longTasks[0];
+            lines.push(`  - long task: ${lt.durationMs.toFixed(1)} ms${lt.name ? ` (${lt.name})` : ''}`);
+          }
+        }
+      }
+      lines.push('');
+    }
+    lines.push('## Top effects (by CPU total)');
+    lines.push('| Effect | Phase | CPU total ms | GPU total ms | Cost/call ms |');
+    lines.push('| --- | --- | ---: | ---: | ---: |');
+    const sorted = (snapshot.effects ?? []).slice().sort((a, b) => b.cpuTotal - a.cpuTotal).slice(0, 10);
+    for (const row of sorted) {
+      const cost = (row.cpuAvg + row.gpuAvg).toFixed(3);
+      lines.push(`| ${row.effect} | ${row.phase} | ${row.cpuTotal.toFixed(1)} | ${row.gpuTotal.toFixed(2)} | ${cost} |`);
+    }
+    lines.push('');
+    lines.push('## V2 pass timings (top 5 by avg)');
+    const passes = Object.entries(snapshot.v2PassTimings ?? {})
+      .map(([name, data]) => ({ name, avg: data?.avg ?? 0, total: data?.total ?? 0 }))
+      .sort((a, b) => b.avg - a.avg)
+      .slice(0, 5);
+    if (passes.length) {
+      for (const p of passes) {
+        lines.push(`- **${p.name}:** ${p.avg.toFixed(2)} ms avg (${p.total.toFixed(1)} ms total)`);
+      }
+    } else {
+      lines.push('_No pass timing data._');
+    }
+    lines.push('');
+    const cache = snapshot.cloudShadowCache;
+    if (cache) {
+      lines.push('## Cloud shadow cache');
+      lines.push(`- Raw hit **${(cache.rawHitPct ?? 0).toFixed(1)}%** · mask hit **${(cache.maskHitPct ?? 0).toFixed(1)}%** · last miss: ${cache.lastMissReason ?? 'n/a'}`);
+      lines.push('');
+    }
+    const vram = snapshot.vramBudget;
+    if (vram) {
+      const usedMb = (vram.usedBytes ?? 0) / 1024 / 1024;
+      const budgetMb = (vram.budgetBytes ?? 0) / 1024 / 1024;
+      lines.push('## VRAM budget');
+      lines.push(`- ${usedMb.toFixed(1)} / ${budgetMb.toFixed(0)} MB (${((vram.usedFraction ?? 0) * 100).toFixed(1)}%)`);
+      lines.push('');
+    }
+    const gpu = snapshot.meta.gpuTiming;
+    lines.push('---');
+    lines.push(`GPU timing: ${gpu?.supported ? (gpu.enabled ? 'enabled' : 'disabled') : 'unsupported'} · disjoints ${snapshot.meta.gpuDisjointEvents} · pool starvations ${snapshot.meta.gpuPoolStarvations}`);
+    if (ctx.moduleVersion) lines.push(`Map Shine Advanced v${ctx.moduleVersion}`);
+    return lines.join('\n');
+  }
+
+  /**
+   * Export markdown report and trigger download.
+   * @returns {{ blob: Blob, filename: string, text: string }}
+   */
+  exportMarkdown() {
+    const text = this.buildMarkdownReport();
+    const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+    const filename = this._buildFilename('md');
+    this._triggerDownload(blob, filename);
+    return { blob, filename, text };
+  }
+
+  /**
+   * Read-only scene / viewport context for export metadata.
+   * @returns {object}
+   * @private
+   */
+  _collectContext() {
+    /** @type {Record<string, unknown>} */
+    const ctx = {
+      moduleVersion: this._moduleVersion,
+    };
+    try {
+      const scene = globalThis.canvas?.scene ?? game?.scenes?.active ?? null;
+      if (scene) {
+        ctx.sceneId = scene.id ?? null;
+        ctx.sceneName = scene.name ?? null;
+        try {
+          const preset = scene.getFlag?.('map-shine-advanced', 'activePresetId');
+          if (typeof preset === 'string' && preset.trim()) ctx.presetId = preset.trim();
+        } catch (_) {}
+      }
+    } catch (_) {}
+    try {
+      const ps = window?.MapShine?.__presentationState;
+      if (ps) {
+        ctx.targetFps = ps.targetFps ?? null;
+        ctx.tier = ps.tier ?? null;
+      }
+    } catch (_) {}
+    try {
+      const el = document.getElementById('board') ?? document.querySelector('#board canvas');
+      const w = el?.clientWidth ?? window.innerWidth;
+      const h = el?.clientHeight ?? window.innerHeight;
+      ctx.viewport = {
+        w: Math.round(w),
+        h: Math.round(h),
+        dpr: window.devicePixelRatio ?? 1,
+      };
+    } catch (_) {}
+    try {
+      const floors = window?.MapShine?.floorStack?.getFloors?.();
+      ctx.activeFloorCount = Array.isArray(floors) ? floors.length : null;
+    } catch (_) {}
+    return ctx;
   }
 
   /**
@@ -1407,6 +1828,7 @@ export class PerformanceRecorder {
    * Free GPU resources. Called only on full teardown (canvas destroy).
    */
   dispose() {
+    this._stopLongTaskObserver();
     this._abortAllPendingQueries('dispose');
     if (this._gl) {
       for (const q of this._queriesOwned) {
@@ -1440,6 +1862,7 @@ function csvEscape(value) {
  * @property {string} key
  * @property {'update'|'render'} phase
  * @property {number} cpuStart
+ * @property {number} frameSeq
  * @property {number} drawsBefore
  * @property {number} trianglesBefore
  * @property {number} linesBefore
@@ -1478,6 +1901,8 @@ function csvEscape(value) {
  * @property {number} sinceLastPresentMs
  * @property {string|null} renderPath
  * @property {string|null} continuousReason
+ * @property {number} [compositorMs]
+ * @property {number} [handlerOverheadMs]
  */
 
 /**

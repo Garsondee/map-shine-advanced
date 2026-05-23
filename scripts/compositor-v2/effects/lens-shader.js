@@ -62,47 +62,27 @@ export function getFragmentShader() {
     uniform float uDigitalNoiseGreenBias;
     uniform float uDigitalNoiseLowLightBoost;
 
-    // ── Layered overlay slots (A..D) ───────────────────────────────────────────
+    // ── Layered overlay slots (A..B) ───────────────────────────────────────────
     uniform sampler2D uOverlayTex0;
     uniform sampler2D uOverlayTex1;
-    uniform sampler2D uOverlayTex2;
-    uniform sampler2D uOverlayTex3;
     uniform sampler2D uOverlayPrevTex0;
     uniform sampler2D uOverlayPrevTex1;
-    uniform sampler2D uOverlayPrevTex2;
-    uniform sampler2D uOverlayPrevTex3;
     uniform float     uOverlayActive0;
     uniform float     uOverlayActive1;
-    uniform float     uOverlayActive2;
-    uniform float     uOverlayActive3;
     uniform float     uOverlayPrevActive0;
     uniform float     uOverlayPrevActive1;
-    uniform float     uOverlayPrevActive2;
-    uniform float     uOverlayPrevActive3;
     uniform float     uOverlayBlend0;
     uniform float     uOverlayBlend1;
-    uniform float     uOverlayBlend2;
-    uniform float     uOverlayBlend3;
     uniform vec4      uOverlayScaleOffset0; // xy=scale, zw=offset
     uniform vec4      uOverlayScaleOffset1;
-    uniform vec4      uOverlayScaleOffset2;
-    uniform vec4      uOverlayScaleOffset3;
     uniform vec4      uOverlayParams0;      // x=intensity, y=lumaReactivity, z=lumaBoost, w=clearRadius
     uniform vec4      uOverlayParams1;
-    uniform vec4      uOverlayParams2;
-    uniform vec4      uOverlayParams3;
     uniform vec4      uOverlayAnim0;        // x=clearSoftness, y=driftX, z=driftY, w=pulseMag
     uniform vec4      uOverlayAnim1;
-    uniform vec4      uOverlayAnim2;
-    uniform vec4      uOverlayAnim3;
     uniform vec2      uOverlayPulse0;       // x=pulseFreq, y=pulsePhase
     uniform vec2      uOverlayPulse1;
-    uniform vec2      uOverlayPulse2;
-    uniform vec2      uOverlayPulse3;
     uniform vec4      uOverlayLumaGate0;    // x=minLuma, y=maxLuma, z=softness, w=influence
     uniform vec4      uOverlayLumaGate1;
-    uniform vec4      uOverlayLumaGate2;
-    uniform vec4      uOverlayLumaGate3;
 
     varying vec2 vUv;
 
@@ -248,8 +228,6 @@ export function getFragmentShader() {
       vec3 overlayAdd = vec3(0.0);
       overlayAdd += sampleOverlayCrossfade(uOverlayPrevTex0, uOverlayTex0, uOverlayPrevActive0, uOverlayActive0, uOverlayBlend0, uOverlayScaleOffset0, uOverlayParams0, uOverlayAnim0, uOverlayPulse0, uOverlayLumaGate0, sceneLuma);
       overlayAdd += sampleOverlayCrossfade(uOverlayPrevTex1, uOverlayTex1, uOverlayPrevActive1, uOverlayActive1, uOverlayBlend1, uOverlayScaleOffset1, uOverlayParams1, uOverlayAnim1, uOverlayPulse1, uOverlayLumaGate1, sceneLuma);
-      overlayAdd += sampleOverlayCrossfade(uOverlayPrevTex2, uOverlayTex2, uOverlayPrevActive2, uOverlayActive2, uOverlayBlend2, uOverlayScaleOffset2, uOverlayParams2, uOverlayAnim2, uOverlayPulse2, uOverlayLumaGate2, sceneLuma);
-      overlayAdd += sampleOverlayCrossfade(uOverlayPrevTex3, uOverlayTex3, uOverlayPrevActive3, uOverlayActive3, uOverlayBlend3, uOverlayScaleOffset3, uOverlayParams3, uOverlayAnim3, uOverlayPulse3, uOverlayLumaGate3, sceneLuma);
 
       // 3. Distort scene UV and sample with chromatic aberration
       vec2 texelSize = vec2(1.0) / max(uResolution, vec2(1.0));

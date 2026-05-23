@@ -3706,7 +3706,8 @@ export class FloorCompositor {
 
       if (!navigationLite) {
         // Wind must advance before update() so accumulation is 1× per frame.
-        this._profileEffectCall('cloud.update.advanceWind', 'update', () => this._cloudEffect.advanceWind(timeInfo.delta ?? 0.016), 'CloudEffectV2 advanceWind');
+        // Instrumented inside CloudEffectV2.advanceWind().
+        this._cloudEffect.advanceWind(timeInfo.delta ?? 0.016);
         this._profileEffectCall('specular', 'update', () => this._specularEffect.update(timeInfo), 'SpecularEffectV2 update');
         this._profileEffectCall('fluid', 'update', () => this._fluidEffect.update(timeInfo), 'FluidEffectV2 update');
         this._profileEffectCall('iridescence', 'update', () => this._iridescenceEffect.update(timeInfo), 'IridescenceEffectV2 update');
@@ -3745,7 +3746,7 @@ export class FloorCompositor {
       }
       try {
         this._skyColorEffect?.setColorCorrectionTimelineActive?.(
-          this._colorCorrectionEffect?.params?.todTimelineEnabled === true
+          this._colorCorrectionEffect?.isTimelineEnabled?.() === true
         );
       } catch (_) {}
       this._profileEffectCall('skyColor', 'update', () => this._skyColorEffect.update(timeInfo), 'SkyColorEffectV2 update');
@@ -3822,9 +3823,9 @@ export class FloorCompositor {
       } catch (_) {}
       this._profileEffectCall('colorCorrection', 'update', () => this._colorCorrectionEffect.update(timeInfo), 'ColorCorrectionEffectV2 update');
       try {
-        this._waterEffect?.setTimelineGradeState?.(
-          this._colorCorrectionEffect?.getTimelineGradeState?.(),
-        );
+        const tlGrade = this._colorCorrectionEffect?.getTimelineGradeState?.();
+        this._waterEffect?.setTimelineGradeState?.(tlGrade);
+        this._windowLightEffect?.setTimelineGradeState?.(tlGrade);
       } catch (_) {}
       this._profileEffectCall('filter', 'update', () => this._filterEffect.update(timeInfo), 'FilterEffectV2 update');
       // Weather state drives atmospheric fog density; advance it even when
@@ -5341,6 +5342,10 @@ export class FloorCompositor {
       if (typeof weatherController?.setRoofMap === 'function') {
         weatherController.setRoofMap(outdoorsTex);
       }
+      if (signatureChanged) {
+        try { this._fireEffect?.onOutdoorsMaskUpdated?.(); } catch (_) {}
+        try { this._candleFlamesEffect?.onOutdoorsMaskUpdated?.(); } catch (_) {}
+      }
     } catch (err) {
       log.warn('FloorCompositor: outdoors mask sync failed:', err);
     }
@@ -6394,6 +6399,10 @@ export class FloorCompositor {
       }
     } catch (_) {}
 
+    try {
+      this._lightingEffect?.beginStackedLightBuffer?.(this.renderer);
+    } catch (_) {}
+
     for (let li = 0; li < perLevelEntries.length; li++) {
       const { levelIndex, rts } = perLevelEntries[li];
       const { sceneRT: levelSceneRT, postA: levelPostA, postB: levelPostB } = rts;
@@ -6474,6 +6483,9 @@ export class FloorCompositor {
           });
         }, 'LightingEffectV2 render');
         if (_profiling) this._recordPassTiming(`perLevel_lighting_${levelIndex}`, _profileT0);
+        try {
+          this._lightingEffect?.accumulateStackedLightBuffer?.(this.renderer);
+        } catch (_) {}
         currentInput = levelPostA;
       }
 
@@ -6726,6 +6738,11 @@ export class FloorCompositor {
     try {
       this._lightingEffect?.setRenderFloorIndexForLights?.(null);
     } catch (_) {}
+    if (!this._colorCorrectionEffect?._initialized) {
+      try {
+        this._lightingEffect?.endStackedLightBuffer?.();
+      } catch (_) {}
+    }
 
     // Release pool entries for levels no longer visible.
     this._levelRTPool.releaseStale(activeLevels);
@@ -6942,7 +6959,9 @@ export class FloorCompositor {
     this._hdrScenePreGradeRT = mergedCompositeOut;
 
     // Color correction (post-composite, single grade owner).
-    if (resolveEffectEnabled(this._colorCorrectionEffect)) {
+    // Mandatory HDR → LDR boundary: always run when initialized (do not gate on
+    // resolveEffectEnabled — a stale params.enabled must not skip the only ToD owner).
+    if (this._colorCorrectionEffect?._initialized) {
       // Build the per-frame stacked outdoors mask so the single CC pass can
       // apply interior/exterior ToD splits accurately on the flat composite.
       let outdoorsForCc = null;
@@ -6971,20 +6990,24 @@ export class FloorCompositor {
 
       const ccOut = _pickOtherPost();
       if (_profiling) _profileT0 = performance.now();
+      let ccWrote = false;
       this._profileEffectCall('colorCorrection.postMerge', 'render', () => {
-        withSceneScissor(this.renderer, () => {
+        withoutSceneScissor(this.renderer, () => {
           try {
-            if (outdoorsForCc) {
-              this._colorCorrectionEffect.setOutdoorsMask(outdoorsForCc);
-            }
+            this._colorCorrectionEffect.setOutdoorsMask(
+              outdoorsForCc ?? this._lastOutdoorsTexture ?? null
+            );
             try {
+              const lightBinding = this._lightingEffect?.getLocalLightBufferBinding?.()
+                ?? { texture: this._lightingEffect?.dynamicLightTexture ?? null, alphaBaseline: 1.0 };
               this._colorCorrectionEffect.setLocalLightTexture?.(
-                this._lightingEffect?.dynamicLightTexture ?? null
+                lightBinding.texture ?? null,
+                lightBinding.alphaBaseline ?? 1.0,
               );
             } catch (_) {}
-            this._colorCorrectionEffect.render(
+            ccWrote = this._colorCorrectionEffect.render(
               this.renderer, mergedCompositeOut, ccOut,
-            );
+            ) === true;
           } finally {
             try {
               this._colorCorrectionEffect.setLocalLightTexture?.(null);
@@ -6992,11 +7015,19 @@ export class FloorCompositor {
                 this._colorCorrectionEffect.setOutdoorsMask(this._lastOutdoorsTexture);
               }
             } catch (_) {}
+            try {
+              this._lightingEffect?.endStackedLightBuffer?.();
+            } catch (_) {}
           }
         });
       }, 'ColorCorrectionEffectV2 postMerge render');
       if (_profiling) this._recordPassTiming('postMerge_colorCorrection', _profileT0);
-      mergedCompositeOut = ccOut;
+      if (ccWrote) mergedCompositeOut = ccOut;
+      try {
+        if (window.MapShine) {
+          window.MapShine.__ccPostMergeDiag = this._colorCorrectionEffect.getDebugState?.() ?? null;
+        }
+      } catch (_) {}
     }
 
     // Expose per-level diagnostics on MapShine for console inspection

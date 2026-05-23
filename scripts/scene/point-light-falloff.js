@@ -54,7 +54,7 @@ export function computePointLightFadeWidth({
   falloffExponent = DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT,
 } = {}) {
   const att = Math.max(0, Math.min(1, Number(attenuation) || 0));
-  const edge = Math.max(0, Math.min(0.75, Number(edgeSoftness) || 0));
+  const edge = Math.max(0, Math.min(1.0, Number(edgeSoftness) || 0));
   const exp = Math.max(0.5, Number(falloffExponent) || DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT);
   const edgeDirect = edge * 0.92;
   const edgeScaled = edge * Math.max(Math.sqrt(2 / exp), 0.68);
@@ -68,7 +68,7 @@ export function computePointLightFadeWidth({
  * @returns {number}
  */
 export function glowShaderAttenuationFromEdgeSoftness(edgeSoftness) {
-  const edge = Math.max(0, Math.min(0.75, Number(edgeSoftness) || 0));
+  const edge = Math.max(0, Math.min(1.0, Number(edgeSoftness) || 0));
   // Track the edge-softness slider directly (stay below 1.0 so the rim band keeps width).
   return Math.max(0.08, Math.min(0.96, edge * 1.12 + 0.08));
 }

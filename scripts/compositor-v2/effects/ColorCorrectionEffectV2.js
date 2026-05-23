@@ -21,6 +21,7 @@
 
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
+import { LightingDirector } from '../../core/LightingDirector.js';
 
 const log = createLogger('ColorCorrectionEffectV2');
 
@@ -144,6 +145,10 @@ const normalizeTintMultiplier = (value) => {
   };
 };
 
+/** @param {*} value */
+const isTimelineEnabledParam = (value) =>
+  value !== false && value !== 0 && value !== '0' && value !== 'false';
+
 const cloneTodAnchors = () => DEFAULT_TOD_ANCHORS.map((anchor) => ({
   hour: anchor.hour,
   global: {
@@ -171,6 +176,11 @@ export class ColorCorrectionEffectV2 {
 
     /** @type {boolean} */
     this._initialized = false;
+
+    /** @type {boolean} Whether the last post-merge render wrote an output RT. */
+    this._lastPostMergeWrote = false;
+    /** @type {boolean} Whether the last post-merge render pushed an active ToD timeline. */
+    this._lastPostMergeTodApplied = false;
 
     // Defaults tuned to match Foundry PIXI brightness.
     // Tone mapping is OFF by default to avoid darkening the scene.
@@ -213,10 +223,14 @@ export class ColorCorrectionEffectV2 {
       // 7. Time-of-day CC timeline. These controls are additive on top of the
       // base CC grade; defaults are neutral so enabling the tool is predictable.
       todTimelineEnabled: true,
-      /** Skip ToD channel tint on pixels lit by local HDR lights (light-buffer alpha falloff). */
+      /** Blend strength toward local neutral-bright grade under gameplay lights (save key retained). */
       localWarmLightPreserve: 1.0,
-      /** Additive HDR emissive restore on local-light pixels after camera grade. */
-      localWarmEmissiveAdd: 0.52,
+      /** Extra exposure stops added to timeline grade inside local-light pools. */
+      localTodOverrideExposure: 2.75,
+      /** Minimum saturation multiplier inside local-light pools (neutral tint). */
+      localTodOverrideSaturation: 1.25,
+      /** Restore ToD grade loss on HDR flame cores (light-buffer × emissive), not map albedo. */
+      localWarmEmissiveAdd: 0.55,
       todAnchors: cloneTodAnchors(),
     };
 
@@ -266,12 +280,30 @@ export class ColorCorrectionEffectV2 {
       },
       localWarmLightPreserve: {
         type: 'slider',
-        label: 'Preserve Local Light ToD Tint',
+        label: 'Local ToD Override Strength',
         min: 0,
         max: 1,
         step: 0.01,
         default: 1.0,
-        tooltip: 'Pixels under local lights (any colour) blend toward tint-neutral ToD grade using the HDR light-buffer falloff — avoids a hard circular cutout from night blue/purple regrading. Fire/candle emissive add is separate.',
+        tooltip: 'Blends from the scene timeline grade toward a bright neutral local grade under gameplay lights (HDR light-buffer alpha). 0 = full midnight/global tint everywhere; 1 = full local override inside lit pools only.',
+      },
+      localTodOverrideExposure: {
+        type: 'slider',
+        label: 'Local Override Exposure',
+        min: -2,
+        max: 5,
+        step: 0.05,
+        default: 2.75,
+        tooltip: 'Base exposure stops added inside local-light pools on top of the timeline grade. Stronger lights gain extra stops automatically — counters midnight darkness and blue tint.',
+      },
+      localTodOverrideSaturation: {
+        type: 'slider',
+        label: 'Local Override Saturation',
+        min: 0.5,
+        max: 2,
+        step: 0.01,
+        default: 1.25,
+        tooltip: 'Minimum saturation multiplier inside local-light pools when overriding toward neutral tint. Brighter pool cores push slightly higher.',
       },
       localWarmEmissiveAdd: {
         type: 'slider',
@@ -279,8 +311,8 @@ export class ColorCorrectionEffectV2 {
         min: 0,
         max: 1.5,
         step: 0.01,
-        default: 0.52,
-        tooltip: 'Adds HDR glow back on local-light and emissive pixels after the ToD grade (uses light-buffer alpha, not hue detection).',
+        default: 0.55,
+        tooltip: 'Restores ToD grade loss on HDR flame cores (light-buffer core × emissive luminance). Does not touch normal map albedo — keeps scene-wide time-of-day tint visible.',
       },
     };
 
@@ -397,6 +429,7 @@ export class ColorCorrectionEffectV2 {
           '**Persistence:** this effect supports **World Based** in the GM panel (shared across scenes) or per-scene storage when World Based is off.',
           'Fullscreen post; cost is modest (single pass).',
           '**Time-of-day timeline:** eight clock anchors each with global and interior exposure, saturation, and RGB tint multipliers (1 = neutral, 0–3 per channel); blends as scene time changes.',
+          '**Local ToD override:** under gameplay lights (HDR light buffer), blends from the timeline grade toward a bright neutral local grade — cancels midnight tint/exposure in lit pools without a circular cutout.',
           '**Note:** Vignette **softness** is written to a uniform but the current fragment shader uses a fixed falloff — the slider is reserved for a future shader hook.',
         ].join('\n\n'),
         glossary: {
@@ -450,7 +483,7 @@ export class ColorCorrectionEffectV2 {
           label: 'Time-of-day camera timeline',
           type: 'folder',
           expanded: false,
-          parameters: ['todTimelineEnabled', 'localWarmLightPreserve', 'localWarmEmissiveAdd'],
+          parameters: ['todTimelineEnabled', 'localWarmLightPreserve', 'localTodOverrideExposure', 'localTodOverrideSaturation', 'localWarmEmissiveAdd'],
         },
         ...timelineGroups,
       ],
@@ -731,10 +764,15 @@ export class ColorCorrectionEffectV2 {
         uTodInteriorSaturation: { value: 1.0 },
         uTodInteriorTintColor: { value: new THREE.Vector3(1, 1, 1) },
 
+        uLocalEmissiveAdd: { value: 0.55 },
+        uLocalOverrideStrength: { value: 1.0 },
+        uLocalOverrideExposureOffset: { value: 2.75 },
+        uLocalOverrideSaturationMin: { value: 1.25 },
         tLocalLightBuffer: { value: null },
         uHasLocalLightBuffer: { value: 0.0 },
-        uLocalLightPreserve: { value: 1.0 },
-        uLocalEmissiveAdd: { value: 0.52 },
+        uLocalLightAlphaBaseline: { value: 1.0 },
+        uLocalLightTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
+        uGradeEnabled: { value: 1.0 },
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -781,10 +819,15 @@ export class ColorCorrectionEffectV2 {
         uniform float uTodInteriorSaturation;
         uniform vec3 uTodInteriorTintColor;
 
+        uniform float uLocalEmissiveAdd;
+        uniform float uLocalOverrideStrength;
+        uniform float uLocalOverrideExposureOffset;
+        uniform float uLocalOverrideSaturationMin;
         uniform sampler2D tLocalLightBuffer;
         uniform float uHasLocalLightBuffer;
-        uniform float uLocalLightPreserve;
-        uniform float uLocalEmissiveAdd;
+        uniform float uLocalLightAlphaBaseline;
+        uniform vec2 uLocalLightTexelSize;
+        uniform float uGradeEnabled;
 
         varying vec2 vUv;
 
@@ -827,14 +870,10 @@ export class ColorCorrectionEffectV2 {
           if (uOutdoorsMaskFlipY > 0.5) sceneUv.y = 1.0 - sceneUv.y;
           sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
 
-          // Match LightingEffectV2 / SkyColor: alpha=0 is "no authored data", not indoors.
-          // RGB black without alpha must not expand interior grading on sparse upper-floor masks.
+          // Match SkyColor / Lighting: alpha=validity, rgb= outdoors strength.
           vec4 od = texture2D(tOutdoorsMask, sceneUv);
-          float outdoorRaw = clamp(max(od.r, max(od.g, od.b)), 0.0, 1.0);
-          float outdoorMid = smoothstep(0.18, 0.82, outdoorRaw);
-          float outdoorClass = (outdoorRaw <= 0.10) ? 0.0 : ((outdoorRaw >= 0.90) ? 1.0 : outdoorMid);
-          float outdoorsAlphaValid = step(0.5, clamp(od.a, 0.0, 1.0));
-          float isOutdoor = mix(1.0, outdoorClass, outdoorsAlphaValid);
+          float outdoorStrength = mix(1.0, clamp(od.r, 0.0, 1.0), clamp(od.a, 0.0, 1.0));
+          float isOutdoor = step(0.5, outdoorStrength);
           float indoorSignal = clamp(1.0 - isOutdoor, 0.0, 1.0);
           return mix(0.0, smoothstep(0.20, 0.75, indoorSignal), inScene);
         }
@@ -848,34 +887,85 @@ export class ColorCorrectionEffectV2 {
           return graded;
         }
 
-        // Soft weight from the HDR light buffer — tracks radial falloff for any local light hue.
-        float sampleLocalLightPresence(vec2 uv) {
+        // True HDR emissive art in the merged composite (flame sprites, etc.).
+        float sampleSceneEmissiveWeight(vec3 hdrColor) {
+          float mx = max(max(hdrColor.r, hdrColor.g), hdrColor.b);
+          if (mx < 1.6) return 0.0;
+          float sat = mx - min(min(hdrColor.r, hdrColor.g), hdrColor.b);
+          return smoothstep(1.6, 3.5, mx) * smoothstep(0.18, 0.55, sat);
+        }
+
+        // Scalar illumination punch above the compose baseline (raw _lightRT clears alpha=1).
+        float sampleLightBufferAlphaAt(vec2 uv) {
           if (uHasLocalLightBuffer < 0.5) return 0.0;
           vec4 L = texture2D(tLocalLightBuffer, uv);
-          float punch = max(L.a, 0.0);
-          if (punch < 0.0004) return 0.0;
-          // Alpha is the authoritative illumination envelope (RGB hue shares the same falloff).
-          return sqrt(smoothstep(0.001, 0.68, punch));
+          float punch = max(L.a - uLocalLightAlphaBaseline, 0.0);
+          float rgbMag = max(max(L.r, L.g), L.b);
+          return max(punch, rgbMag);
         }
 
-        // Bright emissive art in the scene buffer (flame sprites, etc.) — luminance + saturation only.
-        float sampleSceneEmissiveWeight(vec3 sceneColor) {
-          float mx = max(max(sceneColor.r, sceneColor.g), sceneColor.b);
-          if (mx < 0.04) return 0.0;
-          float sat = mx - min(min(sceneColor.r, sceneColor.g), sceneColor.b);
-          return smoothstep(0.05, 0.28, mx) * smoothstep(0.10, 0.42, sat);
+        float sampleBlurredLightAlpha(vec2 uv, float blurScale) {
+          // Wide multi-scale gather for CC influence only — soft ToD-cancel rims must
+          // extend well beyond the geometric light-buffer edge (avoid perfect circles).
+          vec2 t = uLocalLightTexelSize * max(blurScale, 1.0);
+          float s = sampleLightBufferAlphaAt(uv) * 0.14;
+          s += sampleLightBufferAlphaAt(uv + t * vec2( 1.0,  0.0)) * 0.07;
+          s += sampleLightBufferAlphaAt(uv + t * vec2(-1.0,  0.0)) * 0.07;
+          s += sampleLightBufferAlphaAt(uv + t * vec2( 0.0,  1.0)) * 0.07;
+          s += sampleLightBufferAlphaAt(uv + t * vec2( 0.0, -1.0)) * 0.07;
+          vec2 t6 = t * 6.0;
+          s += sampleLightBufferAlphaAt(uv + t6 * vec2( 0.707,  0.707)) * 0.045;
+          s += sampleLightBufferAlphaAt(uv + t6 * vec2(-0.707,  0.707)) * 0.045;
+          s += sampleLightBufferAlphaAt(uv + t6 * vec2( 0.707, -0.707)) * 0.045;
+          s += sampleLightBufferAlphaAt(uv + t6 * vec2(-0.707, -0.707)) * 0.045;
+          vec2 t14 = t * 14.0;
+          s += sampleLightBufferAlphaAt(uv + t14 * vec2( 1.0,  0.0)) * 0.035;
+          s += sampleLightBufferAlphaAt(uv + t14 * vec2(-1.0,  0.0)) * 0.035;
+          s += sampleLightBufferAlphaAt(uv + t14 * vec2( 0.0,  1.0)) * 0.035;
+          s += sampleLightBufferAlphaAt(uv + t14 * vec2( 0.0, -1.0)) * 0.035;
+          vec2 t28 = t * 28.0;
+          s += sampleLightBufferAlphaAt(uv + t28 * vec2( 0.707,  0.707)) * 0.028;
+          s += sampleLightBufferAlphaAt(uv + t28 * vec2(-0.707,  0.707)) * 0.028;
+          s += sampleLightBufferAlphaAt(uv + t28 * vec2( 0.707, -0.707)) * 0.028;
+          s += sampleLightBufferAlphaAt(uv + t28 * vec2(-0.707, -0.707)) * 0.028;
+          vec2 t56 = t * 56.0;
+          s += sampleLightBufferAlphaAt(uv + t56 * vec2( 1.0,  0.0)) * 0.018;
+          s += sampleLightBufferAlphaAt(uv + t56 * vec2(-1.0,  0.0)) * 0.018;
+          s += sampleLightBufferAlphaAt(uv + t56 * vec2( 0.0,  1.0)) * 0.018;
+          s += sampleLightBufferAlphaAt(uv + t56 * vec2( 0.0, -1.0)) * 0.018;
+          return s;
         }
 
-        // Local emissive restore: light-buffer alpha defines glow pools; scene picks up flame art.
-        float sampleLocalEmissiveWeight(vec2 uv, vec3 sceneColor) {
-          float fromBuffer = sampleLocalLightPresence(uv);
-          float sceneGate = 1.0 - smoothstep(0.06, 0.52, fromBuffer);
-          float fromScene = sampleSceneEmissiveWeight(sceneColor) * sceneGate;
-          return clamp(fromBuffer + fromScene, 0.0, 1.0);
+        float localInfluenceFromBlur(float illumCenter, float illumBlur, float outdoorW) {
+          // No hard zero outside the buffer rim — follow the wide blur envelope only.
+          // Outdoors: lower thresholds + gentler curve so campfires shed global midnight tint.
+          float presenceLo = mix(0.0015, 0.0008, outdoorW);
+          float presenceHi = mix(0.028, 0.016, outdoorW);
+          float envLo = mix(0.003, 0.0012, outdoorW);
+          float envHi = mix(0.92, 0.96, outdoorW);
+          float presence = smoothstep(
+            presenceLo,
+            presenceHi,
+            max(illumCenter, illumBlur * mix(0.12, 0.20, outdoorW))
+          );
+          float envelope = smoothstep(envLo, envHi, illumBlur);
+          return presence * pow(envelope, mix(0.92, 0.82, outdoorW));
+        }
+
+        float sampleLocalInfluence(vec2 uv, float outdoorW) {
+          if (uHasLocalLightBuffer < 0.5) return 0.0;
+          float blurScale = mix(1.0, 1.85, clamp(outdoorW, 0.0, 1.0));
+          float illumCenter = sampleLightBufferAlphaAt(uv);
+          float illumBlur = sampleBlurredLightAlpha(uv, blurScale);
+          return localInfluenceFromBlur(illumCenter, illumBlur, outdoorW);
         }
 
         void main() {
           vec4 texel = texture2D(tDiffuse, vUv);
+          if (uGradeEnabled < 0.5) {
+            gl_FragColor = vec4(texel.rgb, texel.a);
+            return;
+          }
           vec3 color = texel.rgb;
 
           // Phase 2: ColorCorrectionEffectV2 is the sole grade owner and runs once
@@ -885,15 +975,10 @@ export class ColorCorrectionEffectV2 {
           // HDR → LDR boundary.
 
           // 1. Exposure (with dynamic eye adaptation multiplier)
-          float localLightW = sampleLocalLightPresence(vUv) * clamp(uLocalLightPreserve, 0.0, 1.0);
-          float localEmissiveW = sampleLocalEmissiveWeight(vUv, texel.rgb);
-          vec3 localEmissiveGlow = texel.rgb * (uExposure * max(uDynamicExposure, 0.0));
-
           color *= (uExposure * max(uDynamicExposure, 0.0));
 
           // 2. White Balance (same path for all pixels — tint skip happens in ToD only)
           color = applyWhiteBalance(color, uTemperature, uTint);
-          localEmissiveGlow = applyWhiteBalance(localEmissiveGlow, uTemperature, uTint);
 
           // 3. Basic Adjustments
           color += uBrightness;
@@ -917,57 +1002,86 @@ export class ColorCorrectionEffectV2 {
             color = pow(color, vec3(1.0 / max(uMasterGamma, 0.0001)));
           }
 
+          // Snapshot before ToD — used to restore emissive art without undoing the grade.
+          vec3 preTodColor = color;
+
           // 5. Time-of-day CC timeline (before tone mapping so exposure stops stay strong).
           // Global grade everywhere; interior uses global + interior exposure in stops,
           // with separate interior saturation/tint, blended by _Outdoors mask.
-          float todExpMul = 1.0;
           if (uTodEnabled > 0.5) {
             float indoorW = clamp(sampleIndoorWeight(vUv), 0.0, 1.0);
-            vec3 globalColor = applyTimelineGrade(
+            float outdoorW = 1.0 - indoorW;
+
+            vec3 globalSceneGrade = applyTimelineGrade(
               color,
               uTodGlobalExposure,
               uTodGlobalSaturation,
               uTodGlobalTintColor
             );
             float interiorExposureTotal = uTodGlobalExposure + uTodInteriorExposure;
-            vec3 interiorColor = applyTimelineGrade(
+            vec3 interiorSceneGrade = applyTimelineGrade(
               color,
               interiorExposureTotal,
               uTodInteriorSaturation,
               uTodInteriorTintColor
             );
-            vec3 timelineGraded = mix(globalColor, interiorColor, indoorW);
-            todExpMul = exp2(clamp(
-              mix(uTodGlobalExposure, interiorExposureTotal, indoorW),
-              -10.0,
-              10.0
-            ));
+            vec3 sceneGrade = mix(globalSceneGrade, interiorSceneGrade, indoorW);
 
-            float preserveW = localLightW;
-            if (preserveW > 0.0001) {
-              // Skip channel tint only; keep exposure/saturation. Weight follows light-buffer falloff.
-              vec3 tintNeutralGlobal = applyTimelineGrade(
-                color,
-                uTodGlobalExposure,
-                max(uTodGlobalSaturation, 1.0),
-                vec3(1.0)
-              );
-              vec3 tintNeutralInterior = applyTimelineGrade(
-                color,
-                interiorExposureTotal,
-                max(uTodInteriorSaturation, 1.0),
-                vec3(1.0)
-              );
-              vec3 tintNeutral = mix(tintNeutralGlobal, tintNeutralInterior, indoorW);
-              color = mix(timelineGraded, tintNeutral, preserveW);
-            } else {
-              color = timelineGraded;
+            float lightPunch = 0.0;
+            float localInfluence = 0.0;
+            if (uHasLocalLightBuffer > 0.5) {
+              float illumCenter = sampleLightBufferAlphaAt(vUv);
+              float blurScale = mix(1.0, 1.85, outdoorW);
+              lightPunch = sampleBlurredLightAlpha(vUv, blurScale);
+              localInfluence = localInfluenceFromBlur(illumCenter, lightPunch, outdoorW)
+                * clamp(uLocalOverrideStrength, 0.0, 1.0);
+              // Outdoors: stronger cancel of global midnight tint under campfires/torches.
+              localInfluence = min(1.0, localInfluence * mix(1.0, 1.38, outdoorW));
             }
+
+            // Stronger lights pull harder toward neutral HDR (extra stops scale with punch).
+            float punchNorm = smoothstep(0.06, 0.72, lightPunch);
+            float expBoost = uLocalOverrideExposureOffset + punchNorm * 2.35;
+            // Fade exposure push at the influence rim; keep more punch outdoors (wider pools).
+            float rimFloor = mix(0.22, 0.50, outdoorW);
+            float rimPow = mix(0.72, 0.58, outdoorW);
+            expBoost *= mix(rimFloor, 1.0, pow(clamp(localInfluence, 0.0, 1.0), rimPow));
+            float localGlobalExp = uTodGlobalExposure + expBoost;
+            float localInteriorExp = interiorExposureTotal + expBoost;
+            float satFloor = uLocalOverrideSaturationMin + punchNorm * 0.42;
+            float localGlobalSat = max(uTodGlobalSaturation, satFloor);
+            float localInteriorSat = max(uTodInteriorSaturation, satFloor);
+
+            vec3 localGlobalGrade = applyTimelineGrade(
+              color,
+              localGlobalExp,
+              localGlobalSat,
+              vec3(1.0)
+            );
+            vec3 localInteriorGrade = applyTimelineGrade(
+              color,
+              localInteriorExp,
+              localInteriorSat,
+              vec3(1.0)
+            );
+            vec3 localGrade = mix(localGlobalGrade, localInteriorGrade, indoorW);
+
+            // Smooth grade blend — avoid pow<1 disks that read as perfect circles at pool edges.
+            float blendRaw = clamp(localInfluence, 0.0, 1.0);
+            float blendW = blendRaw * blendRaw * (3.0 - 2.0 * blendRaw);
+            color = mix(sceneGrade, localGrade, blendW);
           }
 
-          // Local emissive restore: add HDR glow back after the multiplicative grade so
-          // candles/fire stay bright and additive instead of flattened.
-          color += localEmissiveGlow * localEmissiveW * max(uLocalEmissiveAdd, 0.0) * todExpMul;
+          // Restore exposure loss on HDR emissive art without undoing preserved hue.
+          float emissiveW = sampleSceneEmissiveWeight(preTodColor);
+          float emissiveRestore = emissiveW * max(uLocalEmissiveAdd, 0.0);
+          if (emissiveRestore > 0.0001) {
+            float preLuma = dot(preTodColor, vec3(0.2126, 0.7152, 0.0722));
+            float postLuma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+            float lumaLoss = max(0.0, preLuma - postLuma);
+            vec3 dir = color / max(postLuma, 1e-5);
+            color += dir * lumaLoss * emissiveRestore;
+          }
 
           // 6. Tone Mapping
           if (uToneMapping == 1) {
@@ -1037,15 +1151,22 @@ export class ColorCorrectionEffectV2 {
   }
 
   /**
-   * HDR light buffer from {@link LightingEffectV2} (same frame / screen UV as tDiffuse).
-   * Drives soft ToD tint preserve and local emissive restore from the HDR light buffer.
+   * HDR light buffer from {@link LightingEffectV2} — stacked gameplay-light alpha for
+   * local ToD override (torches, lamps, fire/candle glow).
    * @param {THREE.Texture|null} lightTex
+   * @param {number} [alphaBaseline=1] - Subtract from alpha (1 for raw _lightRT, 0 for stacked normalize)
    */
-  setLocalLightTexture(lightTex) {
+  setLocalLightTexture(lightTex, alphaBaseline = 1.0) {
     const u = this._composeMaterial?.uniforms;
     if (!u) return;
     u.tLocalLightBuffer.value = lightTex ?? this._fallbackWhite;
     u.uHasLocalLightBuffer.value = lightTex ? 1.0 : 0.0;
+    u.uLocalLightAlphaBaseline.value = lightTex
+      ? Math.max(0.0, Number(alphaBaseline) || 0.0)
+      : 1.0;
+    const tw = Math.max(1, lightTex?.image?.width ?? 1024);
+    const th = Math.max(1, lightTex?.image?.height ?? 1024);
+    u.uLocalLightTexelSize.value.set(1 / tw, 1 / th);
   }
 
   /**
@@ -1113,12 +1234,18 @@ export class ColorCorrectionEffectV2 {
     const nestedTint = track === 'Global' ? nested?.global?.tintColor : nested?.interior?.tintColor;
     const fallbackTint = track === 'Global' ? fallback.global.tintColor : fallback.interior.tintColor;
 
-    const hasSlider = [keys.r, keys.g, keys.b].some((k) => p[k] !== undefined);
+    const readChannel = (key, fb) => {
+      if (!Object.prototype.hasOwnProperty.call(p, key)) return fb;
+      const v = Number(p[key]);
+      return Number.isFinite(v) ? v : fb;
+    };
+
+    const hasSlider = [keys.r, keys.g, keys.b].some((k) => Object.prototype.hasOwnProperty.call(p, k));
     const rgb = hasSlider
       ? normalizeTintMultiplier({
-        r: p[keys.r],
-        g: p[keys.g],
-        b: p[keys.b],
+        r: readChannel(keys.r, fallbackTint.r),
+        g: readChannel(keys.g, fallbackTint.g),
+        b: readChannel(keys.b, fallbackTint.b),
       })
       : normalizeTintMultiplier(
         p[keys.color] ?? nestedTint ?? fallbackTint
@@ -1203,6 +1330,109 @@ export class ColorCorrectionEffectV2 {
     };
   }
 
+  /** @private @returns {number} */
+  _resolveTimelineHour() {
+    try {
+      const hour = Number(LightingDirector.get()?.hour);
+      if (Number.isFinite(hour)) return wrapHour24(hour);
+    } catch (_) {}
+    const wcHour = Number(weatherController?.timeOfDay);
+    if (Number.isFinite(wcHour)) return wrapHour24(wcHour);
+    try {
+      const panelHour = Number(window.MapShine?.controlPanel?.controlState?.timeOfDay);
+      if (Number.isFinite(panelHour)) return wrapHour24(panelHour);
+    } catch (_) {}
+    return 12.0;
+  }
+
+  /** @returns {boolean} */
+  isTimelineEnabled() {
+    return this._isTimelineEnabled();
+  }
+
+  /**
+   * Live post-merge diagnostics for console inspection.
+   * @returns {object}
+   */
+  getDebugState() {
+    const u = this._composeMaterial?.uniforms;
+    const grade = (this._isTimelineEnabled() && this.params.enabled !== false)
+      ? this._evaluateTodTimeline(this._resolveTimelineHour())
+      : null;
+    return {
+      initialized: this._initialized,
+      paramsEnabled: this.params.enabled !== false,
+      timelineEnabled: this._isTimelineEnabled(),
+      lastPostMergeWrote: this._lastPostMergeWrote,
+      lastPostMergeTodApplied: this._lastPostMergeTodApplied,
+      hour: this._resolveTimelineHour(),
+      gradeEnabled: u?.uGradeEnabled?.value ?? null,
+      todEnabled: u?.uTodEnabled?.value ?? null,
+      todGlobalExposure: u?.uTodGlobalExposure?.value ?? null,
+      todGlobalTint: u?.uTodGlobalTintColor
+        ? { r: u.uTodGlobalTintColor.value.x, g: u.uTodGlobalTintColor.value.y, b: u.uTodGlobalTintColor.value.z }
+        : null,
+      evaluatedGrade: grade,
+    };
+  }
+
+  /**
+   * @param {string} paramId
+   * @param {*} _value
+   */
+  applyParamChange(paramId, _value) {
+    if (!this._initialized || !this._composeMaterial) return;
+    if (
+      paramId === 'todTimelineEnabled'
+      || paramId.startsWith('tod')
+      ||       paramId === 'localWarmLightPreserve'
+      || paramId === 'localTodOverrideExposure'
+      || paramId === 'localTodOverrideSaturation'
+      || paramId === 'localWarmEmissiveAdd'
+    ) {
+      this._pushTodUniforms();
+    }
+  }
+
+  /** @private @returns {boolean} */
+  _isTimelineEnabled() {
+    return isTimelineEnabledParam(this.params?.todTimelineEnabled);
+  }
+
+  /** @private */
+  _pushTodUniforms() {
+    const u = this._composeMaterial?.uniforms;
+    if (!u) return;
+
+    const p = this.params;
+    const applyTimeline = this._isTimelineEnabled() && p.enabled !== false;
+    u.uGradeEnabled.value = p.enabled !== false ? 1.0 : 0.0;
+    u.uTodEnabled.value = applyTimeline ? 1.0 : 0.0;
+    u.uLocalOverrideStrength.value = Math.max(0, Math.min(1, Number(p.localWarmLightPreserve) ?? 1.0));
+    u.uLocalOverrideExposureOffset.value = Number.isFinite(Number(p.localTodOverrideExposure))
+      ? Number(p.localTodOverrideExposure)
+      : 2.75;
+    u.uLocalOverrideSaturationMin.value = Math.max(0.5, Math.min(2, Number(p.localTodOverrideSaturation) ?? 1.25));
+    u.uLocalEmissiveAdd.value = Math.max(0, Math.min(1.5, Number(p.localWarmEmissiveAdd) ?? 0.55));
+    if (!applyTimeline) return;
+
+    const grade = this._evaluateTodTimeline(this._resolveTimelineHour());
+    u.uTodGlobalExposure.value = grade.global.exposure;
+    u.uTodGlobalSaturation.value = grade.global.saturation;
+    u.uTodGlobalTintColor.value.set(
+      grade.global.tintColor.r,
+      grade.global.tintColor.g,
+      grade.global.tintColor.b
+    );
+    u.uTodInteriorExposure.value = grade.interior.exposure;
+    u.uTodInteriorSaturation.value = grade.interior.saturation;
+    u.uTodInteriorTintColor.value.set(
+      grade.interior.tintColor.r,
+      grade.interior.tintColor.g,
+      grade.interior.tintColor.b
+    );
+  }
+
   // ── Per-frame update ──────────────────────────────────────────────────
 
   /**
@@ -1211,7 +1441,10 @@ export class ColorCorrectionEffectV2 {
    */
   update(timeInfo) {
     if (!this._initialized || !this._composeMaterial) return;
-    if (!this.params.enabled) return;
+    if (this.params.enabled === false) {
+      this._composeMaterial.uniforms.uGradeEnabled.value = 0.0;
+      return;
+    }
 
     this._lastTimeInfo = timeInfo;
 
@@ -1243,30 +1476,10 @@ export class ColorCorrectionEffectV2 {
     u.uVignetteStrength.value = p.vignetteStrength ?? 0.0;
     u.uVignetteSoftness.value = p.vignetteSoftness ?? 0.0;
     u.uGrainStrength.value = p.grainStrength ?? 0.0;
+    u.uGradeEnabled.value = 1.0;
 
-    // Phase 2: ColorCorrection is always the post-composite owner of ToD grading;
-    // the legacy suppress/timeline-only toggles are gone.
-    const applyTimeline = p.todTimelineEnabled === true;
-    u.uTodEnabled.value = applyTimeline ? 1.0 : 0.0;
-    u.uLocalLightPreserve.value = Math.max(0, Math.min(1, Number(p.localWarmLightPreserve) ?? 1));
-    u.uLocalEmissiveAdd.value = Math.max(0, Math.min(1.5, Number(p.localWarmEmissiveAdd) ?? 0.52));
-    if (applyTimeline) {
-      const grade = this._evaluateTodTimeline(weatherController?.timeOfDay ?? 12.0);
-      u.uTodGlobalExposure.value = grade.global.exposure;
-      u.uTodGlobalSaturation.value = grade.global.saturation;
-      u.uTodGlobalTintColor.value.set(
-        grade.global.tintColor.r,
-        grade.global.tintColor.g,
-        grade.global.tintColor.b
-      );
-      u.uTodInteriorExposure.value = grade.interior.exposure;
-      u.uTodInteriorSaturation.value = grade.interior.saturation;
-      u.uTodInteriorTintColor.value.set(
-        grade.interior.tintColor.r,
-        grade.interior.tintColor.g,
-        grade.interior.tintColor.b
-      );
-    }
+    // Phase 2: ColorCorrection is always the post-composite owner of ToD grading.
+    this._pushTodUniforms();
   }
 
   /**
@@ -1274,10 +1487,10 @@ export class ColorCorrectionEffectV2 {
    * @returns {{ enabled: boolean, global?: object, interior?: object }}
    */
   getTimelineGradeState() {
-    if (!this.params.enabled || this.params.todTimelineEnabled !== true) {
+    if (this.params.enabled === false || !this._isTimelineEnabled()) {
       return { enabled: false };
     }
-    const grade = this._evaluateTodTimeline(weatherController?.timeOfDay ?? 12.0);
+    const grade = this._evaluateTodTimeline(this._resolveTimelineHour());
     return { enabled: true, global: grade.global, interior: grade.interior };
   }
 
@@ -1290,8 +1503,9 @@ export class ColorCorrectionEffectV2 {
    * @param {THREE.WebGLRenderTarget} outputRT
    */
   render(renderer, inputRT, outputRT) {
-    if (!this._initialized || !this._composeMaterial || !inputRT) return;
-    if (!this.params.enabled) return;
+    this._lastPostMergeWrote = false;
+    this._lastPostMergeTodApplied = false;
+    if (!this._initialized || !this._composeMaterial || !inputRT || !outputRT) return false;
 
     // Track the last input RT so DynamicExposureManager can probe the pre-grade
     // (linear-HDR after Phase 1+) scene via getInputTexture().
@@ -1300,6 +1514,12 @@ export class ColorCorrectionEffectV2 {
     this._composeMaterial.uniforms.uResolution.value.set(
       inputRT.width, inputRT.height
     );
+    this._syncViewBoundsUniforms();
+    this._pushTodUniforms();
+    this._lastPostMergeTodApplied =
+      this._isTimelineEnabled()
+      && this.params.enabled !== false
+      && (this._composeMaterial.uniforms.uTodEnabled?.value ?? 0) > 0.5;
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
@@ -1310,6 +1530,8 @@ export class ColorCorrectionEffectV2 {
 
     renderer.autoClear = prevAutoClear;
     renderer.setRenderTarget(prevTarget);
+    this._lastPostMergeWrote = true;
+    return true;
   }
 
   // ── Cleanup ───────────────────────────────────────────────────────────

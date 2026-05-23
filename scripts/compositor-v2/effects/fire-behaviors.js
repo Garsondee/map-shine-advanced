@@ -43,23 +43,21 @@ export class FixedCurlNoiseField extends CurlNoiseField {
 
   update(particle, delta) {
     if (!particle || !particle.position) return;
+    if (readFlameMotionScale(particle) <= 0) return;
+
     const px = particle.position.x / this.scale.x;
     const py = particle.position.y / this.scale.y;
     const t = this.time;
-    const e = this.epsilon;
-    const n1 = this.generator.noise3D(px, py + e, t);
-    const n2 = this.generator.noise3D(px, py - e, t);
-    const dNdy = (n1 - n2) / (2 * e);
-    const n3 = this.generator.noise3D(px + e, py, t);
-    const n4 = this.generator.noise3D(px - e, py, t);
-    const dNdx = (n3 - n4) / (2 * e);
-    const vx = dNdy * this.strength.x;
-    const vy = -dNdx * this.strength.y;
-    const vz = (n1 + n2) * 0.5 * this.strength.z * 0.5;
+
+    // FAST FAKE CURL: Replaces 4 expensive Simplex noise3D calls with layered trig.
+    // Provides chaotic, swirly turbulence for a fraction of the CPU cost.
+    const vx = (Math.sin(py * 2.13 + t) + Math.cos(py * 3.71 - t)) * 0.5 * this.strength.x;
+    const vy = (Math.cos(px * 2.27 + t) + Math.sin(px * 3.43 - t)) * 0.5 * this.strength.y;
+    const vz = Math.sin((px + py) * 1.77 + t) * this.strength.z;
+
     this._tempV.set(vx, vy, vz);
-    let dt = delta;
-    if (!Number.isFinite(dt)) return;
-    dt = Math.min(Math.max(dt, 0), 0.1);
+
+    let dt = delta > 0.1 ? 0.1 : (delta < 0 ? 0 : delta);
     particle.velocity.addScaledVector(this._tempV, dt);
   }
 
@@ -205,6 +203,27 @@ const _smokeEmissionTemp = { r: 0, g: 0, b: 0 };
 
 function clamp01(v) {
   return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+/** Compact signature for gradient stop arrays (LUT dirty detection). */
+function gradientStopSignature(stops) {
+  if (!stops || stops.length === 0) return '';
+  let sig = '';
+  for (let i = 0; i < stops.length; i++) {
+    const s = stops[i];
+    sig += `${s.t}|${s.r}|${s.g}|${s.b};`;
+  }
+  return sig;
+}
+
+/**
+ * Age used for flipbook / colour envelopes. Between physics steps FireEffectV2
+ * extrapolates `_msDisplayAge` so sprite animation stays smooth at low fireSimHz.
+ * @param {object|null|undefined} particle
+ * @returns {number}
+ */
+export function resolveParticleDisplayAge(particle) {
+  return particle._msDisplayAge !== undefined ? particle._msDisplayAge : particle.age;
 }
 
 function smoothstep01(x) {
@@ -462,44 +481,96 @@ export class FlameLifecycleBehavior {
     this._emissionScale = 2.5;
     this._hdrGain = FIRE_HDR_LINEAR_GAIN;
     this._temperature = 0.5;
+    this._minBrightness = 0.75;
+    this._colorLUT = new Float32Array(256 * 3);
+    this._emissionLUT = new Float32Array(256);
+    this._alphaLUT = new Float32Array(256);
+    this._lutDirty = true;
   }
 
   initialize(particle) {
     particle._flameHeat = 0.7 + Math.random() * 0.5;
     if (particle._flameBrightness === undefined) particle._flameBrightness = 1.0;
+    const stationaryFrac = Math.max(
+      0,
+      Math.min(1, Number(this.ownerEffect?.params?.flameStationaryFraction ?? 0.5))
+    );
+    particle._flameMotionScale = Math.random() < stationaryFrac ? 0 : 1;
     zeroParticleVisual(particle);
   }
 
   update(particle, delta) {
     const life = particle.life;
-    const age = particle.age;
     if (life <= 0) return;
-    const t = age / Math.max(0.001, life);
-    const lifeFade = particleSpawnDeathFade(t, 0.14, 0.16);
+    let age = particle._msDisplayAge;
+    if (age === undefined) age = particle.age;
+    let t = age / (life > 0.001 ? life : 0.001);
+    if (t < 0) t = 0; else if (t > 1) t = 1;
+    const idx = (t * 255) | 0;
 
     const heat = particle._flameHeat ?? 1.0;
-    // Fire masks often contain soft falloff pixels. A low brightness floor keeps
-    // the flame body visible while still allowing mask intensity variation.
-    const minBrightness = Math.max(0.0, this.ownerEffect?.params?.flameBrightnessFloor ?? 0.75);
-    const brightness = Math.max(minBrightness, particle._flameBrightness ?? 1.0);
+    const fb = particle._flameBrightness;
+    const brightness = fb !== undefined
+      ? (fb < this._minBrightness ? this._minBrightness : fb)
+      : this._minBrightness;
 
-    const color = lerpColorStops(this._colorStops, t, _flameColorTemp);
-    const emission = lerpScalarStops(FLAME_EMISSION_STOPS, t) * heat * this._emissionScale * this._hdrGain * lifeFade;
-    const alpha = lerpScalarStops(FLAME_ALPHA_STOPS, t) * this._peakOpacity * lifeFade;
-
-    particle.color.x = color.r * emission * brightness;
-    particle.color.y = color.g * emission * brightness;
-    particle.color.z = color.b * emission * brightness;
-    particle.color.w = alpha * brightness;
+    const emission = this._emissionLUT[idx] * heat * brightness;
+    const alpha = this._alphaLUT[idx] * brightness;
+    const ci = idx * 3;
+    particle.color.x = this._colorLUT[ci] * emission;
+    particle.color.y = this._colorLUT[ci + 1] * emission;
+    particle.color.z = this._colorLUT[ci + 2] * emission;
+    particle.color.w = alpha;
   }
 
   frameUpdate(delta) {
     const p = this.ownerEffect?.params;
-    this._emissionScale = p?.coreEmission ?? 4.5;
-    this._hdrGain = resolveFireHdrMultiplier(this.ownerEffect);
-    this._peakOpacity = p?.flamePeakOpacity ?? 0.9;
-    this._temperature = p?.fireTemperature ?? 0.5;
-    this._updateGradientsForTemperature(this._temperature);
+    const nextEmission = p?.coreEmission ?? 4.5;
+    const nextHdr = resolveFireHdrMultiplier(this.ownerEffect);
+    const nextPeak = p?.flamePeakOpacity ?? 0.9;
+    const nextTemp = p?.fireTemperature ?? 0.5;
+    this._minBrightness = Math.max(0.0, p?.flameBrightnessFloor ?? 0.75);
+
+    if (nextEmission !== this._emissionScale ||
+        nextHdr !== this._hdrGain ||
+        nextPeak !== this._peakOpacity ||
+        nextTemp !== this._temperature) {
+      this._lutDirty = true;
+    }
+
+    this._emissionScale = nextEmission;
+    this._hdrGain = nextHdr;
+    this._peakOpacity = nextPeak;
+    if (nextTemp !== this._temperature) {
+      this._updateGradientsForTemperature(nextTemp);
+    }
+    this._temperature = nextTemp;
+
+    if (this._lutDirty) {
+      this._rebuildLUTs();
+      this._lutDirty = false;
+    }
+  }
+
+  _rebuildLUTs() {
+    const colorLUT = this._colorLUT;
+    const emissionLUT = this._emissionLUT;
+    const alphaLUT = this._alphaLUT;
+    const emissionScale = this._emissionScale;
+    const hdrGain = this._hdrGain;
+    const peakOpacity = this._peakOpacity;
+
+    for (let idx = 0; idx < 256; idx++) {
+      const t = idx / 255;
+      const lifeFade = particleSpawnDeathFade(t, 0.14, 0.16);
+      const color = lerpColorStops(this._colorStops, t, _flameColorTemp);
+      const ci = idx * 3;
+      colorLUT[ci] = color.r;
+      colorLUT[ci + 1] = color.g;
+      colorLUT[ci + 2] = color.b;
+      emissionLUT[idx] = lerpScalarStops(FLAME_EMISSION_STOPS, t) * emissionScale * hdrGain * lifeFade;
+      alphaLUT[idx] = lerpScalarStops(FLAME_ALPHA_STOPS, t) * peakOpacity * lifeFade;
+    }
   }
 
   _updateGradientsForTemperature(temp) {
@@ -539,41 +610,106 @@ export class EmberLifecycleBehavior {
     this._hdrGain = FIRE_HDR_LINEAR_GAIN;
     this._peakOpacity = 1.0;
     this._temperature = 0.5;
+    this._colorLUT = new Float32Array(256 * 3);
+    this._emissionLUT = new Float32Array(256);
+    this._alphaLUT = new Float32Array(256);
+    this._lutDirty = true;
   }
 
   initialize(particle) {
     particle._emberHeat = 0.85 + Math.random() * 0.30;
     if (particle._flameBrightness === undefined) particle._flameBrightness = 1.0;
+
+    const params = this.ownerEffect?.params;
+    let outdoorFactor = particle._windSusceptibility;
+    if (!Number.isFinite(outdoorFactor)) outdoorFactor = 1.0;
+    outdoorFactor = clamp01(outdoorFactor);
+    const indoorBlend = clamp01(1.0 - outdoorFactor);
+
+    const sup = Math.max(0, Math.min(1, Number.isFinite(params?.indoorEmberSuppression) ? params.indoorEmberSuppression : 0));
+    if (sup > 0 && Math.random() < sup * indoorBlend) {
+      if (typeof particle.life === 'number') particle.life = 0;
+      zeroParticleVisual(particle);
+      return;
+    }
+
+    if (outdoorFactor <= 0.01 && typeof particle.life === 'number') {
+      const lifeScale = Math.max(0.05, Math.min(1.0, params?.indoorEmberLifeScale ?? 1.0));
+      particle.life *= lifeScale;
+    }
+
     zeroParticleVisual(particle);
   }
 
   update(particle, delta) {
     const life = particle.life;
-    const age = particle.age;
     if (life <= 0) return;
-    const t = age / Math.max(0.001, life);
-    const lifeFade = particleSpawnDeathFade(t, 0.16, 0.20);
+    let age = particle._msDisplayAge;
+    if (age === undefined) age = particle.age;
+    let t = age / (life > 0.001 ? life : 0.001);
+    if (t < 0) t = 0; else if (t > 1) t = 1;
+    const idx = (t * 255) | 0;
 
     const heat = particle._emberHeat ?? 1.0;
-    const brightness = Math.max(0.3, particle._flameBrightness ?? 1.0);
+    const fb = particle._flameBrightness;
+    const brightness = fb !== undefined ? (fb < 0.3 ? 0.3 : fb) : 1.0;
 
-    const color = lerpColorStops(this._colorStops, t, _emberColorTemp);
-    const emission = lerpScalarStops(EMBER_EMISSION_STOPS, t) * heat * this._emissionScale * this._hdrGain * lifeFade;
-    const alpha = lerpScalarStops(EMBER_ALPHA_STOPS, t) * this._peakOpacity * lifeFade;
-
-    particle.color.x = color.r * emission * brightness;
-    particle.color.y = color.g * emission * brightness;
-    particle.color.z = color.b * emission * brightness;
-    particle.color.w = alpha * brightness;
+    const emission = this._emissionLUT[idx] * heat * brightness;
+    const alpha = this._alphaLUT[idx] * brightness;
+    const ci = idx * 3;
+    particle.color.x = this._colorLUT[ci] * emission;
+    particle.color.y = this._colorLUT[ci + 1] * emission;
+    particle.color.z = this._colorLUT[ci + 2] * emission;
+    particle.color.w = alpha;
   }
 
   frameUpdate(delta) {
     const p = this.ownerEffect?.params;
-    this._emissionScale = p?.emberEmission ?? 5.0;
-    this._hdrGain = resolveFireHdrMultiplier(this.ownerEffect);
-    this._peakOpacity = p?.emberPeakOpacity ?? 0.9;
-    this._temperature = p?.fireTemperature ?? 0.5;
-    this._updateGradientsForTemperature(this._temperature);
+    const nextEmission = p?.emberEmission ?? 5.0;
+    const nextHdr = resolveFireHdrMultiplier(this.ownerEffect);
+    const nextPeak = p?.emberPeakOpacity ?? 0.9;
+    const nextTemp = p?.fireTemperature ?? 0.5;
+
+    if (nextEmission !== this._emissionScale ||
+        nextHdr !== this._hdrGain ||
+        nextPeak !== this._peakOpacity ||
+        nextTemp !== this._temperature) {
+      this._lutDirty = true;
+    }
+
+    this._emissionScale = nextEmission;
+    this._hdrGain = nextHdr;
+    this._peakOpacity = nextPeak;
+    if (nextTemp !== this._temperature) {
+      this._updateGradientsForTemperature(nextTemp);
+    }
+    this._temperature = nextTemp;
+
+    if (this._lutDirty) {
+      this._rebuildLUTs();
+      this._lutDirty = false;
+    }
+  }
+
+  _rebuildLUTs() {
+    const colorLUT = this._colorLUT;
+    const emissionLUT = this._emissionLUT;
+    const alphaLUT = this._alphaLUT;
+    const emissionScale = this._emissionScale;
+    const hdrGain = this._hdrGain;
+    const peakOpacity = this._peakOpacity;
+
+    for (let idx = 0; idx < 256; idx++) {
+      const t = idx / 255;
+      const lifeFade = particleSpawnDeathFade(t, 0.16, 0.20);
+      const color = lerpColorStops(this._colorStops, t, _emberColorTemp);
+      const ci = idx * 3;
+      colorLUT[ci] = color.r;
+      colorLUT[ci + 1] = color.g;
+      colorLUT[ci + 2] = color.b;
+      emissionLUT[idx] = lerpScalarStops(EMBER_EMISSION_STOPS, t) * emissionScale * hdrGain * lifeFade;
+      alphaLUT[idx] = lerpScalarStops(EMBER_ALPHA_STOPS, t) * peakOpacity * lifeFade;
+    }
   }
 
   _updateGradientsForTemperature(temp) {
@@ -615,6 +751,11 @@ export class SmokeLifecycleBehavior {
     this._colorGradient = null;
     this._emissionGradient = null;
     this._smokeEmissionHdr = FIRE_SMOKE_HDR_EMISSION_GAIN * FIRE_HDR_LINEAR_GAIN;
+    this._colorLUT = new Float32Array(256 * 3);
+    this._alphaLUT = new Float32Array(256);
+    this._sizeLUT = new Float32Array(256);
+    this._lutSignature = '';
+    this._lutDirty = true;
   }
 
   initialize(particle) {
@@ -630,77 +771,26 @@ export class SmokeLifecycleBehavior {
 
   update(particle, delta) {
     const life = particle.life;
-    const age = particle.age;
     if (life <= 0) return;
-    const t = age / Math.max(0.001, life);
+    let age = particle._msDisplayAge;
+    if (age === undefined) age = particle.age;
+    let t = age / (life > 0.001 ? life : 0.001);
+    if (t < 0) t = 0; else if (t > 1) t = 1;
+    const idx = (t * 255) | 0;
 
     const density = particle._smokeDensity ?? 0.75;
-    const brightDark = this._colorBrightness * this._darknessFactor;
+    const indoor = particle._indoorSmokeScale;
+    const indoorSmoke = indoor !== undefined ? (indoor < 0 ? 0 : indoor > 1 ? 1 : indoor) : 1.0;
 
-    // Colour and emission gradients use raw normalized life t ∈ [0,1] so stop
-    // positions in the UI bar match sampling in-scene (same axis as sliders).
-    // (Opacity is still driven separately by the alpha envelope below.)
+    const ci = idx * 3;
+    particle.color.x = this._colorLUT[ci];
+    particle.color.y = this._colorLUT[ci + 1];
+    particle.color.z = this._colorLUT[ci + 2];
+    particle.color.w = this._alphaLUT[idx] * density * indoorSmoke;
 
-    let baseR, baseG, baseB;
-
-    if (this._colorGradient) {
-      // User-defined colour gradient — replaces the legacy COOL/WARM blend.
-      const gc = lerpColorStops(this._colorGradient, t, _smokeColorTemp);
-      baseR = gc.r;
-      baseG = gc.g;
-      baseB = gc.b;
-    } else {
-      // Legacy fallback: blend cool grey and warm brown.
-      const coolColor = lerpColorStops(SMOKE_COLOR_COOL, t, _smokeColorTemp);
-      const warmColor = lerpColorStops(SMOKE_COLOR_WARM, t, _smokeColorTemp2);
-      const w = this._colorWarmth;
-      baseR = coolColor.r + (warmColor.r - coolColor.r) * w;
-      baseG = coolColor.g + (warmColor.g - coolColor.g) * w;
-      baseB = coolColor.b + (warmColor.b - coolColor.b) * w;
-    }
-
-    // Emission tint is linear HDR (unclamped); diffuse body stays display-referred.
-    let emissionR = 0, emissionG = 0, emissionB = 0;
-    if (this._emissionGradient) {
-      const em = lerpColorStops(this._emissionGradient, t, _smokeEmissionTemp);
-      const emHdr = this._smokeEmissionHdr ?? FIRE_SMOKE_HDR_EMISSION_GAIN;
-      emissionR = em.r * emHdr;
-      emissionG = em.g * emHdr;
-      emissionB = em.b * emHdr;
-    }
-
-    particle.color.x = clamp01(baseR * brightDark) + emissionR;
-    particle.color.y = clamp01(baseG * brightDark) + emissionG;
-    particle.color.z = clamp01(baseB * brightDark) + emissionB;
-
-    // Alpha: 3-point smoothstep envelope over normalized age t ∈ [0,1].
-    // "Alpha Fade End" is the life fraction where opacity hits zero (not inclusive).
-    // Handle t >= aEnd and peak≈end explicitly so we never leave alphaEnv at its
-    // initial value and never depend on branch order edge cases.
-    let alphaEnv = 0.0;
-    const aStart = this._alphaStart;
-    const aPeak = this._alphaPeak;
-    const aEnd = this._alphaEnd;
-    if (t <= aStart || t >= aEnd) {
-      alphaEnv = 0.0;
-    } else if (t < aPeak) {
-      const rampT = (t - aStart) / Math.max(1e-5, aPeak - aStart);
-      alphaEnv = smoothstep01(rampT);
-    } else {
-      const fadeT = (t - aPeak) / Math.max(1e-5, aEnd - aPeak);
-      const s = smoothstep01(fadeT);
-      alphaEnv = 1.0 - s;
-    }
-    const indoorSmoke = typeof particle._indoorSmokeScale === 'number' && Number.isFinite(particle._indoorSmokeScale)
-      ? Math.max(0, Math.min(1, particle._indoorSmokeScale))
-      : 1.0;
-    particle.color.w = alphaEnv * density * this._smokeOpacity * this._precipMult * indoorSmoke;
-
-    // Size growth: billow from startSize to startSize * sizeGrowth.
     const startSize = particle._smokeStartSize;
     if (startSize > 0) {
-      const st = t * t * (3.0 - 2.0 * t);
-      particle.size = startSize * (1.0 + (this._sizeGrowth - 1.0) * st);
+      particle.size = startSize * this._sizeLUT[idx];
     }
   }
 
@@ -728,11 +818,98 @@ export class SmokeLifecycleBehavior {
     const precip = weatherController.currentState?.precipitation || 0;
     this._precipMult = Math.max(0.2, 1.0 - precip * 0.5);
 
-    // Cache gradient arrays once per frame (avoids per-particle property access).
-    // Gradient is active whenever it has ≥2 valid stops; no separate toggle needed.
     this._colorGradient = normalizeColorStops(p?.smokeColorGradient);
     this._emissionGradient = normalizeColorStops(p?.smokeEmissionGradient);
     this._smokeEmissionHdr = FIRE_SMOKE_HDR_EMISSION_GAIN * resolveFireHdrMultiplier(this.ownerEffect);
+
+    const nextSig = [
+      this._smokeOpacity,
+      this._colorWarmth,
+      this._colorBrightness,
+      this._darknessFactor,
+      this._sizeGrowth,
+      this._alphaStart,
+      this._alphaPeak,
+      this._alphaEnd,
+      this._precipMult,
+      this._smokeEmissionHdr,
+      gradientStopSignature(this._colorGradient),
+      gradientStopSignature(this._emissionGradient),
+    ].join('\x00');
+
+    if (nextSig !== this._lutSignature) {
+      this._lutSignature = nextSig;
+      this._lutDirty = true;
+    }
+
+    if (this._lutDirty) {
+      this._rebuildLUTs();
+      this._lutDirty = false;
+    }
+  }
+
+  _rebuildLUTs() {
+    const colorLUT = this._colorLUT;
+    const alphaLUT = this._alphaLUT;
+    const sizeLUT = this._sizeLUT;
+    const brightDark = this._colorBrightness * this._darknessFactor;
+    const emHdr = this._smokeEmissionHdr;
+    const aStart = this._alphaStart;
+    const aPeak = this._alphaPeak;
+    const aEnd = this._alphaEnd;
+    const sizeGrowth = this._sizeGrowth;
+    const colorWarmth = this._colorWarmth;
+    const colorGradient = this._colorGradient;
+    const emissionGradient = this._emissionGradient;
+    const smokeOpacity = this._smokeOpacity;
+    const precipMult = this._precipMult;
+
+    for (let idx = 0; idx < 256; idx++) {
+      const t = idx / 255;
+
+      let baseR, baseG, baseB;
+      if (colorGradient) {
+        const gc = lerpColorStops(colorGradient, t, _smokeColorTemp);
+        baseR = gc.r;
+        baseG = gc.g;
+        baseB = gc.b;
+      } else {
+        const coolColor = lerpColorStops(SMOKE_COLOR_COOL, t, _smokeColorTemp);
+        const warmColor = lerpColorStops(SMOKE_COLOR_WARM, t, _smokeColorTemp2);
+        const w = colorWarmth;
+        baseR = coolColor.r + (warmColor.r - coolColor.r) * w;
+        baseG = coolColor.g + (warmColor.g - coolColor.g) * w;
+        baseB = coolColor.b + (warmColor.b - coolColor.b) * w;
+      }
+
+      let emissionR = 0, emissionG = 0, emissionB = 0;
+      if (emissionGradient) {
+        const em = lerpColorStops(emissionGradient, t, _smokeEmissionTemp);
+        emissionR = em.r * emHdr;
+        emissionG = em.g * emHdr;
+        emissionB = em.b * emHdr;
+      }
+
+      const ci = idx * 3;
+      colorLUT[ci] = clamp01(baseR * brightDark) + emissionR;
+      colorLUT[ci + 1] = clamp01(baseG * brightDark) + emissionG;
+      colorLUT[ci + 2] = clamp01(baseB * brightDark) + emissionB;
+
+      let alphaEnv = 0.0;
+      if (t > aStart && t < aEnd) {
+        if (t < aPeak) {
+          const rampT = (t - aStart) / Math.max(1e-5, aPeak - aStart);
+          alphaEnv = smoothstep01(rampT);
+        } else {
+          const fadeT = (t - aPeak) / Math.max(1e-5, aEnd - aPeak);
+          alphaEnv = 1.0 - smoothstep01(fadeT);
+        }
+      }
+      alphaLUT[idx] = alphaEnv * smokeOpacity * precipMult;
+
+      const st = t * t * (3.0 - 2.0 * t);
+      sizeLUT[idx] = 1.0 + (sizeGrowth - 1.0) * st;
+    }
   }
 
   reset() {}
@@ -752,41 +929,72 @@ export class FlameShapeFrameBehavior {
   /**
    * @param {number} [shapeCount=4] Atlas rows — distinct silhouette families.
    * @param {number} [animFrames=4] Atlas cols — flicker frames per shape.
+   * @param {{ ownerEffect?: object, cyclesParamKey?: string, defaultCycles?: number }} [options]
    */
-  constructor(shapeCount = 4, animFrames = 4) {
+  constructor(shapeCount = 4, animFrames = 4, options = {}) {
     this.shapeCount = Math.max(1, shapeCount | 0);
     this.animFrames = Math.max(1, animFrames | 0);
+    this.ownerEffect = options.ownerEffect ?? null;
+    this.cyclesParamKey = options.cyclesParamKey ?? 'flameFlipbookCycles';
+    this.defaultCycles = Math.max(0.1, Number(options.defaultCycles) || 2);
     this.type = 'FlameShapeFrameBehavior';
+    this._cachedCycles = this.defaultCycles;
+  }
+
+  /** @private */
+  _resolveCycles() {
+    const raw = this.ownerEffect?.params?.[this.cyclesParamKey];
+    const cycles = typeof raw === 'number' && Number.isFinite(raw) ? raw : this.defaultCycles;
+    return Math.max(0.1, cycles);
   }
 
   initialize(particle) {
     if (!particle) return;
     particle._flameShapeRow = Math.floor(Math.random() * this.shapeCount);
     particle._flameAnimOffset = Math.floor(Math.random() * this.animFrames);
-    this._applyTile(particle, 0);
+    this._applyTile(particle, particle._flameAnimOffset);
   }
 
   update(particle, delta) {
     if (!particle) return;
     const life = particle.life;
     if (!Number.isFinite(life) || life <= 0) return;
-    const t = Math.max(0, Math.min(1, particle.age / life));
-    const animFrame = Math.min(this.animFrames - 1, Math.floor(t * this.animFrames));
-    this._applyTile(particle, animFrame);
-  }
-
-  /** @private */
-  _applyTile(particle, animFrame) {
-    const row = particle._flameShapeRow ?? 0;
+    let age = particle._msDisplayAge;
+    if (age === undefined) age = particle.age;
+    const t = age < 0 ? 0 : age > life ? 1 : age / life;
+    const cycles = this._cachedCycles;
     const offset = particle._flameAnimOffset ?? 0;
-    const col = (animFrame + offset) % this.animFrames;
-    particle.uvTile = row * this.animFrames + col;
+    const loopT = ((t * cycles * this.animFrames) + offset) % this.animFrames;
+    this._applyTile(particle, loopT);
   }
 
-  frameUpdate() {}
+  /**
+   * Set fractional uvTile within one atlas row for tile blending.
+   * @param {object} particle
+   * @param {number} loopT Continuous column index in [0, animFrames).
+   * @private
+   */
+  _applyTile(particle, loopT) {
+    const row = particle._flameShapeRow ?? 0;
+    let colBase = loopT | 0;
+    let frac = loopT - colBase;
+    if (colBase >= this.animFrames - 1) {
+      colBase = this.animFrames - 1;
+      frac = 0;
+    }
+    particle.uvTile = row * this.animFrames + colBase + frac;
+  }
+
+  frameUpdate() {
+    this._cachedCycles = this._resolveCycles();
+  }
   reset() {}
   clone() {
-    return new FlameShapeFrameBehavior(this.shapeCount, this.animFrames);
+    return new FlameShapeFrameBehavior(this.shapeCount, this.animFrames, {
+      ownerEffect: this.ownerEffect,
+      cyclesParamKey: this.cyclesParamKey,
+      defaultCycles: this.defaultCycles,
+    });
   }
 }
 
@@ -813,29 +1021,68 @@ export class FireSpinBehavior {
   }
 
   update(particle, delta) {
-    if (!particle || typeof delta !== 'number') return;
-    let dt = delta;
-    if (!Number.isFinite(dt)) return;
-    dt = Math.min(Math.max(dt, 0), 0.1);
-    if (typeof particle._msTimeScaleFactor === 'number' && Number.isFinite(particle._msTimeScaleFactor)) {
-      dt *= Math.max(0.0, particle._msTimeScaleFactor);
-    }
+    if (!particle) return;
+    let dt = delta > 0.1 ? 0.1 : (delta < 0 ? 0 : delta);
+    const ts = particle._msTimeScaleFactor;
+    if (ts !== undefined) dt *= (ts > 0 ? ts : 0);
     if (dt <= 0.0001) return;
-    if (!Number.isFinite(particle._spinSpeed) || particle._spinSpeed === 0) return;
-    const dAngle = particle._spinSpeed * dt;
-    if (!Number.isFinite(dAngle)) return;
+    const spinSpeed = particle._spinSpeed;
+    if (!spinSpeed) return;
+    const dAngle = spinSpeed * dt;
     if (typeof particle.rotation === 'number') {
-      const next = particle.rotation + dAngle;
-      if (Number.isFinite(next)) particle.rotation = next;
+      particle.rotation += dAngle;
     } else if (particle.rotation && typeof particle.rotation.z === 'number') {
-      const nextZ = particle.rotation.z + dAngle;
-      if (Number.isFinite(nextZ)) particle.rotation.z = nextZ;
+      particle.rotation.z += dAngle;
     }
   }
 
   frameUpdate(delta) {}
   reset() {}
   clone() { return new FireSpinBehavior(); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Per-particle flame motion — anchored flames skip drift forces
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/** @param {object|null|undefined} particle */
+export function readFlameMotionScale(particle) {
+  const s = particle?._flameMotionScale;
+  return s !== undefined ? (s < 0 ? 0 : s > 1 ? 1 : s) : 1;
+}
+
+export class ParticleMotionGatedBehavior {
+  constructor(inner) {
+    this.type = 'ParticleMotionGated';
+    this.inner = inner;
+  }
+
+  initialize(particle, system) {
+    if (this.inner?.initialize) this.inner.initialize(particle, system);
+  }
+
+  update(particle, delta, system) {
+    if (readFlameMotionScale(particle) <= 0) return;
+    if (!this.inner || typeof delta !== 'number') return;
+    if (typeof this.inner.update === 'function') {
+      this.inner.update.length >= 3
+        ? this.inner.update(particle, delta, system)
+        : this.inner.update(particle, delta);
+    }
+  }
+
+  frameUpdate(delta) {
+    if (this.inner?.frameUpdate) this.inner.frameUpdate(delta);
+  }
+
+  reset() {
+    if (this.inner?.reset) this.inner.reset();
+  }
+
+  clone() {
+    const innerClone = this.inner?.clone ? this.inner.clone() : this.inner;
+    return new ParticleMotionGatedBehavior(innerClone);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -853,13 +1100,10 @@ export class ParticleTimeScaledBehavior {
   }
 
   update(particle, delta, system) {
-    if (!this.inner || typeof delta !== 'number') return;
-    let dt = delta;
-    if (!Number.isFinite(dt)) return;
-    dt = Math.min(Math.max(dt, 0), 0.1);
-    if (particle && typeof particle._msTimeScaleFactor === 'number' && Number.isFinite(particle._msTimeScaleFactor)) {
-      dt *= Math.max(0.0, particle._msTimeScaleFactor);
-    }
+    if (!this.inner) return;
+    let dt = delta > 0.1 ? 0.1 : (delta < 0 ? 0 : delta);
+    const ts = particle._msTimeScaleFactor;
+    if (ts !== undefined) dt *= (ts > 0 ? ts : 0);
     if (dt <= 0.0001) return;
     if (typeof this.inner.update === 'function') {
       this.inner.update.length >= 3

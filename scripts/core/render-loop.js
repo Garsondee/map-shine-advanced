@@ -626,8 +626,10 @@ export class RenderLoop {
 
         const _isFirstFrame = !this._firstFrameLogged;
         const _t0 = _isFirstFrame ? performance.now() : 0;
+        const _tComposer0 = tickToken != null ? performance.now() : 0;
 
         this.effectComposer.render(presentationDelta);
+        const compositorMs = tickToken != null ? (performance.now() - _tComposer0) : 0;
         this._lastComposerRenderTime = now;
         this._lastPresentationMs = now;
         this._forceNextRender = false;
@@ -667,6 +669,7 @@ export class RenderLoop {
             sinceLastPresentMs: gate.sinceLastPresentMs,
             renderPath,
             continuousReason,
+            compositorMs,
           });
         }
 

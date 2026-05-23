@@ -21,6 +21,7 @@ import { DiagnosticCenterManager } from './diagnostic-center.js';
 import { TileMotionDialog } from './tile-motion-dialog.js';
 import { TokenMovementDialog } from './token-movement-dialog.js';
 import { CameraPathDialog } from './camera-path-dialog.js';
+import { PerformanceRecorderDialog } from './performance-recorder-dialog.js';
 import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../core/render-layers.js';
 import { MASK_DEBUG_OVERLAY_MODE_OPTIONS } from '../compositor-v2/MaskDebugOverlayPass.js';
 import * as sceneSettings from '../settings/scene-settings.js';
@@ -376,6 +377,9 @@ export class TweakpaneManager {
 
     /** @type {HTMLSelectElement|null} */
     this._presetsSelectEl = null;
+
+    /** @type {HTMLButtonElement|null} */
+    this._presetsRevertBtnEl = null;
 
     /** @type {string|null} */
     this._lastPresetsSceneId = null;
@@ -1632,7 +1636,15 @@ export class TweakpaneManager {
     });
 
     addGridButton('Performance Recorder', () => {
-      window.MapShine?.performanceRecorderDialog?.toggle?.();
+      let dlg = window.MapShine?.performanceRecorderDialog;
+      if (!dlg?.container?.isConnected) {
+        dlg = PerformanceRecorderDialog.ensureAvailable?.() ?? null;
+      }
+      if (!dlg) {
+        ui.notifications?.warn?.('Performance Recorder not available (Map Shine not fully initialized yet)');
+        return;
+      }
+      dlg.toggle();
     });
 
     addGridButton('🎯 Map Points', () => {
@@ -1944,6 +1956,25 @@ export class TweakpaneManager {
     wrap.appendChild(label);
     wrap.appendChild(select);
 
+    const revertBtn = document.createElement('button');
+    revertBtn.type = 'button';
+    revertBtn.className = 'ms-scene-presets-revert';
+    revertBtn.textContent = 'Revert';
+    revertBtn.title = 'Restore settings from before the last preset apply';
+    revertBtn.style.flex = '0 0 auto';
+    revertBtn.style.padding = '5px 10px';
+    revertBtn.style.borderRadius = '6px';
+    revertBtn.style.border = '1px solid rgba(255,255,255,0.18)';
+    revertBtn.style.background = 'rgba(255,255,255,0.08)';
+    revertBtn.style.color = 'inherit';
+    revertBtn.style.cursor = 'pointer';
+    revertBtn.hidden = true;
+    revertBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      void this._onPresetsRevertClick();
+    });
+    wrap.appendChild(revertBtn);
+
     for (const evt of ['mousedown', 'pointerdown', 'dblclick', 'contextmenu', 'click']) {
       wrap.addEventListener(evt, (e) => e.stopPropagation());
     }
@@ -1953,6 +1984,7 @@ export class TweakpaneManager {
 
     this._presetsBarEl = wrap;
     this._presetsSelectEl = select;
+    this._presetsRevertBtnEl = revertBtn;
 
     select.addEventListener('change', (ev) => {
       ev.stopPropagation();
@@ -2002,6 +2034,58 @@ export class TweakpaneManager {
     }
 
     this._lastPresetsSceneId = scene?.id ?? null;
+    this._updatePresetsRevertButton();
+  }
+
+  /**
+   * Show or hide the preset revert control for the active scene.
+   * @private
+   */
+  _updatePresetsRevertButton() {
+    const btn = this._presetsRevertBtnEl;
+    if (!btn) return;
+
+    const scene = canvas?.scene ?? null;
+    const hasUndo = scenePresets.hasPresetUndoSnapshot(scene);
+    btn.hidden = !hasUndo;
+    btn.disabled = !hasUndo || !canPersistSceneDocument();
+  }
+
+  /**
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _onPresetsRevertClick() {
+    const scene = canvas?.scene;
+    if (!scene) {
+      ui.notifications?.warn?.('Map Shine: No active scene');
+      return;
+    }
+
+    if (!canPersistSceneDocument()) {
+      ui.notifications?.warn?.('Map Shine: Only GMs can revert preset changes');
+      return;
+    }
+
+    this._applyingPreset = true;
+    this._presetSuppressCustomForSaves = true;
+    try {
+      const restored = await scenePresets.revertPresetChange(scene);
+      if (!restored) return;
+    } finally {
+      try {
+        this.lastSave = 0;
+        await this.flushSaveQueue();
+        await Promise.resolve();
+        this.lastSave = 0;
+        await this.flushSaveQueue();
+      } catch (_) {
+      }
+      this._presetSuppressCustomForSaves = false;
+      this._applyingPreset = false;
+    }
+
+    await this._hydratePresetsSelect({ forceLoad: false });
   }
 
   /**
@@ -2050,6 +2134,7 @@ export class TweakpaneManager {
     }
 
     await this._hydratePresetsSelect({ forceLoad: false });
+    this._updatePresetsRevertButton();
   }
 
   /**
@@ -2066,6 +2151,7 @@ export class TweakpaneManager {
     if (sceneId !== this._lastPresetsSceneId) {
       this._lastPresetsSceneId = sceneId;
       void this._hydratePresetsSelect({ forceLoad: false });
+      this._updatePresetsRevertButton();
       return;
     }
 
@@ -2081,6 +2167,8 @@ export class TweakpaneManager {
     if (select.value !== want) {
       select.value = want;
     }
+
+    this._updatePresetsRevertButton();
   }
 
   /**
@@ -8263,6 +8351,7 @@ export class TweakpaneManager {
     this._postFolder = null;
     this._presetsBarEl = null;
     this._presetsSelectEl = null;
+    this._presetsRevertBtnEl = null;
     this._lastPresetsSceneId = null;
     this._scenePresetTrackingReady = false;
     this._presetSuppressCustomForSaves = false;
@@ -9319,17 +9408,30 @@ export class TweakpaneManager {
             return `
               <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:4px 0; border-top: 1px solid rgba(255,255,255,0.06);">
                 <span style="font-size: 10px; color: #aaa;">#${idx + 1}: (${xTxt}, ${yTxt})</span>
-                <button type="button" class="remove-point-btn" data-point-index="${idx}" style="
-                  padding: 2px 8px;
-                  font-size: 10px;
-                  background: rgba(180, 60, 60, 0.65);
-                  border: none;
-                  border-radius: 3px;
-                  color: #eee;
-                  cursor: pointer;
-                ">
-                  <i class="fas fa-times"></i>
-                </button>
+                <div style="display:flex; gap:4px; align-items:center;">
+                  <button type="button" class="center-point-btn" data-point-index="${idx}" title="Center map on this point" style="
+                    padding: 2px 8px;
+                    font-size: 10px;
+                    background: rgba(60, 100, 160, 0.65);
+                    border: none;
+                    border-radius: 3px;
+                    color: #eee;
+                    cursor: pointer;
+                  ">
+                    <i class="fas fa-crosshairs"></i>
+                  </button>
+                  <button type="button" class="remove-point-btn" data-point-index="${idx}" title="Remove this point" style="
+                    padding: 2px 8px;
+                    font-size: 10px;
+                    background: rgba(180, 60, 60, 0.65);
+                    border: none;
+                    border-radius: 3px;
+                    color: #eee;
+                    cursor: pointer;
+                  ">
+                    <i class="fas fa-times"></i>
+                  </button>
+                </div>
               </div>
             `;
           }).join('')}
@@ -9360,6 +9462,7 @@ export class TweakpaneManager {
         form.group-edit-form.mapshine-map-point-edit .rope-texture-browse,
         form.group-edit-form.mapshine-map-point-edit .add-points-btn,
         form.group-edit-form.mapshine-map-point-edit .clear-points-btn,
+        form.group-edit-form.mapshine-map-point-edit .center-point-btn,
         form.group-edit-form.mapshine-map-point-edit .remove-point-btn {
           width: auto !important;
           min-width: 0;
@@ -9369,6 +9472,7 @@ export class TweakpaneManager {
           gap: 6px;
           line-height: 1;
         }
+        form.group-edit-form.mapshine-map-point-edit .points-list .center-point-btn,
         form.group-edit-form.mapshine-map-point-edit .points-list .remove-point-btn {
           flex: 0 0 auto;
         }
@@ -9634,6 +9738,26 @@ export class TweakpaneManager {
         html.find('[name="emissionIntensity"]').on('input', (ev) => {
           const val = parseFloat(ev.target.value);
           html.find('.intensity-value').text(`${(val * 100).toFixed(0)}%`);
+        });
+
+        // Center map on a single point
+        html.find('.center-point-btn').on('click', (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const idx = parseInt(ev.currentTarget.dataset.pointIndex);
+          if (!Number.isFinite(idx)) return;
+
+          const point = group.points?.[idx];
+          const x = Number(point?.x);
+          const yWorld = Number(point?.y);
+          if (!Number.isFinite(x) || !Number.isFinite(yWorld)) return;
+
+          const foundryY = Number.isFinite(h) ? (h - yWorld) : yWorld;
+          try {
+            canvas?.animatePan?.({ x, y: foundryY, duration: 250 });
+          } catch (_) {
+            canvas?.pan?.({ x, y: foundryY });
+          }
         });
 
         // Remove a single point

@@ -13,11 +13,8 @@ import { hasV14NativeLevels } from '../foundry/levels-scene-flags.js';
 import {
   DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT,
   POINT_LIGHT_FALLOFF_GLSL,
-  POINT_LIGHT_WALL_VERTEX_EDGE_MIN,
   applyPointLightBufferBlending,
-  computePointLightFadeWidth,
   computePointLightGeomRadiusPx,
-  computePointLightGeomScale,
   foundryShaderAttenuationFromData,
 } from '../scene/point-light-falloff.js';
 
@@ -1842,25 +1839,8 @@ export class ThreeLightSource {
    * @private
    */
   _expandLocalShapePointsForSoftRim(localPoints, outerRadiusPx, attenuation) {
-    const fadeWidth = computePointLightFadeWidth({
-      attenuation,
-      falloffExponent: DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT,
-    });
-    if (!localPoints?.length || fadeWidth < 0.0001) return localPoints;
-
-    const outerR = Math.max(Number(outerRadiusPx) || 0, 1e-4);
-    const rimScale = computePointLightGeomScale(fadeWidth);
-    return localPoints.map((p) => {
-      const len = Math.hypot(p.x, p.y);
-      if (len < 1e-4) return p.clone();
-      const edgeW = Math.min(1.0, len / outerR);
-      if (edgeW < POINT_LIGHT_WALL_VERTEX_EDGE_MIN) return p.clone();
-      const rimT = Math.max(0, Math.min(1,
-        (edgeW - POINT_LIGHT_WALL_VERTEX_EDGE_MIN) / Math.max(1e-4, 1.0 - POINT_LIGHT_WALL_VERTEX_EDGE_MIN)
-      ));
-      const scale = 1.0 + (rimScale - 1.0) * rimT;
-      return new THREE.Vector2(p.x * scale, p.y * scale);
-    });
+    // Wall-clipped Foundry light polygons must not expand — rim pad bleeds through walls.
+    return localPoints;
   }
 
   /** @private Circle fallback radius: photometric base + rim margin (wall clip absent). */

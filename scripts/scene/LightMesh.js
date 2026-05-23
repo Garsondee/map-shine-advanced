@@ -77,7 +77,7 @@ export class LightMesh {
     );
     this.color = { r: color?.r ?? 1, g: color?.g ?? 1, b: color?.b ?? 1 };
     this.edgeSoftness = Number.isFinite(Number(options.edgeSoftness))
-      ? Math.max(0, Math.min(0.75, Number(options.edgeSoftness)))
+      ? Math.max(0, Math.min(1.0, Number(options.edgeSoftness)))
       : 0.12;
     this.attenuation = typeof options.attenuation === 'number'
       ? options.attenuation
@@ -159,7 +159,8 @@ export class LightMesh {
           float geomR = max(uGeomRadius, outerR);
           float dGeom = dist / geomR;
           float photFrac = outerR / geomR;
-          cover *= 1.0 - smoothstep(photFrac * 0.50, 1.04, dGeom);
+          float fadeBand = msaPointLightFadeWidth(uAttenuation, uEdgeSoftness, uFalloffExponent);
+          cover *= 1.0 - smoothstep(photFrac * 0.12, 1.35, dGeom);
 
           float gain = max(uEmissionGain, 0.0);
           float rgbGain = max(uRgbGain, 0.0);
@@ -171,7 +172,11 @@ export class LightMesh {
           vec3 rgbOut = (uAchromaticRgb > 0.5) ? vec3(illumMag) : (hue * illumMag);
           float alphaOut = illumMag;
 
-          float edgeFade = smoothstep(0.0, 0.018, cover);
+          float edgeFade = 1.0 - smoothstep(
+            1.0 - max(0.06, fadeBand * 1.35),
+            1.05 + fadeBand * 0.10,
+            d
+          );
           alphaOut *= edgeFade;
           rgbOut *= edgeFade;
           if (alphaOut <= 0.000001 && max(max(rgbOut.r, rgbOut.g), rgbOut.b) <= 0.000001) discard;
@@ -249,6 +254,9 @@ export class LightMesh {
    * @private
    */
   _expandWorldPointsForSoftRim(worldPoints) {
+    // Wall-clipped polygons must not radially expand — expansion pushes rim through occluders.
+    if (this._baseWorldPoints?.length >= 6) return worldPoints;
+
     const fadeWidth = this._getEffectiveRimSoftness();
     if (!worldPoints?.length || fadeWidth < 0.0001) return worldPoints;
 
@@ -451,6 +459,32 @@ export class LightMesh {
     if (this.material?.uniforms?.uRgbGain) {
       this.material.uniforms.uRgbGain.value = g;
     }
+  }
+
+  /**
+   * Runtime photometric outer radius (px). Updates falloff uniforms; circle meshes rebuild geometry.
+   * @param {number} outerRadiusPx
+   */
+  setOuterRadiusPx(outerRadiusPx) {
+    const outerR = Math.max(1, Number(outerRadiusPx) || 1);
+    if (Math.abs(outerR - this.outerRadiusPx) < 0.5) return;
+    this.outerRadiusPx = outerR;
+    this.innerRadiusPx = Math.min(this.innerRadiusPx, this.outerRadiusPx);
+    this._syncRadiusUniforms();
+    if (this._usesCircleFallback) {
+      this._rebuildCircleGeometryIfNeeded();
+    }
+  }
+
+  /**
+   * Runtime bright-core radius (px), clamped to outer radius.
+   * @param {number} innerRadiusPx
+   */
+  setInnerRadiusPx(innerRadiusPx) {
+    const innerR = Math.max(1, Math.min(Number(innerRadiusPx) || 1, this.outerRadiusPx));
+    if (Math.abs(innerR - this.innerRadiusPx) < 0.5) return;
+    this.innerRadiusPx = innerR;
+    this._syncRadiusUniforms();
   }
 
   /** @private Rebuild geometry when rim/attenuation changes. */

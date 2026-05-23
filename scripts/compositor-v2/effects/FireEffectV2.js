@@ -54,6 +54,7 @@ import {
   SmokeLifecycleBehavior,
   ParticleTimeScaledBehavior,
   FlameShapeFrameBehavior,
+  ParticleMotionGatedBehavior,
   generateFirePoints,
   filterFirePointsByOutdoor,
 } from './fire-behaviors.js';
@@ -91,12 +92,31 @@ const FIRE_GLOW_REBUILD_PARAMS = new Set([
   'fireGlowMaxBuckets',
   'fireGlowRadiusPx',
   'fireGlowInnerRadiusScale',
+  'fireGlowNightRadiusPx',
+  'fireGlowNightInnerRadiusScale',
   'fireGlowWallClipEnabled',
   'fireGlowWallClipRadiusScale',
 ]);
 
 // Spatial bucket size for splitting large fire masks into smaller emitters (px).
 const BUCKET_SIZE = 2000;
+/** Hard cap on spatial particle emitters per floor — coarsens buckets when exceeded. */
+const FIRE_DEFAULT_MAX_SPATIAL_BUCKETS = 16;
+const FIRE_DEFAULT_MAX_SYSTEMS_PER_FLOOR = 36;
+const FIRE_DEFAULT_OUTDOOR_SPLIT_MAX_BUCKETS = 10;
+const FIRE_DEFAULT_SIM_HZ = 18;
+/** Hard ceiling on CPU physics/emission steps (flipbook visuals still refresh every render frame). */
+const FIRE_MAX_SIM_HZ = 30;
+const FIRE_MAX_SPATIAL_BUCKET_SIZE_PX = 16384;
+
+/** Behavior types re-evaluated every render frame for smooth flipbook / colour. */
+const FIRE_VISUAL_BEHAVIOR_TYPES = new Set([
+  'FlameShapeFrameBehavior',
+  'FlameLifecycle',
+  'EmberLifecycle',
+  'SmokeLifecycle',
+  'SizeOverLife',
+]);
 
 // Must NOT start with "__" — FloorRenderBus.renderFloorRangeTo treats "__*" keys like
 // background planes (visibility = includeBackground only), ignoring floorIndex.
@@ -108,19 +128,21 @@ const REBUILD_PARAM_KEYS = [
   'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax',
   'smokeEnabled', 'smokeSizeMin', 'smokeSizeMax', 'smokeLifeMin', 'smokeLifeMax',
   'smokeSizeGrowth', 'smokeSizeOverLife', 'smokeOutdoorAboveCanopy',
+  'fireMaxSpatialBuckets', 'fireMaxParticles', 'fireEmberMaxParticles', 'fireSmokeMaxParticles',
+  'fireMaxSystemsPerFloor', 'fireOutdoorSplitMaxBuckets',
 ];
 const REBUILD_PARAM_SET = new Set(REBUILD_PARAM_KEYS);
 
-// Procedural flame flipbook — 4×4 atlas: rows = fluid shape archetypes, cols = anim frames.
-const FIRE_ATLAS_COLS = 4;
+// Procedural flame flipbook — 4×8 atlas: rows = fluid shape archetypes, cols = anim frames.
+const FIRE_ATLAS_COLS = 8;
 const FIRE_ATLAS_ROWS = 4;
 const FIRE_ATLAS_SHAPE_COUNT = FIRE_ATLAS_ROWS;
 const FIRE_ATLAS_ANIM_FRAMES = FIRE_ATLAS_COLS;
 const FIRE_ATLAS_FRAMES = FIRE_ATLAS_COLS * FIRE_ATLAS_ROWS;
 const FIRE_ATLAS_CELL_SIZE = 64;
 
-// Procedural smoke flipbook — 4×4 atlas: rows = wispy shape archetypes, cols = drift frames.
-const SMOKE_ATLAS_COLS = 4;
+// Procedural smoke flipbook — 4×8 atlas: rows = wispy shape archetypes, cols = drift frames.
+const SMOKE_ATLAS_COLS = 8;
 const SMOKE_ATLAS_ROWS = 4;
 const SMOKE_ATLAS_SHAPE_COUNT = SMOKE_ATLAS_ROWS;
 const SMOKE_ATLAS_ANIM_FRAMES = SMOKE_ATLAS_COLS;
@@ -254,29 +276,36 @@ class ProceduralTextureBuilder {
     return Math.pow(Math.max(0, Math.min(1, alpha)), 1.3);
   }
 
-  /** @private Shape 3 — Scattered Wisps: High contrast noise that breaks the blob into detached islands. */
-  static _fireShapeScatteredWisps(nx, ny, animCol, animCols, baseSeed) {
-    const { tX, tY } = this._fireAtlasAnimDrift(animCol, animCols);
+  /** @private Shape 3 — Archipelago Pool: Coherent fire body with HF noise edge lobes, not speckled wisps. */
+  static _fireShapeArchipelagoPool(nx, ny, animCol, animCols, baseSeed) {
+    const { tX, tY, tX2, tY2 } = this._fireAtlasAnimDrift(animCol, animCols);
 
-    const dx = (nx - 0.5) * 2.0;
-    const dy = (ny - 0.5) * 2.0;
+    const warpX = this._fbm(nx * 2.8 + tX + baseSeed + 63.1, ny * 2.8 + tY, 2) * 0.2;
+    const warpY = this._fbm(nx * 2.8 - tY + 11.4, ny * 2.8 + tX + baseSeed, 2) * 0.2;
+    const dx = (nx - 0.5 + warpX) * 2.0;
+    const dy = (ny - 0.5 + warpY) * 2.0;
     const dist = Math.sqrt(dx * dx + dy * dy);
 
-    // Broad, soft underlying heat pool
-    const basePool = 1.0 - this._smoothstep(0.2, 0.9, dist);
+    const core = Math.exp(-dist * dist * 5.5);
 
-    // High-frequency "cellular" style noise to chop the pool into wisps
-    const wispN = this._fbm(nx * 4.5 + tX * 1.5 + baseSeed, ny * 4.5 + tY * 1.5, 3);
+    // Medium-frequency lobes — a handful of flame islands, not a furry speckle field.
+    const lobeN = this._fbm(nx * 5.5 + tX2 + baseSeed, ny * 5.5 + tY2, 3);
+    const lobeMask = this._smoothstep(0.05, 0.45, lobeN);
 
-    // Sharpen the noise to create distinct islands
-    const wispMask = this._smoothstep(-0.1, 0.4, wispN);
+    // High-frequency ripples on the outer rim for boiling detail.
+    const detailN = this._fbm(nx * 10.0 + tX, ny * 10.0 + tY, 2);
+    const edgeRipple = 1.0 - this._smoothstep(0.38, 0.75, dist - detailN * 0.1);
 
-    // Keep a tiny faint core so the particle doesn't entirely vanish
-    const faintCore = Math.exp(-dist * dist * 12.0) * 0.4;
+    // Archipelago ring: narrow HF channels carve gaps between connected flame lobes.
+    const poolEdge = 1.0 - this._smoothstep(0.25, 0.85, dist);
+    const channelN = this._fbm(nx * 9.0 + tX * 1.1 + baseSeed + 88.0, ny * 9.0 + tY * 1.1, 3);
+    const channels = this._smoothstep(0.35, 0.65, channelN);
+    const midRing = this._smoothstep(0.2, 0.45, dist) * (1.0 - this._smoothstep(0.55, 0.8, dist));
+    const archipelago = poolEdge * (1.0 - midRing + midRing * channels) * lobeMask;
 
-    let alpha = (basePool * wispMask * 1.2) + faintCore;
-    alpha *= 1.0 - this._smoothstep(0.85, 1.0, dist);
-    return Math.pow(Math.max(0, Math.min(1, alpha)), 1.5);
+    let alpha = core * 0.7 + edgeRipple * 0.35 + archipelago * 0.55;
+    alpha *= 1.0 - this._smoothstep(0.88, 1.0, dist);
+    return Math.pow(Math.max(0, Math.min(1, alpha)), 1.2);
   }
 
   /** @private Dispatch to one of four fluid silhouette families. */
@@ -285,14 +314,14 @@ class ProceduralTextureBuilder {
       case 0: return this._fireShapeRollingCore(nx, ny, animCol, animCols, baseSeed);
       case 1: return this._fireShapeLickingTendrils(nx, ny, animCol, animCols, baseSeed);
       case 2: return this._fireShapeSplitting(nx, ny, animCol, animCols, baseSeed);
-      case 3: return this._fireShapeScatteredWisps(nx, ny, animCol, animCols, baseSeed);
+      case 3: return this._fireShapeArchipelagoPool(nx, ny, animCol, animCols, baseSeed);
       default: return this._fireShapeRollingCore(nx, ny, animCol, animCols, baseSeed);
     }
   }
 
   /**
    * Build a cols×rows flipbook of top-down campfire pools.
-   * Rows = four fluid shape archetypes (rolling core, licking tendrils, splitting, scattered wisps); cols = flicker frames.
+   * Rows = four fluid shape archetypes (rolling core, licking tendrils, splitting, archipelago pool); cols = flicker frames.
    * @param {number} cols Animation frames per shape.
    * @param {number} rows Shape archetype count.
    * @param {number} cellSize Pixel size of each atlas cell.
@@ -559,6 +588,12 @@ export class FireEffectV2 {
     this._visionComputer = new VisionPolygonComputer();
     this._needsGlowRebuild = false;
     this._lastGlowRebuildAt = 0;
+    this._glowFlickerDarkness = -1;
+    this._glowParamCache = { indoor: null, outdoor: null, darkness: -1 };
+    this._systemParamsSignature = '';
+    this._simAccumSec = 0;
+    /** @type {import('../../core/diagnostics/PerformanceRecorder.js').PerformanceRecorder|null} */
+    this._activePerfRecorder = null;
     /** @type {[string, number][]} */
     this._glowHookIds = [];
 
@@ -570,8 +605,8 @@ export class FireEffectV2 {
       fireSize: 18.0,
       emberRate: 5,
       windInfluence: 3.9,
-      fireSizeMin: 107,
-      fireSizeMax: 156,
+      fireSizeMin: 123,
+      fireSizeMax: 179,
       fireLifeMin: 5,
       fireLifeMax: 5.45,
       fireSpinEnabled: true,
@@ -593,6 +628,7 @@ export class FireEffectV2 {
       emberLifeMax: 12,
       fireUpdraft: 1.15,
       emberUpdraft: 2.5,
+      flameStationaryFraction: 0.5,
       fireCurlStrength: 0,
       emberCurlStrength: 10,
       weatherPrecipKill: 0.5,
@@ -603,18 +639,22 @@ export class FireEffectV2 {
       indoorLifeScale: 1,
       indoorTimeScale: 0.2,
       flamePeakOpacity: 1,
+      flameFlipbookCycles: 3.5,
       coreEmission: 4.5,
       flameBrightnessFloor: 0.75,
       emberEmission: 5,
       emberPeakOpacity: 1,
+      indoorEmberLifeScale: 1,
+      indoorEmberSuppression: 0,
       smokeEnabled: true,
+      smokeFlipbookCycles: 1,
       smokeRatio: 3,
       smokeOpacity: 1,
       smokeColorWarmth: 1,
       smokeColorBrightness: 0.72,
       smokeDarknessResponse: 0,
-      smokeSizeMin: 200,
-      smokeSizeMax: 400,
+      smokeSizeMin: 230,
+      smokeSizeMax: 460,
       smokeSizeGrowth: 10,
       smokeSizeOverLife: 10,
       smokeLifeMin: 8.2,
@@ -649,6 +689,14 @@ export class FireEffectV2 {
       heatDistortionSpeed: 3.0,
       heatDistortionEdgeSoftness: 0.4,
 
+      fireMaxSpatialBuckets: FIRE_DEFAULT_MAX_SPATIAL_BUCKETS,
+      fireMaxSystemsPerFloor: FIRE_DEFAULT_MAX_SYSTEMS_PER_FLOOR,
+      fireOutdoorSplitMaxBuckets: FIRE_DEFAULT_OUTDOOR_SPLIT_MAX_BUCKETS,
+      fireSimHz: FIRE_DEFAULT_SIM_HZ,
+      fireMaxParticles: 1200,
+      fireEmberMaxParticles: 700,
+      fireSmokeMaxParticles: 600,
+
       fireGlowEnabled: true,
       fireGlowBucketSizePx: 512,
       fireGlowMaxBuckets: 128,
@@ -667,9 +715,27 @@ export class FireEffectV2 {
       fireGlowFlickerSpeedJitter: 0.72,
       fireGlowWallClipEnabled: true,
       fireGlowWallClipRadiusScale: 1.0,
-      fireGlowDayIntensityScale: 0.22,
+      fireGlowDayIntensityScale: 0.68,
       fireGlowNightIntensityScale: 1.35,
-      fireGlowIndoorNightBoost: 0.55,
+      fireGlowIndoorIntensityScale: 0.78,
+      fireGlowOutdoorIntensityScale: 2.0,
+      fireGlowIndoorCancelScale: 0.75,
+      fireGlowOutdoorCancelScale: 1.85,
+      fireGlowIndoorRadiusScale: 0.92,
+      fireGlowOutdoorRadiusScale: 1.28,
+      fireGlowIndoorNightBoost: 0.30,
+      fireGlowOutdoorNightBoost: 1.15,
+      fireGlowNightWarmth: 0.92,
+      fireGlowNightIntensity: 1.35,
+      fireGlowNightDarknessCancel: 11.0,
+      fireGlowNightRadiusPx: 768,
+      fireGlowNightInnerRadiusScale: 0.18,
+      fireGlowNightFalloffExponent: 1.25,
+      fireGlowNightEdgeSoftness: 0.58,
+      fireGlowNightFlickerStrength: 4.2,
+      fireGlowNightFlickerSpeed: 5.5,
+      fireGlowNightFlickerStrengthJitter: 0.85,
+      fireGlowNightFlickerSpeedJitter: 0.75,
     };
 
     log.debug('FireEffectV2 created');
@@ -709,6 +775,13 @@ export class FireEffectV2 {
     this.params[paramId] = value;
     if (paramId.startsWith('fireGlow')) {
       this._applyGlowParamChange(paramId);
+      this._invalidateGlowParamCache();
+    }
+    if (!REBUILD_PARAM_SET.has(paramId)) {
+      this._systemParamsSignature = '';
+    }
+    if (paramId === 'fireSimHz') {
+      this._simAccumSec = 0;
     }
     if (REBUILD_PARAM_SET.has(paramId)) {
       this._queueRebuild();
@@ -731,12 +804,105 @@ export class FireEffectV2 {
     return {
       enabled: true,
       groups: [
-        { name: 'flames', label: 'Flames', type: 'folder', expanded: false, parameters: ['globalFireRate', 'fireHeight', 'fireTemperature', 'flamePeakOpacity', 'coreEmission', 'flameBrightnessFloor', 'fireSizeMin', 'fireSizeMax', 'fireLifeMin', 'fireLifeMax', 'fireSpinEnabled', 'fireSpinSpeedMin', 'fireSpinSpeedMax', 'fireUpdraft', 'fireCurlStrength'] },
+        { name: 'flames', label: 'Flames', type: 'folder', expanded: false, parameters: ['globalFireRate', 'fireHeight', 'fireTemperature', 'flamePeakOpacity', 'coreEmission', 'flameBrightnessFloor', 'fireSizeMin', 'fireSizeMax', 'fireLifeMin', 'fireLifeMax', 'flameFlipbookCycles', 'fireSpinEnabled', 'fireSpinSpeedMin', 'fireSpinSpeedMax', 'flameStationaryFraction', 'fireUpdraft', 'fireCurlStrength'] },
         { name: 'flame-texture', label: 'Flame Texture', type: 'folder', expanded: false, parameters: ['flameTextureOpacity', 'flameTextureBrightness', 'flameTextureScaleX', 'flameTextureScaleY', 'flameTextureOffsetX', 'flameTextureOffsetY', 'flameTextureRotation', 'flameTextureFlipX', 'flameTextureFlipY'] },
-        { name: 'embers', label: 'Embers', type: 'folder', expanded: false, parameters: ['emberRate', 'emberEmission', 'emberPeakOpacity', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'emberUpdraft', 'emberCurlStrength'] },
-        { name: 'smoke', label: 'Smoke', type: 'folder', expanded: true, parameters: ['smokeEnabled', 'smokeOutdoorAboveCanopy', 'smokeRatio', 'smokeOpacity', 'indoorSmokeSuppression', 'smokeColorWarmth', 'smokeColorBrightness', 'smokeDarknessResponse', 'smokeColorGradient', 'smokeEmissionGradient', 'smokeAlphaStart', 'smokeAlphaPeak', 'smokeAlphaEnd', 'smokeSizeMin', 'smokeSizeMax', 'smokeSizeOverLife', 'smokeLifeMin', 'smokeLifeMax', 'smokeUpdraft', 'smokeTurbulence', 'smokeWindInfluence'] },
-        { name: 'fire-glow', label: 'Fire Glow (Darkness)', type: 'folder', expanded: false, parameters: ['fireGlowEnabled', 'fireGlowWarmth', 'fireGlowIntensity', 'fireGlowDarknessCancel', 'fireGlowDarknessNightBoost', 'fireGlowFollowLightIntensity', 'fireGlowDayIntensityScale', 'fireGlowNightIntensityScale', 'fireGlowIndoorNightBoost', 'fireGlowFlickerStrength', 'fireGlowFlickerSpeed', 'fireGlowFlickerStrengthJitter', 'fireGlowFlickerSpeedJitter', 'fireGlowRadiusPx', 'fireGlowInnerRadiusScale', 'fireGlowFalloffExponent', 'fireGlowEdgeSoftness', 'fireGlowBucketSizePx', 'fireGlowMaxBuckets', 'fireGlowWallClipEnabled', 'fireGlowWallClipRadiusScale'] },
+        { name: 'embers', label: 'Embers', type: 'folder', expanded: false, parameters: ['emberRate', 'emberEmission', 'emberPeakOpacity', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'indoorEmberLifeScale', 'indoorEmberSuppression', 'emberUpdraft', 'emberCurlStrength'] },
+        { name: 'smoke', label: 'Smoke', type: 'folder', expanded: true, parameters: ['smokeEnabled', 'smokeOutdoorAboveCanopy', 'smokeRatio', 'smokeOpacity', 'indoorSmokeSuppression', 'smokeColorWarmth', 'smokeColorBrightness', 'smokeDarknessResponse', 'smokeColorGradient', 'smokeEmissionGradient', 'smokeAlphaStart', 'smokeAlphaPeak', 'smokeAlphaEnd', 'smokeSizeMin', 'smokeSizeMax', 'smokeSizeOverLife', 'smokeLifeMin', 'smokeLifeMax', 'smokeFlipbookCycles', 'smokeUpdraft', 'smokeTurbulence', 'smokeWindInfluence'] },
+        {
+          name: 'fire-glow',
+          label: 'Fire Glow (Gameplay Light)',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'fireGlowEnabled',
+            'fireGlowFollowLightIntensity',
+            'fireGlowDayIntensityScale',
+            'fireGlowNightIntensityScale',
+            'fireGlowDarknessNightBoost',
+            'fireGlowBucketSizePx',
+            'fireGlowMaxBuckets',
+            'fireGlowWallClipEnabled',
+            'fireGlowWallClipRadiusScale',
+          ],
+        },
+        {
+          name: 'fire-glow-indoor',
+          label: 'Fire Glow — Indoor Balance',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'fireGlowIndoorIntensityScale',
+            'fireGlowIndoorCancelScale',
+            'fireGlowIndoorRadiusScale',
+            'fireGlowIndoorNightBoost',
+          ],
+        },
+        {
+          name: 'fire-glow-outdoor',
+          label: 'Fire Glow — Outdoor Balance',
+          type: 'folder',
+          expanded: true,
+          parameters: [
+            'fireGlowOutdoorIntensityScale',
+            'fireGlowOutdoorCancelScale',
+            'fireGlowOutdoorRadiusScale',
+            'fireGlowOutdoorNightBoost',
+          ],
+        },
+        {
+          name: 'fire-glow-day',
+          label: 'Fire Glow — Day Pool',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'fireGlowWarmth',
+            'fireGlowIntensity',
+            'fireGlowDarknessCancel',
+            'fireGlowFlickerStrength',
+            'fireGlowFlickerSpeed',
+            'fireGlowFlickerStrengthJitter',
+            'fireGlowFlickerSpeedJitter',
+            'fireGlowRadiusPx',
+            'fireGlowInnerRadiusScale',
+            'fireGlowFalloffExponent',
+            'fireGlowEdgeSoftness',
+          ],
+        },
+        {
+          name: 'fire-glow-night',
+          label: 'Fire Glow — Night Pool',
+          type: 'folder',
+          expanded: true,
+          parameters: [
+            'fireGlowNightWarmth',
+            'fireGlowNightIntensity',
+            'fireGlowNightDarknessCancel',
+            'fireGlowNightFlickerStrength',
+            'fireGlowNightFlickerSpeed',
+            'fireGlowNightFlickerStrengthJitter',
+            'fireGlowNightFlickerSpeedJitter',
+            'fireGlowNightRadiusPx',
+            'fireGlowNightInnerRadiusScale',
+            'fireGlowNightFalloffExponent',
+            'fireGlowNightEdgeSoftness',
+          ],
+        },
         { name: 'environment', label: 'Environment', type: 'folder', expanded: false, parameters: ['windInfluence', 'timeScale', 'lightIntensity', 'nightHdrBrightness', 'indoorLifeScale', 'indoorTimeScale', 'weatherPrecipKill', 'weatherWindKill'] },
+        {
+          name: 'fire-performance',
+          label: 'Performance',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'fireSimHz',
+            'fireMaxSpatialBuckets',
+            'fireMaxSystemsPerFloor',
+            'fireOutdoorSplitMaxBuckets',
+            'fireMaxParticles',
+            'fireEmberMaxParticles',
+            'fireSmokeMaxParticles',
+          ],
+        },
         { name: 'heat-distortion', label: 'Heat Distortion', type: 'folder', expanded: false, parameters: ['heatDistortionEnabled', 'heatDistortionIntensity', 'heatDistortionFrequency', 'heatDistortionSpeed', 'heatDistortionEdgeSoftness'] }
       ],
       parameters: {
@@ -755,14 +921,32 @@ export class FireEffectV2 {
           tooltip: 'Linear HDR flame energy. Raised for the unclamped lighting pipeline — push higher if night fires look pale.',
         },
         flameBrightnessFloor: { type: 'slider', label: 'Mask Brightness Floor', min: 0.0, max: 1.5, step: 0.01, default: 0.75 },
-        fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 150.0, step: 1.0, default: 107 },
-        fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 200.0, step: 1.0, default: 156 },
+        fireSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 150.0, step: 1.0, default: 123 },
+        fireSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 200.0, step: 1.0, default: 179 },
         fireLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 6.0, step: 0.05, default: 5 },
         fireLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 6.0, step: 0.05, default: 5.45 },
+        flameFlipbookCycles: {
+          type: 'slider',
+          label: 'Flipbook Cycles',
+          min: 0.5,
+          max: 6.0,
+          step: 0.1,
+          default: 3.5,
+          tooltip: 'How many full sprite flipbook loops each flame completes over its lifetime. Higher = faster flicker without changing fade or size.',
+        },
         fireSpinEnabled: { type: 'checkbox', label: 'Spin Enabled', default: true, hidden: true },
         fireSpinSpeedMin: { type: 'slider', label: 'Spin Speed Min', min: 0.0, max: 50.0, step: 0.1, default: 0, hidden: true },
         fireSpinSpeedMax: { type: 'slider', label: 'Spin Speed Max', min: 0.0, max: 50.0, step: 0.1, default: 0.3, hidden: true },
         fireUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 1.15 },
+        flameStationaryFraction: {
+          type: 'slider',
+          label: 'Anchored Flames',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.5,
+          tooltip: 'Fraction of flame particles that skip updraft, turbulence, and wind so they stay on the burning surface.',
+        },
         fireCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0 },
         flameTextureOpacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 1 },
         flameTextureBrightness: { type: 'slider', label: 'Brightness', min: 0.0, max: 3.0, step: 0.01, default: 3 },
@@ -788,14 +972,32 @@ export class FireEffectV2 {
         emberSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 60.0, step: 1.0, default: 10 },
         emberLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 8.0, step: 0.1, default: 4.8 },
         emberLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 12.0, step: 0.1, default: 12.0 },
+        indoorEmberLifeScale: {
+          type: 'slider',
+          label: 'Indoor Life Scale',
+          min: 0.05,
+          max: 1.0,
+          step: 0.05,
+          default: 1,
+          tooltip: 'Shortens ember lifespan under roof mask (stacks with Environment → Indoor Life Scale).',
+        },
+        indoorEmberSuppression: {
+          type: 'slider',
+          label: 'Indoor Density Suppression',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0,
+          tooltip: 'Reduces indoor ember spawns (0 = none; 1 = cull all embers fully under roof).',
+        },
         emberUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 2.5 },
         emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 10 },
         smokeEnabled: { type: 'checkbox', label: 'Enable Smoke', default: true },
         smokeOutdoorAboveCanopy: {
           type: 'checkbox',
-          label: 'Outdoor Smoke Above Trees',
+          label: 'Outdoor Smoke & Embers Above Trees',
           default: true,
-          tooltip: 'Outdoor smoke (uncovered by roof mask) renders above tree and bush canopies. Indoor smoke stays under overhead tiles.',
+          tooltip: 'Outdoor smoke and embers (uncovered by roof mask) render above tree and bush canopies. Indoor particles stay under overhead tiles.',
         },
         smokeRatio: { type: 'slider', label: 'Emission Density', min: 0.0, max: 3.0, step: 0.05, default: 3 },
         smokeOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 1 },
@@ -826,12 +1028,21 @@ export class FireEffectV2 {
             { t: 1, r: 0, g: 0, b: 0 },
           ]
         },
-        smokeSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 200.0, step: 1.0, default: 200 },
-        smokeSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 400.0, step: 1.0, default: 400 },
+        smokeSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 200.0, step: 1.0, default: 230 },
+        smokeSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 400.0, step: 1.0, default: 460 },
         smokeSizeGrowth: { type: 'slider', label: 'Size Growth (Legacy)', min: 1.0, max: 10.0, step: 0.1, default: 10, hidden: true },
         smokeSizeOverLife: { type: 'slider', label: 'Size Over Life', min: 1.0, max: 10.0, step: 0.1, default: 10 },
         smokeLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 10.0, step: 0.1, default: 8.2 },
         smokeLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 15.0, step: 0.1, default: 8.5 },
+        smokeFlipbookCycles: {
+          type: 'slider',
+          label: 'Flipbook Cycles',
+          min: 0.5,
+          max: 4.0,
+          step: 0.1,
+          default: 1,
+          tooltip: 'How many full smoke sprite loops each puff completes over its lifetime.',
+        },
         smokeUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 20.0, step: 0.1, default: 14.5 },
         smokeTurbulence: { type: 'slider', label: 'Turbulence', min: 0.0, max: 5.0, step: 0.05, default: 0 },
         smokeWindInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 10.0, step: 0.1, default: 10 },
@@ -846,12 +1057,20 @@ export class FireEffectV2 {
           max: 1,
           step: 0.01,
           default: 1.0,
-          tooltip: 'Deep orange pool hue in the HDR light buffer. ToD tint immunity uses Color Correction → Preserve Local Light ToD Tint (light-buffer alpha, any hue).',
+          tooltip: 'Daylight pool hue at full day. Blends toward Fire Glow — Night Pool at darkness.',
         },
-        fireGlowIntensity: { type: 'slider', label: 'Pool Intensity', min: 0, max: 3.0, step: 0.01, default: 0.95 },
+        fireGlowIntensity: {
+          type: 'slider',
+          label: 'Pool Intensity',
+          min: 0,
+          max: 3.0,
+          step: 0.01,
+          default: 0.95,
+          tooltip: 'Day flicker/intensity at full daylight.',
+        },
         fireGlowDarknessCancel: {
           type: 'slider', label: 'Darkness Cancel (HDR)', min: 0, max: 20, step: 0.1, default: 8.0,
-          tooltip: 'HDR punch into the light buffer alpha — erases Foundry darkness/shadows under each fire pool. Campfires use a much higher default than candles.',
+          tooltip: 'Day HDR punch into the light buffer. Night value is in Fire Glow — Night Pool.',
         },
         fireGlowDarknessNightBoost: {
           type: 'slider', label: 'Night Cancel Boost', min: 1, max: 5, step: 0.05, default: 2.8,
@@ -862,16 +1081,83 @@ export class FireEffectV2 {
           tooltip: 'Multiply cancel strength by Environment → HDR Brightness (day/night blend).',
         },
         fireGlowDayIntensityScale: {
-          type: 'slider', label: 'Day Pool Scale', min: 0, max: 2, step: 0.01, default: 0.22,
-          tooltip: 'Brightness multiplier at full daylight (master darkness ≈ 0). Does not change glow hue.',
+          type: 'slider', label: 'Day Pool Scale', min: 0, max: 2, step: 0.01, default: 0.68,
+          tooltip: 'Gameplay-light pool strength at full daylight (master darkness ≈ 0). Fires always emit; night adds darkness-cancel on top.',
         },
         fireGlowNightIntensityScale: {
           type: 'slider', label: 'Night Pool Scale', min: 0, max: 3, step: 0.01, default: 1.35,
           tooltip: 'Brightness multiplier at full night (master darkness ≈ 1). Does not change glow hue.',
         },
+        fireGlowIndoorIntensityScale: {
+          type: 'slider', label: 'Intensity Scale', min: 0, max: 4, step: 0.01, default: 0.78,
+          tooltip: 'Multiplies day/night pool intensity under roof. Outdoor fires use Fire Glow — Outdoor Balance.',
+        },
+        fireGlowIndoorCancelScale: {
+          type: 'slider', label: 'Cancel Scale', min: 0, max: 4, step: 0.01, default: 0.75,
+          tooltip: 'HDR darkness-cancel multiplier for indoor pools (after day/night cancel blend).',
+        },
+        fireGlowIndoorRadiusScale: {
+          type: 'slider', label: 'Radius Scale', min: 0.25, max: 3, step: 0.01, default: 0.92,
+          tooltip: 'Indoor pool reach multiplier (after day/night radius blend).',
+        },
         fireGlowIndoorNightBoost: {
-          type: 'slider', label: 'Indoor Night Boost', min: 0, max: 2, step: 0.01, default: 0.55,
-          tooltip: 'Extra glow under roof mask at night (interior color correction).',
+          type: 'slider', label: 'Night Boost', min: 0, max: 4, step: 0.01, default: 0.30,
+          tooltip: 'Extra indoor glow at full darkness. Usually lower than outdoor — interior CC already lifts local light.',
+        },
+        fireGlowOutdoorIntensityScale: {
+          type: 'slider', label: 'Intensity Scale', min: 0, max: 4, step: 0.01, default: 2.0,
+          tooltip: 'Multiplies day/night pool intensity in open air. Push high for campfires vs midnight ToD.',
+        },
+        fireGlowOutdoorCancelScale: {
+          type: 'slider', label: 'Cancel Scale', min: 0, max: 4, step: 0.01, default: 1.85,
+          tooltip: 'HDR darkness-cancel multiplier for outdoor pools. Primary control for bright outdoor fire rings.',
+        },
+        fireGlowOutdoorRadiusScale: {
+          type: 'slider', label: 'Radius Scale', min: 0.25, max: 3, step: 0.01, default: 1.28,
+          tooltip: 'Outdoor pool reach multiplier — wider lit area under open sky.',
+        },
+        fireGlowOutdoorNightBoost: {
+          type: 'slider', label: 'Night Boost', min: 0, max: 4, step: 0.01, default: 1.15,
+          tooltip: 'Extra outdoor glow at full darkness, on top of intensity/cancel scales.',
+        },
+        fireGlowNightWarmth: {
+          type: 'slider', label: 'Pool Warmth', min: 0, max: 1, step: 0.01, default: 0.92,
+          tooltip: 'Night-only pool hue. Blends toward this at full darkness; day warmth is in Fire Glow — Day Pool.',
+        },
+        fireGlowNightIntensity: {
+          type: 'slider', label: 'Pool Intensity', min: 0, max: 3.0, step: 0.01, default: 1.35,
+          tooltip: 'Night flicker/intensity scale at full darkness.',
+        },
+        fireGlowNightDarknessCancel: {
+          type: 'slider', label: 'Darkness Cancel (HDR)', min: 0, max: 20, step: 0.1, default: 11.0,
+          tooltip: 'Night HDR punch into the light buffer. Usually higher than the day value for midnight scenes.',
+        },
+        fireGlowNightFlickerStrength: {
+          type: 'slider', label: 'Flicker Strength', min: 0, max: 12, step: 0.05, default: 4.2,
+        },
+        fireGlowNightFlickerSpeed: {
+          type: 'slider', label: 'Flicker Speed', min: 0, max: 25, step: 0.1, default: 5.5,
+        },
+        fireGlowNightFlickerStrengthJitter: {
+          type: 'slider', label: 'Flicker Strength Jitter', min: 0, max: 1, step: 0.01, default: 0.85,
+        },
+        fireGlowNightFlickerSpeedJitter: {
+          type: 'slider', label: 'Flicker Speed Jitter', min: 0, max: 1, step: 0.01, default: 0.75,
+        },
+        fireGlowNightRadiusPx: {
+          type: 'slider', label: 'Pool Radius (px)', min: 32, max: 2000, step: 4, default: 768,
+          tooltip: 'Night pool reach at full darkness. Blends from day radius as scene darkens.',
+        },
+        fireGlowNightInnerRadiusScale: {
+          type: 'slider', label: 'Hot Core Scale', min: 0.05, max: 1, step: 0.01, default: 0.18,
+        },
+        fireGlowNightFalloffExponent: {
+          type: 'slider', label: 'Falloff Exponent', min: 0.5, max: 2.5, step: 0.05, default: 1.25,
+          tooltip: 'Night core tightness. Lower = wider soft midnight pool.',
+        },
+        fireGlowNightEdgeSoftness: {
+          type: 'slider', label: 'Pool Edge Softness', min: 0, max: 1.0, step: 0.01, default: 0.58,
+          tooltip: 'Night rim feather in the HDR light buffer.',
         },
         fireGlowFlickerStrength: { type: 'slider', label: 'Flicker Strength', min: 0, max: 12, step: 0.05, default: 3.8 },
         fireGlowFlickerSpeed: { type: 'slider', label: 'Flicker Speed', min: 0, max: 25, step: 0.1, default: 4.5 },
@@ -884,10 +1170,13 @@ export class FireEffectV2 {
           tooltip: 'Core tightness for unified radial falloff. Lower = wider soft pool; higher ≈ inverse-square hot core.',
         },
         fireGlowEdgeSoftness: {
-          type: 'slider', label: 'Pool Edge Softness', min: 0, max: 0.75, step: 0.01, default: 0.32,
+          type: 'slider', label: 'Pool Edge Softness', min: 0, max: 1.0, step: 0.01, default: 0.32,
           tooltip: 'Feathers the glow rim in the HDR light buffer. Drives shader attenuation + rim geometry (higher = wider, softer pool).',
         },
-        fireGlowBucketSizePx: { type: 'slider', label: 'Cluster Bucket (px)', min: 128, max: 2048, step: 16, default: 512 },
+        fireGlowBucketSizePx: {
+          type: 'slider', label: 'Cluster Bucket (px)', min: 128, max: 2048, step: 16, default: 512,
+          tooltip: 'Spatial cluster size for glow pools. Lower values keep separate wall-clipped pools per fire group; very large buckets merge distant fires and weaken wall clipping.',
+        },
         fireGlowMaxBuckets: { type: 'slider', label: 'Max Glow Pools', min: 1, max: 256, step: 1, default: 128 },
         fireGlowWallClipEnabled: { type: 'checkbox', label: 'Wall Clip Glow', default: true },
         fireGlowWallClipRadiusScale: { type: 'slider', label: 'Wall Clip Radius Scale', min: 0.25, max: 2, step: 0.01, default: 1.0 },
@@ -919,7 +1208,70 @@ export class FireEffectV2 {
         heatDistortionIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 0.05, step: 0.001, default: 0.019 },
         heatDistortionFrequency: { type: 'slider', label: 'Frequency', min: 1.0, max: 20.0, step: 0.5, default: 20.0 },
         heatDistortionSpeed: { type: 'slider', label: 'Speed', min: 0.1, max: 3.0, step: 0.1, default: 3.0 },
-        heatDistortionEdgeSoftness: { type: 'slider', label: 'Edge Softness', min: 0.4, max: 3.0, step: 0.05, default: 0.4 }
+        heatDistortionEdgeSoftness: { type: 'slider', label: 'Edge Softness', min: 0.4, max: 3.0, step: 0.05, default: 0.4 },
+        fireSimHz: {
+          type: 'slider',
+          label: 'Simulation Rate (Hz)',
+          min: 8,
+          max: FIRE_MAX_SIM_HZ,
+          step: 1,
+          default: FIRE_DEFAULT_SIM_HZ,
+          tooltip: `CPU physics/emission step rate (capped at ${FIRE_MAX_SIM_HZ} Hz). Flipbook colour and sprite frames still refresh every render frame.`,
+        },
+        fireMaxSpatialBuckets: {
+          type: 'slider',
+          label: 'Max Spatial Buckets / Floor',
+          min: 4,
+          max: 96,
+          step: 1,
+          default: FIRE_DEFAULT_MAX_SPATIAL_BUCKETS,
+          tooltip: 'Caps particle emitter count per floor. Larger fire maps auto-coarsen buckets when this limit is exceeded.',
+        },
+        fireMaxSystemsPerFloor: {
+          type: 'slider',
+          label: 'Max Particle Systems / Floor',
+          min: 8,
+          max: 120,
+          step: 1,
+          default: FIRE_DEFAULT_MAX_SYSTEMS_PER_FLOOR,
+          tooltip: 'Hard cap on fire + ember + smoke emitters. Excess mask area is merged into fewer buckets.',
+        },
+        fireOutdoorSplitMaxBuckets: {
+          type: 'slider',
+          label: 'Outdoor Split Max Buckets',
+          min: 2,
+          max: 32,
+          step: 1,
+          default: FIRE_DEFAULT_OUTDOOR_SPLIT_MAX_BUCKETS,
+          tooltip: 'Indoor/outdoor ember+smoke split only applies when spatial bucket count is at or below this value.',
+        },
+        fireMaxParticles: {
+          type: 'slider',
+          label: 'Max Flame Particles / Bucket',
+          min: 200,
+          max: 10000,
+          step: 50,
+          default: 1200,
+          tooltip: 'Hard per-bucket cap (scaled by mask area). Emission auto-limits to stay within this budget — reload after changing.',
+        },
+        fireEmberMaxParticles: {
+          type: 'slider',
+          label: 'Max Ember Particles / Bucket',
+          min: 100,
+          max: 4000,
+          step: 50,
+          default: 700,
+          tooltip: 'Hard cap per ember system; emission scales down to match lifespan.',
+        },
+        fireSmokeMaxParticles: {
+          type: 'slider',
+          label: 'Max Smoke Particles / Bucket',
+          min: 100,
+          max: 6000,
+          step: 50,
+          default: 600,
+          tooltip: 'Hard cap per smoke system. Long smoke lifetimes make this the main steady-state CPU driver.',
+        },
       }
     };
   }
@@ -951,19 +1303,13 @@ export class FireEffectV2 {
   async populate(foundrySceneData) {
     log.info('FireEffectV2.populate() called, initialized=' + this._initialized);
     if (!this._initialized) { log.warn('populate: not initialized'); return; }
+    this._bindPerfRecorder();
     this._lastPopulateSceneData = foundrySceneData ?? this._lastPopulateSceneData;
-    this.clear();
-
-    // Wait for fire/ember sprite textures to load before creating systems.
-    if (this._texturesReady) {
-      log.info('Waiting for fire textures to load...');
-      await this._texturesReady;
-      log.info('Fire textures loaded, continuing populate');
-    }
 
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
     const d = canvas?.dimensions;
     if (!d) { log.warn('populate: no canvas dimensions'); return; }
+
     log.info(`populate: canvas dimensions OK, scene ${d.sceneWidth}x${d.sceneHeight}`);
 
     const sceneWidth = d.sceneWidth || d.width;
@@ -978,6 +1324,17 @@ export class FireEffectV2 {
     // Collect fire points per floor from all tiles AND background.
     // Key: floorIndex, Value: {points: Float32Array[]}
     const floorFireData = new Map();
+
+    let _scanToken = this._beginPerfSpan('populate.scan');
+    try {
+    this.clear();
+
+    // Wait for fire/ember sprite textures to load before creating systems.
+    if (this._texturesReady) {
+      log.info('Waiting for fire textures to load...');
+      await this._texturesReady;
+      log.info('Fire textures loaded, continuing populate');
+    }
 
     // ── Process background image(s) (if they have _Fire masks) ────────────────
     // V14: each Level has its own background.src — scene.background.src is not
@@ -1129,7 +1486,12 @@ export class FireEffectV2 {
       floorFireData.get(floorIndex).pointArrays.push(sceneGlobalPoints);
       log.info(`  tile '${tileId}' → floor ${floorIndex}, ${sceneGlobalPoints.length / 3} fire points (tile ${tileW}x${tileH} at ${tileX},${tileY})`);
     }
+    } finally {
+      this._endPerfSpan(_scanToken);
+    }
 
+    let _buildToken = this._beginPerfSpan('populate.build');
+    try {
     // Build particle systems per floor.
     this._glowSceneContext = {
       sceneWidth,
@@ -1174,6 +1536,7 @@ export class FireEffectV2 {
     this._activateCurrentFloor();
 
     this._rebuildAllFloorGlowMeshes();
+    this._invalidateGlowParamCache();
     const maxFi = this._activeFloors.size ? Math.max(...this._activeFloors) : 0;
     this._applyGlowFloorVisibility(maxFi);
 
@@ -1189,6 +1552,9 @@ export class FireEffectV2 {
     }
 
     this._structuralSignature = this._computeStructuralSignature();
+    } finally {
+      this._endPerfSpan(_buildToken);
+    }
   }
 
   /**
@@ -1222,6 +1588,38 @@ export class FireEffectV2 {
     this._queueRebuild();
   }
 
+  // ── Performance Recorder ───────────────────────────────────────────────────
+
+  /** @private */
+  _bindPerfRecorder() {
+    try {
+      const recorder = window.MapShine?.performanceRecorder;
+      this._activePerfRecorder = recorder?.enabled ? recorder : null;
+    } catch (_) {
+      this._activePerfRecorder = null;
+    }
+  }
+
+  /** @private */
+  _beginPerfSpan(name, phase = 'update', options = { cpuOnly: true }) {
+    try {
+      const recorder = this._activePerfRecorder;
+      if (!recorder?.enabled || typeof recorder.beginEffectCall !== 'function') return null;
+      return recorder.beginEffectCall(`fire.${phase}.${name}`, phase, options);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /** @param {object|null} token @private */
+  _endPerfSpan(token) {
+    if (!token) return;
+    try {
+      const recorder = this._activePerfRecorder ?? window.MapShine?.performanceRecorder;
+      recorder?.endEffectCall?.(token);
+    } catch (_) {}
+  }
+
   /**
    * Per-frame update. Steps the BatchedRenderer simulation.
    * @param {{ elapsed: number, delta: number }} timeInfo
@@ -1229,18 +1627,10 @@ export class FireEffectV2 {
   update(timeInfo) {
     if (!this._initialized || !this._enabled) return;
 
+    this._bindPerfRecorder();
+
     try {
       if (window.MapShine?.__v2NavigationLiteUpdates === true) return;
-    } catch (_) {}
-
-    // Step WeatherController so weather state is current.
-    try {
-      if (weatherController && !weatherController.initialized && typeof weatherController.initialize === 'function') {
-        void weatherController.initialize();
-      }
-      if (weatherController && typeof weatherController.update === 'function') {
-        weatherController.update(timeInfo);
-      }
     } catch (_) {}
 
     // Compute dt for three.quarks (matches V1 time scaling).
@@ -1250,26 +1640,151 @@ export class FireEffectV2 {
     const clampedDelta = Math.min(deltaSec, 0.1);
     const simSpeed = (weatherController && typeof weatherController.simulationSpeed === 'number')
       ? weatherController.simulationSpeed : 2.0;
-    const dt = clampedDelta * 0.001 * 750 * simSpeed;
 
-    // Update per-frame emission rates based on params.
-    this._updateSystemParams();
+    if (this._activeFloors.size === 0) return;
 
-    this._tryAttachGlowRoot();
-    if (this._needsGlowRebuild && (timeInfo.elapsed - this._lastGlowRebuildAt) > 0.12) {
-      this._rebuildAllFloorGlowMeshes();
-      this._needsGlowRebuild = false;
-      this._lastGlowRebuildAt = timeInfo.elapsed;
+    const paramsToken = this._beginPerfSpan('systemParams');
+    try {
+      this._updateSystemParams();
+    } finally {
+      this._endPerfSpan(paramsToken);
     }
-    this._updateFireGlowFlicker(timeInfo);
 
-    for (const [, st] of this._floorStates) {
-      if (!st.batchRenderer) continue;
+    const attachToken = this._beginPerfSpan('glow.attach');
+    try {
+      this._tryAttachGlowRoot();
+    } finally {
+      this._endPerfSpan(attachToken);
+    }
+
+    if (this._needsGlowRebuild && (timeInfo.elapsed - this._lastGlowRebuildAt) > 0.12) {
+      const rebuildToken = this._beginPerfSpan('glow.rebuild');
       try {
-        st.batchRenderer.update(dt);
-      } catch (err) {
-        log.warn('FireEffectV2: BatchedRenderer.update threw, skipping frame:', err);
+        this._rebuildAllFloorGlowMeshes();
+        this._needsGlowRebuild = false;
+        this._lastGlowRebuildAt = timeInfo.elapsed;
+        this._invalidateGlowParamCache();
+      } finally {
+        this._endPerfSpan(rebuildToken);
       }
+    }
+
+    const flickerToken = this._beginPerfSpan('glow.flicker');
+    try {
+      this._updateFireGlowFlicker(timeInfo);
+    } finally {
+      this._endPerfSpan(flickerToken);
+    }
+
+    const simHz = Math.max(8, Math.min(FIRE_MAX_SIM_HZ, Number(this.params.fireSimHz) || FIRE_DEFAULT_SIM_HZ));
+    const simStepSec = 1 / simHz;
+    const ageRate = 0.001 * 750 * simSpeed;
+    this._simAccumSec += clampedDelta;
+    // Drop catch-up debt after hitches — multi-step bursts were driving ~25ms spikes.
+    if (this._simAccumSec > simStepSec * 2) {
+      this._simAccumSec = simStepSec;
+    }
+
+    const runPhysics = this._simAccumSec >= simStepSec;
+    if (runPhysics) {
+      this._simAccumSec -= simStepSec;
+      const simDt = simStepSec * ageRate;
+      const physicsToken = this._beginPerfSpan('physics');
+      try {
+        for (const floorIndex of this._activeFloors) {
+          const st = this._floorStates.get(floorIndex);
+          if (!st?.batchRenderer) continue;
+          try {
+            this._syncFireDisplayAge(st.batchRenderer);
+            st.batchRenderer.update(simDt);
+            this._syncFireDisplayAge(st.batchRenderer);
+          } catch (err) {
+            log.warn('FireEffectV2: BatchedRenderer.update threw, skipping frame:', err);
+          }
+        }
+      } finally {
+        this._endPerfSpan(physicsToken);
+      }
+    } else {
+      const visualToken = this._beginPerfSpan('visualRefresh');
+      try {
+        for (const floorIndex of this._activeFloors) {
+          const st = this._floorStates.get(floorIndex);
+          if (!st?.batchRenderer) continue;
+          try {
+            this._refreshFireVisuals(st.batchRenderer, this._simAccumSec, ageRate);
+          } catch (err) {
+            log.warn('FireEffectV2: visual refresh threw, skipping frame:', err);
+          }
+        }
+      } finally {
+        this._endPerfSpan(visualToken);
+      }
+    }
+  }
+
+  /**
+   * Pin display age to the last physics step (called after BatchedRenderer.update).
+   * @param {import('../../libs/three.quarks.module.js').BatchedRenderer} batchRenderer
+   * @private
+   */
+  _syncFireDisplayAge(batchRenderer) {
+    batchRenderer.systemToBatchIndex.forEach((_, ps) => {
+      for (let i = 0; i < ps.particleNum; i++) {
+        ps.particles[i]._msDisplayAge = ps.particles[i].age;
+      }
+    });
+  }
+
+  /**
+   * Extrapolate flipbook / lifecycle visuals between physics steps.
+   * @param {import('../../libs/three.quarks.module.js').BatchedRenderer} batchRenderer
+   * @param {number} subFrameSec Real seconds since the last physics step.
+   * @param {number} ageRate Quarks age units per real second.
+   * @private
+   */
+  _refreshFireVisuals(batchRenderer, subFrameSec, ageRate) {
+    if (!Number.isFinite(subFrameSec) || subFrameSec <= 0) return;
+    const extrapolate = subFrameSec * ageRate;
+
+    batchRenderer.systemToBatchIndex.forEach((_, ps) => {
+      if (ps.paused) return;
+
+      const particles = ps.particles;
+      const pNum = ps.particleNum;
+
+      for (let i = 0; i < pNum; i++) {
+        const particle = particles[i];
+        const ts = particle._msTimeScaleFactor;
+        const timeFactor = ts !== undefined ? (ts > 0 ? ts : 0) : 1;
+        particle._msDisplayAge = particle.age + extrapolate * timeFactor;
+      }
+
+      for (let j = 0; j < ps.behaviors.length; j++) {
+        const beh = ps.behaviors[j];
+        if (!FIRE_VISUAL_BEHAVIOR_TYPES.has(beh.type)) continue;
+        if (beh.frameUpdate) beh.frameUpdate(0);
+        const isSizeOverLife = beh.type === 'SizeOverLife';
+        const hasSystemParam = typeof beh.update === 'function' && beh.update.length >= 3;
+        for (let i = 0; i < pNum; i++) {
+          const particle = particles[i];
+          if (particle.died) continue;
+          if (isSizeOverLife) {
+            const savedAge = particle.age;
+            particle.age = particle._msDisplayAge;
+            beh.update(particle);
+            particle.age = savedAge;
+          } else if (hasSystemParam) {
+            beh.update(particle, 0, ps);
+          } else {
+            beh.update(particle, 0);
+          }
+        }
+      }
+    });
+
+    for (let i = 0; i < batchRenderer.batches.length; i++) {
+      batchRenderer.batches[i].update();
     }
   }
 
@@ -1302,6 +1817,7 @@ export class FireEffectV2 {
 
     log.info(`onFloorChange(${maxFloorIndex}): desired=[${[...desired]}] prev=[${[...this._activeFloors]}] states=[${[...this._floorStates.keys()]}]`);
     this._activeFloors = desired;
+    this._systemParamsSignature = '';
     this._applyGlowFloorVisibility(maxFloorIndex);
   }
 
@@ -1328,6 +1844,9 @@ export class FireEffectV2 {
     this._glowSourcePointsByFloor.clear();
 
     this._structuralSignature = '';
+    this._systemParamsSignature = '';
+    this._simAccumSec = 0;
+    this._invalidateGlowParamCache();
   }
 
   dispose() {
@@ -1404,22 +1923,12 @@ export class FireEffectV2 {
       this._applyGlowVisibility();
       return;
     }
-    if (paramId === 'fireGlowFalloffExponent') {
-      const exp = Math.max(0.5, Number(this.params.fireGlowFalloffExponent) || 2.0);
-      for (const buckets of this._glowBucketsByFloor.values()) {
-        for (const entry of buckets.values()) {
-          entry?.lightMesh?.setFalloffExponent?.(exp);
-        }
-      }
+    if (paramId === 'fireGlowFalloffExponent' || paramId === 'fireGlowNightFalloffExponent') {
+      this._applyLiveGlowMeshParams();
       return;
     }
-    if (paramId === 'fireGlowEdgeSoftness') {
-      const soft = Math.max(0, Math.min(0.75, Number(this.params.fireGlowEdgeSoftness) || 0));
-      for (const buckets of this._glowBucketsByFloor.values()) {
-        for (const entry of buckets.values()) {
-          entry?.lightMesh?.setEdgeSoftness?.(soft);
-        }
-      }
+    if (paramId === 'fireGlowEdgeSoftness' || paramId === 'fireGlowNightEdgeSoftness') {
+      this._applyLiveGlowMeshParams();
       return;
     }
     if (paramId === 'fireGlowWallClipEnabled') {
@@ -1447,30 +1956,203 @@ export class FireEffectV2 {
     return { r: (Number(rgb?.r) || 0) / max, g: (Number(rgb?.g) || 0) / max, b: (Number(rgb?.b) || 0) / max };
   }
 
-  _computeFireGlowWarmTarget() {
-    const warmth = clamp01(Number(this.params.fireGlowWarmth));
+  _computeFireGlowWarmTarget(warmth = null) {
+    const w = clamp01(Number(warmth ?? this.params.fireGlowWarmth) || 0);
     return {
-      r: FIRE_GLOW_COLOR_COOL.r + (FIRE_GLOW_COLOR_WARM.r - FIRE_GLOW_COLOR_COOL.r) * warmth,
-      g: FIRE_GLOW_COLOR_COOL.g + (FIRE_GLOW_COLOR_WARM.g - FIRE_GLOW_COLOR_COOL.g) * warmth,
-      b: FIRE_GLOW_COLOR_COOL.b + (FIRE_GLOW_COLOR_WARM.b - FIRE_GLOW_COLOR_COOL.b) * warmth,
+      r: FIRE_GLOW_COLOR_COOL.r + (FIRE_GLOW_COLOR_WARM.r - FIRE_GLOW_COLOR_COOL.r) * w,
+      g: FIRE_GLOW_COLOR_COOL.g + (FIRE_GLOW_COLOR_WARM.g - FIRE_GLOW_COLOR_COOL.g) * w,
+      b: FIRE_GLOW_COLOR_COOL.b + (FIRE_GLOW_COLOR_WARM.b - FIRE_GLOW_COLOR_COOL.b) * w,
     };
   }
 
+  /** @private @param {number} [darkness] */
+  _blendGlowDayNightParam(dayKey, nightKey, fallback = 0, darkness = null) {
+    const t = clamp01(Number.isFinite(Number(darkness))
+      ? Number(darkness)
+      : LightingDirector.get().masterDarkness);
+    const dayRaw = Number(this.params[dayKey]);
+    const day = Number.isFinite(dayRaw) ? dayRaw : fallback;
+    const nightRaw = Number(this.params[nightKey]);
+    const night = Number.isFinite(nightRaw) ? nightRaw : day;
+    return day + (night - day) * t;
+  }
+
+  /** @private @param {number} outdoor01 */
+  _blendGlowIndoorOutdoorParam(indoorKey, outdoorKey, fallback = 1.0, outdoor01 = 0.5) {
+    const o = clamp01(Number(outdoor01) || 0);
+    const indoorRaw = Number(this.params[indoorKey]);
+    const indoor = Number.isFinite(indoorRaw) ? indoorRaw : fallback;
+    const outdoorRaw = Number(this.params[outdoorKey]);
+    const outdoor = Number.isFinite(outdoorRaw) ? outdoorRaw : fallback;
+    return indoor + (outdoor - indoor) * o;
+  }
+
+  /**
+   * Effective gameplay-light pool params blended by master darkness (day → night)
+   * and roof mask (indoor → outdoor).
+   * @param {number} [darkness]
+   * @param {number|null} [outdoor01]
+   * @returns {object}
+   * @private
+   */
+  _resolveFireGlowParams(darkness = LightingDirector.get().masterDarkness, outdoor01 = null) {
+    const t = clamp01(Number(darkness) || 0);
+    const base = {
+      t,
+      warmth: clamp01(this._blendGlowDayNightParam('fireGlowWarmth', 'fireGlowNightWarmth', 1.0, t)),
+      intensity: Math.max(0, this._blendGlowDayNightParam('fireGlowIntensity', 'fireGlowNightIntensity', 0.95, t)),
+      cancel: Math.max(0, this._blendGlowDayNightParam('fireGlowDarknessCancel', 'fireGlowNightDarknessCancel', 8.0, t)),
+      radiusPx: Math.max(48, this._blendGlowDayNightParam('fireGlowRadiusPx', 'fireGlowNightRadiusPx', 640, t)),
+      innerScale: Math.max(0.05, Math.min(1, this._blendGlowDayNightParam(
+        'fireGlowInnerRadiusScale',
+        'fireGlowNightInnerRadiusScale',
+        0.14,
+        t,
+      ))),
+      falloffExponent: Math.min(2.5, Math.max(0.5, this._blendGlowDayNightParam(
+        'fireGlowFalloffExponent',
+        'fireGlowNightFalloffExponent',
+        2.0,
+        t,
+      ))),
+      edgeSoftness: Math.max(0, Math.min(1.0, this._blendGlowDayNightParam(
+        'fireGlowEdgeSoftness',
+        'fireGlowNightEdgeSoftness',
+        0.32,
+        t,
+      ))),
+      flickerStrength: Math.max(0, this._blendGlowDayNightParam(
+        'fireGlowFlickerStrength',
+        'fireGlowNightFlickerStrength',
+        3.8,
+        t,
+      )),
+      flickerSpeed: Math.max(0, this._blendGlowDayNightParam('fireGlowFlickerSpeed', 'fireGlowNightFlickerSpeed', 4.5, t)),
+      flickerStrengthJitter: clamp01(this._blendGlowDayNightParam(
+        'fireGlowFlickerStrengthJitter',
+        'fireGlowNightFlickerStrengthJitter',
+        0.82,
+        t,
+      )),
+      flickerSpeedJitter: clamp01(this._blendGlowDayNightParam(
+        'fireGlowFlickerSpeedJitter',
+        'fireGlowNightFlickerSpeedJitter',
+        0.72,
+        t,
+      )),
+    };
+
+    if (outdoor01 == null || !Number.isFinite(Number(outdoor01))) return base;
+
+    const intensityScale = Math.max(0, this._blendGlowIndoorOutdoorParam(
+      'fireGlowIndoorIntensityScale',
+      'fireGlowOutdoorIntensityScale',
+      1.0,
+      outdoor01,
+    ));
+    const cancelScale = Math.max(0, this._blendGlowIndoorOutdoorParam(
+      'fireGlowIndoorCancelScale',
+      'fireGlowOutdoorCancelScale',
+      1.0,
+      outdoor01,
+    ));
+    const radiusScale = Math.max(0.25, this._blendGlowIndoorOutdoorParam(
+      'fireGlowIndoorRadiusScale',
+      'fireGlowOutdoorRadiusScale',
+      1.0,
+      outdoor01,
+    ));
+
+    return {
+      ...base,
+      intensity: base.intensity * intensityScale,
+      cancel: base.cancel * cancelScale,
+      radiusPx: Math.max(48, base.radiusPx * radiusScale),
+    };
+  }
+
+  /** Push current darkness-blended falloff/edge to all glow meshes (UI tweak). @private */
+  _applyLiveGlowMeshParams() {
+    this._syncGlowMeshPhotometry(true);
+  }
+
+  /** @private */
+  _invalidateGlowParamCache() {
+    this._glowParamCache.indoor = null;
+    this._glowParamCache.outdoor = null;
+    this._glowParamCache.darkness = -1;
+    this._glowFlickerDarkness = -1;
+  }
+
+  /**
+   * Resolve day/night + indoor/outdoor glow params with per-frame cache.
+   * @param {number} outdoor01
+   * @returns {object}
+   * @private
+   */
+  _resolveCachedFireGlowParams(outdoor01) {
+    const darkness = clamp01(LightingDirector.get().masterDarkness);
+    const outdoor = clamp01(Number(outdoor01) || 0);
+    const cacheKey = outdoor > 0.5 ? 'outdoor' : 'indoor';
+    const cache = this._glowParamCache;
+    if (cache.darkness !== darkness) {
+      cache.indoor = null;
+      cache.outdoor = null;
+      cache.darkness = darkness;
+    }
+    if (!cache[cacheKey]) {
+      cache[cacheKey] = this._resolveFireGlowParams(darkness, outdoor > 0.5 ? 1.0 : 0.0);
+    }
+    return cache[cacheKey];
+  }
+
+  /**
+   * Sync glow pool radius/falloff when darkness or glow params change — not every flicker frame.
+   * @param {boolean} [force=false]
+   * @private
+   */
+  _syncGlowMeshPhotometry(force = false) {
+    const darkness = clamp01(LightingDirector.get().masterDarkness);
+    if (!force && Math.abs(darkness - (this._glowFlickerDarkness ?? -1)) < 0.012) return;
+    this._glowFlickerDarkness = darkness;
+    this._invalidateGlowParamCache();
+    this._glowParamCache.darkness = darkness;
+
+    for (const buckets of this._glowBucketsByFloor.values()) {
+      for (const entry of buckets.values()) {
+        const lm = entry?.lightMesh;
+        if (!lm) continue;
+        const outdoor = entry.outdoor ?? 1.0;
+        const glow = this._resolveCachedFireGlowParams(outdoor);
+        const sizeBoost = entry.sizeBoost ?? 1.0;
+        const poolRadiusScale = entry.radiusScale ?? 1.0;
+        const radiusPx = glow.radiusPx * sizeBoost * poolRadiusScale;
+        const innerRadiusPx = Math.max(1, radiusPx * glow.innerScale);
+        lm.setOuterRadiusPx?.(radiusPx);
+        lm.setInnerRadiusPx?.(innerRadiusPx);
+        lm.setFalloffExponent?.(glow.falloffExponent);
+        lm.setEdgeSoftness?.(glow.edgeSoftness);
+      }
+    }
+  }
+
   /** Normalized deep-orange hue for the HDR light buffer (brightness via emission gain). */
-  _computeFireGlowColor() {
-    return this._normalizeGlowHue(this._computeFireGlowWarmTarget());
+  _computeFireGlowColor(warmth = null) {
+    return this._normalizeGlowHue(this._computeFireGlowWarmTarget(warmth));
   }
 
   _computeFireGlowDayNightMul() {
     const darkness = clamp01(LightingDirector.get().masterDarkness);
-    const day = Math.max(0, Number(this.params.fireGlowDayIntensityScale) || 0);
-    const night = Math.max(0, Number(this.params.fireGlowNightIntensityScale) || 0);
+    // Gameplay light stays on by day; night scale adds darkness-cancel punch (not the only emission path).
+    const dayFloor = 0.55;
+    const day = Math.max(dayFloor, Math.max(0, Number(this.params.fireGlowDayIntensityScale) || 0));
+    const night = Math.max(day, Math.max(0, Number(this.params.fireGlowNightIntensityScale) || 0));
     return day + (night - day) * darkness;
   }
 
-  /** @param {number} visualMul */
-  _computeFireGlowEmissionGain(visualMul) {
-    const cancel = Math.max(0, Number(this.params.fireGlowDarknessCancel) || 0);
+  /** @param {number} visualMul @param {number} [cancelOverride] */
+  _computeFireGlowEmissionGain(visualMul, cancelOverride = null) {
+    const cancel = Math.max(0, Number(cancelOverride ?? this.params.fireGlowDarknessCancel) || 0);
     if (cancel <= 0) return 0;
 
     let lightMul = 1.0;
@@ -1497,6 +2179,15 @@ export class FireEffectV2 {
     const darkness = clamp01(LightingDirector.get().masterDarkness);
     const indoor = 1.0 - clamp01(outdoor01);
     return 1.0 + boost * indoor * darkness;
+  }
+
+  /** @param {number} outdoor01 */
+  _computeFireGlowOutdoorNightBoost(outdoor01) {
+    const boost = Math.max(0, Number(this.params.fireGlowOutdoorNightBoost) || 0);
+    if (boost <= 0) return 1.0;
+    const darkness = clamp01(LightingDirector.get().masterDarkness);
+    const outdoor = clamp01(outdoor01);
+    return 1.0 + boost * outdoor * darkness;
   }
 
   _buildGlowWallClipOptions() {
@@ -1630,6 +2321,13 @@ export class FireEffectV2 {
     }
   }
 
+  /** Rebuild glow pools when authored _Outdoors CPU decode updates (async mask load). */
+  onOutdoorsMaskUpdated() {
+    if (!this.params.fireGlowEnabled) return;
+    this._reclusterGlowFromStoredPoints();
+    this._needsGlowRebuild = true;
+  }
+
   _clearFloorGlow(floorIndex) {
     const buckets = this._glowBucketsByFloor.get(floorIndex);
     if (buckets) {
@@ -1686,11 +2384,13 @@ export class FireEffectV2 {
 
     const walls = canvas?.walls?.placeables ?? [];
     const wallClipOptions = this._buildGlowWallClipOptions();
-    const innerScale = Math.max(0.05, Math.min(1, Number(this.params.fireGlowInnerRadiusScale) || 0.14));
-    const falloffExponent = Math.min(2.5, Math.max(0.5, Number(this.params.fireGlowFalloffExponent) || 2.0));
-    const edgeSoftness = Math.max(0, Math.min(0.75, Number(this.params.fireGlowEdgeSoftness) || 0));
-    const baseRadius = Math.max(48, Number(this.params.fireGlowRadiusPx) || 640);
     const radiusScale = Math.max(0.25, Number(this.params.fireGlowWallClipRadiusScale) || 1.0);
+    const dayRadius = Math.max(48, Number(this.params.fireGlowRadiusPx) || 640);
+    const nightRadius = Math.max(48, Number(this.params.fireGlowNightRadiusPx) || dayRadius);
+    const indoorRadiusScale = Math.max(0.25, Number(this.params.fireGlowIndoorRadiusScale) || 1.0);
+    const outdoorRadiusScale = Math.max(0.25, Number(this.params.fireGlowOutdoorRadiusScale) || 1.0);
+    const clipBaseRadius = Math.max(dayRadius, nightRadius)
+      * Math.max(indoorRadiusScale, outdoorRadiusScale);
 
     for (const [floorIndex, clusters] of this._glowClustersByFloor) {
       this._clearFloorGlow(floorIndex);
@@ -1714,14 +2414,17 @@ export class FireEffectV2 {
 
       for (const c of clusters) {
         const sizeBoost = 0.72 + 0.28 * Math.min(1.5, Math.sqrt(Math.max(0, c.intensity)));
-        const radiusPx = baseRadius * sizeBoost * radiusScale;
+        const outdoor = Math.max(0, Math.min(1, Number(c.outdoor) ?? 1));
+        const glow = this._resolveFireGlowParams(undefined, outdoor);
+        const clipRadiusPx = clipBaseRadius * sizeBoost * radiusScale;
+        const radiusPx = glow.radiusPx * sizeBoost * radiusScale;
 
         let foundryPoly = null;
         if (this.params.fireGlowWallClipEnabled) {
           try {
             foundryPoly = this._visionComputer.compute(
               { x: c.cxFoundry, y: c.cyFoundry },
-              radiusPx,
+              clipRadiusPx,
               walls,
               sceneBounds,
               wallClipOptions
@@ -1739,16 +2442,19 @@ export class FireEffectV2 {
             worldPoints.push(wp.x, wp.y);
           }
         } else if (this.params.fireGlowWallClipEnabled) {
-          continue;
+          if (outdoor < 0.45) {
+            continue;
+          }
+          // Outdoor campfire: radial pool when wall clip fails in open areas.
         }
 
         const centerWorld = new THREE.Vector2(c.cxWorld, c.cyWorld);
         const lm = new LightMesh(centerWorld, radiusPx, c.color, {
-          innerRadiusPx: Math.max(1, radiusPx * innerScale),
+          innerRadiusPx: Math.max(1, radiusPx * glow.innerScale),
           worldPoints,
-          falloffExponent: Math.min(2.5, falloffExponent),
+          falloffExponent: glow.falloffExponent,
           achromaticRgb: false,
-          edgeSoftness,
+          edgeSoftness: glow.edgeSoftness,
         });
 
         lm.setEmissionGain?.(0);
@@ -1765,6 +2471,8 @@ export class FireEffectV2 {
           intensity: c.intensity,
           phase: c.phase,
           outdoor: c.outdoor,
+          sizeBoost,
+          radiusScale,
         });
       }
 
@@ -1781,14 +2489,14 @@ export class FireEffectV2 {
     const THREE = window.THREE;
     if (!THREE) return;
 
-    const t = timeInfo.elapsed;
-    const strength = Math.max(0, Number(this.params.fireGlowFlickerStrength) || 0);
-    const speed = Math.max(0, Number(this.params.fireGlowFlickerSpeed) || 0);
-    const speedJ = clamp01(Number(this.params.fireGlowFlickerSpeedJitter) || 0);
-    const strengthJ = clamp01(Number(this.params.fireGlowFlickerStrengthJitter) || 0);
-    const dayNightMul = this._computeFireGlowDayNightMul();
+    this._syncGlowMeshPhotometry(false);
 
-    for (const buckets of this._glowBucketsByFloor.values()) {
+    const t = timeInfo.elapsed;
+    const dayNightMul = this._computeFireGlowDayNightMul();
+    const glowHueCache = new Map();
+
+    for (const [floorIndex, buckets] of this._glowBucketsByFloor) {
+      if (!this._activeFloors.has(floorIndex)) continue;
       for (const entry of buckets.values()) {
         const lm = entry?.lightMesh;
         const u = lm?.material?.uniforms;
@@ -1796,6 +2504,17 @@ export class FireEffectV2 {
 
         const phase = entry.phase || 0;
         const outdoor = entry.outdoor ?? 1.0;
+        const glowBand = outdoor > 0.5 ? 1 : 0;
+        let glow = glowHueCache.get(glowBand);
+        if (!glow) {
+          glow = this._resolveCachedFireGlowParams(glowBand);
+          glowHueCache.set(glowBand, glow);
+        }
+        const strength = glow.flickerStrength;
+        const speed = glow.flickerSpeed;
+        const speedJ = glow.flickerSpeedJitter;
+        const strengthJ = glow.flickerStrengthJitter;
+
         const r1 = Math.sin((phase + 0.17) * 1000.0) * 43758.5453;
         const r2 = Math.sin((phase + 0.61) * 1000.0) * 24631.1337;
         const rand01 = r1 - Math.floor(r1);
@@ -1814,19 +2533,21 @@ export class FireEffectV2 {
         const flicker = Math.max(0.08, 1.0 + (baseAmp * strength * Math.max(0.05, strengthVar)) * chaos);
 
         const indoorMul = this._computeFireGlowIndoorNightBoost(outdoor);
+        const outdoorMul = this._computeFireGlowOutdoorNightBoost(outdoor);
         const visualMul = Math.max(
           0,
-          (Number(this.params.fireGlowIntensity) || 0)
+          glow.intensity
             * Math.max(0.35, entry.intensity)
             * flicker
             * dayNightMul
             * indoorMul
+            * outdoorMul
         );
 
-        const glowHue = this._computeFireGlowColor();
+        const glowHue = this._computeFireGlowColor(glow.warmth);
         u.uColor.value.setRGB(glowHue.r, glowHue.g, glowHue.b);
 
-        const emissionGain = this._computeFireGlowEmissionGain(visualMul);
+        const emissionGain = this._computeFireGlowEmissionGain(visualMul, glow.cancel);
         if (typeof lm.setEmissionGain === 'function') {
           lm.setEmissionGain(emissionGain);
         } else if (u.uEmissionGain) {
@@ -1856,6 +2577,129 @@ export class FireEffectV2 {
   }
 
   /**
+   * Bucket packed fire-mask points into spatial cells for particle emitters.
+   * @private
+   */
+  _bucketFirePoints(points, sceneW, sceneH, sceneX, sceneY, bucketSizePx) {
+    const buckets = new Map();
+    const bucketSize = Math.max(BUCKET_SIZE, Number(bucketSizePx) || BUCKET_SIZE);
+    for (let i = 0; i < points.length; i += 3) {
+      const u = points[i];
+      const v = points[i + 1];
+      const b = points[i + 2];
+      if (!Number.isFinite(u) || !Number.isFinite(v) || !Number.isFinite(b) || b <= 0) continue;
+      const worldX = sceneX + u * sceneW;
+      const worldY = sceneY + (1.0 - v) * sceneH;
+      const bx = Math.floor(worldX / bucketSize);
+      const by = Math.floor(worldY / bucketSize);
+      const key = `${bx},${by}`;
+      let arr = buckets.get(key);
+      if (!arr) { arr = []; buckets.set(key, arr); }
+      arr.push(u, v, b);
+    }
+    return buckets;
+  }
+
+  /**
+   * Estimate max spatial buckets allowed before particle-system budget is exceeded.
+   * @private
+   */
+  _estimateMaxSpatialBucketsForSystemBudget(proposedBucketCount) {
+    const spatialCap = Math.max(4, Number(this.params.fireMaxSpatialBuckets) | 0 || FIRE_DEFAULT_MAX_SPATIAL_BUCKETS);
+    const maxSystems = Math.max(8, Number(this.params.fireMaxSystemsPerFloor) | 0 || FIRE_DEFAULT_MAX_SYSTEMS_PER_FLOOR);
+    const splitMaxBuckets = Math.max(2, Number(this.params.fireOutdoorSplitMaxBuckets) | 0 || FIRE_DEFAULT_OUTDOOR_SPLIT_MAX_BUCKETS);
+    const splitOutdoor = this.params.smokeOutdoorAboveCanopy !== false
+      && proposedBucketCount <= splitMaxBuckets;
+    const smokeOn = !!this.params.smokeEnabled;
+    let perBucket = 1 + (splitOutdoor ? 2 : 1);
+    if (smokeOn) perBucket += splitOutdoor ? 2 : 1;
+    const budgetBuckets = Math.max(4, Math.floor(maxSystems / perBucket));
+    return Math.min(spatialCap, budgetBuckets);
+  }
+
+  /**
+   * Spatially bucket fire points, coarsening cell size until bucket count is within budget.
+   * @private
+   */
+  _coarsenFireSpatialBuckets(points, sceneW, sceneH, sceneX, sceneY) {
+    let bucketSize = BUCKET_SIZE;
+    let buckets = this._bucketFirePoints(points, sceneW, sceneH, sceneX, sceneY, bucketSize);
+    while (bucketSize < FIRE_MAX_SPATIAL_BUCKET_SIZE_PX) {
+      const maxBuckets = this._estimateMaxSpatialBucketsForSystemBudget(buckets.size);
+      if (buckets.size <= maxBuckets) break;
+      bucketSize *= 2;
+      buckets = this._bucketFirePoints(points, sceneW, sceneH, sceneX, sceneY, bucketSize);
+    }
+    const finalCap = this._estimateMaxSpatialBucketsForSystemBudget(buckets.size);
+    if (buckets.size > finalCap) {
+      log.warn(`FireEffectV2: ${buckets.size} spatial buckets exceed budget ${finalCap} even at ${bucketSize}px cells`);
+    }
+    return buckets;
+  }
+
+  /** Scale per-bucket particle caps by mask area share (matches DustEffectV2). @private */
+  _scaledMaxParticles(baseMax, weight, min = 16) {
+    const base = Math.max(min, Number(baseMax) || min);
+    const w = Math.max(0.06, Number(weight) || 0.06);
+    return Math.max(min, Math.floor(base * w));
+  }
+
+  /**
+   * three.quarks ignores ParticleSystem.maxParticles at spawn time — enforce a hard cap
+   * so live particle count (and CPU cost) cannot grow without bound over time.
+   * @private
+   */
+  _applyParticleSpawnCap(system, maxParticles) {
+    if (!system || maxParticles <= 0) return;
+    system._msParticleCap = maxParticles;
+    if (system._msSpawnCapPatched) return;
+    system._msSpawnCapPatched = true;
+    const origSpawn = system.spawn.bind(system);
+    system.spawn = (count, emissionState, matrix) => {
+      const cap = system._msParticleCap;
+      if (cap > 0 && system.particleNum >= cap) return;
+      const room = cap > 0 ? Math.max(0, cap - system.particleNum) : count;
+      if (room <= 0) return;
+      origSpawn(Math.min(count, room), emissionState, matrix);
+    };
+  }
+
+  /**
+   * Keep emission rates within what maxParticles and lifespan can sustain (~85% fill).
+   * @private
+   */
+  _capEmissionForParticleBudget(emissionMin, emissionMax, maxParticles, lifeMin, lifeMax, globalRate) {
+    const rate = Math.max(0, Number(globalRate) || 0);
+    const avgLife = Math.max(0.05, (Number(lifeMin) + Number(lifeMax)) * 0.5);
+    const budget = Math.max(1, Number(maxParticles) || 1);
+    const maxSustainable = (budget / avgLife) * 0.85;
+    let emMin = Math.max(0, Number(emissionMin) || 0) * rate;
+    let emMax = Math.max(emMin, Number(emissionMax) || 0) * rate;
+    if (emMax <= maxSustainable) return { a: emMin, b: emMax };
+    const scale = maxSustainable / emMax;
+    emMin *= scale;
+    emMax *= scale;
+    return { a: emMin, b: emMax };
+  }
+
+  /** @private */
+  _syncSystemEmission(sys, globalRate) {
+    const ud = sys?.userData;
+    if (!ud || !sys.emissionOverTime) return;
+    const extra = Number(ud._msEmissionExtraMul) || 1;
+    const capped = this._capEmissionForParticleBudget(
+      (ud._msEmissionBaseA ?? 0) * extra,
+      (ud._msEmissionBaseB ?? 0) * extra,
+      ud._msMaxParticles ?? 32,
+      ud._msLifeMin ?? 0.5,
+      ud._msLifeMax ?? 1.0,
+      globalRate
+    );
+    sys.emissionOverTime.a = capped.a;
+    sys.emissionOverTime.b = capped.b;
+  }
+
+  /**
    * Build fire + ember + smoke systems from merged points for a single floor.
    * Points are spatially bucketed for culling efficiency.
    * @private
@@ -1868,22 +2712,11 @@ export class FireEffectV2 {
     const batchRenderer = this._createBatchedRendererForFloor(floorIndex);
     const state = { systems: [], emberSystems: [], smokeSystems: [], batchRenderer };
 
-    // Spatial bucketing.
-    const buckets = new Map();
-    for (let i = 0; i < points.length; i += 3) {
-      const u = points[i];
-      const v = points[i + 1];
-      const b = points[i + 2];
-      if (!Number.isFinite(u) || !Number.isFinite(v) || !Number.isFinite(b) || b <= 0) continue;
-      const worldX = sceneX + u * sceneW;
-      const worldY = sceneY + (1.0 - v) * sceneH;
-      const bx = Math.floor(worldX / BUCKET_SIZE);
-      const by = Math.floor(worldY / BUCKET_SIZE);
-      const key = `${bx},${by}`;
-      let arr = buckets.get(key);
-      if (!arr) { arr = []; buckets.set(key, arr); }
-      arr.push(u, v, b);
-    }
+    const buckets = this._coarsenFireSpatialBuckets(points, sceneW, sceneH, sceneX, sceneY);
+    const maxSystems = Math.max(8, Number(this.params.fireMaxSystemsPerFloor) | 0 || FIRE_DEFAULT_MAX_SYSTEMS_PER_FLOOR);
+    const splitMaxBuckets = Math.max(2, Number(this.params.fireOutdoorSplitMaxBuckets) | 0 || FIRE_DEFAULT_OUTDOOR_SPLIT_MAX_BUCKETS);
+    const splitOutdoor = this.params.smokeOutdoorAboveCanopy !== false && buckets.size <= splitMaxBuckets;
+    let systemCount = 0;
 
     // Emission weight per bucket: √(pixel count) normalized across buckets.
     // Linear weight (bucketCount/totalCount) starves sparse masks (torches = few dots)
@@ -1911,19 +2744,60 @@ export class FireEffectV2 {
 
       // Fire system.
       const fireSys = this._createFireSystem(shape, weight, floorIndex);
-      if (fireSys) state.systems.push(fireSys);
+      if (fireSys) {
+        state.systems.push(fireSys);
+        systemCount += 1;
+      }
 
-      // Ember system.
-      const emberSys = this._createEmberSystem(shape, weight, floorIndex);
-      if (emberSys) state.emberSystems.push(emberSys);
+      let outdoorPoints = null;
+      let indoorPoints = null;
+      if (splitOutdoor) {
+        outdoorPoints = filterFirePointsByOutdoor(bucketPoints, 'outdoor');
+        indoorPoints = filterFirePointsByOutdoor(bucketPoints, 'indoor');
+      }
+
+      // Embers — optional split: outdoor sparks above tree/bush canopies, indoor under overhead.
+      if (systemCount < maxSystems) {
+        if (splitOutdoor) {
+          if (outdoorPoints && systemCount < maxSystems) {
+            const outdoorN = outdoorPoints.length / 3;
+            const wOutdoor = weight * (outdoorN / bucketN);
+            const outdoorShape = new FireMaskShape(
+              outdoorPoints, sceneW, sceneH, sceneX, sceneY,
+              this, GROUND_Z + (Number(floorIndex) || 0), 0.55
+            );
+            const outdoorEmber = this._createEmberSystem(outdoorShape, wOutdoor, floorIndex, { outdoorLayer: true });
+            if (outdoorEmber) {
+              state.emberSystems.push(outdoorEmber);
+              systemCount += 1;
+            }
+          }
+          if (indoorPoints && systemCount < maxSystems) {
+            const indoorN = indoorPoints.length / 3;
+            const wIndoor = weight * (indoorN / bucketN);
+            const indoorShape = new FireMaskShape(
+              indoorPoints, sceneW, sceneH, sceneX, sceneY,
+              this, GROUND_Z + (Number(floorIndex) || 0), 0.55
+            );
+            const indoorEmber = this._createEmberSystem(indoorShape, wIndoor, floorIndex, { outdoorLayer: false });
+            if (indoorEmber) {
+              state.emberSystems.push(indoorEmber);
+              systemCount += 1;
+            }
+          }
+        } else {
+          const emberSys = this._createEmberSystem(shape, weight, floorIndex);
+          if (emberSys) {
+            state.emberSystems.push(emberSys);
+            systemCount += 1;
+          }
+        }
+      }
 
       // Smoke — optional split: outdoor puffs above tree/bush canopies, indoor under overhead.
-      if (this.params.smokeEnabled) {
-        const splitOutdoor = this.params.smokeOutdoorAboveCanopy !== false;
+      if (this.params.smokeEnabled && systemCount < maxSystems) {
         if (splitOutdoor) {
-          const outdoorPoints = filterFirePointsByOutdoor(bucketPoints, 'outdoor');
-          const indoorPoints = filterFirePointsByOutdoor(bucketPoints, 'indoor');
-          if (outdoorPoints) {
+          if (outdoorPoints && systemCount < maxSystems) {
             const outdoorN = outdoorPoints.length / 3;
             const wOutdoor = weight * (outdoorN / bucketN);
             const outdoorShape = new FireMaskShape(
@@ -1931,9 +2805,12 @@ export class FireEffectV2 {
               this, GROUND_Z + (Number(floorIndex) || 0), 0.55
             );
             const outdoorSmoke = this._createSmokeSystem(outdoorShape, wOutdoor, floorIndex, { outdoorLayer: true });
-            if (outdoorSmoke) state.smokeSystems.push(outdoorSmoke);
+            if (outdoorSmoke) {
+              state.smokeSystems.push(outdoorSmoke);
+              systemCount += 1;
+            }
           }
-          if (indoorPoints) {
+          if (indoorPoints && systemCount < maxSystems) {
             const indoorN = indoorPoints.length / 3;
             const wIndoor = weight * (indoorN / bucketN);
             const indoorShape = new FireMaskShape(
@@ -1941,11 +2818,17 @@ export class FireEffectV2 {
               this, GROUND_Z + (Number(floorIndex) || 0), 0.55
             );
             const indoorSmoke = this._createSmokeSystem(indoorShape, wIndoor, floorIndex, { outdoorLayer: false });
-            if (indoorSmoke) state.smokeSystems.push(indoorSmoke);
+            if (indoorSmoke) {
+              state.smokeSystems.push(indoorSmoke);
+              systemCount += 1;
+            }
           }
-        } else {
+        } else if (systemCount < maxSystems) {
           const smokeSys = this._createSmokeSystem(shape, weight, floorIndex, { outdoorLayer: false });
-          if (smokeSys) state.smokeSystems.push(smokeSys);
+          if (smokeSys) {
+            state.smokeSystems.push(smokeSys);
+            systemCount += 1;
+          }
         }
       }
     }
@@ -1980,12 +2863,17 @@ export class FireEffectV2 {
     const lifeMax = Math.max(lifeMin, (p.fireLifeMax ?? 1.2) / timeScale);
     const sizeMin = Math.max(0.1, p.fireSizeMin ?? 19);
     const sizeMax = Math.max(sizeMin, p.fireSizeMax ?? 170);
+    const maxParticles = this._scaledMaxParticles(p.fireMaxParticles ?? 1200, weight, 32);
 
     const flameLifecycle = new FlameLifecycleBehavior(this);
     const sizeOverLife = new SizeOverLife(new PiecewiseBezier([
       [new Bezier(0.0, 0.2, 1.0, 0.0), 0],
     ]));
-    const flameShapeFrames = new FlameShapeFrameBehavior(FIRE_ATLAS_SHAPE_COUNT, FIRE_ATLAS_ANIM_FRAMES);
+    const flameShapeFrames = new FlameShapeFrameBehavior(FIRE_ATLAS_SHAPE_COUNT, FIRE_ATLAS_ANIM_FRAMES, {
+      ownerEffect: this,
+      cyclesParamKey: 'flameFlipbookCycles',
+      defaultCycles: 3.5,
+    });
     const buoyancy = new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(p.fireHeight * 0.125));
     const updraftBehavior = new SmartUpdraftBehavior();
     const windForce = new SmartWindBehavior();
@@ -2003,7 +2891,7 @@ export class FireEffectV2 {
       startSize: new IntervalValue(sizeMin, sizeMax),
       startColor: new ColorRange(new Vector4(1, 1, 1, 1), new Vector4(1, 1, 1, 1)),
       worldSpace: true,
-      maxParticles: 10000,
+      maxParticles,
       emissionOverTime: new IntervalValue(10.0 * weight, 20.0 * weight),
       shape,
       material,
@@ -2013,9 +2901,18 @@ export class FireEffectV2 {
       renderOrder: this._computeParticleRenderOrder(floorIndex, 0),
       uTileCount: FIRE_ATLAS_COLS,
       vTileCount: FIRE_ATLAS_ROWS,
+      blendTiles: true,
       startTileIndex: new ConstantValue(0),
       startRotation: new IntervalValue(0, Math.PI * 2),
-      behaviors: [flameShapeFrames, windForce, buoyancy, updraftBehavior, turbulence, sizeOverLife, flameLifecycle],
+      behaviors: [
+        flameShapeFrames,
+        windForce,
+        new ParticleMotionGatedBehavior(buoyancy),
+        updraftBehavior,
+        new ParticleMotionGatedBehavior(turbulence),
+        sizeOverLife,
+        flameLifecycle,
+      ],
     });
 
     system.userData = {
@@ -2026,7 +2923,16 @@ export class FireEffectV2 {
       turbulence,
       baseCurlStrength: new THREE.Vector3(80, 80, 30),
       _msEmissionScale: weight,
+      _msMaxParticles: maxParticles,
+      _msLifeMin: lifeMin,
+      _msLifeMax: lifeMax,
+      _msEmissionBaseA: 10.0 * weight,
+      _msEmissionBaseB: 20.0 * weight,
+      _msEmissionExtraMul: 1,
     };
+
+    this._applyParticleSpawnCap(system, maxParticles);
+    this._syncSystemEmission(system, p.globalFireRate ?? 1.0);
 
     // Start the system so it becomes active and emits particles.
     if (typeof system.play === 'function') system.play();
@@ -2034,8 +2940,8 @@ export class FireEffectV2 {
     return system;
   }
 
-  /** @private */
-  _createEmberSystem(shape, weight, floorIndex) {
+  /** @private @param {{ outdoorLayer?: boolean }} [opts] */
+  _createEmberSystem(shape, weight, floorIndex, opts = {}) {
     const THREE = window.THREE;
     if (!THREE) return null;
 
@@ -2059,6 +2965,7 @@ export class FireEffectV2 {
     const lifeMax = Math.max(lifeMin, (p.emberLifeMax ?? 3.0) / timeScale);
     const sizeMin = Math.max(0.1, p.emberSizeMin ?? 5);
     const sizeMax = Math.max(sizeMin, p.emberSizeMax ?? 17);
+    const maxParticles = this._scaledMaxParticles(p.fireEmberMaxParticles ?? 700, weight, 16);
 
     const emberLifecycle = new EmberLifecycleBehavior(this);
     const buoyancy = new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(p.fireHeight * 0.4));
@@ -2069,6 +2976,7 @@ export class FireEffectV2 {
     const emberSizeOverLife = new SizeOverLife(new PiecewiseBezier([
       [new Bezier(0.0, 0.14, 0.9, 0.0), 0],
     ]));
+    const outdoorLayer = opts.outdoorLayer === true;
 
     const system = new QuarksParticleSystem({
       duration: 1,
@@ -2078,7 +2986,7 @@ export class FireEffectV2 {
       startSize: new IntervalValue(sizeMin, sizeMax),
       startColor: new ColorRange(new Vector4(1, 1, 1, 1), new Vector4(1, 1, 1, 1)),
       worldSpace: true,
-      maxParticles: 2000,
+      maxParticles,
       emissionOverTime: new IntervalValue(
         (5.0 * p.emberRate) * weight,
         (10.0 * p.emberRate) * weight
@@ -2086,7 +2994,7 @@ export class FireEffectV2 {
       shape,
       material,
       renderMode: RenderMode.BillBoard,
-      renderOrder: this._computeParticleRenderOrder(floorIndex, 1),
+      renderOrder: this._computeEmberRenderOrder(floorIndex, outdoorLayer),
       behaviors: [
         buoyancy,
         updraftBehavior,
@@ -2105,8 +3013,18 @@ export class FireEffectV2 {
       turbulence,
       baseCurlStrength: emberCurlStrength.clone(),
       isEmber: true,
+      isOutdoorEmber: outdoorLayer,
       _msEmissionScale: weight,
+      _msMaxParticles: maxParticles,
+      _msLifeMin: lifeMin,
+      _msLifeMax: lifeMax,
+      _msEmissionBaseA: 5.0 * weight,
+      _msEmissionBaseB: 10.0 * weight,
+      _msEmissionExtraMul: p.emberRate ?? 1.0,
     };
+
+    this._applyParticleSpawnCap(system, maxParticles);
+    this._syncSystemEmission(system, p.globalFireRate ?? 1.0);
 
     // Start the system so it becomes active and emits particles.
     if (typeof system.play === 'function') system.play();
@@ -2138,8 +3056,13 @@ export class FireEffectV2 {
     const sizeMin = Math.max(1.0, p.smokeSizeMin ?? 183);
     const sizeMax = Math.max(sizeMin, p.smokeSizeMax ?? 400);
     const smokeRatio = Math.max(0.0, p.smokeRatio ?? 0.3);
+    const maxParticles = this._scaledMaxParticles(p.fireSmokeMaxParticles ?? 600, weight, 16);
 
-    const smokeShapeFrames = new FlameShapeFrameBehavior(SMOKE_ATLAS_SHAPE_COUNT, SMOKE_ATLAS_ANIM_FRAMES);
+    const smokeShapeFrames = new FlameShapeFrameBehavior(SMOKE_ATLAS_SHAPE_COUNT, SMOKE_ATLAS_ANIM_FRAMES, {
+      ownerEffect: this,
+      cyclesParamKey: 'smokeFlipbookCycles',
+      defaultCycles: 1,
+    });
     const smokeLifecycle = new SmokeLifecycleBehavior(this);
     const smokeUpdraftMag = Math.max(0.0, p.smokeUpdraft ?? 2.5);
     // Top-down play: buoyancy reads on the XY ground plane (+Y) with a Z lift for depth sorting.
@@ -2161,7 +3084,7 @@ export class FireEffectV2 {
       startSize: new IntervalValue(sizeMin, sizeMax),
       startColor: new ColorRange(new Vector4(1, 1, 1, 1), new Vector4(1, 1, 1, 1)),
       worldSpace: true,
-      maxParticles: 3000,
+      maxParticles,
       emissionOverTime: new IntervalValue(
         10.0 * weight * smokeRatio * 0.5,
         20.0 * weight * smokeRatio * 0.8
@@ -2172,6 +3095,7 @@ export class FireEffectV2 {
       renderOrder: this._computeSmokeRenderOrder(floorIndex, outdoorLayer),
       uTileCount: SMOKE_ATLAS_COLS,
       vTileCount: SMOKE_ATLAS_ROWS,
+      blendTiles: true,
       startTileIndex: new ConstantValue(0),
       startRotation: new ConstantValue(0),
       behaviors: [
@@ -2194,7 +3118,16 @@ export class FireEffectV2 {
       isSmoke: true,
       isOutdoorSmoke: outdoorLayer,
       _msEmissionScale: weight,
+      _msMaxParticles: maxParticles,
+      _msLifeMin: lifeMin,
+      _msLifeMax: lifeMax,
+      _msEmissionBaseA: 10.0 * weight * smokeRatio * 0.5,
+      _msEmissionBaseB: 20.0 * weight * smokeRatio * 0.8,
+      _msEmissionExtraMul: 1,
     };
+
+    this._applyParticleSpawnCap(system, maxParticles);
+    this._syncSystemEmission(system, p.globalFireRate ?? 1.0);
 
     // Start the system so it becomes active and emits particles.
     if (typeof system.play === 'function') system.play();
@@ -2240,7 +3173,12 @@ export class FireEffectV2 {
         }
       };
       syncSys(state.systems, 0);
-      syncSys(state.emberSystems, 1);
+      for (const sys of state.emberSystems) {
+        if (!sys) continue;
+        try {
+          sys.renderOrder = this._computeEmberRenderOrder(fi, sys.userData?.isOutdoorEmber === true);
+        } catch (_) {}
+      }
       for (const sys of state.smokeSystems) {
         if (!sys) continue;
         try {
@@ -2248,6 +3186,17 @@ export class FireEffectV2 {
         } catch (_) {}
       }
     }
+  }
+
+  /**
+   * Compute ember render order — indoor embers under overhead; outdoor above tree/bush canopies.
+   * @private
+   */
+  _computeEmberRenderOrder(floorIndex, outdoorLayer = false) {
+    if (outdoorLayer && this.params.smokeOutdoorAboveCanopy !== false) {
+      return outdoorSmokeRenderOrder(floorIndex);
+    }
+    return effectUnderOverheadOrder(floorIndex, 1);
   }
 
   /**
@@ -2284,7 +3233,7 @@ export class FireEffectV2 {
     log.info(`FireEffectV2: activating floor ${floorIndex} with ${allSystems.length} systems (${state.systems.length} fire, ${state.emberSystems.length} ember, ${state.smokeSystems.length} smoke)`);
     
     for (const sys of allSystems) {
-      try { 
+      try {
         br.addSystem(sys);
       } catch (err) {
         log.warn(`  addSystem() failed:`, err);
@@ -2300,6 +3249,7 @@ export class FireEffectV2 {
           log.warn(`  Failed to add emitter:`, err);
         }
       }
+      if (typeof sys.play === 'function') sys.play();
     }
   }
 
@@ -2311,6 +3261,12 @@ export class FireEffectV2 {
 
     const allSystems = [...state.systems, ...state.emberSystems, ...state.smokeSystems];
     for (const sys of allSystems) {
+      // Clear live particles so hidden floors do not retain simulation debt.
+      if (typeof sys.stop === 'function') {
+        try { sys.stop(); } catch (_) {}
+      } else if (typeof sys.pause === 'function') {
+        try { sys.pause(); } catch (_) {}
+      }
       try { br.deleteSystem(sys); } catch (_) {}
       if (sys.emitter) br.remove(sys.emitter);
     }
@@ -2339,14 +3295,42 @@ export class FireEffectV2 {
 
   // ── Private: Per-frame param sync ──────────────────────────────────────────
 
+  /** @private */
+  _getSystemParamsSignature() {
+    const p = this.params;
+    return [
+      p.globalFireRate,
+      p.flameTextureBrightness,
+      p.flameTextureOpacity,
+      p.fireHeight,
+      p.fireUpdraft,
+      p.fireCurlStrength,
+      p.windInfluence,
+      p.emberRate,
+      p.emberUpdraft,
+      p.emberCurlStrength,
+      p.smokeEnabled,
+      p.smokeRatio,
+      p.smokeUpdraft,
+      p.smokeTurbulence,
+      p.smokeWindInfluence,
+    ].join('|');
+  }
+
   /** Update emission rates, updraft, curl based on current params. @private */
   _updateSystemParams() {
+    const signature = this._getSystemParamsSignature();
+    if (signature === this._systemParamsSignature) return;
+    this._systemParamsSignature = signature;
+
     const p = this.params;
     const globalRate = Math.max(0.0, p.globalFireRate ?? 1.0);
     const texBright = Math.max(0, Number(p.flameTextureBrightness) || 0);
     const texOpacity = Math.max(0, Math.min(1, Number(p.flameTextureOpacity) ?? 1));
 
-    for (const [, state] of this._floorStates) {
+    for (const floorIndex of this._activeFloors) {
+      const state = this._floorStates.get(floorIndex);
+      if (!state) continue;
       // Fire systems.
       for (const sys of state.systems) {
         if (sys?.material) {
@@ -2354,11 +3338,7 @@ export class FireEffectV2 {
           if (typeof sys.material.opacity === 'number') sys.material.opacity = texOpacity;
         }
         if (!sys?.userData) continue;
-        const w = sys.userData._msEmissionScale ?? 1.0;
-        if (sys.emissionOverTime) {
-          sys.emissionOverTime.a = 10.0 * w * globalRate;
-          sys.emissionOverTime.b = 20.0 * w * globalRate;
-        }
+        this._syncSystemEmission(sys, globalRate);
         // Updraft.
         const ud = sys.userData.updraftForce;
         if (ud?.magnitude) ud.magnitude.value = (p.fireHeight ?? 10) * 0.125 * (p.fireUpdraft ?? 1.0);
@@ -2379,11 +3359,8 @@ export class FireEffectV2 {
           if (typeof sys.material.opacity === 'number') sys.material.opacity = texOpacity;
         }
         if (!sys?.userData) continue;
-        const w = sys.userData._msEmissionScale ?? 1.0;
-        if (sys.emissionOverTime) {
-          sys.emissionOverTime.a = 5.0 * (p.emberRate ?? 1.0) * w * globalRate;
-          sys.emissionOverTime.b = 10.0 * (p.emberRate ?? 1.0) * w * globalRate;
-        }
+        sys.userData._msEmissionExtraMul = p.emberRate ?? 1.0;
+        this._syncSystemEmission(sys, globalRate);
         const ud = sys.userData.updraftForce;
         if (ud?.magnitude) ud.magnitude.value = (p.fireHeight ?? 10) * 0.4 * (p.emberUpdraft ?? 1.0);
         const turb = sys.userData.turbulence;
@@ -2400,10 +3377,9 @@ export class FireEffectV2 {
         if (!sys?.userData) continue;
         const w = sys.userData._msEmissionScale ?? 1.0;
         const smokeRatio = Math.max(0.0, p.smokeRatio ?? 0.3);
-        if (sys.emissionOverTime) {
-          sys.emissionOverTime.a = 10.0 * w * smokeRatio * 0.5 * globalRate;
-          sys.emissionOverTime.b = 20.0 * w * smokeRatio * 0.8 * globalRate;
-        }
+        sys.userData._msEmissionBaseA = 10.0 * w * smokeRatio * 0.5;
+        sys.userData._msEmissionBaseB = 20.0 * w * smokeRatio * 0.8;
+        this._syncSystemEmission(sys, globalRate);
         const ud = sys.userData.updraftForce;
         if (ud?.magnitude) ud.magnitude.value = Math.max(0.0, p.smokeUpdraft ?? 2.5);
         const turb = sys.userData.turbulence;

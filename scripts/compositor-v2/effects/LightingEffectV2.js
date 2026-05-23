@@ -126,6 +126,8 @@ export class LightingEffectV2 {
     this._lastPerspectiveRefreshAtSec = -Infinity;
     /** @type {boolean} Static compose uniforms need to be re-parsed from params */
     this._paramsDirty = true;
+    /** @type {number} Last uComposeLightGain pushed to Foundry meshes (-1 = never) */
+    this._lastPushedLightGain = -1;
     /**
      * One-shot: old scenes only stored `globalIllumination`; copy that value into
      * {@link #params.ambientDayScale} and {@link #params.ambientNightScale} when they
@@ -166,7 +168,7 @@ export class LightingEffectV2 {
       colorationAchromaticMix: 1.0,
       wallInsetPx: 6.0,
       /** Padded wall segments for light LOS raycast (reduces bleed through thin walls). */
-      wallPaddingPx: 2.0,
+      wallPaddingPx: 4.0,
       upperFloorTransmissionEnabled: false,
       upperFloorTransmissionStrength: 0.6,
       /**
@@ -274,6 +276,23 @@ export class LightingEffectV2 {
     this._composeMaterial = null;
     /** @type {THREE.Mesh|null} */
     this._composeQuad = null;
+
+    /** @type {THREE.WebGLRenderTarget|null} Multi-floor max-blend accumulator A */
+    this._stackedLightRtA = null;
+    /** @type {THREE.WebGLRenderTarget|null} Multi-floor max-blend accumulator B */
+    this._stackedLightRtB = null;
+    /** @type {THREE.WebGLRenderTarget|null} Current stacked light-buffer result */
+    this._stackedLightResult = null;
+    /** @type {THREE.Scene|null} */
+    this._stackLightScene = null;
+    /** @type {THREE.OrthographicCamera|null} */
+    this._stackLightCamera = null;
+    /** @type {THREE.ShaderMaterial|null} */
+    this._stackLightMaterial = null;
+    /** @type {boolean} */
+    this._stackedLightActive = false;
+    /** @type {number} */
+    this._stackedLightLayerCount = 0;
 
     // ── Foundry hooks ───────────────────────────────────────────────────
     /** @type {Array<{hook: string, id: number}>} */
@@ -452,6 +471,12 @@ export class LightingEffectV2 {
 
     if (this._lightRT && (this._lightRT.width !== this._lightSize.w || this._lightRT.height !== this._lightSize.h)) {
       this._lightRT.setSize(this._lightSize.w, this._lightSize.h);
+    }
+    if (this._stackedLightRtA && (this._stackedLightRtA.width !== this._lightSize.w || this._stackedLightRtA.height !== this._lightSize.h)) {
+      this._stackedLightRtA.setSize(this._lightSize.w, this._lightSize.h);
+    }
+    if (this._stackedLightRtB && (this._stackedLightRtB.width !== this._lightSize.w || this._stackedLightRtB.height !== this._lightSize.h)) {
+      this._stackedLightRtB.setSize(this._lightSize.w, this._lightSize.h);
     }
     if (this._windowLightRT && (this._windowLightRT.width !== this._windowSize.w || this._windowLightRT.height !== this._windowSize.h)) {
       this._windowLightRT.setSize(this._windowSize.w, this._windowSize.h);
@@ -779,10 +804,9 @@ export class LightingEffectV2 {
 
     let raw;
     try {
-      raw = scene.getFlag?.(MODULE_ID, LIGHT_ENHANCEMENT_FLAG_KEY);
-    } catch (_) {
-      raw = scene?.flags?.[MODULE_ID]?.[LIGHT_ENHANCEMENT_FLAG_KEY];
-    }
+      raw = scene.flags?.[MODULE_ID]?.[LIGHT_ENHANCEMENT_FLAG_KEY]
+        ?? scene.getFlag?.(MODULE_ID, LIGHT_ENHANCEMENT_FLAG_KEY);
+    } catch (_) {}
 
     const list = Array.isArray(raw)
       ? raw
@@ -883,9 +907,91 @@ export class LightingEffectV2 {
     return this._lightRT?.texture ?? null;
   }
 
-  /** @returns {THREE.Texture|null} Alias for {@link dynamicLightTexture} (Camera Grade warm-light preserve). */
+  /** @returns {THREE.Texture|null} Alias for {@link dynamicLightTexture} (post-merge CC local override). */
   get lightTexture() {
     return this.dynamicLightTexture;
+  }
+
+  /**
+   * Begin accumulating per-floor `_lightRT` layers for post-merge CC local override.
+   * @param {THREE.WebGLRenderer} renderer
+   */
+  beginStackedLightBuffer(renderer) {
+    if (!renderer || !this._stackedLightRtA) return;
+    this._bindPerfRecorder();
+    const _perfToken = this._beginPerfSpan('stackedLight.begin', 'render');
+    const prevTarget = renderer.getRenderTarget();
+    renderer.setRenderTarget(this._stackedLightRtA);
+    // Alpha must be 0 — max-blend with a=1 clear would leave influence at 1.0 map-wide.
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear(true, true, true);
+    renderer.setRenderTarget(prevTarget);
+    this._stackedLightResult = this._stackedLightRtA;
+    this._stackedLightActive = true;
+    this._stackedLightLayerCount = 0;
+    this._endPerfSpan(_perfToken);
+  }
+
+  /**
+   * Max-blend the current floor's `_lightRT` into the stacked accumulator.
+   * @param {THREE.WebGLRenderer} renderer
+   */
+  accumulateStackedLightBuffer(renderer) {
+    if (!renderer || !this._lightRT?.texture || !this._stackLightMaterial) return;
+    if (!this._stackedLightActive) this.beginStackedLightBuffer(renderer);
+
+    const accumTex = this._stackedLightResult?.texture ?? this._stackedLightRtA?.texture;
+    if (!accumTex) return;
+
+    const out = (this._stackedLightResult === this._stackedLightRtA)
+      ? this._stackedLightRtB
+      : this._stackedLightRtA;
+    if (!out) return;
+
+    this._bindPerfRecorder();
+    const _perfToken = this._beginPerfSpan('stackedLight.accumulate', 'render');
+    this._stackLightMaterial.uniforms.tAccum.value = accumTex;
+    this._stackLightMaterial.uniforms.tLayer.value = this._lightRT.texture;
+
+    const prevTarget = renderer.getRenderTarget();
+    renderer.setRenderTarget(out);
+    renderer.render(this._stackLightScene, this._stackLightCamera);
+    renderer.setRenderTarget(prevTarget);
+
+    this._stackedLightResult = out;
+    this._stackedLightLayerCount += 1;
+    this._endPerfSpan(_perfToken);
+  }
+
+  /**
+   * Stacked gameplay-light buffer for post-merge CC (falls back to last floor when inactive).
+   * @returns {THREE.Texture|null}
+   */
+  getStackedDynamicLightTexture() {
+    if (this._stackedLightActive && this._stackedLightLayerCount > 0 && this._stackedLightResult?.texture) {
+      return this._stackedLightResult.texture;
+    }
+    return this.dynamicLightTexture;
+  }
+
+  /**
+   * Texture + alpha baseline for post-merge CC local ToD override.
+   * Raw `_lightRT` clears alpha=1 for compose visibility; stacked layers subtract that baseline.
+   * @returns {{ texture: THREE.Texture|null, alphaBaseline: number }}
+   */
+  getLocalLightBufferBinding() {
+    const stackedActive = this._stackedLightActive && this._stackedLightLayerCount > 0;
+    if (stackedActive && this._stackedLightResult?.texture) {
+      return { texture: this._stackedLightResult.texture, alphaBaseline: 0.0 };
+    }
+    const tex = this.dynamicLightTexture;
+    return { texture: tex ?? null, alphaBaseline: 1.0 };
+  }
+
+  /** Reset stacked light accumulation for the next frame. */
+  endStackedLightBuffer() {
+    this._stackedLightActive = false;
+    this._stackedLightLayerCount = 0;
   }
 
   /**
@@ -1483,6 +1589,7 @@ export class LightingEffectV2 {
         }
 
         float landscapeLightningFlashWeight(vec2 screenUv) {
+          if (uLandscapeLightningFlash01 <= 0.0) return 0.0;
           float llFlash = clamp(uLandscapeLightningFlash01, 0.0, 1.0);
           float llGain = clamp(uLandscapeLightningOutdoorGain, 0.0, 16.0);
           return llFlash * llGain * landscapeLightningShadowFlashGate(screenUv);
@@ -1546,11 +1653,8 @@ export class LightingEffectV2 {
           float foundryYs = uSceneDimensions.y - worldXYs.y;
           vec2 sceneUvRaw = (vec2(foundryXs, foundryYs) - uBldSceneOrigin) / max(uBldSceneSize, vec2(1e-5));
           vec2 sceneUvFoundry = clamp(sceneUvRaw, 0.0, 1.0);
-          float inSceneBounds =
-            step(0.0, sceneUvRaw.x) *
-            step(0.0, sceneUvRaw.y) *
-            step(sceneUvRaw.x, 1.0) *
-            step(sceneUvRaw.y, 1.0);
+          vec2 inBounds2 = step(vec2(0.0), sceneUvRaw) * step(sceneUvRaw, vec2(1.0));
+          float inSceneBounds = inBounds2.x * inBounds2.y;
 
           vec4 roofAlphaSample = vec4(0.0);
           float roofAlphaCached = 0.0;
@@ -1704,11 +1808,7 @@ export class LightingEffectV2 {
           winWhite *= (1.0 - windowOutdoorBlock);
           float lightIVisible = max(c, winWhite);
           // When the RGB buffer carries saturated hue (candles, torches, tinted lamps),
-          // use it for ambient retint and coloration — direct punch stays scalar white.
-          float srcSatForDirect = rgbSaturation(srcSafe);
-          float srcChromaMax = max(max(srcSafe.r, srcSafe.g), srcSafe.b);
-          vec3 srcDirectHue = (srcChromaMax > 1e-4) ? (srcSafe / srcChromaMax) : vec3(1.0);
-          float directTintW = smoothstep(0.04, 0.28, srcSatForDirect);
+          // coloration below uses chroma residual — direct punch stays scalar white.
           vec3 directFromSources = vec3(c);
           vec3 directLight = directFromSources + vec3(winWhite);
 
@@ -1716,7 +1816,7 @@ export class LightingEffectV2 {
           // level locally, letting the ambient brighten under torches/lamps.
           float lightTermI = max(lightIVisible, 0.0);
           float punchLightI = pow(max(lightTermI, 0.0), 0.82);
-          float localLightPresenceA = smoothstep(0.001, 0.38, max(srcSample.a, 0.0));
+          float localLightPresenceA = pow(smoothstep(0.002, 0.92, max(srcSample.a, 0.0)), 0.28);
           if (localLightPresenceA > 0.001) {
             lightTermI = pow(max(lightTermI, 0.0), mix(0.82, 0.72, localLightPresenceA));
             punchLightI = pow(max(punchLightI, 0.0), mix(0.82, 0.62, localLightPresenceA));
@@ -1747,22 +1847,16 @@ export class LightingEffectV2 {
             1.0
           );
           float punchGainEff = max(uDarknessPunchGain, 0.0) * mix(1.0, 0.40, localLightPresenceA);
-          float punchEnvelope = smoothstep(0.0, mix(0.48, 0.72, localLightPresenceA), lightTermI);
+          float punchEnvelope = smoothstep(0.0, mix(0.82, 1.18, localLightPresenceA), lightTermI);
+          punchEnvelope = pow(clamp(punchEnvelope, 0.0, 1.0), 0.55);
           float punch = (1.0 - exp(-punchLightI * punchGainEff)) * punchEnvelope;
           float localDarknessLevel = clamp(
             baseDarknessLevel * (1.0 - punch * max(uNegativeDarknessStrength, 0.0)),
             0.0, 1.0
           );
           vec3 punchedAmbient = mix(ambientDay, ambientNight, localDarknessLevel);
-          // Outdoors at night: darkness punch reveals Foundry ambientDarkness (cool blue/purple).
-          // Retint that fill toward the direct light hue from the buffer (any authored colour).
-          float localOutdoorAmb = localLightPresenceA * punch * isOutdoorForInteriorDim * inSceneBounds;
-          if (localOutdoorAmb > 0.0001) {
-            float ambLuma = dot(punchedAmbient, vec3(0.2126, 0.7152, 0.0722));
-            vec3 fillHue = mix(vec3(1.0), srcDirectHue, directTintW);
-            vec3 localFill = fillHue * max(ambLuma * (1.02 + punch * 0.22), 0.012);
-            punchedAmbient = mix(punchedAmbient, localFill, clamp(localOutdoorAmb * 0.94, 0.0, 0.96));
-          }
+          // Outdoor warm ambient retint removed — post-merge CC local ToD override owns
+          // timeline colour in gameplay-light pools; compose keeps brightness via punch/direct.
 
           // Darkness mask from ThreeDarknessSource meshes.
           float punchedMask = clamp(
@@ -1774,9 +1868,9 @@ export class LightingEffectV2 {
           // sample the map border and smear interior classification (horizontal bands
           // in the grey margin). Match building-shadow guard.
           float isOutdoorForInteriorDimSafe = mix(1.0, isOutdoorForInteriorDim, inSceneBounds);
-          directLight += landscapeLightningFlashColorVec()
-            * landscapeLightningFlashWeight(vUv)
-            * isOutdoorForInteriorDimSafe;
+          float llWeight = landscapeLightningFlashWeight(vUv) * isOutdoorForInteriorDimSafe;
+          vec3 llColorVec = landscapeLightningFlashColorVec();
+          directLight += llColorVec * llWeight;
           // Only apply interior-darkness where the mask confidently indicates
           // "indoors". This rejects low-level mask noise/seams that otherwise
           // become visible as broad banding when interior darkness is increased.
@@ -1797,10 +1891,7 @@ export class LightingEffectV2 {
           ambientAfterDark *= max(0.0, 1.0 - uInteriorDarkness * indoorConfidenceForDim);
 
           // Distant landscape lightning: cold outdoor ambient lift.
-          {
-            float llAmt = landscapeLightningFlashWeight(vUv) * isOutdoorForInteriorDimSafe;
-            ambientAfterDark += landscapeLightningFlashColorVec() * llAmt;
-          }
+          ambientAfterDark += llColorVec * llWeight;
 
           // Building × painted lit texture (scene UV): shared by daylight ambient slice, direct HDR occlusion, additive tint path.
           float buildStructU = (uHasBuildingShadowLit > 0.5)
@@ -1923,14 +2014,12 @@ export class LightingEffectV2 {
 
           // Outdoor lightning fill after shadow combine — cold tint on illumination stack.
           {
-            float llW2 = landscapeLightningFlashWeight(vUv) * isOutdoorForInteriorDimSafe;
-            vec3 llCol2 = landscapeLightningFlashColorVec();
-            totalIllumination += llCol2 * llW2;
+            totalIllumination += llColorVec * llWeight;
             float llContrast = clamp(uLandscapeLightningFlashContrast, 0.0, 3.0)
               * clamp(uLandscapeLightningFlash01, 0.0, 1.0)
               * isOutdoorForInteriorDimSafe;
             if (llContrast > 0.001) {
-              vec3 llCenter = llCol2 * 0.42;
+              vec3 llCenter = llColorVec * 0.42;
               vec3 centered = totalIllumination - llCenter;
               totalIllumination = mix(
                 totalIllumination,
@@ -1951,10 +2040,8 @@ export class LightingEffectV2 {
 
           // Colored lightning screen flash (additive + hue mix — visible over neutral HDR lights).
           {
-            float llW3 = landscapeLightningFlashWeight(vUv) * isOutdoorForInteriorDimSafe;
-            vec3 llCol3 = landscapeLightningFlashColorVec();
-            litColor += llCol3 * llW3 * 0.65;
-            litColor = mix(litColor, litColor * llCol3, clamp(llW3 * 0.42, 0.0, 0.82));
+            litColor += llColorVec * llWeight * 0.65;
+            litColor = mix(litColor, litColor * llColorVec, clamp(llWeight * 0.42, 0.0, 0.82));
           }
 
           // Colouration: only the chromatic part of the RGB light buffer tints albedo.
@@ -1999,6 +2086,45 @@ export class LightingEffectV2 {
     this._composeQuad.frustumCulled = false;
     this._composeScene.add(this._composeQuad);
 
+    // ── Stacked light-buffer max blend (multi-floor post-merge CC) ───────
+    this._stackedLightRtA = new THREE.WebGLRenderTarget(this._lightSize.w, this._lightSize.h, { ...rtOpts });
+    this._stackedLightRtA.texture.colorSpace = THREE.LinearSRGBColorSpace;
+    this._stackedLightRtB = new THREE.WebGLRenderTarget(this._lightSize.w, this._lightSize.h, { ...rtOpts });
+    this._stackedLightRtB.texture.colorSpace = THREE.LinearSRGBColorSpace;
+    this._stackLightCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this._stackLightMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tAccum: { value: null },
+        tLayer: { value: null },
+      },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        uniform sampler2D tAccum;
+        uniform sampler2D tLayer;
+        varying vec2 vUv;
+        void main() {
+          vec4 accum = texture2D(tAccum, vUv);
+          vec4 layer = texture2D(tLayer, vUv);
+          // _lightRT clears alpha=1 as compose baseline; CC reads punch above that floor.
+          layer.a = max(layer.a - 1.0, 0.0);
+          gl_FragColor = max(accum, layer);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+    });
+    this._stackLightMaterial.toneMapped = false;
+    this._stackLightScene = new THREE.Scene();
+    const stackQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._stackLightMaterial);
+    stackQuad.frustumCulled = false;
+    this._stackLightScene.add(stackQuad);
+
     // ── Foundry hooks for light CRUD ──────────────────────────────────
     this._registerHook('createAmbientLight', (doc) => this._onLightCreate(doc));
     this._registerHook('updateAmbientLight', (doc, changes) => this._onLightUpdate(doc, changes));
@@ -2034,6 +2160,8 @@ export class LightingEffectV2 {
    */
   _reconcileMissingEmbeddedLights() {
     if (!this._initialized || !this._lightsSynced) return;
+    this._bindPerfRecorder();
+    const _perfToken = this._beginPerfSpan('reconcileEmbeddedLights', 'update', { cpuOnly: true });
     const docs = getAuthoritativeAmbientLightDocuments();
     const enhancementMap = this._getLightEnhancementConfigMap();
 
@@ -2088,6 +2216,7 @@ export class LightingEffectV2 {
     if (added > 0) {
       log.info(`LightingEffectV2: reconciled ${added} embedded light(s) missing from V2 maps`);
     }
+    this._endPerfSpan(_perfToken);
   }
 
   /**
@@ -2099,6 +2228,8 @@ export class LightingEffectV2 {
     if (!this._initialized) return;
     const g = Math.max(0, Number(this.params.lightIntensity));
     const safe = Number.isFinite(g) ? g : 0;
+    if (this._lastPushedLightGain === safe) return;
+    this._lastPushedLightGain = safe;
     for (let i = 0; i < this._lightList.length; i++) {
       const light = this._lightList[i];
       const u = light?.material?.uniforms?.uComposeLightGain;
@@ -2131,7 +2262,7 @@ export class LightingEffectV2 {
     if (!this._initialized) return;
     this._bindPerfRecorder();
 
-    const _perfToken = this._beginPerfSpan('syncAllLights', 'update', { cpuOnly: true });
+    let _perfToken = this._beginPerfSpan('syncAllLights.detachForeign', 'update', { cpuOnly: true });
     // `_lightScene` is shared with PlayerLightEffectV2 (torch/flashlight) and
     // CandleFlamesEffectV2 (glow group). Those meshes are not in `_lights`, so a
     // normal "clear _lights" pass would leave them parented — looks like a Foundry
@@ -2149,7 +2280,9 @@ export class LightingEffectV2 {
         }
       }
     }
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('syncAllLights.dispose', 'update', { cpuOnly: true });
     // Dispose existing Foundry-tracked light sources
     for (let i = 0; i < this._lightList.length; i++) {
       const light = this._lightList[i];
@@ -2166,7 +2299,9 @@ export class LightingEffectV2 {
     }
     this._darknessSources.clear();
     this._darknessList.length = 0;
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('syncAllLights.rebuildFromDocs', 'update', { cpuOnly: true });
     // Prefer embedded collection: includes every AmbientLight on the scene for all levels.
     // `canvas.lighting.placeables` is only objects on the PIXI layer (often current level only).
     const docs = getAuthoritativeAmbientLightDocuments();
@@ -2179,6 +2314,7 @@ export class LightingEffectV2 {
 
     this._lightsSynced = true;
     this._perspectiveRefreshDirty = true;
+    this._lastPushedLightGain = -1;
     this._pushComposeLightGainToFoundryMeshes();
     log.info(`LightingEffectV2: synced ${this._lights.size} lights, ${this._darknessSources.size} darkness sources`);
     this._endPerfSpan(_perfToken);
@@ -2208,19 +2344,22 @@ export class LightingEffectV2 {
     // gating reads the canonical master darkness, so user-selected priority
     // (calendar/weather/slider/max) consistently drives which torches appear.
     const sceneDarkness = clamp01(LightingDirector.get().masterDarkness);
+    const pOverride = this._renderFloorIndexForLights != null
+      ? getPerspectiveForRenderFloorIndex(this._renderFloorIndexForLights)
+      : null;
 
     for (let i = 0; i < this._lightList.length; i++) {
       const light = this._lightList[i];
       if (!light?.mesh) continue;
       const doc = this._liveAmbientDocForGating(light);
-      light.mesh.visible = this._isDocVisibleForLighting(doc, sceneDarkness);
+      light.mesh.visible = this._isDocVisibleForLighting(doc, sceneDarkness, pOverride);
     }
 
     for (let i = 0; i < this._darknessList.length; i++) {
       const ds = this._darknessList[i];
       if (!ds?.mesh) continue;
       const doc = this._liveAmbientDocForGating(ds);
-      ds.mesh.visible = this._isDocVisibleForLighting(doc, sceneDarkness);
+      ds.mesh.visible = this._isDocVisibleForLighting(doc, sceneDarkness, pOverride);
     }
     this._endPerfSpan(_perfToken);
   }
@@ -2282,13 +2421,11 @@ export class LightingEffectV2 {
    * @private
    * @param {object|null|undefined} doc
    * @param {number} sceneDarkness
+   * @param {object|null|undefined} [pOverride] Hoisted perspective for current render floor
    * @returns {boolean}
    */
-  _isDocVisibleForLighting(doc, sceneDarkness) {
+  _isDocVisibleForLighting(doc, sceneDarkness, pOverride = null) {
     if (!doc) return false;
-    const pOverride = this._renderFloorIndexForLights != null
-      ? getPerspectiveForRenderFloorIndex(this._renderFloorIndexForLights)
-      : null;
     if (!isLightVisibleForPerspective(doc, pOverride)) return false;
     if (doc.hidden === true) return false;
 
@@ -2356,6 +2493,7 @@ export class LightingEffectV2 {
         light.init();
         this._lights.set(id, light);
         this._lightList.push(light); // OPTIMIZATION: Update flat array
+        this._lastPushedLightGain = -1;
         if (light.mesh && this._lightScene) {
           this._lightScene.add(light.mesh);
         }
@@ -2640,7 +2778,7 @@ export class LightingEffectV2 {
     const foundrySceneDarkness = sceneDarkness;
     const tSec = (timeInfo && typeof timeInfo.elapsed === 'number') ? timeInfo.elapsed : 0;
 
-    _perfToken = this._beginPerfSpan('lightLoop', 'update', { cpuOnly: true });
+    _perfToken = this._beginPerfSpan('lightLoop.animation', 'update', { cpuOnly: true });
     // OPTIMIZATION: Array iteration is thousands of times faster than Map.values()
     const lights = this._lightList;
     for (let i = 0; i < lights.length; i++) {
@@ -2648,23 +2786,38 @@ export class LightingEffectV2 {
       if (!this._shouldDecimateAnimationUpdate(light, tSec) && typeof light?.updateAnimation === 'function') {
         light.updateAnimation(timeInfo, sceneDarkness, null, this._shadowContextForLights ?? null);
       }
+    }
+    this._endPerfSpan(_perfToken);
+
+    _perfToken = this._beginPerfSpan('lightLoop.visibility', 'update', { cpuOnly: true });
+    const pOverride = this._renderFloorIndexForLights != null
+      ? getPerspectiveForRenderFloorIndex(this._renderFloorIndexForLights)
+      : null;
+    for (let i = 0; i < lights.length; i++) {
+      const light = lights[i];
       if (light?.mesh) {
         const doc = this._liveAmbientDocForGating(light);
-        light.mesh.visible = this._isDocVisibleForLighting(doc, foundrySceneDarkness);
+        light.mesh.visible = this._isDocVisibleForLighting(doc, foundrySceneDarkness, pOverride);
       }
     }
     this._endPerfSpan(_perfToken);
 
-    _perfToken = this._beginPerfSpan('darknessLoop', 'update', { cpuOnly: true });
+    _perfToken = this._beginPerfSpan('darknessLoop.animation', 'update', { cpuOnly: true });
     const darks = this._darknessList;
     for (let i = 0; i < darks.length; i++) {
       const ds = darks[i];
       if (!this._shouldDecimateAnimationUpdate(ds, tSec) && typeof ds?.updateAnimation === 'function') {
         ds.updateAnimation(timeInfo);
       }
+    }
+    this._endPerfSpan(_perfToken);
+
+    _perfToken = this._beginPerfSpan('darknessLoop.visibility', 'update', { cpuOnly: true });
+    for (let i = 0; i < darks.length; i++) {
+      const ds = darks[i];
       if (ds?.mesh) {
         const doc = this._liveAmbientDocForGating(ds);
-        ds.mesh.visible = this._isDocVisibleForLighting(doc, foundrySceneDarkness);
+        ds.mesh.visible = this._isDocVisibleForLighting(doc, foundrySceneDarkness, pOverride);
       }
     }
     this._endPerfSpan(_perfToken);
@@ -2783,10 +2936,11 @@ export class LightingEffectV2 {
       }
       this._endPerfSpan(_perfToken);
 
-      _perfToken = this._beginPerfSpan('lightOverride.windowDraw', 'render');
       renderer.setRenderTarget(this._lightOverrideWindowRT);
       renderer.setClearColor(0x000000, 1);
       renderer.autoClear = true;
+
+      _perfToken = this._beginPerfSpan('lightOverride.windowDraw.bind', 'render', { cpuOnly: true });
       if (windowLightScene) {
         try {
           windowLightScene.userData?.onBindWindowLightPass?.(
@@ -2795,7 +2949,17 @@ export class LightingEffectV2 {
             camera,
           );
         } catch (_) {}
+      }
+      this._endPerfSpan(_perfToken);
+
+      _perfToken = this._beginPerfSpan('lightOverride.windowDraw.sceneDraw', 'render');
+      if (windowLightScene) {
         renderer.render(windowLightScene, camera);
+      }
+      this._endPerfSpan(_perfToken);
+
+      _perfToken = this._beginPerfSpan('lightOverride.windowDraw.outdoorsClip', 'render');
+      if (windowLightScene) {
         try {
           windowLightScene.userData?.onAfterWindowLightPass?.(
             renderer,
@@ -2972,24 +3136,33 @@ export class LightingEffectV2 {
     }
 
     // ── Pass 1b: Window glow → separate RT (compose merges with roof gating) ─
-    _perfToken = this._beginPerfSpan('windowLightDraw', 'render');
     renderer.setRenderTarget(this._windowLightRT);
     renderer.setClearColor(0x000000, 1);
     renderer.autoClear = true;
     if (windowLightScene) {
       try {
-        // WindowLight shaders use gl_FragCoord / uScreenSize for roof/ceiling masks.
-        // uScreenSize must match THIS RT (set above), not values pushed earlier in the
-        // frame — Lighting resizes these RTs after FloorCompositor.bind, and zoom/DPR
-        // can otherwise desync roof sampling → apparent fade/pulse when panning or zooming.
+        _perfToken = this._beginPerfSpan('windowLightDraw.bind', 'render', { cpuOnly: true });
         try {
+          // WindowLight shaders use gl_FragCoord / uScreenSize for roof/ceiling masks.
+          // uScreenSize must match THIS RT (set above), not values pushed earlier in the
+          // frame — Lighting resizes these RTs after FloorCompositor.bind, and zoom/DPR
+          // can otherwise desync roof sampling → apparent fade/pulse when panning or zooming.
           windowLightScene.userData?.onBindWindowLightPass?.(
             this._windowLightRT.width,
             this._windowLightRT.height,
             camera,
           );
         } catch (_) {}
-        renderer.render(windowLightScene, camera);
+        this._endPerfSpan(_perfToken);
+
+        _perfToken = this._beginPerfSpan('windowLightDraw.sceneDraw', 'render');
+        try {
+          renderer.render(windowLightScene, camera);
+        } finally {
+          this._endPerfSpan(_perfToken);
+        }
+
+        _perfToken = this._beginPerfSpan('windowLightDraw.outdoorsClip', 'render');
         try {
           windowLightScene.userData?.onAfterWindowLightPass?.(
             renderer,
@@ -2998,11 +3171,11 @@ export class LightingEffectV2 {
             outdoorsMaskTexture ?? null,
           );
         } catch (_) {}
+        this._endPerfSpan(_perfToken);
       } catch (err) {
         log.error('LightingEffectV2: window light render failed:', err);
       }
     }
-    this._endPerfSpan(_perfToken);
 
     // ── Pass 2: Accumulate darkness contributions ─────────────────────
     _perfToken = this._beginPerfSpan('darknessDraw', 'render');
@@ -3018,12 +3191,15 @@ export class LightingEffectV2 {
     camera.layers.mask = prevLayerMask;
 
     // ── Pass 3: Compose ───────────────────────────────────────────────
-    _perfToken = this._beginPerfSpan('composeUniforms', 'render', { cpuOnly: true });
+    _perfToken = this._beginPerfSpan('composeUniforms.coreTextures', 'render', { cpuOnly: true });
     const cu = this._composeMaterial.uniforms;
     cu.tScene.value = sceneRT.texture;
     cu.tLightSources.value = this._lightRT.texture;
     cu.tLightWindow.value = this._windowLightRT.texture;
     cu.tDarkness.value = this._darknessRT.texture;
+    this._endPerfSpan(_perfToken);
+
+    _perfToken = this._beginPerfSpan('composeUniforms.shadowInputs', 'render', { cpuOnly: true });
     // Phase 4: ShadowManagerV2's combined shadow factor is the single shadow
     // input. The legacy cloud-only path was removed; if combined is absent,
     // the shader simply applies no shadow term.
@@ -3065,10 +3241,15 @@ export class LightingEffectV2 {
     }
     const vbo = Number(vegetationBillboardOpacity);
     cu.uVegetationBillboardOpacity.value = Number.isFinite(vbo) ? Math.max(0, Math.min(1, vbo)) : 1.0;
+    this._endPerfSpan(_perfToken);
+
+    _perfToken = this._beginPerfSpan('composeUniforms.viewScene', 'render', { cpuOnly: true });
     // View→scene UV uniforms for compose (_Outdoors roof-light gate; building
     // shadow no longer sampled here — ShadowManagerV2 combines it upstream).
     this._syncViewSceneUniforms(camera);
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('composeUniforms.roofMasks', 'render', { cpuOnly: true });
     if (outdoorsMaskTexture) {
       this._normalizeOutdoorsMaskTexture(outdoorsMaskTexture);
       cu.tOutdoorsForRoofLight.value = outdoorsMaskTexture;
@@ -3169,10 +3350,9 @@ export class LightingEffectV2 {
 
     let raw;
     try {
-      raw = scene.getFlag?.(MODULE_ID, LIGHT_ENHANCEMENT_FLAG_KEY);
-    } catch (_) {
-      raw = scene?.flags?.[MODULE_ID]?.[LIGHT_ENHANCEMENT_FLAG_KEY];
-    }
+      raw = scene.flags?.[MODULE_ID]?.[LIGHT_ENHANCEMENT_FLAG_KEY]
+        ?? scene.getFlag?.(MODULE_ID, LIGHT_ENHANCEMENT_FLAG_KEY);
+    } catch (_) {}
 
     const list = Array.isArray(raw)
       ? raw
@@ -3270,6 +3450,13 @@ export class LightingEffectV2 {
 
     // Dispose GPU resources
     try { this._lightRT?.dispose(); } catch (_) {}
+    try { this._stackedLightRtA?.dispose(); } catch (_) {}
+    try { this._stackedLightRtB?.dispose(); } catch (_) {}
+    try { this._stackLightMaterial?.dispose(); } catch (_) {}
+    try {
+      const sq = this._stackLightScene?.children?.[0];
+      sq?.geometry?.dispose?.();
+    } catch (_) {}
     try { this._windowLightRT?.dispose(); } catch (_) {}
     try { this._lightOverrideWindowRT?.dispose(); } catch (_) {}
     try { this._darknessRT?.dispose(); } catch (_) {}
@@ -3289,6 +3476,14 @@ export class LightingEffectV2 {
     this._lightScene = null;
     this._darknessScene = null;
     this._lightRT = null;
+    this._stackedLightRtA = null;
+    this._stackedLightRtB = null;
+    this._stackedLightResult = null;
+    this._stackLightScene = null;
+    this._stackLightCamera = null;
+    this._stackLightMaterial = null;
+    this._stackedLightActive = false;
+    this._stackedLightLayerCount = 0;
     this._windowLightRT = null;
     this._lightOverrideWindowRT = null;
     this._darknessRT = null;

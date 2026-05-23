@@ -631,7 +631,13 @@ export class WeatherController {
         for (let x = 0; x < w; x++) {
           const sx = Math.min(srcW - 1, Math.floor((x / Math.max(w - 1, 1)) * (srcW - 1)));
           const si = (sy * srcW + sx) * 4;
-          data[y * w + x] = rgba[si];
+          const out01 = this._decodeOutdoorsMaskSample8(
+            rgba[si],
+            rgba[si + 1],
+            rgba[si + 2],
+            rgba[si + 3],
+          );
+          data[y * w + x] = Math.round(out01 * 255);
         }
       }
       this.roofMaskData = data;
@@ -668,6 +674,26 @@ export class WeatherController {
   }
 
   /**
+   * Decode one _Outdoors texel to 0..1 outdoors strength (matches GPU msDecodeOutdoorsMaskSample).
+   * Cleared RGBA (0,0,0,0) → 1.0 (outdoor default); otherwise clamp(max(rgb)*alpha).
+   * @param {number} r8
+   * @param {number} g8
+   * @param {number} b8
+   * @param {number} a8
+   * @returns {number}
+   * @private
+   */
+  _decodeOutdoorsMaskSample8(r8, g8, b8, a8) {
+    const r = Math.max(0, Math.min(255, Number(r8) || 0)) / 255;
+    const g = Math.max(0, Math.min(255, Number(g8) || 0)) / 255;
+    const b = Math.max(0, Math.min(255, Number(b8) || 0)) / 255;
+    const a = Math.max(0, Math.min(255, Number(a8) || 0)) / 255;
+    const lum = Math.max(r, g, b);
+    if (lum < 1e-5 && a < 1e-5) return 1.0;
+    return Math.max(0, Math.min(1, lum * a));
+  }
+
+  /**
    * Extract pixel data from the roof mask texture for CPU-side lookup.
    * @param {HTMLImageElement|HTMLCanvasElement} image 
    * @private
@@ -692,15 +718,20 @@ export class WeatherController {
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
       ctx.drawImage(image, 0, 0, w, h);
       
-      // We only need the Red channel (luminance)
       const imageData = ctx.getImageData(0, 0, w, h);
       const pixels = imageData.data; // RGBA
-      
-      // Store compact: 1 byte per pixel
+
+      // Store compact decoded outdoors strength (0..255) — must match GPU _Outdoors decode.
       this.roofMaskData = new Uint8Array(w * h);
       for (let i = 0; i < w * h; i++) {
-        // Red channel is every 4th byte
-        this.roofMaskData[i] = pixels[i * 4];
+        const pi = i * 4;
+        const out01 = this._decodeOutdoorsMaskSample8(
+          pixels[pi],
+          pixels[pi + 1],
+          pixels[pi + 2],
+          pixels[pi + 3],
+        );
+        this.roofMaskData[i] = Math.round(out01 * 255);
       }
       
       this.roofMaskSize = { width: w, height: h };
@@ -728,7 +759,7 @@ export class WeatherController {
     const h = this.roofMaskSize.height;
 
     // Build a distance-to-indoors field using a fast 2-pass chamfer transform.
-    // The mask is authored as outdoors=255 (white), indoors=0 (black).
+    // roofMaskData stores decoded outdoors strength (255=outdoor, 0=indoor).
     // We compute distance for outdoor pixels to the nearest indoor pixel.
     const INF = 1e9;
     const dist = new Int32Array(w * h);

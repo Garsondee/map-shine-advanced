@@ -1,22 +1,11 @@
 import { createLogger } from '../core/log.js';
+import {
+  colorForStatus,
+  headlineHealthStatus,
+  headlineTooltip,
+} from '../core/diagnostics/health-status-ui.js';
 
 const log = createLogger('BreakerBoxHeader');
-
-/** Prefer active-floor rollup so the HUD matches what the GM is looking at. */
-function headlineHealthStatus(snapshot) {
-  if (!snapshot) return 'unknown';
-  const af = snapshot.activeFloorOverallStatus ?? snapshot.meta?.activeFloorOverallStatus;
-  if (af && af !== 'unknown') return af;
-  return snapshot.overallStatus || 'unknown';
-}
-
-function colorForStatus(status) {
-  if (status === 'critical') return '#ff3b30';
-  if (status === 'broken') return '#ff453a';
-  if (status === 'degraded') return '#ffcc00';
-  if (status === 'healthy') return '#30d158';
-  return '#8e8e93';
-}
 
 export class BreakerBoxHeaderIndicator {
   constructor({ healthEvaluator = null, dialog = null } = {}) {
@@ -67,26 +56,31 @@ export class BreakerBoxHeaderIndicator {
     this.button = btn;
 
     this._unsubscribe = this.healthEvaluator?.subscribe?.((snapshot) => {
-      this._applyStatus(headlineHealthStatus(snapshot));
+      this._applyStatus(headlineHealthStatus(snapshot), snapshot);
     }) || null;
-    this._applyStatus(headlineHealthStatus(this.healthEvaluator?.getSnapshot?.()));
+    this._applyStatus(
+      headlineHealthStatus(this.healthEvaluator?.getSnapshot?.()),
+      this.healthEvaluator?.getSnapshot?.()
+    );
   }
 
-  _applyStatus(status) {
+  _applyStatus(status, snapshot = null) {
     if (!this.button) return;
     const color = colorForStatus(status);
     this.button.style.color = color;
+    this.button.title = headlineTooltip(snapshot);
+    this.button.style.animation = 'none';
     const dot = this.button.querySelector('.mapshine-breaker-dot');
     if (dot) {
       dot.style.background = color;
       dot.style.boxShadow = `0 0 8px ${color}99`;
-    }
-    if (status === 'critical' || status === 'broken') {
-      this.button.style.animation = 'mapshine-breaker-pulse 1s ease-in-out infinite';
-    } else if (status === 'degraded') {
-      this.button.style.animation = 'mapshine-breaker-pulse 1.8s ease-in-out infinite';
-    } else {
-      this.button.style.animation = 'none';
+      if (status === 'critical' || status === 'broken') {
+        dot.style.animation = 'mapshine-breaker-pulse 1s ease-in-out infinite';
+      } else if (status === 'degraded') {
+        dot.style.animation = 'mapshine-breaker-pulse 1.8s ease-in-out infinite';
+      } else {
+        dot.style.animation = 'none';
+      }
     }
 
     if (!document.getElementById('map-shine-breaker-style')) {
@@ -99,6 +93,8 @@ export class BreakerBoxHeaderIndicator {
   border-radius: 999px;
   display: inline-block;
   border: 1px solid rgba(255,255,255,0.35);
+  transform-origin: center center;
+  flex-shrink: 0;
 }
 @keyframes mapshine-breaker-pulse {
   0% { transform: scale(1.0); opacity: 1; }

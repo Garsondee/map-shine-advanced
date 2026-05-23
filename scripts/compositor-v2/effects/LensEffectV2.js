@@ -1,7 +1,7 @@
 /**
  * @fileoverview LensEffectV2 — stylized post-processing lens treatment.
  *
- * Multiple overlay textures can be layered at once across 4 slots.
+ * Multiple overlay textures can be layered at once across 2 slots.
  * Exception: textures named lens_overlay_* are mutually exclusive globally
  * (at most one such texture active across all slots).
  * The catalog of available textures is
@@ -26,7 +26,10 @@ const LENS_ASSET_DIR_VARIANTS = [
   'modules/map-shine-advanced/assets/lens-assets',
   'modules/map-shine-advanced/assets/lens_assets',
 ];
-const OVERLAY_SLOT_COUNT = 4;
+const OVERLAY_SLOT_COUNT = 2;
+/** Light-burn RT dimensions are rounded up to this grid to avoid GPU realloc on minor resizes. */
+const LIGHT_BURN_RT_ALIGN = 128;
+const LIGHT_BURN_RT_SCALE = 0.5;
 
 const FALLBACK_OVERLAY_FILES = [
   'lens_dust_01.jpg',
@@ -145,6 +148,12 @@ function computeCoverScaleOffset(texW, texH, screenW, screenH) {
 
 function clamp01(v) { return Math.max(0, Math.min(1, Number(v) || 0)); }
 
+function quantizeDimension(value, align, min = 1) {
+  const v = Math.max(min, Math.floor(Number(value) || min));
+  const step = Math.max(1, Math.floor(Number(align) || 1));
+  return Math.max(min, Math.ceil(v / step) * step);
+}
+
 export class LensEffectV2 {
   constructor() {
     this._initialized = false;
@@ -180,10 +189,25 @@ export class LensEffectV2 {
     this._slotBlendDurationSec = new Array(OVERLAY_SLOT_COUNT).fill(0.8);
     this._currentScreenW = 1;
     this._currentScreenH = 1;
-    this._smoothedSceneLuma = 0.5;
     this._lastUpdateElapsedSec = null;
     this._lastUpdateDeltaSec = 1 / 60;
-    this._lumaReadPixel = null;
+    /** @type {Record<string, number|boolean|[number, number]>} */
+    this._uniformCache = {};
+
+    /** Per-slot runtime state — avoids per-frame object/string churn in the hot path. */
+    this._overlaySlotIndex = new Int32Array(OVERLAY_SLOT_COUNT).fill(-1);
+    this._overlaySlotIntensity = new Float32Array(OVERLAY_SLOT_COUNT).fill(0.8);
+    this._overlaySlotLumaReactivity = new Float32Array(OVERLAY_SLOT_COUNT).fill(0.35);
+    this._overlaySlotLumaBoost = new Float32Array(OVERLAY_SLOT_COUNT).fill(1.5);
+    this._overlaySlotClearRadius = new Float32Array(OVERLAY_SLOT_COUNT).fill(0);
+    this._overlaySlotClearSoftness = new Float32Array(OVERLAY_SLOT_COUNT).fill(0.1);
+    this._overlaySlotDriftX = new Float32Array(OVERLAY_SLOT_COUNT).fill(0.00008);
+    this._overlaySlotDriftY = new Float32Array(OVERLAY_SLOT_COUNT).fill(0.00005);
+    this._overlaySlotPulseMag = new Float32Array(OVERLAY_SLOT_COUNT).fill(0.06);
+    this._overlaySlotPulseFreq = new Float32Array(OVERLAY_SLOT_COUNT).fill(0.10);
+    this._overlaySlotPulsePhase = new Float32Array(OVERLAY_SLOT_COUNT).fill(0);
+    /** @type {Array<{ tex: object, prevTex: object, active: object, prevActive: object, blend: object, scaleOffset: object, params: object, anim: object, pulse: object }>|null} */
+    this._overlayUniformRefs = null;
 
     this._autoFocusEventActive = false;
     this._autoFocusEventElapsedSec = 0;
@@ -236,7 +260,7 @@ export class LensEffectV2 {
       lightBurnPersistenceSeconds: 0.1,
       lightBurnResponse: 1.15,
       lightBurnIntensity: 0.15,
-      lightBurnBlurPx: 8,
+      lightBurnBlurPx: 5,
       lightBurnDarknessGateEnabled: true,
       lightBurnDarknessStart: 0.45,
       lightBurnDarknessEnd: 0.78,
@@ -244,7 +268,7 @@ export class LensEffectV2 {
 
       motionBlurEnabled: false,
       motionBlurStrength: 1.77,
-      motionBlurMaxPx: 10,
+      motionBlurMaxPx: 5,
       motionBlurZoomStrength: 1.25,
       motionBlurSmoothingSeconds: 0.8,
 
@@ -300,13 +324,11 @@ export class LensEffectV2 {
       viewfinderPulseMag: 0.0,
       viewfinderPulseFreq: 0.0,
 
-      // Overlay slots: -1 = disabled, otherwise catalog index.
+      // Overlay slots: -1 = disabled, otherwise catalog index (runtime state in _overlaySlot* arrays).
       overlayIndex0: -1,
       overlayIndex1: -1,
-      overlayIndex2: -1,
-      overlayIndex3: -1,
 
-      // Per-slot tuning.
+      // Per-slot tuning (legacy flat keys — migrated to _overlaySlot* at runtime).
       overlayIntensity0:      0.80,
       overlayLumaReactivity0: 0.35,
       overlayLumaBoost0:      1.50,
@@ -328,28 +350,6 @@ export class LensEffectV2 {
       overlayPulseMag1:       0.06,
       overlayPulseFreq1:      0.10,
       overlayPulsePhase1:     1.5,
-
-      overlayIntensity2:      0.80,
-      overlayLumaReactivity2: 0.35,
-      overlayLumaBoost2:      1.50,
-      overlayClearRadius2:    0.00,
-      overlayClearSoftness2:  0.10,
-      overlayDriftX2:         0.00008,
-      overlayDriftY2:         0.00005,
-      overlayPulseMag2:       0.06,
-      overlayPulseFreq2:      0.10,
-      overlayPulsePhase2:     3.0,
-
-      overlayIntensity3:      0.80,
-      overlayLumaReactivity3: 0.35,
-      overlayLumaBoost3:      1.50,
-      overlayClearRadius3:    0.00,
-      overlayClearSoftness3:  0.10,
-      overlayDriftX3:         0.00008,
-      overlayDriftY3:         0.00005,
-      overlayPulseMag3:       0.06,
-      overlayPulseFreq3:      0.10,
-      overlayPulsePhase3:     4.5,
 
       // Core lens controls.
       distortionAmount:   -0.07,
@@ -392,8 +392,25 @@ export class LensEffectV2 {
     }
   }
 
-  _slotParamKey(base, slot) {
-    return `${base}${slot}`;
+
+  _setScalarUniform(uniform, cacheKey, value) {
+    if (this._uniformCache[cacheKey] === value) return;
+    this._uniformCache[cacheKey] = value;
+    uniform.value = value;
+  }
+
+  _setVec2Uniform(uniform, cacheKey, x, y) {
+    const prev = this._uniformCache[cacheKey];
+    if (prev && prev[0] === x && prev[1] === y) return;
+    this._uniformCache[cacheKey] = [x, y];
+    uniform.set(x, y);
+  }
+
+  _setVec4Uniform(uniform, cacheKey, x, y, z, w) {
+    const prev = this._uniformCache[cacheKey];
+    if (prev && prev[0] === x && prev[1] === y && prev[2] === z && prev[3] === w) return;
+    this._uniformCache[cacheKey] = [x, y, z, w];
+    uniform.set(x, y, z, w);
   }
 
   _clampOverlayIndex(raw) {
@@ -403,7 +420,7 @@ export class LensEffectV2 {
   _resolveSlotIndicesWithOverlayRule() {
     const indices = [];
     for (let i = 0; i < OVERLAY_SLOT_COUNT; i++) {
-      indices.push(this._clampOverlayIndex(this.params[this._slotParamKey('overlayIndex', i)]));
+      indices.push(this._clampOverlayIndex(this._overlaySlotIndex[i]));
     }
 
     let firstLensOverlaySlot = -1;
@@ -425,8 +442,7 @@ export class LensEffectV2 {
 
   _allOverlaySlotsDisabled() {
     for (let i = 0; i < OVERLAY_SLOT_COUNT; i++) {
-      const idx = this._clampOverlayIndex(this.params[this._slotParamKey('overlayIndex', i)]);
-      if (idx >= 0) return false;
+      if (this._overlaySlotIndex[i] >= 0) return false;
     }
     return true;
   }
@@ -476,34 +492,32 @@ export class LensEffectV2 {
     return available[idx];
   }
 
-  _applyChannelToSlot(slot, config) {
-    const {
-      name,
-      intensity,
-      lumaReactivity,
-      lumaBoost,
-      clearRadius,
-      clearSoftness,
-      driftX,
-      driftY,
-      pulseMag,
-      pulseFreq,
-      pulsePhase,
-    } = config;
-
-    const s = String(slot);
+  _applyChannelToSlot(
+    slot,
+    name,
+    intensity,
+    lumaReactivity,
+    lumaBoost,
+    clearRadius,
+    clearSoftness,
+    driftX,
+    driftY,
+    pulseMag,
+    pulseFreq,
+    pulsePhase
+  ) {
     const index = name ? this._findCatalogIndexByName(name) : -1;
-    this.params[`overlayIndex${s}`] = index >= 0 ? index : -1;
-    this.params[`overlayIntensity${s}`] = Math.max(0, Number(intensity) || 0);
-    this.params[`overlayLumaReactivity${s}`] = clamp01(lumaReactivity);
-    this.params[`overlayLumaBoost${s}`] = Math.max(0.1, Number(lumaBoost) || 1);
-    this.params[`overlayClearRadius${s}`] = Math.max(0, Number(clearRadius) || 0);
-    this.params[`overlayClearSoftness${s}`] = Math.max(0.001, Number(clearSoftness) || 0.1);
-    this.params[`overlayDriftX${s}`] = Number(driftX) || 0;
-    this.params[`overlayDriftY${s}`] = Number(driftY) || 0;
-    this.params[`overlayPulseMag${s}`] = Math.max(0, Number(pulseMag) || 0);
-    this.params[`overlayPulseFreq${s}`] = Math.max(0, Number(pulseFreq) || 0);
-    this.params[`overlayPulsePhase${s}`] = Number(pulsePhase) || 0;
+    this._overlaySlotIndex[slot] = index >= 0 ? index : -1;
+    this._overlaySlotIntensity[slot] = Math.max(0, Number(intensity) || 0);
+    this._overlaySlotLumaReactivity[slot] = clamp01(lumaReactivity);
+    this._overlaySlotLumaBoost[slot] = Math.max(0.1, Number(lumaBoost) || 1);
+    this._overlaySlotClearRadius[slot] = Math.max(0, Number(clearRadius) || 0);
+    this._overlaySlotClearSoftness[slot] = Math.max(0.001, Number(clearSoftness) || 0.1);
+    this._overlaySlotDriftX[slot] = Number(driftX) || 0;
+    this._overlaySlotDriftY[slot] = Number(driftY) || 0;
+    this._overlaySlotPulseMag[slot] = Math.max(0, Number(pulseMag) || 0);
+    this._overlaySlotPulseFreq[slot] = Math.max(0, Number(pulseFreq) || 0);
+    this._overlaySlotPulsePhase[slot] = Number(pulsePhase) || 0;
   }
 
   _configureOverlaySlotsForCurrentFrame(timeInfo) {
@@ -515,61 +529,75 @@ export class LensEffectV2 {
     const viewfinderSelection = this.params.viewfinderEnabled ? this.params.viewfinderSelection : 'none';
     const viewfinderName = this._resolveChannelTextureName(viewfinderSelection, VIEWFINDER_NAMES, elapsed, 0.10);
 
-    this._applyChannelToSlot(0, {
-      name: structuralName,
-      intensity: this.params.structuralIntensity,
-      lumaReactivity: this.params.structuralLumaReactivity,
-      lumaBoost: this.params.structuralLumaBoost,
-      clearRadius: this.params.structuralClearRadius,
-      clearSoftness: this.params.structuralClearSoftness,
-      driftX: this.params.structuralDriftX,
-      driftY: this.params.structuralDriftY,
-      pulseMag: this.params.structuralPulseMag,
-      pulseFreq: this.params.structuralPulseFreq,
-      pulsePhase: 0.0,
-    });
+    this._applyChannelToSlot(
+      0,
+      structuralName,
+      this.params.structuralIntensity,
+      this.params.structuralLumaReactivity,
+      this.params.structuralLumaBoost,
+      this.params.structuralClearRadius,
+      this.params.structuralClearSoftness,
+      this.params.structuralDriftX,
+      this.params.structuralDriftY,
+      this.params.structuralPulseMag,
+      this.params.structuralPulseFreq,
+      0.0
+    );
 
-    this._applyChannelToSlot(1, {
-      name: opticalName,
-      intensity: this.params.opticalIntensity,
-      lumaReactivity: this.params.opticalLumaReactivity,
-      lumaBoost: this.params.opticalLumaBoost,
-      clearRadius: this.params.opticalClearRadius,
-      clearSoftness: this.params.opticalClearSoftness,
-      driftX: this.params.opticalDriftX,
-      driftY: this.params.opticalDriftY,
-      pulseMag: this.params.opticalPulseMag,
-      pulseFreq: this.params.opticalPulseFreq,
-      pulsePhase: 1.9,
-    });
-
-    this._applyChannelToSlot(2, {
-      name: reactiveName,
-      intensity: this.params.reactiveIntensity,
-      lumaReactivity: this.params.reactiveLumaReactivity,
-      lumaBoost: this.params.reactiveLumaBoost,
-      clearRadius: this.params.reactiveClearRadius,
-      clearSoftness: this.params.reactiveClearSoftness,
-      driftX: this.params.reactiveDriftX,
-      driftY: this.params.reactiveDriftY,
-      pulseMag: this.params.reactivePulseMag,
-      pulseFreq: this.params.reactivePulseFreq,
-      pulsePhase: 3.7,
-    });
-
-    this._applyChannelToSlot(3, {
-      name: viewfinderName,
-      intensity: this.params.viewfinderEnabled ? this.params.viewfinderIntensity : 0,
-      lumaReactivity: this.params.viewfinderLumaReactivity,
-      lumaBoost: this.params.viewfinderLumaBoost,
-      clearRadius: this.params.viewfinderClearRadius,
-      clearSoftness: this.params.viewfinderClearSoftness,
-      driftX: this.params.viewfinderDriftX,
-      driftY: this.params.viewfinderDriftY,
-      pulseMag: this.params.viewfinderPulseMag,
-      pulseFreq: this.params.viewfinderPulseFreq,
-      pulsePhase: 0,
-    });
+    // Slot 1: viewfinder takes priority; otherwise alternate optical / reactive each cycle.
+    const viewfinderActive = this.params.viewfinderEnabled
+      && String(this.params.viewfinderSelection ?? 'none').toLowerCase() !== 'none'
+      && viewfinderName;
+    if (viewfinderActive) {
+      this._applyChannelToSlot(
+        1,
+        viewfinderName,
+        this.params.viewfinderIntensity,
+        this.params.viewfinderLumaReactivity,
+        this.params.viewfinderLumaBoost,
+        0,
+        0.10,
+        this.params.viewfinderDriftX,
+        this.params.viewfinderDriftY,
+        this.params.viewfinderPulseMag,
+        this.params.viewfinderPulseFreq,
+        0
+      );
+    } else {
+      const cycleSeconds = Math.max(6, Number(this.params.layerCycleSeconds) || 36);
+      const useOptical = (Math.floor(elapsed / cycleSeconds) % 2) === 0;
+      if (useOptical) {
+        this._applyChannelToSlot(
+          1,
+          opticalName,
+          this.params.opticalIntensity,
+          this.params.opticalLumaReactivity,
+          this.params.opticalLumaBoost,
+          this.params.opticalClearRadius,
+          this.params.opticalClearSoftness,
+          this.params.opticalDriftX,
+          this.params.opticalDriftY,
+          this.params.opticalPulseMag,
+          this.params.opticalPulseFreq,
+          1.9
+        );
+      } else {
+        this._applyChannelToSlot(
+          1,
+          reactiveName,
+          this.params.reactiveIntensity,
+          this.params.reactiveLumaReactivity,
+          this.params.reactiveLumaBoost,
+          this.params.reactiveClearRadius,
+          this.params.reactiveClearSoftness,
+          this.params.reactiveDriftX,
+          this.params.reactiveDriftY,
+          this.params.reactivePulseMag,
+          this.params.reactivePulseFreq,
+          3.7
+        );
+      }
+    }
   }
 
   _applyDefaultPresetIfUnset() {
@@ -734,7 +762,7 @@ export class LensEffectV2 {
         lightBurnPersistenceSeconds: { type: 'slider', min: 0.05, max: 8.0, step: 0.05, default: 0.1, label: 'Persistence (s)' },
         lightBurnResponse: { type: 'slider', min: 0.1, max: 3.0, step: 0.05, default: 1.15, label: 'Burn Response' },
         lightBurnIntensity: { type: 'slider', min: 0.0, max: 2.5, step: 0.01, default: 0.15, label: 'Burn Intensity' },
-        lightBurnBlurPx: { type: 'slider', min: 0.0, max: 8.0, step: 0.05, default: 8, label: 'Burn Blur (px)' },
+        lightBurnBlurPx: { type: 'slider', min: 0.0, max: 8.0, step: 0.05, default: 5, label: 'Burn Blur (px)' },
         lightBurnDarknessGateEnabled: { type: 'boolean', default: true, label: 'Gate Burn by Scene Darkness' },
         lightBurnDarknessStart: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.45, label: 'Darkness Gate Start' },
         lightBurnDarknessEnd: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.78, label: 'Darkness Gate End' },
@@ -742,7 +770,7 @@ export class LensEffectV2 {
 
         motionBlurEnabled: { type: 'boolean', default: false, label: 'Enable Camera Motion Blur' },
         motionBlurStrength: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 1.77, label: 'Motion Blur Strength' },
-        motionBlurMaxPx: { type: 'slider', min: 0.0, max: 10.0, step: 0.05, default: 10, label: 'Motion Blur Max (px)' },
+        motionBlurMaxPx: { type: 'slider', min: 0.0, max: 10.0, step: 0.05, default: 5, label: 'Motion Blur Max (px)' },
         motionBlurZoomStrength: { type: 'slider', min: 0.0, max: 8.0, step: 0.05, default: 1.25, label: 'Zoom Blur Strength' },
         motionBlurSmoothingSeconds: { type: 'slider', min: 0.0, max: 0.8, step: 0.01, default: 0.8, label: 'Motion Blur Smoothing (s)' },
 
@@ -836,6 +864,54 @@ export class LensEffectV2 {
     this._fallbackBlack = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, THREE.RGBAFormat);
     this._fallbackBlack.needsUpdate = true;
 
+    this._lightBurnScene = new THREE.Scene();
+    this._lightBurnScene.name = 'LensLightBurnScene';
+    this._lightBurnCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this._lightBurnMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tCurrentScene: { value: null },
+        tPrevBurn: { value: this._fallbackBlack },
+        uThreshold: { value: 0.8 },
+        uSoftness: { value: 0.12 },
+        uResponse: { value: 1.15 },
+        uDecayFactor: { value: 0.98 },
+        uBurnWriteGain: { value: 1.0 },
+      },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        uniform sampler2D tCurrentScene;
+        uniform sampler2D tPrevBurn;
+        uniform float uThreshold;
+        uniform float uSoftness;
+        uniform float uResponse;
+        uniform float uDecayFactor;
+        uniform float uBurnWriteGain;
+        varying vec2 vUv;
+
+        void main() {
+          vec3 src = texture2D(tCurrentScene, vUv).rgb;
+          vec3 prev = texture2D(tPrevBurn, vUv).rgb * clamp(uDecayFactor, 0.0, 1.0);
+          float luma = dot(src, vec3(0.2126, 0.7152, 0.0722));
+          float soft = max(0.0001, uSoftness);
+          float gate = smoothstep(uThreshold - soft, uThreshold + soft, luma);
+          vec3 fresh = src * gate * max(0.0, uResponse) * clamp(uBurnWriteGain, 0.0, 1.0);
+          gl_FragColor = vec4(max(prev, fresh), 1.0);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    this._lightBurnQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._lightBurnMaterial);
+    this._lightBurnQuad.frustumCulled = false;
+    this._lightBurnScene.add(this._lightBurnQuad);
+
     this._composeMaterial = new THREE.ShaderMaterial({
       uniforms: {
         tDiffuse:    { value: null },
@@ -874,44 +950,24 @@ export class LensEffectV2 {
 
         uOverlayTex0:          { value: this._fallbackBlack },
         uOverlayTex1:          { value: this._fallbackBlack },
-        uOverlayTex2:          { value: this._fallbackBlack },
-        uOverlayTex3:          { value: this._fallbackBlack },
         uOverlayPrevTex0:      { value: this._fallbackBlack },
         uOverlayPrevTex1:      { value: this._fallbackBlack },
-        uOverlayPrevTex2:      { value: this._fallbackBlack },
-        uOverlayPrevTex3:      { value: this._fallbackBlack },
         uOverlayActive0:       { value: 0.0 },
         uOverlayActive1:       { value: 0.0 },
-        uOverlayActive2:       { value: 0.0 },
-        uOverlayActive3:       { value: 0.0 },
         uOverlayPrevActive0:   { value: 0.0 },
         uOverlayPrevActive1:   { value: 0.0 },
-        uOverlayPrevActive2:   { value: 0.0 },
-        uOverlayPrevActive3:   { value: 0.0 },
         uOverlayBlend0:        { value: 1.0 },
         uOverlayBlend1:        { value: 1.0 },
-        uOverlayBlend2:        { value: 1.0 },
-        uOverlayBlend3:        { value: 1.0 },
         uOverlayScaleOffset0:  { value: new THREE.Vector4(1, 1, 0, 0) },
         uOverlayScaleOffset1:  { value: new THREE.Vector4(1, 1, 0, 0) },
-        uOverlayScaleOffset2:  { value: new THREE.Vector4(1, 1, 0, 0) },
-        uOverlayScaleOffset3:  { value: new THREE.Vector4(1, 1, 0, 0) },
         uOverlayParams0:       { value: new THREE.Vector4(0.8, 0.35, 1.5, 0.0) },
         uOverlayParams1:       { value: new THREE.Vector4(0.8, 0.35, 1.5, 0.0) },
-        uOverlayParams2:       { value: new THREE.Vector4(0.8, 0.35, 1.5, 0.0) },
-        uOverlayParams3:       { value: new THREE.Vector4(0.8, 0.35, 1.5, 0.0) },
         uOverlayAnim0:         { value: new THREE.Vector4(0.10, 0.00008, 0.00005, 0.06) },
         uOverlayAnim1:         { value: new THREE.Vector4(0.10, 0.00008, 0.00005, 0.06) },
-        uOverlayAnim2:         { value: new THREE.Vector4(0.10, 0.00008, 0.00005, 0.06) },
-        uOverlayAnim3:         { value: new THREE.Vector4(0.10, 0.00008, 0.00005, 0.06) },
         uOverlayPulse0:        { value: new THREE.Vector2(0.10, 0.0) },
         uOverlayPulse1:        { value: new THREE.Vector2(0.10, 1.5) },
-        uOverlayPulse2:        { value: new THREE.Vector2(0.10, 3.0) },
-        uOverlayPulse3:        { value: new THREE.Vector2(0.10, 4.5) },
         uOverlayLumaGate0:     { value: new THREE.Vector4(0.0, 1.0, 0.08, 0.0) },
         uOverlayLumaGate1:     { value: new THREE.Vector4(0.0, 1.0, 0.08, 0.0) },
-        uOverlayLumaGate2:     { value: new THREE.Vector4(0.0, 1.0, 0.08, 0.0) },
-        uOverlayLumaGate3:     { value: new THREE.Vector4(0.0, 1.0, 0.08, 0.0) },
       },
       vertexShader:   getVertexShader(),
       fragmentShader: getFragmentShader(),
@@ -924,6 +980,22 @@ export class LensEffectV2 {
     this._composeQuad.frustumCulled = false;
     this._composeScene.add(this._composeQuad);
 
+    const u = this._composeMaterial.uniforms;
+    this._overlayUniformRefs = [];
+    for (let i = 0; i < OVERLAY_SLOT_COUNT; i++) {
+      this._overlayUniformRefs.push({
+        tex: u[`uOverlayTex${i}`],
+        prevTex: u[`uOverlayPrevTex${i}`],
+        active: u[`uOverlayActive${i}`],
+        prevActive: u[`uOverlayPrevActive${i}`],
+        blend: u[`uOverlayBlend${i}`],
+        scaleOffset: u[`uOverlayScaleOffset${i}`],
+        params: u[`uOverlayParams${i}`],
+        anim: u[`uOverlayAnim${i}`],
+        pulse: u[`uOverlayPulse${i}`],
+      });
+    }
+
     this._initialized = true;
 
     // Discover catalog async — doesn't block initialization.
@@ -934,6 +1006,13 @@ export class LensEffectV2 {
     this._scheduleNextAutoFocusEvent();
 
     log.info('LensEffectV2 initialized');
+  }
+
+  getCompileTargets() {
+    return [
+      { scene: this._composeScene, camera: this._composeCamera },
+      { scene: this._lightBurnScene, camera: this._lightBurnCamera },
+    ];
   }
 
   _randomInRange(min, max) {
@@ -1111,59 +1190,10 @@ export class LensEffectV2 {
 
   _ensureLightBurnResources(width, height) {
     const THREE = window.THREE;
-    if (!THREE || !this._fallbackBlack) return false;
+    if (!THREE || !this._fallbackBlack || !this._lightBurnScene) return false;
 
-    if (!this._lightBurnScene) {
-      this._lightBurnScene = new THREE.Scene();
-      this._lightBurnCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-      this._lightBurnMaterial = new THREE.ShaderMaterial({
-        uniforms: {
-          tCurrentScene: { value: null },
-          tPrevBurn: { value: this._fallbackBlack },
-          uThreshold: { value: 0.8 },
-          uSoftness: { value: 0.12 },
-          uResponse: { value: 1.15 },
-          uDecayFactor: { value: 0.98 },
-          uBurnWriteGain: { value: 1.0 },
-        },
-        vertexShader: /* glsl */`
-          varying vec2 vUv;
-          void main() {
-            vUv = uv;
-            gl_Position = vec4(position.xy, 0.0, 1.0);
-          }
-        `,
-        fragmentShader: /* glsl */`
-          uniform sampler2D tCurrentScene;
-          uniform sampler2D tPrevBurn;
-          uniform float uThreshold;
-          uniform float uSoftness;
-          uniform float uResponse;
-          uniform float uDecayFactor;
-          uniform float uBurnWriteGain;
-          varying vec2 vUv;
-
-          void main() {
-            vec3 src = texture2D(tCurrentScene, vUv).rgb;
-            vec3 prev = texture2D(tPrevBurn, vUv).rgb * clamp(uDecayFactor, 0.0, 1.0);
-            float luma = dot(src, vec3(0.2126, 0.7152, 0.0722));
-            float soft = max(0.0001, uSoftness);
-            float gate = smoothstep(uThreshold - soft, uThreshold + soft, luma);
-            vec3 fresh = src * gate * max(0.0, uResponse) * clamp(uBurnWriteGain, 0.0, 1.0);
-            gl_FragColor = vec4(max(prev, fresh), 1.0);
-          }
-        `,
-        depthTest: false,
-        depthWrite: false,
-        toneMapped: false,
-      });
-      this._lightBurnQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._lightBurnMaterial);
-      this._lightBurnQuad.frustumCulled = false;
-      this._lightBurnScene.add(this._lightBurnQuad);
-    }
-
-    const targetW = Math.max(1, Math.floor(Math.max(1, Number(width) || 1) * 0.5));
-    const targetH = Math.max(1, Math.floor(Math.max(1, Number(height) || 1) * 0.5));
+    const targetW = quantizeDimension(Math.floor(Math.max(1, Number(width) || 1) * LIGHT_BURN_RT_SCALE), LIGHT_BURN_RT_ALIGN);
+    const targetH = quantizeDimension(Math.floor(Math.max(1, Number(height) || 1) * LIGHT_BURN_RT_SCALE), LIGHT_BURN_RT_ALIGN);
     if (targetW === this._lightBurnWidth && targetH === this._lightBurnHeight && this._lightBurnReadRT && this._lightBurnWriteRT) {
       return true;
     }
@@ -1306,6 +1336,14 @@ export class LensEffectV2 {
             try { tex.dispose(); } catch (_) {}
             return;
           }
+
+          try {
+            const renderer = window.MapShine?.renderLoop?.renderer || window.MapShine?.scene?.renderer;
+            if (renderer && typeof renderer.initTexture === 'function') {
+              renderer.initTexture(tex);
+            }
+          } catch (_) {}
+
           this._slotTextures[slot] = tex;
           this._applySlotUniforms(slot, tex);
           this._updateCoverFit(slot, tex, this._currentScreenW, this._currentScreenH);
@@ -1324,14 +1362,15 @@ export class LensEffectV2 {
 
   /** Push overlay texture + active flag into shader uniforms. */
   _applySlotUniforms(slot, tex) {
-    if (!this._composeMaterial) return;
-    const u = this._composeMaterial.uniforms;
-    u[`uOverlayTex${slot}`].value = tex ?? this._fallbackBlack;
-    u[`uOverlayActive${slot}`].value = tex ? 1.0 : 0.0;
+    const refs = this._overlayUniformRefs?.[slot];
+    if (!refs) return;
+    refs.tex.value = tex ?? this._fallbackBlack;
+    refs.active.value = tex ? 1.0 : 0.0;
   }
 
   _beginSlotCrossfade(slot) {
-    if (!this._composeMaterial) return;
+    const refs = this._overlayUniformRefs?.[slot];
+    if (!refs) return;
     const prevExisting = this._slotPrevTextures[slot];
     if (prevExisting) {
       try { prevExisting.dispose(); } catch (_) {}
@@ -1339,23 +1378,22 @@ export class LensEffectV2 {
     }
 
     const outgoing = this._slotTextures[slot];
-    const u = this._composeMaterial.uniforms;
     if (outgoing) {
       this._slotPrevTextures[slot] = outgoing;
-      u[`uOverlayPrevTex${slot}`].value = outgoing;
-      u[`uOverlayPrevActive${slot}`].value = 1.0;
+      refs.prevTex.value = outgoing;
+      refs.prevActive.value = 1.0;
       this._slotBlendT[slot] = 0;
       this._slotBlendDurationSec[slot] = Math.max(0, Number(this.params.layerSwapFadeSeconds) || 0);
-      u[`uOverlayBlend${slot}`].value = (this._slotBlendDurationSec[slot] <= 0.0001) ? 1.0 : 0.0;
+      refs.blend.value = (this._slotBlendDurationSec[slot] <= 0.0001) ? 1.0 : 0.0;
       return;
     }
 
     // No previous texture to fade from.
-    u[`uOverlayPrevTex${slot}`].value = this._fallbackBlack;
-    u[`uOverlayPrevActive${slot}`].value = 0.0;
+    refs.prevTex.value = this._fallbackBlack;
+    refs.prevActive.value = 0.0;
     this._slotBlendT[slot] = 1;
     this._slotBlendDurationSec[slot] = 0;
-    u[`uOverlayBlend${slot}`].value = 1.0;
+    refs.blend.value = 1.0;
   }
 
   _finishSlotCrossfade(slot) {
@@ -1364,27 +1402,27 @@ export class LensEffectV2 {
       try { prev.dispose(); } catch (_) {}
       this._slotPrevTextures[slot] = null;
     }
-    if (!this._composeMaterial) return;
-    const u = this._composeMaterial.uniforms;
-    u[`uOverlayPrevTex${slot}`].value = this._fallbackBlack;
-    u[`uOverlayPrevActive${slot}`].value = 0.0;
-    u[`uOverlayBlend${slot}`].value = 1.0;
+    const refs = this._overlayUniformRefs?.[slot];
+    if (!refs) return;
+    refs.prevTex.value = this._fallbackBlack;
+    refs.prevActive.value = 0.0;
+    refs.blend.value = 1.0;
   }
 
   _advanceSlotCrossfades(dt) {
-    if (!this._composeMaterial) return;
-    const u = this._composeMaterial.uniforms;
     const safeDt = Math.max(0, Number(dt) || 0);
     for (let i = 0; i < OVERLAY_SLOT_COUNT; i++) {
+      const refs = this._overlayUniformRefs?.[i];
+      if (!refs) continue;
       const duration = Math.max(0, Number(this._slotBlendDurationSec[i]) || 0);
       if (duration <= 0.0001 || this._slotBlendT[i] >= 1) {
         if (this._slotBlendT[i] < 1) this._slotBlendT[i] = 1;
-        u[`uOverlayBlend${i}`].value = 1.0;
+        refs.blend.value = 1.0;
         if (this._slotPrevTextures[i]) this._finishSlotCrossfade(i);
         continue;
       }
       this._slotBlendT[i] = Math.min(1, this._slotBlendT[i] + (safeDt / duration));
-      u[`uOverlayBlend${i}`].value = this._slotBlendT[i];
+      refs.blend.value = this._slotBlendT[i];
       if (this._slotBlendT[i] >= 1) this._finishSlotCrossfade(i);
     }
   }
@@ -1396,85 +1434,27 @@ export class LensEffectV2 {
    */
   _applyGroupDefaults(slot, grp) {
     if (!grp) return;
-    const idx = String(slot);
-    // Only apply if params still at their initial default values.
-    if (this.params[`overlayLumaReactivity${idx}`] === 0.35) this.params[`overlayLumaReactivity${idx}`] = grp.lumaReactivity;
-    if (this.params[`overlayLumaBoost${idx}`]      === 1.50) this.params[`overlayLumaBoost${idx}`]      = grp.lumaBoost;
-    if (this.params[`overlayClearRadius${idx}`]    === 0.00) this.params[`overlayClearRadius${idx}`]    = grp.clearRadius;
-    if (this.params[`overlayClearSoftness${idx}`]  === 0.10) this.params[`overlayClearSoftness${idx}`]  = grp.clearSoftness;
-    if (this.params[`overlayPulseMag${idx}`]       === 0.06) this.params[`overlayPulseMag${idx}`]       = grp.pulseMag;
-    if (this.params[`overlayPulseFreq${idx}`]      === 0.10) this.params[`overlayPulseFreq${idx}`]      = grp.pulseFreq;
+    // Only apply if slot params still at their initial default values.
+    if (this._overlaySlotLumaReactivity[slot] === 0.35) this._overlaySlotLumaReactivity[slot] = grp.lumaReactivity;
+    if (this._overlaySlotLumaBoost[slot]      === 1.50) this._overlaySlotLumaBoost[slot]      = grp.lumaBoost;
+    if (this._overlaySlotClearRadius[slot]    === 0.00) this._overlaySlotClearRadius[slot]    = grp.clearRadius;
+    if (this._overlaySlotClearSoftness[slot]  === 0.10) this._overlaySlotClearSoftness[slot]  = grp.clearSoftness;
+    if (this._overlaySlotPulseMag[slot]       === 0.06) this._overlaySlotPulseMag[slot]       = grp.pulseMag;
+    if (this._overlaySlotPulseFreq[slot]      === 0.10) this._overlaySlotPulseFreq[slot]      = grp.pulseFreq;
   }
 
   /** Recalculate cover-fit UV scale+offset for the active texture. */
   _updateCoverFit(slot, tex, screenW, screenH) {
-    if (!this._composeMaterial) return;
+    const refs = this._overlayUniformRefs?.[slot];
+    if (!refs) return;
     const img = tex?.image;
     const tw  = img?.width  || 0;
     const th  = img?.height || 0;
-    const u   = this._composeMaterial.uniforms;
     if (tw > 0 && th > 0) {
       const f = computeCoverScaleOffset(tw, th, screenW, screenH);
-      u[`uOverlayScaleOffset${slot}`].value.set(f.sx, f.sy, f.ox, f.oy);
+      refs.scaleOffset.value.set(f.sx, f.sy, f.ox, f.oy);
     } else {
-      u[`uOverlayScaleOffset${slot}`].value.set(1, 1, 0, 0);
-    }
-  }
-
-  _sampleSceneLumaFromInputRT(renderer, inputRT) {
-    if (!renderer?.readRenderTargetPixels || !inputRT) return null;
-    const w = Math.max(1, Number(inputRT.width) || 1);
-    const h = Math.max(1, Number(inputRT.height) || 1);
-    if (!this._lumaReadPixel) this._lumaReadPixel = new Uint8Array(4);
-
-    const samplePoints = [
-      [0.2, 0.2], [0.5, 0.2], [0.8, 0.2],
-      [0.2, 0.5], [0.5, 0.5], [0.8, 0.5],
-      [0.2, 0.8], [0.5, 0.8], [0.8, 0.8],
-    ];
-
-    let sum = 0;
-    let count = 0;
-    for (const [u, v] of samplePoints) {
-      const x = Math.max(0, Math.min(w - 1, Math.floor(u * (w - 1))));
-      const y = Math.max(0, Math.min(h - 1, Math.floor(v * (h - 1))));
-      try {
-        renderer.readRenderTargetPixels(inputRT, x, y, 1, 1, this._lumaReadPixel);
-      } catch (_) {
-        return null;
-      }
-      const r = this._lumaReadPixel[0] / 255;
-      const g = this._lumaReadPixel[1] / 255;
-      const b = this._lumaReadPixel[2] / 255;
-      sum += (0.2126 * r) + (0.7152 * g) + (0.0722 * b);
-      count++;
-    }
-    if (count <= 0) return null;
-    return clamp01(sum / count);
-  }
-
-  _updateSmoothedSceneLuma(renderer, inputRT) {
-    const sampled = this._sampleSceneLumaFromInputRT(renderer, inputRT);
-    if (!Number.isFinite(sampled)) return;
-
-    const tau = Math.max(0, Number(this.params.lumaSmoothingSeconds) || 0);
-    const dt = Math.max(1 / 240, Number(this._lastUpdateDeltaSec) || (1 / 60));
-    if (tau <= 0.0001) {
-      this._smoothedSceneLuma = sampled;
-      // DEBUG: Log raw sampled luma
-      if (Math.random() < 0.01) { // 1% sample rate to avoid spam
-        log.info(`[LensEffectV2 DEBUG] Raw sampled luma: ${sampled.toFixed(3)}, smoothed: ${this._smoothedSceneLuma.toFixed(3)}`);
-      }
-      return;
-    }
-
-    const alpha = 1 - Math.exp(-dt / tau);
-    const prev = Number.isFinite(this._smoothedSceneLuma) ? this._smoothedSceneLuma : sampled;
-    this._smoothedSceneLuma = prev + (sampled - prev) * alpha;
-    
-    // DEBUG: Log smoothed luma periodically
-    if (Math.random() < 0.01) { // 1% sample rate to avoid spam
-      log.info(`[LensEffectV2 DEBUG] Raw sampled luma: ${sampled.toFixed(3)}, smoothed: ${this._smoothedSceneLuma.toFixed(3)}, tau: ${tau.toFixed(2)}s`);
+      refs.scaleOffset.value.set(1, 1, 0, 0);
     }
   }
 
@@ -1510,23 +1490,29 @@ export class LensEffectV2 {
     const u = this._composeMaterial.uniforms;
     u.uTime.value = Number(timeInfo?.elapsed) || 0;
 
-    u.uDistortionAmount.value    = Number(this.params.distortionAmount)   || 0;
-    u.uDistortionCenter.value.set(clamp01(this.params.distortionCenterX), clamp01(this.params.distortionCenterY));
-    u.uChromaticAmountPx.value   = Math.max(0,    Number(this.params.chromaticAmountPx)  || 0);
-    u.uChromaticEdgePower.value  = Math.max(0.01, Number(this.params.chromaticEdgePower) || 1);
-    u.uVignetteIntensity.value   = clamp01(this.params.vignetteIntensity);
-    u.uVignetteSoftness.value    = Math.max(0.01, clamp01(this.params.vignetteSoftness));
-    u.uGrainAmount.value         = Math.max(0, Number(this.params.grainAmount) || 0);
-    u.uGrainSpeed.value          = Math.max(0, Number(this.params.grainSpeed)  || 0);
-    u.uAdaptiveGrainEnabled.value = this.params.adaptiveGrainEnabled ? 1.0 : 0.0;
-    u.uGrainLowLightBoost.value = Math.max(0, Number(this.params.grainLowLightBoost) || 0);
-    u.uGrainCellSizeBright.value = Math.max(1, Number(this.params.grainCellSizeBright) || 1);
-    u.uGrainCellSizeDark.value = Math.max(1, Number(this.params.grainCellSizeDark) || 1);
-    u.uDigitalNoiseEnabled.value = this.params.digitalNoiseEnabled ? 1.0 : 0.0;
-    u.uDigitalNoiseAmount.value = Math.max(0, Number(this.params.digitalNoiseAmount) || 0);
-    u.uDigitalNoiseChance.value = clamp01(this.params.digitalNoiseChance);
-    u.uDigitalNoiseGreenBias.value = clamp01(this.params.digitalNoiseGreenBias);
-    u.uDigitalNoiseLowLightBoost.value = Math.max(0, Number(this.params.digitalNoiseLowLightBoost) || 0);
+    this._setScalarUniform(u.uDistortionAmount, 'distortionAmount', Number(this.params.distortionAmount) || 0);
+    this._setVec2Uniform(
+      u.uDistortionCenter,
+      'distortionCenter',
+      clamp01(this.params.distortionCenterX),
+      clamp01(this.params.distortionCenterY)
+    );
+    this._setScalarUniform(u.uChromaticAmountPx, 'chromaticAmountPx', Math.max(0, Number(this.params.chromaticAmountPx) || 0));
+    this._setScalarUniform(u.uChromaticEdgePower, 'chromaticEdgePower', Math.max(0.01, Number(this.params.chromaticEdgePower) || 1));
+    this._setScalarUniform(u.uVignetteIntensity, 'vignetteIntensity', clamp01(this.params.vignetteIntensity));
+    this._setScalarUniform(u.uVignetteSoftness, 'vignetteSoftness', Math.max(0.01, clamp01(this.params.vignetteSoftness)));
+    this._setScalarUniform(u.uGrainAmount, 'grainAmount', Math.max(0, Number(this.params.grainAmount) || 0));
+    this._setScalarUniform(u.uGrainSpeed, 'grainSpeed', Math.max(0, Number(this.params.grainSpeed) || 0));
+    this._setScalarUniform(u.uAdaptiveGrainEnabled, 'adaptiveGrainEnabled', this.params.adaptiveGrainEnabled ? 1.0 : 0.0);
+    this._setScalarUniform(u.uGrainLowLightBoost, 'grainLowLightBoost', Math.max(0, Number(this.params.grainLowLightBoost) || 0));
+    this._setScalarUniform(u.uGrainCellSizeBright, 'grainCellSizeBright', Math.max(1, Number(this.params.grainCellSizeBright) || 1));
+    this._setScalarUniform(u.uGrainCellSizeDark, 'grainCellSizeDark', Math.max(1, Number(this.params.grainCellSizeDark) || 1));
+    this._setScalarUniform(u.uDigitalNoiseEnabled, 'digitalNoiseEnabled', this.params.digitalNoiseEnabled ? 1.0 : 0.0);
+    this._setScalarUniform(u.uDigitalNoiseAmount, 'digitalNoiseAmount', Math.max(0, Number(this.params.digitalNoiseAmount) || 0));
+    this._setScalarUniform(u.uDigitalNoiseChance, 'digitalNoiseChance', clamp01(this.params.digitalNoiseChance));
+    this._setScalarUniform(u.uDigitalNoiseGreenBias, 'digitalNoiseGreenBias', clamp01(this.params.digitalNoiseGreenBias));
+    this._setScalarUniform(u.uDigitalNoiseLowLightBoost, 'digitalNoiseLowLightBoost', Math.max(0, Number(this.params.digitalNoiseLowLightBoost) || 0));
+
     u.uAutoFocusAmount.value     = clamp01(this._autoFocusAmount);
     u.uAutoFocusBlurPx.value     = Math.max(0, Number(this.params.autoFocusMaxBlurPx) || 0);
     u.uAutoFocusShiftPx.value.set(
@@ -1541,25 +1527,32 @@ export class LensEffectV2 {
     u.uMotionBlurZoomPx.value = Number(this._zoomMotionBlurPx) || 0;
     u.uLightBurnEnabled.value    = this.params.lightBurnEnabled ? 1.0 : 0.0;
     u.uLightBurnIntensity.value  = Math.max(0, Number(this.params.lightBurnIntensity) || 0) * clamp01(this._lightBurnDarknessGate);
-    u.uLightBurnBlurPx.value     = Math.max(0, Number(this.params.lightBurnBlurPx) || 0);
+    this._setScalarUniform(u.uLightBurnBlurPx, 'lightBurnBlurPx', Math.max(0, Number(this.params.lightBurnBlurPx) || 0));
 
     for (let i = 0; i < OVERLAY_SLOT_COUNT; i++) {
-      const s = String(i);
-      u[`uOverlayParams${i}`].value.set(
-        Math.max(0, Number(this.params[`overlayIntensity${s}`]) || 0),
-        clamp01(this.params[`overlayLumaReactivity${s}`]),
-        Math.max(0.1, Number(this.params[`overlayLumaBoost${s}`]) || 1),
-        Math.max(0, Number(this.params[`overlayClearRadius${s}`]) || 0)
+      const refs = this._overlayUniformRefs?.[i];
+      if (!refs) continue;
+      this._setVec4Uniform(
+        refs.params,
+        `overlayParams${i}`,
+        this._overlaySlotIntensity[i],
+        this._overlaySlotLumaReactivity[i],
+        this._overlaySlotLumaBoost[i],
+        this._overlaySlotClearRadius[i]
       );
-      u[`uOverlayAnim${i}`].value.set(
-        Math.max(0.001, Number(this.params[`overlayClearSoftness${s}`]) || 0.1),
-        Number(this.params[`overlayDriftX${s}`]) || 0,
-        Number(this.params[`overlayDriftY${s}`]) || 0,
-        Math.max(0, Number(this.params[`overlayPulseMag${s}`]) || 0)
+      this._setVec4Uniform(
+        refs.anim,
+        `overlayAnim${i}`,
+        Math.max(0.001, this._overlaySlotClearSoftness[i] || 0.1),
+        this._overlaySlotDriftX[i],
+        this._overlaySlotDriftY[i],
+        Math.max(0, this._overlaySlotPulseMag[i] || 0)
       );
-      u[`uOverlayPulse${i}`].value.set(
-        Math.max(0, Number(this.params[`overlayPulseFreq${s}`]) || 0),
-        Number(this.params[`overlayPulsePhase${s}`]) || 0
+      this._setVec2Uniform(
+        refs.pulse,
+        `overlayPulse${i}`,
+        Math.max(0, this._overlaySlotPulseFreq[i] || 0),
+        this._overlaySlotPulsePhase[i] || 0
       );
     }
   }
@@ -1567,12 +1560,6 @@ export class LensEffectV2 {
   render(renderer, camera, inputRT, outputRT, lumaSampleRT = null) {
     if (!this._initialized || !this._composeMaterial || !inputRT) return false;
     if (!this.params.enabled) return false;
-
-    // Let the shader estimate scene luma directly from the input (which includes bloom).
-    // The CPU-side override was causing issues because all buffers are darkened by the
-    // lighting pass when scene darkness is high. The shader's GPU-side estimation works
-    // better because it samples the final image including bloom on bright areas.
-    // this._updateSmoothedSceneLuma(renderer, sampleSource);
 
     if (this.params.lightBurnEnabled) {
       this._updateLightBurnMap(renderer, inputRT, this._lastUpdateDeltaSec, this._lightBurnDarknessGate);
@@ -1614,7 +1601,7 @@ export class LensEffectV2 {
 
   onResize(width, height) {
     // Cover-fit is recalculated in render() when dimensions change.
-    this._disposeLightBurnTargets();
+    // Light-burn RTs are resized lazily via quantized _ensureLightBurnResources().
   }
 
   dispose() {
@@ -1649,6 +1636,8 @@ export class LensEffectV2 {
     this._catalogNameToIndex.clear();
     this._catalogNameSet.clear();
     this._slotLoadedIndices.fill(-2);
+    this._overlayUniformRefs = null;
+    this._uniformCache = {};
     this._initialized     = false;
 
     log.info('LensEffectV2 disposed');

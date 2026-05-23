@@ -11,8 +11,6 @@
 import { createLogger } from '../core/log.js';
 
 const log = createLogger('PerfRecorderDialog');
-
-/** Default sort key (computed = cpuAvg + gpuAvg). */
 const DEFAULT_SORT_KEY = 'cost';
 const DEFAULT_SORT_DIR = 'desc';
 
@@ -85,6 +83,12 @@ export class PerformanceRecorderDialog {
 
     /** @type {boolean} Detail expansion for session summary. */
     this._expandSummary = false;
+
+    /** @type {boolean} Detail expansion for stutter timeline. */
+    this._expandStutter = false;
+
+    /** @type {boolean} Roll up dotted effect keys in the table. */
+    this._groupByPrefix = false;
   }
 
   /**
@@ -117,6 +121,8 @@ export class PerformanceRecorderDialog {
         </label>
         <button type="button" data-action="export-json" class="msa-perf__btn">Export JSON</button>
         <button type="button" data-action="export-csv"  class="msa-perf__btn">Export CSV</button>
+        <button type="button" data-action="export-md"   class="msa-perf__btn">Export Markdown</button>
+        <button type="button" data-action="copy-report" class="msa-perf__btn">Copy report</button>
       </div>
 
       <div class="msa-perf__status">
@@ -164,6 +170,27 @@ export class PerformanceRecorderDialog {
           <span class="msa-perf__status-label">GPU disjoints / pool starv.</span>
           <span class="msa-perf__status-value" data-bind="gpuDiag">0 / 0</span>
         </div>
+        <div class="msa-perf__status-row">
+          <span class="msa-perf__status-label">Stutters</span>
+          <span class="msa-perf__status-value" data-bind="stutters">—</span>
+        </div>
+        <div class="msa-perf__status-row">
+          <span class="msa-perf__status-label">Present p95</span>
+          <span class="msa-perf__status-value" data-bind="presentP95">—</span>
+        </div>
+        <div class="msa-perf__status-row">
+          <span class="msa-perf__status-label">Over-budget ticks</span>
+          <span class="msa-perf__status-value" data-bind="overBudget">—</span>
+        </div>
+      </div>
+
+      <div class="msa-perf__findings" data-bind="findings" hidden></div>
+
+      <div class="msa-perf__table-toolbar">
+        <label class="msa-perf__check" title="Roll up dotted spans (e.g. cloud.update.* → cloud.update)">
+          <input type="checkbox" data-input="groupByPrefix">
+          Group by prefix
+        </label>
       </div>
 
       <div class="msa-perf__table-wrap">
@@ -177,6 +204,14 @@ export class PerformanceRecorderDialog {
         </table>
       </div>
 
+      <div class="msa-perf__stutter">
+        <div class="msa-perf__stutter-header" data-action="toggle-stutter">
+          <span class="msa-perf__chevron" data-bind="stutter-chevron">▶</span>
+          Stutter timeline
+        </div>
+        <div class="msa-perf__stutter-body" data-bind="stutter-body" hidden></div>
+      </div>
+
       <div class="msa-perf__summary">
         <div class="msa-perf__summary-header" data-action="toggle-summary">
           <span class="msa-perf__chevron" data-bind="summary-chevron">▶</span>
@@ -186,7 +221,7 @@ export class PerformanceRecorderDialog {
       </div>
 
       <div class="msa-perf__hint">
-        Tip: Include Sequencer-heavy scenes: Session summary shows mirror sync cost (normally one syncFromPixi pass per FloorCompositor frame). Set MapShine.__sequencerMirrorLegacyPostPixiSync=true only if diagnosing legacy double-sync; main table prefixes sequencer › / seqMirror ›.
+        Tip: Expand <strong>Stutter timeline</strong> for idle hitch diagnosis. See <code>docs/performance-recorder.md</code> for rAF gaps, long tasks, and cache stats.
       </div>
     `;
 
@@ -195,17 +230,48 @@ export class PerformanceRecorderDialog {
 
     this._renderTableHead();
     this._bindEvents();
-    this._refresh();
+    try {
+      this._refresh();
+    } catch (err) {
+      log.warn('Performance recorder dialog initial refresh failed:', err);
+    }
 
     log.info('Performance recorder dialog initialized');
+  }
+
+  /**
+   * Lazily create or recover the dialog when MapShine lost the reference after a
+   * partial init (e.g. refresh threw before canvas-replacement assigned globals).
+   * @returns {PerformanceRecorderDialog|null}
+   */
+  static ensureAvailable() {
+    try {
+      const existing = window.MapShine?.performanceRecorderDialog;
+      if (existing?.container?.isConnected) return existing;
+
+      const recorder = window.MapShine?.performanceRecorder;
+      if (!recorder) return null;
+
+      const dlg = new PerformanceRecorderDialog(recorder);
+      dlg.initialize();
+      if (window.MapShine) window.MapShine.performanceRecorderDialog = dlg;
+      return dlg.container ? dlg : null;
+    } catch (err) {
+      log.warn('Performance recorder dialog ensureAvailable failed:', err);
+      return null;
+    }
   }
 
   show() {
     if (!this.container) this.initialize();
     if (!this.container) return;
-    this.container.style.display = 'block';
+    this.container.style.display = 'flex';
     this.visible = true;
-    this._refresh();
+    try {
+      this._refresh();
+    } catch (err) {
+      log.warn('Performance recorder dialog refresh failed:', err);
+    }
     this._startRefreshLoop();
   }
 
@@ -217,7 +283,10 @@ export class PerformanceRecorderDialog {
   }
 
   toggle() {
-    if (this.visible) this.hide();
+    const domShown = this.container
+      && this.container.isConnected
+      && this.container.style.display !== 'none';
+    if (domShown) this.hide();
     else this.show();
   }
 
@@ -271,8 +340,20 @@ export class PerformanceRecorderDialog {
         case 'export-csv':
           this._onExportCsv();
           break;
+        case 'export-md':
+          this._onExportMarkdown();
+          break;
+        case 'copy-report':
+          this._onCopyReport();
+          break;
         case 'toggle-summary':
           this._toggleSummary();
+          break;
+        case 'toggle-stutter':
+          this._toggleStutter();
+          break;
+        case 'copy-stutter-event':
+          this._onCopyStutterEvent(actionEl);
           break;
       }
     });
@@ -282,6 +363,10 @@ export class PerformanceRecorderDialog {
       if (!input) return;
       if (input.dataset.input === 'gpuTiming') {
         this.recorder.setGpuTimingEnabled(!!input.checked);
+        this._refresh();
+      }
+      if (input.dataset.input === 'groupByPrefix') {
+        this._groupByPrefix = !!input.checked;
         this._refresh();
       }
     });
@@ -373,6 +458,34 @@ export class PerformanceRecorderDialog {
   }
 
   /** @private */
+  _onExportMarkdown() {
+    try {
+      const { filename } = this.recorder.exportMarkdown();
+      ui?.notifications?.info?.(`Exported ${filename}`);
+    } catch (err) {
+      log.error('export Markdown failed:', err);
+      ui?.notifications?.warn?.('Performance recorder: Markdown export failed. See console.');
+    }
+  }
+
+  /** @private */
+  async _onCopyReport() {
+    try {
+      const text = this.recorder.buildMarkdownReport();
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        ui?.notifications?.info?.('Performance report copied to clipboard');
+      } else {
+        const { filename } = this.recorder.exportMarkdown();
+        ui?.notifications?.info?.(`Clipboard unavailable — downloaded ${filename}`);
+      }
+    } catch (err) {
+      log.error('copy report failed:', err);
+      ui?.notifications?.warn?.('Performance recorder: copy failed. See console.');
+    }
+  }
+
+  /** @private */
   _onReset() {
     try {
       this.recorder.reset({ keepEnabled: this.recorder.enabled });
@@ -405,6 +518,34 @@ export class PerformanceRecorderDialog {
   }
 
   /** @private */
+  _toggleStutter() {
+    this._expandStutter = !this._expandStutter;
+    const body = this.container?.querySelector('[data-bind="stutter-body"]');
+    const chevron = this.container?.querySelector('[data-bind="stutter-chevron"]');
+    if (body) body.hidden = !this._expandStutter;
+    if (chevron) chevron.textContent = this._expandStutter ? '▼' : '▶';
+    if (this._expandStutter) this._refresh();
+  }
+
+  /**
+   * @param {HTMLElement} actionEl
+   * @private
+   */
+  async _onCopyStutterEvent(actionEl) {
+    try {
+      const raw = actionEl.dataset.eventJson;
+      if (!raw) return;
+      const text = JSON.stringify(JSON.parse(decodeURIComponent(raw)), null, 2);
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        ui?.notifications?.info?.('Stutter event copied to clipboard');
+      }
+    } catch (err) {
+      log.warn('copy stutter event failed:', err);
+    }
+  }
+
+  /** @private */
   _toggleSummary() {
     this._expandSummary = !this._expandSummary;
     const body = this.container?.querySelector('[data-bind="summary-body"]');
@@ -412,6 +553,64 @@ export class PerformanceRecorderDialog {
     if (body) body.hidden = !this._expandSummary;
     if (chevron) chevron.textContent = this._expandSummary ? '▼' : '▶';
     if (this._expandSummary) this._refresh();
+  }
+
+  /** @private */
+  _renderStutterTimeline(snap) {
+    const body = this.container?.querySelector('[data-bind="stutter-body"]');
+    if (!body) return;
+
+    const events = snap.stutterEvents ?? [];
+    if (!events.length) {
+      body.innerHTML = '<div class="msa-perf__stutter-empty">No stutter events exceeded thresholds in this capture.</div>';
+      return;
+    }
+
+    const rows = events.map((ev) => {
+      const sec = (ev.tMs / 1000).toFixed(2);
+      const ms = ev.gapMs ?? ev.frameTimeMs ?? ev.tickMs ?? ev.sinceLastPresentMs ?? 0;
+      const severityCls = `msa-perf__stutter-row--${ev.severity ?? 'warn'}`;
+      const detailParts = [];
+      if (ev.frameTimeMs != null) detailParts.push(`frame ${fmt(ev.frameTimeMs, 2)} ms`);
+      if (ev.tickMs != null) detailParts.push(`tick ${fmt(ev.tickMs, 2)} ms`);
+      if (ev.compositorMs != null) detailParts.push(`comp ${fmt(ev.compositorMs, 2)} ms`);
+      if (ev.handlerOverheadMs != null) detailParts.push(`overhead ${fmt(ev.handlerOverheadMs, 2)} ms`);
+      if (ev.continuousReason) detailParts.push(escapeHtml(ev.continuousReason));
+      if (ev.topEffects?.length) {
+        const tops = ev.topEffects.slice(0, 3).map((e) => `${escapeHtml(e.effect)}/${e.phase} ${fmt(e.cpuMs, 2)}ms`).join(', ');
+        detailParts.push(tops);
+      }
+      if (ev.longTasks?.length) {
+        const lt = ev.longTasks[0];
+        detailParts.push(`long task ${fmt(lt.durationMs, 1)} ms${lt.name ? ` (${escapeHtml(lt.name)})` : ''}`);
+      }
+      const eventJson = encodeURIComponent(JSON.stringify(ev));
+      return `
+        <tr class="msa-perf__stutter-row ${severityCls}" data-action="copy-stutter-event" data-event-json="${eventJson}" title="Click to copy JSON snippet">
+          <td>${escapeHtml(ev.kind)}</td>
+          <td>${sec}s</td>
+          <td class="msa-perf__num">${fmt(ms, 2)}</td>
+          <td class="msa-perf__num">${ev.seq != null ? ev.seq : '—'}</td>
+          <td class="msa-perf__stutter-detail">${detailParts.join(' · ') || '—'}</td>
+        </tr>
+      `;
+    }).join('');
+
+    body.innerHTML = `
+      <p class="msa-perf__stutter-hint">Worst events first. Click a row to copy JSON for bug reports.</p>
+      <table class="msa-perf__sub-table msa-perf__stutter-table">
+        <thead>
+          <tr>
+            <th>Kind</th>
+            <th>Time</th>
+            <th>Ms</th>
+            <th>Frame</th>
+            <th>Detail</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
   }
 
   // ────────────────────────────────────────────────────────────────────────
@@ -447,15 +646,117 @@ export class PerformanceRecorderDialog {
 
   /** @private */
   _refresh() {
-    if (!this.container) return;
+    if (!this.container || !this.recorder) return;
     const snap = this.recorder.getSnapshot();
 
     this._renderStatus(snap);
+    this._renderFindings(snap);
     this._renderTable(snap);
     this._renderControls(snap);
     if (this._expandSummary) {
       this._renderSummary(snap);
     }
+    if (this._expandStutter) {
+      this._renderStutterTimeline(snap);
+    }
+  }
+
+  /**
+   * Roll dotted effect keys to parent (cloud.update.foo → cloud.update).
+   * @param {string} effect
+   * @returns {string}
+   * @private
+   */
+  _effectGroupKey(effect) {
+    const parts = String(effect ?? '').split('.');
+    if (parts.length >= 3) return `${parts[0]}.${parts[1]}`;
+    return String(effect ?? '');
+  }
+
+  /**
+   * @param {object[]} effects
+   * @returns {object[]}
+   * @private
+   */
+  _groupEffectRows(effects) {
+    /** @type {Map<string, object>} */
+    const map = new Map();
+    for (const row of effects ?? []) {
+      const key = `${this._effectGroupKey(row.effect)}/${row.phase}`;
+      let agg = map.get(key);
+      if (!agg) {
+        agg = {
+          effect: this._effectGroupKey(row.effect),
+          phase: row.phase,
+          cpuLast: 0,
+          cpuAvg: 0,
+          cpuMax: 0,
+          cpuTotal: 0,
+          cpuCount: 0,
+          gpuLast: 0,
+          gpuAvg: 0,
+          gpuMax: 0,
+          gpuTotal: 0,
+          gpuCount: 0,
+          drawCallsAvg: 0,
+          trianglesAvg: 0,
+          linesAvg: 0,
+          pointsAvg: 0,
+          gpuDisjointDropped: 0,
+          gpuMissing: 0,
+          gpuBlocked: 0,
+          _drawWeighted: 0,
+          _triWeighted: 0,
+        };
+        map.set(key, agg);
+      }
+      agg.cpuLast = row.cpuLast;
+      agg.cpuMax = Math.max(agg.cpuMax, row.cpuMax ?? 0);
+      agg.cpuTotal += row.cpuTotal ?? 0;
+      agg.cpuCount += row.cpuCount ?? 0;
+      agg.gpuLast = row.gpuLast;
+      agg.gpuMax = Math.max(agg.gpuMax, row.gpuMax ?? 0);
+      agg.gpuTotal += row.gpuTotal ?? 0;
+      agg.gpuCount = Math.max(agg.gpuCount, row.gpuCount ?? 0);
+      agg.gpuDisjointDropped += row.gpuDisjointDropped ?? 0;
+      agg.gpuMissing += row.gpuMissing ?? 0;
+      agg.gpuBlocked += row.gpuBlocked ?? 0;
+      const count = row.cpuCount ?? 0;
+      agg._drawWeighted += (row.drawCallsAvg ?? 0) * count;
+      agg._triWeighted += (row.trianglesAvg ?? 0) * count;
+    }
+    return [...map.values()].map((agg) => {
+      const count = agg.cpuCount || 1;
+      return {
+        ...agg,
+        cpuAvg: agg.cpuTotal / count,
+        gpuAvg: agg.gpuCount > 0 ? agg.gpuTotal / agg.gpuCount : 0,
+        drawCallsAvg: agg._drawWeighted / count,
+        trianglesAvg: agg._triWeighted / count,
+        cost: (agg.cpuTotal / count) + (agg.gpuCount > 0 ? agg.gpuTotal / agg.gpuCount : 0),
+      };
+    });
+  }
+
+  /** @private */
+  _renderFindings(snap) {
+    const el = this.container?.querySelector('[data-bind="findings"]');
+    if (!el) return;
+
+    const insights = this.recorder.getInsights?.() ?? [];
+
+    if (!insights.length || (snap.meta.framesRecorded ?? 0) === 0) {
+      el.hidden = true;
+      el.innerHTML = '';
+      return;
+    }
+
+    el.hidden = false;
+    const items = insights.map((i) => {
+      const cls = `msa-perf__finding msa-perf__finding--${i.severity}`;
+      return `<div class="${cls}"><strong>${escapeHtml(i.title)}</strong><span>${escapeHtml(i.detail)}</span></div>`;
+    }).join('');
+    el.innerHTML = `<div class="msa-perf__findings-title">Key findings</div>${items}`;
   }
 
   /** @private */
@@ -465,7 +766,7 @@ export class PerformanceRecorderDialog {
       if (el) el.textContent = value;
     };
 
-    const gpu = snap.meta.gpuTiming;
+    const gpu = snap.meta?.gpuTiming ?? { supported: false, enabled: false };
     const capabilityText = gpu.supported
       ? (gpu.enabled ? 'GPU timing: ON' : 'GPU timing: OFF (CPU + draws only)')
       : 'GPU timing: unsupported (CPU + draws only)';
@@ -507,6 +808,26 @@ export class PerformanceRecorderDialog {
     set('drawsPerFrame', `${fmtInt(snap.session.avgDrawCallsPerFrame)} / ${fmtInt(snap.session.avgTrianglesPerFrame)}`);
     set('gpuDiag', `${snap.meta.gpuDisjointEvents} / ${snap.meta.gpuPoolStarvations}`);
 
+    const stutterCounts = snap.stutterSummary?.countsByKind ?? {};
+    const rafGap = stutterCounts.raf_gap ?? 0;
+    const compositorSpike = stutterCounts.compositor_spike ?? 0;
+    const freeze = stutterCounts.freeze ?? 0;
+    const presentGap = stutterCounts.present_gap ?? 0;
+    const tickOver = stutterCounts.tick_overbudget ?? 0;
+    const stutterParts = [];
+    if (rafGap) stutterParts.push(`raf ${rafGap}`);
+    if (compositorSpike) stutterParts.push(`comp ${compositorSpike}`);
+    if (freeze) stutterParts.push(`freeze ${freeze}`);
+    if (presentGap) stutterParts.push(`present ${presentGap}`);
+    if (tickOver) stutterParts.push(`tick ${tickOver}`);
+    set('stutters', stutterParts.length ? stutterParts.join(' · ') : 'none');
+
+    const presentP95 = snap.stutterSummary?.sinceLastPresentMs?.p95 ?? 0;
+    set('presentP95', presentP95 > 0 ? `${fmt(presentP95, 2)} ms` : '—');
+
+    const overPct = snap.session?.pacing?.overBudgetPresentPct ?? 0;
+    set('overBudget', pacing.ticksRecorded > 0 ? `${fmt(overPct, 1)}%` : '—');
+
     const cap = this.container?.querySelector('[data-bind="capability"]');
     if (cap) {
       cap.classList.toggle('msa-perf__capability--ok', gpu.supported && gpu.enabled);
@@ -519,9 +840,16 @@ export class PerformanceRecorderDialog {
     const body = this.container?.querySelector('[data-bind="table-body"]');
     if (!body) return;
 
-    const rows = (snap.effects || []).map((r) => ({
+    const groupCheckbox = this.container?.querySelector('input[data-input="groupByPrefix"]');
+    if (groupCheckbox) groupCheckbox.checked = this._groupByPrefix;
+
+    const sourceRows = this._groupByPrefix
+      ? this._groupEffectRows(snap.effects)
+      : (snap.effects || []);
+
+    const rows = sourceRows.map((r) => ({
       ...r,
-      cost: r.cpuAvg + r.gpuAvg,
+      cost: r.cost ?? (r.cpuAvg + r.gpuAvg),
     }));
 
     if (rows.length === 0) {
@@ -585,6 +913,9 @@ export class PerformanceRecorderDialog {
       gpuCheckbox.checked = snap.meta.gpuTiming.enabled === true;
       gpuCheckbox.disabled = !snap.meta.gpuTiming.supported;
     }
+
+    const groupCheckbox = root.querySelector('input[data-input="groupByPrefix"]');
+    if (groupCheckbox) groupCheckbox.checked = this._groupByPrefix;
   }
 
   /** @private */
@@ -679,6 +1010,27 @@ export class PerformanceRecorderDialog {
       </ul>
     ` : '<em>renderer.info unavailable</em>';
 
+    let gpuBlockedHtml = '<em>none</em>';
+    let blockedSpans = 0;
+    let blockedSamples = 0;
+    for (const row of snap.effects ?? []) {
+      const blocked = Number(row.gpuBlocked) || 0;
+      const count = Number(row.cpuCount) || 0;
+      if (blocked > count * 0.5 && blocked > 0) {
+        blockedSpans += 1;
+        blockedSamples += blocked;
+      }
+    }
+    if (blockedSpans > 0) {
+      gpuBlockedHtml = `${blockedSpans} span(s), ${blockedSamples} blocked samples — GPU totals are sampled`;
+    }
+
+    let cloudCacheHtml = '<em>cloud effect not active</em>';
+    const cache = snap.cloudShadowCache;
+    if (cache) {
+      cloudCacheHtml = `raw ${(cache.rawHitPct ?? 0).toFixed(1)}% hit · mask ${(cache.maskHitPct ?? 0).toFixed(1)}% · cloudTop ${(cache.cloudTopHitPct ?? 0).toFixed(1)}% · last miss: ${escapeHtml(String(cache.lastMissReason ?? 'n/a'))}`;
+    }
+
     body.innerHTML = `
       <div class="msa-perf__summary-section">
         <h4>Frame stats</h4>
@@ -737,6 +1089,16 @@ export class PerformanceRecorderDialog {
       <div class="msa-perf__summary-section">
         <h4>VRAM budget tracker</h4>
         <div>${vramHtml}</div>
+      </div>
+
+      <div class="msa-perf__summary-section">
+        <h4>Cloud shadow cache</h4>
+        <div>${cloudCacheHtml}</div>
+      </div>
+
+      <div class="msa-perf__summary-section">
+        <h4>GPU timing coverage</h4>
+        <div>${gpuBlockedHtml}</div>
       </div>
 
       <div class="msa-perf__summary-section">

@@ -157,7 +157,11 @@ export class VisionPolygonComputer {
     
     // Validate polygon
     if (points.length < 6) {
-      // Fallback to circle if polygon is degenerate
+      // When geometry blocking was requested and walls contributed segments,
+      // a circle fallback would bleed through occluders — treat as clip failure.
+      if (blockGeometry && segments.length > 0) {
+        return [];
+      }
       return this.createCirclePolygon(center, radius, circleSegments, points);
     }
     

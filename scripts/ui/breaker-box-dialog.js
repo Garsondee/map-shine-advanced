@@ -1,7 +1,13 @@
 import { createLogger } from '../core/log.js';
+import {
+  colorForStatus,
+  isMissingMaskCheck,
+  missingMaskSummaryLine,
+  STATUS_WEIGHT,
+  tooltipForGraphNode,
+} from '../core/diagnostics/health-status-ui.js';
 
 const log = createLogger('BreakerBoxDialog');
-const STATUS_WEIGHT = { unknown: 0, healthy: 1, degraded: 2, broken: 3, critical: 4 };
 
 const SOURCE_DEFS = [
   { id: 'src:waterMasks', label: 'Water Masks', effects: ['WaterEffectV2'], keywords: ['floorDataMap', 'mask'] },
@@ -52,14 +58,6 @@ function esc(value) {
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;');
-}
-
-function colorForStatus(status) {
-  if (status === 'critical') return '#ff3b30';
-  if (status === 'broken') return '#ff453a';
-  if (status === 'degraded') return '#ffcc00';
-  if (status === 'healthy') return '#30d158';
-  return '#8e8e93';
 }
 
 function collectChecks(effect) {
@@ -1261,7 +1259,7 @@ export class BreakerBoxDialog {
       btn.style.fontSize = `${Math.max(11, Math.round(12 * this._graphZoom))}px`;
       btn.style.left = `${p.x}px`;
       btn.style.top = `${p.y}px`;
-      btn.title = `${node.label} (${node.status})`;
+      btn.title = tooltipForGraphNode(node, snapshot);
       btn.innerHTML = `
         <span class="bulb" style="background:${colorForStatus(node.status)};"></span>
         <span>
@@ -1346,8 +1344,12 @@ export class BreakerBoxDialog {
 
     const allFailed = collectChecks(effect).filter((c) => c.result === 'fail');
     const { direct, propagated } = partitionFailedChecks(allFailed);
-    const fmtFail = (c) =>
-      `<li style="line-height:1.35"><span class="muted">${esc(c.levelKey)}</span> · <code style="font-size:10px">${esc(c.ruleId)}</code><br/>${esc(c.message)}</li>`;
+    const fmtFail = (c) => {
+      const miss = isMissingMaskCheck(c);
+      const msgColor = miss ? colorForStatus('degraded') : 'inherit';
+      const tip = c.tooltip ? ` title="${esc(c.tooltip)}"` : '';
+      return `<li style="line-height:1.35"${tip}><span class="muted">${esc(c.levelKey)}</span> · <code style="font-size:10px">${esc(c.ruleId)}</code><br/><span style="color:${msgColor}">${esc(c.message)}</span></li>`;
+    };
     const directBlock =
       direct.slice(0, 8).map(fmtFail).join('') || '<li class="muted">None — no direct contract failures.</li>';
     const propBlock =
@@ -1443,9 +1445,11 @@ export class BreakerBoxDialog {
     if (this._overall) {
       const af = Number(snapshot.runtime?.activeFloor ?? 0);
       const afs = snapshot.activeFloorOverallStatus || snapshot.meta?.activeFloorOverallStatus || 'unknown';
+      const maskLine = missingMaskSummaryLine(snapshot);
       this._overall.innerHTML = `
         <div>All tracked levels: <strong style="color:${colorForStatus(snapshot.overallStatus)}">${esc(snapshot.overallStatus)}</strong></div>
         <div style="margin-top:4px;font-size:12px">Current floor (${af}): <strong style="color:${colorForStatus(afs)}">${esc(afs)}</strong></div>
+        ${maskLine ? `<div style="margin-top:4px;font-size:11px;color:${colorForStatus('degraded')}" title="${esc(maskLine)}">${esc(maskLine)}</div>` : ''}
       `;
     }
 

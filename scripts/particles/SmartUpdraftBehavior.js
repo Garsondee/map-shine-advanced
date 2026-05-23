@@ -71,7 +71,10 @@ export class SmartUpdraftBehavior {
     }
 
     const rainScale = this._computeRainUpdraftScale(particle, system);
-    const scale = timeScale * rainScale;
+    const motionScale = (typeof particle._flameMotionScale === 'number' && Number.isFinite(particle._flameMotionScale))
+      ? Math.max(0, Math.min(1, particle._flameMotionScale))
+      : 1;
+    const scale = timeScale * rainScale * motionScale;
     if (scale <= 0.0001) return;
 
     const force = system?.userData?.updraftForce;

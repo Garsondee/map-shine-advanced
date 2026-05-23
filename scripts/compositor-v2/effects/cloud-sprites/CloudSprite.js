@@ -14,6 +14,8 @@ export const MAX_ACTIVE_SPRITES = 120;
 export const MAX_SPRITE_POOL_SIZE = 120;
 export const COVER_FOR_MIN = 0.2;
 export const COVER_FOR_MAX = 0.8;
+/** Seconds for cloud sprite fade-in / fade-out (never pop visible/invisible). */
+export const SPRITE_FADE_DURATION_SEC = 10;
 
 export const FULL_CLOUD_FILES = [
   'cloud_transparent_007.png', 'cloud_transparent_008.png', 'cloud_transparent_026.png',
@@ -138,6 +140,18 @@ export class CloudSprite {
     this._params = params;
     this.layerIndex = 0;
     this.baseOpacity = 1;
+    /** 0..1 lifecycle multiplier applied on top of baseOpacity. */
+    this.fadeMul = 1;
+    this._fadePhase = 'steady';
+    this._fadeElapsed = 0;
+    this._fadeDuration = SPRITE_FADE_DURATION_SEC;
+    this._fadeStartMul = 1;
+    /** Extra multiplier during cloud-top RT capture (restored after pass). */
+    this.renderOpacityMul = 1;
+    /** When true, mesh hides after fade-out completes (pool deactivation). */
+    this._pendingDeactivate = false;
+    /** Set when a downwind exit fade-out finishes and the sprite should respawn upwind. */
+    this._awaitingRecycle = false;
     this.windSpeedMult = 1;
     this.windAngleRad = 0;
     /** Per-sprite domain-warp seed (display shader). */
@@ -208,6 +222,74 @@ export class CloudSprite {
     }
   }
 
+  /** @param {number} [duration=SPRITE_FADE_DURATION_SEC] */
+  beginFadeIn(duration = SPRITE_FADE_DURATION_SEC) {
+    this._pendingDeactivate = false;
+    this._awaitingRecycle = false;
+    this._fadePhase = 'in';
+    this._fadeElapsed = 0;
+    this._fadeDuration = Math.max(0.001, Number(duration) || SPRITE_FADE_DURATION_SEC);
+    this._fadeStartMul = 0;
+    this.fadeMul = 0;
+    this.syncDisplayOpacity();
+  }
+
+  /** @param {number} [duration=SPRITE_FADE_DURATION_SEC] */
+  beginFadeOut(duration = SPRITE_FADE_DURATION_SEC) {
+    if (this._fadePhase === 'out') return;
+    this._fadePhase = 'out';
+    this._fadeElapsed = 0;
+    this._fadeDuration = Math.max(0.001, Number(duration) || SPRITE_FADE_DURATION_SEC);
+    this._fadeStartMul = Math.max(0, Math.min(1, this.fadeMul));
+    this.syncDisplayOpacity();
+  }
+
+  markPendingDeactivate() {
+    this._pendingDeactivate = true;
+    this.beginFadeOut();
+  }
+
+  clearPendingDeactivate() {
+    this._pendingDeactivate = false;
+  }
+
+  /**
+   * Advance fade ramp; returns `'complete'` when the current in/out ramp finishes.
+   * @param {number} delta
+   * @returns {'running'|'complete'}
+   */
+  updateFade(delta) {
+    if (this._fadePhase === 'steady') return 'running';
+
+    this._fadeElapsed += Math.max(0, Number(delta) || 0);
+    const t = Math.min(1, this._fadeElapsed / this._fadeDuration);
+
+    if (this._fadePhase === 'in') {
+      this.fadeMul = this._fadeStartMul + (1 - this._fadeStartMul) * t;
+    } else {
+      this.fadeMul = this._fadeStartMul * (1 - t);
+    }
+    this.syncDisplayOpacity();
+
+    if (t >= 1) {
+      const finishedPhase = this._fadePhase;
+      this._fadePhase = 'steady';
+      this.fadeMul = finishedPhase === 'in' ? 1 : 0;
+      this.syncDisplayOpacity();
+      return 'complete';
+    }
+    return 'running';
+  }
+
+  syncDisplayOpacity() {
+    this.setDisplayOpacity(this.baseOpacity * this.fadeMul * this.renderOpacityMul);
+  }
+
+  /** @param {number} [shadowScale=1] */
+  syncShadowOpacity(shadowScale = 1) {
+    this.setShadowOpacity(Math.max(0, Number(shadowScale) || 0) * this.baseOpacity * this.fadeMul);
+  }
+
   /** @returns {import('three').Texture|null} */
   getTexture() {
     return this.displayMaterial.uniforms?.map?.value
@@ -246,7 +328,7 @@ export class CloudSprite {
     const opMin = Number(p.spriteOpacityMin) || 0.6;
     const opMax = Number(p.spriteOpacityMax) || 1.0;
     this.baseOpacity = opMin + Math.random() * (opMax - opMin);
-    this.setDisplayOpacity(this.baseOpacity);
+    this.syncDisplayOpacity();
 
     this.windSpeedMult = 0.88 + Math.random() * 0.24;
     this.windAngleRad = (Math.random() * 2 - 1) * (5 * Math.PI / 180);

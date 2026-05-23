@@ -133,6 +133,47 @@ export class BloomEffectV2 {
     this._spillSuppressScene = null;
     this._spillSuppressCamera = null;
     this._spillSuppressMaterial = null;
+
+    /** @type {import('../../core/diagnostics/PerformanceRecorder.js').PerformanceRecorder|null} */
+    this._activePerfRecorder = null;
+  }
+
+  // ── Performance Recorder ───────────────────────────────────────────────────
+
+  /** @private */
+  _bindPerfRecorder() {
+    try {
+      const recorder = window.MapShine?.performanceRecorder;
+      this._activePerfRecorder = recorder?.enabled ? recorder : null;
+    } catch (_) {
+      this._activePerfRecorder = null;
+    }
+  }
+
+  /**
+   * @param {string} name
+   * @param {'update'|'render'} [phase='update']
+   * @param {{ cpuOnly?: boolean }} [options={}]
+   * @returns {object|null}
+   * @private
+   */
+  _beginPerfSpan(name, phase = 'update', options = {}) {
+    try {
+      const recorder = this._activePerfRecorder;
+      if (!recorder?.enabled || typeof recorder.beginEffectCall !== 'function') return null;
+      return recorder.beginEffectCall(`bloom.${phase}.${name}`, phase, options);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /** @param {object|null} token @private */
+  _endPerfSpan(token) {
+    if (!token) return;
+    try {
+      const recorder = this._activePerfRecorder ?? window.MapShine?.performanceRecorder;
+      recorder?.endEffectCall?.(token);
+    } catch (_) {}
   }
 
   // ── UI schema (moved from V1 BloomEffect) ────────────────────────────────
@@ -739,13 +780,18 @@ export class BloomEffectV2 {
   update(_timeInfo) {
     if (!this._initialized || !this._pass) return;
     if (!this.params.enabled) return;
+    this._bindPerfRecorder();
 
+    let _perfToken = this._beginPerfSpan('lightningAdapt', 'update', { cpuOnly: true });
     this._applyLightningAdaptationToPass();
+    this._endPerfSpan(_perfToken);
 
     // Update tint color if changed
     const tc = this.params.tintColor;
     if (tc.r !== this._lastTintR || tc.g !== this._lastTintG || tc.b !== this._lastTintB) {
+      _perfToken = this._beginPerfSpan('tintColor', 'update', { cpuOnly: true });
       this._updateTintColor();
+      this._endPerfSpan(_perfToken);
     }
   }
 
@@ -928,8 +974,11 @@ export class BloomEffectV2 {
    */
   render(renderer, inputRT, outputRT, camera = null) {
     if (!this._initialized || !this._pass || !inputRT || !outputRT) return false;
+    this._bindPerfRecorder();
 
+    let _perfToken = this._beginPerfSpan('lightningAdapt', 'render', { cpuOnly: true });
     this._applyLightningAdaptationToPass();
+    this._endPerfSpan(_perfToken);
 
     const p = this.params;
     if (
@@ -938,7 +987,12 @@ export class BloomEffectV2 {
       || !(this._effectiveStrength > 1e-6)
       || !(this._effectiveBlendOpacity > 1e-6)
     ) {
-      return this._passthrough(renderer, inputRT, outputRT);
+      _perfToken = this._beginPerfSpan('passthrough', 'render');
+      try {
+        return this._passthrough(renderer, inputRT, outputRT);
+      } finally {
+        this._endPerfSpan(_perfToken);
+      }
     }
 
     const prevTarget = renderer.getRenderTarget();
@@ -951,6 +1005,7 @@ export class BloomEffectV2 {
         && p0.waterSpecularBloomEnabled !== false
         && (Number(p0.waterSpecularBloomStrength) > 1e-6);
       if (useWaterBloom && this._waterBloomCompositeMaterial && this._waterBloomCompositeScene) {
+        _perfToken = this._beginPerfSpan('prepInput.waterComposite', 'render');
         const wm = this._waterBloomCompositeMaterial.uniforms;
         wm.tDiffuse.value = inputRT.texture;
         wm.tWaterSpecBloom.value = this._waterSpecBloomTexture;
@@ -959,15 +1014,22 @@ export class BloomEffectV2 {
         renderer.setRenderTarget(this._bloomInputRT);
         renderer.autoClear = true;
         renderer.render(this._waterBloomCompositeScene, this._waterBloomCompositeCamera);
+        this._endPerfSpan(_perfToken);
       } else {
+        _perfToken = this._beginPerfSpan('prepInput.copy', 'render');
         this._copyRT(renderer, inputRT.texture, this._bloomInputRT);
+        this._endPerfSpan(_perfToken);
       }
 
       // Step 2: Pre-bloom snapshot for spill isolation (outdoor window-glow halos).
+      _perfToken = this._beginPerfSpan('preBloomSnapshot', 'render');
       this._copyRT(renderer, this._bloomInputRT.texture, this._preBloomSceneRT);
+      this._endPerfSpan(_perfToken);
 
       // Step 3: UnrealBloomPass (reads + writes _bloomInputRT in place).
+      _perfToken = this._beginPerfSpan('unrealBloomPass', 'render');
       this._pass.render(renderer, null, this._bloomInputRT, 0.016, false);
+      this._endPerfSpan(_perfToken);
 
       const useSpillSuppress = p0.outdoorSpillSuppressEnabled !== false
         && this._outdoorsMask
@@ -975,6 +1037,7 @@ export class BloomEffectV2 {
         && this._spillSuppressScene;
 
       if (useSpillSuppress) {
+        _perfToken = this._beginPerfSpan('spillSuppress.prep', 'render', { cpuOnly: true });
         const su = this._spillSuppressMaterial.uniforms;
         const effThreshold = Math.max(0, Number(this._effectiveThreshold) || Number(p0.threshold) || 0);
         su.uSpillEnabled.value = 1.0;
@@ -983,20 +1046,28 @@ export class BloomEffectV2 {
         su.tPreBloom.value = this._preBloomSceneRT.texture;
         su.tPostBloom.value = this._bloomInputRT.texture;
         this._syncSpillProjectionUniforms(camera);
+        this._endPerfSpan(_perfToken);
+
+        _perfToken = this._beginPerfSpan('spillSuppress.draw', 'render');
         renderer.setRenderTarget(outputRT);
         renderer.autoClear = true;
         renderer.render(this._spillSuppressScene, this._spillSuppressCamera);
+        this._endPerfSpan(_perfToken);
       } else {
+        _perfToken = this._beginPerfSpan('outputCopy', 'render');
         this._copyRT(renderer, this._bloomInputRT.texture, outputRT);
+        this._endPerfSpan(_perfToken);
       }
     } catch (e) {
       // Fallback: pass through input → output on error
+      _perfToken = this._beginPerfSpan('errorPassthrough', 'render');
       try {
         this._copyMaterial.map = inputRT.texture;
         renderer.setRenderTarget(outputRT);
         renderer.autoClear = true;
         renderer.render(this._copyScene, this._copyCamera);
       } catch (_) {}
+      this._endPerfSpan(_perfToken);
 
       if (Math.random() < 0.01) {
         log.warn('BloomEffectV2 render error:', e);

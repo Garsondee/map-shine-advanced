@@ -32,9 +32,12 @@ export class SmartWindBehavior {
     if (dt <= 0.0001) return;
 
     // 1. Check Susceptibility
-    const susceptibility = typeof particle._windSusceptibility === 'number'
+    let susceptibility = typeof particle._windSusceptibility === 'number'
       ? particle._windSusceptibility
       : 1.0;
+    if (typeof particle._flameMotionScale === 'number' && Number.isFinite(particle._flameMotionScale)) {
+      susceptibility *= Math.max(0, Math.min(1, particle._flameMotionScale));
+    }
     if (!Number.isFinite(susceptibility) || susceptibility <= 0.001) return; // Optimization: Skip indoor particles
 
     // 2. Get Global Wind State

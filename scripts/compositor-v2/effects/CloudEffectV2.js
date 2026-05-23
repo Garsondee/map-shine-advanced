@@ -29,6 +29,7 @@ import {
   MAX_SPRITE_POOL_SIZE,
   MIN_ACTIVE_SPRITES,
   SPARSE_CLOUD_FILES,
+  SPRITE_FADE_DURATION_SEC,
 } from './cloud-sprites/CloudSprite.js';
 import { createCloudLayerMaterialTemplate, createShadowMaskMaterial } from './cloud-sprites/cloud-shaders.js';
 import { getCloudControlSchema } from './cloud-sprites/cloud-control-schema.js';
@@ -36,9 +37,11 @@ import { getCloudControlSchema } from './cloud-sprites/cloud-control-schema.js';
 const log = createLogger('CloudEffectV2');
 
 /** Norm-space margin beyond 0..1 before a sprite is recycled off the downwind edge. */
-const OFF_STAGE_MARGIN = 0.14;
+const OFF_STAGE_MARGIN = 0.28;
 /** Extra norm-space depth for upwind spawns (fully off-stage before drifting in). */
-const UPWIND_SPAWN_DEPTH = 0.1;
+const UPWIND_SPAWN_DEPTH = 0.2;
+/** Scene-span padding for wrap/roam bounds (fraction of scene width/height). */
+const WRAP_BOUNDS_PAD = 0.24;
 /** Extra norm-space padding beyond sprite half-extent on the spawn arc. */
 const SPAWN_ARC_SPRITE_PAD = 0.06;
 
@@ -173,9 +176,12 @@ export class CloudEffectV2 {
       sceneDarkness01: 0.0,
     };
     this._lightingCacheBucket = '';
+    this._lastAppliedLightingBucket = '';
 
     this._tempVec2A = null;
     this._tempVec2B = null;
+    this._tempDriftUV = { du: 0, dv: 0, len: 0 };
+    this._tempSpawnUV = { u: 0, v: 0 };
     this._tempSize = null;
     this._lastElapsed = 0;
     this._needsNeutralClear = false;
@@ -212,7 +218,7 @@ export class CloudEffectV2 {
     this._shadowRawCacheKey = '';
     this._shadowMaskCacheKey = '';
     this._cloudTopCacheKey = '';
-    /** Re-render shadow RTs at this interval even when the static key is unchanged. */
+    /** Re-render shadow RTs at this interval while sprites drift; static scenes only refresh on key change. */
     this._shadowPassMaxStaleFrames = 12;
     this._shadowPassStaleFrames = 0;
     /** World-space bucket size for view-bound driven shadow mask UVs. */
@@ -388,18 +394,29 @@ export class CloudEffectV2 {
   }
 
   setOutdoorsMask(texture) {
-    this._outdoorsMask = texture ?? null;
+    const t = texture ?? null;
+    if (this._outdoorsMask === t) return;
+    this._outdoorsMask = t;
     this._invalidateShadowPassCache();
   }
 
   setOutdoorsMasks(textures) {
     if (!Array.isArray(textures)) return;
-    for (let i = 0; i < 4; i++) this._outdoorsMasks[i] = textures[i] ?? null;
-    this._invalidateShadowPassCache();
+    let changed = false;
+    for (let i = 0; i < 4; i++) {
+      const t = textures[i] ?? null;
+      if (this._outdoorsMasks[i] !== t) {
+        this._outdoorsMasks[i] = t;
+        changed = true;
+      }
+    }
+    if (changed) this._invalidateShadowPassCache();
   }
 
   setFloorIdTexture(texture) {
-    this._floorIdTex = texture ?? null;
+    const t = texture ?? null;
+    if (this._floorIdTex === t) return;
+    this._floorIdTex = t;
     this._invalidateShadowPassCache();
   }
 
@@ -609,8 +626,28 @@ export class CloudEffectV2 {
   /** @private */
   _windDriftUV(wind) {
     const len = Math.hypot(wind.x, wind.y);
-    if (len < 1e-6) return { du: 0, dv: 0, len: 0 };
-    return { du: wind.x / len, dv: -(wind.y / len), len };
+    if (len < 1e-6) {
+      this._tempDriftUV.du = 0;
+      this._tempDriftUV.dv = 0;
+      this._tempDriftUV.len = 0;
+      return this._tempDriftUV;
+    }
+    this._tempDriftUV.du = wind.x / len;
+    this._tempDriftUV.dv = -(wind.y / len);
+    this._tempDriftUV.len = len;
+    return this._tempDriftUV;
+  }
+
+  /**
+   * True when the sprite center has crossed the scene edge on the downwind side.
+   * @private
+   */
+  _isPastDownwindSceneEdge(sprite, drift) {
+    if (drift.du > 0.01 && sprite.normU > 1) return true;
+    if (drift.du < -0.01 && sprite.normU < 0) return true;
+    if (drift.dv > 0.01 && sprite.normV > 1) return true;
+    if (drift.dv < -0.01 && sprite.normV < 0) return true;
+    return false;
   }
 
   /**
@@ -668,10 +705,9 @@ export class CloudEffectV2 {
 
     if (len < 1e-6) {
       const span = 1 + pad * 2;
-      return {
-        u: -pad + Math.random() * span,
-        v: -pad + Math.random() * span,
-      };
+      this._tempSpawnUV.u = -pad + Math.random() * span;
+      this._tempSpawnUV.v = -pad + Math.random() * span;
+      return this._tempSpawnUV;
     }
 
     const wu = du / len;
@@ -699,16 +735,14 @@ export class CloudEffectV2 {
     const alongT = tMin + t * (tMax - tMin);
     const det = pu * wv - pv * wu;
     if (Math.abs(det) < 1e-8) {
-      return {
-        u: wu >= 0 ? -depth : 1 + depth,
-        v: -pad + t * (1 + pad * 2),
-      };
+      this._tempSpawnUV.u = wu >= 0 ? -depth : 1 + depth;
+      this._tempSpawnUV.v = -pad + t * (1 + pad * 2);
+      return this._tempSpawnUV;
     }
 
-    return {
-      u: (alongT * wv - pv * targetW) / det,
-      v: (pu * targetW - alongT * wu) / det,
-    };
+    this._tempSpawnUV.u = (alongT * wv - pv * targetW) / det;
+    this._tempSpawnUV.v = (pu * targetW - alongT * wu) / det;
+    return this._tempSpawnUV;
   }
 
   /**
@@ -749,6 +783,7 @@ export class CloudEffectV2 {
    * @private
    */
   _spawnUpwindOffStage(sprite, geom, drift, windSpeed) {
+    sprite.beginFadeIn(SPRITE_FADE_DURATION_SEC);
     const depth = UPWIND_SPAWN_DEPTH + Math.random() * OFF_STAGE_MARGIN;
     const along = this._advanceSpawnArcWalker(windSpeed);
     const { u, v } = this._spawnUVFromArc(along, geom, drift, depth);
@@ -827,6 +862,7 @@ export class CloudEffectV2 {
         v = v * (1 - mix) + (-pad + Math.random() * span) * mix;
       }
       this._placeSpriteAtNorm(sprite, geom, u, v);
+      sprite.beginFadeIn(SPRITE_FADE_DURATION_SEC);
     }
     this._needsSpriteRespread = false;
   }
@@ -864,9 +900,15 @@ export class CloudEffectV2 {
 
   advanceWind(delta) {
     if (!this._initialized || !this.params.enabled) return;
-    const ws = this._getWeatherState();
-    if (!ws.weatherEnabled || this._isCoverZero(ws.cloudCover)) return;
-    this._advanceWindSim(delta, ws.windDirX, ws.windDirY, ws.windSpeed);
+    this._bindPerfRecorder();
+    const _perfToken = this._beginPerfSpan('advanceWind', 'update');
+    try {
+      const ws = this._getWeatherState();
+      if (!ws.weatherEnabled || this._isCoverZero(ws.cloudCover)) return;
+      this._advanceWindSim(delta, ws.windDirX, ws.windDirY, ws.windSpeed);
+    } finally {
+      this._endPerfSpan(_perfToken);
+    }
   }
 
   /** @private */
@@ -910,12 +952,15 @@ export class CloudEffectV2 {
     this._needsNeutralClear = false;
     this._endPerfSpan(_perfToken);
 
-    _perfToken = this._beginPerfSpan('sunAndViewBounds', 'update');
+    _perfToken = this._beginPerfSpan('sunAndViewBounds.calc', 'update');
     this._calcSunDir();
     this._updateViewBounds();
     const sceneBoundsChanged = this._updateSceneBounds();
     this._updateCaptureCamera();
     this._updateWrapBounds();
+    this._endPerfSpan(_perfToken);
+
+    _perfToken = this._beginPerfSpan('sunAndViewBounds.sprites', 'update');
     if ((sceneBoundsChanged || this._needsSpriteRespread) && this._assetsLoaded && this._texturePicker) {
       this._resetVisibleSprites(ws.cloudCover);
     } else {
@@ -923,9 +968,14 @@ export class CloudEffectV2 {
     }
     this._endPerfSpan(_perfToken);
 
-    _perfToken = this._beginPerfSpan('spriteSim', 'update');
+    _perfToken = this._beginPerfSpan('spriteSim.count', 'update');
     if (this._assetsLoaded) {
       this._updateActiveSpriteCount(ws.cloudCover);
+    }
+    this._endPerfSpan(_perfToken);
+
+    _perfToken = this._beginPerfSpan('spriteSim.simulate', 'update');
+    if (this._assetsLoaded) {
       this._simulateSprites(delta);
     }
     this._endPerfSpan(_perfToken);
@@ -970,6 +1020,7 @@ export class CloudEffectV2 {
         return;
       }
 
+      _perfToken = this._beginPerfSpan('prep', 'render', { cpuOnly: true });
       this.syncSunFromDriver();
       this._updateSkyLighting();
       this._updateViewBounds();
@@ -984,10 +1035,12 @@ export class CloudEffectV2 {
 
       this._shadowPassStaleFrames++;
       const staticKey = this._computeShadowStaticCacheKey();
-      const forceShadowRefresh = this._shadowPassStaleFrames >= this._shadowPassMaxStaleFrames;
+      const staleBudget = this._getShadowPassStaleBudget();
+      const forceShadowRefresh = Number.isFinite(staleBudget)
+        && this._shadowPassStaleFrames >= staleBudget;
       const rawCacheHit = !forceShadowRefresh && staticKey === this._shadowRawCacheKey && !!this._shadowRawCacheKey;
       const maskKey = this._computeShadowMaskCacheKey(staticKey);
-      const maskCacheHit = maskKey === this._shadowMaskCacheKey && !!this._shadowMaskCacheKey;
+      const maskCacheHit = rawCacheHit && maskKey === this._shadowMaskCacheKey && !!this._shadowMaskCacheKey;
       const cloudTopKey = this._computeCloudTopCacheKey(staticKey, topFade);
       const animatedCloudTop = this._isAnimatedCloudTop();
       const cloudTopCacheHit = !animatedCloudTop && !forceShadowRefresh
@@ -1014,11 +1067,8 @@ export class CloudEffectV2 {
         else this._shadowCacheStats.cloudTopMiss++;
       }
 
-      if (!rawCacheHit) {
-        this._applyAllVisibleSpriteLocalPositions();
-      }
-
       this._updateShadowMaskUniforms();
+      this._endPerfSpan(_perfToken);
 
       if (rawCacheHit) {
         _perfToken = this._beginPerfSpan('shadowRaw.cacheSkip', 'render', { cpuOnly: true });
@@ -1055,9 +1105,6 @@ export class CloudEffectV2 {
           _perfToken = this._beginPerfSpan('cloudTop.cacheSkip', 'render', { cpuOnly: true });
           this._endPerfSpan(_perfToken);
         } else {
-          if (!rawCacheHit) {
-            this._applyAllVisibleSpriteLocalPositions();
-          }
           _perfToken = this._beginPerfSpan('cloudTop', 'render');
           try {
             this._renderCloudTops(renderer, topFade);
@@ -1067,10 +1114,15 @@ export class CloudEffectV2 {
           }
         }
       } else if (this._cloudTopRT) {
-        this._cloudTopCacheKey = '';
-        renderer.setRenderTarget(this._cloudTopRT);
-        renderer.setClearColor(0x000000, 0);
-        renderer.clear();
+        _perfToken = this._beginPerfSpan('cloudTop.clear', 'render', { cpuOnly: true });
+        try {
+          this._cloudTopCacheKey = '';
+          renderer.setRenderTarget(this._cloudTopRT);
+          renderer.setClearColor(0x000000, 0);
+          renderer.clear();
+        } finally {
+          this._endPerfSpan(_perfToken);
+        }
       }
     } finally {
       renderer.setRenderTarget(prevTarget);
@@ -1138,6 +1190,17 @@ export class CloudEffectV2 {
     this._shadowPassStaleFrames = 0;
   }
 
+  /**
+   * How many render passes may reuse cached shadow RTs before a forced refresh.
+   * Active sprites use `_shadowPassMaxStaleFrames`; empty cover only refreshes on static-key change.
+   * @private
+   * @returns {number}
+   */
+  _getShadowPassStaleBudget() {
+    if ((this._lastActiveTotal ?? 0) <= 0) return Number.POSITIVE_INFINITY;
+    return Math.max(1, Number(this._shadowPassMaxStaleFrames) || 12);
+  }
+
   /** @private @param {string} paramId */
   _paramAffectsShadowPassCache(paramId) {
     return paramId.startsWith('shadow')
@@ -1175,13 +1238,15 @@ export class CloudEffectV2 {
     return String(tex.uuid ?? tex.id ?? tex);
   }
 
-  /** @private — static inputs only; motion/sun drift handled by stale refresh + explicit invalidation. */
+  /** @private — static inputs only; sprite motion requires per-frame raw capture when active. */
   _computeShadowStaticCacheKey() {
     const p = this.params;
     return [
       this._lastShadowInternalW,
       this._lastShadowInternalH,
       this._lastSceneBoundsKey,
+      this._quantizeShadowBucket(this._sunDir?.x ?? 0, 0.04),
+      this._quantizeShadowBucket(this._sunDir?.y ?? 0, 0.04),
       this._quantizeShadowBucket(p.shadowOpacity, 0.02),
       this._quantizeShadowBucket(p.shadowOffsetScale, 0.02),
       this._lastActiveTotal,
@@ -1237,8 +1302,12 @@ export class CloudEffectV2 {
       rawHitPct: rawTotal > 0 ? (s.rawHit / rawTotal) * 100 : 0,
       maskHitPct: maskTotal > 0 ? (s.maskHit / maskTotal) * 100 : 0,
       cloudTopHitPct: topTotal > 0 ? (s.cloudTopHit / topTotal) * 100 : 0,
-      staleMaxFrames: this._shadowPassMaxStaleFrames,
+      staleMaxFrames: (() => {
+        const budget = this._getShadowPassStaleBudget();
+        return Number.isFinite(budget) ? budget : null;
+      })(),
       staleFrames: this._shadowPassStaleFrames,
+      spritesActive: (this._lastActiveTotal ?? 0) > 0,
     };
   }
 
@@ -1263,7 +1332,7 @@ export class CloudEffectV2 {
 
     for (const sprite of this._cloudSprites) {
       if (!sprite.mesh.visible) continue;
-      sprite.setShadowOpacity(shadowOpacity * sprite.baseOpacity);
+      sprite.syncShadowOpacity(shadowOpacity);
     }
 
     const cam = this._cloudCaptureCam;
@@ -1297,7 +1366,8 @@ export class CloudEffectV2 {
     const opacityMul = Math.max(0, Number(p.cloudTopOpacity) || 0) * topFade;
     for (const sprite of this._cloudSprites) {
       if (!sprite.mesh.visible) continue;
-      sprite.setDisplayOpacity(sprite.baseOpacity * opacityMul);
+      sprite.renderOpacityMul = opacityMul;
+      sprite.syncDisplayOpacity();
     }
 
     renderer.setRenderTarget(this._cloudTopRT);
@@ -1312,7 +1382,8 @@ export class CloudEffectV2 {
 
     for (const sprite of this._cloudSprites) {
       if (!sprite.mesh.visible) continue;
-      sprite.setDisplayOpacity(sprite.baseOpacity);
+      sprite.renderOpacityMul = 1;
+      sprite.syncDisplayOpacity();
     }
   }
 
@@ -1485,7 +1556,7 @@ export class CloudEffectV2 {
     const maxY = src.maxY;
     const spanW = Math.max(1, maxX - minX);
     const spanH = Math.max(1, maxY - minY);
-    const pad = 0.12;
+    const pad = WRAP_BOUNDS_PAD;
     this._wrapBounds.minX = minX - spanW * pad;
     this._wrapBounds.minY = minY - spanH * pad;
     this._wrapBounds.maxX = maxX + spanW * pad;
@@ -1581,7 +1652,19 @@ export class CloudEffectV2 {
         const sprite = this._cloudSprites[idx];
         if (!sprite) continue;
         sprite.layerIndex = layer;
-        sprite.mesh.visible = i < activeInLayer;
+        const shouldBeActive = i < activeInLayer;
+
+        if (shouldBeActive) {
+          if (sprite._pendingDeactivate) {
+            sprite.clearPendingDeactivate();
+            sprite.mesh.visible = true;
+            sprite.beginFadeIn(SPRITE_FADE_DURATION_SEC);
+          } else if (!sprite.mesh.visible) {
+            sprite.mesh.visible = true;
+          }
+        } else if (sprite.mesh.visible && !sprite._pendingDeactivate) {
+          sprite.markPendingDeactivate();
+        }
       }
     }
     if (countChanged && total > previousVisibleTotal && previousVisibleTotal >= 0 && this._texturePicker) {
@@ -1589,6 +1672,39 @@ export class CloudEffectV2 {
     }
     if (countChanged && previousVisibleTotal >= 0) {
       this._invalidateShadowPassCache();
+    }
+  }
+
+  /** @private */
+  _updateSpriteLifecycle(sprite, delta, geom, drift, windSpeed) {
+    if (sprite._pendingDeactivate) {
+      const fadeDone = sprite.updateFade(delta) === 'complete';
+      this._applySpriteLocalPosition(sprite, geom);
+      if (fadeDone && sprite.fadeMul <= 0.001) {
+        sprite.mesh.visible = false;
+        sprite.clearPendingDeactivate();
+        sprite.fadeMul = 1;
+      }
+      return;
+    }
+
+    sprite.updateFade(delta);
+
+    const pastEdge = this._isPastDownwindSceneEdge(sprite, drift);
+    if (sprite._fadePhase === 'out' && !pastEdge) {
+      sprite.beginFadeIn(SPRITE_FADE_DURATION_SEC);
+    } else if (pastEdge && sprite._fadePhase === 'steady' && sprite.fadeMul > 0.001) {
+      sprite.beginFadeOut(SPRITE_FADE_DURATION_SEC);
+    }
+
+    if (sprite._fadePhase === 'steady' && sprite.fadeMul <= 0.001 && pastEdge) {
+      sprite._awaitingRecycle = true;
+    }
+
+    if (sprite._awaitingRecycle && sprite._fadePhase === 'steady' && sprite.fadeMul <= 0.001) {
+      this._spawnUpwindOffStage(sprite, geom, drift, windSpeed);
+    } else {
+      this._applySpriteLocalPosition(sprite, geom);
     }
   }
 
@@ -1629,11 +1745,7 @@ export class CloudEffectV2 {
           sprite.normV += Math.sin(sprite.orbitPhase * 1.27) * orbit * normScaleV;
         }
 
-        if (this._hasExitedDownwind(sprite, drift)) {
-          this._spawnUpwindOffStage(sprite, geom, drift, windSpeed);
-        } else {
-          this._applySpriteLocalPosition(sprite, geom);
-        }
+        this._updateSpriteLifecycle(sprite, delta, geom, drift, windSpeed);
       }
     }
     this._syncCloudAnchor();
@@ -1644,17 +1756,9 @@ export class CloudEffectV2 {
     const lighting = this._resolveCloudLighting();
     if (!lighting) return;
 
-    const {
-      tint,
-      sunDirX,
-      sunDirY,
-      sunElevation01,
-      skyIntensity,
-      nightDim,
-      brightness,
-      skyTintStrength,
-      sunLightingStrength,
-    } = lighting;
+    const bucket = this._computeLightingCacheBucket();
+    const staticLightingChanged = bucket !== this._lastAppliedLightingBucket;
+    this._lastAppliedLightingBucket = bucket;
 
     const lightning = this._resolveLightningFlash();
     const boilStrength = Math.max(0, Number(this.params.spriteBoilStrength) ?? 0);
@@ -1665,24 +1769,41 @@ export class CloudEffectV2 {
       if (!sprite.mesh.visible) continue;
       const u = sprite.displayMaterial?.uniforms;
       if (!u) continue;
-      if (u.uSkyTint?.value?.set) u.uSkyTint.value.set(tint.x, tint.y, tint.z);
-      if (u.uSkyTintStrength) u.uSkyTintStrength.value = skyTintStrength;
-      if (u.uSunDir?.value?.set) u.uSunDir.value.set(sunDirX, sunDirY);
-      if (u.uSunElevation01) u.uSunElevation01.value = sunElevation01;
-      if (u.uSkyIntensity) u.uSkyIntensity.value = skyIntensity;
-      if (u.uSunLightingStrength) u.uSunLightingStrength.value = sunLightingStrength;
-      if (u.uBrightness) u.uBrightness.value = brightness;
-      if (u.uNightDim) u.uNightDim.value = nightDim;
-      if (u.uWarpSeed?.value?.set) u.uWarpSeed.value.set(sprite.warpSeedX ?? 0, sprite.warpSeedY ?? 0);
-      if (u.uWarpStrength) u.uWarpStrength.value = boilStrength;
+
       if (u.uTime) u.uTime.value = warpTime;
       if (u.uLightningFlash01) u.uLightningFlash01.value = lightning.flash01;
-      if (u.uLightningFlashColor?.value?.set) {
-        u.uLightningFlashColor.value.set(lightning.colorR, lightning.colorG, lightning.colorB);
+      if (lightning.flash01 > 0) {
+        if (u.uLightningFlashColor?.value?.set) {
+          u.uLightningFlashColor.value.set(lightning.colorR, lightning.colorG, lightning.colorB);
+        }
+        if (u.uLightningBrightnessBoost) u.uLightningBrightnessBoost.value = lightning.brightnessBoost;
+        if (u.uLightningContrastBoost) u.uLightningContrastBoost.value = lightning.contrastBoost;
+        if (u.uLightningTintStrength) u.uLightningTintStrength.value = lightning.tintStrength;
       }
-      if (u.uLightningBrightnessBoost) u.uLightningBrightnessBoost.value = lightning.brightnessBoost;
-      if (u.uLightningContrastBoost) u.uLightningContrastBoost.value = lightning.contrastBoost;
-      if (u.uLightningTintStrength) u.uLightningTintStrength.value = lightning.tintStrength;
+
+      if (staticLightingChanged) {
+        const {
+          tint,
+          sunDirX,
+          sunDirY,
+          sunElevation01,
+          skyIntensity,
+          nightDim,
+          brightness,
+          skyTintStrength,
+          sunLightingStrength,
+        } = lighting;
+        if (u.uSkyTint?.value?.set) u.uSkyTint.value.set(tint.x, tint.y, tint.z);
+        if (u.uSkyTintStrength) u.uSkyTintStrength.value = skyTintStrength;
+        if (u.uSunDir?.value?.set) u.uSunDir.value.set(sunDirX, sunDirY);
+        if (u.uSunElevation01) u.uSunElevation01.value = sunElevation01;
+        if (u.uSkyIntensity) u.uSkyIntensity.value = skyIntensity;
+        if (u.uSunLightingStrength) u.uSunLightingStrength.value = sunLightingStrength;
+        if (u.uBrightness) u.uBrightness.value = brightness;
+        if (u.uNightDim) u.uNightDim.value = nightDim;
+        if (u.uWarpSeed?.value?.set) u.uWarpSeed.value.set(sprite.warpSeedX ?? 0, sprite.warpSeedY ?? 0);
+        if (u.uWarpStrength) u.uWarpStrength.value = boilStrength;
+      }
     }
   }
 
@@ -1768,6 +1889,7 @@ export class CloudEffectV2 {
       this._quantizeShadowBucket(lighting.skyIntensity, 0.05),
       this._quantizeShadowBucket(lighting.nightDim, 0.05),
       this._quantizeShadowBucket(this._resolveLightningFlash()?.flash01 ?? 0, 0.04),
+      this._quantizeShadowBucket(Math.max(0, Number(this.params.spriteBoilStrength) ?? 0), 0.005),
     ].join(',');
     this._lightingCacheBucket = bucket;
     return bucket;
@@ -2203,12 +2325,14 @@ export class CloudEffectV2 {
       this._sunDir.set(x, y);
     }
     let tuningChanged = false;
-    if (Number.isFinite(Number(driverState.tuning?.shadowSoftnessScale))) {
-      this._driverShadowSoftnessScale = Number(driverState.tuning.shadowSoftnessScale);
+    const newSoftness = Number(driverState.tuning?.shadowSoftnessScale);
+    if (Number.isFinite(newSoftness) && this._driverShadowSoftnessScale !== newSoftness) {
+      this._driverShadowSoftnessScale = newSoftness;
       tuningChanged = true;
     }
-    if (Number.isFinite(Number(driverState.tuning?.shadowLengthScale))) {
-      this._driverShadowLengthScale = Number(driverState.tuning.shadowLengthScale);
+    const newLength = Number(driverState.tuning?.shadowLengthScale);
+    if (Number.isFinite(newLength) && this._driverShadowLengthScale !== newLength) {
+      this._driverShadowLengthScale = newLength;
       tuningChanged = true;
     }
     if (tuningChanged) this._invalidateShadowPassCache();

@@ -7,6 +7,12 @@ import { evaluateRenderStackFindings } from './RenderStackRules.js';
 import { isLevelsEnabledForScene } from '../../foundry/levels-scene-flags.js';
 import { collectEnabledMaskIds, getMaskTextureManifest } from '../../settings/mask-manifest-flags.js';
 import { getShaderCompileMonitor } from './ShaderCompileMonitor.js';
+import {
+  createMissingMaskHealthRule,
+  evaluateEffectMaskHealth,
+  isMissingRequiredMask,
+} from './MaskPresenceEvaluator.js';
+import { getAllEffectMaskHealthEntries } from './EffectMaskHealthCatalog.js';
 
 const log = createLogger('HealthEvaluator');
 
@@ -826,11 +832,19 @@ export class HealthEvaluatorService {
   }
 
   _evaluateContractLevel(contract, instance, levelKey, allowedTiers) {
-    const checks = [];
     const now = Date.now();
+    const key = `${contract.effectId}|${levelKey}`;
+    const prev = this._records.get(key) || null;
+    const tierSet = new Set(Array.isArray(allowedTiers) ? allowedTiers : ['structural', 'behavioral']);
+    const preservedChecks = (prev?.checks || []).filter(
+      (c) => !tierSet.has(c?.tier || 'structural')
+    );
+
+    /** @type {object[]} */
+    const newChecks = [];
     for (const rule of (contract.rules || [])) {
       const tier = rule.tier || 'structural';
-      if (!allowedTiers.includes(tier)) continue;
+      if (!tierSet.has(tier)) continue;
       const shouldRun = safeCall(
         () => (typeof rule.when === 'function' ? !!rule.when(instance, this, levelKey) : true),
         `health.rule.when.${contract.effectId}.${rule.id}`,
@@ -838,7 +852,7 @@ export class HealthEvaluatorService {
         { fallback: false }
       );
       if (!shouldRun) {
-        checks.push({
+        newChecks.push({
           ruleId: rule.id,
           tier,
           result: 'skipped',
@@ -856,19 +870,19 @@ export class HealthEvaluatorService {
       );
 
       const skipped = !!out?.skipped;
-      checks.push({
+      newChecks.push({
         ruleId: rule.id,
         tier,
         result: skipped ? 'skipped' : (out?.pass ? 'pass' : 'fail'),
-        severity: rule.severity || 'warn',
+        severity: out?.severity || rule.severity || 'warn',
         message: String(out?.message || (out?.pass ? 'Pass' : 'Fail')),
+        tooltip: out?.tooltip || undefined,
         evidence: out?.evidence || undefined,
       });
     }
 
+    const checks = [...preservedChecks, ...newChecks];
     const status = this._deriveStatus(checks);
-    const key = `${contract.effectId}|${levelKey}`;
-    const prev = this._records.get(key) || null;
     const rec = {
       effectId: contract.effectId,
       levelKey,
@@ -948,9 +962,14 @@ export class HealthEvaluatorService {
   }
 
   _applyDependencyPropagation() {
-    // Reset root cause flags first
+    // Reset root cause flags first — missing-mask-only warnings must not propagate downstream.
     for (const rec of this._records.values()) {
-      rec.rootCause = rec.status !== 'healthy' && rec.status !== 'unknown';
+      const directFails = (rec.checks || []).filter(
+        (c) => c?.result === 'fail' && !String(c?.ruleId || '').startsWith('propagated:')
+      );
+      const maskOnly = directFails.length > 0
+        && directFails.every((c) => String(c?.ruleId || '') === 'missingRequiredMask');
+      rec.rootCause = rec.status !== 'healthy' && rec.status !== 'unknown' && !maskOnly;
     }
 
     const runtime = this._getRuntimeSnapshot();
@@ -1134,14 +1153,17 @@ export class HealthEvaluatorService {
           id: 'floorDataMap',
           tier: 'structural',
           severity: 'warn',
-          check: (instance, _ctx, levelKey) => {
+          check: (instance, ctx, levelKey) => {
+            if (isMissingRequiredMask(ctx, instance, 'WaterEffectV2', levelKey)) {
+              return { pass: true, skipped: true, message: 'Mask presence check owns this scenario' };
+            }
             const idx = Number(String(levelKey).split(':')[1]);
             const hasFloorData = !!instance?._floorWater?.has?.(idx);
             const expected = Array.isArray(instance?._waterTiles)
               ? instance._waterTiles.some((t) => Number(t?.floorIndex) === idx)
               : false;
             if (!expected && !hasFloorData) {
-              return { pass: true, skipped: true, message: 'Intentional absence (no expected water on level)' };
+              return { pass: true, skipped: true, message: 'No water data on this level' };
             }
             return {
               pass: hasFloorData,
@@ -1436,9 +1458,12 @@ export class HealthEvaluatorService {
           id: 'batchRenderer',
           tier: 'structural',
           severity: 'error',
-          check: (instance, _ctx, levelKey) => {
+          check: (instance, ctx, levelKey) => {
             if (!instance?.enabled || !instance?.params?.enabled) {
               return { pass: true, skipped: true, message: 'Fire disabled' };
+            }
+            if (isMissingRequiredMask(ctx, instance, 'FireEffectV2', levelKey)) {
+              return { pass: true, skipped: true, message: 'Mask presence check owns this scenario' };
             }
             const m = typeof levelKey === 'string' ? /^floor:(\d+)$/.exec(levelKey) : null;
             const floorIndex = m ? Number(m[1]) : NaN;
@@ -1538,9 +1563,13 @@ export class HealthEvaluatorService {
           id: 'initialized',
           tier: 'structural',
           severity: 'error',
-          check: (instance) => {
-            if (!instance?.enabled || !instance?.params?.enabled) {
-              return { pass: true, skipped: true, message: 'Water splashes disabled' };
+          check: (instance, ctx, levelKey) => {
+            const maskOut = evaluateEffectMaskHealth('WaterSplashesEffectV2', instance, ctx, levelKey);
+            if (maskOut.skipped) {
+              return { pass: true, skipped: true, message: maskOut.message };
+            }
+            if (!maskOut.pass) {
+              return { pass: true, skipped: true, message: 'Mask presence check owns this scenario' };
             }
             return {
               pass: !!instance?._initialized,
@@ -1552,26 +1581,34 @@ export class HealthEvaluatorService {
           id: 'batchRenderer',
           tier: 'structural',
           severity: 'error',
-          check: (instance) => {
-            if (!instance?.enabled || !instance?.params?.enabled) {
-              return { pass: true, skipped: true, message: 'Water splashes disabled' };
+          check: (instance, ctx, levelKey) => {
+            const maskOut = evaluateEffectMaskHealth('WaterSplashesEffectV2', instance, ctx, levelKey);
+            if (maskOut.skipped) {
+              return { pass: true, skipped: true, message: maskOut.message };
             }
-            const states = instance?._floorStates;
-            let perFloorBatchCount = 0;
-            if (states && typeof states.values === 'function') {
-              for (const st of states.values()) {
-                if (st?.batchRenderer) perFloorBatchCount += 1;
-              }
+            if (!maskOut.pass) {
+              return { pass: true, skipped: true, message: 'Mask presence check owns this scenario' };
             }
-            const mapCount = Number(instance?._batchRenderers?.size ?? 0);
-            const ok = perFloorBatchCount > 0 || mapCount > 0;
-            return {
-              pass: ok,
-              message: ok
-                ? `Per-floor splash batch renderers present (${Math.max(perFloorBatchCount, mapCount)})`
-                : 'Per-floor splash batch renderers missing',
-              evidence: { perFloorBatchCount, mapCount },
-            };
+            const m = typeof levelKey === 'string' ? /^floor:(\d+)$/.exec(levelKey) : null;
+            const floorIndex = m ? Number(m[1]) : NaN;
+            const st = Number.isFinite(floorIndex) ? instance._floorStates?.get(floorIndex) : null;
+            if (Number.isFinite(floorIndex) && !st) {
+              return {
+                pass: false,
+                message: 'Expected water splashes on level but floor state missing',
+                evidence: { floorIndex },
+              };
+            }
+            if (st?.batchRenderer) {
+              return { pass: true, message: 'Per-floor splash batch renderer present' };
+            }
+            const hasPoints =
+              (Array.isArray(st?.edgePoints) && st.edgePoints.length > 0)
+              || (Array.isArray(st?.interiorPoints) && st.interiorPoints.length > 0);
+            if (!hasPoints) {
+              return { pass: true, skipped: true, message: 'No splash spawn points on level' };
+            }
+            return { pass: false, message: 'Per-floor splash batch renderer missing' };
           },
         },
         heartbeatRule('WaterSplashesEffectV2', 6000),
@@ -1609,9 +1646,12 @@ export class HealthEvaluatorService {
           id: 'batchRenderer',
           tier: 'structural',
           severity: 'error',
-          check: (instance) => {
+          check: (instance, ctx) => {
             if (!instance?.enabled || !instance?.params?.enabled) {
               return { pass: true, skipped: true, message: 'Dust disabled' };
+            }
+            if (isMissingRequiredMask(ctx, instance, 'DustEffectV2')) {
+              return { pass: true, skipped: true, message: 'Mask presence check owns this scenario' };
             }
             return {
               pass: !!instance?._batchRenderer,
@@ -1794,9 +1834,15 @@ export class HealthEvaluatorService {
           id: 'initializedTargets',
           tier: 'structural',
           severity: 'error',
-          check: (instance) => {
+          check: (instance, ctx) => {
             if (instance?.params && instance.params.enabled === false) {
               return { pass: true, skipped: true, message: 'Painted shadows disabled' };
+            }
+            if (isMissingRequiredMask(ctx, instance, 'PaintedShadowEffectV2')) {
+              return { pass: true, skipped: true, message: 'Mask presence check owns this scenario' };
+            }
+            if (!instance?._projectMaterial) {
+              return { pass: true, skipped: true, message: 'Awaiting first resize/render cycle' };
             }
             const pass =
               !!instance?._projectMaterial &&
@@ -1937,11 +1983,21 @@ export class HealthEvaluatorService {
         {
           id: 'activeFloorOutdoorsResolvable',
           tier: 'behavioral',
-          severity: 'warn',
+          severity: 'error',
           check: (_instance, ctx) => {
+            const maskOut = evaluateEffectMaskHealth('GpuSceneMaskCompositor', _instance, ctx, 'global:scene');
+            if (!maskOut.pass && !maskOut.skipped) {
+              return {
+                pass: false,
+                severity: 'error',
+                message: maskOut.message,
+                tooltip: maskOut.tooltip,
+                evidence: maskOut.evidence,
+              };
+            }
             const diag = ctx._buildGpuCompositorOutdoorsDiagnostics();
             if (!diag.compositorPresent) {
-              return { pass: false, message: 'Compositor missing', evidence: diag };
+              return { pass: false, severity: 'error', message: 'Compositor missing', evidence: diag };
             }
             const af = Number(ctx._getRuntimeSnapshot()?.activeFloor ?? 0);
             const row = (diag.floorRows || []).find((r) => Number(r.floorIndex) === af);
@@ -1951,15 +2007,60 @@ export class HealthEvaluatorService {
             const pass = !!row.resolvedOutdoors;
             return {
               pass,
+              severity: pass ? 'warn' : 'error',
               message: pass
                 ? `Floor ${af}: _Outdoors resolvable (${row.resolvedNote || 'direct key'})`
-                : `Floor ${af}: no _Outdoors RT for compositorKey "${row.compositorKey}" and no sibling key match — mask not loaded or band key mismatch`,
+                : `Missing critical mask: _Outdoors — floor ${af} compositorKey "${row.compositorKey}" has no resolvable outdoors RT`,
+              tooltip: pass
+                ? undefined
+                : 'Missing critical mask: _Outdoors — indoor/outdoor gating will fail across multiple effects.',
               evidence: row,
             };
           },
         },
       ],
     });
+
+    this._wireMissingMaskRules(activeLevelKeys);
+  }
+
+  /**
+   * Prepend missingRequiredMask rules from EffectMaskHealthCatalog to registered contracts.
+   * Registers minimal contracts for mask-driven effects not yet in the registry.
+   * @param {(ctx: object) => string[]} activeLevelKeys
+   * @private
+   */
+  _wireMissingMaskRules(activeLevelKeys) {
+    /** @type {Record<string, (ctx: object) => object|null>} */
+    const extraGetters = {
+      AshDisturbanceEffectV2: (ctx) => ctx.floorCompositor?._ashDisturbanceEffect ?? null,
+      FluidEffectV2: (ctx) => ctx.floorCompositor?._fluidEffect ?? null,
+      TreeEffectV2: (ctx) => ctx.floorCompositor?._treeEffect ?? null,
+      BushEffectV2: (ctx) => ctx.floorCompositor?._bushEffect ?? null,
+      IridescenceEffectV2: (ctx) => ctx.floorCompositor?._iridescenceEffect ?? null,
+      PrismEffectV2: (ctx) => ctx.floorCompositor?._prismEffect ?? null,
+    };
+
+    for (const entry of getAllEffectMaskHealthEntries()) {
+      const effectId = entry.healthEffectId;
+      const rule = createMissingMaskHealthRule(effectId);
+      let contract = this.registry.get(effectId);
+      if (contract) {
+        const rules = contract.rules || [];
+        if (!rules.some((r) => r.id === 'missingRequiredMask')) {
+          contract.rules = [rule, ...rules];
+        }
+        continue;
+      }
+      const getInstance = extraGetters[effectId];
+      if (!getInstance) continue;
+      this.registry.register(effectId, {
+        effectId,
+        getInstance,
+        getLevelKeys: (_instance, ctx) => activeLevelKeys(ctx),
+        rules: [rule],
+      });
+    }
   }
 }
 

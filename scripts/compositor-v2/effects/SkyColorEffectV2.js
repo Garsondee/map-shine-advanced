@@ -1187,16 +1187,18 @@ export class SkyColorEffectV2 {
         effectiveIntensity *= lerp(1.0, localGradeIntensity, strength);
       }
       this.currentSkyIntensity01 = clamp01(effectiveIntensity);
-      // Linear HDR refactor (Phase 0): SkyColor is no longer a full-screen grader.
-      // It still computes sun/tint/intensity state for downstream consumers
-      // (water specular, splashes, ambient endpoints), but its fragment grade
-      // is suppressed unconditionally. The screen grade now lives only in
-      // ColorCorrectionEffectV2 post-composite. Set FORCE_SKY_GRADE = true in
-      // a debug build to re-enable for A/B testing.
-      const FORCE_SKY_GRADE = false;
-      if (!FORCE_SKY_GRADE) {
-        effectiveIntensity = 0.0;
-      } else if (this._colorCorrectionTimelineActive) {
+      // Post-merge Camera Grade owns the screen-wide ToD timeline when it actually
+      // renders with an active timeline. Otherwise fall back to the legacy per-level
+      // SkyColor outdoor grade so time-of-day recolouring never silently disappears.
+      let ccOwnsScreenGrade = false;
+      try {
+        const cc = window.MapShine?.effectComposer?._floorCompositorV2?._colorCorrectionEffect ?? null;
+        ccOwnsScreenGrade = cc?._initialized === true
+          && cc?.params?.enabled !== false
+          && cc?._lastPostMergeWrote === true
+          && cc?._lastPostMergeTodApplied === true;
+      } catch (_) {}
+      if (ccOwnsScreenGrade || this._colorCorrectionTimelineActive) {
         effectiveIntensity = 0.0;
       }
 

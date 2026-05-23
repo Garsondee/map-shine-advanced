@@ -19,6 +19,12 @@ export const PRESETS_DIRECTORY = 'modules/map-shine-advanced/data/presets';
 /** Scene flag key for which built-in preset was last applied (authoring hint). */
 export const ACTIVE_PRESET_FLAG_KEY = 'activePresetId';
 
+/** Synthetic id for the one-level undo snapshot (not a file on disk). */
+export const PRESET_UNDO_SNAPSHOT_ID = '__msa_previous_settings__';
+
+/** @type {Map<string, { preset: MapShineScenePreset, savedAt: number }>} */
+const _presetUndoBySceneId = new Map();
+
 /** @type {Array<MapShineScenePreset>|null} */
 let presetCache = null;
 
@@ -30,6 +36,7 @@ let presetCache = null;
  * @property {boolean} [enabled]
  * @property {Record<string, unknown>} settings
  * @property {Record<string, unknown>} [controlState]
+ * @property {string} [previousActivePresetId] — active preset before undo snapshot (undo only)
  * @property {string} [sourcePath] — resolved file URL used for load (debug)
  */
 
@@ -200,6 +207,89 @@ export async function setActivePresetId(scene, presetId) {
 }
 
 /**
+ * Capture the current scene state so the user can revert the next preset apply.
+ *
+ * @param {Scene|null|undefined} scene
+ * @returns {boolean}
+ */
+export function capturePresetUndoSnapshot(scene) {
+  if (!scene?.id) return false;
+
+  const payload = buildPresetReadyJsonForScene(scene);
+  if (!payload) return false;
+
+  const previousActivePresetId = getActivePresetId(scene);
+
+  _presetUndoBySceneId.set(scene.id, {
+    preset: {
+      id: PRESET_UNDO_SNAPSHOT_ID,
+      name: 'Previous Settings',
+      description: previousActivePresetId
+        ? `Saved before applying a preset (was "${previousActivePresetId}")`
+        : 'Saved before applying a preset',
+      enabled: payload.enabled,
+      settings: payload.settings,
+      ...(_isPlainObject(payload.controlState) ? { controlState: payload.controlState } : {}),
+      previousActivePresetId
+    },
+    savedAt: Date.now()
+  });
+
+  return true;
+}
+
+/**
+ * @param {Scene|null|undefined} scene
+ * @returns {boolean}
+ */
+export function hasPresetUndoSnapshot(scene) {
+  return Boolean(scene?.id && _presetUndoBySceneId.has(scene.id));
+}
+
+/**
+ * @param {Scene|null|undefined} scene
+ * @returns {MapShineScenePreset|null}
+ */
+export function getPresetUndoSnapshot(scene) {
+  if (!scene?.id) return null;
+  return _presetUndoBySceneId.get(scene.id)?.preset ?? null;
+}
+
+/**
+ * @param {Scene|null|undefined} scene
+ */
+export function clearPresetUndoSnapshot(scene) {
+  if (!scene?.id) return;
+  _presetUndoBySceneId.delete(scene.id);
+}
+
+/**
+ * Restore settings captured before the last preset apply.
+ *
+ * @param {Scene} scene
+ * @returns {Promise<boolean>}
+ */
+export async function revertPresetChange(scene) {
+  if (!scene?.id) {
+    ui.notifications?.warn?.('Map Shine: No active scene');
+    return false;
+  }
+
+  const entry = _presetUndoBySceneId.get(scene.id);
+  if (!entry?.preset) {
+    ui.notifications?.warn?.('Map Shine: No previous settings to restore');
+    return false;
+  }
+
+  const restored = await applyPresetToScene(scene, entry.preset, { skipUndoCapture: true, isUndoRestore: true });
+  if (!restored) return false;
+
+  clearPresetUndoSnapshot(scene);
+  ui.notifications?.info?.('Map Shine: Restored previous settings');
+  return true;
+}
+
+/**
  * Build clipboard-ready preset JSON (extends scene-settings-v1 with id/name/description).
  *
  * @param {Scene|null|undefined} scene
@@ -229,15 +319,21 @@ export function buildPresetReadyJsonForScene(scene) {
  *
  * @param {Scene} scene
  * @param {MapShineScenePreset} preset
- * @returns {Promise<void>}
+ * @param {{ skipUndoCapture?: boolean, isUndoRestore?: boolean }} [options]
+ * @returns {Promise<boolean>}
  */
-export async function applyPresetToScene(scene, preset) {
+export async function applyPresetToScene(scene, preset, options = {}) {
+  const { skipUndoCapture = false, isUndoRestore = false } = options;
   if (!scene || !preset?.id || !_isPlainObject(preset.settings)) {
     ui.notifications?.warn?.('Map Shine: Invalid preset or no active scene');
-    return;
+    return false;
   }
 
   try {
+    if (!skipUndoCapture && preset.id !== PRESET_UNDO_SNAPSHOT_ID) {
+      capturePresetUndoSnapshot(scene);
+    }
+
     const enabledFlag = typeof preset.enabled === 'boolean' ? preset.enabled : false;
     await scene.setFlag('map-shine-advanced', 'enabled', enabledFlag);
     await sceneSettings.setSceneSettings(scene, preset.settings);
@@ -252,15 +348,29 @@ export async function applyPresetToScene(scene, preset) {
       await repairSceneControlStateFlag(scene);
     }
 
-    await setActivePresetId(scene, preset.id);
+    if (isUndoRestore) {
+      const previousActivePresetId = preset.previousActivePresetId;
+      if (typeof previousActivePresetId === 'string' && previousActivePresetId.trim()) {
+        await setActivePresetId(scene, previousActivePresetId);
+      } else {
+        await clearActivePresetId(scene);
+      }
+    } else if (preset.id !== PRESET_UNDO_SNAPSHOT_ID) {
+      await setActivePresetId(scene, preset.id);
+    }
 
     const drawScene = game.scenes?.get?.(scene.id) ?? scene;
     await canvas.draw(drawScene);
 
-    ui.notifications?.info?.(`Map Shine: Preset "${preset.name}" applied`);
+    if (!isUndoRestore) {
+      const undoHint = hasPresetUndoSnapshot(scene) ? ' — use Revert to restore previous settings' : '';
+      ui.notifications?.info?.(`Map Shine: Preset "${preset.name}" applied${undoHint}`);
+    }
+    return true;
   } catch (e) {
     log.error('applyPresetToScene failed:', e);
     ui.notifications?.error?.('Map Shine: Failed to apply preset — see console');
+    return false;
   }
 }
 

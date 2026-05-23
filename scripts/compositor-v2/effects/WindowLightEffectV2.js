@@ -37,8 +37,9 @@
  * "lower floor" behavior matches the slice being drawn, not only the UI active floor.
  *
  * Environment tint: {@link #setSkyState} receives sky tint from SkyColor and,
- * when Color Correction time-of-day camera timeline is enabled, the timeline
- * global tint multiplier so window glow tracks graded time of day.
+ * when Color Correction time-of-day camera timeline is enabled, {@link #setTimelineGradeState}
+ * plus live {@link ColorCorrectionEffectV2#getTimelineGradeState} supply global/interior
+ * tint multipliers blended by destination indoors weight (window spill is indoor-gated).
  *
  * Indoor-only: {@link #setOutdoorsMask} gates overlays with the active-floor
  * `_Outdoors` mask (white = outdoor, no window glow). After the overlay draw,
@@ -177,6 +178,9 @@ export class WindowLightEffectV2 {
     this._clipTmpWorldVec = null;
     this._clipTmpDirVec = null;
 
+    /** @type {{ enabled: boolean, global?: object, interior?: object }} */
+    this._timelineGradeState = { enabled: false };
+
     /** @type {{ skyTintColor: {r:number,g:number,b:number}, sunAzimuthDeg: number, skyIntensity01: number, sceneDarkness01: (number|null), effectiveDarkness01: (number|null), skyTintDarknessLightsEnabled: (boolean|null), skyTintDarknessLightsIntensity: (number|null), todCameraTimelineActive: boolean, todCameraTintColor: {r:number,g:number,b:number} }} */
     this._driverSunDir = null;
     this._driverShadowLengthScale = 1.0;
@@ -259,7 +263,48 @@ export class WindowLightEffectV2 {
      */
     this._populateGeneration = 0;
 
+    /** @type {import('../../core/diagnostics/PerformanceRecorder.js').PerformanceRecorder|null} */
+    this._activePerfRecorder = null;
+
     log.debug('WindowLightEffectV2 created');
+  }
+
+  // ── Performance Recorder ───────────────────────────────────────────────────
+
+  /** @private */
+  _bindPerfRecorder() {
+    try {
+      const recorder = window.MapShine?.performanceRecorder;
+      this._activePerfRecorder = recorder?.enabled ? recorder : null;
+    } catch (_) {
+      this._activePerfRecorder = null;
+    }
+  }
+
+  /**
+   * @param {string} name
+   * @param {'update'|'render'} [phase='update']
+   * @param {{ cpuOnly?: boolean }} [options={}]
+   * @returns {object|null}
+   * @private
+   */
+  _beginPerfSpan(name, phase = 'update', options = {}) {
+    try {
+      const recorder = this._activePerfRecorder;
+      if (!recorder?.enabled || typeof recorder.beginEffectCall !== 'function') return null;
+      return recorder.beginEffectCall(`windowLight.${phase}.${name}`, phase, options);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /** @param {object|null} token @private */
+  _endPerfSpan(token) {
+    if (!token) return;
+    try {
+      const recorder = this._activePerfRecorder ?? window.MapShine?.performanceRecorder;
+      recorder?.endEffectCall?.(token);
+    } catch (_) {}
   }
 
   // ── Public API ─────────────────────────────────────────────────────────────
@@ -318,7 +363,7 @@ export class WindowLightEffectV2 {
           'Master intensity': 'Overall window glow scale. Time-of-day percentages multiply this value.',
           'Time of day %': 'Per-anchor strength as a percentage of master intensity. Anchors blend smoothly around the 24h clock (same eight slots as Color Correction).',
           'Sky tint': 'How much computed sky color warms/cools window light.',
-          'ToD camera tint': 'Multiplies window light by the Color Correction time-of-day camera timeline global tint when that timeline is enabled.',
+          'ToD camera tint': 'Multiplies window light by the Color Correction time-of-day camera timeline tint (global + interior tracks, blended like the CC grade on indoor destinations).',
           'Night dimming': 'How strongly LightingDirector darkness reduces windows at night.'
         },
       },
@@ -369,7 +414,7 @@ export class WindowLightEffectV2 {
         nightDimming: { type: 'slider', label: 'Night Dimming', min: 0.0, max: 2.0, step: 0.01, default: 0.1 },
         useSkyTint: { type: 'boolean', label: 'Use Sky Tint', default: true },
         skyTintStrength: { type: 'slider', label: 'Sky Tint Strength', min: 0.0, max: 5.0, step: 0.01, default: 0.05, tooltip: 'Moderate sky color coupling for weather/night ambience without replacing Camera Grade.' },
-        useTodCameraTint: { type: 'boolean', label: 'Use ToD Camera Tint', default: true, tooltip: 'When Color Correction time-of-day camera timeline is on, multiply window light by the timeline global tint (same style as the CC grade).' },
+        useTodCameraTint: { type: 'boolean', label: 'Use ToD Camera Tint', default: true, tooltip: 'When Color Correction time-of-day camera timeline is on, multiply window light by the timeline tint multipliers (global + interior, blended on indoor spill pixels).' },
         todCameraTintStrength: { type: 'slider', label: 'ToD Camera Tint Strength', min: 0.0, max: 5.0, step: 0.01, default: 5.0, throttle: 50, tooltip: 'Intensity of the timeline tint on window light (0 = no effect). Independent from Sky Tint Strength.' },
         cloudShadowContrast: { type: 'slider', label: 'Shadow Contrast', min: 0.0, max: 4.0, step: 0.01, default: 1.0 },
         cloudShadowBias: { type: 'slider', label: 'Shadow Bias', min: -1.0, max: 1.0, step: 0.01, default: 0.05 },
@@ -491,16 +536,22 @@ export class WindowLightEffectV2 {
     this._buildOutdoorsClipPass();
 
     this._scene.userData.onBindWindowLightPass = (rw, rh, renderCamera) => {
-      const u = this._sharedUniforms;
-      if (!u?.uScreenSize) return;
-      const w = Math.max(1, Math.floor(Number(rw) || 1));
-      const h = Math.max(1, Math.floor(Number(rh) || 1));
-      u.uScreenSize.value.set(w, h);
-      // Combined/cloud shadow RTs are authored for this same buffer; keep the divisor
-      // identical to gl_FragCoord space for Pass 1b (avoids texel drift vs texture.image).
-      if (u.uCloudShadowBufferSize) u.uCloudShadowBufferSize.value.set(w, h);
-      this._syncViewProjectionUniforms(renderCamera ?? null);
-      this._updateSceneBounds();
+      this._bindPerfRecorder();
+      const _perfToken = this._beginPerfSpan('bindPass', 'render', { cpuOnly: true });
+      try {
+        const u = this._sharedUniforms;
+        if (!u?.uScreenSize) return;
+        const w = Math.max(1, Math.floor(Number(rw) || 1));
+        const h = Math.max(1, Math.floor(Number(rh) || 1));
+        u.uScreenSize.value.set(w, h);
+        // Combined/cloud shadow RTs are authored for this same buffer; keep the divisor
+        // identical to gl_FragCoord space for Pass 1b (avoids texel drift vs texture.image).
+        if (u.uCloudShadowBufferSize) u.uCloudShadowBufferSize.value.set(w, h);
+        this._syncViewProjectionUniforms(renderCamera ?? null);
+        this._updateSceneBounds();
+      } finally {
+        this._endPerfSpan(_perfToken);
+      }
     };
 
     this._scene.userData.onAfterWindowLightPass = (renderer, camera, targetRT, outdoorsMask) => {
@@ -772,7 +823,9 @@ export class WindowLightEffectV2 {
    */
   update(timeInfo) {
     if (!this._initialized || !this._enabled) return;
+    this._bindPerfRecorder();
 
+    let _perfToken = this._beginPerfSpan('floorPoll', 'update', { cpuOnly: true });
     if (this._sharedUniforms?.uTime) {
       this._sharedUniforms.uTime.value = typeof timeInfo?.elapsed === 'number' ? timeInfo.elapsed : 0;
     }
@@ -799,11 +852,13 @@ export class WindowLightEffectV2 {
           .finally(() => { this._repopulatePromise = null; });
       }
     } catch (_) {}
+    this._endPerfSpan(_perfToken);
 
     // Sync params → uniforms (cheap; shared uniforms update all overlays).
     const u = this._sharedUniforms;
     if (!u) return;
 
+    _perfToken = this._beginPerfSpan('uniforms', 'update', { cpuOnly: true });
     u.uEffectEnabled.value = !!this._enabled;
     let landscapeWindowMul = 1.0;
     let landscapeFlash01 = 0;
@@ -859,18 +914,7 @@ export class WindowLightEffectV2 {
     const skyIntensity01 = clamp01(this._skyState.skyIntensity01);
     u.uSkyTintStrength.value = Math.max(0.0, Number(this.params.skyTintStrength) || 0.0) * skyIntensity01 * skyTintBySkyColorMul;
 
-    const todTint = this._skyState.todCameraTintColor;
-    const ttr = Number(todTint.r);
-    const ttg = Number(todTint.g);
-    const ttb = Number(todTint.b);
-    u.uTodCameraTintColor.value.setRGB(
-      Number.isFinite(ttr) ? ttr : 1.0,
-      Number.isFinite(ttg) ? ttg : 1.0,
-      Number.isFinite(ttb) ? ttb : 1.0
-    );
-    const todCamActive = this._skyState.todCameraTimelineActive === true && this.params.useTodCameraTint !== false;
-    u.uTodCameraTintActive.value = todCamActive ? 1.0 : 0.0;
-    u.uTodCameraTintStrength.value = Math.max(0.0, Number(this.params.todCameraTintStrength) || 0.0);
+    this._syncTodCameraTintUniforms();
 
     // Phase 3: prefer the externally-injected sky state when available so a
     // single orchestrator can override per-frame, otherwise fall through to
@@ -941,7 +985,9 @@ export class WindowLightEffectV2 {
     // tweaks take effect without requiring a repopulate.
     u.uRgbShiftAmount.value = Math.max(0.0, Number(this.params.rgbShiftAmount) || 0);
     u.uRgbShiftAngle.value = (Number(this.params.rgbShiftAngle) || 0) * (Math.PI / 180.0);
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('overlayIntensity', 'update', { cpuOnly: true });
     // Keep overhead controls live without requiring repopulate/rebuild.
     const overheadEnabled = !!this.params.lightOverheadTiles;
     const overheadIntensity = Math.max(0.0, Math.min(1.0, Number(this.params.overheadLightIntensity) || 0.0));
@@ -954,9 +1000,12 @@ export class WindowLightEffectV2 {
       const overlayUniform = entry.material?.uniforms?.uOverlayIntensity;
       if (overlayUniform) overlayUniform.value = overlayIntensity;
     }
+    this._endPerfSpan(_perfToken);
 
+    _perfToken = this._beginPerfSpan('bounds', 'update', { cpuOnly: true });
     this._updateViewBounds();
     this._updateSceneBounds();
+    this._endPerfSpan(_perfToken);
   }
 
   /**
@@ -984,6 +1033,8 @@ export class WindowLightEffectV2 {
     const mask = outdoorsMaskOverride ?? this._outdoorsMask;
     if (!mask || !this._outdoorsClipMaterial || !this._outdoorsClipScene) return;
 
+    this._bindPerfRecorder();
+    let _perfToken = this._beginPerfSpan('outdoorsClipPrep', 'render', { cpuOnly: true });
     const w = Math.max(1, Math.floor(Number(targetRT.width) || 1));
     const h = Math.max(1, Math.floor(Number(targetRT.height) || 1));
     this._ensureOutdoorsClipScratchRT(w, h, targetRT.texture?.type);
@@ -994,9 +1045,11 @@ export class WindowLightEffectV2 {
     u.uHasOutdoorsMask.value = 1.0;
     u.uOutdoorsMaskFlipY.value = mask.flipY ? 1.0 : 0.0;
     this._syncViewProjectionUniforms(camera);
+    this._endPerfSpan(_perfToken);
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
+    _perfToken = this._beginPerfSpan('outdoorsClipDraw', 'render');
     try {
       renderer.autoClear = false;
 
@@ -1012,6 +1065,7 @@ export class WindowLightEffectV2 {
       renderer.clear();
       renderer.render(this._outdoorsClipScene, this._outdoorsClipCamera);
     } finally {
+      this._endPerfSpan(_perfToken);
       renderer.autoClear = prevAutoClear;
       renderer.setRenderTarget(prevTarget);
     }
@@ -1041,6 +1095,54 @@ export class WindowLightEffectV2 {
     if (Number.isFinite(Number(driverState.sun?.azimuthDeg))) {
       this._skyState.sunAzimuthDeg = Number(driverState.sun.azimuthDeg);
     }
+  }
+
+  /**
+   * Timeline grade from ColorCorrectionEffectV2 (same evaluation as post-merge CC).
+   * @param {{ enabled: boolean, global?: object, interior?: object }} state
+   */
+  setTimelineGradeState(state) {
+    this._timelineGradeState = state ?? { enabled: false };
+  }
+
+  /**
+   * Push CC timeline tint multipliers to shared uniforms (global + interior tracks).
+   * Window glow is gated to indoor destinations, so interior tint must participate.
+   * @private
+   */
+  _syncTodCameraTintUniforms() {
+    const u = this._sharedUniforms;
+    if (!u) return;
+
+    let grade = this._timelineGradeState ?? { enabled: false };
+    try {
+      const cc = window.MapShine?.effectComposer?._floorCompositorV2?._colorCorrectionEffect ?? null;
+      const live = cc?.getTimelineGradeState?.();
+      if (live && typeof live === 'object') grade = live;
+    } catch (_) {}
+
+    const legacyActive = this._skyState.todCameraTimelineActive === true;
+    const active = (grade.enabled === true || legacyActive) && this.params.useTodCameraTint !== false;
+    u.uTodCameraTintActive.value = active ? 1.0 : 0.0;
+    u.uTodCameraTintStrength.value = Math.max(0.0, Number(this.params.todCameraTintStrength) || 0.0);
+    if (!active) return;
+
+    const readTint = (primary, fallback) => {
+      const src = (primary && typeof primary === 'object') ? primary : fallback;
+      const r = Number(src?.r);
+      const g = Number(src?.g);
+      const b = Number(src?.b);
+      return {
+        r: Number.isFinite(r) ? r : 1.0,
+        g: Number.isFinite(g) ? g : 1.0,
+        b: Number.isFinite(b) ? b : 1.0,
+      };
+    };
+
+    const globalTint = readTint(grade.global?.tintColor, this._skyState.todCameraTintColor);
+    const interiorTint = readTint(grade.interior?.tintColor, globalTint);
+    u.uTodCameraTintColor.value.setRGB(globalTint.r, globalTint.g, globalTint.b);
+    u.uTodCameraTintInterior.value.setRGB(interiorTint.r, interiorTint.g, interiorTint.b);
   }
 
   setSkyState(state = {}) {
@@ -1470,6 +1572,7 @@ export class WindowLightEffectV2 {
       uUseSkyTint: { value: this.params.useSkyTint ? 1.0 : 0.0 },
       uSkyTintStrength: { value: Math.max(0.0, Number(this.params.skyTintStrength) || 0.0) },
       uTodCameraTintColor: { value: new THREE.Color(1, 1, 1) },
+      uTodCameraTintInterior: { value: new THREE.Color(1, 1, 1) },
       uTodCameraTintActive: { value: 0.0 },
       uTodCameraTintStrength: { value: Math.max(0.0, Number(this.params.todCameraTintStrength) || 0.0) },
       uNightFactor: { value: 1.0 },
@@ -1582,6 +1685,7 @@ export class WindowLightEffectV2 {
         uniform float uUseSkyTint;
         uniform float uSkyTintStrength;
         uniform vec3  uTodCameraTintColor;
+        uniform vec3  uTodCameraTintInterior;
         uniform float uTodCameraTintActive;
         uniform float uTodCameraTintStrength;
         uniform float uNightFactor;
@@ -1696,6 +1800,7 @@ export class WindowLightEffectV2 {
           // and the world position that owns the shifted mask sample.
           vec2 screenUv = gl_FragCoord.xy / max(uScreenSize, vec2(1.0));
           float outdoorAtDest = outdoorStrengthAtScreen(screenUv);
+          float indoorW = clamp(1.0 - outdoorAtDest, 0.0, 1.0);
           float outdoorAtSrc = outdoorStrengthAtWorld(vWorldXY + uvOffsetToWorld(maskOffsetUv));
           if (max(outdoorAtDest, outdoorAtSrc) > 0.45) discard;
 
@@ -1773,7 +1878,9 @@ export class WindowLightEffectV2 {
           vec3 daylightWarmTint = vec3(1.05, 1.0, 0.94);
           vec3 envTintColor = mix(tintColor, tintColor * daylightWarmTint, 0.16 * warmDayFactor);
 
-          vec3 todTint = clamp(uTodCameraTintColor, vec3(0.0), vec3(10.0));
+          vec3 todTintGlobal = clamp(uTodCameraTintColor, vec3(0.0), vec3(10.0));
+          vec3 todTintInterior = clamp(uTodCameraTintInterior, vec3(0.0), vec3(10.0));
+          vec3 todTint = mix(todTintGlobal, todTintInterior, indoorW);
           float todMix = (uTodCameraTintActive > 0.5)
             ? (1.0 - exp(-max(uTodCameraTintStrength, 0.0) * 0.42))
             : 0.0;

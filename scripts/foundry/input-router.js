@@ -267,7 +267,7 @@ export class InputRouter {
         const pixiCanvas = canvas.app?.view;
         if (pixiCanvas) {
           pixiCanvas.style.pointerEvents = 'none';
-          pixiCanvas.style.opacity = '1';
+          pixiCanvas.style.opacity = pixiVisualOpacity;
           pixiCanvas.style.display = '';
           pixiCanvas.style.visibility = 'visible';
           pixiCanvas.style.zIndex = '10';
@@ -277,7 +277,7 @@ export class InputRouter {
         if (board && board.tagName === 'CANVAS') {
           board.style.display = '';
           board.style.visibility = 'visible';
-          board.style.opacity = '1';
+          board.style.opacity = pixiVisualOpacity;
           board.style.zIndex = '10';
           board.style.pointerEvents = 'none';
           board.style.backgroundColor = 'transparent';
@@ -357,14 +357,14 @@ export class InputRouter {
         pixiCanvas.style.visibility = 'visible';
         pixiCanvas.style.zIndex = '10';
         pixiCanvas.style.pointerEvents = 'none';
-        pixiCanvas.style.opacity = '1';
+        pixiCanvas.style.opacity = pixiVisualOpacity;
         pixiCanvas.style.backgroundColor = 'transparent';
 
         const board = document.getElementById('board');
         if (board && board.tagName === 'CANVAS') {
           board.style.display = '';
           board.style.visibility = 'visible';
-          board.style.opacity = '1';
+          board.style.opacity = pixiVisualOpacity;
           board.style.zIndex = '10';
           board.style.pointerEvents = 'none';
           board.style.backgroundColor = 'transparent';

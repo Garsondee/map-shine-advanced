@@ -13,8 +13,9 @@ const log = createLogger('LayerVisibility');
  * 
  * Strategy:
  * - "Replaced" layers (background, tokens, etc.) are always hidden (Three.js renders them)
- * - "Always visible" layers (templates, drawings, notes, controls) stay visible
- * - "Edit only" layers (walls, lighting, sounds, etc.) are shown only when active
+ * - "Always visible" layers (templates, notes, controls) stay visible
+ * - "Edit only" layers (drawings, walls, lighting, sounds, etc.) shown when active;
+ *   drawings fall back to always-visible when the PIXI bridge owns presentation
  */
 export class LayerVisibilityManager {
   constructor() {
@@ -38,7 +39,6 @@ export class LayerVisibilityManager {
      */
     this.alwaysVisibleLayers = new Set([
       'templates',
-      'drawings',
       'notes',
       'controls',
       'walls'
@@ -49,6 +49,7 @@ export class LayerVisibilityManager {
      * @type {Set<string>}
      */
     this.editOnlyLayers = new Set([
+      'drawings',
       'lighting',
       'sounds',
       'regions'
@@ -160,6 +161,13 @@ export class LayerVisibilityManager {
     
     // Show edit layers only when active
     for (const name of this.editOnlyLayers) {
+      if (name === 'drawings' && (
+        window?.MapShine?.__usePixiContentLayerBridge === true
+        || window?.MapShine?.__useNativePersistentPixiOverlays === true
+      )) {
+        this.setLayerVisibility(name, true, 'drawings-bridge-fallback');
+        continue;
+      }
       const isActive = this.isLayerActive(name, activeName);
       this.setLayerVisibility(name, isActive, isActive ? 'edit-active' : 'edit-inactive');
     }
@@ -199,6 +207,7 @@ export class LayerVisibilityManager {
 
     if (normalizedLayer === 'lighting' && canvas?.lighting?.active) return true;
     if (normalizedLayer === 'walls' && canvas?.walls?.active) return true;
+    if (normalizedLayer === 'drawings' && canvas?.drawings?.active) return true;
 
     if (!activeName) return false;
     

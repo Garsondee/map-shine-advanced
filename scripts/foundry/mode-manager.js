@@ -401,7 +401,6 @@ export class ModeManager {
     if (!canvas?.ready) return;
     // Single-source policy: use gameplay suppression as authority.
     this.enforceGameplayPixiSuppression();
-    if (canvas.drawings) canvas.drawings.visible = true;
     if (canvas.templates) canvas.templates.visible = true;
     if (canvas.notes) canvas.notes.visible = true;
     if (canvas.lighting) {

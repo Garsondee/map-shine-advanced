@@ -1452,6 +1452,76 @@ function _scheduleNativeTemplateHydration(reason = 'unspecified', passes = 4) {
 }
 
 /**
+ * Whether V2 gameplay should render drawings via Three (DrawingManager) instead of
+ * native PIXI overlays. Disabled when the PIXI bridge or legacy native-overlay
+ * flags own drawing presentation.
+ * @returns {boolean}
+ * @private
+ */
+function _shouldThreeOwnDrawingsInGameplay() {
+  if (window?.MapShine?.__usePixiContentLayerBridge === true) return false;
+  if (window?.MapShine?.__useNativePersistentPixiOverlays === true) return false;
+  if (!canvas?.ready || isMapMakerMode) return false;
+  if (!sceneSettings.isEnabled(canvas?.scene)) return false;
+  return true;
+}
+
+/**
+ * V2 drawing ownership: Three DrawingManager during gameplay; native PIXI while
+ * the Drawings tool is active (handles, live edit). Mirrors V3 policy.
+ * @private
+ */
+function _applyNativeDrawingVisibilityPolicy() {
+  if (!canvas?.ready) return;
+  const layer = canvas.drawings;
+  if (!layer) return;
+
+  if (!_shouldThreeOwnDrawingsInGameplay()) return;
+
+  const ctx = _getEditContexts();
+  const drawingsEditMode = !!layer.active || !!ctx.drawings;
+
+  try {
+    layer.visible = drawingsEditMode;
+    if ('renderable' in layer) layer.renderable = drawingsEditMode;
+  } catch (_) {}
+
+  const drawingObjs = [
+    ...(Array.isArray(layer.placeables) ? layer.placeables : []),
+    ...(Array.isArray(layer.objects?.children) ? layer.objects.children : []),
+  ];
+
+  for (const drawing of drawingObjs) {
+    if (!drawing) continue;
+    try {
+      if (drawingsEditMode) {
+        drawing.visible = true;
+        if ('renderable' in drawing) drawing.renderable = true;
+      } else {
+        drawing.visible = false;
+        if ('renderable' in drawing) drawing.renderable = false;
+        if (drawing.shape) {
+          drawing.shape.visible = false;
+          drawing.shape.renderable = false;
+        }
+        if (drawing.text) {
+          drawing.text.visible = false;
+          drawing.text.renderable = false;
+        }
+        if (drawing.frame) {
+          drawing.frame.visible = false;
+          drawing.frame.renderable = false;
+        }
+      }
+    } catch (_) {}
+  }
+
+  try {
+    window.MapShine?.drawingManager?.updateVisibility?.();
+  } catch (_) {}
+}
+
+/**
  * Re-apply native Drawing shape/text visibility after scene refresh.
  * Drawing visuals are rendered via Drawing.shape on canvas.primary or canvas.interface.
  * @param {string} [reason]
@@ -1459,6 +1529,11 @@ function _scheduleNativeTemplateHydration(reason = 'unspecified', passes = 4) {
  */
 function _rehydrateNativeDrawingOverlays(reason = 'unspecified') {
   if (!canvas?.ready) return false;
+  if (window?.MapShine?.__usePixiContentLayerBridge === true) return false;
+  if (_shouldThreeOwnDrawingsInGameplay()) {
+    const ctx = _getEditContexts();
+    if (!canvas?.drawings?.active && !ctx.drawings) return false;
+  }
   const drawings = Array.isArray(canvas?.drawings?.placeables) ? canvas.drawings.placeables : [];
   if (drawings.length <= 0) return false;
 
@@ -5307,6 +5382,8 @@ function _installPixiSuppressionHooksForV2() {
     install('updateToken');
     install('activateCanvasLayer');
     install('renderSceneControls');
+    install('activateDrawingsLayer');
+    install('deactivateDrawingsLayer');
 
     try {
       const ticker = canvas?.app?.ticker;
@@ -7552,6 +7629,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
     if (window.MapShine) window.MapShine.pixiContentLayerBridge = pixiContentLayerBridge;
     console.log(' -> Manager: Lightweight batch DONE');
     log.info('Parallel manager batch initialized (Door, MapPoints, Grid, Drawings)');
+    try { _applyNativeDrawingVisibilityPolicy(); } catch (_) {}
 
     // Map-point consumers are wired by FloorCompositor V2
     // (smelly flies / lightning / candle flames). Keep manager bootstrap
@@ -10479,7 +10557,11 @@ function _enforceGameplayPixiSuppression() {
       try { _enforcePersistentOverlayAdornments(); } catch(e) {}
       _applyMsV2CanvasDomStack(!!shouldPixiReceiveInputEffective);
       try { _suppressFoundryPlatingWhenMsaPixiStackedAboveThree(); } catch(e) {}
-      
+      try { _applyNativeDrawingVisibilityPolicy(); } catch (_) {}
+      if (ctx.drawings || canvas?.drawings?.active) {
+        try { _scheduleNativeDrawingHydration('drawings-edit-overlay', 2); } catch (_) {}
+      }
+
       return;
     }
 
@@ -10528,6 +10610,7 @@ function _enforceGameplayPixiSuppression() {
     }
 
     _applyMsV2CanvasDomStack(false);
+    try { _applyNativeDrawingVisibilityPolicy(); } catch (_) {}
 
   } catch (e) {
     log.error('Error in _enforceGameplayPixiSuppression', e);
@@ -10559,14 +10642,6 @@ function _enforcePersistentOverlayAdornments() {
     forceVisible(note.icon);
     forceVisible(note.controlIcon);
     forceVisible(note.tooltip);
-  };
-
-  const touchDrawing = (drawing) => {
-    if (!drawing) return;
-    forceVisible(drawing);
-    forceVisible(drawing.shape);
-    forceVisible(drawing.text);
-    forceVisible(drawing.frame);
   };
 
   /** Measured template radius, fill, and grid highlights — always keep on for MapShine capture/gameplay. */
@@ -10625,20 +10700,6 @@ function _enforcePersistentOverlayAdornments() {
       }
     } catch (_) {}
   }
-
-  // Drawings are native PIXI-owned overlays in the default path. Their rendered
-  // shape/text can be attached outside DrawingsLayer (Primary/Interface group).
-  try {
-    if (canvas.drawings) {
-      canvas.drawings.visible = true;
-      canvas.drawings.renderable = true;
-      const drawingObjs = [
-        ...(Array.isArray(canvas.drawings.placeables) ? canvas.drawings.placeables : []),
-        ...(Array.isArray(canvas.drawings.objects?.children) ? canvas.drawings.objects.children : []),
-      ];
-      for (const d of drawingObjs) touchDrawing(d);
-    }
-  } catch (_) {}
 
   const now = performance.now();
   if ((now - _lastPersistentOverlayRefreshMs) < 1200) return;

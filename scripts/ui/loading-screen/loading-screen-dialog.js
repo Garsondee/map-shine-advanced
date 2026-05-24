@@ -3,7 +3,7 @@
  * @module ui/loading-screen/loading-screen-dialog
  */
 
-import { normalizeLoadingScreenConfig, deepClone } from './loading-screen-config.js';
+import { normalizeLoadingScreenConfig } from './loading-screen-config.js';
 import { getAvailableFontFamilies } from './loading-screen-fonts.js';
 import { applyPresetToConfig } from './loading-screen-presets.js';
 
@@ -214,16 +214,15 @@ export class LoadingScreenDialog {
       // Apply the preset locally (no persistence) so changes stay in the
       // dialog until the user explicitly clicks Apply / Save+Close.
       try {
-        const user = (Array.isArray(this.state.userPresets) ? this.state.userPresets : [])
-          .find((p) => String(p?.id || '') === presetId);
-        if (user?.config) {
-          this.state.config = normalizeLoadingScreenConfig(deepClone(user.config));
-        } else {
-          this.state.config = await applyPresetToConfig(presetId, this.state.config);
-        }
+        this.state.config = await this.manager.resolvePresetConfig(presetId, this.state.config);
         this.state.activePresetId = presetId;
+        this.state.userPresets = await this.manager.getUserPresets();
         this.selectedElementId = this.state.config.layout?.elements?.[0]?.id || null;
-        console.log(`Map Shine: dialog applied preset "${presetId}"`, this.state.config.style);
+        const wallpaperCount = this.state.config.wallpapers?.entries?.length || 0;
+        console.log(`Map Shine: dialog applied preset "${presetId}"`, {
+          style: this.state.config.style,
+          wallpaperCount,
+        });
         this._status('Applied preset (click Apply to save).');
         this._renderAll();
       } catch (err) {
@@ -239,8 +238,9 @@ export class LoadingScreenDialog {
         return;
       }
       this._markLayoutCustomized();
+      const saved = await this.manager.saveUserPreset({ name, config: this.state.config });
+      this.state.activePresetId = saved.id;
       await this._applyChanges();
-      await this.manager.saveUserPreset({ name, config: this.state.config });
       this.state.userPresets = await this.manager.getUserPresets();
       this.refs.userPresetInput.value = '';
       this._status(`Saved preset "${name}" and applied loading screen settings.`);

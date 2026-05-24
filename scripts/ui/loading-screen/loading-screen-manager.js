@@ -6,7 +6,7 @@
 import { loadingScreenService, LOADING_SCREEN_MODES } from './loading-screen-service.js';
 import { LoadingScreenDialog } from './loading-screen-dialog.js';
 import { createDefaultStyledLoadingScreenConfig, deepClone, normalizeLoadingScreenConfig } from './loading-screen-config.js';
-import { clearPresetCache } from './loading-screen-presets.js';
+import { applyPresetToConfig, clearPresetCache } from './loading-screen-presets.js';
 
 const MODULE_ID = 'map-shine-advanced';
 
@@ -116,40 +116,81 @@ export class LoadingScreenManager {
   }
 
   /**
-   * @returns {Promise<Array<any>>}
+   * @returns {Promise<Array<{id:string,name:string,config:Object}>>}
    */
   async getUserPresets() {
     try {
       const raw = game.settings.get(MODULE_ID, 'loadingScreenUserPresets');
-      return Array.isArray(raw) ? raw : [];
+      if (!Array.isArray(raw)) return [];
+
+      return raw
+        .filter((p) => p && typeof p === 'object' && String(p.id || '').trim())
+        .map((p) => ({
+          id: String(p.id || '').trim(),
+          name: String(p.name || p.id || 'Custom Preset').trim() || 'Custom Preset',
+          config: normalizeLoadingScreenConfig(deepClone(p.config || {})),
+        }));
     } catch (_) {
       return [];
     }
   }
 
   /**
+   * Apply a built-in or user preset to a working config without persisting.
+   * User presets restore a full saved snapshot; built-ins merge per preset JSON.
+   * @param {string} presetId
+   * @param {Object|null|undefined} currentConfig
+   * @returns {Promise<Object>}
+   */
+  async resolvePresetConfig(presetId, currentConfig) {
+    const id = String(presetId || '').trim();
+    if (!id) return normalizeLoadingScreenConfig(currentConfig);
+
+    const userPresets = await this.getUserPresets();
+    const user = userPresets.find((p) => p.id === id);
+    if (user?.config) {
+      return normalizeLoadingScreenConfig(deepClone(user.config));
+    }
+
+    return applyPresetToConfig(id, currentConfig);
+  }
+
+  /**
    * @param {{id?:string,name:string,config:Object}} preset
-   * @returns {Promise<void>}
+   * @returns {Promise<{id:string,name:string}>}
    */
   async saveUserPreset(preset) {
-    const list = await this.getUserPresets();
+    let list = [];
+    try {
+      const raw = game.settings.get(MODULE_ID, 'loadingScreenUserPresets');
+      list = Array.isArray(raw) ? raw : [];
+    } catch (_) {
+      list = [];
+    }
+
     const id = String(preset.id || `user-${Date.now()}`);
     const normalizedConfig = normalizeLoadingScreenConfig(
       preset.config || loadingScreenService.getStyledConfig()
     );
 
-    const next = [...list];
-    const index = next.findIndex((p) => String(p?.id || '') === id);
+    const next = list.map((p) => ({
+      id: String(p?.id || ''),
+      name: String(p?.name || 'Custom Preset'),
+      config: deepClone(p?.config || {}),
+    })).filter((p) => p.id);
+
     const item = {
       id,
       name: String(preset.name || 'Custom Preset').trim() || 'Custom Preset',
       config: deepClone(normalizedConfig),
     };
 
+    const index = next.findIndex((p) => p.id === id);
     if (index >= 0) next[index] = item;
     else next.push(item);
 
     await game.settings.set(MODULE_ID, 'loadingScreenUserPresets', next);
+    return { id, name: item.name };
   }
 
   /**

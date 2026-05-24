@@ -699,6 +699,11 @@ export class StyledLoadingScreenRenderer {
     if (Number.isFinite(widthPx) && widthPx > 0) node.style.width = `${Math.max(1, widthPx)}px`;
     if (Number.isFinite(maxWidthPx) && maxWidthPx > 0) node.style.maxWidth = `${Math.max(16, maxWidthPx)}px`;
     if (Number.isFinite(minWidthPx) && minWidthPx > 0) node.style.minWidth = `${Math.max(1, minWidthPx)}px`;
+    const heightPx = Number(element.style?.heightPx);
+    if (Number.isFinite(heightPx) && heightPx > 0) {
+      node.style.height = `${Math.max(1, heightPx)}px`;
+      node.style.boxSizing = 'border-box';
+    }
 
     const whiteSpace = String(element.style?.whiteSpace || '').trim();
     const textLikeType = isTextLikeType(type);

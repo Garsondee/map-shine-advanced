@@ -7,6 +7,26 @@ import { normalizeLoadingScreenConfig, WALLPAPER_MODES } from './loading-screen-
 import { getAllLoadingHints } from './loading-hints.js';
 import { getAvailableFontFamilies } from './loading-screen-fonts.js';
 import { applyPresetToConfig } from './loading-screen-presets.js';
+import {
+  alignEntries,
+  buildSnapTargets,
+  centerEntriesOn,
+  distributeEntries,
+  loadAlignmentPrefs,
+  rectRelativeToLayer,
+  resolveAxisSnap,
+  saveAlignmentPrefs,
+  snapThresholdForStrength,
+} from './loading-screen-alignment.js';
+import {
+  applyRectToElement,
+  applyRectToPanel,
+  computePanelResizeRect,
+  computeResizedRect,
+  cursorForHandle,
+  measureElementRect,
+  RESIZE_HANDLES,
+} from './loading-screen-element-resize.js';
 
 const DIALOG_ID = 'map-shine-loading-screen-dialog';
 const STYLE_ID = 'map-shine-loading-screen-dialog-style';
@@ -23,8 +43,13 @@ export class LoadingScreenDialog {
 
     this.state = null;
     this.selectedElementId = null;
+    /** @type {Set<string>} */
+    this.selectedElementIds = new Set();
     this.drag = null;
     this._fontFamilies = [];
+    this._alignmentPrefs = loadAlignmentPrefs();
+    this._alignmentGuideTimer = null;
+    this._onKeyDown = null;
 
     this._safeRatio = 'none'; // safe guides are optional and off by default
     this._layoutHelperRefId = '__panel__';
@@ -47,6 +72,11 @@ export class LoadingScreenDialog {
       elementList: null,
       previewLayer: null,
       safeGuides: null,
+      alignmentGuides: null,
+      alignToolbar: null,
+      snapEnabledCheckbox: null,
+      axesEnabledCheckbox: null,
+      snapStrengthSelect: null,
       inspector: null,
       status: null,
     };
@@ -77,6 +107,7 @@ export class LoadingScreenDialog {
     if (!this.container) await this.initialize();
     this.visible = true;
     this.container.style.display = 'block';
+    this._bindKeyboardNudge();
     await this._loadState();
     this._renderAll();
   }
@@ -85,6 +116,7 @@ export class LoadingScreenDialog {
     if (!this.container) return;
     this.visible = false;
     this.container.style.display = 'none';
+    this._unbindKeyboardNudge();
   }
 
   async toggle() {
@@ -93,6 +125,11 @@ export class LoadingScreenDialog {
   }
 
   dispose() {
+    this._unbindKeyboardNudge();
+    if (this._alignmentGuideTimer) {
+      clearTimeout(this._alignmentGuideTimer);
+      this._alignmentGuideTimer = null;
+    }
     if (this._onResize) {
       window.removeEventListener('resize', this._onResize);
       this._onResize = null;
@@ -109,16 +146,23 @@ export class LoadingScreenDialog {
     if (!this.selectedElementId) {
       this.selectedElementId = this.state.config.layout?.elements?.[0]?.id || null;
     }
+    if (this.selectedElementId && this.selectedElementId !== '__panel__') {
+      this.selectedElementIds = new Set([this.selectedElementId]);
+    } else {
+      this.selectedElementIds = new Set();
+    }
   }
 
   _renderAll() {
     this._renderTopControls();
     this._renderWallpaperSettings();
     this._renderWallpaperList();
+    this._renderAlignToolbar();
     this._renderElementList();
     this._renderPreview();
     this._renderInspector();
     this._renderSafeGuides();
+    this._renderPersistentAxes();
   }
 
   _renderWallpaperSettings() {
@@ -151,8 +195,23 @@ export class LoadingScreenDialog {
     this.refs.elementList = q('[data-ref="element-list"]');
     this.refs.previewLayer = q('[data-ref="preview-layer"]');
     this.refs.safeGuides = q('[data-ref="safe-guides"]');
+    this.refs.alignmentGuides = q('[data-ref="alignment-guides"]');
+    this.refs.alignToolbar = q('[data-ref="align-toolbar"]');
+    this.refs.snapEnabledCheckbox = q('[data-ref="snap-enabled"]');
+    this.refs.axesEnabledCheckbox = q('[data-ref="axes-enabled"]');
+    this.refs.snapStrengthSelect = q('[data-ref="snap-strength"]');
     this.refs.inspector = q('[data-ref="inspector"]');
     this.refs.status = q('[data-ref="status"]');
+
+    if (this.refs.snapEnabledCheckbox) {
+      this.refs.snapEnabledCheckbox.checked = this._alignmentPrefs.snapEnabled !== false;
+    }
+    if (this.refs.axesEnabledCheckbox) {
+      this.refs.axesEnabledCheckbox.checked = !!this._alignmentPrefs.axesEnabled;
+    }
+    if (this.refs.snapStrengthSelect) {
+      this.refs.snapStrengthSelect.value = String(this._alignmentPrefs.snapStrength || 'normal');
+    }
   }
 
   _bindEvents() {
@@ -166,9 +225,40 @@ export class LoadingScreenDialog {
       this._renderSafeGuides();
     });
 
+    this.refs.snapEnabledCheckbox?.addEventListener('change', (e) => {
+      this._alignmentPrefs.snapEnabled = !!e.target.checked;
+      saveAlignmentPrefs(this._alignmentPrefs);
+    });
+    this.refs.axesEnabledCheckbox?.addEventListener('change', (e) => {
+      this._alignmentPrefs.axesEnabled = !!e.target.checked;
+      saveAlignmentPrefs(this._alignmentPrefs);
+      this._renderPersistentAxes();
+    });
+    this.refs.snapStrengthSelect?.addEventListener('change', (e) => {
+      this._alignmentPrefs.snapStrength = String(e.target.value || 'normal');
+      saveAlignmentPrefs(this._alignmentPrefs);
+    });
+
     // Re-render safe guides on resize so they match the new viewport
-    this._onResize = () => { if (this.visible) this._renderSafeGuides(); };
+    this._onResize = () => {
+      if (!this.visible) return;
+      this._renderSafeGuides();
+      this._renderPersistentAxes();
+    };
     window.addEventListener('resize', this._onResize);
+
+    this.refs.previewLayer?.addEventListener('mousedown', (ev) => {
+      if (!this.visible || this.drag) return;
+      if (ev.button !== 0) return;
+      if (ev.target.closest('.ms-lsd-live-element, .ms-lsd-live-panel, .ms-lsd-resize-handle')) return;
+      if (!this.selectedElementId && this.selectedElementIds.size === 0) return;
+      ev.preventDefault();
+      this._clearSelection();
+      this._renderPreview();
+      this._renderElementList();
+      this._renderInspector();
+      this._renderAlignToolbar();
+    });
 
     // Make the floating dialog draggable by its header
     const floating = this.container.querySelector('.ms-lsd-floating');
@@ -470,10 +560,11 @@ export class LoadingScreenDialog {
       row.className = `ms-lsd-element-row ${this.selectedElementId === '__panel__' ? 'is-selected' : ''}`;
       row.addEventListener('click', (ev) => {
         if (ev.target.closest('.ms-lsd-element-controls, input, button')) return;
-        this.selectedElementId = '__panel__';
+        this._handleElementSelect('__panel__', ev);
         this._renderElementList();
         this._renderInspector();
         this._renderPreview();
+        this._renderAlignToolbar();
       });
 
       const left = document.createElement('div');
@@ -520,12 +611,14 @@ export class LoadingScreenDialog {
 
     for (const element of elements) {
       const row = document.createElement('div');
-      row.className = `ms-lsd-element-row ${element.id === this.selectedElementId ? 'is-selected' : ''}`;
+      row.className = `ms-lsd-element-row ${this._elementSelectionClass(element.id)}`;
       row.addEventListener('click', (ev) => {
         if (ev.target.closest('.ms-lsd-element-controls, input, button')) return;
-        this.selectedElementId = element.id;
+        this._handleElementSelect(element.id, ev);
         this._renderElementList();
         this._renderInspector();
+        this._renderPreview();
+        this._renderAlignToolbar();
       });
 
       const left = document.createElement('div');
@@ -564,6 +657,10 @@ export class LoadingScreenDialog {
         if (this.selectedElementId === element.id) {
           this.selectedElementId = elements[0]?.id || null;
         }
+        this.selectedElementIds.delete(element.id);
+        if (this.selectedElementIds.size === 0 && this.selectedElementId) {
+          this.selectedElementIds.add(this.selectedElementId);
+        }
         this._renderAll();
       }, true);
 
@@ -597,6 +694,7 @@ export class LoadingScreenDialog {
       const overlay = document.createElement('div');
       overlay.className = 'ms-lsd-live-wallpaper-overlay';
       overlay.style.background = this.state.config.wallpapers.overlay.color || 'rgba(0,0,0,0.45)';
+      overlay.style.pointerEvents = 'none';
       layer.appendChild(overlay);
     }
 
@@ -651,12 +749,19 @@ export class LoadingScreenDialog {
       // Click to select panel; drag to reposition
       panel.addEventListener('click', (ev) => {
         ev.stopPropagation();
-        this.selectedElementId = '__panel__';
+        this._handleElementSelect('__panel__', ev);
         this._renderElementList();
         this._renderInspector();
         this._renderPreview();
+        this._renderAlignToolbar();
       });
-      panel.addEventListener('mousedown', (ev) => this._startDragPanel(ev));
+      panel.addEventListener('mousedown', (ev) => {
+        if (ev.target.closest('.ms-lsd-resize-handle')) return;
+        this._startDragPanel(ev);
+      });
+      if (this.selectedElementId === '__panel__') {
+        this._appendResizeHandles(panel, panelCfg, 'panel');
+      }
       layer.appendChild(panel);
     }
 
@@ -668,7 +773,7 @@ export class LoadingScreenDialog {
       if (element.visible === false) continue;
 
       const node = document.createElement('div');
-      node.className = `ms-lsd-live-element ${element.id === this.selectedElementId ? 'is-selected' : ''}`;
+      node.className = `ms-lsd-live-element ${this._elementSelectionClass(element.id)}`;
       node.dataset.elementId = element.id;
       node.style.left = `${num(element.position?.x, 50)}%`;
       node.style.top = `${num(element.position?.y, 50)}%`;
@@ -695,14 +800,17 @@ export class LoadingScreenDialog {
       if (Number.isFinite(widthPx) && widthPx > 0) node.style.width = `${Math.max(1, widthPx)}px`;
       if (Number.isFinite(maxWidthPx) && maxWidthPx > 0) node.style.maxWidth = `${Math.max(16, maxWidthPx)}px`;
       if (Number.isFinite(minWidthPx) && minWidthPx > 0) node.style.minWidth = `${Math.max(1, minWidthPx)}px`;
+      const heightPx = Number(element.style?.heightPx);
+      if (Number.isFinite(heightPx) && heightPx > 0) {
+        node.style.height = `${Math.max(1, heightPx)}px`;
+        node.style.boxSizing = 'border-box';
+      }
 
       const whiteSpace = String(element.style?.whiteSpace || '').trim();
       const textLikeType = isTextLikeType(element.type);
       const hasBlockWidth = (Number.isFinite(widthPx) && widthPx > 0) || (Number.isFinite(maxWidthPx) && maxWidthPx > 0);
       if (whiteSpace && whiteSpace !== 'auto') node.style.whiteSpace = whiteSpace;
       else if (textLikeType && hasBlockWidth) node.style.whiteSpace = 'normal';
-
-      this._applyAnchor(node, element.anchor || 'center');
 
       if (element.type === 'progress-bar') {
         node.classList.add('ms-lsd-live-progress');
@@ -818,14 +926,24 @@ export class LoadingScreenDialog {
         node.textContent = String(element.props?.text || element.type);
       }
 
-      node.addEventListener('mousedown', (ev) => this._startDragElement(ev, element.id));
+      node.addEventListener('mousedown', (ev) => {
+        if (ev.target.closest('.ms-lsd-resize-handle')) return;
+        this._startDragElement(ev, element.id);
+      });
       node.addEventListener('click', (ev) => {
         ev.stopPropagation();
-        this.selectedElementId = element.id;
+        this._handleElementSelect(element.id, ev);
         this._renderElementList();
         this._renderInspector();
         this._renderPreview();
+        this._renderAlignToolbar();
       });
+
+      if (this.selectedElementId === element.id) {
+        this._appendResizeHandles(node, element, 'element');
+      }
+
+      this._applyAnchor(node, element.anchor || 'center');
 
       layer.appendChild(node);
     }
@@ -1125,6 +1243,12 @@ export class LoadingScreenDialog {
       this._renderPreview();
     })));
 
+    wrap.appendChild(this._inputRow('Height px', this._number(num(element.style?.heightPx, 0), 0, 3000, 1, (v) => {
+      if (v <= 0) delete element.style.heightPx;
+      else element.style.heightPx = Math.max(1, v);
+      this._renderPreview();
+    })));
+
     wrap.appendChild(this._inputRow('Max width px', this._number(num(element.style?.maxWidthPx, 0), 0, 3000, 1, (v) => {
       if (v <= 0) delete element.style.maxWidthPx;
       else element.style.maxWidthPx = Math.max(16, v);
@@ -1349,6 +1473,540 @@ export class LoadingScreenDialog {
     return 'Scene';
   }
 
+  _elementSelectionClass(elementId) {
+    if (this.selectedElementId === elementId) return 'is-selected';
+    if (this.selectedElementIds.has(elementId)) return 'is-selected-secondary';
+    return '';
+  }
+
+  _clearSelection() {
+    this.selectedElementId = null;
+    this.selectedElementIds.clear();
+  }
+
+  _handleElementSelect(elementId, ev) {
+    const elements = this.state.config.layout.elements || [];
+    const orderedIds = elements.map((e) => e.id);
+
+    if (elementId === '__panel__') {
+      this.selectedElementId = '__panel__';
+      this.selectedElementIds.clear();
+      return;
+    }
+
+    if (ev?.shiftKey && this.selectedElementId && this.selectedElementId !== '__panel__') {
+      const anchorIdx = orderedIds.indexOf(this.selectedElementId);
+      const targetIdx = orderedIds.indexOf(elementId);
+      if (anchorIdx >= 0 && targetIdx >= 0) {
+        const start = Math.min(anchorIdx, targetIdx);
+        const end = Math.max(anchorIdx, targetIdx);
+        this.selectedElementIds = new Set(orderedIds.slice(start, end + 1));
+        this.selectedElementId = elementId;
+        return;
+      }
+    }
+
+    if (ev?.ctrlKey || ev?.metaKey) {
+      if (this.selectedElementId === '__panel__') {
+        this.selectedElementIds.clear();
+      }
+      if (this.selectedElementIds.has(elementId)) {
+        this.selectedElementIds.delete(elementId);
+        if (this.selectedElementId === elementId) {
+          this.selectedElementId = [...this.selectedElementIds][0] || null;
+        }
+      } else {
+        this.selectedElementIds.add(elementId);
+        this.selectedElementId = elementId;
+      }
+      if (this.selectedElementIds.size === 0) {
+        this.selectedElementIds.add(elementId);
+        this.selectedElementId = elementId;
+      }
+      return;
+    }
+
+    this.selectedElementId = elementId;
+    this.selectedElementIds = new Set([elementId]);
+  }
+
+  _collectPreviewEntries(selectedIds = null) {
+    const layer = this.refs.previewLayer;
+    if (!layer) return [];
+
+    const layerRect = layer.getBoundingClientRect();
+    const elements = this.state.config.layout.elements || [];
+    const ids = selectedIds || [...this.selectedElementIds];
+    const entries = [];
+
+    for (const id of ids) {
+      const element = elements.find((e) => e && String(e.id) === String(id));
+      const node = layer.querySelector(`[data-element-id="${CSS.escape(String(id))}"]`);
+      if (!element || !node || element.visible === false) continue;
+      entries.push({
+        element,
+        rect: rectRelativeToLayer(node.getBoundingClientRect(), layerRect),
+      });
+    }
+
+    return entries;
+  }
+
+  _resolveDragPosition(rawX, rawY, moveEvent, draggingId = null) {
+    const altHeld = !!moveEvent?.altKey;
+    let x = rawX;
+    let y = rawY;
+    let guides = {};
+
+    if (!altHeld && this._alignmentPrefs.snapEnabled !== false) {
+      const targets = buildSnapTargets({
+        layout: this.state.config.layout,
+        draggingId,
+        includePanel: draggingId !== '__panel__',
+      });
+      const threshold = snapThresholdForStrength(this._alignmentPrefs.snapStrength);
+      const snapped = resolveAxisSnap(x, y, targets, threshold);
+      x = snapped.x;
+      y = snapped.y;
+      guides = snapped.guides;
+
+      if (!guides.vertical && !guides.horizontal) {
+        const snapStep = Math.max(0, Number(this._dragSnapPct) || 0);
+        if (snapStep > 0) {
+          x = snapToStep(x, snapStep);
+          y = snapToStep(y, snapStep);
+        }
+      }
+    } else if (!altHeld) {
+      const snapStep = Math.max(0, Number(this._dragSnapPct) || 0);
+      if (snapStep > 0) {
+        x = snapToStep(x, snapStep);
+        y = snapToStep(y, snapStep);
+      }
+    }
+
+    this._renderAlignmentGuides(guides);
+    return { x: clamp(x, 0, 100), y: clamp(y, 0, 100) };
+  }
+
+  _renderAlignmentGuides(guides = {}, { flash = false } = {}) {
+    const container = this.refs.alignmentGuides;
+    if (!container) return;
+
+    if (this._alignmentGuideTimer && !flash) {
+      clearTimeout(this._alignmentGuideTimer);
+      this._alignmentGuideTimer = null;
+    }
+
+    container.innerHTML = '';
+    const layer = this.refs.previewLayer;
+    const layerRect = layer?.getBoundingClientRect();
+    const viewW = Math.max(1, layerRect?.width || window.innerWidth);
+    const viewH = Math.max(1, layerRect?.height || window.innerHeight);
+
+    const addLine = (orientation, pct, isAxis = false) => {
+      const line = document.createElement('div');
+      line.className = `ms-lsd-align-line ms-lsd-align-line--${orientation === 'vertical' ? 'v' : 'h'}${isAxis ? ' is-axis' : ''}${flash ? ' is-flash' : ''}`;
+      if (orientation === 'vertical') {
+        line.style.left = `${(Number(pct) / 100) * viewW}px`;
+      } else {
+        line.style.top = `${(Number(pct) / 100) * viewH}px`;
+      }
+      container.appendChild(line);
+    };
+
+    if (Number.isFinite(guides.vertical)) addLine('vertical', guides.vertical, false);
+    if (Number.isFinite(guides.horizontal)) addLine('horizontal', guides.horizontal, false);
+  }
+
+  _clearAlignmentGuides() {
+    if (this._alignmentGuideTimer) {
+      clearTimeout(this._alignmentGuideTimer);
+      this._alignmentGuideTimer = null;
+    }
+    if (this.refs.alignmentGuides) this.refs.alignmentGuides.innerHTML = '';
+    this._renderPersistentAxes();
+  }
+
+  _flashAlignmentGuides(guides = {}) {
+    this._renderAlignmentGuides(guides, { flash: true });
+    if (this._alignmentGuideTimer) clearTimeout(this._alignmentGuideTimer);
+    this._alignmentGuideTimer = window.setTimeout(() => {
+      this._alignmentGuideTimer = null;
+      this._clearAlignmentGuides();
+    }, 600);
+  }
+
+  _renderPersistentAxes() {
+    if (this.drag || !this._alignmentPrefs.axesEnabled) {
+      if (!this.drag && this.refs.alignmentGuides && !this._alignmentGuideTimer) {
+        this.refs.alignmentGuides.innerHTML = '';
+      }
+      return;
+    }
+
+    this._renderAlignmentGuides({ vertical: 50, horizontal: 50 });
+    const container = this.refs.alignmentGuides;
+    if (!container) return;
+    for (const line of container.querySelectorAll('.ms-lsd-align-line')) {
+      line.classList.add('is-axis');
+    }
+  }
+
+  _renderAlignToolbar() {
+    const wrap = this.refs.alignToolbar;
+    if (!wrap) return;
+
+    wrap.innerHTML = '';
+    const count = this.selectedElementIds.size;
+    if (count < 2 || this.selectedElementId === '__panel__') {
+      wrap.classList.remove('is-visible');
+      return;
+    }
+
+    wrap.classList.add('is-visible');
+
+    const title = document.createElement('div');
+    title.className = 'ms-lsd-align-toolbar-title';
+    title.textContent = `Align Selection (${count})`;
+    wrap.appendChild(title);
+
+    wrap.appendChild(this._inputRow('Align', this._buttonGroup([
+      { label: 'Left', onClick: () => this._applyAlignSelection('left') },
+      { label: 'Center', onClick: () => this._applyAlignSelection('center') },
+      { label: 'Right', onClick: () => this._applyAlignSelection('right') },
+    ])));
+
+    wrap.appendChild(this._inputRow('Vertical', this._buttonGroup([
+      { label: 'Top', onClick: () => this._applyAlignSelection('top') },
+      { label: 'Middle', onClick: () => this._applyAlignSelection('middle') },
+      { label: 'Bottom', onClick: () => this._applyAlignSelection('bottom') },
+    ])));
+
+    wrap.appendChild(this._inputRow('Distribute', this._buttonGroup([
+      { label: 'Horiz', onClick: () => this._applyAlignSelection('distribute-h') },
+      { label: 'Vert', onClick: () => this._applyAlignSelection('distribute-v') },
+    ])));
+
+    wrap.appendChild(this._inputRow('Center on', this._buttonGroup([
+      { label: 'Canvas', onClick: () => this._applyAlignSelection('center-canvas') },
+      { label: 'Panel', onClick: () => this._applyAlignSelection('center-panel') },
+    ])));
+  }
+
+  _applyAlignSelection(action) {
+    const layer = this.refs.previewLayer;
+    if (!layer) return;
+
+    const layerRect = layer.getBoundingClientRect();
+    const entries = this._collectPreviewEntries();
+    if (entries.length < 2 && !String(action || '').startsWith('center-')) return;
+
+    if (action === 'left' || action === 'center' || action === 'right') {
+      alignEntries(entries, layerRect.width, layerRect.height, action);
+    } else if (action === 'top' || action === 'middle' || action === 'bottom') {
+      alignEntries(entries, layerRect.width, layerRect.height, action);
+    } else if (action === 'distribute-h') {
+      distributeEntries(entries, layerRect.width, layerRect.height, 'horizontal');
+    } else if (action === 'distribute-v') {
+      distributeEntries(entries, layerRect.width, layerRect.height, 'vertical');
+    } else if (action === 'center-canvas') {
+      centerEntriesOn(entries, layerRect.width, layerRect.height, { x: 50, y: 50 });
+    } else if (action === 'center-panel') {
+      const panel = this.state.config.layout.panel || {};
+      centerEntriesOn(entries, layerRect.width, layerRect.height, {
+        x: num(panel.x, 50),
+        y: num(panel.y, 50),
+      });
+    } else {
+      return;
+    }
+
+    this._markLayoutCustomized();
+    this._flashAlignmentGuides({ vertical: 50, horizontal: 50 });
+    this._renderPreview();
+    this._renderElementList();
+    this._renderInspector();
+    this._renderAlignToolbar();
+  }
+
+  _bindKeyboardNudge() {
+    if (this._onKeyDown) return;
+    this._onKeyDown = (ev) => {
+      if (!this.visible) return;
+      if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(ev.key)) return;
+
+      const tag = String(ev.target?.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      if (ev.target?.isContentEditable) return;
+
+      ev.preventDefault();
+      const step = ev.shiftKey ? 10 : 1;
+      let dx = 0;
+      let dy = 0;
+      if (ev.key === 'ArrowLeft') dx = -step;
+      else if (ev.key === 'ArrowRight') dx = step;
+      else if (ev.key === 'ArrowUp') dy = -step;
+      else if (ev.key === 'ArrowDown') dy = step;
+      this._nudgeSelection(dx, dy);
+    };
+    window.addEventListener('keydown', this._onKeyDown);
+  }
+
+  _unbindKeyboardNudge() {
+    if (!this._onKeyDown) return;
+    window.removeEventListener('keydown', this._onKeyDown);
+    this._onKeyDown = null;
+  }
+
+  _nudgeSelection(dxPx, dyPx) {
+    const layer = this.refs.previewLayer;
+    if (!layer || (!dxPx && !dyPx)) return;
+
+    const layerRect = layer.getBoundingClientRect();
+    const dxPct = (dxPx / Math.max(1, layerRect.width)) * 100;
+    const dyPct = (dyPx / Math.max(1, layerRect.height)) * 100;
+
+    if (this.selectedElementId === '__panel__') {
+      const panel = this.state?.config?.layout?.panel;
+      if (!panel) return;
+      panel.x = clamp(num(panel.x, 50) + dxPct, 0, 100);
+      panel.y = clamp(num(panel.y, 50) + dyPct, 0, 100);
+      this._markLayoutCustomized();
+      this._renderPreview();
+      this._renderElementList();
+      this._renderInspector();
+      return;
+    }
+
+    const ids = this.selectedElementIds.size > 0
+      ? [...this.selectedElementIds]
+      : (this.selectedElementId ? [this.selectedElementId] : []);
+    if (!ids.length) return;
+
+    const elements = this.state.config.layout.elements || [];
+    for (const id of ids) {
+      const element = elements.find((e) => e && String(e.id) === String(id));
+      if (!element?.position) continue;
+      element.position.x = clamp(num(element.position.x, 50) + dxPct, 0, 100);
+      element.position.y = clamp(num(element.position.y, 50) + dyPct, 0, 100);
+    }
+
+    this._markLayoutCustomized();
+    this._renderPreview();
+    this._renderElementList();
+    this._renderInspector();
+    this._renderAlignToolbar();
+  }
+
+  _appendResizeHandles(node, target, kind = 'element') {
+    if (!node || !target) return;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'ms-lsd-resize-handles';
+    wrap.addEventListener('mousedown', (ev) => ev.stopPropagation());
+    wrap.addEventListener('click', (ev) => ev.stopPropagation());
+
+    for (const handle of RESIZE_HANDLES) {
+      if (kind === 'panel' && (handle === 'n' || handle === 's')) continue;
+
+      const hit = document.createElement('div');
+      hit.className = `ms-lsd-resize-handle ms-lsd-resize-handle--${handle}`;
+      hit.dataset.handle = handle;
+      hit.style.cursor = cursorForHandle(handle);
+      hit.title = `Resize ${handle.toUpperCase()}`;
+      hit.addEventListener('mousedown', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (kind === 'panel') this._startResizePanel(ev, target, handle, node);
+        else this._startResizeElement(ev, target, handle, node);
+      });
+      wrap.appendChild(hit);
+    }
+
+    node.appendChild(wrap);
+  }
+
+  _syncElementNodeLayout(node, element) {
+    if (!node || !element) return;
+
+    node.style.left = `${num(element.position?.x, 50)}%`;
+    node.style.top = `${num(element.position?.y, 50)}%`;
+
+    const type = String(element.type || 'text');
+    if (type === 'progress-bar') {
+      node.style.width = `${Math.max(80, num(element.props?.widthPx, 280))}px`;
+      node.style.height = `${Math.max(2, num(element.props?.heightPx, 6))}px`;
+    } else if (type === 'spinner') {
+      const size = Math.max(10, num(element.props?.sizePx, 30));
+      node.style.width = `${size}px`;
+      node.style.height = `${size}px`;
+    } else if (type === 'image') {
+      const img = node.querySelector('img');
+      if (img) {
+        const w = Math.max(16, num(element.props?.widthPx, 90));
+        const h = Math.max(16, num(element.props?.heightPx, 90));
+        img.style.maxWidth = `${w}px`;
+        img.style.maxHeight = `${h}px`;
+        node.style.width = `${w}px`;
+        node.style.height = `${h}px`;
+      }
+    } else if (type === 'stage-pills') {
+      node.style.maxWidth = `${Math.max(240, num(element.props?.maxWidthPx, 1200))}px`;
+      const padY = Math.max(0, num(element.props?.containerPaddingYpx, 8));
+      const padX = Math.max(0, num(element.props?.containerPaddingXpx, 12));
+      node.style.padding = `${padY}px ${padX}px`;
+    } else {
+      if (Number.isFinite(element.style?.widthPx) && element.style.widthPx > 0) {
+        node.style.width = `${Math.max(1, element.style.widthPx)}px`;
+      }
+      if (Number.isFinite(element.style?.heightPx) && element.style.heightPx > 0) {
+        node.style.height = `${Math.max(1, element.style.heightPx)}px`;
+        node.style.boxSizing = 'border-box';
+      }
+    }
+
+    this._applyAnchor(node, element.anchor || 'center');
+  }
+
+  _syncPanelNodeLayout(node, panelCfg) {
+    if (!node || !panelCfg) return;
+    node.style.left = `${num(panelCfg.x, 50)}%`;
+    node.style.top = `${num(panelCfg.y, 50)}%`;
+    node.style.width = `min(${Math.max(120, num(panelCfg.widthPx, 440))}px, calc(100vw - 40px))`;
+  }
+
+  _scheduleDragUiRefresh() {
+    /* Inspector/list refresh deferred to mouseup via _finishDragInteraction for smoother drags. */
+  }
+
+  _finishDragInteraction() {
+    if (this._dragRenderRaf) {
+      cancelAnimationFrame(this._dragRenderRaf);
+      this._dragRenderRaf = null;
+    }
+    this._renderPreview();
+    this._renderElementList();
+    this._renderInspector();
+    this._renderAlignToolbar();
+  }
+
+  _startResizeElement(ev, element, handle, node) {
+    const layer = this.refs.previewLayer;
+    if (!layer || !element?.position || !node) return;
+
+    this.selectedElementId = element.id;
+    this.selectedElementIds = new Set([element.id]);
+
+    const layerRect = layer.getBoundingClientRect();
+    const startRect = measureElementRect(node.getBoundingClientRect(), layerRect);
+    this.drag = { kind: 'resize-element', element, node, handle, layerRect, startRect };
+
+    const onMove = (moveEvent) => {
+      if (!this.drag || this.drag.kind !== 'resize-element') return;
+      const px = moveEvent.clientX - layerRect.left;
+      const py = moveEvent.clientY - layerRect.top;
+      const rect = computeResizedRect(this.drag.startRect, handle, px, py);
+      applyRectToElement(element, rect, element.anchor || 'center', layerRect.width, layerRect.height, handle);
+      const liveNode = this._getPreviewElementNode(element.id) || node;
+      this._syncElementNodeLayout(liveNode, element);
+    };
+
+    const onUp = () => {
+      delete element._resizeAxis;
+      this.drag = null;
+      this._markLayoutCustomized();
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      this._finishDragInteraction();
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  _startResizePanel(ev, panelCfg, handle, node) {
+    const layer = this.refs.previewLayer;
+    if (!layer || !panelCfg || !node) return;
+
+    this.selectedElementId = '__panel__';
+    this.selectedElementIds.clear();
+
+    const layerRect = layer.getBoundingClientRect();
+    const startRect = measureElementRect(node.getBoundingClientRect(), layerRect);
+    this.drag = { kind: 'resize-panel', panelCfg, node, handle, layerRect, startRect };
+
+    const onMove = (moveEvent) => {
+      if (!this.drag || this.drag.kind !== 'resize-panel') return;
+      const px = moveEvent.clientX - layerRect.left;
+      const rect = computePanelResizeRect(this.drag.startRect, handle, px);
+      if (!rect) return;
+      applyRectToPanel(panelCfg, rect, layerRect.width, layerRect.height);
+      const liveNode = layer.querySelector('.ms-lsd-live-panel') || node;
+      this._syncPanelNodeLayout(liveNode, panelCfg);
+    };
+
+    const onUp = () => {
+      this.drag = null;
+      this._markLayoutCustomized();
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      this._finishDragInteraction();
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
+  _getPreviewElementNode(elementId) {
+    const layer = this.refs.previewLayer;
+    if (!layer || !elementId) return null;
+    return layer.querySelector(`[data-element-id="${CSS.escape(String(elementId))}"]`);
+  }
+
+  _highlightPreviewSelection() {
+    const layer = this.refs.previewLayer;
+    if (!layer) return;
+
+    for (const node of layer.querySelectorAll('.ms-lsd-live-element')) {
+      const id = node.dataset.elementId;
+      node.classList.remove('is-selected', 'is-selected-secondary');
+      const cls = this._elementSelectionClass(id);
+      if (cls) node.classList.add(cls);
+    }
+
+    const panel = layer.querySelector('.ms-lsd-live-panel');
+    if (panel) {
+      panel.classList.toggle('is-selected', this.selectedElementId === '__panel__');
+    }
+  }
+
+  _updateDraggedElementPosition(elementId, x, y) {
+    const element = (this.state.config.layout.elements || []).find((e) => e.id === elementId);
+    const node = this._getPreviewElementNode(elementId);
+    if (!element?.position || !node) return null;
+
+    element.position.x = x;
+    element.position.y = y;
+    node.style.left = `${x}%`;
+    node.style.top = `${y}%`;
+    this._applyAnchor(node, element.anchor || 'center');
+    return node;
+  }
+
+  _updateDraggedPanelPosition(x, y) {
+    const panelCfg = this.state.config.layout.panel;
+    const layer = this.refs.previewLayer;
+    const panelNode = layer?.querySelector('.ms-lsd-live-panel');
+    if (!panelCfg || !panelNode) return null;
+
+    panelCfg.x = x;
+    panelCfg.y = y;
+    panelNode.style.left = `${x}%`;
+    panelNode.style.top = `${y}%`;
+    return panelNode;
+  }
+
   _startDragElement(ev, elementId) {
     ev.preventDefault();
     ev.stopPropagation();
@@ -1360,38 +2018,44 @@ export class LoadingScreenDialog {
     if (!element) return;
 
     this.selectedElementId = elementId;
+    if (!ev?.ctrlKey && !ev?.metaKey && !ev?.shiftKey) {
+      this.selectedElementIds = new Set([elementId]);
+    } else {
+      this.selectedElementIds.add(elementId);
+    }
 
     // The preview layer covers the full viewport, so use its bounding rect
     // (which equals the window size) for coordinate mapping.
     const rect = layer.getBoundingClientRect();
-    this.drag = { element, rect };
+    this.drag = { kind: 'move-element', element, rect, draggingId: elementId };
 
     const onMove = (moveEvent) => {
-      if (!this.drag) return;
-      const x = ((moveEvent.clientX - rect.left) / Math.max(1, rect.width)) * 100;
-      const y = ((moveEvent.clientY - rect.top) / Math.max(1, rect.height)) * 100;
-      const snapStep = moveEvent.altKey ? 0 : Math.max(0, Number(this._dragSnapPct) || 0);
-      const nextX = snapStep > 0 ? snapToStep(x, snapStep) : x;
-      const nextY = snapStep > 0 ? snapToStep(y, snapStep) : y;
-      element.position.x = clamp(nextX, 0, 100);
-      element.position.y = clamp(nextY, 0, 100);
-      this._renderPreview();
-      this._renderElementList();
-      this._renderInspector();
+      if (!this.drag || this.drag.kind !== 'move-element') return;
+      const rawX = ((moveEvent.clientX - rect.left) / Math.max(1, rect.width)) * 100;
+      const rawY = ((moveEvent.clientY - rect.top) / Math.max(1, rect.height)) * 100;
+      const next = this._resolveDragPosition(rawX, rawY, moveEvent, elementId);
+      this._updateDraggedElementPosition(elementId, next.x, next.y);
     };
 
     const onUp = () => {
       this.drag = null;
+      this._clearAlignmentGuides();
+      this._markLayoutCustomized();
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
+      this._finishDragInteraction();
     };
 
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
 
+    this._highlightPreviewSelection();
+    const liveNode = this._getPreviewElementNode(elementId);
+    if (liveNode && !liveNode.querySelector('.ms-lsd-resize-handles')) {
+      this._appendResizeHandles(liveNode, element, 'element');
+    }
     this._renderElementList();
     this._renderInspector();
-    this._renderPreview();
   }
 
   _startDragPanel(ev) {
@@ -1405,33 +2069,38 @@ export class LoadingScreenDialog {
     if (!panelCfg) return;
 
     this.selectedElementId = '__panel__';
+    this.selectedElementIds.clear();
 
     const rect = layer.getBoundingClientRect();
+    this.drag = { kind: 'move-panel', panel: panelCfg, rect, draggingId: '__panel__' };
 
     const onMove = (moveEvent) => {
-      const x = ((moveEvent.clientX - rect.left) / Math.max(1, rect.width)) * 100;
-      const y = ((moveEvent.clientY - rect.top) / Math.max(1, rect.height)) * 100;
-      const snapStep = moveEvent.altKey ? 0 : Math.max(0, Number(this._dragSnapPct) || 0);
-      const nextX = snapStep > 0 ? snapToStep(x, snapStep) : x;
-      const nextY = snapStep > 0 ? snapToStep(y, snapStep) : y;
-      panelCfg.x = clamp(nextX, 0, 100);
-      panelCfg.y = clamp(nextY, 0, 100);
-      this._renderPreview();
-      this._renderElementList();
-      this._renderInspector();
+      if (!this.drag || this.drag.kind !== 'move-panel') return;
+      const rawX = ((moveEvent.clientX - rect.left) / Math.max(1, rect.width)) * 100;
+      const rawY = ((moveEvent.clientY - rect.top) / Math.max(1, rect.height)) * 100;
+      const next = this._resolveDragPosition(rawX, rawY, moveEvent, '__panel__');
+      this._updateDraggedPanelPosition(next.x, next.y);
     };
 
     const onUp = () => {
+      this.drag = null;
+      this._clearAlignmentGuides();
+      this._markLayoutCustomized();
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
+      this._finishDragInteraction();
     };
 
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
 
+    this._highlightPreviewSelection();
+    const panelNode = layer.querySelector('.ms-lsd-live-panel');
+    if (panelNode && !panelNode.querySelector('.ms-lsd-resize-handles')) {
+      this._appendResizeHandles(panelNode, panelCfg, 'panel');
+    }
     this._renderElementList();
     this._renderInspector();
-    this._renderPreview();
   }
 
   async _applyChanges() {
@@ -1486,6 +2155,7 @@ export class LoadingScreenDialog {
     this.state.config.layout.elements.push(element);
     this._markLayoutCustomized();
     this.selectedElementId = id;
+    this.selectedElementIds = new Set([id]);
   }
 
   _addHintsElement() {
@@ -1525,6 +2195,7 @@ export class LoadingScreenDialog {
     this.state.config.layout.elements.push(element);
     this._markLayoutCustomized();
     this.selectedElementId = id;
+    this.selectedElementIds = new Set([id]);
     this._status('Added Loading Hints element — open Hint Editor to add tips.');
   }
 
@@ -1569,8 +2240,16 @@ export class LoadingScreenDialog {
     wrap.appendChild(this._inputRow('Align to ref', this._buttonGroup([
       { label: 'Match X', onClick: () => this._applyElementLayoutHelper(element, 'match-x') },
       { label: 'Match Y', onClick: () => this._applyElementLayoutHelper(element, 'match-y') },
+      { label: 'Center', onClick: () => this._applyElementLayoutHelper(element, 'center-on-ref') },
       { label: 'Above', onClick: () => this._applyElementLayoutHelper(element, 'above') },
       { label: 'Below', onClick: () => this._applyElementLayoutHelper(element, 'below') },
+    ])));
+
+    wrap.appendChild(this._inputRow('Snap edge', this._buttonGroup([
+      { label: 'Left', onClick: () => this._applyElementLayoutHelper(element, 'snap-left') },
+      { label: 'Right', onClick: () => this._applyElementLayoutHelper(element, 'snap-right') },
+      { label: 'Top', onClick: () => this._applyElementLayoutHelper(element, 'snap-top') },
+      { label: 'Bottom', onClick: () => this._applyElementLayoutHelper(element, 'snap-bottom') },
     ])));
 
     wrap.appendChild(this._inputRow('Justify', this._buttonGroup([
@@ -1588,8 +2267,93 @@ export class LoadingScreenDialog {
 
     const hint = document.createElement('div');
     hint.className = 'ms-lsd-helper-hint';
-    hint.textContent = 'Tip: hold Alt while dragging to temporarily disable snap.';
+    hint.textContent = 'Tip: hold Alt while dragging to disable snap. Arrow keys nudge 1px (Shift=10px). Ctrl/Cmd+click or Shift+click to multi-select.';
     wrap.appendChild(hint);
+  }
+
+  _getReferencePreviewRect(referenceId, currentElementId = null) {
+    const layer = this.refs.previewLayer;
+    if (!layer) return null;
+
+    const layerRect = layer.getBoundingClientRect();
+    const id = String(referenceId || '__panel__').trim() || '__panel__';
+
+    if (id === '__panel__') {
+      const node = layer.querySelector('.ms-lsd-live-panel');
+      if (!node) {
+        const panel = this.state?.config?.layout?.panel || {};
+        return {
+          kind: 'point',
+          x: clamp(num(panel.x, 50), 0, 100),
+          y: clamp(num(panel.y, 50), 0, 100),
+        };
+      }
+      return { kind: 'rect', ...rectRelativeToLayer(node.getBoundingClientRect(), layerRect) };
+    }
+
+    if (String(currentElementId || '') === id) return null;
+    const node = layer.querySelector(`[data-element-id="${CSS.escape(id)}"]`);
+    if (!node) {
+      const ref = this._resolveLayoutReference(id, currentElementId);
+      return ref ? { kind: 'point', x: ref.x, y: ref.y } : null;
+    }
+    return { kind: 'rect', ...rectRelativeToLayer(node.getBoundingClientRect(), layerRect) };
+  }
+
+  _snapElementToReferenceEdge(element, edge) {
+    const layer = this.refs.previewLayer;
+    if (!layer || !element?.position) return null;
+
+    const refRect = this._getReferencePreviewRect(this._layoutHelperRefId, element.id);
+    if (!refRect) return null;
+
+    const gapPx = (clamp(num(this._layoutHelperGapPct, 1.5), 0, 30) / 100) * layer.getBoundingClientRect().width;
+    const layerRect = layer.getBoundingClientRect();
+    const node = layer.querySelector(`[data-element-id="${CSS.escape(String(element.id))}"]`);
+    if (!node) return null;
+
+    const elRect = rectRelativeToLayer(node.getBoundingClientRect(), layerRect);
+    let dxPx = 0;
+    let dyPx = 0;
+    let guides = {};
+
+    if (refRect.kind === 'point') {
+      const refXPx = (refRect.x / 100) * layerRect.width;
+      const refYPx = (refRect.y / 100) * layerRect.height;
+      if (edge === 'left') {
+        dxPx = refXPx + gapPx - elRect.left;
+        guides = { vertical: refRect.x };
+      } else if (edge === 'right') {
+        dxPx = refXPx - gapPx - elRect.right;
+        guides = { vertical: refRect.x };
+      } else if (edge === 'top') {
+        dyPx = refYPx + gapPx - elRect.top;
+        guides = { horizontal: refRect.y };
+      } else if (edge === 'bottom') {
+        dyPx = refYPx - gapPx - elRect.bottom;
+        guides = { horizontal: refRect.y };
+      } else {
+        return null;
+      }
+    } else if (edge === 'left') {
+      dxPx = refRect.left + gapPx - elRect.left;
+      guides = { vertical: (refRect.left / layerRect.width) * 100 };
+    } else if (edge === 'right') {
+      dxPx = refRect.right - gapPx - elRect.right;
+      guides = { vertical: (refRect.right / layerRect.width) * 100 };
+    } else if (edge === 'top') {
+      dyPx = refRect.top + gapPx - elRect.top;
+      guides = { horizontal: (refRect.top / layerRect.height) * 100 };
+    } else if (edge === 'bottom') {
+      dyPx = refRect.bottom - gapPx - elRect.bottom;
+      guides = { horizontal: (refRect.bottom / layerRect.height) * 100 };
+    } else {
+      return null;
+    }
+
+    element.position.x = clamp(num(element.position.x, 50) + (dxPx / layerRect.width) * 100, 0, 100);
+    element.position.y = clamp(num(element.position.y, 50) + (dyPx / layerRect.height) * 100, 0, 100);
+    return guides;
   }
 
   _applyElementLayoutHelper(element, action) {
@@ -1598,15 +2362,32 @@ export class LoadingScreenDialog {
     const ref = this._resolveLayoutReference(this._layoutHelperRefId, element.id);
     const gap = clamp(num(this._layoutHelperGapPct, 1.5), 0, 30);
     const nudge = clamp(num(this._layoutHelperNudgePct, 0.5), 0.05, 10);
+    let flashGuides = null;
 
     if (action === 'match-x' && ref) {
       element.position.x = clamp(ref.x, 0, 100);
+      flashGuides = { vertical: ref.x };
     } else if (action === 'match-y' && ref) {
       element.position.y = clamp(ref.y, 0, 100);
+      flashGuides = { horizontal: ref.y };
+    } else if (action === 'center-on-ref' && ref) {
+      element.position.x = clamp(ref.x, 0, 100);
+      element.position.y = clamp(ref.y, 0, 100);
+      flashGuides = { vertical: ref.x, horizontal: ref.y };
     } else if (action === 'above' && ref) {
       element.position.y = clamp(ref.y - gap, 0, 100);
+      flashGuides = { horizontal: ref.y };
     } else if (action === 'below' && ref) {
       element.position.y = clamp(ref.y + gap, 0, 100);
+      flashGuides = { horizontal: ref.y };
+    } else if (action === 'snap-left') {
+      flashGuides = this._snapElementToReferenceEdge(element, 'left');
+    } else if (action === 'snap-right') {
+      flashGuides = this._snapElementToReferenceEdge(element, 'right');
+    } else if (action === 'snap-top') {
+      flashGuides = this._snapElementToReferenceEdge(element, 'top');
+    } else if (action === 'snap-bottom') {
+      flashGuides = this._snapElementToReferenceEdge(element, 'bottom');
     } else if (action === 'justify-left') {
       this._applyHorizontalJustification(element, 'left', ref?.x);
     } else if (action === 'justify-center') {
@@ -1625,6 +2406,10 @@ export class LoadingScreenDialog {
       return;
     }
 
+    this._markLayoutCustomized();
+    if (flashGuides && (flashGuides.vertical != null || flashGuides.horizontal != null)) {
+      this._flashAlignmentGuides(flashGuides);
+    }
     this._renderPreview();
     this._renderElementList();
     this._renderInspector();
@@ -2041,6 +2826,9 @@ export class LoadingScreenDialog {
       <!-- Safe-region guide overlays -->
       <div class="ms-lsd-safe-guides" data-ref="safe-guides"></div>
 
+      <!-- Smart alignment guide overlays (Miro-style snap lines) -->
+      <div class="ms-lsd-alignment-guides" data-ref="alignment-guides"></div>
+
       <!-- Floating dialog panel -->
       <div class="ms-lsd-floating" role="dialog" aria-label="Loading Screen Composer">
 
@@ -2055,6 +2843,19 @@ export class LoadingScreenDialog {
                 <option value="16:9">16:9</option>
                 <option value="21:9">21:9</option>
                 <option value="all">All</option>
+              </select>
+            </label>
+            <label class="ms-lsd-safe-select-label" title="Snap to center lines and other elements while dragging">
+              <input type="checkbox" data-ref="snap-enabled" checked /> Snap
+            </label>
+            <label class="ms-lsd-safe-select-label" title="Show viewport center crosshair">
+              <input type="checkbox" data-ref="axes-enabled" /> Axes
+            </label>
+            <label class="ms-lsd-safe-select-label">Strength
+              <select data-ref="snap-strength" class="ms-lsd-input ms-lsd-input--mini" title="Snap sensitivity">
+                <option value="tight">Tight</option>
+                <option value="normal" selected>Normal</option>
+                <option value="loose">Loose</option>
               </select>
             </label>
             <button type="button" class="ms-lsd-btn" data-action="reset-default">Reset</button>
@@ -2118,6 +2919,7 @@ export class LoadingScreenDialog {
 
             <details open>
               <summary class="ms-lsd-section-title">Elements</summary>
+              <div class="ms-lsd-align-toolbar" data-ref="align-toolbar"></div>
               <div class="ms-lsd-list" data-ref="element-list"></div>
               <button type="button" class="ms-lsd-btn ms-lsd-btn--full" data-action="add-element">Add Element</button>
               <button type="button" class="ms-lsd-btn ms-lsd-btn--full" data-action="add-hints-element">Add Loading Hints</button>
@@ -2180,11 +2982,37 @@ export class LoadingScreenDialog {
       .ms-lsd-live-element {
         position: absolute; cursor: move; user-select: none;
         pointer-events: auto; white-space: nowrap; z-index: 1;
+        transform-origin: center center;
       }
       .ms-lsd-live-element.is-selected {
         outline: 2px dashed rgba(110,200,255,0.85);
         outline-offset: 4px;
       }
+      .ms-lsd-resize-handles {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        z-index: 3;
+      }
+      .ms-lsd-resize-handle {
+        position: absolute;
+        width: 8px;
+        height: 8px;
+        background: #ffffff;
+        border: 1px solid rgba(110, 200, 255, 0.95);
+        border-radius: 1px;
+        box-shadow: 0 0 4px rgba(0, 0, 0, 0.45);
+        pointer-events: auto;
+        z-index: 4;
+      }
+      .ms-lsd-resize-handle--n { top: 0; left: 50%; transform: translate(-50%, -50%); }
+      .ms-lsd-resize-handle--s { bottom: 0; left: 50%; transform: translate(-50%, 50%); }
+      .ms-lsd-resize-handle--e { right: 0; top: 50%; transform: translate(50%, -50%); }
+      .ms-lsd-resize-handle--w { left: 0; top: 50%; transform: translate(-50%, -50%); }
+      .ms-lsd-resize-handle--ne { top: 0; right: 0; transform: translate(50%, -50%); }
+      .ms-lsd-resize-handle--nw { top: 0; left: 0; transform: translate(-50%, -50%); }
+      .ms-lsd-resize-handle--se { bottom: 0; right: 0; transform: translate(50%, 50%); }
+      .ms-lsd-resize-handle--sw { bottom: 0; left: 0; transform: translate(-50%, 50%); }
       .ms-lsd-live-spinner {
         width: 100%;
         height: 100%;
@@ -2242,6 +3070,53 @@ export class LoadingScreenDialog {
         text-shadow: 0 1px 3px rgba(0,0,0,0.8);
       }
 
+      /* ===== Alignment snap guides ===== */
+      .ms-lsd-alignment-guides {
+        position: absolute; inset: 0; pointer-events: none; z-index: 3;
+      }
+      .ms-lsd-align-line {
+        position: absolute; background: rgba(255, 90, 210, 0.85);
+        box-shadow: 0 0 6px rgba(255, 90, 210, 0.45);
+      }
+      .ms-lsd-align-line--v {
+        top: 0; bottom: 0; width: 1px;
+      }
+      .ms-lsd-align-line--h {
+        left: 0; right: 0; height: 1px;
+      }
+      .ms-lsd-align-line.is-axis {
+        background: rgba(90, 220, 255, 0.55);
+        box-shadow: none;
+      }
+      .ms-lsd-align-line.is-flash {
+        background: rgba(120, 255, 180, 0.9);
+        box-shadow: 0 0 8px rgba(120, 255, 180, 0.5);
+      }
+
+      .ms-lsd-align-toolbar {
+        display: none;
+        flex-direction: column;
+        gap: 6px;
+        margin-bottom: 8px;
+        padding: 8px;
+        border-radius: 6px;
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(255,255,255,0.08);
+      }
+      .ms-lsd-align-toolbar.is-visible { display: flex; }
+      .ms-lsd-align-toolbar-title {
+        font-size: 10px; font-weight: 700; text-transform: uppercase;
+        letter-spacing: 0.04em; opacity: 0.75;
+      }
+      .ms-lsd-align-toolbar .ms-lsd-btn-group {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .ms-lsd-live-element.is-selected-secondary {
+        outline: 1px dashed rgba(110, 200, 255, 0.55);
+        outline-offset: 3px;
+      }
+
       /* ===== Floating dialog panel ===== */
       .ms-lsd-floating {
         position: absolute; z-index: 10;
@@ -2267,7 +3142,7 @@ export class LoadingScreenDialog {
         cursor: move;
       }
       .ms-lsd-header h2 { margin: 0; font-size: 14px; font-weight: 700; white-space: nowrap; }
-      .ms-lsd-header-actions { display: flex; align-items: center; gap: 6px; }
+      .ms-lsd-header-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
       .ms-lsd-safe-select-label {
         display: flex; align-items: center; gap: 4px;
         font-size: 10px; opacity: 0.8; white-space: nowrap;
@@ -2283,8 +3158,19 @@ export class LoadingScreenDialog {
       .ms-lsd-body {
         display: flex; flex-direction: column;
         min-height: 0; overflow-y: auto;
+        overflow-x: hidden;
       }
       .ms-lsd-sidebar { padding: 8px 12px; }
+      .ms-lsd-sidebar details > summary {
+        list-style: none;
+      }
+      .ms-lsd-sidebar details > summary::-webkit-details-marker {
+        display: none;
+      }
+      .ms-lsd-sidebar details > :not(summary) {
+        padding-left: 0;
+        margin-left: 0;
+      }
       .ms-lsd-inspector-wrap {
         padding: 8px 12px;
         border-top: 1px solid rgba(255,255,255,0.08);
@@ -2305,13 +3191,22 @@ export class LoadingScreenDialog {
         border: 1px dashed rgba(255,255,255,0.18); border-radius: 5px;
       }
       .ms-lsd-wall-row, .ms-lsd-element-row {
-        display: flex; justify-content: space-between; gap: 6px; padding: 5px;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 6px;
+        padding: 5px;
         border: 1px solid rgba(255,255,255,0.1); border-radius: 5px;
         background: rgba(255,255,255,0.03);
+        box-sizing: border-box;
       }
       .ms-lsd-element-row { cursor: pointer; }
       .ms-lsd-element-row.is-selected {
         border-color: rgba(0,180,255,0.5); background: rgba(0,180,255,0.09);
+      }
+      .ms-lsd-element-row.is-selected-secondary {
+        background: rgba(110, 200, 255, 0.08);
+        box-shadow: inset 2px 0 0 rgba(110, 200, 255, 0.45);
       }
       .ms-lsd-wall-main, .ms-lsd-element-left { min-width: 0; }
       .ms-lsd-wall-title, .ms-lsd-element-name {

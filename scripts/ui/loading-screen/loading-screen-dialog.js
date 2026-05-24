@@ -57,6 +57,8 @@ export class LoadingScreenDialog {
     this._layoutHelperNudgePct = 0.5;
     this._dragSnapPct = 0.25;
     this._suppressPresetChange = false;
+    /** @type {string|null} Composer-only wallpaper preview selection (not persisted). */
+    this._previewWallpaperId = null;
 
     this.refs = {
       modeSelect: null,
@@ -151,6 +153,7 @@ export class LoadingScreenDialog {
     } else {
       this.selectedElementIds = new Set();
     }
+    this._ensurePreviewWallpaperId();
   }
 
   _renderAll() {
@@ -398,6 +401,7 @@ export class LoadingScreenDialog {
       };
 
       this.state.config.wallpapers.entries.push(entry);
+      this._previewWallpaperId = entry.id;
       if (this.state.config.wallpapers.entries.length > 1) {
         const mode = String(this.state.config.wallpapers.mode || WALLPAPER_MODES.SEQUENTIAL);
         if (mode === WALLPAPER_MODES.SINGLE && this.state.config.wallpapersModeExplicit !== true) {
@@ -475,12 +479,45 @@ export class LoadingScreenDialog {
     }
   }
 
+  _getValidWallpaperEntries() {
+    return (this.state?.config?.wallpapers?.entries || [])
+      .filter((e) => e && String(e.src || '').trim());
+  }
+
+  _ensurePreviewWallpaperId() {
+    const valid = this._getValidWallpaperEntries();
+    if (this._previewWallpaperId && valid.some((e) => String(e.id) === String(this._previewWallpaperId))) {
+      return;
+    }
+    this._previewWallpaperId = valid[0]?.id ? String(valid[0].id) : null;
+  }
+
+  _resolvePreviewWallpaper() {
+    this._ensurePreviewWallpaperId();
+    const valid = this._getValidWallpaperEntries();
+    if (!valid.length) return null;
+    return valid.find((e) => String(e.id) === String(this._previewWallpaperId)) || valid[0];
+  }
+
+  _setPreviewWallpaper(entryOrId) {
+    const id = typeof entryOrId === 'object' ? entryOrId?.id : entryOrId;
+    if (!id) return;
+    const entry = this._getValidWallpaperEntries().find((e) => String(e.id) === String(id));
+    if (!entry) return;
+    this._previewWallpaperId = String(entry.id);
+    this._renderWallpaperList();
+    this._renderPreview();
+    this._status(`Previewing wallpaper: ${entry.label || this._basename(entry.src)}`);
+  }
+
   _renderWallpaperList() {
     const listEl = this.refs.wallpaperList;
     if (!listEl) return;
 
     const wallpapers = this.state.config.wallpapers.entries || [];
     listEl.innerHTML = '';
+
+    this._ensurePreviewWallpaperId();
 
     if (wallpapers.length === 0) {
       const empty = document.createElement('div');
@@ -490,16 +527,43 @@ export class LoadingScreenDialog {
       return;
     }
 
+    const hint = document.createElement('div');
+    hint.className = 'ms-lsd-wall-hint';
+    hint.textContent = 'Click a wallpaper to preview it behind the composer.';
+    listEl.appendChild(hint);
+
     wallpapers.forEach((w, index) => {
+      const entryId = String(w?.id || '');
+      const isPreviewing = entryId && entryId === String(this._previewWallpaperId || '');
       const row = document.createElement('div');
-      row.className = 'ms-lsd-wall-row';
+      row.className = `ms-lsd-wall-row${isPreviewing ? ' is-previewing' : ''}`;
+      row.title = isPreviewing ? 'Currently previewing' : 'Click to preview this wallpaper';
+      row.addEventListener('click', (ev) => {
+        if (ev.target.closest('.ms-lsd-wall-controls, input, button')) return;
+        if (!String(w?.src || '').trim()) return;
+        this._setPreviewWallpaper(w);
+      });
+
+      const thumb = document.createElement('div');
+      thumb.className = 'ms-lsd-wall-thumb';
+      if (String(w?.src || '').trim()) {
+        const img = document.createElement('img');
+        img.src = String(w.src);
+        img.alt = w.label || this._basename(w.src);
+        img.loading = 'lazy';
+        img.draggable = false;
+        thumb.appendChild(img);
+      } else {
+        thumb.classList.add('is-empty');
+        thumb.textContent = '?';
+      }
 
       const main = document.createElement('div');
       main.className = 'ms-lsd-wall-main';
 
       const title = document.createElement('div');
       title.className = 'ms-lsd-wall-title';
-      title.textContent = w.label || this._basename(w.src || 'wallpaper');
+      title.textContent = `${w.label || this._basename(w.src || 'wallpaper')}${isPreviewing ? ' · preview' : ''}`;
 
       const path = document.createElement('div');
       path.className = 'ms-lsd-wall-path';
@@ -510,6 +574,7 @@ export class LoadingScreenDialog {
 
       const controls = document.createElement('div');
       controls.className = 'ms-lsd-wall-controls';
+      controls.addEventListener('click', (ev) => ev.stopPropagation());
 
       const pin = document.createElement('input');
       pin.type = 'checkbox';
@@ -535,13 +600,18 @@ export class LoadingScreenDialog {
       });
 
       const remove = this._button('✕', () => {
+        const removedId = String(w.id || '');
         wallpapers.splice(index, 1);
+        if (removedId && removedId === String(this._previewWallpaperId || '')) {
+          this._previewWallpaperId = null;
+          this._ensurePreviewWallpaperId();
+        }
         this._renderWallpaperList();
         this._renderPreview();
       }, true);
 
       controls.append(pin, up, down, remove);
-      row.append(main, controls);
+      row.append(thumb, main, controls);
       listEl.appendChild(row);
     });
   }
@@ -677,9 +747,8 @@ export class LoadingScreenDialog {
     layer.innerHTML = '';
     layer.style.background = this.state.config.style.backgroundColor || 'rgba(0,0,0,1)';
 
-    // Wallpaper preview — show the first configured entry (rotation applies at runtime only).
-    const wall = (this.state.config.wallpapers?.entries || [])
-      .find((e) => e && String(e.src || '').trim());
+    // Wallpaper preview — composer picks which entry to show (runtime rotation unchanged).
+    const wall = this._resolvePreviewWallpaper();
     if (wall?.src) {
       const img = document.createElement('img');
       img.src = wall.src;
@@ -3199,6 +3268,43 @@ export class LoadingScreenDialog {
         border: 1px solid rgba(255,255,255,0.1); border-radius: 5px;
         background: rgba(255,255,255,0.03);
         box-sizing: border-box;
+      }
+      .ms-lsd-wall-row {
+        grid-template-columns: 56px minmax(0, 1fr) auto;
+        cursor: pointer;
+      }
+      .ms-lsd-wall-row.is-previewing {
+        border-color: rgba(0,180,255,0.5);
+        background: rgba(0,180,255,0.09);
+      }
+      .ms-lsd-wall-hint {
+        font-size: 9px;
+        opacity: 0.62;
+        line-height: 1.35;
+        margin-bottom: 4px;
+      }
+      .ms-lsd-wall-thumb {
+        width: 56px;
+        height: 34px;
+        border-radius: 4px;
+        overflow: hidden;
+        background: rgba(0,0,0,0.35);
+        border: 1px solid rgba(255,255,255,0.12);
+        flex-shrink: 0;
+      }
+      .ms-lsd-wall-thumb img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+        pointer-events: none;
+      }
+      .ms-lsd-wall-thumb.is-empty {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 11px;
+        opacity: 0.45;
       }
       .ms-lsd-element-row { cursor: pointer; }
       .ms-lsd-element-row.is-selected {

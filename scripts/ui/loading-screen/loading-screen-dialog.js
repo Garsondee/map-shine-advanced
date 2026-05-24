@@ -3,7 +3,8 @@
  * @module ui/loading-screen/loading-screen-dialog
  */
 
-import { normalizeLoadingScreenConfig } from './loading-screen-config.js';
+import { normalizeLoadingScreenConfig, WALLPAPER_MODES } from './loading-screen-config.js';
+import { selectWallpaper } from './loading-screen-wallpapers.js';
 import { getAvailableFontFamilies } from './loading-screen-fonts.js';
 import { applyPresetToConfig } from './loading-screen-presets.js';
 
@@ -41,6 +42,8 @@ export class LoadingScreenDialog {
       presetSelect: null,
       userPresetInput: null,
       wallpaperList: null,
+      wallpaperModeSelect: null,
+      wallpaperFitSelect: null,
       elementList: null,
       previewLayer: null,
       safeGuides: null,
@@ -110,11 +113,26 @@ export class LoadingScreenDialog {
 
   _renderAll() {
     this._renderTopControls();
+    this._renderWallpaperSettings();
     this._renderWallpaperList();
     this._renderElementList();
     this._renderPreview();
     this._renderInspector();
     this._renderSafeGuides();
+  }
+
+  _renderWallpaperSettings() {
+    const wallpapers = this.state?.config?.wallpapers;
+    if (!wallpapers) return;
+
+    if (this.refs.wallpaperModeSelect) {
+      const mode = String(wallpapers.mode || WALLPAPER_MODES.SEQUENTIAL);
+      this.refs.wallpaperModeSelect.value = mode;
+    }
+
+    if (this.refs.wallpaperFitSelect) {
+      this.refs.wallpaperFitSelect.value = String(wallpapers.fit || 'cover');
+    }
   }
 
   _cacheRefs() {
@@ -128,6 +146,8 @@ export class LoadingScreenDialog {
     this.refs.presetSelect = q('[data-ref="preset"]');
     this.refs.userPresetInput = q('[data-ref="preset-name"]');
     this.refs.wallpaperList = q('[data-ref="wallpaper-list"]');
+    this.refs.wallpaperModeSelect = q('[data-ref="wallpaper-mode"]');
+    this.refs.wallpaperFitSelect = q('[data-ref="wallpaper-fit"]');
     this.refs.elementList = q('[data-ref="element-list"]');
     this.refs.previewLayer = q('[data-ref="preview-layer"]');
     this.refs.safeGuides = q('[data-ref="safe-guides"]');
@@ -206,6 +226,20 @@ export class LoadingScreenDialog {
       this.state.googleFontsEnabled = this.refs.googleFontsCheckbox.checked;
     });
 
+    this.refs.wallpaperModeSelect?.addEventListener('change', () => {
+      if (!this.state?.config?.wallpapers) return;
+      this.state.config.wallpapers.mode = String(this.refs.wallpaperModeSelect.value || WALLPAPER_MODES.SEQUENTIAL);
+      this.state.config.wallpapersModeExplicit = true;
+      this._renderPreview();
+      this._status(`Wallpaper rotation: ${this.state.config.wallpapers.mode}.`);
+    });
+
+    this.refs.wallpaperFitSelect?.addEventListener('change', () => {
+      if (!this.state?.config?.wallpapers) return;
+      this.state.config.wallpapers.fit = String(this.refs.wallpaperFitSelect.value || 'cover');
+      this._renderPreview();
+    });
+
     this.refs.presetSelect?.addEventListener('change', async () => {
       if (this._suppressPresetChange) return;
       const presetId = String(this.refs.presetSelect.value || '');
@@ -265,6 +299,13 @@ export class LoadingScreenDialog {
       };
 
       this.state.config.wallpapers.entries.push(entry);
+      if (this.state.config.wallpapers.entries.length > 1) {
+        const mode = String(this.state.config.wallpapers.mode || WALLPAPER_MODES.SEQUENTIAL);
+        if (mode === WALLPAPER_MODES.SINGLE && this.state.config.wallpapersModeExplicit !== true) {
+          this.state.config.wallpapers.mode = WALLPAPER_MODES.SEQUENTIAL;
+          this._status('Multiple wallpapers — rotation set to Sequential (cycles each load).');
+        }
+      }
       this._renderWallpaperList();
       this._renderPreview();
       this._status('Wallpaper added.');
@@ -526,13 +567,15 @@ export class LoadingScreenDialog {
     layer.innerHTML = '';
     layer.style.background = this.state.config.style.backgroundColor || 'rgba(0,0,0,1)';
 
-    // Wallpaper
-    const wall = this.state.config.wallpapers.entries?.[0];
+    // Wallpaper — use the same selection helper as runtime (preview uses first sequential pick)
+    const wall = selectWallpaper(this.state.config.wallpapers, { isFirstLoad: false, advanceSequential: false })
+      || this.state.config.wallpapers.entries?.[0];
     if (wall?.src) {
       const img = document.createElement('img');
       img.src = wall.src;
       img.alt = wall.label || 'Wallpaper';
       img.className = 'ms-lsd-live-wallpaper';
+      img.style.objectFit = String(this.state.config.wallpapers?.fit || 'cover');
       layer.appendChild(img);
     }
 
@@ -1966,8 +2009,23 @@ export class LoadingScreenDialog {
               <button type="button" class="ms-lsd-btn ms-lsd-btn--full" data-action="save-user-preset">Save User Preset</button>
             </details>
 
-            <details>
+            <details open>
               <summary class="ms-lsd-section-title">Wallpapers</summary>
+              <label class="ms-lsd-stack">
+                Rotation
+                <select data-ref="wallpaper-mode" class="ms-lsd-input">
+                  <option value="single">Single (always first)</option>
+                  <option value="sequential">Sequential (cycle each load)</option>
+                  <option value="random">Random (weighted)</option>
+                </select>
+              </label>
+              <label class="ms-lsd-stack">
+                Fit
+                <select data-ref="wallpaper-fit" class="ms-lsd-input">
+                  <option value="cover">Cover</option>
+                  <option value="contain">Contain</option>
+                </select>
+              </label>
               <div class="ms-lsd-list" data-ref="wallpaper-list"></div>
               <button type="button" class="ms-lsd-btn ms-lsd-btn--full" data-action="add-wallpaper">Add Wallpaper</button>
             </details>

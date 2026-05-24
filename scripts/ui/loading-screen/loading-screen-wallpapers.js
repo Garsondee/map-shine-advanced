@@ -27,11 +27,13 @@ export function selectWallpaper(wallpapers, options = {}) {
     if (pinned) return pinned;
   }
 
-  const mode = String(wallpapers?.mode || 'single');
+  const mode = String(wallpapers?.mode || 'sequential').trim().toLowerCase();
   if (mode === 'single') return entries[0];
 
   if (mode === 'sequential') {
-    const idx = getAndAdvanceSequenceIndex(entries.length);
+    const idx = options.advanceSequential === false
+      ? peekSequenceIndex(entries.length)
+      : getAndAdvanceSequenceIndex(entries.length);
     return entries[idx] || entries[0];
   }
 
@@ -141,6 +143,16 @@ function getAndAdvanceSequenceIndex(length) {
     const idx = Number.isFinite(current) ? Math.max(0, current) % length : 0;
     sessionStorage.setItem(SESSION_SEQ_INDEX_KEY, String((idx + 1) % length));
     return idx;
+  } catch (_) {
+    return 0;
+  }
+}
+
+function peekSequenceIndex(length) {
+  if (length <= 1) return 0;
+  try {
+    const current = Number.parseInt(sessionStorage.getItem(SESSION_SEQ_INDEX_KEY) || '0', 10);
+    return Number.isFinite(current) ? Math.max(0, current) % length : 0;
   } catch (_) {
     return 0;
   }

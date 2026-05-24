@@ -5,6 +5,12 @@
 
 export const LOADING_SCREEN_CONFIG_VERSION = 1;
 
+export const WALLPAPER_MODES = Object.freeze({
+  SINGLE: 'single',
+  SEQUENTIAL: 'sequential',
+  RANDOM: 'random',
+});
+
 /**
  * Build the default styled config which visually matches the current Map Shine loading screen.
  * @returns {Object}
@@ -30,7 +36,7 @@ export function createDefaultStyledLoadingScreenConfig() {
       googleFamilies: [],
     },
     wallpapers: {
-      mode: 'single',
+      mode: WALLPAPER_MODES.SEQUENTIAL,
       fit: 'cover',
       entries: [],
       overlay: {
@@ -213,11 +219,45 @@ export function normalizeLoadingScreenConfig(input) {
     config.basePresetId = source.basePresetId.trim();
   }
   config.layoutCustomized = source.layoutCustomized === true;
+  config.wallpapersModeExplicit = source.wallpapersModeExplicit === true;
   if (!Array.isArray(config.fonts.googleFamilies)) config.fonts.googleFamilies = [];
   config.fonts.googleFamilies = config.fonts.googleFamilies.map((f) => String(f || '').trim()).filter(Boolean);
+  normalizeWallpaperSettings(config);
   applyDefaultThemeBottomClusterUpgrade(config);
 
   return config;
+}
+
+/**
+ * Normalize wallpaper rotation mode and upgrade legacy multi-wallpaper configs.
+ * @param {Object} config
+ */
+export function normalizeWallpaperSettings(config) {
+  if (!config.wallpapers || typeof config.wallpapers !== 'object') {
+    config.wallpapers = createDefaultStyledLoadingScreenConfig().wallpapers;
+    return;
+  }
+
+  const entries = Array.isArray(config.wallpapers.entries) ? config.wallpapers.entries : [];
+  const allowed = new Set(Object.values(WALLPAPER_MODES));
+  let mode = String(config.wallpapers.mode || WALLPAPER_MODES.SEQUENTIAL).trim().toLowerCase();
+  if (!allowed.has(mode)) {
+    mode = entries.length > 1 ? WALLPAPER_MODES.SEQUENTIAL : WALLPAPER_MODES.SINGLE;
+  }
+
+  // Older saves added multiple wallpapers while the default mode was still 'single'.
+  if (
+    entries.length > 1
+    && mode === WALLPAPER_MODES.SINGLE
+    && config.wallpapersModeExplicit !== true
+  ) {
+    mode = WALLPAPER_MODES.SEQUENTIAL;
+  }
+
+  config.wallpapers.mode = mode;
+
+  const fit = String(config.wallpapers.fit || 'cover').trim().toLowerCase();
+  config.wallpapers.fit = fit === 'contain' ? 'contain' : 'cover';
 }
 
 /**

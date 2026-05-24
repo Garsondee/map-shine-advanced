@@ -5,7 +5,9 @@
 
 import { loadingScreenService, LOADING_SCREEN_MODES } from './loading-screen-service.js';
 import { LoadingScreenDialog } from './loading-screen-dialog.js';
+import { LoadingHintsDialog } from './loading-hints-dialog.js';
 import { createDefaultStyledLoadingScreenConfig, deepClone, normalizeLoadingScreenConfig } from './loading-screen-config.js';
+import { getAllLoadingHints, normalizeHintsList } from './loading-hints.js';
 import { applyPresetToConfig, clearPresetCache } from './loading-screen-presets.js';
 
 const MODULE_ID = 'map-shine-advanced';
@@ -13,6 +15,7 @@ const MODULE_ID = 'map-shine-advanced';
 export class LoadingScreenManager {
   constructor() {
     this._dialog = null;
+    this._hintsDialog = null;
     this._initialized = false;
   }
 
@@ -22,7 +25,9 @@ export class LoadingScreenManager {
 
     await loadingScreenService.initialize();
     this._dialog = new LoadingScreenDialog(this);
+    this._hintsDialog = new LoadingHintsDialog(this);
     await this._dialog.initialize(document.body);
+    await this._hintsDialog.initialize(document.body);
   }
 
   async open() {
@@ -38,6 +43,33 @@ export class LoadingScreenManager {
   async toggle() {
     await this.initialize();
     this._dialog?.toggle();
+  }
+
+  async openHintsDialog() {
+    await this.initialize();
+    await this._hintsDialog?.show();
+  }
+
+  async closeHintsDialog() {
+    await this.initialize();
+    this._hintsDialog?.hide();
+  }
+
+  /**
+   * @returns {Promise<Array<{id:string,text:string,enabled:boolean}>>}
+   */
+  async getLoadingHints() {
+    return getAllLoadingHints();
+  }
+
+  /**
+   * @param {Array<any>} hints
+   * @returns {Promise<void>}
+   */
+  async saveLoadingHints(hints) {
+    const next = normalizeHintsList(hints);
+    await game.settings.set(MODULE_ID, 'loadingScreenHints', next);
+    await loadingScreenService.refreshHintsFromSettings();
   }
 
   /**
@@ -217,9 +249,11 @@ export class LoadingScreenManager {
   dispose() {
     try {
       this._dialog?.dispose();
+      this._hintsDialog?.dispose();
     } catch (_) {
     }
     this._dialog = null;
+    this._hintsDialog = null;
     this._initialized = false;
   }
 }

@@ -8,6 +8,7 @@ import { createLogger } from '../core/log.js';
 import { repairSceneControlStateFlag } from './control-state-sanitize.js';
 import { wipeMapShineAdvancedFlagsAsync } from './scene-msa-flag-wipe.js';
 import { createDefaultStyledLoadingScreenConfig } from '../ui/loading-screen/loading-screen-config.js';
+import { createDefaultLoadingHints } from '../ui/loading-screen/loading-hints.js';
 import { LightingDirector } from '../core/LightingDirector.js';
 
 const log = createLogger('Settings');
@@ -35,6 +36,7 @@ const LOADING_SCREEN_APPLY_TO_SETTING = 'loadingScreenApplyTo';
 const LOADING_SCREEN_GOOGLE_FONTS_ENABLED_SETTING = 'loadingScreenGoogleFontsEnabled';
 const LOADING_SCREEN_USE_FOUNDRY_DEFAULT_SETTING = 'loadingScreenUseFoundryDefault';
 const LOADING_SCREEN_ACTIVE_PRESET_ID_SETTING = 'loadingScreenActivePresetId';
+const LOADING_SCREEN_HINTS_SETTING = 'loadingScreenHints';
 
 /** World-scoped effect settings keys (used for effects in "World Based" mode) */
 const WORLD_EFFECT_SETTINGS_KEY = 'worldEffectSettings';
@@ -1046,6 +1048,19 @@ export function registerSettings() {
     restricted: true,
     type: Array,
     default: []
+  });
+
+  game.settings.register(FLAG_NAMESPACE, LOADING_SCREEN_HINTS_SETTING, {
+    name: 'Loading Screen Hints',
+    hint: 'Rotating tip text shown by Loading Hints elements on styled loading screens.',
+    scope: 'world',
+    config: false,
+    restricted: true,
+    type: Array,
+    default: createDefaultLoadingHints(),
+    onChange: () => {
+      try { window.MapShine?.loadingScreenService?.refreshHintsFromSettings?.(); } catch (_) {}
+    }
   });
 
   // Intro Zoom Effect — client-local (each player can opt out independently).

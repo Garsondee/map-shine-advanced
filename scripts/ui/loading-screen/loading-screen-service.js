@@ -10,6 +10,7 @@ import { applyPresetToConfig, loadBuiltInPresets } from './loading-screen-preset
 import { createDefaultStyledLoadingScreenConfig, deepClone, normalizeLoadingScreenConfig } from './loading-screen-config.js';
 import { loadConfiguredFonts } from './loading-screen-fonts.js';
 import { isFirstLoadOfSession, preloadWallpapers, selectWallpaper } from './loading-screen-wallpapers.js';
+import { getEnabledLoadingHints } from './loading-hints.js';
 
 const MODULE_ID = 'map-shine-advanced';
 
@@ -64,6 +65,9 @@ class LoadingScreenService {
     /** @type {LoadingScreenRuntimeSettings} */
     this.settings = this.createDefaultSettings();
 
+    /** @type {Array<{id:string,text:string,enabled:boolean}>} */
+    this._loadingHints = [];
+
     this._initialized = false;
     this._activeRenderer = this.legacy;
   }
@@ -97,6 +101,23 @@ class LoadingScreenService {
   }
 
   /**
+   * Refresh cached loading hints from world settings.
+   */
+  refreshHintsFromSettings() {
+    this._loadingHints = getEnabledLoadingHints();
+    if (this._activeRenderer === this.styled && typeof this.styled.refreshHints === 'function') {
+      this.styled.refreshHints(this._loadingHints);
+    }
+  }
+
+  /**
+   * @returns {Array<{id:string,text:string,enabled:boolean}>}
+   */
+  getEnabledHints() {
+    return Array.isArray(this._loadingHints) ? [...this._loadingHints] : [];
+  }
+
+  /**
    * Re-read world settings and update active renderer.
    * @returns {Promise<void>}
    */
@@ -123,6 +144,7 @@ class LoadingScreenService {
     }
 
     this.settings = next;
+    this.refreshHintsFromSettings();
 
     // Apply active preset only when there is no saved styled config yet.
     if (!hasSavedStyledConfig) {
@@ -139,6 +161,7 @@ class LoadingScreenService {
 
     if (this._activeRenderer === this.styled) {
       this.styled.setConfig(this.settings.styledConfig);
+      this.styled.refreshHints(this._loadingHints);
       this._prepareStyledAssets().catch((e) => console.warn('Map Shine: failed to prepare styled assets', e));
     }
 
@@ -172,6 +195,7 @@ class LoadingScreenService {
 
     if (this._activeRenderer === this.styled) {
       this.styled.setConfig(this.settings.styledConfig);
+      this.styled.refreshHints(this._loadingHints);
       this._prepareStyledAssets().catch(() => {});
     }
 
@@ -194,6 +218,7 @@ class LoadingScreenService {
     this.settings.styledConfig = normalizeLoadingScreenConfig(config);
     if (this._activeRenderer === this.styled) {
       this.styled.setConfig(this.settings.styledConfig);
+      this.styled.refreshHints(this._loadingHints);
       await this._prepareStyledAssets();
     }
     await this._persistSettings();
@@ -216,6 +241,7 @@ class LoadingScreenService {
 
     if (this._activeRenderer === this.styled) {
       this.styled.setConfig(this.settings.styledConfig);
+      this.styled.refreshHints(this._loadingHints);
       await this._prepareStyledAssets();
     }
 

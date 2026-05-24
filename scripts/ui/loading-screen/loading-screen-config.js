@@ -3,6 +3,8 @@
  * @module ui/loading-screen/loading-screen-config
  */
 
+import { normalizeLoadingHintsElementProps } from './loading-hints.js';
+
 export const LOADING_SCREEN_CONFIG_VERSION = 1;
 
 export const WALLPAPER_MODES = Object.freeze({
@@ -295,6 +297,25 @@ function normalizeElement(element) {
     normalized.props.maxWidthPx = Number.isFinite(normalized.props.maxWidthPx)
       ? clamp(normalized.props.maxWidthPx, 240, 3000)
       : 1200;
+  }
+
+  if (normalized.type === 'loading-hints') {
+    normalized.props = normalizeLoadingHintsElementProps(normalized.props);
+    if (!normalized.style.maxWidthCss && !Number.isFinite(normalized.style.maxWidthPx)) {
+      normalized.style.maxWidthCss = 'min(640px, 86vw)';
+    }
+    if (!normalized.style.fontSize) {
+      normalized.style.fontSize = 'clamp(12px, 0.95vw, 14px)';
+    }
+    if (!normalized.style.color) {
+      normalized.style.color = 'rgba(196,223,255,0.82)';
+    }
+    if (!normalized.style.textAlign) {
+      normalized.style.textAlign = 'center';
+    }
+    if (!normalized.style.fontStyle) {
+      normalized.style.fontStyle = 'italic';
+    }
   }
 
   return normalized;

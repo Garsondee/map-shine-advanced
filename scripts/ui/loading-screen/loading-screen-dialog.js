@@ -4,6 +4,7 @@
  */
 
 import { normalizeLoadingScreenConfig, WALLPAPER_MODES } from './loading-screen-config.js';
+import { getAllLoadingHints } from './loading-hints.js';
 import { getAvailableFontFamilies } from './loading-screen-fonts.js';
 import { applyPresetToConfig } from './loading-screen-presets.js';
 
@@ -283,6 +284,15 @@ export class LoadingScreenDialog {
     this.container.querySelector('[data-action="add-element"]')?.addEventListener('click', () => {
       this._addElement();
       this._renderAll();
+    });
+
+    this.container.querySelector('[data-action="add-hints-element"]')?.addEventListener('click', () => {
+      this._addHintsElement();
+      this._renderAll();
+    });
+
+    this.container.querySelector('[data-action="manage-hints"]')?.addEventListener('click', async () => {
+      await this.manager.openHintsDialog();
     });
 
     this.container.querySelector('[data-action="add-wallpaper"]')?.addEventListener('click', async () => {
@@ -798,6 +808,12 @@ export class LoadingScreenDialog {
         node.appendChild(img);
       } else if (element.type === 'custom-html') {
         node.innerHTML = String(element.props?.html || '<em>Custom HTML</em>');
+      } else if (element.type === 'loading-hints') {
+        const hints = getAllLoadingHints().filter((h) => h.enabled !== false);
+        const sample = hints[0]?.text || element.props?.emptyText || 'Loading hint preview…';
+        const prefix = String(element.props?.prefix ?? 'Tip: ');
+        node.textContent = `${prefix}${sample}`;
+        node.style.fontStyle = String(element.style?.fontStyle || 'italic');
       } else {
         node.textContent = String(element.props?.text || element.type);
       }
@@ -904,7 +920,7 @@ export class LoadingScreenDialog {
     })));
 
     wrap.appendChild(this._inputRow('Type', this._select([
-      'text', 'scene-name', 'message', 'progress-bar', 'spinner', 'percentage', 'timer', 'stage-pills', 'image', 'custom-html', 'subtitle'
+      'text', 'scene-name', 'message', 'progress-bar', 'spinner', 'percentage', 'timer', 'stage-pills', 'image', 'custom-html', 'subtitle', 'loading-hints'
     ], element.type, (v) => {
       element.type = v;
       this._renderElementList();
@@ -1001,6 +1017,31 @@ export class LoadingScreenDialog {
       })));
       wrap.appendChild(this._inputRow('Radius px', this._number(num(element.props?.radiusPx, 999), 0, 999, 1, (v) => {
         element.props.radiusPx = Math.max(0, v);
+        this._renderPreview();
+      })));
+    }
+
+    if (element.type === 'loading-hints') {
+      wrap.appendChild(this._fieldLabel('Loading Hints', true));
+      wrap.appendChild(this._inputRow('Manage hints', this._button('Open Hint Editor…', async () => {
+        await this.manager.openHintsDialog();
+        this._renderPreview();
+      })));
+      wrap.appendChild(this._inputRow('Prefix', this._text(String(element.props?.prefix ?? 'Tip: '), (v) => {
+        element.props.prefix = v;
+        this._renderPreview();
+      })));
+      wrap.appendChild(this._inputRow('Interval sec', this._number(num(element.props?.intervalMs, 10000) / 1000, 2, 120, 0.5, (v) => {
+        element.props.intervalMs = Math.round(Math.max(2, v) * 1000);
+      })));
+      wrap.appendChild(this._inputRow('Fade ms', this._number(num(element.props?.fadeMs, 600), 0, 4000, 50, (v) => {
+        element.props.fadeMs = Math.max(0, v);
+      })));
+      wrap.appendChild(this._inputRow('Random order', this._checkbox(element.props?.shuffle !== false, (v) => {
+        element.props.shuffle = v;
+      })));
+      wrap.appendChild(this._inputRow('Empty pool text', this._text(String(element.props?.emptyText || ''), (v) => {
+        element.props.emptyText = v;
         this._renderPreview();
       })));
     }
@@ -1445,6 +1486,46 @@ export class LoadingScreenDialog {
     this.state.config.layout.elements.push(element);
     this._markLayoutCustomized();
     this.selectedElementId = id;
+  }
+
+  _addHintsElement() {
+    const elements = this.state.config.layout.elements || [];
+    if (elements.some((e) => String(e?.type || '') === 'loading-hints')) {
+      this._status('This layout already has a Loading Hints element.');
+      return;
+    }
+
+    const id = `hints-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const element = {
+      id,
+      type: 'loading-hints',
+      visible: true,
+      position: { x: 50, y: 78 },
+      anchor: 'center',
+      props: {
+        prefix: 'Tip: ',
+        intervalMs: 10000,
+        fadeMs: 600,
+        shuffle: true,
+        emptyText: 'Add loading hints via the Hint Editor.',
+      },
+      style: {
+        fontSize: 'clamp(12px, 0.95vw, 14px)',
+        fontStyle: 'italic',
+        color: 'rgba(196,223,255,0.82)',
+        textAlign: 'center',
+        maxWidthCss: 'min(640px, 86vw)',
+      },
+      animation: {
+        entrance: { type: 'fade-in', duration: 500, delay: 420, easing: 'ease-out' },
+        ambient: null,
+      },
+    };
+
+    this.state.config.layout.elements.push(element);
+    this._markLayoutCustomized();
+    this.selectedElementId = id;
+    this._status('Added Loading Hints element — open Hint Editor to add tips.');
   }
 
   _markLayoutCustomized() {
@@ -2039,6 +2120,8 @@ export class LoadingScreenDialog {
               <summary class="ms-lsd-section-title">Elements</summary>
               <div class="ms-lsd-list" data-ref="element-list"></div>
               <button type="button" class="ms-lsd-btn ms-lsd-btn--full" data-action="add-element">Add Element</button>
+              <button type="button" class="ms-lsd-btn ms-lsd-btn--full" data-action="add-hints-element">Add Loading Hints</button>
+              <button type="button" class="ms-lsd-btn ms-lsd-btn--full" data-action="manage-hints">Manage Hint Text…</button>
             </details>
           </div>
 
@@ -2336,7 +2419,8 @@ function normalizeColorHex(value) {
 
 function isTextLikeType(type) {
   const t = String(type || '').toLowerCase();
-  return t === 'text' || t === 'subtitle' || t === 'scene-name' || t === 'message' || t === 'percentage' || t === 'timer';
+  return t === 'text' || t === 'subtitle' || t === 'scene-name' || t === 'message'
+    || t === 'percentage' || t === 'timer' || t === 'loading-hints';
 }
 
 function snapToStep(value, step) {

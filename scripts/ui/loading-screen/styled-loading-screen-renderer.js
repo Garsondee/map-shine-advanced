@@ -7,6 +7,7 @@ import { installLoadingScreenAnimationStyle, mapAmbientAnimationClass, mapEntran
 import { normalizeLoadingScreenConfig } from './loading-screen-config.js';
 import { familySpecToFamilyName } from './loading-screen-fonts.js';
 import { getCachedWallpaperImage, loadImage, selectWallpaper } from './loading-screen-wallpapers.js';
+import { normalizeLoadingHintsElementProps, pickRandomHintIndex } from './loading-hints.js';
 
 /**
  * Styled DOM renderer implementing the same API contract as LoadingOverlay.
@@ -44,6 +45,21 @@ export class StyledLoadingScreenRenderer {
     this._message = 'Starting…';
     this._config = normalizeLoadingScreenConfig(null);
     this._activeWallpaper = null;
+
+    /** @type {Array<{id:string,text:string,enabled:boolean}>} */
+    this._loadingHints = [];
+    /** @type {Map<string, any>} */
+    this._hintsRuntimes = new Map();
+  }
+
+  /**
+   * @param {Array<{id:string,text:string,enabled:boolean}>} hints
+   */
+  refreshHints(hints) {
+    this._loadingHints = Array.isArray(hints) ? hints.filter((h) => h && h.enabled !== false) : [];
+    if (this.el && this.el.style.display !== 'none') {
+      this._restartHintsRotation();
+    }
   }
 
   /**
@@ -213,6 +229,7 @@ export class StyledLoadingScreenRenderer {
     this._resetProgress();
     this.setMessage(message);
     this._startTimer();
+    this._startHintsRotation();
 
     this.el.style.display = 'block';
     this.el.style.pointerEvents = 'auto';
@@ -232,6 +249,7 @@ export class StyledLoadingScreenRenderer {
     this._token++;
     this._resetProgress();
     this._stopTimer();
+    this._stopHintsRotation();
     this.el.classList.add('map-shine-loading-overlay--hidden');
     this.el.style.display = 'none';
     this.el.style.pointerEvents = 'none';
@@ -406,11 +424,89 @@ export class StyledLoadingScreenRenderer {
     this._timerRaf = requestAnimationFrame(() => this._timerTick());
   }
 
+  _stopHintsRotation() {
+    for (const runtime of this._hintsRuntimes.values()) {
+      if (runtime?.timerId) clearInterval(runtime.timerId);
+      runtime.timerId = 0;
+      runtime.token++;
+    }
+  }
+
+  _restartHintsRotation() {
+    this._stopHintsRotation();
+    this._startHintsRotation();
+  }
+
+  _startHintsRotation() {
+    if (!this._hintsRuntimes.size) return;
+
+    for (const [elementId, runtime] of this._hintsRuntimes.entries()) {
+      if (!runtime?.textEl || !runtime?.element) continue;
+      runtime.token++;
+      const token = runtime.token;
+      const props = normalizeLoadingHintsElementProps(runtime.element.props);
+      const hints = this._loadingHints.filter((h) => h && String(h.text || '').trim());
+      const intervalMs = props.intervalMs;
+
+      const showHint = async (advance = true) => {
+        if (token !== runtime.token) return;
+        const pool = this._loadingHints.filter((h) => h && String(h.text || '').trim());
+        if (!pool.length) {
+          runtime.textEl.textContent = props.emptyText;
+          runtime.textEl.style.opacity = pool.length ? '1' : '0.65';
+          return;
+        }
+
+        if (advance) {
+          if (props.shuffle) {
+            runtime.index = pickRandomHintIndex(pool.length, runtime.index);
+          } else {
+            runtime.index = (runtime.index + 1) % pool.length;
+          }
+        } else if (runtime.index < 0) {
+          runtime.index = props.shuffle ? pickRandomHintIndex(pool.length) : 0;
+        }
+
+        const hint = pool[runtime.index] || pool[0];
+        const prefix = String(props.prefix || '');
+        const reduceMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
+        const fadeMs = reduceMotion ? 0 : props.fadeMs;
+
+        if (fadeMs > 0 && runtime.textEl.style.opacity !== '0' && runtime.textEl.textContent) {
+          runtime.textEl.style.transition = `opacity ${fadeMs}ms ease`;
+          runtime.textEl.style.opacity = '0';
+          await sleep(fadeMs);
+          if (token !== runtime.token) return;
+        }
+
+        runtime.textEl.textContent = `${prefix}${hint.text}`;
+        if (fadeMs > 0) {
+          await this._nextFrame();
+          if (token !== runtime.token) return;
+          runtime.textEl.style.transition = `opacity ${fadeMs}ms ease`;
+          runtime.textEl.style.opacity = '1';
+        } else {
+          runtime.textEl.style.opacity = '1';
+        }
+      };
+
+      showHint(false);
+
+      if (hints.length > 1) {
+        runtime.timerId = setInterval(() => {
+          showHint(true);
+        }, intervalMs);
+      }
+    }
+  }
+
   _rebuild() {
     if (!this.el) return;
 
+    this._stopHintsRotation();
     this.el.innerHTML = '';
     this._elementsById.clear();
+    this._hintsRuntimes.clear();
     this._stageRow = null;
     this._progressFill = null;
     this._timerEl = null;
@@ -469,6 +565,9 @@ export class StyledLoadingScreenRenderer {
     this.setMessage(this._message);
     this._applyProgress(this._progressCurrent);
     this._renderStagePills();
+    if (this.el.style.display !== 'none') {
+      this._startHintsRotation();
+    }
   }
 
   _buildOverlayEffects() {
@@ -695,6 +794,19 @@ export class StyledLoadingScreenRenderer {
       node.appendChild(img);
     } else if (type === 'custom-html') {
       node.innerHTML = String(element.props?.html || '');
+    } else if (type === 'loading-hints') {
+      node.classList.add('map-shine-styled-loading-overlay__hints-wrap');
+      const textEl = document.createElement('div');
+      textEl.className = 'map-shine-styled-loading-overlay__hint-text';
+      textEl.style.opacity = '0';
+      node.appendChild(textEl);
+      this._hintsRuntimes.set(id, {
+        element,
+        textEl,
+        index: -1,
+        timerId: 0,
+        token: 0,
+      });
     } else {
       node.textContent = String(element.props?.text || type);
     }
@@ -898,6 +1010,16 @@ export class StyledLoadingScreenRenderer {
         display: block;
       }
 
+      .map-shine-styled-loading-overlay__hints-wrap {
+        display: block;
+        white-space: normal;
+      }
+      .map-shine-styled-loading-overlay__hint-text {
+        width: 100%;
+        line-height: 1.45;
+        will-change: opacity;
+      }
+
       .map-shine-styled-loading-overlay__progress-track {
         width: 100%; height: 100%;
         background: rgba(255,255,255,0.1);
@@ -1072,7 +1194,8 @@ function quoteFont(name) {
 
 function isTextLikeType(type) {
   const t = String(type || '').toLowerCase();
-  return t === 'text' || t === 'subtitle' || t === 'scene-name' || t === 'message' || t === 'percentage' || t === 'timer';
+  return t === 'text' || t === 'subtitle' || t === 'scene-name' || t === 'message'
+    || t === 'percentage' || t === 'timer' || t === 'loading-hints';
 }
 
 function stageGroupFromId(stageId) {

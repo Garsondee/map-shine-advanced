@@ -7,7 +7,7 @@
 import { loadingOverlay as legacyLoadingOverlay } from '../loading-overlay.js';
 import { StyledLoadingScreenRenderer } from './styled-loading-screen-renderer.js';
 import { applyPresetToConfig, loadBuiltInPresets } from './loading-screen-presets.js';
-import { createDefaultStyledLoadingScreenConfig, deepClone, normalizeLoadingScreenConfig } from './loading-screen-config.js';
+import { createDefaultStyledLoadingScreenConfig, deepClone, normalizeLoadingScreenConfig, scalePresentationTimingsForReducedMotion } from './loading-screen-config.js';
 import { loadConfiguredFonts } from './loading-screen-fonts.js';
 import { isFirstLoadOfSession, preloadWallpapers, selectWallpaper } from './loading-screen-wallpapers.js';
 import { getEnabledLoadingHints } from './loading-hints.js';
@@ -54,6 +54,11 @@ class LoadingScreenService {
       fadeClear: async () => {},
       showPanel: async () => {},
       hidePanel: async () => {},
+      whenPresentable: async () => {},
+      whenProgressSettled: async () => {},
+      whenStagePillsReady: async () => {},
+      prepareForCover: () => {},
+      ensureContentHidden: () => {},
       enableDebugMode: () => {},
       disableDebugMode: () => {},
       appendDebugLine: () => {},
@@ -258,8 +263,30 @@ class LoadingScreenService {
   setProgress(value01, opts) { this._active().setProgress?.(value01, opts); }
   startAutoProgress(target01, rate01PerSec) { this._active().startAutoProgress?.(target01, rate01PerSec); }
   stopAutoProgress() { this._active().stopAutoProgress?.(); }
-  showBlack(message) { if (!this.shouldHandleLoading()) return; this._prepareStyledWallpaperForShow(); this._renderer().showBlack?.(message); }
-  showLoading(message) { if (!this.shouldHandleLoading()) return; this._prepareStyledWallpaperForShow(); this._renderer().showLoading?.(message); }
+  showBlack(message) {
+    if (!this.shouldHandleLoading()) return;
+    this._prepareStyledWallpaperForShow();
+    this._renderer().showBlack?.(message);
+  }
+
+  prepareForCover(message) {
+    if (!this.shouldHandleLoading()) return;
+    this._prepareStyledWallpaperForShow();
+    const r = this._renderer();
+    if (typeof r.prepareForCover === 'function') r.prepareForCover(message);
+    else r.showBlack?.(message);
+  }
+
+  ensureContentHidden() {
+    this._renderer().ensureContentHidden?.();
+  }
+
+  showLoading(message) {
+    if (!this.shouldHandleLoading()) return;
+    this._prepareStyledWallpaperForShow();
+    this._renderer().showLoading?.(message);
+  }
+
   hide() { this._renderer().hide?.(); }
 
   async fadeToBlack(durationMs = 5000, contentFadeMs = 2000) {
@@ -346,6 +373,67 @@ class LoadingScreenService {
   setDebugLog(text) { this._active().setDebugLog?.(text); }
   showDebugDismiss(callback) { this._active().showDebugDismiss?.(callback); }
   getElapsedSeconds() { return this._active().getElapsedSeconds?.() ?? 0; }
+
+  /**
+   * Resolved presentation timings from styled config, with reduced-motion scaling.
+   * @returns {import('./loading-screen-config.js').LoadingScreenPresentationTimings}
+   */
+  getPresentationTimings() {
+    const raw = this.settings?.styledConfig?.presentation;
+    const normalized = normalizeLoadingScreenConfig(this.settings.styledConfig).presentation;
+    return scalePresentationTimingsForReducedMotion(normalized ?? raw);
+  }
+
+  /**
+   * Preload fonts/wallpapers before the loading panel fades in.
+   * @returns {Promise<void>}
+   */
+  async prepareForPresentation() {
+    if (!this.shouldHandleLoading()) return;
+    this.ensure();
+    if (this._activeRenderer === this.styled) {
+      await this._prepareStyledAssets();
+    }
+    const r = this._renderer();
+    if (typeof r.whenPresentable === 'function') {
+      await r.whenPresentable();
+    }
+  }
+
+  /**
+   * @returns {Promise<void>}
+   */
+  async whenPresentable() {
+    if (!this.shouldHandleLoading()) return;
+    const r = this._renderer();
+    if (typeof r.whenPresentable === 'function') {
+      await r.whenPresentable();
+    }
+  }
+
+  /**
+   * @param {number} [maxWaitMs]
+   * @returns {Promise<void>}
+   */
+  async whenProgressSettled(maxWaitMs = undefined) {
+    if (!this.shouldHandleLoading()) return;
+    const r = this._renderer();
+    if (typeof r.whenProgressSettled === 'function') {
+      await r.whenProgressSettled(maxWaitMs);
+    }
+  }
+
+  /**
+   * @param {number} [maxWaitMs]
+   * @returns {Promise<void>}
+   */
+  async whenStagePillsReady(maxWaitMs = undefined) {
+    if (!this.shouldHandleLoading()) return;
+    const r = this._renderer();
+    if (typeof r.whenStagePillsReady === 'function') {
+      await r.whenStagePillsReady(maxWaitMs);
+    }
+  }
 
   /**
    * Surface a load failure through the loading UI so users see what went wrong

@@ -15,6 +15,8 @@ import { normalizeLoadingHintsElementProps, pickRandomHintIndex } from './loadin
 export class StyledLoadingScreenRenderer {
   constructor() {
     this.el = null;
+    /** @type {HTMLElement|null} Inner content layer for panel in/out fades. */
+    this._contentEl = null;
     this._style = null;
     this._token = 0;
 
@@ -46,6 +48,11 @@ export class StyledLoadingScreenRenderer {
     this._config = normalizeLoadingScreenConfig(null);
     this._activeWallpaper = null;
 
+    /** @type {Promise<void>|null} */
+    this._wallpaperApplyPromise = null;
+    /** @type {Promise<void>|null} */
+    this._presentablePromise = null;
+
     /** @type {Array<{id:string,text:string,enabled:boolean}>} */
     this._loadingHints = [];
     /** @type {Map<string, any>} */
@@ -67,9 +74,11 @@ export class StyledLoadingScreenRenderer {
    */
   setConfig(config) {
     this._config = normalizeLoadingScreenConfig(config);
-    if (this.el) {
-      this._rebuild();
-    }
+    if (!this.el) return;
+    const visible = this.el.style.display !== 'none'
+      && !this.el.classList.contains('map-shine-loading-overlay--hidden');
+    if (visible) return;
+    this._rebuild();
   }
 
   /**
@@ -164,10 +173,22 @@ export class StyledLoadingScreenRenderer {
     root.style.display = 'none';
     root.style.opacity = '1';
     root.style.pointerEvents = 'none';
-    root.style.background = this._config.style.backgroundColor;
+    root.style.background = 'rgba(0, 0, 0, 1)';
     root.style.overflow = 'hidden';
+    root.style.transitionProperty = 'opacity';
+    root.style.transitionTimingFunction = 'ease';
 
     this.el = root;
+
+    this._contentEl = document.createElement('div');
+    this._contentEl.className = 'map-shine-styled-loading-overlay__content';
+    this._contentEl.style.position = 'absolute';
+    this._contentEl.style.inset = '0';
+    this._contentEl.style.opacity = '0';
+    this._contentEl.style.transitionProperty = 'opacity';
+    this._contentEl.style.transitionTimingFunction = 'ease';
+    this.el.appendChild(this._contentEl);
+
     this._installRuntimeStyle();
     this._rebuild();
 
@@ -222,20 +243,31 @@ export class StyledLoadingScreenRenderer {
   }
 
   showBlack(message = 'Loading…') {
+    // Presentation flow: black shell only; panel fades in via showPanel().
+    this.prepareForCover(message);
+  }
+
+  prepareForCover(message = 'Loading…') {
     this.ensure();
-    // Cancel any in-flight fade from a previous scene load.
-    // Without this, a stale fadeIn() completion can hide a newly shown overlay.
     this._token++;
     this._resetProgress();
     this.setMessage(message);
-    this._startTimer();
-    this._startHintsRotation();
 
     this.el.style.display = 'block';
     this.el.style.pointerEvents = 'auto';
     this.el.style.opacity = '1';
-    this.el.style.background = this._config.style.backgroundColor;
+    this.el.style.background = 'rgba(0, 0, 0, 1)';
     this.el.classList.remove('map-shine-loading-overlay--hidden');
+    this.el.classList.add('map-shine-loading-overlay--black');
+    this._setContentOpacity(0, 0);
+  }
+
+  /**
+   * Keep the loading UI hidden while the outer black curtain stays up.
+   */
+  ensureContentHidden() {
+    if (!this.el) return;
+    this._setContentOpacity(0, 0);
   }
 
   showLoading(message = 'Loading…') {
@@ -245,45 +277,269 @@ export class StyledLoadingScreenRenderer {
 
   hide() {
     if (!this.el) return;
-    // Invalidate pending async fades so they cannot race future show calls.
     this._token++;
     this._resetProgress();
     this._stopTimer();
     this._stopHintsRotation();
+    this._clearTransitionHints(this.el);
+    this._clearTransitionHints(this._contentEl);
     this.el.classList.add('map-shine-loading-overlay--hidden');
+    this.el.classList.remove('map-shine-loading-overlay--black');
     this.el.style.display = 'none';
     this.el.style.pointerEvents = 'none';
+    this._presentablePromise = null;
   }
 
-  async fadeToBlack(durationMs = 500, _contentFadeMs = 250) {
+  async fadeBlack(durationMs = 280, options = undefined) {
     this.ensure();
     const token = ++this._token;
+    const d = Math.max(0, Number.isFinite(durationMs) ? durationMs : 280);
+    const contentVisible = options?.contentVisible !== false;
+
+    this._autoProgress = null;
+
+    const wasHidden = this.el.style.display === 'none'
+      || this.el.classList.contains('map-shine-loading-overlay--hidden');
 
     this.el.style.display = 'block';
     this.el.style.pointerEvents = 'auto';
-    this.el.style.transition = `opacity ${Math.max(0, durationMs)}ms ease`;
-    this.el.style.opacity = '0';
-    await this._nextFrame();
+    this.el.style.background = 'rgba(0, 0, 0, 1)';
+    this.el.style.transitionProperty = 'opacity';
+    this.el.style.transitionTimingFunction = 'ease';
+    this._setContentOpacity(contentVisible ? 1 : 0, 0);
+    this.el.classList.remove('map-shine-loading-overlay--hidden');
+    this.el.classList.add('map-shine-loading-overlay--black');
+
+    const parsedOpacity = parseFloat(this.el.style.opacity || '0');
+    const startOpacity = wasHidden ? 0
+      : (Number.isFinite(parsedOpacity) ? parsedOpacity : 0);
+
+    if (startOpacity >= 0.999) {
+      this.el.style.transitionDuration = '0ms';
+      this.el.style.opacity = '1';
+      if (!contentVisible) this._setContentOpacity(0, 0);
+      return;
+    }
+
+    this._markTransitionHint(this.el);
+    this.el.style.transitionDuration = '0ms';
+    this.el.style.opacity = String(startOpacity);
+    void this.el.offsetHeight;
+    this.el.style.transitionDuration = `${d}ms`;
     this.el.style.opacity = '1';
 
-    await sleep(Math.max(0, durationMs));
+    await this._waitForOpacityTransition(this.el, d);
     if (token !== this._token) return;
+    this._clearTransitionHints(this.el);
   }
 
-  async fadeIn(durationMs = 500, _contentFadeMs = 250) {
-    if (!this.el) return;
+  async showPanel(durationMs = 300) {
+    this.ensure();
+    const token = this._token;
+    const d = Math.max(0, Number.isFinite(durationMs) ? durationMs : 300);
+
+    if (!this._contentEl) return;
+
+    this._restartEntranceAnimations();
+    this._startTimer();
+    this._startHintsRotation();
+
+    const startOpacity = parseFloat(this._contentEl.style.opacity || '0') || 0;
+    if (startOpacity >= 0.999) {
+      this._setContentOpacity(1, 0);
+      return;
+    }
+
+    this._markTransitionHint(this._contentEl);
+    this._setContentOpacity(startOpacity, 0);
+    void this._contentEl.offsetHeight;
+    this._setContentOpacity(1, d);
+
+    await this._waitForOpacityTransition(this._contentEl, d);
+    if (token !== this._token) return;
+    this._clearTransitionHints(this._contentEl);
+  }
+
+  async hidePanel(durationMs = 300) {
+    this.ensure();
+    const token = this._token;
+    const d = Math.max(0, Number.isFinite(durationMs) ? durationMs : 300);
+
+    if (!this._contentEl) return;
+
+    const startOpacity = parseFloat(this._contentEl.style.opacity || '1');
+    const start = Number.isFinite(startOpacity) ? startOpacity : 1;
+    if (start <= 0.001) {
+      this._setContentOpacity(0, 0);
+      return;
+    }
+
+    this._markTransitionHint(this._contentEl);
+    this._setContentOpacity(start, 0);
+    void this._contentEl.offsetHeight;
+    this._setContentOpacity(0, d);
+
+    await this._waitForOpacityTransition(this._contentEl, d);
+    if (token !== this._token) return;
+    this._clearTransitionHints(this._contentEl);
+    this._stopHintsRotation();
+  }
+
+  async fadeClear(durationMs = 520) {
+    this.ensure();
     const token = ++this._token;
+    const d = Math.max(0, Number.isFinite(durationMs) ? durationMs : 520);
+
+    this._autoProgress = null;
 
     this.el.style.display = 'block';
     this.el.style.pointerEvents = 'none';
-    this.el.style.transition = `opacity ${Math.max(0, durationMs)}ms ease`;
+    this.el.style.background = 'rgba(0, 0, 0, 1)';
+    this.el.style.transitionProperty = 'opacity';
+    this.el.style.transitionTimingFunction = 'ease';
+
+    const startOpacity = parseFloat(this.el.style.opacity || '1');
+    if (startOpacity <= 0.001) {
+      this.hide();
+      return;
+    }
+
+    this._markTransitionHint(this.el);
+    this.el.style.transitionDuration = '0ms';
+    this.el.style.opacity = String(Number.isFinite(startOpacity) ? startOpacity : 1);
+    void this.el.offsetHeight;
+    this.el.style.transitionDuration = `${d}ms`;
+    this.el.style.opacity = '0';
+
+    await this._waitForOpacityTransition(this.el, d);
+    if (token !== this._token) return;
+    this._clearTransitionHints(this.el);
+    this.hide();
+  }
+
+  async fadeToBlack(durationMs = 500, contentFadeMs = 250) {
+    this.ensure();
+    const token = ++this._token;
+    const outerMs = Math.max(0, Number.isFinite(durationMs) ? durationMs : 500);
+    const innerMs = Math.min(
+      Math.max(0, Number.isFinite(contentFadeMs) ? contentFadeMs : 0),
+      outerMs
+    );
+
+    this.el.style.display = 'block';
+    this.el.style.pointerEvents = 'auto';
+    this.el.style.background = 'rgba(0, 0, 0, 1)';
+    this.el.style.transitionProperty = 'opacity';
+    this.el.style.transitionTimingFunction = 'ease';
+    this._setContentOpacity(1, 0);
+    this.el.classList.remove('map-shine-loading-overlay--hidden');
+
+    this._markTransitionHint(this.el);
+    this._markTransitionHint(this._contentEl);
+    this.el.style.transitionDuration = `${outerMs}ms`;
+    this._setContentOpacity(0, innerMs);
+    this.el.style.opacity = '0';
+    await this._nextFrame();
+    this.el.style.opacity = '1';
+
+    await this._waitForOpacityTransition(this.el, outerMs);
+    if (token !== this._token) return;
+    this._clearTransitionHints(this.el);
+    this._clearTransitionHints(this._contentEl);
+  }
+
+  async fadeIn(durationMs = 500, contentFadeMs = 250) {
+    if (!this.el) return;
+    const token = ++this._token;
+    const outerMs = Math.max(0, Number.isFinite(durationMs) ? durationMs : 500);
+    const innerMs = Math.min(
+      Math.max(0, Number.isFinite(contentFadeMs) ? contentFadeMs : 0),
+      outerMs
+    );
+
+    this.el.style.display = 'block';
+    this.el.style.pointerEvents = 'none';
+    this.el.style.background = 'rgba(0, 0, 0, 1)';
+    this.el.style.transitionProperty = 'opacity';
+    this.el.style.transitionTimingFunction = 'ease';
+    this._setContentOpacity(1, 0);
+
+    this._markTransitionHint(this.el);
+    this._markTransitionHint(this._contentEl);
+    this.el.style.transitionDuration = `${outerMs}ms`;
+    this._setContentOpacity(0, innerMs);
     this.el.style.opacity = '1';
     await this._nextFrame();
     this.el.style.opacity = '0';
-    await sleep(Math.max(0, durationMs));
-    if (token !== this._token) return;
 
+    await this._waitForOpacityTransition(this.el, outerMs);
+    if (token !== this._token) return;
+    this._clearTransitionHints(this.el);
+    this._clearTransitionHints(this._contentEl);
     this.hide();
+  }
+
+  /**
+   * Resolve when wallpaper/fonts/DOM are ready for panel fade-in.
+   * @param {number} [maxWaitMs=3000]
+   * @returns {Promise<void>}
+   */
+  async whenPresentable(maxWaitMs = 3000) {
+    this.ensure();
+    if (this._presentablePromise) {
+      await this._presentablePromise;
+      return;
+    }
+
+    const waitMs = Math.max(500, Number.isFinite(maxWaitMs) ? maxWaitMs : 3000);
+    this._presentablePromise = Promise.race([
+      this._resolvePresentable(),
+      sleep(waitMs),
+    ]).finally(() => {
+      this._presentablePromise = null;
+    });
+
+    await this._presentablePromise;
+  }
+
+  /**
+   * Wait until the progress bar RAF loop reaches its target.
+   * @param {number} [maxWaitMs=500]
+   * @returns {Promise<void>}
+   */
+  async whenProgressSettled(maxWaitMs = 500) {
+    this.ensure();
+    const limit = Math.max(50, Number.isFinite(maxWaitMs) ? maxWaitMs : 500);
+    const start = performance.now();
+
+    while (performance.now() - start < limit) {
+      if (Math.abs(this._progressTarget - this._progressCurrent) < 0.01) return;
+      await this._nextFrame();
+    }
+  }
+
+  /**
+   * Wait until stage pill DOM matches configured stage count.
+   * @param {number} [maxWaitMs=3000]
+   * @returns {Promise<void>}
+   */
+  async whenStagePillsReady(maxWaitMs = 3000) {
+    this.ensure();
+    const expected = this._stageState?.ranges?.size ?? 0;
+    if (!expected || !this._stageRow) return;
+
+    const limit = Math.max(100, Number.isFinite(maxWaitMs) ? maxWaitMs : 3000);
+    const start = performance.now();
+
+    while (performance.now() - start < limit) {
+      const count = this._stageRow.children?.length ?? 0;
+      if (count >= expected) {
+        await this._nextFrame();
+        await this._nextFrame();
+        return;
+      }
+      await this._nextFrame();
+    }
   }
 
   enableDebugMode() {
@@ -501,30 +757,27 @@ export class StyledLoadingScreenRenderer {
   }
 
   _rebuild() {
-    if (!this.el) return;
+    if (!this.el || !this._contentEl) return;
 
     this._stopHintsRotation();
-    this.el.innerHTML = '';
+    this._contentEl.innerHTML = '';
     this._elementsById.clear();
     this._hintsRuntimes.clear();
     this._stageRow = null;
     this._progressFill = null;
     this._timerEl = null;
 
-    this.el.style.background = String(this._config.style.backgroundColor || 'rgba(0,0,0,1)');
-    this.el.style.setProperty('--ms-ls-accent', String(this._config.style.accentColor || 'rgba(0,180,255,0.9)'));
-    this.el.style.setProperty('--ms-ls-accent-2', String(this._config.style.secondaryAccentColor || 'rgba(140,100,255,0.9)'));
-    this.el.style.setProperty('--ms-ls-wallpaper-fit', String(this._config.wallpapers?.fit || 'cover'));
+    const host = this._contentEl;
+    host.style.setProperty('--ms-ls-accent', String(this._config.style.accentColor || 'rgba(0,180,255,0.9)'));
+    host.style.setProperty('--ms-ls-accent-2', String(this._config.style.secondaryAccentColor || 'rgba(140,100,255,0.9)'));
+    host.style.setProperty('--ms-ls-wallpaper-fit', String(this._config.wallpapers?.fit || 'cover'));
 
-    // Wallpaper layer
     const wallLayer = document.createElement('div');
     wallLayer.className = 'map-shine-styled-loading-overlay__wallpaper';
-    this.el.appendChild(wallLayer);
+    host.appendChild(wallLayer);
 
-    // Optional overlay effects
-    this._buildOverlayEffects();
+    this._buildOverlayEffects(host);
 
-    // Panel
     const panelCfg = this._config.layout?.panel || {};
     const panel = document.createElement('div');
     panel.className = 'map-shine-styled-loading-overlay__panel';
@@ -545,20 +798,17 @@ export class StyledLoadingScreenRenderer {
     panel.style.color = String(this._config.style.textColor || 'rgba(255,255,255,0.92)');
 
     if (panelCfg.visible !== false) {
-      this.el.appendChild(panel);
+      host.appendChild(panel);
     }
 
-    // Elements are always children of the full overlay so they can be freely
-    // positioned anywhere on screen, independent of the panel.
     const elements = Array.isArray(this._config.layout?.elements) ? this._config.layout.elements : [];
     for (const element of elements) {
       const node = this._createElementNode(element);
       if (!node) continue;
-      this.el.appendChild(node);
+      host.appendChild(node);
     }
 
-    // Debug UI lives inside the panel for readability
-    const debugHost = panelCfg.visible !== false ? panel : this.el;
+    const debugHost = panelCfg.visible !== false ? panel : host;
     this._buildDebugUi(debugHost);
     this._applyWallpaper();
     this.setSceneName(this._sceneName);
@@ -570,9 +820,9 @@ export class StyledLoadingScreenRenderer {
     }
   }
 
-  _buildOverlayEffects() {
+  _buildOverlayEffects(host = this._contentEl) {
     const effects = Array.isArray(this._config.overlayEffects) ? this._config.overlayEffects : [];
-    if (!this.el || effects.length === 0) return;
+    if (!host || effects.length === 0) return;
 
     for (const effect of effects) {
       if (!effect || effect.enabled === false) continue;
@@ -585,30 +835,30 @@ export class StyledLoadingScreenRenderer {
         node.className = 'map-shine-styled-loading-overlay__effect-vignette';
         node.style.opacity = `${intensity}`;
         node.style.background = `radial-gradient(ellipse at center, rgba(0,0,0,0) 40%, ${String(effect.color || 'rgba(0,0,0,0.75)')} 100%)`;
-        this.el.appendChild(node);
+        host.appendChild(node);
       } else if (type === 'scanlines') {
         const node = document.createElement('div');
         node.className = 'map-shine-styled-loading-overlay__effect-scanlines';
         node.style.opacity = `${Math.max(0.05, intensity * 0.55)}`;
-        this.el.appendChild(node);
+        host.appendChild(node);
       } else if (type === 'grain') {
         const node = document.createElement('div');
         node.className = 'map-shine-styled-loading-overlay__effect-grain';
         node.style.opacity = `${Math.max(0.03, intensity * 0.25)}`;
-        this.el.appendChild(node);
+        host.appendChild(node);
       } else if (type === 'embers' || type === 'dust' || type === 'stars' || type === 'magic-motes' || type === 'fog' || type === 'smoke') {
-        this._buildParticleOverlay(type, effect);
+        this._buildParticleOverlay(type, effect, host);
       }
     }
   }
 
-  _buildParticleOverlay(type, effect) {
-    if (!this.el) return;
+  _buildParticleOverlay(type, effect, host = this._contentEl) {
+    if (!host) return;
     const container = document.createElement('div');
     container.style.position = 'absolute';
     container.style.inset = '0';
     container.style.pointerEvents = 'none';
-    this.el.appendChild(container);
+    host.appendChild(container);
 
     const intensity = clamp(Number(effect.intensity), 0, 1);
     let count = 10;
@@ -874,8 +1124,17 @@ export class StyledLoadingScreenRenderer {
   }
 
   async _applyWallpaper() {
-    if (!this.el) return;
-    const wallLayer = this.el.querySelector('.map-shine-styled-loading-overlay__wallpaper');
+    if (!this._contentEl) return;
+    this._wallpaperApplyPromise = this._applyWallpaperInner();
+    try {
+      await this._wallpaperApplyPromise;
+    } catch (_) {
+    }
+  }
+
+  async _applyWallpaperInner() {
+    if (!this._contentEl) return;
+    const wallLayer = this._contentEl.querySelector('.map-shine-styled-loading-overlay__wallpaper');
     if (!wallLayer) return;
 
     wallLayer.innerHTML = '';
@@ -894,14 +1153,18 @@ export class StyledLoadingScreenRenderer {
       domImg.src = img.src;
       domImg.alt = String(entry.label || 'Wallpaper');
       wallLayer.appendChild(domImg);
+      try {
+        if (domImg.decode) await domImg.decode();
+      } catch (_) {
+      }
     }
 
     this._applyWallpaperOverlay();
   }
 
   _applyWallpaperOverlay() {
-    if (!this.el) return;
-    this.el.querySelectorAll('.map-shine-styled-loading-overlay__wallpaper-overlay').forEach((n) => n.remove());
+    if (!this._contentEl) return;
+    this._contentEl.querySelectorAll('.map-shine-styled-loading-overlay__wallpaper-overlay').forEach((n) => n.remove());
 
     const overlay = this._config.wallpapers?.overlay;
     if (!overlay?.enabled) return;
@@ -912,7 +1175,7 @@ export class StyledLoadingScreenRenderer {
     node.style.inset = '0';
     node.style.pointerEvents = 'none';
     node.style.background = String(overlay.color || 'rgba(0,0,0,0.45)');
-    this.el.appendChild(node);
+    this._contentEl.appendChild(node);
   }
 
   _renderStagePills() {
@@ -981,6 +1244,13 @@ export class StyledLoadingScreenRenderer {
       .map-shine-styled-loading-overlay {
         font-family: 'Signika', sans-serif;
         color: rgba(255,255,255,0.92);
+        background: rgba(0, 0, 0, 1);
+      }
+
+      .map-shine-styled-loading-overlay__content {
+        position: absolute;
+        inset: 0;
+        overflow: hidden;
       }
 
       .map-shine-styled-loading-overlay__wallpaper {
@@ -1125,6 +1395,85 @@ export class StyledLoadingScreenRenderer {
       try { requestAnimationFrame(() => done()); } catch (_) {}
       setTimeout(done, 50);
     });
+  }
+
+  _setContentOpacity(value, durationMs = 0) {
+    if (!this._contentEl) return;
+    const v = clamp(value, 0, 1);
+    const d = Math.max(0, Number.isFinite(durationMs) ? durationMs : 0);
+    this._contentEl.style.transitionProperty = 'opacity';
+    this._contentEl.style.transitionTimingFunction = 'ease';
+    this._contentEl.style.transitionDuration = `${d}ms`;
+    this._contentEl.style.opacity = String(v);
+  }
+
+  _waitForOpacityTransition(el, durationMs) {
+    if (!el) return Promise.resolve();
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        try { el.removeEventListener('transitionend', onEnd); } catch (_) {}
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        resolve();
+      };
+      const onEnd = (event) => {
+        if (event && event.target !== el) return;
+        if (event?.propertyName && event.propertyName !== 'opacity') return;
+        finish();
+      };
+      el.addEventListener('transitionend', onEnd);
+      const timeoutHandle = setTimeout(finish, Math.max(50, durationMs + 120));
+    });
+  }
+
+  _markTransitionHint(el) {
+    if (!el?.style) return;
+    el.style.willChange = 'opacity';
+  }
+
+  _clearTransitionHints(el) {
+    if (!el?.style) return;
+    el.style.willChange = '';
+  }
+
+  async _resolvePresentable() {
+    this.ensure();
+    if (this._wallpaperApplyPromise) {
+      try { await this._wallpaperApplyPromise; } catch (_) {}
+    } else {
+      await this._applyWallpaper();
+    }
+
+    try {
+      if (document.fonts?.ready) {
+        await Promise.race([
+          document.fonts.ready,
+          sleep(1500),
+        ]);
+      }
+    } catch (_) {
+    }
+
+    await this._nextFrame();
+    await this._nextFrame();
+  }
+
+  _restartEntranceAnimations() {
+    if (!this._contentEl) return;
+    const elements = Array.isArray(this._config.layout?.elements) ? this._config.layout.elements : [];
+    const byId = new Map(elements.map((e) => [String(e.id || ''), e]));
+
+    for (const [id, node] of this._elementsById.entries()) {
+      const element = byId.get(id);
+      if (!element?.animation?.entrance?.type) continue;
+      const cls = mapEntranceAnimationClass(element.animation.entrance.type);
+      if (!cls) continue;
+      node.classList.remove(cls);
+      void node.offsetWidth;
+      applyElementAnimations(node, element.animation);
+    }
   }
 }
 

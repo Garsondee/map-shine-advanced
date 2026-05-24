@@ -3,7 +3,7 @@
  * @module ui/loading-screen/loading-screen-dialog
  */
 
-import { normalizeLoadingScreenConfig, WALLPAPER_MODES } from './loading-screen-config.js';
+import { normalizeLoadingScreenConfig, normalizePresentationTimings, WALLPAPER_MODES } from './loading-screen-config.js';
 import { getAllLoadingHints } from './loading-hints.js';
 import { getAvailableFontFamilies } from './loading-screen-fonts.js';
 import { applyPresetToConfig } from './loading-screen-presets.js';
@@ -70,6 +70,7 @@ export class LoadingScreenDialog {
       userPresetInput: null,
       userPresetList: null,
       deleteUserPresetBtn: null,
+      presentationSettings: null,
       wallpaperList: null,
       wallpaperModeSelect: null,
       wallpaperFitSelect: null,
@@ -161,6 +162,7 @@ export class LoadingScreenDialog {
   _renderAll() {
     this._renderTopControls();
     this._renderUserPresetList();
+    this._renderPresentationSettings();
     this._renderWallpaperSettings();
     this._renderWallpaperList();
     this._renderAlignToolbar();
@@ -185,6 +187,61 @@ export class LoadingScreenDialog {
     }
   }
 
+  _renderPresentationSettings() {
+    const host = this.refs.presentationSettings;
+    if (!host || !this.state?.config) return;
+
+    if (!this.state.config.presentation) {
+      this.state.config.presentation = normalizePresentationTimings(null);
+    }
+
+    const p = this.state.config.presentation;
+    host.innerHTML = '';
+
+    const intro = document.createElement('div');
+    intro.className = 'ms-lsd-empty';
+    intro.style.marginBottom = '6px';
+    intro.textContent = 'Scene load fade timings (ms). Defaults: 4000ms fades.';
+    host.appendChild(intro);
+
+    const fields = [
+      { key: 'coverFadeMs', label: 'Cover fade (scene → black)' },
+      { key: 'panelInFadeMs', label: 'Panel in (black → loading UI)' },
+      { key: 'minBlackHoldMs', label: 'Min black hold before panel in' },
+      { key: 'minVisibleMs', label: 'Min visible after panel in' },
+      { key: 'readyHoldMs', label: 'Hold at Ready / 100%' },
+      { key: 'panelOutFadeMs', label: 'Panel out (loading UI → black)' },
+      { key: 'sceneRevealFadeMs', label: 'Scene reveal (black → scene)' },
+      { key: 'progressSettleMs', label: 'Progress bar settle wait' },
+    ];
+
+    for (const field of fields) {
+      host.appendChild(this._inputRow(field.label, this._number(
+        num(p[field.key], 0),
+        0,
+        10000,
+        100,
+        (v) => {
+          p[field.key] = Math.max(0, Math.round(v));
+          this.state.config.presentation = normalizePresentationTimings(p);
+        }
+      )));
+    }
+
+    const deferRow = document.createElement('label');
+    deferRow.className = 'ms-lsd-stack';
+    deferRow.style.marginTop = '4px';
+    const deferCheckbox = document.createElement('input');
+    deferCheckbox.type = 'checkbox';
+    deferCheckbox.checked = p.deferPanelUntilPresentable !== false;
+    deferCheckbox.addEventListener('change', () => {
+      p.deferPanelUntilPresentable = deferCheckbox.checked;
+      this.state.config.presentation = normalizePresentationTimings(p);
+    });
+    deferRow.append(deferCheckbox, document.createTextNode(' Wait for fonts/wallpaper before panel in'));
+    host.appendChild(deferRow);
+  }
+
   _cacheRefs() {
     const q = (selector) => this.container.querySelector(selector);
 
@@ -197,6 +254,7 @@ export class LoadingScreenDialog {
     this.refs.userPresetInput = q('[data-ref="preset-name"]');
     this.refs.userPresetList = q('[data-ref="user-preset-list"]');
     this.refs.deleteUserPresetBtn = q('[data-action="delete-user-preset"]');
+    this.refs.presentationSettings = q('[data-ref="presentation-settings"]');
     this.refs.wallpaperList = q('[data-ref="wallpaper-list"]');
     this.refs.wallpaperModeSelect = q('[data-ref="wallpaper-mode"]');
     this.refs.wallpaperFitSelect = q('[data-ref="wallpaper-fit"]');
@@ -3146,6 +3204,11 @@ export class LoadingScreenDialog {
               <button type="button" class="ms-lsd-btn ms-lsd-btn--full" data-action="save-user-preset">Save User Preset</button>
               <button type="button" class="ms-lsd-btn ms-lsd-btn--full is-danger is-muted" data-action="delete-user-preset">Delete Selected User Preset</button>
               <div class="ms-lsd-list ms-lsd-user-preset-list" data-ref="user-preset-list"></div>
+            </details>
+
+            <details>
+              <summary class="ms-lsd-section-title">Presentation</summary>
+              <div class="ms-lsd-presentation-settings" data-ref="presentation-settings"></div>
             </details>
 
             <details open>

@@ -456,6 +456,44 @@ export class LoadingOverlay {
     return (performance.now() - this._timerStart) / 1000;
   }
 
+  async whenPresentable(_maxWaitMs = 3000) {
+    this.ensure();
+    try {
+      if (document.fonts?.ready) {
+        await Promise.race([document.fonts.ready, this._sleep(1500)]);
+      }
+    } catch (_) {}
+    await this._nextFrame();
+  }
+
+  async whenProgressSettled(maxWaitMs = 500) {
+    this.ensure();
+    const limit = Math.max(50, Number.isFinite(maxWaitMs) ? maxWaitMs : 500);
+    const start = performance.now();
+    while (performance.now() - start < limit) {
+      if (Math.abs(this._progressTarget - this._progressCurrent) < 0.01) return;
+      await this._nextFrame();
+    }
+  }
+
+  async whenStagePillsReady(maxWaitMs = 3000) {
+    this.ensure();
+    const expected = this._stageState?.ranges?.size ?? 0;
+    if (!expected || !this._stageRowEl) return;
+
+    const limit = Math.max(100, Number.isFinite(maxWaitMs) ? maxWaitMs : 3000);
+    const start = performance.now();
+    while (performance.now() - start < limit) {
+      const count = this._stageRowEl.children?.length ?? 0;
+      if (count >= expected) {
+        await this._nextFrame();
+        await this._nextFrame();
+        return;
+      }
+      await this._nextFrame();
+    }
+  }
+
   setMessage(message) {
     this.ensure();
     if (this.msgEl) this.msgEl.textContent = message || '';

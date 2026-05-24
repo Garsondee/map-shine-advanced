@@ -5719,7 +5719,7 @@ async function onCanvasReady(canvas) {
     // is reset and the panel-out → bg-out reveal looks smooth. Falls back to a
     // direct fadeIn if the curtain raises.
     safeCall(() => {
-      sceneTransitionCurtain.reveal({ holdMs: 0 }).catch(() => {
+      sceneTransitionCurtain.reveal({ fast: true, holdMs: 0 }).catch(() => {
         try { loadingOverlay.fadeIn(500).catch(() => {}); } catch (_) {}
       });
     }, 'overlay.noScene', Severity.COSMETIC);
@@ -5929,10 +5929,17 @@ async function onCanvasReady(canvas) {
         lastResolvedSceneId: window?.MapShine?.__msaLastResolvedSceneId ?? null,
       });
     } catch (_) {}
+    await safeCallAsync(async () => {
+      if (!sceneTransitionCurtain.isActive()) {
+        await sceneTransitionCurtain.cover({ message: 'Loading…' });
+      }
+    }, 'overlay.cover', Severity.COSMETIC);
+
     safeCall(() => {
       // Scene name is rendered by the dedicated scene-name element/subtitle when present.
       const displayName = getSceneLoadingDisplayName(scene);
-      loadingOverlay.showBlack('Loading...');
+      loadingOverlay.ensure?.();
+      loadingOverlay.setMessage?.('Loading...');
       loadingOverlay.setSceneName(displayName);
       loadingOverlay.configureStages([
         { id: 'assets.discover',      label: 'Discovering assets...',   weight: 3  },
@@ -5964,6 +5971,18 @@ async function onCanvasReady(canvas) {
       loadingOverlay.setStage('assets.discover', 0.0, undefined, { immediate: true });
       loadingOverlay.startAutoProgress(0.04, 0.05);
     }, 'overlay.configureStages', Severity.COSMETIC);
+
+    try {
+      if (window.MapShine) window.MapShine.__loadingOverlayConfiguredSceneId = scene?.id ?? null;
+    } catch (_) {}
+
+    // Fade the loading panel in while createThreeCanvas runs. Do not await here —
+    // awaiting would delay the load and (previously) allowed createThreeCanvas to
+    // call ensureContentHidden() after the panel had already faded in.
+    safeCallAsync(async () => {
+      await loadingOverlay.prepareForPresentation?.();
+      await sceneTransitionCurtain.revealPanel();
+    }, 'overlay.revealPanel', Severity.COSMETIC);
   }
 
   // V14 native same-scene level redraw: resync placeables + hooks without destroying WebGL.
@@ -6737,12 +6756,14 @@ async function createThreeCanvas(scene, createOptions = {}) {
           callStack: new Error('createThreeCanvas overlay stack trace').stack,
         });
       } catch (_) {}
-      safeCall(() => {
-        // Scene name is rendered by the dedicated scene-name element/subtitle when present.
-        const displayName = getSceneLoadingDisplayName(scene);
-        loadingOverlay.showBlack('Loading...');
-        loadingOverlay.setSceneName(displayName);
-        loadingOverlay.configureStages([
+      const configuredForScene = window.MapShine?.__loadingOverlayConfiguredSceneId === scene?.id;
+      if (!configuredForScene) {
+        safeCall(() => {
+          // Scene name is rendered by the dedicated scene-name element/subtitle when present.
+          const displayName = getSceneLoadingDisplayName(scene);
+          loadingOverlay.showBlack('Loading...');
+          loadingOverlay.setSceneName(displayName);
+          loadingOverlay.configureStages([
           { id: 'assets.discover',      label: 'Discovering assets...',   weight: 3  },
           { id: 'assets.catalog',       label: 'Cataloging batches...',    weight: 2  },
           { id: 'assets.load',          label: 'Loading textures...',      weight: 18 },
@@ -6768,10 +6789,11 @@ async function createThreeCanvas(scene, createOptions = {}) {
           { id: 'final.controls',       label: 'Final controls...',        weight: 2  },
           { id: 'final',                label: 'Ready...',                 weight: 2  },
         ]);
-        loadingOverlay.startStages();
-        loadingOverlay.setStage('assets.discover', 0.0, undefined, { immediate: true });
-        loadingOverlay.startAutoProgress(0.04, 0.05);
-      }, 'overlay.configureStages(create)', Severity.COSMETIC);
+          loadingOverlay.startStages();
+          loadingOverlay.setStage('assets.discover', 0.0, undefined, { immediate: true });
+          loadingOverlay.startAutoProgress(0.04, 0.05);
+        }, 'overlay.configureStages(create)', Severity.COSMETIC);
+      }
     }
 
     // Proactively validate and normalize the scene settings flag.
@@ -9472,7 +9494,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
             // a throttled rAF, otherwise the user can see an empty/grey WebGL
             // view until the tab is foregrounded.
             await safeCallAsync(async () => {
-              await sceneTransitionCurtain.reveal({ holdMs: 0 }).catch(() => {});
+              await sceneTransitionCurtain.reveal({ fast: true, holdMs: 0 }).catch(() => {});
               try { loadingOverlay.hide?.(); } catch (_) {}
             }, 'overlay.tabHidden.reveal', Severity.COSMETIC);
             safeCall(() => {
@@ -9484,42 +9506,47 @@ async function createThreeCanvas(scene, createOptions = {}) {
           }
 
           await Promise.race([
-            sceneTransitionCurtain.reveal({ holdMs: 0 }),
+            sceneTransitionCurtain.reveal({ fast: true }),
             new Promise((r) => setTimeout(r, 5000)),
           ]);
           return;
         }
 
-        // IntroZoomEffect intercepts the fade-out when enabled.
-        // It handles its own fallback to a standard fadeIn when disabled or when
-        // no owned tokens are found. The effect temporarily locks user pan/zoom
-        // input and restores the cinematic camera manager's blocker on completion.
-        await Promise.race([
-          introZoomEffect.run(loadingOverlay, {
-          onBlockInput: () => {
-            try { cinematicCameraManager?.suspendTemporaryRuntimeControl?.(); } catch (_) {}
-            pixiInputBridge?.setInputBlocker(() => true);
-          },
-          onUnblockInput: () => {
-            pixiInputBridge?.setInputBlocker(null);
-            try { cinematicCameraManager?.resumeTemporaryRuntimeControl?.(); } catch (_) {}
-            // Restore the cinematic camera manager's input blocker so its
-            // player-follow-lock and bounds-constraint features work after the sequence.
-            try { cinematicCameraManager?._bindInputBridge?.(); } catch (_) {}
-          },
-          }),
-          new Promise((resolve) => setTimeout(resolve, 12000)),
-        ]);
+        const presentation = loadingOverlay.getPresentationTimings?.() ?? {};
 
-        // Hard safety: regardless of intro outcome, never leave the overlay
-        // stuck. The intro zoom typically calls `loadingOverlay.hide()` itself,
-        // so this is mostly a no-op state reset, but we still await a fast
-        // reveal in case the intro zoom failed silently and the panel is still
-        // visible.
-        await Promise.race([
-          sceneTransitionCurtain.reveal({ holdMs: 0, panelOutMs: 200, revealMs: 400 }),
-          new Promise((resolve) => setTimeout(resolve, 4000)),
-        ]);
+        if (introZoomEffect.isEnabled()) {
+          await Promise.race([
+            loadingOverlay.hidePanel?.(presentation.panelOutFadeMs ?? 4000),
+            new Promise((r) => setTimeout(r, (presentation.panelOutFadeMs ?? 4000) + 500)),
+          ]);
+
+          // IntroZoomEffect intercepts the fade-out when enabled.
+          await Promise.race([
+            introZoomEffect.run(loadingOverlay, {
+            onBlockInput: () => {
+              try { cinematicCameraManager?.suspendTemporaryRuntimeControl?.(); } catch (_) {}
+              pixiInputBridge?.setInputBlocker(() => true);
+            },
+            onUnblockInput: () => {
+              pixiInputBridge?.setInputBlocker(null);
+              try { cinematicCameraManager?.resumeTemporaryRuntimeControl?.(); } catch (_) {}
+              try { cinematicCameraManager?._bindInputBridge?.(); } catch (_) {}
+            },
+            }),
+            new Promise((resolve) => setTimeout(resolve, 12000)),
+          ]);
+
+          await Promise.race([
+            sceneTransitionCurtain.reveal({ fast: true, holdMs: 0 }),
+            new Promise((resolve) => setTimeout(resolve, 4000)),
+          ]);
+        } else {
+          await Promise.race([
+            sceneTransitionCurtain.reveal({ finalMessage: readyMsg }),
+            new Promise((resolve) => setTimeout(resolve, 45000)),
+          ]);
+        }
+
         try { sceneTransitionCurtain.forceClear(); } catch (_) {}
         try { loadingOverlay.hide?.(); } catch (_) {}
       }, 'overlay.introZoom', Severity.COSMETIC);

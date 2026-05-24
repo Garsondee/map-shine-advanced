@@ -2,36 +2,14 @@
  * @fileoverview Scene transition curtain — orchestrates the visual sequence
  * around full Foundry scene switches.
  *
- * The legacy flow ({@link LoadingOverlay#fadeToBlack} +
- * {@link LoadingOverlay#fadeIn}) cross-faded the background colour and the
- * panel content at the same time. The panel was invisible by the time the
- * screen was fully black, so the user never saw the "Loading…" UI during the
- * costly Canvas.draw/createThreeCanvas phase, and the reveal showed a panel
- * popping back to opacity 1 for a single frame before disappearing.
+ * Presentation timings come from loading screen config (`presentation` block)
+ * via {@link loadingScreenService.getPresentationTimings}.
  *
- * This curtain replaces that with a four-phase sequence:
- *
- *   cover()
- *     1. Outer overlay fades to opaque black (opacity only). Panel kept at
- *        content-opacity 0 so the screen reaches solid-black with no UI.
- *     2. Panel fades in (content-opacity 0 → 1) so the loading screen
- *        gracefully appears over the black backdrop.
- *
- *   (Foundry tears down, draws the new scene, createThreeCanvas runs, etc.
- *   Progress / stage / scene-name updates remain visible the whole time.)
- *
- *   reveal()
- *     3. Brief hold so 100% / "Ready!" is visible to the user.
- *     4. Panel fades out (content-opacity 1 → 0) back to solid-black.
- *     5. Outer overlay fades to transparent revealing the fully-drawn scene.
- *
- * Concurrent calls are coalesced — a second `cover()` while the curtain is
- * already covered is a no-op; a `reveal()` cancels any pending reveal and
- * starts a fresh one.
- *
- * The curtain marks `window.MapShine.__sceneTransitionActive` while a
- * transition is in flight so the level-transition curtain bypasses itself
- * cleanly during scene switches.
+ * Sequence:
+ *   cover()       → fade to solid black (content hidden)
+ *   revealPanel() → after assets presentable, fade loading UI in
+ *   (load runs, progress updates)
+ *   reveal()      → min visible + progress settle + hold → panel out → scene in
  *
  * @module scene/scene-transition-curtain
  */
@@ -41,22 +19,8 @@ import { loadingScreenService as loadingOverlay } from '../ui/loading-screen/loa
 
 const log = createLogger('SceneTransitionCurtain');
 
-// Phase durations — kept short enough that fast scene loads still feel snappy,
-// long enough that the transitions read as deliberate rather than as glitches.
-const COVER_MS = 420;       // outer overlay 0 → solid black
-const PANEL_IN_MS = 320;    // loading screen content 0 → 1
-const HOLD_AT_FULL_MS = 220;// "Ready!" pause after load completes
-const PANEL_OUT_MS = 280;   // loading screen content 1 → 0
-const REVEAL_MS = 640;      // outer overlay solid black → transparent
-
 /**
  * Coordinates the loading overlay around full Foundry scene switches.
- *
- * Usage:
- *   await sceneTransitionCurtain.cover({ message: 'Switching scenes…' });
- *   // Foundry tearDown / draw runs while the curtain is in place.
- *   // createThreeCanvas updates the panel (stages, progress, scene name).
- *   await sceneTransitionCurtain.reveal();
  */
 export class SceneTransitionCurtain {
   constructor() {
@@ -66,64 +30,44 @@ export class SceneTransitionCurtain {
     this._coverPromise = null;
     /** @type {Promise<void>|null} */
     this._revealPromise = null;
-    /** @type {number} Monotonic token so a fresh cover() invalidates an
-     *  in-flight reveal() (and vice-versa). */
+    /** @type {Promise<void>|null} */
+    this._panelRevealPromise = null;
+    /** @type {number} */
     this._token = 0;
+    /** @type {number|null} */
+    this._coverStartedAt = null;
+    /** @type {number|null} */
+    this._panelShownAt = null;
+    /** @type {boolean} */
+    this._panelVisible = false;
   }
 
-  /**
-   * Phase tag — exposed for diagnostics.
-   * @returns {'idle'|'covering'|'covered'|'revealing'}
-   */
   get phase() {
     return this._phase;
   }
 
-  /**
-   * Whether the curtain is currently covering the scene (either mid-fade or
-   * fully black). Callers can check this to decide whether to skip extra
-   * fade animations.
-   * @returns {boolean}
-   */
   isActive() {
     return this._phase === 'covering' || this._phase === 'covered';
   }
 
-  // ---------------------------------------------------------------------------
-  // Phase 1+2: cover the scene with black, then bring up the loading panel.
-  // ---------------------------------------------------------------------------
-
   /**
-   * Fade the current scene out and bring the loading panel up.
-   *
-   * Coalesces with an in-flight cover; calling it a second time while the
-   * curtain is already covering simply awaits the existing animation.
+   * Fade the current scene out to solid black. Panel reveal is deferred to
+   * {@link #revealPanel} once assets are presentable.
    *
    * @param {object} [options]
-   * @param {string} [options.message='Loading…'] Message text to show on the
-   *   panel as it fades in. Caller can update it later via
-   *   `loadingOverlay.setMessage(...)`.
-   * @param {string} [options.sceneName] Optional scene name displayed in the
-   *   subtitle / breadcrumb area of the panel.
-   * @param {number} [options.coverMs=COVER_MS] Duration of the black fade.
-   * @param {number} [options.panelInMs=PANEL_IN_MS] Duration of the panel
-   *   fade-in.
-   * @param {boolean} [options.resetProgress=true] When true (the default),
-   *   the panel's progress / timer / stage state is reset before the panel
-   *   fades in so the new transition starts clean.
+   * @param {string} [options.message='Loading…']
+   * @param {string} [options.sceneName]
+   * @param {number} [options.coverMs]
+   * @param {boolean} [options.resetProgress=true]
    * @returns {Promise<void>}
    */
   async cover(options = undefined) {
+    const timings = loadingOverlay.getPresentationTimings?.() ?? {};
     const message = options?.message ?? 'Loading…';
     const sceneName = options?.sceneName ?? null;
-    const coverMs = Number.isFinite(options?.coverMs) ? options.coverMs : COVER_MS;
-    const panelInMs = Number.isFinite(options?.panelInMs) ? options.panelInMs : PANEL_IN_MS;
+    const coverMs = Number.isFinite(options?.coverMs) ? options.coverMs : timings.coverFadeMs ?? 4000;
     const resetProgress = options?.resetProgress !== false;
 
-    // If a cover is already in flight, await it instead of starting a second
-    // one (label-only update). When phase is "covered" but no in-flight
-    // promise exists, the previous reveal/error path may have bypassed the
-    // curtain — fall through and re-cover so state is consistent.
     if (this._coverPromise) {
       try {
         loadingOverlay.setMessage?.(message);
@@ -136,6 +80,9 @@ export class SceneTransitionCurtain {
     const token = ++this._token;
     this._markSceneTransitionActive(true);
     this._phase = 'covering';
+    this._panelVisible = false;
+    this._panelShownAt = null;
+    this._coverStartedAt = performance.now();
 
     const promise = (async () => {
       try {
@@ -149,8 +96,6 @@ export class SceneTransitionCurtain {
         }
 
         await loadingOverlay.fadeBlack(coverMs, { contentVisible: false });
-        if (token !== this._token) return;
-        await loadingOverlay.showPanel(panelInMs);
         if (token !== this._token) return;
       } catch (err) {
         log.warn('cover() pipeline error (continuing covered)', err);
@@ -167,45 +112,110 @@ export class SceneTransitionCurtain {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Phase 3+4+5: hold at full, fade the panel out, then reveal the new scene.
-  // ---------------------------------------------------------------------------
-
   /**
-   * Hide the loading panel and fade the curtain out, revealing the freshly
-   * drawn scene.
-   *
-   * Safe to call when the curtain is already idle — it will be a no-op that
-   * still ensures the overlay is hidden (cleanup-on-completion).
+   * Fade the loading panel in after assets are presentable (called from
+   * onCanvasReady once stages are configured).
    *
    * @param {object} [options]
-   * @param {number} [options.holdMs=HOLD_AT_FULL_MS] How long to keep the
-   *   "100% / Ready!" state visible before starting the fade-out.
-   * @param {number} [options.panelOutMs=PANEL_OUT_MS] Duration of the
-   *   panel fade-out.
-   * @param {number} [options.revealMs=REVEAL_MS] Duration of the overlay
-   *   fade-to-transparent.
-   * @param {string} [options.finalMessage] Optional message to display
-   *   during the hold (e.g. `Ready! (3.2s)`).
+   * @param {number} [options.panelInMs]
+   * @returns {Promise<void>}
+   */
+  async revealPanel(options = undefined) {
+    if (this._panelRevealPromise) {
+      try { await this._panelRevealPromise; } catch (_) {}
+      return;
+    }
+
+    const timings = loadingOverlay.getPresentationTimings?.() ?? {};
+    const panelInMs = Number.isFinite(options?.panelInMs) ? options.panelInMs : timings.panelInFadeMs ?? 4000;
+    const minBlackHoldMs = timings.minBlackHoldMs ?? 250;
+    const deferPresentable = timings.deferPanelUntilPresentable !== false;
+
+    const token = this._token;
+
+    const promise = (async () => {
+      if (this._panelVisible) return;
+
+      // prepareForCover() can show the black shell before the curtain's cover()
+      // runs (first world load). Treat that as covered so revealPanel still runs.
+      if (this._phase === 'idle') {
+        this._phase = 'covered';
+        this._markSceneTransitionActive(true);
+        if (this._coverStartedAt == null) {
+          this._coverStartedAt = performance.now();
+        }
+      }
+
+      try {
+        if (this._coverStartedAt != null && minBlackHoldMs > 0) {
+          const elapsed = performance.now() - this._coverStartedAt;
+          const remaining = minBlackHoldMs - elapsed;
+          if (remaining > 0) {
+            await this._sleep(remaining);
+            if (token !== this._token) return;
+          }
+        }
+
+        if (deferPresentable) {
+          try { await loadingOverlay.whenPresentable?.(); } catch (_) {}
+          if (token !== this._token) return;
+        }
+
+        try { await loadingOverlay.whenStagePillsReady?.(); } catch (_) {}
+        if (token !== this._token) return;
+
+        await loadingOverlay.showPanel(panelInMs);
+        if (token !== this._token) return;
+
+        this._panelVisible = true;
+        this._panelShownAt = performance.now();
+      } catch (err) {
+        log.warn('revealPanel() error (continuing)', err);
+        try {
+          await loadingOverlay.showPanel(0);
+          this._panelVisible = true;
+          this._panelShownAt = performance.now();
+        } catch (_) {}
+      }
+    })();
+
+    this._panelRevealPromise = promise;
+    try {
+      await promise;
+    } finally {
+      if (this._panelRevealPromise === promise) this._panelRevealPromise = null;
+    }
+  }
+
+  /**
+   * Hide the loading panel and fade the curtain out, revealing the scene.
+   *
+   * @param {object} [options]
+   * @param {number} [options.holdMs] Override ready hold (0 = skip gates for recovery)
+   * @param {number} [options.panelOutMs]
+   * @param {number} [options.revealMs]
+   * @param {string} [options.finalMessage]
+   * @param {boolean} [options.fast=false] Skip min-visible and progress-settle gates
    * @returns {Promise<void>}
    */
   async reveal(options = undefined) {
-    const holdMs = Number.isFinite(options?.holdMs) ? options.holdMs : HOLD_AT_FULL_MS;
-    const panelOutMs = Number.isFinite(options?.panelOutMs) ? options.panelOutMs : PANEL_OUT_MS;
-    const revealMs = Number.isFinite(options?.revealMs) ? options.revealMs : REVEAL_MS;
+    const timings = loadingOverlay.getPresentationTimings?.() ?? {};
+    const fast = options?.fast === true;
+    const holdMs = Number.isFinite(options?.holdMs)
+      ? options.holdMs
+      : (fast ? 0 : timings.readyHoldMs ?? 800);
+    const panelOutMs = Number.isFinite(options?.panelOutMs) ? options.panelOutMs : timings.panelOutFadeMs ?? 4000;
+    const revealMs = Number.isFinite(options?.revealMs) ? options.revealMs : timings.sceneRevealFadeMs ?? 4000;
     const finalMessage = options?.finalMessage ?? null;
 
     if (this._coverPromise) {
       try { await this._coverPromise; } catch (_) {}
     }
+    if (this._panelRevealPromise) {
+      try { await this._panelRevealPromise; } catch (_) {}
+    }
 
-    // When the curtain was driven through `cover()` we know the panel is at
-    // content-opacity 1 and the overlay is at opacity 1 — we can animate the
-    // full panel-out → bg-out sequence. When the caller arrives here without
-    // a prior `cover()` (initial loads, recovery paths, debug auto-dismiss
-    // before any tear-down was wrapped) we skip the panel-out step and just
-    // fade the overlay out, which is also a no-op when it is already hidden.
-    const wasCovered = this._phase === 'covered' || this._phase === 'covering';
+    const wasCovered = this._phase === 'covered' || this._phase === 'covering' || this._panelVisible;
 
     const token = ++this._token;
     this._phase = 'revealing';
@@ -215,14 +225,35 @@ export class SceneTransitionCurtain {
         if (finalMessage != null) {
           try { loadingOverlay.setMessage(finalMessage); } catch (_) {}
         }
+
+        if (!fast && wasCovered && this._panelShownAt != null) {
+          const minVisibleMs = timings.minVisibleMs ?? 1500;
+          const elapsed = performance.now() - this._panelShownAt;
+          const remaining = minVisibleMs - elapsed;
+          if (remaining > 0) {
+            await this._sleep(remaining);
+            if (token !== this._token) return;
+          }
+        }
+
+        if (!fast) {
+          try {
+            await loadingOverlay.whenProgressSettled?.(timings.progressSettleMs ?? 500);
+          } catch (_) {}
+          if (token !== this._token) return;
+        }
+
         if (holdMs > 0) {
           await this._sleep(holdMs);
           if (token !== this._token) return;
         }
-        if (wasCovered) {
+
+        if (wasCovered && this._panelVisible) {
           await loadingOverlay.hidePanel(panelOutMs);
           if (token !== this._token) return;
+          this._panelVisible = false;
         }
+
         await loadingOverlay.fadeClear(revealMs);
         if (token !== this._token) return;
       } catch (err) {
@@ -231,7 +262,13 @@ export class SceneTransitionCurtain {
       } finally {
         if (token === this._token) {
           this._phase = 'idle';
+          this._panelVisible = false;
+          this._panelShownAt = null;
+          this._coverStartedAt = null;
           this._markSceneTransitionActive(false);
+          try {
+            if (window.MapShine) window.MapShine.__loadingOverlayConfiguredSceneId = null;
+          } catch (_) {}
         }
       }
     })();
@@ -244,28 +281,22 @@ export class SceneTransitionCurtain {
     }
   }
 
-  /**
-   * Cancel any in-flight transition and force the overlay hidden. Intended
-   * for error-recovery paths (e.g. Canvas.draw() throws and never reaches a
-   * reveal site).
-   */
   forceClear() {
     this._token++;
     this._phase = 'idle';
     this._coverPromise = null;
     this._revealPromise = null;
+    this._panelRevealPromise = null;
+    this._panelVisible = false;
+    this._panelShownAt = null;
+    this._coverStartedAt = null;
     try { loadingOverlay.hide?.(); } catch (_) {}
+    try {
+      if (window.MapShine) window.MapShine.__loadingOverlayConfiguredSceneId = null;
+    } catch (_) {}
     this._markSceneTransitionActive(false);
   }
 
-  // ---------------------------------------------------------------------------
-  // Internal helpers
-  // ---------------------------------------------------------------------------
-
-  /**
-   * @param {boolean} active
-   * @private
-   */
   _markSceneTransitionActive(active) {
     try {
       if (!window.MapShine) window.MapShine = {};
@@ -273,19 +304,9 @@ export class SceneTransitionCurtain {
     } catch (_) {}
   }
 
-  /**
-   * @param {number} ms
-   * @returns {Promise<void>}
-   * @private
-   */
   _sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
   }
 }
 
-/**
- * Process-wide singleton. The curtain owns no per-scene state, so a single
- * instance can safely service every scene switch. Mirrors the {@link
- * loadingOverlay} singleton it composes with.
- */
 export const sceneTransitionCurtain = new SceneTransitionCurtain();

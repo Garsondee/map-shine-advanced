@@ -5,6 +5,20 @@
 
 import { normalizeLoadingHintsElementProps } from './loading-hints.js';
 
+function isObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+function clampMs(value, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return clamp(Math.round(n), 0, 10000);
+}
+
 export const LOADING_SCREEN_CONFIG_VERSION = 1;
 
 export const WALLPAPER_MODES = Object.freeze({
@@ -12,6 +26,80 @@ export const WALLPAPER_MODES = Object.freeze({
   SEQUENTIAL: 'sequential',
   RANDOM: 'random',
 });
+
+/** @typedef {Object} LoadingScreenPresentationTimings
+ * @property {number} coverFadeMs
+ * @property {number} panelInFadeMs
+ * @property {number} minBlackHoldMs
+ * @property {number} minVisibleMs
+ * @property {number} readyHoldMs
+ * @property {number} panelOutFadeMs
+ * @property {number} sceneRevealFadeMs
+ * @property {number} progressSettleMs
+ * @property {boolean} deferPanelUntilPresentable
+ */
+
+/**
+ * Default scene-transition presentation timings (ms).
+ * @returns {LoadingScreenPresentationTimings}
+ */
+export function createDefaultPresentationTimings() {
+  return {
+    coverFadeMs: 4000,
+    panelInFadeMs: 4000,
+    minBlackHoldMs: 250,
+    minVisibleMs: 1500,
+    readyHoldMs: 800,
+    panelOutFadeMs: 4000,
+    sceneRevealFadeMs: 4000,
+    progressSettleMs: 500,
+    deferPanelUntilPresentable: true,
+  };
+}
+
+/**
+ * @param {any} input
+ * @returns {LoadingScreenPresentationTimings}
+ */
+export function normalizePresentationTimings(input) {
+  const defaults = createDefaultPresentationTimings();
+  const source = isObject(input) ? input : {};
+
+  return {
+    coverFadeMs: clampMs(source.coverFadeMs, defaults.coverFadeMs),
+    panelInFadeMs: clampMs(source.panelInFadeMs, defaults.panelInFadeMs),
+    minBlackHoldMs: clampMs(source.minBlackHoldMs, defaults.minBlackHoldMs),
+    minVisibleMs: clampMs(source.minVisibleMs, defaults.minVisibleMs),
+    readyHoldMs: clampMs(source.readyHoldMs, defaults.readyHoldMs),
+    panelOutFadeMs: clampMs(source.panelOutFadeMs, defaults.panelOutFadeMs),
+    sceneRevealFadeMs: clampMs(source.sceneRevealFadeMs, defaults.sceneRevealFadeMs),
+    progressSettleMs: clampMs(source.progressSettleMs, defaults.progressSettleMs),
+    deferPanelUntilPresentable: source.deferPanelUntilPresentable !== false,
+  };
+}
+
+/**
+ * Scale presentation timings for prefers-reduced-motion.
+ * @param {LoadingScreenPresentationTimings} timings
+ * @returns {LoadingScreenPresentationTimings}
+ */
+export function scalePresentationTimingsForReducedMotion(timings) {
+  const reduceMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
+  if (!reduceMotion) return { ...timings };
+
+  const scale = (ms) => Math.min(200, Math.max(0, Math.round(ms * 0.05)));
+  return {
+    ...timings,
+    coverFadeMs: scale(timings.coverFadeMs),
+    panelInFadeMs: scale(timings.panelInFadeMs),
+    minBlackHoldMs: scale(timings.minBlackHoldMs),
+    minVisibleMs: scale(timings.minVisibleMs),
+    readyHoldMs: scale(timings.readyHoldMs),
+    panelOutFadeMs: scale(timings.panelOutFadeMs),
+    sceneRevealFadeMs: scale(timings.sceneRevealFadeMs),
+    progressSettleMs: scale(timings.progressSettleMs),
+  };
+}
 
 /**
  * Build the default styled config which visually matches the current Map Shine loading screen.
@@ -157,6 +245,7 @@ export function createDefaultStyledLoadingScreenConfig() {
       ],
     },
     overlayEffects: [],
+    presentation: createDefaultPresentationTimings(),
   };
 }
 
@@ -214,6 +303,7 @@ export function normalizeLoadingScreenConfig(input) {
           speed: Number.isFinite(e.speed) ? clamp(e.speed, 0.25, 4) : 1,
         }))
       : defaults.overlayEffects,
+    presentation: normalizePresentationTimings(source.presentation ?? defaults.presentation),
   };
 
   config.version = LOADING_SCREEN_CONFIG_VERSION;
@@ -332,14 +422,6 @@ export function deepClone(value) {
   } catch (_) {
     return value;
   }
-}
-
-function isObject(value) {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
-function clamp(v, min, max) {
-  return Math.max(min, Math.min(max, v));
 }
 
 function cryptoSafeId() {

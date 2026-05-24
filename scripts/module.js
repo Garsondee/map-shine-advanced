@@ -749,7 +749,7 @@ Hooks.once('init', async function() {
   }
 
   try {
-    loadingOverlay.showBlack('Initializing...');
+    loadingOverlay.prepareForCover('Initializing...');
   } catch (e) {
     console.warn('Map Shine: failed to initialize loading overlay', e);
   }

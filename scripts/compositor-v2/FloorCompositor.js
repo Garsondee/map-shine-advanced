@@ -4014,6 +4014,8 @@ export class FloorCompositor {
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: buildingShadows.render'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
     if (!_skipBuildingShadowPass) {
+      const wl = this._weatherLightningEffect;
+      const needsLightningShadowCapture = !!wl?.wantsLiveLightningShadowOverride?.();
       this._pushLandscapeLightningShadowOverride();
       try {
         this._profileEffectCall('buildingShadows', 'render', () => {
@@ -4027,6 +4029,24 @@ export class FloorCompositor {
         }, 'PaintedShadowEffectV2 render');
       } finally {
         this._popLandscapeLightningShadowOverride();
+      }
+      if (needsLightningShadowCapture) {
+        try { wl?.captureStrikeShadowFromCompositor?.(this); } catch (err) {
+          log.warn('FloorCompositor: landscape lightning strike shadow capture failed:', err);
+        }
+        try {
+          this._profileEffectCall('buildingShadows', 'render', () => {
+            this._buildingShadowEffect?.render?.(this.renderer, this.camera);
+          }, 'BuildingShadowsEffectV2 sun re-render');
+          this._profileEffectCall('skyReachShadows', 'render', () => {
+            this._skyReachShadowEffect?.render?.(this.renderer, this.camera);
+          }, 'SkyReachShadowsEffectV2 sun re-render');
+          this._profileEffectCall('paintedShadows', 'render', () => {
+            this._paintedShadowEffect?.render?.(this.renderer);
+          }, 'PaintedShadowEffectV2 sun re-render');
+        } catch (err) {
+          log.warn('FloorCompositor: sun structural shadow re-render after lightning capture failed:', err);
+        }
       }
     }
     if (_profiling) {
@@ -4051,15 +4071,6 @@ export class FloorCompositor {
       this._prepareTreeCanopyOcclusionPass();
     } catch (err) {
       log.warn('FloorCompositor: tree canopy occlusion prep failed:', err);
-    }
-
-    try {
-      const wlCap = this._weatherLightningEffect;
-      if (wlCap?.wantsLiveLightningShadowOverride?.()) {
-        wlCap.captureStrikeShadowFromCompositor(this);
-      }
-    } catch (err) {
-      log.warn('FloorCompositor: landscape lightning strike shadow capture failed:', err);
     }
 
     // ShadowManagerV2 (required): combine previous-frame cloud + structural shadows

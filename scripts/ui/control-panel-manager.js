@@ -1404,6 +1404,7 @@ export class ControlPanelManager {
       this.syncLiveWeatherOverrideDomFromDirectedPreset();
       this.syncManualFogDomFromControlState();
       this.syncLiveLightningDomFromControlState();
+      this.syncLiveGustinessDomFromControlState();
       this.syncManualAshDomFromController();
       this._syncReplicaOcclDomFromControlState();
       this._mirrorWindCompassFromState();
@@ -1597,6 +1598,9 @@ export class ControlPanelManager {
     }
     this._refreshWeatherFolderTag();
     this._updateManualFogControlAvailability();
+    if (isManual && (environmentFadeController.isRunning || this._environmentFadeTransitionActive)) {
+      this._cancelActiveEnvironmentFade();
+    }
     this._updateStatusPanel();
   }
 
@@ -1803,6 +1807,45 @@ export class ControlPanelManager {
   syncLiveLightningDomFromControlState() {
     const v = readLightningIntensityFromControlState(this.controlState);
     this._mirrorLiveWeatherDomPair('lightning', v);
+  }
+
+  /**
+   * @param {number} rawIndex Gustiness fader index (0 = calm … 4 = extreme).
+   * @param {{ save?: boolean }} [opts]
+   * @private
+   */
+  _commitLiveGustiness(rawIndex, opts = {}) {
+    if (this._suppressLiveWeatherDomEvents) return;
+
+    const idx = Math.round(Number(rawIndex));
+    if (!Number.isFinite(idx)) return;
+    const clamped = Math.max(0, Math.min(GUSTINESS_LABELS.length - 1, idx));
+    const key = GUSTINESS_LABELS[clamped] || 'moderate';
+    this.controlState.gustiness = key;
+
+    try {
+      const wc = resolveWeatherController();
+      const variability = GUSTINESS_TO_VARIABILITY[key] ?? GUSTINESS_TO_VARIABILITY.moderate;
+      if (typeof wc?.setVariability === 'function') {
+        wc.setVariability(variability);
+      } else if (wc) {
+        wc.variability = Math.max(0, Math.min(1, variability));
+      }
+    } catch (_) {}
+
+    this._mirrorLiveWeatherDomPair('gustiness', clamped);
+    this._mirrorWindCompassFromState();
+
+    if (opts.save) {
+      this._skipNextControlStateSceneFlagPersist = true;
+      this.debouncedSave();
+    }
+  }
+
+  /** Sync Gust fader from `controlState.gustiness`. */
+  syncLiveGustinessDomFromControlState() {
+    const gIdx = GUSTINESS_LABELS.indexOf(this.controlState.gustiness || 'moderate');
+    this._mirrorLiveWeatherDomPair('gustiness', gIdx >= 0 ? gIdx : 2);
   }
 
   /**
@@ -2052,12 +2095,20 @@ export class ControlPanelManager {
           range.addEventListener('input', () => {
             if (this._suppressLiveWeatherDomEvents) return;
             const idx = Math.round(range.valueAsNumber);
-            this._handleFadeAwareFaderInput(pid, idx, () => {});
+            this._handleFadeAwareFaderInput(
+              pid,
+              idx,
+              (val) => this._commitLiveGustiness(val, { save: false }),
+            );
           });
           range.addEventListener('change', () => {
             if (this._suppressLiveWeatherDomEvents) return;
             const idx = Math.round(range.valueAsNumber);
-            this._handleFadeAwareFaderChange(pid, idx, () => {});
+            this._handleFadeAwareFaderChange(
+              pid,
+              idx,
+              (val) => this._commitLiveGustiness(val, { save: true }),
+            );
           });
         } else {
           range.addEventListener('input', () => {
@@ -2102,6 +2153,7 @@ export class ControlPanelManager {
     this.syncLiveWeatherOverrideDomFromDirectedPreset();
     this.syncManualFogDomFromControlState();
     this.syncLiveLightningDomFromControlState();
+    this.syncLiveGustinessDomFromControlState();
     this.syncManualAshDomFromController();
     this.refreshAshMasterRowVisibility();
     syncWeatherLightningEffectFromControlState(this.controlState);
@@ -2923,13 +2975,17 @@ export class ControlPanelManager {
     );
     if (this._liveWeatherOverrideDom?.rows) {
       const rows = this._liveWeatherOverrideDom.rows;
-      mirrorFaderRow(rows, 'precipitation', snap.weather.precipitation);
-      mirrorFaderRow(rows, 'cloudCover', snap.weather.cloudCover);
-      mirrorFaderRow(rows, 'freezeLevel', snap.weather.freezeLevel);
-      mirrorFaderRow(rows, 'manualFogDensity', snap.manualFogDensity);
-      mirrorFaderRow(rows, 'lightning', snap.lightning);
-      mirrorFaderRow(rows, 'ashIntensity', extras?.ashIntensity ?? 0);
-      mirrorFaderRow(rows, 'gustiness', Math.round(extras?.gustinessIndex ?? 2));
+      const mirrorUnlessDragging = (paramId, value) => {
+        if (this._fadeChannelDragActive.has(paramId)) return;
+        mirrorFaderRow(rows, paramId, value);
+      };
+      mirrorUnlessDragging('precipitation', snap.weather.precipitation);
+      mirrorUnlessDragging('cloudCover', snap.weather.cloudCover);
+      mirrorUnlessDragging('freezeLevel', snap.weather.freezeLevel);
+      mirrorUnlessDragging('manualFogDensity', snap.manualFogDensity);
+      mirrorUnlessDragging('lightning', snap.lightning);
+      mirrorUnlessDragging('ashIntensity', extras?.ashIntensity ?? 0);
+      mirrorUnlessDragging('gustiness', Math.round(extras?.gustinessIndex ?? 2));
     }
   }
 
@@ -3009,6 +3065,7 @@ export class ControlPanelManager {
       this.controlState.windDirection = endSnap.weather.windDirection;
       writeManualFogDensityToControlState(this.controlState, endSnap.manualFogDensity);
       writeLightningIntensityToControlState(this.controlState, endSnap.lightning);
+      this.controlState.gustiness = gustinessFromExtras(endEx);
       this._coercePanelWindScalarsInPlace();
       this._lastTimeTargetApplied = endSnap.timeOfDay;
       this._lastTimeTransitionMinutesApplied = mins;
@@ -3057,15 +3114,23 @@ export class ControlPanelManager {
    */
   _handleFadeAwareFaderInput(paramId, value, commitFn) {
     const fadeMins = this._getEnvironmentFadeMinutes();
+    const fadeActive = environmentFadeController.isRunning || this._environmentFadeTransitionActive;
 
-    if (environmentFadeController.isRunning || this._environmentFadeTransitionActive) {
+    // Manual faders take immediate authority — stop an environment fade from fighting the slider.
+    if (fadeActive && this._normalizeWeatherUIMode() === 'manual') {
+      this._cancelActiveEnvironmentFade();
+      commitFn(value);
+      return;
+    }
+
+    if (fadeActive) {
       if (fadeMins <= 0) {
         this._cancelActiveEnvironmentFade();
         commitFn(value);
         return;
       }
       if (paramId === 'gustiness') {
-        this.controlState.gustiness = GUSTINESS_LABELS[Math.round(value)] || 'moderate';
+        this._commitLiveGustiness(value, { save: false });
       } else {
         commitFn(value);
       }
@@ -3083,6 +3148,9 @@ export class ControlPanelManager {
       return;
     }
     this._ensureEnvironmentFadePreviewStart();
+    if (paramId === 'lightning' || paramId === 'manualFogDensity' || paramId === 'ashIntensity' || paramId === 'gustiness') {
+      commitFn(value);
+    }
     setFaderPreview(this._liveWeatherOverrideDom?.rows, paramId, value);
   }
 
@@ -3095,8 +3163,16 @@ export class ControlPanelManager {
   _handleFadeAwareFaderChange(paramId, value, commitFn) {
     this._fadeChannelDragActive.delete(paramId);
     const fadeMins = this._getEnvironmentFadeMinutes();
+    const fadeActive = environmentFadeController.isRunning || this._environmentFadeTransitionActive;
 
-    if (environmentFadeController.isRunning || this._environmentFadeTransitionActive) {
+    if (fadeActive && this._normalizeWeatherUIMode() === 'manual') {
+      this._cancelActiveEnvironmentFade();
+      commitFn(value);
+      this.debouncedSave();
+      return;
+    }
+
+    if (fadeActive) {
       if (fadeMins <= 0) {
         this._cancelActiveEnvironmentFade();
         commitFn(value);
@@ -3104,7 +3180,7 @@ export class ControlPanelManager {
         return;
       }
       if (paramId === 'gustiness') {
-        this.controlState.gustiness = GUSTINESS_LABELS[Math.round(value)] || 'moderate';
+        this._commitLiveGustiness(value, { save: false });
       } else {
         commitFn(value);
       }
@@ -3117,10 +3193,10 @@ export class ControlPanelManager {
       commitFn(value);
       return;
     }
-    if (paramId !== 'gustiness') {
-      commitFn(value);
+    if (paramId === 'gustiness') {
+      this._commitLiveGustiness(value, { save: false });
     } else {
-      this.controlState.gustiness = GUSTINESS_LABELS[Math.round(value)] || 'moderate';
+      commitFn(value);
     }
     void this._commitEnvironmentFadeFromControlState().then(() => this.debouncedSave());
   }

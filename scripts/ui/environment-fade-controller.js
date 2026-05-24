@@ -1,6 +1,8 @@
 /**
  * @fileoverview Smooth cross-fade for time, weather scalars, wind, fog, and lightning.
  * Supports per-channel retarget when a slider overrides an in-progress transition.
+ * Long time-of-day fades are split into chunked mini-fades so Foundry darkness and
+ * darkness-gated lights refresh at each leg boundary.
  *
  * @module ui/environment-fade-controller
  */
@@ -9,6 +11,7 @@ import { createLogger } from '../core/log.js';
 import { environmentControlApi } from './environment-control-api.js';
 import {
   lerpEnvironmentField,
+  lerpEnvironmentSnapshots,
   normalizeEnvironmentSnapshot,
 } from './environment-override-specs.js';
 import { GUSTINESS_LABELS } from './control-panel/widgets/astrolabe-dial.js';
@@ -18,6 +21,7 @@ import { readLightningIntensityFromControlState } from './landscape-lightning-br
 const log = createLogger('EnvironmentFade');
 const DRIVE_TOKEN = 'cp-environment-fade';
 const TICK_MS = 100;
+const MODULE_ID = 'map-shine-advanced';
 
 /** @typedef {{ ashIntensity: number, gustinessIndex: number }} FadeExtras */
 /** @typedef {string} FadeChannelId */
@@ -46,6 +50,14 @@ export const FADE_CHANNEL_IDS = Object.freeze([
  * @property {number} [period]
  */
 
+/**
+ * @typedef {Object} SegmentDriveOptions
+ * @property {boolean} [beginDrive=false]
+ * @property {boolean} [endDrive=false]
+ * @property {boolean} [skipCancel=false]
+ * @property {boolean} [applyExtrasAsLast=false]
+ */
+
 /** @type {Record<FadeChannelId, { angular?: boolean, period?: number }>} */
 const CHANNEL_META = Object.freeze({
   timeOfDay: { angular: true, period: 24 },
@@ -59,6 +71,33 @@ const CHANNEL_META = Object.freeze({
   ashIntensity: {},
   gustiness: {},
 });
+
+/** @returns {number} */
+export function readEnvironmentFadeChunkLegSeconds() {
+  try {
+    const v = Number(globalThis.game?.settings?.get?.(MODULE_ID, 'environmentFadeChunkLegSeconds'));
+    if (Number.isFinite(v)) return Math.max(5, Math.min(60, v));
+  } catch (_) {}
+  return 10;
+}
+
+/** @returns {number} */
+export function readEnvironmentFadeChunkSettleMs() {
+  try {
+    const v = Number(globalThis.game?.settings?.get?.(MODULE_ID, 'environmentFadeChunkSettleMs'));
+    if (Number.isFinite(v)) return Math.max(0, Math.min(2000, v));
+  } catch (_) {}
+  return 300;
+}
+
+/** @returns {number} */
+export function readEnvironmentFadeChunkMinHourDelta() {
+  try {
+    const v = Number(globalThis.game?.settings?.get?.(MODULE_ID, 'environmentFadeChunkMinHourDelta'));
+    if (Number.isFinite(v)) return Math.max(0.1, Math.min(12, v));
+  } catch (_) {}
+  return 0.5;
+}
 
 export function snapshotFromControlState(controlState, maxWindMs = 78) {
   const cs = controlState || {};
@@ -112,6 +151,30 @@ export function lerpFadeExtras(a, b, t) {
 export function gustinessFromExtras(extras) {
   const idx = Math.round(Number(extras?.gustinessIndex) || 0);
   return GUSTINESS_LABELS[Math.max(0, Math.min(GUSTINESS_LABELS.length - 1, idx))] || 'moderate';
+}
+
+/** @param {number} a @param {number} b @returns {number} */
+function shortestArcHourDelta(a, b) {
+  let delta = b - a;
+  if (delta > 12) delta -= 24;
+  if (delta < -12) delta += 24;
+  return Math.abs(delta);
+}
+
+/** @param {number} a @param {number} b @param {number} period @returns {number} */
+function shortestArcDelta(a, b, period) {
+  let delta = b - a;
+  const half = period / 2;
+  if (delta > half) delta -= period;
+  if (delta < -half) delta += period;
+  return Math.abs(delta);
+}
+
+/** @param {FadeChannelId} channelId @param {number} startVal @param {number} endVal @returns {number} */
+function channelDelta(channelId, startVal, endVal) {
+  if (channelId === 'timeOfDay') return shortestArcHourDelta(startVal, endVal);
+  if (channelId === 'windDirection') return shortestArcDelta(startVal, endVal, 360);
+  return Math.abs(startVal - endVal);
 }
 
 function readChannelValue(channelId, snap, extras) {
@@ -193,13 +256,28 @@ export class EnvironmentFadeController {
     this._hooks = null;
     this._resolvePromise = null;
     this._rejectPromise = null;
+    /** @type {boolean} */
+    this._segmentEndDrive = true;
+    /** @type {number} */
+    this._runGeneration = 0;
+    /** @type {number} */
+    this._segmentGeneration = 0;
+    /** @type {number} Monotonic epoch; stale tick callbacks from a prior leg bail out. */
+    this._segmentEpoch = 0;
+    /** @type {boolean} True for the full multi-leg chunked sequence. */
+    this._chunkedFadeActive = false;
+    /** @type {boolean} */
+    this._segmentApplyExtrasAsLast = false;
   }
 
   get isRunning() {
-    return this._running === true;
+    return this._running === true || this._chunkedFadeActive === true;
   }
 
   cancel() {
+    this._runGeneration += 1;
+    this._segmentEpoch += 1;
+    this._chunkedFadeActive = false;
     if (this._intervalId) {
       clearInterval(this._intervalId);
       this._intervalId = null;
@@ -214,6 +292,8 @@ export class EnvironmentFadeController {
     this._hooks = null;
     this._resolvePromise = null;
     this._rejectPromise = null;
+    this._segmentEndDrive = true;
+    this._segmentApplyExtrasAsLast = false;
     try {
       environmentControlApi.endExternalDrive(DRIVE_TOKEN, { restore: false });
     } catch (_) {}
@@ -225,6 +305,39 @@ export class EnvironmentFadeController {
     const minsNum = Number(transitionMinutes);
     const safeMinutes = Number.isFinite(minsNum) ? Math.max(0, Math.min(60, minsNum)) : 0;
     return safeMinutes * 60 * 1000;
+  }
+
+  /**
+   * @param {number} transitionMinutes
+   * @param {import('./environment-control-api.js').EnvironmentSnapshot} startSnap
+   * @param {import('./environment-control-api.js').EnvironmentSnapshot} endSnap
+   * @returns {boolean}
+   */
+  _shouldChunk(transitionMinutes, startSnap, endSnap) {
+    const durationMs = this._durationMs(transitionMinutes);
+    const legMs = readEnvironmentFadeChunkLegSeconds() * 1000;
+    if (durationMs <= legMs) return false;
+
+    const minHourDelta = readEnvironmentFadeChunkMinHourDelta();
+    const hourDelta = shortestArcHourDelta(
+      Number(startSnap?.timeOfDay) || 0,
+      Number(endSnap?.timeOfDay) || 0,
+    );
+    return hourDelta >= minHourDelta;
+  }
+
+  /**
+   * @param {number} ms
+   * @param {number} gen
+   * @returns {Promise<void>}
+   */
+  async _delaySettle(ms, gen) {
+    const endAt = Date.now() + ms;
+    while (Date.now() < endAt) {
+      if (gen !== this._runGeneration) return;
+      const remaining = endAt - Date.now();
+      await new Promise((resolve) => setTimeout(resolve, Math.min(50, remaining)));
+    }
   }
 
   _makeChannel(channelId, startVal, endVal, durationMs) {
@@ -266,14 +379,21 @@ export class EnvironmentFadeController {
 
     this._intervalId = setInterval(() => {
       void (async () => {
+        const tickEpoch = this._segmentEpoch;
         try {
+          if (tickEpoch !== this._segmentEpoch) return;
+
           const { snap, extras, allDone } = this._compose();
+          if (tickEpoch !== this._segmentEpoch) return;
+
           await environmentControlApi.applySnapshot(snap, {
             persist: false,
             syncUi: false,
             applyDarkness: false,
             syncFoundryTime: false,
           });
+          if (tickEpoch !== this._segmentEpoch) return;
+
           if (this._hooks?.applyExtras) await this._hooks.applyExtras(extras, false);
           if (this._hooks?.onTick) {
             const maxT = this._channels.size
@@ -283,6 +403,11 @@ export class EnvironmentFadeController {
           }
 
           if (allDone && this._endSnap && this._endExtras) {
+            if (tickEpoch !== this._segmentEpoch) return;
+
+            const segmentGen = this._segmentGeneration;
+            if (segmentGen !== this._runGeneration) return;
+
             if (this._intervalId) {
               clearInterval(this._intervalId);
               this._intervalId = null;
@@ -295,20 +420,30 @@ export class EnvironmentFadeController {
               applyDarkness: true,
               syncFoundryTime: false,
             });
-            if (this._hooks?.applyExtras) await this._hooks.applyExtras(this._endExtras, true);
+            if (tickEpoch !== this._segmentEpoch) return;
+            if (segmentGen !== this._runGeneration) return;
+
+            const segmentLast = this._segmentApplyExtrasAsLast === true;
+            if (this._hooks?.applyExtras) await this._hooks.applyExtras(this._endExtras, segmentLast);
             if (this._hooks?.onTick) this._hooks.onTick(this._endSnap, this._endExtras, 1);
 
             const resolve = this._resolvePromise;
+            const endDrive = this._segmentEndDrive;
             this._resolvePromise = null;
             this._hooks = null;
             this._channels.clear();
+            this._segmentEndDrive = true;
+            this._segmentApplyExtrasAsLast = false;
 
-            try {
-              environmentControlApi.endExternalDrive(DRIVE_TOKEN, { restore: false });
-            } catch (_) {}
+            if (endDrive) {
+              try {
+                environmentControlApi.endExternalDrive(DRIVE_TOKEN, { restore: false });
+              } catch (_) {}
+            }
             resolve?.();
           }
         } catch (err) {
+          if (tickEpoch !== this._segmentEpoch) return;
           this.cancel();
           log.error('Environment fade tick failed', err);
           this._rejectPromise?.(err);
@@ -355,8 +490,35 @@ export class EnvironmentFadeController {
     this._ensureLoop();
   }
 
-  async start(startSnap, endSnap, startExtras, endExtras, transitionMinutes, hooks = {}) {
-    this.cancel();
+  /**
+   * Run one fade segment between two snapshots.
+   *
+   * @param {import('./environment-control-api.js').EnvironmentSnapshot} startSnap
+   * @param {import('./environment-control-api.js').EnvironmentSnapshot} endSnap
+   * @param {FadeExtras} startExtras
+   * @param {FadeExtras} endExtras
+   * @param {number} transitionMinutes
+   * @param {Object} [hooks]
+   * @param {SegmentDriveOptions} [driveOpts]
+   * @returns {Promise<void>}
+   */
+  async _runSegment(startSnap, endSnap, startExtras, endExtras, transitionMinutes, hooks = {}, driveOpts = {}) {
+    const {
+      beginDrive = false,
+      endDrive = false,
+      skipCancel = false,
+      applyExtrasAsLast = false,
+    } = driveOpts;
+
+    if (!skipCancel) {
+      this.cancel();
+    } else if (this._intervalId) {
+      clearInterval(this._intervalId);
+      this._intervalId = null;
+    }
+
+    this._segmentEpoch += 1;
+    const segmentEpoch = this._segmentEpoch;
 
     const start = normalizeEnvironmentSnapshot(startSnap);
     const end = normalizeEnvironmentSnapshot(endSnap);
@@ -365,14 +527,21 @@ export class EnvironmentFadeController {
     const durationMs = this._durationMs(transitionMinutes);
 
     if (durationMs <= 1) {
+      if (beginDrive) await environmentControlApi.beginExternalDrive(DRIVE_TOKEN);
       await environmentControlApi.applySnapshot(end, {
         persist: false,
         syncUi: false,
         applyDarkness: true,
         syncFoundryTime: false,
       });
-      if (hooks.applyExtras) await hooks.applyExtras(endEx, true);
+      if (segmentEpoch !== this._segmentEpoch) return;
+      if (hooks.applyExtras) await hooks.applyExtras(endEx, applyExtrasAsLast);
       if (hooks.onTick) hooks.onTick(end, endEx, 1);
+      if (endDrive) {
+        try {
+          environmentControlApi.endExternalDrive(DRIVE_TOKEN, { restore: false });
+        } catch (_) {}
+      }
       return;
     }
 
@@ -383,30 +552,42 @@ export class EnvironmentFadeController {
     this._endSnap = end;
     this._endExtras = endEx;
     this._channels.clear();
+    this._segmentEndDrive = endDrive;
+    this._segmentApplyExtrasAsLast = applyExtrasAsLast;
+    this._segmentGeneration = this._runGeneration;
 
-    await environmentControlApi.beginExternalDrive(DRIVE_TOKEN);
+    if (beginDrive) await environmentControlApi.beginExternalDrive(DRIVE_TOKEN);
 
     for (const channelId of FADE_CHANNEL_IDS) {
       const s = readChannelValue(channelId, start, startEx);
       const e = readChannelValue(channelId, end, endEx);
-      const delta = Math.abs(s - e);
+      const delta = channelDelta(channelId, s, e);
       const threshold = (channelId === 'timeOfDay' || channelId === 'windDirection') ? 0.05 : 0.0005;
       if (delta <= threshold) continue;
       this._channels.set(channelId, this._makeChannel(channelId, s, e, durationMs));
     }
 
     if (this._channels.size === 0) {
+      if (segmentEpoch !== this._segmentEpoch) return;
       await environmentControlApi.applySnapshot(end, {
         persist: false,
         syncUi: false,
         applyDarkness: true,
         syncFoundryTime: false,
       });
-      if (hooks.applyExtras) await hooks.applyExtras(endEx, true);
+      if (hooks.applyExtras) await hooks.applyExtras(endEx, applyExtrasAsLast);
       if (hooks.onTick) hooks.onTick(end, endEx, 1);
-      this.cancel();
+      this._running = false;
+      this._hooks = null;
+      if (endDrive) {
+        try {
+          environmentControlApi.endExternalDrive(DRIVE_TOKEN, { restore: false });
+        } catch (_) {}
+      }
       return;
     }
+
+    if (segmentEpoch !== this._segmentEpoch) return;
 
     await environmentControlApi.applySnapshot(start, {
       persist: false,
@@ -421,6 +602,93 @@ export class EnvironmentFadeController {
       this._resolvePromise = resolve;
       this._rejectPromise = reject;
       this._ensureLoop();
+    });
+  }
+
+  /**
+   * @param {import('./environment-control-api.js').EnvironmentSnapshot} startSnap
+   * @param {import('./environment-control-api.js').EnvironmentSnapshot} endSnap
+   * @param {FadeExtras} startExtras
+   * @param {FadeExtras} endExtras
+   * @param {number} transitionMinutes
+   * @param {Object} [hooks]
+   * @returns {Promise<void>}
+   */
+  async _startChunked(startSnap, endSnap, startExtras, endExtras, transitionMinutes, hooks = {}) {
+    const start = normalizeEnvironmentSnapshot(startSnap);
+    const end = normalizeEnvironmentSnapshot(endSnap);
+    const startEx = { ...startExtras };
+    const endEx = { ...endExtras };
+    const totalMs = this._durationMs(transitionMinutes);
+    const legMs = readEnvironmentFadeChunkLegSeconds() * 1000;
+    const settleMs = readEnvironmentFadeChunkSettleMs();
+    const numLegs = Math.max(1, Math.ceil(totalMs / legMs));
+    const gen = this._runGeneration;
+    this._chunkedFadeActive = true;
+
+    let currentSnap = start;
+    let currentEx = startEx;
+
+    try {
+      await environmentControlApi.beginExternalDrive(DRIVE_TOKEN);
+
+      for (let i = 0; i < numLegs; i++) {
+        if (gen !== this._runGeneration) return;
+
+        const t1 = (i + 1) / numLegs;
+        const legEnd = lerpEnvironmentSnapshots(start, end, t1);
+        const legEndEx = lerpFadeExtras(startEx, endEx, t1);
+        const remainingMs = totalMs - i * legMs;
+        const thisLegMs = Math.min(legMs, remainingMs);
+        const legMinutes = thisLegMs / 60000;
+        const isFinalLeg = i === numLegs - 1;
+
+        await this._runSegment(currentSnap, legEnd, currentEx, legEndEx, legMinutes, hooks, {
+          beginDrive: false,
+          endDrive: false,
+          skipCancel: true,
+          applyExtrasAsLast: isFinalLeg,
+        });
+
+        if (gen !== this._runGeneration) return;
+
+        if (!isFinalLeg && settleMs > 0) {
+          await this._delaySettle(settleMs, gen);
+        }
+
+        currentSnap = legEnd;
+        currentEx = legEndEx;
+      }
+
+      if (gen === this._runGeneration) {
+        try {
+          environmentControlApi.endExternalDrive(DRIVE_TOKEN, { restore: false });
+        } catch (_) {}
+      }
+    } finally {
+      if (gen === this._runGeneration) {
+        this._chunkedFadeActive = false;
+      }
+    }
+  }
+
+  async start(startSnap, endSnap, startExtras, endExtras, transitionMinutes, hooks = {}) {
+    this.cancel();
+
+    const start = normalizeEnvironmentSnapshot(startSnap);
+    const end = normalizeEnvironmentSnapshot(endSnap);
+    const startEx = { ...startExtras };
+    const endEx = { ...endExtras };
+
+    if (this._shouldChunk(transitionMinutes, start, end)) {
+      return this._startChunked(start, end, startEx, endEx, transitionMinutes, hooks);
+    }
+
+    return this._runSegment(start, end, startEx, endEx, transitionMinutes, hooks, {
+      beginDrive: true,
+      endDrive: true,
+      skipCancel: true,
+      applyExtrasAsLast: true,
     });
   }
 }

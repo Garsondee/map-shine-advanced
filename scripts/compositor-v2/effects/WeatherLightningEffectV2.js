@@ -96,6 +96,10 @@ export class WeatherLightningEffectV2 {
       duskFlashBrightnessScale: 0.28,
       /** Flash strength near midnight. */
       nightFlashBrightnessScale: 1.26,
+      /** Structural shadow flash at solar noon (0 = keep sun building shadows). */
+      dayStructuralShadowScale: 0,
+      /** Structural shadow flash near midnight. */
+      nightStructuralShadowScale: 1,
       /** Hour radius around dawn/dusk/noon anchors (wider = more twilight coverage). */
       twilightFlashBlendHours: 2.5,
       /** Sharpness of night-arc ramp (midnight peak vs sunset/sunrise). */
@@ -137,7 +141,8 @@ export class WeatherLightningEffectV2 {
             'shadowLengthScale', 'shadowSmearScale', 'windowFlashBoost', 'windowFlashPeakMultiplier',
             'outdoorFlashStrength',
             'dayFlashBrightnessScale', 'dawnFlashBrightnessScale', 'duskFlashBrightnessScale',
-            'nightFlashBrightnessScale', 'twilightFlashBlendHours', 'dayNightFlashCurve',
+            'nightFlashBrightnessScale', 'dayStructuralShadowScale', 'nightStructuralShadowScale',
+            'twilightFlashBlendHours', 'dayNightFlashCurve',
             'shadowBlendWeight', 'shadowFadeDurationScale', 'shadowFadeCurve',
             'lightningShadowFlashFloor', 'lightningFlashContrast', 'lightningShadowDarkness',
             'lightningFlashColorR', 'lightningFlashColorG', 'lightningFlashColorB',
@@ -225,6 +230,16 @@ export class WeatherLightningEffectV2 {
           type: 'slider', min: 0, max: 2, step: 0.01, default: d.nightFlashBrightnessScale,
           label: 'Night Flash Scale',
           tooltip: 'Lightning brightness near midnight.',
+        },
+        dayStructuralShadowScale: {
+          type: 'slider', min: 0, max: 1, step: 0.01, default: d.dayStructuralShadowScale,
+          label: 'Day Shadow Scale',
+          tooltip: 'Building/sky-reach shadow flash at noon. 0 keeps existing sun shadows; outdoor flash still applies.',
+        },
+        nightStructuralShadowScale: {
+          type: 'slider', min: 0, max: 1, step: 0.01, default: d.nightStructuralShadowScale,
+          label: 'Night Shadow Scale',
+          tooltip: 'Building/sky-reach shadow flash near midnight.',
         },
         twilightFlashBlendHours: {
           type: 'slider', min: 0.5, max: 6, step: 0.1, default: d.twilightFlashBlendHours,
@@ -365,10 +380,12 @@ export class WeatherLightningEffectV2 {
 
   /**
    * Live GM intensity scale (0 = off, 1 = full config brightness + frequency).
+   * Ease-in curve keeps very low slider values subtle.
    * @returns {number}
    */
   _getLiveIntensityScale() {
-    return clamp01(this.params.stormIntensity, 0);
+    const t = clamp01(this.params.stormIntensity, 0);
+    return Math.pow(t, 1.25);
   }
 
   /**
@@ -436,6 +453,38 @@ export class WeatherLightningEffectV2 {
   }
 
   /**
+   * Scene sun azimuth for shadow-direction hints (building pass when available).
+   * @returns {number}
+   * @private
+   */
+  _resolveSceneSunAzimuthDeg() {
+    const buildingAz = Number(this._floorCompositor?._buildingShadowEffect?._sunAzimuthDeg);
+    if (Number.isFinite(buildingAz)) return ((buildingAz % 360) + 360) % 360;
+    return ((Number(this._activeAzimuthDeg) || 180) % 360 + 360) % 360;
+  }
+
+  /**
+   * Pick a strike azimuth clustered near the live sun so shadows do not flip to the far side.
+   * @param {'small'|'big'|'auto'} [kind]
+   * @returns {number}
+   * @private
+   */
+  _pickStrikeAzimuthDeg(kind = 'auto') {
+    const sunAz = this._resolveSceneSunAzimuthDeg();
+    const spreadVar = clamp01(this.params.distanceVariation, 0.5);
+    let maxSpreadDeg = 40;
+    if (kind === 'small') {
+      maxSpreadDeg = 55 + spreadVar * 45;
+    } else if (kind === 'big') {
+      maxSpreadDeg = 22 + spreadVar * 38;
+    } else {
+      maxSpreadDeg = 28 + spreadVar * 52;
+    }
+    const offset = (Math.random() * 2 - 1) * maxSpreadDeg;
+    return ((sunAz + offset) % 360 + 360) % 360;
+  }
+
+  /**
    * @param {'small'|'big'|'auto'} kind
    * @returns {object}
    * @private
@@ -471,7 +520,7 @@ export class WeatherLightningEffectV2 {
       kind,
       startMs: performance.now(),
       peak: Math.max(0, peak),
-      azimuthDeg: Math.random() * 360,
+      azimuthDeg: this._pickStrikeAzimuthDeg(kind),
       strikeShadowWeight: kind === 'small' ? blendW * 0.42 : blendW,
       flickerHoldMs,
       flickerProfile,
@@ -521,8 +570,9 @@ export class WeatherLightningEffectV2 {
     const env = this._computeStrikeEnvelope(dtMs, attackMs, flickerHoldMs, decayMs, curve, true);
     const peak = Math.max(0, strike.peak);
 
+    const scale = strike.manualBoost ? 1.0 : this._getEffectiveIntensityScale(strike.kind);
     const flickAmtBase = clamp01(this.params.flashFlickerAmount, 0.52);
-    const flickAmt = strike.kind === 'small' ? flickAmtBase * 0.38 : flickAmtBase;
+    const flickAmt = (strike.kind === 'small' ? flickAmtBase * 0.38 : flickAmtBase) * scale;
     const inFlickerHold = dtMs > attackMs && dtMs < attackMs + flickerHoldMs + 1;
     let flickMul = 1.0;
     if (flickAmt > 0 && inFlickerHold && flickerHoldMs > 0) {
@@ -538,17 +588,13 @@ export class WeatherLightningEffectV2 {
       : 4;
     if (clampV > 0) flash = Math.min(flash, clampV);
 
-    const scale = strike.manualBoost ? 1.0 : this._getEffectiveIntensityScale(strike.kind);
-    const bright = clamp01(this.params.flashBrightness, 0.7) * scale;
-    const fullPeak = clamp01(this.params.brightnessMax, 1) * bright;
-    const strikeFlash01 = fullPeak > 0.001 ? clamp01(flash / fullPeak, 0) : 0;
+    const brightFull = clamp01(this.params.flashBrightness, 0.7);
+    const fullPeakRef = clamp01(this.params.brightnessMax, 1) * brightFull;
+    const strikeFlash01 = fullPeakRef > 0.001 ? clamp01(flash / fullPeakRef, 0) : 0;
 
     const shadowEnv = this._computeShadowEnvelope(dtMs, attackMs, flickerHoldMs, decayMs);
-    let shadowOut = shadowEnv;
-    if (inFlickerHold && flickMul < 0.999) {
-      shadowOut *= flickMul;
-    }
-    const peakFrac = fullPeak > 0.001 ? clamp01(peak / fullPeak, 0) : 0;
+    const shadowOut = shadowEnv;
+    const peakFrac = fullPeakRef > 0.001 ? clamp01(peak / fullPeakRef, 0) : 0;
     const shadow01 = clamp01(shadowOut * peakFrac, 0);
 
     const lightDone = env <= 0.0001;
@@ -566,7 +612,12 @@ export class WeatherLightningEffectV2 {
    * @param {'small'|'big'|'auto'} [kind]
    */
   _beginStrike(kind = 'auto') {
+    const hadActive = this._hasActiveStrikes();
     const strike = this._createStrikeRecord(kind);
+    if (!hadActive) {
+      this._strikeSnapshot.clear();
+      this._snapshotAzimuthDeg = Number.NaN;
+    }
     this._activeStrikes.push(strike);
     if (strike.manualBoost) this._manualStrikeBoost = true;
     this._flashStartMs = strike.startMs;
@@ -655,7 +706,7 @@ export class WeatherLightningEffectV2 {
    * @returns {object|null}
    */
   getLightningShadowTarget() {
-    if (this._envShadowFlash01 <= 0) return null;
+    if (this._resolveStructuralShadowFlash01() <= 0.001) return null;
     return this._buildLightningShadowTarget();
   }
 
@@ -665,6 +716,7 @@ export class WeatherLightningEffectV2 {
    * @returns {object|null}
    */
   getVegetationLightningShadowTarget() {
+    if (this._resolveStructuralShadowFlash01() <= 0.001) return null;
     if (!this._hasActiveStrikes()) return null;
     return this._buildLightningShadowTarget();
   }
@@ -712,7 +764,7 @@ export class WeatherLightningEffectV2 {
    * @returns {boolean}
    */
   wantsLiveLightningShadowOverride() {
-    if (this._envShadowFlash01 <= 0) return false;
+    if (this._resolveStructuralShadowFlash01() <= 0.001) return false;
     if (!this.getLightningShadowTarget()) return false;
     // After snapshot: fade via fixed lightning texture blend only (no sun-angle lerp).
     return !this._strikeSnapshot.hasCapture();
@@ -763,9 +815,10 @@ export class WeatherLightningEffectV2 {
    */
   getFlashState() {
     const dayNightMul = this._resolveDayNightFlashMultiplier();
-    const shadow01 = clamp01(this._envShadowFlash01 * dayNightMul, 0);
+    const shadow01 = this._resolveStructuralShadowFlash01();
+    const lighting01 = this._resolvePublishedLightingFlash01();
     return {
-      flash01: clamp01(this._envFlash01 * dayNightMul, 0),
+      flash01: lighting01,
       dayNightFlashMul: dayNightMul,
       shadowFlash01: shadow01,
       flash: this._flashValue,
@@ -862,6 +915,72 @@ export class WeatherLightningEffectV2 {
    * Scale flash strength by time-of-day anchors (day, dawn, dusk, night).
    * @returns {number}
    */
+  /**
+   * Night blend weight (0 = day flash level, 1 = night flash level) from time-of-day flash curve.
+   * @returns {number}
+   * @private
+   */
+  _resolveStructuralShadowNightWeight() {
+    const dayFlash = Math.max(0, Number(this.params.dayFlashBrightnessScale) ?? 0.2);
+    const nightFlash = Math.max(dayFlash, Number(this.params.nightFlashBrightnessScale) ?? 1);
+    const currentFlash = this._resolveDayNightFlashMultiplier();
+    if (nightFlash <= dayFlash + 1e-5) {
+      return currentFlash >= nightFlash * 0.5 ? 1 : 0;
+    }
+    return clamp01((currentFlash - dayFlash) / (nightFlash - dayFlash), 0);
+  }
+
+  /**
+   * Soft-rises outdoor/window flash at day and twilight when flashAttackMs is 0,
+   * preventing a one-frame blowout that washes over building shadows.
+   * @returns {number} 0..1
+   * @private
+   */
+  _resolveLightingSoftAttack01() {
+    const dayNightMul = this._resolveDayNightFlashMultiplier();
+    const nightFlash = Math.max(0, Number(this.params.nightFlashBrightnessScale) ?? 1);
+    if (dayNightMul >= nightFlash * 0.55) return 1;
+
+    const startMs = Number(this._flashStartMs);
+    const elapsed = Number.isFinite(startMs) && startMs >= 0
+      ? Math.max(0, performance.now() - startMs)
+      : 0;
+
+    const configuredAttack = Math.max(0, Number(this.params.flashAttackMs) || 0);
+    if (configuredAttack > 0) {
+      return Math.min(1, elapsed / configuredAttack);
+    }
+
+    const softMs = dayNightMul <= 0.25 ? 150 : 100;
+    return Math.min(1, elapsed / softMs);
+  }
+
+  /**
+   * Outdoor/window flash strength after day/night and soft-attack shaping.
+   * @returns {number}
+   * @private
+   */
+  _resolvePublishedLightingFlash01() {
+    const dayNightMul = this._resolveDayNightFlashMultiplier();
+    const raw = clamp01(this._envFlash01, 0);
+    return clamp01(raw * dayNightMul * this._resolveLightingSoftAttack01(), 0);
+  }
+
+  /**
+   * Effective structural shadow flash (building/sky-reach/painted). Outdoor flash uses day/night flash scales separately.
+   * @returns {number}
+   * @private
+   */
+  _resolveStructuralShadowFlash01() {
+    const raw = clamp01(this._envShadowFlash01, 0);
+    if (raw <= 0) return 0;
+    const dayStruct = clamp01(this.params.dayStructuralShadowScale, 0);
+    const nightStruct = clamp01(this.params.nightStructuralShadowScale, 1);
+    const nightW = this._resolveStructuralShadowNightWeight();
+    const structScale = dayStruct + (nightStruct - dayStruct) * nightW;
+    return clamp01(raw * structScale * this._resolveLightingSoftAttack01(), 0);
+  }
+
   _resolveDayNightFlashMultiplier() {
     const dayMul = Math.max(0, Number(this.params.dayFlashBrightnessScale) ?? 0.2);
     const dawnMul = Math.max(0, Number(this.params.dawnFlashBrightnessScale) ?? dayMul);
@@ -929,19 +1048,17 @@ export class WeatherLightningEffectV2 {
     const dayNightMul = this._resolveDayNightFlashMultiplier();
     env.landscapeLightningDayNightMul = dayNightMul;
     env.landscapeLightningFlash = this._flashValue;
-    env.landscapeLightningFlash01 = clamp01(this._envFlash01 * dayNightMul, 0);
+    const strike01 = this._resolvePublishedLightingFlash01();
+    env.landscapeLightningFlash01 = strike01;
     env.landscapeLightningAzimuthDeg = this._activeAzimuthDeg;
     env.landscapeLightningStrikeTime = timeInfo?.elapsed ?? 0;
-    const flash01 = clamp01(this._envFlash01, 0);
-    const bright = clamp01(this.params.flashBrightness, 0.7) * this._getEffectiveIntensityScale('auto');
     const peakMul = Math.max(1, Number(this.params.windowFlashPeakMultiplier) || 9);
-    const strike01 = flash01 * bright * dayNightMul;
     env.landscapeLightningWindowMul = 1.0 + strike01 * Math.max(0, peakMul - 1);
-    env.landscapeLightningOutdoorStrength = strike01
-      * Math.max(0, Number(this.params.outdoorFlashStrength) || 7.5);
+    env.landscapeLightningOutdoorStrength = Math.max(0, Number(this.params.outdoorFlashStrength) || 7.5);
     env.landscapeLightningShadowFlashFloor = clamp01(this.params.lightningShadowFlashFloor, 0.06);
     env.landscapeLightningShadowFlashGamma = Math.max(0.1, Number(this.params.lightningShadowFlashGamma) || 0.72);
-    env.landscapeLightningFlashContrast = Math.max(0, Number(this.params.lightningFlashContrast) || 1.15);
+    const contrastBase = Math.max(0, Number(this.params.lightningFlashContrast) || 1.15);
+    env.landscapeLightningFlashContrast = contrastBase * Math.max(0.1, strike01);
     env.landscapeLightningShadowDarkness = Math.max(1, Number(this.params.lightningShadowDarkness) || 2.4);
     const colorR = Number(this.params.lightningFlashColorR);
     const colorG = Number(this.params.lightningFlashColorG);
@@ -1141,16 +1258,8 @@ export class WeatherLightningEffectV2 {
   }
 
   _syncDominantStrikeSnapshot(dominantStrike) {
-    if (!dominantStrike) return;
-    const az = dominantStrike.azimuthDeg;
-    const prev = this._snapshotAzimuthDeg;
-    const drift = Number.isFinite(prev)
-      ? Math.min(Math.abs(az - prev), 360 - Math.abs(az - prev))
-      : Infinity;
-    if (!Number.isFinite(prev) || drift > 18) {
-      this._strikeSnapshot.clear();
-      this._snapshotAzimuthDeg = az;
-    }
+    if (!dominantStrike || this._strikeSnapshot.hasCapture()) return;
+    this._snapshotAzimuthDeg = dominantStrike.azimuthDeg;
   }
 
   _updateFlashEnvelope(nowMs, timeInfo) {
@@ -1209,7 +1318,11 @@ export class WeatherLightningEffectV2 {
     }
 
     if (dominantStrike) {
-      this._activeAzimuthDeg = dominantStrike.azimuthDeg;
+      if (this._strikeSnapshot.hasCapture() && Number.isFinite(this._snapshotAzimuthDeg)) {
+        this._activeAzimuthDeg = this._snapshotAzimuthDeg;
+      } else {
+        this._activeAzimuthDeg = dominantStrike.azimuthDeg;
+      }
       this._strikeShadowWeight = dominantStrike.strikeShadowWeight;
       this._syncDominantStrikeSnapshot(dominantStrike);
     }

@@ -36,6 +36,9 @@ const log = createLogger('LightingDirector');
 
 const MODULE_ID = 'map-shine-advanced';
 const SETTING_DARKNESS_PRIORITY = 'lightingDarknessPriority';
+const SETTING_FADE_CHUNK_LEG_SECONDS = 'environmentFadeChunkLegSeconds';
+const SETTING_FADE_CHUNK_SETTLE_MS = 'environmentFadeChunkSettleMs';
+const SETTING_FADE_CHUNK_MIN_HOUR_DELTA = 'environmentFadeChunkMinHourDelta';
 
 /**
  * How to merge the three darkness inputs (Foundry slider, calendar, weather).
@@ -123,6 +126,33 @@ class LightingDirectorImpl {
         choices: { ...DARKNESS_PRIORITY_CHOICES },
         default: DARKNESS_PRIORITY.MAX,
         onChange: () => { this._priorityCache = null; },
+      });
+      globalThis.game.settings.register(MODULE_ID, SETTING_FADE_CHUNK_LEG_SECONDS, {
+        name: 'Environment fade chunk leg (seconds)',
+        hint: 'Wall-clock duration of each mini-fade leg when a long time-of-day transition is split into chunks. Darkness and Foundry light activation refresh at the end of each leg.',
+        scope: 'world',
+        config: true,
+        type: Number,
+        range: { min: 5, max: 60, step: 1 },
+        default: 10,
+      });
+      globalThis.game.settings.register(MODULE_ID, SETTING_FADE_CHUNK_SETTLE_MS, {
+        name: 'Environment fade chunk settle (ms)',
+        hint: 'Pause between chunked fade legs so Foundry perception/lighting can catch up before the next leg begins.',
+        scope: 'world',
+        config: true,
+        type: Number,
+        range: { min: 0, max: 2000, step: 50 },
+        default: 300,
+      });
+      globalThis.game.settings.register(MODULE_ID, SETTING_FADE_CHUNK_MIN_HOUR_DELTA, {
+        name: 'Environment fade chunk min hour delta',
+        hint: 'Minimum in-game hour span (shortest arc) before chunked fades activate. Chunking also requires the fade duration to exceed the leg length.',
+        scope: 'world',
+        config: true,
+        type: Number,
+        range: { min: 0.1, max: 12, step: 0.1 },
+        default: 0.5,
       });
     } catch (e) {
       log.warn('Failed to register darknessPriority setting:', e);

@@ -11,6 +11,11 @@ import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
 import { mapShinePushSceneDarknessLevel } from '../utils/msa-v2-darkness.js';
 import { weatherController as coreWeatherController } from '../core/WeatherController.js';
 import { computeTimeOfDayDarkness01 } from '../core/foundry-time-phases.js';
+import {
+  environmentFadeController,
+  fadeExtrasFromControlState,
+} from './environment-fade-controller.js';
+import { environmentControlApi } from './environment-control-api.js';
 
 const log = createLogger('StateApplier');
 
@@ -428,66 +433,37 @@ export class StateApplier {
     try {
       const minutesNum = typeof transitionMinutes === 'number' ? transitionMinutes : Number(transitionMinutes);
       const safeMinutes = Number.isFinite(minutesNum) ? Math.max(0.0, Math.min(60.0, minutesNum)) : 0.0;
-      const durationSeconds = safeMinutes * 60.0;
 
       const wc = this._getWeatherController();
       const current = wc?.getCurrentTime?.() ?? wc?.timeOfDay ?? window.MapShine?.controlPanel?.controlState?.timeOfDay;
       const startHour = Number.isFinite(Number(current)) ? ((Number(current) % 24) + 24) % 24 : 12.0;
-
       const tgt = ((Number(targetHour) % 24) + 24) % 24;
 
-      // Cancel any previous time transition.
       if (this._timeTransitionIntervalId) {
         clearInterval(this._timeTransitionIntervalId);
         this._timeTransitionIntervalId = null;
       }
 
-      // If duration is 0, apply immediately.
-      if (durationSeconds <= 0.001) {
+      if (safeMinutes * 60 <= 0.001) {
         await this.applyTimeOfDay(tgt, saveToScene, applyFoundryDarkness);
         return;
       }
 
-      // Move along the shortest arc in circular time space.
-      let delta = tgt - startHour;
-      if (delta > 12) delta -= 24;
-      if (delta < -12) delta += 24;
+      const startSnap = environmentControlApi.captureSnapshot();
+      startSnap.timeOfDay = startHour;
+      const endSnap = environmentControlApi.captureSnapshot();
+      endSnap.timeOfDay = tgt;
 
-      const startMs = Date.now();
-      const durationMs = durationSeconds * 1000.0;
+      const cpState = window.MapShine?.controlPanel?.controlState;
+      const extras = cpState
+        ? fadeExtrasFromControlState(cpState)
+        : { ashIntensity: 0, gustinessIndex: 2 };
 
-      // Apply the first frame immediately.
-      await this.applyTimeOfDay(startHour, false, applyFoundryDarkness);
+      await environmentFadeController.start(startSnap, endSnap, extras, extras, safeMinutes);
 
-      return await new Promise((resolve, reject) => {
-        this._timeTransitionIntervalId = setInterval(() => {
-          try {
-            const elapsedMs = Date.now() - startMs;
-            const t = Math.max(0, Math.min(1, elapsedMs / durationMs));
-
-            const hour = ((startHour + delta * t) % 24 + 24) % 24;
-
-            // During the ramp we don't want to spam scene flags.
-            void this.applyTimeOfDay(hour, false, applyFoundryDarkness);
-
-            if (t >= 1) {
-              if (this._timeTransitionIntervalId) {
-                clearInterval(this._timeTransitionIntervalId);
-                this._timeTransitionIntervalId = null;
-              }
-
-              // Final application persists.
-              void this.applyTimeOfDay(tgt, saveToScene, applyFoundryDarkness).then(resolve).catch(reject);
-            }
-          } catch (e) {
-            if (this._timeTransitionIntervalId) {
-              clearInterval(this._timeTransitionIntervalId);
-              this._timeTransitionIntervalId = null;
-            }
-            reject(e);
-          }
-        }, 100);
-      });
+      if (saveToScene) {
+        await this.applyTimeOfDay(tgt, true, applyFoundryDarkness);
+      }
     } catch (error) {
       log.error('Failed to start time-of-day transition:', error);
       throw error;

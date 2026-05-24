@@ -201,7 +201,9 @@ export class ShadowManagerV2 {
           float bolt = clamp(lightningLit, 0.0, 1.0);
           float darkPow = max(1.0, uLandscapeLightningShadowDarkness);
           if (darkPow > 1.001) bolt = pow(bolt, darkPow);
-          return mix(liveLit, bolt, b);
+          // Union with live sun shadows — lightning darkens further but never erases existing shadow.
+          float merged = min(liveLit, bolt);
+          return mix(liveLit, merged, b);
         }
 
         vec2 smScreenUvToFoundry(vec2 screenUv) {

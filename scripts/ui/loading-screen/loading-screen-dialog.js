@@ -4,7 +4,6 @@
  */
 
 import { normalizeLoadingScreenConfig, WALLPAPER_MODES } from './loading-screen-config.js';
-import { selectWallpaper } from './loading-screen-wallpapers.js';
 import { getAvailableFontFamilies } from './loading-screen-fonts.js';
 import { applyPresetToConfig } from './loading-screen-presets.js';
 
@@ -459,7 +458,8 @@ export class LoadingScreenDialog {
     {
       const row = document.createElement('div');
       row.className = `ms-lsd-element-row ${this.selectedElementId === '__panel__' ? 'is-selected' : ''}`;
-      row.addEventListener('click', () => {
+      row.addEventListener('click', (ev) => {
+        if (ev.target.closest('.ms-lsd-element-controls, input, button')) return;
         this.selectedElementId = '__panel__';
         this._renderElementList();
         this._renderInspector();
@@ -482,14 +482,15 @@ export class LoadingScreenDialog {
 
       const controls = document.createElement('div');
       controls.className = 'ms-lsd-element-controls';
+      controls.addEventListener('click', (ev) => ev.stopPropagation());
 
       const vis = document.createElement('input');
       vis.type = 'checkbox';
       vis.checked = panelCfg.visible !== false;
       vis.title = 'Visible';
-      vis.addEventListener('change', (ev) => {
-        ev.stopPropagation();
+      vis.addEventListener('change', () => {
         panelCfg.visible = vis.checked;
+        this._markLayoutCustomized();
         this._renderPreview();
         this._renderElementList();
       });
@@ -510,7 +511,8 @@ export class LoadingScreenDialog {
     for (const element of elements) {
       const row = document.createElement('div');
       row.className = `ms-lsd-element-row ${element.id === this.selectedElementId ? 'is-selected' : ''}`;
-      row.addEventListener('click', () => {
+      row.addEventListener('click', (ev) => {
+        if (ev.target.closest('.ms-lsd-element-controls, input, button')) return;
         this.selectedElementId = element.id;
         this._renderElementList();
         this._renderInspector();
@@ -531,14 +533,15 @@ export class LoadingScreenDialog {
 
       const controls = document.createElement('div');
       controls.className = 'ms-lsd-element-controls';
+      controls.addEventListener('click', (ev) => ev.stopPropagation());
 
       const vis = document.createElement('input');
       vis.type = 'checkbox';
       vis.checked = element.visible !== false;
       vis.title = 'Visible';
-      vis.addEventListener('change', (ev) => {
-        ev.stopPropagation();
+      vis.addEventListener('change', () => {
         element.visible = vis.checked;
+        this._markLayoutCustomized();
         this._renderPreview();
         this._renderElementList();
       });
@@ -567,9 +570,9 @@ export class LoadingScreenDialog {
     layer.innerHTML = '';
     layer.style.background = this.state.config.style.backgroundColor || 'rgba(0,0,0,1)';
 
-    // Wallpaper — use the same selection helper as runtime (preview uses first sequential pick)
-    const wall = selectWallpaper(this.state.config.wallpapers, { isFirstLoad: false, advanceSequential: false })
-      || this.state.config.wallpapers.entries?.[0];
+    // Wallpaper preview — show the first configured entry (rotation applies at runtime only).
+    const wall = (this.state.config.wallpapers?.entries || [])
+      .find((e) => e && String(e.src || '').trim());
     if (wall?.src) {
       const img = document.createElement('img');
       img.src = wall.src;
@@ -895,6 +898,7 @@ export class LoadingScreenDialog {
 
     wrap.appendChild(this._inputRow('Visible', this._checkbox(element.visible !== false, (v) => {
       element.visible = v;
+      this._markLayoutCustomized();
       this._renderElementList();
       this._renderPreview();
     })));
@@ -1137,6 +1141,7 @@ export class LoadingScreenDialog {
 
     wrap.appendChild(this._inputRow('Visible', this._checkbox(panel.visible !== false, (v) => {
       panel.visible = v;
+      this._markLayoutCustomized();
       this._renderPreview();
       this._renderElementList();
     })));

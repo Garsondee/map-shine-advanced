@@ -9,9 +9,36 @@ const SESSION_SEQ_INDEX_KEY = 'map-shine-advanced.loading.wallpaperSeqIndex';
 /** @type {Map<string, HTMLImageElement>} */
 const imageCache = new Map();
 
+function normalizeWeight(value) {
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(1, Math.min(10, Number(value)));
+}
+
+function peekSequenceIndex(length) {
+  if (length <= 1) return 0;
+  try {
+    const current = Number.parseInt(sessionStorage.getItem(SESSION_SEQ_INDEX_KEY) || '0', 10);
+    return Number.isFinite(current) ? Math.max(0, current) % length : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
+function getAndAdvanceSequenceIndex(length) {
+  if (length <= 1) return 0;
+  try {
+    const current = Number.parseInt(sessionStorage.getItem(SESSION_SEQ_INDEX_KEY) || '0', 10);
+    const idx = Number.isFinite(current) ? Math.max(0, current) % length : 0;
+    sessionStorage.setItem(SESSION_SEQ_INDEX_KEY, String((idx + 1) % length));
+    return idx;
+  } catch (_) {
+    return 0;
+  }
+}
+
 /**
  * @param {Object} wallpapers
- * @param {{isFirstLoad?: boolean}} [options]
+ * @param {{isFirstLoad?: boolean, advanceSequential?: boolean}} [options]
  * @returns {Object|null}
  */
 export function selectWallpaper(wallpapers, options = {}) {
@@ -129,33 +156,6 @@ export async function loadImage(src, timeoutMs = 2500) {
 
   imageCache.set(key, img);
   return img;
-}
-
-function normalizeWeight(value) {
-  if (!Number.isFinite(value)) return 1;
-  return Math.max(1, Math.min(10, Number(value)));
-}
-
-function getAndAdvanceSequenceIndex(length) {
-  if (length <= 1) return 0;
-  try {
-    const current = Number.parseInt(sessionStorage.getItem(SESSION_SEQ_INDEX_KEY) || '0', 10);
-    const idx = Number.isFinite(current) ? Math.max(0, current) % length : 0;
-    sessionStorage.setItem(SESSION_SEQ_INDEX_KEY, String((idx + 1) % length));
-    return idx;
-  } catch (_) {
-    return 0;
-  }
-}
-
-function peekSequenceIndex(length) {
-  if (length <= 1) return 0;
-  try {
-    const current = Number.parseInt(sessionStorage.getItem(SESSION_SEQ_INDEX_KEY) || '0', 10);
-    return Number.isFinite(current) ? Math.max(0, current) % length : 0;
-  } catch (_) {
-    return 0;
-  }
 }
 
 function sleep(ms) {

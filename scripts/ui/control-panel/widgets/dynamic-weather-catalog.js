@@ -3,6 +3,15 @@
  * @module ui/control-panel/widgets/dynamic-weather-catalog
  */
 
+/** Precipitation becomes snow above this freeze level (see WeatherController). */
+export const FREEZE_SNOW_THRESHOLD = 0.55;
+
+/** Warm presets — freeze pinned at zero so rain never becomes snow. */
+export const WARM_FREEZE_BOUNDS = Object.freeze({ freezeLevelMin: 0, freezeLevelMax: 0 });
+
+/** Cold / snow-capable presets. */
+export const COLD_FREEZE_BOUNDS = Object.freeze({ freezeLevelMin: 0.6, freezeLevelMax: 1 });
+
 /** @typedef {{ id: string, label: string, icon: string, blurb: string, traits: string[] }} BiomeInfo */
 
 /** @typedef {{ id: string, label: string, icon: string, blurb: string, biome: string, speed: number, planMinutes: number, boundsEnabled?: boolean, bounds?: Record<string, number> }} MoodPreset */
@@ -155,7 +164,7 @@ export const DYNAMIC_MOOD_PRESETS = Object.freeze([
       cloudCoverMin: 0.08, cloudCoverMax: 0.5,
       windSpeedMin: 0.02, windSpeedMax: 0.45,
       fogDensityMin: 0, fogDensityMax: 0.35,
-      freezeLevelMin: 0, freezeLevelMax: 0.35,
+      ...WARM_FREEZE_BOUNDS,
     },
     blurb: 'Soft clouds and light breeze — low drama for long sessions.',
   },
@@ -172,7 +181,7 @@ export const DYNAMIC_MOOD_PRESETS = Object.freeze([
       cloudCoverMin: 0.25, cloudCoverMax: 0.85,
       windSpeedMin: 0.12, windSpeedMax: 0.7,
       fogDensityMin: 0.15, fogDensityMax: 0.75,
-      freezeLevelMin: 0, freezeLevelMax: 0.25,
+      ...WARM_FREEZE_BOUNDS,
     },
     blurb: 'Marine layer fog with onshore wind — moody but playable.',
   },
@@ -189,7 +198,7 @@ export const DYNAMIC_MOOD_PRESETS = Object.freeze([
       cloudCoverMin: 0.55, cloudCoverMax: 1,
       windSpeedMin: 0.08, windSpeedMax: 0.75,
       fogDensityMin: 0.05, fogDensityMax: 0.55,
-      freezeLevelMin: 0, freezeLevelMax: 0.15,
+      ...WARM_FREEZE_BOUNDS,
     },
     blurb: 'Wet, humid, and restless — frequent rain bursts.',
   },
@@ -206,7 +215,7 @@ export const DYNAMIC_MOOD_PRESETS = Object.freeze([
       cloudCoverMin: 0.45, cloudCoverMax: 1,
       windSpeedMin: 0.35, windSpeedMax: 1,
       fogDensityMin: 0.1, fogDensityMax: 0.65,
-      freezeLevelMin: 0.65, freezeLevelMax: 1,
+      ...COLD_FREEZE_BOUNDS,
     },
     blurb: 'Snow-heavy whiteout energy with fierce gusts.',
   },
@@ -223,7 +232,7 @@ export const DYNAMIC_MOOD_PRESETS = Object.freeze([
       cloudCoverMin: 0, cloudCoverMax: 0.3,
       windSpeedMin: 0.05, windSpeedMax: 0.65,
       fogDensityMin: 0, fogDensityMax: 0.12,
-      freezeLevelMin: 0.55, freezeLevelMax: 1,
+      ...WARM_FREEZE_BOUNDS,
     },
     blurb: 'Dry, hot, and dusty — rare storms only.',
   },
@@ -240,7 +249,10 @@ export const DYNAMIC_MOOD_PRESETS = Object.freeze([
       cloudCoverMin: 0.35, cloudCoverMax: 0.9,
       windSpeedMin: 0.1, windSpeedMax: 0.85,
       fogDensityMin: 0.2, fogDensityMax: 0.85,
-      freezeLevelMin: 0.45, freezeLevelMax: 0.95,
+      ...WARM_FREEZE_BOUNDS,
+      ashIntensityMin: 0.5, ashIntensityMax: 0.95,
+      lightningMin: 0, lightningMax: 0.35,
+      gustinessMin: 1, gustinessMax: 3,
     },
     blurb: 'Ash-thick air and oppressive heat — apocalyptic tone.',
   },
@@ -257,7 +269,10 @@ export const DYNAMIC_MOOD_PRESETS = Object.freeze([
       cloudCoverMin: 0.4, cloudCoverMax: 1,
       windSpeedMin: 0.15, windSpeedMax: 1,
       fogDensityMin: 0, fogDensityMax: 0.45,
-      freezeLevelMin: 0, freezeLevelMax: 0.4,
+      ...WARM_FREEZE_BOUNDS,
+      lightningMin: 0.55, lightningMax: 1,
+      ashIntensityMin: 0, ashIntensityMax: 0.12,
+      gustinessMin: 2, gustinessMax: 4,
     },
     blurb: 'Fast-evolving storm drama — good for set-piece scenes.',
   },
@@ -274,7 +289,7 @@ export const DYNAMIC_MOOD_PRESETS = Object.freeze([
       cloudCoverMin: 0.35, cloudCoverMax: 0.9,
       windSpeedMin: 0, windSpeedMax: 0.35,
       fogDensityMin: 0.25, fogDensityMax: 0.9,
-      freezeLevelMin: 0, freezeLevelMax: 0.3,
+      ...WARM_FREEZE_BOUNDS,
     },
     blurb: 'Slow, foggy, and oppressive — horror-friendly baseline.',
   },
@@ -326,6 +341,94 @@ export function allCatalogBiomeIds() {
   return Object.keys(DYNAMIC_BIOME_CATALOG);
 }
 
+/** Channels off unless a mood preset or biome template explicitly enables them. */
+const NEUTRAL_CHANNEL_BOUNDS = Object.freeze({
+  lightningMin: 0,
+  lightningMax: 0,
+  ashIntensityMin: 0,
+  ashIntensityMax: 0,
+  gustinessMin: 0,
+  gustinessMax: 3,
+});
+
+/** @type {Record<string, Record<string, number>>} */
+const CATEGORY_CHANNEL_BOUNDS = Object.freeze({
+  temperate: {
+    lightningMin: 0, lightningMax: 0.4,
+    ashIntensityMin: 0, ashIntensityMax: 0.15,
+    gustinessMin: 0, gustinessMax: 3,
+  },
+  arid: {
+    lightningMin: 0, lightningMax: 0.35,
+    ashIntensityMin: 0, ashIntensityMax: 0.55,
+    gustinessMin: 1, gustinessMax: 4,
+  },
+  tropical: {
+    lightningMin: 0.1, lightningMax: 0.65,
+    ashIntensityMin: 0, ashIntensityMax: 0.2,
+    gustinessMin: 1, gustinessMax: 3,
+  },
+  polar: {
+    lightningMin: 0, lightningMax: 0.25,
+    ashIntensityMin: 0, ashIntensityMax: 0.08,
+    gustinessMin: 1, gustinessMax: 4,
+  },
+  extreme: {
+    lightningMin: 0.35, lightningMax: 1,
+    ashIntensityMin: 0, ashIntensityMax: 0.25,
+    gustinessMin: 2, gustinessMax: 4,
+  },
+});
+
+/** @type {Record<string, Partial<Record<string, number>>>} */
+const BIOME_CHANNEL_BOUNDS = Object.freeze({
+  'Volcanic Wastes': {
+    ashIntensityMin: 0.45, ashIntensityMax: 1,
+    lightningMin: 0.05, lightningMax: 0.45,
+  },
+  'Thunderhead Ridge': {
+    lightningMin: 0.55, lightningMax: 1,
+    gustinessMin: 2, gustinessMax: 4,
+  },
+  'Arctic Blizzard': {
+    ashIntensityMin: 0, ashIntensityMax: 0.05,
+    lightningMin: 0, lightningMax: 0.15,
+  },
+  'Misty Vale': {
+    lightningMin: 0, lightningMax: 0.2,
+    gustinessMin: 0, gustinessMax: 2,
+  },
+});
+
+/**
+ * Merge scalar weather bounds with lightning, ash, and gustiness channels.
+ * @param {Record<string, number>} scalarBounds
+ * @param {string} biomeId
+ * @param {Record<string, number>} [overrides]
+ * @param {{ enrichChannels?: boolean }} [opts] When false (scene moods), lightning/ash default to off.
+ * @returns {Record<string, number>}
+ */
+export function buildFullDynamicBounds(scalarBounds, biomeId, overrides, opts = {}) {
+  const enrichChannels = opts.enrichChannels === true;
+
+  if (!enrichChannels) {
+    return {
+      ...NEUTRAL_CHANNEL_BOUNDS,
+      ...scalarBounds,
+      ...(overrides || {}),
+    };
+  }
+
+  const meta = lookupBiome(biomeId);
+  const cat = meta?.category || 'temperate';
+  return {
+    ...(CATEGORY_CHANNEL_BOUNDS[cat] || CATEGORY_CHANNEL_BOUNDS.temperate),
+    ...scalarBounds,
+    ...(BIOME_CHANNEL_BOUNDS[biomeId] || {}),
+    ...(overrides || {}),
+  };
+}
+
 /** @type {Record<string, Record<string, number>>} */
 const CATEGORY_BOUNDS_TEMPLATES = Object.freeze({
   temperate: {
@@ -333,35 +436,35 @@ const CATEGORY_BOUNDS_TEMPLATES = Object.freeze({
     cloudCoverMin: 0.05, cloudCoverMax: 0.65,
     windSpeedMin: 0.02, windSpeedMax: 0.55,
     fogDensityMin: 0, fogDensityMax: 0.4,
-    freezeLevelMin: 0, freezeLevelMax: 0.35,
+    ...WARM_FREEZE_BOUNDS,
   },
   arid: {
     precipitationMin: 0, precipitationMax: 0.22,
     cloudCoverMin: 0, cloudCoverMax: 0.35,
     windSpeedMin: 0.05, windSpeedMax: 0.8,
     fogDensityMin: 0, fogDensityMax: 0.12,
-    freezeLevelMin: 0.45, freezeLevelMax: 1,
+    ...WARM_FREEZE_BOUNDS,
   },
   tropical: {
     precipitationMin: 0.1, precipitationMax: 0.95,
     cloudCoverMin: 0.25, cloudCoverMax: 1,
     windSpeedMin: 0.04, windSpeedMax: 0.75,
     fogDensityMin: 0.02, fogDensityMax: 0.55,
-    freezeLevelMin: 0, freezeLevelMax: 0.15,
+    ...WARM_FREEZE_BOUNDS,
   },
   polar: {
     precipitationMin: 0.05, precipitationMax: 0.85,
     cloudCoverMin: 0.2, cloudCoverMax: 1,
     windSpeedMin: 0.1, windSpeedMax: 1,
     fogDensityMin: 0.05, fogDensityMax: 0.55,
-    freezeLevelMin: 0.55, freezeLevelMax: 1,
+    ...COLD_FREEZE_BOUNDS,
   },
   extreme: {
     precipitationMin: 0.15, precipitationMax: 1,
     cloudCoverMin: 0.35, cloudCoverMax: 1,
     windSpeedMin: 0.12, windSpeedMax: 1,
     fogDensityMin: 0, fogDensityMax: 0.5,
-    freezeLevelMin: 0, freezeLevelMax: 0.5,
+    ...WARM_FREEZE_BOUNDS,
   },
 });
 
@@ -369,6 +472,21 @@ const CATEGORY_BOUNDS_TEMPLATES = Object.freeze({
  * @param {string} biomeId
  * @returns {Record<string, number>}
  */
+/** Biomes that should never drift into snow (non-polar play spaces). */
+const WARM_BIOME_IDS = Object.freeze(new Set([
+  'Temperate Plains',
+  'Coastal Breeze',
+  'Misty Vale',
+  'Urban Heat Island',
+  'Desert',
+  'Steppe Winds',
+  'Volcanic Wastes',
+  'Tropical Jungle',
+  'Monsoon Season',
+  'Swamp & Marsh',
+  'Thunderhead Ridge',
+]));
+
 export function deriveBiomeBounds(biomeId) {
   const meta = lookupBiome(biomeId);
   const base = { ...(CATEGORY_BOUNDS_TEMPLATES[meta?.category || 'temperate'] || CATEGORY_BOUNDS_TEMPLATES.temperate) };
@@ -379,13 +497,19 @@ export function deriveBiomeBounds(biomeId) {
   if (biomeId === 'Arctic Blizzard' || biomeId === 'Permafrost Night') {
     base.freezeLevelMin = 0.7;
     base.freezeLevelMax = 1;
+  } else if (biomeId === 'Highland Peaks') {
+    base.freezeLevelMin = 0.35;
+    base.freezeLevelMax = 0.85;
+  } else if (WARM_BIOME_IDS.has(biomeId)) {
+    base.freezeLevelMin = 0;
+    base.freezeLevelMax = 0;
   }
   if (biomeId === 'Coastal Breeze') {
     base.windSpeedMin = 0.12;
     base.windSpeedMax = 0.75;
     base.fogDensityMax = 0.65;
   }
-  return base;
+  return buildFullDynamicBounds(base, biomeId, undefined, { enrichChannels: true });
 }
 
 /**
@@ -415,7 +539,7 @@ export function buildEnvironmentPresetSections() {
       biome: m.biome,
       speed: m.speed,
       planMinutes: m.planMinutes,
-      bounds: { ...(m.bounds || deriveBiomeBounds(m.biome)) },
+      bounds: buildFullDynamicBounds(m.bounds, m.biome, undefined, { enrichChannels: false }),
     })),
   }];
 

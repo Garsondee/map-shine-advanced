@@ -5518,6 +5518,125 @@ body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {
   opacity: 0.92;
 }
 
+/* Dynamic bounds — min/max handles on chunky fader tracks */
+.msa-cp-bounds-fader-board {
+  margin-top: 4px;
+}
+
+.msa-cp-fader--bounds .msa-cp-fader__track-wrap {
+  cursor: ns-resize;
+}
+
+.msa-cp-fader__bounds-fill {
+  position: absolute;
+  bottom: 0;
+  left: 2px;
+  right: 2px;
+  height: 0;
+  min-height: 2px;
+  border-radius: 0 0 10px 10px;
+  background: var(--fader-fill-color, rgba(80, 175, 255, 0.9));
+  box-shadow: 0 0 10px color-mix(in srgb, var(--fader-fill-color, rgba(80, 175, 255, 0.9)) 55%, transparent);
+  pointer-events: none;
+  z-index: 1;
+  transition: bottom 0.08s ease, height 0.08s ease;
+}
+
+.msa-cp-fader--bounds.has-preview .msa-cp-fader__bounds-fill {
+  opacity: 0.55;
+}
+
+.msa-cp-fader__bounds-preview {
+  z-index: 2;
+  border-radius: 10px;
+}
+
+.msa-cp-fader__bounds-live {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  margin-bottom: -1.5px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow:
+    0 0 8px rgba(255, 255, 255, 0.75),
+    0 0 2px rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+  cursor: ns-resize;
+  touch-action: none;
+  z-index: 5;
+  transition: box-shadow 0.12s ease, transform 0.12s ease;
+}
+
+.msa-cp-fader__bounds-live::after {
+  content: '';
+  position: absolute;
+  left: -4px;
+  right: -4px;
+  top: -7px;
+  bottom: -7px;
+}
+
+.msa-cp-fader--bounds.is-live-dragging .msa-cp-fader__bounds-live,
+.msa-cp-fader__bounds-live:hover {
+  box-shadow:
+    0 0 12px rgba(255, 255, 255, 0.95),
+    0 0 4px rgba(90, 200, 250, 0.65);
+  transform: scaleY(1.35);
+}
+
+.msa-cp-fader--bounds.is-live-dragging .msa-cp-fader__bounds-handle {
+  opacity: 0.55;
+}
+
+.msa-cp-fader__bounds-handle {
+  position: absolute;
+  left: 1px;
+  width: 18px;
+  height: 5px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.88);
+  border-radius: 2px;
+  background: rgba(220, 240, 255, 0.95);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  cursor: ns-resize;
+  touch-action: none;
+  z-index: 3;
+  transition: opacity 0.12s ease, box-shadow 0.12s ease;
+}
+
+.msa-cp-fader__bounds-handle::after {
+  content: '';
+  position: absolute;
+  left: -4px;
+  right: -4px;
+  top: -7px;
+  bottom: -7px;
+}
+
+.msa-cp-fader__bounds-handle--min {
+  background: rgba(180, 210, 240, 0.92);
+}
+
+.msa-cp-fader__bounds-handle--max {
+  background: rgba(240, 250, 255, 0.98);
+}
+
+.msa-cp-fader__bounds-handle.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.msa-cp-fader__bounds-handle.is-collapsed {
+  box-shadow: 0 0 6px rgba(90, 200, 250, 0.55);
+}
+
+.msa-cp-fader--bounds.is-dragging .msa-cp-fader__bounds-handle {
+  box-shadow: 0 0 8px rgba(90, 200, 250, 0.65);
+}
+
 .msa-cp-astrolabe__wind-arrow-wrap--target {
   z-index: 10;
   color: rgba(200, 230, 255, 0.72);
@@ -5931,8 +6050,8 @@ body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {
 
 .msa-cp__weather-status.is-dynamic-view,
 .msa-cp-weather-status-panel.is-dynamic-view {
-  padding: 14px 10px 16px;
-  min-height: 72px;
+  padding: 12px 10px 14px;
+  min-height: 88px;
   font-size: 10px;
 }
 
@@ -5942,6 +6061,9 @@ body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {
   line-height: 1.35;
   white-space: normal;
   opacity: 0.9;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
 }
 
 .msa-cp-weather-status-panel.is-dynamic-view .msa-cp-weather-status__cur,
@@ -5964,6 +6086,11 @@ body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {
   align-items: center;
   gap: 6px;
   min-height: 16px;
+}
+
+.msa-cp-weather-status__top.is-badge-hidden .msa-cp-weather-status__activity {
+  flex: 1 1 100%;
+  min-width: 0;
 }
 
 .msa-cp-weather-status__activity {
@@ -6521,20 +6648,3 @@ body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {
 .msa-cp-mixer-shared__faders {
   margin-top: 6px;
 }
-
-.msa-cp-weather-status-panel.is-dynamic-view,
-.msa-cp__weather-status.is-dynamic-view {
-  min-height: 88px;
-  padding: 12px 10px 14px;
-}
-
-.msa-cp-weather-status-panel.is-dynamic-view .msa-cp-weather-status__activity,
-.msa-cp__weather-status.is-dynamic-view .msa-cp-weather-status__activity {
-  white-space: normal;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  line-height: 1.35;
-  font-size: 9.5px;
-}
-

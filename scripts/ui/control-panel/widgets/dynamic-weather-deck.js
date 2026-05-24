@@ -1,17 +1,33 @@
 /**
  * @fileoverview Compact Dynamic Weather deck — range bounds faders + overlay preset picker.
+ * Dynamic steps use Environment Fade (min 1 min); no separate evolve speed controls.
  * @module ui/control-panel/widgets/dynamic-weather-deck
  */
 
-import { createNativeControl } from '../cp-shell.js';
 import {
   buildEnvironmentPresetSections,
   findEnvironmentPreset,
   lookupBiome,
 } from './dynamic-weather-catalog.js';
-import { createSplitBoundsFaderBoard } from './split-bounds-fader-board.js';
+import { createSplitBoundsFaderBoard, BOUND_FADER_GROUPS } from './split-bounds-fader-board.js';
+import { GUSTINESS_LABELS } from './astrolabe-dial.js';
+import { applyAshMasterIntensity } from '../../ash-weather-bridge.js';
+import {
+  applyLightningIntensityToEffect,
+  writeLightningIntensityToControlState,
+} from '../../landscape-lightning-bridge.js';
+import { computePrecipType } from '../../weather-param-bridge.js';
 
 const PRESET_OVERLAY_WIDTH_PX = 720;
+
+/** @type {Record<string, number>} */
+const GUSTINESS_TO_VARIABILITY = Object.freeze({
+  calm: 0.25,
+  light: 0.45,
+  moderate: 0.7,
+  strong: 0.85,
+  extreme: 0.95,
+});
 
 /**
  * @param {HTMLElement} mountEl
@@ -51,117 +67,6 @@ export function createDynamicWeatherDeck(mountEl, hooks) {
     try {
       await hooks.onSaveDynamic?.();
     } catch (_) {}
-  }
-
-  const evolutionStrip = document.createElement('div');
-  evolutionStrip.className = 'msa-cp-dynamic-evolution-strip';
-
-  const evolutionHeader = document.createElement('div');
-  evolutionHeader.className = 'msa-cp-dynamic-evolution-strip__header';
-
-  const evolutionTitle = document.createElement('span');
-  evolutionTitle.className = 'msa-cp-dynamic-evolution-strip__title';
-  evolutionTitle.textContent = 'Evolution';
-
-  const evolutionTag = document.createElement('span');
-  evolutionTag.className = 'msa-cp-dynamic-evolution-strip__tag';
-
-  evolutionHeader.appendChild(evolutionTitle);
-  evolutionHeader.appendChild(evolutionTag);
-  evolutionStrip.appendChild(evolutionHeader);
-
-  const evolutionToggles = document.createElement('div');
-  evolutionToggles.className = 'msa-cp-dynamic-evolution-strip__toggles';
-
-  /**
-   * @param {string} label
-   * @param {() => boolean} read
-   * @param {(next: boolean) => void} write
-   * @param {() => void} commit
-   */
-  function createEvolutionToggle(label, read, write, commit) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'msa-cp-dynamic-evolution-strip__toggle';
-    btn.textContent = label;
-    btn.disabled = !hooks.isGm();
-
-    const mirror = () => {
-      const on = read();
-      btn.classList.toggle('is-active', on);
-      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-    };
-
-    btn.addEventListener('click', () => {
-      if (!hooks.isGm()) return;
-      write(!read());
-      mirror();
-      commit();
-    });
-
-    mirror();
-    return { btn, mirror };
-  }
-
-  const evolveToggle = createEvolutionToggle(
-    'Evolve',
-    () => hooks.controlState.dynamicEnabled === true,
-    (next) => { hooks.controlState.dynamicEnabled = next; },
-    () => {
-      void hooks.onApply();
-      hooks.onSave();
-      updateEvolutionTag();
-      updatePresetButtonLabel();
-    },
-  );
-
-  const pauseToggle = createEvolutionToggle(
-    'Pause',
-    () => hooks.controlState.dynamicPaused === true,
-    (next) => { hooks.controlState.dynamicPaused = next; },
-    () => {
-      void hooks.onApply();
-      hooks.onSave();
-      updateEvolutionTag();
-    },
-  );
-
-  evolutionToggles.appendChild(evolveToggle.btn);
-  evolutionToggles.appendChild(pauseToggle.btn);
-  evolutionStrip.appendChild(evolutionToggles);
-
-  const speedWrap = document.createElement('div');
-  speedWrap.className = 'msa-cp-dynamic-evolution-strip__speed';
-
-  const speed = createNativeControl({
-    type: 'range',
-    label: 'Speed',
-    target: hooks.controlState,
-    key: 'dynamicEvolutionSpeed',
-    min: 0,
-    max: 600,
-    step: 1,
-    disabled: !hooks.isGm(),
-    onChange: () => {
-      void hooks.onApply();
-      hooks.onSave();
-      updateEvolutionTag();
-    },
-  });
-  speed.row.classList.add('msa-cp-dynamic-evolution-strip__speed-row');
-  speedWrap.appendChild(speed.row);
-  evolutionStrip.appendChild(speedWrap);
-  root.appendChild(evolutionStrip);
-
-  function updateEvolutionTag() {
-    const speedVal = Math.round(Number(hooks.controlState.dynamicEvolutionSpeed) || 0);
-    const paused = hooks.controlState.dynamicPaused === true;
-    const evolving = hooks.controlState.dynamicEnabled === true;
-    if (!evolving) {
-      evolutionTag.textContent = 'Off';
-      return;
-    }
-    evolutionTag.textContent = paused ? `${speedVal}× · Paused` : `${speedVal}×`;
   }
 
   const presetRow = document.createElement('div');
@@ -222,7 +127,7 @@ export function createDynamicWeatherDeck(mountEl, hooks) {
 
       const optMeta = document.createElement('div');
       optMeta.className = 'msa-cp-dynamic-preset-overlay__option-meta';
-      optMeta.textContent = `${lookupBiome(item.biome)?.label || item.biome} · ${item.speed}× evolution · ${item.planMinutes} min steps`;
+      optMeta.textContent = `${lookupBiome(item.biome)?.label || item.biome} · bounds for evolution · Environment Fade sets step length`;
 
       opt.appendChild(optTitle);
       opt.appendChild(optBody);
@@ -269,7 +174,11 @@ export function createDynamicWeatherDeck(mountEl, hooks) {
     const wc = hooks.getWeatherController();
     const n = Number(wc?._dynamicBounds?.[key]);
     if (Number.isFinite(n)) return n;
-    return key.endsWith('Max') ? 1 : 0;
+    if (key.endsWith('Max')) {
+      if (key.startsWith('gustiness')) return GUSTINESS_LABELS.length - 1;
+      return 1;
+    }
+    return 0;
   };
 
   const writeBound = (key, value) => {
@@ -278,12 +187,72 @@ export function createDynamicWeatherDeck(mountEl, hooks) {
     wc?.setDynamicBoundsEnabled?.(true);
   };
 
+  /**
+   * @param {string} metaId
+   * @param {number} rawValue
+   * @param {{ save?: boolean }} [opts]
+   */
+  function commitDynamicLiveScalar(metaId, rawValue, opts = {}) {
+    if (!hooks.isGm()) return;
+    const wc = hooks.getWeatherController();
+    if (!wc) return;
+
+    const group = BOUND_FADER_GROUPS.find((g) => g.metaId === metaId);
+    if (!group) return;
+
+    const lo = Math.min(readBound(group.minKey), readBound(group.maxKey));
+    const hi = Math.max(readBound(group.minKey), readBound(group.maxKey));
+    let value = Number(rawValue);
+    if (!Number.isFinite(value)) return;
+    value = Math.max(lo, Math.min(hi, value));
+    if (group.step >= 1) value = Math.round(value);
+
+    const applyScalar = (field, v) => {
+      const applyTo = (state) => {
+        if (!state) return;
+        state[field] = v;
+      };
+      applyTo(wc.targetState);
+      applyTo(wc.currentState);
+      if (field === 'precipitation' || field === 'freezeLevel') {
+        const pt = computePrecipType(wc.targetState?.precipitation, wc.targetState?.freezeLevel);
+        if (wc.targetState) wc.targetState.precipType = pt;
+        if (wc.currentState) wc.currentState.precipType = pt;
+      }
+    };
+
+    if (metaId === 'lightning') {
+      writeLightningIntensityToControlState(hooks.controlState, value);
+      applyLightningIntensityToEffect(value);
+    } else if (metaId === 'ashIntensity') {
+      applyAshMasterIntensity(value, { syncMainTweakpane: false });
+      applyScalar('ashIntensity', value);
+    } else if (metaId === 'gustiness') {
+      const key = GUSTINESS_LABELS[Math.round(value)] || 'moderate';
+      hooks.controlState.gustiness = key;
+      const variability = GUSTINESS_TO_VARIABILITY[key] ?? GUSTINESS_TO_VARIABILITY.moderate;
+      if (typeof wc.setVariability === 'function') wc.setVariability(variability);
+      else wc.variability = variability;
+    } else {
+      applyScalar(metaId, value);
+    }
+
+    wc.isTransitioning = false;
+    wc.transitionElapsed = 0;
+
+    if (opts.save) {
+      hooks.onSave();
+    }
+  }
+
   const boundsBoard = createSplitBoundsFaderBoard(faderMount, {
     readBound,
     writeBound,
     disabled: !hooks.isGm(),
     setContextHint: hooks.setContextHint,
     clearContextHint: hooks.clearContextHint,
+    onLiveValueInput: (metaId, value) => commitDynamicLiveScalar(metaId, value, { save: false }),
+    onLiveValueCommit: (metaId, value) => commitDynamicLiveScalar(metaId, value, { save: true }),
     onBoundsChange: () => {
       hooks.controlState.dynamicEnvironmentPresetId = null;
       void commitDynamicPersistence();
@@ -307,6 +276,99 @@ export function createDynamicWeatherDeck(mountEl, hooks) {
     for (const opt of presetPanel.querySelectorAll('.msa-cp-dynamic-preset-overlay__option')) {
       opt.classList.toggle('is-active', presetId != null && opt.dataset.presetId === presetId);
     }
+  }
+
+  /**
+   * Write preset bounds to WC and refresh fader visuals.
+   * @param {Record<string, number>} bounds
+   */
+  function applyBoundsToRuntime(bounds) {
+    if (!bounds || typeof bounds !== 'object') return;
+    const wc = hooks.getWeatherController();
+    wc?.setDynamicBoundsEnabled?.(true);
+    for (const [key, val] of Object.entries(bounds)) {
+      if (Number.isFinite(Number(val))) wc?.setDynamicBound?.(key, Number(val));
+    }
+    boundsBoard.applyBounds(bounds);
+    snapWeatherScalarsToBounds(bounds);
+  }
+
+  /**
+   * Clamp live weather into new bounds so warm presets do not inherit snow from prior cold drift.
+   * @param {Record<string, number>} bounds
+   */
+  function snapWeatherScalarsToBounds(bounds) {
+    if (!hooks.isGm()) return;
+    const wc = hooks.getWeatherController();
+    if (!wc || !bounds) return;
+
+    const clampToBounds = (minKey, maxKey, value) => {
+      const lo = Math.min(Number(bounds[minKey] ?? 0), Number(bounds[maxKey] ?? 0));
+      const hi = Math.max(Number(bounds[minKey] ?? 0), Number(bounds[maxKey] ?? 0));
+      const n = Number(value);
+      if (!Number.isFinite(n)) return lo;
+      return Math.max(lo, Math.min(hi, n));
+    };
+
+    const applyToState = (state) => {
+      if (!state) return;
+      for (const group of BOUND_FADER_GROUPS) {
+        if (group.metaId === 'lightning' || group.metaId === 'ashIntensity' || group.metaId === 'gustiness') {
+          continue;
+        }
+        state[group.metaId] = clampToBounds(group.minKey, group.maxKey, state[group.metaId]);
+      }
+      state.precipType = computePrecipType(state.precipitation, state.freezeLevel);
+    };
+
+    applyToState(wc.currentState);
+    applyToState(wc.targetState);
+
+    if (wc._dynamicLatent && Number.isFinite(Number(wc.targetState?.freezeLevel))) {
+      wc._dynamicLatent.temperature = Math.max(0, Math.min(1, 1 - Number(wc.targetState.freezeLevel)));
+    }
+
+    wc.isTransitioning = false;
+    wc.transitionElapsed = 0;
+    mirrorLiveValues();
+  }
+
+  /**
+   * @param {Record<string, number>|undefined|null} stored
+   * @param {Record<string, number>} target
+   */
+  function boundsDiffer(stored, target) {
+    if (!target || typeof target !== 'object') return false;
+    for (const [key, val] of Object.entries(target)) {
+      if (!Number.isFinite(Number(val))) continue;
+      const cur = Number(stored?.[key]);
+      if (!Number.isFinite(cur) || Math.abs(cur - Number(val)) > 0.001) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Keep vertical bounds aligned with the active catalog preset on load and mirror.
+   * @private
+   */
+  function syncBoundsFromActivePreset() {
+    const preset = findEnvironmentPreset(resolveActivePresetId(), presetSections);
+    if (!preset?.bounds) {
+      boundsBoard.mirrorAllBounds();
+      return;
+    }
+
+    if (hooks.controlState.dynamicEnvironmentPresetId) {
+      const wc = hooks.getWeatherController();
+      if (boundsDiffer(wc?._dynamicBounds, preset.bounds)) {
+        applyBoundsToRuntime(preset.bounds);
+      } else {
+        boundsBoard.mirrorAllBounds();
+      }
+      return;
+    }
+
+    boundsBoard.mirrorAllBounds();
   }
 
   function positionPresetOverlay() {
@@ -359,54 +421,38 @@ export function createDynamicWeatherDeck(mountEl, hooks) {
     hooks.controlState.dynamicEnvironmentPresetId = item.id;
     hooks.controlState.dynamicEnabled = true;
     hooks.controlState.dynamicPresetId = item.biome;
-    hooks.controlState.dynamicEvolutionSpeed = item.speed;
     hooks.controlState.dynamicPaused = false;
 
-    const wc = hooks.getWeatherController();
-    if (typeof wc?.setDynamicPlanDurationMinutes === 'function') {
-      wc.setDynamicPlanDurationMinutes(item.planMinutes);
-    }
-    wc?.setDynamicBoundsEnabled?.(true);
-    if (item.bounds) {
-      for (const [key, val] of Object.entries(item.bounds)) {
-        wc?.setDynamicBound?.(key, val);
-      }
-    }
-
-    boundsBoard.applyBounds(item.bounds);
-    evolveToggle.mirror();
-    pauseToggle.mirror();
-    speed.mirror();
-    updateEvolutionTag();
+    applyBoundsToRuntime(item.bounds);
     updatePresetButtonLabel();
     void hooks.onApply();
     void commitDynamicPersistence();
   }
 
-  function ensureBoundsFromStoredPreset() {
-    const presetId = hooks.controlState.dynamicEnvironmentPresetId;
-    if (typeof presetId !== 'string' || !presetId) return;
-
-    const preset = findEnvironmentPreset(presetId, presetSections);
-    if (!preset?.bounds) return;
-
-    const scene = canvas?.scene;
-    const stored = scene?.getFlag?.('map-shine-advanced', 'weather-dynamic');
-    if (stored?.bounds && typeof stored.bounds === 'object') return;
-
+  function mirrorLiveValues() {
     const wc = hooks.getWeatherController();
-    wc?.setDynamicBoundsEnabled?.(true);
-    boundsBoard.applyBounds(preset.bounds);
+    const state = wc?.getCurrentState?.() || wc?.currentState;
+    if (!state) return;
+
+    const gustKey = String(hooks.controlState?.gustiness || 'moderate');
+    const gustIdx = GUSTINESS_LABELS.indexOf(gustKey);
+    const lightning = Number(hooks.controlState?.landscapeLightning?.lightning);
+
+    boundsBoard.setLiveValues({
+      precipitation: Number(state.precipitation) || 0,
+      cloudCover: Number(state.cloudCover) || 0,
+      freezeLevel: Number(state.freezeLevel) || 0,
+      fogDensity: Number(state.fogDensity) || 0,
+      lightning: Number.isFinite(lightning) ? lightning : 0,
+      ashIntensity: Number(state.ashIntensity) || 0,
+      gustiness: gustIdx >= 0 ? gustIdx : 2,
+    });
   }
 
   function mirrorAll() {
     activePresetId = resolveActivePresetId();
-    evolveToggle.mirror();
-    pauseToggle.mirror();
-    speed.mirror();
-    updateEvolutionTag();
-    ensureBoundsFromStoredPreset();
-    boundsBoard.mirrorAllBounds();
+    syncBoundsFromActivePreset();
+    mirrorLiveValues();
     updatePresetButtonLabel();
   }
 
@@ -415,6 +461,7 @@ export function createDynamicWeatherDeck(mountEl, hooks) {
   return {
     root,
     mirror: mirrorAll,
+    mirrorLive: mirrorLiveValues,
     mirrorInfo: updatePresetButtonLabel,
     destroy: () => {
       window.removeEventListener('keydown', onOverlayKeydown);

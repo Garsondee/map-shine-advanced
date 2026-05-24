@@ -288,17 +288,29 @@ export const FADE_TIME_STOP_MINUTES = Object.freeze((() => {
   return stops;
 })());
 
+/** Dynamic weather evolution stops: 1 min → 60 min (no instant). */
+export const DYNAMIC_EVOLUTION_FADE_STOPS = Object.freeze((() => {
+  const stops = [1, ...FADE_TIME_STOP_MINUTES.filter((m) => m > 1 && m <= 60)];
+  for (let i = 1; i <= 10; i++) {
+    const t = i / 10;
+    stops.push(30 + (60 - 30) * t);
+  }
+  stops.push(60);
+  return [...new Set(stops.map((m) => Math.round(m * 1000) / 1000))].sort((a, b) => a - b);
+})());
+
 /**
  * @param {number} minutes
+ * @param {readonly number[]} [stopTable]
  * @returns {number}
  */
-export function fadeMinutesToStopIndex(minutes) {
+export function fadeMinutesToStopIndex(minutes, stopTable = FADE_TIME_STOP_MINUTES) {
   const m = Number(minutes);
   if (!Number.isFinite(m) || m <= 0) return 0;
   let best = 0;
   let bestDist = Infinity;
-  for (let i = 0; i < FADE_TIME_STOP_MINUTES.length; i++) {
-    const d = Math.abs(FADE_TIME_STOP_MINUTES[i] - m);
+  for (let i = 0; i < stopTable.length; i++) {
+    const d = Math.abs(stopTable[i] - m);
     if (d < bestDist) {
       bestDist = d;
       best = i;
@@ -309,11 +321,12 @@ export function fadeMinutesToStopIndex(minutes) {
 
 /**
  * @param {number} index
+ * @param {readonly number[]} [stopTable]
  * @returns {number}
  */
-export function fadeStopIndexToMinutes(index) {
-  const i = Math.max(0, Math.min(FADE_TIME_STOP_MINUTES.length - 1, Math.round(Number(index) || 0)));
-  return FADE_TIME_STOP_MINUTES[i];
+export function fadeStopIndexToMinutes(index, stopTable = FADE_TIME_STOP_MINUTES) {
+  const i = Math.max(0, Math.min(stopTable.length - 1, Math.round(Number(index) || 0)));
+  return stopTable[i];
 }
 
 /**
@@ -333,6 +346,7 @@ export function formatFadeMinutes(minutes) {
 
 /**
  * Slider row for environment fade duration (instant → 10s → … → 30 min).
+ * Call `setStopTable()` to switch ranges (e.g. dynamic 1 min → 60 min).
  */
 export function createFadeTimeSlider(spec) {
   const row = document.createElement('div');
@@ -347,12 +361,11 @@ export function createFadeTimeSlider(spec) {
   lbl.textContent = spec.label;
 
   lblWrap.appendChild(lbl);
-  if (spec.hint) {
-    const hint = document.createElement('span');
-    hint.className = 'msa-cp-fade-slider__hint';
-    hint.textContent = spec.hint;
-    lblWrap.appendChild(hint);
-  }
+  const hintEl = document.createElement('span');
+  hintEl.className = 'msa-cp-fade-slider__hint';
+  hintEl.textContent = spec.hint || '';
+  hintEl.hidden = !spec.hint;
+  lblWrap.appendChild(hintEl);
 
   const readout = document.createElement('span');
   readout.className = 'msa-cp-fade-slider__value';
@@ -363,34 +376,36 @@ export function createFadeTimeSlider(spec) {
   const input = document.createElement('input');
   input.type = 'range';
   input.className = 'msa-cp-fade-slider__range';
-  input.min = '0';
-  input.max = String(FADE_TIME_STOP_MINUTES.length - 1);
   input.step = '1';
 
   const ends = document.createElement('div');
   ends.className = 'msa-cp-fade-slider__ends';
-  ends.innerHTML = '<span>Instant</span><span>30 min</span>';
 
   trackWrap.appendChild(input);
   trackWrap.appendChild(ends);
 
-  let stopIndex = fadeMinutesToStopIndex(spec.value);
+  /** @type {readonly number[]} */
+  let stopTable = FADE_TIME_STOP_MINUTES;
+  let stopIndex = fadeMinutesToStopIndex(spec.value, stopTable);
 
   const render = () => {
+    input.min = '0';
+    input.max = String(Math.max(0, stopTable.length - 1));
+    stopIndex = Math.max(0, Math.min(stopTable.length - 1, stopIndex));
     input.value = String(stopIndex);
-    readout.textContent = formatFadeMinutes(fadeStopIndexToMinutes(stopIndex));
+    readout.textContent = formatFadeMinutes(fadeStopIndexToMinutes(stopIndex, stopTable));
   };
 
   const commit = (last) => {
-    stopIndex = Math.max(0, Math.min(FADE_TIME_STOP_MINUTES.length - 1, stopIndex));
+    stopIndex = Math.max(0, Math.min(stopTable.length - 1, stopIndex));
     render();
-    spec.onChange(fadeStopIndexToMinutes(stopIndex), last);
+    spec.onChange(fadeStopIndexToMinutes(stopIndex, stopTable), last);
   };
 
   input.addEventListener('input', () => {
     stopIndex = Number(input.value) || 0;
     render();
-    spec.onChange(fadeStopIndexToMinutes(stopIndex), false);
+    spec.onChange(fadeStopIndexToMinutes(stopIndex, stopTable), false);
   });
   input.addEventListener('change', () => {
     stopIndex = Number(input.value) || 0;
@@ -400,14 +415,39 @@ export function createFadeTimeSlider(spec) {
   row.appendChild(lblWrap);
   row.appendChild(readout);
   row.appendChild(trackWrap);
-  render();
 
-  const mirror = (minutes) => {
-    stopIndex = fadeMinutesToStopIndex(minutes);
+  /**
+   * @param {readonly number[]} stops
+   * @param {{ lowLabel?: string, highLabel?: string, hint?: string, minutes?: number }} [opts]
+   */
+  const setStopTable = (stops, opts = {}) => {
+    stopTable = stops?.length ? stops : FADE_TIME_STOP_MINUTES;
+    if (Number.isFinite(Number(opts.minutes))) {
+      stopIndex = fadeMinutesToStopIndex(Number(opts.minutes), stopTable);
+    }
+    if (opts.lowLabel || opts.highLabel) {
+      ends.innerHTML = `<span>${opts.lowLabel || ''}</span><span>${opts.highLabel || ''}</span>`;
+    }
+    if (typeof opts.hint === 'string') {
+      hintEl.textContent = opts.hint;
+      hintEl.hidden = !opts.hint;
+    }
     render();
   };
 
-  return { row, mirror, input, readout };
+  setStopTable(FADE_TIME_STOP_MINUTES, {
+    lowLabel: 'Instant',
+    highLabel: '30 min',
+    hint: spec.hint,
+    minutes: spec.value,
+  });
+
+  const mirror = (minutes) => {
+    stopIndex = fadeMinutesToStopIndex(minutes, stopTable);
+    render();
+  };
+
+  return { row, mirror, input, readout, setStopTable };
 }
 
 /**

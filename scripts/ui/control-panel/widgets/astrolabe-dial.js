@@ -449,6 +449,8 @@ export function createAstrolabeDial(opts) {
   let gustiness = 'moderate';
   let liveSpeedMS = null;
   let gustPulse = 0;
+  let displayVisualDeg = 0;
+  let displayVisualInitialized = false;
 
   const setDialHint = (text) => {
     try {
@@ -457,6 +459,21 @@ export function createAstrolabeDial(opts) {
   };
 
   const clearDialHint = () => setDialHint(null);
+
+  const aimWindVisualRotation = (targetDirectionDeg) => {
+    const targetVisual = windDegToVisualDeg(targetDirectionDeg);
+    if (!displayVisualInitialized) {
+      displayVisualDeg = targetVisual;
+      displayVisualInitialized = true;
+      return displayVisualDeg;
+    }
+    let delta = targetVisual - displayVisualDeg;
+    delta = ((delta + 180) % 360 + 360) % 360 - 180;
+    if (Math.abs(delta) > 0.15) {
+      displayVisualDeg += delta;
+    }
+    return displayVisualDeg;
+  };
 
   const applyWindVisuals = () => {
     const setNorm = Math.max(0, Math.min(1, speedMS / maxSpeed));
@@ -467,8 +484,9 @@ export function createAstrolabeDial(opts) {
     const minH = Math.round(WIND_SOCK_REACH * 0.82);
     const maxH = Math.round(WIND_SOCK_REACH * 1.12);
     const arrowH = minH + displayNorm * (maxH - minH);
+    const visualDeg = aimWindVisualRotation(directionDeg);
 
-    windArrowWrap.style.transform = `translate(-50%, -100%) rotate(${windDegToVisualDeg(directionDeg)}deg)`;
+    windArrowWrap.style.transform = `translate(-50%, -100%) rotate(${visualDeg}deg)`;
     windArrowWrap.style.setProperty('--wind-arrow-height', `${arrowH}px`);
 
     const surge = Number.isFinite(liveSpeedMS) && Math.abs(liveSpeedMS - speedMS) > 2.5;

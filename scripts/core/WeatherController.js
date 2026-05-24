@@ -180,6 +180,8 @@ export class WeatherController {
     this.dynamicEvolutionSpeed = 15.0;
 
     this.dynamicPlanDurationSeconds = 360.0;
+    /** Environment Fade minutes for dynamic step transitions (min 1 while dynamic). */
+    this._environmentFadeMinutes = 1.0;
     this._dynamicPlanStrength = 0.0;
 
     /** @type {THREE.Texture|null} */
@@ -220,7 +222,13 @@ export class WeatherController {
       fogDensityMin: 0.0,
       fogDensityMax: 1.0,
       freezeLevelMin: 0.0,
-      freezeLevelMax: 1.0
+      freezeLevelMax: 1.0,
+      lightningMin: 0.0,
+      lightningMax: 1.0,
+      ashIntensityMin: 0.0,
+      ashIntensityMax: 1.0,
+      gustinessMin: 0.0,
+      gustinessMax: 4.0,
     };
 
     this._queuedTransitionTarget = {
@@ -1403,6 +1411,38 @@ export class WeatherController {
     this._scheduleSaveDynamicState();
   }
 
+  /**
+   * Environment Fade duration (minutes) used for dynamic weather step transitions.
+   * @param {number} minutes
+   */
+  setEnvironmentFadeMinutes(minutes) {
+    const n = typeof minutes === 'number' ? minutes : Number(minutes);
+    if (!Number.isFinite(n)) return;
+    if (this.dynamicEnabled === true) {
+      this._environmentFadeMinutes = Math.max(1, Math.min(60, n));
+      return;
+    }
+    this._environmentFadeMinutes = Math.max(0, n);
+  }
+
+  /**
+   * @returns {number} Transition duration in seconds for dynamic planned steps.
+   * @private
+   */
+  _getDynamicTransitionDurationSeconds() {
+    if (this.dynamicEnabled !== true) return 0;
+
+    let mins = Number(this._environmentFadeMinutes);
+    if (!Number.isFinite(mins) || mins <= 0) {
+      try {
+        mins = Number(window.MapShine?.controlPanel?.controlState?.timeTransitionMinutes);
+      } catch (_) {}
+    }
+    if (!Number.isFinite(mins) || mins <= 0) mins = 1;
+    mins = Math.max(1, Math.min(60, mins));
+    return mins * 60.0;
+  }
+
   setPresetTransitionDurationMinutes(minutes) {
     const n = typeof minutes === 'number' ? minutes : Number(minutes);
     if (!Number.isFinite(n)) return;
@@ -1601,6 +1641,12 @@ export class WeatherController {
         assign('fogDensityMax');
         assign('freezeLevelMin');
         assign('freezeLevelMax');
+        assign('lightningMin');
+        assign('lightningMax');
+        assign('ashIntensityMin');
+        assign('ashIntensityMax');
+        assign('gustinessMin');
+        assign('gustinessMax');
       }
 
       // If we loaded dynamic mode as enabled, snapshot current manual target state
@@ -1772,6 +1818,11 @@ export class WeatherController {
       {
         const r = minMax('windSpeedMin', 'windSpeedMax');
         outWindBase = this._dynamicClamp(outWindBase, r.mn, r.mx);
+      }
+      {
+        const r = minMax('ashIntensityMin', 'ashIntensityMax');
+        const ash = Number(this.targetState.ashIntensity) || 0.0;
+        this.targetState.ashIntensity = this._dynamicClamp(ash, r.mn, r.mx);
       }
     }
 
@@ -2059,12 +2110,7 @@ export class WeatherController {
       this._initializeDynamicFromTarget();
     }
 
-    const speed = Number.isFinite(this.dynamicEvolutionSpeed) ? this.dynamicEvolutionSpeed : 60.0;
     const safeDt = Math.min(dt, 0.25);
-
-    if (this.dynamicPaused === true) {
-      return;
-    }
 
     // While a long transition is running, do not change the dynamic target.
     // This prevents the "constant readjustment" look.
@@ -2084,8 +2130,7 @@ export class WeatherController {
     let steps = 0;
     while (this._dynamicSimAccumulator >= this._dynamicStepSeconds && steps < 10) {
       this._dynamicSimAccumulator -= this._dynamicStepSeconds;
-      const simSeconds = this._dynamicStepSeconds * Math.max(0, speed);
-      this._dynamicStep(simSeconds);
+      this._dynamicStep(this._dynamicStepSeconds);
       steps++;
     }
 
@@ -2142,10 +2187,8 @@ export class WeatherController {
     else if (r < pClear + pOvercast + pRain + pStorm) regime = 'storm';
     else regime = 'blizzard';
 
-    // Strength: how far we move toward the new regime.
-    // (Examples: 0.3 = 30% more rainy, 0.5 = 50% more clear, etc.)
-    const r2 = rnd();
-    const strength = r2 < 0.6 ? 0.1 : (r2 < 0.9 ? 0.3 : 0.5);
+    // Strength: how far we move toward the new regime (1 = full step over Environment Fade).
+    const strength = 1.0;
     this._dynamicPlanStrength = strength;
 
     const archetype = {
@@ -2245,8 +2288,8 @@ export class WeatherController {
       next.precipType = PrecipitationType.RAIN;
     }
 
-    const duration = Math.max(1.0, Number.isFinite(this.dynamicPlanDurationSeconds) ? this.dynamicPlanDurationSeconds : 360.0);
-    this.transitionTo(next, duration);
+    const duration = this._getDynamicTransitionDurationSeconds();
+    this.transitionTo(next, Math.max(60, duration));
   }
 
   setDynamicPlanDurationMinutes(minutes) {
@@ -2748,6 +2791,22 @@ export class WeatherController {
   }
 
   _applyVariability(time, dt) {
+    if (window.MapShine?.environmentControlApi?.isExternallyDriven?.() === true) {
+      // Scripted environment fades own target/current wind — skip meander twitch.
+      this._syncWindUnits(this.targetState);
+      this.currentState.windSpeedMS = this.targetState.windSpeedMS;
+      this.currentState.windSpeed = this.targetState.windSpeed;
+      if (this.currentState.windDirection && this.targetState.windDirection) {
+        if (typeof this.currentState.windDirection.copy === 'function') {
+          this.currentState.windDirection.copy(this.targetState.windDirection);
+        } else {
+          this.currentState.windDirection.x = this.targetState.windDirection.x;
+          this.currentState.windDirection.y = this.targetState.windDirection.y;
+        }
+      }
+      return;
+    }
+
     const baseVar = this.variability;
 
     // Build continuous wind variability directly from speed-coupled noise bands.

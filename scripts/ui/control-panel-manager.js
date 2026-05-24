@@ -11,6 +11,8 @@ import {
   createSegmentedControl,
   createNativeControl,
   createStepperControl,
+  DYNAMIC_EVOLUTION_FADE_STOPS,
+  FADE_TIME_STOP_MINUTES,
   formatFadeMinutes,
   openAdvancedDrawer,
   triggerPanelClunk,
@@ -542,6 +544,9 @@ export class ControlPanelManager {
     if (next === 'dynamic') {
       this.controlState.weatherMode = 'dynamic';
       this.controlState.dynamicEnabled = true;
+      this.controlState.dynamicPaused = false;
+      this._reconfigureEnvironmentFadeSliderForMode();
+      this._syncDynamicEnvironmentFadeToWeatherController();
     } else {
       this.controlState.weatherMode = 'directed';
       this.controlState.dynamicEnabled = false;
@@ -574,14 +579,16 @@ export class ControlPanelManager {
       try {
         refreshMsaSameSceneRedrawPredict();
 
-        const weatherState = {
-          mode: this.controlState.weatherMode,
-          dynamicEnabled: this.controlState.dynamicEnabled,
-          dynamicPresetId: this.controlState.dynamicPresetId,
-          dynamicEvolutionSpeed: this.controlState.dynamicEvolutionSpeed,
-          dynamicPaused: this.controlState.dynamicPaused,
-        };
-        await stateApplier.applyWeatherState(weatherState, false);
+      const weatherState = {
+        mode: this.controlState.weatherMode,
+        dynamicEnabled: this.controlState.dynamicEnabled,
+        dynamicPresetId: this.controlState.dynamicPresetId,
+        dynamicEvolutionSpeed: this.controlState.dynamicEvolutionSpeed,
+        dynamicPaused: false,
+      };
+      await stateApplier.applyWeatherState(weatherState, false);
+
+      this._syncDynamicEnvironmentFadeToWeatherController();
 
         this._syncLandscapeLightningAndFogFromControlState();
         this._updateStatusPanel();
@@ -988,7 +995,11 @@ export class ControlPanelManager {
       title: 'How long time, weather, wind, fog, lightning, and ash take to blend (Instant = immediate jump)',
       value: Number(this.controlState.timeTransitionMinutes) || 0,
       onChange: (v) => {
-        this.controlState.timeTransitionMinutes = v;
+        const mins = this._isDynamicWeatherRuntimeActive()
+          ? this._clampDynamicEnvironmentFadeMinutes(v)
+          : (Number(v) || 0);
+        this.controlState.timeTransitionMinutes = mins;
+        this._syncDynamicEnvironmentFadeToWeatherController();
         refreshTimeFolderTag();
         this.debouncedSave();
       },
@@ -1000,12 +1011,19 @@ export class ControlPanelManager {
     this._bindContextHint(transSlider.row, () => {
       const mins = Number(this.controlState.timeTransitionMinutes) || 0;
       const fade = mins > 0 ? formatFadeMinutes(mins) : 'Instant';
+      const dynamic = this._isDynamicWeatherRuntimeActive();
       return [
         `Environment Fade — ${fade}`,
-        'Blends clock, weather sliders, wind, fog, lightning, and ash together',
-        'Dashed previews show targets before you release',
+        dynamic
+          ? 'Dynamic evolution step length (1 min – 1 hr, no instant)'
+          : 'Blends clock, weather sliders, wind, fog, lightning, and ash together',
+        dynamic
+          ? 'Each weather evolution step takes this long'
+          : 'Dashed previews show targets before you release',
       ];
     });
+
+    this._reconfigureEnvironmentFadeSliderForMode();
 
     lockBtn.classList.toggle('is-locked', this.controlState.linkTimeToFoundry === true);
     lockBtn.textContent = this.controlState.linkTimeToFoundry ? '🔒 Synced to Foundry VTT' : '🔓 Sync Foundry VTT Time';
@@ -1349,16 +1367,23 @@ export class ControlPanelManager {
   _mirrorWindCompassFromState(liveSpeedMS = null, gustPulse = null, liveDirectionDeg = null) {
     if (!this._astrolabe) return;
     this._coercePanelWindScalarsInPlace();
+
+    const fadeActive = this._environmentFadeTransitionActive || environmentFadeController.isRunning;
+    const speedMS = fadeActive && Number.isFinite(liveSpeedMS)
+      ? liveSpeedMS
+      : (Number(this.controlState.windSpeedMS) || 0);
+    const directionDeg = Number.isFinite(liveDirectionDeg)
+      ? liveDirectionDeg
+      : (Number(this.controlState.windDirection) || 0);
+
     this._astrolabe.mirror({
-      speedMS: Number(this.controlState.windSpeedMS) || 0,
-      directionDeg: Number.isFinite(liveDirectionDeg)
-        ? liveDirectionDeg
-        : (Number(this.controlState.windDirection) || 0),
+      speedMS,
+      directionDeg,
       gustiness: this.controlState.gustiness || 'moderate',
-      liveSpeedMS: Number.isFinite(liveSpeedMS) ? liveSpeedMS : null,
+      liveSpeedMS: fadeActive ? null : (Number.isFinite(liveSpeedMS) ? liveSpeedMS : null),
       gustPulse: Number.isFinite(gustPulse) ? gustPulse : null,
     });
-    const ms = Number.isFinite(liveSpeedMS) ? liveSpeedMS : (Number(this.controlState.windSpeedMS) || 0);
+    const ms = Number.isFinite(liveSpeedMS) ? liveSpeedMS : speedMS;
     this._setFolderTag('wind', `${Math.round(ms)} m/s`);
     if (this._liveWeatherOverrideDom?.rows?.gustiness) {
       const gIdx = GUSTINESS_LABELS.indexOf(this.controlState.gustiness || 'moderate');
@@ -1542,6 +1567,8 @@ export class ControlPanelManager {
     if (this._shell?.strikeZone) {
       this._shell.strikeZone.style.display = 'none';
     }
+    this._reconfigureEnvironmentFadeSliderForMode();
+    this._syncDynamicEnvironmentFadeToWeatherController();
     if (this._weatherFingerLeft) {
       this._weatherFingerLeft.style.display = isDirected ? '' : 'none';
     }
@@ -1614,6 +1641,94 @@ export class ControlPanelManager {
    */
   _isDynamicWeatherDrivingFog() {
     return this.controlState?.weatherMode === 'dynamic' && this.controlState?.dynamicEnabled === true;
+  }
+
+  /**
+   * @returns {boolean}
+   * @private
+   */
+  _isDynamicWeatherPanelActive() {
+    return this._normalizeWeatherUIMode() === 'dynamic';
+  }
+
+  /**
+   * @returns {boolean}
+   * @private
+   */
+  _isDynamicWeatherRuntimeActive() {
+    return this.controlState?.weatherMode === 'dynamic' && this.controlState?.dynamicEnabled === true;
+  }
+
+  /**
+   * @param {number} minutes
+   * @returns {number}
+   * @private
+   */
+  _clampDynamicEnvironmentFadeMinutes(minutes) {
+    const n = Number(minutes);
+    if (!Number.isFinite(n)) return 1;
+    return Math.max(1, Math.min(60, n));
+  }
+
+  /**
+   * Dynamic mode: 1 min – 1 hr, no instant. Manual/Directed: instant – 30 min.
+   * @private
+   */
+  _reconfigureEnvironmentFadeSliderForMode() {
+    const slider = this._timeTransitionStepper;
+    if (!slider?.setStopTable) return;
+
+    if (this._isDynamicWeatherRuntimeActive()) {
+      const mins = this._clampDynamicEnvironmentFadeMinutes(this.controlState.timeTransitionMinutes);
+      if (mins !== Number(this.controlState.timeTransitionMinutes)) {
+        this.controlState.timeTransitionMinutes = mins;
+      }
+      slider.setStopTable(DYNAMIC_EVOLUTION_FADE_STOPS, {
+        lowLabel: '1 min',
+        highLabel: '1 hr',
+        hint: '1 min → 1 hr',
+        minutes: mins,
+      });
+      return;
+    }
+
+    slider.setStopTable(FADE_TIME_STOP_MINUTES, {
+      lowLabel: 'Instant',
+      highLabel: '30 min',
+      hint: 'instant → 30 min',
+      minutes: Number(this.controlState.timeTransitionMinutes) || 0,
+    });
+  }
+
+  /**
+   * @returns {boolean} Whether control state was changed
+   * @private
+   */
+  _enforceDynamicEnvironmentFadeMinimum() {
+    if (!this._isDynamicWeatherRuntimeActive()) return false;
+    const clamped = this._clampDynamicEnvironmentFadeMinutes(this.controlState.timeTransitionMinutes);
+    if (clamped === Number(this.controlState.timeTransitionMinutes)) return false;
+    this.controlState.timeTransitionMinutes = clamped;
+    this._timeTransitionStepper?.mirror?.(clamped);
+    return true;
+  }
+
+  /**
+   * @private
+   */
+  _syncDynamicEnvironmentFadeToWeatherController() {
+    const wc = resolveWeatherController();
+    if (!wc?.setEnvironmentFadeMinutes) return;
+    if (this._isDynamicWeatherRuntimeActive()) {
+      const mins = this._clampDynamicEnvironmentFadeMinutes(this._getEnvironmentFadeMinutes());
+      if (mins !== Number(this.controlState.timeTransitionMinutes)) {
+        this.controlState.timeTransitionMinutes = mins;
+        this._timeTransitionStepper?.mirror?.(mins);
+      }
+      wc.setEnvironmentFadeMinutes(mins);
+      return;
+    }
+    wc.setEnvironmentFadeMinutes(this._getEnvironmentFadeMinutes());
   }
 
   /**
@@ -2462,13 +2577,18 @@ export class ControlPanelManager {
     this._syncTileMotionSpeedFromManager();
     this._dynamicWeatherDeck?.mirrorInfo?.();
 
+    if (this._isDynamicWeatherRuntimeActive()) {
+      this._dynamicWeatherDeck?.mirrorLive?.();
+    }
+
     const isEnabled = wc.enabled !== false;
     const isDynamic = wc.dynamicEnabled === true;
-    const isPaused = wc.dynamicPaused === true;
     const isTrans = wc.isTransitioning === true && Number(wc.transitionDuration) > 0;
 
     const dynamicPreset = typeof wc.dynamicPresetId === 'string' && wc.dynamicPresetId ? wc.dynamicPresetId : '—';
-    const dynamicSpeed = Number.isFinite(wc.dynamicEvolutionSpeed) ? wc.dynamicEvolutionSpeed : null;
+    const fadeMins = this._isDynamicWeatherRuntimeActive()
+      ? this._clampDynamicEnvironmentFadeMinutes(this._getEnvironmentFadeMinutes())
+      : this._getEnvironmentFadeMinutes();
 
     let modeLabel;
     let modeBadgeClass;
@@ -2476,22 +2596,26 @@ export class ControlPanelManager {
       modeLabel = 'Disabled';
       modeBadgeClass = 'ms-status-mode-badge--off';
     } else if (isDynamic) {
-      if (isPaused) modeLabel = 'Dynamic · Paused';
-      else if (isTrans) modeLabel = 'Dynamic · →';
-      else modeLabel = 'Dynamic';
+      modeLabel = 'Dynamic';
       modeBadgeClass = 'ms-status-mode-badge--dynamic';
     } else {
       modeLabel = 'Directed';
       modeBadgeClass = 'ms-status-mode-badge--directed';
     }
-    els.modeText.className = `ms-status-mode-badge ${modeBadgeClass}`;
-    els.modeText.textContent = modeLabel;
+
+    const hideModeBadge = uiMode === 'dynamic' && isEnabled && isDynamic;
+    els.modeText.hidden = hideModeBadge;
+    if (!hideModeBadge) {
+      els.modeText.className = `ms-status-mode-badge ${modeBadgeClass}`;
+      els.modeText.textContent = modeLabel;
+    }
+    els.topRow?.classList.toggle('is-badge-hidden', hideModeBadge);
 
     if (isEnabled && isDynamic) {
       const meta = lookupBiome(dynamicPreset);
-      const spd = dynamicSpeed !== null ? `${Math.round(dynamicSpeed)}× evolution` : '';
+      const fadeLine = fadeMins > 0 ? `${formatFadeMinutes(fadeMins)} fade steps` : '';
       const traitLine = meta?.traits?.slice(0, 2).join(' · ') || '';
-      els.activityText.textContent = [meta?.blurb || dynamicPreset, traitLine, spd].filter(Boolean).join(' — ');
+      els.activityText.textContent = [meta?.blurb || dynamicPreset, traitLine, fadeLine].filter(Boolean).join(' — ');
     } else {
       els.activityText.textContent = '';
     }
@@ -2537,15 +2661,12 @@ export class ControlPanelManager {
     }
 
     if (isDynamic) {
-      /* Show current state summary for dynamic mode */
       els.curText.textContent = this._formatWeatherLine(cur);
       els.tgtText.textContent = '';
       els.tgtText.style.display = 'none';
-      els.progressWrap.style.display = 'block';
-      els.progressLabel.textContent = isPaused ? 'Paused' : dynamicPreset;
-      els.progressPct.textContent = dynamicSpeed !== null ? `${Math.round(dynamicSpeed)}×` : '';
-      els.barInner.style.width = '35%';
-      els.barInner.style.animation = isPaused ? 'none' : 'mapShineIndeterminate 1.15s linear infinite';
+      els.progressWrap.style.display = 'none';
+      els.barInner.style.animation = 'none';
+      els.barInner.style.width = '0%';
       return;
     }
 
@@ -2633,6 +2754,14 @@ export class ControlPanelManager {
 
   _updateWindUI(wc) {
     if (this._astrolabe) {
+      if (
+        this._astrolabeWindDragging
+        || this._environmentFadeTransitionActive
+        || environmentFadeController.isRunning
+      ) {
+        return;
+      }
+
       let state = null;
       try {
         state = wc.getCurrentState?.() ?? wc.currentState;
@@ -3138,6 +3267,9 @@ export class ControlPanelManager {
 
     try {
       resolveWeatherController()?._loadDynamicStateFromScene?.();
+      this._reconfigureEnvironmentFadeSliderForMode();
+      this._enforceDynamicEnvironmentFadeMinimum();
+      this._syncDynamicEnvironmentFadeToWeatherController();
       this._dynamicWeatherDeck?.mirror?.();
     } catch (_) {}
 
@@ -4450,9 +4582,11 @@ export class ControlPanelManager {
         dynamicEnabled: this.controlState.dynamicEnabled,
         dynamicPresetId: this.controlState.dynamicPresetId,
         dynamicEvolutionSpeed: this.controlState.dynamicEvolutionSpeed,
-        dynamicPaused: this.controlState.dynamicPaused
+        dynamicPaused: false,
       };
       await stateApplier.applyWeatherState(weatherState, false); // Don't save here, handled by debouncedSave
+
+      this._syncDynamicEnvironmentFadeToWeatherController();
 
       // Important: applyWeatherState handles mode/dynamic only — directed Custom scalars
       // need _applyRapidWeatherOverrides. Do NOT run that on every _applyControlState:

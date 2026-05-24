@@ -5021,8 +5021,8 @@ body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {
   border: 1px solid rgba(90, 200, 250, 0.22);
   box-shadow: inset 0 0 14px rgba(0, 0, 0, 0.45);
   touch-action: none;
-  pointer-events: auto;
-  cursor: crosshair;
+  pointer-events: none;
+  cursor: default;
 }
 
 .msa-cp-astrolabe__time-stops {
@@ -5040,13 +5040,52 @@ body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {
   height: var(--wind-arrow-height, 112px);
   transform: translate(-50%, -100%);
   transform-origin: 50% 100%;
-  pointer-events: auto;
-  cursor: crosshair;
+  pointer-events: none;
   touch-action: none;
   z-index: 11;
   color: var(--msa-cp-accent);
   filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.65)) drop-shadow(0 0 8px var(--msa-cp-accent-dim));
   transition: height 0.15s ease, color 0.2s, filter 0.2s;
+}
+
+.msa-cp-astrolabe__wind-grab {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 28px;
+  height: 34px;
+  transform: translate(-50%, 0);
+  border-radius: 999px;
+  pointer-events: auto;
+  cursor: grab;
+  touch-action: none;
+  z-index: 2;
+}
+
+.msa-cp-astrolabe__wind-grab:active {
+  cursor: grabbing;
+}
+
+.msa-cp-astrolabe__wind-grab::after {
+  content: '';
+  position: absolute;
+  inset: -6px -8px;
+  border-radius: 999px;
+}
+
+.msa-cp-astrolabe__wind-grab:hover:not(.is-direction-locked):not(.is-speed-mode) {
+  box-shadow: 0 0 0 1px rgba(90, 200, 250, 0.28);
+}
+
+.msa-cp-astrolabe__wind-grab.is-direction-locked,
+.msa-cp-astrolabe__wind-grab.is-speed-mode {
+  cursor: ns-resize;
+  box-shadow: 0 0 0 1px rgba(160, 190, 220, 0.35);
+}
+
+.msa-cp-astrolabe__wind-grab.is-direction-mode {
+  cursor: grab;
+  box-shadow: 0 0 0 1px rgba(90, 200, 250, 0.32);
 }
 
 .msa-cp-astrolabe__wind-arrow-wrap[data-heat='mid'] {
@@ -5408,36 +5447,6 @@ body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.msa-cp-dial-wind-col {
-  position: absolute;
-  right: 2px;
-  top: 50%;
-  transform: translateY(-50%);
-  z-index: 4;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  pointer-events: auto;
-}
-
-.msa-cp-dial-wind-col__wind-mark {
-  font-size: 14px;
-  line-height: 1;
-  opacity: 0.88;
-  cursor: help;
-  user-select: none;
-}
-
-.msa-cp-dial-wind-col__gust .msa-cp-fader-board {
-  --fader-count: 1;
-}
-
-.msa-cp-dial-wind-col__gust .msa-cp-fader-board__tracks,
-.msa-cp-dial-wind-col__gust .msa-cp-fader-board__icons {
-  grid-template-columns: 20px;
 }
 
 .msa-cp-fader {
@@ -6529,6 +6538,3 @@ body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {
   font-size: 9.5px;
 }
 
-.msa-cp-dial-wind-col {
-  right: 8px;
-}

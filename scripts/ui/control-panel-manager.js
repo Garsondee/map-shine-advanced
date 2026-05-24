@@ -711,38 +711,8 @@ export class ControlPanelManager {
     stage.appendChild(dialCenter);
     zoneEl.appendChild(stage);
 
-    this._buildDialWindColumn(stage);
-
     this._weatherFingerLeft = leftFingers;
     this._weatherFingerRight = rightFingers;
-  }
-
-  /**
-   * Wind marker + gustiness fader column to the right of the astrolabe.
-   * @param {HTMLElement} stageEl
-   * @private
-   */
-  _buildDialWindColumn(stageEl) {
-    const col = document.createElement('div');
-    col.className = 'msa-cp-dial-wind-col';
-
-    const windMark = document.createElement('span');
-    windMark.className = 'msa-cp-dial-wind-col__wind-mark';
-    windMark.textContent = '💨';
-    windMark.setAttribute('aria-hidden', 'true');
-    col.appendChild(windMark);
-
-    this._bindContextHint(windMark, () => {
-      const ms = Math.round(Number(this.controlState.windSpeedMS) || 0);
-      const dir = Math.round(Number(this.controlState.windDirection) || 0);
-      return [
-        `Wind — ${ms} m/s · ${dir}°`,
-        'Use the sock on the dial: angle = direction',
-        'Pull sock length from center = speed (longer = faster)',
-      ];
-    });
-
-    stageEl.appendChild(col);
   }
 
   /**
@@ -3569,16 +3539,23 @@ export class ControlPanelManager {
   }
 
   _isAstrolabeNonTimeTarget(e) {
-    if (e.target?.closest?.('.msa-cp-astrolabe__wind-disc, .msa-cp-astrolabe__wind-arrow-wrap, .msa-cp-astrolabe__time-stop, .msa-cp-astrolabe__weather-btn, .msa-cp-astrolabe__time-pill')) {
-      return true;
-    }
-    const x = e.clientX ?? e.touches?.[0]?.clientX;
-    const y = e.clientY ?? e.touches?.[0]?.clientY;
-    if (Number.isFinite(x) && Number.isFinite(y) && this._astrolabe?.hitTestWindSock?.(x, y)) {
-      this._astrolabe.beginWindPointerAt?.(x, y);
+    if (e.target?.closest?.('.msa-cp-astrolabe__wind-grab, .msa-cp-astrolabe__time-stop, .msa-cp-astrolabe__weather-btn, .msa-cp-astrolabe__time-pill')) {
       return true;
     }
     return false;
+  }
+
+  /**
+   * @param {MouseEvent|TouchEvent} e
+   * @returns {boolean}
+   * @private
+   */
+  _isAstrolabeTimeRingPointer(e) {
+    const x = e.clientX ?? e.touches?.[0]?.clientX;
+    const y = e.clientY ?? e.touches?.[0]?.clientY;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    if (e.target?.closest?.('.msa-cp-astrolabe__handle-hub')) return true;
+    return this._astrolabe?.hitTestTimeRing?.(x, y) === true;
   }
 
   /**
@@ -3589,6 +3566,9 @@ export class ControlPanelManager {
   _onClockMouseDown(e) {
     if (this._astrolabeWindDragging) return;
     if (this._isAstrolabeNonTimeTarget(e)) {
+      return;
+    }
+    if (!this._isAstrolabeTimeRingPointer(e)) {
       return;
     }
     e.preventDefault();
@@ -3650,6 +3630,9 @@ export class ControlPanelManager {
    */
   _onClockTouchStart(e) {
     if (this._isAstrolabeNonTimeTarget(e)) {
+      return;
+    }
+    if (!this._isAstrolabeTimeRingPointer(e)) {
       return;
     }
     e.preventDefault();

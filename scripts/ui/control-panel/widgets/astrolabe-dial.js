@@ -14,6 +14,66 @@ export const GUSTINESS_DISPLAY = Object.freeze({
   extreme: 'Extreme',
 });
 
+/** Inner fraction of the speed track that maps to calm (0 m/s) — no need to hit center. */
+const WIND_CALM_NORM = 0.28;
+/** Pointer travel (px) before speed vs direction intent is chosen. */
+const WIND_DRAG_DECIDE_PX = 6;
+
+/**
+ * @param {number} a
+ * @param {number} b
+ */
+function shortestAngleDeltaDeg(a, b) {
+  let d = ((Number(b) - Number(a)) % 360 + 540) % 360 - 180;
+  return Math.abs(d);
+}
+
+/**
+ * @param {number} windDeg
+ */
+function outwardUnitForWindDeg(windDeg) {
+  const rad = (Number(windDeg) * Math.PI) / 180;
+  return { ux: Math.cos(rad), uy: Math.sin(rad) };
+}
+
+/**
+ * @param {number} norm 0..1 along wind axis
+ * @param {number} maxSpeed
+ */
+function distNormToSpeedMs(norm, maxSpeed) {
+  const n = Math.max(0, Math.min(1, norm));
+  if (n <= WIND_CALM_NORM) return 0;
+  return maxSpeed * (n - WIND_CALM_NORM) / (1 - WIND_CALM_NORM);
+}
+
+/**
+ * @param {number} clientX
+ * @param {number} clientY
+ * @param {number} cx
+ * @param {number} cy
+ * @param {number} windDeg
+ */
+function pointerAlongWindAxis(clientX, clientY, cx, cy, windDeg) {
+  const dx = clientX - cx;
+  const dy = clientY - cy;
+  const { ux, uy } = outwardUnitForWindDeg(windDeg);
+  return dx * ux + dy * uy;
+}
+
+/**
+ * @param {number} clientX
+ * @param {number} clientY
+ * @param {number} cx
+ * @param {number} cy
+ */
+function pointerAngleDegFromCenter(clientX, clientY, cx, cy) {
+  const dx = clientX - cx;
+  const dy = clientY - cy;
+  let pointerDeg = (Math.atan2(dy, dx) * 180) / Math.PI + 90;
+  if (pointerDeg < 0) pointerDeg += 360;
+  return pointerDeg;
+}
+
 /** Eight time stops evenly around the outer track. */
 const TIME_STOPS = Object.freeze([
   { hour: 0, label: 'Midnight' },
@@ -30,7 +90,7 @@ const TIME_STOPS = Object.freeze([
 export const CONTEXT_HINT_IDLE = Object.freeze([
   'Hover a control for help',
   'Sliders: drag track up/down to adjust',
-  'Environment Fade on: dashed previews · dial = time & wind',
+  'Outer ring = time · sock head = wind',
 ]);
 
 /** Convert pointer-on-disc degrees (0 = up) to WeatherController wind degrees. */
@@ -100,9 +160,11 @@ function windCompassLabel(deg) {
  * @param {number} proposedMS
  * @param {boolean} [dragging]
  * @param {number} [currentMS]
+ * @param {boolean} [directionLocked]
+ * @param {'speed'|'direction'|null} [dragMode]
  * @returns {string[]}
  */
-function formatWindSockHint(directionDeg, proposedMS, dragging = false, currentMS = proposedMS) {
+function formatWindSockHint(directionDeg, proposedMS, dragging = false, currentMS = proposedMS, directionLocked = false, dragMode = null) {
   const dir = Math.round(((Number(directionDeg) % 360) + 360) % 360);
   const proposed = Math.round(Number(proposedMS) || 0);
   const current = Math.round(Number(currentMS) || 0);
@@ -110,16 +172,30 @@ function formatWindSockHint(directionDeg, proposedMS, dragging = false, currentM
     const speedLine = proposed !== current
       ? `Setting speed: ${proposed} m/s (was ${current} m/s)`
       : `Setting speed: ${proposed} m/s`;
+    if (dragMode === 'speed' || directionLocked) {
+      return [
+        speedLine,
+        `Direction held: ${dir}° ${windCompassLabel(dir)}`,
+        'Release, then drag sideways on the sock to re-aim',
+      ];
+    }
+    if (dragMode === 'direction') {
+      return [
+        `Direction: ${dir}° ${windCompassLabel(dir)}`,
+        `Speed held: ${current} m/s`,
+        'Release, then pull sock in/out to change speed',
+      ];
+    }
     return [
       speedLine,
       `Direction: ${dir}° ${windCompassLabel(dir)}`,
-      'Pull toward center = slower · away from center = faster.',
+      'Pull in/out = speed · drag sideways = direction',
     ];
   }
   return [
     `Wind speed: ${current} m/s`,
     `Direction: ${dir}° ${windCompassLabel(dir)}`,
-    'Drag sock: aim = direction · pull length = speed.',
+    'Pull sock in/out for speed · sideways for direction',
   ];
 }
 
@@ -139,8 +215,8 @@ function formatWindDiscHint(directionDeg, speedMS, dragging = false, proposedMS 
   }
   return [
     `Wind direction: ${dir}° ${windCompassLabel(dir)}`,
-    `Speed: ${current} m/s — change by dragging sock length`,
-    'Drag inner disc or sock · distance from center sets speed.',
+    `Speed: ${current} m/s — drag the sock head to change`,
+    'Grab the sock bag only · the outer ring sets time',
   ];
 }
 
@@ -153,7 +229,7 @@ function formatTimeRingHint(hour24, dragging = false) {
   const period = hourPeriodLabel(hour24);
   return [
     `Time of Day — ${formatClockTime(hour24)} · ${period}`,
-    dragging ? 'Setting time…' : 'Drag the outer ring to change time',
+    dragging ? 'Setting time…' : 'Drag the outer ring band to change time',
     'Top: Noon · Right: Dusk · Bottom: Midnight · Left: Dawn',
   ];
 }
@@ -331,6 +407,11 @@ export function createAstrolabeDial(opts) {
   windArrowWrap.className = 'msa-cp-astrolabe__wind-arrow-wrap';
   windArrowWrap.innerHTML = WIND_ARROW_SVG;
 
+  const windGrab = document.createElement('div');
+  windGrab.className = 'msa-cp-astrolabe__wind-grab';
+  windGrab.title = 'Drag to set wind direction and speed';
+  windArrowWrap.appendChild(windGrab);
+
   const windArrowTarget = document.createElement('div');
   windArrowTarget.className = 'msa-cp-astrolabe__wind-arrow-wrap msa-cp-astrolabe__wind-arrow-wrap--target';
   windArrowTarget.innerHTML = WIND_ARROW_SVG;
@@ -355,6 +436,14 @@ export function createAstrolabeDial(opts) {
 
   const maxSpeed = opts.maxSpeedMS ?? 78;
   let windDragging = false;
+  /** @type {'undecided'|'speed'|'direction'} */
+  let windDragMode = 'undecided';
+  let dragStartClientX = 0;
+  let dragStartClientY = 0;
+  let dragStartPointerDist = 0;
+  let dragStartPointerWindDeg = 0;
+  let dragLockDirectionDeg = 180;
+  let dragLockSpeedMS = 0;
   let speedMS = 0;
   let directionDeg = 180;
   let gustiness = 'moderate';
@@ -408,32 +497,122 @@ export function createAstrolabeDial(opts) {
     windArrowTarget.hidden = true;
   };
 
+  const syncWindGrabDragMode = () => {
+    windGrab.classList.toggle('is-speed-mode', windDragMode === 'speed');
+    windGrab.classList.toggle('is-direction-mode', windDragMode === 'direction');
+    windGrab.classList.toggle('is-direction-locked', windDragMode === 'speed');
+  };
+
+  const resetWindDragSession = () => {
+    windDragMode = 'undecided';
+    syncWindGrabDragMode();
+  };
+
+  const beginWindDragSession = (clientX, clientY) => {
+    const rect = windDisc.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+
+    dragStartClientX = clientX;
+    dragStartClientY = clientY;
+    dragLockDirectionDeg = directionDeg;
+    dragLockSpeedMS = speedMS;
+
+    const dx = clientX - cx;
+    const dy = clientY - cy;
+    dragStartPointerDist = Math.hypot(dx, dy);
+    dragStartPointerWindDeg = pointerDegToWindDeg(pointerAngleDegFromCenter(clientX, clientY, cx, cy));
+
+    windDragMode = 'undecided';
+    syncWindGrabDragMode();
+  };
+
+  const decideWindDragMode = (clientX, clientY, cx, cy) => {
+    if (windDragMode !== 'undecided') return;
+
+    const moveDist = Math.hypot(clientX - dragStartClientX, clientY - dragStartClientY);
+    if (moveDist < WIND_DRAG_DECIDE_PX) return;
+
+    const dx = clientX - cx;
+    const dy = clientY - cy;
+    const currentDist = Math.hypot(dx, dy);
+    const currentWindDeg = pointerDegToWindDeg(pointerAngleDegFromCenter(clientX, clientY, cx, cy));
+
+    const distDelta = Math.abs(currentDist - dragStartPointerDist);
+    const angleDelta = shortestAngleDeltaDeg(dragStartPointerWindDeg, currentWindDeg);
+    const avgR = Math.max(14, (dragStartPointerDist + currentDist) * 0.5);
+    const arcPx = (angleDelta * Math.PI / 180) * avgR;
+
+    // Sideways orbit around the pivot → direction. In/out from pivot → speed.
+    if (angleDelta >= 7) {
+      windDragMode = 'direction';
+      dragLockSpeedMS = speedMS;
+    } else if (angleDelta >= 4 && arcPx >= distDelta * 1.05 && arcPx >= WIND_DRAG_DECIDE_PX * 0.55) {
+      windDragMode = 'direction';
+      dragLockSpeedMS = speedMS;
+    } else if (distDelta >= 3.5 && distDelta > arcPx * 1.05) {
+      windDragMode = 'speed';
+    } else if (moveDist >= WIND_DRAG_DECIDE_PX * 2) {
+      windDragMode = arcPx >= distDelta ? 'direction' : 'speed';
+      if (windDragMode === 'direction') dragLockSpeedMS = speedMS;
+    }
+
+    if (windDragMode !== 'undecided') {
+      dragLockDirectionDeg = directionDeg;
+      syncWindGrabDragMode();
+    }
+  };
+
   const updateWindFromPointer = (clientX, clientY, last) => {
     const rect = windDisc.getBoundingClientRect();
     const cx = rect.left + rect.width / 2;
     const cy = rect.top + rect.height / 2;
-    const dx = clientX - cx;
-    const dy = clientY - cy;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    const norm = Math.max(0, Math.min(1, dist / WIND_MAX_R));
-    let pointerDeg = (Math.atan2(dy, dx) * 180) / Math.PI + 90;
-    if (pointerDeg < 0) pointerDeg += 360;
-    const angle = pointerDegToWindDeg(pointerDeg);
-    const newSpeed = norm * maxSpeed;
     const prevSpeed = speedMS;
 
+    decideWindDragMode(clientX, clientY, cx, cy);
+
+    let newSpeed = speedMS;
+    let newDirection = directionDeg;
+
+    if (windDragMode === 'speed') {
+      const along = pointerAlongWindAxis(clientX, clientY, cx, cy, dragLockDirectionDeg);
+      const norm = Math.max(0, Math.min(1, along / WIND_MAX_R));
+      newSpeed = distNormToSpeedMs(norm, maxSpeed);
+      newDirection = dragLockDirectionDeg;
+    } else if (windDragMode === 'direction') {
+      newSpeed = dragLockSpeedMS;
+      const dx = clientX - cx;
+      const dy = clientY - cy;
+      if (Math.hypot(dx, dy) >= 8) {
+        const pointerDeg = pointerAngleDegFromCenter(clientX, clientY, cx, cy);
+        newDirection = pointerDegToWindDeg(pointerDeg);
+      }
+    }
+
     if (windDragging) {
-      setDialHint(formatWindSockHint(angle, newSpeed, true, prevSpeed));
+      setDialHint(formatWindSockHint(
+        newDirection,
+        newSpeed,
+        true,
+        prevSpeed,
+        windDragMode === 'speed',
+        windDragMode,
+      ));
     }
 
     if (Math.abs(newSpeed - speedMS) > 0.05) {
       speedMS = newSpeed;
       opts.onSpeedChange(speedMS, last);
     }
-    if (Math.abs(angle - directionDeg) > 0.5) {
-      directionDeg = angle;
+
+    if (windDragMode === 'direction' && Math.abs(newDirection - directionDeg) > 0.5) {
+      directionDeg = newDirection;
       opts.onDirectionChange(directionDeg, last);
+    } else if (windDragMode === 'speed') {
+      directionDeg = dragLockDirectionDeg;
     }
+
+    syncWindGrabDragMode();
     applyWindVisuals();
   };
 
@@ -447,6 +626,7 @@ export function createAstrolabeDial(opts) {
   const endWindPointer = (e) => {
     if (!windDragging) return;
     windDragging = false;
+    resetWindDragSession();
     windCaptureEl = null;
     opts.onWindDragChange?.(false);
     if (e?.clientX != null && e?.clientY != null) {
@@ -463,10 +643,10 @@ export function createAstrolabeDial(opts) {
 
   const onWindPointerDown = (e) => {
     windDragging = true;
+    beginWindDragSession(e.clientX, e.clientY);
     windCaptureEl = /** @type {HTMLElement} */ (e.currentTarget);
     opts.onWindDragChange?.(true);
     try { windCaptureEl.setPointerCapture(e.pointerId); } catch (_) {}
-    updateWindFromPointer(e.clientX, e.clientY, false);
     document.addEventListener('pointermove', onWindDocMove, true);
     document.addEventListener('pointerup', endWindPointer, true);
     document.addEventListener('pointercancel', endWindPointer, true);
@@ -475,20 +655,33 @@ export function createAstrolabeDial(opts) {
   };
 
   const hitTestWindSock = (clientX, clientY) => {
-    const rect = windArrowWrap.getBoundingClientRect();
+    const rect = windGrab.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return false;
-    const padX = 24;
-    const padTop = 28;
-    const padBottom = 12;
-    return clientX >= rect.left - padX
-      && clientX <= rect.right + padX
-      && clientY >= rect.top - padTop
-      && clientY <= rect.bottom + padBottom;
+    const pad = 4;
+    return clientX >= rect.left - pad
+      && clientX <= rect.right + pad
+      && clientY >= rect.top - pad
+      && clientY <= rect.bottom + pad;
+  };
+
+  const hitTestTimeRing = (clientX, clientY) => {
+    const rect = face.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    const scale = rect.width / FACE_SIZE;
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const dx = clientX - cx;
+    const dy = clientY - cy;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    const inner = RING_INNER_R * scale - 2;
+    const outer = R_OUTER * scale + 8;
+    return dist >= inner && dist <= outer;
   };
 
   const beginWindPointerAt = (clientX, clientY) => {
     if (windDragging) return;
     windDragging = true;
+    beginWindDragSession(clientX, clientY);
     opts.onWindDragChange?.(true);
     updateWindFromPointer(clientX, clientY, false);
     document.addEventListener('pointermove', onWindDocMove, true);
@@ -497,7 +690,7 @@ export function createAstrolabeDial(opts) {
   };
 
   const stopTimeBubble = (e) => e.stopPropagation();
-  const windTargets = [windDisc, windArrowWrap];
+  const windTargets = [windGrab];
   for (const el of windTargets) {
     el.addEventListener('mousedown', stopTimeBubble);
     el.addEventListener('touchstart', stopTimeBubble);
@@ -515,11 +708,7 @@ export function createAstrolabeDial(opts) {
       endWindPointer(null);
     });
     el.addEventListener('pointerenter', () => {
-      if (el === windArrowWrap) {
-        setDialHint(formatWindSockHint(directionDeg, speedMS, false));
-      } else {
-        setDialHint(formatWindDiscHint(directionDeg, speedMS, false));
-      }
+      setDialHint(formatWindSockHint(directionDeg, speedMS, false));
     });
   }
 
@@ -541,7 +730,7 @@ export function createAstrolabeDial(opts) {
 
   const onFacePointerMove = (e) => {
     if (windDragging) return;
-    if (e.target?.closest?.('.msa-cp-astrolabe__wind-disc, .msa-cp-astrolabe__wind-arrow-wrap, .msa-cp-astrolabe__time-stop')) {
+    if (e.target?.closest?.('.msa-cp-astrolabe__wind-grab, .msa-cp-astrolabe__time-stop')) {
       return;
     }
     if (hitTestWindSock(e.clientX, e.clientY)) {
@@ -591,6 +780,7 @@ export function createAstrolabeDial(opts) {
     digital: timePill,
     windDisc,
     windArrowWrap,
+    windGrab,
     windArrowTarget,
   };
 
@@ -602,6 +792,7 @@ export function createAstrolabeDial(opts) {
     setDigitalTime,
     updateTimeVisuals,
     hitTestWindSock,
+    hitTestTimeRing,
     beginWindPointerAt,
     setWindTargetPreview: applyWindTargetVisuals,
     clearWindTargetPreview,

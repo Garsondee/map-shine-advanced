@@ -754,7 +754,7 @@
           "heatDistortionFrequency": 20,
           "heatDistortionSpeed": 3,
           "heatDistortionEdgeSoftness": 0.5,
-          "fireSimHz": 30,
+          "fireSimHz": 60,
           "fireMaxSpatialBuckets": 16,
           "fireMaxSystemsPerFloor": 36,
           "fireOutdoorSplitMaxBuckets": 10,

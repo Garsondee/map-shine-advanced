@@ -180,6 +180,7 @@ export class LightningEffectV2 {
           name: 'timing',
           label: 'Timing',
           type: 'inline',
+          advanced: true,
           parameters: ['minDelayMs', 'maxDelayMs', 'burstMinStrikes', 'burstMaxStrikes', 'strikeDurationMs', 'leaderFraction', 'flickerChance']
         },
         {
@@ -192,6 +193,7 @@ export class LightningEffectV2 {
           name: 'shape',
           label: 'Shape',
           type: 'inline',
+          advanced: true,
           parameters: ['segments', 'curveAmount', 'macroDisplacement', 'microJitter', 'endPointRandomnessPx', 'branchAngleDeg', 'branchChance', 'branchMax', 'branchLengthMin', 'branchLengthMax', 'branchWidthScale', 'branchIntensityScale', 'branchDurationScale', 'wildArcChance']
         },
         {
@@ -204,6 +206,7 @@ export class LightningEffectV2 {
           name: 'originFlash',
           label: 'Origin Flash Light',
           type: 'folder',
+          advanced: true,
           expanded: true,
           parameters: [
             'originFlashEnabled',
@@ -232,6 +235,7 @@ export class LightningEffectV2 {
           name: 'audio',
           label: 'Audio',
           type: 'inline',
+          advanced: true,
           parameters: ['audioEnabled', 'audioStrikePath', 'audioVolume']
         }
       ],

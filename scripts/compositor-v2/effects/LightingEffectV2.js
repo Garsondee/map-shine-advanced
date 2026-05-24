@@ -1059,6 +1059,7 @@ export class LightingEffectV2 {
           name: 'surfaceTint',
           label: 'Colored light on surfaces',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'colorationStrength',
@@ -1072,6 +1073,7 @@ export class LightingEffectV2 {
           name: 'ambientShadowMix',
           label: 'Ambient occlusion from shadows',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'combinedShadowEffectStrength',
@@ -1086,6 +1088,7 @@ export class LightingEffectV2 {
           name: 'occlusion',
           label: 'Roof / floor occlusion',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'wallInsetPx',
@@ -1099,6 +1102,7 @@ export class LightingEffectV2 {
           name: 'darkness',
           label: 'Advanced darkness response',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: ['interiorDarkness', 'negativeDarknessStrength', 'darknessPunchGain'],
         },
@@ -1106,6 +1110,7 @@ export class LightingEffectV2 {
           name: 'lightAnim',
           label: 'Advanced light animation',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: ['lightAnimWindInfluence', 'lightAnimOutdoorPower'],
         },

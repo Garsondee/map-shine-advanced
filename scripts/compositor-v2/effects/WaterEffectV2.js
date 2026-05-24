@@ -1065,6 +1065,7 @@ static getControlSchema() {
           name: 'mask-status',
           label: 'Mask Status',
           type: 'mask-status',
+          advanced: true,
           expanded: true,
           separator: true,
           parameters: []
@@ -1084,6 +1085,7 @@ static getControlSchema() {
           name: 'water-depth-enhancement',
           label: 'Water Depth Enhancement',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'waterDepthShadowEnabled',
@@ -1095,6 +1097,7 @@ static getControlSchema() {
           name: 'water-micro-chop',
           label: 'Micro-Chop',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'microChopIntensity',
@@ -1122,6 +1125,7 @@ static getControlSchema() {
           name: 'water-wind-coupling',
           label: 'Wind Coupling',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'waveSpeedWindMinFactor', 'waveSpeedWindMaxFactor', 'waveGustSlewRate', 'waveStrengthWindMinFactor',
@@ -1135,6 +1139,7 @@ static getControlSchema() {
           name: 'water-refraction',
           label: 'Refraction',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'refractionMultiTapEnabled',
@@ -1146,6 +1151,7 @@ static getControlSchema() {
           name: 'water-chromatic-aberration',
           label: 'Chromatic Aberration',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'chromaticAberrationEnabled',
@@ -1161,6 +1167,7 @@ static getControlSchema() {
           name: 'water-rain',
           label: 'Precipitation Distortion',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'rainDistortionEnabled',
@@ -1174,6 +1181,7 @@ static getControlSchema() {
           name: 'water-specular',
           label: 'Specular',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'specStrength', 'specPower', 'specModel', 'specClamp',
@@ -1190,6 +1198,7 @@ static getControlSchema() {
           name: 'water-specular-highlights',
           label: 'Specular Highlights',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'specHighlightsEnabled', 'specHighlightsStrength', 'specHighlightsPower', 'specHighlightsClamp',
@@ -1203,6 +1212,7 @@ static getControlSchema() {
           name: 'water-bloom-spec',
           label: 'Bloom link (specular)',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: ['bloomSpecularEmit'],
         },
@@ -1210,6 +1220,7 @@ static getControlSchema() {
           name: 'water-cloud-shadow',
           label: 'Cloud Shadow Modulation',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'cloudShadowEnabled',
@@ -1221,6 +1232,7 @@ static getControlSchema() {
           name: 'water-cloud-reflection',
           label: 'Cloud Reflection',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'cloudReflectionEnabled',
@@ -1231,6 +1243,7 @@ static getControlSchema() {
           name: 'water-caustics',
           label: 'Caustics',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'causticsEnabled',
@@ -1244,6 +1257,7 @@ static getControlSchema() {
           name: 'water-shore-foam-advanced',
           label: 'Shore Foam (Advanced)',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'shoreFoamEnabled',
@@ -1277,6 +1291,7 @@ static getControlSchema() {
           name: 'water-floating-foam-advanced',
           label: 'Floating Foam (Advanced)',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'floatingFoamColor', 'floatingFoamTint', 'floatingFoamTintStrength',
@@ -1307,6 +1322,7 @@ static getControlSchema() {
           name: 'water-murk',
           label: 'Murk',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'murkEnabled',
@@ -1320,6 +1336,7 @@ static getControlSchema() {
           name: 'water-bathymetry',
           label: 'Bathymetry (Volumetric)',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'bathymetryEnabled',
@@ -1338,6 +1355,7 @@ static getControlSchema() {
           type: 'dropdown',
           default: 0,
           label: 'Debug View',
+          advanced: true,
           options: {
             Final: 0,
             'Water Mask': 1,
@@ -1350,7 +1368,7 @@ static getControlSchema() {
             Murk: 8,
           }
         },
-        debugWindArrow: { type: 'boolean', default: false, label: 'Debug Wind Arrow' },
+        debugWindArrow: { type: 'boolean', default: false, label: 'Debug Wind Arrow', advanced: true },
 
         waterDepthShadowEnabled: { type: 'boolean', default: false, label: 'Enable Depth Shadow' },
         waterDepthShadowStrength: { type: 'slider', min: 0, max: 0.5, step: 0.01, default: 0.15, label: 'Shadow Strength' },

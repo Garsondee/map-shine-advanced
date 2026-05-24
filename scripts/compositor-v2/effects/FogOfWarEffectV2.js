@@ -863,8 +863,8 @@ export class FogOfWarEffectV2 {
         noiseSpeed: { type: 'slider', min: 0, max: 2, step: 0.05, default: 0.2, label: 'Distortion Speed' },
         revealTokenInFogEnabled: { type: 'boolean', default: false, label: 'Reveal Token Bubbles' },
         doorFogSyncEnabled: { type: 'boolean', default: true, label: 'Door Sync' },
-        doorFogSyncThickness: { type: 'slider', min: 0.01, max: 0.5, step: 0.01, default: 0.08, label: 'Door Sync Thickness' },
-        doorFogSyncDefaultDurationMs: { type: 'slider', min: 50, max: 2500, step: 25, default: 500, label: 'Door Sync Duration (ms)' }
+        doorFogSyncThickness: { type: 'slider', min: 0.01, max: 0.5, step: 0.01, default: 0.08, label: 'Door Sync Thickness', advanced: true },
+        doorFogSyncDefaultDurationMs: { type: 'slider', min: 50, max: 2500, step: 25, default: 500, label: 'Door Sync Duration (ms)', advanced: true }
       }
     };
   }

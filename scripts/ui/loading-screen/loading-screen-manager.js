@@ -5,7 +5,7 @@
 
 import { loadingScreenService, LOADING_SCREEN_MODES } from './loading-screen-service.js';
 import { LoadingScreenDialog } from './loading-screen-dialog.js';
-import { deepClone } from './loading-screen-config.js';
+import { createDefaultStyledLoadingScreenConfig, deepClone, normalizeLoadingScreenConfig } from './loading-screen-config.js';
 import { clearPresetCache } from './loading-screen-presets.js';
 
 const MODULE_ID = 'map-shine-advanced';
@@ -134,13 +134,16 @@ export class LoadingScreenManager {
   async saveUserPreset(preset) {
     const list = await this.getUserPresets();
     const id = String(preset.id || `user-${Date.now()}`);
+    const normalizedConfig = normalizeLoadingScreenConfig(
+      preset.config || loadingScreenService.getStyledConfig()
+    );
 
     const next = [...list];
     const index = next.findIndex((p) => String(p?.id || '') === id);
     const item = {
       id,
       name: String(preset.name || 'Custom Preset').trim() || 'Custom Preset',
-      config: deepClone(preset.config || loadingScreenService.getStyledConfig()),
+      config: deepClone(normalizedConfig),
     };
 
     if (index >= 0) next[index] = item;

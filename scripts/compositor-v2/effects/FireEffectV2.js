@@ -104,9 +104,9 @@ const BUCKET_SIZE = 2000;
 const FIRE_DEFAULT_MAX_SPATIAL_BUCKETS = 16;
 const FIRE_DEFAULT_MAX_SYSTEMS_PER_FLOOR = 36;
 const FIRE_DEFAULT_OUTDOOR_SPLIT_MAX_BUCKETS = 10;
-const FIRE_DEFAULT_SIM_HZ = 18;
-/** Hard ceiling on CPU physics/emission steps (flipbook visuals still refresh every render frame). */
-const FIRE_MAX_SIM_HZ = 30;
+const FIRE_DEFAULT_SIM_HZ = 60;
+/** Hard ceiling on CPU physics/emission steps. 60+ enables buttery smooth native frame updates. */
+const FIRE_MAX_SIM_HZ = 60; // (You can set this to 120 or 144 if you have a high-refresh monitor)
 const FIRE_MAX_SPATIAL_BUCKET_SIZE_PX = 16384;
 
 /** Behavior types re-evaluated every render frame for smooth flipbook / colour. */
@@ -804,14 +804,15 @@ export class FireEffectV2 {
     return {
       enabled: true,
       groups: [
-        { name: 'flames', label: 'Flames', type: 'folder', expanded: false, parameters: ['globalFireRate', 'fireHeight', 'fireTemperature', 'flamePeakOpacity', 'coreEmission', 'flameBrightnessFloor', 'fireSizeMin', 'fireSizeMax', 'fireLifeMin', 'fireLifeMax', 'flameFlipbookCycles', 'fireSpinEnabled', 'fireSpinSpeedMin', 'fireSpinSpeedMax', 'flameStationaryFraction', 'fireUpdraft', 'fireCurlStrength'] },
-        { name: 'flame-texture', label: 'Flame Texture', type: 'folder', expanded: false, parameters: ['flameTextureOpacity', 'flameTextureBrightness', 'flameTextureScaleX', 'flameTextureScaleY', 'flameTextureOffsetX', 'flameTextureOffsetY', 'flameTextureRotation', 'flameTextureFlipX', 'flameTextureFlipY'] },
-        { name: 'embers', label: 'Embers', type: 'folder', expanded: false, parameters: ['emberRate', 'emberEmission', 'emberPeakOpacity', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'indoorEmberLifeScale', 'indoorEmberSuppression', 'emberUpdraft', 'emberCurlStrength'] },
+        { name: 'flames', label: 'Flames', type: 'folder', advanced: true, expanded: false, parameters: ['globalFireRate', 'fireHeight', 'fireTemperature', 'flamePeakOpacity', 'coreEmission', 'flameBrightnessFloor', 'fireSizeMin', 'fireSizeMax', 'fireLifeMin', 'fireLifeMax', 'flameFlipbookCycles', 'fireSpinEnabled', 'fireSpinSpeedMin', 'fireSpinSpeedMax', 'flameStationaryFraction', 'fireUpdraft', 'fireCurlStrength'] },
+        { name: 'flame-texture', label: 'Flame Texture', type: 'folder', advanced: true, expanded: false, parameters: ['flameTextureOpacity', 'flameTextureBrightness', 'flameTextureScaleX', 'flameTextureScaleY', 'flameTextureOffsetX', 'flameTextureOffsetY', 'flameTextureRotation', 'flameTextureFlipX', 'flameTextureFlipY'] },
+        { name: 'embers', label: 'Embers', type: 'folder', advanced: true, expanded: false, parameters: ['emberRate', 'emberEmission', 'emberPeakOpacity', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'indoorEmberLifeScale', 'indoorEmberSuppression', 'emberUpdraft', 'emberCurlStrength'] },
         { name: 'smoke', label: 'Smoke', type: 'folder', expanded: true, parameters: ['smokeEnabled', 'smokeOutdoorAboveCanopy', 'smokeRatio', 'smokeOpacity', 'indoorSmokeSuppression', 'smokeColorWarmth', 'smokeColorBrightness', 'smokeDarknessResponse', 'smokeColorGradient', 'smokeEmissionGradient', 'smokeAlphaStart', 'smokeAlphaPeak', 'smokeAlphaEnd', 'smokeSizeMin', 'smokeSizeMax', 'smokeSizeOverLife', 'smokeLifeMin', 'smokeLifeMax', 'smokeFlipbookCycles', 'smokeUpdraft', 'smokeTurbulence', 'smokeWindInfluence'] },
         {
           name: 'fire-glow',
           label: 'Fire Glow (Gameplay Light)',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'fireGlowEnabled',
@@ -829,6 +830,7 @@ export class FireEffectV2 {
           name: 'fire-glow-indoor',
           label: 'Fire Glow — Indoor Balance',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'fireGlowIndoorIntensityScale',
@@ -872,6 +874,7 @@ export class FireEffectV2 {
           name: 'fire-glow-night',
           label: 'Fire Glow — Night Pool',
           type: 'folder',
+          advanced: true,
           expanded: true,
           parameters: [
             'fireGlowNightWarmth',
@@ -887,11 +890,12 @@ export class FireEffectV2 {
             'fireGlowNightEdgeSoftness',
           ],
         },
-        { name: 'environment', label: 'Environment', type: 'folder', expanded: false, parameters: ['windInfluence', 'timeScale', 'lightIntensity', 'nightHdrBrightness', 'indoorLifeScale', 'indoorTimeScale', 'weatherPrecipKill', 'weatherWindKill'] },
+        { name: 'environment', label: 'Environment', type: 'folder', advanced: true, expanded: false, parameters: ['windInfluence', 'timeScale', 'lightIntensity', 'nightHdrBrightness', 'indoorLifeScale', 'indoorTimeScale', 'weatherPrecipKill', 'weatherWindKill'] },
         {
           name: 'fire-performance',
           label: 'Performance',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'fireSimHz',
@@ -903,7 +907,7 @@ export class FireEffectV2 {
             'fireSmokeMaxParticles',
           ],
         },
-        { name: 'heat-distortion', label: 'Heat Distortion', type: 'folder', expanded: false, parameters: ['heatDistortionEnabled', 'heatDistortionIntensity', 'heatDistortionFrequency', 'heatDistortionSpeed', 'heatDistortionEdgeSoftness'] }
+        { name: 'heat-distortion', label: 'Heat Distortion', type: 'folder', advanced: true, expanded: false, parameters: ['heatDistortionEnabled', 'heatDistortionIntensity', 'heatDistortionFrequency', 'heatDistortionSpeed', 'heatDistortionEdgeSoftness'] }
       ],
       parameters: {
         enabled: { type: 'checkbox', label: 'Fire Enabled', default: true },
@@ -1215,8 +1219,8 @@ export class FireEffectV2 {
           min: 8,
           max: FIRE_MAX_SIM_HZ,
           step: 1,
-          default: FIRE_DEFAULT_SIM_HZ,
-          tooltip: `CPU physics/emission step rate (capped at ${FIRE_MAX_SIM_HZ} Hz). Flipbook colour and sprite frames still refresh every render frame.`,
+          default: 60,
+          tooltip: `CPU physics step rate. Set to 60+ for buttery smooth movement, or lower to save CPU.`,
         },
         fireMaxSpatialBuckets: {
           type: 'slider',
@@ -1677,48 +1681,99 @@ export class FireEffectV2 {
     }
 
     const simHz = Math.max(8, Math.min(FIRE_MAX_SIM_HZ, Number(this.params.fireSimHz) || FIRE_DEFAULT_SIM_HZ));
-    const simStepSec = 1 / simHz;
     const ageRate = 0.001 * 750 * simSpeed;
-    this._simAccumSec += clampedDelta;
-    // Drop catch-up debt after hitches — multi-step bursts were driving ~25ms spikes.
-    if (this._simAccumSec > simStepSec * 2) {
-      this._simAccumSec = simStepSec;
-    }
+    const useNativeTimestep = simHz >= 60;
 
-    const runPhysics = this._simAccumSec >= simStepSec;
-    if (runPhysics) {
-      this._simAccumSec -= simStepSec;
-      const simDt = simStepSec * ageRate;
+    if (useNativeTimestep) {
+      this._simAccumSec = 0;
+      const simDt = clampedDelta * ageRate;
       const physicsToken = this._beginPerfSpan('physics');
       try {
         for (const floorIndex of this._activeFloors) {
           const st = this._floorStates.get(floorIndex);
           if (!st?.batchRenderer) continue;
           try {
-            this._syncFireDisplayAge(st.batchRenderer);
             st.batchRenderer.update(simDt);
             this._syncFireDisplayAge(st.batchRenderer);
           } catch (err) {
-            log.warn('FireEffectV2: BatchedRenderer.update threw, skipping frame:', err);
+            log.warn('FireEffectV2: BatchedRenderer.update threw:', err);
           }
         }
       } finally {
         this._endPerfSpan(physicsToken);
       }
-    } else {
+
       const visualToken = this._beginPerfSpan('visualRefresh');
       try {
         for (const floorIndex of this._activeFloors) {
           const st = this._floorStates.get(floorIndex);
           if (!st?.batchRenderer) continue;
           try {
-            this._refreshFireVisuals(st.batchRenderer, this._simAccumSec, ageRate);
+            this._refreshFireVisuals(st.batchRenderer, 0, ageRate, true);
           } catch (err) {
             log.warn('FireEffectV2: visual refresh threw, skipping frame:', err);
           }
         }
       } finally {
         this._endPerfSpan(visualToken);
+      }
+    } else {
+      const simStepSec = 1 / simHz;
+      this._simAccumSec += clampedDelta;
+
+      if (this._simAccumSec > simStepSec * 2) {
+        this._simAccumSec = simStepSec;
+      }
+
+      const runPhysics = this._simAccumSec >= simStepSec;
+      if (runPhysics) {
+        this._simAccumSec -= simStepSec;
+        const simDt = simStepSec * ageRate;
+        const physicsToken = this._beginPerfSpan('physics');
+        try {
+          for (const floorIndex of this._activeFloors) {
+            const st = this._floorStates.get(floorIndex);
+            if (!st?.batchRenderer) continue;
+            try {
+              st.batchRenderer.update(simDt);
+              this._syncFireDisplayAge(st.batchRenderer);
+            } catch (err) {
+              log.warn('FireEffectV2: BatchedRenderer.update threw, skipping frame:', err);
+            }
+          }
+        } finally {
+          this._endPerfSpan(physicsToken);
+        }
+
+        const visualToken = this._beginPerfSpan('visualRefresh');
+        try {
+          for (const floorIndex of this._activeFloors) {
+            const st = this._floorStates.get(floorIndex);
+            if (!st?.batchRenderer) continue;
+            try {
+              this._refreshFireVisuals(st.batchRenderer, 0, ageRate, true);
+            } catch (err) {
+              log.warn('FireEffectV2: visual refresh threw, skipping frame:', err);
+            }
+          }
+        } finally {
+          this._endPerfSpan(visualToken);
+        }
+      } else {
+        const visualToken = this._beginPerfSpan('visualRefresh');
+        try {
+          for (const floorIndex of this._activeFloors) {
+            const st = this._floorStates.get(floorIndex);
+            if (!st?.batchRenderer) continue;
+            try {
+              this._refreshFireVisuals(st.batchRenderer, this._simAccumSec, ageRate);
+            } catch (err) {
+              log.warn('FireEffectV2: visual refresh threw, skipping frame:', err);
+            }
+          }
+        } finally {
+          this._endPerfSpan(visualToken);
+        }
       }
     }
   }
@@ -1741,11 +1796,18 @@ export class FireEffectV2 {
    * @param {import('../../libs/three.quarks.module.js').BatchedRenderer} batchRenderer
    * @param {number} subFrameSec Real seconds since the last physics step.
    * @param {number} ageRate Quarks age units per real second.
+   * @param {boolean} [afterPhysics=false] When true, re-run visual behaviors at the
+   *   post-physics display age (no extrapolation). Keeps atlas frames in sync after
+   *   BatchedRenderer.update, which evaluates behaviors before age += delta.
    * @private
    */
-  _refreshFireVisuals(batchRenderer, subFrameSec, ageRate) {
-    if (!Number.isFinite(subFrameSec) || subFrameSec <= 0) return;
-    const extrapolate = subFrameSec * ageRate;
+  _refreshFireVisuals(batchRenderer, subFrameSec, ageRate, afterPhysics = false) {
+    if (!afterPhysics) {
+      if (!Number.isFinite(subFrameSec) || subFrameSec <= 0) return;
+    }
+    const extrapolate = (!afterPhysics && Number.isFinite(subFrameSec) && subFrameSec > 0)
+      ? subFrameSec * ageRate
+      : 0;
 
     batchRenderer.systemToBatchIndex.forEach((_, ps) => {
       if (ps.paused) return;
@@ -1753,11 +1815,13 @@ export class FireEffectV2 {
       const particles = ps.particles;
       const pNum = ps.particleNum;
 
-      for (let i = 0; i < pNum; i++) {
-        const particle = particles[i];
-        const ts = particle._msTimeScaleFactor;
-        const timeFactor = ts !== undefined ? (ts > 0 ? ts : 0) : 1;
-        particle._msDisplayAge = particle.age + extrapolate * timeFactor;
+      if (extrapolate > 0) {
+        for (let i = 0; i < pNum; i++) {
+          const particle = particles[i];
+          const ts = particle._msTimeScaleFactor;
+          const timeFactor = ts !== undefined ? (ts > 0 ? ts : 0) : 1;
+          particle._msDisplayAge = particle.age + extrapolate * timeFactor;
+        }
       }
 
       for (let j = 0; j < ps.behaviors.length; j++) {

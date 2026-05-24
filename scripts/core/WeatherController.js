@@ -7,11 +7,19 @@ import { canPersistSceneDocument } from './gm-parity.js';
 
 import { createLogger } from './log.js';
 import { getFoundrySunlightFactor } from './foundry-time-phases.js';
-import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
+import { extendMsaLocalFlagWriteGuard, refreshMsaSameSceneRedrawPredict } from '../utils/msa-local-flag-guard.js';
 import { mapShinePushSceneDarknessLevel } from '../utils/msa-v2-darkness.js';
-import { cloneAndSanitizeControlState } from '../settings/control-state-sanitize.js';
+import { cloneAndSanitizeControlState, inferWeatherPanelView } from '../settings/control-state-sanitize.js';
 
 const log = createLogger('WeatherController');
+
+function _weatherSyncBridge() {
+  try {
+    return window.MapShine?.weatherSyncBridge ?? null;
+  } catch (_) {
+    return null;
+  }
+}
 
 /**
  * @enum {number}
@@ -381,28 +389,21 @@ export class WeatherController {
       lifeMax: 4.7,
       speedMin: 15,
       speedMax: 25,
-      opacityStartMin: 0.58,
-      opacityStartMax: 0.82,
+      opacityStartMin: 0.53,
+      opacityStartMax: 0.75,
       opacityEnd: 0.85,
-      // Quarks startColor ColorRange: random tint per particle from soot → pale ash.
-      colorStart: { r: 0.07, g: 0.055, b: 0.045 },
-      colorEnd: { r: 0.82, g: 0.80, b: 0.76 },
+      colorStart: { r: 0.45, g: 0.42, b: 0.38 },
+      colorEnd: { r: 0.35, g: 0.32, b: 0.28 },
       brightness: 1.0,
-      // Multiplies ash billboard material RGB (1 = neutral white; vertex colours carry hue).
       materialTint: 1.0,
-      // ColorOverLife multiplies startColour over lifetime; >1 RGB brightens dark soot toward pale ash.
       ashLifeBrighten: 2.28,
       ashLifeAlphaFade: 0.32,
-      gravityScale: 0.62,
-      windInfluence: 1.85,
-      // Scales CurlNoiseField strength (base baked in WeatherParticles).
-      curlStrength: 2.6,
-      // Multiplies curl noise spatial scale (larger = broader swirls).
+      gravityScale: 0.55,
+      windInfluence: 4,
+      curlStrength: 3,
       curlNoiseScale: 1.0,
-      // Multiplies curl noise time evolution rate.
       curlTimeScale: 0.88,
-      // Base wind magnitude for falling ash (before windSpeed and windInfluence).
-      ashWindBase: 400,
+      ashWindBase: 1450,
       emberEmissionRate: 167,
       emberSizeMin: 7,
       emberSizeMax: 14,
@@ -415,10 +416,10 @@ export class WeatherController {
       emberOpacityEnd: 0.83,
       emberColorStart: { r: 1.0, g: 0.25, b: 0.0 },
       emberColorEnd: { r: 1.0, g: 0.25, b: 0.0 },
-      emberBrightness: 5,
+      emberBrightness: 9.5,
       emberGravityScale: 0,
-      emberWindInfluence: 0.52,
-      emberCurlStrength: 4.2,
+      emberWindInfluence: 0.45,
+      emberCurlStrength: 3,
       emberCurlNoiseScale: 0.72,
       emberCurlTimeScale: 1.28,
       emberWindBase: 650
@@ -1148,6 +1149,9 @@ export class WeatherController {
       this._lastLocalWeatherSnapshotUpdatedAt = payload.updatedAt;
       extendMsaLocalFlagWriteGuard();
       await scene.setFlag('map-shine-advanced', 'weather-snapshot', payload);
+      try {
+        _weatherSyncBridge()?.emitSnapshot(payload, { force: false });
+      } catch (_) {}
       log.debug(`Saved weather snapshot to scene flags (updatedAt=${payload.updatedAt})`);
     } catch (e) {
       log.warn('Failed to save weather snapshot to scene flags:', e);
@@ -1172,7 +1176,10 @@ export class WeatherController {
           if (cp?.controlState && typeof cp.controlState === 'object') {
             Object.assign(cp.controlState, cloneAndSanitizeControlState(stored.controlState, { silent: true }));
             cp._ensureDirectedCustomPreset?.();
+            inferWeatherPanelView(cp.controlState);
+            cp._applyWeatherPanelViewVisibility?.();
             cp.syncLiveWeatherOverrideDomFromDirectedPreset?.();
+            cp._mirrorAllDomFromState?.();
             cp.pane?.refresh?.();
           }
         }
@@ -1656,7 +1663,12 @@ export class WeatherController {
         }
       };
 
+      extendMsaLocalFlagWriteGuard();
+      refreshMsaSameSceneRedrawPredict();
       await scene.setFlag('map-shine-advanced', 'weather-dynamic', payload);
+      try {
+        _weatherSyncBridge()?.emitDynamic(payload);
+      } catch (_) {}
     } catch (e) {
     }
   }
@@ -1925,7 +1937,11 @@ export class WeatherController {
         }
       };
 
+      extendMsaLocalFlagWriteGuard();
       await scene.setFlag('map-shine-advanced', 'weather-transition', cmd);
+      try {
+        _weatherSyncBridge()?.emitTransition(cmd);
+      } catch (_) {}
     } catch (e) {
     }
   }
@@ -2276,6 +2292,76 @@ export class WeatherController {
       storminess: { baseline: 0.62, min: 0.2, max: 1.0, timeScaleSeconds: 900, noise: 0.12 },
       windBase: { baseline: 0.55, min: 0.15, max: 1.0, timeScaleSeconds: 650, noise: 0.14 },
       windAngle: { baseline: (200.0 * Math.PI) / 180.0, timeScaleSeconds: 1800, noise: 0.65 }
+    },
+    'Coastal Breeze': {
+      temperature: { baseline: 0.58, min: 0.35, max: 0.78, timeScaleSeconds: 1600, noise: 0.05 },
+      humidity: { baseline: 0.62, min: 0.35, max: 0.92, timeScaleSeconds: 1200, noise: 0.07 },
+      storminess: { baseline: 0.22, min: 0.04, max: 0.55, timeScaleSeconds: 1100, noise: 0.09 },
+      windBase: { baseline: 0.32, min: 0.08, max: 0.82, timeScaleSeconds: 700, noise: 0.11 },
+      windAngle: { baseline: (240.0 * Math.PI) / 180.0, timeScaleSeconds: 1900, noise: 0.42 }
+    },
+    'Misty Vale': {
+      temperature: { baseline: 0.48, min: 0.28, max: 0.68, timeScaleSeconds: 2100, noise: 0.04 },
+      humidity: { baseline: 0.72, min: 0.5, max: 0.98, timeScaleSeconds: 1300, noise: 0.06 },
+      storminess: { baseline: 0.18, min: 0.02, max: 0.45, timeScaleSeconds: 1400, noise: 0.07 },
+      windBase: { baseline: 0.12, min: 0.01, max: 0.45, timeScaleSeconds: 1100, noise: 0.06 },
+      windAngle: { baseline: (175.0 * Math.PI) / 180.0, timeScaleSeconds: 2600, noise: 0.28 }
+    },
+    'Urban Heat Island': {
+      temperature: { baseline: 0.78, min: 0.55, max: 0.95, timeScaleSeconds: 1900, noise: 0.05 },
+      humidity: { baseline: 0.38, min: 0.18, max: 0.62, timeScaleSeconds: 1700, noise: 0.06 },
+      storminess: { baseline: 0.14, min: 0.0, max: 0.35, timeScaleSeconds: 1500, noise: 0.06 },
+      windBase: { baseline: 0.14, min: 0.02, max: 0.55, timeScaleSeconds: 950, noise: 0.07 },
+      windAngle: { baseline: (220.0 * Math.PI) / 180.0, timeScaleSeconds: 2200, noise: 0.38 }
+    },
+    'Steppe Winds': {
+      temperature: { baseline: 0.62, min: 0.35, max: 0.88, timeScaleSeconds: 1700, noise: 0.05 },
+      humidity: { baseline: 0.28, min: 0.08, max: 0.48, timeScaleSeconds: 1400, noise: 0.06 },
+      storminess: { baseline: 0.16, min: 0.02, max: 0.42, timeScaleSeconds: 1000, noise: 0.08 },
+      windBase: { baseline: 0.38, min: 0.1, max: 0.92, timeScaleSeconds: 620, noise: 0.12 },
+      windAngle: { baseline: (250.0 * Math.PI) / 180.0, timeScaleSeconds: 1600, noise: 0.52 }
+    },
+    'Volcanic Wastes': {
+      temperature: { baseline: 0.88, min: 0.7, max: 1.0, timeScaleSeconds: 2000, noise: 0.05 },
+      humidity: { baseline: 0.22, min: 0.05, max: 0.42, timeScaleSeconds: 1500, noise: 0.06 },
+      storminess: { baseline: 0.2, min: 0.04, max: 0.55, timeScaleSeconds: 850, noise: 0.1 },
+      windBase: { baseline: 0.28, min: 0.06, max: 0.88, timeScaleSeconds: 720, noise: 0.13 },
+      windAngle: { baseline: (215.0 * Math.PI) / 180.0, timeScaleSeconds: 1400, noise: 0.58 }
+    },
+    'Monsoon Season': {
+      temperature: { baseline: 0.86, min: 0.62, max: 1.0, timeScaleSeconds: 1800, noise: 0.05 },
+      humidity: { baseline: 0.92, min: 0.72, max: 1.0, timeScaleSeconds: 1100, noise: 0.08 },
+      storminess: { baseline: 0.72, min: 0.28, max: 1.0, timeScaleSeconds: 750, noise: 0.14 },
+      windBase: { baseline: 0.26, min: 0.06, max: 0.85, timeScaleSeconds: 680, noise: 0.11 },
+      windAngle: { baseline: (185.0 * Math.PI) / 180.0, timeScaleSeconds: 1700, noise: 0.4 }
+    },
+    'Swamp & Marsh': {
+      temperature: { baseline: 0.72, min: 0.48, max: 0.92, timeScaleSeconds: 2200, noise: 0.04 },
+      humidity: { baseline: 0.88, min: 0.68, max: 1.0, timeScaleSeconds: 1200, noise: 0.07 },
+      storminess: { baseline: 0.28, min: 0.06, max: 0.62, timeScaleSeconds: 1300, noise: 0.09 },
+      windBase: { baseline: 0.1, min: 0.0, max: 0.38, timeScaleSeconds: 1200, noise: 0.07 },
+      windAngle: { baseline: (160.0 * Math.PI) / 180.0, timeScaleSeconds: 2800, noise: 0.3 }
+    },
+    'Permafrost Night': {
+      temperature: { baseline: 0.04, min: 0.0, max: 0.12, timeScaleSeconds: 2800, noise: 0.03 },
+      humidity: { baseline: 0.48, min: 0.22, max: 0.78, timeScaleSeconds: 1800, noise: 0.06 },
+      storminess: { baseline: 0.12, min: 0.0, max: 0.35, timeScaleSeconds: 1600, noise: 0.07 },
+      windBase: { baseline: 0.18, min: 0.02, max: 0.62, timeScaleSeconds: 900, noise: 0.09 },
+      windAngle: { baseline: (195.0 * Math.PI) / 180.0, timeScaleSeconds: 2400, noise: 0.48 }
+    },
+    'Highland Peaks': {
+      temperature: { baseline: 0.22, min: 0.0, max: 0.52, timeScaleSeconds: 1500, noise: 0.07 },
+      humidity: { baseline: 0.5, min: 0.2, max: 0.85, timeScaleSeconds: 1300, noise: 0.08 },
+      storminess: { baseline: 0.32, min: 0.05, max: 0.78, timeScaleSeconds: 950, noise: 0.11 },
+      windBase: { baseline: 0.42, min: 0.1, max: 0.95, timeScaleSeconds: 600, noise: 0.13 },
+      windAngle: { baseline: (225.0 * Math.PI) / 180.0, timeScaleSeconds: 1500, noise: 0.55 }
+    },
+    'Thunderhead Ridge': {
+      temperature: { baseline: 0.55, min: 0.25, max: 0.82, timeScaleSeconds: 1400, noise: 0.06 },
+      humidity: { baseline: 0.68, min: 0.35, max: 0.98, timeScaleSeconds: 1000, noise: 0.09 },
+      storminess: { baseline: 0.78, min: 0.35, max: 1.0, timeScaleSeconds: 650, noise: 0.15 },
+      windBase: { baseline: 0.34, min: 0.08, max: 0.95, timeScaleSeconds: 580, noise: 0.14 },
+      windAngle: { baseline: (210.0 * Math.PI) / 180.0, timeScaleSeconds: 1200, noise: 0.62 }
     }
   };
 
@@ -2323,10 +2409,28 @@ export class WeatherController {
 
     this._environmentState.skyColor.copy(skyNight).lerp(skyDay, dayFactor).lerp(skyStorm, overcastFactor * 0.65 + stormFactor * 0.35);
 
+    let resolvedSkyIntensity = skyIntensity;
+    try {
+      const skyFx = globalThis.window?.MapShine?.effectComposer?._floorCompositorV2?._skyColorEffect
+        ?? globalThis.window?.MapShine?.floorCompositorV2?._skyColorEffect;
+      if (skyFx?.params?.enabled !== false) {
+        const tint = skyFx.currentSkyTintColor;
+        if (tint && Number.isFinite(tint.r) && Number.isFinite(tint.g) && Number.isFinite(tint.b)) {
+          this._environmentState.skyColor.setRGB(
+            Math.max(0, tint.r),
+            Math.max(0, tint.g),
+            Math.max(0, tint.b),
+          );
+          const fromSky = Number(skyFx.currentSkyIntensity01);
+          if (Number.isFinite(fromSky)) resolvedSkyIntensity = clamp01(fromSky);
+        }
+      }
+    } catch (_) {}
+
     this._environmentState.timeOfDay = timeOfDay;
     this._environmentState.sceneDarkness = clamp01(sceneDarkness ?? 0.0);
     this._environmentState.effectiveDarkness = effectiveDarkness;
-    this._environmentState.skyIntensity = skyIntensity;
+    this._environmentState.skyIntensity = resolvedSkyIntensity;
     this._environmentState.overcastFactor = overcastFactor;
     this._environmentState.stormFactor = stormFactor;
   }
@@ -2980,10 +3084,20 @@ export class WeatherController {
           default: 'Temperate Plains',
           options: {
             'Temperate Plains': 'Temperate Plains',
+            'Coastal Breeze': 'Coastal Breeze',
+            'Misty Vale': 'Misty Vale',
+            'Urban Heat Island': 'Urban Heat Island',
             Desert: 'Desert',
+            'Steppe Winds': 'Steppe Winds',
+            'Volcanic Wastes': 'Volcanic Wastes',
             'Tropical Jungle': 'Tropical Jungle',
+            'Monsoon Season': 'Monsoon Season',
+            'Swamp & Marsh': 'Swamp & Marsh',
             Tundra: 'Tundra',
-            'Arctic Blizzard': 'Arctic Blizzard'
+            'Arctic Blizzard': 'Arctic Blizzard',
+            'Permafrost Night': 'Permafrost Night',
+            'Highland Peaks': 'Highland Peaks',
+            'Thunderhead Ridge': 'Thunderhead Ridge',
           },
           group: 'dynamic'
         },
@@ -3822,8 +3936,8 @@ export class WeatherController {
         }
       },
       groups: [
-        { label: 'Dynamic Weather', type: 'folder', parameters: ['dynamicEnabled', 'dynamicPresetId', 'dynamicEvolutionSpeed', 'dynamicPaused'], expanded: true },
-        { label: 'Dynamic Bounds (GM)', type: 'folder', parameters: [
+        { label: 'Dynamic Weather', type: 'folder', advanced: true, parameters: ['dynamicEnabled', 'dynamicPresetId', 'dynamicEvolutionSpeed', 'dynamicPaused'], expanded: true },
+        { label: 'Dynamic Bounds (GM)', type: 'folder', advanced: true, parameters: [
           'dynamicBoundsEnabled',
           'dynamicBoundsPrecipitationMin',
           'dynamicBoundsPrecipitationMax',
@@ -3836,7 +3950,7 @@ export class WeatherController {
           'dynamicBoundsFreezeLevelMin',
           'dynamicBoundsFreezeLevelMax'
         ], expanded: false },
-        { label: 'GM Transition', type: 'folder', parameters: [
+        { label: 'GM Transition', type: 'folder', advanced: true, parameters: [
           'transitionDuration',
           'queuedPrecipitation',
           'queuedCloudCover',
@@ -3847,15 +3961,16 @@ export class WeatherController {
           'queueFromCurrent',
           'startQueuedTransition'
         ], expanded: false },
-        { label: 'Environment', type: 'folder', parameters: ['roofMaskForceEnabled'] },
-        { label: 'Simulation', type: 'folder', parameters: ['transitionDuration', 'simulationSpeed'] },
+        { label: 'Environment', type: 'folder', advanced: true, parameters: ['roofMaskForceEnabled'] },
+        { label: 'Simulation', type: 'folder', advanced: true, parameters: ['transitionDuration', 'simulationSpeed'] },
         { label: 'Fog', type: 'folder', parameters: ['fogDensity'], expanded: true },
-        { label: 'Manual Override', type: 'folder', parameters: ['precipitation', 'cloudCover', 'wetness', 'freezeLevel'], expanded: true },
-        { label: 'Wetness', type: 'folder', parameters: ['wettingDuration', 'dryingDuration', 'precipThreshold'] },
+        { label: 'Manual Override', type: 'folder', parameters: ['precipitation', 'cloudCover', 'wetness', 'freezeLevel', 'ashIntensity'], expanded: true },
+        { label: 'Wetness', type: 'folder', advanced: true, parameters: ['wettingDuration', 'dryingDuration', 'precipThreshold'] },
         {
           id: 'rain-particles',
           label: 'Rain Particles',
           type: 'folder',
+          advanced: true,
           categoryId: 'particle',
           parameters: [
             'rainIntensityScale',
@@ -3874,7 +3989,7 @@ export class WeatherController {
             'debugRainHighlight'
           ]
         },
-        { label: 'Roof & tree drips', type: 'folder', expanded: false, parameters: [
+        { label: 'Roof & tree drips', type: 'folder', advanced: true, expanded: false, parameters: [
           'roofDripEnabled',
           'roofDripEmissionRainMult',
           'roofDripEmissionTailMult',
@@ -3885,7 +4000,7 @@ export class WeatherController {
           'roofDripSizeMax',
           'roofDripMaxParticles'
         ] },
-        { label: 'Rain Splashes', type: 'folder', parameters: [
+        { label: 'Rain Splashes', type: 'folder', advanced: true, parameters: [
           'rainSplash1IntensityScale',
           'rainSplash1LifeMin',
           'rainSplash1LifeMax',
@@ -3915,6 +4030,7 @@ export class WeatherController {
           id: 'snow-particles',
           label: 'Snow Particles',
           type: 'folder',
+          advanced: true,
           categoryId: 'particle',
           parameters: [
             'snowIntensityScale',
@@ -3926,7 +4042,7 @@ export class WeatherController {
             'snowFlutterStrength'
           ]
         },
-        { label: 'Flurries', type: 'folder', parameters: [
+        { label: 'Flurries', type: 'folder', advanced: true, parameters: [
           'precipFlurryVariability',
           'ashFlurryVariability',
           'flurryTimeScale',

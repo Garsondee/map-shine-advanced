@@ -78,6 +78,7 @@ export class SharpenEffectV2 {
           max: 6.0,
           step: 0.1,
           default: 3.5,
+          advanced: true,
           tooltip: 'Blur radius in pixels used for the unsharp mask.',
         },
         threshold: {
@@ -87,6 +88,7 @@ export class SharpenEffectV2 {
           max: 0.25,
           step: 0.005,
           default: 0.045,
+          advanced: true,
           tooltip: 'Ignore weak edges below this luma delta to limit noise sharpening.',
         },
       },

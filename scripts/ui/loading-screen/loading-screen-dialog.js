@@ -3,7 +3,7 @@
  * @module ui/loading-screen/loading-screen-dialog
  */
 
-import { normalizeLoadingScreenConfig } from './loading-screen-config.js';
+import { normalizeLoadingScreenConfig, deepClone } from './loading-screen-config.js';
 import { getAvailableFontFamilies } from './loading-screen-fonts.js';
 import { applyPresetToConfig } from './loading-screen-presets.js';
 
@@ -30,6 +30,7 @@ export class LoadingScreenDialog {
     this._layoutHelperGapPct = 1.5;
     this._layoutHelperNudgePct = 0.5;
     this._dragSnapPct = 0.25;
+    this._suppressPresetChange = false;
 
     this.refs = {
       modeSelect: null,
@@ -206,17 +207,23 @@ export class LoadingScreenDialog {
     });
 
     this.refs.presetSelect?.addEventListener('change', async () => {
+      if (this._suppressPresetChange) return;
       const presetId = String(this.refs.presetSelect.value || '');
       if (!presetId) return;
 
       // Apply the preset locally (no persistence) so changes stay in the
       // dialog until the user explicitly clicks Apply / Save+Close.
       try {
-        const merged = await applyPresetToConfig(presetId, this.state.config);
-        this.state.config = merged;
+        const user = (Array.isArray(this.state.userPresets) ? this.state.userPresets : [])
+          .find((p) => String(p?.id || '') === presetId);
+        if (user?.config) {
+          this.state.config = normalizeLoadingScreenConfig(deepClone(user.config));
+        } else {
+          this.state.config = await applyPresetToConfig(presetId, this.state.config);
+        }
         this.state.activePresetId = presetId;
         this.selectedElementId = this.state.config.layout?.elements?.[0]?.id || null;
-        console.log(`Map Shine: dialog applied preset "${presetId}"`, merged.style);
+        console.log(`Map Shine: dialog applied preset "${presetId}"`, this.state.config.style);
         this._status('Applied preset (click Apply to save).');
         this._renderAll();
       } catch (err) {
@@ -231,10 +238,12 @@ export class LoadingScreenDialog {
         this._status('Enter a preset name first.');
         return;
       }
+      this._markLayoutCustomized();
+      await this._applyChanges();
       await this.manager.saveUserPreset({ name, config: this.state.config });
       this.state.userPresets = await this.manager.getUserPresets();
       this.refs.userPresetInput.value = '';
-      this._status(`Saved preset "${name}".`);
+      this._status(`Saved preset "${name}" and applied loading screen settings.`);
       this._renderTopControls();
     });
 
@@ -317,7 +326,12 @@ export class LoadingScreenDialog {
       addGroup('User', user, true);
 
       const active = String(this.state.activePresetId || 'map-shine-default');
-      presetSelect.value = active;
+      this._suppressPresetChange = true;
+      try {
+        presetSelect.value = active;
+      } finally {
+        this._suppressPresetChange = false;
+      }
     }
   }
 
@@ -492,6 +506,7 @@ export class LoadingScreenDialog {
         ev?.stopPropagation?.();
         const idx = elements.findIndex((e) => e.id === element.id);
         if (idx >= 0) elements.splice(idx, 1);
+        this._markLayoutCustomized();
         if (this.selectedElementId === element.id) {
           this.selectedElementId = elements[0]?.id || null;
         }
@@ -1331,6 +1346,7 @@ export class LoadingScreenDialog {
   }
 
   async _applyChanges() {
+    this._markLayoutCustomized();
     this.state.config = normalizeLoadingScreenConfig(this.state.config);
 
     // Auto-switch to styled mode when saving from the composer so the user's
@@ -1379,7 +1395,13 @@ export class LoadingScreenDialog {
     };
 
     this.state.config.layout.elements.push(element);
+    this._markLayoutCustomized();
     this.selectedElementId = id;
+  }
+
+  _markLayoutCustomized() {
+    if (!this.state?.config) return;
+    this.state.config.layoutCustomized = true;
   }
 
   _renderElementLayoutHelpers(wrap, element) {

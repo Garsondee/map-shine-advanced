@@ -2,7 +2,7 @@
   "msaVersion": "scene-settings-v1",
   "id": "baseline",
   "name": "Baseline",
-  "description": "Reference preset with production-tuned defaults for every Map Shine effect. Core atmosphere is active (lighting, weather, clouds, atmospheric and exploration fog, building shadows, vegetation, window lights, weather lightning, flashlight exploration, bloom, and color grading). Optional or map-specific effects (fire, particles, lens, water, and similar) stay disabled but retain ready-to-use tuning when you enable them on a scene.",
+  "description": "Reference preset with production-tuned defaults for every Map Shine effect. Core atmosphere is active (lighting, weather, clouds, ash weather, atmospheric and exploration fog, building shadows, vegetation, window lights, weather lightning, flashlight exploration, bloom, and color grading). Optional or map-specific effects (fire, particles, lens, water, and similar) stay disabled but retain ready-to-use tuning when you enable them on a scene.",
   "enabled": true,
   "settings": {
     "mapMaker": {
@@ -754,7 +754,7 @@
           "heatDistortionFrequency": 20,
           "heatDistortionSpeed": 3,
           "heatDistortionEdgeSoftness": 0.5,
-          "fireSimHz": 30,
+          "fireSimHz": 60,
           "fireMaxSpatialBuckets": 16,
           "fireMaxSystemsPerFloor": 36,
           "fireOutdoorSplitMaxBuckets": 10,
@@ -1659,8 +1659,8 @@
           "digitalNoiseLowLightBoost": 3.37
         },
         "ash-weather": {
-          "enabled": false,
-          "ashIntensity": 0,
+          "enabled": true,
+          "ashIntensity": 1,
           "ashIntensityScale": 0.5,
           "ashEmissionRate": 840,
           "ashSizeMin": 5,
@@ -1687,8 +1687,8 @@
           "ashLifeBrighten": 2.28,
           "ashLifeAlphaFade": 0.32,
           "ashGravityScale": 0.55,
-          "ashWindInfluence": 2.1,
-          "ashWindBase": 400,
+          "ashWindInfluence": 4,
+          "ashWindBase": 1450,
           "ashCurlStrength": 3,
           "ashCurlNoiseScale": 1,
           "ashCurlTimeScale": 0.88,
@@ -1712,7 +1712,7 @@
             "g": 0.25,
             "b": 0
           },
-          "emberBrightness": 5,
+          "emberBrightness": 9.5,
           "emberGravityScale": 0,
           "emberWindInfluence": 0.45,
           "emberWindBase": 650,

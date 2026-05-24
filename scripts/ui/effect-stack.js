@@ -20,6 +20,8 @@ export class EffectStackUI {
     this.visible = false;
 
     this._summaryBindings = {};
+    this._summaryFolder = null;
+    this._debugFolder = null;
     this._summaryState = {
       albedoSource: '—',
       maskSource: '—',
@@ -134,6 +136,7 @@ export class EffectStackUI {
     this.container.appendChild(this.headerOverlay);
 
     const summaryFolder = this.pane.addFolder({ title: 'Summary', expanded: true });
+    this._summaryFolder = summaryFolder;
 
     this._summaryBindings.albedoSource = summaryFolder.addBlade({
       view: 'text',
@@ -230,6 +233,7 @@ export class EffectStackUI {
     }
 
     const debugFolder = this.pane.addFolder({ title: 'Mask Debug', expanded: true });
+    this._debugFolder = debugFolder;
 
     const options = this._getMaskDebugOptions();
     const state = { maskId: this._selectedMaskId };
@@ -267,12 +271,25 @@ export class EffectStackUI {
     log.info('Effect Stack UI initialized (refresh deferred to first toggle)');
   }
 
+  /**
+   * Register all folders with the main panel's Advanced Mode registry.
+   * @param {{ registerAdvancedFolder?: (folder: any) => void }} host
+   */
+  registerAdvancedTargets(host) {
+    if (!host?.registerAdvancedFolder) return;
+    host.registerAdvancedFolder(this._summaryFolder);
+    host.registerAdvancedFolder(this._debugFolder);
+    host.registerAdvancedFolder(this._effectsFolder);
+    host.registerAdvancedFolder(this._tilesFolder);
+  }
+
   toggle() {
     this.visible = !this.visible;
     this.container.style.display = this.visible ? 'block' : 'none';
 
     if (this.visible) {
       this.constrainToScreen();
+      window.MapShine?.uiManager?.refreshAdvancedModeVisibility?.();
       void this.refresh();
     }
   }

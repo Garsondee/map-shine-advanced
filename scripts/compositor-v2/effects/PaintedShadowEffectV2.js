@@ -177,6 +177,7 @@ export class PaintedShadowEffectV2 {
           default: 1,
           tooltip:
             'Blurs outward without eating the caster edge: merges pre-blur strength where shadow is darkest, full blur where it fades.',
+          advanced: true,
         },
         contactSharpBlendLow: {
           type: 'slider',
@@ -187,6 +188,7 @@ export class PaintedShadowEffectV2 {
           default: 0.04,
           tooltip:
             'Lower bound for where pre-blur strength starts to dominate. Raise slightly if fringe looks too crunchy.',
+          advanced: true,
         },
         contactSharpBlendHigh: {
           type: 'slider',
@@ -197,6 +199,7 @@ export class PaintedShadowEffectV2 {
           default: 0.78,
           tooltip:
             'Upper bound toward full contact sharpness inside the silhouette. Lower to pull softness closer to walls.',
+          advanced: true,
         },
         shadowEdgeInflatePx: {
           type: 'slider',
@@ -207,8 +210,9 @@ export class PaintedShadowEffectV2 {
           default: 1.25,
           tooltip:
             'Expands painted shadow slightly in this pass’s pixel grid (often lower-res than canvas) so it tucks under assets and hides bright rim cracks. 0 = off.',
+          advanced: true,
         },
-        resolutionScale: { type: 'slider', label: 'Resolution', min: 0.75, max: 2.0, step: 0.05, default: 2 },
+        resolutionScale: { type: 'slider', label: 'Resolution', min: 0.75, max: 2.0, step: 0.05, default: 2, advanced: true },
       },
     };
   }

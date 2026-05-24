@@ -67,6 +67,7 @@ const V2_EFFECT_KEY_BY_ID = Object.freeze({
   lens: '_lensEffect',
   water: '_waterEffect',
   cloud: '_cloudEffect',
+  'ash-clouds': '_ashCloudEffect',
   'overhead-shadows': '_overheadShadowEffect',
   'building-shadows': '_buildingShadowEffect',
   'painted-shadows': '_paintedShadowEffect',

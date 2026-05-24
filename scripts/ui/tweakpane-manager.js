@@ -37,6 +37,7 @@ import {
   hydrateControlPanelLiveOverridesFromController,
   resolveWeatherController
 } from './weather-param-bridge.js';
+import { ASH_EFFECT_IDS } from './ash-weather-bridge.js';
 import {
   readLightningIntensityFromControlState,
   syncWeatherLightningEffectFromControlState,
@@ -338,8 +339,29 @@ export class TweakpaneManager {
     /** @type {string} Current section filter query */
     this._filterQuery = '';
 
-    /** @type {HTMLElement|null} Filter bar wrapper element */
-    this._filterBarEl = null;
+    /** @type {boolean} When true, show controls tagged as advanced. Off by default. */
+    this.advancedModeEnabled = false;
+
+    /** @type {Array<{ element: HTMLElement, advanced: boolean, kind: string }>} */
+    this._advancedTargets = [];
+
+    /** @type {HTMLElement|null} Universal toolbar (search + advanced mode). */
+    this._universalToolbarEl = null;
+
+    /** @type {HTMLElement|null} Scroll host for section list content. */
+    this._scrollBodyEl = null;
+
+    /** @type {ResizeObserver|null} */
+    this._scrollLayoutObserver = null;
+
+    /** @type {boolean} */
+    this._scrollBodyGuardsWired = false;
+
+    /** @type {HTMLInputElement|null} Section filter search input. */
+    this._filterInputEl = null;
+
+    /** @type {HTMLInputElement|null} Advanced Mode checkbox. */
+    this._advancedModeCheckboxEl = null;
 
     /** @type {HTMLElement|null} */
     this._sceneEnableQuickSectionEl = null;
@@ -400,9 +422,21 @@ export class TweakpaneManager {
     this._presetSuppressCustomForSaves = false;
   }
 
-  _registerPrimaryFolder(folder) {
+  /**
+   * @param {any} folder
+   * @param {{ advanced?: boolean }} [opts]
+   * @private
+   */
+  _registerPrimaryFolder(folder, opts = {}) {
     if (!folder) return;
     this._primaryFolders.push(folder);
+
+    if (opts.advanced === true) {
+      folder._msUiAdvanced = true;
+      if (folder.element) {
+        this._registerAdvancedTarget(folder.element, { advanced: true, kind: 'section' });
+      }
+    }
 
     folder.on('fold', (ev) => {
       if (!ev?.expanded || !this._singleOpenPrimarySections) return;
@@ -417,25 +451,292 @@ export class TweakpaneManager {
   }
 
   /**
-   * Build the sticky search/filter bar inserted between the pane title and the section list.
-   * Filtering shows/hides top-level sections, auto-expands matched ones, highlights matching
-   * text within visible sections, and scrolls to the first match.
+   * @param {HTMLElement|null|undefined} element
+   * @param {{ advanced?: boolean, kind?: string }} [opts]
    * @private
    */
-  _buildFilterBar() {
+  _registerAdvancedTarget(element, opts = {}) {
+    if (!element) return;
+    const advanced = opts.advanced !== false;
+    const kind = opts.kind || 'control';
+    const existing = this._advancedTargets.find((entry) => entry.element === element);
+    if (existing) {
+      existing.advanced = advanced;
+      existing.kind = kind;
+      return;
+    }
+    this._advancedTargets.push({ element, advanced, kind });
+  }
+
+  /**
+   * @param {any} binding
+   * @private
+   */
+  _registerBindingAsAdvanced(binding) {
+    if (!binding) return;
+    const el = binding.element?.closest?.('.tp-lblv')
+      || binding.element?.closest?.('.tp-btnv')
+      || binding.element?.parentElement;
+    if (el) this._registerAdvancedTarget(el, { advanced: true, kind: 'control' });
+  }
+
+  /**
+   * @param {any} folder
+   * @private
+   */
+  _registerFolderAsAdvanced(folder) {
+    if (folder?.element) {
+      this._registerAdvancedTarget(folder.element, { advanced: true, kind: 'folder' });
+    }
+  }
+
+  /**
+   * @param {HTMLElement|null} el
+   * @private
+   */
+  _registerDomStripAsAdvanced(el) {
+    if (el) this._registerAdvancedTarget(el, { advanced: true, kind: 'strip' });
+  }
+
+  /**
+   * Public API — register a Tweakpane folder as advanced-only (satellite panes, etc.).
+   * @param {any} folder
+   */
+  registerAdvancedFolder(folder) {
+    this._registerFolderAsAdvanced(folder);
+    this._applyAdvancedModeVisibility();
+  }
+
+  /**
+   * Public API — register a Tweakpane binding as advanced-only.
+   * @param {any} binding
+   */
+  registerAdvancedBinding(binding) {
+    this._registerBindingAsAdvanced(binding);
+    this._applyAdvancedModeVisibility();
+  }
+
+  /**
+   * Public API — register a raw DOM node as advanced-only.
+   * @param {HTMLElement|null} element
+   */
+  registerAdvancedElement(element) {
+    this._registerDomStripAsAdvanced(element);
+    this._applyAdvancedModeVisibility();
+  }
+
+  /** Re-apply Advanced Mode visibility (e.g. after opening a satellite pane). */
+  refreshAdvancedModeVisibility() {
+    this._applyAdvancedModeVisibility();
+  }
+
+  /**
+   * @param {any} folder
+   * @returns {boolean}
+   * @private
+   */
+  _isAdvancedPrimaryFolder(folder) {
+    return folder?._msUiAdvanced === true;
+  }
+
+  /**
+   * Apply Advanced Mode visibility to all registered targets.
+   * @private
+   */
+  _applyAdvancedModeVisibility() {
+    const hideAdvanced = !this.advancedModeEnabled;
+    for (const entry of this._advancedTargets) {
+      if (!entry?.element?.classList) continue;
+      if (hideAdvanced && entry.advanced) {
+        entry.element.classList.add('ms-ui-advanced-hidden');
+      } else {
+        entry.element.classList.remove('ms-ui-advanced-hidden');
+      }
+    }
+  }
+
+  /**
+   * Resolve the Tweakpane root view element (tp-rotv).
+   * @returns {HTMLElement|null}
+   * @private
+   */
+  _getPaneRootView() {
+    const el = this.pane?.element;
+    if (!el) return null;
+    if (el.classList?.contains('tp-rotv')) return el;
+    return el.querySelector('.tp-rotv') || el;
+  }
+
+  /**
+   * Host element for presets, scene toggle, and Tweakpane section rows.
+   * @returns {HTMLElement|null}
+   * @private
+   */
+  _getSectionListHost() {
+    if (this._scrollBodyEl?.isConnected) return this._scrollBodyEl;
+    const rotv = this._getPaneRootView();
+    const content = rotv?.querySelector(':scope > .tp-rotv_c');
+    if (content) return content;
+    const paneEl = this.pane?.element;
+    if (!paneEl) return null;
+    const firstFolderEl = paneEl.querySelector('.tp-fldv');
+    return firstFolderEl?.parentElement || rotv || null;
+  }
+
+  /**
+   * Mark Tweakpane's native content container as the scroll host.
+   * Keeps tp-rotv_c in place so expand/collapse keeps working; only overflow scrolls.
+   * @private
+   */
+  _setupUiScrollShell() {
+    const rotv = this._getPaneRootView();
+    if (!rotv) return;
+
+    // Unwrap legacy scroll wrapper from an earlier layout experiment, if present.
+    const legacyWrap = rotv.querySelector(':scope > .ms-ui-scroll-body:not(.tp-rotv_c)');
+    if (legacyWrap) {
+      const rotvContent = rotv.querySelector(':scope > .tp-rotv_c');
+      while (legacyWrap.firstChild) {
+        const child = legacyWrap.firstChild;
+        if (child.classList?.contains('tp-rotv_c')) {
+          rotv.insertBefore(child, legacyWrap);
+        } else if (rotvContent) {
+          rotvContent.insertBefore(child, rotvContent.firstChild);
+        } else {
+          rotv.insertBefore(child, legacyWrap);
+        }
+      }
+      legacyWrap.remove();
+    }
+
+    const content = rotv.querySelector(':scope > .tp-rotv_c');
+    if (!content) return;
+
+    content.classList.add('ms-ui-scroll-body');
+    this._scrollBodyEl = content;
+    this._wireScrollBodyGuards(content);
+    this._syncScrollBodyLayout();
+  }
+
+  /**
+   * Keep vertical scroll on the section list and block accidental horizontal drift.
+   * @param {HTMLElement} scrollBody
+   * @private
+   */
+  _wireScrollBodyGuards(scrollBody) {
+    if (!scrollBody || this._scrollBodyGuardsWired) return;
+    this._scrollBodyGuardsWired = true;
+
+    scrollBody.addEventListener('scroll', () => {
+      if (scrollBody.scrollLeft !== 0) scrollBody.scrollLeft = 0;
+    }, { passive: true });
+
+    scrollBody.addEventListener('wheel', (e) => {
+      const absX = Math.abs(e.deltaX);
+      const absY = Math.abs(e.deltaY);
+      if (absX > absY && scrollBody.scrollWidth <= scrollBody.clientWidth + 1) {
+        e.preventDefault();
+      }
+    }, { passive: false });
+  }
+
+  /**
+   * Measure chrome (title + toolbar) and cap scroll-body height so overflow-y scrolls reliably.
+   * Uses the viewport cap minus fixed chrome — not container bottom — so flex layout cannot
+   * collapse into a ~120px feedback loop.
+   * @private
+   */
+  _syncScrollBodyLayout() {
+    const container = this.container;
+    const scrollBody = this._scrollBodyEl;
+    if (!container?.isConnected || !scrollBody?.isConnected) return;
+
+    const viewportCap = Math.max(240, Math.floor(window.innerHeight * 0.8));
+    container.style.maxHeight = `${viewportCap}px`;
+
+    const containerRect = container.getBoundingClientRect();
+    const scrollRect = scrollBody.getBoundingClientRect();
+    if (containerRect.height <= 0) {
+      requestAnimationFrame(() => this._syncScrollBodyLayout());
+      return;
+    }
+
+    const chromeAboveScroll = Math.max(0, Math.round(scrollRect.top - containerRect.top));
+    const scrollFromCap = viewportCap - chromeAboveScroll - 8;
+
+    const viewportHeight = Math.max(
+      window.innerHeight || 0,
+      document.documentElement?.clientHeight || 0
+    );
+    const scrollFromViewport = viewportHeight - scrollRect.top - 20;
+
+    const maxScroll = Math.max(160, Math.min(scrollFromCap, scrollFromViewport));
+
+    scrollBody.style.maxHeight = `${maxScroll}px`;
+    scrollBody.style.overflowY = 'auto';
+    scrollBody.style.overflowX = 'hidden';
+
+    if (scrollBody.scrollLeft !== 0) scrollBody.scrollLeft = 0;
+  }
+
+  /**
+   * Observe panel size changes and re-sync scroll height.
+   * @private
+   */
+  _ensureScrollLayoutObserver() {
+    if (this._scrollLayoutObserver || !this.container) return;
+    if (typeof ResizeObserver === 'undefined') return;
+
+    this._scrollLayoutObserver = new ResizeObserver(() => {
+      requestAnimationFrame(() => this._syncScrollBodyLayout());
+    });
+    this._scrollLayoutObserver.observe(this.container);
+    const rotv = this._getPaneRootView();
+    if (rotv) this._scrollLayoutObserver.observe(rotv);
+    if (this._universalToolbarEl) this._scrollLayoutObserver.observe(this._universalToolbarEl);
+  }
+
+  /**
+   * Block Foundry canvas / hotkey interaction for toolbar controls.
+   * @param {HTMLElement} el
+   * @private
+   */
+  _wireToolbarEventIsolation(el) {
+    for (const evt of ['mousedown', 'pointerdown', 'click', 'dblclick']) {
+      el.addEventListener(evt, (e) => e.stopPropagation());
+    }
+    el.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
+    el.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
+  }
+
+  /**
+   * Build the always-visible universal toolbar (search + Advanced Mode) below the pane title.
+   * @private
+   */
+  _buildUniversalToolbar() {
     if (!this.pane?.element) return;
 
-    const paneEl = this.pane.element;
-    const firstFolderEl = paneEl.querySelector('.tp-fldv');
-    const listHost = firstFolderEl?.parentElement;
-    if (!firstFolderEl || !listHost) return;
+    this._setupUiScrollShell();
 
-    if (this._filterBarEl?.parentElement) {
-      this._filterBarEl.remove();
+    const rotv = this._getPaneRootView();
+    const content = rotv?.querySelector(':scope > .tp-rotv_c');
+    if (!rotv || !content) {
+      log.warn('Map Shine UI: could not mount universal toolbar (tp-rotv / tp-rotv_c missing)');
+      return;
+    }
+
+    if (this._universalToolbarEl?.parentElement) {
+      this._universalToolbarEl.remove();
     }
 
     const wrap = document.createElement('div');
-    wrap.className = 'ms-filter-bar';
+    wrap.className = 'ms-universal-toolbar';
+    wrap.setAttribute('role', 'region');
+    wrap.setAttribute('aria-label', 'Map Shine toolbar');
+    this._wireToolbarEventIsolation(wrap);
+
+    const filterRow = document.createElement('div');
+    filterRow.className = 'ms-filter-row';
 
     const icon = document.createElement('span');
     icon.className = 'ms-filter-icon';
@@ -450,6 +751,7 @@ export class TweakpaneManager {
     input.setAttribute('data-lpignore', 'true');
     input.setAttribute('data-1p-ignore', 'true');
     input.setAttribute('data-bwignore', 'true');
+    input.setAttribute('aria-label', 'Filter Map Shine sections');
 
     const clearBtn = document.createElement('button');
     clearBtn.type = 'button';
@@ -458,18 +760,33 @@ export class TweakpaneManager {
     clearBtn.style.display = 'none';
     clearBtn.title = 'Clear filter';
 
-    wrap.appendChild(icon);
-    wrap.appendChild(input);
-    wrap.appendChild(clearBtn);
+    filterRow.appendChild(icon);
+    filterRow.appendChild(input);
+    filterRow.appendChild(clearBtn);
 
-    // Block pointer events from propagating to the Foundry canvas
-    for (const evt of ['mousedown', 'pointerdown', 'click', 'dblclick']) {
-      wrap.addEventListener(evt, (e) => e.stopPropagation());
-    }
-    wrap.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
-    wrap.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
+    const advancedRow = document.createElement('label');
+    advancedRow.className = 'ms-advanced-mode-row';
 
-    // Block keyboard events so typing doesn't trigger Foundry hotkeys
+    const advancedCheckbox = document.createElement('input');
+    advancedCheckbox.type = 'checkbox';
+    advancedCheckbox.className = 'ms-advanced-mode-checkbox';
+    advancedCheckbox.checked = this.advancedModeEnabled === true;
+
+    const advancedLabel = document.createElement('span');
+    advancedLabel.className = 'ms-advanced-mode-label';
+    advancedLabel.textContent = 'Advanced Mode';
+
+    const advancedHint = document.createElement('span');
+    advancedHint.className = 'ms-advanced-mode-hint';
+    advancedHint.textContent = 'Show expert controls';
+
+    advancedRow.appendChild(advancedCheckbox);
+    advancedRow.appendChild(advancedLabel);
+    advancedRow.appendChild(advancedHint);
+
+    wrap.appendChild(filterRow);
+    wrap.appendChild(advancedRow);
+
     for (const evt of ['keydown', 'keypress', 'keyup']) {
       input.addEventListener(evt, (e) => e.stopPropagation());
     }
@@ -487,11 +804,42 @@ export class TweakpaneManager {
       this._applyFilter('');
     });
 
-    // Prepend so the filter bar stays above any headerless strips (presets / scene toggle)
-    // and the first Tweakpane folder row.
-    listHost.insertBefore(wrap, listHost.firstChild);
+    advancedCheckbox.addEventListener('change', (e) => {
+      e.stopPropagation();
+      this.advancedModeEnabled = advancedCheckbox.checked === true;
+      this._applyAdvancedModeVisibility();
+      if (this._filterQuery) {
+        this._applyFilter(this._filterQuery);
+      }
+      this.saveUIState();
+    });
 
-    this._filterBarEl = wrap;
+    // Pin between title row and scrollable Tweakpane content (sibling of tp-rotv_c).
+    rotv.insertBefore(wrap, content);
+
+    this._universalToolbarEl = wrap;
+    this._filterInputEl = input;
+    this._advancedModeCheckboxEl = advancedCheckbox;
+    this._ensureScrollLayoutObserver();
+    requestAnimationFrame(() => this._syncScrollBodyLayout());
+  }
+
+  /**
+   * Self-heal: rebuild toolbar if DOM was lost (hot reload, Tweakpane refresh, etc.).
+   * @private
+   */
+  _ensureUniversalToolbar() {
+    if (this._universalToolbarEl?.isConnected) return;
+    if (!this.pane?.element) return;
+    this._buildUniversalToolbar();
+    if (this._advancedModeCheckboxEl) {
+      this._advancedModeCheckboxEl.checked = this.advancedModeEnabled === true;
+    }
+    this._applyAdvancedModeVisibility();
+    if (this._filterQuery && this._filterInputEl) {
+      this._filterInputEl.value = this._filterQuery;
+    }
+    requestAnimationFrame(() => this._syncScrollBodyLayout());
   }
 
   /**
@@ -525,6 +873,8 @@ export class TweakpaneManager {
           child.style.display = '';
         }
       }
+      this._applyAdvancedModeVisibility();
+      requestAnimationFrame(() => this._syncScrollBodyLayout());
       return;
     }
 
@@ -536,6 +886,11 @@ export class TweakpaneManager {
 
     for (const folder of this._primaryFolders) {
       if (!folder?.element) continue;
+
+      if (this._isAdvancedPrimaryFolder(folder) && !this.advancedModeEnabled) {
+        folder.element.style.display = 'none';
+        continue;
+      }
 
       const topEl = folder.element;
       const childFolders = this._getDirectChildFolderElements(topEl);
@@ -587,10 +942,13 @@ export class TweakpaneManager {
         try { firstMatchEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } catch (_) {}
       }, 60);
     }
+
+    this._applyAdvancedModeVisibility();
+    requestAnimationFrame(() => this._syncScrollBodyLayout());
   }
 
   /**
-   * Get direct child folders of a folder element (one level down).
+   * Direct child `.tp-fldv` elements inside a folder's content container.
    * @param {HTMLElement} folderEl
    * @returns {HTMLElement[]}
    * @private
@@ -916,6 +1274,8 @@ export class TweakpaneManager {
     if (_isDbg) _dlp.begin('tp.loadUIState', 'finalize');
     await this.loadUIState();
     if (_isDbg) _dlp.end('tp.loadUIState');
+    this._registerGlobalControlHandlers();
+    this.onGlobalChange('timeRate', this.globalParams.timeRate ?? 100);
     this._warnIfMaskDebugOverlayActiveOnLoad();
 
     // Populate _worldBasedEffects from persisted game setting
@@ -927,28 +1287,24 @@ export class TweakpaneManager {
     const showOnboardingOnly = !!globalThis.game?.user?.isGM && !sceneIsEnabled;
 
     // Quick Actions is created first (so insertBefore targets exist), then
-    // presets / scene-enable strips are inserted above it; after the filter bar
-    // exists we move Quick Actions to sit directly under the filter (see
-    // _moveQuickActionsSectionBelowFilterBar).
+    // presets strip is inserted above it; after the universal toolbar exists we
+    // move Quick Actions to the top of the scroll body (see
+    // _moveQuickActionsSectionBelowToolbar).
     this.buildQuickActionsSection();
     // Presets strip (requires a top-level folder to anchor insertBefore the first .tp-fldv)
     if (!showOnboardingOnly) {
       await this.buildPresetsBar();
     }
     // Headerless strip: inserts before the first top-level folder row.
-    this.buildSceneEnableQuickSection();
+    // Scene enable toggle lives at the bottom of Quick Actions (see buildQuickActionsSection).
 
     if (_isDbg) _dlp.begin('tp.buildSections', 'finalize');
-    // Build scene setup section (only for GMs)
-    if (isGmLike()) {
-      if (showOnboardingOnly) this.buildFirstTimeEnableSection();
-      else this.buildSceneSetupSection();
+    // First-time onboarding for GMs when the scene is not yet enabled.
+    if (isGmLike() && showOnboardingOnly) {
+      this.buildFirstTimeEnableSection();
     }
 
     if (!showOnboardingOnly) {
-      // Build authoring workflow controls
-      this.buildGlobalControls();
-
       // Build intro controls (loading transition and scene intro behavior)
       this.buildIntrosSection();
 
@@ -972,10 +1328,14 @@ export class TweakpaneManager {
     }
     if (_isDbg) _dlp.end('tp.buildSections');
 
-    // Build the always-visible section filter bar after folders exist so we can
-    // anchor it against the actual section list instead of guessing Tweakpane internals.
-    this._buildFilterBar();
-    this._moveQuickActionsSectionBelowFilterBar();
+    // Build the always-visible universal toolbar after folders exist so we can
+    // anchor Quick Actions against the scroll body.
+    this._setupUiScrollShell();
+    this._buildUniversalToolbar();
+    this._moveQuickActionsSectionBelowToolbar();
+    this._applyAdvancedModeVisibility();
+    this._ensureScrollLayoutObserver();
+    requestAnimationFrame(() => this._syncScrollBodyLayout());
 
     // Start UI update loop only when full controls are available.
     if (!showOnboardingOnly) {
@@ -995,7 +1355,10 @@ export class TweakpaneManager {
     this.makeDraggable();
 
     this._windowResizeHandler = () => {
-      requestAnimationFrame(() => this._ensurePaneSafePosition({ persist: true }));
+      requestAnimationFrame(() => {
+        this._ensurePaneSafePosition({ persist: true });
+        this._syncScrollBodyLayout();
+      });
     };
     window.addEventListener('resize', this._windowResizeHandler);
 
@@ -1004,18 +1367,21 @@ export class TweakpaneManager {
       if (_isDbg) _dlp.begin('tp.textureManager.init', 'finalize');
       this.textureManager = new TextureManagerUI();
       await this.textureManager.initialize();
+      this.textureManager.registerAdvancedTargets(this);
       if (_isDbg) _dlp.end('tp.textureManager.init');
 
       // Initialize Effect Stack
       if (_isDbg) _dlp.begin('tp.effectStack.init', 'finalize');
       this.effectStack = new EffectStackUI();
       await this.effectStack.initialize();
+      this.effectStack.registerAdvancedTargets(this);
       if (_isDbg) _dlp.end('tp.effectStack.init');
 
       // Initialize Diagnostic Center
       if (_isDbg) _dlp.begin('tp.diagnosticCenter.init', 'finalize');
       this.diagnosticCenter = new DiagnosticCenterManager();
       await this.diagnosticCenter.initialize();
+      this.diagnosticCenter.registerAdvancedTargets(this);
       if (_isDbg) _dlp.end('tp.diagnosticCenter.init');
 
       // Initialize Tile Motion Dialog
@@ -1082,6 +1448,7 @@ export class TweakpaneManager {
       if (this.pane) {
         this.pane.expanded = !this.pane.expanded;
       }
+      requestAnimationFrame(() => this._syncScrollBodyLayout());
     });
 
     header.appendChild(button);
@@ -1089,92 +1456,17 @@ export class TweakpaneManager {
   }
 
   /**
-   * Build global control section
+   * Register global param change handlers (UI validator + programmatic updates).
+   * Time Scale lives in the Map Shine Control Panel; other dev globals stay API-only.
    * @private
    */
-  buildGlobalControls() {
-    const globalFolder = this.pane.addFolder({
-      title: 'Authoring Workflow',
-      expanded: this.accordionStates['global'] ?? true
-    });
-    this._registerPrimaryFolder(globalFolder);
-
-    // PIXI/native rendering parity toggle (legacy key kept for compatibility)
-    const onMapMakerModeChange = (ev) => {
-      this.onGlobalChange('mapMakerMode', ev.value);
-    };
-    this._uiValidatorGlobalHandlers.mapMakerMode = onMapMakerModeChange;
-
-    globalFolder.addBinding(this.globalParams, 'mapMakerMode', {
-      label: 'PIXI / Native Foundry rendering mode'
-    }).on('change', onMapMakerModeChange);
-
-    // Time rate slider
-    const onTimeRateChange = (ev) => {
+  _registerGlobalControlHandlers() {
+    this._uiValidatorGlobalHandlers.timeRate = (ev) => {
+      this.globalParams.timeRate = ev.value;
       this.onGlobalChange('timeRate', ev.value);
     };
-    this._uiValidatorGlobalHandlers.timeRate = onTimeRateChange;
 
-    globalFolder.addBinding(this.globalParams, 'timeRate', {
-      label: 'Time Rate',
-      min: 0,
-      max: 200,
-      step: 1
-    }).on('change', onTimeRateChange);
-
-    const lightingDirectorFolder = globalFolder.addFolder({
-      title: 'Lighting Director (readout)',
-      expanded: this.accordionStates['lightingDirector'] ?? false
-    });
-    this._lightingDirectorDebugBindings = [];
-    const directorDebug = this.globalParams.lightingDirectorDebug;
-    try {
-      const currentPriority = globalThis.game?.settings?.get?.('map-shine-advanced', 'lightingDarknessPriority');
-      if (typeof currentPriority === 'string') directorDebug.lightingDarknessPriority = currentPriority;
-    } catch (_) {
-    }
-    lightingDirectorFolder.addBinding(directorDebug, 'lightingDarknessPriority', {
-      label: 'Darkness authority',
-      options: {
-        'Max of all sources': DARKNESS_PRIORITY.MAX,
-        'Foundry slider': DARKNESS_PRIORITY.FOUNDRY,
-        'Calendar / time': DARKNESS_PRIORITY.CALENDAR,
-        Weather: DARKNESS_PRIORITY.WEATHER,
-      }
-    }).on('change', (ev) => {
-      directorDebug.lightingDarknessPriority = ev.value;
-      try {
-        void globalThis.game?.settings?.set?.('map-shine-advanced', 'lightingDarknessPriority', ev.value);
-      } catch (_) {
-      }
-      this.saveUIState();
-    });
-    const addDirectorReadout = (key, label) => {
-      const binding = lightingDirectorFolder.addBinding(directorDebug, key, {
-        label,
-        readonly: true
-      });
-      this._lightingDirectorDebugBindings.push(binding);
-      return binding;
-    };
-    addDirectorReadout('masterDarkness', 'Master darkness');
-    addDirectorReadout('foundryDarkness', 'Foundry');
-    addDirectorReadout('calendarDarkness', 'Calendar');
-    addDirectorReadout('weatherDarkness', 'Weather');
-    addDirectorReadout('calendarDayWeight', 'Daylight');
-    addDirectorReadout('sunElevationDeg', 'Sun elevation');
-    addDirectorReadout('sunAzimuthDeg', 'Sun azimuth');
-    addDirectorReadout('priority', 'Authority');
-    lightingDirectorFolder.on('fold', (ev) => {
-      this.accordionStates['lightingDirector'] = ev.expanded;
-      this.saveUIState();
-    });
-
-    // Visual separator between time controls and UI/tools controls
-    globalFolder.addBlade({ view: 'separator' });
-
-    // UI Scale
-    const onUiScaleChange = (ev) => {
+    this._uiValidatorGlobalHandlers.uiScale = (ev) => {
       this.uiScale = ev.value;
       this.uiScaleParams.scale = ev.value;
       if (ev.last) {
@@ -1184,71 +1476,10 @@ export class TweakpaneManager {
         }, 100);
       }
     };
-    this._uiValidatorGlobalHandlers.uiScale = onUiScaleChange;
 
-    globalFolder.addBinding(this.uiScaleParams, 'scale', {
-      label: 'UI Scale',
-      min: 0.5,
-      max: 2.0,
-      step: 0.1
-    }).on('change', onUiScaleChange);
-
-    // Light Authoring UI visibility folder
-    const lightAuthoringFolder = globalFolder.addFolder({
-      title: 'Light Authoring UI',
-      expanded: this.accordionStates['lightAuthoring'] ?? false
-    });
-
-    const onLightUIToggle = (param) => (ev) => {
-      this.globalParams[param] = ev.value;
-      this.onGlobalChange(param, ev.value);
-      this.saveUIState();
+    this._uiValidatorGlobalHandlers.mapMakerMode = (ev) => {
+      this.onGlobalChange('mapMakerMode', ev.value);
     };
-
-    lightAuthoringFolder.addBinding(this.globalParams, 'showLightTranslateGizmo', {
-      label: 'Translate Gizmo'
-    }).on('change', onLightUIToggle('showLightTranslateGizmo'));
-
-    lightAuthoringFolder.addBinding(this.globalParams, 'showLightRadiusRings', {
-      label: 'Radius Edit Rings'
-    }).on('change', onLightUIToggle('showLightRadiusRings'));
-
-    lightAuthoringFolder.addBinding(this.globalParams, 'showLightRadiusVisualization', {
-      label: 'Radius Visualization'
-    }).on('change', onLightUIToggle('showLightRadiusVisualization'));
-
-    lightAuthoringFolder.on('fold', (ev) => {
-      this.accordionStates['lightAuthoring'] = ev.expanded;
-      this.saveUIState();
-    });
-
-    globalFolder.addBlade({ view: 'separator' });
-
-    const masterResetButton = globalFolder.addButton({
-      title: 'Master Reset to Defaults',
-      label: 'Defaults'
-    });
-
-    masterResetButton.on('click', () => {
-      this.onMasterResetToDefaults();
-    });
-
-    this.undoButton = globalFolder.addButton({
-      title: 'Undo Last Master Reset',
-      label: 'Undo'
-    });
-
-    this.undoButton.on('click', () => {
-      this.onUndoMasterReset();
-    });
-
-    this.updateUndoButtonState();
-
-    // Track accordion state
-    globalFolder.on('fold', (ev) => {
-      this.accordionStates['global'] = ev.expanded;
-      this.saveUIState();
-    });
   }
 
   /**
@@ -1370,33 +1601,37 @@ export class TweakpaneManager {
       step: 0.01
     }).on('change', onTokenCCChange('saturation'));
 
-    tokenCCFolder.addBinding(this.globalParams.tokenColorCorrection, 'gamma', {
+    const gammaBinding = tokenCCFolder.addBinding(this.globalParams.tokenColorCorrection, 'gamma', {
       label: 'Gamma',
       min: 0.2,
       max: 3,
       step: 0.01
     }).on('change', onTokenCCChange('gamma'));
+    this._registerBindingAsAdvanced(gammaBinding);
 
-    tokenCCFolder.addBinding(this.globalParams.tokenColorCorrection, 'temperature', {
+    const temperatureBinding = tokenCCFolder.addBinding(this.globalParams.tokenColorCorrection, 'temperature', {
       label: 'Temperature',
       min: -1,
       max: 1,
       step: 0.01
     }).on('change', onTokenCCChange('temperature'));
+    this._registerBindingAsAdvanced(temperatureBinding);
 
-    tokenCCFolder.addBinding(this.globalParams.tokenColorCorrection, 'tint', {
+    const tintBinding = tokenCCFolder.addBinding(this.globalParams.tokenColorCorrection, 'tint', {
       label: 'Tint',
       min: -1,
       max: 1,
       step: 0.01
     }).on('change', onTokenCCChange('tint'));
+    this._registerBindingAsAdvanced(tintBinding);
 
-    tokenCCFolder.addBinding(this.globalParams.tokenColorCorrection, 'windowLightIntensity', {
+    const windowLightIntensityBinding = tokenCCFolder.addBinding(this.globalParams.tokenColorCorrection, 'windowLightIntensity', {
       label: 'Window Light Intensity',
       min: 0,
       max: 2,
       step: 0.01
     }).on('change', onTokenCCChange('windowLightIntensity'));
+    this._registerBindingAsAdvanced(windowLightIntensityBinding);
 
     tokenCCFolder.addButton({
       title: 'Reset Token CC'
@@ -1464,31 +1699,35 @@ export class TweakpaneManager {
       step: 0.01
     }).on('change', onDynamicExposureChange('maxExposure'));
 
-    dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'probeHz', {
+    const probeHzBinding = dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'probeHz', {
       label: 'Probe Hz',
       min: 0.5,
       max: 30,
       step: 0.5
     }).on('change', onDynamicExposureChange('probeHz'));
+    this._registerBindingAsAdvanced(probeHzBinding);
 
-    dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'tauBrighten', {
+    const tauBrightenBinding = dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'tauBrighten', {
       label: 'Decay Up (s)',
       min: 0.05,
       max: 30,
       step: 0.01
     }).on('change', onDynamicExposureChange('tauBrighten'));
+    this._registerBindingAsAdvanced(tauBrightenBinding);
 
-    dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'tauDarken', {
+    const tauDarkenBinding = dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'tauDarken', {
       label: 'Decay Down (s)',
       min: 0.05,
       max: 30,
       step: 0.01
     }).on('change', onDynamicExposureChange('tauDarken'));
+    this._registerBindingAsAdvanced(tauDarkenBinding);
 
     const dynamicExposureDebugFolder = dynamicExposureFolder.addFolder({
       title: 'Debug (Selected Token)',
       expanded: this.accordionStates['token_dynamicExposure_debug'] ?? false
     });
+    this._registerFolderAsAdvanced(dynamicExposureDebugFolder);
 
     // These bindings are updated by the UI loop.
     this._dynamicExposureDebugBindings = [];
@@ -1592,48 +1831,50 @@ export class TweakpaneManager {
     grid.style.gap = '6px';
     grid.style.marginTop = '4px';
 
-    const addGridButton = (label, onClick, danger = false) => {
+    const addGridButton = (label, onClick, opts = {}) => {
+      const options = typeof opts === 'boolean' ? { danger: opts } : (opts ?? {});
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.textContent = label;
       btn.style.padding = '6px 8px';
       btn.style.borderRadius = '6px';
-      btn.style.border = danger
+      btn.style.border = options.danger
         ? '1px solid rgba(255,120,120,0.45)'
         : '1px solid rgba(255,255,255,0.15)';
-      btn.style.background = danger
+      btn.style.background = options.danger
         ? 'rgba(120,0,0,0.18)'
         : 'rgba(255,255,255,0.06)';
       btn.style.color = 'inherit';
       btn.style.cursor = 'pointer';
       btn.addEventListener('click', onClick);
       grid.appendChild(btn);
+      if (options.advanced) this._registerDomStripAsAdvanced(btn);
       return btn;
     };
 
     addGridButton('Defaults', () => {
       this.onMasterResetToDefaults();
-    }, true);
+    }, { danger: true, advanced: true });
 
     this._quickUndoButtonEl = addGridButton('Undo Defaults', () => {
       this.onUndoMasterReset();
-    });
+    }, { advanced: true });
 
     addGridButton('Texture Manager', () => {
       if (this.textureManager) this.textureManager.toggle();
-    });
+    }, { advanced: true });
 
     addGridButton('Effect Stack', () => {
       if (this.effectStack) this.effectStack.toggle();
-    });
+    }, { advanced: true });
 
     addGridButton('Diagnostic Center', () => {
       if (this.diagnosticCenter) this.diagnosticCenter.toggle();
-    });
+    }, { advanced: true });
 
     addGridButton('Breaker Box', () => {
       window.MapShine?.breakerBoxDialog?.toggle?.();
-    });
+    }, { advanced: true });
 
     addGridButton('Performance Recorder', () => {
       let dlg = window.MapShine?.performanceRecorderDialog;
@@ -1645,7 +1886,7 @@ export class TweakpaneManager {
         return;
       }
       dlg.toggle();
-    });
+    }, { advanced: true });
 
     addGridButton('🎯 Map Points', () => {
       this.openMapPointsManagerDialog();
@@ -1678,20 +1919,20 @@ export class TweakpaneManager {
 
       addGridButton('Copy Effects From Scene', async () => {
         await this.importSingleEffectFromScene();
-      });
+      }, { advanced: true });
 
       addGridButton('Reset Effects…', async () => {
         await this.resetSelectedEffectsInScene();
-      });
+      }, { advanced: true });
 
       addGridButton('Apply Effects to All Scenes…', async () => {
         await this.applyCurrentEffectsToAllScenes();
-      });
+      }, { advanced: true });
     }
 
     addGridButton('Attempt Scene Recovery', async () => {
       await this.attemptSceneRecovery();
-    }, true);
+    }, { danger: true, advanced: true });
 
     addGridButton('Scene Reset', async () => {
       try {
@@ -1721,9 +1962,15 @@ export class TweakpaneManager {
         } catch (_) {
         }
       }
-    }, true);
+    }, { danger: true, advanced: true });
 
     contentElement.appendChild(grid);
+
+    const scene = canvas?.scene ?? null;
+    const sceneIsEnabled = !!scene && sceneSettings.isEnabled(scene);
+    if (isGmLike() && sceneIsEnabled) {
+      this._appendSceneEnableToggleToQuickActions(contentElement);
+    }
 
     this.updateUndoButtonState();
 
@@ -1734,37 +1981,28 @@ export class TweakpaneManager {
   }
 
   /**
-   * Place the Quick Actions folder immediately below the sticky filter bar so
-   * launchers stay at the top of the panel (after init, presets/scene strips may
-   * have been inserted above it in DOM order).
+   * Place the Quick Actions folder at the top of the scroll body (below the pinned toolbar).
    * @private
    */
-  _moveQuickActionsSectionBelowFilterBar() {
+  _moveQuickActionsSectionBelowToolbar() {
     const folder = this._quickActionsFolder;
     const el = folder?.element;
-    if (!el?.parentElement || !this._filterBarEl?.parentElement) return;
+    const listHost = this._getSectionListHost();
+    if (!el?.parentElement || !listHost) return;
+    if (el.parentElement !== listHost) return;
 
-    const listHost = el.parentElement;
-    const filter = this._filterBarEl;
-    if (filter.parentElement !== listHost) return;
-
-    const anchor = filter.nextSibling;
+    const anchor = listHost.firstChild;
     if (el === anchor) return;
     listHost.insertBefore(el, anchor);
   }
 
   /**
-   * Build an always-visible, headerless scene master toggle section that lives
-   * near the top of the section list (before the first Tweakpane folder at init).
+   * Append the scene enable ON/OFF toggle at the bottom of Quick Actions.
+   * @param {HTMLElement} parentEl
    * @private
    */
-  buildSceneEnableQuickSection() {
-    if (!this.pane?.element) return;
-
-    const paneEl = this.pane.element;
-    const firstFolderEl = paneEl.querySelector('.tp-fldv');
-    const listHost = firstFolderEl?.parentElement;
-    if (!firstFolderEl || !listHost) return;
+  _appendSceneEnableToggleToQuickActions(parentEl) {
+    if (!parentEl) return;
 
     if (this._sceneEnableQuickSectionEl?.parentElement) {
       this._sceneEnableQuickSectionEl.remove();
@@ -1773,7 +2011,9 @@ export class TweakpaneManager {
     const wrap = document.createElement('div');
     wrap.className = 'ms-scene-enable-quick';
     wrap.style.display = 'flex';
-    wrap.style.padding = '4px 0 6px 0';
+    wrap.style.padding = '8px 0 2px 0';
+    wrap.style.marginTop = '6px';
+    wrap.style.borderTop = '1px solid rgba(255,255,255,0.1)';
 
     const button = document.createElement('button');
     button.type = 'button';
@@ -1799,7 +2039,7 @@ export class TweakpaneManager {
     }
 
     wrap.appendChild(button);
-    listHost.insertBefore(wrap, firstFolderEl);
+    parentEl.appendChild(wrap);
 
     this._sceneEnableQuickSectionEl = wrap;
     this._sceneEnableQuickToggleButtonEl = button;
@@ -2292,6 +2532,7 @@ export class TweakpaneManager {
     }).on('change', onSunLatitudeChange);
 
     const softFolder = sunFolder.addFolder({ title: 'Time-of-day softness', expanded: true });
+    this._registerFolderAsAdvanced(softFolder);
     const bindSoft = (key, label, min, max, step) => {
       softFolder.addBinding(this.globalParams.shadowSystem, key, {
         label,
@@ -2308,6 +2549,7 @@ export class TweakpaneManager {
     bindSoft('midnightWidthHours', 'Midnight peak width (h)', 0.5, 5.0, 0.1);
 
     const lenFolder = sunFolder.addFolder({ title: 'Length & smear', expanded: false });
+    this._registerFolderAsAdvanced(lenFolder);
     const bindLen = (key, label, min, max, step) => {
       lenFolder.addBinding(this.globalParams.shadowSystem, key, {
         label,
@@ -2324,6 +2566,7 @@ export class TweakpaneManager {
     bindLen('smearMidnight', 'Midnight smear', 0.0, 1.5, 0.01);
 
     const cloudFolder = sunFolder.addFolder({ title: 'Weather', expanded: false });
+    this._registerFolderAsAdvanced(cloudFolder);
     cloudFolder.addBinding(this.globalParams.shadowSystem, 'cloudDiffusionFactor', {
       label: 'Cloud softness boost',
       min: 1.0,
@@ -2412,6 +2655,7 @@ export class TweakpaneManager {
       title: 'Performance',
       expanded: this.accordionStates['post_dsn_perf'] ?? false
     });
+    this._registerFolderAsAdvanced(perfFolder);
 
     perfFolder.addBinding(dsn, 'performanceMode', {
       label: 'Preset',
@@ -2487,12 +2731,13 @@ export class TweakpaneManager {
       step: 0.01
     }).on('change', onChange);
 
-    lookFolder.addBinding(dsn, 'gamma', {
+    const gammaBinding = lookFolder.addBinding(dsn, 'gamma', {
       label: 'Gamma',
       min: 0.5,
       max: 2.5,
       step: 0.01
     }).on('change', onChange);
+    this._registerBindingAsAdvanced(gammaBinding);
 
     lookFolder.on('fold', (ev) => {
       this.accordionStates['post_dsn_look'] = ev.expanded;
@@ -2569,6 +2814,7 @@ export class TweakpaneManager {
       title: 'Mirror scale',
       expanded: this.accordionStates['post_sequencer_scale'] ?? true
     });
+    this._registerFolderAsAdvanced(scaleFolder);
 
     scaleFolder.addBinding(seq, 'mirrorScaleMul', {
       label: 'Footprint multiplier',
@@ -2586,6 +2832,7 @@ export class TweakpaneManager {
       title: 'Placement',
       expanded: this.accordionStates['post_sequencer_placement'] ?? false
     });
+    this._registerFolderAsAdvanced(placementFolder);
 
     placementFolder.addBinding(seq, 'alongCastPlacementMul', {
       label: 'Along-cast delta',
@@ -2704,7 +2951,7 @@ export class TweakpaneManager {
       title: 'Developer Tools',
       expanded: this.accordionStates['debug'] ?? false
     });
-    this._registerPrimaryFolder(debugFolder);
+    this._registerPrimaryFolder(debugFolder, { advanced: true });
 
     this._debugFolder = debugFolder;
 
@@ -3325,10 +3572,12 @@ export class TweakpaneManager {
       title: 'Rope Defaults',
       expanded: this.accordionStates['ropes_defaults_rope'] ?? false
     });
+    this._registerFolderAsAdvanced(ropeFolder);
     const chainFolder = folder.addFolder({
       title: 'Chain Defaults',
       expanded: this.accordionStates['ropes_defaults_chain'] ?? false
     });
+    this._registerFolderAsAdvanced(chainFolder);
 
     ropeFolder.on('fold', (ev) => {
       this.accordionStates['ropes_defaults_rope'] = ev.expanded;
@@ -3622,57 +3871,6 @@ export class TweakpaneManager {
   }
 
   /**
-   * Build scene setup section (GM only)
-   * @private
-   */
-  buildSceneSetupSection() {
-    const setupFolder = this.pane.addFolder({
-      title: 'Scene Setup',
-      expanded: this.accordionStates['sceneSetup'] ?? true
-    });
-    this._registerPrimaryFolder(setupFolder);
-
-    // Settings mode selector
-    const modeParams = {
-      mode: this.settingsMode
-    };
-
-    setupFolder.addBinding(modeParams, 'mode', {
-      label: 'Settings Mode',
-      options: {
-        'Map Maker': 'mapMaker',
-        'GM Override': 'gm'
-      }
-    }).on('change', (ev) => {
-      this.setSettingsMode(ev.value);
-    });
-
-    // Revert to Map Maker button
-    setupFolder.addButton({
-      title: 'Revert to Original'
-    }).on('click', () => {
-      this.revertToMapMaker();
-    });
-
-    setupFolder.addButton({
-      title: 'Publish Scene Settings (Compendium)'
-    }).on('click', async () => {
-      await this.publishSceneSettingsToMap();
-    });
-
-    setupFolder.addBlade({ view: 'separator' });
-
-    // Enable / Upgrade Map Shine Advanced for this scene
-    this._addSceneEnableControlButton(setupFolder);
-
-    // Track accordion state
-    setupFolder.on('fold', (ev) => {
-      this.accordionStates['sceneSetup'] = ev.expanded;
-      this.saveUIState();
-    });
-  }
-
-  /**
    * Build minimal onboarding section for first-time setup.
    * Shows only a short explanation and a single enable/upgrade button.
    * @private
@@ -3845,7 +4043,7 @@ export class TweakpaneManager {
       title: 'Support & Links',
       expanded: this.accordionStates['branding'] ?? false
     });
-    this._registerPrimaryFolder(brandingFolder);
+    this._registerPrimaryFolder(brandingFolder, { advanced: true });
 
     // Add HTML element for links
     const linkContainer = document.createElement('div');
@@ -3900,7 +4098,7 @@ export class TweakpaneManager {
     });
 
     // Category folders are top-level sections and must participate in section filtering.
-    this._registerPrimaryFolder(folder);
+    this._registerPrimaryFolder(folder, { advanced: categoryId === 'debug' });
 
     try {
       const debugEl = this._debugFolder?.element;
@@ -4057,6 +4255,7 @@ export class TweakpaneManager {
       updateCallback(effectId, 'enabled', ev.value);
       this.updateEffectiveState(effectId);
       this.updateControlStates(effectId);
+      this._refreshControlPanelAshMasterRow(effectId);
       this.queueSave(effectId);
     };
 
@@ -4099,6 +4298,27 @@ export class TweakpaneManager {
       this.accordionStates[effectId] = ev.expanded;
       this.saveUIState();
     });
+
+    if (schema.advanced === true && folder.element) {
+      this._registerAdvancedTarget(folder.element, { advanced: true, kind: 'effect' });
+    }
+
+    this._applyAdvancedModeVisibility();
+  }
+
+  /**
+   * Refresh Manual Weather Ash master row when ash effects register or toggle enabled.
+   * @param {string} [effectId]
+   * @private
+   */
+  _refreshControlPanelAshMasterRow(effectId = '') {
+    if (effectId && !ASH_EFFECT_IDS.includes(effectId) && effectId !== 'weather') return;
+    try {
+      window.MapShine?.controlPanel?._wireLiveWeatherOverrideBindingsIfReady?.();
+    } catch (_) {}
+    try {
+      window.MapShine?.controlPanel?.refreshAshMasterRowVisibility?.();
+    } catch (_) {}
   }
 
   /**
@@ -4311,6 +4531,7 @@ export class TweakpaneManager {
       updateCallback(effectId, 'enabled', ev.value);
       this.updateEffectiveState(effectId);
       this.updateControlStates(effectId);
+      this._refreshControlPanelAshMasterRow(effectId);
       this.queueSave(effectId);
     };
 
@@ -4382,6 +4603,11 @@ export class TweakpaneManager {
       } catch (e) {
         log.warn('controlPanel._wireLiveWeatherOverrideBindingsIfReady failed:', e);
       }
+      this._refreshControlPanelAshMasterRow('weather');
+    }
+
+    if (ASH_EFFECT_IDS.includes(effectId)) {
+      this._refreshControlPanelAshMasterRow(effectId);
     }
 
     this.updateEffectiveState(effectId);
@@ -4405,6 +4631,12 @@ export class TweakpaneManager {
       this.accordionStates[effectId] = ev.expanded;
       this.saveUIState();
     });
+
+    if (schema.advanced === true && folder.element) {
+      this._registerAdvancedTarget(folder.element, { advanced: true, kind: 'effect' });
+    }
+
+    this._applyAdvancedModeVisibility();
   }
 
   /**
@@ -4673,6 +4905,10 @@ export class TweakpaneManager {
         folder: targetContainer
       });
 
+      if (group.advanced === true && targetContainer?.element) {
+        this._registerAdvancedTarget(targetContainer.element, { advanced: true, kind: 'group' });
+      }
+
       for (const paramId of group.parameters || []) {
         const paramDef = schema.parameters[paramId];
         if (!paramDef) {
@@ -4680,11 +4916,15 @@ export class TweakpaneManager {
           continue;
         }
 
+        const effectiveDef = group.advanced === true
+          ? { ...paramDef, advanced: paramDef.advanced ?? true }
+          : paramDef;
+
         this.buildParameterControl(
           effectId,
           targetContainer,
           paramId,
-          paramDef,
+          effectiveDef,
           updateCallback,
           savedParams
         );
@@ -4722,6 +4962,10 @@ export class TweakpaneManager {
           });
         }
 
+        if (group.advanced === true && group.type === 'folder' && targetContainer?.element) {
+          this._registerAdvancedTarget(targetContainer.element, { advanced: true, kind: 'group' });
+        }
+
         // Build controls for this group's parameters
         for (const paramId of group.parameters) {
           const paramDef = schema.parameters[paramId];
@@ -4730,11 +4974,15 @@ export class TweakpaneManager {
             continue;
           }
 
+          const effectiveDef = group.advanced === true && group.type !== 'folder'
+            ? { ...paramDef, advanced: paramDef.advanced ?? true }
+            : paramDef;
+
           this.buildParameterControl(
             effectId,
             targetContainer,
             paramId,
-            paramDef,
+            effectiveDef,
             updateCallback,
             savedParams
           );
@@ -4788,6 +5036,10 @@ export class TweakpaneManager {
         } catch (e) {
         }
       });
+
+      if (paramDef.advanced === true) {
+        this._registerBindingAsAdvanced(button);
+      }
 
       return;
     }
@@ -4852,6 +5104,10 @@ export class TweakpaneManager {
     // Store binding config for later enabling/disabling
     if (!effectData.bindingConfigs) effectData.bindingConfigs = {};
     effectData.bindingConfigs[paramId] = { binding, paramDef };
+
+    if (paramDef.advanced === true) {
+      this._registerBindingAsAdvanced(binding);
+    }
 
     const handleChange = (ev) => {
       // Validate new value
@@ -4937,6 +5193,10 @@ export class TweakpaneManager {
     const hostEl = document.createElement('div');
     hostEl.className = 'ms-gradient-editor-host';
     contentEl.appendChild(hostEl);
+
+    if (paramDef.advanced === true) {
+      this._registerAdvancedTarget(hostEl, { advanced: true, kind: 'control' });
+    }
 
     const stops = effectData.params[paramId] ?? paramDef.default ?? null;
 
@@ -8195,6 +8455,10 @@ export class TweakpaneManager {
         this.updateScale();
       }
 
+      if (state.advancedModeEnabled === true) {
+        this.advancedModeEnabled = true;
+      }
+
       this._ensurePaneSafePosition();
 
       try {
@@ -8281,7 +8545,8 @@ export class TweakpaneManager {
         },
         accordionStates: this.accordionStates,
         globalParams: this.globalParams,
-        scale: this.uiScale
+        scale: this.uiScale,
+        advancedModeEnabled: this.advancedModeEnabled === true
       };
 
       await game.settings.set('map-shine-advanced', 'ui-state', state);
@@ -8316,8 +8581,11 @@ export class TweakpaneManager {
    */
   show() {
     if (this.container) {
+      this._ensureUniversalToolbar();
       this.container.style.display = 'block';
       this._ensurePaneSafePosition({ persist: true });
+      this._ensureScrollLayoutObserver();
+      requestAnimationFrame(() => this._syncScrollBodyLayout());
       this.visible = true;
     }
   }
@@ -8354,7 +8622,19 @@ export class TweakpaneManager {
     // Clean up filter bar state
     this._clearFilterHighlights();
     this._filterSavedExpanded.clear();
-    this._filterBarEl = null;
+    this._universalToolbarEl = null;
+    this._scrollBodyEl = null;
+    this._scrollBodyGuardsWired = false;
+    if (this._scrollLayoutObserver) {
+      try {
+        this._scrollLayoutObserver.disconnect();
+      } catch (_) {
+      }
+      this._scrollLayoutObserver = null;
+    }
+    this._filterInputEl = null;
+    this._advancedModeCheckboxEl = null;
+    this._advancedTargets = [];
     this._sceneEnableQuickSectionEl = null;
     this._sceneEnableQuickToggleButtonEl = null;
     this._sceneEnableQuickToggleSceneId = null;

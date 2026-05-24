@@ -229,6 +229,7 @@ export class BloomEffectV2 {
           name: 'water-spec-bloom',
           label: 'Water specular (bloom)',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: ['waterSpecularBloomEnabled', 'waterSpecularBloomStrength', 'waterSpecularBloomGamma'],
         },
@@ -243,6 +244,7 @@ export class BloomEffectV2 {
           name: 'lightning-strike',
           label: 'Lightning strike',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'lightningBloomAdaptEnabled',
@@ -259,6 +261,7 @@ export class BloomEffectV2 {
           name: 'outdoor-spill',
           label: 'Outdoor spill (window glow)',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'outdoorSpillSuppressEnabled',

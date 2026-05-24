@@ -1,8 +1,30 @@
 /**
  * @fileoverview Control Panel Manager - GM live-play interface
- * Compact Tweakpane-based UI for time-of-day and weather control during actual play
+ * Tactile native UI for time-of-day and weather control during actual play
  * @module ui/control-panel-manager
  */
+import {
+  createControlPanelShell,
+  createSection,
+  createCpButton,
+  createFadeTimeSlider,
+  createSegmentedControl,
+  createNativeControl,
+  createStepperControl,
+  formatFadeMinutes,
+  openAdvancedDrawer,
+  triggerPanelClunk,
+} from './control-panel/cp-shell.js';
+import { createFaderBoard, mirrorFaderRow, clearAllFaderPreviews, setFaderPreview, setFaderLiveValue } from './control-panel/widgets/fader-board.js';
+import {
+  createAstrolabeDial,
+  CONTEXT_HINT_IDLE,
+  GUSTINESS_LABELS,
+  GUSTINESS_DISPLAY,
+} from './control-panel/widgets/astrolabe-dial.js';
+import { createDynamicWeatherDeck } from './control-panel/widgets/dynamic-weather-deck.js';
+import { lookupBiome } from './control-panel/widgets/dynamic-weather-catalog.js';
+import { updatePhaseRing } from './control-panel/widgets/smart-ring-clock.js';
 import { canPersistSceneDocument, isGmLike } from '../core/gm-parity.js';
 
 
@@ -16,11 +38,28 @@ import {
   LIVE_WEATHER_OVERRIDE_PARAM_IDS
 } from './weather-param-bridge.js';
 import { LIVE_WEATHER_PANEL_SPECS } from './environment-override-specs.js';
+import {
+  applyAshMasterIntensity,
+  isAnyAshSystemEnabledInScene,
+  readAshIntensityFromController,
+} from './ash-weather-bridge.js';
 import { environmentControlApi } from './environment-control-api.js';
+import {
+  environmentFadeController,
+  snapshotFromControlState,
+  fadeExtrasFromControlState,
+  gustinessFromExtras,
+} from './environment-fade-controller.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { getFoundryTimePhaseHours } from '../core/foundry-time-phases.js';
+import {
+  resolveTodQuickPickAnchors,
+  readColorCorrectionParamsFromUi,
+  todHourToOrbitAngleDeg,
+} from '../core/tod-anchor-spec.js';
 import { extendMsaLocalFlagWriteGuard, refreshMsaSameSceneRedrawPredict } from '../utils/msa-local-flag-guard.js';
-import { cloneAndSanitizeControlState, sanitizeControlStateInPlace } from '../settings/control-state-sanitize.js';
+import { cloneAndSanitizeControlState, inferWeatherPanelView, sanitizeControlStateInPlace } from '../settings/control-state-sanitize.js';
+import { getWeatherSyncBridge } from '../foundry/weather-sync-bridge.js';
 import {
   readLightningIntensityFromControlState,
   syncWeatherLightningEffectFromControlState,
@@ -41,6 +80,37 @@ import {
 
 const log = createLogger('ControlPanel');
 
+/** Control panel outer width (wand remote). */
+const CP_PANEL_WIDTH_PX = 436;
+
+/** Horizontal arc offset (px outward) — peaks at mid-column to hug the dial. */
+const WEATHER_FINGER_ARC_OFFSETS = Object.freeze([6, 14, 22, 28, 22, 14, 6]);
+const WEATHER_FINGER_H_PX = 22;
+const WEATHER_FINGER_GAP_PX = 2;
+const WEATHER_FINGER_STAGE_H_PX = 300;
+
+/** Weather preset lozenges flanking the astrolabe dial. */
+const WEATHER_FINGER_PRESETS = Object.freeze({
+  left: [
+    { id: 'Clear (Dry)', icon: '☀️', label: 'Clear' },
+    { id: 'Clear (Breezy)', icon: '🌬', label: 'Breezy' },
+    { id: 'Partly Cloudy', icon: '⛅', label: 'Partly' },
+    { id: 'Overcast (Light)', icon: '☁', label: 'Overcast' },
+    { id: 'Mist', icon: '🌫', label: 'Mist' },
+    { id: 'Drizzle', icon: '🌦', label: 'Drizzle' },
+    { id: 'Light Rain', icon: '🌧', label: 'Light' },
+  ],
+  right: [
+    { id: 'Rain', icon: '🌧', label: 'Rain' },
+    { id: 'Heavy Rain', icon: '🌧', label: 'Heavy' },
+    { id: 'Thunderstorm', icon: '⛈', label: 'Storm' },
+    { id: 'Snow Flurries', icon: '🌨', label: 'Flurries' },
+    { id: 'Snow', icon: '❄', label: 'Snow' },
+    { id: 'Blizzard', icon: '🌨', label: 'Blizzard' },
+    { id: 'Fog (Dense)', icon: '🌫', label: 'Fog' },
+  ],
+});
+
 /** GM panel "Gustiness" → WeatherController.variability (wind surge / meander strength). */
 const GUSTINESS_TO_VARIABILITY = Object.freeze({
   calm: 0.25,
@@ -58,8 +128,8 @@ const MAX_WIND_MS_CP = 78.0;
  */
 export class ControlPanelManager {
   constructor() {
-    /** @type {Tweakpane.Pane|null} */
-    this.pane = null;
+    /** @type {{ zones: Record<string, HTMLElement>, statusLed: HTMLElement }|null} */
+    this._shell = null;
     
     /** @type {HTMLElement|null} */
     this.container = null;
@@ -81,6 +151,24 @@ export class ControlPanelManager {
     /** @type {number|null} */
     this._dragTimeTarget = null;
 
+    /** @type {number|null} Hour at pointer-down when dragging the clock (fade transitions). */
+    this._dragTimeStartHour = null;
+
+    /** @type {import('./environment-control-api.js').EnvironmentSnapshot|null} */
+    this._environmentFadePreviewStartSnap = null;
+
+    /** @type {import('./environment-fade-controller.js').FadeExtras|null} */
+    this._environmentFadePreviewStartExtras = null;
+
+    /** @type {{ speedMS?: number, directionDeg?: number }|null} */
+    this._pendingWindTarget = null;
+
+    /** @type {boolean} */
+    this._environmentFadeTransitionActive = false;
+
+    /** @type {Set<string>} */
+    this._fadeChannelDragActive = new Set();
+
     /** @type {number|null} */
     this._lastTimeTargetApplied = null;
 
@@ -96,9 +184,13 @@ export class ControlPanelManager {
       timeTransitionMinutes: 0.0,
       linkTimeToFoundry: false,
       weatherMode: 'dynamic', // 'dynamic' | 'directed'
+      /** Manual Weather sliders vs Weather Director in the unified Weather folder. */
+      weatherPanelView: 'manual', // 'manual' | 'directed' | 'dynamic' (legacy 'director' migrated)
       // Dynamic mode
       dynamicEnabled: false,
       dynamicPresetId: 'Temperate Plains',
+      /** Scene mood / biome card in Dynamic deck (`mood:…` or `biome:…`). */
+      dynamicEnvironmentPresetId: null,
       dynamicEvolutionSpeed: 60.0,
       dynamicPaused: false,
       // Directed mode
@@ -141,11 +233,23 @@ export class ControlPanelManager {
      */
     this._rapidWeatherBindingTarget = this.controlState.directedCustomPreset;
 
-    /** True once Live Weather Overrides DOM rows are built (idempotent). */
+    /** True once Manual Weather DOM rows are built (idempotent). */
     this._liveWeatherOverrideDomBuilt = false;
 
-    /** @type {any|null} Tweakpane folder API for live weather overrides */
-    this._liveWeatherOverrideFolder = null;
+    /** @type {ReturnType<typeof createAstrolabeDial>|null} */
+    this._astrolabe = null;
+
+    /** @type {Record<string, HTMLElement>|null} Section tag elements */
+    this._sectionTags = null;
+
+    /** @type {HTMLElement|null} Manual Weather DOM container */
+    this._weatherManualViewEl = null;
+
+    /** @type {HTMLElement|null} Weather Director DOM container */
+    this._weatherDirectorViewEl = null;
+
+    /** @type {{ manualBtn: HTMLButtonElement, directorBtn: HTMLButtonElement }|null} */
+    this._weatherViewToggleButtons = null;
 
     /**
      * Plain DOM for the five scalars (avoids Tweakpane number-binding NaN issues).
@@ -167,6 +271,15 @@ export class ControlPanelManager {
 
     /** @type {HTMLElement|null} */
     this._windStrengthText = null;
+
+    /** @type {{ timeRate: number }|null} */
+    this._timeScaleParams = null;
+
+    /** @type {{ mirror: ()=>void }|null} */
+    this._timeScaleControl = null;
+
+    /** @type {Record<string, { mirror: ()=>void }>} */
+    this._nativeControls = {};
     
     /** @type {Function} Debounced save function */
     this.debouncedSave = this._debounce(() => this._saveControlState(), 500);
@@ -195,11 +308,23 @@ export class ControlPanelManager {
     /** @type {HTMLButtonElement|null} */
     this._minimizeButton = null;
 
+    /** @type {HTMLElement|null} */
+    this._minimizedDock = null;
+
     /** @type {HTMLButtonElement|null} */
-    this._minimizedButton = null;
+    this._minimizedOpenBtn = null;
+
+    /** @type {HTMLElement|null} */
+    this._minimizedHandle = null;
 
     /** @type {boolean} */
     this._isMinimized = false;
+
+    /** @type {boolean} */
+    this._isDraggingMinimizedDock = false;
+
+    /** @type {{mx:number,my:number,left:number,top:number}|null} */
+    this._minimizedDragStart = null;
 
     /** @type {string} */
     this._uiStateStorageKey = 'map-shine-advanced.control-panel-ui-v1';
@@ -233,17 +358,14 @@ export class ControlPanelManager {
     /** @type {any|null} */
     this._tileMotionSpeedBinding = null;
 
-    /** @type {any|null} */
-    this._tileMotionAutoPlayBinding = null;
+    /** @type {HTMLElement|null} */
+    this._tileMotionStripTag = null;
 
-    /** @type {any|null} */
-    this._tileMotionTimeFactorBinding = null;
+    /** @type {HTMLElement|null} Shared contextual hint under the dial. */
+    this._contextHintEl = null;
 
-    /** @type {any|null} */
-    this._tileMotionPausedBinding = null;
-
-    /** @type {any|null} */
-    this._weatherDynamicFolder = null;
+    /** @type {Map<string, string>} */
+    this._contextHintSources = new Map();
 
     /** @type {any|null} */
     this._weatherDirectedFolder = null;
@@ -251,8 +373,8 @@ export class ControlPanelManager {
     /** @type {boolean} */
     this._singleOpenTopLevelSections = false;
 
-    /** @type {Array<any>} */
-    this._topLevelFolders = [];
+    /** @type {Array<{ id: string, setExpanded: (v: boolean)=>void }>} */
+    this._sections = [];
 
     /** @type {Object<string, HTMLElement|null>} */
     this._folderTags = {
@@ -261,7 +383,6 @@ export class ControlPanelManager {
       time: null,
       weather: null,
       wind: null,
-      tileMotion: null,
       environment: null,
       utilities: null,
       system: null
@@ -305,7 +426,10 @@ export class ControlPanelManager {
       onDocPanelMouseMove: (e) => this._onHeaderMouseMove(e),
       onDocPanelMouseUp: () => this._onHeaderMouseUp(),
       onMinimizeButtonClick: (e) => this._onMinimizeButtonClick(e),
-      onMinimizedBadgeClick: (e) => this._onMinimizedBadgeClick(e)
+      onMinimizedOpenClick: (e) => this._onMinimizedOpenClick(e),
+      onMinimizedHandlePointerDown: (e) => this._onMinimizedHandlePointerDown(e),
+      onMinimizedDockPointerMove: (e) => this._onMinimizedDockPointerMove(e),
+      onMinimizedDockPointerUp: (e) => this._onMinimizedDockPointerUp(e)
     };
   }
 
@@ -319,34 +443,40 @@ export class ControlPanelManager {
     };
   }
 
-  _registerTopLevelFolder(folder) {
-    if (!folder) return;
-    this._topLevelFolders.push(folder);
+  _registerSection(sectionRec) {
+    if (!sectionRec) return;
+    this._sections.push(sectionRec);
+  }
+
+  _ensureSectionTag(section, key, initialText = '') {
+    if (!section?.tag) return null;
+    if (!this._sectionTags) this._sectionTags = {};
+    this._sectionTags[key] = section.tag;
+    this._setFolderTag(key, initialText);
+    return section.tag;
+  }
+
+  _registerTopLevelFolder(_folder) {
+    /* legacy no-op — native sections use _registerSection */
   }
 
   _ensureFolderTag(folder, key, initialText = '') {
     try {
-      const titleElement = folder?.element?.querySelector?.('.tp-fldv_t');
+      const titleElement = folder?.element?.querySelector?.('.tp-fldv_t')
+        || folder?.header
+        || folder?.querySelector?.('.msa-cp-section__header');
       if (!titleElement) return null;
 
       let tag = titleElement.querySelector(`.map-shine-folder-tag-${key}`);
       if (!tag) {
         tag = document.createElement('span');
-        tag.className = `map-shine-folder-tag map-shine-folder-tag-${key}`;
-        tag.style.marginLeft = '8px';
-        tag.style.fontSize = '10px';
-        tag.style.fontWeight = '600';
-        tag.style.padding = '1px 6px';
-        tag.style.borderRadius = '999px';
-        tag.style.border = '1px solid rgba(255,255,255,0.14)';
-        tag.style.background = 'rgba(255,255,255,0.08)';
-        tag.style.opacity = '0.9';
-        tag.style.verticalAlign = 'middle';
-        tag.style.pointerEvents = 'none';
+        tag.className = `map-shine-folder-tag map-shine-folder-tag-${key} msa-cp-section__tag`;
         titleElement.appendChild(tag);
       }
 
+      if (!this._sectionTags) this._sectionTags = {};
       this._folderTags[key] = tag;
+      this._sectionTags[key] = tag;
       this._setFolderTag(key, initialText);
       return tag;
     } catch (_) {
@@ -366,16 +496,115 @@ export class ControlPanelManager {
   }
 
   _setFolderTag(key, text) {
-    const tag = this._folderTags?.[key];
+    const tag = this._sectionTags?.[key] || this._folderTags?.[key];
     if (!tag) return;
     const next = String(text || '').trim();
     tag.textContent = next;
-    tag.style.display = next ? 'inline-block' : 'none';
+    tag.style.display = next ? 'inline-flex' : 'none';
   }
 
   _refreshWeatherFolderTag() {
-    const isDynamic = this.controlState.weatherMode === 'dynamic';
-    this._setFolderTag('weather', isDynamic ? 'Dynamic' : 'Directed');
+    const mode = this._normalizeWeatherUIMode();
+    const labels = { manual: 'Manual', directed: 'Directed', dynamic: 'Dynamic' };
+    this._setFolderTag('weather', labels[mode] || 'Manual');
+  }
+
+  /**
+   * @returns {'manual'|'directed'|'dynamic'}
+   * @private
+   */
+  _normalizeWeatherUIMode() {
+    return inferWeatherPanelView(this.controlState);
+  }
+
+  /**
+   * Broadcast current weather panel mode to connected players.
+   * @private
+   */
+  _emitWeatherModeSync() {
+    try {
+      getWeatherSyncBridge().emitMode(this.controlState, { immediate: true });
+    } catch (_) {}
+  }
+
+  /**
+   * @param {'manual'|'directed'|'dynamic'} mode
+   * @private
+   */
+  _setWeatherUIMode(mode) {
+    const next = mode === 'dynamic' ? 'dynamic' : mode === 'directed' ? 'directed' : 'manual';
+    const prev = this._normalizeWeatherUIMode();
+    if (prev === next) return;
+
+    const prevRuntimeDynamic = this.controlState.weatherMode === 'dynamic' && this.controlState.dynamicEnabled === true;
+
+    this.controlState.weatherPanelView = next;
+    if (next === 'dynamic') {
+      this.controlState.weatherMode = 'dynamic';
+      this.controlState.dynamicEnabled = true;
+    } else {
+      this.controlState.weatherMode = 'directed';
+      this.controlState.dynamicEnabled = false;
+    }
+
+    this._updateWeatherControls();
+    this._applyWeatherPanelViewVisibility();
+
+    const nextRuntimeDynamic = next === 'dynamic';
+    const uiOnlySwitch =
+      (prev === 'manual' || prev === 'directed') &&
+      (next === 'manual' || next === 'directed');
+
+    if (uiOnlySwitch || prevRuntimeDynamic === nextRuntimeDynamic) {
+      void this._persistWeatherPanelModeChange({ runtime: false });
+      return;
+    }
+
+    refreshMsaSameSceneRedrawPredict();
+    void this._applyWeatherModeRuntime();
+  }
+
+  /**
+   * Persist weather panel mode and broadcast to players.
+   * @param {{ runtime?: boolean }} [opts]
+   * @private
+   */
+  async _persistWeatherPanelModeChange(opts = {}) {
+    if (opts.runtime === true) {
+      try {
+        refreshMsaSameSceneRedrawPredict();
+
+        const weatherState = {
+          mode: this.controlState.weatherMode,
+          dynamicEnabled: this.controlState.dynamicEnabled,
+          dynamicPresetId: this.controlState.dynamicPresetId,
+          dynamicEvolutionSpeed: this.controlState.dynamicEvolutionSpeed,
+          dynamicPaused: this.controlState.dynamicPaused,
+        };
+        await stateApplier.applyWeatherState(weatherState, false);
+
+        this._syncLandscapeLightningAndFogFromControlState();
+        this._updateStatusPanel();
+
+        const wc = resolveWeatherController();
+        if (this.controlState.dynamicEnabled === true) {
+          await wc?.saveDynamicStateNow?.();
+        }
+      } catch (error) {
+        log.error('Failed to apply weather UI mode runtime:', error);
+      }
+    }
+
+    await this._saveControlState();
+    this._emitWeatherModeSync();
+  }
+
+  /**
+   * Apply dynamic/directed runtime switch and persist to scene flags.
+   * @private
+   */
+  async _applyWeatherModeRuntime() {
+    await this._persistWeatherPanelModeChange({ runtime: true });
   }
 
   /**
@@ -417,22 +646,654 @@ export class ControlPanelManager {
    * @private
    */
   _buildPhaseALayout() {
-    const masterFolder = this.pane.addFolder({
-      title: '🎛️ Master Control',
-      expanded: true
-    });
-    this._registerTopLevelFolder(masterFolder);
-    this._ensureFolderTag(masterFolder, 'master', 'Live');
-
     this._ensureDirectedCustomPreset();
-    this._buildRapidWeatherOverrides(masterFolder);
-    this._buildTimeSection(masterFolder, { expanded: true, registerTopLevel: false });
-    this._buildQuickSceneBeatsSection(masterFolder, { expanded: true, registerTopLevel: false });
-    this._buildTileMotionSection(masterFolder, { expanded: false, registerTopLevel: false });
-    this._buildOverheadOcclusionSection(masterFolder, { expanded: false, registerTopLevel: false });
-    this._buildPlayerLightsSection(masterFolder, { expanded: false, registerTopLevel: false });
-    this._buildWeatherSection(masterFolder, { expanded: false, registerTopLevel: false });
-    this._buildWindSection(masterFolder, { expanded: false, registerTopLevel: false });
+    if (!this._shell?.zones) return;
+
+    this._normalizeWeatherUIMode();
+    this._buildHeaderModeToggle();
+    this._buildDialZone(this._shell.zones.dial);
+    this._buildWeatherStatusZone(this._shell.weatherStatusStrip);
+    this._buildStickControls(this._shell.stickControls);
+    this._buildMixerZone(this._shell.zones.mixer);
+    this._buildAdvancedDeck(this._shell.zones.advanced);
+    this._buildCompactTileMotionStrip(this._shell.tileMotionStrip);
+    this._applyWeatherPanelViewVisibility();
+    this._mountMinimizeButton();
+  }
+
+  /**
+   * Manual | Directed | Dynamic mode switch at panel top.
+   * @private
+   */
+  _buildHeaderModeToggle() {
+    if (!this._shell?.modeBar) return;
+    this._shell.modeBar.replaceChildren();
+
+    const current = this._normalizeWeatherUIMode();
+
+    this._weatherViewSegment = createSegmentedControl(
+      { Manual: 'manual', Directed: 'directed', Dynamic: 'dynamic' },
+      current,
+      (v) => this._setWeatherUIMode(v),
+    );
+    this._weatherViewSegment.wrap.classList.add('msa-cp__mode-segment', 'msa-cp__mode-segment--triple');
+    this._shell.modeBar.appendChild(this._weatherViewSegment.wrap);
+  }
+
+  /**
+   * Astrolabe wheel in the remote head with weather preset fingers.
+   * @private
+   */
+  _buildDialZone(zoneEl) {
+    zoneEl.replaceChildren();
+    this._weatherPresetButtons = [];
+
+    const stage = document.createElement('div');
+    stage.className = 'msa-cp-dial-stage';
+
+    const dialCenter = document.createElement('div');
+    dialCenter.className = 'msa-cp-dial-center';
+
+    const leftFingers = document.createElement('div');
+    leftFingers.className = 'msa-cp-weather-fingers msa-cp-weather-fingers--left';
+    leftFingers.dataset.side = 'left';
+
+    const rightFingers = document.createElement('div');
+    rightFingers.className = 'msa-cp-weather-fingers msa-cp-weather-fingers--right';
+    rightFingers.dataset.side = 'right';
+
+    this._buildAstrolabeHero(dialCenter);
+    this._buildWeatherFingers(leftFingers, WEATHER_FINGER_PRESETS.left, 'left');
+    this._buildWeatherFingers(rightFingers, WEATHER_FINGER_PRESETS.right, 'right');
+
+    stage.appendChild(leftFingers);
+    stage.appendChild(rightFingers);
+    stage.appendChild(dialCenter);
+    zoneEl.appendChild(stage);
+
+    this._buildDialWindColumn(stage);
+
+    this._weatherFingerLeft = leftFingers;
+    this._weatherFingerRight = rightFingers;
+  }
+
+  /**
+   * Wind marker + gustiness fader column to the right of the astrolabe.
+   * @param {HTMLElement} stageEl
+   * @private
+   */
+  _buildDialWindColumn(stageEl) {
+    const col = document.createElement('div');
+    col.className = 'msa-cp-dial-wind-col';
+
+    const windMark = document.createElement('span');
+    windMark.className = 'msa-cp-dial-wind-col__wind-mark';
+    windMark.textContent = '💨';
+    windMark.setAttribute('aria-hidden', 'true');
+    col.appendChild(windMark);
+
+    this._bindContextHint(windMark, () => {
+      const ms = Math.round(Number(this.controlState.windSpeedMS) || 0);
+      const dir = Math.round(Number(this.controlState.windDirection) || 0);
+      return [
+        `Wind — ${ms} m/s · ${dir}°`,
+        'Use the sock on the dial: angle = direction',
+        'Pull sock length from center = speed (longer = faster)',
+      ];
+    });
+
+    stageEl.appendChild(col);
+  }
+
+  /**
+   * Weather status readout under the dial (director detail vs manual compact).
+   * @param {HTMLElement} mountEl
+   * @private
+   */
+  _buildWeatherStatusZone(mountEl) {
+    mountEl.replaceChildren();
+    mountEl.classList.add('msa-cp__status-led');
+    this.statusPanel = null;
+    this._buildStatusPanel(mountEl);
+
+    const hintEl = document.createElement('div');
+    hintEl.className = 'msa-cp-context-hint';
+    hintEl.setAttribute('aria-live', 'polite');
+    for (let i = 0; i < 3; i++) {
+      const line = document.createElement('div');
+      line.className = 'msa-cp-context-hint__line';
+      hintEl.appendChild(line);
+    }
+    mountEl.appendChild(hintEl);
+    this._contextHintEl = hintEl;
+    this._renderContextHintLines(CONTEXT_HINT_IDLE);
+
+    this._applyWeatherStatusStripMode();
+  }
+
+  /**
+   * @param {string|string[]} text
+   * @returns {string[]}
+   * @private
+   */
+  _normalizeHintLines(text) {
+    if (Array.isArray(text)) {
+      const lines = text.map((l) => String(l ?? '').trim()).slice(0, 3);
+      while (lines.length < 3) lines.push('');
+      return lines;
+    }
+    const s = String(text ?? '').trim();
+    if (!s) return ['', '', ''];
+    if (s.includes('\n')) {
+      return this._normalizeHintLines(s.split('\n').map((l) => l.trim()).filter(Boolean));
+    }
+    return [s, '', ''];
+  }
+
+  /**
+   * @param {string[]} lines
+   * @private
+   */
+  _renderContextHintLines(lines) {
+    if (!this._contextHintEl) return;
+    const kids = this._contextHintEl.querySelectorAll('.msa-cp-context-hint__line');
+    const normalized = this._normalizeHintLines(lines);
+    for (let i = 0; i < 3; i++) {
+      if (kids[i]) kids[i].textContent = normalized[i] || '\u00a0';
+    }
+  }
+
+  /**
+   * @param {string} source
+   * @param {string|string[]} text
+   * @private
+   */
+  _setContextHint(source, text) {
+    if (!source || !text) return;
+    this._contextHintSources.set(source, this._normalizeHintLines(text));
+    this._refreshContextHint();
+  }
+
+  /**
+   * @param {string} source
+   * @private
+   */
+  _clearContextHint(source) {
+    if (!source) return;
+    this._contextHintSources.delete(source);
+    this._refreshContextHint();
+  }
+
+  /** @private */
+  _refreshContextHint() {
+    if (!this._contextHintEl) return;
+    const order = ['time-drag', 'dial', 'fader', 'stick'];
+    for (const key of order) {
+      const lines = this._contextHintSources.get(key);
+      if (lines) {
+        this._renderContextHintLines(lines);
+        return;
+      }
+    }
+    this._renderContextHintLines(CONTEXT_HINT_IDLE);
+  }
+
+  /**
+   * @param {HTMLElement} el
+   * @param {string|(() => string)} textOrFn
+   * @private
+   */
+  _bindContextHint(el, textOrFn) {
+    if (!el) return;
+    el.addEventListener('pointerenter', () => {
+      const text = typeof textOrFn === 'function' ? textOrFn() : textOrFn;
+      if (text) this._setContextHint('stick', text);
+    });
+    el.addEventListener('pointerleave', () => this._clearContextHint('stick'));
+  }
+
+  /** @private */
+  _applyWeatherStatusStripMode() {
+    const mode = this._normalizeWeatherUIMode();
+    const isCompact = mode === 'manual' || mode === 'directed';
+    const isDynamic = mode === 'dynamic';
+
+    if (this._shell?.weatherStatusStrip) {
+      const strip = this._shell.weatherStatusStrip;
+      strip.classList.toggle('is-compact-view', isCompact);
+      strip.classList.toggle('is-dynamic-view', isDynamic);
+      strip.classList.remove('is-manual-view', 'is-directed-view');
+    }
+    if (this.statusPanel) {
+      this.statusPanel.classList.toggle('is-compact-view', isCompact);
+      this.statusPanel.classList.toggle('is-dynamic-view', isDynamic);
+      this.statusPanel.classList.remove('is-manual-view', 'is-directed-view');
+    }
+  }
+
+  /**
+   * @param {HTMLElement} mountEl
+   * @param {Array<{ id: string, icon: string, label: string }>} presets
+   * @param {'left'|'right'} side
+   * @private
+   */
+  _buildWeatherFingers(mountEl, presets, side) {
+    mountEl.replaceChildren();
+    mountEl.dataset.side = side;
+    if (!this._weatherPresetButtons) this._weatherPresetButtons = [];
+
+    const count = presets.length;
+
+    for (let i = 0; i < count; i++) {
+      const preset = presets[i];
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'msa-cp-weather-finger';
+      btn.title = preset.id;
+      btn.dataset.presetId = preset.id;
+      btn.dataset.slot = String(i);
+
+      const iconSpan = document.createElement('span');
+      iconSpan.className = 'msa-cp-weather-finger__icon';
+      iconSpan.textContent = preset.icon;
+
+      const labelSpan = document.createElement('span');
+      labelSpan.className = 'msa-cp-weather-finger__label';
+      labelSpan.textContent = preset.label;
+
+      btn.appendChild(iconSpan);
+      btn.appendChild(labelSpan);
+
+      const stackH = count * WEATHER_FINGER_H_PX + (count - 1) * WEATHER_FINGER_GAP_PX;
+      const startY = (WEATHER_FINGER_STAGE_H_PX - stackH) / 2;
+      btn.style.top = `${startY + i * (WEATHER_FINGER_H_PX + WEATHER_FINGER_GAP_PX)}px`;
+      const arcOut = WEATHER_FINGER_ARC_OFFSETS[i] ?? 0;
+      const tx = side === 'left' ? -arcOut : arcOut;
+      btn.style.transform = `translateX(${tx}px)`;
+
+      btn.addEventListener('click', () => {
+        triggerPanelClunk(this.container);
+        void this._applyQuickWeatherBeat(preset.id).then(() => {
+          this.debouncedSave();
+          this._mirrorWeatherPresetButtons();
+        });
+      });
+
+      this._bindContextHint(btn, () => [
+        `Weather Preset — ${preset.label}`,
+        'Click to apply this weather beat',
+        preset.id,
+      ]);
+
+      mountEl.appendChild(btn);
+      this._weatherPresetButtons.push(btn);
+    }
+  }
+
+  /**
+   * Compact time controls at top of the stick body.
+   * @param {HTMLElement} mountEl
+   * @private
+   */
+  _buildStickControls(mountEl) {
+    mountEl.replaceChildren();
+
+    const refreshTimeFolderTag = () => {
+      const mins = Number(this.controlState.timeTransitionMinutes) || 0;
+      if (this.controlState.linkTimeToFoundry) {
+        this._setFolderTag('time', 'VTT Sync');
+      } else if (mins > 0) {
+        this._setFolderTag('time', formatFadeMinutes(mins));
+      } else {
+        this._setFolderTag('time', 'Now');
+      }
+    };
+    this._refreshTimeFolderTag = refreshTimeFolderTag;
+
+    const lockRow = document.createElement('div');
+    lockRow.className = 'msa-cp-stick-lock';
+
+    const lockBtn = document.createElement('button');
+    lockBtn.type = 'button';
+    lockBtn.className = 'msa-cp-stick-lock__btn';
+    lockBtn.title = 'Sync Map Shine time with Foundry VTT world clock';
+    lockBtn.textContent = '🔓 Sync Foundry VTT Time';
+    lockBtn.disabled = !(isGmLike());
+    lockBtn.addEventListener('click', () => {
+      const next = !lockBtn.classList.contains('is-locked');
+      lockBtn.classList.toggle('is-locked', next);
+      lockBtn.textContent = next ? '🔒 Synced to Foundry VTT' : '🔓 Sync Foundry VTT Time';
+      this.controlState.linkTimeToFoundry = next;
+      refreshTimeFolderTag();
+      if (next) {
+        void this._syncTimeFromFoundryWorldTime(game?.time?.worldTime, false);
+      }
+      this.debouncedSave();
+    });
+    this._foundryLockBtn = lockBtn;
+    lockRow.appendChild(lockBtn);
+    mountEl.appendChild(lockRow);
+
+    this._bindContextHint(lockBtn, () => (
+      this.controlState.linkTimeToFoundry
+        ? [
+          'Foundry Time Sync — locked',
+          'Map Shine follows the VTT world clock',
+          'Click to unlock manual time control',
+        ]
+        : [
+          'Foundry Time Sync — off',
+          'Click to mirror Map Shine time to Foundry VTT',
+          'Use the dial ring for manual time when unlocked',
+        ]
+    ));
+
+    this._timeScaleParams = { timeRate: this._getTimeScalePercent() };
+    const scaleStepper = createStepperControl({
+      label: 'Time Speed',
+      hint: 'passage rate',
+      title: 'How fast in-scene time passes relative to real time (100% = normal)',
+      value: this._timeScaleParams.timeRate,
+      min: 0,
+      max: 200,
+      step: 5,
+      format: (v) => `${Math.round(v)}%`,
+      onChange: (v) => this._applyTimeScale(v),
+    });
+    this._timeScaleControl = scaleStepper;
+    mountEl.appendChild(scaleStepper.row);
+
+    this._bindContextHint(scaleStepper.row, () => [
+      `Time Speed — ${Math.round(this._getTimeScalePercent())}%`,
+      'How fast in-scene time passes vs real time',
+      '100% = normal · 0% = paused',
+    ]);
+
+    const fadeRow = document.createElement('div');
+    fadeRow.className = 'msa-cp-fade-row';
+
+    const transSlider = createFadeTimeSlider({
+      label: 'Environment Fade',
+      hint: 'instant → 30 min',
+      title: 'How long time, weather, wind, fog, lightning, and ash take to blend (Instant = immediate jump)',
+      value: Number(this.controlState.timeTransitionMinutes) || 0,
+      onChange: (v) => {
+        this.controlState.timeTransitionMinutes = v;
+        refreshTimeFolderTag();
+        this.debouncedSave();
+      },
+    });
+    this._timeTransitionStepper = transSlider;
+    fadeRow.appendChild(transSlider.row);
+    mountEl.appendChild(fadeRow);
+
+    this._bindContextHint(transSlider.row, () => {
+      const mins = Number(this.controlState.timeTransitionMinutes) || 0;
+      const fade = mins > 0 ? formatFadeMinutes(mins) : 'Instant';
+      return [
+        `Environment Fade — ${fade}`,
+        'Blends clock, weather sliders, wind, fog, lightning, and ash together',
+        'Dashed previews show targets before you release',
+      ];
+    });
+
+    lockBtn.classList.toggle('is-locked', this.controlState.linkTimeToFoundry === true);
+    lockBtn.textContent = this.controlState.linkTimeToFoundry ? '🔒 Synced to Foundry VTT' : '🔓 Sync Foundry VTT Time';
+    refreshTimeFolderTag();
+  }
+
+  /**
+   * Compact tile motion transport above Advanced Settings.
+   * @param {HTMLElement} mountEl
+   * @private
+   */
+  _buildCompactTileMotionStrip(mountEl) {
+    mountEl.replaceChildren();
+    const canEditTileMotion = isGmLike() && !!window.MapShine?.tileMotionManager;
+
+    const header = document.createElement('div');
+    header.className = 'msa-cp-tile-motion-strip__header';
+
+    const title = document.createElement('span');
+    title.className = 'msa-cp-tile-motion-strip__title';
+    title.textContent = 'Tile Motion';
+
+    const tag = document.createElement('span');
+    tag.className = 'msa-cp-tile-motion-strip__tag';
+    tag.textContent = `${Math.round(Number(this.controlState.tileMotionSpeedPercent) || 0)}%`;
+    this._tileMotionStripTag = tag;
+
+    header.appendChild(title);
+    header.appendChild(tag);
+    mountEl.appendChild(header);
+
+    const transport = document.createElement('div');
+    transport.className = 'msa-cp-tile-motion-strip__transport';
+
+    const transportDefs = [
+      { icon: '▶', label: 'Start', fn: () => this._startTileMotion() },
+      { icon: '⏸', label: 'Pause', fn: () => this._pauseTileMotion() },
+      { icon: '⏵', label: 'Resume', fn: () => this._resumeTileMotion() },
+      { icon: '⏹', label: 'Stop', fn: () => this._stopTileMotion() },
+    ];
+
+    for (const def of transportDefs) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'msa-cp-tile-motion-strip__btn';
+      btn.title = def.label;
+      btn.setAttribute('aria-label', def.label);
+      btn.textContent = def.icon;
+      btn.disabled = !canEditTileMotion;
+      btn.addEventListener('click', () => { void def.fn(); });
+      this._bindContextHint(btn, [
+        `Tile Motion — ${def.label}`,
+        canEditTileMotion ? 'GM transport control' : 'GM only',
+        'Speed slider below sets playback rate',
+      ]);
+      transport.appendChild(btn);
+    }
+
+    const resetBtn = document.createElement('button');
+    resetBtn.type = 'button';
+    resetBtn.className = 'msa-cp-tile-motion-strip__btn msa-cp-tile-motion-strip__btn--reset';
+    resetBtn.title = 'Reset Phase';
+    resetBtn.setAttribute('aria-label', 'Reset Phase');
+    resetBtn.textContent = '↺';
+    resetBtn.disabled = !canEditTileMotion;
+    resetBtn.addEventListener('click', () => { void this._resetTileMotionPhase(); });
+    this._bindContextHint(resetBtn, [
+      'Tile Motion — Reset Phase',
+      'Restarts the motion cycle from the beginning',
+      canEditTileMotion ? 'GM only control' : 'GM only',
+    ]);
+    transport.appendChild(resetBtn);
+
+    mountEl.appendChild(transport);
+
+    const speedRow = document.createElement('div');
+    speedRow.className = 'msa-cp-tile-motion-strip__speed';
+
+    const speedCtrl = createNativeControl({
+      type: 'range',
+      label: 'Speed',
+      target: this.controlState,
+      key: 'tileMotionSpeedPercent',
+      min: 0,
+      max: 400,
+      step: 1,
+      disabled: !canEditTileMotion,
+      onChange: (v, last) => {
+        if (!Number.isFinite(Number(v))) return;
+        this.controlState.tileMotionSpeedPercent = v;
+        this._updateTileMotionStripTag(v);
+        void this._setTileMotionSpeed(v, { persist: last === true });
+        if (last) this.debouncedSave();
+      },
+    });
+    speedCtrl.row.classList.add('msa-cp-tile-motion-strip__speed-row');
+    this._tileMotionSpeedBinding = speedCtrl;
+    speedRow.appendChild(speedCtrl.row);
+    mountEl.appendChild(speedRow);
+
+    this._bindContextHint(speedCtrl.row, () => [
+      `Tile Motion Speed — ${Math.round(Number(this.controlState.tileMotionSpeedPercent) || 0)}%`,
+      'Playback rate for animated tiles',
+      '100% = authored speed · drag to adjust live',
+    ]);
+
+    if (!canEditTileMotion) {
+      const hint = document.createElement('div');
+      hint.className = 'msa-cp-tile-motion-strip__hint';
+      hint.textContent = isGmLike()
+        ? 'Tile motion manager not ready'
+        : 'GM only';
+      mountEl.appendChild(hint);
+    }
+  }
+
+  /**
+   * Lightning strike buttons below faders in the stick.
+   * @param {HTMLElement} mountEl
+   * @private
+   */
+  _buildStrikeRow(mountEl) {
+    mountEl.replaceChildren();
+
+    const pad = document.createElement('div');
+    pad.className = 'msa-cp-strike-pad';
+
+    const label = document.createElement('div');
+    label.className = 'msa-cp-strike-pad__label';
+    label.textContent = 'Manual lightning strikes';
+    pad.appendChild(label);
+
+    const hint = document.createElement('div');
+    hint.className = 'msa-cp-strike-pad__hint';
+    hint.textContent = 'Trigger landscape flashes — separate from the ⚡ intensity slider above';
+    pad.appendChild(hint);
+
+    const strikeGrid = document.createElement('div');
+    strikeGrid.className = 'msa-cp-strike-pad__buttons';
+    strikeGrid.dataset.msLiveWxStrikes = '1';
+
+    for (const [btnLabel, actionId] of [['Small', 'small'], ['Big', 'big'], ['30s burst', 'series']]) {
+      const btn = createCpButton(btnLabel, () => triggerLandscapeLightningAction(actionId));
+      const strikeHints = {
+        small: [
+          'Manual Lightning — Small strike',
+          'One brief landscape flash',
+          'Separate from the ⚡ intensity slider',
+        ],
+        big: [
+          'Manual Lightning — Big strike',
+          'One heavy landscape flash',
+          'Separate from the ⚡ intensity slider',
+        ],
+        series: [
+          'Manual Lightning — 30s burst',
+          'Rapid strikes for half a minute',
+          'Separate from the ⚡ intensity slider',
+        ],
+      };
+      this._bindContextHint(btn, strikeHints[actionId] || [`Manual Lightning — ${btnLabel}`, '', '']);
+      strikeGrid.appendChild(btn);
+    }
+    pad.appendChild(strikeGrid);
+    mountEl.appendChild(pad);
+  }
+
+  /**
+   * Zone C: Manual weather faders (wired when manual view active).
+   * @private
+   */
+  _buildMixerZone(zoneEl) {
+    this._mixerZoneEl = zoneEl;
+
+    const dynamicMount = document.createElement('div');
+    dynamicMount.className = 'msa-cp-mixer-dynamic';
+    dynamicMount.dataset.msWeatherPanelView = 'dynamic';
+
+    const faderMount = document.createElement('div');
+    faderMount.className = 'msa-cp-mixer-shared__faders';
+
+    const manualWrap = document.createElement('div');
+    manualWrap.className = 'msa-cp-mixer-manual';
+    manualWrap.dataset.msWeatherPanelView = 'manual';
+
+    const strikeMount = document.createElement('div');
+    strikeMount.className = 'msa-cp-mixer-manual__strikes';
+    manualWrap.appendChild(strikeMount);
+
+    zoneEl.appendChild(dynamicMount);
+    zoneEl.appendChild(faderMount);
+    zoneEl.appendChild(manualWrap);
+
+    this._weatherDynamicMixerEl = dynamicMount;
+    this._weatherManualViewEl = faderMount;
+    this._weatherStrikeMountEl = strikeMount;
+    this._buildDynamicMixerDeck(dynamicMount);
+    this._wireLiveWeatherOverrideBindingsIfReady();
+    this._buildStrikeRow(strikeMount);
+  }
+
+  /**
+   * Primary Dynamic Weather deck in the main stick body.
+   * @param {HTMLElement} mountEl
+   * @private
+   */
+  _buildDynamicMixerDeck(mountEl) {
+    this._dynamicWeatherDeck = createDynamicWeatherDeck(mountEl, {
+      controlState: this.controlState,
+      getWeatherController: () => resolveWeatherController(),
+      isGm: () => isGmLike(),
+      onApply: () => this._applyControlState(),
+      onSave: () => this.debouncedSave(),
+      onSaveDynamic: async () => {
+        try {
+          await resolveWeatherController()?.saveDynamicStateNow?.();
+        } catch (_) {}
+      },
+      setContextHint: (lines) => this._setContextHint('stick', lines),
+      clearContextHint: () => this._clearContextHint('stick'),
+    });
+  }
+
+  /**
+   * Advanced collapsible sections.
+   * @private
+   */
+  _buildAdvancedDeck(zoneEl) {
+    const directorSec = createSection(zoneEl, {
+      id: 'weatherDirector',
+      title: '🌦 Weather Director',
+      tagKey: 'weather',
+      expanded: false,
+    });
+    this._ensureSectionTag(directorSec, 'weather', 'Manual');
+    this._weatherDirectorViewEl = directorSec.body;
+    this._registerSection({ id: 'weatherDirector', setExpanded: directorSec.setExpanded });
+    this._buildWeatherDirectorContents(directorSec.body);
+
+    const occlSec = createSection(zoneEl, {
+      id: 'overheadOccl',
+      title: '🔳 Overhead Occlusion',
+      tagKey: 'overheadOccl',
+      expanded: false,
+    });
+    this._ensureSectionTag(occlSec, 'overheadOccl', 'V2');
+    this._registerSection({ id: 'overheadOccl', setExpanded: occlSec.setExpanded });
+    this._buildOverheadOcclusionSection(occlSec.body);
+
+    const lightsSec = createSection(zoneEl, {
+      id: 'playerLights',
+      title: '🔦 Player Lights',
+      tagKey: 'playerLights',
+      expanded: false,
+    });
+    this._ensureSectionTag(lightsSec, 'playerLights', 'GM');
+    this._registerSection({ id: 'playerLights', setExpanded: lightsSec.setExpanded });
+    this._buildPlayerLightsSection(lightsSec.body);
   }
 
   /**
@@ -502,11 +1363,67 @@ export class ControlPanelManager {
    * @private
    */
   _refreshWindPaneBindings() {
+    this._mirrorWindCompassFromState();
+  }
+
+  _windAngleDegFromController(wc, dir) {
+    if (typeof wc?._windAngleDegFromDir === 'function') {
+      return wc._windAngleDegFromDir(dir);
+    }
+    const x = Number.isFinite(Number(dir?.x)) ? Number(dir.x) : 1.0;
+    const y = Number.isFinite(Number(dir?.y)) ? Number(dir.y) : 0.0;
+    const deg = Math.atan2(-y, x) * (180.0 / Math.PI);
+    return deg < 0 ? (deg + 360.0) : deg;
+  }
+
+  _mirrorWindCompassFromState(liveSpeedMS = null, gustPulse = null, liveDirectionDeg = null) {
+    if (!this._astrolabe) return;
+    this._coercePanelWindScalarsInPlace();
+    this._astrolabe.mirror({
+      speedMS: Number(this.controlState.windSpeedMS) || 0,
+      directionDeg: Number.isFinite(liveDirectionDeg)
+        ? liveDirectionDeg
+        : (Number(this.controlState.windDirection) || 0),
+      gustiness: this.controlState.gustiness || 'moderate',
+      liveSpeedMS: Number.isFinite(liveSpeedMS) ? liveSpeedMS : null,
+      gustPulse: Number.isFinite(gustPulse) ? gustPulse : null,
+    });
+    const ms = Number.isFinite(liveSpeedMS) ? liveSpeedMS : (Number(this.controlState.windSpeedMS) || 0);
+    this._setFolderTag('wind', `${Math.round(ms)} m/s`);
+    if (this._liveWeatherOverrideDom?.rows?.gustiness) {
+      const gIdx = GUSTINESS_LABELS.indexOf(this.controlState.gustiness || 'moderate');
+      mirrorFaderRow(this._liveWeatherOverrideDom.rows, 'gustiness', gIdx >= 0 ? gIdx : 2);
+    }
+  }
+
+  _mirrorAllDomFromState() {
     try {
-      this.windControls?.speed?.refresh?.();
-      this.windControls?.direction?.refresh?.();
-      this._windGustinessBinding?.refresh?.();
+      this.syncLiveWeatherOverrideDomFromDirectedPreset();
+      this.syncManualFogDomFromControlState();
+      this.syncLiveLightningDomFromControlState();
+      this.syncManualAshDomFromController();
+      this._syncReplicaOcclDomFromControlState();
+      this._mirrorWindCompassFromState();
+      this._timeScaleControl?.mirror?.(this._getTimeScalePercent());
+      this._timeTransitionStepper?.mirror?.(Number(this.controlState.timeTransitionMinutes) || 0);
+      for (const ctrl of Object.values(this._nativeControls || {})) {
+        try { ctrl.mirror?.(); } catch (_) {}
+      }
+      if (this._weatherViewSegment?.mirror) {
+        this._weatherViewSegment.mirror(this._normalizeWeatherUIMode());
+      }
+      if (this._weatherModeSegment?.mirror) {
+        this._weatherModeSegment.mirror(this.controlState.weatherMode || 'dynamic');
+      }
+      this._updateClock(this.controlState.timeOfDay);
+      updatePhaseRing(this.clockElements?.phaseRing, this.controlState.timeOfDay);
+      this._mirrorWeatherPresetButtons();
+      this._dynamicWeatherDeck?.mirror?.();
     } catch (_) {}
+  }
+
+  _injectPanelStyles() {
+    /* Styles live in styles/module.css (.msa-cp) */
   }
 
   _ensureDirectedCustomPreset() {
@@ -544,376 +1461,138 @@ export class ControlPanelManager {
     this.controlState.directedCustomPreset = target;
   }
 
-  _injectPanelStyles() {
-    const STYLE_ID = 'map-shine-cp-phase-d-style';
-    if (document.getElementById(STYLE_ID)) return;
-
-    const style = document.createElement('style');
-    style.id = STYLE_ID;
-    style.textContent = `
-      /* ═══ Map Shine Control Panel — Phase D Visual Polish ═══ */
-
-      /* Container frame */
-      #map-shine-control-panel {
-        width: 292px !important;
-        max-width: 292px !important;
-        border-radius: 12px !important;
-        overflow: hidden !important;
-        box-shadow:
-          0 28px 72px rgba(0, 0, 0, 0.75),
-          0 8px 24px rgba(0, 0, 0, 0.50),
-          0 0 0 1px rgba(70, 130, 255, 0.20),
-          inset 0 1px 0 rgba(255, 255, 255, 0.05) !important;
-      }
-
-      /* Pane root — CSS variable retheme */
-      #map-shine-control-panel .tp-dfwv {
-        --tp-base-background-color: rgba(8, 11, 22, 1.0);
-        --tp-button-background-color: rgba(255, 255, 255, 0.065);
-        --tp-button-background-color-active: rgba(80, 175, 255, 0.28);
-        --tp-button-background-color-focus: rgba(80, 175, 255, 0.16);
-        --tp-button-background-color-hover: rgba(80, 175, 255, 0.15);
-        --tp-button-foreground-color: rgba(210, 232, 255, 0.90);
-        --tp-container-background-color: rgba(255, 255, 255, 0.025);
-        --tp-container-background-color-active: rgba(80, 175, 255, 0.12);
-        --tp-container-background-color-focus: rgba(80, 175, 255, 0.08);
-        --tp-container-background-color-hover: rgba(255, 255, 255, 0.04);
-        --tp-container-foreground-color: rgba(215, 235, 255, 0.90);
-        --tp-groove-foreground-color: rgba(90, 200, 250, 0.60);
-        --tp-input-background-color: rgba(255, 255, 255, 0.065);
-        --tp-input-background-color-active: rgba(80, 175, 255, 0.22);
-        --tp-input-background-color-focus: rgba(80, 175, 255, 0.13);
-        --tp-input-background-color-hover: rgba(255, 255, 255, 0.10);
-        --tp-input-foreground-color: rgba(225, 242, 255, 0.95);
-        --tp-label-foreground-color: rgba(150, 182, 225, 0.72);
-        --tp-monitor-background-color: rgba(0, 0, 0, 0.22);
-        --tp-monitor-foreground-color: rgba(175, 210, 250, 0.85);
-        width: 292px !important;
-        min-width: 292px !important;
-        max-width: 292px !important;
-        background: rgba(8, 11, 22, 1.0) !important;
-        font-family: var(--font-primary, 'Signika', 'Segoe UI', sans-serif) !important;
-      }
-
-      /* Root title bar */
-      #map-shine-control-panel .tp-rotv_b {
-        background: linear-gradient(135deg,
-          rgba(12, 18, 46, 1.0) 0%,
-          rgba(9, 14, 34, 1.0) 100%) !important;
-        border-bottom: 1px solid rgba(70, 130, 255, 0.22) !important;
-        padding: 0 32px 0 10px !important;
-        height: 30px !important;
-        min-height: 30px !important;
-      }
-
-      #map-shine-control-panel .tp-rotv_t {
-        font-size: 10px !important;
-        font-weight: 700 !important;
-        letter-spacing: 0.12em !important;
-        text-transform: uppercase !important;
-        color: rgba(125, 195, 255, 0.95) !important;
-      }
-
-      /* Scrollable content area */
-      #map-shine-control-panel .tp-rotv_c {
-        background: rgba(8, 11, 22, 1.0) !important;
-        max-height: 78vh;
-        overflow-y: auto;
-        scrollbar-width: thin;
-        scrollbar-color: rgba(70, 140, 255, 0.30) transparent;
-      }
-
-      #map-shine-control-panel .tp-rotv_c::-webkit-scrollbar { width: 3px; }
-      #map-shine-control-panel .tp-rotv_c::-webkit-scrollbar-track { background: transparent; }
-      #map-shine-control-panel .tp-rotv_c::-webkit-scrollbar-thumb {
-        background: rgba(70, 140, 255, 0.32);
-        border-radius: 2px;
-      }
-      #map-shine-control-panel .tp-rotv_c::-webkit-scrollbar-thumb:hover {
-        background: rgba(90, 200, 250, 0.50);
-      }
-
-      /* Blade rows — ultra-tight */
-      #map-shine-control-panel .tp-bldv {
-        margin: 0 !important;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.030) !important;
-      }
-
-      /* Label rows */
-      #map-shine-control-panel .tp-lblv {
-        padding: 0 8px !important;
-        min-height: 22px !important;
-        height: 22px !important;
-      }
-
-      #map-shine-control-panel .tp-lblv_l {
-        font-size: 10px !important;
-        min-width: 76px !important;
-        max-width: 96px !important;
-        white-space: nowrap !important;
-        overflow: hidden !important;
-        text-overflow: ellipsis !important;
-        color: rgba(150, 182, 225, 0.72) !important;
-      }
-
-      /* Top-level folder headers (direct children of content area) */
-      #map-shine-control-panel .tp-rotv_c > .tp-fldv > .tp-fldv_b {
-        background: linear-gradient(90deg,
-          rgba(14, 24, 58, 0.98) 0%,
-          rgba(10, 18, 44, 0.98) 100%) !important;
-        border-bottom: 1px solid rgba(70, 130, 255, 0.22) !important;
-        padding: 0 10px 0 12px !important;
-        height: 27px !important;
-        min-height: 27px !important;
-        position: relative;
-      }
-
-      /* Accent left-border on top-level folders */
-      #map-shine-control-panel .tp-rotv_c > .tp-fldv > .tp-fldv_b::before {
-        content: '';
-        position: absolute;
-        left: 0;
-        top: 4px;
-        bottom: 4px;
-        width: 2px;
-        background: linear-gradient(180deg, rgba(90, 200, 250, 0.90), rgba(60, 140, 255, 0.75));
-        border-radius: 0 2px 2px 0;
-      }
-
-      #map-shine-control-panel .tp-rotv_c > .tp-fldv > .tp-fldv_b:hover {
-        background: linear-gradient(90deg,
-          rgba(20, 34, 74, 0.98) 0%,
-          rgba(16, 26, 60, 0.98) 100%) !important;
-      }
-
-      #map-shine-control-panel .tp-rotv_c > .tp-fldv > .tp-fldv_b .tp-fldv_t {
-        font-size: 9.5px !important;
-        font-weight: 700 !important;
-        letter-spacing: 0.09em !important;
-        text-transform: uppercase !important;
-        color: rgba(125, 192, 255, 0.95) !important;
-      }
-
-      /* Level 2 nested folder headers */
-      #map-shine-control-panel .tp-fldv .tp-fldv .tp-fldv_b {
-        background: rgba(255, 255, 255, 0.022) !important;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
-        padding: 0 8px 0 10px !important;
-        height: 22px !important;
-        min-height: 22px !important;
-      }
-
-      #map-shine-control-panel .tp-fldv .tp-fldv .tp-fldv_b:hover {
-        background: rgba(70, 145, 255, 0.07) !important;
-      }
-
-      #map-shine-control-panel .tp-fldv .tp-fldv .tp-fldv_b .tp-fldv_t {
-        font-size: 9px !important;
-        font-weight: 600 !important;
-        letter-spacing: 0.05em !important;
-        text-transform: uppercase !important;
-        color: rgba(152, 183, 230, 0.80) !important;
-      }
-
-      /* Level 3+ deeply nested folder headers */
-      #map-shine-control-panel .tp-fldv .tp-fldv .tp-fldv .tp-fldv_b {
-        height: 20px !important;
-        min-height: 20px !important;
-        background: rgba(255, 255, 255, 0.013) !important;
-      }
-
-      #map-shine-control-panel .tp-fldv .tp-fldv .tp-fldv .tp-fldv_b .tp-fldv_t {
-        font-size: 8.5px !important;
-        color: rgba(140, 168, 215, 0.72) !important;
-      }
-
-      /* Expand arrow — dim */
-      #map-shine-control-panel .tp-fldv_m {
-        opacity: 0.45 !important;
-      }
-
-      /* Ultra-tight gap between sibling folders */
-      #map-shine-control-panel .tp-fldv + .tp-fldv { margin-top: 0 !important; }
-      #map-shine-control-panel .tp-fldv { margin-bottom: 0 !important; }
-
-      /* ── Sliders ── */
-      #map-shine-control-panel .tp-sldv {
-        height: 22px !important;
-        display: flex;
-        align-items: center;
-      }
-
-      #map-shine-control-panel .tp-sldv_t {
-        height: 2px !important;
-        border-radius: 2px !important;
-        background: rgba(255, 255, 255, 0.12) !important;
-      }
-
-      /* Track fill colour via groove var */
-      #map-shine-control-panel .tp-sldv_t::before {
-        background: linear-gradient(90deg,
-          rgba(55, 155, 255, 0.85) 0%,
-          rgba(90, 200, 250, 0.85) 100%) !important;
-        border-radius: 2px !important;
-      }
-
-      /* ── Buttons ── */
-      #map-shine-control-panel .tp-btnv_b {
-        height: 22px !important;
-        padding: 0 10px !important;
-        font-size: 10px !important;
-        font-weight: 600 !important;
-        border-radius: 5px !important;
-        letter-spacing: 0.02em !important;
-        transition: background 0.12s, border-color 0.12s, color 0.12s !important;
-      }
-
-      /* ── Button grids ── */
-      #map-shine-control-panel .tp-btngridv_b {
-        font-size: 9.5px !important;
-        height: 22px !important;
-        font-weight: 600 !important;
-        border-radius: 4px !important;
-        letter-spacing: 0.02em !important;
-      }
-
-      /* ── Dropdowns ── */
-      #map-shine-control-panel .tp-lstv_s {
-        font-size: 10px !important;
-        height: 20px !important;
-        padding: 0 4px !important;
-        border-radius: 4px !important;
-      }
-
-      /* ── Checkboxes ── */
-      #map-shine-control-panel .tp-ckbv_w {
-        width: 28px !important;
-        height: 14px !important;
-        border-radius: 7px !important;
-      }
-
-      #map-shine-control-panel .tp-ckbv_k {
-        width: 10px !important;
-        height: 10px !important;
-      }
-
-      /* ── Number / text inputs ── */
-      #map-shine-control-panel .tp-nmbv_i,
-      #map-shine-control-panel .tp-txtv_i {
-        font-size: 10px !important;
-        height: 20px !important;
-        padding: 0 6px !important;
-        border-radius: 4px !important;
-      }
-
-      /* ── Separators ── */
-      #map-shine-control-panel .tp-brkv {
-        border-top: 1px solid rgba(255, 255, 255, 0.06) !important;
-        margin: 3px 8px !important;
-      }
-
-      /* ── Tab views ── */
-      #map-shine-control-panel .tp-tabv_b {
-        font-size: 9.5px !important;
-        height: 24px !important;
-        font-weight: 600 !important;
-        letter-spacing: 0.04em !important;
-      }
-
-      /* ── Monitor / read-only ── */
-      #map-shine-control-panel .tp-mntv_v,
-      #map-shine-control-panel .tp-mntv_g {
-        font-size: 10px !important;
-      }
-
-      /* ── Map Shine folder-tag chips — keep legible at compressed height ── */
-      #map-shine-control-panel .map-shine-folder-tag,
-      #map-shine-control-panel .map-shine-effects-count-tag {
-        font-size: 8px !important;
-        padding: 0 4px !important;
-        min-height: 12px !important;
-        line-height: 12px !important;
-        border-radius: 3px !important;
-      }
-
-      /* Live Weather Overrides — native range + number (not Tweakpane bindings) */
-      #map-shine-control-panel .map-shine-live-wx {
-        padding: 4px 6px 6px;
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-      }
-      #map-shine-control-panel .map-shine-live-wx-row {
-        display: grid;
-        grid-template-columns: 76px 1fr 44px;
-        align-items: center;
-        gap: 6px;
-        min-height: 22px;
-      }
-      #map-shine-control-panel .map-shine-live-wx-lbl {
-        font-size: 10px;
-        color: rgba(150, 182, 225, 0.78);
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-      #map-shine-control-panel .map-shine-live-wx-row input[type="range"] {
-        width: 100%;
-        height: 4px;
-        accent-color: rgba(80, 175, 255, 0.95);
-        cursor: pointer;
-      }
-      #map-shine-control-panel .map-shine-live-wx-num {
-        width: 100%;
-        font-size: 10px;
-        height: 20px;
-        padding: 0 4px;
-        border-radius: 4px;
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        background: rgba(255, 255, 255, 0.065);
-        color: rgba(225, 242, 255, 0.95);
-        box-sizing: border-box;
-      }
-      #map-shine-control-panel .map-shine-live-wx-strike-grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr 1fr;
-        gap: 3px;
-        padding: 2px 0 0;
-      }
-      #map-shine-control-panel .map-shine-live-wx-strike-lbl {
-        font-size: 10px;
-        color: rgba(150, 182, 225, 0.78);
-        padding: 4px 0 0;
-      }
-      #map-shine-control-panel .map-shine-live-wx-strike-btn {
-        padding: 5px 4px;
-        border-radius: 5px;
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        background: rgba(255, 255, 255, 0.06);
-        color: rgba(210, 232, 255, 0.90);
-        cursor: pointer;
-        font-size: 9.5px;
-        font-weight: 600;
-        font-family: inherit;
-        transition: background 0.12s, border-color 0.12s;
-      }
-      #map-shine-control-panel .map-shine-live-wx-strike-btn:hover {
-        background: rgba(80, 170, 255, 0.14);
-        border-color: rgba(80, 170, 255, 0.32);
-      }
-    `;
-    document.head.appendChild(style);
-  }
-
-  _buildRapidWeatherOverrides(parentFolder) {
+  /**
+   * Unified weather shell: presets, Manual/Director toggle (Zone A macro pad).
+   * @param {HTMLElement} zoneEl
+   * @private
+   */
+  _buildUnifiedWeatherSection(zoneEl) {
     this._ensureDirectedCustomPreset();
 
-    this._liveWeatherOverrideFolder = parentFolder.addFolder({
-      title: '🎚️ Live Weather Overrides',
-      expanded: true
-    });
+    if (this.controlState.weatherPanelView === 'director') {
+      this._normalizeWeatherUIMode();
+    }
 
-    this._wireLiveWeatherOverrideBindingsIfReady();
+    const presetsWrap = document.createElement('div');
+    presetsWrap.className = 'msa-cp-macro-zone';
+    this._appendWeatherPresetsGrid(presetsWrap);
+    zoneEl.appendChild(presetsWrap);
+
+    const windGrid = document.createElement('div');
+    windGrid.className = 'msa-cp-macro-pad msa-cp-wind-presets';
+    const beats = {
+      Calm: { speedMS: 4.0, gustiness: 'calm' },
+      Breezy: { speedMS: 14.0, gustiness: 'light' },
+      Windy: { speedMS: 28.0, gustiness: 'strong' },
+      Storm: { speedMS: 50.0, gustiness: 'extreme' },
+    };
+    for (const [label, cfg] of Object.entries(beats)) {
+      windGrid.appendChild(createCpButton(label, () => {
+        this.controlState.windSpeedMS = cfg.speedMS;
+        this.controlState.gustiness = cfg.gustiness;
+        this._coercePanelWindScalarsInPlace();
+        void this._applyWindState();
+        this._mirrorWindCompassFromState();
+        this.debouncedSave();
+        triggerPanelClunk(this.container);
+      }));
+    }
+    zoneEl.appendChild(windGrid);
+
+    this._refreshWeatherFolderTag();
+    this._applyWeatherPanelViewVisibility();
+    this._mirrorWeatherPresetButtons();
+  }
+
+  /**
+   * @param {HTMLElement} container
+   * @private
+   */
+  _appendWeatherPresetsGrid(container) {
+    const weatherGrid = document.createElement('div');
+    weatherGrid.className = 'msa-cp-macro-pad';
+    const weatherBeats = {
+      'Clear ☀️': 'Clear (Dry)',
+      'Rain 🌧️': 'Rain',
+      'Storm ⛈️': 'Thunderstorm',
+      'Snow ❄️': 'Snow',
+    };
+    /** @type {HTMLButtonElement[]} */
+    this._weatherPresetButtons = [];
+    for (const [label, presetId] of Object.entries(weatherBeats)) {
+      const btn = createCpButton(label, () => {
+        triggerPanelClunk(this.container);
+        void this._applyQuickWeatherBeat(presetId).then(() => {
+          this.debouncedSave();
+          this._mirrorWeatherPresetButtons();
+        });
+      });
+      btn.dataset.presetId = presetId;
+      weatherGrid.appendChild(btn);
+      this._weatherPresetButtons.push(btn);
+    }
+    container.appendChild(weatherGrid);
+  }
+
+  /** @private */
+  _mirrorWeatherPresetButtons() {
+    const active = this.controlState?.directedPresetId || '';
+    for (const btn of this._weatherPresetButtons || []) {
+      btn.classList.toggle('is-active', btn.dataset.presetId === active);
+    }
+  }
+
+  /**
+   * @param {'manual'|'directed'|'dynamic'} view
+   * @private
+   */
+  _setWeatherPanelView(view) {
+    this._setWeatherUIMode(view);
+  }
+
+  /** @private */
+  _applyWeatherPanelViewVisibility() {
+    const mode = this._normalizeWeatherUIMode();
+    const isManual = mode === 'manual';
+    const isDirected = mode === 'directed';
+    const isDynamic = mode === 'dynamic';
+
+    if (this._mixerZoneEl) {
+      this._mixerZoneEl.style.display = (isManual || isDynamic) ? '' : 'none';
+    }
+    if (this._weatherDynamicMixerEl) {
+      this._weatherDynamicMixerEl.style.display = isDynamic ? '' : 'none';
+    }
+    if (this._weatherManualViewEl) {
+      this._weatherManualViewEl.style.display = isManual ? '' : 'none';
+    }
+    if (this._weatherStrikeMountEl?.closest('.msa-cp-mixer-manual')) {
+      this._weatherStrikeMountEl.closest('.msa-cp-mixer-manual').style.display = isManual ? '' : 'none';
+    }
+    if (this._shell?.strikeZone) {
+      this._shell.strikeZone.style.display = 'none';
+    }
+    if (this._weatherFingerLeft) {
+      this._weatherFingerLeft.style.display = isDirected ? '' : 'none';
+    }
+    if (this._weatherFingerRight) {
+      this._weatherFingerRight.style.display = isDirected ? '' : 'none';
+    }
+    if (this._weatherDirectorViewEl) {
+      const directorSection = this._weatherDirectorViewEl.closest('.msa-cp-section');
+      if (directorSection) {
+        directorSection.style.display = isDirected ? '' : 'none';
+      }
+    }
+
+    this._applyWeatherStatusStripMode();
+
+    if (this._weatherViewSegment?.mirror) {
+      this._weatherViewSegment.mirror(mode);
+    }
+    this._refreshWeatherFolderTag();
+    this._updateManualFogControlAvailability();
+    this._updateStatusPanel();
   }
 
   /**
@@ -949,8 +1628,9 @@ export class ControlPanelManager {
     this._suppressLiveWeatherDomEvents = true;
     try {
       if (Number.isFinite(value)) {
-        row.range.valueAsNumber = value;
-        row.number.valueAsNumber = value;
+        mirrorFaderRow(this._liveWeatherOverrideDom.rows, paramId, value);
+        if (row.range) row.range.valueAsNumber = value;
+        if (row.number) row.number.valueAsNumber = value;
       }
     } finally {
       this._suppressLiveWeatherDomEvents = false;
@@ -1033,6 +1713,52 @@ export class ControlPanelManager {
   }
 
   /**
+   * @param {number} value
+   * @param {{ save?: boolean }} [opts]
+   * @private
+   */
+  _commitManualAshIntensity(value, opts = {}) {
+    if (this._suppressLiveWeatherDomEvents) return;
+
+    const v = applyAshMasterIntensity(value, { syncMainTweakpane: true });
+    this._mirrorLiveWeatherDomPair('ashIntensity', v);
+
+    if (opts.save) {
+      this._skipNextControlStateSceneFlagPersist = true;
+      this.debouncedSave();
+    }
+  }
+
+  /** Sync Ash slider from WeatherController (safe before DOM build). */
+  syncManualAshDomFromController() {
+    const v = readAshIntensityFromController();
+    this._mirrorLiveWeatherDomPair('ashIntensity', v);
+  }
+
+  /**
+   * Show or hide the Ash master row when ash effects are enabled in the scene stack.
+   */
+  refreshAshMasterRowVisibility() {
+    const dom = this._liveWeatherOverrideDom;
+    const row = dom?.rows?.ashIntensity;
+    const el = row?.faderEl || row?.rowEl;
+    if (!el) return;
+
+    const show = isAnyAshSystemEnabledInScene();
+    el.style.display = show ? '' : 'none';
+    if (row.iconEl) row.iconEl.style.display = show ? '' : 'none';
+    if (dom?.root) {
+      const visibleCount = Object.values(dom.rows).filter(
+        (entry) => entry?.faderEl && entry.faderEl.style.display !== 'none',
+      ).length;
+      dom.root.style.setProperty('--fader-count', String(Math.max(1, visibleCount)));
+    }
+    if (show) {
+      this.syncManualAshDomFromController();
+    }
+  }
+
+  /**
    * Push landscape lightning + manual fog from control state into runtime effects.
    * @private
    */
@@ -1056,14 +1782,11 @@ export class ControlPanelManager {
     if (!row) return;
     const locked = this._isDynamicWeatherDrivingFog();
     const title = locked ? 'Fog — driven by Dynamic Weather' : 'Fog — manual atmospheric haze (Directed mode)';
-    row.range.disabled = locked;
-    row.number.disabled = locked;
-    row.range.title = title;
-    row.number.title = title;
-    if (row.label) {
-      row.label.style.opacity = locked ? '0.45' : '';
-      row.label.title = title;
+    if (row.range) {
+      row.range.disabled = locked;
+      row.range.title = title;
     }
+    if (row.faderEl) row.faderEl.style.opacity = locked ? '0.45' : '';
   }
 
   /**
@@ -1114,7 +1837,7 @@ export class ControlPanelManager {
   }
 
   /**
-   * Push `directedCustomPreset` into the native Live Weather controls (after WC sync / load).
+   * Push `directedCustomPreset` into the native Manual Weather controls (after WC sync / load).
    * Safe to call from `weather-param-bridge`; no-ops if DOM not built yet.
    */
   syncLiveWeatherOverrideDomFromDirectedPreset() {
@@ -1132,14 +1855,14 @@ export class ControlPanelManager {
   }
 
   /**
-   * Build plain-DOM range+number rows under the Live Weather Overrides folder (not Tweakpane `addBinding`).
+   * Build plain-DOM range+number rows for Manual Weather (not Tweakpane `addBinding`).
    * Idempotent; also callable from `tweakpane-manager` after weather registers.
    */
   _wireLiveWeatherOverrideBindingsIfReady() {
     if (this._liveWeatherOverrideDomBuilt) return;
 
-    const folder = this._liveWeatherOverrideFolder;
-    if (!folder) return;
+    const mountEl = this._weatherManualViewEl;
+    if (!mountEl) return;
 
     this._ensureDirectedCustomPreset();
     const preset = this.controlState.directedCustomPreset;
@@ -1148,152 +1871,134 @@ export class ControlPanelManager {
     this._sanitizeDirectedCustomPresetNumbers(preset);
     this._rapidWeatherBindingTarget = preset;
 
-    const contentEl = folder.element.querySelector('.tp-fldv_c') || folder.element;
-    const root = document.createElement('div');
-    root.className = 'map-shine-live-wx';
-    root.dataset.msLiveWx = '1';
+    const specMeta = LIVE_WEATHER_PANEL_SPECS
+      .filter((s) => s.id !== 'windSpeed' && s.id !== 'windDirection')
+      .map((spec) => ({
+        id: spec.id,
+        label: spec.label,
+        min: spec.min,
+        max: spec.max,
+        step: spec.step,
+        manualFog: spec.backend === 'fog',
+        manualLightning: spec.backend === 'lightning',
+      }));
 
-    /** @type {Record<string, { range: HTMLInputElement, number: HTMLInputElement }>} */
-    const rows = {};
+    specMeta.push({
+      id: 'ashIntensity',
+      label: 'Ash',
+      min: 0,
+      max: 1,
+      step: 0.01,
+      manualAsh: true,
+    });
 
-    const specs = LIVE_WEATHER_PANEL_SPECS.map((spec) => ({
-      id: spec.id,
-      label: spec.label,
-      min: spec.min,
-      max: spec.max,
-      step: spec.step,
-      manualFog: spec.backend === 'fog',
-      manualLightning: spec.backend === 'lightning',
-    }));
+    specMeta.push({
+      id: 'gustiness',
+      label: 'Gust',
+      min: 0,
+      max: GUSTINESS_LABELS.length - 1,
+      step: 1,
+      manualGustiness: true,
+    });
 
-    for (const spec of specs) {
-      const rowEl = document.createElement('div');
-      rowEl.className = 'map-shine-live-wx-row';
+    const board = createFaderBoard(mountEl, specMeta, {
+      setContextHint: (text) => this._setContextHint('fader', text),
+      clearContextHint: () => this._clearContextHint('fader'),
+      wireRow: (pid, range) => {
+        const spec = specMeta.find((s) => s.id === pid);
+        if (spec?.manualFog) {
+          range.addEventListener('input', () => {
+            if (this._suppressLiveWeatherDomEvents) return;
+            const v = range.valueAsNumber;
+            if (!Number.isFinite(v)) return;
+            this._handleFadeAwareFaderInput(pid, v, (val) => this._commitManualFogDensity(val, { save: false }));
+          });
+          range.addEventListener('change', () => {
+            if (this._suppressLiveWeatherDomEvents) return;
+            const v = range.valueAsNumber;
+            if (!Number.isFinite(v)) return;
+            this._handleFadeAwareFaderChange(pid, v, (val) => {
+              this._commitManualFogDensity(val, { save: false });
+              this.debouncedSave();
+            });
+          });
+        } else if (spec?.manualLightning) {
+          range.addEventListener('input', () => {
+            if (this._suppressLiveWeatherDomEvents) return;
+            const v = range.valueAsNumber;
+            if (!Number.isFinite(v)) return;
+            this._handleFadeAwareFaderInput(pid, v, (val) => this._commitLiveLightningIntensity(val, { save: false }));
+          });
+          range.addEventListener('change', () => {
+            if (this._suppressLiveWeatherDomEvents) return;
+            const v = range.valueAsNumber;
+            if (!Number.isFinite(v)) return;
+            this._handleFadeAwareFaderChange(pid, v, (val) => {
+              this._commitLiveLightningIntensity(val, { save: false });
+              this.debouncedSave();
+            });
+          });
+        } else if (spec?.manualAsh) {
+          range.addEventListener('input', () => {
+            if (this._suppressLiveWeatherDomEvents) return;
+            const v = range.valueAsNumber;
+            if (!Number.isFinite(v)) return;
+            this._handleFadeAwareFaderInput(pid, v, (val) => this._commitManualAshIntensity(val, { save: false }));
+          });
+          range.addEventListener('change', () => {
+            if (this._suppressLiveWeatherDomEvents) return;
+            const v = range.valueAsNumber;
+            if (!Number.isFinite(v)) return;
+            this._handleFadeAwareFaderChange(pid, v, (val) => {
+              this._commitManualAshIntensity(val, { save: false });
+              this._skipNextControlStateSceneFlagPersist = true;
+              this.debouncedSave();
+            });
+          });
+        } else if (spec?.manualGustiness) {
+          range.addEventListener('input', () => {
+            if (this._suppressLiveWeatherDomEvents) return;
+            const idx = Math.round(range.valueAsNumber);
+            this._handleFadeAwareFaderInput(pid, idx, () => {});
+          });
+          range.addEventListener('change', () => {
+            if (this._suppressLiveWeatherDomEvents) return;
+            const idx = Math.round(range.valueAsNumber);
+            this._handleFadeAwareFaderChange(pid, idx, () => {});
+          });
+        } else {
+          range.addEventListener('input', () => {
+            if (this._suppressLiveWeatherDomEvents) return;
+            const v = range.valueAsNumber;
+            if (!Number.isFinite(v)) return;
+            this._handleFadeAwareFaderInput(pid, v, (val) => this._commitLiveWeatherOverrideScalar(pid, val, { save: false }));
+          });
+          range.addEventListener('change', () => {
+            if (this._suppressLiveWeatherDomEvents) return;
+            const v = range.valueAsNumber;
+            if (!Number.isFinite(v)) return;
+            this._handleFadeAwareFaderChange(pid, v, (val) => {
+              this._commitLiveWeatherOverrideScalar(pid, val, { save: false });
+              this._skipNextControlStateSceneFlagPersist = true;
+              this.debouncedSave();
+            });
+          });
+        }
+      },
+    });
 
-      const lbl = document.createElement('span');
-      lbl.className = 'map-shine-live-wx-lbl';
-      lbl.textContent = spec.label;
-      lbl.title = spec.label;
+    const rows = board.rows;
 
-      const range = document.createElement('input');
-      range.type = 'range';
-      range.min = String(spec.min);
-      range.max = String(spec.max);
-      range.step = String(spec.step);
-      range.setAttribute('aria-label', spec.label);
-
-      const num = document.createElement('input');
-      num.type = 'number';
-      num.className = 'map-shine-live-wx-num';
-      num.min = String(spec.min);
-      num.max = String(spec.max);
-      num.step = String(spec.step);
-      num.setAttribute('aria-label', `${spec.label} value`);
-
-      const pid = spec.id;
-      if (spec.manualFog) {
-        range.addEventListener('input', () => {
-          const v = range.valueAsNumber;
-          if (!Number.isFinite(v)) return;
-          this._commitManualFogDensity(v, { save: false });
-        });
-        range.addEventListener('change', () => {
-          const v = range.valueAsNumber;
-          if (Number.isFinite(v)) this._commitManualFogDensity(v, { save: false });
-          this.debouncedSave();
-        });
-        num.addEventListener('input', () => {
-          const v = parseFloat(num.value);
-          if (!Number.isFinite(v)) return;
-          this._commitManualFogDensity(v, { save: false });
-        });
-        num.addEventListener('change', () => {
-          const v = parseFloat(num.value);
-          if (Number.isFinite(v)) this._commitManualFogDensity(v, { save: false });
-          this.debouncedSave();
-        });
-      } else if (spec.manualLightning) {
-        range.addEventListener('input', () => {
-          const v = range.valueAsNumber;
-          if (!Number.isFinite(v)) return;
-          this._commitLiveLightningIntensity(v, { save: false });
-        });
-        range.addEventListener('change', () => {
-          const v = range.valueAsNumber;
-          if (Number.isFinite(v)) this._commitLiveLightningIntensity(v, { save: false });
-          this.debouncedSave();
-        });
-        num.addEventListener('input', () => {
-          const v = parseFloat(num.value);
-          if (!Number.isFinite(v)) return;
-          this._commitLiveLightningIntensity(v, { save: false });
-        });
-        num.addEventListener('change', () => {
-          const v = parseFloat(num.value);
-          if (Number.isFinite(v)) this._commitLiveLightningIntensity(v, { save: false });
-          this.debouncedSave();
-        });
-      } else {
-        range.addEventListener('input', () => {
-          const v = range.valueAsNumber;
-          if (!Number.isFinite(v)) return;
-          this._commitLiveWeatherOverrideScalar(pid, v, { save: false });
-        });
-        range.addEventListener('change', () => {
-          this._skipNextControlStateSceneFlagPersist = true;
-          this.debouncedSave();
-        });
-
-        num.addEventListener('input', () => {
-          const v = parseFloat(num.value);
-          if (!Number.isFinite(v)) return;
-          this._commitLiveWeatherOverrideScalar(pid, v, { save: false });
-        });
-        num.addEventListener('change', () => {
-          const v = parseFloat(num.value);
-          if (Number.isFinite(v)) {
-            this._commitLiveWeatherOverrideScalar(pid, v, { save: false });
-          }
-          this._skipNextControlStateSceneFlagPersist = true;
-          this.debouncedSave();
-        });
+    const ashRow = rows.ashIntensity;
+    if (ashRow?.faderEl) {
+      ashRow.faderEl.dataset.msAshMaster = '1';
+      ashRow.faderEl.style.display = isAnyAshSystemEnabledInScene() ? '' : 'none';
+      if (ashRow.iconEl) {
+        ashRow.iconEl.style.display = isAnyAshSystemEnabledInScene() ? '' : 'none';
       }
-
-      rowEl.appendChild(lbl);
-      rowEl.appendChild(range);
-      rowEl.appendChild(num);
-      root.appendChild(rowEl);
-
-      rows[pid] = { range, number: num, label: lbl };
     }
 
-    const strikeLabel = document.createElement('div');
-    strikeLabel.className = 'map-shine-live-wx-strike-lbl';
-    strikeLabel.textContent = 'Lightning Strikes';
-    root.appendChild(strikeLabel);
-
-    const strikeGrid = document.createElement('div');
-    strikeGrid.className = 'map-shine-live-wx-strike-grid';
-    strikeGrid.dataset.msLiveWxStrikes = '1';
-
-    const makeStrikeBtn = (label, actionId) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'map-shine-live-wx-strike-btn';
-      btn.textContent = label;
-      btn.addEventListener('click', () => {
-        triggerLandscapeLightningAction(actionId);
-      });
-      return btn;
-    };
-
-    strikeGrid.appendChild(makeStrikeBtn('Small', 'small'));
-    strikeGrid.appendChild(makeStrikeBtn('Big', 'big'));
-    strikeGrid.appendChild(makeStrikeBtn('30s Series', 'series'));
-    root.appendChild(strikeGrid);
-
-    contentEl.appendChild(root);
-    this._liveWeatherOverrideDom = { root, rows, strikeGrid };
+    this._liveWeatherOverrideDom = { root: board.root, rows };
     this._liveWeatherOverrideDomBuilt = true;
 
     try {
@@ -1304,6 +2009,8 @@ export class ControlPanelManager {
     this.syncLiveWeatherOverrideDomFromDirectedPreset();
     this.syncManualFogDomFromControlState();
     this.syncLiveLightningDomFromControlState();
+    this.syncManualAshDomFromController();
+    this.refreshAshMasterRowVisibility();
     syncWeatherLightningEffectFromControlState(this.controlState);
   }
 
@@ -1393,10 +2100,7 @@ export class ControlPanelManager {
 
       this._updateWeatherControls();
       this.syncLiveWeatherOverrideDomFromDirectedPreset();
-      try {
-        this.pane?.refresh?.();
-      } catch (_) {
-      }
+      this._mirrorAllDomFromState();
     } catch (error) {
       log.error('Failed to apply rapid weather overrides:', error);
     } finally {
@@ -1404,107 +2108,44 @@ export class ControlPanelManager {
     }
   }
 
-  _buildStatusPanel() {
-    if (!this.pane?.element) return;
-    if (this.statusPanel) return;
+  _buildStatusPanel(mountEl = null) {
+    if (!mountEl) return null;
+    if (this.statusPanel) return this.statusPanel;
 
-    if (!document.getElementById('map-shine-control-status-style')) {
-      const style = document.createElement('style');
-      style.id = 'map-shine-control-status-style';
-      style.textContent = `
-        @keyframes mapShineIndeterminate {
-          0% { transform: translateX(-60%); }
-          100% { transform: translateX(160%); }
-        }
-        .ms-status-mode-badge {
-          display: inline-flex;
-          align-items: center;
-          padding: 1px 5px;
-          border-radius: 3px;
-          font-size: 8.5px;
-          font-weight: 700;
-          letter-spacing: 0.06em;
-          text-transform: uppercase;
-          white-space: nowrap;
-          flex-shrink: 0;
-        }
-        .ms-status-mode-badge--dynamic {
-          background: rgba(80, 175, 255, 0.18);
-          color: rgba(140, 210, 255, 0.95);
-          border: 1px solid rgba(80, 175, 255, 0.28);
-        }
-        .ms-status-mode-badge--directed {
-          background: rgba(160, 110, 255, 0.18);
-          color: rgba(200, 170, 255, 0.95);
-          border: 1px solid rgba(160, 110, 255, 0.28);
-        }
-        .ms-status-mode-badge--off {
-          background: rgba(255, 255, 255, 0.07);
-          color: rgba(180, 190, 210, 0.75);
-          border: 1px solid rgba(255, 255, 255, 0.10);
-        }
-      `;
-      document.head.appendChild(style);
-    }
-
-    const FF = 'system-ui, -apple-system, "Segoe UI", sans-serif';
-
-    /* Outer panel strip */
     const panel = document.createElement('div');
-    panel.style.padding = '5px 8px 6px';
-    panel.style.background = 'rgba(10, 14, 32, 0.90)';
-    panel.style.borderBottom = '1px solid rgba(60, 110, 255, 0.14)';
-    panel.style.fontFamily = FF;
-    panel.style.fontSize = '10px';
-    panel.style.lineHeight = '1.3';
-    panel.style.color = 'rgba(195, 220, 255, 0.88)';
+    panel.classList.add('map-shine-time-status-panel', 'msa-cp-weather-status-panel');
 
-    /* Top row: mode badge + activity description */
+    /* Top row: mode badge + activity description (director view) */
     const topRow = document.createElement('div');
-    topRow.style.display = 'flex';
-    topRow.style.alignItems = 'center';
-    topRow.style.gap = '6px';
-    topRow.style.minHeight = '16px';
+    topRow.className = 'msa-cp-weather-status__top';
 
     const modeText = document.createElement('span');
     modeText.className = 'ms-status-mode-badge ms-status-mode-badge--off';
 
     const activityText = document.createElement('span');
-    activityText.style.flex = '1';
-    activityText.style.overflow = 'hidden';
-    activityText.style.textOverflow = 'ellipsis';
-    activityText.style.whiteSpace = 'nowrap';
-    activityText.style.fontSize = '9.5px';
-    activityText.style.opacity = '0.78';
+    activityText.className = 'msa-cp-weather-status__activity';
 
     topRow.appendChild(modeText);
     topRow.appendChild(activityText);
     panel.appendChild(topRow);
 
-    /* Stats row: current | target | scope — compact inline */
+    /* Compact single-line readout (manual view) */
+    const compactText = document.createElement('div');
+    compactText.className = 'msa-cp-weather-status__compact';
+    panel.appendChild(compactText);
+
+    /* Stats row: current | target — director view */
     const statsRow = document.createElement('div');
-    statsRow.style.display = 'flex';
-    statsRow.style.gap = '6px';
-    statsRow.style.marginTop = '3px';
-    statsRow.style.fontSize = '9px';
-    statsRow.style.opacity = '0.65';
-    statsRow.style.overflow = 'hidden';
+    statsRow.className = 'msa-cp-weather-status__stats';
 
     const curText = document.createElement('span');
-    curText.style.flex = '1';
-    curText.style.overflow = 'hidden';
-    curText.style.textOverflow = 'ellipsis';
-    curText.style.whiteSpace = 'nowrap';
+    curText.className = 'msa-cp-weather-status__cur';
 
     const tgtText = document.createElement('span');
-    tgtText.style.flex = '1';
-    tgtText.style.overflow = 'hidden';
-    tgtText.style.textOverflow = 'ellipsis';
-    tgtText.style.whiteSpace = 'nowrap';
-    tgtText.style.opacity = '0.80';
+    tgtText.className = 'msa-cp-weather-status__tgt';
 
     const scopeText = document.createElement('span');
-    scopeText.style.display = 'none'; // Hidden — scope tracked internally
+    scopeText.style.display = 'none';
 
     statsRow.appendChild(curText);
     statsRow.appendChild(tgtText);
@@ -1512,15 +2153,10 @@ export class ControlPanelManager {
 
     /* Slim progress bar — hidden when not transitioning */
     const progressWrap = document.createElement('div');
-    progressWrap.style.display = 'none';
-    progressWrap.style.marginTop = '5px';
+    progressWrap.className = 'msa-cp-weather-status__progress';
 
     const progressMeta = document.createElement('div');
-    progressMeta.style.display = 'flex';
-    progressMeta.style.justifyContent = 'space-between';
-    progressMeta.style.marginBottom = '3px';
-    progressMeta.style.fontSize = '8.5px';
-    progressMeta.style.opacity = '0.65';
+    progressMeta.className = 'msa-cp-weather-status__progress-meta';
 
     const progressLabel = document.createElement('span');
     const progressPct = document.createElement('span');
@@ -1528,17 +2164,10 @@ export class ControlPanelManager {
     progressMeta.appendChild(progressPct);
 
     const barOuter = document.createElement('div');
-    barOuter.style.height = '2px';
-    barOuter.style.borderRadius = '999px';
-    barOuter.style.background = 'rgba(255,255,255,0.08)';
-    barOuter.style.overflow = 'hidden';
+    barOuter.className = 'msa-cp-weather-status__bar-outer';
 
     const barInner = document.createElement('div');
-    barInner.style.height = '100%';
-    barInner.style.width = '0%';
-    barInner.style.background = 'linear-gradient(90deg, rgba(55,155,255,0.90), rgba(90,200,250,0.90))';
-    barInner.style.transition = 'width 120ms linear';
-    barInner.style.borderRadius = '999px';
+    barInner.className = 'msa-cp-weather-status__bar-inner';
     barOuter.appendChild(barInner);
 
     progressWrap.appendChild(progressMeta);
@@ -1549,20 +2178,21 @@ export class ControlPanelManager {
     this._statusEls = {
       curText,
       tgtText,
+      compactText,
       modeText,
       activityText,
       scopeText,
       progressLabel,
       progressPct,
       barInner,
-      progressWrap
+      progressWrap,
+      topRow,
+      statsRow,
     };
 
-    // Insert directly under the pane title bar.
-    const root = this.pane.element;
-    root.insertBefore(panel, root.firstChild?.nextSibling ?? root.firstChild);
-
     this._updateStatusPanel();
+    mountEl.appendChild(panel);
+    return panel;
   }
 
   _loadControlPanelUIState() {
@@ -1592,9 +2222,9 @@ export class ControlPanelManager {
         top: null
       };
 
-      if (this._isMinimized && this._minimizedButton) {
-        state.left = this._readPx(this._minimizedButton.style.left);
-        state.top = this._readPx(this._minimizedButton.style.top);
+      if (this._isMinimized && this._minimizedDock) {
+        state.left = this._readPx(this._minimizedDock.style.left);
+        state.top = this._readPx(this._minimizedDock.style.top);
       } else if (this.container) {
         state.left = this._readPx(this.container.style.left);
         state.top = this._readPx(this.container.style.top);
@@ -1617,117 +2247,102 @@ export class ControlPanelManager {
       this.container.style.top = `${top}px`;
     }
 
-    if (state.minimized === true) {
+    if (state.minimized === true && isGmLike()) {
       const x = Number.isFinite(left) ? left : 20;
       const y = Number.isFinite(top) ? top : 20;
-      this._showMinimizedButtonAt(x, y);
+      this._showMinimizedDockAt(x, y);
       this._isMinimized = true;
-      this.container.style.display = 'none';
+      this._setPanelDomVisible(false);
       this.visible = false;
     }
   }
 
-  _createMinimizeControls(parentElement = document.body) {
-    if (!this.container || !this.headerOverlay) return;
+  _createMinimizedDock(parentElement = document.body) {
+    if (this._minimizedDock) return;
 
-    /* ─── In-panel minimize button (top-right of title bar) ─── */
+    const dock = document.createElement('div');
+    dock.className = 'msa-cp__minimized-dock';
+    dock.id = 'map-shine-control-panel-minimized';
+    dock.hidden = true;
+
+    const handle = document.createElement('div');
+    handle.className = 'msa-cp__minimized-handle';
+    handle.title = 'Drag Map Shine Control';
+    handle.setAttribute('aria-label', 'Drag Map Shine Control');
+    handle.innerHTML = '<span class="msa-cp__minimized-grip" aria-hidden="true"></span>';
+
+    const openBtn = document.createElement('button');
+    openBtn.type = 'button';
+    openBtn.className = 'msa-cp__minimized-open';
+    openBtn.textContent = 'Map Shine Control';
+    openBtn.title = 'Open Map Shine Control Panel';
+
+    dock.appendChild(handle);
+    dock.appendChild(openBtn);
+    parentElement.appendChild(dock);
+
+    handle.addEventListener('pointerdown', this._boundHandlers.onMinimizedHandlePointerDown);
+    openBtn.addEventListener('click', this._boundHandlers.onMinimizedOpenClick);
+
+    this._minimizedDock = dock;
+    this._minimizedHandle = handle;
+    this._minimizedOpenBtn = openBtn;
+  }
+
+  _mountMinimizeButton() {
+    const slot = this._shell?.minimizeSlot ?? this._shell?.topBar;
+    if (!slot) return;
+
+    if (this._minimizeButton?.parentElement === slot) return;
+    this._minimizeButton?.remove();
+
     const minimizeButton = document.createElement('button');
     minimizeButton.type = 'button';
+    minimizeButton.className = 'msa-cp__minimize-btn';
     minimizeButton.title = 'Minimize panel';
+    minimizeButton.setAttribute('aria-label', 'Minimize Map Shine Control Panel');
     minimizeButton.textContent = '−';
-    minimizeButton.style.cssText = [
-      'position:absolute',
-      'right:6px',
-      'top:50%',
-      'transform:translateY(-50%)',
-      'width:18px',
-      'height:18px',
-      'border:1px solid rgba(255,255,255,0.16)',
-      'border-radius:4px',
-      'background:rgba(0,0,0,0.30)',
-      'color:rgba(200,225,255,0.85)',
-      'cursor:pointer',
-      'line-height:16px',
-      'padding:0',
-      'font-size:14px',
-      'font-weight:300',
-      'z-index:10002',
-      'transition:background 0.12s,border-color 0.12s,color 0.12s'
-    ].join(';');
-    minimizeButton.addEventListener('mouseenter', () => {
-      minimizeButton.style.background = 'rgba(255,80,80,0.22)';
-      minimizeButton.style.borderColor = 'rgba(255,100,100,0.45)';
-      minimizeButton.style.color = 'rgba(255,200,200,0.95)';
-    });
-    minimizeButton.addEventListener('mouseleave', () => {
-      minimizeButton.style.background = 'rgba(0,0,0,0.30)';
-      minimizeButton.style.borderColor = 'rgba(255,255,255,0.16)';
-      minimizeButton.style.color = 'rgba(200,225,255,0.85)';
-    });
-    minimizeButton.addEventListener('mousedown', (e) => {
-      e.preventDefault();
+    minimizeButton.addEventListener('pointerdown', (e) => {
       e.stopPropagation();
     });
     minimizeButton.addEventListener('click', this._boundHandlers.onMinimizeButtonClick);
-    this.headerOverlay.appendChild(minimizeButton);
+    slot.appendChild(minimizeButton);
     this._minimizeButton = minimizeButton;
-
-    /* ─── Floating restore icon (shown when minimized) ─── */
-    const minimizedButton = document.createElement('button');
-    minimizedButton.type = 'button';
-    minimizedButton.title = 'Open Map Shine Control';
-    minimizedButton.textContent = '🎛️';
-    minimizedButton.style.cssText = [
-      'position:fixed',
-      'left:20px',
-      'top:20px',
-      'width:32px',
-      'height:32px',
-      'border:1px solid rgba(70,130,255,0.35)',
-      'border-radius:999px',
-      'background:rgba(8,11,22,0.88)',
-      'box-shadow:0 4px 16px rgba(0,0,0,0.55),0 0 0 1px rgba(70,130,255,0.18)',
-      'color:rgba(255,255,255,0.95)',
-      'cursor:pointer',
-      'display:none',
-      'z-index:10001',
-      'padding:0',
-      'line-height:1',
-      'font-size:15px',
-      'transition:box-shadow 0.15s,border-color 0.15s,background 0.15s'
-    ].join(';');
-    minimizedButton.addEventListener('mouseenter', () => {
-      minimizedButton.style.background = 'rgba(14,20,50,0.95)';
-      minimizedButton.style.borderColor = 'rgba(90,200,250,0.55)';
-      minimizedButton.style.boxShadow = '0 6px 24px rgba(0,0,0,0.60),0 0 0 1px rgba(90,200,250,0.28)';
-    });
-    minimizedButton.addEventListener('mouseleave', () => {
-      minimizedButton.style.background = 'rgba(8,11,22,0.88)';
-      minimizedButton.style.borderColor = 'rgba(70,130,255,0.35)';
-      minimizedButton.style.boxShadow = '0 4px 16px rgba(0,0,0,0.55),0 0 0 1px rgba(70,130,255,0.18)';
-    });
-    minimizedButton.addEventListener('click', this._boundHandlers.onMinimizedBadgeClick);
-    parentElement.appendChild(minimizedButton);
-    this._minimizedButton = minimizedButton;
   }
 
-  _showMinimizedButtonAt(left, top) {
-    if (!this._minimizedButton) return;
+  _createMinimizeControls(parentElement = document.body) {
+    this._createMinimizedDock(parentElement);
+    this._mountMinimizeButton();
+  }
+
+  _showMinimizedDockAt(left, top) {
+    if (!this._minimizedDock) return;
     const pad = 8;
-    const width = this._minimizedButton.offsetWidth || 28;
-    const height = this._minimizedButton.offsetHeight || 28;
+    this._minimizedDock.hidden = false;
+    const width = this._minimizedDock.offsetWidth || 180;
+    const height = this._minimizedDock.offsetHeight || 36;
     const maxLeft = Math.max(pad, window.innerWidth - (width + pad));
     const maxTop = Math.max(pad, window.innerHeight - (height + pad));
     const x = Math.max(pad, Math.min(maxLeft, Number(left) || pad));
     const y = Math.max(pad, Math.min(maxTop, Number(top) || pad));
-    this._minimizedButton.style.left = `${x}px`;
-    this._minimizedButton.style.top = `${y}px`;
-    this._minimizedButton.style.display = 'block';
+    this._minimizedDock.style.left = `${x}px`;
+    this._minimizedDock.style.top = `${y}px`;
   }
 
-  _hideMinimizedButton() {
-    if (!this._minimizedButton) return;
-    this._minimizedButton.style.display = 'none';
+  _hideMinimizedDock() {
+    if (!this._minimizedDock) return;
+    this._minimizedDock.hidden = true;
+  }
+
+  /** @param {boolean} visible */
+  _setPanelDomVisible(visible) {
+    if (!this.container) return;
+    const show = visible === true;
+    this.container.hidden = !show;
+    this.container.classList.toggle('msa-cp--panel-hidden', !show);
+    if (show) {
+      this.container.style.removeProperty('display');
+    }
   }
 
   _getPanelAnchorPosition() {
@@ -1742,23 +2357,81 @@ export class ControlPanelManager {
   _onMinimizeButtonClick(e) {
     e.preventDefault();
     e.stopPropagation();
-    this._minimizeToIcon();
+    this._minimizeToDock();
   }
 
-  _onMinimizedBadgeClick(e) {
+  _onMinimizedOpenClick(e) {
     e.preventDefault();
     e.stopPropagation();
     this.show();
   }
 
-  _minimizeToIcon() {
+  _onMinimizedHandlePointerDown(e) {
+    if (!this._minimizedDock || e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const rect = this._minimizedDock.getBoundingClientRect();
+    this._isDraggingMinimizedDock = true;
+    this._minimizedDragStart = {
+      mx: e.clientX,
+      my: e.clientY,
+      left: rect.left,
+      top: rect.top
+    };
+
+    try {
+      this._minimizedHandle?.setPointerCapture?.(e.pointerId);
+    } catch (_) {}
+
+    document.addEventListener('pointermove', this._boundHandlers.onMinimizedDockPointerMove, { capture: true });
+    document.addEventListener('pointerup', this._boundHandlers.onMinimizedDockPointerUp, { capture: true });
+    document.addEventListener('pointercancel', this._boundHandlers.onMinimizedDockPointerUp, { capture: true });
+  }
+
+  _onMinimizedDockPointerMove(e) {
+    if (!this._isDraggingMinimizedDock || !this._minimizedDock || !this._minimizedDragStart) return;
+    e.preventDefault();
+
+    const dx = e.clientX - this._minimizedDragStart.mx;
+    const dy = e.clientY - this._minimizedDragStart.my;
+    const pad = 8;
+    const width = this._minimizedDock.offsetWidth || 180;
+    const height = this._minimizedDock.offsetHeight || 36;
+    const maxLeft = Math.max(pad, window.innerWidth - (width + pad));
+    const maxTop = Math.max(pad, window.innerHeight - (height + pad));
+    const left = Math.max(pad, Math.min(maxLeft, this._minimizedDragStart.left + dx));
+    const top = Math.max(pad, Math.min(maxTop, this._minimizedDragStart.top + dy));
+
+    this._minimizedDock.style.left = `${left}px`;
+    this._minimizedDock.style.top = `${top}px`;
+  }
+
+  _onMinimizedDockPointerUp(e) {
+    if (!this._isDraggingMinimizedDock) return;
+
+    this._isDraggingMinimizedDock = false;
+    this._minimizedDragStart = null;
+
+    try {
+      this._minimizedHandle?.releasePointerCapture?.(e.pointerId);
+    } catch (_) {}
+
+    document.removeEventListener('pointermove', this._boundHandlers.onMinimizedDockPointerMove, { capture: true });
+    document.removeEventListener('pointerup', this._boundHandlers.onMinimizedDockPointerUp, { capture: true });
+    document.removeEventListener('pointercancel', this._boundHandlers.onMinimizedDockPointerUp, { capture: true });
+
+    this._saveControlPanelUIState();
+  }
+
+  _minimizeToDock() {
     if (!this.container) return;
 
     const anchor = this._getPanelAnchorPosition();
-    this.container.style.display = 'none';
+    this._setPanelDomVisible(false);
     this.visible = false;
     this._isMinimized = true;
-    this._showMinimizedButtonAt(anchor.left, anchor.top);
+    this._showMinimizedDockAt(anchor.left, anchor.top);
 
     if (this._statusIntervalId) {
       clearInterval(this._statusIntervalId);
@@ -1766,6 +2439,19 @@ export class ControlPanelManager {
     }
 
     this._saveControlPanelUIState();
+  }
+
+  _finalizeGmPanelVisibility() {
+    if (!isGmLike()) return;
+
+    if (this._isMinimized) {
+      const left = this._readPx(this._minimizedDock?.style?.left);
+      const top = this._readPx(this._minimizedDock?.style?.top);
+      this._showMinimizedDockAt(left ?? 20, top ?? 20);
+      return;
+    }
+
+    this.show();
   }
 
   _formatWeatherLine(state) {
@@ -1776,16 +2462,16 @@ export class ControlPanelManager {
       return (Number.isFinite(ws) && ws > 0.01) ? ws * 78 : (Number(state.windSpeedMS) || 0);
     })();
     const freeze = Math.max(0, Math.min(1, Number(state.freezeLevel) || 0));
+    const precipPct = pct(state.precipitation);
     const tempLabel = freeze > 0.75 ? 'Snow' : freeze > 0.45 ? 'Sleet' : 'Rain';
-    /* Short single-line summary for compact status strip */
-    return `${tempLabel} · Rain ${pct(state.precipitation)} · ` +
-           `Clouds ${pct(state.cloudCover)} · Wind ${Math.round(windMS)}m/s`;
+    return `${tempLabel} ${precipPct} · Clouds ${pct(state.cloudCover)} · Wind ${Math.round(windMS)}m/s`;
   }
 
   _updateStatusPanel() {
     const els = this._statusEls;
     if (!els) return;
 
+    const uiMode = this._normalizeWeatherUIMode();
     const wc = coreWeatherController || window.MapShine?.weatherController || window.weatherController;
     const isGM = isGmLike();
     els.scopeText.textContent = isGM ? 'Scene (GM authoritative)' : 'Runtime only';
@@ -1796,6 +2482,7 @@ export class ControlPanelManager {
       els.activityText.textContent = '';
       els.curText.textContent = 'WeatherController not available';
       els.tgtText.textContent = '—';
+      els.compactText.textContent = 'Weather unavailable';
       els.progressWrap.style.display = 'none';
       return;
     }
@@ -1803,6 +2490,7 @@ export class ControlPanelManager {
     this._updateTimeUI(wc);
     this._updateWindUI(wc);
     this._syncTileMotionSpeedFromManager();
+    this._dynamicWeatherDeck?.mirrorInfo?.();
 
     const isEnabled = wc.enabled !== false;
     const isDynamic = wc.dynamicEnabled === true;
@@ -1830,16 +2518,20 @@ export class ControlPanelManager {
     els.modeText.textContent = modeLabel;
 
     if (isEnabled && isDynamic) {
-      const spd = dynamicSpeed !== null ? `, Speed ${Math.round(dynamicSpeed)}x` : '';
-      els.activityText.textContent = `${dynamicPreset}${spd}`;
+      const meta = lookupBiome(dynamicPreset);
+      const spd = dynamicSpeed !== null ? `${Math.round(dynamicSpeed)}× evolution` : '';
+      const traitLine = meta?.traits?.slice(0, 2).join(' · ') || '';
+      els.activityText.textContent = [meta?.blurb || dynamicPreset, traitLine, spd].filter(Boolean).join(' — ');
     } else {
       els.activityText.textContent = '';
     }
 
     const cur = wc.getCurrentState?.() ?? wc.currentState;
     const tgt = wc.targetState;
+    const weatherLine = this._formatWeatherLine(cur);
 
     if (!isEnabled) {
+      els.compactText.textContent = 'Weather disabled';
       els.curText.textContent = 'Weather disabled';
       els.tgtText.textContent = '';
       els.tgtText.style.display = 'none';
@@ -1849,6 +2541,12 @@ export class ControlPanelManager {
       return;
     }
 
+    if (uiMode === 'manual' || uiMode === 'directed') {
+      els.compactText.textContent = weatherLine;
+      return;
+    }
+
+    /* Dynamic mode — expanded info panel */
     if (isTrans) {
       /* Show current → target during active transition */
       els.curText.textContent = this._formatWeatherLine(cur);
@@ -1964,6 +2662,37 @@ export class ControlPanelManager {
   }
 
   _updateWindUI(wc) {
+    if (this._astrolabe) {
+      let state = null;
+      try {
+        state = wc.getCurrentState?.() ?? wc.currentState;
+      } catch (_) {
+        state = wc.currentState;
+      }
+
+      let liveSpeedMS = null;
+      let gustPulse = null;
+      let liveDirectionDeg = null;
+      if (state) {
+        const ms = Number(state?.windSpeedMS);
+        if (Number.isFinite(ms)) {
+          liveSpeedMS = Math.max(0.0, Math.min(78.0, ms));
+        } else {
+          const legacy01 = Number(state?.windSpeed);
+          if (Number.isFinite(legacy01)) liveSpeedMS = Math.max(0.0, Math.min(78.0, legacy01 * 78.0));
+        }
+
+        if (state.windDirection && !this._astrolabeWindDragging) {
+          liveDirectionDeg = this._windAngleDegFromController(wc, state.windDirection);
+        }
+
+        const variability = Number(state?.windVariability ?? state?.variability);
+        if (Number.isFinite(variability)) gustPulse = variability;
+      }
+
+      this._mirrorWindCompassFromState(liveSpeedMS, gustPulse, liveDirectionDeg);
+      return;
+    }
     if (!this._windArrow && !this._windStrengthBarInner && !this._windStrengthText) return;
 
     let state = null;
@@ -2000,20 +2729,299 @@ export class ControlPanelManager {
     }
   }
 
-  async _startTimeOfDayTransition(targetHour, transitionMinutes) {
+  _getCurrentSceneHour() {
     try {
-      const minsNum = typeof transitionMinutes === 'number' ? transitionMinutes : Number(transitionMinutes);
-      const safeMinutes = Number.isFinite(minsNum) ? Math.max(0.1, Math.min(60.0, minsNum)) : 5.0;
+      const wc = coreWeatherController || window.MapShine?.weatherController;
+      const cur = wc?.getCurrentTime?.() ?? wc?.timeOfDay;
+      if (Number.isFinite(Number(cur))) return ((Number(cur) % 24) + 24) % 24;
+    } catch (_) {}
+    const cs = Number(this.controlState?.timeOfDay);
+    return Number.isFinite(cs) ? ((cs % 24) + 24) % 24 : 12;
+  }
 
-      // Do not persist time targets to scene flags here.
-      // In Foundry V14, scene flag writes on the viewed scene can trigger same-scene
-      // redraw paths that surface as full loading transitions.
-      this.controlState.timeOfDay = ((targetHour % 24) + 24) % 24;
+  _getEnvironmentFadeMinutes() {
+    return Number(this.controlState.timeTransitionMinutes) || 0;
+  }
 
-      // Runtime-only time transition; avoid StateApplier's saveToScene controlState write,
-      // but do update local Foundry darkness so darkness-gated lights re-evaluate during the ramp.
-      await stateApplier.startTimeOfDayTransition(this.controlState.timeOfDay, safeMinutes, false, true);
-      this._updateClockTarget(this.controlState.timeOfDay);
+  _isEnvironmentFadeEnabled() {
+    return this._getEnvironmentFadeMinutes() > 0;
+  }
+
+  _ensureEnvironmentFadePreviewStart() {
+    if (this._environmentFadePreviewStartSnap) return;
+    this._environmentFadePreviewStartSnap = environmentControlApi.captureSnapshot();
+    this._environmentFadePreviewStartExtras = fadeExtrasFromControlState(
+      this.controlState,
+      readAshIntensityFromController(),
+    );
+    this._syncFaderLiveValuesFromSnapshot(this._environmentFadePreviewStartSnap);
+  }
+
+  _clearEnvironmentFadePreviewSession() {
+    this._environmentFadePreviewStartSnap = null;
+    this._environmentFadePreviewStartExtras = null;
+    this._pendingWindTarget = null;
+    clearAllFaderPreviews(this._liveWeatherOverrideDom?.rows);
+    this._astrolabe?.clearWindTargetPreview?.();
+  }
+
+  /**
+   * @param {import('./environment-control-api.js').EnvironmentSnapshot} snap
+   * @private
+   */
+  _syncFaderLiveValuesFromSnapshot(snap) {
+    const rows = this._liveWeatherOverrideDom?.rows;
+    if (!rows || !snap) return;
+    const w = snap.weather || {};
+    setFaderLiveValue(rows, 'precipitation', w.precipitation);
+    setFaderLiveValue(rows, 'cloudCover', w.cloudCover);
+    setFaderLiveValue(rows, 'freezeLevel', w.freezeLevel);
+    setFaderLiveValue(rows, 'manualFogDensity', snap.manualFogDensity);
+    setFaderLiveValue(rows, 'lightning', snap.lightning);
+    if (this._environmentFadePreviewStartExtras) {
+      setFaderLiveValue(rows, 'ashIntensity', this._environmentFadePreviewStartExtras.ashIntensity);
+      setFaderLiveValue(rows, 'gustiness', this._environmentFadePreviewStartExtras.gustinessIndex ?? 2);
+    }
+  }
+
+  /**
+   * @param {import('./environment-control-api.js').EnvironmentSnapshot} snap
+   * @param {import('./environment-fade-controller.js').FadeExtras} extras
+   * @private
+   */
+  _syncPanelUiFromFadeSnapshot(snap, extras) {
+    if (!snap) return;
+    this._updateClock(snap.timeOfDay);
+    this._mirrorWindCompassFromState(
+      snap.weather.windSpeed * MAX_WIND_MS_CP,
+      null,
+      snap.weather.windDirection,
+    );
+    if (this._liveWeatherOverrideDom?.rows) {
+      const rows = this._liveWeatherOverrideDom.rows;
+      mirrorFaderRow(rows, 'precipitation', snap.weather.precipitation);
+      mirrorFaderRow(rows, 'cloudCover', snap.weather.cloudCover);
+      mirrorFaderRow(rows, 'freezeLevel', snap.weather.freezeLevel);
+      mirrorFaderRow(rows, 'manualFogDensity', snap.manualFogDensity);
+      mirrorFaderRow(rows, 'lightning', snap.lightning);
+      mirrorFaderRow(rows, 'ashIntensity', extras?.ashIntensity ?? 0);
+      mirrorFaderRow(rows, 'gustiness', Math.round(extras?.gustinessIndex ?? 2));
+    }
+  }
+
+  /**
+   * @param {import('./environment-fade-controller.js').FadeExtras} extras
+   * @param {boolean} last
+   * @private
+   */
+  async _applyFadeExtras(extras, last) {
+    const gust = gustinessFromExtras(extras);
+    if (this.controlState.gustiness !== gust) {
+      this.controlState.gustiness = gust;
+      this._coercePanelWindScalarsInPlace();
+    }
+    try {
+      const wc = resolveWeatherController();
+      const variability = GUSTINESS_TO_VARIABILITY[gust] ?? GUSTINESS_TO_VARIABILITY.moderate;
+      if (typeof wc?.setVariability === 'function') {
+        wc.setVariability(variability);
+      } else if (wc) {
+        wc.variability = Math.max(0, Math.min(1, variability));
+      }
+    } catch (_) {}
+    try {
+      applyAshMasterIntensity(extras.ashIntensity, { syncMainTweakpane: last });
+    } catch (_) {}
+    if (last) {
+      void this._applyWindState();
+    }
+  }
+
+  /**
+   * @param {import('./environment-control-api.js').EnvironmentSnapshot} endSnap
+   * @param {number} [transitionMinutes]
+   * @param {import('./environment-control-api.js').EnvironmentSnapshot} [startSnap]
+   * @param {import('./environment-fade-controller.js').FadeExtras} [startExtras]
+   * @param {import('./environment-fade-controller.js').FadeExtras} [endExtras]
+   * @private
+   */
+  async _startEnvironmentTransition(endSnap, transitionMinutes, startSnap, startExtras, endExtras) {
+    const start = startSnap || this._environmentFadePreviewStartSnap || environmentControlApi.captureSnapshot();
+    const startEx = startExtras || this._environmentFadePreviewStartExtras || fadeExtrasFromControlState(this.controlState);
+    const endEx = endExtras || fadeExtrasFromControlState(this.controlState, startEx.ashIntensity);
+    const mins = Number.isFinite(Number(transitionMinutes))
+      ? Number(transitionMinutes)
+      : this._getEnvironmentFadeMinutes();
+
+    if (stateApplier._timeTransitionIntervalId) {
+      clearInterval(stateApplier._timeTransitionIntervalId);
+      stateApplier._timeTransitionIntervalId = null;
+    }
+
+    this._environmentFadeTransitionActive = true;
+    this._clearEnvironmentFadePreviewSession();
+    this._revealTimeTargetUI();
+    this._updateClockTarget(endSnap.timeOfDay);
+    this._astrolabe?.setWindTargetPreview?.(
+      endSnap.weather.windDirection,
+      endSnap.weather.windSpeed * MAX_WIND_MS_CP,
+    );
+
+    try {
+      await environmentFadeController.start(start, endSnap, startEx, endEx, mins, {
+        onTick: (snap, extras) => {
+          this._syncPanelUiFromFadeSnapshot(snap, extras);
+        },
+        applyExtras: (extras, last) => this._applyFadeExtras(extras, last),
+      });
+
+      this.controlState.timeOfDay = endSnap.timeOfDay;
+      this._ensureDirectedCustomPreset();
+      Object.assign(this.controlState.directedCustomPreset, endSnap.weather);
+      this.controlState.windSpeedMS = endSnap.weather.windSpeed * MAX_WIND_MS_CP;
+      this.controlState.windDirection = endSnap.weather.windDirection;
+      writeManualFogDensityToControlState(this.controlState, endSnap.manualFogDensity);
+      writeLightningIntensityToControlState(this.controlState, endSnap.lightning);
+      this._coercePanelWindScalarsInPlace();
+      this._lastTimeTargetApplied = endSnap.timeOfDay;
+      this._lastTimeTransitionMinutesApplied = mins;
+      this._mirrorAllDomFromState();
+      this._astrolabe?.clearWindTargetPreview?.();
+    } finally {
+      this._environmentFadeTransitionActive = false;
+    }
+  }
+
+  /** @private */
+  async _commitEnvironmentFadeFromControlState() {
+    const endSnap = snapshotFromControlState(this.controlState, MAX_WIND_MS_CP);
+    await this._startEnvironmentTransition(
+      endSnap,
+      this._getEnvironmentFadeMinutes(),
+      this._environmentFadePreviewStartSnap,
+      this._environmentFadePreviewStartExtras,
+      fadeExtrasFromControlState(this.controlState),
+    );
+  }
+
+  /**
+   * @param {string} paramId
+   * @param {number} value
+   * @private
+   */
+  _retargetEnvironmentFadeChannel(paramId, value, resetClock = false) {
+    const mins = this._getEnvironmentFadeMinutes();
+    if (mins <= 0) return;
+    environmentFadeController.retargetChannel(
+      /** @type {import('./environment-fade-controller.js').FadeChannelId} */ (paramId),
+      value,
+      mins,
+      { resetClock },
+    );
+  }
+
+  /**
+   * @param {string} paramId
+   * @param {number} value
+   * @param {(v: number) => void} commitFn
+   * @private
+   */
+  _handleFadeAwareFaderInput(paramId, value, commitFn) {
+    const fadeMins = this._getEnvironmentFadeMinutes();
+
+    if (environmentFadeController.isRunning && fadeMins > 0) {
+      if (paramId === 'gustiness') {
+        this.controlState.gustiness = GUSTINESS_LABELS[Math.round(value)] || 'moderate';
+      } else {
+        commitFn(value);
+      }
+      if (!this._fadeChannelDragActive.has(paramId)) {
+        this._retargetEnvironmentFadeChannel(paramId, value, true);
+        this._fadeChannelDragActive.add(paramId);
+      } else {
+        this._retargetEnvironmentFadeChannel(paramId, value, false);
+      }
+      return;
+    }
+
+    if (!this._isEnvironmentFadeEnabled() || this._environmentFadeTransitionActive) {
+      commitFn(value);
+      return;
+    }
+    this._ensureEnvironmentFadePreviewStart();
+    setFaderPreview(this._liveWeatherOverrideDom?.rows, paramId, value);
+  }
+
+  /**
+   * @param {string} paramId
+   * @param {number} value
+   * @param {(v: number) => void} commitFn
+   * @private
+   */
+  _handleFadeAwareFaderChange(paramId, value, commitFn) {
+    this._fadeChannelDragActive.delete(paramId);
+    const fadeMins = this._getEnvironmentFadeMinutes();
+
+    if (environmentFadeController.isRunning && fadeMins > 0) {
+      if (paramId === 'gustiness') {
+        this.controlState.gustiness = GUSTINESS_LABELS[Math.round(value)] || 'moderate';
+      } else {
+        commitFn(value);
+      }
+      this._retargetEnvironmentFadeChannel(paramId, value, false);
+      this.debouncedSave();
+      return;
+    }
+
+    if (!this._isEnvironmentFadeEnabled() || this._environmentFadeTransitionActive) {
+      commitFn(value);
+      return;
+    }
+    if (paramId !== 'gustiness') {
+      commitFn(value);
+    } else {
+      this.controlState.gustiness = GUSTINESS_LABELS[Math.round(value)] || 'moderate';
+    }
+    void this._commitEnvironmentFadeFromControlState().then(() => this.debouncedSave());
+  }
+
+  /** @private */
+  _updateWindPreviewDuringFade() {
+    const start = this._environmentFadePreviewStartSnap;
+    const pending = this._pendingWindTarget;
+    if (!start || !pending) return;
+    const liveSpeed = start.weather.windSpeed * MAX_WIND_MS_CP;
+    const liveDir = start.weather.windDirection;
+    this._astrolabe?.mirror?.({
+      speedMS: liveSpeed,
+      directionDeg: liveDir,
+      gustiness: this.controlState.gustiness,
+    });
+    this._astrolabe?.setWindTargetPreview?.(
+      Number.isFinite(pending.directionDeg) ? pending.directionDeg : liveDir,
+      Number.isFinite(pending.speedMS) ? pending.speedMS : liveSpeed,
+    );
+  }
+
+  async _startTimeOfDayTransition(targetHour, transitionMinutes, startHour = null) {
+    try {
+      const tgt = ((Number(targetHour) % 24) + 24) % 24;
+      this.controlState.timeOfDay = tgt;
+
+      const startSnap = environmentControlApi.captureSnapshot();
+      if (Number.isFinite(Number(startHour))) {
+        startSnap.timeOfDay = ((Number(startHour) % 24) + 24) % 24;
+      }
+      const endSnap = snapshotFromControlState(this.controlState, MAX_WIND_MS_CP);
+      endSnap.timeOfDay = tgt;
+
+      await this._startEnvironmentTransition(
+        endSnap,
+        transitionMinutes,
+        startSnap,
+        fadeExtrasFromControlState(this.controlState),
+        fadeExtrasFromControlState(this.controlState),
+      );
     } catch (error) {
       log.error('Failed to start time-of-day transition:', error);
       ui.notifications?.error('Failed to start time transition');
@@ -2026,7 +3034,7 @@ export class ControlPanelManager {
    * @returns {Promise<void>}
    */
   async initialize(parentElement = document.body) {
-    if (this.pane) {
+    if (this._shell) {
       log.warn('ControlPanelManager already initialized');
       return;
     }
@@ -2034,96 +3042,45 @@ export class ControlPanelManager {
     const _dlp = debugLoadingProfiler;
     const _isDbg = _dlp.debugMode;
 
-    // Wait for Tweakpane to be available
-    if (_isDbg) _dlp.begin('cp.waitForLib', 'finalize');
-    const startTime = Date.now();
-    while (typeof Tweakpane === 'undefined' && (Date.now() - startTime) < 5000) {
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
-    if (_isDbg) _dlp.end('cp.waitForLib');
-
-    if (typeof Tweakpane === 'undefined') {
-      throw new Error('Tweakpane library not available');
-    }
-
     log.info('Initializing Control Panel...');
 
     this._injectPanelStyles();
 
-    // Create container
     this.container = document.createElement('div');
     this.container.id = 'map-shine-control-panel';
     this.container.style.position = 'fixed';
-    this.container.style.zIndex = '9999'; // Below config panel (10000)
+    this.container.style.zIndex = '9999';
     this.container.style.left = '50%';
     this.container.style.top = '50%';
     this.container.style.transform = 'translate(-50%, -50%)';
-    this.container.style.display = 'none'; // Initially hidden
-    this.container.style.borderRadius = '12px';
-    this.container.style.overflow = 'hidden';
-    this.container.style.width = '292px';
-    this.container.style.maxWidth = '292px';
+    this.container.hidden = true;
+    this.container.classList.add('msa-cp--panel-hidden');
+    this.container.style.width = `${CP_PANEL_WIDTH_PX}px`;
+    this.container.style.maxWidth = `${CP_PANEL_WIDTH_PX}px`;
     parentElement.appendChild(this.container);
 
     {
       const stop = (e) => {
-        try {
-          e.stopPropagation();
-        } catch (_) {
-        }
+        try { e.stopPropagation(); } catch (_) {}
       };
-
       const stopAndPrevent = (e) => {
-        try {
-          e.preventDefault();
-        } catch (_) {
-        }
+        try { e.preventDefault(); } catch (_) {}
         stop(e);
       };
-
-      const events = [
-        'pointerdown',
-        'mousedown',
-        'click',
-        'dblclick',
-        'wheel'
-      ];
-
-      for (const type of events) {
+      for (const type of ['pointerdown', 'mousedown', 'click', 'dblclick', 'wheel']) {
         if (type === 'wheel') this.container.addEventListener(type, stop, { passive: true });
         else this.container.addEventListener(type, stop);
       }
-
       this.container.addEventListener('contextmenu', stopAndPrevent);
     }
 
-    // Create pane
-    this.pane = new Tweakpane.Pane({
-      title: 'Map Shine Control',
-      container: this.container,
-      expanded: true
-    });
-
-    // Create a transparent header overlay for dragging.
-    this.headerOverlay = document.createElement('div');
-    this.headerOverlay.className = 'map-shine-control-header-overlay';
-    this.headerOverlay.style.position = 'absolute';
-    this.headerOverlay.style.top = '0';
-    this.headerOverlay.style.left = '0';
-    this.headerOverlay.style.right = '0';
-    this.headerOverlay.style.height = '24px';
-    this.headerOverlay.style.pointerEvents = 'auto';
-    this.headerOverlay.style.cursor = 'move';
-    this.headerOverlay.style.background = 'transparent';
-    this.headerOverlay.style.zIndex = '10000';
+    this._shell = createControlPanelShell(this.container);
+    this.headerOverlay = this._shell.headChrome;
     this.headerOverlay.addEventListener('mousedown', this._boundHandlers.onHeaderMouseDown);
-    this.container.appendChild(this.headerOverlay);
 
-    this._createMinimizeControls(parentElement);
+    this._createMinimizedDock(parentElement);
 
-    this._buildStatusPanel();
-
-    this._applyControlPanelUIState(this._loadControlPanelUIState());
+    const savedUiState = this._loadControlPanelUIState();
 
     // Load saved control state
     if (_isDbg) _dlp.begin('cp.loadControlState', 'finalize');
@@ -2196,16 +3153,23 @@ export class ControlPanelManager {
     }
 
     this._sanitizeControlStateForTweakpaneBindings();
+    inferWeatherPanelView(this.controlState);
 
     // Build UI sections
     if (_isDbg) _dlp.begin('cp.buildSections', 'finalize');
     this._buildPhaseALayout();
     if (_isDbg) _dlp.end('cp.buildSections');
+    this._applyWeatherPanelViewVisibility();
 
     // Apply initial state
     if (_isDbg) _dlp.begin('cp.applyControlState', 'finalize');
     await this._applyControlState();
     if (_isDbg) _dlp.end('cp.applyControlState');
+
+    try {
+      resolveWeatherController()?._loadDynamicStateFromScene?.();
+      this._dynamicWeatherDeck?.mirror?.();
+    } catch (_) {}
 
     try {
       hydrateControlPanelLiveOverridesFromController(resolveWeatherController());
@@ -2216,6 +3180,22 @@ export class ControlPanelManager {
     void this._applyWindState();
 
     this._registerFoundryTimeHook();
+
+    this._applyControlPanelUIState(savedUiState);
+    this._finalizeGmPanelVisibility();
+
+    // Ash effect UI registers after the panel shell; re-check once effects + scene are ready.
+    queueMicrotask(() => {
+      try {
+        this._wireLiveWeatherOverrideBindingsIfReady();
+        this.refreshAshMasterRowVisibility();
+      } catch (_) {}
+    });
+    setTimeout(() => {
+      try {
+        this.refreshAshMasterRowVisibility();
+      } catch (_) {}
+    }, 500);
 
     log.info('Control Panel initialized');
   }
@@ -2283,10 +3263,7 @@ export class ControlPanelManager {
     this.controlState.directedPresetId = presetId;
 
     this._updateWeatherControls();
-    try {
-      this.pane?.refresh?.();
-    } catch (_) {
-    }
+    this._mirrorAllDomFromState();
 
     await this._startDirectedTransition();
   }
@@ -2365,371 +3342,201 @@ export class ControlPanelManager {
   }
 
   /**
-   * Build the Time of Day section with custom clock
+   * @returns {Array<{ label: string, hour: number, clockHint: string }>}
    * @private
    */
-  _buildTimeSection(parentFolder = this.pane, options = undefined) {
-    const targetFolder = parentFolder || this.pane;
-    const timeFolder = targetFolder.addFolder({
-      title: options?.title ?? '⏰ Time Director',
-      expanded: options?.expanded ?? true
-    });
-    if (options?.registerTopLevel !== false && targetFolder === this.pane) this._registerTopLevelFolder(timeFolder);
-    this._ensureFolderTag(timeFolder, 'time', 'Now');
+  _resolveTodQuickPickAnchors() {
+    return resolveTodQuickPickAnchors(readColorCorrectionParamsFromUi());
+  }
 
+  /**
+   * Combined Time + Wind Astrolabe — fills the remote head.
+   * @param {HTMLElement} mountEl
+   * @private
+   */
+  _buildAstrolabeHero(mountEl) {
     const refreshTimeFolderTag = () => {
       const mins = Number(this.controlState.timeTransitionMinutes) || 0;
       if (this.controlState.linkTimeToFoundry) {
-        this._setFolderTag('time', 'Foundry Lock');
+        this._setFolderTag('time', 'VTT Sync');
       } else if (mins > 0) {
-        this._setFolderTag('time', `${mins.toFixed(1)} min`);
+        this._setFolderTag('time', formatFadeMinutes(mins));
       } else {
         this._setFolderTag('time', 'Now');
       }
     };
+    this._refreshTimeFolderTag = refreshTimeFolderTag;
 
-    this.clockElement = this._createClockDOM();
-
-    /* Two-column layout: clock left, controls right */
-    const twoCol = document.createElement('div');
-    twoCol.style.cssText = 'display:flex;gap:6px;padding:6px 6px 5px;align-items:flex-start;';
-
-    /* Left: clock */
-    const clockWrap = document.createElement('div');
-    clockWrap.style.flexShrink = '0';
-    clockWrap.appendChild(this.clockElement);
-
-    /* Right: controls column */
-    const ctrlWrap = document.createElement('div');
-    ctrlWrap.style.cssText = 'flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;padding-top:1px;';
-
-    /* 2×2 quick-time buttons */
-    const quickTimes = this._getQuickTimeAnchors();
-    const btnGrid = document.createElement('div');
-    btnGrid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:3px;';
-
-    for (const [label, hour] of Object.entries(quickTimes)) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.textContent = label;
-      btn.style.cssText = [
-        'padding:5px 3px',
-        'border-radius:5px',
-        'border:1px solid rgba(255,255,255,0.12)',
-        'background:rgba(255,255,255,0.06)',
-        'color:rgba(210,232,255,0.90)',
-        'cursor:pointer',
-        'font-size:9.5px',
-        'font-weight:600',
-        'font-family:inherit',
-        'transition:background 0.12s,border-color 0.12s'
-      ].join(';');
-      btn.addEventListener('mouseenter', () => {
-        btn.style.background = 'rgba(80,170,255,0.16)';
-        btn.style.borderColor = 'rgba(80,170,255,0.38)';
-      });
-      btn.addEventListener('mouseleave', () => {
-        btn.style.background = 'rgba(255,255,255,0.06)';
-        btn.style.borderColor = 'rgba(255,255,255,0.12)';
-      });
-      btn.addEventListener('click', () => {
-        this._revealTimeTargetUI();
-        const mins = Number(this.controlState.timeTransitionMinutes) || 0;
-        if (mins > 0) {
-          void this._startTimeOfDayTransition(hour, mins).then(() => this._queueTimeOnlySave());
-        } else {
-          void this._setTimeOfDay(hour).then(() => this._queueTimeOnlySave());
-        }
-      });
-      btnGrid.appendChild(btn);
-    }
-    ctrlWrap.appendChild(btnGrid);
-
-    /* Thin separator */
-    const sep = document.createElement('div');
-    sep.style.cssText = 'border-top:1px solid rgba(255,255,255,0.06);margin:1px 0;';
-    ctrlWrap.appendChild(sep);
-
-    /* Transition row: label + number input */
-    const transRow = document.createElement('div');
-    transRow.style.cssText = 'display:flex;align-items:center;gap:4px;font-size:9.5px;color:rgba(155,185,225,0.75);';
-
-    const transLabel = document.createElement('span');
-    transLabel.textContent = 'Transition';
-    transLabel.style.flexShrink = '0';
-
-    const transInput = document.createElement('input');
-    transInput.type = 'number';
-    transInput.min = '0';
-    transInput.max = '60';
-    transInput.step = '0.5';
-    transInput.value = String(this.controlState.timeTransitionMinutes ?? 0);
-    transInput.style.cssText = [
-      'flex:1',
-      'min-width:0',
-      'height:18px',
-      'padding:0 4px',
-      'border:1px solid rgba(255,255,255,0.12)',
-      'border-radius:4px',
-      'background:rgba(255,255,255,0.07)',
-      'color:rgba(220,238,255,0.92)',
-      'font-size:9.5px',
-      'font-family:inherit',
-      'outline:none',
-      'transition:border-color 0.12s,background 0.12s'
-    ].join(';');
-    transInput.addEventListener('change', () => {
-      this.controlState.timeTransitionMinutes = Math.max(0, Math.min(60, Number(transInput.value) || 0));
-      transInput.value = String(this.controlState.timeTransitionMinutes);
-      refreshTimeFolderTag();
-      this.debouncedSave();
-    });
-    transInput.addEventListener('focus', () => {
-      transInput.style.borderColor = 'rgba(90,200,250,0.45)';
-      transInput.style.background = 'rgba(90,200,250,0.10)';
-    });
-    transInput.addEventListener('blur', () => {
-      transInput.style.borderColor = 'rgba(255,255,255,0.12)';
-      transInput.style.background = 'rgba(255,255,255,0.07)';
-    });
-    this._timeTransitionInput = transInput;
-
-    transRow.appendChild(transLabel);
-    transRow.appendChild(transInput);
-    ctrlWrap.appendChild(transRow);
-
-    /* Link-to-Foundry checkbox row */
-    const linkRow = document.createElement('label');
-    linkRow.style.cssText = [
-      'display:flex',
-      'align-items:center',
-      'gap:5px',
-      'cursor:pointer',
-      'font-size:9.5px',
-      'color:rgba(155,185,225,0.75)',
-      'user-select:none'
-    ].join(';');
-    linkRow.title = 'Lock Map Shine time to the Foundry world clock';
-
-    const linkChk = document.createElement('input');
-    linkChk.type = 'checkbox';
-    linkChk.checked = this.controlState.linkTimeToFoundry === true;
-    linkChk.disabled = !(isGmLike());
-    linkChk.style.cssText = 'width:12px;height:12px;cursor:pointer;flex-shrink:0;accent-color:rgba(90,200,250,1);';
-    linkChk.addEventListener('change', (e) => {
-      this.controlState.linkTimeToFoundry = e.target.checked;
-      refreshTimeFolderTag();
-      if (e.target.checked) {
-        void this._syncTimeFromFoundryWorldTime(game?.time?.worldTime, false);
+    const jumpToHour = (hour) => {
+      this._revealTimeTargetUI();
+      this.controlState.timeOfDay = hour;
+      const mins = Number(this.controlState.timeTransitionMinutes) || 0;
+      if (mins > 0) {
+        this._clearEnvironmentFadePreviewSession();
+        void this._startEnvironmentTransition(
+          snapshotFromControlState(this.controlState, MAX_WIND_MS_CP),
+          mins,
+          environmentControlApi.captureSnapshot(),
+          fadeExtrasFromControlState(this.controlState),
+          fadeExtrasFromControlState(this.controlState),
+        ).then(() => this._queueTimeOnlySave());
+      } else {
+        void this._setTimeOfDay(hour).then(() => this._queueTimeOnlySave());
       }
-      this.debouncedSave();
+    };
+
+    this._astrolabe = createAstrolabeDial({
+      faceSize: 280,
+      onTimeStopClick: jumpToHour,
+      maxSpeedMS: MAX_WIND_MS_CP,
+      onContextHint: (text) => {
+        if (text) this._setContextHint('dial', text);
+        else this._clearContextHint('dial');
+      },
+      onWindDragChange: (dragging) => {
+        this._astrolabeWindDragging = dragging === true;
+        if (dragging && this._isEnvironmentFadeEnabled()) {
+          this._ensureEnvironmentFadePreviewStart();
+          this._pendingWindTarget = {};
+        }
+        if (!dragging && this._isEnvironmentFadeEnabled() && this._pendingWindTarget) {
+          if (Number.isFinite(this._pendingWindTarget.speedMS)) {
+            this.controlState.windSpeedMS = this._pendingWindTarget.speedMS;
+          }
+          if (Number.isFinite(this._pendingWindTarget.directionDeg)) {
+            this.controlState.windDirection = this._pendingWindTarget.directionDeg;
+          }
+          void this._commitEnvironmentFadeFromControlState().then(() => this.debouncedSave());
+          this._pendingWindTarget = null;
+        }
+      },
+      onSpeedChange: (ms, last) => {
+        if (this._isEnvironmentFadeEnabled() && this._astrolabeWindDragging) {
+          this._pendingWindTarget = { ...this._pendingWindTarget, speedMS: ms };
+          this._updateWindPreviewDuringFade();
+          return;
+        }
+        this.controlState.windSpeedMS = ms;
+        this._coercePanelWindScalarsInPlace();
+        void this._applyWindState();
+        if (last) this.debouncedSave();
+      },
+      onDirectionChange: (deg, last) => {
+        if (this._isEnvironmentFadeEnabled() && this._astrolabeWindDragging) {
+          this._pendingWindTarget = { ...this._pendingWindTarget, directionDeg: deg };
+          this._updateWindPreviewDuringFade();
+          return;
+        }
+        this.controlState.windDirection = deg;
+        this._coercePanelWindScalarsInPlace();
+        void this._applyWindState();
+        if (last) this.debouncedSave();
+      },
     });
-    this._timeLinkCheckbox = linkChk;
 
-    const linkLabel = document.createElement('span');
-    linkLabel.textContent = 'Foundry Time Lock';
-    linkRow.appendChild(linkChk);
-    linkRow.appendChild(linkLabel);
-    ctrlWrap.appendChild(linkRow);
+    this.clockElement = this._astrolabe.container;
+    this.clockElements = this._astrolabe.elements;
+    updatePhaseRing(this.clockElements.phaseRing, this.controlState.timeOfDay);
 
-    twoCol.appendChild(clockWrap);
-    twoCol.appendChild(ctrlWrap);
+    this.clockElements.face.addEventListener('mousedown', this._boundHandlers.onFaceMouseDown);
+    this.clockElements.face.addEventListener('touchstart', this._boundHandlers.onFaceTouchStart);
+    if (this.clockElements.handHub) {
+      this.clockElements.handHub.addEventListener('mousedown', this._boundHandlers.onFaceMouseDown);
+      this.clockElements.handHub.addEventListener('touchstart', this._boundHandlers.onFaceTouchStart);
+    }
+    if (!this._clockDocListenersAttached) {
+      document.addEventListener('mousemove', this._boundHandlers.onDocMouseMove, { capture: true });
+      document.addEventListener('mouseup', this._boundHandlers.onDocMouseUp, { capture: true });
+      document.addEventListener('touchmove', this._boundHandlers.onDocTouchMove);
+      document.addEventListener('touchend', this._boundHandlers.onDocTouchEnd);
+      this._clockDocListenersAttached = true;
+    }
 
-    const contentElement = timeFolder.element.querySelector('.tp-fldv_c') || timeFolder.element;
-    contentElement.appendChild(twoCol);
-
+    mountEl.appendChild(this._astrolabe.container);
     refreshTimeFolderTag();
-  }
-
-  _updateCustomTimeControls() {
-    if (this._timeTransitionInput) {
-      this._timeTransitionInput.value = String(this.controlState.timeTransitionMinutes ?? 0);
-    }
-    if (this._timeLinkCheckbox) {
-      this._timeLinkCheckbox.checked = this.controlState.linkTimeToFoundry === true;
-    }
+    this._mirrorWindCompassFromState();
+    this._mirrorWeatherPresetButtons();
+    this._updateClock(this.controlState.timeOfDay);
   }
 
   /**
-   * Create custom clock DOM element
-   * @returns {HTMLElement}
+   * @returns {number}
    * @private
    */
-  _createClockDOM() {
-    /* 120px face — all pixel values scaled from the original 180px design (scale ≈ 60/85) */
-    const FACE_SIZE = 120;
-    const CENTER   = 60;  // face center in px
+  _getTimeScalePercent() {
+    const uiRate = window.MapShine?.uiManager?.globalParams?.timeRate;
+    if (Number.isFinite(Number(uiRate))) {
+      return Math.max(0, Math.min(200, Number(uiRate)));
+    }
+    const scale = window.MapShine?.timeManager?.scale;
+    if (Number.isFinite(Number(scale))) {
+      return Math.max(0, Math.min(200, Math.round(Number(scale) * 100)));
+    }
+    return 100;
+  }
 
-    const container = document.createElement('div');
-    container.style.cssText = 'width:120px;position:relative;flex-shrink:0;';
+  /**
+   * @param {number} value
+   * @param {{ persist?: boolean }} [options]
+   * @private
+   */
+  _applyTimeScale(value, options = {}) {
+    const persist = options.persist !== false;
+    const rate = Math.max(0, Math.min(200, Number(value) || 0));
+    if (this._timeScaleParams) this._timeScaleParams.timeRate = rate;
 
-    const face = document.createElement('div');
-    const modulePath = game?.modules?.get?.('map-shine-advanced')?.path;
-    const clockBg = modulePath ? `${modulePath}/assets/clock-face.webp` : null;
-    face.style.cssText = [
-      `width:${FACE_SIZE}px`,
-      `height:${FACE_SIZE}px`,
-      'border:2px solid rgba(60,90,160,0.55)',
-      'border-radius:50%',
-      'position:relative',
-      `background:${clockBg ? `url('${clockBg}') center/cover` : 'rgba(14,20,42,0.85)'}`,
-      'cursor:crosshair',
-      'box-shadow:0 0 10px rgba(0,0,0,0.45),inset 0 0 12px rgba(0,0,0,0.35)'
-    ].join(';');
-
-    /* Hour markers (24-hour, noon at top, midnight at bottom) */
-    const R1_MAJOR = 47, R1_MINOR = 50, R2 = 55;
-    for (let i = 0; i < 24; i++) {
-      const isMajor = i % 6 === 0;
-      const shifted = ((i - 12) % 24 + 24) % 24;
-      const deg = shifted * 15;
-      const angle = (deg - 90) * (Math.PI / 180);
-      const r1 = isMajor ? R1_MAJOR : R1_MINOR;
-      const x1 = CENTER + Math.cos(angle) * r1;
-      const y1 = CENTER + Math.sin(angle) * r1;
-      const marker = document.createElement('div');
-      marker.style.cssText = [
-        'position:absolute',
-        `width:${isMajor ? 2 : 1}px`,
-        `height:${isMajor ? 7 : 4}px`,
-        `background:${isMajor ? 'rgba(180,200,255,0.55)' : 'rgba(100,130,200,0.35)'}`,
-        `left:${x1.toFixed(1)}px`,
-        `top:${y1.toFixed(1)}px`,
-        `transform:rotate(${deg}deg)`,
-        `transform-origin:${isMajor ? '1px 3.5px' : '0.5px 2px'}`
-      ].join(';');
-      face.appendChild(marker);
+    const ui = window.MapShine?.uiManager;
+    if (ui) {
+      ui.globalParams.timeRate = rate;
+      ui.onGlobalChange('timeRate', rate);
+      if (persist) ui.saveUIState();
+    } else if (window.MapShine?.timeManager) {
+      window.MapShine.timeManager.setScale(rate / 100);
     }
 
-    /* Time hand */
-    const hand = document.createElement('div');
-    hand.style.cssText = [
-      'position:absolute',
-      'width:2px',
-      'height:46px',
-      'background:#e74c3c',
-      `left:${CENTER - 1}px`,
-      'top:10px',
-      `transform-origin:1px ${CENTER - 10}px`,
-      'border-radius:2px',
-      'box-shadow:0 0 3px rgba(0,0,0,0.4)',
-      'pointer-events:none'
-    ].join(';');
+    try {
+      this._timeScaleControl?.mirror?.(rate);
+    } catch (_) {}
+  }
 
-    /* Target (ghost) hand — shown when dragging to a target time */
-    const targetHand = document.createElement('div');
-    targetHand.style.cssText = [
-      'position:absolute',
-      'width:2px',
-      'height:46px',
-      'background:rgba(255,255,255,0.30)',
-      `left:${CENTER - 1}px`,
-      'top:10px',
-      `transform-origin:1px ${CENTER - 10}px`,
-      'border-radius:2px',
-      'pointer-events:none',
-      'z-index:1',
-      'display:none'
-    ].join(';');
+  _syncTimeScaleBindingFromUiManager() {
+    if (!this._timeScaleParams) return;
+    this._timeScaleParams.timeRate = this._getTimeScalePercent();
+    try {
+      this._timeScaleControl?.mirror?.(this._timeScaleParams.timeRate);
+    } catch (_) {}
+  }
 
-    /* Center dot */
-    const center = document.createElement('div');
-    center.style.cssText = [
-      'position:absolute',
-      'width:8px',
-      'height:8px',
-      'background:rgba(20,28,60,0.90)',
-      'border:1px solid rgba(90,200,250,0.45)',
-      'border-radius:50%',
-      `left:${CENTER - 4}px`,
-      `top:${CENTER - 4}px`,
-      'z-index:2'
-    ].join(';');
-
-    /* Wind direction arrow (stays on clock as a directional indicator) */
-    const windArrow = document.createElement('div');
-    windArrow.style.cssText = [
-      'position:absolute',
-      'left:50%',
-      'top:50%',
-      'width:2px',
-      'height:22px',
-      'background:rgba(90,200,250,0.75)',
-      'transform-origin:50% 100%',
-      'pointer-events:none',
-      'z-index:3',
-      'transform:translate(-50%,0%) rotate(0deg)'
-    ].join(';');
-
-    const windArrowHead = document.createElement('div');
-    windArrowHead.style.cssText = [
-      'position:absolute',
-      'left:50%',
-      'top:0',
-      'transform:translate(-50%,-50%)',
-      'width:0',
-      'height:0',
-      'border-left:4px solid transparent',
-      'border-right:4px solid transparent',
-      'border-bottom:7px solid rgba(90,200,250,0.80)'
-    ].join(';');
-    windArrow.appendChild(windArrowHead);
-
-    /* Digital time (below face) */
-    const digital = document.createElement('div');
-    digital.style.cssText = [
-      'text-align:center',
-      'font-family:monospace',
-      'font-size:10px',
-      'font-weight:700',
-      'color:rgba(215,235,255,0.88)',
-      'margin-top:4px',
-      'letter-spacing:0.05em'
-    ].join(';');
-
-    face.appendChild(hand);
-    face.appendChild(targetHand);
-    face.appendChild(center);
-    face.appendChild(windArrow);
-    container.appendChild(face);
-    container.appendChild(digital);
-
-    /* Store references (wind strength bar removed — wind is now in Live Weather Overrides) */
-    this.clockElements = { hand, targetHand, digital, face };
-    this._windArrow = windArrow;
-    this._windStrengthBarInner = null;  // moved to Live Weather Overrides
-    this._windStrengthText = null;      // moved to Live Weather Overrides
-
-    /* Mouse events for dragging */
-    face.addEventListener('mousedown', this._boundHandlers.onFaceMouseDown);
-    document.addEventListener('mousemove', this._boundHandlers.onDocMouseMove, { capture: true });
-    document.addEventListener('mouseup', this._boundHandlers.onDocMouseUp, { capture: true });
-
-    /* Touch events */
-    face.addEventListener('touchstart', this._boundHandlers.onFaceTouchStart);
-    document.addEventListener('touchmove', this._boundHandlers.onDocTouchMove);
-    document.addEventListener('touchend', this._boundHandlers.onDocTouchEnd);
-
-    return container;
+  _updateCustomTimeControls() {
+    if (this._timeTransitionStepper?.mirror) {
+      this._timeTransitionStepper.mirror(Number(this.controlState.timeTransitionMinutes) || 0);
+    }
+    if (this._foundryLockBtn) {
+      const locked = this.controlState.linkTimeToFoundry === true;
+      this._foundryLockBtn.classList.toggle('is-locked', locked);
+      this._foundryLockBtn.textContent = locked ? '🔒 Synced to Foundry VTT' : '🔓 Sync Foundry VTT Time';
+      this._foundryLockBtn.disabled = !(isGmLike());
+    }
   }
 
   _revealTimeTargetUI() {
     if (this._didRevealTimeTarget) return;
     this._didRevealTimeTarget = true;
-    if (this.clockElements?.targetHand) {
-      this.clockElements.targetHand.style.display = '';
+    if (this.clockElements?.targetHandHub) {
+      this.clockElements.targetHandHub.style.display = '';
     }
   }
 
   _updateClockTarget(hour) {
-    if (!this.clockElements.targetHand) return;
+    const hub = this.clockElements?.targetHandHub || this.clockElements?.targetHand;
+    if (!hub) return;
 
     // Only show the ghost hand after the first user-driven target interaction.
     if (!this._didRevealTimeTarget) return;
 
     const shifted = ((hour - 12) % 24 + 24) % 24;
     const angle = (shifted / 24) * 360;
-    this.clockElements.targetHand.style.transform = `rotate(${angle}deg)`;
+    hub.style.transform = `rotate(${angle}deg)`;
   }
 
   /**
@@ -2738,18 +3545,40 @@ export class ControlPanelManager {
    * @private
    */
   _updateClock(hour) {
-    if (!this.clockElements.hand) return;
+    const handHub = this.clockElements?.handHub || this.clockElements?.hand;
+    if (!handHub) return;
 
-    // 24h angle with noon at top, midnight at bottom.
     const shifted = ((hour - 12) % 24 + 24) % 24;
     const angle = (shifted / 24) * 360;
-    this.clockElements.hand.style.transform = `rotate(${angle}deg)`;
+    handHub.style.transform = `rotate(${angle}deg)`;
 
-    // Update digital display
     const displayHour = Math.floor(hour);
     const displayMinute = Math.floor((hour % 1) * 60);
-    this.clockElements.digital.textContent = 
-      `${displayHour.toString().padStart(2, '0')}:${displayMinute.toString().padStart(2, '0')}`;
+    const timeText = `${displayHour.toString().padStart(2, '0')}:${displayMinute.toString().padStart(2, '0')}`;
+    if (this.clockElements.digital) {
+      this.clockElements.digital.textContent = timeText;
+    }
+    if (this._astrolabe?.setDigitalTime) {
+      this._astrolabe.setDigitalTime(timeText);
+    }
+    if (this._astrolabe?.updateTimeVisuals) {
+      this._astrolabe.updateTimeVisuals(hour);
+    } else if (this.clockElements.phaseRing) {
+      updatePhaseRing(this.clockElements.phaseRing, hour);
+    }
+  }
+
+  _isAstrolabeNonTimeTarget(e) {
+    if (e.target?.closest?.('.msa-cp-astrolabe__wind-disc, .msa-cp-astrolabe__wind-arrow-wrap, .msa-cp-astrolabe__time-stop, .msa-cp-astrolabe__weather-btn, .msa-cp-astrolabe__time-pill')) {
+      return true;
+    }
+    const x = e.clientX ?? e.touches?.[0]?.clientX;
+    const y = e.clientY ?? e.touches?.[0]?.clientY;
+    if (Number.isFinite(x) && Number.isFinite(y) && this._astrolabe?.hitTestWindSock?.(x, y)) {
+      this._astrolabe.beginWindPointerAt?.(x, y);
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -2758,8 +3587,18 @@ export class ControlPanelManager {
    * @private
    */
   _onClockMouseDown(e) {
+    if (this._astrolabeWindDragging) return;
+    if (this._isAstrolabeNonTimeTarget(e)) {
+      return;
+    }
     e.preventDefault();
+    e.stopPropagation();
     this.isDraggingClock = true;
+    this._isDraggingPanel = false;
+    this._dragTimeStartHour = this._getCurrentSceneHour();
+    if (this._isEnvironmentFadeEnabled()) {
+      this._ensureEnvironmentFadePreviewStart();
+    }
     this._revealTimeTargetUI();
     this._updateTimeFromMouse(e);
   }
@@ -2771,6 +3610,8 @@ export class ControlPanelManager {
    */
   _onClockMouseMove(e) {
     if (!this.isDraggingClock) return;
+    e.preventDefault();
+    e.stopPropagation();
     this._updateTimeFromMouse(e);
   }
 
@@ -2781,18 +3622,22 @@ export class ControlPanelManager {
   _onClockMouseUp() {
     if (this.isDraggingClock) {
       this.isDraggingClock = false;
+      this._clearContextHint('time-drag');
 
       const target = this._dragTimeTarget;
       this._dragTimeTarget = null;
 
       if (typeof target === 'number' && Number.isFinite(target)) {
+        this.controlState.timeOfDay = target;
         const mins = Number(this.controlState.timeTransitionMinutes) || 0;
+        this._dragTimeStartHour = null;
         if (mins > 0) {
-          void this._startTimeOfDayTransition(target, mins).then(() => this._queueTimeOnlySave());
+          void this._commitEnvironmentFadeFromControlState().then(() => this._queueTimeOnlySave());
         } else {
           void this._setTimeOfDay(target).then(() => this._queueTimeOnlySave());
         }
       } else {
+        this._dragTimeStartHour = null;
         this._queueTimeOnlySave();
       }
     }
@@ -2804,8 +3649,17 @@ export class ControlPanelManager {
    * @private
    */
   _onClockTouchStart(e) {
+    if (this._isAstrolabeNonTimeTarget(e)) {
+      return;
+    }
     e.preventDefault();
+    e.stopPropagation();
     this.isDraggingClock = true;
+    this._isDraggingPanel = false;
+    this._dragTimeStartHour = this._getCurrentSceneHour();
+    if (this._isEnvironmentFadeEnabled()) {
+      this._ensureEnvironmentFadePreviewStart();
+    }
     this._revealTimeTargetUI();
     const touch = e.touches[0];
     this._updateTimeFromMouse(touch);
@@ -2843,26 +3697,51 @@ export class ControlPanelManager {
     
     // Convert angle to 24h time with noon at top.
     const hour24 = (((angle / 360) * 24) + 12) % 24;
+    const fadeMins = Number(this.controlState.timeTransitionMinutes) || 0;
 
-    // During drag we only preview the target.
     this._dragTimeTarget = hour24;
+
+    const displayHour = Math.floor(hour24);
+    const displayMinute = Math.floor((hour24 % 1) * 60);
+    const timeText = `${displayHour.toString().padStart(2, '0')}:${displayMinute.toString().padStart(2, '0')}`;
+
+    if (fadeMins > 0) {
+      this._updateClockTarget(hour24);
+      if (this.clockElements.digital) {
+        this.clockElements.digital.textContent = timeText;
+      }
+      if (this._astrolabe?.setDigitalTime) {
+        this._astrolabe.setDigitalTime(timeText);
+      }
+      if (this._astrolabe?.formatTimeRingHint) {
+        this._setContextHint('time-drag', this._astrolabe.formatTimeRingHint(hour24, true));
+      }
+      return;
+    }
+
     this.controlState.timeOfDay = hour24;
     try {
       const wc = coreWeatherController || window.MapShine?.weatherController;
       wc?.setTime?.(hour24);
     } catch (_) {}
     this._updateClockTarget(hour24);
-
-    // Provide immediate feedback while dragging.
-    const displayHour = Math.floor(hour24);
-    const displayMinute = Math.floor((hour24 % 1) * 60);
     if (this.clockElements.digital) {
-      this.clockElements.digital.textContent = `${displayHour.toString().padStart(2, '0')}:${displayMinute.toString().padStart(2, '0')}`;
+      this.clockElements.digital.textContent = timeText;
+    }
+    if (this._astrolabe?.formatTimeRingHint) {
+      this._setContextHint('time-drag', this._astrolabe.formatTimeRingHint(hour24, true));
     }
   }
 
   _onHeaderMouseDown(e) {
     if (!this.container) return;
+    if (this.isDraggingClock) return;
+    if (e.target?.closest?.('.msa-cp__minimize-btn, button, input, select, .msa-cp-segmented, .msa-cp-segmented__btn')) {
+      return;
+    }
+    if (e.target?.closest?.('.msa-cp-dial-stage, .msa-cp-astrolabe, .msa-cp-weather-finger, .msa-cp__zone--dial')) {
+      return;
+    }
     e.preventDefault();
     e.stopPropagation();
 
@@ -2884,6 +3763,7 @@ export class ControlPanelManager {
   }
 
   _onHeaderMouseMove(e) {
+    if (this.isDraggingClock) return;
     if (!this._isDraggingPanel || !this.container || !this._dragStart) return;
     e.preventDefault();
 
@@ -2934,310 +3814,101 @@ export class ControlPanelManager {
   }
 
   /**
-   * Build the Weather section
+   * Build Weather Director controls inside the unified Weather folder.
+   * @param {import('@tweakpane/core').FolderApi} parentFolder
    * @private
    */
-  _buildWeatherSection(parentFolder = this.pane, options = undefined) {
-    const targetFolder = parentFolder || this.pane;
-    const weatherFolder = targetFolder.addFolder({
-      title: options?.title ?? '🌦️ Weather Director',
-      expanded: options?.expanded ?? false
-    });
-    if (options?.registerTopLevel !== false && targetFolder === this.pane) this._registerTopLevelFolder(weatherFolder);
-    this._ensureFolderTag(weatherFolder, 'weather', 'Directed');
+  _buildWeatherDirectorContents(mountEl) {
+    this._weatherModeSegment = createSegmentedControl(
+      { Dynamic: 'dynamic', Directed: 'directed' },
+      this.controlState.weatherMode || 'dynamic',
+      (v) => {
+        this._setWeatherUIMode(v === 'dynamic' ? 'dynamic' : 'directed');
+      },
+    );
+    mountEl.appendChild(this._weatherModeSegment.wrap);
 
-    weatherFolder.on('fold', (ev) => {
-      // Keep state explicit if we later persist control-panel accordions.
-      this._weatherFolderExpanded = !!ev.expanded;
-    });
+    this._weatherDynamicEl = document.createElement('div');
+    this._weatherDynamicEl.className = 'msa-cp-director-dynamic';
+    mountEl.appendChild(this._weatherDynamicEl);
+    this.dynamicControls = this._buildDynamicControls(this._weatherDynamicEl);
 
-    // Weather mode selector
-    weatherFolder.addBinding(this.controlState, 'weatherMode', {
-      label: 'Mode',
-      options: {
-        'Dynamic': 'dynamic',
-        'Directed': 'directed'
-      }
-    }).on('change', (ev) => {
-      this.controlState.weatherMode = ev.value;
+    this._weatherDirectedEl = document.createElement('div');
+    this._weatherDirectedEl.className = 'msa-cp-director-directed';
+    mountEl.appendChild(this._weatherDirectedEl);
+    this.directedControls = this._buildDirectedControls(this._weatherDirectedEl);
 
-      // Make the mode toggle persist correctly across refresh by ensuring
-      // the underlying dynamicEnabled flag matches the selected mode.
-      // If the user picks Dynamic, dynamic weather should be enabled.
-      // If the user picks Directed, dynamic weather should be disabled.
-      if (ev.value === 'dynamic') {
-        this.controlState.dynamicEnabled = true;
-      } else {
-        this.controlState.dynamicEnabled = false;
-      }
-
-      this._updateWeatherControls();
-      void this._applyControlState();
-      this.debouncedSave();
-    });
-
-    this._weatherDynamicFolder = weatherFolder.addFolder({
-      title: 'Dynamic Mode',
-      expanded: this.controlState.weatherMode === 'dynamic'
-    });
-    this.dynamicControls = this._buildDynamicControls(this._weatherDynamicFolder);
-
-    this._weatherDirectedFolder = weatherFolder.addFolder({
-      title: 'Directed Mode',
-      expanded: this.controlState.weatherMode === 'directed'
-    });
-    this.directedControls = this._buildDirectedControls(this._weatherDirectedFolder);
-
-    // Show/hide appropriate controls based on current mode
     this._updateWeatherControls();
   }
 
-  /**
-   * Build dynamic weather controls
-   * @param {Tweakpane.Folder} parentFolder
-   * @returns {Object} Control references
-   * @private
-   */
-  _buildDynamicControls(parentFolder) {
-    const controls = {};
-
-    controls.enabled = parentFolder.addBinding(this.controlState, 'dynamicEnabled', {
-      label: 'Dynamic Weather'
-    }).on('change', (ev) => {
-      void this._applyControlState();
-      if (ev?.last) this.debouncedSave();
-    });
-
-    controls.preset = parentFolder.addBinding(this.controlState, 'dynamicPresetId', {
-      label: 'Biome',
-      options: {
-        'Temperate Plains': 'Temperate Plains',
-        'Desert': 'Desert',
-        'Tropical Jungle': 'Tropical Jungle',
-        'Tundra': 'Tundra',
-        'Arctic Blizzard': 'Arctic Blizzard'
-      }
-    }).on('change', (ev) => {
-      void this._applyControlState();
-      if (ev?.last) this.debouncedSave();
-    });
-
-    controls.speed = parentFolder.addBinding(this.controlState, 'dynamicEvolutionSpeed', {
-      label: 'Speed (x)',
-      min: 0,
-      max: 600,
-      step: 1
-    }).on('change', (ev) => {
-      void this._applyControlState();
-      if (ev?.last) this.debouncedSave();
-    });
-
-    controls.paused = parentFolder.addBinding(this.controlState, 'dynamicPaused', {
-      label: 'Pause Evolution'
-    }).on('change', (ev) => {
-      void this._applyControlState();
-      if (ev?.last) this.debouncedSave();
-    });
-
-    return controls;
+  _buildDynamicControls(mountEl) {
+    const note = document.createElement('p');
+    note.className = 'msa-cp-director-dynamic__note';
+    note.textContent = 'Dynamic environment controls live in the main panel when Dynamic mode is selected.';
+    mountEl.appendChild(note);
+    return { note: { row: note, mirror: () => {} } };
   }
 
-  /**
-   * Build directed weather controls
-   * @param {Tweakpane.Folder} parentFolder
-   * @returns {Object} Control references
-   * @private
-   */
-  _buildDirectedControls(parentFolder) {
+  _buildDirectedControls(mountEl) {
     const controls = {};
-
-    controls.preset = parentFolder.addBinding(this.controlState, 'directedPresetId', {
+    const preset = createNativeControl({
+      type: 'select',
       label: 'Weather',
+      target: this.controlState,
+      key: 'directedPresetId',
       options: {
-        'Custom': 'Custom',
+        Custom: 'Custom',
         'Clear (Dry)': 'Clear (Dry)',
         'Clear (Breezy)': 'Clear (Breezy)',
         'Partly Cloudy': 'Partly Cloudy',
         'Overcast (Light)': 'Overcast (Light)',
         'Overcast (Heavy)': 'Overcast (Heavy)',
-        'Mist': 'Mist',
+        Mist: 'Mist',
         'Fog (Dense)': 'Fog (Dense)',
-        'Drizzle': 'Drizzle',
+        Drizzle: 'Drizzle',
         'Light Rain': 'Light Rain',
-        'Rain': 'Rain',
+        Rain: 'Rain',
         'Heavy Rain': 'Heavy Rain',
-        'Thunderstorm': 'Thunderstorm',
+        Thunderstorm: 'Thunderstorm',
         'Snow Flurries': 'Snow Flurries',
-        'Snow': 'Snow',
-        'Blizzard': 'Blizzard'
-      }
-    }).on('change', (ev) => {
-      if (ev?.last) this.debouncedSave();
+        Snow: 'Snow',
+        Blizzard: 'Blizzard',
+      },
+      onChange: () => this.debouncedSave(),
     });
+    mountEl.appendChild(preset.row);
+    controls.preset = preset;
 
-    controls.transition = parentFolder.addBinding(this.controlState, 'directedTransitionMinutes', {
+    const transition = createNativeControl({
+      type: 'number',
       label: 'Transition (min)',
+      target: this.controlState,
+      key: 'directedTransitionMinutes',
       min: 0.1,
       max: 60,
-      step: 0.1
-    }).on('change', (ev) => {
-      if (ev?.last) this.debouncedSave();
+      step: 0.1,
+      onChange: () => this.debouncedSave(),
     });
+    mountEl.appendChild(transition.row);
+    controls.transition = transition;
 
-    const buttonGroup = parentFolder.addButton({
-      title: 'Start Transition'
-    }).on('click', () => {
+    mountEl.appendChild(createCpButton('Start Transition', () => {
       void this._startDirectedTransition().then(() => this.debouncedSave());
-    });
-
-    controls.startButton = buttonGroup;
-
+    }));
     return controls;
   }
 
-  /**
-   * Build wind controls
-   * @param {Tweakpane.Folder} parentFolder
-   * @returns {Object} Control references
-   * @private
-   */
-  _buildWindControls(parentFolder, options = undefined) {
-    const includeGustiness = options?.includeGustiness !== false;
-    const controls = {};
-
-    controls.speed = parentFolder.addBinding(this.controlState, 'windSpeedMS', {
-      label: 'Wind Speed (m/s)',
-      min: 0.0,
-      max: 78.0,
-      step: 0.5
-    }).on('change', (ev) => {
-      this._coercePanelWindScalarsInPlace();
-      void this._applyWindState();
-      if (ev?.last) this.debouncedSave();
-    });
-
-    controls.direction = parentFolder.addBinding(this.controlState, 'windDirection', {
-      label: 'Direction (°)',
-      min: 0,
-      max: 360,
-      step: 5
-    }).on('change', (ev) => {
-      this._coercePanelWindScalarsInPlace();
-      void this._applyWindState();
-      if (ev?.last) this.debouncedSave();
-    });
-
-    if (includeGustiness) {
-      controls.gustiness = parentFolder.addBinding(this.controlState, 'gustiness', {
-        label: 'Gustiness',
-        options: {
-          'Calm': 'calm',
-          'Light': 'light',
-          'Moderate': 'moderate',
-          'Strong': 'strong',
-          'Extreme': 'extreme'
-        }
-      }).on('change', (ev) => {
-        this._coercePanelWindScalarsInPlace();
-        void this._applyWindState();
-        if (ev?.last) this.debouncedSave();
-      });
-    }
-
-    return controls;
-  }
-
-  _buildWindSection(parentFolder = this.pane, options = undefined) {
-    const targetFolder = parentFolder || this.pane;
-    const windFolder = targetFolder.addFolder({
-      title: options?.title ?? '💨 Wind',
-      expanded: options?.expanded ?? false
-    });
-    if (options?.registerTopLevel !== false && targetFolder === this.pane) this._registerTopLevelFolder(windFolder);
-    const initialWindMs = Number(this.controlState.windSpeedMS) || 0;
-    const initialPct = `${Math.round(Math.max(0, Math.min(1, initialWindMs / 78.0)) * 100)}%`;
-    this._ensureFolderTag(windFolder, 'wind', initialPct);
-
-    const quickWindFolder = windFolder.addFolder({
-      title: 'Quick Wind',
-      expanded: true
-    });
-
-    this.windControls = this._buildWindControls(quickWindFolder, { includeGustiness: false });
-
-    quickWindFolder.addBlade({ view: 'separator' });
-
-    const beats = {
-      Calm: { speedMS: 4.0, gustiness: 'calm' },
-      Breezy: { speedMS: 14.0, gustiness: 'light' },
-      Windy: { speedMS: 28.0, gustiness: 'strong' },
-      Storm: { speedMS: 50.0, gustiness: 'extreme' }
-    };
-
-    const contentElement = quickWindFolder.element.querySelector('.tp-fldv_c') || quickWindFolder.element;
-    const grid = document.createElement('div');
-    grid.style.display = 'grid';
-    grid.style.gridTemplateColumns = '1fr 1fr';
-    grid.style.gap = '6px';
-    grid.style.marginTop = '6px';
-
-    for (const [label, cfg] of Object.entries(beats)) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.textContent = label;
-      btn.style.padding = '6px 8px';
-      btn.style.borderRadius = '6px';
-      btn.style.border = '1px solid rgba(255,255,255,0.15)';
-      btn.style.background = 'rgba(255,255,255,0.06)';
-      btn.style.color = 'inherit';
-      btn.style.cursor = 'pointer';
-      btn.addEventListener('click', () => {
-        this.controlState.windSpeedMS = cfg.speedMS;
-        this.controlState.gustiness = cfg.gustiness;
-        this._coercePanelWindScalarsInPlace();
-        try {
-          this.pane?.refresh?.();
-        } catch (_) {
-        }
-        void this._applyWindState();
-        this.debouncedSave();
-      });
-      grid.appendChild(btn);
-    }
-    contentElement.appendChild(grid);
-
-    const advancedFolder = windFolder.addFolder({
-      title: 'Advanced Wind',
-      expanded: false
-    });
-
-    this._windGustinessBinding = advancedFolder.addBinding(this.controlState, 'gustiness', {
-      label: 'Gustiness',
-      options: {
-        'Calm': 'calm',
-        'Light': 'light',
-        'Moderate': 'moderate',
-        'Strong': 'strong',
-        'Extreme': 'extreme'
-      }
-    }).on('change', (ev) => {
-      this._coercePanelWindScalarsInPlace();
-      void this._applyWindState();
-      if (ev?.last) this.debouncedSave();
-    });
-  }
-
-  /**
-   * Update visibility of weather controls based on mode
-   * @private
-   */
   _updateWeatherControls() {
     const isDynamic = this.controlState.weatherMode === 'dynamic';
-
-    // Keep mode sections explicit in the hierarchy, auto-expanding the active mode
-    // so the GM always lands on the relevant controls during live play.
-    if (this._weatherDynamicFolder) this._weatherDynamicFolder.expanded = isDynamic;
-    if (this._weatherDirectedFolder) this._weatherDirectedFolder.expanded = !isDynamic;
+    if (this._weatherDynamicEl) this._weatherDynamicEl.hidden = !isDynamic;
+    if (this._weatherDirectedEl) this._weatherDirectedEl.hidden = isDynamic;
+    if (this._weatherModeSegment?.wrap) {
+      this._weatherModeSegment.wrap.hidden = true;
+    }
+    if (this._weatherModeSegment?.mirror) {
+      this._weatherModeSegment.mirror(isDynamic ? 'dynamic' : 'directed');
+    }
+    this._dynamicWeatherDeck?.mirror?.();
     this._refreshWeatherFolderTag();
     this._updateManualFogControlAvailability();
   }
@@ -3300,6 +3971,20 @@ export class ControlPanelManager {
     contentElement.appendChild(grid);
   }
 
+  _updateTileMotionStripTag(speedPercent, opts = {}) {
+    if (!this._tileMotionStripTag) return;
+    const clamped = Math.max(0, Math.min(400, Number(speedPercent) || 0));
+    const playing = opts.playing;
+    const paused = opts.paused;
+    if (playing === false) {
+      this._tileMotionStripTag.textContent = 'Stopped';
+    } else if (paused === true) {
+      this._tileMotionStripTag.textContent = `Paused ${Math.round(clamped)}%`;
+    } else {
+      this._tileMotionStripTag.textContent = `${Math.round(clamped)}%`;
+    }
+  }
+
   _syncTileMotionSpeedFromManager() {
     try {
       const mgr = window.MapShine?.tileMotionManager;
@@ -3317,9 +4002,7 @@ export class ControlPanelManager {
         if (Math.abs((this.controlState.tileMotionSpeedPercent ?? 100) - clamped) >= 0.001) {
           this.controlState.tileMotionSpeedPercent = clamped;
         }
-        if (!playing) this._setFolderTag('tileMotion', 'Stopped');
-        else if (paused) this._setFolderTag('tileMotion', `Paused ${Math.round(clamped)}%`);
-        else this._setFolderTag('tileMotion', `${Math.round(clamped)}%`);
+        this._updateTileMotionStripTag(clamped, { playing, paused });
       }
 
       if ((this.controlState.tileMotionAutoPlayEnabled ?? true) !== autoPlay) {
@@ -3338,12 +4021,8 @@ export class ControlPanelManager {
       }
 
       try {
-        this._tileMotionSpeedBinding?.refresh?.();
-        this._tileMotionAutoPlayBinding?.refresh?.();
-        this._tileMotionTimeFactorBinding?.refresh?.();
-        this._tileMotionPausedBinding?.refresh?.();
-      } catch (_) {
-      }
+        this._tileMotionSpeedBinding?.mirror?.();
+      } catch (_) {}
     } catch (_) {
     }
   }
@@ -3489,129 +4168,14 @@ export class ControlPanelManager {
     ui.notifications?.info('Tile motion phase reset');
   }
 
-  _buildTileMotionSection(parentFolder = this.pane, options = undefined) {
-    const targetFolder = parentFolder || this.pane;
-    const tileMotionFolder = targetFolder.addFolder({
-      title: options?.title ?? '🧭 Tile Motion',
-      expanded: options?.expanded ?? false
-    });
-    if (options?.registerTopLevel !== false && targetFolder === this.pane) this._registerTopLevelFolder(tileMotionFolder);
-    this._ensureFolderTag(tileMotionFolder, 'tileMotion', `${Math.round(Number(this.controlState.tileMotionSpeedPercent) || 0)}%`);
-
-    const canEditTileMotion = isGmLike() && !!window.MapShine?.tileMotionManager;
-    if (!canEditTileMotion) {
-      const content = tileMotionFolder.element.querySelector('.tp-fldv_c') || tileMotionFolder.element;
-      const reason = document.createElement('div');
-      reason.textContent = isGmLike()
-        ? 'Unavailable: Tile motion manager is not ready yet.'
-        : 'Unavailable: Tile motion controls are GM-only.';
-      reason.style.fontSize = '11px';
-      reason.style.opacity = '0.78';
-      reason.style.margin = '4px 0 8px';
-      content.appendChild(reason);
-    }
-
-    this._tileMotionAutoPlayBinding = tileMotionFolder.addBinding(this.controlState, 'tileMotionAutoPlayEnabled', {
-      label: 'Auto'
-    }).on('change', (ev) => {
-      this.controlState.tileMotionAutoPlayEnabled = !!ev.value;
-      void this._setTileMotionAutoPlayEnabled(!!ev.value, { persist: !!ev?.last });
-      if (ev?.last) this.debouncedSave();
-    });
-    this._tileMotionAutoPlayBinding.disabled = !canEditTileMotion;
-
-    this._tileMotionPausedBinding = tileMotionFolder.addBinding(this.controlState, 'tileMotionPaused', {
-      label: 'Paused'
-    }).on('change', (ev) => {
-      this.controlState.tileMotionPaused = !!ev.value;
-      void this._setTileMotionPaused(!!ev.value, { persist: !!ev?.last });
-      if (ev?.last) this.debouncedSave();
-    });
-    this._tileMotionPausedBinding.disabled = !canEditTileMotion;
-
-    this._tileMotionTimeFactorBinding = tileMotionFolder.addBinding(this.controlState, 'tileMotionTimeFactorPercent', {
-      label: 'Time %',
-      min: 0,
-      max: 200,
-      step: 1
-    }).on('change', (ev) => {
-      this.controlState.tileMotionTimeFactorPercent = ev.value;
-      void this._setTileMotionTimeFactor(ev.value, { persist: !!ev?.last });
-      if (ev?.last) this.debouncedSave();
-    });
-    this._tileMotionTimeFactorBinding.disabled = !canEditTileMotion;
-
-    this._tileMotionSpeedBinding = tileMotionFolder.addBinding(this.controlState, 'tileMotionSpeedPercent', {
-      label: 'Speed %',
-      min: 0,
-      max: 400,
-      step: 1
-    }).on('change', (ev) => {
-      this.controlState.tileMotionSpeedPercent = ev.value;
-      this._setFolderTag('tileMotion', `${Math.round(Number(ev.value) || 0)}%`);
-      void this._setTileMotionSpeed(ev.value, { persist: !!ev?.last });
-      if (ev?.last) this.debouncedSave();
-    });
-    this._tileMotionSpeedBinding.disabled = !canEditTileMotion;
-
-    const contentElement = tileMotionFolder.element.querySelector('.tp-fldv_c') || tileMotionFolder.element;
-    const transportGrid = document.createElement('div');
-    transportGrid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:4px 6px 6px;';
-
-    const makeTransportBtn = (label, onClick) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.textContent = label;
-      btn.disabled = !canEditTileMotion;
-      btn.style.cssText = [
-        'height:20px',
-        'padding:0 6px',
-        'border-radius:5px',
-        'border:1px solid rgba(255,255,255,0.12)',
-        'background:rgba(255,255,255,0.06)',
-        'color:rgba(210,232,255,0.90)',
-        'font-size:9px',
-        'font-weight:600',
-        'font-family:inherit',
-        'cursor:pointer'
-      ].join(';');
-      btn.addEventListener('click', onClick);
-      transportGrid.appendChild(btn);
-    };
-
-    makeTransportBtn('Start', () => { void this._startTileMotion(); });
-    makeTransportBtn('Pause', () => { void this._pauseTileMotion(); });
-    makeTransportBtn('Resume', () => { void this._resumeTileMotion(); });
-    makeTransportBtn('Stop', () => { void this._stopTileMotion(); });
-    makeTransportBtn('Reset', () => { void this._resetTileMotionPhase(); });
-
-    const spacer = document.createElement('div');
-    spacer.style.display = 'none';
-    transportGrid.appendChild(spacer);
-
-    contentElement.appendChild(transportGrid);
-  }
-
-  /**
-   * V2 replica overhead occlusion: radius + soft edge (Map Shine Control → scene flag).
-   * @private
-   */
-  _buildOverheadOcclusionSection(parentFolder = this.pane, options = undefined) {
-    const targetFolder = parentFolder || this.pane;
-    const folder = targetFolder.addFolder({
-      title: options?.title ?? '🔳 Overhead occlusion',
-      expanded: options?.expanded ?? false
-    });
-    if (options?.registerTopLevel !== false && targetFolder === this.pane) this._registerTopLevelFolder(folder);
-    this._ensureFolderTag(folder, 'overheadOccl', 'V2');
-
+  _buildOverheadOcclusionSection(mountEl) {
     const canEdit = isGmLike();
-    const content = folder.element.querySelector('.tp-fldv_c') || folder.element;
     if (!canEdit) {
       const reason = document.createElement('div');
       reason.textContent = 'GM only: radial roof cutout tuning for Map Shine V2 bus.';
-      reason.style.cssText = 'font-size:11px;opacity:0.78;margin:4px 8px 8px';
-      content.appendChild(reason);
+      reason.style.cssText = 'font-size:10px;opacity:0.78;margin:4px 8px 8px';
+      mountEl.appendChild(reason);
+      return;
     }
 
     const clampR = (x) => {
@@ -3626,113 +4190,45 @@ export class ControlPanelManager {
     this.controlState.replicaOcclusionEdgeSoftness = clampE(this.controlState.replicaOcclusionEdgeSoftness);
 
     const hint = document.createElement('div');
-    hint.textContent = 'Radius × 0.05–100 (default 35). Soft edge 0–100: replica rim + roof blend (try 20–80).';
-    hint.style.cssText = 'font-size:10px;opacity:0.65;margin:2px 8px 6px;line-height:1.35';
-    content.appendChild(hint);
+    hint.textContent = 'Radius × 0.05–100. Soft edge 0–100.';
+    hint.style.cssText = 'font-size:9px;opacity:0.65;margin:0 0 6px';
+    mountEl.appendChild(hint);
 
     if (this._replicaOcclDomBuilt) return;
 
-    const root = document.createElement('div');
-    root.className = 'map-shine-live-wx';
-    root.dataset.msReplicaOccl = '1';
+    const board = createFaderBoard(mountEl, [
+      { id: 'replicaOcclusionRadiusScale', label: 'Hole radius', min: 0.05, max: 100, step: 0.5 },
+      { id: 'replicaOcclusionEdgeSoftness', label: 'Soft edge', min: 0, max: 100, step: 1 },
+    ], {
+      wireRow: (pid, range) => {
+        const clampFn = pid === 'replicaOcclusionRadiusScale' ? clampR : clampE;
+        const key = pid;
+        range.addEventListener('input', () => {
+          if (this._suppressReplicaOcclDom) return;
+          const v = range.valueAsNumber;
+          if (!Number.isFinite(v)) return;
+          this.controlState[key] = clampFn(v);
+          mirrorFaderRow(board.rows, pid, this.controlState[key]);
+        });
+        range.addEventListener('change', () => {
+          if (this._suppressReplicaOcclDom) return;
+          const v = range.valueAsNumber;
+          if (Number.isFinite(v)) this.controlState[key] = clampFn(v);
+          this.debouncedSave();
+        });
+      },
+    });
 
-    const mkRow = (labelText, min, max, step) => {
-      const rowEl = document.createElement('div');
-      rowEl.className = 'map-shine-live-wx-row';
-      const lbl = document.createElement('span');
-      lbl.className = 'map-shine-live-wx-lbl';
-      lbl.textContent = labelText;
-      lbl.title = labelText;
-      const range = document.createElement('input');
-      range.type = 'range';
-      range.min = String(min);
-      range.max = String(max);
-      range.step = String(step);
-      range.setAttribute('aria-label', labelText);
-      const num = document.createElement('input');
-      num.type = 'number';
-      num.className = 'map-shine-live-wx-num';
-      num.min = String(min);
-      num.max = String(max);
-      num.step = String(step);
-      num.setAttribute('aria-label', `${labelText} value`);
-      rowEl.appendChild(lbl);
-      rowEl.appendChild(range);
-      rowEl.appendChild(num);
-      root.appendChild(rowEl);
-      return { rowEl, range, number: num };
-    };
-
-    const rRow = mkRow('Hole radius ×', 0.05, 100, 0.5);
-    const eRow = mkRow('Soft edge', 0, 100, 1);
-
-    const wirePair = (range, num, clampFn, key) => {
-      const finalize = (doSave) => {
-        const c = clampFn(this.controlState[key]);
-        this.controlState[key] = c;
-        this._suppressReplicaOcclDom = true;
-        try {
-          range.value = String(c);
-          num.value = String(c);
-        } catch (_) {
-        }
-        this._suppressReplicaOcclDom = false;
-        if (doSave) this.debouncedSave();
-      };
-
-      range.addEventListener('input', () => {
-        if (this._suppressReplicaOcclDom) return;
-        const v = range.valueAsNumber;
-        if (!Number.isFinite(v)) return;
-        const c = clampFn(v);
-        this.controlState[key] = c;
-        num.value = String(c);
-      });
-      range.addEventListener('change', () => {
-        if (this._suppressReplicaOcclDom) return;
-        const v = range.valueAsNumber;
-        if (Number.isFinite(v)) this.controlState[key] = clampFn(v);
-        finalize(true);
-      });
-
-      num.addEventListener('input', () => {
-        if (this._suppressReplicaOcclDom) return;
-        const v = parseFloat(num.value);
-        if (!Number.isFinite(v)) return;
-        const c = clampFn(v);
-        this.controlState[key] = c;
-        range.value = String(c);
-      });
-      num.addEventListener('change', () => {
-        if (this._suppressReplicaOcclDom) return;
-        const v = parseFloat(num.value);
-        if (Number.isFinite(v)) this.controlState[key] = clampFn(v);
-        finalize(true);
-      });
-
-      range.disabled = !canEdit;
-      num.disabled = !canEdit;
-    };
-
-    wirePair(rRow.range, rRow.number, clampR, 'replicaOcclusionRadiusScale');
-    wirePair(eRow.range, eRow.number, clampE, 'replicaOcclusionEdgeSoftness');
-
-    content.appendChild(root);
     this._replicaOcclDom = {
-      root,
-      rangeR: rRow.range,
-      numR: rRow.number,
-      rangeE: eRow.range,
-      numE: eRow.number,
+      root: board.root,
+      rangeR: board.rows.replicaOcclusionRadiusScale?.range,
+      rangeE: board.rows.replicaOcclusionEdgeSoftness?.range,
+      rows: board.rows,
     };
     this._replicaOcclDomBuilt = true;
     this._syncReplicaOcclDomFromControlState();
   }
 
-  /**
-   * Mirror `controlState` → replica occlusion range/number inputs (after flag load / sanitize).
-   * @private
-   */
   _syncReplicaOcclDomFromControlState() {
     if (!this._replicaOcclDomBuilt || !this._replicaOcclDom || !this.controlState) return;
     const clampR = (x) => {
@@ -3749,12 +4245,9 @@ export class ControlPanelManager {
     this.controlState.replicaOcclusionEdgeSoftness = e;
     this._suppressReplicaOcclDom = true;
     try {
-      this._replicaOcclDom.rangeR.value = String(r);
-      this._replicaOcclDom.numR.value = String(r);
-      this._replicaOcclDom.rangeE.value = String(e);
-      this._replicaOcclDom.numE.value = String(e);
-    } catch (_) {
-    }
+      mirrorFaderRow(this._replicaOcclDom.rows, 'replicaOcclusionRadiusScale', r);
+      mirrorFaderRow(this._replicaOcclDom.rows, 'replicaOcclusionEdgeSoftness', e);
+    } catch (_) {}
     this._suppressReplicaOcclDom = false;
   }
 
@@ -3762,22 +4255,12 @@ export class ControlPanelManager {
    * GM: per-scene Player Light mode allowances + world global defaults.
    * @private
    */
-  _buildPlayerLightsSection(parentFolder = this.pane, options = undefined) {
-    const targetFolder = parentFolder || this.pane;
-    const lightsFolder = targetFolder.addFolder({
-      title: options?.title ?? '🔦 Player Lights',
-      expanded: options?.expanded ?? false
-    });
-    if (options?.registerTopLevel !== false && targetFolder === this.pane) this._registerTopLevelFolder(lightsFolder);
-    this._ensureFolderTag(lightsFolder, 'playerLights', 'GM');
-
-    const contentEl = lightsFolder.element.querySelector('.tp-fldv_c') || lightsFolder.element;
-
+  _buildPlayerLightsSection(mountEl) {
     if (!isGmLike()) {
       const reason = document.createElement('div');
-      reason.textContent = 'Player Light allowances are GM-only. Ask your GM to use Map Shine Control → Player Lights.';
-      reason.style.cssText = 'font-size:11px;opacity:0.78;margin:4px 8px 8px';
-      contentEl.appendChild(reason);
+      reason.textContent = 'Player Light allowances are GM-only.';
+      reason.style.cssText = 'font-size:10px;opacity:0.78;margin:4px 8px 8px';
+      mountEl.appendChild(reason);
       return;
     }
 
@@ -3789,19 +4272,19 @@ export class ControlPanelManager {
       { key: 'torch', label: 'Torch' },
       { key: 'flashlight', label: 'Flashlight' },
       { key: 'nightVision', label: 'Night Vision' },
-      { key: 'lowLightVision', label: 'Low-light Vision' },
+      { key: 'lowLightVision', label: 'Low-light' },
       { key: 'infravision', label: 'Infravision' },
-      { key: 'activeIR', label: 'Active Infravision' }
+      { key: 'activeIR', label: 'Active IR' },
     ];
+    const allowanceOptions = ['global', 'allowed', 'disallowed'];
+    const allowanceLabels = { global: 'Global', allowed: 'Allow', disallowed: 'Deny' };
 
     const MODULE = 'map-shine-advanced';
     const clamp01 = (v) => Math.max(0, Math.min(1, Number(v) || 0));
     const getPlayerLightParam = (paramId, fallback = 0) => {
       try {
-        const uiManager = window.MapShine?.uiManager;
-        const eff = uiManager?.effectFolders?.['player-light'];
-        const raw = eff?.params?.[paramId];
-        const n = Number(raw);
+        const eff = window.MapShine?.uiManager?.effectFolders?.['player-light'];
+        const n = Number(eff?.params?.[paramId]);
         return Number.isFinite(n) ? clamp01(n) : fallback;
       } catch (_) {
         return fallback;
@@ -3814,13 +4297,8 @@ export class ControlPanelManager {
         if (!eff?.params || !Object.prototype.hasOwnProperty.call(eff.params, paramId)) return;
         const next = clamp01(value);
         eff.params[paramId] = next;
-        try {
-          eff.bindings?.[paramId]?.refresh?.();
-        } catch (_) {}
-        try {
-          const cb = uiManager?.effectCallbacks?.get?.('player-light');
-          cb?.('player-light', paramId, next);
-        } catch (_) {}
+        try { eff.bindings?.[paramId]?.refresh?.(); } catch (_) {}
+        try { uiManager?.effectCallbacks?.get?.('player-light')?.('player-light', paramId, next); } catch (_) {}
         try {
           uiManager?.updateEffectiveState?.('player-light');
           uiManager?.updateControlStates?.('player-light');
@@ -3830,13 +4308,13 @@ export class ControlPanelManager {
     };
 
     const summaryEl = document.createElement('div');
-    summaryEl.style.cssText = 'font-size:9px;opacity:0.78;margin:4px 8px 8px;line-height:1.4;white-space:pre-wrap;';
-    contentEl.insertBefore(summaryEl, contentEl.firstChild);
+    summaryEl.className = 'msa-cp-pl-summary';
+    mountEl.appendChild(summaryEl);
 
     const updateSummary = () => {
       try {
         const scene = canvas?.scene ?? null;
-        const lines = ['Effective for players on this scene:'];
+        const lines = ['Effective for players:'];
         for (const { key, label } of playerLightModes) {
           const ok = resolvePlayerLightModeAllowance(key, { scene, controlState: this.controlState });
           lines.push(`• ${label}: ${ok ? 'Allowed' : 'Disallowed'}`);
@@ -3848,151 +4326,96 @@ export class ControlPanelManager {
     };
     updateSummary();
 
-    const sceneModes = playerLightModes.map(({ key, label }) => ({
-      key,
-      label: `${label} (scene)`
-    }));
-
-    for (const { key, label } of sceneModes) {
-      lightsFolder.addBinding(this.controlState.playerLightAllowance, key, {
-        label,
-        options: {
-          'Use Global': 'global',
-          'Allowed': 'allowed',
-          'Disallowed': 'disallowed'
-        }
-      }).on('change', (ev) => {
-        this.controlState.playerLightAllowance[key] = ev.value;
-        updateSummary();
-        if (ev?.last) {
-          this.debouncedSave();
-          try {
-            ui?.controls?.render?.(true);
-          } catch (_) {}
-        }
-      });
+    const matrix = document.createElement('div');
+    matrix.className = 'msa-cp-pl-matrix';
+    matrix.appendChild(Object.assign(document.createElement('div'), { className: 'msa-cp-pl-matrix__head', textContent: '' }));
+    for (const opt of allowanceOptions) {
+      const h = document.createElement('div');
+      h.className = 'msa-cp-pl-matrix__head';
+      h.textContent = allowanceLabels[opt];
+      matrix.appendChild(h);
     }
 
-    const flashlightFolder = lightsFolder.addFolder({
-      title: 'Flashlight Behavior',
-      expanded: false
-    });
+    const mirrorMatrix = () => {
+      for (const btn of matrix.querySelectorAll('.msa-cp-pl-cell')) {
+        const { modeKey, value } = btn.dataset;
+        btn.classList.toggle('is-active', this.controlState.playerLightAllowance[modeKey] === value);
+      }
+    };
+
+    for (const { key, label } of playerLightModes) {
+      const modeLbl = document.createElement('div');
+      modeLbl.className = 'msa-cp-pl-matrix__mode';
+      modeLbl.textContent = label;
+      matrix.appendChild(modeLbl);
+      for (const opt of allowanceOptions) {
+        const cell = document.createElement('button');
+        cell.type = 'button';
+        cell.className = 'msa-cp-pl-cell';
+        cell.dataset.modeKey = key;
+        cell.dataset.value = opt;
+        cell.textContent = allowanceLabels[opt];
+        cell.classList.toggle('is-active', this.controlState.playerLightAllowance[key] === opt);
+        cell.addEventListener('click', () => {
+          this.controlState.playerLightAllowance[key] = opt;
+          mirrorMatrix();
+          updateSummary();
+          this.debouncedSave();
+          try { ui?.controls?.render?.(true); } catch (_) {}
+        });
+        matrix.appendChild(cell);
+      }
+    }
+    mountEl.appendChild(matrix);
+
+    const flashSec = createSection(mountEl, { id: 'flashlightBehavior', title: 'Flashlight Behavior', collapsible: true, expanded: false });
     const flashlightState = {
       flashlightWobble: getPlayerLightParam('flashlightWobble', 0),
-      flashlightBrokenness: getPlayerLightParam('flashlightBrokenness', 0)
+      flashlightBrokenness: getPlayerLightParam('flashlightBrokenness', 0),
     };
-    flashlightFolder.addBinding(flashlightState, 'flashlightWobble', {
-      label: 'Wobble',
-      min: 0,
-      max: 1,
-      step: 0.01
-    }).on('change', (ev) => {
-      flashlightState.flashlightWobble = clamp01(ev.value);
-      setPlayerLightParam('flashlightWobble', flashlightState.flashlightWobble);
+    const wobble = createNativeControl({
+      type: 'range', label: 'Wobble', target: flashlightState, key: 'flashlightWobble', min: 0, max: 1, step: 0.01,
+      onChange: (v) => setPlayerLightParam('flashlightWobble', v),
     });
-    flashlightFolder.addBinding(flashlightState, 'flashlightBrokenness', {
-      label: 'Broken',
-      min: 0,
-      max: 1,
-      step: 0.01
-    }).on('change', (ev) => {
-      flashlightState.flashlightBrokenness = clamp01(ev.value);
-      setPlayerLightParam('flashlightBrokenness', flashlightState.flashlightBrokenness);
+    const broken = createNativeControl({
+      type: 'range', label: 'Broken', target: flashlightState, key: 'flashlightBrokenness', min: 0, max: 1, step: 0.01,
+      onChange: (v) => setPlayerLightParam('flashlightBrokenness', v),
     });
+    flashSec.body.appendChild(wobble.row);
+    flashSec.body.appendChild(broken.row);
 
-    const globalFolder = lightsFolder.addFolder({
-      title: 'Global Defaults',
-      expanded: false
-    });
-
+    const globalSec = createSection(mountEl, { id: 'plGlobal', title: 'Global Defaults', collapsible: true, expanded: false });
     const globalDefaultsState = {
       torch: !!game.settings.get(MODULE, 'playerLightTorchAllowedDefault'),
       flashlight: !!game.settings.get(MODULE, 'playerLightFlashlightAllowedDefault'),
       nightVision: getGlobalPlayerLightModeAllowed('nightVision'),
       lowLightVision: getGlobalPlayerLightModeAllowed('lowLightVision'),
       infravision: getGlobalPlayerLightModeAllowed('infravision'),
-      activeIR: getGlobalPlayerLightModeAllowed('activeIR')
+      activeIR: getGlobalPlayerLightModeAllowed('activeIR'),
     };
-
-    globalFolder.addBinding(globalDefaultsState, 'torch', { label: 'Torch' }).on('change', async (ev) => {
-      globalDefaultsState.torch = !!ev.value;
-      try {
-        await game.settings.set(MODULE, 'playerLightTorchAllowedDefault', !!ev.value);
-      } catch (_) {}
-      updateSummary();
-      if (ev?.last) {
-        try {
-          ui?.controls?.render?.(true);
-        } catch (_) {}
-      }
+    const addGlobalToggle = (label, key, settingKey, extra) => {
+      const ctrl = createNativeControl({
+        type: 'toggle', label, target: globalDefaultsState, key,
+        onChange: async (v) => {
+          globalDefaultsState[key] = !!v;
+          try {
+            await game.settings.set(MODULE, settingKey, !!v);
+            if (extra) await extra(!!v);
+          } catch (_) {}
+          updateSummary();
+          try { ui?.controls?.render?.(true); } catch (_) {}
+        },
+      });
+      globalSec.body.appendChild(ctrl.row);
+    };
+    addGlobalToggle('Torch', 'torch', 'playerLightTorchAllowedDefault');
+    addGlobalToggle('Flashlight', 'flashlight', 'playerLightFlashlightAllowedDefault');
+    addGlobalToggle('Night Vision', 'nightVision', 'playerLightNightVisionAllowedDefault', async (v) => {
+      await game.settings.set(MODULE, 'nightVisionAllowPlayers', v);
     });
-
-    globalFolder.addBinding(globalDefaultsState, 'flashlight', { label: 'Flashlight' }).on('change', async (ev) => {
-      globalDefaultsState.flashlight = !!ev.value;
-      try {
-        await game.settings.set(MODULE, 'playerLightFlashlightAllowedDefault', !!ev.value);
-      } catch (_) {}
-      updateSummary();
-      if (ev?.last) {
-        try {
-          ui?.controls?.render?.(true);
-        } catch (_) {}
-      }
-    });
-
-    globalFolder.addBinding(globalDefaultsState, 'nightVision', { label: 'Night Vision' }).on('change', async (ev) => {
-      globalDefaultsState.nightVision = !!ev.value;
-      const v = !!ev.value;
-      try {
-        await game.settings.set(MODULE, 'playerLightNightVisionAllowedDefault', v);
-        await game.settings.set(MODULE, 'nightVisionAllowPlayers', v);
-      } catch (_) {}
-      updateSummary();
-      if (ev?.last) {
-        try {
-          ui?.controls?.render?.(true);
-        } catch (_) {}
-      }
-    });
-
-    globalFolder.addBinding(globalDefaultsState, 'lowLightVision', { label: 'Low-light Vision' }).on('change', async (ev) => {
-      globalDefaultsState.lowLightVision = !!ev.value;
-      try {
-        await game.settings.set(MODULE, 'playerLightLowLightVisionAllowedDefault', !!ev.value);
-      } catch (_) {}
-      updateSummary();
-      if (ev?.last) {
-        try {
-          ui?.controls?.render?.(true);
-        } catch (_) {}
-      }
-    });
-
-    globalFolder.addBinding(globalDefaultsState, 'infravision', { label: 'Infravision' }).on('change', async (ev) => {
-      globalDefaultsState.infravision = !!ev.value;
-      try {
-        await game.settings.set(MODULE, 'playerLightInfravisionAllowedDefault', !!ev.value);
-      } catch (_) {}
-      updateSummary();
-      if (ev?.last) {
-        try {
-          ui?.controls?.render?.(true);
-        } catch (_) {}
-      }
-    });
-
-    globalFolder.addBinding(globalDefaultsState, 'activeIR', { label: 'Active Infravision' }).on('change', async (ev) => {
-      globalDefaultsState.activeIR = !!ev.value;
-      try {
-        await game.settings.set(MODULE, 'playerLightActiveIRAllowedDefault', !!ev.value);
-      } catch (_) {}
-      updateSummary();
-      if (ev?.last) {
-        try {
-          ui?.controls?.render?.(true);
-        } catch (_) {}
-      }
-    });
+    addGlobalToggle('Low-light Vision', 'lowLightVision', 'playerLightLowLightVisionAllowedDefault');
+    addGlobalToggle('Infravision', 'infravision', 'playerLightInfravisionAllowedDefault');
+    addGlobalToggle('Active IR', 'activeIR', 'playerLightActiveIRAllowedDefault');
   }
 
   /**
@@ -4009,18 +4432,22 @@ export class ControlPanelManager {
       const shouldStartTransition =
         transitionMinutes > 0 &&
         (this._lastTimeTargetApplied === null ||
-          Math.abs(this._lastTimeTargetApplied - targetHour) > 1e-4 ||
-          this._lastTimeTransitionMinutesApplied === null ||
-          Math.abs(this._lastTimeTransitionMinutesApplied - transitionMinutes) > 1e-4);
+          Math.abs(this._lastTimeTargetApplied - targetHour) > 1e-4);
 
       const shouldApplyInstant =
         transitionMinutes <= 0 &&
         (this._lastTimeTargetApplied === null || Math.abs(this._lastTimeTargetApplied - targetHour) > 1e-4);
 
-      if (shouldStartTransition) {
+      if (this._environmentFadeTransitionActive) {
+        // Active environment fade owns time/scene application.
+      } else if (shouldStartTransition) {
         this._lastTimeTargetApplied = targetHour;
         this._lastTimeTransitionMinutesApplied = transitionMinutes;
-        await stateApplier.startTimeOfDayTransition(targetHour, transitionMinutes, false, true);
+        await this._startEnvironmentTransition(
+          snapshotFromControlState(this.controlState, MAX_WIND_MS_CP),
+          transitionMinutes,
+          environmentControlApi.captureSnapshot(),
+        );
       } else if (shouldApplyInstant) {
         this._lastTimeTargetApplied = targetHour;
         this._lastTimeTransitionMinutesApplied = transitionMinutes;
@@ -4235,10 +4662,7 @@ export class ControlPanelManager {
       await this._saveControlState();
     });
     
-    // Refresh bindings
-    if (this.pane) {
-      this.pane.refresh();
-    }
+    this._mirrorAllDomFromState();
     this._sanitizeControlStateForTweakpaneBindings();
     this._updateCustomTimeControls();
 
@@ -4331,15 +4755,15 @@ Current Weather:
       }
 
       this._sanitizeControlStateForTweakpaneBindings();
+      inferWeatherPanelView(this.controlState);
       this._updateCustomTimeControls();
       this._syncTileMotionSpeedFromManager();
       this._lastWeatherControlFingerprint = null;
       this._lastTimeTargetApplied = null;
       this._lastTimeTransitionMinutesApplied = null;
 
-      if (this.pane) {
-        this.pane.refresh();
-      }
+      this._mirrorAllDomFromState();
+      this._applyWeatherPanelViewVisibility();
 
       await this._applyControlState();
     } catch (error) {
@@ -4374,6 +4798,7 @@ Current Weather:
         if ('windSpeed' in this.controlState) {
           try { delete this.controlState.windSpeed; } catch (_) {}
         }
+        inferWeatherPanelView(this.controlState);
         log.info('Loaded control state from scene flags');
         // Force one rapid-custom apply on next _applyControlState for this scene.
         this._lastWeatherControlFingerprint = null;
@@ -4409,6 +4834,9 @@ Current Weather:
           if (wc?.saveWeatherSnapshotNow) {
             await wc.saveWeatherSnapshotNow();
           }
+          if (wc?.saveDynamicStateNow) {
+            await wc.saveDynamicStateNow();
+          }
         } catch (_) {}
         log.debug('Skipped Scene controlState flag persist for live/time-only save (weather-snapshot updated)');
         return;
@@ -4433,11 +4861,46 @@ Current Weather:
         if (wc?.saveWeatherSnapshotNow) {
           await wc.saveWeatherSnapshotNow();
         }
+        if (wc?.saveDynamicStateNow) {
+          await wc.saveDynamicStateNow();
+        }
       } catch (_) {}
       log.debug('Saved control state to scene flags');
+      this._emitWeatherSyncAfterSave();
     } catch (error) {
       log.warn('Failed to save control state:', error);
     }
+  }
+
+  /**
+   * Emit throttled live weather sync packets after a full controlState persist.
+   * @private
+   */
+  _emitWeatherSyncAfterSave() {
+    try {
+      const bridge = getWeatherSyncBridge();
+      bridge.emitMode(this.controlState, { immediate: false });
+      const wc = resolveWeatherController();
+      if (!wc) return;
+      bridge.emitSnapshot({
+        version: 1,
+        enabled: wc.enabled === true,
+        dynamicEnabled: wc.dynamicEnabled === true,
+        dynamicPresetId: wc.dynamicPresetId,
+        dynamicEvolutionSpeed: wc.dynamicEvolutionSpeed,
+        dynamicPaused: wc.dynamicPaused === true,
+        timeOfDay: Number.isFinite(Number(wc.timeOfDay)) ? wc.timeOfDay : this.controlState.timeOfDay,
+        timeTransitionMinutes: this.controlState.timeTransitionMinutes,
+        linkTimeToFoundry: this.controlState.linkTimeToFoundry,
+        start: wc._serializeWeatherState?.(wc.startState),
+        current: wc._serializeWeatherState?.(wc.currentState),
+        target: wc._serializeWeatherState?.(wc.targetState),
+        isTransitioning: wc.isTransitioning === true,
+        transitionDuration: Number(wc.transitionDuration) || 0,
+        transitionElapsed: Number(wc.transitionElapsed) || 0,
+        controlState: cloneAndSanitizeControlState(this.controlState, { silent: true }),
+      }, { force: false });
+    } catch (_) {}
   }
 
   /**
@@ -4466,27 +4929,29 @@ Current Weather:
     if (!this.container) return;
 
     if (this._isMinimized) {
-      const left = this._readPx(this._minimizedButton?.style?.left);
-      const top = this._readPx(this._minimizedButton?.style?.top);
+      const left = this._readPx(this._minimizedDock?.style?.left);
+      const top = this._readPx(this._minimizedDock?.style?.top);
       if (Number.isFinite(left) && Number.isFinite(top)) {
         this.container.style.transform = 'none';
         this.container.style.left = `${left}px`;
         this.container.style.top = `${top}px`;
       }
-      this._hideMinimizedButton();
+      this._hideMinimizedDock();
       this._isMinimized = false;
     }
     
-    this.container.style.display = 'block';
+    this._setPanelDomVisible(true);
     this.visible = true;
     
     // Update clock to current state
     this._updateClock(this.controlState.timeOfDay);
+    this._syncTimeScaleBindingFromUiManager();
 
     this._wireLiveWeatherOverrideBindingsIfReady();
     try {
       hydrateControlPanelLiveOverridesFromController(resolveWeatherController());
     } catch (_) {}
+    this._mirrorAllDomFromState();
     this._syncLandscapeLightningAndFogFromControlState();
 
     // Ensure status panel is up to date immediately.
@@ -4513,10 +4978,10 @@ Current Weather:
   hide() {
     if (!this.container) return;
     
-    this.container.style.display = 'none';
+    this._setPanelDomVisible(false);
     this.visible = false;
     this._isMinimized = false;
-    this._hideMinimizedButton();
+    this._hideMinimizedDock();
 
     if (this._statusIntervalId) {
       clearInterval(this._statusIntervalId);
@@ -4565,6 +5030,10 @@ Current Weather:
       this.clockElements.face.removeEventListener('mousedown', this._boundHandlers.onFaceMouseDown);
       this.clockElements.face.removeEventListener('touchstart', this._boundHandlers.onFaceTouchStart);
     }
+    if (this.clockElements?.handHub) {
+      this.clockElements.handHub.removeEventListener('mousedown', this._boundHandlers.onFaceMouseDown);
+      this.clockElements.handHub.removeEventListener('touchstart', this._boundHandlers.onFaceTouchStart);
+    }
     document.removeEventListener('mousemove', this._boundHandlers.onDocMouseMove, { capture: true });
     document.removeEventListener('mouseup', this._boundHandlers.onDocMouseUp, { capture: true });
     document.removeEventListener('touchmove', this._boundHandlers.onDocTouchMove);
@@ -4572,6 +5041,9 @@ Current Weather:
 
     document.removeEventListener('mousemove', this._boundHandlers.onDocPanelMouseMove, { capture: true });
     document.removeEventListener('mouseup', this._boundHandlers.onDocPanelMouseUp, { capture: true });
+    document.removeEventListener('pointermove', this._boundHandlers.onMinimizedDockPointerMove, { capture: true });
+    document.removeEventListener('pointerup', this._boundHandlers.onMinimizedDockPointerUp, { capture: true });
+    document.removeEventListener('pointercancel', this._boundHandlers.onMinimizedDockPointerUp, { capture: true });
 
     if (this.headerOverlay) {
       this.headerOverlay.removeEventListener('mousedown', this._boundHandlers.onHeaderMouseDown);
@@ -4581,34 +5053,35 @@ Current Weather:
       this._minimizeButton.removeEventListener('click', this._boundHandlers.onMinimizeButtonClick);
     }
 
-    if (this._minimizedButton) {
-      this._minimizedButton.removeEventListener('click', this._boundHandlers.onMinimizedBadgeClick);
-      if (this._minimizedButton.parentNode) {
-        this._minimizedButton.parentNode.removeChild(this._minimizedButton);
-      }
+    if (this._minimizedOpenBtn) {
+      this._minimizedOpenBtn.removeEventListener('click', this._boundHandlers.onMinimizedOpenClick);
     }
 
-    // Destroy Tweakpane
-    if (this.pane) {
-      this.pane.dispose();
+    if (this._minimizedHandle) {
+      this._minimizedHandle.removeEventListener('pointerdown', this._boundHandlers.onMinimizedHandlePointerDown);
     }
 
-    // Remove container
+    if (this._minimizedDock?.parentNode) {
+      this._minimizedDock.parentNode.removeChild(this._minimizedDock);
+    }
+
     if (this.container && this.container.parentNode) {
       this.container.parentNode.removeChild(this.container);
     }
 
     // Clear references
-    this.pane = null;
-    this.container = null;
     this.clockElement = null;
     this.clockElements = {};
     this.statusPanel = null;
     this._statusEls = null;
     this.headerOverlay = null;
     this._minimizeButton = null;
-    this._minimizedButton = null;
+    this._minimizedDock = null;
+    this._minimizedOpenBtn = null;
+    this._minimizedHandle = null;
     this._isMinimized = false;
+    this._isDraggingMinimizedDock = false;
+    this._minimizedDragStart = null;
     this._sunLatitudeBinding = null;
     this._tileMotionSpeedBinding = null;
 
@@ -4616,6 +5089,10 @@ Current Weather:
     this._rapidWeatherBindingTarget = null;
     this._liveWeatherOverrideFolder = null;
     this._liveWeatherOverrideDom = null;
+    this._weatherUnifiedFolder = null;
+    this._weatherManualViewEl = null;
+    this._weatherDirectorViewEl = null;
+    this._weatherViewToggleButtons = null;
     this._windGustinessBinding = null;
 
     log.info('Control panel destroyed');

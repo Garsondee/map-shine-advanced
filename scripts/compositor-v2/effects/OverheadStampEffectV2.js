@@ -1114,18 +1114,21 @@ export class OverheadStampEffectV2 {
           name: 'tileProjection',
           label: 'Tile Shadow Projection',
           type: 'inline',
+          advanced: true,
           parameters: ['tileProjectionEnabled', 'tileProjectionOpacity', 'tileProjectionLengthScale', 'tileProjectionSoftness', 'tileProjectionThreshold', 'tileProjectionPower', 'tileProjectionOutdoorOpacityScale', 'tileProjectionIndoorOpacityScale']
         },
         {
           name: 'receiverTuning',
           label: 'Receiver Regions',
           type: 'inline',
+          advanced: true,
           parameters: ['outdoorShadowLengthScale', 'indoorReceiverShadowLengthScale']
         },
         {
           name: 'debug',
           label: 'Debug',
           type: 'inline',
+          advanced: true,
           parameters: ['debugView']
         }
       ],
@@ -1185,6 +1188,7 @@ export class OverheadStampEffectV2 {
           type: 'checkbox',
           label: 'Use Fluid Effect Colour',
           default: true,
+          advanced: true,
           tooltip: 'Tints overhead shadows with FluidEffect colour when fluid overlays are attached to overhead tiles'
         },
         fluidEffectTransparency: {
@@ -1194,6 +1198,7 @@ export class OverheadStampEffectV2 {
           max: 1.0,
           step: 0.01,
           default: 0.35,
+          advanced: true,
           tooltip: 'Opacity of FluidEffect colour tint in overhead shadows'
         },
         fluidShadowIntensityBoost: {
@@ -1203,6 +1208,7 @@ export class OverheadStampEffectV2 {
           max: 5.0,
           step: 0.01,
           default: 1.0,
+          advanced: true,
           tooltip: 'Boost multiplier for FluidEffect shadow contribution (up to 500%)'
         },
         fluidShadowSoftness: {
@@ -1212,6 +1218,7 @@ export class OverheadStampEffectV2 {
           max: 10.0,
           step: 0.1,
           default: 3.0,
+          advanced: true,
           tooltip: 'Blur radius for FluidEffect tint on outdoor receivers (up to 2x regular shadow softness range)'
         },
         fluidColorBoost: {
@@ -1221,6 +1228,7 @@ export class OverheadStampEffectV2 {
           max: 4.0,
           step: 0.01,
           default: 1.5,
+          advanced: true,
           tooltip: 'Boosts fluid colour intensity used to tint overhead shadows'
         },
         fluidColorSaturation: {
@@ -1230,6 +1238,7 @@ export class OverheadStampEffectV2 {
           max: 3.0,
           step: 0.01,
           default: 1.2,
+          advanced: true,
           tooltip: 'Saturation multiplier for fluid shadow tint colour'
         },
         tileProjectionEnabled: {

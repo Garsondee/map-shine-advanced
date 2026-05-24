@@ -65,11 +65,13 @@ export class DebugLayerEffect extends EffectBase {
   static getControlSchema() {
     return {
       enabled: false,
+      advanced: true,
       groups: [
         {
           name: 'debug-layer',
           label: 'Debug Layer',
           type: 'inline',
+          advanced: true,
           parameters: [
             'showPanel',
             'showTether',

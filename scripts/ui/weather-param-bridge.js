@@ -3,7 +3,7 @@
  *
  * **Authority model (runtime):**
  * - `WeatherController.targetState` is the single source of truth for simulation values.
- * - **Live Weather Overrides** (control panel) apply by writing `targetState` / `currentState`
+ * - **Manual Weather** (control panel) apply by writing `targetState` / `currentState`
  *   (`applyDirectedCustomPresetToWeather` / `applyWeatherManualParam`), then mirror into the
  *   main Weather folder for display (`syncWeatherEffectFolderParam`). That is one-way UI→WC→main Tweakpane.
  * - **Main Tweakpane** manual scalars (precip, clouds, etc.) call `applyWeatherManualParam` → WC, then
@@ -32,7 +32,7 @@ export const MANUAL_WEATHER_PARAM_IDS = new Set([
   'windDirection'
 ]);
 
-/** Subset shown as Live Weather Overrides on the compact GM control panel. */
+/** Subset shown as Manual Weather on the compact GM control panel. */
 export const LIVE_WEATHER_OVERRIDE_PARAM_IDS = [
   'precipitation',
   'cloudCover',
@@ -174,7 +174,7 @@ export function hydrateMainWeatherTweakpaneFromController(wc, uiManager) {
 }
 
 /**
- * Refresh compact panel Live Weather Overrides from WeatherController (no WC write).
+ * Refresh compact panel Manual Weather from WeatherController (no WC write).
  * @param {import('../core/WeatherController.js').WeatherController|null|undefined} wc
  */
 export function hydrateControlPanelLiveOverridesFromController(wc) {
@@ -347,7 +347,7 @@ export function syncWeatherEffectFolderParam(paramId, value) {
 }
 
 /**
- * Full directed-Custom payload (Live Weather Overrides): applies all scalars + precipType + wind.
+ * Full directed-Custom payload (Manual Weather): applies all scalars + precipType + wind.
  * Call after `directedCustomPreset` object is clamped/normalized.
  *
  * @param {import('../core/WeatherController.js').WeatherController|null|undefined} wc
@@ -498,10 +498,22 @@ export function syncDirectedCustomPresetFromWeatherController(wc) {
       if (typeof cp._refreshWindPaneBindings === 'function') cp._refreshWindPaneBindings();
     } catch (_) {}
 
-    // Live overrides use native range/number DOM, not Tweakpane bindings — sync from preset only.
+    // Manual Weather uses native range/number DOM, not Tweakpane bindings — sync from preset only.
     try {
       if (typeof cp.syncLiveWeatherOverrideDomFromDirectedPreset === 'function') {
         cp.syncLiveWeatherOverrideDomFromDirectedPreset();
+      }
+    } catch (_) {}
+
+    try {
+      if (typeof cp.syncManualAshDomFromController === 'function') {
+        cp.syncManualAshDomFromController();
+      }
+    } catch (_) {}
+
+    try {
+      if (typeof cp.refreshAshMasterRowVisibility === 'function') {
+        cp.refreshAshMasterRowVisibility();
       }
     } catch (_) {}
 

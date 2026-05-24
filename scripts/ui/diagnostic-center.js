@@ -56,6 +56,14 @@ export class DiagnosticCenterManager {
   }
 
   /**
+   * Register dev-only UI with the main panel's Advanced Mode registry.
+   * @param {{ registerAdvancedElement?: (el: HTMLElement) => void }} host
+   */
+  registerAdvancedTargets(host) {
+    this.dialog.registerAdvancedTargets(host);
+  }
+
+  /**
    * Ensure low-overhead method instrumentation is installed for churn probing.
    * Wraps once per manager lifetime.
    * @private

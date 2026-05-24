@@ -862,7 +862,8 @@ export class SmellyFliesEffect {
           min: 500,
           max: 3000,
           step: 100,
-          default: 1500
+          default: 1500,
+          advanced: true,
         },
         'flying.tetherStrength': {
           type: 'slider',
@@ -870,7 +871,8 @@ export class SmellyFliesEffect {
           min: 5,
           max: 50,
           step: 1,
-          default: 20
+          default: 20,
+          advanced: true,
         },
         'flying.maxSpeed': {
           type: 'slider',
@@ -878,7 +880,8 @@ export class SmellyFliesEffect {
           min: 200,
           max: 1500,
           step: 50,
-          default: 600
+          default: 600,
+          advanced: true,
         },
         'flying.landChance': {
           type: 'slider',
@@ -886,7 +889,8 @@ export class SmellyFliesEffect {
           min: 0,
           max: 0.2,
           step: 0.01,
-          default: 0.08
+          default: 0.08,
+          advanced: true,
         },
         'flying.flyHeight': {
           type: 'slider',
@@ -894,7 +898,8 @@ export class SmellyFliesEffect {
           min: 20,
           max: 200,
           step: 10,
-          default: 80
+          default: 80,
+          advanced: true,
         },
         'walking.walkSpeed': {
           type: 'slider',
@@ -902,7 +907,8 @@ export class SmellyFliesEffect {
           min: 10,
           max: 100,
           step: 5,
-          default: 40
+          default: 40,
+          advanced: true,
         },
         'walking.takeoffChance': {
           type: 'slider',
@@ -910,7 +916,8 @@ export class SmellyFliesEffect {
           min: 0,
           max: 0.1,
           step: 0.005,
-          default: 0.03
+          default: 0.03,
+          advanced: true,
         },
         'visual.flyingScale': {
           type: 'slider',
@@ -931,7 +938,8 @@ export class SmellyFliesEffect {
         'visual.motionBlurEnabled': {
           type: 'boolean',
           label: 'Motion Blur',
-          default: true
+          default: true,
+          advanced: true,
         },
         speedMultiplier: {
           type: 'slider',

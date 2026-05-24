@@ -37,6 +37,8 @@ const log = createLogger('AshDisturbanceV2');
 
 const GROUND_Z = 1000;
 const BURST_Z_OFFSET = 5;
+/** Manual Weather ash master at ~zero — skip Quarks work without toggling effect.enabled. */
+const ASH_MASTER_EPSILON = 0.001;
 
 /** Min time between movement bursts per token (path updates can fire very often). */
 const TOKEN_MOVE_BURST_MIN_MS = 75;
@@ -230,7 +232,7 @@ export class AshDisturbanceEffectV2 {
       groups: [
         { name: 'burst', label: 'Burst Settings', type: 'inline', parameters: ['burstRate', 'burstDuration', 'burstRadius', 'maxParticles'] },
         { name: 'appearance', label: 'Appearance', type: 'inline', separator: true, parameters: ['sizeMin', 'sizeMax', 'lifeMin', 'lifeMax', 'opacityStart', 'opacityEnd'] },
-        { name: 'motion', label: 'Motion', type: 'inline', separator: true, parameters: ['windInfluence', 'curlStrength', 'curlScale'] }
+        { name: 'motion', label: 'Motion', type: 'inline', advanced: true, separator: true, parameters: ['windInfluence', 'curlStrength', 'curlScale'] }
       ],
       presets: {
         'Light Disturbance': { burstRate: 200, burstDuration: 0.3, burstRadius: 180, maxParticles: 1500, sizeMin: 14, sizeMax: 35, lifeMin: 1.0, lifeMax: 2.5, opacityStart: 0.65, opacityEnd: 0.1, windInfluence: 0.5, curlStrength: 10, curlScale: 240 },
@@ -243,7 +245,7 @@ export class AshDisturbanceEffectV2 {
         burstRate: { type: 'slider', label: 'Burst Rate (particles/s)', min: 50, max: 2000, step: 10, default: 270, throttle: 50 },
         burstDuration: { type: 'slider', label: 'Burst Duration (s)', min: 0.1, max: 2.0, step: 0.05, default: 1.6, throttle: 50 },
         burstRadius: { type: 'slider', label: 'Burst Radius (px)', min: 50, max: 800, step: 10, default: 170, throttle: 50 },
-        maxParticles: { type: 'slider', label: 'Max Particles', min: 500, max: 8000, step: 100, default: 3000, throttle: 50 },
+        maxParticles: { type: 'slider', label: 'Max Particles', min: 500, max: 8000, step: 100, default: 3000, throttle: 50, advanced: true },
         lifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.2, max: 6.0, step: 0.1, default: 4, throttle: 50 },
         lifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.5, max: 8.0, step: 0.1, default: 5.9, throttle: 50 },
         sizeMin: { type: 'slider', label: 'Size Min (px)', min: 4, max: 100, step: 1, default: 54, throttle: 50 },
@@ -251,8 +253,8 @@ export class AshDisturbanceEffectV2 {
         opacityStart: { type: 'slider', label: 'Opacity Start', min: 0.1, max: 1.0, step: 0.05, default: 0.5, throttle: 50 },
         opacityEnd: { type: 'slider', label: 'Opacity End', min: 0.0, max: 1.0, step: 0.05, default: 0.15, throttle: 50 },
         windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 3.0, step: 0.05, default: 0.35, throttle: 50 },
-        curlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 80.0, step: 1, default: 20, throttle: 50 },
-        curlScale: { type: 'slider', label: 'Curl Scale', min: 50, max: 800, step: 10, default: 140, throttle: 50 }
+        curlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 80.0, step: 1, default: 20, throttle: 50, advanced: true },
+        curlScale: { type: 'slider', label: 'Curl Scale', min: 50, max: 800, step: 10, default: 140, throttle: 50, advanced: true }
       }
     };
   }
@@ -531,16 +533,16 @@ export class AshDisturbanceEffectV2 {
     if (!this.enabled) return;
     if (!this._batchRenderer) return;
 
-    this._updateDisturbanceViewKillBounds();
-
     const weather = window.MapShine?.weatherController?.getCurrentState?.() ?? {};
     const ashBoost = Math.max(0, Math.min(1, Number(weather.ashIntensity) || 0));
+    if (ashBoost < ASH_MASTER_EPSILON) return;
+
+    this._updateDisturbanceViewKillBounds();
 
     const motionDelta = (typeof timeInfo?.motionDelta === 'number')
       ? timeInfo.motionDelta
       : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
 
-    // Quarks tick whenever the effect is enabled (bursts use mask + enabled; weather ash is optional).
     try {
       this._batchRenderer.update(motionDelta);
     } catch (_) {
@@ -595,6 +597,10 @@ export class AshDisturbanceEffectV2 {
   triggerBurstAt(worldX, worldY) {
     if (!this.enabled) return;
 
+    const weather = window.MapShine?.weatherController?.getCurrentState?.() ?? {};
+    const ashBoost = Math.max(0, Math.min(1, Number(weather.ashIntensity) || 0));
+    if (ashBoost < ASH_MASTER_EPSILON) return;
+
     const burstView = this._computeCameraViewWorldRect(1.65);
     if (burstView) {
       if (worldX < burstView.minX || worldX > burstView.maxX
@@ -603,8 +609,6 @@ export class AshDisturbanceEffectV2 {
       }
     }
 
-    const weather = window.MapShine?.weatherController?.getCurrentState?.() ?? {};
-    const ashBoost = Math.max(0, Math.min(1, Number(weather.ashIntensity) || 0));
     const burstRateMul = 1.0 + 0.5 * ashBoost;
 
     // Pick the topmost visible floor (active) as the primary burst floor.

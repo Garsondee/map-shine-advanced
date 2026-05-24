@@ -12,23 +12,20 @@
  */
 
 import { createLogger } from '../../core/log.js';
-import { loadTexture } from '../../assets/loader.js';
+import { loadCloudSpriteTextures } from './cloud-sprites/cloud-asset-loader.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { resolveEffectShadowSun2D } from '../shadow-system/ShadowSunDirection.js';
 import {
   CloudSprite,
   CloudTexturePicker,
-  CLOUD_ASSET_BASE,
   COVER_FOR_MAX,
   COVER_FOR_MIN,
-  FULL_CLOUD_FILES,
   LAYER_COUNT,
   LAYER_PARALLAX,
   LAYER_POOL_COUNTS,
   MAX_ACTIVE_SPRITES,
   MAX_SPRITE_POOL_SIZE,
   MIN_ACTIVE_SPRITES,
-  SPARSE_CLOUD_FILES,
   SPRITE_FADE_DURATION_SEC,
 } from './cloud-sprites/CloudSprite.js';
 import { createCloudLayerMaterialTemplate, createShadowMaskMaterial } from './cloud-sprites/cloud-shaders.js';
@@ -438,33 +435,7 @@ export class CloudEffectV2 {
 
   /** @private */
   async _loadCloudTextures() {
-    const THREE = window.THREE;
-    if (!THREE) return;
-
-    const loadFolder = async (folder, files) => {
-      const out = [];
-      for (const file of files) {
-        const url = `${CLOUD_ASSET_BASE}/${folder}/${file}`;
-        try {
-          const tex = await loadTexture(url, { role: 'MASK_COLOR', suppressProbeErrors: true });
-          if (!tex) continue;
-          tex.generateMipmaps = false;
-          tex.minFilter = THREE.LinearFilter;
-          tex.magFilter = THREE.LinearFilter;
-          tex.wrapS = THREE.ClampToEdgeWrapping;
-          tex.wrapT = THREE.ClampToEdgeWrapping;
-          out.push(tex);
-        } catch (err) {
-          log.warn(`CloudEffectV2: failed to load ${url}`, err);
-        }
-      }
-      return out;
-    };
-
-    const [sparse, full] = await Promise.all([
-      loadFolder('sparse', SPARSE_CLOUD_FILES),
-      loadFolder('full', FULL_CLOUD_FILES),
-    ]);
+    const { sparse, full } = await loadCloudSpriteTextures();
     this._sparseTextures = sparse;
     this._fullTextures = full;
   }

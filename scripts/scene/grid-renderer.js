@@ -396,18 +396,21 @@ export class GridRenderer {
         },
         ghostGridEnabled: {
           label: 'Show Adjacent Floor Grids',
-          default: true
+          default: true,
+          advanced: true
         },
         ghostGridAlphaScale: {
           label: 'Adjacent Grid Opacity Scale',
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.22
+          default: 0.22,
+          advanced: true
         },
         floorTintPresetsEnabled: {
           label: 'Floor Color Tinting',
-          default: true
+          default: true,
+          advanced: true
         }
       }
     };

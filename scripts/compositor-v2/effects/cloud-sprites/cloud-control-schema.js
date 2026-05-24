@@ -40,6 +40,7 @@ export function getCloudControlSchema() {
         label: 'Sprite Textures',
         type: 'inline',
         separator: true,
+        advanced: true,
         parameters: ['spriteScaleMin', 'spriteScaleMax', 'spriteOpacityMin', 'spriteOpacityMax', 'cloudBrightness'],
       },
       {
@@ -47,6 +48,7 @@ export function getCloudControlSchema() {
         label: 'Sky & Time of Day',
         type: 'inline',
         separator: true,
+        advanced: true,
         parameters: ['skyTintStrength', 'sunLightingStrength', 'nightDimStrength'],
       },
       {
@@ -54,6 +56,7 @@ export function getCloudControlSchema() {
         label: 'Motion & Domain Warp',
         type: 'inline',
         separator: true,
+        advanced: true,
         parameters: [
           'overlayDomainWarpStrength',
           'spriteBoilStrength',
@@ -67,6 +70,7 @@ export function getCloudControlSchema() {
         type: 'folder',
         expanded: false,
         separator: true,
+        advanced: true,
         parameters: [
           'lightningCloudEnabled',
           'lightningCloudBrightnessBoost',
@@ -86,6 +90,7 @@ export function getCloudControlSchema() {
         label: 'Screen Cloud Layer',
         type: 'inline',
         separator: true,
+        advanced: true,
         parameters: ['cloudTopOpacity', 'cloudTopAlphaStart', 'cloudTopAlphaEnd', 'cloudTopFadeStart', 'cloudTopFadeEnd'],
       },
       {
@@ -94,6 +99,7 @@ export function getCloudControlSchema() {
         type: 'folder',
         expanded: false,
         separator: true,
+        advanced: true,
         parameters: [
           'cloudLayerCoverageScale',
           'cloudLayerDepthScaleStep',
@@ -113,6 +119,7 @@ export function getCloudControlSchema() {
         label: 'Overlay Plane Heights',
         type: 'folder',
         expanded: false,
+        advanced: true,
         parameters: [
           'cloudLayerHeightFromGround',
           'cloudLayer1HeightFromGround',
@@ -127,6 +134,7 @@ export function getCloudControlSchema() {
         label: 'Sprite Motion Parallax',
         type: 'folder',
         expanded: false,
+        advanced: true,
         parameters: ['layerParallaxBase', 'layer1ParallaxMult', 'layer2ParallaxMult', 'layer3ParallaxMult'],
       },
       {
@@ -141,6 +149,7 @@ export function getCloudControlSchema() {
         label: 'Performance',
         type: 'inline',
         separator: true,
+        advanced: true,
         parameters: ['internalResolutionScale'],
       },
     ],
@@ -161,6 +170,7 @@ export function getCloudControlSchema() {
         max: 120,
         step: 1,
         default: 40,
+        advanced: true,
         tooltip: 'Upper cap on billboard count (split across 3 depth layers). Rebuilds the pool immediately.',
       },
       sparseWeight: {
@@ -170,6 +180,7 @@ export function getCloudControlSchema() {
         max: 1,
         step: 0.01,
         default: -1,
+        advanced: true,
         tooltip: '-1 = auto from cover (wispy at low cover). 0 = balanced. 1 = always sparse wisps.',
       },
       spriteScaleMin: {
@@ -327,6 +338,7 @@ export function getCloudControlSchema() {
         max: 10.0,
         step: 0.1,
         default: 0.9,
+        advanced: true,
       },
       shadowOffsetScale: {
         type: 'slider',
@@ -335,6 +347,7 @@ export function getCloudControlSchema() {
         max: 0.3,
         step: 0.01,
         default: 0.3,
+        advanced: true,
         tooltip: 'How far shadows offset opposite the sun (scales with sun elevation driver).',
       },
       minShadowBrightness: {
@@ -344,6 +357,7 @@ export function getCloudControlSchema() {
         max: 0.5,
         step: 0.01,
         default: 0.0,
+        advanced: true,
         tooltip: 'Floor for shadow factor — prevents fully black patches.',
       },
       shadowSceneFadeSoftness: {
@@ -353,6 +367,7 @@ export function getCloudControlSchema() {
         max: 0.15,
         step: 0.005,
         default: 0.025,
+        advanced: true,
         tooltip: 'Softens shadow clip at scene rect padding.',
       },
       shadowResolutionScale: {
@@ -362,6 +377,7 @@ export function getCloudControlSchema() {
         max: 1.0,
         step: 0.05,
         default: 0.35,
+        advanced: true,
         tooltip: 'Internal resolution for ground/window cloud shadows only. Lower is faster; blur masks soften the result.',
       },
       cloudTopOpacity: {
@@ -612,6 +628,7 @@ export function getCloudControlSchema() {
         max: 0.05,
         step: 0.001,
         default: 0.002,
+        advanced: true,
       },
       driftResponsiveness: {
         type: 'slider',
@@ -620,6 +637,7 @@ export function getCloudControlSchema() {
         max: 1.0,
         step: 0.01,
         default: 0.4,
+        advanced: true,
       },
       driftMaxSpeed: {
         type: 'slider',
@@ -628,6 +646,7 @@ export function getCloudControlSchema() {
         max: 2.0,
         step: 0.01,
         default: 0.5,
+        advanced: true,
       },
       internalResolutionScale: {
         type: 'slider',

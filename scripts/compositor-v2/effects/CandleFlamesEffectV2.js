@@ -198,6 +198,7 @@ export class CandleFlamesEffectV2 {
           name: 'dayNight',
           label: 'Day / Night (Flames)',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'autoDayNightBalance',
@@ -210,6 +211,7 @@ export class CandleFlamesEffectV2 {
           name: 'glow',
           label: 'Glow (Gameplay Light)',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'glowEnabled',
@@ -227,6 +229,7 @@ export class CandleFlamesEffectV2 {
           name: 'glow-indoor',
           label: 'Glow — Indoor Balance',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'glowIndoorIntensityScale',
@@ -270,6 +273,7 @@ export class CandleFlamesEffectV2 {
           name: 'glow-night',
           label: 'Glow — Night Pool',
           type: 'folder',
+          advanced: true,
           expanded: true,
           parameters: [
             'glowNightWarmth',

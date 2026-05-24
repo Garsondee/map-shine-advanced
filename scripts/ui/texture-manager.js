@@ -54,6 +54,7 @@ export class TextureManagerUI {
     };
 
     this._summaryBindings = {};
+    this._summaryFolder = null;
 
     this._lastReport = '';
   }
@@ -350,6 +351,7 @@ export class TextureManagerUI {
     this.container.appendChild(this.headerOverlay);
 
     const summaryFolder = this.pane.addFolder({ title: 'Summary', expanded: true });
+    this._summaryFolder = summaryFolder;
 
     this._summaryBindings.basePath = summaryFolder.addBlade({
       view: 'text',
@@ -439,6 +441,18 @@ export class TextureManagerUI {
   }
 
   /**
+   * Register dev-only UI with the main panel's Advanced Mode registry.
+   * @param {{ registerAdvancedFolder?: (folder: any) => void, registerAdvancedElement?: (el: HTMLElement) => void }} host
+   */
+  registerAdvancedTargets(host) {
+    if (!host) return;
+    host.registerAdvancedFolder?.(this._summaryFolder);
+    host.registerAdvancedElement?.(this.columnsContainer);
+    host.registerAdvancedElement?.(this.foundPane?.element);
+    host.registerAdvancedElement?.(this.catalogPane?.element);
+  }
+
+  /**
    * Toggle visibility
    */
   toggle() {
@@ -448,7 +462,7 @@ export class TextureManagerUI {
     if (this.visible) {
       // Ensure it's on screen
       this.constrainToScreen();
-
+      window.MapShine?.uiManager?.refreshAdvancedModeVisibility?.();
       void this.refresh();
     }
   }
@@ -522,6 +536,10 @@ export class TextureManagerUI {
     this._rebuildColumnPanes();
     this._buildFoundPane(records);
     this._buildCatalogPane(mm, basePath);
+
+    window.MapShine?.uiManager?.registerAdvancedElement?.(this.foundPane?.element);
+    window.MapShine?.uiManager?.registerAdvancedElement?.(this.catalogPane?.element);
+    window.MapShine?.uiManager?.refreshAdvancedModeVisibility?.();
 
     this._lastReport = this._buildReport(records, basePath);
   }

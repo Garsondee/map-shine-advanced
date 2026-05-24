@@ -26,6 +26,7 @@ import { LightingEffectV2 } from '../compositor-v2/effects/LightingEffectV2.js';
 import { FireEffectV2 } from '../compositor-v2/effects/FireEffectV2.js';
 import { DustEffectV2 } from '../compositor-v2/effects/DustEffectV2.js';
 import { CloudEffectV2 } from '../compositor-v2/effects/CloudEffectV2.js';
+import { AshCloudEffectV2 } from '../compositor-v2/effects/AshCloudEffectV2.js';
 import { AsciiEffectV2 } from '../compositor-v2/effects/AsciiEffectV2.js';
 import { WaterEffectV2 } from '../compositor-v2/effects/WaterEffectV2.js';
 import { AtmosphericFogEffectV2 } from '../compositor-v2/effects/AtmosphericFogEffectV2.js';
@@ -48,6 +49,7 @@ export {
   DustEffectV2,
   SmellyFliesEffect,
   CloudEffectV2,
+  AshCloudEffectV2,
   AsciiEffectV2,
   WaterEffectV2,
   AtmosphericFogEffectV2,
@@ -77,6 +79,7 @@ const CAPABILITIES = [
   { effectId: 'color-correction',  displayName: 'Color Correction',          category: 'global',       performanceImpact: 'low' },
   { effectId: 'dot-screen',        displayName: 'Dot Screen',                category: 'global',       performanceImpact: 'low' },
   { effectId: 'clouds',            displayName: 'Clouds',                   category: 'atmospheric',  performanceImpact: 'medium' },
+  { effectId: 'ash-clouds',        displayName: 'Ash Ground Clouds',        category: 'atmospheric',  performanceImpact: 'medium' },
   { effectId: 'overhead-shadows',  displayName: 'Overhead Shadows',         category: 'structure',    performanceImpact: 'medium' },
   { effectId: 'building-shadows',  displayName: 'Building Shadows',         category: 'structure',    performanceImpact: 'medium' },
   { effectId: 'painted-shadows',   displayName: 'Painted Shadows',          category: 'structure',    performanceImpact: 'medium' },

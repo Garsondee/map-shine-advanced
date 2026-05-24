@@ -51,19 +51,20 @@ export class WeatherLightningEffectV2 {
     this._floorCompositor = null;
     this._bakeCache = new LightningShadowBakeCache();
     this._strikeSnapshot = new LightningStrikeShadowSnapshot();
+    /** @type {object[]} Overlapping strike envelopes (see _createStrikeRecord). */
+    this._activeStrikes = [];
+    /** Azimuth captured into {@link LightningStrikeShadowSnapshot} (re-capture when dominant drifts). */
+    this._snapshotAzimuthDeg = Number.NaN;
     this._flashStartMs = -1;
     this._flashPeak = 0.0;
     this._flashValue = 0.0;
-    this._flashSeed = Math.random();
-    /** @type {object|null} Per-strike irregular flicker schedule (see _buildOrganicFlickerProfile). */
-    this._flickerProfile = null;
     this._activeAzimuthDeg = 180;
     this._strikeShadowWeight = 0.85;
     this._nextAutoStrikeMs = 0;
     this._seriesQueue = [];
     this._envFlash01 = 0;
     this._envShadowFlash01 = 0;
-    /** True while a GM manual strike plays at full config brightness (live slider at 0). */
+    /** True while any GM manual strike plays at full config brightness (live slider at 0). */
     this._manualStrikeBoost = false;
   }
 
@@ -146,6 +147,7 @@ export class WeatherLightningEffectV2 {
           name: 'envelope',
           label: 'Flash Envelope',
           type: 'inline',
+          advanced: true,
           parameters: [
             'flashAttackMs', 'flashFlickerHoldMs', 'flashDecayMs', 'flashDecayCurve',
             'flashFlickerAmount', 'flashFlickerRate', 'flashMaxClamp',
@@ -156,6 +158,7 @@ export class WeatherLightningEffectV2 {
           name: 'gm',
           label: 'GM Triggers',
           type: 'inline',
+          advanced: true,
           parameters: ['triggerSmallStrike', 'triggerBigStrike', 'triggerStrikeSeries'],
         },
       ],
@@ -349,7 +352,6 @@ export class WeatherLightningEffectV2 {
   initialize() {
     this._initialized = true;
     this.isInitialized = true;
-    this._flashSeed = Math.random();
     log.info('WeatherLightningEffectV2 initialized');
   }
 
@@ -395,49 +397,180 @@ export class WeatherLightningEffectV2 {
   }
 
   /**
+   * Relative peak brightness for a strike kind (0..1 of configured max).
+   * Small strikes are a faint fraction of a full strike — typically 10–32%.
+   * @param {'small'|'big'|'auto'} [kind]
+   * @returns {number}
+   */
+  _pickStrikePeakFraction(kind = 'auto') {
+    if (kind === 'small') return 0.10 + Math.random() * 0.22;
+    if (kind === 'big') return 0.88 + Math.random() * 0.12;
+    const roll = Math.random();
+    if (roll < 0.14) return 0.88 + Math.random() * 0.12;
+    if (roll < 0.62) return 0.10 + Math.random() * 0.22;
+    const spread = clamp01(this.params.distanceVariation, 0.5);
+    return 0.35 + spread * (0.25 + Math.random() * 0.4);
+  }
+
+  /**
+   * Absolute strike brightness before flashBrightness scaling.
+   * Small uses a fraction of max — NOT interpolated from brightnessMin (that kept small ~75% as bright as big).
    * @param {'small'|'big'|'auto'} [kind]
    * @returns {number}
    */
   _pickStrikeBrightness(kind = 'auto') {
     const vmin = clamp01(this.params.brightnessMin, 0.22);
     const vmax = clamp01(this.params.brightnessMax, 1);
+    const frac = this._pickStrikePeakFraction(kind);
+    if (kind === 'small') {
+      return vmax * frac;
+    }
+    if (kind === 'big') {
+      return vmax * Math.max(frac, 0.92);
+    }
+    if (frac < 0.55) {
+      return vmax * frac;
+    }
     const spread = clamp01(this.params.distanceVariation, 0.5);
-    if (kind === 'small') return vmin + (vmax - vmin) * spread * 0.15;
-    if (kind === 'big') return vmax;
-    const t = spread * (0.35 + Math.random() * 0.65);
-    return vmin + (vmax - vmin) * t;
+    return vmin + (vmax - vmin) * spread * (0.35 + (frac - 0.55) * 0.9);
+  }
+
+  /**
+   * @param {'small'|'big'|'auto'} kind
+   * @returns {object}
+   * @private
+   */
+  _createStrikeRecord(kind = 'auto') {
+    const flashSeed = Math.random();
+    const baseHoldMs = Math.max(0, Number(this.params.flashFlickerHoldMs) || 550);
+    const flickerHoldMs = kind === 'small'
+      ? Math.max(60, baseHoldMs * 0.22)
+      : baseHoldMs;
+    const chaos = Math.max(0.5, Number(this.params.flashFlickerRate) || 10);
+    const flickerProfile = flickerHoldMs > 0
+      ? this._buildOrganicFlickerProfile(flashSeed, kind, chaos)
+      : null;
+    const blendW = clamp01(this.params.shadowBlendWeight, 0.98);
+    const manualBoost = kind !== 'auto' && this._getLiveIntensityScale() <= 0.001;
+    const scale = this._getEffectiveIntensityScale(kind);
+    const bright = clamp01(this.params.flashBrightness, 0.7) * scale;
+    let peak = this._pickStrikeBrightness(kind) * bright;
+    if (kind === 'big') {
+      peak = Math.max(peak, bright * 0.92);
+    }
+    let decayMs = Number(this.params.flashDecayMs) || 1950;
+    if (kind === 'small') {
+      decayMs = Math.min(
+        Number(this.params.smallStrikeDecayMs) || 380,
+        Math.max(120, decayMs * 0.35),
+      );
+    } else if (kind === 'big') {
+      decayMs = Number(this.params.bigStrikeDecayMs) || 900;
+    }
+    return {
+      kind,
+      startMs: performance.now(),
+      peak: Math.max(0, peak),
+      azimuthDeg: Math.random() * 360,
+      strikeShadowWeight: kind === 'small' ? blendW * 0.42 : blendW,
+      flickerHoldMs,
+      flickerProfile,
+      decayMs,
+      flashSeed,
+      manualBoost,
+    };
+  }
+
+  /**
+   * @returns {boolean}
+   * @private
+   */
+  _hasActiveStrikes() {
+    return this._activeStrikes.length > 0;
+  }
+
+  /**
+   * Smoothly combine overlapping flash contributions (additive screen blend, capped).
+   * @param {number} base
+   * @param {number} add
+   * @returns {number}
+   * @private
+   */
+  _blendFlashContribution(base, add) {
+    const a = clamp01(base, 0);
+    const b = clamp01(add, 0);
+    return clamp01(a + b * (1 - a), 0);
+  }
+
+  /**
+   * @param {object} strike
+   * @param {number} nowMs
+   * @returns {{ absoluteFlash01: number, shadow01: number, env01: number, done: boolean }}
+   * @private
+   */
+  _computeStrikeContribution(strike, nowMs) {
+    const attackMs = Math.max(0, Number(this.params.flashAttackMs) || 0);
+    const flickerHoldMs = Math.max(
+      0,
+      Number(strike.flickerHoldMs) || Number(this.params.flashFlickerHoldMs) || 1600,
+    );
+    const decayMs = Math.max(1, Number(strike.decayMs) || Number(this.params.flashDecayMs) || 1950);
+    const curve = Math.max(0.15, Number(this.params.flashDecayCurve) || 0.72);
+    const dtMs = Math.max(0, nowMs - strike.startMs);
+
+    const env = this._computeStrikeEnvelope(dtMs, attackMs, flickerHoldMs, decayMs, curve, true);
+    const peak = Math.max(0, strike.peak);
+
+    const flickAmtBase = clamp01(this.params.flashFlickerAmount, 0.52);
+    const flickAmt = strike.kind === 'small' ? flickAmtBase * 0.38 : flickAmtBase;
+    const inFlickerHold = dtMs > attackMs && dtMs < attackMs + flickerHoldMs + 1;
+    let flickMul = 1.0;
+    if (flickAmt > 0 && inFlickerHold && flickerHoldMs > 0) {
+      const holdElapsed = Math.max(0, dtMs - attackMs);
+      const u = holdElapsed / flickerHoldMs;
+      const organic = this._sampleOrganicFlicker(strike.flickerProfile, u);
+      flickMul = (1 - flickAmt) + flickAmt * organic;
+    }
+
+    let flash = env * peak * flickMul;
+    const clampV = Number.isFinite(Number(this.params.flashMaxClamp))
+      ? Math.max(0, Number(this.params.flashMaxClamp))
+      : 4;
+    if (clampV > 0) flash = Math.min(flash, clampV);
+
+    const scale = strike.manualBoost ? 1.0 : this._getEffectiveIntensityScale(strike.kind);
+    const bright = clamp01(this.params.flashBrightness, 0.7) * scale;
+    const fullPeak = clamp01(this.params.brightnessMax, 1) * bright;
+    const strikeFlash01 = fullPeak > 0.001 ? clamp01(flash / fullPeak, 0) : 0;
+
+    const shadowEnv = this._computeShadowEnvelope(dtMs, attackMs, flickerHoldMs, decayMs);
+    let shadowOut = shadowEnv;
+    if (inFlickerHold && flickMul < 0.999) {
+      shadowOut *= flickMul;
+    }
+    const peakFrac = fullPeak > 0.001 ? clamp01(peak / fullPeak, 0) : 0;
+    const shadow01 = clamp01(shadowOut * peakFrac, 0);
+
+    const lightDone = env <= 0.0001;
+    const shadowDone = shadowEnv <= 0.0001;
+    return {
+      strikeFlash01,
+      shadow01,
+      env01: env,
+      flashValue: flash,
+      done: lightDone && shadowDone,
+    };
   }
 
   /**
    * @param {'small'|'big'|'auto'} [kind]
    */
   _beginStrike(kind = 'auto') {
-    this._strikeSnapshot.clear();
-    this._flashSeed = Math.random();
-    const holdMs = Math.max(0, Number(this.params.flashFlickerHoldMs) || 550);
-    const chaos = Math.max(0.5, Number(this.params.flashFlickerRate) || 10);
-    this._flickerProfile = holdMs > 0
-      ? this._buildOrganicFlickerProfile(this._flashSeed, kind, chaos)
-      : null;
-    this._activeAzimuthDeg = Math.random() * 360;
-    const blendW = clamp01(this.params.shadowBlendWeight, 0.98);
-    this._strikeShadowWeight = kind === 'small' ? blendW * 0.88 : blendW;
-    this._manualStrikeBoost = kind !== 'auto' && this._getLiveIntensityScale() <= 0.001;
-    const scale = this._getEffectiveIntensityScale(kind);
-    const bright = clamp01(this.params.flashBrightness, 0.7) * scale;
-    let peak = this._pickStrikeBrightness(kind) * bright;
-    if (kind === 'big') {
-      peak = Math.max(peak, bright);
-    }
-    this._flashPeak = Math.max(this._flashPeak, peak);
-    this._flashStartMs = performance.now();
-    if (kind === 'small') {
-      this._pendingDecayMs = Number(this.params.smallStrikeDecayMs) || 380;
-    } else if (kind === 'big') {
-      this._pendingDecayMs = Number(this.params.bigStrikeDecayMs) || 900;
-    } else {
-      this._pendingDecayMs = null;
-    }
+    const strike = this._createStrikeRecord(kind);
+    this._activeStrikes.push(strike);
+    if (strike.manualBoost) this._manualStrikeBoost = true;
+    this._flashStartMs = strike.startMs;
+    this._flashPeak = Math.max(this._flashPeak, strike.peak);
     this._bakeCache.ensureReady({ floorCompositor: this._floorCompositor, params: this.params });
     this._rushBakeCacheForStrike();
     this._kickFlashEnvelopeAndRender();
@@ -461,12 +594,17 @@ export class WeatherLightningEffectV2 {
   _requestStrikeRenderLoop() {
     try {
       const holdMs = Math.max(0, Number(this.params.flashFlickerHoldMs) || 550);
-      const decayMs = Math.max(
-        1,
-        Number(this._pendingDecayMs) || Number(this.params.flashDecayMs) || 1950,
-      );
       const fadeScale = Math.max(1, Number(this.params.shadowFadeDurationScale) || 3.5);
-      const durationMs = holdMs + decayMs * fadeScale + 800;
+      let durationMs = holdMs + (Number(this.params.flashDecayMs) || 1950) * fadeScale + 800;
+      for (const strike of this._activeStrikes) {
+        const decayMs = Math.max(1, Number(strike.decayMs) || Number(this.params.flashDecayMs) || 1950);
+        const remaining = holdMs + decayMs * fadeScale + 800 - Math.max(0, performance.now() - strike.startMs);
+        durationMs = Math.max(durationMs, remaining);
+      }
+      for (const item of this._seriesQueue) {
+        const tail = Math.max(0, item.atMs - performance.now()) + holdMs + fadeScale * 4500 + 800;
+        durationMs = Math.max(durationMs, tail);
+      }
       window.MapShine?.renderLoop?.requestContinuousRender?.(durationMs);
     } catch (_) {}
   }
@@ -527,7 +665,7 @@ export class WeatherLightningEffectV2 {
    * @returns {object|null}
    */
   getVegetationLightningShadowTarget() {
-    if (this._flashStartMs < 0) return null;
+    if (!this._hasActiveStrikes()) return null;
     return this._buildLightningShadowTarget();
   }
 
@@ -605,20 +743,18 @@ export class WeatherLightningEffectV2 {
   triggerStrikeSeries(durationMs = 30000) {
     if (!this._canRunStrikeActivity()) return;
     const dur = Math.max(5000, Number(durationMs) || 30000);
-    const count = 4 + Math.floor(Math.random() * 9);
+    const count = 12 + Math.floor(Math.random() * 14);
     const queue = [];
     for (let i = 0; i < count; i++) {
-      const t = (dur / count) * i + Math.random() * (dur / count) * 0.35;
       queue.push({
-        atMs: performance.now() + t,
-        kind: Math.random() < 0.35 ? 'big' : 'small',
+        atMs: performance.now() + Math.random() * dur,
+        kind: Math.random() < 0.14 ? 'big' : 'small',
       });
     }
+    queue.sort((a, b) => a.atMs - b.atMs);
     this._seriesQueue = queue;
     this._bakeCache.ensureReady({ floorCompositor: this._floorCompositor, params: this.params });
-    try {
-      window.MapShine?.renderLoop?.requestContinuousRender?.(dur + 1200);
-    } catch (_) {}
+    this._requestStrikeRenderLoop();
   }
 
   /**
@@ -1004,72 +1140,86 @@ export class WeatherLightningEffectV2 {
     );
   }
 
+  _syncDominantStrikeSnapshot(dominantStrike) {
+    if (!dominantStrike) return;
+    const az = dominantStrike.azimuthDeg;
+    const prev = this._snapshotAzimuthDeg;
+    const drift = Number.isFinite(prev)
+      ? Math.min(Math.abs(az - prev), 360 - Math.abs(az - prev))
+      : Infinity;
+    if (!Number.isFinite(prev) || drift > 18) {
+      this._strikeSnapshot.clear();
+      this._snapshotAzimuthDeg = az;
+    }
+  }
+
   _updateFlashEnvelope(nowMs, timeInfo) {
-    if (this._flashStartMs < 0) {
-      if (this._flashValue !== 0) {
+    if (!this._hasActiveStrikes()) {
+      if (this._flashValue !== 0 || this._envFlash01 !== 0 || this._envShadowFlash01 !== 0) {
         this._flashValue = 0;
         this._envFlash01 = 0;
         this._envShadowFlash01 = 0;
+        this._flashStartMs = -1;
+        this._flashPeak = 0;
+        this._manualStrikeBoost = false;
+        this._strikeSnapshot.clear();
+        this._snapshotAzimuthDeg = Number.NaN;
       }
       this._publishEnvironment(timeInfo);
       return;
     }
 
-    const attackMs = Math.max(0, Number(this.params.flashAttackMs) || 0);
-    const flickerHoldMs = Math.max(0, Number(this.params.flashFlickerHoldMs) || 1600);
-    const decayMs = Math.max(
-      1,
-      Number(this._pendingDecayMs) || Number(this.params.flashDecayMs) || 1950,
-    );
-    const curve = Math.max(0.15, Number(this.params.flashDecayCurve) || 0.72);
-    const dtMs = Math.max(0, nowMs - this._flashStartMs);
+    let combinedFlash01 = 0;
+    let combinedShadow01 = 0;
+    let combinedFlashValue = 0;
+    let dominantStrike = null;
+    let dominantFlash = 0;
+    let earliestStart = Infinity;
+    let maxPeak = 0;
 
-    const env = this._computeStrikeEnvelope(dtMs, attackMs, flickerHoldMs, decayMs, curve, true);
-
-    let flash = env * Math.max(0, this._flashPeak);
-
-    const flickAmt = clamp01(this.params.flashFlickerAmount, 0.52);
-    const inFlickerHold = dtMs > attackMs && dtMs < attackMs + flickerHoldMs + 1;
-    let flickMul = 1.0;
-    if (flickAmt > 0 && inFlickerHold && flickerHoldMs > 0) {
-      const holdElapsed = Math.max(0, dtMs - attackMs);
-      const u = holdElapsed / flickerHoldMs;
-      const organic = this._sampleOrganicFlicker(this._flickerProfile, u);
-      flickMul = (1 - flickAmt) + flickAmt * organic;
-      flash *= flickMul;
+    for (let i = this._activeStrikes.length - 1; i >= 0; i--) {
+      const strike = this._activeStrikes[i];
+      const contrib = this._computeStrikeContribution(strike, nowMs);
+      if (contrib.done) {
+        this._activeStrikes.splice(i, 1);
+        continue;
+      }
+      earliestStart = Math.min(earliestStart, strike.startMs);
+      maxPeak = Math.max(maxPeak, strike.peak);
+      combinedFlash01 = this._blendFlashContribution(combinedFlash01, contrib.strikeFlash01);
+      combinedShadow01 = Math.max(combinedShadow01, contrib.shadow01);
+      combinedFlashValue = Math.max(combinedFlashValue, contrib.flashValue);
+      if (contrib.strikeFlash01 > dominantFlash) {
+        dominantFlash = contrib.strikeFlash01;
+        dominantStrike = strike;
+      }
     }
 
-    const clampV = Number.isFinite(Number(this.params.flashMaxClamp))
-      ? Math.max(0, Number(this.params.flashMaxClamp))
-      : 4;
-    if (clampV > 0) flash = Math.min(flash, clampV);
-
-    this._flashValue = flash;
-    this._envEnvelope01 = env;
-    const peak = Math.max(0, this._flashPeak);
-    // Perceptual flash01 must include flicker (lighting/windows read this, not _flashValue alone).
-    this._envFlash01 = peak > 0.001 ? clamp01(flash / peak, 0) : 0;
-    const shadowEnv = this._computeShadowEnvelope(dtMs, attackMs, flickerHoldMs, decayMs);
-    // Shadow fade follows the shadow envelope only (not strike peak) so dim flashes still release smoothly.
-    let shadowOut = shadowEnv;
-    if (inFlickerHold && flickMul < 0.999) {
-      shadowOut *= flickMul;
-    }
-    this._envShadowFlash01 = clamp01(shadowOut, 0);
-
-    const lightDone = env <= 0.0001;
-    const shadowDone = shadowEnv <= 0.0001;
-    if (lightDone && shadowDone) {
-      this._flashStartMs = -1;
-      this._flashPeak = 0;
-      this._pendingDecayMs = null;
-      this._flickerProfile = null;
-      this._manualStrikeBoost = false;
+    if (!this._hasActiveStrikes()) {
       this._flashValue = 0;
       this._envFlash01 = 0;
       this._envShadowFlash01 = 0;
+      this._flashStartMs = -1;
+      this._flashPeak = 0;
+      this._manualStrikeBoost = false;
       this._strikeSnapshot.clear();
+      this._snapshotAzimuthDeg = Number.NaN;
+      this._publishEnvironment(timeInfo);
+      return;
     }
+
+    if (dominantStrike) {
+      this._activeAzimuthDeg = dominantStrike.azimuthDeg;
+      this._strikeShadowWeight = dominantStrike.strikeShadowWeight;
+      this._syncDominantStrikeSnapshot(dominantStrike);
+    }
+
+    this._manualStrikeBoost = this._activeStrikes.some((s) => s.manualBoost);
+    this._flashStartMs = Number.isFinite(earliestStart) ? earliestStart : -1;
+    this._flashPeak = maxPeak;
+    this._flashValue = combinedFlashValue;
+    this._envFlash01 = combinedFlash01;
+    this._envShadowFlash01 = combinedShadow01;
 
     this._publishEnvironment(timeInfo);
   }
@@ -1085,7 +1235,7 @@ export class WeatherLightningEffectV2 {
       this._nextAutoStrikeMs = nowMs + min + Math.random() * (max - min);
     }
 
-    if (stormOn || this._flashStartMs >= 0 || this._seriesQueue.length) {
+    if (stormOn || this._hasActiveStrikes() || this._seriesQueue.length) {
       this._bakeCache.ensureReady({ floorCompositor: this._floorCompositor, params: this.params });
       this._bakeCache.tickBake({ floorCompositor: this._floorCompositor, params: this.params });
     }
@@ -1097,7 +1247,7 @@ export class WeatherLightningEffectV2 {
       }
     }
 
-    if (stormOn && this._flashStartMs < 0 && nowMs >= this._nextAutoStrikeMs) {
+    if (stormOn && nowMs >= this._nextAutoStrikeMs) {
       this._beginStrike('auto');
       const { min, max } = this._resolveDelayRange();
       const intensity = clamp01(this.params.stormIntensity, 0);
@@ -1113,7 +1263,7 @@ export class WeatherLightningEffectV2 {
   wantsContinuousRender() {
     return (
       (this.enabled && this.params.enabled && clamp01(this.params.stormIntensity, 0) > 0)
-      || this._flashStartMs >= 0
+      || this._hasActiveStrikes()
       || this._envShadowFlash01 > 0.001
       || this._seriesQueue.length > 0
       || this._bakeCache.state === 'baking'
@@ -1121,6 +1271,8 @@ export class WeatherLightningEffectV2 {
   }
 
   dispose() {
+    this._activeStrikes = [];
+    this._seriesQueue = [];
     this._bakeCache.dispose();
     this._strikeSnapshot.dispose();
     this._floorCompositor = null;

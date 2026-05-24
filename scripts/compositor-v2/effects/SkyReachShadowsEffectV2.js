@@ -230,13 +230,14 @@ export class SkyReachShadowsEffectV2 {
         length: { type: 'slider', label: 'Length', min: 0.02, max: 0.6, step: 0.005, default: 0.1 },
         softness: { type: 'slider', label: 'Softness', min: 0.5, max: 8.0, step: 0.1, default: 8 },
         smear: { type: 'slider', label: 'Smear', min: 0.0, max: 1.0, step: 0.01, default: 1.0 },
-        resolutionScale: { type: 'slider', label: 'Resolution', min: 1.0, max: 2.0, step: 0.05, default: 1.25 },
-        penumbra: { type: 'slider', label: 'Penumbra', min: 0.0, max: 1.0, step: 0.01, default: 1 },
-        shadowCurve: { type: 'slider', label: 'Shadow Curve', min: 0.5, max: 1.6, step: 0.01, default: 0.81 },
-        blurRadius: { type: 'slider', label: 'Blur', min: 0.0, max: 4.0, step: 0.05, default: 0 },
+        resolutionScale: { type: 'slider', label: 'Resolution', min: 1.0, max: 2.0, step: 0.05, default: 1.25, advanced: true },
+        penumbra: { type: 'slider', label: 'Penumbra', min: 0.0, max: 1.0, step: 0.01, default: 1, advanced: true },
+        shadowCurve: { type: 'slider', label: 'Shadow Curve', min: 0.5, max: 1.6, step: 0.01, default: 0.81, advanced: true },
+        blurRadius: { type: 'slider', label: 'Blur', min: 0.0, max: 4.0, step: 0.05, default: 0, advanced: true },
         upperFloorCombineMode: {
           type: 'select',
           label: 'Upper-Floor Combine',
+          advanced: true,
           options: {
             'Max (union)': 'max',
             'Multiply (single layer only)': 'multiply',
@@ -247,6 +248,7 @@ export class SkyReachShadowsEffectV2 {
           type: 'boolean',
           label: 'Receiver: interior only',
           default: false,
+          advanced: true,
         },
       },
     };

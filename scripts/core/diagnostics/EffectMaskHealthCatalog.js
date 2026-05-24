@@ -128,6 +128,12 @@ const EFFECT_MASK_HEALTH_ENTRIES = [
     maskRequirements: [{ maskIds: ['ash'], severity: 'warn' }],
   },
   {
+    healthEffectId: 'AshCloudEffectV2',
+    sceneEffectIds: ['ash-clouds'],
+    maskRequirements: [{ maskIds: ['outdoors'], severity: 'warn' }],
+    isEffectEnabled: (_ctx, instance) => isV2InstanceEnabled(instance),
+  },
+  {
     healthEffectId: 'SpecularEffectV2',
     sceneEffectIds: ['specular'],
     maskRequirements: [{ maskIds: ['specular'], severity: 'warn' }],

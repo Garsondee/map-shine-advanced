@@ -455,6 +455,7 @@ export class DistortionManager {
           name: 'debug',
           label: 'Debug',
           type: 'inline',
+          advanced: true,
           collapsed: true,
           parameters: ['debugMode', 'debugShowMask', 'debugShowWaterShoreBand']
         }

@@ -236,6 +236,7 @@ export class DustMotesEffect extends EffectBase {
           name: 'lifetime',
           label: 'Lifetime & Size',
           type: 'inline',
+          advanced: true,
           separator: true,
           parameters: ['lifeMin', 'lifeMax', 'sizeMin', 'sizeMax']
         },
@@ -243,6 +244,7 @@ export class DustMotesEffect extends EffectBase {
           name: 'volume',
           label: 'Volume',
           type: 'inline',
+          advanced: true,
           separator: true,
           parameters: ['zMin', 'zMax']
         },
@@ -250,6 +252,7 @@ export class DustMotesEffect extends EffectBase {
           name: 'motion',
           label: 'Motion',
           type: 'inline',
+          advanced: true,
           separator: true,
           parameters: ['motionDrift', 'motionCurlStrength', 'motionCurlScale']
         },
@@ -257,6 +260,7 @@ export class DustMotesEffect extends EffectBase {
           name: 'window',
           label: 'Window Light Coupling',
           type: 'inline',
+          advanced: true,
           separator: true,
           parameters: ['baseDarkness', 'lightMin', 'lightMax', 'lightIntensity', 'lightTintInfluence']
         },
@@ -264,6 +268,7 @@ export class DustMotesEffect extends EffectBase {
           name: 'debug',
           label: 'Debug',
           type: 'inline',
+          advanced: true,
           separator: true,
           parameters: ['debugShowLight', 'debugForceVisible']
         }
@@ -271,7 +276,7 @@ export class DustMotesEffect extends EffectBase {
       parameters: {
         enabled: { type: 'boolean', default: false },
         density: { type: 'slider', label: 'Density', min: 0.0, max: 3.0, step: 0.05, default: 3.0, throttle: 50 },
-        maxParticles: { type: 'slider', label: 'Max Particles', min: 0, max: 20000, step: 100, default: 4000, throttle: 50 },
+        maxParticles: { type: 'slider', label: 'Max Particles', min: 0, max: 20000, step: 100, default: 4000, throttle: 50, advanced: true },
         brightness: { type: 'slider', label: 'Brightness', min: 0.0, max: 3.0, step: 0.05, default: 3.0, throttle: 50 },
         opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.5, throttle: 50 },
         lifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.2, max: 30.0, step: 0.1, default: 4.5, throttle: 50 },

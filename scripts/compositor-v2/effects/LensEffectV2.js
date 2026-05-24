@@ -403,14 +403,14 @@ export class LensEffectV2 {
     const prev = this._uniformCache[cacheKey];
     if (prev && prev[0] === x && prev[1] === y) return;
     this._uniformCache[cacheKey] = [x, y];
-    uniform.set(x, y);
+    uniform.value.set(x, y);
   }
 
   _setVec4Uniform(uniform, cacheKey, x, y, z, w) {
     const prev = this._uniformCache[cacheKey];
     if (prev && prev[0] === x && prev[1] === y && prev[2] === z && prev[3] === w) return;
     this._uniformCache[cacheKey] = [x, y, z, w];
-    uniform.set(x, y, z, w);
+    uniform.value.set(x, y, z, w);
   }
 
   _clampOverlayIndex(raw) {
@@ -622,6 +622,7 @@ export class LensEffectV2 {
           name: 'lens-dynamics',
           label: 'Dynamic Layer Behavior',
           type: 'folder',
+          advanced: true,
           expanded: true,
           parameters: ['dynamicLayersEnabled', 'layerCycleSeconds', 'lumaSmoothingSeconds', 'layerSwapFadeSeconds']
         },
@@ -629,6 +630,7 @@ export class LensEffectV2 {
           name: 'lens-autofocus',
           label: 'Autofocus Defocus Pulses',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'autoFocusEnabled',
@@ -642,6 +644,7 @@ export class LensEffectV2 {
           name: 'lens-light-burn',
           label: 'Light Burn Persistence',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'lightBurnEnabled',
@@ -656,6 +659,7 @@ export class LensEffectV2 {
           name: 'lens-motion',
           label: 'Camera Motion Response',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'motionBlurEnabled', 'motionBlurStrength', 'motionBlurMaxPx',
@@ -666,6 +670,7 @@ export class LensEffectV2 {
           name: 'lens-viewfinder',
           label: 'Viewfinder Overlay',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'viewfinderEnabled', 'viewfinderSelection',
@@ -679,6 +684,7 @@ export class LensEffectV2 {
           name: 'lens-structural',
           label: 'Structural Imperfections (Dust / Grease / Scratches)',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'structuralSelection',
@@ -694,6 +700,7 @@ export class LensEffectV2 {
           name: 'lens-optical',
           label: 'Optical Artifacts (Lens Leaks / Rings)',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'opticalSelection',
@@ -709,6 +716,7 @@ export class LensEffectV2 {
           name: 'lens-reactive',
           label: 'Illumination-Reactive Leaks / Chroma',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'reactiveSelection',

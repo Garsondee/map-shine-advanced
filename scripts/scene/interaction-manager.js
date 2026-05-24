@@ -883,7 +883,7 @@ export class InteractionManager {
 
     const uiRootSelector = '.window-app, .app.window-app, .application, foundry-application, dialog, .dialog, .filepicker, #sidebar, #navigation, #chat, #chat-log, #chat-controls, .chat-popout, .chat-message, .message-content, [data-message-id], [data-app-type="ChatMessage"]';
     const uiControlSelector = 'button, a, input, select, textarea, label, [role="button"], [data-action], [data-tooltip]';
-    const mapShineUiSelector = '#map-shine-ui, #map-shine-texture-manager, #map-shine-effect-stack, #map-shine-control-panel, #map-shine-loading-overlay';
+    const mapShineUiSelector = '#map-shine-ui, #map-shine-texture-manager, #map-shine-effect-stack, #map-shine-control-panel, #map-shine-control-panel-minimized, #map-shine-loading-overlay';
 
     // If any probed element is a render canvas, treat it as scene interaction
     // unless a hard UI blocker is present (dialogs, inputs, etc.).
@@ -945,7 +945,7 @@ export class InteractionManager {
 
     const uiRootSelector = '.window-app, .app.window-app, .application, foundry-application, dialog, .dialog, .filepicker, #sidebar, #navigation, #chat, #chat-log, #chat-controls, .chat-popout, .chat-message, .message-content, [data-message-id], [data-app-type="ChatMessage"]';
     const uiControlSelector = 'button, a, input, select, textarea, label, [role="button"], [data-action], [data-tooltip]';
-    const mapShineUiSelector = '#map-shine-ui, #map-shine-texture-manager, #map-shine-effect-stack, #map-shine-control-panel, #map-shine-loading-overlay';
+    const mapShineUiSelector = '#map-shine-ui, #map-shine-texture-manager, #map-shine-effect-stack, #map-shine-control-panel, #map-shine-control-panel-minimized, #map-shine-loading-overlay';
 
     for (const el of elements) {
       if (el.closest(uiRootSelector)) return true;

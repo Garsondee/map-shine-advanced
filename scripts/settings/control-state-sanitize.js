@@ -40,6 +40,36 @@ export const CP_VALID_DIRECTED_PRESET = new Set([
 
 export const CP_VALID_GUSTINESS = new Set(['calm', 'light', 'moderate', 'strong', 'extreme']);
 
+export const CP_VALID_WEATHER_PANEL_VIEWS = new Set(['manual', 'directed', 'dynamic']);
+
+/**
+ * Infer the GM weather panel tab from runtime flags and legacy values.
+ * Mutates `cs.weatherPanelView` when inference is required.
+ * @param {object|null|undefined} cs
+ * @returns {'manual'|'directed'|'dynamic'}
+ */
+export function inferWeatherPanelView(cs) {
+  if (!cs || typeof cs !== 'object') return 'manual';
+
+  if (cs.weatherPanelView === 'director') {
+    cs.weatherPanelView = undefined;
+  }
+
+  if (cs.weatherMode === 'dynamic' && cs.dynamicEnabled === true) {
+    cs.weatherPanelView = 'dynamic';
+    return 'dynamic';
+  }
+
+  const view = cs.weatherPanelView;
+  if (view === 'manual' || view === 'directed') {
+    cs.weatherPanelView = view;
+    return view;
+  }
+
+  cs.weatherPanelView = 'manual';
+  return 'manual';
+}
+
 /**
  * Default GM control panel state (matches ControlPanelManager constructor).
  * @returns {object}
@@ -50,8 +80,12 @@ export function createDefaultControlState() {
     timeTransitionMinutes: 0.0,
     linkTimeToFoundry: false,
     weatherMode: 'dynamic',
+    /** Manual Weather sliders vs Weather Director vs Dynamic in the unified Weather folder. */
+    weatherPanelView: 'manual',
     dynamicEnabled: false,
     dynamicPresetId: 'Temperate Plains',
+    /** Scene mood / biome card id from Dynamic deck (`mood:…` or `biome:…`). */
+    dynamicEnvironmentPresetId: null,
     dynamicEvolutionSpeed: 60.0,
     dynamicPaused: false,
     directedPresetId: 'Clear (Dry)',
@@ -129,6 +163,21 @@ export function sanitizeControlStateInPlace(cs, options = {}) {
     cs.weatherMode = 'directed';
   }
 
+  inferWeatherPanelView(cs);
+
+  if (!CP_VALID_WEATHER_PANEL_VIEWS.has(cs.weatherPanelView)) {
+    if (cs.weatherPanelView != null) warn('Invalid weatherPanelView; resetting to manual', cs.weatherPanelView);
+    cs.weatherPanelView = 'manual';
+  }
+
+  if (cs.weatherPanelView === 'dynamic') {
+    cs.weatherMode = 'dynamic';
+    cs.dynamicEnabled = true;
+  } else {
+    cs.weatherMode = 'directed';
+    cs.dynamicEnabled = false;
+  }
+
   if (typeof cs.dynamicPresetId !== 'string' || !CP_VALID_DYNAMIC_PRESET.has(cs.dynamicPresetId)) {
     if (cs.dynamicPresetId != null) warn('Invalid dynamicPresetId; resetting', cs.dynamicPresetId);
     cs.dynamicPresetId = 'Temperate Plains';
@@ -173,6 +222,12 @@ export function sanitizeControlStateInPlace(cs, options = {}) {
   if (typeof cs.dynamicEnabled !== 'boolean') cs.dynamicEnabled = false;
   if (typeof cs.dynamicPaused !== 'boolean') cs.dynamicPaused = false;
   if (typeof cs.linkTimeToFoundry !== 'boolean') cs.linkTimeToFoundry = false;
+
+  if (cs.dynamicEnvironmentPresetId != null && typeof cs.dynamicEnvironmentPresetId !== 'string') {
+    cs.dynamicEnvironmentPresetId = null;
+  } else if (typeof cs.dynamicEnvironmentPresetId === 'string' && !cs.dynamicEnvironmentPresetId.trim()) {
+    cs.dynamicEnvironmentPresetId = null;
+  }
 
   const rScale = Number(cs.replicaOcclusionRadiusScale);
   cs.replicaOcclusionRadiusScale = Number.isFinite(rScale) ? Math.max(0.05, Math.min(100, rScale)) : 35.0;

@@ -82,6 +82,7 @@ import { SepiaEffectV2 } from '../compositor-v2/effects/SepiaEffectV2.js';
 import { LensEffectV2 } from '../compositor-v2/effects/LensEffectV2.js';
 import { FloorDepthBlurEffect } from '../compositor-v2/effects/FloorDepthBlurEffect.js';
 import { AshDisturbanceEffectV2 } from '../compositor-v2/effects/AshDisturbanceEffectV2.js';
+import { AshCloudEffectV2 } from '../compositor-v2/effects/AshCloudEffectV2.js';
 import { InteractionManager } from '../scene/interaction-manager.js';
 import { PixiContentLayerBridge } from './pixi-content-layer-bridge.js';
 import { GridRenderer } from '../scene/grid-renderer.js';
@@ -101,6 +102,8 @@ import { loadingScreenService as loadingOverlay } from '../ui/loading-screen/loa
 import { stateApplier } from '../ui/state-applier.js';
 import { MSA_SAME_SCENE_REDRAW_PREDICT_MS } from '../utils/msa-local-flag-guard.js';
 import { applyWeatherManualParam, syncDirectedCustomPresetFromWeatherController } from '../ui/weather-param-bridge.js';
+import { inferWeatherPanelView } from '../settings/control-state-sanitize.js';
+import { getWeatherSyncBridge } from './weather-sync-bridge.js';
 import { createEnhancedLightsApi } from '../effects/EnhancedLightsApi.js';
 import { LightEnhancementStore } from '../effects/LightEnhancementStore.js';
 import { OverlayUIManager } from '../ui/overlay-ui-manager.js';
@@ -4609,7 +4612,7 @@ function _msaMapShineFlagDiffIsEchoOnly(changes) {
   try {
     const keys = _msaGetMsaFlagChanges(changes);
     if (!keys.length) return false;
-    const ECHO = new Set(['controlState', 'weather-snapshot']);
+    const ECHO = new Set(['controlState', 'weather-snapshot', 'weather-dynamic', 'weather-transition', 'weather-transitionTarget']);
     return keys.every((k) => ECHO.has(k));
   } catch (_) {
     return false;
@@ -4703,6 +4706,9 @@ function _msaSceneUpdateDeltaSkipsMapShineRebuild(changes) {
         || k === 'mapPointGroupsInitialized'
         || k === 'controlState'
         || k === 'weather-snapshot'
+        || k === 'weather-dynamic'
+        || k === 'weather-transition'
+        || k === 'weather-transitionTarget'
         || k === 'advancedCameraState'
       ))
       && !structuralTop
@@ -4717,6 +4723,9 @@ function _msaSceneUpdateDeltaSkipsMapShineRebuild(changes) {
     const msaNonStructuralFlagKeys = new Set([
       'controlState',
       'weather-snapshot',
+      'weather-dynamic',
+      'weather-transition',
+      'weather-transitionTarget',
       'mapPointGroups',
       'mapPointGroupsInitialized',
       'advancedCameraState',
@@ -4991,15 +5000,18 @@ async function onUpdateScene(scene, changes, _options, _userId) {
               cp.controlState = { ...cs };
             }
             // Shallow assign replaces nested `directedCustomPreset` with a new object from flags.
-            // Merge back into the stable preset object used for persistence + native Live Weather DOM.
+            // Merge back into the stable preset object used for persistence + native Manual Weather DOM.
             safeCall(() => {
               if (typeof cp._ensureDirectedCustomPreset === 'function') {
                 cp._ensureDirectedCustomPreset();
               }
             }, 'controlPanel.ensureDirectedCustomPreset', Severity.COSMETIC);
             safeCall(() => {
+              inferWeatherPanelView(cp.controlState);
               syncAtmosphericFogEffectFromControlState(cp.controlState);
               cp.syncManualFogDomFromControlState?.();
+              cp._applyWeatherPanelViewVisibility?.();
+              cp._mirrorAllDomFromState?.();
             }, 'controlPanel.syncManualFog', Severity.COSMETIC);
             safeCall(() => cp.pane?.refresh?.(), 'controlPanel.refresh', Severity.COSMETIC);
           }
@@ -8430,6 +8442,12 @@ async function createThreeCanvas(scene, createOptions = {}) {
           if (window.MapShine) window.MapShine.cinematicCameraManager = cinematicCameraManager;
         }
 
+        safeCall(() => {
+          const bridge = getWeatherSyncBridge();
+          bridge.initialize();
+          if (window.MapShine) window.MapShine.weatherSyncBridge = bridge;
+        }, 'weatherSyncBridge.initialize', Severity.COSMETIC);
+
         if (!cameraPanel) {
           cameraPanel = new CameraPanelManager(cinematicCameraManager);
           cameraPanel.initialize();
@@ -8730,21 +8748,21 @@ async function createThreeCanvas(scene, createOptions = {}) {
         // semantic gate that maps to ashIntensity (0 = off).
         safeCall(() => {
           const ashTuning = weatherController?.ashTuning || {};
-          const ashColorStartDefault = { ...(ashTuning.colorStart ?? { r: 0.07, g: 0.055, b: 0.045 }) };
-          const ashColorEndDefault = { ...(ashTuning.colorEnd ?? { r: 0.82, g: 0.8, b: 0.76 }) };
+          const ashColorStartDefault = { ...(ashTuning.colorStart ?? { r: 0.45, g: 0.42, b: 0.38 }) };
+          const ashColorEndDefault = { ...(ashTuning.colorEnd ?? { r: 0.35, g: 0.32, b: 0.28 }) };
           const emberColorStartDefault = { ...(ashTuning.emberColorStart ?? { r: 1.0, g: 0.25, b: 0.0 }) };
           const emberColorEndDefault = { ...(ashTuning.emberColorEnd ?? { r: 1.0, g: 0.25, b: 0.0 }) };
           const ashWeatherSchema = {
-            enabled: false,
+            enabled: true,
             groups: [
               { name: 'ash', label: 'Ashfall', type: 'inline', parameters: ['ashIntensity', 'ashIntensityScale', 'ashEmissionRate'] },
-              { name: 'ash-appearance', label: 'Ash Appearance', type: 'inline', separator: true, parameters: ['ashSizeMin', 'ashSizeMax', 'ashLifeMin', 'ashLifeMax', 'ashSpeedMin', 'ashSpeedMax', 'ashOpacityStartMin', 'ashOpacityStartMax', 'ashOpacityEnd', 'ashColorStart', 'ashColorEnd', 'ashBrightness', 'ashMaterialTint', 'ashLifeBrighten', 'ashLifeAlphaFade'] },
-              { name: 'ash-motion', label: 'Ash Motion', type: 'inline', separator: true, parameters: ['ashGravityScale', 'ashWindInfluence', 'ashWindBase', 'ashCurlStrength', 'ashCurlNoiseScale', 'ashCurlTimeScale'] },
-              { name: 'embers', label: 'Embers', type: 'inline', separator: true, parameters: ['emberEmissionRate', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'emberSpeedMin', 'emberSpeedMax', 'emberOpacityStartMin', 'emberOpacityStartMax', 'emberOpacityEnd', 'emberColorStart', 'emberColorEnd', 'emberBrightness', 'emberGravityScale', 'emberWindInfluence', 'emberWindBase', 'emberCurlStrength', 'emberCurlNoiseScale', 'emberCurlTimeScale'] }
+              { name: 'ash-appearance', label: 'Ash Appearance', type: 'inline', advanced: true, separator: true, parameters: ['ashSizeMin', 'ashSizeMax', 'ashLifeMin', 'ashLifeMax', 'ashSpeedMin', 'ashSpeedMax', 'ashOpacityStartMin', 'ashOpacityStartMax', 'ashOpacityEnd', 'ashColorStart', 'ashColorEnd', 'ashBrightness', 'ashMaterialTint', 'ashLifeBrighten', 'ashLifeAlphaFade'] },
+              { name: 'ash-motion', label: 'Ash Motion', type: 'inline', advanced: true, separator: true, parameters: ['ashGravityScale', 'ashWindInfluence', 'ashWindBase', 'ashCurlStrength', 'ashCurlNoiseScale', 'ashCurlTimeScale'] },
+              { name: 'embers', label: 'Embers', type: 'inline', advanced: true, separator: true, parameters: ['emberEmissionRate', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'emberSpeedMin', 'emberSpeedMax', 'emberOpacityStartMin', 'emberOpacityStartMax', 'emberOpacityEnd', 'emberColorStart', 'emberColorEnd', 'emberBrightness', 'emberGravityScale', 'emberWindInfluence', 'emberWindBase', 'emberCurlStrength', 'emberCurlNoiseScale', 'emberCurlTimeScale'] }
             ],
             parameters: {
-              enabled: { type: 'boolean', default: false },
-              ashIntensity: { label: 'Ash Intensity', type: 'slider', default: 0.0, min: 0.0, max: 1.0, step: 0.01 },
+              enabled: { type: 'boolean', default: true },
+              ashIntensity: { label: 'Ash Intensity', type: 'slider', default: 1.0, min: 0.0, max: 1.0, step: 0.01 },
               ashIntensityScale: { label: 'Intensity Scale', type: 'slider', default: ashTuning.intensityScale ?? 0.5, min: 0.0, max: 4.0, step: 0.05 },
               ashEmissionRate: { label: 'Emission Rate', type: 'slider', default: ashTuning.emissionRate ?? 840, min: 0, max: 2400, step: 10 },
               ashSizeMin: { label: 'Size Min', type: 'slider', default: ashTuning.sizeMin ?? 5, min: 1, max: 60, step: 1 },
@@ -8753,8 +8771,8 @@ async function createThreeCanvas(scene, createOptions = {}) {
               ashLifeMax: { label: 'Life Max (s)', type: 'slider', default: ashTuning.lifeMax ?? 4.7, min: 0.2, max: 18, step: 0.1 },
               ashSpeedMin: { label: 'Fall Speed Min', type: 'slider', default: ashTuning.speedMin ?? 15, min: 0, max: 600, step: 5 },
               ashSpeedMax: { label: 'Fall Speed Max', type: 'slider', default: ashTuning.speedMax ?? 25, min: 0, max: 900, step: 5 },
-              ashOpacityStartMin: { label: 'Opacity Start Min', type: 'slider', default: ashTuning.opacityStartMin ?? 0.58, min: 0.0, max: 1.0, step: 0.01 },
-              ashOpacityStartMax: { label: 'Opacity Start Max', type: 'slider', default: ashTuning.opacityStartMax ?? 0.82, min: 0.0, max: 1.0, step: 0.01 },
+              ashOpacityStartMin: { label: 'Opacity Start Min', type: 'slider', default: ashTuning.opacityStartMin ?? 0.53, min: 0.0, max: 1.0, step: 0.01 },
+              ashOpacityStartMax: { label: 'Opacity Start Max', type: 'slider', default: ashTuning.opacityStartMax ?? 0.75, min: 0.0, max: 1.0, step: 0.01 },
               ashOpacityEnd: { label: 'Opacity End', type: 'slider', default: ashTuning.opacityEnd ?? 0.85, min: 0.0, max: 1.0, step: 0.01 },
               ashColorStart: { type: 'color', label: 'Color Start (soot)', default: ashColorStartDefault },
               ashColorEnd: { type: 'color', label: 'Color End (pale ash)', default: ashColorEndDefault },
@@ -8762,10 +8780,10 @@ async function createThreeCanvas(scene, createOptions = {}) {
               ashMaterialTint: { label: 'Material Tint', type: 'slider', default: ashTuning.materialTint ?? 1.0, min: 0.35, max: 1.5, step: 0.01 },
               ashLifeBrighten: { label: 'Life Brighten', type: 'slider', default: ashTuning.ashLifeBrighten ?? 2.28, min: 0.5, max: 4.0, step: 0.02 },
               ashLifeAlphaFade: { label: 'Life Alpha Fade', type: 'slider', default: ashTuning.ashLifeAlphaFade ?? 0.32, min: 0.05, max: 1.0, step: 0.01 },
-              ashGravityScale: { label: 'Gravity Scale', type: 'slider', default: ashTuning.gravityScale ?? 0.62, min: 0.0, max: 3.0, step: 0.05 },
-              ashWindInfluence: { label: 'Wind Influence', type: 'slider', default: ashTuning.windInfluence ?? 1.85, min: 0.0, max: 4.0, step: 0.05 },
-              ashWindBase: { label: 'Wind Base', type: 'slider', default: ashTuning.ashWindBase ?? 400, min: 0, max: 2000, step: 10 },
-              ashCurlStrength: { label: 'Curl Strength', type: 'slider', default: ashTuning.curlStrength ?? 2.6, min: 0.0, max: 10.0, step: 0.05 },
+              ashGravityScale: { label: 'Gravity Scale', type: 'slider', default: ashTuning.gravityScale ?? 0.55, min: 0.0, max: 3.0, step: 0.05 },
+              ashWindInfluence: { label: 'Wind Influence', type: 'slider', default: ashTuning.windInfluence ?? 4, min: 0.0, max: 4.0, step: 0.05 },
+              ashWindBase: { label: 'Wind Base', type: 'slider', default: ashTuning.ashWindBase ?? 1450, min: 0, max: 2000, step: 10 },
+              ashCurlStrength: { label: 'Curl Strength', type: 'slider', default: ashTuning.curlStrength ?? 3, min: 0.0, max: 10.0, step: 0.05 },
               ashCurlNoiseScale: { label: 'Curl Noise Scale', type: 'slider', default: ashTuning.curlNoiseScale ?? 1.0, min: 0.2, max: 3.0, step: 0.02 },
               ashCurlTimeScale: { label: 'Curl Time Scale', type: 'slider', default: ashTuning.curlTimeScale ?? 0.88, min: 0.1, max: 3.0, step: 0.02 },
               emberEmissionRate: { label: 'Ember Rate', type: 'slider', default: ashTuning.emberEmissionRate ?? 167, min: 0, max: 400, step: 1 },
@@ -8780,11 +8798,11 @@ async function createThreeCanvas(scene, createOptions = {}) {
               emberOpacityEnd: { label: 'Ember Opacity End', type: 'slider', default: ashTuning.emberOpacityEnd ?? 0.83, min: 0.0, max: 1.0, step: 0.01 },
               emberColorStart: { type: 'color', label: 'Ember Color Start', default: emberColorStartDefault },
               emberColorEnd: { type: 'color', label: 'Ember Color End', default: emberColorEndDefault },
-              emberBrightness: { label: 'Ember Brightness (HDR)', type: 'slider', default: ashTuning.emberBrightness ?? 5, min: 0.0, max: 12.0, step: 0.05 },
+              emberBrightness: { label: 'Ember Brightness (HDR)', type: 'slider', default: ashTuning.emberBrightness ?? 9.5, min: 0.0, max: 12.0, step: 0.05 },
               emberGravityScale: { label: 'Ember Gravity Scale', type: 'slider', default: ashTuning.emberGravityScale ?? 0, min: 0.0, max: 3.0, step: 0.05 },
-              emberWindInfluence: { label: 'Ember Wind Influence', type: 'slider', default: ashTuning.emberWindInfluence ?? 0.52, min: 0.0, max: 4.0, step: 0.05 },
+              emberWindInfluence: { label: 'Ember Wind Influence', type: 'slider', default: ashTuning.emberWindInfluence ?? 0.45, min: 0.0, max: 4.0, step: 0.05 },
               emberWindBase: { label: 'Ember Wind Base', type: 'slider', default: ashTuning.emberWindBase ?? 650, min: 0, max: 2500, step: 10 },
-              emberCurlStrength: { label: 'Ember Curl Strength', type: 'slider', default: ashTuning.emberCurlStrength ?? 4.2, min: 0.0, max: 100.0, step: 0.05 },
+              emberCurlStrength: { label: 'Ember Curl Strength', type: 'slider', default: ashTuning.emberCurlStrength ?? 3, min: 0.0, max: 100.0, step: 0.05 },
               emberCurlNoiseScale: { label: 'Ember Curl Noise Scale', type: 'slider', default: ashTuning.emberCurlNoiseScale ?? 0.72, min: 0.2, max: 3.0, step: 0.02 },
               emberCurlTimeScale: { label: 'Ember Curl Time Scale', type: 'slider', default: ashTuning.emberCurlTimeScale ?? 1.28, min: 0.1, max: 3.0, step: 0.02 }
             }
@@ -8915,6 +8933,16 @@ async function createThreeCanvas(scene, createOptions = {}) {
             'particle'
           );
         }, 'v2.registerAshWeatherUI', Severity.DEGRADED);
+
+        safeCall(() => {
+          uiManager.registerEffect(
+            'ash-clouds',
+            'Ash Ground Clouds',
+            AshCloudEffectV2.getControlSchema(),
+            _makeV2Callback('_ashCloudEffect'),
+            'atmospheric'
+          );
+        }, 'v2.registerAshCloudsUI', Severity.DEGRADED);
 
         safeCall(() => {
           const waterSchema = WaterEffectV2.getControlSchema();

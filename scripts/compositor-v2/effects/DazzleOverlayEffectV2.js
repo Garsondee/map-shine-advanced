@@ -67,9 +67,9 @@ export class DazzleOverlayEffectV2 {
         exposureLift: { type: 'slider', label: 'Exposure Lift', min: 0, max: 3, step: 0.01, default: 0.9 },
         whiteAdd: { type: 'slider', label: 'White Add', min: 0, max: 2, step: 0.01, default: 0.65 },
         desaturate: { type: 'slider', label: 'Desaturate', min: 0, max: 1, step: 0.01, default: 0.35 },
-        glareStrength: { type: 'slider', label: 'Glare Strength', min: 0, max: 2, step: 0.01, default: 0.55 },
-        glarePower: { type: 'slider', label: 'Glare Power', min: 0.1, max: 8, step: 0.05, default: 2 },
-        rgbShiftPx: { type: 'slider', label: 'RGB Shift (px)', min: 0, max: 8, step: 0.05, default: 1.35 },
+        glareStrength: { type: 'slider', label: 'Glare Strength', min: 0, max: 2, step: 0.01, default: 0.55, advanced: true },
+        glarePower: { type: 'slider', label: 'Glare Power', min: 0.1, max: 8, step: 0.05, default: 2, advanced: true },
+        rgbShiftPx: { type: 'slider', label: 'RGB Shift (px)', min: 0, max: 8, step: 0.05, default: 1.35, advanced: true },
       },
     };
   }

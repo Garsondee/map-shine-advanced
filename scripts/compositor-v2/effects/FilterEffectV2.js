@@ -128,6 +128,7 @@ export class FilterEffectV2 {
           name: 'inkAo',
           label: 'Ink AO (from scene)',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'inkAoEnabled',
@@ -146,6 +147,7 @@ export class FilterEffectV2 {
           name: 'vignette',
           label: 'Advanced: legacy multiply vignette',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: ['vignetteEnabled', 'vignetteStrength', 'vignetteInner', 'vignetteOuter', 'vignetteTintColor'],
         },

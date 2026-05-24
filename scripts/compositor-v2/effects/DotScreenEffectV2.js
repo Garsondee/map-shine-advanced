@@ -69,6 +69,7 @@ export class DotScreenEffectV2 {
           name: 'center',
           label: 'Center',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: ['centerX', 'centerY'],
         },

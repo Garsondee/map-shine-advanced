@@ -61,11 +61,11 @@ export class PrismEffectV2 {
     return {
       enabled: true,
       groups: [
-        { name: 'status', label: 'Effect Status', type: 'inline', parameters: ['textureStatus'] },
+        { name: 'status', label: 'Effect Status', type: 'inline', advanced: true, parameters: ['textureStatus'] },
         { name: 'refraction', label: 'Refraction', type: 'folder', parameters: ['intensity', 'spread', 'brightness', 'opacity', 'maskThreshold'] },
-        { name: 'facets', label: 'Crystal Facets', type: 'folder', parameters: ['facetScale', 'facetAnimate', 'facetSpeed', 'facetSoftness'] },
-        { name: 'parallax', label: 'Camera Parallax', type: 'inline', parameters: ['parallaxStrength'] },
-        { name: 'glint', label: 'Surface Glint', type: 'folder', parameters: ['glintStrength', 'glintThreshold'] },
+        { name: 'facets', label: 'Crystal Facets', type: 'folder', advanced: true, parameters: ['facetScale', 'facetAnimate', 'facetSpeed', 'facetSoftness'] },
+        { name: 'parallax', label: 'Camera Parallax', type: 'inline', advanced: true, parameters: ['parallaxStrength'] },
+        { name: 'glint', label: 'Surface Glint', type: 'folder', advanced: true, parameters: ['glintStrength', 'glintThreshold'] },
       ],
       parameters: {
         textureStatus: { type: 'string', label: 'Mask Status', default: 'Checking...', readonly: true },
@@ -73,7 +73,7 @@ export class PrismEffectV2 {
         spread: { type: 'slider', label: 'Spectral Spread', min: 0.0, max: 1.0, step: 0.1, default: 0.6 },
         brightness: { type: 'slider', label: 'Brightness Boost', min: 0.5, max: 3.0, step: 0.1, default: 1.5 },
         opacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.05, default: 0.25 },
-        maskThreshold: { type: 'slider', label: 'Mask Brightness Cutoff', min: 0.0, max: 1.0, step: 0.01, default: 0.9 },
+        maskThreshold: { type: 'slider', label: 'Mask Brightness Cutoff', min: 0.0, max: 1.0, step: 0.01, default: 0.9, advanced: true },
         facetScale: { type: 'slider', label: 'Facet Scale', min: 1.0, max: 1000.0, step: 1.0, default: 254.0 },
         facetAnimate: { type: 'boolean', label: 'Animate Facets', default: true },
         facetSpeed: { type: 'slider', label: 'Animation Speed', min: 0.0, max: 2.0, step: 0.01, default: 1.01 },

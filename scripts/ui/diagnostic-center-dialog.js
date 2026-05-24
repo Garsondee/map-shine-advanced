@@ -867,6 +867,14 @@ export class DiagnosticCenterDialog {
     log.info('Diagnostic Center dialog initialized');
   }
 
+  /**
+   * Register dev-only UI with the main panel's Advanced Mode registry.
+   * @param {{ registerAdvancedElement?: (el: HTMLElement) => void }} host
+   */
+  registerAdvancedTargets(host) {
+    host?.registerAdvancedElement?.(this.container);
+  }
+
   toggle() {
     if (this.visible) this.hide();
     else this.show();
@@ -876,6 +884,7 @@ export class DiagnosticCenterDialog {
     if (!this.container) return;
     this.container.style.display = 'block';
     this.visible = true;
+    window.MapShine?.uiManager?.refreshAdvancedModeVisibility?.();
 
     // Refresh target label when opened.
     void this._autoSelectTarget();

@@ -53,6 +53,7 @@ import { ReplicaOcclusionMaskPass } from './ReplicaOcclusionMaskPass.js';
 import { SpecularEffectV2 } from './effects/SpecularEffectV2.js';
 import { FireEffectV2 } from './effects/FireEffectV2.js';
 import { AshDisturbanceEffectV2 } from './effects/AshDisturbanceEffectV2.js';
+import { AshCloudEffectV2 } from './effects/AshCloudEffectV2.js';
 import { WindowLightEffectV2 } from './effects/WindowLightEffectV2.js';
 import { LightingEffectV2 } from './effects/LightingEffectV2.js';
 import { SkyColorEffectV2 } from './effects/SkyColorEffectV2.js';
@@ -383,6 +384,12 @@ export class FloorCompositor {
      * @type {AshDisturbanceEffectV2}
      */
     this._ashDisturbanceEffect = new AshDisturbanceEffectV2(this._renderBus);
+
+    /**
+     * V2 Ash Clouds: ground-level ash cloud billboards driven by ash weather.
+     * @type {AshCloudEffectV2}
+     */
+    this._ashCloudEffect = new AshCloudEffectV2();
 
     /**
      * V2 Smelly Flies Effect: map-point-driven ambient fly swarms.
@@ -1661,6 +1668,8 @@ export class FloorCompositor {
     await initEffect('TreeEffectV2', () => this._treeEffect.initialize());
     await initEffect('FireEffectV2', () => this._fireEffect.initialize());
     await initEffect('AshDisturbanceEffectV2', () => this._ashDisturbanceEffect.initialize());
+    this._ashCloudEffect.initialize(this.renderer, this._renderBus._scene, this.camera);
+    _reportProgress('AshCloudEffectV2');
     await initEffect('DustEffectV2', () => this._dustEffect.initialize());
     await initEffect('WindowLightEffectV2', () => this._windowLightEffect.initialize());
     try {
@@ -3708,6 +3717,7 @@ export class FloorCompositor {
         // Wind must advance before update() so accumulation is 1× per frame.
         // Instrumented inside CloudEffectV2.advanceWind().
         this._cloudEffect.advanceWind(timeInfo.delta ?? 0.016);
+        this._ashCloudEffect?.advanceWind?.(timeInfo.delta ?? 0.016);
         this._profileEffectCall('specular', 'update', () => this._specularEffect.update(timeInfo), 'SpecularEffectV2 update');
         this._profileEffectCall('fluid', 'update', () => this._fluidEffect.update(timeInfo), 'FluidEffectV2 update');
         this._profileEffectCall('iridescence', 'update', () => this._iridescenceEffect.update(timeInfo), 'IridescenceEffectV2 update');
@@ -3716,6 +3726,7 @@ export class FloorCompositor {
         this._profileEffectCall('tree', 'update', () => this._treeEffect.update(timeInfo), 'TreeEffectV2 update');
         this._profileEffectCall('fire', 'update', () => this._fireEffect.update(timeInfo), 'FireEffectV2 update');
         this._profileEffectCall('ashDisturbance', 'update', () => this._ashDisturbanceEffect?.update?.(timeInfo), 'AshDisturbanceEffectV2 update');
+        this._profileEffectCall('ashCloud', 'update', () => this._ashCloudEffect?.update?.(timeInfo), 'AshCloudEffectV2 update', { cpuOnly: true });
         this._profileEffectCall('dust', 'update', () => this._dustEffect.update(timeInfo), 'DustEffectV2 update');
         this._profileEffectCall('waterSplashes', 'update', () => this._waterSplashesEffect?.update?.(timeInfo), 'WaterSplashesEffectV2 update');
         this._profileEffectCall('smellyFlies', 'update', () => this._smellyFliesEffect?.update?.(timeInfo), 'SmellyFliesEffect update');
@@ -3744,23 +3755,25 @@ export class FloorCompositor {
       if (!navigationLite) {
         this._profileEffectCall('weatherParticles', 'update', () => this._weatherParticles?.update?.(timeInfo), 'WeatherParticlesV2 update');
       }
-      try {
-        this._skyColorEffect?.setColorCorrectionTimelineActive?.(
-          this._colorCorrectionEffect?.isTimelineEnabled?.() === true
-        );
-      } catch (_) {}
       this._profileEffectCall('skyColor', 'update', () => this._skyColorEffect.update(timeInfo), 'SkyColorEffectV2 update');
+      const skyIntensity01 = Number(
+        this._skyColorEffect?.currentSkyIntensity01
+        ?? this._skyColorEffect?._composeMaterial?.uniforms?.uIntensity?.value
+      );
       try {
         const sky = this._skyColorEffect;
         if (sky && Number.isFinite(Number(sky.currentSunAzimuthDeg)) && Number.isFinite(Number(sky.currentSunElevationDeg))) {
           this._waterEffect?.setSunAngles?.(sky.currentSunAzimuthDeg, sky.currentSunElevationDeg);
         }
+        const tint = sky?.currentSkyTintColor;
+        if (tint) {
+          this._waterEffect?.setSkyColor?.(tint.r, tint.g, tint.b);
+        }
+        if (Number.isFinite(skyIntensity01)) {
+          this._waterEffect?.setSkyIntensity01?.(Math.max(0.0, Math.min(1.0, skyIntensity01)));
+        }
       } catch (_) {}
       this._profileEffectCall('water', 'update', () => this._waterEffect?.update?.(timeInfo), 'WaterEffectV2 update');
-      const skyIntensity01 = Number(
-        this._skyColorEffect?.currentSkyIntensity01
-        ?? this._skyColorEffect?._composeMaterial?.uniforms?.uIntensity?.value
-      );
       const weatherEnv = weatherController?.getEnvironment?.() ?? null;
       const sceneDarknessRaw = Number(canvas?.scene?.environment?.darknessLevel);
       const envDarknessRaw = Number(canvas?.environment?.darknessLevel);
@@ -5316,6 +5329,7 @@ export class FloorCompositor {
 
       // Always propagate (including null) so consumers cannot keep stale masks.
       this._cloudEffect?.setOutdoorsMask?.(outdoorsTex);
+      this._ashCloudEffect?.setOutdoorsMask?.(outdoorsTex);
       this._waterEffect?.setOutdoorsMask?.(waterOutdoorsTex);
       this._skyColorEffect?.setOutdoorsMask?.(skyOutdoorsFinal);
       this._skyColorEffect?.setSkyReachMask?.(skyReachTex);
@@ -5334,9 +5348,13 @@ export class FloorCompositor {
         if (cloudFloorIdSupported && cloudAnyPerFloorMask) {
           this._cloudEffect?.setFloorIdTexture?.(cloudFloorIdTex);
           this._cloudEffect?.setOutdoorsMasks?.(cloudPerFloor);
+          this._ashCloudEffect?.setFloorIdTexture?.(cloudFloorIdTex);
+          this._ashCloudEffect?.setOutdoorsMasks?.(cloudPerFloor);
         } else {
           this._cloudEffect?.setFloorIdTexture?.(null);
           this._cloudEffect?.setOutdoorsMasks?.([null, null, null, null]);
+          this._ashCloudEffect?.setFloorIdTexture?.(null);
+          this._ashCloudEffect?.setOutdoorsMasks?.([null, null, null, null]);
         }
       } catch (_) {}
 
@@ -5368,6 +5386,7 @@ export class FloorCompositor {
       try { this._renderBus.setVisibleFloors(fallbackIdx); } catch (_) {}
       try { this._fireEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
       try { this._ashDisturbanceEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
+      try { this._ashCloudEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
       try { this._dustEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
       try { this._specularEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
       try { this._waterSplashesEffect?.onFloorChange?.(fallbackIdx); } catch (_) {}
@@ -5479,6 +5498,7 @@ export class FloorCompositor {
     // Notify fire effect of floor change so it can swap active particle systems.
     this._fireEffect.onFloorChange(maxFloorIndex);
     try { this._ashDisturbanceEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
+    try { this._ashCloudEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
     // Notify dust effect of floor change so it can swap active particle systems.
     this._dustEffect.onFloorChange(maxFloorIndex);
     // Specular background overlay needs floor rebinding on level changes.
@@ -7087,6 +7107,7 @@ export class FloorCompositor {
     try { this._treeEffect?.dispose?.(); } catch (_) {}
     try { this._fireEffect?.dispose?.(); } catch (_) {}
     try { this._ashDisturbanceEffect?.dispose?.(); } catch (_) {}
+    try { this._ashCloudEffect?.dispose?.(); } catch (_) {}
     try { this._dustEffect?.dispose?.(); } catch (_) {}
     try { this._windowLightEffect?.dispose?.(); } catch (_) {}
     try { this._cloudEffect?.dispose?.(); } catch (_) {}

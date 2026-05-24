@@ -209,6 +209,10 @@ export function normalizeLoadingScreenConfig(input) {
   };
 
   config.version = LOADING_SCREEN_CONFIG_VERSION;
+  if (typeof source.basePresetId === 'string' && source.basePresetId.trim()) {
+    config.basePresetId = source.basePresetId.trim();
+  }
+  config.layoutCustomized = source.layoutCustomized === true;
   if (!Array.isArray(config.fonts.googleFamilies)) config.fonts.googleFamilies = [];
   config.fonts.googleFamilies = config.fonts.googleFamilies.map((f) => String(f || '').trim()).filter(Boolean);
   applyDefaultThemeBottomClusterUpgrade(config);
@@ -290,14 +294,32 @@ function cryptoSafeId() {
  * even when older world settings saved stale element values.
  * @param {Object} config
  */
+function needsBottomClusterUpgrade(elements) {
+  if (!Array.isArray(elements) || !elements.length) return false;
+
+  const canonicalTypes = ['progress-bar', 'spinner', 'timer', 'percentage', 'message'];
+  for (const type of canonicalTypes) {
+    const matches = elements.filter((e) => String(e?.type || '').trim().toLowerCase() === type);
+    if (matches.length > 1) return true;
+  }
+
+  return elements.some((el) => {
+    const type = String(el?.type || '').trim().toLowerCase();
+    const id = String(el?.id || '').trim();
+    return type === 'custom-html' && id !== 'decor-line' && el?.visible !== false;
+  });
+}
+
 function applyDefaultThemeBottomClusterUpgrade(config) {
   const basePresetId = String(config?.basePresetId || '').trim();
   const themeName = String(config?.themeName || '').trim();
   const isMapShineDefault = basePresetId === 'map-shine-default' || themeName === 'Map Shine Default';
   if (!isMapShineDefault) return;
+  if (config.layoutCustomized === true) return;
 
   const elements = Array.isArray(config?.layout?.elements) ? config.layout.elements : [];
   if (!elements.length) return;
+  if (!needsBottomClusterUpgrade(elements)) return;
 
   // Some worlds saved older/default variations can leave duplicate bottom
   // cluster elements. We normalize then enforce singletons by type.
@@ -339,9 +361,10 @@ function applyDefaultThemeBottomClusterUpgrade(config) {
     const matches = elements.filter((e) => String(e?.type || '').trim().toLowerCase() === type);
     if (!matches.length) continue;
     let chosen = matches.find((e) => String(e?.id || '').trim() === canonicalId) || matches[0];
-    for (const m of matches) m.visible = (m === chosen);
+    for (const m of matches) {
+      if (m !== chosen) m.visible = false;
+    }
     chosen.id = canonicalId;
-    chosen.visible = true;
   }
 
   // Re-apply canonical bottom-cluster styling by canonical ids.

@@ -622,6 +622,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           name: 'torch-behavior',
           label: 'Torch: Behavior',
           type: 'folder',
+          advanced: true,
           parameters: [
             'springStiffness',
             'springDamping',
@@ -645,6 +646,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           name: 'torch-flame',
           label: 'Torch: Flame VFX',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'torchFlameSizeMin',
@@ -659,6 +661,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           name: 'torch-sparks',
           label: 'Torch: Sparks VFX',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'torchSparksEnabled',
@@ -676,6 +679,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           name: 'torch-dynamic-light',
           label: 'Torch: Dynamic Light',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'torchLightEnabled',
@@ -694,6 +698,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           name: 'flashlight-beam',
           label: 'Flashlight: Beam',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'flashlightIntensity',
@@ -724,6 +729,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           name: 'flashlight-cookie',
           label: 'Flashlight: Cookie',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'flashlightCookieIntensity',
@@ -750,6 +756,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           name: 'flashlight-dynamic-light',
           label: 'Flashlight: Dynamic Light',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'flashlightLightEnabled',
@@ -772,6 +779,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           name: 'night-vision-tube',
           label: 'Night Vision: Tube & Tint',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'nightVisionTint',
@@ -784,6 +792,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           name: 'night-vision-purkinje',
           label: 'Night Vision: Purkinje (Low-light)',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'nightVisionPurkinjeStrength',
@@ -796,6 +805,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           name: 'night-vision-gain',
           label: 'Night Vision: Light Amplification',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'nightVisionGain',
@@ -808,6 +818,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           name: 'night-vision-eyepiece',
           label: 'Night Vision: Eyepiece',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'nightVisionEyepieceStyle',
@@ -822,6 +833,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           name: 'night-vision-scanlines',
           label: 'Night Vision: Scanlines',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'nightVisionScanlinesEnabled',
@@ -835,6 +847,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           name: 'night-vision-noise',
           label: 'Night Vision: Noise & Phosphor',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'nightVisionNoiseAmount',
@@ -852,6 +865,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           name: 'night-vision-bloom',
           label: 'Night Vision: Bloom / Burn-In',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'nightVisionBloomEnabled',
@@ -867,6 +881,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           name: 'night-vision-optical',
           label: 'Night Vision: Optical',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'nightVisionDistortionAmount',
@@ -878,6 +893,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           name: 'night-vision-power',
           label: 'Night Vision: Power & Warm-up',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'nightVisionWarmupSeconds',
@@ -890,6 +906,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           name: 'night-vision-darkness',
           label: 'Night Vision: Auto-Dim',
           type: 'folder',
+          advanced: true,
           expanded: false,
           parameters: [
             'nightVisionDarknessGateEnabled',
@@ -1228,7 +1245,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         nightVisionDarknessEnd: { type: 'slider', label: 'Darkness Gate End', min: 0, max: 1, step: 0.01, default: 0.6, throttle: 50 },
         nightVisionDarknessInfluence: { type: 'slider', label: 'Darkness Influence', min: 0, max: 1, step: 0.01, default: 1.0, throttle: 50 },
 
-        debugReadoutEnabled: { type: 'boolean', label: 'Debug Readout', default: false }
+        debugReadoutEnabled: { type: 'boolean', label: 'Debug Readout', default: false, advanced: true }
       }
     };
   }

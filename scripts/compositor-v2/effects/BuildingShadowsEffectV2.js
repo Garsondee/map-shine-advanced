@@ -259,6 +259,7 @@ export class BuildingShadowsEffectV2 {
           max: 10.0,
           step: 0.05,
           default: 1,
+          advanced: true,
           tooltip: 'Extra darkening beyond opacity (×1 matches older behavior; use up to ×10 when shadows look too faint).'
         },
         length: {
@@ -287,6 +288,7 @@ export class BuildingShadowsEffectV2 {
           max: 1.0,
           step: 0.01,
           default: 0.38,
+          advanced: true,
           tooltip: 'Stretches and softens the shadow tail along the sun direction (higher = more smeared, painterly falloff).'
         },
         resolutionScale: {
@@ -295,7 +297,8 @@ export class BuildingShadowsEffectV2 {
           min: 1.0,
           max: 2.0,
           step: 0.05,
-          default: 2
+          default: 2,
+          advanced: true,
         },
         penumbra: {
           type: 'slider',
@@ -304,6 +307,7 @@ export class BuildingShadowsEffectV2 {
           max: 1.0,
           step: 0.01,
           default: 0.68,
+          advanced: true,
           tooltip: 'How quickly the shadow softens and lightens along its length (away from the building).'
         },
         shadowCurve: {
@@ -312,7 +316,8 @@ export class BuildingShadowsEffectV2 {
           min: 0.5,
           max: 1.6,
           step: 0.01,
-          default: 1.6
+          default: 1.6,
+          advanced: true,
         },
         blurRadius: {
           type: 'slider',
@@ -320,7 +325,8 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 4.0,
           step: 0.05,
-          default: 1.75
+          default: 1.75,
+          advanced: true,
         },
         contactShadowPreserve: {
           type: 'slider',
@@ -329,6 +335,7 @@ export class BuildingShadowsEffectV2 {
           max: 1.0,
           step: 0.02,
           default: 1,
+          advanced: true,
           tooltip:
             'Blurs outward without eating the caster edge: merges pre-blur strength where the footprint is darkest, full blur where it fades.'
         },
@@ -339,6 +346,7 @@ export class BuildingShadowsEffectV2 {
           max: 0.35,
           step: 0.005,
           default: 0.06,
+          advanced: true,
           tooltip: 'Lower bound for where pre-blur strength starts to dominate (shadow strength gamma). Raise slightly if fringe looks too crunchy.'
         },
         contactSharpBlendHigh: {
@@ -348,6 +356,7 @@ export class BuildingShadowsEffectV2 {
           max: 0.98,
           step: 0.01,
           default: 0.58,
+          advanced: true,
           tooltip: 'Upper bound toward full contact sharpness inside the silhouette. Lower to pull softness closer to walls.'
         },
         shadowEdgeInflatePx: {
@@ -357,6 +366,7 @@ export class BuildingShadowsEffectV2 {
           max: 8.0,
           step: 0.05,
           default: 0.5,
+          advanced: true,
           tooltip:
             'Expands shadow strength slightly in the shadow buffer (in RT pixels) so coverage tucks under the footprint and hides bright rim lines. 0 = off.'
         }

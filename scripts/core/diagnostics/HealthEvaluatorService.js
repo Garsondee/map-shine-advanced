@@ -1265,6 +1265,43 @@ export class HealthEvaluatorService {
       ],
     });
 
+    this.registry.register('AshCloudEffectV2', {
+      effectId: 'AshCloudEffectV2',
+      getInstance: (ctx) => ctx.floorCompositor?._ashCloudEffect ?? null,
+      getLevelKeys: (_instance, ctx) => activeLevelKeys(ctx),
+      rules: [
+        {
+          id: 'initialized',
+          tier: 'structural',
+          severity: 'error',
+          check: (instance) => {
+            if (!instance?.enabled || !instance?.params?.enabled) {
+              return { pass: true, skipped: true, message: 'Ash clouds disabled' };
+            }
+            return {
+              pass: !!instance?._initialized,
+              message: instance?._initialized ? 'Initialized' : 'Ash cloud effect not initialized',
+            };
+          },
+        },
+        {
+          id: 'assetsLoaded',
+          tier: 'structural',
+          severity: 'warn',
+          check: (instance) => {
+            if (!instance?.enabled || !instance?.params?.enabled) {
+              return { pass: true, skipped: true, message: 'Ash clouds disabled' };
+            }
+            return {
+              pass: !!instance?._assetsLoaded,
+              message: instance?._assetsLoaded ? 'Cloud PNG assets loaded' : 'Ash cloud textures not loaded yet',
+            };
+          },
+        },
+        heartbeatRule('AshCloudEffectV2', 6000),
+      ],
+    });
+
     this.registry.register('OverheadShadowsEffectV2', {
       effectId: 'OverheadShadowsEffectV2',
       getInstance: (ctx) => ctx.floorCompositor?._overheadShadowEffect ?? null,
@@ -2034,6 +2071,7 @@ export class HealthEvaluatorService {
     /** @type {Record<string, (ctx: object) => object|null>} */
     const extraGetters = {
       AshDisturbanceEffectV2: (ctx) => ctx.floorCompositor?._ashDisturbanceEffect ?? null,
+      AshCloudEffectV2: (ctx) => ctx.floorCompositor?._ashCloudEffect ?? null,
       FluidEffectV2: (ctx) => ctx.floorCompositor?._fluidEffect ?? null,
       TreeEffectV2: (ctx) => ctx.floorCompositor?._treeEffect ?? null,
       BushEffectV2: (ctx) => ctx.floorCompositor?._bushEffect ?? null,

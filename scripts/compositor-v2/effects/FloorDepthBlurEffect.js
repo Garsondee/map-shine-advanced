@@ -170,6 +170,7 @@ export class FloorDepthBlurEffect {
           step: 1,
           default: 2,
           label: 'Smoothness passes',
+          advanced: true,
           tooltip: 'More passes make the blur softer and less blocky; each pass is extra drawing work.',
         },
         maxIters: {
@@ -179,6 +180,7 @@ export class FloorDepthBlurEffect {
           step: 1,
           default: 6,
           label: 'Work limit',
+          advanced: true,
           tooltip: 'Stops the blur from running too many passes total, to protect frame rate.',
         },
       },

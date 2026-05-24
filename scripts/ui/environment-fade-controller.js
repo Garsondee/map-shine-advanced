@@ -204,6 +204,7 @@ export class EnvironmentFadeController {
       clearInterval(this._intervalId);
       this._intervalId = null;
     }
+    const resolve = this._resolvePromise;
     this._running = false;
     this._channels.clear();
     this._startSnap = null;
@@ -216,6 +217,8 @@ export class EnvironmentFadeController {
     try {
       environmentControlApi.endExternalDrive(DRIVE_TOKEN, { restore: false });
     } catch (_) {}
+    // Resolve so superseding transitions can unwind await/finally handlers.
+    resolve?.();
   }
 
   _durationMs(transitionMinutes) {

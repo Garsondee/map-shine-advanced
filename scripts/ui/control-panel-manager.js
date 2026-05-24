@@ -168,6 +168,9 @@ export class ControlPanelManager {
     /** @type {boolean} */
     this._environmentFadeTransitionActive = false;
 
+    /** @type {number} Bumped when a fade is cancelled/superseded so stale awaits skip cleanup. */
+    this._environmentFadeGeneration = 0;
+
     /** @type {Set<string>} */
     this._fadeChannelDragActive = new Set();
 
@@ -995,11 +998,16 @@ export class ControlPanelManager {
       title: 'How long time, weather, wind, fog, lightning, and ash take to blend (Instant = immediate jump)',
       value: Number(this.controlState.timeTransitionMinutes) || 0,
       onChange: (v) => {
+        const prevMins = this._getEnvironmentFadeMinutes();
         const mins = this._isDynamicWeatherRuntimeActive()
           ? this._clampDynamicEnvironmentFadeMinutes(v)
           : (Number(v) || 0);
         this.controlState.timeTransitionMinutes = mins;
         this._syncDynamicEnvironmentFadeToWeatherController();
+        if (mins <= 0 && prevMins > 0
+          && (environmentFadeController.isRunning || this._environmentFadeTransitionActive)) {
+          this._cancelActiveEnvironmentFade();
+        }
         refreshTimeFolderTag();
         this.debouncedSave();
       },
@@ -2405,7 +2413,7 @@ export class ControlPanelManager {
     const pad = 8;
     this._minimizedDock.hidden = false;
     const width = this._minimizedDock.offsetWidth || 180;
-    const height = this._minimizedDock.offsetHeight || 36;
+    const height = this._minimizedDock.offsetHeight || 40;
     const maxLeft = Math.max(pad, window.innerWidth - (width + pad));
     const maxTop = Math.max(pad, window.innerHeight - (height + pad));
     const x = Math.max(pad, Math.min(maxLeft, Number(left) || pad));
@@ -2482,7 +2490,7 @@ export class ControlPanelManager {
     const dy = e.clientY - this._minimizedDragStart.my;
     const pad = 8;
     const width = this._minimizedDock.offsetWidth || 180;
-    const height = this._minimizedDock.offsetHeight || 36;
+    const height = this._minimizedDock.offsetHeight || 40;
     const maxLeft = Math.max(pad, window.innerWidth - (width + pad));
     const maxTop = Math.max(pad, window.innerHeight - (height + pad));
     const left = Math.max(pad, Math.min(maxLeft, this._minimizedDragStart.left + dx));
@@ -2846,6 +2854,23 @@ export class ControlPanelManager {
     return this._getEnvironmentFadeMinutes() > 0;
   }
 
+  /**
+   * Stop any in-progress environment fade so Instant edits can take over immediately.
+   * @private
+   */
+  _cancelActiveEnvironmentFade() {
+    this._environmentFadeGeneration += 1;
+    environmentFadeController.cancel();
+    if (stateApplier._timeTransitionIntervalId) {
+      clearInterval(stateApplier._timeTransitionIntervalId);
+      stateApplier._timeTransitionIntervalId = null;
+    }
+    this._environmentFadeTransitionActive = false;
+    this._fadeChannelDragActive.clear();
+    this._clearEnvironmentFadePreviewSession();
+    this._astrolabe?.clearWindTargetPreview?.();
+  }
+
   _ensureEnvironmentFadePreviewStart() {
     if (this._environmentFadePreviewStartSnap) return;
     this._environmentFadePreviewStartSnap = environmentControlApi.captureSnapshot();
@@ -2951,6 +2976,7 @@ export class ControlPanelManager {
     const mins = Number.isFinite(Number(transitionMinutes))
       ? Number(transitionMinutes)
       : this._getEnvironmentFadeMinutes();
+    const gen = ++this._environmentFadeGeneration;
 
     if (stateApplier._timeTransitionIntervalId) {
       clearInterval(stateApplier._timeTransitionIntervalId);
@@ -2974,6 +3000,8 @@ export class ControlPanelManager {
         applyExtras: (extras, last) => this._applyFadeExtras(extras, last),
       });
 
+      if (gen !== this._environmentFadeGeneration) return;
+
       this.controlState.timeOfDay = endSnap.timeOfDay;
       this._ensureDirectedCustomPreset();
       Object.assign(this.controlState.directedCustomPreset, endSnap.weather);
@@ -2987,7 +3015,9 @@ export class ControlPanelManager {
       this._mirrorAllDomFromState();
       this._astrolabe?.clearWindTargetPreview?.();
     } finally {
-      this._environmentFadeTransitionActive = false;
+      if (gen === this._environmentFadeGeneration) {
+        this._environmentFadeTransitionActive = false;
+      }
     }
   }
 
@@ -3028,7 +3058,12 @@ export class ControlPanelManager {
   _handleFadeAwareFaderInput(paramId, value, commitFn) {
     const fadeMins = this._getEnvironmentFadeMinutes();
 
-    if (environmentFadeController.isRunning && fadeMins > 0) {
+    if (environmentFadeController.isRunning || this._environmentFadeTransitionActive) {
+      if (fadeMins <= 0) {
+        this._cancelActiveEnvironmentFade();
+        commitFn(value);
+        return;
+      }
       if (paramId === 'gustiness') {
         this.controlState.gustiness = GUSTINESS_LABELS[Math.round(value)] || 'moderate';
       } else {
@@ -3043,7 +3078,7 @@ export class ControlPanelManager {
       return;
     }
 
-    if (!this._isEnvironmentFadeEnabled() || this._environmentFadeTransitionActive) {
+    if (!this._isEnvironmentFadeEnabled()) {
       commitFn(value);
       return;
     }
@@ -3061,7 +3096,13 @@ export class ControlPanelManager {
     this._fadeChannelDragActive.delete(paramId);
     const fadeMins = this._getEnvironmentFadeMinutes();
 
-    if (environmentFadeController.isRunning && fadeMins > 0) {
+    if (environmentFadeController.isRunning || this._environmentFadeTransitionActive) {
+      if (fadeMins <= 0) {
+        this._cancelActiveEnvironmentFade();
+        commitFn(value);
+        this.debouncedSave();
+        return;
+      }
       if (paramId === 'gustiness') {
         this.controlState.gustiness = GUSTINESS_LABELS[Math.round(value)] || 'moderate';
       } else {
@@ -3072,7 +3113,7 @@ export class ControlPanelManager {
       return;
     }
 
-    if (!this._isEnvironmentFadeEnabled() || this._environmentFadeTransitionActive) {
+    if (!this._isEnvironmentFadeEnabled()) {
       commitFn(value);
       return;
     }
@@ -3820,6 +3861,11 @@ export class ControlPanelManager {
     const displayMinute = Math.floor((hour24 % 1) * 60);
     const timeText = `${displayHour.toString().padStart(2, '0')}:${displayMinute.toString().padStart(2, '0')}`;
 
+    if (fadeMins <= 0
+      && (environmentFadeController.isRunning || this._environmentFadeTransitionActive)) {
+      this._cancelActiveEnvironmentFade();
+    }
+
     if (fadeMins > 0) {
       this._updateClockTarget(hour24);
       if (this.clockElements.digital) {
@@ -3911,9 +3957,19 @@ export class ControlPanelManager {
    * @private
    */
   async _setTimeOfDay(hour) {
-    this.controlState.timeOfDay = hour % 24;
-    this._updateClockTarget(this.controlState.timeOfDay);
-    this._updateClock(hour);
+    const tgt = ((Number(hour) % 24) + 24) % 24;
+    this.controlState.timeOfDay = tgt;
+    this._updateClockTarget(tgt);
+    this._updateClock(tgt);
+
+    if (this._getEnvironmentFadeMinutes() <= 0) {
+      this._cancelActiveEnvironmentFade();
+      this._lastTimeTargetApplied = tgt;
+      this._lastTimeTransitionMinutesApplied = 0;
+      await stateApplier.applyTimeOfDay(tgt, false, false);
+      return;
+    }
+
     await this._applyControlState();
   }
 
@@ -4544,30 +4600,25 @@ export class ControlPanelManager {
 
       const targetHour = ((Number(this.controlState.timeOfDay) % 24) + 24) % 24;
       const transitionMinutes = Number(this.controlState.timeTransitionMinutes) || 0;
-      const shouldStartTransition =
-        transitionMinutes > 0 &&
-        (this._lastTimeTargetApplied === null ||
-          Math.abs(this._lastTimeTargetApplied - targetHour) > 1e-4);
+      const targetChanged =
+        this._lastTimeTargetApplied === null
+        || Math.abs(this._lastTimeTargetApplied - targetHour) > 1e-4;
 
-      const shouldApplyInstant =
-        transitionMinutes <= 0 &&
-        (this._lastTimeTargetApplied === null || Math.abs(this._lastTimeTargetApplied - targetHour) > 1e-4);
-
-      if (this._environmentFadeTransitionActive) {
-        // Active environment fade owns time/scene application.
-      } else if (shouldStartTransition) {
-        this._lastTimeTargetApplied = targetHour;
-        this._lastTimeTransitionMinutesApplied = transitionMinutes;
-        await this._startEnvironmentTransition(
-          snapshotFromControlState(this.controlState, MAX_WIND_MS_CP),
-          transitionMinutes,
-          environmentControlApi.captureSnapshot(),
-        );
-      } else if (shouldApplyInstant) {
-        this._lastTimeTargetApplied = targetHour;
-        this._lastTimeTransitionMinutesApplied = transitionMinutes;
-        // Do not call Foundry scene darkness from live slider — sync once on debouncedSave.
-        await stateApplier.applyTimeOfDay(targetHour, false, false);
+      if (targetChanged) {
+        if (transitionMinutes <= 0) {
+          this._cancelActiveEnvironmentFade();
+          this._lastTimeTargetApplied = targetHour;
+          this._lastTimeTransitionMinutesApplied = 0;
+          await stateApplier.applyTimeOfDay(targetHour, false, false);
+        } else if (!this._environmentFadeTransitionActive && !environmentFadeController.isRunning) {
+          this._lastTimeTargetApplied = targetHour;
+          this._lastTimeTransitionMinutesApplied = transitionMinutes;
+          await this._startEnvironmentTransition(
+            snapshotFromControlState(this.controlState, MAX_WIND_MS_CP),
+            transitionMinutes,
+            environmentControlApi.captureSnapshot(),
+          );
+        }
       }
 
       if (this._suppressInitialWeatherApply) {

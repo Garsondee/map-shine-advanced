@@ -3976,13 +3976,15 @@ body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {
 }
 
 .msa-cp__minimized-dock {
+  --msa-cp-minimized-dock-height: 40px;
   position: fixed;
   left: 20px;
   top: 20px;
   z-index: 10001;
   display: flex;
   align-items: stretch;
-  min-height: 36px;
+  height: var(--msa-cp-minimized-dock-height);
+  min-height: var(--msa-cp-minimized-dock-height);
   border-radius: 999px;
   background: var(--msa-cp-surface);
   backdrop-filter: var(--msa-cp-blur);
@@ -4001,7 +4003,10 @@ body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {
 
 .msa-cp__minimized-handle {
   flex-shrink: 0;
-  width: 22px;
+  align-self: stretch;
+  width: 24px;
+  height: 100%;
+  min-height: var(--msa-cp-minimized-dock-height);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -4019,7 +4024,7 @@ body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {
 .msa-cp__minimized-grip {
   display: block;
   width: 4px;
-  height: 14px;
+  height: 18px;
   border-radius: 999px;
   background:
     radial-gradient(circle, rgba(180, 210, 255, 0.75) 1px, transparent 1.2px) 0 0 / 4px 4px repeat;
@@ -4028,19 +4033,24 @@ body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {
 
 .msa-cp__minimized-open {
   flex: 1;
+  align-self: stretch;
   min-width: 0;
+  height: 100%;
+  min-height: var(--msa-cp-minimized-dock-height);
   margin: 0;
-  padding: 10px 18px 10px 12px;
+  padding: 0 18px 0 12px;
   border: none;
   background: transparent;
   color: rgba(210, 235, 255, 0.96);
   font-family: inherit;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   white-space: nowrap;
   cursor: pointer;
+  display: flex;
+  align-items: center;
   transition: background 0.12s, color 0.12s;
 }
 
@@ -6341,24 +6351,13 @@ body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {
   cursor: pointer;
 }
 
-.msa-cp-dynamic-deck__preset-row {
-  position: relative;
-  display: flex;
-  align-items: stretch;
-  gap: 0;
-}
-
-.msa-cp-dynamic-deck__preset-row.is-open .msa-cp-dynamic-deck__preset-chevron {
-  transform: rotate(180deg);
-}
-
 .msa-cp-dynamic-deck__preset-btn {
-  flex: 1;
+  display: block;
+  width: 100%;
   min-height: 34px;
   padding: 6px 10px;
-  border-radius: 8px 0 0 8px;
+  border-radius: 8px;
   border: 1px solid rgba(90, 200, 250, 0.28);
-  border-right: none;
   background: rgba(20, 45, 80, 0.55);
   color: rgba(210, 235, 255, 0.96);
   font-family: inherit;
@@ -6370,23 +6369,9 @@ body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {
 }
 
 .msa-cp-dynamic-deck__preset-btn:hover,
-.msa-cp-dynamic-deck__preset-row.is-open .msa-cp-dynamic-deck__preset-btn {
+.msa-cp-dynamic-deck__preset-btn.is-open {
   background: rgba(50, 110, 170, 0.45);
   border-color: rgba(90, 200, 250, 0.45);
-}
-
-.msa-cp-dynamic-deck__preset-chevron {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  border-radius: 0 8px 8px 0;
-  border: 1px solid rgba(90, 200, 250, 0.28);
-  background: rgba(20, 45, 80, 0.55);
-  color: rgba(190, 225, 255, 0.9);
-  font-size: 11px;
-  pointer-events: none;
-  transition: transform 0.15s ease;
 }
 
 .msa-cp-dynamic-preset-overlay {

@@ -9,8 +9,14 @@ export const FREEZE_SNOW_THRESHOLD = 0.55;
 /** Warm presets — freeze pinned at zero so rain never becomes snow. */
 export const WARM_FREEZE_BOUNDS = Object.freeze({ freezeLevelMin: 0, freezeLevelMax: 0 });
 
+/** No landscape lightning unless a preset explicitly enables it. */
+export const NO_LIGHTNING_BOUNDS = Object.freeze({ lightningMin: 0, lightningMax: 0 });
+
 /** Cold / snow-capable presets. */
 export const COLD_FREEZE_BOUNDS = Object.freeze({ freezeLevelMin: 0.6, freezeLevelMax: 1 });
+
+/** Storm presets — landscape lightning allowed. */
+export const STORM_LIGHTNING_BOUNDS = Object.freeze({ lightningMin: 0.55, lightningMax: 1 });
 
 /** @typedef {{ id: string, label: string, icon: string, blurb: string, traits: string[] }} BiomeInfo */
 
@@ -250,8 +256,8 @@ export const DYNAMIC_MOOD_PRESETS = Object.freeze([
       windSpeedMin: 0.1, windSpeedMax: 0.85,
       fogDensityMin: 0.2, fogDensityMax: 0.85,
       ...WARM_FREEZE_BOUNDS,
-      ashIntensityMin: 0.5, ashIntensityMax: 0.95,
       lightningMin: 0, lightningMax: 0.35,
+      ashIntensityMin: 0.5, ashIntensityMax: 0.95,
       gustinessMin: 1, gustinessMax: 3,
     },
     blurb: 'Ash-thick air and oppressive heat — apocalyptic tone.',
@@ -270,7 +276,7 @@ export const DYNAMIC_MOOD_PRESETS = Object.freeze([
       windSpeedMin: 0.15, windSpeedMax: 1,
       fogDensityMin: 0, fogDensityMax: 0.45,
       ...WARM_FREEZE_BOUNDS,
-      lightningMin: 0.55, lightningMax: 1,
+      ...STORM_LIGHTNING_BOUNDS,
       ashIntensityMin: 0, ashIntensityMax: 0.12,
       gustinessMin: 2, gustinessMax: 4,
     },
@@ -343,8 +349,7 @@ export function allCatalogBiomeIds() {
 
 /** Channels off unless a mood preset or biome template explicitly enables them. */
 const NEUTRAL_CHANNEL_BOUNDS = Object.freeze({
-  lightningMin: 0,
-  lightningMax: 0,
+  ...NO_LIGHTNING_BOUNDS,
   ashIntensityMin: 0,
   ashIntensityMax: 0,
   gustinessMin: 0,
@@ -354,22 +359,22 @@ const NEUTRAL_CHANNEL_BOUNDS = Object.freeze({
 /** @type {Record<string, Record<string, number>>} */
 const CATEGORY_CHANNEL_BOUNDS = Object.freeze({
   temperate: {
-    lightningMin: 0, lightningMax: 0.4,
+    ...NO_LIGHTNING_BOUNDS,
     ashIntensityMin: 0, ashIntensityMax: 0.15,
     gustinessMin: 0, gustinessMax: 3,
   },
   arid: {
-    lightningMin: 0, lightningMax: 0.35,
+    ...NO_LIGHTNING_BOUNDS,
     ashIntensityMin: 0, ashIntensityMax: 0.55,
     gustinessMin: 1, gustinessMax: 4,
   },
   tropical: {
-    lightningMin: 0.1, lightningMax: 0.65,
+    ...NO_LIGHTNING_BOUNDS,
     ashIntensityMin: 0, ashIntensityMax: 0.2,
     gustinessMin: 1, gustinessMax: 3,
   },
   polar: {
-    lightningMin: 0, lightningMax: 0.25,
+    ...NO_LIGHTNING_BOUNDS,
     ashIntensityMin: 0, ashIntensityMax: 0.08,
     gustinessMin: 1, gustinessMax: 4,
   },
@@ -382,12 +387,15 @@ const CATEGORY_CHANNEL_BOUNDS = Object.freeze({
 
 /** @type {Record<string, Partial<Record<string, number>>>} */
 const BIOME_CHANNEL_BOUNDS = Object.freeze({
+  'Monsoon Season': {
+    lightningMin: 0.15, lightningMax: 0.55,
+  },
   'Volcanic Wastes': {
     ashIntensityMin: 0.45, ashIntensityMax: 1,
     lightningMin: 0.05, lightningMax: 0.45,
   },
   'Thunderhead Ridge': {
-    lightningMin: 0.55, lightningMax: 1,
+    ...STORM_LIGHTNING_BOUNDS,
     gustinessMin: 2, gustinessMax: 4,
   },
   'Arctic Blizzard': {
@@ -395,7 +403,6 @@ const BIOME_CHANNEL_BOUNDS = Object.freeze({
     lightningMin: 0, lightningMax: 0.15,
   },
   'Misty Vale': {
-    lightningMin: 0, lightningMax: 0.2,
     gustinessMin: 0, gustinessMax: 2,
   },
 });

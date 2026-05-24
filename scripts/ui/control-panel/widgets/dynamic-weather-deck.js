@@ -69,23 +69,13 @@ export function createDynamicWeatherDeck(mountEl, hooks) {
     } catch (_) {}
   }
 
-  const presetRow = document.createElement('div');
-  presetRow.className = 'msa-cp-dynamic-deck__preset-row';
-
   const presetBtn = document.createElement('button');
   presetBtn.type = 'button';
   presetBtn.className = 'msa-cp-dynamic-deck__preset-btn';
   presetBtn.setAttribute('aria-haspopup', 'listbox');
   presetBtn.setAttribute('aria-expanded', 'false');
 
-  const presetChevron = document.createElement('span');
-  presetChevron.className = 'msa-cp-dynamic-deck__preset-chevron';
-  presetChevron.textContent = '▾';
-  presetChevron.setAttribute('aria-hidden', 'true');
-
-  presetRow.appendChild(presetBtn);
-  presetRow.appendChild(presetChevron);
-  root.appendChild(presetRow);
+  root.appendChild(presetBtn);
 
   const presetOverlay = document.createElement('div');
   presetOverlay.className = 'msa-cp-dynamic-preset-overlay';
@@ -294,7 +284,8 @@ export function createDynamicWeatherDeck(mountEl, hooks) {
   }
 
   /**
-   * Clamp live weather into new bounds so warm presets do not inherit snow from prior cold drift.
+   * Clamp live weather into new bounds so presets do not inherit stale channel values
+   * (e.g. default lightning 1.0 on a calm mood).
    * @param {Record<string, number>} bounds
    */
   function snapWeatherScalarsToBounds(bounds) {
@@ -313,9 +304,7 @@ export function createDynamicWeatherDeck(mountEl, hooks) {
     const applyToState = (state) => {
       if (!state) return;
       for (const group of BOUND_FADER_GROUPS) {
-        if (group.metaId === 'lightning' || group.metaId === 'ashIntensity' || group.metaId === 'gustiness') {
-          continue;
-        }
+        if (group.metaId === 'lightning' || group.metaId === 'gustiness') continue;
         state[group.metaId] = clampToBounds(group.minKey, group.maxKey, state[group.metaId]);
       }
       state.precipType = computePrecipType(state.precipitation, state.freezeLevel);
@@ -323,6 +312,29 @@ export function createDynamicWeatherDeck(mountEl, hooks) {
 
     applyToState(wc.currentState);
     applyToState(wc.targetState);
+
+    const snappedLightning = clampToBounds(
+      'lightningMin',
+      'lightningMax',
+      Number(hooks.controlState?.landscapeLightning?.lightning),
+    );
+    writeLightningIntensityToControlState(hooks.controlState, snappedLightning);
+    applyLightningIntensityToEffect(snappedLightning);
+
+    const snappedAsh = clampToBounds('ashIntensityMin', 'ashIntensityMax', wc.targetState?.ashIntensity);
+    if (wc.currentState) wc.currentState.ashIntensity = snappedAsh;
+    if (wc.targetState) wc.targetState.ashIntensity = snappedAsh;
+    applyAshMasterIntensity(snappedAsh, { syncMainTweakpane: false });
+
+    const gustKey = String(hooks.controlState?.gustiness || 'moderate');
+    let gustIdx = GUSTINESS_LABELS.indexOf(gustKey);
+    if (gustIdx < 0) gustIdx = 2;
+    const snappedGustIdx = Math.round(clampToBounds('gustinessMin', 'gustinessMax', gustIdx));
+    const gustLabel = GUSTINESS_LABELS[snappedGustIdx] || 'moderate';
+    hooks.controlState.gustiness = gustLabel;
+    const variability = GUSTINESS_TO_VARIABILITY[gustLabel] ?? GUSTINESS_TO_VARIABILITY.moderate;
+    if (typeof wc.setVariability === 'function') wc.setVariability(variability);
+    else wc.variability = variability;
 
     if (wc._dynamicLatent && Number.isFinite(Number(wc.targetState?.freezeLevel))) {
       wc._dynamicLatent.temperature = Math.max(0, Math.min(1, 1 - Number(wc.targetState.freezeLevel)));
@@ -364,6 +376,7 @@ export function createDynamicWeatherDeck(mountEl, hooks) {
         applyBoundsToRuntime(preset.bounds);
       } else {
         boundsBoard.mirrorAllBounds();
+        snapWeatherScalarsToBounds(preset.bounds);
       }
       return;
     }
@@ -387,14 +400,14 @@ export function createDynamicWeatherDeck(mountEl, hooks) {
   function closePresetPanel() {
     presetOverlay.hidden = true;
     presetBtn.setAttribute('aria-expanded', 'false');
-    presetRow.classList.remove('is-open');
+    presetBtn.classList.remove('is-open');
   }
 
   function openPresetPanel() {
     positionPresetOverlay();
     presetOverlay.hidden = false;
     presetBtn.setAttribute('aria-expanded', 'true');
-    presetRow.classList.add('is-open');
+    presetBtn.classList.add('is-open');
   }
 
   presetBtn.addEventListener('click', () => {

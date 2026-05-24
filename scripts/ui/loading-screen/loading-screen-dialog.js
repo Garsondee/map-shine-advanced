@@ -68,6 +68,8 @@ export class LoadingScreenDialog {
       googleFontsCheckbox: null,
       presetSelect: null,
       userPresetInput: null,
+      userPresetList: null,
+      deleteUserPresetBtn: null,
       wallpaperList: null,
       wallpaperModeSelect: null,
       wallpaperFitSelect: null,
@@ -158,6 +160,7 @@ export class LoadingScreenDialog {
 
   _renderAll() {
     this._renderTopControls();
+    this._renderUserPresetList();
     this._renderWallpaperSettings();
     this._renderWallpaperList();
     this._renderAlignToolbar();
@@ -192,6 +195,8 @@ export class LoadingScreenDialog {
     this.refs.googleFontsCheckbox = q('[data-ref="google-fonts"]');
     this.refs.presetSelect = q('[data-ref="preset"]');
     this.refs.userPresetInput = q('[data-ref="preset-name"]');
+    this.refs.userPresetList = q('[data-ref="user-preset-list"]');
+    this.refs.deleteUserPresetBtn = q('[data-action="delete-user-preset"]');
     this.refs.wallpaperList = q('[data-ref="wallpaper-list"]');
     this.refs.wallpaperModeSelect = q('[data-ref="wallpaper-mode"]');
     this.refs.wallpaperFitSelect = q('[data-ref="wallpaper-fit"]');
@@ -372,6 +377,12 @@ export class LoadingScreenDialog {
       this.refs.userPresetInput.value = '';
       this._status(`Saved preset "${name}" and applied loading screen settings.`);
       this._renderTopControls();
+      this._renderUserPresetList();
+    });
+
+    this.container.querySelector('[data-action="delete-user-preset"]')?.addEventListener('click', async () => {
+      const presetId = String(this.refs.presetSelect?.value || '');
+      await this._deleteUserPreset(presetId);
     });
 
     this.container.querySelector('[data-action="add-element"]')?.addEventListener('click', () => {
@@ -476,6 +487,140 @@ export class LoadingScreenDialog {
       } finally {
         this._suppressPresetChange = false;
       }
+
+      const activeId = String(presetSelect.value || this.state.activePresetId || '');
+      const isUserPreset = (this.state.userPresets || []).some((p) => String(p?.id || '') === activeId);
+      if (this.refs.deleteUserPresetBtn) {
+        this.refs.deleteUserPresetBtn.classList.toggle('is-muted', !isUserPreset);
+        this.refs.deleteUserPresetBtn.title = isUserPreset
+          ? 'Delete the selected user preset'
+          : 'Select a user preset from the dropdown (User group) to delete';
+      }
+    }
+  }
+
+  _renderUserPresetList() {
+    const listEl = this.refs.userPresetList;
+    if (!listEl) return;
+
+    const user = Array.isArray(this.state?.userPresets) ? this.state.userPresets : [];
+    listEl.innerHTML = '';
+
+    if (user.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'ms-lsd-empty';
+      empty.textContent = 'No user presets yet. Save the current layout above.';
+      listEl.appendChild(empty);
+      return;
+    }
+
+    for (const preset of user) {
+      const id = String(preset.id || '');
+      const isActive = id && id === String(this.state.activePresetId || '');
+
+      const row = document.createElement('div');
+      row.className = `ms-lsd-user-preset-row${isActive ? ' is-active' : ''}`;
+
+      const main = document.createElement('div');
+      main.className = 'ms-lsd-user-preset-main';
+
+      const name = document.createElement('div');
+      name.className = 'ms-lsd-user-preset-name';
+      name.textContent = preset.name || id || 'Custom Preset';
+
+      const meta = document.createElement('div');
+      meta.className = 'ms-lsd-user-preset-meta';
+      meta.textContent = isActive ? 'Currently selected' : 'Click to select';
+
+      main.append(name, meta);
+
+      row.addEventListener('click', (ev) => {
+        if (ev.target.closest('.ms-lsd-user-preset-controls, button')) return;
+        if (!this.refs.presetSelect || !id) return;
+        this.refs.presetSelect.value = id;
+        this.refs.presetSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+
+      const controls = document.createElement('div');
+      controls.className = 'ms-lsd-user-preset-controls';
+      controls.addEventListener('click', (ev) => ev.stopPropagation());
+
+      const remove = this._button('✕', async (ev) => {
+        ev?.stopPropagation?.();
+        await this._deleteUserPreset(id);
+      }, true);
+      remove.title = 'Delete this user preset';
+
+      controls.append(remove);
+      row.append(main, controls);
+      listEl.appendChild(row);
+    }
+  }
+
+  async _deleteUserPreset(presetId) {
+    const id = String(presetId || '').trim();
+    if (!id) {
+      this._status('Select a user preset to delete.');
+      return;
+    }
+
+    let userPresets = [];
+    try {
+      userPresets = await this.manager.getUserPresets();
+    } catch (err) {
+      console.error('Map Shine: failed to load user presets for delete', err);
+      this._status('Could not load user presets.');
+      return;
+    }
+
+    const preset = userPresets.find((p) => String(p?.id || '') === id);
+    if (!preset) {
+      this._status('Only user presets can be deleted. Pick one from the User group in the dropdown.');
+      return;
+    }
+
+    const label = foundry.utils.escapeHTML(String(preset.name || preset.id || 'Custom Preset'));
+    let confirmed = false;
+    try {
+      confirmed = await this._confirmAboveOverlay({
+        title: 'Delete Loading Screen Preset',
+        content: `<p>Permanently delete user preset <strong>${label}</strong>? This cannot be undone.</p>`,
+      });
+    } catch (err) {
+      console.error('Map Shine: delete preset confirmation failed', err);
+      this._status('Delete confirmation failed.');
+      return;
+    }
+    if (!confirmed) return;
+
+    try {
+      await this.manager.deleteUserPreset(id);
+    } catch (err) {
+      console.error('Map Shine: failed to delete user preset', err);
+      ui.notifications?.error?.('Map Shine: Could not delete loading screen preset.');
+      this._status('Failed to delete preset.');
+      return;
+    }
+
+    this.state.userPresets = await this.manager.getUserPresets();
+
+    const wasActive = String(this.state.activePresetId || '') === id;
+    if (wasActive) {
+      this.state.activePresetId = 'map-shine-default';
+      try {
+        this.state.config = await this.manager.resolvePresetConfig('map-shine-default', this.state.config);
+      } catch (_) {
+        this.state.config = normalizeLoadingScreenConfig(null);
+      }
+    }
+
+    this._renderTopControls();
+    this._renderUserPresetList();
+    if (wasActive) {
+      this._renderAll();
+      this._status(`Deleted "${preset.name}" and switched to Map Shine Default (click Apply to save).`);
+    } else {
+      this._status(`Deleted user preset "${preset.name}".`);
     }
   }
 
@@ -2779,6 +2924,42 @@ export class LoadingScreenDialog {
     }
   }
 
+  /**
+   * Foundry confirm dialogs stack below the composer's high z-index overlay unless
+   * we temporarily pull the overlay aside (same approach as FilePicker).
+   * @param {{title?: string, content?: string}} config
+   * @returns {Promise<boolean>}
+   */
+  async _confirmAboveOverlay(config = {}) {
+    this._beginFilePickerStackingWorkaround();
+    try {
+      const title = String(config.title || 'Confirm');
+      const content = String(config.content || '<p>Are you sure?</p>');
+      const DialogV2 = foundry?.applications?.api?.DialogV2;
+      if (typeof DialogV2?.confirm === 'function') {
+        const result = await DialogV2.confirm({
+          window: { title },
+          content,
+          modal: true,
+          rejectClose: false,
+        });
+        return result === true;
+      }
+      if (typeof Dialog?.confirm === 'function') {
+        return await Dialog.confirm({
+          title,
+          content,
+          yes: () => true,
+          no: () => false,
+          defaultYes: false,
+        });
+      }
+      return globalThis.confirm(`${title}\n\n${content.replace(/<[^>]+>/g, '')}`);
+    } finally {
+      this._endFilePickerStackingWorkaround();
+    }
+  }
+
   async _pickFilePath() {
     try {
       const filePickerImpl = globalThis.foundry?.applications?.apps?.FilePicker?.implementation;
@@ -2963,6 +3144,8 @@ export class LoadingScreenDialog {
                 <input type="text" data-ref="preset-name" class="ms-lsd-input" placeholder="Save as…" />
               </label>
               <button type="button" class="ms-lsd-btn ms-lsd-btn--full" data-action="save-user-preset">Save User Preset</button>
+              <button type="button" class="ms-lsd-btn ms-lsd-btn--full is-danger is-muted" data-action="delete-user-preset">Delete Selected User Preset</button>
+              <div class="ms-lsd-list ms-lsd-user-preset-list" data-ref="user-preset-list"></div>
             </details>
 
             <details open>
@@ -3327,6 +3510,34 @@ export class LoadingScreenDialog {
         display: flex; align-items: center; gap: 3px;
       }
 
+      .ms-lsd-user-preset-list { margin-top: 6px; }
+      .ms-lsd-user-preset-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 6px;
+        padding: 5px;
+        border: 1px solid rgba(255,255,255,0.1);
+        border-radius: 5px;
+        background: rgba(255,255,255,0.03);
+        cursor: pointer;
+      }
+      .ms-lsd-user-preset-row.is-active {
+        border-color: rgba(0,180,255,0.5);
+        background: rgba(0,180,255,0.09);
+      }
+      .ms-lsd-user-preset-name {
+        font-size: 10px;
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .ms-lsd-user-preset-meta {
+        font-size: 9px;
+        opacity: 0.6;
+      }
+
       .ms-lsd-inspector { display: flex; flex-direction: column; gap: 5px; }
       .ms-lsd-helper-hint {
         margin-top: 2px;
@@ -3382,6 +3593,12 @@ export class LoadingScreenDialog {
       }
       .ms-lsd-btn.is-danger {
         background: rgba(255,90,90,0.18); border-color: rgba(255,90,90,0.35); color: #ffb9b9;
+      }
+      .ms-lsd-btn.is-muted {
+        opacity: 0.55;
+      }
+      .ms-lsd-btn.is-muted:hover {
+        opacity: 0.85;
       }
       .ms-lsd-btn--full { width: 100%; }
       .ms-lsd-btn-group {

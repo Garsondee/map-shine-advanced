@@ -20,7 +20,7 @@ const SOURCE_DEFS = [
   { id: 'src:lightingCore', label: 'Lighting Core (lightRT / compose)', effects: ['LightingEffectV2'], keywords: ['lightRT', 'composeMaterial', 'initialized'] },
   { id: 'src:waterSplashes', label: 'Water Splashes (Quarks)', effects: ['WaterSplashesEffectV2'], keywords: ['batchRenderer', 'initialized'] },
   { id: 'src:dustParticles', label: 'Dust Particles (Quarks)', effects: ['DustEffectV2'], keywords: ['batchRenderer', 'initialized'] },
-  { id: 'src:skyGrade', label: 'Sky Color Pass', effects: ['SkyColorEffectV2'], keywords: ['composeMaterial', 'initialized'] },
+  { id: 'src:skyGrade', label: 'Sky Environment (CPU exports)', effects: ['SkyColorEffectV2'], keywords: ['atmosphereState', 'initialized'] },
   { id: 'src:buildingShadowRTs', label: 'Building Shadow RTs', effects: ['BuildingShadowsEffectV2'], keywords: ['initializedTargets', 'shadow'] },
   {
     id: 'src:specularOutdoors',

@@ -1073,6 +1073,7 @@ export class HealthEvaluatorService {
     this.dependencyGraph.addEdge('ShadowDriverState', 'SkyReachShadowsEffectV2', 'required');
     this.dependencyGraph.addEdge('SkyOcclusionPrimitive', 'LightingEffectV2', 'contextual');
     this.dependencyGraph.addEdge('SkyOcclusionPrimitive', 'SkyColorEffectV2', 'contextual');
+    this.dependencyGraph.addEdge('SkyOcclusionPrimitive', 'ColorCorrectionEffectV2', 'contextual');
     this.dependencyGraph.addEdge('WaterEffectV2', 'WindowLightEffectV2', 'contextual');
     this.dependencyGraph.addEdge('WaterEffectV2', 'WaterSplashesEffectV2', 'contextual');
     this.dependencyGraph.addEdge('WindowLightEffectV2', 'LightingEffectV2', 'required');
@@ -1080,6 +1081,7 @@ export class HealthEvaluatorService {
     this.dependencyGraph.addEdge('FireEffectV2', 'LightingEffectV2', 'contextual');
     this.dependencyGraph.addEdge('LightingEffectV2', 'SkyColorEffectV2', 'contextual');
     this.dependencyGraph.addEdge('SkyColorEffectV2', 'WaterEffectV2', 'contextual');
+    this.dependencyGraph.addEdge('SkyColorEffectV2', 'ColorCorrectionEffectV2', 'contextual');
     this.dependencyGraph.addEdge('WaterEffectV2', 'BloomEffectV2', 'contextual');
         this.dependencyGraph.addEdge('SkyColorEffectV2', 'WindowLightEffectV2', 'contextual');
         this.dependencyGraph.addEdge('ColorCorrectionEffectV2', 'WindowLightEffectV2', 'contextual');
@@ -1711,43 +1713,27 @@ export class HealthEvaluatorService {
           severity: 'error',
           check: (instance) => {
             if (instance?.params && instance.params.enabled === false) {
-              return { pass: true, skipped: true, message: 'Sky color disabled' };
+              return { pass: true, skipped: true, message: 'Sky environment disabled' };
             }
             return {
               pass: !!instance?._initialized,
-              message: instance?._initialized ? 'Initialized' : 'Sky color not initialized',
+              message: instance?._initialized ? 'Initialized' : 'Sky environment not initialized',
             };
           },
         },
         {
-          id: 'composeMaterial',
+          id: 'atmosphereState',
           tier: 'structural',
-          severity: 'error',
+          severity: 'warn',
           check: (instance) => {
             if (instance?.params && instance.params.enabled === false) {
-              return { pass: true, skipped: true, message: 'Sky color disabled' };
+              return { pass: true, skipped: true, message: 'Sky environment disabled' };
             }
-            return {
-              pass: !!instance?._composeMaterial,
-              message: instance?._composeMaterial ? 'Compose material present' : 'Sky compose material missing',
-            };
-          },
-        },
-        {
-          id: 'illuminationMaskUniforms',
-          tier: 'structural',
-          severity: 'error',
-          check: (instance) => {
-            if (instance?.params && instance.params.enabled === false) {
-              return { pass: true, skipped: true, message: 'Sky color disabled' };
-            }
-            const u = instance?._composeMaterial?.uniforms;
-            const pass = !!u?.tDynamicLightMask && !!u?.tWindowLightMask && !!u?.uHasIlluminationMask;
+            const state = instance?.getAtmosphereState?.() ?? instance?._lastState;
+            const pass = !!state?.skyTintColor;
             return {
               pass,
-              message: pass
-                ? 'Illumination mask uniforms present'
-                : 'Sky illumination mask uniforms missing',
+              message: pass ? 'Sky environment state published' : 'Sky environment state missing',
             };
           },
         },

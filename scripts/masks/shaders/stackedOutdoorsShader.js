@@ -46,3 +46,25 @@ export const STACKED_OUTDOORS_LAYER_FRAG = /* glsl */`
     gl_FragColor = vec4(outR, outR, outR, outA);
   }
 `;
+
+/** Same stack logic as outdoors but reads derived per-floor `skyReach` masks. */
+export const STACKED_SKY_REACH_LAYER_FRAG = /* glsl */`
+  precision highp float;
+
+  uniform sampler2D tAccum;
+  uniform sampler2D tFloorAlpha;
+  uniform sampler2D tSkyReach;
+
+  varying vec2 vSceneUv;
+
+  void main() {
+    vec4 acc = texture2D(tAccum, vSceneUv);
+    float cov = clamp(texture2D(tFloorAlpha, vSceneUv).r, 0.0, 1.0);
+    vec4 sr = texture2D(tSkyReach, vSceneUv);
+    float reach = mix(1.0, clamp(sr.r, 0.0, 1.0), clamp(sr.a, 0.0, 1.0));
+    float w = cov;
+    float outR = mix(acc.r, reach, w);
+    float outA = max(acc.a, w);
+    gl_FragColor = vec4(outR, outR, outR, outA);
+  }
+`;

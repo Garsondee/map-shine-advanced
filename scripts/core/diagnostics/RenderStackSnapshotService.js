@@ -138,16 +138,18 @@ export function captureRenderStack(fc, runtime = {}) {
     ],
   });
 
-  addPass('skyColor', 'SkyColorEffectV2', 'post', {
+  addPass('skyColor', 'SkyColorEffectV2 (CPU exports)', 'post', {
     enabled: !!fc._skyColorEffect?.params?.enabled,
-    outputs: ['ping-pong post RT'],
+    outputs: ['sky tint / sun angles for downstream effects'],
     effectIds: ['SkyColorEffectV2'],
+    detail: 'Outdoor atmosphere grading runs in post-merge ColorCorrectionEffectV2.',
   });
 
   addPass('colorCorrection', 'ColorCorrectionEffectV2', 'post', {
-    enabled: !!fc._colorCorrectionEffect?.params?.enabled,
-    outputs: ['ping-pong post RT'],
+    enabled: !!fc._colorCorrectionEffect?._initialized,
+    outputs: ['HDR → LDR graded composite'],
     effectIds: ['ColorCorrectionEffectV2'],
+    detail: 'Camera grade + outdoor atmosphere + tone mapping (post-merge).',
   });
 
   addPass('filter', 'FilterEffectV2', 'post', {

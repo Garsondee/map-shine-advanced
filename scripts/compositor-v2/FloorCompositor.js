@@ -33,10 +33,9 @@
  *     Window light overlays are fed into the light accumulation RT here so
  *     the compose shader tints them by surface albedo (preserving hue).
  *   - **WaterEffectV2**: Water tint/distortion/specular/foam driven by _Water masks.
- *   - **SkyColorEffectV2**: Time-of-day atmospheric color grading.
+ *   - **SkyColorEffectV2**: CPU sky environment exports (tint, sun angles) for water/windows/clouds.
  *   - **BloomEffectV2**: Screen-space glow via UnrealBloomPass.
- *   - **ColorCorrectionEffectV2**: User-authored color grade (runs **after** per-level
- *     water so tint/spec/foam receive the same grade as the rest of the scene; no extra pass).
+ *   - **ColorCorrectionEffectV2**: HDR → LDR camera grade + outdoor atmosphere (post-merge).
  *   - **SharpenEffectV2**: Unsharp mask filter (disabled by default).
  *
  * Called by EffectComposer.render() in the V2-only runtime.
@@ -602,6 +601,8 @@ export class FloorCompositor {
 
     /** @type {THREE.Texture|null} Last outdoors mask pushed to V2 consumers */
     this._lastOutdoorsTexture = null;
+    this._lastSkyReachTexture = null;
+    this._lastSkyOcclusionTexture = null;
 
     /** @type {string|null} Last resolved floor key used for outdoors sync diagnostics */
     this._lastOutdoorsFloorKey = null;
@@ -1771,7 +1772,12 @@ export class FloorCompositor {
 
     await initEffect('LightingEffectV2', () => this._lightingEffect.initialize(w, h));
     await initEffect('SkyColorEffectV2', () => this._skyColorEffect.initialize());
-    await initEffect('ColorCorrectionEffectV2', () => this._colorCorrectionEffect.initialize());
+    await initEffect('ColorCorrectionEffectV2', () => {
+      this._colorCorrectionEffect.initialize();
+      try {
+        this._colorCorrectionEffect.migrateAtmosphereFromSky?.(this._skyColorEffect?.params);
+      } catch (_) {}
+    });
     await initEffect('FilterEffectV2', () => this._filterEffect.initialize());
     await initEffect('AtmosphericFogEffectV2', () => this._atmosphericFogEffect.initialize(this.renderer, this._renderBus._scene, this.camera));
     await initEffect('FogOfWarEffectV2', () => this._fogEffect.initialize(this.renderer, this.scene, this.camera));
@@ -3463,7 +3469,8 @@ export class FloorCompositor {
       driver.masks.upperFloorAlphaCompositeTexture = upperTex;
       driver.masks.skyOcclusionTexture = skyOccTex;
       this._lightingEffect?.setSkyOcclusionTexture?.(skyOccTex);
-      this._skyColorEffect?.setSkyOcclusionTexture?.(skyOccTex);
+      this._colorCorrectionEffect?.setSkyOcclusionTexture?.(skyOccTex);
+      this._lastSkyOcclusionTexture = skyOccTex ?? null;
     } catch (err) {
       log.warn('FloorCompositor: shadow driver sky-occlusion render failed:', err);
     }
@@ -3746,20 +3753,21 @@ export class FloorCompositor {
       }
 
       this._profileEffectCall('lighting', 'update', () => this._lightingEffect.update(timeInfo), 'LightingEffectV2 update');
-      try {
-        const cs = Number(this._lightingEffect?.params?.combinedShadowEffectStrength);
-        this._skyColorEffect?.setCombinedShadowEffectStrength?.(cs);
-      } catch (_) {}
+      this._profileEffectCall('colorCorrection', 'update', () => this._colorCorrectionEffect.update(timeInfo), 'ColorCorrectionEffectV2 update');
+      this._profileEffectCall('skyColor', 'update', () => {
+        this._skyColorEffect.update(timeInfo, this._colorCorrectionEffect?.params ?? null);
+        try {
+          this._colorCorrectionEffect?.setAtmosphereState?.(
+            this._skyColorEffect.getAtmosphereState?.() ?? null,
+          );
+        } catch (_) {}
+      }, 'SkyColorEffectV2 update');
       // Weather particles must update BEFORE the bus render so their BatchedRenderer
       // positions are current when the bus scene is drawn this frame.
       if (!navigationLite) {
         this._profileEffectCall('weatherParticles', 'update', () => this._weatherParticles?.update?.(timeInfo), 'WeatherParticlesV2 update');
       }
-      this._profileEffectCall('skyColor', 'update', () => this._skyColorEffect.update(timeInfo), 'SkyColorEffectV2 update');
-      const skyIntensity01 = Number(
-        this._skyColorEffect?.currentSkyIntensity01
-        ?? this._skyColorEffect?._composeMaterial?.uniforms?.uIntensity?.value
-      );
+      const skyIntensity01 = Number(this._skyColorEffect?.currentSkyIntensity01);
       try {
         const sky = this._skyColorEffect;
         if (sky && Number.isFinite(Number(sky.currentSunAzimuthDeg)) && Number.isFinite(Number(sky.currentSunElevationDeg))) {
@@ -3834,7 +3842,6 @@ export class FloorCompositor {
           tm?.setWindowLightEffect?.(this._windowLightEffect);
         }
       } catch (_) {}
-      this._profileEffectCall('colorCorrection', 'update', () => this._colorCorrectionEffect.update(timeInfo), 'ColorCorrectionEffectV2 update');
       try {
         const tlGrade = this._colorCorrectionEffect?.getTimelineGradeState?.();
         this._waterEffect?.setTimelineGradeState?.(tlGrade);
@@ -5342,8 +5349,7 @@ export class FloorCompositor {
       this._cloudEffect?.setOutdoorsMask?.(outdoorsTex);
       this._ashCloudEffect?.setOutdoorsMask?.(outdoorsTex);
       this._waterEffect?.setOutdoorsMask?.(waterOutdoorsTex);
-      this._skyColorEffect?.setOutdoorsMask?.(skyOutdoorsFinal);
-      this._skyColorEffect?.setSkyReachMask?.(skyReachTex);
+      this._lastSkyReachTexture = skyReachTex ?? null;
       this._colorCorrectionEffect?.setOutdoorsMask?.(outdoorsTex);
       this._filterEffect?.setOutdoorsMask?.(outdoorsTex);
       this._atmosphericFogEffect?.setOutdoorsMask?.(outdoorsTex);
@@ -6521,23 +6527,7 @@ export class FloorCompositor {
         currentInput = levelPostA;
       }
 
-      // Sky color grading
-      if (resolveEffectEnabled(this._skyColorEffect)) {
-        const skyOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        const lightingForSky = resolveEffectEnabled(this._lightingEffect) ? this._lightingEffect : null;
-        this._skyColorEffect?.setIlluminationMasks?.(
-          lightingForSky?.dynamicLightTexture ?? null,
-          lightingForSky?.windowLightTexture ?? null,
-        );
-        this._skyColorEffect?.setCombinedShadowTexture?.(combinedShadowTex ?? null);
-        this._profileEffectCall('skyColor', 'render', () => {
-          withSceneScissor(this.renderer, () => {
-            this._skyColorEffect.render(this.renderer, currentInput, skyOut);
-          });
-        }, 'SkyColorEffectV2 render');
-        currentInput = skyOut;
-      }
-
+      // Sky color grading removed — outdoor atmosphere runs in post-merge Camera Grade.
       // Filter (before water: refracted samples include filter; avoids an extra pass)
       if (resolveEffectEnabled(this._filterEffect)) {
         const fOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
@@ -7020,6 +7010,29 @@ export class FloorCompositor {
       // Single-floor fallback: use the active outdoors mask already synced for the frame.
       if (!outdoorsForCc) outdoorsForCc = this._lastOutdoorsTexture ?? null;
 
+      let skyReachForCc = null;
+      try {
+        const maskCompositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+        const floorKeys = visibleFloors
+          .map((f) => (f?.compositorKey != null ? String(f.compositorKey) : ''))
+          .filter((k) => k.length > 0);
+        if (maskCompositor && floorKeys.length > 1) {
+          if (_profiling) _profileT0 = performance.now();
+          this._profileEffectCall('cc.stackedSkyReach', 'render', () => {
+            try {
+              skyReachForCc = maskCompositor.composeStackedSkyReachMask?.(
+                this.renderer,
+                floorKeys,
+              ) ?? null;
+            } catch (_) {
+              skyReachForCc = null;
+            }
+          }, 'GpuSceneMaskCompositor stacked skyReach');
+          if (_profiling) this._recordPassTiming('postMerge_stackedSkyReach', _profileT0);
+        }
+      } catch (_) {}
+      if (!skyReachForCc) skyReachForCc = this._lastSkyReachTexture ?? null;
+
       const ccOut = _pickOtherPost();
       if (_profiling) _profileT0 = performance.now();
       let ccWrote = false;
@@ -7029,6 +7042,21 @@ export class FloorCompositor {
             this._colorCorrectionEffect.setOutdoorsMask(
               outdoorsForCc ?? this._lastOutdoorsTexture ?? null
             );
+            this._colorCorrectionEffect.setSkyReachMask(skyReachForCc ?? null);
+            this._colorCorrectionEffect.setSkyOcclusionTexture?.(
+              this._lastSkyOcclusionTexture ?? null,
+            );
+            try {
+              const cs = Number(this._lightingEffect?.params?.combinedShadowEffectStrength);
+              this._colorCorrectionEffect.setCombinedShadowEffectStrength?.(cs);
+            } catch (_) {}
+            try {
+              const smCombined = (resolveEffectEnabled(this._shadowManagerEffect)
+                && this._shadowManagerEffect?.combinedShadowTexture)
+                ? this._shadowManagerEffect.combinedShadowTexture
+                : null;
+              this._colorCorrectionEffect.setCombinedShadowTexture?.(smCombined ?? null);
+            } catch (_) {}
             try {
               const lightBinding = this._lightingEffect?.getLocalLightBufferBinding?.()
                 ?? { texture: this._lightingEffect?.dynamicLightTexture ?? null, alphaBaseline: 1.0 };
@@ -7043,6 +7071,7 @@ export class FloorCompositor {
           } finally {
             try {
               this._colorCorrectionEffect.setLocalLightTexture?.(null);
+              this._colorCorrectionEffect.setCombinedShadowTexture?.(null);
               if (this._lastOutdoorsTexture) {
                 this._colorCorrectionEffect.setOutdoorsMask(this._lastOutdoorsTexture);
               }

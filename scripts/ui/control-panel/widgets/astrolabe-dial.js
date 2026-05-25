@@ -33,7 +33,8 @@ function shortestAngleDeltaDeg(a, b) {
  */
 function outwardUnitForWindDeg(windDeg) {
   const rad = (Number(windDeg) * Math.PI) / 180;
-  return { ux: Math.cos(rad), uy: Math.sin(rad) };
+  // Weather degrees are math-space (Y-up); screen Y is down.
+  return { ux: Math.cos(rad), uy: -Math.sin(rad) };
 }
 
 /**
@@ -95,12 +96,12 @@ export const CONTEXT_HINT_IDLE = Object.freeze([
 
 /** Convert pointer-on-disc degrees (0 = up) to WeatherController wind degrees. */
 function pointerDegToWindDeg(pointerDeg) {
-  return (pointerDeg - 90 + 360) % 360;
+  return (90 - Number(pointerDeg) + 360) % 360;
 }
 
 /** Convert WeatherController wind degrees to wind-sock visual rotation. */
 function windDegToVisualDeg(windDeg) {
-  return (90 + Number(windDeg) + 360) % 360;
+  return (90 - Number(windDeg) + 360) % 360;
 }
 
 /**

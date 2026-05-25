@@ -11,13 +11,16 @@ export const FoundryLightingShaderChunks = {
   `,
 
   fairy: `
-            // Foundry VTT: lighting/effects/fairy-light.mjs
+            // Foundry VTT: lighting/effects/fairy-light.mjs (+ Map Shine caustic filaments)
             const float INVTWOPI = 0.15915494309189535;
             const float INVTHREE = 0.3333333333333333;
             const vec2 PIVOT = vec2(0.5, 0.5);
 
-            float time = uTime;
-            float intensityIn = uAnimIntensity;
+            float time = uTime + uSeed * 6.283185307179586;
+            float intensityIn = clamp(uAnimIntensity, 0.0, 10.0);
+            // High animation intensity reveals caustics; low stays soft rainbow only.
+            float causticDrive = smoothstep(3.0, 9.5, intensityIn);
+            causticDrive *= causticDrive;
 
             float distortion1 = fbm(vec2(
                               fbm(vUvs * 3.0 + time * 0.50),
@@ -48,14 +51,49 @@ export const FoundryLightingShaderChunks = {
             vec3 baseColor = max(uColor, vec3(0.001));
             vec3 mixedColor = mix(baseColor, rainbow, rainbowMix);
 
-            outColor = distortion1 * distortion1 *
-                       distortion2 * distortion2 *
-                       mixedColor * (1.0 - dist * dist * dist) *
-                       mix( uv.x + distortion1 * 4.5 * (intensityIn * 0.4),
-                            uv.y + distortion2 * 4.5 * (intensityIn * 0.4), tcos);
+            // Soft radial tint gradient (illumination shape stays on msaPointLightFalloff / intensity).
+            float fadeWidth = msaPointLightFadeWidth(att, uEdgeSoftness, uFalloffExponent);
+            float gradEdge = mix(0.88, 0.62, fadeWidth);
+            float tintGrad = smoothstep(1.0, gradEdge, 1.0 - dist);
+            tintGrad = mix(tintGrad, sqrt(tintGrad), 0.40);
+
+            // Geometric-mean distortion reads smoother than d1²·d2² (less fuzzy disk).
+            float pattern = sqrt(max(distortion1 * distortion2, 0.0));
+            float shimmerMul = mix(
+              uv.x + distortion1 * 2.6 * (intensityIn * 0.22),
+              uv.y + distortion2 * 2.6 * (intensityIn * 0.22),
+              tcos
+            );
+            shimmerMul = mix(1.0, clamp(shimmerMul, 0.68, 1.22), tintGrad * 0.28);
+
+            outColor = pattern * pattern * mixedColor * tintGrad * shimmerMul;
+
+            // Dual-layer ridged caustics (water-style); warp UV follows fairy distortion.
+            float caAmt = 0.0;
+            if (causticDrive > 0.001) {
+              float caScale = mix(5.5, 16.0, causticDrive);
+              float caSpeed = mix(0.28, 0.72, causticDrive);
+              float caSharp = mix(0.12, 0.62, causticDrive);
+              vec2 caUv = uv + vec2(distortion1, distortion2) * 0.18;
+              float cSharp = fairyCausticsPattern(caUv, time, caScale, caSpeed, caSharp);
+              float cSoft = fairyCausticsPattern(
+                caUv * 1.08 + vec2(uSeed * 0.03, -uSeed * 0.02),
+                time * 0.85,
+                caScale * 0.55,
+                caSpeed * 0.65,
+                max(0.08, caSharp * 0.35)
+              );
+              float caustics = max(cSharp, cSoft * 0.7);
+              float caRim = mix(1.0 - dist * dist, tintGrad, 0.55);
+              caAmt = caustics * causticDrive * caRim;
+              vec3 caColor = mix(mixedColor, vec3(1.0, 0.98, 0.92), 0.35);
+              outColor += caColor * caAmt * 1.55;
+              outColor = max(outColor, vec3(0.0));
+            }
 
             float motionWave = 0.5 * (0.5 * (cos(time * 0.5) + 1.0)) + 0.25;
-            animAlphaMul = mix(distortion1, distortion2, motionWave);
+            float flicker = mix(distortion1, distortion2, motionWave);
+            animAlphaMul = mix(0.86, flicker, 0.38) + caAmt * 0.28;
   `
 
   ,

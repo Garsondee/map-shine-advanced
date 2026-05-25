@@ -2822,8 +2822,18 @@ export class DiagnosticCenterDialog {
               tOutdoorsMask: _textureBrief(v2?._waterEffect?._composeMaterial?.uniforms?.tOutdoorsMask?.value ?? null),
             },
             skyColor: {
-              uHasOutdoorsMask: Number(v2?._skyColorEffect?._composeMaterial?.uniforms?.uHasOutdoorsMask?.value ?? 0),
-              tOutdoorsMask: _textureBrief(v2?._skyColorEffect?._composeMaterial?.uniforms?.tOutdoorsMask?.value ?? null),
+              initialized: !!v2?._skyColorEffect?._initialized,
+              skyIntensity01: v2?._skyColorEffect?.currentSkyIntensity01 ?? null,
+              skyTintColor: v2?._skyColorEffect?.currentSkyTintColor ?? null,
+              atmosphereState: v2?._skyColorEffect?.getAtmosphereState?.() ?? null,
+            },
+            colorCorrectionAtmosphere: {
+              uAtmosphereEnabled: Number(v2?._colorCorrectionEffect?._composeMaterial?.uniforms?.uAtmosphereEnabled?.value ?? 0),
+              uAtmosphereStrength: Number(v2?._colorCorrectionEffect?._composeMaterial?.uniforms?.uAtmosphereStrength?.value ?? 0),
+              uHasSkyReachMask: Number(v2?._colorCorrectionEffect?._composeMaterial?.uniforms?.uHasSkyReachMask?.value ?? 0),
+              tSkyReachMask: _textureBrief(v2?._colorCorrectionEffect?._composeMaterial?.uniforms?.tSkyReachMask?.value ?? null),
+              uHasOutdoorsMask: Number(v2?._colorCorrectionEffect?._composeMaterial?.uniforms?.uHasOutdoorsMask?.value ?? 0),
+              tOutdoorsMask: _textureBrief(v2?._colorCorrectionEffect?._composeMaterial?.uniforms?.tOutdoorsMask?.value ?? null),
             },
             cloud: {
               legacyOutdoorsMask: _textureBrief(v2?._cloudEffect?._outdoorsMask ?? null),

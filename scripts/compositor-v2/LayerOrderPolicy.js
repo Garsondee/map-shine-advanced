@@ -13,8 +13,8 @@
  *   (particles, splashes) that are not tied to a single tile’s sort slot.
  * - **effectTopOfFloorStackOrder** — Canopy-level sprites (trees) above motion-top
  *   tiles and all {@link tileStackedOverlayOrder} overlays on the same floor.
- *   Prefer {@link treeOverlayRenderOrders} / {@link bushOverlayRenderOrders} for
- *   split shadow + canopy meshes.
+ *   Prefer {@link treeOverlayRenderOrders} for tree shadow + canopy meshes;
+ *   bushes use {@link bushOverlayRenderOrders} (tile-stacked, below overhead).
  *
  * The policy divides each floor into fixed role bands so that the visual stack is
  * deterministic regardless of which floor the viewer is on:
@@ -156,7 +156,7 @@ const TOP_OF_FLOOR_STACK_STEP = 0.01;
 
 /**
  * Render order at the top of a floor — above motion-top tiles and
- * {@link tileStackedOverlayOrder} overlays (bushes, specular, prism, …).
+ * {@link tileStackedOverlayOrder} overlays (specular, prism, …).
  * Uses fractional slots just below `(floorIndex + 1) * RENDER_ORDER_PER_FLOOR`.
  *
  * @param {number} floorIndex
@@ -173,8 +173,6 @@ export function effectTopOfFloorStackOrder(floorIndex, slotFromTop = 0) {
 export const TOP_OF_FLOOR_SLOTS = Object.freeze({
   TREE_CANOPY: 0,
   TREE_SHADOW: 1,
-  BUSH_CANOPY: 2,
-  BUSH_SHADOW: 3,
 });
 
 /**
@@ -191,25 +189,33 @@ export function outdoorSmokeRenderOrder(floorIndex) {
 }
 
 /**
- * Bush shadow + canopy render orders: fixed top-of-floor slots below all tree
- * overlays on the same floor (no tile-stacking — that let bush decals interleave
- * with tree layers and show clipped shadows on tree foliage).
+ * Bush shadow + canopy render orders: stacked on the source tile (or top of
+ * FLOOR_EFFECTS when no base order) so bushes paint above ground albedo but
+ * below overhead / roof tiles. Tree canopies stay at {@link treeOverlayRenderOrders}
+ * (screen-space bush shadow suppression handles tree overlap).
  *
- * @param {number} _tileRenderOrder - ignored; kept for call-site parity
+ * @param {number} tileRenderOrder - base tile or background plane `renderOrder`
  * @param {number} floorIndex
  * @returns {{ shadowOrder: number, canopyOrder: number }}
  */
-export function bushOverlayRenderOrders(_tileRenderOrder, floorIndex) {
+export function bushOverlayRenderOrders(tileRenderOrder, floorIndex) {
   const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
-  const treeShadowOrder = effectTopOfFloorStackOrder(fi, TOP_OF_FLOOR_SLOTS.TREE_SHADOW);
-  const canopyOrder = Math.min(
-    effectTopOfFloorStackOrder(fi, TOP_OF_FLOOR_SLOTS.BUSH_CANOPY),
-    treeShadowOrder - TOP_OF_FLOOR_STACK_STEP,
-  );
-  const shadowOrder = Math.min(
-    effectTopOfFloorStackOrder(fi, TOP_OF_FLOOR_SLOTS.BUSH_SHADOW),
-    canopyOrder - TOP_OF_FLOOR_STACK_STEP,
-  );
+  const floorBase = fi * RENDER_ORDER_PER_FLOOR;
+  const maxBelowOverhead = floorBase + ROLE_OFFSETS.FLOOR_OVERHEAD - STACKED_OVERLAY_FRACTIONAL_STEP;
+
+  const base = Number(tileRenderOrder);
+  let shadowOrder;
+  let canopyOrder;
+  if (Number.isFinite(base) && base > 0) {
+    shadowOrder = tileStackedOverlayOrder(base, fi, 1);
+    canopyOrder = tileStackedOverlayOrder(base, fi, 2);
+  } else {
+    shadowOrder = effectUnderOverheadOrder(fi, MAX_INTRA_ROLE_OFFSET - 2);
+    canopyOrder = effectUnderOverheadOrder(fi, MAX_INTRA_ROLE_OFFSET - 1);
+  }
+
+  canopyOrder = Math.min(canopyOrder, maxBelowOverhead);
+  shadowOrder = Math.min(shadowOrder, canopyOrder - STACKED_OVERLAY_FRACTIONAL_STEP);
   return { shadowOrder, canopyOrder };
 }
 

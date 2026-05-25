@@ -20,6 +20,7 @@ import { weatherController } from '../../core/WeatherController.js';
 import { resolveEffectShadowSun2D } from '../shadow-system/ShadowSunDirection.js';
 import {
   bushOverlayRenderOrders,
+  tileAlbedoOrder,
 } from '../LayerOrderPolicy.js';
 
 const log = createLogger('BushEffectV2');
@@ -1514,7 +1515,7 @@ export class BushEffectV2 {
     shadowMesh.rotation.z = rotation;
     mesh.rotation.z = rotation;
 
-    this._applyBushOverlayRenderOrders(shadowMesh, mesh, floorIndex);
+    this._applyBushOverlayRenderOrders(shadowMesh, mesh, floorIndex, tileId);
 
     this._renderBus.addEffectOverlay(`${tileId}_bush_shadow`, shadowMesh, floorIndex);
     this._renderBus.addEffectOverlay(`${tileId}_bush`, mesh, floorIndex);
@@ -1538,7 +1539,7 @@ export class BushEffectV2 {
         try {
           const entry = this._overlays.get(tileId);
           if (entry?.shadowMesh && entry?.mesh) {
-            this._applyBushOverlayRenderOrders(entry.shadowMesh, entry.mesh, floorIndex);
+            this._applyBushOverlayRenderOrders(entry.shadowMesh, entry.mesh, floorIndex, tileId);
           }
         } catch (_) {}
       } else {
@@ -1579,10 +1580,19 @@ export class BushEffectV2 {
     return 0;
   }
 
-  _applyBushOverlayRenderOrders(shadowM, canopyM, floorIndex) {
+  _applyBushOverlayRenderOrders(shadowM, canopyM, floorIndex, tileId) {
     try {
       const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
-      const { shadowOrder, canopyOrder } = bushOverlayRenderOrders(0, fi);
+      let baseOrder = 0;
+      const isBgPlane = /^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId));
+      if (isBgPlane) {
+        baseOrder = tileAlbedoOrder(fi, 0);
+      } else {
+        const baseEntry = this._renderBus?._tiles?.get?.(tileId);
+        const fromTile = Number(baseEntry?.mesh?.renderOrder);
+        if (Number.isFinite(fromTile)) baseOrder = fromTile;
+      }
+      const { shadowOrder, canopyOrder } = bushOverlayRenderOrders(baseOrder, fi);
       shadowM.renderOrder = shadowOrder;
       canopyM.renderOrder = canopyOrder;
     } catch (_) {}

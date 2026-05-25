@@ -1,1088 +1,133 @@
 /**
- * @fileoverview SkyColorEffectV2 — V2 screen-space color grading post-processing pass.
+ * @fileoverview SkyColorEffectV2 — CPU sky environment facade for downstream systems.
  *
- * HEALTH-WIRING BADGE (Map Shine Breaker Box):
- * If you change init/render, `_composeMaterial`, or consumers (water / dust / window
- * light sky buffers), you MUST update HealthEvaluator contracts for `SkyColorEffectV2`
- * and dependency edges to prevent silent failures.
- *
- * Applies time-of-day atmospheric color grading to the lit scene:
- *   - Exposure, white balance (temperature + tint)
- *   - Brightness, contrast, saturation, vibrance
- *   - Lift/Gamma/Gain color grading
- *   - Optional tone mapping (ACES Filmic, Reinhard)
- *   - Vignette + film grain
- *
- * **Analytic sky model**: sunrise/sunset-aware sun angles + weather integration
- * (turbidity, Rayleigh, Mie, overcast desaturation, golden-hour recolor, etc.).
- * The per-level outdoor screen grade applies only where `_Outdoors` ∧ skyReach
- * say the pixel sees sky. Camera Grade (ColorCorrection) still owns the merged
- * HDR → LDR timeline for the full frame; this pass adds weather-aware outdoor
- * atmosphere on top of lit geometry before the merge.
- *
- * Exposes `currentSkyTintColor`, sun angles, and `currentSkyIntensity01` for
- * downstream systems (water, windows, clouds, darkness-response lights).
- *
- * Simplifications vs V1:
- *   - No rope mask or token mask
- *   - No cloud top mask
- *   - Outdoors gating uses the active-floor `_Outdoors` mask for the final grade
- *     blend. Overhead roof screen-space alpha does **not** suppress grading on roof
- *     texels so time-of-day still brightens/darkens roofs (including Foundry
- *     “Restrict light” tiles).
+ * Outdoor atmosphere grading now runs inside {@link ColorCorrectionEffectV2} on the
+ * merged HDR frame. This class evaluates the analytic sky model each frame and
+ * exports tint, sun angles, and intensity for water, windows, dust, clouds, and
+ * weather-aware lighting.
  *
  * @module compositor-v2/effects/SkyColorEffectV2
  */
 
 import { createLogger } from '../../core/log.js';
-import { weatherController } from '../../core/WeatherController.js';
-import { getFoundryTimePhaseHours } from '../../core/foundry-time-phases.js';
-import { computeSunAnglesFromHour } from '../shadow-system/SunDirection.js';
-import { LightingDirector } from '../../core/LightingDirector.js';
+import {
+  DEFAULT_ATMOSPHERE_PARAMS,
+  evaluateSkyEnvironment,
+  pickAtmosphereParams,
+} from '../SkyEnvironmentModel.js';
 
 const log = createLogger('SkyColorEffectV2');
-
-// ── Utility helpers (ported from V1) ────────────────────────────────────────
-
-const clamp01 = (n) => Math.max(0, Math.min(1, n));
-
-const wrapHour24 = (h) => {
-  const hour = Number.isFinite(h) ? h : 0;
-  return ((hour % 24) + 24) % 24;
-};
-
-const smooth01 = (x) => x * x * (3 - 2 * x);
-
-const wrapDistHours = (a, b) => {
-  const d = Math.abs(a - b);
-  return Math.min(d, 24 - d);
-};
-
-const peakHour = (hour, center, widthHours) => {
-  const d = wrapDistHours(hour, center);
-  const t = clamp01(1 - d / Math.max(0.0001, widthHours));
-  return smooth01(t);
-};
-
-const lerp = (a, b, t) => a + (b - a) * t;
-
-// ── SkyColorEffectV2 ────────────────────────────────────────────────────────
 
 export class SkyColorEffectV2 {
   constructor() {
     /** @type {boolean} */
     this._initialized = false;
 
-    // ── Tuning parameters (match V1 defaults) ──────────────────────────
+    /** @type {import('../SkyEnvironmentModel.js').SkyEnvironmentState|null} */
+    this._lastState = null;
+
     this.params = {
-      enabled: true,
-      intensity: 1,
-      saturationBoost: 0.5,
-      vibranceBoost: 0.07,
-
-      sunriseHour: 6.0,
-      sunsetHour: 18.0,
-      goldenHourWidth: 6.0,
-      goldenStrength: 4,
-      goldenPower: 3,
-      nightFloor: 0.5,
-
-      analyticStrength: 0.85,
-      turbidity: 0.22,
-      rayleighStrength: 0.63,
-      mieStrength: 0.35,
-      forwardScatter: 0.3,
-
-      weatherInfluence: 0.67,
-      cloudToTurbidity: 0.25,
-      precipToTurbidity: 0.72,
-      overcastDesaturate: 0.3,
-      overcastContrastReduce: 0.38,
-
-      tempWarmAtHorizon: 0.85,
-      tempCoolAtNoon: -0.45,
-      nightCoolBoost: -0.25,
-      goldenSaturationBoost: 0.29,
-      nightSaturationFloor: 0.33,
-      hazeLift: 0.08,
-      hazeContrastLoss: 0.0,
-
-      autoIntensityEnabled: false,
-      autoIntensityStrength: 1.0,
-      goldenOutdoorRecolorStrength: 3.25,
-      goldenOutdoorRecolorColor: { r: 1.35, g: 0.80, b: 0.50 },
-
+      ...DEFAULT_ATMOSPHERE_PARAMS,
       skyTintDarknessLightsEnabled: true,
       skyTintDarknessLightsIntensity: 5,
-      shadowGradePreserve: 0.35,
-
-      /**
-       * How strongly Map Shine calendar / weather clock darkness is merged with Foundry
-       * scene darkness for grading (1 = same rule as lighting: max of both).
-       */
-      calendarDarknessBlend: 1.0,
-      /** Multiplier on how hard darkness pulls exposure/contrast toward night (widen noon–midnight). */
-      dayNightGradePull: 1.0,
-      /** Added to internal darkness before grading — pushes nights darker without changing noon clock. */
-      nightExtraDarkness: 0.0,
     };
 
-    /**
-     * Exposed sky tint color for downstream systems (e.g., Darkness Response lights).
-     * Updated each frame in update(). RGB multiplier representing the current sky hue.
-     */
     this.currentSkyTintColor = { r: 1.0, g: 1.0, b: 1.0 };
-
-    /**
-     * Current sun azimuth in degrees (0=North, 90=East, 180=South, 270=West).
-     * Derived from time-of-day: sun rises in the East (~90°) and sets in the West (~270°).
-     * Updated each frame. Downstream systems (water specular) should read this.
-     */
     this.currentSunAzimuthDeg = 180.0;
-
-    /**
-     * Current sun elevation in degrees above the horizon (0=horizon, 90=zenith).
-     * Derived from time-of-day: peaks at solar noon, 0 at sunrise/sunset.
-     * Updated each frame.
-     */
     this.currentSunElevationDeg = 45.0;
-
-    // ── GPU resources (created in initialize) ───────────────────────────
-    /** @type {THREE.Scene|null} */
-    this._composeScene = null;
-    /** @type {THREE.OrthographicCamera|null} */
-    this._composeCamera = null;
-    /** @type {THREE.ShaderMaterial|null} */
-    this._composeMaterial = null;
-    /** @type {THREE.Mesh|null} */
-    this._composeQuad = null;
-
-    // Cached dayFactor for auto-intensity computation
-    this._lastDayFactor = 0.5;
     this.currentSkyIntensity01 = 1.0;
-
-    /** @type {THREE.DataTexture|null} */
-    this._fallbackWhite = null;
-    /** @type {THREE.DataTexture|null} */
-    this._fallbackBlack = null;
+    this._lastDayFactor = 0.5;
   }
-
-  // ── UI schema (moved from V1 SkyColorEffect) ─────────────────────────────
 
   static getControlSchema() {
     return {
       enabled: true,
       help: {
-        title: 'Sky Environment',
+        title: 'Sky Environment (exports)',
         summary: [
-          'Computes time-of-day sky color, sun angle, and weather tint for outdoor pixels and downstream systems.',
-          'The analytic model drives a per-level outdoor grade (golden hour, overcast desat, night cooling) masked by `_Outdoors` and skyReach.',
-          'Camera Grade owns merged-frame exposure, vignette, grain, and tone mapping; use these controls to shape outdoor atmosphere and exported sky data for water, windows, and weather-aware lighting.'
+          'Computes time-of-day sky tint, sun angle, and weather data for water, windows, clouds, and weather-aware lighting.',
+          'Outdoor atmosphere grading is applied in **Camera Grade (HDR → LDR)** under the Outdoor atmosphere folder.',
+          'Use the controls here for downstream light tinting and exported environment strength.',
         ].join('\n\n'),
         glossary: {
-          'Outdoor grade strength': 'How strongly the analytic sky model recolours outdoor pixels each level. Also exported as environment strength for water and weather-aware lighting.',
-          'Golden recolor': 'Warm horizon/golden-hour bias for outdoor sky light.',
-          'Weather influence': 'How strongly cloud/precipitation shift turbidity, desaturation, and contrast.',
+          'Sun light tint': 'How strongly Foundry sun/global lights follow the computed sky hue at night.',
         },
       },
       groups: [
-        { name: 'sky-color', label: 'Sky environment', type: 'inline', parameters: ['intensity', 'saturationBoost', 'vibranceBoost', 'shadowGradePreserve', 'skyTintDarknessLightsEnabled', 'skyTintDarknessLightsIntensity'] },
         {
-          name: 'day-night-grade',
-          label: 'Time / weather light quality',
-          type: 'folder',
-          expanded: true,
+          name: 'sky-color',
+          label: 'Sky exports',
+          type: 'inline',
           parameters: [
-            'calendarDarknessBlend',
-            'dayNightGradePull',
-            'nightExtraDarkness',
-            'autoIntensityEnabled',
-            'autoIntensityStrength',
-          ],
-        },
-        {
-          name: 'sky-automation',
-          label: 'Analytic sky model',
-          type: 'folder',
-          expanded: true,
-          parameters: [
-            'sunriseHour', 'sunsetHour', 'goldenHourWidth', 'goldenStrength', 'goldenPower',
-            'goldenOutdoorRecolorStrength', 'goldenOutdoorRecolorColor', 'nightFloor', 'analyticStrength',
-            'turbidity', 'rayleighStrength', 'mieStrength', 'forwardScatter',
-            'weatherInfluence', 'cloudToTurbidity', 'precipToTurbidity',
-            'overcastDesaturate', 'overcastContrastReduce',
-            'tempWarmAtHorizon', 'tempCoolAtNoon', 'nightCoolBoost',
-            'goldenSaturationBoost', 'nightSaturationFloor', 'hazeLift', 'hazeContrastLoss',
+            'skyTintDarknessLightsEnabled',
+            'skyTintDarknessLightsIntensity',
           ],
         },
       ],
       parameters: {
-        enabled: { type: 'boolean', default: true },
-        intensity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Outdoor grade strength', throttle: 50, tooltip: 'Analytic sky recolour on outdoor pixels (masked by _Outdoors). Also exported as environment strength for water and weather-aware lighting.' },
-        saturationBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.5, label: 'Sky color saturation', throttle: 50, tooltip: 'Chroma bias for the computed sky tint sent to downstream systems.' },
-        vibranceBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.07, label: 'Sky color vibrance', throttle: 50, tooltip: 'Selective chroma lift for the exported sky tint.' },
-        shadowGradePreserve: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.35, label: 'Shadow preserve', throttle: 50, tooltip: 'Keeps shadowed pixels from inheriting too much atmospheric tint in consumers that use shadow-aware sky data.' },
-        sunriseHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: 6.0, label: 'Sunrise', throttle: 50 },
-        sunsetHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: 18.0, label: 'Sunset', throttle: 50 },
-        goldenHourWidth: { type: 'slider', min: 0.25, max: 6.0, step: 0.05, default: 6.0, label: 'Golden Width', throttle: 50 },
-        goldenStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 4, label: 'Golden Strength', throttle: 50 },
-        goldenPower: { type: 'slider', min: 0.5, max: 3.0, step: 0.01, default: 3, label: 'Golden Power', throttle: 50 },
-        goldenOutdoorRecolorStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.05, default: 3.25, label: 'Golden Recolor', throttle: 50 },
-        goldenOutdoorRecolorColor: { type: 'color', default: { r: 1.35, g: 0.80, b: 0.50 }, label: 'Golden Recolor Color' },
-        nightFloor: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.5, label: 'Night Floor', throttle: 50 },
-        analyticStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 0.85, label: 'Analytic Strength', throttle: 50 },
-        turbidity: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.22, label: 'Turbidity', throttle: 50 },
-        rayleighStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.63, label: 'Rayleigh', throttle: 50 },
-        mieStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.35, label: 'Mie', throttle: 50 },
-        forwardScatter: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.3, label: 'Forward Scatter', throttle: 50 },
-        weatherInfluence: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.67, label: 'Weather Influence', throttle: 50 },
-        cloudToTurbidity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.25, label: 'Cloud→Turbidity', throttle: 50 },
-        precipToTurbidity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.72, label: 'Precip→Turbidity', throttle: 50 },
-        overcastDesaturate: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.3, label: 'Overcast Desat', throttle: 50 },
-        overcastContrastReduce: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.38, label: 'Overcast Contrast', throttle: 50 },
-        tempWarmAtHorizon: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.85, label: 'Warm Horizon', throttle: 50 },
-        tempCoolAtNoon: { type: 'slider', min: -1.0, max: 0.0, step: 0.01, default: -0.45, label: 'Cool Noon', throttle: 50 },
-        nightCoolBoost: { type: 'slider', min: -1.0, max: 0.0, step: 0.01, default: -0.25, label: 'Night Cool', throttle: 50 },
-        goldenSaturationBoost: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.29, label: 'Golden Sat', throttle: 50 },
-        nightSaturationFloor: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.33, label: 'Night Sat Floor', throttle: 50 },
-        hazeLift: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.08, label: 'Haze Lift', throttle: 50 },
-        hazeContrastLoss: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.0, label: 'Haze Contrast', throttle: 50 },
-        autoIntensityEnabled: { type: 'boolean', default: false, label: 'Auto Intensity' },
-        autoIntensityStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.0, label: 'Auto Strength', throttle: 50 },
-        skyTintDarknessLightsEnabled: { type: 'boolean', default: true, label: 'Tint Sun Lights' },
-        skyTintDarknessLightsIntensity: { type: 'slider', min: 0.0, max: 5.0, step: 0.01, default: 5, label: 'Sun Light Tint Intensity', throttle: 50 },
-        calendarDarknessBlend: {
-          type: 'slider',
-          min: 0,
-          max: 1,
-          step: 0.05,
-          default: 1.0,
-          label: 'Master darkness blend',
-          throttle: 50,
-          tooltip: 'How much LightingDirector master darkness influences sky color. Leave at 1 so sky, lights, and weather agree.',
+        enabled: { type: 'boolean', default: true, hidden: true },
+        skyTintDarknessLightsEnabled: {
+          type: 'boolean',
+          default: true,
+          label: 'Tint Sun Lights',
         },
-        dayNightGradePull: {
+        skyTintDarknessLightsIntensity: {
           type: 'slider',
-          min: 0,
-          max: 2.5,
-          step: 0.05,
-          default: 1.0,
-          label: 'Day/night color separation',
-          throttle: 50,
-          tooltip: 'Raises how strongly darkness cools/desaturates the outdoor sky grade and exported tint.',
-        },
-        nightExtraDarkness: {
-          type: 'slider',
-          min: 0,
-          max: 0.45,
+          min: 0.0,
+          max: 5.0,
           step: 0.01,
-          default: 0.0,
-          label: 'Night color depth',
+          default: 5,
+          label: 'Sun Light Tint Intensity',
           throttle: 50,
-          tooltip: 'Biases the exported sky tint toward night; keep subtle to avoid double-darkening with Weather and LightingDirector.',
         },
       },
-      presets: {
-        'Clear Noon': {
-          intensity: 0.9,
-          weatherInfluence: 0.45,
-          goldenOutdoorRecolorStrength: 1.4,
-          overcastDesaturate: 0.22,
-          overcastContrastReduce: 0.28,
-          nightExtraDarkness: 0.0,
-        },
-        'Golden Hour': {
-          intensity: 0.82,
-          goldenStrength: 3.2,
-          goldenOutdoorRecolorStrength: 2.8,
-          goldenSaturationBoost: 0.28,
-          tempWarmAtHorizon: 0.95,
-          weatherInfluence: 0.55,
-        },
-        'Overcast Day': {
-          intensity: 0.68,
-          weatherInfluence: 0.85,
-          overcastDesaturate: 0.42,
-          overcastContrastReduce: 0.48,
-          tempCoolAtNoon: -0.55,
-          hazeLift: 0.12,
-        },
-        Storm: {
-          intensity: 0.55,
-          weatherInfluence: 1.0,
-          cloudToTurbidity: 0.45,
-          precipToTurbidity: 0.85,
-          overcastDesaturate: 0.5,
-          overcastContrastReduce: 0.58,
-          nightExtraDarkness: 0.06,
-        },
-        'Moonlit Night': {
-          intensity: 0.42,
-          nightCoolBoost: -0.45,
-          nightSaturationFloor: 0.25,
-          skyTintDarknessLightsIntensity: 0.8,
-          nightExtraDarkness: 0.04,
-        },
-        'Interior Night': {
-          intensity: 0.35,
-          nightCoolBoost: -0.35,
-          nightSaturationFloor: 0.3,
-          skyTintDarknessLightsIntensity: 0.6,
-          nightExtraDarkness: 0.03,
-        },
-      },
+      presets: {},
     };
   }
 
-  // ── Lifecycle ─────────────────────────────────────────────────────────
-
   initialize() {
-    const THREE = window.THREE;
-    if (!THREE) return;
-
-    this._ensureFallbackTextures();
-
-    this._composeScene = new THREE.Scene();
-    this._composeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-
-    this._composeMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        tDiffuse:    { value: null },
-        tOutdoorsMask: { value: this._fallbackWhite },
-        tSkyReachMask: { value: this._fallbackWhite },
-        tSkyOcclusion: { value: this._fallbackWhite },
-        tCombinedShadow: { value: this._fallbackWhite },
-        tDynamicLightMask: { value: this._fallbackBlack },
-        tWindowLightMask: { value: this._fallbackBlack },
-        uTime:       { value: 0.0 },
-        uResolution: { value: new THREE.Vector2(1, 1) },
-        uHasOutdoorsMask: { value: 0.0 },
-        uHasSkyReachMask: { value: 0.0 },
-        uHasSkyOcclusion: { value: 0.0 },
-        uHasCombinedShadow: { value: 0.0 },
-        uCombinedShadowEffectStrength: { value: 1.0 },
-        uHasIlluminationMask: { value: 0.0 },
-        uOutdoorsMaskFlipY: { value: 0.0 },
-        uSkyReachMaskFlipY: { value: 0.0 },
-        uShadowGradePreserve: { value: 0.35 },
-        uViewBoundsMin: { value: new THREE.Vector2(0, 0) },
-        uViewBoundsMax: { value: new THREE.Vector2(1, 1) },
-        uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
-        uSceneDimensions: { value: new THREE.Vector2(1, 1) },
-
-        // Grading params (blended per time-of-day)
-        uExposure:    { value: 0.0 },
-        uTemperature: { value: 0.0 },
-        uTint:        { value: 0.0 },
-        uBrightness:  { value: 0.0 },
-        uContrast:    { value: 1.0 },
-        uSaturation:  { value: 1.0 },
-        uVibrance:    { value: 0.0 },
-
-        uLift:        { value: new THREE.Vector3(0, 0, 0) },
-        uGamma:       { value: new THREE.Vector3(1, 1, 1) },
-        uGain:        { value: new THREE.Vector3(1, 1, 1) },
-        uMasterGamma: { value: 1.0 },
-        uToneMapping: { value: 0 },
-
-        uVignetteStrength: { value: 0.0 },
-        uVignetteSoftness: { value: 0.5 },
-        uGrainStrength:    { value: 0.0 },
-        uGoldenRecolorStrength: { value: 0.0 },
-        uGoldenRecolorColor: { value: new THREE.Vector3(1.35, 0.80, 0.50) },
-
-        uIntensity: { value: 1.0 },
-      },
-      vertexShader: /* glsl */`
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = vec4(position.xy, 0.0, 1.0);
-        }
-      `,
-      fragmentShader: /* glsl */`
-        uniform sampler2D tDiffuse;
-        uniform sampler2D tOutdoorsMask;
-        uniform sampler2D tSkyReachMask;
-        uniform sampler2D tSkyOcclusion;
-        uniform sampler2D tCombinedShadow;
-        uniform sampler2D tDynamicLightMask;
-        uniform sampler2D tWindowLightMask;
-        uniform vec2 uResolution;
-        uniform float uTime;
-        uniform float uHasOutdoorsMask;
-        uniform float uHasSkyReachMask;
-        uniform float uHasSkyOcclusion;
-        uniform float uHasCombinedShadow;
-        uniform float uCombinedShadowEffectStrength;
-        uniform float uHasIlluminationMask;
-        uniform float uOutdoorsMaskFlipY;
-        uniform float uSkyReachMaskFlipY;
-        uniform float uShadowGradePreserve;
-        uniform vec2 uViewBoundsMin;
-        uniform vec2 uViewBoundsMax;
-        uniform vec4 uSceneBounds;
-        uniform vec2 uSceneDimensions;
-
-        uniform float uExposure;
-        uniform float uTemperature;
-        uniform float uTint;
-        uniform float uBrightness;
-        uniform float uContrast;
-        uniform float uSaturation;
-        uniform float uVibrance;
-        uniform vec3 uLift;
-        uniform vec3 uGamma;
-        uniform vec3 uGain;
-        uniform float uMasterGamma;
-        uniform int uToneMapping;
-        uniform float uVignetteStrength;
-        uniform float uVignetteSoftness;
-        uniform float uGrainStrength;
-        uniform float uGoldenRecolorStrength;
-        uniform vec3 uGoldenRecolorColor;
-        uniform float uIntensity;
-
-        varying vec2 vUv;
-
-        vec3 ACESFilmicToneMapping(vec3 x) {
-          float a = 2.51;
-          float b = 0.03;
-          float c = 2.43;
-          float d = 0.59;
-          float e = 0.14;
-          return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
-        }
-
-        vec3 ReinhardToneMapping(vec3 x) {
-          return x / (x + vec3(1.0));
-        }
-
-        vec3 applyWhiteBalance(vec3 color, float temp, float tintVal) {
-          vec3 tempShift = vec3(1.0 + temp, 1.0, 1.0 - temp);
-          if (temp < 0.0) tempShift = vec3(1.0, 1.0, 1.0 - temp * 0.5);
-          else tempShift = vec3(1.0 + temp * 0.5, 1.0, 1.0);
-          vec3 tintShift = vec3(1.0, 1.0 + tintVal, 1.0);
-          return color * tempShift * tintShift;
-        }
-
-        float random(vec2 p) {
-          return fract(sin(dot(p.xy, vec2(12.9898, 78.233))) * 43758.5453);
-        }
-
-        float sampleOutdoorsMask(vec2 screenUv) {
-          if (uHasOutdoorsMask < 0.5) return 1.0;
-          vec2 worldXY = mix(uViewBoundsMin, uViewBoundsMax, screenUv);
-          vec2 sceneUvRaw = vec2(
-            (worldXY.x - uSceneBounds.x) / max(1e-5, uSceneBounds.z),
-            1.0 - ((worldXY.y - uSceneBounds.y) / max(1e-5, uSceneBounds.w))
-          );
-          float inScene =
-            step(0.0, sceneUvRaw.x) * step(sceneUvRaw.x, 1.0) *
-            step(0.0, sceneUvRaw.y) * step(sceneUvRaw.y, 1.0);
-          vec2 sceneUv = sceneUvRaw;
-          if (uOutdoorsMaskFlipY > 0.5) sceneUv.y = 1.0 - sceneUv.y;
-          sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
-          // Why this is correct:
-          // Per-floor _Outdoors masks are not guaranteed to have valid RGB everywhere.
-          // On upper floors, "unwritten" regions are commonly RGBA=(0,0,0,0):
-          //   - RGB black does NOT mean "indoors"
-          //   - alpha=0 means "no authored data at this pixel"
-          //
-          // If we read only m.r, those no-data pixels are misclassified as indoors,
-          // producing the exact artifact we saw: a bloated, blocky indoor silhouette
-          // that expands around upper-floor geometry when SkyColor gating is enabled.
-          //
-          // Treat alpha as validity and RGB as value:
-          //   alpha=0 -> default outdoors (1.0)
-          //   alpha=1 -> trust m.r
-          // This matches OverheadShadowsEffectV2 behavior and keeps sparse floor masks
-          // from contaminating sky gating.
-          vec4 m = texture2D(tOutdoorsMask, sceneUv);
-          float outdoors = mix(1.0, m.r, m.a);
-          float outdoorMaskSample = step(0.5, clamp(outdoors, 0.0, 1.0));
-
-          // Apply the per-floor skyReach gate on top of _Outdoors. Where
-          // an upper-floor solid tile (a bridge, an overhang, a rooftop)
-          // blocks the sky, this mask reads 0 and the area below stops being
-          // treated as sky-eligible. The mask is sampled in the same scene UV
-          // space as _Outdoors (see GpuSceneMaskCompositor skyReach mask id).
-          // alpha=0 → "no data" → default 1.0 to avoid sparse-mask bloating
-          // (same convention as _Outdoors above).
-          float skyReachSample = 1.0;
-          if (uHasSkyReachMask > 0.5) {
-            vec2 srUv = sceneUvRaw;
-            if (uSkyReachMaskFlipY > 0.5) srUv.y = 1.0 - srUv.y;
-            srUv = clamp(srUv, vec2(0.0), vec2(1.0));
-            vec4 sr = texture2D(tSkyReachMask, srUv);
-            float reach = mix(1.0, sr.r, sr.a);
-            skyReachSample = clamp(reach, 0.0, 1.0);
-          }
-
-          return mix(1.0, outdoorMaskSample * skyReachSample, inScene);
-        }
-
-        float sampleSkyOcclusion(vec2 screenUv) {
-          if (uHasSkyOcclusion < 0.5) return 1.0;
-          vec2 worldXY = mix(uViewBoundsMin, uViewBoundsMax, screenUv);
-          vec2 sceneUvRaw = vec2(
-            (worldXY.x - uSceneBounds.x) / max(1e-5, uSceneBounds.z),
-            1.0 - ((worldXY.y - uSceneBounds.y) / max(1e-5, uSceneBounds.w))
-          );
-          float inScene =
-            step(0.0, sceneUvRaw.x) * step(sceneUvRaw.x, 1.0) *
-            step(0.0, sceneUvRaw.y) * step(sceneUvRaw.y, 1.0);
-          vec2 sceneUv = clamp(sceneUvRaw, vec2(0.0), vec2(1.0));
-          return mix(1.0, clamp(texture2D(tSkyOcclusion, sceneUv).r, 0.0, 1.0), inScene);
-        }
-
-        float sampleDirectIllumination(vec2 screenUv) {
-          if (uHasIlluminationMask < 0.5) return 0.0;
-          vec3 dynamicLight = texture2D(tDynamicLightMask, screenUv).rgb;
-          vec3 windowLight = texture2D(tWindowLightMask, screenUv).rgb;
-          float dynamicI = max(dynamicLight.r, max(dynamicLight.g, dynamicLight.b));
-          float windowI = max(windowLight.r, max(windowLight.g, windowLight.b));
-          return smoothstep(0.015, 0.18, max(dynamicI, windowI));
-        }
-
-        /** Combined shadow R: 1 = lit. Strength >= 1 scales up subtle darkening (penumbra). */
-        float amplifyCombinedShadowLit(float lit01, float strength) {
-          float s = max(strength, 1.0);
-          float dark = 1.0 - clamp(lit01, 0.0, 1.0);
-          return 1.0 - min(1.0, dark * s);
-        }
-
-        void main() {
-          vec4 sceneColor = texture2D(tDiffuse, vUv);
-          vec3 base = sceneColor.rgb;
-
-          // Fast early-out: nothing to blend.
-          if (uIntensity <= 0.0) {
-            gl_FragColor = sceneColor;
-            return;
-          }
-
-          vec3 color = base;
-          float outdoorVis = clamp(sampleOutdoorsMask(vUv), 0.0, 1.0);
-          float skyEligible = outdoorVis;
-          skyEligible *= sampleSkyOcclusion(vUv);
-
-          // Sample once: R channel 1 = fully lit. Used to damp sky grade / warm recolor on
-          // outdoor pixels so subtle geometric shadow (sky-reach, soft penumbra) is not
-          // erased by lift/gain + grading — interiors already keep base via low skyEligible.
-          float combinedShadowR = uHasCombinedShadow > 0.5
-            ? clamp(texture2D(tCombinedShadow, vUv).r, 0.0, 1.0)
-            : 1.0;
-          combinedShadowR = amplifyCombinedShadowLit(combinedShadowR, uCombinedShadowEffectStrength);
-          // Old smoothstep(0, 0.5, r) hit full grading at R=0.5 — anything “not deep building
-          // shadow” became full sky replace and washed out small outdoor darkening.
-          float gradeBlend = smoothstep(0.74, 1.0, combinedShadowR);
-
-          // 1) Exposure (stops)
-          color *= exp2(uExposure);
-
-          // 2) White balance
-          color = applyWhiteBalance(color, uTemperature, uTint);
-
-          // 3) Basic adjustments
-          color += uBrightness;
-          color = (color - 0.5) * uContrast + 0.5;
-
-          float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-          vec3 gray = vec3(luma);
-          float sat = max(color.r, max(color.g, color.b)) - min(color.r, min(color.g, color.b));
-          float directIllumination = sampleDirectIllumination(vUv);
-          float litSceneLevel = max(max(base.r, base.g), base.b);
-          float darkScene = 1.0 - smoothstep(0.10, 0.38, litSceneLevel);
-          float desatEligibility = min(darkScene, 1.0 - directIllumination);
-          float saturationAmount = uSaturation < 1.0 ? mix(1.0, uSaturation, desatEligibility) : uSaturation;
-          vec3 satColor = mix(gray, color, saturationAmount);
-          if (uVibrance != 0.0) {
-            satColor = mix(satColor, mix(gray, satColor, 1.0 + uVibrance), (1.0 - sat));
-          }
-          color = satColor;
-
-          // 4) Lift/Gamma/Gain
-          color = color + (uLift * 0.1);
-          color = color * uGain;
-          color = max(color, vec3(0.0));
-          color = pow(color, 1.0 / uGamma);
-          if (uMasterGamma != 1.0) {
-            color = pow(color, vec3(1.0 / max(uMasterGamma, 0.0001)));
-          }
-
-          // 5) Tone mapping (optional)
-          if (uToneMapping == 1) {
-            color = ACESFilmicToneMapping(color);
-          } else if (uToneMapping == 2) {
-            color = ReinhardToneMapping(color);
-          }
-
-          // 6) VFX — vignette
-          vec2 dist = (vUv - 0.5) * 2.0;
-          float len = length(dist);
-          if (uVignetteStrength > 0.0) {
-            float soft = clamp(uVignetteSoftness, 0.0, 1.0);
-            float inner = mix(0.85, 0.35, soft);
-            float outer = mix(1.25, 0.85, soft);
-            float vig = 1.0 - smoothstep(inner, outer, len);
-            color *= mix(1.0, vig, uVignetteStrength);
-          }
-
-          // Film grain
-          if (uGrainStrength > 0.0) {
-            float noise = random(vUv + uTime);
-            color += (noise - 0.5) * uGrainStrength;
-          }
-
-          // Dramatic golden-hour recolor for outdoors.
-          if (uGoldenRecolorStrength > 0.0001) {
-            float recolorAmt = clamp(uGoldenRecolorStrength * skyEligible * gradeBlend, 0.0, 1.0);
-            vec3 warmShift = color * uGoldenRecolorColor;
-            color = mix(color, warmShift, recolorAmt);
-          }
-
-          // Blend grade only where outdoor visibility says the sky should apply.
-          // This keeps interiors neutral when a valid _Outdoors mask is present.
-          float gradeDamp = mix(clamp(uShadowGradePreserve, 0.0, 1.0), 1.0, gradeBlend);
-          float mask = clamp(uIntensity * skyEligible * gradeDamp, 0.0, 1.0);
-          vec3 finalColor = mix(base, color, mask);
-
-          gl_FragColor = vec4(finalColor, sceneColor.a);
-        }
-      `,
-      depthTest: false,
-      depthWrite: false,
-    });
-    this._composeMaterial.toneMapped = false;
-
-    this._composeQuad = new THREE.Mesh(
-      new THREE.PlaneGeometry(2, 2),
-      this._composeMaterial
-    );
-    this._composeQuad.frustumCulled = false;
-    this._composeScene.add(this._composeQuad);
-
     this._initialized = true;
-    log.info('SkyColorEffectV2 initialized');
+    log.info('SkyColorEffectV2 initialized (CPU facade)');
   }
 
-  /** @private */
-  _ensureFallbackTextures() {
-    const THREE = window.THREE;
-    if (!THREE) return;
-    if (!this._fallbackWhite) {
-      const white = new Uint8Array([255, 255, 255, 255]);
-      this._fallbackWhite = new THREE.DataTexture(white, 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
-      this._fallbackWhite.needsUpdate = true;
-      this._fallbackWhite.flipY = false;
-      this._fallbackWhite.generateMipmaps = false;
-      this._fallbackWhite.minFilter = THREE.NearestFilter;
-      this._fallbackWhite.magFilter = THREE.NearestFilter;
+  /**
+   * @returns {import('../SkyEnvironmentModel.js').SkyEnvironmentState|null}
+   */
+  getAtmosphereState() {
+    return this._lastState;
+  }
+
+  /**
+   * Resolve atmosphere params: Camera Grade owns authoring when present.
+   * @param {Record<string, *>|null} [colorCorrectionParams]
+   * @returns {Record<string, *>}
+   */
+  resolveAtmosphereParams(colorCorrectionParams = null) {
+    if (colorCorrectionParams && colorCorrectionParams.atmosphereEnabled !== false) {
+      return { ...this.params, ...pickAtmosphereParams(colorCorrectionParams) };
     }
-    if (!this._fallbackBlack) {
-      const black = new Uint8Array([0, 0, 0, 0]);
-      this._fallbackBlack = new THREE.DataTexture(black, 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
-      this._fallbackBlack.needsUpdate = true;
-      this._fallbackBlack.flipY = false;
-      this._fallbackBlack.generateMipmaps = false;
-      this._fallbackBlack.minFilter = THREE.NearestFilter;
-      this._fallbackBlack.magFilter = THREE.NearestFilter;
+    return this.params;
+  }
+
+  /**
+   * @param {{ elapsed: number, delta: number }} _timeInfo
+   * @param {Record<string, *>|null} [colorCorrectionParams]
+   */
+  update(_timeInfo, colorCorrectionParams = null) {
+    if (!this._initialized) return;
+    if (this.params.enabled === false) {
+      this._lastState = null;
+      return;
     }
-  }
-
-  /**
-   * Feed the active-floor outdoors mask into sky grading.
-   * Outdoors pixels receive sky grading; indoors remain ungraded.
-   * @param {THREE.Texture|null} outdoorsTex
-   */
-  setOutdoorsMask(outdoorsTex) {
-    const u = this._composeMaterial?.uniforms;
-    if (!u) return;
-    u.tOutdoorsMask.value = outdoorsTex ?? this._fallbackWhite;
-    u.uHasOutdoorsMask.value = outdoorsTex ? 1.0 : 0.0;
-    u.uOutdoorsMaskFlipY.value = outdoorsTex?.flipY ? 1.0 : 0.0;
-  }
-
-  /**
-   * Feed the active-floor `skyReach` mask (per-floor `outdoors ∧ ¬union(upper-floor floorAlpha)`)
-   * into sky grading. Pixels under upper-floor solid coverage (bridges,
-   * rooftops, overhangs) read 0 and stop receiving sky color, matching the way
-   * indoor pixels stop receiving sky color.
-   *
-   * Source is {@link GpuSceneMaskCompositor#getFloorTexture} for `'skyReach'`
-   * — wired in {@link FloorCompositor#_syncOutdoorsMaskConsumers}.
-   * @param {THREE.Texture|null} skyReachTex
-   */
-  setSkyReachMask(skyReachTex) {
-    const u = this._composeMaterial?.uniforms;
-    if (!u) return;
-    u.tSkyReachMask.value = skyReachTex ?? this._fallbackWhite;
-    u.uHasSkyReachMask.value = skyReachTex ? 1.0 : 0.0;
-    u.uSkyReachMaskFlipY.value = skyReachTex?.flipY ? 1.0 : 0.0;
-  }
-
-  setSkyOcclusionTexture(texture) {
-    const u = this._composeMaterial?.uniforms;
-    if (!u) return;
-    u.tSkyOcclusion.value = texture ?? this._fallbackWhite;
-    u.uHasSkyOcclusion.value = texture ? 1.0 : 0.0;
-  }
-
-  setCombinedShadowTexture(texture) {
-    const u = this._composeMaterial?.uniforms;
-    if (!u) return;
-    u.tCombinedShadow.value = texture ?? this._fallbackWhite;
-    u.uHasCombinedShadow.value = texture ? 1.0 : 0.0;
-  }
-
-  /**
-   * Matches {@link LightingEffectV2} `combinedShadowEffectStrength` (1–10).
-   * Wired from FloorCompositor each frame after lighting updates.
-   * @param {number} strength
-   */
-  setCombinedShadowEffectStrength(strength) {
-    const u = this._composeMaterial?.uniforms;
-    if (!u?.uCombinedShadowEffectStrength) return;
-    const s = Number(strength);
-    u.uCombinedShadowEffectStrength.value = Number.isFinite(s) ? Math.max(1.0, Math.min(10.0, s)) : 1.0;
-  }
-
-  /**
-   * Feed direct illumination buffers so night saturation desat can spare lit pixels.
-   * @param {THREE.Texture|null} dynamicLightTex
-   * @param {THREE.Texture|null} windowLightTex
-   */
-  setIlluminationMasks(dynamicLightTex, windowLightTex) {
-    const u = this._composeMaterial?.uniforms;
-    if (!u) return;
-    u.tDynamicLightMask.value = dynamicLightTex ?? this._fallbackBlack;
-    u.tWindowLightMask.value = windowLightTex ?? this._fallbackBlack;
-    u.uHasIlluminationMask.value = dynamicLightTex || windowLightTex ? 1.0 : 0.0;
-  }
-
-  /**
-   * Darkness 0..1 for sky grading: Foundry scene + Map Shine calendar curve + weather,
-   * matching {@link LightingEffectV2} so sky tracks midnight when the lighting pass does.
-   * @returns {number}
-   */
-  _sceneDarknessForSkyGrade() {
-    // Phase 3: defer to LightingDirector so SkyColor agrees with LightingEffectV2.
-    // The legacy `calendarDarknessBlend` slider is still honoured as a *local*
-    // blend between the master darkness and the raw Foundry slider value, so
-    // authors can soften sky desaturation independent of the canonical
-    // master used by lighting.
-    const director = LightingDirector.get();
-    let sceneDarkness = clamp01(director.masterDarkness);
-    const blend = clamp01(Number(this.params?.calendarDarknessBlend) ?? 1);
-    if (blend < 1) {
-      sceneDarkness = clamp01(
-        director.foundryDarkness * (1 - blend) + sceneDarkness * blend,
-      );
-    }
-
-    return sceneDarkness;
-  }
-
-  // ── Per-frame update ──────────────────────────────────────────────────
-
-  /**
-   * Compute time-of-day grading parameters and push them to shader uniforms.
-   * All the CPU-side automation logic is ported directly from V1 SkyColorEffect.
-   * @param {{ elapsed: number, delta: number }} timeInfo
-   */
-  update(timeInfo) {
-    if (!this._initialized || !this._composeMaterial) return;
-    if (!this.params.enabled) return;
 
     try {
-      const director = LightingDirector.get();
-      const hourRaw = Number.isFinite(Number(director?.hour))
-        ? Number(director.hour)
-        : (weatherController?.timeOfDay ?? 12.0);
-      const hour = wrapHour24(hourRaw);
-
-      let exposure = 0.0;
-      let temperature = 0.0;
-      let tint = 0.0;
-      let brightness = 0.0;
-      let contrast = 1.0;
-      let saturation = 1.0;
-      let vibrance = 0.0;
-      let liftR = 0.0, liftG = 0.0, liftB = 0.0;
-      let gammaR = 1.0, gammaG = 1.0, gammaB = 1.0;
-      let gainR = 1.0, gainG = 1.0, gainB = 1.0;
-      let masterGamma = 1.0;
-      let toneMapping = 0;
-      let vignetteStrength = 0.0;
-      let vignetteSoftness = 0.5;
-      let grainStrength = 0.0;
-      let goldenEnergy = 0.0;
-      let nightSatFloor = clamp01(this.params.nightSaturationFloor);
-      let dayProgress = -1.0;
-      let effectiveDarkness = 0.0;
-
-      {
-        // ── Analytic automation ──────────────────────────────────────
-        const isFoundryLinked = window.MapShine?.controlPanel?.controlState?.linkTimeToFoundry === true;
-        const foundryPhases = isFoundryLinked ? getFoundryTimePhaseHours() : null;
-        const sunrise = wrapHour24(Number.isFinite(foundryPhases?.sunrise) ? foundryPhases.sunrise : this.params.sunriseHour);
-        const sunset = wrapHour24(Number.isFinite(foundryPhases?.sunset) ? foundryPhases.sunset : this.params.sunsetHour);
-
-        // Day progress: 0→1 from sunrise to sunset, -1 at night
-        dayProgress = 0.0;
-        if (sunrise < sunset) {
-          if (hour >= sunrise && hour <= sunset) {
-            dayProgress = (hour - sunrise) / Math.max(0.0001, sunset - sunrise);
-          } else {
-            dayProgress = -1.0;
-          }
-        } else {
-          const span = (24 - sunrise) + sunset;
-          if (hour >= sunrise) {
-            dayProgress = (hour - sunrise) / Math.max(0.0001, span);
-          } else if (hour <= sunset) {
-            dayProgress = (24 - sunrise + hour) / Math.max(0.0001, span);
-          } else {
-            dayProgress = -1.0;
-          }
-        }
-
-        const sunFactorRaw = dayProgress >= 0.0 ? Math.sin(Math.PI * clamp01(dayProgress)) : 0.0;
-        const dayFactorBase = Math.max(clamp01(this.params.nightFloor), clamp01(sunFactorRaw));
-
-        const goldenWidth = Math.max(0.0001, this.params.goldenHourWidth);
-        const goldenBase = clamp01(peakHour(hour, sunrise, goldenWidth) + peakHour(hour, sunset, goldenWidth));
-        const goldenPow = Math.pow(goldenBase, Math.max(0.0001, this.params.goldenPower ?? 1.0));
-        const golden = clamp01(goldenPow * Math.max(0.0, this.params.goldenStrength ?? 1.0));
-        goldenEnergy = Math.max(0.0, Math.min(3.0, goldenPow * Math.max(0.0, this.params.goldenStrength ?? 1.0)));
-
-        // Extend dayFactor into golden hour transition zones
-        const dayFactor = Math.max(dayFactorBase, golden * 0.45);
-
-        // Weather state
-        const state = weatherController?.getCurrentState ? weatherController.getCurrentState() : null;
-        const cloudCover = clamp01(state?.cloudCover ?? 0.0);
-        const precipitation = clamp01(state?.precipitation ?? 0.0);
-        let overcast = clamp01(cloudCover * 0.8 + precipitation * 0.6);
-        let storm = precipitation;
-
-        const env = weatherController?.getEnvironment ? weatherController.getEnvironment() : null;
-        if (env) {
-          if (Number.isFinite(env.overcastFactor)) overcast = clamp01(env.overcastFactor);
-          if (Number.isFinite(env.stormFactor)) storm = clamp01(env.stormFactor);
-        }
-
-        let sceneDarkness = this._sceneDarknessForSkyGrade();
-
-        const gradePull = Math.max(0, Number(this.params.dayNightGradePull) ?? 1);
-        const nightExtra = Math.max(0, Number(this.params.nightExtraDarkness) || 0);
-
-        const weatherInfluence = clamp01(this.params.weatherInfluence);
-        const turbidityBase = clamp01(this.params.turbidity);
-        const turbidityWeather = weatherInfluence * (
-          (this.params.cloudToTurbidity ?? 0.0) * cloudCover +
-          (this.params.precipToTurbidity ?? 0.0) * precipitation
-        );
-        const turbidityEff = clamp01(turbidityBase + turbidityWeather);
-
-        // LightingDirector already owns calendar/weather/Foundry darkness.
-        // SkyColor should add only a small atmospheric weather color bias here,
-        // not re-derive night darkness and double-dim the simulation.
-        effectiveDarkness = clamp01(
-          sceneDarkness +
-          overcast * 0.08 * weatherInfluence +
-          storm * 0.06 * weatherInfluence +
-          nightExtra
-        );
-
-        const rayleigh = clamp01(this.params.rayleighStrength);
-        const mie = clamp01(this.params.mieStrength);
-        const forward = clamp01(this.params.forwardScatter);
-
-        temperature =
-          (this.params.tempWarmAtHorizon ?? 0.0) * golden * (0.5 + 0.5 * mie) +
-          (this.params.tempCoolAtNoon ?? 0.0) * dayFactor * rayleigh +
-          (this.params.nightCoolBoost ?? 0.0) * effectiveDarkness;
-
-        const overcastDesat = clamp01(this.params.overcastDesaturate);
-        const overcastContrast = clamp01(this.params.overcastContrastReduce);
-        const hazeLoss = clamp01(this.params.hazeContrastLoss);
-
-        saturation = 1.0;
-        saturation += (this.params.goldenSaturationBoost ?? 0.0) * golden;
-        saturation *= 1.0 - overcastDesat * overcast * weatherInfluence;
-        saturation *= 1.0 - (turbidityEff * mie) * 0.35;
-        nightSatFloor = clamp01(this.params.nightSaturationFloor);
-        // NOTE: apply the night saturation floor *after* analyticStrength scaling.
-        // Otherwise, scaling can drive saturation below zero at night, clamp it,
-        // and wash the whole frame toward gray.
-
-        contrast = 1.0;
-        // Overcast haze should flatten contrast mostly during daytime.
-        // At night, applying full overcast contrast loss produces a broad gray wash.
-        const overcastContrastNightWeight = 0.2;
-        const overcastContrastWeight = lerp(overcastContrastNightWeight, 1.0, dayFactor);
-        contrast *= 1.0 - overcastContrast * overcast * weatherInfluence * overcastContrastWeight;
-        contrast *= 1.0 - turbidityEff * mie * hazeLoss;
-        contrast *= 1.0 - effectiveDarkness * 0.2 * Math.min(1.5, gradePull);
-        contrast = Math.max(0.5, Math.min(1.5, contrast));
-
-        const daylightGradeFactor = dayProgress >= 0.0 ? dayFactor : 0.0;
-        const hazeLiftVal = clamp01(this.params.hazeLift);
-        brightness = turbidityEff * mie * hazeLiftVal * daylightGradeFactor;
-
-        exposure = 0.25 * daylightGradeFactor
-          - 0.35 * effectiveDarkness * gradePull
-          - 0.10 * turbidityEff;
-        exposure += forward * golden * 0.05;
-        exposure = Math.max(-1.0, Math.min(1.0, exposure));
-
-        vibrance = (golden * 0.25 - overcast * 0.2) * (1.0 - effectiveDarkness);
-
-        const analyticStrength = Math.max(0.0, this.params.analyticStrength ?? 1.0);
-        temperature = Math.max(-1.0, Math.min(1.0, temperature * analyticStrength));
-        exposure = Math.max(-1.0, Math.min(1.0, exposure * analyticStrength));
-        brightness = Math.max(-0.5, Math.min(0.5, brightness * analyticStrength));
-        saturation = Math.max(0.0, Math.min(2.0, 1.0 + (saturation - 1.0) * analyticStrength));
-        contrast = Math.max(0.5, Math.min(1.5, 1.0 + (contrast - 1.0) * analyticStrength));
-        vibrance = Math.max(-1.0, Math.min(1.0, vibrance * analyticStrength));
-
-        // Now enforce the night saturation floor with darkness weighting.
-        // Keeps nights from becoming unintentionally grayscale under strong analyticStrength.
-        const satFloor = nightSatFloor;
-        saturation = Math.max(satFloor, lerp(saturation, satFloor, effectiveDarkness * 0.75));
-
-        this._lastDayFactor = dayFactor;
-
-        // Full 24h orbit for shadows/specular — no freeze at dawn/dusk.
-        const sunAngles = computeSunAnglesFromHour(hour, sunrise);
-        this.currentSunAzimuthDeg = sunAngles.azimuthDeg;
-        this.currentSunElevationDeg = sunAngles.elevationDeg;
-      }
-
-      saturation = Math.max(0.0, Math.min(2.0, saturation + (this.params.saturationBoost ?? 0.0)));
-      vibrance = Math.max(-1.0, Math.min(1.0, vibrance + (this.params.vibranceBoost ?? 0.0)));
-
-      // ── Sky tint color for Darkness Response lights ─────────────────
-      {
-        const t = temperature;
-        let tr, tg, tb;
-        if (t >= 0) {
-          tr = 1.0 + t * 0.4;
-          tg = 1.0 - t * 0.15;
-          tb = 1.0 - t * 0.55;
-        } else {
-          const at = -t;
-          tr = 1.0 - at * 0.45;
-          tg = 1.0 - at * 0.1;
-          tb = 1.0 + at * 0.4;
-        }
-        const tintShiftG = 1.0 + tint;
-        tr = Math.max(0.01, tr);
-        tg = Math.max(0.01, tg * tintShiftG);
-        tb = Math.max(0.01, tb);
-        // Deep blue night sky for downstream lights (window glow, dust, etc.).
-        const deepR = 0.22;
-        const deepG = 0.34;
-        const deepB = 0.92;
-        const calNightBoost = dayProgress < 0 ? 0.38 : 0.0;
-        const nightSkyMix = clamp01(effectiveDarkness * 0.82 + calNightBoost);
-        this.currentSkyTintColor.r = lerp(tr, deepR, nightSkyMix);
-        this.currentSkyTintColor.g = lerp(tg, deepG, nightSkyMix);
-        this.currentSkyTintColor.b = lerp(tb, deepB, nightSkyMix);
-      }
-
-      // ── Push to shader uniforms ─────────────────────────────────────
-      const u = this._composeMaterial.uniforms;
-      u.uTime.value = timeInfo.elapsed;
-
-      // Keep post-pass screen UV -> world -> scene UV mapping in sync for outdoors masking.
-      const sc = window.MapShine?.sceneComposer;
-      const sceneRect = canvas?.dimensions?.sceneRect;
-      const sceneX = sceneRect?.x ?? 0;
-      const sceneY = sceneRect?.y ?? 0;
-      const sceneW = sceneRect?.width ?? 1;
-      const sceneH = sceneRect?.height ?? 1;
-      let vMinX = 0, vMinY = 0, vMaxX = sceneW, vMaxY = sceneH;
-      const cam = sc?.camera;
-      if (cam) {
-        if (cam.isOrthographicCamera) {
-          const camPos = cam.position;
-          vMinX = camPos.x + cam.left / cam.zoom;
-          vMinY = camPos.y + cam.bottom / cam.zoom;
-          vMaxX = camPos.x + cam.right / cam.zoom;
-          vMaxY = camPos.y + cam.top / cam.zoom;
-        } else {
-          const groundZ = sc?.groundZ ?? 0;
-          const dist = Math.max(1e-3, Math.abs((cam.position?.z ?? 0) - groundZ));
-          const fovRad = (Number(cam.fov) || 60) * Math.PI / 180;
-          const halfH = dist * Math.tan(fovRad * 0.5);
-          const aspect = Number(cam.aspect) || ((sc?.baseViewportWidth || 1) / Math.max(1, (sc?.baseViewportHeight || 1)));
-          const halfW = halfH * aspect;
-          vMinX = cam.position.x - halfW;
-          vMaxX = cam.position.x + halfW;
-          vMinY = cam.position.y - halfH;
-          vMaxY = cam.position.y + halfH;
-        }
-      }
-      u.uViewBoundsMin.value.set(vMinX, vMinY);
-      u.uViewBoundsMax.value.set(vMaxX, vMaxY);
-      u.uSceneBounds.value.set(sceneX, sceneY, sceneW, sceneH);
-      u.uSceneDimensions.value.set(canvas?.dimensions?.width ?? sceneW, canvas?.dimensions?.height ?? sceneH);
-
-      u.uExposure.value = exposure;
-      u.uTemperature.value = temperature;
-      u.uTint.value = tint;
-      u.uBrightness.value = brightness;
-      u.uContrast.value = contrast;
-      u.uSaturation.value = saturation;
-      u.uVibrance.value = vibrance;
-
-      u.uLift.value.set(liftR, liftG, liftB);
-      u.uGamma.value.set(Math.max(0.0001, gammaR), Math.max(0.0001, gammaG), Math.max(0.0001, gammaB));
-      u.uGain.value.set(gainR, gainG, gainB);
-      u.uMasterGamma.value = masterGamma ?? 1.0;
-      u.uToneMapping.value = toneMapping;
-      u.uVignetteStrength.value = vignetteStrength;
-      u.uVignetteSoftness.value = vignetteSoftness;
-      u.uGrainStrength.value = grainStrength;
-      const rc = this.params.goldenOutdoorRecolorColor ?? { r: 1.35, g: 0.80, b: 0.50 };
-      u.uGoldenRecolorStrength.value = clamp01(
-        goldenEnergy * Math.max(0.0, Number(this.params.goldenOutdoorRecolorStrength ?? 0.0))
-      );
-      u.uGoldenRecolorColor.value.set(
-        Math.max(0.01, Number(rc.r) || 1.35),
-        Math.max(0.01, Number(rc.g) || 0.80),
-        Math.max(0.01, Number(rc.b) || 0.50)
-      );
-
-      // Auto-intensity
-      let effectiveIntensity = this.params.intensity;
-      if (this.params.autoIntensityEnabled) {
-        const localDayFactor = clamp01(this._lastDayFactor ?? 0.5);
-        const localSceneDarkness = this._sceneDarknessForSkyGrade();
-        // Auto-intensity should NOT behave like “sky brightness”.
-        // We want the grade to stay strong at night (to actually darken),
-        // and be gentler at noon.
-        //
-        // localDayFactor: 0 at night → 1 at noon
-        // localGradeIntensity: 1 at night → ~0.35 at noon
-        //
-        // Also keep a small responsiveness to Foundry scene darkness so that
-        // explicit darkness changes still read as stronger grading.
-        const localGradeIntensity = clamp01(
-          (0.35 + 0.65 * (1.0 - localDayFactor)) *
-          (0.85 + 0.15 * (1.0 - localSceneDarkness))
-        );
-        const strength = clamp01(this.params.autoIntensityStrength);
-        effectiveIntensity *= lerp(1.0, localGradeIntensity, strength);
-      }
-      this.currentSkyIntensity01 = clamp01(effectiveIntensity);
-      u.uIntensity.value = effectiveIntensity;
-      if (u.uShadowGradePreserve) {
-        u.uShadowGradePreserve.value = clamp01(this.params.shadowGradePreserve ?? 0.35);
-      }
+      const state = evaluateSkyEnvironment(this.resolveAtmosphereParams(colorCorrectionParams));
+      this._lastState = state;
+      this.currentSkyTintColor = { ...state.skyTintColor };
+      this.currentSunAzimuthDeg = state.sunAzimuthDeg;
+      this.currentSunElevationDeg = state.sunElevationDeg;
+      this.currentSkyIntensity01 = state.skyIntensity01;
+      this._lastDayFactor = state.dayFactor;
     } catch (e) {
       if (Math.random() < 0.01) {
         log.warn('SkyColorEffectV2 update failed:', e);
@@ -1090,52 +135,32 @@ export class SkyColorEffectV2 {
     }
   }
 
-  // ── Render ────────────────────────────────────────────────────────────
+  /** @deprecated Per-level render removed; atmosphere runs in Camera Grade. */
+  render(_renderer, _inputRT, _outputRT) {}
 
-  /**
-   * Execute the sky color grading post-processing pass.
-   * Reads inputRT, writes to outputRT.
-   *
-   * @param {THREE.WebGLRenderer} renderer
-   * @param {THREE.WebGLRenderTarget} inputRT  - Scene after lighting
-   * @param {THREE.WebGLRenderTarget} outputRT - Where to write the graded result
-   */
-  render(renderer, inputRT, outputRT) {
-    if (!this._initialized || !this._composeMaterial || !inputRT) return;
-    if (!this.params.enabled) {
-      // When disabled, we need to pass through — copy input to output.
-      // If they're the same RT, nothing to do. Otherwise we'd need a blit.
-      // For now, the FloorCompositor should skip this pass when disabled.
-      return;
-    }
+  /** @deprecated No GPU masks; wired on ColorCorrectionEffectV2 post-merge. */
+  setOutdoorsMask(_outdoorsTex) {}
 
-    this._composeMaterial.uniforms.tDiffuse.value = inputRT.texture;
+  /** @deprecated */
+  setSkyReachMask(_skyReachTex) {}
 
-    const prevTarget = renderer.getRenderTarget();
-    const prevAutoClear = renderer.autoClear;
+  /** @deprecated */
+  setSkyOcclusionTexture(_texture) {}
 
-    renderer.setRenderTarget(outputRT);
-    renderer.autoClear = true;
-    renderer.render(this._composeScene, this._composeCamera);
+  /** @deprecated */
+  setCombinedShadowTexture(_texture) {}
 
-    renderer.autoClear = prevAutoClear;
-    renderer.setRenderTarget(prevTarget);
-  }
+  /** @deprecated */
+  setCombinedShadowEffectStrength(_strength) {}
 
-  // ── Cleanup ───────────────────────────────────────────────────────────
+  /** @deprecated */
+  setIlluminationMasks(_dynamicLightTex, _windowLightTex) {}
 
   dispose() {
-    try { this._composeMaterial?.dispose(); } catch (_) {}
-    try { this._composeQuad?.geometry?.dispose(); } catch (_) {}
-    try { this._fallbackWhite?.dispose?.(); } catch (_) {}
-    try { this._fallbackBlack?.dispose?.(); } catch (_) {}
-    this._composeScene = null;
-    this._composeCamera = null;
-    this._composeMaterial = null;
-    this._composeQuad = null;
-    this._fallbackWhite = null;
-    this._fallbackBlack = null;
     this._initialized = false;
+    this._lastState = null;
     log.info('SkyColorEffectV2 disposed');
   }
 }
+
+export default SkyColorEffectV2;

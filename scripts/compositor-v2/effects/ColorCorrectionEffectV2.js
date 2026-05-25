@@ -10,9 +10,9 @@
  *   - Vignette + film grain
  *
  * Runs after LevelCompositePass, AtmosphericFogEffectV2, and BloomEffectV2 in
- * {@link FloorCompositor}. This is the single HDR → LDR boundary: Lighting and
- * SkyColor produce linear environment values, while this pass owns exposure,
- * ToD timeline grading, vignette, grain, and tone mapping.
+ * {@link FloorCompositor}. This is the single HDR → LDR boundary. Outdoor
+ * weather/golden-hour atmosphere ({@link SkyEnvironmentModel}) is applied here
+ * on sky-eligible pixels after the time-of-day timeline and before tone mapping.
  *
  * Ported from V1 ColorCorrectionEffect with identical shader logic and defaults.
  *
@@ -22,6 +22,10 @@
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
+import {
+  DEFAULT_ATMOSPHERE_PARAMS,
+  migrateAtmosphereParams,
+} from '../SkyEnvironmentModel.js';
 
 const log = createLogger('ColorCorrectionEffectV2');
 
@@ -232,6 +236,10 @@ export class ColorCorrectionEffectV2 {
       /** Restore ToD grade loss on HDR flame cores (light-buffer × emissive), not map albedo. */
       localWarmEmissiveAdd: 0.55,
       todAnchors: cloneTodAnchors(),
+
+      // Outdoor atmosphere (weather / golden hour) — evaluated by SkyEnvironmentModel.
+      atmosphereEnabled: true,
+      ...DEFAULT_ATMOSPHERE_PARAMS,
     };
 
     for (let i = 0; i < TOD_ANCHOR_COUNT; i++) {
@@ -265,6 +273,13 @@ export class ColorCorrectionEffectV2 {
 
     /** @type {THREE.DataTexture|null} */
     this._fallbackWhite = null;
+    /** @type {THREE.DataTexture|null} */
+    this._fallbackBlack = null;
+
+    /** @type {import('../SkyEnvironmentModel.js').SkyEnvironmentState|null} */
+    this._atmosphereState = null;
+    /** @type {number} */
+    this._combinedShadowEffectStrength = 1.0;
   }
 
   // ── UI schema (moved from V1 ColorCorrectionEffect) ──────────────────────
@@ -430,6 +445,7 @@ export class ColorCorrectionEffectV2 {
           '**Persistence:** this effect supports **World Based** in the GM panel (shared across scenes) or per-scene storage when World Based is off.',
           'Fullscreen post; cost is modest (single pass).',
           '**Time-of-day timeline:** eight clock anchors each with global and interior exposure, saturation, and RGB tint multipliers (1 = neutral, 0–3 per channel); blends as scene time changes.',
+          '**Outdoor atmosphere:** procedural weather/golden-hour offsets on sky-eligible outdoor pixels (after timeline, before tone map).',
           '**Local ToD override:** under gameplay lights (HDR light buffer), blends from the timeline grade toward a bright neutral local grade — cancels midnight tint/exposure in lit pools without a circular cutout.',
           '**Note:** Vignette **softness** is written to a uniform but the current fragment shader uses a fixed falloff — the slider is reserved for a future shader hook.',
         ].join('\n\n'),
@@ -488,6 +504,49 @@ export class ColorCorrectionEffectV2 {
           advanced: true,
           expanded: false,
           parameters: ['todTimelineEnabled', 'localWarmLightPreserve', 'localTodOverrideExposure', 'localTodOverrideSaturation', 'localWarmEmissiveAdd'],
+        },
+        {
+          name: 'outdoor-atmosphere',
+          label: 'Outdoor atmosphere',
+          type: 'folder',
+          expanded: true,
+          parameters: [
+            'atmosphereEnabled',
+            'intensity',
+            'saturationBoost',
+            'vibranceBoost',
+            'shadowGradePreserve',
+            'calendarDarknessBlend',
+            'dayNightGradePull',
+            'nightExtraDarkness',
+            'autoIntensityEnabled',
+            'autoIntensityStrength',
+            'sunriseHour',
+            'sunsetHour',
+            'goldenHourWidth',
+            'goldenStrength',
+            'goldenPower',
+            'goldenOutdoorRecolorStrength',
+            'goldenOutdoorRecolorColor',
+            'nightFloor',
+            'analyticStrength',
+            'turbidity',
+            'rayleighStrength',
+            'mieStrength',
+            'forwardScatter',
+            'weatherInfluence',
+            'cloudToTurbidity',
+            'precipToTurbidity',
+            'overcastDesaturate',
+            'overcastContrastReduce',
+            'tempWarmAtHorizon',
+            'tempCoolAtNoon',
+            'nightCoolBoost',
+            'goldenSaturationBoost',
+            'nightSaturationFloor',
+            'hazeLift',
+            'hazeContrastLoss',
+          ],
         },
         ...timelineGroups,
       ],
@@ -621,28 +680,84 @@ export class ColorCorrectionEffectV2 {
           default: 0.0,
           tooltip: 'Animated film grain amplitude (0 = off).',
         },
+        atmosphereEnabled: {
+          type: 'boolean',
+          default: true,
+          label: 'Enable outdoor atmosphere',
+          tooltip: 'Weather-aware golden hour / overcast offsets on sky-eligible outdoor pixels.',
+        },
+        intensity: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 1,
+          label: 'Outdoor atmosphere strength',
+          throttle: 50,
+          tooltip: 'Blend of procedural outdoor atmosphere on sky-visible pixels. Also exported as environment strength for water and weather-aware lighting.',
+        },
+        saturationBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.5, label: 'Sky color saturation', throttle: 50 },
+        vibranceBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.07, label: 'Sky color vibrance', throttle: 50 },
+        shadowGradePreserve: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.35, label: 'Shadow preserve', throttle: 50, tooltip: 'Keeps shadowed outdoor pixels from full atmospheric recolor.' },
+        sunriseHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: 6.0, label: 'Sunrise', throttle: 50 },
+        sunsetHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: 18.0, label: 'Sunset', throttle: 50 },
+        goldenHourWidth: { type: 'slider', min: 0.25, max: 6.0, step: 0.05, default: 6.0, label: 'Golden Width', throttle: 50 },
+        goldenStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 4, label: 'Golden Strength', throttle: 50 },
+        goldenPower: { type: 'slider', min: 0.5, max: 3.0, step: 0.01, default: 3, label: 'Golden Power', throttle: 50 },
+        goldenOutdoorRecolorStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.05, default: 3.25, label: 'Golden Recolor', throttle: 50 },
+        goldenOutdoorRecolorColor: { type: 'color', default: { r: 1.35, g: 0.80, b: 0.50 }, label: 'Golden Recolor Color' },
+        nightFloor: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.5, label: 'Night Floor', throttle: 50 },
+        analyticStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 0.85, label: 'Analytic Strength', throttle: 50 },
+        turbidity: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.22, label: 'Turbidity', throttle: 50 },
+        rayleighStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.63, label: 'Rayleigh', throttle: 50 },
+        mieStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.35, label: 'Mie', throttle: 50 },
+        forwardScatter: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.3, label: 'Forward Scatter', throttle: 50 },
+        weatherInfluence: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.67, label: 'Weather Influence', throttle: 50 },
+        cloudToTurbidity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.25, label: 'Cloud→Turbidity', throttle: 50 },
+        precipToTurbidity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.72, label: 'Precip→Turbidity', throttle: 50 },
+        overcastDesaturate: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.3, label: 'Overcast Desat', throttle: 50 },
+        overcastContrastReduce: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.38, label: 'Overcast Contrast', throttle: 50 },
+        tempWarmAtHorizon: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.85, label: 'Warm Horizon', throttle: 50 },
+        tempCoolAtNoon: { type: 'slider', min: -1.0, max: 0.0, step: 0.01, default: -0.45, label: 'Cool Noon', throttle: 50 },
+        nightCoolBoost: { type: 'slider', min: -1.0, max: 0.0, step: 0.01, default: -0.25, label: 'Night Cool', throttle: 50 },
+        goldenSaturationBoost: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.29, label: 'Golden Sat', throttle: 50 },
+        nightSaturationFloor: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.33, label: 'Night Sat Floor', throttle: 50 },
+        hazeLift: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.08, label: 'Haze Lift', throttle: 50 },
+        hazeContrastLoss: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.0, label: 'Haze Contrast', throttle: 50 },
+        autoIntensityEnabled: { type: 'boolean', default: false, label: 'Auto Intensity' },
+        autoIntensityStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.0, label: 'Auto Strength', throttle: 50 },
+        calendarDarknessBlend: { type: 'slider', min: 0, max: 1, step: 0.05, default: 1.0, label: 'Master darkness blend', throttle: 50 },
+        dayNightGradePull: { type: 'slider', min: 0, max: 2.5, step: 0.05, default: 1.0, label: 'Day/night color separation', throttle: 50 },
+        nightExtraDarkness: { type: 'slider', min: 0, max: 0.45, step: 0.01, default: 0.0, label: 'Night color depth', throttle: 50 },
       },
       presets: {
         'Clear Noon': {
           toneMapping: 1,
           exposure: 0.95,
           temperature: 0.02,
-          tint: 0.0,
           contrast: 1.04,
           saturation: 1.02,
           vibrance: -0.05,
-          vignetteStrength: 0.0,
-          grainStrength: 0.0,
+          intensity: 0.9,
+          weatherInfluence: 0.45,
+          goldenOutdoorRecolorStrength: 1.4,
+          overcastDesaturate: 0.22,
+          overcastContrastReduce: 0.28,
         },
         'Golden Hour': {
           toneMapping: 1,
           exposure: 0.92,
           temperature: 0.18,
-          tint: 0.03,
           contrast: 1.02,
           saturation: 1.06,
           vibrance: 0.05,
           vignetteStrength: 0.08,
+          intensity: 0.82,
+          goldenStrength: 3.2,
+          goldenOutdoorRecolorStrength: 2.8,
+          goldenSaturationBoost: 0.28,
+          tempWarmAtHorizon: 0.95,
+          weatherInfluence: 0.55,
         },
         'Overcast Day': {
           toneMapping: 1,
@@ -651,7 +766,12 @@ export class ColorCorrectionEffectV2 {
           contrast: 0.94,
           saturation: 0.88,
           vibrance: -0.1,
-          vignetteStrength: 0.0,
+          intensity: 0.68,
+          weatherInfluence: 0.85,
+          overcastDesaturate: 0.42,
+          overcastContrastReduce: 0.48,
+          tempCoolAtNoon: -0.55,
+          hazeLift: 0.12,
         },
         Storm: {
           toneMapping: 1,
@@ -661,6 +781,13 @@ export class ColorCorrectionEffectV2 {
           saturation: 0.78,
           vibrance: -0.18,
           vignetteStrength: 0.12,
+          intensity: 0.55,
+          weatherInfluence: 1.0,
+          cloudToTurbidity: 0.45,
+          precipToTurbidity: 0.85,
+          overcastDesaturate: 0.5,
+          overcastContrastReduce: 0.58,
+          nightExtraDarkness: 0.06,
         },
         'Moonlit Night': {
           toneMapping: 1,
@@ -670,6 +797,10 @@ export class ColorCorrectionEffectV2 {
           saturation: 0.62,
           vibrance: -0.2,
           vignetteStrength: 0.16,
+          intensity: 0.42,
+          nightCoolBoost: -0.45,
+          nightSaturationFloor: 0.25,
+          nightExtraDarkness: 0.04,
         },
         'Interior Night': {
           toneMapping: 1,
@@ -684,6 +815,10 @@ export class ColorCorrectionEffectV2 {
           tod7InteriorExposure: 0.25,
           tod0InteriorSaturation: 0.95,
           tod7InteriorSaturation: 0.95,
+          intensity: 0.35,
+          nightCoolBoost: -0.35,
+          nightSaturationFloor: 0.3,
+          nightExtraDarkness: 0.03,
         },
         Cinematic: {
           toneMapping: 1,
@@ -777,6 +912,25 @@ export class ColorCorrectionEffectV2 {
         uLocalLightAlphaBaseline: { value: 1.0 },
         uLocalLightTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
         uGradeEnabled: { value: 1.0 },
+
+        uAtmosphereEnabled: { value: 1.0 },
+        uAtmosphereStrength: { value: 1.0 },
+        uAtmosphereExposure: { value: 0.0 },
+        uAtmosphereSaturation: { value: 1.0 },
+        uAtmosphereContrast: { value: 1.0 },
+        uAtmosphereTintColor: { value: new THREE.Vector3(1, 1, 1) },
+        uGoldenRecolorStrength: { value: 0.0 },
+        uGoldenRecolorColor: { value: new THREE.Vector3(1.35, 0.80, 0.50) },
+        uShadowGradePreserve: { value: 0.35 },
+        uCombinedShadowEffectStrength: { value: 1.0 },
+
+        tSkyReachMask: { value: this._fallbackWhite },
+        tSkyOcclusion: { value: this._fallbackWhite },
+        tCombinedShadow: { value: this._fallbackWhite },
+        uHasSkyReachMask: { value: 0.0 },
+        uHasSkyOcclusion: { value: 0.0 },
+        uHasCombinedShadow: { value: 0.0 },
+        uSkyReachMaskFlipY: { value: 0.0 },
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -833,6 +987,25 @@ export class ColorCorrectionEffectV2 {
         uniform vec2 uLocalLightTexelSize;
         uniform float uGradeEnabled;
 
+        uniform float uAtmosphereEnabled;
+        uniform float uAtmosphereStrength;
+        uniform float uAtmosphereExposure;
+        uniform float uAtmosphereSaturation;
+        uniform float uAtmosphereContrast;
+        uniform vec3 uAtmosphereTintColor;
+        uniform float uGoldenRecolorStrength;
+        uniform vec3 uGoldenRecolorColor;
+        uniform float uShadowGradePreserve;
+        uniform float uCombinedShadowEffectStrength;
+
+        uniform sampler2D tSkyReachMask;
+        uniform sampler2D tSkyOcclusion;
+        uniform sampler2D tCombinedShadow;
+        uniform float uHasSkyReachMask;
+        uniform float uHasSkyOcclusion;
+        uniform float uHasCombinedShadow;
+        uniform float uSkyReachMaskFlipY;
+
         varying vec2 vUv;
 
         vec3 ACESFilmicToneMapping(vec3 x) {
@@ -880,6 +1053,60 @@ export class ColorCorrectionEffectV2 {
           float isOutdoor = step(0.5, outdoorStrength);
           float indoorSignal = clamp(1.0 - isOutdoor, 0.0, 1.0);
           return mix(0.0, smoothstep(0.20, 0.75, indoorSignal), inScene);
+        }
+
+        vec2 sceneUvFromScreen(vec2 screenUv) {
+          vec2 worldXY = mix(uViewBoundsMin, uViewBoundsMax, screenUv);
+          return vec2(
+            (worldXY.x - uSceneBounds.x) / max(1e-5, uSceneBounds.z),
+            1.0 - ((worldXY.y - uSceneBounds.y) / max(1e-5, uSceneBounds.w))
+          );
+        }
+
+        float sampleSkyReachAt(vec2 sceneUvRaw) {
+          if (uHasSkyReachMask < 0.5) return 1.0;
+          vec2 sceneUv = sceneUvRaw;
+          if (uSkyReachMaskFlipY > 0.5) sceneUv.y = 1.0 - sceneUv.y;
+          sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
+          vec4 sr = texture2D(tSkyReachMask, sceneUv);
+          return mix(1.0, clamp(sr.r, 0.0, 1.0), clamp(sr.a, 0.0, 1.0));
+        }
+
+        float sampleSkyOcclusionAt(vec2 sceneUvRaw, float inScene) {
+          if (uHasSkyOcclusion < 0.5) return 1.0;
+          vec2 sceneUv = clamp(sceneUvRaw, vec2(0.0), vec2(1.0));
+          return mix(1.0, clamp(texture2D(tSkyOcclusion, sceneUv).r, 0.0, 1.0), inScene);
+        }
+
+        float amplifyCombinedShadowLit(float lit01, float strength) {
+          float s = max(strength, 1.0);
+          float dark = 1.0 - clamp(lit01, 0.0, 1.0);
+          return 1.0 - min(1.0, dark * s);
+        }
+
+        float sampleOutdoorAtmosphereWeight(vec2 screenUv) {
+          if (uHasOutdoorsMask < 0.5) return 1.0;
+          vec2 sceneUvRaw = sceneUvFromScreen(screenUv);
+          float inScene =
+            step(0.0, sceneUvRaw.x) * step(sceneUvRaw.x, 1.0) *
+            step(0.0, sceneUvRaw.y) * step(sceneUvRaw.y, 1.0);
+          vec2 sceneUv = sceneUvRaw;
+          if (uOutdoorsMaskFlipY > 0.5) sceneUv.y = 1.0 - sceneUv.y;
+          sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
+          vec4 od = texture2D(tOutdoorsMask, sceneUv);
+          float outdoorStrength = mix(1.0, clamp(od.r, 0.0, 1.0), clamp(od.a, 0.0, 1.0));
+          float outdoorVis = mix(1.0, step(0.5, outdoorStrength), inScene);
+          float skyReach = sampleSkyReachAt(sceneUvRaw);
+          float skyOcc = sampleSkyOcclusionAt(sceneUvRaw, inScene);
+          return clamp(outdoorVis * skyReach * skyOcc, 0.0, 1.0);
+        }
+
+        float sampleAtmosphereShadowDamp(vec2 screenUv) {
+          if (uHasCombinedShadow < 0.5) return 1.0;
+          float combinedShadowR = clamp(texture2D(tCombinedShadow, screenUv).r, 0.0, 1.0);
+          combinedShadowR = amplifyCombinedShadowLit(combinedShadowR, uCombinedShadowEffectStrength);
+          float gradeBlend = smoothstep(0.74, 1.0, combinedShadowR);
+          return mix(clamp(uShadowGradePreserve, 0.0, 1.0), 1.0, gradeBlend);
         }
 
         vec3 applyTimelineGrade(vec3 inputColor, float exposureStops, float saturationMul, vec3 tintColor) {
@@ -1076,6 +1303,30 @@ export class ColorCorrectionEffectV2 {
             color = mix(sceneGrade, localGrade, blendW);
           }
 
+          // 5b. Outdoor atmosphere (weather / golden hour) on sky-eligible pixels.
+          if (uAtmosphereEnabled > 0.5 && uAtmosphereStrength > 0.0001) {
+            float skyEligible = sampleOutdoorAtmosphereWeight(vUv);
+            float shadowDamp = sampleAtmosphereShadowDamp(vUv);
+            float atmWeight = clamp(uAtmosphereStrength * skyEligible * shadowDamp, 0.0, 1.0);
+            if (atmWeight > 0.0001) {
+              vec3 atmGrade = applyTimelineGrade(
+                color,
+                uAtmosphereExposure,
+                uAtmosphereSaturation,
+                uAtmosphereTintColor
+              );
+              if (abs(uAtmosphereContrast - 1.0) > 0.0001) {
+                atmGrade = (atmGrade - 0.5) * uAtmosphereContrast + 0.5;
+              }
+              if (uGoldenRecolorStrength > 0.0001) {
+                float recolorAmt = clamp(uGoldenRecolorStrength * atmWeight, 0.0, 1.0);
+                vec3 warmShift = atmGrade * uGoldenRecolorColor;
+                atmGrade = mix(atmGrade, warmShift, recolorAmt);
+              }
+              color = mix(color, atmGrade, atmWeight);
+            }
+          }
+
           // Restore exposure loss on HDR emissive art without undoing preserved hue.
           float emissiveW = sampleSceneEmissiveWeight(preTodColor);
           float emissiveRestore = emissiveW * max(uLocalEmissiveAdd, 0.0);
@@ -1132,14 +1383,25 @@ export class ColorCorrectionEffectV2 {
   /** @private */
   _ensureFallbackTextures() {
     const THREE = window.THREE;
-    if (!THREE || this._fallbackWhite) return;
-    const white = new Uint8Array([255, 255, 255, 255]);
-    this._fallbackWhite = new THREE.DataTexture(white, 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
-    this._fallbackWhite.needsUpdate = true;
-    this._fallbackWhite.flipY = false;
-    this._fallbackWhite.generateMipmaps = false;
-    this._fallbackWhite.minFilter = THREE.NearestFilter;
-    this._fallbackWhite.magFilter = THREE.NearestFilter;
+    if (!THREE) return;
+    if (!this._fallbackWhite) {
+      const white = new Uint8Array([255, 255, 255, 255]);
+      this._fallbackWhite = new THREE.DataTexture(white, 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+      this._fallbackWhite.needsUpdate = true;
+      this._fallbackWhite.flipY = false;
+      this._fallbackWhite.generateMipmaps = false;
+      this._fallbackWhite.minFilter = THREE.NearestFilter;
+      this._fallbackWhite.magFilter = THREE.NearestFilter;
+    }
+    if (!this._fallbackBlack) {
+      const black = new Uint8Array([0, 0, 0, 0]);
+      this._fallbackBlack = new THREE.DataTexture(black, 1, 1, THREE.RGBAFormat, THREE.UnsignedByteType);
+      this._fallbackBlack.needsUpdate = true;
+      this._fallbackBlack.flipY = false;
+      this._fallbackBlack.generateMipmaps = false;
+      this._fallbackBlack.minFilter = THREE.NearestFilter;
+      this._fallbackBlack.magFilter = THREE.NearestFilter;
+    }
   }
 
   /**
@@ -1152,6 +1414,94 @@ export class ColorCorrectionEffectV2 {
     u.tOutdoorsMask.value = outdoorsTex ?? this._fallbackWhite;
     u.uHasOutdoorsMask.value = outdoorsTex ? 1.0 : 0.0;
     u.uOutdoorsMaskFlipY.value = outdoorsTex?.flipY ? 1.0 : 0.0;
+  }
+
+  /**
+   * Stacked or per-floor skyReach mask for outdoor atmosphere gating.
+   * @param {THREE.Texture|null} skyReachTex
+   */
+  setSkyReachMask(skyReachTex) {
+    const u = this._composeMaterial?.uniforms;
+    if (!u) return;
+    u.tSkyReachMask.value = skyReachTex ?? this._fallbackWhite;
+    u.uHasSkyReachMask.value = skyReachTex ? 1.0 : 0.0;
+    u.uSkyReachMaskFlipY.value = skyReachTex?.flipY ? 1.0 : 0.0;
+  }
+
+  /** @param {THREE.Texture|null} texture */
+  setSkyOcclusionTexture(texture) {
+    const u = this._composeMaterial?.uniforms;
+    if (!u) return;
+    u.tSkyOcclusion.value = texture ?? this._fallbackWhite;
+    u.uHasSkyOcclusion.value = texture ? 1.0 : 0.0;
+  }
+
+  /** @param {THREE.Texture|null} texture */
+  setCombinedShadowTexture(texture) {
+    const u = this._composeMaterial?.uniforms;
+    if (!u) return;
+    u.tCombinedShadow.value = texture ?? this._fallbackWhite;
+    u.uHasCombinedShadow.value = texture ? 1.0 : 0.0;
+  }
+
+  /** @param {number} strength */
+  setCombinedShadowEffectStrength(strength) {
+    this._combinedShadowEffectStrength = strength;
+    const u = this._composeMaterial?.uniforms;
+    if (!u?.uCombinedShadowEffectStrength) return;
+    const s = Number(strength);
+    u.uCombinedShadowEffectStrength.value = Number.isFinite(s) ? Math.max(1.0, Math.min(10.0, s)) : 1.0;
+  }
+
+  /**
+   * Push evaluated sky environment state from {@link SkyEnvironmentModel}.
+   * @param {import('../SkyEnvironmentModel.js').SkyEnvironmentState|null} state
+   */
+  setAtmosphereState(state) {
+    this._atmosphereState = state;
+    this._pushAtmosphereUniforms();
+  }
+
+  /**
+   * Migrate legacy Sky Color params into Camera Grade on first init.
+   * @param {Record<string, *>|null} legacySkyParams
+   */
+  migrateAtmosphereFromSky(legacySkyParams) {
+    if (legacySkyParams) migrateAtmosphereParams(this.params, legacySkyParams);
+  }
+
+  /** @private */
+  _pushAtmosphereUniforms() {
+    const u = this._composeMaterial?.uniforms;
+    if (!u) return;
+
+    const p = this.params;
+    const enabled = p.atmosphereEnabled !== false && p.enabled !== false;
+    u.uAtmosphereEnabled.value = enabled ? 1.0 : 0.0;
+
+    const grade = this._atmosphereState?.atmosphereGrade;
+    if (!enabled || !grade) {
+      u.uAtmosphereStrength.value = 0.0;
+      return;
+    }
+
+    u.uAtmosphereStrength.value = Math.max(0, Math.min(1, Number(grade.strength) || 0));
+    u.uAtmosphereExposure.value = Number(grade.exposureStops) || 0;
+    u.uAtmosphereSaturation.value = Math.max(0, Math.min(4, Number(grade.saturationMul) || 1));
+    u.uAtmosphereContrast.value = Math.max(0.5, Math.min(1.5, Number(grade.contrastMul) || 1));
+    u.uAtmosphereTintColor.value.set(
+      grade.tintMul?.r ?? 1,
+      grade.tintMul?.g ?? 1,
+      grade.tintMul?.b ?? 1,
+    );
+    u.uGoldenRecolorStrength.value = Math.max(0, Number(grade.goldenRecolorStrength) || 0);
+    u.uGoldenRecolorColor.value.set(
+      grade.goldenRecolorColor?.r ?? 1.35,
+      grade.goldenRecolorColor?.g ?? 0.80,
+      grade.goldenRecolorColor?.b ?? 0.50,
+    );
+    u.uShadowGradePreserve.value = Math.max(0, Math.min(1, Number(grade.shadowGradePreserve) ?? 0.35));
+    u.uCombinedShadowEffectStrength.value = Math.max(1, Math.min(10, Number(this._combinedShadowEffectStrength) || 1));
   }
 
   /**
@@ -1392,9 +1742,16 @@ export class ColorCorrectionEffectV2 {
       ||       paramId === 'localWarmLightPreserve'
       || paramId === 'localTodOverrideExposure'
       || paramId === 'localTodOverrideSaturation'
-      || paramId === 'localWarmEmissiveAdd'
+      ||       paramId === 'localWarmEmissiveAdd'
+      || paramId === 'atmosphereEnabled'
+      || paramId === 'intensity'
+      || paramId === 'shadowGradePreserve'
+      || paramId === 'goldenOutdoorRecolorStrength'
+      || paramId === 'goldenOutdoorRecolorColor'
+      || paramId === 'analyticStrength'
     ) {
       this._pushTodUniforms();
+      this._pushAtmosphereUniforms();
     }
   }
 
@@ -1484,6 +1841,21 @@ export class ColorCorrectionEffectV2 {
 
     // Phase 2: ColorCorrection is always the post-composite owner of ToD grading.
     this._pushTodUniforms();
+    this._pushAtmosphereUniforms();
+  }
+
+  /**
+   * Combined timeline + atmosphere grade for downstream effects.
+   * @returns {{ enabled: boolean, global?: object, interior?: object, atmosphere?: object }}
+   */
+  getEnvironmentGradeState() {
+    const timeline = this.getTimelineGradeState();
+    const atmosphere = this._atmosphereState?.atmosphereGrade ?? null;
+    return {
+      ...timeline,
+      atmosphere,
+      skyTintColor: this._atmosphereState?.skyTintColor ?? null,
+    };
   }
 
   /**
@@ -1520,6 +1892,7 @@ export class ColorCorrectionEffectV2 {
     );
     this._syncViewBoundsUniforms();
     this._pushTodUniforms();
+    this._pushAtmosphereUniforms();
     this._lastPostMergeTodApplied =
       this._isTimelineEnabled()
       && this.params.enabled !== false

@@ -25,6 +25,7 @@ import { SKY_REACH_VERT, SKY_REACH_FRAG, OVERHEAD_ACCUM_FRAG } from './shaders/s
 import {
   STACKED_OUTDOORS_VERT,
   STACKED_OUTDOORS_LAYER_FRAG,
+  STACKED_SKY_REACH_LAYER_FRAG,
 } from './shaders/stackedOutdoorsShader.js';
 import { isLevelsEnabledForScene, tileHasLevelsRange, readTileLevelsFlags, readSceneLevelsFlag, hasV14NativeLevels, readV14SceneLevels, getViewedLevelBackgroundSrc } from '../foundry/levels-scene-flags.js';
 import { isTileOverhead } from '../scene/tile-manager.js';
@@ -530,6 +531,17 @@ export class GpuSceneMaskCompositor {
     this._stackedOutdoorsRtA = null;
     /** @type {THREE.WebGLRenderTarget|null} */
     this._stackedOutdoorsRtB = null;
+
+    /** @type {THREE.RawShaderMaterial|null} Stacked skyReach layer combiner. */
+    this._stackedSkyReachMaterial = null;
+    /** @type {THREE.Mesh|null} */
+    this._stackedSkyReachMesh = null;
+    /** @type {THREE.Scene|null} */
+    this._stackedSkyReachScene = null;
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this._stackedSkyReachRtA = null;
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this._stackedSkyReachRtB = null;
 
     /**
      * Signature of the last water patch operation to avoid repeated SDF rebuilds
@@ -2252,6 +2264,14 @@ export class GpuSceneMaskCompositor {
     try { this._stackedOutdoorsRtB?.dispose(); } catch (_) {}
     this._stackedOutdoorsRtA = null;
     this._stackedOutdoorsRtB = null;
+    try { this._stackedSkyReachMaterial?.dispose(); } catch (_) {}
+    this._stackedSkyReachMaterial = null;
+    this._stackedSkyReachMesh = null;
+    this._stackedSkyReachScene = null;
+    try { this._stackedSkyReachRtA?.dispose(); } catch (_) {}
+    try { this._stackedSkyReachRtB?.dispose(); } catch (_) {}
+    this._stackedSkyReachRtA = null;
+    this._stackedSkyReachRtB = null;
 
     this._quadMesh = null;
     this._quadScene = null;
@@ -2468,6 +2488,30 @@ export class GpuSceneMaskCompositor {
       this._stackedOutdoorsScene = new THREE.Scene();
       this._stackedOutdoorsScene.add(this._stackedOutdoorsMesh);
     }
+
+    if (!this._stackedSkyReachMaterial) {
+      this._stackedSkyReachMaterial = new THREE.RawShaderMaterial({
+        vertexShader: STACKED_OUTDOORS_VERT,
+        fragmentShader: STACKED_SKY_REACH_LAYER_FRAG,
+        uniforms: {
+          tAccum: { value: null },
+          tFloorAlpha: { value: null },
+          tSkyReach: { value: null },
+        },
+        depthTest: false,
+        depthWrite: false,
+        transparent: false,
+        blending: THREE.NoBlending,
+      });
+    }
+    if (!this._stackedSkyReachMesh) {
+      this._stackedSkyReachMesh = new THREE.Mesh(this._quadGeo, this._stackedSkyReachMaterial);
+      this._stackedSkyReachMesh.frustumCulled = false;
+    }
+    if (!this._stackedSkyReachScene) {
+      this._stackedSkyReachScene = new THREE.Scene();
+      this._stackedSkyReachScene.add(this._stackedSkyReachMesh);
+    }
   }
 
   /**
@@ -2538,6 +2582,86 @@ export class GpuSceneMaskCompositor {
         renderer.render(this._stackedOutdoorsScene, this._orthoCamera);
       } catch (e) {
         log.debug('composeStackedOutdoorsMask: layer failed', { floorKey, err: e });
+      }
+
+      const tmp = accum;
+      accum = scratch;
+      scratch = tmp;
+    }
+
+    renderer.setClearColor(prevClearColor, prevClearAlpha);
+    renderer.setRenderTarget(prevTarget);
+
+    return accum.texture;
+  }
+
+  /**
+   * Build a scene-space stacked `skyReach` mask for visible floors (bottom→top).
+   *
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {string[]} floorKeysBottomToTop
+   * @returns {THREE.Texture|null}
+   */
+  composeStackedSkyReachMask(renderer, floorKeysBottomToTop) {
+    const THREE = window.THREE;
+    if (!renderer || !THREE || !Array.isArray(floorKeysBottomToTop) || floorKeysBottomToTop.length === 0) {
+      return null;
+    }
+
+    this._ensureGpuResources(THREE);
+
+    let refW = 0;
+    let refH = 0;
+    for (const floorKey of floorKeysBottomToTop) {
+      const ref = this.getFloorTexture(floorKey, 'skyReach')
+        ?? this.getFloorTexture(floorKey, 'floorAlpha');
+      if (!ref) continue;
+      refW = Number(ref.image?.width) || refW;
+      refH = Number(ref.image?.height) || refH;
+      if (refW > 0 && refH > 0) break;
+    }
+    if (refW < 1 || refH < 1) return null;
+
+    let rtA = this._stackedSkyReachRtA;
+    let rtB = this._stackedSkyReachRtB;
+    if (!rtA || rtA.width !== refW || rtA.height !== refH) {
+      try { rtA?.dispose(); } catch (_) {}
+      try { rtB?.dispose(); } catch (_) {}
+      rtA = this._createRenderTarget(THREE, refW, refH, 'stackedSkyReachA');
+      rtB = this._createRenderTarget(THREE, refW, refH, 'stackedSkyReachB');
+      this._stackedSkyReachRtA = rtA;
+      this._stackedSkyReachRtB = rtB;
+    }
+
+    const m = this._stackedSkyReachMaterial;
+    const prevTarget = renderer.getRenderTarget();
+    const prevClearColor = new THREE.Color();
+    renderer.getClearColor(prevClearColor);
+    const prevClearAlpha = renderer.getClearAlpha();
+
+    renderer.setRenderTarget(rtA);
+    renderer.setClearColor(0xffffff, 0);
+    renderer.clear();
+
+    let accum = rtA;
+    let scratch = rtB;
+
+    for (const floorKey of floorKeysBottomToTop) {
+      const skyReachTex = this.getFloorTexture(floorKey, 'skyReach');
+      const alphaTex = this.getFloorTexture(floorKey, 'floorAlpha');
+      if (!skyReachTex || !alphaTex) continue;
+
+      m.uniforms.tAccum.value = accum.texture;
+      m.uniforms.tFloorAlpha.value = alphaTex;
+      m.uniforms.tSkyReach.value = skyReachTex;
+
+      renderer.setRenderTarget(scratch);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear();
+      try {
+        renderer.render(this._stackedSkyReachScene, this._orthoCamera);
+      } catch (e) {
+        log.debug('composeStackedSkyReachMask: layer failed', { floorKey, err: e });
       }
 
       const tmp = accum;

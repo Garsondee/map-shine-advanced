@@ -999,6 +999,8 @@ export class SmellyFliesEffect {
 
     this._pendingRebuild = false;
     this._rebuildQueued = false;
+    /** @type {string|null} Last map-point signature successfully built into flySystems */
+    this._systemsSyncKey = null;
     
     /** @type {MapPointsManager} */
     this.mapPointsManager = null;
@@ -1205,6 +1207,7 @@ export class SmellyFliesEffect {
   setMapPointsSources(manager) {
     const prevManager = this.mapPointsManager;
     this.mapPointsManager = manager;
+    this._systemsSyncKey = null;
 
     // Remove old change listener
     
@@ -1224,6 +1227,7 @@ export class SmellyFliesEffect {
 
   setActiveLevelContext(context = null) {
     this._activeLevelContext = context ?? window.MapShine?.activeLevelContext ?? null;
+    this._systemsSyncKey = null;
     this._queueRebuildSystems();
   }
 
@@ -1235,10 +1239,39 @@ export class SmellyFliesEffect {
     if (!resolveEffectEnabled(this)) return;
     if (this._rebuildQueued) return;
     this._rebuildQueued = true;
+    this._systemsSyncKey = null;
     setTimeout(() => {
       this._rebuildQueued = false;
       this._rebuildSystems();
     }, 0);
+  }
+
+  /**
+   * Stable signature of current map-point sources for rebuild deduplication.
+   * @returns {string|null}
+   * @private
+   */
+  _computeSystemsSyncKey() {
+    if (!this.mapPointsManager) return null;
+
+    const ctx = this._activeLevelContext;
+    const ctxKey = ctx?.id
+      ?? (Number.isFinite(ctx?.floorIndex) ? `floor:${ctx.floorIndex}` : null)
+      ?? String(ctx ?? 'none');
+
+    const areas = (typeof this.mapPointsManager.getAreasForEffectForContext === 'function')
+      ? this.mapPointsManager.getAreasForEffectForContext('smellyFlies', this._activeLevelContext)
+      : this.mapPointsManager.getAreasForEffect('smellyFlies');
+
+    const pointGroups = (typeof this.mapPointsManager.getGroupsByEffectForContext === 'function'
+      ? this.mapPointsManager.getGroupsByEffectForContext('smellyFlies', this._activeLevelContext)
+      : this.mapPointsManager.getGroupsByEffect('smellyFlies'))
+      .filter(g => g.type === 'point' && g.points && g.points.length > 0);
+
+    const areaIds = areas.map(a => a.groupId).sort().join(',');
+    const groupIds = pointGroups.map(g => g.id).sort().join(',');
+
+    return `${ctxKey}|a:${areaIds}|g:${groupIds}`;
   }
 
   /**
@@ -1250,6 +1283,7 @@ export class SmellyFliesEffect {
     this.enabled = next;
     if (this.params) this.params.enabled = next;
     if (!resolveEffectEnabled(this)) {
+      this._systemsSyncKey = null;
       this._disposeSystems();
       return;
     }
@@ -1342,8 +1376,10 @@ export class SmellyFliesEffect {
       : this.mapPointsManager.getGroupsByEffect('smellyFlies'))
       .filter(g => g.type === 'point' && g.points && g.points.length > 0);
     
-    log.info(`Creating fly systems: ${areas.length} areas, ${pointGroups.length} point groups`);
-    
+    if (areas.length > 0 || pointGroups.length > 0) {
+      log.debug(`Creating fly systems: ${areas.length} areas, ${pointGroups.length} point groups`);
+    }
+
     // Create system for each area
     for (const area of areas) {
       const system = this._createFlySystem(area);
@@ -1359,6 +1395,8 @@ export class SmellyFliesEffect {
         this.flySystems.set(group.id, system);
       }
     }
+
+    this._systemsSyncKey = this._computeSystemsSyncKey();
   }
 
   /**
@@ -1604,9 +1642,9 @@ export class SmellyFliesEffect {
       return;
     }
 
+    const syncKey = this._computeSystemsSyncKey();
     if (
-      this.flySystems.size === 0
-      && this.mapPointsManager
+      syncKey !== this._systemsSyncKey
       && this.batchRenderer
       && this.atlasTexture
     ) {

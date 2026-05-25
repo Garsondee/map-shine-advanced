@@ -1324,7 +1324,7 @@ export class WaterSplashesEffectV2 {
       try { return window.MapShine?.effectComposer?._floorCompositorV2 ?? null; } catch (_) { return null; }
     })();
     const sky = fc?._skyColorEffect;
-    const skyIntensityRaw = Number(sky?._composeMaterial?.uniforms?.uIntensity?.value);
+    const skyIntensityRaw = Number(sky?.currentSkyIntensity01);
     const skyIntensity01 = Number.isFinite(skyIntensityRaw)
       ? Math.max(0.0, Math.min(1.0, skyIntensityRaw))
       : 1.0;

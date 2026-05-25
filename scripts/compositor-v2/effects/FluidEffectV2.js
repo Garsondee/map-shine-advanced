@@ -15,11 +15,15 @@
 import { createLogger } from '../../core/log.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
+import { resolveEffectEnabled } from '../../effects/resolve-effect-enabled.js';
+import { RENDER_ORDER_PER_FLOOR } from '../LayerOrderPolicy.js';
 
 const log = createLogger('FluidEffectV2');
 
 const GROUND_Z = 1000;
 const FLUID_Z_OFFSET = -0.05; // under albedo tile, within same floor band
+/** Fractional step below source albedo — avoids integer -1 dropping into the prior floor band. */
+const SUB_ALBEDO_RENDER_ORDER_STEP = 0.01;
 
 export class FluidEffectV2 {
   /**
@@ -49,6 +53,7 @@ export class FluidEffectV2 {
 
     // Match V1 defaults for visual parity.
     this.params = {
+      enabled: true,
       intensity: 1.0,
       opacity: 1.0,
 
@@ -129,10 +134,10 @@ export class FluidEffectV2 {
 
   get enabled() { return this._enabled; }
   set enabled(v) {
-    this._enabled = !!v;
-    for (const entry of this._overlays.values()) {
-      entry.mesh.visible = this._enabled;
-    }
+    const next = !!v;
+    this._enabled = next;
+    this.params.enabled = next;
+    this._syncOverlayVisibility();
   }
 
   // ── UI schema (moved from V1 FluidEffect) ────────────────────────────────
@@ -171,7 +176,7 @@ export class FluidEffectV2 {
         noiseScale:         { type: 'slider', label: 'Noise Scale',        min: 0.5, max: 30,   step: 0.1,  default: 6.0 },
         noiseStrength:      { type: 'slider', label: 'Noise Strength',     min: 0,   max: 1,    step: 0.01, default: 0.0 },
         bubbleScale:        { type: 'slider', label: 'Bubble Scale',       min: 1,   max: 60,   step: 0.5,  default: 18.0 },
-        bubbleStrength:     { type: 'slider', label: 'Bubble Strength',    min: 0,   max: 0.5,  step: 0.01, default: 0.0 },
+        bubbleStrength:     { type: 'slider', label: 'Bubble Strength',    min: 0,   max: 2,    step: 0.01, default: 0.0 },
         edgeNoiseScale:     { type: 'slider', label: 'Edge Noise Scale',   min: 0.5, max: 20,   step: 0.1,  default: 0.5 },
         edgeNoiseAmp:       { type: 'slider', label: 'Edge Noise Amp',     min: 0,   max: 0.3,  step: 0.005, default: 0.0 },
         meniscusStrength:   { type: 'slider', label: 'Meniscus Strength',  min: 0,   max: 1,    step: 0.01, default: 0.0 },
@@ -227,6 +232,10 @@ export class FluidEffectV2 {
 
     this._loader = new THREE.TextureLoader();
     this._screenSize = new THREE.Vector2(1, 1);
+    this._colorASrc = String(this.params.colorA ?? '#ffffff');
+    this._colorBSrc = String(this.params.colorB ?? '#ffffff');
+    this._cachedColorA = new THREE.Color(this._colorASrc);
+    this._cachedColorB = new THREE.Color(this._colorBSrc);
     this._initialized = true;
     log.info('FluidEffectV2 initialized');
   }
@@ -397,6 +406,15 @@ export class FluidEffectV2 {
     const THREE = window.THREE;
     if (!THREE) return;
 
+    if (!resolveEffectEnabled(this)) {
+      for (const { material } of this._overlays.values()) {
+        const u = material.uniforms;
+        if (u?.uEffectEnabled) u.uEffectEnabled.value = 0.0;
+      }
+      this._syncOverlayVisibility();
+      return;
+    }
+
     // Screen size: used by shader for gl_FragCoord UV mapping (depth/roof paths).
     // In V2 we keep depth/roof disabled, but still provide a sane size.
     try {
@@ -409,6 +427,8 @@ export class FluidEffectV2 {
         }
       }
     } catch (_) {}
+
+    let sharedColorsSynced = false;
 
     for (const { mesh, material } of this._overlays.values()) {
       const u = material.uniforms;
@@ -424,8 +444,13 @@ export class FluidEffectV2 {
       u.uMaskThresholdLo.value = maskLo;
       u.uMaskThresholdHi.value = maskHi;
 
-      try { u.uColorA.value.set(this.params.colorA); } catch (_) {}
-      try { u.uColorB.value.set(this.params.colorB); } catch (_) {}
+      if (!sharedColorsSynced) {
+        this._syncColorUniforms(u);
+        sharedColorsSynced = true;
+      } else {
+        try { u.uColorA.value.copy(this._cachedColorA); } catch (_) {}
+        try { u.uColorB.value.copy(this._cachedColorB); } catch (_) {}
+      }
       u.uAgeGamma.value = this.params.ageGamma;
 
       u.uFlowMode.value = this.params.flowMode;
@@ -503,16 +528,59 @@ export class FluidEffectV2 {
       u.uDepthEnabled.value = 0.0;
       u.uDepthTexture.value = null;
 
-      mesh.visible = this._enabled;
+      u.uEffectEnabled.value = 1.0;
+    }
+
+    this._syncOverlayVisibility();
+  }
+
+  /**
+   * FloorRenderBus resets overlay mesh.visible each frame for floor slicing.
+   * Shader uEffectEnabled is the authoritative off switch; keep meshes hidden
+   * when disabled to skip draw calls.
+   * @private
+   */
+  _syncOverlayVisibility() {
+    const visible = resolveEffectEnabled(this);
+    for (const [, entry] of this._overlays) {
+      const mesh = entry?.mesh;
+      if (!mesh) continue;
+      mesh.visible = visible;
     }
   }
 
   // ── Private ───────────────────────────────────────────────────────────────
 
   _basePathNoExt(src) {
-    const s = String(src ?? '');
-    const dot = s.lastIndexOf('.');
-    return dot > 0 ? s.substring(0, dot) : s;
+    const s = String(src ?? '').trim();
+    if (!s) return '';
+    const withoutQuery = s.split(/[?#]/)[0];
+    const lastSlash = withoutQuery.lastIndexOf('/');
+    const lastDot = withoutQuery.lastIndexOf('.');
+    if (lastDot > lastSlash && lastDot > 0) {
+      return withoutQuery.substring(0, lastDot);
+    }
+    return withoutQuery;
+  }
+
+  /**
+   * Parse UI color strings once per change; avoid hex parsing in the per-overlay hot loop.
+   * @param {Record<string, import('three').IUniform>} uniforms
+   * @private
+   */
+  _syncColorUniforms(uniforms) {
+    const nextA = String(this.params.colorA ?? '#ffffff');
+    const nextB = String(this.params.colorB ?? '#ffffff');
+    if (nextA !== this._colorASrc) {
+      this._colorASrc = nextA;
+      try { this._cachedColorA.set(nextA); } catch (_) {}
+    }
+    if (nextB !== this._colorBSrc) {
+      this._colorBSrc = nextB;
+      try { this._cachedColorB.set(nextB); } catch (_) {}
+    }
+    try { uniforms.uColorA.value.copy(this._cachedColorA); } catch (_) {}
+    try { uniforms.uColorB.value.copy(this._cachedColorB); } catch (_) {}
   }
 
   _resolveFloorIndex(tileDoc, floors) {
@@ -573,21 +641,40 @@ export class FluidEffectV2 {
     try {
       const baseOrder = Number(baseEntry?.mesh?.renderOrder);
       if (Number.isFinite(baseOrder)) {
-        mesh.renderOrder = baseOrder - 1;
+        const floorBase = (Number(floorIndex) || 0) * RENDER_ORDER_PER_FLOOR;
+        mesh.renderOrder = Math.max(floorBase, baseOrder - SUB_ALBEDO_RENDER_ORDER_STEP);
       }
     } catch (_) {}
 
+    const overlayKey = `${tileId}_fluid`;
     let attached = false;
     if (canAttachToTileRoot && typeof this._renderBus?.addTileAttachedOverlay === 'function') {
-      attached = this._renderBus.addTileAttachedOverlay(tileId, `${tileId}_fluid`, mesh, floorIndex) === true;
+      attached = this._renderBus.addTileAttachedOverlay(tileId, overlayKey, mesh, floorIndex) === true;
     }
     if (!attached) {
-      this._renderBus.addEffectOverlay(`${tileId}_fluid`, mesh, floorIndex);
+      this._renderBus.addEffectOverlay(overlayKey, mesh, floorIndex);
+      // syncRuntimeTileState resolves opacity via attachedToTileId — set it even when
+      // the overlay is scene-absolute (attach failed) so uTileOpacity tracks the tile.
+      if (!String(tileId).startsWith('__')) {
+        try {
+          const busEntry = this._renderBus?._tiles?.get?.(overlayKey);
+          if (busEntry) busEntry.attachedToTileId = tileId;
+        } catch (_) {}
+      }
     }
     this._overlays.set(tileId, { mesh, material, floorIndex });
+    this._syncOverlayVisibility();
 
-    // Load mask texture.
+    // Load mask texture — capture material so stale async callbacks cannot leak GPU
+    // memory or bind the wrong mask after rapid texture swaps.
+    const targetMaterial = material;
     this._loader.load(maskUrl, (tex) => {
+      const entry = this._overlays.get(tileId);
+      if (!entry || entry.material !== targetMaterial) {
+        tex.dispose();
+        return;
+      }
+
       tex.flipY = true;
       tex.minFilter = THREE.LinearFilter;
       tex.magFilter = THREE.LinearFilter;
@@ -596,17 +683,20 @@ export class FluidEffectV2 {
       tex.generateMipmaps = false;
       tex.needsUpdate = true;
 
-      const entry = this._overlays.get(tileId);
-      if (!entry) {
+      const uMask = targetMaterial.uniforms?.tFluidMask;
+      if (!uMask) {
         tex.dispose();
         return;
       }
+      const previousTex = uMask.value;
+      uMask.value = tex;
+      if (previousTex && previousTex !== tex) {
+        try { previousTex.dispose(); } catch (_) {}
+      }
 
-      entry.material.uniforms.tFluidMask.value = tex;
-      // Update texel size for finite differences.
       const w = tex.image?.width || 512;
       const h = tex.image?.height || 512;
-      entry.material.uniforms.uTexelSize.value.set(1.0 / Math.max(1, w), 1.0 / Math.max(1, h));
+      targetMaterial.uniforms.uTexelSize.value.set(1.0 / Math.max(1, w), 1.0 / Math.max(1, h));
     }, undefined, (err) => {
       log.warn(`FluidEffectV2: failed to load mask for ${tileId}: ${maskUrl}`, err);
     });
@@ -707,6 +797,8 @@ export class FluidEffectV2 {
         uDepthEnabled: { value: 0.0 },
         uDepthCameraNear: { value: 800.0 },
         uDepthCameraFar: { value: 1200.0 },
+
+        uEffectEnabled: { value: resolveEffectEnabled(this) ? 1.0 : 0.0 },
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -806,6 +898,8 @@ export class FluidEffectV2 {
         uniform float uDepthEnabled;
         uniform float uDepthCameraNear;
         uniform float uDepthCameraFar;
+
+        uniform float uEffectEnabled;
 
         varying vec2 vUv;
         varying float vLinearDepth;
@@ -920,6 +1014,8 @@ export class FluidEffectV2 {
         }
 
         void main() {
+          if (uEffectEnabled < 0.5) discard;
+
           vec2 baseUv = vUv;
           vec2 churnOffset = vec2(0.0);
           if (uChurnEnabled > 0.5 && uChurnStrength > 0.0001) {
@@ -1046,7 +1142,10 @@ export class FluidEffectV2 {
 
           float noiseAlpha = mix(1.0, 0.85 + thickNoise * 0.3, uNoiseStrength * 0.3);
 
-          vec2 bubUv = detailUv * uBubbleScale;
+          // Shift the entire UV grid with flow so bubbles drift smoothly (no fract snap).
+          vec2 globalDrift = flowDir * (t * 0.15) * isFlowing + vec2(0.0, uTime * 0.02);
+          vec2 bubUv = (detailUv - globalDrift) * uBubbleScale;
+
           vec2 bCellId = floor(bubUv);
           vec2 bCellFrac = fract(bubUv);
           float totalBubble = 0.0;
@@ -1058,19 +1157,22 @@ export class FluidEffectV2 {
 
               vec2 rnd = hash22(cid);
               float birthPhase = hash21(cid * 7.13);
-              float exists = step(0.55, hash21(cid * 3.77));
+              float exists = step(0.3, hash21(cid * 3.77));
 
               float cycleLen = 1.5 + rnd.x * 2.0;
               float life = fract((uTime + birthPhase * cycleLen) / cycleLen);
-              float envelope = smoothstep(0.0, 0.2, life) * (1.0 - smoothstep(0.7, 1.0, life));
+              float envelope = smoothstep(0.0, 0.15, life) * (1.0 - smoothstep(0.7, 1.0, life));
 
-              vec2 drift = vec2(t * 0.12, t * 0.08) * isFlowing + vec2(-life * 0.1, life * 0.12) * isFlowing;
-              vec2 bubPos = fract(rnd * 0.7 + 0.15 + drift);
+              vec2 bubPos = rnd * 0.6 + 0.2;
 
               float dist = length(bCellFrac - neighbor - bubPos);
-              float radius = (0.04 + rnd.y * 0.08) * envelope;
+              float radius = (0.2 + rnd.y * 0.25) * envelope;
 
-              float bub = (1.0 - smoothstep(radius * 0.3, radius, dist)) * exists * envelope;
+              float body = 1.0 - smoothstep(radius * 0.6, radius, dist);
+              float highlightDist = length(bCellFrac - neighbor - bubPos + vec2(radius * 0.3));
+              float highlight = 1.0 - smoothstep(0.0, radius * 0.4, highlightDist);
+
+              float bub = (body * 0.3 + highlight) * exists * envelope;
               totalBubble += bub;
             }
           }
@@ -1141,6 +1243,9 @@ export class FluidEffectV2 {
             col.b *= mix(1.0, min(1.0, maskB * safeInv), 0.7);
           }
 
+          // Intensity scales RGB (alpha uses it separately below).
+          col *= max(uIntensity, 0.0);
+
           if (uHdrBoostEnabled > 0.5 && uHdrBoostStrength > 0.001) {
             float pulse = sin(uTime * uHdrBoostPulseSpeed * 1.5) * 0.3 + 0.7;
             float shimmer = sin(uTime * uHdrBoostPulseSpeed * 4.7 + age * 12.0) * 0.15 + 0.85;
@@ -1149,8 +1254,14 @@ export class FluidEffectV2 {
             float edgeGlow = pow(1.0 - clamp(mask, 0.0, 1.0), 3.0) * uHdrBoostEdge;
             float centerGlow = clamp(mask, 0.0, 1.0) * hotNoise * uHdrBoostCenter;
 
-            float boostAmount = (edgeGlow + centerGlow) * uHdrBoostStrength * pulse * shimmer;
-            col += col * boostAmount;
+            float glowMix = (edgeGlow + centerGlow) * pulse * shimmer;
+            float emissiveStops = uHdrBoostStrength * glowMix;
+            float luma = max(dot(col, vec3(0.2126, 0.7152, 0.0722)), 0.08);
+            // Unclamped linear emissive — sceneRT is lit by multiplication, so push
+            // radiance high enough for bloom/visibility after typical night illum (~0.2).
+            vec3 emissive = col * emissiveStops * 1.35;
+            emissive += vec3(emissiveStops * 2.25) * luma;
+            col += emissive;
           }
 
           if (uDepthEnabled > 0.5) {
@@ -1178,6 +1289,7 @@ export class FluidEffectV2 {
       depthWrite: false,
       depthTest: true,
       blending: THREE.NormalBlending,
+      toneMapped: false,
       extensions: { derivatives: true },
     });
 

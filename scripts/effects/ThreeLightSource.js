@@ -524,6 +524,19 @@ export class ThreeLightSource {
           return total;
         }
 
+        // Ridged FBM caustic filaments (same shaping as water/DistortionManager caustics).
+        float fairyCausticsPattern(vec2 uv, float time, float scale, float speed, float sharpness) {
+          vec2 p = uv * scale;
+          float t = time * speed;
+          float n1 = fbm4(p + vec2(t * 0.12, -t * 0.09));
+          float n2 = fbm4(p * 1.7 + vec2(-t * 0.08, t * 0.11));
+          float nn = clamp((0.6 * n1 + 0.4 * n2) / 1.875, 0.0, 1.0);
+          float ridge = 1.0 - abs(2.0 * nn - 1.0);
+          float s = max(0.1, sharpness);
+          float w = 0.18 / (1.0 + s * 0.65);
+          return smoothstep(1.0 - w, 1.0, ridge);
+        }
+
         // Foundry VTT rotation helper (ported 1:1 from base-shader-mixin.mjs)
         mat2 rot(in float a) {
           float s = sin(a);
@@ -791,7 +804,7 @@ export class ThreeLightSource {
           float uAlphaEff = mix(uAlpha, min(1.0, max(uAlpha, 0.92)), isFireCore);
           float cover = intensity * uAlphaEff * uIntensity * animAlphaMul * cookieFactor * max(uOutputGain, 0.0);
 
-          float fairyBoost = (uAnimType > 1.5 && uAnimType < 2.5) ? 3.0 : 1.0;
+          float fairyBoost = (uAnimType > 1.5 && uAnimType < 2.5) ? 2.05 : 1.0;
           cover *= fairyBoost;
           cover *= mix(1.0, 1.75, isFireCore * iAnimDrive);
 
@@ -1556,12 +1569,12 @@ export class ThreeLightSource {
 
   animateFairy(tMs, { speed = 5, intensity = 5, reverse = false } = {}) {
     this.animateTime(tMs, { speed, intensity, reverse });
-    // Fairy lights: dramatic rapid shimmer with larger intensity changes
-    const shimmer = Math.sin(this.animation.time * 10.0) * 0.5 + 
-                    Math.sin(this.animation.time * 17.0) * 0.3 + 
+    // Fairy lights: rapid shimmer; keep radius stable so attenuation defines the pool shape.
+    const shimmer = Math.sin(this.animation.time * 10.0) * 0.5 +
+                    Math.sin(this.animation.time * 17.0) * 0.3 +
                     Math.sin(this.animation.time * 23.0) * 0.2;
-    const pulse = 1.0 + (shimmer * intensity * 0.15);
-    const ratioPulse = this._baseRatio * (0.6 + shimmer * 0.4);
+    const pulse = 1.0 + (shimmer * intensity * 0.12);
+    const ratioPulse = this._baseRatio * (0.92 + shimmer * 0.08);
     return { pulse, ratioPulse };
   }
 
@@ -2365,13 +2378,12 @@ export class ThreeLightSource {
       u.uBrightRadius.value = this._baseRadiusPx * this._clamp(ratioPulse, 0, 1);
       u.uAnimType.value = 22;
     } else if (type === 'fairy') {
-      // Foundry fairy is a shader-driven pattern; drive via uTime + uAnimType.
-      const tSec = (reverse ? -tMs : tMs) / 1000;
+      const { pulse, ratioPulse } = this.animateFairy(tMs, { speed, intensity, reverse });
       u.uAnimType.value = 2;
-      // Foundry fairy shaders expect the raw intensity scale (0..10).
       u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
+      u.uIntensity.value = pulse * darknessMul;
+      u.uBrightRadius.value = this._baseRadiusPx * this._clamp(ratioPulse, 0, 1);
       u.uTime.value = this.animation.time;
-      u.uTime.value = tSec;
     } else if (type === 'wave') {
       // Foundry wave is a shader-driven ripple pattern; drive via uTime + uAnimType.
       const tSec = (reverse ? -tMs : tMs) / 1000;

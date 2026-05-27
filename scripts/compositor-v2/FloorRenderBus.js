@@ -482,11 +482,26 @@ export class FloorRenderBus {
       camera.layers.enable(i);
     }
 
+    const savedSplashVisibility = new Map();
+    for (const [tileId, entry] of this._tiles) {
+      if (!String(tileId).startsWith('ms_water_splash_batch_')) continue;
+      const node = entry?.root || entry?.mesh;
+      if (!node) continue;
+      savedSplashVisibility.set(tileId, node.visible === true);
+      node.visible = false;
+    }
+
     // Render with a black clear so no white flash while textures load.
     renderer.setRenderTarget(target);
     renderer.setClearColor(0x000000, 1);
     renderer.autoClear = true;
     renderer.render(this._scene, camera);
+
+    for (const [tileId, wasVisible] of savedSplashVisibility) {
+      const entry = this._tiles.get(tileId);
+      const node = entry?.root || entry?.mesh;
+      if (node) node.visible = wasVisible;
+    }
 
     // Restore camera layer mask and renderer state.
     camera.layers.mask = prevLayerMask;
@@ -1460,6 +1475,21 @@ export class FloorRenderBus {
           // Legacy path (single-RT draw): all bg planes follow includeBackground.
           node.visible = includeBackground;
         }
+        continue;
+      }
+
+      // Splashes + vegetation are composited after water/bloom (visibility-gated bus draw).
+      if (String(tileId).startsWith('ms_water_splash_batch_')) {
+        node.visible = false;
+        continue;
+      }
+      if (
+        tileId.endsWith('_bush')
+        || tileId.endsWith('_tree')
+        || tileId.endsWith('_bush_shadow')
+        || tileId.endsWith('_tree_shadow')
+      ) {
+        node.visible = false;
         continue;
       }
 

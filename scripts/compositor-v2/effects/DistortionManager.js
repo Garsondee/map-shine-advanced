@@ -1280,6 +1280,9 @@ export class DistortionManager {
 
         uHasTokenMask: { value: 0.0 },
 
+        // Bush/tree canopy: suppress screen-space UV warp (shader wind only).
+        tVegetationDistortionMask: { value: null },
+        uHasVegetationDistortionMask: { value: 0.0 },
 
         // Floor-presence mask: alpha of current-floor tiles.
         // tFloorPresence may be a screen-space RT or a world-space compositor RT.
@@ -1425,6 +1428,8 @@ export class DistortionManager {
         uniform float uWindowLightBelowFloor;
 
         uniform float uHasTokenMask;
+        uniform sampler2D tVegetationDistortionMask;
+        uniform float uHasVegetationDistortionMask;
 
         // Floor-presence: alpha of current-floor tiles.
         // Can be screen-space (sampled at vUv) or world-space (sampled at scene UV).
@@ -1682,7 +1687,13 @@ export class DistortionManager {
           }
           float tokenKeep = 1.0 - tokenMask01;
 
-          vec2 scaledOffset = offset * zoomScale * tokenKeep;
+          float vegMask01 = 0.0;
+          if (uHasVegetationDistortionMask > 0.5) {
+            vegMask01 = smoothstep(0.12, 0.88, texture2D(tVegetationDistortionMask, vUv).a);
+          }
+          float foliageKeep = 1.0 - vegMask01;
+
+          vec2 scaledOffset = offset * zoomScale * tokenKeep * foliageKeep;
 
           // Clamp maximum distortion in pixels. Also reduce the allowed pixel shift
           // when zoomed out so the effect doesn't dominate the scene.
@@ -1696,8 +1707,9 @@ export class DistortionManager {
           
           // Apply distortion
           vec2 distortedUv = safeClampUv(vUv + zoomedOffset);
+          vec2 sampleUv = mix(distortedUv, vUv, vegMask01);
           
-          vec4 sceneColor = texture2D(tScene, distortedUv);
+          vec4 sceneColor = texture2D(tScene, sampleUv);
 
           // If we are on a token pixel, skip all water shading (tint/chroma/caustics/foam)
           // and return the undistorted scene. This prevents token edges picking up any
@@ -1708,9 +1720,8 @@ export class DistortionManager {
           }
 
           // Water shading (tint/murk/sand/caustics/foam).
-          // IMPORTANT: This must NOT be gated by chromatic refraction.
-          // Otherwise caustics will never render when chroma is disabled.
-          if (uHasWaterMask > 0.5) {
+          // Skip under bush/tree canopy — WaterEffectV2 + shader wind own that band.
+          if (uHasWaterMask > 0.5 && vegMask01 < 0.88) {
             // Derive a softened water mask directly from the water mask texture.
             // Using the composite alpha here can produce sharp edges due to encoding/thresholding.
             vec2 foundryPos = screenUvToFoundry(vUv);
@@ -2253,6 +2264,19 @@ export class DistortionManager {
   setBuffers(read, write) {
     this.readBuffer = read;
     this.writeBuffer = write;
+  }
+
+  /**
+   * Screen-space bush/tree canopy mask — suppresses heat/water UV warp under foliage.
+   * @param {THREE.Texture|null} tex
+   */
+  setVegetationDistortionMaskTexture(tex) {
+    const au = this.applyMaterial?.uniforms;
+    if (!au) return;
+    if (au.tVegetationDistortionMask) au.tVegetationDistortionMask.value = tex ?? null;
+    if (au.uHasVegetationDistortionMask) {
+      au.uHasVegetationDistortionMask.value = tex ? 1.0 : 0.0;
+    }
   }
 
   /**

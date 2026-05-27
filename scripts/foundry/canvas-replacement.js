@@ -5585,6 +5585,34 @@ function _hasLiveMapShineRuntime() {
   return !!(effectComposer && sceneComposer && threeCanvas && renderLoop);
 }
 
+/** Clear stale load/intro input guards so RMB pan works after scene load. */
+function _msaReleaseSceneLoadInputGuards() {
+  try {
+    if (window.MapShine) window.MapShine.__sceneTransitionActive = false;
+  } catch (_) {}
+  try {
+    pixiInputBridge?.setInputBlocker(null);
+  } catch (_) {}
+  try {
+    cinematicCameraManager?.resumeTemporaryRuntimeControl?.();
+  } catch (_) {}
+  try {
+    const el = document.getElementById('map-shine-canvas');
+    if (el) {
+      if (el.style.pointerEvents === 'none') el.style.pointerEvents = '';
+      if (el.style.visibility === 'hidden') el.style.visibility = '';
+      if (el.style.opacity === '0') el.style.opacity = '';
+    }
+  } catch (_) {}
+  try {
+    const orphan = document.getElementById('msa-instant-transition-curtain');
+    if (orphan) orphan.style.display = 'none';
+  } catch (_) {}
+  try {
+    cinematicCameraManager?._bindInputBridge?.();
+  } catch (_) {}
+}
+
 async function _waitForFoundryCanvasReady({ timeoutMs = 15000 } = {}) {
   const start = Date.now();
   const pollMs = 50;
@@ -6030,6 +6058,7 @@ async function onCanvasReady(canvas) {
         const msg = `Loading timed out (${step})`;
         loadingOverlay.setStage?.('final', 1.0, msg, { immediate: true });
         loadingOverlay.fadeIn?.(500)?.catch?.(() => {});
+        _msaReleaseSceneLoadInputGuards();
       }, 'overlay.hardTimeout', Severity.COSMETIC);
     } else {
       // Not yet timed out -- log a heartbeat with how long the current step has been running.
@@ -6044,6 +6073,7 @@ async function onCanvasReady(canvas) {
     await createThreeCanvas(scene, { skipLoadingOverlay: false });
   } finally {
     clearInterval(_watchdogId);
+    safeCall(() => _msaReleaseSceneLoadInputGuards(), 'overlay.canvasReady.releaseGuards', Severity.COSMETIC);
     if (_loadingTimedOut) {
       log.warn('[loading] createThreeCanvas eventually completed after hard timeout was triggered');
     }
@@ -6403,6 +6433,9 @@ function restoreFoundryStateFromSnapshot() {
 /** @param {*} scene @param {{ skipLoadingOverlay?: boolean }} [createOptions] */
 async function createThreeCanvas(scene, createOptions = {}) {
   const skipLoadingOverlay = !!createOptions?.skipLoadingOverlay;
+  try {
+    if (window.MapShine) delete window.MapShine.__msaShaderWarmupComplete;
+  } catch (_) {}
   // Runtime testing/isolation modes disabled: always execute the full load path.
   const isolateCanvasOnly = false;
   const isolateProbeOnly = false;
@@ -8227,6 +8260,8 @@ async function createThreeCanvas(scene, createOptions = {}) {
           if (window.MapShine) window.MapShine.uiManager = uiManager;
         }
 
+        safeCall(() => loadingOverlay.setStage('ui.panels', 0.45, 'Weather controls...', { keepAuto: false }), 'overlay.uiInit.weatherStart', Severity.COSMETIC);
+
         // Breaker Box UI stubs: dialog + header bulb indicator.
         safeCall(() => {
           if (healthEvaluator && !breakerBoxDialog) {
@@ -8457,6 +8492,8 @@ async function createThreeCanvas(scene, createOptions = {}) {
 
           uiManager.registerEffect('weather', 'Weather', weatherSchema, onWeatherUpdate, 'atmospheric');
         }, 'v2.registerWeatherUI.early', Severity.DEGRADED);
+        safeCall(() => loadingOverlay.setStage('ui.panels', 0.60, 'Weather ready...', { keepAuto: false }), 'overlay.uiInit.weatherDone', Severity.COSMETIC);
+        await new Promise(r => setTimeout(r, 0)); // yield
 
         if (!controlPanel) {
           controlPanel = new ControlPanelManager();
@@ -9306,6 +9343,9 @@ async function createThreeCanvas(scene, createOptions = {}) {
       fc.openShaderGate();
 
       safeCall(() => loadingOverlay.setStage('shaders.compile', 1.0, 'Shaders ready', { immediate: true }), 'overlay.shaderCompile.done', Severity.COSMETIC);
+      try {
+        if (window.MapShine) window.MapShine.__msaShaderWarmupComplete = true;
+      } catch (_) {}
     }, 'fin.shaderCompile', Severity.DEGRADED);
     stepLog(' -> Step: shaderCompile DONE');
     if (isDebugLoad) dlp.end('fin.shaderCompile');
@@ -9378,17 +9418,19 @@ async function createThreeCanvas(scene, createOptions = {}) {
       safeCall(() => {
         try { sceneTransitionCurtain.forceClear(); } catch (_) {}
         try { loadingOverlay.hide?.(); } catch (_) {}
+        _msaReleaseSceneLoadInputGuards();
       }, 'overlay.nativeLevelSwitchDismiss', Severity.COSMETIC);
     } else {
       stepLog(' -> Step: overlay.fadeIn / intro-zoom');
       await safeCallAsync(async () => {
         const isTabHidden = () => (typeof document !== 'undefined' && document.hidden === true);
-        const waitForCompiledPrograms = async ({ maxWaitMs = 90000, requiredStableFrames = 20 } = {}) => {
+        const waitForCompiledPrograms = async ({ maxWaitMs = 15000, requiredStableFrames = 6 } = {}) => {
           const start = performance.now();
           let stable = 0;
           let readyStableTotal = -1;
           let lastTotal = 0;
           let lastReady = 0;
+          let lastOverlayProgressAt = 0;
 
           // Background tabs heavily throttle/stop frame production. This gate depends
           // on render progress and should not block scene completion while unfocused.
@@ -9402,26 +9444,6 @@ async function createThreeCanvas(scene, createOptions = {}) {
               elapsedMs: 0,
             };
           }
-
-          // Kick an extra warmup pass now that shader gate is open.
-          await safeCallAsync(async () => {
-            await effectComposer.progressiveWarmup();
-          }, 'introZoom.readinessWarmup', Severity.DEGRADED);
-
-          // Late warmup pass: some effect programs are only created after the first
-          // post-gate renders or async setup settles. Run one additional compile pass
-          // before intro gating so late variants are submitted and accounted for.
-          await safeCallAsync(async () => {
-            const fcLate = window.MapShine?.effectComposer?._floorCompositorV2;
-            if (!fcLate || typeof fcLate.warmupAsync !== 'function') return;
-
-            try {
-              await fcLate.prewarmForLoading?.({ prewarmAllFloors: false, awaitPopulate: true });
-            } catch (_) {}
-
-            await fcLate.warmupAsync(15000);
-            await effectComposer.progressiveWarmup();
-          }, 'introZoom.waitForCompiledPrograms.lateWarmup', Severity.DEGRADED);
 
           while ((performance.now() - start) < maxWaitMs) {
             // If the tab becomes hidden mid-gate, stop waiting and fall back to a
@@ -9454,6 +9476,20 @@ async function createThreeCanvas(scene, createOptions = {}) {
 
             lastTotal = total;
             lastReady = ready;
+
+            const now = performance.now();
+            if (total > 0 && (now - lastOverlayProgressAt) >= 250) {
+              lastOverlayProgressAt = now;
+              const frac = Math.min(0.99, ready / total);
+              safeCall(() => {
+                loadingOverlay.setStage(
+                  'shaders.compile',
+                  frac,
+                  `Compiling shaders (${ready}/${total})...`,
+                  { keepAuto: false },
+                );
+              }, 'overlay.introCompile.progress', Severity.COSMETIC);
+            }
 
             const allReady = total <= 0 ? true : (ready >= total);
             if (allReady) {
@@ -9494,13 +9530,12 @@ async function createThreeCanvas(scene, createOptions = {}) {
         const readyMsg = elapsed > 0 ? `Ready! (${elapsed.toFixed(1)}s)` : 'Ready!';
         loadingOverlay.setStage('final', 1.0, readyMsg, { immediate: true });
 
-        // Hard gate intro start until shader programs report compiled readiness for
-        // multiple consecutive polls. This prevents the intro from starting while
-        // water (or any post effect) is still compiling.
-        const compileGate = await waitForCompiledPrograms({
-          maxWaitMs: 90000,
-          requiredStableFrames: 20,
-        });
+        // fin.shaderCompile already warmed programs; only run a short sanity poll when
+        // warmup was skipped and intro zoom needs a last compile check.
+        const shaderWarmupDone = !!window.MapShine?.__msaShaderWarmupComplete;
+        const compileGate = shaderWarmupDone
+          ? { ok: true, skipped: true }
+          : await waitForCompiledPrograms();
 
         if (!compileGate.ok) {
           const reason = compileGate?.reason === 'tab-hidden'
@@ -9528,6 +9563,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
               window.MapShine?.renderLoop?.requestContinuousRender?.(5000);
             }, 'overlay.tabHidden.postPump', Severity.COSMETIC);
             safeCall(() => _startLoadHiddenPump(), 'loadHiddenPump.tabHiddenIntro', Severity.COSMETIC);
+            _msaReleaseSceneLoadInputGuards();
             return;
           }
 
@@ -9535,10 +9571,15 @@ async function createThreeCanvas(scene, createOptions = {}) {
             sceneTransitionCurtain.reveal({ fast: true }),
             new Promise((r) => setTimeout(r, 5000)),
           ]);
+          _msaReleaseSceneLoadInputGuards();
           return;
         }
 
         const presentation = loadingOverlay.getPresentationTimings?.() ?? {};
+
+        const revealOpts = sceneTransitionCurtain.isActive?.()
+          ? { fast: true, holdMs: 0, finalMessage: readyMsg }
+          : { finalMessage: readyMsg };
 
         if (introZoomEffect.isEnabled()) {
           await Promise.race([
@@ -9546,35 +9587,34 @@ async function createThreeCanvas(scene, createOptions = {}) {
             new Promise((r) => setTimeout(r, (presentation.panelOutFadeMs ?? 4000) + 500)),
           ]);
 
-          // IntroZoomEffect intercepts the fade-out when enabled.
-          await Promise.race([
-            introZoomEffect.run(loadingOverlay, {
-            onBlockInput: () => {
-              try { cinematicCameraManager?.suspendTemporaryRuntimeControl?.(); } catch (_) {}
-              pixiInputBridge?.setInputBlocker(() => true);
-            },
-            onUnblockInput: () => {
-              pixiInputBridge?.setInputBlocker(null);
-              try { cinematicCameraManager?.resumeTemporaryRuntimeControl?.(); } catch (_) {}
-              try { cinematicCameraManager?._bindInputBridge?.(); } catch (_) {}
-            },
-            }),
-            new Promise((resolve) => setTimeout(resolve, 12000)),
-          ]);
+          const blockIntroInput = () => {
+            try { cinematicCameraManager?.suspendTemporaryRuntimeControl?.(); } catch (_) {}
+            try { pixiInputBridge?.setInputBlocker(() => true); } catch (_) {}
+          };
+          const unblockIntroInput = () => {
+            try { pixiInputBridge?.setInputBlocker(null); } catch (_) {}
+            try { cinematicCameraManager?.resumeTemporaryRuntimeControl?.(); } catch (_) {}
+            try { cinematicCameraManager?._bindInputBridge?.(); } catch (_) {}
+          };
 
-          await Promise.race([
-            sceneTransitionCurtain.reveal({ fast: true, holdMs: 0 }),
-            new Promise((resolve) => setTimeout(resolve, 4000)),
-          ]);
+          try {
+            blockIntroInput();
+            await introZoomEffect.run(loadingOverlay, {
+              onBlockInput: blockIntroInput,
+              onUnblockInput: unblockIntroInput,
+            });
+          } finally {
+            unblockIntroInput();
+          }
+
+          await sceneTransitionCurtain.reveal(revealOpts).catch(() => {});
         } else {
-          await Promise.race([
-            sceneTransitionCurtain.reveal({ finalMessage: readyMsg }),
-            new Promise((resolve) => setTimeout(resolve, 45000)),
-          ]);
+          await sceneTransitionCurtain.reveal(revealOpts).catch(() => {});
         }
 
         try { sceneTransitionCurtain.forceClear(); } catch (_) {}
         try { loadingOverlay.hide?.(); } catch (_) {}
+        _msaReleaseSceneLoadInputGuards();
       }, 'overlay.introZoom', Severity.COSMETIC);
       stepLog(' -> Step: overlay.introZoom DONE');
     }

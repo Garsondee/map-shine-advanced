@@ -25,6 +25,15 @@ import {
   tileAlbedoOrder,
   treeOverlayRenderOrders,
 } from '../LayerOrderPolicy.js';
+import {
+  applyVegetationAboveWaterLayer,
+  overlayWorldBounds,
+  resolveWorldViewBounds,
+  tileBoundsIntersectView,
+  cameraViewBoundsSignature,
+  resolveVegetationEdgeSafetyBounds,
+  vegetationEdgeSafetyBoundsSignature,
+} from './vegetation-overlay-runtime.js';
 
 const log = createLogger('TreeEffectV2');
 
@@ -76,6 +85,24 @@ export class TreeEffectV2 {
     this._hoverFadeInProgress = false;
     this._worldSamplePoint = null;
     this._localSamplePoint = null;
+    /** @type {number|null} */
+    this._lastVisibilityFloorIndex = null;
+    /** @type {string} */
+    this._viewBoundsSignature = '';
+    /** @type {{ minX: number, minY: number, maxX: number, maxY: number }|null} */
+    this._cachedViewBounds = null;
+    this._viewCullPadding = 192;
+
+    /** Bumped on clear/populate so stale async mask loads cannot touch new overlays. */
+    this._populateGeneration = 0;
+    /** Per-overlay serial invalidated when an entry is torn down or replaced. */
+    this._maskLoadSerial = 0;
+    /** Wall-clock ms — block hover-reveal shadow stacking right after repopulate. */
+    this._suppressHoverRevealStackingUntilMs = 0;
+    /** @type {object|null} Last populate geometry snapshot for edge-safety fallback. */
+    this._lastFoundrySceneData = null;
+    /** @type {string} Cached {@link vegetationEdgeSafetyBoundsSignature} */
+    this._edgeSafetyBoundsSignature = '';
 
     // Public params — wind/shadow/edge defaults match BushEffectV2 for parity; trees
     // add optional turbulence (default off).
@@ -140,7 +167,8 @@ export class TreeEffectV2 {
   set enabled(v) {
     this._enabled = !!v;
     this.params.enabled = this._enabled;
-    this._applyOverlayFloorVisibility();
+    this._viewBoundsMayHaveChanged();
+    this._syncOverlayVisibility();
   }
 
   static getControlSchema() {
@@ -710,6 +738,10 @@ export class TreeEffectV2 {
     if (!this._initialized) return;
     this.clear();
 
+    this._lastFoundrySceneData = foundrySceneData ?? null;
+    this._edgeSafetyBoundsSignature = '';
+    this._syncSceneBoundsUniforms(true);
+
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
     const activeFloorIdxRaw = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
     const activeFloorIdx = Number.isFinite(activeFloorIdxRaw) ? activeFloorIdxRaw : 0;
@@ -796,6 +828,8 @@ export class TreeEffectV2 {
       this._createOverlay(tileId, floorIndex, { url, centerX, centerY, z, tileW, tileH, rotation });
     }
 
+    this._resetAllOverlayHoverAndStacking();
+
     const n = this._overlays.size;
     this.params.textureStatus = n > 0
       ? 'Ready (_Tree mask found)'
@@ -803,11 +837,46 @@ export class TreeEffectV2 {
     log.info(`TreeEffectV2 populated: ${n} overlays`);
   }
 
+  /**
+   * Minimal uniform tick while the camera is panning — skips wind/weather CPU work
+   * but still advances canopy hover-fade uniforms.
+   * @param {{ elapsed?: number, delta?: number, motionDelta?: number, time?: number }} timeInfo
+   */
+  updateNavigationLite(timeInfo) {
+    if (!this._enabled || !this._initialized) return;
+    const time = Number.isFinite(timeInfo?.elapsed)
+      ? Number(timeInfo.elapsed)
+      : Number(timeInfo?.time ?? 0);
+    const delta = Number.isFinite(timeInfo?.motionDelta)
+      ? Number(timeInfo.motionDelta)
+      : (Number.isFinite(timeInfo?.delta) ? Number(timeInfo.delta) : 0.016);
+    const phaseDelta = Math.min(0.25, Math.max(0.0, delta));
+    this._windFieldPhase += phaseDelta * 0.16;
+    this._wavePhase += phaseDelta * 0.2;
+    this._flutterPhase += phaseDelta * 0.3;
+    if (this._sharedUniforms) {
+      this._sharedUniforms.uTime.value = time;
+      this._sharedUniforms.uWindFieldPhase.value = this._windFieldPhase;
+      this._sharedUniforms.uWavePhase.value = this._wavePhase;
+      this._sharedUniforms.uFlutterPhase.value = this._flutterPhase;
+    }
+    const maxFloor = this._getSafeVisibleMaxFloorIndex();
+    const floorChanged = maxFloor !== this._lastVisibilityFloorIndex;
+    const viewChanged = this._viewBoundsMayHaveChanged();
+    if (floorChanged) this._lastVisibilityFloorIndex = maxFloor;
+    if (floorChanged || viewChanged) this._syncOverlayVisibility();
+    this._advanceHoverFadeUniforms(delta);
+    this._lastFrameTime = time;
+  }
+
   update(timeInfo) {
     if (!this._enabled || !this._initialized) return;
 
-    // Clamp overlay visibility to active floor every frame to avoid transition flashes.
-    this._applyOverlayFloorVisibility();
+    const maxFloor = this._getSafeVisibleMaxFloorIndex();
+    const floorChanged = maxFloor !== this._lastVisibilityFloorIndex;
+    const viewChanged = this._viewBoundsMayHaveChanged();
+    if (floorChanged) this._lastVisibilityFloorIndex = maxFloor;
+    if (floorChanged || viewChanged) this._syncOverlayVisibility();
 
     const time = Number.isFinite(timeInfo?.elapsed)
       ? Number(timeInfo.elapsed)
@@ -893,15 +962,46 @@ export class TreeEffectV2 {
       this._syncRoofMaskUniforms();
     }
 
-    const tileManager = window.MapShine?.tileManager;
+    this._advanceHoverFadeUniforms(delta);
+
+    this._lastFrameTime = time;
+  }
+
+  /**
+   * Ramp per-overlay uHoverFade toward the active hover-hidden target.
+   * @param {number} delta
+   * @private
+   */
+  _advanceHoverFadeUniforms(delta) {
+    const stepDelta = Number.isFinite(delta) ? delta : 0.016;
+    // Warmup/populate paths freeze delta — snap instead of leaving _hoverFadeInProgress stuck.
+    if (stepDelta <= 1e-6) {
+      for (const [tileId, entry] of this._overlays) {
+        const hoverUniform = entry?.material?.uniforms?.uHoverFade;
+        const shadowHoverUniform = entry?.shadowMaterial?.uniforms?.uHoverFade;
+        const shadowCanopyFadeUniform = entry?.shadowMaterial?.uniforms?.uCanopyHoverFade;
+        if (!hoverUniform) continue;
+        const hoverHidden = this._hoverHidden || this._isTileHoverHiddenOnActiveScene(tileId);
+        const targetFade = hoverHidden ? 0.0 : 1.0;
+        hoverUniform.value = targetFade;
+        if (shadowHoverUniform) shadowHoverUniform.value = 1.0;
+        if (shadowCanopyFadeUniform) shadowCanopyFadeUniform.value = targetFade;
+        this._applyTreeHoverRevealStacking(entry, tileId, targetFade);
+      }
+      this._hoverFadeInProgress = false;
+      return;
+    }
+
     let hoverFadeInProgress = false;
+    const hoverHiding = this._hoverHidden;
     for (const [tileId, entry] of this._overlays) {
+      if (!entry?.mesh?.visible && !hoverHiding && !this._hoverFadeInProgress) continue;
       const hoverUniform = entry?.material?.uniforms?.uHoverFade;
       const shadowHoverUniform = entry?.shadowMaterial?.uniforms?.uHoverFade;
       const shadowCanopyFadeUniform = entry?.shadowMaterial?.uniforms?.uCanopyHoverFade;
       if (!hoverUniform) continue;
 
-      const hoverHidden = this._hoverHidden || !!tileManager?.getTileSpriteData?.(tileId)?.hoverHidden;
+      const hoverHidden = this._hoverHidden || this._isTileHoverHiddenOnActiveScene(tileId);
       const targetFade = hoverHidden ? 0.0 : 1.0;
       const currentFade = Number.isFinite(hoverUniform.value) ? hoverUniform.value : targetFade;
       const diff = targetFade - currentFade;
@@ -916,7 +1016,7 @@ export class TreeEffectV2 {
       }
       hoverFadeInProgress = true;
 
-      const maxStep = delta / 2.0;
+      const maxStep = stepDelta / 2.0;
       const step = Math.sign(diff) * Math.min(absDiff, maxStep);
       hoverUniform.value = currentFade + step;
       // Ground shadow stays full strength during hover reveal — only the canopy fades.
@@ -927,20 +1027,50 @@ export class TreeEffectV2 {
       this._applyTreeHoverRevealStacking(entry, tileId, hoverUniform.value);
     }
     this._hoverFadeInProgress = hoverFadeInProgress;
-
-    this._lastFrameTime = time;
   }
 
   onFloorChange(_maxFloorIndex) {
-    this._applyOverlayFloorVisibility();
+    this._lastVisibilityFloorIndex = null;
+    this._viewBoundsMayHaveChanged();
+    this._syncOverlayVisibility();
   }
 
   wantsContinuousRender() {
-    return this._enabled && this._initialized && this._overlays.size > 0;
+    if (!this._enabled || !this._initialized || this._overlays.size <= 0) return false;
+    return this.isHoverRevealActive();
   }
 
   setHoverHidden(hidden) {
-    this._hoverHidden = !!hidden;
+    const next = !!hidden;
+    if (next === this._hoverHidden) return;
+    this._hoverHidden = next;
+    if (!next) {
+      for (const entry of this._overlays.values()) {
+        const hoverFade = entry?.material?.uniforms?.uHoverFade?.value;
+        if (Number.isFinite(hoverFade) && hoverFade < 0.999) {
+          this._hoverFadeInProgress = true;
+          break;
+        }
+      }
+    }
+    if (next || this._hoverFadeInProgress) {
+      this._pumpHoverFadeRenderBurst();
+    }
+  }
+
+  /**
+   * Request a short presentation burst for hover-fade ramps. Skipped during populate
+   * slim renders and shader warmup so loading/pause UI pacing is not disturbed.
+   * @private
+   */
+  _pumpHoverFadeRenderBurst() {
+    try {
+      const fc = window.MapShine?.effectComposer?._floorCompositorV2;
+      if (fc?._populateSlimRenderActive?.()) return;
+      if (!fc?._shaderWarmupGateOpen) return;
+    } catch (_) {}
+    try { window.MapShine?.renderLoop?.requestContinuousRender?.(750); } catch (_) {}
+    try { window.MapShine?.renderLoop?.requestRender?.(); } catch (_) {}
   }
 
   /**
@@ -1089,24 +1219,22 @@ export class TreeEffectV2 {
   }
 
   onResize(_w, _h) {
-    // No RTs.
+    this._edgeSafetyBoundsSignature = '';
+    this._syncSceneBoundsUniforms();
   }
 
   clear() {
+    this._populateGeneration += 1;
     for (const [tileId, entry] of this._overlays) {
-      this._renderBus.removeEffectOverlay(`${tileId}_tree_shadow`);
-      this._renderBus.removeEffectOverlay(`${tileId}_tree`);
-      entry.material.dispose();
-      entry.shadowMaterial.dispose();
-      entry.mesh.geometry.dispose();
-      const tex = entry.material.uniforms.uTreeMask?.value;
-      if (tex && tex.dispose) {
-        try { tex.dispose(); } catch (_) {}
-      }
+      this._teardownOverlayEntry(tileId, entry);
     }
     this._overlays.clear();
     this._deriveAlphaByTileId.clear();
     this._alphaSampleByTileId.clear();
+    this._hoverHidden = false;
+    this._hoverFadeInProgress = false;
+    this._lastFoundrySceneData = null;
+    this._edgeSafetyBoundsSignature = '';
     this.params.textureStatus = 'Inactive (no _Tree mask)';
   }
 
@@ -1118,15 +1246,7 @@ export class TreeEffectV2 {
     if (!tileId || String(tileId).startsWith('__bg_image__')) return;
     const entry = this._overlays.get(tileId);
     if (!entry) return;
-    this._renderBus.removeEffectOverlay(`${tileId}_tree_shadow`);
-    this._renderBus.removeEffectOverlay(`${tileId}_tree`);
-    try { entry.material.dispose(); } catch (_) {}
-    try { entry.shadowMaterial.dispose(); } catch (_) {}
-    try { entry.mesh.geometry.dispose(); } catch (_) {}
-    const tex = entry.material.uniforms.uTreeMask?.value;
-    if (tex && tex.dispose) {
-      try { tex.dispose(); } catch (_) {}
-    }
+    this._teardownOverlayEntry(tileId, entry);
     this._overlays.delete(tileId);
     try { this._deriveAlphaByTileId.delete(tileId); } catch (_) {}
     try { this._alphaSampleByTileId.delete(tileId); } catch (_) {}
@@ -1214,6 +1334,52 @@ export class TreeEffectV2 {
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────────
+
+  /**
+   * Remove overlay meshes from the bus and dispose GPU resources. Detaches materials
+   * first so late TextureLoader callbacks cannot paint torn-down meshes.
+   * @param {string} tileId
+   * @param {{ mesh?: import('three').Mesh, shadowMesh?: import('three').Mesh, material?: import('three').ShaderMaterial, shadowMaterial?: import('three').ShaderMaterial }} entry
+   * @private
+   */
+  _teardownOverlayEntry(tileId, entry) {
+    if (!entry) return;
+    try { if (entry.shadowMesh) entry.shadowMesh.visible = false; } catch (_) {}
+    try { if (entry.mesh) entry.mesh.visible = false; } catch (_) {}
+    try { this._renderBus.removeEffectOverlay(`${tileId}_tree_shadow`); } catch (_) {}
+    try { this._renderBus.removeEffectOverlay(`${tileId}_tree`); } catch (_) {}
+    try { if (entry.shadowMesh) entry.shadowMesh.material = null; } catch (_) {}
+    try { if (entry.mesh) entry.mesh.material = null; } catch (_) {}
+    const tex = entry.material?.uniforms?.uTreeMask?.value ?? null;
+    try { entry.material?.dispose?.(); } catch (_) {}
+    try { entry.shadowMaterial?.dispose?.(); } catch (_) {}
+    const geom = entry.mesh?.geometry ?? entry.shadowMesh?.geometry ?? null;
+    if (geom) {
+      try { entry.mesh.geometry = null; } catch (_) {}
+      try { entry.shadowMesh.geometry = null; } catch (_) {}
+      try { geom.dispose(); } catch (_) {}
+    }
+    if (tex?.dispose) {
+      try { tex.dispose(); } catch (_) {}
+    }
+  }
+
+  /**
+   * Only honor TileManager hover-hide when the tile belongs to the active scene.
+   * @param {string} tileId
+   * @returns {boolean}
+   * @private
+   */
+  _isTileHoverHiddenOnActiveScene(tileId) {
+    if (!tileId || String(tileId).startsWith('__')) return false;
+    try {
+      const tileDoc = canvas?.scene?.tiles?.get?.(tileId);
+      if (!tileDoc) return false;
+      return !!window.MapShine?.tileManager?.getTileSpriteData?.(tileId)?.hoverHidden;
+    } catch (_) {
+      return false;
+    }
+  }
 
   _buildSharedUniforms() {
     const THREE = window.THREE;
@@ -1363,24 +1529,19 @@ export class TreeEffectV2 {
     return 0;
   }
 
-  _syncSceneBoundsUniforms() {
+  /**
+   * @param {boolean} [preferSnapshot=false] Use populate snapshot over stale canvas rect.
+   * @private
+   */
+  _syncSceneBoundsUniforms(preferSnapshot = false) {
     if (!this._sharedUniforms) return;
-    const dims = canvas?.dimensions;
-    const sceneRect = dims?.sceneRect;
-    if (!sceneRect) return;
-
-    const canvasHeight = Number(dims?.height ?? 0);
-    const sceneX = Number(sceneRect.x ?? 0);
-    const sceneY = Number(sceneRect.y ?? 0);
-    const sceneW = Number(sceneRect.width ?? 0);
-    const sceneH = Number(sceneRect.height ?? 0);
-
-    // Scene rect is Foundry-space (Y-down); shader world positions are Three-space (Y-up).
-    const minY = canvasHeight - (sceneY + sceneH);
-    const maxY = canvasHeight - sceneY;
-
-    this._sharedUniforms.uSceneMin.value.set(sceneX, minY);
-    this._sharedUniforms.uSceneMax.value.set(sceneX + sceneW, maxY);
+    const bounds = resolveVegetationEdgeSafetyBounds(this._lastFoundrySceneData, { preferSnapshot });
+    if (!bounds) return;
+    const sig = vegetationEdgeSafetyBoundsSignature(bounds);
+    if (sig === this._edgeSafetyBoundsSignature) return;
+    this._edgeSafetyBoundsSignature = sig;
+    this._sharedUniforms.uSceneMin.value.set(bounds.minX, bounds.minY);
+    this._sharedUniforms.uSceneMax.value.set(bounds.maxX, bounds.maxY);
   }
 
   _syncSunDirectionUniform() {
@@ -1665,88 +1826,85 @@ export class TreeEffectV2 {
           float edgeFade = smoothstep(0.0, max(uEdgeFadeStart + 1e-4, uEdgeFadeEnd), edgeDist);
           distortion *= edgeFade;
 
-          vec4 treeSample = texture2D(uTreeMask, vUv - distortion);
-          float texA = safeAlpha(treeSample);
-
-          vec2 shadowDir = normalize(vec2(uSunDir.x, -uSunDir.y));
-          if (length(shadowDir) < 0.01) shadowDir = -globalWindDir;
-          vec2 shadowOffset = shadowDir * uShadowLength;
-          float shadowBlur = max(0.0001, uShadowSoftness * 0.0008);
-          vec2 shadowBaseUv = vUv - distortion - shadowOffset;
-          vec2 step1 = vec2(shadowBlur);
-          vec2 step2 = step1 * 2.0;
-
-          // Kawase-style multi-ring taps: center + near diagonals + far axis + far diagonals.
-          float shadowAccum = 0.0;
-          float shadowWeight = 0.0;
-
-          float tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv));
-          shadowAccum += tap * 0.24;
-          shadowWeight += 0.24;
-
-          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step1.x,  step1.y)));
-          shadowAccum += tap * 0.12;
-          shadowWeight += 0.12;
-          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step1.x,  step1.y)));
-          shadowAccum += tap * 0.12;
-          shadowWeight += 0.12;
-          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step1.x, -step1.y)));
-          shadowAccum += tap * 0.12;
-          shadowWeight += 0.12;
-          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step1.x, -step1.y)));
-          shadowAccum += tap * 0.12;
-          shadowWeight += 0.12;
-
-          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step2.x, 0.0)));
-          shadowAccum += tap * 0.07;
-          shadowWeight += 0.07;
-          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step2.x, 0.0)));
-          shadowAccum += tap * 0.07;
-          shadowWeight += 0.07;
-          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(0.0,  step2.y)));
-          shadowAccum += tap * 0.07;
-          shadowWeight += 0.07;
-          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(0.0, -step2.y)));
-          shadowAccum += tap * 0.07;
-          shadowWeight += 0.07;
-
-          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step2.x,  step2.y)));
-          shadowAccum += tap * 0.04;
-          shadowWeight += 0.04;
-          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step2.x,  step2.y)));
-          shadowAccum += tap * 0.04;
-          shadowWeight += 0.04;
-          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step2.x, -step2.y)));
-          shadowAccum += tap * 0.04;
-          shadowWeight += 0.04;
-          tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step2.x, -step2.y)));
-          shadowAccum += tap * 0.04;
-          shadowWeight += 0.04;
-
-          float shadowA = (shadowWeight > 0.0) ? (shadowAccum / shadowWeight) : 0.0;
-          if (uBillboardShadowMode > 0.5) shadowA = 0.0;
-          shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
-
-          float hf = clamp(uHoverFade, 0.0, 1.0);
-          float mainAlpha = texA * uIntensity;
-          float visibleMainAlpha = mainAlpha * hf;
-
-          // Pass 1: shadow decal — canopy mesh draws above and occludes naturally.
+          // Pass 1: ground shadow — multi-tap blur only on the shadow mesh.
           if (uVegetationPass < 1.5) {
+            vec2 shadowDir = normalize(vec2(uSunDir.x, -uSunDir.y));
+            if (length(shadowDir) < 0.01) shadowDir = -globalWindDir;
+            vec2 shadowOffset = shadowDir * uShadowLength;
+            float shadowBlur = max(0.0001, uShadowSoftness * 0.0008);
+            vec2 shadowBaseUv = vUv - distortion - shadowOffset;
+            vec2 step1 = vec2(shadowBlur);
+            vec2 step2 = step1 * 2.0;
+
+            float shadowAccum = 0.0;
+            float shadowWeight = 0.0;
+
+            float tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv));
+            shadowAccum += tap * 0.24;
+            shadowWeight += 0.24;
+
+            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step1.x,  step1.y)));
+            shadowAccum += tap * 0.12;
+            shadowWeight += 0.12;
+            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step1.x,  step1.y)));
+            shadowAccum += tap * 0.12;
+            shadowWeight += 0.12;
+            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step1.x, -step1.y)));
+            shadowAccum += tap * 0.12;
+            shadowWeight += 0.12;
+            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step1.x, -step1.y)));
+            shadowAccum += tap * 0.12;
+            shadowWeight += 0.12;
+
+            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step2.x, 0.0)));
+            shadowAccum += tap * 0.07;
+            shadowWeight += 0.07;
+            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step2.x, 0.0)));
+            shadowAccum += tap * 0.07;
+            shadowWeight += 0.07;
+            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(0.0,  step2.y)));
+            shadowAccum += tap * 0.07;
+            shadowWeight += 0.07;
+            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(0.0, -step2.y)));
+            shadowAccum += tap * 0.07;
+            shadowWeight += 0.07;
+
+            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step2.x,  step2.y)));
+            shadowAccum += tap * 0.04;
+            shadowWeight += 0.04;
+            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step2.x,  step2.y)));
+            shadowAccum += tap * 0.04;
+            shadowWeight += 0.04;
+            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step2.x, -step2.y)));
+            shadowAccum += tap * 0.04;
+            shadowWeight += 0.04;
+            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step2.x, -step2.y)));
+            shadowAccum += tap * 0.04;
+            shadowWeight += 0.04;
+
+            float shadowA = (shadowWeight > 0.0) ? (shadowAccum / shadowWeight) : 0.0;
+            if (uBillboardShadowMode > 0.5) shadowA = 0.0;
+            shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
+
             if (uShadowLitCapture > 0.5) {
+              float texA = safeAlpha(texture2D(uTreeMask, vUv - distortion));
               float lit = clamp(1.0 - shadowA, 0.0, 1.0);
-              // Ground-only lit factor — skip foliage punch-out while canopy is hover-faded
-              // (shadow uHoverFade stays 1; uCanopyHoverFade tracks canopy reveal).
               float canopyFade = clamp(uCanopyHoverFade, 0.0, 1.0);
               lit = mix(lit, 1.0, clamp(texA * uIntensity * canopyFade, 0.0, 1.0));
               gl_FragColor = vec4(lit, lit, lit, 1.0);
               return;
             }
-            float outShadow = shadowA;
-            if (outShadow <= 0.001) discard;
-            gl_FragColor = vec4(0.0, 0.0, 0.0, outShadow);
+            if (shadowA <= 0.001) discard;
+            gl_FragColor = vec4(0.0, 0.0, 0.0, shadowA);
             return;
           }
+
+          // Pass 2: canopy — single mask sample (distortion only, no shadow taps).
+          vec4 treeSample = texture2D(uTreeMask, vUv - distortion);
+          float texA = safeAlpha(treeSample);
+          float hf = clamp(uHoverFade, 0.0, 1.0);
+          float mainAlpha = texA * uIntensity;
+          float visibleMainAlpha = mainAlpha * hf;
 
           if (uRoofRainHardBlockEnabled > 0.5) {
             float rv = 1.0;
@@ -1764,7 +1922,6 @@ export class TreeEffectV2 {
             visibleMainAlpha *= (1.0 - hiddenBlock);
           }
 
-          // Pass 2: canopy only.
           if (visibleMainAlpha <= 0.001) discard;
 
           float ccDelta = abs(uExposure) + abs(uBrightness) + abs(uContrast - 1.0)
@@ -1800,8 +1957,8 @@ export class TreeEffectV2 {
     const mesh = new THREE.Mesh(geometry, material);
     shadowMesh.name = `TreeV2Shadow_${tileId}`;
     mesh.name = `TreeV2_${tileId}`;
-    shadowMesh.frustumCulled = false;
-    mesh.frustumCulled = false;
+    shadowMesh.frustumCulled = true;
+    mesh.frustumCulled = true;
     shadowMesh.userData = shadowMesh.userData || {};
     mesh.userData = mesh.userData || {};
     mesh.userData.mapShineTreeTileId = tileId;
@@ -1816,43 +1973,57 @@ export class TreeEffectV2 {
     mesh.rotation.z = rotation;
 
     this._applyTreeOverlayRenderOrders(shadowMesh, mesh, tileId, floorIndex);
-
-    try {
-      // Canopy only — ground shadow stays on the bus albedo pass (layer 0). BushEffectV2
-      // never tags shadow meshes for roof/weather capture; doing so here made hover-faded
-      // canopies leave a mask-shaped shadow in roof RTs that overhead lighting projects.
-      mesh.layers.enable(21);
-    } catch (_) {}
+    applyVegetationAboveWaterLayer(shadowMesh, {});
+    applyVegetationAboveWaterLayer(mesh, { retainWeatherRoofLayer: true });
 
     this._renderBus.addEffectOverlay(`${tileId}_tree_shadow`, shadowMesh, floorIndex);
     this._renderBus.addEffectOverlay(`${tileId}_tree`, mesh, floorIndex);
-    this._overlays.set(tileId, { mesh, shadowMesh, material, shadowMaterial, floorIndex });
-    this._applyOverlayFloorVisibility();
+    const bounds = overlayWorldBounds(centerX, centerY, tileW, tileH);
+    const maskLoadSerial = ++this._maskLoadSerial;
+    const populateGen = this._populateGeneration;
+    this._overlays.set(tileId, {
+      mesh,
+      shadowMesh,
+      material,
+      shadowMaterial,
+      floorIndex,
+      bounds,
+      maskLoadSerial,
+    });
+    this._viewBoundsMayHaveChanged();
+    this._syncOverlayVisibility();
 
     // Load mask texture.
     this._loader.load(url, (tex) => {
+      if (populateGen !== this._populateGeneration) {
+        try { tex.dispose(); } catch (_) {}
+        return;
+      }
+      const entry = this._overlays.get(tileId);
+      if (!entry
+        || entry.maskLoadSerial !== maskLoadSerial
+        || entry.material !== material
+        || entry.shadowMaterial !== shadowMaterial) {
+        try { tex.dispose(); } catch (_) {}
+        return;
+      }
       tex.flipY = true;
       // Tree masks carry visible color data, so sample in sRGB for correct contrast.
       if ('colorSpace' in tex && THREE?.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
       else if ('encoding' in tex && THREE?.sRGBEncoding) tex.encoding = THREE.sRGBEncoding;
       tex.needsUpdate = true;
-      if (this._overlays.has(tileId)) {
-        material.uniforms.uTreeMask.value = tex;
-        shadowMaterial.uniforms.uTreeMask.value = tex;
-        const derive = this._detectDerivedAlpha(tex);
-        this._deriveAlphaByTileId.set(tileId, derive);
-        material.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
-        shadowMaterial.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
-        this._cacheAlphaSamples(tileId, tex);
-        try {
-          const entry = this._overlays.get(tileId);
-          if (entry?.shadowMesh && entry?.mesh) {
-            this._applyTreeOverlayRenderOrders(entry.shadowMesh, entry.mesh, tileId, floorIndex);
-          }
-        } catch (_) {}
-      } else {
-        try { tex.dispose(); } catch (_) {}
-      }
+      material.uniforms.uTreeMask.value = tex;
+      shadowMaterial.uniforms.uTreeMask.value = tex;
+      const derive = this._detectDerivedAlpha(tex);
+      this._deriveAlphaByTileId.set(tileId, derive);
+      material.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
+      shadowMaterial.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
+      this._cacheAlphaSamples(tileId, tex);
+      try {
+        if (entry?.shadowMesh && entry?.mesh) {
+          this._applyTreeOverlayRenderOrders(entry.shadowMesh, entry.mesh, tileId, floorIndex);
+        }
+      } catch (_) {}
     }, undefined, (err) => {
       log.warn(`TreeEffectV2: failed to load mask for ${tileId}: ${url}`, err);
     });
@@ -1908,15 +2079,64 @@ export class TreeEffectV2 {
     return 0;
   }
 
-  _applyOverlayFloorVisibility() {
+  /**
+   * @returns {boolean}
+   * @private
+   */
+  _viewBoundsMayHaveChanged() {
+    const cam = window.MapShine?.sceneComposer?.camera;
+    const sig = cameraViewBoundsSignature(cam);
+    if (sig === this._viewBoundsSignature) return false;
+    this._viewBoundsSignature = sig;
+    this._cachedViewBounds = resolveWorldViewBounds(
+      cam,
+      window.MapShine?.sceneComposer ?? null,
+      this._viewCullPadding,
+    );
+    return true;
+  }
+
+  /**
+   * Floor + camera view culling for overlay meshes.
+   * @private
+   */
+  _syncOverlayVisibility() {
     const maxFloor = this._getSafeVisibleMaxFloorIndex();
+    const view = this._cachedViewBounds;
     for (const entry of this._overlays.values()) {
-      const visible = this._enabled && Number(entry.floorIndex) <= maxFloor;
-      if (entry?.mesh) entry.mesh.visible = visible;
+      const floorOk = this._enabled && Number(entry.floorIndex) <= maxFloor;
+      const viewOk = !view || tileBoundsIntersectView(entry.bounds, view);
+      const visible = floorOk && viewOk;
+      if (entry?.mesh) {
+        entry.mesh.visible = visible;
+        applyVegetationAboveWaterLayer(entry.mesh, { retainWeatherRoofLayer: true });
+      }
       if (entry?.shadowMesh) {
         entry.shadowMesh.visible = visible;
-        // Ground shadow is bus-only; never participate in roof/weather layer captures.
-        try { entry.shadowMesh.layers.disable(21); } catch (_) {}
+        applyVegetationAboveWaterLayer(entry.shadowMesh, {});
+      }
+    }
+  }
+
+  /**
+   * After scene repopulate, drop hover-reveal stacking and restore shadow-under-canopy
+   * render orders so a prior canopy hover cannot leave shadows painted on top.
+   * @private
+   */
+  _resetAllOverlayHoverAndStacking() {
+    this._hoverHidden = false;
+    this._hoverFadeInProgress = false;
+    const nowMs = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    this._suppressHoverRevealStackingUntilMs = nowMs + 750;
+    for (const [tileId, entry] of this._overlays) {
+      const hoverUniform = entry?.material?.uniforms?.uHoverFade;
+      const shadowHoverUniform = entry?.shadowMaterial?.uniforms?.uHoverFade;
+      const shadowCanopyFadeUniform = entry?.shadowMaterial?.uniforms?.uCanopyHoverFade;
+      if (hoverUniform) hoverUniform.value = 1.0;
+      if (shadowHoverUniform) shadowHoverUniform.value = 1.0;
+      if (shadowCanopyFadeUniform) shadowCanopyFadeUniform.value = 1.0;
+      if (entry?.shadowMesh && entry?.mesh) {
+        this._applyTreeOverlayRenderOrders(entry.shadowMesh, entry.mesh, tileId, entry.floorIndex);
       }
     }
   }
@@ -1932,6 +2152,11 @@ export class TreeEffectV2 {
    */
   _applyTreeHoverRevealStacking(entry, tileId, hoverFade) {
     if (!entry?.shadowMesh || !entry?.mesh) return;
+    const nowMs = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    if (nowMs < this._suppressHoverRevealStackingUntilMs) {
+      this._applyTreeOverlayRenderOrders(entry.shadowMesh, entry.mesh, tileId, entry.floorIndex);
+      return;
+    }
     const hf = Number.isFinite(Number(hoverFade)) ? Number(hoverFade) : 1.0;
     if (hf < 0.999) {
       const fi = Number.isFinite(Number(entry.floorIndex)) ? Math.max(0, Number(entry.floorIndex)) : 0;

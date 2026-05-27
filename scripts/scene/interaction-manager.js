@@ -8,7 +8,7 @@ import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
-import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
+import { OVERLAY_THREE_LAYER, VEGETATION_ABOVE_WATER_LAYER } from '../core/render-layers.js';
 import { SelectionBoxEffectV2 } from '../compositor-v2/effects/SelectionBoxEffectV2.js';
 import { MapPointDrawHandler } from './map-point-interaction.js';
 import { LightInteractionHandler } from './light-interaction.js';
@@ -5434,15 +5434,28 @@ export class InteractionManager {
       opaqueHit = !!treeEffect.isWorldPointOpaque(worldPos.x, worldPos.y);
     }
 
-    // Fallback path: legacy raycast + UV test.
-    if (!opaqueHit) {
-      const treeHits = this.raycaster.intersectObjects(treeMeshes, false);
-      if (treeHits.length > 0) {
-        const hit = treeHits[0];
-        if (typeof treeEffect.isUvOpaque === 'function' && hit?.uv) {
-          opaqueHit = !!treeEffect.isUvOpaque(hit.uv, hit.object ?? null);
-        } else {
-          opaqueHit = true;
+    // Fallback path: legacy raycast + UV test (canopies live on VEGETATION_ABOVE_WATER_LAYER).
+    if (!opaqueHit && treeMeshes.length > 0) {
+      const THREE = window.THREE;
+      if (THREE) {
+        const prevMask = this.raycaster.layers?.mask;
+        try {
+          if (!this.raycaster.layers) this.raycaster.layers = new THREE.Layers();
+          this.raycaster.layers.set(VEGETATION_ABOVE_WATER_LAYER);
+          this.raycaster.layers.enable(21);
+          const treeHits = this.raycaster.intersectObjects(treeMeshes, false);
+          if (treeHits.length > 0) {
+            const hit = treeHits[0];
+            if (typeof treeEffect.isUvOpaque === 'function' && hit?.uv) {
+              opaqueHit = !!treeEffect.isUvOpaque(hit.uv, hit.object ?? null);
+            } else {
+              opaqueHit = true;
+            }
+          }
+        } finally {
+          if (typeof prevMask === 'number' && this.raycaster.layers) {
+            this.raycaster.layers.mask = prevMask;
+          }
         }
       }
     }

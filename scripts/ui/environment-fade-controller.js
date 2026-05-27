@@ -391,6 +391,7 @@ export class EnvironmentFadeController {
             syncUi: false,
             applyDarkness: false,
             syncFoundryTime: false,
+            transient: true,
           });
           if (tickEpoch !== this._segmentEpoch) return;
 
@@ -594,6 +595,7 @@ export class EnvironmentFadeController {
       syncUi: false,
       applyDarkness: false,
       syncFoundryTime: false,
+      transient: true,
     });
     if (hooks.applyExtras) await hooks.applyExtras(startEx, false);
     if (hooks.onTick) hooks.onTick(start, startEx, 0);

@@ -42,8 +42,7 @@ import {
   getViewedLevelBackgroundSrc,
   hasV14NativeLevels,
 } from '../../foundry/levels-scene-flags.js';
-// OVERLAY_THREE_LAYER intentionally not imported — splashes use layer 0 only
-// and rely on LayerOrderPolicy FLOOR_EFFECTS band for correct stacking.
+import { applyWaterSplashAboveWaterLayer } from './vegetation-overlay-runtime.js';
 import {
   WaterEdgeMaskShape,
   WaterInteriorMaskShape,
@@ -793,6 +792,7 @@ export class WaterSplashesEffectV2 {
       if (!br) continue;
       const fi = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
       br.renderOrder = effectUnderOverheadOrder(fi, 50);
+      applyWaterSplashAboveWaterLayer(br);
     }
   }
 
@@ -815,11 +815,7 @@ export class WaterSplashesEffectV2 {
     const br = new BatchedRenderer();
     br.frustumCulled = false;
     br.renderOrder = effectUnderOverheadOrder(floorIndex, 50);
-    try {
-      if (br.layers && typeof br.layers.set === 'function') {
-        br.layers.set(0);
-      }
-    } catch (_) {}
+    applyWaterSplashAboveWaterLayer(br);
     return br;
   }
 
@@ -2268,8 +2264,12 @@ export class WaterSplashesEffectV2 {
       if (sys?.userData) sys.userData._msFloorIndex = floorIndex;
       try { br.addSystem(sys); } catch (_) {}
       // Emitters as children of BatchedRenderer — transitive scene membership.
-      if (sys.emitter) br.add(sys.emitter);
+      if (sys.emitter) {
+        br.add(sys.emitter);
+        applyWaterSplashAboveWaterLayer(sys.emitter);
+      }
     }
+    applyWaterSplashAboveWaterLayer(br);
 
     const batches = br.batches;
     const map = br.systemToBatchIndex;

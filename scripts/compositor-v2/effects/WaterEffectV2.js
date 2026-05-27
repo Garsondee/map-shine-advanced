@@ -488,14 +488,36 @@ export class WaterEffectV2 {
       murkEnabled: true,
       murkIntensity: 0.5,
       murkColor: { r: 0.2654325162055096, g: 0.2539300631928279, b: 0.0 },
+      murkColorAlt: { r: 0.12, g: 0.22, b: 0.08 },
+      murkColorVariation: 0.4,
+      murkHueScatter: 0.18,
+      murkSaturation: 1.0,
+      murkLumaVariation: 0.3,
       murkScale: 9.7,
       murkSpeed: 1.54,
+      murkSeedOffsetX: 0.0,
+      murkSeedOffsetY: 0.0,
       murkDepthLo: 0.0,
       murkDepthHi: 0.0,
+      murkDepthFade: 0.0,
+      murkCloudLo: 0.28,
+      murkCloudHi: 0.76,
+      murkCloudGamma: 1.0,
+      murkPatchScale: 2.2,
+      murkPatchMix: 0.5,
+      murkDetailScale: 3.6,
+      murkDetailMix: 0.42,
+      murkDensityContrast: 1.15,
+      murkThicknessVariation: 0.55,
+      murkThicknessChaos: 0.38,
+      murkStrengthLo: 0.0,
+      murkStrengthHi: 1.0,
+      murkWarpStrength: 0.45,
+      murkChaos: 0.32,
+      murkChaosSpeed: 0.9,
       murkGrainScale: 10.0,
       murkGrainSpeed: 0.0,
       murkGrainStrength: 2.0,
-      murkDepthFade: 0.0,
 
       // Murk Shadow Integration
       murkShadowEnabled: true,
@@ -1326,10 +1348,65 @@ static getControlSchema() {
           expanded: false,
           parameters: [
             'murkEnabled',
-            'murkIntensity', 'murkColor', 'murkScale', 'murkSpeed',
+            'murkIntensity', 'murkScale', 'murkSpeed',
+            'murkSeedOffsetX', 'murkSeedOffsetY',
             'murkDepthLo', 'murkDepthHi', 'murkDepthFade',
-            'murkGrainScale', 'murkGrainSpeed', 'murkGrainStrength',
             'murkShadowEnabled', 'murkShadowStrength'
+          ]
+        },
+        {
+          name: 'water-murk-color',
+          label: 'Murk — Color',
+          type: 'folder',
+          advanced: true,
+          expanded: false,
+          parameters: [
+            'murkColor', 'murkColorAlt', 'murkColorVariation',
+            'murkHueScatter', 'murkSaturation', 'murkLumaVariation'
+          ]
+        },
+        {
+          name: 'water-murk-clouds',
+          label: 'Murk — Clouds & Patches',
+          type: 'folder',
+          advanced: true,
+          expanded: false,
+          parameters: [
+            'murkCloudLo', 'murkCloudHi', 'murkCloudGamma',
+            'murkPatchScale', 'murkPatchMix',
+            'murkDetailScale', 'murkDetailMix',
+            'murkDensityContrast', 'murkWarpStrength'
+          ]
+        },
+        {
+          name: 'water-murk-thickness',
+          label: 'Murk — Thickness',
+          type: 'folder',
+          advanced: true,
+          expanded: false,
+          parameters: [
+            'murkThicknessVariation', 'murkThicknessChaos',
+            'murkStrengthLo', 'murkStrengthHi'
+          ]
+        },
+        {
+          name: 'water-murk-chaos',
+          label: 'Murk — Chaos',
+          type: 'folder',
+          advanced: true,
+          expanded: false,
+          parameters: [
+            'murkChaos', 'murkChaosSpeed'
+          ]
+        },
+        {
+          name: 'water-murk-grain',
+          label: 'Murk — Grain',
+          type: 'folder',
+          advanced: true,
+          expanded: false,
+          parameters: [
+            'murkGrainScale', 'murkGrainSpeed', 'murkGrainStrength'
           ]
         },
         {
@@ -1701,15 +1778,37 @@ static getControlSchema() {
 
         murkEnabled: { type: 'boolean', default: true, label: 'Murk Enabled' },
         murkIntensity: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.5, label: 'Intensity' },
-        murkColor: { type: 'color', default: { r: 0.2654325162055096, g: 0.2539300631928279, b: 0.0 }, label: 'Color' },
+        murkColor: { type: 'color', default: { r: 0.2654325162055096, g: 0.2539300631928279, b: 0.0 }, label: 'Base Color' },
+        murkColorAlt: { type: 'color', default: { r: 0.12, g: 0.22, b: 0.08 }, label: 'Alt Color' },
+        murkColorVariation: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.4, label: 'Color Variation' },
+        murkHueScatter: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.18, label: 'Hue Scatter' },
+        murkSaturation: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.0, label: 'Saturation' },
+        murkLumaVariation: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.3, label: 'Brightness Variation' },
         murkScale: { type: 'slider', min: 0.1, max: 20, step: 0.1, default: 9.7, label: 'Scale' },
         murkSpeed: { type: 'slider', min: 0, max: 5, step: 0.01, default: 1.54, label: 'Speed' },
-        murkDepthLo: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.0, label: 'Depth Low' },
-        murkDepthHi: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.0, label: 'Depth High' },
+        murkSeedOffsetX: { type: 'slider', min: -200, max: 200, step: 0.5, default: 0.0, label: 'Seed Offset X' },
+        murkSeedOffsetY: { type: 'slider', min: -200, max: 200, step: 0.5, default: 0.0, label: 'Seed Offset Y' },
+        murkDepthLo: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.0, label: 'Depth Low (mask)' },
+        murkDepthHi: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.0, label: 'Depth High (mask)' },
+        murkDepthFade: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.0, label: 'Depth Fade' },
+        murkCloudLo: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.28, label: 'Cloud Threshold Low' },
+        murkCloudHi: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.76, label: 'Cloud Threshold High' },
+        murkCloudGamma: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 1.0, label: 'Cloud Gamma' },
+        murkPatchScale: { type: 'slider', min: 0.1, max: 8, step: 0.05, default: 2.2, label: 'Patch Scale Mult' },
+        murkPatchMix: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Patch Mix' },
+        murkDetailScale: { type: 'slider', min: 0.1, max: 12, step: 0.05, default: 3.6, label: 'Detail Scale Mult' },
+        murkDetailMix: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.42, label: 'Detail Mix' },
+        murkDensityContrast: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 1.15, label: 'Density Contrast' },
+        murkThicknessVariation: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.55, label: 'Thickness Variation' },
+        murkThicknessChaos: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.38, label: 'Thickness Chaos' },
+        murkStrengthLo: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.0, label: 'Strength Low' },
+        murkStrengthHi: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1.0, label: 'Strength High' },
+        murkWarpStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.45, label: 'Warp Strength' },
+        murkChaos: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.32, label: 'Chaos' },
+        murkChaosSpeed: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.9, label: 'Chaos Speed' },
         murkGrainScale: { type: 'slider', min: 10, max: 6000, step: 10, default: 10.0, label: 'Grain Scale' },
         murkGrainSpeed: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.0, label: 'Grain Speed' },
         murkGrainStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 2.0, label: 'Grain Strength' },
-        murkDepthFade: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.0, label: 'Depth Fade' },
         murkShadowEnabled: { type: 'boolean', default: true, label: 'Shadow Enabled' },
         murkShadowStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.56, label: 'Shadow Strength' },
 
@@ -3585,16 +3684,38 @@ static getControlSchema() {
     u.uMurkEnabled.value = p.murkEnabled ? 1.0 : 0.0;
     u.uMurkIntensity.value = safeNum(p.murkIntensity, 0.76);
     const murkColor = normalizeRgb01(p.murkColor, { r: 0.15, g: 0.22, b: 0.12 });
+    const murkColorAlt = normalizeRgb01(p.murkColorAlt, { r: 0.12, g: 0.22, b: 0.08 });
     u.uMurkColor.value.set(murkColor.r, murkColor.g, murkColor.b);
+    u.uMurkColorAlt.value.set(murkColorAlt.r, murkColorAlt.g, murkColorAlt.b);
+    u.uMurkColorVariation.value = safeNum(p.murkColorVariation, 0.4);
+    u.uMurkHueScatter.value = safeNum(p.murkHueScatter, 0.18);
+    u.uMurkSaturation.value = safeNum(p.murkSaturation, 1.0);
+    u.uMurkLumaVariation.value = safeNum(p.murkLumaVariation, 0.3);
     u.uMurkScale.value = safeNum(p.murkScale, 5.66);
     u.uMurkSpeed.value = safeNum(p.murkSpeed, 0.45);
+    u.uMurkSeedOffset.value.set(safeNum(p.murkSeedOffsetX, 0.0), safeNum(p.murkSeedOffsetY, 0.0));
     u.uMurkDepthLo.value = safeNum(p.murkDepthLo, 0.0);
     u.uMurkDepthHi.value = safeNum(p.murkDepthHi, 0.8);
+    u.uMurkDepthFade.value = safeNum(p.murkDepthFade, 1.8);
+    u.uMurkCloudLo.value = safeNum(p.murkCloudLo, 0.28);
+    u.uMurkCloudHi.value = safeNum(p.murkCloudHi, 0.76);
+    u.uMurkCloudGamma.value = safeNum(p.murkCloudGamma, 1.0);
+    u.uMurkPatchScale.value = safeNum(p.murkPatchScale, 2.2);
+    u.uMurkPatchMix.value = safeNum(p.murkPatchMix, 0.5);
+    u.uMurkDetailScale.value = safeNum(p.murkDetailScale, 3.6);
+    u.uMurkDetailMix.value = safeNum(p.murkDetailMix, 0.42);
+    u.uMurkDensityContrast.value = safeNum(p.murkDensityContrast, 1.15);
+    u.uMurkThicknessVariation.value = safeNum(p.murkThicknessVariation, 0.55);
+    u.uMurkThicknessChaos.value = safeNum(p.murkThicknessChaos, 0.38);
+    u.uMurkStrengthLo.value = safeNum(p.murkStrengthLo, 0.0);
+    u.uMurkStrengthHi.value = safeNum(p.murkStrengthHi, 1.0);
+    u.uMurkWarpStrength.value = safeNum(p.murkWarpStrength, 0.45);
+    u.uMurkChaos.value = safeNum(p.murkChaos, 0.32);
+    u.uMurkChaosSpeed.value = safeNum(p.murkChaosSpeed, 0.9);
     u.uMurkGrainScale.value = safeNum(p.murkGrainScale, 2600.0);
     u.uMurkGrainSpeed.value = safeNum(p.murkGrainSpeed, 0.6);
     u.uMurkGrainStrength.value = safeNum(p.murkGrainStrength, 0.8);
-    u.uMurkDepthFade.value = safeNum(p.murkDepthFade, 1.8);
-    
+
     // Murk Shadow Integration
     u.uMurkShadowEnabled.value = p.murkShadowEnabled ? 1.0 : 0.0;
     u.uMurkShadowStrength.value = safeNum(p.murkShadowStrength, 1.0);
@@ -4150,6 +4271,7 @@ static getControlSchema() {
   setPostMergeWaterContext(viewedFloorIndex) {
     const v = Number(viewedFloorIndex);
     this._perLevelOverride = -1;
+    this._setCrossSliceWaterDataUniform(0);
     if (!Number.isFinite(v) || v < 0) {
       this._commitWaterBindingsForView(this._getViewedFloorIndex(), { crossSlice: false });
       return -1;
@@ -4400,6 +4522,7 @@ static getControlSchema() {
     const shoreFoamColor = normalizeRgb01(p.shoreFoamColor, { r: 1.0, g: 1.0, b: 1.0 });
     const shoreFoamTint = normalizeRgb01(p.shoreFoamTint, { r: 0.95, g: 0.97, b: 0.9 });
     const murkColor = normalizeRgb01(p.murkColor, { r: 0.15, g: 0.22, b: 0.12 });
+    const murkColorAlt = normalizeRgb01(p.murkColorAlt, { r: 0.12, g: 0.22, b: 0.08 });
     const bathAbsorb = normalizeRgb01(p.bathymetryAbsorptionCoeff, { r: 4.0, g: 1.5, b: 0.1 });
     const bathScatter = normalizeRgb01(p.bathymetryDeepScatterColor, { r: 0.02, g: 0.10, b: 0.20 });
     return {
@@ -4733,17 +4856,38 @@ static getControlSchema() {
 
       
       // Murk
-      uMurkEnabled:       { value: p.murkEnabled ? 1.0 : 0.0 },
-      uMurkIntensity:     { value: p.murkIntensity },
-      uMurkColor:         { value: new THREE.Vector3(murkColor.r, murkColor.g, murkColor.b) },
-      uMurkScale:         { value: p.murkScale },
-      uMurkSpeed:         { value: p.murkSpeed },
-      uMurkDepthLo:       { value: p.murkDepthLo },
-      uMurkDepthHi:       { value: p.murkDepthHi },
-      uMurkGrainScale:    { value: p.murkGrainScale },
-      uMurkGrainSpeed:    { value: p.murkGrainSpeed },
-      uMurkGrainStrength: { value: p.murkGrainStrength },
-      uMurkDepthFade:     { value: p.murkDepthFade },
+      uMurkEnabled:            { value: p.murkEnabled ? 1.0 : 0.0 },
+      uMurkIntensity:          { value: p.murkIntensity },
+      uMurkColor:              { value: new THREE.Vector3(murkColor.r, murkColor.g, murkColor.b) },
+      uMurkColorAlt:           { value: new THREE.Vector3(murkColorAlt.r, murkColorAlt.g, murkColorAlt.b) },
+      uMurkColorVariation:     { value: p.murkColorVariation ?? 0.4 },
+      uMurkHueScatter:         { value: p.murkHueScatter ?? 0.18 },
+      uMurkSaturation:         { value: p.murkSaturation ?? 1.0 },
+      uMurkLumaVariation:      { value: p.murkLumaVariation ?? 0.3 },
+      uMurkScale:              { value: p.murkScale },
+      uMurkSpeed:              { value: p.murkSpeed },
+      uMurkSeedOffset:         { value: new THREE.Vector2(p.murkSeedOffsetX ?? 0, p.murkSeedOffsetY ?? 0) },
+      uMurkDepthLo:            { value: p.murkDepthLo },
+      uMurkDepthHi:            { value: p.murkDepthHi },
+      uMurkDepthFade:          { value: p.murkDepthFade },
+      uMurkCloudLo:            { value: p.murkCloudLo ?? 0.28 },
+      uMurkCloudHi:            { value: p.murkCloudHi ?? 0.76 },
+      uMurkCloudGamma:         { value: p.murkCloudGamma ?? 1.0 },
+      uMurkPatchScale:         { value: p.murkPatchScale ?? 2.2 },
+      uMurkPatchMix:           { value: p.murkPatchMix ?? 0.5 },
+      uMurkDetailScale:        { value: p.murkDetailScale ?? 3.6 },
+      uMurkDetailMix:          { value: p.murkDetailMix ?? 0.42 },
+      uMurkDensityContrast:    { value: p.murkDensityContrast ?? 1.15 },
+      uMurkThicknessVariation: { value: p.murkThicknessVariation ?? 0.55 },
+      uMurkThicknessChaos:     { value: p.murkThicknessChaos ?? 0.38 },
+      uMurkStrengthLo:         { value: p.murkStrengthLo ?? 0.0 },
+      uMurkStrengthHi:         { value: p.murkStrengthHi ?? 1.0 },
+      uMurkWarpStrength:       { value: p.murkWarpStrength ?? 0.45 },
+      uMurkChaos:              { value: p.murkChaos ?? 0.32 },
+      uMurkChaosSpeed:         { value: p.murkChaosSpeed ?? 0.9 },
+      uMurkGrainScale:         { value: p.murkGrainScale },
+      uMurkGrainSpeed:         { value: p.murkGrainSpeed },
+      uMurkGrainStrength:      { value: p.murkGrainStrength },
 
       // Murk Shadow Integration
       tCombinedShadow:     { value: fallbacks?.white ?? null },

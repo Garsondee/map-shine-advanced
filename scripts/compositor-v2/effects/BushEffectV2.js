@@ -22,6 +22,15 @@ import {
   bushOverlayRenderOrders,
   tileAlbedoOrder,
 } from '../LayerOrderPolicy.js';
+import {
+  applyVegetationAboveWaterLayer,
+  overlayWorldBounds,
+  resolveWorldViewBounds,
+  tileBoundsIntersectView,
+  cameraViewBoundsSignature,
+  resolveVegetationEdgeSafetyBounds,
+  vegetationEdgeSafetyBoundsSignature,
+} from './vegetation-overlay-runtime.js';
 
 const log = createLogger('BushEffectV2');
 
@@ -52,8 +61,16 @@ export class BushEffectV2 {
     this._overlays = new Map();
     /** @type {number|null} */
     this._lastVisibilityFloorIndex = null;
-    /** @type {number|null} */
-    this._lastVisibilityFloorIndex = null;
+    /** @type {string} */
+    this._viewBoundsSignature = '';
+    /** @type {{ minX: number, minY: number, maxX: number, maxY: number }|null} */
+    this._cachedViewBounds = null;
+    /** World-unit margin so wind distortion at tile edges still draws while panning. */
+    this._viewCullPadding = 192;
+    /** @type {object|null} Last populate geometry snapshot for edge-safety fallback. */
+    this._lastFoundrySceneData = null;
+    /** @type {string} Cached {@link vegetationEdgeSafetyBoundsSignature} */
+    this._edgeSafetyBoundsSignature = '';
 
     /** @type {Set<string>} */
     this._negativeCache = new Set();
@@ -132,7 +149,8 @@ export class BushEffectV2 {
   set enabled(v) {
     this._enabled = !!v;
     this.params.enabled = this._enabled;
-    this._applyOverlayFloorVisibility();
+    this._viewBoundsMayHaveChanged();
+    this._syncOverlayVisibility();
   }
 
   static getControlSchema() {
@@ -681,6 +699,10 @@ export class BushEffectV2 {
     if (!this._initialized) return;
     this.clear();
 
+    this._lastFoundrySceneData = foundrySceneData ?? null;
+    this._edgeSafetyBoundsSignature = '';
+    this._syncSceneBoundsUniforms(true);
+
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
     const activeFloorIdxRaw = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
     const activeFloorIdx = Number.isFinite(activeFloorIdxRaw) ? activeFloorIdxRaw : 0;
@@ -773,7 +795,7 @@ export class BushEffectV2 {
   }
 
   /**
-   * Minimal uniform tick while the camera is panning — skips per-overlay visibility scans.
+   * Minimal uniform tick while the camera is panning — skips wind/weather CPU work.
    * @param {{ elapsed?: number, delta?: number, motionDelta?: number, time?: number }} timeInfo
    */
   updateNavigationLite(timeInfo) {
@@ -794,6 +816,11 @@ export class BushEffectV2 {
       this._sharedUniforms.uWavePhase.value = this._wavePhase;
       this._sharedUniforms.uFlutterPhase.value = this._flutterPhase;
     }
+    const maxFloor = this._getSafeVisibleMaxFloorIndex();
+    const floorChanged = maxFloor !== this._lastVisibilityFloorIndex;
+    const viewChanged = this._viewBoundsMayHaveChanged();
+    if (floorChanged) this._lastVisibilityFloorIndex = maxFloor;
+    if (floorChanged || viewChanged) this._syncOverlayVisibility();
     this._lastFrameTime = time;
   }
 
@@ -801,10 +828,10 @@ export class BushEffectV2 {
     if (!this._enabled || !this._initialized) return;
 
     const maxFloor = this._getSafeVisibleMaxFloorIndex();
-    if (maxFloor !== this._lastVisibilityFloorIndex) {
-      this._lastVisibilityFloorIndex = maxFloor;
-      this._applyOverlayFloorVisibility();
-    }
+    const floorChanged = maxFloor !== this._lastVisibilityFloorIndex;
+    const viewChanged = this._viewBoundsMayHaveChanged();
+    if (floorChanged) this._lastVisibilityFloorIndex = maxFloor;
+    if (floorChanged || viewChanged) this._syncOverlayVisibility();
 
     const time = Number.isFinite(timeInfo?.elapsed)
       ? Number(timeInfo.elapsed)
@@ -895,7 +922,9 @@ export class BushEffectV2 {
   }
 
   onFloorChange(_maxFloorIndex) {
-    this._applyOverlayFloorVisibility();
+    this._lastVisibilityFloorIndex = null;
+    this._viewBoundsMayHaveChanged();
+    this._syncOverlayVisibility();
   }
 
   wantsContinuousRender() {
@@ -903,7 +932,8 @@ export class BushEffectV2 {
   }
 
   onResize(_w, _h) {
-    // No RTs.
+    this._edgeSafetyBoundsSignature = '';
+    this._syncSceneBoundsUniforms();
   }
 
   clear() {
@@ -920,6 +950,8 @@ export class BushEffectV2 {
     }
     this._overlays.clear();
     this._deriveAlphaByTileId.clear();
+    this._lastFoundrySceneData = null;
+    this._edgeSafetyBoundsSignature = '';
     this.params.textureStatus = 'Inactive (no _Bush mask)';
   }
 
@@ -1012,6 +1044,23 @@ export class BushEffectV2 {
         mesh: entry.shadowMesh,
         uniforms: entry.shadowMaterial.uniforms,
         material: entry.shadowMaterial,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Live bush canopy meshes for screen-space coverage (water specular / bloom mask).
+   * @returns {{mesh: import('three').Mesh, material: import('three').Material}[]}
+   */
+  collectCanopyOcclusionEntries() {
+    if (!this._enabled || !this._initialized) return [];
+    const out = [];
+    for (const entry of this._overlays.values()) {
+      if (!entry?.mesh?.visible || !entry?.material) continue;
+      out.push({
+        mesh: entry.mesh,
+        material: entry.material,
       });
     }
     return out;
@@ -1124,24 +1173,19 @@ export class BushEffectV2 {
     return 0;
   }
 
-  _syncSceneBoundsUniforms() {
+  /**
+   * @param {boolean} [preferSnapshot=false] Use populate snapshot over stale canvas rect.
+   * @private
+   */
+  _syncSceneBoundsUniforms(preferSnapshot = false) {
     if (!this._sharedUniforms) return;
-    const dims = canvas?.dimensions;
-    const sceneRect = dims?.sceneRect;
-    if (!sceneRect) return;
-
-    const canvasHeight = Number(dims?.height ?? 0);
-    const sceneX = Number(sceneRect.x ?? 0);
-    const sceneY = Number(sceneRect.y ?? 0);
-    const sceneW = Number(sceneRect.width ?? 0);
-    const sceneH = Number(sceneRect.height ?? 0);
-
-    // Scene rect is Foundry-space (Y-down); shader world positions are Three-space (Y-up).
-    const minY = canvasHeight - (sceneY + sceneH);
-    const maxY = canvasHeight - sceneY;
-
-    this._sharedUniforms.uSceneMin.value.set(sceneX, minY);
-    this._sharedUniforms.uSceneMax.value.set(sceneX + sceneW, maxY);
+    const bounds = resolveVegetationEdgeSafetyBounds(this._lastFoundrySceneData, { preferSnapshot });
+    if (!bounds) return;
+    const sig = vegetationEdgeSafetyBoundsSignature(bounds);
+    if (sig === this._edgeSafetyBoundsSignature) return;
+    this._edgeSafetyBoundsSignature = sig;
+    this._sharedUniforms.uSceneMin.value.set(bounds.minX, bounds.minY);
+    this._sharedUniforms.uSceneMax.value.set(bounds.maxX, bounds.maxY);
   }
 
   _syncSunDirectionUniform() {
@@ -1387,78 +1431,74 @@ export class BushEffectV2 {
           float edgeFade = smoothstep(0.0, max(uEdgeFadeStart + 1e-4, uEdgeFadeEnd), edgeDist);
           distortion *= edgeFade;
 
-          vec4 bushSample = texture2D(uBushMask, vUv - distortion);
-          float texA = safeAlpha(bushSample);
-
-          vec2 shadowDir = normalize(vec2(uSunDir.x, -uSunDir.y));
-          if (length(shadowDir) < 0.01) shadowDir = -windDir;
-          vec2 shadowOffset = shadowDir * uShadowLength;
-          float shadowBlur = max(0.0001, uShadowSoftness * 0.0008);
-          vec2 shadowBaseUv = vUv - distortion - shadowOffset;
-          vec2 step1 = vec2(shadowBlur);
-          vec2 step2 = step1 * 2.0;
-
-          // Kawase-style multi-ring taps: center + near diagonals + far axis + far diagonals.
-          float shadowAccum = 0.0;
-          float shadowWeight = 0.0;
-
-          float tap = safeAlpha(texture2D(uBushMask, shadowBaseUv));
-          shadowAccum += tap * 0.24;
-          shadowWeight += 0.24;
-
-          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2( step1.x,  step1.y)));
-          shadowAccum += tap * 0.12;
-          shadowWeight += 0.12;
-          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(-step1.x,  step1.y)));
-          shadowAccum += tap * 0.12;
-          shadowWeight += 0.12;
-          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2( step1.x, -step1.y)));
-          shadowAccum += tap * 0.12;
-          shadowWeight += 0.12;
-          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(-step1.x, -step1.y)));
-          shadowAccum += tap * 0.12;
-          shadowWeight += 0.12;
-
-          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2( step2.x, 0.0)));
-          shadowAccum += tap * 0.07;
-          shadowWeight += 0.07;
-          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(-step2.x, 0.0)));
-          shadowAccum += tap * 0.07;
-          shadowWeight += 0.07;
-          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(0.0,  step2.y)));
-          shadowAccum += tap * 0.07;
-          shadowWeight += 0.07;
-          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(0.0, -step2.y)));
-          shadowAccum += tap * 0.07;
-          shadowWeight += 0.07;
-
-          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2( step2.x,  step2.y)));
-          shadowAccum += tap * 0.04;
-          shadowWeight += 0.04;
-          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(-step2.x,  step2.y)));
-          shadowAccum += tap * 0.04;
-          shadowWeight += 0.04;
-          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2( step2.x, -step2.y)));
-          shadowAccum += tap * 0.04;
-          shadowWeight += 0.04;
-          tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(-step2.x, -step2.y)));
-          shadowAccum += tap * 0.04;
-          shadowWeight += 0.04;
-
-          float shadowA = (shadowWeight > 0.0) ? (shadowAccum / shadowWeight) : 0.0;
-          if (uBillboardShadowMode > 0.5) shadowA = 0.0;
-          shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
-
-          // Pass 1: shadow decal — canopy mesh draws above and occludes naturally.
+          // Pass 1: ground shadow — multi-tap blur only on the shadow mesh.
           if (uVegetationPass < 1.5) {
+            vec2 shadowDir = normalize(vec2(uSunDir.x, -uSunDir.y));
+            if (length(shadowDir) < 0.01) shadowDir = -windDir;
+            vec2 shadowOffset = shadowDir * uShadowLength;
+            float shadowBlur = max(0.0001, uShadowSoftness * 0.0008);
+            vec2 shadowBaseUv = vUv - distortion - shadowOffset;
+            vec2 step1 = vec2(shadowBlur);
+            vec2 step2 = step1 * 2.0;
+
+            float shadowAccum = 0.0;
+            float shadowWeight = 0.0;
+
+            float tap = safeAlpha(texture2D(uBushMask, shadowBaseUv));
+            shadowAccum += tap * 0.24;
+            shadowWeight += 0.24;
+
+            tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2( step1.x,  step1.y)));
+            shadowAccum += tap * 0.12;
+            shadowWeight += 0.12;
+            tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(-step1.x,  step1.y)));
+            shadowAccum += tap * 0.12;
+            shadowWeight += 0.12;
+            tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2( step1.x, -step1.y)));
+            shadowAccum += tap * 0.12;
+            shadowWeight += 0.12;
+            tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(-step1.x, -step1.y)));
+            shadowAccum += tap * 0.12;
+            shadowWeight += 0.12;
+
+            tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2( step2.x, 0.0)));
+            shadowAccum += tap * 0.07;
+            shadowWeight += 0.07;
+            tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(-step2.x, 0.0)));
+            shadowAccum += tap * 0.07;
+            shadowWeight += 0.07;
+            tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(0.0,  step2.y)));
+            shadowAccum += tap * 0.07;
+            shadowWeight += 0.07;
+            tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(0.0, -step2.y)));
+            shadowAccum += tap * 0.07;
+            shadowWeight += 0.07;
+
+            tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2( step2.x,  step2.y)));
+            shadowAccum += tap * 0.04;
+            shadowWeight += 0.04;
+            tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(-step2.x,  step2.y)));
+            shadowAccum += tap * 0.04;
+            shadowWeight += 0.04;
+            tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2( step2.x, -step2.y)));
+            shadowAccum += tap * 0.04;
+            shadowWeight += 0.04;
+            tap = safeAlpha(texture2D(uBushMask, shadowBaseUv + vec2(-step2.x, -step2.y)));
+            shadowAccum += tap * 0.04;
+            shadowWeight += 0.04;
+
+            float shadowA = (shadowWeight > 0.0) ? (shadowAccum / shadowWeight) : 0.0;
+            if (uBillboardShadowMode > 0.5) shadowA = 0.0;
+            shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
+
             if (uHasTreeCanopyOcclusion > 0.5) {
               vec2 screenUv = gl_FragCoord.xy / max(uScreenSize, vec2(1.0));
               float treeBlock = clamp(texture2D(uTreeCanopyOcclusion, screenUv).a, 0.0, 1.0);
               shadowA *= (1.0 - treeBlock);
             }
             if (uShadowLitCapture > 0.5) {
+              float texA = safeAlpha(texture2D(uBushMask, vUv - distortion));
               float lit = clamp(1.0 - shadowA, 0.0, 1.0);
-              // Ground-only lit factor — never darken pixels where foliage exists.
               lit = mix(lit, 1.0, clamp(texA * uIntensity, 0.0, 1.0));
               gl_FragColor = vec4(lit, lit, lit, 1.0);
               return;
@@ -1468,6 +1508,9 @@ export class BushEffectV2 {
             return;
           }
 
+          // Pass 2: canopy — single mask sample (distortion only, no shadow taps).
+          vec4 bushSample = texture2D(uBushMask, vUv - distortion);
+          float texA = safeAlpha(bushSample);
           float mainAlpha = texA * uIntensity;
           if (mainAlpha <= 0.001) discard;
 
@@ -1504,8 +1547,8 @@ export class BushEffectV2 {
     const mesh = new THREE.Mesh(geometry, material);
     shadowMesh.name = `BushV2Shadow_${tileId}`;
     mesh.name = `BushV2_${tileId}`;
-    shadowMesh.frustumCulled = false;
-    mesh.frustumCulled = false;
+    shadowMesh.frustumCulled = true;
+    mesh.frustumCulled = true;
     shadowMesh.userData = shadowMesh.userData || {};
     mesh.userData = mesh.userData || {};
     shadowMesh.userData.floorIndex = floorIndex;
@@ -1516,11 +1559,15 @@ export class BushEffectV2 {
     mesh.rotation.z = rotation;
 
     this._applyBushOverlayRenderOrders(shadowMesh, mesh, floorIndex, tileId);
+    applyVegetationAboveWaterLayer(shadowMesh, {});
+    applyVegetationAboveWaterLayer(mesh, {});
 
     this._renderBus.addEffectOverlay(`${tileId}_bush_shadow`, shadowMesh, floorIndex);
     this._renderBus.addEffectOverlay(`${tileId}_bush`, mesh, floorIndex);
-    this._overlays.set(tileId, { mesh, shadowMesh, material, shadowMaterial, floorIndex });
-    this._applyOverlayFloorVisibility();
+    const bounds = overlayWorldBounds(centerX, centerY, tileW, tileH);
+    this._overlays.set(tileId, { mesh, shadowMesh, material, shadowMaterial, floorIndex, bounds });
+    this._viewBoundsMayHaveChanged();
+    this._syncOverlayVisibility();
 
     // Load mask texture.
     this._loader.load(url, (tex) => {
@@ -1598,12 +1645,42 @@ export class BushEffectV2 {
     } catch (_) {}
   }
 
-  _applyOverlayFloorVisibility() {
+  /**
+   * @returns {boolean}
+   * @private
+   */
+  _viewBoundsMayHaveChanged() {
+    const cam = window.MapShine?.sceneComposer?.camera;
+    const sig = cameraViewBoundsSignature(cam);
+    if (sig === this._viewBoundsSignature) return false;
+    this._viewBoundsSignature = sig;
+    this._cachedViewBounds = resolveWorldViewBounds(
+      cam,
+      window.MapShine?.sceneComposer ?? null,
+      this._viewCullPadding,
+    );
+    return true;
+  }
+
+  /**
+   * Floor + camera view culling for overlay meshes.
+   * @private
+   */
+  _syncOverlayVisibility() {
     const maxFloor = this._getSafeVisibleMaxFloorIndex();
+    const view = this._cachedViewBounds;
     for (const entry of this._overlays.values()) {
-      const visible = this._enabled && Number(entry.floorIndex) <= maxFloor;
-      if (entry?.mesh) entry.mesh.visible = visible;
-      if (entry?.shadowMesh) entry.shadowMesh.visible = visible;
+      const floorOk = this._enabled && Number(entry.floorIndex) <= maxFloor;
+      const viewOk = !view || tileBoundsIntersectView(entry.bounds, view);
+      const visible = floorOk && viewOk;
+      if (entry?.mesh) {
+        entry.mesh.visible = visible;
+        applyVegetationAboveWaterLayer(entry.mesh, {});
+      }
+      if (entry?.shadowMesh) {
+        entry.shadowMesh.visible = visible;
+        applyVegetationAboveWaterLayer(entry.shadowMesh, {});
+      }
     }
   }
 }

@@ -659,7 +659,7 @@ export class ColorCorrectionEffectV2 {
           type: 'slider',
           label: 'Master gamma',
           min: 0.1,
-          max: 3,
+          max: 6,
           step: 0.01,
           default: 1.65,
           tooltip: 'Overall gamma after lift/gamma/gain (1 = neutral).',

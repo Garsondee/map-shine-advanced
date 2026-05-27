@@ -267,11 +267,22 @@ export class StateApplier {
   async applyTimeOfDay(hour, saveToScene = true, applyDarkness = true, syncFoundryTime = true) {
     try {
       const clampedHour = ((hour % 24) + 24) % 24;
-      
+
+      const weatherController = this._getWeatherController();
+      const wcHourRaw = weatherController?.getCurrentTime?.() ?? weatherController?.timeOfDay;
+      const wcHour = Number(wcHourRaw);
+      const hourAlreadyActive =
+        Number.isFinite(wcHour)
+        && Math.abs((((wcHour % 24) + 24) % 24) - clampedHour) < 1e-4;
+      if (hourAlreadyActive && !saveToScene && !syncFoundryTime) {
+        if (applyDarkness) {
+          await this._updateSceneDarkness(clampedHour);
+        }
+        return;
+      }
+
       log.debug(`Applying time of day: ${clampedHour.toFixed(2)}`);
 
-      // Forward to WeatherController (single source of truth for time-driven systems)
-      const weatherController = this._getWeatherController();
       if (weatherController && typeof weatherController.setTime === 'function') {
         weatherController.setTime(clampedHour);
       } else {
@@ -303,7 +314,7 @@ export class StateApplier {
         }
       }
 
-      log.info(`Time of day applied: ${clampedHour.toFixed(2)}`);
+      log.debug(`Time of day applied: ${clampedHour.toFixed(2)}`);
     } catch (error) {
       log.error('Failed to apply time of day:', error);
       throw error;

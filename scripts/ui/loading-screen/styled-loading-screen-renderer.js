@@ -96,6 +96,7 @@ export class StyledLoadingScreenRenderer {
 
   startStages(opts = undefined) {
     this.ensure();
+    this._ensureStagePillRow();
     const stages = Array.isArray(opts?.stages) ? opts.stages : this._stages;
     if (!Array.isArray(stages) || stages.length === 0) {
       this._stageState = null;
@@ -250,7 +251,8 @@ export class StyledLoadingScreenRenderer {
   prepareForCover(message = 'Loading…') {
     this.ensure();
     this._token++;
-    this._resetProgress();
+    // Keep stage pill DOM when the curtain re-arms mid-load; only reset the bar.
+    this._resetProgressBarOnly();
     this.setMessage(message);
 
     this.el.style.display = 'block';
@@ -340,6 +342,8 @@ export class StyledLoadingScreenRenderer {
 
     if (!this._contentEl) return;
 
+    this._ensureStagePillRow();
+    this._renderStagePills();
     this._restartEntranceAnimations();
     this._startTimer();
     this._startHintsRotation();
@@ -526,13 +530,20 @@ export class StyledLoadingScreenRenderer {
   async whenStagePillsReady(maxWaitMs = 3000) {
     this.ensure();
     const expected = this._stageState?.ranges?.size ?? 0;
-    if (!expected || !this._stageRow) return;
+    if (!expected) return;
+
+    this._ensureStagePillRow();
+    if (!this._stageRow) return;
 
     const limit = Math.max(100, Number.isFinite(maxWaitMs) ? maxWaitMs : 3000);
     const start = performance.now();
 
     while (performance.now() - start < limit) {
-      const count = this._stageRow.children?.length ?? 0;
+      let count = this._stageRow.children?.length ?? 0;
+      if (count < expected) {
+        this._renderStagePills();
+        count = this._stageRow.children?.length ?? 0;
+      }
       if (count >= expected) {
         await this._nextFrame();
         await this._nextFrame();
@@ -540,6 +551,7 @@ export class StyledLoadingScreenRenderer {
       }
       await this._nextFrame();
     }
+    this._renderStagePills();
   }
 
   enableDebugMode() {
@@ -593,13 +605,50 @@ export class StyledLoadingScreenRenderer {
     if (pctEl) pctEl.textContent = `${Math.round(clamp(value01, 0, 1) * 100)}%`;
   }
 
-  _resetProgress() {
+  _resetProgressBarOnly() {
     this._autoProgress = null;
     this._progressCurrent = 0;
     this._progressTarget = 0;
     this._applyProgress(0);
     this._stopProgressLoop();
+  }
+
+  _resetProgress() {
+    this._resetProgressBarOnly();
     if (this._stageRow) this._stageRow.innerHTML = '';
+    this._renderStagePills();
+  }
+
+  /**
+   * Guarantee a stage-pills host exists (custom layouts may omit the element).
+   * @private
+   */
+  _ensureStagePillRow() {
+    if (this._stageRow) return;
+    this.ensure();
+    const elements = Array.isArray(this._config.layout?.elements) ? this._config.layout.elements : [];
+    const hasConfiguredElement = elements.some((e) => String(e?.type || '') === 'stage-pills');
+    if (hasConfiguredElement) {
+      this._rebuild();
+      return;
+    }
+    if (!this._contentEl) return;
+    const row = document.createElement('div');
+    row.className = 'map-shine-styled-loading-overlay__stage-row map-shine-styled-loading-overlay__element';
+    row.dataset.elementId = 'stage-pills-fallback';
+    row.dataset.elementType = 'stage-pills';
+    row.style.left = '50%';
+    row.style.top = '50%';
+    applyAnchor(row, 'center');
+    row.style.width = 'max-content';
+    row.style.maxWidth = 'min(72%, calc(100vw - 24px))';
+    row.style.padding = '8px 12px';
+    row.style.borderRadius = '999px';
+    row.style.background = 'rgba(6,10,20,0.62)';
+    row.style.border = '1px solid rgba(120,160,255,0.24)';
+    row.style.justifyContent = 'center';
+    this._contentEl.appendChild(row);
+    this._stageRow = row;
   }
 
   _stopProgressLoop() {

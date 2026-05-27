@@ -23,7 +23,7 @@
  *   - Multi-octave wave system with warp, evolution, and wind coupling
  *   - Shore foam with curl noise breakup + floating foam clumps
  *   - Shader-based foam flecks (ifdef USE_FOAM_FLECKS)
- *   - Murk (subsurface silt/algae)
+ *   - Murk (subsurface silt/algae; multi-layer clouds, color/thickness variation, chaos)
  *   - GGX specular with anisotropy + optional surface chaos (patchy roughness, capillary normals)
  *   - Chromatic aberration (runtime toggle + thresholded Kawase blur)
  *   - Multi-tap refraction (ifdef USE_WATER_REFRACTION_MULTITAP)
@@ -64,9 +64,16 @@ void main() {
 
 export function getFragmentShader() {
   return /* glsl */`
-// tNoiseMap: use texture2DLodEXT(..., 0.0) so sampling does not rely on implicit
-// screen-space gradients inside loops (ANGLE/D3D X3595). Three maps this to textureLod on WebGL2.
+// tNoiseMap: use explicit LOD sampling so loops do not rely on implicit screen-space
+// derivatives (ANGLE/D3D X3595). MSA_TEXTURE_LOD maps to textureLod on WebGL2.
+#if __VERSION__ >= 300
+#define MSA_TEXTURE_LOD(tex, uv, lod) textureLod(tex, uv, lod)
+#else
+#define MSA_TEXTURE_LOD(tex, uv, lod) texture2DLodEXT(tex, uv, lod)
+#endif
 
+// Main color: gl_FragColor (Three.js maps to pc_fragColor @ location 0 on WebGL2).
+// Bloom MRT: only declare location 1 — do not declare location 0 (conflicts with Three).
 #ifdef USE_WATER_SPEC_BLOOM_RT
 layout(location = 1) out highp vec4 pc_fragColor1;
 #define MSA_BLOOM_RT_ZERO pc_fragColor1 = vec4(0.0)
@@ -75,6 +82,7 @@ layout(location = 1) out highp vec4 pc_fragColor1;
 #define MSA_BLOOM_RT_ZERO
 #define MSA_BLOOM_RT_COMMIT(rgb)
 #endif
+#define MSA_FRAG_COLOR gl_FragColor
 
 // ── Texture samplers ─────────────────────────────────────────────────────
 uniform sampler2D tDiffuse;       // Scene RT (lit + sky + filter; user CC runs after water in FloorCompositor)
@@ -405,14 +413,35 @@ uniform float uFoamFlecksIntensity;
 uniform float uMurkEnabled;
 uniform float uMurkIntensity;
 uniform vec3 uMurkColor;
+uniform vec3 uMurkColorAlt;
+uniform float uMurkColorVariation;
+uniform float uMurkHueScatter;
+uniform float uMurkSaturation;
+uniform float uMurkLumaVariation;
 uniform float uMurkScale;
 uniform float uMurkSpeed;
 uniform float uMurkDepthLo;
 uniform float uMurkDepthHi;
+uniform float uMurkDepthFade;
+uniform float uMurkCloudLo;
+uniform float uMurkCloudHi;
+uniform float uMurkCloudGamma;
+uniform float uMurkPatchScale;
+uniform float uMurkPatchMix;
+uniform float uMurkDetailScale;
+uniform float uMurkDetailMix;
+uniform float uMurkDensityContrast;
+uniform float uMurkThicknessVariation;
+uniform float uMurkThicknessChaos;
+uniform float uMurkStrengthLo;
+uniform float uMurkStrengthHi;
+uniform float uMurkWarpStrength;
+uniform float uMurkChaos;
+uniform float uMurkChaosSpeed;
+uniform vec2 uMurkSeedOffset;
 uniform float uMurkGrainScale;
 uniform float uMurkGrainSpeed;
 uniform float uMurkGrainStrength;
-uniform float uMurkDepthFade;
 
 // ── Debug ────────────────────────────────────────────────────────────────
 uniform float uDebugView;
@@ -479,10 +508,10 @@ float valueNoise2D(vec2 p) {
   vec2 i = floor(p);
   vec2 f = fract(p);
   vec2 u = f * f * (3.0 - 2.0 * f);
-  float a = texture2DLodEXT(tNoiseMap, (i + 0.5) * NOISE_INV, 0.0).r;
-  float b = texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV, 0.0).r;
-  float c = texture2DLodEXT(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV, 0.0).r;
-  float d = texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV, 0.0).r;
+  float a = MSA_TEXTURE_LOD(tNoiseMap, (i + 0.5) * NOISE_INV, 0.0).r;
+  float b = MSA_TEXTURE_LOD(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV, 0.0).r;
+  float c = MSA_TEXTURE_LOD(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV, 0.0).r;
+  float d = MSA_TEXTURE_LOD(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV, 0.0).r;
   return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
@@ -505,30 +534,30 @@ float fbmNoise(vec2 p) {
   i = floor(p); f = fract(p); u = f * f * (3.0 - 2.0 * f);
   i = mod(i, NOISE_SIZE);
   float n0 = mix(mix(
-    texture2DLodEXT(tNoiseMap, (i + 0.5) * NOISE_INV, 0.0).r,
-    texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV, 0.0).r, u.x), mix(
-    texture2DLodEXT(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV, 0.0).r,
-    texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV, 0.0).r, u.x), u.y);
+    MSA_TEXTURE_LOD(tNoiseMap, (i + 0.5) * NOISE_INV, 0.0).r,
+    MSA_TEXTURE_LOD(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV, 0.0).r, u.x), mix(
+    MSA_TEXTURE_LOD(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV, 0.0).r,
+    MSA_TEXTURE_LOD(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV, 0.0).r, u.x), u.y);
 
   p = octRot * p * 2.0;
   p = mod(p, NOISE_SIZE);
   i = floor(p); f = fract(p); u = f * f * (3.0 - 2.0 * f);
   i = mod(i, NOISE_SIZE);
   float n1 = mix(mix(
-    texture2DLodEXT(tNoiseMap, (i + 0.5) * NOISE_INV, 0.0).g,
-    texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV, 0.0).g, u.x), mix(
-    texture2DLodEXT(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV, 0.0).g,
-    texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV, 0.0).g, u.x), u.y);
+    MSA_TEXTURE_LOD(tNoiseMap, (i + 0.5) * NOISE_INV, 0.0).g,
+    MSA_TEXTURE_LOD(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV, 0.0).g, u.x), mix(
+    MSA_TEXTURE_LOD(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV, 0.0).g,
+    MSA_TEXTURE_LOD(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV, 0.0).g, u.x), u.y);
 
   p = octRot * p * 2.0;
   p = mod(p, NOISE_SIZE);
   i = floor(p); f = fract(p); u = f * f * (3.0 - 2.0 * f);
   i = mod(i, NOISE_SIZE);
   float n2 = mix(mix(
-    texture2DLodEXT(tNoiseMap, (i + 0.5) * NOISE_INV, 0.0).b,
-    texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV, 0.0).b, u.x), mix(
-    texture2DLodEXT(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV, 0.0).b,
-    texture2DLodEXT(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV, 0.0).b, u.x), u.y);
+    MSA_TEXTURE_LOD(tNoiseMap, (i + 0.5) * NOISE_INV, 0.0).b,
+    MSA_TEXTURE_LOD(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV, 0.0).b, u.x), mix(
+    MSA_TEXTURE_LOD(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV, 0.0).b,
+    MSA_TEXTURE_LOD(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV, 0.0).b, u.x), u.y);
 
   return (n0 - 0.5) * 1.14 + (n1 - 0.5) * 0.62 + (n2 - 0.5) * 0.36;
 }
@@ -1084,8 +1113,8 @@ float causticsPattern(vec2 sceneUv, float t, float scale, float speed, float sha
   float tt = t * speed;
   vec2 uv1 = fract(p + vec2(tt * 0.12, -tt * 0.09));
   vec2 uv2 = fract(p * 1.7 + vec2(-tt * 0.08, tt * 0.11));
-  float n1 = texture2DLodEXT(tNoiseMap, uv1, 0.0).r;
-  float n2 = texture2DLodEXT(tNoiseMap, uv2, 0.0).g;
+  float n1 = MSA_TEXTURE_LOD(tNoiseMap, uv1, 0.0).r;
+  float n2 = MSA_TEXTURE_LOD(tNoiseMap, uv2, 0.0).g;
   float nn = clamp(0.6 * n1 + 0.4 * n2, 0.0, 1.0);
   float ridge = 1.0 - abs(2.0 * nn - 1.0);
   float s = max(0.1, sharpness);
@@ -1489,7 +1518,8 @@ float waterCombinedShadowLit(vec2 screenUv, vec2 sceneUv01) {
 }
 
 // ── Murk (subsurface silt/algae) ─────────────────────────────────────────
-vec3 applyMurk(vec2 sceneUv, float t, float inside, float shore, float outdoorStrength, float indoorWindMotion, vec3 baseColor, out float murkFactorOut, float shadowLitFactor) {
+// maskDepth01: composited _Water mask intensity (0 = land/shore, 1 = deep open water).
+vec3 applyMurk(vec2 sceneUv, float t, float inside, float maskDepth01, float outdoorStrength, float indoorWindMotion, vec3 baseColor, out float murkFactorOut, float shadowLitFactor) {
   murkFactorOut = 0.0;
   if (uMurkEnabled < 0.5) return baseColor;
   #ifndef USE_MURK
@@ -1500,39 +1530,82 @@ vec3 applyMurk(vec2 sceneUv, float t, float inside, float shore, float outdoorSt
   float murkScale = max(0.1, uMurkScale);
   float murkSpeed = max(0.0, uMurkSpeed);
   float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
-  // Offset by a large constant so the FBM domain centre sits far from the
-  // scene UV [0,1] boundary. Without this offset the low-frequency FBM bands
-  // have a visible seam/edge at the scene extents (tiling artifact).
-  vec2 murkBasis = vec2(sceneUv.x * sceneAspect, sceneUv.y) + vec2(47.3, 31.7);
+  vec2 murkBasis = vec2(sceneUv.x * sceneAspect, sceneUv.y) + vec2(47.3, 31.7) + uMurkSeedOffset;
   vec2 windF = uWindDir; float windLen = length(windF);
   windF = (windLen > 1e-6) ? (windF / windLen) : vec2(1.0, 0.0);
   vec2 windBasis = normalize(vec2(windF.x * sceneAspect, windF.y));
   vec2 windPerp = vec2(-windBasis.y, windBasis.x);
-
   vec2 driftAspect = vec2(uWindDrift.x * sceneAspect, uWindDrift.y) * indoorWindMotion;
   vec2 driftAspectPerp = vec2(-driftAspect.y, driftAspect.x);
-
-  vec2 cloudUv = murkBasis * murkScale;
   vec2 cloudDrift = driftAspect * (murkSpeed * 0.22);
-  vec2 cloudWarp = curlNoise2D((cloudUv - cloudDrift) * 0.45) * 0.45;
+
+  float chaosAmt = clamp(uMurkChaos, 0.0, 1.0);
+  float chaosSpeed = max(0.0, uMurkChaosSpeed);
+  vec2 chaosWarp = curlNoise2D(murkBasis * 0.11 + vec2(t * chaosSpeed * 0.17, t * chaosSpeed * 0.13)) * chaosAmt * 1.35;
+  murkBasis += chaosWarp;
+
+  float warpStr = clamp(uMurkWarpStrength, 0.0, 2.0);
+  vec2 cloudUv = murkBasis * murkScale;
+  vec2 cloudWarp = curlNoise2D((cloudUv - cloudDrift) * 0.45) * warpStr;
   float cloudA = valueNoise2D(cloudUv - cloudDrift + cloudWarp);
   float cloudB = valueNoise2D(cloudUv * 0.57 - cloudDrift * 0.73 + windPerp * 0.35 + vec2(17.3, 9.1) - cloudWarp * 0.35);
   float cloud = clamp(0.5 + 0.5 * (0.65 * cloudA + 0.35 * cloudB), 0.0, 1.0);
-  cloud = smoothstep(0.30, 0.78, cloud);
+
+  float patchMix = clamp(uMurkPatchMix, 0.0, 1.0);
+  if (patchMix > 0.001) {
+    float patchScale = murkScale * max(0.05, uMurkPatchScale);
+    vec2 patchUv = murkBasis * patchScale + vec2(91.2, -33.7);
+    float patchA = valueNoise2D(patchUv - cloudDrift * 0.62 + cloudWarp * 0.48);
+    float patchB = valueNoise2D(patchUv * 0.41 - cloudDrift * 0.51 + vec2(5.1, 19.8) + windPerp * 0.22);
+    float cloudPatch = clamp(0.5 + 0.5 * (0.58 * patchA + 0.42 * patchB), 0.0, 1.0);
+    cloud = mix(cloud, cloud * cloudPatch, patchMix);
+  }
+
+  float detailMix = clamp(uMurkDetailMix, 0.0, 1.0);
+  if (detailMix > 0.001) {
+    float detailScale = murkScale * max(0.1, uMurkDetailScale);
+    vec2 detailUv = murkBasis * detailScale + vec2(-12.4, 44.1);
+    float detailN = valueNoise2D(detailUv - cloudDrift * 1.28 + chaosWarp * 2.2);
+    float detail = clamp(0.5 + 0.5 * detailN, 0.0, 1.0);
+    cloud = mix(cloud, cloud * detail, detailMix * (0.82 + chaosAmt * 0.18));
+  }
+
+  float cLo = clamp(uMurkCloudLo, 0.0, 1.0);
+  float cHi = clamp(uMurkCloudHi, 0.0, 1.0);
+  float mcLo = min(cLo, cHi - 0.001);
+  float mcHi = max(cHi, mcLo + 0.001);
+  cloud = smoothstep(mcLo, mcHi, cloud);
+  cloud = pow(cloud, max(0.1, uMurkCloudGamma));
+  float densityContrast = max(0.01, uMurkDensityContrast);
+  cloud = clamp(0.5 + (cloud - 0.5) * densityContrast, 0.0, 1.0);
+
   float depthLo = clamp(uMurkDepthLo, 0.0, 1.0);
   float depthHi = clamp(uMurkDepthHi, 0.0, 1.0);
   float mdLo = min(depthLo, depthHi - 0.001);
   float mdHi = max(depthHi, mdLo + 0.001);
-  float depthMask = smoothstep(mdLo, mdHi, clamp(shore, 0.0, 1.0));
+  float depthMask = smoothstep(mdLo, mdHi, clamp(maskDepth01, 0.0, 1.0));
   float depthFactor = pow(depthMask, max(0.1, uMurkDepthFade));
+
+  float thickVar = clamp(uMurkThicknessVariation, 0.0, 2.0);
+  float thickChaos = clamp(uMurkThicknessChaos, 0.0, 2.0);
+  float thickN1 = valueNoise2D(murkBasis * murkScale * 1.72 + cloudWarp * 0.35);
+  float thickN2 = valueNoise2D(murkBasis * murkScale * 4.15 - cloudDrift + vec2(29.1, -7.4));
+  float thickBlend = clamp(0.5 + 0.5 * (0.56 * thickN1 + 0.44 * thickN2), 0.0, 1.0);
+  float thickMod = mix(1.0, 0.25 + 0.75 * thickBlend, thickVar);
+  if (thickChaos > 0.001) {
+    float thickN3 = valueNoise2D(murkBasis * murkScale * 7.3 + chaosWarp * 3.1 - cloudDrift * 0.8);
+    thickMod *= mix(1.0, 0.35 + 0.65 * thickN3, thickChaos * 0.55);
+  }
+  float sLo = clamp(uMurkStrengthLo, 0.0, 1.0);
+  float sHi = clamp(uMurkStrengthHi, 0.0, 1.0);
+  float msLo = min(sLo, sHi - 0.001);
+  float msHi = max(sHi, msLo + 0.001);
+  thickMod *= smoothstep(msLo, msHi, thickMod);
+
   float grainScale = max(10.0, uMurkGrainScale);
   float grainSpeed = max(0.0, uMurkGrainSpeed);
-  // Same domain offset as murkBasis to keep grain seamlessly continuous
-  // across the scene UV [0,1] extents.
-  vec2 grainBasis = vec2(sceneUv.x * sceneAspect, sceneUv.y) + vec2(47.3, 31.7);
+  vec2 grainBasis = vec2(sceneUv.x * sceneAspect, sceneUv.y) + vec2(47.3, 31.7) + uMurkSeedOffset;
   vec2 grainDrift = driftAspect * ((murkSpeed + grainSpeed) * 1.8);
-  // Keep the fine-grain evolution locked to the wind basis so the suspended
-  // silt motion always aligns with wind direction.
   vec2 grainEvo = driftAspect * (grainSpeed * 0.95) + driftAspectPerp * (grainSpeed * 0.22);
   vec2 gUv1 = grainBasis * (grainScale * 1.0) - grainDrift + grainEvo;
   vec2 gUv2 = grainBasis * (grainScale * 2.35) - grainDrift * 2.1 - grainEvo * 1.6 + vec2(23.4, 7.1);
@@ -1546,15 +1619,39 @@ vec3 applyMurk(vec2 sceneUv, float t, float inside, float shore, float outdoorSt
   float grit = clamp(0.55 * g1 + 0.30 * g2 + 0.15 * g3, 0.0, 1.0);
   float grain = pow(grit, 14.0) * clamp(uMurkGrainStrength, 0.0, 2.0);
   grain *= smoothstep(0.45, 0.95, cloud) * depthFactor;
-  float murkFactor = clamp(cloud * depthFactor * murkIntensity * inside, 0.0, 1.0);
+
+  float murkFactor = clamp(cloud * depthFactor * murkIntensity * inside * thickMod, 0.0, 1.0);
   murkFactorOut = murkFactor;
-  vec3 murkColor = clamp(uMurkColor, vec3(0.0), vec3(1.0));
+
+  vec3 murkBase = clamp(uMurkColor, vec3(0.0), vec3(1.0));
+  vec3 murkAlt = clamp(uMurkColorAlt, vec3(0.0), vec3(1.0));
+  float colorN1 = valueNoise2D(murkBasis * murkScale * 0.86 + vec2(3.1, 8.7));
+  float colorN2 = valueNoise2D(murkBasis * murkScale * 2.05 - cloudDrift * 0.42 + windPerp * 0.18);
+  float colorBlend = clamp(0.5 + 0.5 * (0.68 * colorN1 + 0.32 * colorN2), 0.0, 1.0);
+  float colorVar = clamp(uMurkColorVariation, 0.0, 1.0);
+  vec3 murkColor = mix(murkBase, murkAlt, colorBlend * colorVar);
+
+  float hueScatter = clamp(uMurkHueScatter, 0.0, 1.0);
+  if (hueScatter > 0.001) {
+    float hueN = valueNoise2D(murkBasis * murkScale * 0.52 + chaosWarp * 0.65);
+    float hueShift = (hueN * 2.0 - 1.0) * hueScatter;
+    murkColor.r = clamp(murkColor.r + hueShift * 0.14, 0.0, 1.0);
+    murkColor.g = clamp(murkColor.g + hueShift * 0.07, 0.0, 1.0);
+    murkColor.b = clamp(murkColor.b - hueShift * 0.11, 0.0, 1.0);
+  }
+
+  float sat = max(0.0, uMurkSaturation);
+  float lumaVar = clamp(uMurkLumaVariation, 0.0, 1.0);
+  float murkLuma = dot(murkColor, vec3(0.299, 0.587, 0.114));
+  float satNoise = mix(1.0, 0.55 + 0.9 * colorN2, lumaVar * 0.65);
+  murkColor = mix(vec3(murkLuma), murkColor, sat * satNoise);
+  float lumaMod = mix(1.0, 0.58 + 0.84 * colorN1, lumaVar);
+
   float darkness = clamp(uSceneDarkness, 0.0, 1.0);
   float murkDarkScale = mix(1.0, 0.22, darkness);
   float baseLuma = dot(baseColor, vec3(0.299, 0.587, 0.114));
   float localLight = clamp(0.35 + baseLuma * 0.85, 0.2, 1.0);
-  
-  // ShadowManager + painted lit factor (passed from main; includes multi-floor painted).
+
   float shadowDarken = 1.0;
   if (uMurkShadowEnabled > 0.5 && (uHasCombinedShadow > 0.5 || uHasPaintedShadowLit > 0.5)) {
     float shadowLit = clamp(shadowLitFactor, 0.0, 1.0);
@@ -1562,9 +1659,9 @@ vec3 applyMurk(vec2 sceneUv, float t, float inside, float shore, float outdoorSt
     float shadowStrength = clamp(uMurkShadowStrength, 0.0, 2.0);
     shadowDarken = 1.0 - (shadowOcclusion * shadowStrength);
   }
-  
+
   vec3 muckyCol = mix(murkColor * 0.6, murkColor, cloud);
-  muckyCol *= murkDarkScale * localLight * shadowDarken;
+  muckyCol *= lumaMod * murkDarkScale * localLight * shadowDarken;
   muckyCol += grain * 0.35 * murkDarkScale * localLight * shadowDarken;
   return mix(baseColor, muckyCol, murkFactor);
   #endif
@@ -1586,10 +1683,16 @@ float waterOccluderAlphaSoft(vec2 screenUv) {
   return 0.72 * c + 0.07 * (n + s + e + w);
 }
 
-// Non-_Water bus tiles on the water-source floor (cached deck mask).
+// Non-_Water bus tiles on the water-source floor (cached deck mask, RT alpha).
 float waterRoofBlockOcc(vec2 screenUv) {
   if (uHasOverheadRoofBlock < 0.5) return 0.0;
   return smoothstep(0.34, 0.66, texture2D(tOverheadRoofBlock, screenUv).a);
+}
+
+// Bush/tree canopy in RT green — suppress refraction under foliage (G channel, same sampler).
+float waterVegetationFoothold(vec2 screenUv) {
+  if (uHasOverheadRoofBlock < 0.5) return 0.0;
+  return smoothstep(0.10, 0.88, texture2D(tOverheadRoofBlock, screenUv).g);
 }
 
 // Deck mask × source slice scene alpha (screen-space punch over river UV).
@@ -1765,11 +1868,11 @@ void main() {
   // it alone still tints every pixel cyan/magenta.
   if (uDebugWaterPassTint > 2.5) {
     MSA_BLOOM_RT_ZERO;
-    gl_FragColor = vec4(1.0, 1.0, 0.0, 1.0);
+    MSA_FRAG_COLOR = vec4(1.0, 1.0, 0.0, 1.0);
     return;
   }
   float isEnabled = step(0.5, uWaterEnabled) * step(0.5, uHasWaterData);
-  if (isEnabled < 0.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = base; return; }
+  if (isEnabled < 0.5) { MSA_BLOOM_RT_ZERO; MSA_FRAG_COLOR = base; return; }
   // Occluder mask: upper-floor tiles rendered to screen-space RT (tile union →
   // stair-step edges). Soft-filter + blend instead of a hard 0.5 test.
   float occluderBlend = 0.0;
@@ -1779,7 +1882,7 @@ void main() {
   }
   if (occluderBlend > 0.995) {
     MSA_BLOOM_RT_ZERO;
-    gl_FragColor = base;
+    MSA_FRAG_COLOR = base;
     return;
   }
 
@@ -1798,7 +1901,7 @@ void main() {
       // Relative threshold so upper-floor tiles don't fully cull lower-floor water.
       if (ratio < 0.99995 && aboveActiveFloor > 0.5) {
         MSA_BLOOM_RT_ZERO;
-        gl_FragColor = base;
+        MSA_FRAG_COLOR = base;
         return;
       }
     }
@@ -1811,13 +1914,21 @@ void main() {
     sceneUv = foundryToSceneUv(foundryPos);
     worldSceneUv = sceneUv;
     float inScene = step(0.0, sceneUv.x) * step(sceneUv.x, 1.0) * step(0.0, sceneUv.y) * step(sceneUv.y, 1.0);
-    if (inScene < 0.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = base; return; }
+    if (inScene < 0.5) { MSA_BLOOM_RT_ZERO; MSA_FRAG_COLOR = base; return; }
     sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
   }
 
   vec4 wd = texture2D(tWaterData, sceneUv);
   float shoreFromPack = wd.g;
   float rawAuth = waterRawMaskIntensity(sceneUv);
+  // Mask gradient via texel taps (safe under divergent early returns; no dFdx/fwidth).
+  float rawMaskTap = max(uWaterRawMaskTexelSize.x, uWaterRawMaskTexelSize.y);
+  vec2 rawMaskTapUv = vec2(rawMaskTap);
+  float rawAuthL = waterRawMaskIntensity(sceneUv - vec2(rawMaskTapUv.x, 0.0));
+  float rawAuthR = waterRawMaskIntensity(sceneUv + vec2(rawMaskTapUv.x, 0.0));
+  float rawAuthD = waterRawMaskIntensity(sceneUv - vec2(0.0, rawMaskTapUv.y));
+  float rawAuthU = waterRawMaskIntensity(sceneUv + vec2(0.0, rawMaskTapUv.y));
+  float rawGrad = length(vec2(rawAuthR - rawAuthL, rawAuthU - rawAuthD));
   // Authoritative coverage from composited _Water; packed G = mask-gradient shore band.
   float inside = rawAuth;
   float shore = clamp(shoreFromPack * rawAuth, 0.0, 1.0);
@@ -1869,9 +1980,9 @@ void main() {
       float occVis = (uHasWaterOccluderAlpha > 0.5) ? waterOccluderAlphaSoft(vUv) : 0.0;
       float occBlend = smoothstep(0.36, 0.64, occVis);
       vec3 rgb = mix(dbg, base.rgb, occBlend);
-      gl_FragColor = vec4(rgb, 1.0);
+      MSA_FRAG_COLOR = vec4(rgb, 1.0);
     } else {
-      gl_FragColor = base;
+      MSA_FRAG_COLOR = base;
     }
     return;
   }
@@ -1896,37 +2007,37 @@ void main() {
     float d = floor(uDebugView + 0.5);
     if (d < 1.5) {
       MSA_BLOOM_RT_ZERO;
-      if (uHasWaterRawMask < 0.5) gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0);
-      else gl_FragColor = vec4(vec3(texture2D(tWaterRawMask, sceneUv).r), 1.0);
+      if (uHasWaterRawMask < 0.5) MSA_FRAG_COLOR = vec4(1.0, 0.0, 1.0, 1.0);
+      else MSA_FRAG_COLOR = vec4(vec3(texture2D(tWaterRawMask, sceneUv).r), 1.0);
       return;
     }
-    if (d < 2.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = vec4(vec3(inside), 1.0); return; }
-    if (d < 3.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = vec4(vec3(wd.r), 1.0); return; }
-    if (d < 4.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = vec4(vec3(shoreFromPack), 1.0); return; }
-    if (d < 5.5) { MSA_BLOOM_RT_ZERO; vec2 nn = smoothFlow2D(sceneUv); gl_FragColor = vec4(nn * 0.5 + 0.5, 0.0, 1.0); return; }
+    if (d < 2.5) { MSA_BLOOM_RT_ZERO; MSA_FRAG_COLOR = vec4(vec3(inside), 1.0); return; }
+    if (d < 3.5) { MSA_BLOOM_RT_ZERO; MSA_FRAG_COLOR = vec4(vec3(wd.r), 1.0); return; }
+    if (d < 4.5) { MSA_BLOOM_RT_ZERO; MSA_FRAG_COLOR = vec4(vec3(shoreFromPack), 1.0); return; }
+    if (d < 5.5) { MSA_BLOOM_RT_ZERO; vec2 nn = smoothFlow2D(sceneUv); MSA_FRAG_COLOR = vec4(nn * 0.5 + 0.5, 0.0, 1.0); return; }
     if (d < 6.5) {
       MSA_BLOOM_RT_ZERO;
       float wv = 0.5 + 0.5 * waveHeight(sceneUv, uWaveTime * waveShelter01, waveMotion01);
-      gl_FragColor = vec4(vec3(wv), 1.0);
+      MSA_FRAG_COLOR = vec4(vec3(wv), 1.0);
       return;
     }
-    if (d < 7.5) { MSA_BLOOM_RT_ZERO; gl_FragColor = vec4(vec3(distMask), 1.0); return; }
+    if (d < 7.5) { MSA_BLOOM_RT_ZERO; MSA_FRAG_COLOR = vec4(vec3(distMask), 1.0); return; }
     if (d < 8.5) {
       MSA_BLOOM_RT_ZERO;
       float occ = (uHasWaterOccluderAlpha > 0.5) ? waterOccluderAlphaSoft(vUv) : 0.0;
-      gl_FragColor = vec4(vec3(occ), 1.0);
+      MSA_FRAG_COLOR = vec4(vec3(occ), 1.0);
       return;
     }
     if (d < 9.5) {
       MSA_BLOOM_RT_ZERO;
-      gl_FragColor = vec4(skyReflection, base.a);
+      MSA_FRAG_COLOR = vec4(skyReflection, base.a);
       return;
     }
     MSA_BLOOM_RT_ZERO;
-    gl_FragColor = vec4(1.0, 0.0, 1.0, 1.0); return;
+    MSA_FRAG_COLOR = vec4(1.0, 0.0, 1.0, 1.0); return;
   }
 
-  if (inside < 0.01) { MSA_BLOOM_RT_ZERO; gl_FragColor = base; return; }
+  if (inside < 0.01) { MSA_BLOOM_RT_ZERO; MSA_FRAG_COLOR = base; return; }
 
   // Animated distortion (single calculateWave: reuse height + gradient).
   // waveShelter01: per-pixel _Outdoors shelter (computed above with indoorWindMotion).
@@ -1996,8 +2107,10 @@ void main() {
   if (uCrossSliceWaterData > 0.5) {
     offsetUvRaw *= 0.14;
   }
+  float vegFoothold = waterVegetationFoothold(vUv);
+  offsetUvRaw *= (1.0 - vegFoothold);
   vec2 offsetUv = offsetUvRaw * distMask;
-  vec2 uv1Candidate = vUv + offsetUv;
+  vec2 uv1Candidate = mix(vUv + offsetUv, vUv, vegFoothold);
   vec2 uv1 = clamp(uv1Candidate, vec2(0.001), vec2(0.999));
 
   // If the distorted center UV would sample outside the water body or into an
@@ -2006,7 +2119,8 @@ void main() {
   float edgeFade = screenUvEdgeFade(uv1Candidate);
   offsetUv *= v1;
   offsetUv *= edgeFade;
-  uv1 = clamp(vUv + offsetUv, vec2(0.001), vec2(0.999));
+  vec2 uv1Refract = clamp(vUv + offsetUv, vec2(0.001), vec2(0.999));
+  uv1 = mix(uv1Refract, vUv, vegFoothold);
   vec4 centerSample = texture2D(tDiffuse, uv1);
 
   #ifdef USE_WATER_REFRACTION_MULTITAP
@@ -2040,7 +2154,6 @@ void main() {
     float caRawEdgeBand = clamp(4.0 * rawAuth * (1.0 - rawAuth), 0.0, 1.0);
     caRawEdgeBand = pow(caRawEdgeBand, 1.9);
     // Require actual mask gradient so wide soft plateaus don't get broad CA tint.
-    float rawGrad = length(vec2(dFdx(rawAuth), dFdy(rawAuth)));
     float caGradGate = smoothstep(0.006, 0.03, rawGrad);
     float caEdgeMask = caCoverageMask * caRawEdgeBand * caGradGate * caLumaGate;
     float caPx = caPxBase * caEdgeMask;
@@ -2154,7 +2267,7 @@ void main() {
 
   // Murk
   float murkFactor = 0.0;
-  col = applyMurk(sceneUv, uTime, inside, shore, outdoorStrength, indoorWindMotion, col, murkFactor, combinedShadowLit);
+  col = applyMurk(sceneUv, uTime, inside, rawAuth, outdoorStrength, indoorWindMotion, col, murkFactor, combinedShadowLit);
 
   // Tint - use darkening approach instead of brightening
   float sceneDarkness = clamp(uSceneDarkness, 0.0, 1.0);
@@ -2517,11 +2630,8 @@ void main() {
     rough = clamp(rough + chR * (0.032 + 0.145 * rPatch), 0.001, 1.0);
   }
 
-  // Specular AA: if the normal/slope varies too fast across pixels, GGX produces
-  // sub-pixel sparkles (thin scratchy lines). Increase roughness locally to
-  // band-limit the highlight.
-  vec2 fw = fwidth(slope);
-  float slopeFw = clamp(length(fw), 0.0, 1.0);
+  // Specular AA without fwidth (derivatives invalid after per-pixel early returns).
+  float slopeFw = clamp(length(slope) * 3.5, 0.0, 1.0);
   float aa = slopeFw * clamp(uSpecAAStrength, 0.0, 10.0);
   rough = clamp(rough + aa, 0.001, 1.0);
   // Widen highlight lobe when underlying scene was Kawase-blurred (matches softer bus).
@@ -2740,7 +2850,7 @@ void main() {
   // when col holds water — upper-floor holes then show void instead of lower water.
   float waterOutA = max(base.a, clamp(inside, 0.0, 1.0));
   waterOutA = mix(waterOutA, base.a, occluderBlend);
-  gl_FragColor = vec4(col, waterOutA);
+  MSA_FRAG_COLOR = vec4(col, waterOutA);
 }
 `;
 }

@@ -24,6 +24,52 @@ function wallDocDoorIsOpenForVision(doc) {
   return Number(doc?.door) > 0 && Number(doc?.ds) === open;
 }
 
+/** @returns {Readonly<{BOTH:number,LEFT:number,RIGHT:number}>} */
+function wallEdgeDirections() {
+  const edge = CONST?.EDGE_DIRECTIONS;
+  const legacy = CONST?.WALL_DIRECTIONS;
+  return {
+    BOTH: edge?.BOTH ?? legacy?.BOTH ?? 0,
+    LEFT: edge?.LEFT ?? legacy?.LEFT ?? 1,
+    RIGHT: edge?.RIGHT ?? legacy?.RIGHT ?? 2,
+  };
+}
+
+/**
+ * Foundry one-way wall direction from document / edge data.
+ * @param {object|null|undefined} wall
+ * @param {object|null|undefined} doc
+ * @returns {number}
+ */
+function readWallEdgeDirection(wall, doc) {
+  const { BOTH, LEFT, RIGHT } = wallEdgeDirections();
+  let raw = doc?.dir;
+  if (raw == null && wall) {
+    raw = wall.edge?.direction ?? wall.edge?.dir;
+  }
+  const n = Number(raw);
+  if (n === LEFT || n === RIGHT) return n;
+  return BOTH;
+}
+
+/**
+ * True when a one-way wall blocks the viewer at `center` (Foundry ClockwiseSweep inclusion).
+ * @param {number} dir
+ * @param {{x:number,y:number}} a
+ * @param {{x:number,y:number}} b
+ * @param {{x:number,y:number}} center
+ * @returns {boolean}
+ */
+function wallEdgeBlocksViewer(dir, a, b, center) {
+  const { BOTH, LEFT, RIGHT } = wallEdgeDirections();
+  if (dir === BOTH) return true;
+  const orient = (a.y - center.y) * (b.x - center.x) - (a.x - center.x) * (b.y - center.y);
+  if (Math.abs(orient) < 1e-9) return false;
+  const side = orient < 0 ? LEFT : RIGHT;
+  // Foundry: ignore one-directional walls facing away — block when side !== dir.
+  return side !== dir;
+}
+
 /**
  * Computes line-of-sight visibility polygons from wall data
  */
@@ -110,7 +156,7 @@ export class VisionPolygonComputer {
 
     const wallPaddingPx = Math.max(0, Number(options?.wallPaddingPx) || 0);
     if (wallPaddingPx > 0 && segments.length > 0) {
-      this._replaceSegmentsWithPaddedQuads(segments, wallPaddingPx);
+      this._replaceSegmentsWithPaddedQuads(segments, wallPaddingPx, center);
     }
 
     const circleSegments = Math.max(8, Math.min(256, Math.floor(Number(options?.circleSegments) || this.circleSegments)));
@@ -231,9 +277,7 @@ export class VisionPolygonComputer {
     const segments = outSegments ?? [];
     let writeIndex = segments.length;
     const radiusSq = radius * radius;
-    const WALL_DIRECTION_BOTH = 0;
-    const WALL_DIRECTION_LEFT = 1;
-    const WALL_DIRECTION_RIGHT = 2;
+    const { BOTH: WALL_DIRECTION_BOTH } = wallEdgeDirections();
     const hasElevation = (elevation !== undefined);
 
     // MS-LVL-035: Pre-collect bounds of tiles with allWallBlockSight=true.
@@ -341,17 +385,11 @@ export class VisionPolygonComputer {
       const bx = c[2];
       const by = c[3];
 
-      // Directional walls only block rays from one side. Match Foundry's orient2dFast
-      // convention where a negative orientation means LEFT, positive means RIGHT.
-      // blockGeometry: treat every segment as a full barrier (candle glow vs windows).
-      const dir = doc.dir ?? WALL_DIRECTION_BOTH;
+      // Directional walls: match Foundry ClockwiseSweep _testWallInclusion (block when
+      // side !== dir). blockGeometry skips this so physical glow can use full segments.
+      const dir = readWallEdgeDirection(wall, doc);
       if (!blockGeometry && dir !== WALL_DIRECTION_BOTH) {
-        // orient2dFast(a, b, c) = (a.y - c.y) * (b.x - c.x) - (a.x - c.x) * (b.y - c.y)
-        const orient = (ay - center.y) * (bx - center.x) - (ax - center.x) * (by - center.y);
-        if (orient !== 0) {
-          const side = orient < 0 ? WALL_DIRECTION_LEFT : WALL_DIRECTION_RIGHT;
-          if (side !== dir) continue;
-        }
+        if (!wallEdgeBlocksViewer(dir, { x: ax, y: ay }, { x: bx, y: by }, center)) continue;
       }
       
       // Quick rejection: skip segments entirely outside vision radius
@@ -382,6 +420,8 @@ export class VisionPolygonComputer {
       seg.a.y = ay;
       seg.b.x = bx;
       seg.b.y = by;
+      if (dir !== WALL_DIRECTION_BOTH) seg.wallDir = dir;
+      else delete seg.wallDir;
       writeIndex++;
     }
 
@@ -392,14 +432,16 @@ export class VisionPolygonComputer {
   /**
    * Replace thin wall segments with padded quads so light polygons do not bleed
    * through sub-pixel wall gaps.
-   * @param {Array<{a:{x:number,y:number},b:{x:number,y:number}}>} segments
+   * @param {Array<{a:{x:number,y:number},b:{x:number,y:number},wallDir?:number}>} segments
    * @param {number} padPx
+   * @param {{x:number,y:number}|null} [viewerCenter] - When set, one-way walls pad only on the blocking side.
    * @private
    */
-  _replaceSegmentsWithPaddedQuads(segments, padPx) {
+  _replaceSegmentsWithPaddedQuads(segments, padPx, viewerCenter = null) {
     const pad = Math.max(0, Number(padPx) || 0);
     if (pad <= 0 || !segments?.length) return;
 
+    const { BOTH: WALL_DIRECTION_BOTH } = wallEdgeDirections();
     const sourceCount = segments.length;
     let writeIndex = 0;
 
@@ -416,8 +458,21 @@ export class VisionPolygonComputer {
       const len = Math.hypot(dx, dy);
       if (len <= 1e-6) continue;
 
-      const nx = (-dy / len) * pad;
-      const ny = (dx / len) * pad;
+      let nx = (-dy / len) * pad;
+      let ny = (dx / len) * pad;
+
+      const wallDir = Number(src.wallDir);
+      const oneSided = viewerCenter
+        && Number.isFinite(wallDir)
+        && wallDir !== WALL_DIRECTION_BOTH;
+      if (oneSided) {
+        const orient = (ay - viewerCenter.y) * (bx - viewerCenter.x)
+          - (ax - viewerCenter.x) * (by - viewerCenter.y);
+        if (orient > 0) {
+          nx = -nx;
+          ny = -ny;
+        }
+      }
 
       const a1x = ax + nx;
       const a1y = ay + ny;
@@ -428,12 +483,18 @@ export class VisionPolygonComputer {
       const b2x = bx - nx;
       const b2y = by - ny;
 
-      const edges = [
-        [a1x, a1y, b1x, b1y],
-        [a2x, a2y, b2x, b2y],
-        [a1x, a1y, a2x, a2y],
-        [b1x, b1y, b2x, b2y]
-      ];
+      const edges = oneSided
+        ? [
+          [a1x, a1y, b1x, b1y],
+          [a1x, a1y, ax, ay],
+          [b1x, b1y, bx, by],
+        ]
+        : [
+          [a1x, a1y, b1x, b1y],
+          [a2x, a2y, b2x, b2y],
+          [a1x, a1y, a2x, a2y],
+          [b1x, b1y, b2x, b2y],
+        ];
 
       for (let e = 0; e < edges.length; e++) {
         let seg = segments[writeIndex];

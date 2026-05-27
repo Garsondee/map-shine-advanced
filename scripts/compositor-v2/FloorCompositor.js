@@ -14,7 +14,9 @@
  *      With **multiple** visible floors, **WaterEffectV2** runs **once after** this
  *      merge so `tDiffuse` is the stacked scene (holes/stacking already correct).
  *      Single-floor keeps water inside the per-level chain (bloom MRT / spec path).
- *   3. Distortion, PIXI/fog/lens, mask debug, blit to screen, late overlays.
+ *   3. Splashes + bush/tree overlays, then color correction (vegetation in the grade).
+ *   4. Distortion with a vegetation mask (no screen-space warp under foliage).
+ *   5. PIXI/fog/lens, mask debug, blit to screen, late overlays.
  *
  * Current effects (bus overlays — rendered in step 1):
  *   - **SpecularEffectV2**: Per-tile additive overlays driven by _Specular masks.
@@ -24,6 +26,8 @@
  *   - **WeatherParticlesV2**: Rain, snow, and ash particles via
  *     shared BatchedRenderer in the bus scene.
  *   - **AshDisturbanceEffectV2**: Token-movement ash bursts on `_Ash` masks (Quarks).
+ *   - **BushEffectV2** / **TreeEffectV2**: Vegetation on layer 32 before CC; distortion
+ *     masked under canopy. **WaterSplashesEffectV2** under vegetation.
  *
  * Post-processing effects (per-level and composite passes):
    *   - **CloudEffectV2**: Sprite-based clouds — generates shadow RT (fed into Lighting)
@@ -46,7 +50,11 @@
 import { createLogger } from '../core/log.js';
 import { isCameraNavigationActive } from '../foundry/camera-navigation-state.js';
 import { yieldToMain } from '../core/yield-to-main.js';
-import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
+import {
+  OVERLAY_THREE_LAYER,
+  VEGETATION_ABOVE_WATER_LAYER,
+  WATER_SPLASH_ABOVE_WATER_LAYER,
+} from '../core/render-layers.js';
 import { FloorRenderBus } from './FloorRenderBus.js';
 import { ReplicaOcclusionMaskPass } from './ReplicaOcclusionMaskPass.js';
 import { SpecularEffectV2 } from './effects/SpecularEffectV2.js';
@@ -330,6 +338,8 @@ export class FloorCompositor {
     this._bushVegetationBillboardPass = new VegetationBillboardShadowPass();
     /** @type {TreeCanopyOcclusionPass} */
     this._treeCanopyOcclusionPass = new TreeCanopyOcclusionPass();
+    /** @type {TreeCanopyOcclusionPass} Screen-space bush/tree mask for DistortionManager. */
+    this._vegetationDistortionMaskPass = new TreeCanopyOcclusionPass();
     /** @type {THREE.Texture|null} */
     this._treeBillboardShadowTexture = null;
     /** @type {THREE.Texture|null} */
@@ -702,6 +712,8 @@ export class FloorCompositor {
     this._waterOccluderRT = null;
     /** @type {THREE.WebGLRenderTarget|null} Ping-pong scratch for upper-alpha occluder union */
     this._waterOccluderScratchRT = null;
+    /** @type {THREE.WebGLRenderTarget|null} Deck + vegetation foothold packed for water shader */
+    this._waterFootholdMaskRT = null;
     /** @type {THREE.Scene|null} Fullscreen scene for upper-alpha occluder union */
     this._waterOccluderUnionScene = null;
     /** @type {THREE.OrthographicCamera|null} Camera for upper-alpha occluder union */
@@ -1140,6 +1152,256 @@ export class FloorCompositor {
   }
 
   /**
+   * Collect WaterSplashesEffectV2 BatchedRenderer roots for visibility-gated draws.
+   * @returns {Set<import('three').Object3D>}
+   * @private
+   */
+  _getWaterSplashBatchRoots() {
+    const roots = new Set();
+    const splash = this._waterSplashesEffect;
+    if (!splash?._floorStates) return roots;
+    for (const st of splash._floorStates.values()) {
+      const br = st?.batchRenderer;
+      if (br) roots.add(br);
+    }
+    return roots;
+  }
+
+  /**
+   * Bush/tree overlay meshes for the post-splash compositor pass.
+   * @returns {Set<import('three').Object3D>}
+   * @private
+   */
+  _getVegetationOverlayRoots() {
+    const roots = new Set();
+    const maxFloor = Number.isFinite(Number(this._renderBus?._visibleMaxFloorIndex))
+      ? Number(this._renderBus._visibleMaxFloorIndex)
+      : 0;
+    const collect = (effect) => {
+      const overlays = effect?._overlays;
+      if (!overlays?.values) return;
+      for (const entry of overlays.values()) {
+        const fi = Number(entry?.floorIndex);
+        if (Number.isFinite(fi) && fi > maxFloor) continue;
+        if (entry?.shadowMesh) roots.add(entry.shadowMesh);
+        if (entry?.mesh) roots.add(entry.mesh);
+      }
+    };
+    collect(this._bushEffect);
+    collect(this._treeEffect);
+    return roots;
+  }
+
+  /**
+   * @param {import('three').Object3D} obj
+   * @param {Set<import('three').Object3D>} keepRoots
+   * @returns {boolean}
+   * @private
+   */
+  _isUnderBusOverlayRoot(obj, keepRoots) {
+    if (!obj || !keepRoots.size) return false;
+    let node = obj;
+    while (node) {
+      if (keepRoots.has(node)) return true;
+      node = node.parent;
+    }
+    return false;
+  }
+
+  /**
+   * Render only objects under `keepRoots` into `targetRT` (layer-0 bus draw).
+   * Quarks BatchedRenderer does not reliably respect isolated Three.js layers.
+   *
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {THREE.WebGLRenderTarget} targetRT
+   * @param {Set<import('three').Object3D>} keepRoots
+   * @returns {boolean}
+   * @private
+   */
+  _compositeBusOverlayVisibilityGate(renderer, targetRT, keepRoots, options = {}) {
+    const scene = this._renderBus?._scene;
+    const camera = this.camera;
+    if (!scene || !camera || !renderer || !targetRT || !keepRoots?.size) return false;
+
+    // Ancestors must stay visible: a child with visible=true under visible=false parent never draws.
+    // Descendants too — Quarks BatchedRenderer keeps particle meshes under the batch root.
+    const mustShow = new Set();
+    for (const root of keepRoots) {
+      let node = root;
+      while (node) {
+        mustShow.add(node);
+        node = node.parent;
+      }
+      if (typeof root.traverse === 'function') {
+        root.traverse((child) => {
+          mustShow.add(child);
+        });
+      }
+    }
+
+    const saved = new Map();
+    const visit = (obj) => {
+      if (!obj || saved.has(obj)) return;
+      saved.set(obj, obj.visible === true);
+      if (obj === scene) {
+        // Never toggle the bus scene root.
+      } else if (mustShow.has(obj)) {
+        obj.visible = true;
+      } else {
+        obj.visible = false;
+      }
+      const ch = obj.children;
+      if (ch?.length) {
+        for (let i = 0; i < ch.length; i++) visit(ch[i]);
+      }
+    };
+    visit(scene);
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    const prevDepthTest = renderer.depthTest;
+    const prevDepthWrite = renderer.depthWrite;
+    const prevLayerMask = camera.layers.mask;
+    renderer.setRenderTarget(targetRT);
+    renderer.autoClear = false;
+    renderer.depthTest = false;
+    renderer.depthWrite = false;
+    try {
+      if (options.vegetationOnly === true) {
+        camera.layers.set(VEGETATION_ABOVE_WATER_LAYER);
+        camera.layers.enable(21);
+      } else if (options.splashesOnly === true) {
+        camera.layers.set(0);
+        for (let i = 1; i <= 19; i++) camera.layers.enable(i);
+        camera.layers.enable(WATER_SPLASH_ABOVE_WATER_LAYER);
+      } else {
+        camera.layers.enable(0);
+        for (let i = 1; i <= 19; i++) camera.layers.enable(i);
+        camera.layers.enable(WATER_SPLASH_ABOVE_WATER_LAYER);
+        camera.layers.enable(VEGETATION_ABOVE_WATER_LAYER);
+      }
+      withSceneScissor(renderer, () => {
+        renderer.render(scene, camera);
+      });
+      return true;
+    } finally {
+      for (const [obj, wasVisible] of saved) {
+        obj.visible = wasVisible;
+      }
+      camera.layers.mask = prevLayerMask;
+      renderer.depthTest = prevDepthTest;
+      renderer.depthWrite = prevDepthWrite;
+      renderer.autoClear = prevAutoClear;
+      renderer.setRenderTarget(prevTarget);
+    }
+  }
+
+  /**
+   * Draw WaterSplashesEffectV2 onto a post-water RT (below vegetation).
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {THREE.WebGLRenderTarget} targetRT
+   * @returns {boolean}
+   * @private
+   */
+  _compositeWaterSplashesAboveWater(renderer, targetRT) {
+    if (!resolveFloorEffectActive(this._waterSplashesEffect)) return false;
+    return this._compositeBusOverlayVisibilityGate(
+      renderer,
+      targetRT,
+      this._getWaterSplashBatchRoots(),
+      { splashesOnly: true },
+    );
+  }
+
+  /**
+   * Draw bush/tree overlays (layer 32) on top of the post-bloom HDR composite.
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {THREE.WebGLRenderTarget} targetRT
+   * @returns {boolean}
+   * @private
+   */
+  _compositeVegetationAboveWater(renderer, targetRT) {
+    if (!resolveOverlayEffectActive(this._bushEffect) && !resolveOverlayEffectActive(this._treeEffect)) {
+      return false;
+    }
+    return this._compositeBusOverlayVisibilityGate(
+      renderer,
+      targetRT,
+      this._getVegetationOverlayRoots(),
+      { vegetationOnly: true },
+    );
+  }
+
+  /**
+   * @returns {{ mesh: import('three').Mesh, material: import('three').Material }[]}
+   * @private
+   */
+  _collectVegetationDistortionMaskEntries() {
+    const entries = [];
+    const maxFloor = Number.isFinite(Number(this._renderBus?._visibleMaxFloorIndex))
+      ? Number(this._renderBus._visibleMaxFloorIndex)
+      : 0;
+    const collect = (effect) => {
+      const overlays = effect?._overlays;
+      if (!overlays?.values) return;
+      for (const entry of overlays.values()) {
+        const fi = Number(entry?.floorIndex);
+        if (Number.isFinite(fi) && fi > maxFloor) continue;
+        if (entry?.shadowMesh?.material) {
+          entries.push({ mesh: entry.shadowMesh, material: entry.shadowMaterial });
+        }
+        if (entry?.mesh?.material) {
+          entries.push({ mesh: entry.mesh, material: entry.material });
+        }
+      }
+    };
+    collect(this._bushEffect);
+    collect(this._treeEffect);
+    return entries;
+  }
+
+  /**
+   * Screen-space vegetation alpha for DistortionManager (suppress heat/water UV warp).
+   * @private
+   */
+  _prepareVegetationDistortionMaskPass() {
+    const pass = this._vegetationDistortionMaskPass;
+    if (!pass || !this.renderer || !this.camera) return;
+    try {
+      pass.initialize();
+    } catch (_) {
+      return;
+    }
+    const v = this._drawingBufferSizeTmp || (this._drawingBufferSizeTmp = new window.THREE.Vector2());
+    this.renderer.getDrawingBufferSize(v);
+    const bw = Math.max(2, Math.floor(Number(v.x) || 2));
+    const bh = Math.max(2, Math.floor(Number(v.y) || 2));
+    try {
+      pass.onResize(bw, bh);
+    } catch (_) {}
+
+    const entries = this._collectVegetationDistortionMaskEntries();
+    if (!entries.length) return;
+
+    const saved = new Map();
+    for (const entry of entries) {
+      const mesh = entry?.mesh;
+      if (!mesh) continue;
+      saved.set(mesh, mesh.visible === true);
+      mesh.visible = true;
+    }
+    try {
+      pass.render(this.renderer, this.camera, entries);
+    } catch (err) {
+      log.warn('FloorCompositor: vegetation distortion mask pass failed:', err);
+    } finally {
+      for (const [mesh, wasVisible] of saved) {
+        mesh.visible = wasVisible;
+      }
+    }
+  }
+
+  /**
    * Composite fog overlay into the post RT chain.
    * @param {THREE.WebGLRenderTarget} inputRT
    * @param {THREE.WebGLRenderTarget} outputRT
@@ -1301,6 +1563,15 @@ export class FloorCompositor {
       stencilBuffer: false,
       colorSpace: THREE.NoColorSpace,
     });
+    this._waterFootholdMaskRT = new THREE.WebGLRenderTarget(w, h, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      depthBuffer: false,
+      stencilBuffer: false,
+      colorSpace: THREE.NoColorSpace,
+    });
     this._waterOccluderUnionScene = new THREE.Scene();
     this._waterOccluderUnionCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     this._waterOccluderUnionMaterial = new THREE.ShaderMaterial({
@@ -1389,6 +1660,47 @@ export class FloorCompositor {
     );
     this._waterSourceOccProductQuad.frustumCulled = false;
     this._waterSourceOccProductScene.add(this._waterSourceOccProductQuad);
+
+    this._waterFootholdMaskScene = new THREE.Scene();
+    this._waterFootholdMaskCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this._waterFootholdMaskMaterial = new THREE.ShaderMaterial({
+      name: 'WaterFootholdMaskMerge',
+      uniforms: {
+        tDeck: { value: null },
+        tVegetation: { value: null },
+        uHasVegetation: { value: 0.0 },
+      },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        precision mediump float;
+        uniform sampler2D tDeck;
+        uniform sampler2D tVegetation;
+        uniform float uHasVegetation;
+        varying vec2 vUv;
+        void main() {
+          float deckA = texture2D(tDeck, vUv).a;
+          float vegA = (uHasVegetation > 0.5) ? texture2D(tVegetation, vUv).a : 0.0;
+          gl_FragColor = vec4(0.0, vegA, 0.0, deckA);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+      transparent: false,
+      blending: THREE.NoBlending,
+    });
+    this._waterFootholdMaskMaterial.toneMapped = false;
+    this._waterFootholdMaskQuad = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      this._waterFootholdMaskMaterial,
+    );
+    this._waterFootholdMaskQuad.frustumCulled = false;
+    this._waterFootholdMaskScene.add(this._waterFootholdMaskQuad);
 
     const bgProdRtOpts = {
       minFilter: THREE.LinearFilter,
@@ -1717,9 +2029,11 @@ export class FloorCompositor {
         this._treeVegetationBillboardPass.initialize();
         this._bushVegetationBillboardPass.initialize();
         this._treeCanopyOcclusionPass.initialize();
+        this._vegetationDistortionMaskPass.initialize();
         this._treeVegetationBillboardPass.onResize(w, h);
         this._bushVegetationBillboardPass.onResize(w, h);
         this._treeCanopyOcclusionPass.onResize(w, h);
+        this._vegetationDistortionMaskPass.onResize(w, h);
       },
     );
     await initEffect('UpperFloorAlphaCompositor', () => this._upperFloorAlphaCompositor.initialize(this.renderer, w, h));
@@ -2065,6 +2379,15 @@ export class FloorCompositor {
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
+      if (
+        this._shaderWarmupGateOpen
+        && !this._populateSlimRenderActive()
+        && this._treeEffect?.isHoverRevealActive?.()
+      ) {
+        reason = 'tree:hover-fade';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
       const fire = this._fireEffect;
       if (resolveFloorEffectActive(fire)) {
         reason = 'fire:active-floors';
@@ -2320,6 +2643,7 @@ export class FloorCompositor {
     // without this early clear old-floor overlays can flash for a few frames
     // during floor/level transitions.
     try { this._treeEffect?.clear?.(); } catch (_) {}
+    try { this._treeEffect?.setHoverHidden?.(false); } catch (_) {}
     try { this._bushEffect?.clear?.(); } catch (_) {}
 
     this._populateComplete = false;
@@ -3831,6 +4155,7 @@ export class FloorCompositor {
       } else {
         // Decorative overlays: uTime advances in shaders on present frames; skip CPU sim while panning.
         this._profileEffectCall('bush', 'update', () => this._bushEffect.updateNavigationLite?.(timeInfo), 'BushEffectV2 navigationLite');
+        this._profileEffectCall('tree', 'update', () => this._treeEffect.updateNavigationLite?.(timeInfo), 'TreeEffectV2 navigationLite');
       }
 
       this._profileEffectCall('lighting', 'update', () => this._lightingEffect.update(timeInfo), 'LightingEffectV2 update');
@@ -4333,11 +4658,19 @@ export class FloorCompositor {
       const distOut = (currentInput === this._postA) ? this._postB : this._postA;
       this._distortionEffect.setBuffers(currentInput, distOut);
       this._distortionEffect.setRenderToScreen(false);
+      try {
+        this._distortionEffect.setVegetationDistortionMaskTexture?.(
+          this._vegetationDistortionMaskPass?.texture ?? null,
+        );
+      } catch (_) {}
       this._profileEffectCall('distortion', 'render', () => {
         withSceneScissor(this.renderer, () => {
           this._distortionEffect.render(this.renderer, this._renderBus?._scene ?? this.scene, this.camera);
         });
       }, 'DistortionManager render');
+      try {
+        this._distortionEffect.setVegetationDistortionMaskTexture?.(null);
+      } catch (_) {}
       currentInput = distOut;
     }
 
@@ -5908,6 +6241,7 @@ export class FloorCompositor {
     if (this._postB)   this._postB.setSize(w, h);
     if (this._waterOccluderRT) this._waterOccluderRT.setSize(w, h);
     if (this._waterOccluderScratchRT) this._waterOccluderScratchRT.setSize(w, h);
+    if (this._waterFootholdMaskRT) this._waterFootholdMaskRT.setSize(w, h);
     if (this._waterBgProductRT) this._waterBgProductRT.setSize(w, h);
     if (this._waterBgProductScratchRT) this._waterBgProductScratchRT.setSize(w, h);
     try { this._levelRTPool?.onResize?.(w, h, this.renderer); } catch (_) {}
@@ -5919,6 +6253,7 @@ export class FloorCompositor {
       this._treeVegetationBillboardPass?.onResize?.(w, h);
       this._bushVegetationBillboardPass?.onResize?.(w, h);
       this._treeCanopyOcclusionPass?.onResize?.(w, h);
+      this._vegetationDistortionMaskPass?.onResize?.(w, h);
     } catch (_) {}
     try { this._skyOcclusionPrimitive?.onResize?.(w, h); } catch (_) {}
     try { this._bushEffect?.onResize?.(w, h); } catch (_) {}
@@ -6145,16 +6480,54 @@ export class FloorCompositor {
     }
 
     try {
+      this._prepareVegetationDistortionMaskPass();
       const deckRT = withSceneScissor(this.renderer, () =>
         this._buildWaterSourceDeckMaskRT(dataFloor, this._waterOccluderScratchRT)
       );
-      this._frameWaterSourceDeckTex = deckRT?.texture ?? null;
+      const merged = this._mergeWaterFootholdMaskRT(
+        deckRT?.texture ?? null,
+        this._vegetationDistortionMaskPass?.texture ?? null,
+        this._waterFootholdMaskRT,
+      );
+      this._frameWaterSourceDeckTex = merged?.texture ?? deckRT?.texture ?? null;
       if (window.MapShine?.__waterDebug) {
         window.MapShine.__waterDebug.lastDeckMask = this._frameWaterSourceDeckTex;
         window.MapShine.__waterDebug.lastSourceFloorIndex = dataFloor;
         window.MapShine.__waterDebug.lastWaterTileIds = [...this._getWaterTileIdsForFloor(dataFloor)];
       }
     } catch (_) {}
+  }
+
+  /**
+   * Pack deck mask (alpha) + vegetation canopy (green) for water foothold gating.
+   * @param {import('three').Texture|null} deckTex
+   * @param {import('three').Texture|null} vegetationTex
+   * @param {import('three').WebGLRenderTarget} targetRT
+   * @returns {import('three').WebGLRenderTarget|null}
+   * @private
+   */
+  _mergeWaterFootholdMaskRT(deckTex, vegetationTex, targetRT) {
+    if (!deckTex || !targetRT || !this.renderer) return null;
+    if (!this._waterFootholdMaskScene || !this._waterFootholdMaskMaterial) return null;
+    const renderer = this.renderer;
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    const u = this._waterFootholdMaskMaterial.uniforms;
+    try {
+      u.tDeck.value = deckTex;
+      u.tVegetation.value = vegetationTex ?? deckTex;
+      u.uHasVegetation.value = vegetationTex ? 1.0 : 0.0;
+      renderer.setRenderTarget(targetRT);
+      renderer.setClearColor(0x000000, 0);
+      renderer.autoClear = true;
+      renderer.render(this._waterFootholdMaskScene, this._waterFootholdMaskCamera);
+      return targetRT;
+    } catch (_) {
+      return null;
+    } finally {
+      renderer.autoClear = prevAutoClear;
+      renderer.setRenderTarget(prevTarget);
+    }
   }
 
   /**
@@ -6834,6 +7207,8 @@ export class FloorCompositor {
       if (_profiling) this._recordPassTiming(`perLevel_alphaRebind_${levelIndex}`, _profileT0);
       if (rebound) currentInput = rebindOut;
 
+      // Splashes composited after bloom (with vegetation) so bloom does not relight particles on top of trees.
+
       levelFinalRTs.push(currentInput);
 
       // Restore water to global state after this level's pass
@@ -6979,7 +7354,7 @@ export class FloorCompositor {
               this._postA,
               this._postB,
               postMergeWaterOccluder,
-              this._frameWaterSourceSliceTex,
+              null,
             )
           );
         } catch (_) {
@@ -7059,6 +7434,14 @@ export class FloorCompositor {
     // Now that bloom has consumed the water specular bloom texture (if any),
     // clear it so the next frame starts clean.
     try { this._bloomEffect?.setWaterSpecularBloomTexture?.(null); } catch (_) {}
+
+    // Splashes + vegetation before CC (so overlays receive the camera grade).
+    if (_profiling) _profileT0 = performance.now();
+    this._profileEffectCall('postBloom.worldOverlays', 'render', () => {
+      this._compositeWaterSplashesAboveWater(this.renderer, mergedCompositeOut);
+      this._compositeVegetationAboveWater(this.renderer, mergedCompositeOut);
+    }, 'Splashes + vegetation before CC');
+    if (_profiling) this._recordPassTiming('postMerge_worldOverlaysBeforeCc', _profileT0);
 
     // Night vision meters this buffer (linear HDR, post-bloom) while displaying
     // the tone-mapped composite from the late pass chain.
@@ -7290,6 +7673,7 @@ export class FloorCompositor {
     try { this._postB?.dispose(); } catch (_) {}
     try { this._waterOccluderRT?.dispose(); } catch (_) {}
     try { this._waterOccluderScratchRT?.dispose(); } catch (_) {}
+    try { this._waterFootholdMaskRT?.dispose(); } catch (_) {}
     try { this._waterBgProductRT?.dispose(); } catch (_) {}
     try { this._waterBgProductScratchRT?.dispose(); } catch (_) {}
     try { this._levelRTPool?.dispose(); } catch (_) {}
@@ -7300,6 +7684,7 @@ export class FloorCompositor {
     this._postB = null;
     this._waterOccluderRT = null;
     this._waterOccluderScratchRT = null;
+    this._waterFootholdMaskRT = null;
     this._waterBgProductRT = null;
     this._waterBgProductScratchRT = null;
     try { this._waterOccluderUnionMaterial?.dispose?.(); } catch (_) {}
@@ -7310,7 +7695,10 @@ export class FloorCompositor {
     this._waterOccluderUnionQuad = null;
     try { this._waterSourceOccProductMaterial?.dispose?.(); } catch (_) {}
     try { this._waterSourceOccProductQuad?.geometry?.dispose?.(); } catch (_) {}
+    try { this._waterFootholdMaskMaterial?.dispose?.(); } catch (_) {}
+    try { this._waterFootholdMaskQuad?.geometry?.dispose?.(); } catch (_) {}
     this._waterSourceOccProductScene = null;
+    this._waterFootholdMaskScene = null;
     this._waterSourceOccProductCamera = null;
     this._waterSourceOccProductMaterial = null;
     this._waterSourceOccProductQuad = null;

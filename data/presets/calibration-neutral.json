@@ -1,8 +1,8 @@
 {
   "msaVersion": "scene-settings-v1",
-  "id": "baseline",
-  "name": "Baseline",
-  "description": "Neutral starting preset: identity color grade and sky (no channel tints or golden push), with balanced lighting, shadows, and moderate fog/bloom for everyday scenes. Add mood presets on top rather than fighting wild defaults.",
+  "id": "calibration-neutral",
+  "name": "Calibration Neutral",
+  "description": "Display-neutral reference for color-chart calibration scenes only. Minimizes grade, fog, bloom, and mood lighting so measured patches should match authored sRGB. Do not use as a gameplay mood preset — tune on chart scene then promote values into baseline.",
   "enabled": true,
   "settings": {
     "mapMaker": {
@@ -28,10 +28,10 @@
           "dynamicBoundsFogDensityMax": 1,
           "dynamicBoundsFreezeLevelMin": 0,
           "dynamicBoundsFreezeLevelMax": 1,
-          "queuedPrecipitation": 0,
-          "queuedCloudCover": 0,
-          "queuedWindSpeed": 0,
-          "queuedWindDirection": 180,
+          "queuedPrecipitation": 0.88,
+          "queuedCloudCover": 0.93,
+          "queuedWindSpeed": 0.1,
+          "queuedWindDirection": 205,
           "queuedFogDensity": 0,
           "queuedFreezeLevel": 0,
           "queuedAshIntensity": 0,
@@ -57,7 +57,7 @@
           "rainBrightnessSpread": 0.25,
           "rainLengthSpread": 0.05,
           "debugRainHighlight": false,
-          "roofDripEnabled": false,
+          "roofDripEnabled": true,
           "roofDripEmissionRainMult": 300,
           "roofDripEmissionTailMult": 260,
           "roofDripDebugEmissionMul": 2.5,
@@ -133,24 +133,24 @@
         },
         "lighting": {
           "enabled": true,
-          "globalIllumination": 0.48,
-          "ambientDayScale": 0.86,
-          "ambientNightScale": 0.32,
-          "minIlluminationScale": 0.3,
-          "lightIntensity": 1.05,
-          "colorationStrength": 0.45,
-          "colorationReflectivity": 0.35,
-          "colorationSaturation": 0.55,
-          "colorationChromaCurve": 0.12,
-          "colorationAchromaticMix": 0.92,
+          "globalIllumination": 1,
+          "ambientDayScale": 1,
+          "ambientNightScale": 1,
+          "minIlluminationScale": 1,
+          "lightIntensity": 1,
+          "colorationStrength": 0,
+          "colorationReflectivity": 0,
+          "colorationSaturation": 0,
+          "colorationChromaCurve": 0,
+          "colorationAchromaticMix": 1,
           "composeToneMapping": 0,
           "composeToneExposure": 1,
-          "combinedShadowEffectStrength": 1.55,
+          "combinedShadowEffectStrength": 0,
           "cloudShadowAmbientInfluence": 0.45,
           "overheadShadowAmbientInfluence": 0.85,
           "dynamicLightShadowOverrideStrength": 0,
-          "structuralSunAmbientOcclusion": 0.34,
-          "directStructuralOcclusionStrength": 0.28,
+          "structuralSunAmbientOcclusion": 0.38,
+          "directStructuralOcclusionStrength": 0.32,
           "wallInsetPx": 6,
           "wallPaddingPx": 2,
           "restrictRoofScreenLightOcclusionToTopFloor": true,
@@ -159,7 +159,7 @@
           "interiorDarkness": 0,
           "lightAnimWindInfluence": 1,
           "lightAnimOutdoorPower": 1.4,
-          "negativeDarknessStrength": 0.58,
+          "negativeDarknessStrength": 0,
           "darknessPunchGain": 0
         },
         "specular": {
@@ -476,7 +476,7 @@
           "contrast": 0.98
         },
         "windowLight": {
-          "enabled": true,
+          "enabled": false,
           "hasWindowMask": true,
           "intensity": 4,
           "tod4IntensityPercent": 65,
@@ -508,7 +508,7 @@
           "specularBoost": 2,
           "lightOverheadTiles": true,
           "overheadLightIntensity": 1,
-          "rainOnGlassEnabled": false,
+          "rainOnGlassEnabled": true,
           "rainOnGlassIntensity": 1.37,
           "rainOnGlassPrecipStart": 0.15,
           "rainOnGlassPrecipFull": 0.7,
@@ -960,7 +960,7 @@
           "audioVolume": 0.7
         },
         "weather-lightning": {
-          "enabled": true,
+          "enabled": false,
           "stormIntensity": 0,
           "flashBrightness": 0.57,
           "flashFrequency": 0.51,
@@ -1064,7 +1064,7 @@
           "wallClipRadiusScale": 0.3
         },
         "player-light": {
-          "enabled": true,
+          "enabled": false,
           "mode": "flashlight",
           "torchMaxDistanceUnits": 10,
           "flashlightMaxDistanceUnits": 60,
@@ -1242,7 +1242,7 @@
           "debugReadoutEnabled": false
         },
         "bloom": {
-          "enabled": true,
+          "enabled": false,
           "strength": 0.42,
           "radius": 1,
           "threshold": 1.35,
@@ -1384,7 +1384,7 @@
             "g": 1,
             "b": 1
           },
-          "masterGamma": 1.5,
+          "masterGamma": 1,
           "toneMapping": 0,
           "vignetteStrength": 0,
           "vignetteSoftness": 0,
@@ -1463,15 +1463,15 @@
           }
         },
         "atmospheric-fog": {
-          "enabled": true,
+          "enabled": false,
           "weatherFogInfluence": 0,
-          "maxOpacity": 0.66,
+          "maxOpacity": 0.72,
           "falloffStart": 0,
           "falloffEnd": 0.5,
-          "hdrHazeStrength": 0.88,
+          "hdrHazeStrength": 0.92,
           "fogAdditive": 1,
           "fogRefLuminance": 0.18,
-          "lightOcclusionStrength": 0.62,
+          "lightOcclusionStrength": 0.72,
           "fogColor": {
             "r": 1,
             "g": 1,
@@ -1514,7 +1514,7 @@
           "debugForceFog": false
         },
         "fog": {
-          "enabled": true,
+          "enabled": false,
           "unexploredColor": {
             "r": 0,
             "g": 0,
@@ -1699,7 +1699,7 @@
           "digitalNoiseLowLightBoost": 3.37
         },
         "ash-weather": {
-          "enabled": true,
+          "enabled": false,
           "ashIntensity": 1,
           "ashIntensityScale": 0.5,
           "ashEmissionRate": 840,
@@ -2203,25 +2203,5 @@
     "gm": null,
     "player": {},
     "version": "0.2.0"
-  },
-  "controlState": {
-    "timeOfDay": 12,
-    "timeTransitionMinutes": 0,
-    "linkTimeToFoundry": false,
-    "weatherMode": "directed",
-    "weatherPanelView": "manual",
-    "dynamicEnabled": false,
-    "dynamicPaused": true,
-    "directedPresetId": "Clear (Dry)",
-    "directedTransitionMinutes": 0,
-    "directedCustomPreset": {
-      "precipitation": 0,
-      "cloudCover": 0,
-      "windSpeed": 0.08,
-      "windDirection": 180,
-      "fogDensity": 0,
-      "freezeLevel": 0
-    },
-    "manualFogDensity": 0
   }
 }

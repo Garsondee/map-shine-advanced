@@ -11,6 +11,12 @@ import { probeMaskFile } from '../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
 import { isTileOverhead } from '../scene/tile-manager.js';
 import { worldToReplicaDrawingPx, worldToReplicaMaskPx } from '../compositor-v2/ReplicaOcclusionMaskPass.js';
+import {
+  runColorCalibration,
+  runCalibrationWorkflow,
+  downloadCalibrationReport,
+} from '../calibration/color-calibration-sampler.js';
+import { readRtRegionToSrgb8 } from './rt-pixel-readback.js';
 
 const log = createLogger('ConsoleHelpers');
 
@@ -430,6 +436,36 @@ function getPeriodicPerfSnapshot() {
  * Access via window.MapShine.debug
  */
 export const consoleHelpers = {
+  /**
+   * Run color-chart calibration scan against current scene RT taps.
+   * Usage: `await MapShine.debug.runColorCalibration({ taps: ['busAlbedo','final'] })`
+   * @param {object} [options]
+   */
+  async runColorCalibration(options = {}) {
+    return runColorCalibration(options);
+  },
+
+  /**
+   * Full workflow: optional neutral preset → wait for redraw → scan → export.
+   * Usage: `await MapShine.debug.runCalibrationWorkflow({ mode: 'v2' })`
+   * @param {object} [options]
+   */
+  async runCalibrationWorkflow(options = {}) {
+    return runCalibrationWorkflow(options);
+  },
+
+  /**
+   * Download last calibration report (or run one first).
+   * Usage: `await MapShine.debug.downloadColorCalibration('both')`
+   * @param {'json'|'md'|'both'} [format]
+   */
+  async downloadColorCalibration(format = 'both') {
+    const report = window.MapShine?.__lastCalibrationReport ?? await runColorCalibration({});
+    if (format === 'json' || format === 'both') downloadCalibrationReport(report, 'json');
+    if (format === 'md' || format === 'both') downloadCalibrationReport(report, 'md');
+    return report;
+  },
+
   /**
    * Diagnose current specular effect state
    * Checks for common issues that break the effect
@@ -2272,11 +2308,9 @@ export const consoleHelpers = {
       }
       const w = rt.width | 0;
       const h = rt.height | 0;
-      const pixels = new Uint8Array(w * h * 4);
-      try {
-        renderer.readRenderTargetPixels(rt, 0, 0, w, h, pixels);
-      } catch (e) {
-        return { label, error: 'readback-failed:' + (e?.message ?? String(e)) };
+      const pixels = readRtRegionToSrgb8(renderer, rt, 0, 0, w, h);
+      if (!pixels) {
+        return { label, error: 'readback-failed (HalfFloat RT needs Uint16 readback — reload module if this persists)' };
       }
       const canvas = document.createElement('canvas');
       canvas.width = w;

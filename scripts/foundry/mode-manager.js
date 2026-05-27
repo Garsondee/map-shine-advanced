@@ -20,6 +20,19 @@ import { getConfiguredCanvasLayer } from './canvas-layer-resolve.js';
 
 const log = createLogger('ModeManager');
 
+/** Keep pause banner visible/clickable without blocking canvas camera pan (RMB). */
+const PAUSE_UI_Z = '10100';
+const PAUSE_INTERACTIVE_SELECTOR = [
+  'button',
+  'a[href]',
+  '[data-action]',
+  '[role="button"]',
+  'input',
+  'select',
+  'textarea',
+  'label[for]'
+].join(', ');
+
 /**
  * Manages the Gameplay / PIXI-native parity mode lifecycle.
  * 
@@ -96,15 +109,21 @@ export class ModeManager {
 
   /**
    * Foundry `Pause` HUD (`#pause` / `ui.pause`) must sit above Map Shine DOM (canvas
-   * stack ~10–25, control surfaces ~10k) and stay clickable while `#ui` uses
-   * `pointer-events: none` for canvas passthrough.
+   * stack ~10–25, control surfaces ~10k) while `#ui` uses `pointer-events: none` for
+   * canvas passthrough. The pause root uses `none` too so RMB camera pan reaches the
+   * canvas; only real controls inside the banner stay interactive.
    */
   elevatePauseUi() {
-    const z = '10100';
     const apply = (node) => {
       if (!node || !(node instanceof HTMLElement)) return;
-      node.style.zIndex = z;
-      node.style.pointerEvents = 'auto';
+      node.style.zIndex = PAUSE_UI_Z;
+      node.style.pointerEvents = 'none';
+      try {
+        node.querySelectorAll(PAUSE_INTERACTIVE_SELECTOR).forEach((el) => {
+          if (el instanceof HTMLElement) el.style.pointerEvents = 'auto';
+        });
+      } catch (_) {
+      }
     };
     try {
       apply(document.getElementById('pause'));
@@ -154,7 +173,7 @@ export class ModeManager {
 
       // Re-enable pointer events on child elements that need interaction
       const uiChildren = uiContainer.querySelectorAll(
-        '#sidebar, #chat, #players, #hotbar, #controls, #navigation, #pause'
+        '#sidebar, #chat, #players, #hotbar, #controls, #navigation'
       );
       uiChildren.forEach(child => {
         child.style.pointerEvents = 'auto';

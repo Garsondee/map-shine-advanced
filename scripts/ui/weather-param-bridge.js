@@ -11,13 +11,15 @@
  *   fields, and `ControlPanelManager.syncLiveWeatherOverrideDomFromDirectedPreset()`. Base wind and
  *   gustiness/variability are edited only on the Map Shine Control Panel.
  *
- * On Weather effect registration, `hydrateMainWeatherTweakpaneFromController` runs **before** the initial
- * callback so schema defaults (often 0) do not clobber WC that was already loaded from snapshots.
+ * On Weather effect registration, scenes **with** a `weather-snapshot` hydrate the main Tweakpane from WC
+ * after param callbacks. Scenes **without** a snapshot apply manual scalars from scene settings into WC
+ * first, then hydrate the UI from WC.
  *
  * @module ui/weather-param-bridge
  */
 
 import { PrecipitationType, weatherController as coreWeatherController } from '../core/WeatherController.js';
+import * as sceneSettings from '../settings/scene-settings.js';
 import { refreshMsaSameSceneRedrawPredict } from '../utils/msa-local-flag-guard.js';
 
 /** @type {ReadonlySet<string>} */
@@ -41,7 +43,73 @@ export const LIVE_WEATHER_OVERRIDE_PARAM_IDS = [
   'windDirection'
 ];
 
+/** Queued director scalars stored on the weather effect (scene settings). */
+const QUEUED_WEATHER_PARAM_IDS = [
+  'queuedPrecipitation',
+  'queuedCloudCover',
+  'queuedWindSpeed',
+  'queuedWindDirection',
+  'queuedFogDensity',
+  'queuedFreezeLevel',
+  'queuedAshIntensity'
+];
+
 const MAX_WIND_MS = 78.0;
+
+/**
+ * @param {object|null|undefined} scene
+ * @returns {boolean}
+ */
+export function sceneHasWeatherSnapshot(scene) {
+  try {
+    const stored = scene?.getFlag?.('map-shine-advanced', 'weather-snapshot');
+    return !!(stored && typeof stored === 'object' && stored.version === 1);
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * When a scene has no persisted `weather-snapshot`, apply manual scalars from scene
+ * settings (preset / baseline) into WeatherController so new scenes are not stuck on
+ * session constructor defaults.
+ *
+ * @param {import('../core/WeatherController.js').WeatherController|null|undefined} wc
+ * @param {object|null|undefined} scene
+ * @returns {boolean} True when at least one scalar was applied
+ */
+export function applyManualWeatherFromSceneEffectSettings(wc, scene) {
+  if (!wc?.targetState || !scene) return false;
+
+  const weatherFx = sceneSettings.getSceneSettings(scene)?.mapMaker?.effects?.weather;
+  if (!weatherFx || typeof weatherFx !== 'object') return false;
+
+  let applied = false;
+  for (const paramId of MANUAL_WEATHER_PARAM_IDS) {
+    if (!Object.prototype.hasOwnProperty.call(weatherFx, paramId)) continue;
+    if (applyWeatherManualParam(wc, paramId, weatherFx[paramId], { syncMainTweakpane: false })) {
+      applied = true;
+    }
+  }
+
+  for (const paramId of QUEUED_WEATHER_PARAM_IDS) {
+    if (!Object.prototype.hasOwnProperty.call(weatherFx, paramId)) continue;
+    const n = Number(weatherFx[paramId]);
+    if (!Number.isFinite(n)) continue;
+    if (typeof wc.setQueuedTransitionParam === 'function') {
+      wc.setQueuedTransitionParam(paramId, n);
+      applied = true;
+    }
+  }
+
+  if (applied) {
+    try {
+      wc._updateEnvironmentOutputs?.();
+    } catch (_) {}
+  }
+
+  return applied;
+}
 
 /**
  * Copy runtime weather into main Tweakpane `weather` params and refresh bindings only (no WC callbacks).

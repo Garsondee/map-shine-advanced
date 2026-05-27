@@ -1,0 +1,48 @@
+---
+description: Local preset comparison and insight reports (no Foundry)
+globs:
+  - data/presets/**
+  - scripts/tools/preset-insight/**
+---
+
+# Preset Insight Analyzer
+
+Map Shine ships scene presets in `data/presets/`. A **local Node CLI** compares them and produces Markdown + JSON insight reports — no Foundry session required.
+
+## When to offer this
+
+- User asks why two presets look different, or how to evolve **baseline** tuning.
+- Investigating lighting: brightening vs darkening controls “fighting” each other.
+- Suspected inverted sliders, wrong min/max ranges, or params always pinned at extremes.
+- After saving new presets and wanting a structured diff vs `baseline` or another reference.
+
+## Commands
+
+```bash
+npm run preset:insight -- --all
+npm run preset:insight -- --compare furnace-forge,the-mad-scientists-lair --reference baseline
+npm run preset:insight -- --all --out docs/reports/preset-insight.md --json docs/reports/preset-insight.json
+npm run preset:insight -- --all --neutral-score
+npm run preset:insight -- --all --neutral-score --calibration-report docs/reports/msa-calibration-report.json
+npm run chart:generate
+```
+
+Entry: `scripts/tools/preset-insight.mjs`  
+Chart generator: `scripts/tools/generate-calibration-chart.mjs`  
+Docs: `docs/preset-insight-tool.md`, `docs/calibration-workflow.md`
+
+## How to use results in chat
+
+1. Run the tool (or ask the user to run it and share the JSON path).
+2. Summarize **Executive summary** / `heuristics` (high severity first).
+3. Always mention **Light vs Dark** tension and opposing deltas vs reference when lighting is in scope.
+4. Use JSON `diffs` / per-preset `diff.changes` for follow-up code or schema fixes — do not guess large parameter diffs by hand.
+5. If a calibration report is available, include neutral-score + imported calibration nudges.
+
+## Calibration-assisted workflow
+
+- For baseline neutralization, offer `npm run chart:generate` to create an uploadable test chart PNG.
+- In Foundry, run calibration scan and export report JSON.
+- Feed that JSON back into `preset:insight` using `--calibration-report` and `--neutral-score`.
+
+Default reference is `baseline`; treat it as provisional — other trusted presets may be better guides for an updated baseline.

@@ -535,8 +535,14 @@ export class RenderLoop {
         const pendingPixiToken = strictSync && fc?.hasPendingPixiToken?.() === true;
 
         // Advance sim time once per rAF even if a downstream gate skips the present.
+        let timeInfo = null;
         try {
-          this.effectComposer.getTimeManager?.()?.update(this.frameCount);
+          timeInfo = this.effectComposer.getTimeManager?.()?.update(this.frameCount) ?? null;
+        } catch (_) {}
+
+        // Quarks weather/ash/fire/etc. must sim every rAF — not only when the compositor presents.
+        try {
+          this.effectComposer.tickParticleSystems?.(this.frameCount);
         } catch (_) {}
 
         let gate = null;

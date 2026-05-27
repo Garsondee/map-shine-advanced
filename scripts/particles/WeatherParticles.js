@@ -19,6 +19,7 @@ import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { createLogger } from '../core/log.js';
 import { getCanvasForegroundElevationSplit } from '../foundry/levels-scene-flags.js';
 import { weatherController } from '../core/WeatherController.js';
+import { isAshWeatherParticleEffectEnabled } from '../ui/ash-weather-bridge.js';
 import { RoofDripGpuSilhouetteReadback } from './RoofDripGpuSilhouetteReadback.js';
 import {
   ROOF_DRIP_EDGE_SAMPLING_DISABLED,
@@ -4912,6 +4913,9 @@ export class WeatherParticles {
      // Render rain in the late overlay pass so it can appear above canopy geometry.
      try {
        this.rainSystem.emitter.userData.msOverlayLayer = true;
+       // Full-scene precipitation follows the camera; never frustum-pause (Quarks
+       // pause() freezes sim and looks like ~controlHz stutter when emitter lags).
+       this.rainSystem.emitter.userData.msAutoCull = false;
      } catch (_) {}
 
      if (this.scene) this.scene.add(this.rainSystem.emitter);
@@ -5496,6 +5500,9 @@ export class WeatherParticles {
      
      this.snowSystem.emitter.position.set(centerX, centerY, safeEmitterZ);
      this.snowSystem.emitter.rotation.set(Math.PI, 0, 0);
+     try {
+       this.snowSystem.emitter.userData.msAutoCull = false;
+     } catch (_) {}
 
      if (this.scene) this.scene.add(this.snowSystem.emitter);
      this.batchRenderer.addSystem(this.snowSystem);
@@ -5600,6 +5607,7 @@ export class WeatherParticles {
     // Match rain: late overlay pass (layer 31) so ash draws above tokens and canopy art.
     try {
       this.ashSystem.emitter.userData.msOverlayLayer = true;
+      this.ashSystem.emitter.userData.msAutoCull = false;
     } catch (_) {}
 
     if (this.scene) this.scene.add(this.ashSystem.emitter);
@@ -5673,6 +5681,7 @@ export class WeatherParticles {
     this.ashEmberSystem.emitter.rotation.set(Math.PI, 0, 0);
     try {
       this.ashEmberSystem.emitter.userData.msOverlayLayer = true;
+      this.ashEmberSystem.emitter.userData.msAutoCull = false;
     } catch (_) {}
     if (this.scene) this.scene.add(this.ashEmberSystem.emitter);
     this.batchRenderer.addSystem(this.ashEmberSystem);
@@ -6866,6 +6875,122 @@ export class WeatherParticles {
       : Math.max(0.08, Math.min(1, (b - 0.1) / span));
   }
 
+  /**
+   * Keep precipitation emitter boxes centered on the camera every frame.
+   * Runs outside the control-rate throttle so frustum cull radii stay valid
+   * when msAutoCull is enabled on other systems.
+   * @private
+   */
+  _tickCameraFollowedEmitterBounds() {
+    const THREE = window.THREE;
+    const sceneComposer = window.MapShine?.sceneComposer;
+    const mainCamera = sceneComposer?.camera;
+    if (!THREE || !sceneComposer || !mainCamera) return;
+
+    const zoom = sceneComposer.currentZoom || 1.0;
+    const viewportWidth = sceneComposer.baseViewportWidth || window.innerWidth;
+    const viewportHeight = sceneComposer.baseViewportHeight || window.innerHeight;
+
+    const visibleW = viewportWidth / Math.max(1e-6, zoom);
+    const visibleH = viewportHeight / Math.max(1e-6, zoom);
+
+    const marginScale = 1.2;
+    const desiredW = visibleW * marginScale;
+    const desiredH = visibleH * marginScale;
+
+    let sceneX = 0;
+    let sceneY = 0;
+    let sceneW = 0;
+    let sceneH = 0;
+    try {
+      const d = canvas?.dimensions;
+      const rect = d?.sceneRect;
+      const totalH = d?.height ?? 0;
+      if (rect && typeof rect.x === 'number') {
+        sceneX = rect.x;
+        sceneW = rect.width;
+        sceneH = rect.height;
+        sceneY = (totalH > 0) ? (totalH - (rect.y + rect.height)) : rect.y;
+      } else if (d) {
+        sceneX = d.sceneX ?? 0;
+        sceneW = d.sceneWidth ?? d.width ?? 0;
+        sceneH = d.sceneHeight ?? d.height ?? 0;
+        sceneY = (totalH > 0) ? (totalH - ((d.sceneY ?? 0) + sceneH)) : (d.sceneY ?? 0);
+      }
+    } catch (_) {}
+
+    const camX = mainCamera.position.x;
+    const camY = mainCamera.position.y;
+
+    let minX = camX - desiredW / 2;
+    let maxX = camX + desiredW / 2;
+    let minY = camY - desiredH / 2;
+    let maxY = camY + desiredH / 2;
+
+    if (sceneW > 0 && sceneH > 0) {
+      const sMinX = sceneX;
+      const sMaxX = sceneX + sceneW;
+      const sMinY = sceneY;
+      const sMaxY = sceneY + sceneH;
+
+      minX = Math.max(sMinX, minX);
+      maxX = Math.min(sMaxX, maxX);
+      minY = Math.max(sMinY, minY);
+      maxY = Math.min(sMaxY, maxY);
+    }
+
+    const emitW = Math.max(1, maxX - minX);
+    const emitH = Math.max(1, maxY - minY);
+    const emitCX = (minX + maxX) * 0.5;
+    const emitCY = (minY + maxY) * 0.5;
+
+    this._viewMinX = minX;
+    this._viewMaxX = maxX;
+    this._viewMinY = minY;
+    this._viewMaxY = maxY;
+    this._viewSceneX = sceneX;
+    this._viewSceneY = sceneY;
+    this._viewSceneW = sceneW;
+    this._viewSceneH = sceneH;
+
+    if (this.rainSystem?.emitter && this.rainSystem.emitterShape) {
+      const shape = this.rainSystem.emitterShape;
+      if (typeof shape.width === 'number') shape.width = emitW;
+      if (typeof shape.height === 'number') shape.height = emitH;
+      this.rainSystem.emitter.position.x = emitCX;
+      this.rainSystem.emitter.position.y = emitCY;
+    }
+
+    if (this.snowSystem?.emitter && this.snowSystem.emitterShape) {
+      const shape = this.snowSystem.emitterShape;
+      if (typeof shape.width === 'number') shape.width = emitW;
+      if (typeof shape.height === 'number') shape.height = emitH;
+      this.snowSystem.emitter.position.x = emitCX;
+      this.snowSystem.emitter.position.y = emitCY;
+    }
+
+    if (this.roofDripSystem?.emitter) {
+      this.roofDripSystem.emitter.position.x = emitCX;
+      this.roofDripSystem.emitter.position.y = emitCY;
+    }
+
+    if (this.ashSystem?.emitter && this.ashSystem.emitterShape) {
+      const shape = this.ashSystem.emitterShape;
+      if (typeof shape.width === 'number') shape.width = emitW;
+      if (typeof shape.height === 'number') shape.height = emitH;
+      this.ashSystem.emitter.position.x = emitCX;
+      this.ashSystem.emitter.position.y = emitCY;
+    }
+
+    if (this.ashEmberSystem?.emitter && this.ashEmberSystem.emitterShape) {
+      const shape = this.ashEmberSystem.emitterShape;
+      if (typeof shape.width === 'number') shape.width = emitW;
+      if (typeof shape.height === 'number') shape.height = emitH;
+      this.ashEmberSystem.emitter.position.x = emitCX;
+      this.ashEmberSystem.emitter.position.y = emitCY;
+    }
+  }
+
   update(dt, sceneBoundsVec4) {
     // Global Weather checkbox kill-switch.
     // When weather is disabled we must:
@@ -6924,6 +7049,9 @@ export class WeatherParticles {
 
     // Landscape lightning flash doubles rain brightness — must track flash envelope every frame.
     this._applyLandscapeLightningRainBrightness();
+
+    // Emitter follow runs every frame (not only on the control path).
+    this._tickCameraFollowedEmitterBounds();
 
     // T2-A: Control-rate throttle — the expensive control path (emission bounds,
     // sizing, emission rates, uniform updates, mask lookups) only runs at _controlHz.
@@ -7010,120 +7138,8 @@ export class WeatherParticles {
 
     const THREE = window.THREE;
 
-    // Phase 1 (Quarks perf): view-dependent emission bounds.
-    // Reduce spawn area to the camera-visible rectangle (+ margin) instead of the full map.
-    // We keep the _Outdoors mask projection in full-scene coordinates via uSceneBounds.
-    const mainCamera = sceneComposer?.camera;
-    if (THREE && sceneComposer && mainCamera) {
-      const viewportWidth = sceneComposer.baseViewportWidth || window.innerWidth;
-      const viewportHeight = sceneComposer.baseViewportHeight || window.innerHeight;
-
-      const visibleW = viewportWidth / Math.max(1e-6, zoom);
-      const visibleH = viewportHeight / Math.max(1e-6, zoom);
-
-      const marginScale = 1.2;
-      const desiredW = visibleW * marginScale;
-      const desiredH = visibleH * marginScale;
-
-      // Clamp the view rectangle to the scene rect in *world-space* (Y-up).
-      let sceneX = 0;
-      let sceneY = 0;
-      let sceneW = 0;
-      let sceneH = 0;
-      try {
-        const d = canvas?.dimensions;
-        const rect = d?.sceneRect;
-        const totalH = d?.height ?? 0;
-        if (rect && typeof rect.x === 'number') {
-          sceneX = rect.x;
-          sceneW = rect.width;
-          sceneH = rect.height;
-          sceneY = (totalH > 0) ? (totalH - (rect.y + rect.height)) : rect.y;
-        } else if (d) {
-          sceneX = d.sceneX ?? 0;
-          sceneW = d.sceneWidth ?? d.width ?? 0;
-          sceneH = d.sceneHeight ?? d.height ?? 0;
-          sceneY = (totalH > 0) ? (totalH - ((d.sceneY ?? 0) + sceneH)) : (d.sceneY ?? 0);
-        }
-      } catch (e) {
-        // Fallback: no clamping
-      }
-
-      const camX = mainCamera.position.x;
-      const camY = mainCamera.position.y;
-
-      let minX = camX - desiredW / 2;
-      let maxX = camX + desiredW / 2;
-      let minY = camY - desiredH / 2;
-      let maxY = camY + desiredH / 2;
-
-      if (sceneW > 0 && sceneH > 0) {
-        const sMinX = sceneX;
-        const sMaxX = sceneX + sceneW;
-        const sMinY = sceneY;
-        const sMaxY = sceneY + sceneH;
-
-        minX = Math.max(sMinX, minX);
-        maxX = Math.min(sMaxX, maxX);
-        minY = Math.max(sMinY, minY);
-        maxY = Math.min(sMaxY, maxY);
-      }
-
-      const emitW = Math.max(1, maxX - minX);
-      const emitH = Math.max(1, maxY - minY);
-      const emitCX = (minX + maxX) * 0.5;
-      const emitCY = (minY + maxY) * 0.5;
-
-      // Cache the camera-visible world rectangle for view-dependent foam.webp spawning.
-      this._viewMinX = minX;
-      this._viewMaxX = maxX;
-      this._viewMinY = minY;
-      this._viewMaxY = maxY;
-      this._viewSceneX = sceneX;
-      this._viewSceneY = sceneY;
-      this._viewSceneW = sceneW;
-      this._viewSceneH = sceneH;
-
-      if (this.rainSystem?.emitter && this.rainSystem.emitterShape) {
-        const shape = this.rainSystem.emitterShape;
-        if (typeof shape.width === 'number') shape.width = emitW;
-        if (typeof shape.height === 'number') shape.height = emitH;
-        this.rainSystem.emitter.position.x = emitCX;
-        this.rainSystem.emitter.position.y = emitCY;
-      }
-
-      if (this.snowSystem?.emitter && this.snowSystem.emitterShape) {
-        const shape = this.snowSystem.emitterShape;
-        if (typeof shape.width === 'number') shape.width = emitW;
-        if (typeof shape.height === 'number') shape.height = emitH;
-        this.snowSystem.emitter.position.x = emitCX;
-        this.snowSystem.emitter.position.y = emitCY;
-      }
-
-      // Roof drips: same XY follow as rain so spawn distribution tracks the camera (per-point UVs stay full-scene).
-      if (this.roofDripSystem?.emitter) {
-        this.roofDripSystem.emitter.position.x = emitCX;
-        this.roofDripSystem.emitter.position.y = emitCY;
-      }
-
-      // Ash / ash ember emitters follow the camera-visible rectangle (same as rain/snow).
-      // Density variation uses temporal clusterBoost on emission, not a static full-map box.
-      if (this.ashSystem?.emitter && this.ashSystem.emitterShape) {
-        const shape = this.ashSystem.emitterShape;
-        if (typeof shape.width === 'number') shape.width = emitW;
-        if (typeof shape.height === 'number') shape.height = emitH;
-        this.ashSystem.emitter.position.x = emitCX;
-        this.ashSystem.emitter.position.y = emitCY;
-      }
-
-      if (this.ashEmberSystem?.emitter && this.ashEmberSystem.emitterShape) {
-        const shape = this.ashEmberSystem.emitterShape;
-        if (typeof shape.width === 'number') shape.width = emitW;
-        if (typeof shape.height === 'number') shape.height = emitH;
-        this.ashEmberSystem.emitter.position.x = emitCX;
-        this.ashEmberSystem.emitter.position.y = emitCY;
-      }
-
+    // View-dependent emitter bounds: updated every frame in _tickCameraFollowedEmitterBounds().
+    if (THREE && sceneComposer) {
       // Foam flecks: keep the rendered dot ~pixel-sized across zoom levels.
       // Billboards use world units for size; to approximate a 1–2px dot in screen space,
       // scale by 1/zoom (bigger world size when zoomed out, smaller when zoomed in).
@@ -8964,7 +8980,8 @@ export class WeatherParticles {
       const ashTuning = weatherController.ashTuning || {};
       const ashIntensity = weather.ashIntensity ?? 0;
       const intensityScale = ashTuning.intensityScale ?? 0.5;
-      const tunedIntensity = Math.max(0.0, ashIntensity * intensityScale);
+      const ashParticleGate = isAshWeatherParticleEffectEnabled() ? 1.0 : 0.0;
+      const tunedIntensity = Math.max(0.0, ashIntensity * intensityScale * ashParticleGate);
 
       // One-time diagnostic log when ash first activates
       if (tunedIntensity > 0 && !this._ashActivatedLogged) {
@@ -9092,7 +9109,8 @@ export class WeatherParticles {
       const ashTuning = weatherController.ashTuning || {};
       const ashIntensity = weather.ashIntensity ?? 0;
       const intensityScale = ashTuning.intensityScale ?? 0.5;
-      const tunedIntensity = Math.max(0.0, ashIntensity * intensityScale);
+      const ashParticleGate = isAshWeatherParticleEffectEnabled() ? 1.0 : 0.0;
+      const tunedIntensity = Math.max(0.0, ashIntensity * intensityScale * ashParticleGate);
 
       // Share the ash flurry envelope so embers track the same surges/lulls.
       const emberEnvelope = typeof weatherController.getAshEmissionEnvelope === 'function'

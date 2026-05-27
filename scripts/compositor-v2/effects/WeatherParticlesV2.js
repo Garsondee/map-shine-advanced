@@ -424,6 +424,32 @@ export class WeatherParticlesV2 {
   }
 
   /**
+   * Weather Quarks sim + late-overlay draw only run inside FloorCompositor.render().
+   * RenderLoop presentation pacing must treat active precipitation as continuous.
+   * @returns {boolean}
+   */
+  wantsContinuousRender() {
+    if (!this._initialized || !this.enabled) return false;
+    if (weatherController?.enabled === false) return false;
+    if (weatherController?.elevationWeatherSuppressed === true) return false;
+    const state = (typeof weatherController?.getCurrentState === 'function')
+      ? weatherController.getCurrentState()
+      : weatherController?.currentState;
+    const target = weatherController?.targetState;
+    const precip = Math.max(Number(state?.precipitation) || 0, Number(target?.precipitation) || 0);
+    const ash = Math.max(Number(state?.ashIntensity) || 0, Number(target?.ashIntensity) || 0);
+    if (precip > 0.001 || ash > 0.001) return true;
+
+    const wp = this._weatherParticles;
+    const systems = [wp?.rainSystem, wp?.snowSystem, wp?.ashSystem, wp?.ashEmberSystem];
+    for (const sys of systems) {
+      const e = sys?.emissionOverTime?.value;
+      if (typeof e === 'number' && e > 0.5) return true;
+    }
+    return false;
+  }
+
+  /**
    * Clear cached water/foam mask data after tile/water mask edits.
    */
   clearWaterCaches() {
@@ -478,13 +504,13 @@ export class WeatherParticlesV2 {
     const camera = window.MapShine?.sceneComposer?.camera;
     if (!camera) return;
     const systemMap = this._batchRenderer?.systemToBatchIndex;
-    if (!systemMap || typeof systemMap.forEach !== 'function') return;
+    if (!systemMap || typeof systemMap.entries !== 'function') return;
     const batches = this._batchRenderer?.batches;
 
-    // Build frustum from current camera matrices.
+    // Match V1 ParticleSystem._applyQuarksCulling: avoid forcing updateProjectionMatrix
+    // every frame (severe CPU/GPU stalls). Camera matrices are synced in the render loop.
     try {
-      if (typeof camera.updateProjectionMatrix === 'function') camera.updateProjectionMatrix();
-      camera.updateMatrixWorld(true);
+      camera.updateMatrixWorld(false);
       this._cullProjScreenMatrix.multiplyMatrices(
         camera.projectionMatrix,
         camera.matrixWorldInverse
@@ -494,15 +520,14 @@ export class WeatherParticlesV2 {
 
     const groundZ = window.MapShine?.sceneComposer?.groundZ ?? null;
 
-    systemMap.forEach((_, ps) => {
-      if (!ps || !ps.emitter) return;
+    for (const [ps, idx] of systemMap.entries()) {
+      if (!ps || !ps.emitter) continue;
       const emitter = ps.emitter;
       const ud = emitter.userData || (emitter.userData = {});
 
       // Default: layer 0 so precipitation renders in FloorRenderBus.renderTo (under
       // overhead + trees). Foam plume sets msOverlayLayer=true to stay on layer 31.
       try {
-        const idx = systemMap.get(ps);
         const batch = (idx !== undefined && batches) ? batches[idx] : null;
         const layer = (ud.msOverlayLayer === true) ? OVERLAY_THREE_LAYER : 0;
         if (batch?.layers?.set) {
@@ -519,7 +544,7 @@ export class WeatherParticlesV2 {
 
       // Allow specific systems (e.g. full-scene foam overlays) to opt out of
       // frustum-based pause/play culling while still being layer-forced above.
-      if (ud.msAutoCull === false) return;
+      if (ud.msAutoCull === false) continue;
 
       // Compute a bounding sphere radius for this emitter.
       const pos = emitter.position;
@@ -565,12 +590,10 @@ export class WeatherParticlesV2 {
           if (typeof ps.play === 'function') ps.play();
           ud._msCulled = false;
         }
-      } else {
-        if (!wasCulled) {
-          if (typeof ps.pause === 'function') ps.pause();
-          ud._msCulled = true;
-        }
+      } else if (!wasCulled) {
+        if (typeof ps.pause === 'function') ps.pause();
+        ud._msCulled = true;
       }
-    });
+    }
   }
 }

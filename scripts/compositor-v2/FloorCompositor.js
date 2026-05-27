@@ -576,6 +576,9 @@ export class FloorCompositor {
      */
     this._shaderWarmupGateOpen = false;
 
+    /** @type {number} Last frame when tickParticleSystems() ran (RenderLoop frameCount). */
+    this._particleTickFrameId = -1;
+
     /** @type {THREE.Vector2} Reusable size vector (avoids per-frame allocation) */
     this._sizeVec = null;
 
@@ -1070,6 +1073,30 @@ export class FloorCompositor {
   }
 
   /**
+   * True when `root` or any descendant has OVERLAY_THREE_LAYER enabled.
+   * Quarks SpriteBatches live under BatchedRenderer, not as top-level bus children.
+   * @param {THREE.Object3D} root
+   * @param {number} overlayBit `1 << OVERLAY_THREE_LAYER`
+   * @returns {boolean}
+   * @private
+   */
+  _sceneHasOverlayLayerContent(root, overlayBit) {
+    if (!root) return false;
+    const stack = [root];
+    while (stack.length > 0) {
+      const obj = stack.pop();
+      if (obj?.layers && (obj.layers.mask & overlayBit)) return true;
+      const children = obj.children;
+      if (children) {
+        for (let i = 0, len = children.length; i < len; i++) {
+          stack.push(children[i]);
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
    * Render overlay-layer world UI from the FloorRenderBus scene after final blit.
    * @private
    */
@@ -1086,18 +1113,8 @@ export class FloorCompositor {
       : Date.now();
     const shouldRescan = !this._hasOverlayLayerContent || now >= this._overlayLayerScanNextAt;
     if (shouldRescan) {
-      // Cheap refresh: check if any bus scene child has overlay layer enabled.
-      // Only scans top-level children (not full traverse) to keep this O(N-floors).
-      const children = scene.children;
-      let found = false;
       const overlayBit = 1 << OVERLAY_THREE_LAYER;
-      for (let i = 0, len = children.length; i < len; i++) {
-        if (children[i].layers && (children[i].layers.mask & overlayBit)) {
-          found = true;
-          break;
-        }
-      }
-      this._hasOverlayLayerContent = found;
+      this._hasOverlayLayerContent = this._sceneHasOverlayLayerContent(scene, overlayBit);
       const scanEvery = Math.max(100, Number(this._overlayLayerScanIntervalMs) || 350);
       this._overlayLayerScanNextAt = now + scanEvery;
     }
@@ -1964,6 +1981,69 @@ export class FloorCompositor {
   }
 
   /**
+   * True when global weather precipitation/ash should force continuous presentation.
+   * @returns {boolean}
+   * @private
+   */
+  _weatherNeedsContinuousRender() {
+    try {
+      return this._weatherParticles?.wantsContinuousRender?.() === true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * @returns {boolean}
+   * @private
+   */
+  _ashDisturbanceNeedsContinuousRender() {
+    try {
+      const effect = this._ashDisturbanceEffect;
+      if (!effect?.enabled || !resolveFloorEffectActive(effect)) return false;
+      if (weatherController?.enabled === false) return false;
+      const state = weatherController?.getCurrentState?.() ?? weatherController?.currentState ?? {};
+      const target = weatherController?.targetState ?? {};
+      const ash = Math.max(Number(state.ashIntensity) || 0, Number(target.ashIntensity) || 0);
+      return ash > 0.001;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * Advance all Quarks-based particle systems once per rAF (see RenderLoop + EffectComposer).
+   * @param {import('../core/time.js').TimeInfo} timeInfo
+   */
+  tickParticleSystems(timeInfo) {
+    if (!this._initialized || !timeInfo) return;
+
+    const frameId = Number(timeInfo.frameCount);
+    if (Number.isFinite(frameId) && frameId === this._particleTickFrameId) return;
+    if (Number.isFinite(frameId)) this._particleTickFrameId = frameId;
+
+    if (this._populateSlimRenderActive()) return;
+    if (!this._shaderWarmupGateOpen) return;
+    if (isCameraNavigationActive()) return;
+
+    this._profileEffectCall('fire', 'update', () => this._fireEffect.update(timeInfo), 'FireEffectV2 update');
+    this._profileEffectCall('ashDisturbance', 'update', () => this._ashDisturbanceEffect?.update?.(timeInfo), 'AshDisturbanceEffectV2 update');
+    this._profileEffectCall('dust', 'update', () => this._dustEffect.update(timeInfo), 'DustEffectV2 update');
+    this._profileEffectCall('waterSplashes', 'update', () => this._waterSplashesEffect?.update?.(timeInfo), 'WaterSplashesEffectV2 update');
+    this._profileEffectCall('smellyFlies', 'update', () => this._smellyFliesEffect?.update?.(timeInfo), 'SmellyFliesEffect update');
+    this._profileEffectCall('lightning', 'update', () => {
+      this._lightningEffect?.ensureMeshesAttached?.(this._renderBus?._scene ?? null);
+      this._lightningEffect?.update?.(timeInfo);
+    }, 'LightningEffectV2 update');
+    this._profileEffectCall('candleFlames', 'update', () => {
+      this._candleFlamesEffect?.ensureMeshesAttached?.(this._renderBus?._scene ?? null);
+      this._candleFlamesEffect?.update?.(timeInfo);
+    }, 'CandleFlamesEffectV2 update');
+    this._profileEffectCall('playerLight', 'update', () => this._playerLightEffect?.update?.(timeInfo), 'PlayerLightEffectV2 update');
+    this._profileEffectCall('weatherParticles', 'update', () => this._weatherParticles?.update?.(timeInfo), 'WeatherParticlesV2 update');
+  }
+
+  /**
    * Hook for EffectComposer/RenderLoop adaptive FPS.
    * When true, the render loop will prefer the "continuous" FPS cap so
    * time-varying systems (particles) stay smooth.
@@ -1975,6 +2055,16 @@ export class FloorCompositor {
       let reason = 'none';
       // Shader overlay effects (bush, tree, fluid, iridescence, prism) advance uTime on
       // presented frames only — presentation pacing owns their steady-state rate.
+      if (this._weatherNeedsContinuousRender()) {
+        reason = 'weather:precip-or-ash';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
+      if (this._ashDisturbanceNeedsContinuousRender()) {
+        reason = 'ashDisturbance:active';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
       const fire = this._fireEffect;
       if (resolveFloorEffectActive(fire)) {
         reason = 'fire:active-floors';
@@ -2077,6 +2167,11 @@ export class FloorCompositor {
    */
   getPreferredContinuousFps() {
     try {
+      if (this.wantsContinuousRender()) {
+        // Match active presentation tier so Quarks particles stay smooth on high-refresh displays.
+        const active = Number(window.MapShine?.renderActiveFps);
+        return Number.isFinite(active) && active > 0 ? active : 60;
+      }
       const fluid = this._fluidEffect;
       if (resolveOverlayEffectActive(fluid)) {
         // Fluid shader animation looks noticeably stepped at 30fps.
@@ -3710,7 +3805,7 @@ export class FloorCompositor {
     // particles, wind, and waves from accumulating time during the warmup window
     // so all systems start cleanly from t=0 when the scene first becomes visible.
     if (!populateSlimRender && !this._shaderWarmupGateOpen && timeInfo) {
-      timeInfo = { ...timeInfo, delta: 0 };
+      timeInfo = { ...timeInfo, delta: 0, motionDelta: 0 };
     }
     if (!populateSlimRender && timeInfo) {
       const navigationLite = isCameraNavigationActive();
@@ -3731,21 +3826,7 @@ export class FloorCompositor {
         this._profileEffectCall('prism', 'update', () => this._prismEffect.update(timeInfo), 'PrismEffectV2 update');
         this._profileEffectCall('bush', 'update', () => this._bushEffect.update(timeInfo), 'BushEffectV2 update');
         this._profileEffectCall('tree', 'update', () => this._treeEffect.update(timeInfo), 'TreeEffectV2 update');
-        this._profileEffectCall('fire', 'update', () => this._fireEffect.update(timeInfo), 'FireEffectV2 update');
-        this._profileEffectCall('ashDisturbance', 'update', () => this._ashDisturbanceEffect?.update?.(timeInfo), 'AshDisturbanceEffectV2 update');
         this._profileEffectCall('ashCloud', 'update', () => this._ashCloudEffect?.update?.(timeInfo), 'AshCloudEffectV2 update', { cpuOnly: true });
-        this._profileEffectCall('dust', 'update', () => this._dustEffect.update(timeInfo), 'DustEffectV2 update');
-        this._profileEffectCall('waterSplashes', 'update', () => this._waterSplashesEffect?.update?.(timeInfo), 'WaterSplashesEffectV2 update');
-        this._profileEffectCall('smellyFlies', 'update', () => this._smellyFliesEffect?.update?.(timeInfo), 'SmellyFliesEffect update');
-        this._profileEffectCall('lightning', 'update', () => {
-          this._lightningEffect?.ensureMeshesAttached?.(this._renderBus?._scene ?? null);
-          this._lightningEffect?.update?.(timeInfo);
-        }, 'LightningEffectV2 update');
-        this._profileEffectCall('candleFlames', 'update', () => {
-          this._candleFlamesEffect?.ensureMeshesAttached?.(this._renderBus?._scene ?? null);
-          this._candleFlamesEffect?.update?.(timeInfo);
-        }, 'CandleFlamesEffectV2 update');
-        this._profileEffectCall('playerLight', 'update', () => this._playerLightEffect?.update?.(timeInfo), 'PlayerLightEffectV2 update');
         this._profileEffectCall('cloud', 'update', () => this._cloudEffect.update(timeInfo), 'CloudEffectV2 update', { cpuOnly: true });
       } else {
         // Decorative overlays: uTime advances in shaders on present frames; skip CPU sim while panning.
@@ -3762,10 +3843,9 @@ export class FloorCompositor {
           );
         } catch (_) {}
       }, 'SkyColorEffectV2 update');
-      // Weather particles must update BEFORE the bus render so their BatchedRenderer
-      // positions are current when the bus scene is drawn this frame.
+      // Quarks particles tick every rAF via tickParticleSystems(); ensure sim is current before bus draw.
       if (!navigationLite) {
-        this._profileEffectCall('weatherParticles', 'update', () => this._weatherParticles?.update?.(timeInfo), 'WeatherParticlesV2 update');
+        this.tickParticleSystems(timeInfo);
       }
       const skyIntensity01 = Number(this._skyColorEffect?.currentSkyIntensity01);
       try {
@@ -6378,6 +6458,7 @@ export class FloorCompositor {
     // Track which level indices are active so we can release stale pool entries.
     const activeLevels = new Set();
     const levelFinalRTs = [];
+    const levelLitRTs = [];
     // Parallel array of raw sceneRTs (post-`renderFloorRangeTo`, pre-any-pass).
     // Used by the rebind pass below and exposed via diag for dumpLevelRTs().
     const levelSceneRTs = [];
@@ -6525,6 +6606,9 @@ export class FloorCompositor {
           this._lightingEffect?.accumulateStackedLightBuffer?.(this.renderer);
         } catch (_) {}
         currentInput = levelPostA;
+        levelLitRTs.push(levelPostA);
+      } else {
+        levelLitRTs.push(null);
       }
 
       // Sky color grading removed — outdoor atmosphere runs in post-merge Camera Grade.
@@ -7105,6 +7189,8 @@ export class FloorCompositor {
           // Post-chain, alpha-rebound output for each level. This is the
           // RT that LevelCompositePass actually reads from.
           levelFinalRTs: levelFinalRTs.slice(),
+          // Post-lighting per-level RT (null when lighting disabled).
+          levelLitRTs: levelLitRTs.slice(),
           // Raw sceneRT for each level — the direct output of
           // `renderFloorRangeTo`, before any post-pass. Carries the
           // authored content alpha (the authoritative per-floor solidity
@@ -7112,6 +7198,10 @@ export class FloorCompositor {
           // isolating draw-time alpha loss vs. post-pass widening in
           // `dumpLevelRTs()` / `levelAlphaProbe()`.
           levelSceneRTs: levelSceneRTs.slice(),
+          // Linear HDR after post-merge bloom, before Color Correction.
+          hdrScenePreGradeRT: this._hdrScenePreGradeRT ?? null,
+          // Post–color-correction merged composite (late chain input).
+          mergedFinalRT: mergedCompositeOut ?? null,
           // Shared upper-floor water occluder RT (tile-only alpha union of
           // floors above the currently-rendering level). `null` on single-floor
           // scenes or before a frame has been composed.

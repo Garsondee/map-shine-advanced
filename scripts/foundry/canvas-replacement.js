@@ -6075,11 +6075,12 @@ function onCanvasTearDown(canvas) {
   const forceFullPresetReload = _msaForceFullSceneReloadRequested(_tearDownSid);
   const _predictMatches = !forceFullPresetReload && _msaSameSceneRedrawPredicted(_tearDownSid);
   const _mapPointInFlight = !forceFullPresetReload && _msaMapPointWriteInFlight();
+  const liveRuntime = _hasLiveMapShineRuntime();
   const lightNativeSameSceneRedraw =
-    !forceFullPresetReload && (
+    !forceFullPresetReload && liveRuntime && (
       !!window.MapShine.__nativeSameSceneRedraw
-      || (_predictMatches && _hasLiveMapShineRuntime())
-      || (_mapPointInFlight && _hasLiveMapShineRuntime())
+      || _predictMatches
+      || _mapPointInFlight
     );
   const lightNativeSameScenePath = lightNativeLevelSwitch || lightNativeSameSceneRedraw;
   if (_mapPointInFlight) {
@@ -6803,6 +6804,10 @@ async function createThreeCanvas(scene, createOptions = {}) {
     safeCall(() => loadingOverlay.setStage('scene.settings', 0.0, 'Validating scene settings...', { immediate: true, keepAuto: true }), 'overlay.sceneSettings.start', Severity.COSMETIC);
     await safeCallAsync(async () => {
       if (_bailIfSessionStale('sceneSettings.ensureValid')) return;
+      if (sceneSettings.isEnabled(scene)) {
+        const { ensureBaselinePresetForEnabledScene } = await import('../ui/scene-presets.js');
+        await ensureBaselinePresetForEnabledScene(scene, { skipDraw: true, silent: true });
+      }
       if (typeof sceneSettings?.ensureValidSceneSettings === 'function') {
         await sceneSettings.ensureValidSceneSettings(scene, { autoRepair: true });
       }
@@ -7997,7 +8002,8 @@ async function createThreeCanvas(scene, createOptions = {}) {
 
     if (!pauseUiRenderHookId) {
       pauseUiRenderHookId = Hooks.on('renderApplication', (app) => {
-        if (!app || app.constructor?.name !== 'Pause') return;
+        const pauseCtor = app?.constructor?.name;
+        if (pauseCtor !== 'Pause' && pauseCtor !== 'GamePause') return;
         safeCall(() => modeManager?.elevatePauseUi?.(), 'renderApplication.pauseUi', Severity.COSMETIC);
       });
     }
@@ -8206,6 +8212,12 @@ async function createThreeCanvas(scene, createOptions = {}) {
         graphicsSettings.registerEffectInstance('external-effects-dsn', ee.facades.diceSoNice);
         graphicsSettings.applyOverrides();
       }, 'graphicsSettings.registerExternalEffects', Severity.COSMETIC);
+
+        if (uiManager && !uiManager.effectStack) {
+          safeDispose(() => uiManager.dispose(), 'uiManager.dispose(onboardingStale)');
+          uiManager = null;
+          if (window.MapShine) window.MapShine.uiManager = null;
+        }
 
         if (!uiManager) {
           uiManager = new TweakpaneManager();
@@ -8876,13 +8888,17 @@ async function createThreeCanvas(scene, createOptions = {}) {
 
               if (paramId === 'ashIntensity') {
                 const v = Number(value) || 0;
+                const ashUi = uiManager?.effectFolders?.['ash-weather'];
+                const ashEnabled = ashUi?.params?.enabled === true;
+                if (!ashEnabled && v > 0) {
+                  _syncAshUiParam('ashIntensity', 0.0);
+                  return;
+                }
                 if (window.MapShine) {
                   if (!window.MapShine.__v2AshWeatherState) window.MapShine.__v2AshWeatherState = {};
                   if (v > 0) window.MapShine.__v2AshWeatherState.lastIntensity = v;
                 }
                 _applyAshIntensity(v);
-                // Slider movement implies enabled=true when intensity>0.
-                if (v > 0) _syncAshUiParam('enabled', true);
                 return;
               }
 
@@ -11292,7 +11308,7 @@ function ensureUILayering() {
     log.debug('UI container set to pointer-events: none');
     
     // Re-enable pointer events on child elements that need interaction
-    const uiChildren = uiContainer.querySelectorAll('#sidebar, #chat, #players, #hotbar, #controls, #navigation, #pause');
+    const uiChildren = uiContainer.querySelectorAll('#sidebar, #chat, #players, #hotbar, #controls, #navigation');
     uiChildren.forEach(child => {
       child.style.pointerEvents = 'auto';
     });
@@ -11300,17 +11316,7 @@ function ensureUILayering() {
   }
 
   try {
-    const pauseEl = document.getElementById('pause');
-    if (pauseEl) {
-      pauseEl.style.zIndex = '10100';
-      pauseEl.style.pointerEvents = 'auto';
-    }
-    const raw = globalThis.ui?.pause?.element;
-    const pnode = raw?.get?.(0) ?? raw?.[0] ?? (raw instanceof HTMLElement ? raw : null);
-    if (pnode?.style) {
-      pnode.style.zIndex = '10100';
-      pnode.style.pointerEvents = 'auto';
-    }
+    modeManager?.elevatePauseUi?.();
   } catch (_) {
   }
 

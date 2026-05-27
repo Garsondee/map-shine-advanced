@@ -77,13 +77,13 @@ export class WeatherController {
 
     /** @type {WeatherState} */
     this.currentState = {
-      precipitation: 0.34,
-      precipType: PrecipitationType.RAIN,
-      cloudCover: 0.53,
-      windSpeedMS: 0.1 * WeatherController.MAX_WIND_MS,
-      windSpeed: 0.1,
-      windDirection: { x: Math.cos((205.0 * Math.PI) / 180.0), y: Math.sin((205.0 * Math.PI) / 180.0) },
-      fogDensity: 0.35,
+      precipitation: 0.0,
+      precipType: PrecipitationType.NONE,
+      cloudCover: 0.0,
+      windSpeedMS: 0.0,
+      windSpeed: 0.0,
+      windDirection: { x: 1, y: 0 },
+      fogDensity: 0.0,
       wetness: 0.0,
       freezeLevel: 0.0,
       ashIntensity: 0.0
@@ -110,13 +110,13 @@ export class WeatherController {
 
     /** @type {WeatherState} */
     this.targetState = {
-      precipitation: 0.34,
-      precipType: PrecipitationType.RAIN,
-      cloudCover: 0.53,
-      windSpeedMS: 0.1 * WeatherController.MAX_WIND_MS,
-      windSpeed: 0.1,
-      windDirection: { x: Math.cos((205.0 * Math.PI) / 180.0), y: Math.sin((205.0 * Math.PI) / 180.0) },
-      fogDensity: 0.35,
+      precipitation: 0.0,
+      precipType: PrecipitationType.NONE,
+      cloudCover: 0.0,
+      windSpeedMS: 0.0,
+      windSpeed: 0.0,
+      windDirection: { x: 1, y: 0 },
+      fogDensity: 0.0,
       wetness: 0.0,
       freezeLevel: 0.0,
       ashIntensity: 0.0
@@ -232,10 +232,10 @@ export class WeatherController {
     };
 
     this._queuedTransitionTarget = {
-      precipitation: 0.88,
-      cloudCover: 0.93,
-      windSpeed: 0.1,
-      windDirectionDeg: 205.0,
+      precipitation: 0.0,
+      cloudCover: 0.0,
+      windSpeed: 0.0,
+      windDirectionDeg: 180.0,
       fogDensity: 0.0,
       freezeLevel: 0.0,
       ashIntensity: 0.0
@@ -1171,8 +1171,15 @@ export class WeatherController {
       const scene = canvas?.scene;
       if (!scene) return;
       const stored = scene.getFlag('map-shine-advanced', 'weather-snapshot');
-      if (!stored || typeof stored !== 'object') return;
-      if (stored.version !== 1) return;
+      if (!stored || typeof stored !== 'object' || stored.version !== 1) {
+        try {
+          const { applyManualWeatherFromSceneEffectSettings } = await import('../ui/weather-param-bridge.js');
+          applyManualWeatherFromSceneEffectSettings(this, scene);
+        } catch (e) {
+          log.warn('No weather snapshot; failed to apply scene weather settings:', e);
+        }
+        return;
+      }
 
       if (this._lastLocalWeatherSnapshotUpdatedAt != null && stored.updatedAt === this._lastLocalWeatherSnapshotUpdatedAt) {
         return;

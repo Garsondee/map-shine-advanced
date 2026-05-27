@@ -449,8 +449,16 @@ export async function ensureValidSceneSettings(scene, options = {}) {
     let raw = scene.getFlag(FLAG_NAMESPACE, 'settings');
     raw = _safeParseJsonMaybe(raw);
 
-    // If missing or totally invalid, reset.
+    // If missing or totally invalid, reset (baseline for enabled scenes when possible).
     if (!_isPlainObject(raw)) {
+      if (autoRepair && _canEditScene(scene) && isEnabled(scene)) {
+        const { ensureBaselinePresetForEnabledScene } = await import('../ui/scene-presets.js');
+        const applied = await ensureBaselinePresetForEnabledScene(scene, { force: true, skipDraw: true, silent: true });
+        if (applied) {
+          log.warn('Scene settings flag was invalid; repaired with baseline preset');
+          return getSceneSettings(scene);
+        }
+      }
       if (autoRepair && _canEditScene(scene)) {
         await scene.setFlag(FLAG_NAMESPACE, 'settings', defaults);
         log.warn('Scene settings flag was invalid; repaired to defaults');
@@ -591,11 +599,19 @@ export async function enable(scene, options = {}) {
     existing = _safeParseJsonMaybe(existing);
   } catch (_) {}
 
+  const { ensureBaselinePresetForEnabledScene } = await import('../ui/scene-presets.js');
+
   if (reset === 'full' || !_isPlainObject(existing)) {
-    await setSceneSettings(s, createDefaultSettings());
-    log.info(`Map Shine enabled for scene: ${s.name} (${reset === 'full' ? 'defaults after full reset' : 'default settings written'})`);
+    const applied = await ensureBaselinePresetForEnabledScene(s, { force: true, skipDraw: true, silent: true });
+    if (!applied) {
+      await setSceneSettings(s, createDefaultSettings());
+      log.info(`Map Shine enabled for scene: ${s.name} (${reset === 'full' ? 'defaults after full reset (baseline missing)' : 'default settings written'})`);
+    } else {
+      log.info(`Map Shine enabled for scene: ${s.name} (${reset === 'full' ? 'baseline preset after full reset' : 'baseline preset applied'})`);
+    }
   } else {
-    log.info(`Map Shine enabled for scene: ${s.name} (existing settings preserved)`);
+    await ensureBaselinePresetForEnabledScene(s, { skipDraw: true, silent: true });
+    log.info(`Map Shine enabled for scene: ${s.name} (existing settings preserved or baseline applied where needed)`);
   }
 }
 

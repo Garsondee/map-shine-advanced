@@ -126,6 +126,9 @@ export class EffectComposer {
     /** @type {Promise<void>|null} Pending first-time FloorCompositor.initialize() */
     this._floorCompositorV2InitPromise = null;
 
+    /** @type {number} Dedupe Quarks ticks to one step per RenderLoop rAF */
+    this._lastParticleTickFrame = -1;
+
     // PERFORMANCE: Cache for resolved render order to avoid per-frame allocations
     this._cachedRenderOrder = [];
     this._renderOrderDirty = true;
@@ -248,6 +251,31 @@ export class EffectComposer {
     } catch (_) {
     }
     return 0;
+  }
+
+  /**
+   * Step Quarks particle systems once per rAF, independent of presentation pacing.
+   * Foundry may report 120 FPS while Map Shine only presents at idle/continuous caps;
+   * without this hook, particle sim only advanced on compositor presents (~5–30 Hz).
+   *
+   * @param {number|null} [frameKey=null] RenderLoop frame id for deduplication
+   */
+  tickParticleSystems(frameKey = null) {
+    const fc = this._floorCompositorV2;
+    if (!fc || typeof fc.tickParticleSystems !== 'function') return;
+
+    const key = Number.isFinite(frameKey) ? frameKey : Number(this.timeManager?.frameCount);
+    if (Number.isFinite(key) && key === this._lastParticleTickFrame) return;
+    if (Number.isFinite(key)) this._lastParticleTickFrame = key;
+
+    const timeInfo = this.timeManager?.getTimeInfo?.();
+    if (!timeInfo) return;
+
+    try {
+      fc.tickParticleSystems(timeInfo);
+    } catch (err) {
+      log.warn('tickParticleSystems threw:', err);
+    }
   }
 
   /**

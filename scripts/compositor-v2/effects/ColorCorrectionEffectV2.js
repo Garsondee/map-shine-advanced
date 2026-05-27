@@ -209,7 +209,7 @@ export class ColorCorrectionEffectV2 {
 
       // 4. Color Grading (Lift/Gamma/Gain)
       liftColor: { r: 0, g: 0, b: 0 },
-      gammaColor: { r: 0.5, g: 0.5, b: 0.5 },
+      gammaColor: { r: 1.0, g: 1.0, b: 1.0 },
       gainColor: { r: 1, g: 1, b: 1 },
       masterGamma: 1.5,
 
@@ -627,8 +627,8 @@ export class ColorCorrectionEffectV2 {
           type: 'color',
           colorType: 'float',
           label: 'Gamma',
-          default: { r: 0.5, g: 0.5, b: 0.5 },
-          tooltip: 'Per-channel gamma pivot values (drive pow curve; keep above zero).',
+          default: { r: 1.0, g: 1.0, b: 1.0 },
+          tooltip: 'Per-channel gamma exponent (shader uses pow(rgb, 1/gamma); 1 = neutral).',
         },
         gainColor: {
           type: 'color',

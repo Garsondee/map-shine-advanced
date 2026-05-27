@@ -159,31 +159,33 @@ function isUiAshEffectEnabled(effectId) {
  */
 
 export function isAshEffectEnabledInScene(effectId) {
+  const ui = isUiAshEffectEnabled(effectId);
+  if (ui === false) return false;
 
   const compositor = isCompositorAshEffectEnabled(effectId);
-
   if (compositor === true) return true;
 
-
-
   const blob = readSceneAshEffectBlob(effectId);
-
   if (blob?.enabled === true) return true;
-
-
-
-  const ui = isUiAshEffectEnabled(effectId);
 
   if (ui === true) return true;
 
-
-
-  if (blob && blob.enabled !== false && ui !== false) return true;
-
-
-
   return false;
+}
 
+/**
+ * True when the Ash (Weather) particle effect is enabled in the Tweakpane UI.
+ * Used to gate fall/ember emission without blocking other ash channels (clouds, manual weather).
+ * @returns {boolean}
+ */
+export function isAshWeatherParticleEffectEnabled() {
+  try {
+    const data = window.MapShine?.uiManager?.effectFolders?.['ash-weather'];
+    if (data?.params && typeof data.params.enabled === 'boolean') {
+      return data.params.enabled === true;
+    }
+  } catch (_) {}
+  return isAshEffectEnabledInScene('ash-weather');
 }
 
 
@@ -324,7 +326,9 @@ export function syncAshWeatherEffectFolderIntensity(value) {
 
     if (!data?.params) return;
 
-    const v = clampAshIntensity(value);
+    const v = isAshWeatherParticleEffectEnabled()
+      ? clampAshIntensity(value)
+      : 0;
 
     data.params.ashIntensity = v;
 

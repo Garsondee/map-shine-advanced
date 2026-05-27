@@ -33,7 +33,9 @@ import {
 import Coordinates from '../utils/coordinates.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import {
+  applyManualWeatherFromSceneEffectSettings,
   hydrateMainWeatherTweakpaneFromController,
+  sceneHasWeatherSnapshot,
   hydrateControlPanelLiveOverridesFromController,
   resolveWeatherController
 } from './weather-param-bridge.js';
@@ -45,6 +47,13 @@ import {
 import * as scenePresets from './scene-presets.js';
 import { DARKNESS_PRIORITY, LightingDirector } from '../core/LightingDirector.js';
 import { DEFAULT_SHADOW_SYSTEM_TUNING } from '../compositor-v2/shadow-system/SunDirection.js';
+import {
+  runColorCalibration,
+  runCalibrationWorkflow,
+  downloadCalibrationReport,
+  getChartSpecPathHint,
+} from '../calibration/color-calibration-sampler.js';
+import { getActivePresetId } from '../ui/scene-presets.js';
 
 const log = createLogger('UI');
 
@@ -1343,6 +1352,7 @@ export class TweakpaneManager {
       this.startUILoop();
       if (!this._canvasReadyPresetsHandler) {
         this._canvasReadyPresetsHandler = () => {
+          if (this._isPresetApplyInFlight(canvas?.scene)) return;
           this._lastPresetsSceneId = null;
           void this._hydratePresetsSelect({ forceLoad: false });
           this._refreshSceneEnableQuickToggle({ force: true });
@@ -2082,7 +2092,10 @@ export class TweakpaneManager {
           ui.notifications?.error?.('Map Shine: Enabled flag did not persist. Check console for details.');
           return;
         }
-        ui.notifications?.info?.('Map Shine: Enabled for this scene.');
+        this._refreshSceneEnableQuickToggle({ force: true });
+        const drawScene = game.scenes?.get?.(scene.id) ?? scene;
+        scenePresets.requestSceneEnablePageReload(drawScene);
+        return;
       }
 
       this._refreshSceneEnableQuickToggle({ force: true });
@@ -2091,7 +2104,7 @@ export class TweakpaneManager {
         const drawScene = game.scenes?.get?.(scene.id) ?? scene;
         await canvas.draw(drawScene);
       } catch (drawErr) {
-        console.warn('MapShine scene toggle: canvas.draw() threw; skipping forced page reload:', drawErr);
+        console.warn('MapShine scene toggle: canvas.draw() threw:', drawErr);
         ui.notifications?.warn?.('Map Shine: Scene redraw failed. Try switching scenes or reloading manually if visuals look incorrect.');
       }
     } catch (e) {
@@ -2262,12 +2275,14 @@ export class TweakpaneManager {
     }
 
     const scene = canvas?.scene ?? null;
-    const activeId = scene ? scenePresets.getActivePresetId(scene) : null;
-    const hasPresetOption = activeId && presets.some((p) => p.id === activeId);
+    const activeId = this._resolvePresetsDropdownId(scene, presets);
 
-    if (hasPresetOption) {
+    if (activeId) {
       select.value = activeId;
       optCustom.hidden = true;
+      if (scene?.id && scenePresets.getActivePresetId(scene) === activeId) {
+        scenePresets.clearPendingActivePreset(scene);
+      }
     } else {
       select.value = '__custom__';
       optCustom.hidden = false;
@@ -2275,6 +2290,33 @@ export class TweakpaneManager {
 
     this._lastPresetsSceneId = scene?.id ?? null;
     this._updatePresetsRevertButton();
+  }
+
+  /**
+   * Resolve which preset id the dropdown should show for a scene.
+   *
+   * @param {Scene|null|undefined} scene
+   * @param {Array<{ id: string }>} presets
+   * @returns {string|null}
+   * @private
+   */
+  _resolvePresetsDropdownId(scene, presets) {
+    const activeId = scene ? scenePresets.resolveActivePresetIdForScene(scene) : null;
+    if (activeId && presets.some((p) => p.id === activeId)) return activeId;
+    return null;
+  }
+
+  /**
+   * Preset apply may dispose this manager; use global MapShine guards too.
+   *
+   * @param {Scene|null|undefined} scene
+   * @returns {boolean}
+   * @private
+   */
+  _isPresetApplyInFlight(scene) {
+    return this._applyingPreset
+      || this._presetSuppressCustomForSaves
+      || scenePresets.isApplyingPresetToScene(scene);
   }
 
   /**
@@ -2313,17 +2355,19 @@ export class TweakpaneManager {
     let restored = false;
     try {
       restored = await scenePresets.revertPresetChange(scene);
+      if (restored) {
+        await this._resyncUiAfterPresetApply();
+        await this._hydratePresetsSelect({ forceLoad: false });
+      }
     } finally {
       this._discardPendingEffectSaves();
       this._presetSuppressCustomForSaves = false;
       this._applyingPreset = false;
     }
 
-    if (restored) {
-      await this._resyncUiAfterPresetApply();
+    if (!restored) {
+      await this._hydratePresetsSelect({ forceLoad: false });
     }
-
-    await this._hydratePresetsSelect({ forceLoad: false });
   }
 
   /**
@@ -2342,7 +2386,7 @@ export class TweakpaneManager {
    * @private
    */
   async _resyncUiAfterPresetApply() {
-    this.reloadAllEffectParameters();
+    this.reloadAllEffectParameters({ preferSceneFlags: true, silent: true });
 
     try {
       hydrateMainWeatherTweakpaneFromController(resolveWeatherController(), this);
@@ -2385,6 +2429,15 @@ export class TweakpaneManager {
       return;
     }
 
+    scenePresets.setPendingActivePreset(scene, preset.id);
+
+    const select = this._presetsSelectEl;
+    if (select) {
+      select.value = preset.id;
+      const customOpt = select.querySelector('option[value="__custom__"]');
+      if (customOpt) customOpt.hidden = true;
+    }
+
     this._discardPendingEffectSaves();
     this._applyingPreset = true;
     this._presetSuppressCustomForSaves = true;
@@ -2395,14 +2448,24 @@ export class TweakpaneManager {
       this._discardPendingEffectSaves();
       this._presetSuppressCustomForSaves = false;
       this._applyingPreset = false;
+      if (!applied) {
+        scenePresets.clearPendingActivePreset(scene);
+      }
     }
 
-    if (applied) {
-      await this._resyncUiAfterPresetApply();
+    const liveUi = window.MapShine?.uiManager;
+    if (applied && liveUi && liveUi !== this) {
+      await liveUi._hydratePresetsSelect?.({ forceLoad: false });
+      liveUi._updatePresetsRevertButton?.();
+    } else if (applied) {
+      await this._hydratePresetsSelect({ forceLoad: false });
+      this._updatePresetsRevertButton();
     }
 
-    await this._hydratePresetsSelect({ forceLoad: false });
-    this._updatePresetsRevertButton();
+    if (!applied) {
+      await this._hydratePresetsSelect({ forceLoad: false });
+      this._updatePresetsRevertButton();
+    }
   }
 
   /**
@@ -2414,6 +2477,8 @@ export class TweakpaneManager {
     if (!select) return;
 
     const scene = canvas?.scene ?? null;
+    if (this._isPresetApplyInFlight(scene)) return;
+
     const sceneId = scene?.id ?? null;
 
     if (sceneId !== this._lastPresetsSceneId) {
@@ -2425,9 +2490,10 @@ export class TweakpaneManager {
 
     if (!scene) return;
 
-    const activeId = scenePresets.getActivePresetId(scene);
-    const hasOption = activeId && [...select.options].some((o) => o.value === activeId);
-    const want = hasOption ? activeId : '__custom__';
+    const presetRows = [...select.options]
+      .filter((o) => o.value && o.value !== '__custom__')
+      .map((o) => ({ id: o.value }));
+    const want = this._resolvePresetsDropdownId(scene, presetRows) ?? '__custom__';
 
     const customOpt = select.querySelector('option[value="__custom__"]');
     if (customOpt) customOpt.hidden = want !== '__custom__';
@@ -2445,9 +2511,9 @@ export class TweakpaneManager {
    * @private
    */
   async _markPresetCustom() {
-    if (this._applyingPreset || this._presetSuppressCustomForSaves || !this._scenePresetTrackingReady || this._uiValidatorActive) return;
-
     const scene = canvas?.scene;
+    if (this._isPresetApplyInFlight(scene) || !this._scenePresetTrackingReady || this._uiValidatorActive) return;
+
     if (!scene) return;
 
     const select = this._presetsSelectEl;
@@ -3068,6 +3134,166 @@ export class TweakpaneManager {
 
     sceneFolder.on('fold', (ev) => {
       this.accordionStates['debug_scene'] = ev.expanded;
+      this.saveUIState();
+    });
+
+    debugFolder.addBlade({ view: 'separator' });
+
+    const calibrationFolder = debugFolder.addFolder({
+      title: 'Calibration',
+      expanded: this.accordionStates['debug_calibration'] ?? false
+    });
+    const calibrationState = {
+      mode: this.accordionStates['debug_calibration_mode'] === 'v2' ? 'v2' : 'v1',
+      workflowApplyNeutral: this.accordionStates['debug_calibration_workflow_neutral'] === true,
+    };
+
+    calibrationFolder.addBinding(calibrationState, 'mode', {
+      label: 'Calibration Mode',
+      options: {
+        'Classic v1': 'v1',
+        'Tiled v2': 'v2',
+      },
+    }).on('change', (ev) => {
+      this.accordionStates['debug_calibration_mode'] = ev.value;
+      this.saveUIState();
+    });
+
+    calibrationFolder.addButton({
+      title: 'Chart Spec Path'
+    }).on('click', async () => {
+      try {
+        const hint = getChartSpecPathHint(calibrationState.mode);
+        await navigator.clipboard.writeText(hint);
+        ui.notifications?.info?.(`Map Shine: Copied chart spec path (${hint})`);
+      } catch (_) {
+        ui.notifications?.warn?.('Map Shine: Could not copy chart spec path');
+      }
+    });
+
+    calibrationFolder.addButton({
+      title: 'Run Calibration Scan'
+    }).on('click', async () => {
+      try {
+        ui.notifications?.info?.(`Map Shine: ${calibrationState.mode.toUpperCase()} calibration scan started (may take a few seconds)…`);
+        const report = await runColorCalibration({
+          mode: calibrationState.mode,
+          taps: ['busAlbedo', 'lit', 'preGrade', 'final'],
+        });
+        const mean = report?.aggregates?.busAlbedoMeanDelta;
+        if (Number.isFinite(mean)) {
+          ui.notifications?.info?.(`Map Shine: ${calibrationState.mode.toUpperCase()} calibration complete (bus mean Δ ${mean.toFixed(2)})`);
+        } else {
+          ui.notifications?.info?.('Map Shine: Calibration complete');
+        }
+      } catch (e) {
+        console.warn('Map Shine: Calibration scan failed', e);
+        ui.notifications?.error?.(`Map Shine: Calibration scan failed (${e?.message ?? e})`);
+      }
+    });
+
+    calibrationFolder.addButton({
+      title: 'Export Calibration Report'
+    }).on('click', async () => {
+      try {
+        const report = window.MapShine?.__lastCalibrationReport
+          ?? await runColorCalibration({
+            mode: calibrationState.mode,
+            taps: ['busAlbedo', 'lit', 'preGrade', 'final'],
+          });
+        const jsonName = downloadCalibrationReport(report, 'json');
+        const mdName = downloadCalibrationReport(report, 'md');
+        ui.notifications?.info?.(`Map Shine: Downloaded ${jsonName} and ${mdName}`);
+      } catch (e) {
+        console.warn('Map Shine: Calibration export failed', e);
+        ui.notifications?.error?.(`Map Shine: Calibration export failed (${e?.message ?? e})`);
+      }
+    });
+
+    calibrationFolder.addButton({
+      title: 'Run Calibration Scan (v2 tiled)'
+    }).on('click', async () => {
+      try {
+        ui.notifications?.info?.('Map Shine: v2 calibration scan started (may take a few seconds)…');
+        const report = await runColorCalibration({
+          mode: 'v2',
+          taps: ['busAlbedo', 'lit', 'preGrade', 'final'],
+        });
+        const conf = Number(report?.meta?.alignment?.markerHitRate);
+        if (Number.isFinite(conf)) {
+          ui.notifications?.info?.(`Map Shine: v2 scan complete (marker ${(conf * 100).toFixed(1)}%)`);
+        } else {
+          ui.notifications?.info?.('Map Shine: v2 scan complete');
+        }
+      } catch (e) {
+        console.warn('Map Shine: Calibration v2 scan failed', e);
+        ui.notifications?.error?.(`Map Shine: Calibration v2 scan failed (${e?.message ?? e})`);
+      }
+    });
+
+    calibrationFolder.addBinding(calibrationState, 'workflowApplyNeutral', {
+      label: 'Workflow: apply neutral first',
+    }).on('change', (ev) => {
+      this.accordionStates['debug_calibration_workflow_neutral'] = !!ev.value;
+      this.saveUIState();
+    });
+
+    calibrationFolder.addButton({
+      title: 'Run Full Calibration Workflow'
+    }).on('click', async () => {
+      try {
+        ui.notifications?.info?.('Map Shine: calibration workflow started…');
+        const report = await runCalibrationWorkflow({
+          mode: calibrationState.mode === 'v2' ? 'v2' : 'v1',
+          applyNeutralPreset: calibrationState.workflowApplyNeutral,
+          download: true,
+          downloadFormat: 'both',
+          taps: ['busAlbedo', 'lit', 'preGrade', 'final'],
+        });
+        const drift = report?.pipelineDrift;
+        const bus = report?.aggregates?.busAlbedoMeanDelta;
+        const fin = report?.aggregates?.finalMeanDelta;
+        const preset = report?.meta?.workflow?.verifiedActivePresetId ?? report?.meta?.activePresetId ?? '—';
+        ui.notifications?.info?.(
+          `Map Shine: workflow done (preset: ${preset}, bus Δ ${Number(bus).toFixed(1)}, final Δ ${Number(fin).toFixed(1)}, bus→final +${Number(drift?.busToFinal).toFixed(1)})`,
+        );
+      } catch (e) {
+        console.warn('Map Shine: Calibration workflow failed', e);
+        ui.notifications?.error?.(`Map Shine: Calibration workflow failed (${e?.message ?? e})`);
+      }
+    });
+
+    calibrationFolder.addButton({
+      title: 'Apply Calibration Neutral Preset'
+    }).on('click', async () => {
+      try {
+        const scene = game?.scenes?.viewed ?? canvas?.scene ?? null;
+        if (!scene) {
+          ui.notifications?.warn?.('Map Shine: No viewed scene');
+          return;
+        }
+        const presets = await scenePresets.loadBuiltInPresets({ force: true });
+        const preset = presets.find((p) => p.id === 'calibration-neutral');
+        if (!preset) {
+          ui.notifications?.warn?.('Map Shine: calibration-neutral preset not found');
+          return;
+        }
+        ui.notifications?.info?.('Map Shine: applying preset (scene will redraw)…');
+        const applied = await scenePresets.applyPresetToScene(scene, preset);
+        const flagId = getActivePresetId(scene);
+        if (applied) {
+          ui.notifications?.info?.(
+            `Map Shine: Calibration Neutral applied (activePresetId: ${flagId ?? 'unset'}). Scene redraw is normal.`,
+          );
+        }
+      } catch (e) {
+        console.warn('Map Shine: Applying calibration preset failed', e);
+        ui.notifications?.error?.(`Map Shine: Failed to apply calibration preset (${e?.message ?? e})`);
+      }
+    });
+
+    calibrationFolder.on('fold', (ev) => {
+      this.accordionStates['debug_calibration'] = ev.expanded;
       this.saveUIState();
     });
 
@@ -4019,14 +4245,8 @@ export class TweakpaneManager {
           return;
         }
 
-        ui.notifications?.info?.('Map Shine: Scene enabled — activating 3D canvas…');
-
-        try {
-          await canvas.draw(refreshed);
-        } catch (drawErr) {
-          console.warn('MapShine enable button: canvas.draw() threw; skipping forced page reload:', drawErr);
-          ui.notifications?.warn?.('Map Shine: Scene redraw failed after enabling. You can reload manually if the scene looks wrong.');
-        }
+        scenePresets.requestSceneEnablePageReload(refreshed);
+        return;
       } catch (e) {
         log.error('Failed to enable Map Shine Advanced for scene:', e);
         ui.notifications?.error?.('Map Shine: Failed to enable this scene. Check console for details.');
@@ -4550,18 +4770,22 @@ export class TweakpaneManager {
     const effectData = this.effectFolders[effectId];
     const initialCallback = this.effectCallbacks.get(effectId) || updateCallback;
 
-    // Weather: WeatherController is hydrated from scene/snapshot before this UI exists.
-    // Without this, the initial callback would push schema defaults (often 0) into WC and
-    // wipe live state; the GM control panel would then show zeros and feel "disconnected".
     if (effectId === 'weather') {
-      try {
-        hydrateMainWeatherTweakpaneFromController(resolveWeatherController(), this);
-      } catch (e) {
-        log.warn('hydrateMainWeatherTweakpaneFromController failed:', e);
+      const wc = resolveWeatherController();
+      const scene = canvas?.scene;
+      // Fresh scenes (baseline, no weather-snapshot): scene settings are authoritative.
+      // Snapshotted scenes: WC already restored — hydrate UI from WC only.
+      if (wc && scene && !sceneHasWeatherSnapshot(scene)) {
+        try {
+          applyManualWeatherFromSceneEffectSettings(wc, scene);
+        } catch (e) {
+          log.warn('applyManualWeatherFromSceneEffectSettings failed:', e);
+        }
       }
     }
 
     if (initialCallback && effectData && effectData.params) {
+      const ashWeatherDisabled = effectId === 'ash-weather' && effectData.params.enabled !== true;
       for (const [paramId, value] of Object.entries(effectData.params)) {
         const def = effectData.schema?.parameters?.[paramId];
         // Do not push readonly (status-only) or hidden parameters into the effect.
@@ -4571,6 +4795,8 @@ export class TweakpaneManager {
         if (def?.hidden === true && paramId !== 'enabled') continue;
         // stormIntensity is owned by Map Shine Control (landscapeLightning.lightning).
         if (effectId === 'weather-lightning' && paramId === 'stormIntensity') continue;
+        // Ash (Weather): when disabled, do not push a saved non-zero intensity (would re-enable particles).
+        if (ashWeatherDisabled && paramId === 'ashIntensity') continue;
 
         initialCallback(effectId, paramId, value);
       }
@@ -4593,6 +4819,11 @@ export class TweakpaneManager {
     }
 
     if (effectId === 'weather') {
+      try {
+        hydrateMainWeatherTweakpaneFromController(resolveWeatherController(), this);
+      } catch (e) {
+        log.warn('hydrateMainWeatherTweakpaneFromController failed:', e);
+      }
       try {
         hydrateControlPanelLiveOverridesFromController(resolveWeatherController());
       } catch (e) {
@@ -5367,10 +5598,15 @@ export class TweakpaneManager {
    * @returns {Object} Loaded parameters or defaults
    * @private
    */
-  loadEffectParameters(effectId, schema) {
+  loadEffectParameters(effectId, schema, options = {}) {
+    const { preferSceneFlags = false } = options;
     try {
       // Route to world-scoped storage when this effect is in "World Based" mode
-      if (this._isWorldBasedEligible(effectId) && this._worldBasedEffects.has(effectId)) {
+      if (
+        !preferSceneFlags
+        && this._isWorldBasedEligible(effectId)
+        && this._worldBasedEffects.has(effectId)
+      ) {
         return this._loadWorldEffectParameters(effectId, schema);
       }
 
@@ -5469,7 +5705,9 @@ export class TweakpaneManager {
   queueSave(effectId) {
     if (this._uiValidatorActive) return;
     this.saveQueue.add(effectId);
-    void this._markPresetCustom();
+    if (!this._isPresetApplyInFlight(canvas?.scene)) {
+      void this._markPresetCustom();
+    }
   }
 
   /**
@@ -5931,9 +6169,10 @@ export class TweakpaneManager {
    * Reload all effect parameters (used when switching modes)
    * @private
    */
-  reloadAllEffectParameters() {
+  reloadAllEffectParameters(options = {}) {
+    const { preferSceneFlags = false, silent = false } = options;
     for (const [effectId, effectData] of Object.entries(this.effectFolders)) {
-      const savedParams = this.loadEffectParameters(effectId, effectData.schema);
+      const savedParams = this.loadEffectParameters(effectId, effectData.schema, { preferSceneFlags });
 
       // Update params object
       for (const [paramId, value] of Object.entries(savedParams)) {
@@ -5950,16 +6189,15 @@ export class TweakpaneManager {
             if (g) next = g;
           }
           effectData.params[paramId] = next;
-          
-          // Refresh binding display
-          if (effectData.bindings[paramId]) {
+
+          if (!silent && effectData.bindings[paramId]) {
             effectData.bindings[paramId].refresh();
           }
         }
       }
 
       // Notify effect callback
-      const callback = this.effectCallbacks.get(effectId);
+      const callback = !silent ? this.effectCallbacks.get(effectId) : null;
       if (callback) {
         for (const [paramId, value] of Object.entries(savedParams)) {
           const def = effectData.schema?.parameters?.[paramId];

@@ -11,6 +11,23 @@
   pointer-events: none; /* Let Foundry handle mouse events */
 }
 
+/* Foundry pause banner: visible above Map Shine, but pass RMB pan through to canvas */
+#pause {
+  z-index: 10100 !important;
+  pointer-events: none !important;
+}
+
+#pause button,
+#pause a[href],
+#pause [data-action],
+#pause [role="button"],
+#pause input,
+#pause select,
+#pause textarea,
+#pause label[for] {
+  pointer-events: auto !important;
+}
+
 /* Tweakpane UI Container */
 #map-shine-ui {
   font-family: var(--font-primary, 'Signika', sans-serif);

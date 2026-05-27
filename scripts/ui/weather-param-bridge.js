@@ -106,6 +106,12 @@ export function applyManualWeatherFromSceneEffectSettings(wc, scene) {
     try {
       wc._updateEnvironmentOutputs?.();
     } catch (_) {}
+    try {
+      const ash = Number(wc.targetState?.ashIntensity);
+      if (Number.isFinite(ash) && ash <= 0.001) {
+        if (window.MapShine) window.MapShine.__v2AshIntensity = 0;
+      }
+    } catch (_) {}
   }
 
   return applied;

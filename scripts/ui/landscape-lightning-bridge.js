@@ -41,13 +41,13 @@ export function resolveWeatherLightningEffect() {
  */
 export function ensureLandscapeLightningState(controlState) {
   if (!controlState.landscapeLightning || typeof controlState.landscapeLightning !== 'object') {
-    controlState.landscapeLightning = { lightning: 1.0 };
+    controlState.landscapeLightning = { lightning: 0.0 };
   }
   if (!Number.isFinite(Number(controlState.landscapeLightning.lightning))) {
     const legacy = Number(controlState.landscapeLightning.stormIntensity);
     controlState.landscapeLightning.lightning = Number.isFinite(legacy)
-      ? clampScalar01(legacy, 1.0)
-      : 1.0;
+      ? clampScalar01(legacy, 0.0)
+      : 0.0;
   }
   return controlState.landscapeLightning;
 }

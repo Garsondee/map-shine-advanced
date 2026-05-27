@@ -22,10 +22,7 @@
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
-import {
-  DEFAULT_ATMOSPHERE_PARAMS,
-  migrateAtmosphereParams,
-} from '../SkyEnvironmentModel.js';
+import { migrateAtmosphereParams } from '../SkyEnvironmentModel.js';
 
 const log = createLogger('ColorCorrectionEffectV2');
 
@@ -73,33 +70,55 @@ const makeTodAnchor = (hour, global = {}, interior = {}) => ({
   interior: makeTodGrade(interior),
 });
 
-/** Default hour per anchor index (tod0..tod7). */
+/** Default hour per anchor index (tod0..tod7). Neutral grades — timeline off by default. */
 const DEFAULT_TOD_ANCHORS = [
-  makeTodAnchor(0.0,
-    { exposure: 0, saturation: 0.5, tintColor: { r: 0.45, g: 0.55, b: 2.4 } },
-    { exposure: -3, saturation: 1, tintColor: { r: 0.55, g: 0.71, b: 1.2 } }),
-  makeTodAnchor(3.0,
-    { exposure: -1, saturation: 0.4, tintColor: { r: 1, g: 1, b: 1 } },
-    { exposure: -3, saturation: 1, tintColor: { r: 1, g: 1, b: 1 } }),
-  makeTodAnchor(6.0,
-    { exposure: 0, saturation: 1, tintColor: { r: 2, g: 1.3, b: 1 } },
-    { exposure: -3, saturation: 1, tintColor: { r: 1, g: 1, b: 1 } }),
-  makeTodAnchor(9.0,
-    { exposure: 0, saturation: 1, tintColor: { r: 1, g: 1, b: 1 } },
-    { exposure: -2, saturation: 1, tintColor: { r: 1, g: 1, b: 1 } }),
-  makeTodAnchor(12.0,
-    { exposure: 0.7, saturation: 1, tintColor: { r: 1, g: 1, b: 1 } },
-    { exposure: -2, saturation: 0.5, tintColor: { r: 1, g: 1, b: 1 } }),
-  makeTodAnchor(15.0,
-    { exposure: 0, saturation: 1, tintColor: { r: 3, g: 1.3, b: 1 } },
-    { exposure: -2, saturation: 1, tintColor: { r: 1, g: 1, b: 1 } }),
-  makeTodAnchor(18.0,
-    { exposure: 0, saturation: 1, tintColor: { r: 2, g: 1.4, b: 1 } },
-    { exposure: -3, saturation: 1, tintColor: { r: 1, g: 1, b: 1 } }),
-  makeTodAnchor(21.0,
-    { exposure: -1, saturation: 0.4, tintColor: { r: 1, g: 1, b: 1 } },
-    { exposure: -3, saturation: 1, tintColor: { r: 1, g: 1, b: 1 } }),
+  makeTodAnchor(0.0),
+  makeTodAnchor(3.0),
+  makeTodAnchor(6.0),
+  makeTodAnchor(9.0),
+  makeTodAnchor(12.0),
+  makeTodAnchor(15.0),
+  makeTodAnchor(18.0),
+  makeTodAnchor(21.0),
 ];
+
+/** Baseline camera-grade atmosphere defaults (neutral; atmosphere off by default). */
+const COLOR_CORRECTION_ATMOSPHERE_DEFAULTS = Object.freeze({
+  intensity: 1,
+  saturationBoost: 0,
+  vibranceBoost: 0,
+  sunriseHour: 6,
+  sunsetHour: 18,
+  goldenHourWidth: 1.3,
+  goldenStrength: 1,
+  goldenPower: 1,
+  nightFloor: 0,
+  analyticStrength: 0.85,
+  turbidity: 0.22,
+  rayleighStrength: 0.63,
+  mieStrength: 0.35,
+  forwardScatter: 0.3,
+  weatherInfluence: 0.67,
+  cloudToTurbidity: 0.25,
+  precipToTurbidity: 0.72,
+  overcastDesaturate: 0,
+  overcastContrastReduce: 0,
+  tempWarmAtHorizon: 0,
+  tempCoolAtNoon: 0,
+  nightCoolBoost: 0,
+  goldenSaturationBoost: 0,
+  nightSaturationFloor: 0,
+  hazeLift: 0,
+  hazeContrastLoss: 0,
+  autoIntensityEnabled: false,
+  autoIntensityStrength: 1,
+  goldenOutdoorRecolorStrength: 0,
+  goldenOutdoorRecolorColor: { r: 1, g: 1, b: 1 },
+  shadowGradePreserve: 0.35,
+  calendarDarknessBlend: 1,
+  dayNightGradePull: 1,
+  nightExtraDarkness: 0,
+});
 
 /**
  * UI order and labels: noon → afternoon → dusk → night → midnight → pre-dawn → dawn → morning.
@@ -211,7 +230,7 @@ export class ColorCorrectionEffectV2 {
       liftColor: { r: 0, g: 0, b: 0 },
       gammaColor: { r: 1.0, g: 1.0, b: 1.0 },
       gainColor: { r: 1, g: 1, b: 1 },
-      masterGamma: 1.5,
+      masterGamma: 1.65,
 
       // 5. Tone Mapping.
       // ACES is the HDR → LDR boundary now that the per-level chain emits true
@@ -224,22 +243,21 @@ export class ColorCorrectionEffectV2 {
       vignetteSoftness: 0.0,
       grainStrength: 0.0,
 
-      // 7. Time-of-day CC timeline. These controls are additive on top of the
-      // base CC grade; defaults are neutral so enabling the tool is predictable.
-      todTimelineEnabled: true,
+      // 7. Time-of-day CC timeline. Neutral anchors; off by default until authored.
+      todTimelineEnabled: false,
       /** Blend strength toward local neutral-bright grade under gameplay lights (save key retained). */
-      localWarmLightPreserve: 1.0,
+      localWarmLightPreserve: 0,
       /** Extra exposure stops added to timeline grade inside local-light pools. */
-      localTodOverrideExposure: 2.75,
+      localTodOverrideExposure: 0,
       /** Minimum saturation multiplier inside local-light pools (neutral tint). */
-      localTodOverrideSaturation: 1.25,
+      localTodOverrideSaturation: 1,
       /** Restore ToD grade loss on HDR flame cores (light-buffer × emissive), not map albedo. */
-      localWarmEmissiveAdd: 0.55,
+      localWarmEmissiveAdd: 0,
       todAnchors: cloneTodAnchors(),
 
       // Outdoor atmosphere (weather / golden hour) — evaluated by SkyEnvironmentModel.
-      atmosphereEnabled: true,
-      ...DEFAULT_ATMOSPHERE_PARAMS,
+      atmosphereEnabled: false,
+      ...COLOR_CORRECTION_ATMOSPHERE_DEFAULTS,
     };
 
     for (let i = 0; i < TOD_ANCHOR_COUNT; i++) {
@@ -289,7 +307,7 @@ export class ColorCorrectionEffectV2 {
     const timelineParams = {
       todTimelineEnabled: {
         type: 'boolean',
-        default: true,
+        default: false,
         label: 'Enable time-of-day timeline',
         tooltip: 'Blends eight clock anchors (global + interior grades) as Map Shine time advances. This is the camera-grade owner for visible time-of-day exposure.',
       },
@@ -299,7 +317,7 @@ export class ColorCorrectionEffectV2 {
         min: 0,
         max: 1,
         step: 0.01,
-        default: 1.0,
+        default: 0,
         tooltip: 'Blends from the scene timeline grade toward a bright neutral local grade under gameplay lights (HDR light-buffer alpha). 0 = full midnight/global tint everywhere; 1 = full local override inside lit pools only.',
       },
       localTodOverrideExposure: {
@@ -308,7 +326,7 @@ export class ColorCorrectionEffectV2 {
         min: -2,
         max: 5,
         step: 0.05,
-        default: 2.75,
+        default: 0,
         tooltip: 'Base exposure stops added inside local-light pools on top of the timeline grade. Stronger lights gain extra stops automatically — counters midnight darkness and blue tint.',
       },
       localTodOverrideSaturation: {
@@ -317,7 +335,7 @@ export class ColorCorrectionEffectV2 {
         min: 0.5,
         max: 2,
         step: 0.01,
-        default: 1.25,
+        default: 1,
         tooltip: 'Minimum saturation multiplier inside local-light pools when overriding toward neutral tint. Brighter pool cores push slightly higher.',
       },
       localWarmEmissiveAdd: {
@@ -326,7 +344,7 @@ export class ColorCorrectionEffectV2 {
         min: 0,
         max: 1.5,
         step: 0.01,
-        default: 0.55,
+        default: 0,
         tooltip: 'Restores ToD grade loss on HDR flame cores (light-buffer core × emissive luminance). Does not touch normal map albedo — keeps scene-wide time-of-day tint visible.',
       },
     };
@@ -643,7 +661,7 @@ export class ColorCorrectionEffectV2 {
           min: 0.1,
           max: 3,
           step: 0.01,
-          default: 1.5,
+          default: 1.65,
           tooltip: 'Overall gamma after lift/gamma/gain (1 = neutral).',
         },
         toneMapping: {
@@ -682,7 +700,7 @@ export class ColorCorrectionEffectV2 {
         },
         atmosphereEnabled: {
           type: 'boolean',
-          default: true,
+          default: false,
           label: 'Enable outdoor atmosphere',
           tooltip: 'Weather-aware golden hour / overcast offsets on sky-eligible outdoor pixels.',
         },
@@ -691,44 +709,44 @@ export class ColorCorrectionEffectV2 {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 1,
+          default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.intensity,
           label: 'Outdoor atmosphere strength',
           throttle: 50,
           tooltip: 'Blend of procedural outdoor atmosphere on sky-visible pixels. Also exported as environment strength for water and weather-aware lighting.',
         },
-        saturationBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.5, label: 'Sky color saturation', throttle: 50 },
-        vibranceBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: 0.07, label: 'Sky color vibrance', throttle: 50 },
-        shadowGradePreserve: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.35, label: 'Shadow preserve', throttle: 50, tooltip: 'Keeps shadowed outdoor pixels from full atmospheric recolor.' },
-        sunriseHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: 6.0, label: 'Sunrise', throttle: 50 },
-        sunsetHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: 18.0, label: 'Sunset', throttle: 50 },
-        goldenHourWidth: { type: 'slider', min: 0.25, max: 6.0, step: 0.05, default: 6.0, label: 'Golden Width', throttle: 50 },
-        goldenStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 4, label: 'Golden Strength', throttle: 50 },
-        goldenPower: { type: 'slider', min: 0.5, max: 3.0, step: 0.01, default: 3, label: 'Golden Power', throttle: 50 },
-        goldenOutdoorRecolorStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.05, default: 3.25, label: 'Golden Recolor', throttle: 50 },
-        goldenOutdoorRecolorColor: { type: 'color', default: { r: 1.35, g: 0.80, b: 0.50 }, label: 'Golden Recolor Color' },
-        nightFloor: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.5, label: 'Night Floor', throttle: 50 },
-        analyticStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: 0.85, label: 'Analytic Strength', throttle: 50 },
-        turbidity: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.22, label: 'Turbidity', throttle: 50 },
-        rayleighStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.63, label: 'Rayleigh', throttle: 50 },
-        mieStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.35, label: 'Mie', throttle: 50 },
-        forwardScatter: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.3, label: 'Forward Scatter', throttle: 50 },
-        weatherInfluence: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.67, label: 'Weather Influence', throttle: 50 },
-        cloudToTurbidity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.25, label: 'Cloud→Turbidity', throttle: 50 },
-        precipToTurbidity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: 0.72, label: 'Precip→Turbidity', throttle: 50 },
-        overcastDesaturate: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.3, label: 'Overcast Desat', throttle: 50 },
-        overcastContrastReduce: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.38, label: 'Overcast Contrast', throttle: 50 },
-        tempWarmAtHorizon: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.85, label: 'Warm Horizon', throttle: 50 },
-        tempCoolAtNoon: { type: 'slider', min: -1.0, max: 0.0, step: 0.01, default: -0.45, label: 'Cool Noon', throttle: 50 },
-        nightCoolBoost: { type: 'slider', min: -1.0, max: 0.0, step: 0.01, default: -0.25, label: 'Night Cool', throttle: 50 },
-        goldenSaturationBoost: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.29, label: 'Golden Sat', throttle: 50 },
-        nightSaturationFloor: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.33, label: 'Night Sat Floor', throttle: 50 },
-        hazeLift: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: 0.08, label: 'Haze Lift', throttle: 50 },
-        hazeContrastLoss: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 0.0, label: 'Haze Contrast', throttle: 50 },
-        autoIntensityEnabled: { type: 'boolean', default: false, label: 'Auto Intensity' },
-        autoIntensityStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: 1.0, label: 'Auto Strength', throttle: 50 },
-        calendarDarknessBlend: { type: 'slider', min: 0, max: 1, step: 0.05, default: 1.0, label: 'Master darkness blend', throttle: 50 },
-        dayNightGradePull: { type: 'slider', min: 0, max: 2.5, step: 0.05, default: 1.0, label: 'Day/night color separation', throttle: 50 },
-        nightExtraDarkness: { type: 'slider', min: 0, max: 0.45, step: 0.01, default: 0.0, label: 'Night color depth', throttle: 50 },
+        saturationBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.saturationBoost, label: 'Sky color saturation', throttle: 50 },
+        vibranceBoost: { type: 'slider', min: -0.5, max: 0.5, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.vibranceBoost, label: 'Sky color vibrance', throttle: 50 },
+        shadowGradePreserve: { type: 'slider', min: 0, max: 1, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.shadowGradePreserve, label: 'Shadow preserve', throttle: 50, tooltip: 'Keeps shadowed outdoor pixels from full atmospheric recolor.' },
+        sunriseHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.sunriseHour, label: 'Sunrise', throttle: 50 },
+        sunsetHour: { type: 'slider', min: 0, max: 24, step: 0.05, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.sunsetHour, label: 'Sunset', throttle: 50 },
+        goldenHourWidth: { type: 'slider', min: 0.25, max: 6.0, step: 0.05, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.goldenHourWidth, label: 'Golden Width', throttle: 50 },
+        goldenStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.goldenStrength, label: 'Golden Strength', throttle: 50 },
+        goldenPower: { type: 'slider', min: 0.5, max: 3.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.goldenPower, label: 'Golden Power', throttle: 50 },
+        goldenOutdoorRecolorStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.05, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.goldenOutdoorRecolorStrength, label: 'Golden Recolor', throttle: 50 },
+        goldenOutdoorRecolorColor: { type: 'color', default: { ...COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.goldenOutdoorRecolorColor }, label: 'Golden Recolor Color' },
+        nightFloor: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.nightFloor, label: 'Night Floor', throttle: 50 },
+        analyticStrength: { type: 'slider', min: 0.0, max: 4.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.analyticStrength, label: 'Analytic Strength', throttle: 50 },
+        turbidity: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.turbidity, label: 'Turbidity', throttle: 50 },
+        rayleighStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.rayleighStrength, label: 'Rayleigh', throttle: 50 },
+        mieStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.mieStrength, label: 'Mie', throttle: 50 },
+        forwardScatter: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.forwardScatter, label: 'Forward Scatter', throttle: 50 },
+        weatherInfluence: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.weatherInfluence, label: 'Weather Influence', throttle: 50 },
+        cloudToTurbidity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.cloudToTurbidity, label: 'Cloud→Turbidity', throttle: 50 },
+        precipToTurbidity: { type: 'slider', min: 0.0, max: 2.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.precipToTurbidity, label: 'Precip→Turbidity', throttle: 50 },
+        overcastDesaturate: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.overcastDesaturate, label: 'Overcast Desat', throttle: 50 },
+        overcastContrastReduce: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.overcastContrastReduce, label: 'Overcast Contrast', throttle: 50 },
+        tempWarmAtHorizon: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.tempWarmAtHorizon, label: 'Warm Horizon', throttle: 50 },
+        tempCoolAtNoon: { type: 'slider', min: -1.0, max: 0.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.tempCoolAtNoon, label: 'Cool Noon', throttle: 50 },
+        nightCoolBoost: { type: 'slider', min: -1.0, max: 0.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.nightCoolBoost, label: 'Night Cool', throttle: 50 },
+        goldenSaturationBoost: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.goldenSaturationBoost, label: 'Golden Sat', throttle: 50 },
+        nightSaturationFloor: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.nightSaturationFloor, label: 'Night Sat Floor', throttle: 50 },
+        hazeLift: { type: 'slider', min: 0.0, max: 0.5, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.hazeLift, label: 'Haze Lift', throttle: 50 },
+        hazeContrastLoss: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.hazeContrastLoss, label: 'Haze Contrast', throttle: 50 },
+        autoIntensityEnabled: { type: 'boolean', default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.autoIntensityEnabled, label: 'Auto Intensity' },
+        autoIntensityStrength: { type: 'slider', min: 0.0, max: 1.0, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.autoIntensityStrength, label: 'Auto Strength', throttle: 50 },
+        calendarDarknessBlend: { type: 'slider', min: 0, max: 1, step: 0.05, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.calendarDarknessBlend, label: 'Master darkness blend', throttle: 50 },
+        dayNightGradePull: { type: 'slider', min: 0, max: 2.5, step: 0.05, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.dayNightGradePull, label: 'Day/night color separation', throttle: 50 },
+        nightExtraDarkness: { type: 'slider', min: 0, max: 0.45, step: 0.01, default: COLOR_CORRECTION_ATMOSPHERE_DEFAULTS.nightExtraDarkness, label: 'Night color depth', throttle: 50 },
       },
       presets: {
         'Clear Noon': {

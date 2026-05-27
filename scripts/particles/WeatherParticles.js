@@ -2413,19 +2413,33 @@ export class WeatherParticles {
     }
   }
 
+  _clearParticleSystemLive(sys) {
+    if (!sys) return;
+    try {
+      if (sys.particles && typeof sys.particles.length === 'number') sys.particles.length = 0;
+      if (typeof sys.particleNum === 'number') sys.particleNum = 0;
+      if (sys.emissionState && typeof sys.emissionState.waitEmiting === 'number') sys.emissionState.waitEmiting = 0;
+    } catch (_) {}
+  }
+
+  _clearAshParticleSystems() {
+    this._clearParticleSystemLive(this.ashSystem);
+    this._clearParticleSystemLive(this.ashEmberSystem);
+    try {
+      if (this.ashSystem?.emissionOverTime && typeof this.ashSystem.emissionOverTime.value === 'number') {
+        this.ashSystem.emissionOverTime.value = 0;
+      }
+      if (this.ashEmberSystem?.emissionOverTime && typeof this.ashEmberSystem.emissionOverTime.value === 'number') {
+        this.ashEmberSystem.emissionOverTime.value = 0;
+      }
+    } catch (_) {}
+  }
+
   _clearAllRainSplashes() {
     // three.quarks keeps live particles in `system.particles` and indexes the
     // active range via `system.particleNum`. If precipitation drops to 0 and we
     // pause the system, existing particles can remain frozen in place.
-    const clearSystem = (sys) => {
-      if (!sys) return;
-      try {
-        if (sys.particles && typeof sys.particles.length === 'number') sys.particles.length = 0;
-        if (typeof sys.particleNum === 'number') sys.particleNum = 0;
-        if (sys.emissionState && typeof sys.emissionState.waitEmiting === 'number') sys.emissionState.waitEmiting = 0;
-      } catch (_) {
-      }
-    };
+    const clearSystem = (sys) => this._clearParticleSystemLive(sys);
 
     if (this.splashSystem) clearSystem(this.splashSystem);
     if (this.splashSystems && this.splashSystems.length) {
@@ -8983,6 +8997,10 @@ export class WeatherParticles {
       const ashParticleGate = isAshWeatherParticleEffectEnabled() ? 1.0 : 0.0;
       const tunedIntensity = Math.max(0.0, ashIntensity * intensityScale * ashParticleGate);
 
+      if (tunedIntensity <= 0.001) {
+        this._clearAshParticleSystems();
+      }
+
       // One-time diagnostic log when ash first activates
       if (tunedIntensity > 0 && !this._ashActivatedLogged) {
         this._ashActivatedLogged = true;
@@ -9111,6 +9129,10 @@ export class WeatherParticles {
       const intensityScale = ashTuning.intensityScale ?? 0.5;
       const ashParticleGate = isAshWeatherParticleEffectEnabled() ? 1.0 : 0.0;
       const tunedIntensity = Math.max(0.0, ashIntensity * intensityScale * ashParticleGate);
+
+      if (tunedIntensity <= 0.001) {
+        this._clearAshParticleSystems();
+      }
 
       // Share the ash flurry envelope so embers track the same surges/lulls.
       const emberEnvelope = typeof weatherController.getAshEmissionEnvelope === 'function'

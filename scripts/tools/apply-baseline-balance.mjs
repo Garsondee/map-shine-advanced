@@ -225,6 +225,12 @@ if (win) {
   win.rainOnGlassEnabled = false;
 }
 
+const ashWeather = mm['ash-weather'];
+if (ashWeather) {
+  ashWeather.enabled = false;
+  ashWeather.ashIntensity = 0;
+}
+
 preset.controlState = {
   timeOfDay: 12,
   timeTransitionMinutes: 0,
@@ -238,11 +244,15 @@ preset.controlState = {
   directedCustomPreset: {
     precipitation: 0,
     cloudCover: 0,
-    windSpeed: 0.08,
+    windSpeed: 0,
     windDirection: 180,
     fogDensity: 0,
     freezeLevel: 0,
   },
+  windSpeedMS: 0,
+  windDirection: 180,
+  gustiness: 'calm',
+  landscapeLightning: { lightning: 0 },
   manualFogDensity: 0,
 };
 

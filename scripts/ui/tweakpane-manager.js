@@ -4786,7 +4786,10 @@ export class TweakpaneManager {
 
     if (initialCallback && effectData && effectData.params) {
       const ashWeatherDisabled = effectId === 'ash-weather' && effectData.params.enabled !== true;
+      const ashInitDeferEnabled = effectId === 'ash-weather';
+      const ashDeferredKeys = ashInitDeferEnabled ? new Set(['enabled', 'masterEnabled']) : null;
       for (const [paramId, value] of Object.entries(effectData.params)) {
+        if (ashDeferredKeys?.has(paramId)) continue;
         const def = effectData.schema?.parameters?.[paramId];
         // Do not push readonly (status-only) or hidden parameters into the effect.
         // These are typically driven by the effect itself (e.g. texture discovery state)
@@ -4799,6 +4802,12 @@ export class TweakpaneManager {
         if (ashWeatherDisabled && paramId === 'ashIntensity') continue;
 
         initialCallback(effectId, paramId, value);
+      }
+      if (ashInitDeferEnabled && ashDeferredKeys) {
+        for (const paramId of ashDeferredKeys) {
+          if (!Object.prototype.hasOwnProperty.call(effectData.params, paramId)) continue;
+          initialCallback(effectId, paramId, effectData.params[paramId]);
+        }
       }
     }
 

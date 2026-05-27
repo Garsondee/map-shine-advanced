@@ -92,15 +92,15 @@ export function createDefaultControlState() {
     directedTransitionMinutes: 5.0,
     directedCustomPreset: {
       precipitation: 0.0,
-      cloudCover: 0.15,
-      windSpeed: 39.0 / 78.0,
+      cloudCover: 0.0,
+      windSpeed: 0.0,
       windDirection: 180.0,
       fogDensity: 0.0,
       freezeLevel: 0.0
     },
-    windSpeedMS: 39.0,
+    windSpeedMS: 0.0,
     windDirection: 180.0,
-    gustiness: 'moderate',
+    gustiness: 'calm',
     tileMotionSpeedPercent: 100,
     tileMotionAutoPlayEnabled: true,
     tileMotionTimeFactorPercent: 100,
@@ -111,7 +111,7 @@ export function createDefaultControlState() {
     /** Soft rim width 0–100 (1 = default; higher = wider smoothstep). */
     replicaOcclusionEdgeSoftness: 1.0,
     landscapeLightning: {
-      lightning: 1.0,
+      lightning: 0.0,
     },
     /** Manual atmospheric fog when not using Dynamic Weather (Map Shine Control → AtmosphericFogEffectV2). */
     manualFogDensity: 0.0,

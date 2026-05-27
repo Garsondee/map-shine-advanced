@@ -179,6 +179,9 @@ export function isAshEffectEnabledInScene(effectId) {
  * @returns {boolean}
  */
 export function isAshWeatherParticleEffectEnabled() {
+  const intensity = readAshIntensityFromController();
+  if (intensity <= 0.001) return false;
+
   try {
     const data = window.MapShine?.uiManager?.effectFolders?.['ash-weather'];
     if (data?.params && typeof data.params.enabled === 'boolean') {

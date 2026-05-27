@@ -1384,7 +1384,7 @@
             "g": 1,
             "b": 1
           },
-          "masterGamma": 1.5,
+          "masterGamma": 1.65,
           "toneMapping": 0,
           "vignetteStrength": 0,
           "vignetteSoftness": 0,
@@ -1699,8 +1699,8 @@
           "digitalNoiseLowLightBoost": 3.37
         },
         "ash-weather": {
-          "enabled": true,
-          "ashIntensity": 1,
+          "enabled": false,
+          "ashIntensity": 0,
           "ashIntensityScale": 0.5,
           "ashEmissionRate": 840,
           "ashSizeMin": 5,
@@ -2217,10 +2217,16 @@
     "directedCustomPreset": {
       "precipitation": 0,
       "cloudCover": 0,
-      "windSpeed": 0.08,
+      "windSpeed": 0,
       "windDirection": 180,
       "fogDensity": 0,
       "freezeLevel": 0
+    },
+    "windSpeedMS": 0,
+    "windDirection": 180,
+    "gustiness": "calm",
+    "landscapeLightning": {
+      "lightning": 0
     },
     "manualFogDensity": 0
   }

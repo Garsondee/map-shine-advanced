@@ -203,8 +203,8 @@ export class ControlPanelManager {
       directedTransitionMinutes: 5.0,
       directedCustomPreset: {
         precipitation: 0.0,
-        cloudCover: 0.15,
-        windSpeed: 39.0 / 78.0,
+        cloudCover: 0.0,
+        windSpeed: 0.0,
         windDirection: 180.0,
         fogDensity: 0.0,
         freezeLevel: 0.0
@@ -212,9 +212,9 @@ export class ControlPanelManager {
       // Wind controls
       // Real-world wind speed in m/s (0..MAX_WIND_MS). WeatherController will still expose
       // a derived legacy 0..1 `windSpeed` for existing effects.
-      windSpeedMS: 39.0,
+      windSpeedMS: 0.0,
       windDirection: 180.0,
-      gustiness: 'moderate', // 'calm', 'light', 'moderate', 'strong', 'extreme'
+      gustiness: 'calm', // 'calm', 'light', 'moderate', 'strong', 'extreme'
       // Tile motion transport controls (runtime state still lives in tileMotion scene flag)
       tileMotionSpeedPercent: 100,
       tileMotionAutoPlayEnabled: true,
@@ -224,7 +224,7 @@ export class ControlPanelManager {
       replicaOcclusionRadiusScale: 35.0,
       replicaOcclusionEdgeSoftness: 1.0,
       landscapeLightning: {
-        lightning: 1.0,
+        lightning: 0.0,
       },
       manualFogDensity: 0.0,
     };
@@ -4874,15 +4874,15 @@ export class ControlPanelManager {
       directedTransitionMinutes: 5.0,
       directedCustomPreset: {
         precipitation: 0.0,
-        cloudCover: 0.15,
-        windSpeed: 39.0 / 78.0,
+        cloudCover: 0.0,
+        windSpeed: 0.0,
         windDirection: 180.0,
         fogDensity: 0.0,
         freezeLevel: 0.0
       },
-      windSpeedMS: 39.0,
+      windSpeedMS: 0.0,
       windDirection: 180.0,
-      gustiness: 'moderate',
+      gustiness: 'calm',
       tileMotionSpeedPercent: 100,
       tileMotionAutoPlayEnabled: true,
       tileMotionTimeFactorPercent: 100,
@@ -4891,7 +4891,7 @@ export class ControlPanelManager {
       replicaOcclusionEdgeSoftness: 1.0,
       manualFogDensity: 0.0,
       landscapeLightning: {
-        lightning: 1.0,
+        lightning: 0.0,
       },
     };
     this._ensureDirectedCustomPreset();

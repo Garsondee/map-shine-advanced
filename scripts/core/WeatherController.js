@@ -131,7 +131,7 @@ export class WeatherController {
     this.isTransitioning = false;
 
     // Variability (Wanderer Loop)
-    this.variability = 0.7; // Tuned variability
+    this.variability = 0.25; // Default matches control panel gustiness "calm"
     this.noiseOffset = 0;
 
     // Flurry emission envelopes (particle-only). One channel for ash, one shared

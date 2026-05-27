@@ -8879,7 +8879,17 @@ async function createThreeCanvas(scene, createOptions = {}) {
                   _applyAshIntensity(0.0);
                   _syncAshUiParam('ashIntensity', 0.0);
                 } else {
-                  const restore = Number(st.lastIntensity ?? 0.25) || 0.25;
+                  const ashUi = uiManager?.effectFolders?.['ash-weather'];
+                  const saved = Number(ashUi?.params?.ashIntensity);
+                  let restore = 0.0;
+                  if (Number.isFinite(saved) && saved >= 0) {
+                    restore = Math.max(0, Math.min(1, saved));
+                  } else {
+                    const remembered = Number(st.lastIntensity);
+                    if (Number.isFinite(remembered) && remembered > 0) {
+                      restore = Math.max(0, Math.min(1, remembered));
+                    }
+                  }
                   _applyAshIntensity(restore);
                   _syncAshUiParam('ashIntensity', restore);
                 }

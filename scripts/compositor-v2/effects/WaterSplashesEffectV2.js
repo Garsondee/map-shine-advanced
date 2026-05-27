@@ -65,7 +65,7 @@ import {
   GROUND_Z,
   effectUnderOverheadOrder,
 } from '../LayerOrderPolicy.js';
-import { resolveEffectWindWorld } from './resolve-effect-wind.js';
+import { resolveEffectWindParticleDrift } from './resolve-effect-wind.js';
 import { getTileBusPlaneSizeAndMirror, getTileVisualCenterFoundryXY } from '../../scene/tile-manager.js';
 
 const log = createLogger('WaterSplashesV2');
@@ -2357,7 +2357,7 @@ export class WaterSplashesEffectV2 {
 
     let wind01 = 0.15;
     try {
-      wind01 = resolveEffectWindWorld().speed01;
+      wind01 = resolveEffectWindParticleDrift().speed01;
     } catch (_) {}
     const foamWindMul = 0.42 + 0.58 * wind01;
     const splashWindPrecipMul = 0.55 + 0.45 * wind01;

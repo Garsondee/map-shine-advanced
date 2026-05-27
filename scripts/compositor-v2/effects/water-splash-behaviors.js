@@ -16,7 +16,7 @@
  */
 
 import { weatherController } from '../../core/WeatherController.js';
-import { resolveEffectWindWorld } from './resolve-effect-wind.js';
+import { resolveEffectWindParticleDrift } from './resolve-effect-wind.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Gradient / Envelope Constants
@@ -691,7 +691,7 @@ export class FoamPlumeLifecycleBehavior {
       };
     }
 
-    const rw = resolveEffectWindWorld();
+    const rw = resolveEffectWindParticleDrift();
     this._windX = rw.dirX;
     this._windY = rw.dirY;
     this._windSpeed01 = rw.speed01;
@@ -813,7 +813,7 @@ export class SplashRingLifecycleBehavior {
     this._peakOpacity = Math.max(0.0, Math.min(1.0, p?.splashPeakOpacity ?? 0.70));
     this._splashWindDriftScale = Math.max(0.0, Number(p?.splashWindDriftScale) || 1.0);
 
-    const rw = resolveEffectWindWorld();
+    const rw = resolveEffectWindParticleDrift();
     this._windX = rw.dirX;
     this._windY = rw.dirY;
     this._windSpeed01 = rw.speed01;

@@ -54,7 +54,7 @@ import {
 } from '../../foundry/levels-scene-flags.js';
 import { DepthShaderChunks } from '../../effects/DepthShaderChunks.js';
 import { getVertexShader, getFragmentShader, getFragmentShaderSafe } from './water-shader.js';
-import { resolveEffectWindWorld } from './resolve-effect-wind.js';
+import { resolveEffectWindWorld, windDirFromBearingDeg } from './resolve-effect-wind.js';
 import { safeBuildShaderMaterial } from '../../core/diagnostics/SafeShaderBuilder.js';
 import { getTileBusPlaneSizeAndMirror, getTileVisualCenterFoundryXY } from '../../scene/tile-manager.js';
 
@@ -265,6 +265,11 @@ export class WaterEffectV2 {
       advectionDirOffsetDeg: 0.0,
       advectionSpeed01: 3.0,
       advectionSpeed: 1.5,
+
+      // Wind override — compass flow axis independent of scene weather
+      windOverrideEnabled: false,
+      windOverrideBearingDeg: 180.0,
+      windOverrideSpeed01: 0.35,
 
       // Specular (GGX)
       specStrength: 200.0,
@@ -1076,6 +1081,35 @@ export class WaterEffectV2 {
   }
 
   /**
+   * Wind drift for WaterSplashesEffectV2 particles (Three.js Y-up scene space).
+   * Matches the water surface travel axis, including Wind Override when enabled.
+   * Safe to call before water update() — override params are read immediately.
+   * @returns {{ dirX: number, dirY: number, speed01: number }}
+   */
+  getParticleWindDrift() {
+    const p = this.params || {};
+    if (p.windOverrideEnabled) {
+      const { dirX, dirY } = windDirFromBearingDeg(p.windOverrideBearingDeg);
+      const speed01 = Math.max(0.0, Math.min(1.0, Number(p.windOverrideSpeed01) ?? 0.35));
+      return { dirX, dirY, speed01 };
+    }
+    const cached = this._particleWindDrift;
+    if (cached && Number.isFinite(cached.dirX) && Number.isFinite(cached.dirY)) {
+      return cached;
+    }
+    const len = Math.hypot(this._waveDirX, this._waveDirY);
+    if (len > 1e-6) {
+      return {
+        dirX: this._waveDirX / len,
+        dirY: this._waveDirY / len,
+        speed01: Number.isFinite(this._waveGustDisplay01) ? this._waveGustDisplay01 : 0.15,
+      };
+    }
+    const w = resolveEffectWindWorld();
+    return { dirX: w.dirX, dirY: w.dirY, speed01: w.speed01 };
+  }
+
+  /**
    * Tweakpane control schema for WaterEffectV2.
    * Keep this schema aligned with the live params consumed in update().
    */
@@ -1155,6 +1189,17 @@ static getControlSchema() {
             'windDirResponsiveness',
             'waveTriBlendAngleDeg', 'waveTriSideWeight',
             'advectionDirOffsetDeg', 'advectionSpeed01'
+          ]
+        },
+        {
+          name: 'water-wind-override',
+          label: 'Wind Override',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'windOverrideEnabled',
+            'windOverrideBearingDeg',
+            'windOverrideSpeed01'
           ]
         },
         {
@@ -1551,6 +1596,34 @@ static getControlSchema() {
         waveTriSideWeight: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.18, label: 'Tri Blend Side Weight' },
         advectionDirOffsetDeg: { type: 'slider', min: -180, max: 180, step: 1, default: 0.0, label: 'Advection Dir Offset (deg)' },
         advectionSpeed01: { type: 'slider', min: 0, max: 3, step: 0.01, default: 3.0, label: 'Advection Speed' },
+
+        windOverrideEnabled: {
+          type: 'boolean',
+          default: false,
+          label: 'Override scene wind',
+          tooltip:
+            'When enabled, all wind-driven water motion (waves, foam, murk, rain shear, advection) and splash/foam particle drift follow the compass bearing below instead of live weather wind.',
+        },
+        windOverrideBearingDeg: {
+          type: 'slider',
+          min: 0,
+          max: 360,
+          step: 1,
+          default: 180.0,
+          label: 'Flow bearing (deg)',
+          tooltip:
+            'Compass bearing for surface flow, using the same degrees as the scene wind control (0° = East, 90° = North on the map). Ignored when override is off.',
+        },
+        windOverrideSpeed01: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.35,
+          label: 'Flow strength',
+          tooltip:
+            'Normalized motion energy when override is on (wave speed, foam drift, gust coupling). Replaces scene wind speed while override is active.',
+        },
 
         refractionMultiTapEnabled: { type: 'boolean', default: false, label: 'Multi-Tap Refraction' },
         chromaticAberrationEnabled: { type: 'boolean', default: true, label: 'Chromatic Aberration Enabled' },
@@ -3033,11 +3106,18 @@ static getControlSchema() {
     let windDirX = rawWind.dirX;
     let windDirY = rawWind.dirY;
     let windSpeed01 = rawWind.speed01;
+    const windOverride = !!p.windOverrideEnabled;
+    if (windOverride) {
+      const ov = windDirFromBearingDeg(p.windOverrideBearingDeg);
+      windDirX = ov.dirX;
+      windDirY = ov.dirY;
+      windSpeed01 = Math.max(0.0, Math.min(1.0, Number(p.windOverrideSpeed01) ?? 0.35));
+    }
 
     // Freeze wind-driving inputs while paused. This prevents paused-frame drift
     // when external weather fallbacks (e.g. cloud fallback state) continue to
     // update off wall-clock time.
-    if (paused) {
+    if (paused && !windOverride) {
       const stableLen = Math.hypot(this._waveDirX, this._waveDirY);
       if (stableLen > 1e-6) {
         windDirX = this._waveDirX / stableLen;
@@ -3050,19 +3130,33 @@ static getControlSchema() {
 
     // Wind-direction smoothing: low-pass filter gated by wind speed so
     // calm water remains stable while gusts smoothly steer the wavefield.
-    {
-      const responsiveness = Math.max(0, Number(p.windDirResponsiveness) || 10.0);
-      const speedGate = Math.max(0.05, Math.min(1.0, windSpeed01));
-      const dirTrack = responsiveness * (0.20 + 0.80 * speedGate);
-      const lerpT = 1.0 - Math.exp(-dirTrack * dt);
-      this._smoothedWindDirX += (windDirX - this._smoothedWindDirX) * lerpT;
-      this._smoothedWindDirY += (windDirY - this._smoothedWindDirY) * lerpT;
-      const smoothLen = Math.hypot(this._smoothedWindDirX, this._smoothedWindDirY);
-      if (smoothLen > 1e-5) {
-        windDirX = this._smoothedWindDirX / smoothLen;
-        windDirY = this._smoothedWindDirY / smoothLen;
+    if (windOverride) {
+      this._smoothedWindDirX = windDirX;
+      this._smoothedWindDirY = windDirY;
+      this._prevWindDirX = windDirX;
+      this._prevWindDirY = windDirY;
+      this._targetWindDirX = windDirX;
+      this._targetWindDirY = windDirY;
+      this._windDirBlend01 = 1.0;
+      this._waveDirX = windDirX;
+      this._waveDirY = windDirY;
+      if (u.uPrevWindDir) u.uPrevWindDir.value.set(windDirX, -windDirY);
+      if (u.uTargetWindDir) u.uTargetWindDir.value.set(windDirX, -windDirY);
+      if (u.uWindDirBlend) u.uWindDirBlend.value = 1.0;
+    } else {
+      {
+        const responsiveness = Math.max(0, Number(p.windDirResponsiveness) || 10.0);
+        const speedGate = Math.max(0.05, Math.min(1.0, windSpeed01));
+        const dirTrack = responsiveness * (0.20 + 0.80 * speedGate);
+        const lerpT = 1.0 - Math.exp(-dirTrack * dt);
+        this._smoothedWindDirX += (windDirX - this._smoothedWindDirX) * lerpT;
+        this._smoothedWindDirY += (windDirY - this._smoothedWindDirY) * lerpT;
+        const smoothLen = Math.hypot(this._smoothedWindDirX, this._smoothedWindDirY);
+        if (smoothLen > 1e-5) {
+          windDirX = this._smoothedWindDirX / smoothLen;
+          windDirY = this._smoothedWindDirY / smoothLen;
+        }
       }
-    }
 
     // Wave-direction driving for wave shape.
     // Use a discrete dual-spectrum state to handle wind rotation.
@@ -3118,6 +3212,7 @@ static getControlSchema() {
       if (u.uPrevWindDir) u.uPrevWindDir.value.set(this._prevWindDirX, -this._prevWindDirY);
       if (u.uTargetWindDir) u.uTargetWindDir.value.set(this._targetWindDirX, -this._targetWindDirY);
       if (u.uWindDirBlend) u.uWindDirBlend.value = sBlend;
+    }
     }
 
     // Wind speed smoothing (V1): asymmetric (fast gain, slow loss).
@@ -3209,6 +3304,8 @@ static getControlSchema() {
     const waterWindDirY = -windDirY;
     u.uWindDir.value.set(waterWindDirX, waterWindDirY);
     u.uWindSpeed.value = gust01;
+    // Three.js Y-up drift axis aligned with water surface travel (see getParticleWindDrift).
+    this._particleWindDrift = { dirX: windDirX, dirY: windDirY, speed01: gust01 };
 
     if (u.uWindDrift) {
       this._windDriftX = (this._windDriftX || 0) + waterWindDirX * windTimeDt;
@@ -3324,7 +3421,7 @@ static getControlSchema() {
     _perfToken = this._beginPerfSpan('waveDirection');
 
     // ── Wave direction ────────────────────────────────────────────────────
-    u.uLockWaveTravelToWind.value = p.lockWaveTravelToWind ? 1.0 : 0.0;
+    u.uLockWaveTravelToWind.value = (p.lockWaveTravelToWind || windOverride) ? 1.0 : 0.0;
     u.uWaveDirOffsetRad.value = (p.waveDirOffsetDeg ?? 0) * (Math.PI / 180);
     const waveAppearanceDeg = this._resolveWaveAppearanceDeg(p);
     u.uWaveAppearanceRotRad.value = waveAppearanceDeg * (Math.PI / 180);

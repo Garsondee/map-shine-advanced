@@ -48,6 +48,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { suppressFloorPreloadAfterLevelChange } from './floor-sim-decimation.js';
 import { isCameraNavigationActive } from '../foundry/camera-navigation-state.js';
 import { yieldToMain } from '../core/yield-to-main.js';
 import {
@@ -758,6 +759,18 @@ export class FloorCompositor {
      */
     this._levelAlphaRebindPass = new LevelAlphaRebindPass();
 
+    /**
+     * Reused lit composites for lower stacked floors (multi-floor scenes only).
+     * @type {Map<number, { rt: import('three').WebGLRenderTarget, epoch: number }>}
+     */
+    this._stackedLevelLitSnapshots = new Map();
+    /** @type {number} */
+    this._stackedLevelSnapshotEpoch = 1;
+    /** @type {boolean} */
+    this._stackedLevelSnapshotsStale = true;
+    /** @type {string} */
+    this._stackedSnapshotCamKey = '';
+
     /** @type {THREE.Scene|null} Dedicated scene for fullscreen blit quad */
     this._blitScene  = null;
     /** @type {THREE.OrthographicCamera|null} Camera for blit renders */
@@ -822,6 +835,7 @@ export class FloorCompositor {
     this._tempLevelSceneRTs = [];
     this._tempPerLevelEntries = [];
     this._tempTextures = [];
+    this._tempFloorKeys = [];
 
     this._frameValidation = { valid: false, reason: null, details: {} };
     
@@ -2675,8 +2689,8 @@ export class FloorCompositor {
    */
   _validateFrameInputs() {
     const out = this._frameValidation;
-    // Fast clear of details
-    for (const k in out.details) delete out.details[k];
+    // Keep object shapes stable without per-key delete deopts.
+    out.details = {};
     out.valid = false;
 
     if (!this._initialized) {
@@ -4533,6 +4547,12 @@ export class FloorCompositor {
     try { this._waterSplashesEffect?.syncShadowDarkeningUniforms?.(); } catch (err) {
       log.warn('WaterSplashesEffectV2 syncShadowDarkeningUniforms threw, skipping:', err);
     }
+    try { this._bushEffect?.syncCloudShadowUniforms?.(); } catch (err) {
+      log.warn('BushEffectV2 syncCloudShadowUniforms threw, skipping:', err);
+    }
+    try { this._treeEffect?.syncCloudShadowUniforms?.(); } catch (err) {
+      log.warn('TreeEffectV2 syncCloudShadowUniforms threw, skipping:', err);
+    }
     if (_profiling) this._recordPassTiming('cloudRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: cloud.render DONE'); } catch (_) {} }
 
@@ -5294,6 +5314,8 @@ export class FloorCompositor {
    */
   _onLevelContextChanged(payload) {
     if (!this._busPopulated) return;
+    suppressFloorPreloadAfterLevelChange(10000);
+    this._invalidateStackedLevelLitSnapshots('level-context');
     try {
       this._overheadShadowEffect?.invalidateDynamicCaches?.('level-context-changed');
     } catch (_) {}
@@ -6229,6 +6251,169 @@ export class FloorCompositor {
   }
 
   /**
+   * @param {string} [reason]
+   * @private
+   */
+  _invalidateStackedLevelLitSnapshots(reason = '') {
+    this._stackedLevelSnapshotEpoch += 1;
+    this._stackedLevelSnapshotsStale = true;
+    if (reason) {
+      try { log.debug(`FloorCompositor: stacked lit snapshots stale (${reason})`); } catch (_) {}
+    }
+  }
+
+  /**
+   * @returns {string}
+   * @private
+   */
+  _stackedSnapshotCameraKey() {
+    const parts = [];
+
+    // Foundry drives zoom via PIXI stage scale; perspective cameras use FOV, not cam.zoom.
+    try {
+      const fc = window.MapShine?.frameCoordinator;
+      const fs = fc?.initialized && fc.getFrameState ? fc.getFrameState() : null;
+      if (fs) {
+        parts.push(
+          `pixi:${Number(fs.cameraX).toFixed(2)}:${Number(fs.cameraY).toFixed(2)}:${Number(fs.zoom).toFixed(4)}`,
+        );
+      } else if (typeof canvas !== 'undefined' && canvas?.stage) {
+        const st = canvas.stage;
+        parts.push(
+          `pixi:${Number(st.pivot?.x ?? 0).toFixed(2)}:${Number(st.pivot?.y ?? 0).toFixed(2)}:${Number(st.scale?.x ?? 1).toFixed(4)}`,
+        );
+      }
+    } catch (_) {}
+
+    const cam = this.camera;
+    if (!cam) return parts.join('|');
+    parts.push(
+      `cam:${Number(cam.position?.x ?? 0).toFixed(2)}:${Number(cam.position?.y ?? 0).toFixed(2)}:${Number(cam.position?.z ?? 0).toFixed(2)}`,
+    );
+    if (cam.isPerspectiveCamera) {
+      parts.push(`fov:${Number(cam.fov ?? 0).toFixed(3)}`);
+      parts.push(`asp:${Number(cam.aspect ?? 0).toFixed(4)}`);
+    } else {
+      parts.push(`oz:${Number(cam.zoom ?? 1).toFixed(4)}`);
+      parts.push(
+        `fr:${Number(cam.left ?? 0).toFixed(2)}:${Number(cam.right ?? 0).toFixed(2)}:${Number(cam.top ?? 0).toFixed(2)}:${Number(cam.bottom ?? 0).toFixed(2)}`,
+      );
+    }
+
+    try {
+      const cz = window.MapShine?.sceneComposer?.currentZoom;
+      if (Number.isFinite(cz)) parts.push(`scz:${Number(cz).toFixed(4)}`);
+    } catch (_) {}
+
+    return parts.join('|');
+  }
+
+  /**
+   * @private
+   */
+  _touchStackedSnapshotCameraState() {
+    const key = this._stackedSnapshotCameraKey();
+    if (!key || key === this._stackedSnapshotCamKey) return;
+    this._stackedSnapshotCamKey = key;
+    if (!this._stackedLevelSnapshotsStale) {
+      this._invalidateStackedLevelLitSnapshots('camera-moved');
+    }
+  }
+
+  /**
+   * @param {number} levelIndex
+   * @param {number} listIndex
+   * @param {number} visibleCount
+   * @returns {boolean}
+   * @private
+   */
+  _canReuseStackedLevelLitSnapshot(levelIndex, listIndex, visibleCount) {
+    try {
+      if (window.MapShine?.__msaDisableStackedLevelLitCache === true) return false;
+    } catch (_) {}
+    if (visibleCount <= 1 || this._stackedLevelSnapshotsStale) return false;
+    if (listIndex >= visibleCount - 1) return false;
+    const entry = this._stackedLevelLitSnapshots.get(levelIndex);
+    return !!(entry?.rt && entry.epoch === this._stackedLevelSnapshotEpoch);
+  }
+
+  /**
+   * @param {number} levelIndex
+   * @returns {{ rt: import('three').WebGLRenderTarget, epoch: number }|null}
+   * @private
+   */
+  _ensureStackedLevelLitSnapshotRT(levelIndex) {
+    const THREE = window.THREE;
+    const source = this._sceneRT;
+    if (!THREE || !source) return null;
+    const w = Math.max(1, Math.floor(Number(source.width) || 1));
+    const h = Math.max(1, Math.floor(Number(source.height) || 1));
+    const rtType = source.texture?.type ?? THREE.HalfFloatType;
+    let entry = this._stackedLevelLitSnapshots.get(levelIndex);
+    if (entry?.rt && (entry.rt.width !== w || entry.rt.height !== h || entry.rt.texture?.type !== rtType)) {
+      try { entry.rt.dispose(); } catch (_) {}
+      entry = null;
+    }
+    if (!entry) {
+      const rt = new THREE.WebGLRenderTarget(w, h, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: rtType,
+        depthBuffer: false,
+        stencilBuffer: false,
+        colorSpace: THREE.LinearSRGBColorSpace,
+      });
+      entry = { rt, epoch: -1 };
+      this._stackedLevelLitSnapshots.set(levelIndex, entry);
+    }
+    return entry;
+  }
+
+  /**
+   * @param {import('three').WebGLRenderTarget} sourceRT
+   * @param {import('three').WebGLRenderTarget} destRT
+   * @private
+   */
+  _copyRenderTargetFull(sourceRT, destRT) {
+    if (!this._blitMaterial || !this._blitScene || !this._blitCamera || !sourceRT || !destRT) return;
+    const renderer = this.renderer;
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    try {
+      this._blitMaterial.uniforms.tDiffuse.value = sourceRT.texture;
+      renderer.setRenderTarget(destRT);
+      renderer.autoClear = true;
+      renderer.render(this._blitScene, this._blitCamera);
+    } finally {
+      renderer.autoClear = prevAutoClear;
+      renderer.setRenderTarget(prevTarget);
+    }
+  }
+
+  /**
+   * @param {number} levelIndex
+   * @param {import('three').WebGLRenderTarget} sourceRT
+   * @private
+   */
+  _saveStackedLevelLitSnapshot(levelIndex, sourceRT) {
+    const entry = this._ensureStackedLevelLitSnapshotRT(levelIndex);
+    if (!entry || !sourceRT) return;
+    this._copyRenderTargetFull(sourceRT, entry.rt);
+    entry.epoch = this._stackedLevelSnapshotEpoch;
+  }
+
+  /**
+   * @private
+   */
+  _disposeStackedLevelLitSnapshots() {
+    for (const [, entry] of this._stackedLevelLitSnapshots) {
+      try { entry?.rt?.dispose?.(); } catch (_) {}
+    }
+    this._stackedLevelLitSnapshots.clear();
+  }
+
+  /**
    * External resize handler — call when the viewport size changes.
    * @param {number} width
    * @param {number} height
@@ -6236,6 +6421,8 @@ export class FloorCompositor {
   onResize(width, height) {
     const w = Math.max(1, width);
     const h = Math.max(1, height);
+    this._invalidateStackedLevelLitSnapshots('resize');
+    this._disposeStackedLevelLitSnapshots();
     if (this._sceneRT) this._sceneRT.setSize(w, h);
     if (this._postA)   this._postA.setSize(w, h);
     if (this._postB)   this._postB.setSize(w, h);
@@ -6560,6 +6747,27 @@ export class FloorCompositor {
   }
 
   /**
+   * Build an upper-floor alpha occluder from a level-scene array range.
+   * Avoids per-frame `slice()` allocations in hot render paths.
+   *
+   * @param {Array<THREE.WebGLRenderTarget|null|undefined>} levelSceneRTs
+   * @param {number} startIndex
+   * @returns {THREE.WebGLRenderTarget|null}
+   * @private
+   */
+  _buildUpperSceneAlphaOccluderFromRange(levelSceneRTs, startIndex) {
+    if (!Array.isArray(levelSceneRTs) || levelSceneRTs.length === 0) return null;
+    const si = Math.max(0, Math.floor(Number(startIndex) || 0));
+    if (si >= levelSceneRTs.length) return null;
+    this._tempTextures.length = 0;
+    for (let i = si; i < levelSceneRTs.length; i++) {
+      const tex = levelSceneRTs[i]?.texture;
+      if (tex) this._tempTextures.push(tex);
+    }
+    return this._buildUpperSceneAlphaOccluderFromTextures(this._tempTextures);
+  }
+
+  /**
    * @param {Array<import('three').Texture>} textures
    * @returns {import('three').WebGLRenderTarget|null}
    * @private
@@ -6633,7 +6841,7 @@ export class FloorCompositor {
       ) return null;
       const li = visibleFloors.findIndex((v) => Number(v) === fi);
       if (li < 0 || li >= visibleFloors.length - 1) return null;
-      const rt = this._buildUpperSceneAlphaOccluder(levelSceneRTs.slice(li + 1));
+      const rt = this._buildUpperSceneAlphaOccluderFromRange(levelSceneRTs, li + 1);
       return rt?.texture ?? null;
     } catch (_) {
       return null;
@@ -6645,18 +6853,18 @@ export class FloorCompositor {
    * sample the same factors as LightingEffectV2.
    * When ShadowManagerV2 is enabled, bind its combined RT to tCombinedShadow
    * (never use cloud-only texture as a false "combined" for foam).
-   * @param {object} o
-   * @param {THREE.Texture|null} [o.cloudShadowTexLegacy]
-   * @param {THREE.Texture|null} [o.buildingShadowTex]
-   * @param {THREE.Texture|null} [o.overheadShadowTexLegacy]
+   * @param {THREE.Texture|null} [cloudShadowTexLegacy]
+   * @param {THREE.Texture|null} [buildingShadowTex]
+   * @param {THREE.Texture|null} [overheadShadowTexLegacy]
+   * @param {number|null} [waterDataFloorIndex]
    * @private
    */
-  _bindWaterShadowUniforms({
+  _bindWaterShadowUniforms(
     cloudShadowTexLegacy = null,
     buildingShadowTex = null,
     overheadShadowTexLegacy = null,
     waterDataFloorIndex = null,
-  } = {}) {
+  ) {
     const water = this._waterEffect;
     if (!water) return;
     const sm = this._shadowManagerEffect;
@@ -6895,9 +7103,22 @@ export class FloorCompositor {
       this._lightingEffect?.beginStackedLightBuffer?.(this.renderer);
     } catch (_) {}
 
+    const stackedVisibleCount = visibleFloors.length;
+    this._touchStackedSnapshotCameraState();
+
     for (let li = 0; li < perLevelEntries.length; li++) {
       const { levelIndex, rts } = perLevelEntries[li];
       const { sceneRT: levelSceneRT, postA: levelPostA, postB: levelPostB } = rts;
+
+      if (this._canReuseStackedLevelLitSnapshot(levelIndex, li, stackedVisibleCount)) {
+        const snap = this._stackedLevelLitSnapshots.get(levelIndex);
+        if (snap?.rt) {
+          levelFinalRTs.push(snap.rt);
+          levelLitRTs.push(snap.rt);
+          if (_profiling) this._recordPassTiming(`perLevel_litCache_${levelIndex}`, 0);
+          continue;
+        }
+      }
 
       // ── Post-processing chain for this level ───────────────────────────
       // Every effect call below renders into a pool RT (`levelPostA` /
@@ -7025,7 +7246,7 @@ export class FloorCompositor {
           this._profileEffectCall('water.perLevel.occluderBuild', 'render', () => {
             try {
               waterOccluder = withSceneScissor(this.renderer, () =>
-                this._buildUpperSceneAlphaOccluder(levelSceneRTs.slice(li + 1))
+                this._buildUpperSceneAlphaOccluderFromRange(levelSceneRTs, li + 1)
               );
             } catch (_) {
               waterOccluder = null;
@@ -7038,12 +7259,12 @@ export class FloorCompositor {
         if (_profiling) _profileT0 = performance.now();
         this._profileEffectCall('water', 'render', () => {
           this._profileEffectCall('water.perLevel.shadowBind', 'render', () => {
-            this._bindWaterShadowUniforms({
+            this._bindWaterShadowUniforms(
               cloudShadowTexLegacy,
               buildingShadowTex,
               overheadShadowTexLegacy,
-              waterDataFloorIndex: waterDataFloorIndex,
-            });
+              waterDataFloorIndex,
+            );
           }, 'WaterEffectV2 shadow bind');
           try {
             if (nativeSourceWater) {
@@ -7211,10 +7432,15 @@ export class FloorCompositor {
 
       levelFinalRTs.push(currentInput);
 
+      if (li < stackedVisibleCount - 1) {
+        this._saveStackedLevelLitSnapshot(levelIndex, currentInput);
+      }
+
       // Restore water to global state after this level's pass
       try { this._waterEffect?.clearLevelContext?.(); } catch (_) {}
       restoreWaterOutdoorsForDataFloor(this._waterEffect?._activeFloorIndex);
     }
+    this._stackedLevelSnapshotsStale = false;
     this._windowLightEffect?.setRenderFloorIndex?.(null);
     try {
       this._lightingEffect?.setRenderFloorIndexForLights?.(null);
@@ -7296,7 +7522,7 @@ export class FloorCompositor {
           this._profileEffectCall('water.postMerge.occluderBuild', 'render', () => {
             try {
               postMergeWaterOccluder = withSceneScissor(this.renderer, () =>
-                this._buildUpperSceneAlphaOccluder(levelSceneRTs.slice(sourceSi + 1))
+                this._buildUpperSceneAlphaOccluderFromRange(levelSceneRTs, sourceSi + 1)
               );
             } catch (_) {
               postMergeWaterOccluder = null;
@@ -7337,12 +7563,12 @@ export class FloorCompositor {
       this._profileEffectCall('water', 'render', () => {
         try {
           this._profileEffectCall('water.postMerge.shadowBind', 'render', () => {
-            this._bindWaterShadowUniforms({
+            this._bindWaterShadowUniforms(
               cloudShadowTexLegacy,
               buildingShadowTex,
               overheadShadowTexLegacy,
-              waterDataFloorIndex: Number.isFinite(dataFloor) && dataFloor >= 0 ? dataFloor : ai,
-            });
+              Number.isFinite(dataFloor) && dataFloor >= 0 ? dataFloor : ai,
+            );
           }, 'WaterEffectV2 postMerge shadow bind');
           this._profileEffectCall('water.postMerge.deckMask', 'render', () => {
             this._bindWaterSourceDeckMask();
@@ -7385,6 +7611,15 @@ export class FloorCompositor {
 
     const _pickOtherPost = () =>
       (mergedCompositeOut === this._postA) ? this._postB : this._postA;
+    const stackedFloorKeys = this._tempFloorKeys;
+    stackedFloorKeys.length = 0;
+    for (let i = 0; i < visibleFloors.length; i++) {
+      const key = visibleFloors[i]?.compositorKey;
+      if (key != null) {
+        const s = String(key);
+        if (s.length > 0) stackedFloorKeys.push(s);
+      }
+    }
 
     // Atmospheric fog (post-composite)
     if (resolveEffectEnabled(this._atmosphericFogEffect)) {
@@ -7412,13 +7647,10 @@ export class FloorCompositor {
       let outdoorsForBloom = this._lastOutdoorsTexture ?? null;
       try {
         const maskCompositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
-        const floorKeys = visibleFloors
-          .map((f) => (f?.compositorKey != null ? String(f.compositorKey) : ''))
-          .filter((k) => k.length > 0);
-        if (maskCompositor && floorKeys.length > 1) {
+        if (maskCompositor && stackedFloorKeys.length > 1) {
           outdoorsForBloom = maskCompositor.composeStackedOutdoorsMask?.(
             this.renderer,
-            floorKeys,
+            stackedFloorKeys,
           ) ?? outdoorsForBloom;
         }
       } catch (_) {}
@@ -7456,16 +7688,13 @@ export class FloorCompositor {
       let outdoorsForCc = null;
       try {
         const maskCompositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
-        const floorKeys = visibleFloors
-          .map((f) => (f?.compositorKey != null ? String(f.compositorKey) : ''))
-          .filter((k) => k.length > 0);
-        if (maskCompositor && floorKeys.length > 1) {
+        if (maskCompositor && stackedFloorKeys.length > 1) {
           if (_profiling) _profileT0 = performance.now();
           this._profileEffectCall('cc.stackedOutdoors', 'render', () => {
             try {
               outdoorsForCc = maskCompositor.composeStackedOutdoorsMask?.(
                 this.renderer,
-                floorKeys,
+                stackedFloorKeys,
               ) ?? null;
             } catch (_) {
               outdoorsForCc = null;
@@ -7480,16 +7709,13 @@ export class FloorCompositor {
       let skyReachForCc = null;
       try {
         const maskCompositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
-        const floorKeys = visibleFloors
-          .map((f) => (f?.compositorKey != null ? String(f.compositorKey) : ''))
-          .filter((k) => k.length > 0);
-        if (maskCompositor && floorKeys.length > 1) {
+        if (maskCompositor && stackedFloorKeys.length > 1) {
           if (_profiling) _profileT0 = performance.now();
           this._profileEffectCall('cc.stackedSkyReach', 'render', () => {
             try {
               skyReachForCc = maskCompositor.composeStackedSkyReachMask?.(
                 this.renderer,
-                floorKeys,
+                stackedFloorKeys,
               ) ?? null;
             } catch (_) {
               skyReachForCc = null;
@@ -7679,6 +7905,7 @@ export class FloorCompositor {
     try { this._levelRTPool?.dispose(); } catch (_) {}
     try { this._levelCompositePass?.dispose(); } catch (_) {}
     try { this._levelAlphaRebindPass?.dispose(); } catch (_) {}
+    this._disposeStackedLevelLitSnapshots();
     this._sceneRT = null;
     this._postA = null;
     this._postB = null;

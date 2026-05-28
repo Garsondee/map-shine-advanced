@@ -34,6 +34,15 @@ import {
   resolveVegetationEdgeSafetyBounds,
   vegetationEdgeSafetyBoundsSignature,
 } from './vegetation-overlay-runtime.js';
+import {
+  VEGETATION_CLOUD_SHADOW_DEFAULTS,
+  VEGETATION_CLOUD_SHADOW_UNIFORM_GLSL,
+  VEGETATION_CLOUD_SHADOW_APPLY_GLSL,
+  VEGETATION_CLOUD_SHADOW_CONTROL_SCHEMA,
+  createVegetationCloudShadowUniforms,
+  applyVegetationCloudShadowParamsToUniforms,
+  syncVegetationCloudShadowUniforms,
+} from './vegetation-cloud-shadow.js';
 
 const log = createLogger('TreeEffectV2');
 
@@ -158,6 +167,8 @@ export class TreeEffectV2 {
       shadowOpacity: 0.5,
       shadowLength: 0.01,
       shadowSoftness: 0.5,
+
+      ...VEGETATION_CLOUD_SHADOW_DEFAULTS,
     };
 
     log.debug('TreeEffectV2 created');
@@ -188,6 +199,7 @@ export class TreeEffectV2 {
           Intensity: 'Overall strength of the tree layer (alpha and shadow contribution).',
           Turbulence: 'Extra high-frequency wobble mixed into distortion (trees only).',
           'Canopy shadow': 'Darkening from a blurred, offset sample of the mask opposite the sun (same as bushes).',
+          'Cloud shadows': 'Screen-space darkening from the cloud shadow map (same pass as ground tiles).',
           'Edge safety': 'Pulls motion and shadow down near scene edges to hide UV seams.',
           'Hover fade': 'When hover-hide is active, the canopy fades out but the offset ground shadow stays at full strength.',
         },
@@ -262,6 +274,18 @@ export class TreeEffectV2 {
           advanced: true,
           expanded: false,
           parameters: ['shadowOpacity', 'shadowLength', 'shadowSoftness'],
+        },
+        {
+          name: 'cloudShadow',
+          label: 'Cloud shadows',
+          type: 'folder',
+          advanced: true,
+          expanded: false,
+          parameters: [
+            'cloudShadowEnabled',
+            'cloudShadowDarkenStrength',
+            'cloudShadowDarkenCurve',
+          ],
         },
         {
           name: 'edges',
@@ -650,6 +674,7 @@ export class TreeEffectV2 {
           throttle: 100,
           tooltip: 'Blur radius of the multi-tap shadow sample.',
         },
+        ...VEGETATION_CLOUD_SHADOW_CONTROL_SCHEMA,
         edgeFadeStart: {
           type: 'slider',
           label: 'Edge fade start',
@@ -960,11 +985,20 @@ export class TreeEffectV2 {
 
       this._applyShadowDriverUniforms();
       this._syncRoofMaskUniforms();
+      applyVegetationCloudShadowParamsToUniforms(this._sharedUniforms, this.params);
     }
 
     this._advanceHoverFadeUniforms(delta);
 
     this._lastFrameTime = time;
+  }
+
+  /**
+   * Bind CloudEffectV2 shadow map for canopy darkening (call after cloud render each frame).
+   */
+  syncCloudShadowUniforms() {
+    if (!this._initialized || !this._sharedUniforms) return;
+    syncVegetationCloudShadowUniforms(this._sharedUniforms, this.params);
   }
 
   /**
@@ -1445,6 +1479,7 @@ export class TreeEffectV2 {
       uHasRoofBlockMap: { value: 0.0 },
       uRoofRainHardBlockEnabled: { value: 0.0 },
       uScreenSize: { value: new THREE.Vector2(1920, 1080) },
+      ...createVegetationCloudShadowUniforms(THREE, this.params),
     };
   }
 
@@ -1684,6 +1719,7 @@ export class TreeEffectV2 {
         uniform float uHoverFade;
         uniform float uCanopyHoverFade;
         uniform float uVegetationPass;
+${VEGETATION_CLOUD_SHADOW_UNIFORM_GLSL}
         uniform sampler2D uRoofAlphaMap;
         uniform sampler2D uRoofBlockMap;
         uniform float uHasRoofAlphaMap;
@@ -1929,6 +1965,7 @@ export class TreeEffectV2 {
           vec3 c = treeSample.rgb;
           if (ccDelta > 0.0001) c = applyCC(c);
           c *= texA;
+${VEGETATION_CLOUD_SHADOW_APPLY_GLSL}
           gl_FragColor = vec4(c * uIntensity * hf, visibleMainAlpha);
         }
       `,

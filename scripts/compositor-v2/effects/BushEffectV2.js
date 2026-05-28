@@ -31,6 +31,15 @@ import {
   resolveVegetationEdgeSafetyBounds,
   vegetationEdgeSafetyBoundsSignature,
 } from './vegetation-overlay-runtime.js';
+import {
+  VEGETATION_CLOUD_SHADOW_DEFAULTS,
+  VEGETATION_CLOUD_SHADOW_UNIFORM_GLSL,
+  VEGETATION_CLOUD_SHADOW_APPLY_GLSL,
+  VEGETATION_CLOUD_SHADOW_CONTROL_SCHEMA,
+  createVegetationCloudShadowUniforms,
+  applyVegetationCloudShadowParamsToUniforms,
+  syncVegetationCloudShadowUniforms,
+} from './vegetation-cloud-shadow.js';
 
 const log = createLogger('BushEffectV2');
 
@@ -140,6 +149,8 @@ export class BushEffectV2 {
       shadowOpacity: 0.5,
       shadowLength: 0.01,
       shadowSoftness: 0.5,
+
+      ...VEGETATION_CLOUD_SHADOW_DEFAULTS,
     };
 
     log.debug('BushEffectV2 created');
@@ -171,6 +182,7 @@ export class BushEffectV2 {
           'Wind responsiveness': 'How quickly the effect catches up when scene wind speed changes.',
           'Rustle floor': 'Minimum motion when wind reads calm so bushes never look frozen.',
           'Canopy shadow': 'Darkening from a blurred, offset sample of the mask opposite the sun.',
+          'Cloud shadows': 'Screen-space darkening from the cloud shadow map (same pass as ground tiles).',
           'Edge safety': 'Pulls motion and shadow down near scene edges to hide UV seams.',
         },
       },
@@ -243,6 +255,18 @@ export class BushEffectV2 {
           advanced: true,
           expanded: false,
           parameters: ['shadowOpacity', 'shadowLength', 'shadowSoftness'],
+        },
+        {
+          name: 'cloudShadow',
+          label: 'Cloud shadows',
+          type: 'folder',
+          advanced: true,
+          expanded: false,
+          parameters: [
+            'cloudShadowEnabled',
+            'cloudShadowDarkenStrength',
+            'cloudShadowDarkenCurve',
+          ],
         },
         {
           name: 'edges',
@@ -611,6 +635,7 @@ export class BushEffectV2 {
           throttle: 100,
           tooltip: 'Blur radius of the multi-tap shadow sample.',
         },
+        ...VEGETATION_CLOUD_SHADOW_CONTROL_SCHEMA,
         edgeFadeStart: {
           type: 'slider',
           label: 'Edge fade start',
@@ -916,9 +941,18 @@ export class BushEffectV2 {
       this._sharedUniforms.uTint.value = this.params.tint;
 
       this._applyShadowDriverUniforms();
+      applyVegetationCloudShadowParamsToUniforms(this._sharedUniforms, this.params);
     }
 
     this._lastFrameTime = time;
+  }
+
+  /**
+   * Bind CloudEffectV2 shadow map for canopy darkening (call after cloud render each frame).
+   */
+  syncCloudShadowUniforms() {
+    if (!this._initialized || !this._sharedUniforms) return;
+    syncVegetationCloudShadowUniforms(this._sharedUniforms, this.params);
   }
 
   onFloorChange(_maxFloorIndex) {
@@ -1135,6 +1169,7 @@ export class BushEffectV2 {
       uTint: { value: this.params.tint },
 
       uDeriveAlpha: { value: 0.0 },
+      ...createVegetationCloudShadowUniforms(THREE, this.params),
     };
   }
 
@@ -1323,6 +1358,7 @@ export class BushEffectV2 {
 
         uniform float uDeriveAlpha;
         uniform float uVegetationPass;
+${VEGETATION_CLOUD_SHADOW_UNIFORM_GLSL}
 
         varying vec2 vUv;
         varying vec2 vWorldPos;
@@ -1519,6 +1555,7 @@ export class BushEffectV2 {
           vec3 c = bushSample.rgb;
           if (ccDelta > 0.0001) c = applyCC(c);
           c *= texA;
+${VEGETATION_CLOUD_SHADOW_APPLY_GLSL}
           gl_FragColor = vec4(c * uIntensity, mainAlpha);
         }
       `,

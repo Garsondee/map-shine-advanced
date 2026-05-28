@@ -64,6 +64,7 @@ import { DrawingManager } from '../scene/drawing-manager.js';
 import { NoteIconManager } from '../scene/NoteIconManager.js';
 import { TemplateAdornmentManager } from '../scene/TemplateAdornmentManager.js';
 import { FloorStack } from '../scene/FloorStack.js';
+import { suppressFloorPreloadAfterLevelChange } from '../compositor-v2/floor-sim-decimation.js';
 import { FloorLayerManager } from '../compositor-v2/FloorLayerManager.js';
 import { FilterEffectV2 } from '../compositor-v2/effects/FilterEffectV2.js';
 import { WaterSplashesEffectV2 } from '../compositor-v2/effects/WaterSplashesEffectV2.js';
@@ -2948,6 +2949,7 @@ export function initialize() {
       // the visible "scene rebuilds one element at a time" effect that the
       // user observed on first-visit level transitions.
       const levelMaskRebuildPromise = safeCallAsync(async () => {
+        suppressFloorPreloadAfterLevelChange(10000);
         const ms = window.MapShine;
         if (!sceneSettings.isEnabled(canvas?.scene)) return;
 

@@ -56,6 +56,18 @@ export const PrecipitationType = {
 export class WeatherController {
   static MAX_WIND_MS = 78.0;
 
+  /** Variability (0..1) for each gustiness step: calm → extreme. */
+  static GUSTINESS_VARIABILITY = Object.freeze([0.25, 0.45, 0.7, 0.85, 0.95]);
+
+  /** Default dynamic gustiness wander when a biome omits `gustiness`. */
+  static DYNAMIC_GUSTINESS_DEFAULT = Object.freeze({
+    baseline: 2.0,
+    min: 0.0,
+    max: 4.0,
+    timeScaleSeconds: 2400,
+    noise: 0.28
+  });
+
   constructor() {
     /**
      * Sub-rate update lane — weather state math (transition lerp, noise, wetness)
@@ -203,7 +215,9 @@ export class WeatherController {
       humidity: 0.4,
       storminess: 0.2,
       windBase: 0.1,
-      windAngle: (205.0 * Math.PI) / 180.0
+      windAngle: (205.0 * Math.PI) / 180.0,
+      /** Gustiness index 0..4 (calm..extreme), evolved over time in dynamic mode. */
+      gustiness: 2.0
     };
 
     this._dynamicManualTargetSnapshot = null;
@@ -455,6 +469,117 @@ export class WeatherController {
 
   _windMSFrom01(w01) {
     return this._clampWindMS(this._clamp01(w01) * WeatherController.MAX_WIND_MS);
+  }
+
+  /**
+   * Map a continuous gustiness index (0..4) to variability (0..1).
+   * @param {number} index
+   * @returns {number}
+   * @private
+   */
+  _variabilityFromGustinessIndex(index) {
+    const table = WeatherController.GUSTINESS_VARIABILITY;
+    const i = Math.max(0, Math.min(table.length - 1, Number(index) || 0));
+    const i0 = Math.floor(i);
+    const i1 = Math.min(table.length - 1, i0 + 1);
+    const t = i - i0;
+    return table[i0] + (table[i1] - table[i0]) * t;
+  }
+
+  /**
+   * Approximate inverse of {@link _variabilityFromGustinessIndex} for latent init.
+   * @param {number} variability01
+   * @returns {number}
+   * @private
+   */
+  _gustinessIndexFromVariability(variability01) {
+    const table = WeatherController.GUSTINESS_VARIABILITY;
+    const v = this._clamp01(variability01);
+    for (let i = 0; i < table.length - 1; i++) {
+      if (v <= table[i + 1]) {
+        const span = table[i + 1] - table[i];
+        const t = span > 1e-6 ? (v - table[i]) / span : 0;
+        return i + t;
+      }
+    }
+    return table.length - 1;
+  }
+
+  /**
+   * @param {number} index Gustiness index 0..4.
+   * @returns {number}
+   * @private
+   */
+  _clampDynamicGustinessIndex(index) {
+    let g = Number(index);
+    if (!Number.isFinite(g)) g = 2.0;
+    if (this.dynamicBoundsEnabled === true) {
+      const b = this._dynamicBounds;
+      let mn = Number(b.gustinessMin);
+      let mx = Number(b.gustinessMax);
+      if (!Number.isFinite(mn)) mn = 0;
+      if (!Number.isFinite(mx)) mx = 4;
+      if (mx < mn) {
+        const t = mn;
+        mn = mx;
+        mx = t;
+      }
+      g = this._dynamicClamp(g, mn, mx);
+    } else {
+      g = this._dynamicClamp(g, 0, 4);
+    }
+    return g;
+  }
+
+  /**
+   * Resolve normalized wind speed from dynamic latent state, honoring GM bounds.
+   * @returns {number}
+   * @private
+   */
+  _resolveDynamicWindSpeed01() {
+    const clamp01 = (n) => Math.max(0, Math.min(1, n));
+    let wind = clamp01(this._dynamicLatent.windBase);
+    if (this.dynamicBoundsEnabled === true) {
+      const b = this._dynamicBounds;
+      let mn = Number(b.windSpeedMin);
+      let mx = Number(b.windSpeedMax);
+      if (!Number.isFinite(mn)) mn = 0;
+      if (!Number.isFinite(mx)) mx = 1;
+      if (mx < mn) {
+        const t = mn;
+        mn = mx;
+        mx = t;
+      }
+      wind = this._dynamicClamp(wind, mn, mx);
+    }
+    return wind;
+  }
+
+  /**
+   * Push evolving latent wind + gustiness into {@link targetState} each dynamic tick.
+   * @private
+   */
+  _applyDynamicLatentToTargets() {
+    const THREE = window.THREE;
+    if (!THREE || !this.targetState) return;
+
+    const wind01 = this._resolveDynamicWindSpeed01();
+    this.targetState.windSpeed = wind01;
+    this._syncWindUnits(this.targetState);
+
+    if (this.targetState.windDirection?.set) {
+      const angle = Number.isFinite(this._dynamicLatent.windAngle)
+        ? this._dynamicLatent.windAngle
+        : 0;
+      this._setWindDirFromMathAngle(angle, this.targetState.windDirection);
+    }
+
+    let gustiness = this._clampDynamicGustinessIndex(this._dynamicLatent.gustiness);
+    this._dynamicLatent.gustiness = gustiness;
+    const variability = this._variabilityFromGustinessIndex(gustiness);
+    if (Math.abs(variability - this.variability) > 0.002) {
+      this.setVariability(variability);
+    }
   }
 
   _syncWindUnits(state) {
@@ -1576,6 +1701,7 @@ export class WeatherController {
     this._dynamicLatent.storminess = clamp01(target.precipitation ?? 0.0);
     this._dynamicLatent.windBase = clamp01(target.windSpeed ?? 0.0);
     this._dynamicLatent.windAngle = Number.isFinite(windAngle) ? windAngle : 0.0;
+    this._dynamicLatent.gustiness = this._gustinessIndexFromVariability(this.variability);
 
     this._dynamicInitialized = true;
 
@@ -1626,6 +1752,7 @@ export class WeatherController {
         if (Number.isFinite(latent.storminess)) this._dynamicLatent.storminess = latent.storminess;
         if (Number.isFinite(latent.windBase)) this._dynamicLatent.windBase = latent.windBase;
         if (Number.isFinite(latent.windAngle)) this._dynamicLatent.windAngle = latent.windAngle;
+        if (Number.isFinite(latent.gustiness)) this._dynamicLatent.gustiness = latent.gustiness;
 
         this._dynamicInitialized = true;
       }
@@ -1712,7 +1839,8 @@ export class WeatherController {
           humidity: latent.humidity,
           storminess: latent.storminess,
           windBase: latent.windBase,
-          windAngle: latent.windAngle
+          windAngle: latent.windAngle,
+          gustiness: latent.gustiness
         }
       };
 
@@ -1754,6 +1882,9 @@ export class WeatherController {
     this._dynamicLatent.humidity = updateScalar(this._dynamicLatent.humidity, cfg.humidity);
     this._dynamicLatent.storminess = updateScalar(this._dynamicLatent.storminess, cfg.storminess);
     this._dynamicLatent.windBase = updateScalar(this._dynamicLatent.windBase, cfg.windBase);
+
+    const gustSpec = cfg.gustiness ?? WeatherController.DYNAMIC_GUSTINESS_DEFAULT;
+    this._dynamicLatent.gustiness = updateScalar(this._dynamicLatent.gustiness, gustSpec);
 
     const angSpec = cfg.windAngle;
     if (angSpec) {
@@ -2113,24 +2244,15 @@ export class WeatherController {
   }
 
   _updateDynamic(dt) {
+    if (this.dynamicPaused === true) return;
+
     if (this._dynamicInitialized !== true) {
       this._initializeDynamicFromTarget();
     }
 
     const safeDt = Math.min(dt, 0.25);
 
-    // While a long transition is running, do not change the dynamic target.
-    // This prevents the "constant readjustment" look.
-    if (this.isTransitioning === true) {
-      this._dynamicPersistTimer += safeDt;
-      if (this._dynamicPersistTimer >= this._dynamicPersistIntervalSeconds) {
-        this._dynamicPersistTimer = 0;
-        this._scheduleSaveDynamicState();
-      }
-      return;
-    }
-
-    // Keep latent variables evolving, but only use them to inform the *next* planned target.
+    // Latent wind + gustiness evolve continuously (including during long transitions).
     this._dynamicSimAccumulator += safeDt;
     this._dynamicPersistTimer += safeDt;
 
@@ -2141,12 +2263,19 @@ export class WeatherController {
       steps++;
     }
 
+    this._applyDynamicLatentToTargets();
+
     if (this._dynamicPersistTimer >= this._dynamicPersistIntervalSeconds) {
       this._dynamicPersistTimer = 0;
       this._scheduleSaveDynamicState();
     }
 
-    // Start a long, smooth planned transition.
+    // While a long transition is running, do not start another regime step.
+    if (this.isTransitioning === true) {
+      return;
+    }
+
+    // Start a long, smooth planned transition for precipitation/clouds/etc.
     this._dynamicStartPlannedTransition();
   }
 
@@ -2163,7 +2292,6 @@ export class WeatherController {
     const baseTemp = Number.isFinite(cfg.temperature?.baseline) ? cfg.temperature.baseline : 0.6;
     const baseHumidity = Number.isFinite(cfg.humidity?.baseline) ? cfg.humidity.baseline : 0.45;
     const baseStorm = Number.isFinite(cfg.storminess?.baseline) ? cfg.storminess.baseline : 0.25;
-    const baseWind = Number.isFinite(cfg.windBase?.baseline) ? cfg.windBase.baseline : 0.2;
     const freezeBaseline = clamp01(1.0 - baseTemp);
 
     const coldFactor = clamp01((freezeBaseline - 0.5) / 0.5);
@@ -2198,11 +2326,17 @@ export class WeatherController {
     const strength = 1.0;
     this._dynamicPlanStrength = strength;
 
+    const latentWind01 = this._resolveDynamicWindSpeed01();
+    const latentWindDir = this.targetState.windDirection?.clone?.() ?? new THREE.Vector2(1, 0);
+    if (latentWindDir.set) {
+      this._setWindDirFromMathAngle(this._dynamicLatent.windAngle, latentWindDir);
+    }
+
     const archetype = {
       precipitation: 0.0,
       cloudCover: 0.2,
-      windSpeed: clamp01(baseWind),
-      windDirection: this.targetState.windDirection?.clone?.() ?? new THREE.Vector2(1, 0),
+      windSpeed: latentWind01,
+      windDirection: latentWindDir,
       fogDensity: 0.0,
       freezeLevel: freezeBaseline,
       precipType: PrecipitationType.NONE,
@@ -2213,27 +2347,22 @@ export class WeatherController {
       archetype.precipitation = 0.0;
       archetype.cloudCover = 0.05 + 0.25 * rnd();
       archetype.fogDensity = 0.0 + 0.06 * rnd();
-      archetype.windSpeed = clamp01(0.05 + 0.25 * rnd());
     } else if (regime === 'overcast') {
       archetype.precipitation = 0.0 + 0.15 * rnd();
       archetype.cloudCover = 0.55 + 0.45 * rnd();
       archetype.fogDensity = 0.05 + 0.20 * rnd();
-      archetype.windSpeed = clamp01(0.08 + 0.25 * rnd());
     } else if (regime === 'rain') {
       archetype.precipitation = 0.35 + 0.45 * rnd();
       archetype.cloudCover = 0.65 + 0.35 * rnd();
       archetype.fogDensity = 0.06 + 0.25 * rnd();
-      archetype.windSpeed = clamp01(0.15 + 0.35 * rnd());
     } else if (regime === 'storm') {
       archetype.precipitation = 0.65 + 0.35 * rnd();
       archetype.cloudCover = 0.85 + 0.15 * rnd();
       archetype.fogDensity = 0.10 + 0.35 * rnd();
-      archetype.windSpeed = clamp01(0.35 + 0.55 * rnd());
     } else if (regime === 'blizzard') {
       archetype.precipitation = 0.65 + 0.35 * rnd();
       archetype.cloudCover = 0.85 + 0.15 * rnd();
       archetype.fogDensity = 0.15 + 0.35 * rnd();
-      archetype.windSpeed = clamp01(0.45 + 0.55 * rnd());
       archetype.freezeLevel = 0.75 + 0.25 * rnd();
     }
 
@@ -2262,10 +2391,6 @@ export class WeatherController {
         archetype.cloudCover = this._dynamicClamp(archetype.cloudCover, rB.mn, rB.mx);
       }
       {
-        const rB = minMax('windSpeedMin', 'windSpeedMax');
-        archetype.windSpeed = this._dynamicClamp(archetype.windSpeed, rB.mn, rB.mx);
-      }
-      {
         const rB = minMax('fogDensityMin', 'fogDensityMax');
         archetype.fogDensity = this._dynamicClamp(archetype.fogDensity, rB.mn, rB.mx);
       }
@@ -2279,8 +2404,8 @@ export class WeatherController {
     const next = {
       precipitation: THREE.MathUtils.lerp(cur.precipitation, archetype.precipitation, strength),
       cloudCover: THREE.MathUtils.lerp(cur.cloudCover, archetype.cloudCover, strength),
-      windSpeed: THREE.MathUtils.lerp(cur.windSpeed, archetype.windSpeed, strength),
-      windDirection: cur.windDirection?.clone?.() ?? new THREE.Vector2(1, 0),
+      windSpeed: archetype.windSpeed,
+      windDirection: archetype.windDirection?.clone?.() ?? new THREE.Vector2(1, 0),
       fogDensity: THREE.MathUtils.lerp(cur.fogDensity, archetype.fogDensity, strength),
       freezeLevel: THREE.MathUtils.lerp(cur.freezeLevel, archetype.freezeLevel, strength),
       precipType: PrecipitationType.NONE,
@@ -3009,8 +3134,14 @@ export class WeatherController {
    * @param {number} value - 0.0 to 1.0
    */
   setVariability(value) {
+    const THREE = window.THREE;
+    if (!THREE) return;
     this.variability = THREE.MathUtils.clamp(value, 0, 1);
     this._staticSnapped = false; // Break static fast-path when variability changes
+    if (this.dynamicEnabled === true && this._dynamicLatent) {
+      this._dynamicLatent.gustiness = this._gustinessIndexFromVariability(this.variability);
+      this._scheduleSaveDynamicState();
+    }
   }
 
   /**

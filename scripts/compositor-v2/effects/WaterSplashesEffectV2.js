@@ -50,6 +50,8 @@ import {
   SplashRingLifecycleBehavior,
   scanWaterEdgePoints,
   scanWaterInteriorPoints,
+  syncSharedOutdoorsMaskForFloor,
+  clearSharedOutdoorsMaskCache,
 } from './water-splash-behaviors.js';
 import {
   ParticleSystem as QuarksParticleSystem,
@@ -290,6 +292,9 @@ export class WaterSplashesEffectV2 {
      * @type {number}
      */
     this._lastViewSpawnUpdateAtMs = 0;
+
+    /** Bumped each `update()` so outdoors mask readback runs once per floor per frame. @type {number} */
+    this._outdoorsMaskFrameToken = 0;
 
     // Cache for direct mask probing so we don't repeatedly 404-spam hosted setups.
     // Key: basePathWithSuffix + formats. Value: { url, image } or null when missing.
@@ -1411,6 +1416,13 @@ export class WaterSplashesEffectV2 {
     }
     if (!shouldRender) return;
 
+    // One outdoors CPU readback per active floor (shared by all bucketed lifecycle behaviors).
+    this._outdoorsMaskFrameToken += 1;
+    const outdoorsToken = this._outdoorsMaskFrameToken;
+    for (const floorIndex of this._activeFloors) {
+      try { syncSharedOutdoorsMaskForFloor(floorIndex, outdoorsToken); } catch (_) {}
+    }
+
     // Optional diagnostics for cases where systems were activated before the
     // user set the debug flag. This runs once when enabled and prints the
     // BatchedRenderer + system registration state.
@@ -1862,6 +1874,7 @@ export class WaterSplashesEffectV2 {
   // ── Cleanup ────────────────────────────────────────────────────────────────
 
   clear() {
+    clearSharedOutdoorsMaskCache();
     for (const idx of this._activeFloors) {
       this._deactivateFloor(idx);
     }

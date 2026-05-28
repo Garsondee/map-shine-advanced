@@ -24,6 +24,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { isFloorPreloadSuppressedAfterLevelChange } from '../floor-sim-decimation.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { resolveCompositorOutdoorsTexture } from '../../masks/resolve-compositor-outdoors.js';
 import { FLOOR_ID_OUTDOORS_RECEIVER_GLSL } from '../shadow-system/DirectionalShadowProjector.js';
@@ -1816,6 +1817,7 @@ export class BuildingShadowsEffectV2 {
 
   _maybeWarmFloorMaskCache(compositor, floorCount) {
     if (!compositor) return;
+    if (isFloorPreloadSuppressedAfterLevelChange()) return;
     if (this._floorPreloadPromise) return;
 
     // render() calls this every frame; preloadAllFloors used to bust _floorMeta on
@@ -1836,7 +1838,7 @@ export class BuildingShadowsEffectV2 {
     }
 
     const now = Date.now();
-    const throttleMs = floorCount <= 1 ? 3500 : 1000;
+    const throttleMs = floorCount <= 1 ? 3500 : 4000;
     if ((now - this._lastFloorPreloadAttemptMs) < throttleMs) return;
     this._lastFloorPreloadAttemptMs = now;
 

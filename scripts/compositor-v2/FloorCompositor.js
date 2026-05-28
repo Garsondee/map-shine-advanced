@@ -836,6 +836,7 @@ export class FloorCompositor {
     this._tempPerLevelEntries = [];
     this._tempTextures = [];
     this._tempFloorKeys = [];
+    this._tempStackTextures = [];
 
     this._frameValidation = { valid: false, reason: null, details: {} };
     
@@ -7529,7 +7530,8 @@ export class FloorCompositor {
             }
           }, 'WaterEffectV2 postMerge occluder');
         }
-        const stackTex = [];
+        const stackTex = this._tempStackTextures;
+        stackTex.length = 0;
         for (let j = sourceSi + 1; j < visibleFloors.length; j++) {
           const li = Number(visibleFloors[j]?.index);
           let t = null;
@@ -7539,18 +7541,20 @@ export class FloorCompositor {
           if (!t && typeof bus?.getBackgroundImageMapForStackIndex === 'function') {
             t = bus.getBackgroundImageMapForStackIndex(j);
           }
-          if (t) stackTex.push(t);
+          if (t) {
+            stackTex.push(t);
+            if (stackTex.length >= 8) break;
+          }
         }
-        const layers = stackTex.slice(0, 8);
         let maskRt = null;
-        if (layers.length) {
+        if (stackTex.length) {
           this._profileEffectCall('water.postMerge.bgStackMask', 'render', () => {
             try {
               this._waterEffect.syncComposeViewportUniforms?.(this.renderer, this.camera);
             } catch (_) {}
             this._syncWaterBgProductUniformsFromWaterCompose();
             maskRt = withSceneScissor(this.renderer, () =>
-              this._buildWaterBackgroundAlphaMaskRT(layers)
+              this._buildWaterBackgroundAlphaMaskRT(stackTex)
             );
           }, 'WaterEffectV2 postMerge bg stack mask');
         }
@@ -7611,6 +7615,7 @@ export class FloorCompositor {
 
     const _pickOtherPost = () =>
       (mergedCompositeOut === this._postA) ? this._postB : this._postA;
+    const sceneMaskCompositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
     const stackedFloorKeys = this._tempFloorKeys;
     stackedFloorKeys.length = 0;
     for (let i = 0; i < visibleFloors.length; i++) {
@@ -7646,9 +7651,8 @@ export class FloorCompositor {
       // Stacked outdoors for multi-floor spill suppress (same source as CC grade).
       let outdoorsForBloom = this._lastOutdoorsTexture ?? null;
       try {
-        const maskCompositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
-        if (maskCompositor && stackedFloorKeys.length > 1) {
-          outdoorsForBloom = maskCompositor.composeStackedOutdoorsMask?.(
+        if (sceneMaskCompositor && stackedFloorKeys.length > 1) {
+          outdoorsForBloom = sceneMaskCompositor.composeStackedOutdoorsMask?.(
             this.renderer,
             stackedFloorKeys,
           ) ?? outdoorsForBloom;
@@ -7687,12 +7691,11 @@ export class FloorCompositor {
       // apply interior/exterior ToD splits accurately on the flat composite.
       let outdoorsForCc = null;
       try {
-        const maskCompositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
-        if (maskCompositor && stackedFloorKeys.length > 1) {
+        if (sceneMaskCompositor && stackedFloorKeys.length > 1) {
           if (_profiling) _profileT0 = performance.now();
           this._profileEffectCall('cc.stackedOutdoors', 'render', () => {
             try {
-              outdoorsForCc = maskCompositor.composeStackedOutdoorsMask?.(
+              outdoorsForCc = sceneMaskCompositor.composeStackedOutdoorsMask?.(
                 this.renderer,
                 stackedFloorKeys,
               ) ?? null;
@@ -7708,12 +7711,11 @@ export class FloorCompositor {
 
       let skyReachForCc = null;
       try {
-        const maskCompositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
-        if (maskCompositor && stackedFloorKeys.length > 1) {
+        if (sceneMaskCompositor && stackedFloorKeys.length > 1) {
           if (_profiling) _profileT0 = performance.now();
           this._profileEffectCall('cc.stackedSkyReach', 'render', () => {
             try {
-              skyReachForCc = maskCompositor.composeStackedSkyReachMask?.(
+              skyReachForCc = sceneMaskCompositor.composeStackedSkyReachMask?.(
                 this.renderer,
                 stackedFloorKeys,
               ) ?? null;

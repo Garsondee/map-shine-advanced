@@ -655,6 +655,15 @@ export class FloorCompositor {
     this._strictFramesRendered = 0;
     /** @type {THREE.Texture|null} 1x1 indoors fallback when floor-scoped outdoors is unavailable */
     this._neutralOutdoorsTexture = null;
+    /**
+     * Pinned _Outdoors for the floor that owns packed water data. Survives
+     * compositor LRU eviction when viewing upper floors so wave shelter stays
+     * consistent with the ground-floor look.
+     * @type {THREE.Texture|null}
+     */
+    this._waterShelterOutdoorsTexture = null;
+    /** @type {string|null} compositorKey for {@link _waterShelterOutdoorsTexture} */
+    this._waterShelterOutdoorsFloorKey = null;
 
     /**
      * MaskBindingController: unified per-floor mask fan-out engine. Wrapped
@@ -2621,6 +2630,7 @@ export class FloorCompositor {
    */
   async forceRepopulate(options = {}) {
     const { source = 'runtime-refresh' } = options;
+    const runtimeParamSnapshot = this._captureRuntimeEffectParamSnapshot();
 
     // Coalesce duplicate repopulate requests emitted during cold-load/level-sync
     // bootstrap paths (e.g. cold-load-bg-resync + level-context-resync). Without
@@ -2664,7 +2674,9 @@ export class FloorCompositor {
     this._populateComplete = false;
     this._populatePromise = null;
     this._busPopulated = false;
-    return this._ensureBusPopulated({ source });
+    const populated = await this._ensureBusPopulated({ source });
+    this._restoreRuntimeEffectParamSnapshot(runtimeParamSnapshot);
+    return populated;
   }
 
   /**
@@ -5306,6 +5318,121 @@ export class FloorCompositor {
     } catch (_) {}
   }
 
+  /**
+   * Clone arbitrary effect param values for snapshot/replay.
+   * @param {*} value
+   * @returns {*}
+   * @private
+   */
+  _cloneEffectParamValue(value) {
+    if (value == null) return value;
+    if (typeof structuredClone === 'function') {
+      try { return structuredClone(value); } catch (_) {}
+    }
+    if (Array.isArray(value)) {
+      return value.map((entry) => this._cloneEffectParamValue(entry));
+    }
+    if (typeof value === 'object') {
+      const out = {};
+      for (const [k, v] of Object.entries(value)) {
+        out[k] = this._cloneEffectParamValue(v);
+      }
+      return out;
+    }
+    return value;
+  }
+
+  /**
+   * Capture live runtime params so forceRepopulate can replay them exactly.
+   *
+   * This prevents floor/level-triggered repopulates from visually drifting
+   * effects toward constructor/schema defaults.
+   *
+   * @returns {Map<string, {enabled?: boolean, params: object}>}
+   * @private
+   */
+  _captureRuntimeEffectParamSnapshot() {
+    const effectKeys = [
+      '_specularEffect',
+      '_fluidEffect',
+      '_iridescenceEffect',
+      '_prismEffect',
+      '_bushEffect',
+      '_treeEffect',
+      '_fireEffect',
+      '_ashDisturbanceEffect',
+      '_ashCloudEffect',
+      '_dustEffect',
+      '_windowLightEffect',
+      '_lightingEffect',
+      '_skyColorEffect',
+      '_colorCorrectionEffect',
+      '_filterEffect',
+      '_waterEffect',
+      '_waterSplashesEffect',
+      '_underwaterBubblesEffect',
+      '_cloudEffect',
+      '_shadowManagerEffect',
+      '_overheadShadowEffect',
+      '_buildingShadowEffect',
+      '_skyReachShadowEffect',
+      '_paintedShadowEffect',
+      '_bloomEffect',
+      '_sharpenEffect',
+      '_dotScreenEffect',
+      '_halftoneEffect',
+      '_asciiEffect',
+      '_dazzleOverlayEffect',
+      '_visionModeEffect',
+      '_invertEffect',
+      '_sepiaEffect',
+      '_lensEffect',
+      '_atmosphericFogEffect',
+      '_fogEffect',
+      '_lightningEffect',
+      '_weatherLightningEffect',
+      '_smellyFliesEffect',
+      '_candleFlamesEffect',
+      '_playerLightEffect',
+      '_movementPreviewEffect',
+      '_floorDepthBlurEffect',
+    ];
+    const snapshot = new Map();
+    for (const effectKey of effectKeys) {
+      const effect = this[effectKey];
+      if (!effect || typeof effect !== 'object') continue;
+      const params = effect.params && typeof effect.params === 'object'
+        ? this._cloneEffectParamValue(effect.params)
+        : null;
+      if (!params) continue;
+      const entry = { params };
+      const enabledVal = effect.enabled;
+      if (typeof enabledVal === 'boolean') {
+        entry.enabled = enabledVal;
+      }
+      snapshot.set(effectKey, entry);
+    }
+    return snapshot;
+  }
+
+  /**
+   * Replay captured params back into live effects after repopulate.
+   * @param {Map<string, {enabled?: boolean, params: object}>|null} snapshot
+   * @private
+   */
+  _restoreRuntimeEffectParamSnapshot(snapshot) {
+    if (!snapshot || !(snapshot instanceof Map) || snapshot.size === 0) return;
+    for (const [effectKey, entry] of snapshot.entries()) {
+      if (!entry || !entry.params || typeof entry.params !== 'object') continue;
+      if (typeof entry.enabled === 'boolean') {
+        this.applyParam(effectKey, 'enabled', entry.enabled);
+      }
+      for (const [paramId, value] of Object.entries(entry.params)) {
+        this.applyParam(effectKey, paramId, this._cloneEffectParamValue(value));
+      }
+    }
+  }
+
   // ── Floor Visibility ──────────────────────────────────────────────────────
 
   /**
@@ -5461,6 +5588,74 @@ export class FloorCompositor {
   }
 
   /**
+   * Remember the authored outdoors mask for the water data floor so upper-floor
+   * views do not inherit the viewed band's _Outdoors (different resolution/layout).
+   *
+   * @param {THREE.Texture|null} tex
+   * @param {string|null} floorKey
+   * @private
+   */
+  _pinWaterShelterOutdoors(tex, floorKey = null) {
+    if (!tex) return;
+    this._waterShelterOutdoorsTexture = tex;
+    this._waterShelterOutdoorsFloorKey = floorKey != null ? String(floorKey) : null;
+  }
+
+  /**
+   * Resolve _Outdoors for water wave shelter on a specific floor index.
+   * Prefers pinned cache when the compositor has evicted lower-floor RTs.
+   *
+   * @param {number} floorIndex
+   * @returns {THREE.Texture|null}
+   * @private
+   */
+  _resolveWaterShelterOutdoorsTexture(floorIndex) {
+    const idx = Number(floorIndex);
+    if (!Number.isFinite(idx) || idx < 0) return null;
+    const waterDataFloor = Number(this._waterEffect?._activeFloorIndex);
+    const isWaterDataFloor = Number.isFinite(waterDataFloor) && waterDataFloor === idx;
+
+    if (isWaterDataFloor && this._waterShelterOutdoorsTexture) {
+      return this._waterShelterOutdoorsTexture;
+    }
+
+    try {
+      const viewedIdx = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index ?? NaN);
+      if (Number.isFinite(viewedIdx) && viewedIdx === idx && this._lastOutdoorsTexture) {
+        const tex = this._lastOutdoorsTexture;
+        if (isWaterDataFloor) {
+          const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+          const row = floors.find((f) => Number(f?.index) === idx) ?? null;
+          this._pinWaterShelterOutdoors(tex, row?.compositorKey ?? null);
+        }
+        return tex;
+      }
+
+      const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+      const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+      const floor = floors.find((f) => Number(f?.index) === idx) ?? null;
+      const floorKey = floor?.compositorKey ?? null;
+      if (compositor && floorKey) {
+        const floorTex = (
+          compositor.getFloorTexture?.(floorKey, 'outdoors')
+          ?? compositor.getFloorTexture?.(floorKey, 'skyReach')
+          ?? null
+        );
+        if (floorTex) {
+          if (isWaterDataFloor) this._pinWaterShelterOutdoors(floorTex, floorKey);
+          return floorTex;
+        }
+      }
+
+      if (isWaterDataFloor && this._waterShelterOutdoorsTexture) {
+        return this._waterShelterOutdoorsTexture;
+      }
+    } catch (_) {}
+
+    return null;
+  }
+
+  /**
    * Lazily instantiate and return the MaskBindingController.
    *
    * The controller is shared across frames. It is safe to re-read the global
@@ -5532,8 +5727,8 @@ export class FloorCompositor {
         allowWeatherRoofMap: false,
         strictViewedFloorOnly: multiFloorScene,
       });
-      let waterOutdoorsTex = waterResolved.texture ?? null;
-      let waterOutdoorsRoute = waterResolved.floorKey ?? null;
+      let waterOutdoorsTex = null;
+      let waterOutdoorsRoute = null;
       // Sky grading is very sensitive to mask source quality/alignment.
       // Resolve a strict floor outdoors texture for sky that never falls back to
       // weather roof maps and never reuses stale previous masks.
@@ -5563,10 +5758,6 @@ export class FloorCompositor {
       if (!outdoorsTex && multiFloorScene && neutralOutdoorsTex) {
         outdoorsTex = neutralOutdoorsTex;
         mainRoute = 'neutral';
-      }
-      if (!waterOutdoorsTex && multiFloorScene && neutralOutdoorsTex) {
-        waterOutdoorsTex = neutralOutdoorsTex;
-        waterOutdoorsRoute = 'neutral';
       }
       const skyOutdoorsFinal = (!skyOutdoorsTex && multiFloorScene && neutralOutdoorsTex)
         ? neutralOutdoorsTex
@@ -5628,55 +5819,41 @@ export class FloorCompositor {
         paintedOutdoorsRoute = mainRoute ? `main:${mainRoute}` : 'main';
       }
 
-      // Water can run in floor-fallback mode (for example only ground has _Water
-      // data while viewing an upper floor). In that case, sampling outdoors from
-      // the viewed floor can alter wave/rain response and make the same water body
-      // appear different per view floor. Prefer outdoors for the active water floor
-      // when available so fallback water remains visually consistent.
+      // Water can run in floor-fallback mode (only ground has _Water while viewing
+      // upper floors). Never seed water outdoors from the viewed band first — that
+      // changes wave shelter and makes the same water body look like defaults upstairs.
       let resolvedWaterFloorIndex = null;
       try {
         const waterFloorIndex = Number(this._waterEffect?._activeFloorIndex);
-        if (Number.isFinite(waterFloorIndex)) {
+        const viewedFloor = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+        const viewedIdx = Number(viewedFloor?.index);
+        if (Number.isFinite(waterFloorIndex) && waterFloorIndex >= 0) {
           resolvedWaterFloorIndex = waterFloorIndex;
-          const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
-          const waterFloor = floors.find((f) => Number(f?.index) === waterFloorIndex) ?? null;
-          const waterFloorKey = waterFloor?.compositorKey ?? null;
-          const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
-          const waterFloorTex = (compositor && waterFloorKey)
-            ? (
-              compositor.getFloorTexture?.(waterFloorKey, 'outdoors')
-              ?? compositor.getFloorTexture?.(waterFloorKey, 'skyReach')
-              ?? null
-            )
-            : null;
-          if (waterFloorTex) {
-            waterOutdoorsTex = waterFloorTex;
-            waterOutdoorsRoute = `water-floor:${waterFloorKey}`;
+          const shelterTex = this._resolveWaterShelterOutdoorsTexture(waterFloorIndex);
+          if (shelterTex) {
+            waterOutdoorsTex = shelterTex;
+            waterOutdoorsRoute = `water-shelter:${this._waterShelterOutdoorsFloorKey ?? waterFloorIndex}`;
+          }
+          if (
+            Number.isFinite(viewedIdx)
+            && viewedIdx === waterFloorIndex
+            && outdoorsTex
+          ) {
+            this._pinWaterShelterOutdoors(outdoorsTex, viewedFloor?.compositorKey ?? null);
+            waterOutdoorsTex = outdoorsTex;
+            waterOutdoorsRoute = mainRoute ? `same-floor-as-main:${mainRoute}` : 'same-floor-as-main';
           }
         }
       } catch (_) {}
 
-      // When water geometry/data is for the **same floor being viewed**, force the water
-      // shader to sample the **same** _Outdoors texture as the rest of the stack (cloud,
-      // lighting sync via weatherController.setRoofMap, overhead/building shadows, etc.).
-      // Otherwise water used compositor.getFloorTexture(key, skyReach ?? outdoors) while
-      // main used resolveCompositorOutdoorsTexture — sibling band keys / skyReach vs
-      // outdoors / async RT pools can disagree and look like wrong-floor or inverted
-      // indoor/outdoor response next to a neutral (all-indoor) fallback.
-      try {
-        const viewedFloor = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
-        const viewedIdx = Number(viewedFloor?.index);
-        const waterIdx = Number(this._waterEffect?._activeFloorIndex);
-        if (
-          Number.isFinite(viewedIdx)
-          && Number.isFinite(waterIdx)
-          && viewedIdx === waterIdx
-          && outdoorsTex
-        ) {
-          waterOutdoorsTex = outdoorsTex;
-          waterOutdoorsRoute = mainRoute ? `same-floor-as-main:${mainRoute}` : 'same-floor-as-main';
-        }
-      } catch (_) {}
+      if (!waterOutdoorsTex && !multiFloorScene) {
+        waterOutdoorsTex = waterResolved.texture ?? null;
+        waterOutdoorsRoute = waterResolved.floorKey ?? null;
+      }
+      if (!waterOutdoorsTex && multiFloorScene && neutralOutdoorsTex) {
+        waterOutdoorsTex = neutralOutdoorsTex;
+        waterOutdoorsRoute = 'neutral';
+      }
 
       // Resolve per-floor cloud outdoors masks and the floor-id texture up-front
       // so their identities participate in the binding signature below. This
@@ -6989,34 +7166,9 @@ export class FloorCompositor {
       return null;
     };
 
-    /**
-     * Water wave shelter sampling: prefer authored `_Outdoors` before `skyReach`.
-     * `skyReach` gates sky visibility — dark under overhead geometry — while water
-     * shelter should follow authored outdoor classification. Same-floor views use
-     * `_lastOutdoorsTexture` so we match `_syncOutdoorsMaskConsumers` (per-level water
-     * render no longer stomps sync with skyReach-first).
-     */
-    const resolveWaterShelterOutdoorsForFloor = (floorIndex) => {
-      try {
-        const idx = Number(floorIndex);
-        if (!Number.isFinite(idx)) return null;
-        const viewedIdx = Number(floorStack?.getActiveFloor?.()?.index ?? NaN);
-        if (Number.isFinite(viewedIdx) && viewedIdx === idx && this._lastOutdoorsTexture) {
-          return this._lastOutdoorsTexture;
-        }
-        const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
-        const floor = floorsByIndex.get(idx) ?? null;
-        const floorKey = floor?.compositorKey ?? null;
-        if (compositor && floorKey) {
-          return (
-            compositor.getFloorTexture?.(floorKey, 'outdoors')
-            ?? compositor.getFloorTexture?.(floorKey, 'skyReach')
-            ?? null
-          );
-        }
-      } catch (_) {}
-      return null;
-    };
+    /** @see FloorCompositor#_resolveWaterShelterOutdoorsTexture */
+    const resolveWaterShelterOutdoorsForFloor = (floorIndex) =>
+      this._resolveWaterShelterOutdoorsTexture(floorIndex);
     const restoreWaterOutdoorsForDataFloor = (dataFloorIndex) => {
       try {
         const idx = Number(dataFloorIndex);
@@ -7224,34 +7376,26 @@ export class FloorCompositor {
       if (!usePostMergeWater && !_skipWaterPass && resolveEffectEnabled(this._waterEffect)) {
         let waterDataFloorIndex = levelIndex;
         this._profileEffectCall('water.perLevel.setContext', 'render', () => {
-          try {
-            const resolvedDataFloor = this._waterEffect.setLevelContext?.(levelIndex);
-            if (Number.isFinite(Number(resolvedDataFloor))) {
-              waterDataFloorIndex = Number(resolvedDataFloor);
-            }
-          } catch (_) {}
+          const resolvedDataFloor = this._waterEffect?.setLevelContext?.(levelIndex);
+          if (Number.isFinite(Number(resolvedDataFloor))) {
+            waterDataFloorIndex = Number(resolvedDataFloor);
+          }
         }, 'WaterEffectV2 setLevelContext');
         this._profileEffectCall('water.perLevel.outdoorsMask', 'render', () => {
-          try {
-            const perLevelWaterOutdoors = resolveWaterShelterOutdoorsForFloor(waterDataFloorIndex);
-            if (perLevelWaterOutdoors) {
-              this._waterEffect.setOutdoorsMask?.(perLevelWaterOutdoors);
-            } else if (visibleFloors.length > 1) {
-              this._waterEffect.setOutdoorsMask?.(this._getNeutralOutdoorsTexture());
-            }
-          } catch (_) {}
+          const perLevelWaterOutdoors = resolveWaterShelterOutdoorsForFloor(waterDataFloorIndex);
+          if (perLevelWaterOutdoors) {
+            this._waterEffect?.setOutdoorsMask?.(perLevelWaterOutdoors);
+          } else if (visibleFloors.length > 1) {
+            this._waterEffect?.setOutdoorsMask?.(this._getNeutralOutdoorsTexture());
+          }
         }, 'WaterEffectV2 per-level outdoors');
 
         let waterOccluder = null;
         if (!_disableWaterOccluder && li < visibleFloors.length - 1 && this._waterOccluderRT) {
           this._profileEffectCall('water.perLevel.occluderBuild', 'render', () => {
-            try {
-              waterOccluder = withSceneScissor(this.renderer, () =>
-                this._buildUpperSceneAlphaOccluderFromRange(levelSceneRTs, li + 1)
-              );
-            } catch (_) {
-              waterOccluder = null;
-            }
+            waterOccluder = withSceneScissor(this.renderer, () =>
+              this._buildUpperSceneAlphaOccluderFromRange(levelSceneRTs, li + 1)
+            );
           }, 'WaterEffectV2 per-level occluder');
         }
 
@@ -7267,12 +7411,12 @@ export class FloorCompositor {
               waterDataFloorIndex,
             );
           }, 'WaterEffectV2 shadow bind');
+          if (nativeSourceWater) {
+            this._profileEffectCall('water.perLevel.deckMask', 'render', () => {
+              this._bindWaterSourceDeckMask();
+            }, 'WaterEffectV2 deck mask');
+          }
           try {
-            if (nativeSourceWater) {
-              this._profileEffectCall('water.perLevel.deckMask', 'render', () => {
-                this._bindWaterSourceDeckMask();
-              }, 'WaterEffectV2 deck mask');
-            }
             _waterPassWrote = withSceneScissor(this.renderer, () =>
               this._waterEffect.render(
                 this.renderer,
@@ -7284,21 +7428,19 @@ export class FloorCompositor {
               )
             );
           } finally {
-            try { this._waterEffect?.setOverheadRoofBlockTexture?.(null); } catch (_) {}
+            this._waterEffect?.setOverheadRoofBlockTexture?.(null);
           }
         }, 'WaterEffectV2 render');
         if (_profiling) this._recordPassTiming(`perLevel_water_${levelIndex}`, _profileT0);
         if (_waterPassWrote) currentInput = waterOut;
       } else if (usePostMergeWater) {
-        try { this._bloomEffect?.setWaterSpecularBloomTexture?.(null); } catch (_) {}
+        this._bloomEffect?.setWaterSpecularBloomTexture?.(null);
       }
 
       // Feed water specular bloom texture (only meaningful from the last level that had water)
-      try {
-        const wt = (!usePostMergeWater && _waterPassWrote && typeof this._waterEffect?.getWaterSpecularBloomTexture === 'function')
-          ? this._waterEffect.getWaterSpecularBloomTexture() : null;
-        this._bloomEffect?.setWaterSpecularBloomTexture?.(wt ?? null);
-      } catch (_) {}
+      const wt = (!usePostMergeWater && _waterPassWrote && typeof this._waterEffect?.getWaterSpecularBloomTexture === 'function')
+        ? this._waterEffect.getWaterSpecularBloomTexture() : null;
+      this._bloomEffect?.setWaterSpecularBloomTexture?.(wt ?? null);
 
       // Phase 2: ColorCorrection, AtmosphericFog, and Bloom moved out of the
       // per-level loop. They now run once on the merged composite after
@@ -7485,25 +7627,19 @@ export class FloorCompositor {
         : 0;
       let dataFloor = -1;
       this._profileEffectCall('water.postMerge.setContext', 'render', () => {
-        try {
-          dataFloor = typeof this._waterEffect.setPostMergeWaterContext === 'function'
-            ? Number(this._waterEffect.setPostMergeWaterContext(ai))
-            : -1;
-        } catch (_) {
-          dataFloor = -1;
-        }
+        dataFloor = typeof this._waterEffect?.setPostMergeWaterContext === 'function'
+          ? Number(this._waterEffect.setPostMergeWaterContext(ai))
+          : -1;
       }, 'WaterEffectV2 postMerge context');
       this._profileEffectCall('water.postMerge.outdoorsMask', 'render', () => {
-        try {
-          const perLevelWaterOutdoors = resolveWaterShelterOutdoorsForFloor(
-            Number.isFinite(dataFloor) && dataFloor >= 0 ? dataFloor : ai,
-          );
-          if (perLevelWaterOutdoors) {
-            this._waterEffect.setOutdoorsMask?.(perLevelWaterOutdoors);
-          } else {
-            this._waterEffect.setOutdoorsMask?.(this._getNeutralOutdoorsTexture());
-          }
-        } catch (_) {}
+        const perLevelWaterOutdoors = resolveWaterShelterOutdoorsForFloor(
+          Number.isFinite(dataFloor) && dataFloor >= 0 ? dataFloor : ai,
+        );
+        if (perLevelWaterOutdoors) {
+          this._waterEffect?.setOutdoorsMask?.(perLevelWaterOutdoors);
+        } else {
+          this._waterEffect?.setOutdoorsMask?.(this._getNeutralOutdoorsTexture());
+        }
       }, 'WaterEffectV2 postMerge outdoors');
       // Post-merge: punch water with every bus background **between** the water
       // data floor (e.g. ground) and the viewer — e.g. levels 1+2 when source is 0
@@ -7512,22 +7648,23 @@ export class FloorCompositor {
       let postMergeWaterOccluder = null;
       try {
         const bus = this._renderBus;
-        let sourceSi = visibleFloors.findIndex(
-          (f) => Number(f?.index) === Number(dataFloor),
-        );
+        const dataFloorNum = Number(dataFloor);
+        let sourceSi = -1;
+        for (let i = 0; i < visibleFloors.length; i++) {
+          if (Number(visibleFloors[i]?.index) === dataFloorNum) {
+            sourceSi = i;
+            break;
+          }
+        }
         if (sourceSi < 0) {
           // Water source below the lowest visible slice: mask the whole visible stack.
           sourceSi = -1;
         }
         if (!_disableWaterOccluder && sourceSi < visibleFloors.length - 1 && this._waterOccluderRT) {
           this._profileEffectCall('water.postMerge.occluderBuild', 'render', () => {
-            try {
-              postMergeWaterOccluder = withSceneScissor(this.renderer, () =>
-                this._buildUpperSceneAlphaOccluderFromRange(levelSceneRTs, sourceSi + 1)
-              );
-            } catch (_) {
-              postMergeWaterOccluder = null;
-            }
+            postMergeWaterOccluder = withSceneScissor(this.renderer, () =>
+              this._buildUpperSceneAlphaOccluderFromRange(levelSceneRTs, sourceSi + 1)
+            );
           }, 'WaterEffectV2 postMerge occluder');
         }
         const stackTex = this._tempStackTextures;
@@ -7549,9 +7686,7 @@ export class FloorCompositor {
         let maskRt = null;
         if (stackTex.length) {
           this._profileEffectCall('water.postMerge.bgStackMask', 'render', () => {
-            try {
-              this._waterEffect.syncComposeViewportUniforms?.(this.renderer, this.camera);
-            } catch (_) {}
+            this._waterEffect?.syncComposeViewportUniforms?.(this.renderer, this.camera);
             this._syncWaterBgProductUniformsFromWaterCompose();
             maskRt = withSceneScissor(this.renderer, () =>
               this._buildWaterBackgroundAlphaMaskRT(stackTex)
@@ -7615,7 +7750,8 @@ export class FloorCompositor {
 
     const _pickOtherPost = () =>
       (mergedCompositeOut === this._postA) ? this._postB : this._postA;
-    const sceneMaskCompositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+    const mapShineGlobal = window.MapShine ?? null;
+    const sceneMaskCompositor = mapShineGlobal?.sceneComposer?._sceneMaskCompositor ?? null;
     const stackedFloorKeys = this._tempFloorKeys;
     stackedFloorKeys.length = 0;
     for (let i = 0; i < visibleFloors.length; i++) {
@@ -7753,11 +7889,12 @@ export class FloorCompositor {
               this._colorCorrectionEffect.setCombinedShadowTexture?.(smCombined ?? null);
             } catch (_) {}
             try {
-              const lightBinding = this._lightingEffect?.getLocalLightBufferBinding?.()
-                ?? { texture: this._lightingEffect?.dynamicLightTexture ?? null, alphaBaseline: 1.0 };
+              const lightBinding = this._lightingEffect?.getLocalLightBufferBinding?.() ?? null;
+              const lbTexture = lightBinding?.texture ?? this._lightingEffect?.dynamicLightTexture ?? null;
+              const lbAlphaBaseline = lightBinding?.alphaBaseline ?? 1.0;
               this._colorCorrectionEffect.setLocalLightTexture?.(
-                lightBinding.texture ?? null,
-                lightBinding.alphaBaseline ?? 1.0,
+                lbTexture,
+                lbAlphaBaseline,
               );
             } catch (_) {}
             ccWrote = this._colorCorrectionEffect.render(
@@ -7779,17 +7916,17 @@ export class FloorCompositor {
       }, 'ColorCorrectionEffectV2 postMerge render');
       if (_profiling) this._recordPassTiming('postMerge_colorCorrection', _profileT0);
       if (ccWrote) mergedCompositeOut = ccOut;
-      try {
-        if (window.MapShine) {
-          window.MapShine.__ccPostMergeDiag = this._colorCorrectionEffect.getDebugState?.() ?? null;
-        }
-      } catch (_) {}
+      if (mapShineGlobal) {
+        try {
+          mapShineGlobal.__ccPostMergeDiag = this._colorCorrectionEffect.getDebugState?.() ?? null;
+        } catch (_) {}
+      }
     }
 
     // Expose per-level diagnostics on MapShine for console inspection
     try {
-      if (window.MapShine) {
-        window.MapShine.__v2PerLevelDiag = {
+      if (mapShineGlobal) {
+        mapShineGlobal.__v2PerLevelDiag = {
           levelCount: visibleFloors.length,
           rtPoolAllocated: this._levelRTPool.allocatedCount,
           levelIndices: [...activeLevels],
@@ -7894,6 +8031,8 @@ export class FloorCompositor {
     this._populatePromise = null;
     this._frameWaterSourceDeckTex = null;
     this._frameWaterSourceSliceTex = null;
+    this._waterShelterOutdoorsTexture = null;
+    this._waterShelterOutdoorsFloorKey = null;
 
     // Dispose render targets.
     try { this._sceneRT?.dispose(); } catch (_) {}

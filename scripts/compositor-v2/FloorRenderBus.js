@@ -57,9 +57,13 @@ import {
   MAX_INTRA_ROLE_OFFSET,
   tileAlbedoOrder,
   tileOverheadOrder,
+  effectUnderOverheadOrder,
   motionAboveTokensOrder,
   formatRenderOrder,
 } from './LayerOrderPolicy.js';
+
+/** High-sort albedo tiles (e.g. bridge decks) can sit below FLOOR_OVERHEAD but above splashes. */
+const SPLASH_OCCLUDER_HIGH_ALBEDO_INTRA = MAX_INTRA_ROLE_OFFSET - 80;
 
 const log = createLogger('FloorRenderBus');
 
@@ -1133,6 +1137,50 @@ export class FloorRenderBus {
    * @returns {boolean}
    * @private
    */
+  /**
+   * Whether any bus tile on `floorIndex` should contribute to same-floor splash overhead clip.
+   * @param {number} floorIndex
+   * @returns {boolean}
+   */
+  hasOverheadTilesForFloor(floorIndex) {
+    return this.hasSplashOccluderTilesForFloor(floorIndex);
+  }
+
+  /**
+   * Whether any tile on `floorIndex` should contribute to post-merge splash clip.
+   * @param {number} floorIndex
+   * @returns {boolean}
+   */
+  hasSplashOccluderTilesForFloor(floorIndex) {
+    const fi = Number(floorIndex);
+    if (!Number.isFinite(fi) || fi < 0) return false;
+    for (const [, entry] of this._tiles) {
+      if (Number(entry?.floorIndex) !== fi) continue;
+      if (this._tileQualifiesAsSplashScreenOccluder(entry)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Tiles that paint above water splashes on the viewed floor (overhead band + high albedo).
+   * @param {object} entry
+   * @returns {boolean}
+   * @private
+   */
+  _tileQualifiesAsSplashScreenOccluder(entry) {
+    if (this._tileQualifiesAsWaterOverhead(entry)) return true;
+    if (entry?.root?.userData?._msMotionForcedOverhead) return true;
+    const fi = Number(entry?.floorIndex);
+    if (!Number.isFinite(fi)) return false;
+    const mesh = entry?.mesh || entry?.root?.children?.[0];
+    const ro = Number(mesh?.renderOrder);
+    if (!Number.isFinite(ro)) return false;
+    if (ro > effectUnderOverheadOrder(fi, 50)) return true;
+    const highAlbedoRo = tileAlbedoOrder(fi, SPLASH_OCCLUDER_HIGH_ALBEDO_INTRA);
+    const effectsBase = fi * RENDER_ORDER_PER_FLOOR + ROLE_OFFSETS.FLOOR_EFFECTS;
+    return ro >= highAlbedoRo && ro < effectsBase;
+  }
+
   _tileQualifiesAsWaterOverhead(entry) {
     if (entry?.isOverhead || entry?.roofShadowCaster) return true;
     const node = entry?.root || entry?.mesh;
@@ -1193,6 +1241,7 @@ export class FloorRenderBus {
     const includeHiddenAboveFloors = options?.includeHiddenAboveFloors === true;
     const roofCastersOnly = options?.roofCastersOnly === true;
     const overheadTilesOnly = options?.overheadTilesOnly === true;
+    const splashOccluderTilesOnly = options?.splashOccluderTilesOnly === true;
     const includeRoofCaptureLayers = options?.includeRoofCaptureLayers === true;
     const roofLayerOnly = options?.roofLayerOnly === true;
     const includeBackground = options?.includeBackground === true;
@@ -1292,6 +1341,8 @@ export class FloorRenderBus {
           continue;
         }
         includeAsOccluder = true;
+      } else if (splashOccluderTilesOnly) {
+        includeAsOccluder = this._tileQualifiesAsSplashScreenOccluder(entry);
       } else if (roofLayerOnly || (overheadTilesOnly && !roofCastersOnly)) {
         includeAsOccluder = this._tileQualifiesAsWaterOverhead(entry);
       } else if (roofCastersOnly) {

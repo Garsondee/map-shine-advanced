@@ -751,10 +751,32 @@ export class FloorCompositor {
     this._frameWaterSourceSliceTex = null;
     /**
      * Post-merge upper-floor water occluder for this frame (ground water viewed
-     * from roof). Shared with WaterSplashesEffectV2 for floor 0 systems.
+     * from roof). WaterEffectV2 only — do not bind for splashes (uses levelFinalRT).
      * @type {import('three').WebGLRenderTarget|null}
      */
     this._frameUpperWaterOccluderRT = null;
+    /**
+     * Post-merge upper-floor splash occluder (levelSceneRT alpha stack or bus mask).
+     * @type {import('three').WebGLRenderTarget|null}
+     */
+    this._frameUpperSplashOccluderRT = null;
+    /**
+     * Per splash-floor upper occluder textures (built once per frame before composite).
+     * @type {Map<number, import('three').Texture>|null}
+     */
+    this._frameSplashUpperOccluderTexByFloor = null;
+    /**
+     * Viewed-floor prepass scene alpha (levelSceneRT) for same-floor splash clip.
+     * @type {import('three').Texture|null}
+     */
+    this._frameViewedLevelSceneTex = null;
+    /** @type {import('three').Texture|null} Post-merge bg stack mask for splash parity */
+    this._frameWaterBgAlphaMaskTex = null;
+    /**
+     * @deprecated Bus overhead mask; kept for probe compat. Prefer levelSceneRT clip.
+     * @type {import('three').WebGLRenderTarget|null}
+     */
+    this._frameSameFloorOverheadOccluderRT = null;
 
     /** @type {THREE.WebGLRenderTarget|null} Ping-pong A: post-merge bg stack → water mask */
     this._waterBgProductRT = null;
@@ -1603,6 +1625,16 @@ export class FloorCompositor {
       stencilBuffer: false,
       colorSpace: THREE.NoColorSpace,
     });
+    /** Dedicated RT for post-merge splash same-floor overhead clip (not deck/scratch). */
+    this._splashSameFloorOverheadRT = new THREE.WebGLRenderTarget(w, h, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      depthBuffer: false,
+      stencilBuffer: false,
+      colorSpace: THREE.NoColorSpace,
+    });
     this._waterFootholdMaskRT = new THREE.WebGLRenderTarget(w, h, {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
@@ -2318,6 +2350,7 @@ export class FloorCompositor {
       this._postB,
       this._waterOccluderRT,
       this._waterOccluderScratchRT,
+      this._splashSameFloorOverheadRT,
       this._waterBgProductRT,
       this._waterBgProductScratchRT,
     ].filter((rt) => rt);
@@ -4151,6 +4184,7 @@ export class FloorCompositor {
         // Level-context hooks can update FloorStack before _applyCurrentFloorVisibility
         // runs; rebind water textures/settings so packed masks match.
         try { this._waterEffect?.onFloorChange?.(stackIdx); } catch (_) {}
+        try { this._waterSplashesEffect?.onFloorChange?.(stackIdx); } catch (_) {}
       }
     } catch (_) {}
 
@@ -5652,6 +5686,8 @@ export class FloorCompositor {
    */
   _pinWaterShelterOutdoors(tex, floorKey = null) {
     if (!tex) return;
+    // First successful pin wins — upper-floor views must not replace ground truth.
+    if (this._waterShelterOutdoorsTexture) return;
     this._waterShelterOutdoorsTexture = tex;
     this._waterShelterOutdoorsFloorKey = floorKey != null ? String(floorKey) : null;
   }
@@ -5894,9 +5930,13 @@ export class FloorCompositor {
             && viewedIdx === waterFloorIndex
             && outdoorsTex
           ) {
-            this._pinWaterShelterOutdoors(outdoorsTex, viewedFloor?.compositorKey ?? null);
-            waterOutdoorsTex = outdoorsTex;
-            waterOutdoorsRoute = mainRoute ? `same-floor-as-main:${mainRoute}` : 'same-floor-as-main';
+            if (!this._waterShelterOutdoorsTexture) {
+              this._pinWaterShelterOutdoors(outdoorsTex, viewedFloor?.compositorKey ?? null);
+            }
+            waterOutdoorsTex = this._waterShelterOutdoorsTexture ?? outdoorsTex;
+            waterOutdoorsRoute = this._waterShelterOutdoorsTexture
+              ? `water-shelter:${this._waterShelterOutdoorsFloorKey ?? waterFloorIndex}`
+              : (mainRoute ? `same-floor-as-main:${mainRoute}` : 'same-floor-as-main');
           }
         }
       } catch (_) {}
@@ -6689,6 +6729,7 @@ export class FloorCompositor {
     if (this._postB)   this._postB.setSize(w, h);
     if (this._waterOccluderRT) this._waterOccluderRT.setSize(w, h);
     if (this._waterOccluderScratchRT) this._waterOccluderScratchRT.setSize(w, h);
+    if (this._splashSameFloorOverheadRT) this._splashSameFloorOverheadRT.setSize(w, h);
     if (this._waterFootholdMaskRT) this._waterFootholdMaskRT.setSize(w, h);
     if (this._waterBgProductRT) this._waterBgProductRT.setSize(w, h);
     if (this._waterBgProductScratchRT) this._waterBgProductScratchRT.setSize(w, h);
@@ -7021,13 +7062,12 @@ export class FloorCompositor {
    * Build an upper-floor alpha occluder from a level-scene array range.
    * Avoids per-frame `slice()` allocations in hot render paths.
    *
-   * Stack per-level RT alphas (prefers levelFinalRT). Used when exactly one band
-   * sits above the water source (middle-floor view). Roof views use
-   * {@link _buildBusOccluderMaskAboveWaterFloor} instead.
+   * Stack per-level RT alphas. Water occlusion prefers levelFinalRT; splash
+   * occlusion uses levelSceneRT only (no baked water in the mask).
    *
    * @param {Array<THREE.WebGLRenderTarget|null|undefined>} levelSceneRTs
    * @param {number} startIndex
-   * @param {{ visibleFloors?: Array|null, waterFloorIndex?: number, viewedFloorIndex?: number, levelFinalRTs?: Array|null }} [options]
+   * @param {{ visibleFloors?: Array|null, waterFloorIndex?: number, viewedFloorIndex?: number, levelFinalRTs?: Array|null, preferSceneAlpha?: boolean }} [options]
    * @returns {THREE.WebGLRenderTarget|null}
    * @private
    */
@@ -7036,12 +7076,13 @@ export class FloorCompositor {
     const si = Math.max(0, Math.floor(Number(startIndex) || 0));
     if (si >= levelSceneRTs.length) return null;
     const levelFinalRTs = Array.isArray(options.levelFinalRTs) ? options.levelFinalRTs : null;
+    const preferSceneAlpha = options.preferSceneAlpha === true;
 
     this._tempTextures.length = 0;
     for (let i = si; i < levelSceneRTs.length; i++) {
       const sceneRT = levelSceneRTs[i] ?? null;
       const finalRT = levelFinalRTs?.[i] ?? null;
-      const sliceRT = finalRT?.texture ? finalRT : sceneRT;
+      const sliceRT = (preferSceneAlpha || !finalRT?.texture) ? sceneRT : finalRT;
       if (!sliceRT?.texture) continue;
       this._tempTextures.push(sliceRT.texture);
     }
@@ -7059,14 +7100,57 @@ export class FloorCompositor {
    * @returns {import('three').WebGLRenderTarget|null}
    * @private
    */
-  _buildBusOccluderMaskAboveWaterFloor(waterFloorIndex, viewedFloorIndex, target) {
-    const waterFi = Number(waterFloorIndex);
-    const viewedFi = Number(viewedFloorIndex);
-    if (!Number.isFinite(waterFi) || !Number.isFinite(viewedFi) || viewedFi <= waterFi || !target) {
+  /**
+   * Screen-space mask of overhead tiles on `floorIndex` only (viewed floor).
+   * Used so post-merge splashes/bubbles clip under bridge decks and roofs but
+   * not under open water on the same floor.
+   *
+   * @param {number} floorIndex
+   * @param {import('three').WebGLRenderTarget} target
+   * @returns {import('three').WebGLRenderTarget|null}
+   * @private
+   */
+  _buildSameFloorOverheadOccluderMask(floorIndex, target) {
+    const fi = Number(floorIndex);
+    if (!Number.isFinite(fi) || fi < 0 || !target || !this._renderBus || !this.renderer || !this.camera) {
       return null;
     }
-    const minFi = waterFi + 1;
+    if (typeof this._renderBus.hasSplashOccluderTilesForFloor === 'function'
+      && !this._renderBus.hasSplashOccluderTilesForFloor(fi)) {
+      return null;
+    }
+    if (!this._renderBus._initialized || !this._renderBus._scene) return null;
+    try {
+      withSceneScissor(this.renderer, () => {
+        this._renderBus.renderFloorMaskTo(this.renderer, this.camera, fi, target, {
+          maxFloorIndex: fi,
+          splashOccluderTilesOnly: true,
+          excludeTileIds: this._getWaterTileIdsForFloor(fi),
+          forceRevealForFloorIndex: fi,
+          includeRoofCaptureLayers: true,
+          preserveCameraLayers: true,
+        });
+      });
+      return target;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * @param {number} lowestSplashFloorIndex - Lowest splash floor below the camera
+   * @param {number} viewedFloorIndex
+   * @param {import('three').WebGLRenderTarget} target
+   */
+  _buildBusOccluderMaskAboveWaterFloor(lowestSplashFloorIndex, viewedFloorIndex, target) {
+    const splashFi = Number(lowestSplashFloorIndex);
+    const viewedFi = Number(viewedFloorIndex);
+    if (!Number.isFinite(splashFi) || !Number.isFinite(viewedFi) || viewedFi <= splashFi || !target) {
+      return null;
+    }
+    const minFi = splashFi + 1;
     if (minFi > viewedFi || !this._renderBus || !this.renderer || !this.camera) return null;
+    const waterDataFi = this._resolveWaterSourceFloorForView(viewedFi);
     try {
       this._renderBus.renderFloorMaskTo(this.renderer, this.camera, minFi, target, {
         includeHiddenAboveFloors: true,
@@ -7075,7 +7159,9 @@ export class FloorCompositor {
         filterBackgroundByFloor: true,
         includeRoofCaptureLayers: true,
         preserveCameraLayers: true,
-        excludeTileIds: this._getWaterTileIdsForFloor(waterFi),
+        excludeTileIds: waterDataFi >= 0
+          ? this._getWaterTileIdsForFloor(waterDataFi)
+          : null,
       });
       return target;
     } catch (_) {
@@ -7107,7 +7193,9 @@ export class FloorCompositor {
       return null;
     }
 
-    if (viewedFi > waterFi + 1) {
+    // Middle-floor views (viewed = water+1) need the bus mask too — per-slice scene RT
+    // stacks miss middle-floor overheads and make ground-water splashes look wrong.
+    if (viewedFi > waterFi) {
       return this._buildBusOccluderMaskAboveWaterFloor(waterFi, viewedFi, this._waterOccluderRT);
     }
 
@@ -7223,6 +7311,105 @@ export class FloorCompositor {
   }
 
   /**
+   * @param {import('three').WebGLRenderTarget|null} rt
+   * @private
+   */
+  _publishFrameSameFloorOverheadOccluder(rt) {
+    this._frameSameFloorOverheadOccluderRT = rt ?? null;
+    try {
+      if (window?.MapShine) {
+        window.MapShine.__frameSameFloorOverheadOccluderTex = rt?.texture ?? null;
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * @param {import('three').WebGLRenderTarget|null} levelSceneRT
+   * @private
+   */
+  _publishFrameViewedLevelSceneOccluder(levelSceneRT) {
+    this._frameViewedLevelSceneTex = levelSceneRT?.texture ?? null;
+    try {
+      if (window?.MapShine) {
+        window.MapShine.__frameViewedLevelSceneTex = this._frameViewedLevelSceneTex;
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * @param {import('three').WebGLRenderTarget|null} rt
+   * @private
+   */
+  _publishFrameUpperSplashOccluder(rt) {
+    this._frameUpperSplashOccluderRT = rt ?? null;
+    try {
+      if (window?.MapShine) {
+        window.MapShine.__frameUpperSplashOccluderTex = rt?.texture ?? null;
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * @param {Map<number, import('three').Texture>|null} byFloor
+   * @private
+   */
+  _publishFrameSplashUpperOccluderTexByFloor(byFloor) {
+    this._frameSplashUpperOccluderTexByFloor = byFloor ?? null;
+    try {
+      if (window?.MapShine) {
+        window.MapShine.__frameSplashUpperOccluderTexByFloor = byFloor;
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * Author splash floor-presence textures for the post-bloom composite pass.
+   * @param {Array} visibleFloors
+   * @param {Array} levelSceneRTs
+   * @param {number} viewedFloorIndex
+   * @private
+   */
+  _publishFrameSplashOccluders(visibleFloors, levelSceneRTs, viewedFloorIndex) {
+    const viewedFi = Number(viewedFloorIndex);
+    if (!Number.isFinite(viewedFi) || !Array.isArray(visibleFloors) || !Array.isArray(levelSceneRTs)) {
+      this._publishFrameViewedLevelSceneOccluder(null);
+      this._publishFrameUpperSplashOccluder(null);
+      this._publishFrameSameFloorOverheadOccluder(null);
+      return;
+    }
+    const viewedSi = visibleFloors.findIndex((v) => {
+      const idx = Number.isFinite(Number(v?.index)) ? Number(v.index) : Number(v);
+      return idx === viewedFi;
+    });
+    // Full levelSceneRT alpha includes walkable ground over river UVs — only use
+    // overhead-only bus mask for same-floor clip (see WaterSplashesEffectV2 note).
+    this._publishFrameViewedLevelSceneOccluder(null);
+    let sameFloorOcc = null;
+    if (viewedSi >= 0 && this._splashSameFloorOverheadRT) {
+      sameFloorOcc = this._buildSameFloorOverheadOccluderMask(
+        viewedFi,
+        this._splashSameFloorOverheadRT,
+      );
+    }
+    this._publishFrameSameFloorOverheadOccluder(sameFloorOcc);
+
+    const byFloor = new Map();
+    try {
+      const active = this._waterSplashesEffect?._activeFloors;
+      if (active && typeof active[Symbol.iterator] === 'function') {
+        for (const rawFi of active) {
+          const fi = Number(rawFi);
+          if (!Number.isFinite(fi) || fi >= viewedFi) continue;
+          const tex = this.getUpperSceneOccluderTextureForFloorIndex(fi);
+          if (tex) byFloor.set(fi, tex);
+        }
+      }
+    } catch (_) {}
+    this._publishFrameSplashUpperOccluderTexByFloor(byFloor);
+    this._publishFrameUpperSplashOccluder(null);
+  }
+
+  /**
    * Public occlusion contract for floor-aware effects:
    * returns authored upper-slice alpha occluder texture for `floorIndex`.
    *
@@ -7234,14 +7421,9 @@ export class FloorCompositor {
     if (!Number.isFinite(fi)) return null;
     try {
       const viewedFi = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index ?? NaN);
-      if (Number.isFinite(viewedFi) && fi < viewedFi && this._frameUpperWaterOccluderRT?.texture) {
-        return this._frameUpperWaterOccluderRT.texture;
-      }
-
       const diag = window.MapShine?.__v2PerLevelDiag ?? null;
       const visibleFloors = Array.isArray(diag?.visibleFloors) ? diag.visibleFloors : null;
       const levelSceneRTs = Array.isArray(diag?.levelSceneRTs) ? diag.levelSceneRTs : null;
-      const levelFinalRTs = Array.isArray(diag?.levelFinalRTs) ? diag.levelFinalRTs : null;
       if (
         !visibleFloors
         || !levelSceneRTs
@@ -7253,15 +7435,41 @@ export class FloorCompositor {
         return idx === fi;
       });
       if (li < 0 || li >= visibleFloors.length - 1) return null;
+
+      const viewedSi = Number.isFinite(viewedFi)
+        ? visibleFloors.findIndex((v) => {
+          const idx = Number.isFinite(Number(v?.index)) ? Number(v.index) : Number(v);
+          return idx === viewedFi;
+        })
+        : -1;
+      const stackEndSi = viewedSi >= 0 ? viewedSi : (visibleFloors.length - 1);
+      const firstAboveSi = li + 1;
+      if (firstAboveSi > stackEndSi) return null;
+
+      // Ground-water viewed from above: bus mask (slice stacks can miss middle overheads).
       const waterFi = this._resolveWaterSourceFloorForView(viewedFi);
-      const rt = this._resolvePostMergeWaterOccluderRT(
-        levelSceneRTs,
-        levelFinalRTs,
-        visibleFloors,
-        li,
-        waterFi,
-        viewedFi,
-      );
+      if (
+        Number.isFinite(viewedFi)
+        && Number.isFinite(waterFi)
+        && fi === waterFi
+        && viewedFi > fi
+        && this._waterOccluderRT
+      ) {
+        const busRt = this._buildBusOccluderMaskAboveWaterFloor(fi, viewedFi, this._waterOccluderRT);
+        if (busRt?.texture) return busRt.texture;
+      }
+
+      // Single band above splash floor: use prepass scene RT directly (no union RT stomp).
+      if (firstAboveSi === stackEndSi) {
+        return levelSceneRTs[firstAboveSi]?.texture ?? null;
+      }
+
+      this._tempTextures.length = 0;
+      for (let i = firstAboveSi; i <= stackEndSi; i++) {
+        const sceneRT = levelSceneRTs[i] ?? null;
+        if (sceneRT?.texture) this._tempTextures.push(sceneRT.texture);
+      }
+      const rt = this._buildUpperSceneAlphaOccluderFromTextures(this._tempTextures);
       return rt?.texture ?? null;
     } catch (_) {
       return null;
@@ -7889,6 +8097,14 @@ export class FloorCompositor {
     /** Merged composite lives in `_postA`; post-merge water may write `_postB`. */
     let mergedCompositeOut = this._postA;
     this._publishFrameUpperWaterOccluder(null);
+    this._publishFrameUpperSplashOccluder(null);
+    this._publishFrameSplashUpperOccluderTexByFloor(null);
+    this._publishFrameViewedLevelSceneOccluder(null);
+    this._publishFrameSameFloorOverheadOccluder(null);
+    this._frameWaterBgAlphaMaskTex = null;
+    try {
+      if (window?.MapShine) window.MapShine.__frameWaterBgAlphaMaskTex = null;
+    } catch (_) {}
     // Post-merge water composites onto an already user–CC'd merge (CC ran per slice before
     // composite). Timeline CC runs once after water via stacked _Outdoors (multi-floor).
     if (usePostMergeWater && !_skipWaterPass && resolveEffectEnabled(this._waterEffect)) {
@@ -7972,9 +8188,11 @@ export class FloorCompositor {
             );
           }, 'WaterEffectV2 postMerge bg stack mask');
         }
-        this._waterEffect.setWaterBackgroundAlphaMaskTexture?.(
-          maskRt?.texture ?? null,
-        );
+        this._frameWaterBgAlphaMaskTex = maskRt?.texture ?? null;
+        try {
+          if (window?.MapShine) window.MapShine.__frameWaterBgAlphaMaskTex = this._frameWaterBgAlphaMaskTex;
+        } catch (_) {}
+        this._waterEffect.setWaterBackgroundAlphaMaskTexture?.(this._frameWaterBgAlphaMaskTex);
       } catch (_) {}
       let postMergeWaterWrote = false;
       if (_profiling) _profileT0 = performance.now();
@@ -8089,6 +8307,23 @@ export class FloorCompositor {
     // Splashes + vegetation before CC (so overlays receive the camera grade).
     if (_profiling) _profileT0 = performance.now();
     this._profileEffectCall('postBloom.worldOverlays', 'render', () => {
+      if (resolveFloorEffectActive(this._waterSplashesEffect)) {
+        const viewedForSplashes = Number(floorStack?.getActiveFloor?.()?.index ?? 0);
+        if (Number.isFinite(viewedForSplashes)) {
+          this._publishFrameSplashOccluders(visibleFloors, levelSceneRTs, viewedForSplashes);
+        } else {
+          this._publishFrameViewedLevelSceneOccluder(null);
+          this._publishFrameUpperSplashOccluder(null);
+          this._publishFrameSplashUpperOccluderTexByFloor(null);
+        }
+      } else {
+        this._publishFrameViewedLevelSceneOccluder(null);
+        this._publishFrameUpperSplashOccluder(null);
+        this._publishFrameSplashUpperOccluderTexByFloor(null);
+      }
+      try {
+        this._waterSplashesEffect?.syncPostMergeOcclusionUniforms?.();
+      } catch (_) {}
       this._compositeWaterSplashesAboveWater(this.renderer, mergedCompositeOut);
       this._compositeVegetationAboveWater(this.renderer, mergedCompositeOut);
     }, 'Splashes + vegetation before CC');
@@ -8233,6 +8468,8 @@ export class FloorCompositor {
           // floors above the currently-rendering level). `null` on single-floor
           // scenes or before a frame has been composed.
           waterOccluderRT: this._waterOccluderRT ?? null,
+          frameUpperSplashOccluderRT: this._frameUpperSplashOccluderRT ?? null,
+          frameViewedLevelSceneTex: this._frameViewedLevelSceneTex ?? null,
         };
       }
     } catch (_) {}
@@ -8310,7 +8547,12 @@ export class FloorCompositor {
     this._populatePromise = null;
     this._frameWaterSourceDeckTex = null;
     this._frameWaterSourceSliceTex = null;
+    this._frameWaterBgAlphaMaskTex = null;
     this._publishFrameUpperWaterOccluder(null);
+    this._publishFrameUpperSplashOccluder(null);
+    this._publishFrameSplashUpperOccluderTexByFloor(null);
+    this._publishFrameViewedLevelSceneOccluder(null);
+    this._publishFrameSameFloorOverheadOccluder(null);
     this._waterShelterOutdoorsTexture = null;
     this._waterShelterOutdoorsFloorKey = null;
 
@@ -8320,6 +8562,7 @@ export class FloorCompositor {
     try { this._postB?.dispose(); } catch (_) {}
     try { this._waterOccluderRT?.dispose(); } catch (_) {}
     try { this._waterOccluderScratchRT?.dispose(); } catch (_) {}
+    try { this._splashSameFloorOverheadRT?.dispose(); } catch (_) {}
     try { this._waterFootholdMaskRT?.dispose(); } catch (_) {}
     try { this._waterBgProductRT?.dispose(); } catch (_) {}
     try { this._waterBgProductScratchRT?.dispose(); } catch (_) {}
@@ -8332,6 +8575,7 @@ export class FloorCompositor {
     this._postB = null;
     this._waterOccluderRT = null;
     this._waterOccluderScratchRT = null;
+    this._splashSameFloorOverheadRT = null;
     this._waterFootholdMaskRT = null;
     this._waterBgProductRT = null;
     this._waterBgProductScratchRT = null;

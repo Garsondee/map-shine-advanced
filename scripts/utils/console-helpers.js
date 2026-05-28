@@ -3339,6 +3339,21 @@ export function installConsoleHelpers() {
       console.log('->-> Copy the above and paste it into the issue tracker.');
     };
 
+    const splashProbeUrl = 'modules/map-shine-advanced/scripts/utils/water-splash-floor-probe-console-snippet.js';
+    window.MapShine.loadSplashFloorProbe = async function loadSplashFloorProbe() {
+      if (typeof window.MapShine.msaSplashProbeCapture === 'function') {
+        return true;
+      }
+      const res = await fetch(`${splashProbeUrl}?v=${Date.now()}`);
+      if (!res.ok) {
+        throw new Error(`splash probe fetch failed: ${res.status} (${splashProbeUrl})`);
+      }
+      // DevTools-only eval; snippet registers msaSplashProbeCapture / Compare on MapShine.
+      // eslint-disable-next-line no-eval
+      eval(await res.text());
+      return true;
+    };
+
     // Shortcut to visualize the water occluder RT in WaterEffectV2 (debug view 8 = waterOccluder)
     window.MapShine.showOccluderDebug = (view = 8) => {
       const we = window.MapShine?.waterEffect;
@@ -3354,6 +3369,7 @@ export function installConsoleHelpers() {
       stopPeriodicPerfLog();
     }
     console.log('-> Type MapShine.debug.help() for debugging commands');
+    console.log('-> Splash floor probe: await MapShine.loadSplashFloorProbe() then MapShine.msaSplashProbeCapture("ground")');
     console.log('-> Type MapShine.showOccluderDebug(8) to visualize tWaterOccluderAlpha');
     console.log(`-> Filter console by ${PERF_LOG_TAG} for recurring 10s perf logs`);
   }

@@ -2794,6 +2794,18 @@ static getControlSchema() {
   }
 
   /**
+   * Raw composited _Water mask for a specific floor (splashes / probes).
+   * @param {number} floorIndex
+   * @returns {import('three').Texture|null}
+   */
+  getWaterMaskTextureForFloor(floorIndex) {
+    const fi = Number(floorIndex);
+    if (!Number.isFinite(fi)) return null;
+    const floorData = this._floorWater.get(fi);
+    return floorData?.rawMask ?? floorData?.waterData?.rawMaskTexture ?? null;
+  }
+
+  /**
    * Return the active floor's packed water-data texture (used by V1 WeatherParticles
    * foam behaviors for spawn gating and flow-field sampling).
    * Returns null when no water data is loaded.

@@ -773,6 +773,8 @@ export class FloorCompositor {
      * @type {Map<number, { rt: import('three').WebGLRenderTarget, epoch: number }>}
      */
     this._stackedLevelLitSnapshots = new Map();
+    /** @type {number|null} Last active floor index used for stacked lit cache invalidation */
+    this._stackedLitCacheMaxFloorIndex = null;
     /** @type {number} */
     this._stackedLevelSnapshotEpoch = 1;
     /** @type {boolean} */
@@ -4092,6 +4094,9 @@ export class FloorCompositor {
       if (stackIdx !== null && stackIdx !== (prevIdx ?? Number.NaN)) {
         this._activeFloorIndex = stackIdx;
         this._lastOutdoorsSignature = null;
+        if (Number.isFinite(prevIdx) && stackIdx !== prevIdx) {
+          this._invalidateStackedLevelLitSnapshots('floor-stack-index');
+        }
         window.MapShine?.sceneComposer?._sceneMaskCompositor?.syncActiveFloorFromFloorStack?.();
         // Level-context hooks can update FloorStack before _applyCurrentFloorVisibility
         // runs; rebind water textures/settings so packed masks match.
@@ -6123,7 +6128,12 @@ export class FloorCompositor {
       log.info(`FloorCompositor: active floor index = ${maxFloorIndex}`);
     }
     this._activeFloorIndex = maxFloorIndex;
-    
+
+    if (this._stackedLitCacheMaxFloorIndex !== maxFloorIndex) {
+      this._stackedLitCacheMaxFloorIndex = maxFloorIndex;
+      this._invalidateStackedLevelLitSnapshots('active-floor-changed');
+    }
+
     this._renderBus.setVisibleFloors(maxFloorIndex);
     // Notify fire effect of floor change so it can swap active particle systems.
     this._fireEffect.onFloorChange(maxFloorIndex);
@@ -6429,6 +6439,28 @@ export class FloorCompositor {
   }
 
   /**
+   * True when packed water lives on a lower floor than the player is viewing
+   * (e.g. ground _Water visible from the roof). Stacked lit RT reuse must not
+   * skip the lower-floor bus+lighting pass in that case or holes show water
+   * without the ground albedo underneath when the camera is still.
+   *
+   * @returns {boolean}
+   * @private
+   */
+  _hasCrossFloorWaterView() {
+    try {
+      if (!this._waterEffect?._floorWater?.size) return false;
+      const waterIdx = Number(this._waterEffect._activeFloorIndex);
+      if (!Number.isFinite(waterIdx) || waterIdx < 0) return false;
+      if (!this._waterEffect._floorWater?.has?.(waterIdx)) return false;
+      const viewed = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index ?? NaN);
+      return Number.isFinite(viewed) && viewed > waterIdx;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
    * @param {string} [reason]
    * @private
    */
@@ -6509,6 +6541,7 @@ export class FloorCompositor {
     try {
       if (window.MapShine?.__msaDisableStackedLevelLitCache === true) return false;
     } catch (_) {}
+    if (this._hasCrossFloorWaterView()) return false;
     if (visibleCount <= 1 || this._stackedLevelSnapshotsStale) return false;
     if (listIndex >= visibleCount - 1) return false;
     const entry = this._stackedLevelLitSnapshots.get(levelIndex);
@@ -7169,6 +7202,26 @@ export class FloorCompositor {
     /** @see FloorCompositor#_resolveWaterShelterOutdoorsTexture */
     const resolveWaterShelterOutdoorsForFloor = (floorIndex) =>
       this._resolveWaterShelterOutdoorsTexture(floorIndex);
+    const resolveOutdoorsForLevelLighting = (floorIndex) => {
+      try {
+        const idx = Number(floorIndex);
+        if (!Number.isFinite(idx)) return null;
+        const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+        const floor = floorsByIndex.get(idx) ?? null;
+        const floorKey = floor?.compositorKey ?? null;
+        if (compositor && floorKey) {
+          const floorTex = (
+            compositor.getFloorTexture?.(floorKey, 'outdoors')
+            ?? compositor.getFloorTexture?.(floorKey, 'skyReach')
+            ?? null
+          );
+          if (floorTex) return floorTex;
+        }
+        const waterIdx = Number(this._waterEffect?._activeFloorIndex);
+        if (idx === waterIdx) return this._resolveWaterShelterOutdoorsTexture(idx);
+      } catch (_) {}
+      return null;
+    };
     const restoreWaterOutdoorsForDataFloor = (dataFloorIndex) => {
       try {
         const idx = Number(dataFloorIndex);
@@ -7302,9 +7355,9 @@ export class FloorCompositor {
         let outdoorsForLightingTex = null;
         try {
           const floorCount = (floorStack?.getFloors?.() ?? []).length;
-          // Authored `_Outdoors` first (not skyReach) so window glow + interior dim
-          // agree on indoor/outdoor classification for this level slice.
-          outdoorsForLightingTex = resolveWaterShelterOutdoorsForFloor(levelIndex);
+          // Per-level lighting follows each slice's authored _Outdoors (not the
+          // pinned water-shelter mask used only by WaterEffectV2 wave damping).
+          outdoorsForLightingTex = resolveOutdoorsForLevelLighting(levelIndex);
           if (!outdoorsForLightingTex && floorCount <= 1) {
             const lightingCtx = window.MapShine?.activeLevelContext ?? null;
             outdoorsForLightingTex = this._resolveOutdoorsMask(lightingCtx, { allowWeatherRoofMap: false }).texture ?? null;

@@ -6,21 +6,108 @@
  * Per-floor stacking uses compositor floor-id + per-band mask slots 0–3.
  *
  * Emit pass renders into a scene-UV RT (mask resolution, PaintedShadow-style).
- * Lighting compose samples that texture at sceneUvFoundry so glow stays locked
- * to the map when the camera pans or zooms.
+ * Lighting compose applies token-style `litColor *= (1 + win)` so glow brightens
+ * albedo without flat additive wash (matches token-manager window light path).
  *
  * @module compositor-v2/effects/WindowLightEffectV2
  */
 
 import { createLogger } from '../../core/log.js';
+import { LightingDirector } from '../../core/LightingDirector.js';
+import { weatherController } from '../../core/WeatherController.js';
+import {
+  DEFAULT_TOD_ANCHOR_HOURS,
+  readColorCorrectionParamsFromUi,
+  TOD_ANCHOR_META,
+} from '../../core/tod-anchor-spec.js';
+import {
+  clamp,
+  evaluateTodTimeline,
+  isTimelineEnabledParam,
+  makeTodGrade,
+  neutralTodGrade,
+  normalizeTintMultiplier,
+  TOD_ANCHOR_COUNT,
+  TOD_TINT_MAX,
+  TOD_TINT_MIN,
+  TOD_TINT_NEUTRAL,
+  wrapHour24,
+} from '../../core/tod-timeline.js';
 import { loadAssetBundle, loadTexture, probeMaskFile } from '../../assets/loader.js';
 import { getMaskTextureManifest, maskTextureManifestMatchesLoadContext } from '../../settings/mask-manifest-flags.js';
 import { resolveCompositorFloorMaskTexture } from '../../masks/resolve-compositor-outdoors.js';
 import { getViewedLevelBackgroundSrc } from '../../foundry/levels-scene-flags.js';
+import {
+  applySceneViewProjectionToUniforms,
+  createSceneViewProjectionCache,
+  updateSceneViewProjectionFromCamera,
+} from '../scene-view-projection.js';
 
 const log = createLogger('WindowLightEffectV2');
 
 const WINDOW_MASK_ALIASES = ['windows', 'structural'];
+
+/** Scale emit RT values for compose `litColor *= (1 + win)` — not display albedo. */
+const WINDOW_ILLUM_SCALE = 0.35;
+
+const wlTodTintSliderKeys = (index) => ({
+  r: `tod${index}TintR`,
+  g: `tod${index}TintG`,
+  b: `tod${index}TintB`,
+  color: `tod${index}TintColor`,
+});
+
+/** @returns {Record<string, *>} */
+const buildDefaultWindowLightTodParams = () => {
+  const out = {
+    todTimelineEnabled: false,
+    useCameraGradeAnchorHours: false,
+  };
+  for (let i = 0; i < TOD_ANCHOR_COUNT; i += 1) {
+    out[`tod${i}Hour`] = DEFAULT_TOD_ANCHOR_HOURS[i] ?? 0;
+    out[`tod${i}IntensityScale`] = 1.0;
+    out[`tod${i}Exposure`] = 0.0;
+    out[`tod${i}Saturation`] = 1.0;
+    out[`tod${i}TintR`] = TOD_TINT_NEUTRAL;
+    out[`tod${i}TintG`] = TOD_TINT_NEUTRAL;
+    out[`tod${i}TintB`] = TOD_TINT_NEUTRAL;
+  }
+  return out;
+};
+
+const EMIT_CLOUD_GLSL = /* glsl */`
+  vec2 wlSceneUvToWorld(vec2 sceneUv, vec2 sceneOrigin, vec2 sceneSize, vec2 sceneDimensions) {
+    vec2 foundryXY = sceneUv * sceneSize + sceneOrigin;
+    return vec2(foundryXY.x, sceneDimensions.y - foundryXY.y);
+  }
+
+  vec2 wlWorldToScreenUv(vec2 worldXY, vec2 boundsMin, vec2 boundsMax) {
+    return clamp((worldXY - boundsMin) / max(boundsMax - boundsMin, vec2(1e-5)), 0.0, 1.0);
+  }
+
+  float wlSampleCloudShadowFactor(
+    vec2 sceneUv,
+    vec2 sceneOrigin,
+    vec2 sceneSize,
+    vec2 sceneDimensions,
+    vec2 boundsMin,
+    vec2 boundsMax,
+    sampler2D cloudTex,
+    float hasCloudTex,
+    float contrast,
+    float bias,
+    float gamma,
+    float minLight
+  ) {
+    if (hasCloudTex < 0.5) return 1.0;
+    vec2 worldXY = wlSceneUvToWorld(sceneUv, sceneOrigin, sceneSize, sceneDimensions);
+    vec2 screenUv = wlWorldToScreenUv(worldXY, boundsMin, boundsMax);
+    float s = clamp(texture2D(cloudTex, screenUv).r, 0.0, 1.0);
+    s = clamp((s - 0.5) * max(contrast, 0.0) + 0.5 + bias, 0.0, 1.0);
+    s = pow(s, max(gamma, 0.01));
+    return max(s, clamp(minLight, 0.0, 1.0));
+  }
+`;
 
 /** Full-screen emit pass — scene-UV RT (PaintedShadow project pass pattern). */
 const EMIT_VERT = `
@@ -54,7 +141,61 @@ const EMIT_FRAG = `
   uniform sampler2D tFloorIdTex;
   uniform float uHasFloorIdTex;
   uniform float uFloorIdFlipY;
+  uniform float uCloudFactor;
+  uniform float uCloudInfluence;
+  uniform sampler2D uCloudShadowTex;
+  uniform float uHasCloudShadowTex;
+  uniform float uCloudShadowContrast;
+  uniform float uCloudShadowBias;
+  uniform float uCloudShadowGamma;
+  uniform float uCloudShadowMinLight;
+  uniform vec2 uViewBoundsMin;
+  uniform vec2 uViewBoundsMax;
+  uniform vec2 uSceneOrigin;
+  uniform vec2 uSceneSize;
+  uniform vec2 uSceneDimensions;
+  uniform float uTodEnabled;
+  uniform float uTodIntensityScale;
+  uniform float uTodExposure;
+  uniform float uTodSaturation;
+  uniform vec3 uTodTint;
   varying vec2 vUv;
+
+  ${EMIT_CLOUD_GLSL}
+
+  vec3 wlApplyTodGrade(vec3 rgb, float enabled, float intensityScale,
+                       float exposureStops, float saturation, vec3 tint) {
+    if (enabled < 0.5) return rgb;
+
+    // Exposure + intensity scale (clamped stops — avoids half-float blow-up in emit RT).
+    float expMul = exp2(clamp(exposureStops, -3.0, 3.0));
+    vec3 graded = rgb * (max(intensityScale, 0.0) * expMul);
+
+    // Luminance-preserving tint (skipped when neutral).
+    vec3 tintClamped = clamp(tint, vec3(0.0), vec3(3.0));
+    if (abs(tintClamped.r - 1.0) + abs(tintClamped.g - 1.0) + abs(tintClamped.b - 1.0) > 1e-4) {
+      float lumaIn = dot(graded, vec3(0.2126, 0.7152, 0.0722));
+      graded *= tintClamped;
+      float lumaOut = dot(graded, vec3(0.2126, 0.7152, 0.0722));
+      if (lumaOut > 1e-5) {
+        graded *= (lumaIn / lumaOut);
+      }
+    }
+
+    // Saturation: scale chroma distance from grey; restore luma so hot mask cores stay bright.
+    float sat = clamp(saturation, 0.0, 2.0);
+    float lumaBefore = dot(graded, vec3(0.2126, 0.7152, 0.0722));
+    vec3 chroma = graded - vec3(lumaBefore);
+    vec3 saturated = vec3(lumaBefore) + chroma * sat;
+    saturated = max(saturated, vec3(0.0));
+    float lumaAfter = dot(saturated, vec3(0.2126, 0.7152, 0.0722));
+    if (lumaAfter > 1e-5 && lumaBefore > 1e-5) {
+      saturated *= (lumaBefore / lumaAfter);
+    }
+    graded = saturated;
+
+    return min(max(graded, vec3(0.0)), vec3(512.0));
+  }
 
   void main() {
     if (uEffectEnabled < 0.5) {
@@ -116,7 +257,24 @@ const EMIT_FRAG = `
       return;
     }
 
-    vec3 emit = shaped * uColor * uIntensity;
+    vec3 emit = shaped * uColor * uIntensity * ${WINDOW_ILLUM_SCALE.toFixed(6)};
+    emit = wlApplyTodGrade(emit, uTodEnabled, uTodIntensityScale, uTodExposure, uTodSaturation, uTodTint);
+    float cloudDimming = mix(1.0, clamp(uCloudFactor, 0.0, 1.0), clamp(uCloudInfluence, 0.0, 1.0));
+    float cloudShadow = wlSampleCloudShadowFactor(
+      sceneUv,
+      uSceneOrigin,
+      uSceneSize,
+      uSceneDimensions,
+      uViewBoundsMin,
+      uViewBoundsMax,
+      uCloudShadowTex,
+      uHasCloudShadowTex,
+      uCloudShadowContrast,
+      uCloudShadowBias,
+      uCloudShadowGamma,
+      uCloudShadowMinLight
+    );
+    emit *= cloudDimming * cloudShadow;
     if (uDebugForceMagenta > 0.5 && dot(emit, emit) > 1e-8) {
       emit = vec3(1.0, 0.0, 1.0);
     }
@@ -272,13 +430,30 @@ export class WindowLightEffectV2 {
     this._floorIdTex = null;
     /** @type {import('three').Texture|null} 1×1 black — unbound sampler slots must never stay null. */
     this._fallbackMaskTex = null;
+    /** @type {import('../scene-view-projection.js').SceneViewProjectionCache} */
+    this._viewProjectionCache = createSceneViewProjectionCache();
+    this._clipTmpNdcVec = null;
+    this._clipTmpWorldVec = null;
+    this._clipTmpDirVec = null;
+    /** @type {import('three').Texture|null} */
+    this._cloudShadowTex = null;
+    /** @type {{ enabled: boolean, global?: object, interior?: object }|null} */
+    this._cameraTimelineGradeState = { enabled: false };
+    /** @type {{ exposure: number, saturation: number, tintColor: object, intensityScale: number }|null} */
+    this._lastEvaluatedTodGrade = null;
 
     this.params = {
       hasWindowMask: false,
       enabled: true,
-      intensity: 4.0,
+      intensity: 2.0,
       falloff: 1.5,
       color: { r: 1.0, g: 0.96, b: 0.85 },
+      cloudInfluence: 1.0,
+      cloudShadowContrast: 1.0,
+      cloudShadowBias: 0.05,
+      cloudShadowGamma: 2.28,
+      cloudShadowMinLight: 0.0,
+      ...buildDefaultWindowLightTodParams(),
     };
 
     log.debug('WindowLightEffectV2 created (scene-UV compositor)');
@@ -294,15 +469,133 @@ export class WindowLightEffectV2 {
   }
 
   static getControlSchema() {
+    const timelineGroups = [];
+    const timelineParams = {
+      todTimelineEnabled: {
+        type: 'boolean',
+        default: false,
+        label: 'Enable time-of-day timeline',
+        tooltip: 'Blends eight clock anchors as Map Shine time advances. Adjusts window glow intensity, exposure, saturation, and tint per anchor.',
+      },
+      useCameraGradeAnchorHours: {
+        type: 'boolean',
+        default: false,
+        label: 'Use Camera Grade anchor hours',
+        tooltip: 'When enabled, blend points follow Camera Grade clock-hour sliders instead of the local hour sliders below.',
+      },
+    };
+
+    const addTintMultiplierSliders = (index) => {
+      const keys = wlTodTintSliderKeys(index);
+      const tintTooltip = 'Per-channel hue bias (1 = neutral, 0–3). Raise R / lower B for warmth; overall brightness is preserved. Not a 0–255 colour.';
+      for (const ch of ['R', 'G', 'B']) {
+        const key = keys[ch.toLowerCase()];
+        timelineParams[key] = {
+          type: 'slider',
+          label: `Tint ${ch}`,
+          min: TOD_TINT_MIN,
+          max: TOD_TINT_MAX,
+          step: 0.01,
+          default: TOD_TINT_NEUTRAL,
+          throttle: 50,
+          tooltip: tintTooltip,
+        };
+      }
+      return [keys.r, keys.g, keys.b];
+    };
+
+    for (const meta of TOD_ANCHOR_META) {
+      const i = meta.index;
+      const defaultHour = DEFAULT_TOD_ANCHOR_HOURS[i] ?? 0;
+      const tintKeys = addTintMultiplierSliders(i);
+      const sectionLabel = `${meta.label} (~${meta.clockHint})`;
+      const params = [
+        `tod${i}Hour`,
+        `tod${i}IntensityScale`,
+        `tod${i}Exposure`,
+        `tod${i}Saturation`,
+        ...tintKeys,
+      ];
+      timelineGroups.push({
+        name: `wl-tod-anchor-${i}`,
+        label: sectionLabel,
+        type: 'folder',
+        advanced: true,
+        expanded: false,
+        parameters: params,
+      });
+      timelineParams[`tod${i}Hour`] = {
+        type: 'slider',
+        label: 'Clock hour',
+        min: 0,
+        max: 24,
+        step: 0.05,
+        default: defaultHour,
+        throttle: 50,
+        tooltip: `When the scene clock is near this anchor (${meta.clockHint} by default). Ignored when "Use Camera Grade anchor hours" is on.`,
+      };
+      timelineParams[`tod${i}IntensityScale`] = {
+        type: 'slider',
+        label: 'Intensity scale',
+        min: 0,
+        max: 3,
+        step: 0.01,
+        default: 1.0,
+        throttle: 50,
+        tooltip: 'Window glow brightness multiplier at this anchor. Stacks with the master Intensity slider.',
+      };
+      timelineParams[`tod${i}Exposure`] = {
+        type: 'slider',
+        label: 'Exposure',
+        min: -3,
+        max: 3,
+        step: 0.01,
+        default: 0,
+        throttle: 50,
+        tooltip: 'Exposure in stops for window glow at this anchor.',
+      };
+      timelineParams[`tod${i}Saturation`] = {
+        type: 'slider',
+        label: 'Saturation',
+        min: 0,
+        max: 2,
+        step: 0.01,
+        default: 1,
+        throttle: 50,
+        tooltip: 'Chroma strength for window glow at this anchor (1 = neutral). Brightness is preserved — only hue richness changes.',
+      };
+    }
+
     return {
       enabled: true,
       help: {
         title: 'Window Light',
-        summary: 'Emissive window glow from GpuSceneMaskCompositor _Windows masks (scene UV, per-floor stack).',
+        summary: [
+          'Emissive window glow from GpuSceneMaskCompositor _Windows masks (scene UV, per-floor stack).',
+          'Cloud dimming ties window glow to overcast weather and cloud shadow maps.',
+          'Time-of-day timeline uses the same eight clock anchors as Camera Grade.',
+        ].join('\n\n'),
       },
       groups: [
         { name: 'status', label: 'Effect Status', type: 'inline', advanced: true, parameters: ['textureStatus'] },
         { name: 'lighting', label: 'Window Light', type: 'folder', expanded: true, parameters: ['intensity', 'falloff', 'color'] },
+        { name: 'environment', label: 'Environment', type: 'folder', expanded: false, parameters: ['cloudInfluence'] },
+        {
+          name: 'cloudShadows',
+          label: 'Cloud Shadows',
+          type: 'folder',
+          expanded: false,
+          parameters: ['cloudShadowContrast', 'cloudShadowBias', 'cloudShadowGamma', 'cloudShadowMinLight'],
+        },
+        {
+          name: 'wl-tod-timeline',
+          label: 'Time-of-day window light',
+          type: 'folder',
+          advanced: true,
+          expanded: false,
+          parameters: ['todTimelineEnabled', 'useCameraGradeAnchorHours'],
+        },
+        ...timelineGroups,
       ],
       parameters: {
         hasWindowMask: { type: 'boolean', default: true, hidden: true },
@@ -311,13 +604,27 @@ export class WindowLightEffectV2 {
           type: 'slider',
           label: 'Intensity',
           min: 0.0,
-          max: 12.0,
+          max: 20.0,
           step: 0.05,
-          default: 4.0,
-          tooltip: 'Linear window glow energy written to the window-light RT.',
+          default: 2.0,
+          tooltip: 'Window glow strength — multiplicative brighten (1 + light), not flat overlay.',
         },
         falloff: { type: 'slider', label: 'Falloff (Gamma)', min: 0.5, max: 5.0, step: 0.05, default: 1.5 },
         color: { type: 'color', label: 'Light Color', default: { r: 1.0, g: 0.96, b: 0.85 } },
+        cloudInfluence: {
+          type: 'slider',
+          label: 'Cloud Dimming',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 1.0,
+          tooltip: 'How much overcast weather and cloud shadows dim window glow (0 = ignore clouds).',
+        },
+        cloudShadowContrast: { type: 'slider', label: 'Shadow Contrast', min: 0.0, max: 4.0, step: 0.01, default: 1.0 },
+        cloudShadowBias: { type: 'slider', label: 'Shadow Bias', min: -1.0, max: 1.0, step: 0.01, default: 0.05 },
+        cloudShadowGamma: { type: 'slider', label: 'Shadow Gamma', min: 0.1, max: 4.0, step: 0.01, default: 2.28 },
+        cloudShadowMinLight: { type: 'slider', label: 'Min Light', min: 0.0, max: 1.0, step: 0.01, default: 0.0 },
+        ...timelineParams,
       },
     };
   }
@@ -338,7 +645,9 @@ export class WindowLightEffectV2 {
     const fb = this._fallbackMaskTex;
     this._buildSceneUvEmitPass(fb);
 
-    this._scene.userData.onBindWindowLightPass = (_rw, _rh, _renderCamera) => {};
+    this._scene.userData.onBindWindowLightPass = (rw, rh, renderCamera) => {
+      this._bindWindowLightPass(rw, rh, renderCamera);
+    };
 
     this._scene.userData.onAfterWindowLightPass = () => {};
 
@@ -424,6 +733,174 @@ export class WindowLightEffectV2 {
     if (c && typeof c === 'object') {
       u.uColor.value.setRGB(Number(c.r) || 0, Number(c.g) || 0, Number(c.b) || 0);
     }
+
+    this._syncCloudUniformsFromParams(u);
+    this._updateSceneBounds();
+    this._pushTodUniforms();
+  }
+
+  /**
+   * @param {string} paramId
+   * @param {*} _value
+   */
+  applyParamChange(paramId, _value) {
+    if (!this._initialized || !this._emitMaterial) return;
+    if (
+      paramId === 'todTimelineEnabled'
+      || paramId === 'useCameraGradeAnchorHours'
+      || paramId.startsWith('tod')
+    ) {
+      this._pushTodUniforms();
+    }
+  }
+
+  /** @private @returns {boolean} */
+  _isTodTimelineEnabled() {
+    return isTimelineEnabledParam(this.params?.todTimelineEnabled)
+      && this.params.enabled !== false
+      && this._enabled;
+  }
+
+  /** @private */
+  _readTodTint(index) {
+    const p = this.params;
+    const keys = wlTodTintSliderKeys(index);
+    const fallbackTint = makeTodGrade().tintColor;
+
+    const readChannel = (key, fb) => {
+      if (!Object.prototype.hasOwnProperty.call(p, key)) return fb;
+      const v = Number(p[key]);
+      return Number.isFinite(v) ? v : fb;
+    };
+
+    const hasSlider = [keys.r, keys.g, keys.b].some((k) => Object.prototype.hasOwnProperty.call(p, k));
+    const rgb = hasSlider
+      ? normalizeTintMultiplier({
+        r: readChannel(keys.r, fallbackTint.r),
+        g: readChannel(keys.g, fallbackTint.g),
+        b: readChannel(keys.b, fallbackTint.b),
+      })
+      : normalizeTintMultiplier(p[keys.color] ?? fallbackTint);
+
+    p[keys.r] = rgb.r;
+    p[keys.g] = rgb.g;
+    p[keys.b] = rgb.b;
+    p[keys.color] = { ...rgb };
+    return rgb;
+  }
+
+  /** @private */
+  _resolveAnchorHour(index) {
+    const p = this.params;
+    const fallback = DEFAULT_TOD_ANCHOR_HOURS[index] ?? 0;
+    if (isTimelineEnabledParam(p.useCameraGradeAnchorHours)) {
+      const ccParams = readColorCorrectionParamsFromUi();
+      const ccKey = `tod${index}Hour`;
+      if (ccParams && Number.isFinite(Number(ccParams[ccKey]))) {
+        return wrapHour24(Number(ccParams[ccKey]));
+      }
+    }
+    return wrapHour24(p[`tod${index}Hour`] ?? fallback);
+  }
+
+  /** @private */
+  _readTodAnchor(index) {
+    const p = this.params;
+    return {
+      hour: this._resolveAnchorHour(index),
+      grade: {
+        intensityScale: clamp(p[`tod${index}IntensityScale`] ?? 1, 0, 3),
+        exposure: clamp(p[`tod${index}Exposure`] ?? 0, -10, 10),
+        saturation: clamp(p[`tod${index}Saturation`] ?? 1, 0, 4),
+        tintColor: this._readTodTint(index),
+      },
+    };
+  }
+
+  /** @private */
+  _evaluateWindowLightTod(hourRaw) {
+    const anchors = [];
+    for (let i = 0; i < TOD_ANCHOR_COUNT; i += 1) {
+      anchors.push(this._readTodAnchor(i));
+    }
+    this.params.todAnchors = anchors.map((anchor) => ({
+      hour: anchor.hour,
+      grade: {
+        intensityScale: anchor.grade.intensityScale,
+        exposure: anchor.grade.exposure,
+        saturation: anchor.grade.saturation,
+        tintColor: { ...anchor.grade.tintColor },
+      },
+    }));
+    return evaluateTodTimeline(hourRaw, anchors);
+  }
+
+  /** @private @returns {number} */
+  _resolveTimelineHour() {
+    try {
+      const hour = Number(LightingDirector.get()?.hour);
+      if (Number.isFinite(hour)) return wrapHour24(hour);
+    } catch (_) {}
+    const wcHour = Number(weatherController?.timeOfDay);
+    if (Number.isFinite(wcHour)) return wrapHour24(wcHour);
+    try {
+      const panelHour = Number(window.MapShine?.controlPanel?.controlState?.timeOfDay);
+      if (Number.isFinite(panelHour)) return wrapHour24(panelHour);
+    } catch (_) {}
+    return 12.0;
+  }
+
+  /** @private */
+  _pushTodUniforms() {
+    const u = this._emitMaterial?.uniforms;
+    if (!u?.uTodEnabled) return;
+
+    const applyTimeline = this._isTodTimelineEnabled();
+    u.uTodEnabled.value = applyTimeline ? 1.0 : 0.0;
+
+    const grade = applyTimeline
+      ? this._evaluateWindowLightTod(this._resolveTimelineHour())
+      : neutralTodGrade();
+
+    this._lastEvaluatedTodGrade = grade;
+
+    u.uTodIntensityScale.value = Math.max(0, Number(grade.intensityScale) || 0);
+    u.uTodExposure.value = Number(grade.exposure) || 0;
+    u.uTodSaturation.value = Number.isFinite(Number(grade.saturation)) ? Number(grade.saturation) : 1;
+    u.uTodTint.value.set(
+      grade.tintColor.r ?? TOD_TINT_NEUTRAL,
+      grade.tintColor.g ?? TOD_TINT_NEUTRAL,
+      grade.tintColor.b ?? TOD_TINT_NEUTRAL,
+    );
+  }
+
+  /**
+   * Live ToD diagnostics for console inspection.
+   * @returns {object}
+   */
+  getTodDebugState() {
+    const u = this._emitMaterial?.uniforms;
+    const hour = this._resolveTimelineHour();
+    const grade = this._isTodTimelineEnabled()
+      ? this._evaluateWindowLightTod(hour)
+      : neutralTodGrade();
+    return {
+      timelineEnabled: this._isTodTimelineEnabled(),
+      useCameraGradeAnchorHours: isTimelineEnabledParam(this.params?.useCameraGradeAnchorHours),
+      hour,
+      evaluatedGrade: grade,
+      anchors: this.params.todAnchors ?? null,
+      uniforms: u ? {
+        uTodEnabled: u.uTodEnabled?.value ?? null,
+        uTodIntensityScale: u.uTodIntensityScale?.value ?? null,
+        uTodExposure: u.uTodExposure?.value ?? null,
+        uTodSaturation: u.uTodSaturation?.value ?? null,
+        uTodTint: u.uTodTint?.value
+          ? { r: u.uTodTint.value.x, g: u.uTodTint.value.y, b: u.uTodTint.value.z }
+          : null,
+      } : null,
+      cameraTimelineGradeState: this._cameraTimelineGradeState ?? null,
+    };
   }
 
   render(_renderer, _camera) {}
@@ -431,11 +908,24 @@ export class WindowLightEffectV2 {
   // ── FloorCompositor hooks ───────────────────────────────────────────────────
 
   setOutdoorsMask(_mask) {}
-  setCloudShadowTexture(_tex, _w, _h, _bounds) {}
+  setCloudShadowTexture(texture, screenW, screenH, _viewBounds = null) {
+    this._cloudShadowTex = texture ?? null;
+    const u = this._emitMaterial?.uniforms;
+    if (!u) return;
+    u.uCloudShadowTex.value = this._cloudShadowTex ?? this._fallbackMaskTex ?? null;
+    u.uHasCloudShadowTex.value = this._cloudShadowTex ? 1.0 : 0.0;
+    const w = Math.max(1, Number(screenW) || 1);
+    const h = Math.max(1, Number(screenH) || 1);
+    void w;
+    void h;
+    void _viewBounds;
+  }
   setOverheadRoofAlphaTexture(_tex, _w, _h) {}
   setCeilingTransmittanceTexture(_tex) {}
   setSkyState(_state) {}
-  setTimelineGradeState(_state) {}
+  setTimelineGradeState(state) {
+    this._cameraTimelineGradeState = state ?? { enabled: false };
+  }
   setDriver(_driverState) {}
   applyOutdoorsClip(_renderer, _camera, _targetRT, _outdoorsMaskOverride) {}
 
@@ -625,14 +1115,24 @@ export class WindowLightEffectV2 {
         ? { w: this._emitRT.width, h: this._emitRT.height }
         : null,
       winScenePassedToLighting: !!(fc && this._scene && this._enabled),
+      hasCloudShadowTex: !!this._cloudShadowTex,
+      cloudInfluence: Number(this.params.cloudInfluence) || 0,
+      todTimelineEnabled: this._isTodTimelineEnabled(),
+      todHour: this._resolveTimelineHour(),
+      todGrade: this._lastEvaluatedTodGrade,
     };
   }
 
-  drawWindowLightPass(renderer, _camera) {
+  drawWindowLightPass(renderer, camera) {
     if (!this._enabled || !renderer || !this._initialized || !this._scene || !this._emitMaterial) {
       this._lastDrawStats = { skipReason: 'disabled_or_unready' };
       return;
     }
+
+    if (camera) this._syncViewProjectionUniforms(camera);
+    this._updateSceneBounds();
+    this._syncCloudUniformsFromParams(this._emitMaterial.uniforms);
+    this._pushTodUniforms();
 
     if (!this.params.hasWindowMask) {
       this._lastDrawStats = { skipReason: 'no_compositor_masks', drew: false };
@@ -731,6 +1231,28 @@ export class WindowLightEffectV2 {
         tFloorIdTex: { value: fb },
         uHasFloorIdTex: { value: 0.0 },
         uFloorIdFlipY: { value: 1.0 },
+        uCloudFactor: { value: 1.0 },
+        uCloudInfluence: { value: Math.max(0.0, Math.min(1.0, Number(this.params.cloudInfluence) || 0.0)) },
+        uCloudShadowTex: { value: fb },
+        uHasCloudShadowTex: { value: 0.0 },
+        uCloudShadowContrast: { value: Math.max(0.0, Number(this.params.cloudShadowContrast) || 1.0) },
+        uCloudShadowBias: { value: Number(this.params.cloudShadowBias) || 0.0 },
+        uCloudShadowGamma: { value: Math.max(0.01, Number(this.params.cloudShadowGamma) || 1.0) },
+        uCloudShadowMinLight: { value: Math.max(0.0, Math.min(1.0, Number(this.params.cloudShadowMinLight) || 0.0)) },
+        uViewBoundsMin: { value: new THREE.Vector2(0, 0) },
+        uViewBoundsMax: { value: new THREE.Vector2(1, 1) },
+        uViewCorner00: { value: new THREE.Vector2(0, 0) },
+        uViewCorner10: { value: new THREE.Vector2(1, 0) },
+        uViewCorner01: { value: new THREE.Vector2(0, 1) },
+        uViewCorner11: { value: new THREE.Vector2(1, 1) },
+        uSceneOrigin: { value: new THREE.Vector2(0, 0) },
+        uSceneSize: { value: new THREE.Vector2(1, 1) },
+        uSceneDimensions: { value: new THREE.Vector2(1, 1) },
+        uTodEnabled: { value: 0.0 },
+        uTodIntensityScale: { value: 1.0 },
+        uTodExposure: { value: 0.0 },
+        uTodSaturation: { value: 1.0 },
+        uTodTint: { value: new THREE.Color(TOD_TINT_NEUTRAL, TOD_TINT_NEUTRAL, TOD_TINT_NEUTRAL) },
       },
       vertexShader: EMIT_VERT,
       fragmentShader: EMIT_FRAG,
@@ -744,6 +1266,7 @@ export class WindowLightEffectV2 {
     const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._emitMaterial);
     quad.frustumCulled = false;
     this._scene.add(quad);
+    this._pushTodUniforms();
   }
 
   _maskImageSize(tex) {
@@ -814,6 +1337,109 @@ export class WindowLightEffectV2 {
         this._overlays.set(`__compositor_floor_${i}__`, { floorIndex: i });
       }
     }
+  }
+
+  /**
+   * @param {number} rw
+   * @param {number} rh
+   * @param {import('three').Camera|null} renderCamera
+   * @private
+   */
+  _bindWindowLightPass(rw, rh, renderCamera) {
+    void rw;
+    void rh;
+    this._syncViewProjectionUniforms(renderCamera ?? null);
+    this._updateSceneBounds();
+    const u = this._emitMaterial?.uniforms;
+    if (u) this._syncCloudUniformsFromParams(u);
+  }
+
+  /** @private */
+  _syncCloudUniformsFromParams(u) {
+    if (!u) return;
+    const weather = window.MapShine?.weatherController ?? null;
+    const env = weather?.getEnvironment?.() ?? {};
+    const overcastFactor = Math.max(0.0, Math.min(1.0, Number(env?.overcastFactor) || 0.0));
+    const stormFactor = Math.max(0.0, Math.min(1.0, Number(env?.stormFactor) || 0.0));
+    const cloudFactor = Math.max(0.0, Math.min(1.0, (1.0 - overcastFactor * 0.55) * (1.0 - stormFactor * 0.25)));
+    u.uCloudFactor.value = cloudFactor;
+    u.uCloudInfluence.value = Math.max(0.0, Math.min(1.0, Number(this.params.cloudInfluence) || 0.0));
+    u.uCloudShadowContrast.value = Math.max(0.0, Number(this.params.cloudShadowContrast) || 1.0);
+    u.uCloudShadowBias.value = Number(this.params.cloudShadowBias) || 0.0;
+    u.uCloudShadowGamma.value = Math.max(0.01, Number(this.params.cloudShadowGamma) || 1.0);
+    u.uCloudShadowMinLight.value = Math.max(0.0, Math.min(1.0, Number(this.params.cloudShadowMinLight) || 0.0));
+    u.uCloudShadowTex.value = this._cloudShadowTex ?? this._fallbackMaskTex ?? null;
+    u.uHasCloudShadowTex.value = this._cloudShadowTex ? 1.0 : 0.0;
+  }
+
+  /** @private Match LightingEffectV2 compose: bilinear view corners + scene rect. */
+  _syncViewProjectionUniforms(camera) {
+    const dims = canvas?.dimensions;
+    if (!dims) return;
+
+    const sc = window.MapShine?.sceneComposer ?? null;
+    const cam = camera ?? sc?.camera ?? null;
+    if (!cam) return;
+
+    const groundZ = sc?.basePlaneMesh?.position?.z ?? (sc?.groundZ ?? 0);
+    const THREE = window.THREE;
+    if (!this._clipTmpNdcVec && THREE) {
+      this._clipTmpNdcVec = new THREE.Vector3();
+      this._clipTmpWorldVec = new THREE.Vector3();
+      this._clipTmpDirVec = new THREE.Vector3();
+    }
+
+    updateSceneViewProjectionFromCamera(
+      cam,
+      groundZ,
+      this._viewProjectionCache,
+      {
+        ndc: this._clipTmpNdcVec,
+        world: this._clipTmpWorldVec,
+        dir: this._clipTmpDirVec,
+      },
+    );
+
+    applySceneViewProjectionToUniforms(this._viewProjectionCache, this._emitMaterial?.uniforms);
+
+    const fd = this._lastFoundrySceneData
+      ?? sc?.foundrySceneData
+      ?? null;
+    const sr = dims.sceneRect ?? dims;
+    const sceneX = Number(fd?.sceneX ?? sr?.x ?? 0);
+    const sceneY = Number(fd?.sceneY ?? sr?.y ?? 0);
+    const sceneW = Number(fd?.sceneWidth ?? fd?.width ?? sr?.width ?? dims.width ?? 1);
+    const sceneH = Number(fd?.sceneHeight ?? fd?.height ?? sr?.height ?? dims.height ?? 1);
+    const canvasW = Number(fd?.width ?? dims.width ?? 1);
+    const canvasH = Number(fd?.height ?? dims.height ?? 1);
+
+    const u = this._emitMaterial?.uniforms;
+    if (!u) return;
+    u.uSceneOrigin?.value?.set(sceneX, sceneY);
+    u.uSceneSize?.value?.set(sceneW, sceneH);
+    u.uSceneDimensions?.value?.set(canvasW, canvasH);
+  }
+
+  /** @private */
+  _updateSceneBounds() {
+    const u = this._emitMaterial?.uniforms;
+    if (!u?.uSceneOrigin || !u?.uSceneSize || !u?.uSceneDimensions) return;
+
+    const fd = this._lastFoundrySceneData
+      ?? window.MapShine?.sceneComposer?.foundrySceneData
+      ?? null;
+    const dims = canvas?.dimensions;
+    const sr = dims?.sceneRect ?? dims;
+    const sceneX = Number(fd?.sceneX ?? sr?.x ?? 0);
+    const sceneY = Number(fd?.sceneY ?? sr?.y ?? 0);
+    const sceneW = Number(fd?.sceneWidth ?? fd?.width ?? sr?.width ?? dims?.width ?? 1);
+    const sceneH = Number(fd?.sceneHeight ?? fd?.height ?? sr?.height ?? dims?.height ?? 1);
+    const canvasW = Number(fd?.width ?? dims?.width ?? 1);
+    const canvasH = Number(fd?.height ?? dims?.height ?? 1);
+
+    u.uSceneOrigin.value.set(sceneX, sceneY);
+    u.uSceneSize.value.set(sceneW, sceneH);
+    u.uSceneDimensions.value.set(canvasW, canvasH);
   }
 
   _levelContextForFloorIndex(floorIndex) {

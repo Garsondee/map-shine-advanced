@@ -4504,6 +4504,7 @@ export class FloorCompositor {
       this._windowLightEffect?.setCeilingTransmittanceTexture?.(null);
       this._windowLightEffect?.syncFrameOcclusion?.(this);
       this._lightingEffect?.setRenderFloorIndexForLights?.(activeIdx);
+      this._fireEffect?.setRenderFloorIndexForGlow?.(activeIdx, true);
       const winScene = resolveEffectEnabled(this._windowLightEffect)
         ? this._windowLightEffect._scene
         : null;
@@ -7777,6 +7778,7 @@ export class FloorCompositor {
 
         try {
           this._lightingEffect?.setRenderFloorIndexForLights?.(levelIndex);
+          this._fireEffect?.setRenderFloorIndexForGlow?.(levelIndex, true);
         } catch (_) {}
 
         let outdoorsForLightingTex = null;
@@ -8092,6 +8094,7 @@ export class FloorCompositor {
     this._windowLightEffect?.setRenderFloorIndex?.(null);
     try {
       this._lightingEffect?.setRenderFloorIndexForLights?.(null);
+      this._fireEffect?.setRenderFloorIndexForGlow?.(null);
     } catch (_) {}
     if (!this._colorCorrectionEffect?._initialized) {
       try {

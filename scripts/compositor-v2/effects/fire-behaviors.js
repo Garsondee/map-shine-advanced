@@ -1125,30 +1125,72 @@ export class ParticleTimeScaledBehavior {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Scan a fire mask image on the CPU and collect bright pixels as (u, v, brightness)
- * triples packed into a Float32Array. This is the core "Lookup Map" technique.
- *
- * @param {HTMLImageElement|ImageBitmap} image - The _Fire mask image
- * @param {number} [threshold=0.1] - Minimum brightness to include
- * @returns {Float32Array|null} Packed (u, v, brightness) triples, or null if empty
+ * @param {HTMLImageElement|ImageBitmap} image
+ * @returns {{ data: Uint8ClampedArray, width: number, height: number }|null}
  */
-export function generateFirePoints(image, threshold = 0.1) {
-  if (!image) return null;
-
+function readImageRgba(image) {
+  if (!image?.width || !image?.height) return null;
   const c = document.createElement('canvas');
   c.width = image.width;
   c.height = image.height;
   const ctx = c.getContext('2d');
+  if (!ctx) return null;
   ctx.drawImage(image, 0, 0);
-  const data = ctx.getImageData(0, 0, c.width, c.height).data;
-  const imgW = c.width;
-  const imgH = c.height;
+  const img = ctx.getImageData(0, 0, c.width, c.height);
+  return { data: img.data, width: c.width, height: c.height };
+}
+
+/**
+ * @typedef {object} FireMaskScanOptions
+ * @property {number} [threshold=0.1] - Minimum premultiplied brightness (lum × alpha)
+ * @property {number} [minMaskAlpha=0.35] - Drop mask texels below this alpha
+ * @property {number} [minMaskBrightness=0] - Require max(R,G,B) luminance in the _Fire mask
+ */
+
+/**
+ * Scan a fire mask image on the CPU and collect bright pixels as (u, v, brightness)
+ * triples packed into a Float32Array. This is the core "Lookup Map" technique.
+ *
+ * @param {HTMLImageElement|ImageBitmap} image - The _Fire mask image
+ * @param {number|FireMaskScanOptions} [thresholdOrOptions=0.1]
+ * @param {number} [minMaskAlpha=0.35] - Legacy positional min alpha when 2nd arg is numeric
+ * @returns {Float32Array|null} Packed (u, v, brightness) triples, or null if empty
+ */
+export function generateFirePoints(image, thresholdOrOptions = 0.1, minMaskAlpha = 0.35) {
+  if (!image) return null;
+
+  /** @type {FireMaskScanOptions} */
+  let opts = {
+    threshold: 0.1,
+    minMaskAlpha: 0.35,
+    minMaskBrightness: 0,
+  };
+  if (thresholdOrOptions && typeof thresholdOrOptions === 'object') {
+    opts = {
+      threshold: Number(thresholdOrOptions.threshold ?? 0.1),
+      minMaskAlpha: Number(thresholdOrOptions.minMaskAlpha ?? 0.35),
+      minMaskBrightness: Number(thresholdOrOptions.minMaskBrightness ?? 0),
+    };
+  } else {
+    opts.threshold = Number(thresholdOrOptions ?? 0.1);
+    opts.minMaskAlpha = Number(minMaskAlpha ?? 0.35);
+  }
+
+  const rgba = readImageRgba(image);
+  if (!rgba) return null;
+  const { data, width: imgW, height: imgH } = rgba;
+  const minAlpha255 = Math.max(0, Math.min(255, Math.round(clamp01(opts.minMaskAlpha) * 255)));
+  const minLum = clamp01(Number(opts.minMaskBrightness) || 0);
+  const premulThreshold = Math.max(0, Number(opts.threshold) || 0);
 
   const coords = [];
   for (let i = 0; i < data.length; i += 4) {
+    const a = data[i + 3];
+    if (a < minAlpha255) continue;
     const lum = Math.max(data[i], data[i + 1], data[i + 2]) / 255.0;
-    const b = lum * (data[i + 3] / 255.0);
-    if (b > threshold) {
+    if (lum < minLum) continue;
+    const b = lum * (a / 255.0);
+    if (b > premulThreshold) {
       const idx = i / 4;
       const x = (idx % imgW) / imgW;
       const y = Math.floor(idx / imgW) / imgH;
@@ -1158,6 +1200,97 @@ export function generateFirePoints(image, threshold = 0.1) {
 
   if (coords.length === 0) return null;
   return new Float32Array(coords);
+}
+
+/**
+ * Drop fire spawn points where the companion albedo image is transparent.
+ * Prevents glow/particles on WebP hole edges and upper-floor alpha fringes.
+ *
+ * @param {Float32Array|null} points - Packed (u, v, brightness) in albedo image UV space
+ * @param {HTMLImageElement|ImageBitmap|null} albedoImage - Tile or background colour texture
+ * @param {number} [minAlbedoAlpha=0.5] - Minimum authored alpha required to keep a point
+ * @returns {Float32Array|null}
+ */
+export function filterFirePointsByAlbedoAlpha(points, albedoImage, minAlbedoAlpha = 0.5) {
+  if (!points || points.length < 3) return points ?? null;
+  if (!albedoImage) return points;
+
+  const rgba = readImageRgba(albedoImage);
+  if (!rgba) return points;
+
+  const { data, width: w, height: h } = rgba;
+  const minAlpha255 = Math.max(0, Math.min(255, Math.round(clamp01(minAlbedoAlpha) * 255)));
+  const out = [];
+
+  for (let i = 0; i < points.length; i += 3) {
+    const u = points[i];
+    const v = points[i + 1];
+    if (!Number.isFinite(u) || !Number.isFinite(v)) continue;
+    const px = Math.min(w - 1, Math.max(0, Math.floor(u * w)));
+    const py = Math.min(h - 1, Math.max(0, Math.floor(v * h)));
+    const o = (py * w + px) * 4;
+    if (data[o + 3] >= minAlpha255) {
+      out.push(points[i], points[i + 1], points[i + 2]);
+    }
+  }
+
+  return out.length >= 3 ? new Float32Array(out) : null;
+}
+
+/**
+ * Drop isolated fire-mask specks with no neighbour within `minDistPx` (mask pixels).
+ * @param {Float32Array|null} points
+ * @param {number} imgW
+ * @param {number} imgH
+ * @param {number} [minDistPx=0] - 0 disables
+ * @returns {Float32Array|null}
+ */
+export function filterFirePointsRequireNeighbor(points, imgW, imgH, minDistPx = 0) {
+  if (!points || points.length < 3) return points ?? null;
+  const distPx = Math.max(0, Number(minDistPx) || 0);
+  if (distPx <= 0) return points;
+
+  const w = Math.max(1, Number(imgW) || 1);
+  const h = Math.max(1, Number(imgH) || 1);
+  const dist2 = distPx * distPx;
+  const cell = Math.max(1, distPx);
+  const grid = new Map();
+
+  for (let i = 0; i < points.length; i += 3) {
+    const px = points[i] * w;
+    const py = points[i + 1] * h;
+    const key = `${Math.floor(px / cell)},${Math.floor(py / cell)}`;
+    let arr = grid.get(key);
+    if (!arr) { arr = []; grid.set(key, arr); }
+    arr.push(i);
+  }
+
+  const out = [];
+  for (let i = 0; i < points.length; i += 3) {
+    const px = points[i] * w;
+    const py = points[i + 1] * h;
+    const bx = Math.floor(px / cell);
+    const by = Math.floor(py / cell);
+    let hasNeighbor = false;
+    for (let ox = -1; ox <= 1 && !hasNeighbor; ox++) {
+      for (let oy = -1; oy <= 1 && !hasNeighbor; oy++) {
+        const arr = grid.get(`${bx + ox},${by + oy}`);
+        if (!arr) continue;
+        for (const j of arr) {
+          if (j === i) continue;
+          const dx = px - points[j] * w;
+          const dy = py - points[j + 1] * h;
+          if ((dx * dx + dy * dy) <= dist2) {
+            hasNeighbor = true;
+            break;
+          }
+        }
+      }
+    }
+    if (hasNeighbor) out.push(points[i], points[i + 1], points[i + 2]);
+  }
+
+  return out.length >= 3 ? new Float32Array(out) : null;
 }
 
 const OUTDOOR_SMOKE_POINT_THRESHOLD = 0.5;

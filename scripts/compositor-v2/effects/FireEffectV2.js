@@ -57,6 +57,8 @@ import {
   ParticleMotionGatedBehavior,
   generateFirePoints,
   filterFirePointsByOutdoor,
+  filterFirePointsByAlbedoAlpha,
+  filterFirePointsRequireNeighbor,
 } from './fire-behaviors.js';
 import {
   ParticleSystem as QuarksParticleSystem,
@@ -100,6 +102,16 @@ const FIRE_GLOW_REBUILD_PARAMS = new Set([
 
 // Spatial bucket size for splitting large fire masks into smaller emitters (px).
 const BUCKET_SIZE = 2000;
+
+/** Params that require repopulating _Fire mask spawn points + glow clusters. */
+const FIRE_MASK_PICKUP_PARAM_KEYS = [
+  'fireMaskMinBrightness',
+  'fireMaskMinAlpha',
+  'fireMaskPremulThreshold',
+  'fireAlbedoMinAlpha',
+  'fireMaskIsolationPx',
+];
+
 /** Hard cap on spatial particle emitters per floor — coarsens buckets when exceeded. */
 const FIRE_DEFAULT_MAX_SPATIAL_BUCKETS = 16;
 const FIRE_DEFAULT_MAX_SYSTEMS_PER_FLOOR = 36;
@@ -130,6 +142,7 @@ const REBUILD_PARAM_KEYS = [
   'smokeSizeGrowth', 'smokeSizeOverLife', 'smokeOutdoorAboveCanopy',
   'fireMaxSpatialBuckets', 'fireMaxParticles', 'fireEmberMaxParticles', 'fireSmokeMaxParticles',
   'fireMaxSystemsPerFloor', 'fireOutdoorSplitMaxBuckets',
+  ...FIRE_MASK_PICKUP_PARAM_KEYS,
 ];
 const REBUILD_PARAM_SET = new Set(REBUILD_PARAM_KEYS);
 
@@ -596,6 +609,12 @@ export class FireEffectV2 {
     this._activePerfRecorder = null;
     /** @type {[string, number][]} */
     this._glowHookIds = [];
+    /** @type {number|null} Per-pass lighting floor (strict slice during per-level compose). */
+    this._renderFloorIndexForGlow = null;
+    /** @type {boolean} When true, only {@link _renderFloorIndexForGlow} emits into `_lightRT`. */
+    this._renderFloorSliceStrict = false;
+    /** @type {number} Highest floor index visible for stacked particle/glow visibility. */
+    this._maxVisibleFloorIndex = 0;
 
     // Effect parameters — fire-sparks defaults (map-scale flames + smoke).
     this.params = {
@@ -697,6 +716,13 @@ export class FireEffectV2 {
       fireEmberMaxParticles: 700,
       fireSmokeMaxParticles: 600,
 
+      // _Fire mask pickup — which texels become particles + gameplay glow pools.
+      fireMaskMinBrightness: 0.6,
+      fireMaskMinAlpha: 0.8,
+      fireMaskPremulThreshold: 0.2,
+      fireAlbedoMinAlpha: 0.65,
+      fireMaskIsolationPx: 0,
+
       fireGlowEnabled: true,
       fireGlowBucketSizePx: 512,
       fireGlowMaxBuckets: 128,
@@ -789,6 +815,56 @@ export class FireEffectV2 {
   }
 
   /**
+   * CPU scan options for `_Fire` mask pickup (particles + glow source points).
+   * @returns {{ threshold: number, minMaskAlpha: number, minMaskBrightness: number }}
+   * @private
+   */
+  _fireMaskScanOptions() {
+    const p = this.params ?? {};
+    return {
+      threshold: Math.max(0, Number(p.fireMaskPremulThreshold ?? 0.2)),
+      minMaskAlpha: clamp01(Number(p.fireMaskMinAlpha ?? 0.8)),
+      minMaskBrightness: clamp01(Number(p.fireMaskMinBrightness ?? 0.6)),
+    };
+  }
+
+  /**
+   * @returns {number}
+   * @private
+   */
+  _fireAlbedoMinAlpha() {
+    return clamp01(Number(this.params?.fireAlbedoMinAlpha ?? 0.65));
+  }
+
+  /**
+   * @returns {number}
+   * @private
+   */
+  _fireMaskIsolationPx() {
+    return Math.max(0, Number(this.params?.fireMaskIsolationPx ?? 0) || 0);
+  }
+
+  /**
+   * Scan + filter a tile/background-local _Fire mask into spawn/glow points.
+   * @param {HTMLImageElement|ImageBitmap} fireMaskImage
+   * @param {HTMLImageElement|ImageBitmap|null} albedoImage
+   * @returns {Float32Array|null}
+   * @private
+   */
+  _pickupFireMaskPoints(fireMaskImage, albedoImage = null) {
+    if (!fireMaskImage) return null;
+    let points = generateFirePoints(fireMaskImage, this._fireMaskScanOptions());
+    points = filterFirePointsByAlbedoAlpha(points, albedoImage, this._fireAlbedoMinAlpha());
+    points = filterFirePointsRequireNeighbor(
+      points,
+      fireMaskImage.width,
+      fireMaskImage.height,
+      this._fireMaskIsolationPx(),
+    );
+    return points;
+  }
+
+  /**
    * Attach to LightingEffectV2 so fire glow buckets render into the HDR light buffer.
    * @param {object|null} lightingEffect
    */
@@ -796,6 +872,21 @@ export class FireEffectV2 {
     this._lightingEffect = lightingEffect || null;
     this._tryAttachGlowRoot();
     this._applyGlowVisibility();
+  }
+
+  /**
+   * Restrict fire-glow LightMesh visibility for the upcoming `_lightRT` draw.
+   * Mirrors WindowLightEffectV2 floor slicing: per-level lighting must not
+   * accumulate lower-floor glow pools onto upper-floor lit RTs (screen-space bleed).
+   *
+   * @param {number|null} [floorIndex=null] - Render floor for the lighting pass
+   * @param {boolean} [sliceStrict=false] - When true, only that floor's glow draws
+   */
+  setRenderFloorIndexForGlow(floorIndex = null, sliceStrict = false) {
+    const next = (floorIndex !== null && floorIndex !== undefined) ? Number(floorIndex) : null;
+    this._renderFloorIndexForGlow = (next !== null && Number.isFinite(next)) ? next : null;
+    this._renderFloorSliceStrict = this._renderFloorIndexForGlow !== null ? !!sliceStrict : false;
+    this._applyGlowFloorVisibility(this._maxVisibleFloorIndex);
   }
 
   // ── UI schema (moved from V1 FireSparksEffect) ───────────────────────────
@@ -808,6 +899,19 @@ export class FireEffectV2 {
         { name: 'flame-texture', label: 'Flame Texture', type: 'folder', advanced: true, expanded: false, parameters: ['flameTextureOpacity', 'flameTextureBrightness', 'flameTextureScaleX', 'flameTextureScaleY', 'flameTextureOffsetX', 'flameTextureOffsetY', 'flameTextureRotation', 'flameTextureFlipX', 'flameTextureFlipY'] },
         { name: 'embers', label: 'Embers', type: 'folder', advanced: true, expanded: false, parameters: ['emberRate', 'emberEmission', 'emberPeakOpacity', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'indoorEmberLifeScale', 'indoorEmberSuppression', 'emberUpdraft', 'emberCurlStrength'] },
         { name: 'smoke', label: 'Smoke', type: 'folder', expanded: true, parameters: ['smokeEnabled', 'smokeOutdoorAboveCanopy', 'smokeRatio', 'smokeOpacity', 'indoorSmokeSuppression', 'smokeColorWarmth', 'smokeColorBrightness', 'smokeDarknessResponse', 'smokeColorGradient', 'smokeEmissionGradient', 'smokeAlphaStart', 'smokeAlphaPeak', 'smokeAlphaEnd', 'smokeSizeMin', 'smokeSizeMax', 'smokeSizeOverLife', 'smokeLifeMin', 'smokeLifeMax', 'smokeFlipbookCycles', 'smokeUpdraft', 'smokeTurbulence', 'smokeWindInfluence'] },
+        {
+          name: 'fire-mask-pickup',
+          label: 'Fire Mask Pickup',
+          type: 'folder',
+          expanded: true,
+          parameters: [
+            'fireMaskMinBrightness',
+            'fireMaskMinAlpha',
+            'fireMaskPremulThreshold',
+            'fireAlbedoMinAlpha',
+            'fireMaskIsolationPx',
+          ],
+        },
         {
           name: 'fire-glow',
           label: 'Fire Glow (Gameplay Light)',
@@ -1053,6 +1157,51 @@ export class FireEffectV2 {
         smokeAlphaStart: { type: 'slider', label: 'Opacity ramp from (life %)', min: 0.0, max: 1.0, step: 0.01, default: 0 },
         smokeAlphaPeak: { type: 'slider', label: 'Peak opacity at (life %)', min: 0.0, max: 1.0, step: 0.01, default: 0.45 },
         smokeAlphaEnd: { type: 'slider', label: 'Opacity reaches zero at (life %)', min: 0.0, max: 1.0, step: 0.01, default: 0.92 },
+        fireMaskMinBrightness: {
+          type: 'slider',
+          label: 'Min Mask White',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.6,
+          tooltip: 'Require this much peak RGB brightness in the _Fire mask (0–1). Raise to ignore grey fringe and keep only strong white texels.',
+        },
+        fireMaskMinAlpha: {
+          type: 'slider',
+          label: 'Min Mask Alpha',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.8,
+          tooltip: 'Reject _Fire texels below this alpha. Raise to drop semi-transparent anti-alias edges (try 0.85–0.95 for WebP holes).',
+        },
+        fireMaskPremulThreshold: {
+          type: 'slider',
+          label: 'Min Combined Strength',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.2,
+          tooltip: 'Minimum premultiplied strength (mask white × mask alpha). Higher = fewer, stronger pickup points.',
+        },
+        fireAlbedoMinAlpha: {
+          type: 'slider',
+          label: 'Min Tile Alpha',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.65,
+          tooltip: 'Require the colour texture (tile/background) to be this opaque at the same UV. Suppresses fire on transparent map holes and upper-floor rims.',
+        },
+        fireMaskIsolationPx: {
+          type: 'slider',
+          label: 'Min Neighbour Distance (px)',
+          min: 0,
+          max: 64,
+          step: 1,
+          default: 0,
+          tooltip: 'Drop isolated _Fire specks with no neighbour within this distance in mask pixels. 0 = off; try 8–16 to cull single-pixel noise.',
+        },
         fireGlowEnabled: { type: 'checkbox', label: 'Enable Fire Glow', default: true },
         fireGlowWarmth: {
           type: 'slider',
@@ -1372,9 +1521,10 @@ export class FireEffectV2 {
       log.info(`  image loaded: ${image ? `${image.width}x${image.height}` : 'null'}`);
       if (!image) return;
 
-      log.info(`  calling generateFirePoints with threshold=0.01`);
-      const bgLocalPoints = generateFirePoints(image, 0.01);
-      log.info(`  generateFirePoints returned: ${bgLocalPoints ? `${bgLocalPoints.length / 3} points` : 'null'}`);
+      log.info(`  calling generateFirePoints (mask pickup gates)`);
+      const bgAlbedo = bgSrc ? await this._loadImage(bgSrc) : null;
+      const bgLocalPoints = this._pickupFireMaskPoints(image, bgAlbedo);
+      log.info(`  mask pickup returned: ${bgLocalPoints ? `${bgLocalPoints.length / 3} points` : 'null'}`);
       if (!bgLocalPoints || bgLocalPoints.length === 0) return;
 
       log.info(`  background _Fire mask: found ${bgLocalPoints.length / 3} points from ${image.width}x${image.height} image`);
@@ -1450,7 +1600,8 @@ export class FireEffectV2 {
       // No need for fallback GET probing - it just causes 404 spam.
       if (!image) continue;
 
-      const tileLocalPoints = generateFirePoints(image, 0.01);
+      const tileAlbedo = await this._loadImage(src);
+      const tileLocalPoints = this._pickupFireMaskPoints(image, tileAlbedo);
       if (!tileLocalPoints || tileLocalPoints.length === 0) continue;
 
       // Convert tile-local UVs → scene-global UVs.
@@ -1969,14 +2120,35 @@ export class FireEffectV2 {
     if (this._glowRootGroup) this._glowRootGroup.visible = show;
   }
 
-  /** @param {number} maxFloorIndex */
-  _applyGlowFloorVisibility(maxFloorIndex) {
+  /**
+   * Whether a per-floor glow group should draw into the HDR light buffer this pass.
+   * @param {number} floorIndex
+   * @returns {boolean}
+   * @private
+   */
+  _isGlowFloorGroupVisible(floorIndex) {
+    if (!this._enabled || !this.params.fireGlowEnabled) return false;
+    const fi = Number(floorIndex) || 0;
+
+    const renderFi = this._renderFloorIndexForGlow;
+    if (renderFi !== null && Number.isFinite(Number(renderFi))) {
+      const sliceFi = Math.max(0, Math.floor(Number(renderFi)));
+      if (this._renderFloorSliceStrict) return fi === sliceFi;
+      return fi <= sliceFi;
+    }
+
+    return fi <= this._maxVisibleFloorIndex;
+  }
+
+  /** @param {number} [maxFloorIndex] */
+  _applyGlowFloorVisibility(maxFloorIndex = this._maxVisibleFloorIndex) {
+    this._maxVisibleFloorIndex = Number.isFinite(Number(maxFloorIndex))
+      ? Math.max(0, Math.floor(Number(maxFloorIndex)))
+      : 0;
     this._applyGlowVisibility();
     if (!this._glowRootGroup) return;
     for (const [fi, group] of this._glowFloorGroups) {
-      group.visible = this._enabled
-        && !!this.params.fireGlowEnabled
-        && fi <= maxFloorIndex;
+      group.visible = this._isGlowFloorGroupVisible(fi);
     }
   }
 

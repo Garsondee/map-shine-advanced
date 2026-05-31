@@ -222,7 +222,7 @@ export class LightingEffectV2 {
       internalDarknessResolutionScale: 1.0,
       /** Use half-float for window light RT (false allows 8-bit to cut bandwidth). */
       windowLightUseHalfFloat: true,
-      /** Additive scale for window glow merged after albedo × illumination (minimal rebuild). */
+      /** Scale for token-style `litColor *= (1 + win)` window boost at compose. */
       windowEmissiveGain: 1.0,
     };
 
@@ -1817,12 +1817,12 @@ export class LightingEffectV2 {
           // Foundry HDR buffer already carries lightIntensity via ThreeLightSource uComposeLightGain;
           // no second multiply here (that lifted every texel with buffer energy).
           float c = max(srcSample.a, 0.0) * visS;
-          float winWhite = max(max(winLights.r, winLights.g), winLights.b) * visW;
-          float lightIVisible = max(c, winWhite);
+          // Window glow must not punch ambient to daylight — Foundry lights only for darkness punch.
+          float lightIVisible = c;
           // When the RGB buffer carries saturated hue (candles, torches, tinted lamps),
           // coloration below uses chroma residual — direct punch stays scalar white.
           vec3 directFromSources = vec3(c);
-          vec3 directLight = directFromSources + vec3(winWhite);
+          vec3 directLight = directFromSources;
 
           // Darkness punch: strong nearby lights reduce the effective darkness
           // level locally, letting the ambient brighten under torches/lamps.
@@ -1922,10 +1922,6 @@ export class LightingEffectV2 {
           float coreStructLiftedGlobal = mix(coreStructUnified, 1.0, dynamicShadowLiftStructural);
           float structuralDirectMul = mix(1.0, coreStructLiftedGlobal, clamp(uDirectStructuralOcclusionStrength, 0.0, 1.0));
           vec3 srcAttenuated = directFromSources * structuralDirectMul;
-          // Window glow is emissive spill from openings — do not crush it under painted/building
-          // structural masks (Foundry darkness meshes already skip the direct channel).
-          // It is merged additively after albedo×illumination (see below), not here, so dark
-          // overhead capture cannot zero visible glow via multiply-by-black-baseColor.
           vec3 attenuatedDirect = srcAttenuated;
 
           vec3 totalIllumination = ambientAfterDark + attenuatedDirect;
@@ -2052,12 +2048,13 @@ export class LightingEffectV2 {
           float floorReach = clamp(ambientShadowMixOut, 0.0, 1.0);
           totalIllumination = max(totalIllumination, minIllum * mix(0.18, 1.0, floorReach));
 
-          // Apply illumination to albedo.
+          // Apply illumination to albedo, then window glow (token-style multiplicative boost).
+          // litColor *= (1 + win) preserves surface hue/texture vs additive flat wash.
           vec3 litColor = baseColor.rgb * totalIllumination;
-
-          // Emissive window glow: additive after albedo multiply so openings stay visible
-          // under dark overhead tiles / near-black baseColor (multiplicative-only cannot lift 0).
-          litColor += winSafe * max(uWindowEmissiveGain, 0.0);
+          {
+            vec3 winBoost = winSafe * max(uWindowEmissiveGain, 0.0);
+            litColor *= vec3(1.0) + winBoost;
+          }
 
           // Colored lightning screen flash (additive + hue mix — visible over neutral HDR lights).
           {
@@ -2065,10 +2062,12 @@ export class LightingEffectV2 {
             litColor = mix(litColor, litColor * llColorVec, clamp(llWeight * 0.42, 0.0, 0.82));
           }
 
-          // Colouration: only the chromatic part of the RGB light buffer tints albedo.
-          // Luminance for neutral / uncoloured Foundry lights already comes from tLightSources.a
-          // (see directLight), so repeating full RGB here used to double-count white light.
-          vec3 lightsForColor = srcSafe + winSafe;
+          // Colouration: chromatic part of Foundry light buffer tints albedo.
+          // Window glow is excluded — it already tints via multiplicative (1 + winBoost) above.
+          // Including winSafe here caused safeForColor to clamp at 3.5 while greySL tracked
+          // the full HDR emit, producing a large negative chromaResidual that darkened hot cores
+          // when ToD exposure / intensity pushed emit past the coloration clamp.
+          vec3 lightsForColor = srcSafe;
           vec3 lumaW = vec3(0.2126, 0.7152, 0.0722);
           float lSL = dot(lightsForColor, lumaW);
           vec3 greySL = vec3(lSL);
@@ -3012,10 +3011,8 @@ export class LightingEffectV2 {
    *   2. Render darkness meshes → darknessRT
    *   3. Compose: sceneRT * (ambient + lights - darkness) → outputRT
    *
-   * Compose merges `lightRT` + `windowLightRT` into total illumination so window
-   * glow tints by surface albedo. Roof masks gate channels independently (sources
-   * vs window) by active floor so upper-floor lights stay visible without window
-   * glow washing water and other areas.
+   * Compose merges window glow via `litColor *= (1 + win)` after albedo × illumination
+   * (token-style — preserves surface colour). Roof masks gate window channel independently.
    *
    * @param {THREE.WebGLRenderer} renderer
    * @param {THREE.Camera} camera - The main perspective camera

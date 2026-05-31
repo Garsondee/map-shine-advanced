@@ -3056,6 +3056,31 @@ export const consoleHelpers = {
     return { debugForceMagenta: on };
   },
 
+  /**
+   * Window Light time-of-day timeline diagnostics.
+   * Usage: MapShine.debug.getWindowLightTodState()
+   */
+  getWindowLightTodState() {
+    const ms = globalThis.MapShine ?? {};
+    const wle = ms.floorCompositorV2?._windowLightEffect
+      ?? ms.effectComposer?._floorCompositorV2?._windowLightEffect
+      ?? ms.windowLightEffect
+      ?? null;
+    if (!wle?.getTodDebugState) {
+      return {
+        error: 'window-light-tod-missing',
+        hint: 'Full reload Map Shine — WindowLightEffectV2.getTodDebugState not on the live instance.',
+      };
+    }
+    const state = wle.getTodDebugState();
+    try {
+      console.groupCollapsed(`[WindowLight ToD] hour=${state.hour?.toFixed?.(2) ?? state.hour} enabled=${state.timelineEnabled}`);
+      console.log(JSON.stringify(state, null, 2));
+      console.groupEnd();
+    } catch (_) {}
+    return state;
+  },
+
   /** Re-open the last Scene Pixel Probe dialog. */
   async showLastScenePixelProbeDialog() {
     const mod = await import('../ui/scene-pixel-probe-dialog.js');

@@ -110,7 +110,10 @@ import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 import { CandleFlamesEffectV2 } from './effects/CandleFlamesEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
 import { LightingDirector } from '../core/LightingDirector.js';
-import { resolveCompositorOutdoorsTexture } from '../masks/resolve-compositor-outdoors.js';
+import {
+  resolveAuthoredOutdoorsForFloorKey,
+  resolveCompositorOutdoorsTexture,
+} from '../masks/resolve-compositor-outdoors.js';
 import { MaskBindingController } from '../masks/mask-binding-controller.js';
 import { MaskDebugOverlayPass } from './MaskDebugOverlayPass.js';
 import { LevelRenderTargetPool } from './LevelRenderTargetPool.js';
@@ -3230,7 +3233,9 @@ export class FloorCompositor {
       const populateJobs = [];
       for (const row of maskJobDefs) {
         const [label, effectKey, fn] = row;
-        if (!hintPruneMasks || this._shouldWarmupEffectKey(effectKey)) {
+        // Window masks must always be discovered — hint pruning skips populate when
+        // effectHints omit windows/structural, leaving zero overlays forever.
+        if (!hintPruneMasks || effectKey === '_windowLightEffect' || this._shouldWarmupEffectKey(effectKey)) {
           populateJobs.push([label, fn]);
         }
       }
@@ -3619,7 +3624,10 @@ export class FloorCompositor {
   _buildDynamicLightOverridePayload() {
     const le = this._lightingEffect;
     const tex = le?.dynamicLightTexture ?? null;
-    const winTex = le?.windowLightOverrideTexture ?? le?.windowLightTexture ?? null;
+    const winTex = this._windowLightEffect?.getEmitTexture?.()
+      ?? le?.windowLightOverrideTexture
+      ?? le?.windowLightTexture
+      ?? null;
     if (!tex && !winTex) return null;
 
     const dims = globalThis.canvas?.dimensions;
@@ -6061,7 +6069,9 @@ export class FloorCompositor {
       this._colorCorrectionEffect?.setOutdoorsMask?.(outdoorsTex);
       this._filterEffect?.setOutdoorsMask?.(outdoorsTex);
       this._atmosphericFogEffect?.setOutdoorsMask?.(outdoorsTex);
-      this._windowLightEffect?.setOutdoorsMask?.(outdoorsTex);
+      // Window-light outdoors is bound per-level before LightingEffectV2 draw
+      // (authored meta preferred). Do not push route/GPU/neutral masks here —
+      // applyOutdoorsClip would zero the whole RT when they decode as outdoor.
       this._bloomEffect?.setOutdoorsMask?.(outdoorsTex);
       this._overheadShadowEffect?.setOutdoorsMask?.(outdoorsTex);
       this._buildingShadowEffect?.setOutdoorsMask?.(outdoorsTex);
@@ -7772,6 +7782,9 @@ export class FloorCompositor {
         let outdoorsForLightingTex = null;
         try {
           const floorCount = (floorStack?.getFloors?.() ?? []).length;
+          const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+          const floor = floorsByIndex.get(levelIndex) ?? null;
+          const floorKey = floor?.compositorKey ?? null;
           // Per-level lighting follows each slice's authored _Outdoors (not the
           // pinned water-shelter mask used only by WaterEffectV2 wave damping).
           outdoorsForLightingTex = resolveOutdoorsForLevelLighting(levelIndex);
@@ -7782,9 +7795,23 @@ export class FloorCompositor {
           if (!outdoorsForLightingTex && floorCount > 1) {
             outdoorsForLightingTex = this._getNeutralOutdoorsTexture();
           }
-        } catch (_) {}
 
-        this._windowLightEffect?.setOutdoorsMask?.(outdoorsForLightingTex);
+          // Prefer authored file/bundle _Outdoors over GPU RT (stale/cleared GPU texels
+          // decode as outdoor and zero window glow in applyOutdoorsClip + compose).
+          if (compositor && floorKey) {
+            try {
+              const authored = resolveAuthoredOutdoorsForFloorKey(compositor, floorKey);
+              if (authored) outdoorsForLightingTex = authored;
+            } catch (_) {}
+          }
+
+          // Window-light clip: never bind the neutral all-outdoor mask (it discards every fragment).
+          let outdoorsForWindowLight = outdoorsForLightingTex;
+          if (outdoorsForWindowLight?.name === 'MapShineNeutralOutdoorsMask') {
+            outdoorsForWindowLight = null;
+          }
+          this._windowLightEffect?.setOutdoorsMask?.(outdoorsForWindowLight ?? null);
+        } catch (_) {}
 
         // Lighting composes screen-space occlusion/window terms using gl_FragCoord.
         // Keep this pass unscissored so elevated/parallax overhead pixels outside the

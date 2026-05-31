@@ -222,6 +222,8 @@ export class LightingEffectV2 {
       internalDarknessResolutionScale: 1.0,
       /** Use half-float for window light RT (false allows 8-bit to cut bandwidth). */
       windowLightUseHalfFloat: true,
+      /** Additive scale for window glow merged after albedo × illumination (minimal rebuild). */
+      windowEmissiveGain: 1.0,
     };
 
     // ── Light management ────────────────────────────────────────────────
@@ -1000,6 +1002,11 @@ export class LightingEffectV2 {
    * @returns {THREE.Texture|null}
    */
   get windowLightTexture() {
+    try {
+      const wle = window.MapShine?.effectComposer?._floorCompositorV2?._windowLightEffect;
+      const sceneTex = wle?.getEmitTexture?.() ?? null;
+      if (sceneTex) return sceneTex;
+    } catch (_) {}
     return this._windowLightRT?.texture ?? null;
   }
 
@@ -1472,6 +1479,7 @@ export class LightingEffectV2 {
         // uAllowRoofGate there — compose must still suppress leaks onto water/lower views).
         uApplyRoofOcclusionToSources: { value: 1.0 },
         uApplyRoofOcclusionToWindow:  { value: 0.0 },
+        uWindowEmissiveGain: { value: 1.0 },
         // _Outdoors mask (scene UV): gate roof/tree *light* occlusion so interior
         // pixels under overhead stamps still receive Foundry lights (see fragment).
         tOutdoorsForRoofLight: { value: null },
@@ -1567,6 +1575,7 @@ export class LightingEffectV2 {
         uniform float uHasSkyOcclusion;
         uniform float uApplyRoofOcclusionToSources;
         uniform float uApplyRoofOcclusionToWindow;
+        uniform float uWindowEmissiveGain;
         uniform sampler2D tOutdoorsForRoofLight;
         uniform float uHasOutdoorsForRoofLight;
         uniform float uOutdoorsForRoofLightFlipY;
@@ -1634,7 +1643,20 @@ export class LightingEffectV2 {
           vec4 baseColor = texture2D(tScene, vUv);
           vec4 srcSample = texture2D(tLightSources, vUv);
           vec3 srcLights = max(srcSample.rgb, vec3(0.0));
-          vec3 winLights = max(texture2D(tLightWindow, vUv).rgb, vec3(0.0));
+
+          // Scene UV (Foundry space) for masks authored in scene rect — shared by
+          // building shadow, window glow (scene-UV RT), and _Outdoors–gated roof light.
+          vec2 w0s = mix(uBldViewCorner00, uBldViewCorner10, vUv.x);
+          vec2 w1s = mix(uBldViewCorner01, uBldViewCorner11, vUv.x);
+          vec2 worldXYs = mix(w0s, w1s, vUv.y);
+          float foundryXs = worldXYs.x;
+          float foundryYs = uSceneDimensions.y - worldXYs.y;
+          vec2 sceneUvRaw = (vec2(foundryXs, foundryYs) - uBldSceneOrigin) / max(uBldSceneSize, vec2(1e-5));
+          vec2 sceneUvFoundry = clamp(sceneUvRaw, 0.0, 1.0);
+          vec2 inBounds2 = step(vec2(0.0), sceneUvRaw) * step(sceneUvRaw, vec2(1.0));
+          float inSceneBounds = inBounds2.x * inBounds2.y;
+
+          vec3 winLights = max(texture2D(tLightWindow, sceneUvFoundry).rgb, vec3(0.0)) * inSceneBounds;
           float darknessMask = clamp(texture2D(tDarkness, vUv).r, 0.0, 1.0);
           float ambientShadowMixOut = 1.0;
 
@@ -1648,18 +1670,6 @@ export class LightingEffectV2 {
           vec3 ambientDay   = uAmbientBrightest * max(uAmbientDayScale, 0.0) * calendarDayWeight;
           vec3 ambientNight = uAmbientDarkness  * max(uAmbientNightScale, 0.0);
           vec3 ambient = mix(ambientDay, ambientNight, baseDarknessLevel);
-
-          // Scene UV (Foundry space) for masks authored in scene rect — shared by
-          // building shadow and _Outdoors–gated roof light occlusion.
-          vec2 w0s = mix(uBldViewCorner00, uBldViewCorner10, vUv.x);
-          vec2 w1s = mix(uBldViewCorner01, uBldViewCorner11, vUv.x);
-          vec2 worldXYs = mix(w0s, w1s, vUv.y);
-          float foundryXs = worldXYs.x;
-          float foundryYs = uSceneDimensions.y - worldXYs.y;
-          vec2 sceneUvRaw = (vec2(foundryXs, foundryYs) - uBldSceneOrigin) / max(uBldSceneSize, vec2(1e-5));
-          vec2 sceneUvFoundry = clamp(sceneUvRaw, 0.0, 1.0);
-          vec2 inBounds2 = step(vec2(0.0), sceneUvRaw) * step(sceneUvRaw, vec2(1.0));
-          float inSceneBounds = inBounds2.x * inBounds2.y;
 
           vec4 roofAlphaSample = vec4(0.0);
           float roofAlphaCached = 0.0;
@@ -1700,12 +1710,8 @@ export class LightingEffectV2 {
             isOutdoorForInteriorDim = mix(1.0, outdoorLoHi, outdoorsAlphaValid);
           }
 
-          // Window glow: hard outdoor block (canonical decode — not interior-dim soft snap).
-          float windowOutdoorBlock = 0.0;
-          if (uHasOutdoorsForRoofLight > 0.5) {
-            windowOutdoorBlock = msDecodeOutdoorsMaskSample(outdoorsRoofSample) * inSceneBounds;
-            winLights *= (1.0 - windowOutdoorBlock);
-          }
+          // Window glow: minimal rebuild — no outdoor block on winLights (outdoors clip removed).
+          // windowOutdoorBlock still used for Foundry light path context only when needed below.
 
           // Roof / tree canopy: prefer packed ceiling transmittance T (half-res blit from
           // OverheadShadows) so geometric gating matches one source; else derive from
@@ -1802,15 +1808,16 @@ export class LightingEffectV2 {
           // min(stampedVis, 1 - mask) drives contribution to ~0 under a solid restrict-light stamp.
           float visRestrict = min(stampedVis, 1.0 - restrictLightRoof);
           visS = mix(visS, visRestrict, restrictLightRoof);
-          visW = mix(visW, visRestrict, restrictLightRoof);
+          // Restrict-light stamps target Foundry lamp leakage on overhead texels.
+          // Window glow is already indoor-gated (outdoors clip + compose outdoor block);
+          // do not drive visW toward visRestrict when uApplyRoofOcclusionToWindow is off.
+          visW = mix(visW, visRestrict, restrictLightRoof * clamp(uApplyRoofOcclusionToWindow, 0.0, 1.0));
           vec3 srcSafe = srcLights * visS;
           vec3 winSafe = winLights * visW;
-          winSafe *= (1.0 - windowOutdoorBlock);
           // Foundry HDR buffer already carries lightIntensity via ThreeLightSource uComposeLightGain;
           // no second multiply here (that lifted every texel with buffer energy).
           float c = max(srcSample.a, 0.0) * visS;
           float winWhite = max(max(winLights.r, winLights.g), winLights.b) * visW;
-          winWhite *= (1.0 - windowOutdoorBlock);
           float lightIVisible = max(c, winWhite);
           // When the RGB buffer carries saturated hue (candles, torches, tinted lamps),
           // coloration below uses chroma residual — direct punch stays scalar white.
@@ -1914,7 +1921,12 @@ export class LightingEffectV2 {
           float coreStructUnified = clamp(buildStructU * paintedStructU, 0.0, 1.0);
           float coreStructLiftedGlobal = mix(coreStructUnified, 1.0, dynamicShadowLiftStructural);
           float structuralDirectMul = mix(1.0, coreStructLiftedGlobal, clamp(uDirectStructuralOcclusionStrength, 0.0, 1.0));
-          vec3 attenuatedDirect = directLight * structuralDirectMul;
+          vec3 srcAttenuated = directFromSources * structuralDirectMul;
+          // Window glow is emissive spill from openings — do not crush it under painted/building
+          // structural masks (Foundry darkness meshes already skip the direct channel).
+          // It is merged additively after albedo×illumination (see below), not here, so dark
+          // overhead capture cannot zero visible glow via multiply-by-black-baseColor.
+          vec3 attenuatedDirect = srcAttenuated;
 
           vec3 totalIllumination = ambientAfterDark + attenuatedDirect;
 
@@ -2042,6 +2054,10 @@ export class LightingEffectV2 {
 
           // Apply illumination to albedo.
           vec3 litColor = baseColor.rgb * totalIllumination;
+
+          // Emissive window glow: additive after albedo multiply so openings stay visible
+          // under dark overhead tiles / near-black baseColor (multiplicative-only cannot lift 0).
+          litColor += winSafe * max(uWindowEmissiveGain, 0.0);
 
           // Colored lightning screen flash (additive + hue mix — visible over neutral HDR lights).
           {
@@ -2943,7 +2959,8 @@ export class LightingEffectV2 {
 
       renderer.setRenderTarget(this._lightOverrideWindowRT);
       renderer.setClearColor(0x000000, 1);
-      renderer.autoClear = true;
+      renderer.autoClear = false;
+      renderer.clear(true, true, false);
 
       _perfToken = this._beginPerfSpan('lightOverride.windowDraw.bind', 'render', { cpuOnly: true });
       if (windowLightScene) {
@@ -2959,7 +2976,11 @@ export class LightingEffectV2 {
 
       _perfToken = this._beginPerfSpan('lightOverride.windowDraw.sceneDraw', 'render');
       if (windowLightScene) {
-        renderer.render(windowLightScene, camera);
+        if (typeof windowLightScene.userData?.drawWindowLightPass === 'function') {
+          windowLightScene.userData.drawWindowLightPass(renderer, camera);
+        } else {
+          renderer.render(windowLightScene, camera);
+        }
       }
       this._endPerfSpan(_perfToken);
 
@@ -3098,6 +3119,7 @@ export class LightingEffectV2 {
       : persp.getRoofScreenOcclusionScale(restrictRoofToTop);
     cu0.uApplyRoofOcclusionToSources.value = occlusionWeight * roofScreenOcclusionScale;
     cu0.uApplyRoofOcclusionToWindow.value = 0.0;
+    cu0.uWindowEmissiveGain.value = Math.max(0.0, Number(this.params.windowEmissiveGain) || 1.0);
     this._endPerfSpan(_perfToken);
 
     _perfToken = this._beginPerfSpan('perspectiveRefresh', 'render', { cpuOnly: true });
@@ -3143,7 +3165,8 @@ export class LightingEffectV2 {
     // ── Pass 1b: Window glow → separate RT (compose merges with roof gating) ─
     renderer.setRenderTarget(this._windowLightRT);
     renderer.setClearColor(0x000000, 1);
-    renderer.autoClear = true;
+    renderer.autoClear = false;
+    renderer.clear(true, true, false);
     if (windowLightScene) {
       try {
         _perfToken = this._beginPerfSpan('windowLightDraw.bind', 'render', { cpuOnly: true });
@@ -3162,7 +3185,11 @@ export class LightingEffectV2 {
 
         _perfToken = this._beginPerfSpan('windowLightDraw.sceneDraw', 'render');
         try {
-          renderer.render(windowLightScene, camera);
+          if (typeof windowLightScene.userData?.drawWindowLightPass === 'function') {
+            windowLightScene.userData.drawWindowLightPass(renderer, camera);
+          } else {
+            renderer.render(windowLightScene, camera);
+          }
         } finally {
           this._endPerfSpan(_perfToken);
         }
@@ -3173,7 +3200,6 @@ export class LightingEffectV2 {
             renderer,
             camera,
             this._windowLightRT,
-            outdoorsMaskTexture ?? null,
           );
         } catch (_) {}
         this._endPerfSpan(_perfToken);
@@ -3200,7 +3226,7 @@ export class LightingEffectV2 {
     const cu = this._composeMaterial.uniforms;
     cu.tScene.value = sceneRT.texture;
     cu.tLightSources.value = this._lightRT.texture;
-    cu.tLightWindow.value = this._windowLightRT.texture;
+    cu.tLightWindow.value = this.windowLightTexture;
     cu.tDarkness.value = this._darknessRT.texture;
     this._endPerfSpan(_perfToken);
 

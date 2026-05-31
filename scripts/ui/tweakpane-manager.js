@@ -1882,6 +1882,21 @@ export class TweakpaneManager {
       if (this.diagnosticCenter) this.diagnosticCenter.toggle();
     }, { advanced: true });
 
+    addGridButton('Pixel Probe', async () => {
+      try {
+        const { probeScenePixelPick } = await import('../utils/scene-pixel-probe.js');
+        const result = probeScenePixelPick({ count: 3 });
+        if (result?.error) {
+          ui.notifications?.error?.(`Pixel probe failed: ${result.error}`);
+        } else if (result?.active) {
+          ui.notifications?.info?.('Pixel probe: click three spots on the map (A, B, C).');
+        }
+      } catch (e) {
+        log.warn('Pixel probe pick failed:', e);
+        ui.notifications?.error?.(`Pixel probe failed: ${e?.message || e}`);
+      }
+    }, { advanced: true });
+
     addGridButton('Breaker Box', () => {
       window.MapShine?.breakerBoxDialog?.toggle?.();
     }, { advanced: true });
@@ -3116,6 +3131,47 @@ export class TweakpaneManager {
       } catch (e) {
         console.warn('Map Shine: Failed to dump Surface Report', e);
       }
+    });
+
+    sceneFolder.addBlade({ view: 'separator' });
+
+    sceneFolder.addButton({
+      title: 'Pixel Probe — Pick on Map (A/B/C)',
+    }).on('click', async () => {
+      try {
+        const { probeScenePixelPick } = await import('../utils/scene-pixel-probe.js');
+        const result = probeScenePixelPick({ count: 3 });
+        if (result?.error) {
+          ui.notifications?.error?.(`Pixel probe failed: ${result.error}`);
+        } else if (result?.active) {
+          ui.notifications?.info?.('Pixel probe: click three spots on the map (A, B, C).');
+        }
+      } catch (e) {
+        log.warn('Pixel probe pick failed:', e);
+        ui.notifications?.error?.(`Pixel probe failed: ${e?.message || e}`);
+      }
+    });
+
+    sceneFolder.addButton({
+      title: 'Pixel Probe — Show Last Report',
+    }).on('click', async () => {
+      try {
+        const { showLastScenePixelProbeDialog } = await import('../ui/scene-pixel-probe-dialog.js');
+        showLastScenePixelProbeDialog();
+      } catch (e) {
+        log.warn('Pixel probe dialog failed:', e);
+        ui.notifications?.warn?.(`Could not open pixel probe dialog: ${e?.message || e}`);
+      }
+    });
+
+    sceneFolder.addButton({
+      title: 'Pixel Probe — Cancel Pick',
+    }).on('click', async () => {
+      try {
+        const { probeScenePixelPickCancel } = await import('../utils/scene-pixel-probe.js');
+        probeScenePixelPickCancel();
+        ui.notifications?.info?.('Pixel probe pick cancelled.');
+      } catch (_) {}
     });
 
     sceneFolder.addBlade({ view: 'separator' });

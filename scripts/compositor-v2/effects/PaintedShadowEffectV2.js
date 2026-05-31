@@ -990,7 +990,7 @@ export class PaintedShadowEffectV2 {
             dynI = max(dynI, clamp(max(dyn.r, max(dyn.g, dyn.b)), 0.0, 1.0));
           }
           if (uHasWindowLight > 0.5) {
-            vec3 win = texture2D(tWindowLight, dynUv).rgb;
+            vec3 win = texture2D(tWindowLight, sceneUv).rgb;
             dynI = max(dynI, clamp(max(win.r, max(win.g, win.b)), 0.0, 1.0));
           }
           // Linear-HDR _lightRT can carry a nonzero baseline from AmbientLight-style

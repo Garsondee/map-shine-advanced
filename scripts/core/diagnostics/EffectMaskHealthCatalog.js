@@ -143,6 +143,7 @@ const EFFECT_MASK_HEALTH_ENTRIES = [
       return isV2InstanceEnabled(instance);
     },
   },
+  // Minimal rebuild: mask × intensity only; compose adds via uWindowEmissiveGain (no outdoors clip in draw).
   {
     healthEffectId: 'WindowLightEffectV2',
     sceneEffectIds: ['window-lights', 'window-light'],

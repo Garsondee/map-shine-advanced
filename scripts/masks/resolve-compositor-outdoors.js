@@ -230,6 +230,30 @@ export function resolveCompositorFloorMaskTexture(compositor, maskTypeIds, level
 }
 
 /**
+ * Authored file/bundle `_Outdoors` for one floor band — prefers `_floorMeta` over the
+ * GPU compose RT so consumers (window-light clip, compose outdoor block) do not treat
+ * stale/cleared GPU texels as fully outdoor.
+ *
+ * @param {object|null} compositor - GpuSceneMaskCompositor instance
+ * @param {string|null|undefined} floorKey
+ * @returns {import('three').Texture|null}
+ */
+export function resolveAuthoredOutdoorsForFloorKey(compositor, floorKey) {
+  if (!compositor || floorKey == null || floorKey === '') return null;
+  const key = String(floorKey);
+  try {
+    const metaTex = compositor._floorMeta?.get?.(key)?.masks
+      ?.find((m) => (m.id ?? m.type) === 'outdoors')?.texture ?? null;
+    if (Number(metaTex?.image?.width) > 0) return metaTex;
+  } catch (_) {}
+  try {
+    return compositor.getFloorTexture?.(key, 'outdoors') ?? null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
  * @param {object} compositor - GpuSceneMaskCompositor instance
  * @param {{ bottom?: number, top?: number }|null} [levelContext]
  * @param {{ skipGroundFallback?: boolean, allowBundleFallback?: boolean, strictViewedFloorOnly?: boolean }} [options]

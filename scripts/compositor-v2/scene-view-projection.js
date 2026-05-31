@@ -191,6 +191,9 @@ export function updateSceneViewProjectionFromCamera(camera, groundZ, cache, temp
         vMinY = minY;
         vMaxX = maxX;
         vMaxY = maxY;
+      } else {
+        cache.isValid = false;
+        return false;
       }
       if (validCornerCount < 4 && minX !== Infinity) {
         c00x = minX; c00y = minY;

@@ -2978,6 +2978,91 @@ export const consoleHelpers = {
   },
 
   /**
+   * Multi-click scene pixel probe (lighting, masks, window light). Opens summary dialog + copies JSON.
+   * Usage: MapShine.debug.probeScenePixelPick({ count: 3 })
+   * @param {{ count?: number, floorIdx?: number }} [options]
+   */
+  async probeScenePixelPick(options = {}) {
+    const mod = await import('./scene-pixel-probe.js');
+    return mod.probeScenePixelPick(options);
+  },
+
+  /** Cancel active pixel probe pick mode. */
+  probeScenePixelPickCancel() {
+    return import('./scene-pixel-probe.js').then((mod) => mod.probeScenePixelPickCancel());
+  },
+
+  /**
+   * One-shot pixel probe at world coordinates (or current mouse position).
+   * Usage: MapShine.debug.probeScenePixelAt(x, y) or MapShine.debug.probeScenePixelAt()
+   */
+  async probeScenePixelAt(x, y, x2, y2, floorIdx) {
+    const mod = await import('./scene-pixel-probe.js');
+    return mod.probeScenePixelAt(x, y, x2, y2, floorIdx);
+  },
+
+  /**
+   * Window-light-only probe at a world click (no full scene probe).
+   * Usage: MapShine.debug.probeWindowLightAt(x, y) or MapShine.debug.probeWindowLightAt()
+   */
+  probeWindowLightAt(x, y, floorIdx) {
+    const m = canvas?.mousePosition;
+    const wx = Number.isFinite(Number(x)) ? Number(x) : Number(m?.x);
+    const wy = Number.isFinite(Number(y)) ? Number(y) : Number(m?.y);
+    if (!Number.isFinite(wx) || !Number.isFinite(wy)) {
+      return { error: 'missing-coordinates', hint: 'MapShine.debug.probeWindowLightAt(x, y) or hover map first' };
+    }
+    const ms = globalThis.MapShine ?? {};
+    const wle = ms.floorCompositorV2?._windowLightEffect
+      ?? ms.effectComposer?._floorCompositorV2?._windowLightEffect
+      ?? null;
+    if (!wle?.probeAtWorld) {
+      return {
+        error: 'window-light-probeAtWorld-missing',
+        hint: 'Full reload Map Shine — WindowLightEffectV2.probeAtWorld not on the live instance.',
+      };
+    }
+    const probe = wle.probeAtWorld(wx, wy, { floorIdx });
+    try {
+      console.groupCollapsed(`[WindowLightProbe] (${wx.toFixed(0)}, ${wy.toFixed(0)}) verdict=${probe.verdict}`);
+      console.log(JSON.stringify(probe, null, 2));
+      console.groupEnd();
+    } catch (_) {}
+    globalThis.MapShine.__lastWindowLightProbe = probe;
+    return probe;
+  },
+
+  /**
+   * GPU diagnostic: surviving window-light fragments render solid magenta in `_windowLightRT`.
+   * Magenta → discard/bind path reached the RT; still black → UV shift or mask not on GPU.
+   * Usage: MapShine.debug.setWindowLightDebugMagenta(true|false)
+   */
+  setWindowLightDebugMagenta(enabled = true) {
+    const ms = globalThis.MapShine ?? {};
+    const wle = ms.floorCompositorV2?._windowLightEffect
+      ?? ms.effectComposer?._floorCompositorV2?._windowLightEffect
+      ?? null;
+    if (!wle?.setDebugForceMagenta) {
+      return {
+        error: 'window-light-effect-missing',
+        hint: 'Full reload Map Shine — WindowLightEffectV2.setDebugForceMagenta not on the live instance.',
+      };
+    }
+    const on = wle.setDebugForceMagenta(enabled === true);
+    console.info(
+      `[WindowLight] debugForceMagenta=${on} — if RT shows magenta at windows, mask UV/bind is OK; `
+      + 'if still black, fragments are discarding (UV shift) or mask is not on GPU.',
+    );
+    return { debugForceMagenta: on };
+  },
+
+  /** Re-open the last Scene Pixel Probe dialog. */
+  async showLastScenePixelProbeDialog() {
+    const mod = await import('../ui/scene-pixel-probe-dialog.js');
+    return mod.showLastScenePixelProbeDialog();
+  },
+
+  /**
    * Show help
    */
   help() {
@@ -3011,6 +3096,11 @@ Available commands (access via MapShine.debug):
   .alphaIsolationPreset(id) - Apply a bisect preset (noLens/noStamp/noWaterOccluder/noWater/noOverhead/noCloud/noBuilding/off)
   .alphaIsolationReset()    - Clear alpha/isolation debug flags
   .probeReplicaOcclusionV2() - JSON: replica RT + occludable tokens + bus roof uniforms + readPixels at token
+  .probeScenePixelPick({ count: 3 }) - Click map spots A/B/C — full probe incl. window light blockers + dialog
+  .probeScenePixelPickCancel() - Cancel active pixel probe pick
+  .probeScenePixelAt(x, y) - One-shot pixel probe at world coords (or mouse if omitted)
+  .probeWindowLightAt(x, y) - Window-light-only gate probe at click (overlay/mask/outdoors/roof)
+  .showLastScenePixelProbeDialog() - Re-open last probe summary dialog
   .diagnoseSpecular()       - Check specular effect health
   .resetSpecular()          - Reset to defaults
   .exportParameters()       - Export current params as JSON

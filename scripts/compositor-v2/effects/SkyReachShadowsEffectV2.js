@@ -699,7 +699,7 @@ export class SkyReachShadowsEffectV2 {
               dynI = max(dynI, clamp(max(dyn.r, max(dyn.g, dyn.b)), 0.0, 1.0));
             }
             if (uHasWindowLight > 0.5) {
-              vec3 win = texture2D(tWindowLight, dynUv).rgb;
+              vec3 win = texture2D(tWindowLight, vUv).rgb;
               dynI = max(dynI, clamp(max(win.r, max(win.g, win.b)), 0.0, 1.0));
             }
             // Sparse sky-reach shadows vanish if we treat globally-bright RT as “torch everywhere”.

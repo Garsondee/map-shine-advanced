@@ -71,6 +71,277 @@ export class FixedCurlNoiseField extends CurlNoiseField {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// FireForcesBehavior — single-pass wind + updraft + buoyancy + turbulence
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/** @param {object|null|undefined} force */
+function readApplyForceMagnitude(force) {
+  if (!force?.magnitude) return 0;
+  if (typeof force.magnitude.value === 'number' && Number.isFinite(force.magnitude.value)) {
+    return force.magnitude.value;
+  }
+  if (typeof force.magnitudeValue === 'number' && Number.isFinite(force.magnitudeValue)) {
+    return force.magnitudeValue;
+  }
+  return 0;
+}
+
+/**
+ * Applies all motion forces in one particle pass (replaces SmartWind +
+ * SmartUpdraft + ApplyForce + FixedCurlNoiseField behavior loops).
+ *
+ * @param {'flame'|'ember'|'smoke'} profile
+ */
+export class FireForcesBehavior {
+  constructor(profile = 'flame') {
+    this.type = 'FireForces';
+    this.profile = profile;
+    this._frameWind = { windSpeed: 0, windDirX: 0, windDirY: 0, hasWind: false };
+    this._framePrecip = 0;
+    this._tempV = new Vector3();
+    /** @type {FixedCurlNoiseField|null} */
+    this._turbulence = null;
+  }
+
+  /** @param {FixedCurlNoiseField|null} turb */
+  bindTurbulence(turb) {
+    this._turbulence = turb ?? null;
+  }
+
+  initialize(particle, system) {
+    if (typeof particle._windSusceptibility !== 'number') {
+      particle._windSusceptibility = 1.0;
+    }
+  }
+
+  /** @private */
+  _refreshFrameWind() {
+    const cache = this._frameWind;
+    cache.windSpeed = 0;
+    cache.windDirX = 0;
+    cache.windDirY = 0;
+    cache.hasWind = false;
+
+    let state;
+    try {
+      state = weatherController.getCurrentState();
+    } catch (_) {
+      return;
+    }
+
+    let windSpeed = 0;
+    if (state && typeof state.windSpeedMS === 'number' && Number.isFinite(state.windSpeedMS)) {
+      windSpeed = Math.max(0.0, Math.min(1.0, state.windSpeedMS / 78.0));
+    } else if (state && typeof state.windSpeed === 'number' && Number.isFinite(state.windSpeed)) {
+      windSpeed = Math.max(0.0, Math.min(1.0, state.windSpeed));
+    }
+    if (!Number.isFinite(windSpeed) || windSpeed <= 0.001) return;
+
+    const windDir = state?.windDirection;
+    if (!windDir || !Number.isFinite(windDir.x) || !Number.isFinite(windDir.y)) return;
+
+    cache.windSpeed = windSpeed;
+    cache.windDirX = windDir.x;
+    cache.windDirY = windDir.y;
+    cache.hasWind = true;
+  }
+
+  /** @private */
+  _refreshFramePrecip() {
+    let precip = 0;
+    try {
+      const state = (typeof weatherController?.getCurrentState === 'function')
+        ? weatherController.getCurrentState()
+        : (weatherController?.currentState ?? {});
+      precip = state?.precipitation ?? 0;
+    } catch (_) {
+      precip = 0;
+    }
+    this._framePrecip = Number.isFinite(precip) ? precip : 0;
+  }
+
+  frameUpdate(delta) {
+    let dt = delta;
+    if (!Number.isFinite(dt)) return;
+    dt = Math.min(Math.max(dt, 0), 0.1);
+    this._refreshFrameWind();
+    this._refreshFramePrecip();
+    const turb = this._turbulence;
+    if (turb) {
+      turb.time += dt * (turb.timeScale ?? 1);
+    }
+  }
+
+  /** @private */
+  _rainUpdraftScale(particle, system) {
+    const outdoor = Math.max(0, Math.min(1, particle._windSusceptibility ?? 1.0));
+    if (outdoor <= 0.001) return 1.0;
+
+    const precip = this._framePrecip;
+    if (!Number.isFinite(precip) || precip <= 0.001) return 1.0;
+
+    const owner = system?.userData?.ownerEffect;
+    const precipKill = owner?.params?.weatherPrecipKill ?? 0.5;
+    const damp = Math.min(1.0, outdoor * precip * precipKill * 1.75);
+    return Math.max(0.05, 1.0 - damp);
+  }
+
+  /** @private */
+  _applyWind(particle, dt, system) {
+    if (!particle?.velocity) return;
+
+    const isSmoke = this.profile === 'smoke' || !!(system?.userData?.isSmoke);
+    let susceptibility = typeof particle._windSusceptibility === 'number'
+      ? particle._windSusceptibility
+      : 1.0;
+    if (typeof particle._flameMotionScale === 'number' && Number.isFinite(particle._flameMotionScale)) {
+      susceptibility *= Math.max(0, Math.min(1, particle._flameMotionScale));
+    }
+    if (!Number.isFinite(susceptibility) || susceptibility <= 0.001) return;
+
+    const frameWind = this._frameWind;
+    if (!frameWind.hasWind) {
+      const decay = isSmoke ? 0.992 : 0.85;
+      particle.velocity.x *= decay;
+      particle.velocity.y *= decay;
+      return;
+    }
+
+    let influence = 1.0;
+    if (system?.userData && typeof system.userData.windInfluence === 'number') {
+      influence = system.userData.windInfluence;
+    }
+    if (!Number.isFinite(influence)) influence = 1.0;
+
+    if (influence <= 0.001) {
+      particle.velocity.x *= 0.85;
+      particle.velocity.y *= 0.85;
+      return;
+    }
+
+    const smokeWindMul = isSmoke ? 0.42 : 1.0;
+    const forceMag = frameWind.windSpeed * 300.0 * influence * susceptibility * smokeWindMul;
+    if (!Number.isFinite(forceMag)) return;
+
+    const dvx = frameWind.windDirX * forceMag * dt;
+    const dvy = frameWind.windDirY * forceMag * dt;
+    if (Number.isFinite(dvx) && Number.isFinite(dvy)) {
+      particle.velocity.x += dvx;
+      particle.velocity.y += dvy;
+    }
+  }
+
+  /** @private */
+  _applyUpdraft(particle, dt, system) {
+    if (!particle?.velocity) return;
+
+    const force = system?.userData?.updraftForce;
+    const mag = readApplyForceMagnitude(force);
+    if (!Number.isFinite(mag) || mag <= 0) return;
+
+    let timeScale = 1.0;
+    if (typeof particle._msTimeScaleFactor === 'number' && Number.isFinite(particle._msTimeScaleFactor)) {
+      timeScale = Math.max(0.0, particle._msTimeScaleFactor);
+    }
+
+    const motionScale = (typeof particle._flameMotionScale === 'number' && Number.isFinite(particle._flameMotionScale))
+      ? Math.max(0, Math.min(1, particle._flameMotionScale))
+      : 1;
+    const rainScale = this._rainUpdraftScale(particle, system);
+    const scale = timeScale * rainScale * motionScale;
+    if (scale <= 0.0001) return;
+
+    const dir = force?.direction;
+    if (dir) {
+      particle.velocity.x += dir.x * mag * scale * dt;
+      particle.velocity.y += dir.y * mag * scale * dt;
+      particle.velocity.z += dir.z * mag * scale * dt;
+    } else {
+      particle.velocity.z += mag * scale * dt;
+    }
+  }
+
+  /** @private */
+  _applyRawBuoyancy(particle, dt, system) {
+    if (this.profile === 'smoke') return;
+    if (!particle?.velocity) return;
+
+    const motionScale = readFlameMotionScale(particle);
+    if (this.profile === 'flame' && motionScale <= 0) return;
+
+    const force = system?.userData?.updraftForce;
+    const mag = readApplyForceMagnitude(force);
+    if (!Number.isFinite(mag) || mag <= 0) return;
+
+    const dir = force?.direction;
+    if (dir) {
+      particle.velocity.x += dir.x * mag * dt;
+      particle.velocity.y += dir.y * mag * dt;
+      particle.velocity.z += dir.z * mag * dt;
+    } else {
+      particle.velocity.z += mag * dt;
+    }
+  }
+
+  /** @private */
+  _applyTurbulence(particle, dt, system) {
+    if (!particle?.position || !particle?.velocity) return;
+
+    const motionScale = readFlameMotionScale(particle);
+    if (this.profile === 'flame' && motionScale <= 0) return;
+
+    let turbDt = dt;
+    if (this.profile !== 'flame') {
+      const ts = particle._msTimeScaleFactor;
+      if (ts !== undefined) turbDt *= (ts > 0 ? ts : 0);
+      if (turbDt <= 0.0001) return;
+    }
+
+    const turb = system?.userData?.turbulence ?? this._turbulence;
+    if (!turb?.scale || !turb?.strength) return;
+
+    const px = particle.position.x / turb.scale.x;
+    const py = particle.position.y / turb.scale.y;
+    const t = turb.time;
+
+    const vx = (Math.sin(py * 2.13 + t) + Math.cos(py * 3.71 - t)) * 0.5 * turb.strength.x;
+    const vy = (Math.cos(px * 2.27 + t) + Math.sin(px * 3.43 - t)) * 0.5 * turb.strength.y;
+    const vz = Math.sin((px + py) * 1.77 + t) * turb.strength.z;
+
+    this._tempV.set(vx, vy, vz);
+    particle.velocity.addScaledVector(this._tempV, turbDt);
+  }
+
+  update(particle, delta, system) {
+    if (!particle || typeof delta !== 'number') return;
+
+    let dt = delta;
+    if (!Number.isFinite(dt)) return;
+    dt = Math.min(Math.max(dt, 0), 0.1);
+    if (dt <= 0.0001) return;
+
+    this._applyWind(particle, dt, system);
+    if (this.profile !== 'smoke') {
+      this._applyRawBuoyancy(particle, dt, system);
+    }
+    this._applyUpdraft(particle, dt, system);
+    this._applyTurbulence(particle, dt, system);
+  }
+
+  reset() {
+    if (this._turbulence) this._turbulence.time = 0;
+  }
+
+  clone() {
+    const next = new FireForcesBehavior(this.profile);
+    if (this._turbulence) {
+      next.bindTurbulence(this._turbulence.clone());
+    }
+    return next;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Gradient Data Constants
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1039,6 +1310,66 @@ export class FireSpinBehavior {
   frameUpdate(delta) {}
   reset() {}
   clone() { return new FireSpinBehavior(); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DeferredVisualBehavior — skip cosmetic updates during the physics step
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Wraps a visual-only behavior so `update()` no-ops while `system._msDeferVisualToRefresh`
+ * is true (during ParticleSystem.update). FireEffectV2 re-applies visuals in
+ * `_refreshFireVisuals()` with defer cleared.
+ */
+export class DeferredVisualBehavior {
+  constructor(inner) {
+    this.inner = inner;
+    this.type = inner?.type ?? 'DeferredVisual';
+  }
+
+  initialize(particle, system) {
+    if (this.inner?.initialize) this.inner.initialize(particle, system);
+  }
+
+  update(particle, delta, system) {
+    if (system?._msDeferVisualToRefresh) return;
+    if (!this.inner || typeof this.inner.update !== 'function') return;
+    if (this.inner.update.length >= 3) {
+      this.inner.update(particle, delta, system);
+    } else if (this.inner.update.length >= 2) {
+      this.inner.update(particle, delta);
+    } else {
+      this.inner.update(particle);
+    }
+  }
+
+  frameUpdate(delta) {
+    if (this.inner?.frameUpdate) this.inner.frameUpdate(delta);
+  }
+
+  reset() {
+    if (this.inner?.reset) this.inner.reset();
+  }
+
+  clone() {
+    const innerClone = this.inner?.clone ? this.inner.clone() : this.inner;
+    return new DeferredVisualBehavior(innerClone);
+  }
+}
+
+/**
+ * Wrap behaviors whose types appear in `visualTypes` with {@link DeferredVisualBehavior}.
+ * @param {object|null|undefined} system
+ * @param {Set<string>} visualTypes
+ */
+export function deferVisualBehaviorsOnSystem(system, visualTypes) {
+  if (!system?.behaviors?.length || !visualTypes?.size) return;
+  for (let j = 0; j < system.behaviors.length; j++) {
+    const beh = system.behaviors[j];
+    if (visualTypes.has(beh.type)) {
+      system.behaviors[j] = new DeferredVisualBehavior(beh);
+    }
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

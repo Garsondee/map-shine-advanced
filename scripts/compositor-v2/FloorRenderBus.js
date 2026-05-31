@@ -1529,7 +1529,7 @@ export class FloorRenderBus {
         continue;
       }
 
-      // Splashes + vegetation are composited after water/bloom (visibility-gated bus draw).
+      // Splashes + vegetation are composited after water/bloom (root-scoped overlay draw).
       if (String(tileId).startsWith('ms_water_splash_batch_')) {
         node.visible = false;
         continue;

@@ -38,7 +38,7 @@ export function isVegetationOverlayBusKey(tileId) {
 
 /**
  * Mark splash batches so FloorCompositor can exclude them from the bus albedo pass.
- * Splashes are drawn via a visibility-gated bus render after water (layer 0), not
+ * Splashes are drawn via a root-scoped bus render after water (layer 0), not
  * isolated Three.js layer 33 — quarks BatchedRenderer does not honor that reliably.
  *
  * @param {import('three').Object3D|null|undefined} object3d

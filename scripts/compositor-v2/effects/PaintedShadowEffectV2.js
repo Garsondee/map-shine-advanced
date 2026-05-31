@@ -14,6 +14,9 @@
  *
  * Internal render targets use the same half-res budgeting as building shadows to keep
  * the project + separable blur chain from burning fill rate on very large mask textures.
+ *
+ * Render cadence mirrors {@link BuildingShadowsEffectV2}: hard/soft dirty detection with
+ * throttled refresh when sun or dynamic-light inputs drift slowly.
  */
 
 import { createLogger } from '../../core/log.js';
@@ -30,9 +33,18 @@ import {
 import { resolveBakeRayLength } from '../lightning/shadow-bake-override.js';
 
 const log = createLogger('PaintedShadowEffectV2');
-const MAX_PAINTED_SHADOW_EDGE_PX = 3072;
+/** Align with BuildingShadowsEffectV2 — painted shadow is low-frequency after blur. */
+const MAX_PAINTED_SHADOW_EDGE_PX = 2560;
 /** Same idea as BuildingShadowsEffectV2: separable blur + invert are fill-rate heavy; half-res RT is visually equivalent on most scenes. */
 const INTERNAL_PAINTED_SHADOW_DOWNSAMPLE = 0.5;
+const PAINTED_SHADOW_VIEW_BOUNDS_QUANTIZE = 24;
+const PAINTED_SHADOW_DRIVER_EPS = 0.002;
+const PAINTED_SHADOW_SUN_EPS_DEG = 0.1;
+/** Throttle dynamic-light coupling (texture.version bumps every lighting frame). */
+const PAINTED_SHADOW_THROTTLE_DYNAMIC_MS = 50;
+const PAINTED_SHADOW_THROTTLE_STATIC_MS = 400;
+const PAINTED_SHADOW_SAFETY_DYNAMIC_MS = 1000;
+const PAINTED_SHADOW_SAFETY_STATIC_MS = 3000;
 const PAINTED_MASK_ALIASES = ['handPaintedShadow', 'paintedShadow', 'shadow'];
 
 export class PaintedShadowEffectV2 {
@@ -50,7 +62,7 @@ export class PaintedShadowEffectV2 {
       contactSharpBlendHigh: 0.78,
       /** Grow shadow coverage in shadow RT pixels (max-filter); hides rim at footprint. */
       shadowEdgeInflatePx: 1.25,
-      resolutionScale: 2,
+      resolutionScale: 1,
       sunLatitude: 0.1,
       dynamicLightShadowOverrideEnabled: true,
       dynamicLightShadowOverrideStrength: 0.7,
@@ -127,6 +139,51 @@ export class PaintedShadowEffectV2 {
     this._perFloorLitLastFillSerial = [0, 0, 0, 0];
     /** @type {import('three').Texture|null} Resolved painted tex from the latest {@link render}. */
     this._lastPaintedTexForSlots = null;
+
+    /** @type {Record<string, unknown>} Last-seen UI params (dirty detection). */
+    this._lastParams = {};
+    /** @type {object} Inputs that affect shadow RTs; drives cache + throttle. */
+    this._renderState = {
+      time: 0,
+      sunAz: null,
+      sunEl: null,
+      driverLen: null,
+      driverSoft: null,
+      rtWidth: 0,
+      rtHeight: 0,
+      bandSig: '',
+      floorIdUuid: null,
+      paintedUuid0: null,
+      paintedUuid1: null,
+      paintedUuid2: null,
+      paintedUuid3: null,
+      outdoorsUuid0: null,
+      outdoorsUuid1: null,
+      outdoorsUuid2: null,
+      outdoorsUuid3: null,
+      litMaskUuid0: null,
+      litMaskUuid1: null,
+      litMaskUuid2: null,
+      litMaskUuid3: null,
+      hasLitMask0: 0,
+      hasLitMask1: 0,
+      hasLitMask2: 0,
+      hasLitMask3: 0,
+      dynTexVersion: -1,
+      winTexVersion: -1,
+      dloStrength: -1,
+      dloEnabled: null,
+      vbX: 0,
+      vbY: 0,
+      vbZ: 0,
+      vbW: 0,
+      srX: 0,
+      srY: 0,
+      srZ: 0,
+      srW: 0,
+      sdimX: 0,
+      sdimY: 0,
+    };
   }
 
   /** @returns {import('three').Texture|null} Floor-0-only lit factor (multi-floor level 0 pass). */
@@ -212,7 +269,7 @@ export class PaintedShadowEffectV2 {
             'Expands painted shadow slightly in this pass’s pixel grid (often lower-res than canvas) so it tucks under assets and hides bright rim cracks. 0 = off.',
           advanced: true,
         },
-        resolutionScale: { type: 'slider', label: 'Resolution', min: 0.75, max: 2.0, step: 0.05, default: 2, advanced: true },
+        resolutionScale: { type: 'slider', label: 'Resolution', min: 0.75, max: 2.0, step: 0.05, default: 1, advanced: true },
       },
     };
   }
@@ -1145,22 +1202,18 @@ export class PaintedShadowEffectV2 {
         }
 
         void main() {
+          vec2 edge = vec2(0.001);
+          vec2 edge2 = vec2(0.999);
+          vec2 suv = clamp(vUv, edge, edge2);
           vec2 duv = max(uStrengthTexelSize * max(uShadowEdgeInflatePx, 0.0), vec2(0.0));
-          float s = mergedStrength(clamp(vUv, vec2(0.001), vec2(0.999)));
+          float s = mergedStrength(suv);
           float infl = clamp(uShadowEdgeInflatePx, 0.0, 32.0);
           if (infl > 1e-6) {
-            vec2 dd = duv * vec2(0.70710678);
-            vec2 edge = vec2(0.001);
-            vec2 edge2 = vec2(0.999);
-            vec2 suv;
-            suv = clamp(vUv + vec2(duv.x, 0.0), edge, edge2); s = max(s, mergedStrength(suv));
-            suv = clamp(vUv - vec2(duv.x, 0.0), edge, edge2); s = max(s, mergedStrength(suv));
-            suv = clamp(vUv + vec2(0.0, duv.y), edge, edge2); s = max(s, mergedStrength(suv));
-            suv = clamp(vUv - vec2(0.0, duv.y), edge, edge2); s = max(s, mergedStrength(suv));
-            suv = clamp(vUv + vec2(dd.x, dd.y), edge, edge2); s = max(s, mergedStrength(suv));
-            suv = clamp(vUv + vec2(dd.x, -dd.y), edge, edge2); s = max(s, mergedStrength(suv));
-            suv = clamp(vUv + vec2(-dd.x, dd.y), edge, edge2); s = max(s, mergedStrength(suv));
-            suv = clamp(vUv - vec2(dd.x, dd.y), edge, edge2); s = max(s, mergedStrength(suv));
+            // Separable axis max-filter (5 taps) — visually equivalent to 9-tap diamond for small inflate.
+            float sH = max(mergedStrength(clamp(suv - vec2(duv.x, 0.0), edge, edge2)),
+              max(s, mergedStrength(clamp(suv + vec2(duv.x, 0.0), edge, edge2))));
+            s = max(sH, max(mergedStrength(clamp(suv - vec2(0.0, duv.y), edge, edge2)),
+              mergedStrength(clamp(suv + vec2(0.0, duv.y), edge, edge2))));
           }
           float lit = 1.0 - s;
           gl_FragColor = vec4(lit, lit, lit, 1.0);
@@ -1341,6 +1394,333 @@ export class PaintedShadowEffectV2 {
   /** @private */
   _invalidatePerFloorLitCache() {
     for (let i = 1; i <= 3; i++) this._perFloorLitLastFillSerial[i] = 0;
+  }
+
+  /** Force next {@link render} to run GPU passes (e.g. after clearing shadowTarget). */
+  _invalidateShadowRenderCache() {
+    this._renderState.time = 0;
+  }
+
+  /** @param {number} v @param {number} step */
+  _quantizeForCache(v, step) {
+    if (!Number.isFinite(v) || step <= 0) return 0;
+    return Math.round(v / step) * step;
+  }
+
+  /** @param {number|null|undefined} a @param {number|null|undefined} b @param {number} eps */
+  _numChanged(a, b, eps) {
+    const na = Number(a);
+    const nb = Number(b);
+    if (!Number.isFinite(na) && !Number.isFinite(nb)) return false;
+    if (!Number.isFinite(na) || !Number.isFinite(nb)) return true;
+    return Math.abs(na - nb) > eps;
+  }
+
+  /**
+   * Snap camera view bounds so sub-texel camera jitter does not bust the cache.
+   * @param {{x:number,y:number,z:number,w:number}|null|undefined} vb
+   * @returns {{x:number,y:number,z:number,w:number}|null}
+   */
+  _quantizeViewBoundsForCache(vb) {
+    if (!vb) return null;
+    const step = PAINTED_SHADOW_VIEW_BOUNDS_QUANTIZE;
+    return {
+      x: this._quantizeForCache(vb.x, step),
+      y: this._quantizeForCache(vb.y, step),
+      z: this._quantizeForCache(vb.z, step),
+      w: this._quantizeForCache(vb.w, step),
+    };
+  }
+
+  /**
+   * @param {number} now
+   * @param {object} snap
+   */
+  _commitRenderState(now, snap) {
+    const rs = this._renderState;
+    rs.time = now;
+    rs.sunAz = snap.sunAz;
+    rs.sunEl = snap.sunEl;
+    rs.driverLen = snap.driverLen;
+    rs.driverSoft = snap.driverSoft;
+    rs.rtWidth = snap.rtWidth;
+    rs.rtHeight = snap.rtHeight;
+    rs.bandSig = snap.bandSig;
+    rs.floorIdUuid = snap.floorIdUuid;
+    rs.paintedUuid0 = snap.paintedUuid0;
+    rs.paintedUuid1 = snap.paintedUuid1;
+    rs.paintedUuid2 = snap.paintedUuid2;
+    rs.paintedUuid3 = snap.paintedUuid3;
+    rs.outdoorsUuid0 = snap.outdoorsUuid0;
+    rs.outdoorsUuid1 = snap.outdoorsUuid1;
+    rs.outdoorsUuid2 = snap.outdoorsUuid2;
+    rs.outdoorsUuid3 = snap.outdoorsUuid3;
+    rs.litMaskUuid0 = snap.litMaskUuid0;
+    rs.litMaskUuid1 = snap.litMaskUuid1;
+    rs.litMaskUuid2 = snap.litMaskUuid2;
+    rs.litMaskUuid3 = snap.litMaskUuid3;
+    rs.hasLitMask0 = snap.hasLitMask0;
+    rs.hasLitMask1 = snap.hasLitMask1;
+    rs.hasLitMask2 = snap.hasLitMask2;
+    rs.hasLitMask3 = snap.hasLitMask3;
+    rs.dynTexVersion = snap.dynTexVersion;
+    rs.winTexVersion = snap.winTexVersion;
+    rs.dloStrength = snap.dloStrength;
+    rs.dloEnabled = snap.dloEnabled;
+    rs.vbX = snap.vbX;
+    rs.vbY = snap.vbY;
+    rs.vbZ = snap.vbZ;
+    rs.vbW = snap.vbW;
+    rs.srX = snap.srX;
+    rs.srY = snap.srY;
+    rs.srZ = snap.srZ;
+    rs.srW = snap.srW;
+    rs.sdimX = snap.sdimX;
+    rs.sdimY = snap.sdimY;
+  }
+
+  /**
+   * @param {string} bandSig
+   * @returns {object}
+   * @private
+   */
+  _buildRenderSnapshot(bandSig) {
+    const dlo = this._dynamicLightOverride;
+    const dynTex = dlo?.texture ?? null;
+    const winTex = dlo?.windowTexture ?? null;
+    const vbQ = this._quantizeViewBoundsForCache(dlo?.viewBounds);
+    const sr = dlo?.sceneRect;
+    const sdim = dlo?.sceneDimensions;
+    const litMasks = this._litFloorMasks ?? [];
+    const painted = this._paintedMasks ?? [];
+    const outdoors = this._outdoorsMasks ?? [];
+
+    return {
+      sunAz: this._sunAzimuthDeg,
+      sunEl: this._sunElevationDeg,
+      driverLen: this._driverShadowLengthScale,
+      driverSoft: this._driverShadowSoftnessScale,
+      rtWidth: this._strengthTarget?.width ?? 0,
+      rtHeight: this._strengthTarget?.height ?? 0,
+      bandSig: bandSig ?? '',
+      floorIdUuid: this._floorIdTex?.uuid ?? null,
+      paintedUuid0: painted[0]?.uuid ?? null,
+      paintedUuid1: painted[1]?.uuid ?? null,
+      paintedUuid2: painted[2]?.uuid ?? null,
+      paintedUuid3: painted[3]?.uuid ?? null,
+      outdoorsUuid0: outdoors[0]?.uuid ?? null,
+      outdoorsUuid1: outdoors[1]?.uuid ?? null,
+      outdoorsUuid2: outdoors[2]?.uuid ?? null,
+      outdoorsUuid3: outdoors[3]?.uuid ?? null,
+      litMaskUuid0: litMasks[0]?.uuid ?? null,
+      litMaskUuid1: litMasks[1]?.uuid ?? null,
+      litMaskUuid2: litMasks[2]?.uuid ?? null,
+      litMaskUuid3: litMasks[3]?.uuid ?? null,
+      hasLitMask0: this._hasValidLitMask(0) ? 1 : 0,
+      hasLitMask1: this._hasValidLitMask(1) ? 1 : 0,
+      hasLitMask2: this._hasValidLitMask(2) ? 1 : 0,
+      hasLitMask3: this._hasValidLitMask(3) ? 1 : 0,
+      dynTexVersion: dynTex ? dynTex.version : -1,
+      winTexVersion: winTex ? winTex.version : -1,
+      dloStrength: dlo?.strength ?? -1,
+      dloEnabled: dlo?.enabled !== false,
+      vbX: vbQ?.x ?? 0,
+      vbY: vbQ?.y ?? 0,
+      vbZ: vbQ?.z ?? 0,
+      vbW: vbQ?.w ?? 0,
+      srX: sr?.x ?? 0,
+      srY: sr?.y ?? 0,
+      srZ: sr?.z ?? 0,
+      srW: sr?.w ?? 0,
+      sdimX: sdim?.x ?? 0,
+      sdimY: sdim?.y ?? 0,
+    };
+  }
+
+  /**
+   * Hard dirty = rebuild immediately. Soft dirty = sun/driver/viewBounds/tex.version (throttled).
+   * @param {object} snap
+   * @returns {{hard:boolean, soft:boolean}}
+   */
+  _classifyRenderDirty(snap) {
+    const rs = this._renderState;
+    let hard = false;
+    let soft = false;
+
+    if (
+      rs.rtWidth !== snap.rtWidth ||
+      rs.rtHeight !== snap.rtHeight ||
+      rs.bandSig !== snap.bandSig ||
+      rs.floorIdUuid !== snap.floorIdUuid ||
+      rs.paintedUuid0 !== snap.paintedUuid0 ||
+      rs.paintedUuid1 !== snap.paintedUuid1 ||
+      rs.paintedUuid2 !== snap.paintedUuid2 ||
+      rs.paintedUuid3 !== snap.paintedUuid3 ||
+      rs.outdoorsUuid0 !== snap.outdoorsUuid0 ||
+      rs.outdoorsUuid1 !== snap.outdoorsUuid1 ||
+      rs.outdoorsUuid2 !== snap.outdoorsUuid2 ||
+      rs.outdoorsUuid3 !== snap.outdoorsUuid3 ||
+      rs.litMaskUuid0 !== snap.litMaskUuid0 ||
+      rs.litMaskUuid1 !== snap.litMaskUuid1 ||
+      rs.litMaskUuid2 !== snap.litMaskUuid2 ||
+      rs.litMaskUuid3 !== snap.litMaskUuid3 ||
+      rs.hasLitMask0 !== snap.hasLitMask0 ||
+      rs.hasLitMask1 !== snap.hasLitMask1 ||
+      rs.hasLitMask2 !== snap.hasLitMask2 ||
+      rs.hasLitMask3 !== snap.hasLitMask3 ||
+      rs.dloEnabled !== snap.dloEnabled
+    ) {
+      hard = true;
+    }
+
+    if (this._numChanged(rs.dloStrength, snap.dloStrength, 1e-5)) hard = true;
+
+    if (
+      this._numChanged(rs.sunAz, snap.sunAz, PAINTED_SHADOW_SUN_EPS_DEG) ||
+      this._numChanged(rs.sunEl, snap.sunEl, PAINTED_SHADOW_SUN_EPS_DEG) ||
+      this._numChanged(rs.driverLen, snap.driverLen, PAINTED_SHADOW_DRIVER_EPS) ||
+      this._numChanged(rs.driverSoft, snap.driverSoft, PAINTED_SHADOW_DRIVER_EPS)
+    ) {
+      soft = true;
+    }
+
+    if (
+      rs.vbX !== snap.vbX ||
+      rs.vbY !== snap.vbY ||
+      rs.vbZ !== snap.vbZ ||
+      rs.vbW !== snap.vbW ||
+      rs.srX !== snap.srX ||
+      rs.srY !== snap.srY ||
+      rs.srZ !== snap.srZ ||
+      rs.srW !== snap.srW ||
+      rs.sdimX !== snap.sdimX ||
+      rs.sdimY !== snap.sdimY ||
+      rs.dynTexVersion !== snap.dynTexVersion ||
+      rs.winTexVersion !== snap.winTexVersion
+    ) {
+      soft = true;
+    }
+
+    return { hard, soft };
+  }
+
+  /**
+   * Returns true when shadow inputs changed or the throttle window elapsed.
+   * @param {object} snap
+   * @param {{hard:boolean, soft:boolean}} dirty
+   * @returns {boolean}
+   */
+  _shouldRenderSnapshot(snap, dirty) {
+    const now = performance.now();
+
+    const dlo = this._dynamicLightOverride;
+    const hasDynamicLights =
+      (dlo?.texture || dlo?.windowTexture) &&
+      snap.dloEnabled &&
+      this.params.dynamicLightShadowOverrideEnabled !== false;
+    const throttleMs = hasDynamicLights
+      ? PAINTED_SHADOW_THROTTLE_DYNAMIC_MS
+      : PAINTED_SHADOW_THROTTLE_STATIC_MS;
+    const safetyMs = hasDynamicLights
+      ? PAINTED_SHADOW_SAFETY_DYNAMIC_MS
+      : PAINTED_SHADOW_SAFETY_STATIC_MS;
+    const elapsed = now - this._renderState.time;
+
+    if (dirty.hard) {
+      this._commitRenderState(now, snap);
+      return true;
+    }
+
+    if (dirty.soft && elapsed >= throttleMs) {
+      this._commitRenderState(now, snap);
+      return true;
+    }
+
+    if (elapsed >= safetyMs) {
+      this._commitRenderState(now, snap);
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Per-floor selective re-render when only one floor's masks changed.
+   * @param {number} floorIndex
+   * @param {object} snap
+   * @param {{hard:boolean, soft:boolean}} dirty
+   * @param {boolean} multiFloor
+   * @param {boolean} floorHardDirty
+   * @param {boolean} globalHardAllFloors
+   * @returns {boolean}
+   * @private
+   */
+  _shouldRenderFloor(floorIndex, snap, dirty, multiFloor, floorHardDirty, globalHardAllFloors, paramHard) {
+    const fi = Math.max(0, Math.min(3, Math.floor(Number(floorIndex))));
+    if (!multiFloor) return fi === 0;
+
+    if (fi > 0 && !snap[`hasLitMask${fi}`]) return false;
+
+    if (dirty.soft || globalHardAllFloors || floorHardDirty || paramHard) return true;
+
+    if (fi === 0 && !this._groundOnlyLitTarget?.texture) return true;
+    if (fi > 0 && !this._perFloorLitTargets[fi]?.texture) return true;
+
+    return false;
+  }
+
+  /**
+   * @param {object} snap
+   * @param {object} rs
+   * @param {number} floorIndex
+   * @returns {boolean}
+   * @private
+   */
+  _floorMaskHardDirty(snap, rs, floorIndex) {
+    const fi = Math.max(0, Math.min(3, Math.floor(Number(floorIndex))));
+    return rs[`litMaskUuid${fi}`] !== snap[`litMaskUuid${fi}`]
+      || rs[`outdoorsUuid${fi}`] !== snap[`outdoorsUuid${fi}`]
+      || rs[`hasLitMask${fi}`] !== snap[`hasLitMask${fi}`];
+  }
+
+  /**
+   * @param {object} snap
+   * @param {object} rs
+   * @returns {boolean}
+   * @private
+   */
+  _globalHardRequiresAllFloors(snap, rs) {
+    return rs.rtWidth !== snap.rtWidth
+      || rs.rtHeight !== snap.rtHeight
+      || rs.bandSig !== snap.bandSig
+      || rs.floorIdUuid !== snap.floorIdUuid
+      || rs.dloEnabled !== snap.dloEnabled
+      || this._numChanged(rs.dloStrength, snap.dloStrength, 1e-5);
+  }
+
+  /**
+   * @param {string} bandSig
+   * @returns {{ snap: object, dirty: { hard: boolean, soft: boolean } }}
+   * @private
+   */
+  _resolveRenderDirtyState(bandSig) {
+    const snap = this._buildRenderSnapshot(bandSig);
+    const dirty = this._classifyRenderDirty(snap);
+    let paramHard = false;
+
+    for (const k in this.params) {
+      if (this.params[k] !== this._lastParams[k]) {
+        this._lastParams[k] = this.params[k];
+        paramHard = true;
+        break;
+      }
+    }
+
+    if (paramHard) {
+      return { snap, dirty: { hard: true, soft: false }, paramHard: true };
+    }
+
+    return { snap, dirty, paramHard: false };
   }
 
   /**
@@ -1773,10 +2153,9 @@ export class PaintedShadowEffectV2 {
   render(renderer) {
     if (!this.params.enabled || !this._projectMaterial || !this._invertMaterial || !this._quad || !this._scene || !this._camera) {
       this._invalidatePerFloorLitCache();
+      this._invalidateShadowRenderCache();
       return;
     }
-    this._perFloorLitCacheSerial++;
-    const perFloorLitSerialThisFrame = this._perFloorLitCacheSerial;
 
     const paintedTex = this._resolvePaintedShadowTexture();
     const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
@@ -1829,6 +2208,7 @@ export class PaintedShadowEffectV2 {
         note: 'Missing painted or outdoors mask',
       };
       this._invalidatePerFloorLitCache();
+      this._invalidateShadowRenderCache();
       this._clearShadowTargetToWhite(renderer);
       this._lastPaintedSourceSig = null;
       return;
@@ -1850,6 +2230,7 @@ export class PaintedShadowEffectV2 {
     ].join('|');
     if (this._lastPaintedSourceSig != null && this._lastPaintedSourceSig !== bandSig && renderer) {
       this._invalidatePerFloorLitCache();
+      this._invalidateShadowRenderCache();
       this._clearShadowTargetToWhite(renderer);
       this._floorOcclusionSig = '';
     }
@@ -1857,18 +2238,42 @@ export class PaintedShadowEffectV2 {
 
     if (!this._ensureTargets(renderer, paintedTex)) {
       this._invalidatePerFloorLitCache();
+      this._invalidateShadowRenderCache();
       this._clearShadowTargetToWhite(renderer);
       return;
     }
+
+    this._lastPaintedTexForSlots = paintedTex;
+    this._rebuildLitFloorMasks(paintedTex);
+
+    const { snap: renderSnap, dirty: renderDirty, paramHard } = this._resolveRenderDirtyState(bandSig);
+    const preCommitRs = this._renderState;
+    const globalHardAllFloors = this._globalHardRequiresAllFloors(renderSnap, preCommitRs);
+    if (!this._shouldRenderSnapshot(renderSnap, renderDirty)) {
+      this._healthDiagnostics = {
+        timestamp: Date.now(),
+        paramsEnabled: true,
+        paintedMaskFound: true,
+        outdoorsMaskFound: true,
+        syncOutdoorsMaskUuid: this._outdoorsMask?.uuid ?? null,
+        dynamicLightOverrideBound: !!(this._dynamicLightOverride?.texture || this._dynamicLightOverride?.windowTexture),
+        shadowFactorTextureUuid: this.shadowTarget?.texture?.uuid ?? null,
+        litScratchUuid: this._litScratchTarget?.texture?.uuid ?? null,
+        groundOnlyLitUuid: this._groundOnlyLitTarget?.texture?.uuid ?? null,
+        note: 'Cached render (optimization)',
+      };
+      return;
+    }
+
+    this._perFloorLitCacheSerial++;
+    const perFloorLitSerialThisFrame = this._perFloorLitCacheSerial;
+    const multiFloor = (window.MapShine?.floorStack?.getFloors?.()?.length ?? 0) > 1;
 
     const prevTarget = renderer.getRenderTarget();
     const prevAuto = renderer.autoClear;
     try {
       const pu = this._projectMaterial.uniforms;
       pu.tPaintedShadow.value = paintedTex;
-      this._lastPaintedTexForSlots = paintedTex;
-
-      this._rebuildLitFloorMasks(paintedTex);
 
       const noShadowTex = this._noShadowFallbackTex;
       pu.tPaintedShadow0.value = this._resolvePaintedSlotTexture(0, paintedTex, noShadowTex);
@@ -1955,20 +2360,41 @@ export class PaintedShadowEffectV2 {
       }
 
       renderer.autoClear = false;
-      this._renderStrengthToLitTarget(renderer, this.shadowTarget);
 
-      const multiFloor = (window.MapShine?.floorStack?.getFloors?.()?.length ?? 0) > 1;
+      if (!multiFloor) {
+        this._renderStrengthToLitTarget(renderer, this.shadowTarget);
+      }
+
       const rtW = this._strengthTarget?.width | 0;
       const rtH = this._strengthTarget?.height | 0;
-      if (multiFloor && this._groundOnlyLitTarget) {
+      if (multiFloor && this._groundOnlyLitTarget && this._shouldRenderFloor(
+        0, renderSnap, renderDirty, multiFloor,
+        this._floorMaskHardDirty(renderSnap, preCommitRs, 0),
+        globalHardAllFloors,
+        paramHard,
+      )) {
         this._renderSingleFloorLit(renderer, 0, this._groundOnlyLitTarget);
+        this._perFloorLitLastFillSerial[0] = perFloorLitSerialThisFrame;
       }
       // FloorCompositor calls `renderLitForSingleFloor` once per visible upper band; without
       // prefetch each call repeated the entire project+blur+invert chain (often >2×/frame).
       if (multiFloor && rtW > 0 && rtH > 0 && renderer) {
         for (let fi = 1; fi <= 3; fi++) {
-          this._perFloorLitLastFillSerial[fi] = 0;
-          if (!this._hasValidLitMask(fi)) continue;
+          if (!this._shouldRenderFloor(
+            fi, renderSnap, renderDirty, multiFloor,
+            this._floorMaskHardDirty(renderSnap, preCommitRs, fi),
+            globalHardAllFloors,
+            paramHard,
+          )) {
+            if (this._perFloorLitTargets[fi]?.texture) {
+              this._perFloorLitLastFillSerial[fi] = perFloorLitSerialThisFrame;
+            }
+            continue;
+          }
+          if (!this._hasValidLitMask(fi)) {
+            this._perFloorLitLastFillSerial[fi] = 0;
+            continue;
+          }
           if (!this._ensurePerFloorLitTarget(fi, rtW, rtH)) continue;
           this._renderSingleFloorLit(renderer, fi, this._perFloorLitTargets[fi]);
           this._perFloorLitLastFillSerial[fi] = perFloorLitSerialThisFrame;
@@ -1987,6 +2413,8 @@ export class PaintedShadowEffectV2 {
         shadowFactorTextureUuid: this.shadowTarget?.texture?.uuid ?? null,
         litScratchUuid: this._litScratchTarget?.texture?.uuid ?? null,
         groundOnlyLitUuid: this._groundOnlyLitTarget?.texture?.uuid ?? null,
+        renderCached: false,
+        multiFloorSkipCombined: multiFloor,
         paintedSlotBindings,
         rawPerFloorMaskUuids: (this._paintedMasks ?? []).map((t, i) => ({ floor: i, uuid: t?.uuid ?? null })),
         litFloorMaskUuids: (this._litFloorMasks ?? []).map((t, i) => ({ floor: i, uuid: t?.uuid ?? null })),
@@ -2055,5 +2483,7 @@ export class PaintedShadowEffectV2 {
     this._levelTextureCache.clear();
     this._levelTextureInflight.clear();
     this._floorOcclusionSig = '';
+    this._lastParams = {};
+    this._renderState.time = 0;
   }
 }

@@ -44,17 +44,15 @@ import {
   getViewedLevelBackgroundSrc,
   hasV14NativeLevels,
 } from '../../foundry/levels-scene-flags.js';
-import { SmartWindBehavior } from '../../particles/SmartWindBehavior.js';
-import { SmartUpdraftBehavior } from '../../particles/SmartUpdraftBehavior.js';
 import {
   FireMaskShape,
   FixedCurlNoiseField,
+  FireForcesBehavior,
   FlameLifecycleBehavior,
   EmberLifecycleBehavior,
   SmokeLifecycleBehavior,
-  ParticleTimeScaledBehavior,
   FlameShapeFrameBehavior,
-  ParticleMotionGatedBehavior,
+  deferVisualBehaviorsOnSystem,
   generateFirePoints,
   filterFirePointsByOutdoor,
   filterFirePointsByAlbedoAlpha,
@@ -598,6 +596,16 @@ export class FireEffectV2 {
     this._glowSourcePointsByFloor = new Map();
     /** @type {object|null} Scene bounds cached for glow wall clipping */
     this._glowSceneContext = null;
+    /** @type {THREE.DataTexture|null} CPU-built heat-haze mask from glow clusters */
+    this._heatDistortionMaskTex = null;
+    /** @type {Uint8Array|null} Pixel buffer backing `_heatDistortionMaskTex` */
+    this._heatDistortionMaskData = null;
+    /** @type {string} Cache signature for `_heatDistortionMaskTex` */
+    this._heatDistortionMaskSig = '';
+    /** @type {number} Cached heat mask width */
+    this._heatDistortionMaskW = 0;
+    /** @type {number} Cached heat mask height */
+    this._heatDistortionMaskH = 0;
     this._visionComputer = new VisionPolygonComputer();
     this._needsGlowRebuild = false;
     this._lastGlowRebuildAt = 0;
@@ -605,6 +613,9 @@ export class FireEffectV2 {
     this._glowParamCache = { indoor: null, outdoor: null, darkness: -1 };
     this._systemParamsSignature = '';
     this._simAccumSec = 0;
+    this._physicsFloorCursor = 0;
+    /** @type {Map<number, number>} Last timeInfo.elapsed when a floor received physics. */
+    this._floorLastPhysicsAt = new Map();
     /** @type {import('../../core/diagnostics/PerformanceRecorder.js').PerformanceRecorder|null} */
     this._activePerfRecorder = null;
     /** @type {[string, number][]} */
@@ -790,6 +801,157 @@ export class FireEffectV2 {
   }
 
   /**
+   * Build (or return cached) scene-space heat-haze mask from live fire glow
+   * clusters. Used when GpuSceneMaskCompositor has no `fire` RT even though
+   * FireEffectV2 populated from direct `_Fire` tile probes.
+   * @returns {THREE.DataTexture|null}
+   */
+  buildHeatDistortionMaskTexture() {
+    const THREE = window.THREE;
+    const ctx = this._glowSceneContext;
+    if (!THREE || !ctx) return null;
+
+    const sceneW = Math.max(1, Number(ctx.sceneWidth) || 1);
+    const sceneH = Math.max(1, Number(ctx.sceneHeight) || 1);
+
+    /** @type {object[]} */
+    const clusters = [];
+    for (const idx of this._activeFloors ?? []) {
+      const list = this._glowClustersByFloor.get(idx);
+      if (!Array.isArray(list) || !list.length) continue;
+      for (const c of list) clusters.push(c);
+    }
+
+    /** @type {{ u: number, v: number, strength: number, radiusPx: number }[]} */
+    const stamps = [];
+    if (clusters.length) {
+      for (const c of clusters) {
+        const foundrySceneX = Number(c?.foundrySceneX ?? ctx.foundrySceneX) || 0;
+        const foundrySceneY = Number(c?.foundrySceneY ?? ctx.foundrySceneY) || 0;
+        const cSceneW = Math.max(1, Number(c?.sceneWidth ?? sceneW) || sceneW);
+        const cSceneH = Math.max(1, Number(c?.sceneHeight ?? sceneH) || sceneH);
+        const u = (Number(c?.cxFoundry) - foundrySceneX) / cSceneW;
+        const v = (Number(c?.cyFoundry) - foundrySceneY) / cSceneH;
+        if (!Number.isFinite(u) || !Number.isFinite(v)) continue;
+        stamps.push({
+          u,
+          v,
+          strength: Math.max(0.15, Math.min(1.0, Number(c?.intensity) || 0.5)),
+          radiusPx: Math.max(24, Number(c?.radiusPx) || 0),
+        });
+      }
+    } else {
+      const avgSize = Math.max(
+        32,
+        (Number(this.params?.fireSizeMin) + Number(this.params?.fireSizeMax)) * 0.25,
+      );
+      const pointRadiusPx = Math.max(48, avgSize * 0.85);
+      for (const idx of this._activeFloors ?? []) {
+        const points = this._glowSourcePointsByFloor.get(idx);
+        if (!points || points.length < 3) continue;
+        const stride = Math.max(1, Math.ceil((points.length / 3) / 900));
+        for (let i = 0; i < points.length; i += 3 * stride) {
+          const u = points[i];
+          const v = points[i + 1];
+          const b = points[i + 2];
+          if (!Number.isFinite(u) || !Number.isFinite(v) || !Number.isFinite(b) || b <= 0) continue;
+          stamps.push({
+            u,
+            v,
+            strength: Math.max(0.12, Math.min(1.0, b)),
+            radiusPx: pointRadiusPx,
+          });
+        }
+      }
+    }
+    if (!stamps.length) return null;
+
+    const maxDim = 2048;
+    const scale = Math.min(1, maxDim / Math.max(sceneW, sceneH));
+    const w = Math.max(64, Math.round(sceneW * scale));
+    const h = Math.max(64, Math.round(sceneH * scale));
+
+    const activeKey = [...(this._activeFloors ?? [])].sort((a, b) => a - b).join(',');
+    let sig = `${w}x${h}|f=${activeKey}|n=${stamps.length}`;
+    for (let i = 0; i < Math.min(stamps.length, 12); i++) {
+      const s = stamps[i];
+      sig += `|${Math.round(s.u * 10000)}:${Math.round(s.v * 10000)}:${Math.round(s.radiusPx)}`;
+    }
+
+    if (this._heatDistortionMaskTex && sig === this._heatDistortionMaskSig
+      && this._heatDistortionMaskW === w && this._heatDistortionMaskH === h) {
+      return this._heatDistortionMaskTex;
+    }
+
+    if (!this._heatDistortionMaskData || this._heatDistortionMaskW !== w || this._heatDistortionMaskH !== h) {
+      this._heatDistortionMaskData = new Uint8Array(w * h);
+      if (this._heatDistortionMaskTex) {
+        try { this._heatDistortionMaskTex.dispose(); } catch (_) {}
+      }
+      this._heatDistortionMaskTex = new THREE.DataTexture(
+        this._heatDistortionMaskData,
+        w,
+        h,
+        THREE.RedFormat,
+        THREE.UnsignedByteType,
+      );
+      this._heatDistortionMaskTex.flipY = true;
+      this._heatDistortionMaskTex.minFilter = THREE.LinearFilter;
+      this._heatDistortionMaskTex.magFilter = THREE.LinearFilter;
+      this._heatDistortionMaskTex.wrapS = THREE.ClampToEdgeWrapping;
+      this._heatDistortionMaskTex.wrapT = THREE.ClampToEdgeWrapping;
+      this._heatDistortionMaskTex.generateMipmaps = false;
+      this._heatDistortionMaskW = w;
+      this._heatDistortionMaskH = h;
+    }
+
+    const data = this._heatDistortionMaskData;
+    data.fill(0);
+
+    const edgeSoftness = Number.isFinite(Number(this.params?.heatDistortionEdgeSoftness))
+      ? Number(this.params.heatDistortionEdgeSoftness)
+      : 0.4;
+    const hazeExpand = 1.15 + Math.max(0, edgeSoftness - 0.4) * 0.55;
+
+    for (const s of stamps) {
+      const cx = s.u * (w - 1);
+      const cy = s.v * (h - 1);
+      const radiusPx = s.radiusPx * scale * hazeExpand;
+      const strength = s.strength;
+      const r = Math.ceil(radiusPx);
+      const x0 = Math.max(0, Math.floor(cx - r));
+      const x1 = Math.min(w - 1, Math.ceil(cx + r));
+      const y0 = Math.max(0, Math.floor(cy - r));
+      const y1 = Math.min(h - 1, Math.ceil(cy + r));
+      const r2 = radiusPx * radiusPx;
+
+      for (let y = y0; y <= y1; y++) {
+        for (let x = x0; x <= x1; x++) {
+          const dx = x - cx;
+          const dy = y - cy;
+          const d2 = dx * dx + dy * dy;
+          if (d2 > r2) continue;
+          const t = 1.0 - Math.sqrt(d2 / r2);
+          const soft = t * t * (3.0 - 2.0 * t);
+          const val = Math.round(strength * soft * 255);
+          const idx = y * w + x;
+          if (val > data[idx]) data[idx] = val;
+        }
+      }
+    }
+
+    this._heatDistortionMaskTex.image.data = data;
+    this._heatDistortionMaskTex.needsUpdate = true;
+    this._heatDistortionMaskSig = sig;
+    return this._heatDistortionMaskTex;
+  }
+
+  /** @private */
+  _invalidateHeatDistortionMask() {
+    this._heatDistortionMaskSig = '';
+  }
+
+  /**
    * Apply a runtime parameter change coming from the UI callback bridge.
    * Structural parameters trigger a full particle-system rebuild; dynamic
    * parameters continue to update live in _updateSystemParams/behaviors.
@@ -802,6 +964,10 @@ export class FireEffectV2 {
     if (paramId.startsWith('fireGlow')) {
       this._applyGlowParamChange(paramId);
       this._invalidateGlowParamCache();
+      this._invalidateHeatDistortionMask();
+    }
+    if (paramId.startsWith('heatDistortion')) {
+      this._invalidateHeatDistortionMask();
     }
     if (!REBUILD_PARAM_SET.has(paramId)) {
       this._systemParamsSignature = '';
@@ -1831,43 +1997,13 @@ export class FireEffectV2 {
       this._endPerfSpan(flickerToken);
     }
 
-    const simHz = Math.max(8, Math.min(FIRE_MAX_SIM_HZ, Number(this.params.fireSimHz) || FIRE_DEFAULT_SIM_HZ));
+    const simHz = this._resolveEffectiveSimHz(timeInfo);
     const ageRate = 0.001 * 750 * simSpeed;
     const useNativeTimestep = simHz >= 60;
 
     if (useNativeTimestep) {
       this._simAccumSec = 0;
-      const simDt = clampedDelta * ageRate;
-      const physicsToken = this._beginPerfSpan('physics');
-      try {
-        for (const floorIndex of this._activeFloors) {
-          const st = this._floorStates.get(floorIndex);
-          if (!st?.batchRenderer) continue;
-          try {
-            st.batchRenderer.update(simDt);
-            this._syncFireDisplayAge(st.batchRenderer);
-          } catch (err) {
-            log.warn('FireEffectV2: BatchedRenderer.update threw:', err);
-          }
-        }
-      } finally {
-        this._endPerfSpan(physicsToken);
-      }
-
-      const visualToken = this._beginPerfSpan('visualRefresh');
-      try {
-        for (const floorIndex of this._activeFloors) {
-          const st = this._floorStates.get(floorIndex);
-          if (!st?.batchRenderer) continue;
-          try {
-            this._refreshFireVisuals(st.batchRenderer, 0, ageRate, true);
-          } catch (err) {
-            log.warn('FireEffectV2: visual refresh threw, skipping frame:', err);
-          }
-        }
-      } finally {
-        this._endPerfSpan(visualToken);
-      }
+      this._runFirePhysicsAndVisuals(clampedDelta * ageRate, ageRate, true, timeInfo);
     } else {
       const simStepSec = 1 / simHz;
       this._simAccumSec += clampedDelta;
@@ -1879,37 +2015,7 @@ export class FireEffectV2 {
       const runPhysics = this._simAccumSec >= simStepSec;
       if (runPhysics) {
         this._simAccumSec -= simStepSec;
-        const simDt = simStepSec * ageRate;
-        const physicsToken = this._beginPerfSpan('physics');
-        try {
-          for (const floorIndex of this._activeFloors) {
-            const st = this._floorStates.get(floorIndex);
-            if (!st?.batchRenderer) continue;
-            try {
-              st.batchRenderer.update(simDt);
-              this._syncFireDisplayAge(st.batchRenderer);
-            } catch (err) {
-              log.warn('FireEffectV2: BatchedRenderer.update threw, skipping frame:', err);
-            }
-          }
-        } finally {
-          this._endPerfSpan(physicsToken);
-        }
-
-        const visualToken = this._beginPerfSpan('visualRefresh');
-        try {
-          for (const floorIndex of this._activeFloors) {
-            const st = this._floorStates.get(floorIndex);
-            if (!st?.batchRenderer) continue;
-            try {
-              this._refreshFireVisuals(st.batchRenderer, 0, ageRate, true);
-            } catch (err) {
-              log.warn('FireEffectV2: visual refresh threw, skipping frame:', err);
-            }
-          }
-        } finally {
-          this._endPerfSpan(visualToken);
-        }
+        this._runFirePhysicsAndVisuals(simStepSec * ageRate, ageRate, true, timeInfo);
       } else {
         const visualToken = this._beginPerfSpan('visualRefresh');
         try {
@@ -1930,16 +2036,122 @@ export class FireEffectV2 {
   }
 
   /**
-   * Pin display age to the last physics step (called after BatchedRenderer.update).
+   * Cap CPU physics rate to the compositor presentation tier so navigation at 30 Hz
+   * does not still run 60 Hz particle integration.
+   * @param {{ targetFps?: number }|null|undefined} timeInfo
+   * @returns {number}
+   * @private
+   */
+  _resolveEffectiveSimHz(timeInfo) {
+    const userHz = Math.max(8, Math.min(FIRE_MAX_SIM_HZ, Number(this.params.fireSimHz) || FIRE_DEFAULT_SIM_HZ));
+    const targetFps = Number(timeInfo?.targetFps);
+    if (Number.isFinite(targetFps) && targetFps >= 8 && targetFps < userHz) {
+      return Math.max(8, Math.floor(targetFps));
+    }
+    return userHz;
+  }
+
+  /**
+   * When multiple floors are active, rotate which floor receives physics each step
+   * so spike cost stays bounded; visuals still refresh every floor every frame.
+   * @returns {number[]}
+   * @private
+   */
+  _getPhysicsFloorsThisFrame() {
+    const floors = [...this._activeFloors].sort((a, b) => a - b);
+    if (floors.length <= 1) return floors;
+    this._physicsFloorCursor = (this._physicsFloorCursor + 1) % floors.length;
+    return [floors[this._physicsFloorCursor]];
+  }
+
+  /**
+   * @param {number} simDt
+   * @param {number} ageRate
+   * @param {boolean} afterPhysics
+   * @param {{ elapsed?: number }} timeInfo
+   * @private
+   */
+  _runFirePhysicsAndVisuals(simDt, ageRate, afterPhysics, timeInfo) {
+    const physicsFloors = this._getPhysicsFloorsThisFrame();
+    const physicsSet = new Set(physicsFloors);
+    const elapsed = Number(timeInfo?.elapsed) || 0;
+
+    const physicsToken = this._beginPerfSpan('physics');
+    try {
+      for (const floorIndex of physicsFloors) {
+        const st = this._floorStates.get(floorIndex);
+        if (!st?.batchRenderer) continue;
+        try {
+          this._stepFirePhysicsSim(st.batchRenderer, simDt);
+          if (Number.isFinite(elapsed)) this._floorLastPhysicsAt.set(floorIndex, elapsed);
+        } catch (err) {
+          log.warn('FireEffectV2: physics sim threw:', err);
+        }
+      }
+    } finally {
+      this._endPerfSpan(physicsToken);
+    }
+
+    const visualToken = this._beginPerfSpan('visualRefresh');
+    try {
+      for (const floorIndex of this._activeFloors) {
+        const st = this._floorStates.get(floorIndex);
+        if (!st?.batchRenderer) continue;
+        try {
+          if (physicsSet.has(floorIndex)) {
+            this._refreshFireVisuals(st.batchRenderer, 0, ageRate, afterPhysics);
+          } else {
+            const lastAt = this._floorLastPhysicsAt.get(floorIndex);
+            const subSec = Number.isFinite(lastAt) && elapsed > lastAt ? elapsed - lastAt : 0;
+            this._refreshFireVisuals(st.batchRenderer, subSec, ageRate, false);
+          }
+        } catch (err) {
+          log.warn('FireEffectV2: visual refresh threw, skipping frame:', err);
+        }
+      }
+    } finally {
+      this._endPerfSpan(visualToken);
+    }
+  }
+
+  /**
+   * Step particle physics only (no GPU instance upload). Visual behaviors are
+   * deferred via `system._msDeferVisualToRefresh` and `_refreshFireVisuals()`.
+   * @param {import('../../libs/three.quarks.module.js').BatchedRenderer} batchRenderer
+   * @param {number} simDt
+   * @private
+   */
+  _stepFirePhysicsSim(batchRenderer, simDt) {
+    const simToken = this._beginPerfSpan('physics.sim');
+    try {
+      batchRenderer.systemToBatchIndex.forEach((_, ps) => {
+        ps._msDeferVisualToRefresh = true;
+        ps.update(simDt);
+      });
+    } finally {
+      this._endPerfSpan(simToken);
+    }
+  }
+
+  /**
+   * Upload instanced particle buffers to the GPU (single pass per frame).
    * @param {import('../../libs/three.quarks.module.js').BatchedRenderer} batchRenderer
    * @private
    */
-  _syncFireDisplayAge(batchRenderer) {
-    batchRenderer.systemToBatchIndex.forEach((_, ps) => {
-      for (let i = 0; i < ps.particleNum; i++) {
-        ps.particles[i]._msDisplayAge = ps.particles[i].age;
+  _uploadFireBatchBuffers(batchRenderer) {
+    const uploadToken = this._beginPerfSpan('visualRefresh.upload');
+    try {
+      for (let i = 0; i < batchRenderer.batches.length; i++) {
+        batchRenderer.batches[i].update();
       }
-    });
+    } finally {
+      this._endPerfSpan(uploadToken);
+    }
+  }
+
+  /** @param {import('../../libs/three.quarks.module.js').ParticleSystem} system @private */
+  _finalizeFireParticleSystem(system) {
+    deferVisualBehaviorsOnSystem(system, FIRE_VISUAL_BEHAVIOR_TYPES);
   }
 
   /**
@@ -1949,12 +2161,15 @@ export class FireEffectV2 {
    * @param {number} ageRate Quarks age units per real second.
    * @param {boolean} [afterPhysics=false] When true, re-run visual behaviors at the
    *   post-physics display age (no extrapolation). Keeps atlas frames in sync after
-   *   BatchedRenderer.update, which evaluates behaviors before age += delta.
+   *   the physics step, which evaluates behaviors before age += delta.
    * @private
    */
   _refreshFireVisuals(batchRenderer, subFrameSec, ageRate, afterPhysics = false) {
     if (!afterPhysics) {
-      if (!Number.isFinite(subFrameSec) || subFrameSec <= 0) return;
+      if (!Number.isFinite(subFrameSec) || subFrameSec <= 0) {
+        this._uploadFireBatchBuffers(batchRenderer);
+        return;
+      }
     }
     const extrapolate = (!afterPhysics && Number.isFinite(subFrameSec) && subFrameSec > 0)
       ? subFrameSec * ageRate
@@ -1963,10 +2178,16 @@ export class FireEffectV2 {
     batchRenderer.systemToBatchIndex.forEach((_, ps) => {
       if (ps.paused) return;
 
+      ps._msDeferVisualToRefresh = false;
+
       const particles = ps.particles;
       const pNum = ps.particleNum;
 
-      if (extrapolate > 0) {
+      if (afterPhysics) {
+        for (let i = 0; i < pNum; i++) {
+          particles[i]._msDisplayAge = particles[i].age;
+        }
+      } else if (extrapolate > 0) {
         for (let i = 0; i < pNum; i++) {
           const particle = particles[i];
           const ts = particle._msTimeScaleFactor;
@@ -1978,7 +2199,6 @@ export class FireEffectV2 {
       for (let j = 0; j < ps.behaviors.length; j++) {
         const beh = ps.behaviors[j];
         if (!FIRE_VISUAL_BEHAVIOR_TYPES.has(beh.type)) continue;
-        if (beh.frameUpdate) beh.frameUpdate(0);
         const isSizeOverLife = beh.type === 'SizeOverLife';
         const hasSystemParam = typeof beh.update === 'function' && beh.update.length >= 3;
         for (let i = 0; i < pNum; i++) {
@@ -1998,9 +2218,7 @@ export class FireEffectV2 {
       }
     });
 
-    for (let i = 0; i < batchRenderer.batches.length; i++) {
-      batchRenderer.batches[i].update();
-    }
+    this._uploadFireBatchBuffers(batchRenderer);
   }
 
   /**
@@ -2057,10 +2275,12 @@ export class FireEffectV2 {
     this._clearAllGlow();
     this._glowClustersByFloor.clear();
     this._glowSourcePointsByFloor.clear();
+    this._invalidateHeatDistortionMask();
 
     this._structuralSignature = '';
     this._systemParamsSignature = '';
     this._simAccumSec = 0;
+    this._floorLastPhysicsAt.clear();
     this._invalidateGlowParamCache();
   }
 
@@ -2073,6 +2293,10 @@ export class FireEffectV2 {
     this._fireTexture = null;
     this._emberTexture = null;
     this._smokeTexture = null;
+    try { this._heatDistortionMaskTex?.dispose?.(); } catch (_) {}
+    this._heatDistortionMaskTex = null;
+    this._heatDistortionMaskData = null;
+    this._heatDistortionMaskSig = '';
     this._initialized = false;
     this._lightingEffect = null;
     log.info('FireEffectV2 disposed');
@@ -2540,6 +2764,7 @@ export class FireEffectV2 {
     }
 
     this._glowClustersByFloor.set(floorIndex, clusters);
+    this._invalidateHeatDistortionMask();
   }
 
   _reclusterGlowFromStoredPoints() {
@@ -3111,13 +3336,13 @@ export class FireEffectV2 {
       defaultCycles: 3.5,
     });
     const buoyancy = new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(p.fireHeight * 0.125));
-    const updraftBehavior = new SmartUpdraftBehavior();
-    const windForce = new SmartWindBehavior();
     const turbulence = new FixedCurlNoiseField(
       new THREE.Vector3(150, 150, 50),
       new THREE.Vector3(80, 80, 30),
       1.5
     );
+    const fireForces = new FireForcesBehavior('flame');
+    fireForces.bindTurbulence(turbulence);
 
     const system = new QuarksParticleSystem({
       duration: 1,
@@ -3142,17 +3367,13 @@ export class FireEffectV2 {
       startRotation: new IntervalValue(0, Math.PI * 2),
       behaviors: [
         flameShapeFrames,
-        windForce,
-        new ParticleMotionGatedBehavior(buoyancy),
-        updraftBehavior,
-        new ParticleMotionGatedBehavior(turbulence),
+        fireForces,
         sizeOverLife,
         flameLifecycle,
       ],
     });
 
     system.userData = {
-      windForce,
       ownerEffect: this,
       updraftForce: buoyancy,
       baseUpdraftMag: p.fireHeight * 0.125,
@@ -3169,6 +3390,7 @@ export class FireEffectV2 {
 
     this._applyParticleSpawnCap(system, maxParticles);
     this._syncSystemEmission(system, p.globalFireRate ?? 1.0);
+    this._finalizeFireParticleSystem(system);
 
     // Start the system so it becomes active and emits particles.
     if (typeof system.play === 'function') system.play();
@@ -3205,10 +3427,10 @@ export class FireEffectV2 {
 
     const emberLifecycle = new EmberLifecycleBehavior(this);
     const buoyancy = new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(p.fireHeight * 0.4));
-    const updraftBehavior = new SmartUpdraftBehavior();
-    const windForce = new SmartWindBehavior();
     const emberCurlStrength = new THREE.Vector3(150, 150, 50);
     const turbulence = new FixedCurlNoiseField(new THREE.Vector3(30, 30, 30), emberCurlStrength.clone(), 4.0);
+    const emberForces = new FireForcesBehavior('ember');
+    emberForces.bindTurbulence(turbulence);
     const emberSizeOverLife = new SizeOverLife(new PiecewiseBezier([
       [new Bezier(0.0, 0.14, 0.9, 0.0), 0],
     ]));
@@ -3232,17 +3454,13 @@ export class FireEffectV2 {
       renderMode: RenderMode.BillBoard,
       renderOrder: this._computeEmberRenderOrder(floorIndex, outdoorLayer),
       behaviors: [
-        buoyancy,
-        updraftBehavior,
-        windForce,
-        new ParticleTimeScaledBehavior(turbulence),
+        emberForces,
         emberSizeOverLife,
         emberLifecycle,
       ],
     });
 
     system.userData = {
-      windForce,
       ownerEffect: this,
       updraftForce: buoyancy,
       baseUpdraftMag: p.fireHeight * 0.4,
@@ -3261,6 +3479,7 @@ export class FireEffectV2 {
 
     this._applyParticleSpawnCap(system, maxParticles);
     this._syncSystemEmission(system, p.globalFireRate ?? 1.0);
+    this._finalizeFireParticleSystem(system);
 
     // Start the system so it becomes active and emits particles.
     if (typeof system.play === 'function') system.play();
@@ -3304,12 +3523,12 @@ export class FireEffectV2 {
     // Top-down play: buoyancy reads on the XY ground plane (+Y) with a Z lift for depth sorting.
     const smokeUpdraftDir = new THREE.Vector3(0, 0.82, 0.28).normalize();
     const smokeUpdraft = new ApplyForce(smokeUpdraftDir, new ConstantValue(smokeUpdraftMag));
-    const updraftBehavior = new SmartUpdraftBehavior();
-    const windForce = new SmartWindBehavior();
     const smokeWindInfluence = Math.max(0.0, p.smokeWindInfluence ?? 1.0);
     const smokeTurbMult = Math.max(0.0, p.smokeTurbulence ?? 1.0);
     const smokeCurlStrengthBase = new THREE.Vector3(200 * smokeTurbMult, 200 * smokeTurbMult, 80 * smokeTurbMult);
     const turbulence = new FixedCurlNoiseField(new THREE.Vector3(100, 100, 40), smokeCurlStrengthBase.clone(), 2.0);
+    const smokeForces = new FireForcesBehavior('smoke');
+    smokeForces.bindTurbulence(turbulence);
     const outdoorLayer = opts.outdoorLayer === true;
 
     const system = new QuarksParticleSystem({
@@ -3336,15 +3555,12 @@ export class FireEffectV2 {
       startRotation: new ConstantValue(0),
       behaviors: [
         smokeShapeFrames,
-        windForce,
-        updraftBehavior,
-        new ParticleTimeScaledBehavior(turbulence),
+        smokeForces,
         smokeLifecycle,
       ],
     });
 
     system.userData = {
-      windForce,
       ownerEffect: this,
       updraftForce: smokeUpdraft,
       baseUpdraftMag: smokeUpdraftMag,
@@ -3364,6 +3580,7 @@ export class FireEffectV2 {
 
     this._applyParticleSpawnCap(system, maxParticles);
     this._syncSystemEmission(system, p.globalFireRate ?? 1.0);
+    this._finalizeFireParticleSystem(system);
 
     // Start the system so it becomes active and emits particles.
     if (typeof system.play === 'function') system.play();

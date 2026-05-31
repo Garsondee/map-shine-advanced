@@ -5,12 +5,14 @@ import { weatherController } from '../core/WeatherController.js';
  * - Particles with `_windSusceptibility = 1.0` get full wind (Outdoors).
  * - Particles with `_windSusceptibility = 0.0` get no wind (Indoors).
  * - Values in between are interpolated.
- * 
+ *
  * This replaces the standard ApplyForce for wind in systems that need indoor/outdoor awareness.
  */
 export class SmartWindBehavior {
   constructor() {
     this.type = 'SmartWind';
+    /** @type {{ windSpeed: number, windDirX: number, windDirY: number, hasWind: boolean }} */
+    this._frameWind = { windSpeed: 0, windDirX: 0, windDirY: 0, hasWind: false };
   }
 
   initialize(particle, system) {
@@ -18,6 +20,38 @@ export class SmartWindBehavior {
     if (typeof particle._windSusceptibility !== 'number') {
       particle._windSusceptibility = 1.0;
     }
+  }
+
+  /** @private */
+  _refreshFrameWind() {
+    const cache = this._frameWind;
+    cache.windSpeed = 0;
+    cache.windDirX = 0;
+    cache.windDirY = 0;
+    cache.hasWind = false;
+
+    let state;
+    try {
+      state = weatherController.getCurrentState();
+    } catch (_) {
+      return;
+    }
+
+    let windSpeed = 0;
+    if (state && typeof state.windSpeedMS === 'number' && Number.isFinite(state.windSpeedMS)) {
+      windSpeed = Math.max(0.0, Math.min(1.0, state.windSpeedMS / 78.0));
+    } else if (state && typeof state.windSpeed === 'number' && Number.isFinite(state.windSpeed)) {
+      windSpeed = Math.max(0.0, Math.min(1.0, state.windSpeed));
+    }
+    if (!Number.isFinite(windSpeed) || windSpeed <= 0.001) return;
+
+    const windDir = state?.windDirection;
+    if (!windDir || !Number.isFinite(windDir.x) || !Number.isFinite(windDir.y)) return;
+
+    cache.windSpeed = windSpeed;
+    cache.windDirX = windDir.x;
+    cache.windDirY = windDir.y;
+    cache.hasWind = true;
   }
 
   update(particle, delta, system) {
@@ -38,18 +72,10 @@ export class SmartWindBehavior {
     if (typeof particle._flameMotionScale === 'number' && Number.isFinite(particle._flameMotionScale)) {
       susceptibility *= Math.max(0, Math.min(1, particle._flameMotionScale));
     }
-    if (!Number.isFinite(susceptibility) || susceptibility <= 0.001) return; // Optimization: Skip indoor particles
+    if (!Number.isFinite(susceptibility) || susceptibility <= 0.001) return;
 
-    // 2. Get Global Wind State
-    const state = weatherController.getCurrentState();
-    // Prefer real-world windSpeedMS (m/s) but keep existing tuning by mapping 78 m/s => 1.0.
-    let windSpeed = 0;
-    if (state && typeof state.windSpeedMS === 'number' && Number.isFinite(state.windSpeedMS)) {
-      windSpeed = Math.max(0.0, Math.min(1.0, state.windSpeedMS / 78.0));
-    } else if (state && typeof state.windSpeed === 'number' && Number.isFinite(state.windSpeed)) {
-      windSpeed = Math.max(0.0, Math.min(1.0, state.windSpeed));
-    }
-    if (!Number.isFinite(windSpeed) || windSpeed <= 0.001) {
+    const frameWind = this._frameWind;
+    if (!frameWind.hasWind) {
       if (particle.velocity) {
         const decay = isSmoke ? 0.992 : 0.85;
         particle.velocity.x *= decay;
@@ -58,32 +84,13 @@ export class SmartWindBehavior {
       return;
     }
 
-    const windDir = state && state.windDirection; // Vector2
-    if (!windDir || !Number.isFinite(windDir.x) || !Number.isFinite(windDir.y)) {
-      if (particle.velocity) {
-        const decay = isSmoke ? 0.992 : 0.85;
-        particle.velocity.x *= decay;
-        particle.velocity.y *= decay;
-      }
-      return;
-    }
-
-    // 3. Calculate Force
-    // Base magnitude scaling matches FireSparksEffect / WeatherParticles tuning
-    // We can allow an optional system-level multiplier via system.userData or similar if needed.
-    // For now, we use a standard base force of 300.0 (matches FireSparksEffect).
-    
     // Check for system-level overrides
     let influence = 1.0;
     if (system && system.userData && typeof system.userData.windInfluence === 'number') {
-        influence = system.userData.windInfluence;
+      influence = system.userData.windInfluence;
     }
     if (!Number.isFinite(influence)) influence = 1.0;
 
-    // When influence is effectively zero (e.g. Fire UI Wind Influence = 0), we
-    // want particles to *stop* being carried by the wind, not just stop
-    // accelerating further. Apply a gentle horizontal damping so any existing
-    // wind-driven velocity decays quickly.
     if (influence <= 0.001) {
       if (particle.velocity) {
         particle.velocity.x *= 0.85;
@@ -92,19 +99,13 @@ export class SmartWindBehavior {
       return;
     }
 
-    // Smoke lives much longer than flames; use a reduced base so drift stays map-scale.
     const smokeWindMul = isSmoke ? 0.42 : 1.0;
-
-    const forceMag = windSpeed * 300.0 * influence * susceptibility * smokeWindMul;
+    const forceMag = frameWind.windSpeed * 300.0 * influence * susceptibility * smokeWindMul;
     if (!Number.isFinite(forceMag)) return;
 
-    // 4. Apply to Velocity
-    // Standard Euler integration: v += a * dt
-    // Wind acts as a force (acceleration).
-
     if (particle.velocity) {
-      const dvx = windDir.x * forceMag * dt;
-      const dvy = windDir.y * forceMag * dt;
+      const dvx = frameWind.windDirX * forceMag * dt;
+      const dvy = frameWind.windDirY * forceMag * dt;
 
       if (Number.isFinite(dvx) && Number.isFinite(dvy)) {
         particle.velocity.x += dvx;
@@ -113,15 +114,13 @@ export class SmartWindBehavior {
     }
   }
 
-  frameUpdate(delta) { 
-    // No per-frame global update needed, we pull from WeatherController directly
+  frameUpdate(delta) {
+    this._refreshFrameWind();
   }
 
   clone() {
     return new SmartWindBehavior();
   }
 
-  reset() { 
-    // No internal state to reset
-  }
+  reset() {}
 }

@@ -2280,91 +2280,14 @@ export class DistortionManager {
   }
 
   /**
-   * Update effect state
+   * Push registered distortion source masks/params into the composite shader.
+   * Called from update() and again at render() time so late-bound sources
+   * (e.g. fire heat haze synced just before the distortion pass) are current.
    */
-  update(timeInfo) {
-    if (!this.enabled) return;
-    
-    const u = this.compositeMaterial.uniforms;
-    const au = this.applyMaterial?.uniforms;
-    
-    // Update time
-    u.uTime.value = timeInfo.elapsed;
-    u.uGlobalIntensity.value = this.params.globalIntensity;
+  syncSourceUniforms() {
+    const u = this.compositeMaterial?.uniforms;
+    if (!u) return;
 
-    // Bind depth pass uniforms so the composite shader can occlude distortion
-    // for elevated surfaces (tokens, overhead tiles, etc.).
-    DepthShaderChunks.bindDepthPass(u);
-
-    if (au) {
-      // Also bind depth pass for the apply shader (water shading occlusion).
-      DepthShaderChunks.bindDepthPass(au);
-
-      au.uTime.value = timeInfo.elapsed;
-
-      const sceneComposer = window.MapShine?.sceneComposer ?? window.canvas?.mapShine?.sceneComposer;
-      const z = sceneComposer?.currentZoom ?? (typeof sceneComposer?.getZoomScale === 'function' ? sceneComposer.getZoomScale() : 1.0);
-      au.uZoom.value = Number.isFinite(z) ? z : 1.0;
-
-      if (au.uZoomMax) {
-        const limits = (typeof sceneComposer?.getZoomLimits === 'function') ? sceneComposer.getZoomLimits() : null;
-        const zm = limits && Number.isFinite(limits.max) ? limits.max : 1.0;
-        au.uZoomMax.value = Number.isFinite(zm) && zm > 0 ? zm : 1.0;
-      }
-    }
-
-    // Update view mapping (screen UV -> Three world -> Foundry world -> scene UV)
-    try {
-      const d = canvas?.dimensions;
-
-      // Full canvas dimensions (Foundry coords, including padding)
-      if (d && typeof d.width === 'number' && typeof d.height === 'number') {
-        u.uSceneDimensions.value.set(d.width, d.height);
-
-        if (au && au.uSceneDimensions) {
-          au.uSceneDimensions.value.set(d.width, d.height);
-        }
-      }
-
-      // Compute view bounds by intersecting camera frustum with ground plane at groundZ
-      const camera = this.mainCamera;
-      const sceneComposer = window.MapShine?.sceneComposer ?? window.canvas?.mapShine?.sceneComposer;
-      const groundZ = sceneComposer?.groundZ ?? 0;
-      if (camera) {
-        this._updateViewBoundsFromCamera(camera, groundZ, u.uViewBounds.value);
-
-        if (au && au.uViewBounds) {
-          au.uViewBounds.value.copy(u.uViewBounds.value);
-        }
-      }
-
-      // Prefer canvas.dimensions.sceneRect (used elsewhere in this codebase)
-      const sceneRect = d?.sceneRect;
-      if (sceneRect && typeof sceneRect.x === 'number' && typeof sceneRect.y === 'number') {
-        u.uSceneRect.value.set(sceneRect.x, sceneRect.y, sceneRect.width || 1, sceneRect.height || 1);
-        u.uHasSceneRect.value = 1.0;
-
-        if (au && au.uSceneRect && au.uHasSceneRect) {
-          au.uSceneRect.value.copy(u.uSceneRect.value);
-          au.uHasSceneRect.value = 1.0;
-        }
-      } else {
-        u.uHasSceneRect.value = 0.0;
-
-        if (au && au.uHasSceneRect) {
-          au.uHasSceneRect.value = 0.0;
-        }
-      }
-    } catch (_) {
-      // If anything goes wrong, fall back to screen-space behavior
-      u.uHasSceneRect.value = 0.0;
-
-      if (au && au.uHasSceneRect) {
-        au.uHasSceneRect.value = 0.0;
-      }
-    }
-    
-    // Update per-source uniforms
     const heatSource = this.sources.get('heat');
     if (heatSource && heatSource.enabled && heatSource.mask) {
       u.uHeatEnabled.value = 1.0;
@@ -2398,7 +2321,7 @@ export class DistortionManager {
     } else {
       u.uHeatEnabled.value = 0.0;
     }
-    
+
     const waterSource = this.sources.get('water');
     if (waterSource && waterSource.enabled && waterSource.mask) {
       u.uWaterEnabled.value = 1.0;
@@ -2487,6 +2410,96 @@ export class DistortionManager {
       if (u.uWaterShoreNoiseWashStrength) u.uWaterShoreNoiseWashStrength.value = 0.45;
       if (u.uWaterShoreNoiseWashSpeed) u.uWaterShoreNoiseWashSpeed.value = 0.8;
     }
+  }
+
+  /**
+   * Update effect state
+   */
+  update(timeInfo) {
+    if (!this.enabled) return;
+    
+    const u = this.compositeMaterial.uniforms;
+    const au = this.applyMaterial?.uniforms;
+    
+    // Update time
+    u.uTime.value = timeInfo.elapsed;
+    u.uGlobalIntensity.value = this.params.globalIntensity;
+
+    // Bind depth pass uniforms so the composite shader can occlude distortion
+    // for elevated surfaces (tokens, overhead tiles, etc.).
+    DepthShaderChunks.bindDepthPass(u);
+
+    if (au) {
+      // Also bind depth pass for the apply shader (water shading occlusion).
+      DepthShaderChunks.bindDepthPass(au);
+
+      au.uTime.value = timeInfo.elapsed;
+
+      const sceneComposer = window.MapShine?.sceneComposer ?? window.canvas?.mapShine?.sceneComposer;
+      const z = sceneComposer?.currentZoom ?? (typeof sceneComposer?.getZoomScale === 'function' ? sceneComposer.getZoomScale() : 1.0);
+      au.uZoom.value = Number.isFinite(z) ? z : 1.0;
+
+      if (au.uZoomMax) {
+        const limits = (typeof sceneComposer?.getZoomLimits === 'function') ? sceneComposer.getZoomLimits() : null;
+        const zm = limits && Number.isFinite(limits.max) ? limits.max : 1.0;
+        au.uZoomMax.value = Number.isFinite(zm) && zm > 0 ? zm : 1.0;
+      }
+    }
+
+    // Update view mapping (screen UV -> Three world -> Foundry world -> scene UV)
+    try {
+      const d = canvas?.dimensions;
+
+      // Full canvas dimensions (Foundry coords, including padding)
+      if (d && typeof d.width === 'number' && typeof d.height === 'number') {
+        u.uSceneDimensions.value.set(d.width, d.height);
+
+        if (au && au.uSceneDimensions) {
+          au.uSceneDimensions.value.set(d.width, d.height);
+        }
+      }
+
+      // Compute view bounds by intersecting camera frustum with ground plane at groundZ
+      const camera = this.mainCamera;
+      const sceneComposer = window.MapShine?.sceneComposer ?? window.canvas?.mapShine?.sceneComposer;
+      const groundZ = sceneComposer?.groundZ ?? 0;
+      if (camera) {
+        this._updateViewBoundsFromCamera(camera, groundZ, u.uViewBounds.value);
+
+        if (au && au.uViewBounds) {
+          au.uViewBounds.value.copy(u.uViewBounds.value);
+        }
+      }
+
+      // Prefer canvas.dimensions.sceneRect (used elsewhere in this codebase)
+      const sceneRect = d?.sceneRect;
+      if (sceneRect && typeof sceneRect.x === 'number' && typeof sceneRect.y === 'number') {
+        u.uSceneRect.value.set(sceneRect.x, sceneRect.y, sceneRect.width || 1, sceneRect.height || 1);
+        u.uHasSceneRect.value = 1.0;
+
+        if (au && au.uSceneRect && au.uHasSceneRect) {
+          au.uSceneRect.value.copy(u.uSceneRect.value);
+          au.uHasSceneRect.value = 1.0;
+        }
+      } else {
+        u.uHasSceneRect.value = 0.0;
+
+        if (au && au.uHasSceneRect) {
+          au.uHasSceneRect.value = 0.0;
+        }
+      }
+    } catch (_) {
+      // If anything goes wrong, fall back to screen-space behavior
+      u.uHasSceneRect.value = 0.0;
+
+      if (au && au.uHasSceneRect) {
+        au.uHasSceneRect.value = 0.0;
+      }
+    }
+    
+    this.syncSourceUniforms();
+
+    const waterSource = this.sources.get('water');
 
     // Water chromatic refraction (apply pass)
     if (au) {
@@ -3151,6 +3164,10 @@ export class DistortionManager {
       return;
     }
     
+    // Fire heat (and any other late-bound sources) may have been synced after
+    // update() ran earlier in the frame — refresh composite uniforms now.
+    this.syncSourceUniforms();
+
     // Step 1: Render composite distortion map
     renderer.setRenderTarget(this.distortionTarget);
     renderer.clear();

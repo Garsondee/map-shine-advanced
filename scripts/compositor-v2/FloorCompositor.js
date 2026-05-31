@@ -872,6 +872,15 @@ export class FloorCompositor {
     /** @type {number} Min interval between overlay-layer scans in ms */
     this._overlayLayerScanIntervalMs = 350;
 
+    /** @type {Set<import('three').Object3D>|null} Reused by post-bloom overlay draws */
+    this._waterSplashBatchRootsCache = null;
+    /** @type {Set<import('three').Object3D>|null} Reused by post-bloom overlay draws */
+    this._vegetationOverlayRootsCache = null;
+    /** @type {Map<number, import('three').Texture|null>|null} Per-frame upper splash occluder cache */
+    this._splashUpperOccTexCache = null;
+    /** @type {string} Signature for cached same-floor splash overhead mask */
+    this._sameFloorSplashOccSig = '';
+
     // PERFORMANCE: Pre-allocated objects to eliminate GC pressure in the render loop
     this._tempColor = null;
     this._tempVec4 = null;
@@ -1217,12 +1226,13 @@ export class FloorCompositor {
   }
 
   /**
-   * Collect WaterSplashesEffectV2 BatchedRenderer roots for visibility-gated draws.
+   * Collect WaterSplashesEffectV2 BatchedRenderer roots for post-bloom overlay draws.
    * @returns {Set<import('three').Object3D>}
    * @private
    */
   _getWaterSplashBatchRoots() {
-    const roots = new Set();
+    const roots = this._waterSplashBatchRootsCache ?? (this._waterSplashBatchRootsCache = new Set());
+    roots.clear();
     const splash = this._waterSplashesEffect;
     if (!splash?._floorStates) return roots;
     for (const st of splash._floorStates.values()) {
@@ -1238,7 +1248,8 @@ export class FloorCompositor {
    * @private
    */
   _getVegetationOverlayRoots() {
-    const roots = new Set();
+    const roots = this._vegetationOverlayRootsCache ?? (this._vegetationOverlayRootsCache = new Set());
+    roots.clear();
     const maxFloor = Number.isFinite(Number(this._renderBus?._visibleMaxFloorIndex))
       ? Number(this._renderBus._visibleMaxFloorIndex)
       : 0;
@@ -1274,8 +1285,9 @@ export class FloorCompositor {
   }
 
   /**
-   * Render only objects under `keepRoots` into `targetRT` (layer-0 bus draw).
-   * Quarks BatchedRenderer does not reliably respect isolated Three.js layers.
+   * Composite overlay roots into `targetRT` without walking the full bus scene.
+   * Prep passes already hide splash/vegetation overlays (`renderFloorRangeTo`);
+   * drawing each root subtree avoids O(scene) visibility toggles every frame.
    *
    * @param {THREE.WebGLRenderer} renderer
    * @param {THREE.WebGLRenderTarget} targetRT
@@ -1284,43 +1296,8 @@ export class FloorCompositor {
    * @private
    */
   _compositeBusOverlayVisibilityGate(renderer, targetRT, keepRoots, options = {}) {
-    const scene = this._renderBus?._scene;
     const camera = this.camera;
-    if (!scene || !camera || !renderer || !targetRT || !keepRoots?.size) return false;
-
-    // Ancestors must stay visible: a child with visible=true under visible=false parent never draws.
-    // Descendants too — Quarks BatchedRenderer keeps particle meshes under the batch root.
-    const mustShow = new Set();
-    for (const root of keepRoots) {
-      let node = root;
-      while (node) {
-        mustShow.add(node);
-        node = node.parent;
-      }
-      if (typeof root.traverse === 'function') {
-        root.traverse((child) => {
-          mustShow.add(child);
-        });
-      }
-    }
-
-    const saved = new Map();
-    const visit = (obj) => {
-      if (!obj || saved.has(obj)) return;
-      saved.set(obj, obj.visible === true);
-      if (obj === scene) {
-        // Never toggle the bus scene root.
-      } else if (mustShow.has(obj)) {
-        obj.visible = true;
-      } else {
-        obj.visible = false;
-      }
-      const ch = obj.children;
-      if (ch?.length) {
-        for (let i = 0; i < ch.length; i++) visit(ch[i]);
-      }
-    };
-    visit(scene);
+    if (!camera || !renderer || !targetRT || !keepRoots?.size) return false;
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
@@ -1331,14 +1308,13 @@ export class FloorCompositor {
     renderer.autoClear = false;
     renderer.depthTest = false;
     renderer.depthWrite = false;
+    let drew = false;
     try {
       if (options.vegetationOnly === true) {
         camera.layers.set(VEGETATION_ABOVE_WATER_LAYER);
         camera.layers.enable(21);
       } else if (options.splashesOnly === true) {
         camera.layers.set(0);
-        for (let i = 1; i <= 19; i++) camera.layers.enable(i);
-        camera.layers.enable(WATER_SPLASH_ABOVE_WATER_LAYER);
       } else {
         camera.layers.enable(0);
         for (let i = 1; i <= 19; i++) camera.layers.enable(i);
@@ -1346,13 +1322,14 @@ export class FloorCompositor {
         camera.layers.enable(VEGETATION_ABOVE_WATER_LAYER);
       }
       withSceneScissor(renderer, () => {
-        renderer.render(scene, camera);
+        for (const root of keepRoots) {
+          if (!root || root.visible === false) continue;
+          renderer.render(root, camera);
+          drew = true;
+        }
       });
-      return true;
+      return drew;
     } finally {
-      for (const [obj, wasVisible] of saved) {
-        obj.visible = wasVisible;
-      }
       camera.layers.mask = prevLayerMask;
       renderer.depthTest = prevDepthTest;
       renderer.depthWrite = prevDepthWrite;
@@ -6314,38 +6291,33 @@ export class FloorCompositor {
     const fireHasActiveFloors = Number.isFinite(fireActiveFloorCount) && fireActiveFloorCount > 0;
     if (!fireHasActiveFloors) {
       dist.setSourceEnabled('heat', false);
+      try {
+        if (window.MapShine) window.MapShine.__fireHeatDistortionState = { enabled: false, reason: 'no-active-floors' };
+      } catch (_) {}
       return;
     }
 
-    // Prefer checking whether the ACTIVE floor band has any fire systems.
-    // FireEffectV2 deactivates systems from the per-floor BatchedRenderer but keeps the
-    // per-floor arrays resident, so "any systems anywhere" is not enough to
-    // decide whether heat should run this frame.
-    let hasSystemsOnActiveBand = null;
+    // Prefer checking whether any currently-visible floor band has fire systems.
+    // FireEffectV2 keeps per-floor arrays resident but only activates floors
+    // up to the visible max; ground-floor fire remains active on upper views.
+    let hasSystemsOnVisibleBands = false;
     try {
-      const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
-      const activeIdx = activeFloor && Number.isFinite(Number(activeFloor.index)) ? Number(activeFloor.index) : null;
-      if (activeIdx !== null) {
-        const state = fire?._floorStates?.get(activeIdx) ?? null;
-        hasSystemsOnActiveBand = this._fireEffectHasSystemsInState(state);
+      for (const idx of fire._activeFloors ?? []) {
+        if (this._fireEffectHasSystemsInState(fire?._floorStates?.get(idx))) {
+          hasSystemsOnVisibleBands = true;
+          break;
+        }
       }
     } catch (_) {
-      // Fall back to broader checks below.
+      hasSystemsOnVisibleBands = this._fireEffectHasAnySystems(fire);
     }
 
-    if (hasSystemsOnActiveBand === false) {
+    if (!hasSystemsOnVisibleBands) {
       dist.setSourceEnabled('heat', false);
+      try {
+        if (window.MapShine) window.MapShine.__fireHeatDistortionState = { enabled: false, reason: 'no-fire-systems' };
+      } catch (_) {}
       return;
-    }
-
-    // If we couldn't resolve active-band state, fall back to whether there are
-    // any fire systems at all (legacy safety net).
-    if (hasSystemsOnActiveBand === null) {
-      const fireHasAnySystems = this._fireEffectHasAnySystems(fire);
-      if (!fireHasAnySystems) {
-        dist.setSourceEnabled('heat', false);
-        return;
-      }
     }
 
     const fireParams = fire?.params ?? null;
@@ -6355,77 +6327,26 @@ export class FloorCompositor {
       return;
     }
 
-    const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
-    const ctx = window.MapShine?.activeLevelContext ?? null;
-    const b = Number(ctx?.bottom);
-    const t = Number(ctx?.top);
-    const activeKey = (Number.isFinite(b) && Number.isFinite(t)) ? `${b}:${t}` : null;
-
-    let fireMask = null;
-    let fireMaskSource = 'none';
-    if (compositor && activeKey) {
-      fireMask = compositor.getFloorTexture?.(activeKey, 'fire') ?? null;
-      if (fireMask) fireMaskSource = 'compositor-active';
-    }
-    if (!fireMask && compositor && Number.isFinite(b) && Number.isFinite(t)) {
-      // In levels-inferred contexts, activeLevelContext keys may be fractional and
-      // not string-identical to compositor cache keys. Resolve by numeric range.
-      const cacheKeys = Array.isArray(compositor?._floorCache?.keys?.())
-        ? compositor._floorCache.keys()
-        : Array.from(compositor?._floorCache?.keys?.() ?? []);
-      const mid = (b + t) * 0.5;
-      let bestKey = null;
-      let bestDelta = Infinity;
-      for (const key of cacheKeys) {
-        if (typeof key !== 'string') continue;
-        const parts = key.split(':');
-        if (parts.length !== 2) continue;
-        const kb = Number(parts[0]);
-        const kt = Number(parts[1]);
-        if (!Number.isFinite(kb) || !Number.isFinite(kt)) continue;
-        if (mid < kb || mid > kt) continue;
-        const delta = Math.abs(kb - b) + Math.abs(kt - t);
-        if (delta < bestDelta) {
-          bestDelta = delta;
-          bestKey = key;
-        }
-      }
-      if (bestKey) {
-        fireMask = compositor.getFloorTexture?.(bestKey, 'fire') ?? null;
-        if (fireMask) fireMaskSource = 'compositor-best';
-      }
-    }
-    if (!fireMask) {
-      fireMask = compositor?.getGroundFloorMaskTexture?.('fire') ?? null;
-      if (fireMask) fireMaskSource = 'compositor-ground';
-    }
-    if (!fireMask) {
-      fireMask = window.MapShine?.effectMaskRegistry?.getSlot?.('fire')?.texture ?? null;
-      if (fireMask) fireMaskSource = 'registry-slot';
-    }
-    if (!fireMask) {
-      fireMask = window.MapShine?.sceneComposer?.currentBundle?.masks?.find?.(
-        (m) => (m?.id === 'fire' || m?.type === 'fire')
-      )?.texture ?? null;
-      if (fireMask) fireMaskSource = 'bundle-mask';
-    }
-    if (!fireMask) {
-      fireMask = window.MapShine?.maskManager?.getTexture?.('fire.scene') ?? null;
-      if (fireMask) fireMaskSource = 'mask-manager';
-    }
+    const { fireMask, fireMaskSource } = this._resolveFireHeatMaskTexture(fire);
 
     if (!fireMask) {
       dist.setSourceEnabled('heat', false);
+      try {
+        if (window.MapShine) window.MapShine.__fireHeatDistortionState = { enabled: false, reason: 'no-fire-mask' };
+      } catch (_) {}
       return;
     }
 
     // Guardrail: only trust compositor floor-scoped fire masks by default.
     // Weak/global fallback sources can keep a non-null texture resident even when
     // no meaningful fire contribution exists, forcing DistortionManager apply
-    // every frame. Allow override for debugging/legacy behavior.
+    // every frame. Allow override for debugging/legacy behavior, and allow
+    // fallbacks when live fire systems are confirmed on visible bands.
     const allowWeakHeatFallback = !!window?.MapShine?.__allowFireHeatMaskFallback;
-    const reliableFireMask = fireMaskSource.startsWith('compositor-');
-    if (!reliableFireMask && !allowWeakHeatFallback) {
+    const reliableFireMask =
+      fireMaskSource.startsWith('compositor-')
+      || fireMaskSource.startsWith('fire-runtime');
+    if (!reliableFireMask && !allowWeakHeatFallback && !hasSystemsOnVisibleBands) {
       dist.setSourceEnabled('heat', false);
       return;
     }
@@ -6489,6 +6410,114 @@ export class FloorCompositor {
       });
       dist.setSourceEnabled('heat', true);
     }
+
+    try {
+      if (window.MapShine) {
+        window.MapShine.__fireHeatDistortionState = {
+          enabled: true,
+          fireMaskSource,
+          finalIntensity,
+          heatFrequency,
+          heatSpeed,
+          edgeSoftnessTexels,
+          maskSize: {
+            w: heatMask?.image?.width ?? heatMask?.image?.data?.length ?? null,
+            h: heatMask?.image?.height ?? null,
+          },
+        };
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * Resolve the best available _Fire mask texture for heat-haze distortion.
+   * Prefers compositor floor keys for bands that currently have fire systems.
+   * @param {import('./effects/FireEffectV2.js').FireEffectV2|null|undefined} fire
+   * @returns {{ fireMask: THREE.Texture|null, fireMaskSource: string }}
+   * @private
+   */
+  _resolveFireHeatMaskTexture(fire) {
+    const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+    const floorStack = window.MapShine?.floorStack ?? null;
+    const floors = floorStack?.getFloors?.() ?? [];
+
+    if (compositor && fire?._activeFloors?.size) {
+      const indices = [...fire._activeFloors].sort((a, b) => b - a);
+      for (const idx of indices) {
+        if (!this._fireEffectHasSystemsInState(fire._floorStates?.get(idx))) continue;
+        const floor = floors.find((f) => Number(f?.index) === Number(idx));
+        const key = floor?.compositorKey;
+        if (typeof key === 'string' && key.length) {
+          const tex = compositor.getFloorTexture?.(key, 'fire') ?? null;
+          if (tex) return { fireMask: tex, fireMaskSource: `compositor-floor-${idx}` };
+        }
+      }
+    }
+
+    const activeFloor = floorStack?.getActiveFloor?.() ?? null;
+    const activeCompositorKey = activeFloor?.compositorKey ?? null;
+    if (compositor && typeof activeCompositorKey === 'string' && activeCompositorKey.length) {
+      const tex = compositor.getFloorTexture?.(activeCompositorKey, 'fire') ?? null;
+      if (tex) return { fireMask: tex, fireMaskSource: 'compositor-active' };
+    }
+
+    const ctx = window.MapShine?.activeLevelContext ?? null;
+    const b = Number(ctx?.bottom);
+    const t = Number(ctx?.top);
+    const activeKey = (Number.isFinite(b) && Number.isFinite(t)) ? `${b}:${t}` : null;
+
+    if (compositor && activeKey) {
+      const tex = compositor.getFloorTexture?.(activeKey, 'fire') ?? null;
+      if (tex) return { fireMask: tex, fireMaskSource: 'compositor-active' };
+    }
+    if (compositor && Number.isFinite(b) && Number.isFinite(t)) {
+      // In levels-inferred contexts, activeLevelContext keys may be fractional and
+      // not string-identical to compositor cache keys. Resolve by numeric range.
+      const cacheKeys = Array.isArray(compositor?._floorCache?.keys?.())
+        ? compositor._floorCache.keys()
+        : Array.from(compositor?._floorCache?.keys?.() ?? []);
+      const mid = (b + t) * 0.5;
+      let bestKey = null;
+      let bestDelta = Infinity;
+      for (const key of cacheKeys) {
+        if (typeof key !== 'string') continue;
+        const parts = key.split(':');
+        if (parts.length !== 2) continue;
+        const kb = Number(parts[0]);
+        const kt = Number(parts[1]);
+        if (!Number.isFinite(kb) || !Number.isFinite(kt)) continue;
+        if (mid < kb || mid > kt) continue;
+        const delta = Math.abs(kb - b) + Math.abs(kt - t);
+        if (delta < bestDelta) {
+          bestDelta = delta;
+          bestKey = key;
+        }
+      }
+      if (bestKey) {
+        const tex = compositor.getFloorTexture?.(bestKey, 'fire') ?? null;
+        if (tex) return { fireMask: tex, fireMaskSource: 'compositor-best' };
+      }
+    }
+    if (compositor) {
+      const tex = compositor.getGroundFloorMaskTexture?.('fire') ?? null;
+      if (tex) return { fireMask: tex, fireMaskSource: 'compositor-ground' };
+    }
+
+    const registryTex = window.MapShine?.effectMaskRegistry?.getSlot?.('fire')?.texture ?? null;
+    if (registryTex) return { fireMask: registryTex, fireMaskSource: 'registry-slot' };
+
+    const bundleTex = window.MapShine?.sceneComposer?.currentBundle?.masks?.find?.(
+      (m) => (m?.id === 'fire' || m?.type === 'fire')
+    )?.texture ?? null;
+    if (bundleTex) return { fireMask: bundleTex, fireMaskSource: 'bundle-mask' };
+
+    const managerTex = window.MapShine?.maskManager?.getTexture?.('fire.scene') ?? null;
+    if (managerTex) return { fireMask: managerTex, fireMaskSource: 'mask-manager' };
+
+    const runtimeTex = fire?.buildHeatDistortionMaskTexture?.() ?? null;
+    if (runtimeTex) return { fireMask: runtimeTex, fireMaskSource: 'fire-runtime-clusters' };
+
+    return { fireMask: null, fireMaskSource: 'none' };
   }
 
   /**
@@ -7381,11 +7410,15 @@ export class FloorCompositor {
    * @private
    */
   _publishFrameSplashOccluders(visibleFloors, levelSceneRTs, viewedFloorIndex) {
+    const occCache = this._splashUpperOccTexCache ?? (this._splashUpperOccTexCache = new Map());
+    occCache.clear();
+
     const viewedFi = Number(viewedFloorIndex);
     if (!Number.isFinite(viewedFi) || !Array.isArray(visibleFloors) || !Array.isArray(levelSceneRTs)) {
       this._publishFrameViewedLevelSceneOccluder(null);
       this._publishFrameUpperSplashOccluder(null);
       this._publishFrameSameFloorOverheadOccluder(null);
+      this._sameFloorSplashOccSig = '';
       return;
     }
     const viewedSi = visibleFloors.findIndex((v) => {
@@ -7397,10 +7430,20 @@ export class FloorCompositor {
     this._publishFrameViewedLevelSceneOccluder(null);
     let sameFloorOcc = null;
     if (viewedSi >= 0 && this._splashSameFloorOverheadRT) {
-      sameFloorOcc = this._buildSameFloorOverheadOccluderMask(
-        viewedFi,
-        this._splashSameFloorOverheadRT,
-      );
+      const maxFloor = Number(this._renderBus?._visibleMaxFloorIndex);
+      const hasTiles = this._renderBus?.hasSplashOccluderTilesForFloor?.(viewedFi) === true;
+      const occSig = `${viewedFi}|${maxFloor}|${hasTiles ? 1 : 0}`;
+      if (occSig === this._sameFloorSplashOccSig) {
+        sameFloorOcc = this._splashSameFloorOverheadRT;
+      } else {
+        sameFloorOcc = this._buildSameFloorOverheadOccluderMask(
+          viewedFi,
+          this._splashSameFloorOverheadRT,
+        );
+        this._sameFloorSplashOccSig = occSig;
+      }
+    } else {
+      this._sameFloorSplashOccSig = '';
     }
     this._publishFrameSameFloorOverheadOccluder(sameFloorOcc);
 
@@ -7411,7 +7454,11 @@ export class FloorCompositor {
         for (const rawFi of active) {
           const fi = Number(rawFi);
           if (!Number.isFinite(fi) || fi >= viewedFi) continue;
-          const tex = this.getUpperSceneOccluderTextureForFloorIndex(fi);
+          let tex = occCache.get(fi);
+          if (tex === undefined) {
+            tex = this.getUpperSceneOccluderTextureForFloorIndex(fi) ?? null;
+            occCache.set(fi, tex);
+          }
           if (tex) byFloor.set(fi, tex);
         }
       }
@@ -7430,6 +7477,13 @@ export class FloorCompositor {
   getUpperSceneOccluderTextureForFloorIndex(floorIndex) {
     const fi = Number(floorIndex);
     if (!Number.isFinite(fi)) return null;
+    const occCache = this._splashUpperOccTexCache;
+    if (occCache?.has(fi)) return occCache.get(fi) ?? null;
+    const storeOcc = (tex) => {
+      const out = tex ?? null;
+      occCache?.set(fi, out);
+      return out;
+    };
     try {
       const viewedFi = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index ?? NaN);
       const diag = window.MapShine?.__v2PerLevelDiag ?? null;
@@ -7440,12 +7494,12 @@ export class FloorCompositor {
         || !levelSceneRTs
         || visibleFloors.length !== levelSceneRTs.length
         || visibleFloors.length === 0
-      ) return null;
+      ) return storeOcc(null);
       const li = visibleFloors.findIndex((v) => {
         const idx = Number.isFinite(Number(v?.index)) ? Number(v.index) : Number(v);
         return idx === fi;
       });
-      if (li < 0 || li >= visibleFloors.length - 1) return null;
+      if (li < 0 || li >= visibleFloors.length - 1) return storeOcc(null);
 
       const viewedSi = Number.isFinite(viewedFi)
         ? visibleFloors.findIndex((v) => {
@@ -7455,7 +7509,7 @@ export class FloorCompositor {
         : -1;
       const stackEndSi = viewedSi >= 0 ? viewedSi : (visibleFloors.length - 1);
       const firstAboveSi = li + 1;
-      if (firstAboveSi > stackEndSi) return null;
+      if (firstAboveSi > stackEndSi) return storeOcc(null);
 
       // Ground-water viewed from above: bus mask (slice stacks can miss middle overheads).
       const waterFi = this._resolveWaterSourceFloorForView(viewedFi);
@@ -7467,12 +7521,12 @@ export class FloorCompositor {
         && this._waterOccluderRT
       ) {
         const busRt = this._buildBusOccluderMaskAboveWaterFloor(fi, viewedFi, this._waterOccluderRT);
-        if (busRt?.texture) return busRt.texture;
+        if (busRt?.texture) return storeOcc(busRt.texture);
       }
 
       // Single band above splash floor: use prepass scene RT directly (no union RT stomp).
       if (firstAboveSi === stackEndSi) {
-        return levelSceneRTs[firstAboveSi]?.texture ?? null;
+        return storeOcc(levelSceneRTs[firstAboveSi]?.texture ?? null);
       }
 
       this._tempTextures.length = 0;
@@ -7481,9 +7535,9 @@ export class FloorCompositor {
         if (sceneRT?.texture) this._tempTextures.push(sceneRT.texture);
       }
       const rt = this._buildUpperSceneAlphaOccluderFromTextures(this._tempTextures);
-      return rt?.texture ?? null;
+      return storeOcc(rt?.texture ?? null);
     } catch (_) {
-      return null;
+      return storeOcc(null);
     }
   }
 

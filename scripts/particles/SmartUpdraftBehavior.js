@@ -12,6 +12,7 @@ import { weatherController } from '../core/WeatherController.js';
 export class SmartUpdraftBehavior {
   constructor() {
     this.type = 'SmartUpdraft';
+    this._framePrecip = 0;
   }
 
   initialize(particle) {
@@ -36,20 +37,11 @@ export class SmartUpdraftBehavior {
     const outdoor = Math.max(0, Math.min(1, particle._windSusceptibility ?? 1.0));
     if (outdoor <= 0.001) return 1.0;
 
-    let precip = 0;
-    try {
-      const state = (typeof weatherController?.getCurrentState === 'function')
-        ? weatherController.getCurrentState()
-        : (weatherController?.currentState ?? {});
-      precip = state?.precipitation ?? 0;
-    } catch (_) {
-      precip = 0;
-    }
+    const precip = this._framePrecip;
     if (!Number.isFinite(precip) || precip <= 0.001) return 1.0;
 
     const owner = system?.userData?.ownerEffect;
     const precipKill = owner?.params?.weatherPrecipKill ?? 0.5;
-    // Rain hits vertical motion harder than spawn-time guttering (life/size).
     const damp = Math.min(1.0, outdoor * precip * precipKill * 1.75);
     return Math.max(0.05, 1.0 - damp);
   }
@@ -88,7 +80,18 @@ export class SmartUpdraftBehavior {
     }
   }
 
-  frameUpdate() {}
+  frameUpdate() {
+    let precip = 0;
+    try {
+      const state = (typeof weatherController?.getCurrentState === 'function')
+        ? weatherController.getCurrentState()
+        : (weatherController?.currentState ?? {});
+      precip = state?.precipitation ?? 0;
+    } catch (_) {
+      precip = 0;
+    }
+    this._framePrecip = Number.isFinite(precip) ? precip : 0;
+  }
 
   clone() {
     return new SmartUpdraftBehavior();

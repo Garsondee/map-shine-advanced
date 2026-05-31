@@ -272,6 +272,15 @@ export class EffectComposer {
     if (!timeInfo) return;
 
     try {
+      const ps = window.MapShine?.__presentationState;
+      const gateFps = Number(ps?.targetFps);
+      if (!Number.isFinite(timeInfo.targetFps) && Number.isFinite(gateFps) && gateFps > 0) {
+        timeInfo.targetFps = gateFps;
+        timeInfo.presentationTier = ps?.tier ?? null;
+      }
+    } catch (_) {}
+
+    try {
       fc.tickParticleSystems(timeInfo);
     } catch (err) {
       log.warn('tickParticleSystems threw:', err);

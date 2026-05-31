@@ -2580,6 +2580,13 @@ export class FloorCompositor {
   getPreferredContinuousFps() {
     try {
       if (this.wantsContinuousRender()) {
+        const fire = this._fireEffect;
+        const fireFloorCount = resolveFloorEffectActive(fire) ? (fire?._activeFloors?.size ?? 0) : 0;
+        // Multi-floor fire is CPU-heavy; prefer the presentation cap over 60 Hz active tier.
+        if (fireFloorCount > 1) {
+          const presentation = Number(window.MapShine?.renderPresentationFps);
+          if (Number.isFinite(presentation) && presentation > 0) return presentation;
+        }
         // Match active presentation tier so Quarks particles stay smooth on high-refresh displays.
         const active = Number(window.MapShine?.renderActiveFps);
         return Number.isFinite(active) && active > 0 ? active : 60;

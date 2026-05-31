@@ -46,6 +46,7 @@ import {
 const log = createLogger('WindowLightEffectV2');
 
 const WINDOW_MASK_ALIASES = ['windows', 'structural'];
+const SPECULAR_MASK_ALIASES = ['specular'];
 
 /** Scale emit RT values for compose `litColor *= (1 + win)` — not display albedo. */
 const WINDOW_ILLUM_SCALE = 0.35;
@@ -109,6 +110,154 @@ const EMIT_CLOUD_GLSL = /* glsl */`
   }
 `;
 
+const WL_REFRACT_GLSL = /* glsl */`
+  float wlMaskLuma(vec4 mask, float falloff) {
+    vec3 shaped = pow(clamp(mask.rgb, 0.0, 1.0), vec3(max(falloff, 0.001)));
+    return dot(shaped, vec3(0.2126, 0.7152, 0.0722)) * mask.a;
+  }
+
+  vec4 wlSampleWindowMaskAtFloor(float floorIdx, vec2 sceneUv, vec2 offsetUv) {
+    vec2 suv = clamp(sceneUv + offsetUv, 0.0, 1.0);
+    vec4 maskOut = vec4(0.0);
+    if (floorIdx < 0.5 && uHasWindow0 > 0.5) {
+      if (uWindow0FlipY > 0.5) suv.y = 1.0 - suv.y;
+      maskOut = texture2D(tWindow0, suv);
+    } else if (floorIdx < 1.5 && uHasWindow1 > 0.5) {
+      if (uWindow1FlipY > 0.5) suv.y = 1.0 - suv.y;
+      maskOut = texture2D(tWindow1, suv);
+    } else if (floorIdx < 2.5 && uHasWindow2 > 0.5) {
+      if (uWindow2FlipY > 0.5) suv.y = 1.0 - suv.y;
+      maskOut = texture2D(tWindow2, suv);
+    } else if (floorIdx >= 2.5 && uHasWindow3 > 0.5) {
+      if (uWindow3FlipY > 0.5) suv.y = 1.0 - suv.y;
+      maskOut = texture2D(tWindow3, suv);
+    }
+    return maskOut;
+  }
+
+  float wlSampleSpecularAtFloor(float floorIdx, vec2 sceneUv) {
+    vec2 suv = clamp(sceneUv, 0.0, 1.0);
+    float specOut = 0.0;
+    if (floorIdx < 0.5 && uHasSpecular0 > 0.5) {
+      if (uSpecular0FlipY > 0.5) suv.y = 1.0 - suv.y;
+      specOut = texture2D(tSpecular0, suv).r;
+    } else if (floorIdx < 1.5 && uHasSpecular1 > 0.5) {
+      if (uSpecular1FlipY > 0.5) suv.y = 1.0 - suv.y;
+      specOut = texture2D(tSpecular1, suv).r;
+    } else if (floorIdx < 2.5 && uHasSpecular2 > 0.5) {
+      if (uSpecular2FlipY > 0.5) suv.y = 1.0 - suv.y;
+      specOut = texture2D(tSpecular2, suv).r;
+    } else if (floorIdx >= 2.5 && uHasSpecular3 > 0.5) {
+      if (uSpecular3FlipY > 0.5) suv.y = 1.0 - suv.y;
+      specOut = texture2D(tSpecular3, suv).r;
+    }
+    return specOut;
+  }
+
+  float wlMaskEdge(float floorIdx, vec2 sceneUv, vec2 texelSize, float falloff) {
+    vec2 t = texelSize;
+    float c = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, sceneUv, vec2(0.0)), falloff);
+    float l = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, sceneUv, vec2(-t.x, 0.0)), falloff);
+    float r = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, sceneUv, vec2(t.x, 0.0)), falloff);
+    float d = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, sceneUv, vec2(0.0, -t.y)), falloff);
+    float u = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, sceneUv, vec2(0.0, t.y)), falloff);
+    return clamp((abs(l - r) + abs(d - u)) * 2.5, 0.0, 1.0);
+  }
+
+  vec2 wlHash22(vec2 p) {
+    return fract(sin(vec2(
+      dot(p, vec2(127.1, 311.7)),
+      dot(p, vec2(269.5, 183.3))
+    )) * 43758.5453);
+  }
+
+  float wlSparklePointAt(vec2 p, vec2 cell, float layerIdx, float timeSlot, float t, float speed, float spawnCut) {
+    float spawn = wlHash22(cell + vec2(timeSlot * 19.0 + layerIdx * 47.0, timeSlot * 0.31 + layerIdx * 3.0)).x;
+    if (spawn < spawnCut) return 0.0;
+
+    vec2 rnd = wlHash22(cell + vec2(71.2 + layerIdx * 13.0, timeSlot * 23.0 + layerIdx));
+    vec2 center = cell + rnd * 0.82 + 0.09;
+    float d = length(p - center);
+    float core = exp(-d * 30.0);
+    float halo = exp(-d * 8.5) * 0.45;
+    float peak = core * (1.0 + halo * 2.0);
+
+    float phase = wlHash22(cell + vec2(layerIdx * 5.7, timeSlot * 0.41)).x * 6.2831853;
+    float twinkle = 0.5 + 0.5 * sin(t * max(speed, 0.05) * 3.2 + phase);
+    return peak * twinkle;
+  }
+
+  float wlSparkleLayer(vec2 uvTexel, float cellTexel, float layerIdx, float timeSlot, float t, float speed, float spawnCut) {
+    float layerScale = cellTexel * (1.0 + 0.41 * layerIdx);
+    vec2 jitter = wlHash22(vec2(layerIdx * 19.3 + timeSlot * 0.17, timeSlot * 0.09 + 4.1)) * cellTexel * 2.5;
+    vec2 p = (uvTexel + jitter) / layerScale;
+    vec2 baseCell = floor(p);
+    float bestPeak = 0.0;
+    for (int oy = -1; oy <= 1; oy++) {
+      for (int ox = -1; ox <= 1; ox++) {
+        vec2 cell = baseCell + vec2(float(ox), float(oy));
+        float pt = wlSparklePointAt(p, cell, layerIdx, timeSlot, t, speed, spawnCut);
+        bestPeak = max(bestPeak, pt);
+      }
+    }
+    return bestPeak;
+  }
+
+  // Random cloud in camera view: density = cells across visible frustum width (not whole map).
+  float wlSparklePointField(
+    vec2 sceneUv,
+    vec2 maskTexelSize,
+    float cellScale,
+    float t,
+    float speed,
+    float hasView,
+    vec2 viewUvMin,
+    vec2 viewUvMax
+  ) {
+    if (hasView > 0.5) {
+      float inView = step(viewUvMin.x, sceneUv.x) * step(viewUvMin.y, sceneUv.y)
+                   * step(sceneUv.x, viewUvMax.x) * step(sceneUv.y, viewUvMax.y);
+      if (inView < 0.5) return 0.0;
+    }
+
+    float cells = max(cellScale, 6.0);
+    float mapW = 1.0 / max(maskTexelSize.x, 1e-6);
+    float mapH = 1.0 / max(maskTexelSize.y, 1e-6);
+    vec2 spanUv = max(viewUvMax - viewUvMin, vec2(1e-4));
+    if (hasView < 0.5) spanUv = vec2(1.0);
+    vec2 spanTexel = spanUv * vec2(mapW, mapH);
+    float cellTexel = max(max(spanTexel.x, spanTexel.y) / cells, 1.0);
+    vec2 uvTexel = sceneUv / max(maskTexelSize, vec2(1e-6));
+    float spawnCut = mix(0.93, 0.62, clamp(cells / 120.0, 0.0, 1.0));
+
+    float repopRate = max(speed, 0.05) * 0.28;
+    float slotT = t * repopRate;
+    float timeSlot = floor(slotT);
+    float timePrev = max(timeSlot - 1.0, 0.0);
+    float slotBlend = smoothstep(0.0, 1.0, fract(slotT));
+
+    float cur = 0.0;
+    cur = max(cur, wlSparkleLayer(uvTexel, cellTexel, 0.0, timeSlot, t, speed, spawnCut));
+    cur = max(cur, wlSparkleLayer(uvTexel, cellTexel, 1.0, timeSlot, t, speed, spawnCut));
+    cur = max(cur, wlSparkleLayer(uvTexel, cellTexel, 2.0, timeSlot, t, speed, spawnCut));
+
+    float prev = 0.0;
+    prev = max(prev, wlSparkleLayer(uvTexel, cellTexel, 0.0, timePrev, t, speed, spawnCut));
+    prev = max(prev, wlSparkleLayer(uvTexel, cellTexel, 1.0, timePrev, t, speed, spawnCut));
+    prev = max(prev, wlSparkleLayer(uvTexel, cellTexel, 2.0, timePrev, t, speed, spawnCut));
+
+    float peak = mix(prev, cur, slotBlend);
+    return smoothstep(0.65, 0.9, peak);
+  }
+
+  vec3 wlApplyFringeSaturation(vec3 chroma, float satAmt) {
+    float luma = dot(chroma, vec3(0.2126, 0.7152, 0.0722));
+    vec3 grey = vec3(luma);
+    float sat = clamp(satAmt, 0.0, 3.0);
+    return max(mix(grey, chroma, sat), vec3(0.0));
+  }
+`;
+
 /** Full-screen emit pass — scene-UV RT (PaintedShadow project pass pattern). */
 const EMIT_VERT = `
   varying vec2 vUv;
@@ -138,9 +287,46 @@ const EMIT_FRAG = `
   uniform float uWindow1FlipY;
   uniform float uWindow2FlipY;
   uniform float uWindow3FlipY;
+  uniform sampler2D tSpecular0;
+  uniform sampler2D tSpecular1;
+  uniform sampler2D tSpecular2;
+  uniform sampler2D tSpecular3;
+  uniform float uHasSpecular0;
+  uniform float uHasSpecular1;
+  uniform float uHasSpecular2;
+  uniform float uHasSpecular3;
+  uniform float uSpecular0FlipY;
+  uniform float uSpecular1FlipY;
+  uniform float uSpecular2FlipY;
+  uniform float uSpecular3FlipY;
   uniform sampler2D tFloorIdTex;
   uniform float uHasFloorIdTex;
   uniform float uFloorIdFlipY;
+  uniform vec2 uMaskTexelSize;
+  uniform float uTime;
+  uniform float uGlassRefractionEnabled;
+  uniform float uRgbShiftAmount;
+  uniform float uRgbShiftAngle;
+  uniform float uRgbShiftSpread;
+  uniform float uRgbShiftEdgeWeight;
+  uniform float uRgbShiftAnimate;
+  uniform float uRgbShiftAnimSpeed;
+  uniform float uRgbShiftAnimWobbleDeg;
+  uniform float uRgbFringeSaturation;
+  uniform vec3 uRgbFringeBalance;
+  uniform float uSpecularBoost;
+  uniform float uSparkleEnabled;
+  uniform float uSparkleStrength;
+  uniform float uSparkleSpeed;
+  uniform float uSparkleScale;
+  uniform float uSparkleThreshold;
+  uniform float uSparkleEdgeBias;
+  uniform vec3 uSparkleColor;
+  uniform float uLightningWindowEnabled;
+  uniform float uLightningFlash01;
+  uniform float uLightningWindowIntensityBoost;
+  uniform float uLightningWindowContrastBoost;
+  uniform float uLightningWindowRgbBoost;
   uniform float uCloudFactor;
   uniform float uCloudInfluence;
   uniform sampler2D uCloudShadowTex;
@@ -151,6 +337,9 @@ const EMIT_FRAG = `
   uniform float uCloudShadowMinLight;
   uniform vec2 uViewBoundsMin;
   uniform vec2 uViewBoundsMax;
+  uniform float uHasSparkleView;
+  uniform vec2 uSparkleViewUvMin;
+  uniform vec2 uSparkleViewUvMax;
   uniform vec2 uSceneOrigin;
   uniform vec2 uSceneSize;
   uniform vec2 uSceneDimensions;
@@ -162,16 +351,15 @@ const EMIT_FRAG = `
   varying vec2 vUv;
 
   ${EMIT_CLOUD_GLSL}
+  ${WL_REFRACT_GLSL}
 
   vec3 wlApplyTodGrade(vec3 rgb, float enabled, float intensityScale,
                        float exposureStops, float saturation, vec3 tint) {
     if (enabled < 0.5) return rgb;
 
-    // Exposure + intensity scale (clamped stops — avoids half-float blow-up in emit RT).
     float expMul = exp2(clamp(exposureStops, -3.0, 3.0));
     vec3 graded = rgb * (max(intensityScale, 0.0) * expMul);
 
-    // Luminance-preserving tint (skipped when neutral).
     vec3 tintClamped = clamp(tint, vec3(0.0), vec3(3.0));
     if (abs(tintClamped.r - 1.0) + abs(tintClamped.g - 1.0) + abs(tintClamped.b - 1.0) > 1e-4) {
       float lumaIn = dot(graded, vec3(0.2126, 0.7152, 0.0722));
@@ -182,7 +370,6 @@ const EMIT_FRAG = `
       }
     }
 
-    // Saturation: scale chroma distance from grey; restore luma so hot mask cores stay bright.
     float sat = clamp(saturation, 0.0, 2.0);
     float lumaBefore = dot(graded, vec3(0.2126, 0.7152, 0.0722));
     vec3 chroma = graded - vec3(lumaBefore);
@@ -219,45 +406,92 @@ const EMIT_FRAG = `
       }
     }
 
-    vec4 mask = vec4(0.0);
-
-    if (floorIdx < 0.5) {
-      if (uHasWindow0 > 0.5) {
-        vec2 suv = sceneUv;
-        if (uWindow0FlipY > 0.5) suv.y = 1.0 - suv.y;
-        mask = texture2D(tWindow0, suv);
-      }
-    } else if (floorIdx < 1.5) {
-      if (uHasWindow1 > 0.5) {
-        vec2 suv = sceneUv;
-        if (uWindow1FlipY > 0.5) suv.y = 1.0 - suv.y;
-        mask = texture2D(tWindow1, suv);
-      }
-    } else if (floorIdx < 2.5) {
-      if (uHasWindow2 > 0.5) {
-        vec2 suv = sceneUv;
-        if (uWindow2FlipY > 0.5) suv.y = 1.0 - suv.y;
-        mask = texture2D(tWindow2, suv);
-      }
-    } else if (uHasWindow3 > 0.5) {
-      vec2 suv = sceneUv;
-      if (uWindow3FlipY > 0.5) suv.y = 1.0 - suv.y;
-      mask = texture2D(tWindow3, suv);
-    }
-
+    vec4 mask = wlSampleWindowMaskAtFloor(floorIdx, sceneUv, vec2(0.0));
     if (mask.a < 0.01) {
       gl_FragColor = vec4(0.0);
       return;
     }
 
-    vec3 shaped = pow(clamp(mask.rgb, 0.0, 1.0), vec3(max(uFalloff, 0.001))) * mask.a;
-    float lum = dot(shaped, vec3(0.2126, 0.7152, 0.0722));
-    if (lum < 0.001) {
+    float flash01 = (uLightningWindowEnabled > 0.5) ? clamp(uLightningFlash01, 0.0, 1.0) : 0.0;
+    float flashMul = 1.0 + flash01 * max(uLightningWindowIntensityBoost, 0.0);
+    float contrastPow = 1.0 / (1.0 + flash01 * max(uLightningWindowContrastBoost, 0.0));
+
+    float useRefract = (uGlassRefractionEnabled > 0.5 && uRgbShiftAmount > 0.001) ? 1.0 : 0.0;
+    float useSparkle = uSparkleEnabled;
+    float useSpecular = max(uSpecularBoost, 0.0);
+
+    vec3 lightMap;
+    float edgeAmt = wlMaskEdge(floorIdx, sceneUv, uMaskTexelSize, uFalloff);
+
+    if (useRefract > 0.5) {
+      float shiftPx = uRgbShiftAmount * (1.0 + flash01 * max(uLightningWindowRgbBoost, 0.0));
+      float edgeW = clamp(uRgbShiftEdgeWeight, 0.0, 1.0);
+      shiftPx *= mix(1.0, edgeAmt, edgeW);
+
+      float angle = uRgbShiftAngle;
+      if (uRgbShiftAnimate > 0.5) {
+        float wobbleRad = uRgbShiftAnimWobbleDeg * 0.01745329252;
+        float tAnim = uTime * max(uRgbShiftAnimSpeed, 0.01);
+        angle += sin(tAnim) * wobbleRad * 1.35;
+        angle += sin(tAnim * 1.71 + 0.8) * wobbleRad * 0.62;
+        vec2 facetRnd = wlHash22(floor(sceneUv * 24.0));
+        angle += (facetRnd.x - 0.5) * wobbleRad * 1.15;
+        shiftPx *= 1.0 + 0.18 * sin(tAnim * 0.92 + facetRnd.y * 6.28);
+      }
+
+      vec2 shiftDir = vec2(cos(angle), sin(angle));
+      float spread = clamp(uRgbShiftSpread, 0.0, 1.0);
+      vec2 rOffset = shiftDir * shiftPx * (1.0 + spread) * uMaskTexelSize;
+      vec2 bOffset = -shiftDir * shiftPx * (1.0 + spread) * uMaskTexelSize;
+
+      float maskR = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, sceneUv, rOffset), uFalloff);
+      float maskG = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, sceneUv, vec2(0.0)), uFalloff);
+      float maskB = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, sceneUv, bOffset), uFalloff);
+
+      vec3 chromaRaw = vec3(maskR, maskG, maskB);
+      chromaRaw = wlApplyFringeSaturation(chromaRaw, uRgbFringeSaturation);
+      chromaRaw *= clamp(uRgbFringeBalance, vec3(0.0), vec3(3.0));
+      lightMap = pow(max(chromaRaw, vec3(0.0)), vec3(max(uFalloff, 0.001)));
+      lightMap = pow(max(lightMap, vec3(0.0)), vec3(contrastPow));
+    } else {
+      float lum = wlMaskLuma(mask, uFalloff);
+      if (lum < 0.001) {
+        gl_FragColor = vec4(0.0);
+        return;
+      }
+      lightMap = vec3(lum);
+      lightMap = pow(max(lightMap, vec3(0.0)), vec3(contrastPow));
+    }
+
+    float lumCheck = dot(lightMap, vec3(0.2126, 0.7152, 0.0722));
+    if (lumCheck < 0.001) {
       gl_FragColor = vec4(0.0);
       return;
     }
 
-    vec3 emit = shaped * uColor * uIntensity * ${WINDOW_ILLUM_SCALE.toFixed(6)};
+    vec3 emit = lightMap * uColor * uIntensity * ${WINDOW_ILLUM_SCALE.toFixed(6)} * flashMul;
+
+    if (useSpecular > 0.001) {
+      float spec = wlSampleSpecularAtFloor(floorIdx, sceneUv);
+      emit += emit * spec * uSpecularBoost;
+    }
+
+    if (useSparkle > 0.5 && uSparkleStrength > 0.001) {
+      float coreGate = smoothstep(uSparkleThreshold, 1.0, lumCheck);
+      float edgeGate = mix(coreGate, edgeAmt, clamp(uSparkleEdgeBias, 0.0, 1.0));
+      float spark = wlSparklePointField(
+        sceneUv,
+        uMaskTexelSize,
+        uSparkleScale,
+        uTime,
+        uSparkleSpeed,
+        uHasSparkleView,
+        uSparkleViewUvMin,
+        uSparkleViewUvMax
+      );
+      emit += uSparkleColor * spark * uSparkleStrength * 2.8 * edgeGate * mask.a;
+    }
+
     emit = wlApplyTodGrade(emit, uTodEnabled, uTodIntensityScale, uTodExposure, uTodSaturation, uTodTint);
     float cloudDimming = mix(1.0, clamp(uCloudFactor, 0.0, 1.0), clamp(uCloudInfluence, 0.0, 1.0));
     float cloudShadow = wlSampleCloudShadowFactor(
@@ -418,6 +652,10 @@ export class WindowLightEffectV2 {
     this._windowMasks = [null, null, null, null];
     /** @type {(import('three').Texture|null)[]} Distinct per-floor masks for draw (PaintedShadow-style). */
     this._litWindowMasks = [null, null, null, null];
+    /** @type {(import('three').Texture|null)[]} Compositor specular slots (raw). */
+    this._specularMasks = [null, null, null, null];
+    /** @type {(import('three').Texture|null)[]} Per-floor specular for draw. */
+    this._litSpecularMasks = [null, null, null, null];
     /** @type {Map<string, import('three').Texture|null>} */
     this._windowBundleByBasePath = new Map();
     /** @type {Set<string>} */
@@ -453,6 +691,28 @@ export class WindowLightEffectV2 {
       cloudShadowBias: 0.05,
       cloudShadowGamma: 2.28,
       cloudShadowMinLight: 0.0,
+      glassRefractionEnabled: true,
+      rgbShiftAmount: 4.42,
+      rgbShiftAngle: 30.0,
+      rgbShiftSpread: 0.35,
+      rgbShiftEdgeWeight: 0.55,
+      rgbShiftAnimate: true,
+      rgbShiftAnimSpeed: 0.55,
+      rgbShiftAnimWobbleDeg: 28.0,
+      rgbFringeSaturation: 1.35,
+      rgbFringeBalance: { r: 1.0, g: 1.0, b: 1.0 },
+      specularBoost: 2.0,
+      sparkleEnabled: true,
+      sparkleStrength: 1.35,
+      sparkleSpeed: 1.4,
+      sparkleScale: 38.0,
+      sparkleThreshold: 0.12,
+      sparkleEdgeBias: 0.72,
+      sparkleColor: { r: 1.0, g: 0.98, b: 0.92 },
+      lightningWindowEnabled: true,
+      lightningWindowIntensityBoost: 1.0,
+      lightningWindowContrastBoost: 1.75,
+      lightningWindowRgbBoost: 0.35,
       ...buildDefaultWindowLightTodParams(),
     };
 
@@ -572,6 +832,7 @@ export class WindowLightEffectV2 {
         title: 'Window Light',
         summary: [
           'Emissive window glow from GpuSceneMaskCompositor _Windows masks (scene UV, per-floor stack).',
+          'Glass Refraction splits R/G/B mask samples for prismatic window fringes; Sparkle & Glint adds animated highlights (_Specular mask).',
           'Cloud dimming ties window glow to overcast weather and cloud shadow maps.',
           'Time-of-day timeline uses the same eight clock anchors as Camera Grade.',
         ].join('\n\n'),
@@ -579,6 +840,58 @@ export class WindowLightEffectV2 {
       groups: [
         { name: 'status', label: 'Effect Status', type: 'inline', advanced: true, parameters: ['textureStatus'] },
         { name: 'lighting', label: 'Window Light', type: 'folder', expanded: true, parameters: ['intensity', 'falloff', 'color'] },
+        {
+          name: 'wl-glass-refraction',
+          label: 'Glass Refraction',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'glassRefractionEnabled',
+            'rgbShiftAmount',
+            'rgbShiftAngle',
+            'rgbShiftSpread',
+            'rgbShiftEdgeWeight',
+            'rgbFringeSaturation',
+            'rgbFringeBalance',
+          ],
+        },
+        {
+          name: 'wl-refraction-animation',
+          label: 'Refraction Animation',
+          type: 'folder',
+          expanded: false,
+          advanced: true,
+          parameters: ['rgbShiftAnimate', 'rgbShiftAnimSpeed', 'rgbShiftAnimWobbleDeg'],
+        },
+        {
+          name: 'wl-sparkle-glint',
+          label: 'Sparkle & Glint',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'sparkleEnabled',
+            'sparkleStrength',
+            'sparkleSpeed',
+            'sparkleScale',
+            'sparkleThreshold',
+            'sparkleEdgeBias',
+            'sparkleColor',
+            'specularBoost',
+          ],
+        },
+        {
+          name: 'wl-lightning-windows',
+          label: 'Lightning on Windows',
+          type: 'folder',
+          expanded: false,
+          advanced: true,
+          parameters: [
+            'lightningWindowEnabled',
+            'lightningWindowIntensityBoost',
+            'lightningWindowContrastBoost',
+            'lightningWindowRgbBoost',
+          ],
+        },
         { name: 'environment', label: 'Environment', type: 'folder', expanded: false, parameters: ['cloudInfluence'] },
         {
           name: 'cloudShadows',
@@ -624,6 +937,174 @@ export class WindowLightEffectV2 {
         cloudShadowBias: { type: 'slider', label: 'Shadow Bias', min: -1.0, max: 1.0, step: 0.01, default: 0.05 },
         cloudShadowGamma: { type: 'slider', label: 'Shadow Gamma', min: 0.1, max: 4.0, step: 0.01, default: 2.28 },
         cloudShadowMinLight: { type: 'slider', label: 'Min Light', min: 0.0, max: 1.0, step: 0.01, default: 0.0 },
+        glassRefractionEnabled: {
+          type: 'boolean',
+          default: true,
+          label: 'Glass Refraction',
+          tooltip: 'Per-channel mask RGB shift for prismatic window fringes. Set RGB Shift to 0 to disable fringes while leaving this on.',
+        },
+        rgbShiftAmount: {
+          type: 'slider',
+          label: 'RGB Shift (px)',
+          min: 0.0,
+          max: 16.0,
+          step: 0.01,
+          default: 4.42,
+          tooltip: 'Chromatic offset in mask texels along the shift angle.',
+        },
+        rgbShiftAngle: {
+          type: 'slider',
+          label: 'Shift Angle (deg)',
+          min: 0.0,
+          max: 360.0,
+          step: 1.0,
+          default: 30.0,
+        },
+        rgbShiftSpread: {
+          type: 'slider',
+          label: 'Spectral Spread',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.35,
+          tooltip: 'Widens R vs B separation (0 = symmetric).',
+        },
+        rgbShiftEdgeWeight: {
+          type: 'slider',
+          label: 'Edge Fringe Weight',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.55,
+          tooltip: '1 = chromatic shift strongest on mask edges (pane borders).',
+        },
+        rgbFringeSaturation: {
+          type: 'slider',
+          label: 'Fringe Saturation',
+          min: 0.0,
+          max: 3.0,
+          step: 0.01,
+          default: 1.35,
+        },
+        rgbFringeBalance: {
+          type: 'color',
+          label: 'Fringe RGB Balance',
+          default: { r: 1.0, g: 1.0, b: 1.0 },
+          tooltip: 'Per-channel multiplier on chromatic fringe before falloff.',
+        },
+        rgbShiftAnimate: {
+          type: 'boolean',
+          default: true,
+          label: 'Animate Refraction',
+        },
+        rgbShiftAnimSpeed: {
+          type: 'slider',
+          label: 'Animation Speed',
+          min: 0.0,
+          max: 3.0,
+          step: 0.01,
+          default: 0.45,
+        },
+        rgbShiftAnimWobbleDeg: {
+          type: 'slider',
+          label: 'Angle Wobble (deg)',
+          min: 0.0,
+          max: 90.0,
+          step: 0.5,
+          default: 28.0,
+          tooltip: 'Peak swing of refraction angle while animated. Higher = more visible rainbow drift.',
+        },
+        specularBoost: {
+          type: 'slider',
+          label: 'Specular Boost',
+          min: 0.0,
+          max: 5.0,
+          step: 0.05,
+          default: 2.0,
+          tooltip: 'Multiplies emit where _Specular mask is bright.',
+        },
+        sparkleEnabled: {
+          type: 'boolean',
+          default: true,
+          label: 'Sparkle Enabled',
+        },
+        sparkleStrength: {
+          type: 'slider',
+          label: 'Sparkle Strength',
+          min: 0.0,
+          max: 5.0,
+          step: 0.01,
+          default: 1.35,
+        },
+        sparkleSpeed: {
+          type: 'slider',
+          label: 'Sparkle Speed',
+          min: 0.0,
+          max: 4.0,
+          step: 0.01,
+          default: 1.2,
+          tooltip: 'Twinkle rate and how fast spawn locations shuffle (higher = quicker repopulation). Glints do not drift on the map.',
+        },
+        sparkleScale: {
+          type: 'slider',
+          label: 'Sparkle Density',
+          min: 12.0,
+          max: 120.0,
+          step: 1.0,
+          default: 38.0,
+          tooltip: 'Glint cells across the visible camera view (not the whole map). Higher = more sparkles in what you see. Lower = fewer, larger gaps.',
+        },
+        sparkleThreshold: {
+          type: 'slider',
+          label: 'Sparkle Core Threshold',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.12,
+        },
+        sparkleEdgeBias: {
+          type: 'slider',
+          label: 'Sparkle Edge Bias',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.72,
+          tooltip: '0 = bright mask cores; 1 = pane edges.',
+        },
+        sparkleColor: {
+          type: 'color',
+          label: 'Sparkle Tint',
+          default: { r: 1.0, g: 0.98, b: 0.92 },
+        },
+        lightningWindowEnabled: {
+          type: 'boolean',
+          default: true,
+          label: 'Lightning Coupling',
+        },
+        lightningWindowIntensityBoost: {
+          type: 'slider',
+          label: 'Flash Intensity Boost',
+          min: 0.0,
+          max: 5.0,
+          step: 0.05,
+          default: 1.0,
+        },
+        lightningWindowContrastBoost: {
+          type: 'slider',
+          label: 'Flash Contrast Boost',
+          min: 0.0,
+          max: 4.0,
+          step: 0.05,
+          default: 1.75,
+        },
+        lightningWindowRgbBoost: {
+          type: 'slider',
+          label: 'Flash RGB Shift Boost',
+          min: 0.0,
+          max: 3.0,
+          step: 0.01,
+          default: 0.35,
+        },
         ...timelineParams,
       },
     };
@@ -682,6 +1163,8 @@ export class WindowLightEffectV2 {
     this._initialized = false;
     this._windowMasks = [null, null, null, null];
     this._litWindowMasks = [null, null, null, null];
+    this._specularMasks = [null, null, null, null];
+    this._litSpecularMasks = [null, null, null, null];
     this._windowBundleByBasePath.clear();
     this._windowBundleLoadsInFlight.clear();
     this._windowBundleMissPaths.clear();
@@ -713,7 +1196,7 @@ export class WindowLightEffectV2 {
     log.info(`WindowLightEffectV2 populated: compositor window slots=${slotCount}`);
   }
 
-  update(_timeInfo) {
+  update(timeInfo) {
     if (!this._initialized || !this._enabled) return;
 
     const polledActiveFloor = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
@@ -734,9 +1217,14 @@ export class WindowLightEffectV2 {
       u.uColor.value.setRGB(Number(c.r) || 0, Number(c.g) || 0, Number(c.b) || 0);
     }
 
+    if (u.uTime) {
+      u.uTime.value = Number(timeInfo?.elapsed) || 0;
+    }
+
     this._syncCloudUniformsFromParams(u);
     this._updateSceneBounds();
     this._pushTodUniforms();
+    this._pushRefractionUniforms(u);
   }
 
   /**
@@ -745,12 +1233,100 @@ export class WindowLightEffectV2 {
    */
   applyParamChange(paramId, _value) {
     if (!this._initialized || !this._emitMaterial) return;
+    const u = this._emitMaterial.uniforms;
     if (
       paramId === 'todTimelineEnabled'
       || paramId === 'useCameraGradeAnchorHours'
       || paramId.startsWith('tod')
     ) {
       this._pushTodUniforms();
+    }
+    if (
+      paramId === 'glassRefractionEnabled'
+      || paramId.startsWith('rgb')
+      || paramId.startsWith('sparkle')
+      || paramId === 'specularBoost'
+      || paramId.startsWith('lightningWindow')
+    ) {
+      this._pushRefractionUniforms(u);
+    }
+    if (paramId === 'color' && u.uColor) {
+      const col = this.params.color;
+      if (col && typeof col === 'object') {
+        u.uColor.value.setRGB(Number(col.r) || 0, Number(col.g) || 0, Number(col.b) || 0);
+      }
+    }
+  }
+
+  /** @private */
+  _pushRefractionUniforms(u) {
+    if (!u) return;
+    const p = this.params;
+
+    if (u.uGlassRefractionEnabled) {
+      u.uGlassRefractionEnabled.value = p.glassRefractionEnabled !== false ? 1.0 : 0.0;
+    }
+    if (u.uRgbShiftAmount) u.uRgbShiftAmount.value = Math.max(0.0, Number(p.rgbShiftAmount) || 0);
+    if (u.uRgbShiftAngle) {
+      u.uRgbShiftAngle.value = (Number(p.rgbShiftAngle) || 0) * (Math.PI / 180.0);
+    }
+    if (u.uRgbShiftSpread) u.uRgbShiftSpread.value = clamp(Number(p.rgbShiftSpread) || 0, 0, 1);
+    if (u.uRgbShiftEdgeWeight) u.uRgbShiftEdgeWeight.value = clamp(Number(p.rgbShiftEdgeWeight) || 0, 0, 1);
+    if (u.uRgbShiftAnimate) u.uRgbShiftAnimate.value = p.rgbShiftAnimate !== false ? 1.0 : 0.0;
+    if (u.uRgbShiftAnimSpeed) u.uRgbShiftAnimSpeed.value = Math.max(0.0, Number(p.rgbShiftAnimSpeed) || 0);
+    if (u.uRgbShiftAnimWobbleDeg) {
+      u.uRgbShiftAnimWobbleDeg.value = Math.max(0.0, Number(p.rgbShiftAnimWobbleDeg) || 0);
+    }
+    if (u.uRgbFringeSaturation) {
+      u.uRgbFringeSaturation.value = Math.max(0.0, Number(p.rgbFringeSaturation) || 1);
+    }
+    if (u.uRgbFringeBalance) {
+      const bal = p.rgbFringeBalance;
+      if (bal && typeof bal === 'object') {
+        u.uRgbFringeBalance.value.set(
+          Math.max(0, Number(bal.r) || 1),
+          Math.max(0, Number(bal.g) || 1),
+          Math.max(0, Number(bal.b) || 1),
+        );
+      }
+    }
+    if (u.uSpecularBoost) u.uSpecularBoost.value = Math.max(0.0, Number(p.specularBoost) || 0);
+    if (u.uSparkleEnabled) u.uSparkleEnabled.value = p.sparkleEnabled !== false ? 1.0 : 0.0;
+    if (u.uSparkleStrength) u.uSparkleStrength.value = Math.max(0.0, Number(p.sparkleStrength) || 0);
+    if (u.uSparkleSpeed) u.uSparkleSpeed.value = Math.max(0.0, Number(p.sparkleSpeed) || 0);
+    if (u.uSparkleScale) u.uSparkleScale.value = clamp(Number(p.sparkleScale) || 38, 12, 120);
+    if (u.uSparkleThreshold) u.uSparkleThreshold.value = clamp(Number(p.sparkleThreshold) || 0, 0, 1);
+    if (u.uSparkleEdgeBias) u.uSparkleEdgeBias.value = clamp(Number(p.sparkleEdgeBias) || 0, 0, 1);
+    if (u.uSparkleColor) {
+      const sc = p.sparkleColor;
+      if (sc && typeof sc === 'object') {
+        u.uSparkleColor.value.set(
+          Number(sc.r) || 1,
+          Number(sc.g) || 1,
+          Number(sc.b) || 1,
+        );
+      }
+    }
+
+    let flash01 = 0.0;
+    try {
+      const env = window.MapShine?.environment;
+      if (env && typeof env.lightningFlash01 === 'number' && Number.isFinite(env.lightningFlash01)) {
+        flash01 = Math.max(0.0, Math.min(1.0, env.lightningFlash01));
+      }
+    } catch (_) {}
+    if (u.uLightningWindowEnabled) {
+      u.uLightningWindowEnabled.value = p.lightningWindowEnabled !== false ? 1.0 : 0.0;
+    }
+    if (u.uLightningFlash01) u.uLightningFlash01.value = flash01;
+    if (u.uLightningWindowIntensityBoost) {
+      u.uLightningWindowIntensityBoost.value = Math.max(0.0, Number(p.lightningWindowIntensityBoost) || 0);
+    }
+    if (u.uLightningWindowContrastBoost) {
+      u.uLightningWindowContrastBoost.value = Math.max(0.0, Number(p.lightningWindowContrastBoost) || 0);
+    }
+    if (u.uLightningWindowRgbBoost) {
+      u.uLightningWindowRgbBoost.value = Math.max(0.0, Number(p.lightningWindowRgbBoost) || 0);
     }
   }
 
@@ -941,6 +1517,8 @@ export class WindowLightEffectV2 {
     const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
     this._windowMasks = [null, null, null, null];
     this._litWindowMasks = [null, null, null, null];
+    this._specularMasks = [null, null, null, null];
+    this._litSpecularMasks = [null, null, null, null];
     this._floorIdTex = null;
     this.params.hasWindowMask = false;
 
@@ -953,6 +1531,7 @@ export class WindowLightEffectV2 {
         const idx = Number(floor?.index);
         if (!Number.isFinite(idx) || idx < 0 || idx > 3) continue;
         this._windowMasks[idx] = this._resolveCompositorWindowMaskForFloor(floor, compositor);
+        this._specularMasks[idx] = this._resolveCompositorSpecularMaskForFloor(floor, compositor);
         if (!this._windowMasks[idx]) {
           this._tryAssignWindowBundleMaskForFloor(idx);
         }
@@ -967,6 +1546,7 @@ export class WindowLightEffectV2 {
       }
 
       this._rebuildLitWindowMasks();
+      this._rebuildLitSpecularMasks();
 
       if (this._litWindowMasks.some((_t, i) => this._hasValidWindowMask(i))) {
         this._floorIdTex = compositor.floorIdTarget?.texture ?? null;
@@ -1133,6 +1713,7 @@ export class WindowLightEffectV2 {
     this._updateSceneBounds();
     this._syncCloudUniformsFromParams(this._emitMaterial.uniforms);
     this._pushTodUniforms();
+    this._pushRefractionUniforms(this._emitMaterial.uniforms);
 
     if (!this.params.hasWindowMask) {
       this._lastDrawStats = { skipReason: 'no_compositor_masks', drew: false };
@@ -1140,6 +1721,7 @@ export class WindowLightEffectV2 {
     }
 
     this._rebuildLitWindowMasks();
+    this._rebuildLitSpecularMasks();
 
     const strictFloor = Number(this._renderFloorIndex);
     if (this._renderFloorSliceStrict && Number.isFinite(strictFloor)) {
@@ -1241,6 +1823,9 @@ export class WindowLightEffectV2 {
         uCloudShadowMinLight: { value: Math.max(0.0, Math.min(1.0, Number(this.params.cloudShadowMinLight) || 0.0)) },
         uViewBoundsMin: { value: new THREE.Vector2(0, 0) },
         uViewBoundsMax: { value: new THREE.Vector2(1, 1) },
+        uHasSparkleView: { value: 0.0 },
+        uSparkleViewUvMin: { value: new THREE.Vector2(0, 0) },
+        uSparkleViewUvMax: { value: new THREE.Vector2(1, 1) },
         uViewCorner00: { value: new THREE.Vector2(0, 0) },
         uViewCorner10: { value: new THREE.Vector2(1, 0) },
         uViewCorner01: { value: new THREE.Vector2(0, 1) },
@@ -1253,6 +1838,43 @@ export class WindowLightEffectV2 {
         uTodExposure: { value: 0.0 },
         uTodSaturation: { value: 1.0 },
         uTodTint: { value: new THREE.Color(TOD_TINT_NEUTRAL, TOD_TINT_NEUTRAL, TOD_TINT_NEUTRAL) },
+        tSpecular0: { value: fb },
+        tSpecular1: { value: fb },
+        tSpecular2: { value: fb },
+        tSpecular3: { value: fb },
+        uHasSpecular0: { value: 0.0 },
+        uHasSpecular1: { value: 0.0 },
+        uHasSpecular2: { value: 0.0 },
+        uHasSpecular3: { value: 0.0 },
+        uSpecular0FlipY: { value: 0.0 },
+        uSpecular1FlipY: { value: 0.0 },
+        uSpecular2FlipY: { value: 0.0 },
+        uSpecular3FlipY: { value: 0.0 },
+        uMaskTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
+        uTime: { value: 0.0 },
+        uGlassRefractionEnabled: { value: 1.0 },
+        uRgbShiftAmount: { value: 4.42 },
+        uRgbShiftAngle: { value: 30.0 * (Math.PI / 180.0) },
+        uRgbShiftSpread: { value: 0.35 },
+        uRgbShiftEdgeWeight: { value: 0.55 },
+        uRgbShiftAnimate: { value: 1.0 },
+        uRgbShiftAnimSpeed: { value: 0.55 },
+        uRgbShiftAnimWobbleDeg: { value: 28.0 },
+        uRgbFringeSaturation: { value: 1.35 },
+        uRgbFringeBalance: { value: new THREE.Vector3(1, 1, 1) },
+        uSpecularBoost: { value: 2.0 },
+        uSparkleEnabled: { value: 1.0 },
+        uSparkleStrength: { value: 1.35 },
+        uSparkleSpeed: { value: 1.4 },
+        uSparkleScale: { value: 38.0 },
+        uSparkleThreshold: { value: 0.12 },
+        uSparkleEdgeBias: { value: 0.72 },
+        uSparkleColor: { value: new THREE.Color(1, 0.98, 0.92) },
+        uLightningWindowEnabled: { value: 1.0 },
+        uLightningFlash01: { value: 0.0 },
+        uLightningWindowIntensityBoost: { value: 1.0 },
+        uLightningWindowContrastBoost: { value: 1.75 },
+        uLightningWindowRgbBoost: { value: 0.35 },
       },
       vertexShader: EMIT_VERT,
       fragmentShader: EMIT_FRAG,
@@ -1267,6 +1889,7 @@ export class WindowLightEffectV2 {
     quad.frustumCulled = false;
     this._scene.add(quad);
     this._pushTodUniforms();
+    this._pushRefractionUniforms(this._emitMaterial.uniforms);
   }
 
   _maskImageSize(tex) {
@@ -1418,6 +2041,62 @@ export class WindowLightEffectV2 {
     u.uSceneOrigin?.value?.set(sceneX, sceneY);
     u.uSceneSize?.value?.set(sceneW, sceneH);
     u.uSceneDimensions?.value?.set(canvasW, canvasH);
+    this._syncSparkleViewUniforms(fd, sceneX, sceneY, sceneW, sceneH, canvasH);
+  }
+
+  /**
+   * Scene-UV bounds of the ground-plane camera frustum for sparkle density gating.
+   * @private
+   */
+  _worldXYToSceneUv(wx, wy, sceneX, sceneY, sceneW, sceneH, canvasH) {
+    const foundryY = canvasH - wy;
+    return {
+      u: (wx - sceneX) / Math.max(1e-5, sceneW),
+      v: (foundryY - sceneY) / Math.max(1e-5, sceneH),
+    };
+  }
+
+  /** @private */
+  _syncSparkleViewUniforms(fd, sceneX, sceneY, sceneW, sceneH, canvasH) {
+    const u = this._emitMaterial?.uniforms;
+    if (!u?.uSparkleViewUvMin || !u?.uSparkleViewUvMax) return;
+
+    const cache = this._viewProjectionCache;
+    if (!cache?.isValid) {
+      u.uHasSparkleView.value = 0.0;
+      u.uSparkleViewUvMin.value.set(0, 0);
+      u.uSparkleViewUvMax.value.set(1, 1);
+      return;
+    }
+
+    const corners = [
+      [cache.c00x, cache.c00y],
+      [cache.c10x, cache.c10y],
+      [cache.c01x, cache.c01y],
+      [cache.c11x, cache.c11y],
+    ];
+    let minU = 1;
+    let minV = 1;
+    let maxU = 0;
+    let maxV = 0;
+    for (const [wx, wy] of corners) {
+      const uv = this._worldXYToSceneUv(wx, wy, sceneX, sceneY, sceneW, sceneH, canvasH);
+      minU = Math.min(minU, uv.u);
+      minV = Math.min(minV, uv.v);
+      maxU = Math.max(maxU, uv.u);
+      maxV = Math.max(maxV, uv.v);
+    }
+
+    const pad = 0.05;
+    u.uHasSparkleView.value = 1.0;
+    u.uSparkleViewUvMin.value.set(
+      Math.max(0, minU - pad),
+      Math.max(0, minV - pad),
+    );
+    u.uSparkleViewUvMax.value.set(
+      Math.min(1, maxU + pad),
+      Math.min(1, maxV + pad),
+    );
   }
 
   /** @private */
@@ -1468,6 +2147,40 @@ export class WindowLightEffectV2 {
     return compositor.getFloorTexture?.(key, 'windows')
       ?? compositor.getFloorTexture?.(key, 'structural')
       ?? null;
+  }
+
+  _resolveCompositorSpecularMaskForFloor(floor, compositor) {
+    const key = floor?.compositorKey;
+    const idx = Number(floor?.index);
+    if (!compositor || !key) return null;
+
+    const lvlCtx = this._levelContextForFloorIndex(idx);
+    const gpu = resolveCompositorFloorMaskTexture(compositor, SPECULAR_MASK_ALIASES, lvlCtx);
+    if (gpu?.texture) return gpu.texture;
+
+    return compositor.getFloorTexture?.(key, 'specular') ?? null;
+  }
+
+  /** @private */
+  _rebuildLitSpecularMasks() {
+    for (let idx = 0; idx < 4; idx += 1) {
+      this._litSpecularMasks[idx] = this._specularMasks[idx] ?? null;
+    }
+  }
+
+  /**
+   * @param {number} floorIndex
+   * @returns {boolean}
+   * @private
+   */
+  _hasValidSpecularMask(floorIndex) {
+    const idx = Number(floorIndex);
+    if (!Number.isFinite(idx) || idx < 0 || idx > 3) return false;
+    const mask = this._litSpecularMasks?.[idx] ?? null;
+    const fb = this._fallbackMaskTex;
+    if (!mask) return false;
+    if (!fb) return true;
+    return mask !== fb && mask.uuid !== fb.uuid;
   }
 
   _resolveBasePathForFloorIndex(floorIndex) {
@@ -1701,9 +2414,23 @@ export class WindowLightEffectV2 {
       u[`uWindow${i}FlipY`].value = (valid && this._litWindowMasks[i]?.flipY) ? 1.0 : 0.0;
     }
 
+    for (let i = 0; i < 4; i += 1) {
+      const specValid = this._hasValidSpecularMask(i);
+      const specTex = specValid ? (this._litSpecularMasks[i] ?? fallback) : fallback;
+      u[`tSpecular${i}`].value = specTex ?? fallback;
+      u[`uHasSpecular${i}`].value = specValid ? 1.0 : 0.0;
+      u[`uSpecular${i}FlipY`].value = (specValid && this._litSpecularMasks[i]?.flipY) ? 1.0 : 0.0;
+    }
+
     u.tFloorIdTex.value = this._floorIdTex ?? fallback;
     u.uHasFloorIdTex.value = this._floorIdTex ? 1.0 : 0.0;
     u.uFloorIdFlipY.value = 1.0;
+
+    const refMask = this._resolveEmitMaskReference();
+    if (u.uMaskTexelSize && refMask) {
+      const { w, h } = this._maskImageSize(refMask);
+      u.uMaskTexelSize.value.set(1 / Math.max(1, w), 1 / Math.max(1, h));
+    }
   }
 
   _bindFloorSliceUniforms() {

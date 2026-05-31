@@ -328,4 +328,6 @@ export class TimeManager {
  * @property {number} fps - Current frames per second
  * @property {number} scale - Current time scale multiplier
  * @property {boolean} paused - Whether time is paused
+ * @property {number} [targetFps] - Render-loop presentation target for this rAF (particle sim cap)
+ * @property {string} [presentationTier] - idle | active | presentation | navigation | cinematic
  */

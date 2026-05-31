@@ -564,6 +564,18 @@ export class RenderLoop {
           timeInfo = this.effectComposer.getTimeManager?.()?.update(this.frameCount) ?? null;
         } catch (_) {}
 
+        // Resolve presentation tier before Quarks tick so fire/dust can cap CPU sim Hz.
+        let gate = null;
+        try {
+          gate = this._evaluatePresentationGate(now);
+        } catch (_) {
+          gate = null;
+        }
+        if (timeInfo && gate) {
+          timeInfo.targetFps = gate.targetFps;
+          timeInfo.presentationTier = gate.tier;
+        }
+
         // Quarks weather/ash/fire/etc. must sim every rAF — not only when the compositor presents.
         try {
           this._syncV2NavigationLiteFlags(now);
@@ -572,13 +584,12 @@ export class RenderLoop {
           this.effectComposer.tickParticleSystems?.(this.frameCount);
         } catch (_) {}
 
-        let gate = null;
         if (forcePresent) {
-          gate = this._evaluatePresentationGate(now);
+          if (!gate) gate = this._evaluatePresentationGate(now);
           gate.shouldPresent = true;
           gate.skipReason = 'none';
         } else if (pacingEnabled) {
-          gate = this._evaluatePresentationGate(now);
+          if (!gate) gate = this._evaluatePresentationGate(now);
           this._publishPresentationState({
             presented: false,
             skipReason: gate.skipReason,

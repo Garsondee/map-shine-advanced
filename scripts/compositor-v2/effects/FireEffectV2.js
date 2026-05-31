@@ -614,6 +614,7 @@ export class FireEffectV2 {
     this._systemParamsSignature = '';
     this._simAccumSec = 0;
     this._physicsFloorCursor = 0;
+    this._glowFlickerFloorCursor = 0;
     /** @type {Map<number, number>} Last timeInfo.elapsed when a floor received physics. */
     this._floorLastPhysicsAt = new Map();
     /** @type {import('../../core/diagnostics/PerformanceRecorder.js').PerformanceRecorder|null} */
@@ -2044,11 +2045,36 @@ export class FireEffectV2 {
    */
   _resolveEffectiveSimHz(timeInfo) {
     const userHz = Math.max(8, Math.min(FIRE_MAX_SIM_HZ, Number(this.params.fireSimHz) || FIRE_DEFAULT_SIM_HZ));
+    let capHz = userHz;
     const targetFps = Number(timeInfo?.targetFps);
-    if (Number.isFinite(targetFps) && targetFps >= 8 && targetFps < userHz) {
-      return Math.max(8, Math.floor(targetFps));
+    if (Number.isFinite(targetFps) && targetFps >= 8 && targetFps < capHz) {
+      capHz = Math.max(8, Math.floor(targetFps));
     }
-    return userHz;
+    // Multi-floor fire is stepped on a rotating floor index; cap sim Hz to the
+    // presentation FPS budget so CPU stays near what the compositor actually sustains.
+    if (capHz > 30 && this._activeFloors.size > 1) {
+      try {
+        const presentationFps = Number(window.MapShine?.renderPresentationFps);
+        if (Number.isFinite(presentationFps) && presentationFps >= 8 && presentationFps < capHz) {
+          capHz = Math.max(8, Math.floor(presentationFps));
+        }
+      } catch (_) {}
+    }
+    return capHz;
+  }
+
+  /**
+   * When several floors have glow pools, update one floor per frame (like physics rotation).
+   * @returns {number[]}
+   * @private
+   */
+  _getGlowFlickerFloorsThisFrame() {
+    const floors = [...this._activeFloors]
+      .filter((idx) => (this._glowBucketsByFloor.get(idx)?.size ?? 0) > 0)
+      .sort((a, b) => a - b);
+    if (floors.length <= 1) return floors;
+    this._glowFlickerFloorCursor = (this._glowFlickerFloorCursor + 1) % floors.length;
+    return [floors[this._glowFlickerFloorCursor]];
   }
 
   /**
@@ -2954,10 +2980,13 @@ export class FireEffectV2 {
 
     const t = timeInfo.elapsed;
     const dayNightMul = this._computeFireGlowDayNightMul();
-    const glowHueCache = new Map();
+    /** @type {Map<number, { glow: object, hue: {r:number,g:number,b:number} }>} */
+    const glowBandPack = new Map();
+    const flickerFloors = this._getGlowFlickerFloorsThisFrame();
 
-    for (const [floorIndex, buckets] of this._glowBucketsByFloor) {
-      if (!this._activeFloors.has(floorIndex)) continue;
+    for (const floorIndex of flickerFloors) {
+      const buckets = this._glowBucketsByFloor.get(floorIndex);
+      if (!buckets?.size) continue;
       for (const entry of buckets.values()) {
         const lm = entry?.lightMesh;
         const u = lm?.material?.uniforms;
@@ -2966,11 +2995,13 @@ export class FireEffectV2 {
         const phase = entry.phase || 0;
         const outdoor = entry.outdoor ?? 1.0;
         const glowBand = outdoor > 0.5 ? 1 : 0;
-        let glow = glowHueCache.get(glowBand);
-        if (!glow) {
-          glow = this._resolveCachedFireGlowParams(glowBand);
-          glowHueCache.set(glowBand, glow);
+        let pack = glowBandPack.get(glowBand);
+        if (!pack) {
+          const glow = this._resolveCachedFireGlowParams(glowBand);
+          pack = { glow, hue: this._computeFireGlowColor(glow.warmth) };
+          glowBandPack.set(glowBand, pack);
         }
+        const glow = pack.glow;
         const strength = glow.flickerStrength;
         const speed = glow.flickerSpeed;
         const speedJ = glow.flickerSpeedJitter;
@@ -3005,8 +3036,7 @@ export class FireEffectV2 {
             * outdoorMul
         );
 
-        const glowHue = this._computeFireGlowColor(glow.warmth);
-        u.uColor.value.setRGB(glowHue.r, glowHue.g, glowHue.b);
+        u.uColor.value.setRGB(pack.hue.r, pack.hue.g, pack.hue.b);
 
         const emissionGain = this._computeFireGlowEmissionGain(visualMul, glow.cancel);
         if (typeof lm.setEmissionGain === 'function') {

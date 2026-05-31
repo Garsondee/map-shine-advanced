@@ -291,6 +291,30 @@ export class RenderLoop {
   }
 
   /**
+   * Navigation-lite flags must be set before tickParticleSystems(). FloorCompositor
+   * previously published them only during update(), which runs after the particle
+   * tick — so fire/dust still simulated every rAF while panning at navigation tier.
+   * @private
+   */
+  _syncV2NavigationLiteFlags(now) {
+    try {
+      const ms = window.MapShine;
+      if (!ms) return;
+
+      const inContinuousWindow = now < (this._continuousRenderUntilMs || 0);
+      const effectWantsContinuous = this._getEffectWantsContinuous(now);
+      const { cameraChanged } = this._detectCameraChanged();
+      if (cameraChanged) {
+        this._cameraActiveUntilMs = now + this._cameraActiveHoldMs;
+      }
+
+      const navigationLite = isCameraNavigationActive();
+      ms.__v2NavigationLiteUpdates = navigationLite;
+      ms.__v2NavigationRenderLite = navigationLite;
+    } catch (_) {}
+  }
+
+  /**
    * Presentation-first gate. Returns whether to run the compositor this rAF.
    * @private
    */
@@ -541,6 +565,9 @@ export class RenderLoop {
         } catch (_) {}
 
         // Quarks weather/ash/fire/etc. must sim every rAF — not only when the compositor presents.
+        try {
+          this._syncV2NavigationLiteFlags(now);
+        } catch (_) {}
         try {
           this.effectComposer.tickParticleSystems?.(this.frameCount);
         } catch (_) {}

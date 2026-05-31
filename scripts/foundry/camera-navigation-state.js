@@ -27,10 +27,8 @@ export function isCameraNavigationActive() {
   try {
     if (isCameraPathPlaybackSimActive()) return false;
 
+    // Pan/zoom gesture only — do not key off presentation tier ('active' is high-FPS present mode, not pan).
     if (window.MapShine?.pixiInputBridge?.isCameraPanActive?.()) return true;
-    const tier = window.MapShine?.__presentationState?.tier;
-    // 'cinematic' is render-loop pacing for camera paths — not user navigation.
-    if (tier === 'active') return true;
   } catch (_) {}
   return false;
 }

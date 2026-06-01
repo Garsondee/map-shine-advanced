@@ -4391,6 +4391,7 @@ export class ControlPanelManager {
       return;
     }
 
+    this._syncTileMotionSpeedFromManager();
     ui.notifications?.info('Tile motion stopped');
   }
 
@@ -4412,6 +4413,7 @@ export class ControlPanelManager {
       return;
     }
 
+    this._syncTileMotionSpeedFromManager();
     ui.notifications?.info('Tile motion phase reset');
   }
 

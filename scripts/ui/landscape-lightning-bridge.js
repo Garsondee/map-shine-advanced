@@ -1,5 +1,11 @@
 /**
  * @fileoverview Bridge Map Shine Control landscape lightning ↔ WeatherLightningEffectV2.
+ *
+ * WeatherLightningEffectV2 publishes `landscapeLightningFlash01` (and related keys) on
+ * `MapShine.environment` each frame. Window, bush, tree, cloud, and bloom effects read
+ * that signal (via {@link ../compositor-v2/lightning/resolve-compositor-lightning-flash.js})
+ * — this bridge only drives storm intensity and manual strike triggers on the effect.
+ *
  * @module ui/landscape-lightning-bridge
  */
 

@@ -37,7 +37,7 @@ export class SepiaEffectV2 {
         title: 'Sepia tone',
         summary: [
           'Warm brown photo grade by mixing the scene toward a classic sepia transform (photographic-style matrix).',
-          'Stylistic only — no masks. One fullscreen post pass on the composited image.',
+          'Stylistic only — no masks. One fullscreen post pass on the merged composite (after bush/tree overlays and color correction).',
           'Performance: very cheap (single pass, simple shader).',
           'Persistence: settings save with the scene (not World Based).',
         ].join('\n\n'),

@@ -8,6 +8,7 @@
  * @module ui/performance-recorder-dialog
  */
 
+import { groupEffectRows } from '../core/diagnostics/performance-recorder-export.js';
 import { createLogger } from '../core/log.js';
 
 const log = createLogger('PerfRecorderDialog');
@@ -119,7 +120,8 @@ export class PerformanceRecorderDialog {
           <input type="checkbox" data-input="gpuTiming" checked>
           GPU timing
         </label>
-        <button type="button" data-action="export-json" class="msa-perf__btn">Export JSON</button>
+        <button type="button" data-action="export-json" class="msa-perf__btn" title="Grouped effects, insights, stutter summary — no frame/tick timelines">Export JSON</button>
+        <button type="button" data-action="export-json-full" class="msa-perf__btn" title="Full frames[], ticks[], and per-span effects for deep debugging">Export full JSON</button>
         <button type="button" data-action="export-csv"  class="msa-perf__btn">Export CSV</button>
         <button type="button" data-action="export-md"   class="msa-perf__btn">Export Markdown</button>
         <button type="button" data-action="copy-report" class="msa-perf__btn">Copy report</button>
@@ -335,7 +337,10 @@ export class PerformanceRecorderDialog {
           this._onReset();
           break;
         case 'export-json':
-          this._onExportJson();
+          this._onExportJson('summary');
+          break;
+        case 'export-json-full':
+          this._onExportJson('full');
           break;
         case 'export-csv':
           this._onExportCsv();
@@ -495,10 +500,13 @@ export class PerformanceRecorderDialog {
     }
   }
 
-  /** @private */
-  _onExportJson() {
+  /**
+   * @param {'summary'|'full'} [mode]
+   * @private
+   */
+  _onExportJson(mode = 'summary') {
     try {
-      const { filename } = this.recorder.exportJson();
+      const { filename } = this.recorder.exportJson({ mode });
       ui?.notifications?.info?.(`Exported ${filename}`);
     } catch (err) {
       log.error('export JSON failed:', err);
@@ -661,83 +669,6 @@ export class PerformanceRecorderDialog {
     }
   }
 
-  /**
-   * Roll dotted effect keys to parent (cloud.update.foo → cloud.update).
-   * @param {string} effect
-   * @returns {string}
-   * @private
-   */
-  _effectGroupKey(effect) {
-    const parts = String(effect ?? '').split('.');
-    if (parts.length >= 3) return `${parts[0]}.${parts[1]}`;
-    return String(effect ?? '');
-  }
-
-  /**
-   * @param {object[]} effects
-   * @returns {object[]}
-   * @private
-   */
-  _groupEffectRows(effects) {
-    /** @type {Map<string, object>} */
-    const map = new Map();
-    for (const row of effects ?? []) {
-      const key = `${this._effectGroupKey(row.effect)}/${row.phase}`;
-      let agg = map.get(key);
-      if (!agg) {
-        agg = {
-          effect: this._effectGroupKey(row.effect),
-          phase: row.phase,
-          cpuLast: 0,
-          cpuAvg: 0,
-          cpuMax: 0,
-          cpuTotal: 0,
-          cpuCount: 0,
-          gpuLast: 0,
-          gpuAvg: 0,
-          gpuMax: 0,
-          gpuTotal: 0,
-          gpuCount: 0,
-          drawCallsAvg: 0,
-          trianglesAvg: 0,
-          linesAvg: 0,
-          pointsAvg: 0,
-          gpuDisjointDropped: 0,
-          gpuMissing: 0,
-          gpuBlocked: 0,
-          _drawWeighted: 0,
-          _triWeighted: 0,
-        };
-        map.set(key, agg);
-      }
-      agg.cpuLast = row.cpuLast;
-      agg.cpuMax = Math.max(agg.cpuMax, row.cpuMax ?? 0);
-      agg.cpuTotal += row.cpuTotal ?? 0;
-      agg.cpuCount += row.cpuCount ?? 0;
-      agg.gpuLast = row.gpuLast;
-      agg.gpuMax = Math.max(agg.gpuMax, row.gpuMax ?? 0);
-      agg.gpuTotal += row.gpuTotal ?? 0;
-      agg.gpuCount = Math.max(agg.gpuCount, row.gpuCount ?? 0);
-      agg.gpuDisjointDropped += row.gpuDisjointDropped ?? 0;
-      agg.gpuMissing += row.gpuMissing ?? 0;
-      agg.gpuBlocked += row.gpuBlocked ?? 0;
-      const count = row.cpuCount ?? 0;
-      agg._drawWeighted += (row.drawCallsAvg ?? 0) * count;
-      agg._triWeighted += (row.trianglesAvg ?? 0) * count;
-    }
-    return [...map.values()].map((agg) => {
-      const count = agg.cpuCount || 1;
-      return {
-        ...agg,
-        cpuAvg: agg.cpuTotal / count,
-        gpuAvg: agg.gpuCount > 0 ? agg.gpuTotal / agg.gpuCount : 0,
-        drawCallsAvg: agg._drawWeighted / count,
-        trianglesAvg: agg._triWeighted / count,
-        cost: (agg.cpuTotal / count) + (agg.gpuCount > 0 ? agg.gpuTotal / agg.gpuCount : 0),
-      };
-    });
-  }
-
   /** @private */
   _renderFindings(snap) {
     const el = this.container?.querySelector('[data-bind="findings"]');
@@ -844,7 +775,7 @@ export class PerformanceRecorderDialog {
     if (groupCheckbox) groupCheckbox.checked = this._groupByPrefix;
 
     const sourceRows = this._groupByPrefix
-      ? this._groupEffectRows(snap.effects)
+      ? groupEffectRows(snap.effects)
       : (snap.effects || []);
 
     const rows = sourceRows.map((r) => ({

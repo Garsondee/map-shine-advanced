@@ -2114,6 +2114,95 @@ export class GpuSceneMaskCompositor {
   }
 
   /**
+   * Promote file/bundle `_Outdoors` into a scene-space GPU RT when `compose()` never
+   * ran for this band (common for ground-floor background-only preload). Building
+   * shadows and other scene-UV passes need the same coordinate space as tile-composed
+   * upper-floor masks — sampling raw bundle textures at scene UV often reads as all-indoor.
+   *
+   * @param {string} floorKey - e.g. "0:10"
+   * @param {object|null} [scene]
+   * @returns {import('three').Texture|null}
+   */
+  ensureSceneSpaceOutdoorsForFloor(floorKey, scene = null) {
+    if (!floorKey) return null;
+    const key = String(floorKey);
+    const existingRt = this._floorCache.get(key)?.get('outdoors');
+    if (existingRt?.texture) return existingRt.texture;
+
+    const metaEntry = this._floorMeta.get(key)?.masks
+      ?.find((m) => (m.id ?? m.type) === 'outdoors') ?? null;
+    const bundleTex = metaEntry?.texture ?? null;
+    if (!bundleTex) return null;
+
+    const renderer = window.MapShine?.renderer;
+    const THREE = window.THREE;
+    if (!renderer || !THREE) return bundleTex;
+
+    const d = canvas?.dimensions;
+    const sr = d?.sceneRect;
+    if (!sr?.width || !sr?.height) return bundleTex;
+
+    this._ensureGpuResources(THREE);
+
+    const sceneW = sr.width;
+    const sceneH = sr.height;
+    const maxTex = renderer.capabilities?.maxTextureSize ?? 16384;
+    const scale = Math.min(
+      1.0,
+      HIGH_DETAIL_DATA_MAX / Math.max(1, sceneW),
+      HIGH_DETAIL_DATA_MAX / Math.max(1, sceneH),
+      maxTex / Math.max(1, sceneW),
+      maxTex / Math.max(1, sceneH),
+    );
+    const outW = Math.max(1, Math.round(sceneW * scale));
+    const outH = Math.max(1, Math.round(sceneH * scale));
+
+    const floorTargets = this._getOrCreateFloorTargets(key);
+    let rt = floorTargets.get('outdoors');
+    if (!rt || rt.width !== outW || rt.height !== outH) {
+      try { rt?.dispose?.(); } catch (_) {}
+      rt = this._createRenderTarget(THREE, outW, outH, 'outdoors');
+      floorTargets.set('outdoors', rt);
+      this._floorCacheVersion++;
+    }
+
+    const prevTarget = renderer.getRenderTarget();
+    const mat = this._tileMaterial;
+    mat.blending = THREE.NormalBlending;
+    mat.uniforms.uMode.value = 1;
+    mat.uniforms.tMask.value = bundleTex;
+    mat.uniforms.uTileRect.value.set(0, 0, 1, 1);
+    mat.uniforms.uScaleSign.value.set(1, 1);
+    mat.uniforms.uRotation.value = 0;
+
+    renderer.setRenderTarget(rt);
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear();
+    try {
+      renderer.render(this._quadScene, this._orthoCamera);
+    } catch (e) {
+      log.debug('ensureSceneSpaceOutdoorsForFloor: bake failed', { floorKey: key, err: e });
+      renderer.setRenderTarget(prevTarget);
+      return bundleTex;
+    }
+    renderer.setRenderTarget(prevTarget);
+
+    const outTex = rt.texture;
+    if (outTex) {
+      outTex.flipY = false;
+      outTex.needsUpdate = true;
+      if (THREE.NoColorSpace) outTex.colorSpace = THREE.NoColorSpace;
+    }
+    log.debug('ensureSceneSpaceOutdoorsForFloor: baked bundle outdoors to GPU RT', {
+      floorKey: key,
+      outW,
+      outH,
+      srcUuid: bundleTex.uuid ?? null,
+    });
+    return outTex ?? bundleTex;
+  }
+
+  /**
    * Get the cached compositor RT texture for the below-floor (previously active floor).
    * This returns the mask for the floor that was active before the current floor,
    * enabling effects to show lower-floor contributions through gaps in the current floor.

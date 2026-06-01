@@ -11,10 +11,11 @@
  * `BuildingShadowsEffectV2` and the edge into `LightingEffectV2` to prevent silent failures.
  *
  * Multi-level behavior:
- * - Combines the active floor + all floors above it into one shadow field.
- * - As perspective moves upward, lower floors are excluded.
- * - Falls back to the active floor outdoors mask when no floor-stack data exists
- *   (single-level maps / non-level scenes).
+ * - Single-floor maps: one combined shadowFactorTexture (legacy path).
+ * - Multi-floor maps: per-receiver-floor lit targets (groundOnlyLitTexture +
+ *   renderLitForSingleFloor), mirroring PaintedShadowEffectV2. Each floor gets
+ *   casters from its index upward and receiver gating from that floor's _Outdoors.
+ * - Falls back to the active floor outdoors mask when no floor-stack data exists.
  *
  * @module compositor-v2/effects/BuildingShadowsEffectV2
  *
@@ -26,7 +27,7 @@
 import { createLogger } from '../../core/log.js';
 import { isFloorPreloadSuppressedAfterLevelChange } from '../floor-sim-decimation.js';
 import { weatherController } from '../../core/WeatherController.js';
-import { resolveCompositorOutdoorsTexture } from '../../masks/resolve-compositor-outdoors.js';
+import { resolveAuthoredOutdoorsForFloorKey, resolveCompositorOutdoorsTexture } from '../../masks/resolve-compositor-outdoors.js';
 import { FLOOR_ID_OUTDOORS_RECEIVER_GLSL } from '../shadow-system/DirectionalShadowProjector.js';
 import {
   resolveEffectShadowSun2D,
@@ -129,6 +130,23 @@ export class BuildingShadowsEffectV2 {
 
     /** @type {boolean} One-shot debug guard for empty-floor diagnostics */
     this._loggedNoMaskOnce = false;
+    /** @type {boolean} One-shot emergency fallback log */
+    this._loggedEmergencyFallbackOnce = false;
+
+    /** @type {(import('three').Texture|null)[]} Per-floor _Outdoors for floor-id receiver sampling */
+    this._outdoorsMasks = [null, null, null, null];
+    /** @type {import('three').Texture|null} */
+    this._floorIdTex = null;
+    /** @type {import('three').WebGLRenderTarget|null} Floor-0-only lit factor (multi-floor ground pass) */
+    this._groundOnlyLitTarget = null;
+    /** @type {import('three').WebGLRenderTarget|null} Scratch lit RT for on-demand per-floor resolve */
+    this._litScratchTarget = null;
+    /** @type {(import('three').WebGLRenderTarget|null)[]} Cached lit factor per receiver floor */
+    this._perFloorLitTargets = [null, null, null, null];
+    /** @type {number} Bumped each multi-floor {@link render} */
+    this._perFloorLitCacheSerial = 0;
+    /** @type {number[]} Matches {@link #_perFloorLitCacheSerial} when slot is warm */
+    this._perFloorLitLastFillSerial = [0, 0, 0, 0];
 
     this._sunAzimuthDeg = null;
     this._sunElevationDeg = null;
@@ -203,6 +221,12 @@ export class BuildingShadowsEffectV2 {
       sh: 0,
       outdoorsRoute: null,
       outdoorsKey: null,
+      floorIdUuid: null,
+      outdoorsUuid0: null,
+      outdoorsUuid1: null,
+      outdoorsUuid2: null,
+      outdoorsUuid3: null,
+      floorCacheVersion: 0,
     };
   }
 
@@ -387,6 +411,30 @@ export class BuildingShadowsEffectV2 {
     return this.shadowTarget?.texture || null;
   }
 
+  /** @returns {import('three').Texture|null} Floor-0-only lit factor (multi-floor level 0 pass). */
+  get groundOnlyLitTexture() {
+    return this._groundOnlyLitTarget?.texture ?? null;
+  }
+
+  /**
+   * Lit factor for a single receiver floor (multi-floor per-level lighting).
+   * @param {import('three').WebGLRenderer} renderer
+   * @param {number} floorIndex
+   * @returns {import('three').Texture|null}
+   */
+  renderLitForSingleFloor(renderer, floorIndex) {
+    const idx = Math.max(0, Math.min(3, Math.floor(Number(floorIndex))));
+    const litTarget = this._perFloorLitTargets[idx]
+      ?? (idx === 0 ? this._groundOnlyLitTarget : null)
+      ?? this._litScratchTarget;
+    if (this._perFloorLitLastFillSerial[idx] === this._perFloorLitCacheSerial) {
+      const cached = litTarget?.texture ?? null;
+      if (cached) return cached;
+    }
+    if (!litTarget) return null;
+    return this._renderSingleFloorLit(renderer, idx, litTarget);
+  }
+
   /**
    * Direct outdoors mask feed from FloorCompositor.
    * Used as a fallback when per-floor compositor lookups are not ready yet.
@@ -449,6 +497,7 @@ export class BuildingShadowsEffectV2 {
         uOutdoors1FlipY: { value: 0.0 },
         uOutdoors2FlipY: { value: 0.0 },
         uOutdoors3FlipY: { value: 0.0 },
+        uReceiverFloorIndex: { value: -1.0 },
       },
       vertexShader: `
         varying vec2 vUv;
@@ -498,7 +547,29 @@ export class BuildingShadowsEffectV2 {
         uniform vec2 uDynSceneDimensions;
         uniform vec4 uDynSceneRect;
         uniform float uHasDynSceneRect;
+        uniform float uReceiverFloorIndex;
         varying vec2 vUv;
+
+        float readOutdoorsByFloor(float floorIdx, vec2 uv) {
+          if (floorIdx < 0.5) {
+            return uHasOutdoors0 > 0.5
+              ? msa_readAlphaAwareOutdoors(tOutdoors0, uv, uOutdoors0FlipY)
+              : 1.0;
+          }
+          if (floorIdx < 1.5) {
+            return uHasOutdoors1 > 0.5
+              ? msa_readAlphaAwareOutdoors(tOutdoors1, uv, uOutdoors1FlipY)
+              : 1.0;
+          }
+          if (floorIdx < 2.5) {
+            return uHasOutdoors2 > 0.5
+              ? msa_readAlphaAwareOutdoors(tOutdoors2, uv, uOutdoors2FlipY)
+              : 1.0;
+          }
+          return uHasOutdoors3 > 0.5
+            ? msa_readAlphaAwareOutdoors(tOutdoors3, uv, uOutdoors3FlipY)
+            : 1.0;
+        }
 
         float readOutdoorsMask(vec2 uv) {
           vec2 suv = clamp(uv, 0.0, 1.0);
@@ -512,6 +583,9 @@ export class BuildingShadowsEffectV2 {
         }
 
         float readReceiverOutdoorsMask(vec2 uv) {
+          if (uReceiverFloorIndex >= 0.0) {
+            return readOutdoorsByFloor(clamp(uReceiverFloorIndex, 0.0, 3.0), uv);
+          }
           if (uHasFloorId > 0.5) {
             return msa_readFloorIdOutdoors(
               uv,
@@ -863,7 +937,496 @@ export class BuildingShadowsEffectV2 {
       this._blurMaterial.uniforms.uTexelSize.value.set(1 / rtWidth, 1 / rtHeight);
     }
 
-    this._clearShadowTargetToWhite(this.renderer);
+    this._ensurePerFloorLitTargets(rtWidth, rtHeight);
+    this._invalidatePerFloorLitCache();
+    this._invalidateShadowRenderCache();
+    // Never wipe groundOnlyLit / per-floor lit RTs on resize — PaintedShadowEffectV2
+    // does not clear them; clearing floor-0 here left all-white targets when the
+    // render cache skipped on the same frame.
+    this._clearShadowTargetToWhite(this.renderer, { includeGroundOnlyLit: false });
+  }
+
+  /**
+   * @param {number} rtWidth
+   * @param {number} rtHeight
+   * @private
+   */
+  _ensurePerFloorLitTargets(rtWidth, rtHeight) {
+    const THREE = window.THREE;
+    if (!THREE || !rtWidth || !rtHeight) return;
+    const w = Math.max(1, rtWidth | 0);
+    const h = Math.max(1, rtHeight | 0);
+    const rtOpts = {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      depthBuffer: false,
+      stencilBuffer: false,
+    };
+    if (!this._groundOnlyLitTarget) {
+      this._groundOnlyLitTarget = new THREE.WebGLRenderTarget(w, h, rtOpts);
+    } else {
+      this._groundOnlyLitTarget.setSize(w, h);
+    }
+    this._perFloorLitTargets[0] = this._groundOnlyLitTarget;
+    if (!this._litScratchTarget) {
+      this._litScratchTarget = new THREE.WebGLRenderTarget(w, h, rtOpts);
+    } else {
+      this._litScratchTarget.setSize(w, h);
+    }
+    for (let i = 1; i <= 3; i++) {
+      if (!this._perFloorLitTargets[i]) {
+        this._perFloorLitTargets[i] = new THREE.WebGLRenderTarget(w, h, rtOpts);
+      } else {
+        this._perFloorLitTargets[i].setSize(w, h);
+      }
+    }
+  }
+
+  /** @private */
+  _invalidatePerFloorLitCache() {
+    for (let i = 0; i < 4; i++) this._perFloorLitLastFillSerial[i] = 0;
+  }
+
+  /**
+   * @param {object} compositor
+   * @param {number} receiverFloorIndex
+   * @returns {string[]}
+   * @private
+   */
+  _computeSourceFloorKeysForReceiver(compositor, receiverFloorIndex) {
+    const recvIdx = Number.isFinite(Number(receiverFloorIndex))
+      ? Math.max(0, Math.floor(Number(receiverFloorIndex)))
+      : 0;
+    const ctx = window.MapShine?.activeLevelContext ?? null;
+    const activeKey = (ctx && Number.isFinite(Number(ctx.bottom)) && Number.isFinite(Number(ctx.top)))
+      ? `${ctx.bottom}:${ctx.top}`
+      : null;
+    const activeBottom = Number(ctx?.bottom);
+
+    const cachedEntries = [];
+    try {
+      const floorMeta = compositor?._floorMeta;
+      if (floorMeta && typeof floorMeta.entries === 'function') {
+        for (const [key] of floorMeta.entries()) {
+          const parts = String(key).split(':');
+          const b = Number(parts[0]);
+          const t = Number(parts[1]);
+          if (!Number.isFinite(b) || !Number.isFinite(t)) continue;
+          if (!compositor.getFloorTexture(key, 'outdoors')) continue;
+          cachedEntries.push({ key, bottom: b, top: t });
+        }
+      }
+    } catch (_) {}
+
+    const floorStack = window.MapShine?.floorStack;
+    const floors = floorStack?.getFloors?.() ?? [];
+    const keys = [];
+    const seen = new Set();
+    const pushKey = (key) => {
+      if (!key || seen.has(key)) return;
+      if (!compositor.getFloorTexture(key, 'outdoors')) return;
+      seen.add(key);
+      keys.push(key);
+    };
+
+    if (Array.isArray(floors) && floors.length > 0) {
+      for (const floor of floors) {
+        if (!Number.isFinite(floor?.index) || floor.index < recvIdx) continue;
+        const ck = floor?.compositorKey != null ? String(floor.compositorKey) : '';
+        if (ck) pushKey(ck);
+        const b = Number(floor?.elevationMin);
+        const t = Number(floor?.elevationMax);
+        if (Number.isFinite(b) && Number.isFinite(t)) {
+          pushKey(`${b}:${t}`);
+        }
+      }
+    }
+
+    if (keys.length === 0 && activeKey) {
+      pushKey(activeKey);
+    }
+
+    if (keys.length === 0 && cachedEntries.length > 0) {
+      cachedEntries.sort((a, b) => a.bottom - b.bottom);
+      if (Number.isFinite(activeBottom)) {
+        const filtered = cachedEntries
+          .filter((entry) => entry.bottom >= activeBottom)
+          .map((entry) => entry.key);
+        if (filtered.length > 0) return filtered;
+      }
+      if (floors.length <= 1 || recvIdx <= 0) {
+        return cachedEntries.map((entry) => entry.key);
+      }
+    }
+
+    const skipGroundGlobalFallback = floors.length > 1 && recvIdx > 0;
+    if (keys.length === 0 && (floors.length <= 1 || recvIdx <= 0)) {
+      pushKey('ground');
+    }
+
+    if (keys.length === 0 && compositor) {
+      const r = resolveCompositorOutdoorsTexture(
+        compositor,
+        window.MapShine?.activeLevelContext ?? null,
+        {
+          skipGroundFallback: skipGroundGlobalFallback,
+          allowBundleFallback: !skipGroundGlobalFallback,
+        },
+      );
+      if (r.resolvedKey && r.texture) {
+        pushKey(r.resolvedKey);
+      }
+    }
+
+    if (keys.length === 0 && activeKey && compositor && !seen.has(activeKey)) {
+      seen.add(activeKey);
+      keys.push(activeKey);
+    }
+
+    return keys;
+  }
+
+  /**
+   * @param {object} compositor
+   * @param {string|null|undefined} floorKey
+   * @returns {import('three').Texture|null}
+   * @private
+   */
+  _resolveOutdoorsTextureForFloorKey(compositor, floorKey) {
+    if (!compositor || floorKey == null || floorKey === '') return null;
+    const key = String(floorKey);
+    // Scene-aligned GPU compose RT (matches PaintedShadowEffectV2). Authored bundle
+    // meta is tile/map space and misaligns in the building-shadow projector pass.
+    const gpuTex = compositor._floorCache?.get?.(key)?.get?.('outdoors')?.texture ?? null;
+    if (gpuTex) return gpuTex;
+    if (typeof compositor.ensureSceneSpaceOutdoorsForFloor === 'function') {
+      const baked = compositor.ensureSceneSpaceOutdoorsForFloor(key, canvas?.scene ?? null);
+      if (baked) return baked;
+    }
+    return compositor.getFloorTexture?.(key, 'outdoors')
+      ?? resolveAuthoredOutdoorsForFloorKey(compositor, key)
+      ?? null;
+  }
+
+  /**
+   * Promote bundle-only lower-band _Outdoors into scene-space GPU RTs before shadow projection.
+   * @param {object} compositor
+   * @private
+   */
+  _ensureStackFloorOutdoorsGpu(compositor) {
+    if (!compositor || typeof compositor.ensureSceneSpaceOutdoorsForFloor !== 'function') return;
+    const floorCount = Number(window.MapShine?.floorStack?.getFloors?.()?.length ?? 0);
+    if (floorCount <= 1) return;
+    const scene = canvas?.scene ?? null;
+    const visibleKeys = new Set(
+      (window.MapShine?.floorStack?.getVisibleFloors?.() ?? [])
+        .map((f) => (f?.compositorKey != null ? String(f.compositorKey) : ''))
+        .filter(Boolean),
+    );
+    for (const floor of window.MapShine?.floorStack?.getFloors?.() ?? []) {
+      const ck = floor?.compositorKey != null ? String(floor.compositorKey) : '';
+      if (!ck) continue;
+      const idx = Number(floor?.index);
+      if (Number.isFinite(idx) && idx > 0 && !visibleKeys.has(ck)) continue;
+      if (compositor._floorCache?.get?.(ck)?.get?.('outdoors')?.texture) continue;
+      try {
+        compositor.ensureSceneSpaceOutdoorsForFloor(ck, scene);
+      } catch (_) {}
+    }
+  }
+
+  /**
+   * Populate {@link #_outdoorsMasks} from FloorStack + authored bundle masks (not only GPU RT cache).
+   * @param {object} compositor
+   * @returns {(import('three').Texture|null)[]}
+   * @private
+   */
+  _syncOutdoorsMaskSlots(compositor) {
+    this._outdoorsMasks = [null, null, null, null];
+    this._floorIdTex = compositor?.floorIdTarget?.texture ?? null;
+    if (!compositor) return this._outdoorsMasks;
+    this._ensureStackFloorOutdoorsGpu(compositor);
+    try {
+      const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+      for (const floor of floors) {
+        const idx = Number(floor?.index);
+        if (!Number.isFinite(idx) || idx < 0 || idx > 3) continue;
+        const ck = floor?.compositorKey != null ? String(floor.compositorKey) : '';
+        let tex = ck ? this._resolveOutdoorsTextureForFloorKey(compositor, ck) : null;
+        if (!tex) {
+          const b = Number(floor?.elevationMin);
+          const t = Number(floor?.elevationMax);
+          if (Number.isFinite(b) && Number.isFinite(t)) {
+            tex = this._resolveOutdoorsTextureForFloorKey(compositor, `${b}:${t}`);
+          }
+        }
+        this._outdoorsMasks[idx] = tex ?? this._outdoorsMasks[idx] ?? null;
+      }
+      const { textures: recvSlots, floorIdTex } = collectOutdoorsTexturesByFloorIndex(compositor);
+      if (floorIdTex) this._floorIdTex = floorIdTex;
+      for (let i = 0; i < 4; i++) {
+        if (!this._outdoorsMasks[i] && recvSlots[i]) {
+          this._outdoorsMasks[i] = recvSlots[i];
+        }
+      }
+    } catch (_) {}
+    return this._outdoorsMasks;
+  }
+
+  /**
+   * Caster outdoors textures for floors at/above the receiver index (deduped by uuid).
+   * @param {object} compositor
+   * @param {number} receiverIdx
+   * @returns {import('three').Texture[]}
+   * @private
+   */
+  _resolveCasterTexturesForReceiver(compositor, receiverIdx) {
+    const recvIdx = Math.max(0, Math.floor(Number(receiverIdx)));
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const seen = new Set();
+    /** @type {import('three').Texture[]} */
+    const textures = [];
+    const pushTex = (tex) => {
+      if (!tex?.uuid || seen.has(tex.uuid)) return;
+      seen.add(tex.uuid);
+      textures.push(tex);
+    };
+    for (const floor of floors) {
+      const idx = Number(floor?.index);
+      if (!Number.isFinite(idx) || idx < recvIdx) continue;
+      const ck = floor?.compositorKey != null ? String(floor.compositorKey) : '';
+      if (ck) pushTex(this._resolveOutdoorsTextureForFloorKey(compositor, ck));
+      const b = Number(floor?.elevationMin);
+      const t = Number(floor?.elevationMax);
+      if (Number.isFinite(b) && Number.isFinite(t)) {
+        pushTex(this._resolveOutdoorsTextureForFloorKey(compositor, `${b}:${t}`));
+      }
+    }
+    return textures;
+  }
+
+  /**
+   * @param {object} compositor
+   * @private
+   */
+  _bindOutdoorsSlotUniforms(compositor) {
+    if (!this._projectMaterial?.uniforms || !compositor) return;
+    const pu = this._projectMaterial.uniforms;
+    const slots = this._syncOutdoorsMaskSlots(compositor);
+    pu.tFloorId.value = this._floorIdTex;
+    pu.uHasFloorId.value = this._floorIdTex ? 1.0 : 0.0;
+    pu.uFloorIdFlipY.value = 1.0;
+    for (let i = 0; i < 4; i++) {
+      const t = slots[i] ?? null;
+      pu[`tOutdoors${i}`].value = t;
+      pu[`uHasOutdoors${i}`].value = t ? 1.0 : 0.0;
+      pu[`uOutdoors${i}FlipY`].value = t?.flipY ? 1.0 : 0.0;
+    }
+  }
+
+  /**
+   * @param {number} floorIndex
+   * @returns {boolean}
+   * @private
+   */
+  _hasOutdoorsMaskForFloor(floorIndex) {
+    const idx = Number(floorIndex);
+    if (!Number.isFinite(idx) || idx < 0 || idx > 3) return false;
+    return !!this._outdoorsMasks?.[idx];
+  }
+
+  /**
+   * Project + blur + invert into a lit-factor RT for one receiver floor.
+   * @param {import('three').WebGLRenderer} renderer
+   * @param {string[]} floorKeys
+   * @param {import('three').Texture|null} fallbackMask
+   * @param {number} receiverFloorIndex
+   * @param {import('three').WebGLRenderTarget} litTarget
+   * @param {object} compositor
+   * @returns {import('three').Texture|null}
+   * @private
+   */
+  _renderShadowFactorToTarget(renderer, floorKeys, fallbackMask, receiverFloorIndex, litTarget, compositor) {
+    const THREE = window.THREE;
+    if (!THREE || !renderer || !litTarget || !this._projectMaterial || !this._invertMaterial || !this._scene || !this._quad) {
+      return null;
+    }
+
+    const pu = this._projectMaterial.uniforms;
+    const prevRecvIdx = pu.uReceiverFloorIndex.value;
+    pu.uReceiverFloorIndex.value = Number.isFinite(Number(receiverFloorIndex))
+      ? Math.max(0, Math.min(3, Math.floor(Number(receiverFloorIndex))))
+      : -1.0;
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+
+    renderer.setRenderTarget(this._strengthTarget);
+    renderer.setClearColor(0x000000, 1);
+    renderer.clear();
+    renderer.autoClear = false;
+
+    this._quad.material = this._projectMaterial;
+    let drewAny = false;
+    const recvIdx = Number(receiverFloorIndex);
+    const perFloorCasters = Number.isFinite(recvIdx) && recvIdx >= 0;
+    const casterTextures = perFloorCasters
+      ? this._resolveCasterTexturesForReceiver(compositor, recvIdx)
+      : [];
+
+    if (casterTextures.length > 0) {
+      for (const maskTex of casterTextures) {
+        pu.uOutdoorsMask.value = maskTex;
+        pu.uHasMask.value = 1.0;
+        pu.uOutdoorsMaskFlipY.value = maskTex?.flipY ? 1.0 : 0.0;
+        renderer.render(this._scene, this._camera);
+        drewAny = true;
+      }
+    } else {
+      for (const key of floorKeys) {
+        if (key === 'full-outdoors') {
+          pu.uOutdoorsMask.value = null;
+          pu.uHasMask.value = 0.0;
+          pu.uOutdoorsMaskFlipY.value = 0.0;
+          renderer.render(this._scene, this._camera);
+          drewAny = true;
+          continue;
+        }
+        const maskTex = key === 'bundle'
+          ? fallbackMask
+          : this._resolveOutdoorsTextureForFloorKey(compositor, key)
+            ?? compositor.getFloorTexture?.(key, 'outdoors');
+        if (!maskTex) continue;
+        pu.uOutdoorsMask.value = maskTex;
+        pu.uHasMask.value = 1.0;
+        pu.uOutdoorsMaskFlipY.value = maskTex?.flipY ? 1.0 : 0.0;
+        renderer.render(this._scene, this._camera);
+        drewAny = true;
+      }
+    }
+
+    if (!drewAny && fallbackMask) {
+      pu.uOutdoorsMask.value = fallbackMask;
+      pu.uHasMask.value = 1.0;
+      pu.uOutdoorsMaskFlipY.value = fallbackMask?.flipY ? 1.0 : 0.0;
+      renderer.render(this._scene, this._camera);
+      drewAny = true;
+    }
+
+    if (!drewAny) {
+      pu.uOutdoorsMask.value = null;
+      pu.uHasMask.value = 0.0;
+      pu.uOutdoorsMaskFlipY.value = 0.0;
+      renderer.render(this._scene, this._camera);
+      drewAny = true;
+    }
+
+    const blurRadius = this._getEffectiveBlurRadius();
+    const useBlur = !!this._blurMaterial && !!this._blurTarget && blurRadius > 0.01;
+    let finalStrengthTex = this._strengthTarget.texture;
+
+    const contactP = Number(this.params.contactShadowPreserve ?? 1);
+    const preserveContact =
+      !!this._sharpHoldTarget &&
+      !!this._copyMaterial &&
+      Number.isFinite(contactP) &&
+      contactP > 1e-4;
+
+    if (useBlur) {
+      this._quad.material = this._blurMaterial;
+      let blurSrc = this._strengthTarget.texture;
+
+      if (preserveContact) {
+        this._quad.material = this._copyMaterial;
+        this._copyMaterial.uniforms.tMap.value = this._strengthTarget.texture;
+        renderer.setRenderTarget(this._sharpHoldTarget);
+        renderer.setClearColor(0x000000, 1);
+        renderer.clear();
+        renderer.render(this._scene, this._camera);
+        blurSrc = this._sharpHoldTarget.texture;
+        this._quad.material = this._blurMaterial;
+      }
+
+      this._blurMaterial.uniforms.tInput.value = blurSrc;
+      this._blurMaterial.uniforms.uDirection.value.set(1, 0);
+      renderer.setRenderTarget(this._blurTarget);
+      renderer.setClearColor(0x000000, 1);
+      renderer.clear();
+      renderer.render(this._scene, this._camera);
+
+      this._blurMaterial.uniforms.tInput.value = this._blurTarget.texture;
+      this._blurMaterial.uniforms.uDirection.value.set(0, 1);
+      renderer.setRenderTarget(this._strengthTarget);
+      renderer.setClearColor(0x000000, 1);
+      renderer.clear();
+      renderer.render(this._scene, this._camera);
+      finalStrengthTex = this._strengthTarget.texture;
+    }
+
+    this._quad.material = this._invertMaterial;
+    if (this._invertMaterial.uniforms.uStrengthTexelSize) {
+      const sw = Math.max(1, this._strengthTarget.width | 0);
+      const sh = Math.max(1, this._strengthTarget.height | 0);
+      this._invertMaterial.uniforms.uStrengthTexelSize.value.set(1 / sw, 1 / sh);
+    }
+    this._invertMaterial.uniforms.tStrength.value = finalStrengthTex;
+    if (this._invertMaterial.uniforms.tSharpStrength) {
+      const sharpTex = (preserveContact && useBlur && this._sharpHoldTarget?.texture)
+        ? this._sharpHoldTarget.texture
+        : finalStrengthTex;
+      this._invertMaterial.uniforms.tSharpStrength.value = sharpTex;
+    }
+    renderer.setRenderTarget(litTarget);
+    renderer.setClearColor(0xffffff, 1);
+    renderer.clear();
+    renderer.render(this._scene, this._camera);
+
+    pu.uReceiverFloorIndex.value = prevRecvIdx;
+    renderer.autoClear = prevAutoClear;
+    renderer.setRenderTarget(prevTarget);
+
+    return litTarget.texture ?? null;
+  }
+
+  /**
+   * @param {import('three').WebGLRenderer} renderer
+   * @param {number} floorIndex
+   * @param {import('three').WebGLRenderTarget} litTarget
+   * @returns {import('three').Texture|null}
+   * @private
+   */
+  _renderSingleFloorLit(renderer, floorIndex, litTarget) {
+    const idx = Math.max(0, Math.min(3, Math.floor(Number(floorIndex))));
+    const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+    if (!compositor) return this.shadowFactorTexture ?? null;
+
+    this.update(null);
+    this._bindOutdoorsSlotUniforms(compositor);
+
+    const floorCount = Number(window.MapShine?.floorStack?.getFloors?.()?.length ?? 0);
+    const allowFallbackMask = floorCount <= 1;
+    let fallbackMask = allowFallbackMask ? (this._outdoorsMask ?? null) : null;
+    if (allowFallbackMask && !fallbackMask) {
+      fallbackMask = resolveCompositorOutdoorsTexture(
+        compositor,
+        window.MapShine?.activeLevelContext ?? null,
+        {
+          skipGroundFallback: this._skipGroundAndBundleFallbackForUpperMultiFloor(),
+          allowBundleFallback: !this._skipGroundAndBundleFallbackForUpperMultiFloor(),
+        },
+      ).texture ?? null;
+    }
+
+    return this._renderShadowFactorToTarget(
+      renderer,
+      [],
+      fallbackMask,
+      idx,
+      litTarget,
+      compositor,
+    );
   }
 
   update(_timeInfo) {
@@ -1122,6 +1685,12 @@ export class BuildingShadowsEffectV2 {
     rs.sdimY = snap.sdimY;
     rs.outdoorsRoute = snap.outdoorsRoute;
     rs.outdoorsKey = snap.outdoorsKey;
+    rs.floorIdUuid = snap.floorIdUuid;
+    rs.outdoorsUuid0 = snap.outdoorsUuid0;
+    rs.outdoorsUuid1 = snap.outdoorsUuid1;
+    rs.outdoorsUuid2 = snap.outdoorsUuid2;
+    rs.outdoorsUuid3 = snap.outdoorsUuid3;
+    rs.floorCacheVersion = snap.floorCacheVersion;
   }
 
   /**
@@ -1129,9 +1698,10 @@ export class BuildingShadowsEffectV2 {
    * @param {THREE.Texture|null} receiverMaskTex
    * @param {THREE.Texture|null} fallbackMask
    * @param {{route:string|null, resolvedKey:string|null}|null} [outdoorResolve]
+   * @param {object|null} [compositor]
    * @returns {boolean}
    */
-  _buildRenderSnapshot(floorKeys, receiverMaskTex, fallbackMask, outdoorResolve = null) {
+  _buildRenderSnapshot(floorKeys, receiverMaskTex, fallbackMask, outdoorResolve = null, compositor = null) {
     const keysStr = floorKeys ? floorKeys.join('|') : '';
     const dlo = this._dynamicLightOverride;
     const dynTex = dlo?.texture ?? null;
@@ -1142,6 +1712,11 @@ export class BuildingShadowsEffectV2 {
     const dims = canvas?.dimensions;
     const sw = dims?.sceneWidth || dims?.width || 1;
     const sh = dims?.sceneHeight || dims?.height || 1;
+    const slots = compositor ? this._syncOutdoorsMaskSlots(compositor) : this._outdoorsMasks;
+    let floorCacheVersion = 0;
+    try {
+      floorCacheVersion = Number(compositor?.getFloorCacheVersion?.() ?? 0);
+    } catch (_) {}
 
     return {
       sunAz: this._sunAzimuthDeg,
@@ -1173,6 +1748,12 @@ export class BuildingShadowsEffectV2 {
       sdimY: sdim?.y ?? 0,
       outdoorsRoute: outdoorResolve?.route ?? null,
       outdoorsKey: outdoorResolve?.resolvedKey ?? null,
+      floorIdUuid: this._floorIdTex?.uuid ?? null,
+      outdoorsUuid0: slots?.[0]?.uuid ?? null,
+      outdoorsUuid1: slots?.[1]?.uuid ?? null,
+      outdoorsUuid2: slots?.[2]?.uuid ?? null,
+      outdoorsUuid3: slots?.[3]?.uuid ?? null,
+      floorCacheVersion,
     };
   }
 
@@ -1197,7 +1778,13 @@ export class BuildingShadowsEffectV2 {
       rs.sw !== snap.sw ||
       rs.sh !== snap.sh ||
       rs.outdoorsRoute !== snap.outdoorsRoute ||
-      rs.outdoorsKey !== snap.outdoorsKey
+      rs.outdoorsKey !== snap.outdoorsKey ||
+      rs.floorIdUuid !== snap.floorIdUuid ||
+      rs.outdoorsUuid0 !== snap.outdoorsUuid0 ||
+      rs.outdoorsUuid1 !== snap.outdoorsUuid1 ||
+      rs.outdoorsUuid2 !== snap.outdoorsUuid2 ||
+      rs.outdoorsUuid3 !== snap.outdoorsUuid3 ||
+      rs.floorCacheVersion !== snap.floorCacheVersion
     ) {
       hard = true;
     }
@@ -1242,18 +1829,18 @@ export class BuildingShadowsEffectV2 {
    * @param {{route:string|null, resolvedKey:string|null}|null} [outdoorResolve]
    * @returns {boolean}
    */
-  _shouldRender(floorKeys, receiverMaskTex, fallbackMask, outdoorResolve = null) {
+  _shouldRender(floorKeys, receiverMaskTex, fallbackMask, outdoorResolve = null, compositor = null) {
     const now = performance.now();
 
     for (const k in this.params) {
       if (this.params[k] !== this._lastParams[k]) {
         this._lastParams[k] = this.params[k];
-        this._commitRenderState(now, this._buildRenderSnapshot(floorKeys, receiverMaskTex, fallbackMask, outdoorResolve));
+        this._commitRenderState(now, this._buildRenderSnapshot(floorKeys, receiverMaskTex, fallbackMask, outdoorResolve, compositor));
         return true;
       }
     }
 
-    const snap = this._buildRenderSnapshot(floorKeys, receiverMaskTex, fallbackMask, outdoorResolve);
+    const snap = this._buildRenderSnapshot(floorKeys, receiverMaskTex, fallbackMask, outdoorResolve, compositor);
     const { hard, soft } = this._classifyRenderDirty(snap);
 
     const dlo = this._dynamicLightOverride;
@@ -1304,6 +1891,7 @@ export class BuildingShadowsEffectV2 {
         note: 'Building shadows disabled',
       });
       this._invalidateShadowRenderCache();
+      this._invalidatePerFloorLitCache();
       this._clearShadowTargetToWhite(renderer);
       return;
     }
@@ -1321,6 +1909,7 @@ export class BuildingShadowsEffectV2 {
         note: 'GpuSceneMaskCompositor missing',
       });
       this._invalidateShadowRenderCache();
+      this._invalidatePerFloorLitCache();
       this._clearShadowTargetToWhite(renderer);
       return;
     }
@@ -1381,8 +1970,9 @@ export class BuildingShadowsEffectV2 {
     }
 
     const receiverMaskTex = this._resolveReceiverMaskTexture(compositor);
+    this._syncOutdoorsMaskSlots(compositor);
 
-    if (!this._shouldRender(floorKeys, receiverMaskTex, fallbackMask, outdoorResolve)) {
+    if (!this._shouldRender(floorKeys, receiverMaskTex, fallbackMask, outdoorResolve, compositor)) {
       const rs = this._renderState;
       const usedBundleFallback = floorKeys.includes('bundle') || (outdoorResolve.route === 'bundle');
       const usedFullOutdoorsFallback = floorKeys.includes('full-outdoors');
@@ -1417,106 +2007,45 @@ export class BuildingShadowsEffectV2 {
       pu.uReceiverOutdoorsMask.value = receiverMaskTex;
       pu.uHasReceiverMask.value = receiverMaskTex ? 1.0 : 0.0;
       pu.uReceiverOutdoorsMaskFlipY.value = receiverMaskTex?.flipY ? 1.0 : 0.0;
-
-      const { textures: recvSlots, floorIdTex } = collectOutdoorsTexturesByFloorIndex(compositor);
-      pu.tFloorId.value = floorIdTex;
-      pu.uHasFloorId.value = floorIdTex ? 1.0 : 0.0;
-      pu.uFloorIdFlipY.value = 1.0;
-      for (let i = 0; i < 4; i++) {
-        const t = recvSlots[i] ?? receiverMaskTex ?? null;
-        pu[`tOutdoors${i}`].value = t;
-        pu[`uHasOutdoors${i}`].value = t ? 1.0 : 0.0;
-        pu[`uOutdoors${i}FlipY`].value = t?.flipY ? 1.0 : 0.0;
-      }
+      this._bindOutdoorsSlotUniforms(compositor);
     }
 
-    const THREE = window.THREE;
-    if (!THREE) return;
-
-    const prevTarget = renderer.getRenderTarget();
-    const prevAutoClear = renderer.autoClear;
-
-    renderer.setRenderTarget(this._strengthTarget);
-    renderer.setClearColor(0x000000, 1);
-    renderer.clear();
-    renderer.autoClear = false;
-
-    this._quad.material = this._projectMaterial;
-    let drewAny = false;
-    let keyedDrew = false;
-    for (const key of floorKeys) {
-      if (key === 'full-outdoors') {
-        // No outdoors mask exists - treat everything as outdoors (white mask)
-        // Set hasMask to 0 so shader uses full outdoors assumption
-        this._projectMaterial.uniforms.uOutdoorsMask.value = null;
-        this._projectMaterial.uniforms.uHasMask.value = 0.0;
-        this._projectMaterial.uniforms.uOutdoorsMaskFlipY.value = 0.0;
-        renderer.render(this._scene, this._camera);
-        drewAny = true;
-        keyedDrew = true;
-        continue;
-      }
-      // Handle synthetic 'bundle' key by using the fallbackMask directly
-      const maskTex = key === 'bundle' ? fallbackMask : compositor.getFloorTexture(key, 'outdoors');
-      if (!maskTex) continue;
-      this._projectMaterial.uniforms.uOutdoorsMask.value = maskTex;
-      this._projectMaterial.uniforms.uHasMask.value = 1.0;
-      this._projectMaterial.uniforms.uOutdoorsMaskFlipY.value = maskTex?.flipY ? 1.0 : 0.0;
-      renderer.render(this._scene, this._camera);
-      drewAny = true;
-      keyedDrew = true;
-    }
-
-    // Fallback: if keyed lookups weren't ready this frame, still project from the
-    // direct outdoors texture feed so the effect doesn't disappear.
-    if (!drewAny && fallbackMask) {
-      this._projectMaterial.uniforms.uOutdoorsMask.value = fallbackMask;
-      this._projectMaterial.uniforms.uHasMask.value = 1.0;
-      this._projectMaterial.uniforms.uOutdoorsMaskFlipY.value = fallbackMask?.flipY ? 1.0 : 0.0;
-      renderer.render(this._scene, this._camera);
-      drewAny = true;
-    }
-
-    if (!drewAny) {
-      // Last-resort fallback when keys exist but none resolve this frame.
-      // Keep shadows active by treating missing mask as full-outdoors.
-      this._projectMaterial.uniforms.uOutdoorsMask.value = null;
-      this._projectMaterial.uniforms.uHasMask.value = 0.0;
-      this._projectMaterial.uniforms.uOutdoorsMaskFlipY.value = 0.0;
-      renderer.render(this._scene, this._camera);
-      drewAny = true;
-    }
-
-    if (!drewAny) {
-      this._patchHealthDiagnostics({
-        timestamp: Date.now(),
-        paramsEnabled: true,
-        compositorPresent: true,
-        floorKeys,
-        floorKeyCount: floorKeys.length,
-        syncOutdoorsMaskUuid: this._outdoorsMask?.uuid ?? null,
-        fallbackUsed: false,
-        fallbackMaskUuid: null,
-        bundleFallbackUsed: false,
-        fullOutdoorsFallbackUsed: false,
-        outdoorsResolveRoute: outdoorResolve.route,
-        outdoorsResolveKey: outdoorResolve.resolvedKey,
-        receiverMaskUuid: null,
-        shadowFactorTextureUuid: null,
-        dynamicLightOverrideBound: false,
-        drewAny: false,
-        note: 'Keyed passes produced no draw (mask textures null?)',
-      });
-      this._invalidateShadowRenderCache();
-      this._clearShadowTargetToWhite(renderer);
-      renderer.autoClear = prevAutoClear;
-      renderer.setRenderTarget(prevTarget);
-      return;
-    }
-
-    // Track if bundle fallback or full-outdoors fallback was used
+    const multiFloor = floorCount > 1;
     const usedBundleFallback = floorKeys.includes('bundle') || (outdoorResolve.route === 'bundle');
     const usedFullOutdoorsFallback = floorKeys.includes('full-outdoors');
+    const stackIndices = [...new Set(
+      (window.MapShine?.floorStack?.getFloors?.() ?? [])
+        .map((f) => Number(f?.index))
+        .filter((i) => Number.isFinite(i) && i >= 0 && i <= 3),
+    )].sort((a, b) => a - b);
+
+    if (!multiFloor) {
+      this._renderShadowFactorToTarget(
+        renderer,
+        floorKeys,
+        fallbackMask,
+        -1,
+        this.shadowTarget,
+        compositor,
+      );
+    } else {
+      this._perFloorLitCacheSerial++;
+      const serial = this._perFloorLitCacheSerial;
+
+      for (const fi of stackIndices) {
+        const litTarget = this._perFloorLitTargets[fi]
+          ?? (fi === 0 ? this._groundOnlyLitTarget : null);
+        if (!litTarget) continue;
+        const fb = fi === 0 ? fallbackMask : null;
+        this._renderShadowFactorToTarget(renderer, [], fb, fi, litTarget, compositor);
+        this._perFloorLitLastFillSerial[fi] = serial;
+      }
+
+      // Combined shadowTarget is unused in multi-floor lighting; groundOnlyLitTarget
+      // must stay intact — FloorCompositor binds it for level 0 (see PaintedShadowEffectV2).
+      this._clearShadowTargetToWhite(renderer, { includeGroundOnlyLit: false });
+    }
+
     this._patchHealthDiagnostics({
       timestamp: Date.now(),
       paramsEnabled: true,
@@ -1524,84 +2053,21 @@ export class BuildingShadowsEffectV2 {
       floorKeys,
       floorKeyCount: floorKeys.length,
       syncOutdoorsMaskUuid: this._outdoorsMask?.uuid ?? null,
-      fallbackUsed: drewAny && !keyedDrew && !!fallbackMask,
-      fallbackMaskUuid: (drewAny && !keyedDrew && fallbackMask) ? (fallbackMask?.uuid ?? null) : null,
+      fallbackUsed: !!fallbackMask && floorKeys.length === 0,
+      fallbackMaskUuid: fallbackMask?.uuid ?? null,
       bundleFallbackUsed: usedBundleFallback,
       fullOutdoorsFallbackUsed: usedFullOutdoorsFallback,
       outdoorsResolveRoute: outdoorResolve.route,
       outdoorsResolveKey: outdoorResolve.resolvedKey,
       drewAny: true,
       receiverMaskUuid: receiverMaskTex?.uuid ?? null,
-      shadowFactorTextureUuid: this.shadowTarget?.texture?.uuid ?? null,
+      shadowFactorTextureUuid: multiFloor
+        ? (this._groundOnlyLitTarget?.texture?.uuid ?? null)
+        : (this.shadowTarget?.texture?.uuid ?? null),
       dynamicLightOverrideBound: !!(this._dynamicLightOverride?.texture || this._dynamicLightOverride?.windowTexture),
+      multiFloorSkipCombined: multiFloor,
       note: null,
     });
-
-    const blurRadius = this._getEffectiveBlurRadius();
-    const useBlur = !!this._blurMaterial && !!this._blurTarget && blurRadius > 0.01;
-    let finalStrengthTex = this._strengthTarget.texture;
-
-    const contactP = Number(this.params.contactShadowPreserve ?? 1);
-    const preserveContact =
-      !!this._sharpHoldTarget &&
-      !!this._copyMaterial &&
-      Number.isFinite(contactP) &&
-      contactP > 1e-4;
-
-    if (useBlur) {
-      this._quad.material = this._blurMaterial;
-
-      let blurSrc = this._strengthTarget.texture;
-
-      if (preserveContact) {
-        this._quad.material = this._copyMaterial;
-        this._copyMaterial.uniforms.tMap.value = this._strengthTarget.texture;
-        renderer.setRenderTarget(this._sharpHoldTarget);
-        renderer.setClearColor(0x000000, 1);
-        renderer.clear();
-        renderer.render(this._scene, this._camera);
-        blurSrc = this._sharpHoldTarget.texture;
-
-        this._quad.material = this._blurMaterial;
-      }
-
-      this._blurMaterial.uniforms.tInput.value = blurSrc;
-      this._blurMaterial.uniforms.uDirection.value.set(1, 0);
-      renderer.setRenderTarget(this._blurTarget);
-      renderer.setClearColor(0x000000, 1);
-      renderer.clear();
-      renderer.render(this._scene, this._camera);
-
-      this._blurMaterial.uniforms.tInput.value = this._blurTarget.texture;
-      this._blurMaterial.uniforms.uDirection.value.set(0, 1);
-      renderer.setRenderTarget(this._strengthTarget);
-      renderer.setClearColor(0x000000, 1);
-      renderer.clear();
-      renderer.render(this._scene, this._camera);
-      finalStrengthTex = this._strengthTarget.texture;
-    }
-
-    this._quad.material = this._invertMaterial;
-    if (this._invertMaterial.uniforms.uStrengthTexelSize) {
-      const sw = Math.max(1, this._strengthTarget.width | 0);
-      const sh = Math.max(1, this._strengthTarget.height | 0);
-      this._invertMaterial.uniforms.uStrengthTexelSize.value.set(1 / sw, 1 / sh);
-    }
-    this._invertMaterial.uniforms.tStrength.value = finalStrengthTex;
-    if (this._invertMaterial.uniforms.tSharpStrength) {
-      const sharpTex = (preserveContact && useBlur && this._sharpHoldTarget?.texture)
-        ? this._sharpHoldTarget.texture
-        : finalStrengthTex;
-      this._invertMaterial.uniforms.tSharpStrength.value = sharpTex;
-    }
-    renderer.setRenderTarget(this.shadowTarget);
-    renderer.setClearColor(0xffffff, 1);
-    renderer.clear();
-    renderer.autoClear = true;
-    renderer.render(this._scene, this._camera);
-
-    renderer.autoClear = prevAutoClear;
-    renderer.setRenderTarget(prevTarget);
   }
 
   /**
@@ -1931,22 +2397,43 @@ export class BuildingShadowsEffectV2 {
     this.sunDir = writeEffectSunDir(this.sunDir, sun2d, THREE);
   }
 
-  _clearShadowTargetToWhite(renderer) {
-    if (!renderer || !this.shadowTarget) return;
+  /**
+   * @param {import('three').WebGLRenderer|null} renderer
+   * @param {{ includeGroundOnlyLit?: boolean }} [options]
+   */
+  _clearShadowTargetToWhite(renderer, options = {}) {
+    if (!renderer) return;
+    const includeGroundOnlyLit = options.includeGroundOnlyLit !== false;
     const prevTarget = renderer.getRenderTarget();
-    renderer.setRenderTarget(this.shadowTarget);
-    renderer.setClearColor(0xffffff, 1);
-    renderer.clear();
+    const targets = [
+      this.shadowTarget,
+      this._litScratchTarget,
+    ].filter(Boolean);
+    if (includeGroundOnlyLit && this._groundOnlyLitTarget) {
+      targets.push(this._groundOnlyLitTarget);
+    }
+    for (const rt of targets) {
+      renderer.setRenderTarget(rt);
+      renderer.setClearColor(0xffffff, 1);
+      renderer.clear();
+    }
     renderer.setRenderTarget(prevTarget);
   }
 
   dispose() {
     this._floorKeysCache = null;
     this._floorKeysSigCache = '';
+    this._invalidatePerFloorLitCache();
     try { this._strengthTarget?.dispose(); } catch (_) {}
     try { this.shadowTarget?.dispose(); } catch (_) {}
     try { this._blurTarget?.dispose(); } catch (_) {}
     try { this._sharpHoldTarget?.dispose(); } catch (_) {}
+    try { this._groundOnlyLitTarget?.dispose(); } catch (_) {}
+    try { this._litScratchTarget?.dispose(); } catch (_) {}
+    for (let i = 1; i <= 3; i++) {
+      try { this._perFloorLitTargets[i]?.dispose?.(); } catch (_) {}
+      this._perFloorLitTargets[i] = null;
+    }
     try { this._projectMaterial?.dispose(); } catch (_) {}
     try { this._invertMaterial?.dispose(); } catch (_) {}
     try { this._blurMaterial?.dispose(); } catch (_) {}
@@ -1957,6 +2444,13 @@ export class BuildingShadowsEffectV2 {
     this.shadowTarget = null;
     this._blurTarget = null;
     this._sharpHoldTarget = null;
+    this._groundOnlyLitTarget = null;
+    this._litScratchTarget = null;
+    this._perFloorLitTargets = [null, null, null, null];
+    this._perFloorLitLastFillSerial = [0, 0, 0, 0];
+    this._perFloorLitCacheSerial = 0;
+    this._outdoorsMasks = [null, null, null, null];
+    this._floorIdTex = null;
     this._projectMaterial = null;
     this._invertMaterial = null;
     this._blurMaterial = null;

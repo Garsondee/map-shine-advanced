@@ -5,6 +5,7 @@
  * @module core/diagnostics/performance-recorder-insights
  */
 
+import { rollupEffectKey } from './performance-recorder-export.js';
 import { analyzeStutters, formatStutterEventLines } from './performance-recorder-stutters.js';
 
 /**
@@ -18,18 +19,6 @@ import { analyzeStutters, formatStutterEventLines } from './performance-recorder
  * @property {string} detail
  * @property {string[]} tags
  */
-
-/**
- * Roll dotted effect keys up to parent (e.g. cloud.render.shadowRaw → cloud.render).
- * @param {string} key
- * @returns {string}
- */
-function rollupEffectKey(key) {
-  const s = String(key ?? '');
-  const parts = s.split('.');
-  if (parts.length <= 2) return s;
-  return `${parts[0]}.${parts[1]}`;
-}
 
 /**
  * @param {object[]} effects

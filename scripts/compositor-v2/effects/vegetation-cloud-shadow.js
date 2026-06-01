@@ -28,7 +28,8 @@ export const VEGETATION_CLOUD_SHADOW_UNIFORM_GLSL = `
  * Expects `c` (vec3) and `uScreenSize` in scope.
  */
 export const VEGETATION_CLOUD_SHADOW_APPLY_GLSL = `
-          if (uCloudShadowEnabled > 0.5 && uHasCloudShadow > 0.5) {
+          if (uCloudShadowEnabled > 0.5 && uHasCloudShadow > 0.5
+              && (uLightningVegetationEnabled < 0.5 || uLightningFlash01 < 0.01)) {
             vec2 msCloudUv = gl_FragCoord.xy / max(uScreenSize, vec2(1.0));
             float cloudLit = clamp(texture2D(tCloudShadow, msCloudUv).r, 0.0, 1.0);
             float cloudShade = 1.0 - cloudLit;

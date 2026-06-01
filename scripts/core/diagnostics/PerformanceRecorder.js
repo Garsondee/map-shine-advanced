@@ -22,6 +22,12 @@
 
 import { createLogger } from '../log.js';
 import { buildPerformanceInsights, formatInsightsMarkdown } from './performance-recorder-insights.js';
+import {
+  buildExportFilename,
+  buildFullPayload,
+  buildSummaryPayload,
+  resolveExportMode,
+} from './performance-recorder-export.js';
 import { analyzeStutters } from './performance-recorder-stutters.js';
 
 const log = createLogger('PerfRecorder');
@@ -1384,19 +1390,17 @@ export class PerformanceRecorder {
 
   /**
    * Build a JSON export blob and trigger a browser download.
+   * @param {{ mode?: 'summary'|'full' }} [options] - Default `summary` (grouped effects, no timelines).
    * @returns {{ blob: Blob, filename: string }}
    */
-  exportJson() {
-    const snapshot = this.getSnapshot();
-    const payload = {
-      ...snapshot,
-      frames: this._frames.slice(),
-      ticks: this._tickRecords.slice(),
-      generatedAtMs: Date.now(),
-    };
+  exportJson(options = {}) {
+    const mode = resolveExportMode(options);
+    const payload = mode === 'full'
+      ? buildFullPayload(this)
+      : buildSummaryPayload(this);
     const json = JSON.stringify(payload, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
-    const filename = this._buildFilename('json');
+    const filename = buildExportFilename(this, mode);
     this._triggerDownload(blob, filename);
     return { blob, filename };
   }

@@ -13,6 +13,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { resolveCompositorLightningFlash01 } from '../lightning/resolve-compositor-lightning-flash.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
 import { weatherController } from '../../core/WeatherController.js';
 import {
@@ -1310,10 +1311,7 @@ export class WindowLightEffectV2 {
 
     let flash01 = 0.0;
     try {
-      const env = window.MapShine?.environment;
-      if (env && typeof env.lightningFlash01 === 'number' && Number.isFinite(env.lightningFlash01)) {
-        flash01 = Math.max(0.0, Math.min(1.0, env.lightningFlash01));
-      }
+      flash01 = resolveCompositorLightningFlash01();
     } catch (_) {}
     if (u.uLightningWindowEnabled) {
       u.uLightningWindowEnabled.value = p.lightningWindowEnabled !== false ? 1.0 : 0.0;

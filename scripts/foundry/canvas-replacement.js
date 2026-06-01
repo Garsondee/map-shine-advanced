@@ -4614,7 +4614,14 @@ function _msaMapShineFlagDiffIsEchoOnly(changes) {
   try {
     const keys = _msaGetMsaFlagChanges(changes);
     if (!keys.length) return false;
-    const ECHO = new Set(['controlState', 'weather-snapshot', 'weather-dynamic', 'weather-transition', 'weather-transitionTarget']);
+    const ECHO = new Set([
+      'controlState',
+      'weather-snapshot',
+      'weather-dynamic',
+      'weather-transition',
+      'weather-transitionTarget',
+      'tileMotion',
+    ]);
     return keys.every((k) => ECHO.has(k));
   } catch (_) {
     return false;
@@ -4712,6 +4719,7 @@ function _msaSceneUpdateDeltaSkipsMapShineRebuild(changes) {
         || k === 'weather-transition'
         || k === 'weather-transitionTarget'
         || k === 'advancedCameraState'
+        || k === 'tileMotion'
       ))
       && !structuralTop
       && !gridGeomEarly
@@ -4731,6 +4739,7 @@ function _msaSceneUpdateDeltaSkipsMapShineRebuild(changes) {
       'mapPointGroups',
       'mapPointGroupsInitialized',
       'advancedCameraState',
+      'tileMotion',
     ]);
     const SAFE_TOP = new Set([
       'flags',
@@ -4911,6 +4920,11 @@ async function onUpdateScene(scene, changes, _options, _userId) {
   const touchesMapPointData =
     msaDiffKeys.includes('mapPointGroups') || msaDiffKeys.includes('mapPointGroupsInitialized');
   if (touchesMapPointData && !hasMsaSettingsDiff) {
+    _armPredictSameSceneRedrawFromMsaFlags(scene);
+  }
+
+  // Tile motion transport/config persists only `tileMotion` — must not schedule full reinit.
+  if (msaDiffKeys.includes('tileMotion') && !hasMsaSettingsDiff) {
     _armPredictSameSceneRedrawFromMsaFlags(scene);
   }
 

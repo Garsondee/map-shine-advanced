@@ -7,6 +7,7 @@
  * @module scene/tile-motion-manager
  */
 import { createLogger } from '../core/log.js';
+import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
 
 const log = createLogger('TileMotionManager');
 
@@ -153,6 +154,9 @@ export class TileMotionManager {
     /** @type {boolean} */
     this._suppressFlagReload = false;
 
+    /** @type {number} Ignore echoed `updateScene` for local tileMotion writes (ms, performance.now). */
+    this._ignoreLocalTileMotionEchoUntil = 0;
+
     /** @type {number} */
     this._frameStamp = 0;
 
@@ -253,6 +257,9 @@ export class TileMotionManager {
     this._hookIds.push(['updateScene', Hooks.on('updateScene', (scene, changes) => {
       if (!scene || scene.id !== canvas?.scene?.id) return;
       if (this._suppressFlagReload) return;
+      // Async updateScene echoes can arrive after setFlag() resolves; reloading here
+      // on resume/start rebakes bases and looks like a full level reload.
+      if (performance.now() < (this._ignoreLocalTileMotionEchoUntil || 0)) return;
 
       const mod = changes?.flags?.[MODULE_ID];
       if (!mod || !Object.prototype.hasOwnProperty.call(mod, FLAG_KEY)) return;
@@ -415,6 +422,7 @@ export class TileMotionManager {
 
     try {
       this._suppressFlagReload = true;
+      extendMsaLocalFlagWriteGuard();
       await scene.setFlag(MODULE_ID, FLAG_KEY, this.state);
       return true;
     } catch (error) {
@@ -422,6 +430,7 @@ export class TileMotionManager {
       return false;
     } finally {
       this._suppressFlagReload = false;
+      this._ignoreLocalTileMotionEchoUntil = performance.now() + 3200;
     }
   }
 

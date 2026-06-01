@@ -3,8 +3,8 @@
  * @module compositor-v2/effects/cloud-sprites/cloud-shaders
  */
 
-/** Shared GLSL: lightning strike brightening + contrast punch for cloud passes. */
-const CLOUD_LIGHTNING_FLASH_GLSL = /* glsl */`
+/** Shared GLSL: lightning strike brightening + contrast punch (cloud + vegetation). */
+export const CLOUD_LIGHTNING_FLASH_GLSL = /* glsl */`
   vec3 applyCloudLightningFlash(
     vec3 rgb,
     float flash01,

@@ -15,8 +15,9 @@
  *      merge so `tDiffuse` is the stacked scene (holes/stacking already correct).
  *      Single-floor keeps water inside the per-level chain (bloom MRT / spec path).
  *   3. Splashes + bush/tree overlays, then color correction (vegetation in the grade).
- *   4. Distortion with a vegetation mask (no screen-space warp under foliage).
- *   5. PIXI/fog/lens, mask debug, blit to screen, late overlays.
+ *   4. Sharpen + artistic filters (sepia, halftone, …) once on the merged composite.
+ *   5. Distortion with a vegetation mask (no screen-space warp under foliage).
+ *   6. PIXI/fog/lens, mask debug, blit to screen, late overlays.
  *
  * Current effects (bus overlays — rendered in step 1):
  *   - **SpecularEffectV2**: Per-tile additive overlays driven by _Specular masks.
@@ -1253,6 +1254,8 @@ export class FloorCompositor {
     const maxFloor = Number.isFinite(Number(this._renderBus?._visibleMaxFloorIndex))
       ? Number(this._renderBus._visibleMaxFloorIndex)
       : 0;
+    // Draw ground-shadow mesh first, then canopy (shadow pass never runs lightning —
+    // see BushEffectV2 / TreeEffectV2 uVegetationPass). Billboard shadows still feed lighting.
     const collect = (effect) => {
       const overlays = effect?._overlays;
       if (!overlays?.values) return;
@@ -1372,6 +1375,104 @@ export class FloorCompositor {
       this._getVegetationOverlayRoots(),
       { vegetationOnly: true },
     );
+  }
+
+  /**
+   * Sharpen + artistic fullscreen passes on the merged composite after bush/tree
+   * overlays and ColorCorrection. Per-level RTs never contain vegetation (layer 32),
+   * so these effects must not run only inside the per-level loop.
+   *
+   * @param {THREE.WebGLRenderTarget} inputRT
+   * @param {() => THREE.WebGLRenderTarget} pickOtherPost
+   * @param {boolean} [_profiling]
+   * @returns {THREE.WebGLRenderTarget}
+   * @private
+   */
+  _runPostMergeStylizationPasses(inputRT, pickOtherPost, _profiling = false) {
+    let currentInput = inputRT;
+
+    if (resolveEffectEnabled(this._sharpenEffect)) {
+      const shOut = pickOtherPost();
+      this._profileEffectCall('sharpen.postMerge', 'render', () => {
+        withSceneScissor(this.renderer, () => {
+          this._sharpenEffect.render(this.renderer, currentInput, shOut);
+        });
+      }, 'SharpenEffectV2 postMerge render');
+      currentInput = shOut;
+    }
+
+    if (resolveEffectEnabled(this._dotScreenEffect)) {
+      const dsOut = pickOtherPost();
+      let wrote = false;
+      this._profileEffectCall('dotScreen.postMerge', 'render', () => {
+        wrote = withSceneScissor(this.renderer, () =>
+          this._dotScreenEffect.render(this.renderer, this.camera, currentInput, dsOut),
+        );
+      }, 'DotScreenEffectV2 postMerge render');
+      if (wrote) currentInput = dsOut;
+    }
+    if (resolveEffectEnabled(this._halftoneEffect)) {
+      const htOut = pickOtherPost();
+      let wrote = false;
+      this._profileEffectCall('halftone.postMerge', 'render', () => {
+        wrote = withSceneScissor(this.renderer, () =>
+          this._halftoneEffect.render(this.renderer, this.camera, currentInput, htOut),
+        );
+      }, 'HalftoneEffectV2 postMerge render');
+      if (wrote) currentInput = htOut;
+    }
+    if (resolveEffectEnabled(this._asciiEffect)) {
+      const ascOut = pickOtherPost();
+      let wrote = false;
+      this._profileEffectCall('ascii.postMerge', 'render', () => {
+        wrote = withSceneScissor(this.renderer, () =>
+          this._asciiEffect.render(this.renderer, this.camera, currentInput, ascOut),
+        );
+      }, 'AsciiEffectV2 postMerge render');
+      if (wrote) currentInput = ascOut;
+    }
+    if (resolveEffectEnabled(this._dazzleOverlayEffect)) {
+      const dzOut = pickOtherPost();
+      let wrote = false;
+      this._profileEffectCall('dazzleOverlay.postMerge', 'render', () => {
+        wrote = withSceneScissor(this.renderer, () =>
+          this._dazzleOverlayEffect.render(this.renderer, this.camera, currentInput, dzOut),
+        );
+      }, 'DazzleOverlayEffectV2 postMerge render');
+      if (wrote) currentInput = dzOut;
+    }
+    if (resolveEffectEnabled(this._visionModeEffect)) {
+      const vmOut = pickOtherPost();
+      let wrote = false;
+      this._profileEffectCall('visionMode.postMerge', 'render', () => {
+        wrote = withSceneScissor(this.renderer, () =>
+          this._visionModeEffect.render(this.renderer, this.camera, currentInput, vmOut),
+        );
+      }, 'VisionModeEffectV2 postMerge render');
+      if (wrote) currentInput = vmOut;
+    }
+    if (resolveEffectEnabled(this._invertEffect)) {
+      const invOut = pickOtherPost();
+      let wrote = false;
+      this._profileEffectCall('invert.postMerge', 'render', () => {
+        wrote = withSceneScissor(this.renderer, () =>
+          this._invertEffect.render(this.renderer, this.camera, currentInput, invOut),
+        );
+      }, 'InvertEffectV2 postMerge render');
+      if (wrote) currentInput = invOut;
+    }
+    if (resolveEffectEnabled(this._sepiaEffect)) {
+      const sepOut = pickOtherPost();
+      let wrote = false;
+      this._profileEffectCall('sepia.postMerge', 'render', () => {
+        wrote = withSceneScissor(this.renderer, () =>
+          this._sepiaEffect.render(this.renderer, this.camera, currentInput, sepOut),
+        );
+      }, 'SepiaEffectV2 postMerge render');
+      if (wrote) currentInput = sepOut;
+    }
+
+    return currentInput;
   }
 
   /**
@@ -3920,6 +4021,10 @@ export class FloorCompositor {
       : null;
     const sceneFloorCountForShadow = window.MapShine?.floorStack?.getFloors?.()?.length ?? 0;
     const omitPaintedFromCombined = sceneFloorCountForShadow > 1;
+    const omitBuildingFromCombined = sceneFloorCountForShadow > 1;
+    const buildingTexForCombine = (resolveEffectEnabled(this._buildingShadowEffect) && !omitBuildingFromCombined)
+      ? buildingTex
+      : null;
     const paintedTex = (this._paintedShadowEffect?.params?.enabled && !omitPaintedFromCombined)
       ? (this._paintedShadowEffect.shadowFactorTexture ?? null)
       : null;
@@ -3930,7 +4035,7 @@ export class FloorCompositor {
       sm.setInputList([
         { id: 'cloud', texture: cloudTex ?? null, rawTexture: cloudRawTex ?? null, uvSpace: 'screen', opacity: sm.params?.cloudOpacity ?? 1 },
         { id: 'overhead', texture: overheadTex, uvSpace: 'screen', opacity: sm.params?.overheadOpacity ?? 1 },
-        { id: 'building', texture: buildingTex, uvSpace: 'scene', opacity: sm.params?.buildingOpacity ?? 1 },
+        { id: 'building', texture: buildingTexForCombine, uvSpace: 'scene', opacity: sm.params?.buildingOpacity ?? 1 },
         { id: 'painted', texture: paintedTex, uvSpace: 'scene', opacity: sm.params?.paintedOpacity ?? 1, preservesDeep: true },
         { id: 'skyReach', texture: skyReachTex, uvSpace: 'scene', opacity: sm.params?.skyReachOpacity ?? 1 },
         { id: 'tree', texture: this._treeBillboardShadowTexture ?? null, uvSpace: 'screen', opacity: 0 },
@@ -3941,7 +4046,7 @@ export class FloorCompositor {
         cloudShadowTexture: cloudTex ?? null,
         cloudShadowRawTexture: cloudRawTex ?? null,
         overheadShadowTexture: overheadTex,
-        buildingShadowTexture: buildingTex,
+        buildingShadowTexture: buildingTexForCombine,
         paintedShadowTexture: paintedTex,
         skyReachShadowTexture: skyReachTex,
         treeBillboardShadowTexture: this._treeBillboardShadowTexture ?? null,
@@ -4648,6 +4753,12 @@ export class FloorCompositor {
     try { this._treeEffect?.syncCloudShadowUniforms?.(); } catch (err) {
       log.warn('TreeEffectV2 syncCloudShadowUniforms threw, skipping:', err);
     }
+    try { this._bushEffect?.syncLandscapeLightningUniforms?.(); } catch (err) {
+      log.warn('BushEffectV2 syncLandscapeLightningUniforms threw, skipping:', err);
+    }
+    try { this._treeEffect?.syncLandscapeLightningUniforms?.(); } catch (err) {
+      log.warn('TreeEffectV2 syncLandscapeLightningUniforms threw, skipping:', err);
+    }
     if (_profiling) this._recordPassTiming('cloudRender', _profileT0);
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: cloud.render DONE'); } catch (_) {} }
 
@@ -4676,13 +4787,19 @@ export class FloorCompositor {
       ? (this._shadowManagerEffect?.combinedShadowRawTexture ?? combinedShadowTex)
       : (cloudShadowRawTexLegacy ?? combinedShadowTex);
     const omitPaintedFromCombined = (window.MapShine?.floorStack?.getFloors?.()?.length ?? 0) > 1;
+    const omitBuildingFromCombined = omitPaintedFromCombined;
     const paintedShadowEnabled = resolveEffectEnabled(this._paintedShadowEffect)
       && this._paintedShadowEffect?.params?.enabled;
+    const buildingShadowEnabled = resolveEffectEnabled(this._buildingShadowEffect)
+      && this._buildingShadowEffect?.params?.enabled;
     const paintedShadowLitTex = paintedShadowEnabled
       ? (this._paintedShadowEffect.shadowFactorTexture ?? null)
       : null;
     const paintedGroundOnlyLitTex = (omitPaintedFromCombined && paintedShadowEnabled)
       ? (this._paintedShadowEffect?.groundOnlyLitTexture ?? null)
+      : null;
+    const buildingGroundOnlyLitTex = (omitBuildingFromCombined && buildingShadowEnabled)
+      ? (this._buildingShadowEffect?.groundOnlyLitTexture ?? null)
       : null;
     const paintedShadowAtAndAboveLitTex = null;
     const paintedShadowInCombined = !omitPaintedFromCombined;
@@ -4691,6 +4808,7 @@ export class FloorCompositor {
       : 1.0;
     // Lighting compose samples building+painted separately for structural-vs-sky ambient (still unified for combine).
     const buildingShadowTexForLighting = buildingShadowTex;
+    const buildingShadowInCombined = !omitBuildingFromCombined;
     const buildingShadowOpacity = Number.isFinite(this._buildingShadowEffect?.params?.opacity)
       ? this._buildingShadowEffect.params.opacity : 0.75;
     const overheadRoofAlphaTex = (_disableRoofInLighting || !_overheadShadowEnabled)
@@ -4732,6 +4850,8 @@ export class FloorCompositor {
       paintedShadowInCombined,
       buildingShadowTex,
       buildingShadowTexForLighting,
+      buildingGroundOnlyLitTex,
+      buildingShadowInCombined,
       buildingShadowOpacity,
       overheadShadowTexLegacy,
       overheadRoofAlphaTex,
@@ -7573,9 +7693,12 @@ export class FloorCompositor {
       : null;
     const sceneFloorCount = window.MapShine?.floorStack?.getFloors?.()?.length ?? 0;
     const omitPaintedFromCombined = sceneFloorCount > 1;
+    const omitBuildingFromCombined = omitPaintedFromCombined;
     let paintedLitTex = null;
+    let buildingLitTex = null;
     let paintedOpacity = 1.0;
     const ps = this._paintedShadowEffect;
+    const bs = this._buildingShadowEffect;
     if (
       omitPaintedFromCombined
       && resolveEffectEnabled(ps)
@@ -7598,6 +7721,26 @@ export class FloorCompositor {
       const po = Number(sm?.params?.paintedOpacity);
       paintedOpacity = Number.isFinite(po) ? Math.max(0, Math.min(1, po)) : 1.0;
     }
+    if (
+      omitBuildingFromCombined
+      && resolveEffectEnabled(bs)
+      && bs?.params?.enabled
+    ) {
+      const fi = Number.isFinite(Number(waterDataFloorIndex))
+        ? Math.max(0, Math.floor(Number(waterDataFloorIndex)))
+        : 0;
+      if (fi <= 0) {
+        buildingLitTex = bs.groundOnlyLitTexture ?? bs.shadowFactorTexture ?? null;
+      } else if (typeof bs.renderLitForSingleFloor === 'function') {
+        try {
+          buildingLitTex = bs.renderLitForSingleFloor(this.renderer, fi);
+        } catch (_) {
+          buildingLitTex = bs.shadowFactorTexture ?? null;
+        }
+      } else {
+        buildingLitTex = bs.shadowFactorTexture ?? null;
+      }
+    }
     try {
       if (smCombined) {
         water.setShadowManagerCombinedTexture?.(smCombined);
@@ -7606,7 +7749,7 @@ export class FloorCompositor {
       }
       water.setPaintedShadowLitTexture?.(paintedLitTex, paintedOpacity);
       water.setCloudShadowTexture?.(cloudShadowTexLegacy ?? null);
-      water.setBuildingShadowTexture?.(buildingShadowTex ?? null);
+      water.setBuildingShadowTexture?.(buildingLitTex ?? buildingShadowTex ?? null);
       water.setOverheadShadowTexture?.(overheadShadowTexLegacy ?? null);
     } catch (_) {}
   }
@@ -7638,6 +7781,8 @@ export class FloorCompositor {
       paintedShadowInCombined,
       buildingShadowTex,
       buildingShadowTexForLighting = buildingShadowTex,
+      buildingGroundOnlyLitTex = null,
+      buildingShadowInCombined = true,
       buildingShadowOpacity,
       overheadShadowTexLegacy,
       overheadRoofAlphaTex,
@@ -7886,6 +8031,12 @@ export class FloorCompositor {
               ?? paintedShadowLitTex)
             : (paintedGroundOnlyLitTex ?? paintedShadowLitTex))
           : paintedShadowLitTex;
+        const buildingForLevel = !buildingShadowInCombined
+          ? (levelIndex > 0
+            ? (this._buildingShadowEffect?.renderLitForSingleFloor?.(this.renderer, levelIndex)
+              ?? buildingShadowTexForLighting)
+            : (buildingGroundOnlyLitTex ?? buildingShadowTexForLighting))
+          : buildingShadowTexForLighting;
         this._profileEffectCall('lighting', 'render', () => {
           withoutSceneScissor(this.renderer, () => {
             this._lightingEffect.render(
@@ -7893,7 +8044,7 @@ export class FloorCompositor {
               currentInput, levelPostA,
               winScene,
               cloudShadowTexLegacy, cloudShadowRawTexLegacy,
-              buildingShadowTexForLighting, overheadShadowTexLegacy,
+              buildingForLevel, overheadShadowTexLegacy,
               buildingShadowOpacity,
               overheadRoofAlphaTex, overheadRoofBlockTex,
               outdoorsForLightingTex,
@@ -8018,90 +8169,8 @@ export class FloorCompositor {
       // Distortion (fire heat haze): skipped per-level because aux-pass
       // caching in DistortionManager assumes one render per frame. Applied
       // once globally after composite in the late pass section.
-
-      // Sharpen
-      if (resolveEffectEnabled(this._sharpenEffect)) {
-        const shOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        this._profileEffectCall('sharpen', 'render', () => {
-          withSceneScissor(this.renderer, () => {
-            this._sharpenEffect.render(this.renderer, currentInput, shOut);
-          });
-        }, 'SharpenEffectV2 render');
-        currentInput = shOut;
-      }
-
-      // Artistic post-processing — use resolveEffectEnabled (instance + params)
-      // so registry/UI cannot disagree with FilterEffectV2-style gating.
-      if (resolveEffectEnabled(this._dotScreenEffect)) {
-        const dsOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        let wrote = false;
-        this._profileEffectCall('dotScreen', 'render', () => {
-          wrote = withSceneScissor(this.renderer, () =>
-            this._dotScreenEffect.render(this.renderer, this.camera, currentInput, dsOut)
-          );
-        }, 'DotScreenEffectV2 render');
-        if (wrote) currentInput = dsOut;
-      }
-      if (resolveEffectEnabled(this._halftoneEffect)) {
-        const htOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        let wrote = false;
-        this._profileEffectCall('halftone', 'render', () => {
-          wrote = withSceneScissor(this.renderer, () =>
-            this._halftoneEffect.render(this.renderer, this.camera, currentInput, htOut)
-          );
-        }, 'HalftoneEffectV2 render');
-        if (wrote) currentInput = htOut;
-      }
-      if (resolveEffectEnabled(this._asciiEffect)) {
-        const ascOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        let wrote = false;
-        this._profileEffectCall('ascii', 'render', () => {
-          wrote = withSceneScissor(this.renderer, () =>
-            this._asciiEffect.render(this.renderer, this.camera, currentInput, ascOut)
-          );
-        }, 'AsciiEffectV2 render');
-        if (wrote) currentInput = ascOut;
-      }
-      if (resolveEffectEnabled(this._dazzleOverlayEffect)) {
-        const dzOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        let wrote = false;
-        this._profileEffectCall('dazzleOverlay', 'render', () => {
-          wrote = withSceneScissor(this.renderer, () =>
-            this._dazzleOverlayEffect.render(this.renderer, this.camera, currentInput, dzOut)
-          );
-        }, 'DazzleOverlayEffectV2 render');
-        if (wrote) currentInput = dzOut;
-      }
-      if (resolveEffectEnabled(this._visionModeEffect)) {
-        const vmOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        let wrote = false;
-        this._profileEffectCall('visionMode', 'render', () => {
-          wrote = withSceneScissor(this.renderer, () =>
-            this._visionModeEffect.render(this.renderer, this.camera, currentInput, vmOut)
-          );
-        }, 'VisionModeEffectV2 render');
-        if (wrote) currentInput = vmOut;
-      }
-      if (resolveEffectEnabled(this._invertEffect)) {
-        const invOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        let wrote = false;
-        this._profileEffectCall('invert', 'render', () => {
-          wrote = withSceneScissor(this.renderer, () =>
-            this._invertEffect.render(this.renderer, this.camera, currentInput, invOut)
-          );
-        }, 'InvertEffectV2 render');
-        if (wrote) currentInput = invOut;
-      }
-      if (resolveEffectEnabled(this._sepiaEffect)) {
-        const sepOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        let wrote = false;
-        this._profileEffectCall('sepia', 'render', () => {
-          wrote = withSceneScissor(this.renderer, () =>
-            this._sepiaEffect.render(this.renderer, this.camera, currentInput, sepOut)
-          );
-        }, 'SepiaEffectV2 render');
-        if (wrote) currentInput = sepOut;
-      }
+      // Sharpen + artistic filters (sepia, halftone, …) run once post-merge
+      // after bush/tree overlays and ColorCorrection — see _runPostMergeStylizationPasses.
 
       // ── Authoritative alpha rebind ─────────────────────────────────────
       // Clamp the post-chain RT's alpha to the raw sceneRT alpha. The
@@ -8416,6 +8485,8 @@ export class FloorCompositor {
         this._waterSplashesEffect?.syncPostMergeOcclusionUniforms?.();
       } catch (_) {}
       this._compositeWaterSplashesAboveWater(this.renderer, mergedCompositeOut);
+      try { this._bushEffect?.syncLandscapeLightningUniforms?.(); } catch (_) {}
+      try { this._treeEffect?.syncLandscapeLightningUniforms?.(); } catch (_) {}
       this._compositeVegetationAboveWater(this.renderer, mergedCompositeOut);
     }, 'Splashes + vegetation before CC');
     if (_profiling) this._recordPassTiming('postMerge_worldOverlaysBeforeCc', _profileT0);
@@ -8527,6 +8598,15 @@ export class FloorCompositor {
         } catch (_) {}
       }
     }
+
+    // Fullscreen stylization after vegetation + CC (bush/tree are not in per-level RTs).
+    if (_profiling) _profileT0 = performance.now();
+    mergedCompositeOut = this._runPostMergeStylizationPasses(
+      mergedCompositeOut,
+      _pickOtherPost,
+      _profiling,
+    );
+    if (_profiling) this._recordPassTiming('postMerge_stylization', _profileT0);
 
     // Expose per-level diagnostics on MapShine for console inspection
     try {

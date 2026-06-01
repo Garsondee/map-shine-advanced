@@ -40,6 +40,17 @@ import {
   applyVegetationCloudShadowParamsToUniforms,
   syncVegetationCloudShadowUniforms,
 } from './vegetation-cloud-shadow.js';
+import {
+  VEGETATION_LANDSCAPE_LIGHTNING_DEFAULTS,
+  VEGETATION_LANDSCAPE_LIGHTNING_CONTROL_SCHEMA,
+  VEGETATION_LANDSCAPE_LIGHTNING_UNIFORM_GLSL,
+  VEGETATION_LANDSCAPE_LIGHTNING_APPLY_GLSL,
+  createVegetationLandscapeLightningUniforms,
+  createVegetationShadowLightningUniforms,
+  applyVegetationLandscapeLightningParamsToUniforms,
+  syncVegetationLandscapeLightningForEffect,
+  linkVegetationLandscapeLightningUniforms,
+} from './vegetation-landscape-lightning.js';
 
 const log = createLogger('BushEffectV2');
 
@@ -151,6 +162,7 @@ export class BushEffectV2 {
       shadowSoftness: 0.5,
 
       ...VEGETATION_CLOUD_SHADOW_DEFAULTS,
+      ...VEGETATION_LANDSCAPE_LIGHTNING_DEFAULTS,
     };
 
     log.debug('BushEffectV2 created');
@@ -183,6 +195,7 @@ export class BushEffectV2 {
           'Rustle floor': 'Minimum motion when wind reads calm so bushes never look frozen.',
           'Canopy shadow': 'Darkening from a blurred, offset sample of the mask opposite the sun.',
           'Cloud shadows': 'Screen-space darkening from the cloud shadow map (same pass as ground tiles).',
+          'Landscape lightning': 'HDR brightening on foliage during distant strikes (Map Shine Control lightning).',
           'Edge safety': 'Pulls motion and shadow down near scene edges to hide UV seams.',
         },
       },
@@ -266,6 +279,19 @@ export class BushEffectV2 {
             'cloudShadowEnabled',
             'cloudShadowDarkenStrength',
             'cloudShadowDarkenCurve',
+          ],
+        },
+        {
+          name: 'landscapeLightning',
+          label: 'Landscape lightning',
+          type: 'folder',
+          advanced: true,
+          expanded: false,
+          parameters: [
+            'lightningVegetationEnabled',
+            'lightningVegetationBrightnessBoost',
+            'lightningVegetationContrastBoost',
+            'lightningVegetationTintStrength',
           ],
         },
         {
@@ -636,6 +662,7 @@ export class BushEffectV2 {
           tooltip: 'Blur radius of the multi-tap shadow sample.',
         },
         ...VEGETATION_CLOUD_SHADOW_CONTROL_SCHEMA,
+        ...VEGETATION_LANDSCAPE_LIGHTNING_CONTROL_SCHEMA,
         edgeFadeStart: {
           type: 'slider',
           label: 'Edge fade start',
@@ -942,6 +969,7 @@ export class BushEffectV2 {
 
       this._applyShadowDriverUniforms();
       applyVegetationCloudShadowParamsToUniforms(this._sharedUniforms, this.params);
+      applyVegetationLandscapeLightningParamsToUniforms(this._sharedUniforms, this.params);
     }
 
     this._lastFrameTime = time;
@@ -953,6 +981,14 @@ export class BushEffectV2 {
   syncCloudShadowUniforms() {
     if (!this._initialized || !this._sharedUniforms) return;
     syncVegetationCloudShadowUniforms(this._sharedUniforms, this.params);
+  }
+
+  /**
+   * Bind landscape lightning flash from WeatherLightningEffectV2 (after its update each frame).
+   */
+  syncLandscapeLightningUniforms() {
+    if (!this._initialized) return;
+    syncVegetationLandscapeLightningForEffect(this);
   }
 
   onFloorChange(_maxFloorIndex) {
@@ -1170,6 +1206,7 @@ export class BushEffectV2 {
 
       uDeriveAlpha: { value: 0.0 },
       ...createVegetationCloudShadowUniforms(THREE, this.params),
+      ...createVegetationLandscapeLightningUniforms(THREE, this.params),
     };
   }
 
@@ -1284,10 +1321,12 @@ export class BushEffectV2 {
     };
     const shadowUniforms = {
       ...this._sharedUniforms,
+      ...createVegetationShadowLightningUniforms(THREE),
       uBushMask: { value: null },
       uDeriveAlpha: { value: 0.0 },
       uVegetationPass: { value: 1.0 },
     };
+    linkVegetationLandscapeLightningUniforms(uniforms, this._sharedUniforms);
 
     const material = new THREE.ShaderMaterial({
       uniforms,
@@ -1359,6 +1398,7 @@ export class BushEffectV2 {
         uniform float uDeriveAlpha;
         uniform float uVegetationPass;
 ${VEGETATION_CLOUD_SHADOW_UNIFORM_GLSL}
+${VEGETATION_LANDSCAPE_LIGHTNING_UNIFORM_GLSL}
 
         varying vec2 vUv;
         varying vec2 vWorldPos;
@@ -1555,8 +1595,9 @@ ${VEGETATION_CLOUD_SHADOW_UNIFORM_GLSL}
           vec3 c = bushSample.rgb;
           if (ccDelta > 0.0001) c = applyCC(c);
           c *= texA;
+${VEGETATION_LANDSCAPE_LIGHTNING_APPLY_GLSL}
 ${VEGETATION_CLOUD_SHADOW_APPLY_GLSL}
-          gl_FragColor = vec4(c * uIntensity, mainAlpha);
+          gl_FragColor = vec4(c, mainAlpha);
         }
       `,
       transparent: true,

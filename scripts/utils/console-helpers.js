@@ -3229,7 +3229,16 @@ export function installConsoleHelpers() {
       top: (kind = 'updatables', n = 10) => {
         return globalProfiler.getTopContributors(kind, n);
       },
-      exportJson: () => {
+      /**
+       * Performance Recorder JSON download when `MapShine.performanceRecorder` exists;
+       * otherwise legacy frame profiler JSON object.
+       * @param {{ mode?: 'summary'|'full' }} [opts] Default summary; `{ mode: 'full' }` for frame/tick timelines.
+       */
+      exportJson: (opts = {}) => {
+        const rec = window.MapShine?.performanceRecorder;
+        if (rec && typeof rec.exportJson === 'function') {
+          return rec.exportJson(opts);
+        }
         return globalProfiler.exportJson();
       },
       exportCsv: () => {

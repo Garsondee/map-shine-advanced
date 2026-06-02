@@ -25,6 +25,7 @@ export const STACKED_OUTDOORS_LAYER_FRAG = /* glsl */`
   uniform sampler2D tAccum;
   uniform sampler2D tFloorAlpha;
   uniform sampler2D tOutdoors;
+  uniform float uUseOutdoorsAlphaCoverage;
 
   varying vec2 vSceneUv;
 
@@ -36,8 +37,10 @@ export const STACKED_OUTDOORS_LAYER_FRAG = /* glsl */`
 
   void main() {
     vec4 acc = texture2D(tAccum, vSceneUv);
-    float cov = clamp(texture2D(tFloorAlpha, vSceneUv).r, 0.0, 1.0);
     vec4 od = texture2D(tOutdoors, vSceneUv);
+    float cov = (uUseOutdoorsAlphaCoverage > 0.5)
+      ? clamp(od.a, 0.0, 1.0)
+      : clamp(texture2D(tFloorAlpha, vSceneUv).r, 0.0, 1.0);
     float valid = step(0.5, clamp(od.a, 0.0, 1.0));
     float outdoorClass = decodeOutdoorClass(od);
     float w = cov * valid;

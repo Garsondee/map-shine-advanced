@@ -1051,6 +1051,14 @@ export class ColorCorrectionEffectV2 {
           return fract(sin(dot(p.xy, vec2(12.9898, 78.233))) * 43758.5453);
         }
 
+        float decodeOutdoorsMaskSample(vec4 od) {
+          float outdoorRaw = clamp(max(od.r, max(od.g, od.b)), 0.0, 1.0);
+          float outdoorMid = smoothstep(0.18, 0.82, outdoorRaw);
+          float outdoorClass = (outdoorRaw <= 0.10) ? 0.0 : ((outdoorRaw >= 0.90) ? 1.0 : outdoorMid);
+          float outdoorsAlphaValid = step(0.5, clamp(od.a, 0.0, 1.0));
+          return mix(1.0, outdoorClass, outdoorsAlphaValid);
+        }
+
         float sampleIndoorWeight(vec2 screenUv) {
           if (uHasOutdoorsMask < 0.5) return 0.0;
           vec2 worldXY = mix(uViewBoundsMin, uViewBoundsMax, screenUv);
@@ -1065,11 +1073,10 @@ export class ColorCorrectionEffectV2 {
           if (uOutdoorsMaskFlipY > 0.5) sceneUv.y = 1.0 - sceneUv.y;
           sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
 
-          // Match SkyColor / Lighting: alpha=validity, rgb= outdoors strength.
+          // Canonical outdoors decode (matches Lighting/Water/Fog paths).
           vec4 od = texture2D(tOutdoorsMask, sceneUv);
-          float outdoorStrength = mix(1.0, clamp(od.r, 0.0, 1.0), clamp(od.a, 0.0, 1.0));
-          float isOutdoor = step(0.5, outdoorStrength);
-          float indoorSignal = clamp(1.0 - isOutdoor, 0.0, 1.0);
+          float outdoorStrength = decodeOutdoorsMaskSample(od);
+          float indoorSignal = clamp(1.0 - outdoorStrength, 0.0, 1.0);
           return mix(0.0, smoothstep(0.20, 0.75, indoorSignal), inScene);
         }
 
@@ -1112,8 +1119,8 @@ export class ColorCorrectionEffectV2 {
           if (uOutdoorsMaskFlipY > 0.5) sceneUv.y = 1.0 - sceneUv.y;
           sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
           vec4 od = texture2D(tOutdoorsMask, sceneUv);
-          float outdoorStrength = mix(1.0, clamp(od.r, 0.0, 1.0), clamp(od.a, 0.0, 1.0));
-          float outdoorVis = mix(1.0, step(0.5, outdoorStrength), inScene);
+          float outdoorStrength = decodeOutdoorsMaskSample(od);
+          float outdoorVis = mix(1.0, outdoorStrength, inScene);
           float skyReach = sampleSkyReachAt(sceneUvRaw);
           float skyOcc = sampleSkyOcclusionAt(sceneUvRaw, inScene);
           return clamp(outdoorVis * skyReach * skyOcc, 0.0, 1.0);
@@ -1704,11 +1711,18 @@ export class ColorCorrectionEffectV2 {
 
   /** @private @returns {number} */
   _resolveTimelineHour() {
+    const externalDriveActive = window.MapShine?.environmentControlApi?.isExternallyDriven?.() === true;
+    const wcHour = Number(weatherController?.timeOfDay);
+    if (externalDriveActive && Number.isFinite(wcHour)) return wrapHour24(wcHour);
+    try {
+      const panelHour = Number(window.MapShine?.controlPanel?.controlState?.timeOfDay);
+      if (externalDriveActive && Number.isFinite(panelHour)) return wrapHour24(panelHour);
+    } catch (_) {}
+
     try {
       const hour = Number(LightingDirector.get()?.hour);
       if (Number.isFinite(hour)) return wrapHour24(hour);
     } catch (_) {}
-    const wcHour = Number(weatherController?.timeOfDay);
     if (Number.isFinite(wcHour)) return wrapHour24(wcHour);
     try {
       const panelHour = Number(window.MapShine?.controlPanel?.controlState?.timeOfDay);

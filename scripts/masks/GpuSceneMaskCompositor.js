@@ -2562,6 +2562,7 @@ export class GpuSceneMaskCompositor {
           tAccum: { value: null },
           tFloorAlpha: { value: null },
           tOutdoors: { value: null },
+          uUseOutdoorsAlphaCoverage: { value: 0.0 },
         },
         depthTest: false,
         depthWrite: false,
@@ -2657,12 +2658,14 @@ export class GpuSceneMaskCompositor {
 
     for (const floorKey of floorKeysBottomToTop) {
       const outdoorsTex = this.getFloorTexture(floorKey, 'outdoors');
+      if (!outdoorsTex) continue;
       const alphaTex = this.getFloorTexture(floorKey, 'floorAlpha');
-      if (!outdoorsTex || !alphaTex) continue;
+      const useOutdoorsAlphaCoverage = !alphaTex;
 
       m.uniforms.tAccum.value = accum.texture;
-      m.uniforms.tFloorAlpha.value = alphaTex;
+      m.uniforms.tFloorAlpha.value = alphaTex ?? outdoorsTex;
       m.uniforms.tOutdoors.value = outdoorsTex;
+      m.uniforms.uUseOutdoorsAlphaCoverage.value = useOutdoorsAlphaCoverage ? 1.0 : 0.0;
 
       renderer.setRenderTarget(scratch);
       renderer.setClearColor(0x000000, 0);

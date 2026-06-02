@@ -3,8 +3,11 @@ import {
   POINT_LIGHT_FALLOFF_GLSL,
   POINT_LIGHT_WALL_VERTEX_EDGE_MIN,
   applyPointLightBufferBlending,
+  applyPointLightFalloffUniforms,
   computePointLightFadeWidth,
   computePointLightGeomScale,
+  applyFalloffAttenuationUniforms,
+  createPointLightFalloffUniforms,
   glowShaderAttenuationFromEdgeSoftness,
 } from './point-light-falloff.js';
 
@@ -113,6 +116,8 @@ export class LightMesh {
         uCoreContrast: { value: 1.0 },
         uHaloContrast: { value: 1.0 },
         uAttenuation: { value: this.attenuation },
+        uFoundryAttenuation: { value: this.attenuation },
+        uFalloffAttBlend: { value: this.attenuation },
         uFalloffExponent: { value: this.falloffExponent },
         /** HDR scale for rgb + alpha (compose reads alpha for darkness punch / direct light). */
         uEmissionGain: { value: 0.0 },
@@ -122,6 +127,7 @@ export class LightMesh {
         uRgbGain: { value: this.rgbGain },
         /** Rim fade width as a fraction of outer radius (0 = hard edge). */
         uEdgeSoftness: { value: this.edgeSoftness },
+        ...createPointLightFalloffUniforms(window.THREE),
       },
       vertexShader: `
         varying vec2 vLocalPos;
@@ -159,7 +165,7 @@ export class LightMesh {
           float geomR = max(uGeomRadius, outerR);
           float dGeom = dist / geomR;
           float photFrac = outerR / geomR;
-          float fadeBand = msaPointLightFadeWidth(uAttenuation, uEdgeSoftness, uFalloffExponent);
+          float fadeBand = msaPointLightFadeWidth(uEdgeSoftness, uFalloffExponent);
           cover *= 1.0 - smoothstep(photFrac * 0.12, 1.35, dGeom);
 
           float gain = max(uEmissionGain, 0.0);
@@ -190,6 +196,7 @@ export class LightMesh {
     });
 
     applyPointLightBufferBlending(this.material);
+    applyPointLightFalloffUniforms(this.material.uniforms);
     this.material.toneMapped = false;
     if (options.worldPoints?.length) {
       this._buildMeshFromWorldPoints(options.worldPoints);
@@ -380,7 +387,8 @@ export class LightMesh {
 
     this.material.uniforms.uColor.value.setRGB(this.color.r, this.color.g, this.color.b);
     this._syncRadiusUniforms();
-    this.material.uniforms.uAttenuation.value = this.attenuation;
+    const b = this.outerRadiusPx > 0 ? Math.min(1, this.innerRadiusPx / this.outerRadiusPx) : 1;
+    applyFalloffAttenuationUniforms(this.material.uniforms, this.attenuation, 1.0, b);
     const newRim = this._getEffectiveRimSoftness();
     const rimChanged = Math.abs(newRim - (this._lastEffectiveRim ?? -1)) > 0.004;
     this._lastEffectiveRim = newRim;
@@ -503,9 +511,8 @@ export class LightMesh {
   setAttenuation(attenuation) {
     const a = Math.max(0, Math.min(1, Number(attenuation) || 0));
     this.attenuation = a;
-    if (this.material?.uniforms?.uAttenuation) {
-      this.material.uniforms.uAttenuation.value = a;
-    }
+    const b = this.outerRadiusPx > 0 ? Math.min(1, this.innerRadiusPx / this.outerRadiusPx) : 1;
+    applyFalloffAttenuationUniforms(this.material?.uniforms, a, 1.0, b);
     const prevRim = this._lastEffectiveRim;
     this._lastEffectiveRim = this._getEffectiveRimSoftness();
     if (Math.abs((prevRim ?? -1) - this._lastEffectiveRim) > 0.004) {

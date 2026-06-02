@@ -3740,6 +3740,45 @@ function computeNativeSameSceneDrawIntent(drawArgs) {
   }
 }
 
+/**
+ * True when {@link Canvas#draw} is switching to a different scene than Map Shine
+ * last finished loading (`__msaLastResolvedSceneId`). Used to arm an instant
+ * black curtain at draw entry — before tearDown — so the destination albedo
+ * cannot flash when Foundry has already updated `viewed` / `canvas.scene`.
+ *
+ * @param {unknown[]} drawArgs
+ * @returns {boolean}
+ */
+function _msaIsCrossSceneTransition(drawArgs) {
+  try {
+    if (_msaMapPointWriteInFlight()) return false;
+
+    let drawTarget = drawArgs?.[0];
+    if (drawTarget === undefined) {
+      try {
+        drawTarget = game.scenes?.current ?? null;
+      } catch (_) {
+        drawTarget = null;
+      }
+    }
+    if (!drawTarget || drawTarget === null) return false;
+
+    const targetId = drawTarget?.id != null ? String(drawTarget.id) : '';
+    if (!targetId) return false;
+    if (_msaForceFullSceneReloadRequested(targetId)) return true;
+
+    const intent = computeNativeSameSceneDrawIntent(drawArgs);
+    if (intent.sameSceneRedraw) return false;
+
+    const lastRes = window.MapShine?.__msaLastResolvedSceneId;
+    if (lastRes == null || lastRes === '') return false;
+
+    return String(lastRes) !== targetId;
+  } catch (_) {
+    return false;
+  }
+}
+
 function installCanvasDrawWrapper() {
   if (globalThis.__msaCanvasDrawWrapped) return;
   globalThis.__msaCanvasDrawWrapped = true;
@@ -3792,6 +3831,18 @@ function installCanvasDrawWrapper() {
               byPredict: _predictMatches,
               levelSwitch: drawIntent.sameSceneLevelSwitch === true,
             });
+          } catch (_) {}
+        }
+
+        // Foundry can point viewed/canvas.scene at the destination before tearDown.
+        // Hide immediately so the new scene's albedo cannot flash under the curtain.
+        if (
+          !forceFullPresetReload
+          && !sameSceneRedrawEffective
+          && _msaIsCrossSceneTransition(args)
+        ) {
+          try {
+            sceneTransitionCurtain.armCoverSync({ message: 'Loading…' });
           } catch (_) {}
         }
       } catch (_) {}
@@ -4132,17 +4183,22 @@ function installCanvasTransitionWrapper() {
         const viewedSid = _msaResolvedActiveSceneId();
         const liveSid = canvas?.scene?.id != null ? String(canvas.scene.id) : null;
         const currentDocId = game?.scenes?.current?.id != null ? String(game.scenes.current.id) : null;
-        let lastRes = null;
+        let msaLastResolved = null;
         try {
           const lr = window.MapShine?.__msaLastResolvedSceneId;
-          lastRes = lr != null ? String(lr) : null;
+          msaLastResolved = lr != null ? String(lr) : null;
         } catch (_) {}
-        const effectiveSid = liveSid || lastRes || currentDocId;
+        const effectiveSid = liveSid || msaLastResolved || currentDocId;
+        // V14 scene activation can set viewed/canvas.scene to the destination before
+        // tearDown. Only skip the transition when Map Shine was already on that scene
+        // (__msaLastResolvedSceneId), not merely when Foundry's viewed id matches.
         if (
           viewedSid
           && effectiveSid
           && viewedSid === effectiveSid
           && !_msaForceFullSceneReloadRequested(effectiveSid)
+          && msaLastResolved
+          && msaLastResolved === effectiveSid
         ) {
           return wrapped(...args);
         }
@@ -4193,11 +4249,13 @@ function installCanvasTransitionWrapper() {
           guardUntil: window?.MapShine?._msaLocalFlagWriteGuardUntil ?? 0,
         });
       } catch (_) {}
-      // Scene-transition curtain: opacity-only fade-to-black, then the loading
-      // panel gracefully fades IN over the black backdrop so the user sees the
-      // loading screen for the full duration of the createThreeCanvas work.
+      // Scene-transition curtain: instant black (if draw entry missed), then
+      // opacity fade-to-black, then the loading panel fades IN over the backdrop.
       // Marks `__sceneTransitionActive=true` so the level-transition curtain
       // bypasses itself during this window.
+      try {
+        sceneTransitionCurtain.armCoverSync({ message: 'Loading…' });
+      } catch (_) {}
       await safeCallAsync(async () => {
         await sceneTransitionCurtain.cover({ message: 'Loading…' });
       }, 'sceneTransition.cover', Severity.DEGRADED);
@@ -8644,9 +8702,18 @@ async function createThreeCanvas(scene, createOptions = {}) {
               return;
             }
 
+            // Keep runtime callback behavior aligned with FloorCompositor.applyParam():
+            // write effect.params first, then notify applyParamChange for uniform refresh.
+            let wroteParam = false;
+            if (effect.params && Object.prototype.hasOwnProperty.call(effect.params, paramId)) {
+              if (!_isFiniteOrNonNumeric(value)) return;
+              effect.params[paramId] = value;
+              wroteParam = true;
+            }
+
             if (typeof effect.applyParamChange === 'function') {
               effect.applyParamChange(paramId, value);
-            } else if (effect.params && Object.prototype.hasOwnProperty.call(effect.params, paramId)) {
+            } else if (!wroteParam && effect.params && Object.prototype.hasOwnProperty.call(effect.params, paramId)) {
               effect.params[paramId] = value;
             }
           } catch (_) {}

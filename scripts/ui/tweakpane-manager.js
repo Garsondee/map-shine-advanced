@@ -1342,6 +1342,9 @@ export class TweakpaneManager {
     this._setupUiScrollShell();
     this._buildUniversalToolbar();
     this._moveQuickActionsSectionBelowToolbar();
+    if (this._quickActionsFolder) {
+      try { this._quickActionsFolder.expanded = true; } catch (_) {}
+    }
     this._applyAdvancedModeVisibility();
     this._ensureScrollLayoutObserver();
     requestAnimationFrame(() => this._syncScrollBodyLayout());
@@ -1823,13 +1826,9 @@ export class TweakpaneManager {
   buildQuickActionsSection() {
     if (!this.pane) return;
 
-    const expanded = this.accordionStates['quick_actions']
-      ?? this.accordionStates['utilities']
-      ?? true;
-
     const quickActionsFolder = this.pane.addFolder({
       title: 'Quick Actions',
-      expanded
+      expanded: true
     });
     this._quickActionsFolder = quickActionsFolder;
     this._registerPrimaryFolder(quickActionsFolder);
@@ -1998,11 +1997,6 @@ export class TweakpaneManager {
     }
 
     this.updateUndoButtonState();
-
-    quickActionsFolder.on('fold', (ev) => {
-      this.accordionStates['quick_actions'] = ev.expanded;
-      this.saveUIState();
-    });
   }
 
   /**

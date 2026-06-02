@@ -680,6 +680,14 @@ export class WindowLightEffectV2 {
     this._cameraTimelineGradeState = { enabled: false };
     /** @type {{ exposure: number, saturation: number, tintColor: object, intensityScale: number }|null} */
     this._lastEvaluatedTodGrade = null;
+    /** Monotonic frame id — incremented by {@link #beginFrame}. */
+    this._frameId = 0;
+    /** Last frame where {@link #syncFrameOcclusion} completed. */
+    this._occlusionSyncedFrameId = -1;
+    /** When false, {@link #_rebuildLitWindowMasks} is a no-op until masks change. */
+    this._litMasksDirty = true;
+    /** Cache key for the last successful {@link #drawWindowLightPass} this frame. */
+    this._emitDrawCacheKey = '';
 
     this.params = {
       hasWindowMask: false,
@@ -1115,6 +1123,11 @@ export class WindowLightEffectV2 {
     return Math.max(0.0, Number(this.params.intensity) || 0);
   }
 
+  /** Call once at the start of each FloorCompositor frame before occlusion sync. */
+  beginFrame() {
+    this._frameId += 1;
+  }
+
   initialize() {
     if (this._initialized) return;
     const THREE = window.THREE;
@@ -1519,6 +1532,7 @@ export class WindowLightEffectV2 {
     this._litSpecularMasks = [null, null, null, null];
     this._floorIdTex = null;
     this.params.hasWindowMask = false;
+    this._litMasksDirty = true;
 
     if (!compositor) return;
 
@@ -1707,16 +1721,16 @@ export class WindowLightEffectV2 {
       return;
     }
 
+    if (!this.params.hasWindowMask) {
+      this._lastDrawStats = { skipReason: 'no_compositor_masks', drew: false };
+      return;
+    }
+
     if (camera) this._syncViewProjectionUniforms(camera);
     this._updateSceneBounds();
     this._syncCloudUniformsFromParams(this._emitMaterial.uniforms);
     this._pushTodUniforms();
     this._pushRefractionUniforms(this._emitMaterial.uniforms);
-
-    if (!this.params.hasWindowMask) {
-      this._lastDrawStats = { skipReason: 'no_compositor_masks', drew: false };
-      return;
-    }
 
     this._rebuildLitWindowMasks();
     this._rebuildLitSpecularMasks();

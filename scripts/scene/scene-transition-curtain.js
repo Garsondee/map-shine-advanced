@@ -51,6 +51,30 @@ export class SceneTransitionCurtain {
   }
 
   /**
+   * Instantly hide the canvas behind an opaque black curtain (no fade). Call
+   * synchronously at {@link Canvas#draw} entry before Foundry can paint the
+   * destination scene; {@link #cover} may follow with an opacity fade.
+   *
+   * @param {object} [options]
+   * @param {string} [options.message='Loading…']
+   */
+  armCoverSync(options = undefined) {
+    const message = options?.message ?? 'Loading…';
+    this._markSceneTransitionActive(true);
+    if (this._phase === 'idle' || this._phase === 'revealing') {
+      this._phase = 'covering';
+      this._panelVisible = false;
+      this._panelShownAt = null;
+      if (this._coverStartedAt == null) {
+        this._coverStartedAt = performance.now();
+      }
+    }
+    try {
+      loadingOverlay.prepareForCover?.(message);
+    } catch (_) {}
+  }
+
+  /**
    * Fade the current scene out to solid black. Panel reveal is deferred to
    * {@link #revealPanel} once assets are presentable.
    *
@@ -95,6 +119,7 @@ export class SceneTransitionCurtain {
           try { loadingOverlay.setProgress?.(0, { immediate: true }); } catch (_) {}
         }
 
+        try { loadingOverlay.prepareForCover?.(message); } catch (_) {}
         await loadingOverlay.fadeBlack(coverMs, { contentVisible: false });
         if (token !== this._token) return;
       } catch (err) {

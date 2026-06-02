@@ -52,7 +52,7 @@ export const FoundryLightingShaderChunks = {
             vec3 mixedColor = mix(baseColor, rainbow, rainbowMix);
 
             // Soft radial tint gradient (illumination shape stays on msaPointLightFalloff / intensity).
-            float fadeWidth = msaPointLightFadeWidth(att, uEdgeSoftness, uFalloffExponent);
+            float fadeWidth = msaPointLightFadeWidth(uEdgeSoftness, uFalloffExponent);
             float gradEdge = mix(0.88, 0.62, fadeWidth);
             float tintGrad = smoothstep(1.0, gradEdge, 1.0 - dist);
             tintGrad = mix(tintGrad, sqrt(tintGrad), 0.40);

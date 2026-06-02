@@ -15,7 +15,13 @@ import {
   POINT_LIGHT_FALLOFF_GLSL,
   applyPointLightBufferBlending,
   computePointLightGeomRadiusPx,
-  foundryShaderAttenuationFromData,
+  createPointLightFalloffUniforms,
+  applyFalloffAttenuationUniforms,
+  brightNormFromLightUniforms,
+  foundryColorationAlphaFromIntensity,
+  foundryColorMixFromColorationAlpha,
+  foundryLuminosityIllumMultiplier,
+  getFoundryLightAttenuation,
 } from '../scene/point-light-falloff.js';
 
 const _lightLosComputer = new VisionPolygonComputer();
@@ -135,6 +141,8 @@ export class ThreeLightSource {
 
     /** @type {number} Shader softness mapped from Foundry attenuation [0..1]. */
     this._shaderSoftness = 0.5;
+    /** @type {number} Foundry config attenuation 0..1 (drives half-distance lerp). */
+    this._foundryAttenuation = 0.5;
     /** @type {THREE.Vector2[]|null} Unexpanded wall-clip polygon in light-local space. */
     this._baseShapePointsLocal = null;
 
@@ -307,6 +315,9 @@ export class ThreeLightSource {
         uCenterOffset: { value: new THREE.Vector2(0, 0) },
         uAlpha: { value: 0.5 },
         uAttenuation: { value: 0.5 },
+        /** Foundry config attenuation 0..1 (drives half-life lerp + Attenuation curve slider). */
+        uFoundryAttenuation: { value: 0.5 },
+        uFalloffAttBlend: { value: 0.5 },
         uFalloffExponent: { value: DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT },
         uEdgeSoftness: { value: 0.0 },
         uOutputGain: { value: 1.0 },
@@ -320,11 +331,10 @@ export class ThreeLightSource {
         uPulse: { value: 0.0 },
         uBrightness: { value: 1.0 },
         // Foundry photometric controls:
-        // - uLuminosity scales emitted strength
-        // - uColoration = Foundry "Color Intensity" (0..1), from config.colorIntensity
-        //   (not config.coloration, which is the coloration *technique* id)
+        // - uLuminosity = Foundry illumination multiplier (0.5 → 1.0 neutral)
+        // - uColorationAlpha = Foundry colorationAlpha (config.colorIntensity or config.alpha + technique)
         uLuminosity: { value: 1.0 },
-        uColoration: { value: 0.5 },
+        uColorationAlpha: { value: 1.0 },
         /**
          * Map Shine LightingEffect “Point light gain” — applied before additive `_lightRT` blend,
          * not in compose post-multiply.
@@ -343,6 +353,7 @@ export class ThreeLightSource {
         uCookieInvert: { value: 0.0 },
         uCookieColorize: { value: 0.0 },
         uCookieTint: { value: new THREE.Color(1, 1, 1) },
+        ...createPointLightFalloffUniforms(THREE),
       },
       vertexShader: `
         varying vec2 vPos;
@@ -372,7 +383,7 @@ export class ThreeLightSource {
         uniform float uPulse;
         uniform float uBrightness;
         uniform float uLuminosity;
-        uniform float uColoration;
+        uniform float uColorationAlpha;
         uniform float uComposeLightGain;
         uniform sampler2D tCookie;
         uniform float uHasCookie;
@@ -800,7 +811,7 @@ export class ThreeLightSource {
             ${FoundryLightingShaderChunks.pulse}
           }
 
-          // Falloff shape (0..1) shared by RGB coloration + alpha direct channel.
+          // Falloff shape (0..1): alpha = illumination, RGB = chroma × gel for compose.
           float uAlphaEff = mix(uAlpha, min(1.0, max(uAlpha, 0.92)), isFireCore);
           float cover = intensity * uAlphaEff * uIntensity * animAlphaMul * cookieFactor * max(uOutputGain, 0.0);
 
@@ -808,33 +819,34 @@ export class ThreeLightSource {
           cover *= fairyBoost;
           cover *= mix(1.0, 1.75, isFireCore * iAnimDrive);
 
-          float lumMul = clamp(uLuminosity, 0.0, 1.0);
-          float ci = clamp(uColoration, 0.0, 1.0);
-          // Single attenuation envelope: alpha = scalar illumination, RGB = hue * same mag.
-          // Color-only lights (lum≈0, ci>0) keep RGB reach without alpha direct punch.
+          float lumMul = max(uLuminosity, 0.0);
+          // Alpha = illumination; RGB = lamp colour × colorMix (compose approach D).
           float illumMag = cover * lumMul;
-          float colorOnly = (1.0 - step(0.02, lumMul)) * ci;
-          float colorMag = cover * mix(lumMul, 1.0, colorOnly);
+          float gelEnc = clamp(uColorationAlpha * 0.55, 0.0, 1.0);
+          vec3 lightColor = clamp(outColor, 0.0, 1.0);
+          float maxC = max(max(lightColor.r, lightColor.g), lightColor.b);
+          float minC = min(min(lightColor.r, lightColor.g), lightColor.b);
+          float chroma = (maxC > 1e-5) ? ((maxC - minC) / maxC) : 0.0;
+          vec3 chromaDir = (chroma > 0.04) ? (lightColor / maxC) : vec3(0.0);
+          // Chroma direction × CI (neutral lamps write rgb=0). Compose tints by lampEnergyA, not rgb footprint.
+          vec3 rgbOut = chromaDir * gelEnc;
 
           float cookieColorMul = (uHasCookie > 0.5) ? cookieFactor : 1.0;
-
-          float srcMx = max(max(outColor.r, outColor.g), outColor.b);
-          vec3 hue = (srcMx > 1e-4) ? (outColor / srcMx) : vec3(1.0);
-          vec3 rgbOut = mix(vec3(illumMag), hue * colorMag, ci);
-          rgbOut *= uBrightness * (0.75 + 0.25 * fairyBoost) * cookieColorMul;
+          float brightMul = uBrightness * (0.75 + 0.25 * fairyBoost) * cookieColorMul;
           if (isFireCore > 0.5) {
             float hotHi = mix(1.05, 3.35, pow(iAnimDrive, 1.04));
             vec3 fire = vec3(1.0, 0.52, 0.14);
             rgbOut = mix(rgbOut * hotHi, rgbOut * fire * hotHi * 0.42, mix(0.22, 0.38, iAnimDrive));
           }
 
-          float alpha = illumMag;
+          float alpha = illumMag * brightMul;
           float composeGain = clamp(uComposeLightGain, 0.0, 8.0);
           float edgeFade = smoothstep(0.0, 0.012, cover);
           alpha *= edgeFade;
           rgbOut *= edgeFade;
           if (alpha <= 0.000001 && max(max(rgbOut.r, rgbOut.g), rgbOut.b) <= 0.000001) discard;
-          gl_FragColor = vec4(rgbOut * composeGain, alpha * composeGain);
+          // HDR gain on alpha only; RGB is normalized colour × colorMix (compose scales by lampEnergyA).
+          gl_FragColor = vec4(rgbOut, alpha * composeGain);
         }
       `,
       transparent: true,
@@ -862,7 +874,7 @@ export class ThreeLightSource {
 
   updateData(doc, forceRebuild = false) {
     this.document = doc;
-    const config = doc.config;
+    const config = (doc?.config && typeof doc.config === 'object') ? doc.config : {};
     const THREE = window.THREE;
 
     try {
@@ -888,49 +900,9 @@ export class ThreeLightSource {
       ? this._renderRadiusPx
       : prevRadiusPx;
 
-    // 1. Color parsing — match V3 / Foundry v14: authored tints are display-referred sRGB;
-    // decode to linear working RGB for the WebGL light shader (THREE.ColorManagement).
-    const c = new THREE.Color(1, 1, 1);
-    const srgb = THREE.SRGBColorSpace;
-    const colorInput = config?.color ?? config?.tint ?? doc?.tint ?? null;
-
-    if (colorInput) {
-      try {
-        if (typeof colorInput === 'string') {
-          c.set(colorInput);
-        } else if (typeof colorInput === 'number') {
-          c.setHex(colorInput >>> 0, srgb);
-        } else if (typeof colorInput === 'object') {
-          // Foundry color payloads vary by code path:
-          // - {r,g,b}
-          // - {rgb:[r,g,b]}
-          // - Color-like objects exposing toArray()
-          // - serializable payloads accepted by foundry.utils.Color.from
-          if (Array.isArray(colorInput.rgb)) {
-            const [r = 1, g = 1, b = 1] = colorInput.rgb;
-            c.setRGB(r, g, b, srgb);
-          } else if (typeof colorInput.r === 'number' && typeof colorInput.g === 'number' && typeof colorInput.b === 'number') {
-            c.setRGB(colorInput.r, colorInput.g, colorInput.b, srgb);
-          } else if (typeof colorInput.toArray === 'function') {
-            const arr = colorInput.toArray();
-            c.setRGB(arr?.[0] ?? 1, arr?.[1] ?? 1, arr?.[2] ?? 1, srgb);
-          } else if (foundry?.utils?.Color?.from) {
-            const fc = foundry.utils.Color.from(colorInput);
-            if (fc && typeof fc.r === 'number' && typeof fc.g === 'number' && typeof fc.b === 'number') {
-              c.setRGB(fc.r, fc.g, fc.b, srgb);
-            }
-          }
-        }
-      } catch (_) {
-      }
-    }
-
-    this.material.uniforms.uColor.value.copy(c);
-
-    // Cache the untinted base color so sky-tint in updateAnimation can be applied
-    // from the original each frame without compounding (feedback loop).
+    this._applyFoundryLightColorFromDoc(config, doc);
     if (!this._baseLightColor) this._baseLightColor = new THREE.Color();
-    this._baseLightColor.copy(c);
+    this._baseLightColor.copy(this.material.uniforms.uColor.value);
 
     // 2. Brightness / intensity logic (Foundry-like luminosity mapping)
     const luminosityRaw = Number(config.luminosity);
@@ -942,12 +914,10 @@ export class ThreeLightSource {
       ? luminosity
       : this._clamp((luminosity + 1.0) * 0.5, 0.0, 1.0);
     const satBonus = 0.0;
-    this.material.uniforms.uBrightness.value = Math.max(0.2, 1.0 + ((luminosity01 * 2.0 - 1.0) * 0.35)) + satBonus;
-    this.material.uniforms.uLuminosity.value = luminosity01;
+    this.material.uniforms.uBrightness.value = Math.max(0.2, 1.0) + satBonus;
+    this.material.uniforms.uLuminosity.value = foundryLuminosityIllumMultiplier(luminosity01);
 
-    // Foundry "Color Intensity" slider → config.colorIntensity (0..1). Do not use
-    // config.coloration here: that field is the coloration technique enum (integer).
-    this.material.uniforms.uColoration.value = this._colorIntensity01FromConfig(config);
+    this.material.uniforms.uColorationAlpha.value = this._foundryColorationAlphaFromConfig(config);
 
     const dim = config.dim || 0;
     const bright = config.bright || 0;
@@ -1009,8 +979,9 @@ export class ThreeLightSource {
 
     this.material.uniforms.uRadius.value = rPxSafe;
     this.material.uniforms.uBrightRadius.value = brightPxSafe;
-    const alphaRaw = Number(config.alpha);
-    this.material.uniforms.uAlpha.value = Number.isFinite(alphaRaw) ? this._clamp(alphaRaw, 0.0, 1.0) : 0.5;
+    // Foundry `config.alpha` is Color Intensity (see BaseLightSource._updateColorationUniforms),
+    // not photometric opacity — never scale falloff cover by it.
+    this.material.uniforms.uAlpha.value = 1.0;
 
     // Additional shaping/boost controls
     // These are MapShine-only controls (Foundry documents won't set them), so we
@@ -1027,11 +998,18 @@ export class ThreeLightSource {
 
     // --- FOUNDRY ATTENUATION MATH ---
     // Maps user input [0,1] to a non-linear shader curve [0,1]
-    const rawAttenuation = config.attenuation ?? doc?.attenuation ?? 0.5;
-    const computedAttenuation = foundryShaderAttenuationFromData(rawAttenuation);
+    const rawAttClamped = getFoundryLightAttenuation(config, doc);
+    this._foundryAttenuation = rawAttClamped;
+    const attCurvePower = Number(this.material?.uniforms?.uFalloffAttCurvePower?.value);
+    const brightNorm = rPxSafe > 0 ? Math.max(0, Math.min(1, brightPxSafe / rPxSafe)) : 1;
+    applyFalloffAttenuationUniforms(
+      this.material.uniforms,
+      rawAttClamped,
+      Number.isFinite(attCurvePower) ? attCurvePower : 1.0,
+      brightNorm,
+    );
     const prevShaderSoftness = this._shaderSoftness;
-    this._shaderSoftness = computedAttenuation;
-    this.material.uniforms.uAttenuation.value = computedAttenuation;
+    this._shaderSoftness = this.material.uniforms.uAttenuation?.value ?? 0.5;
     if (this.material.uniforms.uFalloffExponent) {
       this.material.uniforms.uFalloffExponent.value = DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT;
     }
@@ -1078,7 +1056,7 @@ export class ThreeLightSource {
     }
 
     const softnessChanged = Number.isFinite(prevShaderSoftness)
-      && Math.abs(prevShaderSoftness - computedAttenuation) > 0.004;
+      && Math.abs(prevShaderSoftness - this._shaderSoftness) > 0.004;
 
     if (forceRebuild || !this.mesh || radiusChanged || positionChanged) {
       this.rebuildGeometry(worldPos.x, worldPos.y, renderRadiusPx, lightZ);
@@ -1100,18 +1078,79 @@ export class ThreeLightSource {
   }
 
   /**
-   * Foundry ambient light: "Color Intensity" is stored as `colorIntensity` on the
-   * light config. `coloration` names the rendering technique (integer), not this slider.
+   * Foundry Color Intensity: `config.alpha` (V14 UI) with optional `config.colorIntensity`.
+   * `config.coloration` is the coloration technique id, not this slider.
    * @param {object|null|undefined} config
    * @returns {number}
    * @private
    */
   _colorIntensity01FromConfig(config) {
     if (!config || typeof config !== 'object') return 0.5;
-    let v = Number(config.colorIntensity);
-    if (!Number.isFinite(v)) v = Number(config.colourIntensity);
-    if (Number.isFinite(v)) return this._clamp(v, 0.0, 1.0);
+    // V14 UI writes Color Intensity to `alpha`; some worlds also use `colorIntensity`.
+    const keys = ['colorIntensity', 'colourIntensity', 'alpha'];
+    for (let i = 0; i < keys.length; i++) {
+      const v = Number(config[keys[i]]);
+      if (Number.isFinite(v)) return this._clamp(v, 0.0, 1.0);
+    }
     return 0.5;
+  }
+
+  /**
+   * Foundry colorationAlpha from Color Intensity + coloration technique id.
+   * @param {object|null|undefined} config
+   * @returns {number}
+   * @private
+   */
+  _foundryColorationAlphaFromConfig(config) {
+    const ci = this._colorIntensity01FromConfig(config);
+    const technique = config && typeof config === 'object' ? Number(config.coloration) : 1;
+    return foundryColorationAlphaFromIntensity(ci, technique);
+  }
+
+  /**
+   * Foundry AmbientLight tint → `uColor` (linear). V14 often stores hex on `doc.color`.
+   * @param {object|null|undefined} config
+   * @param {object|null|undefined} doc
+   * @private
+   */
+  _applyFoundryLightColorFromDoc(config, doc) {
+    const THREE = window.THREE;
+    if (!THREE || !this.material?.uniforms?.uColor) return;
+    const dst = this.material.uniforms.uColor.value;
+    const srgb = THREE.SRGBColorSpace;
+    const colorInput = config?.color ?? config?.tint ?? doc?.color ?? doc?.tint ?? null;
+    if (colorInput == null || colorInput === '') {
+      dst.setRGB(1, 1, 1);
+      return;
+    }
+    try {
+      if (typeof colorInput === 'object' && Array.isArray(colorInput.rgb)) {
+        const [r = 1, g = 1, b = 1] = colorInput.rgb;
+        dst.setRGB(this._normChannel(r), this._normChannel(g), this._normChannel(b), srgb);
+        return;
+      }
+      if (typeof colorInput === 'number' && colorInput >= 0) {
+        dst.setHex(colorInput >>> 0, srgb);
+        return;
+      }
+      const fc = (foundry?.utils?.Color)
+        ? foundry.utils.Color.from(colorInput)
+        : new THREE.Color(colorInput);
+      dst.setRGB(fc.r, fc.g, fc.b, srgb);
+    } catch (_) {
+      dst.setRGB(1, 1, 1);
+    }
+  }
+
+  /**
+   * @param {number} v
+   * @returns {number}
+   * @private
+   */
+  _normChannel(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return 1;
+    return n > 1 ? n / 255 : n;
   }
 
   _clamp(value, min, max) {
@@ -1399,12 +1438,23 @@ export class ThreeLightSource {
    */
   _resolveLiveLightDoc() {
     const id = this.id;
+    if (id == null) return null;
     try {
-      const col = typeof canvas !== 'undefined' ? canvas?.scene?.lights : null;
-      if (!col || id == null) return null;
-      const placeable = col.get?.(id) ?? col.get?.(String(id));
-      const d = placeable?.document;
-      if (d && typeof d === 'object') return d;
+      const lighting = typeof canvas !== 'undefined' ? canvas?.lighting : null;
+      if (lighting?.placeables?.length) {
+        for (let i = 0; i < lighting.placeables.length; i++) {
+          const p = lighting.placeables[i];
+          if (p?.id === id || p?.document?.id === id) {
+            return p.document ?? p;
+          }
+        }
+      }
+      const col = canvas?.scene?.lights;
+      if (col) {
+        const placeable = col.get?.(id) ?? col.get?.(String(id));
+        const d = placeable?.document ?? placeable;
+        if (d && typeof d === 'object') return d;
+      }
     } catch (_) {}
     return null;
   }
@@ -2119,8 +2169,37 @@ export class ThreeLightSource {
     try {
       const liveDoc = this._resolveLiveLightDoc() || this.document;
       const liveCfg = liveDoc?.config && typeof liveDoc.config === 'object' ? liveDoc.config : null;
-      if (liveCfg && this.material?.uniforms?.uColoration) {
-        this.material.uniforms.uColoration.value = this._colorIntensity01FromConfig(liveCfg);
+      if (liveDoc) {
+        this._applyFoundryLightColorFromDoc(liveCfg, liveDoc);
+        if (this._baseLightColor) {
+          this._baseLightColor.copy(this.material.uniforms.uColor.value);
+        }
+      }
+      if (liveCfg && this.material?.uniforms?.uColorationAlpha) {
+        this.material.uniforms.uColorationAlpha.value = this._foundryColorationAlphaFromConfig(liveCfg);
+      }
+      if (liveCfg && this.material?.uniforms?.uLuminosity) {
+        const lumRaw = Number(liveCfg.luminosity);
+        const lum = Number.isFinite(lumRaw) ? lumRaw : 0.5;
+        const lum01 = (lum >= 0 && lum <= 1) ? lum : this._clamp((lum + 1.0) * 0.5, 0.0, 1.0);
+        this.material.uniforms.uLuminosity.value = foundryLuminosityIllumMultiplier(lum01);
+      }
+      if (liveCfg && this.material?.uniforms) {
+        const liveAtt = getFoundryLightAttenuation(liveCfg, liveDoc);
+        const curvePow = Number(this.material.uniforms.uFalloffAttCurvePower?.value);
+        const prevRim = this._shaderSoftness;
+        applyFalloffAttenuationUniforms(
+          this.material.uniforms,
+          liveAtt,
+          Number.isFinite(curvePow) ? curvePow : 1.0,
+          brightNormFromLightUniforms(this.material.uniforms),
+        );
+        this._foundryAttenuation = liveAtt;
+        this._shaderSoftness = this.material.uniforms.uAttenuation?.value ?? 0.5;
+        if (this.mesh && Math.abs((prevRim ?? -1) - this._shaderSoftness) > 0.004) {
+          const p = this.mesh.position;
+          this._reapplyShapeSoftnessGeometry(p.x, p.y, p.z);
+        }
       }
     } catch (_) {
     }

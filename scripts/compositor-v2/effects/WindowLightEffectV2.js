@@ -59,20 +59,73 @@ const wlTodTintSliderKeys = (index) => ({
   color: `tod${index}TintColor`,
 });
 
+/**
+ * Per-anchor window-light grade (tod0..tod7). Bold chroma + tints mirroring Camera Grade day/night.
+ * @type {ReadonlyArray<{ intensityScale: number, exposure: number, saturation: number, tintColor: { r: number, g: number, b: number } }>}
+ */
+const DEFAULT_WINDOW_LIGHT_TOD_ANCHORS = Object.freeze([
+  { intensityScale: 1.05, exposure: 0.15, saturation: 1.85, tintColor: { r: 0.6, g: 0.75, b: 3 } },
+  { intensityScale: 0.95, exposure: 0.05, saturation: 1.55, tintColor: { r: 1.4, g: 0.85, b: 2.3 } },
+  { intensityScale: 1.25, exposure: 0.25, saturation: 1.75, tintColor: { r: 3, g: 1.15, b: 0.85 } },
+  { intensityScale: 1.15, exposure: 0.2, saturation: 1.65, tintColor: { r: 1.45, g: 1.2, b: 0.95 } },
+  { intensityScale: 1.1, exposure: 0.15, saturation: 1.55, tintColor: { r: 0.8, g: 0.95, b: 1.35 } },
+  { intensityScale: 1.12, exposure: 0.12, saturation: 1.6, tintColor: { r: 1.3, g: 1.05, b: 1.0 } },
+  { intensityScale: 1.28, exposure: 0.3, saturation: 1.8, tintColor: { r: 3, g: 1.2, b: 0.9 } },
+  { intensityScale: 1.0, exposure: 0.1, saturation: 1.78, tintColor: { r: 0.65, g: 0.7, b: 2.15 } },
+]);
+
+/** Baseline window-light params (prismatic glass + timeline on by default). */
+const WINDOW_LIGHT_CORE_DEFAULTS = Object.freeze({
+  enabled: true,
+  intensity: 12.85,
+  falloff: 1,
+  color: { r: 1, g: 1, b: 1 },
+  cloudInfluence: 1,
+  cloudShadowContrast: 4,
+  cloudShadowBias: -1,
+  cloudShadowGamma: 4,
+  cloudShadowMinLight: 0,
+  glassRefractionEnabled: true,
+  rgbShiftAmount: 5.88,
+  rgbShiftAngle: 30,
+  rgbShiftSpread: 0.35,
+  rgbShiftEdgeWeight: 0.55,
+  rgbFringeSaturation: 1.35,
+  rgbFringeBalance: { r: 1, g: 1, b: 1 },
+  rgbShiftAnimate: true,
+  rgbShiftAnimSpeed: 0.45,
+  rgbShiftAnimWobbleDeg: 28,
+  specularBoost: 2,
+  sparkleEnabled: true,
+  sparkleStrength: 1.35,
+  sparkleSpeed: 1.2,
+  sparkleScale: 38,
+  sparkleThreshold: 0.12,
+  sparkleEdgeBias: 0.72,
+  sparkleColor: { r: 1, g: 0.98, b: 0.92 },
+  lightningWindowEnabled: true,
+  lightningWindowIntensityBoost: 5,
+  lightningWindowContrastBoost: 4,
+  lightningWindowRgbBoost: 3,
+  todTimelineEnabled: true,
+  useCameraGradeAnchorHours: true,
+});
+
 /** @returns {Record<string, *>} */
 const buildDefaultWindowLightTodParams = () => {
   const out = {
-    todTimelineEnabled: false,
-    useCameraGradeAnchorHours: false,
+    todTimelineEnabled: WINDOW_LIGHT_CORE_DEFAULTS.todTimelineEnabled,
+    useCameraGradeAnchorHours: WINDOW_LIGHT_CORE_DEFAULTS.useCameraGradeAnchorHours,
   };
   for (let i = 0; i < TOD_ANCHOR_COUNT; i += 1) {
+    const anchor = DEFAULT_WINDOW_LIGHT_TOD_ANCHORS[i];
     out[`tod${i}Hour`] = DEFAULT_TOD_ANCHOR_HOURS[i] ?? 0;
-    out[`tod${i}IntensityScale`] = 1.0;
-    out[`tod${i}Exposure`] = 0.0;
-    out[`tod${i}Saturation`] = 1.0;
-    out[`tod${i}TintR`] = TOD_TINT_NEUTRAL;
-    out[`tod${i}TintG`] = TOD_TINT_NEUTRAL;
-    out[`tod${i}TintB`] = TOD_TINT_NEUTRAL;
+    out[`tod${i}IntensityScale`] = anchor.intensityScale;
+    out[`tod${i}Exposure`] = anchor.exposure;
+    out[`tod${i}Saturation`] = anchor.saturation;
+    out[`tod${i}TintR`] = anchor.tintColor.r;
+    out[`tod${i}TintG`] = anchor.tintColor.g;
+    out[`tod${i}TintB`] = anchor.tintColor.b;
   }
   return out;
 };
@@ -691,37 +744,7 @@ export class WindowLightEffectV2 {
 
     this.params = {
       hasWindowMask: false,
-      enabled: true,
-      intensity: 2.0,
-      falloff: 1.5,
-      color: { r: 1.0, g: 0.96, b: 0.85 },
-      cloudInfluence: 1.0,
-      cloudShadowContrast: 1.0,
-      cloudShadowBias: 0.05,
-      cloudShadowGamma: 2.28,
-      cloudShadowMinLight: 0.0,
-      glassRefractionEnabled: true,
-      rgbShiftAmount: 4.42,
-      rgbShiftAngle: 30.0,
-      rgbShiftSpread: 0.35,
-      rgbShiftEdgeWeight: 0.55,
-      rgbShiftAnimate: true,
-      rgbShiftAnimSpeed: 0.55,
-      rgbShiftAnimWobbleDeg: 28.0,
-      rgbFringeSaturation: 1.35,
-      rgbFringeBalance: { r: 1.0, g: 1.0, b: 1.0 },
-      specularBoost: 2.0,
-      sparkleEnabled: true,
-      sparkleStrength: 1.35,
-      sparkleSpeed: 1.4,
-      sparkleScale: 38.0,
-      sparkleThreshold: 0.12,
-      sparkleEdgeBias: 0.72,
-      sparkleColor: { r: 1.0, g: 0.98, b: 0.92 },
-      lightningWindowEnabled: true,
-      lightningWindowIntensityBoost: 1.0,
-      lightningWindowContrastBoost: 1.75,
-      lightningWindowRgbBoost: 0.35,
+      ...WINDOW_LIGHT_CORE_DEFAULTS,
       ...buildDefaultWindowLightTodParams(),
     };
 
@@ -742,19 +765,19 @@ export class WindowLightEffectV2 {
     const timelineParams = {
       todTimelineEnabled: {
         type: 'boolean',
-        default: false,
+        default: WINDOW_LIGHT_CORE_DEFAULTS.todTimelineEnabled,
         label: 'Enable time-of-day timeline',
         tooltip: 'Blends eight clock anchors as Map Shine time advances. Adjusts window glow intensity, exposure, saturation, and tint per anchor.',
       },
       useCameraGradeAnchorHours: {
         type: 'boolean',
-        default: false,
+        default: WINDOW_LIGHT_CORE_DEFAULTS.useCameraGradeAnchorHours,
         label: 'Use Camera Grade anchor hours',
         tooltip: 'When enabled, blend points follow Camera Grade clock-hour sliders instead of the local hour sliders below.',
       },
     };
 
-    const addTintMultiplierSliders = (index) => {
+    const addTintMultiplierSliders = (index, channelDefaults) => {
       const keys = wlTodTintSliderKeys(index);
       const tintTooltip = 'Per-channel hue bias (1 = neutral, 0–3). Raise R / lower B for warmth; overall brightness is preserved. Not a 0–255 colour.';
       for (const ch of ['R', 'G', 'B']) {
@@ -765,7 +788,7 @@ export class WindowLightEffectV2 {
           min: TOD_TINT_MIN,
           max: TOD_TINT_MAX,
           step: 0.01,
-          default: TOD_TINT_NEUTRAL,
+          default: channelDefaults[ch.toLowerCase()],
           throttle: 50,
           tooltip: tintTooltip,
         };
@@ -775,8 +798,9 @@ export class WindowLightEffectV2 {
 
     for (const meta of TOD_ANCHOR_META) {
       const i = meta.index;
+      const anchor = DEFAULT_WINDOW_LIGHT_TOD_ANCHORS[i];
       const defaultHour = DEFAULT_TOD_ANCHOR_HOURS[i] ?? 0;
-      const tintKeys = addTintMultiplierSliders(i);
+      const tintKeys = addTintMultiplierSliders(i, anchor.tintColor);
       const sectionLabel = `${meta.label} (~${meta.clockHint})`;
       const params = [
         `tod${i}Hour`,
@@ -809,7 +833,7 @@ export class WindowLightEffectV2 {
         min: 0,
         max: 3,
         step: 0.01,
-        default: 1.0,
+        default: anchor.intensityScale,
         throttle: 50,
         tooltip: 'Window glow brightness multiplier at this anchor. Stacks with the master Intensity slider.',
       };
@@ -819,7 +843,7 @@ export class WindowLightEffectV2 {
         min: -3,
         max: 3,
         step: 0.01,
-        default: 0,
+        default: anchor.exposure,
         throttle: 50,
         tooltip: 'Exposure in stops for window glow at this anchor.',
       };
@@ -829,7 +853,7 @@ export class WindowLightEffectV2 {
         min: 0,
         max: 2,
         step: 0.01,
-        default: 1,
+        default: anchor.saturation,
         throttle: 50,
         tooltip: 'Chroma strength for window glow at this anchor (1 = neutral). Brightness is preserved — only hue richness changes.',
       };
@@ -928,24 +952,63 @@ export class WindowLightEffectV2 {
           min: 0.0,
           max: 20.0,
           step: 0.05,
-          default: 2.0,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.intensity,
           tooltip: 'Window glow strength — multiplicative brighten (1 + light), not flat overlay.',
         },
-        falloff: { type: 'slider', label: 'Falloff (Gamma)', min: 0.5, max: 5.0, step: 0.05, default: 1.5 },
-        color: { type: 'color', label: 'Light Color', default: { r: 1.0, g: 0.96, b: 0.85 } },
+        falloff: {
+          type: 'slider',
+          label: 'Falloff (Gamma)',
+          min: 0.5,
+          max: 5.0,
+          step: 0.05,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.falloff,
+        },
+        color: {
+          type: 'color',
+          label: 'Light Color',
+          default: { ...WINDOW_LIGHT_CORE_DEFAULTS.color },
+        },
         cloudInfluence: {
           type: 'slider',
           label: 'Cloud Dimming',
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 1.0,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.cloudInfluence,
           tooltip: 'How much overcast weather and cloud shadows dim window glow (0 = ignore clouds).',
         },
-        cloudShadowContrast: { type: 'slider', label: 'Shadow Contrast', min: 0.0, max: 4.0, step: 0.01, default: 1.0 },
-        cloudShadowBias: { type: 'slider', label: 'Shadow Bias', min: -1.0, max: 1.0, step: 0.01, default: 0.05 },
-        cloudShadowGamma: { type: 'slider', label: 'Shadow Gamma', min: 0.1, max: 4.0, step: 0.01, default: 2.28 },
-        cloudShadowMinLight: { type: 'slider', label: 'Min Light', min: 0.0, max: 1.0, step: 0.01, default: 0.0 },
+        cloudShadowContrast: {
+          type: 'slider',
+          label: 'Shadow Contrast',
+          min: 0.0,
+          max: 4.0,
+          step: 0.01,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.cloudShadowContrast,
+        },
+        cloudShadowBias: {
+          type: 'slider',
+          label: 'Shadow Bias',
+          min: -1.0,
+          max: 1.0,
+          step: 0.01,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.cloudShadowBias,
+        },
+        cloudShadowGamma: {
+          type: 'slider',
+          label: 'Shadow Gamma',
+          min: 0.1,
+          max: 4.0,
+          step: 0.01,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.cloudShadowGamma,
+        },
+        cloudShadowMinLight: {
+          type: 'slider',
+          label: 'Min Light',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.cloudShadowMinLight,
+        },
         glassRefractionEnabled: {
           type: 'boolean',
           default: true,
@@ -958,7 +1021,7 @@ export class WindowLightEffectV2 {
           min: 0.0,
           max: 16.0,
           step: 0.01,
-          default: 4.42,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.rgbShiftAmount,
           tooltip: 'Chromatic offset in mask texels along the shift angle.',
         },
         rgbShiftAngle: {
@@ -967,7 +1030,7 @@ export class WindowLightEffectV2 {
           min: 0.0,
           max: 360.0,
           step: 1.0,
-          default: 30.0,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.rgbShiftAngle,
         },
         rgbShiftSpread: {
           type: 'slider',
@@ -975,7 +1038,7 @@ export class WindowLightEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.35,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.rgbShiftSpread,
           tooltip: 'Widens R vs B separation (0 = symmetric).',
         },
         rgbShiftEdgeWeight: {
@@ -984,7 +1047,7 @@ export class WindowLightEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.55,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.rgbShiftEdgeWeight,
           tooltip: '1 = chromatic shift strongest on mask edges (pane borders).',
         },
         rgbFringeSaturation: {
@@ -993,12 +1056,12 @@ export class WindowLightEffectV2 {
           min: 0.0,
           max: 3.0,
           step: 0.01,
-          default: 1.35,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.rgbFringeSaturation,
         },
         rgbFringeBalance: {
           type: 'color',
           label: 'Fringe RGB Balance',
-          default: { r: 1.0, g: 1.0, b: 1.0 },
+          default: { ...WINDOW_LIGHT_CORE_DEFAULTS.rgbFringeBalance },
           tooltip: 'Per-channel multiplier on chromatic fringe before falloff.',
         },
         rgbShiftAnimate: {
@@ -1012,7 +1075,7 @@ export class WindowLightEffectV2 {
           min: 0.0,
           max: 3.0,
           step: 0.01,
-          default: 0.45,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.rgbShiftAnimSpeed,
         },
         rgbShiftAnimWobbleDeg: {
           type: 'slider',
@@ -1020,7 +1083,7 @@ export class WindowLightEffectV2 {
           min: 0.0,
           max: 90.0,
           step: 0.5,
-          default: 28.0,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.rgbShiftAnimWobbleDeg,
           tooltip: 'Peak swing of refraction angle while animated. Higher = more visible rainbow drift.',
         },
         specularBoost: {
@@ -1029,7 +1092,7 @@ export class WindowLightEffectV2 {
           min: 0.0,
           max: 5.0,
           step: 0.05,
-          default: 2.0,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.specularBoost,
           tooltip: 'Multiplies emit where _Specular mask is bright.',
         },
         sparkleEnabled: {
@@ -1051,7 +1114,7 @@ export class WindowLightEffectV2 {
           min: 0.0,
           max: 4.0,
           step: 0.01,
-          default: 1.2,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.sparkleSpeed,
           tooltip: 'Twinkle rate and how fast spawn locations shuffle (higher = quicker repopulation). Glints do not drift on the map.',
         },
         sparkleScale: {
@@ -1083,7 +1146,7 @@ export class WindowLightEffectV2 {
         sparkleColor: {
           type: 'color',
           label: 'Sparkle Tint',
-          default: { r: 1.0, g: 0.98, b: 0.92 },
+          default: { ...WINDOW_LIGHT_CORE_DEFAULTS.sparkleColor },
         },
         lightningWindowEnabled: {
           type: 'boolean',
@@ -1096,7 +1159,7 @@ export class WindowLightEffectV2 {
           min: 0.0,
           max: 5.0,
           step: 0.05,
-          default: 1.0,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.lightningWindowIntensityBoost,
         },
         lightningWindowContrastBoost: {
           type: 'slider',
@@ -1104,7 +1167,7 @@ export class WindowLightEffectV2 {
           min: 0.0,
           max: 4.0,
           step: 0.05,
-          default: 1.75,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.lightningWindowContrastBoost,
         },
         lightningWindowRgbBoost: {
           type: 'slider',
@@ -1112,7 +1175,7 @@ export class WindowLightEffectV2 {
           min: 0.0,
           max: 3.0,
           step: 0.01,
-          default: 0.35,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.lightningWindowRgbBoost,
         },
         ...timelineParams,
       },
@@ -1352,7 +1415,8 @@ export class WindowLightEffectV2 {
   _readTodTint(index) {
     const p = this.params;
     const keys = wlTodTintSliderKeys(index);
-    const fallbackTint = makeTodGrade().tintColor;
+    const fallbackTint = DEFAULT_WINDOW_LIGHT_TOD_ANCHORS[index]?.tintColor
+      ?? { r: TOD_TINT_NEUTRAL, g: TOD_TINT_NEUTRAL, b: TOD_TINT_NEUTRAL };
 
     const readChannel = (key, fb) => {
       if (!Object.prototype.hasOwnProperty.call(p, key)) return fb;
@@ -1393,12 +1457,13 @@ export class WindowLightEffectV2 {
   /** @private */
   _readTodAnchor(index) {
     const p = this.params;
+    const fallback = DEFAULT_WINDOW_LIGHT_TOD_ANCHORS[index];
     return {
       hour: this._resolveAnchorHour(index),
       grade: {
-        intensityScale: clamp(p[`tod${index}IntensityScale`] ?? 1, 0, 3),
-        exposure: clamp(p[`tod${index}Exposure`] ?? 0, -10, 10),
-        saturation: clamp(p[`tod${index}Saturation`] ?? 1, 0, 4),
+        intensityScale: clamp(p[`tod${index}IntensityScale`] ?? fallback?.intensityScale ?? 1, 0, 3),
+        exposure: clamp(p[`tod${index}Exposure`] ?? fallback?.exposure ?? 0, -10, 10),
+        saturation: clamp(p[`tod${index}Saturation`] ?? fallback?.saturation ?? 1, 0, 4),
         tintColor: this._readTodTint(index),
       },
     };

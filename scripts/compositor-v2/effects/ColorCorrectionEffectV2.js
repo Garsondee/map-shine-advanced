@@ -70,17 +70,108 @@ const makeTodAnchor = (hour, global = {}, interior = {}) => ({
   interior: makeTodGrade(interior),
 });
 
-/** Default hour per anchor index (tod0..tod7). Neutral grades — timeline off by default. */
+/**
+ * Default hour per anchor index (tod0..tod7).
+ * Authored day/night camera timeline: cool noon, blue midnight, warm dawn/dusk bridges.
+ */
 const DEFAULT_TOD_ANCHORS = [
-  makeTodAnchor(0.0),
-  makeTodAnchor(3.0),
-  makeTodAnchor(6.0),
-  makeTodAnchor(9.0),
-  makeTodAnchor(12.0),
-  makeTodAnchor(15.0),
-  makeTodAnchor(18.0),
-  makeTodAnchor(21.0),
+  makeTodAnchor(0, {
+    exposure: -2,
+    saturation: 1.05,
+    tintColor: { r: 0, g: 0, b: 3 },
+  }, {
+    exposure: -1,
+    saturation: 0.97,
+    tintColor: { r: 0.55, g: 0.71, b: 2.29 },
+  }),
+  makeTodAnchor(3, {
+    exposure: -2,
+    saturation: 2,
+    tintColor: { r: 0, g: 0, b: 3 },
+  }, {
+    exposure: -1,
+    saturation: 0.98,
+    tintColor: { r: 0.55, g: 0.71, b: 3 },
+  }),
+  makeTodAnchor(6, {
+    exposure: -0.4,
+    saturation: 2,
+    tintColor: { r: 3, g: 1.3, b: 1 },
+  }, {
+    exposure: -3,
+    saturation: 1,
+    tintColor: { r: 1.82, g: 1.39, b: 1 },
+  }),
+  makeTodAnchor(9, {
+    exposure: 0.9,
+    saturation: 1,
+    tintColor: { r: 1.2, g: 1.02, b: 1.06 },
+  }, {
+    exposure: -2,
+    saturation: 1,
+    tintColor: { r: 1, g: 1, b: 1 },
+  }),
+  makeTodAnchor(12, {
+    exposure: 0.7,
+    saturation: 1.2,
+    tintColor: { r: 0.9, g: 0.9, b: 1.13 },
+  }, {
+    exposure: -1.75,
+    saturation: 1,
+    tintColor: { r: 1, g: 1, b: 1 },
+  }),
+  makeTodAnchor(15, {
+    exposure: 0.9,
+    saturation: 1.08,
+    tintColor: { r: 1.15, g: 0.98, b: 1.04 },
+  }, {
+    exposure: -2.25,
+    saturation: 1,
+    tintColor: { r: 1, g: 1, b: 1 },
+  }),
+  makeTodAnchor(18, {
+    exposure: -0.4,
+    saturation: 2,
+    tintColor: { r: 3, g: 1.36, b: 1 },
+  }, {
+    exposure: -3,
+    saturation: 1,
+    tintColor: { r: 1.82, g: 1.39, b: 1 },
+  }),
+  makeTodAnchor(21, {
+    exposure: -2,
+    saturation: 2,
+    tintColor: { r: 0, g: 0, b: 3 },
+  }, {
+    exposure: -1,
+    saturation: 1,
+    tintColor: { r: 0.55, g: 0.71, b: 3 },
+  }),
 ];
+
+/** Baseline camera-grade params (HDR → LDR owner). Timeline on by default. */
+const COLOR_CORRECTION_CORE_DEFAULTS = Object.freeze({
+  exposure: 0.9,
+  temperature: 0,
+  tint: 0,
+  brightness: 0,
+  contrast: 1,
+  saturation: 1,
+  vibrance: 0,
+  liftColor: { r: 0, g: 0, b: 0 },
+  gammaColor: { r: 0.5, g: 0.5, b: 0.5 },
+  gainColor: { r: 1, g: 1, b: 1 },
+  masterGamma: 2,
+  toneMapping: 0,
+  vignetteStrength: 0,
+  vignetteSoftness: 0,
+  grainStrength: 0,
+  todTimelineEnabled: true,
+  localWarmLightPreserve: 1,
+  localTodOverrideExposure: 1,
+  localTodOverrideSaturation: 1,
+  localWarmEmissiveAdd: 0.1,
+});
 
 /** Baseline camera-grade atmosphere defaults (neutral; atmosphere off by default). */
 const COLOR_CORRECTION_ATMOSPHERE_DEFAULTS = Object.freeze({
@@ -205,54 +296,14 @@ export class ColorCorrectionEffectV2 {
     /** @type {boolean} Whether the last post-merge render pushed an active ToD timeline. */
     this._lastPostMergeTodApplied = false;
 
-    // Defaults tuned to match Foundry PIXI brightness.
-    // Tone mapping is OFF by default to avoid darkening the scene.
+    // Authored HDR → LDR camera grade; tone mapping off unless scene needs legacy linear.
     this.params = {
       enabled: true,
-
-      // 1. Input
-      exposure: 1,
 
       // Dynamic Exposure (eye adaptation). Driven by DynamicExposureManager, not user-authored.
       dynamicExposure: 1.0,
 
-      // 2. White Balance
-      temperature: 0.0,
-      tint: 0.0,
-
-      // 3. Basic Adjustments
-      brightness: 0.0,
-      contrast: 1.0,
-      saturation: 1,
-      vibrance: 0,
-
-      // 4. Color Grading (Lift/Gamma/Gain)
-      liftColor: { r: 0, g: 0, b: 0 },
-      gammaColor: { r: 1.0, g: 1.0, b: 1.0 },
-      gainColor: { r: 1, g: 1, b: 1 },
-      masterGamma: 1.65,
-
-      // 5. Tone Mapping.
-      // ACES is the HDR → LDR boundary now that the per-level chain emits true
-      // linear HDR (lighting tone map / sky grade removed). Override to 0 for
-      // legacy linear output if you author scenes against the pre-HDR pipeline.
-      toneMapping: 0,
-
-      // 6. Artistic
-      vignetteStrength: 0.0,
-      vignetteSoftness: 0.0,
-      grainStrength: 0.0,
-
-      // 7. Time-of-day CC timeline. Neutral anchors; off by default until authored.
-      todTimelineEnabled: false,
-      /** Blend strength toward local neutral-bright grade under gameplay lights (save key retained). */
-      localWarmLightPreserve: 0,
-      /** Extra exposure stops added to timeline grade inside local-light pools. */
-      localTodOverrideExposure: 0,
-      /** Minimum saturation multiplier inside local-light pools (neutral tint). */
-      localTodOverrideSaturation: 1,
-      /** Restore ToD grade loss on HDR flame cores (light-buffer × emissive), not map albedo. */
-      localWarmEmissiveAdd: 0,
+      ...COLOR_CORRECTION_CORE_DEFAULTS,
       todAnchors: cloneTodAnchors(),
 
       // Outdoor atmosphere (weather / golden hour) — evaluated by SkyEnvironmentModel.
@@ -307,7 +358,7 @@ export class ColorCorrectionEffectV2 {
     const timelineParams = {
       todTimelineEnabled: {
         type: 'boolean',
-        default: false,
+        default: COLOR_CORRECTION_CORE_DEFAULTS.todTimelineEnabled,
         label: 'Enable time-of-day timeline',
         tooltip: 'Blends eight clock anchors (global + interior grades) as Map Shine time advances. This is the camera-grade owner for visible time-of-day exposure.',
       },
@@ -317,7 +368,7 @@ export class ColorCorrectionEffectV2 {
         min: 0,
         max: 1,
         step: 0.01,
-        default: 0,
+        default: COLOR_CORRECTION_CORE_DEFAULTS.localWarmLightPreserve,
         tooltip: 'Blends from the scene timeline grade toward a bright neutral local grade under gameplay lights (HDR light-buffer alpha). 0 = full midnight/global tint everywhere; 1 = full local override inside lit pools only.',
       },
       localTodOverrideExposure: {
@@ -326,7 +377,7 @@ export class ColorCorrectionEffectV2 {
         min: -2,
         max: 5,
         step: 0.05,
-        default: 0,
+        default: COLOR_CORRECTION_CORE_DEFAULTS.localTodOverrideExposure,
         tooltip: 'Base exposure stops added inside local-light pools on top of the timeline grade. Stronger lights gain extra stops automatically — counters midnight darkness and blue tint.',
       },
       localTodOverrideSaturation: {
@@ -335,7 +386,7 @@ export class ColorCorrectionEffectV2 {
         min: 0.5,
         max: 2,
         step: 0.01,
-        default: 1,
+        default: COLOR_CORRECTION_CORE_DEFAULTS.localTodOverrideSaturation,
         tooltip: 'Minimum saturation multiplier inside local-light pools when overriding toward neutral tint. Brighter pool cores push slightly higher.',
       },
       localWarmEmissiveAdd: {
@@ -344,7 +395,7 @@ export class ColorCorrectionEffectV2 {
         min: 0,
         max: 1.5,
         step: 0.01,
-        default: 0,
+        default: COLOR_CORRECTION_CORE_DEFAULTS.localWarmEmissiveAdd,
         tooltip: 'Restores ToD grade loss on HDR flame cores (light-buffer core × emissive luminance). Does not touch normal map albedo — keeps scene-wide time-of-day tint visible.',
       },
     };
@@ -577,7 +628,7 @@ export class ColorCorrectionEffectV2 {
           min: 0.25,
           max: 2,
           step: 0.01,
-          default: 1,
+          default: COLOR_CORRECTION_CORE_DEFAULTS.exposure,
           tooltip: 'Final camera exposure multiplier before tone mapping. Dynamic exposure multiplies this at runtime.',
         },
         temperature: {
@@ -645,7 +696,7 @@ export class ColorCorrectionEffectV2 {
           type: 'color',
           colorType: 'float',
           label: 'Gamma',
-          default: { r: 1.0, g: 1.0, b: 1.0 },
+          default: { ...COLOR_CORRECTION_CORE_DEFAULTS.gammaColor },
           tooltip: 'Per-channel gamma exponent (shader uses pow(rgb, 1/gamma); 1 = neutral).',
         },
         gainColor: {
@@ -661,7 +712,7 @@ export class ColorCorrectionEffectV2 {
           min: 0.1,
           max: 6,
           step: 0.01,
-          default: 1.65,
+          default: COLOR_CORRECTION_CORE_DEFAULTS.masterGamma,
           tooltip: 'Overall gamma after lift/gamma/gain (1 = neutral).',
         },
         toneMapping: {

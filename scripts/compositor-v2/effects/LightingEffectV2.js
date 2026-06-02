@@ -161,7 +161,7 @@ export class LightingEffectV2 {
       ambientDayScale: 0,
       /** Scales Foundry ambient darkness colour at darkness 1 (night). */
       ambientNightScale: 0,
-      lightIntensity: 2,
+      lightIntensity: 0.75,
       /** Half-life falloff: normalized radius per halving at Foundry attenuation 0 (gentle). */
       falloffHalfInAtAtt0: 0.52,
       /** Foundry zone hardness at attenuation 1 (bright ring); larger = softer, fills radius. */
@@ -169,25 +169,25 @@ export class LightingEffectV2 {
       falloffHalfOutAtAtt0: 0.38,
       falloffHalfOutAtAtt1: 0.22,
       falloffHalfMin: 0.02,
-      falloffEdgeSoftBoostIn: 0.08,
-      falloffEdgeSoftBoostOut: 0.06,
+      falloffEdgeSoftBoostIn: 0.1,
+      falloffEdgeSoftBoostOut: 0.08,
       falloffBrightNormInfluence: 0.92,
       falloffDimRingWeight: 1.0,
       falloffRimAAScale: 0.38,
       falloffAttCurvePower: 1.0,
-      falloffRimBandAtAtt0: 0.14,
+      falloffRimBandAtAtt0: 0.16,
       falloffRimBandAtAtt1: 0.08,
       falloffExponent: DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT,
       /** Scales the minimum illumination floor under darkness (see compose shader). */
       minIlluminationScale: 0,
       /** Compose boost on saturated radiance excess (1 = off; ~2.5 matches Foundry-like CI). */
-      colorationStrength: 4.0,
+      colorationStrength: 3.2,
       /** Multiplier on buffer colorMix before strength. */
       colorationMixScale: 1.0,
       /** Exponent on scaled colorMix (CI curve). */
-      colorationMixPower: 1.0,
+      colorationMixPower: 3.65,
       /** Hard cap on effective gel weight [0..1]. */
-      colorationMaxMix: 1.0,
+      colorationMaxMix: 0.69,
       /** smoothstep low edge for gel vs lampEnergyA (higher = tint starts further in). */
       colorationFalloffStart: 0.0,
       /** smoothstep high edge on lamp energy (wider = softer colour penumbra). */
@@ -199,7 +199,7 @@ export class LightingEffectV2 {
       /** Boost lamp chroma before tint (0 = as buffer; 1 = full sat push). */
       colorationSaturation: 0.0,
       /** Extra saturation in compose tint path. */
-      colorationSaturationBoost: 0.0,
+      colorationSaturationBoost: 1.4,
       /** Darkens tinted result (0 = off; 1 = strong). */
       colorationDarken: 0.0,
       /** Brightens tinted result (additive on peak; can wash colour). */
@@ -216,7 +216,7 @@ export class LightingEffectV2 {
       colorationHueShift: 0.0,
       wallInsetPx: 6.0,
       /** Padded wall segments for light LOS raycast (reduces bleed through thin walls). */
-      wallPaddingPx: 4.0,
+      wallPaddingPx: 2.0,
       upperFloorTransmissionEnabled: false,
       upperFloorTransmissionStrength: 0.6,
       /**
@@ -244,9 +244,9 @@ export class LightingEffectV2 {
        * Amplifies darkness from the unified combined shadow texture (1 = as authored,
        * up to 10 = treat subtle penumbra as much deeper shadow for tuning).
        */
-      combinedShadowEffectStrength: 4,
+      combinedShadowEffectStrength: 2,
       /** How much cloud / combined shadow darkens ambient here (0 = ignore, 1 = full). */
-      cloudShadowAmbientInfluence: 1.0,
+      cloudShadowAmbientInfluence: 0.45,
       /** Scales overhead shadow strength on ambient only (0 = off). */
       overheadShadowAmbientInfluence: 1.0,
       /** How strongly dynamic lights neutralize ambient shadow darkening (0 = off, 1 = full). */
@@ -261,7 +261,7 @@ export class LightingEffectV2 {
        * building×painted structural lit texture. Gameplay-scale lights clear via structural
        * shadow override only. 0 = legacy (fills and tints bypass structural shadow).
        */
-      directStructuralOcclusionStrength: 1.0,
+      directStructuralOcclusionStrength: 0.5,
       /** Internal render scale for source lights RT (1.0 = full resolution). */
       internalLightResolutionScale: 1.0,
       /** Internal render scale for window glow RT (1.0 = full resolution). */
@@ -817,6 +817,7 @@ export class LightingEffectV2 {
     );
     u.uColorationFalloffPower.value = Math.max(0.01, Number(this.params.colorationFalloffPower) || 1);
     u.uColorationEnergyGain.value = Math.max(0, Number(this.params.colorationEnergyGain) || 1);
+    u.uColorationMixPower.value = Math.max(0.01, Number(this.params.colorationMixPower) || 1);
     this._lightBufferUniformsDirty = true;
     // Linear HDR refactor (Phase 0): the lighting pass must emit unclamped linear light.
     // Tone mapping is owned by ColorCorrectionEffectV2; we hard-coerce these to safe values
@@ -1159,6 +1160,7 @@ export class LightingEffectV2 {
           parameters: [
             'colorationMixScale',
             'colorationMaxMix',
+            'colorationMixPower',
             'colorationStrength',
             'colorationReflectivity',
             'colorationSaturationBoost',
@@ -1258,7 +1260,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 2,
           step: 0.05,
-          default: 2,
+          default: 0.75,
           label: 'Point light gain',
           tooltip:
             'Emission multiplier on Foundry lamp meshes (`uComposeLightGain`) before `_lightRT` accumulation; compose reads the RT as-is so buffer overlap or noise does not get a second brightness pass. Torch/flash meshes follow the same value. Separate from Window glow / Day-night ambient.',
@@ -1398,9 +1400,9 @@ export class LightingEffectV2 {
           min: 1,
           max: 12,
           step: 0.1,
-          default: 4.0,
-          label: 'Coloration strength',
-          tooltip: 'How much lamp hue is mixed into illumination (1 = full Foundry CI colour on the beam; does not change brightness).',
+          default: 3.2,
+          label: 'Saturation boost gain',
+          tooltip: 'Extra albedo saturation push at high CI only (does not map CI 0.5 vs 1.0 — that is linear from the lamp). Leave at default unless you want punchier colour.',
         },
         colorationReflectivity: {
           type: 'slider',
@@ -1425,16 +1427,16 @@ export class LightingEffectV2 {
           min: 0.1,
           max: 6,
           step: 0.05,
-          default: 1.0,
-          label: 'Mix power',
-          tooltip: 'Exponent on color mix after scale (higher = tint kicks in later with CI).',
+          default: 3.65,
+          label: 'CI curve power',
+          tooltip: 'Exponent on Foundry CI before compose (1 = linear; >1 widens gap between 0.5 and 1.0; <1 compresses mid CI).',
         },
         colorationMaxMix: {
           type: 'slider',
           min: 0,
           max: 1,
           step: 0.01,
-          default: 1.0,
+          default: 0.69,
           label: 'Max CI mix',
           tooltip: 'Caps how much Foundry Color Intensity can push the buffer toward lamp hue [0..1].',
         },
@@ -1488,7 +1490,7 @@ export class LightingEffectV2 {
           min: -2,
           max: 6,
           step: 0.05,
-          default: 0.0,
+          default: 1.4,
           label: 'Saturation boost',
           tooltip: 'Pushes chroma after the lamp tint (0.5–1.5 typical). Does not change lamp brightness.',
         },
@@ -1569,7 +1571,7 @@ export class LightingEffectV2 {
           min: 1,
           max: 4,
           step: 0.05,
-          default: 4,
+          default: 2,
           label: 'Combined shadow strength',
           tooltip:
             'Amplifies unified shadow darkness on ambient only (1 = authored, 4 = very deep). Strong lights can still clear shadow override on structural paths.',
@@ -1579,7 +1581,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 1,
           step: 0.05,
-          default: 1.0,
+          default: 0.45,
           label: 'Cloud shadow on ambient',
           tooltip: 'Reduces cloud (or combined) shadow on ambient only; dynamic lights stay full strength.',
         },
@@ -1617,7 +1619,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 1,
           step: 0.05,
-          default: 1.0,
+          default: 0.5,
           label: 'Structural occlusion on HDR lights',
           tooltip:
             'Darkens the Foundry HDR light accumulation (ambient disks/torches/colour spill) wherever building+painted shadows are dark. Strong gameplay lights clear this via Structural shadow override. Set to 0 to restore fills that bypass structural shadows entirely.',
@@ -1794,6 +1796,7 @@ export class LightingEffectV2 {
         uColorationFalloffEnd: { value: 0.35 },
         uColorationFalloffPower: { value: 1.0 },
         uColorationEnergyGain: { value: 1.0 },
+        uColorationMixPower: { value: 1.0 },
         uComposeToneExposure: { value: 1.0 },
         uCombinedShadowEffectStrength: { value: 1.0 },
         uCloudShadowAmbientInfluence: { value: 1.0 },
@@ -1896,6 +1899,7 @@ export class LightingEffectV2 {
         uniform float uColorationFalloffEnd;
         uniform float uColorationFalloffPower;
         uniform float uColorationEnergyGain;
+        uniform float uColorationMixPower;
         uniform float uComposeToneExposure;
         uniform float uCombinedShadowEffectStrength;
         uniform float uCloudShadowAmbientInfluence;
@@ -2141,15 +2145,16 @@ export class LightingEffectV2 {
           // ciBase = Foundry CI for this lamp (constant in the disk); was chromaMag/mag which
           // ignored falloff and made colour full-strength until the mesh edge (binary ring).
           float ciBase = clamp(chromaMag / max(lampEnergyA, 1e-4), 0.0, 1.0);
+          float ciEff = pow(ciBase, max(uColorationMixPower, 0.01));
           float eGel = lampEnergyA * max(uColorationEnergyGain, 0.0);
           float gelEnd = max(uColorationFalloffEnd, uColorationFalloffStart + 0.001);
           float gelSpatial = smoothstep(uColorationFalloffStart, gelEnd, eGel);
           gelSpatial = pow(clamp(gelSpatial, 0.0, 1.0), max(uColorationFalloffPower, 0.01));
-          float gel01 = ciBase * gelSpatial;
-          float colorMix = clamp(gel01 * chromaGain, 0.0, 3.0);
-          // Neutral lift on all channels + hue term on direct (additive, not hue*vec3 lift).
-          vec3 lift = vec3(1.0 + lampEnergyA);
-          vec3 directFromSources = lift + lampHue * lampEnergyA * colorMix;
+          float gel01 = ciEff * gelSpatial;
+          // Direct: white → luma-matched hue as CI rises (linear in gel01).
+          float baseIllum = 1.0 + lampEnergyA;
+          float colorW = clamp(gel01, 0.0, 1.0);
+          vec3 directFromSources = msaLightDirectIllumination(vec3(baseIllum), lampHue, colorW);
           vec3 directLight = directFromSources;
 
           // Darkness punch: strong nearby lights reduce the effective darkness
@@ -2379,16 +2384,18 @@ export class LightingEffectV2 {
           // Apply illumination to albedo, then window glow (token-style multiplicative boost).
           // litColor *= (1 + win) preserves surface hue/texture vs additive flat wash.
           vec3 litColor = baseColor.rgb * totalIllumination;
-          // Push albedo toward lamp hue (luma preserved); strength tracks CI × coloration strength.
+          // Albedo tint: linear in CI (exp×chromaGain flattened 0.5 vs 1.0 to the same weight).
+          // Fade tint when direct already carries hue so CI steps read on illumination first.
           if (chromaMag > 1e-5 && gel01 > 1e-4) {
             float reflPB = max(perceivedBrightness(baseColor.rgb), 0.05);
             float colorReflect = mix(1.0, reflPB, clamp(uColorationReflectivity, 0.0, 1.0));
-            float tintW = 1.0 - exp(-gel01 * chromaGain * colorReflect);
+            float tintW = clamp(gel01 * colorReflect * mix(1.0, 0.18, colorW), 0.0, 1.0);
             litColor = msaLightLumaPreserveTint(litColor, lampHue, tintW);
             float satBoost = max(uColorationSaturationBoost, 0.0);
             if (satBoost > 0.001) {
               float litL = dot(litColor, MSA_LUMA_W);
-              litColor = mix(vec3(litL), litColor, 1.0 + satBoost * tintW);
+              float satMul = 1.0 + satBoost * gel01 * clamp(chromaGain * 0.18, 0.0, 2.5);
+              litColor = mix(vec3(litL), litColor, satMul);
             }
           }
           {

@@ -142,7 +142,8 @@ export class FireForcesBehavior {
 
     cache.windSpeed = windSpeed;
     cache.windDirX = windDir.x;
-    cache.windDirY = windDir.y;
+    // WeatherController wind is Foundry Y-down; particle sim uses THREE Y-up (matches wind sock).
+    cache.windDirY = -windDir.y;
     cache.hasWind = true;
   }
 

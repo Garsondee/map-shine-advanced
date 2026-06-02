@@ -181,20 +181,20 @@ export class SpecularEffectV2 {
     this.params = {
       enabled: true,
       textureStatus: 'Searching...',
-      intensity: 0.4,
+      intensity: 0.15,
       lightColor: { r: 1.0, g: 1.0, b: 1.0 },
 
       // Multi-layer stripe system
       stripeEnabled: true,
       stripeBlendMode: 0,
       parallaxStrength: 1.5,
-      stripeMaskThreshold: 0.1,
-      worldPatternScale: 5808.0,
+      stripeMaskThreshold: 0.08,
+      worldPatternScale: 16384.0,
 
       // Layer 1
       stripe1Enabled: true,
       stripe1Frequency: 11.0,
-      stripe1Speed: 0.05,
+      stripe1Speed: 0.0,
       stripe1Angle: 115.0,
       stripe1Width: 0.21,
       stripe1Intensity: 5.0,
@@ -206,7 +206,7 @@ export class SpecularEffectV2 {
       // Layer 2
       stripe2Enabled: true,
       stripe2Frequency: 15.5,
-      stripe2Speed: 0.04,
+      stripe2Speed: 0.0,
       stripe2Angle: 111.0,
       stripe2Width: 0.38,
       stripe2Intensity: 5.0,
@@ -218,7 +218,7 @@ export class SpecularEffectV2 {
       // Layer 3
       stripe3Enabled: true,
       stripe3Frequency: 5.0,
-      stripe3Speed: 0.03,
+      stripe3Speed: 0.0,
       stripe3Angle: 162.0,
       stripe3Width: 0.09,
       stripe3Intensity: 5.0,
@@ -235,8 +235,8 @@ export class SpecularEffectV2 {
 
       // Outdoor Cloud Specular
       outdoorCloudSpecularEnabled: true,
-      outdoorStripeBlend: 0.8,
-      cloudSpecularIntensity: 3.0,
+      outdoorStripeBlend: 0.31,
+      cloudSpecularIntensity: 1.0,
 
       // Wet Surface (Rain)
       wetSpecularEnabled: true,
@@ -270,7 +270,7 @@ export class SpecularEffectV2 {
       buildingShadowSuppressionStrength: 0.8,
 
       /** Extra analytic specular gain for PlayerLightEffectV2 torch / flashlight overlap (1 = none). */
-      playerLightSpecularBoost: 1.35,
+      playerLightSpecularBoost: 1.2,
     };
 
     log.debug('SpecularEffectV2 created');
@@ -486,7 +486,7 @@ export class SpecularEffectV2 {
           min: 0,
           max: 2,
           step: 0.01,
-          default: 0.4,
+          default: 0.15,
           throttle: 100,
           tooltip: 'Master strength of the additive specular pass.',
         },
@@ -503,7 +503,7 @@ export class SpecularEffectV2 {
           min: 1,
           max: 2.5,
           step: 0.05,
-          default: 1.35,
+          default: 1.2,
           throttle: 100,
           tooltip: 'Extra strength where torch / flashlight (PlayerLightEffectV2) overlaps the floor specular pass. Uses the same world-space radii as the player light disks.',
         },
@@ -526,7 +526,7 @@ export class SpecularEffectV2 {
           min: 0,
           max: 1,
           step: 0.01,
-          default: 0.1,
+          default: 0.08,
           throttle: 100,
           tooltip: 'Stripes only where the specular mask is brighter than this (reduces shine in dark mask areas).',
         },
@@ -536,7 +536,7 @@ export class SpecularEffectV2 {
           min: 256,
           max: 16384,
           step: 16,
-          default: 5808,
+          default: 16384,
           throttle: 100,
           tooltip: 'Size of world-space stripe pattern — larger values stretch bands wider.',
         },
@@ -552,7 +552,7 @@ export class SpecularEffectV2 {
         },
         stripe1Enabled: { type: 'boolean', label: 'On', default: true },
         stripe1Frequency: { type: 'slider', label: 'Frequency', min: 0.5, max: 20, step: 0.5, default: 11.0, throttle: 100, tooltip: 'How often bands repeat.' },
-        stripe1Speed: { type: 'slider', label: 'Speed', min: -1, max: 1, step: 0.001, default: 0.05, throttle: 100, tooltip: 'Scroll speed along the pattern (outdoors only when _Outdoors mask is bound).' },
+        stripe1Speed: { type: 'slider', label: 'Speed', min: -1, max: 1, step: 0.001, default: 0, throttle: 100, tooltip: 'Scroll speed along the pattern (outdoors only when _Outdoors mask is bound).' },
         stripe1Angle: { type: 'slider', label: 'Angle (°)', min: 0, max: 360, step: 1, default: 115, throttle: 100, tooltip: 'Band direction in degrees.' },
         stripe1Width: { type: 'slider', label: 'Width', min: 0, max: 1, step: 0.01, default: 0.21, throttle: 100, tooltip: 'Thickness of each bright band.' },
         stripe1Intensity: { type: 'slider', label: 'Strength', min: 0, max: 5, step: 0.01, default: 5.0, throttle: 100, tooltip: 'How strong this layer is before blending.' },
@@ -562,7 +562,7 @@ export class SpecularEffectV2 {
         stripe1Softness: { type: 'slider', label: 'Softness', min: 0, max: 5, step: 0.01, default: 2.14, throttle: 100, tooltip: 'Edge softness of each band.' },
         stripe2Enabled: { type: 'boolean', label: 'On', default: true },
         stripe2Frequency: { type: 'slider', label: 'Frequency', min: 0.5, max: 20, step: 0.5, default: 15.5, throttle: 100, tooltip: 'How often bands repeat.' },
-        stripe2Speed: { type: 'slider', label: 'Speed', min: -1, max: 1, step: 0.001, default: 0.04, throttle: 100, tooltip: 'Scroll speed along the pattern (outdoors only when _Outdoors mask is bound).' },
+        stripe2Speed: { type: 'slider', label: 'Speed', min: -1, max: 1, step: 0.001, default: 0, throttle: 100, tooltip: 'Scroll speed along the pattern (outdoors only when _Outdoors mask is bound).' },
         stripe2Angle: { type: 'slider', label: 'Angle (°)', min: 0, max: 360, step: 1, default: 111, throttle: 100, tooltip: 'Band direction in degrees.' },
         stripe2Width: { type: 'slider', label: 'Width', min: 0, max: 1, step: 0.01, default: 0.38, throttle: 100, tooltip: 'Thickness of each bright band.' },
         stripe2Intensity: { type: 'slider', label: 'Strength', min: 0, max: 5, step: 0.01, default: 5.0, throttle: 100, tooltip: 'How strong this layer is before blending.' },
@@ -572,7 +572,7 @@ export class SpecularEffectV2 {
         stripe2Softness: { type: 'slider', label: 'Softness', min: 0, max: 5, step: 0.01, default: 3.93, throttle: 100, tooltip: 'Edge softness of each band.' },
         stripe3Enabled: { type: 'boolean', label: 'On', default: true },
         stripe3Frequency: { type: 'slider', label: 'Frequency', min: 0.5, max: 20, step: 0.5, default: 5.0, throttle: 100, tooltip: 'How often bands repeat.' },
-        stripe3Speed: { type: 'slider', label: 'Speed', min: -1, max: 1, step: 0.001, default: 0.03, throttle: 100, tooltip: 'Scroll speed along the pattern (outdoors only when _Outdoors mask is bound).' },
+        stripe3Speed: { type: 'slider', label: 'Speed', min: -1, max: 1, step: 0.001, default: 0, throttle: 100, tooltip: 'Scroll speed along the pattern (outdoors only when _Outdoors mask is bound).' },
         stripe3Angle: { type: 'slider', label: 'Angle (°)', min: 0, max: 360, step: 1, default: 162, throttle: 100, tooltip: 'Band direction in degrees.' },
         stripe3Width: { type: 'slider', label: 'Width', min: 0, max: 1, step: 0.01, default: 0.09, throttle: 100, tooltip: 'Thickness of each bright band.' },
         stripe3Intensity: { type: 'slider', label: 'Strength', min: 0, max: 5, step: 0.01, default: 5.0, throttle: 100, tooltip: 'How strong this layer is before blending.' },
@@ -585,8 +585,8 @@ export class SpecularEffectV2 {
         sparkleScale: { type: 'slider', label: 'Density', min: 100, max: 10000, step: 1, default: 2460, throttle: 100, tooltip: 'Higher = smaller, busier sparkles.' },
         sparkleSpeed: { type: 'slider', label: 'Twinkle speed', min: 0, max: 5, step: 0.01, default: 1.38, throttle: 100, tooltip: 'How fast sparkles blink.' },
         outdoorCloudSpecularEnabled: { type: 'boolean', label: 'Cloud specular', default: true, tooltip: 'Brighten outdoor specular where the cloud shadow map says “lit”. Requires cloud shadows from the cloud effect.' },
-        outdoorStripeBlend: { type: 'slider', label: 'Outdoor stripe mix', min: 0, max: 1, step: 0.01, default: 0.8, throttle: 100, tooltip: 'How much `_Outdoors` reduces stripe modulation (outdoor areas stay punchier).' },
-        cloudSpecularIntensity: { type: 'slider', label: 'Cloud lit boost', min: 0, max: 3, step: 0.01, default: 3, throttle: 100, tooltip: 'Extra additive specular on sunlit outdoor pixels from the cloud pass.' },
+        outdoorStripeBlend: { type: 'slider', label: 'Outdoor stripe mix', min: 0, max: 1, step: 0.01, default: 0.31, throttle: 100, tooltip: 'How much `_Outdoors` reduces stripe modulation (outdoor areas stay punchier).' },
+        cloudSpecularIntensity: { type: 'slider', label: 'Cloud lit boost', min: 0, max: 3, step: 0.01, default: 1, throttle: 100, tooltip: 'Extra additive specular on sunlit outdoor pixels from the cloud pass.' },
         wetSpecularEnabled: { type: 'boolean', label: 'Wet sheen', default: true, tooltip: 'Rain wetness (from weather) adds sheen from albedo brightness.' },
         wetInputBrightness: { type: 'slider', label: 'Input lift', min: -0.5, max: 0.5, step: 0.01, default: 0.0, throttle: 100, tooltip: 'Brightness bias before wet mask extraction.' },
         wetInputGamma: { type: 'slider', label: 'Input gamma', min: 0.1, max: 3.0, step: 0.01, default: 1.0, throttle: 100, tooltip: 'Gamma on albedo grayscale before contrast.' },
@@ -2258,7 +2258,7 @@ export class SpecularEffectV2 {
       u.uPlayerLightFloorGate.value = 0.0;
     }
 
-    const boost = Math.max(1.0, Math.min(3.5, Number(this.params.playerLightSpecularBoost) || 1.35));
+    const boost = Math.max(1.0, Math.min(3.5, Number(this.params.playerLightSpecularBoost) || 1.2));
     const posArr = u.playerLightPosition.value;
     const colArr = u.playerLightColor.value;
     const cfgArr = u.playerLightConfig.value;

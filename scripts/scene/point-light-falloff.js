@@ -388,6 +388,19 @@ export const MSA_LIGHT_RADIANCE_GLSL = `
     return chromaMag * tintEnvelope;
   }
 
+  // CI crossfade: replace neutral white illumination with luma-matched coloured light.
+  // Additive white + hue always reads salmon; multiply toward hue as CI rises.
+  vec3 msaLightDirectIllumination(vec3 neutralIllum, vec3 hue, float colorWeight) {
+    float w = clamp(colorWeight, 0.0, 1.0);
+    if (w <= 0.0001) return neutralIllum;
+    vec3 hueN = clamp(hue, 0.0, 1.0);
+    float hLen = length(hueN);
+    if (hLen > 1e-5) hueN /= hLen;
+    float hueL = dot(hueN, MSA_LUMA_W);
+    vec3 hueIllum = (hueL > 1e-5) ? (hueN / hueL) : vec3(1.0);
+    return neutralIllum * mix(vec3(1.0), hueIllum, w);
+  }
+
   // Luma-preserving hue tint (CI changes colour, not scene brightness).
   vec3 msaLightLumaPreserveTint(vec3 litColor, vec3 hue, float tintWeight) {
     float w = clamp(tintWeight, 0.0, 1.0);

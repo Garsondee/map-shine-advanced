@@ -1,5 +1,6 @@
 import {
   DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT,
+  MSA_LIGHT_RADIANCE_GLSL,
   POINT_LIGHT_FALLOFF_GLSL,
   POINT_LIGHT_WALL_VERTEX_EDGE_MIN,
   applyPointLightBufferBlending,
@@ -150,6 +151,7 @@ export class LightMesh {
         uniform float uRgbGain;
         uniform float uEdgeSoftness;
         ${POINT_LIGHT_FALLOFF_GLSL}
+        ${MSA_LIGHT_RADIANCE_GLSL}
         void main() {
           float dist = length(vLocalPos);
           float outerR = max(uOuterRadius, 1e-4);
@@ -170,24 +172,20 @@ export class LightMesh {
 
           float gain = max(uEmissionGain, 0.0);
           float rgbGain = max(uRgbGain, 0.0);
-          // Match ThreeLightSource: alpha = scalar illumination, RGB = hue * same mag.
-          // uColor is a tint direction only — magnitude lives in uEmissionGain.
-          float illumMag = cover * gain * rgbGain;
+          float mag = cover * gain * rgbGain;
           float srcMx = max(max(uColor.r, uColor.g), uColor.b);
-          vec3 hue = (srcMx > 1e-4) ? (uColor / srcMx) : vec3(1.0);
-          vec3 rgbOut = (uAchromaticRgb > 0.5) ? vec3(illumMag) : (hue * illumMag);
-          float alphaOut = illumMag;
+          vec3 lampCol = (srcMx > 1e-4) ? (uColor / srcMx) : vec3(1.0);
+          float gel = (uAchromaticRgb > 0.5) ? 0.0 : 1.0;
 
           float edgeFade = 1.0 - smoothstep(
             1.0 - max(0.06, fadeBand * 1.35),
             1.05 + fadeBand * 0.10,
             d
           );
-          alphaOut *= edgeFade;
-          rgbOut *= edgeFade;
-          if (alphaOut <= 0.000001 && max(max(rgbOut.r, rgbOut.g), rgbOut.b) <= 0.000001) discard;
-
-          gl_FragColor = vec4(rgbOut, alphaOut);
+          mag *= edgeFade;
+          vec3 chromaSig = msaLightChromaSignal(lampCol, gel, mag);
+          if (mag <= 0.000001) discard;
+          gl_FragColor = vec4(chromaSig, mag);
         }
       `,
       transparent: true,

@@ -12,14 +12,14 @@ import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { hasV14NativeLevels } from '../foundry/levels-scene-flags.js';
 import {
   DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT,
+  MSA_LIGHT_RADIANCE_GLSL,
   POINT_LIGHT_FALLOFF_GLSL,
   applyPointLightBufferBlending,
   computePointLightGeomRadiusPx,
   createPointLightFalloffUniforms,
   applyFalloffAttenuationUniforms,
   brightNormFromLightUniforms,
-  foundryColorationAlphaFromIntensity,
-  foundryColorMixFromColorationAlpha,
+  foundryColorIntensity01FromConfig,
   foundryLuminosityIllumMultiplier,
   getFoundryLightAttenuation,
 } from '../scene/point-light-falloff.js';
@@ -332,14 +332,18 @@ export class ThreeLightSource {
         uBrightness: { value: 1.0 },
         // Foundry photometric controls:
         // - uLuminosity = Foundry illumination multiplier (0.5 → 1.0 neutral)
-        // - uColorationAlpha = Foundry colorationAlpha (config.colorIntensity or config.alpha + technique)
+        // - uColorIntensity01 = Foundry Color Intensity slider (config.alpha / colorIntensity)
         uLuminosity: { value: 1.0 },
+        uColorIntensity01: { value: 0.5 },
+        /** Legacy uniform slot; CI gel is driven by uColorIntensity01 in the fragment shader. */
         uColorationAlpha: { value: 1.0 },
         /**
          * Map Shine LightingEffect “Point light gain” — applied before additive `_lightRT` blend,
          * not in compose post-multiply.
          */
         uComposeLightGain: { value: 0.35 },
+        uColorationMixScale: { value: 1.0 },
+        uColorationMaxMix: { value: 1.0 },
         // Cookie/gobo texture (optional)
         tCookie: { value: null },
         uHasCookie: { value: 0.0 },
@@ -383,8 +387,11 @@ export class ThreeLightSource {
         uniform float uPulse;
         uniform float uBrightness;
         uniform float uLuminosity;
-        uniform float uColorationAlpha;
         uniform float uComposeLightGain;
+        uniform float uColorIntensity01;
+        uniform float uColorationAlpha;
+        uniform float uColorationMixScale;
+        uniform float uColorationMaxMix;
         uniform sampler2D tCookie;
         uniform float uHasCookie;
         uniform float uCookieRotation;
@@ -565,6 +572,7 @@ export class ThreeLightSource {
         }
 
         ${POINT_LIGHT_FALLOFF_GLSL}
+        ${MSA_LIGHT_RADIANCE_GLSL}
 
         void main() {
           vec2 p = vPos - uCenterOffset;
@@ -811,7 +819,7 @@ export class ThreeLightSource {
             ${FoundryLightingShaderChunks.pulse}
           }
 
-          // Falloff shape (0..1): alpha = illumination, RGB = chroma × gel for compose.
+          // Falloff shape (0..1): alpha = illumination; RGB = hue × same envelope (see LightMesh).
           float uAlphaEff = mix(uAlpha, min(1.0, max(uAlpha, 0.92)), isFireCore);
           float cover = intensity * uAlphaEff * uIntensity * animAlphaMul * cookieFactor * max(uOutputGain, 0.0);
 
@@ -820,33 +828,33 @@ export class ThreeLightSource {
           cover *= mix(1.0, 1.75, isFireCore * iAnimDrive);
 
           float lumMul = max(uLuminosity, 0.0);
-          // Alpha = illumination; RGB = lamp colour × colorMix (compose approach D).
           float illumMag = cover * lumMul;
-          float gelEnc = clamp(uColorationAlpha * 0.55, 0.0, 1.0);
           vec3 lightColor = clamp(outColor, 0.0, 1.0);
           float maxC = max(max(lightColor.r, lightColor.g), lightColor.b);
           float minC = min(min(lightColor.r, lightColor.g), lightColor.b);
           float chroma = (maxC > 1e-5) ? ((maxC - minC) / maxC) : 0.0;
-          vec3 chromaDir = (chroma > 0.04) ? (lightColor / maxC) : vec3(0.0);
-          // Chroma direction × CI (neutral lamps write rgb=0). Compose tints by lampEnergyA, not rgb footprint.
-          vec3 rgbOut = chromaDir * gelEnc;
+          vec3 lampCol = (chroma > 0.04) ? (lightColor / maxC) : vec3(1.0);
+          float gel = clamp(
+            uColorIntensity01 * max(uColorationMixScale, 0.0),
+            0.0,
+            clamp(uColorationMaxMix, 0.0, 1.0)
+          );
 
           float cookieColorMul = (uHasCookie > 0.5) ? cookieFactor : 1.0;
           float brightMul = uBrightness * (0.75 + 0.25 * fairyBoost) * cookieColorMul;
+          float mag = illumMag * brightMul * clamp(uComposeLightGain, 0.0, 8.0);
+          float edgeFade = smoothstep(0.0, 0.012, cover);
+          mag *= edgeFade;
+
+          vec3 chromaSig = msaLightChromaSignal(lampCol, gel, mag);
           if (isFireCore > 0.5) {
             float hotHi = mix(1.05, 3.35, pow(iAnimDrive, 1.04));
             vec3 fire = vec3(1.0, 0.52, 0.14);
-            rgbOut = mix(rgbOut * hotHi, rgbOut * fire * hotHi * 0.42, mix(0.22, 0.38, iAnimDrive));
+            chromaSig = mix(chromaSig * hotHi, msaLightChromaSignal(fire, gel, mag) * hotHi * 0.42, mix(0.22, 0.38, iAnimDrive));
           }
 
-          float alpha = illumMag * brightMul;
-          float composeGain = clamp(uComposeLightGain, 0.0, 8.0);
-          float edgeFade = smoothstep(0.0, 0.012, cover);
-          alpha *= edgeFade;
-          rgbOut *= edgeFade;
-          if (alpha <= 0.000001 && max(max(rgbOut.r, rgbOut.g), rgbOut.b) <= 0.000001) discard;
-          // HDR gain on alpha only; RGB is normalized colour × colorMix (compose scales by lampEnergyA).
-          gl_FragColor = vec4(rgbOut, alpha * composeGain);
+          if (mag <= 0.000001) discard;
+          gl_FragColor = vec4(chromaSig, mag);
         }
       `,
       transparent: true,
@@ -917,7 +925,7 @@ export class ThreeLightSource {
     this.material.uniforms.uBrightness.value = Math.max(0.2, 1.0) + satBonus;
     this.material.uniforms.uLuminosity.value = foundryLuminosityIllumMultiplier(luminosity01);
 
-    this.material.uniforms.uColorationAlpha.value = this._foundryColorationAlphaFromConfig(config);
+    this._syncColorationUniforms(config);
 
     const dim = config.dim || 0;
     const bright = config.bright || 0;
@@ -979,8 +987,7 @@ export class ThreeLightSource {
 
     this.material.uniforms.uRadius.value = rPxSafe;
     this.material.uniforms.uBrightRadius.value = brightPxSafe;
-    // Foundry `config.alpha` is Color Intensity (see BaseLightSource._updateColorationUniforms),
-    // not photometric opacity — never scale falloff cover by it.
+    // Foundry Color Intensity (`config.alpha` in V14) must not scale photometric falloff cover.
     this.material.uniforms.uAlpha.value = 1.0;
 
     // Additional shaping/boost controls
@@ -1078,33 +1085,27 @@ export class ThreeLightSource {
   }
 
   /**
-   * Foundry Color Intensity: `config.alpha` (V14 UI) with optional `config.colorIntensity`.
-   * `config.coloration` is the coloration technique id, not this slider.
+   * Foundry Color Intensity 0..1 (`config.alpha` in V14 UI).
    * @param {object|null|undefined} config
    * @returns {number}
    * @private
    */
   _colorIntensity01FromConfig(config) {
-    if (!config || typeof config !== 'object') return 0.5;
-    // V14 UI writes Color Intensity to `alpha`; some worlds also use `colorIntensity`.
-    const keys = ['colorIntensity', 'colourIntensity', 'alpha'];
-    for (let i = 0; i < keys.length; i++) {
-      const v = Number(config[keys[i]]);
-      if (Number.isFinite(v)) return this._clamp(v, 0.0, 1.0);
-    }
-    return 0.5;
+    return foundryColorIntensity01FromConfig(config);
   }
 
   /**
-   * Foundry colorationAlpha from Color Intensity + coloration technique id.
+   * Push Foundry Color Intensity (0..1) for chroma gel; illumination stays on mag/alpha only.
    * @param {object|null|undefined} config
-   * @returns {number}
    * @private
    */
-  _foundryColorationAlphaFromConfig(config) {
-    const ci = this._colorIntensity01FromConfig(config);
-    const technique = config && typeof config === 'object' ? Number(config.coloration) : 1;
-    return foundryColorationAlphaFromIntensity(ci, technique);
+  _syncColorationUniforms(config) {
+    const u = this.material?.uniforms;
+    if (!u) return;
+    const cfg = config && typeof config === 'object' ? config : {};
+    if (u.uColorIntensity01) {
+      u.uColorIntensity01.value = this._colorIntensity01FromConfig(cfg);
+    }
   }
 
   /**
@@ -2175,8 +2176,8 @@ export class ThreeLightSource {
           this._baseLightColor.copy(this.material.uniforms.uColor.value);
         }
       }
-      if (liveCfg && this.material?.uniforms?.uColorationAlpha) {
-        this.material.uniforms.uColorationAlpha.value = this._foundryColorationAlphaFromConfig(liveCfg);
+      if (liveCfg) {
+        this._syncColorationUniforms(liveCfg);
       }
       if (liveCfg && this.material?.uniforms?.uLuminosity) {
         const lumRaw = Number(liveCfg.luminosity);

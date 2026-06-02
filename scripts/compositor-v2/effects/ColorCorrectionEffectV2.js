@@ -1298,10 +1298,8 @@ export class ColorCorrectionEffectV2 {
             // Stronger lights pull harder toward neutral HDR (extra stops scale with punch).
             float punchNorm = smoothstep(0.06, 0.72, lightPunch);
             float expBoost = uLocalOverrideExposureOffset + punchNorm * 2.35;
-            // Fade exposure push at the influence rim; keep more punch outdoors (wider pools).
-            float rimFloor = mix(0.22, 0.50, outdoorW);
-            float rimPow = mix(0.72, 0.58, outdoorW);
-            expBoost *= mix(rimFloor, 1.0, pow(clamp(localInfluence, 0.0, 1.0), rimPow));
+            // Keep exposure boost under the blurred influence rim (low rimFloor caused dark halos around lamps).
+            expBoost *= mix(0.92, 1.0, pow(clamp(localInfluence, 0.0, 1.0), 1.1));
             float localGlobalExp = uTodGlobalExposure + expBoost;
             float localInteriorExp = interiorExposureTotal + expBoost;
             float satFloor = uLocalOverrideSaturationMin + punchNorm * 0.42;

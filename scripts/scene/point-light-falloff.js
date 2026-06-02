@@ -217,6 +217,26 @@ export function foundryLuminosityIllumMultiplier(luminosity01) {
 }
 
 /**
+ * Foundry Color Intensity (0..1) from an AmbientLight `config`.
+ * V14 UI writes `config.alpha`; some worlds/macros use `colorIntensity` or `saturation`.
+ * Do not use Math.max across fields — `alpha` may be emission opacity on some docs.
+ * @param {object|null|undefined} config
+ * @returns {number}
+ */
+export function foundryColorIntensity01FromConfig(config) {
+  if (!config || typeof config !== 'object') return 0.5;
+  // V14 Color Intensity UI → `config.alpha` (see V3ThreeSceneHost / Foundry LightData).
+  const alpha = Number(config.alpha);
+  if (Number.isFinite(alpha)) return Math.max(0, Math.min(1, alpha));
+  const ci = Number(config.colorIntensity ?? config.colourIntensity);
+  if (Number.isFinite(ci)) return Math.max(0, Math.min(1, ci));
+  // Macros (e.g. theatre) sometimes map “Color Intensity” to background saturation -1..1.
+  const sat = Number(config.saturation);
+  if (Number.isFinite(sat)) return Math.max(0, Math.min(1, sat * 0.5 + 0.5));
+  return 0.5;
+}
+
+/**
  * Mirrors `BaseLightSource._updateColorationUniforms` colorationAlpha from Color Intensity.
  * @param {number} colorIntensity01 Foundry `config.colorIntensity` 0..1
  * @param {number} [colorationTechnique=1] Foundry `config.coloration` technique id
@@ -337,6 +357,67 @@ export function computePointLightGeomRadiusPx(outerRadiusPx, softnessOpts = {}) 
 }
 
 /**
+ * Shared GLSL for `_lightRT`: RGB = chroma signal only; alpha = illumination (mag).
+ * Color Intensity must not multiply into white/brightness — compose tints in luma-preserving mix.
+ */
+export const MSA_LIGHT_RADIANCE_GLSL = `
+  const vec3 MSA_LUMA_W = vec3(0.2126, 0.7152, 0.0722);
+
+  // hue × CI gel × spatial mag (falloff shape). No colorationAlpha>1 clamp toward white.
+  vec3 msaLightChromaSignal(vec3 lampCol, float gel01, float mag) {
+    float g = clamp(gel01, 0.0, 1.0);
+    vec3 hue = clamp(lampCol, 0.0, 1.0);
+    return hue * g * max(mag, 0.0);
+  }
+
+  float msaLightRadianceLuma(vec3 rgb) {
+    return dot(max(rgb, vec3(0.0)), MSA_LUMA_W);
+  }
+
+  float msaLightRadianceChroma(vec3 rgb) {
+    float mx = max(max(rgb.r, rgb.g), rgb.b);
+    if (mx < 1e-5) return 0.0;
+    float mn = min(min(rgb.r, rgb.g), rgb.b);
+    return clamp((mx - mn) / mx, 0.0, 1.0);
+  }
+
+  // Tint weight: chroma magnitude × penumbra envelope (never length/mag — that is flat until the rim).
+  float msaLightTintWeight(vec3 chromaSig, float mag) {
+    float chromaMag = length(max(chromaSig, vec3(0.0)));
+    float tintEnvelope = smoothstep(0.06, 0.42, max(mag, 0.0));
+    return chromaMag * tintEnvelope;
+  }
+
+  // Luma-preserving hue tint (CI changes colour, not scene brightness).
+  vec3 msaLightLumaPreserveTint(vec3 litColor, vec3 hue, float tintWeight) {
+    float w = clamp(tintWeight, 0.0, 1.0);
+    if (w <= 0.0001) return litColor;
+    vec3 hueN = clamp(hue, 0.0, 1.0);
+    float hLen = length(hueN);
+    if (hLen > 1e-5) hueN /= hLen;
+    vec3 tinted = litColor * hueN;
+    float origL = dot(litColor, MSA_LUMA_W);
+    float newL = dot(tinted, MSA_LUMA_W);
+    if (newL > 1e-5 && origL > 1e-5) tinted *= (origL / newL);
+    return mix(litColor, tinted, w);
+  }
+
+  // vividness 0 = luma-preserving; 1 = multiply toward lamp hue (stronger saturation at highlights).
+  vec3 msaLightApplyColoration(vec3 litColor, vec3 hue, float tintWeight, float vividness) {
+    float w = clamp(tintWeight, 0.0, 1.0);
+    float v = clamp(vividness, 0.0, 1.0);
+    if (w <= 0.0001) return litColor;
+    vec3 preserved = msaLightLumaPreserveTint(litColor, hue, w);
+    if (v <= 0.0001) return preserved;
+    vec3 hueN = clamp(hue, 0.0, 1.0);
+    float hLen = length(hueN);
+    if (hLen > 1e-5) hueN /= hLen;
+    vec3 multiplied = litColor * hueN;
+    return mix(preserved, multiplied, v);
+  }
+`;
+
+/**
  * Max blend into `_lightRT` (cleared to 0). Overlap takes the brighter lamp sample,
  * not the sum — prevents midpoint hotspots brighter than either core.
  * @param {THREE.Material|null|undefined} material
@@ -344,8 +425,7 @@ export function computePointLightGeomRadiusPx(outerRadiusPx, softnessOpts = {}) 
 export function applyPointLightBufferBlending(material) {
   const THREE = window.THREE;
   if (!THREE || !material) return;
-  // Non-premultiplied: RGB stores chroma × gel; alpha stores energy. Premultiply
-  // was crushing chroma in the max-blend _lightRT when alpha differed from rgb scale.
+  // RGB = Foundry tinted radiance; alpha = illumination envelope (mag).
   material.premultipliedAlpha = false;
   material.blending = THREE.CustomBlending;
   material.blendEquation = THREE.MaxEquation;

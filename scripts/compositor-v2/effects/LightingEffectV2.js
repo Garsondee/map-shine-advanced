@@ -9,9 +9,8 @@
  * dependency edges to prevent silent failures.
  *
  * Reads the bus scene RT (albedo + overlays) and applies ambient light,
- * dynamic light sources, darkness sources, and chroma-weighted surface tint
- * (so neutral lamp RGB does not duplicate the luminance channel) to produce the
- * lit image.
+ * dynamic light sources, darkness sources, and HDR radiance from the light buffer
+ * to produce the lit image.
  *
  * Reuses the V1 ThreeLightSource and ThreeDarknessSource classes for
  * individual light mesh rendering — they max-blend into a dedicated light accumulation RT.
@@ -42,11 +41,11 @@
  * Legacy per-effect fallbacks (`tOverheadShadow`, cloud-only) were removed —
  * ShadowManagerV2 owns the combined factor.
  *
- * **Point light gain (`lightIntensity`):** Applied in {@link ThreeLightSource} fragment
- * output (`uComposeLightGain`) before max-blend into `_lightRT`. Falloff uses half-life
- * decay in {@link POINT_LIGHT_FALLOFF_GLSL} (brightness halves every ~11% of radius at att=1).
- * `_lightRT` uses max-blend (see {@link applyPointLightBufferBlending}) with alpha=0 clear;
- * compose adds a direct-fill baseline of 1.0 plus buffer energy so overlaps cannot exceed a single core.
+ * **Point light gain (`lightIntensity`):** Applied in {@link ThreeLightSource} as
+ * `uComposeLightGain` on HDR radiance before max-blend into `_lightRT`.
+ * Falloff uses {@link POINT_LIGHT_FALLOFF_GLSL}. Buffer RGB = Foundry tinted colour
+ * (`lampHue × CI gel × mag`); alpha = mag. Compose: neutral `direct = vec3(1+mag)`, then
+ * luma-preserving hue tint on `base × totalIllum` (CI never in the vec3 brightness multiply). Max-blend.
  * Torch / flashlight {@link ThreeLightSource} instances are updated
  * from here each frame/when params change. Window glow is unchanged.
  *
@@ -77,6 +76,7 @@ import {
   applyPointLightFalloffUniforms,
   brightNormFromLightUniforms,
   getPointLightFalloffTuningFromParams,
+  MSA_LIGHT_RADIANCE_GLSL,
 } from '../../scene/point-light-falloff.js';
 
 const log = createLogger('LightingEffectV2');
@@ -135,8 +135,10 @@ export class LightingEffectV2 {
     this._lastPerspectiveRefreshAtSec = -Infinity;
     /** @type {boolean} Static compose uniforms need to be re-parsed from params */
     this._paramsDirty = true;
-    /** @type {number} Last uComposeLightGain pushed to Foundry meshes (-1 = never) */
-    this._lastPushedLightGain = -1;
+    /** @type {string|null} Last light-buffer uniform signature pushed to meshes */
+    this._lastLightBufferUniformSig = null;
+    /** @type {boolean} Force push coloration/gain uniforms to ThreeLightSource */
+    this._lightBufferUniformsDirty = true;
     /** @type {string|null} Cached falloff tuning signature for mesh uniform push */
     this._lastFalloffTuningSig = null;
     /**
@@ -178,8 +180,8 @@ export class LightingEffectV2 {
       falloffExponent: DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT,
       /** Scales the minimum illumination floor under darkness (see compose shader). */
       minIlluminationScale: 0,
-      /** Overall tint amount vs buffer Color Intensity mix. */
-      colorationStrength: 1.0,
+      /** Compose boost on saturated radiance excess (1 = off; ~2.5 matches Foundry-like CI). */
+      colorationStrength: 4.0,
       /** Multiplier on buffer colorMix before strength. */
       colorationMixScale: 1.0,
       /** Exponent on scaled colorMix (CI curve). */
@@ -188,8 +190,8 @@ export class LightingEffectV2 {
       colorationMaxMix: 1.0,
       /** smoothstep low edge for gel vs lampEnergyA (higher = tint starts further in). */
       colorationFalloffStart: 0.0,
-      /** smoothstep high edge (wider = softer colour boundary). */
-      colorationFalloffEnd: 0.02,
+      /** smoothstep high edge on lamp energy (wider = softer colour penumbra). */
+      colorationFalloffEnd: 0.35,
       /** Exponent on falloff mask after smoothstep. */
       colorationFalloffPower: 1.0,
       /** Scales lampEnergyA before colour falloff (boost without moving photometric alpha). */
@@ -204,7 +206,7 @@ export class LightingEffectV2 {
       colorationBrighten: 0.0,
       /** 1 = preserve max RGB peak after tint; 0 = allow peak to change. */
       colorationPeakPreserve: 1.0,
-      /** Couples gel to surface albedo luma (0 = ignore albedo). */
+      /** Couples gel to surface albedo luma (0 = vivid on stone). */
       colorationReflectivity: 0.0,
       /** Exponent on buffer colorMix (chroma gate). */
       colorationChromaCurve: 1.0,
@@ -773,7 +775,15 @@ export class LightingEffectV2 {
     if (!this.params || !Object.prototype.hasOwnProperty.call(this.params, paramId)) return;
     this.params[paramId] = value;
     this._paramsDirty = true;
-    if (paramId === 'lightIntensity') this._pushComposeLightGainToFoundryMeshes();
+    if (
+      paramId === 'lightIntensity'
+      || paramId === 'colorationStrength'
+      || paramId === 'colorationMixScale'
+      || paramId === 'colorationMaxMix'
+      || paramId === 'colorationReflectivity'
+    ) {
+      this._pushLightBufferUniformsToMeshes();
+    }
     if (POINT_LIGHT_FALLOFF_PARAM_KEYS.includes(paramId)) this._pushPointLightFalloffUniforms();
     if (paramId === 'wallInsetPx' || paramId === 'wallPaddingPx') this.syncAllLights();
   }
@@ -797,26 +807,17 @@ export class LightingEffectV2 {
     u.uAmbientDayScale.value = Math.max(0, Number(this.params.ambientDayScale) || 0);
     u.uAmbientNightScale.value = Math.max(0, Number(this.params.ambientNightScale) || 0);
     u.uMinIlluminationScale.value = Math.max(0, Number(this.params.minIlluminationScale) || 0);
-    u.uColorationStrength.value = Math.max(0, Number(this.params.colorationStrength) || 0);
-    u.uColorationMixScale.value = Math.max(0, Number(this.params.colorationMixScale) || 0);
-    u.uColorationMixPower.value = Math.max(0.01, Number(this.params.colorationMixPower) || 1);
-    u.uColorationMaxMix.value = clamp01(Number(this.params.colorationMaxMix) ?? 1);
-    u.uColorationFalloffStart.value = Number(this.params.colorationFalloffStart) || 0;
+    u.uChromaticRadianceGain.value = Math.max(1.0, Number(this.params.colorationStrength) || 4.0);
+    u.uColorationReflectivity.value = clamp01(Number(this.params.colorationReflectivity) ?? 0);
+    u.uColorationSaturationBoost.value = Math.max(0, Number(this.params.colorationSaturationBoost) || 0);
+    u.uColorationFalloffStart.value = Math.max(0, Number(this.params.colorationFalloffStart) || 0);
     u.uColorationFalloffEnd.value = Math.max(
-      u.uColorationFalloffStart.value + 1e-5,
-      Number(this.params.colorationFalloffEnd) || 0.02
+      u.uColorationFalloffStart.value + 0.001,
+      Number(this.params.colorationFalloffEnd) || 0.35,
     );
     u.uColorationFalloffPower.value = Math.max(0.01, Number(this.params.colorationFalloffPower) || 1);
-    u.uColorationEnergyGain.value = Math.max(0, Number(this.params.colorationEnergyGain) || 0);
-    u.uColorationSaturation.value = Number(this.params.colorationSaturation) || 0;
-    u.uColorationSaturationBoost.value = Number(this.params.colorationSaturationBoost) || 0;
-    u.uColorationDarken.value = Math.max(0, Number(this.params.colorationDarken) || 0);
-    u.uColorationBrighten.value = Number(this.params.colorationBrighten) || 0;
-    u.uColorationPeakPreserve.value = clamp01(Number(this.params.colorationPeakPreserve) ?? 1);
-    u.uColorationReflectivity.value = Math.max(0, Number(this.params.colorationReflectivity) || 0);
-    u.uColorationChromaCurve.value = Math.max(0.01, Number(this.params.colorationChromaCurve) || 1);
-    u.uColorationAchromaticMix.value = clamp01(Number(this.params.colorationAchromaticMix) || 0);
-    u.uColorationHueShift.value = Number(this.params.colorationHueShift) || 0;
+    u.uColorationEnergyGain.value = Math.max(0, Number(this.params.colorationEnergyGain) || 1);
+    this._lightBufferUniformsDirty = true;
     // Linear HDR refactor (Phase 0): the lighting pass must emit unclamped linear light.
     // Tone mapping is owned by ColorCorrectionEffectV2; we hard-coerce these to safe values
     // regardless of stored params so legacy scenes that set ACES/Reinhard here stop double-applying.
@@ -1151,46 +1152,20 @@ export class LightingEffectV2 {
         },
         {
           name: 'colorationIntensity',
-          label: 'Colour intensity & mix',
+          label: 'Lamp colour (HDR radiance buffer)',
           type: 'folder',
           advanced: true,
           expanded: true,
           parameters: [
-            'colorationStrength',
             'colorationMixScale',
-            'colorationMixPower',
             'colorationMaxMix',
-            'colorationEnergyGain',
-            'colorationChromaCurve',
-            'colorationAchromaticMix',
-          ],
-        },
-        {
-          name: 'colorationFalloff',
-          label: 'Colour falloff softness',
-          type: 'folder',
-          advanced: true,
-          expanded: true,
-          parameters: [
+            'colorationStrength',
+            'colorationReflectivity',
+            'colorationSaturationBoost',
             'colorationFalloffStart',
             'colorationFalloffEnd',
             'colorationFalloffPower',
-          ],
-        },
-        {
-          name: 'colorationColor',
-          label: 'Colour look (sat / dark / hue)',
-          type: 'folder',
-          advanced: true,
-          expanded: true,
-          parameters: [
-            'colorationSaturation',
-            'colorationSaturationBoost',
-            'colorationDarken',
-            'colorationBrighten',
-            'colorationPeakPreserve',
-            'colorationHueShift',
-            'colorationReflectivity',
+            'colorationEnergyGain',
           ],
         },
         {
@@ -1420,12 +1395,21 @@ export class LightingEffectV2 {
         },
         colorationStrength: {
           type: 'slider',
+          min: 1,
+          max: 12,
+          step: 0.1,
+          default: 4.0,
+          label: 'Coloration strength',
+          tooltip: 'How much lamp hue is mixed into illumination (1 = full Foundry CI colour on the beam; does not change brightness).',
+        },
+        colorationReflectivity: {
+          type: 'slider',
           min: 0,
-          max: 8,
-          step: 0.05,
-          default: 1.0,
-          label: 'Tint strength',
-          tooltip: 'Overall tint vs Foundry Color Intensity buffer mix.',
+          max: 1,
+          step: 0.01,
+          default: 0.0,
+          label: 'Coloration reflectivity',
+          tooltip: '0 = vivid lamp hue on stone; 1 = tint follows albedo luma (weaker on dark cobble). Use 0 for torches.',
         },
         colorationMixScale: {
           type: 'slider',
@@ -1433,8 +1417,8 @@ export class LightingEffectV2 {
           max: 4,
           step: 0.05,
           default: 1.0,
-          label: 'Buffer mix scale',
-          tooltip: 'Multiplies chroma mix from the light buffer before other curves.',
+          label: 'CI buffer scale',
+          tooltip: 'Scales Foundry Color Intensity in the buffer (1.0 = full CI from the lamp; 0.4 = 40% max saturation).',
         },
         colorationMixPower: {
           type: 'slider',
@@ -1451,8 +1435,8 @@ export class LightingEffectV2 {
           max: 1,
           step: 0.01,
           default: 1.0,
-          label: 'Max tint weight',
-          tooltip: 'Hard cap on gel weight [0..1].',
+          label: 'Max CI mix',
+          tooltip: 'Caps how much Foundry Color Intensity can push the buffer toward lamp hue [0..1].',
         },
         colorationEnergyGain: {
           type: 'slider',
@@ -1460,8 +1444,8 @@ export class LightingEffectV2 {
           max: 16,
           step: 0.1,
           default: 1.0,
-          label: 'Falloff energy gain',
-          tooltip: 'Scales lamp alpha used for colour falloff only (not photometric brightness).',
+          label: 'Colour energy gain',
+          tooltip: 'Scales lamp energy before the colour penumbra smoothstep (extends colour toward the rim when >1).',
         },
         colorationFalloffStart: {
           type: 'slider',
@@ -1469,17 +1453,17 @@ export class LightingEffectV2 {
           max: 2,
           step: 0.005,
           default: 0.0,
-          label: 'Falloff start',
-          tooltip: 'smoothstep low edge on lamp energy — raise to push colour inward from the rim.',
+          label: 'Colour falloff start',
+          tooltip: 'Lamp-energy level where colour tint begins (smoothstep low edge).',
         },
         colorationFalloffEnd: {
           type: 'slider',
           min: 0.001,
           max: 4,
           step: 0.01,
-          default: 0.02,
-          label: 'Falloff end',
-          tooltip: 'smoothstep high edge — wider = softer colour boundary (try 0.05–0.5).',
+          default: 0.35,
+          label: 'Colour falloff end',
+          tooltip: 'Lamp-energy level where CI reaches full strength. Raise (e.g. 0.5–0.8) for softer colour penumbra; must stay below typical lamp core energy or colour stays weak in the centre.',
         },
         colorationFalloffPower: {
           type: 'slider',
@@ -1487,8 +1471,8 @@ export class LightingEffectV2 {
           max: 12,
           step: 0.05,
           default: 1.0,
-          label: 'Falloff curve',
-          tooltip: 'Exponent on falloff mask after smoothstep ( >1 = softer penumbra ).',
+          label: 'Colour falloff curve',
+          tooltip: 'Exponent on the colour penumbra mask (>1 = softer).',
         },
         colorationSaturation: {
           type: 'slider',
@@ -1506,7 +1490,7 @@ export class LightingEffectV2 {
           step: 0.05,
           default: 0.0,
           label: 'Saturation boost',
-          tooltip: 'Extra saturation in the compose tint path.',
+          tooltip: 'Pushes chroma after the lamp tint (0.5–1.5 typical). Does not change lamp brightness.',
         },
         colorationDarken: {
           type: 'slider',
@@ -1543,15 +1527,6 @@ export class LightingEffectV2 {
           default: 0.0,
           label: 'Hue shift',
           tooltip: 'Rotates lamp hue before tint (-1..1 = full wheel).',
-        },
-        colorationReflectivity: {
-          type: 'slider',
-          min: 0,
-          max: 4,
-          step: 0.05,
-          default: 0.0,
-          label: 'Tint vs albedo',
-          tooltip: 'Couples tint strength to surface albedo luma.',
         },
         colorationChromaCurve: {
           type: 'slider',
@@ -1812,23 +1787,13 @@ export class LightingEffectV2 {
         uAmbientDayScale:    { value: 1.3 },
         uAmbientNightScale:  { value: 0.85 },
         uMinIlluminationScale: { value: 1.0 },
-        uColorationStrength: { value: 1.0 },
-        uColorationMixScale: { value: 1.0 },
-        uColorationMixPower: { value: 1.0 },
-        uColorationMaxMix: { value: 1.0 },
+        uChromaticRadianceGain: { value: 4.0 },
+        uColorationReflectivity: { value: 0.0 },
+        uColorationSaturationBoost: { value: 0.0 },
         uColorationFalloffStart: { value: 0.0 },
-        uColorationFalloffEnd: { value: 0.02 },
+        uColorationFalloffEnd: { value: 0.35 },
         uColorationFalloffPower: { value: 1.0 },
         uColorationEnergyGain: { value: 1.0 },
-        uColorationSaturation: { value: 0.0 },
-        uColorationSaturationBoost: { value: 0.0 },
-        uColorationDarken: { value: 0.0 },
-        uColorationBrighten: { value: 0.0 },
-        uColorationPeakPreserve: { value: 1.0 },
-        uColorationReflectivity: { value: 0.0 },
-        uColorationChromaCurve: { value: 1.0 },
-        uColorationAchromaticMix: { value: 0.0 },
-        uColorationHueShift: { value: 0.0 },
         uComposeToneExposure: { value: 1.0 },
         uCombinedShadowEffectStrength: { value: 1.0 },
         uCloudShadowAmbientInfluence: { value: 1.0 },
@@ -1880,6 +1845,7 @@ export class LightingEffectV2 {
         precision highp int;
 
         ${GLSL_DECODE_OUTDOORS_MASK}
+        ${MSA_LIGHT_RADIANCE_GLSL}
 
         uniform sampler2D tScene;
         uniform sampler2D tLightSources;
@@ -1923,23 +1889,13 @@ export class LightingEffectV2 {
         uniform float uAmbientDayScale;
         uniform float uAmbientNightScale;
         uniform float uMinIlluminationScale;
-        uniform float uColorationStrength;
-        uniform float uColorationMixScale;
-        uniform float uColorationMixPower;
-        uniform float uColorationMaxMix;
+        uniform float uChromaticRadianceGain;
+        uniform float uColorationReflectivity;
+        uniform float uColorationSaturationBoost;
         uniform float uColorationFalloffStart;
         uniform float uColorationFalloffEnd;
         uniform float uColorationFalloffPower;
         uniform float uColorationEnergyGain;
-        uniform float uColorationSaturation;
-        uniform float uColorationSaturationBoost;
-        uniform float uColorationDarken;
-        uniform float uColorationBrighten;
-        uniform float uColorationPeakPreserve;
-        uniform float uColorationReflectivity;
-        uniform float uColorationChromaCurve;
-        uniform float uColorationAchromaticMix;
-        uniform float uColorationHueShift;
         uniform float uComposeToneExposure;
         uniform float uCombinedShadowEffectStrength;
         uniform float uCloudShadowAmbientInfluence;
@@ -1997,64 +1953,6 @@ export class LightingEffectV2 {
           float s = max(strength, 1.0);
           float dark = 1.0 - clamp(lit01, 0.0, 1.0);
           return 1.0 - min(1.0, dark * s);
-        }
-
-        float rgbSaturation(vec3 c) {
-          float mn = min(min(c.r, c.g), c.b);
-          float mx = max(max(c.r, c.g), c.b);
-          return (mx > 1e-4) ? clamp((mx - mn) / mx, 0.0, 1.0) : 0.0;
-        }
-
-        vec3 msaSaturateRgb(vec3 c, float satMul) {
-          float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
-          return mix(vec3(luma), c, max(satMul, 0.0));
-        }
-
-        vec3 msaRgbToHsl(vec3 c) {
-          float mx = max(c.r, max(c.g, c.b));
-          float mn = min(c.r, min(c.g, c.b));
-          float h = 0.0;
-          float s = 0.0;
-          float l = (mx + mn) * 0.5;
-          if (mx > mn + 1e-6) {
-            float d = mx - mn;
-            s = (l > 0.5) ? (d / (2.0 - mx - mn)) : (d / (mx + mn));
-            if (mx == c.r) h = (c.g - c.b) / d + (c.g < c.b ? 6.0 : 0.0);
-            else if (mx == c.g) h = (c.b - c.r) / d + 2.0;
-            else h = (c.r - c.g) / d + 4.0;
-            h /= 6.0;
-          }
-          return vec3(h, s, l);
-        }
-
-        float msaHue2rgb(float p, float q, float t) {
-          if (t < 0.0) t += 1.0;
-          if (t > 1.0) t -= 1.0;
-          if (t < 1.0 / 6.0) return p + (q - p) * 6.0 * t;
-          if (t < 0.5) return q;
-          if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
-          return p;
-        }
-
-        vec3 msaHslToRgb(vec3 hsl) {
-          float h = hsl.x;
-          float s = hsl.y;
-          float l = hsl.z;
-          if (s <= 1e-6) return vec3(l);
-          float q = (l < 0.5) ? (l * (1.0 + s)) : (l + s - l * s);
-          float p = 2.0 * l - q;
-          return vec3(
-            msaHue2rgb(p, q, h + 1.0 / 3.0),
-            msaHue2rgb(p, q, h),
-            msaHue2rgb(p, q, h - 1.0 / 3.0)
-          );
-        }
-
-        vec3 msaShiftHue(vec3 c, float shift01) {
-          if (abs(shift01) < 1e-5) return c;
-          vec3 hsl = msaRgbToHsl(clamp(c, 0.0, 1.0));
-          hsl.x = fract(hsl.x + shift01);
-          return clamp(msaHslToRgb(hsl), 0.0, 1.0);
         }
 
         void main() {
@@ -2232,20 +2130,26 @@ export class LightingEffectV2 {
           visW = mix(visW, visRestrict, restrictLightRoof * clamp(uApplyRoofOcclusionToWindow, 0.0, 1.0));
           vec3 srcSafe = srcLights * visS;
           vec3 winSafe = winLights * visW;
-          // Foundry HDR buffer: max-blended lamp energy (alpha=0 clear). Compose baseline = 1.0 direct fill.
+          // HDR buffer: RGB = hue×CI×falloff; A = mag (brightness only in alpha for direct).
+          vec3 lampChroma = srcSafe;
           float lampEnergyA = max(srcSample.a, 0.0) * visS;
-          // Alpha = illumination envelope; RGB = chroma direction × CI mix (neutral lamps write 0).
-          float colorMixRaw = clamp(max(max(srcSafe.r, srcSafe.g), srcSafe.b), 0.0, 1.0);
-          float colorMix = pow(
-            clamp(colorMixRaw * max(uColorationMixScale, 0.0), 0.0, 8.0),
-            max(uColorationChromaCurve, 0.01)
-          );
-          colorMix = mix(colorMix, 1.0, clamp(uColorationAchromaticMix, 0.0, 1.0));
-          colorMix = min(colorMix, clamp(uColorationMaxMix, 0.0, 1.0));
-          vec3 lampColor = (colorMixRaw > 1e-5) ? (srcSafe / colorMixRaw) : vec3(1.0);
           float lampEnergy = lampEnergyA;
           float lightIVisible = lampEnergyA;
-          vec3 directFromSources = vec3(1.0 + lampEnergyA);
+          float chromaGain = max(uChromaticRadianceGain, 1.0);
+          float chromaMag = length(lampChroma);
+          vec3 lampHue = (chromaMag > 1e-5) ? (lampChroma / chromaMag) : vec3(1.0);
+          // ciBase = Foundry CI for this lamp (constant in the disk); was chromaMag/mag which
+          // ignored falloff and made colour full-strength until the mesh edge (binary ring).
+          float ciBase = clamp(chromaMag / max(lampEnergyA, 1e-4), 0.0, 1.0);
+          float eGel = lampEnergyA * max(uColorationEnergyGain, 0.0);
+          float gelEnd = max(uColorationFalloffEnd, uColorationFalloffStart + 0.001);
+          float gelSpatial = smoothstep(uColorationFalloffStart, gelEnd, eGel);
+          gelSpatial = pow(clamp(gelSpatial, 0.0, 1.0), max(uColorationFalloffPower, 0.01));
+          float gel01 = ciBase * gelSpatial;
+          float colorMix = clamp(gel01 * chromaGain, 0.0, 3.0);
+          // Neutral lift on all channels + hue term on direct (additive, not hue*vec3 lift).
+          vec3 lift = vec3(1.0 + lampEnergyA);
+          vec3 directFromSources = lift + lampHue * lampEnergyA * colorMix;
           vec3 directLight = directFromSources;
 
           // Darkness punch: strong nearby lights reduce the effective darkness
@@ -2475,38 +2379,16 @@ export class LightingEffectV2 {
           // Apply illumination to albedo, then window glow (token-style multiplicative boost).
           // litColor *= (1 + win) preserves surface hue/texture vs additive flat wash.
           vec3 litColor = baseColor.rgb * totalIllumination;
-          float lampColorIntensity = min(
-            pow(colorMix, max(uColorationMixPower, 0.01)) * max(uColorationStrength, 0.0),
-            clamp(uColorationMaxMix, 0.0, 1.0)
-          );
-          if (lampColorIntensity > 1e-5) {
-            vec3 lumaW = vec3(0.2126, 0.7152, 0.0722);
-            float energyForTint = lampEnergyA * max(uColorationEnergyGain, 0.0);
-            float fallMask = smoothstep(
-              uColorationFalloffStart,
-              max(uColorationFalloffEnd, uColorationFalloffStart + 1e-5),
-              energyForTint
-            );
-            fallMask = pow(clamp(fallMask, 0.0, 1.0), max(uColorationFalloffPower, 0.01));
-            float gelW = lampColorIntensity * fallMask;
-            if (uColorationReflectivity > 1e-4) {
-              float albedoL = clamp(dot(baseColor.rgb, lumaW), 0.0, 4.0);
-              gelW *= mix(1.0, clamp(albedoL * uColorationReflectivity, 0.0, 4.0), clamp(uColorationReflectivity, 0.0, 1.0));
-            }
-            vec3 lampCol = msaShiftHue(clamp(lampColor, 0.0, 1.0), uColorationHueShift);
-            float satMul = 1.0 + uColorationSaturation + uColorationSaturationBoost;
-            lampCol = clamp(msaSaturateRgb(lampCol, satMul), 0.0, 1.0);
-            float peak0 = max(max(litColor.r, litColor.g), litColor.b);
-            if (gelW > 1e-5 && peak0 > 1e-5) {
-              float Y = dot(litColor, lumaW);
-              float lcL = max(dot(lampCol, lumaW), 1e-4);
-              vec3 towards = lampCol * (Y / lcL);
-              vec3 newLit = mix(litColor, towards, gelW);
-              float peak1 = max(max(newLit.r, newLit.g), newLit.b);
-              float peakScale = mix(1.0, peak0 / max(peak1, 1e-4), clamp(uColorationPeakPreserve, 0.0, 1.0));
-              newLit *= peakScale;
-              float brightMul = 1.0 + uColorationBrighten * gelW - uColorationDarken * gelW;
-              litColor = newLit * max(brightMul, 0.0);
+          // Push albedo toward lamp hue (luma preserved); strength tracks CI × coloration strength.
+          if (chromaMag > 1e-5 && gel01 > 1e-4) {
+            float reflPB = max(perceivedBrightness(baseColor.rgb), 0.05);
+            float colorReflect = mix(1.0, reflPB, clamp(uColorationReflectivity, 0.0, 1.0));
+            float tintW = 1.0 - exp(-gel01 * chromaGain * colorReflect);
+            litColor = msaLightLumaPreserveTint(litColor, lampHue, tintW);
+            float satBoost = max(uColorationSaturationBoost, 0.0);
+            if (satBoost > 0.001) {
+              float litL = dot(litColor, MSA_LUMA_W);
+              litColor = mix(vec3(litL), litColor, 1.0 + satBoost * tintW);
             }
           }
           {
@@ -2671,26 +2553,46 @@ export class LightingEffectV2 {
   }
 
   /**
-   * Push `params.lightIntensity` into every AmbientLight `ThreeLightSource` + player torch /
-   * flashlight meshes so `_lightRT` accumulates brighter lamps without a compose multiply.
+   * Push HDR radiance + coloration uniforms into light meshes (`ThreeLightSource`, torch, glow).
    * @private
    */
-  _pushComposeLightGainToFoundryMeshes() {
+  _pushLightBufferUniformsToMeshes() {
     if (!this._initialized) return;
     const g = Math.max(0, Number(this.params.lightIntensity));
-    const safe = Number.isFinite(g) ? g : 0;
-    if (this._lastPushedLightGain === safe) return;
-    this._lastPushedLightGain = safe;
+    const safeGain = Number.isFinite(g) ? g : 0;
+    const mixScale = Math.max(0, Number(this.params.colorationMixScale) || 0);
+    const maxMix = clamp01(Number(this.params.colorationMaxMix) ?? 1);
+    const sig = `${safeGain}|${mixScale}|${maxMix}`;
+    if (this._lastLightBufferUniformSig === sig && !this._lightBufferUniformsDirty) return;
+    this._lastLightBufferUniformSig = sig;
+    this._lightBufferUniformsDirty = false;
+
+    const apply = (uniforms) => {
+      if (!uniforms) return;
+      if (uniforms.uComposeLightGain) uniforms.uComposeLightGain.value = safeGain;
+      if (uniforms.uColorationMixScale) uniforms.uColorationMixScale.value = mixScale;
+      if (uniforms.uColorationMaxMix) uniforms.uColorationMaxMix.value = maxMix;
+    };
+
+    const resyncColoration = (light) => {
+      if (!light || typeof light._syncColorationUniforms !== 'function') return;
+      const doc = typeof light._resolveLiveLightDoc === 'function'
+        ? (light._resolveLiveLightDoc() || light.document)
+        : light.document;
+      const cfg = doc?.config && typeof doc.config === 'object' ? doc.config : {};
+      light._syncColorationUniforms(cfg);
+    };
+
     for (let i = 0; i < this._lightList.length; i++) {
       const light = this._lightList[i];
-      const u = light?.material?.uniforms?.uComposeLightGain;
-      if (u) u.value = safe;
+      apply(light?.material?.uniforms);
+      resyncColoration(light);
     }
     try {
       const pl = window.MapShine?.playerLightEffectV2;
       for (const src of [pl?._torchLightSource, pl?._flashlightLightSource]) {
-        const u = src?.material?.uniforms?.uComposeLightGain;
-        if (u) u.value = safe;
+        apply(src?.material?.uniforms);
+        resyncColoration(src);
       }
     } catch (_) {
       /* noop */
@@ -2851,7 +2753,7 @@ export class LightingEffectV2 {
     this._perspectiveRefreshDirty = true;
     this._lastPushedLightGain = -1;
     this._lastFalloffTuningSig = null;
-    this._pushComposeLightGainToFoundryMeshes();
+    this._pushLightBufferUniformsToMeshes();
     this._pushPointLightFalloffUniforms();
     log.info(`LightingEffectV2: synced ${this._lights.size} lights, ${this._darknessSources.size} darkness sources`);
     this._endPerfSpan(_perfToken);
@@ -3439,7 +3341,7 @@ export class LightingEffectV2 {
         ? (performance.now() / 1000)
         : 0
     );
-    this._pushComposeLightGainToFoundryMeshes();
+    this._pushLightBufferUniformsToMeshes();
     this._pushPointLightFalloffUniforms();
     this._endPerfSpan(_perfToken);
 
@@ -3638,7 +3540,7 @@ export class LightingEffectV2 {
     this._endPerfSpan(_perfToken);
 
     _perfToken = this._beginPerfSpan('pushLightGain', 'render', { cpuOnly: true });
-    this._pushComposeLightGainToFoundryMeshes();
+    this._pushLightBufferUniformsToMeshes();
     this._pushPointLightFalloffUniforms();
     this._endPerfSpan(_perfToken);
 

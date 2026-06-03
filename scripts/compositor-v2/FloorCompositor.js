@@ -1393,90 +1393,78 @@ export class FloorCompositor {
    * @private
    */
   _runPostMergeStylizationPasses(inputRT, pickOtherPost, _profiling = false) {
-    let currentInput = inputRT;
+    // Fullscreen post on the merged composite (same as ColorCorrection post-merge):
+    // do not scissor — autoClear + a zero-area or stale scissor can leave the RT black.
+    return withoutSceneScissor(this.renderer, () => {
+      let currentInput = inputRT;
 
-    if (resolveEffectEnabled(this._sharpenEffect)) {
-      const shOut = pickOtherPost();
-      this._profileEffectCall('sharpen.postMerge', 'render', () => {
-        withSceneScissor(this.renderer, () => {
+      if (resolveEffectEnabled(this._sharpenEffect)) {
+        const shOut = pickOtherPost();
+        this._profileEffectCall('sharpen.postMerge', 'render', () => {
           this._sharpenEffect.render(this.renderer, currentInput, shOut);
-        });
-      }, 'SharpenEffectV2 postMerge render');
-      currentInput = shOut;
-    }
+        }, 'SharpenEffectV2 postMerge render');
+        currentInput = shOut;
+      }
 
-    if (resolveEffectEnabled(this._dotScreenEffect)) {
-      const dsOut = pickOtherPost();
-      let wrote = false;
-      this._profileEffectCall('dotScreen.postMerge', 'render', () => {
-        wrote = withSceneScissor(this.renderer, () =>
-          this._dotScreenEffect.render(this.renderer, this.camera, currentInput, dsOut),
-        );
-      }, 'DotScreenEffectV2 postMerge render');
-      if (wrote) currentInput = dsOut;
-    }
-    if (resolveEffectEnabled(this._halftoneEffect)) {
-      const htOut = pickOtherPost();
-      let wrote = false;
-      this._profileEffectCall('halftone.postMerge', 'render', () => {
-        wrote = withSceneScissor(this.renderer, () =>
-          this._halftoneEffect.render(this.renderer, this.camera, currentInput, htOut),
-        );
-      }, 'HalftoneEffectV2 postMerge render');
-      if (wrote) currentInput = htOut;
-    }
-    if (resolveEffectEnabled(this._asciiEffect)) {
-      const ascOut = pickOtherPost();
-      let wrote = false;
-      this._profileEffectCall('ascii.postMerge', 'render', () => {
-        wrote = withSceneScissor(this.renderer, () =>
-          this._asciiEffect.render(this.renderer, this.camera, currentInput, ascOut),
-        );
-      }, 'AsciiEffectV2 postMerge render');
-      if (wrote) currentInput = ascOut;
-    }
-    if (resolveEffectEnabled(this._dazzleOverlayEffect)) {
-      const dzOut = pickOtherPost();
-      let wrote = false;
-      this._profileEffectCall('dazzleOverlay.postMerge', 'render', () => {
-        wrote = withSceneScissor(this.renderer, () =>
-          this._dazzleOverlayEffect.render(this.renderer, this.camera, currentInput, dzOut),
-        );
-      }, 'DazzleOverlayEffectV2 postMerge render');
-      if (wrote) currentInput = dzOut;
-    }
-    if (resolveEffectEnabled(this._visionModeEffect)) {
-      const vmOut = pickOtherPost();
-      let wrote = false;
-      this._profileEffectCall('visionMode.postMerge', 'render', () => {
-        wrote = withSceneScissor(this.renderer, () =>
-          this._visionModeEffect.render(this.renderer, this.camera, currentInput, vmOut),
-        );
-      }, 'VisionModeEffectV2 postMerge render');
-      if (wrote) currentInput = vmOut;
-    }
-    if (resolveEffectEnabled(this._invertEffect)) {
-      const invOut = pickOtherPost();
-      let wrote = false;
-      this._profileEffectCall('invert.postMerge', 'render', () => {
-        wrote = withSceneScissor(this.renderer, () =>
-          this._invertEffect.render(this.renderer, this.camera, currentInput, invOut),
-        );
-      }, 'InvertEffectV2 postMerge render');
-      if (wrote) currentInput = invOut;
-    }
-    if (resolveEffectEnabled(this._sepiaEffect)) {
-      const sepOut = pickOtherPost();
-      let wrote = false;
-      this._profileEffectCall('sepia.postMerge', 'render', () => {
-        wrote = withSceneScissor(this.renderer, () =>
-          this._sepiaEffect.render(this.renderer, this.camera, currentInput, sepOut),
-        );
-      }, 'SepiaEffectV2 postMerge render');
-      if (wrote) currentInput = sepOut;
-    }
+      if (resolveEffectEnabled(this._dotScreenEffect)) {
+        const dsOut = pickOtherPost();
+        let wrote = false;
+        this._profileEffectCall('dotScreen.postMerge', 'render', () => {
+          wrote = !!this._dotScreenEffect.render(this.renderer, this.camera, currentInput, dsOut);
+        }, 'DotScreenEffectV2 postMerge render');
+        if (wrote) currentInput = dsOut;
+      }
+      if (resolveEffectEnabled(this._halftoneEffect)) {
+        const htOut = pickOtherPost();
+        let wrote = false;
+        this._profileEffectCall('halftone.postMerge', 'render', () => {
+          wrote = !!this._halftoneEffect.render(this.renderer, this.camera, currentInput, htOut);
+        }, 'HalftoneEffectV2 postMerge render');
+        if (wrote) currentInput = htOut;
+      }
+      if (resolveEffectEnabled(this._asciiEffect)) {
+        const ascOut = pickOtherPost();
+        let wrote = false;
+        this._profileEffectCall('ascii.postMerge', 'render', () => {
+          wrote = !!this._asciiEffect.render(this.renderer, this.camera, currentInput, ascOut);
+        }, 'AsciiEffectV2 postMerge render');
+        if (wrote) currentInput = ascOut;
+      }
+      if (resolveEffectEnabled(this._dazzleOverlayEffect)) {
+        const dzOut = pickOtherPost();
+        let wrote = false;
+        this._profileEffectCall('dazzleOverlay.postMerge', 'render', () => {
+          wrote = !!this._dazzleOverlayEffect.render(this.renderer, this.camera, currentInput, dzOut);
+        }, 'DazzleOverlayEffectV2 postMerge render');
+        if (wrote) currentInput = dzOut;
+      }
+      if (resolveEffectEnabled(this._visionModeEffect)) {
+        const vmOut = pickOtherPost();
+        let wrote = false;
+        this._profileEffectCall('visionMode.postMerge', 'render', () => {
+          wrote = !!this._visionModeEffect.render(this.renderer, this.camera, currentInput, vmOut);
+        }, 'VisionModeEffectV2 postMerge render');
+        if (wrote) currentInput = vmOut;
+      }
+      if (resolveEffectEnabled(this._invertEffect)) {
+        const invOut = pickOtherPost();
+        let wrote = false;
+        this._profileEffectCall('invert.postMerge', 'render', () => {
+          wrote = !!this._invertEffect.render(this.renderer, this.camera, currentInput, invOut);
+        }, 'InvertEffectV2 postMerge render');
+        if (wrote) currentInput = invOut;
+      }
+      if (resolveEffectEnabled(this._sepiaEffect)) {
+        const sepOut = pickOtherPost();
+        let wrote = false;
+        this._profileEffectCall('sepia.postMerge', 'render', () => {
+          wrote = !!this._sepiaEffect.render(this.renderer, this.camera, currentInput, sepOut);
+        }, 'SepiaEffectV2 postMerge render');
+        if (wrote) currentInput = sepOut;
+      }
 
-    return currentInput;
+      return currentInput;
+    });
   }
 
   /**
@@ -4699,6 +4687,12 @@ export class FloorCompositor {
     }
     try { this._treeEffect?.syncBuildingShadowUniforms?.(); } catch (err) {
       log.warn('TreeEffectV2 syncBuildingShadowUniforms threw, skipping:', err);
+    }
+    try { this._bushEffect?.syncPaintedShadowUniforms?.(); } catch (err) {
+      log.warn('BushEffectV2 syncPaintedShadowUniforms threw, skipping:', err);
+    }
+    try { this._treeEffect?.syncPaintedShadowUniforms?.(); } catch (err) {
+      log.warn('TreeEffectV2 syncPaintedShadowUniforms threw, skipping:', err);
     }
 
     try {
@@ -8512,6 +8506,12 @@ export class FloorCompositor {
       }
       try { this._treeEffect?.syncBuildingShadowUniforms?.(); } catch (err) {
         log.warn('TreeEffectV2 pre-vegetation syncBuildingShadowUniforms threw, skipping:', err);
+      }
+      try { this._bushEffect?.syncPaintedShadowUniforms?.(); } catch (err) {
+        log.warn('BushEffectV2 pre-vegetation syncPaintedShadowUniforms threw, skipping:', err);
+      }
+      try { this._treeEffect?.syncPaintedShadowUniforms?.(); } catch (err) {
+        log.warn('TreeEffectV2 pre-vegetation syncPaintedShadowUniforms threw, skipping:', err);
       }
       try { this._bushEffect?.syncCloudShadowUniforms?.(); } catch (_) {}
       try { this._treeEffect?.syncCloudShadowUniforms?.(); } catch (_) {}

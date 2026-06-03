@@ -771,61 +771,7 @@ export class EffectComposer {
       } catch (_) {}
     }
 
-    // ── Per-frame stylistic effect gate ─────────────────────────────────
-    // Pending-param flushes or stale Tweakpane memory can re-enable ASCII,
-    // dot screen, halftone, etc. between frames. Re-apply the scene-flag
-    // authoritative gate every frame so a single rogue write cannot persist.
-    try {
-      const _fc = this._floorCompositorV2;
-      if (_fc) {
-        const _scene = globalThis.canvas?.scene;
-        const _allSettings = sceneSettings.getSceneSettings(_scene);
-        const _mm = _allSettings?.mapMaker?.effects || {};
-        const _gm = _allSettings?.gm?.effects || {};
-        const _stylisticGates = [
-          ['ascii', '_asciiEffect'],
-          ['dotScreen', '_dotScreenEffect'],
-          ['halftone', '_halftoneEffect'],
-          ['visionMode', '_visionModeEffect'],
-          ['invert', '_invertEffect'],
-          ['sepia', '_sepiaEffect'],
-          ['dazzleOverlay', '_dazzleOverlayEffect'],
-        ];
-        for (const [effectId, fcKey] of _stylisticGates) {
-          const explicitOn = resolveStylisticEnabled(effectId, _mm, _gm);
-          const eff = _fc[fcKey];
-          if (!eff) continue;
-          if (typeof eff.enabled !== 'undefined') eff.enabled = explicitOn;
-          if (eff.params && Object.prototype.hasOwnProperty.call(eff.params, 'enabled')) {
-            eff.params.enabled = explicitOn;
-          }
-        }
-        if (window.MapShine?.__v2FrameTraceEnabled === true) {
-          const gateDiag = {};
-          for (const [effectId, fcKey] of _stylisticGates) {
-            const explicitOn = _mm[effectId]?.enabled === true || _gm[effectId]?.enabled === true;
-            const eff = _fc?.[fcKey];
-            gateDiag[effectId] = {
-              explicitOn,
-              resolvedEnabled: resolveStylisticEnabled(effectId, _mm, _gm),
-              enabled: typeof eff?.enabled === 'boolean' ? !!eff.enabled : null,
-              paramsEnabled: typeof eff?.params?.enabled === 'boolean' ? !!eff.params.enabled : null,
-            };
-          }
-          const entry = {
-            frame: Number(timeInfo?.frameCount ?? -1),
-            gateDiag,
-          };
-          if (!Array.isArray(window.MapShine.__v2FrameTraceStylistic)) {
-            window.MapShine.__v2FrameTraceStylistic = [];
-          }
-          window.MapShine.__v2FrameTraceStylistic.push(entry);
-          if (window.MapShine.__v2FrameTraceStylistic.length > 32) {
-            window.MapShine.__v2FrameTraceStylistic.shift();
-          }
-        }
-      }
-    } catch (_) {}
+    this._applyStylisticEffectGate(timeInfo);
 
     // ── Render: FloorCompositor only (no effects, no overlay) ─────────
     const _compositorV2 = this._getFloorCompositorV2();
@@ -1090,6 +1036,65 @@ export class EffectComposer {
   }
 
   /**
+   * Re-apply scene-flag authoritative enablement for stylistic fullscreen passes.
+   * @param {object|null} [timeInfo]
+   * @private
+   */
+  _applyStylisticEffectGate(timeInfo = null) {
+    try {
+      const _fc = this._floorCompositorV2;
+      if (!_fc) return;
+
+      const _scene = globalThis.canvas?.scene;
+      const _allSettings = sceneSettings.getSceneSettings(_scene);
+      const _mm = _allSettings?.mapMaker?.effects || {};
+      const _gm = _allSettings?.gm?.effects || {};
+      const _stylisticGates = [
+        ['ascii', '_asciiEffect'],
+        ['dotScreen', '_dotScreenEffect'],
+        ['halftone', '_halftoneEffect'],
+        ['visionMode', '_visionModeEffect'],
+        ['invert', '_invertEffect'],
+        ['sepia', '_sepiaEffect'],
+        ['dazzleOverlay', '_dazzleOverlayEffect'],
+      ];
+      for (const [effectId, fcKey] of _stylisticGates) {
+        const explicitOn = resolveStylisticEnabled(effectId, _mm, _gm);
+        const eff = _fc[fcKey];
+        if (!eff) continue;
+        if (typeof eff.enabled !== 'undefined') eff.enabled = explicitOn;
+        if (eff.params && Object.prototype.hasOwnProperty.call(eff.params, 'enabled')) {
+          eff.params.enabled = explicitOn;
+        }
+      }
+      if (window.MapShine?.__v2FrameTraceEnabled === true) {
+        const gateDiag = {};
+        for (const [effectId, fcKey] of _stylisticGates) {
+          const explicitOn = _mm[effectId]?.enabled === true || _gm[effectId]?.enabled === true;
+          const eff = _fc?.[fcKey];
+          gateDiag[effectId] = {
+            explicitOn,
+            resolvedEnabled: resolveStylisticEnabled(effectId, _mm, _gm),
+            enabled: typeof eff?.enabled === 'boolean' ? !!eff.enabled : null,
+            paramsEnabled: typeof eff?.params?.enabled === 'boolean' ? !!eff.params.enabled : null,
+          };
+        }
+        const entry = {
+          frame: Number(timeInfo?.frameCount ?? -1),
+          gateDiag,
+        };
+        if (!Array.isArray(window.MapShine.__v2FrameTraceStylistic)) {
+          window.MapShine.__v2FrameTraceStylistic = [];
+        }
+        window.MapShine.__v2FrameTraceStylistic.push(entry);
+        if (window.MapShine.__v2FrameTraceStylistic.length > 32) {
+          window.MapShine.__v2FrameTraceStylistic.shift();
+        }
+      }
+    } catch (_) {}
+  }
+
+  /**
    * V2 warmup path.
    * Executes a single FloorCompositor V2 render to trigger lazy initialization.
    * @param {function} [onProgress]
@@ -1103,6 +1108,7 @@ export class EffectComposer {
     const frameKey = window.MapShine?.renderLoop?.frameCount ?? null;
     const timeInfo = this.timeManager.update(frameKey);
     const compositor = this._getFloorCompositorV2();
+    this._applyStylisticEffectGate(timeInfo);
     compositor.render({
       floorStack: window.MapShine?.floorStack ?? null,
       timeInfo,

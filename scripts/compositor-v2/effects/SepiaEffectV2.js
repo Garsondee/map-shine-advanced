@@ -1,4 +1,5 @@
 import { createLogger } from '../../core/log.js';
+import { resolveEffectEnabled } from '../../effects/resolve-effect-enabled.js';
 import { MSA_POST_STYLIZE_INPUT_GLSL } from '../msa-post-stylize-input.glsl.js';
 
 const log = createLogger('SepiaEffectV2');
@@ -11,6 +12,9 @@ const log = createLogger('SepiaEffectV2');
  * Disabled by default - users opt in via control panel.
  */
 export class SepiaEffectV2 {
+  /** @type {boolean} Requires explicit enabled:true (matches scene-flag gate). */
+  static optInEnable = true;
+
   constructor() {
     this._enabled = false;
     this._initialized = false;
@@ -135,7 +139,7 @@ export class SepiaEffectV2 {
   }
 
   render(renderer, camera, inputRT, outputRT) {
-    if (!this._enabled || !this._initialized || !this._material) return false;
+    if (!resolveEffectEnabled(this) || !this._initialized || !this._material) return false;
     if (!inputRT?.texture || !outputRT) return false;
     if ((Number(this.params.strength) || 0) < 1e-4) return false;
 

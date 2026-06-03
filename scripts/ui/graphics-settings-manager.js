@@ -75,6 +75,16 @@ const V2_EFFECT_KEY_BY_ID = Object.freeze({
   'candle-flames': '_candleFlamesEffect',
 });
 
+/** Stylistic fullscreen passes default off in scene flags; client overrides default off unless set. */
+const STYLISTIC_EFFECT_IDS_DEFAULT_OFF = new Set([
+  'dotScreen',
+  'halftone',
+  'ascii',
+  'dazzleOverlay',
+  'invert',
+  'sepia',
+]);
+
 /**
  * @typedef {Object} GraphicsSettingsState
  * @property {boolean} globalDisableAll
@@ -682,6 +692,9 @@ export class GraphicsSettingsManager {
 
     const ov = this._getOverride(normalized);
     if (ov && typeof ov.enabled === 'boolean') return ov.enabled;
+
+    // Stylistic fullscreen passes are opt-in per scene; do not default them on.
+    if (STYLISTIC_EFFECT_IDS_DEFAULT_OFF.has(normalized)) return false;
 
     // Default: enabled.
     return true;

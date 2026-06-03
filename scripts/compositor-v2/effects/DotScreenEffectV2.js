@@ -11,6 +11,8 @@ const log = createLogger('DotScreenEffectV2');
  * Disabled by default - users opt in via control panel.
  */
 export class DotScreenEffectV2 {
+  static optInEnable = true;
+
   constructor() {
     this._enabled = false;
     this._initialized = false;

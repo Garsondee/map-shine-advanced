@@ -10,6 +10,8 @@ const log = createLogger('AsciiEffectV2');
  * Converts the composed scene to ASCII glyphs using a generated font atlas.
  */
 export class AsciiEffectV2 {
+  static optInEnable = true;
+
   constructor() {
     this._enabled = false;
     this._initialized = false;

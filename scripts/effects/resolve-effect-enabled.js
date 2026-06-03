@@ -26,6 +26,12 @@
 export function resolveEffectEnabled(effect) {
   if (!effect) return false;
 
+  // Stylistic opt-in passes (sepia, invert, halftone, …): schema default is off.
+  // Undefined enabled must not activate the pass — only explicit true does.
+  if (effect?.constructor?.optInEnable === true) {
+    return effect.enabled === true && effect.params?.enabled === true;
+  }
+
   // Gate 1: runtime instance flag
   if (effect.enabled === false) return false;
 

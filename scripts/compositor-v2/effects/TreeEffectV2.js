@@ -55,6 +55,17 @@ import {
   linkVegetationBuildingShadowUniforms,
 } from './vegetation-building-shadow.js';
 import {
+  VEGETATION_PAINTED_SHADOW_DEFAULTS,
+  VEGETATION_PAINTED_SHADOW_UNIFORM_GLSL,
+  VEGETATION_PAINTED_SHADOW_SAMPLE_GLSL,
+  VEGETATION_PAINTED_SHADOW_APPLY_GLSL,
+  VEGETATION_PAINTED_SHADOW_CONTROL_SCHEMA,
+  createVegetationPaintedShadowUniforms,
+  applyVegetationPaintedShadowParamsToUniforms,
+  syncVegetationPaintedShadowForEffect,
+  linkVegetationPaintedShadowUniforms,
+} from './vegetation-painted-shadow.js';
+import {
   VEGETATION_LANDSCAPE_LIGHTNING_DEFAULTS,
   VEGETATION_LANDSCAPE_LIGHTNING_CONTROL_SCHEMA,
   VEGETATION_LANDSCAPE_LIGHTNING_UNIFORM_GLSL,
@@ -191,6 +202,7 @@ export class TreeEffectV2 {
 
       ...VEGETATION_CLOUD_SHADOW_DEFAULTS,
       ...VEGETATION_BUILDING_SHADOW_DEFAULTS,
+      ...VEGETATION_PAINTED_SHADOW_DEFAULTS,
       ...VEGETATION_LANDSCAPE_LIGHTNING_DEFAULTS,
     };
 
@@ -224,6 +236,7 @@ export class TreeEffectV2 {
           'Canopy shadow': 'Darkening from a blurred, offset sample of the mask opposite the sun (same as bushes).',
           'Cloud shadows': 'Screen-space darkening from the cloud shadow map (same pass as ground tiles).',
           'Building shadows': 'Scene-space darkening from BuildingShadowsEffectV2 (matches ground structural shade).',
+          'Painted shadows': 'Scene-space darkening from PaintedShadowEffectV2 (artist-painted shadow masks).',
           'Landscape lightning': 'HDR brightening on canopy during distant strikes (Map Shine Control lightning).',
           'Edge safety': 'Pulls motion and shadow down near scene edges to hide UV seams.',
           'Hover fade': 'When hover-hide is active, the canopy fades out but the offset ground shadow stays at full strength.',
@@ -322,6 +335,18 @@ export class TreeEffectV2 {
             'buildingShadowEnabled',
             'buildingShadowDarkenStrength',
             'buildingShadowDarkenCurve',
+          ],
+        },
+        {
+          name: 'paintedShadow',
+          label: 'Painted shadows',
+          type: 'folder',
+          advanced: true,
+          expanded: false,
+          parameters: [
+            'paintedShadowEnabled',
+            'paintedShadowDarkenStrength',
+            'paintedShadowDarkenCurve',
           ],
         },
         {
@@ -726,6 +751,7 @@ export class TreeEffectV2 {
         },
         ...VEGETATION_CLOUD_SHADOW_CONTROL_SCHEMA,
         ...VEGETATION_BUILDING_SHADOW_CONTROL_SCHEMA,
+        ...VEGETATION_PAINTED_SHADOW_CONTROL_SCHEMA,
         ...VEGETATION_LANDSCAPE_LIGHTNING_CONTROL_SCHEMA,
         edgeFadeStart: {
           type: 'slider',
@@ -1039,6 +1065,7 @@ export class TreeEffectV2 {
       this._syncRoofMaskUniforms();
       applyVegetationCloudShadowParamsToUniforms(this._sharedUniforms, this.params);
       applyVegetationBuildingShadowParamsToUniforms(this._sharedUniforms, this.params);
+      applyVegetationPaintedShadowParamsToUniforms(this._sharedUniforms, this.params);
       applyVegetationLandscapeLightningParamsToUniforms(this._sharedUniforms, this.params);
     }
 
@@ -1064,6 +1091,14 @@ export class TreeEffectV2 {
   }
 
   /**
+   * Bind PaintedShadowEffectV2 lit-factor maps (call after painted shadow render each frame).
+   */
+  syncPaintedShadowUniforms() {
+    if (!this._initialized) return;
+    syncVegetationPaintedShadowForEffect(this);
+  }
+
+  /**
    * @param {string} paramId
    * @param {unknown} _value
    */
@@ -1072,6 +1107,11 @@ export class TreeEffectV2 {
     if (paramId.startsWith('buildingShadow')) {
       applyVegetationBuildingShadowParamsToUniforms(this._sharedUniforms, this.params);
       syncVegetationBuildingShadowForEffect(this);
+      return;
+    }
+    if (paramId.startsWith('paintedShadow')) {
+      applyVegetationPaintedShadowParamsToUniforms(this._sharedUniforms, this.params);
+      syncVegetationPaintedShadowForEffect(this);
       return;
     }
     if (paramId.startsWith('cloudShadow')) {
@@ -1568,6 +1608,7 @@ export class TreeEffectV2 {
       uScreenSize: { value: new THREE.Vector2(1920, 1080) },
       ...createVegetationCloudShadowUniforms(THREE, this.params),
       ...createVegetationBuildingShadowUniforms(THREE, this.params),
+      ...createVegetationPaintedShadowUniforms(THREE, this.params),
       ...createVegetationLandscapeLightningUniforms(THREE, this.params),
     };
   }
@@ -1743,6 +1784,8 @@ export class TreeEffectV2 {
     linkVegetationLandscapeLightningUniforms(uniforms, this._sharedUniforms);
     linkVegetationBuildingShadowUniforms(uniforms, this._sharedUniforms);
     linkVegetationBuildingShadowUniforms(shadowUniforms, this._sharedUniforms);
+    linkVegetationPaintedShadowUniforms(uniforms, this._sharedUniforms);
+    linkVegetationPaintedShadowUniforms(shadowUniforms, this._sharedUniforms);
 
     const material = new THREE.ShaderMaterial({
       uniforms,
@@ -1816,6 +1859,7 @@ export class TreeEffectV2 {
         uniform float uVegetationPass;
 ${VEGETATION_CLOUD_SHADOW_UNIFORM_GLSL}
 ${VEGETATION_BUILDING_SHADOW_UNIFORM_GLSL}
+${VEGETATION_PAINTED_SHADOW_UNIFORM_GLSL}
 ${VEGETATION_LANDSCAPE_LIGHTNING_UNIFORM_GLSL}
         uniform sampler2D uRoofAlphaMap;
         uniform sampler2D uRoofBlockMap;
@@ -1859,6 +1903,7 @@ ${VEGETATION_LANDSCAPE_LIGHTNING_UNIFORM_GLSL}
         }
 
 ${VEGETATION_BUILDING_SHADOW_SAMPLE_GLSL}
+${VEGETATION_PAINTED_SHADOW_SAMPLE_GLSL}
 
         float safeAlpha(vec4 s) {
           float a = s.a;
@@ -2067,6 +2112,7 @@ ${VEGETATION_BUILDING_SHADOW_SAMPLE_GLSL}
 ${VEGETATION_LANDSCAPE_LIGHTNING_APPLY_GLSL}
 ${VEGETATION_CLOUD_SHADOW_APPLY_GLSL}
 ${VEGETATION_BUILDING_SHADOW_APPLY_GLSL}
+${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
           gl_FragColor = vec4(c * hf, visibleMainAlpha);
         }
       `,

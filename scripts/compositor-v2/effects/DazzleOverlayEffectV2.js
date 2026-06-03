@@ -11,6 +11,8 @@ const log = createLogger('DazzleOverlayEffectV2');
  * Disabled by default - DynamicExposureManager enables it when intensity > 0.
  */
 export class DazzleOverlayEffectV2 {
+  static optInEnable = true;
+
   constructor() {
     this._enabled = false;
     this._initialized = false;

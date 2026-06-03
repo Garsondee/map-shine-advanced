@@ -98,6 +98,11 @@ export const VEGETATION_BUILDING_SHADOW_APPLY_GLSL = `
  * @param {typeof import('three')} THREE
  * @returns {import('three').DataTexture}
  */
+/** @param {typeof import('three')} THREE */
+export function ensureVegetationShadowFallbackWhiteTexture(THREE) {
+  return ensureFallbackWhiteTexture(THREE);
+}
+
 function ensureFallbackWhiteTexture(THREE) {
   if (_fallbackWhiteTex) return _fallbackWhiteTex;
   const data = new Uint8Array([255, 255, 255, 255]);
@@ -113,7 +118,7 @@ function ensureFallbackWhiteTexture(THREE) {
  * @returns {import('three').Texture|null}
  */
 /** @returns {object|null} */
-function resolveFloorCompositorV2() {
+export function resolveFloorCompositorV2() {
   try {
     return window.MapShine?.effectComposer?._floorCompositorV2
       ?? window.MapShine?.floorCompositorV2

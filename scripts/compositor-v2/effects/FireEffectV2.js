@@ -59,6 +59,10 @@ import {
   filterFirePointsRequireNeighbor,
 } from './fire-behaviors.js';
 import {
+  buildEffectSceneBoundsFromCanvas,
+  sampleAuthoredOutdoorsAtWorld,
+} from './water-splash-behaviors.js';
+import {
   ParticleSystem as QuarksParticleSystem,
   BatchedRenderer,
   IntervalValue,
@@ -83,6 +87,9 @@ const log = createLogger('FireEffectV2');
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
+/** Matches glow band split at 0.5 — Indoor/Outdoor Balance folders are exclusive. */
+const FIRE_GLOW_BALANCE_OUTDOOR_THRESHOLD = 0.5;
+
 /** Deep orange fire pool hue (linear HDR direction — magnitude lives in emission gain). */
 const FIRE_GLOW_COLOR_COOL = { r: 1.0, g: 0.72, b: 0.28 };
 const FIRE_GLOW_COLOR_WARM = { r: 1.0, g: 0.32, b: 0.03 };
@@ -97,6 +104,28 @@ const FIRE_GLOW_REBUILD_PARAMS = new Set([
   'fireGlowWallClipEnabled',
   'fireGlowWallClipRadiusScale',
 ]);
+
+const FIRE_GLOW_RADIUS_BALANCE_PARAMS = new Set([
+  'fireGlowIndoorRadiusScale',
+  'fireGlowOutdoorRadiusScale',
+]);
+
+/** Indoor/outdoor balance scales that only touch uniforms (no wall-clip polygon rebuild). */
+const FIRE_GLOW_PHOTOMETRY_PARAMS = new Set([
+  'fireGlowIndoorIntensityScale',
+  'fireGlowOutdoorIntensityScale',
+  'fireGlowIndoorCancelScale',
+  'fireGlowOutdoorCancelScale',
+  'fireGlowIndoorNightBoost',
+  'fireGlowOutdoorNightBoost',
+]);
+
+/** @param {import('three').WebGLRenderer|null} renderer @param {import('three').Texture|null} texture */
+function _isSamplingActiveRenderTarget(renderer, texture) {
+  if (!renderer || !texture) return false;
+  const active = renderer.getRenderTarget?.();
+  return !!(active?.texture && active.texture === texture);
+}
 
 // Spatial bucket size for splitting large fire masks into smaller emitters (px).
 const BUCKET_SIZE = 2000;
@@ -611,6 +640,7 @@ export class FireEffectV2 {
     this._lastGlowRebuildAt = 0;
     this._glowFlickerDarkness = -1;
     this._glowParamCache = { indoor: null, outdoor: null, darkness: -1 };
+    this._outdoorsMaskFrameToken = 0;
     this._systemParamsSignature = '';
     this._simAccumSec = 0;
     this._physicsFloorCursor = 0;
@@ -1820,6 +1850,7 @@ export class FireEffectV2 {
       sceneY,
       foundrySceneX,
       foundrySceneY,
+      sceneBounds: buildEffectSceneBoundsFromCanvas(),
     };
 
     let totalSystems = 0;
@@ -1948,6 +1979,9 @@ export class FireEffectV2 {
     if (!this._initialized || !this._enabled) return;
 
     this._bindPerfRecorder();
+    if (this._glowSceneContext) {
+      this._glowSceneContext.sceneBounds = buildEffectSceneBoundsFromCanvas();
+    }
 
     try {
       if (window.MapShine?.__v2NavigationLiteUpdates === true) return;
@@ -2425,6 +2459,17 @@ export class FireEffectV2 {
     if (paramId === 'fireGlowBucketSizePx' || paramId === 'fireGlowMaxBuckets') {
       this._reclusterGlowFromStoredPoints();
     }
+    if (FIRE_GLOW_PHOTOMETRY_PARAMS.has(paramId)) {
+      this._invalidateGlowParamCache();
+      this._applyLiveFireGlowBalance();
+      return;
+    }
+    if (FIRE_GLOW_RADIUS_BALANCE_PARAMS.has(paramId)) {
+      this._invalidateGlowParamCache();
+      this._applyLiveFireGlowBalance();
+      this._needsGlowRebuild = true;
+      return;
+    }
     if (FIRE_GLOW_REBUILD_PARAMS.has(paramId)) {
       this._needsGlowRebuild = true;
     }
@@ -2461,6 +2506,15 @@ export class FireEffectV2 {
     return day + (night - day) * t;
   }
 
+  /**
+   * @private
+   * @param {number} outdoor01
+   * @returns {0|1}
+   */
+  _snapFireGlowBalanceOutdoor(outdoor01) {
+    return clamp01(Number(outdoor01) || 0) > FIRE_GLOW_BALANCE_OUTDOOR_THRESHOLD ? 1.0 : 0.0;
+  }
+
   /** @private @param {number} outdoor01 */
   _blendGlowIndoorOutdoorParam(indoorKey, outdoorKey, fallback = 1.0, outdoor01 = 0.5) {
     const o = clamp01(Number(outdoor01) || 0);
@@ -2479,8 +2533,10 @@ export class FireEffectV2 {
    * @returns {object}
    * @private
    */
-  _resolveFireGlowParams(darkness = LightingDirector.get().masterDarkness, outdoor01 = null) {
-    const t = clamp01(Number(darkness) || 0);
+  _resolveFireGlowParams(darkness = null, outdoor01 = null) {
+    const t = clamp01(Number.isFinite(Number(darkness))
+      ? Number(darkness)
+      : LightingDirector.get().masterDarkness);
     const base = {
       t,
       warmth: clamp01(this._blendGlowDayNightParam('fireGlowWarmth', 'fireGlowNightWarmth', 1.0, t)),
@@ -2528,23 +2584,24 @@ export class FireEffectV2 {
 
     if (outdoor01 == null || !Number.isFinite(Number(outdoor01))) return base;
 
+    const balanceOutdoor = this._snapFireGlowBalanceOutdoor(outdoor01);
     const intensityScale = Math.max(0, this._blendGlowIndoorOutdoorParam(
       'fireGlowIndoorIntensityScale',
       'fireGlowOutdoorIntensityScale',
       1.0,
-      outdoor01,
+      balanceOutdoor,
     ));
     const cancelScale = Math.max(0, this._blendGlowIndoorOutdoorParam(
       'fireGlowIndoorCancelScale',
       'fireGlowOutdoorCancelScale',
       1.0,
-      outdoor01,
+      balanceOutdoor,
     ));
     const radiusScale = Math.max(0.25, this._blendGlowIndoorOutdoorParam(
       'fireGlowIndoorRadiusScale',
       'fireGlowOutdoorRadiusScale',
       1.0,
-      outdoor01,
+      balanceOutdoor,
     ));
 
     return {
@@ -2577,7 +2634,8 @@ export class FireEffectV2 {
   _resolveCachedFireGlowParams(outdoor01) {
     const darkness = clamp01(LightingDirector.get().masterDarkness);
     const outdoor = clamp01(Number(outdoor01) || 0);
-    const cacheKey = outdoor > 0.5 ? 'outdoor' : 'indoor';
+    const balanceOutdoor = this._snapFireGlowBalanceOutdoor(outdoor);
+    const cacheKey = balanceOutdoor > 0.5 ? 'outdoor' : 'indoor';
     const cache = this._glowParamCache;
     if (cache.darkness !== darkness) {
       cache.indoor = null;
@@ -2585,7 +2643,7 @@ export class FireEffectV2 {
       cache.darkness = darkness;
     }
     if (!cache[cacheKey]) {
-      cache[cacheKey] = this._resolveFireGlowParams(darkness, outdoor > 0.5 ? 1.0 : 0.0);
+      cache[cacheKey] = this._resolveFireGlowParams(darkness, balanceOutdoor);
     }
     return cache[cacheKey];
   }
@@ -2596,26 +2654,70 @@ export class FireEffectV2 {
    * @private
    */
   _syncGlowMeshPhotometry(force = false) {
+    if (this._isLightBufferPassActive()) {
+      this._needsGlowRebuild = true;
+      return;
+    }
     const darkness = clamp01(LightingDirector.get().masterDarkness);
     if (!force && Math.abs(darkness - (this._glowFlickerDarkness ?? -1)) < 0.012) return;
     this._glowFlickerDarkness = darkness;
     this._invalidateGlowParamCache();
     this._glowParamCache.darkness = darkness;
+    this._applyLiveFireGlowBalance({ falloffEdgeOnly: true });
+  }
+
+  /**
+   * Push indoor/outdoor + day/night fire-glow photometry to all pools (slider preview).
+   * @param {{ falloffEdgeOnly?: boolean }} [opts]
+   * @private
+   */
+  _applyLiveFireGlowBalance(opts = {}) {
+    if (!this.params.fireGlowEnabled || !this._glowBucketsByFloor.size) return;
+
+    this._invalidateGlowParamCache();
+    const falloffEdgeOnly = opts.falloffEdgeOnly === true;
+    const dayNightMul = this._computeFireGlowDayNightMul();
+    const wallClipScale = Math.max(0.25, Number(this.params.fireGlowWallClipRadiusScale) || 1.0);
 
     for (const buckets of this._glowBucketsByFloor.values()) {
       for (const entry of buckets.values()) {
         const lm = entry?.lightMesh;
-        if (!lm) continue;
+        const u = lm?.material?.uniforms;
+        if (!u?.uColor?.value) continue;
+
         const outdoor = entry.outdoor ?? 1.0;
         const glow = this._resolveCachedFireGlowParams(outdoor);
         const sizeBoost = entry.sizeBoost ?? 1.0;
-        const poolRadiusScale = entry.radiusScale ?? 1.0;
-        const radiusPx = glow.radiusPx * sizeBoost * poolRadiusScale;
+        const radiusPx = Math.max(48, glow.radiusPx * sizeBoost * wallClipScale);
         const innerRadiusPx = Math.max(1, radiusPx * glow.innerScale);
+
         lm.setOuterRadiusPx?.(radiusPx);
         lm.setInnerRadiusPx?.(innerRadiusPx);
         lm.setFalloffExponent?.(glow.falloffExponent);
         lm.setEdgeSoftness?.(glow.edgeSoftness);
+
+        if (falloffEdgeOnly) continue;
+
+        const indoorMul = this._computeFireGlowIndoorNightBoost(outdoor);
+        const outdoorMul = this._computeFireGlowOutdoorNightBoost(outdoor);
+        const visualMul = Math.max(
+          0,
+          glow.intensity
+            * Math.max(0.35, entry.intensity)
+            * dayNightMul
+            * indoorMul
+            * outdoorMul
+        );
+
+        const hue = this._computeFireGlowColor(glow.warmth);
+        u.uColor.value.setRGB(hue.r, hue.g, hue.b);
+
+        const emissionGain = this._computeFireGlowEmissionGain(visualMul, glow.cancel);
+        if (typeof lm.setEmissionGain === 'function') {
+          lm.setEmissionGain(emissionGain);
+        } else if (u.uEmissionGain) {
+          u.uEmissionGain.value = emissionGain;
+        }
       }
     }
   }
@@ -2661,7 +2763,7 @@ export class FireEffectV2 {
     const boost = Math.max(0, Number(this.params.fireGlowIndoorNightBoost) || 0);
     if (boost <= 0) return 1.0;
     const darkness = clamp01(LightingDirector.get().masterDarkness);
-    const indoor = 1.0 - clamp01(outdoor01);
+    const indoor = 1.0 - this._snapFireGlowBalanceOutdoor(outdoor01);
     return 1.0 + boost * indoor * darkness;
   }
 
@@ -2670,7 +2772,7 @@ export class FireEffectV2 {
     const boost = Math.max(0, Number(this.params.fireGlowOutdoorNightBoost) || 0);
     if (boost <= 0) return 1.0;
     const darkness = clamp01(LightingDirector.get().masterDarkness);
-    const outdoor = clamp01(outdoor01);
+    const outdoor = this._snapFireGlowBalanceOutdoor(outdoor01);
     return 1.0 + boost * outdoor * darkness;
   }
 
@@ -2717,23 +2819,27 @@ export class FireEffectV2 {
       const by = Math.floor(wy / bucketSize);
       const key = `${bx},${by}`;
 
-      let outdoor = 1.0;
-      try {
-        outdoor = weatherController.getRoofMaskIntensity(u, v);
-      } catch (_) {
-        outdoor = 1.0;
-      }
-      outdoor = clamp01(outdoor);
+      const sceneBounds = this._glowSceneContext?.sceneBounds ?? buildEffectSceneBoundsFromCanvas();
+      const rawOutdoor = sampleAuthoredOutdoorsAtWorld(
+        floorIndex,
+        wx,
+        wy,
+        sceneBounds,
+        this._outdoorsMaskFrameToken,
+        window.MapShine?.activeLevelContext ?? null,
+      );
+      const outdoor = clamp01(rawOutdoor == null || !Number.isFinite(rawOutdoor) ? 1.0 : rawOutdoor);
 
       let b = buckets.get(key);
       if (!b) {
-        b = { sumX: 0, sumY: 0, sumI: 0, sumOutdoor: 0, count: 0 };
+        b = { sumX: 0, sumY: 0, sumI: 0, sumOutdoor: 0, minOutdoor: 1.0, count: 0 };
         buckets.set(key, b);
       }
       b.sumX += wx;
       b.sumY += wy;
       b.sumI += brightness;
       b.sumOutdoor += outdoor;
+      b.minOutdoor = Math.min(b.minOutdoor, outdoor);
       b.count += 1;
     }
 
@@ -2753,20 +2859,33 @@ export class FireEffectV2 {
     const foundrySceneY = ctx?.foundrySceneY ?? (canvas?.dimensions?.sceneY ?? 0);
 
     const baseGlowColor = this._computeFireGlowWarmTarget();
-    const baseRadius = Math.max(48, Number(this.params.fireGlowRadiusPx) || 640);
-    const radiusScale = Math.max(0.25, Number(this.params.fireGlowWallClipRadiusScale) || 1.0);
+    const wallClipScale = Math.max(0.25, Number(this.params.fireGlowWallClipRadiusScale) || 1.0);
     const clusters = [];
 
     for (let i = 0; i < take; i++) {
       const b = list[i];
       const cxWorld = b.sumX / b.count;
       const cyWorld = b.sumY / b.count;
-      const avgOutdoor = b.sumOutdoor / b.count;
+      const sceneBounds = ctx?.sceneBounds ?? buildEffectSceneBoundsFromCanvas();
+      const rawCenter = sampleAuthoredOutdoorsAtWorld(
+        floorIndex,
+        cxWorld,
+        cyWorld,
+        sceneBounds,
+        this._outdoorsMaskFrameToken,
+        window.MapShine?.activeLevelContext ?? null,
+      );
+      const outdoorAtCenter = clamp01(rawCenter == null || !Number.isFinite(rawCenter) ? 1.0 : rawCenter);
+      const outdoorForGlow = Math.min(
+        Number.isFinite(b.minOutdoor) ? b.minOutdoor : outdoorAtCenter,
+        outdoorAtCenter,
+      );
       const intensity = b.sumI / Math.max(1, b.count);
       const phase = this._hashGlow2(cxWorld, cyWorld);
       const foundryCenter = Coordinates.toFoundry(cxWorld, cyWorld);
       const sizeBoost = 0.72 + 0.28 * Math.min(1.5, Math.sqrt(intensity));
-      const radiusPx = baseRadius * sizeBoost * radiusScale;
+      const glow = this._resolveFireGlowParams(null, outdoorForGlow);
+      const radiusPx = Math.max(48, glow.radiusPx * sizeBoost * wallClipScale);
 
       clusters.push({
         key: b.key,
@@ -2778,7 +2897,7 @@ export class FireEffectV2 {
         radiusPx,
         intensity,
         phase,
-        outdoor: avgOutdoor,
+        outdoor: outdoorForGlow,
         color: baseGlowColor,
         foundrySceneX,
         foundrySceneY,
@@ -2847,7 +2966,19 @@ export class FireEffectV2 {
     this._glowRootGroup = null;
   }
 
+  /** @private @returns {boolean} */
+  _isLightBufferPassActive() {
+    const renderer = this._lightingEffect?._lastCompositorRenderer ?? null;
+    const lightTex = this._lightingEffect?._lightRT?.texture ?? null;
+    return _isSamplingActiveRenderTarget(renderer, lightTex);
+  }
+
   _rebuildAllFloorGlowMeshes() {
+    if (this._isLightBufferPassActive()) {
+      this._needsGlowRebuild = true;
+      return;
+    }
+
     if (!this.params.fireGlowEnabled) {
       this._clearAllGlow();
       return;
@@ -2862,6 +2993,17 @@ export class FireEffectV2 {
     const THREE = window.THREE;
     if (!THREE) return;
 
+    const lightScene = this._lightingEffect?.lightScene ?? null;
+    const glowRoot = this._glowRootGroup;
+    let detached = false;
+    if (lightScene && glowRoot?.parent === lightScene) {
+      try {
+        lightScene.remove(glowRoot);
+        detached = true;
+      } catch (_) {
+      }
+    }
+
     const activeFloors = new Set(this._glowClustersByFloor.keys());
     for (const fi of [...this._glowFloorGroups.keys()]) {
       if (!activeFloors.has(fi)) this._clearFloorGlow(fi);
@@ -2869,13 +3011,7 @@ export class FireEffectV2 {
 
     const walls = canvas?.walls?.placeables ?? [];
     const wallClipOptions = this._buildGlowWallClipOptions();
-    const radiusScale = Math.max(0.25, Number(this.params.fireGlowWallClipRadiusScale) || 1.0);
-    const dayRadius = Math.max(48, Number(this.params.fireGlowRadiusPx) || 640);
-    const nightRadius = Math.max(48, Number(this.params.fireGlowNightRadiusPx) || dayRadius);
-    const indoorRadiusScale = Math.max(0.25, Number(this.params.fireGlowIndoorRadiusScale) || 1.0);
-    const outdoorRadiusScale = Math.max(0.25, Number(this.params.fireGlowOutdoorRadiusScale) || 1.0);
-    const clipBaseRadius = Math.max(dayRadius, nightRadius)
-      * Math.max(indoorRadiusScale, outdoorRadiusScale);
+    const wallClipScale = Math.max(0.25, Number(this.params.fireGlowWallClipRadiusScale) || 1.0);
 
     for (const [floorIndex, clusters] of this._glowClustersByFloor) {
       this._clearFloorGlow(floorIndex);
@@ -2900,9 +3036,9 @@ export class FireEffectV2 {
       for (const c of clusters) {
         const sizeBoost = 0.72 + 0.28 * Math.min(1.5, Math.sqrt(Math.max(0, c.intensity)));
         const outdoor = Math.max(0, Math.min(1, Number(c.outdoor) ?? 1));
-        const glow = this._resolveFireGlowParams(undefined, outdoor);
-        const clipRadiusPx = clipBaseRadius * sizeBoost * radiusScale;
-        const radiusPx = glow.radiusPx * sizeBoost * radiusScale;
+        const glow = this._resolveFireGlowParams(null, outdoor);
+        const radiusPx = Math.max(48, glow.radiusPx * sizeBoost * wallClipScale);
+        const clipRadiusPx = radiusPx;
 
         let foundryPoly = null;
         if (this.params.fireGlowWallClipEnabled) {
@@ -2957,11 +3093,18 @@ export class FireEffectV2 {
           phase: c.phase,
           outdoor: c.outdoor,
           sizeBoost,
-          radiusScale,
+          wallClipScale,
         });
       }
 
       this._glowBucketsByFloor.set(floorIndex, buckets);
+    }
+
+    if (detached && lightScene && glowRoot) {
+      try {
+        lightScene.add(glowRoot);
+      } catch (_) {
+      }
     }
 
     this._applyGlowVisibility();

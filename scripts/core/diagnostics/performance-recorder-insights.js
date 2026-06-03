@@ -165,7 +165,7 @@ export function buildPerformanceInsights(snapshot, frames = [], ticks = []) {
       insights.push({
         severity: 'warn',
         title: 'Cloud shadow cache cold',
-        detail: `Raw shadow cache hit rate ${rawHitPct.toFixed(1)}% with ${rawMiss} misses${reason}. Cache should warm after the view stabilizes; panning/zooming keeps misses high.`,
+        detail: `Raw shadow cache hit rate ${rawHitPct.toFixed(1)}% with ${rawMiss} misses${reason}. Hits rise when the view is stable (pause/pan); steady wind still advances motion buckets gradually.`,
         tags: ['cloud', 'cache'],
       });
     }

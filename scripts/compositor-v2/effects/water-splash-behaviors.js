@@ -16,6 +16,10 @@
  */
 
 import { weatherController } from '../../core/WeatherController.js';
+import {
+  collectCompositorFloorCandidateKeys,
+  resolveAuthoredOutdoorsForFloorKey,
+} from '../../masks/resolve-compositor-outdoors.js';
 import { resolveEffectWindParticleDrift } from './resolve-effect-wind.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -574,6 +578,88 @@ export function decodeOutdoorsMaskSample8(r8, g8, b8, a8) {
 }
 
 /**
+ * Indoor/outdoor class from one _Outdoors texel — matches LightingEffectV2 / water timeline
+ * (alpha-valid gate, 0.10 indoor / 0.90 outdoor, smoothstep mid-band).
+ *
+ * @param {number} r8
+ * @param {number} g8
+ * @param {number} b8
+ * @param {number} a8
+ * @returns {number} 0..1 outdoors class
+ */
+export function classifyOutdoorsMaskTexel8(r8, g8, b8, a8) {
+  const r = Math.max(0, Math.min(255, Number(r8) || 0)) / 255;
+  const g = Math.max(0, Math.min(255, Number(g8) || 0)) / 255;
+  const b = Math.max(0, Math.min(255, Number(b8) || 0)) / 255;
+  const a = Math.max(0, Math.min(255, Number(a8) || 0)) / 255;
+  const lum = Math.max(r, g, b);
+  if (a < 0.5) return 1.0;
+  if (lum <= 0.10) return 0.0;
+  if (lum >= 0.90) return 1.0;
+  return clamp01((lum - 0.18) / (0.82 - 0.18));
+}
+
+/**
+ * @param {object|null} compositor
+ * @param {number} floorIndex
+ * @param {object|null} [levelContext=null]
+ * @returns {string|null}
+ */
+function resolveOutdoorsFloorKeyForSampling(compositor, floorIndex, levelContext = null) {
+  const fi = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
+  if (!compositor) return null;
+
+  const ctx = levelContext ?? window.MapShine?.activeLevelContext ?? null;
+  const { uniqueKeys } = collectCompositorFloorCandidateKeys(compositor, ctx);
+  /** @type {string[]} */
+  const keys = [...uniqueKeys];
+
+  try {
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const floor = floors[fi];
+    const ck = floor?.compositorKey != null ? String(floor.compositorKey) : null;
+    if (ck) {
+      const idx = keys.indexOf(ck);
+      if (idx > 0) {
+        keys.splice(idx, 1);
+        keys.unshift(ck);
+      } else if (idx < 0) {
+        keys.unshift(ck);
+      }
+    }
+  } catch (_) {}
+
+  for (const key of keys) {
+    if (!key) continue;
+    if (resolveAuthoredOutdoorsForFloorKey(compositor, key)) return key;
+    try {
+      if (compositor.getFloorTexture?.(key, 'outdoors')) return key;
+    } catch (_) {}
+  }
+
+  return resolveCompositorFloorKey(fi, compositor);
+}
+
+/**
+ * @param {Uint8Array|Uint8ClampedArray} data
+ * @param {number} w
+ * @param {number} h
+ * @param {number} px
+ * @param {number} py
+ * @param {boolean} [useRawDecode=false]
+ * @returns {number}
+ */
+function sampleOutdoorsTexel(data, w, h, px, py, useRawDecode = false) {
+  const x = Math.max(0, Math.min(w - 1, px));
+  const y = Math.max(0, Math.min(h - 1, py));
+  const i = (y * w + x) * 4;
+  if (useRawDecode) {
+    return decodeOutdoorsMaskSample8(data[i], data[i + 1], data[i + 2], data[i + 3]);
+  }
+  return classifyOutdoorsMaskTexel8(data[i], data[i + 1], data[i + 2], data[i + 3]);
+}
+
+/**
  * @param {object|null} compositor
  * @param {string} floorKey
  * @returns {{ data: Uint8Array, w: number, h: number }|null}
@@ -611,6 +697,8 @@ function readOutdoorsCpuPixelsForFloor(compositor, floorKey) {
 function readOutdoorsMaskPixelsFromFloorRt(compositor, floorKey) {
   const renderer = window.MapShine?.renderer;
   if (!renderer || !compositor || !floorKey || floorKey === 'none') return null;
+  // Never readback while an FBO is bound — causes feedback loops / GL_INVALID_OPERATION.
+  if (renderer.getRenderTarget?.()) return null;
 
   let rt = null;
   try {
@@ -640,6 +728,7 @@ function readOutdoorsMaskPixelsFromFloorRt(compositor, floorKey) {
 function readOutdoorsMaskPixelsFromImage(tex, cacheSalt = 0) {
   try {
     const img = tex?.image;
+    if (!img || !(Number(img.width) > 0) || !(Number(img.height) > 0)) return null;
     const imgUuid = img?.src ?? tex?.uuid ?? null;
     if (!imgUuid) return null;
     const cacheKey = `${imgUuid}::${cacheSalt}`;
@@ -685,25 +774,33 @@ function splashOutdoorsWindDriftMul(outdoorStrength) {
  *
  * @param {number} floorIndex
  * @param {number} frameToken - Monotonic per-frame id from the owning effect
+ * @param {object|null} [levelContext=null] - Active Levels band (GpuSceneMaskCompositor key order)
  * @returns {OutdoorsMaskSnapshot}
  */
-export function syncSharedOutdoorsMaskForFloor(floorIndex, frameToken) {
+export function syncSharedOutdoorsMaskForFloor(floorIndex, frameToken, levelContext = null) {
   const fi = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
   const compositor = resolveSceneMaskCompositor();
   const compositorGen = Number(compositor?.getFloorCacheVersion?.() ?? 0);
-  const floorKey = resolveCompositorFloorKey(fi, compositor) ?? 'none';
+  const ctx = levelContext ?? window.MapShine?.activeLevelContext ?? null;
+  const { ctxBandKey } = collectCompositorFloorCandidateKeys(compositor, ctx);
+  const floorKey = resolveOutdoorsFloorKeyForSampling(compositor, fi, ctx) ?? 'none';
 
   const prev = _sharedOutdoorsByFloor.get(fi);
+  const renderer = window.MapShine?.renderer;
+  if (renderer?.getRenderTarget?.()) {
+    return prev ?? EMPTY_OUTDOORS_SNAPSHOT;
+  }
   if (
     prev
     && prev.frameToken === frameToken
     && prev.compositorGen === compositorGen
     && prev.floorKey === floorKey
+    && prev.ctxBandKey === ctxBandKey
   ) {
     return prev;
   }
 
-  /** @type {OutdoorsMaskSnapshot & { frameToken?: number, compositorGen?: number, floorKey?: string }} */
+  /** @type {OutdoorsMaskSnapshot & { frameToken?: number, compositorGen?: number, floorKey?: string, ctxBandKey?: string|null }} */
   const snap = {
     hasOutdoorsMask: false,
     outdoorsMaskFlipY: false,
@@ -715,6 +812,7 @@ export function syncSharedOutdoorsMaskForFloor(floorIndex, frameToken) {
     frameToken,
     compositorGen,
     floorKey,
+    ctxBandKey,
   };
 
   try {
@@ -740,22 +838,25 @@ export function syncSharedOutdoorsMaskForFloor(floorIndex, frameToken) {
     // Splashes/bubbles: shelter comes from _Outdoors luminance only (see splashOutdoorsWindDriftMul).
     snap.indoorSuppressionStrength = 0.0;
 
-    let cpuPixels = (compositor && floorKey !== 'none')
-      ? readOutdoorsCpuPixelsForFloor(compositor, floorKey)
+    const authoredTex = (compositor && floorKey !== 'none')
+      ? resolveAuthoredOutdoorsForFloorKey(compositor, floorKey)
       : null;
-    if (!cpuPixels && compositor && floorKey !== 'none') {
-      cpuPixels = readOutdoorsMaskPixelsFromFloorRt(compositor, floorKey);
+    if (authoredTex) {
+      const fromAuthored = readOutdoorsMaskPixelsFromImage(authoredTex, compositorGen);
+      if (fromAuthored) {
+        snap.outdoorsMaskData = fromAuthored.data;
+        snap.outdoorsMaskW = fromAuthored.w;
+        snap.outdoorsMaskH = fromAuthored.h;
+        snap.outdoorsMaskGpuRowOrder = false;
+        if (typeof authoredTex.flipY === 'boolean') {
+          snap.outdoorsMaskFlipY = authoredTex.flipY === true;
+        }
+        _sharedOutdoorsByFloor.set(fi, snap);
+        return snap;
+      }
     }
 
-    if (cpuPixels) {
-      snap.outdoorsMaskData = cpuPixels.data;
-      snap.outdoorsMaskW = cpuPixels.w;
-      snap.outdoorsMaskH = cpuPixels.h;
-      snap.outdoorsMaskGpuRowOrder = true;
-      _sharedOutdoorsByFloor.set(fi, snap);
-      return snap;
-    }
-
+    // CPU-only: never readRenderTargetPixels here (feedback loop if _Outdoors RT is bound/sampled).
     // Canvas readback from floor-addressable outdoors (never the viewed-floor water uniform).
     if (floorOutdoorsTex) {
       const fromImage = readOutdoorsMaskPixelsFromImage(floorOutdoorsTex, compositorGen);
@@ -770,6 +871,120 @@ export function syncSharedOutdoorsMaskForFloor(floorIndex, frameToken) {
 
   _sharedOutdoorsByFloor.set(fi, snap);
   return snap;
+}
+
+/**
+ * Three.js scene bounds for CPU _Outdoors sampling (matches WaterSplashesEffectV2).
+ * @returns {{ sx: number, syWorld: number, sw: number, sh: number }|null}
+ */
+export function buildEffectSceneBoundsFromCanvas() {
+  const d = canvas?.dimensions;
+  if (!d) return null;
+
+  const fd = canvas?.foundry?.dimensions ?? d;
+  const sceneRect = d.sceneRect;
+  const worldH = Number(fd.height ?? d.height ?? 0);
+
+  const foundrySceneX = Number.isFinite(Number(fd.sceneX))
+    ? Number(fd.sceneX)
+    : (sceneRect?.x ?? d.sceneX ?? 0);
+  const foundrySceneY = Number.isFinite(Number(fd.sceneY))
+    ? Number(fd.sceneY)
+    : (sceneRect?.y ?? d.sceneY ?? 0);
+  const sceneWidth = (Number.isFinite(Number(fd.sceneWidth)) && fd.sceneWidth > 0)
+    ? Number(fd.sceneWidth)
+    : (sceneRect?.width ?? sceneRect?.sceneWidth ?? d.sceneWidth ?? d.width ?? 1);
+  const sceneHeight = (Number.isFinite(Number(fd.sceneHeight)) && fd.sceneHeight > 0)
+    ? Number(fd.sceneHeight)
+    : (sceneRect?.height ?? sceneRect?.sceneHeight ?? d.sceneHeight ?? d.height ?? 1);
+
+  const sceneX = foundrySceneX;
+  const sceneY = worldH - foundrySceneY - sceneHeight;
+
+  return {
+    sx: sceneX,
+    syWorld: sceneY,
+    sw: sceneWidth,
+    sh: sceneHeight,
+  };
+}
+
+/**
+ * Sample _Outdoors class/strength from a floor snapshot at Three world XY.
+ * @param {OutdoorsMaskSnapshot} snap
+ * @param {number} worldX
+ * @param {number} worldY
+ * @param {{ sx: number, syWorld: number, sw: number, sh: number }|null} sceneBounds
+ * @param {{ bilinear?: boolean, useRawDecode?: boolean }} [opts]
+ * @returns {number|null}
+ */
+export function sampleOutdoorsFromSnapshot(snap, worldX, worldY, sceneBounds, opts = {}) {
+  if (!snap?.hasOutdoorsMask || !snap.outdoorsMaskData || snap.outdoorsMaskW <= 0 || snap.outdoorsMaskH <= 0) {
+    return null;
+  }
+  const b = sceneBounds;
+  if (!b || !Number.isFinite(worldX) || !Number.isFinite(worldY)) return null;
+  if (!(b.sw > 0 && b.sh > 0)) return null;
+
+  const u = clamp01((worldX - b.sx) / b.sw);
+  const vFoundry = clamp01(1.0 - ((worldY - b.syWorld) / b.sh));
+  const texY = snap.outdoorsMaskFlipY ? (1.0 - vFoundry) : vFoundry;
+
+  const w = snap.outdoorsMaskW;
+  const h = snap.outdoorsMaskH;
+  const d = snap.outdoorsMaskData;
+  const useRawDecode = opts.useRawDecode === true;
+  const bilinear = opts.bilinear !== false;
+
+  const mapRow = (pyRow) => (snap.outdoorsMaskGpuRowOrder ? ((h - 1) - pyRow) : pyRow);
+
+  if (!bilinear || w < 2 || h < 2) {
+    const px = Math.max(0, Math.min(w - 1, Math.floor(u * (w - 1))));
+    const pyRow = Math.max(0, Math.min(h - 1, Math.floor(texY * (h - 1))));
+    return sampleOutdoorsTexel(d, w, h, px, mapRow(pyRow), useRawDecode);
+  }
+
+  const uf = u * (w - 1);
+  const vf = texY * (h - 1);
+  const x0 = Math.floor(uf);
+  const y0 = Math.floor(vf);
+  const x1 = Math.min(w - 1, x0 + 1);
+  const y1 = Math.min(h - 1, y0 + 1);
+  const fx = uf - x0;
+  const fy = vf - y0;
+
+  const s00 = sampleOutdoorsTexel(d, w, h, x0, mapRow(y0), useRawDecode);
+  const s10 = sampleOutdoorsTexel(d, w, h, x1, mapRow(y0), useRawDecode);
+  const s01 = sampleOutdoorsTexel(d, w, h, x0, mapRow(y1), useRawDecode);
+  const s11 = sampleOutdoorsTexel(d, w, h, x1, mapRow(y1), useRawDecode);
+  const s0 = s00 + (s10 - s00) * fx;
+  const s1 = s01 + (s11 - s01) * fx;
+  return s0 + (s1 - s0) * fy;
+}
+
+/**
+ * Sync per-floor _Outdoors CPU data and sample at Three world coordinates.
+ * @param {number} floorIndex
+ * @param {number} worldX
+ * @param {number} worldY
+ * @param {{ sx: number, syWorld: number, sw: number, sh: number }|null} sceneBounds
+ * @param {number} [frameToken=0]
+ * @param {object|null} [levelContext=null]
+ * @param {{ bilinear?: boolean, useRawDecode?: boolean }} [sampleOpts]
+ * @returns {number|null}
+ */
+export function sampleAuthoredOutdoorsAtWorld(
+  floorIndex,
+  worldX,
+  worldY,
+  sceneBounds,
+  _frameToken = 0,
+  _levelContext = null,
+  sampleOpts = {},
+) {
+  const fi = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
+  const snap = _sharedOutdoorsByFloor.get(fi) ?? EMPTY_OUTDOORS_SNAPSHOT;
+  return sampleOutdoorsFromSnapshot(snap, worldX, worldY, sceneBounds, sampleOpts);
 }
 
 /**
@@ -800,24 +1015,7 @@ class OutdoorsMaskState {
    * @returns {number|null}
    */
   sampleAtWorld(worldX, worldY, ownerEffect) {
-    const s = this._snap();
-    if (!s.hasOutdoorsMask || !s.outdoorsMaskData || s.outdoorsMaskW <= 0 || s.outdoorsMaskH <= 0) {
-      return null;
-    }
-    const b = ownerEffect?._sceneBounds;
-    if (!b || !Number.isFinite(worldX) || !Number.isFinite(worldY)) return null;
-    if (!(b.sw > 0 && b.sh > 0)) return null;
-
-    const u = clamp01((worldX - b.sx) / b.sw);
-    const vFoundry = clamp01(1.0 - ((worldY - b.syWorld) / b.sh));
-    const texY = s.outdoorsMaskFlipY ? (1.0 - vFoundry) : vFoundry;
-
-    const px = Math.max(0, Math.min(s.outdoorsMaskW - 1, Math.floor(u * (s.outdoorsMaskW - 1))));
-    const pyRow = Math.max(0, Math.min(s.outdoorsMaskH - 1, Math.floor(texY * (s.outdoorsMaskH - 1))));
-    const py = s.outdoorsMaskGpuRowOrder ? ((s.outdoorsMaskH - 1) - pyRow) : pyRow;
-    const i = (py * s.outdoorsMaskW + px) * 4;
-    const d = s.outdoorsMaskData;
-    return decodeOutdoorsMaskSample8(d[i], d[i + 1], d[i + 2], d[i + 3]);
+    return sampleOutdoorsFromSnapshot(this._snap(), worldX, worldY, ownerEffect?._sceneBounds);
   }
 }
 
@@ -833,8 +1031,17 @@ class OutdoorsMaskState {
 export function sampleSplashOutdoorsAtWorld(floorIndex, worldX, worldY, ownerEffect) {
   const fi = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
   const tok = ownerEffect?._outdoorsMaskFrameToken ?? 0;
-  try { syncSharedOutdoorsMaskForFloor(fi, tok); } catch (_) {}
-  return new OutdoorsMaskState(fi).sampleAtWorld(worldX, worldY, ownerEffect);
+  const bounds = ownerEffect?._sceneBounds ?? buildEffectSceneBoundsFromCanvas();
+  syncSharedOutdoorsMaskForFloor(fi, tok, window.MapShine?.activeLevelContext ?? null);
+  return sampleAuthoredOutdoorsAtWorld(
+    fi,
+    worldX,
+    worldY,
+    bounds,
+    tok,
+    window.MapShine?.activeLevelContext ?? null,
+    { useRawDecode: true },
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -1945,6 +1945,11 @@ export class GpuSceneMaskCompositor {
     const rt = floorTargets.get(maskType);
     if (!rt) return null;
 
+    const active = renderer.getRenderTarget?.();
+    if (active) {
+      return null;
+    }
+
     const w = rt.width;
     const h = rt.height;
     const buf = new Uint8Array(w * h * 4);

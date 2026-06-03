@@ -1,7 +1,12 @@
-﻿import { createLogger } from '../../core/log.js';
+import { createLogger } from '../../core/log.js';
 import Coordinates from '../../utils/coordinates.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
 import { weatherController } from '../../core/WeatherController.js';
+import {
+  buildEffectSceneBoundsFromCanvas,
+  sampleAuthoredOutdoorsAtWorld,
+} from './water-splash-behaviors.js';
+import { refreshShelterOutdoorsMaskForActiveFloor } from '../outdoors-mask-sample.js';
 import { getPerspectiveElevation } from '../../foundry/elevation-context.js';
 import { hasV14NativeLevels } from '../../foundry/levels-scene-flags.js';
 import { VisionPolygonComputer } from '../../vision/VisionPolygonComputer.js';
@@ -17,6 +22,9 @@ const CANDLE_FLAME_RENDER_ORDER = 200100;
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
+/** Matches flame shader `step(0.5, vOutdoor)` — balance folders are exclusive, not blended. */
+const GLOW_BALANCE_OUTDOOR_THRESHOLD = 0.5;
+
 const GLOW_REBUILD_PARAMS = new Set([
   'glowBucketSizePx',
   'glowMaxBuckets',
@@ -24,11 +32,32 @@ const GLOW_REBUILD_PARAMS = new Set([
   'glowInnerRadiusScale',
   'glowNightRadiusPx',
   'glowNightInnerRadiusScale',
-  'glowIndoorRadiusScale',
-  'glowOutdoorRadiusScale',
   'wallClipEnabled',
   'wallClipRadiusScale',
 ]);
+
+/** Indoor/outdoor radius scales affect wall-clip polygons — refresh clusters + meshes only. */
+const GLOW_RADIUS_BALANCE_PARAMS = new Set([
+  'glowIndoorRadiusScale',
+  'glowOutdoorRadiusScale',
+]);
+
+/** Intensity / cancel / night boost — live uniform sync (no wall-clip rebuild). */
+const GLOW_BALANCE_PHOTOMETRY_PARAMS = new Set([
+  'glowIndoorIntensityScale',
+  'glowOutdoorIntensityScale',
+  'glowIndoorCancelScale',
+  'glowOutdoorCancelScale',
+  'glowIndoorNightBoost',
+  'glowOutdoorNightBoost',
+]);
+
+/** @param {import('three').WebGLRenderer|null} renderer @param {import('three').Texture|null} texture */
+function _isSamplingActiveRenderTarget(renderer, texture) {
+  if (!renderer || !texture) return false;
+  const active = renderer.getRenderTarget?.();
+  return !!(active?.texture && active.texture === texture);
+}
 
 /** Glow colour endpoints for warmth slider (0 = neutral, 1 = deep candle / torch amber). */
 const GLOW_COLOR_COOL = { r: 1.0, g: 1.0, b: 1.0 };
@@ -162,6 +191,10 @@ export class CandleFlamesEffectV2 {
     this._lastGlowRebuildAt = -Infinity;
 
     this._sourceFlameCount = 0;
+
+    /** @type {{ sx: number, syWorld: number, sw: number, sh: number }|null} */
+    this._sceneBounds = null;
+    this._outdoorsMaskFrameToken = 0;
   }
 
   static getControlSchema() {
@@ -408,7 +441,7 @@ export class CandleFlamesEffectV2 {
           tooltip: 'HDR darkness-cancel multiplier for indoor pools (after day/night cancel blend).',
         },
         glowIndoorRadiusScale: {
-          type: 'slider', min: 0.25, max: 3, step: 0.01, default: 1.66, label: 'Radius Scale',
+          type: 'slider', min: 0.25, max: 12, step: 0.01, default: 6, label: 'Radius Scale',
           tooltip: 'Indoor pool reach multiplier (after day/night radius blend).',
         },
         glowIndoorNightBoost: {
@@ -617,7 +650,7 @@ export class CandleFlamesEffectV2 {
     }
 
     if (paramId === 'wallClipEnabled') {
-      this._rebuildGlowMeshes();
+      this._scheduleGlowRebuild();
       return;
     }
 
@@ -626,9 +659,58 @@ export class CandleFlamesEffectV2 {
       return;
     }
 
+    if (GLOW_BALANCE_PHOTOMETRY_PARAMS.has(paramId)) {
+      this._applyLiveGlowBalance();
+      return;
+    }
+
+    if (GLOW_RADIUS_BALANCE_PARAMS.has(paramId)) {
+      this._refreshGlowClusterRadii();
+      this._applyLiveGlowBalance();
+      this._scheduleGlowRebuild();
+      return;
+    }
+
     if (GLOW_REBUILD_PARAMS.has(paramId)) {
       this._rebuildFromMapPoints();
     }
+  }
+
+  /**
+   * Recompute per-bucket pool + wall-clip radii from day/night and indoor/outdoor balance.
+   * @private
+   */
+  _refreshGlowClusterRadii() {
+    if (!this._clusters?.length) return;
+    const clipScale = Math.max(0.1, Number(this.params.wallClipRadiusScale) || 1.0);
+    const darkness = LightingDirector.get().masterDarkness;
+    for (const c of this._clusters) {
+      if (!c) continue;
+      const outdoor = Math.max(0, Math.min(1, Number(c.outdoor) ?? 1));
+      const glow = this._resolveGlowParams(darkness, outdoor);
+      const radiusPx = Math.max(32, glow.radiusPx * clipScale);
+      c.radiusPx = radiusPx;
+      c.clipRadiusPx = radiusPx;
+    }
+  }
+
+  /**
+   * Defer wall-clip mesh rebuild to update() — never mutate lightScene during an active _lightRT draw.
+   * @private
+   */
+  _scheduleGlowRebuild() {
+    if (this._isLightBufferPassActive()) {
+      this._needsGlowRebuild = true;
+      return;
+    }
+    this._rebuildGlowMeshes();
+  }
+
+  /** @private @returns {boolean} */
+  _isLightBufferPassActive() {
+    const renderer = this._lightingEffect?._lastCompositorRenderer ?? this.renderer ?? null;
+    const lightTex = this._lightingEffect?._lightRT?.texture ?? null;
+    return _isSamplingActiveRenderTarget(renderer, lightTex);
   }
 
   _applyVisibility() {
@@ -749,6 +831,8 @@ export class CandleFlamesEffectV2 {
     const THREE = window.THREE;
     if (!THREE) return;
 
+    this._sceneBounds = buildEffectSceneBoundsFromCanvas();
+
     this._tryAttachGlowGroup();
 
     if (this._flameMaterial?.uniforms?.uTime) {
@@ -860,6 +944,44 @@ export class CandleFlamesEffectV2 {
 
   onFloorChange(_maxFloorIndex) {
     this.setActiveLevelContext(window.MapShine?.activeLevelContext ?? null);
+    this._sceneBounds = buildEffectSceneBoundsFromCanvas();
+  }
+
+  /** @private */
+  _syncSceneBounds() {
+    this._sceneBounds = buildEffectSceneBoundsFromCanvas();
+  }
+
+  /** @private @returns {number} */
+  _resolveGlowFloorIndex() {
+    try {
+      const af = window.MapShine?.floorStack?.getActiveFloor?.();
+      if (af && Number.isFinite(Number(af.index))) {
+        return Math.max(0, Math.floor(Number(af.index)));
+      }
+    } catch (_) {}
+    return 0;
+  }
+
+  /**
+   * Authored _Outdoors at Three world XY (per-floor compositor mask, not WeatherController roof cache).
+   * @private
+   * @param {number} worldX
+   * @param {number} worldY
+   * @returns {number} 0..1 outdoors strength
+   */
+  _sampleGlowOutdoorAtWorld(worldX, worldY) {
+    const bounds = this._sceneBounds ?? buildEffectSceneBoundsFromCanvas();
+    const raw = sampleAuthoredOutdoorsAtWorld(
+      this._resolveGlowFloorIndex(),
+      worldX,
+      worldY,
+      bounds,
+      this._outdoorsMaskFrameToken,
+      this._activeLevelContext ?? window.MapShine?.activeLevelContext ?? null,
+    );
+    if (raw == null || !Number.isFinite(raw)) return 1.0;
+    return clamp01(raw);
   }
 
   dispose() {
@@ -982,6 +1104,16 @@ export class CandleFlamesEffectV2 {
     return day + (night - day) * t;
   }
 
+  /**
+   * Classify a pool for Indoor vs Outdoor Balance folders (binary, not roof-mask lerp).
+   * @private
+   * @param {number} outdoor01
+   * @returns {0|1}
+   */
+  _snapGlowBalanceOutdoor(outdoor01) {
+    return clamp01(Number(outdoor01) || 0) > GLOW_BALANCE_OUTDOOR_THRESHOLD ? 1.0 : 0.0;
+  }
+
   /** @private @param {number} outdoor01 */
   _blendGlowIndoorOutdoorParam(indoorKey, outdoorKey, fallback = 1.0, outdoor01 = 0.5) {
     const o = clamp01(Number(outdoor01) || 0);
@@ -1000,8 +1132,10 @@ export class CandleFlamesEffectV2 {
    * @returns {object}
    * @private
    */
-  _resolveGlowParams(darkness = LightingDirector.get().masterDarkness, outdoor01 = null) {
-    const t = clamp01(Number(darkness) || 0);
+  _resolveGlowParams(darkness = null, outdoor01 = null) {
+    const t = clamp01(Number.isFinite(Number(darkness))
+      ? Number(darkness)
+      : LightingDirector.get().masterDarkness);
     const base = {
       t,
       warmth: clamp01(this._blendGlowDayNightParam('glowWarmth', 'glowNightWarmth', 1.0, t)),
@@ -1049,23 +1183,24 @@ export class CandleFlamesEffectV2 {
 
     if (outdoor01 == null || !Number.isFinite(Number(outdoor01))) return base;
 
+    const balanceOutdoor = this._snapGlowBalanceOutdoor(outdoor01);
     const intensityScale = Math.max(0, this._blendGlowIndoorOutdoorParam(
       'glowIndoorIntensityScale',
       'glowOutdoorIntensityScale',
       1.0,
-      outdoor01,
+      balanceOutdoor,
     ));
     const cancelScale = Math.max(0, this._blendGlowIndoorOutdoorParam(
       'glowIndoorCancelScale',
       'glowOutdoorCancelScale',
       1.0,
-      outdoor01,
+      balanceOutdoor,
     ));
     const radiusScale = Math.max(0.25, this._blendGlowIndoorOutdoorParam(
       'glowIndoorRadiusScale',
       'glowOutdoorRadiusScale',
       1.0,
-      outdoor01,
+      balanceOutdoor,
     ));
 
     return {
@@ -1078,10 +1213,59 @@ export class CandleFlamesEffectV2 {
 
   /** Push current darkness-blended falloff/edge to all glow meshes (UI tweak). @private */
   _applyLiveGlowMeshParams() {
+    this._applyLiveGlowBalance({ falloffEdgeOnly: true });
+  }
+
+  /**
+   * Push indoor/outdoor + day/night glow photometry to all pools (slider preview).
+   * @param {{ falloffEdgeOnly?: boolean }} [opts]
+   * @private
+   */
+  _applyLiveGlowBalance(opts = {}) {
+    if (!this.params.glowEnabled || !this._glowBuckets.size) return;
+
+    const falloffEdgeOnly = opts.falloffEdgeOnly === true;
+    const dayNightMul = this._computeGlowDayNightIntensityMul();
+    const clipScale = Math.max(0.1, Number(this.params.wallClipRadiusScale) || 1.0);
+
     for (const entry of this._glowBuckets.values()) {
-      const glow = this._resolveGlowParams(undefined, entry?.outdoor ?? 1.0);
-      entry?.lightMesh?.setFalloffExponent?.(glow.falloffExponent);
-      entry?.lightMesh?.setEdgeSoftness?.(glow.edgeSoftness);
+      const lm = entry?.lightMesh;
+      const u = lm?.material?.uniforms;
+      if (!u?.uColor?.value) continue;
+
+      const outdoor = entry.outdoor ?? 1.0;
+      const glow = this._resolveGlowParams(null, outdoor);
+      const radiusPx = Math.max(32, glow.radiusPx * clipScale);
+      const innerRadiusPx = Math.max(1, radiusPx * glow.innerScale);
+
+      lm.setOuterRadiusPx?.(radiusPx);
+      lm.setInnerRadiusPx?.(innerRadiusPx);
+      lm.setFalloffExponent?.(glow.falloffExponent);
+      lm.setEdgeSoftness?.(glow.edgeSoftness);
+
+      if (falloffEdgeOnly) continue;
+
+      const indoorMul = this._computeGlowIndoorNightBoost(outdoor);
+      const outdoorMul = this._computeGlowOutdoorNightBoost(outdoor);
+      const visualMul = Math.max(
+        0.0,
+        glow.intensity
+          * Math.max(0.25, entry.intensity)
+          * dayNightMul
+          * indoorMul
+          * outdoorMul
+      );
+
+      const glowColor = this._computeGlowColor(glow.warmth);
+      u.uColor.value.setRGB(glowColor.r, glowColor.g, glowColor.b);
+      lm.setAchromaticRgb?.(false);
+
+      const emissionGain = this._computeGlowEmissionGain(visualMul, glow.cancel);
+      if (typeof lm.setEmissionGain === 'function') {
+        lm.setEmissionGain(emissionGain);
+      } else if (u.uEmissionGain) {
+        u.uEmissionGain.value = emissionGain;
+      }
     }
   }
 
@@ -1133,7 +1317,7 @@ export class CandleFlamesEffectV2 {
     const boost = Math.max(0, Number(this.params.glowIndoorNightBoost ?? legacy) || 0);
     if (boost <= 0) return 1.0;
     const darkness = clamp01(LightingDirector.get().masterDarkness);
-    const indoor = 1.0 - clamp01(outdoor01);
+    const indoor = 1.0 - this._snapGlowBalanceOutdoor(outdoor01);
     return 1.0 + boost * indoor * darkness;
   }
 
@@ -1142,7 +1326,7 @@ export class CandleFlamesEffectV2 {
     const boost = Math.max(0, Number(this.params.glowOutdoorNightBoost) || 0);
     if (boost <= 0) return 1.0;
     const darkness = clamp01(LightingDirector.get().masterDarkness);
-    const outdoor = clamp01(outdoor01);
+    const outdoor = this._snapGlowBalanceOutdoor(outdoor01);
     return 1.0 + boost * outdoor * darkness;
   }
 
@@ -1467,11 +1651,8 @@ export class CandleFlamesEffectV2 {
       return;
     }
 
-    const d = canvas?.dimensions;
-    const sceneX = d?.sceneX ?? 0;
-    const sceneY = d?.sceneY ?? 0;
-    const sceneW = d?.sceneWidth ?? d?.width ?? 1;
-    const sceneH = d?.sceneHeight ?? d?.height ?? 1;
+    this._syncSceneBounds();
+    try { refreshShelterOutdoorsMaskForActiveFloor(); } catch (_) {}
 
     const groundZ = this._getGroundZ();
 
@@ -1493,17 +1674,7 @@ export class CandleFlamesEffectV2 {
       const wx = pt.x;
       const wy = pt.y;
 
-      const foundryPt = Coordinates.toFoundry(wx, wy);
-      const u = Math.max(0, Math.min(1, (foundryPt.x - sceneX) / sceneW));
-      const v = Math.max(0, Math.min(1, (foundryPt.y - sceneY) / sceneH));
-      let outdoor = 1.0;
-      try {
-        outdoor = weatherController.getRoofMaskIntensity(u, v);
-      } catch (_) {
-        outdoor = 1.0;
-      }
-      if (!Number.isFinite(outdoor)) outdoor = 1.0;
-      outdoor = Math.max(0.0, Math.min(1.0, outdoor));
+      const outdoor = this._sampleGlowOutdoorAtWorld(wx, wy);
 
       const bx = Math.floor(wx / bucketSize);
       const by = Math.floor(wy / bucketSize);
@@ -1511,13 +1682,14 @@ export class CandleFlamesEffectV2 {
 
       let b = buckets.get(key);
       if (!b) {
-        b = { sumX: 0, sumY: 0, sumI: 0, sumOutdoor: 0, count: 0 };
+        b = { sumX: 0, sumY: 0, sumI: 0, sumOutdoor: 0, minOutdoor: 1.0, count: 0 };
         buckets.set(key, b);
       }
       b.sumX += wx;
       b.sumY += wy;
       b.sumI += pt.intensity;
       b.sumOutdoor += outdoor;
+      b.minOutdoor = Math.min(b.minOutdoor, outdoor);
       b.count += 1;
 
       if (written < maxFlames) {
@@ -1566,25 +1738,23 @@ export class CandleFlamesEffectV2 {
 
     const take = Math.min(list.length, maxBuckets);
 
-    const dayRadius = Math.max(32, Number(this.params.glowRadiusPx) || 172);
-    const nightRadius = Math.max(32, Number(this.params.glowNightRadiusPx) || dayRadius);
-    const indoorRadiusScale = Math.max(0.25, Number(this.params.glowIndoorRadiusScale) || 1.0);
-    const outdoorRadiusScale = Math.max(0.25, Number(this.params.glowOutdoorRadiusScale) || 1.0);
     const clipRadiusScale = Math.max(0.1, Number(this.params.wallClipRadiusScale) || 1.0);
-    const clipBaseRadius = Math.max(dayRadius, nightRadius)
-      * Math.max(indoorRadiusScale, outdoorRadiusScale)
-      * clipRadiusScale;
 
     for (let i = 0; i < take; i++) {
       const b = list[i];
       const cxWorld = b.sumX / b.count;
       const cyWorld = b.sumY / b.count;
-      const avgOutdoor = b.sumOutdoor / b.count;
+      const outdoorAtCenter = this._sampleGlowOutdoorAtWorld(cxWorld, cyWorld);
+      const outdoorForGlow = Math.min(
+        Number.isFinite(b.minOutdoor) ? b.minOutdoor : outdoorAtCenter,
+        outdoorAtCenter,
+      );
       const phase = this._hash2(cxWorld, cyWorld);
 
       const intensity = b.sumI / Math.max(1, b.count);
-      const glow = this._resolveGlowParams(undefined, avgOutdoor);
+      const glow = this._resolveGlowParams(null, outdoorForGlow);
       const radiusPx = Math.max(32, glow.radiusPx * clipRadiusScale);
+      const clipRadiusPx = radiusPx;
 
       const foundryCenter = Coordinates.toFoundry(cxWorld, cyWorld);
 
@@ -1595,10 +1765,10 @@ export class CandleFlamesEffectV2 {
         cxFoundry: foundryCenter.x,
         cyFoundry: foundryCenter.y,
         radiusPx,
-        clipRadiusPx: clipBaseRadius,
+        clipRadiusPx,
         intensity,
         phase,
-        outdoor: avgOutdoor,
+        outdoor: outdoorForGlow,
         color: this._computeGlowColor(glow.warmth),
       });
     }
@@ -1654,27 +1824,20 @@ export class CandleFlamesEffectV2 {
   /** Refresh glow pool outdoor classification + meshes after _Outdoors CPU decode updates. */
   onOutdoorsMaskUpdated() {
     if (!this.params.glowEnabled || !this._clusters?.length) return;
-    const d = canvas?.dimensions;
-    const sceneX = d?.sceneX ?? 0;
-    const sceneY = d?.sceneY ?? 0;
-    const sceneW = Math.max(1, d?.sceneWidth ?? d?.width ?? 1);
-    const sceneH = Math.max(1, d?.sceneHeight ?? d?.height ?? 1);
+    this._syncSceneBounds();
     for (const c of this._clusters) {
       if (!c) continue;
-      const u = Math.max(0, Math.min(1, (c.cxFoundry - sceneX) / sceneW));
-      const v = Math.max(0, Math.min(1, (c.cyFoundry - sceneY) / sceneH));
-      let outdoor = 1.0;
-      try {
-        outdoor = weatherController.getRoofMaskIntensity(u, v);
-      } catch (_) {
-        outdoor = 1.0;
-      }
-      c.outdoor = Math.max(0, Math.min(1, Number(outdoor) || 0));
+      c.outdoor = this._sampleGlowOutdoorAtWorld(c.cxWorld, c.cyWorld);
     }
     this._rebuildGlowMeshes();
   }
 
   _rebuildGlowMeshes() {
+    if (this._isLightBufferPassActive()) {
+      this._needsGlowRebuild = true;
+      return;
+    }
+
     if (!this.params.glowEnabled) {
       this._clearGlowBuckets();
       return;
@@ -1685,6 +1848,17 @@ export class CandleFlamesEffectV2 {
     if (!this._glowGroup?.parent) {
       this._clearGlowBuckets();
       return;
+    }
+
+    const lightScene = this._lightingEffect?.lightScene ?? null;
+    const glowGroup = this._glowGroup;
+    let detached = false;
+    if (lightScene && glowGroup?.parent === lightScene) {
+      try {
+        lightScene.remove(glowGroup);
+        detached = true;
+      } catch (_) {
+      }
     }
 
     this._clearGlowBuckets();
@@ -1707,11 +1881,12 @@ export class CandleFlamesEffectV2 {
       if (!c) continue;
 
       const outdoor = Math.max(0, Math.min(1, Number(c.outdoor) ?? 1));
-      const glow = this._resolveGlowParams(undefined, outdoor);
+      const glow = this._resolveGlowParams(null, outdoor);
       const cxFoundry = c.cxFoundry;
       const cyFoundry = c.cyFoundry;
-      const clipRadiusPx = Math.max(32, Number(c.clipRadiusPx) || c.radiusPx || glow.radiusPx);
-      const radiusPx = Math.max(32, Number(c.radiusPx) || glow.radiusPx);
+      const clipScale = Math.max(0.1, Number(this.params.wallClipRadiusScale) || 1.0);
+      const radiusPx = Math.max(32, glow.radiusPx * clipScale);
+      const clipRadiusPx = radiusPx;
 
       let foundryPoly = null;
       if (this.params.wallClipEnabled) {
@@ -1773,6 +1948,13 @@ export class CandleFlamesEffectV2 {
         outdoor: c.outdoor
       });
     }
+
+    if (detached && lightScene && glowGroup) {
+      try {
+        lightScene.add(glowGroup);
+      } catch (_) {
+      }
+    }
   }
 
   _updateGlowFlicker(timeInfo) {
@@ -1792,7 +1974,7 @@ export class CandleFlamesEffectV2 {
 
       const phase = entry.phase || 0;
       const outdoor = entry.outdoor ?? 1.0;
-      const glow = this._resolveGlowParams(undefined, outdoor);
+      const glow = this._resolveGlowParams(null, outdoor);
       const strength = glow.flickerStrength;
       const speed = glow.flickerSpeed;
       const speedJ = glow.flickerSpeedJitter;

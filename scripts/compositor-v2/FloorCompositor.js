@@ -115,6 +115,10 @@ import {
   resolveAuthoredOutdoorsForFloorKey,
   resolveCompositorOutdoorsTexture,
 } from '../masks/resolve-compositor-outdoors.js';
+import {
+  clearShelterOutdoorsMaskCache,
+  refreshShelterOutdoorsMaskForActiveFloor,
+} from './outdoors-mask-sample.js';
 import { MaskBindingController } from '../masks/mask-binding-controller.js';
 import { MaskDebugOverlayPass } from './MaskDebugOverlayPass.js';
 import { LevelRenderTargetPool } from './LevelRenderTargetPool.js';
@@ -4368,6 +4372,7 @@ export class FloorCompositor {
         // Decorative overlays: uTime advances in shaders on present frames; skip CPU sim while panning.
         this._profileEffectCall('bush', 'update', () => this._bushEffect.updateNavigationLite?.(timeInfo), 'BushEffectV2 navigationLite');
         this._profileEffectCall('tree', 'update', () => this._treeEffect.updateNavigationLite?.(timeInfo), 'TreeEffectV2 navigationLite');
+        this._profileEffectCall('cloud', 'update', () => this._cloudEffect.updateNavigationLite(timeInfo), 'CloudEffectV2 navigationLite', { cpuOnly: true });
       }
 
       this._profileEffectCall('lighting', 'update', () => this._lightingEffect.update(timeInfo), 'LightingEffectV2 update');
@@ -6199,6 +6204,11 @@ export class FloorCompositor {
           this._ashCloudEffect?.setOutdoorsMasks?.([null, null, null, null]);
         }
       } catch (_) {}
+
+      if (signatureChanged) {
+        try { clearShelterOutdoorsMaskCache(); } catch (_) {}
+      }
+      try { refreshShelterOutdoorsMaskForActiveFloor(outdoorsTex); } catch (_) {}
 
       if (typeof weatherController?.setRoofMap === 'function') {
         weatherController.setRoofMap(outdoorsTex);

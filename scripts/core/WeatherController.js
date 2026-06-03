@@ -718,7 +718,9 @@ export class WeatherController {
       this._extractRoofMaskData(texture.image);
       return;
     }
-    if (this._extractRoofMaskDataFromGpuOutdoors(texture)) {
+    const renderer = window.MapShine?.renderer;
+    const gpuReadbackSafe = !renderer?.getRenderTarget?.();
+    if (gpuReadbackSafe && this._extractRoofMaskDataFromGpuOutdoors(texture)) {
       return;
     }
     this.roofMaskData = null;

@@ -68,21 +68,21 @@ const wlTodTintSliderKeys = (index) => ({
  * @type {ReadonlyArray<{ intensityScale: number, exposure: number, saturation: number, tintColor: { r: number, g: number, b: number } }>}
  */
 const DEFAULT_WINDOW_LIGHT_TOD_ANCHORS = Object.freeze([
-  { intensityScale: 1.05, exposure: 0.15, saturation: 1.85, tintColor: { r: 0.6, g: 0.75, b: 3 } },
-  { intensityScale: 0.95, exposure: 0.05, saturation: 1.55, tintColor: { r: 1.4, g: 0.85, b: 2.3 } },
-  { intensityScale: 1.25, exposure: 0.25, saturation: 1.75, tintColor: { r: 3, g: 1.15, b: 0.85 } },
+  { intensityScale: 0.98, exposure: -1.04, saturation: 1.85, tintColor: { r: 0, g: 0.72, b: 3 } },
+  { intensityScale: 0.5, exposure: 0.05, saturation: 1.55, tintColor: { r: 1.4, g: 0.85, b: 2.3 } },
+  { intensityScale: 0.5, exposure: 0.25, saturation: 1.75, tintColor: { r: 3, g: 1.15, b: 0.85 } },
   { intensityScale: 1.15, exposure: 0.2, saturation: 1.65, tintColor: { r: 1.45, g: 1.2, b: 0.95 } },
   { intensityScale: 1.1, exposure: 0.15, saturation: 1.55, tintColor: { r: 0.8, g: 0.95, b: 1.35 } },
   { intensityScale: 1.12, exposure: 0.12, saturation: 1.6, tintColor: { r: 1.3, g: 1.05, b: 1.0 } },
-  { intensityScale: 1.28, exposure: 0.3, saturation: 1.8, tintColor: { r: 3, g: 1.2, b: 0.9 } },
-  { intensityScale: 1.0, exposure: 0.1, saturation: 1.78, tintColor: { r: 0.65, g: 0.7, b: 2.15 } },
+  { intensityScale: 0.5, exposure: 0.3, saturation: 1.8, tintColor: { r: 3, g: 1.2, b: 0.9 } },
+  { intensityScale: 0.5, exposure: 0.1, saturation: 2, tintColor: { r: 0.65, g: 0.7, b: 2.15 } },
 ]);
 
 /** Baseline window-light params (prismatic glass + timeline on by default). */
 const WINDOW_LIGHT_CORE_DEFAULTS = Object.freeze({
   enabled: true,
-  intensity: 12.85,
-  falloff: 1,
+  intensity: 6.75,
+  falloff: 1.95,
   color: { r: 1, g: 1, b: 1 },
   cloudInfluence: 1,
   cloudShadowContrast: 4,
@@ -90,11 +90,11 @@ const WINDOW_LIGHT_CORE_DEFAULTS = Object.freeze({
   cloudShadowGamma: 4,
   cloudShadowMinLight: 0,
   glassRefractionEnabled: true,
-  rgbShiftAmount: 5.88,
+  rgbShiftAmount: 7.15,
   rgbShiftAngle: 30,
-  rgbShiftSpread: 0.35,
-  rgbShiftEdgeWeight: 0.55,
-  rgbFringeSaturation: 1.35,
+  rgbShiftSpread: 0.46,
+  rgbShiftEdgeWeight: 1,
+  rgbFringeSaturation: 0,
   rgbFringeBalance: { r: 1, g: 1, b: 1 },
   rgbShiftAnimate: true,
   rgbShiftAnimSpeed: 0.45,

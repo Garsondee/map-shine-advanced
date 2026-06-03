@@ -211,14 +211,14 @@ export class LightingEffectV2 {
       /** Scales Foundry ambient brightest colour at darkness 0 (noon / bright scenes). */
       ambientDayScale: 0,
       /** Outdoor day ambient (_Outdoors mask); falls back to ambientDayScale when unset. */
-      ambientDayScaleOutdoor: 0,
+      ambientDayScaleOutdoor: 2.5,
       /** Indoor day ambient (_Outdoors mask); falls back to ambientDayScale when unset. */
-      ambientDayScaleIndoor: 0,
+      ambientDayScaleIndoor: 1.35,
       /** Scales Foundry ambient darkness colour at darkness 1 (night). */
       ambientNightScale: 0,
-      ambientNightScaleOutdoor: 0,
-      ambientNightScaleIndoor: 0,
-      lightIntensity: 0.75,
+      ambientNightScaleOutdoor: 2,
+      ambientNightScaleIndoor: 2,
+      lightIntensity: 0.9,
       /** Half-life falloff: normalized radius per halving at Foundry attenuation 0 (gentle). */
       falloffHalfInAtAtt0: 0.52,
       /** Foundry zone hardness at attenuation 1 (bright ring); larger = softer, fills radius. */
@@ -301,7 +301,7 @@ export class LightingEffectV2 {
        * Amplifies darkness from the unified combined shadow texture (1 = as authored,
        * up to 10 = treat subtle penumbra as much deeper shadow for tuning).
        */
-      combinedShadowEffectStrength: 2,
+      combinedShadowEffectStrength: 4,
       /** How much cloud / combined shadow darkens ambient here (0 = ignore, 1 = full). */
       cloudShadowAmbientInfluence: 0.45,
       /** Scales overhead shadow strength on ambient only (0 = off). */
@@ -331,15 +331,15 @@ export class LightingEffectV2 {
        * Window glow indirect illumination in compose (`totalIllumination += win × gain`).
        * Separate from point-lamp HDR in `_lightRT`.
        */
-      windowEmissiveGain: 1.0,
+      windowEmissiveGain: 1.3,
       /** Pow shaping on window mag in compose (lower = hotter cores, less flat wash). */
-      windowIndirectContrast: 0.65,
+      windowIndirectContrast: 0.74,
       /** Mix window hue into indirect illumination (0 = neutral white). */
-      windowWarmthTint: 0.62,
+      windowWarmthTint: 0,
       /** Scales indirect window spill by wall albedo luma (keeps texture on masonry). */
       windowAlbedoCoupling: 0.78,
       /** Small additive highlight on litColor after multiply (HDR-linear; not frame multiply). */
-      windowScreenSpill: 0.55,
+      windowScreenSpill: 0,
     };
 
     // ── Light management ────────────────────────────────────────────────
@@ -1389,6 +1389,9 @@ export class LightingEffectV2 {
       ? this._stackedLightRtB
       : this._stackedLightRtA;
     if (!out) return;
+    if (out.texture === accumTex || out.texture === this._lightRT?.texture) {
+      return;
+    }
 
     this._bindPerfRecorder();
     const _perfToken = this._beginPerfSpan('stackedLight.accumulate', 'render');
@@ -1647,7 +1650,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 3.5,
           step: 0.05,
-          default: 0.92,
+          default: 2.5,
           label: 'Day ambient — outdoor',
           tooltip: 'Scales Foundry ambient brightest on outdoor-classified pixels (porches, courtyards, sky reach).',
         },
@@ -1656,7 +1659,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 3.5,
           step: 0.05,
-          default: 0.62,
+          default: 1.35,
           label: 'Day ambient — indoor',
           tooltip: 'Scales Foundry ambient brightest on indoor-classified pixels (rooms under roof capture).',
         },
@@ -1675,7 +1678,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 2,
           step: 0.05,
-          default: 0.32,
+          default: 2,
           label: 'Night ambient — outdoor',
           tooltip: 'Scales Foundry ambientDarkness on outdoor pixels at high darkness.',
         },
@@ -1684,7 +1687,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 2,
           step: 0.05,
-          default: 0.27,
+          default: 2,
           label: 'Night ambient — indoor',
           tooltip: 'Scales Foundry ambientDarkness on indoor pixels; usually slightly lower than outdoor.',
         },
@@ -1693,7 +1696,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 3,
           step: 0.05,
-          default: 0.12,
+          default: 0,
           label: 'Minimum light floor',
           tooltip: 'Scales the darkest-scene safety floor so interiors never clip to pure black.',
         },
@@ -1702,7 +1705,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 2,
           step: 0.05,
-          default: 0.75,
+          default: 0.9,
           label: 'Point light gain',
           tooltip:
             'Emission multiplier on Foundry lamp meshes (`uComposeLightGain`) before `_lightRT` accumulation; compose reads the RT as-is so buffer overlap or noise does not get a second brightness pass. Torch/flash meshes follow the same value. Separate from Window glow / Day-night ambient.',
@@ -2013,7 +2016,7 @@ export class LightingEffectV2 {
           min: 1,
           max: 4,
           step: 0.05,
-          default: 2,
+          default: 4,
           label: 'Combined shadow strength',
           tooltip:
             'Amplifies unified shadow darkness on ambient only (1 = authored, 4 = very deep). Strong lights can still clear shadow override on structural paths.',
@@ -2135,7 +2138,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 4,
           step: 0.05,
-          default: 1,
+          default: 1.3,
           label: 'Window indirect gain',
           tooltip: 'Scales HDR window spill in compose (emit strength is on Window Light → Intensity).',
         },
@@ -2144,7 +2147,7 @@ export class LightingEffectV2 {
           min: 0.35,
           max: 1.2,
           step: 0.02,
-          default: 0.55,
+          default: 0.74,
           label: 'Window contrast',
           tooltip: 'Lower = hotter window cores and softer penumbra (less flat grey at high intensity).',
         },
@@ -2153,7 +2156,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 1,
           step: 0.02,
-          default: 0.62,
+          default: 0,
           label: 'Window warmth tint',
           tooltip: 'How much emit colour tints nearby walls in compose (0 = neutral white spill).',
         },
@@ -2171,7 +2174,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 2,
           step: 0.05,
-          default: 0.55,
+          default: 0,
           label: 'Window core glow',
           tooltip: 'Small additive warm highlight on lit pixels at window cores (HDR-linear; not a full-frame multiply).',
         },
@@ -4181,7 +4184,9 @@ export class LightingEffectV2 {
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
+    const prevLayerMask = camera.layers.mask;
 
+    try {
     _perfToken = this._beginPerfSpan('roofOcclusionUniforms', 'render', { cpuOnly: true });
     const persp = this._lightingPerspectiveContext ?? createLightingPerspectiveContext();
     const cu0 = this._composeMaterial.uniforms;
@@ -4232,8 +4237,7 @@ export class LightingEffectV2 {
     const reuseFoundryPrepass = this._canReuseLightMaskPrepassFoundryDraw(w, h, renderFloorForLights);
 
     // ── Pass 1: Accumulate Foundry light mesh contributions ───────────
-    // Save camera layer mask — ThreeLightSource meshes live on layer 0.
-    const prevLayerMask = camera.layers.mask;
+    // ThreeLightSource meshes live on layer 0.
     camera.layers.enableAll();
 
     if (reuseFoundryPrepass) {
@@ -4297,9 +4301,6 @@ export class LightingEffectV2 {
       renderer.render(this._darknessScene, camera);
     }
     this._endPerfSpan(_perfToken);
-
-    // Restore camera layer mask
-    camera.layers.mask = prevLayerMask;
 
     // ── Pass 3: Compose ───────────────────────────────────────────────
     _perfToken = this._beginPerfSpan('composeUniforms.coreTextures', 'render', { cpuOnly: true });
@@ -4422,18 +4423,23 @@ export class LightingEffectV2 {
     this._endPerfSpan(_perfToken);
 
     this._perfSession.composeDraws += 1;
-    _perfToken = this._beginPerfSpan('composeDraw', 'render', {
-      gpuSlot: { index: 1, count: 2 },
-    });
-    renderer.setRenderTarget(outputRT);
-    renderer.setClearColor(0x000000, 1);
-    renderer.autoClear = true;
-    renderer.render(this._composeScene, this._composeCamera);
-    this._endPerfSpan(_perfToken);
-
-    // Restore renderer state
-    renderer.autoClear = prevAutoClear;
-    renderer.setRenderTarget(prevTarget);
+    if (sceneRT === outputRT || sceneRT?.texture === outputRT?.texture) {
+      log.warn('LightingEffectV2: compose sceneRT aliases outputRT — skipping draw to avoid framebuffer feedback');
+    } else {
+      _perfToken = this._beginPerfSpan('composeDraw', 'render', {
+        gpuSlot: { index: 1, count: 2 },
+      });
+      renderer.setRenderTarget(outputRT);
+      renderer.setClearColor(0x000000, 1);
+      renderer.autoClear = true;
+      renderer.render(this._composeScene, this._composeCamera);
+      this._endPerfSpan(_perfToken);
+    }
+    } finally {
+      camera.layers.mask = prevLayerMask;
+      renderer.autoClear = prevAutoClear;
+      renderer.setRenderTarget(prevTarget);
+    }
   }
 
   // ── Resize ────────────────────────────────────────────────────────────

@@ -181,6 +181,9 @@ export class CloudEffectV2 {
     this._tempSpawnUV = { u: 0, v: 0 };
     this._tempSize = null;
     this._lastElapsed = 0;
+    /** Last motion delta from update (0 when paused / navigation-lite). */
+    this._lastMotionDelta = 0;
+    this._lastTimePaused = false;
     this._needsNeutralClear = false;
     this._cloudCoverZeroLF = false;
     this._cloudCoverEpsilon = 0.0001;
@@ -211,8 +214,11 @@ export class CloudEffectV2 {
     this._lastRTSceneKey = '';
     this._activePerfRecorder = null;
 
-    /** Cached shadow pass keys — skip RT work when inputs are unchanged (no active sprites only). */
+    /** Cached shadow pass keys — skip RT work when static + sprite motion buckets are unchanged. */
     this._shadowRawCacheKey = '';
+    /** Norm-UV / fade quantize steps for shadow motion signature (see `_computeShadowMotionSignature`). */
+    this._shadowMotionUStep = 0.006;
+    this._shadowMotionFadeStep = 0.1;
     this._shadowMaskCacheKey = '';
     this._cloudTopCacheKey = '';
     /** World-space bucket size for view-bound driven shadow mask UVs. */
@@ -901,12 +907,43 @@ export class CloudEffectV2 {
 
   // ── Update ────────────────────────────────────────────────────────────────
 
-  /** @param {{ elapsed: number, delta: number }} timeInfo */
+  /**
+   * View/sun refresh while the camera pans — sprite sim is skipped so shadow RTs can cache.
+   * @param {{ elapsed?: number, delta?: number, motionDelta?: number, paused?: boolean }} timeInfo
+   */
+  updateNavigationLite(timeInfo) {
+    if (!this._initialized || !this.params.enabled) return;
+    this._bindPerfRecorder();
+    this._lastElapsed = timeInfo?.elapsed ?? 0;
+    this._lastMotionDelta = 0;
+    this._lastTimePaused = timeInfo?.paused === true;
+
+    const ws = this._getWeatherState();
+    if (!ws.weatherEnabled || this._isCoverZero(ws.cloudCover)) {
+      if (!this._cloudCoverZeroLF) this._needsNeutralClear = true;
+      this._cloudCoverZeroLF = true;
+      return;
+    }
+    this._cloudCoverZeroLF = false;
+    this._needsNeutralClear = false;
+
+    this._calcSunDir();
+    this._updateViewBounds();
+    this._updateSceneBounds();
+    this._updateCaptureCamera();
+    this._updateShadowMaskUniforms();
+  }
+
+  /** @param {{ elapsed: number, delta: number, motionDelta?: number, paused?: boolean }} timeInfo */
   update(timeInfo) {
     if (!this._initialized || !this.params.enabled) return;
     this._bindPerfRecorder();
     this._lastElapsed = timeInfo?.elapsed ?? 0;
-    const delta = Math.max(0, Number(timeInfo?.delta) || 0.016);
+    const delta = Math.max(0, Number.isFinite(timeInfo?.motionDelta)
+      ? Number(timeInfo.motionDelta)
+      : (Number.isFinite(timeInfo?.delta) ? Number(timeInfo.delta) : 0));
+    this._lastMotionDelta = delta;
+    this._lastTimePaused = timeInfo?.paused === true;
 
     let _perfToken = this._beginPerfSpan('weatherGate', 'update');
     const ws = this._getWeatherState();
@@ -1002,26 +1039,24 @@ export class CloudEffectV2 {
       const topVisible = topFade > 0.01;
 
       const staticKey = this._computeShadowStaticCacheKey();
-      const perFrameShadow = this._requiresPerFrameShadowPasses();
-      const rawCacheHit = !perFrameShadow && staticKey === this._shadowRawCacheKey && !!this._shadowRawCacheKey;
+      const motionSig = this._computeShadowMotionSignature();
+      const rawCacheKey = this._composeShadowRawCacheKey(staticKey, motionSig);
+      const rawCacheHit = rawCacheKey === this._shadowRawCacheKey && !!this._shadowRawCacheKey;
       const maskKey = this._computeShadowMaskCacheKey(staticKey);
       const maskCacheHit = rawCacheHit && maskKey === this._shadowMaskCacheKey && !!this._shadowMaskCacheKey;
-      const cloudTopKey = this._computeCloudTopCacheKey(staticKey, topFade);
+      const cloudTopKey = this._computeCloudTopCacheKey(staticKey, topFade, motionSig);
       const animatedCloudTop = this._isAnimatedCloudTop();
-      const cloudTopCacheHit = !animatedCloudTop && !perFrameShadow
-        && cloudTopKey === this._cloudTopCacheKey && !!this._cloudTopCacheKey;
+      const cloudTopCacheHit = !animatedCloudTop && cloudTopKey === this._cloudTopCacheKey && !!this._cloudTopCacheKey;
 
       if (rawCacheHit) this._shadowCacheStats.rawHit++;
       else {
         this._shadowCacheStats.rawMiss++;
-        if (perFrameShadow) {
-          this._shadowCacheStats.lastMissReason = 'motionActive';
-        } else if (!this._shadowRawCacheKey) {
+        if (!this._shadowRawCacheKey) {
           this._shadowCacheStats.lastMissReason = 'coldStart';
-        } else if (staticKey !== this._shadowRawCacheKey) {
-          this._shadowCacheStats.lastMissReason = 'staticKeyChanged';
         } else {
-          this._shadowCacheStats.lastMissReason = 'unknown';
+          this._shadowCacheStats.lastMissReason = this._shadowCacheMissReason(
+            staticKey, motionSig, this._shadowRawCacheKey,
+          );
         }
       }
       if (maskCacheHit) this._shadowCacheStats.maskHit++;
@@ -1041,7 +1076,7 @@ export class CloudEffectV2 {
         _perfToken = this._beginPerfSpan('shadowRaw', 'render');
         try {
           this._renderShadows(renderer);
-          this._shadowRawCacheKey = staticKey;
+          this._shadowRawCacheKey = rawCacheKey;
           this._shadowMaskCacheKey = '';
           this._cloudTopCacheKey = '';
         } finally {
@@ -1153,13 +1188,81 @@ export class CloudEffectV2 {
   }
 
   /**
-   * Drifting sprites, fades, and panning all need fresh shadow RTs every frame.
-   * Cache only when no sprites are visible (neutral / zero-cover clears).
+   * Quantized visible-sprite UV + fade state. Bucketed so small drift / fade steps can cache-hit.
    * @private
-   * @returns {boolean}
+   * @returns {string}
    */
-  _requiresPerFrameShadowPasses() {
-    return (this._lastActiveTotal ?? 0) > 0;
+  _computeShadowMotionSignature() {
+    const uStep = this._shadowMotionUStep;
+    const fadeStep = this._shadowMotionFadeStep;
+    const parts = [];
+    for (const sprite of this._cloudSprites) {
+      if (!sprite?.mesh.visible) continue;
+      parts.push(
+        this._quantizeShadowBucket(sprite.normU, uStep),
+        this._quantizeShadowBucket(sprite.normV, uStep),
+        this._quantizeShadowBucket(sprite.fadeMul ?? 1, fadeStep),
+      );
+    }
+    return parts.join(',');
+  }
+
+  /** @private @param {string} staticKey @param {string} motionSig */
+  _composeShadowRawCacheKey(staticKey, motionSig) {
+    return `${staticKey}#${motionSig}`;
+  }
+
+  /** @private @param {string} rawCacheKey */
+  _parseShadowRawCacheKey(rawCacheKey) {
+    const hash = rawCacheKey.indexOf('#');
+    if (hash < 0) return { staticKey: rawCacheKey, motionSig: '' };
+    return {
+      staticKey: rawCacheKey.slice(0, hash),
+      motionSig: rawCacheKey.slice(hash + 1),
+    };
+  }
+
+  /**
+   * @private
+   * @param {string} staticKey
+   * @param {string} motionSig
+   * @param {string} cachedRawKey
+   * @returns {string}
+   */
+  _shadowCacheMissReason(staticKey, motionSig, cachedRawKey) {
+    const cached = this._parseShadowRawCacheKey(cachedRawKey);
+    if (cached.staticKey !== staticKey) return 'staticKeyChanged';
+    if (cached.motionSig === motionSig) return 'unknown';
+    return this._shadowCacheMotionDeltaReason(cached.motionSig, motionSig);
+  }
+
+  /**
+   * @private
+   * @param {string} prevSig
+   * @param {string} nextSig
+   * @returns {string}
+   */
+  _shadowCacheMotionDeltaReason(prevSig, nextSig) {
+    const prev = prevSig ? prevSig.split(',').map(Number) : [];
+    const next = nextSig ? nextSig.split(',').map(Number) : [];
+    const n = Math.min(prev.length, next.length);
+    let fadeBuckets = 0;
+    let uvBuckets = 0;
+    for (let i = 0; i < n; i += 3) {
+      if (prev[i] !== next[i] || prev[i + 1] !== next[i + 1]) uvBuckets++;
+      if (prev[i + 2] !== next[i + 2]) fadeBuckets++;
+    }
+    if (fadeBuckets > 0 && uvBuckets === 0) return 'spriteFade';
+    if (uvBuckets > 0) return 'spriteDrift';
+    return 'spriteMotion';
+  }
+
+  /** @private @returns {boolean} True when the raw cache key would change vs the last rendered shadow. */
+  _shadowRawCacheWouldMiss() {
+    if (!this._shadowRawCacheKey) return true;
+    const staticKey = this._computeShadowStaticCacheKey();
+    const motionSig = this._computeShadowMotionSignature();
+    return this._composeShadowRawCacheKey(staticKey, motionSig) !== this._shadowRawCacheKey;
   }
 
   /** @private @param {string} paramId */
@@ -1199,7 +1302,7 @@ export class CloudEffectV2 {
     return String(tex.uuid ?? tex.id ?? tex);
   }
 
-  /** @private — static inputs only; active sprites bypass cache via `_requiresPerFrameShadowPasses`. */
+  /** @private — resolution, sun, and pool size (sprite motion is in `_computeShadowMotionSignature`). */
   _computeShadowStaticCacheKey() {
     const p = this.params;
     return [
@@ -1235,12 +1338,13 @@ export class CloudEffectV2 {
     ].join('|');
   }
 
-  /** @private @param {string} staticKey @param {number} topFade */
-  _computeCloudTopCacheKey(staticKey, topFade) {
+  /** @private @param {string} staticKey @param {number} topFade @param {string} [motionSig=''] */
+  _computeCloudTopCacheKey(staticKey, topFade, motionSig = '') {
     const p = this.params;
     const lightingBucket = this._computeLightingCacheBucket();
     return [
       staticKey,
+      motionSig,
       this._quantizeShadowBucket(topFade, 0.08),
       this._quantizeShadowBucket(p.cloudTopOpacity, 0.02),
       this._quantizeShadowBucket(p.cloudBrightness, 0.02),
@@ -1263,8 +1367,13 @@ export class CloudEffectV2 {
       rawHitPct: rawTotal > 0 ? (s.rawHit / rawTotal) * 100 : 0,
       maskHitPct: maskTotal > 0 ? (s.maskHit / maskTotal) * 100 : 0,
       cloudTopHitPct: topTotal > 0 ? (s.cloudTopHit / topTotal) * 100 : 0,
-      perFrameShadow: this._requiresPerFrameShadowPasses(),
+      perFrameShadow: this._shadowRawCacheWouldMiss(),
       spritesActive: (this._lastActiveTotal ?? 0) > 0,
+      spriteMotionActive: this._shadowRawCacheWouldMiss(),
+      lastMotionDelta: this._lastMotionDelta,
+      navigationLite: (() => {
+        try { return !!window.MapShine?.__v2NavigationLiteUpdates; } catch (_) { return false; }
+      })(),
     };
   }
 
@@ -1346,7 +1455,9 @@ export class CloudEffectV2 {
 
   /** @private */
   _renderNeutral(renderer) {
-    this._invalidateShadowPassCache();
+    if (this._shadowRawCacheKey || (this._lastActiveTotal ?? 0) > 0) {
+      this._invalidateShadowPassCache();
+    }
     if (this._shadowRT) {
       renderer.setRenderTarget(this._shadowRT);
       renderer.setClearColor(0xffffff, 1);

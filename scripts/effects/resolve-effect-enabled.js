@@ -17,6 +17,100 @@
  * @module effects/resolve-effect-enabled
  */
 
+import * as sceneSettings from '../settings/scene-settings.js';
+
+/** Stylistic fullscreen passes synced from scene flags (not repopulate snapshots). */
+export const STYLISTIC_EFFECT_FC_KEYS = Object.freeze([
+  ['ascii', '_asciiEffect'],
+  ['dotScreen', '_dotScreenEffect'],
+  ['halftone', '_halftoneEffect'],
+  ['visionMode', '_visionModeEffect'],
+  ['invert', '_invertEffect'],
+  ['sepia', '_sepiaEffect'],
+  ['dazzleOverlay', '_dazzleOverlayEffect'],
+]);
+
+/** @type {Set<string>} */
+const STYLISTIC_FC_KEY_SET = new Set(STYLISTIC_EFFECT_FC_KEYS.map(([, key]) => key));
+
+/**
+ * @param {string} fcKey
+ * @returns {boolean}
+ */
+export function isStylisticEffectFcKey(fcKey) {
+  return STYLISTIC_FC_KEY_SET.has(fcKey);
+}
+
+/**
+ * Resolve whether a stylistic effect should be enabled from scene flags.
+ * Vision mode defaults on when both branches are unset.
+ *
+ * @param {string} effectId
+ * @param {object} [mapMakerEffects]
+ * @param {object} [gmEffects]
+ * @returns {boolean}
+ */
+export function resolveStylisticEnabled(effectId, mapMakerEffects = {}, gmEffects = {}) {
+  const mmEnabled = mapMakerEffects?.[effectId]?.enabled;
+  const gmEnabled = gmEffects?.[effectId]?.enabled;
+  if (mmEnabled === true || gmEnabled === true) return true;
+
+  if (effectId === 'visionMode') {
+    const hasExplicitBoolean =
+      mmEnabled === true || mmEnabled === false || gmEnabled === true || gmEnabled === false;
+    if (!hasExplicitBoolean) return true;
+  }
+  return false;
+}
+
+/**
+ * Apply scene-flag authoritative enablement for stylistic fullscreen passes.
+ * Uses FloorCompositor.applyParam so getter/setter effects stay in sync.
+ *
+ * @param {object|null|undefined} floorCompositor
+ * @param {object|null|undefined} [scene]
+ * @param {{ syncUi?: boolean }} [options]
+ */
+export function syncStylisticEffectGate(floorCompositor, scene = null, options = {}) {
+  const fc = floorCompositor;
+  if (!fc || typeof fc.applyParam !== 'function') return;
+
+  let mm = {};
+  let gm = {};
+  try {
+    const resolvedScene = scene ?? globalThis.canvas?.scene ?? null;
+    if (resolvedScene) {
+      const all = sceneSettings.getSceneSettings(resolvedScene);
+      mm = all?.mapMaker?.effects || {};
+      gm = all?.gm?.effects || {};
+    }
+  } catch (_) {}
+
+  const ui = options.syncUi === false ? null : (window.MapShine?.uiManager ?? null);
+
+  for (const [effectId, fcKey] of STYLISTIC_EFFECT_FC_KEYS) {
+    let enabled = resolveStylisticEnabled(effectId, mm, gm);
+    try {
+      const gsm = window.MapShine?.graphicsSettingsManager;
+      if (gsm?.getEffectiveEnabled && gsm.getEffectiveEnabled(effectId) === false) {
+        enabled = false;
+      }
+    } catch (_) {}
+
+    try {
+      fc.applyParam(fcKey, 'enabled', enabled);
+    } catch (_) {}
+
+    if (!ui) continue;
+    try {
+      const fd = ui.effectFolders?.[effectId];
+      if (fd?.params && Object.prototype.hasOwnProperty.call(fd.params, 'enabled')) {
+        fd.params.enabled = enabled;
+      }
+    } catch (_) {}
+  }
+}
+
 /**
  * Determine the effective enabled state for a compositor effect.
  *

@@ -13,6 +13,11 @@ import { frameCoordinator } from '../core/frame-coordinator.js';
 import { getGlobalFrameState } from '../core/frame-state.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 import {
+  resolveStylisticEnabled,
+  STYLISTIC_EFFECT_FC_KEYS,
+  syncStylisticEffectGate,
+} from './resolve-effect-enabled.js';
+import {
   BLOOM_HOTSPOT_LAYER,
   OVERLAY_THREE_LAYER,
   GLOBAL_SCENE_LAYER,
@@ -23,29 +28,6 @@ import { FloorCompositor } from '../compositor-v2/FloorCompositor.js';
 import { flushLandscapeLightningWhenCompositorReady } from '../ui/landscape-lightning-bridge.js';
 
 const log = createLogger('EffectComposer');
-
-/**
- * Resolve whether a stylistic effect should be enabled from scene flags.
- * For most effects, only explicit true enables the pass.
- * Vision mode is special-cased to default-on when both branches are unset.
- *
- * @param {string} effectId
- * @param {object} mapMakerEffects
- * @param {object} gmEffects
- * @returns {boolean}
- */
-function resolveStylisticEnabled(effectId, mapMakerEffects = {}, gmEffects = {}) {
-  const mmEnabled = mapMakerEffects?.[effectId]?.enabled;
-  const gmEnabled = gmEffects?.[effectId]?.enabled;
-  if (mmEnabled === true || gmEnabled === true) return true;
-
-  if (effectId === 'visionMode') {
-    const hasExplicitBoolean =
-      mmEnabled === true || mmEnabled === false || gmEnabled === true || gmEnabled === false;
-    if (!hasExplicitBoolean) return true;
-  }
-  return false;
-}
 
 /**
  * Effect render layers (ordered by render sequence)
@@ -771,10 +753,11 @@ export class EffectComposer {
       } catch (_) {}
     }
 
-    this._applyStylisticEffectGate(timeInfo);
-
     // ── Render: FloorCompositor only (no effects, no overlay) ─────────
     const _compositorV2 = this._getFloorCompositorV2();
+    // Gate after lazy compositor creation so scene-flag enablement cannot lose
+    // to stale Tweakpane/graphics-settings writes on the first frame.
+    this._applyStylisticEffectGate(timeInfo);
     _compositorV2.render({
       // floorStack can be transiently null during early Foundry boot or
       // recovery init paths. V2 must still be the sole renderer in that
@@ -909,15 +892,7 @@ export class EffectComposer {
       // stale `enabled: true` when callbacks were dropped before V2 existed,
       // which turns on Ascii/Dot/Halftone/etc. and reads as a "broken pipeline"
       // failure state. Scene flags (below) are authoritative for `enabled`.
-      const STYLISTIC_SCENE_FLAG_TO_FC = [
-        ['ascii', '_asciiEffect'],
-        ['dotScreen', '_dotScreenEffect'],
-        ['halftone', '_halftoneEffect'],
-        ['visionMode', '_visionModeEffect'],
-        ['invert', '_invertEffect'],
-        ['sepia', '_sepiaEffect'],
-        ['dazzleOverlay', '_dazzleOverlayEffect'],
-      ];
+      const STYLISTIC_SCENE_FLAG_TO_FC = STYLISTIC_EFFECT_FC_KEYS;
       const STYLISTIC_EFFECT_ID_SET = new Set(STYLISTIC_SCENE_FLAG_TO_FC.map(([id]) => id));
 
       try {
@@ -984,21 +959,7 @@ export class EffectComposer {
         // Stylistic `enabled`: mapMaker / gm scene flags only (strict `=== true`),
         // then sync Tweakpane folder state so UI matches runtime.
         try {
-          const scene = globalThis.canvas?.scene;
-          const allSettings = sceneSettings.getSceneSettings(scene);
-          const mm = allSettings?.mapMaker?.effects || {};
-          const gm = allSettings?.gm?.effects || {};
-          const ui = window.MapShine?.uiManager;
-          for (const [effectId, fcKey] of STYLISTIC_SCENE_FLAG_TO_FC) {
-            const explicitOn = resolveStylisticEnabled(effectId, mm, gm);
-            this._floorCompositorV2.applyParam(fcKey, 'enabled', explicitOn);
-            try {
-              const fd = ui?.effectFolders?.[effectId];
-              if (fd?.params && Object.prototype.hasOwnProperty.call(fd.params, 'enabled')) {
-                fd.params.enabled = explicitOn;
-              }
-            } catch (_) {}
-          }
+          syncStylisticEffectGate(this._floorCompositorV2, globalThis.canvas?.scene ?? null);
         } catch (err) {
           log.warn('FloorCompositor V2: stylistic effect gate failed:', err);
         }
@@ -1040,36 +1001,17 @@ export class EffectComposer {
    * @param {object|null} [timeInfo]
    * @private
    */
-  _applyStylisticEffectGate(timeInfo = null) {
+  _applyStylisticEffectGate(_timeInfo = null) {
     try {
-      const _fc = this._floorCompositorV2;
-      if (!_fc) return;
-
-      const _scene = globalThis.canvas?.scene;
-      const _allSettings = sceneSettings.getSceneSettings(_scene);
-      const _mm = _allSettings?.mapMaker?.effects || {};
-      const _gm = _allSettings?.gm?.effects || {};
-      const _stylisticGates = [
-        ['ascii', '_asciiEffect'],
-        ['dotScreen', '_dotScreenEffect'],
-        ['halftone', '_halftoneEffect'],
-        ['visionMode', '_visionModeEffect'],
-        ['invert', '_invertEffect'],
-        ['sepia', '_sepiaEffect'],
-        ['dazzleOverlay', '_dazzleOverlayEffect'],
-      ];
-      for (const [effectId, fcKey] of _stylisticGates) {
-        const explicitOn = resolveStylisticEnabled(effectId, _mm, _gm);
-        const eff = _fc[fcKey];
-        if (!eff) continue;
-        if (typeof eff.enabled !== 'undefined') eff.enabled = explicitOn;
-        if (eff.params && Object.prototype.hasOwnProperty.call(eff.params, 'enabled')) {
-          eff.params.enabled = explicitOn;
-        }
-      }
+      syncStylisticEffectGate(this._floorCompositorV2, globalThis.canvas?.scene ?? null);
       if (window.MapShine?.__v2FrameTraceEnabled === true) {
+        const _fc = this._floorCompositorV2;
+        const _scene = globalThis.canvas?.scene;
+        const _allSettings = sceneSettings.getSceneSettings(_scene);
+        const _mm = _allSettings?.mapMaker?.effects || {};
+        const _gm = _allSettings?.gm?.effects || {};
         const gateDiag = {};
-        for (const [effectId, fcKey] of _stylisticGates) {
+        for (const [effectId, fcKey] of STYLISTIC_EFFECT_FC_KEYS) {
           const explicitOn = _mm[effectId]?.enabled === true || _gm[effectId]?.enabled === true;
           const eff = _fc?.[fcKey];
           gateDiag[effectId] = {
@@ -1080,7 +1022,7 @@ export class EffectComposer {
           };
         }
         const entry = {
-          frame: Number(timeInfo?.frameCount ?? -1),
+          frame: Number(_timeInfo?.frameCount ?? -1),
           gateDiag,
         };
         if (!Array.isArray(window.MapShine.__v2FrameTraceStylistic)) {

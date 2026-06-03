@@ -131,7 +131,7 @@ import { SkyOcclusionPrimitive } from './shadow-system/SkyOcclusionPrimitive.js'
 import { VegetationBillboardShadowPass } from './shadow-system/VegetationBillboardShadowPass.js';
 import { TreeCanopyOcclusionPass } from './shadow-system/TreeCanopyOcclusionPass.js';
 import { resolveEffectShadowSun2D } from './shadow-system/ShadowSunDirection.js';
-import { resolveEffectEnabled, resolveOverlayEffectActive, resolveFloorEffectActive } from '../effects/resolve-effect-enabled.js';
+import { resolveEffectEnabled, resolveOverlayEffectActive, resolveFloorEffectActive, syncStylisticEffectGate, isStylisticEffectFcKey } from '../effects/resolve-effect-enabled.js';
 
 const log = createLogger('FloorCompositor');
 
@@ -1387,19 +1387,22 @@ export class FloorCompositor {
    * so these effects must not run only inside the per-level loop.
    *
    * @param {THREE.WebGLRenderTarget} inputRT
-   * @param {() => THREE.WebGLRenderTarget} pickOtherPost
    * @param {boolean} [_profiling]
    * @returns {THREE.WebGLRenderTarget}
    * @private
    */
-  _runPostMergeStylizationPasses(inputRT, pickOtherPost, _profiling = false) {
+  _runPostMergeStylizationPasses(inputRT, _profiling = false) {
     // Fullscreen post on the merged composite (same as ColorCorrection post-merge):
     // do not scissor — autoClear + a zero-area or stale scissor can leave the RT black.
     return withoutSceneScissor(this.renderer, () => {
       let currentInput = inputRT;
+      // Ping-pong against currentInput — NOT mergedCompositeOut at chain entry.
+      // Using the outer post-merge anchor for every pass causes pass 2+ to read/write
+      // the same RT (WebGL feedback loop → GL_INVALID_OPERATION → black frame).
+      const pickOther = (rt) => (rt === this._postA) ? this._postB : this._postA;
 
       if (resolveEffectEnabled(this._sharpenEffect)) {
-        const shOut = pickOtherPost();
+        const shOut = pickOther(currentInput);
         this._profileEffectCall('sharpen.postMerge', 'render', () => {
           this._sharpenEffect.render(this.renderer, currentInput, shOut);
         }, 'SharpenEffectV2 postMerge render');
@@ -1407,7 +1410,7 @@ export class FloorCompositor {
       }
 
       if (resolveEffectEnabled(this._dotScreenEffect)) {
-        const dsOut = pickOtherPost();
+        const dsOut = pickOther(currentInput);
         let wrote = false;
         this._profileEffectCall('dotScreen.postMerge', 'render', () => {
           wrote = !!this._dotScreenEffect.render(this.renderer, this.camera, currentInput, dsOut);
@@ -1415,7 +1418,7 @@ export class FloorCompositor {
         if (wrote) currentInput = dsOut;
       }
       if (resolveEffectEnabled(this._halftoneEffect)) {
-        const htOut = pickOtherPost();
+        const htOut = pickOther(currentInput);
         let wrote = false;
         this._profileEffectCall('halftone.postMerge', 'render', () => {
           wrote = !!this._halftoneEffect.render(this.renderer, this.camera, currentInput, htOut);
@@ -1423,7 +1426,7 @@ export class FloorCompositor {
         if (wrote) currentInput = htOut;
       }
       if (resolveEffectEnabled(this._asciiEffect)) {
-        const ascOut = pickOtherPost();
+        const ascOut = pickOther(currentInput);
         let wrote = false;
         this._profileEffectCall('ascii.postMerge', 'render', () => {
           wrote = !!this._asciiEffect.render(this.renderer, this.camera, currentInput, ascOut);
@@ -1431,7 +1434,7 @@ export class FloorCompositor {
         if (wrote) currentInput = ascOut;
       }
       if (resolveEffectEnabled(this._dazzleOverlayEffect)) {
-        const dzOut = pickOtherPost();
+        const dzOut = pickOther(currentInput);
         let wrote = false;
         this._profileEffectCall('dazzleOverlay.postMerge', 'render', () => {
           wrote = !!this._dazzleOverlayEffect.render(this.renderer, this.camera, currentInput, dzOut);
@@ -1439,7 +1442,7 @@ export class FloorCompositor {
         if (wrote) currentInput = dzOut;
       }
       if (resolveEffectEnabled(this._visionModeEffect)) {
-        const vmOut = pickOtherPost();
+        const vmOut = pickOther(currentInput);
         let wrote = false;
         this._profileEffectCall('visionMode.postMerge', 'render', () => {
           wrote = !!this._visionModeEffect.render(this.renderer, this.camera, currentInput, vmOut);
@@ -1447,7 +1450,7 @@ export class FloorCompositor {
         if (wrote) currentInput = vmOut;
       }
       if (resolveEffectEnabled(this._invertEffect)) {
-        const invOut = pickOtherPost();
+        const invOut = pickOther(currentInput);
         let wrote = false;
         this._profileEffectCall('invert.postMerge', 'render', () => {
           wrote = !!this._invertEffect.render(this.renderer, this.camera, currentInput, invOut);
@@ -1455,7 +1458,7 @@ export class FloorCompositor {
         if (wrote) currentInput = invOut;
       }
       if (resolveEffectEnabled(this._sepiaEffect)) {
-        const sepOut = pickOtherPost();
+        const sepOut = pickOther(currentInput);
         let wrote = false;
         this._profileEffectCall('sepia.postMerge', 'render', () => {
           wrote = !!this._sepiaEffect.render(this.renderer, this.camera, currentInput, sepOut);
@@ -5634,13 +5637,19 @@ export class FloorCompositor {
     if (!snapshot || !(snapshot instanceof Map) || snapshot.size === 0) return;
     for (const [effectKey, entry] of snapshot.entries()) {
       if (!entry || !entry.params || typeof entry.params !== 'object') continue;
-      if (typeof entry.enabled === 'boolean') {
+      // Stylistic enabled is scene-flag authoritative — repopulate snapshots must
+      // not resurrect stale enabled:true and blacken the post-merge chain.
+      if (!isStylisticEffectFcKey(effectKey) && typeof entry.enabled === 'boolean') {
         this.applyParam(effectKey, 'enabled', entry.enabled);
       }
       for (const [paramId, value] of Object.entries(entry.params)) {
+        if (isStylisticEffectFcKey(effectKey) && paramId === 'enabled') continue;
         this.applyParam(effectKey, paramId, this._cloneEffectParamValue(value));
       }
     }
+    try {
+      syncStylisticEffectGate(this, globalThis.canvas?.scene ?? null, { syncUi: false });
+    } catch (_) {}
   }
 
   // ── Floor Visibility ──────────────────────────────────────────────────────
@@ -8631,7 +8640,6 @@ export class FloorCompositor {
     if (_profiling) _profileT0 = performance.now();
     mergedCompositeOut = this._runPostMergeStylizationPasses(
       mergedCompositeOut,
-      _pickOtherPost,
       _profiling,
     );
     if (_profiling) this._recordPassTiming('postMerge_stylization', _profileT0);

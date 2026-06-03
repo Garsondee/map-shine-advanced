@@ -128,6 +128,7 @@ export class SepiaEffectV2 {
 
     const geometry = new THREE.PlaneGeometry(2, 2);
     this._mesh = new THREE.Mesh(geometry, this._material);
+    this._mesh.frustumCulled = false;
     this._quadScene.add(this._mesh);
 
     this._initialized = true;
@@ -139,7 +140,7 @@ export class SepiaEffectV2 {
   }
 
   render(renderer, camera, inputRT, outputRT) {
-    if (!resolveEffectEnabled(this) || !this._initialized || !this._material) return false;
+    if (!this._enabled || !this._initialized || !this._material) return false;
     if (!inputRT?.texture || !outputRT) return false;
     if ((Number(this.params.strength) || 0) < 1e-4) return false;
 

@@ -1,4 +1,5 @@
 import { createLogger } from '../../core/log.js';
+import { MSA_POST_STYLIZE_INPUT_GLSL } from '../msa-post-stylize-input.glsl.js';
 
 const log = createLogger('InvertEffectV2');
 
@@ -101,11 +102,14 @@ export class InvertEffectV2 {
         uniform float uStrength;
         varying vec2 vUv;
 
+        ${MSA_POST_STYLIZE_INPUT_GLSL}
+
         void main() {
           vec4 base = texture2D(tDiffuse, vUv);
-          vec3 inverted = vec3(1.0) - base.rgb;
-          vec3 color = mix(base.rgb, inverted, uStrength);
-          gl_FragColor = vec4(color, base.a);
+          vec3 color = msaPostStylizePrepareRgb(base.rgb);
+          vec3 inverted = vec3(1.0) - clamp(color, 0.0, 1.0);
+          color = mix(color, inverted, clamp(uStrength, 0.0, 1.0));
+          gl_FragColor = vec4(max(color, vec3(0.0)), base.a);
         }
       `,
       depthWrite: false,
@@ -127,6 +131,8 @@ export class InvertEffectV2 {
 
   render(renderer, camera, inputRT, outputRT) {
     if (!this._enabled || !this._initialized || !this._material) return false;
+    if (!inputRT?.texture || !outputRT) return false;
+    if ((Number(this.params.strength) || 0) < 1e-4) return false;
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
@@ -134,7 +140,7 @@ export class InvertEffectV2 {
     this._material.uniforms.tDiffuse.value = inputRT.texture;
 
     renderer.setRenderTarget(outputRT);
-    renderer.autoClear = false;
+    renderer.autoClear = true;
     renderer.render(this._quadScene, this._quadCamera);
 
     renderer.autoClear = prevAutoClear;

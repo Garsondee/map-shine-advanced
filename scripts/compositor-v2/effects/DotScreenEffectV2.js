@@ -1,4 +1,5 @@
 import { createLogger } from '../../core/log.js';
+import { MSA_POST_STYLIZE_INPUT_GLSL } from '../msa-post-stylize-input.glsl.js';
 
 const log = createLogger('DotScreenEffectV2');
 
@@ -190,11 +191,14 @@ export class DotScreenEffectV2 {
           return (sin(point.x) * sin(point.y)) * 4.0;
         }
 
+        ${MSA_POST_STYLIZE_INPUT_GLSL}
+
         void main() {
           vec4 base = texture2D(tDiffuse, vUv);
-          float average = (base.r + base.g + base.b) / 3.0;
+          vec3 prepared = msaPostStylizePrepareRgb(base.rgb);
+          float average = (prepared.r + prepared.g + prepared.b) / 3.0;
           vec3 dots = vec3(average * 10.0 - 5.0 + pattern());
-          vec3 color = mix(base.rgb, dots, clamp(uStrength, 0.0, 1.0));
+          vec3 color = mix(prepared, dots, clamp(uStrength, 0.0, 1.0));
           gl_FragColor = vec4(color, base.a);
         }
       `,
@@ -243,7 +247,7 @@ export class DotScreenEffectV2 {
     }
 
     renderer.setRenderTarget(outputRT);
-    renderer.autoClear = false;
+    renderer.autoClear = true;
     renderer.render(this._quadScene, this._quadCamera);
 
     renderer.autoClear = prevAutoClear;

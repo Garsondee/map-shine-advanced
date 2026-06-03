@@ -28,6 +28,7 @@ import {
   buildSummaryPayload,
   resolveExportMode,
 } from './performance-recorder-export.js';
+import { buildLightingPerfSection, resolveLightingEffect } from './performance-recorder-lighting.js';
 import { analyzeStutters } from './performance-recorder-stutters.js';
 
 const log = createLogger('PerfRecorder');
@@ -387,6 +388,10 @@ export class PerformanceRecorder {
     // for cross-reference in the export.
     try {
       if (window.MapShine) window.MapShine.__v2PassProfiler = true;
+    } catch (_) {}
+
+    try {
+      resolveLightingEffect()?.resetPerformanceRecorderSession?.();
     } catch (_) {}
 
     log.info('Recording started');
@@ -1328,6 +1333,19 @@ export class PerformanceRecorder {
 
     const stutterPayload = this._buildStutterPayload();
 
+    let lighting = null;
+    try {
+      lighting = buildLightingPerfSection({
+        effects,
+        v2PassTimings,
+        session: {
+          frameTime: {
+            avg: frameTimes.length > 0 ? frameTimes.reduce((s, v) => s + v, 0) / frameTimes.length : 0,
+          },
+        },
+      });
+    } catch (_) {}
+
     return {
       meta: {
         enabled: this.enabled,
@@ -1380,6 +1398,7 @@ export class PerformanceRecorder {
       v2PassTimings,
       vramBudget,
       cloudShadowCache,
+      lighting,
       rendererInfo: {
         start: this._infoStart,
         current: infoCurrent,
@@ -1454,6 +1473,28 @@ export class PerformanceRecorder {
       lines.push([csvEscape(u.name), u.count, u.avgMs.toFixed(4), u.totalMs.toFixed(4)].join(','));
     }
     lines.push('');
+
+    const lighting = snapshot.lighting;
+    if (lighting?.spans?.length) {
+      lines.push('## section,lighting-spans');
+      lines.push([
+        'span', 'phase', 'cpu_avg_ms', 'cpu_max_ms', 'cpu_total_ms', 'cpu_count',
+        'gpu_avg_ms', 'gpu_max_ms', 'gpu_total_ms', 'gpu_count',
+        'draws_avg', 'triangles_avg', 'gpu_blocked',
+      ].join(','));
+      for (const row of lighting.spans) {
+        lines.push([
+          csvEscape(row.span), csvEscape(row.phase),
+          Number(row.cpuAvg ?? 0).toFixed(4), Number(row.cpuMax ?? 0).toFixed(4),
+          Number(row.cpuTotal ?? 0).toFixed(4), Number(row.cpuCount ?? 0),
+          Number(row.gpuAvg ?? 0).toFixed(4), Number(row.gpuMax ?? 0).toFixed(4),
+          Number(row.gpuTotal ?? 0).toFixed(4), Number(row.gpuCount ?? 0),
+          Number(row.drawCallsAvg ?? 0).toFixed(2), Number(row.trianglesAvg ?? 0).toFixed(0),
+          Number(row.gpuBlocked ?? 0),
+        ].join(','));
+      }
+      lines.push('');
+    }
 
     const seq = snapshot.sequencer ?? {
       phases: [],
@@ -1716,6 +1757,30 @@ export class PerformanceRecorder {
       lines.push(`- Raw hit **${(cache.rawHitPct ?? 0).toFixed(1)}%** · mask hit **${(cache.maskHitPct ?? 0).toFixed(1)}%** · last miss: ${cache.lastMissReason ?? 'n/a'}`);
       lines.push('');
     }
+    const lighting = snapshot.lighting;
+    if (lighting) {
+      lines.push('## Lighting (performance)');
+      const live = lighting.live ?? {};
+      const counts = live.sourceCounts ?? {};
+      lines.push(`- Sources: **${counts.foundryLights ?? '?'}** lights (**${counts.visibleLights ?? '?'}** visible), **${counts.foundryDarkness ?? '?'}** darkness (**${counts.visibleDarkness ?? '?'}** visible)`);
+      if (live.estimatedRtVramMb != null) {
+        lines.push(`- Estimated lighting RT VRAM: **${live.estimatedRtVramMb.toFixed(1)} MB**`);
+      }
+      const scales = live.resolutionScales ?? {};
+      if (scales.internalLightResolutionScale != null) {
+        lines.push(`- RT scales: light **${scales.internalLightResolutionScale}** · window **${scales.internalWindowResolutionScale}** · darkness **${scales.internalDarknessResolutionScale}**`);
+      }
+      const topSpans = (lighting.spans ?? []).slice(0, 5);
+      if (topSpans.length) {
+        const spanList = topSpans.map((s) => `${s.span} cpu ${(s.cpuTotal ?? 0).toFixed(1)} gpu ${(s.gpuTotal ?? 0).toFixed(1)}`).join('; ');
+        lines.push(`- Heaviest spans: ${spanList}`);
+      }
+      const passes = lighting.passes ?? [];
+      if (passes.length) {
+        lines.push(`- Compositor passes: ${passes.map((p) => `${p.pass} ${(p.avg ?? 0).toFixed(2)} ms avg`).join('; ')}`);
+      }
+      lines.push('');
+    }
     const vram = snapshot.vramBudget;
     if (vram) {
       const usedMb = (vram.usedBytes ?? 0) / 1024 / 1024;
@@ -1940,5 +2005,7 @@ function csvEscape(value) {
  * @property {object} sequencer — phases / per-mirror sync / live diagnostics
  * @property {object|null} v2PassTimings
  * @property {object|null} vramBudget
+ * @property {object|null} cloudShadowCache
+ * @property {object|null} lighting — unrolled spans, live RT inventory, compositor pass timings
  * @property {{ start: object|null, current: object|null }} rendererInfo
  */

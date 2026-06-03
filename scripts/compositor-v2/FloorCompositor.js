@@ -3702,17 +3702,16 @@ export class FloorCompositor {
   /**
    * Build previous-frame dynamic-light payload for source shadow overrides.
    * Uses LightingEffectV2 previous-frame textures: Foundry lights (`_lightRT`)
-   * and window glow (`_windowLightRT`) so {@link WindowLightEffectV2} lift matches
+   * and window glow (emit RT) so {@link WindowLightEffectV2} lift matches
    * gameplay lights in source shadow passes.
    * @returns {{texture:any, windowTexture:any, strength:number, enabled:boolean, viewBounds:{x:number,y:number,z:number,w:number}, sceneDimensions:{x:number,y:number}, sceneRect:{x:number,y:number,z:number,w:number}}|null}
    */
   _buildDynamicLightOverridePayload() {
     const le = this._lightingEffect;
     const tex = le?.dynamicLightTexture ?? null;
-    const winTex = this._windowLightEffect?.getEmitTexture?.()
-      ?? le?.windowLightOverrideTexture
-      ?? le?.windowLightTexture
-      ?? null;
+    const winTex = resolveEffectEnabled(this._windowLightEffect)
+      ? (this._windowLightEffect?.getShadowLiftTexture?.() ?? null)
+      : null;
     if (!tex && !winTex) return null;
 
     const dims = globalThis.canvas?.dimensions;
@@ -4571,6 +4570,8 @@ export class FloorCompositor {
       this._lightingEffect?.setLightingPerspectiveContext?.(null);
     }
 
+    try { this._windowLightEffect?.beginFrame?.(); } catch (_) {}
+
     // Keep bus tile materials aligned to live TileManager sprite opacity before
     // shadow capture. OverheadShadowsEffectV2 now handles its own stable caster
     // capture internally (forced-opacity roofTarget pass), while the separate
@@ -4592,6 +4593,7 @@ export class FloorCompositor {
       this._windowLightEffect?.setOverheadRoofAlphaTexture?.(null, 1, 1);
       this._windowLightEffect?.setCeilingTransmittanceTexture?.(null);
       this._windowLightEffect?.syncFrameOcclusion?.(this);
+      this._lightingEffect?._syncWindowLightEmitContext?.(this.renderer);
       this._lightingEffect?.setRenderFloorIndexForLights?.(activeIdx);
       this._fireEffect?.setRenderFloorIndexForGlow?.(activeIdx, true);
       const winScene = resolveEffectEnabled(this._windowLightEffect)
@@ -7981,6 +7983,7 @@ export class FloorCompositor {
         this._windowLightEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex, windowLightBufW, windowLightBufH);
         this._windowLightEffect?.setCeilingTransmittanceTexture?.(ceilingTransmittanceTex);
         this._windowLightEffect?.syncFrameOcclusion?.(this);
+        this._lightingEffect?._syncWindowLightEmitContext?.(this.renderer);
 
         try {
           this._lightingEffect?.setRenderFloorIndexForLights?.(levelIndex);
@@ -8058,7 +8061,7 @@ export class FloorCompositor {
               0,
             );
           });
-        }, 'LightingEffectV2 render');
+        }, 'LightingEffectV2 render', { cpuOnly: true });
         if (_profiling) this._recordPassTiming(`perLevel_lighting_${levelIndex}`, _profileT0);
         try {
           this._lightingEffect?.accumulateStackedLightBuffer?.(this.renderer);
@@ -8567,7 +8570,7 @@ export class FloorCompositor {
             try {
               const lightBinding = this._lightingEffect?.getLocalLightBufferBinding?.() ?? null;
               const lbTexture = lightBinding?.texture ?? this._lightingEffect?.dynamicLightTexture ?? null;
-              const lbAlphaBaseline = lightBinding?.alphaBaseline ?? 1.0;
+              const lbAlphaBaseline = lightBinding?.alphaBaseline ?? 0.0;
               this._colorCorrectionEffect.setLocalLightTexture?.(
                 lbTexture,
                 lbAlphaBaseline,

@@ -1,4 +1,5 @@
 import { createLogger } from '../../core/log.js';
+import { MSA_POST_STYLIZE_INPUT_GLSL } from '../msa-post-stylize-input.glsl.js';
 
 const log = createLogger('HalftoneEffectV2');
 
@@ -223,6 +224,8 @@ export class HalftoneEffectV2 {
         #define BLENDING_LIGHTER 4
         #define BLENDING_DARKER 5
 
+        ${MSA_POST_STYLIZE_INPUT_GLSL}
+
         uniform sampler2D tDiffuse;
         uniform float radius;
         uniform float rotateR;
@@ -411,10 +414,11 @@ export class HalftoneEffectV2 {
             float b = getDotColour(cell_b, p, 2, rotateB, aa);
 
             vec4 colour = texture2D(tDiffuse, vUV);
+            vec3 prepared = msaPostStylizePrepareRgb(colour.rgb);
 
-            r = blendColour(r, colour.r, blending);
-            g = blendColour(g, colour.g, blending);
-            b = blendColour(b, colour.b, blending);
+            r = blendColour(r, prepared.r, blending);
+            g = blendColour(g, prepared.g, blending);
+            b = blendColour(b, prepared.b, blending);
 
             if (greyscale) {
               r = g = b = (r + b + g) / 3.0;
@@ -469,7 +473,7 @@ export class HalftoneEffectV2 {
     }
 
     renderer.setRenderTarget(outputRT);
-    renderer.autoClear = false;
+    renderer.autoClear = true;
     renderer.render(this._quadScene, this._quadCamera);
 
     renderer.autoClear = prevAutoClear;

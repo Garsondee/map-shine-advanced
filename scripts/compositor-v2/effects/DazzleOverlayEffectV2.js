@@ -1,4 +1,5 @@
 import { createLogger } from '../../core/log.js';
+import { MSA_POST_STYLIZE_INPUT_GLSL } from '../msa-post-stylize-input.glsl.js';
 
 const log = createLogger('DazzleOverlayEffectV2');
 
@@ -106,6 +107,8 @@ export class DazzleOverlayEffectV2 {
         }
       `,
       fragmentShader: /* glsl */`
+        ${MSA_POST_STYLIZE_INPUT_GLSL}
+
         uniform sampler2D tDiffuse;
         uniform vec2 uResolution;
 
@@ -151,9 +154,9 @@ export class DazzleOverlayEffectV2 {
           vec2 uvR = clamp(vUv + shiftUv, vec2(0.001), vec2(0.999));
           vec2 uvB = clamp(vUv - shiftUv, vec2(0.001), vec2(0.999));
 
-          vec3 col = base.rgb;
-          col.r = texture2D(tDiffuse, uvR).r;
-          col.b = texture2D(tDiffuse, uvB).b;
+          vec3 col = msaPostStylizePrepareRgb(base.rgb);
+          col.r = msaPostStylizePrepareRgb(texture2D(tDiffuse, uvR).rgb).r;
+          col.b = msaPostStylizePrepareRgb(texture2D(tDiffuse, uvB).rgb).b;
 
           // Exposure lift (multiplicative). Keep stable and bounded.
           float lift = 1.0 + clamp(uExposureLift, 0.0, 4.0) * k;
@@ -219,7 +222,7 @@ export class DazzleOverlayEffectV2 {
     }
 
     renderer.setRenderTarget(outputRT);
-    renderer.autoClear = false;
+    renderer.autoClear = true;
     renderer.render(this._quadScene, this._quadCamera);
 
     renderer.autoClear = prevAutoClear;

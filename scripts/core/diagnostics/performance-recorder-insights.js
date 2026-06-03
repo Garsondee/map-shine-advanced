@@ -7,6 +7,7 @@
 
 import { rollupEffectKey } from './performance-recorder-export.js';
 import { analyzeStutters, formatStutterEventLines } from './performance-recorder-stutters.js';
+import { buildLightingSpanRows } from './performance-recorder-lighting.js';
 
 /**
  * @typedef {'info'|'warn'|'critical'} InsightSeverity
@@ -318,6 +319,80 @@ export function buildPerformanceInsights(snapshot, frames = [], ticks = []) {
       detail: `~${Math.round(avgDraws)} draw calls and ~${Math.round(session.avgTrianglesPerFrame ?? 0)} triangles per compositor frame (summed from render spans).`,
       tags: ['draws'],
     });
+  }
+
+  const lighting = snapshot.lighting;
+  if (lighting && typeof lighting === 'object') {
+    const wrapGpu = Number(lighting.totals?.compositorWrap?.render?.gpuAvg) || 0;
+    const wrapCpu = Number(lighting.totals?.compositorWrap?.render?.cpuAvg) || 0;
+    if (wrapGpu > 5 || wrapCpu > 0.5) {
+      const share = lighting.frameBudgetHint?.compositorWrapGpuShareOfFramePct;
+      const shareTxt = share != null ? ` (~${share.toFixed(0)}% of avg frame time as GPU)` : '';
+      insights.push({
+        severity: wrapGpu > 8 ? 'warn' : 'info',
+        title: 'Lighting compositor wrap cost',
+        detail: `FloorCompositor lighting/render avg ${fmtMs(wrapCpu)} ms CPU, ${fmtMs(wrapGpu)} ms GPU${shareTxt}. See export \`lighting.spans\` for sub-passes (composeDraw, lightSourcesDraw, foundryDraw, …).`,
+        tags: ['lighting', 'gpu', 'effects'],
+      });
+    }
+
+    const topLightingSpans = (lighting.spans ?? buildLightingSpanRows(effects, { cap: 3 }))
+      .filter((s) => String(s.span).startsWith('lighting.'))
+      .slice(0, 3);
+    if (topLightingSpans.length > 0) {
+      const list = topLightingSpans
+        .map((s) => `${s.span} cpu ${fmtMs(s.cpuTotal)} gpu ${fmtMs(s.gpuTotal)}`)
+        .join('; ');
+      insights.push({
+        severity: 'info',
+        title: 'Heaviest lighting sub-spans',
+        detail: list,
+        tags: ['lighting', 'spans'],
+      });
+    }
+
+    const blocked = Number(lighting.gpuCoverage?.blockedSamples) || 0;
+    if (blocked > 100) {
+      insights.push({
+        severity: 'warn',
+        title: 'Lighting GPU probes partially blocked',
+        detail: `${blocked} blocked nested span sample(s). Prefer \`lighting.totals.compositorWrap.render\` GPU or \`lighting.passes\` (perLevel_lighting_*) for budgeting.`,
+        tags: ['lighting', 'gpu', 'coverage'],
+      });
+    }
+
+    const live = lighting.live ?? {};
+    const counts = live.sourceCounts ?? {};
+    const lightCount = Number(counts.foundryLights) || 0;
+    if (lightCount > 80) {
+      insights.push({
+        severity: 'warn',
+        title: 'High Foundry light count',
+        detail: `${lightCount} synced lights (${counts.visibleLights ?? '?'} visible this frame). Light mesh draws scale with visible count — check Levels visibility and cull distant sources.`,
+        tags: ['lighting', 'sources'],
+      });
+    }
+
+    const estMb = Number(live.estimatedRtVramMb) || 0;
+    const lightScale = Number(live.resolutionScales?.internalLightResolutionScale) || 1;
+    if (estMb > 48 || lightScale < 0.75) {
+      insights.push({
+        severity: estMb > 80 ? 'warn' : 'info',
+        title: 'Lighting RT footprint',
+        detail: `~${estMb.toFixed(1)} MB estimated across lighting RTs at scale ${lightScale.toFixed(2)} (light/window/darkness). Lower internalLightResolutionScale to trade quality for bandwidth.`,
+        tags: ['lighting', 'vram'],
+      });
+    }
+
+    const prepassPct = live.sessionCounters?.prepassReusePct;
+    if (prepassPct != null && prepassPct > 10) {
+      insights.push({
+        severity: 'info',
+        title: 'Light mask prepass reuse',
+        detail: `Foundry light RT redraw skipped on ${prepassPct.toFixed(1)}% of compose draws (shadow prepass still fresh).`,
+        tags: ['lighting', 'cache'],
+      });
+    }
   }
 
   return insights;

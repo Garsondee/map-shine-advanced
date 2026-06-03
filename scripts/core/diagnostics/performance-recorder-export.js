@@ -5,10 +5,12 @@
  * @module core/diagnostics/performance-recorder-export
  */
 
+import { buildSummaryLightingSection } from './performance-recorder-lighting.js';
+
 export const EXPORT_MODE_SUMMARY = 'summary';
 export const EXPORT_MODE_FULL = 'full';
 
-export const EXPORT_SCHEMA_VERSION = 1;
+export const EXPORT_SCHEMA_VERSION = 2;
 
 /** Max grouped effect rows in summary JSON. */
 const SUMMARY_EFFECTS_CAP = 40;
@@ -242,10 +244,12 @@ export function buildSummaryPayload(recorder) {
     effects: _effects,
     longTasks: rawLongTasks,
     sequencer,
+    lighting: _lighting,
     ...rest
   } = snap;
 
   const insights = recorder.getInsights?.() ?? [];
+  const lighting = buildSummaryLightingSection(snap) ?? _lighting ?? null;
 
   return {
     ...rest,
@@ -254,6 +258,7 @@ export function buildSummaryPayload(recorder) {
       export: { mode: EXPORT_MODE_SUMMARY, schemaVersion: EXPORT_SCHEMA_VERSION },
     },
     effects: buildSummaryEffects(_effects),
+    lighting,
     longTasks: summarizeLongTasks(rawLongTasks),
     sequencer: trimSequencerForSummary(sequencer),
     insights,

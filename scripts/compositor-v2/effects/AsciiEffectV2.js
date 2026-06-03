@@ -1,4 +1,5 @@
 import { createLogger } from '../../core/log.js';
+import { MSA_POST_STYLIZE_INPUT_GLSL } from '../msa-post-stylize-input.glsl.js';
 
 const log = createLogger('AsciiEffectV2');
 
@@ -432,7 +433,7 @@ export class AsciiEffectV2 {
     this._updateGridSize(w, h);
 
     renderer.setRenderTarget(outputRT);
-    renderer.autoClear = false;
+    renderer.autoClear = true;
     renderer.render(this._quadScene, this._quadCamera);
 
     renderer.autoClear = prevAutoClear;
@@ -601,6 +602,8 @@ export class AsciiEffectV2 {
 
   _getFragmentShader() {
     return /* glsl */`
+      ${MSA_POST_STYLIZE_INPUT_GLSL}
+
       uniform sampler2D tDiffuse;
       uniform sampler2D tFont;
       uniform sampler2D tFont2;
@@ -633,8 +636,9 @@ export class AsciiEffectV2 {
         vec2 cellCoord = floor(vUv * uGridSize);
         vec2 cellCenterUV = (cellCoord + 0.5) / uGridSize;
         vec4 texel = texture2D(tDiffuse, cellCenterUV);
+        vec3 prepared = msaPostStylizePrepareRgb(texel.rgb);
 
-        float brightness = dot(texel.rgb, vec3(0.2126, 0.7152, 0.0722));
+        float brightness = dot(prepared, vec3(0.2126, 0.7152, 0.0722));
         brightness = (brightness - 0.5) * uContrast + 0.5 + uBrightness;
         brightness = smoothstep(uBlackPoint, uWhitePoint, brightness);
         if (uInvert) brightness = 1.0 - brightness;

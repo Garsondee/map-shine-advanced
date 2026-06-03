@@ -956,6 +956,26 @@ export class PerformanceRecorderDialog {
       gpuBlockedHtml = `${blockedSpans} span(s), ${blockedSamples} blocked samples — GPU totals are sampled`;
     }
 
+    let lightingHtml = '<em>no lighting samples</em>';
+    const lighting = snap.lighting;
+    if (lighting) {
+      const live = lighting.live ?? {};
+      const counts = live.sourceCounts ?? {};
+      const topSpan = (lighting.spans ?? [])[0];
+      const topSpanTxt = topSpan
+        ? `${escapeHtml(topSpan.span)} cpu ${fmt(topSpan.cpuTotal, 1)} gpu ${fmt(topSpan.gpuTotal, 1)}`
+        : 'n/a';
+      const passTxt = (lighting.passes ?? []).slice(0, 2)
+        .map((p) => `${escapeHtml(p.pass)} ${fmt(p.avg, 2)}ms`)
+        .join(' · ') || 'n/a';
+      lightingHtml = [
+        `${counts.foundryLights ?? 0} lights (${counts.visibleLights ?? 0} vis) · ${counts.foundryDarkness ?? 0} darkness`,
+        live.estimatedRtVramMb != null ? `~${fmt(live.estimatedRtVramMb, 1)} MB RTs` : null,
+        `top span: ${topSpanTxt}`,
+        `passes: ${passTxt}`,
+      ].filter(Boolean).join('<br>');
+    }
+
     let cloudCacheHtml = '<em>cloud effect not active</em>';
     const cache = snap.cloudShadowCache;
     if (cache) {
@@ -1020,6 +1040,15 @@ export class PerformanceRecorderDialog {
       <div class="msa-perf__summary-section">
         <h4>VRAM budget tracker</h4>
         <div>${vramHtml}</div>
+      </div>
+
+      <div class="msa-perf__summary-section msa-perf__summary-span2">
+        <h4>Lighting system</h4>
+        <p class="msa-perf__seq-micro">
+          Summary JSON includes <code>lighting.spans</code> (unrolled <code>lighting.render.*</code> / <code>lighting.update.*</code>),
+          <code>lighting.live</code> RT inventory, and <code>lighting.passes</code> (<code>perLevel_lighting_*</code>).
+        </p>
+        <div>${lightingHtml}</div>
       </div>
 
       <div class="msa-perf__summary-section">

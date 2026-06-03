@@ -978,7 +978,7 @@ export class ColorCorrectionEffectV2 {
         uLocalOverrideSaturationMin: { value: 1.25 },
         tLocalLightBuffer: { value: null },
         uHasLocalLightBuffer: { value: 0.0 },
-        uLocalLightAlphaBaseline: { value: 1.0 },
+        uLocalLightAlphaBaseline: { value: 0.0 },
         uLocalLightTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
         uGradeEnabled: { value: 1.0 },
 
@@ -1202,13 +1202,11 @@ export class ColorCorrectionEffectV2 {
           return smoothstep(1.6, 3.5, mx) * smoothstep(0.18, 0.55, sat);
         }
 
-        // Scalar illumination punch above the compose baseline (raw _lightRT clears alpha=1).
+        // Scalar punch from _lightRT alpha (cleared to 0; additive compose, no 1.0 baseline).
         float sampleLightBufferAlphaAt(vec2 uv) {
           if (uHasLocalLightBuffer < 0.5) return 0.0;
           vec4 L = texture2D(tLocalLightBuffer, uv);
-          float punch = max(L.a - uLocalLightAlphaBaseline, 0.0);
-          float rgbMag = max(max(L.r, L.g), L.b);
-          return max(punch, rgbMag);
+          return max(L.a - uLocalLightAlphaBaseline, 0.0);
         }
 
         float sampleBlurredLightAlpha(vec2 uv, float blurScale) {

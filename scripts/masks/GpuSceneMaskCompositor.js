@@ -2114,6 +2114,39 @@ export class GpuSceneMaskCompositor {
   }
 
   /**
+   * Pixel size of a mask texture — GPU compositor RTs have no `image.width`.
+   * Used by window-light emit sizing and other scene-UV passes.
+   *
+   * @param {import('three').Texture|null|undefined} texture
+   * @returns {{ w: number, h: number }}
+   */
+  getMaskTexturePixelSize(texture) {
+    if (!texture) return { w: 1, h: 1 };
+
+    const rt = this._findRenderTargetForTexture(texture);
+    const rtw = Number(rt?.width) || 0;
+    const rth = Number(rt?.height) || 0;
+    if (rtw > 0 && rth > 0) {
+      return { w: rtw, h: rth };
+    }
+
+    if (this._floorIdTarget?.texture === texture) {
+      return {
+        w: Math.max(1, Number(this._floorIdTarget.width) || 1),
+        h: Math.max(1, Number(this._floorIdTarget.height) || 1),
+      };
+    }
+
+    const img = texture.image ?? texture.source?.data ?? null;
+    let w = Number(img?.width) || Number(texture._msaWidth) || Number(texture?.width) || 0;
+    let h = Number(img?.height) || Number(texture._msaHeight) || Number(texture?.height) || 0;
+    return {
+      w: Math.max(1, w || 1),
+      h: Math.max(1, h || 1),
+    };
+  }
+
+  /**
    * Promote file/bundle `_Outdoors` into a scene-space GPU RT when `compose()` never
    * ran for this band (common for ground-floor background-only preload). Building
    * shadows and other scene-UV passes need the same coordinate space as tile-composed
@@ -2790,6 +2823,8 @@ export class GpuSceneMaskCompositor {
     rt.texture.name = `SceneMask_${maskType}`;
     rt.texture.wrapS = THREE.ClampToEdgeWrapping;
     rt.texture.wrapT = THREE.ClampToEdgeWrapping;
+    rt.texture._msaWidth = width;
+    rt.texture._msaHeight = height;
     return rt;
   }
 

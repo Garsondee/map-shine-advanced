@@ -1,5 +1,6 @@
 import { isGmLike } from '../../core/gm-parity.js';
 import { createLogger } from '../../core/log.js';
+import { MSA_POST_STYLIZE_INPUT_GLSL } from '../msa-post-stylize-input.glsl.js';
 
 const log = createLogger('VisionModeEffectV2');
 
@@ -75,6 +76,8 @@ export class VisionModeEffectV2 {
         }
       `,
       fragmentShader: /* glsl */`
+        ${MSA_POST_STYLIZE_INPUT_GLSL}
+
         uniform sampler2D tDiffuse;
         uniform float uSaturation;   // 0=greyscale, 1=unchanged, 2=oversaturated
         uniform float uBrightness;   // added directly to RGB channels
@@ -93,7 +96,7 @@ export class VisionModeEffectV2 {
           vec2 uv = clamp(vUv + vec2(waveX, waveY), vec2(0.001), vec2(0.999));
 
           vec4 texel = texture2D(tDiffuse, uv);
-          vec3 color = texel.rgb;
+          vec3 color = msaPostStylizePrepareRgb(texel.rgb);
 
           // Saturation: mix towards luma (0=greyscale, 1=unchanged)
           float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
@@ -255,7 +258,7 @@ export class VisionModeEffectV2 {
     this._material.uniforms.tDiffuse.value = inputRT.texture;
 
     renderer.setRenderTarget(outputRT);
-    renderer.autoClear = false;
+    renderer.autoClear = true;
     renderer.render(this._quadScene, this._quadCamera);
 
     renderer.autoClear = prevAutoClear;

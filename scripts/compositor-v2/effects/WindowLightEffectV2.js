@@ -43,6 +43,7 @@ import {
   createSceneViewProjectionCache,
   updateSceneViewProjectionFromCamera,
 } from '../scene-view-projection.js';
+import { allocateRtReadbackBuffer, decodeReadbackPixel } from '../../utils/rt-pixel-readback.js';
 
 const log = createLogger('WindowLightEffectV2');
 
@@ -50,7 +51,10 @@ const WINDOW_MASK_ALIASES = ['windows', 'structural'];
 const SPECULAR_MASK_ALIASES = ['specular'];
 
 /** Scale emit RT values for compose `litColor *= (1 + win)` — not display albedo. */
-const WINDOW_ILLUM_SCALE = 0.35;
+const WINDOW_ILLUM_SCALE = 0.22;
+
+/** Matches GpuSceneMaskCompositor scalar mask tier (windows / structural). */
+const SCENE_MASK_EMIT_MAX = 4096;
 
 const wlTodTintSliderKeys = (index) => ({
   r: `tod${index}TintR`,
@@ -312,7 +316,8 @@ const WL_REFRACT_GLSL = /* glsl */`
   }
 `;
 
-/** Full-screen emit pass — scene-UV RT (PaintedShadow project pass pattern). */
+/** Full-screen emit pass — scene-UV RT (PaintedShadow / building-shadow project pass pattern). */
+// vUv is scene-rect UV (same as compose sceneUvFoundry and mask placement).
 const EMIT_VERT = `
   varying vec2 vUv;
   void main() {
@@ -435,7 +440,7 @@ const EMIT_FRAG = `
     }
     graded = saturated;
 
-    return min(max(graded, vec3(0.0)), vec3(512.0));
+    return min(max(graded, vec3(0.0)), vec3(6.0));
   }
 
   void main() {
@@ -461,7 +466,8 @@ const EMIT_FRAG = `
     }
 
     vec4 mask = wlSampleWindowMaskAtFloor(floorIdx, sceneUv, vec2(0.0));
-    if (mask.a < 0.01) {
+    float windowLuma = wlMaskLuma(mask, uFalloff);
+    if (mask.a < 0.02 || windowLuma < 0.02) {
       gl_FragColor = vec4(0.0);
       return;
     }
@@ -527,7 +533,8 @@ const EMIT_FRAG = `
 
     if (useSpecular > 0.001) {
       float spec = wlSampleSpecularAtFloor(floorIdx, sceneUv);
-      emit += emit * spec * uSpecularBoost;
+      float specGate = smoothstep(0.03, 0.12, windowLuma);
+      emit += emit * spec * uSpecularBoost * specGate;
     }
 
     if (useSparkle > 0.5 && uSparkleStrength > 0.001) {
@@ -566,6 +573,7 @@ const EMIT_FRAG = `
     if (uDebugForceMagenta > 0.5 && dot(emit, emit) > 1e-8) {
       emit = vec3(1.0, 0.0, 1.0);
     }
+    emit = min(emit, vec3(0.85));
     gl_FragColor = vec4(emit, 1.0);
   }
 `;
@@ -614,16 +622,17 @@ function _wlProbeSampleMaskTexture(tex, u, v) {
 }
 
 function _wlProbeCreateRtReadBuffer(rt) {
-  const isHalf = rt.texture?.type === window.THREE?.HalfFloatType;
-  return isHalf ? new Float32Array(4) : new Uint8Array(4);
+  return allocateRtReadbackBuffer(rt, 1);
 }
 
 function _wlProbeDecodeRtChannels(buf, rt) {
-  const isHalf = rt.texture?.type === window.THREE?.HalfFloatType;
-  if (isHalf) {
-    return { r: Math.max(0, buf[0]), g: Math.max(0, buf[1]), b: Math.max(0, buf[2]), a: Math.max(0, buf[3]) };
-  }
-  return { r: buf[0] / 255, g: buf[1] / 255, b: buf[2] / 255, a: buf[3] / 255 };
+  const { linear } = decodeReadbackPixel(buf, rt, 0);
+  return {
+    r: Math.max(0, linear[0]),
+    g: Math.max(0, linear[1]),
+    b: Math.max(0, linear[2]),
+    a: Math.max(0, linear[3]),
+  };
 }
 
 function _wlProbeScanRtMaxLuma(renderer, rt, gridSize = 8) {
@@ -697,9 +706,12 @@ export class WindowLightEffectV2 {
     this._debugForceMagenta = false;
     this._lastDrawStats = null;
     this._lastFoundrySceneData = null;
-    /** Scene-UV emit RT (matches compositor mask dimensions — PaintedShadow-style). */
+    /** Scene-UV emit RT for compose (full pass only). */
     this._emitRT = null;
     this._emitRtSig = '';
+    /** Scene-UV emit RT for shadow prepass only (never sampled by compose). */
+    this._shadowLiftEmitRT = null;
+    this._shadowLiftEmitRtSig = '';
     /** Legacy diagnostics shim — one entry per compositor floor slot with a mask. */
     this._overlays = new Map();
     /** @type {(import('three').Texture|null)[]} Compositor slots (raw). */
@@ -739,8 +751,28 @@ export class WindowLightEffectV2 {
     this._occlusionSyncedFrameId = -1;
     /** When false, {@link #_rebuildLitWindowMasks} is a no-op until masks change. */
     this._litMasksDirty = true;
-    /** Cache key for the last successful {@link #drawWindowLightPass} this frame. */
+    /** Cache key for the last successful {@link #drawWindowLightPass} (legacy diagnostic). */
     this._emitDrawCacheKey = '';
+    /** Cache key for last successful full-purpose emit (per floor / frame). */
+    this._lastFullEmitCacheKey = '';
+    /**
+     * True only after a successful `purpose:'full'` emit draw this frame.
+     * @type {boolean}
+     */
+    this._emitComposeValid = false;
+    /** True after a successful `shadowLift` draw this frame (see {@link #getShadowLiftTexture}). */
+    this._shadowLiftValid = false;
+    /** @type {boolean} */
+    this._fullEmitDrawCacheEnabled = false;
+    /** @type {number} Matches {@link LightingEffectV2} `internalWindowResolutionScale`. */
+    this._emitResolutionScale = 1.0;
+    /** @type {number} Drawing buffer width for emit size cap (0 = use mask size until synced). */
+    this._emitBufferW = 0;
+    /** @type {number} Drawing buffer height for emit size cap (0 = use mask size until synced). */
+    this._emitBufferH = 0;
+    this._emitSizeProbeVec = null;
+    /** @type {{ shadowLiftDraws: number, fullDraws: number, skippedFullDraws: number }} */
+    this._emitPerfSession = { shadowLiftDraws: 0, fullDraws: 0, skippedFullDraws: 0 };
 
     this.params = {
       hasWindowMask: false,
@@ -1189,6 +1221,169 @@ export class WindowLightEffectV2 {
   /** Call once at the start of each FloorCompositor frame before occlusion sync. */
   beginFrame() {
     this._frameId += 1;
+    this._emitComposeValid = false;
+    this._shadowLiftValid = false;
+    this._invalidateEmitDrawCache();
+  }
+
+  /** Reset emit draw counters (Performance Recorder session start). */
+  resetEmitPerfSession() {
+    this._emitPerfSession.shadowLiftDraws = 0;
+    this._emitPerfSession.fullDraws = 0;
+    this._emitPerfSession.skippedFullDraws = 0;
+  }
+
+  /**
+   * @param {number} scale
+   */
+  setEmitResolutionScale(scale) {
+    const next = this._sanitizeEmitResolutionScale(scale);
+    if (next === this._emitResolutionScale) return;
+    this._emitResolutionScale = next;
+    this._emitRtSig = '';
+    this._shadowLiftEmitRtSig = '';
+    this._invalidateEmitDrawCache();
+  }
+
+  /**
+   * @param {number} w
+   * @param {number} h
+   */
+  setEmitDrawingBufferSize(w, h) {
+    const bw = Math.max(0, Math.floor(Number(w) || 0));
+    const bh = Math.max(0, Math.floor(Number(h) || 0));
+    if (bw === this._emitBufferW && bh === this._emitBufferH) return;
+    this._emitBufferW = bw;
+    this._emitBufferH = bh;
+    this._emitRtSig = '';
+    this._shadowLiftEmitRtSig = '';
+    this._invalidateEmitDrawCache();
+  }
+
+  /** @returns {object} Live emit stats for Performance Recorder `lighting.live.emit`. */
+  getEmitPerformanceSnapshot() {
+    const emitTex = this.getEmitTexture();
+    const last = this._lastDrawStats ?? null;
+    return {
+      emitRt: this._emitRT
+        ? { w: this._emitRT.width, h: this._emitRT.height, scale: this._emitResolutionScale }
+        : null,
+      lastDraw: last ? {
+        path: last.path,
+        purpose: last.purpose,
+        drew: last.drew,
+        cached: last.cached === true,
+        emitRt: last.emitRt,
+      } : null,
+      windowLightTextureSource: this._emitComposeValid && emitTex ? 'emit' : 'none',
+      sessionCounters: { ...this._emitPerfSession },
+      lastFullEmitCacheKey: this._lastFullEmitCacheKey || null,
+    };
+  }
+
+  /**
+   * @param {number} n
+   * @returns {number}
+   * @private
+   */
+  _sanitizeEmitResolutionScale(n) {
+    const v = Number(n);
+    return Number.isFinite(v) ? Math.max(0.25, Math.min(1.0, v)) : 1.0;
+  }
+
+  /** @private */
+  _invalidateEmitDrawCache() {
+    this._lastFullEmitCacheKey = '';
+    this._emitDrawCacheKey = '';
+    this._emitComposeValid = false;
+  }
+
+  /**
+   * @param {import('three').Texture|null} maskTex
+   * @returns {{ w: number, h: number }}
+   * @private
+   */
+  _computeEmitTargetDimensions(_maskTex) {
+    // Emit is a scene-UV atlas (0..1 = scene rect). Size to the compositor scene
+    // rect — not raw bundle image pixels (often 6k+ and misaligned with compose UV).
+    const sceneDim = this._resolveSceneMaskEmitDimensions();
+    const scale = this._emitResolutionScale;
+    return {
+      w: Math.max(1, Math.floor(sceneDim.w * scale)),
+      h: Math.max(1, Math.floor(sceneDim.h * scale)),
+    };
+  }
+
+  /**
+   * Fallback emit size when mask textures lack pixel metadata (GPU RT path).
+   * @returns {{ w: number, h: number }}
+   * @private
+   */
+  _resolveSceneMaskEmitDimensions() {
+    const dims = globalThis.canvas?.dimensions;
+    const sr = dims?.sceneRect ?? dims;
+    const sceneW = Number(sr?.width ?? dims?.sceneWidth ?? dims?.width) || 0;
+    const sceneH = Number(sr?.height ?? dims?.sceneHeight ?? dims?.height) || 0;
+    if (sceneW < 1 || sceneH < 1) return { w: 1, h: 1 };
+    const maxTex = Number(window.MapShine?.renderer?.capabilities?.maxTextureSize) || SCENE_MASK_EMIT_MAX;
+    const targetMax = Math.min(SCENE_MASK_EMIT_MAX, maxTex);
+    const scale = Math.min(
+      1.0,
+      targetMax / Math.max(1, sceneW),
+      targetMax / Math.max(1, sceneH),
+    );
+    return {
+      w: Math.max(1, Math.round(sceneW * scale)),
+      h: Math.max(1, Math.round(sceneH * scale)),
+    };
+  }
+
+  /**
+   * @param {THREE.WebGLRenderer|null} renderer
+   * @private
+   */
+  _syncEmitDrawingBufferFromRenderer(renderer) {
+    if (!renderer || typeof renderer.getDrawingBufferSize !== 'function') return;
+    const THREE = window.THREE;
+    if (!THREE) return;
+    if (!this._emitSizeProbeVec) this._emitSizeProbeVec = new THREE.Vector2();
+    renderer.getDrawingBufferSize(this._emitSizeProbeVec);
+    const bw = Math.max(0, Math.floor(this._emitSizeProbeVec.x));
+    const bh = Math.max(0, Math.floor(this._emitSizeProbeVec.y));
+    if (bw >= 8 && bh >= 8) {
+      this.setEmitDrawingBufferSize(bw, bh);
+    }
+  }
+
+  /**
+   * @returns {string}
+   * @private
+   */
+  _buildFullEmitCacheKey() {
+    const maskTex = this._resolveEmitMaskReference();
+    const maskDim = maskTex ? this._maskImageSize(maskTex) : null;
+    const maskSig = maskTex
+      ? `${maskTex.uuid}|${maskDim?.w ?? 0}x${maskDim?.h ?? 0}`
+      : 'none';
+    const cloudUuid = this._cloudShadowTex?.uuid ?? 'none';
+    const floor = Number.isFinite(this._renderFloorIndex)
+      ? String(Math.floor(this._renderFloorIndex))
+      : 'all';
+    const todBucket = Math.floor((this._resolveTimelineHour() ?? 0) * 4);
+    const p = this.params;
+    return [
+      this._frameId,
+      'full',
+      floor,
+      maskSig,
+      this._emitRtSig,
+      cloudUuid,
+      todBucket,
+      Number(p.intensity ?? 0).toFixed(3),
+      p.glassRefractionEnabled !== false ? 1 : 0,
+      p.sparkleEnabled !== false ? 1 : 0,
+      Number(p.rgbShiftAmount ?? 0).toFixed(2),
+    ].join('|');
   }
 
   initialize() {
@@ -1209,8 +1404,8 @@ export class WindowLightEffectV2 {
 
     this._scene.userData.onAfterWindowLightPass = () => {};
 
-    this._scene.userData.drawWindowLightPass = (renderer, camera) => {
-      this.drawWindowLightPass(renderer, camera);
+    this._scene.userData.drawWindowLightPass = (renderer, camera, options) => {
+      this.drawWindowLightPass(renderer, camera, options);
     };
 
     this._scene.userData.getWindowLightTexture = () => this.getEmitTexture();
@@ -1230,10 +1425,12 @@ export class WindowLightEffectV2 {
     }
     try { this._emitMaterial?.dispose(); } catch (_) {}
     try { this._emitRT?.dispose(); } catch (_) {}
+    try { this._shadowLiftEmitRT?.dispose(); } catch (_) {}
     try { this._scene?.children?.[0]?.geometry?.dispose(); } catch (_) {}
     try { this._fallbackMaskTex?.dispose(); } catch (_) {}
     this._emitMaterial = null;
     this._emitRT = null;
+    this._shadowLiftEmitRT = null;
     this._drawCamera = null;
     this._fallbackMaskTex = null;
     this._scene = null;
@@ -1262,6 +1459,7 @@ export class WindowLightEffectV2 {
     const next = (floorIndex !== null && floorIndex !== undefined) ? Number(floorIndex) : null;
     this._renderFloorIndex = (next !== null && Number.isFinite(next)) ? next : null;
     this._renderFloorSliceStrict = this._renderFloorIndex !== null ? !!sliceStrict : false;
+    this._invalidateEmitDrawCache();
   }
 
   async populate(foundrySceneData) {
@@ -1562,6 +1760,7 @@ export class WindowLightEffectV2 {
   setOutdoorsMask(_mask) {}
   setCloudShadowTexture(texture, screenW, screenH, _viewBounds = null) {
     this._cloudShadowTex = texture ?? null;
+    this._invalidateEmitDrawCache();
     const u = this._emitMaterial?.uniforms;
     if (!u) return;
     u.uCloudShadowTex.value = this._cloudShadowTex ?? this._fallbackMaskTex ?? null;
@@ -1612,6 +1811,8 @@ export class WindowLightEffectV2 {
         if (!this._windowMasks[idx]) {
           this._tryAssignWindowBundleMaskForFloor(idx);
         }
+        this._stampMaskTextureDimensions(this._windowMasks[idx]);
+        this._stampMaskTextureDimensions(this._specularMasks[idx]);
       }
 
       const groundMask = this._windowMasks[0] ?? null;
@@ -1629,8 +1830,10 @@ export class WindowLightEffectV2 {
         this._floorIdTex = compositor.floorIdTarget?.texture ?? null;
         this.params.hasWindowMask = true;
       }
-      this._emitRtSig = '';
-      this._refreshOverlayShim();
+    this._emitRtSig = '';
+    this._shadowLiftEmitRtSig = '';
+    this._invalidateEmitDrawCache();
+    this._refreshOverlayShim();
     } catch (err) {
       log.warn('syncFrameOcclusion failed:', err);
     }
@@ -1643,17 +1846,25 @@ export class WindowLightEffectV2 {
     return this._debugForceMagenta;
   }
 
-  /** Scene-UV window glow texture for compose / shadow lift. */
+  /** Scene-UV window glow texture after the full emit pass (compose blit source). */
   getEmitTexture() {
     return this._emitRT?.texture ?? null;
   }
 
+  /** Stripped emit for dynamic-light shadow lift (separate RT — not used by compose). */
+  getShadowLiftTexture() {
+    if (!this._shadowLiftValid) return null;
+    return this._shadowLiftEmitRT?.texture ?? null;
+  }
+
+  /** @returns {boolean} Whether compose may sample emit after a full draw this frame. */
+  isEmitValidForCompose() {
+    return this._emitComposeValid === true && !!this._emitRT?.texture;
+  }
+
   getRenderTargetDiagnostics(renderer = null, lightingEffect = null, options = {}) {
     const r = renderer ?? globalThis.MapShine?.renderer ?? null;
-    const rt = this._emitRT
-      ?? lightingEffect?._windowLightRT
-      ?? globalThis.MapShine?.effectComposer?._floorCompositorV2?._lightingEffect?._windowLightRT
-      ?? null;
+    const rt = this._emitRT ?? null;
 
     const scan = (rt && r) ? _wlProbeScanRtMaxLuma(r, rt, 8) : null;
     const screenUv = options?.screenUv ?? null;
@@ -1737,7 +1948,7 @@ export class WindowLightEffectV2 {
     out.floorIndex = bestFloor;
     if (bestSample && bestSample.a >= 0.01 && bestSample.luma > 0.001) {
       out.verdict = 'would_emit';
-      out.hints.push('Compositor mask would emit — check _windowLightRT or debug magenta.');
+      out.hints.push('Compositor mask would emit — check emit RT or debug magenta.');
     } else if (!this.params.hasWindowMask) {
       out.verdict = 'no_light';
     } else {
@@ -1780,37 +1991,93 @@ export class WindowLightEffectV2 {
     };
   }
 
-  drawWindowLightPass(renderer, camera) {
+  /**
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {THREE.Camera|null} camera
+   * @param {{ purpose?: 'full'|'shadowLift' }} [options]
+   */
+  drawWindowLightPass(renderer, camera, options = {}) {
     if (!this._enabled || !renderer || !this._initialized || !this._scene || !this._emitMaterial) {
-      this._lastDrawStats = { skipReason: 'disabled_or_unready' };
+      this._emitComposeValid = false;
+      this._shadowLiftValid = false;
+      this._lastDrawStats = { skipReason: 'disabled_or_unready', drew: false };
       return;
     }
 
+    this._syncEmitDrawingBufferFromRenderer(renderer);
+
     if (!this.params.hasWindowMask) {
+      this._emitComposeValid = false;
+      this._shadowLiftValid = false;
       this._lastDrawStats = { skipReason: 'no_compositor_masks', drew: false };
       return;
     }
 
+    const purpose = options?.purpose === 'shadowLift' ? 'shadowLift' : 'full';
+    const shadowLiftOnly = purpose === 'shadowLift';
+    if (shadowLiftOnly) {
+      this._emitComposeValid = false;
+      this._shadowLiftValid = false;
+    }
+
     if (camera) this._syncViewProjectionUniforms(camera);
     this._updateSceneBounds();
-    this._syncCloudUniformsFromParams(this._emitMaterial.uniforms);
-    this._pushTodUniforms();
-    this._pushRefractionUniforms(this._emitMaterial.uniforms);
+    if (!shadowLiftOnly) {
+      this._syncCloudUniformsFromParams(this._emitMaterial.uniforms);
+      this._pushTodUniforms();
+      this._pushRefractionUniforms(this._emitMaterial.uniforms);
+    }
 
     this._rebuildLitWindowMasks();
-    this._rebuildLitSpecularMasks();
+    if (!shadowLiftOnly) {
+      this._rebuildLitSpecularMasks();
+    }
+
+    const savedEmitUniforms = shadowLiftOnly
+      ? this._pushEmitShadowLiftUniforms(this._emitMaterial.uniforms)
+      : null;
+
+    if (!shadowLiftOnly && this._fullEmitDrawCacheEnabled) {
+      const cacheKey = this._buildFullEmitCacheKey();
+      const maskForDim = this._resolveEmitMaskReference();
+      const expectedDim = maskForDim ? this._computeEmitTargetDimensions(maskForDim) : null;
+      const rtReady = this._emitRT?.texture
+        && expectedDim
+        && this._emitRT.width === expectedDim.w
+        && this._emitRT.height === expectedDim.h
+        && this._emitRT.width >= 8
+        && this._emitRT.height >= 8;
+      if (
+        cacheKey
+        && cacheKey === this._lastFullEmitCacheKey
+        && rtReady
+      ) {
+        this._emitPerfSession.skippedFullDraws += 1;
+        this._emitComposeValid = true;
+        this._lastDrawStats = {
+          path: 'sceneUvEmitRt.cached',
+          purpose: 'full',
+          drew: false,
+          cached: true,
+          floor: Number.isFinite(this._renderFloorIndex) ? this._renderFloorIndex : null,
+          emitRt: { w: this._emitRT.width, h: this._emitRT.height },
+          cacheKey,
+        };
+        return;
+      }
+    }
 
     const strictFloor = Number(this._renderFloorIndex);
     if (this._renderFloorSliceStrict && Number.isFinite(strictFloor)) {
       const fi = Math.max(0, Math.min(3, Math.floor(strictFloor)));
       if (!this._hasValidWindowMask(fi)) {
         const THREE = window.THREE;
-        if (THREE && this._ensureEmitTarget(THREE, renderer)) {
+        const clearRt = THREE ? this._ensurePurposeEmitTarget(THREE, purpose) : null;
+        if (clearRt) {
           const prevTarget = renderer.getRenderTarget();
-          const drawState = this._prepareWindowLightDrawState(renderer, this._emitRT);
+          const drawState = this._prepareWindowLightDrawState(renderer, clearRt);
           try {
-            renderer.setRenderTarget(this._emitRT);
-            renderer.clear(true, true, false);
+            // _prepareWindowLightDrawState already bound emit RT and cleared it.
           } finally {
             renderer.setRenderTarget(prevTarget);
             this._restoreWindowLightDrawState(renderer, drawState);
@@ -1822,12 +2089,20 @@ export class WindowLightEffectV2 {
           drew: false,
           clearedEmitRt: true,
         };
+        if (shadowLiftOnly) {
+          this._shadowLiftValid = true;
+        } else {
+          this._emitComposeValid = false;
+          this._lastFullEmitCacheKey = null;
+        }
         return;
       }
     }
 
     const THREE = window.THREE;
-    if (!THREE || !this._ensureEmitTarget(THREE, renderer)) {
+    const emitTarget = THREE ? this._ensurePurposeEmitTarget(THREE, purpose) : null;
+    if (!emitTarget) {
+      this._shadowLiftValid = false;
       this._lastDrawStats = { skipReason: 'emit_rt_unready', drew: false };
       return;
     }
@@ -1836,24 +2111,85 @@ export class WindowLightEffectV2 {
     this._bindFloorSliceUniforms();
 
     const stats = {
-      path: 'sceneUvEmitRt',
+      path: shadowLiftOnly ? 'sceneUvEmitRt.shadowLift' : 'sceneUvEmitRt',
+      purpose,
+      cached: false,
       floorSlots: this._windowMasks.map((t, i) => (t ? i : null)).filter((x) => x !== null),
       litWindowSlots: this._litWindowMasks.map((_t, i) => (this._hasValidWindowMask(i) ? i : null)).filter((x) => x !== null),
       hasFloorId: !!this._floorIdTex,
-      emitRt: { w: this._emitRT.width, h: this._emitRT.height },
+      emitRt: { w: emitTarget.width, h: emitTarget.height, scale: this._emitResolutionScale },
     };
 
     const prevTarget = renderer.getRenderTarget();
-    const drawState = this._prepareWindowLightDrawState(renderer, this._emitRT);
+    const drawState = this._prepareWindowLightDrawState(renderer, emitTarget);
 
     try {
-      renderer.setRenderTarget(this._emitRT);
+      renderer.setRenderTarget(emitTarget);
       renderer.render(this._scene, this._drawCamera);
       stats.drew = true;
+      this._emitDrawCacheKey = `${this._frameId}|${purpose}|${this._renderFloorIndex ?? 'all'}`;
+      if (shadowLiftOnly) {
+        this._emitPerfSession.shadowLiftDraws += 1;
+        this._shadowLiftValid = true;
+        this._invalidateEmitDrawCache();
+      } else {
+        this._emitPerfSession.fullDraws += 1;
+        this._emitComposeValid = true;
+        const fullKey = this._buildFullEmitCacheKey();
+        this._lastFullEmitCacheKey = fullKey;
+        stats.cacheKey = fullKey;
+      }
     } finally {
+      this._restoreEmitShadowLiftUniforms(this._emitMaterial.uniforms, savedEmitUniforms);
       renderer.setRenderTarget(prevTarget);
       this._restoreWindowLightDrawState(renderer, drawState);
       this._lastDrawStats = stats;
+    }
+  }
+
+  /**
+   * Strip expensive EMIT_FRAG branches for source-shadow dynamic-light lift only.
+   * Building/SkyReach/Painted paths use max(rgb) presence — not sparkle/refraction/ToD.
+   * @param {Record<string, { value: number }>} u
+   * @returns {Record<string, number>|null}
+   * @private
+   */
+  _pushEmitShadowLiftUniforms(u) {
+    if (!u) return null;
+    const saved = {};
+    const snap = (key) => {
+      const slot = u[key];
+      if (!slot) return;
+      saved[key] = slot.value;
+    };
+    snap('uGlassRefractionEnabled');
+    snap('uSparkleEnabled');
+    snap('uSpecularBoost');
+    snap('uLightningWindowEnabled');
+    snap('uTodEnabled');
+    snap('uCloudInfluence');
+    if (u.uGlassRefractionEnabled) u.uGlassRefractionEnabled.value = 0.0;
+    if (u.uSparkleEnabled) u.uSparkleEnabled.value = 0.0;
+    if (u.uSpecularBoost) u.uSpecularBoost.value = 0.0;
+    if (u.uLightningWindowEnabled) u.uLightningWindowEnabled.value = 0.0;
+    if (u.uTodEnabled) u.uTodEnabled.value = 0.0;
+    if (u.uCloudInfluence) u.uCloudInfluence.value = 0.0;
+    if (u.uIntensity) {
+      u.uIntensity.value = Math.max(0.0, Number(this.params.intensity) || 0);
+    }
+    return saved;
+  }
+
+  /**
+   * @param {Record<string, { value: number }>} u
+   * @param {Record<string, number>|null} saved
+   * @private
+   */
+  _restoreEmitShadowLiftUniforms(u, saved) {
+    if (!u || !saved) return;
+    for (const key of Object.keys(saved)) {
+      const slot = u[key];
+      if (slot) slot.value = saved[key];
     }
   }
 
@@ -1970,11 +2306,25 @@ export class WindowLightEffectV2 {
   }
 
   _maskImageSize(tex) {
+    const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+    if (compositor?.getMaskTexturePixelSize) {
+      return compositor.getMaskTexturePixelSize(tex);
+    }
     const img = tex?.image ?? tex?.source?.data ?? null;
+    let w = Number(img?.width) || Number(tex?._msaWidth) || Number(tex?.width) || 0;
+    let h = Number(img?.height) || Number(tex?._msaHeight) || Number(tex?.height) || 0;
     return {
-      w: Math.max(1, Number(img?.width) || 1),
-      h: Math.max(1, Number(img?.height) || 1),
+      w: Math.max(1, w || 1),
+      h: Math.max(1, h || 1),
     };
+  }
+
+  /** @private */
+  _stampMaskTextureDimensions(tex) {
+    if (!tex) return;
+    const { w, h } = this._maskImageSize(tex);
+    if (w > 1) tex._msaWidth = w;
+    if (h > 1) tex._msaHeight = h;
   }
 
   _resolveEmitMaskReference() {
@@ -1984,14 +2334,24 @@ export class WindowLightEffectV2 {
       ?? null;
   }
 
-  _ensureEmitTarget(THREE, _renderer) {
+  /**
+   * @param {object} THREE
+   * @param {'full'|'shadowLift'} purpose
+   * @returns {import('three').WebGLRenderTarget|null}
+   * @private
+   */
+  _ensurePurposeEmitTarget(THREE, purpose) {
     const maskTex = this._resolveEmitMaskReference();
-    if (!maskTex) return false;
+    if (!maskTex) return null;
 
-    const { w, h } = this._maskImageSize(maskTex);
-    const sig = `${w}x${h}|${maskTex.uuid ?? ''}`;
-    if (this._emitRT && this._emitRtSig === sig) return true;
+    const shadowLiftOnly = purpose === 'shadowLift';
+    const { w, h } = this._computeEmitTargetDimensions(maskTex);
+    const sig = `${w}x${h}|${maskTex.uuid ?? ''}|${this._emitResolutionScale}`;
+    let rt = shadowLiftOnly ? this._shadowLiftEmitRT : this._emitRT;
+    const sigRef = shadowLiftOnly ? '_shadowLiftEmitRtSig' : '_emitRtSig';
+    if (rt && this[sigRef] === sig) return rt;
 
+    const prevSig = this[sigRef];
     const le = window.MapShine?.effectComposer?._floorCompositorV2?._lightingEffect ?? null;
     const useHalf = le?.params?.windowLightUseHalfFloat !== false;
     const rtOpts = {
@@ -2003,14 +2363,25 @@ export class WindowLightEffectV2 {
       stencilBuffer: false,
     };
 
-    if (!this._emitRT) {
-      this._emitRT = new THREE.WebGLRenderTarget(w, h, rtOpts);
-      this._emitRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
+    if (!rt) {
+      rt = new THREE.WebGLRenderTarget(w, h, rtOpts);
+      rt.texture.colorSpace = THREE.LinearSRGBColorSpace;
+      rt.texture.flipY = false;
+      rt.texture.wrapS = THREE.ClampToEdgeWrapping;
+      rt.texture.wrapT = THREE.ClampToEdgeWrapping;
+      if (shadowLiftOnly) this._shadowLiftEmitRT = rt;
+      else this._emitRT = rt;
     } else {
-      this._emitRT.setSize(w, h);
+      rt.setSize(w, h);
+      rt.texture.flipY = false;
+      rt.texture.wrapS = THREE.ClampToEdgeWrapping;
+      rt.texture.wrapT = THREE.ClampToEdgeWrapping;
     }
-    this._emitRtSig = sig;
-    return true;
+    if (!shadowLiftOnly && prevSig && prevSig !== sig) {
+      this._invalidateEmitDrawCache();
+    }
+    this[sigRef] = sig;
+    return rt;
   }
 
   _ensureFallbackTextures(THREE) {
@@ -2102,22 +2473,33 @@ export class WindowLightEffectV2 {
 
     applySceneViewProjectionToUniforms(this._viewProjectionCache, this._emitMaterial?.uniforms);
 
-    const fd = this._lastFoundrySceneData
-      ?? sc?.foundrySceneData
-      ?? null;
-    const sr = dims.sceneRect ?? dims;
-    const sceneX = Number(fd?.sceneX ?? sr?.x ?? 0);
-    const sceneY = Number(fd?.sceneY ?? sr?.y ?? 0);
-    const sceneW = Number(fd?.sceneWidth ?? fd?.width ?? sr?.width ?? dims.width ?? 1);
-    const sceneH = Number(fd?.sceneHeight ?? fd?.height ?? sr?.height ?? dims.height ?? 1);
-    const canvasW = Number(fd?.width ?? dims.width ?? 1);
-    const canvasH = Number(fd?.height ?? dims.height ?? 1);
+    const fd = this._lastFoundrySceneData ?? sc?.foundrySceneData ?? null;
+    this._applySceneRectUniforms(this._emitMaterial?.uniforms, dims, fd);
+  }
 
-    const u = this._emitMaterial?.uniforms;
-    if (!u) return;
-    u.uSceneOrigin?.value?.set(sceneX, sceneY);
-    u.uSceneSize?.value?.set(sceneW, sceneH);
-    u.uSceneDimensions?.value?.set(canvasW, canvasH);
+  /**
+   * Scene rect + canvas dimensions — must match LightingEffectV2 compose (not raw fd.width).
+   * @param {Record<string, *>|null} uniforms
+   * @param {object|null} dims
+   * @param {object|null} foundrySceneData
+   * @private
+   */
+  _applySceneRectUniforms(uniforms, dims, foundrySceneData) {
+    const u = uniforms;
+    if (!u?.uSceneOrigin || !u?.uSceneSize || !u?.uSceneDimensions) return;
+
+    const fd = foundrySceneData ?? null;
+    const sr = dims?.sceneRect ?? dims;
+    const sceneX = Number(sr?.x ?? 0);
+    const sceneY = Number(sr?.y ?? 0);
+    const sceneW = Number(sr?.width ?? dims?.sceneWidth ?? fd?.sceneWidth ?? 1);
+    const sceneH = Number(sr?.height ?? dims?.sceneHeight ?? fd?.sceneHeight ?? 1);
+    const canvasW = Number(dims?.width ?? fd?.width ?? 1);
+    const canvasH = Number(dims?.height ?? fd?.height ?? 1);
+
+    u.uSceneOrigin.value.set(sceneX, sceneY);
+    u.uSceneSize.value.set(sceneW, sceneH);
+    u.uSceneDimensions.value.set(canvasW, canvasH);
     this._syncSparkleViewUniforms(fd, sceneX, sceneY, sceneW, sceneH, canvasH);
   }
 
@@ -2178,24 +2560,11 @@ export class WindowLightEffectV2 {
 
   /** @private */
   _updateSceneBounds() {
-    const u = this._emitMaterial?.uniforms;
-    if (!u?.uSceneOrigin || !u?.uSceneSize || !u?.uSceneDimensions) return;
-
+    const dims = canvas?.dimensions ?? null;
     const fd = this._lastFoundrySceneData
       ?? window.MapShine?.sceneComposer?.foundrySceneData
       ?? null;
-    const dims = canvas?.dimensions;
-    const sr = dims?.sceneRect ?? dims;
-    const sceneX = Number(fd?.sceneX ?? sr?.x ?? 0);
-    const sceneY = Number(fd?.sceneY ?? sr?.y ?? 0);
-    const sceneW = Number(fd?.sceneWidth ?? fd?.width ?? sr?.width ?? dims?.width ?? 1);
-    const sceneH = Number(fd?.sceneHeight ?? fd?.height ?? sr?.height ?? dims?.height ?? 1);
-    const canvasW = Number(fd?.width ?? dims?.width ?? 1);
-    const canvasH = Number(fd?.height ?? dims?.height ?? 1);
-
-    u.uSceneOrigin.value.set(sceneX, sceneY);
-    u.uSceneSize.value.set(sceneW, sceneH);
-    u.uSceneDimensions.value.set(canvasW, canvasH);
+    this._applySceneRectUniforms(this._emitMaterial?.uniforms, dims, fd);
   }
 
   _levelContextForFloorIndex(floorIndex) {
@@ -2369,6 +2738,8 @@ export class WindowLightEffectV2 {
 
   /** @private */
   _rebuildLitWindowMasks() {
+    if (!this._litMasksDirty) return;
+    this._litMasksDirty = false;
     const groundUuid = this._windowMasks[0]?.uuid ?? null;
     this._litWindowMasks = [null, null, null, null];
     for (let idx = 0; idx < 4; idx += 1) {
@@ -2548,11 +2919,15 @@ export class WindowLightEffectV2 {
       prev.clearAlpha = renderer.getClearAlpha?.() ?? 1;
     }
     renderer.setScissorTest(false);
-    if (rt && typeof renderer.setViewport === 'function') {
-      renderer.setViewport(0, 0, Math.max(1, rt.width), Math.max(1, rt.height));
+    // Must bind emit RT before clear — Pass 1 leaves the active target on `_lightRT`.
+    if (rt) {
+      renderer.setRenderTarget(rt);
+      if (typeof renderer.setViewport === 'function') {
+        renderer.setViewport(0, 0, Math.max(1, rt.width), Math.max(1, rt.height));
+      }
     }
     renderer.autoClear = false;
-    renderer.setClearColor(0x000000, 1);
+    renderer.setClearColor(0x000000, 0);
     renderer.clear(true, true, false);
     return prev;
   }

@@ -1,4 +1,5 @@
 import { createLogger } from '../../core/log.js';
+import { MSA_POST_STYLIZE_INPUT_GLSL } from '../msa-post-stylize-input.glsl.js';
 
 const log = createLogger('SepiaEffectV2');
 
@@ -37,7 +38,7 @@ export class SepiaEffectV2 {
         title: 'Sepia tone',
         summary: [
           'Warm brown photo grade by mixing the scene toward a classic sepia transform (photographic-style matrix).',
-          'Stylistic only — no masks. One fullscreen post pass on the merged composite (after bush/tree overlays and color correction).',
+          'Stylistic only — no masks. One fullscreen post pass on the merged composite (after bush/tree overlays and color correction). Expects display-referred input; HDR is soft-compressed when CC tone mapping is off.',
           'Performance: very cheap (single pass, simple shader).',
           'Persistence: settings save with the scene (not World Based).',
         ].join('\n\n'),
@@ -101,18 +102,19 @@ export class SepiaEffectV2 {
         uniform float uStrength;
         varying vec2 vUv;
 
+        ${MSA_POST_STYLIZE_INPUT_GLSL}
+
         void main() {
           vec4 base = texture2D(tDiffuse, vUv);
-          vec3 color = base.rgb;
-          
-          // Standard sepia matrix
+          vec3 color = msaPostStylizePrepareRgb(base.rgb);
+
           vec3 sepia;
           sepia.r = dot(color, vec3(0.393, 0.769, 0.189));
           sepia.g = dot(color, vec3(0.349, 0.686, 0.168));
           sepia.b = dot(color, vec3(0.272, 0.534, 0.131));
-          
-          color = mix(color, sepia, uStrength);
-          gl_FragColor = vec4(color, base.a);
+
+          color = mix(color, sepia, clamp(uStrength, 0.0, 1.0));
+          gl_FragColor = vec4(max(color, vec3(0.0)), base.a);
         }
       `,
       depthWrite: false,
@@ -134,6 +136,8 @@ export class SepiaEffectV2 {
 
   render(renderer, camera, inputRT, outputRT) {
     if (!this._enabled || !this._initialized || !this._material) return false;
+    if (!inputRT?.texture || !outputRT) return false;
+    if ((Number(this.params.strength) || 0) < 1e-4) return false;
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
@@ -141,7 +145,7 @@ export class SepiaEffectV2 {
     this._material.uniforms.tDiffuse.value = inputRT.texture;
 
     renderer.setRenderTarget(outputRT);
-    renderer.autoClear = false;
+    renderer.autoClear = true;
     renderer.render(this._quadScene, this._quadCamera);
 
     renderer.autoClear = prevAutoClear;

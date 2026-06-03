@@ -1215,16 +1215,18 @@ export function sampleScenePixelAt(wx, wy, options = {}) {
       readRtPixel(renderer, le._lightRT, uvX, uvY),
     );
   }
-  if (le?._windowLightRT) {
+  const wleEmitRt = window.MapShine?.effectComposer?._floorCompositorV2?._windowLightEffect?._emitRT
+    ?? null;
+  if (wleEmitRt) {
     const wlScreenUv = (screenUv?.onScreen ? screenUv : bufUv);
     point.lighting.buffers.windowLight = wlScreenUv
-      ? sampleRtAtBufferUv(renderer, le._windowLightRT, wlScreenUv)
+      ? sampleRtAtBufferUv(renderer, wleEmitRt, wlScreenUv)
       : null;
     point.lighting.buffers.windowLightSceneUv = compactPixel(
-      readRtPixel(renderer, le._windowLightRT, uvX, uvY),
+      readRtPixel(renderer, wleEmitRt, uvX, uvY),
     );
     if (screenUv?.onScreen) {
-      point.lighting.buffers.windowLightScreenUv = sampleRtAtBufferUv(renderer, le._windowLightRT, screenUv);
+      point.lighting.buffers.windowLightScreenUv = sampleRtAtBufferUv(renderer, wleEmitRt, screenUv);
     }
   }
   if (le?._lightRT && screenUv?.onScreen) {

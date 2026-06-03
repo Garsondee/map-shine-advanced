@@ -696,7 +696,7 @@ export class BuildingShadowsEffectV2 {
               vec3 win = texture2D(tWindowLight, vUv).rgb;
               dynI = max(dynI, clamp(max(win.r, max(win.g, win.b)), 0.0, 1.0));
             }
-            float dynPresence = smoothstep(0.02, 0.30, dynI);
+            float dynPresence = smoothstep(0.28, 0.92, dynI);
             float dynLift = clamp(dynPresence * max(uDynamicLightShadowOverrideStrength, 0.0), 0.0, 1.0);
             strength = mix(strength, 0.0, dynLift);
           }

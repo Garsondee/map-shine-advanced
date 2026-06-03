@@ -44,8 +44,9 @@
  * **Point light gain (`lightIntensity`):** Applied in {@link ThreeLightSource} as
  * `uComposeLightGain` on HDR radiance before max-blend into `_lightRT`.
  * Falloff uses {@link POINT_LIGHT_FALLOFF_GLSL}. Buffer RGB = Foundry tinted colour
- * (`lampHue × CI gel × mag`); alpha = mag. Compose: neutral `direct = vec3(1+mag)`, then
- * luma-preserving hue tint on `base × totalIllum` (CI never in the vec3 brightness multiply). Max-blend.
+ * (`lampHue × CI gel × mag`); alpha = mag. Compose: additive HDR `totalIllum = ambient + direct`
+ * where direct uses lamp mag only; day/night ambient from Foundry env × ambientDay/Night scales.
+ * Max-blend.
  * Torch / flashlight {@link ThreeLightSource} instances are updated
  * from here each frame/when params change. Window glow is unchanged.
  *
@@ -78,6 +79,7 @@ import {
   getPointLightFalloffTuningFromParams,
   MSA_LIGHT_RADIANCE_GLSL,
 } from '../../scene/point-light-falloff.js';
+import { resolveEffectEnabled } from '../../effects/resolve-effect-enabled.js';
 
 const log = createLogger('LightingEffectV2');
 const MODULE_ID = 'map-shine-advanced';
@@ -105,6 +107,15 @@ const LEGACY_LIGHTING_PARAM_KEYS = [
 
 const clamp01 = (n) => Math.max(0, Math.min(1, n));
 
+/** Compose-time defaults when saved ambient scales are all zero (uniform-only; does not mutate params). */
+const MSA_AMBIENT_COMPOSE_DEFAULTS = Object.freeze({
+  dayOutdoor: 0.92,
+  dayIndoor: 0.62,
+  nightOutdoor: 0.32,
+  nightIndoor: 0.27,
+  minIllum: 0.22,
+});
+
 const readFoundryDarkness01 = () => {
   const sceneLevel = canvas?.scene?.environment?.darknessLevel;
   if (Number.isFinite(sceneLevel)) return clamp01(sceneLevel);
@@ -112,6 +123,44 @@ const readFoundryDarkness01 = () => {
   if (Number.isFinite(envLevel)) return clamp01(envLevel);
   return 0.0;
 };
+
+/** Reproject scene-UV window emit into screen-space for compose (matches compose world→scene UV). */
+const WINDOW_EMIT_BLIT_VERT = /* glsl */`
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = vec4(position.xy, 0.0, 1.0);
+  }
+`;
+
+const WINDOW_EMIT_BLIT_FRAG = /* glsl */`
+  uniform sampler2D tEmit;
+  uniform vec2 uSceneDimensions;
+  uniform vec2 uBldViewCorner00;
+  uniform vec2 uBldViewCorner10;
+  uniform vec2 uBldViewCorner01;
+  uniform vec2 uBldViewCorner11;
+  uniform vec2 uBldSceneOrigin;
+  uniform vec2 uBldSceneSize;
+  varying vec2 vUv;
+
+  void main() {
+    vec2 w0s = mix(uBldViewCorner00, uBldViewCorner10, vUv.x);
+    vec2 w1s = mix(uBldViewCorner01, uBldViewCorner11, vUv.x);
+    vec2 worldXYs = mix(w0s, w1s, vUv.y);
+    float foundryXs = worldXYs.x;
+    float foundryYs = uSceneDimensions.y - worldXYs.y;
+    vec2 sceneUvRaw = (vec2(foundryXs, foundryYs) - uBldSceneOrigin) / max(uBldSceneSize, vec2(1e-5));
+    vec2 inBounds2 = step(vec2(0.0), sceneUvRaw) * step(sceneUvRaw, vec2(1.0));
+    float inSceneBounds = inBounds2.x * inBounds2.y;
+    vec2 sceneUvFoundry = clamp(sceneUvRaw, 0.0, 1.0);
+    vec3 win = max(texture2D(tEmit, sceneUvFoundry).rgb, vec3(0.0));
+    float winL = max(win.r, max(win.g, win.b));
+    win *= smoothstep(0.10, 0.24, winL);
+    win = min(win, vec3(1.25)) * inSceneBounds;
+    gl_FragColor = vec4(win, 1.0);
+  }
+`;
 
 export class LightingEffectV2 {
   constructor() {
@@ -148,6 +197,8 @@ export class LightingEffectV2 {
      * @type {boolean}
      */
     this._legacyGlobalIlluminationSeeded = false;
+    /** @type {boolean} */
+    this._splitAmbientParamsMigrated = false;
 
     // ── Tuning parameters (match V1 defaults) ──────────────────────────
     this.params = {
@@ -159,8 +210,14 @@ export class LightingEffectV2 {
       globalIllumination: 0,
       /** Scales Foundry ambient brightest colour at darkness 0 (noon / bright scenes). */
       ambientDayScale: 0,
+      /** Outdoor day ambient (_Outdoors mask); falls back to ambientDayScale when unset. */
+      ambientDayScaleOutdoor: 0,
+      /** Indoor day ambient (_Outdoors mask); falls back to ambientDayScale when unset. */
+      ambientDayScaleIndoor: 0,
       /** Scales Foundry ambient darkness colour at darkness 1 (night). */
       ambientNightScale: 0,
+      ambientNightScaleOutdoor: 0,
+      ambientNightScaleIndoor: 0,
       lightIntensity: 0.75,
       /** Half-life falloff: normalized radius per halving at Foundry attenuation 0 (gentle). */
       falloffHalfInAtAtt0: 0.52,
@@ -270,8 +327,17 @@ export class LightingEffectV2 {
       internalDarknessResolutionScale: 1.0,
       /** Use half-float for window light RT (false allows 8-bit to cut bandwidth). */
       windowLightUseHalfFloat: true,
-      /** Scale for token-style `litColor *= (1 + win)` window boost at compose. */
+      /**
+       * Window glow indirect illumination in compose (`totalIllumination += win × gain`).
+       * Separate from point-lamp HDR in `_lightRT`.
+       */
       windowEmissiveGain: 1.0,
+      /** Pow shaping on window mag in compose (lower = hotter cores, less flat wash). */
+      windowIndirectContrast: 0.65,
+      /** Mix window hue into indirect illumination (0 = neutral white). */
+      windowWarmthTint: 0.62,
+      /** Scale `litColor *= (1 + win)` by surface albedo so walls keep texture. */
+      windowAlbedoCoupling: 0.78,
     };
 
     // ── Light management ────────────────────────────────────────────────
@@ -290,15 +356,16 @@ export class LightingEffectV2 {
     this._darknessScene = null;
     /** @type {THREE.WebGLRenderTarget|null} Foundry light mesh accumulation RT */
     this._lightRT = null;
-    /** @type {THREE.WebGLRenderTarget|null} Window glow accumulation RT (compose combines with {@link #_lightRT}) */
+    /** @type {THREE.WebGLRenderTarget|null} Screen-space window glow for compose (reprojected from emit). */
     this._windowLightRT = null;
-    /**
-     * Shadow-prepass window glow RT — stripped occlusion bindings for source shadow
-     * override. Kept separate from {@link #_windowLightRT} so compose can draw window
-     * glow once with full roof/ceiling/cloud masks.
-     * @type {THREE.WebGLRenderTarget|null}
-     */
-    this._lightOverrideWindowRT = null;
+    /** @type {boolean} True after emit→{@link #_windowLightRT} blit succeeds this frame. */
+    this._windowComposeBlitValid = false;
+    /** @type {THREE.Scene|null} */
+    this._windowEmitBlitScene = null;
+    /** @type {THREE.OrthographicCamera|null} */
+    this._windowEmitBlitCamera = null;
+    /** @type {THREE.ShaderMaterial|null} */
+    this._windowEmitBlitMaterial = null;
     /** @type {THREE.WebGLRenderTarget|null} Darkness accumulation RT */
     this._darknessRT = null;
 
@@ -427,9 +494,186 @@ export class LightingEffectV2 {
 
     /** @type {import('../../core/diagnostics/PerformanceRecorder.js').PerformanceRecorder|null} */
     this._activePerfRecorder = null;
+
+    /**
+     * Session counters for Performance Recorder exports (reset when recorder starts).
+     * @type {{ prepassReuse: number, prepassRedraw: number, lightOverrideDraws: number, composeDraws: number, ceilingTransmittanceDraws: number, stackedLightAccumulates: number }}
+     */
+    this._perfSession = {
+      prepassReuse: 0,
+      prepassRedraw: 0,
+      lightOverrideDraws: 0,
+      composeDraws: 0,
+      ceilingTransmittanceDraws: 0,
+      stackedLightAccumulates: 0,
+    };
   }
 
   // ── Performance Recorder ───────────────────────────────────────────────────
+
+  /**
+   * Live lighting inventory + tuning knobs for performance exports.
+   * @returns {object}
+   */
+  getPerformanceRecorderSnapshot() {
+    let visibleLights = 0;
+    let visibleDarkness = 0;
+    const lights = this._lightList;
+    for (let i = 0; i < lights.length; i++) {
+      if (lights[i]?.mesh?.visible) visibleLights += 1;
+    }
+    const darks = this._darknessList;
+    for (let i = 0; i < darks.length; i++) {
+      if (darks[i]?.mesh?.visible) visibleDarkness += 1;
+    }
+
+    const drawingBuffer = this._sizeVec
+      ? { w: this._sizeVec.x, h: this._sizeVec.y }
+      : null;
+
+    const estimateRtMb = (w, h, halfFloat = true) => {
+      const ww = Math.max(0, Number(w) || 0);
+      const hh = Math.max(0, Number(h) || 0);
+      if (ww === 0 || hh === 0) return 0;
+      const bpp = halfFloat ? 8 : 4;
+      return (ww * hh * bpp) / (1024 * 1024);
+    };
+
+    const p = this.params ?? {};
+    const wle = this._resolveWindowLightEffect();
+    const emitLive = wle?.getEmitPerformanceSnapshot?.() ?? null;
+    const emitRt = emitLive?.emitRt;
+    const rtInventory = [
+      {
+        id: 'lightRT',
+        w: this._lightRT?.width ?? this._lightSize.w,
+        h: this._lightRT?.height ?? this._lightSize.h,
+        scale: this._sanitizeResolutionScale(p.internalLightResolutionScale),
+        halfFloat: true,
+        estMb: estimateRtMb(this._lightRT?.width ?? this._lightSize.w, this._lightRT?.height ?? this._lightSize.h, true),
+      },
+      ...(emitRt ? [{
+        id: 'windowEmitRT',
+        w: emitRt.w,
+        h: emitRt.h,
+        scale: Number(emitRt.scale) || this._sanitizeResolutionScale(p.internalWindowResolutionScale),
+        halfFloat: !!p.windowLightUseHalfFloat,
+        estMb: estimateRtMb(emitRt.w, emitRt.h, !!p.windowLightUseHalfFloat),
+      }] : []),
+      {
+        id: 'darknessRT',
+        w: this._darknessRT?.width ?? this._darknessSize.w,
+        h: this._darknessRT?.height ?? this._darknessSize.h,
+        scale: this._sanitizeResolutionScale(p.internalDarknessResolutionScale),
+        halfFloat: true,
+        estMb: estimateRtMb(this._darknessRT?.width ?? this._darknessSize.w, this._darknessRT?.height ?? this._darknessSize.h, true),
+      },
+    ];
+    if (this.ceilingTransmittanceTarget) {
+      const cw = this.ceilingTransmittanceTarget.width ?? 0;
+      const ch = this.ceilingTransmittanceTarget.height ?? 0;
+      rtInventory.push({
+        id: 'ceilingTransmittance',
+        w: cw,
+        h: ch,
+        scale: 0.5,
+        halfFloat: false,
+        estMb: estimateRtMb(cw, ch, false),
+      });
+    }
+    if (this._stackedLightRtA) {
+      rtInventory.push({
+        id: 'stackedLightRtA',
+        w: this._stackedLightRtA.width,
+        h: this._stackedLightRtA.height,
+        scale: this._sanitizeResolutionScale(p.internalLightResolutionScale),
+        halfFloat: true,
+        estMb: estimateRtMb(this._stackedLightRtA.width, this._stackedLightRtA.height, true),
+      });
+    }
+    if (this._stackedLightRtB) {
+      rtInventory.push({
+        id: 'stackedLightRtB',
+        w: this._stackedLightRtB.width,
+        h: this._stackedLightRtB.height,
+        scale: this._sanitizeResolutionScale(p.internalLightResolutionScale),
+        halfFloat: true,
+        estMb: estimateRtMb(this._stackedLightRtB.width, this._stackedLightRtB.height, true),
+      });
+    }
+
+    const estVramMb = rtInventory.reduce((s, r) => s + (r.estMb || 0), 0);
+    const prepassTotal = this._perfSession.prepassReuse + this._perfSession.prepassRedraw;
+
+    return {
+      initialized: this._initialized,
+      enabled: this._enabled && !!p.enabled,
+      lightsSynced: this._lightsSynced,
+      sourceCounts: {
+        foundryLights: this._lights.size,
+        foundryDarkness: this._darknessSources.size,
+        visibleLights,
+        visibleDarkness,
+        lightEnhancements: this._getLightEnhancementConfigMap().size,
+      },
+      perspective: {
+        renderFloorIndexForLights: this._renderFloorIndexForLights,
+        lightRtContentFloor: this._lightRtContentFloor,
+        activeFloorIndex: this._lightingPerspectiveContext?.activeFloorIndex ?? null,
+        stackedLightActive: this._stackedLightActive,
+        stackedLightLayerCount: this._stackedLightLayerCount,
+      },
+      drawingBuffer,
+      renderTargets: rtInventory,
+      estimatedRtVramMb: Math.round(estVramMb * 100) / 100,
+      lightMaskPrepassCache: { ...this._lightMaskPrepassCache },
+      ceilingTransmittanceWrittenThisFrame: this._ceilingTransmittanceWritten,
+      resolutionScales: {
+        internalLightResolutionScale: this._sanitizeResolutionScale(p.internalLightResolutionScale),
+        internalWindowResolutionScale: this._sanitizeResolutionScale(p.internalWindowResolutionScale),
+        internalDarknessResolutionScale: this._sanitizeResolutionScale(p.internalDarknessResolutionScale),
+        windowLightUseHalfFloat: !!p.windowLightUseHalfFloat,
+      },
+      perfTuningParams: {
+        lightIntensity: Number(p.lightIntensity) || 0,
+        colorationStrength: Number(p.colorationStrength) || 0,
+        directStructuralOcclusionStrength: Number(p.directStructuralOcclusionStrength) || 0,
+        restrictRoofScreenLightOcclusionToTopFloor: p.restrictRoofScreenLightOcclusionToTopFloor !== false,
+      },
+      sessionCounters: {
+        ...this._perfSession,
+        prepassReusePct: prepassTotal > 0
+          ? Math.round((this._perfSession.prepassReuse / prepassTotal) * 1000) / 10
+          : null,
+      },
+      emit: emitLive,
+      windowLightCompose: {
+        blitOk: this._windowComposeBlitValid === true,
+        composePath: 'sceneUvEmit',
+        emit: emitLive?.emitRt
+          ? { w: emitLive.emitRt.w, h: emitLive.emitRt.h }
+          : null,
+        compose: this._windowLightRT
+          ? { w: this._windowLightRT.width, h: this._windowLightRT.height }
+          : null,
+        textureSource: emitLive?.windowLightTextureSource ?? 'emit',
+      },
+      windowLightTextureSource: emitLive?.windowLightTextureSource ?? 'emit',
+    };
+  }
+
+  /** Reset perf session counters (Performance Recorder start). */
+  resetPerformanceRecorderSession() {
+    try {
+      this._resolveWindowLightEffect()?.resetEmitPerfSession?.();
+    } catch (_) {}
+    this._perfSession.prepassReuse = 0;
+    this._perfSession.prepassRedraw = 0;
+    this._perfSession.lightOverrideDraws = 0;
+    this._perfSession.composeDraws = 0;
+    this._perfSession.ceilingTransmittanceDraws = 0;
+    this._perfSession.stackedLightAccumulates = 0;
+  }
 
   /** @private */
   _bindPerfRecorder() {
@@ -452,9 +696,44 @@ export class LightingEffectV2 {
     try {
       const recorder = this._activePerfRecorder;
       if (!recorder?.enabled || typeof recorder.beginEffectCall !== 'function') return null;
-      return recorder.beginEffectCall(`lighting.${phase}.${name}`, phase, options);
+      const opts = { cpuOnly: options.cpuOnly === true };
+      if (options.gpuSlot) opts.gpuSlot = options.gpuSlot;
+      return recorder.beginEffectCall(`lighting.${phase}.${name}`, phase, opts);
     } catch (_) {
       return null;
+    }
+  }
+
+  /**
+   * @returns {import('./WindowLightEffectV2.js').WindowLightEffectV2|null}
+   * @private
+   */
+  _resolveWindowLightEffect() {
+    try {
+      return window.MapShine?.effectComposer?._floorCompositorV2?._windowLightEffect ?? null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * @param {THREE.WebGLRenderer|null} renderer
+   * @private
+   */
+  _syncWindowLightEmitContext(renderer) {
+    const wle = this._resolveWindowLightEffect();
+    if (!wle) return;
+    wle.setEmitResolutionScale?.(this._sanitizeResolutionScale(this.params.internalWindowResolutionScale));
+    if (renderer) {
+      wle._syncEmitDrawingBufferFromRenderer?.(renderer);
+      if (this._sizeVec && typeof renderer.getDrawingBufferSize === 'function') {
+        renderer.getDrawingBufferSize(this._sizeVec);
+        const bw = Math.floor(this._sizeVec.x);
+        const bh = Math.floor(this._sizeVec.h);
+        if (bw >= 8 && bh >= 8) {
+          wle.setEmitDrawingBufferSize?.(bw, bh);
+        }
+      }
     }
   }
 
@@ -530,9 +809,10 @@ export class LightingEffectV2 {
     }
     if (this._windowLightRT && (this._windowLightRT.width !== this._windowSize.w || this._windowLightRT.height !== this._windowSize.h)) {
       this._windowLightRT.setSize(this._windowSize.w, this._windowSize.h);
+      this._windowComposeBlitValid = false;
     }
-    if (this._lightOverrideWindowRT && (this._lightOverrideWindowRT.width !== this._windowSize.w || this._lightOverrideWindowRT.height !== this._windowSize.h)) {
-      this._lightOverrideWindowRT.setSize(this._windowSize.w, this._windowSize.h);
+    if (this._lastCompositorRenderer) {
+      this._syncWindowLightEmitContext(this._lastCompositorRenderer);
     }
     if (this._darknessRT && (this._darknessRT.width !== this._darknessSize.w || this._darknessRT.height !== this._darknessSize.h)) {
       this._darknessRT.setSize(this._darknessSize.w, this._darknessSize.h);
@@ -663,6 +943,7 @@ export class LightingEffectV2 {
     if (!renderer || !roofVisTex || !roofBlockTex || !this.ceilingTransmittanceTarget) {
       return;
     }
+    this._perfSession.ceilingTransmittanceDraws += 1;
     this._bindPerfRecorder();
     const _perfToken = this._beginPerfSpan('ceilingTransmittance.draw', 'render');
     this._ensureCeilingTransmittancePass();
@@ -725,6 +1006,83 @@ export class LightingEffectV2 {
     );
   }
 
+  /** @private */
+  _ensureWindowEmitBlitPass() {
+    const THREE = window.THREE;
+    if (!THREE || this._windowEmitBlitScene) return;
+
+    this._windowEmitBlitCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this._windowEmitBlitScene = new THREE.Scene();
+    this._windowEmitBlitMaterial = new THREE.ShaderMaterial({
+      depthWrite: false,
+      depthTest: false,
+      uniforms: {
+        tEmit: { value: null },
+        uSceneDimensions: { value: new THREE.Vector2(1, 1) },
+        uBldViewCorner00: { value: new THREE.Vector2(0, 0) },
+        uBldViewCorner10: { value: new THREE.Vector2(1, 0) },
+        uBldViewCorner01: { value: new THREE.Vector2(0, 1) },
+        uBldViewCorner11: { value: new THREE.Vector2(1, 1) },
+        uBldSceneOrigin: { value: new THREE.Vector2(0, 0) },
+        uBldSceneSize: { value: new THREE.Vector2(1, 1) },
+      },
+      vertexShader: WINDOW_EMIT_BLIT_VERT,
+      fragmentShader: WINDOW_EMIT_BLIT_FRAG,
+    });
+    this._windowEmitBlitMaterial.toneMapped = false;
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._windowEmitBlitMaterial);
+    quad.frustumCulled = false;
+    this._windowEmitBlitScene.add(quad);
+  }
+
+  /**
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {THREE.Camera} camera
+   * @param {THREE.Texture|null} emitTex
+   * @returns {boolean}
+   * @private
+   */
+  _blitWindowEmitToComposeRT(renderer, camera, emitTex) {
+    this._windowComposeBlitValid = false;
+    if (!emitTex || !this._windowLightRT || !renderer || !camera) return false;
+
+    const THREE = window.THREE;
+    if (!THREE) return false;
+
+    this._ensureWindowEmitBlitPass();
+    const bm = this._windowEmitBlitMaterial;
+    const cu = this._composeMaterial?.uniforms;
+    if (!bm || !cu) return false;
+
+    this._syncViewSceneUniforms(camera);
+    bm.uniforms.tEmit.value = emitTex;
+    bm.uniforms.uSceneDimensions.value.copy(cu.uSceneDimensions.value);
+    bm.uniforms.uBldViewCorner00.value.copy(cu.uBldViewCorner00.value);
+    bm.uniforms.uBldViewCorner10.value.copy(cu.uBldViewCorner10.value);
+    bm.uniforms.uBldViewCorner01.value.copy(cu.uBldViewCorner01.value);
+    bm.uniforms.uBldViewCorner11.value.copy(cu.uBldViewCorner11.value);
+    bm.uniforms.uBldSceneOrigin.value.copy(cu.uBldSceneOrigin.value);
+    bm.uniforms.uBldSceneSize.value.copy(cu.uBldSceneSize.value);
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    try {
+      renderer.setRenderTarget(this._windowLightRT);
+      renderer.setClearColor(0x000000, 1);
+      renderer.autoClear = true;
+      renderer.clear();
+      renderer.render(this._windowEmitBlitScene, this._windowEmitBlitCamera);
+      this._windowComposeBlitValid = true;
+      return true;
+    } catch (err) {
+      log.warn('_blitWindowEmitToComposeRT failed:', err);
+      return false;
+    } finally {
+      renderer.autoClear = prevAutoClear;
+      renderer.setRenderTarget(prevTarget);
+    }
+  }
+
   /**
    * @private
    * @param {THREE.Texture|null|undefined} texture
@@ -741,8 +1099,15 @@ export class LightingEffectV2 {
     if (tex.magFilter !== THREE.LinearFilter) { tex.magFilter = THREE.LinearFilter; texChanged = true; }
     if (tex.generateMipmaps !== false) { tex.generateMipmaps = false; texChanged = true; }
     // Cache dimensions once; render() reads these every frame.
-    tex._msaWidth = Number(tex?.image?.width) || Number(tex?.source?.data?.width) || 0;
-    tex._msaHeight = Number(tex?.image?.height) || Number(tex?.source?.data?.height) || 0;
+    const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+    if (compositor?.getMaskTexturePixelSize) {
+      const dim = compositor.getMaskTexturePixelSize(tex);
+      tex._msaWidth = dim.w;
+      tex._msaHeight = dim.h;
+    } else {
+      tex._msaWidth = Number(tex?.image?.width) || Number(tex?.source?.data?.width) || 0;
+      tex._msaHeight = Number(tex?.image?.height) || Number(tex?.source?.data?.height) || 0;
+    }
     if (texChanged) tex.needsUpdate = true;
     this._normalizedOutdoorsTextures.add(tex);
   }
@@ -803,10 +1168,14 @@ export class LightingEffectV2 {
     for (const k of LEGACY_LIGHTING_PARAM_KEYS) {
       if (Object.prototype.hasOwnProperty.call(this.params, k)) delete this.params[k];
     }
-
-    u.uAmbientDayScale.value = Math.max(0, Number(this.params.ambientDayScale) || 0);
-    u.uAmbientNightScale.value = Math.max(0, Number(this.params.ambientNightScale) || 0);
-    u.uMinIlluminationScale.value = Math.max(0, Number(this.params.minIlluminationScale) || 0);
+    this._pushEffectiveAmbientUniforms(u);
+    u.uWindowEmissiveGain.value = Math.max(0, Number(this.params.windowEmissiveGain) || 0);
+    u.uWindowIndirectContrast.value = Math.max(
+      0.35,
+      Math.min(1.25, Number(this.params.windowIndirectContrast) ?? 0.65),
+    );
+    u.uWindowWarmthTint.value = clamp01(Number(this.params.windowWarmthTint) ?? 0.62);
+    u.uWindowAlbedoCoupling.value = Math.max(0, Number(this.params.windowAlbedoCoupling) ?? 0.78);
     u.uChromaticRadianceGain.value = Math.max(1.0, Number(this.params.colorationStrength) || 4.0);
     u.uColorationReflectivity.value = clamp01(Number(this.params.colorationReflectivity) ?? 0);
     u.uColorationSaturationBoost.value = Math.max(0, Number(this.params.colorationSaturationBoost) || 0);
@@ -1007,6 +1376,7 @@ export class LightingEffectV2 {
    */
   accumulateStackedLightBuffer(renderer) {
     if (!renderer || !this._lightRT?.texture || !this._stackLightMaterial) return;
+    this._perfSession.stackedLightAccumulates += 1;
     if (!this._stackedLightActive) this.beginStackedLightBuffer(renderer);
 
     const accumTex = this._stackedLightResult?.texture ?? this._stackedLightRtA?.texture;
@@ -1070,20 +1440,19 @@ export class LightingEffectV2 {
    */
   get windowLightTexture() {
     try {
-      const wle = window.MapShine?.effectComposer?._floorCompositorV2?._windowLightEffect;
-      const sceneTex = wle?.getEmitTexture?.() ?? null;
-      if (sceneTex) return sceneTex;
+      const wle = this._resolveWindowLightEffect();
+      if (!wle?.isEmitValidForCompose?.()) return null;
+      return wle.getEmitTexture?.() ?? null;
     } catch (_) {}
-    return this._windowLightRT?.texture ?? null;
+    return null;
   }
 
   /**
-   * Window glow captured during {@link #renderLightOverrideMasks} for source shadow
-   * override (stripped occlusion). Not used by compose — see {@link #windowLightTexture}.
+   * Alias for {@link #windowLightTexture} (legacy shadow-prepass naming).
    * @returns {THREE.Texture|null}
    */
   get windowLightOverrideTexture() {
-    return this._lightOverrideWindowRT?.texture ?? null;
+    return this.windowLightTexture;
   }
 
   setSkyOcclusionTexture(texture) {
@@ -1107,8 +1476,8 @@ export class LightingEffectV2 {
           'Shadows dim ambient/sky light. Point lights are preserved so torches and lamps create readable pools at night.'
         ].join('\n\n'),
         glossary: {
-          'Day ambient': 'Foundry ambientBrightest at low darkness; drives bright noon readability.',
-          'Night ambient': 'Foundry ambientDarkness at high darkness; keep lower for deeper nights.',
+          'Day ambient': 'Foundry ambientBrightest at low darkness; outdoor vs indoor scales use the _Outdoors mask.',
+          'Night ambient': 'Foundry ambientDarkness at high darkness; outdoor/indoor split for porches vs rooms.',
           'Point light gain':
             'Multiplies AmbientLight/torch emission in ThreeLightSource before max-blend into `_lightRT`. Tune falloff shape under Point light falloff (half-life). Overlaps take the brighter sample, not the sum. Window glow unaffected.',
           'Minimum light floor': 'Safety floor that prevents pure-black collapse without replacing actual lights.'
@@ -1120,7 +1489,13 @@ export class LightingEffectV2 {
           label: 'Ambient light (linear HDR)',
           type: 'folder',
           expanded: true,
-          parameters: ['ambientDayScale', 'ambientNightScale', 'minIlluminationScale'],
+          parameters: [
+            'ambientDayScaleOutdoor',
+            'ambientDayScaleIndoor',
+            'ambientNightScaleOutdoor',
+            'ambientNightScaleIndoor',
+            'minIlluminationScale',
+          ],
         },
         {
           name: 'dynamicLuma',
@@ -1128,6 +1503,18 @@ export class LightingEffectV2 {
           type: 'folder',
           expanded: true,
           parameters: ['lightIntensity'],
+        },
+        {
+          name: 'windowCompose',
+          label: 'Window glow (compose)',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'windowEmissiveGain',
+            'windowIndirectContrast',
+            'windowWarmthTint',
+            'windowAlbedoCoupling',
+          ],
         },
         {
           name: 'pointFalloff',
@@ -1215,6 +1602,19 @@ export class LightingEffectV2 {
           expanded: false,
           parameters: ['lightAnimWindInfluence', 'lightAnimOutdoorPower'],
         },
+        {
+          name: 'perfTuning',
+          label: 'Performance (internal RT scale)',
+          type: 'folder',
+          advanced: true,
+          expanded: false,
+          parameters: [
+            'internalLightResolutionScale',
+            'internalWindowResolutionScale',
+            'internalDarknessResolutionScale',
+            'windowLightUseHalfFloat',
+          ],
+        },
       ],
       parameters: {
         enabled: { type: 'boolean', default: true, hidden: true },
@@ -1233,25 +1633,63 @@ export class LightingEffectV2 {
           min: 0,
           max: 3.5,
           step: 0.05,
-          default: 0,
-          label: 'Day ambient (noon)',
-          tooltip: 'Scales Foundry “ambient brightest” at low darkness only. Raise for brighter midday without lifting night.',
+          default: 1,
+          label: 'Day ambient (legacy)',
+          hidden: true,
+          tooltip: 'Deprecated: use Outdoor/Indoor day ambient. Loaded for old saves.',
+        },
+        ambientDayScaleOutdoor: {
+          type: 'slider',
+          min: 0,
+          max: 3.5,
+          step: 0.05,
+          default: 0.92,
+          label: 'Day ambient — outdoor',
+          tooltip: 'Scales Foundry ambient brightest on outdoor-classified pixels (porches, courtyards, sky reach).',
+        },
+        ambientDayScaleIndoor: {
+          type: 'slider',
+          min: 0,
+          max: 3.5,
+          step: 0.05,
+          default: 0.62,
+          label: 'Day ambient — indoor',
+          tooltip: 'Scales Foundry ambient brightest on indoor-classified pixels (rooms under roof capture).',
         },
         ambientNightScale: {
           type: 'slider',
           min: 0,
           max: 2,
           step: 0.05,
-          default: 0,
-          label: 'Night ambient fill',
-          tooltip: 'Scales Foundry ambientDarkness at high darkness. Keep below day ambient so nights stay dark/desaturated while point lights remain important.',
+          default: 0.32,
+          label: 'Night ambient (legacy)',
+          hidden: true,
+          tooltip: 'Deprecated: use Outdoor/Indoor night ambient.',
+        },
+        ambientNightScaleOutdoor: {
+          type: 'slider',
+          min: 0,
+          max: 2,
+          step: 0.05,
+          default: 0.32,
+          label: 'Night ambient — outdoor',
+          tooltip: 'Scales Foundry ambientDarkness on outdoor pixels at high darkness.',
+        },
+        ambientNightScaleIndoor: {
+          type: 'slider',
+          min: 0,
+          max: 2,
+          step: 0.05,
+          default: 0.27,
+          label: 'Night ambient — indoor',
+          tooltip: 'Scales Foundry ambientDarkness on indoor pixels; usually slightly lower than outdoor.',
         },
         minIlluminationScale: {
           type: 'slider',
           min: 0,
           max: 3,
           step: 0.05,
-          default: 0,
+          default: 0.12,
           label: 'Minimum light floor',
           tooltip: 'Scales the darkest-scene safety floor so interiors never clip to pure black.',
         },
@@ -1655,6 +2093,75 @@ export class LightingEffectV2 {
         lightAnimOutdoorPower: { type: 'slider', min: 0, max: 6, step: 0.25, default: 2.0, label: 'Outdoor Power' },
         negativeDarknessStrength: { type: 'slider', min: 0, max: 3, step: 0.1, default: 2.0, label: 'Negative Darkness Strength' },
         darknessPunchGain: { type: 'slider', min: 0, max: 10, step: 0.1, default: 0, label: 'Darkness Punch Gain' },
+        internalLightResolutionScale: {
+          type: 'slider',
+          min: 0.25,
+          max: 1,
+          step: 0.05,
+          default: 1,
+          label: 'Foundry lights RT scale',
+          tooltip: 'Internal resolution for `_lightRT` and stacked light buffers. Lower values reduce fill rate; point lights may soften slightly.',
+        },
+        internalWindowResolutionScale: {
+          type: 'slider',
+          min: 0.25,
+          max: 1,
+          step: 0.05,
+          default: 1,
+          label: 'Window emit RT scale',
+          tooltip: 'Scales the scene-UV emit RT relative to compositor mask resolution (1.0 = native mask size). Do not cap to drawing-buffer size — that smears glow in compose.',
+        },
+        internalDarknessResolutionScale: {
+          type: 'slider',
+          min: 0.25,
+          max: 1,
+          step: 0.05,
+          default: 1,
+          label: 'Darkness RT scale',
+          tooltip: 'Internal resolution for the darkness accumulation RT.',
+        },
+        windowLightUseHalfFloat: {
+          type: 'boolean',
+          default: true,
+          label: 'Window emit half-float',
+          tooltip: 'When false, emit RT uses 8-bit (less VRAM/bandwidth; may band on bright windows).',
+        },
+        windowEmissiveGain: {
+          type: 'slider',
+          min: 0,
+          max: 3,
+          step: 0.05,
+          default: 1,
+          label: 'Window indirect gain',
+          tooltip: 'Scales window spill in the lighting compose pass (emit intensity is on the Window Light effect).',
+        },
+        windowIndirectContrast: {
+          type: 'slider',
+          min: 0.35,
+          max: 1.2,
+          step: 0.02,
+          default: 0.65,
+          label: 'Window contrast',
+          tooltip: 'Lower = brighter window cores and softer falloff (less flat grey wash at high intensity).',
+        },
+        windowWarmthTint: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.02,
+          default: 0.62,
+          label: 'Window warmth tint',
+          tooltip: 'How much emit colour tints nearby walls in compose (0 = neutral white spill).',
+        },
+        windowAlbedoCoupling: {
+          type: 'slider',
+          min: 0,
+          max: 1.5,
+          step: 0.02,
+          default: 0.78,
+          label: 'Wall texture coupling',
+          tooltip: 'Scales window spill by surface albedo (in illumination stack only; does not post-multiply the frame).',
+        },
       }
     };
   }
@@ -1697,8 +2204,6 @@ export class LightingEffectV2 {
     };
     this._windowLightRT = new THREE.WebGLRenderTarget(this._windowSize.w, this._windowSize.h, windowRtOpts);
     this._windowLightRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
-    this._lightOverrideWindowRT = new THREE.WebGLRenderTarget(this._windowSize.w, this._windowSize.h, windowRtOpts);
-    this._lightOverrideWindowRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
     this._darknessRT = new THREE.WebGLRenderTarget(this._darknessSize.w, this._darknessSize.h, {
       ...rtOpts,
       type: THREE.UnsignedByteType,
@@ -1730,6 +2235,8 @@ export class LightingEffectV2 {
         tScene:   { value: null },
         tLightSources: { value: null },
         tLightWindow:  { value: null },
+        uHasLightWindow: { value: 0.0 },
+        uWindowLightScreenSpace: { value: 1.0 },
         tDarkness: { value: null },
         // Cloud shadow: factor texture from CloudEffectV2 (1.0=lit, 0.0=shadowed).
         // Multiplies totalIllumination so ambient dims under clouds while dynamic
@@ -1787,7 +2294,11 @@ export class LightingEffectV2 {
         uAmbientBrightest:   { value: new THREE.Color(1, 1, 1) },
         uAmbientDarkness:    { value: new THREE.Color(0.141, 0.141, 0.282) },
         uAmbientDayScale:    { value: 1.3 },
+        uAmbientDayScaleOutdoor: { value: 0.92 },
+        uAmbientDayScaleIndoor: { value: 0.62 },
         uAmbientNightScale:  { value: 0.85 },
+        uAmbientNightScaleOutdoor: { value: 0.32 },
+        uAmbientNightScaleIndoor: { value: 0.27 },
         uMinIlluminationScale: { value: 1.0 },
         uChromaticRadianceGain: { value: 4.0 },
         uColorationReflectivity: { value: 0.0 },
@@ -1815,6 +2326,9 @@ export class LightingEffectV2 {
         uApplyRoofOcclusionToSources: { value: 1.0 },
         uApplyRoofOcclusionToWindow:  { value: 0.0 },
         uWindowEmissiveGain: { value: 1.0 },
+        uWindowIndirectContrast: { value: 0.65 },
+        uWindowWarmthTint: { value: 0.62 },
+        uWindowAlbedoCoupling: { value: 0.78 },
         // _Outdoors mask (scene UV): gate roof/tree *light* occlusion so interior
         // pixels under overhead stamps still receive Foundry lights (see fragment).
         tOutdoorsForRoofLight: { value: null },
@@ -1853,6 +2367,8 @@ export class LightingEffectV2 {
         uniform sampler2D tScene;
         uniform sampler2D tLightSources;
         uniform sampler2D tLightWindow;
+        uniform float uHasLightWindow;
+        uniform float uWindowLightScreenSpace;
         uniform sampler2D tDarkness;
         uniform sampler2D tUnifiedShadowFactor;
         uniform sampler2D tUnifiedShadowRaw;
@@ -1890,7 +2406,11 @@ export class LightingEffectV2 {
         uniform vec3 uAmbientBrightest;
         uniform vec3 uAmbientDarkness;
         uniform float uAmbientDayScale;
+        uniform float uAmbientDayScaleOutdoor;
+        uniform float uAmbientDayScaleIndoor;
         uniform float uAmbientNightScale;
+        uniform float uAmbientNightScaleOutdoor;
+        uniform float uAmbientNightScaleIndoor;
         uniform float uMinIlluminationScale;
         uniform float uChromaticRadianceGain;
         uniform float uColorationReflectivity;
@@ -1915,6 +2435,9 @@ export class LightingEffectV2 {
         uniform float uApplyRoofOcclusionToSources;
         uniform float uApplyRoofOcclusionToWindow;
         uniform float uWindowEmissiveGain;
+        uniform float uWindowIndirectContrast;
+        uniform float uWindowWarmthTint;
+        uniform float uWindowAlbedoCoupling;
         uniform sampler2D tOutdoorsForRoofLight;
         uniform float uHasOutdoorsForRoofLight;
         uniform float uOutdoorsForRoofLightFlipY;
@@ -1976,7 +2499,32 @@ export class LightingEffectV2 {
           vec2 inBounds2 = step(vec2(0.0), sceneUvRaw) * step(sceneUvRaw, vec2(1.0));
           float inSceneBounds = inBounds2.x * inBounds2.y;
 
-          vec3 winLights = max(texture2D(tLightWindow, sceneUvFoundry).rgb, vec3(0.0)) * inSceneBounds;
+          vec4 outdoorsRoofSample = vec4(0.0);
+          float isOutdoorForInteriorDim = 1.0;
+          if (uHasOutdoorsForRoofLight > 0.5) {
+            vec2 ouvWin = sceneUvFoundry;
+            if (uOutdoorsForRoofLightFlipY > 0.5) ouvWin.y = 1.0 - ouvWin.y;
+            outdoorsRoofSample = texture2D(tOutdoorsForRoofLight, ouvWin);
+            vec4 odWin = outdoorsRoofSample;
+            float outdoorRawWin = clamp(max(odWin.r, max(odWin.g, odWin.b)), 0.0, 1.0);
+            float outdoorMidWin = smoothstep(0.18, 0.82, outdoorRawWin);
+            float outdoorLoHiWin = (outdoorRawWin <= 0.10) ? 0.0 : ((outdoorRawWin >= 0.90) ? 1.0 : outdoorMidWin);
+            float outdoorsAlphaValidWin = step(0.5, clamp(odWin.a, 0.0, 1.0));
+            isOutdoorForInteriorDim = mix(1.0, outdoorLoHiWin, outdoorsAlphaValidWin);
+          }
+          float isOutdoorForInteriorDimSafe = mix(1.0, isOutdoorForInteriorDim, inSceneBounds);
+
+          vec3 winLights = vec3(0.0);
+          if (uHasLightWindow > 0.5) {
+            // Scene-UV emit atlas matches building/painted shadow passes (vUv = sceneUvFoundry).
+            vec2 winEmitUv = sceneUvFoundry;
+            vec3 winRaw = max(texture2D(tLightWindow, winEmitUv).rgb, vec3(0.0));
+            float winLumaRaw = max(winRaw.r, max(winRaw.g, winRaw.b));
+            float winGate = smoothstep(0.025, 0.09, winLumaRaw);
+            float winHdrCap = mix(0.88, 1.12, smoothstep(0.75, 2.5, max(uWindowEmissiveGain, 0.0)));
+            winLights = min(winRaw * winGate, vec3(winHdrCap)) * inSceneBounds;
+            winLights *= (1.0 - isOutdoorForInteriorDimSafe);
+          }
           float darknessMask = clamp(texture2D(tDarkness, vUv).r, 0.0, 1.0);
           float ambientShadowMixOut = 1.0;
 
@@ -1987,8 +2535,23 @@ export class LightingEffectV2 {
           // uCalendarDayWeight (sun above horizon) zeroes day ambient at night even if
           // Foundry darkness lags the Map Shine clock.
           float calendarDayWeight = clamp(uCalendarDayWeight, 0.0, 1.0);
-          vec3 ambientDay   = uAmbientBrightest * max(uAmbientDayScale, 0.0) * calendarDayWeight;
-          vec3 ambientNight = uAmbientDarkness  * max(uAmbientNightScale, 0.0);
+          float indoorAmbientW = 0.0;
+          if (uHasOutdoorsForRoofLight > 0.5 && inSceneBounds > 0.5) {
+            float indoorSig = clamp(1.0 - isOutdoorForInteriorDim, 0.0, 1.0);
+            indoorAmbientW = smoothstep(0.20, 0.75, indoorSig);
+          }
+          float dayScale = mix(
+            max(uAmbientDayScaleOutdoor, 0.0),
+            max(uAmbientDayScaleIndoor, 0.0),
+            indoorAmbientW
+          );
+          float nightScale = mix(
+            max(uAmbientNightScaleOutdoor, 0.0),
+            max(uAmbientNightScaleIndoor, 0.0),
+            indoorAmbientW
+          );
+          vec3 ambientDay   = uAmbientBrightest * dayScale * calendarDayWeight;
+          vec3 ambientNight = uAmbientDarkness  * nightScale;
           vec3 ambient = mix(ambientDay, ambientNight, baseDarknessLevel);
 
           vec4 roofAlphaSample = vec4(0.0);
@@ -1998,39 +2561,10 @@ export class LightingEffectV2 {
             roofAlphaCached = clamp(max(roofAlphaSample.a, max(roofAlphaSample.r, max(roofAlphaSample.g, roofAlphaSample.b))), 0.0, 1.0);
           }
 
-          vec4 outdoorsRoofSample = vec4(0.0);
-          if (uHasOutdoorsForRoofLight > 0.5) {
-            vec2 ouvCached = sceneUvFoundry;
-            if (uOutdoorsForRoofLightFlipY > 0.5) ouvCached.y = 1.0 - ouvCached.y;
-            outdoorsRoofSample = texture2D(tOutdoorsForRoofLight, ouvCached);
-          }
-
           // Interior vs outdoor (_Outdoors mask) — dim ambient on indoor pixels only.
-          float isOutdoorForInteriorDim = 1.0;
-          if (uHasOutdoorsForRoofLight > 0.5) {
-            vec4 odId = outdoorsRoofSample;
-            // Robust decode for interior dimming:
-            // - outdoors masks are authored mostly binary (0/1)
-            // - composed/filtered textures can introduce tiny mid-tone rows
-            //   that become visible as horizontal dark bands when scaled by
-            //   uInteriorDarkness.
-            // Snap near-extremes to remove seam/banding noise while preserving
-            // real indoor/outdoor transitions.
-            float outdoorRaw = clamp(max(odId.r, max(odId.g, odId.b)), 0.0, 1.0);
-            float outdoorMid = smoothstep(0.18, 0.82, outdoorRaw);
-            float outdoorLoHi = (outdoorRaw <= 0.10) ? 0.0 : ((outdoorRaw >= 0.90) ? 1.0 : outdoorMid);
-            // Transparent/invalid outdoors pixels should not darken ambient.
-            // In those regions treat as "outdoors" (1.0), then blend toward the
-            // decoded RGB classification only where alpha is confidently present.
-            // Interior-darkness should only trust clearly authored alpha.
-            // Soft alpha ramps (from filtering/composition) can form thin
-            // horizontal rows that interiorDarkness amplifies; treat those as
-            // outdoors to avoid residual banding.
-            float outdoorsAlphaValid = step(0.5, clamp(odId.a, 0.0, 1.0));
-            isOutdoorForInteriorDim = mix(1.0, outdoorLoHi, outdoorsAlphaValid);
-          }
+          // (outdoorsRoofSample + isOutdoorForInteriorDim computed above for window gating too.)
 
-          // Window glow: minimal rebuild — no outdoor block on winLights (outdoors clip removed).
+          // Window glow: outdoors clip restored on winLights (sky/outdoor pixels).
           // windowOutdoorBlock still used for Foundry light path context only when needed below.
 
           // Roof / tree canopy: prefer packed ceiling transmittance T (half-res blit from
@@ -2118,8 +2652,9 @@ export class LightingEffectV2 {
           }
           float roofReceiver = smoothstep(0.55, 0.85, roofAlphaLive);
           float rawSourceLight = max(srcSample.a, 0.0);
-          float rawWindowLight = max(max(winLights.r, winLights.g), winLights.b);
-          float rawLightPresence = smoothstep(0.015, 0.16, max(rawSourceLight, rawWindowLight));
+          // Gameplay lamps only — window emit must not gate roof relief or shadow lift
+          // (compose validity / HDR window shaping caused tree & building shadow flicker).
+          float rawLightPresence = smoothstep(0.015, 0.16, rawSourceLight);
           float roofReliefBoost = roofReceiver * rawLightPresence * 0.88 * (1.0 - restrictLightRoof);
           roofLightVisibility = max(roofLightVisibility, roofReliefBoost);
           float visS = mix(1.0, roofLightVisibility, clamp(uApplyRoofOcclusionToSources, 0.0, 1.0));
@@ -2151,11 +2686,10 @@ export class LightingEffectV2 {
           float gelSpatial = smoothstep(uColorationFalloffStart, gelEnd, eGel);
           gelSpatial = pow(clamp(gelSpatial, 0.0, 1.0), max(uColorationFalloffPower, 0.01));
           float gel01 = ciEff * gelSpatial;
-          // Direct: white → luma-matched hue as CI rises (linear in gel01).
-          float baseIllum = 1.0 + lampEnergyA;
+          // MSA_COMPOSE_DIRECT_BASELINE: mag-only direct (point lamps / torches; no 1.0+ wash).
+          float baseIllum = lampEnergyA;
           float colorW = clamp(gel01, 0.0, 1.0);
           vec3 directFromSources = msaLightDirectIllumination(vec3(baseIllum), lampHue, colorW);
-          vec3 directLight = directFromSources;
 
           // Darkness punch: strong nearby lights reduce the effective darkness
           // level locally, letting the ambient brighten under torches/lamps.
@@ -2212,10 +2746,8 @@ export class LightingEffectV2 {
           // Padding / outside sceneRect: sceneUvFoundry is clamped — _Outdoors would
           // sample the map border and smear interior classification (horizontal bands
           // in the grey margin). Match building-shadow guard.
-          float isOutdoorForInteriorDimSafe = mix(1.0, isOutdoorForInteriorDim, inSceneBounds);
           float llWeight = landscapeLightningFlashWeight(vUv) * isOutdoorForInteriorDimSafe;
           vec3 llColorVec = landscapeLightningFlashColorVec();
-          directLight += llColorVec * llWeight;
           // Only apply interior-darkness where the mask confidently indicates
           // "indoors". This rejects low-level mask noise/seams that otherwise
           // become visible as broad banding when interior darkness is increased.
@@ -2226,7 +2758,7 @@ export class LightingEffectV2 {
           float indoorSignal = clamp(1.0 - skyOpenForInteriorDim, 0.0, 1.0);
           float indoorConfidence = smoothstep(0.30, 0.70, indoorSignal);
           // tScene includes additive specular; litColor = baseColor * totalIllumination. If we
-          // crush ambientAfterDark on interiors while directLight is only moderate, totalIllumination
+          // crush ambientAfterDark on interiors while direct HDR is only moderate, totalIllumination
           // stays low and specular highlights (already in baseColor) read flat. Fade interior
           // crush where the HDR light buffer reads strong on this pixel (Foundry + window whites).
           // Keep suppression for bright direct-light overlap, but avoid fully
@@ -2381,8 +2913,21 @@ export class LightingEffectV2 {
           float floorReach = clamp(ambientShadowMixOut, 0.0, 1.0);
           totalIllumination = max(totalIllumination, minIllum * mix(0.18, 1.0, floorReach));
 
-          // Apply illumination to albedo, then window glow (token-style multiplicative boost).
-          // litColor *= (1 + win) preserves surface hue/texture vs additive flat wash.
+          // Window indirect: illumination stack only (no litColor multiply / bloom — breaks Sepia & CC).
+          if (uHasLightWindow > 0.5) {
+            float winMag = max(winSafe.r, max(winSafe.g, winSafe.b));
+            if (winMag > 1e-5) {
+              float winGain = max(uWindowEmissiveGain, 0.0);
+              float winShape = clamp(uWindowIndirectContrast, 0.35, 1.25);
+              float winCore = pow(clamp(winMag, 0.0, 1.15), winShape);
+              vec3 winHue = winSafe / max(winMag, 1e-4);
+              float winWarmth = clamp(uWindowWarmthTint, 0.0, 1.0);
+              float indirectAmt = winCore * (0.22 + 0.88 * winGain);
+              vec3 winIllum = msaLightDirectIllumination(vec3(indirectAmt), winHue, winWarmth);
+              totalIllumination += winIllum;
+            }
+          }
+
           vec3 litColor = baseColor.rgb * totalIllumination;
           // Albedo tint: linear in CI (exp×chromaGain flattened 0.5 vs 1.0 to the same weight).
           // Fade tint when direct already carries hue so CI steps read on illumination first.
@@ -2398,11 +2943,6 @@ export class LightingEffectV2 {
               litColor = mix(vec3(litL), litColor, satMul);
             }
           }
-          {
-            vec3 winBoost = winSafe * max(uWindowEmissiveGain, 0.0);
-            litColor *= vec3(1.0) + winBoost;
-          }
-
           // Colored lightning screen flash (additive + hue mix — visible over neutral HDR lights).
           {
             litColor += llColorVec * llWeight * 0.65;
@@ -3075,6 +3615,105 @@ export class LightingEffectV2 {
   }
 
   /**
+   * Copy legacy single-scale ambient into outdoor/indoor params once (saved JSON / presets).
+   * @private
+   */
+  _migrateSplitAmbientParams() {
+    if (this._splitAmbientParamsMigrated) return;
+    this._splitAmbientParamsMigrated = true;
+    const p = this.params;
+    const legacyDay = Number(p.ambientDayScale);
+    const legacyNight = Number(p.ambientNightScale);
+    const dayOut = Math.max(0, Number(p.ambientDayScaleOutdoor) || 0);
+    const dayIn = Math.max(0, Number(p.ambientDayScaleIndoor) || 0);
+    const nightOut = Math.max(0, Number(p.ambientNightScaleOutdoor) || 0);
+    const nightIn = Math.max(0, Number(p.ambientNightScaleIndoor) || 0);
+    let dirty = false;
+    if (dayOut < 1e-5 && dayIn < 1e-5 && legacyDay > 1e-5) {
+      p.ambientDayScaleOutdoor = legacyDay;
+      p.ambientDayScaleIndoor = legacyDay;
+      dirty = true;
+    }
+    if (nightOut < 1e-5 && nightIn < 1e-5 && legacyNight > 1e-5) {
+      p.ambientNightScaleOutdoor = legacyNight;
+      p.ambientNightScaleIndoor = legacyNight;
+      dirty = true;
+    }
+    if (dirty) this._markParamsDirty();
+  }
+
+  /**
+   * Effective outdoor/indoor ambient scales for compose (uniforms only when saved values are zero).
+   * @returns {{ dayOutdoor: number, dayIndoor: number, nightOutdoor: number, nightIndoor: number, minIllum: number }}
+   * @private
+   */
+  _resolveEffectiveAmbientScalesForCompose() {
+    this._seedAmbientFromLegacyGlobalIfNeeded();
+    this._migrateSplitAmbientParams();
+    const p = this.params;
+    let dayOutdoor = Math.max(0, Number(p.ambientDayScaleOutdoor) || 0);
+    let dayIndoor = Math.max(0, Number(p.ambientDayScaleIndoor) || 0);
+    let nightOutdoor = Math.max(0, Number(p.ambientNightScaleOutdoor) || 0);
+    let nightIndoor = Math.max(0, Number(p.ambientNightScaleIndoor) || 0);
+    let minIllum = Math.max(0, Number(p.minIlluminationScale) || 0);
+
+    const legacyDay = Math.max(0, Number(p.ambientDayScale) || 0);
+    const legacyNight = Math.max(0, Number(p.ambientNightScale) || 0);
+    if (dayOutdoor < 1e-5 && dayIndoor < 1e-5 && legacyDay > 1e-5) {
+      dayOutdoor = legacyDay;
+      dayIndoor = legacyDay;
+    }
+    if (nightOutdoor < 1e-5 && nightIndoor < 1e-5 && legacyNight > 1e-5) {
+      nightOutdoor = legacyNight;
+      nightIndoor = legacyNight;
+    }
+
+    const allZero = dayOutdoor < 1e-5 && dayIndoor < 1e-5
+      && nightOutdoor < 1e-5 && nightIndoor < 1e-5;
+    if (allZero) {
+      const g = Math.max(0, Number(p.globalIllumination) || 0);
+      if (g > 1e-5) {
+        dayOutdoor = g;
+        dayIndoor = g;
+        nightOutdoor = g;
+        nightIndoor = g;
+        if (minIllum < 1e-5) minIllum = Math.min(g * 0.35, MSA_AMBIENT_COMPOSE_DEFAULTS.minIllum);
+      } else {
+        dayOutdoor = MSA_AMBIENT_COMPOSE_DEFAULTS.dayOutdoor;
+        dayIndoor = MSA_AMBIENT_COMPOSE_DEFAULTS.dayIndoor;
+        nightOutdoor = MSA_AMBIENT_COMPOSE_DEFAULTS.nightOutdoor;
+        nightIndoor = MSA_AMBIENT_COMPOSE_DEFAULTS.nightIndoor;
+        if (minIllum < 1e-5) minIllum = MSA_AMBIENT_COMPOSE_DEFAULTS.minIllum;
+      }
+    } else if (minIllum < 1e-5) {
+      minIllum = MSA_AMBIENT_COMPOSE_DEFAULTS.minIllum;
+    }
+
+    return { dayOutdoor, dayIndoor, nightOutdoor, nightIndoor, minIllum };
+  }
+
+  /**
+   * Push resolved ambient scales to compose uniforms (does not mutate {@link #params}).
+   * @param {Record<string, { value: number }>} u
+   * @private
+   */
+  _pushEffectiveAmbientUniforms(u) {
+    if (!u) return;
+    const eff = this._resolveEffectiveAmbientScalesForCompose();
+    if (u.uAmbientDayScaleOutdoor) u.uAmbientDayScaleOutdoor.value = eff.dayOutdoor;
+    if (u.uAmbientDayScaleIndoor) u.uAmbientDayScaleIndoor.value = eff.dayIndoor;
+    if (u.uAmbientNightScaleOutdoor) u.uAmbientNightScaleOutdoor.value = eff.nightOutdoor;
+    if (u.uAmbientNightScaleIndoor) u.uAmbientNightScaleIndoor.value = eff.nightIndoor;
+    if (u.uMinIlluminationScale) u.uMinIlluminationScale.value = eff.minIllum;
+    if (u.uAmbientDayScale) {
+      u.uAmbientDayScale.value = Math.max(eff.dayOutdoor, eff.dayIndoor);
+    }
+    if (u.uAmbientNightScale) {
+      u.uAmbientNightScale.value = Math.max(eff.nightOutdoor, eff.nightIndoor);
+    }
+  }
+
+  /**
    * Map Shine hour for lighting (weather controller + control-panel fallback).
    * @returns {number|null}
    * @private
@@ -3216,6 +3855,7 @@ export class LightingEffectV2 {
 
     _perfToken = this._beginPerfSpan('composeDarknessUniforms', 'update', { cpuOnly: true });
     this._syncComposeDarknessUniforms();
+    this._pushEffectiveAmbientUniforms(this._composeMaterial?.uniforms);
     this._endPerfSpan(_perfToken);
 
     // Phase 3: master darkness drives both ambient-light animation
@@ -3301,12 +3941,11 @@ export class LightingEffectV2 {
   /**
    * Refresh current-frame light textures before source shadow passes run.
    *
-   * The full lighting render normally accumulates `_lightRT` and `_windowLightRT`
+   * The full lighting render normally accumulates `_lightRT` and window emit
    * immediately before compose, which is too late for Building/SkyReach/Overhead
    * shadow shaders that need light presence to clear shadow strength. This pass
-   * draws Foundry lights to `_lightRT` and stripped window glow to
-   * `_lightOverrideWindowRT` (not compose's `_windowLightRT`) so compose only
-   * draws window glow once with full roof/ceiling/cloud masks.
+   * draws Foundry lights to `_lightRT` and a stripped window emit (`shadowLift`)
+   * so compose draws full window glow once with roof/ceiling/cloud masks.
    *
    * @param {THREE.WebGLRenderer} renderer
    * @param {THREE.Camera} camera
@@ -3318,12 +3957,14 @@ export class LightingEffectV2 {
       this._invalidateLightMaskPrepassCache();
       return false;
     }
-    if (!this._lightRT || !this._lightOverrideWindowRT) {
+    if (!this._lightRT) {
       this._invalidateLightMaskPrepassCache();
       return false;
     }
+    this._perfSession.lightOverrideDraws += 1;
     this._bindPerfRecorder();
     this._lastCompositorRenderer = renderer;
+    this._syncWindowLightEmitContext(renderer);
 
     let _perfToken = this._beginPerfSpan('lightOverride.setup', 'render', { cpuOnly: true });
     if (!this._lightsSynced) {
@@ -3363,7 +4004,7 @@ export class LightingEffectV2 {
     try {
       camera.layers.enableAll();
 
-      _perfToken = this._beginPerfSpan('lightOverride.foundryDraw', 'render');
+      _perfToken = this._beginPerfSpan('lightOverride.foundryDraw', 'render', { cpuOnly: true });
       renderer.setRenderTarget(this._lightRT);
       renderer.setClearColor(0x000000, 0);
       renderer.autoClear = true;
@@ -3372,43 +4013,31 @@ export class LightingEffectV2 {
       }
       this._endPerfSpan(_perfToken);
 
-      renderer.setRenderTarget(this._lightOverrideWindowRT);
-      renderer.setClearColor(0x000000, 1);
-      renderer.autoClear = false;
-      renderer.clear(true, true, false);
-
+      // Window glow for shadow lift is written to WindowLightEffectV2._emitRT (scene-UV).
       _perfToken = this._beginPerfSpan('lightOverride.windowDraw.bind', 'render', { cpuOnly: true });
       if (windowLightScene) {
         try {
-          windowLightScene.userData?.onBindWindowLightPass?.(
-            this._lightOverrideWindowRT.width,
-            this._lightOverrideWindowRT.height,
-            camera,
-          );
+          const wle = this._resolveWindowLightEffect();
+          const emitW = wle?._emitRT?.width ?? 1;
+          const emitH = wle?._emitRT?.height ?? 1;
+          windowLightScene.userData?.onBindWindowLightPass?.(emitW, emitH, camera);
         } catch (_) {}
       }
       this._endPerfSpan(_perfToken);
 
-      _perfToken = this._beginPerfSpan('lightOverride.windowDraw.sceneDraw', 'render');
+      _perfToken = this._beginPerfSpan('lightOverride.windowDraw.sceneDraw', 'render', {
+        gpuSlot: { index: 0, count: 2 },
+      });
       if (windowLightScene) {
         if (typeof windowLightScene.userData?.drawWindowLightPass === 'function') {
-          windowLightScene.userData.drawWindowLightPass(renderer, camera);
+          windowLightScene.userData.drawWindowLightPass(renderer, camera, { purpose: 'shadowLift' });
         } else {
           renderer.render(windowLightScene, camera);
         }
       }
       this._endPerfSpan(_perfToken);
 
-      _perfToken = this._beginPerfSpan('lightOverride.windowDraw.outdoorsClip', 'render');
-      if (windowLightScene) {
-        try {
-          windowLightScene.userData?.onAfterWindowLightPass?.(
-            renderer,
-            camera,
-            this._lightOverrideWindowRT,
-          );
-        } catch (_) {}
-      }
+      _perfToken = this._beginPerfSpan('lightOverride.windowDraw.outdoorsClip', 'render', { cpuOnly: true });
       this._endPerfSpan(_perfToken);
     } finally {
       camera.layers.mask = prevLayerMask;
@@ -3423,19 +4052,19 @@ export class LightingEffectV2 {
   /**
    * Execute the lighting post-processing pass:
    *   1. Render light meshes → lightRT (Foundry sources only)
-   *   1b. Render windowLightScene → windowLightRT
+   *   1b. Render windowLightScene → WindowLightEffectV2 emit RT
    *   2. Render darkness meshes → darknessRT
    *   3. Compose: sceneRT * (ambient + lights - darkness) → outputRT
    *
-   * Compose merges window glow via `litColor *= (1 + win)` after albedo × illumination
-   * (token-style — preserves surface colour). Roof masks gate window channel independently.
+   * Compose merges window glow additively after `litColor = baseColor * totalIllumination`.
+   * Window emit is bound only when Pass 1b runs (effect enabled + valid emit). Roof masks gate window independently.
    *
    * @param {THREE.WebGLRenderer} renderer
    * @param {THREE.Camera} camera - The main perspective camera
    * @param {THREE.WebGLRenderTarget} sceneRT - Bus scene input
    * @param {THREE.WebGLRenderTarget} outputRT - Where to write the lit result
    * @param {THREE.Scene|null} [windowLightScene=null] - Optional scene rendered
-   *   into `windowLightRT` (not combined with Foundry lights until compose).
+   *   into the window emit RT (not combined with Foundry lights until compose).
    * @param {THREE.Texture|null} [cloudShadowTexture=null] - Shadow factor from
    *   CloudEffectV2 (1.0=lit, 0.0=shadowed). Dims ambient illumination under clouds.
    * @param {THREE.Texture|null} [buildingShadowTexture=null] - Shadow factor from
@@ -3469,13 +4098,18 @@ export class LightingEffectV2 {
   render(renderer, camera, sceneRT, outputRT, windowLightScene = null, cloudShadowTexture = null, cloudShadowRawTexture = null, buildingShadowTexture = null, overheadShadowTexture = null, buildingShadowOpacity = 0.75, overheadRoofAlphaTexture = null, overheadRoofBlockTexture = null, outdoorsMaskTexture = null, ceilingTransmittanceTexture = null, overheadRoofRestrictLightTexture = null, combinedShadowTexture = null, combinedShadowRawTexture = null, paintedShadowLitTexture = null, paintedShadowMgrOpacity = 1.0, paintedShadowAtAndAboveLitTexture = null, paintedShadowInCombined = true, vegetationBillboardShadowTexture = null, vegetationBillboardOpacity = 1.0) {
     if (!this._initialized || !this._enabled || !sceneRT) return;
     if (!this._lightRT || !this._windowLightRT || !this._darknessRT || !this._composeMaterial) return;
+    this._windowComposeBlitValid = false;
     this._bindPerfRecorder();
-    if (renderer) this._lastCompositorRenderer = renderer;
+    if (renderer) {
+      this._lastCompositorRenderer = renderer;
+      this._syncWindowLightEmitContext(renderer);
+    }
 
     let _perfToken = this._beginPerfSpan('composeDarknessUniforms', 'render', { cpuOnly: true });
     // FloorCompositor can call render() on multiple levels per frame; keep calendar
     // darkness/day-weight current even if update() was skipped (populate-slim path).
     this._syncComposeDarknessUniforms();
+    this._pushEffectiveAmbientUniforms(this._composeMaterial?.uniforms);
     this._endPerfSpan(_perfToken);
 
     _perfToken = this._beginPerfSpan('syncLights', 'render', { cpuOnly: true });
@@ -3486,7 +4120,7 @@ export class LightingEffectV2 {
       log.info('LightingEffectV2 first render:',
         'sceneRT', sceneRT?.width, 'x', sceneRT?.height,
         '| lightRT', this._lightRT?.width, 'x', this._lightRT?.height,
-        '| windowLightRT', this._windowLightRT?.width, 'x', this._windowLightRT?.height,
+        '| windowEmitRT', this._resolveWindowLightEffect()?._emitRT?.width, 'x', this._resolveWindowLightEffect()?._emitRT?.height,
         '| outputRT', outputRT?.width, 'x', outputRT?.height,
         '| windowLightScene children', windowLightScene?.children?.length ?? 'none'
       );
@@ -3533,6 +4167,12 @@ export class LightingEffectV2 {
     cu0.uApplyRoofOcclusionToSources.value = occlusionWeight * roofScreenOcclusionScale;
     cu0.uApplyRoofOcclusionToWindow.value = 0.0;
     cu0.uWindowEmissiveGain.value = Math.max(0.0, Number(this.params.windowEmissiveGain) || 1.0);
+    cu0.uWindowIndirectContrast.value = Math.max(
+      0.35,
+      Math.min(1.25, Number(this.params.windowIndirectContrast) ?? 0.65),
+    );
+    cu0.uWindowWarmthTint.value = clamp01(Number(this.params.windowWarmthTint) ?? 0.62);
+    cu0.uWindowAlbedoCoupling.value = Math.max(0, Number(this.params.windowAlbedoCoupling) ?? 0.78);
     this._endPerfSpan(_perfToken);
 
     _perfToken = this._beginPerfSpan('perspectiveRefresh', 'render', { cpuOnly: true });
@@ -3562,10 +4202,12 @@ export class LightingEffectV2 {
     camera.layers.enableAll();
 
     if (reuseFoundryPrepass) {
+      this._perfSession.prepassReuse += 1;
       _perfToken = this._beginPerfSpan('lightSourcesDraw.reusePrepass', 'render', { cpuOnly: true });
       this._endPerfSpan(_perfToken);
     } else {
-      _perfToken = this._beginPerfSpan('lightSourcesDraw', 'render');
+      this._perfSession.prepassRedraw += 1;
+      _perfToken = this._beginPerfSpan('lightSourcesDraw', 'render', { cpuOnly: true });
       renderer.setRenderTarget(this._lightRT);
       renderer.setClearColor(0x000000, 0);
       renderer.autoClear = true;
@@ -3576,31 +4218,26 @@ export class LightingEffectV2 {
       this._endPerfSpan(_perfToken);
     }
 
-    // ── Pass 1b: Window glow → separate RT (compose merges with roof gating) ─
-    renderer.setRenderTarget(this._windowLightRT);
-    renderer.setClearColor(0x000000, 1);
-    renderer.autoClear = false;
-    renderer.clear(true, true, false);
+    // ── Pass 1b: Window glow → WindowLightEffectV2 emit RT (compose samples emit) ─
     if (windowLightScene) {
       try {
+        const wle = this._resolveWindowLightEffect();
+        const emitW = wle?._emitRT?.width ?? 1;
+        const emitH = wle?._emitRT?.height ?? 1;
         _perfToken = this._beginPerfSpan('windowLightDraw.bind', 'render', { cpuOnly: true });
         try {
           // WindowLight shaders use gl_FragCoord / uScreenSize for roof/ceiling masks.
-          // uScreenSize must match THIS RT (set above), not values pushed earlier in the
-          // frame — Lighting resizes these RTs after FloorCompositor.bind, and zoom/DPR
-          // can otherwise desync roof sampling → apparent fade/pulse when panning or zooming.
-          windowLightScene.userData?.onBindWindowLightPass?.(
-            this._windowLightRT.width,
-            this._windowLightRT.height,
-            camera,
-          );
+          // uScreenSize must match the emit RT, not the drawing buffer.
+          windowLightScene.userData?.onBindWindowLightPass?.(emitW, emitH, camera);
         } catch (_) {}
         this._endPerfSpan(_perfToken);
 
-        _perfToken = this._beginPerfSpan('windowLightDraw.sceneDraw', 'render');
+        _perfToken = this._beginPerfSpan('windowLightDraw.sceneDraw', 'render', {
+          gpuSlot: { index: 0, count: 2 },
+        });
         try {
           if (typeof windowLightScene.userData?.drawWindowLightPass === 'function') {
-            windowLightScene.userData.drawWindowLightPass(renderer, camera);
+            windowLightScene.userData.drawWindowLightPass(renderer, camera, { purpose: 'full' });
           } else {
             renderer.render(windowLightScene, camera);
           }
@@ -3608,22 +4245,16 @@ export class LightingEffectV2 {
           this._endPerfSpan(_perfToken);
         }
 
-        _perfToken = this._beginPerfSpan('windowLightDraw.outdoorsClip', 'render');
-        try {
-          windowLightScene.userData?.onAfterWindowLightPass?.(
-            renderer,
-            camera,
-            this._windowLightRT,
-          );
-        } catch (_) {}
+        _perfToken = this._beginPerfSpan('windowLightDraw.outdoorsClip', 'render', { cpuOnly: true });
         this._endPerfSpan(_perfToken);
       } catch (err) {
         log.error('LightingEffectV2: window light render failed:', err);
       }
+
     }
 
     // ── Pass 2: Accumulate darkness contributions ─────────────────────
-    _perfToken = this._beginPerfSpan('darknessDraw', 'render');
+    _perfToken = this._beginPerfSpan('darknessDraw', 'render', { cpuOnly: true });
     renderer.setRenderTarget(this._darknessRT);
     renderer.setClearColor(0x000000, 1);
     renderer.autoClear = true;
@@ -3640,7 +4271,18 @@ export class LightingEffectV2 {
     const cu = this._composeMaterial.uniforms;
     cu.tScene.value = sceneRT.texture;
     cu.tLightSources.value = this._lightRT.texture;
-    cu.tLightWindow.value = this.windowLightTexture;
+    const wleCompose = this._resolveWindowLightEffect();
+    const winIntensity = Math.max(0.0, Number(wleCompose?.params?.intensity) || 0);
+    const winTex = (windowLightScene
+      && resolveEffectEnabled(wleCompose)
+      && winIntensity > 1e-5
+      && wleCompose?._emitComposeValid === true)
+      ? (wleCompose.getEmitTexture?.() ?? null)
+      : null;
+    cu.tLightWindow.value = winTex;
+    cu.uHasLightWindow.value = winTex ? 1.0 : 0.0;
+    cu.uWindowLightScreenSpace.value = 0.0;
+    this._pushEffectiveAmbientUniforms(cu);
     cu.tDarkness.value = this._darknessRT.texture;
     this._endPerfSpan(_perfToken);
 
@@ -3744,7 +4386,10 @@ export class LightingEffectV2 {
     // now contributes through ShadowManagerV2's combined shadow texture only.
     this._endPerfSpan(_perfToken);
 
-    _perfToken = this._beginPerfSpan('composeDraw', 'render');
+    this._perfSession.composeDraws += 1;
+    _perfToken = this._beginPerfSpan('composeDraw', 'render', {
+      gpuSlot: { index: 1, count: 2 },
+    });
     renderer.setRenderTarget(outputRT);
     renderer.setClearColor(0x000000, 1);
     renderer.autoClear = true;
@@ -3895,6 +4540,12 @@ export class LightingEffectV2 {
 
     // Dispose GPU resources
     try { this._lightRT?.dispose(); } catch (_) {}
+    try { this._windowLightRT?.dispose(); } catch (_) {}
+    try { this._windowEmitBlitMaterial?.dispose(); } catch (_) {}
+    try {
+      const wq = this._windowEmitBlitScene?.children?.[0];
+      wq?.geometry?.dispose?.();
+    } catch (_) {}
     try { this._stackedLightRtA?.dispose(); } catch (_) {}
     try { this._stackedLightRtB?.dispose(); } catch (_) {}
     try { this._stackLightMaterial?.dispose(); } catch (_) {}
@@ -3902,8 +4553,6 @@ export class LightingEffectV2 {
       const sq = this._stackLightScene?.children?.[0];
       sq?.geometry?.dispose?.();
     } catch (_) {}
-    try { this._windowLightRT?.dispose(); } catch (_) {}
-    try { this._lightOverrideWindowRT?.dispose(); } catch (_) {}
     try { this._darknessRT?.dispose(); } catch (_) {}
     try {
       this.ceilingTransmittanceTarget?.dispose();
@@ -3921,6 +4570,11 @@ export class LightingEffectV2 {
     this._lightScene = null;
     this._darknessScene = null;
     this._lightRT = null;
+    this._windowLightRT = null;
+    this._windowComposeBlitValid = false;
+    this._windowEmitBlitScene = null;
+    this._windowEmitBlitCamera = null;
+    this._windowEmitBlitMaterial = null;
     this._stackedLightRtA = null;
     this._stackedLightRtB = null;
     this._stackedLightResult = null;
@@ -3929,8 +4583,6 @@ export class LightingEffectV2 {
     this._stackLightMaterial = null;
     this._stackedLightActive = false;
     this._stackedLightLayerCount = 0;
-    this._windowLightRT = null;
-    this._lightOverrideWindowRT = null;
     this._darknessRT = null;
     this.ceilingTransmittanceTarget = null;
     this._ceilingTransmittanceMaterial = null;

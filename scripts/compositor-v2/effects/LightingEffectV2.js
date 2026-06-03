@@ -336,8 +336,10 @@ export class LightingEffectV2 {
       windowIndirectContrast: 0.65,
       /** Mix window hue into indirect illumination (0 = neutral white). */
       windowWarmthTint: 0.62,
-      /** Scale `litColor *= (1 + win)` by surface albedo so walls keep texture. */
+      /** Scales indirect window spill by wall albedo luma (keeps texture on masonry). */
       windowAlbedoCoupling: 0.78,
+      /** Small additive highlight on litColor after multiply (HDR-linear; not frame multiply). */
+      windowScreenSpill: 0.55,
     };
 
     // ── Light management ────────────────────────────────────────────────
@@ -1176,6 +1178,7 @@ export class LightingEffectV2 {
     );
     u.uWindowWarmthTint.value = clamp01(Number(this.params.windowWarmthTint) ?? 0.62);
     u.uWindowAlbedoCoupling.value = Math.max(0, Number(this.params.windowAlbedoCoupling) ?? 0.78);
+    u.uWindowScreenSpill.value = Math.max(0, Number(this.params.windowScreenSpill) ?? 0.55);
     u.uChromaticRadianceGain.value = Math.max(1.0, Number(this.params.colorationStrength) || 4.0);
     u.uColorationReflectivity.value = clamp01(Number(this.params.colorationReflectivity) ?? 0);
     u.uColorationSaturationBoost.value = Math.max(0, Number(this.params.colorationSaturationBoost) || 0);
@@ -1514,6 +1517,7 @@ export class LightingEffectV2 {
             'windowIndirectContrast',
             'windowWarmthTint',
             'windowAlbedoCoupling',
+            'windowScreenSpill',
           ],
         },
         {
@@ -2129,20 +2133,20 @@ export class LightingEffectV2 {
         windowEmissiveGain: {
           type: 'slider',
           min: 0,
-          max: 3,
+          max: 4,
           step: 0.05,
           default: 1,
           label: 'Window indirect gain',
-          tooltip: 'Scales window spill in the lighting compose pass (emit intensity is on the Window Light effect).',
+          tooltip: 'Scales HDR window spill in compose (emit strength is on Window Light → Intensity).',
         },
         windowIndirectContrast: {
           type: 'slider',
           min: 0.35,
           max: 1.2,
           step: 0.02,
-          default: 0.65,
+          default: 0.55,
           label: 'Window contrast',
-          tooltip: 'Lower = brighter window cores and softer falloff (less flat grey wash at high intensity).',
+          tooltip: 'Lower = hotter window cores and softer penumbra (less flat grey at high intensity).',
         },
         windowWarmthTint: {
           type: 'slider',
@@ -2160,7 +2164,16 @@ export class LightingEffectV2 {
           step: 0.02,
           default: 0.78,
           label: 'Wall texture coupling',
-          tooltip: 'Scales window spill by surface albedo (in illumination stack only; does not post-multiply the frame).',
+          tooltip: 'Scales indirect spill by wall albedo luma so masonry keeps texture while floors brighten.',
+        },
+        windowScreenSpill: {
+          type: 'slider',
+          min: 0,
+          max: 2,
+          step: 0.05,
+          default: 0.55,
+          label: 'Window core glow',
+          tooltip: 'Small additive warm highlight on lit pixels at window cores (HDR-linear; not a full-frame multiply).',
         },
       }
     };
@@ -2329,6 +2342,7 @@ export class LightingEffectV2 {
         uWindowIndirectContrast: { value: 0.65 },
         uWindowWarmthTint: { value: 0.62 },
         uWindowAlbedoCoupling: { value: 0.78 },
+        uWindowScreenSpill: { value: 0.55 },
         // _Outdoors mask (scene UV): gate roof/tree *light* occlusion so interior
         // pixels under overhead stamps still receive Foundry lights (see fragment).
         tOutdoorsForRoofLight: { value: null },
@@ -2438,6 +2452,7 @@ export class LightingEffectV2 {
         uniform float uWindowIndirectContrast;
         uniform float uWindowWarmthTint;
         uniform float uWindowAlbedoCoupling;
+        uniform float uWindowScreenSpill;
         uniform sampler2D tOutdoorsForRoofLight;
         uniform float uHasOutdoorsForRoofLight;
         uniform float uOutdoorsForRoofLightFlipY;
@@ -2520,9 +2535,12 @@ export class LightingEffectV2 {
             vec2 winEmitUv = sceneUvFoundry;
             vec3 winRaw = max(texture2D(tLightWindow, winEmitUv).rgb, vec3(0.0));
             float winLumaRaw = max(winRaw.r, max(winRaw.g, winRaw.b));
-            float winGate = smoothstep(0.025, 0.09, winLumaRaw);
-            float winHdrCap = mix(0.88, 1.12, smoothstep(0.75, 2.5, max(uWindowEmissiveGain, 0.0)));
-            winLights = min(winRaw * winGate, vec3(winHdrCap)) * inSceneBounds;
+            float winGate = smoothstep(0.008, 0.055, winLumaRaw);
+            vec3 winScaled = winRaw * winGate * inSceneBounds;
+            float winPeak = max(max(winScaled.r, winScaled.g), winScaled.b);
+            winLights = (winPeak > 1.4)
+              ? (winScaled / (vec3(1.0) + winScaled * 0.16))
+              : winScaled;
             winLights *= (1.0 - isOutdoorForInteriorDimSafe);
           }
           float darknessMask = clamp(texture2D(tDarkness, vUv).r, 0.0, 1.0);
@@ -2913,22 +2931,38 @@ export class LightingEffectV2 {
           float floorReach = clamp(ambientShadowMixOut, 0.0, 1.0);
           totalIllumination = max(totalIllumination, minIllum * mix(0.18, 1.0, floorReach));
 
-          // Window indirect: illumination stack only (no litColor multiply / bloom — breaks Sepia & CC).
+          // Window light: HDR spill on illumination stack + small additive core (no litColor *=).
           if (uHasLightWindow > 0.5) {
             float winMag = max(winSafe.r, max(winSafe.g, winSafe.b));
             if (winMag > 1e-5) {
               float winGain = max(uWindowEmissiveGain, 0.0);
               float winShape = clamp(uWindowIndirectContrast, 0.35, 1.25);
-              float winCore = pow(clamp(winMag, 0.0, 1.15), winShape);
+              float winCore = pow(clamp(winMag, 0.0, 2.8), winShape);
               vec3 winHue = winSafe / max(winMag, 1e-4);
               float winWarmth = clamp(uWindowWarmthTint, 0.0, 1.0);
-              float indirectAmt = winCore * (0.22 + 0.88 * winGain);
+              float indirectAmt = winCore * (0.45 + 1.65 * winGain);
+              float albedoCouple = clamp(uWindowAlbedoCoupling, 0.0, 1.5);
+              indirectAmt *= mix(
+                1.0,
+                clamp(perceivedBrightness(baseColor.rgb) * 2.2, 0.5, 1.35),
+                albedoCouple
+              );
               vec3 winIllum = msaLightDirectIllumination(vec3(indirectAmt), winHue, winWarmth);
               totalIllumination += winIllum;
             }
           }
 
           vec3 litColor = baseColor.rgb * totalIllumination;
+
+          if (uHasLightWindow > 0.5) {
+            float winMagLit = max(winSafe.r, max(winSafe.g, winSafe.b));
+            float spillGain = max(uWindowScreenSpill, 0.0) * max(uWindowEmissiveGain, 0.0);
+            float spillAmt = smoothstep(0.06, 0.42, winMagLit) * spillGain * 0.42;
+            if (spillAmt > 1e-5) {
+              vec3 winHueLit = winSafe / max(winMagLit, 1e-4);
+              litColor += winHueLit * spillAmt;
+            }
+          }
           // Albedo tint: linear in CI (exp×chromaGain flattened 0.5 vs 1.0 to the same weight).
           // Fade tint when direct already carries hue so CI steps read on illumination first.
           if (chromaMag > 1e-5 && gel01 > 1e-4) {
@@ -4173,6 +4207,7 @@ export class LightingEffectV2 {
     );
     cu0.uWindowWarmthTint.value = clamp01(Number(this.params.windowWarmthTint) ?? 0.62);
     cu0.uWindowAlbedoCoupling.value = Math.max(0, Number(this.params.windowAlbedoCoupling) ?? 0.78);
+    cu0.uWindowScreenSpill.value = Math.max(0, Number(this.params.windowScreenSpill) ?? 0.55);
     this._endPerfSpan(_perfToken);
 
     _perfToken = this._beginPerfSpan('perspectiveRefresh', 'render', { cpuOnly: true });

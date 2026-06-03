@@ -74,13 +74,13 @@ export class BuildingShadowsEffectV2 {
       shadowStrengthBoost: 1,
       length: 0.075,
       softness: 8,
-      smear: 0.38,
+      smear: 0.65,
       resolutionScale: 2,
-      penumbra: 0.68,
-      shadowCurve: 1.45,
-      blurRadius: 1.75,
+      penumbra: 0.85,
+      shadowCurve: 1.15,
+      blurRadius: 3.0,
       /** 1 = keep full strength at the caster contact; fringe still uses blurred field. 0 = legacy (uniform blur can eat the footprint edge). */
-      contactShadowPreserve: 1,
+      contactShadowPreserve: 0.15,
       /** smoothstep(low,high,sharpStrength) — widens/narrows where the pre-blur field wins over blur. */
       contactSharpBlendLow: 0.06,
       contactSharpBlendHigh: 0.58,
@@ -312,7 +312,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.38,
+          default: 0.65,
           advanced: true,
           tooltip: 'Stretches and softens the shadow tail along the sun direction (higher = more smeared, painterly falloff).'
         },
@@ -331,7 +331,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.68,
+          default: 0.85,
           advanced: true,
           tooltip: 'How quickly the shadow softens and lightens along its length (away from the building).'
         },
@@ -341,8 +341,9 @@ export class BuildingShadowsEffectV2 {
           min: 0.5,
           max: 1.6,
           step: 0.01,
-          default: 1.6,
+          default: 1.15,
           advanced: true,
+          tooltip: 'Gamma on integrated shadow strength; lower = gentler fade into light.'
         },
         blurRadius: {
           type: 'slider',
@@ -350,7 +351,7 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 4.0,
           step: 0.05,
-          default: 1.75,
+          default: 3.0,
           advanced: true,
         },
         contactShadowPreserve: {
@@ -359,10 +360,10 @@ export class BuildingShadowsEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.02,
-          default: 1,
+          default: 0.15,
           advanced: true,
           tooltip:
-            'Blurs outward without eating the caster edge: merges pre-blur strength where the footprint is darkest, full blur where it fades.'
+            'Blurs outward without eating the caster edge: merges pre-blur strength where the footprint is darkest, full blur where it fades. Lower = softer contact.'
         },
         contactSharpBlendLow: {
           type: 'slider',
@@ -658,9 +659,12 @@ export class BuildingShadowsEffectV2 {
           float peakHit = 0.0;
           float spreadBase = 0.28 + 0.62 * smearAmount;
 
-          const int RAY_STEPS = 10;
+          // Per-pixel jitter breaks banding from fixed step counts; blur pass smooths residual noise.
+          float rayJitter = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+
+          const int RAY_STEPS = 24;
           for (int i = 0; i < RAY_STEPS; i++) {
-            float t = (float(i) + 0.5) / float(RAY_STEPS);
+            float t = (float(i) + rayJitter) / float(RAY_STEPS);
             float spreadT = mix(t, t * t, spreadBase);
             spreadT = mix(spreadT, t * t * t, smearAmount * 0.42);
             vec2 centerUv = vUv + (baseOffsetUv * spreadT);
@@ -672,7 +676,9 @@ export class BuildingShadowsEffectV2 {
             float c0 = sampleCasterIndoor(centerUv, receiverOutdoorGate);
             float c1 = sampleCasterIndoor(centerUv + ortho * lateral, receiverOutdoorGate);
             float c2 = sampleCasterIndoor(centerUv - ortho * lateral, receiverOutdoorGate);
-            float stepHit = c0 * 0.5 + c1 * 0.25 + c2 * 0.25;
+            float c3 = sampleCasterIndoor(centerUv + ortho * lateral * 2.0, receiverOutdoorGate);
+            float c4 = sampleCasterIndoor(centerUv - ortho * lateral * 2.0, receiverOutdoorGate);
+            float stepHit = c0 * 0.34 + c1 * 0.18 + c2 * 0.18 + c3 * 0.15 + c4 * 0.15;
             peakHit = max(peakHit, stepHit);
 
             float stepWeight = mix(1.38, 0.58, t) * distanceFade;
@@ -813,18 +819,16 @@ export class BuildingShadowsEffectV2 {
           float r = clamp(uRadius, 0.0, 4.0);
           vec2 stepUv = uDirection * uTexelSize * r;
 
-          // 5-tap linear hardware-filtered Gaussian (bilinear between taps).
-          float w0 = 0.227027;
-          float w12 = 0.316216;
-          float w34 = 0.070270;
-          float off12 = 1.384615;
-          float off34 = 3.230769;
-
-          float s = texture2D(tInput, vUv).r * w0;
-          s += texture2D(tInput, vUv + stepUv * off12).r * w12;
-          s += texture2D(tInput, vUv - stepUv * off12).r * w12;
-          s += texture2D(tInput, vUv + stepUv * off34).r * w34;
-          s += texture2D(tInput, vUv - stepUv * off34).r * w34;
+          // 9-tap separable Gaussian (wider kernel than 5-tap; fewer boxy gaps at high uRadius).
+          float s = texture2D(tInput, vUv).r * 0.2270270270;
+          s += texture2D(tInput, vUv + stepUv * 1.0).r * 0.1945945946;
+          s += texture2D(tInput, vUv - stepUv * 1.0).r * 0.1945945946;
+          s += texture2D(tInput, vUv + stepUv * 2.0).r * 0.1216216216;
+          s += texture2D(tInput, vUv - stepUv * 2.0).r * 0.1216216216;
+          s += texture2D(tInput, vUv + stepUv * 3.0).r * 0.0540540541;
+          s += texture2D(tInput, vUv - stepUv * 3.0).r * 0.0540540541;
+          s += texture2D(tInput, vUv + stepUv * 4.0).r * 0.0162162162;
+          s += texture2D(tInput, vUv - stepUv * 4.0).r * 0.0162162162;
 
           gl_FragColor = vec4(vec3(clamp(s, 0.0, 1.0)), 1.0);
         }

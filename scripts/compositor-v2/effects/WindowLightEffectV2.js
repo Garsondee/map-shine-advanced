@@ -573,7 +573,8 @@ const EMIT_FRAG = `
     if (uDebugForceMagenta > 0.5 && dot(emit, emit) > 1e-8) {
       emit = vec3(1.0, 0.0, 1.0);
     }
-    emit = min(emit, vec3(0.85));
+    // Soft HDR shoulder (replaces hard min(emit, 0.85) — that flattened window light to SDR).
+    emit = emit / (vec3(1.0) + emit * 0.14);
     gl_FragColor = vec4(emit, 1.0);
   }
 `;

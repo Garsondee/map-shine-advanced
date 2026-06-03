@@ -339,7 +339,7 @@ export class LightingEffectV2 {
       /** Scales indirect window spill by wall albedo luma (keeps texture on masonry). */
       windowAlbedoCoupling: 0.78,
       /** Small additive highlight on litColor after multiply (HDR-linear; not frame multiply). */
-      windowScreenSpill: 0,
+      windowScreenSpill: 0.55,
     };
 
     // ── Light management ────────────────────────────────────────────────
@@ -2174,7 +2174,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 2,
           step: 0.05,
-          default: 0,
+          default: 0.55,
           label: 'Window core glow',
           tooltip: 'Small additive warm highlight on lit pixels at window cores (HDR-linear; not a full-frame multiply).',
         },

@@ -107,6 +107,7 @@ import { AtmosphericFogEffectV2 } from './effects/AtmosphericFogEffectV2.js';
 import { FogOfWarEffectV2 } from './effects/FogOfWarEffectV2.js';
 import { MovementPreviewEffectV2 } from './effects/MovementPreviewEffectV2.js';
 import { PlayerLightEffectV2 } from './effects/PlayerLightEffectV2.js';
+import { getNightVisionVertexShader, getNightVisionFragmentShader } from './effects/night-vision-shader.js';
 import { SmellyFliesEffect } from '../particles/SmellyFliesEffect.js';
 import { CandleFlamesEffectV2 } from './effects/CandleFlamesEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
@@ -834,6 +835,13 @@ export class FloorCompositor {
     this._blitMaterial = null;
     /** @type {THREE.Mesh|null} Fullscreen quad for blit */
     this._blitQuad = null;
+
+    /** @type {THREE.Scene|null} Compositor-owned night-vision post draw (same lifecycle as blit). */
+    this._playerNvScene = null;
+    this._playerNvCamera = null;
+    this._playerNvMaterial = null;
+    this._playerNvQuad = null;
+    this._playerNvFallbackBlack = null;
 
     /** @type {THREE.Scene|null} Scene for compositing PIXI world channel into post chain */
     this._pixiWorldCompositeScene = null;
@@ -2000,6 +2008,72 @@ export class FloorCompositor {
     );
     this._blitQuad.frustumCulled = false;
     this._blitScene.add(this._blitQuad);
+
+    // Night-vision post (compositor-owned GPU pass; PlayerLightEffectV2 supplies params/bloom).
+    this._playerNvScene = new THREE.Scene();
+    this._playerNvCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    const nvBlack = new Uint8Array([0, 0, 0, 255]);
+    this._playerNvFallbackBlack = new THREE.DataTexture(nvBlack, 1, 1, THREE.RGBAFormat);
+    this._playerNvFallbackBlack.needsUpdate = true;
+    this._playerNvFallbackBlack.flipY = false;
+    this._playerNvMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tDiffuse: { value: null },
+        tBloomBurnMap: { value: this._playerNvFallbackBlack },
+        uResolution: { value: new THREE.Vector2(1, 1) },
+        uTime: { value: 0 },
+        uTint: { value: new THREE.Vector3(0, 0.5501958510499996, 0.17193620345312488) },
+        uTintStrength: { value: 1 },
+        uSaturation: { value: 0 },
+        uBrightness: { value: 2 },
+        uPurkinjeStrength: { value: 0 },
+        uPurkinjeDarkStart: { value: 0.021 },
+        uPurkinjeBrightEnd: { value: 0.22 },
+        uPurkinjeCurve: { value: 1.25 },
+        uGain: { value: 10 },
+        uGamma: { value: 0.86 },
+        uMaxLuma: { value: 4 },
+        uDarkLift: { value: 0.016 },
+        uDistortionAmount: { value: -0.05 },
+        uDistortionCenter: { value: new THREE.Vector2(0.5, 0.5) },
+        uCAAmountPx: { value: 1.6 },
+        uCAEdgePower: { value: 2.0 },
+        uScanlinesEnabled: { value: 1.0 },
+        uScanIntensity: { value: 0.35 },
+        uScanDensity: { value: 867 },
+        uScanSpeed: { value: -1.15 },
+        uScanThickness: { value: 0.64 },
+        uNoiseAmount: { value: 0.07 },
+        uNoiseLowLightBoost: { value: 0.55 },
+        uNoiseSpeed: { value: 1.7 },
+        uNoiseScale: { value: 1.5 },
+        uPhosphorFlickerAmount: { value: 0.09 },
+        uPhosphorFlickerSpeed: { value: 4.1 },
+        uPhosphorSize: { value: 1.39 },
+        uPhosphorDensity: { value: 0.51 },
+        uPhosphorIntensity: { value: 1.05 },
+        uBloomEnabled: { value: 0.0 },
+        uBloomIntensity: { value: 3 },
+        uBloomBlurPx: { value: 6 },
+        uEyepieceStyle: { value: 0.0 },
+        uEyepieceRadius: { value: 0.68 },
+        uEyepieceSoftness: { value: 0.22 },
+        uEyepieceIntensity: { value: 1.0 },
+        uEyepieceColor: { value: new THREE.Vector3(0, 0, 0) },
+        uEyepieceSeparation: { value: 0.26 },
+        uPower: { value: 1.0 },
+      },
+      vertexShader: getNightVisionVertexShader(),
+      fragmentShader: getNightVisionFragmentShader(),
+      depthTest: false,
+      depthWrite: false,
+      transparent: false,
+      blending: THREE.NoBlending,
+      toneMapped: false,
+    });
+    this._playerNvQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._playerNvMaterial);
+    this._playerNvQuad.frustumCulled = false;
+    this._playerNvScene.add(this._playerNvQuad);
 
     // ── PIXI world-channel composite quad (post-chain injection) ───────────
     this._pixiWorldCompositeScene = new THREE.Scene();
@@ -4459,6 +4533,8 @@ export class FloorCompositor {
         const tlGrade = this._colorCorrectionEffect?.getTimelineGradeState?.();
         this._waterEffect?.setTimelineGradeState?.(tlGrade);
         this._windowLightEffect?.setTimelineGradeState?.(tlGrade);
+        this._bushEffect?.setTimelineGradeState?.(tlGrade);
+        this._treeEffect?.setTimelineGradeState?.(tlGrade);
       } catch (_) {}
       this._profileEffectCall('filter', 'update', () => this._filterEffect.update(timeInfo), 'FilterEffectV2 update');
       // Weather state drives atmospheric fog density; advance it even when
@@ -4968,22 +5044,10 @@ export class FloorCompositor {
 
     // Night vision goggles post-pass (after lens): tube tint, gain, bloom burn, scanlines.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: playerLight.nightVision'); } catch (_) {} }
-    if (resolveEffectEnabled(this._playerLightEffect) && this._playerLightEffect?.shouldRenderNightVision?.()) {
-      const nvOutput = (currentInput === this._postA) ? this._postB : this._postA;
-      let wrote = false;
-      this._profileEffectCall('playerLight', 'render', () => {
-        wrote = withSceneScissor(this.renderer, () =>
-          this._playerLightEffect.renderNightVision(
-            this.renderer,
-            this.camera,
-            currentInput,
-            nvOutput,
-            this._hdrScenePreGradeRT,
-          )
-        );
-      }, 'PlayerLightEffectV2 renderNightVision');
-      if (wrote) {
-        currentInput = nvOutput;
+    {
+      const nvOut = this._renderPlayerNightVisionPost(currentInput);
+      if (nvOut) {
+        currentInput = nvOut;
       }
     }
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: playerLight.nightVision DONE'); } catch (_) {} }
@@ -5354,6 +5418,68 @@ export class FloorCompositor {
       if (!r || typeof r.setRenderTarget !== 'function') return;
       r.setRenderTarget(null);
     } catch (_) {}
+  }
+
+  /**
+   * Night-vision post on the graded display chain (compositor-owned draw).
+   * @param {THREE.WebGLRenderTarget} inputRT
+   * @returns {THREE.WebGLRenderTarget|null}
+   * @private
+   */
+  _renderPlayerNightVisionPost(inputRT) {
+    const pl = this._playerLightEffect;
+    if (!inputRT || !this._postA || !this._postB) return null;
+    if (!resolveEffectEnabled(pl) || !pl?.shouldRenderNightVision?.()) return null;
+
+    const outputRT = (inputRT === this._postA) ? this._postB : this._postA;
+    if (outputRT === inputRT) return null;
+
+    const renderer = this.renderer;
+    if (!renderer || !this._playerNvMaterial || !this._playerNvScene || !this._playerNvCamera) {
+      return null;
+    }
+
+    let wrote = false;
+    this._profileEffectCall('playerLight', 'render', () => {
+      wrote = withoutSceneScissor(renderer, () => {
+        try {
+          if (!pl.prepareNightVisionRender(renderer, inputRT)) return false;
+
+          const w = Math.max(1, Number(inputRT.width) || 1);
+          const h = Math.max(1, Number(inputRT.height) || 1);
+          if (inputRT.texture) inputRT.texture.flipY = false;
+
+          const debugCopyOnly = (() => {
+            try { return window?.MapShine?.__nvDebugCopyOnly === true; } catch (_) { return false; }
+          })();
+
+          const prevTarget = renderer.getRenderTarget();
+          const prevAutoClear = renderer.autoClear;
+          renderer.setRenderTarget(outputRT);
+          renderer.autoClear = true;
+
+          if (debugCopyOnly && this._blitMaterial && this._blitScene && this._blitCamera) {
+            this._blitMaterial.uniforms.tDiffuse.value = inputRT.texture;
+            renderer.render(this._blitScene, this._blitCamera);
+          } else {
+            const u = this._playerNvMaterial.uniforms;
+            u.tDiffuse.value = inputRT.texture;
+            u.tBloomBurnMap.value = pl.getNightVisionBloomTexture() ?? this._playerNvFallbackBlack;
+            pl.syncNightVisionUniformsTo(this._playerNvMaterial, w, h);
+            renderer.render(this._playerNvScene, this._playerNvCamera);
+          }
+
+          renderer.autoClear = prevAutoClear;
+          renderer.setRenderTarget(prevTarget);
+          return true;
+        } catch (err) {
+          log.warn('FloorCompositor: player night vision post failed:', err);
+          return false;
+        }
+      });
+    }, 'PlayerLightEffectV2 renderNightVision');
+
+    return wrote ? outputRT : null;
   }
 
   _blitToScreen(sourceRT) {
@@ -8524,6 +8650,12 @@ export class FloorCompositor {
       }
       try { this._bushEffect?.syncCloudShadowUniforms?.(); } catch (_) {}
       try { this._treeEffect?.syncCloudShadowUniforms?.(); } catch (_) {}
+      try { this._bushEffect?.syncCameraGradeUniforms?.(); } catch (err) {
+        log.warn('BushEffectV2 pre-vegetation syncCameraGradeUniforms threw, skipping:', err);
+      }
+      try { this._treeEffect?.syncCameraGradeUniforms?.(); } catch (err) {
+        log.warn('TreeEffectV2 pre-vegetation syncCameraGradeUniforms threw, skipping:', err);
+      }
       this._compositeVegetationAboveWater(this.renderer, mergedCompositeOut);
     }, 'Splashes + vegetation before CC');
     if (_profiling) this._recordPassTiming('postMerge_worldOverlaysBeforeCc', _profileT0);
@@ -8814,9 +8946,12 @@ export class FloorCompositor {
     this._waterBgProductMaterial = null;
     this._waterBgProductQuad = null;
 
-    // Dispose blit resources.
+    // Dispose blit + player night-vision post resources.
     try { this._blitMaterial?.dispose(); } catch (_) {}
     try { this._blitQuad?.geometry?.dispose(); } catch (_) {}
+    try { this._playerNvMaterial?.dispose(); } catch (_) {}
+    try { this._playerNvQuad?.geometry?.dispose(); } catch (_) {}
+    try { this._playerNvFallbackBlack?.dispose(); } catch (_) {}
     try { this._pixiWorldCompositeMaterial?.dispose?.(); } catch (_) {}
     try { this._pixiWorldCompositeQuad?.geometry?.dispose?.(); } catch (_) {}
     try { this._pixiUiOverlayMaterial?.dispose?.(); } catch (_) {}
@@ -8825,6 +8960,11 @@ export class FloorCompositor {
     this._blitCamera = null;
     this._blitMaterial = null;
     this._blitQuad = null;
+    this._playerNvScene = null;
+    this._playerNvCamera = null;
+    this._playerNvMaterial = null;
+    this._playerNvQuad = null;
+    this._playerNvFallbackBlack = null;
     this._pixiWorldCompositeScene = null;
     this._pixiWorldCompositeCamera = null;
     this._pixiWorldCompositeMaterial = null;

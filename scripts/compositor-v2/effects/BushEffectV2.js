@@ -73,6 +73,12 @@ import {
   syncVegetationLandscapeLightningForEffect,
   linkVegetationLandscapeLightningUniforms,
 } from './vegetation-landscape-lightning.js';
+import {
+  VEGETATION_CAMERA_GRADE_UNIFORM_GLSL,
+  VEGETATION_CAMERA_GRADE_FUNCTION_GLSL,
+  createVegetationCameraGradeUniforms,
+  syncVegetationCameraGradeForEffect,
+} from './vegetation-camera-grade.js';
 
 const log = createLogger('BushEffectV2');
 
@@ -119,6 +125,9 @@ export class BushEffectV2 {
 
     /** @type {object|null} */
     this._sharedUniforms = null;
+
+    /** @type {{ enabled: boolean, global?: object, interior?: object }} */
+    this._timelineGradeState = { enabled: false };
 
     // Derived-alpha support (some Bush masks can be authored as opaque RGB).
     /** @type {Map<string, boolean>} */
@@ -286,6 +295,7 @@ export class BushEffectV2 {
           type: 'folder',
           expanded: false,
           parameters: ['exposure', 'brightness', 'contrast', 'saturation', 'temperature', 'tint'],
+          tooltip: 'Extra foliage tweaks on top of Camera Grade and Time of Day (applied automatically).',
         },
         {
           name: 'shadow',
@@ -629,7 +639,7 @@ export class BushEffectV2 {
           step: 0.02,
           default: 0.0,
           throttle: 100,
-          tooltip: 'Stops-style exposure before other color tweaks.',
+          tooltip: 'Extra stops on top of Camera Grade exposure.',
         },
         brightness: {
           type: 'slider',
@@ -639,7 +649,7 @@ export class BushEffectV2 {
           step: 0.01,
           default: 0.0,
           throttle: 100,
-          tooltip: 'Linear offset after temperature/tint bias.',
+          tooltip: 'Extra linear offset after Camera Grade.',
         },
         contrast: {
           type: 'slider',
@@ -1030,6 +1040,22 @@ export class BushEffectV2 {
   }
 
   /**
+   * Timeline grade from ColorCorrectionEffectV2 (updated each frame by FloorCompositor).
+   * @param {{ enabled: boolean, global?: object, interior?: object }} state
+   */
+  setTimelineGradeState(state) {
+    this._timelineGradeState = state ?? { enabled: false };
+  }
+
+  /**
+   * Push Camera Grade + ToD uniforms before pre-merge vegetation composite.
+   */
+  syncCameraGradeUniforms() {
+    if (!this._initialized) return;
+    syncVegetationCameraGradeForEffect(this);
+  }
+
+  /**
    * Bind CloudEffectV2 shadow map for canopy darkening (call after cloud render each frame).
    */
   syncCloudShadowUniforms() {
@@ -1302,6 +1328,7 @@ export class BushEffectV2 {
       ...createVegetationBuildingShadowUniforms(THREE, this.params),
       ...createVegetationPaintedShadowUniforms(THREE, this.params),
       ...createVegetationLandscapeLightningUniforms(THREE, this.params),
+      ...createVegetationCameraGradeUniforms(THREE),
     };
   }
 
@@ -1498,6 +1525,7 @@ export class BushEffectV2 {
 
         uniform float uDeriveAlpha;
         uniform float uVegetationPass;
+${VEGETATION_CAMERA_GRADE_UNIFORM_GLSL}
 ${VEGETATION_CLOUD_SHADOW_UNIFORM_GLSL}
 ${VEGETATION_BUILDING_SHADOW_UNIFORM_GLSL}
 ${VEGETATION_PAINTED_SHADOW_UNIFORM_GLSL}
@@ -1521,21 +1549,7 @@ ${VEGETATION_LANDSCAPE_LIGHTNING_UNIFORM_GLSL}
           );
         }
 
-        float msLuminance(vec3 c) {
-          return dot(c, vec3(0.2126, 0.7152, 0.0722));
-        }
-
-        vec3 applyCC(vec3 color) {
-          color *= pow(2.0, uExposure);
-          float t = uTemperature;
-          float g = uTint;
-          color.r += t * 0.1; color.b -= t * 0.1; color.g += g * 0.1;
-          color += vec3(uBrightness);
-          color = (color - 0.5) * uContrast + 0.5;
-          float l = msLuminance(color);
-          color = mix(vec3(l), color, uSaturation);
-          return color;
-        }
+${VEGETATION_CAMERA_GRADE_FUNCTION_GLSL}
 
 ${VEGETATION_BUILDING_SHADOW_SAMPLE_GLSL}
 ${VEGETATION_PAINTED_SHADOW_SAMPLE_GLSL}
@@ -1696,15 +1710,17 @@ ${VEGETATION_PAINTED_SHADOW_SAMPLE_GLSL}
           float mainAlpha = texA * uIntensity;
           if (mainAlpha <= 0.001) discard;
 
-          float ccDelta = abs(uExposure) + abs(uBrightness) + abs(uContrast - 1.0)
-                        + abs(uSaturation - 1.0) + abs(uTemperature) + abs(uTint);
           vec3 c = bushSample.rgb;
-          if (ccDelta > 0.0001) c = applyCC(c);
           c *= texA;
 ${VEGETATION_LANDSCAPE_LIGHTNING_APPLY_GLSL}
 ${VEGETATION_CLOUD_SHADOW_APPLY_GLSL}
 ${VEGETATION_BUILDING_SHADOW_APPLY_GLSL}
 ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
+          if (uCcGradeEnabled > 0.5
+              || abs(uExposure) + abs(uBrightness) + abs(uContrast - 1.0)
+                 + abs(uSaturation - 1.0) + abs(uTemperature) + abs(uTint) > 0.0001) {
+            c = applyVegetationColorGrade(c);
+          }
           gl_FragColor = vec4(c, mainAlpha);
         }
       `,

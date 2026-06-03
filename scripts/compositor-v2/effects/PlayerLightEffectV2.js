@@ -342,48 +342,48 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       flashlightLightDistanceScaleNear: 0.28,
       flashlightLightDistanceScaleFar: 3,
 
-      nightVisionTint: { r: 0.2, g: 1.0, b: 0.45 },
-      nightVisionTintStrength: 0.85,
-      nightVisionSaturation: 0.15,
-      nightVisionBrightness: 1.0,
+      nightVisionTint: { r: 0, g: 0.5501958510499996, b: 0.17193620345312488 },
+      nightVisionTintStrength: 1,
+      nightVisionSaturation: 0,
+      nightVisionBrightness: 2,
       nightVisionPurkinjeStrength: 0,
-      nightVisionPurkinjeDarkStart: 0.015,
-      nightVisionPurkinjeBrightEnd: 0.18,
-      nightVisionPurkinjeCurve: 1.35,
-      nightVisionGain: 4.0,
-      nightVisionGamma: 0.7,
-      nightVisionMaxLuma: 2.5,
-      nightVisionDarkLift: 0.02,
+      nightVisionPurkinjeDarkStart: 0.021,
+      nightVisionPurkinjeBrightEnd: 0.23,
+      nightVisionPurkinjeCurve: 1.4,
+      nightVisionGain: 10,
+      nightVisionGamma: 0.86,
+      nightVisionMaxLuma: 4,
+      nightVisionDarkLift: 0.016,
       nightVisionEyepieceStyle: 'single',
-      nightVisionEyepieceRadius: 0.55,
-      nightVisionEyepieceSoftness: 0.18,
+      nightVisionEyepieceRadius: 0.68,
+      nightVisionEyepieceSoftness: 0.22,
       nightVisionEyepieceIntensity: 1.0,
       nightVisionEyepieceColor: { r: 0.0, g: 0.0, b: 0.0 },
-      nightVisionEyepieceSeparation: 0.22,
+      nightVisionEyepieceSeparation: 0.26,
       nightVisionScanlinesEnabled: true,
-      nightVisionScanlinesIntensity: 0.25,
-      nightVisionScanlinesDensity: 320,
-      nightVisionScanlinesSpeed: 0.4,
-      nightVisionScanlinesThickness: 0.5,
-      nightVisionNoiseAmount: 0.18,
-      nightVisionNoiseLowLightBoost: 1.0,
-      nightVisionNoiseSpeed: 6.0,
-      nightVisionNoiseScale: 1.5,
-      nightVisionPhosphorFlickerAmount: 0.06,
-      nightVisionPhosphorFlickerSpeed: 9.0,
-      nightVisionPhosphorSize: 0.75,
-      nightVisionPhosphorDensity: 1.0,
-      nightVisionPhosphorIntensity: 1.0,
+      nightVisionScanlinesIntensity: 0.3,
+      nightVisionScanlinesDensity: 300,
+      nightVisionScanlinesSpeed: 1.4,
+      nightVisionScanlinesThickness: 0.4,
+      nightVisionNoiseAmount: 0.11,
+      nightVisionNoiseLowLightBoost: 0.55,
+      nightVisionNoiseSpeed: 0.1,
+      nightVisionNoiseScale: 6,
+      nightVisionPhosphorFlickerAmount: 0.09,
+      nightVisionPhosphorFlickerSpeed: 4.1,
+      nightVisionPhosphorSize: 1.39,
+      nightVisionPhosphorDensity: 0.51,
+      nightVisionPhosphorIntensity: 1.05,
       nightVisionBloomEnabled: true,
-      nightVisionBloomThreshold: 1.0,
-      nightVisionBloomThresholdSoftness: 0.25,
-      nightVisionBloomIntensity: 0.85,
-      nightVisionBloomBlurPx: 6,
-      nightVisionBloomPersistenceSeconds: 0.6,
-      nightVisionBloomResponse: 1.4,
-      nightVisionDistortionAmount: -0.05,
-      nightVisionCAAmount: 1.6,
-      nightVisionCAEdgePower: 2.0,
+      nightVisionBloomThreshold: 1.44,
+      nightVisionBloomThresholdSoftness: 0.5,
+      nightVisionBloomIntensity: 3,
+      nightVisionBloomBlurPx: 9.8,
+      nightVisionBloomPersistenceSeconds: 0.2,
+      nightVisionBloomResponse: 0.5,
+      nightVisionDistortionAmount: -0.18,
+      nightVisionCAAmount: 6,
+      nightVisionCAEdgePower: 4,
       nightVisionWarmupSeconds: 0.6,
       nightVisionShutdownSeconds: 0.4,
       nightVisionPowerFlickerEnabled: true,
@@ -1108,10 +1108,10 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         flashlightLightDistanceScaleNear: { type: 'slider', label: 'Near Scale', min: 0.1, max: 3, step: 0.01, default: 0.28, throttle: 50 },
         flashlightLightDistanceScaleFar: { type: 'slider', label: 'Far Scale', min: 0.1, max: 3, step: 0.01, default: 3, throttle: 50 },
 
-        nightVisionTint: { type: 'color', label: 'Tint', default: { r: 0.2, g: 1.0, b: 0.45 } },
-        nightVisionTintStrength: { type: 'slider', label: 'Tint Strength', min: 0, max: 1, step: 0.01, default: 0.85, throttle: 50 },
-        nightVisionSaturation: { type: 'slider', label: 'Saturation', min: 0, max: 1, step: 0.01, default: 0.15, throttle: 50 },
-        nightVisionBrightness: { type: 'slider', label: 'Brightness', min: 0, max: 2, step: 0.01, default: 1.0, throttle: 50 },
+        nightVisionTint: { type: 'color', label: 'Tint', default: { r: 0, g: 0.5501958510499996, b: 0.17193620345312488 } },
+        nightVisionTintStrength: { type: 'slider', label: 'Tint Strength', min: 0, max: 1, step: 0.01, default: 1, throttle: 50 },
+        nightVisionSaturation: { type: 'slider', label: 'Saturation', min: 0, max: 1, step: 0.01, default: 0, throttle: 50 },
+        nightVisionBrightness: { type: 'slider', label: 'Brightness', min: 0, max: 2, step: 0.01, default: 2, throttle: 50 },
         nightVisionPurkinjeStrength: {
           type: 'slider',
           label: 'Purkinje Strength',
@@ -1128,7 +1128,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           min: 0.001,
           max: 0.2,
           step: 0.001,
-          default: 0.015,
+          default: 0.021,
           throttle: 50,
           tooltip: 'Pre-gain HDR luma below which color is fully suppressed (rod-dominated).',
         },
@@ -1138,7 +1138,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           min: 0.02,
           max: 1.0,
           step: 0.01,
-          default: 0.18,
+          default: 0.23,
           throttle: 50,
           tooltip: 'Pre-gain HDR luma above which full saturation is restored (cone-dominated).',
         },
@@ -1148,7 +1148,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           min: 0.2,
           max: 4.0,
           step: 0.05,
-          default: 1.35,
+          default: 1.4,
           throttle: 50,
           tooltip: 'Crossover sharpness between rod and cone vision retention.',
         },
@@ -1158,19 +1158,19 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           min: 1,
           max: 10,
           step: 0.05,
-          default: 4.0,
+          default: 10,
           throttle: 50,
-          tooltip: 'Linear gain converted to EV stops for HDR metering (4× ≈ +2 stops). Meters post-bloom linear HDR when available.',
+          tooltip: 'Linear gain on the graded display image (4× is a strong night-vision boost).',
         },
         nightVisionGamma: {
           type: 'slider',
-          label: 'Shadow Curve',
+          label: 'Shadow Lift Curve',
           min: 0.3,
           max: 2.0,
           step: 0.01,
-          default: 0.7,
+          default: 0.86,
           throttle: 50,
-          tooltip: 'Lower values lift shadows more aggressively; higher values keep gain on midtones/highlights.',
+          tooltip: 'Lower values lift dark areas more aggressively before the gain cap.',
         },
         nightVisionMaxLuma: {
           type: 'slider',
@@ -1178,7 +1178,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           min: 0.5,
           max: 4.0,
           step: 0.01,
-          default: 2.5,
+          default: 4,
           throttle: 50,
           tooltip: 'Soft highlight ceiling after amplification. HDR scenes often need 2–3+ vs the old 0–1 display-referred clamp.',
         },
@@ -1188,7 +1188,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           min: 0,
           max: 0.25,
           step: 0.002,
-          default: 0.02,
+          default: 0.016,
           throttle: 50,
           tooltip: 'Linear offset added to HDR luma before log gain (smaller than pre-HDR defaults).',
         },
@@ -1198,25 +1198,25 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           options: { Single: 'single', Binocular: 'binocular' },
           default: 'single'
         },
-        nightVisionEyepieceRadius: { type: 'slider', label: 'Eyepiece Radius', min: 0.05, max: 0.95, step: 0.01, default: 0.55, throttle: 50 },
-        nightVisionEyepieceSoftness: { type: 'slider', label: 'Eyepiece Softness', min: 0.01, max: 0.5, step: 0.01, default: 0.18, throttle: 50 },
+        nightVisionEyepieceRadius: { type: 'slider', label: 'Eyepiece Radius', min: 0.05, max: 0.95, step: 0.01, default: 0.68, throttle: 50 },
+        nightVisionEyepieceSoftness: { type: 'slider', label: 'Eyepiece Softness', min: 0.01, max: 0.5, step: 0.01, default: 0.22, throttle: 50 },
         nightVisionEyepieceIntensity: { type: 'slider', label: 'Eyepiece Intensity', min: 0, max: 1, step: 0.01, default: 1.0, throttle: 50 },
         nightVisionEyepieceColor: { type: 'color', label: 'Eyepiece Edge Color', default: { r: 0, g: 0, b: 0 } },
-        nightVisionEyepieceSeparation: { type: 'slider', label: 'Binocular Separation', min: 0, max: 0.5, step: 0.01, default: 0.22, throttle: 50 },
+        nightVisionEyepieceSeparation: { type: 'slider', label: 'Binocular Separation', min: 0, max: 0.5, step: 0.01, default: 0.26, throttle: 50 },
         nightVisionScanlinesEnabled: { type: 'boolean', label: 'Scanlines', default: true },
-        nightVisionScanlinesIntensity: { type: 'slider', label: 'Scanline Intensity', min: 0, max: 1, step: 0.01, default: 0.25, throttle: 50 },
-        nightVisionScanlinesDensity: { type: 'slider', label: 'Scanline Density', min: 60, max: 1200, step: 1, default: 320, throttle: 50 },
-        nightVisionScanlinesSpeed: { type: 'slider', label: 'Scanline Speed', min: -3, max: 3, step: 0.05, default: 0.4, throttle: 50 },
-        nightVisionScanlinesThickness: { type: 'slider', label: 'Scanline Thickness', min: 0, max: 1, step: 0.01, default: 0.5, throttle: 50 },
-        nightVisionNoiseAmount: { type: 'slider', label: 'Noise Amount', min: 0, max: 1, step: 0.01, default: 0.18, throttle: 50 },
-        nightVisionNoiseLowLightBoost: { type: 'slider', label: 'Noise Low-Light Boost', min: 0, max: 3, step: 0.05, default: 1.0, throttle: 50 },
-        nightVisionNoiseSpeed: { type: 'slider', label: 'Noise Speed', min: 0, max: 12, step: 0.1, default: 6.0, throttle: 50 },
-        nightVisionNoiseScale: { type: 'slider', label: 'Noise Scale', min: 0.5, max: 6, step: 0.05, default: 1.5, throttle: 50 },
-        nightVisionPhosphorFlickerAmount: { type: 'slider', label: 'Phosphor Flicker', min: 0, max: 1, step: 0.01, default: 0.06, throttle: 50 },
-        nightVisionPhosphorFlickerSpeed: { type: 'slider', label: 'Phosphor Flicker Speed', min: 0.5, max: 30, step: 0.1, default: 9.0, throttle: 50 },
-        nightVisionPhosphorSize: { type: 'slider', label: 'Phosphor Size', min: 0.2, max: 3.0, step: 0.01, default: 0.75, throttle: 50 },
-        nightVisionPhosphorDensity: { type: 'slider', label: 'Phosphor Density', min: 0.1, max: 3.0, step: 0.01, default: 1.0, throttle: 50 },
-        nightVisionPhosphorIntensity: { type: 'slider', label: 'Phosphor Intensity', min: 0, max: 4.0, step: 0.01, default: 1.0, throttle: 50 },
+        nightVisionScanlinesIntensity: { type: 'slider', label: 'Scanline Intensity', min: 0, max: 1, step: 0.01, default: 0.3, throttle: 50 },
+        nightVisionScanlinesDensity: { type: 'slider', label: 'Scanline Density', min: 60, max: 1200, step: 1, default: 300, throttle: 50 },
+        nightVisionScanlinesSpeed: { type: 'slider', label: 'Scanline Speed', min: -3, max: 3, step: 0.05, default: 1.4, throttle: 50 },
+        nightVisionScanlinesThickness: { type: 'slider', label: 'Scanline Thickness', min: 0, max: 1, step: 0.01, default: 0.4, throttle: 50 },
+        nightVisionNoiseAmount: { type: 'slider', label: 'Noise Amount', min: 0, max: 1, step: 0.01, default: 0.11, throttle: 50 },
+        nightVisionNoiseLowLightBoost: { type: 'slider', label: 'Noise Low-Light Boost', min: 0, max: 3, step: 0.05, default: 0.55, throttle: 50 },
+        nightVisionNoiseSpeed: { type: 'slider', label: 'Noise Speed', min: 0, max: 12, step: 0.1, default: 0.1, throttle: 50 },
+        nightVisionNoiseScale: { type: 'slider', label: 'Noise Scale', min: 0.5, max: 6, step: 0.05, default: 6, throttle: 50 },
+        nightVisionPhosphorFlickerAmount: { type: 'slider', label: 'Phosphor Flicker', min: 0, max: 1, step: 0.01, default: 0.09, throttle: 50 },
+        nightVisionPhosphorFlickerSpeed: { type: 'slider', label: 'Phosphor Flicker Speed', min: 0.5, max: 30, step: 0.1, default: 4.1, throttle: 50 },
+        nightVisionPhosphorSize: { type: 'slider', label: 'Phosphor Size', min: 0.2, max: 3.0, step: 0.01, default: 1.39, throttle: 50 },
+        nightVisionPhosphorDensity: { type: 'slider', label: 'Phosphor Density', min: 0.1, max: 3.0, step: 0.01, default: 0.51, throttle: 50 },
+        nightVisionPhosphorIntensity: { type: 'slider', label: 'Phosphor Intensity', min: 0, max: 4.0, step: 0.01, default: 1.05, throttle: 50 },
         nightVisionBloomEnabled: { type: 'boolean', label: 'Bloom / Burn-In', default: true },
         nightVisionBloomThreshold: {
           type: 'slider',
@@ -1224,18 +1224,18 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           min: 0,
           max: 4,
           step: 0.01,
-          default: 1.0,
+          default: 1.44,
           throttle: 50,
           tooltip: 'Linear HDR brightness floor for tube bloom burn-in (matches post-merge bloom scale).',
         },
-        nightVisionBloomThresholdSoftness: { type: 'slider', label: 'Threshold Softness', min: 0.01, max: 0.5, step: 0.005, default: 0.25, throttle: 50 },
-        nightVisionBloomIntensity: { type: 'slider', label: 'Bloom Intensity', min: 0, max: 3, step: 0.01, default: 0.85, throttle: 50 },
-        nightVisionBloomBlurPx: { type: 'slider', label: 'Bloom Blur (px)', min: 0, max: 16, step: 0.25, default: 6, throttle: 50 },
-        nightVisionBloomPersistenceSeconds: { type: 'slider', label: 'Burn Persistence (s)', min: 0, max: 3, step: 0.05, default: 0.6, throttle: 50 },
-        nightVisionBloomResponse: { type: 'slider', label: 'Bloom Response', min: 0.1, max: 3, step: 0.05, default: 1.4, throttle: 50 },
-        nightVisionDistortionAmount: { type: 'slider', label: 'Distortion', min: -0.3, max: 0.3, step: 0.005, default: -0.05, throttle: 50 },
-        nightVisionCAAmount: { type: 'slider', label: 'Chromatic Aberration (px)', min: 0, max: 6, step: 0.05, default: 1.6, throttle: 50 },
-        nightVisionCAEdgePower: { type: 'slider', label: 'CA Edge Power', min: 0.1, max: 4, step: 0.05, default: 2.0, throttle: 50 },
+        nightVisionBloomThresholdSoftness: { type: 'slider', label: 'Threshold Softness', min: 0.01, max: 0.5, step: 0.005, default: 0.5, throttle: 50 },
+        nightVisionBloomIntensity: { type: 'slider', label: 'Bloom Intensity', min: 0, max: 3, step: 0.01, default: 3, throttle: 50 },
+        nightVisionBloomBlurPx: { type: 'slider', label: 'Bloom Blur (px)', min: 0, max: 16, step: 0.25, default: 9.8, throttle: 50 },
+        nightVisionBloomPersistenceSeconds: { type: 'slider', label: 'Burn Persistence (s)', min: 0, max: 3, step: 0.05, default: 0.2, throttle: 50 },
+        nightVisionBloomResponse: { type: 'slider', label: 'Bloom Response', min: 0.1, max: 3, step: 0.05, default: 0.5, throttle: 50 },
+        nightVisionDistortionAmount: { type: 'slider', label: 'Distortion', min: -0.3, max: 0.3, step: 0.005, default: -0.18, throttle: 50 },
+        nightVisionCAAmount: { type: 'slider', label: 'Chromatic Aberration (px)', min: 0, max: 6, step: 0.05, default: 6, throttle: 50 },
+        nightVisionCAEdgePower: { type: 'slider', label: 'CA Edge Power', min: 0.1, max: 4, step: 0.05, default: 4, throttle: 50 },
         nightVisionWarmupSeconds: { type: 'slider', label: 'Warm-up (s)', min: 0, max: 3, step: 0.05, default: 0.6, throttle: 50 },
         nightVisionShutdownSeconds: { type: 'slider', label: 'Shutdown (s)', min: 0, max: 3, step: 0.05, default: 0.4, throttle: 50 },
         nightVisionPowerFlickerEnabled: { type: 'boolean', label: 'Warm-up Power Flicker', default: true },
@@ -4632,12 +4632,6 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     return Math.max(0, Math.min(1, x));
   }
 
-  /** Linear gain slider → EV stops for HDR log amplification. */
-  _nightVisionGainToStops(gainLinear) {
-    const g = Math.max(1e-3, Number(gainLinear) || 1);
-    return Math.log2(g);
-  }
-
   _readSceneDarknessLevelNv() {
     let darkness = Number.NaN;
     // Prefer scene-authored darkness first. In some runtime states canvas-level
@@ -4724,6 +4718,23 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     const THREE = window.THREE;
     if (!THREE) return;
 
+    if (this._nvComposeMaterial) {
+      try { this._nvComposeQuad?.geometry?.dispose?.(); } catch (_) {}
+      try { this._nvComposeMaterial.dispose?.(); } catch (_) {}
+      this._nvComposeScene = null;
+      this._nvComposeCamera = null;
+      this._nvComposeMaterial = null;
+      this._nvComposeQuad = null;
+    }
+    if (this._nvBloomMaterial) {
+      try { this._nvBloomQuad?.geometry?.dispose?.(); } catch (_) {}
+      try { this._nvBloomMaterial.dispose?.(); } catch (_) {}
+      this._nvBloomScene = null;
+      this._nvBloomCamera = null;
+      this._nvBloomMaterial = null;
+      this._nvBloomQuad = null;
+    }
+
     if (!this._nvFallbackBlack) {
       const data = new Uint8Array([0, 0, 0, 255]);
       const tex = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat);
@@ -4741,7 +4752,6 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     this._nvComposeMaterial = new THREE.ShaderMaterial({
       uniforms: {
         tDiffuse: { value: null },
-        tHdrLinear: { value: null },
         tBloomBurnMap: { value: this._nvFallbackBlack },
         uResolution: { value: new THREE.Vector2(1, 1) },
         uTime: { value: 0 },
@@ -4753,9 +4763,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
         uPurkinjeDarkStart: { value: this.params.nightVisionPurkinjeDarkStart },
         uPurkinjeBrightEnd: { value: this.params.nightVisionPurkinjeBrightEnd },
         uPurkinjeCurve: { value: this.params.nightVisionPurkinjeCurve },
-        uUseHdrLinear: { value: 0.0 },
-        uGainStops: { value: this._nightVisionGainToStops(this.params.nightVisionGain) },
-        uShadowCurve: { value: this.params.nightVisionGamma },
+        uGain: { value: Math.max(1.0, Number(this.params.nightVisionGain) || 4.0) },
+        uGamma: { value: Math.max(0.05, Number(this.params.nightVisionGamma) || 0.7) },
         uMaxLuma: { value: this.params.nightVisionMaxLuma },
         uDarkLift: { value: this.params.nightVisionDarkLift },
         uDistortionAmount: { value: this.params.nightVisionDistortionAmount },
@@ -4791,6 +4800,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       fragmentShader: getNightVisionFragmentShader(),
       depthTest: false,
       depthWrite: false,
+      transparent: false,
+      blending: THREE.NoBlending,
       toneMapped: false,
     });
 
@@ -4902,8 +4913,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     const decay = Math.exp(-dt / persist);
 
     const u = this._nvBloomMaterial.uniforms;
-    const bloomSrc = hdrInputRT?.texture ?? inputRT.texture;
-    u.tCurrentScene.value = bloomSrc;
+    u.tCurrentScene.value = inputRT.texture;
     u.tPrevBurn.value = this._nvBloomReadRT.texture;
     u.uThreshold.value = Math.max(0, Number(this.params.nightVisionBloomThreshold) || 0);
     u.uSoftness.value = Math.max(0.001, Number(this.params.nightVisionBloomThresholdSoftness) || 0.25);
@@ -4928,15 +4938,22 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
   }
 
   shouldRenderNightVision() {
-    return !!(this.enabled && this.params?.enabled && this._nightVisionActive && this._nvComposeMaterial);
+    return !!(this.enabled && this.params?.enabled && this._nightVisionActive);
   }
 
-  onResize() {
-    this._disposeNvBloomTargets();
+  /** Bloom burn texture for the compositor-owned NV draw. */
+  getNightVisionBloomTexture() {
+    return this._nvBloomReadRT?.texture ?? this._nvFallbackBlack ?? null;
   }
 
-  _syncNightVisionUniforms(w, h) {
-    const u = this._nvComposeMaterial?.uniforms;
+  /**
+   * Update NV bloom and bind uniforms on a compositor-owned ShaderMaterial.
+   * @param {THREE.ShaderMaterial|null} material
+   * @param {number} w
+   * @param {number} h
+   */
+  syncNightVisionUniformsTo(material, w, h) {
+    const u = material?.uniforms;
     if (!u) return;
 
     const tint = this.params.nightVisionTint || { r: 0.2, g: 1, b: 0.45 };
@@ -4947,14 +4964,14 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     u.uTint.value.set(tint.r, tint.g, tint.b);
     u.uTintStrength.value = Number(this.params.nightVisionTintStrength) || 0;
     u.uSaturation.value = Number(this.params.nightVisionSaturation) || 0;
-    u.uBrightness.value = Number(this.params.nightVisionBrightness) ?? 1;
+    u.uBrightness.value = Math.max(0.05, Number(this.params.nightVisionBrightness) ?? 1);
+    u.uMaxLuma.value = Math.max(0.25, Number(this.params.nightVisionMaxLuma) || 2.5);
     u.uPurkinjeStrength.value = Math.max(0, Math.min(1, Number(this.params.nightVisionPurkinjeStrength) || 0));
     u.uPurkinjeDarkStart.value = Math.max(1e-5, Number(this.params.nightVisionPurkinjeDarkStart) || 0.015);
     u.uPurkinjeBrightEnd.value = Math.max(1e-4, Number(this.params.nightVisionPurkinjeBrightEnd) || 0.18);
     u.uPurkinjeCurve.value = Math.max(0.15, Number(this.params.nightVisionPurkinjeCurve) || 1.35);
-    u.uGainStops.value = this._nightVisionGainToStops(this.params.nightVisionGain);
-    u.uShadowCurve.value = Math.max(0.05, Number(this.params.nightVisionGamma) || 1);
-    u.uMaxLuma.value = Math.max(0.01, Number(this.params.nightVisionMaxLuma) || 1);
+    u.uGain.value = Math.max(1.0, Number(this.params.nightVisionGain) || 4.0);
+    u.uGamma.value = Math.max(0.05, Number(this.params.nightVisionGamma) || 0.7);
     u.uDarkLift.value = Math.max(0, Number(this.params.nightVisionDarkLift) || 0);
     u.uDistortionAmount.value = Number(this.params.nightVisionDistortionAmount) || 0;
     u.uCAAmountPx.value = Math.max(0, Number(this.params.nightVisionCAAmount) || 0);
@@ -4985,54 +5002,52 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     u.uPower.value = Math.max(0, Math.min(1, this._nvEffectivePower));
   }
 
-  renderNightVision(renderer, camera, inputRT, outputRT, hdrInputRT = null) {
-    this._bindPerfRecorder();
-    let _perfToken = this._beginPerfSpan('nightVision.gate', 'render', { cpuOnly: true });
-    if (!this.shouldRenderNightVision() || !renderer || !inputRT || !outputRT) {
-      this._endPerfSpan(_perfToken);
+  /**
+   * Bloom + uniform prep immediately before the compositor NV draw.
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {THREE.WebGLRenderTarget} inputRT
+   * @returns {boolean}
+   */
+  prepareNightVisionRender(renderer, inputRT) {
+    if (!this.shouldRenderNightVision() || !renderer || !inputRT) return false;
+
+    const darknessGate = this._computeNightVisionDarknessGate();
+    if (this.params.nightVisionBloomEnabled) {
+      try {
+        this._updateNvBloomMap(renderer, inputRT, this._lastNvDt, darknessGate, null);
+      } catch (_) {}
+    }
+    return true;
+  }
+
+  onResize() {
+    this._disposeNvBloomTargets();
+  }
+
+  /** @deprecated Compositor draws via {@link FloorCompositor#_renderPlayerNightVisionPost}. */
+  renderNightVision(renderer, _camera, inputRT, outputRT) {
+    if (!this.shouldRenderNightVision() || !renderer || !inputRT || !outputRT || inputRT === outputRT) {
       return false;
     }
-    this._endPerfSpan(_perfToken);
-
-    const hdrRT = (hdrInputRT && hdrInputRT !== inputRT) ? hdrInputRT : null;
-    _perfToken = this._beginPerfSpan('nightVision.darknessGate', 'render', { cpuOnly: true });
-    const darknessGate = this._computeNightVisionDarknessGate();
-    this._endPerfSpan(_perfToken);
-
-    if (this.params.nightVisionBloomEnabled) {
-      _perfToken = this._beginPerfSpan('nightVision.bloom', 'render');
-      try {
-        this._updateNvBloomMap(renderer, inputRT, this._lastNvDt, darknessGate, hdrRT);
-      } finally {
-        this._endPerfSpan(_perfToken);
-      }
+    if (!this._nvComposeMaterial?.uniforms?.uGain) {
+      this._initNightVisionPost();
     }
-
+    if (!this._nvComposeMaterial) return false;
+    this.prepareNightVisionRender(renderer, inputRT);
     const w = Math.max(1, Number(inputRT.width) || 1);
     const h = Math.max(1, Number(inputRT.height) || 1);
-
-    _perfToken = this._beginPerfSpan('nightVision.uniforms', 'render', { cpuOnly: true });
+    if (inputRT.texture) inputRT.texture.flipY = false;
     const u = this._nvComposeMaterial.uniforms;
     u.tDiffuse.value = inputRT.texture;
-    u.tHdrLinear.value = hdrRT?.texture ?? inputRT.texture;
-    u.uUseHdrLinear.value = hdrRT ? 1.0 : 0.0;
-    u.tBloomBurnMap.value = this._nvBloomReadRT?.texture ?? this._nvFallbackBlack;
-
-    this._syncNightVisionUniforms(w, h);
-    this._endPerfSpan(_perfToken);
-
-    _perfToken = this._beginPerfSpan('nightVision.composeDraw', 'render');
+    u.tBloomBurnMap.value = this.getNightVisionBloomTexture();
+    this.syncNightVisionUniformsTo(this._nvComposeMaterial, w, h);
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
-
     renderer.setRenderTarget(outputRT);
     renderer.autoClear = true;
     renderer.render(this._nvComposeScene, this._nvComposeCamera);
-
     renderer.autoClear = prevAutoClear;
     renderer.setRenderTarget(prevTarget);
-    this._endPerfSpan(_perfToken);
-
     return true;
   }
 

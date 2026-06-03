@@ -1,11 +1,8 @@
 /**
  * @fileoverview Shader sources for Night Vision post-pass (PlayerLightEffectV2).
  *
- * Order: distort UV → chromatic sample → HDR luma gain (stops) → Purkinje/saturation → tint → bloom burn add →
- *        scanlines → scintillation noise → phosphor flicker → eyepiece vignette → master power.
- *
- * Light amplification meters linear HDR (`tHdrLinear`, post-bloom pre-grade) when available
- * and applies the scale to the display-referred sample (`tDiffuse`, post tone map).
+ * Samples the graded display buffer only (`tDiffuse`). Gain must brighten, never
+ * crush to black — see amplifyNightVision() and the baseCol safety mix at the end.
  */
 
 export function getNightVisionVertexShader() {
@@ -20,8 +17,9 @@ export function getNightVisionVertexShader() {
 
 export function getNightVisionFragmentShader() {
   return /* glsl */`
+    precision highp float;
+
     uniform sampler2D tDiffuse;
-    uniform sampler2D tHdrLinear;
     uniform sampler2D tBloomBurnMap;
     uniform vec2  uResolution;
     uniform float uTime;
@@ -31,16 +29,13 @@ export function getNightVisionFragmentShader() {
     uniform float uSaturation;
     uniform float uBrightness;
 
-    // Purkinje rod/cone crossover: pre-gain photometric luma drives desaturation so
-    // heavily amplified shadows read monochrome while mesopic/bright areas keep color.
     uniform float uPurkinjeStrength;
     uniform float uPurkinjeDarkStart;
     uniform float uPurkinjeBrightEnd;
     uniform float uPurkinjeCurve;
 
-    uniform float uUseHdrLinear;
-    uniform float uGainStops;
-    uniform float uShadowCurve;
+    uniform float uGain;
+    uniform float uGamma;
     uniform float uMaxLuma;
     uniform float uDarkLift;
 
@@ -84,34 +79,17 @@ export function getNightVisionFragmentShader() {
 
     const vec3 LUM = vec3(0.2126, 0.7152, 0.0722);
 
-    vec3 sampleHdrLinear(vec2 uv) {
-      if (uUseHdrLinear < 0.5) return vec3(0.0);
-      return texture2D(tHdrLinear, clamp(uv, vec2(0.0), vec2(1.0))).rgb;
+    vec3 amplifyNightVision(vec3 col) {
+      float Y = max(dot(col, LUM), 1e-5);
+      float g = max(1.0, uGain);
+      float gam = max(0.05, uGamma);
+      float lifted = Y + max(0.0, uDarkLift);
+      float amp = g * pow(max(lifted, 0.0), 1.0 / gam);
+      amp = min(amp, max(0.05, uMaxLuma));
+      float scale = max(1.0, amp / Y);
+      return col * scale;
     }
 
-    // Stops-based tube gain: meters HDR photometric luma, applies scale to display RGB.
-    vec3 amplifyNightVision(vec3 displayCol, vec3 hdrCol) {
-      float Y = max(dot(hdrCol, LUM), 1e-5);
-      float Yd = max(dot(displayCol, LUM), 1e-5);
-
-      float stops = uGainStops;
-      float curve = max(0.05, uShadowCurve);
-      float shadowW = pow(clamp(1.0 - Y / max(uMaxLuma * 0.35, 0.02), 0.0, 1.0), curve);
-      float effectiveStops = stops * (0.25 + 0.75 * shadowW);
-
-      float lifted = max(Y + max(0.0, uDarkLift), 1e-5);
-      float logY = log2(lifted);
-      float maxLog = log2(max(uMaxLuma, 1e-3));
-      float targetLog = clamp(logY + effectiveStops, -12.0, maxLog);
-      float targetY = exp2(targetLog);
-      float knee = max(uMaxLuma, 1e-3);
-      targetY = targetY / (1.0 + max(targetY - knee, 0.0) / knee);
-
-      float scale = clamp(targetY / Yd, 0.0, 64.0);
-      return displayCol * scale;
-    }
-
-    // Mesopic crossover keyed on pre-gain scene luma (not post-amplification brightness).
     float purkinjeSaturation(vec3 amplifiedCol, vec3 preGainCol, float baseSat) {
       float sat = clamp(baseSat, 0.0, 2.0);
       if (uPurkinjeStrength <= 1e-5) return sat;
@@ -121,11 +99,9 @@ export function getNightVisionFragmentShader() {
       float brightEnd = max(darkStart + 1e-5, uPurkinjeBrightEnd);
       float curve = max(0.15, uPurkinjeCurve);
 
-      // Cone retention rises with ambient photometric level before tube gain.
       float coneMix = smoothstep(darkStart, brightEnd, preY);
       coneMix = pow(coneMix, curve);
 
-      // Extra rod bias when amplification ratio is high (deep shadow lift).
       float postY = max(dot(amplifiedCol, LUM), 1e-6);
       float ampRatio = clamp(postY / preY, 1.0, 64.0);
       float ampDesat = clamp(log2(ampRatio) / 4.0, 0.0, 1.0);
@@ -198,24 +174,28 @@ export function getNightVisionFragmentShader() {
 
     void main() {
       vec2 texelSize = vec2(1.0) / max(uResolution, vec2(1.0));
+      vec2 uv = clamp(vUv, vec2(0.0), vec2(1.0));
 
-      vec2 distUv = radialDistort(vUv, uDistortionCenter, uDistortionAmount);
+      vec3 baseCol = texture2D(tDiffuse, uv).rgb;
+
+      vec2 distUv = radialDistort(uv, uDistortionCenter, uDistortionAmount);
       distUv = clamp(distUv, vec2(0.0), vec2(1.0));
 
       vec3 col = sampleSceneWithCA(distUv, texelSize);
-      vec3 hdrCol = (uUseHdrLinear > 0.5) ? sampleHdrLinear(distUv) : col;
-      vec3 preGainMeter = hdrCol;
-      col = amplifyNightVision(col, hdrCol);
+      if (dot(col, LUM) < 1e-4) {
+        col = baseCol;
+      }
+      col = amplifyNightVision(col);
 
-      float sat = purkinjeSaturation(col, preGainMeter, uSaturation);
+      float sat = purkinjeSaturation(col, col, uSaturation);
       float gray = dot(col, LUM);
       col = mix(vec3(gray), col, sat);
 
-      vec3 tint = clamp(uTint, vec3(0.0), vec3(4.0));
+      vec3 tint = max(uTint, vec3(0.001));
       float ts = clamp(uTintStrength, 0.0, 1.0);
       col = mix(col, col * tint, ts);
 
-      col *= max(0.0, uBrightness);
+      col *= max(0.05, uBrightness);
 
       vec3 bloom = sampleBloom(vUv, texelSize);
       col += bloom;
@@ -239,10 +219,8 @@ export function getNightVisionFragmentShader() {
 
       float pf = sin(uTime * uPhosphorFlickerSpeed * 6.2832) * 0.5 + 0.5;
       float flickerMul = 1.0 - uPhosphorFlickerAmount * (0.35 + 0.65 * pf);
-      col *= flickerMul;
+      col *= max(0.15, flickerMul);
 
-      // Add a subtle phosphor scintillation layer that remains visible on
-      // brighter surfaces instead of only reading against black regions.
       float phosphorLuma = clamp(dot(col, LUM), 0.0, max(uMaxLuma, 1.0));
       float phosphorPresence = smoothstep(0.05, 0.9, phosphorLuma);
       float phosphorSize = max(0.05, uPhosphorSize);
@@ -253,19 +231,17 @@ export function getNightVisionFragmentShader() {
       float phosphorAmp = uPhosphorFlickerAmount * max(0.0, uPhosphorIntensity) * (0.02 + 0.06 * phosphorPresence);
       col += vec3(phosphorSpark) * phosphorAmp;
 
+      col = max(col, baseCol);
+
       float eyeOpen = eyepieceMask(vUv);
       float ei = clamp(uEyepieceIntensity, 0.0, 1.0);
       vec3 edgeCol = clamp(uEyepieceColor, vec3(0.0), vec3(1.0));
       col = mix(edgeCol, col, mix(1.0, eyeOpen, ei));
 
-      // Power should fade between original scene and NV look.
-      // Multiplying the final color by power forces the entire frame to black
-      // at low/zero power (e.g. bright scenes with darkness gating).
       float pwr = clamp(uPower, 0.0, 1.0);
-      vec3 baseCol = texture2D(tDiffuse, clamp(vUv, vec2(0.0), vec2(1.0))).rgb;
-      col = mix(baseCol, col, pwr);
+      col = mix(baseCol, max(col, baseCol), pwr);
 
-      gl_FragColor = vec4(col, 1.0);
+      gl_FragColor = vec4(max(col, vec3(0.0)), 1.0);
     }
   `;
 }

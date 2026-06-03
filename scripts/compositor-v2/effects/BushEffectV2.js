@@ -41,6 +41,17 @@ import {
   syncVegetationCloudShadowUniforms,
 } from './vegetation-cloud-shadow.js';
 import {
+  VEGETATION_BUILDING_SHADOW_DEFAULTS,
+  VEGETATION_BUILDING_SHADOW_UNIFORM_GLSL,
+  VEGETATION_BUILDING_SHADOW_SAMPLE_GLSL,
+  VEGETATION_BUILDING_SHADOW_APPLY_GLSL,
+  VEGETATION_BUILDING_SHADOW_CONTROL_SCHEMA,
+  createVegetationBuildingShadowUniforms,
+  applyVegetationBuildingShadowParamsToUniforms,
+  syncVegetationBuildingShadowForEffect,
+  linkVegetationBuildingShadowUniforms,
+} from './vegetation-building-shadow.js';
+import {
   VEGETATION_LANDSCAPE_LIGHTNING_DEFAULTS,
   VEGETATION_LANDSCAPE_LIGHTNING_CONTROL_SCHEMA,
   VEGETATION_LANDSCAPE_LIGHTNING_UNIFORM_GLSL,
@@ -162,6 +173,7 @@ export class BushEffectV2 {
       shadowSoftness: 1.0,
 
       ...VEGETATION_CLOUD_SHADOW_DEFAULTS,
+      ...VEGETATION_BUILDING_SHADOW_DEFAULTS,
       ...VEGETATION_LANDSCAPE_LIGHTNING_DEFAULTS,
     };
 
@@ -195,6 +207,7 @@ export class BushEffectV2 {
           'Rustle floor': 'Minimum motion when wind reads calm so bushes never look frozen.',
           'Canopy shadow': 'Darkening from a blurred, offset sample of the mask opposite the sun.',
           'Cloud shadows': 'Screen-space darkening from the cloud shadow map (same pass as ground tiles).',
+          'Building shadows': 'Scene-space darkening from BuildingShadowsEffectV2 (matches ground structural shade).',
           'Landscape lightning': 'HDR brightening on foliage during distant strikes (Map Shine Control lightning).',
           'Edge safety': 'Pulls motion and shadow down near scene edges to hide UV seams.',
         },
@@ -279,6 +292,18 @@ export class BushEffectV2 {
             'cloudShadowEnabled',
             'cloudShadowDarkenStrength',
             'cloudShadowDarkenCurve',
+          ],
+        },
+        {
+          name: 'buildingShadow',
+          label: 'Building shadows',
+          type: 'folder',
+          advanced: true,
+          expanded: false,
+          parameters: [
+            'buildingShadowEnabled',
+            'buildingShadowDarkenStrength',
+            'buildingShadowDarkenCurve',
           ],
         },
         {
@@ -662,6 +687,7 @@ export class BushEffectV2 {
           tooltip: 'Blur radius of the multi-tap shadow sample.',
         },
         ...VEGETATION_CLOUD_SHADOW_CONTROL_SCHEMA,
+        ...VEGETATION_BUILDING_SHADOW_CONTROL_SCHEMA,
         ...VEGETATION_LANDSCAPE_LIGHTNING_CONTROL_SCHEMA,
         edgeFadeStart: {
           type: 'slider',
@@ -969,6 +995,7 @@ export class BushEffectV2 {
 
       this._applyShadowDriverUniforms();
       applyVegetationCloudShadowParamsToUniforms(this._sharedUniforms, this.params);
+      applyVegetationBuildingShadowParamsToUniforms(this._sharedUniforms, this.params);
       applyVegetationLandscapeLightningParamsToUniforms(this._sharedUniforms, this.params);
     }
 
@@ -981,6 +1008,32 @@ export class BushEffectV2 {
   syncCloudShadowUniforms() {
     if (!this._initialized || !this._sharedUniforms) return;
     syncVegetationCloudShadowUniforms(this._sharedUniforms, this.params);
+  }
+
+  /**
+   * Bind BuildingShadowsEffectV2 lit-factor maps (call after building shadow render each frame).
+   */
+  syncBuildingShadowUniforms() {
+    if (!this._initialized) return;
+    syncVegetationBuildingShadowForEffect(this);
+  }
+
+  /**
+   * Immediate uniform refresh when UI changes building/cloud shadow sliders.
+   * @param {string} paramId
+   * @param {unknown} _value
+   */
+  applyParamChange(paramId, _value) {
+    if (!this._sharedUniforms) return;
+    if (paramId.startsWith('buildingShadow')) {
+      applyVegetationBuildingShadowParamsToUniforms(this._sharedUniforms, this.params);
+      syncVegetationBuildingShadowForEffect(this);
+      return;
+    }
+    if (paramId.startsWith('cloudShadow')) {
+      applyVegetationCloudShadowParamsToUniforms(this._sharedUniforms, this.params);
+      syncVegetationCloudShadowUniforms(this._sharedUniforms, this.params);
+    }
   }
 
   /**
@@ -1206,6 +1259,7 @@ export class BushEffectV2 {
 
       uDeriveAlpha: { value: 0.0 },
       ...createVegetationCloudShadowUniforms(THREE, this.params),
+      ...createVegetationBuildingShadowUniforms(THREE, this.params),
       ...createVegetationLandscapeLightningUniforms(THREE, this.params),
     };
   }
@@ -1318,6 +1372,7 @@ export class BushEffectV2 {
       uBushMask: { value: null },
       uDeriveAlpha: { value: 0.0 },
       uVegetationPass: { value: 2.0 },
+      uBuildingShadowFloorIndex: { value: Math.max(0, Math.min(3, Math.floor(Number(floorIndex)))) },
     };
     const shadowUniforms = {
       ...this._sharedUniforms,
@@ -1325,8 +1380,11 @@ export class BushEffectV2 {
       uBushMask: { value: null },
       uDeriveAlpha: { value: 0.0 },
       uVegetationPass: { value: 1.0 },
+      uBuildingShadowFloorIndex: { value: Math.max(0, Math.min(3, Math.floor(Number(floorIndex)))) },
     };
     linkVegetationLandscapeLightningUniforms(uniforms, this._sharedUniforms);
+    linkVegetationBuildingShadowUniforms(uniforms, this._sharedUniforms);
+    linkVegetationBuildingShadowUniforms(shadowUniforms, this._sharedUniforms);
 
     const material = new THREE.ShaderMaterial({
       uniforms,
@@ -1398,6 +1456,7 @@ export class BushEffectV2 {
         uniform float uDeriveAlpha;
         uniform float uVegetationPass;
 ${VEGETATION_CLOUD_SHADOW_UNIFORM_GLSL}
+${VEGETATION_BUILDING_SHADOW_UNIFORM_GLSL}
 ${VEGETATION_LANDSCAPE_LIGHTNING_UNIFORM_GLSL}
 
         varying vec2 vUv;
@@ -1433,6 +1492,8 @@ ${VEGETATION_LANDSCAPE_LIGHTNING_UNIFORM_GLSL}
           color = mix(vec3(l), color, uSaturation);
           return color;
         }
+
+${VEGETATION_BUILDING_SHADOW_SAMPLE_GLSL}
 
         float safeAlpha(vec4 s) {
           float a = s.a;
@@ -1597,6 +1658,7 @@ ${VEGETATION_LANDSCAPE_LIGHTNING_UNIFORM_GLSL}
           c *= texA;
 ${VEGETATION_LANDSCAPE_LIGHTNING_APPLY_GLSL}
 ${VEGETATION_CLOUD_SHADOW_APPLY_GLSL}
+${VEGETATION_BUILDING_SHADOW_APPLY_GLSL}
           gl_FragColor = vec4(c, mainAlpha);
         }
       `,

@@ -4694,6 +4694,13 @@ export class FloorCompositor {
     }
     if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: paintedShadows.render DONE'); } catch (_) {} }
 
+    try { this._bushEffect?.syncBuildingShadowUniforms?.(); } catch (err) {
+      log.warn('BushEffectV2 syncBuildingShadowUniforms threw, skipping:', err);
+    }
+    try { this._treeEffect?.syncBuildingShadowUniforms?.(); } catch (err) {
+      log.warn('TreeEffectV2 syncBuildingShadowUniforms threw, skipping:', err);
+    }
+
     try {
       this._prepareVegetationBillboardShadowPasses();
     } catch (err) {
@@ -8500,6 +8507,14 @@ export class FloorCompositor {
       this._compositeWaterSplashesAboveWater(this.renderer, mergedCompositeOut);
       try { this._bushEffect?.syncLandscapeLightningUniforms?.(); } catch (_) {}
       try { this._treeEffect?.syncLandscapeLightningUniforms?.(); } catch (_) {}
+      try { this._bushEffect?.syncBuildingShadowUniforms?.(); } catch (err) {
+        log.warn('BushEffectV2 pre-vegetation syncBuildingShadowUniforms threw, skipping:', err);
+      }
+      try { this._treeEffect?.syncBuildingShadowUniforms?.(); } catch (err) {
+        log.warn('TreeEffectV2 pre-vegetation syncBuildingShadowUniforms threw, skipping:', err);
+      }
+      try { this._bushEffect?.syncCloudShadowUniforms?.(); } catch (_) {}
+      try { this._treeEffect?.syncCloudShadowUniforms?.(); } catch (_) {}
       this._compositeVegetationAboveWater(this.renderer, mergedCompositeOut);
     }, 'Splashes + vegetation before CC');
     if (_profiling) this._recordPassTiming('postMerge_worldOverlaysBeforeCc', _profileT0);

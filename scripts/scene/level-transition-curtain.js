@@ -5,9 +5,9 @@
  * The curtain is invoked at the caller side (CameraFollower) BEFORE
  * `canvas.scene.view({ level })` is fired so the screen is fully black
  * before any visible Foundry tear-down can occur. After the switch is
- * performed it waits on real readiness signals (canvasReady, our own
- * mapShineLevelContextChanged, FloorCompositor populate, shader compiles
- * idle, two render frames) and only then fades back in.
+ * performed it waits on real readiness signals (canvasReady, level context,
+ * mask rebuild + effect repopulate, compositor warmup, compiled shaders,
+ * and valid frame inputs) and only then fades back in.
  *
  * @module scene/level-transition-curtain
  */
@@ -23,7 +23,7 @@ const FADE_IN_MS = 520;
 
 // Safety stopper: if every readiness signal somehow stalls, force fade-in so
 // the user never gets stuck looking at a black screen.
-const HARD_CAP_BLACK_MS = 15000;
+const HARD_CAP_BLACK_MS = 25000;
 
 // Per-step timeouts inside _waitForLevelReady. These are upper bounds, not
 // guesses — each helper resolves the moment its hook fires.
@@ -32,6 +32,11 @@ const CONTEXT_TIMEOUT_MS = 5000;
 const LEVEL_MASK_REBUILD_TIMEOUT_MS = 12000;
 const POPULATE_TIMEOUT_MS = 10000;
 const SHADERS_IDLE_TIMEOUT_MS = 6000;
+const COMPILED_PROGRAMS_TIMEOUT_MS = 10000;
+const FRAME_INPUTS_TIMEOUT_MS = 8000;
+const COMPILED_PROGRAMS_STABLE_POLLS = 6;
+const FRAME_INPUTS_STABLE_POLLS = 6;
+const READINESS_POLL_MS = 50;
 
 /**
  * Coordinates the loading overlay around Map Shine level switches.
@@ -110,8 +115,8 @@ export class LevelTransitionCurtain {
    *      `canvas.scene.view({ level })` and the matching
    *      `_emitLevelContextChanged` call happen so all heavy listener work
    *      runs while the screen is covered.
-   *   3. Await real readiness signals (Foundry canvasReady, our own level
-   *      context hook, FloorCompositor populate, shaders idle, render frames).
+   *   3. Await real readiness signals (Foundry canvasReady, level context,
+   *      mask rebuild + repopulate, compiled shaders, valid frame inputs).
    *   4. Fade back in.
    *
    * Concurrent calls are coalesced: a second `runLevelSwitch` while the
@@ -320,6 +325,7 @@ export class LevelTransitionCurtain {
         { id: 'fade', label: 'Covering', weight: 1 },
         { id: 'apply', label: 'Switching', weight: 1 },
         { id: 'compositor', label: 'Compositing', weight: 1 },
+        { id: 'warmup', label: 'Warming up', weight: 1 },
         { id: 'shaders', label: 'Shaders', weight: 1 },
         { id: 'finalize', label: 'Finalizing', weight: 1 },
       ]);
@@ -352,12 +358,12 @@ export class LevelTransitionCurtain {
    * can run while the canvas is hidden behind the curtain.
    * @private
    */
-  _keepRendering() {
+  _keepRendering(continuousMs = 2000) {
     try {
       const ms = window.MapShine;
       ms?.depthPassManager?.invalidate?.();
       ms?.renderLoop?.requestRender?.();
-      ms?.renderLoop?.requestContinuousRender?.(2000);
+      ms?.renderLoop?.requestContinuousRender?.(Math.max(500, continuousMs));
     } catch (_) {}
   }
 
@@ -413,21 +419,35 @@ export class LevelTransitionCurtain {
     );
     if (targetChanged()) return { ready: false, targetChanged: true };
 
-    this._setStage('compositor', 0.5);
+    this._setStage('compositor', 1);
+
+    this._setStage('warmup', 0.2);
     await this._awaitFloorCompositorPopulate(
       Math.min(POPULATE_TIMEOUT_MS, remaining()),
     );
     if (targetChanged()) return { ready: false, targetChanged: true };
-    this._setStage('compositor', 1);
+    this._setStage('warmup', 0.55);
+    await this._pumpCompositorFrames(4);
+    if (targetChanged()) return { ready: false, targetChanged: true };
+    this._setStage('warmup', 1);
 
-    this._setStage('shaders', 0.3);
+    this._setStage('shaders', 0.2);
     await this._awaitShadersIdle(
       Math.min(SHADERS_IDLE_TIMEOUT_MS, remaining()),
     );
     if (targetChanged()) return { ready: false, targetChanged: true };
+    this._setStage('shaders', 0.45);
+    const programsOk = await this._awaitCompiledPrograms(
+      Math.min(COMPILED_PROGRAMS_TIMEOUT_MS, remaining()),
+    );
+    if (targetChanged()) return { ready: false, targetChanged: true };
     this._setStage('shaders', 1);
 
-    this._setStage('finalize', 0.4);
+    this._setStage('finalize', 0.2);
+    const inputsOk = await this._awaitValidFrameInputs(
+      Math.min(FRAME_INPUTS_TIMEOUT_MS, remaining()),
+    );
+    if (targetChanged()) return { ready: false, targetChanged: true };
     await this._awaitRenderFrames(2);
     this._setStage('finalize', 1);
 
@@ -444,6 +464,8 @@ export class LevelTransitionCurtain {
         elapsedMs: Math.round(performance.now() - pipelineStartMs),
         canvasReadyObserved: canvasOk,
         contextMatched: contextOk,
+        compiledPrograms: programsOk,
+        validFrameInputs: inputsOk,
       });
     }
 
@@ -589,9 +611,16 @@ export class LevelTransitionCurtain {
     if (!fc) return;
 
     const deadline = performance.now() + Math.max(50, timeoutMs);
+    let sawIncomplete = fc._populateComplete !== true || fc._busPopulated === false;
+
     while (performance.now() < deadline && !this._disposed) {
+      if (fc._populateComplete !== true || fc._busPopulated === false) {
+        sawIncomplete = true;
+      }
+
       const settled = fc._populateComplete === true && fc._busPopulated !== false;
-      if (settled) return;
+      if (settled && sawIncomplete) return;
+
       if (fc._populatePromise) {
         try {
           await Promise.race([
@@ -600,6 +629,7 @@ export class LevelTransitionCurtain {
           ]);
         } catch (_) {}
       } else {
+        this._keepRendering(4000);
         await this._sleep(60);
       }
     }
@@ -631,6 +661,159 @@ export class LevelTransitionCurtain {
       }
       await this._awaitRenderFrames(1);
     }
+  }
+
+  /**
+   * Pump compositor frames synchronously so lazy init continues while the
+   * curtain is up (mirrors createThreeCanvas hidden-tab load pumps).
+   *
+   * @param {number} [count=1]
+   * @private
+   */
+  async _pumpCompositorFrames(count = 1) {
+    const n = Math.max(1, Math.min(8, Math.floor(Number(count) || 1)));
+    const rl = window.MapShine?.renderLoop;
+    if (!rl) return;
+
+    for (let i = 0; i < n; i++) {
+      try {
+        if (typeof rl.pumpBackgroundLoadFrame === 'function') {
+          rl.pumpBackgroundLoadFrame();
+        } else {
+          rl.requestRender?.();
+        }
+      } catch (_) {}
+      await this._sleep(0);
+    }
+    try {
+      rl.requestContinuousRender?.(Math.max(1200, n * 400));
+      rl.requestRender?.();
+    } catch (_) {}
+  }
+
+  /**
+   * Poll WebGL program readiness until every tracked program reports ready for
+   * several consecutive polls. Same gate used by the full scene-load intro.
+   *
+   * @param {number} timeoutMs
+   * @returns {Promise<boolean>}
+   * @private
+   */
+  async _awaitCompiledPrograms(timeoutMs) {
+    const deadline = performance.now() + Math.max(50, timeoutMs);
+    const renderer = window.MapShine?.renderer ?? null;
+    let stable = 0;
+    let readyStableTotal = -1;
+    let lastTotal = 0;
+    let lastReady = 0;
+
+    while (performance.now() < deadline && !this._disposed) {
+      this._keepRendering(4000);
+      await this._pumpCompositorFrames(1);
+
+      const programs = renderer?.info?.programs ?? [];
+      const total = programs.length;
+      let ready = 0;
+      for (const p of programs) {
+        try {
+          ready += (typeof p?.isReady === 'function') ? (p.isReady() ? 1 : 0) : 1;
+        } catch (_) {
+          ready += 1;
+        }
+      }
+
+      lastTotal = total;
+      lastReady = ready;
+
+      const allReady = total <= 0 ? true : (ready >= total);
+      if (allReady) {
+        if (readyStableTotal === total) stable += 1;
+        else {
+          readyStableTotal = total;
+          stable = 1;
+        }
+        this._setStage(
+          'shaders',
+          0.45 + 0.55 * Math.min(1, stable / COMPILED_PROGRAMS_STABLE_POLLS),
+        );
+      } else {
+        stable = 0;
+        readyStableTotal = -1;
+        if (total > 0) {
+          this._setStage('shaders', 0.45 + 0.4 * Math.min(0.99, ready / total));
+        }
+      }
+
+      if (stable >= COMPILED_PROGRAMS_STABLE_POLLS) {
+        log.debug('Compiled programs ready', { total, ready, stablePolls: stable });
+        return true;
+      }
+
+      await this._sleep(READINESS_POLL_MS);
+    }
+
+    log.debug('Compiled programs wait timed out', {
+      total: lastTotal,
+      ready: lastReady,
+      stablePolls: stable,
+    });
+    return false;
+  }
+
+  /**
+   * Wait until FloorCompositor reports valid frame inputs (populate complete,
+   * active floor resolved, required mask bindings present) for several polls.
+   *
+   * @param {number} timeoutMs
+   * @returns {Promise<boolean>}
+   * @private
+   */
+  async _awaitValidFrameInputs(timeoutMs) {
+    const deadline = performance.now() + Math.max(50, timeoutMs);
+    const fc = window.MapShine?.floorCompositorV2
+      ?? window.MapShine?.effectComposer?._floorCompositorV2
+      ?? null;
+    if (!fc || typeof fc._validateFrameInputs !== 'function') return true;
+
+    let stable = 0;
+    let lastReason = null;
+
+    while (performance.now() < deadline && !this._disposed) {
+      this._keepRendering(4000);
+      await this._pumpCompositorFrames(1);
+
+      let valid = false;
+      let reason = null;
+      try {
+        const probe = fc._validateFrameInputs();
+        valid = probe?.valid === true;
+        reason = probe?.reason ?? null;
+      } catch (_) {}
+
+      if (valid) {
+        stable += 1;
+        this._setStage(
+          'finalize',
+          0.2 + 0.8 * Math.min(1, stable / FRAME_INPUTS_STABLE_POLLS),
+        );
+        if (stable >= FRAME_INPUTS_STABLE_POLLS) {
+          log.debug('Valid frame inputs confirmed', { stablePolls: stable });
+          return true;
+        }
+      } else {
+        stable = 0;
+        lastReason = reason;
+      }
+
+      if (Number(window.MapShine?.__msaDeferredPumpRemaining) > 0) {
+        stable = 0;
+      }
+
+      await this._sleep(READINESS_POLL_MS);
+    }
+
+    log.debug('Valid frame inputs wait timed out', { lastReason, stablePolls: stable });
+    return false;
   }
 
   /**

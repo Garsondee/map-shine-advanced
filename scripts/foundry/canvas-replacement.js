@@ -3124,13 +3124,29 @@ export function initialize() {
             });
           }
           if (
-            didV14Resync
-            && floorCompositor
+            floorCompositor
             && typeof floorCompositor.forceRepopulate === 'function'
           ) {
             await floorCompositor.forceRepopulate({ source: 'level-context-resync' });
           }
         }
+
+        // Warm the compositor graph while the level-transition curtain is still
+        // up so lazy effect init / shader compiles run before fade-in.
+        try {
+          const ec = ms?.effectComposer;
+          if (ec && typeof ec.progressiveWarmup === 'function') {
+            await ec.progressiveWarmup();
+          }
+        } catch (warmErr) {
+          log.debug('Level change: progressiveWarmup failed', warmErr);
+        }
+        try {
+          const rl = ms?.renderLoop;
+          for (let i = 0; i < 4; i++) {
+            rl?.pumpBackgroundLoadFrame?.();
+          }
+        } catch (_) {}
 
         log.info('Level context changed: requesting render');
         ms?.renderLoop?.requestRender?.();

@@ -183,7 +183,7 @@ export function createMaskStatusRow(folderElement, group, insertAfterEl = null) 
 
   placeMaskStatusRow(folderElement, insertAfterEl, row);
 
-  return { row, value: valueEl, helpBtn, template };
+  return { row, label: labelEl, value: valueEl, helpBtn, template };
 }
 
 /**
@@ -194,6 +194,18 @@ export function applyMaskStatusPresentation(elements, status) {
   if (!elements?.row || !elements?.value) return;
   const phase = status?.phase || 'missing-muted';
   const color = MASK_STATUS_VALUE_COLORS[phase] ?? MASK_STATUS_VALUE_COLORS['missing-muted'];
+
+  if (status?.helpMaskId) {
+    elements.template = getMaskStatusTemplate(status.helpMaskId);
+    const helpText = buildMaskSetupHelpText(elements.template);
+    if (elements.helpBtn) {
+      elements.helpBtn.setAttribute('aria-label', `${elements.template.suffix} mask setup help`);
+      elements.helpBtn.title = helpText.length > 240 ? `${helpText.slice(0, 237)}…` : helpText;
+    }
+  }
+  if (status?.label && elements.label) {
+    elements.label.textContent = status.label;
+  }
 
   elements.row.classList.remove(
     'ms-mask-status-row--searching',

@@ -35,6 +35,7 @@ import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
 import { probeMaskFile } from '../../assets/loader.js';
+import { createMaskStatusSchemaGroup, refreshWaterSplashesMaskStatusUi } from '../../ui/effect-mask-status.js';
 import {
   tileHasLevelsRange,
   readTileLevelsFlags,
@@ -1302,6 +1303,7 @@ export class WaterSplashesEffectV2 {
     }
 
     log.info(`WaterSplashesEffectV2 populated: ${floorWaterData.size} floor(s), ${totalSystems} system(s)`);
+    try { refreshWaterSplashesMaskStatusUi(); } catch (_) {}
   }
 
   /**
@@ -1790,6 +1792,7 @@ export class WaterSplashesEffectV2 {
     }
     this._floorStates.clear();
     this._batchRenderers.clear();
+    try { refreshWaterSplashesMaskStatusUi(); } catch (_) {}
   }
 
   dispose() {
@@ -2701,7 +2704,16 @@ export class WaterSplashesEffectV2 {
   static getControlSchema() {
     return {
       enabled: true,
+      help: {
+        title: 'Water Splashes',
+        summary: [
+          'Foam shoreline plumes and rain splash rings spawn from scanned _Water mask edges and interiors.',
+          'Uses the same _Water depth mask as the main Water effect (per tile and level background).',
+          'Parent Water must be enabled for splashes to render.',
+        ].join('\n\n'),
+      },
       groups: [
+        createMaskStatusSchemaGroup('water'),
         {
           name: 'tint-jitter',
           label: 'Tint (Jitter)',
@@ -2813,7 +2825,16 @@ export class WaterSplashesEffectV2 {
   static getBubblesControlSchema() {
     return {
       enabled: true,
+      help: {
+        title: 'Underwater Bubbles',
+        summary: [
+          'Large subsurface bubble plumes and interior rings use the same _Water mask scans as Water Splashes.',
+          'Edge mask pixels drive shoreline-style bubbles; interior pixels drive ring bursts.',
+          'Parent Water must be enabled; tune separately from rain splashes above.',
+        ].join('\n\n'),
+      },
       groups: [
+        createMaskStatusSchemaGroup('water'),
         {
           name: 'tint-jitter',
           label: 'Tint (Jitter)',

@@ -8,6 +8,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { createMaskStatusSchemaGroup, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import Coordinates from '../../utils/coordinates.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
@@ -38,9 +39,8 @@ export class IridescenceEffectV2 {
 
     this.params = {
       enabled: true,
-      textureStatus: 'Searching...',
       /** Set in populate(); retained for scene state / tools (not a Tweakpane control). */
-      hasIridescenceMask: true,
+      hasIridescenceMask: false,
       intensity: 0.5,
       distortionStrength: 0.92,
       noiseScale: 0.68,
@@ -84,7 +84,7 @@ export class IridescenceEffectV2 {
           'Settings save with the scene (not World Based).',
         ].join('\n\n'),
         glossary: {
-          'Mask status': 'Whether the scene found at least one `_Iridescence` mask after load.',
+          Texture: 'Whether the scene found at least one `_Iridescence` texture after load (row under Enabled).',
           Intensity: 'Strength of the iridescent color contribution.',
           Opacity: 'Master alpha for the additive layer (`alpha` uniform).',
           'Flow speed': 'How fast the phase field scrolls in screen UV space.',
@@ -101,14 +101,7 @@ export class IridescenceEffectV2 {
       },
       presetApplyDefaults: true,
       groups: [
-        {
-          name: 'status',
-          label: 'Status',
-          type: 'folder',
-          advanced: true,
-          expanded: true,
-          parameters: ['textureStatus'],
-        },
+        createMaskStatusSchemaGroup('iridescence'),
         {
           name: 'look',
           label: 'Look',
@@ -149,13 +142,6 @@ export class IridescenceEffectV2 {
         },
       ],
       parameters: {
-        textureStatus: {
-          type: 'string',
-          label: 'Mask status',
-          default: 'Searching...',
-          readonly: true,
-          tooltip: 'Updated when the scene loads: whether any `_Iridescence` mask was found.',
-        },
         intensity: {
           type: 'slider',
           label: 'Intensity',
@@ -328,7 +314,8 @@ export class IridescenceEffectV2 {
       }
     }
     this._overlays.clear();
-    this.params.textureStatus = 'Inactive (no _Iridescence mask)';
+    this.params.hasIridescenceMask = false;
+    try { refreshEffectMaskStatusUi('iridescence'); } catch (_) {}
   }
 
   /**
@@ -384,6 +371,7 @@ export class IridescenceEffectV2 {
       maskUrl: result.path, centerX, centerY, z, tileW, tileH, rotation, planeSignX, planeSignY,
     });
     this._syncOverlayVisibility();
+    try { refreshEffectMaskStatusUi('iridescence'); } catch (_) {}
   }
 
   dispose() {
@@ -427,7 +415,6 @@ export class IridescenceEffectV2 {
 
     const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
     const worldH = foundrySceneData?.height ?? 0;
-    let overlayCount = 0;
 
     const bgSrc = canvas?.scene?.background?.src ?? '';
     if (bgSrc) {
@@ -444,7 +431,6 @@ export class IridescenceEffectV2 {
         this._createOverlay('__bg_image__', 0, {
           maskUrl: bgResult.path, centerX, centerY, z, tileW: sceneW, tileH: sceneH, rotation: 0,
         });
-        overlayCount++;
       }
     }
 
@@ -474,15 +460,12 @@ export class IridescenceEffectV2 {
       this._createOverlay(tileKey, floorIndex, {
         maskUrl: result.path, centerX, centerY, z, tileW, tileH, rotation, planeSignX, planeSignY,
       });
-      overlayCount++;
     }
 
-    this.params.hasIridescenceMask = overlayCount > 0;
-    this.params.textureStatus = overlayCount > 0
-      ? 'Ready (_Iridescence mask found)'
-      : 'Inactive (no _Iridescence mask)';
-    log.info(`IridescenceEffectV2 populated: ${overlayCount} overlay(s)`);
+    this.params.hasIridescenceMask = this._overlays.size > 0;
+    log.info(`IridescenceEffectV2 populated: ${this._overlays.size} overlay(s)`);
     this._syncOverlayVisibility();
+    try { refreshEffectMaskStatusUi('iridescence'); } catch (_) {}
   }
 
   update(timeInfo) {

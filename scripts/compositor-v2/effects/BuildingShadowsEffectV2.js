@@ -36,6 +36,7 @@ import {
 import { collectOutdoorsTexturesByFloorIndex } from '../shadow-system/floor-outdoors-slots.js';
 import { resolveReceiverOutdoorsMaskTexture } from '../shadow-system/resolve-receiver-outdoors-mask.js';
 import { resolveBakeRayLength, resolveBakeSmear } from '../lightning/shadow-bake-override.js';
+import { createMaskStatusSchemaGroup, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
 
 const log = createLogger('BuildingShadowsEffectV2');
 
@@ -246,7 +247,16 @@ export class BuildingShadowsEffectV2 {
   static getControlSchema() {
     return {
       enabled: true,
+      help: {
+        title: 'Building Shadows',
+        summary: [
+          'Projects shadows from dark regions of the _Outdoors mask along the sun direction.',
+          'Indoor (roofed) pixels stay lit; outdoor pixels receive building penumbra in scene UV.',
+          'Pairs with GpuSceneMaskCompositor per-floor _Outdoors slots on multi-level maps.',
+        ].join('\n\n'),
+      },
       groups: [
+        createMaskStatusSchemaGroup('outdoors'),
         {
           name: 'main',
           label: 'Building Shadows',
@@ -443,6 +453,7 @@ export class BuildingShadowsEffectV2 {
    */
   setOutdoorsMask(texture) {
     this._outdoorsMask = texture ?? null;
+    try { refreshEffectMaskStatusUi('building-shadows'); } catch (_) {}
   }
 
   initialize(renderer, camera) {
@@ -1897,6 +1908,7 @@ export class BuildingShadowsEffectV2 {
       this._invalidateShadowRenderCache();
       this._invalidatePerFloorLitCache();
       this._clearShadowTargetToWhite(renderer);
+      try { refreshEffectMaskStatusUi('building-shadows'); } catch (_) {}
       return;
     }
 
@@ -1915,6 +1927,7 @@ export class BuildingShadowsEffectV2 {
       this._invalidateShadowRenderCache();
       this._invalidatePerFloorLitCache();
       this._clearShadowTargetToWhite(renderer);
+      try { refreshEffectMaskStatusUi('building-shadows'); } catch (_) {}
       return;
     }
 
@@ -1975,6 +1988,7 @@ export class BuildingShadowsEffectV2 {
 
     const receiverMaskTex = this._resolveReceiverMaskTexture(compositor);
     this._syncOutdoorsMaskSlots(compositor);
+    try { refreshEffectMaskStatusUi('building-shadows'); } catch (_) {}
 
     if (!this._shouldRender(floorKeys, receiverMaskTex, fallbackMask, outdoorResolve, compositor)) {
       const rs = this._renderState;
@@ -2463,6 +2477,7 @@ export class BuildingShadowsEffectV2 {
     this._scene = null;
     this._camera = null;
 
+    try { refreshEffectMaskStatusUi('building-shadows'); } catch (_) {}
     log.info('BuildingShadowsEffectV2 disposed');
   }
 }

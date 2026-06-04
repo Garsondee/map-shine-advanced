@@ -38,12 +38,18 @@ export const STACKED_OUTDOORS_LAYER_FRAG = /* glsl */`
   void main() {
     vec4 acc = texture2D(tAccum, vSceneUv);
     vec4 od = texture2D(tOutdoors, vSceneUv);
+    float outdoorClass = decodeOutdoorClass(od);
     float cov = (uUseOutdoorsAlphaCoverage > 0.5)
       ? clamp(od.a, 0.0, 1.0)
       : clamp(texture2D(tFloorAlpha, vSceneUv).r, 0.0, 1.0);
     float valid = step(0.5, clamp(od.a, 0.0, 1.0));
-    float outdoorClass = decodeOutdoorClass(od);
     float w = cov * valid;
+    // Background-only upper bands often lack floorAlpha and use outdoors.a for
+    // coverage. Deliberate alpha holes must not suppress a strong outdoor RGB
+    // deck (white _Outdoors), or lower-floor indoor ToD bleeds through the stack.
+    if (uUseOutdoorsAlphaCoverage > 0.5 && outdoorClass >= 0.85) {
+      w = max(w, outdoorClass);
+    }
     float outR = mix(acc.r, outdoorClass, w);
     float outA = max(acc.a, w);
     gl_FragColor = vec4(outR, outR, outR, outA);

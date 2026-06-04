@@ -35,6 +35,8 @@ import { getEffectMaskRegistry } from '../assets/loader.js';
  * @property {MaskStatusPhase} phase
  * @property {string} message Short status chip text
  * @property {number} [count]
+ * @property {string} [label] Row label override (e.g. dynamic _Windows vs _Structural)
+ * @property {string} [helpMaskId] Template key for the ? setup dialog
  */
 
 const SUPPORTED_FORMATS = ['webp', 'png', 'jpg', 'jpeg'];
@@ -94,6 +96,202 @@ export const MASK_STATUS_TEMPLATES = {
       'Use an RGBA canopy texture — alpha cuts out the treetop shape.',
       'Motion matches bush wind math with optional extra turbulence for high-frequency chop.',
       'Canopy shadow uses the same offset/blur sample pattern as bushes.',
+    ],
+    extra: 'Supports .webp, .png, .jpg, and .jpeg.',
+  },
+  iridescence: {
+    maskId: 'iridescence',
+    suffix: '_Iridescence',
+    label: 'Texture',
+    exampleBase: 'BattleMap',
+    formats: SUPPORTED_FORMATS,
+    placement: [
+      'Place the _Iridescence texture beside each battlemap albedo (scene background or tile).',
+      'Same base filename + _Iridescence before the extension (e.g. BattleMap_Iridescence.webp).',
+      'One holographic overlay is created per tile or background that has a matching file.',
+    ],
+    authoring: [
+      'Map Shine uses luminance × alpha — paint bright (usually white) where thin-film shimmer should appear.',
+      'Transparent areas stay empty. Use **Invert mask** in the effect if you painted dark-on-light instead.',
+      'Foundry lights tint the layer; **Ignore darkness** keeps color visible in shadow.',
+    ],
+    extra: 'Supports .webp, .png, .jpg, and .jpeg.',
+  },
+  prism: {
+    maskId: 'prism',
+    suffix: '_Prism',
+    label: 'Texture',
+    exampleBase: 'BattleMap',
+    formats: SUPPORTED_FORMATS,
+    placement: [
+      'Place the _Prism texture beside each battlemap albedo (scene background or tile).',
+      'Same base filename + _Prism before the extension (e.g. BattleMap_Prism.webp).',
+      'One crystal/refraction overlay is created per masked source.',
+    ],
+    authoring: [
+      'Grayscale or RGB — brightness above **Mask brightness cutoff** defines glass or crystal areas.',
+      'Brighter mask pixels = stronger refraction, facets, and surface glint.',
+      'Pairs with the tile albedo for parallax and spectral spread in the shader.',
+    ],
+    extra: 'Supports .webp, .png, .jpg, and .jpeg.',
+  },
+  fluid: {
+    maskId: 'fluid',
+    suffix: '_Fluid',
+    label: 'Texture',
+    exampleBase: 'BattleMap',
+    formats: SUPPORTED_FORMATS,
+    placement: [
+      'Place the _Fluid mask beside each battlemap albedo (scene background or tile).',
+      'Same base filename + _Fluid before the extension (e.g. BattleMap_Fluid.webp).',
+      'One fluid overlay is created per masked source on the floor bus.',
+    ],
+    authoring: [
+      'Grayscale mask — luminance between **Low** and **High threshold** defines where fluid simulates.',
+      'Paint flow channels, pools, and streams; RGB tint uniforms color young vs aged fluid in the shader.',
+      'Supports caustics, foam, iridescence, and churn on top of the masked region.',
+    ],
+    extra: 'Supports .webp, .png, .jpg, and .jpeg.',
+  },
+  specular: {
+    maskId: 'specular',
+    suffix: '_Specular',
+    label: '_Specular',
+    exampleBase: 'BattleMap',
+    formats: SUPPORTED_FORMATS,
+    placement: [
+      'Place the _Specular texture beside each battlemap albedo (scene background or tile).',
+      'Same base filename + _Specular before the extension (e.g. BattleMap_Specular.webp).',
+      'One additive shine overlay is created per masked tile or background.',
+    ],
+    authoring: [
+      'Grayscale or RGB — brighter pixels add metallic/stripe/sparkle response on top of the albedo.',
+      'Stripes, wetness, frost, and Foundry lights multiply into this mask (not a PBR normal map).',
+      'Tune **Mask brightness cutoff** if highlights bleed into dark paint.',
+    ],
+    extra: 'Supports .webp, .png, .jpg, and .jpeg.',
+  },
+  windows: {
+    maskId: 'windows',
+    suffix: '_Windows',
+    label: '_Windows',
+    exampleBase: 'BattleMap',
+    formats: SUPPORTED_FORMATS,
+    placement: [
+      'Place the _Windows mask beside each floor’s battlemap background (and tiles when authored per-tile).',
+      'Same base filename + _Windows before the extension (e.g. BattleMap_Windows.webp).',
+      'Window Light reads this from GpuSceneMaskCompositor in scene UV (per-floor slots 0–3).',
+    ],
+    authoring: [
+      'Grayscale or RGBA — bright pixels mark window glass for emissive glow in scene space.',
+      'Used with the time-of-day timeline and cloud dimming; pairs with Glass Refraction in the shader.',
+      'Legacy battlemaps may use _Structural instead — the status row switches to that suffix when only the old file is present.',
+    ],
+    extra: 'Supports .webp, .png, .jpg, and .jpeg.',
+  },
+  structural: {
+    maskId: 'structural',
+    suffix: '_Structural',
+    label: '_Structural',
+    exampleBase: 'BattleMap',
+    formats: SUPPORTED_FORMATS,
+    placement: [
+      'Legacy window mask suffix — same folder/naming as _Windows (e.g. BattleMap_Structural.webp).',
+      'Loaded when no _Windows file is present for that art path; compositor treats it as the window mask tier.',
+    ],
+    authoring: [
+      'Same painting rules as _Windows — bright = lit window areas in scene UV.',
+      'Prefer migrating art to _Windows; _Structural remains supported for older battlemaps.',
+    ],
+    extra: 'Supports .webp, .png, .jpg, and .jpeg.',
+  },
+  fire: {
+    maskId: 'fire',
+    suffix: '_Fire',
+    label: '_Fire',
+    exampleBase: 'BattleMap',
+    formats: SUPPORTED_FORMATS,
+    placement: [
+      'Place the _Fire mask beside each battlemap albedo (scene background or tile).',
+      'Same base filename + _Fire before the extension (e.g. BattleMap_Fire.webp).',
+      'Spawn points are picked up on the CPU per floor; particles stack on the FloorRenderBus.',
+    ],
+    authoring: [
+      'Grayscale or RGBA — bright pixels become flame, ember, and smoke spawn sites.',
+      'Tune **Fire Mask Pickup** thresholds if sparks appear on albedo instead of painted fire.',
+      'Multi-floor Levels: each level background can carry its own _Fire for that floor index.',
+    ],
+    extra: 'Supports .webp, .png, .jpg, and .jpeg.',
+  },
+  dust: {
+    maskId: 'dust',
+    suffix: '_Dust',
+    label: '_Dust',
+    exampleBase: 'BattleMap',
+    formats: SUPPORTED_FORMATS,
+    placement: [
+      'Place the _Dust mask beside each battlemap albedo (scene background or tile).',
+      'Same base filename + _Dust before the extension (e.g. BattleMap_Dust.webp).',
+      'Optional Map Points dust sources can supplement mask scans per floor.',
+    ],
+    authoring: [
+      'Grayscale mask — bright pixels spawn floating dust motes in a vertical volume above the art.',
+      'Glitter and sky tint are optional artistic layers on top of the base particle field.',
+      'Multi-floor Levels: bind each level background _Dust to its floor index.',
+    ],
+    extra: 'Supports .webp, .png, .jpg, and .jpeg.',
+  },
+  ash: {
+    maskId: 'ash',
+    suffix: '_Ash',
+    label: '_Ash',
+    exampleBase: 'BattleMap',
+    formats: SUPPORTED_FORMATS,
+    placement: [
+      'Place the _Ash mask beside each battlemap albedo (scene background or tile).',
+      'Same base filename + _Ash before the extension (e.g. BattleMap_Ash.webp).',
+      'Bursts trigger when tokens move across bright mask pixels on the active floor.',
+    ],
+    authoring: [
+      'Grayscale mask — brighter pixels define where foot traffic kicks up ash puffs.',
+      'Works with Manual Weather ash intensity; effect can stay enabled with zero weather ash.',
+      'CPU scan is strided for performance — very fine detail may need a higher-resolution mask.',
+    ],
+    extra: 'Supports .webp, .png, .jpg, and .jpeg.',
+  },
+  handPaintedShadow: {
+    maskId: 'handPaintedShadow',
+    suffix: '_Shadow',
+    label: '_Shadow',
+    exampleBase: 'BattleMap',
+    formats: SUPPORTED_FORMATS,
+    placement: [
+      'Place the _Shadow mask beside each floor’s battlemap background (and tiles when authored per-tile).',
+      'Same base filename + _Shadow before the extension (e.g. BattleMap_Shadow.webp).',
+      'GpuSceneMaskCompositor loads it in scene UV; multi-floor maps may use per-level variants.',
+    ],
+    authoring: [
+      'Grayscale mask — **dark = shadow caster** (trees, awnings, rooflines) projected along the sun direction.',
+      'Painted shadow only affects **outdoor** pixels gated by the scene _Outdoors mask.',
+      'Blur, contact preserve, and edge inflate tune how crisp the projected penumbra reads.',
+    ],
+    extra: 'Supports .webp, .png, .jpg, and .jpeg.',
+  },
+  outdoors: {
+    maskId: 'outdoors',
+    suffix: '_Outdoors',
+    label: '_Outdoors',
+    exampleBase: 'BattleMap',
+    formats: SUPPORTED_FORMATS,
+    placement: [
+      'Place the _Outdoors mask beside each floor’s battlemap art (background and tiles).',
+      'Same base filename + _Outdoors before the extension (e.g. BattleMap_Outdoors.webp).',
+      'Multi-floor scenes may use per-level variants (_Outdoors_0, _Outdoors_1, …) via the GPU mask compositor.',
+    ],
+    authoring: [
+      'Grayscale mask — **white = outdoor**, **black = indoor** (roofed) for stripe and wet-surface gating.',
+      'Specular samples this from GpuSceneMaskCompositor per floor when available.',
+      'Without _Outdoors, outdoor stripe modulation and wet response fall back to neutral.',
     ],
     extra: 'Supports .webp, .png, .jpg, and .jpeg.',
   },
@@ -259,6 +457,80 @@ export function resolveWaterMaskStatus(config = {}, effectId = 'water') {
 }
 
 /**
+ * @param {object|null} effect
+ * @returns {number}
+ */
+function waterSplashesMaskLoadedCount(effect) {
+  if (!effect) return 0;
+  try {
+    if (effect._floorStates?.size > 0) return 1;
+    for (const [, st] of effect._floorStates ?? []) {
+      const n = (st?.foamSystems?.length ?? 0)
+        + (st?.splashSystems?.length ?? 0)
+        + (st?.foamSystems2?.length ?? 0)
+        + (st?.splashSystems2?.length ?? 0);
+      if (n > 0) return 1;
+    }
+  } catch (_) {}
+  return 0;
+}
+
+/**
+ * @param {MaskStatusGroupConfig} [config]
+ * @param {string} [effectId]
+ * @returns {MaskStatusResult}
+ */
+function resolveWaterSplashesMaskStatus(config = {}, effectId = 'water-splashes') {
+  const template = getMaskStatusTemplate('water', config);
+  const effect = getFloorCompositorEffect('_waterSplashesEffect');
+  return resolvePopulatedMaskStatus(
+    template,
+    effect,
+    effectId,
+    () => waterSplashesMaskLoadedCount(effect),
+  );
+}
+
+/** Refresh _Water rows on Water Splashes and Underwater Bubbles panels. */
+export function refreshWaterSplashesMaskStatusUi() {
+  try {
+    refreshEffectMaskStatusUi('water-splashes');
+    refreshEffectMaskStatusUi('underwater-bubbles');
+  } catch (_) {}
+}
+
+/**
+ * @param {object|null} effect
+ * @returns {number}
+ */
+function dustMaskLoadedCount(effect) {
+  if (!effect) return 0;
+  try {
+    for (const [, st] of effect._floorStates ?? []) {
+      if (st?.points?.length > 0 || (st?.systems?.length ?? 0) > 0) return 1;
+    }
+    if (effect._floorStates?.size > 0) return 1;
+  } catch (_) {}
+  return 0;
+}
+
+/**
+ * @param {MaskStatusGroupConfig} [config]
+ * @param {string} [effectId]
+ * @returns {MaskStatusResult}
+ */
+function resolveDustMaskStatus(config = {}, effectId = 'dust') {
+  const template = getMaskStatusTemplate('dust', config);
+  const effect = getFloorCompositorEffect('_dustEffect');
+  return resolvePopulatedMaskStatus(
+    template,
+    effect,
+    effectId,
+    () => dustMaskLoadedCount(effect),
+  );
+}
+
+/**
  * @param {string} compositorProp - e.g. '_bushEffect', '_treeEffect'
  * @returns {object|null}
  */
@@ -321,7 +593,7 @@ function resolveMissingTextureStatus(template, effect, effectId) {
 }
 
 /**
- * Overlay effects (Bush/Tree): status from _overlays after populate.
+ * Overlay effects (Bush/Tree/Prism/Iridescence): status from _overlays after populate.
  * @param {string} maskId
  * @param {MaskStatusGroupConfig} config
  * @param {string} compositorProp
@@ -345,6 +617,291 @@ function resolveBushMaskStatus(config = {}, effectId = 'bush') {
 
 function resolveTreeMaskStatus(config = {}, effectId = 'tree') {
   return resolveOverlayMaskStatus('tree', config, '_treeEffect', effectId);
+}
+
+function resolveIridescenceMaskStatus(config = {}, effectId = 'iridescence') {
+  return resolveOverlayMaskStatus('iridescence', config, '_iridescenceEffect', effectId);
+}
+
+function resolvePrismMaskStatus(config = {}, effectId = 'prism') {
+  return resolveOverlayMaskStatus('prism', config, '_prismEffect', effectId);
+}
+
+function resolveFluidMaskStatus(config = {}, effectId = 'fluid') {
+  return resolveOverlayMaskStatus('fluid', config, '_fluidEffect', effectId);
+}
+
+/**
+ * @returns {import('../masks/GpuSceneMaskCompositor.js').GpuSceneMaskCompositor|null}
+ */
+function getGpuSceneMaskCompositor() {
+  return window.MapShine?.gpuSceneMaskCompositor
+    ?? window.MapShine?.sceneComposer?._sceneMaskCompositor
+    ?? null;
+}
+
+/**
+ * @param {'outdoors'|'windows'|'structural'} maskType
+ * @returns {boolean}
+ */
+function compositorHasMaskType(maskType) {
+  const compositor = getGpuSceneMaskCompositor();
+  if (!compositor) return false;
+  if (compositor.getGroundFloorMaskTexture?.(maskType)) return true;
+  const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+  for (const floor of floors) {
+    const key = floor?.compositorKey;
+    if (key && compositor.getFloorTexture?.(String(key), maskType)) return true;
+  }
+  try {
+    const meta = compositor._floorMeta;
+    if (meta && typeof meta.forEach === 'function') {
+      for (const [k] of meta) {
+        if (compositor.getFloorTexture?.(String(k), maskType)) return true;
+      }
+    } else if (meta && typeof meta.keys === 'function') {
+      for (const k of meta.keys()) {
+        if (compositor.getFloorTexture?.(String(k), maskType)) return true;
+      }
+    }
+  } catch (_) {}
+  try {
+    const cache = compositor._floorCache;
+    if (cache && typeof cache.keys === 'function') {
+      for (const k of cache.keys()) {
+        if (compositor.getFloorTexture?.(String(k), maskType)) return true;
+      }
+    }
+  } catch (_) {}
+  return false;
+}
+
+/**
+ * @returns {number} 1 if any runtime _Outdoors binding exists, else 0
+ */
+function outdoorsRuntimeLoadedCount() {
+  if (compositorHasMaskType('outdoors')) return 1;
+  try {
+    if (globalThis.weatherController?.roofMap) return 1;
+  } catch (_) {}
+  try {
+    if (window.MapShine?.maskManager?.getTexture?.('outdoors.scene')) return 1;
+  } catch (_) {}
+  return 0;
+}
+
+/**
+ * @param {object|null} effect
+ * @param {'windows'|'structural'|'outdoors'} maskId
+ * @returns {number}
+ */
+function windowLightMaskTypeLoadedCount(effect, maskId) {
+  const id = String(maskId || '').toLowerCase();
+  if (id === 'outdoors') return outdoorsRuntimeLoadedCount();
+  if (!effect) return compositorHasMaskType(id) ? 1 : 0;
+  if (id === 'windows' && effect._runtimeMaskWindows) return 1;
+  if (id === 'structural' && effect._runtimeMaskStructural) return 1;
+  return compositorHasMaskType(id) ? 1 : 0;
+}
+
+/**
+ * Which window-mask suffix to show in the single Window Light row (_Windows default).
+ * @param {object|null} effect
+ * @returns {'windows'|'structural'}
+ */
+function resolveWindowLightActiveWindowMaskId(effect) {
+  if (windowLightMaskTypeLoadedCount(effect, 'windows') > 0) return 'windows';
+  if (windowLightMaskTypeLoadedCount(effect, 'structural') > 0) return 'structural';
+  return 'windows';
+}
+
+/**
+ * @param {object|null} effect
+ * @returns {number}
+ */
+function windowLightWindowMaskLoadedCount(effect) {
+  return Math.max(
+    windowLightMaskTypeLoadedCount(effect, 'windows'),
+    windowLightMaskTypeLoadedCount(effect, 'structural'),
+  );
+}
+
+/**
+ * @param {MaskStatusGroupConfig} config
+ * @param {string} [effectId]
+ * @returns {MaskStatusResult}
+ */
+function resolveWindowLightWindowsMaskStatus(config = {}, effectId = 'windowLight') {
+  const effect = getFloorCompositorEffect('_windowLightEffect');
+  const activeId = resolveWindowLightActiveWindowMaskId(effect);
+  const template = getMaskStatusTemplate(activeId, config);
+  const base = resolvePopulatedMaskStatus(
+    template,
+    effect,
+    effectId,
+    () => windowLightWindowMaskLoadedCount(effect),
+  );
+  return {
+    ...base,
+    label: template.suffix,
+    helpMaskId: activeId,
+  };
+}
+
+/**
+ * @param {string} maskId
+ * @param {MaskStatusGroupConfig} config
+ * @param {string} [effectId]
+ * @returns {MaskStatusResult}
+ */
+function resolveWindowLightMaskStatus(maskId, config = {}, effectId = 'windowLight') {
+  const id = String(maskId || '').toLowerCase();
+  if (id === 'windows' || id === 'structural') {
+    return resolveWindowLightWindowsMaskStatus(config, effectId);
+  }
+  const template = getMaskStatusTemplate(maskId, config);
+  const effect = getFloorCompositorEffect('_windowLightEffect');
+  return resolvePopulatedMaskStatus(
+    template,
+    effect,
+    effectId,
+    () => windowLightMaskTypeLoadedCount(effect, maskId),
+  );
+}
+
+/**
+ * @param {MaskStatusGroupConfig} [config]
+ * @param {string} [effectId]
+ * @param {string} [compositorProp]
+ * @returns {MaskStatusResult}
+ */
+function resolveOutdoorsMaskStatus(config = {}, effectId = 'specular', compositorProp = '_specularEffect') {
+  const template = getMaskStatusTemplate('outdoors', config);
+  const effect = getFloorCompositorEffect(compositorProp);
+  return resolvePopulatedMaskStatus(
+    template,
+    effect,
+    effectId,
+    () => outdoorsRuntimeLoadedCount(),
+  );
+}
+
+function resolveSpecularMaskStatus(config = {}, effectId = 'specular') {
+  return resolveOverlayMaskStatus('specular', config, '_specularEffect', effectId);
+}
+
+const PAINTED_SHADOW_COMPOSITOR_MASK_TYPES = ['handPaintedShadow', 'paintedShadow', 'shadow'];
+
+/**
+ * @returns {boolean}
+ */
+function compositorHasPaintedShadowMask() {
+  for (const maskType of PAINTED_SHADOW_COMPOSITOR_MASK_TYPES) {
+    if (compositorHasMaskType(maskType)) return true;
+  }
+  return false;
+}
+
+/**
+ * @param {object|null} effect
+ * @returns {number}
+ */
+function paintedShadowMaskLoadedCount(effect) {
+  if (effect) {
+    for (let i = 0; i < 4; i += 1) {
+      if (typeof effect._hasValidLitMask === 'function' && effect._hasValidLitMask(i)) return 1;
+    }
+    try {
+      if (effect._lastPaintedTexForSlots) return 1;
+      for (const tex of effect._paintedBundleByBasePath?.values?.() ?? []) {
+        if (tex) return 1;
+      }
+    } catch (_) {}
+  }
+  return compositorHasPaintedShadowMask() ? 1 : 0;
+}
+
+/**
+ * @param {MaskStatusGroupConfig} [config]
+ * @param {string} [effectId]
+ * @returns {MaskStatusResult}
+ */
+function resolvePaintedShadowMaskStatus(config = {}, effectId = 'painted-shadows') {
+  const template = getMaskStatusTemplate('handPaintedShadow', config);
+  const effect = getFloorCompositorEffect('_paintedShadowEffect');
+  return resolvePopulatedMaskStatus(
+    template,
+    effect,
+    effectId,
+    () => paintedShadowMaskLoadedCount(effect),
+  );
+}
+
+/**
+ * @param {object|null} effect
+ * @returns {number}
+ */
+function fireMaskLoadedCount(effect) {
+  if (!effect) return 0;
+  try {
+    for (const [, st] of effect._floorStates ?? []) {
+      if ((st?.systems?.length ?? 0) > 0
+        || (st?.emberSystems?.length ?? 0) > 0
+        || (st?.smokeSystems?.length ?? 0) > 0) {
+        return 1;
+      }
+    }
+    for (const pts of effect._glowSourcePointsByFloor?.values?.() ?? []) {
+      if (pts?.length > 0) return 1;
+    }
+  } catch (_) {}
+  return 0;
+}
+
+/**
+ * @param {MaskStatusGroupConfig} [config]
+ * @param {string} [effectId]
+ * @returns {MaskStatusResult}
+ */
+function resolveFireMaskStatus(config = {}, effectId = 'fire-sparks') {
+  const template = getMaskStatusTemplate('fire', config);
+  const effect = getFloorCompositorEffect('_fireEffect');
+  return resolvePopulatedMaskStatus(
+    template,
+    effect,
+    effectId,
+    () => fireMaskLoadedCount(effect),
+  );
+}
+
+/**
+ * @param {object|null} effect
+ * @returns {number}
+ */
+function ashMaskLoadedCount(effect) {
+  if (!effect) return 0;
+  try {
+    for (const [, st] of effect._floorStates ?? []) {
+      if (st?.points?.length > 0) return 1;
+    }
+  } catch (_) {}
+  return 0;
+}
+
+/**
+ * @param {MaskStatusGroupConfig} [config]
+ * @param {string} [effectId]
+ * @returns {MaskStatusResult}
+ */
+function resolveAshMaskStatus(config = {}, effectId = 'ash-disturbance') {
+  const template = getMaskStatusTemplate('ash', config);
+  const effect = getFloorCompositorEffect('_ashDisturbanceEffect');
+  return resolvePopulatedMaskStatus(
+    template,
+    effect,
+    effectId,
+    () => ashMaskLoadedCount(effect),
+  );
 }
 
 /**
@@ -406,14 +963,63 @@ export function resolveEffectMaskStatus(effectId, config = {}) {
   const maskId = config?.maskId || config?.templateId || effectId;
   switch (maskId) {
     case 'water':
+      if (effectId === 'water-splashes' || effectId === 'underwater-bubbles') {
+        return resolveWaterSplashesMaskStatus(config, effectId);
+      }
       return resolveWaterMaskStatus(config, effectId);
+    case 'dust':
+      return resolveDustMaskStatus(config, effectId);
+    case 'fire':
+      return resolveFireMaskStatus(config, effectId);
+    case 'ash':
+      return resolveAshMaskStatus(config, effectId);
     case 'bush':
       return resolveBushMaskStatus(config, effectId);
     case 'tree':
       return resolveTreeMaskStatus(config, effectId);
+    case 'iridescence':
+      return resolveIridescenceMaskStatus(config, effectId);
+    case 'prism':
+      return resolvePrismMaskStatus(config, effectId);
+    case 'fluid':
+      return resolveFluidMaskStatus(config, effectId);
+    case 'specular':
+      return resolveSpecularMaskStatus(config, effectId);
+    case 'handPaintedShadow':
+    case 'paintedShadow':
+    case 'shadow':
+      return resolvePaintedShadowMaskStatus(config, effectId);
+    case 'outdoors':
+      if (effectId === 'windowLight') return resolveWindowLightMaskStatus('outdoors', config, effectId);
+      if (effectId === 'building-shadows') {
+        return resolveOutdoorsMaskStatus(config, effectId, '_buildingShadowEffect');
+      }
+      return resolveOutdoorsMaskStatus(config, effectId);
+    case 'windows':
+    case 'structural':
+      if (effectId === 'windowLight') return resolveWindowLightWindowsMaskStatus(config, effectId);
+      return resolveWindowLightMaskStatus(maskId, config, effectId);
     default:
       if (effectId === 'bush') return resolveBushMaskStatus(config, effectId);
       if (effectId === 'tree') return resolveTreeMaskStatus(config, effectId);
+      if (effectId === 'iridescence') return resolveIridescenceMaskStatus(config, effectId);
+      if (effectId === 'prism') return resolvePrismMaskStatus(config, effectId);
+      if (effectId === 'fluid') return resolveFluidMaskStatus(config, effectId);
+      if (effectId === 'specular') return resolveSpecularMaskStatus(config, effectId);
+      if (effectId === 'windowLight') {
+        const wlMask = config?.maskId || config?.templateId;
+        if (wlMask) return resolveWindowLightMaskStatus(wlMask, config, effectId);
+      }
+      if (effectId === 'painted-shadows') return resolvePaintedShadowMaskStatus(config, effectId);
+      if (effectId === 'building-shadows') {
+        return resolveOutdoorsMaskStatus(config, effectId, '_buildingShadowEffect');
+      }
+      if (effectId === 'fire-sparks') return resolveFireMaskStatus(config, effectId);
+      if (effectId === 'ash-disturbance') return resolveAshMaskStatus(config, effectId);
+      if (effectId === 'dust') return resolveDustMaskStatus(config, effectId);
+      if (effectId === 'water-splashes' || effectId === 'underwater-bubbles') {
+        return resolveWaterSplashesMaskStatus(config, effectId);
+      }
       return null;
   }
 }

@@ -13,6 +13,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { createMaskStatusSchemaGroup, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
 import { resolveEffectEnabled } from '../../effects/resolve-effect-enabled.js';
@@ -146,6 +147,7 @@ export class FluidEffectV2 {
     return {
       enabled: true,
       groups: [
+        createMaskStatusSchemaGroup('fluid'),
         { name: 'appearance', label: 'Appearance', type: 'inline', parameters: ['intensity', 'opacity', 'colorA', 'colorB', 'ageGamma'] },
         { name: 'masking', label: 'Mask Thresholds', type: 'folder', advanced: true, expanded: false, parameters: ['maskThresholdLo', 'maskThresholdHi'] },
         { name: 'motion', label: 'Flow & Motion', type: 'folder', expanded: false, parameters: ['flowMode', 'flowSpeed', 'pulseFrequency', 'pulseStrength', 'slugWidth', 'edgeSoftness'] },
@@ -253,6 +255,7 @@ export class FluidEffectV2 {
       } catch (_) {}
     }
     this._overlays.clear();
+    this._notifyMaskStatusUi();
   }
 
   /**
@@ -314,6 +317,7 @@ export class FluidEffectV2 {
       rotation,
       isOverhead: !!tileDoc?.overhead,
     });
+    this._notifyMaskStatusUi();
   }
 
   dispose() {
@@ -333,8 +337,6 @@ export class FluidEffectV2 {
     const THREE = window.THREE;
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
     const worldH = foundrySceneData?.height ?? 0;
-
-    let overlayCount = 0;
 
     // Background image (uses bus key '__bg_image__')
     const bgSrc = canvas?.scene?.background?.src ?? '';
@@ -358,7 +360,6 @@ export class FluidEffectV2 {
           rotation: 0,
           isOverhead: false,
         });
-        overlayCount++;
       }
     }
 
@@ -392,10 +393,15 @@ export class FluidEffectV2 {
         rotation,
         isOverhead: !!tileDoc?.overhead,
       });
-      overlayCount++;
     }
 
-    log.info(`FluidEffectV2 populated: ${overlayCount} overlay(s)`);
+    log.info(`FluidEffectV2 populated: ${this._overlays.size} overlay(s)`);
+    this._notifyMaskStatusUi();
+  }
+
+  /** Push _Fluid texture row state into the Fluid Tweakpane panel. */
+  _notifyMaskStatusUi() {
+    refreshEffectMaskStatusUi('fluid');
   }
 
   /**

@@ -175,7 +175,8 @@ const TILE_VERT = /* glsl */`
  *   tMask     — tile mask texture
  *   uMode     — 0 = lighten (output luminance), 1 = source-over (output rgba),
  *               2 = alpha-extract (tile albedo alpha → greyscale, used by _composeFloorAlpha),
- *               3 = solid alpha fallback (tile rect = opaque)
+ *               3 = solid alpha fallback (tile rect = opaque),
+ *               4 = outdoors coverage extract (max(alpha, outdoorClass) for floorAlpha RT)
  */
 const TILE_FRAG = /* glsl */`
   precision highp float;
@@ -222,6 +223,13 @@ const TILE_FRAG = /* glsl */`
       // Tiles with transparent areas correctly encode the holes as black.
       float a = s.a;
       gl_FragColor = vec4(a, a, a, a);
+    } else if (uMode == 4) {
+      // Outdoors → floorAlpha: preserve authored alpha holes but treat strong
+      // outdoor RGB as full floor coverage (open-air roof decks).
+      float outdoorRaw = clamp(max(s.r, max(s.g, s.b)), 0.0, 1.0);
+      float outdoorClass = (outdoorRaw <= 0.10) ? 0.0 : ((outdoorRaw >= 0.90) ? 1.0 : outdoorRaw);
+      float cov = max(s.a, outdoorClass);
+      gl_FragColor = vec4(cov, cov, cov, 1.0);
     } else {
       // Source-over: output full RGBA as-is.
       // Do NOT promote alpha into RGB — upper-floor tiles use alpha as a
@@ -2246,7 +2254,82 @@ export class GpuSceneMaskCompositor {
       outH,
       srcUuid: bundleTex.uuid ?? null,
     });
+    try {
+      this._ensureFloorAlphaFromOutdoors(renderer, THREE, key, sceneW, sceneH);
+    } catch (_) {}
     return outTex ?? bundleTex;
+  }
+
+  /**
+   * Build a scene-space `floorAlpha` RT from an existing per-floor `outdoors` RT.
+   * Used for background-only level bands (zero tiles) so stacked CC can composite
+   * the roof deck without falling back to lower-floor indoor classification.
+   *
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {object} THREE
+   * @param {string} floorKey
+   * @param {number} sceneW
+   * @param {number} sceneH
+   * @returns {import('three').Texture|null}
+   * @private
+   */
+  _ensureFloorAlphaFromOutdoors(renderer, THREE, floorKey, sceneW, sceneH) {
+    if (!floorKey || !renderer || !THREE) return null;
+    const key = String(floorKey);
+    const floorTargets = this._getOrCreateFloorTargets(key);
+    const outdoorsRt = floorTargets.get('outdoors');
+    const outdoorsTex = outdoorsRt?.texture ?? null;
+    if (!outdoorsTex) return null;
+
+    const maxTex = renderer.capabilities?.maxTextureSize ?? 16384;
+    const scale = Math.min(
+      1.0,
+      HIGH_DETAIL_DATA_MAX / Math.max(1, sceneW),
+      HIGH_DETAIL_DATA_MAX / Math.max(1, sceneH),
+      maxTex / Math.max(1, sceneW),
+      maxTex / Math.max(1, sceneH),
+    );
+    const outW = Math.max(1, Math.round(sceneW * scale));
+    const outH = Math.max(1, Math.round(sceneH * scale));
+
+    let alphaRt = floorTargets.get('floorAlpha');
+    if (!alphaRt || alphaRt.width !== outW || alphaRt.height !== outH) {
+      try { alphaRt?.dispose?.(); } catch (_) {}
+      alphaRt = this._createRenderTarget(THREE, outW, outH, 'floorAlpha');
+      floorTargets.set('floorAlpha', alphaRt);
+      this._floorCacheVersion++;
+    }
+
+    this._ensureGpuResources(THREE);
+    const mat = this._tileMaterial;
+    const prevTarget = renderer.getRenderTarget();
+    mat.blending = THREE.NoBlending;
+    mat.uniforms.uMode.value = 4;
+    mat.uniforms.tMask.value = outdoorsTex;
+    mat.uniforms.uTileRect.value.set(0, 0, 1, 1);
+    mat.uniforms.uScaleSign.value.set(1, 1);
+    mat.uniforms.uRotation.value = 0;
+
+    renderer.setRenderTarget(alphaRt);
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear();
+    try {
+      renderer.render(this._quadScene, this._orthoCamera);
+    } catch (e) {
+      log.debug('_ensureFloorAlphaFromOutdoors: bake failed', { floorKey: key, err: e });
+      renderer.setRenderTarget(prevTarget);
+      return null;
+    }
+    renderer.setRenderTarget(prevTarget);
+
+    const tex = alphaRt.texture;
+    if (tex) {
+      tex.flipY = false;
+      tex.needsUpdate = true;
+      tex.colorSpace = THREE.NoColorSpace ?? '';
+    }
+    log.debug('_ensureFloorAlphaFromOutdoors: derived floorAlpha from outdoors', { floorKey: key, outW, outH });
+    return tex ?? null;
   }
 
   /**
@@ -2695,6 +2778,14 @@ export class GpuSceneMaskCompositor {
         continue;
       }
 
+      if (renderer && THREE && sceneW > 0 && sceneH > 0 && !this.getFloorTexture(key, 'floorAlpha')) {
+        try {
+          this._ensureFloorAlphaFromOutdoors(renderer, THREE, key, sceneW, sceneH);
+        } catch (e) {
+          log.debug('prepareVisibleFloorsForOutdoorsStack: floorAlpha derive failed', { floorKey: key, err: e });
+        }
+      }
+
       preparedKeys.push(key);
     }
 
@@ -2704,6 +2795,11 @@ export class GpuSceneMaskCompositor {
         if (skippedKeys.includes(key)) continue;
         const floorTargets = this._floorCache.get(key);
         if (!floorTargets?.get('outdoors')?.texture) continue;
+        if (!floorTargets?.get('floorAlpha')?.texture) {
+          try {
+            this._ensureFloorAlphaFromOutdoors(renderer, THREE, key, sceneW, sceneH);
+          } catch (_) {}
+        }
         if (!floorTargets?.get('floorAlpha')?.texture) continue;
         try {
           this._composeSkyReachForFloor(renderer, THREE, key, floorTargets, sceneW, sceneH);

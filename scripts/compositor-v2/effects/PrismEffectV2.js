@@ -8,6 +8,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { createMaskStatusSchemaGroup, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
 import { tileStackedOverlayOrder } from '../LayerOrderPolicy.js';
@@ -29,7 +30,8 @@ export class PrismEffectV2 {
     this._sharedUniforms = null;
 
     this.params = {
-      textureStatus: 'Searching...',
+      enabled: true,
+      /** Scene/tools flag after populate — not a Tweakpane control. */
       hasPrismMask: false,
 
       intensity: 0.3,
@@ -53,6 +55,7 @@ export class PrismEffectV2 {
 
   set enabled(value) {
     this._enabled = !!value;
+    this.params.enabled = this._enabled;
     if (this._sharedUniforms?.uEffectEnabled) this._sharedUniforms.uEffectEnabled.value = this._enabled;
     for (const entry of this._overlays.values()) entry.mesh.visible = this._enabled;
   }
@@ -61,14 +64,13 @@ export class PrismEffectV2 {
     return {
       enabled: true,
       groups: [
-        { name: 'status', label: 'Effect Status', type: 'inline', advanced: true, parameters: ['textureStatus'] },
+        createMaskStatusSchemaGroup('prism'),
         { name: 'refraction', label: 'Refraction', type: 'folder', parameters: ['intensity', 'spread', 'brightness', 'opacity', 'maskThreshold'] },
         { name: 'facets', label: 'Crystal Facets', type: 'folder', advanced: true, parameters: ['facetScale', 'facetAnimate', 'facetSpeed', 'facetSoftness'] },
         { name: 'parallax', label: 'Camera Parallax', type: 'inline', advanced: true, parameters: ['parallaxStrength'] },
         { name: 'glint', label: 'Surface Glint', type: 'folder', advanced: true, parameters: ['glintStrength', 'glintThreshold'] },
       ],
       parameters: {
-        textureStatus: { type: 'string', label: 'Mask Status', default: 'Checking...', readonly: true },
         intensity: { type: 'slider', label: 'Distortion', min: 0, max: 5.0, step: 0.1, default: 0.3 },
         spread: { type: 'slider', label: 'Spectral Spread', min: 0.0, max: 1.0, step: 0.1, default: 0.6 },
         brightness: { type: 'slider', label: 'Brightness Boost', min: 0.5, max: 3.0, step: 0.1, default: 1.5 },
@@ -106,6 +108,8 @@ export class PrismEffectV2 {
       }
     }
     this._overlays.clear();
+    this.params.hasPrismMask = false;
+    this._notifyMaskStatusUi();
   }
 
   /**
@@ -167,6 +171,7 @@ export class PrismEffectV2 {
       tileH,
       rotation,
     });
+    this._notifyMaskStatusUi();
   }
 
   dispose() {
@@ -182,7 +187,6 @@ export class PrismEffectV2 {
 
     const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
     const worldH = foundrySceneData?.height ?? 0;
-    let overlayCount = 0;
 
     const bgSrc = canvas?.scene?.background?.src ?? '';
     if (bgSrc) {
@@ -206,7 +210,6 @@ export class PrismEffectV2 {
           tileH: sceneH,
           rotation: 0,
         });
-        overlayCount++;
       }
     }
 
@@ -239,12 +242,16 @@ export class PrismEffectV2 {
         tileH,
         rotation,
       });
-      overlayCount++;
     }
 
-    this.params.hasPrismMask = overlayCount > 0;
-    this.params.textureStatus = overlayCount > 0 ? 'Ready (Texture Found)' : 'Inactive (No Texture Found)';
-    log.info(`PrismEffectV2 populated: ${overlayCount} overlay(s)`);
+    this.params.hasPrismMask = this._overlays.size > 0;
+    this._notifyMaskStatusUi();
+    log.info(`PrismEffectV2 populated: ${this._overlays.size} overlay(s)`);
+  }
+
+  /** Push _Prism texture row state into the Prism Tweakpane panel. */
+  _notifyMaskStatusUi() {
+    refreshEffectMaskStatusUi('prism');
   }
 
   update(timeInfo) {

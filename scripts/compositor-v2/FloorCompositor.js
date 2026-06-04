@@ -6090,7 +6090,15 @@ export class FloorCompositor {
       cacheVersion = Number(sceneMaskCompositor.getFloorCacheVersion?.() ?? 0);
     } catch (_) {}
 
-    const cacheKey = `${stackedFloorKeys.join('|')}|v${cacheVersion}`;
+    const activeCk = String(window.MapShine?.floorStack?.getActiveFloor?.()?.compositorKey ?? '');
+    const maskSig = stackedFloorKeys.map((k) => {
+      const key = String(k);
+      const o = sceneMaskCompositor.getFloorTexture?.(key, 'outdoors')?.uuid ?? 'no-od';
+      const a = sceneMaskCompositor.getFloorTexture?.(key, 'floorAlpha')?.uuid ?? 'no-fa';
+      const s = sceneMaskCompositor.getFloorTexture?.(key, 'skyReach')?.uuid ?? 'no-sr';
+      return `${key}:${o}:${a}:${s}`;
+    }).join('|');
+    const cacheKey = `${activeCk}|${maskSig}|v${cacheVersion}`;
     if (
       this._stackedOutdoorsCacheKey === cacheKey
       && this._stackedOutdoorsCacheTex

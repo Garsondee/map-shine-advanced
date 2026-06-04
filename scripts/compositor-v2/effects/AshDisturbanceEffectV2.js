@@ -14,6 +14,7 @@
 
 import { createLogger } from '../../core/log.js';
 import { probeMaskFile } from '../../assets/loader.js';
+import { createMaskStatusSchemaGroup, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
 import { OVERLAY_THREE_LAYER } from '../../core/render-layers.js';
 import {
@@ -229,7 +230,16 @@ export class AshDisturbanceEffectV2 {
   static getControlSchema() {
     return {
       enabled: true,
+      help: {
+        title: 'Ash Disturbance',
+        summary: [
+          'Kicks up ash puffs when tokens walk across bright pixels in authored _Ash masks.',
+          'Masks are probed per tile and scene background; bursts respect Manual Weather ash intensity.',
+          'Place _Ash beside each battlemap albedo you want foot-traffic dust on.',
+        ].join('\n\n'),
+      },
       groups: [
+        createMaskStatusSchemaGroup('ash'),
         { name: 'burst', label: 'Burst Settings', type: 'inline', parameters: ['burstRate', 'burstDuration', 'burstRadius', 'maxParticles'] },
         { name: 'appearance', label: 'Appearance', type: 'inline', separator: true, parameters: ['sizeMin', 'sizeMax', 'lifeMin', 'lifeMax', 'opacityStart', 'opacityEnd'] },
         { name: 'motion', label: 'Motion', type: 'inline', advanced: true, separator: true, parameters: ['windInfluence', 'curlStrength', 'curlScale'] }
@@ -319,6 +329,13 @@ export class AshDisturbanceEffectV2 {
     };
 
     popPhase('enter populate()');
+
+    for (const [, st] of this._floorStates) {
+      for (const sys of st.systems || []) {
+        try { this._batchRenderer?.deleteSystem?.(sys); } catch (_) {}
+      }
+    }
+    this._floorStates.clear();
 
     // Ensure our BatchedRenderer is attached to the bus scene AFTER the bus has
     // populated/cleared its internal tile map.
@@ -507,6 +524,7 @@ export class AshDisturbanceEffectV2 {
       floors: this._floorStates.size,
       pointsByFloor: Array.from(this._floorStates.entries()).map(([k, v]) => [k, Math.floor((v.points?.length ?? 0) / 3)]),
     });
+    try { refreshEffectMaskStatusUi('ash-disturbance'); } catch (_) {}
   }
 
   onFloorChange(maxFloorIndex) {
@@ -719,6 +737,7 @@ export class AshDisturbanceEffectV2 {
       this._texturesReady = null;
     } catch (_) {
     }
+    try { refreshEffectMaskStatusUi('ash-disturbance'); } catch (_) {}
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────

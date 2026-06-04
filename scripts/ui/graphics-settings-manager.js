@@ -11,6 +11,7 @@
 
 import { createLogger } from '../core/log.js';
 import { GraphicsSettingsDialog } from './graphics-settings-dialog.js';
+import { isStylisticEffectId } from '../effects/resolve-effect-enabled.js';
 
 const log = createLogger('GraphicsSettings');
 
@@ -733,6 +734,10 @@ export class GraphicsSettingsManager {
 
     for (const effectId of ids) {
       if (!effectId) continue;
+      // Stylistic post passes (dot screen, halftone, …): scene-flag gate + Tweakpane own
+      // enablement — client graphics "default off" must not clobber the compositor.
+      if (isStylisticEffectId(effectId)) continue;
+
       const enabled = this.getEffectiveEnabled(effectId);
       const effect = this._effects.get(effectId);
 

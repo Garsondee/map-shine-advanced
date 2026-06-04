@@ -19,6 +19,7 @@
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
+import { createMaskStatusSchemaGroup, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
 import {
   tileHasLevelsRange,
   readTileLevelsFlags,
@@ -298,7 +299,16 @@ export class DustEffectV2 {
   static getControlSchema() {
     return {
       enabled: true,
+      help: {
+        title: 'Dust Motes',
+        summary: [
+          'Floating dust particles from authored _Dust masks on tiles and level backgrounds.',
+          'Bright mask pixels define spawn sites in a vertical volume; optional Map Points add extra sources.',
+          'Requires matching _Dust files beside each battlemap you want motes over.',
+        ].join('\n\n'),
+      },
       groups: [
+        createMaskStatusSchemaGroup('dust'),
         { name: 'dust', label: 'Dust Motes', type: 'inline', parameters: ['density', 'maxParticles'] },
         { name: 'appearance', label: 'Appearance', type: 'inline', separator: true, parameters: ['brightness', 'opacity', 'skyTintEnabled', 'skyTintStrength'] },
         { name: 'glitter', label: 'Glitter', type: 'inline', advanced: true, separator: true, parameters: ['glitterEnabled', 'glitterStrength', 'glitterRateMin', 'glitterRateMax'] },
@@ -539,6 +549,7 @@ export class DustEffectV2 {
       systemsByFloor,
       totalSystems,
     });
+    try { refreshEffectMaskStatusUi('dust'); } catch (_) {}
   }
 
   update(timeInfo) {
@@ -592,6 +603,7 @@ export class DustEffectV2 {
     this._floorStates.clear();
 
     this._renderBus.removeEffectOverlay('__dust_batch__');
+    try { refreshEffectMaskStatusUi('dust'); } catch (_) {}
   }
 
   dispose() {

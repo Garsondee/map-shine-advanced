@@ -31,6 +31,7 @@ import {
   writeEffectSunDir,
 } from '../shadow-system/ShadowSunDirection.js';
 import { resolveBakeRayLength } from '../lightning/shadow-bake-override.js';
+import { createMaskStatusSchemaGroup, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
 
 const log = createLogger('PaintedShadowEffectV2');
 /** Align with BuildingShadowsEffectV2 — painted shadow is low-frequency after blur. */
@@ -194,7 +195,16 @@ export class PaintedShadowEffectV2 {
   static getControlSchema() {
     return {
       enabled: true,
+      help: {
+        title: 'Painted Shadows',
+        summary: [
+          'Projects hand-painted _Shadow masks along the sun direction into a scene-space lit-factor texture.',
+          'Outdoor pixels only — gated by the same _Outdoors mask Building Shadows uses.',
+          'Multi-floor maps stack per-floor _Shadow slots; bundle fallback loads per-level art when compositor slots are empty.',
+        ].join('\n\n'),
+      },
       groups: [
+        createMaskStatusSchemaGroup('handPaintedShadow'),
         {
           name: 'main',
           label: 'Painted Shadows',
@@ -706,6 +716,7 @@ export class PaintedShadowEffectV2 {
         const directTex = await this._probePaintedShadowTextureForBasePath(basePath, floorIndex);
         if (directTex) {
           this._paintedBundleByBasePath.set(basePath, directTex);
+          this._applyLoadedPaintedBundleForBasePath(basePath);
           return;
         }
         const probed = await probeMaskFile(basePath, '_Shadow', { allowConventionProbe: false });
@@ -732,15 +743,29 @@ export class PaintedShadowEffectV2 {
           : null;
         const bundleTex = hit?.texture ?? null;
         this._paintedBundleByBasePath.set(basePath, bundleTex);
+        if (bundleTex) this._applyLoadedPaintedBundleForBasePath(basePath);
         if (!bundleTex) this._paintedBundleMissPaths.add(basePath);
       } catch (_) {
         this._paintedBundleByBasePath.set(basePath, null);
         this._paintedBundleMissPaths.add(basePath);
       } finally {
         this._paintedBundleLoadsInFlight.delete(basePath);
+        try { refreshEffectMaskStatusUi('painted-shadows'); } catch (_) {}
       }
     };
     void run();
+  }
+
+  /** @param {string} basePath @private */
+  _applyLoadedPaintedBundleForBasePath(basePath) {
+    if (!basePath) return;
+    const groundUuid = this._paintedMasks[0]?.uuid ?? null;
+    for (let idx = 0; idx < 4; idx += 1) {
+      const floorBasePath = this._resolveBasePathForFloorIndex(idx);
+      if (floorBasePath !== basePath) continue;
+      this._tryAssignPaintedBundleMaskForFloor(idx, idx === 0 ? null : groundUuid);
+    }
+    try { refreshEffectMaskStatusUi('painted-shadows'); } catch (_) {}
   }
 
   /**
@@ -2193,6 +2218,7 @@ export class PaintedShadowEffectV2 {
         }
       } catch (_) {}
     }
+    try { refreshEffectMaskStatusUi('painted-shadows'); } catch (_) {}
     if (!paintedTex || !outdoorsTex) {
       if (!outdoorsTex && !this._loggedMissingOutdoorsMask) {
         this._loggedMissingOutdoorsMask = true;
@@ -2485,5 +2511,6 @@ export class PaintedShadowEffectV2 {
     this._floorOcclusionSig = '';
     this._lastParams = {};
     this._renderState.time = 0;
+    try { refreshEffectMaskStatusUi('painted-shadows'); } catch (_) {}
   }
 }

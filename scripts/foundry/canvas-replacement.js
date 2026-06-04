@@ -8712,10 +8712,15 @@ async function createThreeCanvas(scene, createOptions = {}) {
 
             // Prefer effect.enabled setter when present (several V2 overlay effects
             // keep enabled state on the instance and mirror it into params).
-            // Stylistic effects are gated by scene flags per-frame in
-            // EffectComposer.render() — do not let UI callbacks override that.
             if (paramId === 'enabled' || paramId === 'masterEnabled') {
-              if (_STYLISTIC_FC_KEYS.has(effectKey)) return;
+              if (_STYLISTIC_FC_KEYS.has(effectKey)) {
+                // Do not queue enabled (stale flush caused flicker) but apply live UI
+                // toggles immediately; per-frame gate still reads scene flags + pending UI.
+                if (fc && typeof fc.applyParam === 'function') {
+                  fc.applyParam(effectKey, paramId, !!value);
+                }
+                return;
+              }
               if (typeof effect.enabled !== 'undefined') {
                 try { effect.enabled = !!value; } catch (_) {}
               }

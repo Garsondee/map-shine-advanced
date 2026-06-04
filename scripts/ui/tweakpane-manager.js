@@ -69,6 +69,7 @@ import {
   placeMaskStatusRow,
   refreshMaskStatusRow,
 } from './mask-status-ui.js';
+import { isStylisticEffectId } from '../effects/resolve-effect-enabled.js';
 
 const log = createLogger('UI');
 
@@ -4758,7 +4759,14 @@ export class TweakpaneManager {
       this.updateControlStates(effectId);
       this._refreshControlPanelAshMasterRow(effectId);
       this.refreshEffectMaskStatus(effectId);
-      this.queueSave(effectId);
+      if (isStylisticEffectId(effectId)) {
+        this.saveQueue.add(effectId);
+        void this.saveEffectParameters(effectId).finally(() => {
+          this.saveQueue.delete(effectId);
+        });
+      } else {
+        this.queueSave(effectId);
+      }
     };
 
     const effectDataForHandlers = this.effectFolders[effectId];
@@ -5030,7 +5038,14 @@ export class TweakpaneManager {
       this.updateControlStates(effectId);
       this._refreshControlPanelAshMasterRow(effectId);
       this.refreshEffectMaskStatus(effectId);
-      this.queueSave(effectId);
+      if (isStylisticEffectId(effectId)) {
+        this.saveQueue.add(effectId);
+        void this.saveEffectParameters(effectId).finally(() => {
+          this.saveQueue.delete(effectId);
+        });
+      } else {
+        this.queueSave(effectId);
+      }
     };
 
     const effectDataForHandlers = this.effectFolders[effectId];
@@ -5173,7 +5188,7 @@ export class TweakpaneManager {
    */
   refreshAllEffectMaskStatuses() {
     for (const [effectId, data] of Object.entries(this.effectFolders || {})) {
-      if (data?.maskStatusElements) this.refreshEffectMaskStatus(effectId);
+      if (data?.maskStatusRows?.length || data?.maskStatusElements) this.refreshEffectMaskStatus(effectId);
     }
   }
 
@@ -5253,26 +5268,42 @@ export class TweakpaneManager {
       ?? effectData.enabledBinding?.controller_?.view?.element
       ?? null;
 
+    if (!Array.isArray(effectData.maskStatusRows)) {
+      effectData.maskStatusRows = [];
+    }
+
+    let chainAnchor = anchor;
+
     for (const group of schema?.groups || []) {
       if (group?.type !== 'mask-status') continue;
 
-      if (effectData.maskStatusElements?.row) {
-        placeMaskStatusRow(folder.element, anchor, effectData.maskStatusElements.row);
-        continue;
+      const maskId = group?.maskId || group?.templateId || effectId;
+      let entry = effectData.maskStatusRows.find((r) => r?.config?.maskId === maskId);
+
+      if (!entry) {
+        const elements = createMaskStatusRow(folder.element, group, chainAnchor);
+        if (!elements) continue;
+        entry = {
+          elements,
+          config: {
+            maskId,
+            suffix: group?.suffix,
+            label: group?.label,
+            example: group?.example,
+            templateId: group?.templateId,
+          },
+        };
+        effectData.maskStatusRows.push(entry);
+      } else {
+        placeMaskStatusRow(folder.element, chainAnchor, entry.elements.row);
       }
 
-      const elements = createMaskStatusRow(folder.element, group, anchor);
-      if (!elements) continue;
-
-      effectData.maskStatusElements = elements;
-      effectData.maskStatusConfig = {
-        maskId: group?.maskId || group?.templateId || effectId,
-        suffix: group?.suffix,
-        label: group?.label,
-        example: group?.example,
-        templateId: group?.templateId,
-      };
+      chainAnchor = entry.elements.row;
     }
+
+    const first = effectData.maskStatusRows[0];
+    effectData.maskStatusElements = first?.elements ?? null;
+    effectData.maskStatusConfig = first?.config ?? {};
   }
 
   /**
@@ -5282,7 +5313,17 @@ export class TweakpaneManager {
    */
   refreshEffectMaskStatus(effectId) {
     const effectData = this.effectFolders[effectId];
-    if (!effectData?.maskStatusElements) return;
+    if (!effectData) return;
+
+    const rows = effectData.maskStatusRows;
+    if (Array.isArray(rows) && rows.length > 0) {
+      for (const { elements, config } of rows) {
+        refreshMaskStatusRow(effectId, config || {}, elements);
+      }
+      return;
+    }
+
+    if (!effectData.maskStatusElements) return;
     refreshMaskStatusRow(
       effectId,
       effectData.maskStatusConfig || {},
@@ -8275,7 +8316,7 @@ export class TweakpaneManager {
     
     statusLight.title = `Status: ${tooltip}`;
 
-    if (effectData.maskStatusElements) {
+    if (effectData.maskStatusRows?.length || effectData.maskStatusElements) {
       this.refreshEffectMaskStatus(effectId);
     }
   }

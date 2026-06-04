@@ -33,6 +33,7 @@ import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
 import { probeMaskFile } from '../../assets/loader.js';
+import { createMaskStatusSchemaGroup, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
 import Coordinates from '../../utils/coordinates.js';
 import { getPerspectiveElevation } from '../../foundry/elevation-context.js';
 import { VisionPolygonComputer } from '../../vision/VisionPolygonComputer.js';
@@ -1090,7 +1091,16 @@ export class FireEffectV2 {
   static getControlSchema() {
     return {
       enabled: true,
+      help: {
+        title: 'Fire',
+        summary: [
+          'Flames, embers, and smoke spawn from authored _Fire masks on tiles and level backgrounds.',
+          'Mask pickup scans bright pixels per floor; optional gameplay glow pools light nearby tokens.',
+          'Requires matching _Fire files beside each albedo you want to burn.',
+        ].join('\n\n'),
+      },
       groups: [
+        createMaskStatusSchemaGroup('fire'),
         { name: 'flames', label: 'Flames', type: 'folder', advanced: true, expanded: false, parameters: ['globalFireRate', 'fireHeight', 'fireTemperature', 'flamePeakOpacity', 'coreEmission', 'flameBrightnessFloor', 'fireSizeMin', 'fireSizeMax', 'fireLifeMin', 'fireLifeMax', 'flameFlipbookCycles', 'fireSpinEnabled', 'fireSpinSpeedMin', 'fireSpinSpeedMax', 'flameStationaryFraction', 'fireUpdraft', 'fireCurlStrength'] },
         { name: 'flame-texture', label: 'Flame Texture', type: 'folder', advanced: true, expanded: false, parameters: ['flameTextureOpacity', 'flameTextureBrightness', 'flameTextureScaleX', 'flameTextureScaleY', 'flameTextureOffsetX', 'flameTextureOffsetY', 'flameTextureRotation', 'flameTextureFlipX', 'flameTextureFlipY'] },
         { name: 'embers', label: 'Embers', type: 'folder', advanced: true, expanded: false, parameters: ['emberRate', 'emberEmission', 'emberPeakOpacity', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'indoorEmberLifeScale', 'indoorEmberSuppression', 'emberUpdraft', 'emberCurlStrength'] },
@@ -1906,6 +1916,7 @@ export class FireEffectV2 {
     } finally {
       this._endPerfSpan(_buildToken);
     }
+    try { refreshEffectMaskStatusUi('fire-sparks'); } catch (_) {}
   }
 
   /**
@@ -2340,6 +2351,7 @@ export class FireEffectV2 {
     this._simAccumSec = 0;
     this._floorLastPhysicsAt.clear();
     this._invalidateGlowParamCache();
+    try { refreshEffectMaskStatusUi('fire-sparks'); } catch (_) {}
   }
 
   dispose() {

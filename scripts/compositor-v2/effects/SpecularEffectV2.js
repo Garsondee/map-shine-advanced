@@ -31,6 +31,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { createMaskStatusSchemaGroups, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { loadImageTexture, VISUAL_MASK_MAX_SIZE } from '../../assets/image-texture-loader.js';
@@ -180,7 +181,6 @@ export class SpecularEffectV2 {
     // Effect parameters — same defaults as V1 for visual parity (minus retired unused fields).
     this.params = {
       enabled: true,
-      textureStatus: 'Searching...',
       intensity: 0.15,
       lightColor: { r: 1.0, g: 1.0, b: 1.0 },
 
@@ -344,7 +344,8 @@ export class SpecularEffectV2 {
           'Settings are stored on the scene (not World Based).',
         ].join('\n\n'),
         glossary: {
-          'Mask status': 'Whether the scene found at least one `_Specular` texture after load.',
+          _Outdoors: 'Whether an indoor/outdoor mask is bound (row under Enabled) — white = outdoor for stripes and wet response.',
+          _Specular: 'Whether the scene found at least one `_Specular` texture after load (row under Enabled).',
           Intensity: 'Overall strength of the shine pass.',
           'Specular tint': 'Color multiplied into highlights (white keeps the map neutral).',
           'World scale': 'How large world-space stripe patterns are — higher = bigger, calmer bands.',
@@ -356,14 +357,7 @@ export class SpecularEffectV2 {
       },
       presetApplyDefaults: true,
       groups: [
-        {
-          name: 'status',
-          label: 'Status',
-          type: 'folder',
-          advanced: true,
-          expanded: true,
-          parameters: ['textureStatus'],
-        },
+        ...createMaskStatusSchemaGroups(['outdoors', 'specular']),
         {
           name: 'look',
           label: 'Look',
@@ -473,13 +467,6 @@ export class SpecularEffectV2 {
         },
       ],
       parameters: {
-        textureStatus: {
-          type: 'string',
-          label: 'Mask status',
-          default: 'Searching...',
-          readonly: true,
-          tooltip: 'Updated when the scene loads: whether any `_Specular` mask was found for tiles or the background.',
-        },
         intensity: {
           type: 'slider',
           label: 'Intensity',
@@ -786,9 +773,6 @@ export class SpecularEffectV2 {
     }
 
     const totalCount = overlayCount;
-    this.params.textureStatus = totalCount > 0
-      ? 'Ready (_Specular mask found)'
-      : 'Inactive (no _Specular mask)';
     log.info(`SpecularEffectV2 populated: ${totalCount} overlay(s) (${bgSrc ? '1 bg + ' : ''}${overlayCount - (bgSrc && overlayCount > 0 ? 1 : 0)} tiles)`);
 
     // DEFERRED: Compile real shader after all overlays created with passthrough materials
@@ -797,6 +781,12 @@ export class SpecularEffectV2 {
       setTimeout(() => this._compileRealShaderForOverlays(), 0);
     }
     this._syncOverlayVisibility();
+    this._notifyMaskStatusUi();
+  }
+
+  /** Push _Outdoors / _Specular texture rows into the Specular Tweakpane panel. */
+  _notifyMaskStatusUi() {
+    refreshEffectMaskStatusUi('specular');
   }
 
   /**
@@ -1362,7 +1352,7 @@ export class SpecularEffectV2 {
     this._overlays.clear();
     this._lights.clear();
     this._healthDiagnostics = null;
-    this.params.textureStatus = 'Inactive (no _Specular mask)';
+    this._notifyMaskStatusUi();
   }
 
   /**
@@ -1434,6 +1424,7 @@ export class SpecularEffectV2 {
     if (!this._realShaderCompiled && !this._shaderCompilePending) {
       setTimeout(() => this._compileRealShaderForOverlays(), 0);
     }
+    this._notifyMaskStatusUi();
   }
 
   /**

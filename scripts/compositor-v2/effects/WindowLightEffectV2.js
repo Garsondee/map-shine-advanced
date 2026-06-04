@@ -44,6 +44,7 @@ import {
   updateSceneViewProjectionFromCamera,
 } from '../scene-view-projection.js';
 import { allocateRtReadbackBuffer, decodeReadbackPixel } from '../../utils/rt-pixel-readback.js';
+import { createMaskStatusSchemaGroups, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
 
 const log = createLogger('WindowLightEffectV2');
 
@@ -725,6 +726,12 @@ export class WindowLightEffectV2 {
     this._litSpecularMasks = [null, null, null, null];
     /** @type {Map<string, import('three').Texture|null>} */
     this._windowBundleByBasePath = new Map();
+    /** @type {Map<string, 'windows'|'structural'>} Which suffix won per base-path bundle probe. */
+    this._windowBundleMaskIdByBasePath = new Map();
+    /** Runtime UI: compositor or bundle has _Windows for at least one floor. */
+    this._runtimeMaskWindows = false;
+    /** Runtime UI: compositor or bundle has _Structural for at least one floor. */
+    this._runtimeMaskStructural = false;
     /** @type {Set<string>} */
     this._windowBundleLoadsInFlight = new Set();
     /** @type {Set<string>} */
@@ -897,14 +904,15 @@ export class WindowLightEffectV2 {
       help: {
         title: 'Window Light',
         summary: [
-          'Emissive window glow from GpuSceneMaskCompositor _Windows masks (scene UV, per-floor stack).',
+          'Emissive window glow from _Windows masks (scene UV, per-floor stack); legacy _Structural is supported and shown on the texture row when that is what loads.',
+          '_Outdoors marks roofed vs open sky (same mask Specular uses for outdoor gating).',
           'Glass Refraction splits R/G/B mask samples for prismatic window fringes; Sparkle & Glint adds animated highlights (_Specular mask).',
           'Cloud dimming ties window glow to overcast weather and cloud shadow maps.',
           'Time-of-day timeline uses the same eight clock anchors as Camera Grade.',
         ].join('\n\n'),
       },
       groups: [
-        { name: 'status', label: 'Effect Status', type: 'inline', advanced: true, parameters: ['textureStatus'] },
+        ...createMaskStatusSchemaGroups(['outdoors', 'windows']),
         { name: 'lighting', label: 'Window Light', type: 'folder', expanded: true, parameters: ['intensity', 'falloff', 'color'] },
         {
           name: 'wl-glass-refraction',
@@ -978,7 +986,6 @@ export class WindowLightEffectV2 {
       ],
       parameters: {
         hasWindowMask: { type: 'boolean', default: true, hidden: true },
-        textureStatus: { type: 'string', label: 'Mask Status', default: 'Checking...', readonly: true },
         intensity: {
           type: 'slider',
           label: 'Intensity',
@@ -1441,9 +1448,12 @@ export class WindowLightEffectV2 {
     this._specularMasks = [null, null, null, null];
     this._litSpecularMasks = [null, null, null, null];
     this._windowBundleByBasePath.clear();
+    this._windowBundleMaskIdByBasePath.clear();
     this._windowBundleLoadsInFlight.clear();
     this._windowBundleMissPaths.clear();
     this._windowBundleLastAttemptMs.clear();
+    this._runtimeMaskWindows = false;
+    this._runtimeMaskStructural = false;
     this._floorIdTex = null;
     this._overlays.clear();
   }
@@ -1468,8 +1478,59 @@ export class WindowLightEffectV2 {
     this._lastFoundrySceneData = foundrySceneData;
     this._primeWindowBundleLoadsForAllFloors();
     this.syncFrameOcclusion(null);
+    this._notifyMaskStatusUi();
     const slotCount = this._windowMasks.filter(Boolean).length;
     log.info(`WindowLightEffectV2 populated: compositor window slots=${slotCount}`);
+  }
+
+  /** @private */
+  _notifyMaskStatusUi() {
+    refreshEffectMaskStatusUi('windowLight');
+  }
+
+  /**
+   * @param {'windows'|'structural'|string} maskId
+   * @private
+   */
+  _markRuntimeWindowMaskId(maskId) {
+    const id = String(maskId || '').toLowerCase();
+    if (id === 'windows') this._runtimeMaskWindows = true;
+    if (id === 'structural') this._runtimeMaskStructural = true;
+  }
+
+  /** @private */
+  _applyBundleMaskIdForBasePath(basePath, maskId) {
+    if (!basePath || !maskId) return;
+    const id = String(maskId).toLowerCase();
+    if (id !== 'windows' && id !== 'structural') return;
+    this._windowBundleMaskIdByBasePath.set(basePath, id);
+    this._markRuntimeWindowMaskId(id);
+  }
+
+  /** @private */
+  _refreshRuntimeMaskFlagsFromBundles() {
+    for (const [basePath, tex] of this._windowBundleByBasePath) {
+      if (!tex) continue;
+      const maskId = this._windowBundleMaskIdByBasePath.get(basePath);
+      if (maskId) this._markRuntimeWindowMaskId(maskId);
+    }
+  }
+
+  /** @param {string} basePath @private */
+  _applyLoadedWindowBundleForBasePath(basePath) {
+    if (!basePath) return;
+    const groundUuid = this._windowMasks[0]?.uuid ?? null;
+    for (let idx = 0; idx < 4; idx += 1) {
+      const floorBasePath = this._resolveBasePathForFloorIndex(idx);
+      if (floorBasePath !== basePath) continue;
+      this._tryAssignWindowBundleMaskForFloor(idx, idx === 0 ? null : groundUuid);
+    }
+    this._litMasksDirty = true;
+    this._rebuildLitWindowMasks();
+    if (this._litWindowMasks.some((_t, i) => this._hasValidWindowMask(i))) {
+      this.params.hasWindowMask = true;
+    }
+    this._notifyMaskStatusUi();
   }
 
   update(timeInfo) {
@@ -1798,8 +1859,14 @@ export class WindowLightEffectV2 {
     this._floorIdTex = null;
     this.params.hasWindowMask = false;
     this._litMasksDirty = true;
+    this._runtimeMaskWindows = false;
+    this._runtimeMaskStructural = false;
 
-    if (!compositor) return;
+    if (!compositor) {
+      this._refreshRuntimeMaskFlagsFromBundles();
+      this._notifyMaskStatusUi();
+      return;
+    }
 
     try {
       const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
@@ -1807,6 +1874,11 @@ export class WindowLightEffectV2 {
       for (const floor of floors) {
         const idx = Number(floor?.index);
         if (!Number.isFinite(idx) || idx < 0 || idx > 3) continue;
+        const key = floor?.compositorKey;
+        if (key) {
+          if (compositor.getFloorTexture?.(key, 'windows')) this._runtimeMaskWindows = true;
+          if (compositor.getFloorTexture?.(key, 'structural')) this._runtimeMaskStructural = true;
+        }
         this._windowMasks[idx] = this._resolveCompositorWindowMaskForFloor(floor, compositor);
         this._specularMasks[idx] = this._resolveCompositorSpecularMaskForFloor(floor, compositor);
         if (!this._windowMasks[idx]) {
@@ -1838,6 +1910,8 @@ export class WindowLightEffectV2 {
     } catch (err) {
       log.warn('syncFrameOcclusion failed:', err);
     }
+    this._refreshRuntimeMaskFlagsFromBundles();
+    this._notifyMaskStatusUi();
   }
 
   setDebugForceMagenta(enabled = true) {
@@ -2681,6 +2755,10 @@ export class WindowLightEffectV2 {
     }
   }
 
+  /**
+   * @returns {Promise<{ texture: import('three').Texture, maskId: 'windows'|'structural' }|null>}
+   * @private
+   */
   async _probeWindowMaskTextureForBasePath(basePath, floorIndex = null) {
     if (!basePath) return null;
     const info = Number.isFinite(Number(floorIndex))
@@ -2696,20 +2774,25 @@ export class WindowLightEffectV2 {
           const p = flag?.pathsByMaskId?.[key] ?? null;
           if (typeof p === 'string' && p.trim()) {
             const tex = await loadTexture(p.trim(), { suppressProbeErrors: true });
-            if (tex) return tex;
+            if (tex) return { texture: tex, maskId: key };
           }
         }
       }
     } catch (_) {}
 
-    const suffixes = ['_Windows', '_Structural', '_windows', '_structural'];
-    for (const suffix of suffixes) {
+    const suffixProbeOrder = [
+      { suffix: '_Windows', maskId: 'windows' },
+      { suffix: '_Structural', maskId: 'structural' },
+      { suffix: '_windows', maskId: 'windows' },
+      { suffix: '_structural', maskId: 'structural' },
+    ];
+    for (const { suffix, maskId } of suffixProbeOrder) {
       const probed = await probeMaskFile(basePath, suffix, { allowConventionProbe: false });
       const resolvedPath = probed?.path ?? null;
       if (!resolvedPath) continue;
       try {
         const tex = await loadTexture(resolvedPath, { suppressProbeErrors: true });
-        if (tex) return tex;
+        if (tex) return { texture: tex, maskId };
       } catch (_) {}
     }
     return null;
@@ -2799,9 +2882,11 @@ export class WindowLightEffectV2 {
     this._windowBundleLoadsInFlight.add(basePath);
     const run = async () => {
       try {
-        const directTex = await this._probeWindowMaskTextureForBasePath(basePath, floorIndex);
-        if (directTex) {
-          this._windowBundleByBasePath.set(basePath, directTex);
+        const directHit = await this._probeWindowMaskTextureForBasePath(basePath, floorIndex);
+        if (directHit?.texture) {
+          this._windowBundleByBasePath.set(basePath, directHit.texture);
+          this._applyBundleMaskIdForBasePath(basePath, directHit.maskId);
+          this._applyLoadedWindowBundleForBasePath(basePath);
           return;
         }
         const result = await loadAssetBundle(basePath, null, {
@@ -2823,12 +2908,22 @@ export class WindowLightEffectV2 {
           : null;
         const bundleTex = hit?.texture ?? null;
         this._windowBundleByBasePath.set(basePath, bundleTex);
+        if (bundleTex) {
+          const hitId = String(hit?.id ?? hit?.type ?? '').toLowerCase();
+          const hitSuffix = String(hit?.suffix ?? '').toLowerCase();
+          const maskId = hitId.includes('structural') || hitSuffix.includes('structural')
+            ? 'structural'
+            : 'windows';
+          this._applyBundleMaskIdForBasePath(basePath, maskId);
+          this._applyLoadedWindowBundleForBasePath(basePath);
+        }
         if (!bundleTex) this._windowBundleMissPaths.add(basePath);
       } catch (_) {
         this._windowBundleByBasePath.set(basePath, null);
         this._windowBundleMissPaths.add(basePath);
       } finally {
         this._windowBundleLoadsInFlight.delete(basePath);
+        this._notifyMaskStatusUi();
       }
     };
     void run();

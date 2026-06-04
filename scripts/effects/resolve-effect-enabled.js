@@ -33,12 +33,76 @@ export const STYLISTIC_EFFECT_FC_KEYS = Object.freeze([
 /** @type {Set<string>} */
 const STYLISTIC_FC_KEY_SET = new Set(STYLISTIC_EFFECT_FC_KEYS.map(([, key]) => key));
 
+/** @type {Set<string>} */
+const STYLISTIC_EFFECT_ID_SET = new Set(STYLISTIC_EFFECT_FC_KEYS.map(([id]) => id));
+
 /**
  * @param {string} fcKey
  * @returns {boolean}
  */
 export function isStylisticEffectFcKey(fcKey) {
   return STYLISTIC_FC_KEY_SET.has(fcKey);
+}
+
+/**
+ * @param {string} effectId
+ * @returns {boolean}
+ */
+export function isStylisticEffectId(effectId) {
+  return STYLISTIC_EFFECT_ID_SET.has(effectId);
+}
+
+/**
+ * While the Tweakpane save queue is debounced (~1s), prefer the live UI toggle so
+ * per-frame sync does not stomp a just-enabled stylistic pass before scene flags flush.
+ *
+ * @param {string} effectId
+ * @param {object|null|undefined} [uiManager]
+ * @returns {boolean|null} UI authoritative value, or null when scene flags should win.
+ */
+function resolveStylisticPendingUiEnabled(effectId, uiManager = null) {
+  const ui = uiManager ?? window.MapShine?.uiManager ?? null;
+  if (!ui) return null;
+
+  const fd = ui.effectFolders?.[effectId];
+  if (!fd?.params || typeof fd.params.enabled !== 'boolean') return null;
+
+  const dirtyKey = `${effectId}.enabled`;
+  const pending =
+    (ui.saveQueue && typeof ui.saveQueue.has === 'function' && ui.saveQueue.has(effectId))
+    || (ui.dirtyParams && typeof ui.dirtyParams.has === 'function' && ui.dirtyParams.has(dirtyKey));
+
+  if (!pending) return null;
+  return fd.params.enabled === true;
+}
+
+/**
+ * Scene-flag enablement plus debounced UI toggle authority.
+ *
+ * @param {string} effectId
+ * @param {object} [mapMakerEffects]
+ * @param {object} [gmEffects]
+ * @param {object|null|undefined} [uiManager]
+ * @returns {boolean}
+ */
+export function resolveStylisticEnabledAuthoritative(
+  effectId,
+  mapMakerEffects = {},
+  gmEffects = {},
+  uiManager = null
+) {
+  const sceneOn = resolveStylisticEnabled(effectId, mapMakerEffects, gmEffects);
+  const ui = uiManager ?? window.MapShine?.uiManager ?? null;
+  const fd = ui?.effectFolders?.[effectId];
+  if (fd?.params && typeof fd.params.enabled === 'boolean') {
+    const uiOn = fd.params.enabled === true;
+    // Checkbox is owned by Tweakpane; when it diverges from persisted scene flags
+    // (debounced save, in-flight write), runtime must follow the live UI.
+    if (uiOn !== sceneOn) return uiOn;
+  }
+  const pendingUi = resolveStylisticPendingUiEnabled(effectId, ui);
+  if (pendingUi !== null) return pendingUi;
+  return sceneOn;
 }
 
 /**
@@ -69,7 +133,9 @@ export function resolveStylisticEnabled(effectId, mapMakerEffects = {}, gmEffect
  *
  * @param {object|null|undefined} floorCompositor
  * @param {object|null|undefined} [scene]
- * @param {{ syncUi?: boolean }} [options]
+ * @param {{ syncUi?: boolean }} [options] Legacy option; UI is never overwritten here.
+ *   Tweakpane owns the Enabled checkbox; rewriting `params.enabled` + refresh() each
+ *   frame prevented the toggle from staying checked.
  */
 export function syncStylisticEffectGate(floorCompositor, scene = null, options = {}) {
   const fc = floorCompositor;
@@ -86,10 +152,10 @@ export function syncStylisticEffectGate(floorCompositor, scene = null, options =
     }
   } catch (_) {}
 
-  const ui = options.syncUi === false ? null : (window.MapShine?.uiManager ?? null);
+  const ui = window.MapShine?.uiManager ?? null;
 
   for (const [effectId, fcKey] of STYLISTIC_EFFECT_FC_KEYS) {
-    let enabled = resolveStylisticEnabled(effectId, mm, gm);
+    let enabled = resolveStylisticEnabledAuthoritative(effectId, mm, gm, ui);
     try {
       const gsm = window.MapShine?.graphicsSettingsManager;
       // Only honor explicit client disables — not stylistic default-off semantics from
@@ -101,14 +167,6 @@ export function syncStylisticEffectGate(floorCompositor, scene = null, options =
 
     try {
       fc.applyParam(fcKey, 'enabled', enabled);
-    } catch (_) {}
-
-    if (!ui) continue;
-    try {
-      const fd = ui.effectFolders?.[effectId];
-      if (fd?.params && Object.prototype.hasOwnProperty.call(fd.params, 'enabled')) {
-        fd.params.enabled = enabled;
-      }
     } catch (_) {}
   }
 }

@@ -200,6 +200,12 @@ export class TweakpaneManager {
       maskDebugOverlayOpacity: 0.35,
       maskDebugOverlayReplaceScene: true,
       indoorOutdoorDebugReplaceScene: true,
+      /** 0 = soft tile edges, 1 = aggressive defringe (default tuned for upper floors). */
+      indoorOutdoorDefringeStrength: 0.95,
+      /** 0 = allow indoor nearer tile edge, 1 = indoor only on nearly solid footprint. */
+      indoorOutdoorDefringeIndoorCutoff: 0.75,
+      /** Push tile-edge fringe toward outdoor (0 = off, 1 = full bleed). */
+      indoorOutdoorDefringeEdgeOutdoor: 1.0,
       /**
        * Post — external rendering integrations.
        *
@@ -3795,6 +3801,66 @@ export class TweakpaneManager {
       this.saveUIState();
     });
 
+    const onDefringeChange = () => {
+      try {
+        const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+        compositor?._syncIndoorOutdoorDefringe?.();
+        compositor?._indoorOutdoorMaskService?.invalidateCache?.();
+        const fc = window.MapShine?.floorCompositorV2;
+        if (fc) {
+          fc._stackedOutdoorsCacheKey = null;
+          fc._stackedOutdoorsCacheTex = null;
+        }
+      } catch (_) {}
+      try { window.MapShine?.renderLoop?.requestContinuousRender?.(180); } catch (_) {}
+      this.saveUIState();
+    };
+
+    folder.addBinding(this.globalParams, 'indoorOutdoorDefringeStrength', {
+      label: 'Defringe strength',
+      min: 0,
+      max: 1,
+      step: 0.01,
+    }).on('change', onDefringeChange);
+
+    folder.addBinding(this.globalParams, 'indoorOutdoorDefringeIndoorCutoff', {
+      label: 'Indoor edge cutoff',
+      min: 0,
+      max: 1,
+      step: 0.01,
+    }).on('change', onDefringeChange);
+
+    folder.addBinding(this.globalParams, 'indoorOutdoorDefringeEdgeOutdoor', {
+      label: 'Edge outdoor bleed',
+      min: 0,
+      max: 1,
+      step: 0.01,
+    }).on('change', onDefringeChange);
+
+    folder.addButton({ title: 'Rebuild masks (defringe)' }).on('click', () => {
+      try {
+        const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+        const fs = window.MapShine?.floorStack;
+        const scene = canvas?.scene ?? null;
+        const floors = fs?.getVisibleFloors?.() ?? [];
+        for (const f of floors) {
+          const key = f?.compositorKey != null ? String(f.compositorKey) : '';
+          const bottom = Number(f?.elevationMin);
+          const top = Number(f?.elevationMax);
+          if (!key || !Number.isFinite(bottom) || !Number.isFinite(top)) continue;
+          compositor?._evictGpuMaskRtForFloor?.(key, 'floorAlpha');
+          compositor?._evictGpuMaskRtForFloor?.(key, 'outdoors');
+          compositor?.composeFloor?.({ bottom, top }, scene, { cacheOnly: true })?.catch?.(() => {});
+        }
+        compositor?._syncIndoorOutdoorDefringe?.();
+        compositor?._indoorOutdoorMaskService?.invalidateCache?.();
+        window.MapShine?.floorCompositorV2?._repairVisibleBandOutdoorsFilesAsync?.(compositor, scene);
+      } catch (e) {
+        console.warn('MapShine: defringe rebuild failed', e);
+      }
+      try { window.MapShine?.renderLoop?.requestContinuousRender?.(240); } catch (_) {}
+    });
+
     folder.addButton({ title: 'Log stack diagnostics' }).on('click', () => {
       try {
         const diag = window.MapShine?.__effectiveOutdoorsStack ?? null;
@@ -4162,6 +4228,9 @@ export class TweakpaneManager {
     this.globalParams.maskDebugOverlayOpacity = 0.35;
     this.globalParams.maskDebugOverlayReplaceScene = true;
     this.globalParams.indoorOutdoorDebugReplaceScene = true;
+    this.globalParams.indoorOutdoorDefringeStrength = 0.95;
+    this.globalParams.indoorOutdoorDefringeIndoorCutoff = 0.75;
+    this.globalParams.indoorOutdoorDefringeEdgeOutdoor = 1.0;
 
     // Reset UI scale
     this.uiScale = 1.0;
@@ -8993,6 +9062,15 @@ export class TweakpaneManager {
         }
         if (this.globalParams.indoorOutdoorDebugReplaceScene === undefined) {
           this.globalParams.indoorOutdoorDebugReplaceScene = true;
+        }
+        if (this.globalParams.indoorOutdoorDefringeStrength === undefined) {
+          this.globalParams.indoorOutdoorDefringeStrength = 0.95;
+        }
+        if (this.globalParams.indoorOutdoorDefringeIndoorCutoff === undefined) {
+          this.globalParams.indoorOutdoorDefringeIndoorCutoff = 0.75;
+        }
+        if (this.globalParams.indoorOutdoorDefringeEdgeOutdoor === undefined) {
+          this.globalParams.indoorOutdoorDefringeEdgeOutdoor = 1.0;
         }
 
         // Backwards-compatible defaults for newly added Dynamic Exposure controls

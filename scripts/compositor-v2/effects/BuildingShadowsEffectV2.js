@@ -28,6 +28,7 @@ import { createLogger } from '../../core/log.js';
 import { isFloorPreloadSuppressedAfterLevelChange } from '../floor-sim-decimation.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { resolveAuthoredOutdoorsForFloorKey, resolveCompositorOutdoorsTexture } from '../../masks/resolve-compositor-outdoors.js';
+import { getBandOutdoorsMask, hasBandOutdoorsMask } from '../../masks/indoor-outdoor-mask-api.js';
 import { FLOOR_ID_OUTDOORS_RECEIVER_GLSL } from '../shadow-system/DirectionalShadowProjector.js';
 import {
   resolveEffectShadowSun2D,
@@ -1029,7 +1030,7 @@ export class BuildingShadowsEffectV2 {
           const b = Number(parts[0]);
           const t = Number(parts[1]);
           if (!Number.isFinite(b) || !Number.isFinite(t)) continue;
-          if (!compositor.getFloorTexture(key, 'outdoors')) continue;
+          if (!hasBandOutdoorsMask(key, canvas?.scene ?? null, compositor)) continue;
           cachedEntries.push({ key, bottom: b, top: t });
         }
       }
@@ -1041,7 +1042,7 @@ export class BuildingShadowsEffectV2 {
     const seen = new Set();
     const pushKey = (key) => {
       if (!key || seen.has(key)) return;
-      if (!compositor.getFloorTexture(key, 'outdoors')) return;
+      if (!hasBandOutdoorsMask(key, canvas?.scene ?? null, compositor)) return;
       seen.add(key);
       keys.push(key);
     };
@@ -1120,7 +1121,7 @@ export class BuildingShadowsEffectV2 {
       const baked = compositor.ensureSceneSpaceOutdoorsForFloor(key, canvas?.scene ?? null);
       if (baked) return baked;
     }
-    return compositor.getFloorTexture?.(key, 'outdoors')
+    return getBandOutdoorsMask(key, canvas?.scene ?? null, compositor)
       ?? resolveAuthoredOutdoorsForFloorKey(compositor, key)
       ?? null;
   }
@@ -1312,7 +1313,7 @@ export class BuildingShadowsEffectV2 {
         const maskTex = key === 'bundle'
           ? fallbackMask
           : this._resolveOutdoorsTextureForFloorKey(compositor, key)
-            ?? compositor.getFloorTexture?.(key, 'outdoors');
+            ?? getBandOutdoorsMask(key, canvas?.scene ?? null, compositor);
         if (!maskTex) continue;
         pu.uOutdoorsMask.value = maskTex;
         pu.uHasMask.value = 1.0;
@@ -2141,7 +2142,7 @@ export class BuildingShadowsEffectV2 {
           const b = Number(parts[0]);
           const t = Number(parts[1]);
           if (!Number.isFinite(b) || !Number.isFinite(t)) continue;
-          if (!compositor.getFloorTexture(key, 'outdoors')) continue;
+          if (!hasBandOutdoorsMask(key, canvas?.scene ?? null, compositor)) continue;
           cachedEntries.push({ key, bottom: b, top: t });
         }
       }
@@ -2157,7 +2158,7 @@ export class BuildingShadowsEffectV2 {
     const seen = new Set();
     const pushKey = (key) => {
       if (!key || seen.has(key)) return;
-      if (!compositor.getFloorTexture(key, 'outdoors')) return;
+      if (!hasBandOutdoorsMask(key, canvas?.scene ?? null, compositor)) return;
       seen.add(key);
       keys.push(key);
     };
@@ -2361,7 +2362,7 @@ export class BuildingShadowsEffectV2 {
     };
 
     for (const key of floorKeys || []) {
-      const tex = compositor?.getFloorTexture?.(key, 'outdoors') ?? null;
+      const tex = getBandOutdoorsMask(key, canvas?.scene ?? null, compositor) ?? null;
       const sz = fromTex(tex);
       if (sz) return sz;
     }

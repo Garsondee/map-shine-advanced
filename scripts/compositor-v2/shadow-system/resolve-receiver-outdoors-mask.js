@@ -10,7 +10,10 @@
  * @module compositor-v2/shadow-system/resolve-receiver-outdoors-mask
  */
 
-import { resolveCompositorOutdoorsTexture } from '../../masks/resolve-compositor-outdoors.js';
+import {
+  getBandOutdoorsMask,
+  resolveViewedBandOutdoorsMask,
+} from '../../masks/indoor-outdoor-mask-api.js';
 
 /**
  * @param {object|null} compositor GpuSceneMaskCompositor
@@ -27,10 +30,15 @@ export function resolveReceiverOutdoorsMaskTexture(compositor, legacyOutdoorsMas
     && Number.isFinite(activeIdxForMask)
     && activeIdxForMask > 0;
 
-  const r = resolveCompositorOutdoorsTexture(
+  const r = resolveViewedBandOutdoorsMask(
     compositor,
     window.MapShine?.activeLevelContext ?? null,
-    { skipGroundFallback: skipGroundGlobalFallback, allowBundleFallback: false },
+    {
+      skipGroundFallback: skipGroundGlobalFallback,
+      allowBundleFallback: false,
+      strictViewedFloorOnly: true,
+      preferEffectiveStack: false,
+    },
   );
   if (r.texture) return r.texture;
 
@@ -63,7 +71,7 @@ export function resolveReceiverOutdoorsMaskTexture(compositor, legacyOutdoorsMas
       }
     }
     if (bestKey) {
-      const tex = compositor.getFloorTexture(bestKey, 'outdoors');
+      const tex = getBandOutdoorsMask(bestKey);
       if (tex) return tex;
     }
   }

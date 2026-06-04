@@ -2,6 +2,9 @@
  * Unified GpuSceneMaskCompositor _Outdoors resolution for FloorCompositor,
  * BuildingShadowsEffectV2, and diagnostics.
  *
+ * Scene-UV consumers: prefer {@link module:masks/indoor-outdoor-mask-api} instead of
+ * calling `getFloorTexture(key, 'outdoors')` directly.
+ *
  * Order: **FloorStack active floor** (compositorKey + elevation band) → active level band key
  * → compositor._activeFloorKey, then sibling keys (same band bottom in _floorMeta / _floorCache),
  * then ground band.
@@ -162,9 +165,16 @@ export function resolveCompositorFloorMaskTexture(compositor, maskTypeIds, level
     if (!candidateKeysAttempted.includes(s)) candidateKeysAttempted.push(s);
   };
 
+  const sc = typeof canvas !== 'undefined' ? canvas?.scene : null;
+
   const tryFloorMask = (floorKey) => {
     for (const type of maskTypeIds) {
-      const t = compositor.getFloorTexture(String(floorKey), type) ?? null;
+      let t = null;
+      if (type === 'outdoors') {
+        t = resolveSceneSpaceOutdoorsForFloorKey(compositor, String(floorKey), sc) ?? null;
+      } else {
+        t = compositor.getFloorTexture(String(floorKey), type) ?? null;
+      }
       if (t) return { texture: t, maskType: type };
     }
     return null;
@@ -310,9 +320,11 @@ export function resolveCompositorOutdoorsTexture(compositor, levelContext = null
   /** @type {import('three').Texture|null} */
   let tex = null;
 
+  const sc = typeof canvas !== 'undefined' ? canvas?.scene : null;
+
   const tryKey = (k) => {
     if (k == null || k === '') return null;
-    return compositor.getFloorTexture(String(k), 'outdoors') ?? null;
+    return resolveSceneSpaceOutdoorsForFloorKey(compositor, String(k), sc) ?? null;
   };
 
   for (const key of uniqueKeys) {

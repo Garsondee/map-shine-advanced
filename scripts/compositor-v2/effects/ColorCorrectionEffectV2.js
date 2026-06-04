@@ -24,11 +24,9 @@ import { weatherController } from '../../core/WeatherController.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
 import { migrateAtmosphereParams } from '../SkyEnvironmentModel.js';
 import { createMaskStatusSchemaGroup, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
-import {
-  GLSL_DECODE_OUTDOOR_CLASS,
-  GLSL_DECODE_INDOOR_WEIGHT,
-  GLSL_DECODE_OUTDOORS_MASK_SAMPLE,
-} from '../../masks/outdoors-mask-decode.js';
+import { GLSL_DECODE_OUTDOOR_CLASS } from '../../masks/outdoors-mask-decode.js';
+import { GLSL_DEFRINGE_HELPERS } from '../../masks/shaders/defringe-gLSL.js';
+import { applyDefringeToCcMaterial, getIndoorOutdoorDefringeParams } from '../../masks/indoor-outdoor-defringe.js';
 
 const log = createLogger('ColorCorrectionEffectV2');
 
@@ -1007,6 +1005,11 @@ export class ColorCorrectionEffectV2 {
         uHasSkyOcclusion: { value: 0.0 },
         uHasCombinedShadow: { value: 0.0 },
         uSkyReachMaskFlipY: { value: 0.0 },
+
+        uDefringeStackValidLo: { value: 0.58 },
+        uDefringeStackValidHi: { value: 0.995 },
+        uDefringeIndoorCovMin: { value: 0.72 },
+        uDefringeHardness: { value: 0.95 },
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;
@@ -1110,8 +1113,30 @@ export class ColorCorrectionEffectV2 {
         }
 
         ${GLSL_DECODE_OUTDOOR_CLASS}
-        ${GLSL_DECODE_INDOOR_WEIGHT}
-        ${GLSL_DECODE_OUTDOORS_MASK_SAMPLE}
+        ${GLSL_DEFRINGE_HELPERS}
+
+        uniform float uDefringeStackValidLo;
+        uniform float uDefringeStackValidHi;
+        uniform float uDefringeIndoorCovMin;
+        uniform float uDefringeHardness;
+
+        float stackedMaskCoverage(vec4 od) {
+          return defringeCoverage(od.a, uDefringeStackValidLo, uDefringeStackValidHi, uDefringeHardness);
+        }
+
+        float decodeIndoorWeightFromStackedMask(vec4 od) {
+          float outdoorClass = clamp(od.r, 0.0, 1.0);
+          if (outdoorClass >= 0.82) return 0.0;
+          float cov = stackedMaskCoverage(od);
+          if (cov < uDefringeIndoorCovMin) return 0.0;
+          return (1.0 - outdoorClass) * cov;
+        }
+
+        float decodeStackedOutdoorSample(vec4 od) {
+          float cov = stackedMaskCoverage(od);
+          if (cov < 0.02) return 1.0;
+          return mix(1.0, clamp(od.r, 0.0, 1.0), cov);
+        }
 
         float sampleIndoorWeight(vec2 screenUv) {
           if (uHasOutdoorsMask < 0.5) return 0.0;
@@ -1127,7 +1152,7 @@ export class ColorCorrectionEffectV2 {
           if (uOutdoorsMaskFlipY > 0.5) sceneUv.y = 1.0 - sceneUv.y;
           sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
           vec4 od = texture2D(tOutdoorsMask, sceneUv);
-          float indoorW = decodeIndoorWeightFromMask(od);
+          float indoorW = decodeIndoorWeightFromStackedMask(od);
           return mix(0.0, indoorW, inScene);
         }
 
@@ -1170,7 +1195,7 @@ export class ColorCorrectionEffectV2 {
           if (uOutdoorsMaskFlipY > 0.5) sceneUv.y = 1.0 - sceneUv.y;
           sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
           vec4 od = texture2D(tOutdoorsMask, sceneUv);
-          float outdoorStrength = decodeOutdoorsMaskSample(od);
+          float outdoorStrength = decodeStackedOutdoorSample(od);
           float outdoorVis = mix(1.0, outdoorStrength, inScene);
           float skyReach = sampleSkyReachAt(sceneUvRaw);
           float skyOcc = sampleSkyOcclusionAt(sceneUvRaw, inScene);
@@ -1440,6 +1465,7 @@ export class ColorCorrectionEffectV2 {
       depthWrite: false,
     });
     this._composeMaterial.toneMapped = false;
+    try { applyDefringeToCcMaterial(this._composeMaterial, getIndoorOutdoorDefringeParams()); } catch (_) {}
 
     this._composeQuad = new THREE.Mesh(
       new THREE.PlaneGeometry(2, 2),
@@ -1486,6 +1512,7 @@ export class ColorCorrectionEffectV2 {
     u.tOutdoorsMask.value = outdoorsTex ?? this._fallbackWhite;
     u.uHasOutdoorsMask.value = outdoorsTex ? 1.0 : 0.0;
     u.uOutdoorsMaskFlipY.value = outdoorsTex?.flipY ? 1.0 : 0.0;
+    try { applyDefringeToCcMaterial(this._composeMaterial, getIndoorOutdoorDefringeParams()); } catch (_) {}
     try { refreshEffectMaskStatusUi('colorCorrection'); } catch (_) {}
   }
 

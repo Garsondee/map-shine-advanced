@@ -16,6 +16,7 @@ import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { tileDocRestrictsLight } from '../../scene/tile-manager.js';
 import { resolveEffectEnabled } from '../../effects/resolve-effect-enabled.js';
+import { getBandOutdoorsMask } from '../../masks/indoor-outdoor-mask-api.js';
 import {
   hashCamera,
   hashCasterLive,
@@ -539,7 +540,11 @@ export class OverheadStampEffectV2 {
     // Strict path: always prefer the ACTIVE floor compositor texture first.
     // This avoids reusing a stale/global outdoors texture from another floor.
     if (activeKey) {
-      activeMask = sc?._sceneMaskCompositor?.getFloorTexture?.(activeKey, 'outdoors') ?? null;
+      activeMask = getBandOutdoorsMask(
+        activeKey,
+        canvas?.scene ?? null,
+        sc?._sceneMaskCompositor,
+      ) ?? null;
       if (activeMask) return activeMask;
     }
 
@@ -647,12 +652,12 @@ export class OverheadStampEffectV2 {
       if (!Number.isFinite(idx) || idx <= activeIdx) continue;
       let tex = null;
       const ck = f?.compositorKey != null ? String(f.compositorKey) : '';
-      if (ck) tex = compositor.getFloorTexture?.(ck, 'outdoors') ?? null;
+      if (ck) tex = getBandOutdoorsMask(ck, canvas?.scene ?? null, compositor) ?? null;
       if (!tex) {
         const b = Number(f?.elevationMin);
         const t = Number(f?.elevationMax);
         if (Number.isFinite(b) && Number.isFinite(t)) {
-          tex = compositor.getFloorTexture?.(`${b}:${t}`, 'outdoors') ?? null;
+          tex = getBandOutdoorsMask(`${b}:${t}`, canvas?.scene ?? null, compositor) ?? null;
         }
       }
       if (tex && upper.length < 3) upper.push(tex);

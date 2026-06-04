@@ -33,6 +33,7 @@ import {
   CONSUMER_CATALOG,
   resolveOutdoorsVariant,
 } from './mask-catalog.js';
+import { getBandOutdoorsMask, getEffectiveOutdoorsStack } from './indoor-outdoor-mask-api.js';
 
 const log = createLogger('MaskBindingController');
 
@@ -109,6 +110,7 @@ export class MaskBindingController {
   _buildBundle(compositor, floor) {
     const masks = Object.create(null);
     const floorKey = floor.compositorKey;
+    const scene = typeof canvas !== 'undefined' ? canvas?.scene : null;
     for (const id of Object.keys(MASK_CATALOG)) {
       const entry = MASK_CATALOG[id];
       if (!entry.perFloor) {
@@ -117,7 +119,11 @@ export class MaskBindingController {
       }
       let tex = null;
       try {
-        tex = compositor?.getFloorTexture?.(floorKey, id) ?? null;
+        if (id === 'outdoors') {
+          tex = getBandOutdoorsMask(floorKey, scene, compositor);
+        } else {
+          tex = compositor?.getFloorTexture?.(floorKey, id) ?? null;
+        }
       } catch (_) {
         tex = null;
       }
@@ -191,6 +197,26 @@ export class MaskBindingController {
    * @private
    */
   _pickSingleTex(bundles, activeIndex, maskId) {
+    if (maskId === 'outdoors') {
+      let multiFloor = false;
+      try {
+        multiFloor = (window.MapShine?.floorStack?.getFloors?.() ?? []).length > 1;
+      } catch (_) {}
+      if (multiFloor) {
+        const renderer = window.MapShine?.floorCompositorV2?.renderer
+          ?? window.MapShine?.renderer
+          ?? null;
+        if (renderer) {
+          const built = getEffectiveOutdoorsStack(
+            renderer,
+            typeof canvas !== 'undefined' ? canvas?.scene : null,
+            null,
+            this._getCompositor(),
+          );
+          if (built.outdoors) return built.outdoors;
+        }
+      }
+    }
     const active = bundles.find((b) => b.index === activeIndex);
     if (active?.masks?.[maskId]) return active.masks[maskId];
     if (maskId === 'outdoors' || maskId === 'skyReach') return null;

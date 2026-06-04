@@ -36,6 +36,7 @@ import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { loadImageTexture, VISUAL_MASK_MAX_SIZE } from '../../assets/image-texture-loader.js';
 import { createFallback1x1Texture } from '../../assets/texture-policies.js';
+import { getBandOutdoorsMask } from '../../masks/indoor-outdoor-mask-api.js';
 import {
   tileHasLevelsRange,
   readTileLevelsFlags,
@@ -1105,7 +1106,7 @@ export class SpecularEffectV2 {
         if (!roofTex) {
           const cak = compositor._activeFloorKey ?? null;
           if (cak) {
-            roofTex = compositor.getFloorTexture?.(String(cak), 'outdoors') ?? null;
+            roofTex = getBandOutdoorsMask(String(cak), canvas?.scene ?? null, compositor) ?? null;
             recordAttempt('compositor._activeFloorKey', roofTex, String(cak));
             if (roofTex) singleFloorRoofSource = `compositorInternalActiveKey:${String(cak)}`;
           }
@@ -2372,7 +2373,7 @@ export class SpecularEffectV2 {
 
     const tryKey = (k) => {
       if (k == null || k === '') return null;
-      return compositor.getFloorTexture?.(String(k), 'outdoors') ?? null;
+      return getBandOutdoorsMask(String(k), canvas?.scene ?? null, compositor) ?? null;
     };
 
     const b = Number(floorBand.elevationMin);

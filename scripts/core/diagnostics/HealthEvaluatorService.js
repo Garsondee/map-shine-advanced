@@ -17,6 +17,7 @@ import {
   evaluateCompositorWindowLightReadiness,
   partitionWindowLightOverlays,
 } from './window-light-health-utils.js';
+import { getBandOutdoorsMask } from '../../masks/indoor-outdoor-mask-api.js';
 
 const log = createLogger('HealthEvaluator');
 
@@ -347,7 +348,7 @@ export class HealthEvaluatorService {
       for (const key of keys) {
         if (!key) continue;
         try {
-          const tex = comp.getFloorTexture(key, 'outdoors');
+          const tex = getBandOutdoorsMask(key, canvas?.scene ?? null, comp);
           const br = this._texBrief(tex);
           getFloorTextureAttempts.push({
             key: String(key),
@@ -652,17 +653,17 @@ export class HealthEvaluatorService {
       const inMeta = (() => {
         try { return !!comp._floorMeta?.has?.(ck); } catch (_) { return false; }
       })();
-      const texDirect = comp.getFloorTexture?.(ck, 'outdoors') ?? null;
+      const texDirect = getBandOutdoorsMask(ck, canvas?.scene ?? null, comp) ?? null;
       const bottom = Number(f?.elevationMin);
       const siblingKeys = metaKeys.filter((k) => Number(String(k).split(':')[0]) === bottom);
       let resolvedTex = texDirect;
-      let resolvedNote = texDirect ? `getFloorTexture("${ck}")` : null;
+      let resolvedNote = texDirect ? `getBandOutdoorsMask("${ck}")` : null;
       if (!resolvedTex && Number.isFinite(bottom)) {
         for (const sk of siblingKeys.sort()) {
-          const t = comp.getFloorTexture?.(sk, 'outdoors') ?? null;
+          const t = getBandOutdoorsMask(sk, canvas?.scene ?? null, comp) ?? null;
           if (t) {
             resolvedTex = t;
-            resolvedNote = `getFloorTexture("${sk}") via same elevation bottom`;
+            resolvedNote = `getBandOutdoorsMask("${sk}") via same elevation bottom`;
             break;
           }
         }

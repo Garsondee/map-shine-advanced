@@ -10,6 +10,8 @@ import { readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
 import { resolveEffectEnabled } from '../effects/resolve-effect-enabled.js';
 import { GROUND_Z } from '../compositor-v2/LayerOrderPolicy.js';
 import { estimateIndoorWeightFromRgba } from '../masks/outdoors-mask-decode.js';
+import { estimateStackedIndoorWeight } from '../masks/indoor-outdoor-defringe.js';
+import { getBandOutdoorsMask } from '../masks/indoor-outdoor-mask-api.js';
 
 const SCHEMA_VERSION = 8;
 const PICK_LABELS = ['A', 'B', 'C'];
@@ -99,7 +101,10 @@ export function readRtPixel(renderer, rt, uvX, uvY) {
  * @param {number} a
  * @returns {number}
  */
-function decodeCcOutdoorStrength(r, g, b, a) {
+function decodeCcOutdoorStrength(r, g, b, a, stackedEffective = true) {
+  if (stackedEffective) {
+    return Math.max(0, Math.min(1, r));
+  }
   const lum = Math.max(r, g, b);
   return Math.max(0, Math.min(1, 1.0 - a + lum * a));
 }
@@ -112,7 +117,10 @@ function decodeCcOutdoorStrength(r, g, b, a) {
  * @param {number} a
  * @returns {number}
  */
-function estimateCcIndoorWeight(r, g, b, a) {
+function estimateCcIndoorWeight(r, g, b, a, stackedEffective = true) {
+  if (stackedEffective) {
+    return estimateStackedIndoorWeight(r, a);
+  }
   return estimateIndoorWeightFromRgba(r, g, b, a);
 }
 
@@ -1080,7 +1088,7 @@ export function sampleScenePixelAt(wx, wy, options = {}) {
   const floorAlphaRt = compositor._floorCache?.get(floorKey)?.get('floorAlpha') ?? null;
   point.masks.floorAlphaGpu = compactPixel(readRtPixel(renderer, floorAlphaRt, uvX, uvY));
   const bundleMetaTex = compositor.getMaskTextureForFloor?.(floorKey, 'outdoors') ?? null;
-  const getFloorTex = compositor.getFloorTexture?.(floorKey, 'outdoors') ?? null;
+  const getFloorTex = getBandOutdoorsMask(floorKey, canvas?.scene ?? null, compositor) ?? null;
   if (bundleMetaTex) {
     const cpuSample = sampleCpuTextureAtSceneUv(bundleMetaTex, uvX, uvY);
     point.masks.bundleMetaOutdoors = {

@@ -27,6 +27,20 @@ import {
   STACKED_OUTDOORS_LAYER_FRAG,
   STACKED_SKY_REACH_LAYER_FRAG,
 } from './shaders/stackedOutdoorsShader.js';
+import {
+  STACKED_OUTDOORS_POST_VERT,
+  STACKED_OUTDOORS_POST_FRAG,
+} from './shaders/stackedOutdoorsPostShader.js';
+import {
+  applyDefringeToStackOutdoorsMaterial,
+  applyDefringeToStackPostMaterial,
+  applyDefringeToStackSkyReachMaterial,
+  applyDefringeToTileMaterial,
+  getIndoorOutdoorDefringeParams,
+  syncDefringeCacheInvalidation,
+  applyDefringeToCcMaterial,
+} from './indoor-outdoor-defringe.js';
+import { GLSL_DEFRINGE_HELPERS } from './shaders/defringe-gLSL.js';
 import { isLevelsEnabledForScene, tileHasLevelsRange, readTileLevelsFlags, readSceneLevelsFlag, hasV14NativeLevels, readV14SceneLevels, getViewedLevelBackgroundSrc } from '../foundry/levels-scene-flags.js';
 import { isTileOverhead } from '../scene/tile-manager.js';
 import { collectEnabledMaskIds, getMaskBundleOptionsFromFlagOnly } from '../settings/mask-manifest-flags.js';
@@ -183,9 +197,16 @@ const TILE_FRAG = /* glsl */`
 
   uniform sampler2D tMask;
   uniform int uMode; // 0 = lighten, 1 = source-over, 2 = alpha-extract
+  uniform float uDefringeFloorAlphaLo;
+  uniform float uDefringeFloorAlphaHi;
+  uniform float uDefringeCovLo;
+  uniform float uDefringeCovHi;
+  uniform float uDefringeHardness;
 
   varying vec2 vSceneUv;
   varying vec2 vTileUv;
+
+  ${GLSL_DEFRINGE_HELPERS}
 
   void main() {
     // Discard fragments outside the tile footprint.
@@ -217,18 +238,17 @@ const TILE_FRAG = /* glsl */`
       float lum = max(s.r, max(s.g, s.b)) * s.a;
       gl_FragColor = vec4(lum, lum, lum, lum);
     } else if (uMode == 2) {
-      // Alpha-extract: output the tile albedo's alpha channel as greyscale.
-      // Used by _composeFloorAlpha() to build world-space per-floor alpha RTs.
-      // Fully opaque tiles (alpha=1 everywhere) fill their rect with white.
-      // Tiles with transparent areas correctly encode the holes as black.
-      float a = s.a;
+      // Alpha-extract: tile albedo alpha → floorAlpha RT (defringe sharpen).
+      float a = defringeCoverage(s.a, uDefringeFloorAlphaLo, uDefringeFloorAlphaHi, uDefringeHardness);
       gl_FragColor = vec4(a, a, a, a);
     } else if (uMode == 4) {
-      // Outdoors → floorAlpha: preserve authored alpha holes but treat strong
-      // outdoor RGB as full floor coverage (open-air roof decks).
+      // Outdoors → floorAlpha: defringe alpha fringe; open-air decks use solid RGB.
       float outdoorRaw = clamp(max(s.r, max(s.g, s.b)), 0.0, 1.0);
       float outdoorClass = (outdoorRaw <= 0.10) ? 0.0 : ((outdoorRaw >= 0.90) ? 1.0 : outdoorRaw);
-      float cov = max(s.a, outdoorClass);
+      float cov = defringeCoverage(s.a, uDefringeCovLo, uDefringeCovHi, uDefringeHardness);
+      if (outdoorClass >= 0.85 && s.a >= 0.48) {
+        cov = max(cov, outdoorClass);
+      }
       gl_FragColor = vec4(cov, cov, cov, 1.0);
     } else {
       // Source-over: output full RGBA as-is.
@@ -471,6 +491,9 @@ export class GpuSceneMaskCompositor {
     /** @type {Promise<void>|null} Serialize concurrent preloadAllFloors (load + effects). */
     this._preloadAllFloorsInFlight = null;
 
+    /** @type {string|null} Last applied {@link getIndoorOutdoorDefringeParams} signature. */
+    this._defringeParamsSig = null;
+
     /**
      * Fallback CPU compositor used when the WebGL renderer is unavailable.
      * @type {SceneMaskCompositor}
@@ -557,6 +580,12 @@ export class GpuSceneMaskCompositor {
     this._stackedOutdoorsRtA = null;
     /** @type {THREE.WebGLRenderTarget|null} */
     this._stackedOutdoorsRtB = null;
+    /** @type {THREE.RawShaderMaterial|null} Post-pass fringe erode on stacked outdoors. */
+    this._stackedOutdoorsPostMaterial = null;
+    /** @type {THREE.Mesh|null} */
+    this._stackedOutdoorsPostMesh = null;
+    /** @type {THREE.Scene|null} */
+    this._stackedOutdoorsPostScene = null;
 
     /** @type {THREE.RawShaderMaterial|null} Stacked skyReach layer combiner. */
     this._stackedSkyReachMaterial = null;
@@ -925,6 +954,7 @@ export class GpuSceneMaskCompositor {
         });
         this._floorMeta.delete(floorKey);
         this._evictGpuMaskRtForFloor(floorKey, 'outdoors');
+        this._evictGpuMaskRtForFloor(floorKey, 'floorAlpha');
         cached = null;
       }
     }
@@ -1001,8 +1031,9 @@ export class GpuSceneMaskCompositor {
 
     log.debug('composeFloor: cache miss, compositing floor', { floorKey, bandBottom, bandTop });
 
-    // Stale outdoors RT must not shadow bundle/file masks merged into _floorMeta.
+    // Stale outdoors / floorAlpha RTs must not shadow fresh tile footprint or bundle data.
     this._evictGpuMaskRtForFloor(floorKey, 'outdoors');
+    this._evictGpuMaskRtForFloor(floorKey, 'floorAlpha');
 
     let newMasks = null;
     let primaryBasePath = null;
@@ -2677,6 +2708,8 @@ export class GpuSceneMaskCompositor {
       tex.flipY = false;
       tex.needsUpdate = true;
       tex.colorSpace = THREE.NoColorSpace ?? '';
+      tex.userData = tex.userData ?? {};
+      tex.userData.msaDerivedFromOutdoors = true;
     }
     log.debug('_ensureFloorAlphaFromOutdoors: derived floorAlpha from outdoors', { floorKey: key, outW, outH });
     return tex ?? null;
@@ -2830,6 +2863,10 @@ export class GpuSceneMaskCompositor {
     this._stackedOutdoorsMaterial = null;
     this._stackedOutdoorsMesh = null;
     this._stackedOutdoorsScene = null;
+    try { this._stackedOutdoorsPostMaterial?.dispose(); } catch (_) {}
+    this._stackedOutdoorsPostMaterial = null;
+    this._stackedOutdoorsPostMesh = null;
+    this._stackedOutdoorsPostScene = null;
     try { this._stackedOutdoorsRtA?.dispose(); } catch (_) {}
     try { this._stackedOutdoorsRtB?.dispose(); } catch (_) {}
     this._stackedOutdoorsRtA = null;
@@ -2907,6 +2944,11 @@ export class GpuSceneMaskCompositor {
           uScaleSign: { value: new THREE.Vector2(1, 1) },
           uRotation:  { value: 0.0 },
           uMode:      { value: 1 },
+          uDefringeFloorAlphaLo: { value: 0.62 },
+          uDefringeFloorAlphaHi: { value: 0.999 },
+          uDefringeCovLo: { value: 0.58 },
+          uDefringeCovHi: { value: 0.98 },
+          uDefringeHardness: { value: 0.88 },
         },
         depthTest:  false,
         depthWrite: false,
@@ -3044,12 +3086,51 @@ export class GpuSceneMaskCompositor {
           tFloorAlpha: { value: null },
           tOutdoors: { value: null },
           uUseOutdoorsAlphaCoverage: { value: 0.0 },
+          uHasRealFloorAlpha: { value: 0.0 },
+          uDefringeFootLo: { value: 0.86 },
+          uDefringeFootHi: { value: 0.999 },
+          uDefringeIndoorFootMin: { value: 0.94 },
+          uDefringeOdAlphaLo: { value: 0.58 },
+          uDefringeOdAlphaHi: { value: 0.98 },
+          uDefringeHardness: { value: 0.88 },
+          uDefringeEdgeOutdoorBias: { value: 1.0 },
         },
         depthTest: false,
         depthWrite: false,
         transparent: false,
         blending: THREE.NoBlending,
       });
+    }
+    if (!this._stackedOutdoorsPostMaterial) {
+      this._stackedOutdoorsPostMaterial = new THREE.RawShaderMaterial({
+        vertexShader: STACKED_OUTDOORS_POST_VERT,
+        fragmentShader: STACKED_OUTDOORS_POST_FRAG,
+        uniforms: {
+          tStack: { value: null },
+          tTopFloorAlpha: { value: null },
+          uHasTopFloorAlpha: { value: 0.0 },
+          uDefringeFootLo: { value: 0.92 },
+          uDefringeFootHi: { value: 0.999 },
+          uDefringeIndoorFootMin: { value: 0.94 },
+          uDefringeStackValidLo: { value: 0.62 },
+          uDefringeStackValidHi: { value: 0.998 },
+          uDefringeIndoorCovMin: { value: 0.75 },
+          uDefringeEdgeOutdoorBias: { value: 1.0 },
+          uDefringeHardness: { value: 0.95 },
+        },
+        depthTest: false,
+        depthWrite: false,
+        transparent: false,
+        blending: THREE.NoBlending,
+      });
+    }
+    if (!this._stackedOutdoorsPostMesh) {
+      this._stackedOutdoorsPostMesh = new THREE.Mesh(this._quadGeo, this._stackedOutdoorsPostMaterial);
+      this._stackedOutdoorsPostMesh.frustumCulled = false;
+    }
+    if (!this._stackedOutdoorsPostScene) {
+      this._stackedOutdoorsPostScene = new THREE.Scene();
+      this._stackedOutdoorsPostScene.add(this._stackedOutdoorsPostMesh);
     }
     if (!this._stackedOutdoorsMesh) {
       this._stackedOutdoorsMesh = new THREE.Mesh(this._quadGeo, this._stackedOutdoorsMaterial);
@@ -3068,6 +3149,9 @@ export class GpuSceneMaskCompositor {
           tAccum: { value: null },
           tFloorAlpha: { value: null },
           tSkyReach: { value: null },
+          uDefringeFootLo: { value: 0.86 },
+          uDefringeFootHi: { value: 0.999 },
+          uDefringeHardness: { value: 0.88 },
         },
         depthTest: false,
         depthWrite: false,
@@ -3083,6 +3167,23 @@ export class GpuSceneMaskCompositor {
       this._stackedSkyReachScene = new THREE.Scene();
       this._stackedSkyReachScene.add(this._stackedSkyReachMesh);
     }
+  }
+
+  /**
+   * Push Tweakpane defringe uniforms and invalidate GPU caches when settings change.
+   * @private
+   */
+  _syncIndoorOutdoorDefringe() {
+    const p = getIndoorOutdoorDefringeParams();
+    syncDefringeCacheInvalidation(this, p);
+    applyDefringeToTileMaterial(this._tileMaterial, p);
+    applyDefringeToStackOutdoorsMaterial(this._stackedOutdoorsMaterial, p);
+    applyDefringeToStackPostMaterial(this._stackedOutdoorsPostMaterial, p);
+    applyDefringeToStackSkyReachMaterial(this._stackedSkyReachMaterial, p);
+    applyDefringeToCcMaterial(
+      window.MapShine?.floorCompositorV2?._colorCorrectionEffect?._composeMaterial,
+      p,
+    );
   }
 
   /**
@@ -3104,6 +3205,8 @@ export class GpuSceneMaskCompositor {
     if (!Array.isArray(floorKeysBottomToTop) || floorKeysBottomToTop.length === 0) {
       return { preparedKeys, skippedKeys, reasons };
     }
+
+    this._syncIndoorOutdoorDefringe();
 
     const THREE = window.THREE;
     const d = canvas?.dimensions;
@@ -3323,6 +3426,7 @@ export class GpuSceneMaskCompositor {
 
     const sc = scene ?? canvas?.scene ?? null;
     this._ensureGpuResources(THREE);
+    this._syncIndoorOutdoorDefringe();
 
     let refW = 0;
     let refH = 0;
@@ -3374,11 +3478,13 @@ export class GpuSceneMaskCompositor {
       appliedKeys.push(String(floorKey));
       const alphaTex = layer.floorAlpha;
       const useOutdoorsAlphaCoverage = !alphaTex;
+      const hasRealFloorAlpha = !!(alphaTex && !alphaTex.userData?.msaDerivedFromOutdoors);
 
       m.uniforms.tAccum.value = accum.texture;
       m.uniforms.tFloorAlpha.value = alphaTex ?? outdoorsTex;
       m.uniforms.tOutdoors.value = outdoorsTex;
       m.uniforms.uUseOutdoorsAlphaCoverage.value = useOutdoorsAlphaCoverage ? 1.0 : 0.0;
+      m.uniforms.uHasRealFloorAlpha.value = hasRealFloorAlpha ? 1.0 : 0.0;
 
       renderer.setRenderTarget(scratch);
       renderer.setClearColor(0x000000, 0);
@@ -3394,6 +3500,30 @@ export class GpuSceneMaskCompositor {
       scratch = tmp;
     }
 
+    const topKey = appliedKeys.length
+      ? appliedKeys[appliedKeys.length - 1]
+      : String(floorKeysBottomToTop[floorKeysBottomToTop.length - 1] ?? '');
+    const topFa = topKey
+      ? this._prepareStackLayerTextures(topKey, sc).floorAlpha
+      : null;
+    if (topFa && this._stackedOutdoorsPostMaterial) {
+      const post = this._stackedOutdoorsPostMaterial;
+      post.uniforms.tStack.value = accum.texture;
+      post.uniforms.tTopFloorAlpha.value = topFa;
+      post.uniforms.uHasTopFloorAlpha.value = 1.0;
+      renderer.setRenderTarget(scratch);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear();
+      try {
+        renderer.render(this._stackedOutdoorsPostScene, this._orthoCamera);
+      } catch (e) {
+        log.debug('composeStackedOutdoorsMask: post defringe failed', { err: e });
+      }
+      const tmpPost = accum;
+      accum = scratch;
+      scratch = tmpPost;
+    }
+
     renderer.setClearColor(prevClearColor, prevClearAlpha);
     renderer.setRenderTarget(prevTarget);
 
@@ -3401,6 +3531,8 @@ export class GpuSceneMaskCompositor {
       appliedKeys,
       skippedKeys,
       floorKeys: floorKeysBottomToTop.map((k) => String(k)),
+      postDefringe: !!topFa,
+      topFloorKey: topKey || null,
     };
 
     return accum.texture;
@@ -3420,6 +3552,7 @@ export class GpuSceneMaskCompositor {
     }
 
     this._ensureGpuResources(THREE);
+    this._syncIndoorOutdoorDefringe();
 
     let refW = 0;
     let refH = 0;
@@ -4022,6 +4155,8 @@ export class GpuSceneMaskCompositor {
     }
 
     if (alphaTiles.length === 0) return null;
+
+    this._syncIndoorOutdoorDefringe();
 
     // Use HIGH_DETAIL_DATA_MAX resolution — the floor alpha is a binary-ish mask; no need for
     // visual-quality resolution. Half-res of HIGH_DETAIL_DATA_MAX is sufficient but HIGH_DETAIL_DATA_MAX

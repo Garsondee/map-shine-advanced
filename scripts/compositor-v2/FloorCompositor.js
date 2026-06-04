@@ -113,9 +113,11 @@ import { CandleFlamesEffectV2 } from './effects/CandleFlamesEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
 import { LightingDirector } from '../core/LightingDirector.js';
 import {
-  resolveCompositorOutdoorsTexture,
-} from '../masks/resolve-compositor-outdoors.js';
-import { getIndoorOutdoorMaskService } from '../masks/IndoorOutdoorMaskService.js';
+  collectBandOutdoorsByFloorIndex,
+  getBandOutdoorsMask,
+  getIndoorOutdoorMaskService,
+  resolveViewedBandOutdoorsMask,
+} from '../masks/indoor-outdoor-mask-api.js';
 import {
   clearShelterOutdoorsMaskCache,
   refreshShelterOutdoorsMaskForActiveFloor,
@@ -5951,17 +5953,20 @@ export class FloorCompositor {
       return { texture: roofMap, floorKey: roofMap ? 'weatherController' : null };
     }
 
-    const gpu = resolveCompositorOutdoorsTexture(
+    const gpu = resolveViewedBandOutdoorsMask(
       compositor,
       context,
       {
         skipGroundFallback: skipGroundGlobalFallback,
         allowBundleFallback,
         strictViewedFloorOnly,
+        preferEffectiveStack: !strictViewedFloorOnly,
+        renderer: this.renderer ?? null,
+        scene: canvas?.scene ?? null,
       },
     );
     if (gpu.texture) {
-      return { texture: gpu.texture, floorKey: gpu.resolvedKey };
+      return { texture: gpu.texture, floorKey: gpu.floorKey };
     }
 
     if (allowBundleFallback && bundleMask) {
@@ -6061,7 +6066,7 @@ export class FloorCompositor {
       const floorKey = floor?.compositorKey ?? null;
       if (compositor && floorKey) {
         const floorTex = (
-          compositor.getFloorTexture?.(floorKey, 'outdoors')
+          getBandOutdoorsMask(floorKey, canvas?.scene ?? null, compositor)
           ?? compositor.getFloorTexture?.(floorKey, 'skyReach')
           ?? null
         );
@@ -6144,6 +6149,9 @@ export class FloorCompositor {
           if (compositor._authoredOutdoorsFileByFloor?.has(key)) continue;
           try {
             await compositor._promoteBandBackgroundOutdoorsFile(key, bottom, top, sc);
+            try {
+              await compositor.composeFloor?.({ bottom, top }, sc, { cacheOnly: true });
+            } catch (_) {}
             const renderer = this.renderer;
             if (renderer) {
               compositor.prepareVisibleFloorsForOutdoorsStack?.(renderer, [key], sc);
@@ -6308,13 +6316,16 @@ export class FloorCompositor {
       let paintedOutdoorsRoute = null;
       try {
         if (compositor) {
-          const strictPainted = resolveCompositorOutdoorsTexture(compositor, context, {
+          const strictPainted = resolveViewedBandOutdoorsMask(compositor, context, {
             skipGroundFallback: multiFloorScene,
             allowBundleFallback: !multiFloorScene || !compositorHasFloorMasks,
             strictViewedFloorOnly: true,
+            preferEffectiveStack: false,
+            renderer: this.renderer ?? null,
+            scene: canvas?.scene ?? null,
           });
           paintedOutdoorsTex = strictPainted.texture ?? null;
-          paintedOutdoorsRoute = strictPainted.route ?? strictPainted.resolvedKey ?? null;
+          paintedOutdoorsRoute = strictPainted.route ?? strictPainted.floorKey ?? null;
         }
       } catch (_) {
         paintedOutdoorsTex = null;
@@ -6381,20 +6392,20 @@ export class FloorCompositor {
       try {
         const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
         if (compositor) {
+          const { textures, floorIdTex } = collectBandOutdoorsByFloorIndex(
+            compositor,
+            4,
+            canvas?.scene ?? null,
+          );
+          cloudPerFloor = textures;
+          cloudFloorIdTex = floorIdTex;
+          cloudAnyPerFloorMask = textures.some((t) => !!t);
           const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
           for (const floor of floors) {
             const idx = Number(floor?.index);
-            const key = floor?.compositorKey;
             if (!Number.isFinite(idx) || idx < 0 || idx > 3) {
               cloudFloorIdSupported = false;
-              continue;
             }
-            if (!key) continue;
-            cloudPerFloor[idx] = compositor.getFloorTexture?.(key, 'outdoors') ?? null;
-            if (cloudPerFloor[idx]) cloudAnyPerFloorMask = true;
-          }
-          if (cloudFloorIdSupported && cloudAnyPerFloorMask) {
-            cloudFloorIdTex = compositor.floorIdTarget?.texture ?? null;
           }
         }
       } catch (_) {}
@@ -8144,7 +8155,7 @@ export class FloorCompositor {
         if (compositor && floorKey) {
           return (
             compositor.getFloorTexture?.(floorKey, 'skyReach')
-            ?? compositor.getFloorTexture?.(floorKey, 'outdoors')
+            ?? getBandOutdoorsMask(floorKey, canvas?.scene ?? null, compositor)
             ?? null
           );
         }

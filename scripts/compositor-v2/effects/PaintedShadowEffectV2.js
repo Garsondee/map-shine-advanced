@@ -25,6 +25,7 @@ import { loadAssetBundle, loadTexture, probeMaskFile } from '../../assets/loader
 import { getViewedLevelBackgroundSrc } from '../../foundry/levels-scene-flags.js';
 import { getMaskTextureManifest, maskTextureManifestMatchesLoadContext } from '../../settings/mask-manifest-flags.js';
 import { collectCompositorFloorCandidateKeys, resolveCompositorFloorMaskTexture, resolveCompositorOutdoorsTexture } from '../../masks/resolve-compositor-outdoors.js';
+import { getBandOutdoorsMask } from '../../masks/indoor-outdoor-mask-api.js';
 import { FLOOR_ID_OUTDOORS_RECEIVER_GLSL } from '../shadow-system/DirectionalShadowProjector.js';
 import {
   resolveEffectShadowSun2D,
@@ -2199,7 +2200,10 @@ export class PaintedShadowEffectV2 {
           const idx = Number(floor?.index);
           if (!Number.isFinite(idx) || idx < 0 || idx > 3) continue;
           this._paintedMasks[idx] = this._resolveCompositorPaintedMaskForFloor(floor, compositor);
-          this._outdoorsMasks[idx] = compositor.getFloorTexture?.(floor.compositorKey, 'outdoors') ?? null;
+          const odKey = floor.compositorKey != null ? String(floor.compositorKey) : '';
+          this._outdoorsMasks[idx] = odKey
+            ? (getBandOutdoorsMask(odKey, canvas?.scene ?? null, compositor) ?? null)
+            : null;
           if (!this._paintedMasks[idx]) {
             this._tryAssignPaintedBundleMaskForFloor(idx);
           }

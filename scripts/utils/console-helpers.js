@@ -1581,6 +1581,13 @@ export const consoleHelpers = {
     const ccBoundUuid = ms?.__ccPostMergeOutdoorsTexture?.uuid ?? null;
     const stackUuid = effectiveStack?.textureUuid ?? null;
 
+    try {
+      const { getIndoorOutdoorDefringeParams } = await import('../masks/indoor-outdoor-defringe.js');
+      report.indoorOutdoorDefringe = getIndoorOutdoorDefringeParams();
+    } catch (_) {
+      report.indoorOutdoorDefringe = null;
+    }
+
     report.stackedOutdoorsForCc = {
       visibleFloorKeys: visibleKeys,
       stackKeysForCameraGrade: visibleKeys.slice(),

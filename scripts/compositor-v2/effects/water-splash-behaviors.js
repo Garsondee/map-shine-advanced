@@ -20,6 +20,7 @@ import {
   collectCompositorFloorCandidateKeys,
   resolveAuthoredOutdoorsForFloorKey,
 } from '../../masks/resolve-compositor-outdoors.js';
+import { getBandOutdoorsMask, hasBandOutdoorsMask } from '../../masks/indoor-outdoor-mask-api.js';
 import { resolveEffectWindParticleDrift } from './resolve-effect-wind.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -459,7 +460,7 @@ function resolveSplashOutdoorsSourceTex(floorIndex, compositor, floorKey, waterE
   }
 
   if (compositor && floorKey && floorKey !== 'none') {
-    const tex = compositor.getFloorTexture?.(floorKey, 'outdoors')
+    const tex = getBandOutdoorsMask(floorKey, canvas?.scene ?? null, compositor)
       ?? compositor.getMaskTextureForFloor?.(floorKey, 'outdoors')
       ?? null;
     if (tex) {
@@ -633,7 +634,7 @@ function resolveOutdoorsFloorKeyForSampling(compositor, floorIndex, levelContext
     if (!key) continue;
     if (resolveAuthoredOutdoorsForFloorKey(compositor, key)) return key;
     try {
-      if (compositor.getFloorTexture?.(key, 'outdoors')) return key;
+      if (hasBandOutdoorsMask(key, canvas?.scene ?? null, compositor)) return key;
     } catch (_) {}
   }
 

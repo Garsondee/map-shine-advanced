@@ -7,6 +7,7 @@
 
 import { createLogger } from '../core/log.js';
 import { resolveSceneSpaceOutdoorsForFloorKey } from './resolve-compositor-outdoors.js';
+import { defringeParamsSignature, getIndoorOutdoorDefringeParams } from './indoor-outdoor-defringe.js';
 
 const log = createLogger('IndoorOutdoorMaskService');
 
@@ -123,7 +124,8 @@ export class IndoorOutdoorMaskService {
       const s = compositor.getFloorTexture?.(key, 'skyReach')?.uuid ?? 'no-sr';
       return `${key}:${o}:${a}:${s}`;
     }).join('|');
-    const cacheKey = `${sceneId}|${keys.join(',')}|${maskSig}|v${cacheVersion}`;
+    const defringeSig = defringeParamsSignature(getIndoorOutdoorDefringeParams());
+    const cacheKey = `${sceneId}|${keys.join(',')}|${maskSig}|v${cacheVersion}|${defringeSig}`;
 
     if (this._stackCacheKey === cacheKey && this._stackTexture) {
       const diag = {

@@ -28,12 +28,20 @@ export function decodeOutdoorClassFromRgb(r, g, b) {
  * @returns {number} 0..1 indoor weight for Camera Grade ToD
  */
 export function estimateIndoorWeightFromRgba(r, g, b, a) {
-  const valid = a >= 0.5 ? 1 : 0;
+  const alpha = Math.max(0, Math.min(1, a));
+  // Soft alpha fringe (tile/level edge) is not authored indoor classification.
+  if (alpha < 0.35) return 0;
+  const valid = alpha >= 0.5 ? 1 : 0;
   const outdoorClass = decodeOutdoorClassFromRgb(r, g, b);
   const indoorSignal = Math.max(0, Math.min(1, 1 - outdoorClass));
   const t = Math.max(0, Math.min(1, (indoorSignal - 0.2) / (0.75 - 0.2)));
-  const indoorW = t * t * (3 - 2 * t);
-  return indoorW * valid;
+  let indoorW = t * t * (3 - 2 * t) * valid;
+  if (alpha < 0.52 && indoorW > 0) {
+    const fringeFade = Math.max(0, Math.min(1, (alpha - 0.35) / (0.52 - 0.35)));
+    const s = fringeFade * fringeFade * (3 - 2 * fringeFade);
+    indoorW *= s;
+  }
+  return indoorW;
 }
 
 /** GLSL: outdoor class from mask RGB (no alpha). */
@@ -48,10 +56,16 @@ float decodeOutdoorClass(vec3 rgb) {
 /** GLSL: indoor weight for ToD (RGB classify, alpha = validity). */
 export const GLSL_DECODE_INDOOR_WEIGHT = /* glsl */`
 float decodeIndoorWeightFromMask(vec4 od) {
-  float valid = step(0.5, clamp(od.a, 0.0, 1.0));
+  float alpha = clamp(od.a, 0.0, 1.0);
+  if (alpha < 0.35) return 0.0;
+  float valid = step(0.5, alpha);
   float outdoorClass = decodeOutdoorClass(od.rgb);
   float indoorSignal = clamp(1.0 - outdoorClass, 0.0, 1.0);
-  return smoothstep(0.20, 0.75, indoorSignal) * valid;
+  float indoorW = smoothstep(0.20, 0.75, indoorSignal) * valid;
+  if (alpha < 0.52) {
+    indoorW *= smoothstep(0.35, 0.52, alpha);
+  }
+  return indoorW;
 }
 `;
 

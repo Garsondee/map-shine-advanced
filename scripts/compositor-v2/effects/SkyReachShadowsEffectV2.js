@@ -45,6 +45,7 @@ import { loadTexture } from '../../assets/loader.js';
 import { FLOOR_ID_OUTDOORS_RECEIVER_GLSL } from '../shadow-system/DirectionalShadowProjector.js';
 import { collectOutdoorsTexturesByFloorIndex } from '../shadow-system/floor-outdoors-slots.js';
 import { resolveReceiverOutdoorsMaskTexture } from '../shadow-system/resolve-receiver-outdoors-mask.js';
+import { getBandOutdoorsMask } from '../../masks/indoor-outdoor-mask-api.js';
 import { resolveBakeRayLength, resolveBakeSmear } from '../lightning/shadow-bake-override.js';
 
 const log = createLogger('SkyReachShadowsEffectV2');
@@ -1348,13 +1349,13 @@ export class SkyReachShadowsEffectV2 {
       if (!compositor?.getFloorTexture || !floor) return null;
       const ck = floor.compositorKey != null ? String(floor.compositorKey) : '';
       if (ck) {
-        const sz = fromTex(compositor.getFloorTexture(ck, 'outdoors'));
+        const sz = fromTex(getBandOutdoorsMask(ck, canvas?.scene ?? null, compositor));
         if (sz) return sz;
       }
       const b = Number(floor.elevationMin);
       const t = Number(floor.elevationMax);
       if (Number.isFinite(b) && Number.isFinite(t)) {
-        return fromTex(compositor.getFloorTexture(`${b}:${t}`, 'outdoors'));
+        return fromTex(getBandOutdoorsMask(`${b}:${t}`, canvas?.scene ?? null, compositor));
       }
       return null;
     };
@@ -1375,7 +1376,7 @@ export class SkyReachShadowsEffectV2 {
       const floorMeta = compositor?._floorMeta;
       if (compositor?.getFloorTexture && floorMeta && typeof floorMeta.entries === 'function') {
         for (const [key] of floorMeta.entries()) {
-          const sz = fromTex(compositor.getFloorTexture(key, 'outdoors'));
+          const sz = fromTex(getBandOutdoorsMask(key, canvas?.scene ?? null, compositor));
           if (sz) return clampEdge(sz.x, sz.y);
         }
       }
@@ -1746,7 +1747,7 @@ export class SkyReachShadowsEffectV2 {
           if (!oKey) continue;
           const fa = compositor.getFloorTexture(oKey, 'floorAlpha') ?? null;
           if (fa) continue;
-          const od = compositor.getFloorTexture(oKey, 'outdoors') ?? null;
+          const od = getBandOutdoorsMask(oKey, canvas?.scene ?? null, compositor) ?? null;
           if (!od) continue;
           const oi = this._outdoorIndoorCasterMaterial.uniforms;
           oi.tOutdoors.value = od;

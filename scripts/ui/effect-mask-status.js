@@ -291,6 +291,7 @@ export const MASK_STATUS_TEMPLATES = {
     authoring: [
       'Grayscale mask — **white = outdoor**, **black = indoor** (roofed) for stripe and wet-surface gating.',
       'Specular samples this from GpuSceneMaskCompositor per floor when available.',
+      'Camera Grade uses this for interior vs outdoor timeline exposure/saturation and outdoor atmosphere gating.',
       'Without _Outdoors, outdoor stripe modulation and wet response fall back to neutral.',
     ],
     extra: 'Supports .webp, .png, .jpg, and .jpeg.',
@@ -994,6 +995,9 @@ export function resolveEffectMaskStatus(effectId, config = {}) {
       if (effectId === 'building-shadows') {
         return resolveOutdoorsMaskStatus(config, effectId, '_buildingShadowEffect');
       }
+      if (effectId === 'colorCorrection') {
+        return resolveOutdoorsMaskStatus(config, effectId, '_colorCorrectionEffect');
+      }
       return resolveOutdoorsMaskStatus(config, effectId);
     case 'windows':
     case 'structural':
@@ -1019,6 +1023,9 @@ export function resolveEffectMaskStatus(effectId, config = {}) {
       if (effectId === 'dust') return resolveDustMaskStatus(config, effectId);
       if (effectId === 'water-splashes' || effectId === 'underwater-bubbles') {
         return resolveWaterSplashesMaskStatus(config, effectId);
+      }
+      if (effectId === 'colorCorrection') {
+        return resolveOutdoorsMaskStatus(config, effectId, '_colorCorrectionEffect');
       }
       return null;
   }

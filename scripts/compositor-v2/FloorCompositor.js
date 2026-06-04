@@ -113,9 +113,9 @@ import { CandleFlamesEffectV2 } from './effects/CandleFlamesEffectV2.js';
 import { weatherController } from '../core/WeatherController.js';
 import { LightingDirector } from '../core/LightingDirector.js';
 import {
-  resolveAuthoredOutdoorsForFloorKey,
   resolveCompositorOutdoorsTexture,
 } from '../masks/resolve-compositor-outdoors.js';
+import { getIndoorOutdoorMaskService } from '../masks/IndoorOutdoorMaskService.js';
 import {
   clearShelterOutdoorsMaskCache,
   refreshShelterOutdoorsMaskForActiveFloor,
@@ -913,6 +913,9 @@ export class FloorCompositor {
     /** Per-frame cache for stacked post-merge _Outdoors / skyReach (bloom + CC). */
     this._stackedOutdoorsCacheKey = null;
     this._stackedOutdoorsCacheTex = null;
+    /** @type {Promise<void>|null} */
+    this._bandOutdoorsRepairInFlight = null;
+    this._bandOutdoorsInitialRepairDone = false;
     this._stackedSkyReachCacheTex = null;
     /** @type {object|null} Last stacked outdoors build diagnostics for Camera Grade. */
     this._lastCcPostMergeStackDiag = null;
@@ -4239,6 +4242,15 @@ export class FloorCompositor {
       return;
     }
 
+    try {
+      const floorCount = floorStack?.getFloors?.()?.length ?? 0;
+      if (floorCount > 1 && !this._bandOutdoorsInitialRepairDone) {
+        this._bandOutdoorsInitialRepairDone = true;
+        const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+        this._repairVisibleBandOutdoorsFilesAsync(compositor, canvas?.scene ?? null);
+      }
+    } catch (_) {}
+
     this._hdrScenePreGradeRT = null;
 
     // Single source of truth for darkness / sun / time-of-day for the frame.
@@ -5084,7 +5096,55 @@ export class FloorCompositor {
       const dbgOpacity = Number.isFinite(op) ? Math.max(0, Math.min(1, op)) : 0.35;
       if (dbgOn && this._maskDebugOverlayPass) {
         const ctx = window.MapShine?.activeLevelContext ?? null;
-        const { texture: dbgTex, floorKey: dbgFk, directScreenUv: dbgDirectScreenUv, replaceScene: dbgReplaceScene } = this._maskDebugOverlayPass.resolveMaskTexture(dbgMode, {
+        const dbgReplaceScene =
+          tp?.indoorOutdoorDebugReplaceScene === true
+          || tp?.indoorOutdoorDebugReplaceScene === 1
+          || tp?.maskDebugOverlayReplaceScene === true;
+        const compositorDbg = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+        try {
+          compositorDbg?.syncActiveFloorFromFloorStack?.();
+          compositorDbg?._indoorOutdoorMaskService?.invalidateCache?.();
+        } catch (_) {}
+        const { texture: dbgTex, floorKey: dbgFk, directScreenUv: dbgDirectScreenUv, maskViewMode: dbgViewMode } = this._maskDebugOverlayPass.resolveMaskTexture(dbgMode, {
+          replaceScene: dbgReplaceScene,
+          resolveEffectiveStackMask: () => {
+            if (!compositorDbg) return { texture: null, floorKey: null };
+            try {
+              const service = getIndoorOutdoorMaskService(compositorDbg);
+              const sceneDoc = canvas?.scene ?? null;
+              const keys = (window.MapShine?.floorStack?.getVisibleFloors?.() ?? [])
+                .map((f) => (f?.compositorKey != null ? String(f.compositorKey) : ''))
+                .filter((k) => k.length > 0);
+              if (keys.length > 0) {
+                compositorDbg.prepareVisibleFloorsForOutdoorsStack?.(
+                  this.renderer,
+                  keys,
+                  sceneDoc,
+                );
+              }
+              const built = service.buildVisibleFloorStack(this.renderer, keys, sceneDoc);
+              return {
+                texture: built.outdoors,
+                floorKey: built.diag?.stackKeys?.join('+') ?? 'stack',
+              };
+            } catch (_) {
+              return { texture: null, floorKey: null };
+            }
+          },
+          resolveBandMask: () => {
+            if (!compositorDbg) return { texture: null, floorKey: null };
+            try {
+              const sceneDoc = canvas?.scene ?? null;
+              const activeCk = String(window.MapShine?.floorStack?.getActiveFloor?.()?.compositorKey ?? '');
+              if (activeCk) {
+                compositorDbg._prepareStackLayerTextures?.(activeCk, sceneDoc);
+              }
+              const tex = getIndoorOutdoorMaskService(compositorDbg).getBandMaskForLevel(activeCk, sceneDoc);
+              return { texture: tex, floorKey: activeCk || null };
+            } catch (_) {
+              return { texture: null, floorKey: null };
+            }
+          },
           resolveOutdoorsMask: () => {
             const strict = this._resolveOutdoorsMask(ctx, { allowWeatherRoofMap: false });
             if (strict.texture) return strict;
@@ -5138,6 +5198,7 @@ export class FloorCompositor {
               {
                 directScreenUv: dbgDirectScreenUv === true,
                 replaceScene: dbgReplaceScene === true,
+                maskViewMode: dbgViewMode,
               },
             )
           ) {
@@ -6058,7 +6119,47 @@ export class FloorCompositor {
   }
 
   /**
+   * Load level-background `_Outdoors` files for visible bands (fixes upper floors
+   * that only have a tile-GPU SceneMask RT in cache).
+   *
+   * @param {object|null} compositor
+   * @param {object|null} scene
+   * @private
+   */
+  _repairVisibleBandOutdoorsFilesAsync(compositor, scene = null) {
+    if (!compositor || typeof compositor._promoteBandBackgroundOutdoorsFile !== 'function') return;
+    if (this._bandOutdoorsRepairInFlight) return;
+
+    const sc = scene ?? canvas?.scene ?? null;
+    const floors = window.MapShine?.floorStack?.getVisibleFloors?.() ?? [];
+    if (!floors.length) return;
+
+    this._bandOutdoorsRepairInFlight = (async () => {
+      try {
+        for (const floor of floors) {
+          const key = floor?.compositorKey != null ? String(floor.compositorKey) : '';
+          const bottom = Number(floor?.elevationMin);
+          const top = Number(floor?.elevationMax);
+          if (!key || !Number.isFinite(bottom) || !Number.isFinite(top)) continue;
+          if (compositor._authoredOutdoorsFileByFloor?.has(key)) continue;
+          try {
+            await compositor._promoteBandBackgroundOutdoorsFile(key, bottom, top, sc);
+            const renderer = this.renderer;
+            if (renderer) {
+              compositor.prepareVisibleFloorsForOutdoorsStack?.(renderer, [key], sc);
+            }
+          } catch (_) {}
+        }
+        compositor._indoorOutdoorMaskService?.invalidateCache?.();
+      } finally {
+        this._bandOutdoorsRepairInFlight = null;
+      }
+    })();
+  }
+
+  /**
    * Build (or reuse cached) stacked _Outdoors + skyReach for post-merge bloom/CC.
+   * Uses {@link IndoorOutdoorMaskService} — all visible floors, bottom→top.
    *
    * @param {object|null} sceneMaskCompositor
    * @param {string[]} stackedFloorKeys
@@ -6066,92 +6167,40 @@ export class FloorCompositor {
    * @private
    */
   _buildStackedOutdoorsForPostMerge(sceneMaskCompositor, stackedFloorKeys) {
-    if (!sceneMaskCompositor || !Array.isArray(stackedFloorKeys) || stackedFloorKeys.length <= 1) {
+    if (!sceneMaskCompositor || !Array.isArray(stackedFloorKeys) || stackedFloorKeys.length === 0) {
       return {
-        outdoors: this._lastOutdoorsTexture ?? null,
+        outdoors: null,
         skyReach: this._lastSkyReachTexture ?? null,
         diag: null,
       };
     }
 
     const scene = canvas?.scene ?? null;
-    const prep = sceneMaskCompositor.prepareVisibleFloorsForOutdoorsStack?.(
-      this.renderer,
-      stackedFloorKeys,
-      scene,
-    ) ?? { preparedKeys: [], skippedKeys: [], reasons: {} };
-
+    let service = null;
     try {
-      sceneMaskCompositor.rebuildFloorIdFromVisibleFloorKeys?.(stackedFloorKeys);
-    } catch (_) {}
-
-    let cacheVersion = 0;
-    try {
-      cacheVersion = Number(sceneMaskCompositor.getFloorCacheVersion?.() ?? 0);
-    } catch (_) {}
-
-    const activeCk = String(window.MapShine?.floorStack?.getActiveFloor?.()?.compositorKey ?? '');
-    const maskSig = stackedFloorKeys.map((k) => {
-      const key = String(k);
-      const o = sceneMaskCompositor.getFloorTexture?.(key, 'outdoors')?.uuid ?? 'no-od';
-      const a = sceneMaskCompositor.getFloorTexture?.(key, 'floorAlpha')?.uuid ?? 'no-fa';
-      const s = sceneMaskCompositor.getFloorTexture?.(key, 'skyReach')?.uuid ?? 'no-sr';
-      return `${key}:${o}:${a}:${s}`;
-    }).join('|');
-    const cacheKey = `${activeCk}|${maskSig}|v${cacheVersion}`;
-    if (
-      this._stackedOutdoorsCacheKey === cacheKey
-      && this._stackedOutdoorsCacheTex
-    ) {
-      const diag = {
-        cacheHit: true,
-        prep,
-        outdoors: sceneMaskCompositor.getLastStackedOutdoorsDiag?.() ?? null,
-        skyReach: sceneMaskCompositor.getLastStackedSkyReachDiag?.() ?? null,
-      };
-      this._lastCcPostMergeStackDiag = diag;
-      return {
-        outdoors: this._stackedOutdoorsCacheTex,
-        skyReach: this._stackedSkyReachCacheTex ?? this._lastSkyReachTexture ?? null,
-        diag,
-      };
+      service = getIndoorOutdoorMaskService(sceneMaskCompositor);
+    } catch (_) {
+      return { outdoors: null, skyReach: null, diag: { mode: 'no-service' } };
     }
 
-    let outdoorsTex = null;
-    let skyReachTex = null;
+    const built = service.buildVisibleFloorStack(this.renderer, stackedFloorKeys, scene);
+    this._lastCcPostMergeStackDiag = built.diag ?? null;
+    if (built.outdoors) {
+      this._stackedOutdoorsCacheTex = built.outdoors;
+      this._stackedSkyReachCacheTex = built.skyReach;
+      this._stackedOutdoorsCacheKey = built.diag?.stackKeys?.join(',') ?? '';
+    }
+
     try {
-      outdoorsTex = sceneMaskCompositor.composeStackedOutdoorsMask?.(
-        this.renderer,
-        stackedFloorKeys,
-      ) ?? null;
-      skyReachTex = sceneMaskCompositor.composeStackedSkyReachMask?.(
-        this.renderer,
-        stackedFloorKeys,
-      ) ?? null;
+      if (window.MapShine) {
+        window.MapShine.__ccPostMergeOutdoorsTexture = built.outdoors ?? null;
+      }
     } catch (_) {}
-
-    if (outdoorsTex) {
-      this._stackedOutdoorsCacheKey = cacheKey;
-      this._stackedOutdoorsCacheTex = outdoorsTex;
-      this._stackedSkyReachCacheTex = skyReachTex;
-    }
-
-    const diag = {
-      cacheHit: false,
-      prep,
-      outdoors: sceneMaskCompositor.getLastStackedOutdoorsDiag?.() ?? null,
-      skyReach: sceneMaskCompositor.getLastStackedSkyReachDiag?.() ?? null,
-    };
-    this._lastCcPostMergeStackDiag = diag;
-
-    if (prep.skippedKeys?.length || diag.outdoors?.skippedKeys?.length) {
-      log.debug('FloorCompositor: stacked outdoors incomplete', diag);
-    }
 
     return {
-      outdoors: outdoorsTex ?? this._lastOutdoorsTexture ?? null,
-      skyReach: skyReachTex ?? this._lastSkyReachTexture ?? null,
-      diag,
+      outdoors: built.outdoors,
+      skyReach: built.skyReach ?? this._lastSkyReachTexture ?? null,
+      diag: built.diag,
     };
   }
 
@@ -6400,6 +6449,8 @@ export class FloorCompositor {
       if (signatureChanged) {
         try { this._weatherLightningEffect?.invalidateCache?.('outdoors-change'); } catch (_) {}
       }
+      // Camera Grade binds the stacked mask only in the post-merge pass (IndoorOutdoorMaskService).
+
       if (!force && !signatureChanged) return;
       this._lastOutdoorsTexture = outdoorsTex;
       this._lastOutdoorsFloorKey = resolved.floorKey;
@@ -6428,7 +6479,7 @@ export class FloorCompositor {
       this._ashCloudEffect?.setOutdoorsMask?.(outdoorsTex);
       this._waterEffect?.setOutdoorsMask?.(waterOutdoorsTex);
       this._lastSkyReachTexture = skyReachTex ?? null;
-      this._colorCorrectionEffect?.setOutdoorsMask?.(outdoorsTex);
+      // CC outdoors: post-merge only (see _buildStackedOutdoorsForPostMerge).
       this._filterEffect?.setOutdoorsMask?.(outdoorsTex);
       this._atmosphericFogEffect?.setOutdoorsMask?.(outdoorsTex);
       // Window-light outdoors is bound per-level before LightingEffectV2 draw
@@ -6595,6 +6646,12 @@ export class FloorCompositor {
       log.info(`FloorCompositor: active floor index = ${maxFloorIndex}`);
     }
     this._activeFloorIndex = maxFloorIndex;
+
+    try {
+      const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+      compositor?._indoorOutdoorMaskService?.invalidateCache?.();
+      this._repairVisibleBandOutdoorsFilesAsync(compositor, canvas?.scene ?? null);
+    } catch (_) {}
 
     if (this._stackedLitCacheMaxFloorIndex !== maxFloorIndex) {
       this._stackedLitCacheMaxFloorIndex = maxFloorIndex;
@@ -8106,12 +8163,9 @@ export class FloorCompositor {
         const floor = floorsByIndex.get(idx) ?? null;
         const floorKey = floor?.compositorKey ?? null;
         if (compositor && floorKey) {
-          const floorTex = (
-            compositor.getFloorTexture?.(floorKey, 'outdoors')
-            ?? compositor.getFloorTexture?.(floorKey, 'skyReach')
-            ?? null
-          );
-          if (floorTex) return floorTex;
+          const sceneDoc = canvas?.scene ?? null;
+          const outdoorsTex = getIndoorOutdoorMaskService(compositor).getBandMaskForLevel(floorKey, sceneDoc);
+          if (outdoorsTex) return outdoorsTex;
         }
         const waterIdx = Number(this._waterEffect?._activeFloorIndex);
         if (idx === waterIdx) return this._resolveWaterShelterOutdoorsTexture(idx);
@@ -8265,15 +8319,6 @@ export class FloorCompositor {
           }
           if (!outdoorsForLightingTex && floorCount > 1) {
             outdoorsForLightingTex = this._getNeutralOutdoorsTexture();
-          }
-
-          // Prefer authored file/bundle _Outdoors over GPU RT (stale/cleared GPU texels
-          // decode as outdoor and zero window glow in applyOutdoorsClip + compose).
-          if (compositor && floorKey) {
-            try {
-              const authored = resolveAuthoredOutdoorsForFloorKey(compositor, floorKey);
-              if (authored) outdoorsForLightingTex = authored;
-            } catch (_) {}
           }
 
           // Window-light clip: never bind the neutral all-outdoor mask (it discards every fragment).
@@ -8675,7 +8720,7 @@ export class FloorCompositor {
 
     let stackedOutdoorsForPostMerge = null;
     let stackedSkyReachForPostMerge = null;
-    if (sceneMaskCompositor && stackedFloorKeys.length > 1) {
+    if (sceneMaskCompositor && stackedFloorKeys.length > 0) {
       if (_profiling) _profileT0 = performance.now();
       this._profileEffectCall('cc.prepareStackedOutdoors', 'render', () => {
         const stacked = this._buildStackedOutdoorsForPostMerge(sceneMaskCompositor, stackedFloorKeys);
@@ -8690,6 +8735,7 @@ export class FloorCompositor {
       const fogOut = _pickOtherPost();
       let fogWrote = false;
       if (_profiling) _profileT0 = performance.now();
+      this._atmosphericFogEffect?.setOutdoorsMask?.(stackedOutdoorsForPostMerge ?? null);
       this._profileEffectCall('atmosphericFog.postMerge', 'render', () => {
         fogWrote = withSceneScissor(this.renderer, () =>
           this._atmosphericFogEffect.render(
@@ -8707,7 +8753,7 @@ export class FloorCompositor {
       const bloomOut = _pickOtherPost();
       let bloomWrote = false;
       if (_profiling) _profileT0 = performance.now();
-      const outdoorsForBloom = stackedOutdoorsForPostMerge ?? this._lastOutdoorsTexture ?? null;
+      const outdoorsForBloom = stackedOutdoorsForPostMerge ?? null;
       this._bloomEffect?.setOutdoorsMask?.(outdoorsForBloom ?? null);
       this._profileEffectCall('bloom.postMerge', 'render', () => {
         bloomWrote = !!this._bloomEffect.render(
@@ -8776,7 +8822,7 @@ export class FloorCompositor {
     // Mandatory HDR → LDR boundary: always run when initialized (do not gate on
     // resolveEffectEnabled — a stale params.enabled must not skip the only ToD owner).
     if (this._colorCorrectionEffect?._initialized) {
-      const outdoorsForCc = stackedOutdoorsForPostMerge ?? this._lastOutdoorsTexture ?? null;
+      const outdoorsForCc = stackedOutdoorsForPostMerge ?? null;
       const skyReachForCc = stackedSkyReachForPostMerge ?? this._lastSkyReachTexture ?? null;
 
       const ccOut = _pickOtherPost();
@@ -8817,8 +8863,8 @@ export class FloorCompositor {
             try {
               this._colorCorrectionEffect.setLocalLightTexture?.(null);
               this._colorCorrectionEffect.setCombinedShadowTexture?.(null);
-              if (this._lastOutdoorsTexture) {
-                this._colorCorrectionEffect.setOutdoorsMask(this._lastOutdoorsTexture);
+              if (outdoorsForCc) {
+                this._colorCorrectionEffect.setOutdoorsMask(outdoorsForCc);
               }
             } catch (_) {}
             try {

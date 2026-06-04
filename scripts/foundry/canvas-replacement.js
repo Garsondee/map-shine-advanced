@@ -3085,7 +3085,7 @@ export function initialize() {
             const visibleKeys = visibleFloors
               .map((f) => (f?.compositorKey != null ? String(f.compositorKey) : ''))
               .filter((k) => k.length > 0);
-            if (visibleKeys.length > 1 && typeof compositor.warmVisibleFloorsForOutdoorsStack === 'function') {
+            if (visibleKeys.length > 0 && typeof compositor.warmVisibleFloorsForOutdoorsStack === 'function') {
               for (const vk of visibleKeys) {
                 try { compositor.primeFloorForRecompose(vk); } catch (_) {}
               }
@@ -3097,6 +3097,10 @@ export function initialize() {
               compositor.prepareVisibleFloorsForOutdoorsStack?.(renderer, visibleKeys, sceneDoc);
               compositor.rebuildFloorIdFromVisibleFloorKeys?.(visibleKeys);
             }
+            try {
+              const { getIndoorOutdoorMaskService } = await import('../masks/IndoorOutdoorMaskService.js');
+              getIndoorOutdoorMaskService(compositor)?.invalidateCache?.();
+            } catch (_) {}
           } catch (warmErr) {
             log.debug('Level change: visible-floor outdoors warm failed', warmErr);
           }

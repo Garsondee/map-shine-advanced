@@ -314,11 +314,23 @@ function _toBasePathFromSrc(src) {
   return s.replace(/\?.*$/, '').replace(/\.[^/.]+$/, '');
 }
 
+function _levelsBandMatchesBackground(lvl, bandBottom, bandTop) {
+  if (Number(lvl?.bottom) !== Number(bandBottom)) return false;
+  const lt = Number(lvl?.top);
+  const bt = Number(bandTop);
+  if (Number.isFinite(bt) && Number.isFinite(lt)) return lt === bt;
+  // Open-top bands (Infinity / non-finite top): match on bottom only.
+  if (!Number.isFinite(bt) || !Number.isFinite(lt)) {
+    return Number(lvl?.bottom) === Number(bandBottom);
+  }
+  return false;
+}
+
 function _resolveBandBackgroundBasePath(scene, bandBottom, bandTop) {
   try {
     if (hasV14NativeLevels(scene)) {
       const levels = readV14SceneLevels(scene);
-      const match = levels.find((lvl) => Number(lvl?.bottom) === Number(bandBottom) && Number(lvl?.top) === Number(bandTop));
+      const match = levels.find((lvl) => _levelsBandMatchesBackground(lvl, bandBottom, bandTop));
       if (match?.levelId) {
         const lvlDoc = scene?.levels?.get?.(match.levelId) ?? null;
         const src = lvlDoc?.background?.src;
@@ -449,6 +461,12 @@ export class GpuSceneMaskCompositor {
      * @type {Set<string>}
      */
     this._upperBandNoOutdoorsAccepted = new Set();
+
+    /**
+     * Band background `_Outdoors` file textures (not tile-GPU SceneMask RTs).
+     * @type {Map<string, import('three').Texture>}
+     */
+    this._authoredOutdoorsFileByFloor = new Map();
 
     /** @type {Promise<void>|null} Serialize concurrent preloadAllFloors (load + effects). */
     this._preloadAllFloorsInFlight = null;
@@ -893,6 +911,22 @@ export class GpuSceneMaskCompositor {
         } else if (bandBottom > 0 && this.getFloorTexture(floorKey, 'outdoors')) {
         this._upperOutdoorsMetaRepairCount.delete(floorKey);
       }
+      const odCached = cached.masks.find((m) => (m.id ?? m.type) === 'outdoors');
+      const bgPathCached = _resolveBandBackgroundBasePath(sc, bandBottom, bandTop);
+      if (
+        bgPathCached
+        && odCached?.texture
+        && this._isSceneMaskGpuTexture(odCached.texture)
+        && !this._authoredOutdoorsFileByFloor.has(floorKey)
+      ) {
+        log.debug('composeFloor: bust cache — outdoors is tile GPU, need band background file', {
+          floorKey,
+          bgPath: bgPathCached,
+        });
+        this._floorMeta.delete(floorKey);
+        this._evictGpuMaskRtForFloor(floorKey, 'outdoors');
+        cached = null;
+      }
     }
     // File/bundle masks in _floorMeta satisfy getFloorTexture('outdoors') even when
     // GPU compose() never ran — _floorCache stays empty and derived masks (floorAlpha,
@@ -900,8 +934,21 @@ export class GpuSceneMaskCompositor {
     if (cached?.masks?.length) {
       const tilesForFloor = this._getActiveLevelTiles(sc, ctx)?.length ?? 0;
       const skyReachRt = this._floorCache.get(floorKey)?.get('skyReach');
-      if (tilesForFloor > 0 && !skyReachRt) {
-        log.debug('composeFloor: evicting meta — GPU skyReach missing while tiles exist', { floorKey });
+      const outdoorsRt = this._floorCache.get(floorKey)?.get('outdoors');
+      const usesBgOutdoors = this._floorBandUsesBackgroundAuthoredOutdoors(floorKey, sc);
+      const needsTileGpu = tilesForFloor > 0 && !usesBgOutdoors;
+      const outdoorsBundleBake = !!outdoorsRt?.texture?.userData?.msaBundleBake;
+      const metaOnlyOutdoors = needsTileGpu
+        && !outdoorsRt?.texture
+        && !!this.getMaskTextureForFloor(floorKey, 'outdoors');
+      if (needsTileGpu && (!skyReachRt || outdoorsBundleBake || metaOnlyOutdoors)) {
+        if (outdoorsBundleBake) this._dropBundleBakedOutdoorsRt(floorKey);
+        log.debug('composeFloor: evicting meta — per-tile GPU outdoors required', {
+          floorKey,
+          missingSkyReach: !skyReachRt,
+          outdoorsBundleBake,
+          metaOnlyOutdoors,
+        });
         this._floorMeta.delete(floorKey);
         this._upperBandNoOutdoorsAccepted.delete(floorKey);
         cached = null;
@@ -1080,9 +1127,12 @@ export class GpuSceneMaskCompositor {
     // Any band can end up with a partial mask set from tile-derived bundles
     // (e.g. only specular) that omits _Outdoors. Upper bands used to skip this
     // fallback, leaving stacked Camera Grade _Outdoors stuck on lower-floor data.
-    const hasOutdoorsInNewMasks = Array.isArray(newMasks)
-      && newMasks.some((m) => (m?.id ?? m?.type) === 'outdoors' && !!m?.texture);
-    const needsBandOutdoorsBackfill = !newMasks || !hasOutdoorsInNewMasks;
+    const outdoorsEntryPreBackfill = Array.isArray(newMasks)
+      ? newMasks.find((m) => (m?.id ?? m?.type) === 'outdoors' && !!m?.texture)
+      : null;
+    const hasAuthoredOutdoorsFile = outdoorsEntryPreBackfill?.texture
+      && !this._isSceneMaskGpuTexture(outdoorsEntryPreBackfill.texture);
+    const needsBandOutdoorsBackfill = !hasAuthoredOutdoorsFile;
     if (needsBandOutdoorsBackfill) {
       let bgFallbackPath = null;
       try {
@@ -1132,7 +1182,7 @@ export class GpuSceneMaskCompositor {
               floorKey,
               fallbackPath,
               fromScene: !!bgFallbackPath,
-              hadMasksBeforeBackfill: !!hasOutdoorsInNewMasks || !!newMasks,
+              hadMasksBeforeBackfill: !!hasAuthoredOutdoorsFile || !!newMasks,
               mergedHasOutdoors,
             });
           }
@@ -1179,6 +1229,30 @@ export class GpuSceneMaskCompositor {
 
     if (!newMasks || newMasks.length === 0) return null;
 
+    try {
+      const bgPathPromote = _resolveBandBackgroundBasePath(sc, bandBottom, bandTop);
+      if (bgPathPromote) {
+        await this._promoteBandBackgroundOutdoorsFile(floorKey, bandBottom, bandTop, sc);
+        const fileTex = this._authoredOutdoorsFileByFloor.get(floorKey) ?? null;
+        if (fileTex) {
+          const others = newMasks.filter((m) => (m?.id ?? m?.type) !== 'outdoors');
+          const prev = newMasks.find((m) => (m?.id ?? m?.type) === 'outdoors');
+          newMasks = [
+            ...others,
+            {
+              id: 'outdoors',
+              type: 'outdoors',
+              texture: fileTex,
+              path: prev?.path ?? null,
+              required: !!prev?.required,
+            },
+          ];
+        }
+      }
+    } catch (e) {
+      log.debug('composeFloor: promote band background outdoors failed', { floorKey, err: e });
+    }
+
     // Normalize flipY to match base plane convention.
     for (const m of newMasks) {
       const tex = m?.texture;
@@ -1190,6 +1264,29 @@ export class GpuSceneMaskCompositor {
     if (bandBottom > 0 && this.getFloorTexture(floorKey, 'outdoors')) {
       this._upperOutdoorsMetaRepairCount.delete(floorKey);
     }
+
+    try {
+      const renderer = window.MapShine?.renderer;
+      const THREE = window.THREE;
+      const d = canvas?.dimensions;
+      const sr = d?.sceneRect;
+      const sceneW = Number(sr?.width) || 0;
+      const sceneH = Number(sr?.height) || 0;
+      if (
+        renderer
+        && THREE
+        && sceneW > 0
+        && sceneH > 0
+        && this._authoredOutdoorsFileByFloor.has(floorKey)
+      ) {
+        this.ensureSceneSpaceOutdoorsForFloor(floorKey, sc);
+        if (this._floorBandUsesBackgroundAuthoredOutdoors(floorKey, sc)) {
+          try {
+            this._ensureFloorAlphaFromOutdoors(renderer, THREE, floorKey, sceneW, sceneH);
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
 
     // Single diagnostic log per floor composition - show what masks we have
     const outdoorsEntry = newMasks.find(m => (m?.id || m?.type) === 'outdoors');
@@ -2068,6 +2165,7 @@ export class GpuSceneMaskCompositor {
     this._singleBandPreloadDone.clear();
     this._upperOutdoorsMetaRepairCount.clear();
     this._upperBandNoOutdoorsAccepted.clear();
+    this._authoredOutdoorsFileByFloor.clear();
     this._preloadAllFloorsInFlight = null;
 
     // Dispose and clear cached GPU render targets. Floor keys (e.g. "0:5")
@@ -2084,6 +2182,9 @@ export class GpuSceneMaskCompositor {
     this._lastWaterPatchSignature = null;
     // Reset LRU order so eviction logic starts fresh on the new scene.
     this._lruOrder.length = 0;
+    try {
+      this._indoorOutdoorMaskService?.invalidateCache?.();
+    } catch (_) {}
 
     log.info('GpuSceneMaskCompositor: floor state cleared (RTs disposed)');
   }
@@ -2117,6 +2218,227 @@ export class GpuSceneMaskCompositor {
    * @param {string} maskType - e.g. 'water', 'fire', 'specular'
    * @returns {THREE.Texture|null}
    */
+  /**
+   * Whether a floor band has active level tiles (vs background-only).
+   * @param {string} floorKey
+   * @param {object|null} [scene=null]
+   * @returns {boolean}
+   */
+  _floorBandHasTiles(floorKey, scene = null) {
+    const key = String(floorKey ?? '');
+    const parts = key.split(':').map(Number);
+    if (!Number.isFinite(parts[0]) || !Number.isFinite(parts[1])) return false;
+    const sc = scene || canvas?.scene;
+    if (!sc) return false;
+    try {
+      return (this._getActiveLevelTiles(sc, { bottom: parts[0], top: parts[1] })?.length ?? 0) > 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * V14 background-image levels: `_Outdoors` comes from the band background asset
+   * bundle (scene-sized), not from per-tile GPU composition. Overhead tiles are
+   * decorative; they must not block bundle→scene baking.
+   *
+   * @param {string} floorKey
+   * @param {object|null} [scene=null]
+   * @returns {boolean}
+   */
+  /**
+   * @param {import('three').Texture|null|undefined} tex
+   * @returns {boolean}
+   */
+  _isSceneMaskGpuTexture(tex) {
+    if (!tex) return false;
+    return String(tex.name ?? '').startsWith('SceneMask_');
+  }
+
+  _floorBandUsesBackgroundAuthoredOutdoors(floorKey, scene = null) {
+    const key = String(floorKey ?? '');
+    const parts = key.split(':').map(Number);
+    if (!Number.isFinite(parts[0])) return false;
+    const sc = scene || canvas?.scene;
+    if (!sc) return false;
+
+    try {
+      const bgPath = _resolveBandBackgroundBasePath(sc, parts[0], parts[1]);
+      if (bgPath) return true;
+    } catch (_) {}
+
+    const metaOutdoors = this.getMaskTextureForFloor(key, 'outdoors');
+    if (metaOutdoors && !this._isSceneMaskGpuTexture(metaOutdoors)) return true;
+
+    return !this._floorBandHasTiles(key, sc);
+  }
+
+  /**
+   * File/bundle `_Outdoors` source for scene-space bake (never a tile-GPU RT).
+   * @param {string} floorKey
+   * @param {object|null} [scene=null]
+   * @returns {import('three').Texture|null}
+   */
+  _resolveAuthoredOutdoorsBakeSource(floorKey, scene = null) {
+    const key = String(floorKey ?? '');
+    if (!key) return null;
+
+    const cached = this._authoredOutdoorsFileByFloor.get(key) ?? null;
+    if (cached && !this._isSceneMaskGpuTexture(cached)) return cached;
+
+    const metaEntry = this._floorMeta.get(key)?.masks
+      ?.find((m) => (m.id ?? m.type) === 'outdoors') ?? null;
+    const metaTex = metaEntry?.texture ?? null;
+    if (metaTex && !this._isSceneMaskGpuTexture(metaTex)) {
+      this._authoredOutdoorsFileByFloor.set(key, metaTex);
+      return metaTex;
+    }
+
+    return null;
+  }
+
+  /**
+   * Load level-background `_Outdoors` for a band and cache the file texture.
+   * @param {string} floorKey
+   * @param {number} bandBottom
+   * @param {number} bandTop
+   * @param {object|null} [scene=null]
+   * @returns {Promise<boolean>}
+   */
+  async _promoteBandBackgroundOutdoorsFile(floorKey, bandBottom, bandTop, scene = null) {
+    const key = String(floorKey ?? '');
+    const sc = scene || canvas?.scene;
+    if (!key || !sc) return false;
+
+    const bgPath = _resolveBandBackgroundBasePath(sc, bandBottom, bandTop);
+    if (!bgPath) return false;
+
+    let outdoorsTex = null;
+    let outdoorsPath = null;
+    try {
+      const probed = await assetLoader.probeMaskFile(bgPath, '_Outdoors', { suppressProbeErrors: true });
+      outdoorsPath = probed?.path ?? null;
+      if (outdoorsPath) {
+        outdoorsTex = await assetLoader.loadTexture(outdoorsPath, { suppressProbeErrors: true });
+      }
+    } catch (e) {
+      log.debug('_promoteBandBackgroundOutdoorsFile: probe/load failed', { floorKey: key, bgPath, err: e });
+      return false;
+    }
+
+    if (!outdoorsTex) return false;
+
+    if (outdoorsTex.flipY !== false) {
+      outdoorsTex.flipY = false;
+      outdoorsTex.needsUpdate = true;
+    }
+
+    this._authoredOutdoorsFileByFloor.set(key, outdoorsTex);
+    this._evictGpuMaskRtForFloor(key, 'outdoors');
+
+    const meta = this._floorMeta.get(key);
+    const outdoorsMask = {
+      id: 'outdoors',
+      type: 'outdoors',
+      texture: outdoorsTex,
+      path: outdoorsPath,
+      required: false,
+    };
+    if (meta?.masks?.length) {
+      const others = meta.masks.filter((m) => (m.id ?? m.type) !== 'outdoors');
+      this._floorMeta.set(key, { ...meta, masks: [...others, outdoorsMask] });
+    } else {
+      this._floorMeta.set(key, { masks: [outdoorsMask], basePath: bgPath });
+    }
+
+    log.debug('_promoteBandBackgroundOutdoorsFile: cached band background outdoors', {
+      floorKey: key,
+      bgPath,
+      outdoorsPath,
+      w: outdoorsTex?.image?.width ?? null,
+      h: outdoorsTex?.image?.height ?? null,
+    });
+    return true;
+  }
+
+  /**
+   * Scene-space GPU RT only — never raw `_floorMeta` file textures (wrong UV in stack/CC).
+   * @param {string} floorKey
+   * @param {string} maskType
+   * @returns {import('three').Texture|null}
+   * @private
+   */
+  _getSceneSpaceGpuFloorTexture(floorKey, maskType) {
+    const key = String(floorKey ?? '');
+    if (!key || !maskType) return null;
+    return this._floorCache.get(key)?.get(maskType)?.texture ?? null;
+  }
+
+  /**
+   * Ensure one band's stack inputs are scene-space GPU RTs (bake + derived floorAlpha).
+   * @param {string} floorKey
+   * @param {object|null} [scene=null]
+   * @returns {{ outdoors: import('three').Texture|null, floorAlpha: import('three').Texture|null }}
+   * @private
+   */
+  _prepareStackLayerTextures(floorKey, scene = null) {
+    const key = String(floorKey ?? '');
+    const sc = scene || canvas?.scene;
+    if (!key) return { outdoors: null, floorAlpha: null };
+
+    try {
+      this.ensureSceneSpaceOutdoorsForFloor(key, sc);
+    } catch (_) {}
+
+    let outdoors = this._getSceneSpaceGpuFloorTexture(key, 'outdoors');
+    let floorAlpha = this._getSceneSpaceGpuFloorTexture(key, 'floorAlpha');
+
+    const usesBg = this._floorBandUsesBackgroundAuthoredOutdoors(key, sc);
+    const renderer = window.MapShine?.renderer;
+    const THREE = window.THREE;
+    const d = canvas?.dimensions;
+    const sr = d?.sceneRect;
+    const sceneW = Number(sr?.width) || 0;
+    const sceneH = Number(sr?.height) || 0;
+    if (usesBg && renderer && THREE && sceneW > 0 && sceneH > 0 && outdoors && !floorAlpha) {
+      try {
+        this._ensureFloorAlphaFromOutdoors(renderer, THREE, key, sceneW, sceneH);
+        floorAlpha = this._getSceneSpaceGpuFloorTexture(key, 'floorAlpha');
+      } catch (_) {}
+    }
+
+    return { outdoors, floorAlpha };
+  }
+
+  /**
+   * Bands that rely on per-tile GPU `compose()` for `_Outdoors` (not background bundle).
+   * @param {string} floorKey
+   * @param {object|null} [scene=null]
+   * @returns {boolean}
+   */
+  _floorBandNeedsTileGpuOutdoors(floorKey, scene = null) {
+    if (this._floorBandUsesBackgroundAuthoredOutdoors(floorKey, scene)) return false;
+    return this._floorBandHasTiles(floorKey, scene);
+  }
+
+  /**
+   * Drop a bundle-stretched scene RT that must not gate tile-band Camera Grade.
+   * @param {string} floorKey
+   * @private
+   */
+  _dropBundleBakedOutdoorsRt(floorKey) {
+    const key = String(floorKey);
+    const floorTargets = this._floorCache.get(key);
+    const rt = floorTargets?.get('outdoors');
+    const tex = rt?.texture ?? null;
+    if (!tex?.userData?.msaBundleBake) return;
+    try { rt?.dispose?.(); } catch (_) {}
+    floorTargets?.delete('outdoors');
+    try { floorTargets?.delete('skyReach'); } catch (_) {}
+    try { floorTargets?.delete('floorAlpha'); } catch (_) {}
+    this._floorCacheVersion++;
+  }
+
   getFloorTexture(floorKey, maskType) {
     // Primary: GPU render target produced by the compose() path.
     const floorTargets = this._floorCache.get(floorKey);
@@ -2181,21 +2503,43 @@ export class GpuSceneMaskCompositor {
   ensureSceneSpaceOutdoorsForFloor(floorKey, scene = null) {
     if (!floorKey) return null;
     const key = String(floorKey);
-    const existingRt = this._floorCache.get(key)?.get('outdoors');
-    if (existingRt?.texture) return existingRt.texture;
+    const sc = scene || canvas?.scene;
+    const usesBg = this._floorBandUsesBackgroundAuthoredOutdoors(key, sc);
+    const needsTileGpu = !usesBg && this._floorBandNeedsTileGpuOutdoors(key, sc);
 
-    const metaEntry = this._floorMeta.get(key)?.masks
-      ?.find((m) => (m.id ?? m.type) === 'outdoors') ?? null;
-    const bundleTex = metaEntry?.texture ?? null;
-    if (!bundleTex) return null;
+    // Per-tile-primary bands: never bundle-stretch; wait for tile GPU compose RT.
+    if (needsTileGpu) {
+      const existingRt = this._floorCache.get(key)?.get('outdoors');
+      if (existingRt?.texture?.userData?.msaBundleBake) {
+        this._dropBundleBakedOutdoorsRt(key);
+      }
+      return existingRt?.texture ?? null;
+    }
+
+    const bakeSrc = this._resolveAuthoredOutdoorsBakeSource(key, sc);
+    if (!bakeSrc) return null;
+
+    const existingRt = this._floorCache.get(key)?.get('outdoors');
+    const existingTex = existingRt?.texture ?? null;
+    if (
+      existingTex?.userData?.msaBundleBake
+      && existingTex.userData?.msaAuthoredSrcUuid === bakeSrc.uuid
+    ) {
+      return existingTex;
+    }
+    if (existingTex) {
+      this._evictGpuMaskRtForFloor(key, 'outdoors');
+    }
+
+    const bundleTex = bakeSrc;
 
     const renderer = window.MapShine?.renderer;
     const THREE = window.THREE;
-    if (!renderer || !THREE) return bundleTex;
+    if (!renderer || !THREE) return null;
 
     const d = canvas?.dimensions;
     const sr = d?.sceneRect;
-    if (!sr?.width || !sr?.height) return bundleTex;
+    if (!sr?.width || !sr?.height) return null;
 
     this._ensureGpuResources(THREE);
 
@@ -2238,7 +2582,7 @@ export class GpuSceneMaskCompositor {
     } catch (e) {
       log.debug('ensureSceneSpaceOutdoorsForFloor: bake failed', { floorKey: key, err: e });
       renderer.setRenderTarget(prevTarget);
-      return bundleTex;
+      return null;
     }
     renderer.setRenderTarget(prevTarget);
 
@@ -2254,10 +2598,16 @@ export class GpuSceneMaskCompositor {
       outH,
       srcUuid: bundleTex.uuid ?? null,
     });
-    try {
-      this._ensureFloorAlphaFromOutdoors(renderer, THREE, key, sceneW, sceneH);
-    } catch (_) {}
-    return outTex ?? bundleTex;
+    if (outTex) {
+      try {
+        outTex.userData = {
+          ...(outTex.userData ?? {}),
+          msaBundleBake: true,
+          msaAuthoredSrcUuid: bakeSrc.uuid ?? null,
+        };
+      } catch (_) {}
+    }
+    return outTex ?? null;
   }
 
   /**
@@ -2426,6 +2776,7 @@ export class GpuSceneMaskCompositor {
     this._singleBandPreloadDone.clear();
     this._upperOutdoorsMetaRepairCount.clear();
     this._upperBandNoOutdoorsAccepted.clear();
+    this._authoredOutdoorsFileByFloor.clear();
     this._preloadAllFloorsInFlight = null;
     this._activeFloorBasePath = null;
     this._activeFloorKey = null;
@@ -2763,22 +3114,34 @@ export class GpuSceneMaskCompositor {
     for (const floorKey of floorKeysBottomToTop) {
       if (!floorKey) continue;
       const key = String(floorKey);
-
-      if (!this._floorCache.get(key)?.get('outdoors')?.texture) {
-        try {
-          this.ensureSceneSpaceOutdoorsForFloor(key, sc);
-        } catch (e) {
-          log.debug('prepareVisibleFloorsForOutdoorsStack: ensureSceneSpace failed', { floorKey: key, err: e });
-        }
+      const parts = key.split(':').map(Number);
+      let bandTop = parts[1];
+      if (!Number.isFinite(bandTop)) {
+        const floorBand = (window.MapShine?.floorStack?.getFloors?.() ?? [])
+          .find((f) => String(f.compositorKey) === key);
+        bandTop = Number(floorBand?.elevationMax);
       }
-
-      if (!this.getFloorTexture(key, 'outdoors')) {
+      const bandCtx = Number.isFinite(parts[0]) && Number.isFinite(bandTop)
+        ? { bottom: parts[0], top: bandTop }
+        : null;
+      const usesBgOutdoors = this._floorBandUsesBackgroundAuthoredOutdoors(key, sc);
+      const needsTileGpu = !usesBgOutdoors && bandCtx
+        ? (this._getActiveLevelTiles(sc, bandCtx)?.length ?? 0) > 0
+        : false;
+      const outdoorsTex = this._floorCache.get(key)?.get('outdoors')?.texture ?? null;
+      if (needsTileGpu && outdoorsTex?.userData?.msaBundleBake) {
+        this._dropBundleBakedOutdoorsRt(key);
+      }
+      const layer = this._prepareStackLayerTextures(key, sc);
+      if (!layer.outdoors) {
         skippedKeys.push(key);
-        reasons[key] = 'missing-outdoors';
+        reasons[key] = needsTileGpu ? 'missing-tile-gpu-outdoors' : 'missing-scene-outdoors';
         continue;
       }
 
-      if (renderer && THREE && sceneW > 0 && sceneH > 0 && !this.getFloorTexture(key, 'floorAlpha')) {
+      // Background-authored bands without albedo floorAlpha: derive from baked outdoors.
+      if (renderer && THREE && sceneW > 0 && sceneH > 0 && usesBgOutdoors && !needsTileGpu
+        && !this._getSceneSpaceGpuFloorTexture(key, 'floorAlpha')) {
         try {
           this._ensureFloorAlphaFromOutdoors(renderer, THREE, key, sceneW, sceneH);
         } catch (e) {
@@ -2795,7 +3158,14 @@ export class GpuSceneMaskCompositor {
         if (skippedKeys.includes(key)) continue;
         const floorTargets = this._floorCache.get(key);
         if (!floorTargets?.get('outdoors')?.texture) continue;
-        if (!floorTargets?.get('floorAlpha')?.texture) {
+        const parts = key.split(':').map(Number);
+        const bandCtx = Number.isFinite(parts[0]) && Number.isFinite(parts[1])
+          ? { bottom: parts[0], top: parts[1] }
+          : null;
+        const hasTiles = bandCtx
+          ? (this._getActiveLevelTiles(sc, bandCtx)?.length ?? 0) > 0
+          : false;
+        if (!floorTargets?.get('floorAlpha')?.texture && !hasTiles) {
           try {
             this._ensureFloorAlphaFromOutdoors(renderer, THREE, key, sceneW, sceneH);
           } catch (_) {}
@@ -2841,7 +3211,12 @@ export class GpuSceneMaskCompositor {
           const key = String(floorKey);
           const parts = key.split(':').map(Number);
           const bottom = parts[0];
-          const top = parts[1];
+          let top = parts[1];
+          if (!Number.isFinite(top)) {
+            const floorBand = (window.MapShine?.floorStack?.getFloors?.() ?? [])
+              .find((f) => String(f.compositorKey) === key);
+            top = Number(floorBand?.elevationMax);
+          }
           if (!Number.isFinite(bottom) || !Number.isFinite(top)) {
             skippedKeys.push(key);
             reasons[key] = 'invalid-key';
@@ -2869,6 +3244,8 @@ export class GpuSceneMaskCompositor {
               log.debug('warmVisibleFloorsForOutdoorsStack: composeFloor failed', { floorKey: key, err: e });
             }
           }
+
+          await this._promoteBandBackgroundOutdoorsFile(key, bottom, top, sc);
 
           const renderer = window.MapShine?.renderer;
           this.prepareVisibleFloorsForOutdoorsStack(renderer, [key], sc);
@@ -2938,19 +3315,20 @@ export class GpuSceneMaskCompositor {
    * @param {string[]} floorKeysBottomToTop - GpuSceneMaskCompositor floor keys
    * @returns {THREE.Texture|null}
    */
-  composeStackedOutdoorsMask(renderer, floorKeysBottomToTop) {
+  composeStackedOutdoorsMask(renderer, floorKeysBottomToTop, scene = null) {
     const THREE = window.THREE;
     if (!renderer || !THREE || !Array.isArray(floorKeysBottomToTop) || floorKeysBottomToTop.length === 0) {
       return null;
     }
 
+    const sc = scene ?? canvas?.scene ?? null;
     this._ensureGpuResources(THREE);
 
     let refW = 0;
     let refH = 0;
     for (const floorKey of floorKeysBottomToTop) {
-      const ref = this.getFloorTexture(floorKey, 'outdoors')
-        ?? this.getFloorTexture(floorKey, 'floorAlpha');
+      const layer = this._prepareStackLayerTextures(String(floorKey), sc);
+      const ref = layer.outdoors ?? layer.floorAlpha;
       if (!ref) continue;
       const dims = this.getMaskTexturePixelSize(ref);
       refW = dims.w || refW;
@@ -2976,8 +3354,9 @@ export class GpuSceneMaskCompositor {
     renderer.getClearColor(prevClearColor);
     const prevClearAlpha = renderer.getClearAlpha();
 
+    // Start neutral-indoor so uncovered texels do not default to outdoor ToD.
     renderer.setRenderTarget(rtA);
-    renderer.setClearColor(0xffffff, 0);
+    renderer.setClearColor(0x000000, 0);
     renderer.clear();
 
     let accum = rtA;
@@ -2986,13 +3365,14 @@ export class GpuSceneMaskCompositor {
     const skippedKeys = [];
 
     for (const floorKey of floorKeysBottomToTop) {
-      const outdoorsTex = this.getFloorTexture(floorKey, 'outdoors');
+      const layer = this._prepareStackLayerTextures(String(floorKey), sc);
+      const outdoorsTex = layer.outdoors;
       if (!outdoorsTex) {
         skippedKeys.push(String(floorKey));
         continue;
       }
       appliedKeys.push(String(floorKey));
-      const alphaTex = this.getFloorTexture(floorKey, 'floorAlpha');
+      const alphaTex = layer.floorAlpha;
       const useOutdoorsAlphaCoverage = !alphaTex;
 
       m.uniforms.tAccum.value = accum.texture;

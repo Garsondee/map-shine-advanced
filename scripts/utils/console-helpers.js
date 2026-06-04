@@ -1577,8 +1577,18 @@ export const consoleHelpers = {
       .map((f) => (f?.compositorKey != null ? String(f.compositorKey) : ''))
       .filter(Boolean);
 
+    const effectiveStack = ms?.__effectiveOutdoorsStack ?? null;
+    const ccBoundUuid = ms?.__ccPostMergeOutdoorsTexture?.uuid ?? null;
+    const stackUuid = effectiveStack?.textureUuid ?? null;
+
     report.stackedOutdoorsForCc = {
       visibleFloorKeys: visibleKeys,
+      stackKeysForCameraGrade: visibleKeys.slice(),
+      activeElevationMin: Number(floorStack?.getActiveFloor?.()?.elevationMin) ?? null,
+      effectiveStackDiag: effectiveStack?.diag ?? null,
+      effectiveStackTexture: stackUuid ? { uuid: stackUuid } : null,
+      ccPostMergeOutdoorsTexture: ccBoundUuid ? { uuid: ccBoundUuid } : null,
+      ccBoundMatchesEffectiveStack: !!(ccBoundUuid && stackUuid && ccBoundUuid === stackUuid),
       floorIdTarget: _texProof(compositor?.floorIdTarget?.texture),
       lastStackedOutdoorsDiag: compositor?.getLastStackedOutdoorsDiag?.() ?? null,
       lastStackedSkyReachDiag: compositor?.getLastStackedSkyReachDiag?.() ?? null,
@@ -1587,11 +1597,20 @@ export const consoleHelpers = {
     };
 
     for (const key of visibleKeys) {
+      const gpuOd = compositor?._floorCache?.get?.(key)?.get?.('outdoors')?.texture ?? null;
+      const authoredOd = compositor?._authoredOutdoorsFileByFloor?.get?.(key) ?? null;
+      const metaOd = compositor?.getMaskTextureForFloor?.(key, 'outdoors') ?? null;
       report.stackedOutdoorsForCc.perBandStackReadiness[key] = {
         outdoors: !!compositor?.getFloorTexture?.(key, 'outdoors'),
         floorAlpha: !!compositor?.getFloorTexture?.(key, 'floorAlpha'),
         skyReach: !!compositor?.getFloorTexture?.(key, 'skyReach'),
-        gpuOutdoors: !!compositor?._floorCache?.get?.(key)?.get?.('outdoors')?.texture,
+        gpuOutdoors: !!gpuOd,
+        authoredFileOutdoors: !!authoredOd,
+        authoredFileUuid: authoredOd?.uuid ?? null,
+        gpuOutdoorsUuid: gpuOd?.uuid ?? null,
+        metaOutdoorsUuid: metaOd?.uuid ?? null,
+        gpuMatchesAuthoredFile: !!(gpuOd && authoredOd && gpuOd.uuid === authoredOd.uuid),
+        metaIsGpuOnly: !!(metaOd && String(metaOd.name ?? '').startsWith('SceneMask_')),
       };
     }
 

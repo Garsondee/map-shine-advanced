@@ -254,6 +254,44 @@ export function resolveAuthoredOutdoorsForFloorKey(compositor, floorKey) {
 }
 
 /**
+ * Scene-space `_Outdoors` for a single floor band — GPU compose RT first, then
+ * bundle bake into scene UV. Do **not** return raw tile-space `_floorMeta` textures
+ * (wrong UV mapping in lighting / Camera Grade scene-UV passes).
+ *
+ * @param {object|null} compositor
+ * @param {string|null|undefined} floorKey
+ * @param {object|null} [scene=null]
+ * @returns {import('three').Texture|null}
+ */
+export function resolveSceneSpaceOutdoorsForFloorKey(compositor, floorKey, scene = null) {
+  if (!compositor || floorKey == null || floorKey === '') return null;
+  const key = String(floorKey);
+  const sc = scene ?? (typeof canvas !== 'undefined' ? canvas?.scene : null);
+
+  let needsTileGpu = false;
+  try {
+    needsTileGpu = typeof compositor._floorBandNeedsTileGpuOutdoors === 'function'
+      ? compositor._floorBandNeedsTileGpuOutdoors(key, sc)
+      : false;
+  } catch (_) {}
+
+  try {
+    if (typeof compositor.ensureSceneSpaceOutdoorsForFloor === 'function') {
+      compositor.ensureSceneSpaceOutdoorsForFloor(key, sc);
+    }
+  } catch (_) {}
+
+  try {
+    const gpuTex = compositor._floorCache?.get?.(key)?.get?.('outdoors')?.texture ?? null;
+    if (!gpuTex) return null;
+    if (needsTileGpu && gpuTex.userData?.msaBundleBake) return null;
+    return gpuTex;
+  } catch (_) {}
+
+  return null;
+}
+
+/**
  * @param {object} compositor - GpuSceneMaskCompositor instance
  * @param {{ bottom?: number, top?: number }|null} [levelContext]
  * @param {{ skipGroundFallback?: boolean, allowBundleFallback?: boolean, strictViewedFloorOnly?: boolean }} [options]

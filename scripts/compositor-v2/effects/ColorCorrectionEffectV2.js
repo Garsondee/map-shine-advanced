@@ -23,6 +23,12 @@ import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
 import { migrateAtmosphereParams } from '../SkyEnvironmentModel.js';
+import { createMaskStatusSchemaGroup, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
+import {
+  GLSL_DECODE_OUTDOOR_CLASS,
+  GLSL_DECODE_INDOOR_WEIGHT,
+  GLSL_DECODE_OUTDOORS_MASK_SAMPLE,
+} from '../../masks/outdoors-mask-decode.js';
 
 const log = createLogger('ColorCorrectionEffectV2');
 
@@ -514,7 +520,7 @@ export class ColorCorrectionEffectV2 {
           '**Persistence:** this effect supports **World Based** in the GM panel (shared across scenes) or per-scene storage when World Based is off.',
           'Fullscreen post; cost is modest (single pass).',
           '**Time-of-day timeline:** eight clock anchors each with global and interior exposure, saturation, and RGB tint multipliers (1 = neutral, 0–3 per channel); blends as scene time changes.',
-          '**Outdoor atmosphere:** procedural weather/golden-hour offsets on sky-eligible outdoor pixels (after timeline, before tone map).',
+          '**Outdoor atmosphere:** procedural weather/golden-hour offsets on sky-eligible outdoor pixels (after timeline, before tone map). Requires _Outdoors for interior vs outdoor timeline splits and atmosphere gating.',
           '**Local ToD override:** under gameplay lights (HDR light buffer), blends from the timeline grade toward a bright neutral local grade — cancels midnight tint/exposure in lit pools without a circular cutout.',
           '**Note:** Vignette **softness** is written to a uniform but the current fragment shader uses a fixed falloff — the slider is reserved for a future shader hook.',
         ].join('\n\n'),
@@ -536,6 +542,7 @@ export class ColorCorrectionEffectV2 {
       },
       presetApplyDefaults: true,
       groups: [
+        createMaskStatusSchemaGroup('outdoors'),
         {
           name: 'exposure',
           label: 'Camera exposure & white balance',
@@ -1008,7 +1015,7 @@ export class ColorCorrectionEffectV2 {
           gl_Position = vec4(position.xy, 0.0, 1.0);
         }
       `,
-      fragmentShader: /* glsl */`
+      fragmentShader: /* glsl */ `
         uniform sampler2D tDiffuse;
         uniform sampler2D tOutdoorsMask;
         uniform vec2 uResolution;
@@ -1102,13 +1109,9 @@ export class ColorCorrectionEffectV2 {
           return fract(sin(dot(p.xy, vec2(12.9898, 78.233))) * 43758.5453);
         }
 
-        float decodeOutdoorsMaskSample(vec4 od) {
-          float outdoorRaw = clamp(max(od.r, max(od.g, od.b)), 0.0, 1.0);
-          float outdoorMid = smoothstep(0.18, 0.82, outdoorRaw);
-          float outdoorClass = (outdoorRaw <= 0.10) ? 0.0 : ((outdoorRaw >= 0.90) ? 1.0 : outdoorMid);
-          float outdoorsAlphaValid = step(0.5, clamp(od.a, 0.0, 1.0));
-          return mix(1.0, outdoorClass, outdoorsAlphaValid);
-        }
+        ${GLSL_DECODE_OUTDOOR_CLASS}
+        ${GLSL_DECODE_INDOOR_WEIGHT}
+        ${GLSL_DECODE_OUTDOORS_MASK_SAMPLE}
 
         float sampleIndoorWeight(vec2 screenUv) {
           if (uHasOutdoorsMask < 0.5) return 0.0;
@@ -1123,12 +1126,9 @@ export class ColorCorrectionEffectV2 {
           vec2 sceneUv = sceneUvRaw;
           if (uOutdoorsMaskFlipY > 0.5) sceneUv.y = 1.0 - sceneUv.y;
           sceneUv = clamp(sceneUv, vec2(0.0), vec2(1.0));
-
-          // Canonical outdoors decode (matches Lighting/Water/Fog paths).
           vec4 od = texture2D(tOutdoorsMask, sceneUv);
-          float outdoorStrength = decodeOutdoorsMaskSample(od);
-          float indoorSignal = clamp(1.0 - outdoorStrength, 0.0, 1.0);
-          return mix(0.0, smoothstep(0.20, 0.75, indoorSignal), inScene);
+          float indoorW = decodeIndoorWeightFromMask(od);
+          return mix(0.0, indoorW, inScene);
         }
 
         vec2 sceneUvFromScreen(vec2 screenUv) {
@@ -1486,6 +1486,7 @@ export class ColorCorrectionEffectV2 {
     u.tOutdoorsMask.value = outdoorsTex ?? this._fallbackWhite;
     u.uHasOutdoorsMask.value = outdoorsTex ? 1.0 : 0.0;
     u.uOutdoorsMaskFlipY.value = outdoorsTex?.flipY ? 1.0 : 0.0;
+    try { refreshEffectMaskStatusUi('colorCorrection'); } catch (_) {}
   }
 
   /**

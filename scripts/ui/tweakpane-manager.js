@@ -196,8 +196,10 @@ export class TweakpaneManager {
       },
       /** V2 fullscreen mask debug (FloorCompositor); extend modes in MaskDebugOverlayPass.js */
       maskDebugOverlayEnabled: false,
-      maskDebugOverlayMode: 'outdoors_current',
+      maskDebugOverlayMode: 'indoor_outdoor_effective',
       maskDebugOverlayOpacity: 0.35,
+      maskDebugOverlayReplaceScene: true,
+      indoorOutdoorDebugReplaceScene: true,
       /**
        * Post — external rendering integrations.
        *
@@ -3533,6 +3535,7 @@ export class TweakpaneManager {
     debugFolder.addBlade({ view: 'separator' });
 
     this._buildMaskOverlayV2DebugSection(debugFolder);
+    this._buildIndoorOutdoorDebugSection(debugFolder);
 
     debugFolder.addBlade({ view: 'separator' });
 
@@ -3737,6 +3740,72 @@ export class TweakpaneManager {
 
     folder.on('fold', (ev) => {
       this.accordionStates['debug_maskOverlayV2'] = ev.expanded;
+      this.saveUIState();
+    });
+  }
+
+  /**
+   * Indoor/outdoor effective mask debug (Camera Grade stack SSOT).
+   * @param {Object} parentFolder
+   * @private
+   */
+  _buildIndoorOutdoorDebugSection(parentFolder) {
+    if (!parentFolder) return;
+
+    const folder = parentFolder.addFolder({
+      title: 'Indoors vs Outdoors (effective mask)',
+      expanded: this.accordionStates['debug_indoorOutdoor'] ?? false,
+    });
+
+    folder.addBinding(this.globalParams, 'maskDebugOverlayEnabled', {
+      label: 'Show debug view',
+    }).on('change', () => {
+      try { window.MapShine?.renderLoop?.requestContinuousRender?.(120); } catch (_) {}
+      this.saveUIState();
+    });
+
+    folder.addBinding(this.globalParams, 'maskDebugOverlayMode', {
+      label: 'View',
+      options: {
+        'Effective stack (outdoor B&W)': 'indoor_outdoor_effective',
+        'Indoor weight (B&W)': 'indoor_outdoor_indoor_weight',
+        'Stack validity (alpha)': 'indoor_outdoor_validity',
+        'Active band only': 'indoor_outdoor_band',
+      },
+    }).on('change', () => {
+      try { window.MapShine?.renderLoop?.requestContinuousRender?.(120); } catch (_) {}
+      this.saveUIState();
+    });
+
+    folder.addBinding(this.globalParams, 'indoorOutdoorDebugReplaceScene', {
+      label: 'Replace scene (B&W)',
+    }).on('change', () => {
+      this.globalParams.maskDebugOverlayReplaceScene = this.globalParams.indoorOutdoorDebugReplaceScene;
+      try { window.MapShine?.renderLoop?.requestContinuousRender?.(120); } catch (_) {}
+      this.saveUIState();
+    });
+
+    folder.addBinding(this.globalParams, 'maskDebugOverlayOpacity', {
+      label: 'Overlay opacity',
+      min: 0,
+      max: 1,
+      step: 0.01,
+    }).on('change', () => {
+      try { window.MapShine?.renderLoop?.requestContinuousRender?.(120); } catch (_) {}
+      this.saveUIState();
+    });
+
+    folder.addButton({ title: 'Log stack diagnostics' }).on('click', () => {
+      try {
+        const diag = window.MapShine?.__effectiveOutdoorsStack ?? null;
+        console.info('MapShine effective outdoors stack', diag);
+      } catch (e) {
+        console.warn('MapShine: stack diag unavailable', e);
+      }
+    });
+
+    folder.on('fold', (ev) => {
+      this.accordionStates['debug_indoorOutdoor'] = ev.expanded;
       this.saveUIState();
     });
   }
@@ -4089,8 +4158,10 @@ export class TweakpaneManager {
     this.globalParams.sunLatitude = 0.1;
     this.globalParams.shadowSystem = { ...DEFAULT_SHADOW_SYSTEM_TUNING };
     this.globalParams.maskDebugOverlayEnabled = false;
-    this.globalParams.maskDebugOverlayMode = 'outdoors_current';
+    this.globalParams.maskDebugOverlayMode = 'indoor_outdoor_effective';
     this.globalParams.maskDebugOverlayOpacity = 0.35;
+    this.globalParams.maskDebugOverlayReplaceScene = true;
+    this.globalParams.indoorOutdoorDebugReplaceScene = true;
 
     // Reset UI scale
     this.uiScale = 1.0;
@@ -8912,10 +8983,16 @@ export class TweakpaneManager {
           this.globalParams.maskDebugOverlayEnabled = false;
         }
         if (this.globalParams.maskDebugOverlayMode === undefined) {
-          this.globalParams.maskDebugOverlayMode = 'outdoors_current';
+          this.globalParams.maskDebugOverlayMode = 'indoor_outdoor_effective';
         }
         if (this.globalParams.maskDebugOverlayOpacity === undefined) {
           this.globalParams.maskDebugOverlayOpacity = 0.35;
+        }
+        if (this.globalParams.maskDebugOverlayReplaceScene === undefined) {
+          this.globalParams.maskDebugOverlayReplaceScene = true;
+        }
+        if (this.globalParams.indoorOutdoorDebugReplaceScene === undefined) {
+          this.globalParams.indoorOutdoorDebugReplaceScene = true;
         }
 
         // Backwards-compatible defaults for newly added Dynamic Exposure controls

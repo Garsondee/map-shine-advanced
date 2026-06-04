@@ -9,6 +9,7 @@ import { getAuthoritativeAmbientLightDocuments } from '../foundry/ambient-light-
 import { readTileLevelsFlags } from '../foundry/levels-scene-flags.js';
 import { resolveEffectEnabled } from '../effects/resolve-effect-enabled.js';
 import { GROUND_Z } from '../compositor-v2/LayerOrderPolicy.js';
+import { estimateIndoorWeightFromRgba } from '../masks/outdoors-mask-decode.js';
 
 const SCHEMA_VERSION = 8;
 const PICK_LABELS = ['A', 'B', 'C'];
@@ -112,15 +113,7 @@ function decodeCcOutdoorStrength(r, g, b, a) {
  * @returns {number}
  */
 function estimateCcIndoorWeight(r, g, b, a) {
-  const outdoorRaw = Math.max(0, Math.min(1, Math.max(r, g, b)));
-  const tMid = Math.max(0, Math.min(1, (outdoorRaw - 0.18) / (0.82 - 0.18)));
-  const outdoorMid = tMid * tMid * (3 - 2 * tMid);
-  const outdoorClass = outdoorRaw <= 0.1 ? 0 : (outdoorRaw >= 0.9 ? 1 : outdoorMid);
-  const outdoorsAlphaValid = a > 0.5 ? 1 : 0;
-  const isOutdoor = (1 - outdoorsAlphaValid) + outdoorClass * outdoorsAlphaValid;
-  const indoorSignal = Math.max(0, Math.min(1, 1 - isOutdoor));
-  const t = Math.max(0, Math.min(1, (indoorSignal - 0.2) / (0.75 - 0.2)));
-  return t * t * (3 - 2 * t);
+  return estimateIndoorWeightFromRgba(r, g, b, a);
 }
 
 /** @typedef {'outdoor'|'indoor'|'unknown'} OutdoorsClassification */

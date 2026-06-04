@@ -9,6 +9,10 @@
  * @module masks/shaders/stackedOutdoorsShader
  */
 
+import {
+  GLSL_DECODE_OUTDOOR_CLASS,
+} from '../outdoors-mask-decode.js';
+
 export { SKY_REACH_VERT as STACKED_OUTDOORS_VERT } from './skyReachShader.js';
 
 /**
@@ -29,26 +33,26 @@ export const STACKED_OUTDOORS_LAYER_FRAG = /* glsl */`
 
   varying vec2 vSceneUv;
 
-  float decodeOutdoorClass(vec4 od) {
-    float outdoorRaw = clamp(max(od.r, max(od.g, od.b)), 0.0, 1.0);
-    float outdoorMid = smoothstep(0.18, 0.82, outdoorRaw);
-    return (outdoorRaw <= 0.10) ? 0.0 : ((outdoorRaw >= 0.90) ? 1.0 : outdoorMid);
-  }
+  ${GLSL_DECODE_OUTDOOR_CLASS}
 
   void main() {
     vec4 acc = texture2D(tAccum, vSceneUv);
     vec4 od = texture2D(tOutdoors, vSceneUv);
-    float outdoorClass = decodeOutdoorClass(od);
+    float outdoorClass = decodeOutdoorClass(od.rgb);
     float cov = (uUseOutdoorsAlphaCoverage > 0.5)
       ? clamp(od.a, 0.0, 1.0)
       : clamp(texture2D(tFloorAlpha, vSceneUv).r, 0.0, 1.0);
-    float valid = step(0.5, clamp(od.a, 0.0, 1.0));
+    float covFromRgb = smoothstep(0.12, 0.88, outdoorClass);
+    cov = max(cov, covFromRgb);
+    float valid = max(step(0.5, clamp(od.a, 0.0, 1.0)), step(0.02, cov));
     float w = cov * valid;
     // Background-only upper bands often lack floorAlpha and use outdoors.a for
     // coverage. Deliberate alpha holes must not suppress a strong outdoor RGB
     // deck (white _Outdoors), or lower-floor indoor ToD bleeds through the stack.
     if (uUseOutdoorsAlphaCoverage > 0.5 && outdoorClass >= 0.85) {
       w = max(w, outdoorClass);
+    } else if (outdoorClass >= 0.85) {
+      w = max(w, covFromRgb);
     }
     float outR = mix(acc.r, outdoorClass, w);
     float outA = max(acc.a, w);

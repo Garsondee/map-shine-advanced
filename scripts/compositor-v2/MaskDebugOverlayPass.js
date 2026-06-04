@@ -7,6 +7,10 @@
  */
 
 import { createLogger } from '../core/log.js';
+import {
+  GLSL_DECODE_OUTDOOR_CLASS,
+  GLSL_DECODE_INDOOR_WEIGHT,
+} from '../masks/outdoors-mask-decode.js';
 
 const log = createLogger('MaskDebugOverlayPass');
 
@@ -23,7 +27,11 @@ const _ndcCorners = [
  * Add entries when new debug textures are wired in {@link MaskDebugOverlayPass#resolveMaskTexture}.
  */
 export const MASK_DEBUG_OVERLAY_MODE_OPTIONS = {
-  'Outdoors (current level)': 'outdoors_current',
+  'Indoor/Outdoor: effective stack': 'indoor_outdoor_effective',
+  'Indoor/Outdoor: indoor weight': 'indoor_outdoor_indoor_weight',
+  'Indoor/Outdoor: stack validity': 'indoor_outdoor_validity',
+  'Indoor/Outdoor: active band': 'indoor_outdoor_band',
+  'Outdoors (legacy resolve)': 'outdoors_current',
   'Overhead: Final Shadow Factor': 'overhead_shadow_factor',
   'Overhead: Roof Coverage Capture': 'overhead_roof_coverage',
   'Overhead: Roof Visibility (view floor)': 'overhead_roof_visibility',
@@ -141,6 +149,7 @@ export class MaskDebugOverlayPass {
         uHasSceneLayout: { value: 0.0 },
         uDirectScreenUv: { value: 0.0 },
         uReplaceScene: { value: 0.0 },
+        uMaskViewMode: { value: 0.0 },
       },
       vertexShader: `
         varying vec2 vUv;
@@ -149,7 +158,7 @@ export class MaskDebugOverlayPass {
           gl_Position = vec4(position, 1.0);
         }
       `,
-      fragmentShader: `
+      fragmentShader: /* glsl */ `
         uniform sampler2D tDiffuse;
         uniform sampler2D tMask;
         uniform float uHasMask;
@@ -161,8 +170,12 @@ export class MaskDebugOverlayPass {
         uniform float uHasSceneLayout;
         uniform float uDirectScreenUv;
         uniform float uReplaceScene;
+        uniform float uMaskViewMode;
 
         varying vec2 vUv;
+
+        ${GLSL_DECODE_OUTDOOR_CLASS}
+        ${GLSL_DECODE_INDOOR_WEIGHT}
 
         vec2 screenUvToFoundry(vec2 screenUv) {
           float threeX = mix(uViewBounds.x, uViewBounds.z, screenUv.x);
@@ -200,7 +213,15 @@ export class MaskDebugOverlayPass {
 
           vec4 m = texture2D(tMask, maskUv);
           float lum = max(m.r, max(m.g, m.b));
-          vec3 grey = vec3(lum);
+          float greyVal = lum;
+          if (uMaskViewMode > 0.5 && uMaskViewMode < 1.5) {
+            greyVal = decodeOutdoorClass(m.rgb);
+          } else if (uMaskViewMode > 1.5 && uMaskViewMode < 2.5) {
+            greyVal = decodeIndoorWeightFromMask(m);
+          } else if (uMaskViewMode > 2.5) {
+            greyVal = clamp(m.a, 0.0, 1.0);
+          }
+          vec3 grey = vec3(greyVal);
           if (uReplaceScene > 0.5) {
             gl_FragColor = vec4(grey, base.a);
             return;
@@ -236,6 +257,46 @@ export class MaskDebugOverlayPass {
    * }}
    */
   resolveMaskTexture(mode, hooks = {}) {
+    if (mode === 'indoor_outdoor_effective' && typeof hooks.resolveEffectiveStackMask === 'function') {
+      const r = hooks.resolveEffectiveStackMask();
+      return {
+        texture: r?.texture ?? null,
+        floorKey: r?.floorKey ?? 'effective-stack',
+        directScreenUv: false,
+        replaceScene: hooks.replaceScene === true,
+        maskViewMode: 1.0,
+      };
+    }
+    if (mode === 'indoor_outdoor_indoor_weight' && typeof hooks.resolveEffectiveStackMask === 'function') {
+      const r = hooks.resolveEffectiveStackMask();
+      return {
+        texture: r?.texture ?? null,
+        floorKey: r?.floorKey ?? 'effective-stack',
+        directScreenUv: false,
+        replaceScene: hooks.replaceScene === true,
+        maskViewMode: 2.0,
+      };
+    }
+    if (mode === 'indoor_outdoor_validity' && typeof hooks.resolveEffectiveStackMask === 'function') {
+      const r = hooks.resolveEffectiveStackMask();
+      return {
+        texture: r?.texture ?? null,
+        floorKey: r?.floorKey ?? 'effective-stack',
+        directScreenUv: false,
+        replaceScene: hooks.replaceScene === true,
+        maskViewMode: 3.0,
+      };
+    }
+    if (mode === 'indoor_outdoor_band' && typeof hooks.resolveBandMask === 'function') {
+      const r = hooks.resolveBandMask();
+      return {
+        texture: r?.texture ?? null,
+        floorKey: r?.floorKey ?? null,
+        directScreenUv: false,
+        replaceScene: hooks.replaceScene === true,
+        maskViewMode: 1.0,
+      };
+    }
     if (mode === 'outdoors_current' && typeof hooks.resolveOutdoorsMask === 'function') {
       const r = hooks.resolveOutdoorsMask();
       return {
@@ -243,6 +304,7 @@ export class MaskDebugOverlayPass {
         floorKey: r?.floorKey ?? null,
         directScreenUv: false,
         replaceScene: false,
+        maskViewMode: 0.0,
       };
     }
     if (String(mode).startsWith('overhead_') && typeof hooks.resolveOverheadDebugTexture === 'function') {
@@ -274,6 +336,8 @@ export class MaskDebugOverlayPass {
     if (!this._material) return false;
     const directScreenUv = options?.directScreenUv === true;
     const replaceScene = options?.replaceScene === true;
+    const maskViewMode = Number(options?.maskViewMode);
+    const viewMode = Number.isFinite(maskViewMode) ? maskViewMode : 0.0;
 
     const u = this._material.uniforms;
     u.tDiffuse.value = sourceRT.texture;
@@ -282,6 +346,7 @@ export class MaskDebugOverlayPass {
     u.uOpacity.value = Math.max(0, Math.min(1, opacity01));
     u.uMaskFlipY.value = maskTex?.flipY ? 1.0 : 0.0;
     u.uReplaceScene.value = replaceScene ? 1.0 : 0.0;
+    u.uMaskViewMode.value = viewMode;
     if (maskTex && THREE.ClampToEdgeWrapping) {
       maskTex.wrapS = THREE.ClampToEdgeWrapping;
       maskTex.wrapT = THREE.ClampToEdgeWrapping;

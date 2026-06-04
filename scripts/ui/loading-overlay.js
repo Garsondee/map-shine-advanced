@@ -605,21 +605,45 @@ export class LoadingOverlay {
   }
 
   showBlack(message = 'Loading…') {
+    this.prepareForCover(message);
+    this._startTimer();
+    this.el.style.opacity = '1';
+    this._setContentOpacity(1, 0);
+  }
+
+  /**
+   * Instantly stack a solid-black curtain shell with panel content hidden.
+   * Opacity starts at 0 so {@link #fadeBlack} can smoothly cover the live
+   * scene; pass `{ instant: true }` for an immediate opaque cover (prevents
+   * one-frame flashes when Foundry begins a level redraw).
+   *
+   * @param {string} [message='Loading…']
+   * @param {object} [options]
+   * @param {boolean} [options.instant=false]
+   */
+  prepareForCover(message = 'Loading…', options = undefined) {
     this.ensure();
-    // Cancel any in-flight fade from a previous scene load.
-    // Without this, a stale fadeIn() completion can hide a newly shown overlay.
     this._token++;
     this.setMessage(message);
     this._resetProgress();
-    this._startTimer();
     this.el.style.display = 'flex';
     this.el.style.pointerEvents = 'auto';
     this.el.style.transitionDuration = '0ms';
-    this.el.style.opacity = '1';
+    this.el.style.transitionProperty = 'opacity';
+    this.el.style.transitionTimingFunction = 'ease';
     this.el.style.backgroundColor = 'rgba(0, 0, 0, 1)';
-    this._setContentOpacity(1, 0);
+    this._setContentOpacity(0, 0);
     this.el.classList.remove('map-shine-loading-overlay--hidden');
     this.el.classList.add('map-shine-loading-overlay--black');
+    this.el.style.opacity = options?.instant === true ? '1' : '0';
+  }
+
+  /**
+   * Keep the loading UI hidden while the outer black curtain stays up.
+   */
+  ensureContentHidden() {
+    if (!this.el) return;
+    this._setContentOpacity(0, 0);
   }
 
   showLoading(message = 'Loading…') {

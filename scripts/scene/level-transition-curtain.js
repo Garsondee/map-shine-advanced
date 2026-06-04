@@ -15,11 +15,14 @@
 import { createLogger } from '../core/log.js';
 import { getShaderCompileMonitor } from '../core/diagnostics/ShaderCompileMonitor.js';
 import { loadingOverlay } from '../ui/loading-overlay.js';
+import * as sceneSettings from '../settings/scene-settings.js';
 
 const log = createLogger('LevelTransitionCurtain');
 
-const FADE_OUT_MS = 280;
-const FADE_IN_MS = 520;
+const COVER_FADE_MS = 480;
+const PANEL_IN_MS = 360;
+const PANEL_OUT_MS = 320;
+const REVEAL_FADE_MS = 680;
 
 // Safety stopper: if every readiness signal somehow stalls, force fade-in so
 // the user never gets stuck looking at a black screen.
@@ -37,6 +40,9 @@ const FRAME_INPUTS_TIMEOUT_MS = 8000;
 const COMPILED_PROGRAMS_STABLE_POLLS = 6;
 const FRAME_INPUTS_STABLE_POLLS = 6;
 const READINESS_POLL_MS = 50;
+
+/** @type {{ proto: object, original: Function }|null} */
+let _sceneViewLevelWrapperRestore = null;
 
 /**
  * Coordinates the loading overlay around Map Shine level switches.
@@ -61,19 +67,22 @@ export class LevelTransitionCurtain {
     this._fromLabel = '';
     /** @type {string} Subtitle "to" label for the currently-displayed overlay. */
     this._toLabel = '';
+    /** @type {boolean} Panel visible over the black curtain shell. */
+    this._panelVisible = false;
+    /** @type {boolean} Last armCoverSync used an instant opaque cover. */
+    this._lastCoverInstant = false;
+    /** @type {boolean} Black curtain shell is already stacked (do not re-prepare). */
+    this._coverArmed = false;
     /** @type {boolean} */
     this._disposed = false;
   }
 
   /**
-   * Backwards-compatible no-op. The curtain used to monkey-patch
-   * `cameraFollower._emitLevelContextChanged`; that responsibility has moved
-   * to the caller (CameraFollower routes through {@link #runLevelSwitch}).
-   * Kept so existing wiring code keeps working without changes.
    * @param {object} _cameraFollower
    */
   register(_cameraFollower) {
     this._disposed = false;
+    this._installSceneViewLevelWrapper();
     log.info('Level transition curtain ready (caller-driven)');
   }
 
@@ -84,6 +93,133 @@ export class LevelTransitionCurtain {
     this._latestPerform = null;
     this._fromLabel = '';
     this._toLabel = '';
+    this._panelVisible = false;
+    this._coverArmed = false;
+    this._markLevelTransitionActive(false);
+    this._uninstallSceneViewLevelWrapper();
+  }
+
+  /**
+   * Synchronously hide the canvas behind an opaque black shell (panel hidden).
+   * Call at level-switch entry before Foundry can paint a grey redraw frame.
+   *
+   * @param {object} [options]
+   * @param {string} [options.message='Changing floor…']
+   * @param {string|null} [options.subtitle]
+   * @param {boolean} [options.instant=true] When true, reach opaque black
+   *   immediately; when false, leave opacity at 0 for {@link #_coverToBlack}.
+   */
+  armCoverSync(options = undefined) {
+    if (this._shouldBypass()) return;
+    const message = options?.message ?? 'Changing floor…';
+    const subtitle = options?.subtitle ?? null;
+    const instant = options?.instant !== false;
+
+    this._markLevelTransitionActive(true);
+
+    // Re-arming mid-pipeline (e.g. Canvas.draw during scene.view) must not
+    // call prepareForCover — it bumps the overlay token and hides the panel
+    // we just faded in, which stalls the transition.
+    if (this._coverArmed) {
+      try {
+        if (message) loadingOverlay.setMessage?.(message);
+        if (subtitle != null) loadingOverlay.setSubtitle?.(subtitle);
+      } catch (_) {}
+      return;
+    }
+
+    this._coverArmed = true;
+    this._lastCoverInstant = instant;
+    try {
+      loadingOverlay.prepareForCover?.(message, { instant });
+      if (subtitle != null) {
+        loadingOverlay.setSubtitle?.(subtitle);
+      }
+      loadingOverlay.ensureContentHidden?.();
+    } catch (err) {
+      log.warn('armCoverSync failed', err);
+    }
+  }
+
+  /**
+   * Route Foundry's native `Scene#view({ level })` through the curtain so
+   * level-picker UI cannot flash a grey canvas before our cover arms.
+   * @private
+   */
+  _installSceneViewLevelWrapper() {
+    if (_sceneViewLevelWrapperRestore) return;
+
+    const proto = CONFIG?.Scene?.documentClass?.prototype
+      ?? foundry?.documents?.Scene?.prototype
+      ?? null;
+    if (!proto?.view || proto.view.__msaLevelWrapped === true) return;
+
+    const original = proto.view;
+    const wrapped = async function msaSceneViewLevelWrapper(options, ...rest) {
+      const ms = window.MapShine;
+      if (ms?.__levelTransitionPerformingView === true) {
+        return original.call(this, options, ...rest);
+      }
+
+      const levelId = options?.level;
+      const sceneDoc = this;
+      if (
+        levelId == null
+        || !canvas?.scene
+        || String(canvas.scene.id) !== String(sceneDoc.id)
+        || !sceneSettings.isEnabled(sceneDoc)
+      ) {
+        return original.call(this, options, ...rest);
+      }
+
+      const curtain = ms?.levelTransitionCurtain;
+      if (!curtain || typeof curtain.runLevelSwitch !== 'function') {
+        return original.call(this, options, ...rest);
+      }
+      if (typeof curtain._shouldBypass === 'function' && curtain._shouldBypass()) {
+        return original.call(this, options, ...rest);
+      }
+
+      const cf = ms?.cameraFollower;
+      const levels = cf?._levels;
+      const idx = Array.isArray(levels)
+        ? levels.findIndex((l) => l?.levelId === levelId)
+        : -1;
+      if (idx < 0 || idx === cf?._activeLevelIndex) {
+        return original.call(this, options, ...rest);
+      }
+
+      await cf._setActiveLevelByIndex(idx, {
+        emit: true,
+        reason: 'foundry-native-view',
+      });
+    };
+
+    wrapped.__msaLevelWrapped = true;
+    proto.view = wrapped;
+    _sceneViewLevelWrapperRestore = { proto, original };
+  }
+
+  /** @private */
+  _uninstallSceneViewLevelWrapper() {
+    if (!_sceneViewLevelWrapperRestore) return;
+    try {
+      _sceneViewLevelWrapperRestore.proto.view = _sceneViewLevelWrapperRestore.original;
+    } catch (_) {}
+    _sceneViewLevelWrapperRestore = null;
+  }
+
+  /** @param {boolean} active @private */
+  _markLevelTransitionActive(active) {
+    try {
+      if (!window.MapShine) window.MapShine = {};
+      window.MapShine.__levelTransitionActive = !!active;
+      document.body?.classList?.toggle('msa-level-transition-active', !!active);
+      if (!active) {
+        this._coverArmed = false;
+        this._panelVisible = false;
+      }
+    } catch (_) {}
   }
 
   /**
@@ -110,14 +246,11 @@ export class LevelTransitionCurtain {
    * Run a level switch under a fade-to-black curtain.
    *
    * Pipeline:
-   *   1. Fade the loading overlay to fully opaque black (opacity only).
-   *   2. Run the caller-supplied `perform` callback — this is where
-   *      `canvas.scene.view({ level })` and the matching
-   *      `_emitLevelContextChanged` call happen so all heavy listener work
-   *      runs while the screen is covered.
-   *   3. Await real readiness signals (Foundry canvasReady, level context,
-   *      mask rebuild + repopulate, compiled shaders, valid frame inputs).
-   *   4. Fade back in.
+   *   1. Arm + fade the curtain to solid black (panel hidden).
+   *   2. Fade the loading panel in over black.
+   *   3. Run the caller-supplied `perform` callback — `canvas.scene.view({ level })`
+   *      and `_emitLevelContextChanged` run only after the screen is covered.
+   *   4. Await readiness signals, then hide the panel and fade the scene in.
    *
    * Concurrent calls are coalesced: a second `runLevelSwitch` while the
    * pipeline is already in flight simply runs its `perform` callback under
@@ -175,6 +308,11 @@ export class LevelTransitionCurtain {
     }
 
     this._fromLabel = fromLabel;
+    this.armCoverSync({
+      message: 'Changing floor…',
+      subtitle: `Changing from ${fromLabel} to ${toLabel}`,
+      instant: true,
+    });
     this._inFlightPromise = this._runPipeline({ reason });
 
     try {
@@ -229,25 +367,33 @@ export class LevelTransitionCurtain {
     const pipelineStartMs = performance.now();
     const MAX_PERFORM_ITERATIONS = 8;
 
-    // 1. Prepare overlay chrome (subtitle, panel) BEFORE the fade so the
-    // panel content is correct from the first visible frame of black.
+    this._markLevelTransitionActive(true);
+
+    // 1. Configure overlay chrome while the sync black shell from armCoverSync
+    //    is already hiding the canvas. Smoothly deepen cover if needed, then
+    //    bring the panel in — never before perform().
     this._prepareOverlay();
 
-    // 2. Fade overlay to fully-opaque black (opacity only).
     try {
-      await loadingOverlay.fadeBlack(FADE_OUT_MS);
+      await this._coverToBlack();
     } catch (err) {
-      log.warn('fadeBlack failed', err);
+      log.warn('coverToBlack failed', err);
     }
 
-    // 3. Ask the render loop to keep ticking while we wait for readiness so
-    // populate / shader work makes progress instead of pausing when the
-    // canvas is fully covered.
+    if (!this._panelVisible) {
+      try {
+        await loadingOverlay.showPanel(PANEL_IN_MS);
+        this._panelVisible = true;
+      } catch (err) {
+        log.warn('showPanel failed', err);
+      }
+    }
+
+    // 2. Keep the compositor ticking while covered.
     this._keepRendering();
 
-    // 4. Drain the latest perform queue. Each loop iteration grabs the
-    // most-recently-requested perform and runs it; rapid coalesced calls
-    // are collapsed so only the FINAL desired state is applied.
+    // 4. Drain the latest perform queue — level switch work runs only once
+    //    the screen is fully black and the panel is visible.
     let iterations = 0;
     while (this._latestPerform && iterations < MAX_PERFORM_ITERATIONS && !this._disposed) {
       const p = this._latestPerform;
@@ -297,10 +443,20 @@ export class LevelTransitionCurtain {
       log.info('Skipping curtain fade-in; scene transition took over the overlay');
     } else {
       try {
-        await loadingOverlay.fadeClear(FADE_IN_MS);
+        if (this._panelVisible) {
+          await loadingOverlay.hidePanel(PANEL_OUT_MS);
+          this._panelVisible = false;
+        }
+        await loadingOverlay.fadeClear(REVEAL_FADE_MS);
       } catch (err) {
-        log.warn('fadeClear failed', err);
+        log.warn('reveal failed', err);
+      } finally {
+        this._markLevelTransitionActive(false);
       }
+    }
+
+    if (this._shouldBypass()) {
+      this._markLevelTransitionActive(false);
     }
 
     log.debug('Level switch complete', {
@@ -321,6 +477,7 @@ export class LevelTransitionCurtain {
     try {
       loadingOverlay.ensure();
       loadingOverlay.setMessage('Changing floor…');
+      loadingOverlay.ensureContentHidden?.();
       loadingOverlay.configureStages([
         { id: 'fade', label: 'Covering', weight: 1 },
         { id: 'apply', label: 'Switching', weight: 1 },
@@ -330,11 +487,27 @@ export class LevelTransitionCurtain {
         { id: 'finalize', label: 'Finalizing', weight: 1 },
       ]);
       loadingOverlay.startStages();
-      loadingOverlay.setStage('fade', 0.4);
+      loadingOverlay.setStage('fade', 0.15);
       this._refreshOverlaySubtitle();
     } catch (err) {
       log.warn('prepareOverlay failed', err);
     }
+  }
+
+  /**
+   * Smoothly finish covering the screen when armCoverSync left us at opacity 0,
+   * or no-op when already fully black.
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _coverToBlack() {
+    if (this._lastCoverInstant) {
+      loadingOverlay.setStage('fade', 1);
+      return;
+    }
+    loadingOverlay.setStage('fade', 0.35);
+    await loadingOverlay.fadeBlack(COVER_FADE_MS, { contentVisible: false });
+    loadingOverlay.setStage('fade', 1);
   }
 
   /** @private */

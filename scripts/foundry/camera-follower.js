@@ -486,6 +486,14 @@ export class CameraFollower {
     const toLabel =
       String(level.label || '').trim() || `Level ${clamped + 1}`;
 
+    try {
+      curtain.armCoverSync({
+        message: 'Changing floor…',
+        subtitle: `Changing from ${fromLabel} to ${toLabel}`,
+        instant: true,
+      });
+    } catch (_) {}
+
     this._activeLevelIndex = clamped;
     this._activeLevelContext = {
       levelId: level.levelId,
@@ -500,15 +508,22 @@ export class CameraFollower {
       count: this._levels.length,
     };
 
-    const performSwitch = () => {
-      if (level?.source === 'v14-native' && canvas?.scene?.view) {
-        try {
-          canvas.scene.view({ level: level.levelId });
-        } catch (err) {
-          log.warn('canvas.scene.view failed inside curtain perform', err);
+    const performSwitch = async () => {
+      try {
+        if (window.MapShine) window.MapShine.__levelTransitionPerformingView = true;
+        if (level?.source === 'v14-native' && canvas?.scene?.view) {
+          try {
+            await canvas.scene.view({ level: level.levelId });
+          } catch (err) {
+            log.warn('canvas.scene.view failed inside curtain perform', err);
+          }
         }
+        this._emitLevelContextChanged(reason);
+      } finally {
+        try {
+          if (window.MapShine) window.MapShine.__levelTransitionPerformingView = false;
+        } catch (_) {}
       }
-      this._emitLevelContextChanged(reason);
     };
 
     try {

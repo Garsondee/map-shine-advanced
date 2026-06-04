@@ -809,6 +809,15 @@
   background-color: rgba(0, 0, 0, 1.0);
 }
 
+/* Hide Foundry's native loader while Map Shine owns the level-transition curtain. */
+body.msa-level-transition-active #loading,
+body.msa-level-transition-active #loading-bar,
+body.msa-level-transition-active #loading-text {
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
 #map-shine-loading-overlay .map-shine-loading-overlay__content {
   pointer-events: none;
   width: min(420px, calc(100vw - 40px));

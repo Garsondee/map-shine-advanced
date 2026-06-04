@@ -8,6 +8,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { createMaskStatusSchemaGroup, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import {
   tileHasLevelsRange,
@@ -139,11 +140,12 @@ export class BushEffectV2 {
     this._wavePhase = 0.0;
     this._flutterPhase = 0.0;
     this._lastFrameTime = 0.0;
+    /** @type {'idle'|'searching'|'found'|'missing'} */
+    this._maskDiscoveryPhase = 'idle';
 
     // Public params (mirrors V1 schema / defaults)
     this.params = {
       enabled: true,
-      textureStatus: 'Searching...',
       intensity: 1.0,
 
       // -- Wind Physics --
@@ -222,7 +224,7 @@ export class BushEffectV2 {
           'Settings save with the scene (not World Based).',
         ].join('\n\n'),
         glossary: {
-          'Mask status': 'Whether the scene found at least one `_Bush` texture after load.',
+          Texture: 'Whether the scene found at least one `_Bush` texture after load (row under Enabled).',
           Intensity: 'Overall strength of the bush layer (alpha and shadow contribution).',
           'Wind responsiveness': 'How quickly the effect catches up when scene wind speed changes.',
           'Rustle floor': 'Minimum motion when wind reads calm so bushes never look frozen.',
@@ -236,14 +238,7 @@ export class BushEffectV2 {
       },
       presetApplyDefaults: true,
       groups: [
-        {
-          name: 'status',
-          label: 'Status',
-          type: 'folder',
-          advanced: true,
-          expanded: true,
-          parameters: ['textureStatus'],
-        },
+        createMaskStatusSchemaGroup('bush'),
         {
           name: 'look',
           label: 'Look',
@@ -364,13 +359,6 @@ export class BushEffectV2 {
         },
       ],
       parameters: {
-        textureStatus: {
-          type: 'string',
-          label: 'Mask status',
-          default: 'Searching...',
-          readonly: true,
-          tooltip: 'Updated when the scene loads: whether any `_Bush` mask was found.',
-        },
         intensity: {
           type: 'slider',
           label: 'Intensity',
@@ -902,10 +890,14 @@ export class BushEffectV2 {
     }
 
     const n = this._overlays.size;
-    this.params.textureStatus = n > 0
-      ? 'Ready (_Bush mask found)'
-      : 'Inactive (no _Bush mask)';
+    this._maskDiscoveryPhase = n > 0 ? 'found' : 'missing';
+    this._notifyMaskStatusUi();
     log.info(`BushEffectV2 populated: ${n} overlays`);
+  }
+
+  /** Push _Bush texture row state into the Bush Tweakpane panel. */
+  _notifyMaskStatusUi() {
+    refreshEffectMaskStatusUi('bush');
   }
 
   /**
@@ -1141,7 +1133,8 @@ export class BushEffectV2 {
     this._deriveAlphaByTileId.clear();
     this._lastFoundrySceneData = null;
     this._edgeSafetyBoundsSignature = '';
-    this.params.textureStatus = 'Inactive (no _Bush mask)';
+    this._maskDiscoveryPhase = 'missing';
+    this._notifyMaskStatusUi();
   }
 
   /**

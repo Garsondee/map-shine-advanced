@@ -8,6 +8,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { createMaskStatusSchemaGroup, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import {
   tileHasLevelsRange,
@@ -155,10 +156,12 @@ export class TreeEffectV2 {
     /** @type {string} Cached {@link vegetationEdgeSafetyBoundsSignature} */
     this._edgeSafetyBoundsSignature = '';
 
+    /** @type {'idle'|'searching'|'found'|'missing'} */
+    this._maskDiscoveryPhase = 'idle';
+
     // Public params — tuned for high-canopy motion; optional turbulence on by default.
     this.params = {
       enabled: true,
-      textureStatus: 'Searching...',
       intensity: 1.0,
 
       // -- Wind Physics --
@@ -239,7 +242,7 @@ export class TreeEffectV2 {
           'Settings save with the scene (not World Based).',
         ].join('\n\n'),
         glossary: {
-          'Mask status': 'Whether the scene found at least one `_Tree` texture after load.',
+          Texture: 'Whether the scene found at least one `_Tree` texture after load (row under Enabled).',
           Intensity: 'Overall strength of the tree layer (alpha and shadow contribution).',
           Turbulence: 'Extra high-frequency wobble mixed into distortion (trees only).',
           'Canopy shadow': 'Darkening from a blurred, offset sample of the mask opposite the sun (same as bushes).',
@@ -253,14 +256,7 @@ export class TreeEffectV2 {
       },
       presetApplyDefaults: true,
       groups: [
-        {
-          name: 'status',
-          label: 'Status',
-          type: 'folder',
-          advanced: true,
-          expanded: true,
-          parameters: ['textureStatus'],
-        },
+        createMaskStatusSchemaGroup('tree'),
         {
           name: 'look',
           label: 'Look',
@@ -382,13 +378,6 @@ export class TreeEffectV2 {
         },
       ],
       parameters: {
-        textureStatus: {
-          type: 'string',
-          label: 'Mask status',
-          default: 'Searching...',
-          readonly: true,
-          tooltip: 'Updated when the scene loads: whether any `_Tree` mask was found.',
-        },
         intensity: {
           type: 'slider',
           label: 'Intensity',
@@ -944,10 +933,14 @@ export class TreeEffectV2 {
     this._resetAllOverlayHoverAndStacking();
 
     const n = this._overlays.size;
-    this.params.textureStatus = n > 0
-      ? 'Ready (_Tree mask found)'
-      : 'Inactive (no _Tree mask)';
+    this._maskDiscoveryPhase = n > 0 ? 'found' : 'missing';
+    this._notifyMaskStatusUi();
     log.info(`TreeEffectV2 populated: ${n} overlays`);
+  }
+
+  /** Push _Tree texture row state into the Tree Tweakpane panel. */
+  _notifyMaskStatusUi() {
+    refreshEffectMaskStatusUi('tree');
   }
 
   /**
@@ -1422,7 +1415,8 @@ export class TreeEffectV2 {
     this._hoverFadeInProgress = false;
     this._lastFoundrySceneData = null;
     this._edgeSafetyBoundsSignature = '';
-    this.params.textureStatus = 'Inactive (no _Tree mask)';
+    this._maskDiscoveryPhase = 'missing';
+    this._notifyMaskStatusUi();
   }
 
   /**

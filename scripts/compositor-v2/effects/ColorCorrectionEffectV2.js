@@ -76,9 +76,9 @@ const makeTodAnchor = (hour, global = {}, interior = {}) => ({
  */
 const DEFAULT_TOD_ANCHORS = [
   makeTodAnchor(0, {
-    exposure: -2,
+    exposure: -1,
     saturation: 2,
-    tintColor: { r: 0.5, g: 0.5, b: 3 },
+    tintColor: { r: 0.5, g: 0.5, b: 2 },
   }, {
     exposure: -1,
     saturation: 0.97,
@@ -95,11 +95,11 @@ const DEFAULT_TOD_ANCHORS = [
   }),
   makeTodAnchor(6, {
     exposure: -0.4,
-    saturation: 2,
-    tintColor: { r: 3, g: 1.3, b: 1 },
+    saturation: 1,
+    tintColor: { r: 3, g: 1, b: 1 },
   }, {
     exposure: -2,
-    saturation: 1.5,
+    saturation: 1,
     tintColor: { r: 3, g: 1.39, b: 1 },
   }),
   makeTodAnchor(9, {
@@ -131,11 +131,11 @@ const DEFAULT_TOD_ANCHORS = [
   }),
   makeTodAnchor(18, {
     exposure: -0.4,
-    saturation: 2,
-    tintColor: { r: 3, g: 1.36, b: 1 },
+    saturation: 1,
+    tintColor: { r: 3, g: 1, b: 1 },
   }, {
     exposure: -2,
-    saturation: 1.5,
+    saturation: 1,
     tintColor: { r: 3, g: 1.39, b: 1 },
   }),
   makeTodAnchor(21, {
@@ -151,7 +151,7 @@ const DEFAULT_TOD_ANCHORS = [
 
 /** Baseline camera-grade params (HDR → LDR owner). Timeline on by default. */
 const COLOR_CORRECTION_CORE_DEFAULTS = Object.freeze({
-  exposure: 1,
+  exposure: 0.75,
   temperature: 0,
   tint: 0,
   brightness: 0,
@@ -170,7 +170,7 @@ const COLOR_CORRECTION_CORE_DEFAULTS = Object.freeze({
   localWarmLightPreserve: 1,
   localTodOverrideExposure: 1,
   localTodOverrideSaturation: 1,
-  localWarmEmissiveAdd: 0.1,
+  localWarmEmissiveAdd: 0,
 });
 
 /** Baseline camera-grade atmosphere defaults (neutral; atmosphere off by default). */

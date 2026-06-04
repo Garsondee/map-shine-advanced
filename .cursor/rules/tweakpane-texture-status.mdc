@@ -1,0 +1,14 @@
+---
+description: Tweakpane effects use shared texture status rows (Water template)
+globs:
+  - scripts/ui/tweakpane-manager.js
+  - scripts/ui/effect-mask-status.js
+  - scripts/ui/mask-status-ui.js
+  - scripts/compositor-v2/effects/**/*EffectV2.js
+---
+
+# Tweakpane texture status rows
+
+Follow **`Docs/tweakpane-texture-status-instruction-concise.md`** (full detail: `Docs/tweakpane-texture-status-instruction.md`).
+
+Mask-dependent main-config effects use **`mask-status`** groups (`createMaskStatusSchemaGroup` / `createMaskStatusSchemaGroups`), not `textureStatus` strings. Rows sit under **Enabled**: label **`Texture`** (one mask) or **suffix** (multi, A→Z); chip uses `formatTextureStatusMessage`; square **`?`** for setup help. Probe via `resolvePopulatedMaskStatus` (runtime after populate only); `refreshEffectMaskStatus(effectId)` after populate and on Enabled toggle. Missing = `No _Suffix Texture Found` (grey disabled / red enabled). Water/Bush/Tree migrated.

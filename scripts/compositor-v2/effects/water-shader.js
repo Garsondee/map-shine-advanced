@@ -953,6 +953,57 @@ vec3 calculateWaveForWind(vec2 sceneUv, float t, float motion01, vec2 windDirInp
     return vec3(totalH, slope.x, slope.y);
 }
 
+// High-frequency breakup + micro-normal perturbation added to wave gradients
+// (refraction distortion). Uniforms are driven from WaterEffectV2 breakup/micro params.
+vec2 waveDetailPerturbGrad(vec2 sceneUv, float t, float motion01, vec2 windDirInput) {
+  float m01 = clamp(motion01, 0.0, 1.0);
+  float sceneAspect = sceneAspectRatio();
+  vec2 wind = safeNormalize2(windDirInput);
+  if (dot(wind, wind) < 1e-6) wind = vec2(1.0, 0.0);
+  vec2 windBasis = normalize(vec2(wind.x * sceneAspect, wind.y));
+  vec2 windPerp = vec2(-windBasis.y, windBasis.x);
+  vec2 basis = effectUv(sceneUv);
+  vec2 detailG = vec2(0.0);
+
+  float breakupStrength = clamp(uWaveBreakupStrength, 0.0, 1.0);
+  float breakupDist = clamp(uWaveBreakupDistortionStrength, 0.0, 1.0);
+  if (breakupStrength > 1e-4 && breakupDist > 1e-4) {
+    float bScale = max(0.01, uWaveBreakupScale);
+    float bSpeed = max(0.0, uWaveBreakupSpeed) * m01;
+    float bWarp = clamp(uWaveBreakupWarp, 0.0, 2.0);
+    vec2 bUv = basis * bScale + windBasis * (t * bSpeed * 0.11) + windPerp * (t * bSpeed * 0.05);
+    float bw = valueNoise2D(bUv * 0.17 + vec2(13.1, 9.7)) - 0.5;
+    bUv += (windBasis + windPerp * 0.65) * (bw * 0.65 * bWarp);
+    float bn1 = valueNoise2D(bUv + vec2(17.3, 5.9));
+    float bn2 = valueNoise2D(bUv + vec2(3.1, 29.7));
+    vec2 bVec = (vec2(bn1, bn2) - 0.5);
+    bVec.x *= sceneAspect;
+    float bAmt = clamp(breakupStrength * breakupDist, 0.0, 1.0);
+    bAmt = bAmt * (1.15 + 1.85 * bAmt);
+    detailG += bVec * (0.95 * bAmt);
+  }
+
+  float microStrength = clamp(uWaveMicroNormalStrength, 0.0, 1.0);
+  float microDist = clamp(uWaveMicroNormalDistortionStrength, 0.0, 1.0);
+  if (microStrength > 1e-4 && microDist > 1e-4) {
+    float mScale = max(0.01, uWaveMicroNormalScale);
+    float mSpeed = max(0.0, uWaveMicroNormalSpeed) * m01;
+    float mWarp = clamp(uWaveMicroNormalWarp, 0.0, 2.0);
+    vec2 mUv = basis * mScale + windBasis * (t * mSpeed * 0.15) + windPerp * (t * mSpeed * 0.07);
+    float mw = valueNoise2D(mUv * 0.27 + vec2(41.7, 12.4)) - 0.5;
+    mUv += (windPerp + windBasis * 0.4) * (mw * 0.55 * mWarp);
+    float mn1 = valueNoise2D(mUv + vec2(7.3, 37.1));
+    float mn2 = valueNoise2D(mUv + vec2(29.9, 11.6));
+    vec2 mVec = (vec2(mn1, mn2) - 0.5);
+    mVec.x *= sceneAspect;
+    float mAmt = clamp(microStrength * microDist, 0.0, 1.0);
+    mAmt = mAmt * (1.25 + 2.15 * mAmt);
+    detailG += mVec * (0.78 * mAmt);
+  }
+
+  return detailG;
+}
+
 vec3 calculateWave(vec2 sceneUv, float t, float motion01) {
   // Dual-spectrum wind direction blending: evaluate wavefield for the previous
   // and target wind directions and blend height + gradient.
@@ -960,17 +1011,21 @@ vec3 calculateWave(vec2 sceneUv, float t, float motion01) {
   float s = clamp(uWindDirBlend, 0.0, 1.0);
   if (s < 1e-4) {
     vec3 w = calculateWaveForWind(sceneUv, t, motion01, uPrevWindDir);
+    w.yz += waveDetailPerturbGrad(sceneUv, t, motion01, uPrevWindDir);
     return w;
   }
   if (s > 0.9999) {
     vec3 w = calculateWaveForWind(sceneUv, t, motion01, uTargetWindDir);
+    w.yz += waveDetailPerturbGrad(sceneUv, t, motion01, uTargetWindDir);
     return w;
   }
 
   vec3 a = calculateWaveForWind(sceneUv, t, motion01, uPrevWindDir);
   vec3 b = calculateWaveForWind(sceneUv, t, motion01, uTargetWindDir);
+  vec3 w = mix(a, b, s);
   vec2 blendWind = safeNormalize2(mix(uPrevWindDir, uTargetWindDir, s));
-  return mix(a, b, s);
+  w.yz += waveDetailPerturbGrad(sceneUv, t, motion01, blendWind);
+  return w;
 }
 
 float waveHeight(vec2 sceneUv, float t, float motion01) { return calculateWave(sceneUv, t, motion01).x; }
@@ -1025,22 +1080,17 @@ float waterRawMaskAuthoritative(vec2 sceneUv01) {
   return waterRawMaskIntensity(sceneUv01);
 }
 
-// Edge metric matches legacy SDF semantics: high at the water/land transition, low in open water.
-float maskEdgeMetric(float coverage01) { return 1.0 - clamp(coverage01, 0.0, 1.0); }
-
+// Scene refraction strength follows _Water mask intensity (brighter = stronger).
 float distortionInsideFromCoverage(float coverage01) {
-  float edgeMet = maskEdgeMetric(coverage01);
-  float c = clamp(uDistortionEdgeCenter, 0.0, 1.0);
-  float f = max(0.0, uDistortionEdgeFeather);
-  float inside = (f > 1e-6) ? smoothstep(c + f, c - f, edgeMet) : step(edgeMet, c);
-  return pow(clamp(inside, 0.0, 1.0), max(0.01, uDistortionEdgeGamma));
+  float cov = clamp(coverage01, 0.0, 1.0);
+  return pow(cov, max(0.01, uDistortionEdgeGamma));
 }
 
 float chromaticInsideFromCoverage(float coverage01) {
-  float edgeMet = maskEdgeMetric(coverage01);
+  float cov = clamp(coverage01, 0.0, 1.0);
   float c = clamp(uChromaticAberrationEdgeCenter, 0.0, 1.0);
   float f = max(0.0, uChromaticAberrationEdgeFeather);
-  float inside = (f > 1e-6) ? smoothstep(c + f, c - f, edgeMet) : step(edgeMet, c);
+  float inside = (f > 1e-6) ? smoothstep(c - f, c + f, cov) : step(c, cov);
   inside = pow(clamp(inside, 0.0, 1.0), max(0.01, uChromaticAberrationEdgeGamma));
   inside = max(clamp(uChromaticAberrationEdgeMin, 0.0, 1.0), inside);
 
@@ -1048,7 +1098,7 @@ float chromaticInsideFromCoverage(float coverage01) {
   // artifacts where mask transitions are sharp.
   float dz = max(0.0, uChromaticAberrationDeadzone);
   float dzSoft = max(1e-5, uChromaticAberrationDeadzoneSoftness);
-  float edgeDelta = max(0.0, c - edgeMet);
+  float edgeDelta = max(0.0, c - cov);
   float deadzoneMask = smoothstep(dz, dz + dzSoft, edgeDelta);
   return inside * deadzoneMask;
 }
@@ -1727,15 +1777,14 @@ float refractTapValid(vec2 screenUv) {
   float vRoof = 1.0 - waterSourceScreenOcc(screenUv);
   float vBg = waterBgTransmittanceAt(screenUv);
 
-  // Water-body gating: if the shifted UV lands outside the water mask,
-  // reject it so we don't pull pixels from above-water areas.
+  // Keep taps inside the scene rect; do not require the shifted UV to stay on the
+  // water mask — refraction must sample land/deck visible through the surface.
   if (uHasSceneRect > 0.5) {
     vec2 foundryPos = screenUvToFoundry(screenUv);
     vec2 suv = foundryToSceneUv(foundryPos);
     float inScene = step(0.0, suv.x) * step(suv.x, 1.0) * step(0.0, suv.y) * step(suv.y, 1.0);
     if (inScene < 0.5) return 0.0;
-    float insideS = waterRawMaskIntensity(suv);
-    return insideS * vOcc * vRoof * vBg;
+    return vOcc * vRoof * vBg;
   }
 
   return vOcc * vRoof * vBg;
@@ -1932,7 +1981,7 @@ void main() {
   // Authoritative coverage from composited _Water; packed G = mask-gradient shore band.
   float inside = rawAuth;
   float shore = clamp(shoreFromPack * rawAuth, 0.0, 1.0);
-  float distInside = distortionInsideFromCoverage(rawAuth) * rawAuth;
+  float distInside = distortionInsideFromCoverage(rawAuth);
   if (uHasWaterBgAlphaMask > 0.5) {
     float m = texture2D(tWaterBgAlphaMask, vUv).r;
     inside *= m;
@@ -1989,7 +2038,7 @@ void main() {
   // Extra stability fade near the binary water-mask transition.
   // Prevents bright specular/caustics edge flicker when the water boundary is thin.
   float edgeStability = smoothstep(0.12, 0.42, clamp(distInside, 0.0, 1.0));
-  float distMask = distInside * shoreFactor(shore);
+  float distMask = distInside;
   float waveMotion01 = clamp(uWaveMotion01, 0.0, 1.0);
   float outdoorStrength = 1.0;
   if (uHasOutdoorsMask > 0.5) {

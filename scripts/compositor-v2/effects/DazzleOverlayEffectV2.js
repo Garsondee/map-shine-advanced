@@ -12,6 +12,8 @@ const log = createLogger('DazzleOverlayEffectV2');
  */
 export class DazzleOverlayEffectV2 {
   static optInEnable = true;
+  /** @type {boolean} Render gate follows runtime enabled, not scene-flag sync. */
+  static runtimeEnable = true;
 
   constructor() {
     this._enabled = false;

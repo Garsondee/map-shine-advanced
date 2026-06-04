@@ -1,0 +1,20 @@
+/**
+ * Map Shine Advanced — Tweakpane UI colour scheme helpers.
+ *
+ * Token values are injected at runtime by scripts/ui/ui-color-scheme.js
+ * (`#ms-ui-theme-active`). This file only supplies scheme-specific extras.
+ */
+
+#map-shine-ui[data-ms-ui-theme='high-contrast'] .tp-rotv_c > .tp-fldv > .tp-fldv_b,
+#map-shine-ui[data-ms-ui-theme='high-contrast'] .tp-rotv_c.ms-ui-scroll-body > .tp-fldv > .tp-fldv_b {
+  border: 1px solid #ffffff;
+}
+
+#map-shine-ui[data-ms-ui-theme='high-contrast'] .ms-universal-toolbar,
+#map-shine-ui[data-ms-ui-theme='high-contrast'] .ms-scene-status-bar {
+  border: 1px solid #ffffff;
+}
+
+#map-shine-ui[data-ms-ui-theme='soft-light'] a {
+  color: var(--ms-ui-link-bug);
+}

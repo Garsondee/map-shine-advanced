@@ -1480,6 +1480,8 @@ export const consoleHelpers = {
         isUpperBand: isUpper,
         compositor_getFloorTexture: {
           outdoors: _texProof(compositor?.getFloorTexture?.(key, 'outdoors')),
+          floorAlpha: _texProof(compositor?.getFloorTexture?.(key, 'floorAlpha')),
+          skyReach: _texProof(compositor?.getFloorTexture?.(key, 'skyReach')),
           specular: _texProof(compositor?.getFloorTexture?.(key, 'specular')),
         },
         compositor_floorCache_maskTypes: rtTypes,
@@ -1568,6 +1570,29 @@ export const consoleHelpers = {
       }
 
       report.bands[key] = bandReport;
+    }
+
+    const visibleFloors = floorStack?.getVisibleFloors?.() ?? [];
+    const visibleKeys = visibleFloors
+      .map((f) => (f?.compositorKey != null ? String(f.compositorKey) : ''))
+      .filter(Boolean);
+
+    report.stackedOutdoorsForCc = {
+      visibleFloorKeys: visibleKeys,
+      floorIdTarget: _texProof(compositor?.floorIdTarget?.texture),
+      lastStackedOutdoorsDiag: compositor?.getLastStackedOutdoorsDiag?.() ?? null,
+      lastStackedSkyReachDiag: compositor?.getLastStackedSkyReachDiag?.() ?? null,
+      ccPostMergeDiag: ms?.__ccPostMergeDiag ?? null,
+      perBandStackReadiness: {},
+    };
+
+    for (const key of visibleKeys) {
+      report.stackedOutdoorsForCc.perBandStackReadiness[key] = {
+        outdoors: !!compositor?.getFloorTexture?.(key, 'outdoors'),
+        floorAlpha: !!compositor?.getFloorTexture?.(key, 'floorAlpha'),
+        skyReach: !!compositor?.getFloorTexture?.(key, 'skyReach'),
+        gpuOutdoors: !!compositor?._floorCache?.get?.(key)?.get?.('outdoors')?.texture,
+      };
     }
 
     const json = JSON.stringify(report, null, 2);

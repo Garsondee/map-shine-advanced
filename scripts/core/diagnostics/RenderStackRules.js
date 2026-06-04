@@ -4,6 +4,8 @@
  * @module core/diagnostics/RenderStackRules
  */
 
+import { isCompositorOverlayShim } from './window-light-health-utils.js';
+
 /**
  * @param {object} stack - result of captureRenderStack()
  * @returns {object[]}
@@ -67,7 +69,7 @@ export function evaluateRenderStackFindings(stack) {
   const active = Number(rt.activeFloor ?? 0);
   const key = `floor:${active}`;
   const cur = wl.byFloor?.[key];
-  if (cur && cur.count > 0 && cur.visibleCount === 0) {
+  if (cur && cur.count > 0 && cur.visibleCount === 0 && !wl.compositorMode) {
     findings.push({
       ruleId: 'stack:windowOverlaysHiddenForActiveFloor',
       severity: 'warn',
@@ -77,7 +79,9 @@ export function evaluateRenderStackFindings(stack) {
   }
 
   const inv = Array.isArray(wl.overlayList) ? wl.overlayList : [];
-  const tileRows = inv.filter((o) => o?.tileId && o.tileId !== '__bg_image__');
+  const tileRows = inv.filter(
+    (o) => o?.tileId && o.tileId !== '__bg_image__' && o.mode !== 'compositor' && !isCompositorOverlayShim(o.tileId),
+  );
   if (active >= 1 && tileRows.length > 0) {
     const onActive = tileRows.filter((o) => Number(o.floorIndex) === active);
     if (onActive.length === 0) {

@@ -680,6 +680,25 @@ export class GraphicsSettingsManager {
   }
 
   /**
+   * Whether client graphics overrides explicitly force an effect off.
+   * Stylistic effects default off in {@link getEffectiveEnabled} for the settings UI;
+   * that default must not override scene-flag enablement in syncStylisticEffectGate.
+   * @param {string} effectId
+   * @returns {boolean}
+   */
+  isExplicitlyDisabledByClient(effectId) {
+    if (this.state.globalDisableAll) return true;
+    const normalized = this._normalizeEffectId(effectId);
+    const candidates = [normalized, effectId, ...this._legacyAliasKeysFor(normalized)];
+    for (const id of candidates) {
+      if (!id) continue;
+      const ov = this.state.effectOverrides?.[id];
+      if (ov && typeof ov.enabled === 'boolean' && ov.enabled === false) return true;
+    }
+    return false;
+  }
+
+  /**
    * Effective enabled state = availability && !globalDisableAll && per-effect enabled (if set).
    * @param {string} effectId
    */

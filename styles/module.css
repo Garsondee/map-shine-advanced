@@ -31,19 +31,20 @@
 /* Tweakpane UI Container */
 #map-shine-ui {
   font-family: var(--font-primary, 'Signika', sans-serif);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  color: var(--ms-ui-text, rgba(245, 248, 255, 0.95));
+  box-shadow: 0 4px 16px var(--ms-ui-shadow, rgba(0, 0, 0, 0.4));
   max-height: 80vh;
   min-height: 0;
-  min-width: 280px;
-  max-width: 320px;
-  width: min(320px, calc(100vw - 16px));
+  min-width: 308px;
+  max-width: 370px;
+  width: min(370px, calc(100vw - 16px));
   display: flex;
   flex-direction: column;
   overflow: hidden;
   overflow-x: hidden;
   overscroll-behavior-x: none;
-  /* Prevent scrollbar from overlapping inner controls */
-  padding-right: 8px;
+  padding-left: 10px;
+  padding-right: 10px;
   box-sizing: border-box;
   
   /* PERFORMANCE: Isolate layout without paint containment (paint breaks nested scroll). */
@@ -54,7 +55,8 @@
 /* Effect Stack UI Container */
 #map-shine-effect-stack {
   font-family: var(--font-primary, 'Signika', sans-serif);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  color: var(--ms-ui-text, rgba(245, 248, 255, 0.95));
+  box-shadow: 0 4px 16px var(--ms-ui-shadow, rgba(0, 0, 0, 0.4));
   max-height: 80vh;
   overflow-y: auto;
   padding-right: 8px;
@@ -71,7 +73,7 @@
 /* Localized vertical scrollbar styling for Effect Stack */
 #map-shine-effect-stack {
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.6) rgba(0, 0, 0, 0.4);
+  scrollbar-color: var(--ms-ui-scrollbar-thumb, rgba(255, 255, 255, 0.6)) var(--ms-ui-scrollbar-track, rgba(0, 0, 0, 0.4));
 }
 
 #map-shine-effect-stack::-webkit-scrollbar {
@@ -79,23 +81,23 @@
 }
 
 #map-shine-effect-stack::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.4);
+  background: var(--ms-ui-scrollbar-track, rgba(0, 0, 0, 0.4));
 }
 
 #map-shine-effect-stack::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--ms-ui-scrollbar-thumb, rgba(255, 255, 255, 0.6));
   border-radius: 4px;
 }
 
 #map-shine-effect-stack::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.85);
+  background: var(--ms-ui-scrollbar-thumb-hover, rgba(255, 255, 255, 0.85));
 }
 
 /* Localized vertical scrollbar styling for Map Shine UI scroll body */
 #map-shine-ui .ms-ui-scroll-body {
   /* Firefox */
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.6) rgba(0, 0, 0, 0.4);
+  scrollbar-color: var(--ms-ui-scrollbar-thumb, rgba(255, 255, 255, 0.6)) var(--ms-ui-scrollbar-track, rgba(0, 0, 0, 0.4));
   overscroll-behavior-y: auto;
   overscroll-behavior-x: none;
   touch-action: pan-y pinch-zoom;
@@ -108,22 +110,23 @@
 }
 
 #map-shine-ui .ms-ui-scroll-body::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.4);
+  background: var(--ms-ui-scrollbar-track, rgba(0, 0, 0, 0.4));
 }
 
 #map-shine-ui .ms-ui-scroll-body::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--ms-ui-scrollbar-thumb, rgba(255, 255, 255, 0.6));
   border-radius: 4px;
 }
 
 #map-shine-ui .ms-ui-scroll-body::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.85);
+  background: var(--ms-ui-scrollbar-thumb-hover, rgba(255, 255, 255, 0.85));
 }
 
 /* Texture Manager UI Container */
 #map-shine-texture-manager {
   font-family: var(--font-primary, 'Signika', sans-serif);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  color: var(--ms-ui-text, rgba(245, 248, 255, 0.95));
+  box-shadow: 0 4px 16px var(--ms-ui-shadow, rgba(0, 0, 0, 0.4));
   max-height: 60vh;
   overflow-y: auto;
   /* Prevent scrollbar from overlapping inner controls */
@@ -136,7 +139,7 @@
 /* Localized vertical scrollbar styling for Texture Manager */
 #map-shine-texture-manager {
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.6) rgba(0, 0, 0, 0.4);
+  scrollbar-color: var(--ms-ui-scrollbar-thumb, rgba(255, 255, 255, 0.6)) var(--ms-ui-scrollbar-track, rgba(0, 0, 0, 0.4));
 }
 
 #map-shine-texture-manager::-webkit-scrollbar {
@@ -144,16 +147,16 @@
 }
 
 #map-shine-texture-manager::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.4);
+  background: var(--ms-ui-scrollbar-track, rgba(0, 0, 0, 0.4));
 }
 
 #map-shine-texture-manager::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--ms-ui-scrollbar-thumb, rgba(255, 255, 255, 0.6));
   border-radius: 4px;
 }
 
 #map-shine-texture-manager::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.85);
+  background: var(--ms-ui-scrollbar-thumb-hover, rgba(255, 255, 255, 0.85));
 }
 
 .map-shine-texture-manager-columns {
@@ -205,6 +208,8 @@
   overflow-y: auto !important;
   overflow-x: hidden !important;
   overscroll-behavior-x: none;
+  padding: 0 4px 10px;
+  box-sizing: border-box;
 }
 
 #map-shine-ui .tp-rotv.tp-rotv-expanded > .tp-rotv_c.ms-ui-scroll-body {
@@ -233,10 +238,279 @@
   opacity: 0.8;
 }
 
+/* Pinned-open sections (e.g. Support & Links): always expanded, no collapse control */
+#map-shine-ui .tp-fldv.ms-tp-folder-pinned-open > .tp-fldv_b {
+  pointer-events: none;
+  cursor: default;
+}
+
+#map-shine-ui .tp-fldv.ms-tp-folder-pinned-open > .tp-fldv_b .tp-fldv_m {
+  visibility: hidden;
+}
+
+#map-shine-ui .tp-fldv.ms-tp-folder-pinned-open .tp-fldv_c {
+  display: block !important;
+}
+
 /* Slight extra gap between sibling folders (accordion headers) */
 #map-shine-ui .tp-fldv + .tp-fldv {
-  margin-top: 4px;
+  margin-top: 3px;
 }
+
+/* Top-level section headers — compact, scannable */
+#map-shine-ui .tp-rotv_c > .tp-fldv > .tp-fldv_b,
+#map-shine-ui .tp-rotv_c.ms-ui-scroll-body > .tp-fldv > .tp-fldv_b {
+  min-height: 28px;
+  border-radius: 6px;
+  background: var(--ms-ui-surface, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--ms-ui-border, rgba(255, 255, 255, 0.08));
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+#map-shine-ui .tp-rotv_c > .tp-fldv > .tp-fldv_b:hover,
+#map-shine-ui .tp-rotv_c.ms-ui-scroll-body > .tp-fldv > .tp-fldv_b:hover {
+  background: var(--ms-ui-surface-hover, rgba(255, 255, 255, 0.07));
+  border-color: var(--ms-ui-border-strong, rgba(255, 255, 255, 0.12));
+}
+
+#map-shine-ui .tp-rotv_c > .tp-fldv > .tp-fldv_b .tp-fldv_t,
+#map-shine-ui .tp-rotv_c.ms-ui-scroll-body > .tp-fldv > .tp-fldv_b .tp-fldv_t {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+#map-shine-ui .tp-fldv > .tp-fldv_c {
+  padding-top: 4px;
+  padding-bottom: 2px;
+}
+
+/* Quick Actions — compact two-column launcher grid */
+#map-shine-ui .ms-quick-actions-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: min-content;
+  align-items: start;
+  gap: 4px;
+  margin-top: 2px;
+  padding: 0 2px;
+}
+
+#map-shine-ui .ms-quick-actions-break {
+  grid-column: 1 / -1;
+  height: 1px;
+  margin: 2px 0 1px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--ms-ui-divider-mid, rgba(255, 255, 255, 0.14)) 20%,
+    var(--ms-ui-divider-mid, rgba(255, 255, 255, 0.14)) 80%,
+    transparent 100%
+  );
+}
+
+#map-shine-ui .ms-quick-actions-grid .ms-quick-action-btn {
+  appearance: none;
+  -webkit-appearance: none;
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  margin: 0;
+  padding: 3px 5px;
+  border-radius: 5px;
+  border: 1px solid var(--ms-ui-border, rgba(255, 255, 255, 0.14));
+  background: var(--ms-ui-surface, rgba(255, 255, 255, 0.06));
+  color: var(--ms-ui-text-muted, rgba(245, 248, 255, 0.92));
+  font-family: inherit;
+  font-size: 9.5px;
+  font-weight: 500;
+  line-height: 1.15;
+  text-align: center;
+  white-space: normal;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, transform 80ms ease;
+}
+
+#map-shine-ui .ms-quick-actions-grid .ms-quick-action-btn:hover:not(:disabled) {
+  background: var(--ms-ui-surface-hover, rgba(255, 255, 255, 0.11));
+  border-color: var(--ms-ui-border-strong, rgba(255, 255, 255, 0.22));
+}
+
+#map-shine-ui .ms-quick-actions-grid .ms-quick-action-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+#map-shine-ui .ms-quick-actions-grid .ms-quick-action-btn--danger {
+  border-color: var(--ms-ui-danger-border, rgba(255, 120, 120, 0.38));
+  background: var(--ms-ui-danger-bg, rgba(120, 0, 0, 0.16));
+  color: var(--ms-ui-danger, rgba(255, 210, 210, 0.95));
+}
+
+#map-shine-ui .ms-quick-actions-grid .ms-quick-action-btn--danger:hover:not(:disabled) {
+  background: var(--ms-ui-danger-bg-hover, rgba(140, 20, 20, 0.26));
+  border-color: var(--ms-ui-danger-border-hover, rgba(255, 140, 140, 0.5));
+}
+
+#map-shine-ui .ms-quick-actions-grid .ms-quick-action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Scene enable status — badge + toggle above filter toolbar */
+#map-shine-ui .ms-scene-status-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 6px;
+  background: linear-gradient(180deg, var(--ms-ui-status-start, #2e343d) 0%, var(--ms-ui-status-end, #262b33) 100%);
+  border-bottom: 1px solid var(--ms-ui-border, rgba(255, 255, 255, 0.08));
+}
+
+#map-shine-ui .ms-scene-status-badge {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+#map-shine-ui .ms-scene-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.35);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.08);
+}
+
+#map-shine-ui .ms-scene-status-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.88;
+}
+
+#map-shine-ui .ms-scene-status-chip {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+#map-shine-ui .ms-scene-status-badge--on {
+  border-color: var(--ms-ui-success-border, rgba(78, 210, 126, 0.45));
+  background: var(--ms-ui-success-bg, rgba(46, 166, 86, 0.16));
+  color: var(--ms-ui-success-text, rgba(220, 255, 230, 0.98));
+}
+
+#map-shine-ui .ms-scene-status-badge--on .ms-scene-status-dot {
+  background: var(--ms-ui-success, #5fe08a);
+  box-shadow: 0 0 8px var(--ms-ui-success-border, rgba(78, 210, 126, 0.65));
+}
+
+#map-shine-ui .ms-scene-status-badge--on .ms-scene-status-chip {
+  background: var(--ms-ui-success-bg, rgba(46, 166, 86, 0.35));
+  color: var(--ms-ui-success-text, rgba(235, 255, 242, 0.98));
+}
+
+#map-shine-ui .ms-scene-status-badge--off {
+  border-color: var(--ms-ui-off-border, rgba(230, 100, 84, 0.4));
+  background: var(--ms-ui-off-bg, rgba(166, 62, 46, 0.14));
+  color: var(--ms-ui-off-text, rgba(255, 220, 215, 0.96));
+}
+
+#map-shine-ui .ms-scene-status-badge--off .ms-scene-status-dot {
+  background: var(--ms-ui-off-dot, #e87060);
+  box-shadow: 0 0 6px var(--ms-ui-off-border, rgba(230, 100, 84, 0.45));
+}
+
+#map-shine-ui .ms-scene-status-badge--off .ms-scene-status-chip {
+  background: var(--ms-ui-off-bg, rgba(166, 62, 46, 0.35));
+  color: var(--ms-ui-off-text, rgba(255, 230, 225, 0.98));
+}
+
+#map-shine-ui .ms-scene-status-badge--idle {
+  border-color: var(--ms-ui-border, rgba(255, 255, 255, 0.1));
+  background: var(--ms-ui-surface, rgba(255, 255, 255, 0.04));
+  color: var(--ms-ui-text-faint, rgba(245, 248, 255, 0.65));
+}
+
+#map-shine-ui .ms-scene-status-badge--idle .ms-scene-status-chip {
+  opacity: 0.7;
+}
+
+#map-shine-ui .ms-scene-status-toggle {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 auto;
+  min-width: 4.75rem;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--ms-ui-border-strong, rgba(255, 255, 255, 0.18));
+  background: var(--ms-ui-input-bg, rgba(255, 255, 255, 0.08));
+  color: var(--ms-ui-text, rgba(245, 248, 255, 0.95));
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, transform 80ms ease;
+}
+
+#map-shine-ui .ms-scene-status-toggle:hover:not(:disabled) {
+  background: var(--ms-ui-input-bg-hover, rgba(255, 255, 255, 0.14));
+  border-color: var(--ms-ui-border-strong, rgba(255, 255, 255, 0.28));
+}
+
+#map-shine-ui .ms-scene-status-toggle:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+#map-shine-ui .ms-scene-status-toggle:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Lighting HDR UI facelift: make the dense Tweakpane hierarchy easier to scan. */
+#map-shine-ui .ms-support-links {
+  padding: 6px 2px 4px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+#map-shine-ui .ms-support-links__heading {
+  margin: 8px 0 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+
+#map-shine-ui .ms-support-links__row + .ms-support-links__row {
+  margin-top: 3px;
+}
+
+#map-shine-ui .ms-support-links__bug { color: var(--ms-ui-link-bug, #66aaff); }
+#map-shine-ui .ms-support-links__patreon { color: var(--ms-ui-link-patreon, #ff424d); }
+#map-shine-ui .ms-support-links__store { color: var(--ms-ui-link-store, #ff6400); }
 
 /* Lighting HDR UI facelift: make the dense Tweakpane hierarchy easier to scan. */
 #map-shine-ui .tp-fldv_t {
@@ -253,12 +527,12 @@
 }
 
 #map-shine-ui .tp-fldv:has(.tp-fldv_t[title*="Lighting Director"]) {
-  border-left: 2px solid rgba(130, 180, 255, 0.45);
+  border-left: 2px solid var(--ms-ui-folder-lighting, rgba(130, 180, 255, 0.45));
 }
 
 #map-shine-ui .tp-fldv:has(.tp-fldv_t[title*="Camera Grade"]),
 #map-shine-ui .tp-fldv:has(.tp-fldv_t[title*="HDR"]) {
-  border-left: 2px solid rgba(255, 210, 125, 0.45);
+  border-left: 2px solid var(--ms-ui-folder-grade, rgba(255, 210, 125, 0.45));
 }
 
 /* ===================================================================
@@ -271,10 +545,10 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 8px 10px 9px;
-  background: linear-gradient(180deg, #2a3038 0%, #222730 100%);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  padding: 8px 12px 10px;
+  background: linear-gradient(180deg, var(--ms-ui-toolbar-start, #2a3038) 0%, var(--ms-ui-toolbar-end, #222730) 100%);
+  border-bottom: 1px solid var(--ms-ui-border, rgba(255, 255, 255, 0.12));
+  box-shadow: inset 0 1px 0 var(--ms-ui-divider-edge, rgba(255, 255, 255, 0.04));
   z-index: 6;
 }
 
@@ -289,7 +563,7 @@
   align-items: center;
   gap: 6px;
   font-size: 11px;
-  color: rgba(245, 248, 255, 0.88);
+  color: var(--ms-ui-text-muted, rgba(245, 248, 255, 0.88));
   cursor: pointer;
   user-select: none;
   padding: 0 1px;
@@ -316,8 +590,8 @@
   align-items: center;
   gap: 5px;
   padding: 5px 8px;
-  background: #222730;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  background: var(--ms-ui-toolbar-end, #222730);
+  border-bottom: 1px solid var(--ms-ui-border, rgba(255, 255, 255, 0.07));
 }
 
 .ms-filter-icon {
@@ -334,10 +608,10 @@
   min-width: 0;
   appearance: none;
   -webkit-appearance: none;
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid var(--ms-ui-border-strong, rgba(255, 255, 255, 0.15));
   border-radius: 5px;
-  background: rgba(255, 255, 255, 0.07);
-  color: rgba(245, 248, 255, 0.95);
+  background: var(--ms-ui-input-bg, rgba(255, 255, 255, 0.07));
+  color: var(--ms-ui-text, rgba(245, 248, 255, 0.95));
   font-family: inherit;
   font-size: 11px;
   padding: 3px 7px;
@@ -346,8 +620,8 @@
 }
 
 .ms-filter-input:focus {
-  border-color: rgba(140, 195, 255, 0.55);
-  background: rgba(255, 255, 255, 0.10);
+  border-color: var(--ms-ui-border-focus, rgba(140, 195, 255, 0.55));
+  background: var(--ms-ui-input-bg-hover, rgba(255, 255, 255, 0.10));
 }
 
 .ms-filter-input::placeholder {
@@ -367,10 +641,10 @@
   align-items: center;
   justify-content: center;
   appearance: none;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  border: 1px solid var(--ms-ui-border, rgba(255, 255, 255, 0.16));
   border-radius: 5px;
-  background: rgba(255, 255, 255, 0.05);
-  color: rgba(255, 255, 255, 0.65);
+  background: var(--ms-ui-surface, rgba(255, 255, 255, 0.05));
+  color: var(--ms-ui-text-faint, rgba(255, 255, 255, 0.65));
   font-size: 10px;
   width: 22px;
   height: 22px;
@@ -381,33 +655,74 @@
 }
 
 .ms-filter-clear:hover {
-  border-color: rgba(200, 120, 120, 0.55);
-  background: rgba(180, 70, 70, 0.20);
-  color: rgba(255, 190, 190, 0.95);
+  border-color: var(--ms-ui-danger-border-hover, rgba(200, 120, 120, 0.55));
+  background: var(--ms-ui-danger-bg-hover, rgba(180, 70, 70, 0.20));
+  color: var(--ms-ui-danger, rgba(255, 190, 190, 0.95));
 }
 
 /* Scene presets row — native <select> list must stay readable on dark UI */
 #map-shine-ui .ms-scene-presets-bar {
-  color: rgba(245, 248, 255, 0.95);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 2px 8px;
+  color: var(--ms-ui-text, rgba(245, 248, 255, 0.95));
+}
+
+#map-shine-ui .ms-scene-presets-label {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.65;
 }
 
 #map-shine-ui .ms-scene-presets-select {
-  color-scheme: dark;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--ms-ui-border, rgba(255, 255, 255, 0.16));
+  background: var(--ms-ui-input-bg, rgba(255, 255, 255, 0.07));
+  color: inherit;
+  color-scheme: inherit;
   font-family: inherit;
-  font-size: inherit;
+  font-size: 10.5px;
+}
+
+#map-shine-ui .ms-scene-presets-revert {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--ms-ui-border, rgba(255, 255, 255, 0.16));
+  background: var(--ms-ui-input-bg, rgba(255, 255, 255, 0.07));
+  color: inherit;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+#map-shine-ui .ms-scene-presets-revert:hover:not(:disabled) {
+  background: var(--ms-ui-input-bg-hover, rgba(255, 255, 255, 0.12));
+  border-color: var(--ms-ui-border-strong, rgba(255, 255, 255, 0.24));
 }
 
 #map-shine-ui .ms-scene-presets-select option {
-  background-color: #1a1f28;
-  color: rgba(245, 248, 255, 0.95);
+  background-color: var(--ms-ui-select-option-bg, #1a1f28);
+  color: var(--ms-ui-text, rgba(245, 248, 255, 0.95));
 }
 
 /* Highlighted match text within filtered sections */
 .ms-filter-match {
   font-weight: 700;
-  color: rgba(255, 220, 90, 0.97);
-  text-shadow: 0 0 6px rgba(255, 200, 50, 0.35);
-  background: rgba(255, 200, 50, 0.13);
+  color: var(--ms-ui-filter-match, rgba(255, 220, 90, 0.97));
+  text-shadow: 0 0 6px var(--ms-ui-filter-match-bg, rgba(255, 200, 50, 0.35));
+  background: var(--ms-ui-filter-match-bg, rgba(255, 200, 50, 0.13));
   border-radius: 2px;
   padding: 0 1px;
 }
@@ -6649,4 +6964,87 @@ body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {
 
 .msa-cp-mixer-shared__faders {
   margin-top: 6px;
+}
+
+/* Effect panel — single-line mask status template (label | chip | ?) */
+.ms-mask-status-row {
+  display: flex !important;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 6px;
+  padding: 4px 6px 4px 4px;
+  font-size: 11px;
+  line-height: 1.2;
+  min-height: 22px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.ms-mask-status-label {
+  flex: 0 0 auto;
+  min-width: 4.5em;
+  color: var(--tp-label-foreground-color, #aaa);
+  font-weight: 500;
+}
+
+.ms-mask-status-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 2px 8px;
+  border-radius: 2px;
+  background: var(--tp-input-background-color, rgba(0, 0, 0, 0.28));
+  color: var(--tp-input-foreground-color, #ddd);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ms-mask-status-help-btn {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ms-mask-status-help-btn:hover,
+.ms-mask-status-help-btn:focus-visible {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  outline: none;
+}
+
+#map-shine-ui .ms-mask-status-row--searching .ms-mask-status-value,
+#map-shine-ui .ms-mask-status-value[data-ms-mask-phase='searching'] {
+  color: #c9b458 !important;
+}
+
+#map-shine-ui .ms-mask-status-row--found .ms-mask-status-value,
+#map-shine-ui .ms-mask-status-value[data-ms-mask-phase='found'] {
+  color: #6fcf8a !important;
+}
+
+#map-shine-ui .ms-mask-status-row--missing .ms-mask-status-value,
+#map-shine-ui .ms-mask-status-row--missing-alert .ms-mask-status-value,
+#map-shine-ui .ms-mask-status-value[data-ms-mask-phase='missing'],
+#map-shine-ui .ms-mask-status-value[data-ms-mask-phase='missing-alert'] {
+  color: #ff7b7b !important;
+}
+
+#map-shine-ui .ms-mask-status-row--missing-muted .ms-mask-status-value,
+#map-shine-ui .ms-mask-status-value[data-ms-mask-phase='missing-muted'] {
+  color: #888 !important;
 }

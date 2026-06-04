@@ -5,6 +5,11 @@
  * @module core/diagnostics/RenderStackSnapshotService
  */
 
+import {
+  isCompositorOverlayShim,
+  windowLightUsesCompositorPath,
+} from './window-light-health-utils.js';
+
 const GROUND_Z = 1000;
 const Z_PER_FLOOR = 1;
 const WINDOW_Z_OFFSET = 0.2;
@@ -283,10 +288,11 @@ function _collectWindowLightMeta(wle) {
   const meta = {
     overlayCount: 0,
     byFloor: /** @type {Record<string, { count: number, minRenderOrder: number, maxRenderOrder: number, visibleCount: number }>} */ {},
-    /** @type {Array<{ tileId: string, floorIndex: number, renderOrder: number, visible: boolean, maskReady: number }>} */
+    /** @type {Array<{ tileId: string, floorIndex: number, renderOrder: number, visible: boolean, maskReady: number, mode?: string }>} */
     overlayList: [],
     sortObjects: null,
     activeFloor: null,
+    compositorMode: false,
   };
   if (!wle) return meta;
   const scene = wle._scene;
@@ -295,13 +301,20 @@ function _collectWindowLightMeta(wle) {
   const overlays = wle._overlays;
   if (!overlays || typeof overlays.forEach !== 'function') return meta;
 
+  meta.compositorMode = windowLightUsesCompositorPath(wle, overlays);
+
   overlays.forEach((entry, tileId) => {
     meta.overlayCount++;
     const fi = Math.max(0, Number(entry?.floorIndex) || 0);
     const key = `floor:${fi}`;
+    const isCompositor = isCompositorOverlayShim(tileId);
     const ro = Number(entry?.mesh?.renderOrder ?? 0);
-    const vis = !!entry?.mesh?.visible;
-    const maskReady = Number(entry?.material?.uniforms?.uMaskReady?.value ?? 0);
+    const vis = isCompositor
+      ? (typeof wle._hasValidWindowMask === 'function' ? wle._hasValidWindowMask(fi) : false)
+      : !!entry?.mesh?.visible;
+    const maskReady = isCompositor
+      ? (typeof wle._hasValidWindowMask === 'function' && wle._hasValidWindowMask(fi) ? 1 : 0)
+      : Number(entry?.material?.uniforms?.uMaskReady?.value ?? 0);
     if (!meta.byFloor[key]) {
       meta.byFloor[key] = { count: 0, minRenderOrder: ro, maxRenderOrder: ro, visibleCount: 0 };
     }
@@ -317,6 +330,7 @@ function _collectWindowLightMeta(wle) {
       renderOrder: ro,
       visible: vis,
       maskReady,
+      ...(isCompositor ? { mode: 'compositor' } : {}),
     });
   });
 

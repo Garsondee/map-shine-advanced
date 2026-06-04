@@ -910,6 +910,13 @@ export class FloorCompositor {
     this._tempFloorKeys = [];
     this._tempStackTextures = [];
 
+    /** Per-frame cache for stacked post-merge _Outdoors / skyReach (bloom + CC). */
+    this._stackedOutdoorsCacheKey = null;
+    this._stackedOutdoorsCacheTex = null;
+    this._stackedSkyReachCacheTex = null;
+    /** @type {object|null} Last stacked outdoors build diagnostics for Camera Grade. */
+    this._lastCcPostMergeStackDiag = null;
+
     this._frameValidation = { valid: false, reason: null, details: {} };
     
     this._pixiWorldStageMat = { a: NaN, b: NaN, c: NaN, d: NaN, tx: NaN, ty: NaN };
@@ -1408,6 +1415,15 @@ export class FloorCompositor {
       // Using the outer post-merge anchor for every pass causes pass 2+ to read/write
       // the same RT (WebGL feedback loop → GL_INVALID_OPERATION → black frame).
       const pickOther = (rt) => (rt === this._postA) ? this._postB : this._postA;
+
+      // Ink & Line AO on the graded merged frame (not per-level — avoids bloom/CC washing it out).
+      if (resolveEffectEnabled(this._filterEffect)) {
+        const fOut = pickOther(currentInput);
+        this._profileEffectCall('filter.postMerge', 'render', () => {
+          this._filterEffect.render(this.renderer, currentInput, fOut);
+        }, 'FilterEffectV2 postMerge render');
+        currentInput = fOut;
+      }
 
       if (resolveEffectEnabled(this._sharpenEffect)) {
         const shOut = pickOther(currentInput);
@@ -6042,6 +6058,96 @@ export class FloorCompositor {
   }
 
   /**
+   * Build (or reuse cached) stacked _Outdoors + skyReach for post-merge bloom/CC.
+   *
+   * @param {object|null} sceneMaskCompositor
+   * @param {string[]} stackedFloorKeys
+   * @returns {{ outdoors: import('three').Texture|null, skyReach: import('three').Texture|null, diag: object|null }}
+   * @private
+   */
+  _buildStackedOutdoorsForPostMerge(sceneMaskCompositor, stackedFloorKeys) {
+    if (!sceneMaskCompositor || !Array.isArray(stackedFloorKeys) || stackedFloorKeys.length <= 1) {
+      return {
+        outdoors: this._lastOutdoorsTexture ?? null,
+        skyReach: this._lastSkyReachTexture ?? null,
+        diag: null,
+      };
+    }
+
+    const scene = canvas?.scene ?? null;
+    const prep = sceneMaskCompositor.prepareVisibleFloorsForOutdoorsStack?.(
+      this.renderer,
+      stackedFloorKeys,
+      scene,
+    ) ?? { preparedKeys: [], skippedKeys: [], reasons: {} };
+
+    try {
+      sceneMaskCompositor.rebuildFloorIdFromVisibleFloorKeys?.(stackedFloorKeys);
+    } catch (_) {}
+
+    let cacheVersion = 0;
+    try {
+      cacheVersion = Number(sceneMaskCompositor.getFloorCacheVersion?.() ?? 0);
+    } catch (_) {}
+
+    const cacheKey = `${stackedFloorKeys.join('|')}|v${cacheVersion}`;
+    if (
+      this._stackedOutdoorsCacheKey === cacheKey
+      && this._stackedOutdoorsCacheTex
+    ) {
+      const diag = {
+        cacheHit: true,
+        prep,
+        outdoors: sceneMaskCompositor.getLastStackedOutdoorsDiag?.() ?? null,
+        skyReach: sceneMaskCompositor.getLastStackedSkyReachDiag?.() ?? null,
+      };
+      this._lastCcPostMergeStackDiag = diag;
+      return {
+        outdoors: this._stackedOutdoorsCacheTex,
+        skyReach: this._stackedSkyReachCacheTex ?? this._lastSkyReachTexture ?? null,
+        diag,
+      };
+    }
+
+    let outdoorsTex = null;
+    let skyReachTex = null;
+    try {
+      outdoorsTex = sceneMaskCompositor.composeStackedOutdoorsMask?.(
+        this.renderer,
+        stackedFloorKeys,
+      ) ?? null;
+      skyReachTex = sceneMaskCompositor.composeStackedSkyReachMask?.(
+        this.renderer,
+        stackedFloorKeys,
+      ) ?? null;
+    } catch (_) {}
+
+    if (outdoorsTex) {
+      this._stackedOutdoorsCacheKey = cacheKey;
+      this._stackedOutdoorsCacheTex = outdoorsTex;
+      this._stackedSkyReachCacheTex = skyReachTex;
+    }
+
+    const diag = {
+      cacheHit: false,
+      prep,
+      outdoors: sceneMaskCompositor.getLastStackedOutdoorsDiag?.() ?? null,
+      skyReach: sceneMaskCompositor.getLastStackedSkyReachDiag?.() ?? null,
+    };
+    this._lastCcPostMergeStackDiag = diag;
+
+    if (prep.skippedKeys?.length || diag.outdoors?.skippedKeys?.length) {
+      log.debug('FloorCompositor: stacked outdoors incomplete', diag);
+    }
+
+    return {
+      outdoors: outdoorsTex ?? this._lastOutdoorsTexture ?? null,
+      skyReach: skyReachTex ?? this._lastSkyReachTexture ?? null,
+      diag,
+    };
+  }
+
+  /**
    * Push outdoors mask texture to all V2 consumers.
    * Uses identity-based change detection to avoid redundant uniform writes.
    *
@@ -8219,16 +8325,7 @@ export class FloorCompositor {
       }
 
       // Sky color grading removed — outdoor atmosphere runs in post-merge Camera Grade.
-      // Filter (before water: refracted samples include filter; avoids an extra pass)
-      if (resolveEffectEnabled(this._filterEffect)) {
-        const fOut = (currentInput === levelPostA) ? levelPostB : levelPostA;
-        this._profileEffectCall('filter', 'render', () => {
-          withSceneScissor(this.renderer, () => {
-            this._filterEffect.render(this.renderer, currentInput, fOut);
-          });
-        }, 'FilterEffectV2 render');
-        currentInput = fOut;
-      }
+      // Filter (Ink & Line AO) runs post-merge after CC — see _runPostMergeStylizationPasses.
 
       // Water pass — per-level only when a single floor is visible (bloom MRT path).
       // Multi-floor: one water pass after LevelCompositePass on the merged RT.
@@ -8568,6 +8665,18 @@ export class FloorCompositor {
       }
     }
 
+    let stackedOutdoorsForPostMerge = null;
+    let stackedSkyReachForPostMerge = null;
+    if (sceneMaskCompositor && stackedFloorKeys.length > 1) {
+      if (_profiling) _profileT0 = performance.now();
+      this._profileEffectCall('cc.prepareStackedOutdoors', 'render', () => {
+        const stacked = this._buildStackedOutdoorsForPostMerge(sceneMaskCompositor, stackedFloorKeys);
+        stackedOutdoorsForPostMerge = stacked.outdoors;
+        stackedSkyReachForPostMerge = stacked.skyReach;
+      }, 'prepare stacked outdoors for post-merge');
+      if (_profiling) this._recordPassTiming('postMerge_prepareStackedOutdoors', _profileT0);
+    }
+
     // Atmospheric fog (post-composite)
     if (resolveEffectEnabled(this._atmosphericFogEffect)) {
       const fogOut = _pickOtherPost();
@@ -8590,16 +8699,7 @@ export class FloorCompositor {
       const bloomOut = _pickOtherPost();
       let bloomWrote = false;
       if (_profiling) _profileT0 = performance.now();
-      // Stacked outdoors for multi-floor spill suppress (same source as CC grade).
-      let outdoorsForBloom = this._lastOutdoorsTexture ?? null;
-      try {
-        if (sceneMaskCompositor && stackedFloorKeys.length > 1) {
-          outdoorsForBloom = sceneMaskCompositor.composeStackedOutdoorsMask?.(
-            this.renderer,
-            stackedFloorKeys,
-          ) ?? outdoorsForBloom;
-        }
-      } catch (_) {}
+      const outdoorsForBloom = stackedOutdoorsForPostMerge ?? this._lastOutdoorsTexture ?? null;
       this._bloomEffect?.setOutdoorsMask?.(outdoorsForBloom ?? null);
       this._profileEffectCall('bloom.postMerge', 'render', () => {
         bloomWrote = !!this._bloomEffect.render(
@@ -8668,46 +8768,8 @@ export class FloorCompositor {
     // Mandatory HDR → LDR boundary: always run when initialized (do not gate on
     // resolveEffectEnabled — a stale params.enabled must not skip the only ToD owner).
     if (this._colorCorrectionEffect?._initialized) {
-      // Build the per-frame stacked outdoors mask so the single CC pass can
-      // apply interior/exterior ToD splits accurately on the flat composite.
-      let outdoorsForCc = null;
-      try {
-        if (sceneMaskCompositor && stackedFloorKeys.length > 1) {
-          if (_profiling) _profileT0 = performance.now();
-          this._profileEffectCall('cc.stackedOutdoors', 'render', () => {
-            try {
-              outdoorsForCc = sceneMaskCompositor.composeStackedOutdoorsMask?.(
-                this.renderer,
-                stackedFloorKeys,
-              ) ?? null;
-            } catch (_) {
-              outdoorsForCc = null;
-            }
-          }, 'GpuSceneMaskCompositor stacked outdoors');
-          if (_profiling) this._recordPassTiming('postMerge_stackedOutdoors', _profileT0);
-        }
-      } catch (_) {}
-      // Single-floor fallback: use the active outdoors mask already synced for the frame.
-      if (!outdoorsForCc) outdoorsForCc = this._lastOutdoorsTexture ?? null;
-
-      let skyReachForCc = null;
-      try {
-        if (sceneMaskCompositor && stackedFloorKeys.length > 1) {
-          if (_profiling) _profileT0 = performance.now();
-          this._profileEffectCall('cc.stackedSkyReach', 'render', () => {
-            try {
-              skyReachForCc = sceneMaskCompositor.composeStackedSkyReachMask?.(
-                this.renderer,
-                stackedFloorKeys,
-              ) ?? null;
-            } catch (_) {
-              skyReachForCc = null;
-            }
-          }, 'GpuSceneMaskCompositor stacked skyReach');
-          if (_profiling) this._recordPassTiming('postMerge_stackedSkyReach', _profileT0);
-        }
-      } catch (_) {}
-      if (!skyReachForCc) skyReachForCc = this._lastSkyReachTexture ?? null;
+      const outdoorsForCc = stackedOutdoorsForPostMerge ?? this._lastOutdoorsTexture ?? null;
+      const skyReachForCc = stackedSkyReachForPostMerge ?? this._lastSkyReachTexture ?? null;
 
       const ccOut = _pickOtherPost();
       if (_profiling) _profileT0 = performance.now();
@@ -8715,9 +8777,7 @@ export class FloorCompositor {
       this._profileEffectCall('colorCorrection.postMerge', 'render', () => {
         withoutSceneScissor(this.renderer, () => {
           try {
-            this._colorCorrectionEffect.setOutdoorsMask(
-              outdoorsForCc ?? this._lastOutdoorsTexture ?? null
-            );
+            this._colorCorrectionEffect.setOutdoorsMask(outdoorsForCc ?? null);
             this._colorCorrectionEffect.setSkyReachMask(skyReachForCc ?? null);
             this._colorCorrectionEffect.setSkyOcclusionTexture?.(
               this._lastSkyOcclusionTexture ?? null,
@@ -8763,7 +8823,11 @@ export class FloorCompositor {
       if (ccWrote) mergedCompositeOut = ccOut;
       if (mapShineGlobal) {
         try {
-          mapShineGlobal.__ccPostMergeDiag = this._colorCorrectionEffect.getDebugState?.() ?? null;
+          mapShineGlobal.__ccPostMergeDiag = {
+            ...(this._colorCorrectionEffect.getDebugState?.() ?? {}),
+            stackedOutdoors: this._lastCcPostMergeStackDiag ?? null,
+            stackedFloorKeys: stackedFloorKeys.slice(),
+          };
         } catch (_) {}
       }
     }

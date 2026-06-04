@@ -69,9 +69,7 @@ export class FilterEffectV2 {
       inkTintColor: { r: 0.0, g: 0.0, b: 0.0 },
 
       // Vignette-style multiplicative darken (separate from ColorCorrection vignette).
-      // Prefer ColorCorrectionEffectV2 vignette: this filter runs per-level and gets
-      // composited under upper floors, so enabling it can produce inconsistent edge
-      // darkening on multi-floor scenes. Kept available for stylized single-floor use.
+      // Runs post-merge on the graded composite (see _runPostMergeStylizationPasses).
       vignetteEnabled: false,
       vignetteStrength: 0.35,
       vignetteInner: 0.55,
@@ -649,7 +647,8 @@ export class FilterEffectV2 {
     this._composeMaterial.uniforms.uZoom.value = Number.isFinite(currentZoom) ? Math.max(0.0001, currentZoom) : 1.0;
     // Keep mask sampling world-locked by reconstructing Foundry coords from screen UV.
     const sc = window.MapShine?.sceneComposer;
-    const sceneRect = canvas?.dimensions?.sceneRect;
+    const foundryCanvas = globalThis.canvas;
+    const sceneRect = foundryCanvas?.dimensions?.sceneRect;
     const sceneX = sceneRect?.x ?? 0;
     const sceneY = sceneRect?.y ?? 0;
     const sceneW = sceneRect?.width ?? 1;
@@ -681,7 +680,7 @@ export class FilterEffectV2 {
     }
     this._composeMaterial.uniforms.uViewBounds.value.set(vMinX, vMinY, vMaxX, vMaxY);
     this._composeMaterial.uniforms.uSceneBounds.value.set(sceneX, sceneY, sceneW, sceneH);
-    const dims = canvas?.dimensions;
+    const dims = foundryCanvas?.dimensions;
     if (dims && Number.isFinite(dims.width) && Number.isFinite(dims.height)) {
       this._composeMaterial.uniforms.uSceneDimensions.value.set(dims.width, dims.height);
     }

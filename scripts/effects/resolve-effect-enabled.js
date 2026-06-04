@@ -27,7 +27,7 @@ export const STYLISTIC_EFFECT_FC_KEYS = Object.freeze([
   ['visionMode', '_visionModeEffect'],
   ['invert', '_invertEffect'],
   ['sepia', '_sepiaEffect'],
-  ['dazzleOverlay', '_dazzleOverlayEffect'],
+  // dazzleOverlay omitted — enabled at runtime by DynamicExposureManager after updatables.
 ]);
 
 /** @type {Set<string>} */
@@ -92,7 +92,9 @@ export function syncStylisticEffectGate(floorCompositor, scene = null, options =
     let enabled = resolveStylisticEnabled(effectId, mm, gm);
     try {
       const gsm = window.MapShine?.graphicsSettingsManager;
-      if (gsm?.getEffectiveEnabled && gsm.getEffectiveEnabled(effectId) === false) {
+      // Only honor explicit client disables — not stylistic default-off semantics from
+      // getEffectiveEnabled(), which would force every opt-in pass off every frame.
+      if (gsm?.isExplicitlyDisabledByClient?.(effectId)) {
         enabled = false;
       }
     } catch (_) {}
@@ -123,6 +125,10 @@ export function resolveEffectEnabled(effect) {
   // Stylistic opt-in passes (sepia, invert, halftone, …): schema default is off.
   // Undefined enabled must not activate the pass — only explicit true does.
   if (effect?.constructor?.optInEnable === true) {
+    // DazzleOverlay: runtime gate only (DynamicExposureManager sets enabled after updatables).
+    if (effect?.constructor?.runtimeEnable === true) {
+      return effect.enabled === true;
+    }
     return effect.enabled === true && effect.params?.enabled === true;
   }
 

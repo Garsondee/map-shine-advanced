@@ -54,6 +54,21 @@ import {
   getChartSpecPathHint,
 } from '../calibration/color-calibration-sampler.js';
 import { getActivePresetId } from '../ui/scene-presets.js';
+import {
+  EFFECT_CATEGORY_ORDER,
+  getEffectCategoryTitle,
+} from './effect-categories.js';
+import {
+  applyUiColorScheme,
+  DEFAULT_UI_COLOR_SCHEME_ID,
+  getUiColorSchemeListOptions,
+  normalizeUiColorSchemeId,
+} from './ui-color-scheme.js';
+import {
+  createMaskStatusRow,
+  placeMaskStatusRow,
+  refreshMaskStatusRow,
+} from './mask-status-ui.js';
 
 const log = createLogger('UI');
 
@@ -126,6 +141,8 @@ export class TweakpaneManager {
     
     /** @type {Object} Global parameters */
     this.globalParams = {
+      /** @type {string} Tweakpane chrome colour scheme id (see ui-color-scheme.js). */
+      uiColorScheme: DEFAULT_UI_COLOR_SCHEME_ID,
       mapMakerMode: false,
       timeRate: 100, // 0-200%
       introZoomEnabled: true,
@@ -372,8 +389,14 @@ export class TweakpaneManager {
     /** @type {HTMLInputElement|null} Advanced Mode checkbox. */
     this._advancedModeCheckboxEl = null;
 
+    /** @type {HTMLElement|null} Scene enable status bar (badge + toggle). */
+    this._sceneEnableStatusBarEl = null;
+
     /** @type {HTMLElement|null} */
-    this._sceneEnableQuickSectionEl = null;
+    this._sceneEnableStatusBadgeEl = null;
+
+    /** @type {HTMLSpanElement|null} */
+    this._sceneEnableStatusChipEl = null;
 
     /** @type {HTMLButtonElement|null} */
     this._sceneEnableQuickToggleButtonEl = null;
@@ -415,8 +438,20 @@ export class TweakpaneManager {
     /** @type {string|null} */
     this._lastPresetsSceneId = null;
 
-    /** @type {any|null} Tweakpane folder for the Post section (DSN / Sequencer). */
-    this._postFolder = null;
+    /** @type {boolean} Whether DSN / Sequencer controls were added under Camera & Post. */
+    this._postSectionBuilt = false;
+
+    /** @type {boolean} Whether token rendering controls were added under Gameplay & Interaction. */
+    this._tokensSectionBuilt = false;
+
+    /** @type {boolean} Whether sun/shadow controls were added under Lighting & Shadows. */
+    this._sunShadowsSectionBuilt = false;
+
+    /** @type {boolean} Whether intro controls were added under Gameplay and Interaction. */
+    this._introsSectionBuilt = false;
+
+    /** @type {boolean} Whether the Appearance colour-scheme section was built. */
+    this._appearanceSectionBuilt = false;
 
     /** @type {(() => void)|null} */
     this._postCanvasReadyHandler = null;
@@ -448,15 +483,35 @@ export class TweakpaneManager {
     }
 
     folder.on('fold', (ev) => {
+      if (folder._msUiPinnedOpen && !ev?.expanded) {
+        try { folder.expanded = true; } catch (_) {}
+        return;
+      }
       if (!ev?.expanded || !this._singleOpenPrimarySections) return;
       for (const other of this._primaryFolders) {
         if (!other || other === folder) continue;
+        if (other._msUiPinnedOpen) continue;
         try {
           if (other.expanded) other.expanded = false;
         } catch (_) {
         }
       }
     });
+  }
+
+  /**
+   * Keep a top-level section permanently expanded; hide collapse affordance and
+   * exempt from single-open accordion closing.
+   * @param {any} folder
+   * @private
+   */
+  _pinPrimaryFolderOpen(folder) {
+    if (!folder) return;
+    folder._msUiPinnedOpen = true;
+    try { folder.expanded = true; } catch (_) {}
+    if (folder.element) {
+      folder.element.classList.add('ms-tp-folder-pinned-open');
+    }
   }
 
   /**
@@ -737,6 +792,13 @@ export class TweakpaneManager {
     if (this._universalToolbarEl?.parentElement) {
       this._universalToolbarEl.remove();
     }
+    if (this._sceneEnableStatusBarEl?.parentElement) {
+      this._sceneEnableStatusBarEl.remove();
+    }
+
+    if (isGmLike()) {
+      this._buildSceneStatusBar(rotv, content);
+    }
 
     const wrap = document.createElement('div');
     wrap.className = 'ms-universal-toolbar';
@@ -870,7 +932,7 @@ export class TweakpaneManager {
       const prevSingle = this._singleOpenPrimarySections;
       this._singleOpenPrimarySections = false;
       for (const [folder, wasExpanded] of this._filterSavedExpanded) {
-        try { folder.expanded = wasExpanded; } catch (_) {}
+        try { folder.expanded = folder._msUiPinnedOpen ? true : wasExpanded; } catch (_) {}
       }
       this._singleOpenPrimarySections = prevSingle;
       this._filterSavedExpanded.clear();
@@ -1283,6 +1345,7 @@ export class TweakpaneManager {
     if (_isDbg) _dlp.begin('tp.loadUIState', 'finalize');
     await this.loadUIState();
     if (_isDbg) _dlp.end('tp.loadUIState');
+    applyUiColorScheme(this.globalParams.uiColorScheme);
     this._registerGlobalControlHandlers();
     this.onGlobalChange('timeRate', this.globalParams.timeRate ?? 100);
     this._warnIfMaskDebugOverlayActiveOnLoad();
@@ -1304,8 +1367,10 @@ export class TweakpaneManager {
     if (!showOnboardingOnly) {
       await this.buildPresetsBar();
     }
+    if (!showOnboardingOnly) {
+      this.buildAppearanceSection();
+    }
     // Headerless strip: inserts before the first top-level folder row.
-    // Scene enable toggle lives at the bottom of Quick Actions (see buildQuickActionsSection).
 
     if (_isDbg) _dlp.begin('tp.buildSections', 'finalize');
     // First-time onboarding for GMs when the scene is not yet enabled.
@@ -1316,15 +1381,6 @@ export class TweakpaneManager {
     if (!showOnboardingOnly) {
       // Build intro controls (loading transition and scene intro behavior)
       this.buildIntrosSection();
-
-      // Build environment section (sun latitude etc.) — single source of truth
-      this.buildEnvironmentSection();
-
-      // Build token/character rendering authoring controls
-      this.buildTokensSection();
-
-      // Post — external rendering integrations (Dice So Nice / Sequencer).
-      this.buildPostSection();
 
       this.buildRopesSection();
 
@@ -1342,6 +1398,7 @@ export class TweakpaneManager {
     this._setupUiScrollShell();
     this._buildUniversalToolbar();
     this._moveQuickActionsSectionBelowToolbar();
+    this._positionAppearanceSection();
     if (this._quickActionsFolder) {
       try { this._quickActionsFolder.expanded = true; } catch (_) {}
     }
@@ -1496,10 +1553,69 @@ export class TweakpaneManager {
   }
 
   /**
+   * Build panel chrome controls (colour scheme).
+   * @private
+   */
+  buildAppearanceSection() {
+    if (!this.pane) return;
+    if (this._appearanceSectionBuilt) return;
+
+    const appearanceFolder = this.pane.addFolder({
+      title: 'Panel Appearance',
+      expanded: this.accordionStates['appearance'] ?? false
+    });
+    this._appearanceFolder = appearanceFolder;
+    this._registerPrimaryFolder(appearanceFolder);
+
+    this.globalParams.uiColorScheme = normalizeUiColorSchemeId(this.globalParams.uiColorScheme);
+
+    /** @type {Record<string, string>} */
+    const schemeOptions = {};
+    for (const opt of getUiColorSchemeListOptions()) {
+      schemeOptions[opt.text] = opt.value;
+    }
+
+    appearanceFolder.addBinding(this.globalParams, 'uiColorScheme', {
+      label: 'Colour scheme',
+      options: schemeOptions
+    }).on('change', (ev) => {
+      const resolved = applyUiColorScheme(ev.value);
+      this.globalParams.uiColorScheme = resolved;
+      this.saveUIState();
+    });
+
+    appearanceFolder.on('fold', (ev) => {
+      this.accordionStates['appearance'] = ev.expanded;
+      this.saveUIState();
+    });
+
+    this._positionAppearanceSection();
+    this._appearanceSectionBuilt = true;
+  }
+
+  /**
+   * Keep Panel Appearance directly below the presets strip.
+   * @private
+   */
+  _positionAppearanceSection() {
+    const folderEl = this._appearanceFolder?.element;
+    const listHost = this._getSectionListHost();
+    if (!folderEl?.parentElement || !listHost || folderEl.parentElement !== listHost) return;
+
+    const anchor = this._presetsBarEl?.nextSibling ?? null;
+    if (anchor && folderEl !== anchor && folderEl.nextSibling !== anchor) {
+      listHost.insertBefore(folderEl, anchor);
+    }
+  }
+
+  /**
    * Build intro controls.
    * @private
    */
   buildIntrosSection() {
+    if (!this.pane) return;
+    if (this._introsSectionBuilt) return;
+
     const introFolder = this.pane.addFolder({
       title: 'Intros',
       expanded: this.accordionStates['intros'] ?? this.accordionStates['introSequences'] ?? true
@@ -1545,21 +1661,24 @@ export class TweakpaneManager {
       this.accordionStates['intros'] = ev.expanded;
       this.saveUIState();
     });
+
+    this._introsSectionBuilt = true;
   }
 
   /**
-   * Build token/character rendering controls as a dedicated top-level section.
-   * This keeps authoring workflow controls compact while preserving advanced token tools.
+   * Build token/character rendering controls under Gameplay & Interaction.
    * @private
    */
   buildTokensSection() {
     if (!this.pane) return;
+    if (this._tokensSectionBuilt) return;
 
-    const tokensFolder = this.pane.addFolder({
+    const parent = this.ensureCategoryFolder('gameplay');
+
+    const tokensFolder = parent.addFolder({
       title: 'Tokens & Character Rendering',
       expanded: this.accordionStates['tokens'] ?? false
     });
-    this._registerPrimaryFolder(tokensFolder);
 
     const tokenCCFolder = tokensFolder.addFolder({
       title: 'Color Correction',
@@ -1817,6 +1936,7 @@ export class TweakpaneManager {
     // Push initial state into runtime managers so UI and runtime match.
     applyTokenCC();
     applyDynamicExposure();
+    this._tokensSectionBuilt = true;
   }
 
   /**
@@ -1835,26 +1955,22 @@ export class TweakpaneManager {
 
     const contentElement = quickActionsFolder.element.querySelector('.tp-fldv_c') || quickActionsFolder.element;
     const grid = document.createElement('div');
-    grid.style.display = 'grid';
-    grid.style.gridTemplateColumns = '1fr 1fr';
-    grid.style.gap = '6px';
-    grid.style.marginTop = '4px';
+    grid.className = 'ms-quick-actions-grid';
+
+    const addGroupBreak = () => {
+      const divider = document.createElement('div');
+      divider.className = 'ms-quick-actions-break';
+      divider.setAttribute('aria-hidden', 'true');
+      grid.appendChild(divider);
+    };
 
     const addGridButton = (label, onClick, opts = {}) => {
       const options = typeof opts === 'boolean' ? { danger: opts } : (opts ?? {});
       const btn = document.createElement('button');
       btn.type = 'button';
+      btn.className = 'ms-quick-action-btn' + (options.danger ? ' ms-quick-action-btn--danger' : '');
       btn.textContent = label;
-      btn.style.padding = '6px 8px';
-      btn.style.borderRadius = '6px';
-      btn.style.border = options.danger
-        ? '1px solid rgba(255,120,120,0.45)'
-        : '1px solid rgba(255,255,255,0.15)';
-      btn.style.background = options.danger
-        ? 'rgba(120,0,0,0.18)'
-        : 'rgba(255,255,255,0.06)';
-      btn.style.color = 'inherit';
-      btn.style.cursor = 'pointer';
+      if (options.title) btn.title = options.title;
       btn.addEventListener('click', onClick);
       grid.appendChild(btn);
       if (options.advanced) this._registerDomStripAsAdvanced(btn);
@@ -1863,23 +1979,41 @@ export class TweakpaneManager {
 
     addGridButton('Defaults', () => {
       this.onMasterResetToDefaults();
-    }, { danger: true, advanced: true });
+    }, {
+      danger: true,
+      advanced: true,
+      title: 'Reset every registered effect plus global sun, shadow, and UI controls to schema defaults, then save to this scene. Use Undo Defaults to restore the prior snapshot.',
+    });
 
     this._quickUndoButtonEl = addGridButton('Undo Defaults', () => {
       this.onUndoMasterReset();
-    }, { advanced: true });
+    }, {
+      advanced: true,
+      title: 'Restore all effect parameters and global controls to the snapshot taken immediately before the last Defaults reset.',
+    });
+
+    addGroupBreak();
 
     addGridButton('Texture Manager', () => {
       if (this.textureManager) this.textureManager.toggle();
-    }, { advanced: true });
+    }, {
+      advanced: true,
+      title: 'Open the texture catalog to browse, preview, and assign mask and material textures used by Map Shine effects.',
+    });
 
     addGridButton('Effect Stack', () => {
       if (this.effectStack) this.effectStack.toggle();
-    }, { advanced: true });
+    }, {
+      advanced: true,
+      title: 'Open the render-stack panel showing effect enable state, compositor layer order, mask wiring, and dependency hints for the live scene.',
+    });
 
     addGridButton('Diagnostic Center', () => {
       if (this.diagnosticCenter) this.diagnosticCenter.toggle();
-    }, { advanced: true });
+    }, {
+      advanced: true,
+      title: 'Open the diagnostics hub: render health summaries, mask readiness, dependency checks, and troubleshooting tools for the current scene.',
+    });
 
     addGridButton('Pixel Probe', async () => {
       try {
@@ -1894,11 +2028,17 @@ export class TweakpaneManager {
         log.warn('Pixel probe pick failed:', e);
         ui.notifications?.error?.(`Pixel probe failed: ${e?.message || e}`);
       }
-    }, { advanced: true });
+    }, {
+      advanced: true,
+      title: 'Click three map locations (A, B, C) to sample and log compositor color, mask, and lighting values at those pixels for debugging.',
+    });
 
     addGridButton('Breaker Box', () => {
       window.MapShine?.breakerBoxDialog?.toggle?.();
-    }, { advanced: true });
+    }, {
+      advanced: true,
+      title: 'Open the render dependency graph: trace effects, masks, and data sources into the compositor and spot missing or broken links.',
+    });
 
     addGridButton('Performance Recorder', () => {
       let dlg = window.MapShine?.performanceRecorderDialog;
@@ -1910,18 +2050,29 @@ export class TweakpaneManager {
         return;
       }
       dlg.toggle();
-    }, { advanced: true });
+    }, {
+      advanced: true,
+      title: 'Record per-effect CPU and GPU timing, frame statistics, and draw-call deltas; export profiling data to find performance bottlenecks.',
+    });
+
+    addGroupBreak();
 
     addGridButton('🎯 Map Points', () => {
       this.openMapPointsManagerDialog();
+    }, {
+      title: 'Manage map-point groups (area, line, point, rope) and bind particle or effect emitters to regions you draw on the map.',
     });
 
     addGridButton('🧭 Tile Motion', () => {
       this.tileMotionDialog?.toggle?.();
+    }, {
+      title: 'Author animated tile motion: translate, rotate, and scale selected tiles with timing and easing for ambient movement.',
     });
 
     addGridButton('🚶 Token Movement', () => {
       this.tokenMovementDialog?.toggle?.();
+    }, {
+      title: 'Configure token movement and elevation rules used when tokens travel across the Map Shine canvas and floor bands.',
     });
 
     if (isGmLike()) {
@@ -1931,6 +2082,8 @@ export class TweakpaneManager {
           return;
         }
         this.cameraPathDialog.toggle();
+      }, {
+        title: 'Design cinematic camera sweeps with keyframes; preview pans, zooms, and optional time-of-day or environment ramps along the path.',
       });
       addGridButton('🧱 Levels Authoring', () => {
         const dlg = window.MapShine?.levelsAuthoring;
@@ -1939,24 +2092,41 @@ export class TweakpaneManager {
           return;
         }
         dlg.toggle?.();
+      }, {
+        title: 'Edit multi-floor level bands, elevations, and per-floor mask associations for stacked or multi-level scenes.',
       });
 
-      addGridButton('Copy Effects From Scene', async () => {
+      addGridButton('Copy From Scene', async () => {
         await this.importSingleEffectFromScene();
-      }, { advanced: true });
+      }, {
+        advanced: true,
+        title: 'Copy selected effect settings from another scene into this one. Choose full copy, parameters only, or enabled flags only.',
+      });
 
       addGridButton('Reset Effects…', async () => {
         await this.resetSelectedEffectsInScene();
-      }, { advanced: true });
+      }, {
+        advanced: true,
+        title: 'Pick which registered effects on this scene should be reset to schema defaults without touching effects you leave unchecked.',
+      });
 
-      addGridButton('Apply Effects to All Scenes…', async () => {
+      addGridButton('Apply to All Scenes…', async () => {
         await this.applyCurrentEffectsToAllScenes();
-      }, { advanced: true });
+      }, {
+        advanced: true,
+        title: 'Push the current UI settings for selected effects to every scene in the world. World Based effects update shared global storage instead of per-scene flags.',
+      });
     }
 
-    addGridButton('Attempt Scene Recovery', async () => {
+    addGroupBreak();
+
+    addGridButton('Scene Recovery', async () => {
       await this.attemptSceneRecovery();
-    }, { danger: true, advanced: true });
+    }, {
+      danger: true,
+      advanced: true,
+      title: 'Create a new “[Recovered]” scene by cloning tiles, walls, tokens, and other content into a clean document. Does not delete the current scene; strips Map Shine flags that may be corrupt.',
+    });
 
     addGridButton('Scene Reset', async () => {
       try {
@@ -1986,15 +2156,13 @@ export class TweakpaneManager {
         } catch (_) {
         }
       }
-    }, { danger: true, advanced: true });
+    }, {
+      danger: true,
+      advanced: true,
+      title: 'Rebuild Map Shine Three.js rendering for this scene from scratch. Confirms before running; may take a few seconds but can fix a stuck or corrupted compositor.',
+    });
 
     contentElement.appendChild(grid);
-
-    const scene = canvas?.scene ?? null;
-    const sceneIsEnabled = !!scene && sceneSettings.isEnabled(scene);
-    if (isGmLike() && sceneIsEnabled) {
-      this._appendSceneEnableToggleToQuickActions(contentElement);
-    }
 
     this.updateUndoButtonState();
   }
@@ -2016,52 +2184,65 @@ export class TweakpaneManager {
   }
 
   /**
-   * Append the scene enable ON/OFF toggle at the bottom of Quick Actions.
-   * @param {HTMLElement} parentEl
+   * Status badge + toggle above the filter toolbar (GM only).
+   * @param {HTMLElement} rotv
+   * @param {HTMLElement} contentAnchor
    * @private
    */
-  _appendSceneEnableToggleToQuickActions(parentEl) {
-    if (!parentEl) return;
-
-    if (this._sceneEnableQuickSectionEl?.parentElement) {
-      this._sceneEnableQuickSectionEl.remove();
+  _buildSceneStatusBar(rotv, contentAnchor) {
+    if (!rotv || !contentAnchor) return;
+    if (this._sceneEnableStatusBarEl?.parentElement) {
+      this._sceneEnableStatusBarEl.remove();
     }
 
-    const wrap = document.createElement('div');
-    wrap.className = 'ms-scene-enable-quick';
-    wrap.style.display = 'flex';
-    wrap.style.padding = '8px 0 2px 0';
-    wrap.style.marginTop = '6px';
-    wrap.style.borderTop = '1px solid rgba(255,255,255,0.1)';
+    const bar = document.createElement('div');
+    bar.className = 'ms-scene-status-bar';
+    bar.setAttribute('role', 'status');
+    bar.setAttribute('aria-live', 'polite');
+    this._wireToolbarEventIsolation(bar);
 
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.style.width = '100%';
-    button.style.padding = '6px 10px';
-    button.style.borderRadius = '6px';
-    button.style.border = '1px solid rgba(255,255,255,0.18)';
-    button.style.background = 'rgba(255,255,255,0.08)';
-    button.style.color = 'inherit';
-    button.style.cursor = 'pointer';
-    button.style.fontWeight = '600';
-    button.style.textAlign = 'left';
-    button.style.transition = 'background 120ms ease, border-color 120ms ease';
+    const badge = document.createElement('div');
+    badge.className = 'ms-scene-status-badge ms-scene-status-badge--idle';
 
-    button.addEventListener('click', async (ev) => {
+    const dot = document.createElement('span');
+    dot.className = 'ms-scene-status-dot';
+    dot.setAttribute('aria-hidden', 'true');
+
+    const label = document.createElement('span');
+    label.className = 'ms-scene-status-text';
+    label.textContent = 'Map Shine';
+
+    const chip = document.createElement('span');
+    chip.className = 'ms-scene-status-chip';
+    chip.textContent = '—';
+
+    badge.appendChild(dot);
+    badge.appendChild(label);
+    badge.appendChild(chip);
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'ms-scene-status-toggle';
+    toggle.textContent = 'Enable';
+
+    toggle.addEventListener('click', async (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
       await this._onSceneEnableQuickToggleClick();
     });
 
     for (const evt of ['mousedown', 'pointerdown', 'dblclick', 'contextmenu']) {
-      button.addEventListener(evt, (e) => e.stopPropagation());
+      toggle.addEventListener(evt, (e) => e.stopPropagation());
     }
 
-    wrap.appendChild(button);
-    parentEl.appendChild(wrap);
+    bar.appendChild(badge);
+    bar.appendChild(toggle);
+    rotv.insertBefore(bar, contentAnchor);
 
-    this._sceneEnableQuickSectionEl = wrap;
-    this._sceneEnableQuickToggleButtonEl = button;
+    this._sceneEnableStatusBarEl = bar;
+    this._sceneEnableStatusBadgeEl = badge;
+    this._sceneEnableStatusChipEl = chip;
+    this._sceneEnableQuickToggleButtonEl = toggle;
     this._sceneEnableQuickToggleSceneId = null;
     this._sceneEnableQuickToggleState = null;
     this._refreshSceneEnableQuickToggle({ force: true });
@@ -2132,8 +2313,10 @@ export class TweakpaneManager {
    */
   _refreshSceneEnableQuickToggle(options = {}) {
     const { force = false } = options;
-    const button = this._sceneEnableQuickToggleButtonEl;
-    if (!button) return;
+    const badge = this._sceneEnableStatusBadgeEl;
+    const chip = this._sceneEnableStatusChipEl;
+    const toggle = this._sceneEnableQuickToggleButtonEl;
+    if (!badge || !chip || !toggle) return;
 
     const scene = canvas?.scene ?? null;
     const sceneId = scene?.id ?? null;
@@ -2150,28 +2333,34 @@ export class TweakpaneManager {
     const canEdit = hasScene && canPersistSceneDocument();
     const busy = this._sceneEnableQuickToggleBusy;
 
-    button.disabled = !hasScene || !canEdit || busy;
+    toggle.disabled = !hasScene || !canEdit || busy;
 
     if (!hasScene) {
-      button.textContent = 'Map Shine Enabled: No Active Scene';
-      button.style.background = 'rgba(255,255,255,0.06)';
-      button.style.borderColor = 'rgba(255,255,255,0.16)';
-      button.title = 'No active scene';
+      badge.className = 'ms-scene-status-badge ms-scene-status-badge--idle';
+      chip.textContent = '—';
+      toggle.textContent = busy ? '…' : 'Enable';
+      toggle.title = 'No active scene';
+      badge.title = 'Map Shine: no active scene';
       return;
     }
 
-    button.textContent = `Map Shine Enabled: ${enabled ? 'ON' : 'OFF'}`;
-    button.style.background = enabled ? 'rgba(46, 166, 86, 0.28)' : 'rgba(166, 62, 46, 0.28)';
-    button.style.borderColor = enabled ? 'rgba(78, 210, 126, 0.65)' : 'rgba(230, 100, 84, 0.65)';
+    badge.className = 'ms-scene-status-badge ' + (enabled ? 'ms-scene-status-badge--on' : 'ms-scene-status-badge--off');
+    chip.textContent = enabled ? 'ON' : 'OFF';
+    toggle.textContent = busy ? '…' : (enabled ? 'Disable' : 'Enable');
 
     if (busy) {
-      button.title = 'Applying scene toggle...';
+      toggle.title = 'Applying scene toggle…';
+      badge.title = `Map Shine is ${enabled ? 'on' : 'off'} for this scene (updating…)`;
     } else if (!canEdit) {
-      button.title = 'Only GMs can toggle this scene flag';
+      toggle.title = 'Only GMs can toggle this scene flag';
+      badge.title = `Map Shine is ${enabled ? 'on' : 'off'} for this scene`;
     } else {
-      button.title = enabled
-        ? 'Click to disable Map Shine Advanced for this scene'
-        : 'Click to enable Map Shine Advanced for this scene';
+      toggle.title = enabled
+        ? 'Disable Map Shine Advanced for this scene'
+        : 'Enable Map Shine Advanced for this scene';
+      badge.title = enabled
+        ? 'Map Shine is enabled for this scene'
+        : 'Map Shine is disabled for this scene';
     }
   }
 
@@ -2195,25 +2384,13 @@ export class TweakpaneManager {
 
     const wrap = document.createElement('div');
     wrap.className = 'ms-scene-presets-bar';
-    wrap.style.display = 'flex';
-    wrap.style.alignItems = 'center';
-    wrap.style.gap = '8px';
-    wrap.style.padding = '4px 0 6px 0';
 
     const label = document.createElement('span');
+    label.className = 'ms-scene-presets-label';
     label.textContent = 'Presets';
-    label.style.fontWeight = '600';
-    label.style.flex = '0 0 auto';
 
     const select = document.createElement('select');
     select.className = 'ms-scene-presets-select';
-    select.style.flex = '1 1 auto';
-    select.style.minWidth = '0';
-    select.style.padding = '5px 8px';
-    select.style.borderRadius = '6px';
-    select.style.border = '1px solid rgba(255,255,255,0.18)';
-    select.style.background = 'rgba(255,255,255,0.08)';
-    select.style.color = 'inherit';
 
     wrap.appendChild(label);
     wrap.appendChild(select);
@@ -2223,13 +2400,6 @@ export class TweakpaneManager {
     revertBtn.className = 'ms-scene-presets-revert';
     revertBtn.textContent = 'Revert';
     revertBtn.title = 'Restore settings from before the last preset apply';
-    revertBtn.style.flex = '0 0 auto';
-    revertBtn.style.padding = '5px 10px';
-    revertBtn.style.borderRadius = '6px';
-    revertBtn.style.border = '1px solid rgba(255,255,255,0.18)';
-    revertBtn.style.background = 'rgba(255,255,255,0.08)';
-    revertBtn.style.color = 'inherit';
-    revertBtn.style.cursor = 'pointer';
     revertBtn.hidden = true;
     revertBtn.addEventListener('click', (ev) => {
       ev.stopPropagation();
@@ -2574,14 +2744,20 @@ export class TweakpaneManager {
   }
 
   /**
-   * Build the Environment section — contains global sun/sky parameters that are
-   * the single source of truth for all effects (shadows, window light, trees, etc.).
+   * Sun latitude and shadow tuning under Lighting & Shadows — single source of truth
+   * for all effects (shadows, window light, trees, etc.).
    * @private
    */
   buildEnvironmentSection() {
     if (!this.pane) return;
+    if (this._sunShadowsSectionBuilt) return;
 
-    const sunFolder = this.ensureCategoryFolder('sunShadows', 'Sun & Shadows');
+    const parent = this.ensureCategoryFolder('lighting');
+
+    const sunFolder = parent.addFolder({
+      title: 'Sun & Shadows',
+      expanded: this.accordionStates['sunShadows'] ?? this.accordionStates['cat_sunShadows'] ?? false
+    });
     const ss = this.globalParams.shadowSystem;
     if (!ss || typeof ss !== 'object') {
       this.globalParams.shadowSystem = { ...DEFAULT_SHADOW_SYSTEM_TUNING };
@@ -2650,15 +2826,17 @@ export class TweakpaneManager {
     }).on('change', persistShadow);
 
     sunFolder.on('fold', (ev) => {
-      this.accordionStates['cat_sunShadows'] = ev.expanded;
+      this.accordionStates['sunShadows'] = ev.expanded;
       this.saveUIState();
     });
+
+    this._prependFolderInCategory(parent, sunFolder);
+
+    this._sunShadowsSectionBuilt = true;
   }
 
   /**
-   * Build the **Post** primary folder — external-rendering integrations:
-   * Dice So Nice (compositor pass look + perf) and Sequencer / JB2A
-   * (mirror brightness, tint, cast placement).
+   * Add Dice So Nice and Sequencer / JB2A controls under **Camera & Post**.
    *
    * State lives under `this.globalParams.post` and is fanned out to
    * `MapShine.externalEffects.applyPostSettings(...)` on change. The whole
@@ -2666,21 +2844,19 @@ export class TweakpaneManager {
    * compositor is rebuilt per scene and any uniforms set against the
    * previous instance would be lost.
    *
+   * Call after global-category effects register so these appear at the end of
+   * the section.
+   *
    * @private
    */
   buildPostSection() {
     if (!this.pane) return;
-    if (this._postFolder) return;
+    if (this._postSectionBuilt) return;
 
     const post = this.globalParams.post;
     if (!post || typeof post !== 'object') return;
 
-    const postFolder = this.pane.addFolder({
-      title: 'Post',
-      expanded: this.accordionStates['post'] ?? true
-    });
-    this._registerPrimaryFolder(postFolder);
-    this._postFolder = postFolder;
+    const parent = this.ensureCategoryFolder('post');
 
     const applyAll = () => this._applyPostSettings();
     const persist = () => {
@@ -2688,13 +2864,9 @@ export class TweakpaneManager {
       this.saveUIState();
     };
 
-    this._buildPostDsnFolder(postFolder, post.dsn, applyAll, persist);
-    this._buildPostSequencerFolder(postFolder, post.sequencer, applyAll, persist);
-
-    postFolder.on('fold', (ev) => {
-      this.accordionStates['post'] = ev.expanded;
-      this.saveUIState();
-    });
+    this._buildPostDsnFolder(parent, post.dsn, applyAll, persist);
+    this._buildPostSequencerFolder(parent, post.sequencer, applyAll, persist);
+    this._postSectionBuilt = true;
 
     if (!this._postCanvasReadyHandler) {
       this._postCanvasReadyHandler = () => {
@@ -2707,7 +2879,7 @@ export class TweakpaneManager {
   }
 
   /**
-   * Dice So Nice sub-folder under "Post". Contains performance controls
+   * Dice So Nice sub-folder under Camera & Post. Contains performance controls
    * (which actively change DSN's renderer / canvas-upload rates) and a
    * look group (which only mutates `ExternalDsnPass` uniforms).
    * @param {any} parent
@@ -2843,7 +3015,7 @@ export class TweakpaneManager {
   }
 
   /**
-   * Sequencer / JB2A sub-folder under "Post". Controls per-mirror brightness
+   * Sequencer / JB2A sub-folder under Camera & Post. Controls per-mirror brightness
    * + tint and the placement-along-cast / rotate-towards-forward pivots used
    * by `SequencerEffectMirror`.
    * @param {any} parent
@@ -3729,7 +3901,7 @@ export class TweakpaneManager {
     } catch (e) {
     }
 
-    const particleParent = this.ensureCategoryFolder('particle', 'Particles & VFX');
+    const particleParent = this.ensureCategoryFolder('particle');
 
     const folder = particleParent.addFolder({
       title: 'Rope & Chain',
@@ -4311,73 +4483,61 @@ export class TweakpaneManager {
   buildBrandingSection() {
     const brandingFolder = this.pane.addFolder({
       title: 'Support & Links',
-      expanded: this.accordionStates['branding'] ?? false
+      expanded: true
     });
     this._registerPrimaryFolder(brandingFolder, { advanced: true });
+    this._pinPrimaryFolderOpen(brandingFolder);
 
-    // Add HTML element for links
     const linkContainer = document.createElement('div');
-    linkContainer.style.padding = '8px';
-    linkContainer.style.fontSize = '12px';
+    linkContainer.className = 'ms-support-links';
     linkContainer.innerHTML = `
-      <div style="margin-bottom: 10px;">
-        <a href="https://github.com/Garsondee/map-shine-advanced/issues" target="_blank" style="color: #66aaff;">
+      <div class="ms-support-links__row">
+        <a href="https://github.com/Garsondee/map-shine-advanced/issues" target="_blank" class="ms-support-links__bug">
           🐞 Report a Bug
         </a>
       </div>
-      <div style="margin-bottom: 8px;">
-        <strong>Support Development:</strong>
-      </div>
-      <div style="margin-bottom: 4px;">
-        <a href="https://www.patreon.com/c/MythicaMachina" target="_blank" style="color: #ff424d;">
+      <div class="ms-support-links__heading">Support Development</div>
+      <div class="ms-support-links__row">
+        <a href="https://www.patreon.com/c/MythicaMachina" target="_blank" class="ms-support-links__patreon">
           ❤️ Patreon
         </a>
       </div>
-      <div>
-        <a href="https://www.foundryvtt.store/creators/mythica-machina" target="_blank" style="color: #ff6400;">
+      <div class="ms-support-links__row">
+        <a href="https://www.foundryvtt.store/creators/mythica-machina" target="_blank" class="ms-support-links__store">
           🛒 Foundry Store
         </a>
       </div>
     `;
 
-    // Append into the folder's collapsible content area so it folds correctly
     const contentElement = brandingFolder.element.querySelector('.tp-fldv_c') || brandingFolder.element;
     contentElement.appendChild(linkContainer);
-
-    // Track accordion state
-    brandingFolder.on('fold', (ev) => {
-      this.accordionStates['branding'] = ev.expanded;
-      this.saveUIState();
-    });
   }
 
   /**
-   * Ensure a category folder exists
+   * Ensure a category folder exists.
    * @param {string} categoryId - Unique category identifier
-   * @param {string} title - Display title
+   * @param {string} [title] - Display title (defaults from {@link getEffectCategoryTitle})
    * @returns {any} Tweakpane folder instance
    */
-  ensureCategoryFolder(categoryId, title) {
+  ensureCategoryFolder(categoryId, title = getEffectCategoryTitle(categoryId)) {
     if (this.categoryFolders[categoryId]) {
       return this.categoryFolders[categoryId];
     }
 
+    const legacyKey = categoryId === 'post' ? 'global' : null;
+    const expanded = this.accordionStates[`cat_${categoryId}`]
+      ?? (legacyKey ? this.accordionStates[`cat_${legacyKey}`] : undefined)
+      ?? false;
+
     const folder = this.pane.addFolder({
-      title: title,
-      expanded: this.accordionStates[`cat_${categoryId}`] ?? false
+      title: title || getEffectCategoryTitle(categoryId),
+      expanded
     });
 
     // Category folders are top-level sections and must participate in section filtering.
     this._registerPrimaryFolder(folder, { advanced: categoryId === 'debug' });
 
-    try {
-      const debugEl = this._debugFolder?.element;
-      const folderEl = folder?.element;
-      if (debugEl && folderEl && debugEl.parentNode && debugEl.parentNode === folderEl.parentNode) {
-        debugEl.parentNode.insertBefore(folderEl, debugEl);
-      }
-    } catch (e) {
-    }
+    this._insertCategoryInDisplayOrder(folder, categoryId);
 
     folder.on('fold', (ev) => {
       this.accordionStates[`cat_${categoryId}`] = ev.expanded;
@@ -4386,6 +4546,77 @@ export class TweakpaneManager {
 
     this.categoryFolders[categoryId] = folder;
     return folder;
+  }
+
+  /**
+   * Keep top-level effect category folders in {@link EFFECT_CATEGORY_ORDER}.
+   * @public
+   */
+  reorderEffectCategoryFolders() {
+    for (const categoryId of EFFECT_CATEGORY_ORDER) {
+      if (categoryId === 'debug') {
+        if (this._debugFolder) this._insertCategoryInDisplayOrder(this._debugFolder, 'debug');
+        continue;
+      }
+      const folder = this.categoryFolders[categoryId];
+      if (folder) this._insertCategoryInDisplayOrder(folder, categoryId);
+    }
+  }
+
+  /**
+   * @param {any} folder
+   * @param {string} categoryId
+   * @private
+   */
+  _insertCategoryInDisplayOrder(folder, categoryId) {
+    const folderEl = folder?.element;
+    const parent = folderEl?.parentNode;
+    if (!folderEl || !parent) return;
+
+    const orderIdx = EFFECT_CATEGORY_ORDER.indexOf(categoryId);
+    if (orderIdx < 0) {
+      const debugEl = this._debugFolder?.element;
+      if (debugEl?.parentNode === parent) parent.insertBefore(folderEl, debugEl);
+      return;
+    }
+
+    for (let i = orderIdx + 1; i < EFFECT_CATEGORY_ORDER.length; i++) {
+      const laterId = EFFECT_CATEGORY_ORDER[i];
+      if (laterId === 'debug') {
+        const debugEl = this._debugFolder?.element;
+        if (debugEl?.parentNode === parent) {
+          parent.insertBefore(folderEl, debugEl);
+          return;
+        }
+        continue;
+      }
+      const laterFolder = this.categoryFolders[laterId];
+      const laterEl = laterFolder?.element;
+      if (laterEl?.parentNode === parent) {
+        parent.insertBefore(folderEl, laterEl);
+        return;
+      }
+    }
+
+    const debugEl = this._debugFolder?.element;
+    if (debugEl?.parentNode === parent) parent.insertBefore(folderEl, debugEl);
+  }
+
+  /**
+   * Move a sub-folder to the top of its category accordion content area.
+   * @param {any} categoryFolder
+   * @param {any} childFolder
+   * @private
+   */
+  _prependFolderInCategory(categoryFolder, childFolder) {
+    try {
+      const content = categoryFolder?.element?.querySelector('.tp-fldv_c');
+      const childEl = childFolder?.element;
+      if (content && childEl && childEl.parentNode === content) {
+        content.insertBefore(childEl, content.firstChild);
+      }
+    } catch (_) {
+    }
   }
 
   registerEffectUnderEffect(parentEffectId, effectId, effectName, schema, updateCallback) {
@@ -4526,6 +4757,7 @@ export class TweakpaneManager {
       this.updateEffectiveState(effectId);
       this.updateControlStates(effectId);
       this._refreshControlPanelAshMasterRow(effectId);
+      this.refreshEffectMaskStatus(effectId);
       this.queueSave(effectId);
     };
 
@@ -4533,6 +4765,10 @@ export class TweakpaneManager {
     if (effectDataForHandlers) {
       if (!effectDataForHandlers._uiValidatorHandlers) effectDataForHandlers._uiValidatorHandlers = {};
       effectDataForHandlers._uiValidatorHandlers.enabled = handleEnabledChange;
+      effectDataForHandlers.enabledBinding = enableBinding;
+      effectDataForHandlers.enabledBindingElement = enableBinding.element
+        ?? enableBinding.controller_?.view?.element
+        ?? null;
     }
 
     enableBinding.on('change', this.throttle(handleEnabledChange, 100));
@@ -4573,6 +4809,9 @@ export class TweakpaneManager {
       this._registerAdvancedTarget(folder.element, { advanced: true, kind: 'effect' });
     }
 
+    const enabledAnchor = this.effectFolders[effectId]?.enabledBindingElement ?? null;
+    this._injectEffectMaskStatusSections(effectId, folder, schema, enabledAnchor);
+    this.refreshEffectMaskStatus(effectId);
     this._applyAdvancedModeVisibility();
   }
 
@@ -4610,19 +4849,7 @@ export class TweakpaneManager {
     // Determine parent container (category folder or main pane)
     let parent = this.pane;
     if (categoryId) {
-      const titles = {
-        environment: 'Environment',
-        atmospheric: 'Atmospheric & Environmental',
-        surface: 'Surface & Material',
-        water: 'Water',
-        structure: 'Objects & Structures',
-        particle: 'Particles & VFX',
-        ash: 'Ash',
-        global: 'Global & Post',
-        debug: 'Debug'
-      };
-      const title = titles[categoryId] || categoryId;
-      parent = this.ensureCategoryFolder(categoryId, title);
+      parent = this.ensureCategoryFolder(categoryId);
     }
 
     const folder = parent.addFolder({
@@ -4802,6 +5029,7 @@ export class TweakpaneManager {
       this.updateEffectiveState(effectId);
       this.updateControlStates(effectId);
       this._refreshControlPanelAshMasterRow(effectId);
+      this.refreshEffectMaskStatus(effectId);
       this.queueSave(effectId);
     };
 
@@ -4809,6 +5037,10 @@ export class TweakpaneManager {
     if (effectDataForHandlers) {
       if (!effectDataForHandlers._uiValidatorHandlers) effectDataForHandlers._uiValidatorHandlers = {};
       effectDataForHandlers._uiValidatorHandlers.enabled = handleEnabledChange;
+      effectDataForHandlers.enabledBinding = enableBinding;
+      effectDataForHandlers.enabledBindingElement = enableBinding.element
+        ?? enableBinding.controller_?.view?.element
+        ?? null;
     }
 
     enableBinding.on('change', this.throttle(handleEnabledChange, 100));
@@ -4920,13 +5152,29 @@ export class TweakpaneManager {
     folder.on('fold', (ev) => {
       this.accordionStates[effectId] = ev.expanded;
       this.saveUIState();
+      if (ev.expanded) this.refreshEffectMaskStatus(effectId);
     });
 
     if (schema.advanced === true && folder.element) {
       this._registerAdvancedTarget(folder.element, { advanced: true, kind: 'effect' });
     }
 
+    // Insert after all Tweakpane blades exist — foreign DOM nodes otherwise end up last.
+    const enabledAnchor = this.effectFolders[effectId]?.enabledBindingElement ?? null;
+    this._injectEffectMaskStatusSections(effectId, folder, schema, enabledAnchor);
+
+    this.refreshEffectMaskStatus(effectId);
     this._applyAdvancedModeVisibility();
+  }
+
+  /**
+   * Re-probe mask texture rows for effects that use the mask-status template.
+   * @public
+   */
+  refreshAllEffectMaskStatuses() {
+    for (const [effectId, data] of Object.entries(this.effectFolders || {})) {
+      if (data?.maskStatusElements) this.refreshEffectMaskStatus(effectId);
+    }
   }
 
   /**
@@ -4992,123 +5240,62 @@ export class TweakpaneManager {
   }
 
   /**
-   * Build a mask status section for mask-dependent effects
+   * Build mask-status row directly under the Enabled toggle in the final folder DOM.
    * @private
-   * @param {string} effectId - Effect identifier
-   * @param {object} folder - Tweakpane folder
-   * @param {object} group - Group definition
    */
-  _buildMaskStatusSection(effectId, folder, group) {
-    // Get the content element of the folder
-    const contentElement = folder.element.querySelector('.tp-fldv_c') || folder.element;
+  _injectEffectMaskStatusSections(effectId, folder, schema, insertAfterEl = null) {
+    const effectData = this.effectFolders[effectId];
+    if (!effectData) return;
 
-    // Create container for mask status
-    const statusContainer = document.createElement('div');
-    statusContainer.className = 'ms-mask-status-section';
-    statusContainer.style.padding = '8px';
-    statusContainer.style.fontSize = '12px';
-    statusContainer.style.lineHeight = '1.5';
+    const anchor = insertAfterEl
+      ?? effectData.enabledBindingElement
+      ?? effectData.enabledBinding?.element
+      ?? effectData.enabledBinding?.controller_?.view?.element
+      ?? null;
 
-    // Create header
-    const header = document.createElement('div');
-    header.style.fontWeight = '600';
-    header.style.marginBottom = '8px';
-    header.style.color = '#aaa';
-    header.textContent = 'Required Masks';
-    statusContainer.appendChild(header);
+    for (const group of schema?.groups || []) {
+      if (group?.type !== 'mask-status') continue;
 
-    // Create mask status row for _Water
-    const maskRow = document.createElement('div');
-    maskRow.style.display = 'flex';
-    maskRow.style.alignItems = 'center';
-    maskRow.style.gap = '8px';
-    maskRow.style.padding = '4px 0';
+      if (effectData.maskStatusElements?.row) {
+        placeMaskStatusRow(folder.element, anchor, effectData.maskStatusElements.row);
+        continue;
+      }
 
-    // Status indicator (X in red by default)
-    const statusIndicator = document.createElement('div');
-    statusIndicator.className = 'ms-mask-status-indicator';
-    statusIndicator.style.width = '16px';
-    statusIndicator.style.height = '16px';
-    statusIndicator.style.display = 'flex';
-    statusIndicator.style.alignItems = 'center';
-    statusIndicator.style.justifyContent = 'center';
-    statusIndicator.style.borderRadius = '3px';
-    statusIndicator.style.backgroundColor = 'rgba(255, 68, 68, 0.2)';
-    statusIndicator.style.color = '#ff4444';
-    statusIndicator.style.fontWeight = 'bold';
-    statusIndicator.style.fontSize = '14px';
-    statusIndicator.textContent = '✗';
-    statusIndicator.title = 'Missing: Place a _Water suffixed texture alongside your main albedo texture (e.g., BattleMap.png → BattleMap_Water.png) to enable water rendering.';
+      const elements = createMaskStatusRow(folder.element, group, anchor);
+      if (!elements) continue;
 
-    // Mask label
-    const maskLabel = document.createElement('div');
-    maskLabel.className = 'ms-mask-status-label';
-    maskLabel.style.flex = '1';
-    maskLabel.textContent = '_Water mask';
-    maskLabel.style.color = '#ff4444';
-
-    // Help text
-    const helpText = document.createElement('div');
-    helpText.className = 'ms-mask-status-help';
-    helpText.style.fontSize = '11px';
-    helpText.style.color = '#888';
-    helpText.style.marginTop = '6px';
-    helpText.style.padding = '6px';
-    helpText.style.backgroundColor = 'rgba(255, 255, 255, 0.05)';
-    helpText.style.borderRadius = '3px';
-    helpText.textContent = 'Place a _Water suffixed texture alongside your main albedo texture (e.g., BattleMap.png → BattleMap_Water.png) to enable water rendering.';
-
-    maskRow.appendChild(statusIndicator);
-    maskRow.appendChild(maskLabel);
-    statusContainer.appendChild(maskRow);
-    statusContainer.appendChild(helpText);
-    contentElement.appendChild(statusContainer);
-
-    // Store references for updating
-    if (!this.effectFolders[effectId]) {
-      this.effectFolders[effectId] = {};
+      effectData.maskStatusElements = elements;
+      effectData.maskStatusConfig = {
+        maskId: group?.maskId || group?.templateId || effectId,
+        suffix: group?.suffix,
+        label: group?.label,
+        example: group?.example,
+        templateId: group?.templateId,
+      };
     }
-    this.effectFolders[effectId].maskStatusElements = {
-      container: statusContainer,
-      indicator: statusIndicator,
-      label: maskLabel,
-      helpText: helpText
-    };
   }
 
   /**
-   * Update mask status display for an effect
-   * @param {string} effectId - Effect identifier
-   * @param {object} maskStatus - Object with mask detection status (e.g., { water: true/false })
+   * Refresh mask status display for an effect (probes runtime + asset loader).
+   * @param {string} effectId
+   * @public
+   */
+  refreshEffectMaskStatus(effectId) {
+    const effectData = this.effectFolders[effectId];
+    if (!effectData?.maskStatusElements) return;
+    refreshMaskStatusRow(
+      effectId,
+      effectData.maskStatusConfig || {},
+      effectData.maskStatusElements,
+    );
+  }
+
+  /**
+   * @deprecated Use refreshEffectMaskStatus() instead.
    */
   updateMaskStatusDisplay(effectId, maskStatus) {
-    const effectData = this.effectFolders[effectId];
-    if (!effectData || !effectData.maskStatusElements) return;
-
-    const { indicator, label, helpText } = effectData.maskStatusElements;
-
-    // Update based on _Water mask status
-    const waterDetected = maskStatus.water || false;
-
-    if (waterDetected) {
-      // Green checkmark
-      indicator.style.backgroundColor = 'rgba(76, 175, 80, 0.2)';
-      indicator.style.color = '#4caf50';
-      indicator.textContent = '✓';
-      indicator.title = 'Detected: Water rendering is active.';
-      label.style.color = '#4caf50';
-      helpText.textContent = 'Water mask detected. Water rendering is active.';
-      helpText.style.color = '#888';
-    } else {
-      // Red X
-      indicator.style.backgroundColor = 'rgba(255, 68, 68, 0.2)';
-      indicator.style.color = '#ff4444';
-      indicator.textContent = '✗';
-      indicator.title = 'Missing: Place a _Water suffixed texture alongside your main albedo texture (e.g., BattleMap.png → BattleMap_Water.png) to enable water rendering.';
-      label.style.color = '#ff4444';
-      helpText.textContent = 'Place a _Water suffixed texture alongside your main albedo texture (e.g., BattleMap.png → BattleMap_Water.png) to enable water rendering.';
-      helpText.style.color = '#ff4444';
-    }
+    void maskStatus;
+    this.refreshEffectMaskStatus(effectId);
   }
 
   /**
@@ -5157,15 +5344,12 @@ export class TweakpaneManager {
     if (!effectData.externalFolders) effectData.externalFolders = [];
 
     const categoryTitles = {
-      environment: 'Environment',
-      atmospheric: 'Atmospheric & Environmental',
-      surface: 'Surface & Material',
-      water: 'Water',
-      structure: 'Objects & Structures',
-      particle: 'Particles & VFX',
-      ash: 'Ash',
-      global: 'Global & Post',
-      debug: 'Debug'
+      ...Object.fromEntries(
+        EFFECT_CATEGORY_ORDER.map((id) => [id, getEffectCategoryTitle(id)])
+      ),
+      water: getEffectCategoryTitle('water'),
+      ash: getEffectCategoryTitle('ash'),
+      global: getEffectCategoryTitle('global'),
     };
 
     for (const group of schema.groups || []) {
@@ -5175,7 +5359,7 @@ export class TweakpaneManager {
       const categoryId = group.categoryId;
       const parent = this.ensureCategoryFolder(
         categoryId,
-        categoryTitles[categoryId] || categoryId
+        categoryTitles[categoryId] || getEffectCategoryTitle(categoryId)
       );
 
       const accordionKey = this._externalGroupAccordionKey(effectId, group);
@@ -5236,11 +5420,8 @@ export class TweakpaneManager {
           folder.addBlade({ view: 'separator' });
         }
 
-        // Special handling for mask-status groups
-        if (group.type === 'mask-status') {
-          this._buildMaskStatusSection(effectId, folder, group);
-          continue;
-        }
+        // mask-status groups are injected under Enabled in registerEffect()
+        if (group.type === 'mask-status') continue;
 
         // Determine target container (inline vs nested folder)
         let targetContainer = folder;
@@ -8093,6 +8274,10 @@ export class TweakpaneManager {
     }
     
     statusLight.title = `Status: ${tooltip}`;
+
+    if (effectData.maskStatusElements) {
+      this.refreshEffectMaskStatus(effectId);
+    }
   }
 
   /**
@@ -8678,6 +8863,10 @@ export class TweakpaneManager {
           this.globalParams.introZoomEnabled = true;
         }
 
+        this.globalParams.uiColorScheme = normalizeUiColorSchemeId(
+          this.globalParams.uiColorScheme ?? DEFAULT_UI_COLOR_SCHEME_ID
+        );
+
         if (this.globalParams.maskDebugOverlayEnabled === undefined) {
           this.globalParams.maskDebugOverlayEnabled = false;
         }
@@ -8932,7 +9121,9 @@ export class TweakpaneManager {
     this._filterInputEl = null;
     this._advancedModeCheckboxEl = null;
     this._advancedTargets = [];
-    this._sceneEnableQuickSectionEl = null;
+    this._sceneEnableStatusBarEl = null;
+    this._sceneEnableStatusBadgeEl = null;
+    this._sceneEnableStatusChipEl = null;
     this._sceneEnableQuickToggleButtonEl = null;
     this._sceneEnableQuickToggleSceneId = null;
     this._sceneEnableQuickToggleState = null;
@@ -8953,7 +9144,12 @@ export class TweakpaneManager {
       }
       this._postCanvasReadyHandler = null;
     }
-    this._postFolder = null;
+    this._postSectionBuilt = false;
+    this._tokensSectionBuilt = false;
+    this._sunShadowsSectionBuilt = false;
+    this._introsSectionBuilt = false;
+    this._appearanceSectionBuilt = false;
+    this._appearanceFolder = null;
     this._presetsBarEl = null;
     this._presetsSelectEl = null;
     this._presetsRevertBtnEl = null;

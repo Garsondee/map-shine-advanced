@@ -13,6 +13,10 @@ import {
   isMissingRequiredMask,
 } from './MaskPresenceEvaluator.js';
 import { getAllEffectMaskHealthEntries } from './EffectMaskHealthCatalog.js';
+import {
+  evaluateCompositorWindowLightReadiness,
+  partitionWindowLightOverlays,
+} from './window-light-health-utils.js';
 
 const log = createLogger('HealthEvaluator');
 
@@ -1368,29 +1372,52 @@ export class HealthEvaluatorService {
           severity: 'warn',
           check: (instance, ctx) => {
             const active = Number(ctx._getRuntimeSnapshot()?.activeFloor ?? 0);
-            const overlays = Array.from(instance?._overlays?.values?.() || []);
-            const sameFloor = overlays.filter((e) => Number(e?.floorIndex) === active);
-            if (sameFloor.length === 0) {
+            const { tileOverlays, compositorShims } = partitionWindowLightOverlays(instance?._overlays);
+            const sameFloorTiles = tileOverlays.filter(([, e]) => Number(e?.floorIndex) === active);
+            const sameFloorShims = compositorShims.filter(([, e]) => Number(e?.floorIndex) === active);
+
+            if (sameFloorTiles.length === 0 && sameFloorShims.length === 0) {
               return {
                 pass: true,
                 skipped: true,
                 message: 'No window overlays authored for active floor',
-                evidence: { activeFloor: active, totalOverlays: overlays.length },
+                evidence: {
+                  activeFloor: active,
+                  totalOverlays: tileOverlays.length + compositorShims.length,
+                },
               };
             }
-            const notVisible = sameFloor.filter((e) => !e?.mesh?.visible);
-            const notReady = sameFloor.filter((e) => Number(e?.material?.uniforms?.uMaskReady?.value || 0) < 0.5);
-            const pass = notVisible.length === 0 && notReady.length === 0;
+
+            if (sameFloorTiles.length === 0 && sameFloorShims.length > 0) {
+              return evaluateCompositorWindowLightReadiness(instance, active);
+            }
+
+            const notVisible = sameFloorTiles.filter(([, e]) => !e?.mesh?.visible);
+            const notReady = sameFloorTiles.filter(
+              ([, e]) => Number(e?.material?.uniforms?.uMaskReady?.value || 0) < 0.5,
+            );
+            let pass = notVisible.length === 0 && notReady.length === 0;
+            let compositorEvidence = null;
+            if (sameFloorShims.length > 0) {
+              const comp = evaluateCompositorWindowLightReadiness(instance, active);
+              compositorEvidence = comp.evidence;
+              pass = pass && comp.pass;
+            }
             return {
               pass,
               message: pass
                 ? 'Active-floor window overlays are visible and mask-ready'
-                : 'Active-floor window overlays have visibility or mask readiness issues',
+                : sameFloorShims.length > 0 && sameFloorTiles.length === 0
+                  ? 'Compositor window-light slot not mask-ready'
+                  : 'Active-floor window overlays have visibility or mask readiness issues',
               evidence: {
                 activeFloor: active,
-                sameFloorOverlayCount: sameFloor.length,
+                sameFloorOverlayCount: sameFloorTiles.length + sameFloorShims.length,
+                sameFloorTileCount: sameFloorTiles.length,
+                sameFloorCompositorCount: sameFloorShims.length,
                 notVisibleCount: notVisible.length,
                 notReadyCount: notReady.length,
+                compositor: compositorEvidence,
               },
             };
           },
@@ -1404,24 +1431,23 @@ export class HealthEvaluatorService {
             if (active < 1) {
               return { pass: true, skipped: true, message: 'Ground floor — upper-floor classification check N/A' };
             }
-            const entries = Array.from(instance?._overlays?.entries?.() || []);
-            const tiles = entries.filter(([id]) => id && id !== '__bg_image__');
-            if (tiles.length === 0) {
+            const { tileOverlays } = partitionWindowLightOverlays(instance?._overlays);
+            if (tileOverlays.length === 0) {
               return { pass: true, skipped: true, message: 'No per-tile window overlays to compare' };
             }
-            const onActive = tiles.filter(([, e]) => Number(e?.floorIndex) === active);
+            const onActive = tileOverlays.filter(([, e]) => Number(e?.floorIndex) === active);
             if (onActive.length > 0) {
               return {
                 pass: true,
                 message: `Active floor ${active} has ${onActive.length} tile overlay(s)`,
-                evidence: { activeFloor: active, onActiveCount: onActive.length, totalTileOverlays: tiles.length },
+                evidence: { activeFloor: active, onActiveCount: onActive.length, totalTileOverlays: tileOverlays.length },
               };
             }
-            const floors = [...new Set(tiles.map(([, e]) => Number(e?.floorIndex) || 0))].sort((a, b) => a - b);
+            const floors = [...new Set(tileOverlays.map(([, e]) => Number(e?.floorIndex) || 0))].sort((a, b) => a - b);
             return {
               pass: false,
-              message: `Active floor ${active} has no tile overlays while ${tiles.length} exist on other floor indices — likely Levels/floor-index wiring drift`,
-              evidence: { activeFloor: active, totalTileOverlays: tiles.length, floorsSeen: floors },
+              message: `Active floor ${active} has no tile overlays while ${tileOverlays.length} exist on other floor indices — likely Levels/floor-index wiring drift`,
+              evidence: { activeFloor: active, totalTileOverlays: tileOverlays.length, floorsSeen: floors },
             };
           },
         },

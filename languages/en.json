@@ -1,5 +1,7 @@
 {
     "MODULE.hello": "hello",
     "MAPSHINE.ToolTitle": "Map Shine UI",
-    "MAPSHINE.ToolDescription": "Open the Map Shine effects panel to configure visual enhancements."
+    "MAPSHINE.ToolDescription": "Open the Map Shine effects panel to configure visual enhancements.",
+    "MAPSHINE.PerformanceGraphicsTitle": "Performance & Graphics",
+    "MAPSHINE.PerformanceGraphicsDescription": "Tune how Map Shine looks and runs on your device"
 }

@@ -1057,20 +1057,20 @@ Hooks.once('init', async function() {
 
       ensureTool(tokenControls, {
         name: 'map-shine-graphics-options',
-        title: 'Map Shine Graphics Options',
-        icon: 'fas fa-desktop',
+        title: 'Performance & Graphics',
+        icon: 'fas fa-gauge-high',
         button: true,
         order: 103,
         visible: true,
         toolclip: {
           src: '',
-          heading: 'MAPSHINE.ToolTitle',
-          items: [{ paragraph: 'Open per-client graphics options' }]
+          heading: 'Performance & Graphics',
+          items: [{ paragraph: 'Tune how Map Shine looks and runs on your device' }]
         },
         onChange: () => {
           const graphicsSettings = window.MapShine?.graphicsSettings;
           if (!graphicsSettings || typeof graphicsSettings.toggle !== 'function') {
-            ui.notifications?.warn?.('Map Shine Graphics Options are not available yet. The scene may still be initializing.');
+            ui.notifications?.warn?.('Performance & Graphics are not available yet. The scene may still be initializing.');
             return;
           }
           graphicsSettings.toggle();

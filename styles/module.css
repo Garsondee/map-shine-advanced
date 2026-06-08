@@ -2569,6 +2569,364 @@ body.msa-level-transition-active #loading-text {
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
+ * Performance & Graphics dialog (Tokens toolbar → gauge icon)
+ * Custom DOM overlay for per-client performance and effect toggles.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+#map-shine-graphics-settings {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(420px, calc(100vw - 32px));
+  max-height: min(85vh, 720px);
+  z-index: 10000;
+  display: none;
+  flex-direction: column;
+  background: var(--ms-ui-panel-bg, rgba(14, 16, 22, 0.97));
+  color: var(--ms-ui-text, rgba(232, 234, 240, 0.92));
+  border: 1px solid var(--ms-ui-border, rgba(255, 255, 255, 0.14));
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55), 0 2px 4px rgba(0, 0, 0, 0.4);
+  font-family: var(--font-primary, 'Signika', sans-serif);
+  font-size: 12px;
+  overflow: hidden;
+  pointer-events: auto;
+  contain: layout style paint;
+}
+
+#map-shine-graphics-settings * {
+  box-sizing: border-box;
+}
+
+.msa-gfx__header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  background: linear-gradient(180deg, rgba(38, 44, 56, 0.95), rgba(22, 26, 34, 0.95));
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: grab;
+  user-select: none;
+}
+
+.msa-gfx__header:active {
+  cursor: grabbing;
+}
+
+.msa-gfx__header-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.msa-gfx__title {
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 1.25;
+  color: var(--ms-ui-text-strong, rgba(245, 248, 255, 0.98));
+}
+
+.msa-gfx__subtitle {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.35;
+  opacity: 0.65;
+  font-weight: 400;
+}
+
+.msa-gfx__close {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.msa-gfx__close:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.msa-gfx__body {
+  overflow-y: auto;
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.msa-gfx__section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.msa-gfx__section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.72;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.msa-gfx__count-tag,
+.msa-gfx__group-count {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.08);
+  text-transform: none;
+  letter-spacing: normal;
+  opacity: 0.9;
+}
+
+.msa-gfx__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.msa-gfx__label {
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.85;
+}
+
+.msa-gfx__select {
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--ms-ui-border, rgba(255, 255, 255, 0.16));
+  background: var(--ms-ui-input-bg, rgba(255, 255, 255, 0.07));
+  color: inherit;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.msa-gfx__select:focus {
+  outline: none;
+  border-color: var(--ms-ui-border-strong, rgba(255, 255, 255, 0.28));
+}
+
+.msa-gfx__hint {
+  font-size: 10px;
+  opacity: 0.6;
+  line-height: 1.35;
+  margin: 0;
+}
+
+.msa-gfx__hint--custom-res {
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: rgba(255, 200, 80, 0.08);
+  border: 1px solid rgba(255, 200, 80, 0.2);
+  opacity: 0.85;
+}
+
+.msa-gfx__link {
+  border: none;
+  background: none;
+  color: rgba(140, 190, 255, 0.95);
+  cursor: pointer;
+  font: inherit;
+  font-size: inherit;
+  text-decoration: underline;
+  padding: 0;
+}
+
+.msa-gfx__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.msa-gfx__btn {
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.msa-gfx__btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.msa-gfx__btn--danger {
+  border-color: rgba(255, 80, 80, 0.35);
+  background: rgba(255, 60, 60, 0.12);
+  color: #ff9090;
+}
+
+.msa-gfx__groups {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.msa-gfx__group {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.msa-gfx__group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.msa-gfx__group-header:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.msa-gfx__group-label {
+  flex: 1;
+}
+
+.msa-gfx__group-body {
+  padding: 4px 6px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.msa-gfx__effect-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.msa-gfx__effect-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.msa-gfx__effect-row--unavail {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.msa-gfx__dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #666;
+}
+
+.msa-gfx__dot--on {
+  background: #44ff44;
+  box-shadow: 0 0 4px #44ff44;
+}
+
+.msa-gfx__dot--off {
+  background: #ff4444;
+  box-shadow: 0 0 4px #ff4444;
+}
+
+.msa-gfx__dot--unavail {
+  background: #666;
+  box-shadow: none;
+}
+
+.msa-gfx__effect-check {
+  flex-shrink: 0;
+}
+
+.msa-gfx__effect-name {
+  flex: 1;
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.msa-gfx__chevron {
+  flex-shrink: 0;
+  width: 12px;
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.msa-gfx__advanced-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.72;
+  cursor: pointer;
+  text-align: left;
+}
+
+.msa-gfx__advanced-body {
+  padding: 4px 0 0 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.msa-gfx__check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.msa-gfx__check input[type="checkbox"] {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.msa-gfx__footnote {
+  margin: 0;
+  font-size: 10px;
+  opacity: 0.5;
+  font-style: italic;
+  line-height: 1.35;
+}
+
+.msa-gfx__empty {
+  margin: 0;
+  font-size: 11px;
+  opacity: 0.6;
+  font-style: italic;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
  * Performance Recorder dialog (Quick Actions → Performance Recorder)
  * Custom DOM overlay (no Foundry Application / Tweakpane). Stacked above
  * Foundry UI (~100) but below tooltips, matching other Map Shine dialogs.

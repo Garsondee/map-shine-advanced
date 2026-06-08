@@ -26,6 +26,106 @@ const PARTICLE_SPAWN_TIERS = Object.freeze([
   { label: 'Extreme', scale: 2 }
 ]);
 
+/** Simplified particle UI tiers shown in the Performance panel. */
+export const PARTICLE_SPAWN_UI_TIERS = Object.freeze([
+  { id: 'off', label: 'Off', tierIndex: 0 },
+  { id: 'low', label: 'Low', tierIndex: 1 },
+  { id: 'medium', label: 'Medium', tierIndex: 3 },
+  { id: 'high', label: 'High', tierIndex: 4 },
+]);
+
+/** @typedef {'best60'|'balanced30'|'powerSaver'|'custom'} PerformanceProfileId */
+
+/** @type {Record<PerformanceProfileId, { label: string, apply: (state: GraphicsSettingsState) => void }>} */
+const PERFORMANCE_PROFILES = Object.freeze({
+  best60: {
+    label: 'Best (60 fps)',
+    apply(state) {
+      state.renderPresentationPacingEnabled = true;
+      state.renderAdaptiveFpsEnabled = true;
+      state.renderStrictSyncEnabled = false;
+      state.renderIdleFps = 60;
+      state.renderActiveFps = 60;
+      state.renderPresentationFps = 60;
+      state.renderContinuousFps = 60;
+    },
+  },
+  balanced30: {
+    label: 'Balanced (30 fps)',
+    apply(state) {
+      state.renderPresentationPacingEnabled = true;
+      state.renderAdaptiveFpsEnabled = true;
+      state.renderStrictSyncEnabled = false;
+      state.renderIdleFps = 30;
+      state.renderActiveFps = 30;
+      state.renderPresentationFps = 30;
+      state.renderContinuousFps = 30;
+    },
+  },
+  powerSaver: {
+    label: 'Power saver',
+    apply(state) {
+      state.renderPresentationPacingEnabled = true;
+      state.renderAdaptiveFpsEnabled = true;
+      state.renderStrictSyncEnabled = false;
+      state.renderIdleFps = 15;
+      state.renderActiveFps = 60;
+      state.renderPresentationFps = 30;
+      state.renderContinuousFps = 30;
+      if (state.particleSpawnTier > 1) state.particleSpawnTier = 1;
+    },
+  },
+});
+
+/** Aspect bucket → simplified resolution presets for the UI. */
+const RESOLUTION_PRESETS_BY_ASPECT = Object.freeze({
+  '16:9': Object.freeze([
+    { label: 'Native (full quality)', preset: 'native' },
+    { label: 'High', preset: '1920x1080' },
+    { label: 'Medium', preset: '1280x720' },
+    { label: 'Low', preset: '800x450' },
+  ]),
+  '16:10': Object.freeze([
+    { label: 'Native (full quality)', preset: 'native' },
+    { label: 'High', preset: '1920x1200' },
+    { label: 'Medium', preset: '1280x800' },
+    { label: 'Low', preset: '1440x900' },
+  ]),
+  '21:9': Object.freeze([
+    { label: 'Native (full quality)', preset: 'native' },
+    { label: 'High', preset: '2560x1080' },
+    { label: 'Medium', preset: '1720x720' },
+    { label: 'Low', preset: '800x450' },
+  ]),
+  '32:9': Object.freeze([
+    { label: 'Native (full quality)', preset: 'native' },
+    { label: 'High', preset: '3840x1080' },
+    { label: 'Medium', preset: '2560x720' },
+    { label: 'Low', preset: '800x450' },
+  ]),
+});
+
+/** Effect groups for the simplified UI (order matters). */
+const EFFECT_UI_GROUPS = Object.freeze([
+  { id: 'weather', label: 'Weather & particles', categories: ['atmospheric', 'particle'] },
+  { id: 'lighting', label: 'Lighting & shadows', categories: ['lighting'] },
+  { id: 'surfaces', label: 'Surfaces & animation', categories: ['surface'] },
+  {
+    id: 'look',
+    label: 'Look & color',
+    categories: ['post'],
+    excludeEffectIds: ['external-effects-sequencer', 'external-effects-dsn'],
+  },
+  { id: 'gameplay', label: 'Gameplay', categories: ['gameplay'] },
+  {
+    id: 'integrations',
+    label: 'Integrations',
+    effectIds: ['external-effects-sequencer', 'external-effects-dsn'],
+  },
+]);
+
+const INTEGRATION_EFFECT_IDS = new Set(['external-effects-sequencer', 'external-effects-dsn']);
+
 // Legacy/alias IDs used by capabilities or historical UI wiring.
 // Normalize these to the runtime V2 effect IDs so overrides remain stable.
 const EFFECT_ID_ALIASES = Object.freeze({
@@ -99,6 +199,7 @@ const STYLISTIC_EFFECT_IDS_DEFAULT_OFF = new Set([
  * @property {boolean} renderStrictSyncEnabled
  * @property {boolean} tokenDepthInteraction - P4-02: tokens participate in depth buffer when true
  * @property {number} particleSpawnTier - 0..6; 3 = Medium (100% spawn)
+ * @property {'best60'|'balanced30'|'powerSaver'|'custom'|undefined} [performanceProfile]
  * @property {Object<string, {enabled?: boolean}>} effectOverrides
  */
 
@@ -120,17 +221,15 @@ export class GraphicsSettingsManager {
       globalDisableAll: false,
       renderResolutionPreset: 'native',
       renderAdaptiveFpsEnabled: true,
-      renderIdleFps: 15,
+      renderIdleFps: 60,
       renderActiveFps: 60,
-      renderContinuousFps: 30,
-      renderPresentationFps: 30,
+      renderContinuousFps: 60,
+      renderPresentationFps: 60,
       renderPresentationPacingEnabled: true,
-      // Strict sync: 1:1 PIXI↔compositor lockstep (debug / mask correctness). Off by default for smooth pacing.
       renderStrictSyncEnabled: false,
-      // P4-02: When true, token sprites use depthTest/depthWrite so elevated foreground
-      // tiles correctly occlude them. Default false preserves legacy always-on-top behaviour.
       tokenDepthInteraction: false,
       particleSpawnTier: 3,
+      performanceProfile: 'best60',
       effectOverrides: {}
     };
 
@@ -324,7 +423,7 @@ export class GraphicsSettingsManager {
    * @returns {number}
    */
   getRenderIdleFps() {
-    return this._coerceFps(this.state?.renderIdleFps, 15, 5, 60);
+    return this._coerceFps(this.state?.renderIdleFps, 60, 5, 60);
   }
 
   /**
@@ -338,7 +437,7 @@ export class GraphicsSettingsManager {
    * @returns {number}
    */
   getRenderContinuousFps() {
-    return this._coerceFps(this.state?.renderContinuousFps, 30, 5, 120);
+    return this._coerceFps(this.state?.renderContinuousFps, 60, 5, 120);
   }
 
   /**
@@ -346,7 +445,7 @@ export class GraphicsSettingsManager {
    */
   getRenderPresentationFps() {
     const p = this.state?.renderPresentationFps;
-    if (Number.isFinite(p)) return this._coerceFps(p, 30, 5, 60);
+    if (Number.isFinite(p)) return this._coerceFps(p, 60, 5, 60);
     return this.getRenderContinuousFps();
   }
 
@@ -464,7 +563,8 @@ export class GraphicsSettingsManager {
    * @param {number} fps
    */
   setRenderIdleFps(fps) {
-    this.state.renderIdleFps = this._coerceFps(fps, 15, 5, 60);
+    this.state.renderIdleFps = this._coerceFps(fps, 60, 5, 60);
+    this.state.performanceProfile = this.inferPerformanceProfile();
     this.applyRenderPerformanceSettings();
     this.saveState();
   }
@@ -474,6 +574,7 @@ export class GraphicsSettingsManager {
    */
   setRenderActiveFps(fps) {
     this.state.renderActiveFps = this._coerceFps(fps, 60, 5, 120);
+    this.state.performanceProfile = this.inferPerformanceProfile();
     this.applyRenderPerformanceSettings();
     this.saveState();
   }
@@ -482,8 +583,9 @@ export class GraphicsSettingsManager {
    * @param {number} fps
    */
   setRenderContinuousFps(fps) {
-    this.state.renderContinuousFps = this._coerceFps(fps, 30, 5, 120);
+    this.state.renderContinuousFps = this._coerceFps(fps, 60, 5, 120);
     this.state.renderPresentationFps = this.state.renderContinuousFps;
+    this.state.performanceProfile = this.inferPerformanceProfile();
     this.applyRenderPerformanceSettings();
     this.saveState();
   }
@@ -492,8 +594,9 @@ export class GraphicsSettingsManager {
    * @param {number} fps
    */
   setRenderPresentationFps(fps) {
-    this.state.renderPresentationFps = this._coerceFps(fps, 30, 5, 60);
+    this.state.renderPresentationFps = this._coerceFps(fps, 60, 5, 60);
     this.state.renderContinuousFps = this.state.renderPresentationFps;
+    this.state.performanceProfile = this.inferPerformanceProfile();
     this.applyRenderPerformanceSettings();
     this.saveState();
   }
@@ -518,6 +621,7 @@ export class GraphicsSettingsManager {
     this.state.renderContinuousFps = 30;
     this.state.renderActiveFps = 60;
     this.state.renderIdleFps = 15;
+    this.state.performanceProfile = 'powerSaver';
     this.applyRenderPerformanceSettings();
     this.saveState();
     try { this.dialog?.refresh?.(); } catch (_) {}
@@ -533,7 +637,8 @@ export class GraphicsSettingsManager {
     this.state.renderPresentationFps = 60;
     this.state.renderContinuousFps = 60;
     this.state.renderActiveFps = 60;
-    this.state.renderIdleFps = 15;
+    this.state.renderIdleFps = 60;
+    this.state.performanceProfile = 'best60';
     this.applyRenderPerformanceSettings();
     this.saveState();
     try { this.dialog?.refresh?.(); } catch (_) {}
@@ -549,10 +654,161 @@ export class GraphicsSettingsManager {
     this.state.renderPresentationFps = 60;
     this.state.renderContinuousFps = 60;
     this.state.renderActiveFps = 60;
-    this.state.renderIdleFps = 15;
+    this.state.renderIdleFps = 60;
+    this.state.performanceProfile = 'custom';
     this.applyRenderPerformanceSettings();
     this.saveState();
     try { this.dialog?.refresh?.(); } catch (_) {}
+  }
+
+  /**
+   * @returns {PerformanceProfileId}
+   */
+  getPerformanceProfile() {
+    const stored = this.state?.performanceProfile;
+    if (stored && stored !== 'custom' && PERFORMANCE_PROFILES[stored]) return stored;
+    return this.inferPerformanceProfile();
+  }
+
+  /**
+   * Infer profile from current FPS / pacing values (for migration and custom combos).
+   * @returns {PerformanceProfileId}
+   */
+  inferPerformanceProfile() {
+    const s = this.state;
+    if (s.renderStrictSyncEnabled || s.renderPresentationPacingEnabled === false) return 'custom';
+    const idle = this.getRenderIdleFps();
+    const active = this.getRenderActiveFps();
+    const presentation = this.getRenderPresentationFps();
+    if (idle === 60 && active === 60 && presentation === 60) return 'best60';
+    if (idle === 30 && active === 30 && presentation === 30) return 'balanced30';
+    if (idle === 15 && active === 60 && presentation === 30) return 'powerSaver';
+    // Legacy Smooth 30 preset (idle 15, active 60, presentation 30)
+    if (idle === 15 && active === 60 && presentation === 30 && !s.renderStrictSyncEnabled) {
+      return 'powerSaver';
+    }
+    // Legacy Smooth 60 preset (idle 15, active 60, presentation 60)
+    if (idle === 15 && active === 60 && presentation === 60) return 'best60';
+    return 'custom';
+  }
+
+  /**
+   * @param {PerformanceProfileId|string} profileId
+   */
+  applyPerformanceProfile(profileId) {
+    const id = String(profileId || 'best60');
+    if (id === 'custom' || !PERFORMANCE_PROFILES[id]) {
+      this.state.performanceProfile = 'custom';
+      this.saveState();
+      return;
+    }
+    PERFORMANCE_PROFILES[id].apply(this.state);
+    this.state.performanceProfile = id;
+    this.applyRenderPerformanceSettings();
+    if (id === 'powerSaver') this.applyParticleSpawnScale();
+    this.saveState();
+    try { this.dialog?.refresh?.(); } catch (_) {}
+  }
+
+  /**
+   * @returns {Array<{ label: string, id: PerformanceProfileId }>}
+   */
+  listPerformanceProfileOptions() {
+    return Object.entries(PERFORMANCE_PROFILES).map(([id, row]) => ({
+      id: /** @type {PerformanceProfileId} */ (id),
+      label: row.label,
+    }));
+  }
+
+  /**
+   * Classify viewport aspect ratio into a bucket for resolution presets.
+   * @param {number} [widthCss]
+   * @param {number} [heightCss]
+   * @returns {'16:9'|'16:10'|'21:9'|'32:9'}
+   */
+  classifyViewportAspect(widthCss, heightCss) {
+    let w = Number(widthCss);
+    let h = Number(heightCss);
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+      w = window?.innerWidth || screen?.width || 1920;
+      h = window?.innerHeight || screen?.height || 1080;
+    }
+    const ratio = w / h;
+    if (ratio >= 2.8) return '32:9';
+    if (ratio >= 2.0) return '21:9';
+    if (ratio >= 1.65) return '16:10';
+    return '16:9';
+  }
+
+  /**
+   * @param {number} [widthCss]
+   * @param {number} [heightCss]
+   * @returns {Array<{ label: string, preset: string }>}
+   */
+  getResolutionOptionsForViewport(widthCss, heightCss) {
+    const aspect = this.classifyViewportAspect(widthCss, heightCss);
+    return [...(RESOLUTION_PRESETS_BY_ASPECT[aspect] || RESOLUTION_PRESETS_BY_ASPECT['16:9'])];
+  }
+
+  /**
+   * @param {string} preset
+   * @returns {string}
+   */
+  getResolutionDisplayLabel(preset) {
+    const value = preset || 'native';
+    if (value === 'native') return 'Native (full quality)';
+    const match = String(value).match(/^(\d+)x(\d+)$/i);
+    if (match) return `${match[1]}×${match[2]}`;
+    return value;
+  }
+
+  /**
+   * Whether the saved preset appears in the recommended list for this viewport.
+   * @param {number} [widthCss]
+   * @param {number} [heightCss]
+   * @returns {boolean}
+   */
+  isCurrentResolutionInRecommendedList(widthCss, heightCss) {
+    const preset = this.getRenderResolutionPreset();
+    return this.getResolutionOptionsForViewport(widthCss, heightCss)
+      .some((row) => row.preset === preset);
+  }
+
+  /**
+   * Reset render resolution to native (recommended default).
+   */
+  resetResolutionToRecommended() {
+    this.setRenderResolutionPreset('native');
+    try { this.dialog?.refresh?.(); } catch (_) {}
+  }
+
+  /**
+   * @returns {string} UI tier id: off | low | medium | high
+   */
+  getParticleSpawnUiTierId() {
+    const tier = this.getParticleSpawnTier();
+    const exact = PARTICLE_SPAWN_UI_TIERS.find((row) => row.tierIndex === tier);
+    if (exact) return exact.id;
+    if (tier <= 0) return 'off';
+    if (tier <= 1) return 'low';
+    if (tier <= 3) return 'medium';
+    return 'high';
+  }
+
+  /**
+   * @param {string} uiTierId off | low | medium | high
+   */
+  setParticleSpawnUiTierId(uiTierId) {
+    const row = PARTICLE_SPAWN_UI_TIERS.find((r) => r.id === uiTierId);
+    this.setParticleSpawnTier(row ? row.tierIndex : 3);
+    try { this.dialog?.refresh?.(); } catch (_) {}
+  }
+
+  /**
+   * @returns {Array<{ id: string, label: string }>}
+   */
+  listParticleSpawnUiTierOptions() {
+    return PARTICLE_SPAWN_UI_TIERS.map((row) => ({ id: row.id, label: row.label }));
   }
 
   /**
@@ -635,7 +891,7 @@ export class GraphicsSettingsManager {
   }
 
   /**
-   * @returns {Array<{effectId:string, displayName:string}>}
+   * @returns {Array<{effectId:string, displayName:string, category:string}>}
    */
   listEffectsForUI() {
     const caps = this.capabilitiesRegistry?.list?.() ?? [];
@@ -648,17 +904,72 @@ export class GraphicsSettingsManager {
         seen.add(normalized);
         out.push({
           effectId: normalized,
-          displayName: c.displayName || normalized
+          displayName: c.displayName || normalized,
+          category: c.category || 'global',
         });
       }
       return out;
     }
 
-    // Fallback: if registry isn't available, list known registered instances.
     return Array.from(this._effects.keys()).map((id) => {
       const normalized = this._normalizeEffectId(id);
-      return { effectId: normalized, displayName: normalized };
+      return { effectId: normalized, displayName: normalized, category: 'global' };
     });
+  }
+
+  /**
+   * Effects grouped for the simplified UI.
+   * @returns {Array<{ groupId: string, groupLabel: string, effects: Array<{effectId:string, displayName:string, category:string}> }>}
+   */
+  listEffectsGroupedForUI() {
+    const all = this.listEffectsForUI();
+    const assigned = new Set();
+    const groups = [];
+
+    for (const groupDef of EFFECT_UI_GROUPS) {
+      /** @type {Array<{effectId:string, displayName:string, category:string}>} */
+      const effects = [];
+
+      if (groupDef.effectIds) {
+        for (const rawId of groupDef.effectIds) {
+          const normalized = this._normalizeEffectId(rawId);
+          const entry = all.find((e) => e.effectId === normalized);
+          if (!entry || assigned.has(normalized)) continue;
+          assigned.add(normalized);
+          effects.push(entry);
+        }
+      } else if (groupDef.categories) {
+        const exclude = new Set(groupDef.excludeEffectIds || []);
+        for (const entry of all) {
+          if (assigned.has(entry.effectId)) continue;
+          if (INTEGRATION_EFFECT_IDS.has(entry.effectId)) continue;
+          if (exclude.has(entry.effectId)) continue;
+          if (!groupDef.categories.includes(entry.category)) continue;
+          assigned.add(entry.effectId);
+          effects.push(entry);
+        }
+      }
+
+      if (effects.length === 0) continue;
+      effects.sort((a, b) => String(a.displayName).localeCompare(String(b.displayName)));
+      groups.push({
+        groupId: groupDef.id,
+        groupLabel: groupDef.label,
+        effects,
+      });
+    }
+
+    const leftovers = all.filter((e) => !assigned.has(e.effectId));
+    if (leftovers.length > 0) {
+      leftovers.sort((a, b) => String(a.displayName).localeCompare(String(b.displayName)));
+      groups.push({
+        groupId: 'other',
+        groupLabel: 'Other',
+        effects: leftovers,
+      });
+    }
+
+    return groups;
   }
 
   /**
@@ -881,11 +1192,13 @@ export class GraphicsSettingsManager {
       if (typeof parsed.renderResolutionPreset === 'string') this.state.renderResolutionPreset = parsed.renderResolutionPreset;
       if (typeof parsed.renderAdaptiveFpsEnabled === 'boolean') this.state.renderAdaptiveFpsEnabled = parsed.renderAdaptiveFpsEnabled;
       if (typeof parsed.renderStrictSyncEnabled === 'boolean') this.state.renderStrictSyncEnabled = parsed.renderStrictSyncEnabled;
-      if (parsed.renderIdleFps !== undefined) this.state.renderIdleFps = this._coerceFps(parsed.renderIdleFps, 15, 5, 60);
+      if (parsed.renderIdleFps !== undefined) this.state.renderIdleFps = this._coerceFps(parsed.renderIdleFps, 60, 5, 60);
       if (parsed.renderActiveFps !== undefined) this.state.renderActiveFps = this._coerceFps(parsed.renderActiveFps, 60, 5, 120);
-      if (parsed.renderContinuousFps !== undefined) this.state.renderContinuousFps = this._coerceFps(parsed.renderContinuousFps, 30, 5, 120);
+      if (parsed.renderContinuousFps !== undefined) {
+        this.state.renderContinuousFps = this._coerceFps(parsed.renderContinuousFps, 60, 5, 120);
+      }
       if (parsed.renderPresentationFps !== undefined) {
-        this.state.renderPresentationFps = this._coerceFps(parsed.renderPresentationFps, 30, 5, 60);
+        this.state.renderPresentationFps = this._coerceFps(parsed.renderPresentationFps, 60, 5, 60);
       } else {
         this.state.renderPresentationFps = this.state.renderContinuousFps;
       }
@@ -896,13 +1209,34 @@ export class GraphicsSettingsManager {
       if (parsed.particleSpawnTier !== undefined) {
         this.state.particleSpawnTier = this._coerceParticleSpawnTier(parsed.particleSpawnTier);
       }
-      if (parsed.effectOverrides && typeof parsed.effectOverrides === 'object') this.state.effectOverrides = parsed.effectOverrides;
+      if (typeof parsed.performanceProfile === 'string') {
+        this.state.performanceProfile = parsed.performanceProfile;
+      }
+      if (parsed.effectOverrides && typeof parsed.effectOverrides === 'object') {
+        this.state.effectOverrides = parsed.effectOverrides;
+      }
 
       this.state.particleSpawnTier = this._coerceParticleSpawnTier(this.state.particleSpawnTier);
+      this._migrateLoadedState();
 
       log.debug('Loaded graphics overrides');
     } catch (e) {
       log.warn('Failed to load graphics overrides', e);
+    }
+  }
+
+  /**
+   * Normalize legacy saves and infer performance profile when missing.
+   * @private
+   */
+  _migrateLoadedState() {
+    const inferred = this.inferPerformanceProfile();
+    const stored = this.state.performanceProfile;
+    if (!stored || stored === 'custom') {
+      this.state.performanceProfile = inferred;
+    } else if (stored !== inferred && inferred !== 'custom') {
+      // Stored profile disagrees with FPS values — trust loaded FPS, update profile id.
+      this.state.performanceProfile = inferred;
     }
   }
 

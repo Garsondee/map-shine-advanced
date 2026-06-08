@@ -1,9 +1,8 @@
 /**
- * @fileoverview Graphics Settings Dialog (Tweakpane)
+ * @fileoverview Performance & Graphics Dialog
  *
- * ESSENTIAL FEATURE:
- * This dialog is the player/GM-facing entry point for per-client graphics overrides.
- * It must remain lightweight, stable, and safe to open during live play.
+ * Plain-language per-client graphics and performance controls for players and GMs.
+ * Custom DOM overlay (no Tweakpane) — modeled on PerformanceRecorderDialog.
  *
  * @module ui/graphics-settings-dialog
  */
@@ -12,6 +11,19 @@ import { createLogger } from '../core/log.js';
 
 const log = createLogger('GraphicsSettingsDialog');
 
+/**
+ * @param {string} value
+ */
+function escapeHtml(value) {
+  const s = String(value ?? '');
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export class GraphicsSettingsDialog {
   /**
    * @param {import('./graphics-settings-manager.js').GraphicsSettingsManager} manager
@@ -19,497 +31,360 @@ export class GraphicsSettingsDialog {
   constructor(manager) {
     this.manager = manager;
 
-    /** @type {Tweakpane.Pane|null} */
-    this.pane = null;
-
     /** @type {HTMLElement|null} */
     this.container = null;
 
     /** @type {boolean} */
     this.visible = false;
 
-    /** @type {Map<string, {folder:any, state:{enabled:boolean}, statusDot:HTMLElement|null}>} */
-    this._effectUI = new Map();
+    /** @type {boolean} */
+    this._advancedExpanded = false;
+
+    /** @type {Set<string>} */
+    this._expandedGroups = new Set(['weather', 'lighting']);
 
     this._boundStopHandlers = null;
-
-    /** @type {HTMLElement|null} Active-count tag on the Effects folder title. */
-    this._effectsCountTag = null;
-
-    /** @type {HTMLElement|null} Line under Particle spawn slider (tier + %). */
-    this._particleSpawnCaptionEl = null;
   }
 
+  /**
+   * @param {HTMLElement} [parentElement]
+   */
   async initialize(parentElement = document.body) {
-    if (this.pane) return;
+    if (this.container) return;
 
-    // Wait for Tweakpane to be available.
-    const startTime = Date.now();
-    while (typeof Tweakpane === 'undefined' && (Date.now() - startTime) < 5000) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+    const container = document.createElement('div');
+    container.id = 'map-shine-graphics-settings';
+    container.className = 'map-shine-graphics-settings map-shine-overlay-ui';
+    container.style.display = 'none';
 
-    if (typeof Tweakpane === 'undefined') {
-      throw new Error('Tweakpane library not available');
-    }
+    container.innerHTML = `
+      <div class="msa-gfx__header" data-drag-handle>
+        <div class="msa-gfx__header-text">
+          <div class="msa-gfx__title">Performance &amp; Graphics</div>
+          <div class="msa-gfx__subtitle">These settings apply only to your browser and can help if the map feels slow or choppy.</div>
+        </div>
+        <button type="button" class="msa-gfx__close" data-action="close" aria-label="Close">×</button>
+      </div>
 
-    this.container = document.createElement('div');
-    this.container.id = 'map-shine-graphics-settings';
-    this.container.style.position = 'fixed';
-    this.container.style.zIndex = '10000';
-    this.container.style.left = '50%';
-    this.container.style.top = '50%';
-    this.container.style.transform = 'translate(-50%, -50%)';
-    this.container.style.display = 'none';
-    parentElement.appendChild(this.container);
+      <div class="msa-gfx__body">
+        <section class="msa-gfx__section">
+          <div class="msa-gfx__section-title">Performance</div>
+          <label class="msa-gfx__field">
+            <span class="msa-gfx__label">Smoothness</span>
+            <select class="msa-gfx__select" data-input="performanceProfile"></select>
+          </label>
+          <label class="msa-gfx__field">
+            <span class="msa-gfx__label">Render quality</span>
+            <select class="msa-gfx__select" data-input="renderResolution"></select>
+          </label>
+          <div class="msa-gfx__hint msa-gfx__hint--custom-res" data-bind="custom-resolution" hidden></div>
+          <label class="msa-gfx__field">
+            <span class="msa-gfx__label">Weather &amp; particles</span>
+            <select class="msa-gfx__select" data-input="particleSpawn"></select>
+          </label>
+        </section>
 
-    // Prevent pointer interaction with the scene behind the panel.
-    {
-      const stop = (e) => {
-        try {
-          e.stopPropagation();
-        } catch (_) {
-        }
-      };
+        <section class="msa-gfx__section">
+          <div class="msa-gfx__section-title">
+            Effects
+            <span class="msa-gfx__count-tag" data-bind="effects-count">0/0 on</span>
+          </div>
+          <div class="msa-gfx__toolbar">
+            <button type="button" class="msa-gfx__btn" data-action="enable-all">Enable all</button>
+            <button type="button" class="msa-gfx__btn" data-action="disable-all">Disable all</button>
+            <button type="button" class="msa-gfx__btn msa-gfx__btn--danger" data-action="reset-overrides">Reset to scene defaults</button>
+          </div>
+          <div class="msa-gfx__groups" data-bind="effect-groups"></div>
+        </section>
 
-      const stopAndPrevent = (e) => {
-        try {
-          e.preventDefault();
-        } catch (_) {
-        }
-        stop(e);
-      };
+        <section class="msa-gfx__section msa-gfx__section--advanced">
+          <button type="button" class="msa-gfx__advanced-toggle" data-action="toggle-advanced">
+            <span class="msa-gfx__chevron" data-bind="advanced-chevron">▶</span>
+            Advanced
+          </button>
+          <div class="msa-gfx__advanced-body" data-bind="advanced-body" hidden>
+            <label class="msa-gfx__check">
+              <input type="checkbox" data-input="tokenDepth">
+              <span>Tokens can go behind elevated tiles</span>
+            </label>
+            <p class="msa-gfx__hint">When enabled, tokens may be hidden by foreground map tiles that rise above them.</p>
+          </div>
+        </section>
 
-      const events = ['pointerdown', 'mousedown', 'click', 'dblclick', 'wheel'];
-      for (const type of events) {
-        if (type === 'wheel') this.container.addEventListener(type, stop, { passive: true });
-        else this.container.addEventListener(type, stop);
-      }
-      this.container.addEventListener('contextmenu', stopAndPrevent);
+        <p class="msa-gfx__footnote">Saved on this browser only — other players keep their own settings.</p>
+      </div>
+    `;
 
-      this._boundStopHandlers = { stop, stopAndPrevent };
-    }
+    parentElement.appendChild(container);
+    this.container = container;
 
-    this.pane = new Tweakpane.Pane({
-      title: 'Map Shine Graphics Settings',
-      container: this.container,
-      expanded: true
-    });
-
-    // Global section.
-    const globalFolder = this.pane.addFolder({
-      title: 'Global',
-      expanded: true
-    });
-
-    globalFolder.addBinding(this.manager.state, 'globalDisableAll', {
-      label: 'Disable All'
-    }).on('change', (ev) => {
-      this.manager.state.globalDisableAll = ev.value === true;
-      this.manager.applyOverrides();
-      this.manager.saveState();
-      this.refreshStatus();
-    });
-
-    globalFolder.addBinding(this.manager.state, 'renderResolutionPreset', {
-      label: 'Render Resolution',
-      options: {
-        'Native': 'native',
-        '3840x2160 (4K, 16:9)': '3840x2160',
-        '2560x1440 (1440p, 16:9)': '2560x1440',
-        '1920x1080 (1080p, 16:9)': '1920x1080',
-        '1600x900 (900p, 16:9)': '1600x900',
-        '1366x768 (16:9)': '1366x768',
-        '1280x720 (720p, 16:9)': '1280x720',
-        '1024x576 (16:9)': '1024x576',
-        '800x450 (16:9)': '800x450',
-        '2560x1600 (16:10)': '2560x1600',
-        '1920x1200 (16:10)': '1920x1200',
-        '1680x1050 (16:10)': '1680x1050',
-        '1440x900 (16:10)': '1440x900',
-        '1280x800 (16:10)': '1280x800',
-        '3440x1440 (UWQHD, 21:9)': '3440x1440',
-        '2560x1080 (UWHD, 21:9)': '2560x1080',
-        '1720x720 (21:9)': '1720x720',
-        '5120x1440 (DQHD, 32:9)': '5120x1440',
-        '3840x1080 (32:9)': '3840x1080',
-        '2560x720 (32:9)': '2560x720'
-      }
-    }).on('change', (ev) => {
-      this.manager.setRenderResolutionPreset(ev.value);
-    });
-
-    globalFolder.addBinding(this.manager.state, 'particleSpawnTier', {
-      label: 'Particle spawn',
-      min: 0,
-      max: 6,
-      step: 1
-    }).on('change', (ev) => {
-      this.manager.setParticleSpawnTier(ev.value);
-      this._syncParticleSpawnCaption();
-    });
-
-    const particleCaption = document.createElement('div');
-    particleCaption.className = 'map-shine-particle-spawn-caption';
-    particleCaption.style.fontSize = '10px';
-    particleCaption.style.opacity = '0.75';
-    particleCaption.style.padding = '0 6px 2px 8px';
-    particleCaption.style.fontStyle = 'italic';
-    particleCaption.textContent = this.manager.formatParticleSpawnTierCaption();
-    this._particleSpawnCaptionEl = particleCaption;
-    {
-      const capParent = globalFolder?.element?.querySelector?.('.tp-fldv_c') || globalFolder?.element;
-      if (capParent) capParent.appendChild(particleCaption);
-    }
-
-    globalFolder.addBinding(this.manager.state, 'renderPresentationFps', {
-      label: 'Presentation FPS',
-      min: 5,
-      max: 60,
-      step: 1
-    }).on('change', (ev) => {
-      this.manager.setRenderPresentationFps(ev.value);
-    });
-
-    globalFolder.addBinding(this.manager.state, 'renderStrictSyncEnabled', {
-      label: 'Strict Render Sync (debug)'
-    }).on('change', (ev) => {
-      this.manager.setRenderStrictSyncEnabled(ev.value === true);
-    });
-
-    globalFolder.addBinding(this.manager.state, 'renderPresentationPacingEnabled', {
-      label: 'Presentation Pacing'
-    }).on('change', (ev) => {
-      this.manager.setRenderPresentationPacingEnabled(ev.value === true);
-    });
-
-    globalFolder.addBinding(this.manager.state, 'renderAdaptiveFpsEnabled', {
-      label: 'Legacy Adaptive Cap'
-    }).on('change', (ev) => {
-      this.manager.setRenderAdaptiveFpsEnabled(ev.value === true);
-    });
-
-    globalFolder.addBinding(this.manager.state, 'renderIdleFps', {
-      label: 'Idle FPS',
-      min: 5,
-      max: 60,
-      step: 1
-    }).on('change', (ev) => {
-      this.manager.setRenderIdleFps(ev.value);
-    });
-
-    globalFolder.addBinding(this.manager.state, 'renderActiveFps', {
-      label: 'Active FPS',
-      min: 5,
-      max: 120,
-      step: 1
-    }).on('change', (ev) => {
-      this.manager.setRenderActiveFps(ev.value);
-    });
-
-    globalFolder.addBinding(this.manager.state, 'renderContinuousFps', {
-      label: 'Continuous FX FPS',
-      min: 5,
-      max: 120,
-      step: 1
-    }).on('change', (ev) => {
-      this.manager.setRenderContinuousFps(ev.value);
-    });
-
-    globalFolder.addBinding(this.manager.state, 'tokenDepthInteraction', {
-      label: 'Token Depth Interaction'
-    }).on('change', (ev) => {
-      this.manager.setTokenDepthInteraction(ev.value === true);
-    });
-
-    // Compact 2-column button grid (matches Main Config / Control Panel pattern).
-    {
-      const contentElement = globalFolder?.element?.querySelector?.('.tp-fldv_c') || globalFolder?.element;
-      if (contentElement) {
-        const grid = document.createElement('div');
-        grid.style.display = 'grid';
-        grid.style.gridTemplateColumns = '1fr 1fr';
-        grid.style.gap = '4px';
-        grid.style.padding = '4px 6px 6px 6px';
-
-        const addGridButton = (label, onClick, danger = false) => {
-          const btn = document.createElement('button');
-          btn.textContent = label;
-          btn.style.padding = '4px 8px';
-          btn.style.borderRadius = '6px';
-          btn.style.border = danger ? '1px solid rgba(255,80,80,0.35)' : '1px solid rgba(255,255,255,0.14)';
-          btn.style.background = danger ? 'rgba(255,60,60,0.12)' : 'rgba(255,255,255,0.08)';
-          btn.style.color = danger ? '#ff9090' : 'inherit';
-          btn.style.cursor = 'pointer';
-          btn.style.fontSize = '11px';
-          btn.style.fontWeight = '500';
-          btn.addEventListener('click', onClick);
-          grid.appendChild(btn);
-        };
-
-        addGridButton('Enable All', () => {
-          this.manager.setDisableAll(false);
-          this.manager.enableAllEffects();
-          this.refresh();
-        });
-
-        addGridButton('Disable All', () => {
-          this.manager.setDisableAll(true);
-          this.manager.disableAllEffects();
-          this.refresh();
-        });
-
-        addGridButton('Reset Overrides', () => {
-          this.manager.resetAllOverrides();
-          this.refresh();
-        }, true);
-
-        addGridButton('Smooth 30', () => {
-          this.manager.applySmooth30Preset();
-          this.refresh();
-        });
-
-        addGridButton('Smooth 60', () => {
-          this.manager.applySmooth60Preset();
-          this.refresh();
-        });
-
-        addGridButton('Strict', () => {
-          this.manager.applyStrictDebugPreset();
-          this.refresh();
-        });
-
-        contentElement.appendChild(grid);
-
-        // Persistence scope note (client-local settings).
-        const scopeNote = document.createElement('div');
-        scopeNote.textContent = 'These settings are saved per-client (browser-local).';
-        scopeNote.style.fontSize = '10px';
-        scopeNote.style.opacity = '0.55';
-        scopeNote.style.padding = '4px 6px 2px 6px';
-        scopeNote.style.fontStyle = 'italic';
-        contentElement.appendChild(scopeNote);
-
-        const strictSyncNote = document.createElement('div');
-        strictSyncNote.textContent = 'Strict Render Sync: 1:1 PIXI lockstep for mask debugging. May reduce smoothness on high-refresh displays.';
-        strictSyncNote.style.fontSize = '10px';
-        strictSyncNote.style.opacity = '0.55';
-        strictSyncNote.style.padding = '2px 6px 4px 6px';
-        strictSyncNote.style.fontStyle = 'italic';
-        contentElement.appendChild(strictSyncNote);
-
-        const framePacingNote = document.createElement('div');
-        framePacingNote.textContent = 'Presentation FPS: how often the Three canvas updates. Panning uses Active FPS. Use Smooth 30 for steady pacing.';
-        framePacingNote.style.fontSize = '10px';
-        framePacingNote.style.opacity = '0.55';
-        framePacingNote.style.padding = '2px 6px 4px 6px';
-        framePacingNote.style.fontStyle = 'italic';
-        contentElement.appendChild(framePacingNote);
-      }
-    }
-
-    // Effects section.
-    const effectsFolder = this.pane.addFolder({
-      title: 'Effects',
-      expanded: true
-    });
-
-    // Active-count tag on the Effects folder title.
-    this._ensureEffectsCountTag(effectsFolder);
-
-    this._buildEffectsUI(effectsFolder);
-
-    // Start hidden.
+    this._installPointerIsolation();
+    this._bindEvents();
+    this._installDrag();
     this.hide();
 
-    log.info('Graphics Settings dialog initialized');
+    log.info('Performance & Graphics dialog initialized');
   }
 
-  _syncParticleSpawnCaption() {
-    if (!this._particleSpawnCaptionEl) return;
-    try {
-      this._particleSpawnCaptionEl.textContent = this.manager.formatParticleSpawnTierCaption();
-    } catch (_) {
+  /** @private */
+  _installPointerIsolation() {
+    const stop = (e) => {
+      try { e.stopPropagation(); } catch (_) {}
+    };
+    const stopAndPrevent = (e) => {
+      try { e.preventDefault(); } catch (_) {}
+      stop(e);
+    };
+    const events = ['pointerdown', 'mousedown', 'click', 'dblclick', 'wheel'];
+    for (const type of events) {
+      if (type === 'wheel') this.container.addEventListener(type, stop, { passive: true });
+      else this.container.addEventListener(type, stop);
     }
+    this.container.addEventListener('contextmenu', stopAndPrevent);
+    this._boundStopHandlers = { stop, stopAndPrevent };
   }
 
-  /**
-   * @private
-   * @param {any} parentFolder
-   */
-  _buildEffectsUI(parentFolder) {
-    // Clear any existing UI entries.
-    this._effectUI.clear();
+  /** @private */
+  _bindEvents() {
+    const root = this.container;
+    if (!root) return;
 
-    const effects = this.manager.listEffectsForUI();
-
-    // Sort for readability.
-    effects.sort((a, b) => {
-      const an = String(a.displayName || a.effectId);
-      const bn = String(b.displayName || b.effectId);
-      return an.localeCompare(bn);
+    root.addEventListener('click', (ev) => {
+      const btn = ev.target?.closest?.('[data-action]');
+      if (!btn || !root.contains(btn)) return;
+      const action = btn.dataset.action;
+      if (action === 'close') this.hide();
+      else if (action === 'enable-all') {
+        this.manager.setDisableAll(false);
+        this.manager.enableAllEffects();
+        this.refresh();
+      } else if (action === 'disable-all') {
+        this.manager.setDisableAll(true);
+        this.manager.disableAllEffects();
+        this.refresh();
+      } else if (action === 'reset-overrides') {
+        this.manager.resetAllOverrides();
+        this.refresh();
+      } else if (action === 'toggle-advanced') {
+        this._advancedExpanded = !this._advancedExpanded;
+        this._syncAdvancedSection();
+      } else if (action === 'toggle-group') {
+        const groupId = btn.dataset.groupId;
+        if (!groupId) return;
+        if (this._expandedGroups.has(groupId)) this._expandedGroups.delete(groupId);
+        else this._expandedGroups.add(groupId);
+        this._renderEffectGroups();
+      } else if (action === 'reset-resolution') {
+        this.manager.resetResolutionToRecommended();
+        this.refresh();
+      }
     });
 
-    for (const entry of effects) {
-      const { effectId, displayName } = entry;
-      const initialEnabled = this.manager.getEffectiveEnabled(effectId);
+    root.addEventListener('change', (ev) => {
+      const target = ev.target;
+      if (!(target instanceof HTMLSelectElement) && !(target instanceof HTMLInputElement)) return;
 
-      const folder = parentFolder.addFolder({
-        title: displayName || effectId,
-        expanded: false
-      });
-
-      const state = { enabled: initialEnabled };
-
-      folder.addBinding(state, 'enabled', {
-        label: 'Enabled'
-      }).on('change', (ev) => {
-        this.manager.setEffectEnabled(effectId, ev.value === true);
+      if (target.matches('[data-input="performanceProfile"]')) {
+        this.manager.applyPerformanceProfile(target.value);
+        this.refresh();
+        return;
+      }
+      if (target.matches('[data-input="renderResolution"]')) {
+        this.manager.setRenderResolutionPreset(target.value);
+        this.refresh();
+        return;
+      }
+      if (target.matches('[data-input="particleSpawn"]')) {
+        this.manager.setParticleSpawnUiTierId(target.value);
+        this.refresh();
+        return;
+      }
+      if (target.matches('[data-input="tokenDepth"]')) {
+        this.manager.setTokenDepthInteraction(target.checked);
+        return;
+      }
+      if (target.matches('[data-input="effect-enabled"]')) {
+        const effectId = target.dataset.effectId;
+        if (!effectId) return;
+        this.manager.setEffectEnabled(effectId, target.checked);
         this.manager.saveState();
         this.refreshStatus();
-      });
-
-      folder.addButton({
-        title: 'Reset Override'
-      }).on('click', () => {
-        this.manager.clearEffectOverride(effectId);
-        this.manager.saveState();
-        this.refresh();
-      });
-
-      // Visual status dot in folder title.
-      const statusDot = this._ensureStatusDot(folder);
-
-      this._effectUI.set(effectId, { folder, state, statusDot });
-    }
-
-    this.refreshStatus();
+      }
+    });
   }
 
-  /**
-   * Add a small dot indicator to a Tweakpane folder title.
-   * @private
-   * @param {any} folder
-   * @returns {HTMLElement|null}
-   */
-  _ensureStatusDot(folder) {
-    try {
-      const titleElement = folder?.element?.querySelector?.('.tp-fldv_t');
-      if (!titleElement) return null;
+  /** @private */
+  _installDrag() {
+    const root = this.container;
+    const handle = root?.querySelector('[data-drag-handle]');
+    if (!root || !handle) return;
 
-      let dot = titleElement.querySelector('.map-shine-status-dot');
-      if (dot) return dot;
+    let dragging = false;
+    let startX = 0;
+    let startY = 0;
+    let baseLeft = 0;
+    let baseTop = 0;
 
-      dot = document.createElement('span');
-      dot.className = 'map-shine-status-dot';
-      dot.style.display = 'inline-block';
-      dot.style.width = '8px';
-      dot.style.height = '8px';
-      dot.style.borderRadius = '50%';
-      dot.style.marginRight = '8px';
-      dot.style.verticalAlign = 'middle';
-      dot.style.background = '#666';
+    const onMove = (ev) => {
+      if (!dragging) return;
+      root.style.left = `${baseLeft + (ev.clientX - startX)}px`;
+      root.style.top = `${baseTop + (ev.clientY - startY)}px`;
+      root.style.transform = 'none';
+    };
+    const onUp = () => {
+      dragging = false;
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+    };
 
-      titleElement.prepend(dot);
-      return dot;
-    } catch (_) {
-      return null;
+    handle.addEventListener('pointerdown', (ev) => {
+      if (ev.target?.closest?.('button')) return;
+      dragging = true;
+      const rect = root.getBoundingClientRect();
+      startX = ev.clientX;
+      startY = ev.clientY;
+      baseLeft = rect.left;
+      baseTop = rect.top;
+      document.addEventListener('pointermove', onMove);
+      document.addEventListener('pointerup', onUp);
+      try { ev.preventDefault(); } catch (_) {}
+    });
+  }
+
+  /** @private */
+  _syncAdvancedSection() {
+    const body = this.container?.querySelector('[data-bind="advanced-body"]');
+    const chevron = this.container?.querySelector('[data-bind="advanced-chevron"]');
+    if (body) body.hidden = !this._advancedExpanded;
+    if (chevron) chevron.textContent = this._advancedExpanded ? '▼' : '▶';
+  }
+
+  /** @private */
+  _populatePerformanceControls() {
+    const root = this.container;
+    if (!root) return;
+
+    const profileSelect = root.querySelector('[data-input="performanceProfile"]');
+    if (profileSelect instanceof HTMLSelectElement) {
+      const current = this.manager.getPerformanceProfile();
+      profileSelect.innerHTML = this.manager.listPerformanceProfileOptions()
+        .map((row) => `<option value="${escapeHtml(row.id)}"${row.id === current ? ' selected' : ''}>${escapeHtml(row.label)}</option>`)
+        .join('');
+      if (current === 'custom') {
+        profileSelect.insertAdjacentHTML('beforeend', '<option value="custom" selected>Custom</option>');
+      }
+    }
+
+    const resSelect = root.querySelector('[data-input="renderResolution"]');
+    const customHint = root.querySelector('[data-bind="custom-resolution"]');
+    const currentPreset = this.manager.getRenderResolutionPreset();
+    const options = this.manager.getResolutionOptionsForViewport();
+    const inList = options.some((row) => row.preset === currentPreset);
+
+    if (resSelect instanceof HTMLSelectElement) {
+      resSelect.innerHTML = options
+        .map((row) => `<option value="${escapeHtml(row.preset)}"${row.preset === currentPreset ? ' selected' : ''}>${escapeHtml(row.label)}</option>`)
+        .join('');
+      if (!inList && currentPreset) {
+        resSelect.insertAdjacentHTML(
+          'afterbegin',
+          `<option value="${escapeHtml(currentPreset)}" selected>Custom (${escapeHtml(this.manager.getResolutionDisplayLabel(currentPreset))})</option>`,
+        );
+      }
+    }
+
+    if (customHint instanceof HTMLElement) {
+      if (!inList && currentPreset && currentPreset !== 'native') {
+        customHint.hidden = false;
+        customHint.innerHTML = `Using a custom render size (${escapeHtml(this.manager.getResolutionDisplayLabel(currentPreset))}). <button type="button" class="msa-gfx__link" data-action="reset-resolution">Use recommended</button>`;
+      } else {
+        customHint.hidden = true;
+        customHint.textContent = '';
+      }
+    }
+
+    const particleSelect = root.querySelector('[data-input="particleSpawn"]');
+    if (particleSelect instanceof HTMLSelectElement) {
+      const currentTier = this.manager.getParticleSpawnUiTierId();
+      particleSelect.innerHTML = this.manager.listParticleSpawnUiTierOptions()
+        .map((row) => `<option value="${escapeHtml(row.id)}"${row.id === currentTier ? ' selected' : ''}>${escapeHtml(row.label)}</option>`)
+        .join('');
+    }
+
+    const tokenDepth = root.querySelector('[data-input="tokenDepth"]');
+    if (tokenDepth instanceof HTMLInputElement) {
+      tokenDepth.checked = this.manager.getTokenDepthInteraction();
     }
   }
 
-  /**
-   * Add a small count-tag chip to the Effects folder title (e.g. "8/12 active").
-   * @private
-   * @param {any} folder
-   */
-  _ensureEffectsCountTag(folder) {
-    try {
-      const titleElement = folder?.element?.querySelector?.('.tp-fldv_t');
-      if (!titleElement) return;
+  /** @private */
+  _renderEffectGroups() {
+    const host = this.container?.querySelector('[data-bind="effect-groups"]');
+    if (!host) return;
 
-      const tag = document.createElement('span');
-      tag.className = 'map-shine-effects-count-tag';
-      tag.style.marginLeft = '8px';
-      tag.style.fontSize = '10px';
-      tag.style.fontWeight = '600';
-      tag.style.padding = '1px 6px';
-      tag.style.borderRadius = '999px';
-      tag.style.border = '1px solid rgba(255,255,255,0.14)';
-      tag.style.background = 'rgba(255,255,255,0.08)';
-      tag.style.opacity = '0.9';
-      tag.style.verticalAlign = 'middle';
-      tag.style.pointerEvents = 'none';
-      titleElement.appendChild(tag);
-      this._effectsCountTag = tag;
-    } catch (_) {
+    const groups = this.manager.listEffectsGroupedForUI();
+    if (groups.length === 0) {
+      host.innerHTML = '<p class="msa-gfx__empty">No effects registered for this scene yet.</p>';
+      return;
     }
+
+    host.innerHTML = groups.map((group) => {
+      const expanded = this._expandedGroups.has(group.groupId);
+      let active = 0;
+      const rows = group.effects.map((entry) => {
+        const avail = this.manager.getAvailability(entry.effectId);
+        const enabled = this.manager.getEffectiveEnabled(entry.effectId);
+        if (enabled) active++;
+        const dotClass = !avail.available ? 'msa-gfx__dot--unavail' : (enabled ? 'msa-gfx__dot--on' : 'msa-gfx__dot--off');
+        const title = !avail.available ? (avail.reason || 'Unavailable') : (enabled ? 'Active' : 'Disabled');
+        const disabled = !avail.available ? ' disabled' : '';
+        const checked = enabled ? ' checked' : '';
+        return `
+          <label class="msa-gfx__effect-row${!avail.available ? ' msa-gfx__effect-row--unavail' : ''}" title="${escapeHtml(title)}">
+            <span class="msa-gfx__dot ${dotClass}" aria-hidden="true"></span>
+            <input type="checkbox" class="msa-gfx__effect-check" data-input="effect-enabled" data-effect-id="${escapeHtml(entry.effectId)}"${checked}${disabled}>
+            <span class="msa-gfx__effect-name">${escapeHtml(entry.displayName || entry.effectId)}</span>
+          </label>`;
+      }).join('');
+
+      return `
+        <div class="msa-gfx__group">
+          <button type="button" class="msa-gfx__group-header" data-action="toggle-group" data-group-id="${escapeHtml(group.groupId)}">
+            <span class="msa-gfx__chevron">${expanded ? '▼' : '▶'}</span>
+            <span class="msa-gfx__group-label">${escapeHtml(group.groupLabel)}</span>
+            <span class="msa-gfx__group-count">${active}/${group.effects.length} on</span>
+          </button>
+          <div class="msa-gfx__group-body"${expanded ? '' : ' hidden'}>${rows}</div>
+        </div>`;
+    }).join('');
   }
 
-  /**
-   * Update the Effects folder count tag with current active/total.
-   * @private
-   */
+  /** @private */
   _updateEffectsCountTag() {
-    if (!this._effectsCountTag) return;
+    const tag = this.container?.querySelector('[data-bind="effects-count"]');
+    if (!tag) return;
+    const all = this.manager.listEffectsForUI();
     let active = 0;
-    let total = 0;
-    for (const [effectId] of this._effectUI.entries()) {
-      total++;
-      if (this.manager.getEffectiveEnabled(effectId)) active++;
+    for (const entry of all) {
+      if (this.manager.getEffectiveEnabled(entry.effectId)) active++;
     }
-    const text = `${active}/${total} active`;
-    this._effectsCountTag.textContent = text;
-    this._effectsCountTag.style.display = text ? 'inline-block' : 'none';
+    tag.textContent = `${active}/${all.length} on`;
   }
 
   refresh() {
-    // Sync UI state from manager.
-    for (const [effectId, ui] of this._effectUI.entries()) {
-      ui.state.enabled = this.manager.getEffectiveEnabled(effectId);
-      try {
-        ui.folder.refresh?.();
-      } catch (_) {
-      }
-    }
-
-    try {
-      this.pane?.refresh?.();
-    } catch (_) {
-    }
-
-    this._syncParticleSpawnCaption();
+    this._populatePerformanceControls();
+    this._renderEffectGroups();
+    this._syncAdvancedSection();
     this.refreshStatus();
   }
 
   refreshStatus() {
-    for (const [effectId, ui] of this._effectUI.entries()) {
-      const dot = ui.statusDot;
-      if (!dot) continue;
-
-      const avail = this.manager.getAvailability(effectId);
-      const enabled = this.manager.getEffectiveEnabled(effectId);
-
-      if (!avail.available) {
-        dot.style.backgroundColor = '#666666';
-        dot.style.boxShadow = 'none';
-        dot.title = `Unavailable: ${avail.reason || 'Unavailable'}`;
-      } else if (!enabled) {
-        dot.style.backgroundColor = '#ff4444';
-        dot.style.boxShadow = '0 0 4px #ff4444';
-        dot.title = 'Disabled';
-      } else {
-        dot.style.backgroundColor = '#44ff44';
-        dot.style.boxShadow = '0 0 4px #44ff44';
-        dot.title = 'Active';
-      }
-    }
-
     this._updateEffectsCountTag();
   }
 
   show() {
     if (!this.container) return;
-    this.container.style.display = 'block';
+    this.container.style.display = 'flex';
     this.visible = true;
     this.refresh();
   }
@@ -526,11 +401,6 @@ export class GraphicsSettingsDialog {
   }
 
   dispose() {
-    try {
-      this.pane?.dispose?.();
-    } catch (_) {
-    }
-
     if (this.container && this._boundStopHandlers) {
       try {
         const events = ['pointerdown', 'mousedown', 'click', 'dblclick', 'wheel'];
@@ -538,17 +408,13 @@ export class GraphicsSettingsDialog {
           this.container.removeEventListener(type, this._boundStopHandlers.stop);
         }
         this.container.removeEventListener('contextmenu', this._boundStopHandlers.stopAndPrevent);
-      } catch (_) {
-      }
+      } catch (_) {}
     }
 
     try {
       this.container?.parentNode?.removeChild?.(this.container);
-    } catch (_) {
-    }
+    } catch (_) {}
 
-    this._effectUI.clear();
-    this.pane = null;
     this.container = null;
     this.visible = false;
   }

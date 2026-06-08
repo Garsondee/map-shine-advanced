@@ -14,6 +14,7 @@
 import { createLogger } from '../../core/log.js';
 import { loadCloudSpriteTextures } from './cloud-sprites/cloud-asset-loader.js';
 import { weatherController } from '../../core/WeatherController.js';
+import { advanceCloudWindAdvection } from './cloud-wind-advection.js';
 import { resolveEffectShadowSun2D } from '../shadow-system/ShadowSunDirection.js';
 import {
   CloudSprite,
@@ -52,22 +53,22 @@ export class CloudEffectV2 {
       enabled: true,
       internalResolutionScale: 0.5,
       shadowResolutionScale: 0.35,
-      cloudCover: 0.5,
+      cloudCover: 0.84,
 
       // Sprite pool
-      spritePoolSize: 40,
-      spriteScaleMin: 1000,
-      spriteScaleMax: 3000,
-      spriteOpacityMin: 0.6,
-      spriteOpacityMax: 1.0,
-      sparseWeight: -1,
+      spritePoolSize: 60,
+      spriteScaleMin: 1950,
+      spriteScaleMax: 4350,
+      spriteOpacityMin: 0.2,
+      spriteOpacityMax: 0.6,
+      sparseWeight: 1,
 
       // Shadow
-      shadowOpacity: 0.7,
-      shadowSoftness: 0.9,
+      shadowOpacity: 0.6,
+      shadowSoftness: 1,
       shadowOffsetScale: 0.3,
       minShadowBrightness: 0.0,
-      shadowSceneFadeSoftness: 0.025,
+      shadowSceneFadeSoftness: 0,
 
       // Cloud tops (screen capture + 3D overlay)
       cloudTopOpacity: 1.0,
@@ -75,37 +76,37 @@ export class CloudEffectV2 {
       cloudTopAlphaEnd: 0.6,
       cloudTopFadeStart: 0.24,
       cloudTopFadeEnd: 0.39,
-      cloudBrightness: 1.01,
-      skyTintStrength: 0.85,
-      sunLightingStrength: 0.65,
-      nightDimStrength: 0.75,
-      overlayDomainWarpStrength: 0.035,
-      spriteBoilStrength: 0.025,
-      domainWarpSpeed: 1.0,
-      driftOrbitStrength: 0.15,
+      cloudBrightness: 1.5,
+      skyTintStrength: 1.1,
+      sunLightingStrength: 1,
+      nightDimStrength: 0.8,
+      overlayDomainWarpStrength: 0.15,
+      spriteBoilStrength: 0.12,
+      domainWarpSpeed: 0.06,
+      driftOrbitStrength: 0.05,
       lightningCloudEnabled: true,
       lightningCloudBrightnessBoost: 3.0,
       lightningCloudContrastBoost: 2.5,
       lightningCloudTintStrength: 0.8,
 
       // Elevated blit planes (3 fixed layers)
-      cloudLayerCoverageScale: 3.0,
-      cloudLayerDepthScaleStep: 0.18,
-      cloudLayerHeightFromGround: 200,
-      cloudLayer1HeightFromGround: 0,
-      cloudLayer2HeightFromGround: 150,
-      cloudLayer3HeightFromGround: 300,
-      cloudLayerZSpacing: 220,
+      cloudLayerCoverageScale: 1.5,
+      cloudLayerDepthScaleStep: 0.03,
+      cloudLayerHeightFromGround: 300,
+      cloudLayer1HeightFromGround: 330,
+      cloudLayer2HeightFromGround: 350,
+      cloudLayer3HeightFromGround: 360,
+      cloudLayerZSpacing: 20,
       cloudLayerBaseOffsetFromEmitter: -2200,
-      cloudLayerEdgeSoftness: 0.12,
-      cloudLayerOpacityBase: 0.75,
-      cloudLayerOpacityFalloff: 0.35,
-      cloudLayerOuterReveal: 0.3,
-      cloudLayerMidReveal: 0.9,
-      cloudLayerNoiseScale: 0.0008,
-      cloudLayerNoiseSoftness: 0.12,
-      cloudLayerDriftStrength: 0.02,
-      cloudLayerDriftDepthBoost: 0.015,
+      cloudLayerEdgeSoftness: 0.5,
+      cloudLayerOpacityBase: 0.96,
+      cloudLayerOpacityFalloff: 0.79,
+      cloudLayerOuterReveal: 0.9,
+      cloudLayerMidReveal: 0.82,
+      cloudLayerNoiseScale: 0.00125,
+      cloudLayerNoiseSoftness: 0.205,
+      cloudLayerDriftStrength: 0.188,
+      cloudLayerDriftDepthBoost: 0.068,
       layerParallaxBase: 1.0,
       layer1ParallaxMult: 1.0,
       layer2ParallaxMult: 0.64,
@@ -113,9 +114,10 @@ export class CloudEffectV2 {
 
       // Wind
       windInfluence: 1.33,
-      driftSpeed: 0.01,
+      driftSpeed: 0.061,
       minDriftSpeed: 0.002,
-      driftResponsiveness: 0.4,
+      driftResponsiveness: 0.75,
+      driftDecelFactor: 0.14,
       driftMaxSpeed: 0.5,
     };
 
@@ -501,7 +503,7 @@ export class CloudEffectV2 {
   }
 
   /**
-   * Resolve scene rect in Three world XY (matches FloorRenderBus / SceneRectScissor).
+   * Resolve scene rect in Three world XY (matches FloorRenderBus).
    * Prefers `canvas.dimensions.sceneRect` for x/y/w/h; uses composer height for Y flip.
    * @returns {boolean} true when bounds changed
    * @private
@@ -607,7 +609,7 @@ export class CloudEffectV2 {
       return this._tempDriftUV;
     }
     this._tempDriftUV.du = wind.x / len;
-    this._tempDriftUV.dv = -(wind.y / len);
+    this._tempDriftUV.dv = wind.y / len;
     this._tempDriftUV.len = len;
     return this._tempDriftUV;
   }
@@ -887,18 +889,17 @@ export class CloudEffectV2 {
 
   /** @private */
   _advanceWindSim(delta, windDirX, windDirY, windSpeed) {
-    const p = this.params;
-    const targetSpd = Math.max(windSpeed * p.windInfluence * p.driftSpeed, p.minDriftSpeed || 0);
-    const resp = Math.max(0, p.driftResponsiveness ?? 2.5);
-    const maxSpd = Math.max(0, p.driftMaxSpeed ?? 0.05);
-    const alpha = resp > 0 ? (1 - Math.exp(-resp * delta)) : 1;
-
-    this._tempVec2A.set(windDirX, windDirY);
-    if (this._tempVec2A.lengthSq() > 1e-6) this._tempVec2A.normalize();
-    this._tempVec2A.multiplyScalar(targetSpd);
-    this._windVelocity.lerp(this._tempVec2A, alpha);
-    const vl = this._windVelocity.length();
-    if (vl > maxSpd && vl > 1e-6) this._windVelocity.multiplyScalar(maxSpd / vl);
+    const geom = this._sceneGeometry;
+    advanceCloudWindAdvection(
+      this._windVelocity,
+      this._tempVec2A,
+      delta,
+      windDirX,
+      windDirY,
+      windSpeed,
+      this.params,
+      { centerX: geom?.centerX, centerY: geom?.centerY },
+    );
     this._windOffset.x -= this._windVelocity.x * delta;
     this._windOffset.y -= this._windVelocity.y * delta;
     if (!Number.isFinite(this._windOffset.x)) this._windOffset.x = 0;
@@ -1776,7 +1777,7 @@ export class CloudEffectV2 {
     }
   }
 
-  /** @private */
+  /** @private Sprite advection uses smoothed {@link advanceCloudWindAdvection} velocity only. */
   _simulateSprites(delta) {
     const wind = this._windVelocity;
     const geom = this._sceneGeometry;

@@ -139,14 +139,14 @@ export class OverheadStampEffectV2 {
     this.shadowMesh = null;
 
     this.params = {
-      enabled: true,
-      opacity: 0.5,
-      length: 0.1,
-      softness: 5,
-      outdoorShadowLengthScale: 1.0,
+      enabled: false,
+      opacity: 1,
+      length: 0.12,
+      softness: 1,
+      outdoorShadowLengthScale: 2,
       indoorReceiverShadowLengthScale: 0.25,
       verticalOnly: true,  // v1: primarily vertical motion in screen space
-      affectsLights: 0.75,
+      affectsLights: 0.7,
       sunLatitude: 0.1,    // 0=flat east/west, 1=maximum north/south arc
       indoorShadowEnabled: true, // Back-compat toggle; controls projected _Outdoors dark-region building shadow contribution on outdoor receivers
       indoorShadowOpacity: 1,   // Back-compat alias for outdoorBuildingShadowOpacity
@@ -158,15 +158,15 @@ export class OverheadStampEffectV2 {
       indoorFluidShadowIntensityBoost: 0.81,
       indoorFluidColorSaturation: 1.2,
       tileProjectionEnabled: true,
-      tileProjectionOpacity: 0.5,
+      tileProjectionOpacity: 0.45,
       tileProjectionLengthScale: 1.0,
       tileProjectionSoftness: 3.0,
       tileProjectionThreshold: 0.05,
       tileProjectionPower: 1.0,
-      tileProjectionOutdoorOpacityScale: 0.75,
+      tileProjectionOutdoorOpacityScale: 0.1,
       tileProjectionIndoorOpacityScale: 1.0,
       tileProjectionSortBias: 0.002,
-      fluidColorEnabled: true,
+      fluidColorEnabled: false,
       fluidEffectTransparency: 0.35,
       fluidShadowIntensityBoost: 1.0,
       fluidShadowSoftness: 3.0,
@@ -1144,7 +1144,7 @@ export class OverheadStampEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.5
+          default: 1
         },
         length: {
           type: 'slider',
@@ -1152,7 +1152,7 @@ export class OverheadStampEffectV2 {
           min: 0.0,
           max: 0.3,
           step: 0.005,
-          default: 0.1
+          default: 0.12
         },
         softness: {
           type: 'slider',
@@ -1160,7 +1160,7 @@ export class OverheadStampEffectV2 {
           min: 0.5,
           max: 5.0,
           step: 0.1,
-          default: 5
+          default: 1
         },
         outdoorShadowLengthScale: {
           type: 'slider',
@@ -1168,7 +1168,7 @@ export class OverheadStampEffectV2 {
           min: 0.0,
           max: 30.0,
           step: 1.00,
-          default: 1.0,
+          default: 2,
           tooltip: 'Scales projected overhead shadow distance on outdoor receivers (0 disables outdoor projection)'
         },
         indoorReceiverShadowLengthScale: {
@@ -1186,13 +1186,13 @@ export class OverheadStampEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.05,
-          default: 0.75,
+          default: 0.7,
           tooltip: 'Scales how strongly overhead roof shadows lift dynamic-light shadow regions (0 = no lift, 1 = full lift)'
         },
         fluidColorEnabled: {
           type: 'checkbox',
           label: 'Use Fluid Effect Colour',
-          default: true,
+          default: false,
           advanced: true,
           tooltip: 'Tints overhead shadows with FluidEffect colour when fluid overlays are attached to overhead tiles'
         },
@@ -1258,7 +1258,7 @@ export class OverheadStampEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.5,
+          default: 0.45,
           tooltip: 'Overall strength of tile-projected shadows'
         },
         tileProjectionLengthScale: {
@@ -1303,7 +1303,7 @@ export class OverheadStampEffectV2 {
           min: 0.0,
           max: 2.0,
           step: 0.01,
-          default: 0.75,
+          default: 0.1,
           tooltip: 'Additional multiplier applied to tile-projected shadow strength on outdoor receivers'
         },
         tileProjectionIndoorOpacityScale: {
@@ -2329,9 +2329,9 @@ export class OverheadStampEffectV2 {
                 disabledTreeBlockerUniformOverrides.push({ uniform: uniforms.uAmbientMotion, value: uniforms.uAmbientMotion.value });
                 uniforms.uAmbientMotion.value = 0.0;
               }
-              if (uniforms.uBranchBend && typeof uniforms.uBranchBend.value === 'number') {
-                disabledTreeBlockerUniformOverrides.push({ uniform: uniforms.uBranchBend, value: uniforms.uBranchBend.value });
-                uniforms.uBranchBend.value = 0.0;
+              if (uniforms.uBulkSway && typeof uniforms.uBulkSway.value === 'number') {
+                disabledTreeBlockerUniformOverrides.push({ uniform: uniforms.uBulkSway, value: uniforms.uBulkSway.value });
+                uniforms.uBulkSway.value = 0.0;
               }
               if (uniforms.uFlutterIntensity && typeof uniforms.uFlutterIntensity.value === 'number') {
                 disabledTreeBlockerUniformOverrides.push({ uniform: uniforms.uFlutterIntensity, value: uniforms.uFlutterIntensity.value });
@@ -2693,9 +2693,9 @@ export class OverheadStampEffectV2 {
           treeBlockerUniformOverrides.push({ uniform: uniforms.uAmbientMotion, value: uniforms.uAmbientMotion.value });
           uniforms.uAmbientMotion.value = 0.0;
         }
-        if (uniforms.uBranchBend && typeof uniforms.uBranchBend.value === 'number') {
-          treeBlockerUniformOverrides.push({ uniform: uniforms.uBranchBend, value: uniforms.uBranchBend.value });
-          uniforms.uBranchBend.value = 0.0;
+        if (uniforms.uBulkSway && typeof uniforms.uBulkSway.value === 'number') {
+          treeBlockerUniformOverrides.push({ uniform: uniforms.uBulkSway, value: uniforms.uBulkSway.value });
+          uniforms.uBulkSway.value = 0.0;
         }
         if (uniforms.uFlutterIntensity && typeof uniforms.uFlutterIntensity.value === 'number') {
           treeBlockerUniformOverrides.push({ uniform: uniforms.uFlutterIntensity, value: uniforms.uFlutterIntensity.value });
@@ -2969,7 +2969,7 @@ export class OverheadStampEffectV2 {
           pushUniform(visUniformOverrides, uniforms, 'uShadowOpacity', 0.0);
           pushUniform(visUniformOverrides, uniforms, 'uWindSpeedGlobal', 0.0);
           pushUniform(visUniformOverrides, uniforms, 'uAmbientMotion', 0.0);
-          pushUniform(visUniformOverrides, uniforms, 'uBranchBend', 0.0);
+          pushUniform(visUniformOverrides, uniforms, 'uBulkSway', 0.0);
           pushUniform(visUniformOverrides, uniforms, 'uFlutterIntensity', 0.0);
           pushUniform(visUniformOverrides, uniforms, 'uTurbulence', 0.0);
           pushUniform(visUniformOverrides, uniforms, 'uRoofRainHardBlockEnabled', 0.0);
@@ -2999,7 +2999,7 @@ export class OverheadStampEffectV2 {
           pushUniform(visUniformOverrides, uniforms, 'uShadowOpacity', 0.0);
           pushUniform(visUniformOverrides, uniforms, 'uWindSpeedGlobal', 0.0);
           pushUniform(visUniformOverrides, uniforms, 'uAmbientMotion', 0.0);
-          pushUniform(visUniformOverrides, uniforms, 'uBranchBend', 0.0);
+          pushUniform(visUniformOverrides, uniforms, 'uBulkSway', 0.0);
           pushUniform(visUniformOverrides, uniforms, 'uFlutterIntensity', 0.0);
           pushUniform(visUniformOverrides, uniforms, 'uTurbulence', 0.0);
           pushUniform(visUniformOverrides, uniforms, 'uRoofRainHardBlockEnabled', 0.0);

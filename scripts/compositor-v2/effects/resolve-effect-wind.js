@@ -8,6 +8,7 @@
  */
 
 import { weatherController, WeatherController } from '../../core/WeatherController.js';
+import { sceneWindField } from '../../core/SceneWindField.js';
 
 const MAX_WIND_MS = WeatherController.MAX_WIND_MS;
 
@@ -56,11 +57,23 @@ function resolveWaterWindOverride() {
 
 /**
  * Resolve wind direction and normalized speed for CPU-side effects.
- * @returns {{ dirX: number, dirY: number, speed01: number }}
+ * @param {number} [worldX] Optional world X for spatial field sample (Three Y-up).
+ * @param {number} [worldY] Optional world Y for spatial field sample (Three Y-up).
+ * @returns {{ dirX: number, dirY: number, speed01: number, spatial01?: number, fieldStrength01?: number, inLull?: boolean }}
  */
-export function resolveEffectWindWorld() {
+export function resolveEffectWindWorld(worldX, worldY) {
   const override = resolveWaterWindOverride();
-  if (override) return override;
+  if (override) {
+    const sample = Number.isFinite(worldX) && Number.isFinite(worldY)
+      ? sceneWindField.getSampleWorld(worldX, worldY)
+      : null;
+    return {
+      ...override,
+      spatial01: sample?.spatial01 ?? 1,
+      fieldStrength01: sample?.strength01 ?? override.speed01,
+      inLull: sample?.inLull ?? false,
+    };
+  }
 
   let dirX = 1.0;
   let dirY = 0.0;
@@ -105,7 +118,23 @@ export function resolveEffectWindWorld() {
       }
     }
   } catch (_) {}
-  return { dirX, dirY, speed01 };
+
+  let spatial01 = 1.0;
+  let fieldStrength01 = speed01;
+  let inLull = false;
+  try {
+    if (sceneWindField?.params?.enabled !== false) {
+      const sx = Number.isFinite(worldX) ? worldX : 0;
+      const sy = Number.isFinite(worldY) ? worldY : 0;
+      const sample = sceneWindField.getSampleWorld(sx, sy);
+      spatial01 = sample.spatial01;
+      fieldStrength01 = sample.strength01;
+      inLull = sample.inLull;
+      speed01 = fieldStrength01;
+    }
+  } catch (_) {}
+
+  return { dirX, dirY, speed01, spatial01, fieldStrength01, inLull };
 }
 
 /**

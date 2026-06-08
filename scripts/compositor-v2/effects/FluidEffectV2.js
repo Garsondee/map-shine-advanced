@@ -54,7 +54,7 @@ export class FluidEffectV2 {
 
     // Match V1 defaults for visual parity.
     this.params = {
-      enabled: true,
+      enabled: false,
       intensity: 1.0,
       opacity: 1.0,
 

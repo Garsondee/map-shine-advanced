@@ -1,8 +1,9 @@
 /**
- * Merge a "Current Effect Settings" clipboard export into an existing preset JSON.
+ * Merge a "Current Effect Settings" export into an existing preset JSON.
  * Usage: node scripts/tools/merge-export-into-preset.mjs <export.txt> <preset.json>
  */
 import fs from 'fs';
+import path from 'path';
 
 const SKIP_KEYS = new Set([
   'textureStatus',
@@ -67,17 +68,14 @@ function parseExport(text) {
   return effects;
 }
 
-const [exportPath, presetPath] = process.argv.slice(2);
-if (!exportPath || !presetPath) {
-  console.error('Usage: node merge-export-into-preset.mjs <export.txt> <preset.json>');
-  process.exit(1);
-}
+const exportPath = path.resolve(process.argv[2]);
+const presetPath = path.resolve(process.argv[3]);
 
 const exportText = fs.readFileSync(exportPath, 'utf8');
 const effects = parseExport(exportText);
 const preset = JSON.parse(fs.readFileSync(presetPath, 'utf8'));
 
 preset.settings.mapMaker.effects = effects;
-fs.writeFileSync(presetPath, JSON.stringify(preset, null, 2) + '\n', 'utf8');
 
-console.log(`Merged ${Object.keys(effects).length} effects into ${presetPath}`);
+fs.writeFileSync(presetPath, `${JSON.stringify(preset, null, 2)}\n`);
+console.log(`Merged ${Object.keys(effects).length} effects into ${path.basename(presetPath)}`);

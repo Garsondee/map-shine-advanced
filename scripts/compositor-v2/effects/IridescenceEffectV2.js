@@ -38,23 +38,23 @@ export class IridescenceEffectV2 {
     this._fallbackBlack = null;
 
     this.params = {
-      enabled: true,
+      enabled: false,
       /** Set in populate(); retained for scene state / tools (not a Tweakpane control). */
       hasIridescenceMask: false,
       intensity: 0.5,
-      distortionStrength: 0.92,
-      noiseScale: 0.68,
+      distortionStrength: 0.13,
+      noiseScale: 0.44,
       noiseType: 0,
-      flowSpeed: 1.5,
-      phaseMult: 4.0,
+      flowSpeed: 0.15,
+      phaseMult: 6,
       angle: 0.0,
-      parallaxStrength: 3.0,
-      maskThreshold: 0.05,
+      parallaxStrength: 4.31,
+      maskThreshold: 0.4,
       /** When true, uses (1 − luminance) × α — for masks painted dark-on-light instead of white = shine. */
       invertMask: false,
-      colorCycleSpeed: 0.1,
-      ignoreDarkness: 0.5,
-      alpha: 0.5,
+      colorCycleSpeed: 0.25,
+      ignoreDarkness: 0.6,
+      alpha: 0.9,
     };
   }
 

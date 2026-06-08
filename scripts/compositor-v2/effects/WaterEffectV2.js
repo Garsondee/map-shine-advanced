@@ -240,7 +240,7 @@ export class WaterEffectV2 {
       distortionShoreMin: 0,
 
       // Refraction
-      refractionMultiTapEnabled: false,
+      refractionMultiTapEnabled: true,
 
       // Precipitation distortion — simple noise-based surface agitation
       rainPrecipitation: 0.0,
@@ -494,19 +494,19 @@ export class WaterEffectV2 {
 
       // Murk
       murkEnabled: true,
-      murkIntensity: 1.48,
+      murkIntensity: 1.76,
       murkColor: { r: 0.15, g: 0.22, b: 0.12 },
       murkColorAlt: { r: 0.12, g: 0.22, b: 0.08 },
       murkColorVariation: 0.4,
       murkHueScatter: 0.18,
       murkSaturation: 1,
       murkLumaVariation: 0.3,
-      murkScale: 1.2,
-      murkSpeed: 0.05,
+      murkScale: 5.1,
+      murkSpeed: 0.06,
       murkSeedOffsetX: 0,
       murkSeedOffsetY: 0,
-      murkDepthLo: 0.2,
-      murkDepthHi: 0.8,
+      murkDepthLo: 0,
+      murkDepthHi: 1,
       murkDepthFade: 1.5,
       murkCloudLo: 0.28,
       murkCloudHi: 0.76,
@@ -521,15 +521,15 @@ export class WaterEffectV2 {
       murkStrengthLo: 0,
       murkStrengthHi: 1,
       murkWarpStrength: 0.45,
-      murkChaos: 0.32,
-      murkChaosSpeed: 0.9,
+      murkChaos: 0.12,
+      murkChaosSpeed: 0.02,
       murkGrainScale: 80,
       murkGrainSpeed: 0.3,
       murkGrainStrength: 0.4,
 
       // Murk Shadow Integration
       murkShadowEnabled: true,
-      murkShadowStrength: 0.56,
+      murkShadowStrength: 0.7,
 
       // Faux bathymetry (Beer-Lambert volumetric absorption/scatter)
       bathymetryEnabled: true,
@@ -1187,6 +1187,7 @@ static getControlSchema() {
           label: 'Wind Override',
           type: 'folder',
           expanded: false,
+          hidden: true,
           parameters: [
             'windOverrideEnabled',
             'windOverrideBearingDeg',
@@ -1555,7 +1556,7 @@ static getControlSchema() {
         waveIndoorDampingEnabled: { type: 'boolean', default: false, label: 'Indoor Damping Enabled' },
         waveIndoorDampingStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1, label: 'Indoor Damping Strength' },
         waveIndoorMinFactor: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.05, label: 'Indoor Min Factor' },
-        windDirResponsiveness: { type: 'slider', min: 0.05, max: 30, step: 0.05, default: 10, label: 'Wind Responsiveness' },
+        windDirResponsiveness: { type: 'slider', min: 0.05, max: 30, step: 0.05, default: 10, label: 'Wind Responsiveness', hidden: true },
         lockWaveTravelToWind: {
           type: 'boolean',
           default: true,
@@ -1592,8 +1593,9 @@ static getControlSchema() {
           type: 'boolean',
           default: true,
           label: 'Override scene wind',
+          hidden: true,
           tooltip:
-            'When enabled, all wind-driven water motion (waves, foam, murk, rain shear, advection) and splash/foam particle drift follow the compass bearing below instead of live weather wind.',
+            'Moved to Scene Wind → Water wind override.',
         },
         windOverrideBearingDeg: {
           type: 'slider',
@@ -1602,8 +1604,9 @@ static getControlSchema() {
           step: 1,
           default: 90,
           label: 'Flow bearing (deg)',
+          hidden: true,
           tooltip:
-            'Compass bearing for surface flow, using the same degrees as the scene wind control (0° = East, 90° = North on the map). Ignored when override is off.',
+            'Moved to Scene Wind → Override bearing.',
         },
         windOverrideSpeed01: {
           type: 'slider',
@@ -1612,11 +1615,12 @@ static getControlSchema() {
           step: 0.01,
           default: 0.2,
           label: 'Flow strength',
+          hidden: true,
           tooltip:
-            'Normalized motion energy when override is on (wave speed, foam drift, gust coupling). Replaces scene wind speed while override is active.',
+            'Moved to Scene Wind → Override speed.',
         },
 
-        refractionMultiTapEnabled: { type: 'boolean', default: false, label: 'Multi-Tap Refraction' },
+        refractionMultiTapEnabled: { type: 'boolean', default: true, label: 'Multi-Tap Refraction' },
         chromaticAberrationEnabled: { type: 'boolean', default: false, label: 'Chromatic Aberration Enabled' },
         chromaticAberrationStrengthPx: { type: 'slider', min: 0, max: 8, step: 0.05, default: 2.5, label: 'Chromatic Strength (px)' },
         chromaticAberrationThreshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.2, label: 'Chromatic Luma Threshold' },
@@ -1841,19 +1845,19 @@ static getControlSchema() {
         foamFlecksIntensity: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.6, label: 'Flecks Intensity' },
 
         murkEnabled: { type: 'boolean', default: true, label: 'Murk Enabled' },
-        murkIntensity: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.48, label: 'Intensity' },
+        murkIntensity: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.76, label: 'Intensity' },
         murkColor: { type: 'color', default: { r: 0.15, g: 0.22, b: 0.12 }, label: 'Base Color' },
         murkColorAlt: { type: 'color', default: { r: 0.12, g: 0.22, b: 0.08 }, label: 'Alt Color' },
         murkColorVariation: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.4, label: 'Color Variation' },
         murkHueScatter: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.18, label: 'Hue Scatter' },
         murkSaturation: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1, label: 'Saturation' },
         murkLumaVariation: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.3, label: 'Brightness Variation' },
-        murkScale: { type: 'slider', min: 0.1, max: 20, step: 0.1, default: 1.2, label: 'Scale' },
-        murkSpeed: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.05, label: 'Speed' },
+        murkScale: { type: 'slider', min: 0.1, max: 20, step: 0.1, default: 5.1, label: 'Scale' },
+        murkSpeed: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.06, label: 'Speed' },
         murkSeedOffsetX: { type: 'slider', min: -200, max: 200, step: 0.5, default: 0, label: 'Seed Offset X' },
         murkSeedOffsetY: { type: 'slider', min: -200, max: 200, step: 0.5, default: 0, label: 'Seed Offset Y' },
-        murkDepthLo: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.2, label: 'Depth Low (mask)' },
-        murkDepthHi: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.8, label: 'Depth High (mask)' },
+        murkDepthLo: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0, label: 'Depth Low (mask)' },
+        murkDepthHi: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Depth High (mask)' },
         murkDepthFade: { type: 'slider', min: 0, max: 5, step: 0.01, default: 1.5, label: 'Depth Fade' },
         murkCloudLo: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.28, label: 'Cloud Threshold Low' },
         murkCloudHi: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.76, label: 'Cloud Threshold High' },
@@ -1868,13 +1872,13 @@ static getControlSchema() {
         murkStrengthLo: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0, label: 'Strength Low' },
         murkStrengthHi: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Strength High' },
         murkWarpStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.45, label: 'Warp Strength' },
-        murkChaos: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.32, label: 'Chaos' },
-        murkChaosSpeed: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.9, label: 'Chaos Speed' },
+        murkChaos: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.12, label: 'Chaos' },
+        murkChaosSpeed: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.02, label: 'Chaos Speed' },
         murkGrainScale: { type: 'slider', min: 10, max: 6000, step: 10, default: 80, label: 'Grain Scale' },
         murkGrainSpeed: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.3, label: 'Grain Speed' },
         murkGrainStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.4, label: 'Grain Strength' },
         murkShadowEnabled: { type: 'boolean', default: true, label: 'Shadow Enabled' },
-        murkShadowStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.56, label: 'Shadow Strength' },
+        murkShadowStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.7, label: 'Shadow Strength' },
 
         bathymetryEnabled: { type: 'boolean', default: true, label: 'Bathymetry Enabled' },
         bathymetryDepthCurve: { type: 'slider', min: 0.05, max: 6, step: 0.01, default: 2, label: 'Depth Curve' },

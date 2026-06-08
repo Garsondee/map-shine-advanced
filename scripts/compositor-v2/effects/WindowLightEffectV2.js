@@ -73,7 +73,7 @@ const DEFAULT_WINDOW_LIGHT_TOD_ANCHORS = Object.freeze([
   { intensityScale: 0.5, exposure: 0.05, saturation: 1.55, tintColor: { r: 1.4, g: 0.85, b: 2.3 } },
   { intensityScale: 0.5, exposure: 0.25, saturation: 1.75, tintColor: { r: 3, g: 1.15, b: 0.85 } },
   { intensityScale: 1.15, exposure: 0.2, saturation: 1.65, tintColor: { r: 1.45, g: 1.2, b: 0.95 } },
-  { intensityScale: 1.1, exposure: 0.15, saturation: 1.55, tintColor: { r: 0.8, g: 0.95, b: 1.35 } },
+  { intensityScale: 3, exposure: 0.15, saturation: 1.55, tintColor: { r: 0.8, g: 0.95, b: 1.35 } },
   { intensityScale: 1.12, exposure: 0.12, saturation: 1.6, tintColor: { r: 1.3, g: 1.05, b: 1.0 } },
   { intensityScale: 0.5, exposure: 0.3, saturation: 1.8, tintColor: { r: 3, g: 1.2, b: 0.9 } },
   { intensityScale: 0.5, exposure: 0.1, saturation: 2, tintColor: { r: 0.65, g: 0.7, b: 2.15 } },
@@ -82,8 +82,8 @@ const DEFAULT_WINDOW_LIGHT_TOD_ANCHORS = Object.freeze([
 /** Baseline window-light params (prismatic glass + timeline on by default). */
 const WINDOW_LIGHT_CORE_DEFAULTS = Object.freeze({
   enabled: true,
-  intensity: 6.75,
-  falloff: 1.95,
+  intensity: 1,
+  falloff: 1,
   color: { r: 1, g: 1, b: 1 },
   cloudInfluence: 1,
   cloudShadowContrast: 4,
@@ -91,7 +91,7 @@ const WINDOW_LIGHT_CORE_DEFAULTS = Object.freeze({
   cloudShadowGamma: 4,
   cloudShadowMinLight: 0,
   glassRefractionEnabled: true,
-  rgbShiftAmount: 7.15,
+  rgbShiftAmount: 12.89,
   rgbShiftAngle: 30,
   rgbShiftSpread: 0.46,
   rgbShiftEdgeWeight: 1,

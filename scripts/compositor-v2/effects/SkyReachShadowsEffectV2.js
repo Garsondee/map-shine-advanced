@@ -63,7 +63,7 @@ const SKY_REACH_MIN_EFFECTIVE_RAY_LENGTH = 0.02;
 export class SkyReachShadowsEffectV2 {
   constructor() {
     this.params = {
-      enabled: true,
+      enabled: false,
       opacity: 0.5,
       length: 0.1,
       softness: 8,

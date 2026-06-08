@@ -719,11 +719,10 @@ Hooks.once('init', async function() {
     console.warn('Map Shine: failed to register level navigation keybindings', e);
   }
 
-  const [{ info }, sceneSettings, canvasReplacement, { registerUISettings }, loadingService, debugLoadingProfilerMod] = await Promise.all([
+  const [{ info }, sceneSettings, { registerUISettings }, loadingService, debugLoadingProfilerMod] = await Promise.all([
     import('./core/log.js'),
     import('./settings/scene-settings.js'),
-    import('./foundry/canvas-replacement.js'),
-    import('./ui/tweakpane-manager.js'),
+    import('./ui/register-ui-settings.js'),
     import('./ui/loading-screen/loading-screen-service.js'),
     import('./core/debug-loading-profiler.js')
   ]);
@@ -1526,10 +1525,11 @@ Hooks.once('init', async function() {
     }
   });
 
-  // Initialize canvas replacement hooks
+  // Initialize canvas replacement hooks (deferred — avoids parallel load races with tweakpane-manager).
   try {
   } catch (_) {
   }
+  const canvasReplacement = await import('./foundry/canvas-replacement.js');
   canvasReplacement.initialize();
   try {
   } catch (_) {

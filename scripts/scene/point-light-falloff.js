@@ -504,19 +504,19 @@ export function computeLightFalloffHardnessValues(
 /** Default tuning (matches pre-uniform shader). Overridden by LightingEffectV2 Tweakpane. */
 export const DEFAULT_POINT_LIGHT_FALLOFF_TUNING = {
   /** Soft att=0: wide bright + dim (maps to low hardness ≈0.42). */
-  halfInAtAtt0: 0.52,
+  halfInAtAtt0: 0.51,
   /** Att=1 reference; hardness comes from Foundry mix(0.08, 0.98, att). */
   halfInAtAtt1: 0.22,
   halfOutAtAtt0: 0.38,
   halfOutAtAtt1: 0.22,
   halfMin: 0.02,
-  edgeSoftBoostIn: 0.08,
-  edgeSoftBoostOut: 0.06,
+  edgeSoftBoostIn: 0.1,
+  edgeSoftBoostOut: 0.08,
   brightNormInfluence: 0.92,
   dimRingWeight: 1.0,
   rimAAScale: 0.38,
   attCurvePower: 1.0,
-  rimBandAtAtt0: 0.14,
+  rimBandAtAtt0: 0.16,
   rimBandAtAtt1: 0.08,
 };
 

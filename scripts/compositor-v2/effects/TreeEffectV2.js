@@ -83,6 +83,49 @@ import {
   createVegetationCameraGradeUniforms,
   syncVegetationCameraGradeForEffect,
 } from './vegetation-camera-grade.js';
+import {
+  VEGETATION_CLUMP_FIELD_DEFAULTS,
+  VEGETATION_CLUMP_FIELD_CONTROL_SCHEMA,
+  VEGETATION_CLUMP_DEBUG_SCHEMA_GROUP,
+  VEGETATION_CLUMP_FIELD_UNIFORM_GLSL,
+  VEGETATION_CLUMP_FIELD_SAMPLE_GLSL,
+  VEGETATION_CLUMP_ID_GLSL,
+  VEGETATION_CLUMP_DEBUG_GLSL,
+  createVegetationClumpFieldSharedUniforms,
+  createVegetationClumpFieldOverlayUniforms,
+  applyVegetationClumpFieldParamsToUniforms,
+  buildClumpCoordTexture,
+  bindClumpCoordTextureToOverlayMaterials,
+  syncClumpCoordTextureToOverlayMaterials,
+  disposeClumpCoordTexture,
+  windDisplacedMeshSegments,
+  initClumpWindAttributesOnGeometry,
+} from './vegetation-clump-field.js';
+import {
+  VEGETATION_SCENE_WIND_UNIFORM_GLSL,
+  VEGETATION_SCENE_WIND_STRENGTH_GLSL,
+  createVegetationSceneWindSharedUniforms,
+} from './vegetation-scene-wind.js';
+import { sceneWindField } from '../../core/SceneWindField.js';
+import {
+  VEGETATION_WIND_NOISE_GLSL,
+  VEGETATION_WIND_OVERLAY_UNIFORM_GLSL,
+  VEGETATION_WIND_LAYER_UNIFORM_GLSL,
+  VEGETATION_CLUMP_WIND_VARYING_GLSL,
+  VEGETATION_BULK_WIND_OFFSET_GLSL,
+  VEGETATION_BULK_VERTEX_DISPLACEMENT_GLSL,
+  VEGETATION_BULK_WIND_TURBULENCE_GLSL,
+  VEGETATION_FLUTTER_UV_GLSL,
+  VEGETATION_FLUTTER_FRAGMENT_GLSL,
+  VEGETATION_BILLBOARD_SHADOW_GLSL,
+  createVegetationWindOverlayUniforms,
+} from './vegetation-bulk-wind.js';
+import {
+  isVegetationWindTuningParam,
+  syncVegetationWindParamsToUniforms,
+  linkVegetationWindLayerUniforms,
+  TREE_WIND_LAYER_DEFAULTS,
+} from './vegetation-wind-params.js';
 
 const log = createLogger('TreeEffectV2');
 
@@ -147,6 +190,7 @@ export class TreeEffectV2 {
 
     /** Bumped on clear/populate so stale async mask loads cannot touch new overlays. */
     this._populateGeneration = 0;
+    this._windLayerUniformsLinked = false;
     /** Per-overlay serial invalidated when an entry is torn down or replaced. */
     this._maskLoadSerial = 0;
     /** Wall-clock ms — block hover-reveal shadow stacking right after repopulate. */
@@ -167,6 +211,8 @@ export class TreeEffectV2 {
       // -- Wind Physics --
       windSpeedGlobal: 0.06,
       windRampSpeed: 1.32,
+      windAttackRamp: 2.5,
+      windDecayRamp: 0.88,
       gustFrequency: 0.0022,
       gustSpeed: 0.15,
       waveSpatialFrequency: 0.0014,
@@ -190,17 +236,20 @@ export class TreeEffectV2 {
       edgeFadeStart: 0.0,
       edgeFadeEnd: 0.03,
 
-      // -- Canopy motion --
-      branchBend: 0.05,
-      elasticity: 5.0,
+      // -- Bulk sway (vertex) + leaf flutter (fragment) --
+      bulkSway: 0.029,
+      bulkSwayScale: 0.68,
+      bulkSwaySpeed: 2.36,
+      bulkSwaySpread: 0.48,
+      elasticity: 0.5,
 
       // -- Leaf Flutter --
-      flutterIntensity: 0.0007,
-      flutterSpeed: 6.64,
-      flutterScale: 0.02,
+      flutterIntensity: 0.0005,
+      flutterSpeed: 2.25,
+      flutterScale: 0.005,
 
       // -- Color --
-      exposure: 0.0,
+      exposure: -0.4,
       brightness: 0.0,
       contrast: 1.0,
       saturation: 1.0,
@@ -208,14 +257,15 @@ export class TreeEffectV2 {
       tint: 0.0,
 
       // Canopy shadow (offset alpha sample — same model as BushEffectV2)
-      shadowOpacity: 0.32,
-      shadowLength: 0.1,
-      shadowSoftness: 3.0,
+      shadowOpacity: 0.2,
+      shadowLength: 0.04,
+      shadowSoftness: 0.8,
 
       ...VEGETATION_CLOUD_SHADOW_DEFAULTS,
       ...VEGETATION_BUILDING_SHADOW_DEFAULTS,
       ...VEGETATION_PAINTED_SHADOW_DEFAULTS,
       ...VEGETATION_LANDSCAPE_LIGHTNING_DEFAULTS,
+      ...VEGETATION_CLUMP_FIELD_DEFAULTS,
     };
 
     log.debug('TreeEffectV2 created');
@@ -252,6 +302,8 @@ export class TreeEffectV2 {
           'Landscape lightning': 'HDR brightening on canopy during distant strikes (Map Shine Control lightning).',
           'Edge safety': 'Pulls motion and shadow down near scene edges to hide UV seams.',
           'Hover fade': 'When hover-hide is active, the canopy fades out but the offset ground shadow stays at full strength.',
+          'Clump waves': 'Transparent gaps in the mask define foliage clumps; wind waves roll across clump positions on the map.',
+          'Clump ID view': 'Debug false-color of island labels — use to check whether antialiased edges share the same ID as the canopy body.',
         },
       },
       presetApplyDefaults: true,
@@ -270,25 +322,26 @@ export class TreeEffectV2 {
           type: 'folder',
           expanded: true,
           parameters: [
-            'windSpeedGlobal', 'windRampSpeed', 'gustFrequency', 'gustSpeed',
-            'waveSpatialFrequency', 'waveTravelSpeed', 'waveSharpness', 'waveInfluence',
-            'turbulence', 'turbulenceScale', 'minRustleSpeed',
+            'waveInfluence',
+            'gustFrequency',
+            'gustSpeed',
+            'turbulence',
+            'turbulenceScale',
+            'minRustleSpeed',
           ],
         },
         {
-          name: 'branch',
-          label: 'Branch motion',
+          name: 'bulkSway',
+          label: 'Bulk sway',
           type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: ['branchBend', 'elasticity'],
+          expanded: true,
+          parameters: ['bulkSway', 'bulkSwayScale', 'bulkSwaySpeed', 'bulkSwaySpread', 'elasticity'],
         },
         {
           name: 'flutter',
           label: 'Leaf flutter',
           type: 'folder',
-          advanced: true,
-          expanded: false,
+          expanded: true,
           parameters: ['flutterIntensity', 'flutterSpeed', 'flutterScale'],
         },
         {
@@ -376,6 +429,7 @@ export class TreeEffectV2 {
           expanded: false,
           parameters: ['edgeFadeStart', 'edgeFadeEnd'],
         },
+        VEGETATION_CLUMP_DEBUG_SCHEMA_GROUP,
       ],
       parameters: {
         intensity: {
@@ -396,7 +450,8 @@ export class TreeEffectV2 {
           step: 0.001,
           default: 0.06,
           throttle: 100,
-          tooltip: 'Multiplies scene wind speed before driving motion.',
+          hidden: true,
+          tooltip: 'Moved to Scene Wind → Vegetation response.',
         },
         windRampSpeed: {
           type: 'slider',
@@ -406,7 +461,8 @@ export class TreeEffectV2 {
           step: 0.05,
           default: 1.32,
           throttle: 100,
-          tooltip: 'Higher = canopy motion follows weather wind changes faster.',
+          hidden: true,
+          tooltip: 'Moved to Scene Wind → Vegetation catch-up.',
         },
         gustFrequency: {
           type: 'slider',
@@ -416,7 +472,7 @@ export class TreeEffectV2 {
           step: 0.0001,
           default: 0.0022,
           throttle: 100,
-          tooltip: 'Spatial scale of the pseudo-gust noise field.',
+          tooltip: 'Procedural gust noise scale on foliage (fine chop layered on scene wind).',
         },
         gustSpeed: {
           type: 'slider',
@@ -426,7 +482,7 @@ export class TreeEffectV2 {
           step: 0.01,
           default: 0.15,
           throttle: 100,
-          tooltip: 'How fast the gust field scrolls with wind.',
+          tooltip: 'How fast procedural gust noise scrolls across the canopy.',
         },
         waveSpatialFrequency: {
           type: 'slider',
@@ -436,7 +492,8 @@ export class TreeEffectV2 {
           step: 0.0001,
           default: 0.0014,
           throttle: 100,
-          tooltip: 'Spacing of large wind waves along the wind direction.',
+          hidden: true,
+          tooltip: 'Moved to Scene Wind → Wave spacing.',
         },
         waveTravelSpeed: {
           type: 'slider',
@@ -446,7 +503,8 @@ export class TreeEffectV2 {
           step: 0.01,
           default: 0.7,
           throttle: 100,
-          tooltip: 'Animation speed of the traveling wave carrier.',
+          hidden: true,
+          tooltip: 'Moved to Scene Wind → Wave speed.',
         },
         waveSharpness: {
           type: 'slider',
@@ -456,7 +514,8 @@ export class TreeEffectV2 {
           step: 0.05,
           default: 2.0,
           throttle: 100,
-          tooltip: 'Exponent on the wave carrier — higher = crisper gust fronts.',
+          hidden: true,
+          tooltip: 'Moved to Scene Wind → Wave sharpness.',
         },
         waveInfluence: {
           type: 'slider',
@@ -608,15 +667,45 @@ export class TreeEffectV2 {
           throttle: 100,
           tooltip: 'Minimum effective wind speed when the scene reports calm air.',
         },
-        branchBend: {
+        bulkSway: {
           type: 'slider',
-          label: 'Branch bend',
+          label: 'Sway amount',
           min: 0.0,
-          max: 0.1,
+          max: 0.14,
           step: 0.001,
-          default: 0.05,
+          default: 0.029,
           throttle: 100,
-          tooltip: 'How far UVs shift along wind when bending.',
+          tooltip: 'Rigid whole-island motion — moves overlay geometry, not mask UV.',
+        },
+        bulkSwayScale: {
+          type: 'slider',
+          label: 'Sway scale',
+          min: 0.0,
+          max: 2.5,
+          step: 0.01,
+          default: 0.68,
+          throttle: 100,
+          tooltip: 'Multiplier on bulk sway amplitude.',
+        },
+        bulkSwaySpeed: {
+          type: 'slider',
+          label: 'Sway speed',
+          min: 0.2,
+          max: 3.0,
+          step: 0.01,
+          default: 2.36,
+          throttle: 100,
+          tooltip: 'How fast each island rocks (slow compared to leaf flutter).',
+        },
+        bulkSwaySpread: {
+          type: 'slider',
+          label: 'Direction spread',
+          min: 0.08,
+          max: 0.75,
+          step: 0.01,
+          default: 0.48,
+          throttle: 100,
+          tooltip: 'Per-island variation in sway direction (radians). Higher = more independent trees.',
         },
         elasticity: {
           type: 'slider',
@@ -624,19 +713,19 @@ export class TreeEffectV2 {
           min: 0.5,
           max: 5.0,
           step: 0.01,
-          default: 5.0,
+          default: 0.5,
           throttle: 100,
-          tooltip: 'Oscillation speed of the orbital sway term.',
+          tooltip: 'Oscillation rate mixed into bulk sway (leaf flutter uses Flutter speed).',
         },
         flutterIntensity: {
           type: 'slider',
           label: 'Flutter amount',
           min: 0.0,
-          max: 0.005,
+          max: 0.02,
           step: 0.0001,
-          default: 0.0007,
+          default: 0.0005,
           throttle: 100,
-          tooltip: 'Strength of high-frequency leaf jitter.',
+          tooltip: 'Fine per-pixel leaf UV shimmer (layer 3 — after canopy sway and branch bend).',
         },
         flutterSpeed: {
           type: 'slider',
@@ -644,7 +733,7 @@ export class TreeEffectV2 {
           min: 1.0,
           max: 20.0,
           step: 0.05,
-          default: 6.64,
+          default: 2.25,
           throttle: 100,
           tooltip: 'How fast the flutter phase advances.',
         },
@@ -654,7 +743,7 @@ export class TreeEffectV2 {
           min: 0.005,
           max: 0.1,
           step: 0.0001,
-          default: 0.02,
+          default: 0.005,
           throttle: 100,
           tooltip: 'World-space scale of noise driving flutter.',
         },
@@ -664,7 +753,7 @@ export class TreeEffectV2 {
           min: -2.0,
           max: 2.0,
           step: 0.02,
-          default: 0.0,
+          default: -0.4,
           throttle: 100,
           tooltip: 'Extra stops on top of Camera Grade exposure.',
         },
@@ -724,7 +813,7 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.32,
+          default: 0.2,
           throttle: 100,
           tooltip: 'Opacity of the offset canopy shadow pass.',
         },
@@ -734,7 +823,7 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 0.1,
           step: 0.001,
-          default: 0.1,
+          default: 0.04,
           throttle: 100,
           tooltip: 'How far the shadow sample is pushed opposite the sun.',
         },
@@ -744,7 +833,7 @@ export class TreeEffectV2 {
           min: 0.5,
           max: 5.0,
           step: 0.05,
-          default: 3.0,
+          default: 0.8,
           throttle: 100,
           tooltip: 'Blur radius of the multi-tap shadow sample.',
         },
@@ -752,6 +841,7 @@ export class TreeEffectV2 {
         ...VEGETATION_BUILDING_SHADOW_CONTROL_SCHEMA,
         ...VEGETATION_PAINTED_SHADOW_CONTROL_SCHEMA,
         ...VEGETATION_LANDSCAPE_LIGHTNING_CONTROL_SCHEMA,
+        ...VEGETATION_CLUMP_FIELD_CONTROL_SCHEMA,
         edgeFadeStart: {
           type: 'slider',
           label: 'Edge fade start',
@@ -965,6 +1055,7 @@ export class TreeEffectV2 {
       this._sharedUniforms.uWindFieldPhase.value = this._windFieldPhase;
       this._sharedUniforms.uWavePhase.value = this._wavePhase;
       this._sharedUniforms.uFlutterPhase.value = this._flutterPhase;
+      this._syncWindUniforms();
     }
     const maxFloor = this._getSafeVisibleMaxFloorIndex();
     const floorChanged = maxFloor !== this._lastVisibilityFloorIndex;
@@ -997,7 +1088,9 @@ export class TreeEffectV2 {
     const windDir = weather?.windDirection;
     const windSpeed01 = Number(weather?.windSpeed ?? 0);
 
-    const ramp = Math.max(0.001, Number(this.params.windRampSpeed ?? 1));
+    const attack = Math.max(0.001, Number(this.params.windAttackRamp ?? this.params.windRampSpeed ?? 1));
+    const decay = Math.max(0.001, Number(this.params.windDecayRamp ?? attack * 0.35));
+    const ramp = windSpeed01 > this._currentWindSpeed ? attack : decay;
     const lerpT = Math.min(1.0, delta * ramp);
     this._currentWindSpeed = this._currentWindSpeed + (windSpeed01 - this._currentWindSpeed) * lerpT;
 
@@ -1010,8 +1103,13 @@ export class TreeEffectV2 {
       ? 0.16
       : (0.16 + (Math.max(0.16, Number(this.params.gustSpeed ?? 0.0)) - 0.16) * rawWind);
     this._windFieldPhase += phaseDelta * windFieldTravel * (0.2 + rawWind);
-    this._wavePhase += phaseDelta * Math.max(0.0, Number(this.params.waveTravelSpeed ?? 0.0)) * (0.35 + rustleSpeed);
-    this._flutterPhase += phaseDelta * Math.max(0.0, Number(this.params.flutterSpeed ?? 0.0)) * (0.85 + rustleSpeed);
+    if (sceneWindField.params.enabled !== false) {
+      this._wavePhase = sceneWindField.getUniforms().uSceneWindWavePhase;
+    } else {
+      this._wavePhase += phaseDelta * Math.max(0.0, Number(this.params.waveTravelSpeed ?? 0.0)) * (0.35 + rustleSpeed);
+    }
+    this._flutterPhase += phaseDelta * Math.max(0.0, Number(this.params.flutterSpeed ?? 0.0))
+      * (0.85 + rustleSpeed);
 
     this._syncSceneBoundsUniforms();
 
@@ -1027,34 +1125,7 @@ export class TreeEffectV2 {
       this._sharedUniforms.uWindSpeed.value = this._currentWindSpeed;
 
       this._sharedUniforms.uIntensity.value = (this.params.intensity ?? 1.0);
-      this._sharedUniforms.uWindSpeedGlobal.value = this.params.windSpeedGlobal;
-      this._sharedUniforms.uGustFrequency.value = this.params.gustFrequency;
-      this._sharedUniforms.uGustSpeed.value = this.params.gustSpeed;
-      this._sharedUniforms.uWaveSpatialFrequency.value = this.params.waveSpatialFrequency;
-      this._sharedUniforms.uWaveTravelSpeed.value = this.params.waveTravelSpeed;
-      this._sharedUniforms.uWaveSharpness.value = this.params.waveSharpness;
-      this._sharedUniforms.uWaveInfluence.value = this.params.waveInfluence;
-      this._sharedUniforms.uAmbientMotion.value = this.params.ambientMotion;
-      this._sharedUniforms.uRustleFloorScale.value = this.params.rustleFloorScale;
-      this._sharedUniforms.uFlutterBaseDrive.value = this.params.flutterBaseDrive;
-      this._sharedUniforms.uFlutterWindStart.value = this.params.flutterWindStart;
-      this._sharedUniforms.uFlutterWindFull.value = this.params.flutterWindFull;
-      this._sharedUniforms.uFlutterLowWindBoost.value = this.params.flutterLowWindBoost;
-      this._sharedUniforms.uFlutterLowWindFadeEnd.value = this.params.flutterLowWindFadeEnd;
-      this._sharedUniforms.uFlutterGustFloor.value = this.params.flutterGustFloor;
-      this._sharedUniforms.uBendMinStrength.value = this.params.bendMinStrength;
-      this._sharedUniforms.uBendWindStart.value = this.params.bendWindStart;
-      this._sharedUniforms.uBendWindFull.value = this.params.bendWindFull;
-      this._sharedUniforms.uTurbulence.value = this.params.turbulence;
-      this._sharedUniforms.uTurbulenceScale.value = this.params.turbulenceScale;
-      this._sharedUniforms.uMinRustleSpeed.value = this.params.minRustleSpeed;
-      this._sharedUniforms.uEdgeFadeStart.value = this.params.edgeFadeStart;
-      this._sharedUniforms.uEdgeFadeEnd.value = this.params.edgeFadeEnd;
-      this._sharedUniforms.uBranchBend.value = this.params.branchBend;
-      this._sharedUniforms.uElasticity.value = this.params.elasticity;
-      this._sharedUniforms.uFlutterIntensity.value = this.params.flutterIntensity;
-      this._sharedUniforms.uFlutterSpeed.value = this.params.flutterSpeed;
-      this._sharedUniforms.uFlutterScale.value = this.params.flutterScale;
+      this._syncWindUniforms();
       this._sharedUniforms.uShadowSoftness.value = this.params.shadowSoftness * (Number(this._driverShadowSoftnessScale) || 1.0);
 
       this._sharedUniforms.uExposure.value = this.params.exposure;
@@ -1070,6 +1141,8 @@ export class TreeEffectV2 {
       applyVegetationBuildingShadowParamsToUniforms(this._sharedUniforms, this.params);
       applyVegetationPaintedShadowParamsToUniforms(this._sharedUniforms, this.params);
       applyVegetationLandscapeLightningParamsToUniforms(this._sharedUniforms, this.params);
+      applyVegetationClumpFieldParamsToUniforms(this._sharedUniforms, this.params);
+      this._syncAllOverlayClumpFieldUniforms();
     }
 
     this._advanceHoverFadeUniforms(delta);
@@ -1118,11 +1191,43 @@ export class TreeEffectV2 {
   }
 
   /**
-   * @param {string} paramId
-   * @param {unknown} _value
+   * Push wind/flutter tuning from this.params into shared shader uniforms.
+   * @private
    */
+  _syncWindUniforms() {
+    syncVegetationWindParamsToUniforms(this._sharedUniforms, this.params, {
+      sceneWindField,
+      windLayerDefaults: TREE_WIND_LAYER_DEFAULTS,
+    });
+    if (!this._windLayerUniformsLinked) {
+      this._relinkAllOverlayWindUniforms();
+      this._windLayerUniformsLinked = true;
+    }
+  }
+
+  /** @private */
+  _linkOverlayWindUniforms(uniforms) {
+    linkVegetationWindLayerUniforms(uniforms, this._sharedUniforms);
+  }
+
+  /** @private */
+  _relinkAllOverlayWindUniforms() {
+    for (const entry of this._overlays.values()) {
+      this._linkOverlayWindUniforms(entry.material?.uniforms);
+      this._linkOverlayWindUniforms(entry.shadowMaterial?.uniforms);
+    }
+  }
+
   applyParamChange(paramId, _value) {
     if (!this._sharedUniforms) return;
+    if (isVegetationWindTuningParam(paramId)) {
+      this._syncWindUniforms();
+      if (paramId === 'clumpWaveEnabled' || paramId === 'clumpWaveMix' || paramId === 'clumpIdDebug') {
+        applyVegetationClumpFieldParamsToUniforms(this._sharedUniforms, this.params);
+        this._syncAllOverlayClumpFieldUniforms();
+      }
+      return;
+    }
     if (paramId.startsWith('buildingShadow')) {
       applyVegetationBuildingShadowParamsToUniforms(this._sharedUniforms, this.params);
       syncVegetationBuildingShadowForEffect(this);
@@ -1136,6 +1241,7 @@ export class TreeEffectV2 {
     if (paramId.startsWith('cloudShadow')) {
       applyVegetationCloudShadowParamsToUniforms(this._sharedUniforms, this.params);
       syncVegetationCloudShadowUniforms(this._sharedUniforms, this.params);
+      return;
     }
   }
 
@@ -1405,6 +1511,7 @@ export class TreeEffectV2 {
 
   clear() {
     this._populateGeneration += 1;
+    this._windLayerUniformsLinked = false;
     for (const [tileId, entry] of this._overlays) {
       this._teardownOverlayEntry(tileId, entry);
     }
@@ -1532,6 +1639,7 @@ export class TreeEffectV2 {
     try { if (entry.shadowMesh) entry.shadowMesh.material = null; } catch (_) {}
     try { if (entry.mesh) entry.mesh.material = null; } catch (_) {}
     const tex = entry.material?.uniforms?.uTreeMask?.value ?? null;
+    disposeClumpCoordTexture(entry.clumpCoordTexture ?? null);
     try { entry.material?.dispose?.(); } catch (_) {}
     try { entry.shadowMaterial?.dispose?.(); } catch (_) {}
     const geom = entry.mesh?.geometry ?? entry.shadowMesh?.geometry ?? null;
@@ -1600,7 +1708,10 @@ export class TreeEffectV2 {
       uMinRustleSpeed: { value: this.params.minRustleSpeed },
       uEdgeFadeStart: { value: this.params.edgeFadeStart },
       uEdgeFadeEnd: { value: this.params.edgeFadeEnd },
-      uBranchBend: { value: this.params.branchBend },
+      uBulkSway: { value: this.params.bulkSway },
+      uBulkSwayScale: { value: this.params.bulkSwayScale },
+      uBulkSwaySpeed: { value: this.params.bulkSwaySpeed },
+      uBulkSwaySpread: { value: this.params.bulkSwaySpread },
       uElasticity: { value: this.params.elasticity },
       uFlutterIntensity: { value: this.params.flutterIntensity },
       uFlutterSpeed: { value: this.params.flutterSpeed },
@@ -1631,7 +1742,59 @@ export class TreeEffectV2 {
       ...createVegetationPaintedShadowUniforms(THREE, this.params),
       ...createVegetationLandscapeLightningUniforms(THREE, this.params),
       ...createVegetationCameraGradeUniforms(THREE),
+      ...createVegetationClumpFieldSharedUniforms(this.params),
+      ...createVegetationSceneWindSharedUniforms(sceneWindField.params),
     };
+  }
+
+  /**
+   * Push clump-wave toggles to every live overlay (shared refs + per-overlay has-map).
+   * @private
+   */
+  _syncAllOverlayClumpFieldUniforms() {
+    applyVegetationClumpFieldParamsToUniforms(this._sharedUniforms, this.params);
+    for (const entry of this._overlays.values()) {
+      syncClumpCoordTextureToOverlayMaterials(entry, entry.clumpCoordTexture ?? null, this.params);
+    }
+  }
+
+  /**
+   * Build and bind clump coord map after mask texture load.
+   * @param {string} tileId
+   * @param {import('three').Texture} tex
+   * @param {boolean} deriveAlpha
+   * @param {{ centerX: number, centerY: number, tileW: number, tileH: number, rotation: number }} placement
+   * @private
+   */
+  _applyClumpCoordMapForOverlay(tileId, tex, deriveAlpha, placement) {
+    const entry = this._overlays.get(tileId);
+    if (!entry) return;
+
+    disposeClumpCoordTexture(entry.clumpCoordTexture ?? null);
+    entry.clumpCoordTexture = null;
+
+    const built = buildClumpCoordTexture(tex, deriveAlpha, {
+      centerX: placement.centerX,
+      centerY: placement.centerY,
+      tileW: placement.tileW,
+      tileH: placement.tileH,
+      rotationRad: Number(placement.rotation) || 0,
+    });
+
+    if (built?.texture) {
+      entry.clumpCoordTexture = built.texture;
+      entry.clumpIslandBySeed = built.islandBySeed ?? null;
+      bindClumpCoordTextureToOverlayMaterials(
+        entry, built.texture, this.params, built.primaryAnchor,
+        placement.centerX, placement.centerY, placement, built.islandCount,
+      );
+      log.debug(`TreeEffectV2 clump map: ${tileId} (${built.islandCount} islands, meshSeg ${entry._windMeshSegments ?? '?'})`);
+    } else {
+      entry.clumpIslandBySeed = null;
+      bindClumpCoordTextureToOverlayMaterials(
+        entry, null, this.params, null, placement.centerX, placement.centerY, placement,
+      );
+    }
   }
 
   _syncRoofMaskUniforms() {
@@ -1785,6 +1948,8 @@ export class TreeEffectV2 {
 
     const uniforms = {
       ...this._sharedUniforms,
+      ...createVegetationClumpFieldOverlayUniforms(THREE),
+      ...createVegetationWindOverlayUniforms(THREE, tileW, tileH, centerX, centerY),
       uTreeMask: { value: null },
       uDeriveAlpha: { value: 0.0 },
       uHoverFade: { value: 1.0 },
@@ -1794,6 +1959,8 @@ export class TreeEffectV2 {
     };
     const shadowUniforms = {
       ...this._sharedUniforms,
+      ...createVegetationClumpFieldOverlayUniforms(THREE),
+      ...createVegetationWindOverlayUniforms(THREE, tileW, tileH, centerX, centerY),
       ...createVegetationShadowLightningUniforms(THREE),
       uTreeMask: { value: null },
       uDeriveAlpha: { value: 0.0 },
@@ -1807,15 +1974,71 @@ export class TreeEffectV2 {
     linkVegetationBuildingShadowUniforms(shadowUniforms, this._sharedUniforms);
     linkVegetationPaintedShadowUniforms(uniforms, this._sharedUniforms);
     linkVegetationPaintedShadowUniforms(shadowUniforms, this._sharedUniforms);
+    this._linkOverlayWindUniforms(uniforms);
+    this._linkOverlayWindUniforms(shadowUniforms);
 
     const material = new THREE.ShaderMaterial({
       uniforms,
       vertexShader: /* glsl */`
+        uniform float uTime;
+        uniform float uWindFieldPhase;
+        uniform float uWavePhase;
+        uniform vec2  uWindDir;
+        uniform float uWindSpeed;
+        uniform float uWindSpeedGlobal;
+        uniform float uGustFrequency;
+        uniform float uWaveSpatialFrequency;
+        uniform float uWaveSharpness;
+        uniform float uWaveInfluence;
+        uniform float uAmbientMotion;
+        uniform float uRustleFloorScale;
+        uniform float uBendMinStrength;
+        uniform float uBendWindStart;
+        uniform float uBendWindFull;
+        uniform float uMinRustleSpeed;
+        uniform float uEdgeFadeStart;
+        uniform float uEdgeFadeEnd;
+        uniform float uElasticity;
+        uniform float uVegetationPass;
+        uniform vec2  uSceneMin;
+        uniform vec2  uSceneMax;
+${VEGETATION_CLUMP_WIND_VARYING_GLSL}
+${VEGETATION_WIND_OVERLAY_UNIFORM_GLSL}
+${VEGETATION_WIND_LAYER_UNIFORM_GLSL}
+${VEGETATION_SCENE_WIND_UNIFORM_GLSL}
+${VEGETATION_WIND_NOISE_GLSL}
+${VEGETATION_SCENE_WIND_STRENGTH_GLSL}
+${VEGETATION_BULK_WIND_OFFSET_GLSL}
+${VEGETATION_BULK_VERTEX_DISPLACEMENT_GLSL}
+
         varying vec2 vUv;
         varying vec2 vWorldPos;
+        varying vec2 vRestWorldPos;
+
         void main() {
           vUv = uv;
-          vec4 worldPos = modelMatrix * vec4(position, 1.0);
+          vec2 restWorldPos = (modelMatrix * vec4(position, 1.0)).xy;
+          vRestWorldPos = restWorldPos;
+
+          float islandActive = step(1e-5, aClumpId);
+          vec2 windAnchor = aClumpAnchor;
+          float windSeed = aClumpId;
+          if (islandActive < 0.5) {
+            float posHash = vegetationHash(restWorldPos * 0.0037);
+            windAnchor = mix(uWindAnchorWorld, restWorldPos, 0.42);
+            windSeed = fract(uWindClumpSeed * 0.15915 + posHash);
+          }
+          vClumpAnchor = windAnchor;
+          vClumpId = islandActive > 0.5 ? aClumpId : windSeed;
+
+          vec2 bulkUv = computeVegetationBulkWindOffset(windAnchor, windSeed, uWindDir);
+          bulkUv = applyVegetationBulkWindVertexDisplacement(bulkUv, restWorldPos);
+          vBulkWindUv = bulkUv;
+
+          vec3 localPos = position;
+          localPos.x -= bulkUv.x * uTileWorldSize.x;
+          localPos.y += bulkUv.y * uTileWorldSize.y;
+          vec4 worldPos = modelMatrix * vec4(localPos, 1.0);
           vWorldPos = worldPos.xy;
           gl_Position = projectionMatrix * viewMatrix * worldPos;
         }
@@ -1854,7 +2077,8 @@ export class TreeEffectV2 {
         uniform float uMinRustleSpeed;
         uniform float uEdgeFadeStart;
         uniform float uEdgeFadeEnd;
-        uniform float uBranchBend;
+        uniform float uBulkSway;
+        uniform float uBulkSwaySpread;
         uniform float uElasticity;
         uniform float uFlutterIntensity;
         uniform float uFlutterSpeed;
@@ -1878,6 +2102,9 @@ export class TreeEffectV2 {
         uniform float uHoverFade;
         uniform float uCanopyHoverFade;
         uniform float uVegetationPass;
+${VEGETATION_WIND_OVERLAY_UNIFORM_GLSL}
+${VEGETATION_CLUMP_FIELD_UNIFORM_GLSL}
+${VEGETATION_SCENE_WIND_UNIFORM_GLSL}
 ${VEGETATION_CAMERA_GRADE_UNIFORM_GLSL}
 ${VEGETATION_CLOUD_SHADOW_UNIFORM_GLSL}
 ${VEGETATION_BUILDING_SHADOW_UNIFORM_GLSL}
@@ -1892,23 +2119,20 @@ ${VEGETATION_LANDSCAPE_LIGHTNING_UNIFORM_GLSL}
 
         varying vec2 vUv;
         varying vec2 vWorldPos;
-
-        float hash(vec2 p) {
-          return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
-        }
-
-        float noise(vec2 p) {
-          vec2 i = floor(p);
-          vec2 f = fract(p);
-          vec2 u = f * f * (3.0 - 2.0 * f);
-          return mix(
-            mix(hash(i + vec2(0.0,0.0)), hash(i + vec2(1.0,0.0)), u.x),
-            mix(hash(i + vec2(0.0,1.0)), hash(i + vec2(1.0,1.0)), u.x),
-            u.y
-          );
-        }
+        varying vec2 vRestWorldPos;
+        varying vec2 vClumpAnchor;
+        varying float vClumpId;
+        varying vec2 vBulkWindUv;
 
 ${VEGETATION_CAMERA_GRADE_FUNCTION_GLSL}
+${VEGETATION_CLUMP_FIELD_SAMPLE_GLSL}
+${VEGETATION_CLUMP_ID_GLSL}
+${VEGETATION_CLUMP_DEBUG_GLSL}
+${VEGETATION_WIND_NOISE_GLSL}
+${VEGETATION_SCENE_WIND_STRENGTH_GLSL}
+${VEGETATION_FLUTTER_UV_GLSL}
+${VEGETATION_FLUTTER_FRAGMENT_GLSL}
+${VEGETATION_BULK_WIND_TURBULENCE_GLSL}
 
 ${VEGETATION_BUILDING_SHADOW_SAMPLE_GLSL}
 ${VEGETATION_PAINTED_SHADOW_SAMPLE_GLSL}
@@ -1928,145 +2152,130 @@ ${VEGETATION_PAINTED_SHADOW_SAMPLE_GLSL}
           return a;
         }
 
+${VEGETATION_BILLBOARD_SHADOW_GLSL}
+
         void main() {
           vec2 globalWindDir = normalize(uWindDir);
           if (length(globalWindDir) < 0.01) globalWindDir = vec2(1.0, 0.0);
 
-          float rawWind = clamp(uWindSpeed, 0.0, 1.0);
-          float speed = max(0.0, rawWind * uWindSpeedGlobal);
-          float rustleFloor = max(0.0, uMinRustleSpeed * max(0.0, uRustleFloorScale));
-          float rustleSpeed = max(speed, rustleFloor);
-          float flutterDrive = uFlutterBaseDrive + (1.0 - uFlutterBaseDrive)
-                            * smoothstep(uFlutterWindStart, max(uFlutterWindStart + 1e-4, uFlutterWindFull), rawWind);
-          float bendDrive = smoothstep(uBendWindStart, max(uBendWindStart + 1e-4, uBendWindFull), rawWind);
-          float ambientMotion = uAmbientMotion;
-          float effectiveSpeed = ambientMotion + rustleSpeed;
+          float restTexA = safeAlpha(texture2D(uTreeMask, vUv));
+          vec4 clumpDebugColor = vegetationClumpDebugOutput(vUv, vRestWorldPos, restTexA);
+          if (clumpDebugColor.a == 0.0) discard;
+          if (clumpDebugColor.a > 0.0 && clumpDebugColor.r >= 0.0) {
+            gl_FragColor = vec4(clumpDebugColor.rgb * uIntensity, clumpDebugColor.a * uIntensity);
+            return;
+          }
 
-          // Continuous speed-coupled wind pressure field (traveling across map)
-          // to avoid binary gust behavior and keep response wind-speed driven.
-          float windFieldFrequency = mix(0.0003, max(0.0003, uGustFrequency), rawWind);
-          vec2 windFieldPos = vWorldPos * windFieldFrequency;
-          vec2 windFieldScroll = globalWindDir * uWindFieldPhase;
-          float windField = noise(windFieldPos - windFieldScroll);
-          float windPulse = mix(0.65, 1.28, smoothstep(0.08, 0.92, windField));
-          windPulse *= (0.35 + 0.65 * rawWind);
-
-          float waveCoord = dot(vWorldPos, globalWindDir);
-          float wavePhase = waveCoord * uWaveSpatialFrequency - uWavePhase;
-          float waveCarrier = 0.5 + 0.5 * sin(wavePhase);
-          float waveFront = pow(clamp(waveCarrier, 0.0, 1.0), max(0.1, uWaveSharpness));
-          float waveMod = mix(1.0, waveFront, clamp(uWaveInfluence, 0.0, 1.0));
-
-          // -- Directional Swirl (Turbulence) --
-          // Modulates the base wind direction locally for organic, varied pushing angles.
-          float turbulenceStrength = max(0.0, uTurbulence);
-          float turbulenceScale = max(0.00001, uTurbulenceScale);
-
-          // Generate a low-frequency noise for wind direction swinging
-          float swirlNoise = noise(vWorldPos * (turbulenceScale * 0.4) - (globalWindDir * uTime * 0.15));
-          // angleSpread ranges from roughly -0.6 to +0.6 radians at 1.0 turbulence (~35 degrees)
-          float angleSpread = (swirlNoise - 0.5) * 1.2 * turbulenceStrength;
-
-          float cosS = cos(angleSpread);
-          float sinS = sin(angleSpread);
-          vec2 localWindDir = vec2(
-            globalWindDir.x * cosS - globalWindDir.y * sinS,
-            globalWindDir.x * sinS + globalWindDir.y * cosS
+          float edgeFade = vegetationSceneEdgeFade(vRestWorldPos);
+          vec2 flutterUv = vegetationCanopyFlutterUvOffset(
+            vRestWorldPos, restTexA, vClumpAnchor, vClumpId, globalWindDir, edgeFade
           );
-          vec2 localPerpDir = vec2(-localWindDir.y, localWindDir.x);
+          if (uTurbulence > 0.001) {
+            float foliageFlutterWeight = smoothstep(0.02, 0.38, restTexA);
+            flutterUv += computeVegetationBulkTurbulenceUvOffset(
+              vClumpAnchor, vClumpId, globalWindDir, vec2(0.0)
+            ) * uTurbulence * foliageFlutterWeight * 0.12;
+            flutterUv = capVegetationFlutterUvOffset(flutterUv) * edgeFade * foliageFlutterWeight;
+          }
 
-          float orbitPhase = uTime * uElasticity + (windField * 5.0);
-          float orbitSway = sin(orbitPhase);
+          clumpDebugColor = vegetationClumpWindUvSplitOutput(vUv, vUv, vRestWorldPos, restTexA);
+          if (clumpDebugColor.a == 0.0) discard;
+          if (clumpDebugColor.a > 0.0 && clumpDebugColor.r >= 0.0) {
+            gl_FragColor = vec4(clumpDebugColor.rgb * uIntensity, clumpDebugColor.a * uIntensity);
+            return;
+          }
 
-          float bendStrength = (uBendMinStrength + (1.0 - uBendMinStrength) * rawWind) * bendDrive;
-          float pushMagnitude = windPulse * uBranchBend * effectiveSpeed * waveMod * bendStrength;
-          float swayMagnitude = orbitSway * (uBranchBend * 0.4) * effectiveSpeed * (0.5 + 0.5 * windPulse) * (0.65 + 0.35 * waveMod) * bendStrength;
-          float crossSwayMagnitude = swayMagnitude * 0.16;
-
-          float noiseVal = noise(vWorldPos * uFlutterScale);
-          float flutterPhase = uFlutterPhase + noiseVal * 6.28;
-          float flutter = sin(flutterPhase);
-          float lowWindBoost = mix(uFlutterLowWindBoost, 1.0, smoothstep(0.04, max(0.041, uFlutterLowWindFadeEnd), rawWind));
-          float legacyFlutterFloor = clamp(uFlutterGustFloor, 0.0, 1.0);
-          float flutterWindPulse = mix(legacyFlutterFloor, 1.0, clamp(windPulse, 0.0, 1.0));
-          float flutterMagnitude = flutter * uFlutterIntensity * flutterWindPulse * lowWindBoost * flutterDrive * (0.6 + 0.4 * waveMod);
-          vec2 flutterVec = (localWindDir * flutterMagnitude) + (localPerpDir * (flutterMagnitude * 0.1));
-
-          vec2 distortion = (localWindDir * pushMagnitude)
-                          + (localWindDir * swayMagnitude)
-                          + (localPerpDir * crossSwayMagnitude)
-                          + flutterVec;
-
-          // Optional tree-only chop (default uTurbulence = 0 → bush-identical).
-          vec2 turbulencePos = vWorldPos * turbulenceScale;
-          float turbulenceFieldA = noise(turbulencePos + vec2(uTime * 0.27, -uTime * 0.19));
-          float turbulenceFieldB = noise((turbulencePos * 1.9) - vec2(uTime * 0.61, uTime * 0.47));
-          float turbulenceSigned = ((turbulenceFieldA * 0.65 + turbulenceFieldB * 0.35) - 0.5) * 2.0;
-          float turbulenceGustCoupling = 0.45 + 0.55 * windPulse;
-          float turbulenceMagnitude = turbulenceStrength * effectiveSpeed * turbulenceGustCoupling * (0.55 + 0.45 * waveMod);
-          vec2 turbulenceVec = (localWindDir * (turbulenceSigned * uBranchBend * 0.85 * turbulenceMagnitude))
-                             + (localPerpDir * (((turbulenceFieldB - 0.5) * 2.0) * uBranchBend * 0.15 * turbulenceMagnitude));
-          distortion += turbulenceVec;
-
-          vec2 sceneSpan = max(uSceneMax - uSceneMin, vec2(1e-3));
-          vec2 sceneUv = clamp((vWorldPos - uSceneMin) / sceneSpan, 0.0, 1.0);
-          float edgeDist = min(min(sceneUv.x, 1.0 - sceneUv.x), min(sceneUv.y, 1.0 - sceneUv.y));
-          float edgeFade = smoothstep(0.0, max(uEdgeFadeStart + 1e-4, uEdgeFadeEnd), edgeDist);
-          distortion *= edgeFade;
-
-          // Pass 1: ground shadow — multi-tap blur only on the shadow mesh.
+          // Pass 1: ground shadow — distorted canopy silhouette, sun-offset, multi-tap blur.
           if (uVegetationPass < 1.5) {
             vec2 shadowDir = normalize(vec2(uSunDir.x, -uSunDir.y));
             if (length(shadowDir) < 0.01) shadowDir = -globalWindDir;
             vec2 shadowOffset = shadowDir * uShadowLength;
             float shadowBlur = max(0.0001, uShadowSoftness * 0.0008);
-            vec2 shadowBaseUv = vUv - distortion - shadowOffset;
             vec2 step1 = vec2(shadowBlur);
             vec2 step2 = step1 * 2.0;
 
             float shadowAccum = 0.0;
             float shadowWeight = 0.0;
 
-            float tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv));
+            float tap = vegetationBillboardShadowTap(
+              uTreeMask, vUv, vec2(0.0), shadowOffset, uTileWorldSize, vRestWorldPos,
+              vClumpAnchor, vClumpId, globalWindDir, edgeFade
+            );
             shadowAccum += tap * 0.24;
             shadowWeight += 0.24;
 
-            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step1.x,  step1.y)));
+            tap = vegetationBillboardShadowTap(
+              uTreeMask, vUv, vec2( step1.x,  step1.y), shadowOffset, uTileWorldSize, vRestWorldPos,
+              vClumpAnchor, vClumpId, globalWindDir, edgeFade
+            );
             shadowAccum += tap * 0.12;
             shadowWeight += 0.12;
-            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step1.x,  step1.y)));
+            tap = vegetationBillboardShadowTap(
+              uTreeMask, vUv, vec2(-step1.x,  step1.y), shadowOffset, uTileWorldSize, vRestWorldPos,
+              vClumpAnchor, vClumpId, globalWindDir, edgeFade
+            );
             shadowAccum += tap * 0.12;
             shadowWeight += 0.12;
-            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step1.x, -step1.y)));
+            tap = vegetationBillboardShadowTap(
+              uTreeMask, vUv, vec2( step1.x, -step1.y), shadowOffset, uTileWorldSize, vRestWorldPos,
+              vClumpAnchor, vClumpId, globalWindDir, edgeFade
+            );
             shadowAccum += tap * 0.12;
             shadowWeight += 0.12;
-            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step1.x, -step1.y)));
+            tap = vegetationBillboardShadowTap(
+              uTreeMask, vUv, vec2(-step1.x, -step1.y), shadowOffset, uTileWorldSize, vRestWorldPos,
+              vClumpAnchor, vClumpId, globalWindDir, edgeFade
+            );
             shadowAccum += tap * 0.12;
             shadowWeight += 0.12;
 
-            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step2.x, 0.0)));
+            tap = vegetationBillboardShadowTap(
+              uTreeMask, vUv, vec2( step2.x, 0.0), shadowOffset, uTileWorldSize, vRestWorldPos,
+              vClumpAnchor, vClumpId, globalWindDir, edgeFade
+            );
             shadowAccum += tap * 0.07;
             shadowWeight += 0.07;
-            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step2.x, 0.0)));
+            tap = vegetationBillboardShadowTap(
+              uTreeMask, vUv, vec2(-step2.x, 0.0), shadowOffset, uTileWorldSize, vRestWorldPos,
+              vClumpAnchor, vClumpId, globalWindDir, edgeFade
+            );
             shadowAccum += tap * 0.07;
             shadowWeight += 0.07;
-            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(0.0,  step2.y)));
+            tap = vegetationBillboardShadowTap(
+              uTreeMask, vUv, vec2(0.0,  step2.y), shadowOffset, uTileWorldSize, vRestWorldPos,
+              vClumpAnchor, vClumpId, globalWindDir, edgeFade
+            );
             shadowAccum += tap * 0.07;
             shadowWeight += 0.07;
-            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(0.0, -step2.y)));
+            tap = vegetationBillboardShadowTap(
+              uTreeMask, vUv, vec2(0.0, -step2.y), shadowOffset, uTileWorldSize, vRestWorldPos,
+              vClumpAnchor, vClumpId, globalWindDir, edgeFade
+            );
             shadowAccum += tap * 0.07;
             shadowWeight += 0.07;
 
-            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step2.x,  step2.y)));
+            tap = vegetationBillboardShadowTap(
+              uTreeMask, vUv, vec2( step2.x,  step2.y), shadowOffset, uTileWorldSize, vRestWorldPos,
+              vClumpAnchor, vClumpId, globalWindDir, edgeFade
+            );
             shadowAccum += tap * 0.04;
             shadowWeight += 0.04;
-            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step2.x,  step2.y)));
+            tap = vegetationBillboardShadowTap(
+              uTreeMask, vUv, vec2(-step2.x,  step2.y), shadowOffset, uTileWorldSize, vRestWorldPos,
+              vClumpAnchor, vClumpId, globalWindDir, edgeFade
+            );
             shadowAccum += tap * 0.04;
             shadowWeight += 0.04;
-            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2( step2.x, -step2.y)));
+            tap = vegetationBillboardShadowTap(
+              uTreeMask, vUv, vec2( step2.x, -step2.y), shadowOffset, uTileWorldSize, vRestWorldPos,
+              vClumpAnchor, vClumpId, globalWindDir, edgeFade
+            );
             shadowAccum += tap * 0.04;
             shadowWeight += 0.04;
-            tap = safeAlpha(texture2D(uTreeMask, shadowBaseUv + vec2(-step2.x, -step2.y)));
+            tap = vegetationBillboardShadowTap(
+              uTreeMask, vUv, vec2(-step2.x, -step2.y), shadowOffset, uTileWorldSize, vRestWorldPos,
+              vClumpAnchor, vClumpId, globalWindDir, edgeFade
+            );
             shadowAccum += tap * 0.04;
             shadowWeight += 0.04;
 
@@ -2075,7 +2284,7 @@ ${VEGETATION_PAINTED_SHADOW_SAMPLE_GLSL}
             shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
 
             if (uShadowLitCapture > 0.5) {
-              float texA = safeAlpha(texture2D(uTreeMask, vUv - distortion));
+              float texA = safeAlpha(texture2D(uTreeMask, vUv + flutterUv));
               float lit = clamp(1.0 - shadowA, 0.0, 1.0);
               float canopyFade = clamp(uCanopyHoverFade, 0.0, 1.0);
               lit = mix(lit, 1.0, clamp(texA * uIntensity * canopyFade, 0.0, 1.0));
@@ -2087,8 +2296,8 @@ ${VEGETATION_PAINTED_SHADOW_SAMPLE_GLSL}
             return;
           }
 
-          // Pass 2: canopy — single mask sample (distortion only, no shadow taps).
-          vec4 treeSample = texture2D(uTreeMask, vUv - distortion);
+          // Pass 2: canopy — bulk sway is vertex displacement; fragment adds tiny flutter only.
+          vec4 treeSample = texture2D(uTreeMask, vUv + flutterUv);
           float texA = safeAlpha(treeSample);
           float hf = clamp(uHoverFade, 0.0, 1.0);
           float mainAlpha = texA * uIntensity;
@@ -2114,6 +2323,7 @@ ${VEGETATION_PAINTED_SHADOW_SAMPLE_GLSL}
 
           vec3 c = treeSample.rgb;
           c *= texA;
+          vec2 sceneUv = vegetationSceneUvFromWorld(vWorldPos);
 ${VEGETATION_LANDSCAPE_LIGHTNING_APPLY_GLSL}
 ${VEGETATION_CLOUD_SHADOW_APPLY_GLSL}
 ${VEGETATION_BUILDING_SHADOW_APPLY_GLSL}
@@ -2146,7 +2356,9 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
       blending: THREE.NormalBlending,
     });
 
-    const geometry = new THREE.PlaneGeometry(tileW, tileH);
+    const windSeg = windDisplacedMeshSegments(tileW, tileH, 0, 0, 1);
+    const geometry = new THREE.PlaneGeometry(tileW, tileH, windSeg, windSeg);
+    initClumpWindAttributesOnGeometry(geometry, centerX, centerY, 0);
     const shadowMesh = new THREE.Mesh(geometry, shadowMaterial);
     const mesh = new THREE.Mesh(geometry, material);
     shadowMesh.name = `TreeV2Shadow_${tileId}`;
@@ -2213,6 +2425,9 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
       material.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
       shadowMaterial.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
       this._cacheAlphaSamples(tileId, tex);
+      this._applyClumpCoordMapForOverlay(tileId, tex, derive, {
+        centerX, centerY, tileW, tileH, rotation,
+      });
       try {
         if (entry?.shadowMesh && entry?.mesh) {
           this._applyTreeOverlayRenderOrders(entry.shadowMesh, entry.mesh, tileId, floorIndex);

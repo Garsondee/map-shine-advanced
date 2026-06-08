@@ -76,7 +76,7 @@ export class WeatherLightningEffectV2 {
     return {
       enabled: true,
       stormIntensity: 0,
-      flashBrightness: 0.64,
+      flashBrightness: 0.01,
       flashFrequency: 0.51,
       distanceVariation: 0.8,
       shadowLengthScale: 2.0,
@@ -95,11 +95,11 @@ export class WeatherLightningEffectV2 {
       /** Flash strength at dusk phase (evening twilight). */
       duskFlashBrightnessScale: 0.28,
       /** Flash strength near midnight. */
-      nightFlashBrightnessScale: 1.26,
+      nightFlashBrightnessScale: 0.33,
       /** Structural shadow flash at solar noon (0 = keep sun building shadows). */
       dayStructuralShadowScale: 0,
       /** Structural shadow flash near midnight. */
-      nightStructuralShadowScale: 1,
+      nightStructuralShadowScale: 0.44,
       /** Hour radius around dawn/dusk/noon anchors (wider = more twilight coverage). */
       twilightFlashBlendHours: 2.5,
       /** Sharpness of night-arc ramp (midnight peak vs sunset/sunrise). */

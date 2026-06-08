@@ -65,59 +65,59 @@ export class AtmosphericFogEffectV2 {
       enabled: true,
       
       // Fog appearance
-      fogColor: '#c8d0d8',      // Slightly blue-gray fog
-      fogColorNight: '#1a1a2e', // Darker blue at night
-      skyTintStrength: 0.0,
-      nightColorStrength: 0.75,
-      darknessStrength: 0.65,
+      fogColor: '#ffffff',
+      fogColorNight: '#1a1a2e',
+      skyTintStrength: 0.3,
+      nightColorStrength: 1.1,
+      darknessStrength: 0,
       darknessColorMin: 0.25,
 
       // HDR post-merge (linear scene before ColorCorrection)
-      hdrHazeStrength: 1.0,     // Luminance-matched lift haze (avoids crushing HDR brights)
-      fogAdditive: 0.35,        // Extra air glow added in linear space
-      fogRefLuminance: 0.14,    // Reference scene luma for matching fog radiance
-      lightOcclusionStrength: 1.0, // Smother Foundry lights / emissive hotspots in fog
-      useDepthModulation: false,  // Depth pass modulates fog per-pixel when true
+      hdrHazeStrength: 1.2,
+      fogAdditive: 1,
+      fogRefLuminance: 0.14,
+      lightOcclusionStrength: 1.0,
+      useDepthModulation: false,
 
       // Fog behavior
-      maxOpacity: 0.72,         // Maximum fog opacity at full density
-      falloffStart: 0.1,        // Distance (0-1 of scene) where fog starts
-      falloffEnd: 0.9,          // Distance (0-1 of scene) where fog reaches max
+      maxOpacity: 0.85,
+      falloffStart: 0,
+      falloffEnd: 0.5,
       
       // Indoor masking
       useIndoorMask: true,      // Respect outdoor mask to avoid indoor fog
       indoorFogReduction: 0.9,  // How much to reduce fog indoors (0 = full fog, 1 = no fog)
       useRoofDistanceFeather: true, // Soft wall clearance via roof distance field
-      indoorBufferPx: 48,
-      indoorSoftnessPx: 120,
+      indoorBufferPx: 0,
+      indoorSoftnessPx: 600,
       
       // Noise for organic look
       noiseEnabled: true,
-      noiseScale: 2.0,
-      noiseStrength: 0.15,
-      noiseSpeed: 0.05,
-      noiseContrast: 1.35,
-      advectionSpeed: 1.0,
+      noiseScale: 1,
+      noiseStrength: 0.17,
+      noiseSpeed: 0.03,
+      noiseContrast: 1,
+      advectionSpeed: 1.7,
       windDirResponsiveness: 6.0,
-      curlStrength: 0.55,
-      curlScale: 1.0,
+      curlStrength: 0.3,
+      curlScale: 5.25,
 
       // Macro fog shaping & storm reactivity
-      macroScale: 0.05,
-      macroStrength: 0.8,
+      macroScale: 0.11,
+      macroStrength: 0.65,
       buildingEncroachment: 1.0,
-      swirlIterations: 2,
-      rainResponsiveness: 1.0,
+      swirlIterations: 3,
+      rainResponsiveness: 0.4,
 
       cutoutEnabled: true,
       cutoutScale: 0.22,
-      cutoutStrength: 0.4,
+      cutoutStrength: 0.63,
       cutoutSpeed: 0.02,
       cutoutContrast: 1.25,
 
       // Adds on top of WeatherController fogDensity (control panel / weather presets).
       manualFogDensity: 0.0,
-      weatherFogInfluence: 1.0,
+      weatherFogInfluence: 0,
 
       // Debug: ignore masks / world bounds; full-screen radial haze at density.
       debugForceFog: false,
@@ -214,6 +214,7 @@ export class AtmosphericFogEffectV2 {
           type: 'folder',
           advanced: true,
           expanded: false,
+          hidden: true,
           parameters: ['noiseSpeed', 'advectionSpeed', 'windDirResponsiveness'],
         },
         {
@@ -375,12 +376,14 @@ export class AtmosphericFogEffectV2 {
         advectionSpeed: {
           type: 'slider', min: 0, max: 4, step: 0.05, default: 1.0,
           label: 'Wind Drift',
-          tooltip: 'How fast fog texture advects with wind.',
+          hidden: true,
+          tooltip: 'Moved to Scene Wind → Fog advection.',
         },
         windDirResponsiveness: {
           type: 'slider', min: 0.1, max: 10, step: 0.1, default: 6.0,
           label: 'Wind Turn Rate',
-          tooltip: 'How quickly fog motion follows wind direction changes.',
+          hidden: true,
+          tooltip: 'Moved to Scene Wind → Fog wind response.',
         },
         noiseContrast: {
           type: 'slider', min: 0.5, max: 2.5, step: 0.05, default: 1.35,
@@ -1267,7 +1270,7 @@ export class AtmosphericFogEffectV2 {
     const u = this.material.uniforms;
     const fd = window.MapShine?.sceneComposer?.foundrySceneData ?? null;
 
-    // Match SceneRectScissor / base plane (same source as world projection).
+    // Match base plane (same source as world projection).
     if (fd && Number(fd.height) > 0 && Number(fd.width) > 0) {
       u.uSceneBounds.value.set(
         Number(fd.sceneX ?? 0),

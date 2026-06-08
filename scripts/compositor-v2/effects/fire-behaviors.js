@@ -15,6 +15,7 @@
  */
 
 import { weatherController } from '../../core/WeatherController.js';
+import { sceneWindField } from '../../core/SceneWindField.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
 import { CurlNoiseField, Vector3 } from '../../libs/quarks.core.module.js';
 
@@ -677,11 +678,9 @@ export class FireMaskShape {
 
     const params = this.ownerEffect?.params;
 
-    // Indoor smoke visibility (0 = no suppression; 1 = full suppression when fully under roof).
-    const smokeSup = params?.indoorSmokeSuppression;
-    const sup = Math.max(0, Math.min(1, Number.isFinite(smokeSup) ? smokeSup : 0));
-    const indoorBlend = clamp01(1.0 - outdoorFactor);
-    p._indoorSmokeScale = 1.0 - sup * indoorBlend;
+    // Indoor smoke / ember density scales (re-read each frame in lifecycle behaviors too).
+    p._indoorSmokeScale = computeIndoorSuppressionScale(params?.indoorSmokeSuppression, outdoorFactor);
+    p._indoorEmberScale = computeIndoorSuppressionScale(params?.indoorEmberSuppression, outdoorFactor);
 
     // Indoor time scaling.
     const indoorTimeScale = Math.max(0.05, Math.min(1.0, params?.indoorTimeScale ?? 0.6));
@@ -710,7 +709,13 @@ export class FireMaskShape {
     if (outdoorFactor > 0.01 && (precip > 0.05 || wind > 0.1)) {
       const precipKill = params?.weatherPrecipKill ?? 0.8;
       const windKill = params?.weatherWindKill ?? 0.4;
-      const weatherStress = 0.5 * (precip * precipKill + wind * windKill) * outdoorFactor;
+      let spatialWind = wind;
+      try {
+        if (sceneWindField?.params?.enabled !== false) {
+          spatialWind *= sceneWindField.getSampleWorld(0, 0).spatial01;
+        }
+      } catch (_) {}
+      const weatherStress = 0.5 * (precip * precipKill + spatialWind * windKill) * outdoorFactor;
       const survival = Math.max(0.1, 1.0 - weatherStress);
       if (typeof p.life === 'number') p.life *= survival;
       if (typeof p.size === 'number') p.size *= (0.6 + 0.4 * survival);
@@ -896,18 +901,17 @@ export class EmberLifecycleBehavior {
     let outdoorFactor = particle._windSusceptibility;
     if (!Number.isFinite(outdoorFactor)) outdoorFactor = 1.0;
     outdoorFactor = clamp01(outdoorFactor);
-    const indoorBlend = clamp01(1.0 - outdoorFactor);
 
-    const sup = Math.max(0, Math.min(1, Number.isFinite(params?.indoorEmberSuppression) ? params.indoorEmberSuppression : 0));
-    if (sup > 0 && Math.random() < sup * indoorBlend) {
+    const indoorScale = computeIndoorSuppressionScale(params?.indoorEmberSuppression, outdoorFactor);
+    if (indoorScale <= 0.001) {
       if (typeof particle.life === 'number') particle.life = 0;
       zeroParticleVisual(particle);
       return;
     }
 
-    if (outdoorFactor <= 0.01 && typeof particle.life === 'number') {
+    if (typeof particle.life === 'number') {
       const lifeScale = Math.max(0.05, Math.min(1.0, params?.indoorEmberLifeScale ?? 1.0));
-      particle.life *= lifeScale;
+      particle.life *= lifeScale + (1.0 - lifeScale) * outdoorFactor;
     }
 
     zeroParticleVisual(particle);
@@ -926,8 +930,13 @@ export class EmberLifecycleBehavior {
     const fb = particle._flameBrightness;
     const brightness = fb !== undefined ? (fb < 0.3 ? 0.3 : fb) : 1.0;
 
-    const emission = this._emissionLUT[idx] * heat * brightness;
-    const alpha = this._alphaLUT[idx] * brightness;
+    const params = this.ownerEffect?.params;
+    let outdoorFactor = particle._windSusceptibility;
+    if (!Number.isFinite(outdoorFactor)) outdoorFactor = 1.0;
+    const indoorScale = computeIndoorSuppressionScale(params?.indoorEmberSuppression, outdoorFactor);
+
+    const emission = this._emissionLUT[idx] * heat * brightness * indoorScale;
+    const alpha = this._alphaLUT[idx] * brightness * indoorScale;
     const ci = idx * 3;
     particle.color.x = this._colorLUT[ci] * emission;
     particle.color.y = this._colorLUT[ci + 1] * emission;
@@ -1051,8 +1060,10 @@ export class SmokeLifecycleBehavior {
     const idx = (t * 255) | 0;
 
     const density = particle._smokeDensity ?? 0.75;
-    const indoor = particle._indoorSmokeScale;
-    const indoorSmoke = indoor !== undefined ? (indoor < 0 ? 0 : indoor > 1 ? 1 : indoor) : 1.0;
+    const params = this.ownerEffect?.params;
+    let outdoorFactor = particle._windSusceptibility;
+    if (!Number.isFinite(outdoorFactor)) outdoorFactor = 1.0;
+    const indoorSmoke = computeIndoorSuppressionScale(params?.indoorSmokeSuppression, outdoorFactor);
 
     const ci = idx * 3;
     particle.color.x = this._colorLUT[ci];
@@ -1626,6 +1637,41 @@ export function filterFirePointsRequireNeighbor(points, imgW, imgH, minDistPx = 
 }
 
 const OUTDOOR_SMOKE_POINT_THRESHOLD = 0.5;
+
+/** @param {number} outdoorFactor 0 = fully under roof, 1 = open sky */
+export function computeIndoorBlend(outdoorFactor) {
+  return clamp01(1.0 - clamp01(outdoorFactor));
+}
+
+/**
+ * Shared indoor density curve for smoke + embers (0 = no suppression, 1 = fully under roof).
+ * @param {number} suppression 0–1 param value
+ * @param {number} outdoorFactor roof mask outdoors strength
+ */
+export function computeIndoorSuppressionScale(suppression, outdoorFactor) {
+  const sup = clamp01(Number.isFinite(suppression) ? suppression : 0);
+  return clamp01(1.0 - sup * computeIndoorBlend(outdoorFactor));
+}
+
+/**
+ * Apply Flame Texture folder transforms to the ember sprite map (not the flame flipbook atlas).
+ * @param {THREE.Texture|null|undefined} texture
+ * @param {object|null|undefined} params
+ */
+export function applyEmberSpriteTextureTransform(texture, params) {
+  if (!texture || !params) return;
+  const sx = Math.max(0.05, Number(params.flameTextureScaleX) || 1);
+  const sy = Math.max(0.05, Number(params.flameTextureScaleY) || 1);
+  const flipX = params.flameTextureFlipX !== false;
+  const flipY = params.flameTextureFlipY !== false;
+  const ox = Number(params.flameTextureOffsetX) || 0;
+  const oy = Number(params.flameTextureOffsetY) || 0;
+  texture.repeat.set(flipX ? -sx : sx, flipY ? -sy : sy);
+  texture.offset.set(flipX ? ox + 1 : ox, flipY ? oy + 1 : oy);
+  texture.rotation = Number(params.flameTextureRotation) || 0;
+  texture.center.set(0.5, 0.5);
+  texture.needsUpdate = true;
+}
 
 /**
  * Split packed fire-mask spawn points by roof/outdoor mask intensity.

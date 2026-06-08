@@ -182,14 +182,14 @@ export class SpecularEffectV2 {
     // Effect parameters — same defaults as V1 for visual parity (minus retired unused fields).
     this.params = {
       enabled: true,
-      intensity: 0.15,
+      intensity: 0.25,
       lightColor: { r: 1.0, g: 1.0, b: 1.0 },
 
       // Multi-layer stripe system
       stripeEnabled: true,
       stripeBlendMode: 0,
       parallaxStrength: 1.5,
-      stripeMaskThreshold: 0.08,
+      stripeMaskThreshold: 0.45,
       worldPatternScale: 16384.0,
 
       // Layer 1
@@ -260,7 +260,7 @@ export class SpecularEffectV2 {
 
       // Dynamic Light Color Tinting
       dynamicLightTintEnabled: true,
-      dynamicLightTintStrength: 0.6,
+      dynamicLightTintStrength: 0.65,
 
       // Wind-Driven Stripe Animation
       windDrivenStripesEnabled: true,

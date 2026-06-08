@@ -18,8 +18,8 @@ export class SharpenEffectV2 {
     this.params = {
       enabled: false,
       amount: 0.5,
-      radiusPx: 3.5,
-      threshold: 0.045,
+      radiusPx: 2,
+      threshold: 0,
     };
 
     /** @type {THREE.Scene|null} */
@@ -77,7 +77,7 @@ export class SharpenEffectV2 {
           min: 0.0,
           max: 6.0,
           step: 0.1,
-          default: 3.5,
+          default: 2,
           advanced: true,
           tooltip: 'Blur radius in pixels used for the unsharp mask.',
         },
@@ -87,7 +87,7 @@ export class SharpenEffectV2 {
           min: 0.0,
           max: 0.25,
           step: 0.005,
-          default: 0.045,
+          default: 0,
           advanced: true,
           tooltip: 'Ignore weak edges below this luma delta to limit noise sharpening.',
         },

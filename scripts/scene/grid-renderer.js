@@ -16,6 +16,11 @@ const log = createLogger('GridRenderer');
 // informational; we keep it slightly above groundZ to avoid any edge-case coplanar issues.
 const GRID_Z_OFFSET = 0.01;
 
+/** Screen px/cell — begin fading grid out below this (prevents moiré when zoomed out). */
+const GRID_LOD_FADE_START_PX = 0.5;
+/** Screen px/cell — full grid opacity above this. */
+const GRID_LOD_FADE_END_PX = 2.0;
+
 /**
  * GridRenderer - Renders the scene grid
  */
@@ -49,7 +54,7 @@ export class GridRenderer {
     // Parity-first: default behavior uses Foundry's scene grid settings.
     // Overrides are optional and disabled by default.
     this.settings = {
-      style: null,
+      style: 'dashedLines',
       useStyleOverride: true,
 
       thickness: 2,
@@ -58,7 +63,7 @@ export class GridRenderer {
       colorOverride: '#000000',
       useColorOverride: true,
 
-      alphaOverride: 0.05,
+      alphaOverride: 0.15,
       useAlphaOverride: true
     };
 
@@ -357,7 +362,7 @@ export class GridRenderer {
             'Diamond Points': 'diamondPoints',
             'Round Points': 'roundPoints'
           },
-          default: 'solidLines'
+          default: 'dashedLines'
         },
         useStyleOverride: {
           label: 'Override Style',
@@ -388,7 +393,7 @@ export class GridRenderer {
           min: 0.0,
           max: 1.0,
           step: 0.05,
-          default: 0.05
+          default: 0.15
         },
         useAlphaOverride: {
           label: 'Override Opacity',
@@ -445,6 +450,71 @@ export class GridRenderer {
   }
 
   /**
+   * Pixels per grid cell on screen — drives analytical AA and zoom LOD fade.
+   * Uses the live perspective camera + ground distance when available so line
+   * thickness stays stable across FOV zoom (Foundry parity).
+   *
+   * @param {import('../core/frame-state.js').FrameState|null} frameState
+   * @returns {number|null}
+   * @private
+   */
+  _computeGridResolution(frameState) {
+    const gridSize = Number(this.gridMaterial?.uniforms?.uGridSize?.value ?? canvas?.grid?.size ?? 1);
+    if (!(gridSize > 0)) return null;
+
+    const screenH = Number(frameState?.screenHeight ?? 0);
+    const sc = window.MapShine?.sceneComposer ?? null;
+    const zoom = Math.max(0.001, Number(frameState?.zoom ?? sc?.currentZoom ?? 1));
+
+    if (screenH > 0) {
+      // Primary: view bounds (stable with pan/zoom in production).
+      const viewH = (Number(frameState?.viewMaxY ?? 0) - Number(frameState?.viewMinY ?? 0));
+      if (viewH > 0) {
+        return (screenH / viewH) * gridSize;
+      }
+
+      // FOV camera at the ground plane.
+      const camera = sc?.camera ?? null;
+      if (camera?.isPerspectiveCamera) {
+        const camZ = Number(camera.position?.z ?? 0);
+        const groundZ = Number(sc?.groundZ ?? sc?.basePlaneMesh?.position?.z ?? 1000);
+        const dist = Math.max(1, Number(sc?.groundDistance ?? (camZ - groundZ)));
+        const fovRad = (Number(camera.fov) || 50) * (Math.PI / 180);
+        const projectedH = 2 * dist * Math.tan(fovRad * 0.5);
+        if (projectedH > 0) {
+          return (screenH / projectedH) * gridSize;
+        }
+      }
+    }
+
+    // Last resort before first FrameState tick (drawing-buffer px not ready yet).
+    const cssH = Number(canvas?.app?.renderer?.height ?? 0);
+    if (cssH > 0) {
+      const dpr = Number(window.devicePixelRatio) || 1;
+      return zoom * gridSize * dpr;
+    }
+
+    return zoom * gridSize;
+  }
+
+  /**
+   * @param {number} resolution
+   * @private
+   */
+  _applyGridResolution(resolution) {
+    if (!Number.isFinite(resolution)) return;
+    if (Math.abs(resolution - this._lastResolution) < 1e-4) return;
+
+    this._lastResolution = resolution;
+    this.gridMaterial.uniforms.uResolution.value = resolution;
+
+    for (const ghost of this._ghostGridMeshes) {
+      const u = ghost?.material?.uniforms;
+      if (u?.uResolution) u.uResolution.value = resolution;
+    }
+  }
+
+  /**
    * Optional integration point so the renderer can be updated every frame.
    * EffectComposer will call update(timeInfo).
    * @param {TimeInfo} _timeInfo
@@ -452,31 +522,15 @@ export class GridRenderer {
   update(_timeInfo) {
     this._updateLevelTransition(_timeInfo);
 
-    // Keep the AA resolution uniform in sync with camera zoom.
-    // This is required for parity with Foundry, where grid thickness is stable across zoom.
+    // Keep AA resolution + LOD fade in sync with camera zoom.
     try {
-      if (!this.gridMaterial) return;
-      if (!this.gridMaterial.uniforms) return;
+      if (!this.gridMaterial?.uniforms) return;
 
       const frameState = getGlobalFrameState();
-      const viewH = (frameState.viewMaxY - frameState.viewMinY) || 0;
-      if (!(viewH > 0)) return;
+      const resolution = this._computeGridResolution(frameState);
+      if (resolution == null) return;
 
-      // Our world units are pixels (at zoom=1), so pixels-per-world-unit is screenHeight / viewHeight.
-      const pixelsPerWorldUnit = frameState.screenHeight / viewH;
-      const gridSize = this.gridMaterial.uniforms.uGridSize?.value || (canvas?.grid?.size || 1);
-      const resolution = pixelsPerWorldUnit * gridSize;
-
-      if (!Number.isFinite(resolution)) return;
-      if (Math.abs(resolution - this._lastResolution) < 1e-4) return;
-
-      this._lastResolution = resolution;
-      this.gridMaterial.uniforms.uResolution.value = resolution;
-
-      for (const ghost of this._ghostGridMeshes) {
-        const u = ghost?.material?.uniforms;
-        if (u?.uResolution) u.uResolution.value = resolution;
-      }
+      this._applyGridResolution(resolution);
     } catch (e) {
       // Non-critical; avoid cascading failures.
     }
@@ -559,18 +613,16 @@ export class GridRenderer {
     const THREE = window.THREE;
     if (!THREE) return;
 
-    // Match SceneComposer positioning: draw the grid only over the scene rectangle.
-    // This prevents the grid from rendering in the padded canvas area and ensures
-    // it overlays the base map plane exactly.
+    // Cover the full Foundry canvas (scene + padding). The fragment shader
+    // derives grid lines from absolute canvas pixel coordinates, so lines
+    // stay aligned with the scene grid and continue seamlessly into the
+    // padded margin — we only widen the draw surface, not the grid origin.
     const dims = canvas.dimensions;
-    const worldHeight = Number(dims.height || 1);
-    const sceneX = Number.isFinite(dims.sceneX) ? dims.sceneX : 0;
-    const sceneY = Number.isFinite(dims.sceneY) ? dims.sceneY : 0;
-    const sceneW = Number(dims.sceneWidth || dims.width || 1);
-    const sceneH = Number(dims.sceneHeight || dims.height || 1);
+    const canvasW = Number(dims.width || dims.sceneWidth || 1);
+    const canvasH = Number(dims.height || dims.sceneHeight || 1);
 
-    // Create plane mesh over the sceneRect (actual map bounds)
-    const geometry = new THREE.PlaneGeometry(sceneW, sceneH);
+    // Create plane mesh over the full canvas (includes padding)
+    const geometry = new THREE.PlaneGeometry(canvasW, canvasH);
 
     // Determine effective settings (parity-first)
     const grid = canvas.grid;
@@ -614,7 +666,9 @@ export class GridRenderer {
         uType: { value: Number(grid.type || 0) },
         uStyle: { value: styleCode },
         uThickness: { value: thickness },
-        uResolution: { value: 1.0 },
+        uResolution: { value: Math.max(1, gridSize) },
+        uLodFadeStart: { value: GRID_LOD_FADE_START_PX },
+        uLodFadeEnd: { value: GRID_LOD_FADE_END_PX },
         uColor: { value: new THREE.Vector3(color.r, color.g, color.b) },
         uAlpha: { value: Math.max(0, Math.min(1, Number(alpha))) }
       },
@@ -623,6 +677,13 @@ export class GridRenderer {
     });
 
     this.gridMaterial = material;
+    try {
+      const initialResolution = this._computeGridResolution(getGlobalFrameState());
+      if (initialResolution != null) {
+        material.uniforms.uResolution.value = initialResolution;
+        this._lastResolution = initialResolution;
+      }
+    } catch (_) {}
 
     this.gridMesh = new THREE.Mesh(geometry, material);
     this.gridMesh.name = 'GridOverlay';
@@ -631,12 +692,9 @@ export class GridRenderer {
     this.gridMesh.layers.set(OVERLAY_THREE_LAYER);
     this.gridMesh.renderOrder = 2000;
     
-    // Position grid relative to groundZ
+    // Position over the full canvas centre (matches SceneComposer background plane).
     const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
-    const centerX = sceneX + (sceneW / 2);
-    const centerYFoundry = sceneY + (sceneH / 2);
-    const centerYWorld = worldHeight - centerYFoundry;
-    this.gridMesh.position.set(centerX, centerYWorld, groundZ + GRID_Z_OFFSET);
+    this.gridMesh.position.set(canvasW / 2, canvasH / 2, groundZ + GRID_Z_OFFSET);
 
     // Ensure a stable baseline when the mesh is recreated.
     if (!Number.isFinite(this._displayLevelOffset)) this._displayLevelOffset = 0;
@@ -647,7 +705,7 @@ export class GridRenderer {
     this._refreshGhostGridMeshes();
 
     this.scene.add(this.gridMesh);
-    log.info(`Grid rendered (shader): type ${grid.type}, size ${grid.size}, style ${styleKey}`);
+    log.info(`Grid rendered (shader): type ${grid.type}, size ${grid.size}, style ${styleKey}, canvas ${canvasW}x${canvasH}`);
 
     // Force initial resolution update (if FrameState is available)
     try {
@@ -694,7 +752,8 @@ export class GridRenderer {
 
   _getFragmentShaderSource() {
     // Port of Foundry's GridShader core logic (simplified for Three.js).
-    // Computes grid coverage in grid-space units and anti-aliases using a resolution uniform.
+    // Analytical AA uses uResolution (px/cell) plus screen-space derivatives.
+    // uLodFade* attenuates the grid when cells are sub-pixel to avoid moiré.
     return `
       precision highp float;
 
@@ -706,6 +765,8 @@ export class GridRenderer {
       uniform int uStyle;
       uniform float uThickness;
       uniform float uResolution;
+      uniform float uLodFadeStart;
+      uniform float uLodFadeEnd;
       uniform vec3 uColor;
       uniform float uAlpha;
 
@@ -917,7 +978,11 @@ export class GridRenderer {
         float a = drawGrid(gridCoord, uStyle, uThickness);
         if (a <= 0.0) discard;
 
-        gl_FragColor = vec4(uColor, uAlpha * a);
+        // Fade out when each cell is smaller than ~1 screen px — procedural
+        // grids cannot mip-map; attenuation is the clean alternative to moiré.
+        float lodFade = smoothstep(uLodFadeStart, uLodFadeEnd, uResolution);
+
+        gl_FragColor = vec4(uColor, uAlpha * a * lodFade);
       }
     `;
   }

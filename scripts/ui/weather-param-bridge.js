@@ -563,6 +563,7 @@ export function syncDirectedCustomPresetFromWeatherController(wc) {
     } else {
       cp.controlState.windSpeedMS = Math.max(0, Math.min(MAX_WIND_MS, ws * MAX_WIND_MS));
     }
+    cp.controlState.wind01 = Math.max(0, Math.min(1, Math.pow(ws, 1 / 1.4)));
     cp.controlState.windDirection = preset.windDirection;
 
     try {

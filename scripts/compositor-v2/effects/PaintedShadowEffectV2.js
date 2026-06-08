@@ -64,7 +64,7 @@ export class PaintedShadowEffectV2 {
       contactSharpBlendHigh: 0.78,
       /** Grow shadow coverage in shadow RT pixels (max-filter); hides rim at footprint. */
       shadowEdgeInflatePx: 1.25,
-      resolutionScale: 1,
+      resolutionScale: 2,
       sunLatitude: 0.1,
       dynamicLightShadowOverrideEnabled: true,
       dynamicLightShadowOverrideStrength: 0.7,
@@ -280,7 +280,7 @@ export class PaintedShadowEffectV2 {
             'Expands painted shadow slightly in this pass’s pixel grid (often lower-res than canvas) so it tucks under assets and hides bright rim cracks. 0 = off.',
           advanced: true,
         },
-        resolutionScale: { type: 'slider', label: 'Resolution', min: 0.75, max: 2.0, step: 0.05, default: 1, advanced: true },
+        resolutionScale: { type: 'slider', label: 'Resolution', min: 0.75, max: 2.0, step: 0.05, default: 2, advanced: true },
       },
     };
   }

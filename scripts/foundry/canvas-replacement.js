@@ -45,7 +45,6 @@ import {
 } from './effect-wiring.js';
 import { TileEffectBindingManager } from '../scene/TileEffectBindingManager.js';
 import { RenderLoop } from '../core/render-loop.js';
-import { TweakpaneManager } from '../ui/tweakpane-manager.js';
 import { normalizeEffectRgbParam } from '../ui/parameter-validator.js';
 import { ControlPanelManager } from '../ui/control-panel-manager.js';
 import { syncAtmosphericFogEffectFromControlState } from '../ui/atmospheric-fog-bridge.js';
@@ -96,6 +95,7 @@ import * as assetLoader from '../assets/loader.js';
 import { globalLoadingProfiler } from '../core/loading-profiler.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { WeatherController, weatherController } from '../core/WeatherController.js';
+import { SceneWindField, sceneWindField } from '../core/SceneWindField.js';
 import { DynamicExposureManager } from '../core/DynamicExposureManager.js';
 import { ControlsIntegration } from './controls-integration.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
@@ -142,6 +142,16 @@ import { PerformanceRecorderDialog } from '../ui/performance-recorder-dialog.js'
 
 const log = createLogger('Canvas');
 
+/** @type {typeof import('../ui/tweakpane-manager.js').TweakpaneManager|null} */
+let TweakpaneManagerClass = null;
+
+/** Lazy-load TweakpaneManager to avoid init-time circular imports with module.js. */
+async function loadTweakpaneManagerClass() {
+  if (!TweakpaneManagerClass) {
+    ({ TweakpaneManager: TweakpaneManagerClass } = await import('../ui/tweakpane-manager.js'));
+  }
+  return TweakpaneManagerClass;
+}
 
 async function _withTimeout(promise, timeoutMs, label) {
   const ms = Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : 0;
@@ -1029,7 +1039,7 @@ let cameraFollower = null;
 /** @type {PixiInputBridge|null} */
 let pixiInputBridge = null;
 
-/** @type {TweakpaneManager|null} */
+/** @type {import('../ui/tweakpane-manager.js').TweakpaneManager|null} */
 let uiManager = null;
 
 /** @type {ControlPanelManager|null} */
@@ -5942,7 +5952,7 @@ async function onCanvasReady(canvas) {
     log.debug(`Scene not enabled for Map Shine, initializing UI-only mode: ${scene.name}`);
     if (!uiManager) {
       await safeCallAsync(async () => {
-        uiManager = new TweakpaneManager();
+        uiManager = new (await loadTweakpaneManagerClass())();
         await uiManager.initialize();
         if (window.MapShine) window.MapShine.uiManager = uiManager;
         log.info('Map Shine UI initialized in UI-only mode');
@@ -8370,7 +8380,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
         }
 
         if (!uiManager) {
-          uiManager = new TweakpaneManager();
+          uiManager = new (await loadTweakpaneManagerClass())();
           await uiManager.initialize();
           safeCall(() => loadingOverlay.setStage('ui.panels', 0.35, 'UI manager ready...', { keepAuto: false }), 'overlay.uiInit.uiManagerReady', Severity.COSMETIC);
           await new Promise(r => setTimeout(r, 0)); // yield
@@ -8609,6 +8619,29 @@ async function createThreeCanvas(scene, createOptions = {}) {
 
           uiManager.registerEffect('weather', 'Weather', weatherSchema, onWeatherUpdate, 'atmospheric');
         }, 'v2.registerWeatherUI.early', Severity.DEGRADED);
+
+        safeCall(() => {
+          const onSceneWindUpdate = (_effectId, paramId, value) => {
+            try {
+              if (paramId === 'enabled') {
+                sceneWindField.params.enabled = !!value;
+                sceneWindField.applyParamChange('enabled', !!value);
+              } else {
+                sceneWindField.applyParamChange(paramId, value);
+              }
+              sceneWindField.propagateToConsumers(
+                window.MapShine?.effectComposer?._floorCompositorV2 ?? null,
+              );
+            } catch (_) {}
+          };
+          uiManager.registerEffect(
+            'scene-wind',
+            'Wind',
+            SceneWindField.getControlSchema(),
+            onSceneWindUpdate,
+            'atmospheric',
+          );
+        }, 'v2.registerSceneWindUI', Severity.DEGRADED);
         safeCall(() => loadingOverlay.setStage('ui.panels', 0.60, 'Weather ready...', { keepAuto: false }), 'overlay.uiInit.weatherDone', Severity.COSMETIC);
         await new Promise(r => setTimeout(r, 0)); // yield
 
@@ -9049,7 +9082,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
           const emberColorStartDefault = { ...(ashTuning.emberColorStart ?? { r: 1.0, g: 0.25, b: 0.0 }) };
           const emberColorEndDefault = { ...(ashTuning.emberColorEnd ?? { r: 1.0, g: 0.25, b: 0.0 }) };
           const ashWeatherSchema = {
-            enabled: true,
+            enabled: false,
             groups: [
               { name: 'ash', label: 'Ashfall', type: 'inline', parameters: ['ashIntensity', 'ashIntensityScale', 'ashEmissionRate'] },
               { name: 'ash-appearance', label: 'Ash Appearance', type: 'inline', advanced: true, separator: true, parameters: ['ashSizeMin', 'ashSizeMax', 'ashLifeMin', 'ashLifeMax', 'ashSpeedMin', 'ashSpeedMax', 'ashOpacityStartMin', 'ashOpacityStartMax', 'ashOpacityEnd', 'ashColorStart', 'ashColorEnd', 'ashBrightness', 'ashMaterialTint', 'ashLifeBrighten', 'ashLifeAlphaFade'] },
@@ -9057,8 +9090,8 @@ async function createThreeCanvas(scene, createOptions = {}) {
               { name: 'embers', label: 'Embers', type: 'inline', advanced: true, separator: true, parameters: ['emberEmissionRate', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'emberSpeedMin', 'emberSpeedMax', 'emberOpacityStartMin', 'emberOpacityStartMax', 'emberOpacityEnd', 'emberColorStart', 'emberColorEnd', 'emberBrightness', 'emberGravityScale', 'emberWindInfluence', 'emberWindBase', 'emberCurlStrength', 'emberCurlNoiseScale', 'emberCurlTimeScale'] }
             ],
             parameters: {
-              enabled: { type: 'boolean', default: true },
-              ashIntensity: { label: 'Ash Intensity', type: 'slider', default: 1.0, min: 0.0, max: 1.0, step: 0.01 },
+              enabled: { type: 'boolean', default: false },
+              ashIntensity: { label: 'Ash Intensity', type: 'slider', default: 0, min: 0.0, max: 1.0, step: 0.01 },
               ashIntensityScale: { label: 'Intensity Scale', type: 'slider', default: ashTuning.intensityScale ?? 0.5, min: 0.0, max: 4.0, step: 0.05 },
               ashEmissionRate: { label: 'Emission Rate', type: 'slider', default: ashTuning.emissionRate ?? 840, min: 0, max: 2400, step: 10 },
               ashSizeMin: { label: 'Size Min', type: 'slider', default: ashTuning.sizeMin ?? 5, min: 1, max: 60, step: 1 },
@@ -9077,8 +9110,8 @@ async function createThreeCanvas(scene, createOptions = {}) {
               ashLifeBrighten: { label: 'Life Brighten', type: 'slider', default: ashTuning.ashLifeBrighten ?? 2.28, min: 0.5, max: 4.0, step: 0.02 },
               ashLifeAlphaFade: { label: 'Life Alpha Fade', type: 'slider', default: ashTuning.ashLifeAlphaFade ?? 0.32, min: 0.05, max: 1.0, step: 0.01 },
               ashGravityScale: { label: 'Gravity Scale', type: 'slider', default: ashTuning.gravityScale ?? 0.55, min: 0.0, max: 3.0, step: 0.05 },
-              ashWindInfluence: { label: 'Wind Influence', type: 'slider', default: ashTuning.windInfluence ?? 4, min: 0.0, max: 4.0, step: 0.05 },
-              ashWindBase: { label: 'Wind Base', type: 'slider', default: ashTuning.ashWindBase ?? 1450, min: 0, max: 2000, step: 10 },
+              ashWindInfluence: { label: 'Wind Influence', type: 'slider', default: 2.1, min: 0.0, max: 4.0, step: 0.05 },
+              ashWindBase: { label: 'Wind Base', type: 'slider', default: 400, min: 0, max: 2000, step: 10 },
               ashCurlStrength: { label: 'Curl Strength', type: 'slider', default: ashTuning.curlStrength ?? 3, min: 0.0, max: 10.0, step: 0.05 },
               ashCurlNoiseScale: { label: 'Curl Noise Scale', type: 'slider', default: ashTuning.curlNoiseScale ?? 1.0, min: 0.2, max: 3.0, step: 0.02 },
               ashCurlTimeScale: { label: 'Curl Time Scale', type: 'slider', default: ashTuning.curlTimeScale ?? 0.88, min: 0.1, max: 3.0, step: 0.02 },
@@ -9094,7 +9127,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
               emberOpacityEnd: { label: 'Ember Opacity End', type: 'slider', default: ashTuning.emberOpacityEnd ?? 0.83, min: 0.0, max: 1.0, step: 0.01 },
               emberColorStart: { type: 'color', label: 'Ember Color Start', default: emberColorStartDefault },
               emberColorEnd: { type: 'color', label: 'Ember Color End', default: emberColorEndDefault },
-              emberBrightness: { label: 'Ember Brightness (HDR)', type: 'slider', default: ashTuning.emberBrightness ?? 9.5, min: 0.0, max: 12.0, step: 0.05 },
+              emberBrightness: { label: 'Ember Brightness (HDR)', type: 'slider', default: 5, min: 0.0, max: 12.0, step: 0.05 },
               emberGravityScale: { label: 'Ember Gravity Scale', type: 'slider', default: ashTuning.emberGravityScale ?? 0, min: 0.0, max: 3.0, step: 0.05 },
               emberWindInfluence: { label: 'Ember Wind Influence', type: 'slider', default: ashTuning.emberWindInfluence ?? 0.45, min: 0.0, max: 4.0, step: 0.05 },
               emberWindBase: { label: 'Ember Wind Base', type: 'slider', default: ashTuning.emberWindBase ?? 650, min: 0, max: 2500, step: 10 },

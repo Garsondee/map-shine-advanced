@@ -27,10 +27,10 @@ export class DotScreenEffectV2 {
 
     this.params = {
       enabled: false,
-      strength: 0.85,
-      scale: 1.6,
+      strength: 1,
+      scale: 10,
       angle: 1.57,
-      centerX: 0.5,
+      centerX: 0.56,
       centerY: 0.5
     };
   }
@@ -85,7 +85,7 @@ export class DotScreenEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.85,
+          default: 1,
           tooltip: 'How much of the dot pattern is mixed in (0 = bypass).',
         },
         scale: {
@@ -94,7 +94,7 @@ export class DotScreenEffectV2 {
           min: 0.1,
           max: 10.0,
           step: 0.05,
-          default: 1.6,
+          default: 10,
           tooltip: 'Fineness of the dot grid (higher = smaller / denser dots).',
         },
         angle: {
@@ -112,7 +112,7 @@ export class DotScreenEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.001,
-          default: 0.5,
+          default: 0.56,
           tooltip: 'Horizontal pattern origin in UV space (0 = left, 1 = right).',
         },
         centerY: {

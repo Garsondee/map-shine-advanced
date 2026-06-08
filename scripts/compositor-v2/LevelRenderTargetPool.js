@@ -42,11 +42,8 @@ export class LevelRenderTargetPool {
    * Acquire (or reuse) an RT set for the given level index.
    *
    * When a renderer is supplied and a *new* entry is allocated, each RT
-   * receives a one-time unscissored full clear to opaque black. This is
-   * required for the SceneRectScissor pipeline: subsequent passes write
-   * only inside the inner sceneRect, leaving the outer area untouched.
-   * Bloom's mip downsample samples the input RT at full UV, so the outer
-   * area must contain a known value (not driver-uninitialized memory).
+   * receives a one-time full clear to opaque black so bloom's mip downsample
+   * reads a known value (not driver-uninitialized memory) at full UV.
    *
    * @param {number} levelIndex
    * @param {THREE.WebGLRenderer} [renderer]
@@ -84,10 +81,8 @@ export class LevelRenderTargetPool {
   }
 
   /**
-   * Unscissored full clear of one or more RTs to opaque black. Used to
-   * pre-fill outer-rect (padded zone + outer black region) pixels with a
-   * known value before the SceneRectScissor pipeline starts writing only
-   * inside the inner sceneRect.
+   * Full clear of one or more RTs to opaque black. Pre-fills pixels with a
+   * known value before effect passes write into the RT.
    *
    * @param {THREE.WebGLRenderer} renderer
    * @param {{sceneRT: THREE.WebGLRenderTarget, postA: THREE.WebGLRenderTarget, postB: THREE.WebGLRenderTarget}} entry
@@ -170,8 +165,7 @@ export class LevelRenderTargetPool {
 
   /**
    * Resize all allocated RTs. Optionally re-clears each entry to opaque
-   * black so the SceneRectScissor pipeline doesn't read driver-
-   * uninitialized memory in the outer-rect area after a reallocation.
+   * black after reallocation so bloom does not read uninitialized memory.
    *
    * @param {number} width
    * @param {number} height

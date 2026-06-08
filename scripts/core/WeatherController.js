@@ -271,6 +271,17 @@ export class WeatherController {
     // surge envelope (legacy-compatible replacement for binary gust toggles).
     this._lastWindSpeed01 = this.currentState.windSpeed;
 
+    // Layered wind direction evolution (offsets around astrolabe nominal bearing).
+    this._windMesoOffsetRad = 0;
+    this._windMesoVelocityRad = 0;
+    this._windMacroTargetRad = 0;
+    this._windMacroCurrentRad = 0;
+    this._windMacroDuration = 0;
+    this._windMacroElapsed = 0;
+    this._windMacroActive = false;
+    this._windNextMacroIn = 55 + Math.random() * 90;
+    this._windInversionCooldown = 120 + Math.random() * 180;
+
     this._environmentState = {
       timeOfDay: 0.0,
       sceneDarkness: 0.0,
@@ -2982,14 +2993,79 @@ export class WeatherController {
     this.isGusting = this.currentGustStrength > 0.15;
 
 
-    // Wind direction = target heading + bounded continuous meander.
-    // Keep perturbation around target heading (no random-walk integration).
+    // Wind direction = astrolabe nominal + layered evolution (all tiers).
+    const evoScale = Number(window.MapShine?.sceneWindField?.params?.directionEvolutionScale) || 1.0;
+    const profile = window.MapShine?.sceneWindField?.getActiveProfile?.() ?? null;
+    const jitterRad = (profile?.directionJitterRad ?? (0.02 + windBase01 * 0.12)) * evoScale;
+
     const dirLowSigned = (this._getPinkNoise01(time * 0.02 + this.noiseOffset * 1.3 + 100.0) * 2.0 - 1.0);
     const dirHighSigned = (this._getPinkNoise01(time * 0.11 + this.noiseOffset * 5.1 + 190.0) * 2.0 - 1.0);
-    const maxDirOffsetRad = (0.04 + 0.22 * windBase01) * baseVarClamped;
-    const dirOffset = ((dirLowSigned * 0.7) + (dirHighSigned * 0.3)) * maxDirOffsetRad;
+    const microOffset = ((dirLowSigned * 0.7) + (dirHighSigned * 0.3)) * jitterRad;
+
+    // Meso backing/veering — slow signed drift with mean reversion.
+    if (windBase01 > 0.18) {
+      const mesoNoise = (this._getPinkNoise01(time * 0.015 + this.noiseOffset * 2.1 + 41.0) * 2.0 - 1.0);
+      const mesoTarget = mesoNoise * (0.06 + windBase01 * 0.28) * baseVarClamped * evoScale;
+      const backingBias = -0.006 * windBase01 * Math.max(0, dt);
+      const mesoK = 1.0 - Math.exp(-Math.max(0, dt) * 0.35);
+      this._windMesoVelocityRad += (mesoTarget - this._windMesoOffsetRad) * mesoK + backingBias;
+      this._windMesoOffsetRad += this._windMesoVelocityRad * dt;
+      this._windMesoOffsetRad *= (1.0 - 0.012 * Math.max(0, dt));
+      this._windMesoVelocityRad *= (1.0 - 0.04 * Math.max(0, dt));
+    } else {
+      const decayK = 1.0 - Math.exp(-Math.max(0, dt) * 1.2);
+      this._windMesoOffsetRad *= (1.0 - decayK);
+      this._windMesoVelocityRad *= (1.0 - decayK);
+    }
+
+    // Occasional macro shifts (weather-front feel).
+    this._windNextMacroIn -= Math.max(0, dt);
+    if (this._windNextMacroIn <= 0 && windBase01 > 0.12) {
+      this._windMacroActive = true;
+      this._windMacroElapsed = 0;
+      this._windMacroDuration = 8 + Math.random() * 22;
+      const sign = Math.random() < 0.5 ? -1 : 1;
+      const magDeg = (18 + Math.random() * 42) * (0.35 + windBase01 * 0.65);
+      this._windMacroTargetRad = sign * (magDeg * Math.PI / 180) * evoScale;
+      this._windNextMacroIn = (50 + Math.random() * 160) * (1.15 - windBase01 * 0.5);
+    }
+
+    if (this._windMacroActive) {
+      this._windMacroElapsed += Math.max(0, dt);
+      const prog = Math.min(1, this._windMacroElapsed / Math.max(0.5, this._windMacroDuration));
+      const eased = prog < 0.5
+        ? 4 * prog * prog * prog
+        : 1 - Math.pow(-2 * prog + 2, 3) / 2;
+      this._windMacroCurrentRad = this._windMacroTargetRad * eased;
+      if (prog >= 1.0) {
+        this._windMacroActive = false;
+        this._windMacroCurrentRad = this._windMacroTargetRad;
+      }
+    }
+
+    // Rare inversion / wind-shift events.
+    this._windInversionCooldown -= Math.max(0, dt);
+    if (this._windInversionCooldown <= 0 && windBase01 > 0.3 && Math.random() < 0.000015 * Math.max(0, dt)) {
+      this._windInversionCooldown = 280 + Math.random() * 520;
+      this._windMacroActive = true;
+      this._windMacroElapsed = 0;
+      this._windMacroDuration = 35 + Math.random() * 25;
+      const flip = Math.random() < 0.5 ? 1 : -1;
+      this._windMacroTargetRad = flip * Math.PI * (0.75 + Math.random() * 0.25) * evoScale;
+    }
+
+    // Storm-tier rapid swing within ±45° of nominal.
+    let stormSwing = 0;
+    const stormSwingRad = Number(profile?.stormSwingRad) || 0;
+    if (stormSwingRad > 1e-5) {
+      const stormA = (this._getPinkNoise01(time * 0.38 + this.noiseOffset * 8.2 + 17.0) * 2.0 - 1.0);
+      const stormB = (this._getPinkNoise01(time * 0.67 + this.noiseOffset * 11.3 + 83.0) * 2.0 - 1.0);
+      stormSwing = (stormA * 0.62 + stormB * 0.38) * stormSwingRad;
+    }
+
+    const totalOffset = microOffset + this._windMesoOffsetRad + this._windMacroCurrentRad + stormSwing;
     const baseAngle = this._mathAngleFromWindDir(this.targetState.windDirection);
-    this._setWindDirFromMathAngle(baseAngle + dirOffset, this.currentState.windDirection);
+    this._setWindDirFromMathAngle(baseAngle + totalOffset, this.currentState.windDirection);
 
     // Ash Intensity = Target + subtle noise variation
     // Only modulate if target ashIntensity > 0 so idle scenes aren't affected.
@@ -3487,7 +3563,8 @@ export class WeatherController {
           min: 0.0,
           max: 4.0,
           step: 0.05,
-          group: 'rain'
+          group: 'rain',
+          hidden: true,
         },
         rainCurlStrength: {
           label: 'Rain Curl Strength',
@@ -4037,7 +4114,8 @@ export class WeatherController {
           min: 0.0,
           max: 2.0,
           step: 0.05,
-          group: 'snow'
+          group: 'snow',
+          hidden: true,
         },
         snowCurlStrength: {
           label: 'Snow Curl Strength',
@@ -4179,7 +4257,6 @@ export class WeatherController {
             'rainDropSizeMax',
             'rainBrightness',
             'rainGravityScale',
-            'rainWindInfluence',
             'rainCurlStrength',
             'rainChaosStrength',
             'rainTurbulenceStrength',
@@ -4236,7 +4313,6 @@ export class WeatherController {
             'snowFlakeSize',
             'snowBrightness',
             'snowGravityScale',
-            'snowWindInfluence',
             'snowCurlStrength',
             'snowFlutterStrength'
           ]

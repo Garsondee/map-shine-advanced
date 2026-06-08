@@ -16,7 +16,7 @@ export class SepiaEffectV2 {
   static optInEnable = true;
 
   constructor() {
-    this._enabled = false;
+    this._enabled = true;
     this._initialized = false;
 
     this._quadScene = null;
@@ -25,8 +25,8 @@ export class SepiaEffectV2 {
     this._material = null;
 
     this.params = {
-      enabled: false,
-      strength: 1.0
+      enabled: true,
+      strength: 0.6
     };
   }
 
@@ -37,7 +37,7 @@ export class SepiaEffectV2 {
 
   static getControlSchema() {
     return {
-      enabled: false,
+      enabled: true,
       help: {
         title: 'Sepia tone',
         summary: [
@@ -60,14 +60,14 @@ export class SepiaEffectV2 {
         },
       ],
       parameters: {
-        enabled: { type: 'boolean', default: false, hidden: true },
+        enabled: { type: 'boolean', default: true, hidden: true },
         strength: {
           type: 'slider',
           label: 'Strength',
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 1.0,
+          default: 0.6,
           tooltip: 'How much sepia is mixed in (0 leaves the image unchanged).',
         },
       },

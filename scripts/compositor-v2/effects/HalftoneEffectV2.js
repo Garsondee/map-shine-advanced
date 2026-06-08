@@ -26,10 +26,10 @@ export class HalftoneEffectV2 {
 
     this.params = {
       enabled: false,
-      radius: 4.0,
+      radius: 6.3,
       shape: 1,
       scatter: 0.0,
-      strength: 0.69,
+      strength: 0.47,
       blendingMode: 1,
       greyscale: false
     };
@@ -42,8 +42,8 @@ export class HalftoneEffectV2 {
 
   static getControlSchema() {
     const presetBase = {
-      strength: 0.69,
-      radius: 4.0,
+      strength: 0.47,
+      radius: 6.3,
       shape: 1,
       blendingMode: 1,
       scatter: 0.0,
@@ -102,7 +102,7 @@ export class HalftoneEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.69,
+          default: 0.47,
           tooltip: 'Intensity of the halftone treatment (0 leaves the image unchanged in the shader).',
         },
         radius: {
@@ -111,7 +111,7 @@ export class HalftoneEffectV2 {
           min: 1.0,
           max: 16.0,
           step: 0.25,
-          default: 4.0,
+          default: 6.3,
           tooltip: 'Cell size in pixels (coarser halftone as this increases).',
         },
         shape: {

@@ -4,6 +4,7 @@
  */
 
 import { GUSTINESS_LABELS, GUSTINESS_DISPLAY } from './astrolabe-dial.js';
+import { WIND_TIER_LABELS, windTierFrom01 } from '../../../core/wind-profile.js';
 
 /** @type {Record<string, { icon: string, tint: string, fill: string }>} */
 export const FADER_META = Object.freeze({
@@ -14,6 +15,7 @@ export const FADER_META = Object.freeze({
   fogDensity: { icon: '🌫', tint: 'slate', fill: 'rgba(140, 160, 190, 0.82)' },
   lightning: { icon: '⚡', tint: 'amber', fill: 'rgba(255, 200, 80, 0.9)' },
   windSpeed: { icon: '💨', tint: 'teal', fill: 'rgba(80, 200, 180, 0.85)' },
+  wind01: { icon: '💨', tint: 'teal', fill: 'rgba(80, 200, 180, 0.85)' },
   gustiness: { icon: '🌪', tint: 'teal', fill: 'rgba(100, 210, 190, 0.88)' },
   ashIntensity: { icon: '🌋', tint: 'orange', fill: 'rgba(255, 140, 60, 0.88)' },
   replicaOcclusionRadiusScale: { icon: '⭕', tint: 'slate', fill: 'rgba(140, 160, 190, 0.82)' },
@@ -29,6 +31,7 @@ const FADER_HINTS = Object.freeze({
   fogDensity: 'Ground fog density',
   lightning: 'Ambient lightning activity (not manual strikes below)',
   windSpeed: 'Wind speed in m/s',
+  wind01: 'Scene wind — calm leaf flutter to hurricane force',
   gustiness: 'How much wind speed varies over time',
   ashIntensity: 'Volcanic ash density',
   replicaOcclusionRadiusScale: 'Player light occlusion radius',
@@ -59,7 +62,7 @@ export function createFaderBoard(container, specs, hooks) {
   const defaultHint = [
     'Hover a control for help',
     'Sliders: drag track up/down to adjust',
-    'Dial: ring = time · sock = wind direction & speed',
+    'Dial: ring = time · sock = wind direction · Wind fader = strength',
   ];
 
   /** @type {Record<string, { range: HTMLInputElement, readout: HTMLElement, faderEl: HTMLElement, iconEl: HTMLElement, fillBar?: HTMLElement }>} */
@@ -71,7 +74,15 @@ export function createFaderBoard(container, specs, hooks) {
     const detail = FADER_HINTS[metaKey];
     const boundTag = spec.variant === 'min' ? 'floor' : (spec.variant === 'max' ? 'ceiling' : null);
     let text;
-    if (spec.id === 'gustiness' || metaKey === 'gustiness') {
+    if (spec.id === 'wind01' || metaKey === 'wind01') {
+      const w = Math.max(0, Math.min(1, Number(value) || 0));
+      const tier = WIND_TIER_LABELS[windTierFrom01(w)] || 'Calm';
+      text = [
+        `Wind — ${Math.round(w * 100)}% · ${tier}`,
+        detail || 'Calm leaf flutter to hurricane force',
+        'Drag up = stronger wind · down = calm',
+      ];
+    } else if (spec.id === 'gustiness' || metaKey === 'gustiness') {
       const key = GUSTINESS_LABELS[Math.round(Number(value))] || 'moderate';
       const name = GUSTINESS_DISPLAY[key] || key;
       text = [
@@ -298,6 +309,10 @@ export function createFaderBoard(container, specs, hooks) {
  */
 function toPercentLabel(spec, value) {
   if (!Number.isFinite(value)) return '—';
+  if (spec.id === 'wind01') {
+    const w = Math.max(0, Math.min(1, Number(value) || 0));
+    return `${Math.round(w * 100)}% ${WIND_TIER_LABELS[windTierFrom01(w)] || 'Calm'}`;
+  }
   if (spec.id === 'gustiness') {
     const key = GUSTINESS_LABELS[Math.round(Number(value))] || 'moderate';
     return GUSTINESS_DISPLAY[key] || key;
@@ -314,6 +329,10 @@ function toPercentLabel(spec, value) {
  */
 function formatReadout(paramId, value) {
   if (!Number.isFinite(value)) return '—';
+  if (paramId === 'wind01') {
+    const w = Math.max(0, Math.min(1, Number(value) || 0));
+    return `${Math.round(w * 100)}% ${WIND_TIER_LABELS[windTierFrom01(w)] || 'Calm'}`;
+  }
   if (paramId === 'gustiness') {
     const key = GUSTINESS_LABELS[Math.round(Number(value))] || 'moderate';
     return GUSTINESS_DISPLAY[key] || key;
@@ -385,7 +404,7 @@ export function mirrorFaderRow(rows, paramId, value) {
   row.range.value = String(value);
   const min = Number(row.range.min) || 0;
   const max = Number(row.range.max) || 1;
-  const label = paramId === 'gustiness'
+  const label = (paramId === 'gustiness' || paramId === 'wind01')
     ? formatReadout(paramId, value)
     : `${Math.round(max > min ? ((value - min) / (max - min)) * 100 : 0)}%`;
   row.readout.textContent = label;

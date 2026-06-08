@@ -12,6 +12,7 @@ import { weatherController } from '../../core/WeatherController.js';
 import { loadCloudSpriteTextures } from './cloud-sprites/cloud-asset-loader.js';
 import { CloudTexturePicker } from './cloud-sprites/CloudSprite.js';
 import { resolveEffectWindWorld } from './resolve-effect-wind.js';
+import { advanceCloudWindAdvection } from './cloud-wind-advection.js';
 import { GROUND_Z, effectUnderOverheadOrder } from '../LayerOrderPolicy.js';
 import {
   AshCloudSprite,
@@ -535,10 +536,10 @@ export class AshCloudEffectV2 {
     const fromSim = this._windDriftUV(this._windVelocity);
     if (fromSim.len > 1e-4) return fromSim;
 
-    this._tempVec2A.set(ws?.windDirX ?? 0, ws?.windDirY ?? 0);
+    this._tempVec2A.set(ws?.windDirX ?? 0, -(ws?.windDirY ?? 0));
     if (this._tempVec2A.lengthSq() < 1e-8) {
       const resolved = resolveEffectWindWorld();
-      this._tempVec2A.set(resolved.dirX, resolved.dirY);
+      this._tempVec2A.set(resolved.dirX, -resolved.dirY);
     }
     return this._windDriftUV(this._tempVec2A);
   }
@@ -734,7 +735,7 @@ export class AshCloudEffectV2 {
       return this._tempDriftUV;
     }
     this._tempDriftUV.du = wind.x / len;
-    this._tempDriftUV.dv = -(wind.y / len);
+    this._tempDriftUV.dv = wind.y / len;
     this._tempDriftUV.len = len;
     return this._tempDriftUV;
   }
@@ -1095,18 +1096,17 @@ export class AshCloudEffectV2 {
 
   /** @private */
   _advanceWindSim(delta, windDirX, windDirY, windSpeed) {
-    const p = this.params;
-    const targetSpd = Math.max(windSpeed * p.windInfluence * p.driftSpeed, p.minDriftSpeed || 0);
-    const resp = Math.max(0, p.driftResponsiveness ?? 0.45);
-    const maxSpd = Math.max(0, p.driftMaxSpeed ?? 0.55);
-    const alpha = resp > 0 ? (1 - Math.exp(-resp * delta)) : 1;
-
-    this._tempVec2A.set(windDirX, windDirY);
-    if (this._tempVec2A.lengthSq() > 1e-6) this._tempVec2A.normalize();
-    this._tempVec2A.multiplyScalar(targetSpd);
-    this._windVelocity.lerp(this._tempVec2A, alpha);
-    const vl = this._windVelocity.length();
-    if (vl > maxSpd && vl > 1e-6) this._windVelocity.multiplyScalar(maxSpd / vl);
+    const geom = this._sceneGeometry;
+    advanceCloudWindAdvection(
+      this._windVelocity,
+      this._tempVec2A,
+      delta,
+      windDirX,
+      windDirY,
+      windSpeed,
+      this.params,
+      { centerX: geom?.centerX, centerY: geom?.centerY },
+    );
   }
 
   /** @private */

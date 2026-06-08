@@ -211,16 +211,16 @@ export class LightingEffectV2 {
       /** Scales Foundry ambient brightest colour at darkness 0 (noon / bright scenes). */
       ambientDayScale: 0,
       /** Outdoor day ambient (_Outdoors mask); falls back to ambientDayScale when unset. */
-      ambientDayScaleOutdoor: 2.5,
+      ambientDayScaleOutdoor: 1,
       /** Indoor day ambient (_Outdoors mask); falls back to ambientDayScale when unset. */
-      ambientDayScaleIndoor: 1.35,
+      ambientDayScaleIndoor: 1,
       /** Scales Foundry ambient darkness colour at darkness 1 (night). */
       ambientNightScale: 0,
-      ambientNightScaleOutdoor: 2,
-      ambientNightScaleIndoor: 2,
-      lightIntensity: 0.9,
+      ambientNightScaleOutdoor: 1,
+      ambientNightScaleIndoor: 1.1,
+      lightIntensity: 1,
       /** Half-life falloff: normalized radius per halving at Foundry attenuation 0 (gentle). */
-      falloffHalfInAtAtt0: 0.52,
+      falloffHalfInAtAtt0: 0.51,
       /** Foundry zone hardness at attenuation 1 (bright ring); larger = softer, fills radius. */
       falloffHalfInAtAtt1: 0.22,
       falloffHalfOutAtAtt0: 0.38,
@@ -238,7 +238,7 @@ export class LightingEffectV2 {
       /** Scales the minimum illumination floor under darkness (see compose shader). */
       minIlluminationScale: 0,
       /** Compose boost on saturated radiance excess (1 = off; ~2.5 matches Foundry-like CI). */
-      colorationStrength: 3.2,
+      colorationStrength: 1,
       /** Multiplier on buffer colorMix before strength. */
       colorationMixScale: 1.0,
       /** Exponent on scaled colorMix (CI curve). */
@@ -301,9 +301,9 @@ export class LightingEffectV2 {
        * Amplifies darkness from the unified combined shadow texture (1 = as authored,
        * up to 10 = treat subtle penumbra as much deeper shadow for tuning).
        */
-      combinedShadowEffectStrength: 4,
+      combinedShadowEffectStrength: 2,
       /** How much cloud / combined shadow darkens ambient here (0 = ignore, 1 = full). */
-      cloudShadowAmbientInfluence: 0.45,
+      cloudShadowAmbientInfluence: 1,
       /** Scales overhead shadow strength on ambient only (0 = off). */
       overheadShadowAmbientInfluence: 1.0,
       /** How strongly dynamic lights neutralize ambient shadow darkening (0 = off, 1 = full). */
@@ -318,7 +318,7 @@ export class LightingEffectV2 {
        * building×painted structural lit texture. Gameplay-scale lights clear via structural
        * shadow override only. 0 = legacy (fills and tints bypass structural shadow).
        */
-      directStructuralOcclusionStrength: 0.5,
+      directStructuralOcclusionStrength: 1,
       /** Internal render scale for source lights RT (1.0 = full resolution). */
       internalLightResolutionScale: 1.0,
       /** Internal render scale for window glow RT (1.0 = full resolution). */
@@ -331,15 +331,15 @@ export class LightingEffectV2 {
        * Window glow indirect illumination in compose (`totalIllumination += win × gain`).
        * Separate from point-lamp HDR in `_lightRT`.
        */
-      windowEmissiveGain: 1.3,
+      windowEmissiveGain: 0.55,
       /** Pow shaping on window mag in compose (lower = hotter cores, less flat wash). */
-      windowIndirectContrast: 0.74,
+      windowIndirectContrast: 1.2,
       /** Mix window hue into indirect illumination (0 = neutral white). */
-      windowWarmthTint: 0,
+      windowWarmthTint: 1,
       /** Scales indirect window spill by wall albedo luma (keeps texture on masonry). */
-      windowAlbedoCoupling: 0.78,
+      windowAlbedoCoupling: 0,
       /** Small additive highlight on litColor after multiply (HDR-linear; not frame multiply). */
-      windowScreenSpill: 0.55,
+      windowScreenSpill: 0,
     };
 
     // ── Light management ────────────────────────────────────────────────
@@ -1650,7 +1650,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 3.5,
           step: 0.05,
-          default: 2.5,
+          default: 1,
           label: 'Day ambient — outdoor',
           tooltip: 'Scales Foundry ambient brightest on outdoor-classified pixels (porches, courtyards, sky reach).',
         },
@@ -1659,7 +1659,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 3.5,
           step: 0.05,
-          default: 1.35,
+          default: 1,
           label: 'Day ambient — indoor',
           tooltip: 'Scales Foundry ambient brightest on indoor-classified pixels (rooms under roof capture).',
         },
@@ -1678,7 +1678,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 2,
           step: 0.05,
-          default: 2,
+          default: 1,
           label: 'Night ambient — outdoor',
           tooltip: 'Scales Foundry ambientDarkness on outdoor pixels at high darkness.',
         },
@@ -1687,7 +1687,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 2,
           step: 0.05,
-          default: 2,
+          default: 1.1,
           label: 'Night ambient — indoor',
           tooltip: 'Scales Foundry ambientDarkness on indoor pixels; usually slightly lower than outdoor.',
         },
@@ -1705,7 +1705,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 2,
           step: 0.05,
-          default: 0.9,
+          default: 1,
           label: 'Point light gain',
           tooltip:
             'Emission multiplier on Foundry lamp meshes (`uComposeLightGain`) before `_lightRT` accumulation; compose reads the RT as-is so buffer overlap or noise does not get a second brightness pass. Torch/flash meshes follow the same value. Separate from Window glow / Day-night ambient.',
@@ -1715,7 +1715,7 @@ export class LightingEffectV2 {
           min: 0.01,
           max: 2.0,
           step: 0.005,
-          default: 0.52,
+          default: 0.51,
           label: 'Halving dist. (att 0, bright)',
           tooltip:
             'Maps to Foundry smoothstep hardness in the bright ring (larger = softer, wider bright fill). Attenuation 0.5 uses the geometric mean vs the att=1 value.',
@@ -1845,7 +1845,7 @@ export class LightingEffectV2 {
           min: 1,
           max: 12,
           step: 0.1,
-          default: 3.2,
+          default: 1,
           label: 'Saturation boost gain',
           tooltip: 'Extra albedo saturation push at high CI only (does not map CI 0.5 vs 1.0 — that is linear from the lamp). Leave at default unless you want punchier colour.',
         },
@@ -2016,7 +2016,7 @@ export class LightingEffectV2 {
           min: 1,
           max: 4,
           step: 0.05,
-          default: 4,
+          default: 2,
           label: 'Combined shadow strength',
           tooltip:
             'Amplifies unified shadow darkness on ambient only (1 = authored, 4 = very deep). Strong lights can still clear shadow override on structural paths.',
@@ -2026,7 +2026,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 1,
           step: 0.05,
-          default: 0.45,
+          default: 1,
           label: 'Cloud shadow on ambient',
           tooltip: 'Reduces cloud (or combined) shadow on ambient only; dynamic lights stay full strength.',
         },
@@ -2064,7 +2064,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 1,
           step: 0.05,
-          default: 0.5,
+          default: 1,
           label: 'Structural occlusion on HDR lights',
           tooltip:
             'Darkens the Foundry HDR light accumulation (ambient disks/torches/colour spill) wherever building+painted shadows are dark. Strong gameplay lights clear this via Structural shadow override. Set to 0 to restore fills that bypass structural shadows entirely.',
@@ -2138,7 +2138,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 4,
           step: 0.05,
-          default: 1.3,
+          default: 0.55,
           label: 'Window indirect gain',
           tooltip: 'Scales HDR window spill in compose (emit strength is on Window Light → Intensity).',
         },
@@ -2147,7 +2147,7 @@ export class LightingEffectV2 {
           min: 0.35,
           max: 1.2,
           step: 0.02,
-          default: 0.74,
+          default: 1.2,
           label: 'Window contrast',
           tooltip: 'Lower = hotter window cores and softer penumbra (less flat grey at high intensity).',
         },
@@ -2156,7 +2156,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 1,
           step: 0.02,
-          default: 0,
+          default: 1,
           label: 'Window warmth tint',
           tooltip: 'How much emit colour tints nearby walls in compose (0 = neutral white spill).',
         },
@@ -2165,7 +2165,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 1.5,
           step: 0.02,
-          default: 0.78,
+          default: 0,
           label: 'Wall texture coupling',
           tooltip: 'Scales indirect spill by wall albedo luma so masonry keeps texture while floors brighten.',
         },
@@ -2174,7 +2174,7 @@ export class LightingEffectV2 {
           min: 0,
           max: 2,
           step: 0.05,
-          default: 0.55,
+          default: 0,
           label: 'Window core glow',
           tooltip: 'Small additive warm highlight on lit pixels at window cores (HDR-linear; not a full-frame multiply).',
         },

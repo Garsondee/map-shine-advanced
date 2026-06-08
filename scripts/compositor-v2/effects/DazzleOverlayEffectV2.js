@@ -28,7 +28,7 @@ export class DazzleOverlayEffectV2 {
 
     this.params = {
       enabled: false,
-      intensity: 0.0,
+      intensity: 2.0,
       exposureLift: 0.9,
       whiteAdd: 0.65,
       desaturate: 0.35,
@@ -68,7 +68,7 @@ export class DazzleOverlayEffectV2 {
       ],
       parameters: {
         enabled: { type: 'boolean', default: false, hidden: true },
-        intensity: { type: 'slider', label: 'Intensity', min: 0, max: 2, step: 0.01, default: 0 },
+        intensity: { type: 'slider', label: 'Intensity', min: 0, max: 2, step: 0.01, default: 2 },
         exposureLift: { type: 'slider', label: 'Exposure Lift', min: 0, max: 3, step: 0.01, default: 0.9 },
         whiteAdd: { type: 'slider', label: 'White Add', min: 0, max: 2, step: 0.01, default: 0.65 },
         desaturate: { type: 'slider', label: 'Desaturate', min: 0, max: 1, step: 0.01, default: 0.35 },

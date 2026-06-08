@@ -142,7 +142,8 @@ export function getCloudControlSchema() {
         label: 'Wind & Drift',
         type: 'inline',
         separator: true,
-        parameters: ['windInfluence', 'driftSpeed', 'minDriftSpeed', 'driftResponsiveness', 'driftMaxSpeed'],
+        hidden: true,
+        parameters: ['windInfluence', 'driftSpeed', 'minDriftSpeed', 'driftResponsiveness', 'driftDecelFactor', 'driftMaxSpeed'],
       },
       {
         name: 'quality',
@@ -160,7 +161,7 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 1.0,
         step: 0.01,
-        default: 0.5,
+        default: 0.84,
         tooltip: 'Density of active sprites. Overridden by Weather when Dynamic Weather is running.',
       },
       spritePoolSize: {
@@ -169,7 +170,7 @@ export function getCloudControlSchema() {
         min: 10,
         max: 120,
         step: 1,
-        default: 40,
+        default: 60,
         advanced: true,
         tooltip: 'Upper cap on billboard count (split across 3 depth layers). Rebuilds the pool immediately.',
       },
@@ -179,7 +180,7 @@ export function getCloudControlSchema() {
         min: -1,
         max: 1,
         step: 0.01,
-        default: -1,
+        default: 1,
         advanced: true,
         tooltip: '-1 = auto from cover (wispy at low cover). 0 = balanced. 1 = always sparse wisps.',
       },
@@ -189,7 +190,7 @@ export function getCloudControlSchema() {
         min: 200,
         max: 5000,
         step: 50,
-        default: 1000,
+        default: 1950,
         tooltip: 'Smallest random world-space size for a cloud PNG.',
       },
       spriteScaleMax: {
@@ -198,7 +199,7 @@ export function getCloudControlSchema() {
         min: 500,
         max: 8000,
         step: 50,
-        default: 3000,
+        default: 4350,
         tooltip: 'Largest random world-space size for a cloud PNG.',
       },
       spriteOpacityMin: {
@@ -207,7 +208,7 @@ export function getCloudControlSchema() {
         min: 0.1,
         max: 1.0,
         step: 0.01,
-        default: 0.6,
+        default: 0.2,
       },
       spriteOpacityMax: {
         type: 'slider',
@@ -215,7 +216,7 @@ export function getCloudControlSchema() {
         min: 0.1,
         max: 1.0,
         step: 0.01,
-        default: 1.0,
+        default: 0.6,
       },
       cloudBrightness: {
         type: 'slider',
@@ -223,7 +224,7 @@ export function getCloudControlSchema() {
         min: 0.8,
         max: 1.5,
         step: 0.01,
-        default: 1.01,
+        default: 1.5,
         tooltip: 'Overall luminance multiplier after sky tint and sun shading.',
       },
       skyTintStrength: {
@@ -232,7 +233,7 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 1.5,
         step: 0.01,
-        default: 0.85,
+        default: 1.1,
         tooltip: 'How strongly cloud colour follows SkyColorEffectV2 tint (sunrise gold, noon blue-white, night indigo).',
       },
       sunLightingStrength: {
@@ -241,7 +242,7 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 1.0,
         step: 0.01,
-        default: 0.65,
+        default: 1,
         tooltip: 'Soft lit-vs-shadow variation across each puff, aligned with the live sun direction.',
       },
       nightDimStrength: {
@@ -250,7 +251,7 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 1.0,
         step: 0.01,
-        default: 0.75,
+        default: 0.8,
         tooltip: 'How much scene darkness dims cloud luminance at night.',
       },
       overlayDomainWarpStrength: {
@@ -259,7 +260,7 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 0.15,
         step: 0.001,
-        default: 0.035,
+        default: 0.15,
         tooltip: 'Animated world-space UV warp on 3D overlay planes (cache-safe, runs every frame).',
       },
       spriteBoilStrength: {
@@ -268,7 +269,7 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 0.12,
         step: 0.001,
-        default: 0.025,
+        default: 0.12,
         tooltip: 'Per-cloud UV boil in the capture pass. Values above 0 disable cloud-top RT caching.',
       },
       domainWarpSpeed: {
@@ -277,7 +278,7 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 3.0,
         step: 0.01,
-        default: 1.0,
+        default: 0.06,
         tooltip: 'Animation rate for overlay warp and sprite boil.',
       },
       driftOrbitStrength: {
@@ -286,7 +287,7 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 1.0,
         step: 0.01,
-        default: 0.15,
+        default: 0.05,
         tooltip: 'Per-sprite secondary orbit so puffs diverge from the main wind field.',
       },
       lightningCloudEnabled: {
@@ -328,7 +329,7 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 1.0,
         step: 0.01,
-        default: 0.7,
+        default: 0.6,
         tooltip: 'Alpha of black shadow silhouettes cast on the ground.',
       },
       shadowSoftness: {
@@ -337,7 +338,7 @@ export function getCloudControlSchema() {
         min: 0.5,
         max: 10.0,
         step: 0.1,
-        default: 0.9,
+        default: 1,
         advanced: true,
       },
       shadowOffsetScale: {
@@ -366,7 +367,7 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 0.15,
         step: 0.005,
-        default: 0.025,
+        default: 0,
         advanced: true,
         tooltip: 'Softens shadow clip at scene rect padding.',
       },
@@ -430,7 +431,7 @@ export function getCloudControlSchema() {
         min: 1.0,
         max: 8.0,
         step: 0.05,
-        default: 3.0,
+        default: 1.5,
         tooltip: 'World-space plane size relative to scene (larger = softer horizon fade).',
       },
       cloudLayerDepthScaleStep: {
@@ -439,7 +440,7 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 0.6,
         step: 0.01,
-        default: 0.18,
+        default: 0.03,
         tooltip: 'Size variation between the three stacked overlay planes.',
       },
       cloudLayerEdgeSoftness: {
@@ -448,7 +449,7 @@ export function getCloudControlSchema() {
         min: 0.01,
         max: 0.5,
         step: 0.01,
-        default: 0.12,
+        default: 0.5,
       },
       cloudLayerOpacityBase: {
         type: 'slider',
@@ -456,7 +457,7 @@ export function getCloudControlSchema() {
         min: 0.1,
         max: 1.5,
         step: 0.01,
-        default: 0.75,
+        default: 0.96,
       },
       cloudLayerOpacityFalloff: {
         type: 'slider',
@@ -464,7 +465,7 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 1.0,
         step: 0.01,
-        default: 0.35,
+        default: 0.79,
         tooltip: 'Each higher plane gets dimmer by this fraction.',
       },
       cloudLayerOuterReveal: {
@@ -473,7 +474,7 @@ export function getCloudControlSchema() {
         min: 0.05,
         max: 1.0,
         step: 0.01,
-        default: 0.3,
+        default: 0.9,
         tooltip: 'Fraction of near/far overlay planes visible at any point (noise mask). Lower = less duplicate stacking.',
       },
       cloudLayerMidReveal: {
@@ -482,7 +483,7 @@ export function getCloudControlSchema() {
         min: 0.05,
         max: 1.0,
         step: 0.01,
-        default: 0.9,
+        default: 0.82,
         tooltip: 'Fraction of the middle overlay plane visible. Usually higher than near/far.',
       },
       cloudLayerNoiseScale: {
@@ -491,7 +492,7 @@ export function getCloudControlSchema() {
         min: 0.0002,
         max: 0.002,
         step: 0.00005,
-        default: 0.0008,
+        default: 0.00125,
         tooltip: 'Frequency of the smooth per-layer reveal noise (higher = finer patchwork).',
       },
       cloudLayerNoiseSoftness: {
@@ -500,7 +501,7 @@ export function getCloudControlSchema() {
         min: 0.02,
         max: 0.25,
         step: 0.005,
-        default: 0.12,
+        default: 0.205,
         tooltip: 'Width of the soft transition on the layer reveal mask.',
       },
       cloudLayerDriftStrength: {
@@ -509,7 +510,7 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 0.2,
         step: 0.001,
-        default: 0.02,
+        default: 0.188,
         tooltip: 'UV scroll on 3D overlay planes from wind.',
       },
       cloudLayerDriftDepthBoost: {
@@ -518,7 +519,7 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 0.2,
         step: 0.001,
-        default: 0.015,
+        default: 0.068,
         tooltip: 'Extra pan/zoom parallax on overlay planes per depth.',
       },
       cloudLayerHeightFromGround: {
@@ -527,7 +528,7 @@ export function getCloudControlSchema() {
         min: -2000.0,
         max: 300.0,
         step: 1.0,
-        default: 200.0,
+        default: 300.0,
         tooltip: 'Used when per-layer heights are unset.',
       },
       cloudLayer1HeightFromGround: {
@@ -536,7 +537,7 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 12000.0,
         step: 10.0,
-        default: 0.0,
+        default: 330.0,
       },
       cloudLayer2HeightFromGround: {
         type: 'slider',
@@ -544,7 +545,7 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 12000.0,
         step: 10.0,
-        default: 150.0,
+        default: 350.0,
       },
       cloudLayer3HeightFromGround: {
         type: 'slider',
@@ -552,7 +553,7 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 12000.0,
         step: 10.0,
-        default: 300.0,
+        default: 360.0,
       },
       cloudLayerZSpacing: {
         type: 'slider',
@@ -560,7 +561,7 @@ export function getCloudControlSchema() {
         min: 20.0,
         max: 1200.0,
         step: 5.0,
-        default: 220.0,
+        default: 20.0,
         tooltip: 'Vertical gap when per-layer heights are not used.',
       },
       cloudLayerBaseOffsetFromEmitter: {
@@ -619,7 +620,7 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 0.1,
         step: 0.001,
-        default: 0.01,
+        default: 0.061,
       },
       minDriftSpeed: {
         type: 'slider',
@@ -636,8 +637,19 @@ export function getCloudControlSchema() {
         min: 0.0,
         max: 1.0,
         step: 0.01,
-        default: 0.4,
+        default: 0.75,
         advanced: true,
+        hidden: true,
+      },
+      driftDecelFactor: {
+        type: 'slider',
+        label: 'Decel Rate',
+        min: 0.02,
+        max: 1.0,
+        step: 0.01,
+        default: 0.14,
+        advanced: true,
+        hidden: true,
       },
       driftMaxSpeed: {
         type: 'slider',

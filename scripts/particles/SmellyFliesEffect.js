@@ -49,7 +49,7 @@ const WALK_STATE = {
  */
 const DEFAULT_FLY_CONFIG = {
   enabled: true,
-  maxParticles: 4,
+  maxParticles: 10,
   // Global behavior speed multiplier (affects all states)
   speedMultiplier: 2.75,
   
@@ -854,7 +854,7 @@ export class SmellyFliesEffect {
           min: 1,
           max: 30,
           step: 1,
-          default: 4
+          default: 10
         },
         'flying.noiseStrength': {
           type: 'slider',

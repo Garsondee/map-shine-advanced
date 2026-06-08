@@ -16,8 +16,9 @@
  *   its authored mask floor's FLOOR_EFFECTS band so upper-floor tile/overhead layers can
  *   still occlude lower-floor flames correctly.
  *   For each tile with a `_Fire` mask, scans the mask on the CPU to build spawn
- *   point lists, then creates fire + ember + smoke particle systems. Floor
- *   isolation for simulation uses swapping active systems in/out per batch on floor change.
+ *   point lists, then creates fire + ember + smoke particle systems. A procedural
+ *   coal-bed shader overlay per tile/background draws on albedo under the particles.
+ *   Floor isolation for simulation uses swapping active systems in/out per batch on floor change.
  *
  * V1 → V2 cleanup:
  *   - No EffectMaskRegistry / GpuSceneMaskCompositor (masks loaded per tile)
@@ -53,7 +54,9 @@ import {
   EmberLifecycleBehavior,
   SmokeLifecycleBehavior,
   FlameShapeFrameBehavior,
+  FireSpinBehavior,
   deferVisualBehaviorsOnSystem,
+  applyEmberSpriteTextureTransform,
   generateFirePoints,
   filterFirePointsByOutdoor,
   filterFirePointsByAlbedoAlpha,
@@ -82,7 +85,18 @@ import {
   RENDER_ORDER_PER_FLOOR,
   effectUnderOverheadOrder,
   outdoorSmokeRenderOrder,
+  tileStackedOverlayOrder,
 } from '../LayerOrderPolicy.js';
+import { resolveEffectEnabled } from '../../effects/resolve-effect-enabled.js';
+import {
+  COAL_BED_DEFAULT_PARAMS,
+  applyCoalBedPreset,
+  applyCoalBedBlending,
+  createCoalBedMaterial,
+  syncCoalBedMaskTexelSize,
+  syncCoalBedOverlayPixelSize,
+  syncCoalBedUniforms,
+} from './fire-coal-bed-shader.js';
 
 const log = createLogger('FireEffectV2');
 
@@ -161,6 +175,11 @@ const FIRE_VISUAL_BEHAVIOR_TYPES = new Set([
 // Must NOT start with "__" — FloorRenderBus.renderFloorRangeTo treats "__*" keys like
 // background planes (visibility = includeBackground only), ignoring floorIndex.
 const FIRE_BATCH_OVERLAY_PREFIX = 'ms_fire_batch_';
+const FIRE_COAL_BED_OVERLAY_SUFFIX = '_coalBed';
+/** Local Z lift on tile-attached coal overlays (on albedo, under particles). */
+const COAL_BED_Z_OFFSET = 0.02;
+/** tileStackedOverlayOrder delta — paints after albedo, before FLOOR_EFFECTS particles. */
+const COAL_BED_STACK_DELTA = 2;
 
 const FIRE_MASK_FORMATS = ['webp', 'png', 'jpg', 'jpeg'];
 const REBUILD_PARAM_KEYS = [
@@ -168,6 +187,7 @@ const REBUILD_PARAM_KEYS = [
   'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax',
   'smokeEnabled', 'smokeSizeMin', 'smokeSizeMax', 'smokeLifeMin', 'smokeLifeMax',
   'smokeSizeGrowth', 'smokeSizeOverLife', 'smokeOutdoorAboveCanopy',
+  'timeScale',
   'fireMaxSpatialBuckets', 'fireMaxParticles', 'fireEmberMaxParticles', 'fireSmokeMaxParticles',
   'fireMaxSystemsPerFloor', 'fireOutdoorSplitMaxBuckets',
   ...FIRE_MASK_PICKUP_PARAM_KEYS,
@@ -659,13 +679,26 @@ export class FireEffectV2 {
     /** @type {number} Highest floor index visible for stacked particle/glow visibility. */
     this._maxVisibleFloorIndex = 0;
 
+    /**
+     * Per-tile / per-background coal-bed shader overlays.
+     * @type {Map<string, { mesh: THREE.Mesh, material: THREE.ShaderMaterial, floorIndex: number }>}
+     */
+    this._coalOverlays = new Map();
+    /** @type {THREE.TextureLoader|null} */
+    this._coalTextureLoader = null;
+    /** @type {string} Cached coal-bed uniform signature */
+    this._coalBedParamSignature = '';
+    /** @type {string} Last applied coal-bed preset id */
+    this._lastCoalBedPreset = '';
+
     // Effect parameters — fire-sparks defaults (map-scale flames + smoke).
     this.params = {
+      ...COAL_BED_DEFAULT_PARAMS,
       enabled: true,
       globalFireRate: 2.6,
       fireHeight: 600,
       fireSize: 18.0,
-      emberRate: 0.1,
+      emberRate: 2.3,
       windInfluence: 0.7,
       fireSizeMin: 150,
       fireSizeMax: 195,
@@ -674,7 +707,7 @@ export class FireEffectV2 {
       fireSpinEnabled: true,
       fireSpinSpeedMin: 0,
       fireSpinSpeedMax: 0.3,
-      fireTemperature: 0,
+      fireTemperature: 0.85,
       flameTextureOpacity: 1,
       flameTextureBrightness: 1.85,
       flameTextureScaleX: 1,
@@ -684,8 +717,8 @@ export class FireEffectV2 {
       flameTextureRotation: 0,
       flameTextureFlipX: true,
       flameTextureFlipY: true,
-      emberSizeMin: 10,
-      emberSizeMax: 42,
+      emberSizeMin: 7,
+      emberSizeMax: 26,
       emberLifeMin: 1.1,
       emberLifeMax: 11.3,
       fireUpdraft: 1,
@@ -695,19 +728,19 @@ export class FireEffectV2 {
       emberCurlStrength: 1.25,
       weatherPrecipKill: 5,
       weatherWindKill: 0.9,
-      timeScale: 2,
-      lightIntensity: 2.6,
-      nightHdrBrightness: 2.3,
+      timeScale: 3,
+      lightIntensity: 1.4,
+      nightHdrBrightness: 2.4,
       indoorLifeScale: 0.7,
-      indoorTimeScale: 0.7,
-      flamePeakOpacity: 0.3,
+      indoorTimeScale: 0.4,
+      flamePeakOpacity: 0.19,
       flameFlipbookCycles: 2,
-      coreEmission: 1,
+      coreEmission: 1.4,
       flameBrightnessFloor: 0,
       emberEmission: 12,
       emberPeakOpacity: 1,
-      indoorEmberLifeScale: 0.15,
-      indoorEmberSuppression: 0.6,
+      indoorEmberLifeScale: 0.05,
+      indoorEmberSuppression: 0.2,
       smokeEnabled: true,
       smokeFlipbookCycles: 1,
       smokeRatio: 2,
@@ -729,16 +762,12 @@ export class FireEffectV2 {
       smokeAlphaStart: 0.16,
       smokeAlphaPeak: 0.9,
       smokeAlphaEnd: 1,
-      // Gradient-over-lifespan: colour and emission tracks.
-      // When non-null with ≥2 stops, the gradient overrides the legacy COOL/WARM blend.
-      // Legacy warmth/brightness sliders remain in effect whenever gradient is null.
       smokeColorGradient: [
         { t: 0, r: 0.9, g: 0.45, b: 0.1 },
         { t: 0.1061011893408639, r: 0.44, g: 0.38, b: 0.32 },
         { t: 0.24895833219800675, r: 0.36, g: 0.34, b: 0.32 },
         { t: 1, r: 0, g: 0, b: 0 },
       ],
-      // Emission tint is linear HDR (see SmokeLifecycleBehavior); diffuse smoke RGB stays ≤1.
       smokeEmissionGradient: [
         { t: 0.22172437617346613, r: 0.04, g: 0.04, b: 0.04 },
         { t: 0.4756279846315714, r: 0.0345205563107544, g: 0.0345205563107544, b: 0.0345205563107544 },
@@ -758,7 +787,6 @@ export class FireEffectV2 {
       fireEmberMaxParticles: 700,
       fireSmokeMaxParticles: 900,
 
-      // _Fire mask pickup — which texels become particles + gameplay glow pools.
       fireMaskMinBrightness: 0.6,
       fireMaskMinAlpha: 0.8,
       fireMaskPremulThreshold: 0.2,
@@ -793,12 +821,12 @@ export class FireEffectV2 {
       fireGlowOutdoorRadiusScale: 0.82,
       fireGlowIndoorNightBoost: 0.54,
       fireGlowOutdoorNightBoost: 1.45,
-      fireGlowNightWarmth: 0.66,
-      fireGlowNightIntensity: 2.12,
-      fireGlowNightDarknessCancel: 15.9,
+      fireGlowNightWarmth: 0.38,
+      fireGlowNightIntensity: 3,
+      fireGlowNightDarknessCancel: 9.2,
       fireGlowNightRadiusPx: 916,
       fireGlowNightInnerRadiusScale: 0.27,
-      fireGlowNightFalloffExponent: 1.25,
+      fireGlowNightFalloffExponent: 1.1,
       fireGlowNightEdgeSoftness: 1,
       fireGlowNightFlickerStrength: 0.05,
       fireGlowNightFlickerSpeed: 9.5,
@@ -1009,6 +1037,19 @@ export class FireEffectV2 {
     if (REBUILD_PARAM_SET.has(paramId)) {
       this._queueRebuild();
     }
+    if (paramId === 'coalBedPreset') {
+      applyCoalBedPreset(this.params, value);
+      this._lastCoalBedPreset = String(this.params.coalBedPreset ?? 'coal');
+      this._coalBedParamSignature = '';
+    }
+    if (paramId.startsWith('coalBed')) {
+      this._coalBedParamSignature = '';
+      this._syncCoalBedOverlays();
+    }
+    if (paramId.startsWith('flameTexture')) {
+      this._systemParamsSignature = '';
+      applyEmberSpriteTextureTransform(this._emberTexture, this.params);
+    }
   }
 
   /**
@@ -1095,6 +1136,7 @@ export class FireEffectV2 {
         title: 'Fire',
         summary: [
           'Flames, embers, and smoke spawn from authored _Fire masks on tiles and level backgrounds.',
+          'A procedural coal or wood bed shader draws on the tile surface under the flame particles.',
           'Mask pickup scans bright pixels per floor; optional gameplay glow pools light nearby tokens.',
           'Requires matching _Fire files beside each albedo you want to burn.',
         ].join('\n\n'),
@@ -1200,7 +1242,7 @@ export class FireEffectV2 {
             'fireGlowNightEdgeSoftness',
           ],
         },
-        { name: 'environment', label: 'Environment', type: 'folder', advanced: true, expanded: false, parameters: ['windInfluence', 'timeScale', 'lightIntensity', 'nightHdrBrightness', 'indoorLifeScale', 'indoorTimeScale', 'weatherPrecipKill', 'weatherWindKill'] },
+        { name: 'environment', label: 'Environment', type: 'folder', advanced: true, expanded: false, parameters: ['timeScale', 'lightIntensity', 'nightHdrBrightness', 'indoorLifeScale', 'indoorTimeScale', 'weatherPrecipKill'] },
         {
           name: 'fire-performance',
           label: 'Performance',
@@ -1217,21 +1259,100 @@ export class FireEffectV2 {
             'fireSmokeMaxParticles',
           ],
         },
-        { name: 'heat-distortion', label: 'Heat Distortion', type: 'folder', advanced: true, expanded: false, parameters: ['heatDistortionEnabled', 'heatDistortionIntensity', 'heatDistortionFrequency', 'heatDistortionSpeed', 'heatDistortionEdgeSoftness'] }
+        { name: 'heat-distortion', label: 'Heat Distortion', type: 'folder', advanced: true, expanded: false, parameters: ['heatDistortionEnabled', 'heatDistortionIntensity', 'heatDistortionFrequency', 'heatDistortionSpeed', 'heatDistortionEdgeSoftness'] },
+        {
+          name: 'coal-bed',
+          label: 'Coal Bed',
+          type: 'folder',
+          expanded: true,
+          parameters: ['coalBedEnabled', 'coalBedIntensity', 'coalBedOpacity'],
+        },
+        {
+          name: 'coal-bed-style',
+          label: 'Coal Bed — Style',
+          type: 'folder',
+          advanced: true,
+          expanded: false,
+          parameters: [
+            'coalBedPreset',
+            'coalBedChunkScale',
+            'coalBedChunkContrast',
+            'coalBedChunkAspect',
+            'coalBedGrainScale',
+            'coalBedGrainAngle',
+            'coalBedTurbulence',
+          ],
+        },
+        {
+          name: 'coal-bed-colors',
+          label: 'Coal Bed — Colors',
+          type: 'folder',
+          advanced: true,
+          expanded: false,
+          parameters: [
+            'coalBedColorChar',
+            'coalBedColorHot',
+            'coalBedColorWarm',
+            'coalBedColorAshWarm',
+            'coalBedColorAshCool',
+            'coalBedSaturation',
+            'coalBedContrast',
+            'coalBedEmissiveGain',
+            'coalBedFlareDensity',
+          ],
+        },
+        {
+          name: 'coal-bed-bands',
+          label: 'Coal Bed — Bands',
+          type: 'folder',
+          advanced: true,
+          expanded: false,
+          parameters: [
+            'coalBedBandCharEnd',
+            'coalBedBandHotEnd',
+            'coalBedBandWarmEnd',
+            'coalBedBandAshWarmEnd',
+          ],
+        },
+        {
+          name: 'coal-bed-motion',
+          label: 'Coal Bed — Motion',
+          type: 'folder',
+          advanced: true,
+          expanded: false,
+          parameters: [
+            'coalBedScrollSpeed',
+            'coalBedScrollAngle',
+            'coalBedEvolveSpeed',
+            'coalBedPulseSpeed',
+            'coalBedHeatLevels',
+            'coalBedEdgeSoftness',
+            'coalBedFlareChaos',
+            'coalBedRimStrength',
+          ],
+        },
+        {
+          name: 'coal-bed-mask',
+          label: 'Coal Bed — Mask',
+          type: 'folder',
+          advanced: true,
+          expanded: false,
+          parameters: ['coalBedMaskLo', 'coalBedMaskExpand', 'coalBedMaskDither'],
+        },
       ],
       parameters: {
         enabled: { type: 'checkbox', label: 'Fire Enabled', default: true },
         globalFireRate: { type: 'slider', label: 'Global Intensity', min: 0.0, max: 20.0, step: 0.1, default: 2.6 },
         fireHeight: { type: 'slider', label: 'Height', min: 1.0, max: 600.0, step: 1.0, default: 600 },
-        fireTemperature: { type: 'slider', label: 'Temperature', min: 0.0, max: 1.0, step: 0.05, default: 0 },
-        flamePeakOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.3 },
+        fireTemperature: { type: 'slider', label: 'Temperature', min: 0.0, max: 1.0, step: 0.05, default: 0.85 },
+        flamePeakOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.19 },
         coreEmission: {
           type: 'slider',
           label: 'Core Emission (HDR)',
           min: 0.5,
           max: 12.0,
           step: 0.1,
-          default: 1,
+          default: 1.4,
           tooltip: 'Linear HDR flame energy. Raised for the unclamped lighting pipeline — push higher if night fires look pale.',
         },
         flameBrightnessFloor: { type: 'slider', label: 'Mask Brightness Floor', min: 0.0, max: 1.5, step: 0.01, default: 0 },
@@ -1264,14 +1385,26 @@ export class FireEffectV2 {
         fireCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 0.5 },
         flameTextureOpacity: { type: 'slider', label: 'Opacity', min: 0.0, max: 1.0, step: 0.01, default: 1 },
         flameTextureBrightness: { type: 'slider', label: 'Brightness', min: 0.0, max: 3.0, step: 0.01, default: 1.85 },
-        flameTextureScaleX: { type: 'slider', label: 'Scale X', min: 0.05, max: 4.0, step: 0.05, default: 1.0 },
-        flameTextureScaleY: { type: 'slider', label: 'Scale Y', min: 0.05, max: 4.0, step: 0.05, default: 1.0 },
+        flameTextureScaleX: {
+          type: 'slider', label: 'Scale X', min: 0.05, max: 4.0, step: 0.05, default: 1.0,
+          tooltip: 'Applies to the ember sprite. Flame flipbook atlas orientation is fixed.',
+        },
+        flameTextureScaleY: {
+          type: 'slider', label: 'Scale Y', min: 0.05, max: 4.0, step: 0.05, default: 1.0,
+          tooltip: 'Applies to the ember sprite. Flame flipbook atlas orientation is fixed.',
+        },
         flameTextureOffsetX: { type: 'slider', label: 'Offset X', min: -1.0, max: 1.0, step: 0.01, default: 0.0 },
         flameTextureOffsetY: { type: 'slider', label: 'Offset Y', min: -1.0, max: 1.0, step: 0.01, default: 0.0 },
         flameTextureRotation: { type: 'slider', label: 'Rotation (rad)', min: -3.14, max: 3.14, step: 0.01, default: 0.0 },
-        flameTextureFlipX: { type: 'checkbox', label: 'Flip X', default: true },
-        flameTextureFlipY: { type: 'checkbox', label: 'Flip Y', default: true },
-        emberRate: { type: 'slider', label: 'Density', min: 0.0, max: 5.0, step: 0.1, default: 0.1 },
+        flameTextureFlipX: {
+          type: 'checkbox', label: 'Flip X', default: true,
+          tooltip: 'Ember sprite only.',
+        },
+        flameTextureFlipY: {
+          type: 'checkbox', label: 'Flip Y', default: true,
+          tooltip: 'Ember sprite only.',
+        },
+        emberRate: { type: 'slider', label: 'Density', min: 0.0, max: 5.0, step: 0.1, default: 2.3 },
         emberEmission: {
           type: 'slider',
           label: 'Emission (HDR)',
@@ -1282,8 +1415,8 @@ export class FireEffectV2 {
           tooltip: 'Linear HDR ember energy (vertex RGB, not alpha).',
         },
         emberPeakOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 1 },
-        emberSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 40.0, step: 1.0, default: 10 },
-        emberSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 60.0, step: 1.0, default: 42 },
+        emberSizeMin: { type: 'slider', label: 'Size Min', min: 1.0, max: 40.0, step: 1.0, default: 7 },
+        emberSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 60.0, step: 1.0, default: 26 },
         emberLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 8.0, step: 0.1, default: 1.1 },
         emberLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 12.0, step: 0.1, default: 11.3 },
         indoorEmberLifeScale: {
@@ -1292,7 +1425,7 @@ export class FireEffectV2 {
           min: 0.05,
           max: 1.0,
           step: 0.05,
-          default: 0.15,
+          default: 0.05,
           tooltip: 'Shortens ember lifespan under roof mask (stacks with Environment → Indoor Life Scale).',
         },
         indoorEmberSuppression: {
@@ -1301,8 +1434,8 @@ export class FireEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.6,
-          tooltip: 'Reduces indoor ember spawns (0 = none; 1 = cull all embers fully under roof).',
+          default: 0.2,
+          tooltip: 'Scales indoor ember brightness/opacity by roof coverage (0 = none; 1 = fully suppressed under roof). Updates live.',
         },
         emberUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 12.0, step: 0.05, default: 0.2 },
         emberCurlStrength: { type: 'slider', label: 'Curl Strength', min: 0.0, max: 12.0, step: 0.05, default: 1.25 },
@@ -1315,7 +1448,10 @@ export class FireEffectV2 {
         },
         smokeRatio: { type: 'slider', label: 'Emission Density', min: 0.0, max: 3.0, step: 0.05, default: 2 },
         smokeOpacity: { type: 'slider', label: 'Peak Opacity', min: 0.0, max: 1.0, step: 0.01, default: 0.19 },
-        indoorSmokeSuppression: { type: 'slider', label: 'Indoor Smoke Suppression', min: 0.0, max: 1.0, step: 0.01, default: 1 },
+        indoorSmokeSuppression: {
+          type: 'slider', label: 'Indoor Smoke Suppression', min: 0.0, max: 1.0, step: 0.01, default: 1,
+          tooltip: 'Scales indoor smoke opacity by roof coverage (0 = none; 1 = fully suppressed under roof). Updates live.',
+        },
         // Legacy colour controls — used when smokeColorGradient is null.
         smokeColorWarmth: { type: 'slider', label: 'Color Warmth', min: 0.0, max: 1.0, step: 0.01, default: 0.53 },
         smokeColorBrightness: { type: 'slider', label: 'Brightness', min: 0.05, max: 2.0, step: 0.01, default: 0.82 },
@@ -1479,15 +1615,15 @@ export class FireEffectV2 {
           tooltip: 'Extra outdoor glow at full darkness, on top of intensity/cancel scales.',
         },
         fireGlowNightWarmth: {
-          type: 'slider', label: 'Pool Warmth', min: 0, max: 1, step: 0.01, default: 0.66,
+          type: 'slider', label: 'Pool Warmth', min: 0, max: 1, step: 0.01, default: 0.38,
           tooltip: 'Night-only pool hue. Blends toward this at full darkness; day warmth is in Fire Glow — Day Pool.',
         },
         fireGlowNightIntensity: {
-          type: 'slider', label: 'Pool Intensity', min: 0, max: 3.0, step: 0.01, default: 2.12,
+          type: 'slider', label: 'Pool Intensity', min: 0, max: 3.0, step: 0.01, default: 3,
           tooltip: 'Night flicker/intensity scale at full darkness.',
         },
         fireGlowNightDarknessCancel: {
-          type: 'slider', label: 'Darkness Cancel (HDR)', min: 0, max: 20, step: 0.1, default: 15.9,
+          type: 'slider', label: 'Darkness Cancel (HDR)', min: 0, max: 20, step: 0.1, default: 9.2,
           tooltip: 'Night HDR punch into the light buffer. Usually higher than the day value for midnight scenes.',
         },
         fireGlowNightFlickerStrength: {
@@ -1510,7 +1646,7 @@ export class FireEffectV2 {
           type: 'slider', label: 'Hot Core Scale', min: 0.05, max: 1, step: 0.01, default: 0.27,
         },
         fireGlowNightFalloffExponent: {
-          type: 'slider', label: 'Falloff Exponent', min: 0.5, max: 2.5, step: 0.05, default: 1.25,
+          type: 'slider', label: 'Falloff Exponent', min: 0.5, max: 2.5, step: 0.05, default: 1.1,
           tooltip: 'Night core tightness. Lower = wider soft midnight pool.',
         },
         fireGlowNightEdgeSoftness: {
@@ -1538,15 +1674,15 @@ export class FireEffectV2 {
         fireGlowMaxBuckets: { type: 'slider', label: 'Max Glow Pools', min: 1, max: 256, step: 1, default: 128 },
         fireGlowWallClipEnabled: { type: 'checkbox', label: 'Wall Clip Glow', default: true },
         fireGlowWallClipRadiusScale: { type: 'slider', label: 'Wall Clip Radius Scale', min: 0.25, max: 2, step: 0.01, default: 1.0 },
-        windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 0.7 },
-        timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 2 },
+        windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 0.7, hidden: true },
+        timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 3 },
         lightIntensity: {
           type: 'slider',
           label: 'HDR Brightness (Day)',
           min: 0.0,
           max: 5.0,
           step: 0.1,
-          default: 2.6,
+          default: 1.4,
           tooltip: 'Linear HDR output at full daylight. Blends toward Night HDR Brightness as scene darkness increases.',
         },
         nightHdrBrightness: {
@@ -1555,13 +1691,13 @@ export class FireEffectV2 {
           min: 0.0,
           max: 12.0,
           step: 0.1,
-          default: 2.3,
+          default: 2.4,
           tooltip: 'Linear HDR output at full night. Raise if flames, embers, and smoke emission look too dim after Color Correction.',
         },
         indoorLifeScale: { type: 'slider', label: 'Indoor Life Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.7 },
-        indoorTimeScale: { type: 'slider', label: 'Indoor Time Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.7 },
+        indoorTimeScale: { type: 'slider', label: 'Indoor Time Scale', min: 0.05, max: 1.0, step: 0.05, default: 0.4 },
         weatherPrecipKill: { type: 'slider', label: 'Rain Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 5, tooltip: 'How strongly rain shortens outdoor flame life and suppresses outdoor updraft.' },
-        weatherWindKill: { type: 'slider', label: 'Wind Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.9 },
+        weatherWindKill: { type: 'slider', label: 'Wind Kill Strength', min: 0.0, max: 5.0, step: 0.05, default: 0.9, hidden: true },
         heatDistortionEnabled: { type: 'checkbox', label: 'Enable Heat Haze', default: true },
         heatDistortionIntensity: { type: 'slider', label: 'Intensity', min: 0.0, max: 0.05, step: 0.001, default: 0.001 },
         heatDistortionFrequency: { type: 'slider', label: 'Frequency', min: 1.0, max: 20.0, step: 0.5, default: 20.0 },
@@ -1630,6 +1766,224 @@ export class FireEffectV2 {
           default: 900,
           tooltip: 'Hard cap per smoke system. Long smoke lifetimes make this the main steady-state CPU driver.',
         },
+        coalBedEnabled: {
+          type: 'checkbox',
+          label: 'Enable Coal Bed',
+          default: true,
+          tooltip: 'Procedural coal or wood substrate drawn on the tile surface under flame particles.',
+        },
+        coalBedIntensity: {
+          type: 'slider',
+          label: 'Intensity',
+          min: 0.0,
+          max: 2.0,
+          step: 0.01,
+          default: 0.24,
+          tooltip: 'Master brightness for smolder tint and HDR sparks.',
+        },
+        coalBedOpacity: {
+          type: 'slider',
+          label: 'Opacity',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.53,
+          tooltip: 'Coal stain strength (premultiplied). Also gently scales spark brightness.',
+        },
+        coalBedPreset: {
+          type: 'select',
+          label: 'Preset',
+          options: { 'Coal Bed': 'coal', 'Burning Wood': 'wood', 'Charcoal': 'charcoal' },
+          default: 'coal',
+        },
+        coalBedChunkScale: {
+          type: 'slider',
+          label: 'Smolder Block (px)',
+          min: 8.0,
+          max: 96.0,
+          step: 1.0,
+          default: 36.0,
+          tooltip: 'Slow coal-bed blocks in overlay pixels. Larger = broader smolder patches.',
+        },
+        coalBedChunkContrast: {
+          type: 'slider',
+          label: 'Smolder Sharpness',
+          min: 0.5,
+          max: 6.0,
+          step: 0.05,
+          default: 0.5,
+          tooltip: 'How crisp smolder blocks are vs charcoal grit.',
+        },
+        coalBedChunkAspect: {
+          type: 'slider',
+          label: 'Smolder Aspect',
+          min: 0.5,
+          max: 4.0,
+          step: 0.05,
+          default: 3.0,
+          tooltip: 'Stretches smolder blocks along the grain angle.',
+        },
+        coalBedGrainScale: {
+          type: 'slider',
+          label: 'Flare Size (px)',
+          min: 2.0,
+          max: 24.0,
+          step: 0.5,
+          default: 2.0,
+          tooltip: 'HDR spark cell size in overlay pixels. Lower = smaller, denser flares.',
+        },
+        coalBedGrainAngle: {
+          type: 'slider',
+          label: 'Smolder Angle (rad)',
+          min: -3.14,
+          max: 3.14,
+          step: 0.05,
+          default: 1.7,
+          tooltip: 'Rotates smolder block grid (sparks stay axis-aligned).',
+        },
+        coalBedColorChar: { type: 'color', label: 'Char / Unburnt', default: '#1a100c' },
+        coalBedColorHot: { type: 'color', label: 'Flare Hot', default: '#ffffff' },
+        coalBedColorWarm: { type: 'color', label: 'Ember Warm', default: '#ff4400' },
+        coalBedColorAshWarm: { type: 'color', label: 'Smolder', default: '#aa5030' },
+        coalBedColorAshCool: { type: 'color', label: 'Dead Ash', default: '#524840' },
+        coalBedSaturation: { type: 'slider', label: 'Saturation', min: 0.0, max: 2.5, step: 0.01, default: 0.95 },
+        coalBedContrast: {
+          type: 'slider',
+          label: 'Saturation Boost',
+          min: 0.5,
+          max: 2.0,
+          step: 0.01,
+          default: 1.22,
+          tooltip: 'Mild color punch — does not crush to black.',
+        },
+        coalBedRimStrength: {
+          type: 'slider',
+          label: 'Parallax Depth',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: 0.04,
+          tooltip: 'Shifts cold ash UVs so char/cracks appear recessed — cheap fake volume on the flat bed.',
+        },
+        coalBedEmissiveGain: {
+          type: 'slider',
+          label: 'Emissive Gain (HDR)',
+          min: 0.0,
+          max: 16.0,
+          step: 0.1,
+          default: 12.5,
+          tooltip: 'Linear HDR multiplier on flare pixels (bloom picks this up).',
+        },
+        coalBedFlareDensity: {
+          type: 'slider',
+          label: 'Spark Coverage',
+          min: 0.2,
+          max: 0.98,
+          step: 0.01,
+          default: 0.37,
+          tooltip: 'Fraction of flare cells that can spark. Higher = more simultaneous hot spots.',
+        },
+        coalBedBandCharEnd: {
+          type: 'slider', label: 'Ash → Char', min: 0.05, max: 0.95, step: 0.01, default: 0.05,
+          tooltip: 'Normalized smolder heat where dead ash gives way to char. Lower = more ash, higher = more char.',
+        },
+        coalBedBandHotEnd: {
+          type: 'slider', label: 'Char → Smolder', min: 0.05, max: 0.95, step: 0.01, default: 0.3,
+          tooltip: 'Heat threshold for char → smolder (ash-warm) transition.',
+        },
+        coalBedBandWarmEnd: {
+          type: 'slider', label: 'Smolder → Warm', min: 0.05, max: 0.95, step: 0.01, default: 0.41,
+          tooltip: 'Heat threshold for smolder → warm ember tones.',
+        },
+        coalBedBandAshWarmEnd: {
+          type: 'slider', label: 'Warm → Hot', min: 0.05, max: 0.95, step: 0.01, default: 0.95,
+          tooltip: 'Heat threshold for warm → hot core colour on the brightest smolder cells.',
+        },
+        coalBedScrollSpeed: { type: 'slider', label: 'Scroll (unused)', min: 0.0, max: 0.2, step: 0.005, default: 0.0, hidden: true },
+        coalBedScrollAngle: { type: 'slider', label: 'Scroll Angle (unused)', min: -3.14, max: 3.14, step: 0.05, default: 0.0, hidden: true },
+        coalBedEvolveSpeed: {
+          type: 'slider',
+          label: 'Smolder Drift Speed',
+          min: 0.0,
+          max: 2.0,
+          step: 0.01,
+          default: 2.0,
+          tooltip: 'Slow per-block smolder breathing — does not flash the whole mask.',
+        },
+        coalBedPulseSpeed: {
+          type: 'slider',
+          label: 'Spark Rate',
+          min: 0.2,
+          max: 8.0,
+          step: 0.05,
+          default: 1.8,
+          tooltip: 'How often each spark cell flares up and dies. Higher = faster flicker.',
+        },
+        coalBedTurbulence: {
+          type: 'slider',
+          label: 'Crack / Organic Warp',
+          min: 0.0,
+          max: 2.0,
+          step: 0.01,
+          default: 0.13,
+          tooltip: 'Distorts smolder cells and drives glowing crack vein strength. Also modulates wind-breath ripples.',
+        },
+        coalBedHeatLevels: {
+          type: 'slider',
+          label: 'Heat Levels',
+          min: 2.0,
+          max: 16.0,
+          step: 1.0,
+          default: 12.0,
+          tooltip: 'Quantize smolder base only — HDR sparks stay full brightness.',
+        },
+        coalBedSplatRate: { type: 'slider', label: 'Splat Rate (unused)', min: 0.0, max: 5.0, step: 0.05, default: 0.0, hidden: true },
+        coalBedFlareChaos: {
+          type: 'slider',
+          label: 'Floating Ember Drift',
+          min: 0.0,
+          max: 2.0,
+          step: 0.01,
+          default: 0.85,
+          tooltip: 'Upward drift on micro-sparks — embers breaking off and rising toward flames.',
+        },
+        coalBedMaskLo: {
+          type: 'slider',
+          label: 'Mask Threshold',
+          min: 0.0,
+          max: 0.8,
+          step: 0.01,
+          default: 0.8,
+          tooltip: 'Stochastic cutoff after noisy expand — not a soft alpha edge.',
+        },
+        coalBedMaskExpand: {
+          type: 'slider',
+          label: 'Mask Expand (texels)',
+          min: 0.0,
+          max: 4.0,
+          step: 0.25,
+          default: 0.0,
+          tooltip: 'Dilate _Fire mask before thresholding — dissolves hard authored edges.',
+        },
+        coalBedMaskDither: {
+          type: 'slider',
+          label: 'Mask Edge Noise',
+          min: 0.0,
+          max: 0.5,
+          step: 0.01,
+          default: 0.5,
+          tooltip: 'Noisy soften on mask boundary — irregular pixel dissolve, not a dark ring.',
+        },
+        coalBedMaskHi: { type: 'slider', label: 'Mask Ceiling (unused)', min: 0.5, max: 1.0, step: 0.01, default: 1.0, hidden: true },
+        coalBedEdgeSoftness: {
+          type: 'slider',
+          label: 'Softness (px)',
+          min: 0.0,
+          max: 32.0,
+          step: 0.5,
+          default: 3.0,
+          tooltip: 'Blurs smolder blocks, spark halos, and mask edges before/during/after composite. Try 8–20 for natural embers; higher dissolves retro hot pixels.',
+        },
       }
     };
   }
@@ -1647,6 +2001,7 @@ export class FireEffectV2 {
     this._texturesReady = this._loadTextures();
 
     this._registerGlowWallHooks();
+    this._coalTextureLoader = new THREE.TextureLoader();
 
     this._initialized = true;
     log.info('FireEffectV2 initialized');
@@ -1913,6 +2268,8 @@ export class FireEffectV2 {
     }
 
     this._structuralSignature = this._computeStructuralSignature();
+
+    await this._populateCoalOverlays(foundrySceneData);
     } finally {
       this._endPerfSpan(_buildToken);
     }
@@ -1993,6 +2350,9 @@ export class FireEffectV2 {
     if (this._glowSceneContext) {
       this._glowSceneContext.sceneBounds = buildEffectSceneBoundsFromCanvas();
     }
+
+    // Coal bed time — always advance when the effect is enabled (even with no particle floors).
+    this._syncCoalBedOverlays(timeInfo?.elapsed ?? 0);
 
     try {
       if (window.MapShine?.__v2NavigationLiteUpdates === true) return;
@@ -2351,6 +2711,7 @@ export class FireEffectV2 {
     this._simAccumSec = 0;
     this._floorLastPhysicsAt.clear();
     this._invalidateGlowParamCache();
+    this._clearCoalOverlays();
     try { refreshEffectMaskStatusUi('fire-sparks'); } catch (_) {}
   }
 
@@ -2369,7 +2730,314 @@ export class FireEffectV2 {
     this._heatDistortionMaskSig = '';
     this._initialized = false;
     this._lightingEffect = null;
+    this._coalTextureLoader = null;
     log.info('FireEffectV2 disposed');
+  }
+
+  // ── Private: Coal bed substrate overlays ───────────────────────────────────
+
+  /** @private */
+  _coalBedOverlayKey(tileId) {
+    return `${tileId}${FIRE_COAL_BED_OVERLAY_SUFFIX}`;
+  }
+
+  /** @private */
+  _clearCoalOverlays() {
+    for (const [tileId] of this._coalOverlays) {
+      this._renderBus.removeEffectOverlay(this._coalBedOverlayKey(tileId));
+    }
+    for (const [, entry] of this._coalOverlays) {
+      try { entry.material?.dispose?.(); } catch (_) {}
+      try { entry.mesh?.geometry?.dispose?.(); } catch (_) {}
+      try {
+        const tex = entry.material?.uniforms?.uFireMask?.value;
+        tex?.dispose?.();
+      } catch (_) {}
+    }
+    this._coalOverlays.clear();
+    this._coalBedParamSignature = '';
+  }
+
+  /**
+   * Build per-tile coal-bed overlays for every discovered `_Fire` mask.
+   * @param {object} foundrySceneData
+   * @private
+   */
+  async _populateCoalOverlays(foundrySceneData) {
+    if (!this._initialized || !this._coalTextureLoader) return;
+    this._clearCoalOverlays();
+
+    const floors = window.MapShine?.floorStack?.getFloors() ?? [];
+    const d = canvas?.dimensions;
+    const worldH = foundrySceneData?.height ?? d?.height ?? 0;
+    const sceneWidth = foundrySceneData?.sceneWidth ?? d?.sceneWidth ?? d?.width ?? 0;
+    const sceneHeight = foundrySceneData?.sceneHeight ?? d?.sceneHeight ?? d?.height ?? 0;
+    const sceneX = foundrySceneData?.sceneX ?? d?.sceneX ?? 0;
+    const sceneY = foundrySceneData?.sceneY ?? d?.sceneY ?? 0;
+    const scene = canvas?.scene ?? null;
+    const seenBgKeys = new Set();
+
+    const ingestBackgroundCoal = async (bgSrcRaw, floorIndex) => {
+      const bgSrc = typeof bgSrcRaw === 'string' ? bgSrcRaw.trim() : '';
+      if (!bgSrc) return;
+      const dotIdx = bgSrc.lastIndexOf('.');
+      const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
+      const dedupeKey = `${floorIndex}|${bgBasePath}`;
+      if (seenBgKeys.has(dedupeKey)) return;
+
+      const fireResult = await probeMaskFile(bgBasePath, '_Fire');
+      if (!fireResult?.path) return;
+
+      const tileId = `__bg_fire_${floorIndex}__`;
+      const centerX = sceneX + sceneWidth / 2;
+      const centerY = worldH - (sceneY + sceneHeight / 2);
+      const z = GROUND_Z + floorIndex + COAL_BED_Z_OFFSET;
+
+      this._createCoalOverlay(tileId, floorIndex, {
+        maskUrl: fireResult.path,
+        centerX,
+        centerY,
+        z,
+        tileW: sceneWidth,
+        tileH: sceneHeight,
+        rotation: 0,
+        busTileId: '__bg_image__',
+      });
+      seenBgKeys.add(dedupeKey);
+    };
+
+    if (hasV14NativeLevels(scene) && floors.length > 0) {
+      for (const f of floors) {
+        const lid = f?.levelId;
+        if (typeof lid !== 'string' || !lid.length) continue;
+        let bgSrc = '';
+        try {
+          const lvl = scene.levels?.get?.(lid);
+          bgSrc = String(lvl?.background?.src || '').trim();
+        } catch (_) {}
+        if (!bgSrc) continue;
+        await ingestBackgroundCoal(bgSrc, f.index);
+      }
+    }
+    {
+      const fallbackSrc = getViewedLevelBackgroundSrc(scene)
+        ?? canvas?.scene?.background?.src
+        ?? '';
+      const activeFi = window.MapShine?.floorStack?.getActiveFloor?.();
+      const fi = (floors.length > 1 && Number.isFinite(Number(activeFi?.index)))
+        ? Number(activeFi.index)
+        : 0;
+      await ingestBackgroundCoal(String(fallbackSrc || ''), fi);
+    }
+
+    const tileDocs = canvas?.scene?.tiles?.contents ?? [];
+    for (const tileDoc of tileDocs) {
+      const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
+      if (!src) continue;
+      const tileId = tileDoc.id ?? tileDoc._id;
+      if (!tileId) continue;
+
+      const dotIdx = src.lastIndexOf('.');
+      const basePath = dotIdx > 0 ? src.substring(0, dotIdx) : src;
+      const fireResult = await probeMaskFile(basePath, '_Fire');
+      if (!fireResult?.path) continue;
+
+      const floorIndex = this._resolveFloorIndex(tileDoc, floors);
+      const tileW = Number(tileDoc.width) || 1;
+      const tileH = Number(tileDoc.height) || 1;
+      const centerX = (Number(tileDoc.x) || 0) + tileW / 2;
+      const centerY = worldH - ((Number(tileDoc.y) || 0) + tileH / 2);
+      const rotation = typeof tileDoc.rotation === 'number'
+        ? (tileDoc.rotation * Math.PI) / 180
+        : 0;
+      const z = GROUND_Z + floorIndex + COAL_BED_Z_OFFSET;
+
+      this._createCoalOverlay(tileId, floorIndex, {
+        maskUrl: fireResult.path,
+        centerX,
+        centerY,
+        z,
+        tileW,
+        tileH,
+        rotation,
+        busTileId: tileId,
+      });
+    }
+
+    this._syncCoalBedOverlays();
+    log.info(`FireEffectV2: coal bed overlays populated (${this._coalOverlays.size})`);
+  }
+
+  /**
+   * @param {string} tileId
+   * @param {number} floorIndex
+   * @param {object} opts
+   * @private
+   */
+  _createCoalOverlay(tileId, floorIndex, opts) {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const {
+      maskUrl,
+      centerX,
+      centerY,
+      z,
+      tileW,
+      tileH,
+      rotation,
+      busTileId = tileId,
+    } = opts;
+
+    const baseEntry = this._renderBus?._tiles?.get?.(busTileId);
+    const canAttachToTileRoot = !!baseEntry && !String(busTileId).startsWith('__');
+
+    const material = createCoalBedMaterial(THREE, this.params);
+    const geometry = new THREE.PlaneGeometry(tileW, tileH);
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = `FireCoalBedV2_${tileId}`;
+    mesh.frustumCulled = false;
+
+    if (canAttachToTileRoot) {
+      mesh.position.set(0, 0, COAL_BED_Z_OFFSET);
+      mesh.rotation.z = 0;
+    } else {
+      mesh.position.set(centerX, centerY, z);
+      mesh.rotation.z = rotation;
+    }
+
+    try {
+      const baseOrder = Number(baseEntry?.mesh?.renderOrder);
+      if (Number.isFinite(baseOrder)) {
+        mesh.renderOrder = tileStackedOverlayOrder(baseOrder, floorIndex, COAL_BED_STACK_DELTA);
+      } else {
+        mesh.renderOrder = effectUnderOverheadOrder(floorIndex, 0) - 1;
+      }
+    } catch (_) {
+      mesh.renderOrder = effectUnderOverheadOrder(floorIndex, 0) - 1;
+    }
+
+    const worldScale = material.uniforms?.uOverlayPixelSize?.value;
+    if (worldScale) {
+      syncCoalBedOverlayPixelSize(material, tileW, tileH);
+    }
+
+    const overlayKey = this._coalBedOverlayKey(tileId);
+    let attached = false;
+    if (canAttachToTileRoot && typeof this._renderBus?.addTileAttachedOverlay === 'function') {
+      attached = this._renderBus.addTileAttachedOverlay(busTileId, overlayKey, mesh, floorIndex) === true;
+    }
+    if (!attached) {
+      this._renderBus.addEffectOverlay(overlayKey, mesh, floorIndex);
+      if (!String(busTileId).startsWith('__')) {
+        try {
+          const busEntry = this._renderBus?._tiles?.get?.(overlayKey);
+          if (busEntry) busEntry.attachedToTileId = busTileId;
+        } catch (_) {}
+      }
+    }
+
+    this._coalOverlays.set(tileId, { mesh, material, floorIndex });
+
+    const targetMaterial = material;
+    this._coalTextureLoader.load(maskUrl, (tex) => {
+      const entry = this._coalOverlays.get(tileId);
+      if (!entry || entry.material !== targetMaterial) {
+        tex.dispose();
+        return;
+      }
+      tex.flipY = true;
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.wrapS = THREE.ClampToEdgeWrapping;
+      tex.wrapT = THREE.ClampToEdgeWrapping;
+      tex.generateMipmaps = false;
+      tex.needsUpdate = true;
+
+      const uMask = targetMaterial.uniforms?.uFireMask;
+      if (!uMask) {
+        tex.dispose();
+        return;
+      }
+      const previousTex = uMask.value;
+      uMask.value = tex;
+      if (previousTex && previousTex !== tex) {
+        try { previousTex.dispose(); } catch (_) {}
+      }
+
+      const w = tex.image?.width || 512;
+      const h = tex.image?.height || 512;
+      syncCoalBedMaskTexelSize(targetMaterial, w, h);
+      syncCoalBedOverlayPixelSize(targetMaterial, tileW, tileH);
+    }, undefined, (err) => {
+      log.warn(`FireEffectV2: failed to load coal-bed mask for ${tileId}: ${maskUrl}`, err);
+    });
+  }
+
+  /** @private */
+  _getCoalBedParamSignature() {
+    const p = this.params ?? {};
+    return [
+      p.coalBedEnabled,
+      p.coalBedIntensity,
+      p.coalBedOpacity,
+      p.coalBedPreset,
+      p.coalBedChunkScale,
+      p.coalBedChunkContrast,
+      p.coalBedChunkAspect,
+      p.coalBedGrainScale,
+      p.coalBedGrainAngle,
+      p.coalBedColorChar,
+      p.coalBedColorHot,
+      p.coalBedColorWarm,
+      p.coalBedColorAshWarm,
+      p.coalBedColorAshCool,
+      p.coalBedSaturation,
+      p.coalBedContrast,
+      p.coalBedRimStrength,
+      p.coalBedEmissiveGain,
+      p.coalBedFlareDensity,
+      p.coalBedBandCharEnd,
+      p.coalBedBandHotEnd,
+      p.coalBedBandWarmEnd,
+      p.coalBedBandAshWarmEnd,
+      p.coalBedEvolveSpeed,
+      p.coalBedPulseSpeed,
+      p.coalBedHeatLevels,
+      p.coalBedTurbulence,
+      p.coalBedFlareChaos,
+      p.coalBedMaskLo,
+      p.coalBedMaskExpand,
+      p.coalBedMaskDither,
+      p.coalBedEdgeSoftness,
+      this._enabled,
+    ].join('|');
+  }
+
+  /**
+   * Sync coal-bed visibility and shader uniforms.
+   * @param {number} [elapsed]
+   * @private
+   */
+  _syncCoalBedOverlays(elapsed) {
+    const visible = resolveEffectEnabled(this) && this.params?.coalBedEnabled !== false;
+    const signature = this._getCoalBedParamSignature();
+    const paramsDirty = signature !== this._coalBedParamSignature;
+    if (paramsDirty) this._coalBedParamSignature = signature;
+
+    for (const [, entry] of this._coalOverlays) {
+      const mesh = entry?.mesh;
+      const material = entry?.material;
+      if (!mesh || !material) continue;
+      mesh.visible = visible;
+      if (paramsDirty) {
+        syncCoalBedUniforms(material, this.params, { effectEnabled: resolveEffectEnabled(this) });
+        applyCoalBedBlending(material, window.THREE);
+      }
+      if (typeof elapsed === 'number' && material.uniforms?.uTime) {
+        material.uniforms.uTime.value = elapsed;
+      }
+    }
   }
 
   // ── Private: Fire glow (HDR darkness cancel via LightMesh) ─────────────────
@@ -3526,6 +4194,7 @@ export class FireEffectV2 {
     );
     const fireForces = new FireForcesBehavior('flame');
     fireForces.bindTurbulence(turbulence);
+    const fireSpin = new FireSpinBehavior();
 
     const system = new QuarksParticleSystem({
       duration: 1,
@@ -3551,6 +4220,7 @@ export class FireEffectV2 {
       behaviors: [
         flameShapeFrames,
         fireForces,
+        fireSpin,
         sizeOverLife,
         flameLifecycle,
       ],
@@ -3599,6 +4269,7 @@ export class FireEffectV2 {
     const texOpacity = Math.max(0, Math.min(1, Number(this.params.flameTextureOpacity) ?? 1));
     material.color.setRGB(texBright, texBright, texBright);
     material.opacity = texOpacity;
+    applyEmberSpriteTextureTransform(this._emberTexture, this.params);
 
     const p = this.params;
     const timeScale = Math.max(0.1, p.timeScale ?? 1.0);
@@ -3938,6 +4609,13 @@ export class FireEffectV2 {
       p.globalFireRate,
       p.flameTextureBrightness,
       p.flameTextureOpacity,
+      p.flameTextureScaleX,
+      p.flameTextureScaleY,
+      p.flameTextureOffsetX,
+      p.flameTextureOffsetY,
+      p.flameTextureRotation,
+      p.flameTextureFlipX,
+      p.flameTextureFlipY,
       p.fireHeight,
       p.fireUpdraft,
       p.fireCurlStrength,
@@ -3963,6 +4641,7 @@ export class FireEffectV2 {
     const globalRate = Math.max(0.0, p.globalFireRate ?? 1.0);
     const texBright = Math.max(0, Number(p.flameTextureBrightness) || 0);
     const texOpacity = Math.max(0, Math.min(1, Number(p.flameTextureOpacity) ?? 1));
+    applyEmberSpriteTextureTransform(this._emberTexture, p);
 
     for (const floorIndex of this._activeFloors) {
       const state = this._floorStates.get(floorIndex);
@@ -4067,6 +4746,7 @@ export class FireEffectV2 {
         tex.generateMipmaps = false;
         tex.needsUpdate = true;
         this._emberTexture = tex;
+        applyEmberSpriteTextureTransform(this._emberTexture, this.params);
         resolve();
       }, undefined, () => {
         log.warn('Failed to load particle.webp for embers');

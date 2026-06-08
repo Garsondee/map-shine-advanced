@@ -50,7 +50,7 @@ export class FilterEffectV2 {
       enabled: false,
 
       // Global blend
-      intensity: 1.0,
+      intensity: 0.49,
 
       // Simple tint multiplier.
       // White means "no change".
@@ -58,14 +58,14 @@ export class FilterEffectV2 {
 
       // Ink/AO from the current scene texture.
       inkAoEnabled: true,
-      inkAoStrength: 0.65,
-      inkDarkThreshold: 0.72,
-      inkDarkSoftness: 0.08,
-      inkEdgeStrength: 1.0,
-      inkEdgePower: 1.25,
-      inkSpreadPx: 12.0,
+      inkAoStrength: 2,
+      inkDarkThreshold: 0.28,
+      inkDarkSoftness: 0.5,
+      inkEdgeStrength: 4,
+      inkEdgePower: 0.83,
+      inkSpreadPx: 17.0,
       inkBlurPx: 2.0,
-      inkOutdoorsDarkOnly: false,
+      inkOutdoorsDarkOnly: true,
       inkTintColor: { r: 0.0, g: 0.0, b: 0.0 },
 
       // Vignette-style multiplicative darken (separate from ColorCorrection vignette).

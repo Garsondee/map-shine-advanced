@@ -33,6 +33,8 @@ import { canPersistSceneDocument, isGmLike } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
 import { stateApplier } from './state-applier.js';
 import { weatherController as coreWeatherController } from '../core/WeatherController.js';
+import { deriveWindProfile, wind01FromLegacy } from '../core/wind-profile.js';
+import { sceneWindField } from '../core/SceneWindField.js';
 import {
   applyDirectedCustomPresetToWeather,
   resolveWeatherController,
@@ -209,12 +211,12 @@ export class ControlPanelManager {
         fogDensity: 0.0,
         freezeLevel: 0.0
       },
-      // Wind controls
-      // Real-world wind speed in m/s (0..MAX_WIND_MS). WeatherController will still expose
-      // a derived legacy 0..1 `windSpeed` for existing effects.
+      // Wind controls — GM authority is wind01 (manual weather Wind fader).
+      wind01: 0.0,
+      // Derived cache for legacy readers / weather snapshots.
       windSpeedMS: 0.0,
       windDirection: 180.0,
-      gustiness: 'calm', // 'calm', 'light', 'moderate', 'strong', 'extreme'
+      gustiness: 'calm', // legacy migration only
       // Tile motion transport controls (runtime state still lives in tileMotion scene flag)
       tileMotionSpeedPercent: 100,
       tileMotionAutoPlayEnabled: true,
@@ -1344,10 +1346,16 @@ export class ControlPanelManager {
    */
   _coercePanelWindScalarsInPlace() {
     if (!this.controlState || typeof this.controlState !== 'object') return;
-    const wms = Number(this.controlState.windSpeedMS);
-    this.controlState.windSpeedMS = Number.isFinite(wms)
-      ? Math.max(0.0, Math.min(MAX_WIND_MS_CP, wms))
-      : 39.0;
+    let w01 = Number(this.controlState.wind01);
+    if (!Number.isFinite(w01)) {
+      w01 = wind01FromLegacy({
+        windSpeedMS: this.controlState.windSpeedMS,
+        gustiness: this.controlState.gustiness,
+      });
+    }
+    this.controlState.wind01 = Math.max(0.0, Math.min(1.0, w01));
+    const profile = deriveWindProfile(this.controlState.wind01);
+    this.controlState.windSpeedMS = Math.max(0.0, Math.min(MAX_WIND_MS_CP, profile.windSpeedMS));
     const wd = Number(this.controlState.windDirection);
     this.controlState.windDirection = Number.isFinite(wd)
       ? ((wd % 360) + 360) % 360
@@ -1377,25 +1385,23 @@ export class ControlPanelManager {
     this._coercePanelWindScalarsInPlace();
 
     const fadeActive = this._environmentFadeTransitionActive || environmentFadeController.isRunning;
-    const speedMS = fadeActive && Number.isFinite(liveSpeedMS)
-      ? liveSpeedMS
-      : (Number(this.controlState.windSpeedMS) || 0);
+    const w01 = Math.max(0, Math.min(1, Number(this.controlState.wind01) || 0));
+    const profile = deriveWindProfile(w01);
     const directionDeg = Number.isFinite(liveDirectionDeg)
       ? liveDirectionDeg
       : (Number(this.controlState.windDirection) || 0);
 
     this._astrolabe.mirror({
-      speedMS,
+      wind01: w01,
       directionDeg,
-      gustiness: this.controlState.gustiness || 'moderate',
+      tierLabel: profile.tierLabel,
       liveSpeedMS: fadeActive ? null : (Number.isFinite(liveSpeedMS) ? liveSpeedMS : null),
       gustPulse: Number.isFinite(gustPulse) ? gustPulse : null,
     });
-    const ms = Number.isFinite(liveSpeedMS) ? liveSpeedMS : speedMS;
-    this._setFolderTag('wind', `${Math.round(ms)} m/s`);
-    if (this._liveWeatherOverrideDom?.rows?.gustiness) {
-      const gIdx = GUSTINESS_LABELS.indexOf(this.controlState.gustiness || 'moderate');
-      mirrorFaderRow(this._liveWeatherOverrideDom.rows, 'gustiness', gIdx >= 0 ? gIdx : 2);
+    const ms = Number.isFinite(liveSpeedMS) ? liveSpeedMS : profile.windSpeedMS;
+    this._setFolderTag('wind', `${profile.tierLabel} · ${Math.round(ms)} m/s`);
+    if (this._liveWeatherOverrideDom?.rows?.wind01) {
+      mirrorFaderRow(this._liveWeatherOverrideDom.rows, 'wind01', w01);
     }
   }
 
@@ -1404,7 +1410,7 @@ export class ControlPanelManager {
       this.syncLiveWeatherOverrideDomFromDirectedPreset();
       this.syncManualFogDomFromControlState();
       this.syncLiveLightningDomFromControlState();
-      this.syncLiveGustinessDomFromControlState();
+      this.syncLiveWindDomFromControlState();
       this.syncManualAshDomFromController();
       this._syncReplicaOcclDomFromControlState();
       this._mirrorWindCompassFromState();
@@ -1485,15 +1491,14 @@ export class ControlPanelManager {
     const windGrid = document.createElement('div');
     windGrid.className = 'msa-cp-macro-pad msa-cp-wind-presets';
     const beats = {
-      Calm: { speedMS: 4.0, gustiness: 'calm' },
-      Breezy: { speedMS: 14.0, gustiness: 'light' },
-      Windy: { speedMS: 28.0, gustiness: 'strong' },
-      Storm: { speedMS: 50.0, gustiness: 'extreme' },
+      Calm: { wind01: 0.05 },
+      Breezy: { wind01: 0.25 },
+      Windy: { wind01: 0.55 },
+      Storm: { wind01: 0.85 },
     };
     for (const [label, cfg] of Object.entries(beats)) {
       windGrid.appendChild(createCpButton(label, () => {
-        this.controlState.windSpeedMS = cfg.speedMS;
-        this.controlState.gustiness = cfg.gustiness;
+        this.controlState.wind01 = cfg.wind01;
         this._coercePanelWindScalarsInPlace();
         void this._applyWindState();
         this._mirrorWindCompassFromState();
@@ -1810,6 +1815,27 @@ export class ControlPanelManager {
   }
 
   /**
+   * @param {number} value Wind strength 0..1 (unified profile slider).
+   * @param {{ save?: boolean }} [opts]
+   * @private
+   */
+  _commitWind01(value, opts = {}) {
+    if (this._suppressLiveWeatherDomEvents) return;
+
+    const w01 = Math.max(0, Math.min(1, Number(value) || 0));
+    this.controlState.wind01 = w01;
+    this._coercePanelWindScalarsInPlace();
+    void this._applyWindState();
+    this._mirrorLiveWeatherDomPair('wind01', w01);
+    this._mirrorWindCompassFromState();
+
+    if (opts.save) {
+      this._skipNextControlStateSceneFlagPersist = true;
+      this.debouncedSave();
+    }
+  }
+
+  /**
    * @param {number} rawIndex Gustiness fader index (0 = calm … 4 = extreme).
    * @param {{ save?: boolean }} [opts]
    * @private
@@ -1842,10 +1868,15 @@ export class ControlPanelManager {
     }
   }
 
-  /** Sync Gust fader from `controlState.gustiness`. */
+  /** Sync Wind fader from `controlState.wind01`. */
+  syncLiveWindDomFromControlState() {
+    const w01 = Math.max(0, Math.min(1, Number(this.controlState.wind01) || 0));
+    this._mirrorLiveWeatherDomPair('wind01', w01);
+  }
+
+  /** @deprecated legacy gust fader */
   syncLiveGustinessDomFromControlState() {
-    const gIdx = GUSTINESS_LABELS.indexOf(this.controlState.gustiness || 'moderate');
-    this._mirrorLiveWeatherDomPair('gustiness', gIdx >= 0 ? gIdx : 2);
+    this.syncLiveWindDomFromControlState();
   }
 
   /**
@@ -2020,21 +2051,21 @@ export class ControlPanelManager {
       }));
 
     specMeta.push({
+      id: 'wind01',
+      label: 'Wind',
+      min: 0,
+      max: 1,
+      step: 0.01,
+      manualWind: true,
+    });
+
+    specMeta.push({
       id: 'ashIntensity',
       label: 'Ash',
       min: 0,
       max: 1,
       step: 0.01,
       manualAsh: true,
-    });
-
-    specMeta.push({
-      id: 'gustiness',
-      label: 'Gust',
-      min: 0,
-      max: GUSTINESS_LABELS.length - 1,
-      step: 1,
-      manualGustiness: true,
     });
 
     const board = createFaderBoard(mountEl, specMeta, {
@@ -2091,24 +2122,18 @@ export class ControlPanelManager {
               this.debouncedSave();
             });
           });
-        } else if (spec?.manualGustiness) {
+        } else if (spec?.manualWind) {
           range.addEventListener('input', () => {
             if (this._suppressLiveWeatherDomEvents) return;
-            const idx = Math.round(range.valueAsNumber);
-            this._handleFadeAwareFaderInput(
-              pid,
-              idx,
-              (val) => this._commitLiveGustiness(val, { save: false }),
-            );
+            const v = range.valueAsNumber;
+            if (!Number.isFinite(v)) return;
+            this._handleFadeAwareFaderInput(pid, v, (val) => this._commitWind01(val, { save: false }));
           });
           range.addEventListener('change', () => {
             if (this._suppressLiveWeatherDomEvents) return;
-            const idx = Math.round(range.valueAsNumber);
-            this._handleFadeAwareFaderChange(
-              pid,
-              idx,
-              (val) => this._commitLiveGustiness(val, { save: true }),
-            );
+            const v = range.valueAsNumber;
+            if (!Number.isFinite(v)) return;
+            this._handleFadeAwareFaderChange(pid, v, (val) => this._commitWind01(val, { save: true }));
           });
         } else {
           range.addEventListener('input', () => {
@@ -2153,7 +2178,7 @@ export class ControlPanelManager {
     this.syncLiveWeatherOverrideDomFromDirectedPreset();
     this.syncManualFogDomFromControlState();
     this.syncLiveLightningDomFromControlState();
-    this.syncLiveGustinessDomFromControlState();
+    this.syncLiveWindDomFromControlState();
     this.syncManualAshDomFromController();
     this.refreshAshMasterRowVisibility();
     syncWeatherLightningEffectFromControlState(this.controlState);
@@ -2956,7 +2981,6 @@ export class ControlPanelManager {
     setFaderLiveValue(rows, 'lightning', snap.lightning);
     if (this._environmentFadePreviewStartExtras) {
       setFaderLiveValue(rows, 'ashIntensity', this._environmentFadePreviewStartExtras.ashIntensity);
-      setFaderLiveValue(rows, 'gustiness', this._environmentFadePreviewStartExtras.gustinessIndex ?? 2);
     }
   }
 
@@ -2968,11 +2992,16 @@ export class ControlPanelManager {
   _syncPanelUiFromFadeSnapshot(snap, extras) {
     if (!snap) return;
     this._updateClock(snap.timeOfDay);
-    this._mirrorWindCompassFromState(
-      snap.weather.windSpeed * MAX_WIND_MS_CP,
-      null,
-      snap.weather.windDirection,
-    );
+    const fadeW01 = Number.isFinite(extras?.wind01)
+      ? Math.max(0, Math.min(1, extras.wind01))
+      : Math.max(0, Math.min(1, Number(this.controlState.wind01) || 0));
+    const fadeProfile = deriveWindProfile(fadeW01);
+    this._astrolabe?.mirror?.({
+      wind01: fadeW01,
+      directionDeg: snap.weather.windDirection,
+      tierLabel: fadeProfile.tierLabel,
+      liveSpeedMS: snap.weather.windSpeed * MAX_WIND_MS_CP,
+    });
     if (this._liveWeatherOverrideDom?.rows) {
       const rows = this._liveWeatherOverrideDom.rows;
       const mirrorUnlessDragging = (paramId, value) => {
@@ -2985,7 +3014,7 @@ export class ControlPanelManager {
       mirrorUnlessDragging('manualFogDensity', snap.manualFogDensity);
       mirrorUnlessDragging('lightning', snap.lightning);
       mirrorUnlessDragging('ashIntensity', extras?.ashIntensity ?? 0);
-      mirrorUnlessDragging('gustiness', Math.round(extras?.gustinessIndex ?? 2));
+      mirrorUnlessDragging('wind01', fadeW01);
     }
   }
 
@@ -2995,20 +3024,20 @@ export class ControlPanelManager {
    * @private
    */
   async _applyFadeExtras(extras, last) {
-    const gust = gustinessFromExtras(extras);
-    if (this.controlState.gustiness !== gust) {
-      this.controlState.gustiness = gust;
+    if (Number.isFinite(extras?.wind01)) {
+      this.controlState.wind01 = Math.max(0, Math.min(1, extras.wind01));
       this._coercePanelWindScalarsInPlace();
+      const profile = deriveWindProfile(this.controlState.wind01);
+      try {
+        sceneWindField?.applyWindProfile?.(profile);
+        const wc = resolveWeatherController();
+        if (typeof wc?.setVariability === 'function') {
+          wc.setVariability(profile.variability);
+        } else if (wc) {
+          wc.variability = Math.max(0, Math.min(1, profile.variability));
+        }
+      } catch (_) {}
     }
-    try {
-      const wc = resolveWeatherController();
-      const variability = GUSTINESS_TO_VARIABILITY[gust] ?? GUSTINESS_TO_VARIABILITY.moderate;
-      if (typeof wc?.setVariability === 'function') {
-        wc.setVariability(variability);
-      } else if (wc) {
-        wc.variability = Math.max(0, Math.min(1, variability));
-      }
-    } catch (_) {}
     try {
       applyAshMasterIntensity(extras.ashIntensity, { syncMainTweakpane: last });
     } catch (_) {}
@@ -3061,11 +3090,12 @@ export class ControlPanelManager {
       this.controlState.timeOfDay = endSnap.timeOfDay;
       this._ensureDirectedCustomPreset();
       Object.assign(this.controlState.directedCustomPreset, endSnap.weather);
-      this.controlState.windSpeedMS = endSnap.weather.windSpeed * MAX_WIND_MS_CP;
+      this.controlState.wind01 = Number.isFinite(endEx?.wind01)
+        ? Math.max(0, Math.min(1, endEx.wind01))
+        : Math.pow(Math.max(0, Math.min(1, endSnap.weather.windSpeed)), 1 / 1.4);
       this.controlState.windDirection = endSnap.weather.windDirection;
       writeManualFogDensityToControlState(this.controlState, endSnap.manualFogDensity);
       writeLightningIntensityToControlState(this.controlState, endSnap.lightning);
-      this.controlState.gustiness = gustinessFromExtras(endEx);
       this._coercePanelWindScalarsInPlace();
       this._lastTimeTargetApplied = endSnap.timeOfDay;
       this._lastTimeTransitionMinutesApplied = mins;
@@ -3129,7 +3159,9 @@ export class ControlPanelManager {
         commitFn(value);
         return;
       }
-      if (paramId === 'gustiness') {
+      if (paramId === 'wind01') {
+        this._commitWind01(value, { save: false });
+      } else if (paramId === 'gustiness') {
         this._commitLiveGustiness(value, { save: false });
       } else {
         commitFn(value);
@@ -3148,7 +3180,7 @@ export class ControlPanelManager {
       return;
     }
     this._ensureEnvironmentFadePreviewStart();
-    if (paramId === 'lightning' || paramId === 'manualFogDensity' || paramId === 'ashIntensity' || paramId === 'gustiness') {
+    if (paramId === 'lightning' || paramId === 'manualFogDensity' || paramId === 'ashIntensity' || paramId === 'wind01' || paramId === 'gustiness') {
       commitFn(value);
     }
     setFaderPreview(this._liveWeatherOverrideDom?.rows, paramId, value);
@@ -3179,7 +3211,9 @@ export class ControlPanelManager {
         this.debouncedSave();
         return;
       }
-      if (paramId === 'gustiness') {
+      if (paramId === 'wind01') {
+        this._commitWind01(value, { save: false });
+      } else if (paramId === 'gustiness') {
         this._commitLiveGustiness(value, { save: false });
       } else {
         commitFn(value);
@@ -3193,7 +3227,9 @@ export class ControlPanelManager {
       commitFn(value);
       return;
     }
-    if (paramId === 'gustiness') {
+    if (paramId === 'wind01') {
+      this._commitWind01(value, { save: false });
+    } else if (paramId === 'gustiness') {
       this._commitLiveGustiness(value, { save: false });
     } else {
       commitFn(value);
@@ -3206,16 +3242,18 @@ export class ControlPanelManager {
     const start = this._environmentFadePreviewStartSnap;
     const pending = this._pendingWindTarget;
     if (!start || !pending) return;
-    const liveSpeed = start.weather.windSpeed * MAX_WIND_MS_CP;
+    const liveW01 = Math.max(0, Math.min(1, Number(this.controlState.wind01) || 0));
     const liveDir = start.weather.windDirection;
+    const liveProfile = deriveWindProfile(liveW01);
     this._astrolabe?.mirror?.({
-      speedMS: liveSpeed,
+      wind01: liveW01,
       directionDeg: liveDir,
-      gustiness: this.controlState.gustiness,
+      tierLabel: liveProfile.tierLabel,
     });
+    const targetProfile = deriveWindProfile(liveW01);
     this._astrolabe?.setWindTargetPreview?.(
       Number.isFinite(pending.directionDeg) ? pending.directionDeg : liveDir,
-      Number.isFinite(pending.speedMS) ? pending.speedMS : liveSpeed,
+      targetProfile.windSpeedMS,
     );
   }
 
@@ -3619,26 +3657,13 @@ export class ControlPanelManager {
           this._pendingWindTarget = {};
         }
         if (!dragging && this._isEnvironmentFadeEnabled() && this._pendingWindTarget) {
-          if (Number.isFinite(this._pendingWindTarget.speedMS)) {
-            this.controlState.windSpeedMS = this._pendingWindTarget.speedMS;
-          }
           if (Number.isFinite(this._pendingWindTarget.directionDeg)) {
             this.controlState.windDirection = this._pendingWindTarget.directionDeg;
           }
+          this._coercePanelWindScalarsInPlace();
           void this._commitEnvironmentFadeFromControlState().then(() => this.debouncedSave());
           this._pendingWindTarget = null;
         }
-      },
-      onSpeedChange: (ms, last) => {
-        if (this._isEnvironmentFadeEnabled() && this._astrolabeWindDragging) {
-          this._pendingWindTarget = { ...this._pendingWindTarget, speedMS: ms };
-          this._updateWindPreviewDuringFade();
-          return;
-        }
-        this.controlState.windSpeedMS = ms;
-        this._coercePanelWindScalarsInPlace();
-        void this._applyWindState();
-        if (last) this.debouncedSave();
       },
       onDirectionChange: (deg, last) => {
         if (this._isEnvironmentFadeEnabled() && this._astrolabeWindDragging) {
@@ -4756,13 +4781,17 @@ export class ControlPanelManager {
 
       this._coercePanelWindScalarsInPlace();
 
-      const gustKey = this.controlState.gustiness;
-      const variability = GUSTINESS_TO_VARIABILITY[gustKey] ?? GUSTINESS_TO_VARIABILITY.moderate;
+      const profile = deriveWindProfile(this.controlState.wind01);
+      const variability = profile.variability;
       if (typeof weatherController.setVariability === 'function') {
         weatherController.setVariability(variability);
       } else {
         weatherController.variability = Math.max(0, Math.min(1, variability));
       }
+
+      try {
+        sceneWindField?.applyWindProfile?.(profile);
+      } catch (_) {}
 
       const degRaw = Number(this.controlState.windDirection);
       const degSafe = Number.isFinite(degRaw) ? ((degRaw % 360) + 360) % 360 : 0.0;
@@ -4780,8 +4809,7 @@ export class ControlPanelManager {
       // Also: windDirection is expected to be a THREE.Vector2 after initialize(); never replace it.
       const applyToState = (state) => {
         if (!state) return;
-        const windMS = Number(this.controlState.windSpeedMS);
-        const clampedMS = Number.isFinite(windMS) ? Math.max(0.0, Math.min(MAX_WIND_MS_CP, windMS)) : 0.0;
+        const clampedMS = Math.max(0.0, Math.min(MAX_WIND_MS_CP, profile.windSpeedMS));
         state.windSpeedMS = clampedMS;
         state.windSpeed = clampedMS / MAX_WIND_MS_CP;
 
@@ -4811,10 +4839,11 @@ export class ControlPanelManager {
       this._updateWindUI(weatherController);
 
       log.debug('Applied wind state:', {
+        wind01: this.controlState.wind01,
         speedMS: this.controlState.windSpeedMS,
         direction: this.controlState.windDirection,
-        gustiness: this.controlState.gustiness,
-        variability
+        tier: profile.tierLabel,
+        variability,
       });
     } catch (error) {
       log.error('Failed to apply wind state:', error);
@@ -4882,6 +4911,7 @@ export class ControlPanelManager {
         fogDensity: 0.0,
         freezeLevel: 0.0
       },
+      wind01: 0.0,
       windSpeedMS: 0.0,
       windDirection: 180.0,
       gustiness: 'calm',

@@ -41,9 +41,9 @@ export class BloomEffectV2 {
 
     this.params = {
       enabled: true,
-      strength: 0.4,
+      strength: 1.08,
       radius: 1,
-      threshold: 2,
+      threshold: 3.01,
       tintColor: { r: 1, g: 1, b: 1 },
       blendOpacity: 1.0,
       // WaterEffectV2 writes a linear specular mask; injected here before UnrealBloom threshold.
@@ -278,7 +278,7 @@ export class BloomEffectV2 {
           min: 0,
           max: 3,
           step: 0.01,
-          default: 0.4,
+          default: 1.08,
           tooltip: 'Intensity of the glow added on top of the scene.',
         },
         radius: {
@@ -296,7 +296,7 @@ export class BloomEffectV2 {
           min: 0,
           max: 4,
           step: 0.01,
-          default: 2,
+          default: 3.01,
           tooltip: 'Linear brightness floor; only brighter pixels bloom. With the Linear HDR pipeline the merged scene can exceed 1.0, so this range was extended — 1.0 means "only true highlights bloom".',
         },
         tintColor: {

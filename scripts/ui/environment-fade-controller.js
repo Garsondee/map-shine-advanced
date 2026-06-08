@@ -37,6 +37,7 @@ export const FADE_CHANNEL_IDS = Object.freeze([
   'windSpeed',
   'windDirection',
   'ashIntensity',
+  'wind01',
   'gustiness',
 ]);
 
@@ -69,6 +70,7 @@ const CHANNEL_META = Object.freeze({
   freezeLevel: {},
   windSpeed: {},
   ashIntensity: {},
+  wind01: {},
   gustiness: {},
 });
 
@@ -123,9 +125,11 @@ export function snapshotFromControlState(controlState, maxWindMs = 78) {
 
 export function fadeExtrasFromControlState(controlState, ashFallback = 0) {
   const cs = controlState || {};
-  const gustKey = typeof cs.gustiness === 'string' ? cs.gustiness : 'moderate';
-  let gustinessIndex = GUSTINESS_LABELS.indexOf(gustKey);
-  if (gustinessIndex < 0) gustinessIndex = 2;
+  let wind01 = Number(cs.wind01);
+  if (!Number.isFinite(wind01)) {
+    const ms = Number(cs.windSpeedMS);
+    wind01 = Number.isFinite(ms) ? Math.max(0, Math.min(1, Math.pow(ms / 78, 1 / 1.4))) : 0;
+  }
 
   let ashIntensity = ashFallback;
   const rows = window.MapShine?.controlPanel?._liveWeatherOverrideDom?.rows;
@@ -136,7 +140,9 @@ export function fadeExtrasFromControlState(controlState, ashFallback = 0) {
 
   return {
     ashIntensity: Math.max(0, Math.min(1, Number(ashIntensity) || 0)),
-    gustinessIndex,
+    wind01: Math.max(0, Math.min(1, wind01)),
+    /** @deprecated legacy fade channel */
+    gustinessIndex: Math.round(wind01 * 4),
   };
 }
 
@@ -144,6 +150,7 @@ export function lerpFadeExtras(a, b, t) {
   const tt = Math.max(0, Math.min(1, Number(t) || 0));
   return {
     ashIntensity: a.ashIntensity + (b.ashIntensity - a.ashIntensity) * tt,
+    wind01: a.wind01 + (b.wind01 - a.wind01) * tt,
     gustinessIndex: a.gustinessIndex + (b.gustinessIndex - a.gustinessIndex) * tt,
   };
 }
@@ -188,6 +195,7 @@ function readChannelValue(channelId, snap, extras) {
     case 'windSpeed': return snap.weather.windSpeed;
     case 'windDirection': return snap.weather.windDirection;
     case 'ashIntensity': return extras.ashIntensity;
+    case 'wind01': return extras.wind01;
     case 'gustiness': return extras.gustinessIndex;
     default: return 0;
   }
@@ -204,6 +212,7 @@ function writeChannelValue(channelId, snap, extras, value) {
     case 'windSpeed': snap.weather.windSpeed = value; break;
     case 'windDirection': snap.weather.windDirection = value; break;
     case 'ashIntensity': extras.ashIntensity = value; break;
+    case 'wind01': extras.wind01 = value; break;
     case 'gustiness': extras.gustinessIndex = value; break;
     default: break;
   }
@@ -214,6 +223,9 @@ function normalizeChannelEnd(channelId, value) {
   if (!Number.isFinite(n)) return 0;
   if (channelId === 'gustiness') {
     return Math.max(0, Math.min(GUSTINESS_LABELS.length - 1, Math.round(n)));
+  }
+  if (channelId === 'wind01') {
+    return Math.max(0, Math.min(1, n));
   }
   if (channelId === 'timeOfDay') return ((n % 24) + 24) % 24;
   if (channelId === 'windDirection') return ((n % 360) + 360) % 360;

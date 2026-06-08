@@ -84,8 +84,8 @@ const DEFAULT_TOD_ANCHORS = [
     saturation: 2,
     tintColor: { r: 0.5, g: 0.5, b: 2 },
   }, {
-    exposure: -1,
-    saturation: 0.97,
+    exposure: 1,
+    saturation: 2,
     tintColor: { r: 0.55, g: 0.71, b: 2.29 },
   }),
   makeTodAnchor(3, {
@@ -93,7 +93,7 @@ const DEFAULT_TOD_ANCHORS = [
     saturation: 2,
     tintColor: { r: 0, g: 0, b: 3 },
   }, {
-    exposure: -1,
+    exposure: 1,
     saturation: 0.98,
     tintColor: { r: 0.55, g: 0.71, b: 3 },
   }),
@@ -111,7 +111,7 @@ const DEFAULT_TOD_ANCHORS = [
     saturation: 1,
     tintColor: { r: 1.2, g: 1.02, b: 1.06 },
   }, {
-    exposure: -2,
+    exposure: -1,
     saturation: 1,
     tintColor: { r: 1, g: 1, b: 1 },
   }),
@@ -120,7 +120,7 @@ const DEFAULT_TOD_ANCHORS = [
     saturation: 1.2,
     tintColor: { r: 0.9, g: 0.9, b: 1.13 },
   }, {
-    exposure: -1.75,
+    exposure: -1,
     saturation: 1,
     tintColor: { r: 1, g: 1, b: 1 },
   }),
@@ -129,7 +129,7 @@ const DEFAULT_TOD_ANCHORS = [
     saturation: 1.08,
     tintColor: { r: 1.15, g: 0.98, b: 1.04 },
   }, {
-    exposure: -2.25,
+    exposure: -1,
     saturation: 1,
     tintColor: { r: 1, g: 1, b: 1 },
   }),
@@ -147,7 +147,7 @@ const DEFAULT_TOD_ANCHORS = [
     saturation: 2,
     tintColor: { r: 0, g: 0, b: 3 },
   }, {
-    exposure: -1,
+    exposure: 1,
     saturation: 1,
     tintColor: { r: 0.55, g: 0.71, b: 3 },
   }),
@@ -155,7 +155,7 @@ const DEFAULT_TOD_ANCHORS = [
 
 /** Baseline camera-grade params (HDR → LDR owner). Timeline on by default. */
 const COLOR_CORRECTION_CORE_DEFAULTS = Object.freeze({
-  exposure: 0.75,
+  exposure: 1,
   temperature: 0,
   tint: 0,
   brightness: 0,
@@ -174,7 +174,7 @@ const COLOR_CORRECTION_CORE_DEFAULTS = Object.freeze({
   localWarmLightPreserve: 1,
   localTodOverrideExposure: 1,
   localTodOverrideSaturation: 1,
-  localWarmEmissiveAdd: 0,
+  localWarmEmissiveAdd: 1,
 });
 
 /** Baseline camera-grade atmosphere defaults (neutral; atmosphere off by default). */
@@ -395,12 +395,12 @@ export class ColorCorrectionEffectV2 {
       },
       localWarmEmissiveAdd: {
         type: 'slider',
-        label: 'Local Emissive Add',
+        label: 'Fire / Emissive Preserve',
         min: 0,
         max: 1.5,
         step: 0.01,
         default: COLOR_CORRECTION_CORE_DEFAULTS.localWarmEmissiveAdd,
-        tooltip: 'Restores ToD grade loss on HDR flame cores (light-buffer core × emissive luminance). Does not touch normal map albedo — keeps scene-wide time-of-day tint visible.',
+        tooltip: 'Skips time-of-day and atmosphere darkening on HDR flames, sparks, and other emissive art (1 = full preserve). Base exposure/WB still apply.',
       },
     };
 
@@ -977,7 +977,7 @@ export class ColorCorrectionEffectV2 {
         uTodInteriorSaturation: { value: 1.0 },
         uTodInteriorTintColor: { value: new THREE.Vector3(1, 1, 1) },
 
-        uLocalEmissiveAdd: { value: 0.55 },
+        uLocalEmissiveAdd: { value: 1.0 },
         uLocalOverrideStrength: { value: 1.0 },
         uLocalOverrideExposureOffset: { value: 2.75 },
         uLocalOverrideSaturationMin: { value: 1.25 },
@@ -1219,12 +1219,23 @@ export class ColorCorrectionEffectV2 {
           return graded;
         }
 
-        // True HDR emissive art in the merged composite (flame sprites, etc.).
+        // HDR fire / emissive art in the merged composite (flame sprites, coal sparks, etc.).
         float sampleSceneEmissiveWeight(vec3 hdrColor) {
           float mx = max(max(hdrColor.r, hdrColor.g), hdrColor.b);
-          if (mx < 1.6) return 0.0;
-          float sat = mx - min(min(hdrColor.r, hdrColor.g), hdrColor.b);
-          return smoothstep(1.6, 3.5, mx) * smoothstep(0.18, 0.55, sat);
+          if (mx < 0.25) return 0.0;
+          float mn = min(min(hdrColor.r, hdrColor.g), hdrColor.b);
+          float sat = mx - mn;
+
+          // White-hot HDR cores (bloom, coal sparks).
+          float hotCore = smoothstep(1.0, 2.5, mx) * smoothstep(0.06, 0.5, sat);
+
+          // Warm flames — orange/yellow, R-led, sub-HDR albedo still reads as fire.
+          float warmLead = hdrColor.r - max(hdrColor.g, hdrColor.b) * 0.82;
+          float warmFire = smoothstep(0.28, 1.2, mx)
+            * smoothstep(0.04, 0.38, sat)
+            * smoothstep(-0.05, 0.35, warmLead);
+
+          return clamp(max(hotCore, warmFire * 0.92), 0.0, 1.0);
         }
 
         // Scalar punch from _lightRT alpha (cleared to 0; additive compose, no 1.0 baseline).
@@ -1297,6 +1308,7 @@ export class ColorCorrectionEffectV2 {
             return;
           }
           vec3 color = texel.rgb;
+          vec3 hdrInput = texel.rgb;
 
           // Phase 2: ColorCorrectionEffectV2 is the sole grade owner and runs once
           // on the merged HDR composite, so the legacy timeline-only early-out
@@ -1332,8 +1344,10 @@ export class ColorCorrectionEffectV2 {
             color = pow(color, vec3(1.0 / max(uMasterGamma, 0.0001)));
           }
 
-          // Snapshot before ToD — used to restore emissive art without undoing the grade.
+          // Snapshot before ToD — emissive fire/flame art restores from here after timeline/atmosphere.
           vec3 preTodColor = color;
+          float emissiveW = sampleSceneEmissiveWeight(hdrInput);
+          float emissivePreserve = min(1.0, emissiveW * max(uLocalEmissiveAdd, 0.0));
 
           // 5. Time-of-day CC timeline (before tone mapping so exposure stops stay strong).
           // Global grade everywhere; interior uses global + interior exposure in stops,
@@ -1424,15 +1438,9 @@ export class ColorCorrectionEffectV2 {
             }
           }
 
-          // Restore exposure loss on HDR emissive art without undoing preserved hue.
-          float emissiveW = sampleSceneEmissiveWeight(preTodColor);
-          float emissiveRestore = emissiveW * max(uLocalEmissiveAdd, 0.0);
-          if (emissiveRestore > 0.0001) {
-            float preLuma = dot(preTodColor, vec3(0.2126, 0.7152, 0.0722));
-            float postLuma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-            float lumaLoss = max(0.0, preLuma - postLuma);
-            vec3 dir = color / max(postLuma, 1e-5);
-            color += dir * lumaLoss * emissiveRestore;
+          // Fire / emissive: skip ToD + atmosphere midnight crush; keep pre-timeline brightness and hue.
+          if (emissivePreserve > 0.0001) {
+            color = mix(color, preTodColor, emissivePreserve);
           }
 
           // 6. Tone Mapping
@@ -1445,8 +1453,12 @@ export class ColorCorrectionEffectV2 {
           // 7. Vignette
           vec2 dist = (vUv - 0.5) * 2.0;
           float len = length(dist);
+          vec3 preVignetteColor = color;
           if (uVignetteStrength > 0.0) {
             color *= mix(1.0, smoothstep(1.5, 0.5, len), uVignetteStrength);
+          }
+          if (emissivePreserve > 0.0001) {
+            color = mix(color, preVignetteColor, emissivePreserve * 0.75);
           }
 
           // 8. Film Grain
@@ -1881,7 +1893,7 @@ export class ColorCorrectionEffectV2 {
       ? Number(p.localTodOverrideExposure)
       : 2.75;
     u.uLocalOverrideSaturationMin.value = Math.max(0.5, Math.min(2, Number(p.localTodOverrideSaturation) ?? 1.25));
-    u.uLocalEmissiveAdd.value = Math.max(0, Math.min(1.5, Number(p.localWarmEmissiveAdd) ?? 0.55));
+    u.uLocalEmissiveAdd.value = Math.max(0, Math.min(1.5, Number(p.localWarmEmissiveAdd) ?? 1.0));
     if (!applyTimeline) return;
 
     const grade = this._evaluateTodTimeline(this._resolveTimelineHour());

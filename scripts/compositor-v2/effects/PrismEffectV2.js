@@ -30,7 +30,7 @@ export class PrismEffectV2 {
     this._sharedUniforms = null;
 
     this.params = {
-      enabled: true,
+      enabled: false,
       /** Scene/tools flag after populate — not a Tweakpane control. */
       hasPrismMask: false,
 

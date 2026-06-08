@@ -29,7 +29,7 @@ export class SkyColorEffectV2 {
     this.params = {
       ...DEFAULT_ATMOSPHERE_PARAMS,
       skyTintDarknessLightsEnabled: true,
-      skyTintDarknessLightsIntensity: 5,
+      skyTintDarknessLightsIntensity: 4.27,
     };
 
     this.currentSkyTintColor = { r: 1.0, g: 1.0, b: 1.0 };
@@ -76,7 +76,7 @@ export class SkyColorEffectV2 {
           min: 0.0,
           max: 5.0,
           step: 0.01,
-          default: 5,
+          default: 4.27,
           label: 'Sun Light Tint Intensity',
           throttle: 50,
         },

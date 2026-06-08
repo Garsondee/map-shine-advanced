@@ -8,6 +8,7 @@
 import { canPersistSceneDocument } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
 import { createDefaultPlayerLightAllowance, normalizePlayerLightOverride } from '../core/player-light-allowance.js';
+import { deriveWindProfile, wind01FromLegacy } from '../core/wind-profile.js';
 
 const log = createLogger('ControlStateSanitize');
 
@@ -98,6 +99,7 @@ export function createDefaultControlState() {
       fogDensity: 0.0,
       freezeLevel: 0.0
     },
+    wind01: 0.0,
     windSpeedMS: 0.0,
     windDirection: 180.0,
     gustiness: 'calm',
@@ -205,8 +207,16 @@ export function sanitizeControlStateInPlace(cs, options = {}) {
   const dtm = Number(cs.directedTransitionMinutes);
   cs.directedTransitionMinutes = Number.isFinite(dtm) ? Math.max(0.1, Math.min(60, dtm)) : 5;
 
-  const wms = Number(cs.windSpeedMS);
-  cs.windSpeedMS = Number.isFinite(wms) ? Math.max(0, Math.min(78, wms)) : 39;
+  let w01 = Number(cs.wind01);
+  if (!Number.isFinite(w01)) {
+    w01 = wind01FromLegacy({
+      windSpeedMS: cs.windSpeedMS,
+      gustiness: cs.gustiness,
+    });
+  }
+  cs.wind01 = Math.max(0, Math.min(1, w01));
+  const profile = deriveWindProfile(cs.wind01);
+  cs.windSpeedMS = Math.max(0, Math.min(78, profile.windSpeedMS));
 
   const wdir = Number(cs.windDirection);
   cs.windDirection = Number.isFinite(wdir) ? ((wdir % 360) + 360) % 360 : 180;

@@ -3,8 +3,6 @@
  * @module utils/rt-pixel-readback
  */
 
-import { getGlobalFrameState } from '../core/frame-state.js';
-
 /**
  * @param {number} c linear 0–1+
  * @returns {number}
@@ -194,12 +192,6 @@ export function resolveSceneRectInRtPixels(renderer, rt = null, options = {}) {
       const h = Math.max(1, topGl - y);
       return { x, y, w, h, source: 'foundrySceneData' };
     }
-  }
-
-  const fs = getGlobalFrameState();
-  if (fs?.sceneScissorValid && fs.sceneScissorPx?.w > 0 && fs.sceneScissorPx?.h > 0) {
-    const { x, y, w, h } = fs.sceneScissorPx;
-    return { x, y, w, h, source: 'frameState.sceneScissorPx' };
   }
 
   return null;

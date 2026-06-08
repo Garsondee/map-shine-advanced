@@ -4,12 +4,13 @@
  * @module settings/scene-settings
  */
 import { canPersistSceneDocument, isGmLike } from '../core/gm-parity.js';
-import { createLogger } from '../core/log.js';
+import { createLogger, LogLevel, setLogLevel } from '../core/log.js';
 import { repairSceneControlStateFlag } from './control-state-sanitize.js';
 import { wipeMapShineAdvancedFlagsAsync } from './scene-msa-flag-wipe.js';
 import { createDefaultStyledLoadingScreenConfig } from '../ui/loading-screen/loading-screen-config.js';
 import { createDefaultLoadingHints } from '../ui/loading-screen/loading-hints.js';
 import { LightingDirector } from '../core/LightingDirector.js';
+import { GraphicsSettingsMenuApp } from '../ui/graphics-settings-menu-app.js';
 
 const log = createLogger('Settings');
 
@@ -826,17 +827,27 @@ export function registerSettings() {
   // This is just a placeholder for module-wide settings
 
   // Centralised lighting/darkness orchestrator (scripts/core/LightingDirector.js).
-  // Owns the `lightingDarknessPriority` world setting that controls how
-  // Foundry slider / calendar / weather darkness sources are merged.
   try { LightingDirector.registerSettings(); } catch (_) {}
+
+  game.settings.registerMenu(FLAG_NAMESPACE, 'performanceGraphics', {
+    name: 'MAPSHINE.PerformanceGraphicsTitle',
+    label: 'MAPSHINE.PerformanceGraphicsMenuButton',
+    hint: 'MAPSHINE.PerformanceGraphicsDescription',
+    icon: 'fas fa-gauge-high',
+    type: GraphicsSettingsMenuApp,
+    restricted: false,
+  });
 
   game.settings.register('map-shine-advanced', 'debug-mode', {
     name: 'Debug Mode',
-    hint: 'Enable verbose logging for troubleshooting',
+    hint: 'Enable verbose console logging for troubleshooting (hidden; toggled via module init sync).',
     scope: 'client',
-    config: true,
+    config: false,
     type: Boolean,
-    default: false
+    default: false,
+    onChange: (enabled) => {
+      setLogLevel(enabled ? LogLevel.DEBUG : LogLevel.INFO);
+    },
   });
 
   // Phase 3 floor loop: per-floor scene rendering for correct per-floor masks,
@@ -865,8 +876,8 @@ export function registerSettings() {
   });
 
   game.settings.register('map-shine-advanced', 'fogPersistenceMaxDim', {
-    name: 'Fog Persistence Max Dimension',
-    hint: 'Maximum saved fog mask dimension in pixels when using Map Shine fog persistence. Lower values reduce database size at the cost of mask sharpness after reload.',
+    name: 'Fog Save Quality (max pixels)',
+    hint: 'Maximum fog mask size saved to the database. Lower values save space; higher values stay sharper after reload.',
     scope: 'world',
     config: true,
     restricted: true,
@@ -909,7 +920,7 @@ export function registerSettings() {
     name: 'Use Levels Editor V2',
     hint: 'Use the redesigned Levels authoring UI with vertical stack editing and floor/ceiling roles.',
     scope: 'world',
-    config: true,
+    config: false,
     restricted: true,
     type: Boolean,
     default: true,
@@ -917,9 +928,9 @@ export function registerSettings() {
 
   game.settings.register(FLAG_NAMESPACE, LIGHT_ICON_LEVEL_VISIBILITY_MODE_SETTING, {
     name: 'Light Icon Visibility by Level',
-    hint: 'Choose whether lighting edit icons show all lights or only lights visible for the current level perspective.',
+    hint: 'Filter lighting edit icons by current level perspective. Hidden until LightIconManager wiring is complete.',
     scope: 'client',
-    config: true,
+    config: false,
     type: String,
     choices: {
       [LIGHT_ICON_LEVEL_VISIBILITY_MODES.ALL]: 'Show all light icons',
@@ -936,7 +947,7 @@ export function registerSettings() {
 
   game.settings.register(FLAG_NAMESPACE, TOKEN_RENDERING_MODE_SETTING, {
     name: 'Token Rendering Mode',
-    hint: 'Choose whether token visuals are rendered by Map Shine (Three.js) or Foundry native PIXI. Selection/input remains Foundry-native in both modes.',
+    hint: 'Map Shine Three.js (default) or Foundry native PIXI for token art. Changing this may require reloading the scene.',
     scope: 'world',
     config: true,
     restricted: true,
@@ -1008,7 +1019,7 @@ export function registerSettings() {
     name: 'Google Fonts for Loading Screens',
     hint: 'Allow loading screen themes to fetch Google Fonts families.',
     scope: 'world',
-    config: true,
+    config: false,
     restricted: true,
     type: Boolean,
     default: true,
@@ -1021,7 +1032,7 @@ export function registerSettings() {
     name: 'Force Foundry Default Loading',
     hint: 'Bypass Map Shine loading overlays and use Foundry UI loading indicators only.',
     scope: 'world',
-    config: true,
+    config: false,
     restricted: true,
     type: Boolean,
     default: false,
@@ -1091,19 +1102,22 @@ export function registerSettings() {
 
   game.settings.register('map-shine-advanced', 'allowPlayersToTogglePlayerLightMode', {
     name: 'Allow Players to Toggle Player Light',
-    hint: 'If disabled, only the GM can switch between torch and flashlight mode for player lights.',
+    hint: 'If disabled, only the GM can switch player light modes. Configure in Map Shine Control → Player Lights.',
     scope: 'world',
-    config: true,
+    config: false,
     restricted: true,
     type: Boolean,
-    default: true
+    default: true,
+    onChange: () => {
+      try { ui?.controls?.render?.(true); } catch (_) {}
+    },
   });
 
   game.settings.register('map-shine-advanced', 'nightVisionAllowPlayers', {
     name: 'Allow Players to Use Night Vision Mode',
-    hint: 'Legacy setting — combined with “Player Light: Night Vision (global default)” for Night Vision allowance when a scene uses Use Global. Prefer Map Shine Control → Player Lights → Global Defaults.',
+    hint: 'Legacy setting — use Map Shine Control → Player Lights → Global Defaults.',
     scope: 'world',
-    config: true,
+    config: false,
     restricted: true,
     type: Boolean,
     default: false
@@ -1111,9 +1125,9 @@ export function registerSettings() {
 
   game.settings.register('map-shine-advanced', 'playerLightTorchAllowedDefault', {
     name: 'Player Light: Torch (global default)',
-    hint: 'Default allowance for the Torch token-palette tool when a scene uses “Use Global” for Torch. Per-scene overrides are set in Map Shine Control → Player Lights.',
+    hint: 'Default Torch allowance when a scene uses Use Global. Set in Map Shine Control → Player Lights.',
     scope: 'world',
-    config: true,
+    config: false,
     restricted: true,
     type: Boolean,
     default: true
@@ -1121,9 +1135,9 @@ export function registerSettings() {
 
   game.settings.register('map-shine-advanced', 'playerLightFlashlightAllowedDefault', {
     name: 'Player Light: Flashlight (global default)',
-    hint: 'Default allowance for the Flashlight token-palette tool when a scene uses “Use Global” for Flashlight. Per-scene overrides are set in Map Shine Control → Player Lights.',
+    hint: 'Default Flashlight allowance when a scene uses Use Global. Set in Map Shine Control → Player Lights.',
     scope: 'world',
-    config: true,
+    config: false,
     restricted: true,
     type: Boolean,
     default: true
@@ -1131,9 +1145,9 @@ export function registerSettings() {
 
   game.settings.register('map-shine-advanced', 'playerLightNightVisionAllowedDefault', {
     name: 'Player Light: Night Vision (global default)',
-    hint: 'Default allowance for Night Vision when a scene uses “Use Global”. If either this or the legacy “Allow Players to Use Night Vision Mode” is enabled, Night Vision is allowed globally. Map Shine Control → Player Lights can sync both when you change this there.',
+    hint: 'Default Night Vision allowance when a scene uses Use Global. Set in Map Shine Control → Player Lights.',
     scope: 'world',
-    config: true,
+    config: false,
     restricted: true,
     type: Boolean,
     default: false
@@ -1141,9 +1155,9 @@ export function registerSettings() {
 
   game.settings.register('map-shine-advanced', 'playerLightLowLightVisionAllowedDefault', {
     name: 'Player Light: Low-light Vision (global default)',
-    hint: 'Default allowance for biological low-light vision when a scene uses “Use Global”. Per-scene overrides are set in Map Shine Control → Player Lights.',
+    hint: 'Default low-light vision allowance when a scene uses Use Global. Set in Map Shine Control → Player Lights.',
     scope: 'world',
-    config: true,
+    config: false,
     restricted: true,
     type: Boolean,
     default: false
@@ -1151,9 +1165,9 @@ export function registerSettings() {
 
   game.settings.register('map-shine-advanced', 'playerLightInfravisionAllowedDefault', {
     name: 'Player Light: Infravision (global default)',
-    hint: 'Default allowance for passive thermal infravision when a scene uses “Use Global”. Per-scene overrides are set in Map Shine Control → Player Lights.',
+    hint: 'Default infravision allowance when a scene uses Use Global. Set in Map Shine Control → Player Lights.',
     scope: 'world',
-    config: true,
+    config: false,
     restricted: true,
     type: Boolean,
     default: false
@@ -1161,9 +1175,9 @@ export function registerSettings() {
 
   game.settings.register('map-shine-advanced', 'playerLightActiveIRAllowedDefault', {
     name: 'Player Light: Active Infravision (global default)',
-    hint: 'Default allowance for active IR goggles (NV post-pass + IR flashlight cone) when a scene uses “Use Global”. Per-scene overrides are set in Map Shine Control → Player Lights.',
+    hint: 'Default active IR allowance when a scene uses Use Global. Set in Map Shine Control → Player Lights.',
     scope: 'world',
-    config: true,
+    config: false,
     restricted: true,
     type: Boolean,
     default: false
@@ -1296,6 +1310,18 @@ export function getWorldBasedEffectsConfig() {
   }
 }
 
+/**
+ * Apply client debug-mode setting to the shared log level.
+ * @public
+ */
+export function applyDebugModeFromSettings() {
+  try {
+    const enabled = game.settings.get(FLAG_NAMESPACE, 'debug-mode') === true;
+    setLogLevel(enabled ? LogLevel.DEBUG : LogLevel.INFO);
+  } catch (_) {
+    setLogLevel(LogLevel.INFO);
+  }
+}
 /**
  * Persist the world-based effects configuration.
  * @param {Object.<string, boolean>} config - effectId → true/false

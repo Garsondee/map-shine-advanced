@@ -81,6 +81,7 @@ import {
   getGlobalPlayerLightModeAllowed,
   resolvePlayerLightModeAllowance
 } from '../core/player-light-allowance.js';
+import { DARKNESS_PRIORITY, DARKNESS_PRIORITY_CHOICES } from '../core/LightingDirector.js';
 
 const log = createLogger('ControlPanel');
 
@@ -4542,6 +4543,52 @@ export class ControlPanelManager {
       this.controlState.playerLightAllowance = createDefaultPlayerLightAllowance();
     }
 
+    const MODULE = 'map-shine-advanced';
+
+    const accessState = {
+      allowPlayers: !!game.settings.get(MODULE, 'allowPlayersToTogglePlayerLightMode'),
+    };
+    const accessCtrl = createNativeControl({
+      type: 'toggle',
+      label: 'Allow players to change player lights',
+      target: accessState,
+      key: 'allowPlayers',
+      onChange: async (v) => {
+        try {
+          await game.settings.set(MODULE, 'allowPlayersToTogglePlayerLightMode', !!v);
+        } catch (_) {}
+        try { ui?.controls?.render?.(true); } catch (_) {}
+      },
+    });
+    mountEl.appendChild(accessCtrl.row);
+
+    const darknessRow = document.createElement('label');
+    darknessRow.className = 'msa-cp-native-row';
+    darknessRow.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin:6px 8px 8px;font-size:11px';
+    const darknessLabel = document.createElement('span');
+    darknessLabel.textContent = 'Darkness priority';
+    const darknessSelect = document.createElement('select');
+    darknessSelect.className = 'msa-cp-native-select';
+    for (const [value, label] of Object.entries(DARKNESS_PRIORITY_CHOICES)) {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = label;
+      darknessSelect.appendChild(opt);
+    }
+    try {
+      darknessSelect.value = game.settings.get(MODULE, 'lightingDarknessPriority') || DARKNESS_PRIORITY.MAX;
+    } catch (_) {
+      darknessSelect.value = DARKNESS_PRIORITY.MAX;
+    }
+    darknessSelect.addEventListener('change', async () => {
+      try {
+        await game.settings.set(MODULE, 'lightingDarknessPriority', darknessSelect.value);
+      } catch (_) {}
+    });
+    darknessRow.appendChild(darknessLabel);
+    darknessRow.appendChild(darknessSelect);
+    mountEl.appendChild(darknessRow);
+
     const playerLightModes = [
       { key: 'torch', label: 'Torch' },
       { key: 'flashlight', label: 'Flashlight' },
@@ -4553,7 +4600,6 @@ export class ControlPanelManager {
     const allowanceOptions = ['global', 'allowed', 'disallowed'];
     const allowanceLabels = { global: 'Global', allowed: 'Allow', disallowed: 'Deny' };
 
-    const MODULE = 'map-shine-advanced';
     const clamp01 = (v) => Math.max(0, Math.min(1, Number(v) || 0));
     const getPlayerLightParam = (paramId, fallback = 0) => {
       try {

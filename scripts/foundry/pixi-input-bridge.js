@@ -458,13 +458,20 @@ export class PixiInputBridge {
   }
 
   /**
-   * Keep the compositor rendering while the camera is moving.
+   * Keep the compositor in the navigation window while the camera is moving.
    * @param {number} [durationMs=150]
+   * @param {{immediate?: boolean}} [options]
    * @private
    */
-  _bumpRenderLoop(durationMs = 150) {
+  _bumpRenderLoop(durationMs = 150, { immediate = false } = {}) {
     try {
-      window.MapShine?.renderLoop?.requestContinuousRender?.(durationMs);
+      const rl = window.MapShine?.renderLoop;
+      if (!rl) return;
+      if (immediate) {
+        rl.requestContinuousRender?.(durationMs);
+      } else {
+        rl.extendContinuousRender?.(durationMs);
+      }
     } catch (_) {}
   }
 
@@ -512,7 +519,7 @@ export class PixiInputBridge {
       return;
     }
 
-    this._bumpRenderLoop(200);
+    this._bumpRenderLoop(200, { immediate: true });
 
     const isZoomTarget = this._smoothTargetSource === 'zoom';
     const alphaPan = clamp(1 - Math.exp(-cfg.panHz * dt), 0.04, 1);
@@ -553,6 +560,8 @@ export class PixiInputBridge {
       this._smoothTargetView = null;
       this._smoothTargetSource = null;
       this._applyView(constrained);
+      // Extend the continuous window only — immediate force flags on every pointermove
+      // bypass presentation pacing and stack full compositor presents.
       this._bumpRenderLoop(200);
       return;
     }
@@ -561,13 +570,13 @@ export class PixiInputBridge {
       this._smoothTargetView = null;
       this._smoothTargetSource = null;
       this._applyView(constrained);
-      this._bumpRenderLoop(120);
+      this._bumpRenderLoop(120, { immediate: true });
       return;
     }
 
     this._smoothTargetView = constrained;
     this._smoothTargetSource = (source === 'zoom') ? 'zoom' : 'pan';
-    this._bumpRenderLoop(250);
+    this._bumpRenderLoop(250, { immediate: true });
   }
   
   /**
@@ -627,7 +636,7 @@ export class PixiInputBridge {
         this._smoothTargetSource = null;
         this._lastMousePos = { x: event.clientX, y: event.clientY };
         this.threeCanvas.style.cursor = 'grabbing';
-        this._bumpRenderLoop(500);
+        this._bumpRenderLoop(500, { immediate: true });
         event.preventDefault();
       } else {
         return;
@@ -681,6 +690,9 @@ export class PixiInputBridge {
         this.threeCanvas.style.cursor = 'default';
       }
       flushHudAlign();
+      try {
+        window.MapShine?.renderLoop?.requestRender?.();
+      } catch (_) {}
     }
 
     this._pendingRightDrag = false;
@@ -749,7 +761,7 @@ export class PixiInputBridge {
     }, 'zoom');
 
     this._notifyUserInput('zoom');
-    this._bumpRenderLoop(200);
+    this._bumpRenderLoop(200, { immediate: true });
   }
   
   /**

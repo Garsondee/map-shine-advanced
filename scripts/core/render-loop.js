@@ -236,12 +236,13 @@ export class RenderLoop {
 
     if (inCinematicMode) return { targetFps: 120, tier: 'cinematic' };
 
+    // Pan/zoom: cap full compositor presents at active FPS; camera-only ticks run
+    // every rAF via tickCameraPipeline so Three matrices stay current between presents.
+    if (isCameraNavigationActive()) {
+      return { targetFps: fps.activeFps, tier: 'navigation' };
+    }
+
     if (cameraActive || this._forceNextRender || this._presentationDueImmediately) {
-      // Pan/zoom must present at active FPS — capping to presentation FPS left the
-      // Three layer updating slower than pointer input and caused visible jerk.
-      if (isCameraNavigationActive()) {
-        return { targetFps: fps.activeFps, tier: 'navigation' };
-      }
       return { targetFps: fps.activeFps, tier: 'active' };
     }
 
@@ -270,8 +271,9 @@ export class RenderLoop {
 
     const effectWantsContinuous = this._getEffectWantsContinuous(nowMs);
     const inContinuousWindow = nowMs < (this._continuousRenderUntilMs || 0);
+    const { cameraChanged } = this._detectCameraChanged();
     const { targetFps } = this._resolveTargetPresentationFps(nowMs, {
-      cameraChanged: false,
+      cameraChanged,
       inContinuousWindow,
       effectWantsContinuous,
     });
@@ -342,8 +344,7 @@ export class RenderLoop {
     const navigationActive = isCameraNavigationActive();
     const shouldPresent = dueByTime
       || this._presentationDueImmediately
-      || this._forceNextRender
-      || navigationActive;
+      || this._forceNextRender;
 
     return {
       shouldPresent,
@@ -354,6 +355,7 @@ export class RenderLoop {
       cameraChanged,
       effectWantsContinuous,
       inContinuousWindow,
+      navigationActive,
       pixiPivotX,
       pixiPivotY,
       pixiZoom,
@@ -475,6 +477,21 @@ export class RenderLoop {
     this._cinematicModeUntilMs = 0;
   }
 
+  /**
+   * Extend the continuous-render window without forcing an immediate present.
+   * Use during drag pointermove so presentation stays capped at active FPS.
+   * @param {number} durationMs
+   */
+  extendContinuousRender(durationMs) {
+    const d = Number(durationMs);
+    if (!Number.isFinite(d) || d <= 0) return;
+
+    const until = performance.now() + Math.max(0, d);
+    if (!this._continuousRenderUntilMs || until > this._continuousRenderUntilMs) {
+      this._continuousRenderUntilMs = until;
+    }
+  }
+
   requestContinuousRender(durationMs) {
     const d = Number(durationMs);
     if (!Number.isFinite(d) || d <= 0) {
@@ -483,10 +500,7 @@ export class RenderLoop {
       return;
     }
 
-    const until = performance.now() + Math.max(0, d);
-    if (!this._continuousRenderUntilMs || until > this._continuousRenderUntilMs) {
-      this._continuousRenderUntilMs = until;
-    }
+    this.extendContinuousRender(d);
     this._presentationDueImmediately = true;
     this._forceNextRender = true;
   }
@@ -609,9 +623,9 @@ export class RenderLoop {
           });
 
           if (!gate.shouldPresent && !pendingPixiToken) {
-            // Keep PIXI→Three camera sync current even when the heavy compositor
-            // present is gated (e.g. continuous effects at presentation tier).
-            if (gate.cameraChanged || isCameraNavigationActive()) {
+            // Keep PIXI→Three camera sync current when the heavy compositor present
+            // is gated — especially during navigation pan (active FPS cap).
+            if (gate.cameraChanged || gate.navigationActive || isCameraNavigationActive()) {
               try {
                 const wallDelta = Math.max(0, Math.min((now - this.lastFrameTime) / 1000, 0.1));
                 this.effectComposer.tickCameraPipeline?.(wallDelta, timeInfo);

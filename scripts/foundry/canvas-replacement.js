@@ -8083,10 +8083,11 @@ async function createThreeCanvas(scene, createOptions = {}) {
     }, 'pixiInputBridge.updatable', Severity.COSMETIC);
     safeCall(() => {
       if (window.MapShine) {
+        window.MapShine.pixiInputBridge = pixiInputBridge;
         // Legacy alias used by several interaction paths to temporarily disable camera input while dragging.
         window.MapShine.cameraController = pixiInputBridge;
       }
-    }, 'exposeLegacyCameraControllerAlias', Severity.COSMETIC);
+    }, 'exposePixiInputBridge', Severity.COSMETIC);
     if (isDebugLoad) dlp.end('manager.PixiInputBridge.init');
     log.info('PIXI input bridge initialized - pan/zoom updates PIXI stage');
 

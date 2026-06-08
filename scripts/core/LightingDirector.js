@@ -64,6 +64,8 @@ const DARKNESS_PRIORITY_CHOICES = Object.freeze({
   [DARKNESS_PRIORITY.WEATHER]: 'Weather controller only',
 });
 
+export { DARKNESS_PRIORITY_CHOICES };
+
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
 /**
@@ -119,9 +121,10 @@ class LightingDirectorImpl {
       if (!globalThis.game?.settings?.register) return;
       globalThis.game.settings.register(MODULE_ID, SETTING_DARKNESS_PRIORITY, {
         name: 'Lighting darkness priority',
-        hint: 'Which source defines scene darkness. "Max" keeps the legacy behaviour where Foundry slider, calendar, and weather are combined via Math.max. Choose a single source to make that input authoritative (e.g. so dragging the Foundry slider always wins).',
+        hint: 'Which input controls how dark the scene looks. Use Foundry scene slider only if the Foundry darkness control should always win over Map Shine time and weather.',
         scope: 'world',
         config: true,
+        restricted: true,
         type: String,
         choices: { ...DARKNESS_PRIORITY_CHOICES },
         default: DARKNESS_PRIORITY.MAX,
@@ -129,27 +132,30 @@ class LightingDirectorImpl {
       });
       globalThis.game.settings.register(MODULE_ID, SETTING_FADE_CHUNK_LEG_SECONDS, {
         name: 'Environment fade chunk leg (seconds)',
-        hint: 'Wall-clock duration of each mini-fade leg when a long time-of-day transition is split into chunks. Darkness and Foundry light activation refresh at the end of each leg.',
+        hint: 'Wall-clock duration of each mini-fade leg when a long time-of-day transition is split into chunks.',
         scope: 'world',
-        config: true,
+        config: false,
+        restricted: true,
         type: Number,
         range: { min: 5, max: 60, step: 1 },
         default: 10,
       });
       globalThis.game.settings.register(MODULE_ID, SETTING_FADE_CHUNK_SETTLE_MS, {
         name: 'Environment fade chunk settle (ms)',
-        hint: 'Pause between chunked fade legs so Foundry perception/lighting can catch up before the next leg begins.',
+        hint: 'Pause between chunked fade legs so Foundry perception/lighting can catch up.',
         scope: 'world',
-        config: true,
+        config: false,
+        restricted: true,
         type: Number,
         range: { min: 0, max: 2000, step: 50 },
         default: 300,
       });
       globalThis.game.settings.register(MODULE_ID, SETTING_FADE_CHUNK_MIN_HOUR_DELTA, {
         name: 'Environment fade chunk min hour delta',
-        hint: 'Minimum in-game hour span (shortest arc) before chunked fades activate. Chunking also requires the fade duration to exceed the leg length.',
+        hint: 'Minimum in-game hour span before chunked fades activate.',
         scope: 'world',
-        config: true,
+        config: false,
+        restricted: true,
         type: Number,
         range: { min: 0.1, max: 12, step: 0.1 },
         default: 0.5,

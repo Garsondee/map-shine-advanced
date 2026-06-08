@@ -20,6 +20,15 @@ function isCameraPathPlaybackSimActive() {
   return false;
 }
 
+/** PixiInputBridge is exposed as `cameraController` during scene init; prefer either alias. */
+function getPixiInputBridge() {
+  try {
+    const ms = window.MapShine;
+    return ms?.pixiInputBridge ?? ms?.cameraController ?? null;
+  } catch (_) {}
+  return null;
+}
+
 /**
  * @returns {boolean}
  */
@@ -27,8 +36,10 @@ export function isCameraNavigationActive() {
   try {
     if (isCameraPathPlaybackSimActive()) return false;
 
+    const bridge = getPixiInputBridge();
     // Pan/zoom gesture only — do not key off presentation tier ('active' is high-FPS present mode, not pan).
-    if (window.MapShine?.pixiInputBridge?.isCameraPanActive?.()) return true;
+    if (bridge?.isCameraPanActive?.()) return true;
+    if (bridge?.isUserActivelyPanning?.()) return true;
   } catch (_) {}
   return false;
 }

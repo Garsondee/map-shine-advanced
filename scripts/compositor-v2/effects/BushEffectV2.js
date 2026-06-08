@@ -246,7 +246,7 @@ export class BushEffectV2 {
       tint: 0.0,
 
       // Canopy shadow (offset sample + blur in fragment shader)
-      shadowOpacity: 0.08,
+      shadowOpacity: 0.22,
       shadowLength: 0.02,
       shadowSoftness: 0.7,
 
@@ -782,7 +782,7 @@ export class BushEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.08,
+          default: 0.22,
           throttle: 100,
           tooltip: 'Opacity of the offset canopy shadow pass.',
         },

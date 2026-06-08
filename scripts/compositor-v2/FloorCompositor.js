@@ -4863,10 +4863,10 @@ export class FloorCompositor {
     // Runtime alpha/isolation bisect flags (all optional, all default false).
     // Usage: window.MapShine.__alphaIsolationDebug = { skipLensPass: true, ... }.
     const _alphaIsoDebug = window.MapShine?.__alphaIsolationDebug ?? null;
-    const _skipCloudPass = _alphaIsoDebug?.skipCloudPass === true;
-    const _skipOverheadShadowPass = _alphaIsoDebug?.skipOverheadShadowPass === true;
+    const _skipCloudPass = navigationRenderLite || _alphaIsoDebug?.skipCloudPass === true;
+    const _skipOverheadShadowPass = navigationRenderLite || _alphaIsoDebug?.skipOverheadShadowPass === true;
     const _overheadShadowEnabled = resolveEffectEnabled(this._overheadShadowEffect);
-    const _skipBuildingShadowPass = _alphaIsoDebug?.skipBuildingShadowPass === true;
+    const _skipBuildingShadowPass = navigationRenderLite || _alphaIsoDebug?.skipBuildingShadowPass === true;
     const _disableOverheadInLighting = _alphaIsoDebug?.disableOverheadInLighting === true;
     const _disableRoofInLighting = _alphaIsoDebug?.disableRoofInLighting === true;
     const _skipWaterPass = _alphaIsoDebug?.skipWaterPass === true;
@@ -4906,24 +4906,28 @@ export class FloorCompositor {
 
     // Source shadow passes need current-frame light presence so torches, Foundry
     // lights, and WindowLightEffectV2 clear shadows without one-frame swimming.
+    // During navigation pan, reuse the previous frame's masks to avoid expensive
+    // per-present prepass work; a full refresh runs on mouseup via requestRender().
     try {
       const activeIdx = Number.isFinite(Number(this._activeFloorIndex))
         ? Number(this._activeFloorIndex)
         : 0;
-      this._windowLightEffect?.setRenderFloorIndex?.(activeIdx);
-      this._windowLightEffect?.setCloudShadowTexture?.(null, 1, 1, null);
-      this._windowLightEffect?.setOverheadRoofAlphaTexture?.(null, 1, 1);
-      this._windowLightEffect?.setCeilingTransmittanceTexture?.(null);
-      if (resolveEffectEnabled(this._windowLightEffect)) {
-        this._windowLightEffect?.syncFrameOcclusion?.(this);
-        this._lightingEffect?._syncWindowLightEmitContext?.(this.renderer);
-      }
       this._lightingEffect?.setRenderFloorIndexForLights?.(activeIdx);
       this._fireEffect?.setRenderFloorIndexForGlow?.(activeIdx, true);
-      const winScene = resolveEffectEnabled(this._windowLightEffect)
-        ? this._windowLightEffect._scene
-        : null;
-      this._lightingEffect?.renderLightOverrideMasks?.(this.renderer, this.camera, winScene);
+      if (!navigationRenderLite) {
+        this._windowLightEffect?.setRenderFloorIndex?.(activeIdx);
+        this._windowLightEffect?.setCloudShadowTexture?.(null, 1, 1, null);
+        this._windowLightEffect?.setOverheadRoofAlphaTexture?.(null, 1, 1);
+        this._windowLightEffect?.setCeilingTransmittanceTexture?.(null);
+        if (resolveEffectEnabled(this._windowLightEffect)) {
+          this._windowLightEffect?.syncFrameOcclusion?.(this);
+          this._lightingEffect?._syncWindowLightEmitContext?.(this.renderer);
+        }
+        const winScene = resolveEffectEnabled(this._windowLightEffect)
+          ? this._windowLightEffect._scene
+          : null;
+        this._lightingEffect?.renderLightOverrideMasks?.(this.renderer, this.camera, winScene);
+      }
     } catch (err) {
       log.warn('FloorCompositor: current-frame light override prepass failed:', err);
     }
@@ -5060,17 +5064,19 @@ export class FloorCompositor {
     // ShadowManagerV2 still composes overhead + cloud.
     if (_dbgStages) { try { log.info('[V2 Frame] ▶ Stage: cloud.render'); } catch (_) {} }
     if (_profiling) _profileT0 = performance.now();
-    const cloudEnabled = !_skipCloudPass && resolveEffectEnabled(this._cloudEffect);
+    const cloudEffectEnabled = resolveEffectEnabled(this._cloudEffect);
+    const cloudEnabled = !_skipCloudPass && cloudEffectEnabled;
+    let cloudTex = null;
+    let cloudRawTex = null;
     if (cloudEnabled) {
       this._cloudEffect.render(this.renderer);
+      cloudTex = this._cloudEffect.cloudShadowTexture;
+      cloudRawTex = this._cloudEffect.cloudShadowRawTexture ?? this._cloudEffect.cloudShadowTexture;
+    } else if (navigationRenderLite && cloudEffectEnabled) {
+      cloudTex = this._shadowManagerPrevFrameCloudTex;
+      cloudRawTex = this._shadowManagerPrevFrameCloudRawTex ?? cloudTex;
     }
     {
-      const cloudTex = cloudEnabled
-        ? this._cloudEffect.cloudShadowTexture
-        : null;
-      const cloudRawTex = cloudEnabled
-        ? (this._cloudEffect.cloudShadowRawTexture ?? this._cloudEffect.cloudShadowTexture)
-        : null;
       try {
         this._shadowManagerCombineSucceeded = this._runShadowManagerCombinePass(
           cloudTex,
@@ -5080,8 +5086,10 @@ export class FloorCompositor {
       } catch (err) {
         log.warn('FloorCompositor: post-cloud ShadowManagerV2 combine failed:', err);
       }
-      this._shadowManagerPrevFrameCloudTex = cloudTex ?? null;
-      this._shadowManagerPrevFrameCloudRawTex = cloudRawTex ?? null;
+      if (cloudEnabled) {
+        this._shadowManagerPrevFrameCloudTex = cloudTex ?? null;
+        this._shadowManagerPrevFrameCloudRawTex = cloudRawTex ?? null;
+      }
     }
     try { this._waterSplashesEffect?.syncShadowDarkeningUniforms?.(); } catch (err) {
       log.warn('WaterSplashesEffectV2 syncShadowDarkeningUniforms threw, skipping:', err);
@@ -8975,7 +8983,7 @@ export class FloorCompositor {
         } catch (_) {}
         this._compositeWaterSplashesAboveWater(this.renderer, mergedCompositeOut);
       }, 'Water splashes before CC');
-      this._profileEffectCall('postBloom.worldOverlays.vegetation', 'render', () => {
+      if (!navigationRenderLite) this._profileEffectCall('postBloom.worldOverlays.vegetation', 'render', () => {
         this._profileEffectCall('postBloom.worldOverlays.vegetation.sync', 'render', () => {
           try { this._bushEffect?.syncLandscapeLightningUniforms?.(); } catch (_) {}
           try { this._treeEffect?.syncLandscapeLightningUniforms?.(); } catch (_) {}

@@ -270,7 +270,7 @@ export class TreeEffectV2 {
       tint: 0.0,
 
       // Canopy shadow (offset alpha sample — same model as BushEffectV2)
-      shadowOpacity: 0.2,
+      shadowOpacity: 0.35,
       shadowLength: 0.04,
       shadowSoftness: 0.8,
 
@@ -826,7 +826,7 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.2,
+          default: 0.35,
           throttle: 100,
           tooltip: 'Opacity of the offset canopy shadow pass.',
         },

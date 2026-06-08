@@ -2926,6 +2926,141 @@ body.msa-level-transition-active #loading-text {
   font-style: italic;
 }
 
+.msa-gfx-menu {
+  padding: 8px 4px 4px;
+}
+
+.msa-gfx-menu__lead {
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  opacity: 0.8;
+}
+
+.msa-gfx-menu button[data-action="open"] {
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.1);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.msa-gfx-menu button[data-action="open"]:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+#map-shine-player-light-picker {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(320px, calc(100vw - 32px));
+  max-height: min(70vh, 520px);
+  z-index: 10000;
+  display: none;
+  flex-direction: column;
+  background: var(--ms-ui-panel-bg, rgba(14, 16, 22, 0.97));
+  color: var(--ms-ui-text, rgba(232, 234, 240, 0.92));
+  border: 1px solid var(--ms-ui-border, rgba(255, 255, 255, 0.14));
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  font-family: var(--font-primary, 'Signika', sans-serif);
+  font-size: 12px;
+  overflow: hidden;
+  pointer-events: auto;
+}
+
+#map-shine-player-light-picker * {
+  box-sizing: border-box;
+}
+
+.msa-pl-picker__header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  background: linear-gradient(180deg, rgba(38, 44, 56, 0.95), rgba(22, 26, 34, 0.95));
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: grab;
+  user-select: none;
+}
+
+.msa-pl-picker__title {
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.msa-pl-picker__subtitle {
+  margin-top: 4px;
+  font-size: 11px;
+  opacity: 0.65;
+}
+
+.msa-pl-picker__close {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.msa-pl-picker__body {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+}
+
+.msa-pl-picker__mode {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.msa-pl-picker__mode:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.msa-pl-picker__mode.is-active {
+  border-color: rgba(255, 174, 51, 0.45);
+  background: rgba(255, 174, 51, 0.12);
+  color: #ffcc80;
+}
+
+.msa-pl-picker__mode i {
+  width: 18px;
+  text-align: center;
+  opacity: 0.85;
+}
+
+.msa-pl-picker__empty {
+  margin: 8px;
+  font-size: 11px;
+  opacity: 0.65;
+  font-style: italic;
+  line-height: 1.35;
+}
+
 /* ──────────────────────────────────────────────────────────────────────────
  * Performance Recorder dialog (Quick Actions → Performance Recorder)
  * Custom DOM overlay (no Foundry Application / Tweakpane). Stacked above
@@ -4225,6 +4360,7 @@ body.map-shine-camera-path-hide-ui #map-shine-camera-path,
 body.map-shine-camera-path-hide-ui #map-shine-performance-recorder,
 body.map-shine-camera-path-hide-ui #map-shine-diagnostic-center,
 body.map-shine-camera-path-hide-ui #map-shine-graphics-settings,
+body.map-shine-camera-path-hide-ui #map-shine-player-light-picker,
 body.map-shine-camera-path-hide-ui #map-shine-breaker-box,
 body.map-shine-camera-path-hide-ui #map-shine-overlay-root,
 body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {

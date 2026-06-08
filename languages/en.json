@@ -3,5 +3,10 @@
     "MAPSHINE.ToolTitle": "Map Shine UI",
     "MAPSHINE.ToolDescription": "Open the Map Shine effects panel to configure visual enhancements.",
     "MAPSHINE.PerformanceGraphicsTitle": "Performance & Graphics",
-    "MAPSHINE.PerformanceGraphicsDescription": "Tune how Map Shine looks and runs on your device"
+    "MAPSHINE.PerformanceGraphicsDescription": "Tune how Map Shine looks and runs on your device",
+    "MAPSHINE.PerformanceGraphicsMenuLead": "These settings apply only to your browser and can help if the map feels slow or choppy.",
+    "MAPSHINE.PerformanceGraphicsMenuButton": "Open Performance & Graphics",
+    "MAPSHINE.PlayerLightPickerTitle": "Player Light",
+    "MAPSHINE.PlayerLightPickerSelectToken": "Select a token on the canvas first",
+    "MAPSHINE.PlayerLightPickerNoModes": "No player light modes are enabled for you on this scene."
 }

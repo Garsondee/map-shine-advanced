@@ -183,12 +183,52 @@ export function resolvePlayerLightModeAllowance(mode, options = {}) {
 }
 
 /**
- * GM may always toggle; players follow resolvePlayerLightModeAllowance.
+ * Whether non-GMs may use player light tools at all (world master toggle).
+ * @returns {boolean}
+ */
+export function canPlayersTogglePlayerLightMode() {
+  try {
+    return game.settings.get(MODULE_ID, 'allowPlayersToTogglePlayerLightMode') !== false;
+  } catch (_) {
+    return true;
+  }
+}
+
+/**
+ * Whether the Player Light palette tool should appear for the current user.
+ * @returns {boolean}
+ */
+export function canUserAccessPlayerLightTools() {
+  if (isGmLike()) return true;
+  if (!canPlayersTogglePlayerLightMode()) return false;
+  return PLAYER_LIGHT_MODES.some((mode) => resolvePlayerLightModeAllowance(mode));
+}
+
+/**
+ * Apply player light mode to a token document.
+ * @param {TokenDocument} tokenDoc
+ * @param {PlayerLightMode|null} mode null = off
+ * @returns {Promise<void>}
+ */
+export async function applyPlayerLightModeToToken(tokenDoc, mode) {
+  if (!tokenDoc?.setFlag) return;
+  if (!mode) {
+    await tokenDoc.setFlag(MODULE_ID, 'playerLightEnabled', false);
+    return;
+  }
+  if (!isValidPlayerLightMode(mode)) return;
+  await tokenDoc.setFlag(MODULE_ID, 'playerLightEnabled', true);
+  await tokenDoc.setFlag(MODULE_ID, 'playerLightMode', mode);
+}
+
+/**
+ * GM may always toggle; players follow master toggle + resolvePlayerLightModeAllowance.
  * @param {PlayerLightMode} mode
  * @param {{ scene?: Scene|null, controlState?: object|null, tokenDoc?: TokenDocument|null }} [options]
  * @returns {boolean}
  */
 export function isPlayerLightModeAllowedForUser(mode, options = {}) {
   if (isGmLike()) return true;
+  if (!canPlayersTogglePlayerLightMode()) return false;
   return resolvePlayerLightModeAllowance(mode, options);
 }

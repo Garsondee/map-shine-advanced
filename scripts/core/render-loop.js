@@ -624,6 +624,7 @@ export class RenderLoop {
                 presented: false,
                 skipReason: 'presentation_gate',
                 targetFps: gate.targetFps,
+                tier: gate.tier,
                 sinceLastPresentMs: gate.sinceLastPresentMs,
                 renderPath: null,
               });
@@ -638,6 +639,7 @@ export class RenderLoop {
                 presented: false,
                 skipReason: gate.skipReason,
                 targetFps: gate.targetFps,
+                tier: gate.tier,
                 sinceLastPresentMs: gate.sinceLastPresentMs,
                 renderPath: null,
               });
@@ -679,6 +681,7 @@ export class RenderLoop {
               presented: false,
               skipReason: 'strict_hold',
               targetFps: gate.targetFps,
+              tier: gate.tier,
               sinceLastPresentMs: gate.sinceLastPresentMs,
               renderPath: 'strict-hold',
             });
@@ -728,6 +731,7 @@ export class RenderLoop {
             presented: true,
             skipReason: 'none',
             targetFps: gate.targetFps,
+            tier: gate.tier,
             sinceLastPresentMs: gate.sinceLastPresentMs,
             renderPath,
             continuousReason,

@@ -8,6 +8,7 @@
 import { rollupEffectKey } from './performance-recorder-export.js';
 import { analyzeStutters, formatStutterEventLines } from './performance-recorder-stutters.js';
 import { buildLightingSpanRows } from './performance-recorder-lighting.js';
+import { buildWorldOverlaysSpanRows } from './performance-recorder-world-overlays.js';
 
 /**
  * @typedef {'info'|'warn'|'critical'} InsightSeverity
@@ -190,11 +191,16 @@ export function buildPerformanceInsights(snapshot, frames = [], ticks = []) {
     const rafP95 = stutterAnalysis.summary?.rafGapMs?.p95 ?? 0;
     const frameP95 = Number(session.frameTime?.p95) || 0;
     const eventLines = formatStutterEventLines(stutterAnalysis).join('; ');
+    const gpuBound = snapshot.frameBudget?.diagnosis === 'gpu_bound_presentation';
     insights.push({
       severity: rafP95 >= 50 ? 'critical' : 'warn',
-      title: 'Idle rAF stalls detected (compositor looks healthy)',
-      detail: `${rafGapCount} rAF gap(s), compositor p95 ${fmtMs(frameP95)} ms. Main-thread work outside the compositor draw is the likely cause. Worst: ${eventLines || 'see stutter timeline'}.`,
-      tags: ['stutter', 'raf_gap', 'main-thread'],
+      title: gpuBound
+        ? 'rAF gaps with healthy compositor CPU (GPU-bound pacing)'
+        : 'Idle rAF stalls detected (compositor looks healthy)',
+      detail: gpuBound
+        ? `${rafGapCount} rAF gap(s), compositor p95 ${fmtMs(frameP95)} ms, but present spacing p50 ${fmtMs(snapshot.frameBudget?.presentP50Ms ?? 0)} ms. GPU work (see frameBudget) is likely limiting refresh, not main-thread CPU. Worst: ${eventLines || 'see stutter timeline'}.`
+        : `${rafGapCount} rAF gap(s), compositor p95 ${fmtMs(frameP95)} ms. Main-thread work outside the compositor draw is the likely cause. Worst: ${eventLines || 'see stutter timeline'}.`,
+      tags: gpuBound ? ['stutter', 'raf_gap', 'gpu', 'frameBudget'] : ['stutter', 'raf_gap', 'main-thread'],
     });
   } else if (freezeCount > 0) {
     const eventLines = formatStutterEventLines(stutterAnalysis).join('; ');
@@ -310,6 +316,36 @@ export function buildPerformanceInsights(snapshot, frames = [], ticks = []) {
     });
   }
 
+  const frameBudget = snapshot.frameBudget;
+  if (frameBudget && typeof frameBudget === 'object') {
+    if (frameBudget.diagnosis === 'gpu_bound_presentation') {
+      const top = frameBudget.primaryBottleneck ?? 'unknown span';
+      insights.push({
+        severity: 'critical',
+        title: 'GPU-bound presentation (compositor CPU looks healthy)',
+        detail: `Compositor CPU p95 ${fmtMs(frameBudget.compositorCpuP95Ms)} ms but present interval p50 ${fmtMs(frameBudget.presentP50Ms)} ms (~${frameBudget.achievedPresentFps?.toFixed?.(0) ?? '?'} fps). Sampled render GPU ~${fmtMs(frameBudget.sampledGpuAvgMs)} ms/frame; heaviest span: ${top}. Reduce that pass or lower presentation FPS while continuous effects are active.`,
+        tags: ['gpu', 'pacing', 'frameBudget'],
+      });
+    } else if (frameBudget.diagnosis === 'compositor_cpu_bound') {
+      insights.push({
+        severity: 'warn',
+        title: 'Compositor CPU over budget',
+        detail: `Compositor CPU p95 ${fmtMs(frameBudget.compositorCpuP95Ms)} ms exceeds target interval ${fmtMs(frameBudget.targetIntervalMs)} ms. Inspect top CPU spans in the effect table.`,
+        tags: ['cpu', 'frameBudget'],
+      });
+    }
+
+    const topGpu = frameBudget.topGpuRenderSpans?.[0];
+    if (topGpu && topGpu.gpuAvg >= 3) {
+      insights.push({
+        severity: topGpu.gpuAvg >= 5 ? 'warn' : 'info',
+        title: 'Heaviest GPU render span',
+        detail: `${topGpu.effect} ~${fmtMs(topGpu.gpuAvg)} ms GPU avg (max ${fmtMs(topGpu.gpuMax)} ms). See export \`frameBudget.topGpuRenderSpans\` for the full ranked list.`,
+        tags: ['gpu', 'frameBudget'],
+      });
+    }
+  }
+
   // Draw calls per frame (when fixed)
   const avgDraws = Number(session.avgDrawCallsPerFrame) || 0;
   if (avgDraws > 0) {
@@ -391,6 +427,47 @@ export function buildPerformanceInsights(snapshot, frames = [], ticks = []) {
         title: 'Light mask prepass reuse',
         detail: `Foundry light RT redraw skipped on ${prepassPct.toFixed(1)}% of compose draws (shadow prepass still fresh).`,
         tags: ['lighting', 'cache'],
+      });
+    }
+  }
+
+  const worldOverlays = snapshot.worldOverlays;
+  if (worldOverlays && typeof worldOverlays === 'object') {
+    const rollup = worldOverlays.gpuRollup;
+    const topGpu = (worldOverlays.spans ?? buildWorldOverlaysSpanRows(effects, { cap: 8 }))
+      .filter((s) => (s.gpuAvg ?? 0) > 0 && String(s.span).includes('.draw.'))
+      .slice(0, 3);
+    if (rollup?.estimatedOverlayGpuAvgMs >= 4 || topGpu.length > 0) {
+      const drawList = topGpu.length > 0
+        ? topGpu.map((s) => `${s.span} ~${fmtMs(s.gpuAvg)} ms GPU`).join('; ')
+        : `estimated ~${fmtMs(rollup?.estimatedOverlayGpuAvgMs)} ms/frame`;
+      insights.push({
+        severity: (rollup?.estimatedOverlayGpuAvgMs ?? 0) >= 6 ? 'warn' : 'info',
+        title: 'Post-bloom world overlay GPU',
+        detail: `${drawList}. Splashes ~${fmtMs(rollup?.splashesGpuAvgMs ?? 0)} ms; vegetation draw ~${fmtMs(rollup?.vegetationDrawGpuAvgMs ?? 0)} ms. See export \`worldOverlays.spans\` and \`worldOverlays.live.byKind\`.`,
+        tags: ['gpu', 'worldOverlays', 'vegetation'],
+      });
+    }
+
+    const blocked = Number(worldOverlays.gpuCoverage?.blockedSamples) || 0;
+    if (blocked > 20) {
+      insights.push({
+        severity: 'warn',
+        title: 'World overlay GPU probes partially blocked',
+        detail: `${blocked} blocked sample(s) — parent span may still be holding the GPU timer. Re-export after reload; parent \`postBloom.worldOverlays\` should be cpuOnly.`,
+        tags: ['worldOverlays', 'gpu', 'coverage'],
+      });
+    }
+
+    const live = worldOverlays.live ?? {};
+    const rootCount = Number(live.vegetationRootCount) || 0;
+    if (rootCount > 0 && (rollup?.vegetationDrawGpuAvgMs ?? 0) >= 3) {
+      const kinds = live.byKind ?? {};
+      insights.push({
+        severity: 'info',
+        title: 'Vegetation overlay inventory',
+        detail: `${rootCount} draw roots (bush shadow/canopy ${kinds.bush?.shadow ?? 0}/${kinds.bush?.canopy ?? 0}, tree ${kinds.tree?.shadow ?? 0}/${kinds.tree?.canopy ?? 0}) at ${live.drawingBuffer?.w ?? '?'}×${live.drawingBuffer?.h ?? '?'} buffer.`,
+        tags: ['worldOverlays', 'vegetation'],
       });
     }
   }

@@ -221,6 +221,121 @@ export const VEGETATION_BILLBOARD_SHADOW_GLSL = `
           );
           return safeAlpha(texture2D(mask, castRestUv + flutterUv));
         }
+
+        /**
+         * Multi-tap ground shadow with LOD via uShadowTapLod:
+         *   >= 0.25 — center + 4 step1 taps (5 total)
+         *   >= 0.75 — + 4 step2 axis taps (9 total)
+         *   >= 1.25 — + 4 step2 corner taps (13 total)
+         */
+        float vegetationBillboardShadowAccum(
+          sampler2D mask,
+          vec2 shadowFragmentUv,
+          vec2 shadowOffset,
+          vec2 tileWorldSize,
+          vec2 shadowFragmentWorld,
+          vec2 clumpAnchor,
+          float clumpId,
+          vec2 windDir,
+          float edgeFade,
+          float shadowBlur,
+          float tapLod
+        ) {
+          vec2 step1 = vec2(shadowBlur);
+          vec2 step2 = step1 * 2.0;
+          float shadowAccum = 0.0;
+          float shadowWeight = 0.0;
+
+          float tap = vegetationBillboardShadowTap(
+            mask, shadowFragmentUv, vec2(0.0), shadowOffset, tileWorldSize, shadowFragmentWorld,
+            clumpAnchor, clumpId, windDir, edgeFade
+          );
+          shadowAccum += tap * 0.24;
+          shadowWeight += 0.24;
+
+          if (tapLod >= 0.25) {
+            tap = vegetationBillboardShadowTap(
+              mask, shadowFragmentUv, vec2( step1.x,  step1.y), shadowOffset, tileWorldSize, shadowFragmentWorld,
+              clumpAnchor, clumpId, windDir, edgeFade
+            );
+            shadowAccum += tap * 0.12;
+            shadowWeight += 0.12;
+            tap = vegetationBillboardShadowTap(
+              mask, shadowFragmentUv, vec2(-step1.x,  step1.y), shadowOffset, tileWorldSize, shadowFragmentWorld,
+              clumpAnchor, clumpId, windDir, edgeFade
+            );
+            shadowAccum += tap * 0.12;
+            shadowWeight += 0.12;
+            tap = vegetationBillboardShadowTap(
+              mask, shadowFragmentUv, vec2( step1.x, -step1.y), shadowOffset, tileWorldSize, shadowFragmentWorld,
+              clumpAnchor, clumpId, windDir, edgeFade
+            );
+            shadowAccum += tap * 0.12;
+            shadowWeight += 0.12;
+            tap = vegetationBillboardShadowTap(
+              mask, shadowFragmentUv, vec2(-step1.x, -step1.y), shadowOffset, tileWorldSize, shadowFragmentWorld,
+              clumpAnchor, clumpId, windDir, edgeFade
+            );
+            shadowAccum += tap * 0.12;
+            shadowWeight += 0.12;
+          }
+
+          if (tapLod >= 0.75) {
+            tap = vegetationBillboardShadowTap(
+              mask, shadowFragmentUv, vec2( step2.x, 0.0), shadowOffset, tileWorldSize, shadowFragmentWorld,
+              clumpAnchor, clumpId, windDir, edgeFade
+            );
+            shadowAccum += tap * 0.07;
+            shadowWeight += 0.07;
+            tap = vegetationBillboardShadowTap(
+              mask, shadowFragmentUv, vec2(-step2.x, 0.0), shadowOffset, tileWorldSize, shadowFragmentWorld,
+              clumpAnchor, clumpId, windDir, edgeFade
+            );
+            shadowAccum += tap * 0.07;
+            shadowWeight += 0.07;
+            tap = vegetationBillboardShadowTap(
+              mask, shadowFragmentUv, vec2(0.0,  step2.y), shadowOffset, tileWorldSize, shadowFragmentWorld,
+              clumpAnchor, clumpId, windDir, edgeFade
+            );
+            shadowAccum += tap * 0.07;
+            shadowWeight += 0.07;
+            tap = vegetationBillboardShadowTap(
+              mask, shadowFragmentUv, vec2(0.0, -step2.y), shadowOffset, tileWorldSize, shadowFragmentWorld,
+              clumpAnchor, clumpId, windDir, edgeFade
+            );
+            shadowAccum += tap * 0.07;
+            shadowWeight += 0.07;
+          }
+
+          if (tapLod >= 1.25) {
+            tap = vegetationBillboardShadowTap(
+              mask, shadowFragmentUv, vec2( step2.x,  step2.y), shadowOffset, tileWorldSize, shadowFragmentWorld,
+              clumpAnchor, clumpId, windDir, edgeFade
+            );
+            shadowAccum += tap * 0.04;
+            shadowWeight += 0.04;
+            tap = vegetationBillboardShadowTap(
+              mask, shadowFragmentUv, vec2(-step2.x,  step2.y), shadowOffset, tileWorldSize, shadowFragmentWorld,
+              clumpAnchor, clumpId, windDir, edgeFade
+            );
+            shadowAccum += tap * 0.04;
+            shadowWeight += 0.04;
+            tap = vegetationBillboardShadowTap(
+              mask, shadowFragmentUv, vec2( step2.x, -step2.y), shadowOffset, tileWorldSize, shadowFragmentWorld,
+              clumpAnchor, clumpId, windDir, edgeFade
+            );
+            shadowAccum += tap * 0.04;
+            shadowWeight += 0.04;
+            tap = vegetationBillboardShadowTap(
+              mask, shadowFragmentUv, vec2(-step2.x, -step2.y), shadowOffset, tileWorldSize, shadowFragmentWorld,
+              clumpAnchor, clumpId, windDir, edgeFade
+            );
+            shadowAccum += tap * 0.04;
+            shadowWeight += 0.04;
+          }
+
+          return (shadowWeight > 0.0) ? (shadowAccum / shadowWeight) : 0.0;
+        }
 `;
 
 /**

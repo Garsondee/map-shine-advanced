@@ -219,8 +219,9 @@ export class CloudEffectV2 {
     /** Cached shadow pass keys — skip RT work when static + sprite motion buckets are unchanged. */
     this._shadowRawCacheKey = '';
     /** Norm-UV / fade quantize steps for shadow motion signature (see `_computeShadowMotionSignature`). */
-    this._shadowMotionUStep = 0.006;
-    this._shadowMotionFadeStep = 0.1;
+    // Coarser buckets → fewer raw shadow RT redraws when sprites drift slowly (perf).
+    this._shadowMotionUStep = 0.018;
+    this._shadowMotionFadeStep = 0.15;
     this._shadowMaskCacheKey = '';
     this._cloudTopCacheKey = '';
     /** World-space bucket size for view-bound driven shadow mask UVs. */

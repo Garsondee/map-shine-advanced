@@ -837,6 +837,16 @@ export class FloorCompositor {
     this._blitMaterial = null;
     /** @type {THREE.Mesh|null} Fullscreen quad for blit */
     this._blitQuad = null;
+    /** @type {THREE.WebGLRenderTarget|null} Half-res scratch for vegetation ground shadows */
+    this._vegetationShadowHalfRT = null;
+    /** @type {THREE.Scene|null} Premultiplied-alpha upsample for vegetation shadows */
+    this._vegetationShadowBlitScene = null;
+    /** @type {THREE.OrthographicCamera|null} */
+    this._vegetationShadowBlitCamera = null;
+    /** @type {THREE.ShaderMaterial|null} */
+    this._vegetationShadowBlitMaterial = null;
+    /** @type {THREE.Mesh|null} */
+    this._vegetationShadowBlitQuad = null;
 
     /** @type {THREE.Scene|null} Compositor-owned night-vision post draw (same lifecycle as blit). */
     this._playerNvScene = null;
@@ -1275,24 +1285,60 @@ export class FloorCompositor {
   _getVegetationOverlayRoots() {
     const roots = this._vegetationOverlayRootsCache ?? (this._vegetationOverlayRootsCache = new Set());
     roots.clear();
+    for (const { root } of this._getVegetationOverlayLabeledRoots()) {
+      roots.add(root);
+    }
+    return roots;
+  }
+
+  /**
+   * Bush/tree overlay roots with stable draw-kind labels for profiling.
+   * @returns {Array<{ root: import('three').Object3D, label: string }>}
+   * @private
+   */
+  _getVegetationOverlayLabeledRoots() {
+    const out = [];
     const maxFloor = Number.isFinite(Number(this._renderBus?._visibleMaxFloorIndex))
       ? Number(this._renderBus._visibleMaxFloorIndex)
       : 0;
-    // Draw ground-shadow mesh first, then canopy (shadow pass never runs lightning —
-    // see BushEffectV2 / TreeEffectV2 uVegetationPass). Billboard shadows still feed lighting.
-    const collect = (effect) => {
+    const collect = (effect, kind) => {
       const overlays = effect?._overlays;
       if (!overlays?.values) return;
       for (const entry of overlays.values()) {
         const fi = Number(entry?.floorIndex);
         if (Number.isFinite(fi) && fi > maxFloor) continue;
-        if (entry?.shadowMesh) roots.add(entry.shadowMesh);
-        if (entry?.mesh) roots.add(entry.mesh);
+        if (entry?.shadowMesh) out.push({ root: entry.shadowMesh, label: `${kind}.shadow` });
+        if (entry?.mesh) out.push({ root: entry.mesh, label: `${kind}.canopy` });
       }
     };
-    collect(this._bushEffect);
-    collect(this._treeEffect);
-    return roots;
+    collect(this._bushEffect, 'bush');
+    collect(this._treeEffect, 'tree');
+    return out;
+  }
+
+  /**
+   * Live overlay counts for Performance Recorder `worldOverlays.live`.
+   * @returns {object}
+   */
+  getWorldOverlaysRecorderSnapshot() {
+    const labeled = this._getVegetationOverlayLabeledRoots();
+    /** @type {Record<string, Record<string, number>>} */
+    const byKind = {
+      bush: { shadow: 0, canopy: 0 },
+      tree: { shadow: 0, canopy: 0 },
+    };
+    for (const { label } of labeled) {
+      const [kind, part] = String(label).split('.');
+      if (byKind[kind] && part) byKind[kind][part] = (byKind[kind][part] || 0) + 1;
+    }
+    const db = this.renderer?.getDrawingBufferSize?.(new THREE.Vector2()) ?? null;
+    return {
+      splashesActive: !!resolveFloorEffectActive(this._waterSplashesEffect),
+      vegetationActive: !!resolveOverlayEffectActive(this._bushEffect) || !!resolveOverlayEffectActive(this._treeEffect),
+      vegetationRootCount: labeled.length,
+      byKind,
+      drawingBuffer: db ? { w: db.x, h: db.y } : null,
+    };
   }
 
   /**
@@ -1336,6 +1382,13 @@ export class FloorCompositor {
     renderer.depthTest = false;
     renderer.depthWrite = false;
     let drew = false;
+    const prevClearColor = options.clearTransparent ? new THREE.Color() : null;
+    const prevClearAlpha = options.clearTransparent ? renderer.getClearAlpha() : 0;
+    if (options.clearTransparent) {
+      renderer.getClearColor(prevClearColor);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear(true, false, false);
+    }
     try {
       if (options.vegetationOnly === true) {
         camera.layers.set(VEGETATION_ABOVE_WATER_LAYER);
@@ -1348,13 +1401,39 @@ export class FloorCompositor {
         camera.layers.enable(WATER_SPLASH_ABOVE_WATER_LAYER);
         camera.layers.enable(VEGETATION_ABOVE_WATER_LAYER);
       }
-      for (const root of keepRoots) {
-        if (!root || root.visible === false) continue;
-        renderer.render(root, camera);
-        drew = true;
+      const drawGroups = options.profileDrawGroups;
+      const spanPrefix = options.profileSpanPrefix || 'postBloom.worldOverlays';
+      if (Array.isArray(drawGroups) && drawGroups.length > 0) {
+        for (let gi = 0; gi < drawGroups.length; gi++) {
+          const group = drawGroups[gi];
+          const label = group?.label;
+          const roots = group?.roots;
+          if (!label || !roots?.length) continue;
+          this._profileEffectCall(
+            `${spanPrefix}.draw.${label}`,
+            'render',
+            () => {
+              for (const root of roots) {
+                if (!root || root.visible === false) continue;
+                renderer.render(root, camera);
+                drew = true;
+              }
+            },
+            `World overlay draw ${label}`,
+          );
+        }
+      } else {
+        for (const root of keepRoots) {
+          if (!root || root.visible === false) continue;
+          renderer.render(root, camera);
+          drew = true;
+        }
       }
       return drew;
     } finally {
+      if (options.clearTransparent && prevClearColor) {
+        renderer.setClearColor(prevClearColor, prevClearAlpha);
+      }
       camera.layers.mask = prevLayerMask;
       renderer.depthTest = prevDepthTest;
       renderer.depthWrite = prevDepthWrite;
@@ -1391,12 +1470,123 @@ export class FloorCompositor {
     if (!resolveOverlayEffectActive(this._bushEffect) && !resolveOverlayEffectActive(this._treeEffect)) {
       return false;
     }
-    return this._compositeBusOverlayVisibilityGate(
-      renderer,
-      targetRT,
-      this._getVegetationOverlayRoots(),
-      { vegetationOnly: true },
-    );
+    const labeled = this._getVegetationOverlayLabeledRoots();
+    /** @type {Map<string, import('three').Object3D[]>} */
+    const groupMap = new Map();
+    for (const { root, label } of labeled) {
+      const list = groupMap.get(label) ?? [];
+      list.push(root);
+      groupMap.set(label, list);
+    }
+    const shadowLabelOrder = ['bush.shadow', 'tree.shadow'];
+    const canopyLabelOrder = ['bush.canopy', 'tree.canopy'];
+    const shadowDrawGroups = shadowLabelOrder
+      .filter((label) => groupMap.has(label))
+      .map((label) => ({ label, roots: groupMap.get(label) }));
+    const canopyDrawGroups = canopyLabelOrder
+      .filter((label) => groupMap.has(label))
+      .map((label) => ({ label, roots: groupMap.get(label) }));
+
+    let drew = false;
+
+    if (shadowDrawGroups.length > 0) {
+      const halfRT = this._ensureVegetationShadowHalfRT(renderer);
+      if (halfRT) {
+        try { this._treeEffect?.setShadowTapLod?.(0.5); } catch (_) {}
+        try { this._bushEffect?.setShadowTapLod?.(0.5); } catch (_) {}
+        const shadowDrew = this._compositeBusOverlayVisibilityGate(
+          renderer,
+          halfRT,
+          this._getVegetationOverlayRoots(),
+          {
+            vegetationOnly: true,
+            profileDrawGroups: shadowDrawGroups,
+            profileSpanPrefix: 'postBloom.worldOverlays.vegetation',
+            clearTransparent: true,
+          },
+        );
+        try { this._treeEffect?.setShadowTapLod?.(1.0); } catch (_) {}
+        try { this._bushEffect?.setShadowTapLod?.(1.0); } catch (_) {}
+        if (shadowDrew) {
+          this._blitVegetationShadowHalfToTarget(renderer, halfRT, targetRT);
+          drew = true;
+        }
+      }
+    }
+
+    if (canopyDrawGroups.length > 0) {
+      drew = this._compositeBusOverlayVisibilityGate(
+        renderer,
+        targetRT,
+        this._getVegetationOverlayRoots(),
+        {
+          vegetationOnly: true,
+          profileDrawGroups: canopyDrawGroups,
+          profileSpanPrefix: 'postBloom.worldOverlays.vegetation',
+        },
+      ) || drew;
+    }
+
+    return drew;
+  }
+
+  /**
+   * @param {THREE.WebGLRenderer} renderer
+   * @returns {THREE.WebGLRenderTarget|null}
+   * @private
+   */
+  _ensureVegetationShadowHalfRT(renderer) {
+    const THREE = window.THREE;
+    if (!THREE || !renderer) return null;
+    const v = this._drawingBufferSizeTmp || (this._drawingBufferSizeTmp = new THREE.Vector2());
+    renderer.getDrawingBufferSize(v);
+    const w = Math.max(2, Math.floor(Number(v.x) / 2) || 2);
+    const h = Math.max(2, Math.floor(Number(v.y) / 2) || 2);
+    if (!this._vegetationShadowHalfRT) {
+      this._vegetationShadowHalfRT = new THREE.WebGLRenderTarget(w, h, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType,
+        depthBuffer: false,
+        stencilBuffer: false,
+        colorSpace: THREE.NoColorSpace,
+      });
+      this._vegetationShadowHalfRT.texture.name = 'MapShineVegetationShadowHalf';
+      this._vegetationShadowHalfRT.texture.flipY = false;
+    } else if (this._vegetationShadowHalfRT.width !== w || this._vegetationShadowHalfRT.height !== h) {
+      this._vegetationShadowHalfRT.setSize(w, h);
+    }
+    return this._vegetationShadowHalfRT;
+  }
+
+  /**
+   * Alpha-over upsample half-res vegetation shadows onto the HDR composite.
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {THREE.WebGLRenderTarget} halfRT
+   * @param {THREE.WebGLRenderTarget} targetRT
+   * @private
+   */
+  _blitVegetationShadowHalfToTarget(renderer, halfRT, targetRT) {
+    if (
+      !renderer
+      || !halfRT
+      || !targetRT
+      || !this._vegetationShadowBlitMaterial
+      || !this._vegetationShadowBlitScene
+      || !this._vegetationShadowBlitCamera
+    ) return;
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    try {
+      this._vegetationShadowBlitMaterial.uniforms.tDiffuse.value = halfRT.texture;
+      renderer.setRenderTarget(targetRT);
+      renderer.autoClear = false;
+      renderer.render(this._vegetationShadowBlitScene, this._vegetationShadowBlitCamera);
+    } finally {
+      renderer.autoClear = prevAutoClear;
+      renderer.setRenderTarget(prevTarget);
+    }
   }
 
   /**
@@ -2023,6 +2213,39 @@ export class FloorCompositor {
     );
     this._blitQuad.frustumCulled = false;
     this._blitScene.add(this._blitQuad);
+
+    // Half-res vegetation shadow composite (render low, alpha-upsample to HDR buffer).
+    this._vegetationShadowBlitScene = new THREE.Scene();
+    this._vegetationShadowBlitCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this._vegetationShadowBlitMaterial = new THREE.ShaderMaterial({
+      uniforms: { tDiffuse: { value: null } },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        uniform sampler2D tDiffuse;
+        varying vec2 vUv;
+        void main() {
+          gl_FragColor = texture2D(tDiffuse, vUv);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+      transparent: true,
+      blending: THREE.NormalBlending,
+      premultipliedAlpha: true,
+      toneMapped: false,
+    });
+    this._vegetationShadowBlitQuad = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      this._vegetationShadowBlitMaterial,
+    );
+    this._vegetationShadowBlitQuad.frustumCulled = false;
+    this._vegetationShadowBlitScene.add(this._vegetationShadowBlitQuad);
 
     // Night-vision post (compositor-owned GPU pass; PlayerLightEffectV2 supplies params/bloom).
     this._playerNvScene = new THREE.Scene();
@@ -2661,7 +2884,7 @@ export class FloorCompositor {
       if (
         this._shaderWarmupGateOpen
         && !this._populateSlimRenderActive()
-        && this._treeEffect?.isHoverRevealActive?.()
+        && this._treeEffect?.isHoverFadeInProgress?.()
       ) {
         reason = 'tree:hover-fade';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
@@ -2770,12 +2993,18 @@ export class FloorCompositor {
   getPreferredContinuousFps() {
     try {
       if (this.wantsContinuousRender()) {
+        const presentation = Number(window.MapShine?.renderPresentationFps);
+        const presentationFps = Number.isFinite(presentation) && presentation > 0 ? presentation : 30;
+        // Canopy hover-fade is a slow ramp — cap at presentation FPS so we do not
+        // target 60 Hz while GPU-bound (doubles work and widens present gaps).
+        if (this._treeEffect?.isHoverFadeInProgress?.()) {
+          return presentationFps;
+        }
         const fire = this._fireEffect;
         const fireFloorCount = resolveFloorEffectActive(fire) ? (fire?._activeFloors?.size ?? 0) : 0;
         // Multi-floor fire is CPU-heavy; prefer the presentation cap over 60 Hz active tier.
         if (fireFloorCount > 1) {
-          const presentation = Number(window.MapShine?.renderPresentationFps);
-          if (Number.isFinite(presentation) && presentation > 0) return presentation;
+          return presentationFps;
         }
         // Match active presentation tier so Quarks particles stay smooth on high-refresh displays.
         const active = Number(window.MapShine?.renderActiveFps);
@@ -5444,8 +5673,8 @@ export class FloorCompositor {
    * @param {() => void} fn - Wrapped call (must NOT throw asynchronously).
    * @param {string} [errorLabel] - Used by the existing per-effect log warn
    *   when `fn` throws. Defaults to `${effectKey} ${phase}`.
-   * @param {{ cpuOnly?: boolean }} [options] - Forwarded to the recorder when
-   *   this wrapper should not consume the sole GPU timer query (nested spans).
+   * @param {{ cpuOnly?: boolean, gpuSlot?: { index: number, count: number } }} [options] -
+   *   Forwarded to the recorder (`cpuOnly` for nested spans; `gpuSlot` for round-robin GPU).
    * @private
    */
   _profileEffectCall(effectKey, phase, fn, errorLabel, options = {}) {
@@ -7194,6 +7423,12 @@ export class FloorCompositor {
     if (this._sceneRT) this._sceneRT.setSize(w, h);
     if (this._postA)   this._postA.setSize(w, h);
     if (this._postB)   this._postB.setSize(w, h);
+    if (this._vegetationShadowHalfRT) {
+      this._vegetationShadowHalfRT.setSize(
+        Math.max(2, Math.floor(w / 2)),
+        Math.max(2, Math.floor(h / 2)),
+      );
+    }
     if (this._waterOccluderRT) this._waterOccluderRT.setSize(w, h);
     if (this._waterOccluderScratchRT) this._waterOccluderScratchRT.setSize(w, h);
     if (this._splashSameFloorOverheadRT) this._splashSameFloorOverheadRT.setSize(w, h);
@@ -8716,48 +8951,56 @@ export class FloorCompositor {
     // Splashes + vegetation before CC (so overlays receive the camera grade).
     if (_profiling) _profileT0 = performance.now();
     this._profileEffectCall('postBloom.worldOverlays', 'render', () => {
-      if (resolveFloorEffectActive(this._waterSplashesEffect)) {
-        const viewedForSplashes = Number(floorStack?.getActiveFloor?.()?.index ?? 0);
-        if (Number.isFinite(viewedForSplashes)) {
-          this._publishFrameSplashOccluders(visibleFloors, levelSceneRTs, viewedForSplashes);
+      this._profileEffectCall('postBloom.worldOverlays.splashes', 'render', () => {
+        if (resolveFloorEffectActive(this._waterSplashesEffect)) {
+          const viewedForSplashes = Number(floorStack?.getActiveFloor?.()?.index ?? 0);
+          if (Number.isFinite(viewedForSplashes)) {
+            this._publishFrameSplashOccluders(visibleFloors, levelSceneRTs, viewedForSplashes);
+          } else {
+            this._publishFrameViewedLevelSceneOccluder(null);
+            this._publishFrameUpperSplashOccluder(null);
+            this._publishFrameSplashUpperOccluderTexByFloor(null);
+          }
         } else {
           this._publishFrameViewedLevelSceneOccluder(null);
           this._publishFrameUpperSplashOccluder(null);
           this._publishFrameSplashUpperOccluderTexByFloor(null);
         }
-      } else {
-        this._publishFrameViewedLevelSceneOccluder(null);
-        this._publishFrameUpperSplashOccluder(null);
-        this._publishFrameSplashUpperOccluderTexByFloor(null);
-      }
-      try {
-        this._waterSplashesEffect?.syncPostMergeOcclusionUniforms?.();
-      } catch (_) {}
-      this._compositeWaterSplashesAboveWater(this.renderer, mergedCompositeOut);
-      try { this._bushEffect?.syncLandscapeLightningUniforms?.(); } catch (_) {}
-      try { this._treeEffect?.syncLandscapeLightningUniforms?.(); } catch (_) {}
-      try { this._bushEffect?.syncBuildingShadowUniforms?.(); } catch (err) {
-        log.warn('BushEffectV2 pre-vegetation syncBuildingShadowUniforms threw, skipping:', err);
-      }
-      try { this._treeEffect?.syncBuildingShadowUniforms?.(); } catch (err) {
-        log.warn('TreeEffectV2 pre-vegetation syncBuildingShadowUniforms threw, skipping:', err);
-      }
-      try { this._bushEffect?.syncPaintedShadowUniforms?.(); } catch (err) {
-        log.warn('BushEffectV2 pre-vegetation syncPaintedShadowUniforms threw, skipping:', err);
-      }
-      try { this._treeEffect?.syncPaintedShadowUniforms?.(); } catch (err) {
-        log.warn('TreeEffectV2 pre-vegetation syncPaintedShadowUniforms threw, skipping:', err);
-      }
-      try { this._bushEffect?.syncCloudShadowUniforms?.(); } catch (_) {}
-      try { this._treeEffect?.syncCloudShadowUniforms?.(); } catch (_) {}
-      try { this._bushEffect?.syncCameraGradeUniforms?.(); } catch (err) {
-        log.warn('BushEffectV2 pre-vegetation syncCameraGradeUniforms threw, skipping:', err);
-      }
-      try { this._treeEffect?.syncCameraGradeUniforms?.(); } catch (err) {
-        log.warn('TreeEffectV2 pre-vegetation syncCameraGradeUniforms threw, skipping:', err);
-      }
-      this._compositeVegetationAboveWater(this.renderer, mergedCompositeOut);
-    }, 'Splashes + vegetation before CC');
+        try {
+          this._waterSplashesEffect?.syncPostMergeOcclusionUniforms?.();
+        } catch (_) {}
+        this._compositeWaterSplashesAboveWater(this.renderer, mergedCompositeOut);
+      }, 'Water splashes before CC');
+      this._profileEffectCall('postBloom.worldOverlays.vegetation', 'render', () => {
+        this._profileEffectCall('postBloom.worldOverlays.vegetation.sync', 'render', () => {
+          try { this._bushEffect?.syncLandscapeLightningUniforms?.(); } catch (_) {}
+          try { this._treeEffect?.syncLandscapeLightningUniforms?.(); } catch (_) {}
+          try { this._bushEffect?.syncBuildingShadowUniforms?.(); } catch (err) {
+            log.warn('BushEffectV2 pre-vegetation syncBuildingShadowUniforms threw, skipping:', err);
+          }
+          try { this._treeEffect?.syncBuildingShadowUniforms?.(); } catch (err) {
+            log.warn('TreeEffectV2 pre-vegetation syncBuildingShadowUniforms threw, skipping:', err);
+          }
+          try { this._bushEffect?.syncPaintedShadowUniforms?.(); } catch (err) {
+            log.warn('BushEffectV2 pre-vegetation syncPaintedShadowUniforms threw, skipping:', err);
+          }
+          try { this._treeEffect?.syncPaintedShadowUniforms?.(); } catch (err) {
+            log.warn('TreeEffectV2 pre-vegetation syncPaintedShadowUniforms threw, skipping:', err);
+          }
+          try { this._bushEffect?.syncCloudShadowUniforms?.(); } catch (_) {}
+          try { this._treeEffect?.syncCloudShadowUniforms?.(); } catch (_) {}
+          try { this._bushEffect?.syncCameraGradeUniforms?.(); } catch (err) {
+            log.warn('BushEffectV2 pre-vegetation syncCameraGradeUniforms threw, skipping:', err);
+          }
+          try { this._treeEffect?.syncCameraGradeUniforms?.(); } catch (err) {
+            log.warn('TreeEffectV2 pre-vegetation syncCameraGradeUniforms threw, skipping:', err);
+          }
+        }, 'Vegetation uniform sync before CC', { cpuOnly: true });
+        this._profileEffectCall('postBloom.worldOverlays.vegetation.draw', 'render', () => {
+          this._compositeVegetationAboveWater(this.renderer, mergedCompositeOut);
+        }, 'Bush/tree vegetation draw before CC', { cpuOnly: true });
+      }, 'Bush/tree vegetation before CC', { cpuOnly: true });
+    }, 'Splashes + vegetation before CC', { cpuOnly: true });
     if (_profiling) this._recordPassTiming('postMerge_worldOverlaysBeforeCc', _profileT0);
 
     // Night vision meters this buffer (linear HDR, post-bloom) while displaying
@@ -9011,6 +9254,9 @@ export class FloorCompositor {
     // Dispose blit + player night-vision post resources.
     try { this._blitMaterial?.dispose(); } catch (_) {}
     try { this._blitQuad?.geometry?.dispose(); } catch (_) {}
+    try { this._vegetationShadowHalfRT?.dispose(); } catch (_) {}
+    try { this._vegetationShadowBlitMaterial?.dispose(); } catch (_) {}
+    try { this._vegetationShadowBlitQuad?.geometry?.dispose(); } catch (_) {}
     try { this._playerNvMaterial?.dispose(); } catch (_) {}
     try { this._playerNvQuad?.geometry?.dispose(); } catch (_) {}
     try { this._playerNvFallbackBlack?.dispose(); } catch (_) {}
@@ -9022,6 +9268,11 @@ export class FloorCompositor {
     this._blitCamera = null;
     this._blitMaterial = null;
     this._blitQuad = null;
+    this._vegetationShadowHalfRT = null;
+    this._vegetationShadowBlitScene = null;
+    this._vegetationShadowBlitCamera = null;
+    this._vegetationShadowBlitMaterial = null;
+    this._vegetationShadowBlitQuad = null;
     this._playerNvScene = null;
     this._playerNvCamera = null;
     this._playerNvMaterial = null;

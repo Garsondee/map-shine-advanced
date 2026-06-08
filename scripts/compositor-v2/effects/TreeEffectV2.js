@@ -1366,8 +1366,8 @@ export class TreeEffectV2 {
   }
 
   wantsContinuousRender() {
-    if (!this._enabled || !this._initialized || this._overlays.size <= 0) return false;
-    return this.isHoverRevealActive();
+    // Canopy hover fade runs on presented frames only — no continuous lock-in.
+    return false;
   }
 
   setHoverHidden(hidden) {
@@ -1409,6 +1409,11 @@ export class TreeEffectV2 {
    */
   isHoverRevealActive() {
     return !!this._hoverHidden || !!this._hoverFadeInProgress;
+  }
+
+  /** True only while canopy fade is actively ramping (not steady hidden state). */
+  isHoverFadeInProgress() {
+    return !!this._hoverFadeInProgress;
   }
 
   getHoverMeshes() {
@@ -1626,6 +1631,16 @@ export class TreeEffectV2 {
   }
 
   /**
+   * Shadow multi-tap LOD for perf (see vegetationBillboardShadowAccum).
+   * @param {number} lod 0.5 = coarse, 1.0 = default, 1.5 = full quality
+   */
+  setShadowTapLod(lod) {
+    if (!this._sharedUniforms?.uShadowTapLod) return;
+    const v = Number(lod);
+    this._sharedUniforms.uShadowTapLod.value = Number.isFinite(v) ? v : 1.0;
+  }
+
+  /**
    * @returns {{mesh: import('three').Mesh, uniforms: object}[]}
    */
   collectBillboardShadowOverlayEntries() {
@@ -1770,6 +1785,8 @@ export class TreeEffectV2 {
 
       uBillboardShadowMode: { value: 0.0 },
       uShadowLitCapture: { value: 0.0 },
+      /** Shadow blur tap LOD: 0.5 = 5 taps, 1.0 = 9 taps, 1.5 = 13 taps (full). */
+      uShadowTapLod: { value: 1.0 },
 
       uExposure: { value: this.params.exposure },
       uBrightness: { value: this.params.brightness },
@@ -2145,6 +2162,7 @@ ${VEGETATION_BULK_VERTEX_DISPLACEMENT_GLSL}
         uniform float uShadowSoftness;
         uniform float uBillboardShadowMode;
         uniform float uShadowLitCapture;
+        uniform float uShadowTapLod;
         uniform vec2  uSceneMin;
         uniform vec2  uSceneMax;
 
@@ -2248,95 +2266,10 @@ ${VEGETATION_BILLBOARD_SHADOW_GLSL}
             if (length(shadowDir) < 0.01) shadowDir = -globalWindDir;
             vec2 shadowOffset = shadowDir * uShadowLength;
             float shadowBlur = max(0.0001, uShadowSoftness * 0.0008);
-            vec2 step1 = vec2(shadowBlur);
-            vec2 step2 = step1 * 2.0;
-
-            float shadowAccum = 0.0;
-            float shadowWeight = 0.0;
-
-            float tap = vegetationBillboardShadowTap(
-              uTreeMask, vUv, vec2(0.0), shadowOffset, uTileWorldSize, vRestWorldPos,
-              vClumpAnchor, vClumpId, globalWindDir, edgeFade
+            float shadowA = vegetationBillboardShadowAccum(
+              uTreeMask, vUv, shadowOffset, uTileWorldSize, vRestWorldPos,
+              vClumpAnchor, vClumpId, globalWindDir, edgeFade, shadowBlur, uShadowTapLod
             );
-            shadowAccum += tap * 0.24;
-            shadowWeight += 0.24;
-
-            tap = vegetationBillboardShadowTap(
-              uTreeMask, vUv, vec2( step1.x,  step1.y), shadowOffset, uTileWorldSize, vRestWorldPos,
-              vClumpAnchor, vClumpId, globalWindDir, edgeFade
-            );
-            shadowAccum += tap * 0.12;
-            shadowWeight += 0.12;
-            tap = vegetationBillboardShadowTap(
-              uTreeMask, vUv, vec2(-step1.x,  step1.y), shadowOffset, uTileWorldSize, vRestWorldPos,
-              vClumpAnchor, vClumpId, globalWindDir, edgeFade
-            );
-            shadowAccum += tap * 0.12;
-            shadowWeight += 0.12;
-            tap = vegetationBillboardShadowTap(
-              uTreeMask, vUv, vec2( step1.x, -step1.y), shadowOffset, uTileWorldSize, vRestWorldPos,
-              vClumpAnchor, vClumpId, globalWindDir, edgeFade
-            );
-            shadowAccum += tap * 0.12;
-            shadowWeight += 0.12;
-            tap = vegetationBillboardShadowTap(
-              uTreeMask, vUv, vec2(-step1.x, -step1.y), shadowOffset, uTileWorldSize, vRestWorldPos,
-              vClumpAnchor, vClumpId, globalWindDir, edgeFade
-            );
-            shadowAccum += tap * 0.12;
-            shadowWeight += 0.12;
-
-            tap = vegetationBillboardShadowTap(
-              uTreeMask, vUv, vec2( step2.x, 0.0), shadowOffset, uTileWorldSize, vRestWorldPos,
-              vClumpAnchor, vClumpId, globalWindDir, edgeFade
-            );
-            shadowAccum += tap * 0.07;
-            shadowWeight += 0.07;
-            tap = vegetationBillboardShadowTap(
-              uTreeMask, vUv, vec2(-step2.x, 0.0), shadowOffset, uTileWorldSize, vRestWorldPos,
-              vClumpAnchor, vClumpId, globalWindDir, edgeFade
-            );
-            shadowAccum += tap * 0.07;
-            shadowWeight += 0.07;
-            tap = vegetationBillboardShadowTap(
-              uTreeMask, vUv, vec2(0.0,  step2.y), shadowOffset, uTileWorldSize, vRestWorldPos,
-              vClumpAnchor, vClumpId, globalWindDir, edgeFade
-            );
-            shadowAccum += tap * 0.07;
-            shadowWeight += 0.07;
-            tap = vegetationBillboardShadowTap(
-              uTreeMask, vUv, vec2(0.0, -step2.y), shadowOffset, uTileWorldSize, vRestWorldPos,
-              vClumpAnchor, vClumpId, globalWindDir, edgeFade
-            );
-            shadowAccum += tap * 0.07;
-            shadowWeight += 0.07;
-
-            tap = vegetationBillboardShadowTap(
-              uTreeMask, vUv, vec2( step2.x,  step2.y), shadowOffset, uTileWorldSize, vRestWorldPos,
-              vClumpAnchor, vClumpId, globalWindDir, edgeFade
-            );
-            shadowAccum += tap * 0.04;
-            shadowWeight += 0.04;
-            tap = vegetationBillboardShadowTap(
-              uTreeMask, vUv, vec2(-step2.x,  step2.y), shadowOffset, uTileWorldSize, vRestWorldPos,
-              vClumpAnchor, vClumpId, globalWindDir, edgeFade
-            );
-            shadowAccum += tap * 0.04;
-            shadowWeight += 0.04;
-            tap = vegetationBillboardShadowTap(
-              uTreeMask, vUv, vec2( step2.x, -step2.y), shadowOffset, uTileWorldSize, vRestWorldPos,
-              vClumpAnchor, vClumpId, globalWindDir, edgeFade
-            );
-            shadowAccum += tap * 0.04;
-            shadowWeight += 0.04;
-            tap = vegetationBillboardShadowTap(
-              uTreeMask, vUv, vec2(-step2.x, -step2.y), shadowOffset, uTileWorldSize, vRestWorldPos,
-              vClumpAnchor, vClumpId, globalWindDir, edgeFade
-            );
-            shadowAccum += tap * 0.04;
-            shadowWeight += 0.04;
-
-            float shadowA = (shadowWeight > 0.0) ? (shadowAccum / shadowWeight) : 0.0;
             if (uBillboardShadowMode > 0.5) shadowA = 0.0;
             shadowA *= clamp(uShadowOpacity, 0.0, 1.0) * uIntensity * edgeFade;
 

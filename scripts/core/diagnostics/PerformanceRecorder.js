@@ -28,7 +28,9 @@ import {
   buildSummaryPayload,
   resolveExportMode,
 } from './performance-recorder-export.js';
+import { buildFrameBudgetSection } from './performance-recorder-frame-budget.js';
 import { buildLightingPerfSection, resolveLightingEffect } from './performance-recorder-lighting.js';
+import { buildWorldOverlaysPerfSection } from './performance-recorder-world-overlays.js';
 import { analyzeStutters } from './performance-recorder-stutters.js';
 
 const log = createLogger('PerfRecorder');
@@ -496,6 +498,7 @@ export class PerformanceRecorder {
     const presented = meta.presented === true;
     const skipReason = typeof meta.skipReason === 'string' ? meta.skipReason : (presented ? 'none' : 'unknown');
     const targetFps = Number(meta.targetFps) || 0;
+    const tier = typeof meta.tier === 'string' ? meta.tier : null;
     const sinceLastPresentMs = Number(meta.sinceLastPresentMs) || 0;
     const tickMs = now - token;
     const compositorMs = Number(meta.compositorMs) || 0;
@@ -517,6 +520,7 @@ export class PerformanceRecorder {
       presented,
       skipReason,
       targetFps,
+      tier,
       sinceLastPresentMs,
       renderPath: meta.renderPath ?? null,
       continuousReason: meta.continuousReason ?? null,
@@ -1346,6 +1350,45 @@ export class PerformanceRecorder {
       });
     } catch (_) {}
 
+    let worldOverlays = null;
+    try {
+      worldOverlays = buildWorldOverlaysPerfSection({
+        effects,
+        v2PassTimings,
+        session: {
+          frameTime: {
+            avg: frameTimes.length > 0 ? frameTimes.reduce((s, v) => s + v, 0) / frameTimes.length : 0,
+          },
+        },
+      });
+    } catch (_) {}
+
+    const sessionFrameTime = {
+      p50: percentile(frameTimes.slice(), 0.5),
+      p95: percentile(frameTimes.slice(), 0.95),
+      p99: percentile(frameTimes.slice(), 0.99),
+      max: frameTimes.reduce((m, v) => Math.max(m, v), 0),
+      avg: frameTimes.length > 0 ? frameTimes.reduce((s, v) => s + v, 0) / frameTimes.length : 0,
+    };
+    const sessionFps = {
+      p05: percentile(fpsValues.slice(), 0.05),
+      p50: percentile(fpsValues.slice(), 0.5),
+      p95: percentile(fpsValues.slice(), 0.95),
+      min: fpsValues.length > 0 ? Math.min.apply(null, fpsValues) : 0,
+      max: fpsValues.length > 0 ? Math.max.apply(null, fpsValues) : 0,
+      avg: fpsValues.length > 0 ? fpsValues.reduce((s, v) => s + v, 0) / fpsValues.length : 0,
+    };
+
+    let frameBudget = null;
+    try {
+      frameBudget = buildFrameBudgetSection({
+        effects,
+        session: { frameTime: sessionFrameTime, fps: sessionFps },
+        stutterSummary: stutterPayload.stutterSummary,
+        meta: { context: this._collectContext() },
+      });
+    } catch (_) {}
+
     return {
       meta: {
         enabled: this.enabled,
@@ -1359,21 +1402,8 @@ export class PerformanceRecorder {
         context: this._collectContext(),
       },
       session: {
-        frameTime: {
-          p50: percentile(frameTimes.slice(), 0.5),
-          p95: percentile(frameTimes.slice(), 0.95),
-          p99: percentile(frameTimes.slice(), 0.99),
-          max: frameTimes.reduce((m, v) => Math.max(m, v), 0),
-          avg: frameTimes.length > 0 ? frameTimes.reduce((s, v) => s + v, 0) / frameTimes.length : 0,
-        },
-        fps: {
-          p05: percentile(fpsValues.slice(), 0.05),
-          p50: percentile(fpsValues.slice(), 0.5),
-          p95: percentile(fpsValues.slice(), 0.95),
-          min: fpsValues.length > 0 ? Math.min.apply(null, fpsValues) : 0,
-          max: fpsValues.length > 0 ? Math.max.apply(null, fpsValues) : 0,
-          avg: fpsValues.length > 0 ? fpsValues.reduce((s, v) => s + v, 0) / fpsValues.length : 0,
-        },
+        frameTime: sessionFrameTime,
+        fps: sessionFps,
         continuousReasons,
         decimationActivePct: this._totalRecordedFrames > 0
           ? (this._decimationFrames / this._totalRecordedFrames) * 100
@@ -1399,6 +1429,8 @@ export class PerformanceRecorder {
       vramBudget,
       cloudShadowCache,
       lighting,
+      worldOverlays,
+      frameBudget,
       rendererInfo: {
         start: this._infoStart,
         current: infoCurrent,
@@ -1834,6 +1866,18 @@ export class PerformanceRecorder {
       if (ps) {
         ctx.targetFps = ps.targetFps ?? null;
         ctx.tier = ps.tier ?? null;
+        ctx.continuousReason = ps.continuousReason ?? null;
+      }
+    } catch (_) {}
+    try {
+      const ms = window?.MapShine;
+      if (ms) {
+        ctx.fpsSettings = {
+          idleFps: ms.renderIdleFps ?? null,
+          activeFps: ms.renderActiveFps ?? null,
+          presentationFps: ms.renderPresentationFps ?? null,
+          continuousFps: ms.renderContinuousFps ?? null,
+        };
       }
     } catch (_) {}
     try {

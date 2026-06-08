@@ -31,6 +31,11 @@ import {
 import { buildFrameBudgetSection } from './performance-recorder-frame-budget.js';
 import { buildLightingPerfSection, resolveLightingEffect } from './performance-recorder-lighting.js';
 import { buildWorldOverlaysPerfSection } from './performance-recorder-world-overlays.js';
+import {
+  buildWeatherPerfSection,
+  buildWindowLightPerfSection,
+} from './performance-recorder-weather-window.js';
+import { buildPacingAnalysis } from './performance-recorder-pacing.js';
 import { analyzeStutters } from './performance-recorder-stutters.js';
 
 const log = createLogger('PerfRecorder');
@@ -1363,6 +1368,16 @@ export class PerformanceRecorder {
       });
     } catch (_) {}
 
+    let weatherParticles = null;
+    try {
+      weatherParticles = buildWeatherPerfSection({ effects });
+    } catch (_) {}
+
+    let windowLight = null;
+    try {
+      windowLight = buildWindowLightPerfSection({ effects });
+    } catch (_) {}
+
     const sessionFrameTime = {
       p50: percentile(frameTimes.slice(), 0.5),
       p95: percentile(frameTimes.slice(), 0.95),
@@ -1389,6 +1404,30 @@ export class PerformanceRecorder {
       });
     } catch (_) {}
 
+    const pacingSession = {
+      ticksRecorded: this._totalTickRecords,
+      presentedPct: (this._presentedTickCount / tickTotal) * 100,
+      skippedPct: (this._skippedTickCount / tickTotal) * 100,
+      judderTransitions: this._judderTransitions,
+      judderPerSec,
+      presentSkipFlipsPerSec: judderPerSec,
+      overBudgetPresentPct: this._presentedTickCount > 0
+        ? (overBudgetTicks / this._presentedTickCount) * 100
+        : 0,
+      skipReasons,
+    };
+
+    let pacingAnalysis = null;
+    try {
+      pacingAnalysis = buildPacingAnalysis({
+        ticks: this._tickRecords,
+        skipReasons,
+        pacing: pacingSession,
+        durationMs,
+        stutterSummary: stutterPayload.stutterSummary,
+      });
+    } catch (_) {}
+
     return {
       meta: {
         enabled: this.enabled,
@@ -1410,18 +1449,9 @@ export class PerformanceRecorder {
           : 0,
         avgDrawCallsPerFrame,
         avgTrianglesPerFrame,
-        pacing: {
-          ticksRecorded: this._totalTickRecords,
-          presentedPct: (this._presentedTickCount / tickTotal) * 100,
-          skippedPct: (this._skippedTickCount / tickTotal) * 100,
-          judderTransitions: this._judderTransitions,
-          judderPerSec,
-          overBudgetPresentPct: this._presentedTickCount > 0
-            ? (overBudgetTicks / this._presentedTickCount) * 100
-            : 0,
-          skipReasons,
-        },
+        pacing: pacingSession,
       },
+      pacingAnalysis,
       effects,
       updatables,
       sequencer,
@@ -1430,6 +1460,8 @@ export class PerformanceRecorder {
       cloudShadowCache,
       lighting,
       worldOverlays,
+      weatherParticles,
+      windowLight,
       frameBudget,
       rendererInfo: {
         start: this._infoStart,

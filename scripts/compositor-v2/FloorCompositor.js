@@ -4914,8 +4914,10 @@ export class FloorCompositor {
       this._windowLightEffect?.setCloudShadowTexture?.(null, 1, 1, null);
       this._windowLightEffect?.setOverheadRoofAlphaTexture?.(null, 1, 1);
       this._windowLightEffect?.setCeilingTransmittanceTexture?.(null);
-      this._windowLightEffect?.syncFrameOcclusion?.(this);
-      this._lightingEffect?._syncWindowLightEmitContext?.(this.renderer);
+      if (resolveEffectEnabled(this._windowLightEffect)) {
+        this._windowLightEffect?.syncFrameOcclusion?.(this);
+        this._lightingEffect?._syncWindowLightEmitContext?.(this.renderer);
+      }
       this._lightingEffect?.setRenderFloorIndexForLights?.(activeIdx);
       this._fireEffect?.setRenderFloorIndexForGlow?.(activeIdx, true);
       const winScene = resolveEffectEnabled(this._windowLightEffect)
@@ -8495,8 +8497,10 @@ export class FloorCompositor {
         this._windowLightEffect?.setCloudShadowTexture?.(windowCloudShadowTexLegacy, shadowW, shadowH, windowCloudShadowViewBounds);
         this._windowLightEffect?.setOverheadRoofAlphaTexture?.(overheadRoofAlphaTex, windowLightBufW, windowLightBufH);
         this._windowLightEffect?.setCeilingTransmittanceTexture?.(ceilingTransmittanceTex);
-        this._windowLightEffect?.syncFrameOcclusion?.(this);
-        this._lightingEffect?._syncWindowLightEmitContext?.(this.renderer);
+        if (resolveEffectEnabled(this._windowLightEffect)) {
+          this._windowLightEffect?.syncFrameOcclusion?.(this);
+          this._lightingEffect?._syncWindowLightEmitContext?.(this.renderer);
+        }
 
         try {
           this._lightingEffect?.setRenderFloorIndexForLights?.(levelIndex);

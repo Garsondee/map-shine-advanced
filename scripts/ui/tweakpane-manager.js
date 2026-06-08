@@ -389,6 +389,15 @@ export class TweakpaneManager {
     /** @type {ResizeObserver|null} */
     this._scrollLayoutObserver = null;
 
+    /** @type {number} Pending rAF id for coalesced scroll layout sync. */
+    this._scrollLayoutSyncRaf = 0;
+
+    /** @type {boolean} True while applying scroll layout styles (blocks ResizeObserver feedback). */
+    this._scrollLayoutApplying = false;
+
+    /** @type {number} Retries when container height is 0 during initial mount. */
+    this._scrollLayoutZeroHeightRetries = 0;
+
     /** @type {boolean} */
     this._scrollBodyGuardsWired = false;
 
@@ -688,7 +697,19 @@ export class TweakpaneManager {
     content.classList.add('ms-ui-scroll-body');
     this._scrollBodyEl = content;
     this._wireScrollBodyGuards(content);
-    this._syncScrollBodyLayout();
+    this._scheduleScrollBodyLayoutSync();
+  }
+
+  /**
+   * Coalesce scroll-body layout work to at most one rAF per frame.
+   * @private
+   */
+  _scheduleScrollBodyLayoutSync() {
+    if (this._scrollLayoutSyncRaf) return;
+    this._scrollLayoutSyncRaf = requestAnimationFrame(() => {
+      this._scrollLayoutSyncRaf = 0;
+      this._syncScrollBodyLayout();
+    });
   }
 
   /**
@@ -723,31 +744,40 @@ export class TweakpaneManager {
     const container = this.container;
     const scrollBody = this._scrollBodyEl;
     if (!container?.isConnected || !scrollBody?.isConnected) return;
+    if (this._scrollLayoutApplying) return;
 
-    const viewportCap = Math.max(240, Math.floor(window.innerHeight * 0.8));
-    container.style.maxHeight = `${viewportCap}px`;
-
-    const containerRect = container.getBoundingClientRect();
-    const scrollRect = scrollBody.getBoundingClientRect();
-    if (containerRect.height <= 0) {
-      requestAnimationFrame(() => this._syncScrollBodyLayout());
-      return;
-    }
-
-    const chromeAboveScroll = Math.max(0, Math.round(scrollRect.top - containerRect.top));
-    const scrollFromCap = viewportCap - chromeAboveScroll - 8;
-
-    const viewportHeight = Math.max(
+    const innerHeight = Math.max(
       window.innerHeight || 0,
       document.documentElement?.clientHeight || 0
     );
-    const scrollFromViewport = viewportHeight - scrollRect.top - 20;
+    const viewportCap = Math.max(240, Math.floor(innerHeight * 0.8));
 
+    // Read layout before any style writes to avoid forced sync layout loops.
+    const containerRect = container.getBoundingClientRect();
+    if (containerRect.height <= 0) {
+      if (this._scrollLayoutZeroHeightRetries < 4) {
+        this._scrollLayoutZeroHeightRetries += 1;
+        this._scheduleScrollBodyLayoutSync();
+      }
+      return;
+    }
+    this._scrollLayoutZeroHeightRetries = 0;
+
+    const scrollRect = scrollBody.getBoundingClientRect();
+    const chromeAboveScroll = Math.max(0, Math.round(scrollRect.top - containerRect.top));
+    const scrollFromCap = viewportCap - chromeAboveScroll - 8;
+    const scrollFromViewport = innerHeight - scrollRect.top - 20;
     const maxScroll = Math.max(160, Math.min(scrollFromCap, scrollFromViewport));
 
-    scrollBody.style.maxHeight = `${maxScroll}px`;
-    scrollBody.style.overflowY = 'auto';
-    scrollBody.style.overflowX = 'hidden';
+    this._scrollLayoutApplying = true;
+    try {
+      container.style.maxHeight = `${viewportCap}px`;
+      scrollBody.style.maxHeight = `${maxScroll}px`;
+      scrollBody.style.overflowY = 'auto';
+      scrollBody.style.overflowX = 'hidden';
+    } finally {
+      this._scrollLayoutApplying = false;
+    }
 
     if (scrollBody.scrollLeft !== 0) scrollBody.scrollLeft = 0;
   }
@@ -761,7 +791,8 @@ export class TweakpaneManager {
     if (typeof ResizeObserver === 'undefined') return;
 
     this._scrollLayoutObserver = new ResizeObserver(() => {
-      requestAnimationFrame(() => this._syncScrollBodyLayout());
+      if (this._scrollLayoutApplying) return;
+      this._scheduleScrollBodyLayoutSync();
     });
     this._scrollLayoutObserver.observe(this.container);
     const rotv = this._getPaneRootView();
@@ -901,7 +932,7 @@ export class TweakpaneManager {
     this._filterInputEl = input;
     this._advancedModeCheckboxEl = advancedCheckbox;
     this._ensureScrollLayoutObserver();
-    requestAnimationFrame(() => this._syncScrollBodyLayout());
+    this._scheduleScrollBodyLayoutSync();
   }
 
   /**
@@ -919,7 +950,7 @@ export class TweakpaneManager {
     if (this._filterQuery && this._filterInputEl) {
       this._filterInputEl.value = this._filterQuery;
     }
-    requestAnimationFrame(() => this._syncScrollBodyLayout());
+    this._scheduleScrollBodyLayoutSync();
   }
 
   /**
@@ -954,7 +985,7 @@ export class TweakpaneManager {
         }
       }
       this._applyAdvancedModeVisibility();
-      requestAnimationFrame(() => this._syncScrollBodyLayout());
+      this._scheduleScrollBodyLayoutSync();
       return;
     }
 
@@ -1024,7 +1055,7 @@ export class TweakpaneManager {
     }
 
     this._applyAdvancedModeVisibility();
-    requestAnimationFrame(() => this._syncScrollBodyLayout());
+    this._scheduleScrollBodyLayoutSync();
   }
 
   /**
@@ -1413,7 +1444,7 @@ export class TweakpaneManager {
     }
     this._applyAdvancedModeVisibility();
     this._ensureScrollLayoutObserver();
-    requestAnimationFrame(() => this._syncScrollBodyLayout());
+    this._scheduleScrollBodyLayoutSync();
 
     // Start UI update loop only when full controls are available.
     if (!showOnboardingOnly) {
@@ -1436,7 +1467,7 @@ export class TweakpaneManager {
     this._windowResizeHandler = () => {
       requestAnimationFrame(() => {
         this._ensurePaneSafePosition({ persist: true });
-        this._syncScrollBodyLayout();
+        this._scheduleScrollBodyLayoutSync();
       });
     };
     window.addEventListener('resize', this._windowResizeHandler);
@@ -1527,7 +1558,7 @@ export class TweakpaneManager {
       if (this.pane) {
         this.pane.expanded = !this.pane.expanded;
       }
-      requestAnimationFrame(() => this._syncScrollBodyLayout());
+      this._scheduleScrollBodyLayoutSync();
     });
 
     header.appendChild(button);
@@ -8886,6 +8917,9 @@ export class TweakpaneManager {
       corrected = true;
     }
 
+    if (corrected) {
+      this._scheduleScrollBodyLayoutSync();
+    }
     if (corrected && persist) this.saveUIState();
     return corrected;
   }
@@ -8966,6 +9000,9 @@ export class TweakpaneManager {
 
       // Save position after drag or click
       this._ensurePaneSafePosition();
+      if (hasDragged) {
+        this._scheduleScrollBodyLayoutSync();
+      }
       this.saveUIState();
     };
 
@@ -9267,7 +9304,7 @@ export class TweakpaneManager {
       this.container.style.display = 'block';
       this._ensurePaneSafePosition({ persist: true });
       this._ensureScrollLayoutObserver();
-      requestAnimationFrame(() => this._syncScrollBodyLayout());
+      this._scheduleScrollBodyLayoutSync();
       this.visible = true;
     }
   }
@@ -9307,6 +9344,12 @@ export class TweakpaneManager {
     this._universalToolbarEl = null;
     this._scrollBodyEl = null;
     this._scrollBodyGuardsWired = false;
+    if (this._scrollLayoutSyncRaf) {
+      cancelAnimationFrame(this._scrollLayoutSyncRaf);
+      this._scrollLayoutSyncRaf = 0;
+    }
+    this._scrollLayoutApplying = false;
+    this._scrollLayoutZeroHeightRetries = 0;
     if (this._scrollLayoutObserver) {
       try {
         this._scrollLayoutObserver.disconnect();

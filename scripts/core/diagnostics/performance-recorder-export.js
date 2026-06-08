@@ -7,11 +7,15 @@
 
 import { buildSummaryLightingSection } from './performance-recorder-lighting.js';
 import { buildSummaryWorldOverlaysSection } from './performance-recorder-world-overlays.js';
+import {
+  buildSummaryWeatherSection,
+  buildSummaryWindowLightSection,
+} from './performance-recorder-weather-window.js';
 
 export const EXPORT_MODE_SUMMARY = 'summary';
 export const EXPORT_MODE_FULL = 'full';
 
-export const EXPORT_SCHEMA_VERSION = 3;
+export const EXPORT_SCHEMA_VERSION = 5;
 
 /** Max grouped effect rows in summary JSON. */
 const SUMMARY_EFFECTS_CAP = 40;
@@ -247,12 +251,16 @@ export function buildSummaryPayload(recorder) {
     sequencer,
     lighting: _lighting,
     worldOverlays: _worldOverlays,
+    weatherParticles: _weatherParticles,
+    windowLight: _windowLight,
     ...rest
   } = snap;
 
   const insights = recorder.getInsights?.() ?? [];
   const lighting = buildSummaryLightingSection(snap) ?? _lighting ?? null;
   const worldOverlays = buildSummaryWorldOverlaysSection(snap) ?? _worldOverlays ?? null;
+  const weatherParticles = buildSummaryWeatherSection(snap) ?? _weatherParticles ?? null;
+  const windowLight = buildSummaryWindowLightSection(snap) ?? _windowLight ?? null;
 
   return {
     ...rest,
@@ -263,6 +271,8 @@ export function buildSummaryPayload(recorder) {
     effects: buildSummaryEffects(_effects),
     lighting,
     worldOverlays,
+    weatherParticles,
+    windowLight,
     longTasks: summarizeLongTasks(rawLongTasks),
     sequencer: trimSequencerForSummary(sequencer),
     insights,

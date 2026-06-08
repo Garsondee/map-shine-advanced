@@ -693,13 +693,16 @@ MapShine.applyPasswordManagerIgnores = _applyPasswordManagerIgnores;
 MapShine.installTokenHudPasswordManagerGuard = _installTokenHudPasswordManagerGuard;
 MapShine.installGlobalPasswordManagerInsertGuard = _installGlobalPasswordManagerInsertGuard;
 
-// Map Shine persists fog via FogExploration flags; prevent Foundry FogManager from
-// writing `explored` to the database (single writer).
-Hooks.on('canvasReady', () => {
+// Map Shine persists fog via scene flags (FogOfWarEffectV2). Suppress Foundry
+// FogManager DB saves and the parallel commit/readback path (~70 ms / 500 ms, HP-1).
+// canvasDraw runs before visibility/fog initialize; canvasReady patches the extractor.
+function _suppressNativeFogExplorationWork() {
   import('./fog/fog-native-exploration-suppression.js')
     .then((m) => m.suppressNativeFogExplorationPersistence())
     .catch(() => {});
-});
+}
+Hooks.on('canvasDraw', _suppressNativeFogExplorationWork);
+Hooks.on('canvasReady', _suppressNativeFogExplorationWork);
 
 
 /**

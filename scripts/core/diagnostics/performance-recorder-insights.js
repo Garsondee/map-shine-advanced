@@ -9,6 +9,10 @@ import { rollupEffectKey } from './performance-recorder-export.js';
 import { analyzeStutters, formatStutterEventLines } from './performance-recorder-stutters.js';
 import { buildLightingSpanRows } from './performance-recorder-lighting.js';
 import { buildWorldOverlaysSpanRows } from './performance-recorder-world-overlays.js';
+import {
+  buildWeatherSpanRows,
+  buildWindowLightSpanRows,
+} from './performance-recorder-weather-window.js';
 
 /**
  * @typedef {'info'|'warn'|'critical'} InsightSeverity
@@ -79,6 +83,7 @@ export function buildPerformanceInsights(snapshot, frames = [], ticks = []) {
   const effects = snapshot?.effects ?? [];
   const session = snapshot?.session ?? {};
   const meta = snapshot?.meta ?? {};
+  const pacingAnalysis = snapshot?.pacingAnalysis ?? null;
 
   if ((meta.framesRecorded ?? 0) === 0 && effects.length === 0) {
     return [{
@@ -271,17 +276,52 @@ export function buildPerformanceInsights(snapshot, frames = [], ticks = []) {
     }
   }
 
-  // Target FPS judder from ticks
+  // Presentation pacing (intentional gate vs real irregularity)
+  if (pacingAnalysis && pacingAnalysis.diagnosis !== 'insufficient_data') {
+    const pa = pacingAnalysis;
+    const gatePct = pa.skip?.byReason?.presentation_gate?.pct ?? pa.gateSharePct ?? 0;
+    const flips = pa.presentSkipFlipsPerSec ?? 0;
+    const severity = pa.diagnosis === 'healthy_intentional_gating'
+      ? 'info'
+      : (pa.diagnosis === 'unexpected_skips' ? 'warn' : 'warn');
+    insights.push({
+      severity,
+      title: pa.diagnosis === 'healthy_intentional_gating'
+        ? 'Presentation pacing is gating rAF ticks (expected)'
+        : 'Presentation pacing needs review',
+      detail: [
+        pa.note,
+        `Skipped ${(pa.actualSkipPct ?? 0).toFixed(1)}% of rAF ticks (${gatePct.toFixed(0)}% presentation_gate).`,
+        `~${pa.presentedFpsApprox ?? '?'} compositor presents/s at ~${pa.rafHz ?? '?'} Hz rAF.`,
+        `Present/skip flips ${flips.toFixed(1)}/s are cadence changes, not hitches — use Stutter timeline present_gap for felt judder.`,
+      ].filter(Boolean).join(' '),
+      tags: ['pacing', 'presentation_gate', pa.diagnosis],
+    });
+
+    if (pa.diagnosis === 'healthy_intentional_gating' && (pa.actualSkipPct ?? 0) >= 50) {
+      insights.push({
+        severity: 'info',
+        title: 'High skip % is not a compositor defect',
+        detail: `Target ${pa.targetFps?.median ?? '?'} fps tier yields ~${pa.expectedSkipPct ?? '?'}% expected skip on ~${pa.rafHz ?? '?'} Hz. `
+          + 'Weather/fire continuous effects use the presentation tier (often 30 fps). Idle scenes use 15 fps. '
+          + 'Only investigate if present_gap stutters appear or skip reasons include strict_hold/composer_error.',
+        tags: ['pacing', 'education'],
+      });
+    }
+  }
+
   const targetFpsSet = new Set();
   for (const t of ticks ?? []) {
     if (t && Number(t.targetFps) > 0) targetFpsSet.add(Number(t.targetFps));
   }
   if (targetFpsSet.size > 1) {
     const tiers = [...targetFpsSet].sort((a, b) => a - b).join(' / ');
+    const flips = pacingAnalysis?.presentSkipFlipsPerSec
+      ?? (Number(session.pacing?.presentSkipFlipsPerSec ?? session.pacing?.judderPerSec) || 0);
     insights.push({
       severity: 'info',
       title: 'Adaptive target FPS transitions',
-      detail: `Presentation tier switched between ${tiers} fps during capture. Judder transitions: ${session.pacing?.judderTransitions ?? 0} (${fmtMs(session.pacing?.judderPerSec ?? 0)}/s).`,
+      detail: `Presentation tier switched between ${tiers} fps during capture. Present/skip cadence flips: ${flips.toFixed(1)}/s (not the same as visible stutter).`,
       tags: ['pacing', 'targetFps'],
     });
   }
@@ -468,6 +508,76 @@ export function buildPerformanceInsights(snapshot, frames = [], ticks = []) {
         title: 'Vegetation overlay inventory',
         detail: `${rootCount} draw roots (bush shadow/canopy ${kinds.bush?.shadow ?? 0}/${kinds.bush?.canopy ?? 0}, tree ${kinds.tree?.shadow ?? 0}/${kinds.tree?.canopy ?? 0}) at ${live.drawingBuffer?.w ?? '?'}×${live.drawingBuffer?.h ?? '?'} buffer.`,
         tags: ['worldOverlays', 'vegetation'],
+      });
+    }
+  }
+
+  const weatherSpans = snapshot.weatherParticles?.spans
+    ?? buildWeatherSpanRows(effects, { cap: 6 });
+  if (weatherSpans.length > 0) {
+    const top = weatherSpans[0];
+    const topCpu = Number(top.cpuTotal) || 0;
+    const live = snapshot.weatherParticles?.live ?? {};
+    const precip = Number(live.precipitation) || 0;
+    const ash = Number(live.ashIntensity) || 0;
+    const list = weatherSpans.slice(0, 3)
+      .map((s) => `${s.span} ${fmtMs(s.cpuTotal)} ms`)
+      .join('; ');
+    if (topCpu >= 2 || precip > 0.05 || ash > 0.05) {
+      insights.push({
+        severity: topCpu >= 6 ? 'warn' : 'info',
+        title: 'Weather particles update cost',
+        detail: `${list}. Live precip ${precip.toFixed(2)}, ash ${ash.toFixed(2)}, `
+          + `${live.batchSystems ?? '?'} quarks systems, ${live.culledSystems ?? 0} culled. `
+          + 'Heaviest step is usually `weatherParticles.update.quarks` or `particles` during rain.',
+        tags: ['weather', 'particles', 'cpu'],
+      });
+    }
+    if (live.wantsContinuousRender === true && precip > 0.05) {
+      insights.push({
+        severity: 'info',
+        title: 'Weather driving continuous render',
+        detail: 'Active precipitation locks the compositor on its continuous path — expect adaptive 30 fps tiers while rain/ash is visible.',
+        tags: ['weather', 'continuous', 'pacing'],
+      });
+    }
+  }
+
+  const windowSpans = snapshot.windowLight?.spans
+    ?? buildWindowLightSpanRows(effects, { cap: 6 });
+  if (windowSpans.length > 0) {
+    const topRender = windowSpans.find((s) => s.phase === 'render') ?? null;
+    const topUpdate = windowSpans.find((s) => s.phase === 'update') ?? null;
+    const renderCpu = Number(topRender?.cpuTotal) || 0;
+    const renderGpu = Number(topRender?.gpuTotal) || 0;
+    const updateCpu = Number(topUpdate?.cpuTotal) || 0;
+    const live = snapshot.windowLight?.live ?? {};
+    const skipped = Number(live.sessionCounters?.skippedFullDraws) || 0;
+    const fullDraws = Number(live.sessionCounters?.fullDraws) || 0;
+    const parts = [];
+    if (topRender) {
+      parts.push(`${topRender.span} cpu ${fmtMs(topRender.cpuTotal)} gpu ${fmtMs(topRender.gpuTotal)}`);
+    }
+    if (topUpdate && topUpdate !== topRender) {
+      parts.push(`${topUpdate.span} cpu ${fmtMs(topUpdate.cpuTotal)}`);
+    }
+    if (renderCpu + renderGpu + updateCpu >= 1) {
+      const cacheNote = (skipped > 0 && fullDraws > 0)
+        ? ` Emit cache skipped ${skipped}/${skipped + fullDraws} full draws.`
+        : '';
+      insights.push({
+        severity: (renderGpu >= 4 || renderCpu >= 4) ? 'warn' : 'info',
+        title: 'Window light sub-spans',
+        detail: `${parts.join('; ')}.${cacheNote} GPU emit alternates with lighting.render.windowLightDraw (gpuSlot 0/2 vs 1/2).`,
+        tags: ['windowLight', 'lighting'],
+      });
+    }
+    if (Number(live.emitRt?.w) > 2048 || Number(live.emitRt?.h) > 2048) {
+      insights.push({
+        severity: 'info',
+        title: 'Large window emit RT',
+        detail: `Emit atlas ${live.emitRt?.w ?? '?'}×${live.emitRt?.h ?? '?'} at scale ${Number(live.emitRt?.scale ?? 1).toFixed(2)} — lower internal window resolution in lighting if emitDraw GPU is high.`,
+        tags: ['windowLight', 'vram', 'gpu'],
       });
     }
   }

@@ -88,6 +88,9 @@ export class WeatherParticlesV2 {
 
     /** One-time debug guard for registration failures */
     this._msLoggedRegistrationFailureOnce = false;
+
+    /** @type {import('../../core/diagnostics/PerformanceRecorder.js').PerformanceRecorder|null} */
+    this._activePerfRecorder = null;
   }
 
   _ensureSystemRegistered(sys, label = '') {
@@ -299,6 +302,101 @@ export class WeatherParticlesV2 {
     }
   }
 
+  // ── Performance Recorder ───────────────────────────────────────────────────
+
+  /** @private */
+  _bindPerfRecorder() {
+    try {
+      const recorder = window.MapShine?.performanceRecorder;
+      this._activePerfRecorder = recorder?.enabled ? recorder : null;
+    } catch (_) {
+      this._activePerfRecorder = null;
+    }
+  }
+
+  /**
+   * @param {string} name
+   * @param {'update'|'render'} [phase]
+   * @param {{ cpuOnly?: boolean, gpuSlot?: { index: number, count: number } }} [options]
+   * @private
+   */
+  _beginPerfSpan(name, phase = 'update', options = { cpuOnly: true }) {
+    try {
+      const recorder = this._activePerfRecorder;
+      if (!recorder?.enabled || typeof recorder.beginEffectCall !== 'function') return null;
+      return recorder.beginEffectCall(`weatherParticles.${phase}.${name}`, phase, options);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /** @param {object|null} token @private */
+  _endPerfSpan(token) {
+    if (!token) return;
+    try {
+      const recorder = this._activePerfRecorder ?? window.MapShine?.performanceRecorder;
+      recorder?.endEffectCall?.(token);
+    } catch (_) {}
+  }
+
+  /**
+   * Live weather particle stats for Performance Recorder exports.
+   * @returns {object}
+   */
+  getPerformanceSnapshot() {
+    const wp = this._weatherParticles;
+    const br = this._batchRenderer;
+    const state = (typeof weatherController?.getCurrentState === 'function')
+      ? weatherController.getCurrentState()
+      : weatherController?.currentState;
+    const target = weatherController?.targetState;
+
+    /** @type {Record<string, { emission: number, visible: boolean, culled: boolean, overlayLayer: boolean }>} */
+    const systems = {};
+    const track = (key, sys) => {
+      if (!sys) return;
+      const emitter = sys.emitter;
+      const ud = emitter?.userData ?? {};
+      systems[key] = {
+        emission: Number(sys.emissionOverTime?.value) || 0,
+        visible: emitter?.visible !== false,
+        culled: ud._msCulled === true,
+        overlayLayer: ud.msOverlayLayer === true,
+      };
+    };
+    if (wp) {
+      track('rain', wp.rainSystem);
+      track('roofDrip', wp.roofDripSystem);
+      track('snow', wp.snowSystem);
+      track('ash', wp.ashSystem);
+      track('ashEmber', wp.ashEmberSystem);
+      track('splash', wp.splashSystem);
+    }
+
+    let culledCount = 0;
+    let activeEmission = 0;
+    for (const row of Object.values(systems)) {
+      if (row.culled) culledCount += 1;
+      activeEmission += row.emission;
+    }
+
+    return {
+      enabled: this.enabled === true,
+      initialized: this._initialized === true,
+      weatherControllerEnabled: weatherController?.enabled !== false,
+      elevationWeatherSuppressed: weatherController?.elevationWeatherSuppressed === true,
+      wantsContinuousRender: this.wantsContinuousRender?.() === true,
+      precipitation: Math.max(Number(state?.precipitation) || 0, Number(target?.precipitation) || 0),
+      ashIntensity: Math.max(Number(state?.ashIntensity) || 0, Number(target?.ashIntensity) || 0),
+      simulationSpeed: Number(weatherController?.simulationSpeed) || 2,
+      batchSystems: br?.systemToBatchIndex?.size ?? 0,
+      batchCount: br?.batches?.length ?? 0,
+      culledSystems: culledCount,
+      activeEmissionTotal: activeEmission,
+      systems,
+    };
+  }
+
   // ── Per-frame update ────────────────────────────────────────────────────────
 
   /**
@@ -308,76 +406,92 @@ export class WeatherParticlesV2 {
   update(timeInfo) {
     if (!this._initialized || !this.enabled) return;
 
+    this._bindPerfRecorder();
+
     const deltaSec = typeof timeInfo?.motionDelta === 'number'
       ? timeInfo.motionDelta
       : (typeof timeInfo?.delta === 'number' ? timeInfo.delta : 0.016);
 
-    // Re-attach BatchedRenderer and emitters if FloorRenderBus.clear() evicted them.
-    // This is the ROOT CAUSE fix: clear() wipes all bus scene children (including
-    // the BatchedRenderer and every particle emitter) on every populate() call.
-    // Without this guard the systems emit but are never rendered (no scene parent).
-    this._ensureSceneAttachment();
-
-    this._syncWindowDebugBridge();
-
-    // Always ensure systems are registered before any other logic that might
-    // throw/early-exit. If systems aren't in systemToBatchIndex, Quarks will
-    // never simulate or render them.
-    this._ensureWeatherSystemsRegistered();
-    const dbg = window.MapShine?.debugWeatherFoamLogs === true;
-    if (dbg && !this._msLoggedRegistrationOnce) {
-      this._msLoggedRegistrationOnce = true;
-      const br = this._batchRenderer;
-      const wp = this._weatherParticles;
-      const hasFoam = !!(br && wp && br.systemToBatchIndex?.has?.(wp._foamSystem));
-      const hasRain = !!(br && wp && br.systemToBatchIndex?.has?.(wp.rainSystem));
-      log.info('[WeatherParticlesV2] registration probe', {
-        mapSize: br?.systemToBatchIndex?.size ?? null,
-        batches: br?.batches?.length ?? null,
-        hasFoam,
-        hasRain
-      });
+    let token = this._beginPerfSpan('attach');
+    try {
+      // Re-attach BatchedRenderer and emitters if FloorRenderBus.clear() evicted them.
+      this._ensureSceneAttachment();
+      this._syncWindowDebugBridge();
+      this._ensureWeatherSystemsRegistered();
+      const dbg = window.MapShine?.debugWeatherFoamLogs === true;
+      if (dbg && !this._msLoggedRegistrationOnce) {
+        this._msLoggedRegistrationOnce = true;
+        const br = this._batchRenderer;
+        const wp = this._weatherParticles;
+        const hasFoam = !!(br && wp && br.systemToBatchIndex?.has?.(wp._foamSystem));
+        const hasRain = !!(br && wp && br.systemToBatchIndex?.has?.(wp.rainSystem));
+        log.info('[WeatherParticlesV2] registration probe', {
+          mapSize: br?.systemToBatchIndex?.size ?? null,
+          batches: br?.batches?.length ?? null,
+          hasFoam,
+          hasRain
+        });
+      }
+    } finally {
+      this._endPerfSpan(token);
     }
 
-    // ── 1. Advance WeatherController state ──────────────────────────────
-    // WeatherController has its own sub-rate throttle (15 Hz), so calling
-    // update() every frame is fine — it internally skips when not due.
-    // Match FireEffectV2: ensure the controller is initialized before update().
-    // In V2 mode there is no guarantee some other effect initialized it first.
-    if (weatherController?.initialized !== true && typeof weatherController?.initialize === 'function') {
-      void weatherController.initialize();
-    }
-    if (typeof weatherController?.update === 'function') {
-      weatherController.update(timeInfo);
+    const particleTickNeeded = this._needsParticleSimulationTick();
+
+    token = this._beginPerfSpan('controller');
+    try {
+      if (weatherController?.initialized !== true && typeof weatherController?.initialize === 'function') {
+        void weatherController.initialize();
+      }
+      if (typeof weatherController?.update === 'function') {
+        const wcHz = Number(weatherController?.updateHz);
+        const wcStep = Number.isFinite(wcHz) && wcHz > 0 ? (1 / wcHz) : 0;
+        this._wcAccum += deltaSec;
+        const runController = particleTickNeeded
+          || wcStep <= 0
+          || this._wcAccum >= wcStep;
+        if (runController) {
+          if (wcStep > 0) this._wcAccum %= wcStep;
+          weatherController.update(timeInfo);
+        }
+      }
+    } finally {
+      this._endPerfSpan(token);
     }
 
-    // ── 2. Scene-bounds Vector4 for rain/snow clipping (refreshed on resize / init)
+    if (!particleTickNeeded || !this._weatherParticles) return;
+
     const boundsVec4 = this._sceneBounds;
 
-    // ── 3. Tick WeatherParticles (emission rates, masking, sizing) ───────
-    if (this._weatherParticles) {
+    try {
+      const clampedDelta = Math.min(deltaSec, 0.1);
+      const simSpeed = (typeof weatherController?.simulationSpeed === 'number')
+        ? weatherController.simulationSpeed
+        : 2.0;
+      const dt = clampedDelta * 0.001 * 750 * simSpeed;
+
+      token = this._beginPerfSpan('particles');
       try {
-        // Scale delta to match V1 time convention:
-        //   clampedDelta * 0.001 * 750 * simSpeed
-        // This produces the same time-step that V1 ParticleSystem.update() used.
-        const clampedDelta = Math.min(deltaSec, 0.1);
-        const simSpeed = (typeof weatherController?.simulationSpeed === 'number')
-          ? weatherController.simulationSpeed
-          : 2.0;
-        const dt = clampedDelta * 0.001 * 750 * simSpeed;
-
         this._weatherParticles.update(dt, boundsVec4);
-
-        // Frustum cull before Quarks sim (matches V1 ParticleSystem.update order).
-        // Ensures emitters are paused/visible before batchRenderer.update so work is
-        // not spent on systems already marked off-screen this frame.
-        this._applyCulling();
-
-        // Advance the BatchedRenderer (quarks core simulation step).
-        this._batchRenderer?.update(dt);
-      } catch (e) {
-        log.warn('WeatherParticlesV2.update: particle tick error', e);
+      } finally {
+        this._endPerfSpan(token);
       }
+
+      token = this._beginPerfSpan('cull');
+      try {
+        this._applyCulling();
+      } finally {
+        this._endPerfSpan(token);
+      }
+
+      token = this._beginPerfSpan('quarks');
+      try {
+        this._batchRenderer?.update(dt);
+      } finally {
+        this._endPerfSpan(token);
+      }
+    } catch (e) {
+      log.warn('WeatherParticlesV2.update: particle tick error', e);
     }
   }
 
@@ -429,6 +543,15 @@ export class WeatherParticlesV2 {
    * @returns {boolean}
    */
   wantsContinuousRender() {
+    return this._needsParticleSimulationTick();
+  }
+
+  /**
+   * True when Quarks sim, culling, or roof-drip tail still need per-rAF work.
+   * @returns {boolean}
+   * @private
+   */
+  _needsParticleSimulationTick() {
     if (!this._initialized || !this.enabled) return false;
     if (weatherController?.enabled === false) return false;
     if (weatherController?.elevationWeatherSuppressed === true) return false;
@@ -445,6 +568,34 @@ export class WeatherParticlesV2 {
     for (const sys of systems) {
       const e = sys?.emissionOverTime?.value;
       if (typeof e === 'number' && e > 0.5) return true;
+    }
+
+    if ((wp?._roofDripTailRemainingSec ?? 0) > 0.01) return true;
+    return this._hasLiveQuarksParticles();
+  }
+
+  /**
+   * @returns {boolean}
+   * @private
+   */
+  _hasLiveQuarksParticles() {
+    const wp = this._weatherParticles;
+    if (!wp) return false;
+    const systems = [
+      wp.rainSystem,
+      wp.snowSystem,
+      wp.ashSystem,
+      wp.ashEmberSystem,
+      wp.roofDripSystem,
+      wp.splashSystem,
+      wp._foamSystem,
+      wp._rainImpactSplashSystem,
+      ...(wp.splashSystems ?? []),
+      ...(wp._waterHitSplashSystems?.map((entry) => entry?.system) ?? []),
+    ];
+    for (const sys of systems) {
+      const n = sys?.particleNum;
+      if (typeof n === 'number' && n > 0) return true;
     }
     return false;
   }

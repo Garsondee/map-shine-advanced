@@ -45,6 +45,7 @@ import {
 } from '../scene-view-projection.js';
 import { allocateRtReadbackBuffer, decodeReadbackPixel } from '../../utils/rt-pixel-readback.js';
 import { createMaskStatusSchemaGroups, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
+import { resolveEffectEnabled } from '../../effects/resolve-effect-enabled.js';
 
 const log = createLogger('WindowLightEffectV2');
 
@@ -757,6 +758,14 @@ export class WindowLightEffectV2 {
     this._frameId = 0;
     /** Last frame where {@link #syncFrameOcclusion} completed. */
     this._occlusionSyncedFrameId = -1;
+    /**
+     * When true, {@link #syncFrameOcclusion} is a no-op until mask sources change
+     * (maps with no window masks / bundles after probes complete).
+     * @type {boolean}
+     */
+    this._occlusionIdleSkip = false;
+    /** Compositor floor-cache version when {@link #_occlusionIdleSkip} was armed. */
+    this._occlusionIdleCompositorVersion = -1;
     /** When false, {@link #_rebuildLitWindowMasks} is a no-op until masks change. */
     this._litMasksDirty = true;
     /** Cache key for the last successful {@link #drawWindowLightPass} (legacy diagnostic). */
@@ -781,6 +790,9 @@ export class WindowLightEffectV2 {
     this._emitSizeProbeVec = null;
     /** @type {{ shadowLiftDraws: number, fullDraws: number, skippedFullDraws: number }} */
     this._emitPerfSession = { shadowLiftDraws: 0, fullDraws: 0, skippedFullDraws: 0 };
+
+    /** @type {import('../../core/diagnostics/PerformanceRecorder.js').PerformanceRecorder|null} */
+    this._activePerfRecorder = null;
 
     this.params = {
       hasWindowMask: false,
@@ -1475,6 +1487,7 @@ export class WindowLightEffectV2 {
 
   async populate(foundrySceneData) {
     if (!this._initialized) { log.warn('populate: not initialized'); return; }
+    this._invalidateOcclusionIdle();
     this._lastFoundrySceneData = foundrySceneData;
     this._primeWindowBundleLoadsForAllFloors();
     this.syncFrameOcclusion(null);
@@ -1519,6 +1532,7 @@ export class WindowLightEffectV2 {
   /** @param {string} basePath @private */
   _applyLoadedWindowBundleForBasePath(basePath) {
     if (!basePath) return;
+    this._invalidateOcclusionIdle();
     const groundUuid = this._windowMasks[0]?.uuid ?? null;
     for (let idx = 0; idx < 4; idx += 1) {
       const floorBasePath = this._resolveBasePathForFloorIndex(idx);
@@ -1533,35 +1547,107 @@ export class WindowLightEffectV2 {
     this._notifyMaskStatusUi();
   }
 
+  // ── Performance Recorder ───────────────────────────────────────────────────
+
+  /** @private */
+  _bindPerfRecorder() {
+    try {
+      const recorder = window.MapShine?.performanceRecorder;
+      this._activePerfRecorder = recorder?.enabled ? recorder : null;
+    } catch (_) {
+      this._activePerfRecorder = null;
+    }
+  }
+
+  /**
+   * @param {string} name
+   * @param {'update'|'render'} [phase]
+   * @param {{ cpuOnly?: boolean, gpuSlot?: { index: number, count: number } }} [options]
+   * @private
+   */
+  _beginPerfSpan(name, phase = 'update', options = { cpuOnly: true }) {
+    try {
+      const recorder = this._activePerfRecorder;
+      if (!recorder?.enabled || typeof recorder.beginEffectCall !== 'function') return null;
+      return recorder.beginEffectCall(`windowLight.${phase}.${name}`, phase, options);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /** @param {object|null} token @private */
+  _endPerfSpan(token) {
+    if (!token) return;
+    try {
+      const recorder = this._activePerfRecorder ?? window.MapShine?.performanceRecorder;
+      recorder?.endEffectCall?.(token);
+    } catch (_) {}
+  }
+
   update(timeInfo) {
     if (!this._initialized || !this._enabled) return;
 
-    const polledActiveFloor = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
-    if (Number.isFinite(polledActiveFloor) && polledActiveFloor !== this._activeFloorIndex) {
-      this.onFloorChange(polledActiveFloor);
+    this._bindPerfRecorder();
+
+    let token = this._beginPerfSpan('floorPoll');
+    try {
+      const polledActiveFloor = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
+      if (Number.isFinite(polledActiveFloor) && polledActiveFloor !== this._activeFloorIndex) {
+        this.onFloorChange(polledActiveFloor);
+      }
+    } finally {
+      this._endPerfSpan(token);
     }
 
     const u = this._emitMaterial?.uniforms;
     if (!u) return;
 
-    u.uEffectEnabled.value = this._enabled ? 1.0 : 0.0;
-    u.uDebugForceMagenta.value = this._debugForceMagenta ? 1.0 : 0.0;
-    u.uIntensity.value = this.getEffectiveIntensity();
-    u.uFalloff.value = Math.max(0.01, Number(this.params.falloff) || 1);
+    token = this._beginPerfSpan('coreUniforms');
+    try {
+      u.uEffectEnabled.value = this._enabled ? 1.0 : 0.0;
+      u.uDebugForceMagenta.value = this._debugForceMagenta ? 1.0 : 0.0;
+      u.uIntensity.value = this.getEffectiveIntensity();
+      u.uFalloff.value = Math.max(0.01, Number(this.params.falloff) || 1);
 
-    const c = this.params.color;
-    if (c && typeof c === 'object') {
-      u.uColor.value.setRGB(Number(c.r) || 0, Number(c.g) || 0, Number(c.b) || 0);
+      const c = this.params.color;
+      if (c && typeof c === 'object') {
+        u.uColor.value.setRGB(Number(c.r) || 0, Number(c.g) || 0, Number(c.b) || 0);
+      }
+
+      if (u.uTime) {
+        u.uTime.value = Number(timeInfo?.elapsed) || 0;
+      }
+    } finally {
+      this._endPerfSpan(token);
     }
 
-    if (u.uTime) {
-      u.uTime.value = Number(timeInfo?.elapsed) || 0;
+    token = this._beginPerfSpan('cloudUniforms');
+    try {
+      this._syncCloudUniformsFromParams(u);
+    } finally {
+      this._endPerfSpan(token);
     }
 
-    this._syncCloudUniformsFromParams(u);
-    this._updateSceneBounds();
-    this._pushTodUniforms();
-    this._pushRefractionUniforms(u);
+    token = this._beginPerfSpan('sceneBounds');
+    try {
+      this._updateSceneBounds();
+    } finally {
+      this._endPerfSpan(token);
+    }
+
+    token = this._beginPerfSpan('todUniforms');
+    try {
+      this._pushTodUniforms();
+    } finally {
+      this._endPerfSpan(token);
+    }
+
+    token = this._beginPerfSpan('refractionUniforms');
+    try {
+      this._pushRefractionUniforms(u);
+    } finally {
+      this._endPerfSpan(token);
+    }
   }
 
   /**
@@ -1846,11 +1932,72 @@ export class WindowLightEffectV2 {
     return false;
   }
 
+  /** @private */
+  _invalidateOcclusionIdle() {
+    this._occlusionIdleSkip = false;
+    this._occlusionIdleCompositorVersion = -1;
+  }
+
+  /**
+   * @returns {boolean}
+   * @private
+   */
+  _canSkipOcclusionSync() {
+    if (!this._occlusionIdleSkip) return false;
+    if (this._windowBundleLoadsInFlight.size > 0) {
+      this._invalidateOcclusionIdle();
+      return false;
+    }
+    const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+    const ver = Number(compositor?.getFloorCacheVersion?.() ?? 0);
+    if (ver !== this._occlusionIdleCompositorVersion) {
+      this._invalidateOcclusionIdle();
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * @param {*} compositor
+   * @private
+   */
+  _armOcclusionIdleSkip(compositor) {
+    if (this.params.hasWindowMask) {
+      this._invalidateOcclusionIdle();
+      return;
+    }
+    if (this._windowBundleLoadsInFlight.size > 0) return;
+    this._occlusionIdleSkip = true;
+    this._occlusionIdleCompositorVersion = Number(compositor?.getFloorCacheVersion?.() ?? 0);
+  }
+
   /**
    * Refresh per-floor window mask slots from GpuSceneMaskCompositor (PaintedShadow-style).
    * @param {*} _floorCompositor
    */
   syncFrameOcclusion(_floorCompositor) {
+    if (!this._initialized || !resolveEffectEnabled(this)) return;
+    if (this._occlusionSyncedFrameId === this._frameId) return;
+    if (this._canSkipOcclusionSync()) {
+      this._occlusionSyncedFrameId = this._frameId;
+      return;
+    }
+
+    this._bindPerfRecorder();
+    const occlusionToken = this._beginPerfSpan('syncOcclusion', 'render', { cpuOnly: true });
+    try {
+      this._syncFrameOcclusionInner(_floorCompositor);
+      this._occlusionSyncedFrameId = this._frameId;
+    } finally {
+      this._endPerfSpan(occlusionToken);
+    }
+  }
+
+  /**
+   * @param {*} _floorCompositor
+   * @private
+   */
+  _syncFrameOcclusionInner(_floorCompositor) {
     const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
     this._windowMasks = [null, null, null, null];
     this._litWindowMasks = [null, null, null, null];
@@ -1865,6 +2012,7 @@ export class WindowLightEffectV2 {
     if (!compositor) {
       this._refreshRuntimeMaskFlagsFromBundles();
       this._notifyMaskStatusUi();
+      this._armOcclusionIdleSkip(null);
       return;
     }
 
@@ -1912,6 +2060,7 @@ export class WindowLightEffectV2 {
     }
     this._refreshRuntimeMaskFlagsFromBundles();
     this._notifyMaskStatusUi();
+    this._armOcclusionIdleSkip(compositor);
   }
 
   setDebugForceMagenta(enabled = true) {
@@ -2079,7 +2228,14 @@ export class WindowLightEffectV2 {
       return;
     }
 
-    this._syncEmitDrawingBufferFromRenderer(renderer);
+    this._bindPerfRecorder();
+
+    let prepToken = this._beginPerfSpan('emitBufferSync', 'render', { cpuOnly: true });
+    try {
+      this._syncEmitDrawingBufferFromRenderer(renderer);
+    } finally {
+      this._endPerfSpan(prepToken);
+    }
 
     if (!this.params.hasWindowMask) {
       this._emitComposeValid = false;
@@ -2095,17 +2251,22 @@ export class WindowLightEffectV2 {
       this._shadowLiftValid = false;
     }
 
-    if (camera) this._syncViewProjectionUniforms(camera);
-    this._updateSceneBounds();
-    if (!shadowLiftOnly) {
-      this._syncCloudUniformsFromParams(this._emitMaterial.uniforms);
-      this._pushTodUniforms();
-      this._pushRefractionUniforms(this._emitMaterial.uniforms);
-    }
+    prepToken = this._beginPerfSpan('drawPrep', 'render', { cpuOnly: true });
+    try {
+      if (camera) this._syncViewProjectionUniforms(camera);
+      this._updateSceneBounds();
+      if (!shadowLiftOnly) {
+        this._syncCloudUniformsFromParams(this._emitMaterial.uniforms);
+        this._pushTodUniforms();
+        this._pushRefractionUniforms(this._emitMaterial.uniforms);
+      }
 
-    this._rebuildLitWindowMasks();
-    if (!shadowLiftOnly) {
-      this._rebuildLitSpecularMasks();
+      this._rebuildLitWindowMasks();
+      if (!shadowLiftOnly) {
+        this._rebuildLitSpecularMasks();
+      }
+    } finally {
+      this._endPerfSpan(prepToken);
     }
 
     const savedEmitUniforms = shadowLiftOnly
@@ -2127,17 +2288,22 @@ export class WindowLightEffectV2 {
         && cacheKey === this._lastFullEmitCacheKey
         && rtReady
       ) {
-        this._emitPerfSession.skippedFullDraws += 1;
-        this._emitComposeValid = true;
-        this._lastDrawStats = {
-          path: 'sceneUvEmitRt.cached',
-          purpose: 'full',
-          drew: false,
-          cached: true,
-          floor: Number.isFinite(this._renderFloorIndex) ? this._renderFloorIndex : null,
-          emitRt: { w: this._emitRT.width, h: this._emitRT.height },
-          cacheKey,
-        };
+        const cacheToken = this._beginPerfSpan('emitCached', 'render', { cpuOnly: true });
+        try {
+          this._emitPerfSession.skippedFullDraws += 1;
+          this._emitComposeValid = true;
+          this._lastDrawStats = {
+            path: 'sceneUvEmitRt.cached',
+            purpose: 'full',
+            drew: false,
+            cached: true,
+            floor: Number.isFinite(this._renderFloorIndex) ? this._renderFloorIndex : null,
+            emitRt: { w: this._emitRT.width, h: this._emitRT.height },
+            cacheKey,
+          };
+        } finally {
+          this._endPerfSpan(cacheToken);
+        }
         return;
       }
     }
@@ -2182,8 +2348,13 @@ export class WindowLightEffectV2 {
       return;
     }
 
-    this._bindCompositorMaskUniforms();
-    this._bindFloorSliceUniforms();
+    const bindToken = this._beginPerfSpan('emitBind', 'render', { cpuOnly: true });
+    try {
+      this._bindCompositorMaskUniforms();
+      this._bindFloorSliceUniforms();
+    } finally {
+      this._endPerfSpan(bindToken);
+    }
 
     const stats = {
       path: shadowLiftOnly ? 'sceneUvEmitRt.shadowLift' : 'sceneUvEmitRt',
@@ -2198,6 +2369,9 @@ export class WindowLightEffectV2 {
     const prevTarget = renderer.getRenderTarget();
     const drawState = this._prepareWindowLightDrawState(renderer, emitTarget);
 
+    const drawToken = this._beginPerfSpan('emitDraw', 'render', {
+      gpuSlot: { index: 1, count: 2 },
+    });
     try {
       renderer.setRenderTarget(emitTarget);
       renderer.render(this._scene, this._drawCamera);
@@ -2215,6 +2389,7 @@ export class WindowLightEffectV2 {
         stats.cacheKey = fullKey;
       }
     } finally {
+      this._endPerfSpan(drawToken);
       this._restoreEmitShadowLiftUniforms(this._emitMaterial.uniforms, savedEmitUniforms);
       renderer.setRenderTarget(prevTarget);
       this._restoreWindowLightDrawState(renderer, drawState);

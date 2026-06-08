@@ -8,6 +8,10 @@
  * @module ui/performance-recorder-dialog
  */
 
+import {
+  CLEAN_TEST_DEFAULTS,
+  runCleanPerfTest,
+} from '../core/diagnostics/performance-recorder-clean-test.js';
 import { groupEffectRows } from '../core/diagnostics/performance-recorder-export.js';
 import { createLogger } from '../core/log.js';
 
@@ -90,6 +94,12 @@ export class PerformanceRecorderDialog {
 
     /** @type {boolean} Roll up dotted effect keys in the table. */
     this._groupByPrefix = false;
+
+    /** @type {boolean} Clean 10s test mode in progress. */
+    this._cleanTestRunning = false;
+
+    /** @type {AbortController|null} */
+    this._cleanTestAbort = null;
   }
 
   /**
@@ -114,6 +124,7 @@ export class PerformanceRecorderDialog {
       <div class="msa-perf__controls">
         <button type="button" data-action="start" class="msa-perf__btn msa-perf__btn--primary">Start</button>
         <button type="button" data-action="stop"  class="msa-perf__btn msa-perf__btn--warn" disabled>Stop</button>
+        <button type="button" data-action="clean-test-10s" class="msa-perf__btn" title="Hide all MSA UI, settle 1s, record 10s, settle 1s, restore UI">10s Clean Test</button>
         <button type="button" data-action="reset" class="msa-perf__btn">Reset</button>
         <span class="msa-perf__spacer"></span>
         <label class="msa-perf__check" title="Toggle WebGL2 GPU timer queries">
@@ -153,8 +164,12 @@ export class PerformanceRecorderDialog {
           <span class="msa-perf__status-value" data-bind="continuous">none</span>
         </div>
         <div class="msa-perf__status-row">
-          <span class="msa-perf__status-label">Presented / skipped</span>
+          <span class="msa-perf__status-label">Presents / gated</span>
           <span class="msa-perf__status-value" data-bind="pacing">—</span>
+        </div>
+        <div class="msa-perf__status-row">
+          <span class="msa-perf__status-label">Pacing health</span>
+          <span class="msa-perf__status-value" data-bind="pacingHealth">—</span>
         </div>
         <div class="msa-perf__status-row">
           <span class="msa-perf__status-label">Target FPS</span>
@@ -293,6 +308,7 @@ export class PerformanceRecorderDialog {
   }
 
   destroy() {
+    this._cancelCleanTest();
     this._stopRefreshLoop();
     if (this.container) {
       try { this.container.remove(); } catch (_) {}
@@ -332,6 +348,9 @@ export class PerformanceRecorderDialog {
           break;
         case 'stop':
           this._onStop();
+          break;
+        case 'clean-test-10s':
+          void this._onCleanTest10s();
           break;
         case 'reset':
           this._onReset();
@@ -459,6 +478,76 @@ export class PerformanceRecorderDialog {
       this._refresh();
     } catch (err) {
       log.error('stop failed:', err);
+    }
+  }
+
+  /** @private */
+  _cancelCleanTest() {
+    try {
+      this._cleanTestAbort?.abort?.();
+    } catch (_) {}
+    this._cleanTestAbort = null;
+    this._cleanTestRunning = false;
+  }
+
+  /** @private */
+  async _onCleanTest10s() {
+    if (this._cleanTestRunning) return;
+    if (this.recorder?.enabled) {
+      ui?.notifications?.warn?.('Stop the current recording before starting a clean test.');
+      return;
+    }
+
+    const gpuCheckbox = this.container?.querySelector('input[data-input="gpuTiming"]');
+    const gpuTiming = gpuCheckbox ? gpuCheckbox.checked : true;
+    const reopenRecorder = this.visible === true;
+
+    this._cleanTestRunning = true;
+    this._cleanTestAbort = new AbortController();
+    this._renderControls(this.recorder.getSnapshot());
+
+    const notify = (message, type = 'info') => {
+      try {
+        ui?.notifications?.[type]?.(message);
+      } catch (_) {}
+    };
+
+    try {
+      notify('Clean test: hiding MSA UI…');
+      const { snapshot } = await runCleanPerfTest(this.recorder, {
+        ...CLEAN_TEST_DEFAULTS,
+        gpuTiming,
+        signal: this._cleanTestAbort.signal,
+        onPhase: (phase, detail) => {
+          if (phase === 'settle-before') notify(`Clean test: settling ${detail ?? ''}…`);
+          if (phase === 'recording') notify(`Clean test: recording ${detail ?? ''}…`);
+          if (phase === 'settle-after') notify(`Clean test: finishing ${detail ?? ''}…`);
+        },
+      });
+
+      const frames = Number(snapshot?.meta?.framesRecorded) || 0;
+      const duration = Number(snapshot?.session?.durationSec) || 0;
+      const stutters = Number(snapshot?.stutterAnalysis?.totalEvents) || 0;
+      notify(
+        `Clean test complete — ${frames} frames, ${duration.toFixed(1)}s, ${stutters} stutter events. UI restored.`,
+      );
+
+      if (reopenRecorder) {
+        this.show();
+      } else {
+        try { this._refresh(); } catch (_) {}
+      }
+    } catch (err) {
+      if (err?.name === 'AbortError' || err?.message === 'aborted') {
+        notify('Clean test cancelled.', 'warn');
+      } else {
+        log.error('clean test failed:', err);
+        notify('Clean test failed — see console.', 'error');
+      }
+      if (reopenRecorder) this.show();
+    } finally {
+      this._cancelCleanTest();
+      try { this._refresh(); } catch (_) {}
     }
   }
 
@@ -726,9 +815,32 @@ export class PerformanceRecorderDialog {
       : `idle ${(noneShare * 100).toFixed(0)}%`);
 
     const pacing = snap.session.pacing || {};
-    set('pacing', pacing.ticksRecorded > 0
-      ? `${fmt(pacing.presentedPct, 0)}% / ${fmt(pacing.skippedPct, 0)}% skip`
-      : '—');
+    const pa = snap.pacingAnalysis;
+    if (pacing.ticksRecorded > 0) {
+      const gatePct = pa?.skip?.byReason?.presentation_gate?.pct
+        ?? pacing.skipReasons?.presentation_gate
+          ? ((pacing.skipReasons.presentation_gate / pacing.ticksRecorded) * 100)
+          : null;
+      const gateTxt = gatePct != null ? `, ${fmt(gatePct, 0)}% gate` : '';
+      const presentsFps = pa?.presentedFpsApprox;
+      const presentsTxt = presentsFps != null ? ` (~${fmt(presentsFps, 0)} presents/s)` : '';
+      set('pacing', `${fmt(pacing.presentedPct, 0)}% present / ${fmt(pacing.skippedPct, 0)}% gated${gateTxt}${presentsTxt}`);
+    } else {
+      set('pacing', '—');
+    }
+
+    if (pa?.diagnosis && pa.diagnosis !== 'insufficient_data') {
+      const label = {
+        healthy_intentional_gating: 'healthy (intentional gate)',
+        irregular_present_spacing: 'irregular presents',
+        unexpected_skips: 'unexpected skips',
+        mixed_tiers: 'mixed tiers',
+      }[pa.diagnosis] ?? pa.diagnosis;
+      const delta = pa.skipDelta != null ? ` Δ${pa.skipDelta >= 0 ? '+' : ''}${fmt(pa.skipDelta, 0)}%` : '';
+      set('pacingHealth', `${label}${delta}`);
+    } else {
+      set('pacingHealth', '—');
+    }
     try {
       const ps = window.MapShine?.__presentationState;
       set('targetFps', ps?.targetFps ? `${fmt(ps.targetFps, 0)} (${ps.tier || '?'})` : '—');
@@ -836,8 +948,11 @@ export class PerformanceRecorderDialog {
 
     const startBtn = root.querySelector('button[data-action="start"]');
     const stopBtn  = root.querySelector('button[data-action="stop"]');
-    if (startBtn) startBtn.disabled = this.recorder.enabled === true;
-    if (stopBtn)  stopBtn.disabled  = this.recorder.enabled !== true;
+    const cleanBtn = root.querySelector('button[data-action="clean-test-10s"]');
+    const busy = this.recorder.enabled === true || this._cleanTestRunning === true;
+    if (startBtn) startBtn.disabled = busy;
+    if (stopBtn)  stopBtn.disabled  = this.recorder.enabled !== true || this._cleanTestRunning === true;
+    if (cleanBtn) cleanBtn.disabled = busy;
 
     const gpuCheckbox = root.querySelector('input[data-input="gpuTiming"]');
     if (gpuCheckbox) {
@@ -847,6 +962,49 @@ export class PerformanceRecorderDialog {
 
     const groupCheckbox = root.querySelector('input[data-input="groupByPrefix"]');
     if (groupCheckbox) groupCheckbox.checked = this._groupByPrefix;
+  }
+
+  /**
+   * @param {object} snap
+   * @returns {string}
+   * @private
+   */
+  _renderPacingSummaryHtml(snap) {
+    const pa = snap.pacingAnalysis;
+    const pacing = snap.session?.pacing ?? {};
+    if (!pa || pa.diagnosis === 'insufficient_data') {
+      return '<em>Record longer to analyze pacing.</em>';
+    }
+
+    const skipRows = Object.entries(pa.skip?.byReason ?? pacing.skipReasons ?? {})
+      .filter(([k]) => k !== 'none')
+      .sort((a, b) => (Number(b[1]?.count ?? b[1]) || 0) - (Number(a[1]?.count ?? a[1]) || 0))
+      .map(([reason, data]) => {
+        const count = Number(data?.count ?? data) || 0;
+        const pct = data?.pct != null ? fmt(data.pct, 1) : fmt((count / Math.max(1, pacing.ticksRecorded)) * 100, 1);
+        return `<tr><td>${escapeHtml(reason)}</td><td class="msa-perf__num">${count}</td><td class="msa-perf__num">${pct}%</td></tr>`;
+      }).join('');
+
+    const tierRows = Object.entries(pa.tiers ?? {})
+      .sort((a, b) => b[1] - a[1])
+      .map(([tier, pct]) => `<li>${escapeHtml(tier)}: ${fmt(pct, 1)}%</li>`)
+      .join('');
+
+    return `
+      <ul class="msa-perf__inline-list">
+        <li>Diagnosis: <strong>${escapeHtml(pa.diagnosis)}</strong></li>
+        <li>rAF ~${fmt(pa.rafHz, 0)} Hz · target ~${fmt(pa.targetFps?.median ?? 0, 0)} fps · ~${fmt(pa.presentedFpsApprox ?? 0, 0)} presents/s</li>
+        <li>Skipped ${fmt(pa.actualSkipPct ?? 0, 1)}% (expected ~${fmt(pa.expectedSkipPct ?? 0, 1)}%, Δ ${fmt(pa.skipDelta ?? 0, 1)}%)</li>
+        <li>Cadence flips ${fmt(pa.presentSkipFlipsPerSec ?? 0, 1)}/s</li>
+      </ul>
+      ${pa.note ? `<p class="msa-perf__seq-micro">${escapeHtml(pa.note)}</p>` : ''}
+      <h5 class="msa-perf__subhead">Skip reasons</h5>
+      <table class="msa-perf__sub-table">
+        <thead><tr><th>Reason</th><th>Ticks</th><th>%</th></tr></thead>
+        <tbody>${skipRows || '<tr><td colspan="3"><em>none</em></td></tr>'}</tbody>
+      </table>
+      ${tierRows ? `<h5 class="msa-perf__subhead">Presentation tiers</h5><ul class="msa-perf__inline-list">${tierRows}</ul>` : ''}
+    `;
   }
 
   /** @private */
@@ -982,7 +1140,44 @@ export class PerformanceRecorderDialog {
       cloudCacheHtml = `raw ${(cache.rawHitPct ?? 0).toFixed(1)}% hit · mask ${(cache.maskHitPct ?? 0).toFixed(1)}% · cloudTop ${(cache.cloudTopHitPct ?? 0).toFixed(1)}% · last miss: ${escapeHtml(String(cache.lastMissReason ?? 'n/a'))}`;
     }
 
+    let weatherHtml = '<em>no weather particle samples</em>';
+    const weather = snap.weatherParticles;
+    if (weather?.spans?.length) {
+      const top = weather.spans[0];
+      const live = weather.live ?? {};
+      weatherHtml = [
+        `top: ${escapeHtml(top.span)} cpu ${fmt(top.cpuTotal, 2)} ms`,
+        `precip ${fmt(live.precipitation ?? 0, 2)} · ash ${fmt(live.ashIntensity ?? 0, 2)}`,
+        `${live.batchSystems ?? 0} systems · ${live.culledSystems ?? 0} culled`,
+        live.wantsContinuousRender ? 'continuous render: yes' : null,
+      ].filter(Boolean).join('<br>');
+    }
+
+    let windowLightHtml = '<em>no window light samples</em>';
+    const windowLight = snap.windowLight;
+    if (windowLight?.spans?.length) {
+      const topRender = (windowLight.spans ?? []).find((s) => s.phase === 'render') ?? windowLight.spans[0];
+      const live = windowLight.live ?? {};
+      const counters = live.sessionCounters ?? {};
+      windowLightHtml = [
+        `top render: ${escapeHtml(topRender.span)} cpu ${fmt(topRender.cpuTotal, 2)} gpu ${fmt(topRender.gpuTotal, 2)} ms`,
+        live.emitRt ? `emit ${live.emitRt.w}×${live.emitRt.h} @ ${fmt(live.emitRt.scale ?? 1, 2)}` : null,
+        counters.skippedFullDraws != null
+          ? `cache skips ${counters.skippedFullDraws} / draws ${counters.fullDraws ?? 0}`
+          : null,
+      ].filter(Boolean).join('<br>');
+    }
+
     body.innerHTML = `
+      <div class="msa-perf__summary-section msa-perf__summary-span2">
+        <h4>Presentation pacing</h4>
+        <p class="msa-perf__seq-micro">
+          <strong>Gated</strong> rAF ticks intentionally skip the compositor (<code>presentation_gate</code>) to cap present rate (idle 15 fps, continuous 30 fps, pan 60 fps).
+          Present/skip <em>flips</em> are not visible hitches — check <code>present_gap</code> stutters instead.
+        </p>
+        <div>${this._renderPacingSummaryHtml(snap)}</div>
+      </div>
+
       <div class="msa-perf__summary-section">
         <h4>Frame stats</h4>
         <ul class="msa-perf__inline-list">
@@ -1054,6 +1249,18 @@ export class PerformanceRecorderDialog {
       <div class="msa-perf__summary-section">
         <h4>Cloud shadow cache</h4>
         <div>${cloudCacheHtml}</div>
+      </div>
+
+      <div class="msa-perf__summary-section">
+        <h4>Weather particles</h4>
+        <p class="msa-perf__seq-micro">Sub-spans: <code>weatherParticles.update.attach|controller|particles|cull|quarks</code></p>
+        <div>${weatherHtml}</div>
+      </div>
+
+      <div class="msa-perf__summary-section">
+        <h4>Window light</h4>
+        <p class="msa-perf__seq-micro">Sub-spans: <code>windowLight.render.emitDraw</code>, <code>syncOcclusion</code>, <code>emitCached</code></p>
+        <div>${windowLightHtml}</div>
       </div>
 
       <div class="msa-perf__summary-section">

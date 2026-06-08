@@ -314,6 +314,8 @@ const ALPHA_LINK_THRESHOLD = 0.018;
 const CORE_ERODE_PASSES = 2;
 /** Use full-res nearest-core labeling up to this many pixels. */
 const FULL_RES_PIXEL_LIMIT = 4_000_000;
+/** Max mask dimension for clump coord bake (wind waves are low-frequency). */
+const CLUMP_BAKE_MAX_DIM = 1024;
 const MAX_LABEL_EDGE = 4096;
 
 /**
@@ -606,13 +608,13 @@ function buildCentroidByRoot(foliage, pixelRoot, w, h, srcW, srcH, placement) {
     entry.count += 1;
   }
 
-  /** @type {Map<number, { wx: number, wy: number, seed: number }>} */
+  /** @type {Map<number, { wx: number, wy: number, seed: number, count: number }>} */
   const centroidByRoot = new Map();
   for (const [root, c] of components) {
     const cxPx = c.sumX / c.count;
     const cyPx = c.sumY / c.count;
     const world = pixelCentroidToWorld(cxPx, cyPx, srcW, srcH, placement);
-    centroidByRoot.set(root, { wx: world.x, wy: world.y, seed: c.seed });
+    centroidByRoot.set(root, { wx: world.x, wy: world.y, seed: c.seed, count: c.count });
   }
   return centroidByRoot;
 }
@@ -731,11 +733,8 @@ export function buildClumpCoordTextureFromImageData(opts) {
 
   let primaryAnchor = null;
   let primaryCount = 0;
-  for (const [root, cent] of centroidByRoot) {
-    let count = 0;
-    for (let i = 0; i < pixelCount; i += 1) {
-      if (foliage[i] && pixelRoot[i] === root) count += 1;
-    }
+  for (const cent of centroidByRoot.values()) {
+    const count = Number(cent.count) || 0;
     if (count > primaryCount) {
       primaryCount = count;
       primaryAnchor = cent;
@@ -798,24 +797,77 @@ export function buildClumpCoordTextureFromImageData(opts) {
  * @param {{ centerX: number, centerY: number, tileW: number, tileH: number, rotationRad: number }} placement
  * @returns {{ texture: import('three').DataTexture, islandCount: number, primaryAnchor: { wx: number, wy: number, seed: number }|null }|null}
  */
-export function buildClumpCoordTexture(texture, deriveAlpha, placement) {
+/**
+ * Downscale mask RGBA for clump bake when masks exceed {@link CLUMP_BAKE_MAX_DIM}.
+ * @param {Uint8ClampedArray} data
+ * @param {number} width
+ * @param {number} height
+ * @returns {{ data: Uint8ClampedArray, width: number, height: number }}
+ */
+function downscaleImageDataForClumpBake(data, width, height) {
+  const longest = Math.max(width, height);
+  if (longest <= CLUMP_BAKE_MAX_DIM) {
+    return { data, width, height };
+  }
+  const scale = CLUMP_BAKE_MAX_DIM / longest;
+  const outW = Math.max(1, Math.round(width * scale));
+  const outH = Math.max(1, Math.round(height * scale));
+
+  const srcCanvas = document.createElement('canvas');
+  srcCanvas.width = width;
+  srcCanvas.height = height;
+  const srcCtx = srcCanvas.getContext('2d');
+  if (!srcCtx) return { data, width, height };
+  const srcImage = srcCtx.createImageData(width, height);
+  srcImage.data.set(data);
+  srcCtx.putImageData(srcImage, 0, 0);
+
+  const outCanvas = document.createElement('canvas');
+  outCanvas.width = outW;
+  outCanvas.height = outH;
+  const outCtx = outCanvas.getContext('2d');
+  if (!outCtx) return { data, width, height };
+  outCtx.drawImage(srcCanvas, 0, 0, outW, outH);
+  const out = outCtx.getImageData(0, 0, outW, outH);
+  return { data: out.data, width: outW, height: outH };
+}
+
+export function buildClumpCoordTexture(texture, deriveAlpha, placement, imageDataOpts = null) {
   try {
-    const img = texture?.image;
-    if (!img) return null;
+    let data;
+    let width;
+    let height;
 
-    const width = Number(img.naturalWidth || img.videoWidth || img.width || 0);
-    const height = Number(img.naturalHeight || img.videoHeight || img.height || 0);
-    if (!(width > 0 && height > 0)) return null;
+    if (imageDataOpts?.data && imageDataOpts.width > 0 && imageDataOpts.height > 0) {
+      ({ data, width, height } = downscaleImageDataForClumpBake(
+        imageDataOpts.data,
+        imageDataOpts.width,
+        imageDataOpts.height,
+      ));
+    } else {
+      const img = texture?.image;
+      if (!img) return null;
 
-    const canvasEl = document.createElement('canvas');
-    canvasEl.width = width;
-    canvasEl.height = height;
-    const ctx = canvasEl.getContext('2d');
-    if (!ctx) return null;
-    ctx.drawImage(img, 0, 0, width, height);
-    const imageData = ctx.getImageData(0, 0, width, height);
+      width = Number(img.naturalWidth || img.videoWidth || img.width || 0);
+      height = Number(img.naturalHeight || img.videoHeight || img.height || 0);
+      if (!(width > 0 && height > 0)) return null;
+
+      const canvasEl = document.createElement('canvas');
+      canvasEl.width = width;
+      canvasEl.height = height;
+      const ctx = canvasEl.getContext('2d');
+      if (!ctx) return null;
+      ctx.drawImage(img, 0, 0, width, height);
+      const imageData = ctx.getImageData(0, 0, width, height);
+      ({ data, width, height } = downscaleImageDataForClumpBake(
+        imageData.data,
+        width,
+        height,
+      ));
+    }
+
     return buildClumpCoordTextureFromImageData({
-      data: imageData.data,
+      data,
       width,
       height,
       deriveAlpha,

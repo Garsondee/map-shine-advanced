@@ -122,6 +122,14 @@ import {
   linkVegetationWindLayerUniforms,
   BUSH_WIND_LAYER_DEFAULTS,
 } from './vegetation-wind-params.js';
+import {
+  probeVegetationMaskPathsBatch,
+  readMaskImageData,
+  detectDerivedAlphaFromImageData,
+  VEGETATION_MASK_READ_MAX_DIM,
+  getVegetationMaskLoadQueue,
+  yieldVegetationPopulateFrame,
+} from './vegetation-mask-load.js';
 
 const log = createLogger('BushEffectV2');
 
@@ -964,9 +972,27 @@ export class BushEffectV2 {
         bgEntries.push({ src, floorIndex, key });
       }
     }
+    const tileDocs = canvas?.scene?.tiles?.contents ?? [];
+    const probePaths = [];
+    for (const bg of bgEntries) {
+      probePaths.push(bg.src.replace(/\.[^.]+$/, ''));
+    }
+    for (const tileDoc of tileDocs) {
+      const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
+      if (!src) continue;
+      probePaths.push(src.replace(/\.[^.]+$/, ''));
+    }
+    const maskUrls = await probeVegetationMaskPathsBatch(
+      probePaths,
+      (basePath, suffix) => this._probeMask(basePath, suffix),
+      '_Bush',
+      this._negativeCache,
+    );
+
+    let spawnIdx = 0;
     for (const bg of bgEntries) {
       const basePath = bg.src.replace(/\.[^.]+$/, '');
-      const url = await this._probeMask(basePath, '_Bush');
+      const url = maskUrls.get(basePath);
       if (!url) continue;
       const centerX = sceneX + sceneW / 2;
       const centerY = worldH - (sceneY + sceneH / 2);
@@ -974,16 +1000,16 @@ export class BushEffectV2 {
       const tileH = sceneH;
       const z = GROUND_Z - 1 + BUSH_Z_OFFSET;
       this._createOverlay(bg.key, bg.floorIndex, { url, centerX, centerY, z, tileW, tileH, rotation: 0 });
+      spawnIdx += 1;
+      if (spawnIdx % 2 === 0) await yieldVegetationPopulateFrame();
     }
 
-    // Tiles
-    const tileDocs = canvas?.scene?.tiles?.contents ?? [];
     for (const tileDoc of tileDocs) {
       const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
       if (!src) continue;
 
       const basePath = src.replace(/\.[^.]+$/, '');
-      const url = await this._probeMask(basePath, '_Bush');
+      const url = maskUrls.get(basePath);
       if (!url) continue;
 
       const floorIndex = this._resolveFloorIndex(tileDoc, floors);
@@ -997,6 +1023,8 @@ export class BushEffectV2 {
       if (!tileId) continue;
 
       this._createOverlay(tileId, floorIndex, { url, centerX, centerY, z, tileW, tileH, rotation });
+      spawnIdx += 1;
+      if (spawnIdx % 2 === 0) await yieldVegetationPopulateFrame();
     }
 
     const n = this._overlays.size;
@@ -1120,7 +1148,6 @@ export class BushEffectV2 {
       applyVegetationPaintedShadowParamsToUniforms(this._sharedUniforms, this.params);
       applyVegetationLandscapeLightningParamsToUniforms(this._sharedUniforms, this.params);
       applyVegetationClumpFieldParamsToUniforms(this._sharedUniforms, this.params);
-      this._syncAllOverlayClumpFieldUniforms();
     }
 
     this._lastFrameTime = time;
@@ -1366,6 +1393,8 @@ export class BushEffectV2 {
     const out = [];
     for (const entry of this._overlays.values()) {
       if (!entry?.shadowMesh?.visible || !entry.shadowMaterial?.uniforms) continue;
+      const shadowOp = Number(entry.shadowMaterial.uniforms.uShadowOpacity?.value ?? this.params.shadowOpacity ?? 0);
+      if (!(shadowOp > 0.001)) continue;
       out.push({
         mesh: entry.shadowMesh,
         uniforms: entry.shadowMaterial.uniforms,
@@ -1479,7 +1508,6 @@ export class BushEffectV2 {
    * @private
    */
   _syncAllOverlayClumpFieldUniforms() {
-    applyVegetationClumpFieldParamsToUniforms(this._sharedUniforms, this.params);
     for (const entry of this._overlays.values()) {
       syncClumpCoordTextureToOverlayMaterials(entry, entry.clumpCoordTexture ?? null, this.params);
     }
@@ -1493,7 +1521,7 @@ export class BushEffectV2 {
    * @param {{ centerX: number, centerY: number, tileW: number, tileH: number, rotation: number }} placement
    * @private
    */
-  _applyClumpCoordMapForOverlay(tileId, tex, deriveAlpha, placement) {
+  _applyClumpCoordMapForOverlay(tileId, tex, deriveAlpha, placement, imageDataOpts = null) {
     const entry = this._overlays.get(tileId);
     if (!entry) return;
 
@@ -1506,7 +1534,7 @@ export class BushEffectV2 {
       tileW: placement.tileW,
       tileH: placement.tileH,
       rotationRad: Number(placement.rotation) || 0,
-    });
+    }, imageDataOpts);
 
     if (built?.texture) {
       entry.clumpCoordTexture = built.texture;
@@ -1655,6 +1683,7 @@ export class BushEffectV2 {
     this._linkOverlayWindUniforms(shadowUniforms);
 
     const material = new THREE.ShaderMaterial({
+      name: 'BushV2Canopy',
       uniforms,
       vertexShader: /* glsl */`
         uniform float uTime;
@@ -1847,7 +1876,7 @@ ${VEGETATION_BILLBOARD_SHADOW_GLSL}
             return;
           }
 
-          // Pass 1: ground shadow — distorted canopy silhouette, sun-offset, multi-tap blur.
+          // Pass 1: ground shadow - distorted canopy silhouette, sun-offset, multi-tap blur.
           if (uVegetationPass < 1.5) {
             vec2 shadowDir = normalize(vec2(uSunDir.x, -uSunDir.y));
             if (length(shadowDir) < 0.01) shadowDir = -windDir;
@@ -1962,7 +1991,7 @@ ${VEGETATION_BILLBOARD_SHADOW_GLSL}
             return;
           }
 
-          // Pass 2: canopy — bulk sway is vertex displacement; fragment adds tiny flutter only.
+          // Pass 2: canopy - bulk sway is vertex displacement; fragment adds tiny flutter only.
           vec4 bushSample = texture2D(uBushMask, vUv + flutterUv);
           float texA = safeAlpha(bushSample);
           float mainAlpha = texA * uIntensity;
@@ -1992,6 +2021,7 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
     });
 
     const shadowMaterial = new THREE.ShaderMaterial({
+      name: 'BushV2Shadow',
       uniforms: shadowUniforms,
       vertexShader: material.vertexShader,
       fragmentShader: material.fragmentShader,
@@ -2028,61 +2058,54 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
     this._renderBus.addEffectOverlay(`${tileId}_bush_shadow`, shadowMesh, floorIndex);
     this._renderBus.addEffectOverlay(`${tileId}_bush`, mesh, floorIndex);
     const bounds = overlayWorldBounds(centerX, centerY, tileW, tileH);
-    this._overlays.set(tileId, { mesh, shadowMesh, material, shadowMaterial, floorIndex, bounds });
+    this._overlays.set(tileId, {
+      mesh, shadowMesh, material, shadowMaterial, floorIndex, bounds, maskReady: false,
+    });
+    mesh.visible = false;
+    shadowMesh.visible = false;
     this._viewBoundsMayHaveChanged();
-    this._syncOverlayVisibility();
 
     // Load mask texture.
+    const maskLoadQueue = getVegetationMaskLoadQueue(2);
     this._loader.load(url, (tex) => {
       tex.flipY = true;
       // Bush masks carry visible color data, so sample in sRGB for correct contrast.
       if ('colorSpace' in tex && THREE?.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
       else if ('encoding' in tex && THREE?.sRGBEncoding) tex.encoding = THREE.sRGBEncoding;
       tex.needsUpdate = true;
-      if (this._overlays.has(tileId)) {
-        material.uniforms.uBushMask.value = tex;
-        shadowMaterial.uniforms.uBushMask.value = tex;
-        const derive = this._detectDerivedAlpha(tex);
+      if (!this._overlays.has(tileId)) {
+        try { tex.dispose(); } catch (_) {}
+        return;
+      }
+      material.uniforms.uBushMask.value = tex;
+      shadowMaterial.uniforms.uBushMask.value = tex;
+      const liveEntry = this._overlays.get(tileId);
+      if (liveEntry) {
+        liveEntry.maskReady = true;
+        this._syncOverlayVisibility();
+      }
+      maskLoadQueue.enqueue(() => {
+        if (!this._overlays.has(tileId)) return;
+        const maskRead = readMaskImageData(tex, VEGETATION_MASK_READ_MAX_DIM);
+        const derive = maskRead
+          ? detectDerivedAlphaFromImageData(maskRead.data, maskRead.width, maskRead.height)
+          : false;
         this._deriveAlphaByTileId.set(tileId, derive);
         material.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
         shadowMaterial.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
         this._applyClumpCoordMapForOverlay(tileId, tex, derive, {
           centerX, centerY, tileW, tileH, rotation,
-        });
+        }, maskRead);
         try {
           const entry = this._overlays.get(tileId);
           if (entry?.shadowMesh && entry?.mesh) {
             this._applyBushOverlayRenderOrders(entry.shadowMesh, entry.mesh, floorIndex, tileId);
           }
         } catch (_) {}
-      } else {
-        try { tex.dispose(); } catch (_) {}
-      }
+      }).catch(() => {});
     }, undefined, (err) => {
       log.warn(`BushEffectV2: failed to load mask for ${tileId}: ${url}`, err);
     });
-  }
-
-  _detectDerivedAlpha(texture) {
-    try {
-      const img = texture?.image;
-      if (!img) return false;
-
-      const sampleSize = 64;
-      const canvasEl = document.createElement('canvas');
-      canvasEl.width = sampleSize;
-      canvasEl.height = sampleSize;
-      const ctx = canvasEl.getContext('2d');
-      if (!ctx) return false;
-      ctx.drawImage(img, 0, 0, sampleSize, sampleSize);
-      const data = ctx.getImageData(0, 0, sampleSize, sampleSize).data;
-      for (let i = 3; i < data.length; i += 4) {
-        if (data[i] < 250) return false;
-      }
-      return true;
-    } catch (_err) {
-      return false;
-    }
   }
 
   _getSafeVisibleMaxFloorIndex() {
@@ -2138,14 +2161,18 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
     for (const entry of this._overlays.values()) {
       const floorOk = this._enabled && Number(entry.floorIndex) <= maxFloor;
       const viewOk = !view || tileBoundsIntersectView(entry.bounds, view);
-      const visible = floorOk && viewOk;
-      if (entry?.mesh) {
-        entry.mesh.visible = visible;
-        applyVegetationAboveWaterLayer(entry.mesh, {});
-      }
-      if (entry?.shadowMesh) {
-        entry.shadowMesh.visible = visible;
-        applyVegetationAboveWaterLayer(entry.shadowMesh, {});
+      const maskReady = entry.maskReady === true;
+      const visible = floorOk && viewOk && maskReady;
+      if (entry._lastSyncedVisible !== visible) {
+        entry._lastSyncedVisible = visible;
+        if (entry?.mesh) {
+          entry.mesh.visible = visible;
+          applyVegetationAboveWaterLayer(entry.mesh, {});
+        }
+        if (entry?.shadowMesh) {
+          entry.shadowMesh.visible = visible;
+          applyVegetationAboveWaterLayer(entry.shadowMesh, {});
+        }
       }
     }
   }

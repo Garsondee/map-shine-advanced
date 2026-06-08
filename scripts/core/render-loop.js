@@ -98,9 +98,14 @@ export class RenderLoop {
   }
 
   _pixiCameraFromCoordinator(fcState, stage) {
-    const sx = stage?.pivot?.x;
-    const sy = stage?.pivot?.y;
-    const sz = stage?.scale?.x;
+    const sx = Number(stage?.pivot?.x);
+    const sy = Number(stage?.pivot?.y);
+    const sz = Number(stage?.scale?.x);
+    // Live stage pivot is authoritative during bridge pan — FrameCoordinator
+    // snapshots lag direct pointer writes by up to one PIXI tick.
+    if (Number.isFinite(sx) && Number.isFinite(sy) && Number.isFinite(sz)) {
+      return { x: sx, y: sy, zoom: sz };
+    }
     const fx = fcState?.cameraX;
     const fy = fcState?.cameraY;
     const fz = fcState?.zoom;
@@ -232,11 +237,10 @@ export class RenderLoop {
     if (inCinematicMode) return { targetFps: 120, tier: 'cinematic' };
 
     if (cameraActive || this._forceNextRender || this._presentationDueImmediately) {
-      // Rapid pan at 60 Active FPS often exceeds 16.6ms GPU budget (~18ms presents).
-      // Cap to Presentation FPS during navigation for steady spacing (e.g. 30Hz / 33ms).
+      // Pan/zoom must present at active FPS — capping to presentation FPS left the
+      // Three layer updating slower than pointer input and caused visible jerk.
       if (isCameraNavigationActive()) {
-        const navCap = Math.min(fps.activeFps, fps.presentationFps);
-        return { targetFps: navCap, tier: 'navigation' };
+        return { targetFps: fps.activeFps, tier: 'navigation' };
       }
       return { targetFps: fps.activeFps, tier: 'active' };
     }
@@ -335,7 +339,11 @@ export class RenderLoop {
     });
     const intervalMs = 1000 / Math.max(1, targetFps);
     const dueByTime = sinceLastPresentMs >= intervalMs;
-    const shouldPresent = dueByTime || this._presentationDueImmediately || this._forceNextRender;
+    const navigationActive = isCameraNavigationActive();
+    const shouldPresent = dueByTime
+      || this._presentationDueImmediately
+      || this._forceNextRender
+      || navigationActive;
 
     return {
       shouldPresent,
@@ -601,6 +609,16 @@ export class RenderLoop {
           });
 
           if (!gate.shouldPresent && !pendingPixiToken) {
+            // Keep PIXI→Three camera sync current even when the heavy compositor
+            // present is gated (e.g. continuous effects at presentation tier).
+            if (gate.cameraChanged || isCameraNavigationActive()) {
+              try {
+                const wallDelta = Math.max(0, Math.min((now - this.lastFrameTime) / 1000, 0.1));
+                this.effectComposer.tickCameraPipeline?.(wallDelta, timeInfo);
+                const { pixiPivotX, pixiPivotY, pixiZoom } = this._detectCameraChanged();
+                this._cacheCameraState(pixiPivotX, pixiPivotY, pixiZoom);
+              } catch (_) {}
+            }
             if (tickToken != null) {
               perfRecorder.endTick(tickToken, {
                 presented: false,

@@ -360,7 +360,7 @@ export class PixiInputBridge {
    * @returns {{width:number, height:number}}
    */
   _getViewportSize() {
-    const rect = canvas?.app?.view?.getBoundingClientRect?.();
+    const rect = this._getInputViewportRect();
     if (rect && rect.width > 0 && rect.height > 0) {
       return { width: rect.width, height: rect.height };
     }
@@ -405,6 +405,20 @@ export class PixiInputBridge {
     const vp = this._getViewportSize();
     canvas.stage.position.x = vp.width * 0.5;
     canvas.stage.position.y = vp.height * 0.5;
+
+    try {
+      const scene = canvas?.scene;
+      if (scene) {
+        const prev = scene._viewPosition;
+        scene._viewPosition = {
+          x: view.x,
+          y: view.y,
+          scale: view.scale,
+          level: prev?.level ?? 0,
+        };
+      }
+    } catch (_) {
+    }
 
     this._applyingBridgePan = true;
     try {
@@ -469,6 +483,11 @@ export class PixiInputBridge {
    * @private
    */
   _advanceSmoothing(dt) {
+    if (this._isDragging) {
+      this._smoothTargetView = null;
+      this._smoothTargetSource = null;
+      return;
+    }
     if (!this.enabled || this._isInputBlocked()) {
       this._smoothTargetView = null;
       this._smoothTargetSource = null;
@@ -527,6 +546,16 @@ export class PixiInputBridge {
     if (!view) return;
     const constrained = this._applyExternalViewConstraint(view, source);
     if (!constrained) return;
+
+    // Active drag: apply immediately — smoothing only runs on compositor presents
+    // and reads as lag/jerk when combined with presentation pacing.
+    if (this._isDragging && source === 'pan') {
+      this._smoothTargetView = null;
+      this._smoothTargetSource = null;
+      this._applyView(constrained);
+      this._bumpRenderLoop(200);
+      return;
+    }
 
     if (!this._isSmoothingEnabled()) {
       this._smoothTargetView = null;
@@ -594,6 +623,8 @@ export class PixiInputBridge {
         this._pendingRightDrag = false;
         this._rightDragStartPos = null;
         this._isDragging = true;
+        this._smoothTargetView = null;
+        this._smoothTargetSource = null;
         this._lastMousePos = { x: event.clientX, y: event.clientY };
         this.threeCanvas.style.cursor = 'grabbing';
         this._bumpRenderLoop(500);
@@ -605,7 +636,7 @@ export class PixiInputBridge {
 
     if (!this._isDragging || !this._lastMousePos) return;
 
-    const baseView = this._getInputReferenceView();
+    const baseView = this._getStageView();
     if (!baseView) return;
     
     const deltaX = event.clientX - this._lastMousePos.x;

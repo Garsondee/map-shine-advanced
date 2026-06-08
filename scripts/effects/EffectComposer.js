@@ -1291,6 +1291,30 @@ export class EffectComposer {
   }
 
   /**
+   * Advance the camera pipeline without a full compositor present.
+   * Used while presentation pacing skips heavy GPU work but PIXI pivot moved.
+   *
+   * @param {number} [deltaTime] - Wall-clock seconds since last tick
+   * @param {object|null} [timeInfo] - TimeManager snapshot (optional)
+   */
+  tickCameraPipeline(deltaTime, timeInfo = null) {
+    const info = timeInfo ?? this.timeManager?.getTimeInfo?.() ?? null;
+    if (!info) return;
+
+    const schedulerDelta = Number.isFinite(deltaTime)
+      ? Math.max(0, Math.min(deltaTime, 0.1))
+      : Math.max(0, Number(info.delta) || 0);
+
+    this._runUpdatablesPhase('camera', schedulerDelta, info, false, false, null, null);
+
+    try {
+      const frameState = getGlobalFrameState();
+      const sceneComposer = window.MapShine?.sceneComposer;
+      frameState.update(this.camera, sceneComposer, canvas, info.frameCount, info.delta);
+    } catch (_) {}
+  }
+
+  /**
    * Set the depth pass manager reference for debug overlay rendering.
    * @param {import('../scene/depth-pass-manager.js').DepthPassManager|null} manager
    */

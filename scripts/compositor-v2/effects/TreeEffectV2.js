@@ -126,6 +126,15 @@ import {
   linkVegetationWindLayerUniforms,
   TREE_WIND_LAYER_DEFAULTS,
 } from './vegetation-wind-params.js';
+import {
+  probeVegetationMaskPathsBatch,
+  readMaskImageData,
+  detectDerivedAlphaFromImageData,
+  buildAlphaSampleCache,
+  VEGETATION_MASK_READ_MAX_DIM,
+  getVegetationMaskLoadQueue,
+  yieldVegetationPopulateFrame,
+} from './vegetation-mask-load.js';
 
 const log = createLogger('TreeEffectV2');
 
@@ -202,6 +211,10 @@ export class TreeEffectV2 {
 
     /** @type {'idle'|'searching'|'found'|'missing'} */
     this._maskDiscoveryPhase = 'idle';
+    /** Per-frame cache for per-tile hover-hidden lookups. */
+    this._frameHoverHiddenByTileId = new Map();
+    /** Cached roof-mask uniform bind signature. */
+    this._roofMaskUniformSig = '';
 
     // Public params — tuned for high-canopy motion; optional turbulence on by default.
     this.params = {
@@ -983,11 +996,30 @@ export class TreeEffectV2 {
         bgEntries.push({ src, floorIndex, key });
       }
     }
+    const tileDocs = canvas?.scene?.tiles?.contents ?? [];
+    const probePaths = [];
+    for (const bg of bgEntries) {
+      if (!bg.src) continue;
+      probePaths.push(bg.src.replace(/\.[^.]+$/, ''));
+    }
+    for (const tileDoc of tileDocs) {
+      const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
+      if (!src) continue;
+      probePaths.push(src.replace(/\.[^.]+$/, ''));
+    }
+    const maskUrls = await probeVegetationMaskPathsBatch(
+      probePaths,
+      (basePath, suffix) => this._probeMask(basePath, suffix),
+      '_Tree',
+      this._negativeCache,
+    );
+
+    let spawnIdx = 0;
     for (const bg of bgEntries) {
       const bgSrc = bg.src;
       if (!bgSrc) continue;
       const basePath = bgSrc.replace(/\.[^.]+$/, '');
-      const url = await this._probeMask(basePath, '_Tree');
+      const url = maskUrls.get(basePath);
       if (!url) continue;
       const centerX = sceneX + sceneW / 2;
       const centerY = worldH - (sceneY + sceneH / 2);
@@ -995,16 +1027,16 @@ export class TreeEffectV2 {
       const tileH = sceneH;
       const z = GROUND_Z - 1 + TREE_Z_OFFSET;
       this._createOverlay(bg.key, bg.floorIndex, { url, centerX, centerY, z, tileW, tileH, rotation: 0 });
+      spawnIdx += 1;
+      if (spawnIdx % 2 === 0) await yieldVegetationPopulateFrame();
     }
 
-    // Tiles
-    const tileDocs = canvas?.scene?.tiles?.contents ?? [];
     for (const tileDoc of tileDocs) {
       const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
       if (!src) continue;
 
       const basePath = src.replace(/\.[^.]+$/, '');
-      const url = await this._probeMask(basePath, '_Tree');
+      const url = maskUrls.get(basePath);
       if (!url) continue;
 
       const floorIndex = this._resolveFloorIndex(tileDoc, floors);
@@ -1018,6 +1050,8 @@ export class TreeEffectV2 {
       if (!tileId) continue;
 
       this._createOverlay(tileId, floorIndex, { url, centerX, centerY, z, tileW, tileH, rotation });
+      spawnIdx += 1;
+      if (spawnIdx % 2 === 0) await yieldVegetationPopulateFrame();
     }
 
     this._resetAllOverlayHoverAndStacking();
@@ -1142,7 +1176,6 @@ export class TreeEffectV2 {
       applyVegetationPaintedShadowParamsToUniforms(this._sharedUniforms, this.params);
       applyVegetationLandscapeLightningParamsToUniforms(this._sharedUniforms, this.params);
       applyVegetationClumpFieldParamsToUniforms(this._sharedUniforms, this.params);
-      this._syncAllOverlayClumpFieldUniforms();
     }
 
     this._advanceHoverFadeUniforms(delta);
@@ -1258,8 +1291,19 @@ export class TreeEffectV2 {
    * @param {number} delta
    * @private
    */
+  _resolveTileHoverHidden(tileId, hoverCache) {
+    if (this._hoverHidden) return true;
+    if (!tileId || String(tileId).startsWith('__')) return false;
+    if (hoverCache.has(tileId)) return hoverCache.get(tileId);
+    const hidden = this._isTileHoverHiddenOnActiveScene(tileId);
+    hoverCache.set(tileId, hidden);
+    return hidden;
+  }
+
   _advanceHoverFadeUniforms(delta) {
     const stepDelta = Number.isFinite(delta) ? delta : 0.016;
+    const hoverCache = this._frameHoverHiddenByTileId;
+    hoverCache.clear();
     // Warmup/populate paths freeze delta — snap instead of leaving _hoverFadeInProgress stuck.
     if (stepDelta <= 1e-6) {
       for (const [tileId, entry] of this._overlays) {
@@ -1267,7 +1311,7 @@ export class TreeEffectV2 {
         const shadowHoverUniform = entry?.shadowMaterial?.uniforms?.uHoverFade;
         const shadowCanopyFadeUniform = entry?.shadowMaterial?.uniforms?.uCanopyHoverFade;
         if (!hoverUniform) continue;
-        const hoverHidden = this._hoverHidden || this._isTileHoverHiddenOnActiveScene(tileId);
+        const hoverHidden = this._resolveTileHoverHidden(tileId, hoverCache);
         const targetFade = hoverHidden ? 0.0 : 1.0;
         hoverUniform.value = targetFade;
         if (shadowHoverUniform) shadowHoverUniform.value = 1.0;
@@ -1287,7 +1331,7 @@ export class TreeEffectV2 {
       const shadowCanopyFadeUniform = entry?.shadowMaterial?.uniforms?.uCanopyHoverFade;
       if (!hoverUniform) continue;
 
-      const hoverHidden = this._hoverHidden || this._isTileHoverHiddenOnActiveScene(tileId);
+      const hoverHidden = this._resolveTileHoverHidden(tileId, hoverCache);
       const targetFade = hoverHidden ? 0.0 : 1.0;
       const currentFade = Number.isFinite(hoverUniform.value) ? hoverUniform.value : targetFade;
       const diff = targetFade - currentFade;
@@ -1520,6 +1564,8 @@ export class TreeEffectV2 {
     this._alphaSampleByTileId.clear();
     this._hoverHidden = false;
     this._hoverFadeInProgress = false;
+    this._frameHoverHiddenByTileId.clear();
+    this._roofMaskUniformSig = '';
     this._lastFoundrySceneData = null;
     this._edgeSafetyBoundsSignature = '';
     this._maskDiscoveryPhase = 'missing';
@@ -1587,6 +1633,8 @@ export class TreeEffectV2 {
     const out = [];
     for (const entry of this._overlays.values()) {
       if (!entry?.shadowMesh?.visible || !entry.shadowMaterial?.uniforms) continue;
+      const shadowOp = Number(entry.shadowMaterial.uniforms.uShadowOpacity?.value ?? this.params.shadowOpacity ?? 0);
+      if (!(shadowOp > 0.001)) continue;
       out.push({
         mesh: entry.shadowMesh,
         uniforms: entry.shadowMaterial.uniforms,
@@ -1752,7 +1800,6 @@ export class TreeEffectV2 {
    * @private
    */
   _syncAllOverlayClumpFieldUniforms() {
-    applyVegetationClumpFieldParamsToUniforms(this._sharedUniforms, this.params);
     for (const entry of this._overlays.values()) {
       syncClumpCoordTextureToOverlayMaterials(entry, entry.clumpCoordTexture ?? null, this.params);
     }
@@ -1766,7 +1813,7 @@ export class TreeEffectV2 {
    * @param {{ centerX: number, centerY: number, tileW: number, tileH: number, rotation: number }} placement
    * @private
    */
-  _applyClumpCoordMapForOverlay(tileId, tex, deriveAlpha, placement) {
+  _applyClumpCoordMapForOverlay(tileId, tex, deriveAlpha, placement, imageDataOpts = null) {
     const entry = this._overlays.get(tileId);
     if (!entry) return;
 
@@ -1779,7 +1826,7 @@ export class TreeEffectV2 {
       tileW: placement.tileW,
       tileH: placement.tileH,
       rotationRad: Number(placement.rotation) || 0,
-    });
+    }, imageDataOpts);
 
     if (built?.texture) {
       entry.clumpCoordTexture = built.texture;
@@ -1822,6 +1869,15 @@ export class TreeEffectV2 {
     const hasRoofAlphaMap = !!roofAlphaTexture;
     const hasRoofBlockMap = !!roofBlockTexture;
     const roofHardBlockEnabled = hasRoofAlphaMap && hasRoofBlockMap;
+    const sig = [
+      roofAlphaTexture?.uuid ?? '0',
+      roofBlockTexture?.uuid ?? '0',
+      screenWidth,
+      screenHeight,
+      roofHardBlockEnabled ? 1 : 0,
+    ].join('|');
+    if (sig === this._roofMaskUniformSig) return;
+    this._roofMaskUniformSig = sig;
 
     this._sharedUniforms.uRoofAlphaMap.value = roofAlphaTexture;
     this._sharedUniforms.uRoofBlockMap.value = roofBlockTexture;
@@ -1978,6 +2034,7 @@ export class TreeEffectV2 {
     this._linkOverlayWindUniforms(shadowUniforms);
 
     const material = new THREE.ShaderMaterial({
+      name: 'TreeV2Canopy',
       uniforms,
       vertexShader: /* glsl */`
         uniform float uTime;
@@ -2185,7 +2242,7 @@ ${VEGETATION_BILLBOARD_SHADOW_GLSL}
             return;
           }
 
-          // Pass 1: ground shadow — distorted canopy silhouette, sun-offset, multi-tap blur.
+          // Pass 1: ground shadow - distorted canopy silhouette, sun-offset, multi-tap blur.
           if (uVegetationPass < 1.5) {
             vec2 shadowDir = normalize(vec2(uSunDir.x, -uSunDir.y));
             if (length(shadowDir) < 0.01) shadowDir = -globalWindDir;
@@ -2296,7 +2353,7 @@ ${VEGETATION_BILLBOARD_SHADOW_GLSL}
             return;
           }
 
-          // Pass 2: canopy — bulk sway is vertex displacement; fragment adds tiny flutter only.
+          // Pass 2: canopy - bulk sway is vertex displacement; fragment adds tiny flutter only.
           vec4 treeSample = texture2D(uTreeMask, vUv + flutterUv);
           float texA = safeAlpha(treeSample);
           float hf = clamp(uHoverFade, 0.0, 1.0);
@@ -2345,6 +2402,7 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
     });
 
     const shadowMaterial = new THREE.ShaderMaterial({
+      name: 'TreeV2Shadow',
       uniforms: shadowUniforms,
       vertexShader: material.vertexShader,
       fragmentShader: material.fragmentShader,
@@ -2395,11 +2453,14 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
       floorIndex,
       bounds,
       maskLoadSerial,
+      maskReady: false,
     });
+    mesh.visible = false;
+    shadowMesh.visible = false;
     this._viewBoundsMayHaveChanged();
-    this._syncOverlayVisibility();
 
     // Load mask texture.
+    const maskLoadQueue = getVegetationMaskLoadQueue(2);
     this._loader.load(url, (tex) => {
       if (populateGen !== this._populateGeneration) {
         try { tex.dispose(); } catch (_) {}
@@ -2420,64 +2481,40 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
       tex.needsUpdate = true;
       material.uniforms.uTreeMask.value = tex;
       shadowMaterial.uniforms.uTreeMask.value = tex;
-      const derive = this._detectDerivedAlpha(tex);
-      this._deriveAlphaByTileId.set(tileId, derive);
-      material.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
-      shadowMaterial.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
-      this._cacheAlphaSamples(tileId, tex);
-      this._applyClumpCoordMapForOverlay(tileId, tex, derive, {
-        centerX, centerY, tileW, tileH, rotation,
-      });
-      try {
-        if (entry?.shadowMesh && entry?.mesh) {
-          this._applyTreeOverlayRenderOrders(entry.shadowMesh, entry.mesh, tileId, floorIndex);
+      entry.maskReady = true;
+      this._syncOverlayVisibility();
+      maskLoadQueue.enqueue(() => {
+        if (populateGen !== this._populateGeneration) return;
+        const liveEntry = this._overlays.get(tileId);
+        if (!liveEntry
+          || liveEntry.maskLoadSerial !== maskLoadSerial
+          || liveEntry.material !== material
+          || liveEntry.shadowMaterial !== shadowMaterial) return;
+        const maskRead = readMaskImageData(tex, VEGETATION_MASK_READ_MAX_DIM);
+        const derive = maskRead
+          ? detectDerivedAlphaFromImageData(maskRead.data, maskRead.width, maskRead.height)
+          : false;
+        this._deriveAlphaByTileId.set(tileId, derive);
+        material.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
+        shadowMaterial.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
+        if (maskRead) {
+          this._alphaSampleByTileId.set(
+            tileId,
+            buildAlphaSampleCache(maskRead.data, maskRead.width, maskRead.height),
+          );
         }
-      } catch (_) {}
+        this._applyClumpCoordMapForOverlay(tileId, tex, derive, {
+          centerX, centerY, tileW, tileH, rotation,
+        }, maskRead);
+        try {
+          if (liveEntry?.shadowMesh && liveEntry?.mesh) {
+            this._applyTreeOverlayRenderOrders(liveEntry.shadowMesh, liveEntry.mesh, tileId, floorIndex);
+          }
+        } catch (_) {}
+      }).catch(() => {});
     }, undefined, (err) => {
       log.warn(`TreeEffectV2: failed to load mask for ${tileId}: ${url}`, err);
     });
-  }
-
-  _detectDerivedAlpha(texture) {
-    try {
-      const img = texture?.image;
-      if (!img) return false;
-
-      const sampleSize = 64;
-      const canvasEl = document.createElement('canvas');
-      canvasEl.width = sampleSize;
-      canvasEl.height = sampleSize;
-      const ctx = canvasEl.getContext('2d');
-      if (!ctx) return false;
-      ctx.drawImage(img, 0, 0, sampleSize, sampleSize);
-      const data = ctx.getImageData(0, 0, sampleSize, sampleSize).data;
-      for (let i = 3; i < data.length; i += 4) {
-        if (data[i] < 250) return false;
-      }
-      return true;
-    } catch (_err) {
-      return false;
-    }
-  }
-
-  _cacheAlphaSamples(tileId, texture) {
-    try {
-      const img = texture?.image;
-      if (!img) return;
-
-      const width = Number(img.naturalWidth || img.videoWidth || img.width || 0);
-      const height = Number(img.naturalHeight || img.videoHeight || img.height || 0);
-      if (!(width > 0 && height > 0)) return;
-
-      const canvasEl = document.createElement('canvas');
-      canvasEl.width = width;
-      canvasEl.height = height;
-      const ctx = canvasEl.getContext('2d');
-      if (!ctx) return;
-      ctx.drawImage(img, 0, 0, width, height);
-      const data = ctx.getImageData(0, 0, width, height).data;
-      this._alphaSampleByTileId.set(tileId, { width, height, data });
-    } catch (_) {}
   }
 
   _getSafeVisibleMaxFloorIndex() {
@@ -2515,14 +2552,18 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
     for (const entry of this._overlays.values()) {
       const floorOk = this._enabled && Number(entry.floorIndex) <= maxFloor;
       const viewOk = !view || tileBoundsIntersectView(entry.bounds, view);
-      const visible = floorOk && viewOk;
-      if (entry?.mesh) {
-        entry.mesh.visible = visible;
-        applyVegetationAboveWaterLayer(entry.mesh, { retainWeatherRoofLayer: true });
-      }
-      if (entry?.shadowMesh) {
-        entry.shadowMesh.visible = visible;
-        applyVegetationAboveWaterLayer(entry.shadowMesh, {});
+      const maskReady = entry.maskReady === true;
+      const visible = floorOk && viewOk && maskReady;
+      if (entry._lastSyncedVisible !== visible) {
+        entry._lastSyncedVisible = visible;
+        if (entry?.mesh) {
+          entry.mesh.visible = visible;
+          applyVegetationAboveWaterLayer(entry.mesh, { retainWeatherRoofLayer: true });
+        }
+        if (entry?.shadowMesh) {
+          entry.shadowMesh.visible = visible;
+          applyVegetationAboveWaterLayer(entry.shadowMesh, {});
+        }
       }
     }
   }

@@ -855,6 +855,8 @@ export class FloorCompositor {
     this._blitQuad = null;
     /** @type {THREE.WebGLRenderTarget|null} Half-res scratch for vegetation ground shadows */
     this._vegetationShadowHalfRT = null;
+    /** @type {THREE.WebGLRenderTarget|null} Half-res HDR scratch for zoomed-out canopy draws */
+    this._vegetationCanopyHalfRT = null;
     /** @type {THREE.Scene|null} Premultiplied-alpha upsample for vegetation shadows */
     this._vegetationShadowBlitScene = null;
     /** @type {THREE.OrthographicCamera|null} */
@@ -1531,19 +1533,87 @@ export class FloorCompositor {
     }
 
     if (canopyDrawGroups.length > 0) {
-      drew = this._compositeBusOverlayVisibilityGate(
-        renderer,
-        targetRT,
-        this._getVegetationOverlayRoots(),
-        {
-          vegetationOnly: true,
-          profileDrawGroups: canopyDrawGroups,
-          profileSpanPrefix: 'postBloom.worldOverlays.vegetation',
-        },
-      ) || drew;
+      // Zoomed out, canopy texels are heavily minified anyway — render at half
+      // res and alpha-upsample to cut canopy fill rate ~4× (mirrors shadow path).
+      const canopyHalfRT = this._shouldUseHalfResVegetationCanopy()
+        ? this._ensureVegetationCanopyHalfRT(renderer)
+        : null;
+      if (canopyHalfRT) {
+        const canopyDrew = this._compositeBusOverlayVisibilityGate(
+          renderer,
+          canopyHalfRT,
+          this._getVegetationOverlayRoots(),
+          {
+            vegetationOnly: true,
+            profileDrawGroups: canopyDrawGroups,
+            profileSpanPrefix: 'postBloom.worldOverlays.vegetation',
+            clearTransparent: true,
+          },
+        );
+        if (canopyDrew) {
+          this._blitVegetationShadowHalfToTarget(renderer, canopyHalfRT, targetRT);
+          drew = true;
+        }
+      } else {
+        drew = this._compositeBusOverlayVisibilityGate(
+          renderer,
+          targetRT,
+          this._getVegetationOverlayRoots(),
+          {
+            vegetationOnly: true,
+            profileDrawGroups: canopyDrawGroups,
+            profileSpanPrefix: 'postBloom.worldOverlays.vegetation',
+          },
+        ) || drew;
+      }
     }
 
     return drew;
+  }
+
+  /**
+   * Half-res canopy only when the map is minified enough that the upsample is
+   * invisible (PIXI stage scale ≤ 0.5 ⇒ each scene px covers ≤ half a screen px).
+   * Escape hatch: `window.MapShine.__msaDisableHalfResVegetationCanopy = true`.
+   * @returns {boolean}
+   * @private
+   */
+  _shouldUseHalfResVegetationCanopy() {
+    if (window.MapShine?.__msaDisableHalfResVegetationCanopy === true) return false;
+    const zoom = Number(globalThis.canvas?.stage?.scale?.x);
+    return Number.isFinite(zoom) && zoom <= 0.5;
+  }
+
+  /**
+   * Half-res HDR scratch RT for zoomed-out canopy draws. HalfFloat (unlike the
+   * byte shadow RT) so bright canopy values survive the pre-CC HDR composite.
+   * @param {THREE.WebGLRenderer} renderer
+   * @returns {THREE.WebGLRenderTarget|null}
+   * @private
+   */
+  _ensureVegetationCanopyHalfRT(renderer) {
+    const THREE = window.THREE;
+    if (!THREE || !renderer) return null;
+    const v = this._drawingBufferSizeTmp || (this._drawingBufferSizeTmp = new THREE.Vector2());
+    renderer.getDrawingBufferSize(v);
+    const w = Math.max(2, Math.floor(Number(v.x) / 2) || 2);
+    const h = Math.max(2, Math.floor(Number(v.y) / 2) || 2);
+    if (!this._vegetationCanopyHalfRT) {
+      this._vegetationCanopyHalfRT = new THREE.WebGLRenderTarget(w, h, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.HalfFloatType,
+        depthBuffer: false,
+        stencilBuffer: false,
+        colorSpace: THREE.NoColorSpace,
+      });
+      this._vegetationCanopyHalfRT.texture.name = 'MapShineVegetationCanopyHalf';
+      this._vegetationCanopyHalfRT.texture.flipY = false;
+    } else if (this._vegetationCanopyHalfRT.width !== w || this._vegetationCanopyHalfRT.height !== h) {
+      this._vegetationCanopyHalfRT.setSize(w, h);
+    }
+    return this._vegetationCanopyHalfRT;
   }
 
   /**
@@ -2888,7 +2958,8 @@ export class FloorCompositor {
       // Shader overlay effects (bush, tree, fluid, iridescence, prism) advance uTime on
       // presented frames only — presentation pacing owns their steady-state rate.
       if (this._weatherNeedsContinuousRender()) {
-        reason = 'weather:precip-or-ash';
+        reason = this._weatherParticles?.getContinuousRenderReason?.()
+          ?? 'weather:precip-or-ash';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
@@ -3022,7 +3093,17 @@ export class FloorCompositor {
         if (fireFloorCount > 1) {
           return presentationFps;
         }
-        // Match active presentation tier so Quarks particles stay smooth on high-refresh displays.
+        // When sustained present gaps exceed ~2× the 60 Hz budget, cap continuous tier
+        // so we do not target 60 Hz while GPU-bound (widens gaps without smoother motion).
+        try {
+          const sinceLastPresent = Number(window.MapShine?.__presentationState?.sinceLastPresentMs);
+          if (Number.isFinite(sinceLastPresent) && sinceLastPresent > 33) {
+            const presentationFps = Number(window.MapShine?.renderPresentationFps);
+            if (Number.isFinite(presentationFps) && presentationFps >= 8) {
+              return Math.max(8, Math.floor(presentationFps));
+            }
+          }
+        } catch (_) {}
         const active = Number(window.MapShine?.renderActiveFps);
         return Number.isFinite(active) && active > 0 ? active : 60;
       }
@@ -7453,6 +7534,12 @@ export class FloorCompositor {
     if (this._sceneRT) this._sceneRT.setSize(w, h);
     if (this._postA)   this._postA.setSize(w, h);
     if (this._postB)   this._postB.setSize(w, h);
+    if (this._vegetationCanopyHalfRT) {
+      this._vegetationCanopyHalfRT.setSize(
+        Math.max(2, Math.floor(w / 2)),
+        Math.max(2, Math.floor(h / 2)),
+      );
+    }
     if (this._vegetationShadowHalfRT) {
       this._vegetationShadowHalfRT.setSize(
         Math.max(2, Math.floor(w / 2)),
@@ -8969,6 +9056,7 @@ export class FloorCompositor {
       if (_profiling) _profileT0 = performance.now();
       const outdoorsForBloom = stackedOutdoorsForPostMerge ?? null;
       this._bloomEffect?.setOutdoorsMask?.(outdoorsForBloom ?? null);
+      this._bloomEffect?.setFogClipBindings?.(this._fogEffect?.getBloomClipBindings?.() ?? null);
       this._profileEffectCall('bloom.postMerge', 'render', () => {
         bloomWrote = !!this._bloomEffect.render(
           this.renderer, mergedCompositeOut, bloomOut, this.camera,
@@ -9289,6 +9377,7 @@ export class FloorCompositor {
     try { this._blitMaterial?.dispose(); } catch (_) {}
     try { this._blitQuad?.geometry?.dispose(); } catch (_) {}
     try { this._vegetationShadowHalfRT?.dispose(); } catch (_) {}
+    try { this._vegetationCanopyHalfRT?.dispose(); } catch (_) {}
     try { this._vegetationShadowBlitMaterial?.dispose(); } catch (_) {}
     try { this._vegetationShadowBlitQuad?.geometry?.dispose(); } catch (_) {}
     try { this._playerNvMaterial?.dispose(); } catch (_) {}
@@ -9303,6 +9392,7 @@ export class FloorCompositor {
     this._blitMaterial = null;
     this._blitQuad = null;
     this._vegetationShadowHalfRT = null;
+    this._vegetationCanopyHalfRT = null;
     this._vegetationShadowBlitScene = null;
     this._vegetationShadowBlitCamera = null;
     this._vegetationShadowBlitMaterial = null;

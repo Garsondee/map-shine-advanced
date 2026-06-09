@@ -183,8 +183,15 @@ export class FireForcesBehavior {
   /** @private */
   _currentOutdoorFactor(particle, system) {
     const owner = system?.userData?.ownerEffect;
-    if (owner && particle?.position) {
-      return readFireParticleCurrentOutdoor(particle, owner, system);
+    if (owner && particle) {
+      const frameTok = owner._outdoorsMaskFrameToken ?? 0;
+      const cached = particle._msCurrentOutdoorFootprint;
+      if (Number.isFinite(cached) && particle._msOutdoorFrameToken === frameTok) {
+        return clamp01(cached);
+      }
+      if (particle.position) {
+        return readFireParticleCurrentOutdoor(particle, owner, system);
+      }
     }
     const fallback = particle._windSusceptibility;
     return Number.isFinite(fallback) ? clamp01(fallback) : 1.0;
@@ -1873,6 +1880,77 @@ export function resolveFireOutdoorFactor(worldX, worldY, ownerEffect, floorIndex
 }
 
 /**
+ * Footprint sample offsets — 5-tap (center + cardinals) for hot paths; 9-tap at spawn.
+ * @param {number} particleSize
+ * @param {number} [tapCount=9]
+ * @returns {number[][]}
+ */
+function fireFootprintOffsets(particleSize, tapCount = 9) {
+  const r = Math.max(24, Number(particleSize) || 0) * 0.42;
+  if (r <= 1) return [[0, 0]];
+  if (tapCount <= 5) {
+    return [
+      [0, 0],
+      [r, 0],
+      [-r, 0],
+      [0, r],
+      [0, -r],
+    ];
+  }
+  return [
+    [0, 0],
+    [r, 0],
+    [-r, 0],
+    [0, r],
+    [0, -r],
+    [r * 0.72, r * 0.72],
+    [-r * 0.72, r * 0.72],
+    [r * 0.72, -r * 0.72],
+    [-r * 0.72, -r * 0.72],
+  ];
+}
+
+/**
+ * Min outdoors across a particle footprint using a pre-synced floor snapshot.
+ *
+ * @param {object|null|undefined} snap
+ * @param {object|null|undefined} sceneBounds
+ * @param {number} worldX
+ * @param {number} worldY
+ * @param {number} [particleSize=0]
+ * @param {{ tapCount?: number }} [opts]
+ * @returns {number}
+ */
+export function resolveFireOutdoorFootprintMinFromSnapshot(
+  snap,
+  sceneBounds,
+  worldX,
+  worldY,
+  particleSize = 0,
+  opts = {},
+) {
+  if (!Number.isFinite(worldX) || !Number.isFinite(worldY)) return 1.0;
+  const tapCount = opts.tapCount === 5 ? 5 : 9;
+  const offsets = fireFootprintOffsets(particleSize, tapCount);
+  const sampleOpts = { shelterBias: true };
+
+  let minOutdoor = 1.0;
+  let gotSample = false;
+
+  if (snap?.hasOutdoorsMask && snap.outdoorsMaskData && sceneBounds?.sw > 0 && sceneBounds?.sh > 0) {
+    for (const [ox, oy] of offsets) {
+      const s = sampleOutdoorsFromSnapshot(snap, worldX + ox, worldY + oy, sceneBounds, sampleOpts);
+      if (s == null || !Number.isFinite(s)) continue;
+      gotSample = true;
+      if (s < minOutdoor) minOutdoor = s;
+    }
+    if (gotSample) return clamp01(minOutdoor);
+  }
+
+  return 1.0;
+}
+
+/**
  * Min outdoors sample across particle footprint — large billboards can extend indoors
  * while their center still reads outdoor.
  *
@@ -1881,23 +1959,12 @@ export function resolveFireOutdoorFactor(worldX, worldY, ownerEffect, floorIndex
  * @param {number} [particleSize=0]
  * @param {object|null|undefined} ownerEffect
  * @param {number} [floorIndex=0]
+ * @param {{ tapCount?: number }} [opts]
  * @returns {number}
  */
-export function resolveFireOutdoorFootprintMin(worldX, worldY, particleSize, ownerEffect, floorIndex = 0) {
-  const r = Math.max(24, Number(particleSize) || 0) * 0.42;
-  const offsets = (r > 1)
-    ? [
-      [0, 0],
-      [r, 0],
-      [-r, 0],
-      [0, r],
-      [0, -r],
-      [r * 0.72, r * 0.72],
-      [-r * 0.72, r * 0.72],
-      [r * 0.72, -r * 0.72],
-      [-r * 0.72, -r * 0.72],
-    ]
-    : [[0, 0]];
+export function resolveFireOutdoorFootprintMin(worldX, worldY, particleSize, ownerEffect, floorIndex = 0, opts = {}) {
+  const tapCount = opts.tapCount === 5 ? 5 : 9;
+  const offsets = fireFootprintOffsets(particleSize, tapCount);
 
   let minOutdoor = 1.0;
   let gotSample = false;
@@ -1908,6 +1975,20 @@ export function resolveFireOutdoorFootprintMin(worldX, worldY, particleSize, own
     if (s < minOutdoor) minOutdoor = s;
   }
   return gotSample ? clamp01(minOutdoor) : 1.0;
+}
+
+/**
+ * Invalidate per-particle outdoor footprint when the floor outdoors mask token changes.
+ * @param {object|null|undefined} particle
+ * @param {object|null|undefined} ownerEffect
+ */
+export function invalidateFireParticleOutdoorCache(particle, ownerEffect) {
+  if (!particle) return;
+  const frameTok = ownerEffect?._outdoorsMaskFrameToken ?? 0;
+  if (particle._msOutdoorFrameToken !== frameTok) {
+    particle._msCurrentOutdoorFootprint = undefined;
+    particle._msOutdoorFrameToken = frameTok;
+  }
 }
 
 /** @param {object|null|undefined} particle @param {object|null|undefined} system */
@@ -1934,15 +2015,23 @@ function readParticleSpawnOutdoor(particle) {
  * @param {object|null|undefined} [system]
  * @returns {number}
  */
-export function readFireParticleCurrentOutdoor(particle, ownerEffect, system = null) {
+/** @param {number|null|undefined} [footprintSize] Override billboard size used for shelter taps. */
+function readFireParticleOutdoorAtSize(particle, ownerEffect, system, footprintSize = null) {
   if (!particle?.position || !ownerEffect) return readParticleSpawnOutdoor(particle);
+  const size = Number.isFinite(footprintSize) && footprintSize > 0
+    ? footprintSize
+    : particle.size;
   return resolveFireOutdoorFootprintMin(
     particle.position.x,
     particle.position.y,
-    particle.size,
+    size,
     ownerEffect,
     readParticleFloorIndex(particle, system),
   );
+}
+
+export function readFireParticleCurrentOutdoor(particle, ownerEffect, system = null) {
+  return readFireParticleOutdoorAtSize(particle, ownerEffect, system, null);
 }
 
 /**
@@ -1983,9 +2072,18 @@ export function computeFireZoneContainmentMask(spawnOutdoor, currentOutdoor) {
  * @param {number} [indoorSuppression=0] indoorSmokeSuppression / indoorEmberSuppression param
  * @returns {{ spawnOutdoor: number, currentOutdoor: number, zoneMask: number, indoorScale: number, visualMask: number }}
  */
-export function resolveFireParticleVisualMask(particle, ownerEffect, system = null, indoorSuppression = 0) {
+export function resolveFireParticleVisualMask(
+  particle,
+  ownerEffect,
+  system = null,
+  indoorSuppression = 0,
+  currentOutdoorOverride = null,
+  footprintSize = null,
+) {
   const spawnOutdoor = readParticleSpawnOutdoor(particle);
-  const currentOutdoor = readFireParticleCurrentOutdoor(particle, ownerEffect, system);
+  const currentOutdoor = Number.isFinite(currentOutdoorOverride)
+    ? clamp01(currentOutdoorOverride)
+    : readFireParticleOutdoorAtSize(particle, ownerEffect, system, footprintSize);
   const zoneMask = computeFireZoneContainmentMask(spawnOutdoor, currentOutdoor);
   const indoorScale = indoorSuppression > 0
     ? computeIndoorSuppressionScale(indoorSuppression, currentOutdoor)
@@ -2015,12 +2113,15 @@ export function resolveFireParticleVisualMaskSmoothed(
   system = null,
   indoorSuppression = 0,
   smoothRate = 0.14,
+  footprintSize = null,
 ) {
   const target = resolveFireParticleVisualMask(
     particle,
     ownerEffect,
     system,
     indoorSuppression,
+    null,
+    footprintSize,
   ).visualMask;
   return smoothParticleVisualMask(particle, target, smoothRate);
 }
@@ -2032,7 +2133,125 @@ export function readFireParticleAppliedVisualMask(particle) {
 }
 
 /**
- * Update per-particle indoor/outdoor shelter mask after physics or before visual upload.
+ * One 5-tap outdoors footprint + shelter mask update per particle (physics hot path).
+ *
+ * @param {object|null|undefined} particle
+ * @param {object|null|undefined} system
+ * @param {object|null|undefined} ownerEffect
+ * @param {object|null|undefined} snap
+ * @param {object|null|undefined} sceneBounds
+ * @param {{ tapCount?: number, smoothRate?: number }} [opts]
+ * @returns {number}
+ */
+export function syncFireParticleOutdoorFootprint(
+  particle,
+  system,
+  ownerEffect,
+  snap,
+  sceneBounds,
+  opts = {},
+) {
+  if (!particle || particle.died || !ownerEffect) return 1;
+
+  invalidateFireParticleOutdoorCache(particle, ownerEffect);
+
+  const wx = particle.position?.x;
+  const wy = particle.position?.y;
+  if (!Number.isFinite(wx) || !Number.isFinite(wy)) {
+    return readFireParticleAppliedVisualMask(particle);
+  }
+
+  const tapCount = opts.tapCount === 9 ? 9 : 5;
+  const smoothRate = Number.isFinite(opts.smoothRate) ? opts.smoothRate : 0.32;
+  const bounds = sceneBounds ?? resolveFireSceneBounds(ownerEffect);
+
+  const footprint = resolveFireOutdoorFootprintMinFromSnapshot(
+    snap,
+    bounds,
+    wx,
+    wy,
+    particle.size,
+    { tapCount },
+  );
+  particle._msCurrentOutdoorFootprint = footprint;
+  particle._msOutdoorFrameToken = ownerEffect._outdoorsMaskFrameToken ?? 0;
+
+  let indoorSuppression = 0;
+  if (system?.userData?.isSmoke) {
+    indoorSuppression = ownerEffect.params?.indoorSmokeSuppression ?? 0;
+  } else if (system?.userData?.isEmber) {
+    indoorSuppression = ownerEffect.params?.indoorEmberSuppression ?? 0;
+  }
+
+  const { visualMask } = resolveFireParticleVisualMask(
+    particle,
+    ownerEffect,
+    system,
+    indoorSuppression,
+    footprint,
+  );
+  particle._msFireVisualTarget = visualMask;
+  const mask = smoothParticleVisualMask(particle, visualMask, smoothRate);
+  particle._msFireVisualMask = mask;
+  return mask;
+}
+
+/**
+ * Continue shelter mask easing between physics steps (no outdoors re-sample).
+ * @param {object|null|undefined} particle
+ * @param {number} [smoothRate=0.22]
+ * @returns {number}
+ */
+export function smoothFireParticleShelterMaskOnly(particle, smoothRate = 0.22) {
+  if (!particle || particle.died) return 1;
+  const target = particle._msFireVisualTarget;
+  if (!Number.isFinite(target)) {
+    return readFireParticleAppliedVisualMask(particle);
+  }
+  const mask = smoothParticleVisualMask(particle, target, smoothRate);
+  particle._msFireVisualMask = mask;
+  return mask;
+}
+
+/**
+ * Cache outdoors footprint for wind forces only (no visual mask write).
+ * @param {object|null|undefined} particle
+ * @param {object|null|undefined} ownerEffect
+ * @param {object|null|undefined} snap
+ * @param {object|null|undefined} sceneBounds
+ * @param {object|null|undefined} system
+ * @param {{ tapCount?: number }} [opts]
+ */
+export function cacheFireParticleOutdoorFootprintForWind(
+  particle,
+  ownerEffect,
+  snap,
+  sceneBounds,
+  system,
+  opts = {},
+) {
+  if (!particle || particle.died || !ownerEffect) return;
+  invalidateFireParticleOutdoorCache(particle, ownerEffect);
+  const wx = particle.position?.x;
+  const wy = particle.position?.y;
+  if (!Number.isFinite(wx) || !Number.isFinite(wy)) return;
+  const tapCount = opts.tapCount === 5 ? 5 : 9;
+  const bounds = sceneBounds ?? resolveFireSceneBounds(ownerEffect);
+  const footprint = resolveFireOutdoorFootprintMinFromSnapshot(
+    snap,
+    bounds,
+    wx,
+    wy,
+    particle.size,
+    { tapCount },
+  );
+  particle._msCurrentOutdoorFootprint = footprint;
+  particle._msOutdoorFrameToken = ownerEffect._outdoorsMaskFrameToken ?? 0;
+  void system;
+}
+
+/**
+ * Live 9-tap shelter mask update (smoke visual path — matches pre-perf smoothness).
  * @param {object|null|undefined} particle
  * @param {object|null|undefined} system
  * @param {number} [smoothRate=0.28]
@@ -2050,13 +2269,22 @@ export function applyFireShelterMaskToParticle(particle, system, smoothRate = 0.
     indoorSuppression = owner.params?.indoorEmberSuppression ?? 0;
   }
 
-  const mask = resolveFireParticleVisualMaskSmoothed(
+  // Growing smoke billboards widen the outdoors footprint min every frame and can
+  // crush alpha through indoorSmokeSuppression even in open air — sample at spawn size.
+  const footprintSize = system.userData?.isSmoke
+    ? (particle._smokeStartSize ?? particle.size)
+    : particle.size;
+
+  const { visualMask } = resolveFireParticleVisualMask(
     particle,
     owner,
     system,
     indoorSuppression,
-    smoothRate,
+    null,
+    footprintSize,
   );
+  particle._msFireVisualTarget = visualMask;
+  const mask = smoothParticleVisualMask(particle, visualMask, smoothRate);
   particle._msFireVisualMask = mask;
   return mask;
 }

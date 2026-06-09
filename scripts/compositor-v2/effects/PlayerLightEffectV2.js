@@ -6,6 +6,7 @@ import {
   NV_POST_PLAYER_LIGHT_MODES
 } from '../../core/player-light-allowance.js';
 import { createLogger } from '../../core/log.js';
+import { tagQuarkSystem } from '../../core/quark-diagnostics.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
 import Coordinates from '../../utils/coordinates.js';
 import { readWallHeightFlags } from '../../foundry/levels-scene-flags.js';
@@ -3231,6 +3232,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     system.userData = system.userData || {};
     system.userData.windInfluence = 0.25;
     system.userData._msTorchUpdraft = buoyancy;
+    tagQuarkSystem(system, 'playerLightTorch', 'torch/flame');
 
     this._torchParticleSystem = system;
     this._registerTorchParticleSystem(system);
@@ -3333,6 +3335,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     system.userData = system.userData || {};
     system.userData.windInfluence = 0.45;
     system.userData._msTorchUpdraft = updraft;
+    tagQuarkSystem(system, 'playerLightTorch', 'torch/sparks');
 
     this._torchSparksSystem = system;
     this._registerTorchParticleSystem(system);

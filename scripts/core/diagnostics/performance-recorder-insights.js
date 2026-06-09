@@ -540,6 +540,16 @@ export function buildPerformanceInsights(snapshot, frames = [], ticks = []) {
         detail: 'Active precipitation locks the compositor on its continuous path — expect adaptive 30 fps tiers while rain/ash is visible.',
         tags: ['weather', 'continuous', 'pacing'],
       });
+    } else if (live.wantsContinuousRender === true && precip <= 0.001 && ash <= 0.001) {
+      const reason = live.continuousReason ?? 'weather idle tail';
+      insights.push({
+        severity: 'warn',
+        title: 'Weather continuous render without precip/ash',
+        detail: `wantsContinuousRender is true while precip/ash are ~0 (${reason}). `
+          + `Emission tail ${Number(live.activeEmissionTotal ?? 0).toFixed(1)}, `
+          + `${live.batchSystems ?? '?'} batch systems. Check emission decay or live particle drain.`,
+        tags: ['weather', 'continuous', 'pacing'],
+      });
     }
   }
 
@@ -579,6 +589,59 @@ export function buildPerformanceInsights(snapshot, frames = [], ticks = []) {
         detail: `Emit atlas ${live.emitRt?.w ?? '?'}×${live.emitRt?.h ?? '?'} at scale ${Number(live.emitRt?.scale ?? 1).toFixed(2)} — lower internal window resolution in lighting if emitDraw GPU is high.`,
         tags: ['windowLight', 'vram', 'gpu'],
       });
+    }
+  }
+
+  const quarks = snapshot.quarksParticles;
+  const quarksLive = quarks?.live ?? null;
+  const quarksSession = quarks?.session ?? null;
+  const liveTotals = quarksLive?.totals ?? null;
+  if (liveTotals && (liveTotals.particles > 0 || liveTotals.systems > 0)) {
+    const top = (quarksLive?.topSystems ?? []).slice(0, 3);
+    const topParts = top.map((row) =>
+      `${row.sourceLabel ?? row.source}/${row.label} ${row.particles ?? 0} (${row.sharePct ?? 0}%)`,
+    ).join('; ');
+    const sourceParts = (quarksLive?.sources ?? []).slice(0, 4)
+      .map((src) => `${src.label} ${src.particles ?? 0}`)
+      .join(', ');
+    const sessionTotals = quarksSession?.totals?.particles ?? null;
+    const sessionNote = sessionTotals?.max > 0
+      ? ` Session peak ${sessionTotals.max} (avg ${sessionTotals.avg}, p95 ${sessionTotals.p95}).`
+      : '';
+    const dominant = top[0];
+    const runnerUp = top[1];
+    let dominanceNote = '';
+    if (dominant && runnerUp && runnerUp.particles > 0) {
+      const ratio = dominant.particles / runnerUp.particles;
+      if (ratio >= 5) {
+        dominanceNote = ` **${dominant.sourceLabel ?? dominant.source}/${dominant.label}** carries ~${ratio.toFixed(1)}× the particles of the next system.`;
+      }
+    }
+    insights.push({
+      severity: (liveTotals.particles >= 10000 || (sessionTotals?.p95 ?? 0) >= 10000) ? 'warn' : 'info',
+      title: 'Quarks particle inventory',
+      detail: `${liveTotals.particles} live particles in ${liveTotals.systems} systems (${liveTotals.culledSystems ?? 0} culled).`
+        + ` Sources: ${sourceParts || 'n/a'}.`
+        + (topParts ? ` Top: ${topParts}.` : '')
+        + dominanceNote
+        + sessionNote,
+      tags: ['quarks', 'particles'],
+    });
+
+    const systemPeaks = quarksSession?.systemPeaks ?? [];
+    const peakLeader = systemPeaks[0];
+    const peakRunnerUp = systemPeaks[1];
+    if (peakLeader && peakRunnerUp && peakRunnerUp.maxParticles > 0) {
+      const peakRatio = peakLeader.maxParticles / peakRunnerUp.maxParticles;
+      if (peakRatio >= 8 && peakLeader.maxParticles >= 500) {
+        insights.push({
+          severity: 'warn',
+          title: 'Quarks system dominance (session peak)',
+          detail: `${peakLeader.sourceLabel}/${peakLeader.label} peaked at ${peakLeader.maxParticles} particles `
+            + `(~${peakRatio.toFixed(1)}× ${peakRunnerUp.sourceLabel}/${peakRunnerUp.label}). Check emission caps or mask density for that source.`,
+          tags: ['quarks', 'particles', 'balance'],
+        });
+      }
     }
   }
 

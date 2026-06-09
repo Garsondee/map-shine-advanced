@@ -5,6 +5,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { tagQuarkSystem } from '../core/quark-diagnostics.js';
 import { 
   ParticleSystem, 
   IntervalValue,
@@ -1493,6 +1494,8 @@ export class SmellyFliesEffect {
       }
     }
     
+    tagQuarkSystem(system, 'smellyFlies', `area/${area.groupId}`);
+
     // Add to scene and batch renderer
     this.scene.add(system.emitter);
     this.batchRenderer.addSystem(system);
@@ -1617,6 +1620,8 @@ export class SmellyFliesEffect {
       }
     }
     
+    tagQuarkSystem(system, 'smellyFlies', `point/${group.id}`);
+
     this.scene.add(system.emitter);
     this.batchRenderer.addSystem(system);
     

@@ -38,6 +38,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { tagQuarkSystem } from '../../core/quark-diagnostics.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { WeatherParticles } from '../../particles/WeatherParticles.js';
 import { BatchedRenderer } from '../../libs/three.quarks.module.js';
@@ -53,6 +54,12 @@ const WP_V2_STAMP = 'WeatherParticlesV2:reg-verify:2026-02-25a';
 
 // Layer 31 — only for batches that must draw in FloorCompositor._renderLateWorldOverlay.
 const OVERLAY_THREE_LAYER = 31;
+
+// Grace window for stragglers after weather goes fully idle (precip/ash/emission 0).
+// Live particles get this long to die naturally; anything still alive after the
+// grace (typically frozen particles on frustum-culled/paused systems) is
+// force-cleared so `weather:live-particles` cannot hold continuous presentation forever.
+const IDLE_PARTICLE_DRAIN_GRACE_MS = 4000;
 
 // ─── WeatherParticlesV2 ───────────────────────────────────────────────────────
 
@@ -86,6 +93,9 @@ export class WeatherParticlesV2 {
     /** Accumulated time for WeatherController sub-rate throttle */
     this._wcAccum = 0;
 
+    /** Timestamp (ms) when weather went idle with live particles remaining; 0 = not draining */
+    this._idleDrainStartMs = 0;
+
     /** One-time debug guard for registration failures */
     this._msLoggedRegistrationFailureOnce = false;
 
@@ -95,6 +105,7 @@ export class WeatherParticlesV2 {
 
   _ensureSystemRegistered(sys, label = '') {
     if (!sys || !this._batchRenderer) return;
+    if (label) tagQuarkSystem(sys, 'weather', label);
     const map = this._batchRenderer.systemToBatchIndex;
     if (map && typeof map.has === 'function' && map.has(sys)) return;
     try {
@@ -386,6 +397,8 @@ export class WeatherParticlesV2 {
       weatherControllerEnabled: weatherController?.enabled !== false,
       elevationWeatherSuppressed: weatherController?.elevationWeatherSuppressed === true,
       wantsContinuousRender: this.wantsContinuousRender?.() === true,
+      continuousReason: this.getContinuousRenderReason?.() ?? null,
+      idleDrainArmed: this._idleDrainStartMs > 0,
       precipitation: Math.max(Number(state?.precipitation) || 0, Number(target?.precipitation) || 0),
       ashIntensity: Math.max(Number(state?.ashIntensity) || 0, Number(target?.ashIntensity) || 0),
       simulationSpeed: Number(weatherController?.simulationSpeed) || 2,
@@ -435,6 +448,8 @@ export class WeatherParticlesV2 {
     } finally {
       this._endPerfSpan(token);
     }
+
+    this._updateIdleParticleDrain();
 
     const particleTickNeeded = this._needsParticleSimulationTick();
 
@@ -539,11 +554,69 @@ export class WeatherParticlesV2 {
 
   /**
    * Weather Quarks sim + late-overlay draw only run inside FloorCompositor.render().
-   * RenderLoop presentation pacing must treat active precipitation as continuous.
+   * RenderLoop presentation pacing for *weather* only — shared BatchedRenderer
+   * consumers (fire, dust, flies) register their own continuous reasons on FloorCompositor.
    * @returns {boolean}
    */
   wantsContinuousRender() {
-    return this._needsParticleSimulationTick();
+    return this._weatherNeedsContinuousPresentation();
+  }
+
+  /**
+   * Granular reason for FloorCompositor continuous-render diagnostics.
+   * @returns {string|null}
+   */
+  getContinuousRenderReason() {
+    if (!this._weatherNeedsContinuousPresentation()) return null;
+    if (this._hasActivePrecipOrAsh()) return 'weather:precip-or-ash';
+    if (this._hasActiveWeatherEmission()) return 'weather:emission-tail';
+    if ((this._weatherParticles?._roofDripTailRemainingSec ?? 0) > 0.01) return 'weather:roof-drip-tail';
+    if (this._hasLiveWeatherQuarksParticles()) return 'weather:live-particles';
+    return 'weather:idle';
+  }
+
+  /**
+   * True when weather visuals/sim still need full presentation cadence.
+   * Does not include external BatchedRenderer consumers — those have their own hooks.
+   * @returns {boolean}
+   * @private
+   */
+  _weatherNeedsContinuousPresentation() {
+    if (!this._initialized || !this.enabled) return false;
+    if (weatherController?.enabled === false) return false;
+    if (weatherController?.elevationWeatherSuppressed === true) return false;
+    if (this._hasActivePrecipOrAsh()) return true;
+    if (this._hasActiveWeatherEmission()) return true;
+    if ((this._weatherParticles?._roofDripTailRemainingSec ?? 0) > 0.01) return true;
+    return this._hasLiveWeatherQuarksParticles();
+  }
+
+  /**
+   * @returns {boolean}
+   * @private
+   */
+  _hasActivePrecipOrAsh() {
+    const state = (typeof weatherController?.getCurrentState === 'function')
+      ? weatherController.getCurrentState()
+      : weatherController?.currentState;
+    const target = weatherController?.targetState;
+    const precip = Math.max(Number(state?.precipitation) || 0, Number(target?.precipitation) || 0);
+    const ash = Math.max(Number(state?.ashIntensity) || 0, Number(target?.ashIntensity) || 0);
+    return precip > 0.001 || ash > 0.001;
+  }
+
+  /**
+   * @returns {boolean}
+   * @private
+   */
+  _hasActiveWeatherEmission() {
+    const wp = this._weatherParticles;
+    const systems = [wp?.rainSystem, wp?.snowSystem, wp?.ashSystem, wp?.ashEmberSystem];
+    for (const sys of systems) {
+      const e = sys?.emissionOverTime?.value;
+      if (typeof e === 'number' && e > 0.5) return true;
+    }
+    return false;
   }
 
   /**
@@ -557,23 +630,56 @@ export class WeatherParticlesV2 {
     if (this._hasExternalBatchConsumerWork()) return true;
     if (weatherController?.enabled === false) return false;
     if (weatherController?.elevationWeatherSuppressed === true) return false;
-    const state = (typeof weatherController?.getCurrentState === 'function')
-      ? weatherController.getCurrentState()
-      : weatherController?.currentState;
-    const target = weatherController?.targetState;
-    const precip = Math.max(Number(state?.precipitation) || 0, Number(target?.precipitation) || 0);
-    const ash = Math.max(Number(state?.ashIntensity) || 0, Number(target?.ashIntensity) || 0);
-    if (precip > 0.001 || ash > 0.001) return true;
+    if (this._hasActivePrecipOrAsh()) return true;
+    if (this._hasActiveWeatherEmission()) return true;
+    if ((this._weatherParticles?._roofDripTailRemainingSec ?? 0) > 0.01) return true;
+    return this._hasLiveWeatherQuarksParticles();
+  }
 
-    const wp = this._weatherParticles;
-    const systems = [wp?.rainSystem, wp?.snowSystem, wp?.ashSystem, wp?.ashEmberSystem];
-    for (const sys of systems) {
-      const e = sys?.emissionOverTime?.value;
-      if (typeof e === 'number' && e > 0.5) return true;
+  /**
+   * Force-drain stale weather particles once weather has been fully idle for
+   * {@link IDLE_PARTICLE_DRAIN_GRACE_MS}. Frustum-culled systems are paused, so
+   * their particles never age out — without this, `_hasLiveWeatherQuarksParticles()`
+   * keeps `weather:live-particles` continuous presentation locked indefinitely.
+   * @private
+   */
+  _updateIdleParticleDrain() {
+    const weatherActive = this._hasActivePrecipOrAsh()
+      || this._hasActiveWeatherEmission()
+      || (this._weatherParticles?._roofDripTailRemainingSec ?? 0) > 0.01;
+    if (weatherActive || !this._hasLiveWeatherQuarksParticles()) {
+      this._idleDrainStartMs = 0;
+      return;
     }
 
-    if ((wp?._roofDripTailRemainingSec ?? 0) > 0.01) return true;
-    return this._hasLiveQuarksParticles();
+    const now = (typeof performance !== 'undefined' && typeof performance.now === 'function')
+      ? performance.now()
+      : Date.now();
+    if (this._idleDrainStartMs === 0) {
+      this._idleDrainStartMs = now;
+      return;
+    }
+    if (now - this._idleDrainStartMs < IDLE_PARTICLE_DRAIN_GRACE_MS) return;
+
+    const wp = this._weatherParticles;
+    let cleared = 0;
+    for (const sys of this._getWeatherOwnedSystemSet()) {
+      if (!sys || !(typeof sys.particleNum === 'number' && sys.particleNum > 0)) continue;
+      try {
+        if (typeof wp?._clearParticleSystemLive === 'function') {
+          wp._clearParticleSystemLive(sys);
+        } else {
+          if (sys.particles && typeof sys.particles.length === 'number') sys.particles.length = 0;
+          sys.particleNum = 0;
+        }
+        cleared += 1;
+      } catch (_) {}
+    }
+    this._idleDrainStartMs = 0;
+    if (cleared > 0) {
+      log.debug(`Idle particle drain: cleared ${cleared} stale weather system(s) after `
+        + `${Math.round(IDLE_PARTICLE_DRAIN_GRACE_MS / 1000)}s idle grace`);
+    }
   }
 
   /**
@@ -620,10 +726,11 @@ export class WeatherParticlesV2 {
   }
 
   /**
+   * Weather-owned Quarks only (excludes fire/dust/flies on the shared batch).
    * @returns {boolean}
    * @private
    */
-  _hasLiveQuarksParticles() {
+  _hasLiveWeatherQuarksParticles() {
     const wp = this._weatherParticles;
     if (!wp) return false;
     const systems = [

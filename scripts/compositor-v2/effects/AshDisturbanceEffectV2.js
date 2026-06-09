@@ -13,6 +13,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { tagQuarkSystem } from '../../core/quark-diagnostics.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { createMaskStatusSchemaGroup, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
@@ -1098,7 +1099,9 @@ export class AshDisturbanceEffectV2 {
 
     const systemCount = 6;
     for (let i = 0; i < systemCount; i++) {
-      st.systems.push(createBurstSystem());
+      const sys = createBurstSystem();
+      tagQuarkSystem(sys, 'ashDisturbance', `burst/f${floorIndex}/${i}`);
+      st.systems.push(sys);
     }
 
     // Ensure systems for visible floors are registered.

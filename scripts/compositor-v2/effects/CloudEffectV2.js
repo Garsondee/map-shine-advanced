@@ -220,8 +220,8 @@ export class CloudEffectV2 {
     this._shadowRawCacheKey = '';
     /** Norm-UV / fade quantize steps for shadow motion signature (see `_computeShadowMotionSignature`). */
     // Coarser buckets → fewer raw shadow RT redraws when sprites drift slowly (perf).
-    this._shadowMotionUStep = 0.018;
-    this._shadowMotionFadeStep = 0.15;
+    this._shadowMotionUStep = 0.028;
+    this._shadowMotionFadeStep = 0.2;
     this._shadowMaskCacheKey = '';
     this._cloudTopCacheKey = '';
     /** World-space bucket size for view-bound driven shadow mask UVs. */

@@ -17,6 +17,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { tagQuarkSystem } from '../../core/quark-diagnostics.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { createMaskStatusSchemaGroup, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
@@ -749,12 +750,17 @@ export class DustEffectV2 {
     }
 
     const totalCount = Math.max(1, count);
+    let bucketIndex = 0;
     for (const [, arr] of buckets) {
       if (arr.length < 3) continue;
       const pts = new Float32Array(arr);
       const weight = (pts.length / 3) / totalCount;
       const sys = this._createDustSystem(pts, weight, floorIndex);
-      if (sys) state.systems.push(sys);
+      if (sys) {
+        tagQuarkSystem(sys, 'dust', `motes/f${floorIndex}/b${bucketIndex}`);
+        state.systems.push(sys);
+        bucketIndex += 1;
+      }
     }
 
     if (state.systems.length === 0) {

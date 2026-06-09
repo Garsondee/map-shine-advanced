@@ -1153,6 +1153,23 @@ export class PerformanceRecorderDialog {
       ].filter(Boolean).join('<br>');
     }
 
+    let quarksHtml = '<em>no quarks particle inventory</em>';
+    const quarks = snap.quarksParticles;
+    const quarksLive = quarks?.live;
+    const quarksSession = quarks?.session;
+    if (quarksLive?.totals) {
+      const t = quarksLive.totals;
+      const top = (quarksLive.topSystems ?? [])[0];
+      const sessionTotals = quarksSession?.totals?.particles;
+      quarksHtml = [
+        `${t.particles ?? 0} particles · ${t.systems ?? 0} systems · ${t.culledSystems ?? 0} culled`,
+        top ? `top: ${escapeHtml(String(top.sourceLabel ?? top.source))}/${escapeHtml(String(top.label))} ${top.particles ?? 0} (${fmt(top.sharePct ?? 0, 1)}%)` : null,
+        quarksSession?.samples > 0
+          ? `session max ${sessionTotals?.max ?? 0} · avg ${fmt(sessionTotals?.avg ?? 0, 0)} · p95 ${fmt(sessionTotals?.p95 ?? 0, 0)}`
+          : null,
+      ].filter(Boolean).join('<br>');
+    }
+
     let windowLightHtml = '<em>no window light samples</em>';
     const windowLight = snap.windowLight;
     if (windowLight?.spans?.length) {
@@ -1255,6 +1272,15 @@ export class PerformanceRecorderDialog {
         <h4>Weather particles</h4>
         <p class="msa-perf__seq-micro">Sub-spans: <code>weatherParticles.update.attach|controller|particles|cull|quarks</code></p>
         <div>${weatherHtml}</div>
+      </div>
+
+      <div class="msa-perf__summary-section msa-perf__summary-span2">
+        <h4>Quarks particles</h4>
+        <p class="msa-perf__seq-micro">
+          Live inventory + session aggregates in <code>quarksParticles</code> (summary/full JSON, Copy report).
+          Sampled every 15 compositor frames — not per-frame timelines.
+        </p>
+        <div>${quarksHtml}</div>
       </div>
 
       <div class="msa-perf__summary-section">

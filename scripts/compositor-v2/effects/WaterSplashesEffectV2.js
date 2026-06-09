@@ -32,6 +32,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { tagQuarkSystem } from '../../core/quark-diagnostics.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
 import { probeMaskFile } from '../../assets/loader.js';
@@ -1824,6 +1825,7 @@ export class WaterSplashesEffectV2 {
     if (edgePoints && edgePoints.length >= 3 && this.params.foamEnabled) {
       const buckets = this._spatialBucket(edgePoints, sceneW, sceneH, sceneX, sceneY);
       const totalEdge = edgePoints.length / 3;
+      let bucketIndex = 0;
       for (const [, arr] of buckets) {
         if (arr.length < 3) continue;
         const bucketPoints = new Float32Array(arr);
@@ -1833,7 +1835,10 @@ export class WaterSplashesEffectV2 {
           GROUND_Z + (Number(floorIndex) || 0), 0.3
         );
         const sys = this._createFoamSystem(shape, weight, floorIndex);
-        if (sys) state.foamSystems.push(sys);
+        if (sys) {
+          tagQuarkSystem(sys, 'waterSplashes', `foam/f${floorIndex}/b${bucketIndex++}`);
+          state.foamSystems.push(sys);
+        }
       }
     }
 
@@ -1841,6 +1846,7 @@ export class WaterSplashesEffectV2 {
     if (interiorPoints && interiorPoints.length >= 3 && this.params.splashEnabled) {
       const buckets = this._spatialBucket(interiorPoints, sceneW, sceneH, sceneX, sceneY);
       const totalInterior = interiorPoints.length / 3;
+      let bucketIndex = 0;
       for (const [, arr] of buckets) {
         if (arr.length < 3) continue;
         const bucketPoints = new Float32Array(arr);
@@ -1850,7 +1856,10 @@ export class WaterSplashesEffectV2 {
           GROUND_Z + (Number(floorIndex) || 0), 0.3
         );
         const sys = this._createSplashSystem(shape, weight, floorIndex);
-        if (sys) state.splashSystems.push(sys);
+        if (sys) {
+          tagQuarkSystem(sys, 'waterSplashes', `splash/f${floorIndex}/b${bucketIndex++}`);
+          state.splashSystems.push(sys);
+        }
       }
     }
 
@@ -1858,6 +1867,7 @@ export class WaterSplashesEffectV2 {
     if (edgePoints && edgePoints.length >= 3 && this.bubblesParams.enabled && this.bubblesParams.foamEnabled) {
       const buckets = this._spatialBucket(edgePoints, sceneW, sceneH, sceneX, sceneY);
       const totalEdge = edgePoints.length / 3;
+      let bucketIndex = 0;
       for (const [, arr] of buckets) {
         if (arr.length < 3) continue;
         const bucketPoints = new Float32Array(arr);
@@ -1867,7 +1877,10 @@ export class WaterSplashesEffectV2 {
           GROUND_Z + (Number(floorIndex) || 0), 0.3
         );
         const sys = this._createBubbleFoamSystem(shape, weight, floorIndex);
-        if (sys) state.foamSystems2.push(sys);
+        if (sys) {
+          tagQuarkSystem(sys, 'waterSplashes', `bubbleFoam/f${floorIndex}/b${bucketIndex++}`);
+          state.foamSystems2.push(sys);
+        }
       }
     }
 
@@ -1875,6 +1888,7 @@ export class WaterSplashesEffectV2 {
     if (interiorPoints && interiorPoints.length >= 3 && this.bubblesParams.enabled && this.bubblesParams.splashEnabled) {
       const buckets = this._spatialBucket(interiorPoints, sceneW, sceneH, sceneX, sceneY);
       const totalInterior = interiorPoints.length / 3;
+      let bucketIndex = 0;
       for (const [, arr] of buckets) {
         if (arr.length < 3) continue;
         const bucketPoints = new Float32Array(arr);
@@ -1884,7 +1898,10 @@ export class WaterSplashesEffectV2 {
           GROUND_Z + (Number(floorIndex) || 0), 0.3
         );
         const sys = this._createBubbleSplashSystem(shape, weight, floorIndex);
-        if (sys) state.splashSystems2.push(sys);
+        if (sys) {
+          tagQuarkSystem(sys, 'waterSplashes', `bubbleSplash/f${floorIndex}/b${bucketIndex++}`);
+          state.splashSystems2.push(sys);
+        }
       }
     }
 

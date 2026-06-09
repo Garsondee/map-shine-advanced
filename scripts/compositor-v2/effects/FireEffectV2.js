@@ -62,7 +62,10 @@ import {
   filterFirePointsByOutdoor,
   filterFirePointsByAlbedoAlpha,
   filterFirePointsRequireNeighbor,
+  syncFireParticleOutdoorFootprint,
+  smoothFireParticleShelterMaskOnly,
   applyFireShelterMaskToParticle,
+  cacheFireParticleOutdoorFootprintForWind,
 } from './fire-behaviors.js';
 import {
   buildEffectSceneBoundsFromCanvas,
@@ -91,6 +94,7 @@ import {
   tileStackedOverlayOrder,
 } from '../LayerOrderPolicy.js';
 import { resolveEffectEnabled } from '../../effects/resolve-effect-enabled.js';
+import { tagQuarkSystem } from '../../core/quark-diagnostics.js';
 import {
   COAL_BED_DEFAULT_PARAMS,
   applyCoalBedPreset,
@@ -682,6 +686,12 @@ export class FireEffectV2 {
     this._outdoorsMaskFrameToken = 0;
     this._systemParamsSignature = '';
     this._simAccumSec = 0;
+    /** @type {number} Seconds per fire physics step (for smoke display-age cap). */
+    this._lastFireSimStepSec = 1 / FIRE_DEFAULT_SIM_HZ;
+    /** @type {number} Last timeInfo.frameCount seen in update(). */
+    this._fireUpdateFrameId = -1;
+    /** @type {boolean} At most one physics step per rAF frame when simHz < 60. */
+    this._firePhysicsDoneThisFrame = false;
     this._physicsFloorCursor = 0;
     this._glowFlickerFloorCursor = 0;
     /** @type {Map<number, number>} Last timeInfo.elapsed when a floor received physics. */
@@ -2435,24 +2445,35 @@ export class FireEffectV2 {
       this._endPerfSpan(flickerToken);
     }
 
+    const frameId = Number(timeInfo?.frameCount);
+    if (Number.isFinite(frameId) && frameId !== this._fireUpdateFrameId) {
+      this._fireUpdateFrameId = frameId;
+      this._firePhysicsDoneThisFrame = false;
+    }
+
     const simHz = this._resolveEffectiveSimHz(timeInfo);
     const ageRate = 0.001 * 750 * simSpeed;
+    const simStepSec = 1 / simHz;
+    this._lastFireSimStepSec = simStepSec;
     const useNativeTimestep = simHz >= 60;
 
     if (useNativeTimestep) {
       this._simAccumSec = 0;
-      this._runFirePhysicsAndVisuals(clampedDelta * ageRate, ageRate, true, timeInfo);
+      if (!this._firePhysicsDoneThisFrame) {
+        this._firePhysicsDoneThisFrame = true;
+        this._runFirePhysicsAndVisuals(clampedDelta * ageRate, ageRate, true, timeInfo);
+      }
     } else {
-      const simStepSec = 1 / simHz;
       this._simAccumSec += clampedDelta;
 
       if (this._simAccumSec > simStepSec * 2) {
         this._simAccumSec = simStepSec;
       }
 
-      const runPhysics = this._simAccumSec >= simStepSec;
+      const runPhysics = !this._firePhysicsDoneThisFrame && this._simAccumSec >= simStepSec;
       if (runPhysics) {
         this._simAccumSec -= simStepSec;
+        this._firePhysicsDoneThisFrame = true;
         this._runFirePhysicsAndVisuals(simStepSec * ageRate, ageRate, true, timeInfo);
       } else {
         const visualToken = this._beginPerfSpan('visualRefresh');
@@ -2546,6 +2567,7 @@ export class FireEffectV2 {
         if (!st?.batchRenderer) continue;
         try {
           this._stepFirePhysicsSim(st.batchRenderer, simDt);
+          this._syncFloorParticleOutdoorState(st.batchRenderer, floorIndex);
           if (Number.isFinite(elapsed)) this._floorLastPhysicsAt.set(floorIndex, elapsed);
         } catch (err) {
           log.warn('FireEffectV2: physics sim threw:', err);
@@ -2590,14 +2612,67 @@ export class FireEffectV2 {
       batchRenderer.systemToBatchIndex.forEach((_, ps) => {
         ps._msDeferVisualToRefresh = true;
         ps.update(simDt);
+        if (!ps.userData?.isSmoke) return;
         const particles = ps.particles;
         const pNum = ps.particleNum;
         for (let i = 0; i < pNum; i++) {
-          applyFireShelterMaskToParticle(particles[i], ps, 0.35);
+          const particle = particles[i];
+          if (particle.died) continue;
+          applyFireShelterMaskToParticle(particle, ps, 0.35);
         }
       });
     } finally {
       this._endPerfSpan(simToken);
+    }
+  }
+
+  /**
+   * One 5-tap outdoors footprint + shelter mask per particle after physics (matches post-step positions).
+   * Wind during ps.update() uses the previous frame's cached footprint.
+   * @param {import('../../libs/three.quarks.module.js').BatchedRenderer} batchRenderer
+   * @param {number} floorIndex
+   * @private
+   */
+  /**
+   * @param {number} floorIndex
+   * @returns {object|null}
+   * @private
+   */
+  _resolveOutdoorSnapForFloor(floorIndex) {
+    const token = this._outdoorsMaskFrameToken ?? 0;
+    const levelContext = window.MapShine?.activeLevelContext ?? null;
+    try {
+      return syncSharedOutdoorsMaskForFloor(floorIndex, token, levelContext);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _syncFloorParticleOutdoorState(batchRenderer, floorIndex) {
+    const syncToken = this._beginPerfSpan('outdoorSync');
+    try {
+      const snap = this._resolveOutdoorSnapForFloor(floorIndex);
+      const sceneBounds = this._sceneBounds ?? buildEffectSceneBoundsFromCanvas();
+
+      batchRenderer.systemToBatchIndex.forEach((_, ps) => {
+        const particles = ps.particles;
+        const pNum = ps.particleNum;
+        const isSmoke = !!ps.userData?.isSmoke;
+        for (let i = 0; i < pNum; i++) {
+          const particle = particles[i];
+          if (particle.died) continue;
+          if (isSmoke) {
+            cacheFireParticleOutdoorFootprintForWind(particle, this, snap, sceneBounds, ps, { tapCount: 9 });
+          } else {
+            syncFireParticleOutdoorFootprint(particle, ps, this, snap, sceneBounds, {
+              tapCount: 5,
+              smoothRate: 0.32,
+            });
+          }
+        }
+      });
+    } finally {
+      this._endPerfSpan(syncToken);
     }
   }
 
@@ -2639,9 +2714,10 @@ export class FireEffectV2 {
         return;
       }
     }
-    const extrapolate = (!afterPhysics && Number.isFinite(subFrameSec) && subFrameSec > 0)
-      ? subFrameSec * ageRate
+    const simStepSec = Number.isFinite(this._lastFireSimStepSec) && this._lastFireSimStepSec > 0
+      ? this._lastFireSimStepSec
       : 0;
+    const stepAgeCap = simStepSec > 0 ? simStepSec * ageRate : 0;
 
     batchRenderer.systemToBatchIndex.forEach((_, ps) => {
       if (ps.paused) return;
@@ -2650,22 +2726,48 @@ export class FireEffectV2 {
 
       const particles = ps.particles;
       const pNum = ps.particleNum;
+      const isSmoke = !!ps.userData?.isSmoke;
 
       if (afterPhysics) {
         for (let i = 0; i < pNum; i++) {
           particles[i]._msDisplayAge = particles[i].age;
         }
-      } else if (extrapolate > 0) {
-        for (let i = 0; i < pNum; i++) {
-          const particle = particles[i];
-          const ts = particle._msTimeScaleFactor;
-          const timeFactor = ts !== undefined ? (ts > 0 ? ts : 0) : 1;
-          particle._msDisplayAge = particle.age + extrapolate * timeFactor;
+      } else if (Number.isFinite(subFrameSec) && subFrameSec > 0) {
+        const extrapSec = isSmoke && stepAgeCap > 0
+          ? Math.min(subFrameSec, simStepSec)
+          : subFrameSec;
+        const extrapolate = extrapSec * ageRate;
+        if (extrapolate > 0) {
+          for (let i = 0; i < pNum; i++) {
+            const particle = particles[i];
+            const ts = particle._msTimeScaleFactor;
+            const timeFactor = ts !== undefined ? (ts > 0 ? ts : 0) : 1;
+            particle._msDisplayAge = particle.age + extrapolate * timeFactor;
+          }
         }
       }
 
-      for (let i = 0; i < pNum; i++) {
-        applyFireShelterMaskToParticle(particles[i], ps, afterPhysics ? 0.32 : 0.22);
+      if (isSmoke) {
+        if (afterPhysics) {
+          for (let i = 0; i < pNum; i++) {
+            const particle = particles[i];
+            if (particle.died) continue;
+            applyFireShelterMaskToParticle(particle, ps, 0.32);
+          }
+        } else {
+          for (let i = 0; i < pNum; i++) {
+            const particle = particles[i];
+            if (particle.died) continue;
+            smoothFireParticleShelterMaskOnly(particle, 0.22);
+          }
+        }
+      } else if (ps.userData?.isEmber && (afterPhysics || (Number.isFinite(subFrameSec) && subFrameSec > 0))) {
+        const emberSmoothRate = afterPhysics ? 0.2 : 0.18;
+        for (let i = 0; i < pNum; i++) {
+          const particle = particles[i];
+          if (particle.died) continue;
+          smoothFireParticleShelterMaskOnly(particle, emberSmoothRate);
+        }
       }
 
       for (let j = 0; j < ps.behaviors.length; j++) {
@@ -2756,6 +2858,9 @@ export class FireEffectV2 {
     this._structuralSignature = '';
     this._systemParamsSignature = '';
     this._simAccumSec = 0;
+    this._lastFireSimStepSec = 1 / FIRE_DEFAULT_SIM_HZ;
+    this._fireUpdateFrameId = -1;
+    this._firePhysicsDoneThisFrame = false;
     this._floorLastPhysicsAt.clear();
     this._invalidateGlowParamCache();
     this._clearCoalOverlays();
@@ -4077,6 +4182,7 @@ export class FireEffectV2 {
     const splitMaxBuckets = Math.max(2, Number(this.params.fireOutdoorSplitMaxBuckets) | 0 || FIRE_DEFAULT_OUTDOOR_SPLIT_MAX_BUCKETS);
     const splitOutdoor = this.params.smokeOutdoorAboveCanopy !== false && buckets.size <= splitMaxBuckets;
     let systemCount = 0;
+    let bucketIndex = 0;
 
     // Emission weight per bucket: √(pixel count) normalized across buckets.
     // Linear weight (bucketCount/totalCount) starves sparse masks (torches = few dots)
@@ -4105,6 +4211,7 @@ export class FireEffectV2 {
       // Fire system.
       const fireSys = this._createFireSystem(shape, weight, floorIndex);
       if (fireSys) {
+        tagQuarkSystem(fireSys, 'fire', `flame/f${floorIndex}/b${bucketIndex}`);
         state.systems.push(fireSys);
         systemCount += 1;
       }
@@ -4136,6 +4243,7 @@ export class FireEffectV2 {
             );
             const outdoorEmber = this._createEmberSystem(outdoorShape, wOutdoor, floorIndex, { outdoorLayer: true });
             if (outdoorEmber) {
+              tagQuarkSystem(outdoorEmber, 'fire', `ember/outdoor/f${floorIndex}/b${bucketIndex}`);
               state.emberSystems.push(outdoorEmber);
               systemCount += 1;
             }
@@ -4149,6 +4257,7 @@ export class FireEffectV2 {
             );
             const indoorEmber = this._createEmberSystem(indoorShape, wIndoor, floorIndex, { outdoorLayer: false });
             if (indoorEmber) {
+              tagQuarkSystem(indoorEmber, 'fire', `ember/indoor/f${floorIndex}/b${bucketIndex}`);
               state.emberSystems.push(indoorEmber);
               systemCount += 1;
             }
@@ -4156,6 +4265,7 @@ export class FireEffectV2 {
         } else {
           const emberSys = this._createEmberSystem(shape, weight, floorIndex);
           if (emberSys) {
+            tagQuarkSystem(emberSys, 'fire', `ember/f${floorIndex}/b${bucketIndex}`);
             state.emberSystems.push(emberSys);
             systemCount += 1;
           }
@@ -4174,6 +4284,7 @@ export class FireEffectV2 {
             );
             const outdoorSmoke = this._createSmokeSystem(outdoorShape, wOutdoor, floorIndex, { outdoorLayer: true });
             if (outdoorSmoke) {
+              tagQuarkSystem(outdoorSmoke, 'fire', `smoke/outdoor/f${floorIndex}/b${bucketIndex}`);
               state.smokeSystems.push(outdoorSmoke);
               systemCount += 1;
             }
@@ -4187,6 +4298,7 @@ export class FireEffectV2 {
             );
             const indoorSmoke = this._createSmokeSystem(indoorShape, wIndoor, floorIndex, { outdoorLayer: false });
             if (indoorSmoke) {
+              tagQuarkSystem(indoorSmoke, 'fire', `smoke/indoor/f${floorIndex}/b${bucketIndex}`);
               state.smokeSystems.push(indoorSmoke);
               systemCount += 1;
             }
@@ -4194,11 +4306,14 @@ export class FireEffectV2 {
         } else if (systemCount < maxSystems) {
           const smokeSys = this._createSmokeSystem(shape, weight, floorIndex, { outdoorLayer: false });
           if (smokeSys) {
+            tagQuarkSystem(smokeSys, 'fire', `smoke/f${floorIndex}/b${bucketIndex}`);
             state.smokeSystems.push(smokeSys);
             systemCount += 1;
           }
         }
       }
+
+      bucketIndex += 1;
     }
 
     return state;

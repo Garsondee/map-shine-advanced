@@ -321,12 +321,20 @@ export class LightingEffectV2 {
       directStructuralOcclusionStrength: 1,
       /** Internal render scale for source lights RT (1.0 = full resolution). */
       internalLightResolutionScale: 1.0,
-      /** Internal render scale for window glow RT (1.0 = full resolution). */
-      internalWindowResolutionScale: 1.0,
+      /**
+       * Internal render scale for window glow RT. Default 0.5: emit fill rate is
+       * the single largest GPU cost on multi-floor scenes (~4× reduction vs 1.0)
+       * and the glow is low-frequency, so half-res is visually near-identical.
+       */
+      internalWindowResolutionScale: 0.5,
       /** Internal render scale for darkness RT (1.0 = full resolution). */
       internalDarknessResolutionScale: 1.0,
       /** Use half-float for window light RT (false allows 8-bit to cut bandwidth). */
       windowLightUseHalfFloat: true,
+      /** Cross-frame per-floor window emit draw cache (WindowLightEffectV2). */
+      windowEmitCacheEnabled: true,
+      /** Reuse the pre-bus Foundry light prepass for same-frame/same-floor compose. */
+      lightPrepassReuseEnabled: true,
       /**
        * Window glow indirect illumination in compose (`totalIllumination += win × gain`).
        * Separate from point-lamp HDR in `_lightRT`.
@@ -490,7 +498,15 @@ export class LightingEffectV2 {
       rtW: 0,
       rtH: 0,
       lightGain: NaN,
+      frameSeq: -1,
     };
+    /**
+     * Incremented every {@link #update} (light animation/visibility mutate there).
+     * Prepass reuse is only valid when no update ran between draw and compose,
+     * i.e. strictly within the same presented frame.
+     * @type {number}
+     */
+    this._lightUpdateFrameSeq = 0;
 
     this._viewProjectionCache = createSceneViewProjectionCache();
 
@@ -726,6 +742,7 @@ export class LightingEffectV2 {
     const wle = this._resolveWindowLightEffect();
     if (!wle) return;
     wle.setEmitResolutionScale?.(this._sanitizeResolutionScale(this.params.internalWindowResolutionScale));
+    wle.setFullEmitDrawCacheEnabled?.(this.params.windowEmitCacheEnabled !== false);
     if (renderer) {
       wle._syncEmitDrawingBufferFromRenderer?.(renderer);
       if (this._sizeVec && typeof renderer.getDrawingBufferSize === 'function') {
@@ -1620,6 +1637,8 @@ export class LightingEffectV2 {
             'internalWindowResolutionScale',
             'internalDarknessResolutionScale',
             'windowLightUseHalfFloat',
+            'windowEmitCacheEnabled',
+            'lightPrepassReuseEnabled',
           ],
         },
       ],
@@ -2114,7 +2133,7 @@ export class LightingEffectV2 {
           min: 0.25,
           max: 1,
           step: 0.05,
-          default: 1,
+          default: 0.5,
           label: 'Window emit RT scale',
           tooltip: 'Scales the scene-UV emit RT relative to compositor mask resolution (1.0 = native mask size). Do not cap to drawing-buffer size — that smears glow in compose.',
         },
@@ -2132,6 +2151,18 @@ export class LightingEffectV2 {
           default: true,
           label: 'Window emit half-float',
           tooltip: 'When false, emit RT uses 8-bit (less VRAM/bandwidth; may band on bright windows).',
+        },
+        windowEmitCacheEnabled: {
+          type: 'boolean',
+          default: true,
+          label: 'Window emit cache',
+          tooltip: 'Skips redundant full window-emit draws per floor when nothing changed (cross-frame). Disable if window glow ever looks stale.',
+        },
+        lightPrepassReuseEnabled: {
+          type: 'boolean',
+          default: true,
+          label: 'Light prepass reuse',
+          tooltip: 'Reuses the pre-bus Foundry light buffer at compose when floor/size/state match within the same frame. Disable if light rims flicker.',
         },
         windowEmissiveGain: {
           type: 'slider',
@@ -3282,6 +3313,8 @@ export class LightingEffectV2 {
   syncAllLights() {
     if (!this._initialized) return;
     this._bindPerfRecorder();
+    // Light meshes are rebuilt below; any prepass-drawn light buffer is stale.
+    this._invalidateLightMaskPrepassCache();
 
     let _perfToken = this._beginPerfSpan('syncAllLights.detachForeign', 'update', { cpuOnly: true });
     // `_lightScene` is shared with PlayerLightEffectV2 (torch/flashlight) and
@@ -3845,6 +3878,11 @@ export class LightingEffectV2 {
     if (!this._initialized || !this._enabled) return;
     this._bindPerfRecorder();
 
+    // Light animation/visibility change below — any prepass drawn before this
+    // update is stale (torch/candle flicker would freeze for a frame on reuse).
+    this._lightUpdateFrameSeq = (this._lightUpdateFrameSeq + 1) | 0;
+    this._invalidateLightMaskPrepassCache();
+
     let _perfToken = this._beginPerfSpan('envAmbient', 'update', { cpuOnly: true });
     // Sync darkness level and ambient colors from Foundry canvas environment.
     // canvas.environment exposes darknessLevel (0=bright, 1=dark) and the
@@ -3954,9 +3992,18 @@ export class LightingEffectV2 {
    * @private
    */
   _canReuseLightMaskPrepassFoundryDraw(w, h, renderFloor) {
-    // Always redraw for compose: prepass can run before torch/candle animation updates
-    // and skips attenuation/softness changes — stale buffers read as hard on/off rims.
-    return false;
+    // Reuse is restricted to the same presented frame (frameSeq): update() mutates
+    // torch/candle animation and visibility, so cross-frame reuse would freeze
+    // flicker and miss attenuation/softness changes (hard on/off rims). Within a
+    // frame, prepass and compose push identical uniforms — reuse is lossless.
+    if (this.params.lightPrepassReuseEnabled === false) return false;
+    const c = this._lightMaskPrepassCache;
+    if (!c.valid) return false;
+    if (c.frameSeq !== this._lightUpdateFrameSeq) return false;
+    if (c.floorIndex !== renderFloor) return false;
+    if (c.rtW !== w || c.rtH !== h) return false;
+    const lightGain = Math.max(0, Number(this.params.lightIntensity) || 0);
+    return c.lightGain === lightGain;
   }
 
   /**
@@ -3972,6 +4019,7 @@ export class LightingEffectV2 {
     this._lightMaskPrepassCache.rtW = w;
     this._lightMaskPrepassCache.rtH = h;
     this._lightMaskPrepassCache.lightGain = lightGain;
+    this._lightMaskPrepassCache.frameSeq = this._lightUpdateFrameSeq;
     this._lightRtContentFloor = floorIndex;
   }
 
@@ -4253,7 +4301,8 @@ export class LightingEffectV2 {
       if (this._lightScene) {
         renderer.render(this._lightScene, camera);
       }
-      this._lightRtContentFloor = renderFloorForLights;
+      // Re-mark so a later same-frame pass for this floor can reuse this draw.
+      this._markLightMaskPrepassFoundryDraw(w, h, renderFloorForLights);
       this._endPerfSpan(_perfToken);
     }
 

@@ -3482,6 +3482,68 @@ export class FogOfWarEffectV2 {
   }
 
   /**
+   * Bindings for post-merge bloom clipping — matches fog-plane stamp opacity so
+   * bloom spill is suppressed only where the FoW overlay is present.
+   *
+   * @returns {{
+   *   active: boolean,
+   *   visionTexture?: import('three').Texture|null,
+   *   exploredTexture?: import('three').Texture|null,
+   *   explorationEnabled?: boolean,
+   *   exploredOpacity?: number,
+   *   softnessPx?: number,
+   *   visionTexelSize?: { x: number, y: number },
+   *   exploredTexelSize?: { x: number, y: number },
+   *   sceneOrigin?: { x: number, y: number },
+   *   sceneSize?: { x: number, y: number },
+   * }}
+   */
+  getBloomClipBindings() {
+    if (!this._initialized || !this.params?.enabled || !this._fullResTargetsReady) {
+      return { active: false };
+    }
+    if (this._shouldBypassFog?.() || this._isGlobalIlluminationActive?.()) {
+      return { active: false };
+    }
+    if (this._visionIsFullSceneFallback) {
+      return { active: false };
+    }
+    const tokenVisionEnabled = canvas?.scene?.tokenVision ?? false;
+    if (!tokenVisionEnabled) {
+      return { active: false };
+    }
+
+    const visionTex = this.visionRenderTarget?.texture ?? this._fallbackBlack ?? null;
+    if (!visionTex) {
+      return { active: false };
+    }
+
+    const explorationEnabled = isSceneFogExplorationEnabled(canvas?.scene);
+    const exploredTex = explorationEnabled
+      ? (this._getExplorationReadTarget()?.texture || this._fallbackBlack)
+      : (this._fallbackBlack ?? null);
+
+    const vtW = Math.max(1, this._visionRTWidth);
+    const vtH = Math.max(1, this._visionRTHeight);
+    const etW = Math.max(1, this._explorationRTWidth);
+    const etH = Math.max(1, this._explorationRTHeight);
+    const { x, y, width, height } = this.sceneRect;
+
+    return {
+      active: true,
+      visionTexture: visionTex,
+      exploredTexture: exploredTex,
+      explorationEnabled,
+      exploredOpacity: explorationEnabled ? (Number(this.params.exploredOpacity) || 0) : 0,
+      softnessPx: Math.max(0, Number(this.params.softness) || 0),
+      visionTexelSize: { x: 1.0 / vtW, y: 1.0 / vtH },
+      exploredTexelSize: { x: 1.0 / etW, y: 1.0 / etH },
+      sceneOrigin: { x: Number(x) || 0, y: Number(y) || 0 },
+      sceneSize: { x: Math.max(1, Number(width) || 1), y: Math.max(1, Number(height) || 1) },
+    };
+  }
+
+  /**
    * Force an immediate fog sync for a movement step.
    *
    * Path-walk can emit authoritative token updates faster than the normal fog

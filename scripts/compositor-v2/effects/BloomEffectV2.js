@@ -4,8 +4,11 @@
  * Wraps THREE.UnrealBloomPass to produce high-quality multi-mip bloom glow.
  * Pipeline: threshold bright pixels → progressive mip-chain blur → additive composite.
  *
+ * Fog clip: before UnrealBloomPass, HDR input is multiplied by the token LOS
+ * vision mask so unseen areas never contribute energy to the blur (prevents
+ * in-fog lights from bleeding into visible map regions).
+ *
  * Simplifications vs V1:
- *   - No vision masking via FoundryFogBridge (deferred)
  *   - No scene-rect padding exclusion (V2 compositor handles this)
  *   - No ember hotspot layer injection (deferred)
  *   - No V1 readBuffer/writeBuffer pattern — uses inputRT/outputRT directly
@@ -33,6 +36,48 @@ import {
 } from '../scene-view-projection.js';
 
 const log = createLogger('BloomEffectV2');
+
+/** Shared GLSL for sampling FogOfWar vision in bloom pre-pass (Foundry scene UV). */
+const BLOOM_FOG_VISION_GLSL = /* glsl */`
+  ${GLSL_SCREEN_TO_SCENE_UV}
+
+  float msBloomSampleMaskSoft(sampler2D tex, vec2 uv, vec2 texel, float radiusPx) {
+    float r = clamp(radiusPx, 0.0, 32.0);
+    if (r <= 0.01) return texture2D(tex, uv).r;
+
+    vec2 d1 = texel * max(1.0, r * 0.5);
+    vec2 d2 = texel * max(1.0, r);
+
+    float c = texture2D(tex, uv).r * 0.25;
+    float cross = 0.0;
+    cross += texture2D(tex, uv + vec2(d1.x, 0.0)).r;
+    cross += texture2D(tex, uv + vec2(-d1.x, 0.0)).r;
+    cross += texture2D(tex, uv + vec2(0.0, d1.y)).r;
+    cross += texture2D(tex, uv + vec2(0.0, -d1.y)).r;
+    float diag = 0.0;
+    diag += texture2D(tex, uv + vec2(d2.x, d2.y)).r;
+    diag += texture2D(tex, uv + vec2(-d2.x, d2.y)).r;
+    diag += texture2D(tex, uv + vec2(d2.x, -d2.y)).r;
+    diag += texture2D(tex, uv + vec2(-d2.x, -d2.y)).r;
+    return c + cross * 0.125 + diag * 0.0625;
+  }
+
+  float msBloomMaskEdge01(float sampleVal, float softnessPx) {
+    float softness = max(softnessPx, 0.0);
+    float d = max(fwidth(sampleVal), 1e-4);
+    float dPx = (sampleVal - 0.5) / d;
+    return (softness <= 0.01)
+      ? step(0.5, sampleVal)
+      : smoothstep(-softness, softness, dPx);
+  }
+
+  float msBloomVisionVisible(vec2 sceneUvRaw, vec2 visionTexel, float softnessPx) {
+    float inScene = msInSceneBounds(sceneUvRaw);
+    vec2 visionUv = clamp(sceneUvRaw, 0.0, 1.0);
+    float vision = msBloomSampleMaskSoft(tVision, visionUv, visionTexel, softnessPx);
+    return msBloomMaskEdge01(vision, softnessPx) * inScene;
+  }
+`;
 
 export class BloomEffectV2 {
   constructor() {
@@ -65,6 +110,8 @@ export class BloomEffectV2 {
       outdoorSpillSuppressEnabled: true,
       outdoorSpillLumLoMul: 0.42,
       outdoorSpillLumHiMul: 0.92,
+      // Clip convolved bloom to current LOS (FogOfWar vision mask).
+      fogClipEnabled: true,
     };
 
     /** @type {number} Effective pass strength after lightning adaptation. */
@@ -121,6 +168,9 @@ export class BloomEffectV2 {
     /** @type {THREE.Texture|null} Active-floor / stacked `_Outdoors` for spill suppression. */
     this._outdoorsMask = null;
 
+    /** @type {THREE.Texture|null} Current vision mask from FogOfWarEffectV2. */
+    this._fogVisionTexture = null;
+
     /** @type {THREE.WebGLRenderTarget|null} Scene HDR snapshot before UnrealBloomPass. */
     this._preBloomSceneRT = null;
 
@@ -133,6 +183,10 @@ export class BloomEffectV2 {
     this._spillSuppressScene = null;
     this._spillSuppressCamera = null;
     this._spillSuppressMaterial = null;
+
+    this._fogInputMaskScene = null;
+    this._fogInputMaskCamera = null;
+    this._fogInputMaskMaterial = null;
 
     /** @type {import('../../core/diagnostics/PerformanceRecorder.js').PerformanceRecorder|null} */
     this._activePerfRecorder = null;
@@ -192,6 +246,7 @@ export class BloomEffectV2 {
           'No tile masks required. Runs after the main scene is composited (post-processing).',
           'Water specular can feed a dedicated linear mask (see Water → Bloom link) so sun glints bloom strongly without over-brightening the base image.',
           'During lightning strikes bloom can adapt automatically (Lightning strike folder) to avoid banded halos from broad HDR flash lifts.',
+          'Fog clip (advanced) uses the Fog of War vision mask so bloom cannot spill into unexplored or out-of-LOS areas.',
           'Performance: extra full-screen passes and mip blur — lower radius and blend on large maps or weak GPUs if needed.',
           'Persistence: these controls save with the scene (not World Based).',
         ].join('\n\n'),
@@ -215,6 +270,7 @@ export class BloomEffectV2 {
           'Outdoor spill suppress': 'Stops window-light bloom halos from washing onto dark outdoor ground around buildings (_Outdoors mask).',
           'Outdoor spill lum lo': 'Outdoor pixels darker than threshold × this keep no spill bloom.',
           'Outdoor spill lum hi': 'Full outdoor bloom returns when base HDR exceeds threshold × this.',
+          'Fog clip': 'Zeros HDR bloom input outside token line-of-sight before the blur runs, so in-fog lights cannot bleed into visible areas.',
         },
       },
       groups: [
@@ -268,6 +324,14 @@ export class BloomEffectV2 {
             'outdoorSpillLumLoMul',
             'outdoorSpillLumHiMul',
           ],
+        },
+        {
+          name: 'fog-clip',
+          label: 'Fog clip (vision)',
+          type: 'folder',
+          advanced: true,
+          expanded: false,
+          parameters: ['fogClipEnabled'],
         },
       ],
       parameters: {
@@ -432,6 +496,12 @@ export class BloomEffectV2 {
           default: 0.92,
           tooltip: 'Outdoor pixels above threshold × this keep full bloom (sun, torches, water glints).',
         },
+        fogClipEnabled: {
+          type: 'boolean',
+          default: true,
+          label: 'Clip to vision (FoW)',
+          tooltip: 'Mask bloom source pixels to current token LOS before blur — stops distant in-fog glow from leaking into seen areas.',
+        },
       },
       presets: {
         'Clear Noon': {
@@ -559,6 +629,7 @@ export class BloomEffectV2 {
     this._projTmpDir = new THREE.Vector3();
 
     this._buildSpillSuppressPass();
+    this._buildFogInputMaskPass();
 
     // Copy scene for RT-to-RT blits
     this._copyScene = new THREE.Scene();
@@ -640,6 +711,177 @@ export class BloomEffectV2 {
   }
 
   /**
+   * Bind FogOfWar textures for bloom spill clipping.
+   * @param {{
+   *   active?: boolean,
+   *   visionTexture?: import('three').Texture|null,
+   *   exploredTexture?: import('three').Texture|null,
+   *   explorationEnabled?: boolean,
+   *   exploredOpacity?: number,
+   *   softnessPx?: number,
+   *   visionTexelSize?: { x?: number, y?: number },
+   *   exploredTexelSize?: { x?: number, y?: number },
+   *   sceneOrigin?: { x?: number, y?: number },
+   *   sceneSize?: { x?: number, y?: number },
+   * }|null} bindings
+   */
+  setFogClipBindings(bindings) {
+    const active = bindings?.active === true && bindings?.visionTexture;
+    this._fogVisionTexture = active ? bindings.visionTexture : null;
+
+    const u = this._fogInputMaskMaterial?.uniforms;
+    if (!u) return;
+
+    const black = this._black1x1Texture;
+    u.uFogInputMaskEnabled.value = active && this.params.fogClipEnabled !== false ? 1.0 : 0.0;
+    u.tVision.value = active ? bindings.visionTexture : black;
+    u.uVisionSoftnessPx.value = Math.max(0, Number(bindings?.softnessPx) || 0);
+    const vts = bindings?.visionTexelSize;
+    u.uVisionTexelSize.value.set(
+      Math.max(1e-6, Number(vts?.x) || 1),
+      Math.max(1e-6, Number(vts?.y) || 1),
+    );
+    const origin = bindings?.sceneOrigin;
+    const size = bindings?.sceneSize;
+    if (active && origin && size) {
+      u.uFogSceneOrigin.value.set(Number(origin.x) || 0, Number(origin.y) || 0);
+      u.uFogSceneSize.value.set(Math.max(1, Number(size.x) || 1), Math.max(1, Number(size.y) || 1));
+    }
+  }
+
+  /**
+   * @private
+   */
+  _buildFogInputMaskPass() {
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    this._fogInputMaskMaterial = new THREE.ShaderMaterial({
+      extensions: {
+        derivatives: true,
+      },
+      uniforms: {
+        tDiffuse: { value: null },
+        tVision: { value: null },
+        uFogInputMaskEnabled: { value: 0.0 },
+        uVisionSoftnessPx: { value: 0.0 },
+        uVisionTexelSize: { value: new THREE.Vector2(1, 1) },
+        uFogSceneOrigin: { value: new THREE.Vector2(0, 0) },
+        uFogSceneSize: { value: new THREE.Vector2(1, 1) },
+        uViewCorner00: { value: new THREE.Vector2(0, 0) },
+        uViewCorner10: { value: new THREE.Vector2(1, 0) },
+        uViewCorner01: { value: new THREE.Vector2(0, 1) },
+        uViewCorner11: { value: new THREE.Vector2(1, 1) },
+        uSceneDimensions: { value: new THREE.Vector2(1, 1) },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tDiffuse;
+        uniform sampler2D tVision;
+        uniform float uFogInputMaskEnabled;
+        uniform float uVisionSoftnessPx;
+        uniform vec2 uVisionTexelSize;
+        uniform vec2 uFogSceneOrigin;
+        uniform vec2 uFogSceneSize;
+        uniform vec2 uViewCorner00;
+        uniform vec2 uViewCorner10;
+        uniform vec2 uViewCorner01;
+        uniform vec2 uViewCorner11;
+        uniform vec2 uSceneDimensions;
+        varying vec2 vUv;
+
+        ${BLOOM_FOG_VISION_GLSL}
+
+        void main() {
+          vec3 rgb = texture2D(tDiffuse, vUv).rgb;
+          if (uFogInputMaskEnabled > 0.5) {
+            vec2 sceneUvRaw = msScreenUvToSceneUvRaw(
+              vUv, uViewCorner00, uViewCorner10, uViewCorner01, uViewCorner11,
+              uFogSceneOrigin, uFogSceneSize, uSceneDimensions
+            );
+            float visible = msBloomVisionVisible(sceneUvRaw, uVisionTexelSize, uVisionSoftnessPx);
+            rgb *= visible;
+          }
+          gl_FragColor = vec4(rgb, 1.0);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._fogInputMaskMaterial);
+    quad.frustumCulled = false;
+    this._fogInputMaskScene = new THREE.Scene();
+    this._fogInputMaskScene.add(quad);
+    this._fogInputMaskCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  }
+
+  /**
+   * @private
+   * @param {THREE.Camera|null} camera
+   * @returns {boolean}
+   */
+  _applyFogInputMask(renderer, camera) {
+    if (!this._fogInputMaskMaterial || !this._fogInputMaskScene || !this._bloomInputRT || !this._preBloomSceneRT) {
+      return false;
+    }
+    if (this._fogInputMaskMaterial.uniforms.uFogInputMaskEnabled.value < 0.5) {
+      return false;
+    }
+
+    this._syncVisionMaskProjectionUniforms(camera);
+    this._fogInputMaskMaterial.uniforms.tDiffuse.value = this._bloomInputRT.texture;
+
+    renderer.setRenderTarget(this._preBloomSceneRT);
+    renderer.autoClear = true;
+    renderer.render(this._fogInputMaskScene, this._fogInputMaskCamera);
+
+    this._copyRT(renderer, this._preBloomSceneRT.texture, this._bloomInputRT);
+    return true;
+  }
+
+  /**
+   * @private
+   * @param {THREE.Camera|null} camera
+   */
+  _syncVisionMaskProjectionUniforms(camera) {
+    const u = this._fogInputMaskMaterial?.uniforms;
+    const dims = canvas?.dimensions;
+    const cam = camera
+      ?? window.MapShine?.sceneComposer?.camera
+      ?? null;
+    if (!u || !cam || !dims) return;
+
+    const sc = window.MapShine?.sceneComposer;
+    const groundZ = sc?.basePlaneMesh?.position?.z ?? (sc?.groundZ ?? 0);
+    updateSceneViewProjectionFromCamera(
+      cam,
+      groundZ,
+      this._viewProjectionCache,
+      { ndc: this._projTmpNdc, world: this._projTmpWorld, dir: this._projTmpDir },
+    );
+    applySceneViewProjectionToUniforms(this._viewProjectionCache, u);
+
+    const sr = dims.sceneRect ?? dims;
+    u.uFogSceneOrigin.value.set(Number(sr?.x) || 0, Number(sr?.y) || 0);
+    u.uFogSceneSize.value.set(
+      Math.max(1, Number(sr?.width) || Number(dims.width) || 1),
+      Math.max(1, Number(sr?.height) || Number(dims.height) || 1),
+    );
+    u.uSceneDimensions.value.set(
+      Number(dims.width) || 1,
+      Number(dims.height) || 1,
+    );
+  }
+
+  /**
    * @private
    */
   _buildSpillSuppressPass() {
@@ -647,6 +889,9 @@ export class BloomEffectV2 {
     if (!THREE) return;
 
     this._spillSuppressMaterial = new THREE.ShaderMaterial({
+      extensions: {
+        derivatives: true,
+      },
       uniforms: {
         tPreBloom: { value: null },
         tPostBloom: { value: null },
@@ -697,24 +942,24 @@ export class BloomEffectV2 {
           vec3 post = texture2D(tPostBloom, vUv).rgb;
           vec3 bloomOnly = max(post - pre, vec3(0.0));
 
-          if (uSpillEnabled < 0.5 || uHasOutdoorsMask < 0.5) {
-            gl_FragColor = vec4(post, 1.0);
-            return;
+          float bloomKeep = 1.0;
+
+          if (uSpillEnabled > 0.5 && uHasOutdoorsMask > 0.5) {
+            vec2 sceneUvRaw = msScreenUvToSceneUvRaw(
+              vUv, uViewCorner00, uViewCorner10, uViewCorner01, uViewCorner11,
+              uSceneOrigin, uSceneSize, uSceneDimensions
+            );
+            float inScene = msInSceneBounds(sceneUvRaw);
+            vec2 maskUv = clamp(sceneUvRaw, 0.0, 1.0);
+            if (uOutdoorsMaskFlipY > 0.5) maskUv.y = 1.0 - maskUv.y;
+            float outdoor = msDecodeOutdoorsMaskSample(texture2D(uOutdoorsMask, maskUv)) * inScene;
+
+            float preLum = max(pre.r, max(pre.g, pre.b));
+            float localBright = smoothstep(uSpillLumLo, max(uSpillLumHi, uSpillLumLo + 1e-4), preLum);
+            bloomKeep = mix(1.0, localBright, outdoor);
           }
 
-          vec2 sceneUvRaw = msScreenUvToSceneUvRaw(
-            vUv, uViewCorner00, uViewCorner10, uViewCorner01, uViewCorner11,
-            uSceneOrigin, uSceneSize, uSceneDimensions
-          );
-          float inScene = msInSceneBounds(sceneUvRaw);
-          vec2 maskUv = clamp(sceneUvRaw, 0.0, 1.0);
-          if (uOutdoorsMaskFlipY > 0.5) maskUv.y = 1.0 - maskUv.y;
-          float outdoor = msDecodeOutdoorsMaskSample(texture2D(uOutdoorsMask, maskUv)) * inScene;
-
-          float preLum = max(pre.r, max(pre.g, pre.b));
-          float localBright = smoothstep(uSpillLumLo, max(uSpillLumHi, uSpillLumLo + 1e-4), preLum);
-          float spillKeep = mix(1.0, localBright, outdoor);
-          vec3 outRgb = pre + bloomOnly * spillKeep;
+          vec3 outRgb = pre + bloomOnly * bloomKeep;
           gl_FragColor = vec4(outRgb, 1.0);
         }
       `,
@@ -752,17 +997,15 @@ export class BloomEffectV2 {
     );
     applySceneViewProjectionToUniforms(this._viewProjectionCache, u);
 
-    const fd = sc?.foundrySceneData ?? null;
     const sr = dims.sceneRect ?? dims;
-    const sceneX = Number(fd?.sceneX ?? sr?.x ?? 0);
-    const sceneY = Number(fd?.sceneY ?? sr?.y ?? 0);
-    const sceneW = Number(fd?.sceneWidth ?? fd?.width ?? sr?.width ?? dims.width ?? 1);
-    const sceneH = Number(fd?.sceneHeight ?? fd?.height ?? sr?.height ?? dims.height ?? 1);
-    u.uSceneOrigin.value.set(sceneX, sceneY);
-    u.uSceneSize.value.set(sceneW, sceneH);
+    u.uSceneOrigin.value.set(Number(sr?.x) || 0, Number(sr?.y) || 0);
+    u.uSceneSize.value.set(
+      Math.max(1, Number(sr?.width) || Number(dims.width) || 1),
+      Math.max(1, Number(sr?.height) || Number(dims.height) || 1),
+    );
     u.uSceneDimensions.value.set(
-      Number(fd?.width ?? dims.width ?? 1),
-      Number(fd?.height ?? dims.height ?? 1),
+      Number(dims.width) || 1,
+      Number(dims.height) || 1,
     );
   }
 
@@ -965,9 +1208,10 @@ export class BloomEffectV2 {
    *
    * Flow:
    * 1. Copy inputRT → _bloomInputRT (optional water specular inject)
-   * 2. Snapshot pre-bloom HDR → _preBloomSceneRT
-   * 3. UnrealBloomPass adds bloom into _bloomInputRT
-   * 4. Optional outdoor spill suppress → outputRT
+   * 2. Optional fog input mask (zero HDR outside token LOS)
+   * 3. Pre-bloom snapshot → _preBloomSceneRT
+   * 4. UnrealBloomPass adds bloom into _bloomInputRT
+   * 5. Optional outdoor spill composite → outputRT
    *
    * @param {THREE.WebGLRenderer} renderer
    * @param {THREE.WebGLRenderTarget} inputRT
@@ -1024,10 +1268,25 @@ export class BloomEffectV2 {
         this._endPerfSpan(_perfToken);
       }
 
+      const useFogInputMask = p0.fogClipEnabled !== false
+        && this._fogVisionTexture
+        && this._fogInputMaskMaterial
+        && this._fogInputMaskScene;
+
+      // Step 1b: Zero bloom source HDR outside token LOS before blur convolution.
+      let preBloomFromFogMask = false;
+      if (useFogInputMask) {
+        _perfToken = this._beginPerfSpan('fogInputMask', 'render');
+        preBloomFromFogMask = this._applyFogInputMask(renderer, camera);
+        this._endPerfSpan(_perfToken);
+      }
+
       // Step 2: Pre-bloom snapshot for spill isolation (outdoor window-glow halos).
-      _perfToken = this._beginPerfSpan('preBloomSnapshot', 'render');
-      this._copyRT(renderer, this._bloomInputRT.texture, this._preBloomSceneRT);
-      this._endPerfSpan(_perfToken);
+      if (!preBloomFromFogMask) {
+        _perfToken = this._beginPerfSpan('preBloomSnapshot', 'render');
+        this._copyRT(renderer, this._bloomInputRT.texture, this._preBloomSceneRT);
+        this._endPerfSpan(_perfToken);
+      }
 
       // Step 3: UnrealBloomPass (reads + writes _bloomInputRT in place).
       _perfToken = this._beginPerfSpan('unrealBloomPass', 'render');
@@ -1040,10 +1299,10 @@ export class BloomEffectV2 {
         && this._spillSuppressScene;
 
       if (useSpillSuppress) {
-        _perfToken = this._beginPerfSpan('spillSuppress.prep', 'render', { cpuOnly: true });
+        _perfToken = this._beginPerfSpan('bloomComposite.prep', 'render', { cpuOnly: true });
         const su = this._spillSuppressMaterial.uniforms;
-        const effThreshold = Math.max(0, Number(this._effectiveThreshold) || Number(p0.threshold) || 0);
         su.uSpillEnabled.value = 1.0;
+        const effThreshold = Math.max(0, Number(this._effectiveThreshold) || Number(p0.threshold) || 0);
         su.uSpillLumLo.value = effThreshold * Math.max(0.01, Number(p0.outdoorSpillLumLoMul) ?? 0.42);
         su.uSpillLumHi.value = effThreshold * Math.max(0.02, Number(p0.outdoorSpillLumHiMul) ?? 0.92);
         su.tPreBloom.value = this._preBloomSceneRT.texture;
@@ -1051,7 +1310,7 @@ export class BloomEffectV2 {
         this._syncSpillProjectionUniforms(camera);
         this._endPerfSpan(_perfToken);
 
-        _perfToken = this._beginPerfSpan('spillSuppress.draw', 'render');
+        _perfToken = this._beginPerfSpan('bloomComposite.draw', 'render');
         renderer.setRenderTarget(outputRT);
         renderer.autoClear = true;
         renderer.render(this._spillSuppressScene, this._spillSuppressCamera);
@@ -1117,7 +1376,12 @@ export class BloomEffectV2 {
       const sq = this._spillSuppressScene?.children?.[0];
       if (sq?.geometry) sq.geometry.dispose();
     } catch (_) {}
+    try {
+      const fq = this._fogInputMaskScene?.children?.[0];
+      if (fq?.geometry) fq.geometry.dispose();
+    } catch (_) {}
     try { this._spillSuppressMaterial?.dispose(); } catch (_) {}
+    try { this._fogInputMaskMaterial?.dispose(); } catch (_) {}
     try { this._waterBloomCompositeMaterial?.dispose(); } catch (_) {}
     try { this._black1x1Texture?.dispose(); } catch (_) {}
     this._waterBloomCompositeScene = null;
@@ -1129,9 +1393,13 @@ export class BloomEffectV2 {
     this._bloomInputRT = null;
     this._preBloomSceneRT = null;
     this._outdoorsMask = null;
+    this._fogVisionTexture = null;
     this._spillSuppressScene = null;
     this._spillSuppressCamera = null;
     this._spillSuppressMaterial = null;
+    this._fogInputMaskScene = null;
+    this._fogInputMaskCamera = null;
+    this._fogInputMaskMaterial = null;
     this._copyScene = null;
     this._copyCamera = null;
     this._copyMaterial = null;

@@ -11,11 +11,12 @@ import {
   buildSummaryWeatherSection,
   buildSummaryWindowLightSection,
 } from './performance-recorder-weather-window.js';
+import { buildSummaryQuarksSection } from './performance-recorder-quarks.js';
 
 export const EXPORT_MODE_SUMMARY = 'summary';
 export const EXPORT_MODE_FULL = 'full';
 
-export const EXPORT_SCHEMA_VERSION = 5;
+export const EXPORT_SCHEMA_VERSION = 6;
 
 /** Max grouped effect rows in summary JSON. */
 const SUMMARY_EFFECTS_CAP = 40;
@@ -35,14 +36,36 @@ export function rollupEffectKey(effect) {
 }
 
 /**
+ * True when no other recorded span extends this effect key (avoids summing parent + child CPU).
+ * @param {object} row
+ * @param {object[]} rows
+ * @returns {boolean}
+ */
+function isLeafEffectSpan(row, rows) {
+  const effect = String(row?.effect ?? '');
+  const phase = row?.phase;
+  if (!effect) return true;
+  const prefix = `${effect}.`;
+  for (const other of rows) {
+    if (other?.phase !== phase) continue;
+    const otherEffect = String(other.effect ?? '');
+    if (otherEffect !== effect && otherEffect.startsWith(prefix)) return false;
+  }
+  return true;
+}
+
+/**
  * Group per-span effect rows by rollup key + phase (dialog table grouping).
+ * Leaf spans only — parent wrappers that also have child spans are excluded from totals.
  * @param {object[]} effects
  * @returns {object[]}
  */
 export function groupEffectRows(effects) {
+  const list = effects ?? [];
   /** @type {Map<string, object>} */
   const map = new Map();
-  for (const row of effects ?? []) {
+  for (const row of list) {
+    if (!isLeafEffectSpan(row, list)) continue;
     const key = `${rollupEffectKey(row.effect)}/${row.phase}`;
     let agg = map.get(key);
     if (!agg) {
@@ -253,6 +276,7 @@ export function buildSummaryPayload(recorder) {
     worldOverlays: _worldOverlays,
     weatherParticles: _weatherParticles,
     windowLight: _windowLight,
+    quarksParticles: _quarksParticles,
     ...rest
   } = snap;
 
@@ -261,6 +285,7 @@ export function buildSummaryPayload(recorder) {
   const worldOverlays = buildSummaryWorldOverlaysSection(snap) ?? _worldOverlays ?? null;
   const weatherParticles = buildSummaryWeatherSection(snap) ?? _weatherParticles ?? null;
   const windowLight = buildSummaryWindowLightSection(snap) ?? _windowLight ?? null;
+  const quarksParticles = buildSummaryQuarksSection(snap.quarksParticles ?? _quarksParticles) ?? null;
 
   return {
     ...rest,
@@ -273,6 +298,7 @@ export function buildSummaryPayload(recorder) {
     worldOverlays,
     weatherParticles,
     windowLight,
+    quarksParticles,
     longTasks: summarizeLongTasks(rawLongTasks),
     sequencer: trimSequencerForSummary(sequencer),
     insights,

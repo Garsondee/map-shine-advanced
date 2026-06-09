@@ -22,6 +22,7 @@
 
 import { createLogger } from '../log.js';
 import { buildPerformanceInsights, formatInsightsMarkdown } from './performance-recorder-insights.js';
+import { formatQuarksMarkdown } from './performance-recorder-quarks.js';
 import {
   buildExportFilename,
   buildFullPayload,
@@ -37,6 +38,15 @@ import {
 } from './performance-recorder-weather-window.js';
 import { buildPacingAnalysis } from './performance-recorder-pacing.js';
 import { analyzeStutters } from './performance-recorder-stutters.js';
+import {
+  buildQuarksPerfSection,
+  collectQuarksLiveSnapshot,
+  createQuarksSessionAccumulator,
+  finalizeQuarksSession,
+  QUARKS_SAMPLE_INTERVAL_FRAMES,
+  resetQuarksSession,
+  sampleQuarksSession,
+} from './performance-recorder-quarks.js';
 
 const log = createLogger('PerfRecorder');
 
@@ -295,6 +305,11 @@ export class PerformanceRecorder {
 
     /** @type {string|null} Cached module version for export context. */
     this._moduleVersion = null;
+
+    /** @type {ReturnType<createQuarksSessionAccumulator>} */
+    this._quarksSession = createQuarksSessionAccumulator();
+    /** @type {number} Last compositor frame seq when quarks were sampled. */
+    this._quarksLastSampleFrame = 0;
     try {
       this._moduleVersion = game?.modules?.get?.('map-shine-advanced')?.version ?? null;
     } catch (_) {}
@@ -472,6 +487,9 @@ export class PerformanceRecorder {
     this._gpuDisjointEvents = 0;
     this._gpuPoolStarvations = 0;
 
+    resetQuarksSession(this._quarksSession);
+    this._quarksLastSampleFrame = 0;
+
     if (!keepEnabled) {
       this.enabled = false;
     }
@@ -638,9 +656,29 @@ export class PerformanceRecorder {
     };
     this._pushFrameRecord(record);
     this._pushSpikeFrameDetailIfNeeded(record);
+    this._sampleQuarksIfDue(record);
 
     // Pump GPU query results for samples completed since last frame.
     this._pumpPendingQueries();
+  }
+
+  /**
+   * Sample three.quarks particle inventory periodically during recording.
+   * @param {{ seq?: number, tMs?: number }} record
+   * @private
+   */
+  _sampleQuarksIfDue(record) {
+    if (this._totalRecordedFrames - this._quarksLastSampleFrame < QUARKS_SAMPLE_INTERVAL_FRAMES) {
+      return;
+    }
+    this._quarksLastSampleFrame = this._totalRecordedFrames;
+    try {
+      sampleQuarksSession(
+        this._quarksSession,
+        collectQuarksLiveSnapshot(),
+        { frameSeq: record?.seq, tMs: record?.tMs },
+      );
+    } catch (_) {}
   }
 
   /**
@@ -1378,6 +1416,14 @@ export class PerformanceRecorder {
       windowLight = buildWindowLightPerfSection({ effects });
     } catch (_) {}
 
+    let quarksParticles = null;
+    try {
+      quarksParticles = buildQuarksPerfSection({
+        live: collectQuarksLiveSnapshot(),
+        session: finalizeQuarksSession(this._quarksSession),
+      });
+    } catch (_) {}
+
     const sessionFrameTime = {
       p50: percentile(frameTimes.slice(), 0.5),
       p95: percentile(frameTimes.slice(), 0.95),
@@ -1462,6 +1508,7 @@ export class PerformanceRecorder {
       worldOverlays,
       weatherParticles,
       windowLight,
+      quarksParticles,
       frameBudget,
       rendererInfo: {
         start: this._infoStart,
@@ -1853,6 +1900,7 @@ export class PerformanceRecorder {
       lines.push(`- ${usedMb.toFixed(1)} / ${budgetMb.toFixed(0)} MB (${((vram.usedFraction ?? 0) * 100).toFixed(1)}%)`);
       lines.push('');
     }
+    lines.push(...formatQuarksMarkdown(snapshot.quarksParticles));
     const gpu = snapshot.meta.gpuTiming;
     lines.push('---');
     lines.push(`GPU timing: ${gpu?.supported ? (gpu.enabled ? 'enabled' : 'disabled') : 'unsupported'} · disjoints ${snapshot.meta.gpuDisjointEvents} · pool starvations ${snapshot.meta.gpuPoolStarvations}`);

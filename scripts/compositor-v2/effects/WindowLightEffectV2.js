@@ -780,7 +780,12 @@ export class WindowLightEffectV2 {
     /** True after a successful `shadowLift` draw this frame (see {@link #getShadowLiftTexture}). */
     this._shadowLiftValid = false;
     /** @type {boolean} */
-    this._fullEmitDrawCacheEnabled = false;
+    this._fullEmitDrawCacheEnabled = true;
+    /**
+     * Per-floor emit RT + content cache key for cross-frame reuse.
+     * @type {Map<number, { cacheKey: string, rt: import('three').WebGLRenderTarget|null, rtSig: string }>}
+     */
+    this._floorEmitCache = new Map();
     /** @type {number} Matches {@link LightingEffectV2} `internalWindowResolutionScale`. */
     this._emitResolutionScale = 1.0;
     /** @type {number} Drawing buffer width for emit size cap (0 = use mask size until synced). */
@@ -1243,7 +1248,6 @@ export class WindowLightEffectV2 {
     this._frameId += 1;
     this._emitComposeValid = false;
     this._shadowLiftValid = false;
-    this._invalidateEmitDrawCache();
   }
 
   /** Reset emit draw counters (Performance Recorder session start). */
@@ -1251,6 +1255,17 @@ export class WindowLightEffectV2 {
     this._emitPerfSession.shadowLiftDraws = 0;
     this._emitPerfSession.fullDraws = 0;
     this._emitPerfSession.skippedFullDraws = 0;
+  }
+
+  /**
+   * Toggle the cross-frame per-floor full emit draw cache (Lighting advanced perf).
+   * @param {boolean} enabled
+   */
+  setFullEmitDrawCacheEnabled(enabled) {
+    const next = enabled !== false;
+    if (next === this._fullEmitDrawCacheEnabled) return;
+    this._fullEmitDrawCacheEnabled = next;
+    if (!next) this._invalidateEmitDrawCache();
   }
 
   /**
@@ -1316,6 +1331,56 @@ export class WindowLightEffectV2 {
     this._lastFullEmitCacheKey = '';
     this._emitDrawCacheKey = '';
     this._emitComposeValid = false;
+    for (const entry of this._floorEmitCache.values()) {
+      entry.cacheKey = '';
+    }
+  }
+
+  /**
+   * @param {number} floorIndex
+   * @private
+   */
+  _resolveEmitFloorIndex(floorIndex) {
+    if (Number.isFinite(floorIndex)) {
+      return Math.max(0, Math.min(3, Math.floor(floorIndex)));
+    }
+    if (Number.isFinite(this._renderFloorIndex)) {
+      return Math.max(0, Math.min(3, Math.floor(this._renderFloorIndex)));
+    }
+    return -1;
+  }
+
+  /**
+   * @param {object} THREE
+   * @param {number} w
+   * @param {number} h
+   * @param {string} sig
+   * @param {import('three').WebGLRenderTarget|null} existing
+   * @returns {import('three').WebGLRenderTarget|null}
+   * @private
+   */
+  _allocateEmitRenderTarget(THREE, w, h, sig, existing) {
+    const le = window.MapShine?.effectComposer?._floorCompositorV2?._lightingEffect ?? null;
+    const useHalf = le?.params?.windowLightUseHalfFloat !== false;
+    const rtOpts = {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: useHalf ? THREE.HalfFloatType : THREE.UnsignedByteType,
+      depthBuffer: false,
+      stencilBuffer: false,
+    };
+    let rt = existing;
+    if (!rt) {
+      rt = new THREE.WebGLRenderTarget(w, h, rtOpts);
+      rt.texture.colorSpace = THREE.LinearSRGBColorSpace;
+    } else {
+      rt.setSize(w, h);
+    }
+    rt.texture.flipY = false;
+    rt.texture.wrapS = THREE.ClampToEdgeWrapping;
+    rt.texture.wrapT = THREE.ClampToEdgeWrapping;
+    return rt;
   }
 
   /**
@@ -1392,7 +1457,6 @@ export class WindowLightEffectV2 {
     const todBucket = Math.floor((this._resolveTimelineHour() ?? 0) * 4);
     const p = this.params;
     return [
-      this._frameId,
       'full',
       floor,
       maskSig,
@@ -1444,8 +1508,18 @@ export class WindowLightEffectV2 {
       delete this._scene.userData.getWindowLightTexture;
     }
     try { this._emitMaterial?.dispose(); } catch (_) {}
-    try { this._emitRT?.dispose(); } catch (_) {}
-    try { this._shadowLiftEmitRT?.dispose(); } catch (_) {}
+    const disposedRts = new Set();
+    const disposeRt = (rt) => {
+      if (!rt || disposedRts.has(rt)) return;
+      try { rt.dispose(); } catch (_) {}
+      disposedRts.add(rt);
+    };
+    disposeRt(this._emitRT);
+    disposeRt(this._shadowLiftEmitRT);
+    for (const entry of this._floorEmitCache.values()) {
+      disposeRt(entry?.rt ?? null);
+    }
+    this._floorEmitCache.clear();
     try { this._scene?.children?.[0]?.geometry?.dispose(); } catch (_) {}
     try { this._fallbackMaskTex?.dispose(); } catch (_) {}
     this._emitMaterial = null;
@@ -2275,30 +2349,32 @@ export class WindowLightEffectV2 {
 
     if (!shadowLiftOnly && this._fullEmitDrawCacheEnabled) {
       const cacheKey = this._buildFullEmitCacheKey();
+      const floorIndex = this._resolveEmitFloorIndex(this._renderFloorIndex);
       const maskForDim = this._resolveEmitMaskReference();
       const expectedDim = maskForDim ? this._computeEmitTargetDimensions(maskForDim) : null;
-      const rtReady = this._emitRT?.texture
+      const floorEntry = floorIndex >= 0 ? this._floorEmitCache.get(floorIndex) : null;
+      const cachedRt = floorEntry?.rt ?? null;
+      const rtReady = cachedRt?.texture
         && expectedDim
-        && this._emitRT.width === expectedDim.w
-        && this._emitRT.height === expectedDim.h
-        && this._emitRT.width >= 8
-        && this._emitRT.height >= 8;
-      if (
-        cacheKey
-        && cacheKey === this._lastFullEmitCacheKey
-        && rtReady
-      ) {
+        && cachedRt.width === expectedDim.w
+        && cachedRt.height === expectedDim.h
+        && cachedRt.width >= 8
+        && cachedRt.height >= 8;
+      if (cacheKey && floorEntry?.cacheKey === cacheKey && rtReady) {
         const cacheToken = this._beginPerfSpan('emitCached', 'render', { cpuOnly: true });
         try {
           this._emitPerfSession.skippedFullDraws += 1;
+          this._emitRT = cachedRt;
+          this._emitRtSig = floorEntry.rtSig ?? this._emitRtSig;
+          this._lastFullEmitCacheKey = cacheKey;
           this._emitComposeValid = true;
           this._lastDrawStats = {
             path: 'sceneUvEmitRt.cached',
             purpose: 'full',
             drew: false,
             cached: true,
-            floor: Number.isFinite(this._renderFloorIndex) ? this._renderFloorIndex : null,
-            emitRt: { w: this._emitRT.width, h: this._emitRT.height },
+            floor: floorIndex >= 0 ? floorIndex : null,
+            emitRt: { w: cachedRt.width, h: cachedRt.height },
             cacheKey,
           };
         } finally {
@@ -2341,7 +2417,34 @@ export class WindowLightEffectV2 {
     }
 
     const THREE = window.THREE;
-    const emitTarget = THREE ? this._ensurePurposeEmitTarget(THREE, purpose) : null;
+    const floorIndex = this._resolveEmitFloorIndex(this._renderFloorIndex);
+    let emitTarget = null;
+    if (THREE && !shadowLiftOnly && floorIndex >= 0) {
+      const maskTex = this._resolveEmitMaskReference();
+      if (maskTex) {
+        const { w, h } = this._computeEmitTargetDimensions(maskTex);
+        const sig = `${w}x${h}|${maskTex.uuid ?? ''}|${this._emitResolutionScale}`;
+        let entry = this._floorEmitCache.get(floorIndex);
+        if (!entry) {
+          entry = { cacheKey: '', rt: null, rtSig: '' };
+          this._floorEmitCache.set(floorIndex, entry);
+        }
+        if (!entry.rt || entry.rtSig !== sig) {
+          if (entry.rt && entry.rt !== this._emitRT) {
+            try { entry.rt.dispose(); } catch (_) {}
+          }
+          entry.rt = this._allocateEmitRenderTarget(THREE, w, h, sig, null);
+          entry.rtSig = sig;
+          entry.cacheKey = '';
+        }
+        emitTarget = entry.rt;
+        this._emitRT = emitTarget;
+        this._emitRtSig = sig;
+      }
+    }
+    if (!emitTarget) {
+      emitTarget = THREE ? this._ensurePurposeEmitTarget(THREE, purpose) : null;
+    }
     if (!emitTarget) {
       this._shadowLiftValid = false;
       this._lastDrawStats = { skipReason: 'emit_rt_unready', drew: false };
@@ -2387,6 +2490,16 @@ export class WindowLightEffectV2 {
         const fullKey = this._buildFullEmitCacheKey();
         this._lastFullEmitCacheKey = fullKey;
         stats.cacheKey = fullKey;
+        if (floorIndex >= 0) {
+          let entry = this._floorEmitCache.get(floorIndex);
+          if (!entry) {
+            entry = { cacheKey: '', rt: emitTarget, rtSig: this._emitRtSig };
+            this._floorEmitCache.set(floorIndex, entry);
+          }
+          entry.cacheKey = fullKey;
+          entry.rt = emitTarget;
+          entry.rtSig = this._emitRtSig;
+        }
       }
     } finally {
       this._endPerfSpan(drawToken);

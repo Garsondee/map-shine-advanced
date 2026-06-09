@@ -7,7 +7,7 @@
 // Static import: keybindings MUST be registered synchronously during the init
 // hook, before any await. Dynamic imports yield control back to Foundry, which
 // then considers the init phase complete and rejects late registrations.
-import { canPersistSceneDocument, isGmLike } from './core/gm-parity.js';
+import { canPersistSceneDocument, isGmLike, isUserGM } from './core/gm-parity.js';
 import {
   canUserAccessPlayerLightTools,
   isValidPlayerLightMode,
@@ -16,6 +16,31 @@ import { getPlayerLightPickerDialog } from './ui/player-light-picker-dialog.js';
 
 import { registerLevelNavigationKeybindings } from './foundry/level-navigation-keybindings.js';
 import './scene/level-transition-curtain.js';
+
+const MSA_SOCKET_CHANNEL = 'module.map-shine-advanced';
+
+/** @type {boolean} */
+let _moduleSocketListenerRegistered = false;
+
+/**
+ * Foundry only relays module socket traffic when `"socket": true` is set in module.json.
+ * Register once during init so cinematic camera sync works before canvasReady.
+ */
+function registerModuleSocketListener() {
+  if (_moduleSocketListenerRegistered) return;
+  _moduleSocketListenerRegistered = true;
+  try {
+    game?.socket?.on?.(MSA_SOCKET_CHANNEL, (payload) => {
+      try {
+        window.MapShine?.cinematicCameraManager?.handleSocketMessage?.(payload);
+      } catch (e) {
+        console.warn('Map Shine: cinematic socket handler failed', e);
+      }
+    });
+  } catch (e) {
+    console.warn('Map Shine: failed to register module socket listener', e);
+  }
+}
 
 async function showExperimentalWarningDialog() {
   try {
@@ -690,6 +715,7 @@ Hooks.on('canvasReady', _suppressNativeFogExplorationWork);
  */
 Hooks.once('init', async function() {
   _installGlobalPasswordManagerInsertGuard();
+  registerModuleSocketListener();
 
   // Register keybindings SYNCHRONOUSLY before any await. Foundry's hook system
   // does not await async handlers -- after the first yield, Foundry considers the
@@ -783,7 +809,7 @@ Hooks.once('init', async function() {
   // Foundry v13+ uses Record<string, SceneControl> with tools as Record<string, SceneControlTool>
   Hooks.on('getSceneControlButtons', (controls) => {
     try {
-      const isGM = isGmLike();
+      const isGM = isUserGM();
 
       // NOTE: In Foundry v13, accessing ui.controls.tool
       // can throw during early UI init because the SceneControls instance is not fully
@@ -940,28 +966,6 @@ Hooks.once('init', async function() {
               return;
             }
             controlPanel.toggle();
-          }
-        });
-
-        ensureTool(tokenControls, {
-          name: 'map-shine-camera',
-          title: 'Map Shine Advanced Camera',
-          icon: 'fas fa-video',
-          button: true,
-          order: 102,
-          visible: true,
-          toolclip: {
-            src: '',
-            heading: 'MAPSHINE.ToolTitle',
-            items: [{ paragraph: 'MAPSHINE.ToolDescription' }]
-          },
-          onChange: () => {
-            const cameraPanel = window.MapShine?.cameraPanel;
-            if (!cameraPanel) {
-              ui.notifications?.warn?.('Map Shine Camera Panel is not available yet. The scene may still be initializing.');
-              return;
-            }
-            cameraPanel.toggle();
           }
         });
 

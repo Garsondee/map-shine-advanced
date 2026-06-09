@@ -920,6 +920,101 @@ body.msa-level-transition-active #loading-text {
   transform: translateY(0%);
 }
 
+.map-shine-cinematic-root--gm-preview .map-shine-cinematic-bar {
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.map-shine-cinematic-fade {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  background: #000;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 10007;
+  will-change: opacity;
+  transform: translateZ(0);
+}
+
+.map-shine-cinematic-gm-banner {
+  position: fixed;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+  z-index: 10005;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  max-width: min(520px, 92vw);
+  padding: 10px 16px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 180, 80, 0.45);
+  background: rgba(40, 22, 0, 0.88);
+  color: #ffe8c8;
+  font-family: var(--font-primary, 'Signika', sans-serif);
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: center;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+
+.map-shine-cinematic-gm-banner strong {
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff3dc;
+}
+
+.map-shine-cinematic-gm-toggle {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  pointer-events: auto;
+  z-index: 10006;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 180, 80, 0.35);
+  border-radius: 8px;
+  background: rgba(40, 22, 0, 0.82);
+  color: #ffe8c8;
+  font-family: var(--font-primary, 'Signika', sans-serif);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 10px 14px;
+  cursor: pointer;
+  box-shadow: 0 0 0 0 rgba(255, 160, 60, 0);
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.2s ease,
+    color 0.15s ease;
+}
+
+.map-shine-cinematic-gm-toggle.is-active {
+  border-color: rgba(255, 200, 100, 0.85);
+  background: rgba(120, 60, 0, 0.92);
+  color: #fff;
+  box-shadow:
+    0 0 16px rgba(255, 160, 60, 0.55),
+    0 0 32px rgba(255, 120, 40, 0.25);
+  animation: mapShineCinematicGmPulse 2s ease-in-out infinite;
+}
+
+.map-shine-cinematic-gm-toggle:hover {
+  border-color: rgba(255, 220, 140, 0.95);
+  background: rgba(160, 80, 0, 0.95);
+  color: #fff;
+}
+
+@keyframes mapShineCinematicGmPulse {
+  0%, 100% { box-shadow: 0 0 12px rgba(255, 160, 60, 0.45), 0 0 24px rgba(255, 120, 40, 0.2); }
+  50% { box-shadow: 0 0 20px rgba(255, 180, 80, 0.7), 0 0 40px rgba(255, 140, 50, 0.35); }
+}
+
 .map-shine-cinematic-toggle {
   position: fixed;
   top: 14px;
@@ -952,10 +1047,11 @@ body.msa-level-transition-active #loading-text {
 /* Camera panel */
 #map-shine-camera-panel {
   position: fixed;
-  left: 24px;
-  top: 96px;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
   width: 320px;
-  max-height: calc(100vh - 130px);
+  max-height: min(85vh, calc(100vh - 80px));
   overflow-y: auto;
   z-index: 10004;
   border-radius: 10px;
@@ -1004,6 +1100,21 @@ body.msa-level-transition-active #loading-text {
   gap: 4px;
   font-size: 12px;
   opacity: 0.95;
+}
+
+#map-shine-camera-panel .map-shine-camera-panel__slider-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+#map-shine-camera-panel .map-shine-camera-panel__slider-head [data-display] {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: rgba(180, 220, 255, 0.92);
 }
 
 #map-shine-camera-panel input[type="checkbox"] {
@@ -4370,6 +4481,48 @@ body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {
   opacity: 0 !important;
 }
 
+/* Cinematic mode — hide Foundry + Map Shine chrome for players (opt-out toggle stays visible) */
+body.map-shine-cinematic-player-hide-ui #ui,
+body.map-shine-cinematic-player-hide-ui #notifications,
+body.map-shine-cinematic-player-hide-ui #scene-controls,
+body.map-shine-cinematic-player-hide-ui #token-hud,
+body.map-shine-cinematic-player-hide-ui #tile-hud,
+body.map-shine-cinematic-player-hide-ui #drawing-hud,
+body.map-shine-cinematic-player-hide-ui #controls,
+body.map-shine-cinematic-player-hide-ui #navigation,
+body.map-shine-cinematic-player-hide-ui #sidebar,
+body.map-shine-cinematic-player-hide-ui #chat,
+body.map-shine-cinematic-player-hide-ui #players,
+body.map-shine-cinematic-player-hide-ui #hotbar,
+body.map-shine-cinematic-player-hide-ui #pause,
+body.map-shine-cinematic-player-hide-ui #hud,
+body.map-shine-cinematic-player-hide-ui .window-app,
+body.map-shine-cinematic-player-hide-ui foundry-application,
+body.map-shine-cinematic-player-hide-ui .application,
+body.map-shine-cinematic-player-hide-ui .chat-popout,
+body.map-shine-cinematic-player-hide-ui #tooltip,
+body.map-shine-cinematic-player-hide-ui #context-menu,
+body.map-shine-cinematic-player-hide-ui #map-shine-ui,
+body.map-shine-cinematic-player-hide-ui #map-shine-control-panel,
+body.map-shine-cinematic-player-hide-ui #map-shine-control-panel-minimized,
+body.map-shine-cinematic-player-hide-ui #map-shine-effect-stack,
+body.map-shine-cinematic-player-hide-ui #map-shine-texture-manager,
+body.map-shine-cinematic-player-hide-ui #map-shine-tile-motion-dialog,
+body.map-shine-cinematic-player-hide-ui #map-shine-token-movement-dialog,
+body.map-shine-cinematic-player-hide-ui #map-shine-camera-panel,
+body.map-shine-cinematic-player-hide-ui #map-shine-camera-path,
+body.map-shine-cinematic-player-hide-ui #map-shine-performance-recorder,
+body.map-shine-cinematic-player-hide-ui #map-shine-diagnostic-center,
+body.map-shine-cinematic-player-hide-ui #map-shine-graphics-settings,
+body.map-shine-cinematic-player-hide-ui #map-shine-player-light-picker,
+body.map-shine-cinematic-player-hide-ui #map-shine-breaker-box,
+body.map-shine-cinematic-player-hide-ui #map-shine-overlay-root {
+  display: none !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+  opacity: 0 !important;
+}
+
 .msa-cpath__check--block {
   display: block;
   margin-bottom: 8px;
@@ -5440,6 +5593,19 @@ body.map-shine-camera-path-hide-ui .map-shine-cinematic-toggle {
   box-shadow:
     inset 0 2px 5px rgba(0, 0, 0, 0.45),
     0 0 10px rgba(90, 200, 250, 0.28);
+}
+
+.msa-cp-btn--full {
+  width: 100%;
+}
+
+.msa-cp-btn--cinematic-active {
+  border-color: rgba(255, 180, 80, 0.75) !important;
+  background: rgba(120, 60, 0, 0.55) !important;
+  color: #ffe8c8 !important;
+  box-shadow:
+    0 0 10px rgba(255, 160, 60, 0.35),
+    inset 0 0 12px rgba(255, 140, 50, 0.12);
 }
 
 .msa-cp-btn--danger {

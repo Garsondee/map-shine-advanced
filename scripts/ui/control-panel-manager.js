@@ -27,7 +27,7 @@ import {
 import { createDynamicWeatherDeck } from './control-panel/widgets/dynamic-weather-deck.js';
 import { lookupBiome } from './control-panel/widgets/dynamic-weather-catalog.js';
 import { updatePhaseRing } from './control-panel/widgets/smart-ring-clock.js';
-import { canPersistSceneDocument, isGmLike } from '../core/gm-parity.js';
+import { canPersistSceneDocument, isGmLike, isUserGM } from '../core/gm-parity.js';
 
 
 import { createLogger } from '../core/log.js';
@@ -422,6 +422,12 @@ export class ControlPanelManager {
      * @type {boolean}
      */
     this._syncDarknessOnSkippedPersist = false;
+
+    /** @type {HTMLButtonElement|null} */
+    this._cinematicModeBtn = null;
+
+    /** @type {(() => void)|null} */
+    this._unbindCinematicState = null;
 
     this._boundHandlers = {
       onFaceMouseDown: (e) => this._onClockMouseDown(e),
@@ -1263,6 +1269,41 @@ export class ControlPanelManager {
    * @private
    */
   _buildAdvancedDeck(zoneEl) {
+    const cinematicToggle = createCpButton('Cinematic Mode', () => {
+      const ccm = window.MapShine?.cinematicCameraManager;
+      if (!ccm) {
+        ui.notifications?.warn?.('Cinematic camera is not available yet. The scene may still be initializing.');
+        return;
+      }
+      const active = ccm.getState?.()?.cinematicActive === true;
+      if (active) ccm.endCinematic();
+      else ccm.startCinematic();
+    }, { className: 'msa-cp-btn--full msa-cp-btn--cinematic-toggle' });
+    this._cinematicModeBtn = cinematicToggle;
+    this._bindContextHint(cinematicToggle, [
+      'Cinematic Mode',
+      'Letterbox + hide player UI and lock cameras to yours.',
+      'Click again (or use on-screen End toggle) to release players.',
+    ]);
+    zoneEl.appendChild(cinematicToggle);
+
+    const optionsBtn = createCpButton('Cinematic Options', () => {
+      const cameraPanel = window.MapShine?.cameraPanel;
+      if (!cameraPanel) {
+        ui.notifications?.warn?.('Cinematic options are not available yet. The scene may still be initializing.');
+        return;
+      }
+      cameraPanel.show();
+    }, { className: 'msa-cp-btn--full' });
+    this._bindContextHint(optionsBtn, [
+      'Cinematic Options',
+      'Bar height, player bounds, group cohesion, and focus tools.',
+    ]);
+    zoneEl.appendChild(optionsBtn);
+
+    this._bindCinematicModeButtonSync();
+    this._syncCinematicModeButton();
+
     const directorSec = createSection(zoneEl, {
       id: 'weatherDirector',
       title: '🌦 Weather Director',
@@ -1293,6 +1334,33 @@ export class ControlPanelManager {
     this._ensureSectionTag(lightsSec, 'playerLights', 'GM');
     this._registerSection({ id: 'playerLights', setExpanded: lightsSec.setExpanded });
     this._buildPlayerLightsSection(lightsSec.body);
+  }
+
+  /**
+   * Keep Control Panel cinematic toggle in sync with scene flag / overlay state.
+   * @private
+   */
+  _bindCinematicModeButtonSync() {
+    if (this._unbindCinematicState) {
+      this._unbindCinematicState();
+      this._unbindCinematicState = null;
+    }
+    const ccm = window.MapShine?.cinematicCameraManager;
+    if (!ccm?.onStateChange) return;
+    this._unbindCinematicState = ccm.onStateChange(() => this._syncCinematicModeButton());
+  }
+
+  /**
+   * @private
+   */
+  _syncCinematicModeButton() {
+    if (!this._cinematicModeBtn) return;
+    if (!this._unbindCinematicState) {
+      this._bindCinematicModeButtonSync();
+    }
+    const active = window.MapShine?.cinematicCameraManager?.getState?.()?.cinematicActive === true;
+    this._cinematicModeBtn.classList.toggle('msa-cp-btn--cinematic-active', active);
+    this._cinematicModeBtn.textContent = active ? 'Cinematic Mode (Active)' : 'Cinematic Mode';
   }
 
   /**
@@ -2418,7 +2486,7 @@ export class ControlPanelManager {
       this.container.style.top = `${top}px`;
     }
 
-    if (state.minimized === true && isGmLike()) {
+    if (state.minimized === true && isUserGM()) {
       const x = Number.isFinite(left) ? left : 20;
       const y = Number.isFinite(top) ? top : 20;
       this._showMinimizedDockAt(x, y);
@@ -2613,7 +2681,7 @@ export class ControlPanelManager {
   }
 
   _finalizeGmPanelVisibility() {
-    if (!isGmLike()) return;
+    if (!isUserGM()) return;
 
     if (this._isMinimized) {
       const left = this._readPx(this._minimizedDock?.style?.left);
@@ -3289,6 +3357,11 @@ export class ControlPanelManager {
    * @returns {Promise<void>}
    */
   async initialize(parentElement = document.body) {
+    if (!isUserGM()) {
+      log.debug('Control Panel skipped — not a GM client');
+      return;
+    }
+
     if (this._shell) {
       log.warn('ControlPanelManager already initialized');
       return;
@@ -5248,6 +5321,7 @@ Current Weather:
    * Show the control panel
    */
   show() {
+    if (!isUserGM()) return;
     if (!this.container) return;
 
     if (this._isMinimized) {
@@ -5319,6 +5393,7 @@ Current Weather:
    * Toggle panel visibility
    */
   toggle() {
+    if (!isUserGM()) return;
     if (this.visible) {
       this.hide();
     } else {
@@ -5330,6 +5405,11 @@ Current Weather:
    * Clean up resources
    */
   destroy() {
+    if (this._unbindCinematicState) {
+      this._unbindCinematicState();
+      this._unbindCinematicState = null;
+    }
+
     // Clear timers
     if (this._darknessTimer) {
       clearTimeout(this._darknessTimer);

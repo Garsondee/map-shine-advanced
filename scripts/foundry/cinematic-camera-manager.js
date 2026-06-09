@@ -12,8 +12,8 @@
  *
  * @module foundry/cinematic-camera-manager
  */
-import { canPersistSceneDocument, isGmLike } from '../core/gm-parity.js';
-
+import { canPersistSceneDocument, isUserGM } from '../core/gm-parity.js';
+import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
 
 import { createLogger } from '../core/log.js';
 
@@ -26,6 +26,11 @@ const CAMERA_SOCKET_TYPE = 'advanced-camera-pan';
 const ENVIRONMENT_SOCKET_TYPE = 'advanced-camera-environment';
 const ENVIRONMENT_RELEASE_SOCKET_TYPE = 'advanced-camera-environment-release';
 
+/** Hold after player UI hide before letterbox bars rise. */
+const CINEMATIC_UI_HOLD_MS = 2000;
+/** Fade-to-black and letterbox motion duration (minimum transition length). */
+const CINEMATIC_CURTAIN_MS = 5000;
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -33,6 +38,14 @@ function clamp(value, min, max) {
 function asNumber(value, fallback) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+/** @param {number} value */
+function normalizeBarHeightPct(value) {
+  let n = asNumber(value, 0.12);
+  // Legacy scene flags sometimes stored whole percent (12) instead of fraction (0.12).
+  if (n > 1) n = n / 100;
+  return clamp(n, 0.03, 0.35);
 }
 
 function getChangedFlag(changed, scope, key) {
@@ -65,9 +78,22 @@ export class CinematicCameraManager {
     this._topBar = null;
     this._bottomBar = null;
     this._playerToggleButton = null;
+    this._gmBanner = null;
+    this._gmToggleButton = null;
+    this._gmToggleDefaultLabel = 'Cinematic Mode';
+    this._gmToggleHoverLabel = 'End Cinematic Mode';
+    this._letterboxAnimToken = 0;
+    this._fadeOverlay = null;
+    /** @type {'idle'|'entering'|'active'|'exiting'} */
+    this._presentationPhase = 'idle';
+    this._presentationToken = 0;
+    /** @type {number[]} */
+    this._presentationTimers = [];
+    /** While true, remote follow and camera broadcasts stay behind the black curtain. */
+    this._cameraCurtainClosed = false;
+    this._suppressPresentation = false;
 
     this._hookIds = [];
-    this._socketHandlerBound = this._onSocketMessage.bind(this);
 
     this._lastManualInputAt = 0;
     this._lastBroadcastAt = 0;
@@ -123,7 +149,7 @@ export class CinematicCameraManager {
       letterboxEnabled: false,
       uiFade: 0.92,
       barHeightPct: 0.12,
-      transitionMs: 450,
+      transitionMs: CINEMATIC_CURTAIN_MS,
 
       playerBoundsEnabled: false,
       playerBoundsPadding: 220,
@@ -183,15 +209,18 @@ export class CinematicCameraManager {
     }
     this._hookIds.length = 0;
 
-    try {
-      game?.socket?.off?.(SOCKET_CHANNEL, this._socketHandlerBound);
-    } catch (_) {
-    }
-
     if (this._persistTimeout !== null) {
       clearTimeout(this._persistTimeout);
       this._persistTimeout = null;
     }
+
+    this._cancelPresentation();
+
+    try {
+      this._fadeOverlay?.remove();
+    } catch (_) {
+    }
+    this._fadeOverlay = null;
 
     try {
       this._overlayRoot?.remove();
@@ -202,7 +231,13 @@ export class CinematicCameraManager {
     this._topBar = null;
     this._bottomBar = null;
     this._playerToggleButton = null;
+    this._gmBanner = null;
+    this._gmToggleButton = null;
     this._listeners.clear();
+
+    try {
+      document.body.classList.remove('map-shine-cinematic-player-hide-ui');
+    } catch (_) {}
 
     this._lastBroadcastView = null;
     this._isApplyingRemotePan = false;
@@ -295,23 +330,60 @@ export class CinematicCameraManager {
     playerToggle.className = 'map-shine-cinematic-toggle map-shine-overlay-ui';
     playerToggle.textContent = 'Exit Cinematic View';
     playerToggle.addEventListener('click', () => {
-      if (this.sceneState.strictFollow && !isGmLike()) {
+      if (this.sceneState.strictFollow && !isUserGM()) {
         ui.notifications?.warn?.('GM has enabled strict cinematic follow.');
         return;
       }
       this.toggleLocalCinematicView();
     });
 
+    const gmBanner = document.createElement('div');
+    gmBanner.className = 'map-shine-cinematic-gm-banner map-shine-overlay-ui';
+    gmBanner.innerHTML = `
+      <strong>Cinematic mode is active for players.</strong>
+      <span>Their UI is hidden and cameras follow yours.</span>
+      <span>End cinematic mode to return control.</span>
+    `;
+
+    const gmToggle = document.createElement('button');
+    gmToggle.type = 'button';
+    gmToggle.className = 'map-shine-cinematic-gm-toggle map-shine-overlay-ui';
+    gmToggle.textContent = this._gmToggleDefaultLabel;
+    gmToggle.addEventListener('click', () => {
+      if (!isUserGM()) return;
+      this.endCinematic();
+    });
+    gmToggle.addEventListener('mouseenter', () => {
+      if (this.sceneState.cinematicActive) {
+        gmToggle.textContent = this._gmToggleHoverLabel;
+      }
+    });
+    gmToggle.addEventListener('mouseleave', () => {
+      if (this.sceneState.cinematicActive) {
+        gmToggle.textContent = this._gmToggleDefaultLabel;
+      }
+    });
+
     root.appendChild(topBar);
     root.appendChild(bottomBar);
     root.appendChild(playerToggle);
+    root.appendChild(gmBanner);
+    root.appendChild(gmToggle);
+
+    const fade = document.createElement('div');
+    fade.className = 'map-shine-cinematic-fade map-shine-overlay-ui';
+    fade.style.opacity = '0';
 
     parentElement.appendChild(root);
+    parentElement.appendChild(fade);
 
     this._overlayRoot = root;
+    this._fadeOverlay = fade;
     this._topBar = topBar;
     this._bottomBar = bottomBar;
     this._playerToggleButton = playerToggle;
+    this._gmBanner = gmBanner;
+    this._gmToggleButton = gmToggle;
   }
 
   _registerHooks() {
@@ -322,7 +394,7 @@ export class CinematicCameraManager {
 
     addHook('canvasPan', (_canvas, position) => {
       const isInternalPan = this._isApplyingRemotePan || this._isApplyingConstraintPan || this._isApplyingCohesionPan;
-      if (!isGmLike() && !isInternalPan) {
+      if (!isUserGM() && !isInternalPan) {
         this._lastManualInputAt = Date.now();
       }
 
@@ -365,12 +437,14 @@ export class CinematicCameraManager {
     addHook('deleteToken', () => {
       this._invalidatePlayerBounds();
     });
+  }
 
-    try {
-      game?.socket?.on?.(SOCKET_CHANNEL, this._socketHandlerBound);
-    } catch (e) {
-      log.warn('Failed to register camera socket listener', e);
-    }
+  /**
+   * Entry point for module socket relay (registered in module.js during init).
+   * @param {object} payload
+   */
+  handleSocketMessage(payload) {
+    this._onSocketMessage(payload);
   }
 
   _bindInputBridge() {
@@ -480,7 +554,7 @@ export class CinematicCameraManager {
     if (this.isRuntimeTemporarilySuspended()) return;
     if (!this.sceneState.improvedModeEnabled) return;
     if (!this.sceneState.playerBoundsEnabled) return;
-    if (isGmLike()) return;
+    if (isUserGM()) return;
     if (this._isPlayerFollowLocked()) return;
     if (this._isApplyingConstraintPan) return;
 
@@ -506,12 +580,22 @@ export class CinematicCameraManager {
   }
 
   _hydrateFromSceneFlag() {
-    const flag = canvas?.scene?.getFlag?.(MODULE_ID, SCENE_FLAG_KEY);
-    if (flag && typeof flag === 'object') {
-      this._applySceneStatePatch(flag, { persist: false });
-    } else {
-      this._applyVisualState();
-      this._emitStateChanged();
+    this._suppressPresentation = true;
+    try {
+      const flag = canvas?.scene?.getFlag?.(MODULE_ID, SCENE_FLAG_KEY);
+      if (flag && typeof flag === 'object') {
+        this._applySceneStatePatch(flag, { persist: false });
+        if (this.sceneState.cinematicActive) {
+          this._presentationPhase = 'active';
+          this._cameraCurtainClosed = false;
+          this._applyVisualState();
+        }
+      } else {
+        this._applyVisualState();
+        this._emitStateChanged();
+      }
+    } finally {
+      this._suppressPresentation = false;
     }
   }
 
@@ -524,6 +608,7 @@ export class CinematicCameraManager {
       try {
         const scene = canvas?.scene;
         if (!scene) return;
+        extendMsaLocalFlagWriteGuard();
         await scene.setFlag(MODULE_ID, SCENE_FLAG_KEY, { ...this.sceneState });
       } catch (e) {
         log.warn('Failed to persist camera scene state', e);
@@ -534,6 +619,7 @@ export class CinematicCameraManager {
   _applySceneStatePatch(patch, { persist = true } = {}) {
     if (!patch || typeof patch !== 'object') return;
 
+    const wasCinematicActive = this.sceneState.cinematicActive === true;
     const wasFollowing = this._isPlayerFollowLocked();
     const wasBroadcasting = this._shouldBroadcastCameraState();
 
@@ -556,8 +642,8 @@ export class CinematicCameraManager {
     this.sceneState.localInputSmoothingEnabled = this.sceneState.localInputSmoothingEnabled !== false;
 
     this.sceneState.uiFade = clamp(asNumber(this.sceneState.uiFade, 0.92), 0, 1);
-    this.sceneState.barHeightPct = clamp(asNumber(this.sceneState.barHeightPct, 0.12), 0.03, 0.35);
-    this.sceneState.transitionMs = clamp(asNumber(this.sceneState.transitionMs, 450), 50, 3000);
+    this.sceneState.barHeightPct = normalizeBarHeightPct(this.sceneState.barHeightPct);
+    this.sceneState.transitionMs = clamp(asNumber(this.sceneState.transitionMs, CINEMATIC_CURTAIN_MS), CINEMATIC_CURTAIN_MS, 10000);
     this.sceneState.playerBoundsPadding = clamp(asNumber(this.sceneState.playerBoundsPadding, 220), 0, 2000);
     this.sceneState.playerBoundsSampleDivisions = clamp(Math.round(asNumber(this.sceneState.playerBoundsSampleDivisions, 16)), 6, 80);
     this.sceneState.cohesionStrength = clamp(asNumber(this.sceneState.cohesionStrength, 0.08), 0, 1);
@@ -565,58 +651,262 @@ export class CinematicCameraManager {
     this.sceneState.localPanSmoothingHz = clamp(asNumber(this.sceneState.localPanSmoothingHz, 14), 1, 80);
     this.sceneState.localZoomSmoothingHz = clamp(asNumber(this.sceneState.localZoomSmoothingHz, 10), 1, 80);
 
+    const nowCinematicActive = this.sceneState.cinematicActive === true;
+    const cinematicToggledOn = !wasCinematicActive && nowCinematicActive;
+    const cinematicToggledOff = wasCinematicActive && !nowCinematicActive;
+
+    if (cinematicToggledOn && !isUserGM()) {
+      this.playerOptOut = false;
+      this._savePlayerLocalState();
+    }
+
     this._invalidatePlayerBounds();
-    this._applyVisualState();
+
+    if (this._suppressPresentation) {
+      this._applyVisualState();
+    } else if (cinematicToggledOn) {
+      this._runEnterPresentation();
+    } else if (cinematicToggledOff) {
+      this._runExitPresentation();
+    } else if (this._presentationPhase === 'idle' || this._presentationPhase === 'active') {
+      this._applyVisualState();
+    }
+
     this._emitStateChanged();
 
     const isFollowing = this._isPlayerFollowLocked();
     const isBroadcasting = this._shouldBroadcastCameraState();
 
     if (!isFollowing) {
-      this._resetRemoteFollowState({ clearTarget: true });
-    } else if (!wasFollowing && isFollowing) {
-      this._resetRemoteFollowState({ clearTarget: true });
+      const keepPendingGmView = this.sceneState.cinematicActive === true && this.sceneState.lockPlayers === true;
+      if (!keepPendingGmView) {
+        this._resetRemoteFollowState({ clearTarget: true });
+      }
+    } else if (!wasFollowing && isFollowing && this._remotePanTarget) {
+      this._tickRemoteFollow();
     }
 
-    if (!wasBroadcasting && isBroadcasting) {
-      // Emit an immediate authoritative snapshot so newly-locked players do not
-      // need to wait for the next camera pan event.
-      this._broadcastCameraState(null, { force: true });
-    } else if (wasBroadcasting && !isBroadcasting) {
+    if (isUserGM() && !this._cameraCurtainClosed) {
+      const shouldForceSnap = (!wasBroadcasting && isBroadcasting) || (!wasFollowing && isFollowing);
+      if (shouldForceSnap) {
+        this._broadcastCameraState(null, { force: true });
+      }
+    }
+    if (wasBroadcasting && !isBroadcasting) {
       this._lastBroadcastView = null;
     }
 
     if (persist) this._schedulePersistSceneState();
   }
 
+  _cancelPresentation() {
+    this._presentationToken += 1;
+    for (const id of this._presentationTimers) {
+      clearTimeout(id);
+    }
+    this._presentationTimers.length = 0;
+  }
+
+  _schedulePresentation(delayMs, fn) {
+    const id = setTimeout(fn, Math.max(0, delayMs));
+    this._presentationTimers.push(id);
+    return id;
+  }
+
+  _syncBarCssVars(barTransitionMs = null) {
+    if (!this._overlayRoot) return;
+    const barHeightPct = normalizeBarHeightPct(this.sceneState.barHeightPct);
+    const transitionMs = clamp(
+      asNumber(barTransitionMs ?? this.sceneState.transitionMs, CINEMATIC_CURTAIN_MS),
+      CINEMATIC_CURTAIN_MS,
+      10000,
+    );
+    this._overlayRoot.style.setProperty('--map-shine-cinematic-transition-ms', `${transitionMs}ms`);
+    this._overlayRoot.style.setProperty('--map-shine-cinematic-bar-height', `${barHeightPct * 100}%`);
+  }
+
+  _setBarTransitionMs(ms) {
+    if (!this._overlayRoot) return;
+    const duration = clamp(asNumber(ms, CINEMATIC_CURTAIN_MS), CINEMATIC_CURTAIN_MS, 10000);
+    this._overlayRoot.style.setProperty('--map-shine-cinematic-transition-ms', `${duration}ms`);
+  }
+
+  _setFadeOpacity(opacity, durationMs = CINEMATIC_CURTAIN_MS) {
+    if (!this._fadeOverlay || isUserGM()) return;
+    const target = clamp(asNumber(opacity, 0), 0, 1);
+    const duration = clamp(asNumber(durationMs, CINEMATIC_CURTAIN_MS), CINEMATIC_CURTAIN_MS, 10000);
+    this._fadeOverlay.style.transition = `opacity ${duration}ms ease`;
+    void this._fadeOverlay.offsetWidth;
+    this._fadeOverlay.style.opacity = String(target);
+  }
+
+  _setPlayerUiHidden(hidden) {
+    if (isUserGM()) return;
+    try {
+      document.body.classList.toggle('map-shine-cinematic-player-hide-ui', hidden === true);
+    } catch (_) {}
+  }
+
+  _runEnterPresentation() {
+    this._cancelPresentation();
+    const token = this._presentationToken;
+    this._presentationPhase = 'entering';
+    this._cameraCurtainClosed = true;
+
+    const gm = isUserGM();
+    this._syncBarCssVars(CINEMATIC_CURTAIN_MS);
+    this._setLetterboxActive(false);
+    this._overlayRoot?.classList.remove('map-shine-cinematic-root--gm-preview');
+
+    if (!gm) {
+      this._setPlayerUiHidden(true);
+      this._setFadeOpacity(0, 0);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (token !== this._presentationToken) return;
+          this._setFadeOpacity(1, CINEMATIC_CURTAIN_MS);
+        });
+      });
+    }
+
+    this._schedulePresentation(CINEMATIC_UI_HOLD_MS, () => {
+      if (token !== this._presentationToken) return;
+      this._setBarTransitionMs(CINEMATIC_CURTAIN_MS);
+      this._setLetterboxActive(true);
+      if (gm) {
+        this._overlayRoot?.classList.add('map-shine-cinematic-root--gm-preview');
+      }
+    });
+
+    this._schedulePresentation(CINEMATIC_CURTAIN_MS, () => {
+      if (token !== this._presentationToken) return;
+      this._cameraCurtainClosed = false;
+      if (isUserGM()) {
+        this._broadcastCameraState(null, { force: true });
+      } else if (this._remotePanTarget) {
+        this._tickRemoteFollow();
+      }
+      this._emitStateChanged();
+    });
+
+    this._schedulePresentation(CINEMATIC_UI_HOLD_MS + CINEMATIC_CURTAIN_MS, () => {
+      if (token !== this._presentationToken) return;
+      if (!gm) {
+        this._setFadeOpacity(0, CINEMATIC_CURTAIN_MS);
+      }
+      this._presentationPhase = 'active';
+      this._applyVisualState();
+      this._emitStateChanged();
+    });
+  }
+
+  _runExitPresentation() {
+    this._cancelPresentation();
+    const token = this._presentationToken;
+    this._presentationPhase = 'exiting';
+    this._cameraCurtainClosed = true;
+
+    const gm = isUserGM();
+
+    if (!gm) {
+      this._setFadeOpacity(0, 0);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (token !== this._presentationToken) return;
+          this._setFadeOpacity(1, CINEMATIC_CURTAIN_MS);
+        });
+      });
+    }
+
+    this._schedulePresentation(CINEMATIC_CURTAIN_MS, () => {
+      if (token !== this._presentationToken) return;
+      this._cameraCurtainClosed = false;
+      this._resetRemoteFollowState({ clearTarget: true });
+      this._lastBroadcastView = null;
+      this._setBarTransitionMs(CINEMATIC_CURTAIN_MS);
+      this._setLetterboxActive(false);
+      this._overlayRoot?.classList.remove('map-shine-cinematic-root--gm-preview');
+    });
+
+    this._schedulePresentation(CINEMATIC_CURTAIN_MS + CINEMATIC_CURTAIN_MS, () => {
+      if (token !== this._presentationToken) return;
+      if (!gm) {
+        this._setPlayerUiHidden(false);
+        this._setFadeOpacity(0, CINEMATIC_CURTAIN_MS);
+      }
+      this._presentationPhase = 'idle';
+      this._applyVisualState();
+      this._emitStateChanged();
+    });
+  }
+
+  _setLetterboxActive(showLetterbox) {
+    if (!this._overlayRoot) return;
+
+    const token = ++this._letterboxAnimToken;
+    const apply = (active) => {
+      if (token !== this._letterboxAnimToken || !this._overlayRoot) return;
+      this._overlayRoot.classList.toggle('map-shine-cinematic-active', active);
+    };
+
+    if (showLetterbox && !this._overlayRoot.classList.contains('map-shine-cinematic-active')) {
+      apply(false);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => apply(true));
+      });
+      return;
+    }
+
+    apply(showLetterbox);
+  }
+
   _applyVisualState() {
     if (!this._overlayRoot) return;
 
-    this._overlayRoot.style.setProperty('--map-shine-cinematic-transition-ms', `${this.sceneState.transitionMs}ms`);
-    this._overlayRoot.style.setProperty('--map-shine-cinematic-bar-height', `${this.sceneState.barHeightPct * 100}%`);
-
+    const gm = isUserGM();
     const cinematicActive = this.sceneState.cinematicActive === true;
+    const letterboxEnabled = this.sceneState.letterboxEnabled === true;
+    const inTransition = this._presentationPhase === 'entering' || this._presentationPhase === 'exiting';
 
-    const strictLockedLocally = !isGmLike()
+    this._syncBarCssVars();
+
+    if (!inTransition) {
+      const strictLockedLocally = !gm
+        && cinematicActive
+        && this.sceneState.lockPlayers
+        && this.sceneState.strictFollow;
+
+      const localCinematicActive = cinematicActive && (strictLockedLocally || !this.playerOptOut);
+
+      const showPlayerLetterbox = !gm && localCinematicActive && letterboxEnabled;
+      const showGmPreviewLetterbox = gm && cinematicActive && letterboxEnabled;
+      const showLetterbox = showPlayerLetterbox || showGmPreviewLetterbox;
+
+      this._setLetterboxActive(showLetterbox);
+      this._overlayRoot.classList.toggle('map-shine-cinematic-root--gm-preview', showGmPreviewLetterbox);
+
+      const shouldHidePlayerUi = !gm
+        && localCinematicActive
+        && this.sceneState.lockPlayers === true
+        && this._presentationPhase === 'active';
+
+      this._setPlayerUiHidden(shouldHidePlayerUi);
+    }
+
+    const showPlayerToggle = !gm && cinematicActive && this._presentationPhase === 'active';
+    const strictLockedLocally = !gm
       && cinematicActive
       && this.sceneState.lockPlayers
       && this.sceneState.strictFollow;
-
     const localCinematicActive = cinematicActive && (strictLockedLocally || !this.playerOptOut);
-    const showLetterbox = localCinematicActive && this.sceneState.letterboxEnabled === true;
-    this._overlayRoot.classList.toggle('map-shine-cinematic-active', showLetterbox);
 
-    const showToggle = cinematicActive;
     if (this._playerToggleButton) {
-      this._playerToggleButton.style.display = showToggle ? 'inline-flex' : 'none';
+      this._playerToggleButton.style.display = showPlayerToggle ? 'inline-flex' : 'none';
       this._playerToggleButton.classList.toggle('map-shine-cinematic-toggle--locked', strictLockedLocally);
       this._playerToggleButton.disabled = strictLockedLocally;
       this._playerToggleButton.title = strictLockedLocally
         ? 'GM has enabled strict cinematic follow.'
         : '';
-    }
-
-    if (this._playerToggleButton) {
       if (strictLockedLocally) {
         this._playerToggleButton.textContent = 'Cinematic Locked';
       } else {
@@ -624,18 +914,35 @@ export class CinematicCameraManager {
       }
     }
 
-    const shouldFadeUi = localCinematicActive;
+    const showGmChrome = gm && (
+      this._presentationPhase === 'entering'
+      || this._presentationPhase === 'active'
+      || this._presentationPhase === 'exiting'
+    );
+    if (this._gmBanner) {
+      this._gmBanner.style.display = (showGmChrome && this._presentationPhase === 'active') ? 'flex' : 'none';
+    }
+    if (this._gmToggleButton) {
+      this._gmToggleButton.style.display = showGmChrome ? 'inline-flex' : 'none';
+      this._gmToggleButton.classList.toggle('is-active', this._presentationPhase === 'active' || this._presentationPhase === 'entering');
+      if (showGmChrome) {
+        this._gmToggleButton.textContent = this._gmToggleDefaultLabel;
+      }
+    }
+
     const uiRoot = document.getElementById('ui');
     if (uiRoot) {
-      uiRoot.classList.toggle('map-shine-cinematic-ui-fade-active', shouldFadeUi);
-      uiRoot.style.setProperty('--map-shine-cinematic-ui-opacity', String(1 - this.sceneState.uiFade));
-      uiRoot.style.setProperty('--map-shine-cinematic-transition-ms', `${this.sceneState.transitionMs}ms`);
+      uiRoot.classList.remove('map-shine-cinematic-ui-fade-active');
+      uiRoot.style.removeProperty('--map-shine-cinematic-ui-opacity');
+      uiRoot.style.removeProperty('--map-shine-cinematic-transition-ms');
     }
   }
 
   _isPlayerFollowLocked() {
     if (this.isRuntimeTemporarilySuspended()) return false;
-    if (isGmLike()) return false;
+    if (this._cameraCurtainClosed) return false;
+    if (this._presentationPhase === 'idle' || this._presentationPhase === 'exiting') return false;
+    if (isUserGM()) return false;
     if (!this.sceneState.cinematicActive) return false;
     if (!this.sceneState.lockPlayers) return false;
     if (this.sceneState.strictFollow) return true;
@@ -678,7 +985,7 @@ export class CinematicCameraManager {
   }
 
   toggleLocalOptOut() {
-    if (!isGmLike() && this.sceneState.strictFollow && this.sceneState.cinematicActive && this.sceneState.lockPlayers) {
+    if (!isUserGM() && this.sceneState.strictFollow && this.sceneState.cinematicActive && this.sceneState.lockPlayers) {
       return false;
     }
 
@@ -698,15 +1005,24 @@ export class CinematicCameraManager {
   }
 
   startCinematic() {
+    if (this.sceneState.cinematicActive || this._presentationPhase === 'entering') return;
+    extendMsaLocalFlagWriteGuard();
     this._applySceneStatePatch({
       improvedModeEnabled: true,
       cinematicActive: true,
       lockPlayers: true,
+      strictFollow: true,
       letterboxEnabled: true,
+      transitionMs: CINEMATIC_CURTAIN_MS,
     });
   }
 
   endCinematic() {
+    if (!this.sceneState.cinematicActive && this._presentationPhase !== 'entering') return;
+    extendMsaLocalFlagWriteGuard();
+    if (isUserGM()) {
+      this.broadcastEnvironmentRelease();
+    }
     this._applySceneStatePatch({
       cinematicActive: false,
       lockPlayers: false,
@@ -838,7 +1154,9 @@ export class CinematicCameraManager {
   }
 
   _shouldBroadcastCameraState() {
-    return isGmLike()
+    if (this._cameraCurtainClosed) return false;
+    if (this._presentationPhase !== 'active' && this._presentationPhase !== 'entering') return false;
+    return isUserGM()
       && this.sceneState.cinematicActive
       && this.sceneState.lockPlayers;
   }
@@ -871,7 +1189,7 @@ export class CinematicCameraManager {
   }
 
   broadcastEnvironmentRelease() {
-    if (!isGmLike()) return;
+    if (!isUserGM()) return;
     try {
       game.socket.emit(SOCKET_CHANNEL, {
         type: ENVIRONMENT_RELEASE_SOCKET_TYPE,
@@ -883,17 +1201,39 @@ export class CinematicCameraManager {
     }
   }
 
+  _captureCurrentView() {
+    const x = asNumber(canvas?.stage?.pivot?.x, NaN);
+    const y = asNumber(canvas?.stage?.pivot?.y, NaN);
+    const scale = asNumber(canvas?.stage?.scale?.x, NaN);
+    if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(scale)) {
+      return { x, y, scale };
+    }
+
+    const fromScene = canvas?.scene?._viewPosition;
+    const sx = asNumber(fromScene?.x, NaN);
+    const sy = asNumber(fromScene?.y, NaN);
+    const ss = asNumber(fromScene?.scale, NaN);
+    if (Number.isFinite(sx) && Number.isFinite(sy) && Number.isFinite(ss)) {
+      return { x: sx, y: sy, scale: ss };
+    }
+
+    return null;
+  }
+
+  _pollGmCameraBroadcast() {
+    if (!this._shouldBroadcastCameraState()) return;
+    const view = this._captureCurrentView();
+    if (!view) return;
+    this._broadcastCameraState(view);
+  }
+
   _broadcastCameraState(position, { force = false } = {}) {
     if (!force && !this._shouldBroadcastCameraState()) return;
 
     const now = Date.now();
     if (!force && (now - this._lastBroadcastAt) < this._broadcastMinIntervalMs) return;
 
-    const pos = position || canvas?.scene?._viewPosition || {
-      x: canvas?.stage?.pivot?.x,
-      y: canvas?.stage?.pivot?.y,
-      scale: canvas?.stage?.scale?.x,
-    };
+    const pos = position || this._captureCurrentView();
 
     if (!Number.isFinite(pos?.x) || !Number.isFinite(pos?.y) || !Number.isFinite(pos?.scale)) return;
 
@@ -938,7 +1278,7 @@ export class CinematicCameraManager {
       return;
     }
     if (payload.type !== CAMERA_SOCKET_TYPE) return;
-    if (isGmLike()) return;
+    if (isUserGM()) return;
 
     const senderId = typeof payload.senderId === 'string' ? payload.senderId : null;
     if (senderId && senderId === game.user?.id) return;
@@ -973,7 +1313,7 @@ export class CinematicCameraManager {
   }
 
   _onEnvironmentSocketMessage(payload) {
-    if (isGmLike()) return;
+    if (isUserGM()) return;
 
     const senderId = typeof payload.senderId === 'string' ? payload.senderId : null;
     if (senderId && senderId === game.user?.id) return;
@@ -1008,7 +1348,7 @@ export class CinematicCameraManager {
   }
 
   _onEnvironmentReleaseSocketMessage(payload) {
-    if (isGmLike()) return;
+    if (isUserGM()) return;
 
     const senderId = typeof payload.senderId === 'string' ? payload.senderId : null;
     if (senderId && senderId === game.user?.id) return;
@@ -1037,11 +1377,35 @@ export class CinematicCameraManager {
       scale,
       t: Date.now(),
     };
+
+    if (this._isPlayerFollowLocked()) {
+      this._applyRemotePanView(x, y, scale);
+    }
+  }
+
+  /**
+   * @param {number} x
+   * @param {number} y
+   * @param {number} scale
+   */
+  _applyRemotePanView(x, y, scale) {
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(scale)) return;
+    if (!canvas?.stage?.pivot || !canvas?.stage?.scale) return;
+
+    this._isApplyingRemotePan = true;
+    try {
+      canvas.pan({ x, y, scale, duration: 0 });
+    } catch (e) {
+      log.warn('Failed to apply remote cinematic pan', e);
+    } finally {
+      this._isApplyingRemotePan = false;
+    }
   }
 
   _tickRemoteFollow(timeInfo = null) {
     if (this.isRuntimeTemporarilySuspended()) return;
-    if (isGmLike()) return;
+    if (this._cameraCurtainClosed) return;
+    if (isUserGM()) return;
     if (!this._isPlayerFollowLocked()) return;
     if (!this._remotePanTarget) return;
     if (!canvas?.stage?.pivot || !canvas?.stage?.scale || !canvas?.pan) return;
@@ -1071,15 +1435,7 @@ export class CinematicCameraManager {
     const finalY = closeEnough ? target.y : nextY;
     const finalScale = closeEnough ? target.scale : nextScale;
 
-    this._isApplyingRemotePan = true;
-    try {
-      // Use duration=0 so this manager's own interpolation controls smoothing.
-      canvas.pan({ x: finalX, y: finalY, scale: finalScale, duration: 0 });
-    } catch (e) {
-      log.warn('Failed to apply remote cinematic pan', e);
-    } finally {
-      this._isApplyingRemotePan = false;
-    }
+    this._applyRemotePanView(finalX, finalY, finalScale);
 
     if (closeEnough) {
       this._remotePanTarget = null;
@@ -1182,7 +1538,7 @@ export class CinematicCameraManager {
     if (this.isRuntimeTemporarilySuspended()) return view;
     if (!this.sceneState.improvedModeEnabled) return view;
     if (!this.sceneState.playerBoundsEnabled) return view;
-    if (isGmLike()) return view;
+    if (isUserGM()) return view;
     if (this._isPlayerFollowLocked()) return view;
 
     const bounds = this._getOrComputePlayerBounds();
@@ -1228,7 +1584,9 @@ export class CinematicCameraManager {
     const placeables = canvas?.tokens?.placeables;
     if (!Array.isArray(placeables) || !placeables.length) return [];
 
-    if (isGmLike()) return [];
+    if (isUserGM()) {
+      return placeables.filter((t) => t?.visible !== false);
+    }
 
     return placeables.filter((t) => t?.document?.actor?.isOwner === true);
   }
@@ -1338,6 +1696,7 @@ export class CinematicCameraManager {
 
   update(timeInfo) {
     this._lastExternalUpdateAt = Date.now();
+    this._pollGmCameraBroadcast();
     this._tickRemoteFollow(timeInfo);
     this._tickGroupCohesion();
   }

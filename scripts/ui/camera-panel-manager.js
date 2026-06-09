@@ -1,14 +1,24 @@
 /**
  * @fileoverview Camera Panel Manager
- * Lightweight panel for Map Shine Advanced camera controls.
+ * Full tuning panel for Map Shine Advanced camera controls.
  *
  * @module ui/camera-panel-manager
  */
-import { isGmLike } from '../core/gm-parity.js';
+import { isUserGM } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 
 const log = createLogger('CameraPanel');
+
+const SLIDER_DISPLAY_FORMAT = {
+  uiFade: (v) => `${Math.round(asNumber(v, 0) * 100)}%`,
+  barHeightPct: (v) => `${Math.round(asNumber(v, 0) * 100)}%`,
+  transitionMs: (v) => `${Math.round(asNumber(v, 0))} ms`,
+  playerBoundsPadding: (v) => `${Math.round(asNumber(v, 0))} px`,
+  playerBoundsSampleDivisions: (v) => `${Math.round(asNumber(v, 0))}`,
+  cohesionStrength: (v) => `${Math.round(asNumber(v, 0) * 100)}%`,
+  cohesionPadding: (v) => `${Math.round(asNumber(v, 0))} px`,
+};
 
 function asNumber(value, fallback) {
   const n = Number(value);
@@ -46,43 +56,70 @@ export class CameraPanelManager {
 
     container.innerHTML = `
       <div class="map-shine-camera-panel__header">
-        <div class="map-shine-camera-panel__title">Map Shine Camera</div>
+        <div class="map-shine-camera-panel__title">Cinematic Options</div>
         <button type="button" class="map-shine-camera-panel__close" data-action="close" aria-label="Close">×</button>
       </div>
       <div class="map-shine-camera-panel__body">
         <label><input type="checkbox" data-input="improvedModeEnabled"> Enable Improved Camera Mode</label>
 
-        <div class="map-shine-camera-panel__section">Cinematic</div>
-        <label><input type="checkbox" data-input="cinematicActive"> Cinematic Active</label>
+        <div class="map-shine-camera-panel__section">Cinematic (players)</div>
         <label><input type="checkbox" data-input="lockPlayers"> Lock Players to GM Camera</label>
         <label><input type="checkbox" data-input="strictFollow"> Strict Force Follow</label>
 
-        <label>UI Fade
+        <label class="map-shine-camera-panel__slider">
+          <span class="map-shine-camera-panel__slider-head">
+            <span>UI Fade (legacy opacity when not fully hidden)</span>
+            <span data-display="uiFade">92%</span>
+          </span>
           <input type="range" data-input="uiFade" min="0" max="1" step="0.01">
         </label>
-        <label>Bar Height
+        <label class="map-shine-camera-panel__slider">
+          <span class="map-shine-camera-panel__slider-head">
+            <span>Bar Height</span>
+            <span data-display="barHeightPct">12%</span>
+          </span>
           <input type="range" data-input="barHeightPct" min="0.03" max="0.35" step="0.01">
         </label>
-        <label>Transition (ms)
-          <input type="range" data-input="transitionMs" min="50" max="3000" step="10">
+        <label class="map-shine-camera-panel__slider">
+          <span class="map-shine-camera-panel__slider-head">
+            <span>Transition (bar speed; cinematic sequence uses 5s minimum)</span>
+            <span data-display="transitionMs">5000 ms</span>
+          </span>
+          <input type="range" data-input="transitionMs" min="5000" max="10000" step="100">
         </label>
 
         <div class="map-shine-camera-panel__section">Player Fog Bounds</div>
         <label><input type="checkbox" data-input="playerBoundsEnabled"> Enable Player Bounds</label>
-        <label>Padding (px)
+        <label class="map-shine-camera-panel__slider">
+          <span class="map-shine-camera-panel__slider-head">
+            <span>Padding</span>
+            <span data-display="playerBoundsPadding">220 px</span>
+          </span>
           <input type="range" data-input="playerBoundsPadding" min="0" max="2000" step="10">
         </label>
-        <label>Sampling
+        <label class="map-shine-camera-panel__slider">
+          <span class="map-shine-camera-panel__slider-head">
+            <span>Sampling divisions</span>
+            <span data-display="playerBoundsSampleDivisions">16</span>
+          </span>
           <input type="range" data-input="playerBoundsSampleDivisions" min="6" max="80" step="1">
         </label>
 
         <div class="map-shine-camera-panel__section">Group Cohesion</div>
         <label><input type="checkbox" data-input="cohesionEnabled"> Enable Group Cohesion Force</label>
-        <label>Strength
+        <label class="map-shine-camera-panel__slider">
+          <span class="map-shine-camera-panel__slider-head">
+            <span>Strength</span>
+            <span data-display="cohesionStrength">8%</span>
+          </span>
           <input type="range" data-input="cohesionStrength" min="0" max="1" step="0.01">
         </label>
         <label><input type="checkbox" data-input="cohesionAutoFit"> Auto-fit Group</label>
-        <label>Fit Padding (px)
+        <label class="map-shine-camera-panel__slider">
+          <span class="map-shine-camera-panel__slider-head">
+            <span>Fit Padding</span>
+            <span data-display="cohesionPadding">220 px</span>
+          </span>
           <input type="range" data-input="cohesionPadding" min="0" max="2000" step="10">
         </label>
 
@@ -90,8 +127,7 @@ export class CameraPanelManager {
         <div class="map-shine-camera-panel__actions">
           <button type="button" data-action="focusSelected">Focus Selected</button>
           <button type="button" data-action="focusGroup">Focus Group</button>
-          <button type="button" data-action="testImpulse">Test Impulse API</button>
-          <button type="button" data-action="emergencyUnlock">Emergency Unlock</button>
+          <button type="button" data-action="emergencyUnlock">Unlock Players (keep cinematic)</button>
         </div>
       </div>
     `;
@@ -118,6 +154,22 @@ export class CameraPanelManager {
     const displays = this.container.querySelectorAll('[data-display]');
     for (const display of displays) {
       this._displays[display.dataset.display] = display;
+    }
+  }
+
+  _formatDisplay(key, value) {
+    const fmt = SLIDER_DISPLAY_FORMAT[key];
+    return fmt ? fmt(value) : String(value ?? '');
+  }
+
+  _updateDisplays(keys = null) {
+    const state = this.cinematicManager?.getState?.();
+    const keyList = keys || Object.keys(this._displays);
+    for (const key of keyList) {
+      const el = this._displays[key];
+      if (!el) continue;
+      const raw = state ? state[key] : this._inputs[key]?.value;
+      el.textContent = this._formatDisplay(key, raw);
     }
   }
 
@@ -160,10 +212,6 @@ export class CameraPanelManager {
         case 'focusGroup':
           this.cinematicManager?.focusControlledGroup?.();
           break;
-        case 'testImpulse':
-          this.cinematicManager?.triggerImpulse?.({ x: 0.6, y: 0.4, zoom: 0.03, durationMs: 220 });
-          ui.notifications?.info?.('Camera impulse API invoked (foundation test).');
-          break;
         case 'emergencyUnlock':
           this.cinematicManager?.emergencyUnlockPlayers?.();
           break;
@@ -173,21 +221,21 @@ export class CameraPanelManager {
     const bind = (key, handler) => {
       const el = this._inputs[key];
       if (!el) return;
-      el.addEventListener('input', () => handler(el));
-      el.addEventListener('change', () => handler(el));
+      const run = () => {
+        handler(el);
+        this._updateDisplays([key]);
+      };
+      el.addEventListener('input', run);
+      el.addEventListener('change', run);
     };
 
     bind('improvedModeEnabled', (el) => this.cinematicManager?.setImprovedModeEnabled?.(el.checked));
-    bind('cinematicActive', (el) => {
-      if (el.checked) this.cinematicManager?.startCinematic?.();
-      else this.cinematicManager?.endCinematic?.();
-    });
     bind('lockPlayers', (el) => this.cinematicManager?.setLockPlayers?.(el.checked));
     bind('strictFollow', (el) => this.cinematicManager?.setStrictFollow?.(el.checked));
 
     bind('uiFade', (el) => this.cinematicManager?.setUiFade?.(asNumber(el.value, 0.92)));
     bind('barHeightPct', (el) => this.cinematicManager?.setBarHeightPct?.(asNumber(el.value, 0.12)));
-    bind('transitionMs', (el) => this.cinematicManager?.setTransitionMs?.(asNumber(el.value, 450)));
+    bind('transitionMs', (el) => this.cinematicManager?.setTransitionMs?.(asNumber(el.value, 5000)));
 
     bind('playerBoundsEnabled', (el) => this.cinematicManager?.setPlayerBoundsEnabled?.(el.checked));
     bind('playerBoundsPadding', (el) => this.cinematicManager?.setPlayerBoundsPadding?.(asNumber(el.value, 220)));
@@ -226,7 +274,6 @@ export class CameraPanelManager {
 
     if (state) {
       setCheck('improvedModeEnabled', state.improvedModeEnabled);
-      setCheck('cinematicActive', state.cinematicActive);
       setCheck('lockPlayers', state.lockPlayers);
       setCheck('strictFollow', state.strictFollow);
 
@@ -244,16 +291,16 @@ export class CameraPanelManager {
       setValue('cohesionPadding', state.cohesionPadding);
     }
 
+    this._updateDisplays();
     this._applyRoleRestrictions();
   }
 
   _applyRoleRestrictions() {
     if (!this.container) return;
-    const isGM = isGmLike();
+    const isGM = isUserGM();
 
     const gmOnlyInputs = [
       'improvedModeEnabled',
-      'cinematicActive',
       'lockPlayers',
       'strictFollow',
       'uiFade',

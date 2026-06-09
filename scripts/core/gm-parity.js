@@ -5,8 +5,8 @@
  * mask discovery, scene flags, UI gates, fog/path helpers, and other former
  * `game.user.isGM` checks behave like the GM client.
  *
- * Set to `false` for production, then restore normal behavior. Re-tighten UI
- * by guarding scene control buttons with real `game.user.isGM` where desired.
+ * Set to `false` for production, then restore normal behavior. GM-only UI must
+ * use {@link isUserGM} (real `game.user.isGM`), not {@link isGmLike}.
  *
  * @module core/gm-parity
  */
@@ -18,6 +18,15 @@ export const MAPSHINE_DEBUG_GM_PARITY = true;
  */
 export function isGmLike() {
   return MAPSHINE_DEBUG_GM_PARITY ? true : !!globalThis.game?.user?.isGM;
+}
+
+/**
+ * Real Foundry GM role — never affected by {@link MAPSHINE_DEBUG_GM_PARITY}.
+ * Use for UI access control (control panel, scene control buttons, etc.).
+ * @returns {boolean}
+ */
+export function isUserGM() {
+  return !!globalThis.game?.user?.isGM;
 }
 
 /**

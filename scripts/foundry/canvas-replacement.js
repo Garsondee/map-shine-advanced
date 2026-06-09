@@ -3,7 +3,7 @@
  * Uses Libwrapper to intercept and replace Foundry's canvas rendering
  * @module foundry/canvas-replacement
  */
-import { isGmLike } from '../core/gm-parity.js';
+import { isGmLike, isUserGM } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import { safeCall, safeCallAsync, safeDispose, Severity } from '../core/safe-call.js';
@@ -4732,6 +4732,7 @@ function _msaMapShineFlagDiffIsEchoOnly(changes) {
       'weather-transition',
       'weather-transitionTarget',
       'tileMotion',
+      'advancedCameraState',
     ]);
     return keys.every((k) => ECHO.has(k));
   } catch (_) {
@@ -5036,6 +5037,11 @@ async function onUpdateScene(scene, changes, _options, _userId) {
 
   // Tile motion transport/config persists only `tileMotion` — must not schedule full reinit.
   if (msaDiffKeys.includes('tileMotion') && !hasMsaSettingsDiff) {
+    _armPredictSameSceneRedrawFromMsaFlags(scene);
+  }
+
+  // Cinematic camera toggles persist `advancedCameraState` — same-scene redraw must keep Map Shine alive.
+  if (msaDiffKeys.includes('advancedCameraState') && !hasMsaSettingsDiff) {
     _armPredictSameSceneRedrawFromMsaFlags(scene);
   }
 
@@ -5959,7 +5965,7 @@ async function onCanvasReady(canvas) {
       }, 'uiManager.init(UI-only)', Severity.DEGRADED);
     }
 
-    if (!controlPanel) {
+    if (!controlPanel && isUserGM()) {
       await safeCallAsync(async () => {
         controlPanel = new ControlPanelManager();
         await controlPanel.initialize();
@@ -8646,7 +8652,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
         safeCall(() => loadingOverlay.setStage('ui.panels', 0.60, 'Weather ready...', { keepAuto: false }), 'overlay.uiInit.weatherDone', Severity.COSMETIC);
         await new Promise(r => setTimeout(r, 0)); // yield
 
-        if (!controlPanel) {
+        if (!controlPanel && isUserGM()) {
           controlPanel = new ControlPanelManager();
           await controlPanel.initialize();
           safeCall(() => loadingOverlay.setStage('ui.panels', 0.75, 'Control panel ready...', { keepAuto: false }), 'overlay.uiInit.controlPanelReady', Severity.COSMETIC);
@@ -8659,10 +8665,19 @@ async function createThreeCanvas(scene, createOptions = {}) {
         }, 'v2.flushLandscapeLightning.postControlPanel', Severity.COSMETIC);
 
         if (!cinematicCameraManager) {
-          cinematicCameraManager = new CinematicCameraManager();
+          cinematicCameraManager = new CinematicCameraManager({
+            pixiInputBridge,
+            sceneComposer,
+          });
           cinematicCameraManager.initialize();
           if (window.MapShine) window.MapShine.cinematicCameraManager = cinematicCameraManager;
+        } else {
+          cinematicCameraManager.setDependencies({ pixiInputBridge, sceneComposer });
         }
+        safeCall(() => {
+          effectComposer?.removeUpdatable?.(cinematicCameraManager);
+          effectComposer?.addUpdatable?.(cinematicCameraManager);
+        }, 'cinematicCamera.updatable.uiInit', Severity.COSMETIC);
 
         safeCall(() => {
           const bridge = getWeatherSyncBridge();

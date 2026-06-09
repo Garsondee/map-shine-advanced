@@ -70,6 +70,7 @@ import {
   refreshMaskStatusRow,
 } from './mask-status-ui.js';
 import { isStylisticEffectId } from '../effects/resolve-effect-enabled.js';
+import { openContextGradeDebugDialog } from './context-grade-debug-dialog.js';
 
 const log = createLogger('UI');
 
@@ -88,6 +89,47 @@ function resolveInitialEffectEnabled(schema, savedParams) {
   const pe = schema?.parameters?.enabled;
   if (pe && typeof pe.default === 'boolean') return pe.default;
   return false;
+}
+
+/**
+ * Read-only Tweakpane string → fixed-height textarea (e.g. context key, one trigger per line).
+ *
+ * @param {object} binding
+ * @param {{ rows?: number }} [opts]
+ */
+function applyMultilineReadonlyBinding(binding, opts = {}) {
+  const rows = Math.max(2, Number(opts.rows) || 6);
+  try {
+    const root = binding?.element;
+    if (!root) return;
+    const input = root.querySelector('input');
+    if (!input || root.querySelector('textarea')) return;
+
+    const ta = document.createElement('textarea');
+    ta.readOnly = true;
+    ta.spellcheck = false;
+    ta.rows = rows;
+    ta.value = input.value ?? '';
+    ta.style.width = '100%';
+    ta.style.resize = 'vertical';
+    ta.style.fontFamily = 'var(--font-monospace, monospace)';
+    ta.style.fontSize = '11px';
+    ta.style.lineHeight = '1.35';
+    ta.style.minHeight = `${rows * 1.35}em`;
+    ta.style.boxSizing = 'border-box';
+    input.replaceWith(ta);
+
+    binding._msMultilineEl = ta;
+    const origRefresh = binding.refresh?.bind(binding);
+    if (origRefresh) {
+      binding.refresh = () => {
+        origRefresh();
+        const src = binding.target?.[binding.key] ?? binding.controller?.value?.rawValue ?? '';
+        if (binding._msMultilineEl) binding._msMultilineEl.value = String(src);
+      };
+    }
+  } catch (_) {
+  }
 }
 
 /**
@@ -5321,6 +5363,31 @@ export class TweakpaneManager {
     this.updateEffectiveState(effectId);
     this.updateControlStates(effectId);
 
+    if (effectId === 'contextualSceneGrade') {
+      const statusKeys = [
+        'statusIndoorOutdoor',
+        'statusState',
+        'statusContextKey',
+        'statusSkyCondition',
+        'statusDayPhase',
+        'statusSubject',
+        'statusOutdoorsSample',
+        'statusMaskProbe',
+        'statusCcOverlay',
+        'statusProbeAge',
+      ];
+      const effectDataForStatus = this.effectFolders[effectId];
+      if (effectDataForStatus) {
+        effectDataForStatus._contextGradeStatusBindings = statusKeys
+          .map((k) => effectDataForStatus.bindings?.[k])
+          .filter(Boolean);
+      }
+
+      folder.addButton({ title: 'Open live diagnostics…' }).on('click', () => {
+        openContextGradeDebugDialog();
+      });
+    }
+
     folder.addButton({
       title: '🔄 Reset to Defaults'
     }).on('click', () => {
@@ -5780,6 +5847,10 @@ export class TweakpaneManager {
     // Apply readonly state if requested
     if (paramDef.readonly) {
       binding.disabled = true;
+    }
+
+    if (paramDef.readonly && paramDef.multiline) {
+      applyMultilineReadonlyBinding(binding, { rows: paramDef.rows ?? 6 });
     }
 
     effectData.bindings[paramId] = binding;
@@ -8777,6 +8848,39 @@ export class TweakpaneManager {
           dst.lastProbeAgeSeconds = Number.isFinite(src.lastProbeAgeSeconds) ? src.lastProbeAgeSeconds : 0.0;
 
           const bindings = this._dynamicExposureDebugBindings;
+          if (Array.isArray(bindings)) {
+            for (const b of bindings) {
+              try {
+                b?.refresh?.();
+              } catch (_) {
+              }
+            }
+          }
+        }
+      } catch (_) {
+      }
+
+      // Contextual Scene Grade — mirror live status from runtime into readonly Tweakpane fields.
+      try {
+        const src = window.MapShine?.floorCompositorV2?._contextualSceneGradeEffect?.params;
+        const dst = this.effectFolders?.contextualSceneGrade?.params;
+        if (src && dst) {
+          const keys = [
+            'statusIndoorOutdoor',
+            'statusState',
+            'statusContextKey',
+            'statusSkyCondition',
+            'statusDayPhase',
+            'statusSubject',
+            'statusOutdoorsSample',
+            'statusMaskProbe',
+            'statusCcOverlay',
+            'statusProbeAge',
+          ];
+          for (const k of keys) {
+            if (src[k] !== undefined) dst[k] = src[k];
+          }
+          const bindings = this.effectFolders?.contextualSceneGrade?._contextGradeStatusBindings;
           if (Array.isArray(bindings)) {
             for (const b of bindings) {
               try {

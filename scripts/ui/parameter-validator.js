@@ -250,15 +250,18 @@ export class ParameterValidator {
       warnings.push(`Coerced to boolean: ${value} -> ${validValue}`);
     }
 
-    // Enum/options validation
+    // Enum/options validation — dropdowns store option keys (e.g. '' → "(global)").
     if (paramDef.options) {
-      const validValues = Object.values(paramDef.options);
-      if (!validValues.includes(value)) {
+      const optionKeys = Object.keys(paramDef.options);
+      const optionValues = Object.values(paramDef.options);
+      const allowed = paramDef.type === 'dropdown' ? optionKeys : optionValues;
+      const isValid = optionKeys.includes(value) || optionValues.includes(value);
+      if (!isValid) {
         return {
           valid: false,
           value: paramDef.default,
           warnings: [],
-          error: `Invalid option: ${value} not in [${validValues.join(', ')}]`
+          error: `Invalid option: ${JSON.stringify(value)} not in [${allowed.join(', ')}]`
         };
       }
     }

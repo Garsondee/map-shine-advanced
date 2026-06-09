@@ -820,6 +820,7 @@ export class EffectComposer {
           window.MapShine.playerLightEffectV2 = this._floorCompositorV2._playerLightEffect;
           // Back-compat alias for call sites not yet migrated.
           window.MapShine.playerLightEffect = this._floorCompositorV2._playerLightEffect;
+          window.MapShine.contextualSceneGradeManager = this._floorCompositorV2._contextualSceneGradeManager;
           // Movement UI overlay (path lines, tile highlights, ghost tokens, drag ghosts).
           window.MapShine.movementPreviewEffectV2 = this._floorCompositorV2._movementPreviewEffect;
           // Bus scene reference — used by non-effect code to place overlays.

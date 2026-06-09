@@ -13,6 +13,7 @@ import {
   isValidPlayerLightMode,
 } from './core/player-light-allowance.js';
 import { getPlayerLightPickerDialog } from './ui/player-light-picker-dialog.js';
+import { getWeatherSyncBridge } from './foundry/weather-sync-bridge.js';
 
 import { registerLevelNavigationKeybindings } from './foundry/level-navigation-keybindings.js';
 import './scene/level-transition-curtain.js';
@@ -31,6 +32,11 @@ function registerModuleSocketListener() {
   _moduleSocketListenerRegistered = true;
   try {
     game?.socket?.on?.(MSA_SOCKET_CHANNEL, (payload) => {
+      try {
+        getWeatherSyncBridge().handleSocketMessage(payload);
+      } catch (e) {
+        console.warn('Map Shine: weather sync socket handler failed', e);
+      }
       try {
         window.MapShine?.cinematicCameraManager?.handleSocketMessage?.(payload);
       } catch (e) {

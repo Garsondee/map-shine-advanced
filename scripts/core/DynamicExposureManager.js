@@ -10,6 +10,7 @@
 
 import { createLogger } from './log.js';
 import Coordinates from '../utils/coordinates.js';
+import { resolveSubjectTokenId } from './context-grade/subject-token-resolver.js';
 
 const log = createLogger('DynamicExposure');
 
@@ -74,6 +75,9 @@ export class DynamicExposureManager {
       // Indoors -> outdoors transition trigger (roof mask change)
       dazzleOutdoorsThreshold: 0.7,
       dazzleOutdoorsGain: 0.85,
+
+      /** Multiplier when Contextual Scene Grade drama peak is active (set by manager). */
+      dazzleContextGradeGate: 1.0,
 
       // Environmental gates
       dazzleMaxDarkness: 0.15,
@@ -243,14 +247,7 @@ export class DynamicExposureManager {
   }
 
   _resolveSubjectTokenId() {
-    try {
-      const controlled = canvas?.tokens?.controlled;
-      if (Array.isArray(controlled) && controlled.length > 0) {
-        return controlled[0]?.document?.id ?? controlled[0]?.id ?? null;
-      }
-    } catch (_) {
-    }
-    return null;
+    return resolveSubjectTokenId();
   }
 
   _getSubjectWorldPosition(outVec3) {
@@ -525,6 +522,8 @@ export class DynamicExposureManager {
     // - If idle and not cooling down -> start a new event
     // - If already active -> allow raising peak (but do not restart the ramp)
     if (triggerStrength > 0.0) {
+      const ctxGate = Math.max(0.0, Math.min(1.0, Number(p.dazzleContextGradeGate) || 1.0));
+      triggerStrength *= ctxGate;
       const s = Math.max(0.0, Math.min(1.0, triggerStrength));
 
       if (this._dazzlePhase === 'idle') {

@@ -275,3 +275,47 @@ export function applySceneViewProjectionToUniforms(cache, uniforms) {
   uniforms.uBldViewBoundsMin?.value?.set(cache.vMinX, cache.vMinY);
   uniforms.uBldViewBoundsMax?.value?.set(cache.vMaxX, cache.vMaxY);
 }
+
+/**
+ * Bilinear view-corner ground projection (LightingEffectV2 `sceneUvFoundry`).
+ *
+ * @param {number} screenU
+ * @param {number} screenV
+ * @param {object|null} [uniforms] Lighting compose uniforms; defaults to floor compositor lighting effect.
+ * @returns {{ u: number, v: number, inBounds: boolean }|null}
+ */
+export function screenUvToLightingSceneUv(screenU, screenV, uniforms = null) {
+  const u = uniforms
+    ?? globalThis.MapShine?.floorCompositorV2?._lightingEffect?._composeMaterial?.uniforms
+    ?? null;
+  if (!u?.uBldViewCorner00?.value || !u.uBldSceneOrigin?.value || !u.uBldSceneSize?.value) {
+    return null;
+  }
+
+  const c00 = u.uBldViewCorner00.value;
+  const c10 = u.uBldViewCorner10.value;
+  const c01 = u.uBldViewCorner01.value;
+  const c11 = u.uBldViewCorner11.value;
+  const origin = u.uBldSceneOrigin.value;
+  const size = u.uBldSceneSize.value;
+  const sd = u.uSceneDimensions?.value;
+  const canvasH = Number(sd?.y ?? globalThis.canvas?.dimensions?.height ?? 1);
+
+  const w0x = c00.x + (c10.x - c00.x) * screenU;
+  const w0y = c00.y + (c10.y - c00.y) * screenU;
+  const w1x = c01.x + (c11.x - c01.x) * screenU;
+  const w1y = c01.y + (c11.y - c01.y) * screenU;
+  const wx = w0x + (w1x - w0x) * screenV;
+  const wy = w0y + (w1y - w0y) * screenV;
+
+  const foundryX = wx;
+  const foundryY = canvasH - wy;
+  const su = (foundryX - origin.x) / Math.max(size.x, 1e-5);
+  const sv = (foundryY - origin.y) / Math.max(size.y, 1e-5);
+  const inBounds = su >= 0 && sv >= 0 && su <= 1 && sv <= 1;
+  return {
+    u: Math.max(0, Math.min(1, su)),
+    v: Math.max(0, Math.min(1, sv)),
+    inBounds,
+  };
+}

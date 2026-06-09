@@ -81,6 +81,7 @@ import { InvertEffectV2 } from '../compositor-v2/effects/InvertEffectV2.js';
 import { SepiaEffectV2 } from '../compositor-v2/effects/SepiaEffectV2.js';
 import { LensEffectV2 } from '../compositor-v2/effects/LensEffectV2.js';
 import { FloorDepthBlurEffect } from '../compositor-v2/effects/FloorDepthBlurEffect.js';
+import { ContextualSceneGradeEffectV2 } from '../compositor-v2/effects/ContextualSceneGradeEffectV2.js';
 import { AshDisturbanceEffectV2 } from '../compositor-v2/effects/AshDisturbanceEffectV2.js';
 import { AshCloudEffectV2 } from '../compositor-v2/effects/AshCloudEffectV2.js';
 import { InteractionManager } from '../scene/interaction-manager.js';
@@ -5147,6 +5148,10 @@ async function onUpdateScene(scene, changes, _options, _userId) {
               cp._mirrorAllDomFromState?.();
             }, 'controlPanel.syncManualFog', Severity.COSMETIC);
             safeCall(() => cp.pane?.refresh?.(), 'controlPanel.refresh', Severity.COSMETIC);
+          } else {
+            safeCall(() => {
+              getWeatherSyncBridge().applyRemoteControlState(cs);
+            }, 'updateScene.controlState.playerRuntime', Severity.COSMETIC);
           }
         }, 'updateScene.controlState', Severity.DEGRADED);
       }
@@ -7463,6 +7468,11 @@ async function createThreeCanvas(scene, createOptions = {}) {
     // Always reload the snapshot from the new scene's flags so each scene starts
     // with its own saved weather state (or defaults if no snapshot exists).
     safeCall(() => weatherController._loadWeatherSnapshotFromScene?.(), 'weatherController.sceneReload', Severity.DEGRADED);
+    safeCall(() => {
+      const bridge = getWeatherSyncBridge();
+      bridge.initialize();
+      if (window.MapShine) window.MapShine.weatherSyncBridge = bridge;
+    }, 'weatherSyncBridge.initialize.early', Severity.COSMETIC);
     stepLog(' -> Step: weatherController.initialize DONE');
     if (isDebugLoad) dlp.end('weatherController.initialize');
 
@@ -8873,6 +8883,15 @@ async function createThreeCanvas(scene, createOptions = {}) {
             FloorDepthBlurEffect.getControlSchema(), _makeV2Callback('_floorDepthBlurEffect'), 'gameplay'
           );
         }, 'v2.registerFloorDepthBlurUI', Severity.DEGRADED);
+
+        safeCall(() => {
+          uiManager.registerEffect(
+            'contextualSceneGrade', 'Contextual Scene Grade',
+            ContextualSceneGradeEffectV2.getControlSchema(),
+            _makeV2Callback('_contextualSceneGradeEffect'),
+            'gameplay',
+          );
+        }, 'v2.registerContextualSceneGradeUI', Severity.DEGRADED);
 
         safeCall(() => {
           uiManager?.buildTokensSection?.();

@@ -67,6 +67,8 @@ import { WindowLightEffectV2 } from './effects/WindowLightEffectV2.js';
 import { LightingEffectV2 } from './effects/LightingEffectV2.js';
 import { SkyColorEffectV2 } from './effects/SkyColorEffectV2.js';
 import { ColorCorrectionEffectV2 } from './effects/ColorCorrectionEffectV2.js';
+import { ContextualSceneGradeEffectV2 } from './effects/ContextualSceneGradeEffectV2.js';
+import { ContextualSceneGradeManager } from '../core/context-grade/ContextualSceneGradeManager.js';
 import { BloomEffectV2 } from './effects/BloomEffectV2.js';
 import { SharpenEffectV2 } from './effects/SharpenEffectV2.js';
 import { FloorDepthBlurEffect } from './effects/FloorDepthBlurEffect.js';
@@ -275,6 +277,20 @@ export class FloorCompositor {
      * @type {ColorCorrectionEffectV2}
      */
     this._colorCorrectionEffect = new ColorCorrectionEffectV2();
+
+    /**
+     * Contextual Scene Grade — token-probed scene-wide CC overlay (CPU only).
+     * @type {ContextualSceneGradeEffectV2}
+     */
+    this._contextualSceneGradeEffect = new ContextualSceneGradeEffectV2();
+
+    /**
+     * @type {ContextualSceneGradeManager}
+     */
+    this._contextualSceneGradeManager = new ContextualSceneGradeManager({
+      colorCorrectionEffect: this._colorCorrectionEffect,
+    });
+    this._contextualSceneGradeManager.setParamsRef(this._contextualSceneGradeEffect.params);
 
     /**
      * V2 Filter Effect: multiplicative overlay pass. Intended for ink/AO-style
@@ -4700,6 +4716,9 @@ export class FloorCompositor {
       }
 
       this._profileEffectCall('lighting', 'update', () => this._lightingEffect.update(timeInfo), 'LightingEffectV2 update');
+      this._profileEffectCall('contextualSceneGrade', 'update', () => {
+        this._contextualSceneGradeManager?.update(timeInfo);
+      }, 'ContextualSceneGradeManager update');
       this._profileEffectCall('colorCorrection', 'update', () => this._colorCorrectionEffect.update(timeInfo), 'ColorCorrectionEffectV2 update');
       this._profileEffectCall('skyColor', 'update', () => {
         this._skyColorEffect.update(timeInfo, this._colorCorrectionEffect?.params ?? null);
@@ -5185,6 +5204,7 @@ export class FloorCompositor {
       _profiling,
       _dbgStages,
       _skipWaterPass,
+      navigationRenderLite,
       _alphaIsoDebug,
       cloudShadowTexLegacy,
       cloudShadowRawTexLegacy,
@@ -8310,6 +8330,7 @@ export class FloorCompositor {
       _profiling,
       _dbgStages,
       _skipWaterPass,
+      navigationRenderLite = false,
       _alphaIsoDebug,
       cloudShadowTexLegacy,
       cloudShadowRawTexLegacy,
@@ -9174,6 +9195,7 @@ export class FloorCompositor {
     try { this._atmosphericFogEffect?.dispose?.(); } catch (_) {}
     try { this._fogEffect?.dispose?.(); } catch (_) {}
     try { this._bloomEffect?.dispose?.(); } catch (_) {}
+    try { this._contextualSceneGradeManager?.dispose?.(); } catch (_) {}
     try { this._colorCorrectionEffect?.dispose?.(); } catch (_) {}
     try { this._overheadShadowEffect?.dispose?.(); } catch (_) {}
     try { this._buildingShadowEffect?.dispose?.(); } catch (_) {}

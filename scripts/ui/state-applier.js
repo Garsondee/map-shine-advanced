@@ -465,7 +465,8 @@ export class StateApplier {
       const endSnap = environmentControlApi.captureSnapshot();
       endSnap.timeOfDay = tgt;
 
-      const cpState = window.MapShine?.controlPanel?.controlState;
+      const cpState = window.MapShine?.controlPanel?.controlState
+        ?? window.MapShine?.remoteControlState;
       const extras = cpState
         ? fadeExtrasFromControlState(cpState)
         : { ashIntensity: 0, gustinessIndex: 2 };

@@ -119,6 +119,22 @@ export function readRtRegionToSrgb8(renderer, rt, x, y, w, h, out = null) {
 }
 
 /**
+ * GPU readback is unsafe while an FBO is bound (stall / GL errors mid-pass).
+ *
+ * @param {import('three').WebGLRenderer|null|undefined} renderer
+ * @returns {boolean}
+ */
+export function canSafeGpuReadback(renderer) {
+  if (!renderer?.readRenderTargetPixels) return false;
+  try {
+    if (renderer.getRenderTarget?.()) return false;
+  } catch (_) {
+    return false;
+  }
+  return true;
+}
+
+/**
  * @param {import('three').WebGLRenderer} renderer
  * @param {import('three').WebGLRenderTarget} rt
  * @param {number} px
@@ -126,7 +142,7 @@ export function readRtRegionToSrgb8(renderer, rt, x, y, w, h, out = null) {
  * @returns {{ srgb: [number, number, number], rgba: number[], linear: number[] }|null}
  */
 export function readRtPixelSrgb(renderer, rt, px, pyGl) {
-  if (!renderer?.readRenderTargetPixels || !rt) return null;
+  if (!canSafeGpuReadback(renderer) || !rt) return null;
   const raw = allocateRtReadbackBuffer(rt, 1);
   try {
     renderer.readRenderTargetPixels(rt, px, pyGl, 1, 1, raw);

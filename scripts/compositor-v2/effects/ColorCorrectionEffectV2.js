@@ -307,6 +307,28 @@ export class ColorCorrectionEffectV2 {
       // Dynamic Exposure (eye adaptation). Driven by DynamicExposureManager, not user-authored.
       dynamicExposure: 1.0,
 
+      // Contextual Scene Grade overlay. Driven by ContextualSceneGradeManager.
+      contextGradeEnabled: false,
+      contextExposure: 0,
+      contextSaturation: 0,
+      contextBrightness: 0,
+      contextContrast: 0,
+      contextVibrance: 0,
+      contextTemperature: 0,
+      contextTint: 0,
+      contextVignetteStrength: 0,
+      contextMasterGamma: 0,
+      contextSpatialEnabled: true,
+      contextSpatialStrength: 0.72,
+      contextTokenOutdoorBias: 0.5,
+      contextAtmosphereCoupling: 1.0,
+      contextTreeDappleEnabled: false,
+      contextTreeDappleStrength: 0,
+      contextTreeDappleScale: 42,
+      contextTreeDappleGreenR: 0.86,
+      contextTreeDappleGreenG: 1.06,
+      contextTreeDappleGreenB: 0.82,
+
       ...COLOR_CORRECTION_CORE_DEFAULTS,
       todAnchors: cloneTodAnchors(),
 
@@ -952,6 +974,23 @@ export class ColorCorrectionEffectV2 {
 
         uExposure:        { value: 1.0 },
         uDynamicExposure: { value: 1.0 },
+        uContextGradeEnabled: { value: 0.0 },
+        uContextExposure: { value: 0.0 },
+        uContextSaturation: { value: 0.0 },
+        uContextBrightness: { value: 0.0 },
+        uContextContrast: { value: 0.0 },
+        uContextVibrance: { value: 0.0 },
+        uContextTemperature: { value: 0.0 },
+        uContextTint: { value: 0.0 },
+        uContextVignetteStrength: { value: 0.0 },
+        uContextMasterGamma: { value: 0.0 },
+        uContextSpatialEnabled: { value: 0.0 },
+        uContextSpatialStrength: { value: 0.72 },
+        uTokenOutdoorBias: { value: 0.5 },
+        uContextTreeDappleEnabled: { value: 0.0 },
+        uContextTreeDappleStrength: { value: 0.0 },
+        uContextTreeDappleScale: { value: 42.0 },
+        uContextTreeDappleGreen: { value: new THREE.Vector3(0.86, 1.06, 0.82) },
         uTemperature:     { value: 0.0 },
         uTint:            { value: 0.0 },
         uBrightness:      { value: 0.0 },
@@ -1031,6 +1070,23 @@ export class ColorCorrectionEffectV2 {
 
         uniform float uExposure;
         uniform float uDynamicExposure;
+        uniform float uContextGradeEnabled;
+        uniform float uContextExposure;
+        uniform float uContextSaturation;
+        uniform float uContextBrightness;
+        uniform float uContextContrast;
+        uniform float uContextVibrance;
+        uniform float uContextTemperature;
+        uniform float uContextTint;
+        uniform float uContextVignetteStrength;
+        uniform float uContextMasterGamma;
+        uniform float uContextSpatialEnabled;
+        uniform float uContextSpatialStrength;
+        uniform float uTokenOutdoorBias;
+        uniform float uContextTreeDappleEnabled;
+        uniform float uContextTreeDappleStrength;
+        uniform float uContextTreeDappleScale;
+        uniform vec3 uContextTreeDappleGreen;
         uniform float uTemperature;
         uniform float uTint;
         uniform float uBrightness;
@@ -1110,6 +1166,31 @@ export class ColorCorrectionEffectV2 {
 
         float random(vec2 p) {
           return fract(sin(dot(p.xy, vec2(12.9898, 78.233))) * 43758.5453);
+        }
+
+        vec2 hash22(vec2 p) {
+          p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+          return fract(sin(p) * 43758.5453);
+        }
+
+        // Chunky leaf-dapple pattern — voronoi-like cells with soft penumbra.
+        float treeDapplePattern(vec2 uv, float scale) {
+          vec2 p = uv * max(scale, 4.0);
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          float minDist = 1.0;
+          for (int y = -1; y <= 1; y++) {
+            for (int x = -1; x <= 1; x++) {
+              vec2 neighbor = vec2(float(x), float(y));
+              vec2 point = hash22(i + neighbor);
+              point = 0.5 + 0.38 * sin(uTime * 0.04 + 6.2831 * point);
+              vec2 diff = neighbor + point - f;
+              minDist = min(minDist, length(diff));
+            }
+          }
+          float cell = smoothstep(0.08, 0.92, minDist);
+          float fine = random(floor(p * 2.8) + floor(p.yx * 1.7));
+          return clamp(mix(cell, cell * (0.58 + 0.42 * fine), 0.5), 0.0, 1.0);
         }
 
         ${GLSL_DECODE_OUTDOOR_CLASS}
@@ -1443,6 +1524,52 @@ export class ColorCorrectionEffectV2 {
             color = mix(color, preTodColor, emissivePreserve);
           }
 
+          // 5c. Contextual Scene Grade — token-driven overlay (per-client, optional spatial blend).
+          if (uContextGradeEnabled > 0.5) {
+            vec3 preContextColor = color;
+            float pixelOutdoorW = 1.0;
+            if (uHasOutdoorsMask > 0.5) {
+              float indoorWCtx = clamp(sampleIndoorWeight(vUv), 0.0, 1.0);
+              pixelOutdoorW = 1.0 - indoorWCtx;
+            }
+            float spatialW = 1.0;
+            if (uContextSpatialEnabled > 0.5) {
+              float agreement = 1.0 - abs(pixelOutdoorW - clamp(uTokenOutdoorBias, 0.0, 1.0));
+              spatialW = mix(1.0, agreement, clamp(uContextSpatialStrength, 0.0, 1.0));
+            }
+
+            color *= pow(2.0, uContextExposure);
+            if (abs(uContextTemperature) > 0.0001 || abs(uContextTint) > 0.0001) {
+              color = applyWhiteBalance(color, uContextTemperature, uContextTint);
+            }
+            color += uContextBrightness;
+            color = (color - 0.5) * max(0.05, 1.0 + uContextContrast) + 0.5;
+
+            float ctxLuma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+            vec3 ctxGray = vec3(ctxLuma);
+            float ctxSatAmt = max(0.05, 1.0 + uContextSaturation);
+            color = mix(ctxGray, color, ctxSatAmt);
+            if (abs(uContextVibrance) > 0.0001) {
+              float ctxChroma = max(color.r, max(color.g, color.b)) - min(color.r, min(color.g, color.b));
+              color = mix(color, mix(ctxGray, color, 1.0 + uContextVibrance), (1.0 - ctxChroma));
+            }
+
+            if (abs(uContextMasterGamma) > 0.0001) {
+              color = pow(max(color, vec3(0.0)), vec3(1.0 / max(1.0 + uContextMasterGamma, 0.0001)));
+            }
+
+            color = mix(preContextColor, color, spatialW);
+
+            if (uContextTreeDappleEnabled > 0.5 && uContextTreeDappleStrength > 0.0001) {
+              float dapple = treeDapplePattern(vUv, uContextTreeDappleScale);
+              float str = clamp(uContextTreeDappleStrength, 0.0, 1.5);
+              float shade = mix(1.0, 0.68, dapple * str);
+              color *= shade;
+              vec3 leafTint = uContextTreeDappleGreen;
+              color = mix(color, color * leafTint, dapple * str * 0.62);
+            }
+          }
+
           // 6. Tone Mapping
           if (uToneMapping == 1) {
             color = ACESFilmicToneMapping(color);
@@ -1454,8 +1581,12 @@ export class ColorCorrectionEffectV2 {
           vec2 dist = (vUv - 0.5) * 2.0;
           float len = length(dist);
           vec3 preVignetteColor = color;
-          if (uVignetteStrength > 0.0) {
-            color *= mix(1.0, smoothstep(1.5, 0.5, len), uVignetteStrength);
+          float vignetteAmt = uVignetteStrength;
+          if (uContextGradeEnabled > 0.5) {
+            vignetteAmt += uContextVignetteStrength;
+          }
+          if (vignetteAmt > 0.0) {
+            color *= mix(1.0, smoothstep(1.5, 0.5, len), vignetteAmt);
           }
           if (emissivePreserve > 0.0001) {
             color = mix(color, preVignetteColor, emissivePreserve * 0.75);
@@ -1597,7 +1728,8 @@ export class ColorCorrectionEffectV2 {
       return;
     }
 
-    u.uAtmosphereStrength.value = Math.max(0, Math.min(1, Number(grade.strength) || 0));
+    u.uAtmosphereStrength.value = Math.max(0, Math.min(1, Number(grade.strength) || 0))
+      * Math.max(0, Math.min(1, Number(p.contextAtmosphereCoupling) ?? 1));
     u.uAtmosphereExposure.value = Number(grade.exposureStops) || 0;
     u.uAtmosphereSaturation.value = Math.max(0, Math.min(4, Number(grade.saturationMul) || 1));
     u.uAtmosphereContrast.value = Math.max(0.5, Math.min(1.5, Number(grade.contrastMul) || 1));
@@ -1936,6 +2068,29 @@ export class ColorCorrectionEffectV2 {
 
     u.uExposure.value = p.exposure;
     u.uDynamicExposure.value = p.dynamicExposure ?? 1.0;
+    u.uContextGradeEnabled.value = p.contextGradeEnabled ? 1.0 : 0.0;
+    u.uContextExposure.value = p.contextExposure ?? 0.0;
+    u.uContextSaturation.value = p.contextSaturation ?? 0.0;
+    u.uContextBrightness.value = p.contextBrightness ?? 0.0;
+    u.uContextContrast.value = p.contextContrast ?? 0.0;
+    u.uContextVibrance.value = p.contextVibrance ?? 0.0;
+    u.uContextTemperature.value = p.contextTemperature ?? 0.0;
+    u.uContextTint.value = p.contextTint ?? 0.0;
+    u.uContextVignetteStrength.value = p.contextVignetteStrength ?? 0.0;
+    u.uContextMasterGamma.value = p.contextMasterGamma ?? 0.0;
+    if (u.uContextSpatialEnabled) u.uContextSpatialEnabled.value = p.contextSpatialEnabled ? 1.0 : 0.0;
+    if (u.uContextSpatialStrength) u.uContextSpatialStrength.value = p.contextSpatialStrength ?? 0.72;
+    if (u.uTokenOutdoorBias) u.uTokenOutdoorBias.value = p.contextTokenOutdoorBias ?? 0.5;
+    if (u.uContextTreeDappleEnabled) u.uContextTreeDappleEnabled.value = p.contextTreeDappleEnabled ? 1.0 : 0.0;
+    if (u.uContextTreeDappleStrength) u.uContextTreeDappleStrength.value = p.contextTreeDappleStrength ?? 0;
+    if (u.uContextTreeDappleScale) u.uContextTreeDappleScale.value = p.contextTreeDappleScale ?? 42;
+    if (u.uContextTreeDappleGreen) {
+      u.uContextTreeDappleGreen.value.set(
+        p.contextTreeDappleGreenR ?? 0.86,
+        p.contextTreeDappleGreenG ?? 1.06,
+        p.contextTreeDappleGreenB ?? 0.82,
+      );
+    }
     u.uTemperature.value = p.temperature;
     u.uTint.value = p.tint;
     u.uBrightness.value = p.brightness;

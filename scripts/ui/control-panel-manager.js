@@ -3147,6 +3147,16 @@ export class ControlPanelManager {
     );
 
     try {
+      try {
+        getWeatherSyncBridge().emitEnvironmentFadeStart({
+          startSnap: start,
+          endSnap,
+          startExtras: startEx,
+          endExtras: endEx,
+          transitionMinutes: mins,
+        });
+      } catch (_) {}
+
       await environmentFadeController.start(start, endSnap, startEx, endEx, mins, {
         onTick: (snap, extras) => {
           this._syncPanelUiFromFadeSnapshot(snap, extras);
@@ -3155,6 +3165,13 @@ export class ControlPanelManager {
       });
 
       if (gen !== this._environmentFadeGeneration) return;
+
+      try {
+        getWeatherSyncBridge().emitEnvironmentFadeEnd({
+          endSnap,
+          endExtras: endEx,
+        });
+      } catch (_) {}
 
       this.controlState.timeOfDay = endSnap.timeOfDay;
       this._ensureDirectedCustomPreset();
@@ -5233,6 +5250,7 @@ Current Weather:
             await wc.saveDynamicStateNow();
           }
         } catch (_) {}
+        this._emitWeatherSyncAfterSave({ syncTimeInstant: true });
         log.debug('Skipped Scene controlState flag persist for live/time-only save (weather-snapshot updated)');
         return;
       }
@@ -5269,14 +5287,16 @@ Current Weather:
 
   /**
    * Emit throttled live weather sync packets after a full controlState persist.
+   * @param {{ syncTimeInstant?: boolean, force?: boolean }} [opts]
    * @private
    */
-  _emitWeatherSyncAfterSave() {
+  _emitWeatherSyncAfterSave(opts = {}) {
     try {
       const bridge = getWeatherSyncBridge();
       bridge.emitMode(this.controlState, { immediate: false });
       const wc = resolveWeatherController();
       if (!wc) return;
+      const syncTimeInstant = opts.syncTimeInstant === true;
       bridge.emitSnapshot({
         version: 1,
         enabled: wc.enabled === true,
@@ -5285,7 +5305,9 @@ Current Weather:
         dynamicEvolutionSpeed: wc.dynamicEvolutionSpeed,
         dynamicPaused: wc.dynamicPaused === true,
         timeOfDay: Number.isFinite(Number(wc.timeOfDay)) ? wc.timeOfDay : this.controlState.timeOfDay,
-        timeTransitionMinutes: this.controlState.timeTransitionMinutes,
+        timeTransitionMinutes: syncTimeInstant ? 0 : this.controlState.timeTransitionMinutes,
+        syncTimeInstant,
+        environmentFadeComplete: syncTimeInstant,
         linkTimeToFoundry: this.controlState.linkTimeToFoundry,
         start: wc._serializeWeatherState?.(wc.startState),
         current: wc._serializeWeatherState?.(wc.currentState),
@@ -5294,7 +5316,7 @@ Current Weather:
         transitionDuration: Number(wc.transitionDuration) || 0,
         transitionElapsed: Number(wc.transitionElapsed) || 0,
         controlState: cloneAndSanitizeControlState(this.controlState, { silent: true }),
-      }, { force: false });
+      }, { force: opts.force === true || syncTimeInstant });
     } catch (_) {}
   }
 

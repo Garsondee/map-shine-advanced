@@ -1437,10 +1437,11 @@ export class WeatherController {
         try {
           const stateApplier = window.MapShine?.stateApplier;
           if (stateApplier && typeof stateApplier.applyTimeOfDay === 'function') {
-            // Apply WC / Map Shine time without hammering canvas.scene.update here; snapshot
-            // loads often follow controlState sync and would stack darkness writes (V2 grey).
+            // Replicas need local darkness during restore; GM clients skip here to
+            // avoid stacking canvas.scene.update writes during flag echo reload.
+            const applyDarkness = !canPersistSceneDocument();
             await Promise.race([
-              stateApplier.applyTimeOfDay(stored.timeOfDay % 24, false, false),
+              stateApplier.applyTimeOfDay(stored.timeOfDay % 24, false, applyDarkness),
               new Promise((_, reject) => setTimeout(() => reject(new Error(
                 `applyTimeOfDay timed out after ${SCENE_UPDATE_TIMEOUT_MS}ms`
               )), SCENE_UPDATE_TIMEOUT_MS))

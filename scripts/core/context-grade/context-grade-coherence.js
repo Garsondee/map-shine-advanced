@@ -54,9 +54,9 @@ export function computeCoherenceScalars(params, envState, dims) {
  * @param {Record<string, *>} params
  * @param {'outdoor'|'indoor'|'neutral'} targetState
  */
-export function estimateDramaPeak(rawT, params, targetState) {
+export function estimateDramaPeak(rawT, params, targetState, env = {}) {
   if (params?.dramaEnabled === false) return 0;
-  const pulse = computeDramaPulse(rawT, params, targetState);
+  const pulse = computeDramaPulse(rawT, params, targetState, env);
   return Math.max(0, Math.min(1, Math.abs(pulse.exposure) / Math.max(0.01, finiteOr(params?.dramaPeakExposure, 0.75))));
 }
 

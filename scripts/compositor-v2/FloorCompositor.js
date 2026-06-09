@@ -9004,7 +9004,7 @@ export class FloorCompositor {
         } catch (_) {}
         this._compositeWaterSplashesAboveWater(this.renderer, mergedCompositeOut);
       }, 'Water splashes before CC');
-      if (!navigationRenderLite) this._profileEffectCall('postBloom.worldOverlays.vegetation', 'render', () => {
+      if (!ctx.navigationRenderLite) this._profileEffectCall('postBloom.worldOverlays.vegetation', 'render', () => {
         this._profileEffectCall('postBloom.worldOverlays.vegetation.sync', 'render', () => {
           try { this._bushEffect?.syncLandscapeLightningUniforms?.(); } catch (_) {}
           try { this._treeEffect?.syncLandscapeLightningUniforms?.(); } catch (_) {}

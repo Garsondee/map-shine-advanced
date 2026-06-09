@@ -11,7 +11,8 @@ import {
   sampleAuthoredOutdoorsAtWorld,
   syncSharedOutdoorsMaskForFloor,
 } from '../../compositor-v2/effects/water-splash-behaviors.js';
-import { getSubjectTokenCenterFoundry } from './subject-token-resolver.js';
+import { getSubjectTokenCenterFoundry, getTokenPlaceableById } from './subject-token-resolver.js';
+import { finiteOr } from './context-grade-spec.js';
 
 /** @returns {import('../../compositor-v2/FloorCompositor.js').FloorCompositor|null} */
 function resolveFloorCompositor() {
@@ -257,21 +258,46 @@ function collectWorldShadowSceneUvs(foundryX, foundryY, screen) {
 }
 
 /**
+ * Building/painted lit RTs use the same Y convention as vegetation (see vegetation-building-shadow.js).
+ * Probe with both flips and take the darkest plausible reading at the token center.
+ *
  * @param {import('three').WebGLRenderer} renderer
  * @param {import('three').WebGLRenderTarget} rt
  * @param {number} u scene UV 0..1 (Foundry top-origin v)
  * @param {number} v
  * @returns {number|null}
  */
-function readLitFactorAtSceneUv(renderer, rt, u, v) {
-  const candidates = [
-    readLitFactorFromRenderTarget(renderer, rt, u, 1.0 - v),
-    readLitFactorFromRenderTarget(renderer, rt, u, v),
+function readWorldShadowLitAtSceneUv(renderer, rt, u, v, tapRadius = 0.012) {
+  /** @type {number[]} */
+  const readings = [];
+  const taps = [
+    [u, v],
+    [u + tapRadius, v],
+    [u - tapRadius, v],
+    [u, v + tapRadius],
+    [u, v - tapRadius],
   ];
-  for (const lit of candidates) {
-    if (lit != null) return lit;
+  for (const [tu, tv] of taps) {
+    const su = Math.max(0, Math.min(1, tu));
+    const sv = Math.max(0, Math.min(1, tv));
+    for (const flipV of [1.0 - sv, sv]) {
+      const lit = readLitFactorFromRenderTarget(renderer, rt, su, flipV);
+      if (lit != null) readings.push(lit);
+    }
   }
-  return null;
+  const tex = rt?.texture ?? null;
+  if (tex) {
+    for (const [tu, tv] of taps) {
+      const su = Math.max(0, Math.min(1, tu));
+      const sv = Math.max(0, Math.min(1, tv));
+      for (const flipV of [1.0 - sv, sv]) {
+        const lit = sampleLitFactorAtUv(tex, su, flipV);
+        if (lit != null) readings.push(lit);
+      }
+    }
+  }
+  if (!readings.length) return null;
+  return Math.min(...readings);
 }
 
 /**
@@ -331,18 +357,52 @@ function sampleWorldShadowLitAtFoundry(foundryX, foundryY, floorIndex, fx, disab
   const rt = resolveWorldShadowLitRenderTarget(fx, floorIndex);
   if (!rt) return { lit: null, status: missingStatus };
 
+  if (typeof fx.renderLitForSingleFloor === 'function') {
+    try {
+      fx.renderLitForSingleFloor(renderer, floorIndex);
+    } catch (_) {
+    }
+  } else if (typeof fx.update === 'function') {
+    try {
+      fx.update(null);
+    } catch (_) {
+    }
+  }
+
   const screen = foundryToScreenUv(foundryX, foundryY);
   const sceneUvs = collectWorldShadowSceneUvs(foundryX, foundryY, screen);
-  if (!sceneUvs.length) return { lit: null, status: 'no-scene-uv' };
-
+  /** @type {number[]} */
   const readings = [];
+
+  if (screen) {
+    const lighting = screenUvToLightingSceneUv(screen.u, screen.v);
+    if (lighting?.inBounds) {
+      const lit = readWorldShadowLitAtSceneUv(renderer, rt, lighting.u, lighting.v);
+      if (lit != null) readings.push(lit);
+      const tex = fx.shadowFactorTexture ?? rt?.texture ?? null;
+      if (tex) {
+        const bldV = 1.0 - lighting.v;
+        for (const sv of [bldV, lighting.v]) {
+          const cpu = sampleLitFactorAtUv(tex, lighting.u, sv);
+          if (cpu != null) readings.push(cpu);
+        }
+      }
+    }
+  }
+
   for (const scene of sceneUvs) {
-    const lit = readLitFactorAtSceneUv(renderer, rt, scene.u, scene.v);
+    const lit = readWorldShadowLitAtSceneUv(renderer, rt, scene.u, scene.v);
     if (lit != null) readings.push(lit);
   }
+  if (screen) {
+    const shadowUv = screenUvToShadowSceneUv(screen.u, screen.v);
+    if (shadowUv) {
+      const lit = readWorldShadowLitAtSceneUv(renderer, rt, shadowUv.u, shadowUv.v);
+      if (lit != null) readings.push(lit);
+    }
+  }
   if (!readings.length) return { lit: null, status: 'shadow-read-failed' };
-  // Prefer brightest plausible sample — avoids penumbra false positives.
-  return { lit: Math.max(...readings), status: 'ok' };
+  return { lit: Math.min(...readings), status: 'ok' };
 }
 
 /**
@@ -377,6 +437,76 @@ export function sampleBuildingShadowAtFoundry(foundryX, foundryY, floorIndex = r
     'building-shadows-disabled',
     'no-building-shadow-rt',
   );
+}
+
+/**
+ * Foundry probe points across the token footprint (center + edge/corner taps).
+ * Darkest reading wins so partial shadow on any part of the token is detected.
+ *
+ * @param {string|null} tokenId
+ * @param {number} [footprintScale=1] - multiplier on token half-width/height in grid units
+ * @returns {Array<{ x: number, y: number }>}
+ */
+export function collectTokenProbeFoundryPoints(tokenId, footprintScale = 1) {
+  const center = getSubjectTokenCenterFoundry(tokenId);
+  if (!center) return [];
+
+  const token = getTokenPlaceableById(tokenId);
+  const doc = token?.document;
+  const gridSize = Number(canvas?.grid?.size ?? 100);
+  let halfW = gridSize * 0.5;
+  let halfH = gridSize * 0.5;
+
+  if (doc) {
+    const w = Number(doc.width ?? doc.w ?? 1);
+    const h = Number(doc.height ?? doc.h ?? 1);
+    if (Number.isFinite(w) && w > 0) halfW = w * gridSize * 0.5;
+    if (Number.isFinite(h) && h > 0) halfH = h * gridSize * 0.5;
+  }
+
+  const scale = Math.max(0.25, finiteOr(footprintScale, 1));
+  halfW *= scale;
+  halfH *= scale;
+
+  const { x: cx, y: cy } = center;
+  return [
+    center,
+    { x: cx - halfW, y: cy - halfH },
+    { x: cx + halfW, y: cy - halfH },
+    { x: cx - halfW, y: cy + halfH },
+    { x: cx + halfW, y: cy + halfH },
+    { x: cx - halfW, y: cy },
+    { x: cx + halfW, y: cy },
+    { x: cx, y: cy - halfH },
+    { x: cx, y: cy + halfH },
+  ];
+}
+
+/**
+ * Building shadow lit factor sampled across the token footprint (darkest wins).
+ *
+ * @param {string|null} tokenId
+ * @param {number} [floorIndex]
+ * @param {Record<string, *>} [params]
+ * @returns {{ lit: number|null, status: string }}
+ */
+export function sampleBuildingShadowAtToken(tokenId, floorIndex = resolveActiveFloorIndexForProbe(), params = {}) {
+  const footprint = finiteOr(params?.buildingShadowProbeFootprint, 1);
+  const points = collectTokenProbeFoundryPoints(tokenId, footprint);
+  if (!points.length) return { lit: null, status: 'no-token-center' };
+
+  let minLit = null;
+  let status = 'shadow-read-failed';
+  for (const pt of points) {
+    const result = sampleBuildingShadowAtFoundry(pt.x, pt.y, floorIndex);
+    if (result.lit != null) {
+      minLit = minLit == null ? result.lit : Math.min(minLit, result.lit);
+      status = 'ok';
+    } else if (result.status !== 'ok') {
+      status = result.status;
+    }
+  }
+  return { lit: minLit, status };
 }
 
 /**
@@ -679,7 +809,7 @@ export function probeWindowLitAtFoundry(foundryX, foundryY) {
  * @param {number} [floorIndex]
  * @returns {object}
  */
-export function probeTokenContextAtCenter(tokenId, floorIndex = resolveActiveFloorIndexForProbe()) {
+export function probeTokenContextAtCenter(tokenId, floorIndex = resolveActiveFloorIndexForProbe(), probeParams = {}) {
   const outdoors = probeOutdoorsAtTokenCenter(tokenId, floorIndex);
   const fx = outdoors.foundryX;
   const fy = outdoors.foundryY;
@@ -705,7 +835,7 @@ export function probeTokenContextAtCenter(tokenId, floorIndex = resolveActiveFlo
   const sky = sampleSkyReachAtFoundry(fx, fy);
   const cloud = sampleCloudShadowAtFoundry(fx, fy);
   const win = probeWindowLitAtFoundry(fx, fy);
-  const building = sampleBuildingShadowAtFoundry(fx, fy, floorIndex);
+  const building = sampleBuildingShadowAtToken(tokenId, floorIndex, probeParams);
   const painted = samplePaintedShadowAtFoundry(fx, fy, floorIndex);
   const tree = sampleTreeShadowAtFoundry(fx, fy);
 

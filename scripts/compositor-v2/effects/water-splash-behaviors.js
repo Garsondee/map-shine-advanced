@@ -650,10 +650,26 @@ function resolveOutdoorsFloorKeyForSampling(compositor, floorIndex, levelContext
  * @param {boolean} [useRawDecode=false]
  * @returns {number}
  */
-function sampleOutdoorsTexel(data, w, h, px, py, useRawDecode = false) {
+/**
+ * Fire/shelter sampling: transparent texels count as sheltered (not open sky).
+ * @param {Uint8Array|Uint8ClampedArray} data
+ * @param {number} i - byte index (multiple of 4)
+ * @returns {number}
+ */
+function shelterBiasOutdoorsTexel8(data, i) {
+  const a = Math.max(0, Math.min(255, Number(data[i + 3]) || 0)) / 255;
+  if (a < 0.5) return 0.0;
+  return Math.min(
+    classifyOutdoorsMaskTexel8(data[i], data[i + 1], data[i + 2], data[i + 3]),
+    decodeOutdoorsMaskSample8(data[i], data[i + 1], data[i + 2], data[i + 3]),
+  );
+}
+
+function sampleOutdoorsTexel(data, w, h, px, py, useRawDecode = false, shelterBias = false) {
   const x = Math.max(0, Math.min(w - 1, px));
   const y = Math.max(0, Math.min(h - 1, py));
   const i = (y * w + x) * 4;
+  if (shelterBias) return shelterBiasOutdoorsTexel8(data, i);
   if (useRawDecode) {
     return decodeOutdoorsMaskSample8(data[i], data[i + 1], data[i + 2], data[i + 3]);
   }
@@ -868,6 +884,16 @@ export function syncSharedOutdoorsMaskForFloor(floorIndex, frameToken, levelCont
         snap.outdoorsMaskGpuRowOrder = false;
       }
     }
+
+    if (!snap.outdoorsMaskData && compositor && floorKey !== 'none') {
+      const fromCpu = readOutdoorsCpuPixelsForFloor(compositor, floorKey);
+      if (fromCpu) {
+        snap.outdoorsMaskData = fromCpu.data;
+        snap.outdoorsMaskW = fromCpu.w;
+        snap.outdoorsMaskH = fromCpu.h;
+        snap.outdoorsMaskGpuRowOrder = true;
+      }
+    }
   } catch (_) {}
 
   _sharedOutdoorsByFloor.set(fi, snap);
@@ -916,7 +942,7 @@ export function buildEffectSceneBoundsFromCanvas() {
  * @param {number} worldX
  * @param {number} worldY
  * @param {{ sx: number, syWorld: number, sw: number, sh: number }|null} sceneBounds
- * @param {{ bilinear?: boolean, useRawDecode?: boolean }} [opts]
+ * @param {{ bilinear?: boolean, useRawDecode?: boolean, shelterBias?: boolean }} [opts]
  * @returns {number|null}
  */
 export function sampleOutdoorsFromSnapshot(snap, worldX, worldY, sceneBounds, opts = {}) {
@@ -935,6 +961,7 @@ export function sampleOutdoorsFromSnapshot(snap, worldX, worldY, sceneBounds, op
   const h = snap.outdoorsMaskH;
   const d = snap.outdoorsMaskData;
   const useRawDecode = opts.useRawDecode === true;
+  const shelterBias = opts.shelterBias === true;
   const bilinear = opts.bilinear !== false;
 
   const mapRow = (pyRow) => (snap.outdoorsMaskGpuRowOrder ? ((h - 1) - pyRow) : pyRow);
@@ -942,7 +969,7 @@ export function sampleOutdoorsFromSnapshot(snap, worldX, worldY, sceneBounds, op
   if (!bilinear || w < 2 || h < 2) {
     const px = Math.max(0, Math.min(w - 1, Math.floor(u * (w - 1))));
     const pyRow = Math.max(0, Math.min(h - 1, Math.floor(texY * (h - 1))));
-    return sampleOutdoorsTexel(d, w, h, px, mapRow(pyRow), useRawDecode);
+    return sampleOutdoorsTexel(d, w, h, px, mapRow(pyRow), useRawDecode, shelterBias);
   }
 
   const uf = u * (w - 1);
@@ -954,10 +981,10 @@ export function sampleOutdoorsFromSnapshot(snap, worldX, worldY, sceneBounds, op
   const fx = uf - x0;
   const fy = vf - y0;
 
-  const s00 = sampleOutdoorsTexel(d, w, h, x0, mapRow(y0), useRawDecode);
-  const s10 = sampleOutdoorsTexel(d, w, h, x1, mapRow(y0), useRawDecode);
-  const s01 = sampleOutdoorsTexel(d, w, h, x0, mapRow(y1), useRawDecode);
-  const s11 = sampleOutdoorsTexel(d, w, h, x1, mapRow(y1), useRawDecode);
+  const s00 = sampleOutdoorsTexel(d, w, h, x0, mapRow(y0), useRawDecode, shelterBias);
+  const s10 = sampleOutdoorsTexel(d, w, h, x1, mapRow(y0), useRawDecode, shelterBias);
+  const s01 = sampleOutdoorsTexel(d, w, h, x0, mapRow(y1), useRawDecode, shelterBias);
+  const s11 = sampleOutdoorsTexel(d, w, h, x1, mapRow(y1), useRawDecode, shelterBias);
   const s0 = s00 + (s10 - s00) * fx;
   const s1 = s01 + (s11 - s01) * fx;
   return s0 + (s1 - s0) * fy;

@@ -99,6 +99,43 @@ export function finiteOr(value, fallback = 0) {
 }
 
 /**
+ * Smooth 0..1 outdoor weight from authored _Outdoors sample (matches spatial blend band).
+ *
+ * @param {number|null|undefined} sample
+ * @param {Record<string, *>} params
+ * @returns {number}
+ */
+export function computeOutdoorBlendWeight(sample, params) {
+  const high = finiteOr(params?.outdoorThresholdHigh, 0.82);
+  const low = finiteOr(params?.indoorThresholdLow, 0.18);
+  const s = Number(sample);
+  if (!Number.isFinite(s)) return 0.5;
+  if (s <= low) return 0;
+  if (s >= high) return 1;
+  const t = (s - low) / Math.max(0.001, high - low);
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * How far overlay `current` has converged toward `target` (0..1).
+ *
+ * @param {ContextGradeOverlay|null|undefined} current
+ * @param {ContextGradeOverlay|null|undefined} target
+ * @returns {number}
+ */
+export function overlayConvergenceProgress(current, target) {
+  let maxDelta = 0;
+  for (const spec of CONTEXT_GRADE_FIELD_SPECS) {
+    const va = finiteOr(current?.[spec.id], spec.default);
+    const vb = finiteOr(target?.[spec.id], spec.default);
+    maxDelta = Math.max(maxDelta, Math.abs(va - vb));
+  }
+  if (maxDelta <= 0.0005) return 1;
+  const refSpan = 1.25;
+  return Math.max(0, Math.min(1, 1 - maxDelta / refSpan));
+}
+
+/**
  * @param {number} t
  * @param {ContextGradeEasingId|string} [easingId='smooth']
  * @returns {number}
@@ -176,15 +213,33 @@ export function computeDramaSettleProgress(rawT, params) {
 }
 
 /**
+ * Doorway dazzle is only appropriate in bright daytime — not night/twilight selection or transitions.
+ *
+ * @param {Record<string, *>} params
+ * @param {{ dayPhase?: string, calendarDayWeight?: number|null }} [env]
+ * @returns {boolean}
+ */
+export function isDoorwayDramaAllowed(params = {}, env = {}) {
+  if (params?.dramaEnabled === false) return false;
+  if (params?.dramaRequireDaylight === false) return true;
+  const phase = String(env?.dayPhase ?? 'day');
+  if (phase !== 'day') return false;
+  const dayWeight = finiteOr(env?.calendarDayWeight, 1);
+  const dayHigh = finiteOr(params?.dramaDayThreshold, finiteOr(params?.envDayThreshold, 0.62));
+  return dayWeight >= dayHigh;
+}
+
+/**
  * Gaussian-ish brightness punch during transitions (doorway dazzle).
  *
  * @param {number} rawT - 0..1 transition time
  * @param {Record<string, *>} params
  * @param {'outdoor'|'indoor'|'neutral'} targetState
+ * @param {{ dayPhase?: string, calendarDayWeight?: number|null }} [env]
  * @returns {ContextGradeOverlay}
  */
-export function computeDramaPulse(rawT, params, targetState) {
-  if (params?.dramaEnabled === false) return createNeutralContextGrade();
+export function computeDramaPulse(rawT, params, targetState, env = {}) {
+  if (!isDoorwayDramaAllowed(params, env)) return createNeutralContextGrade();
 
   const strength = Math.max(0, finiteOr(params?.dramaStrength, 1));
   if (strength <= 0) return createNeutralContextGrade();
@@ -343,4 +398,59 @@ export function lerpContextGradeFast(current, target, dt, tauMs = 250) {
   const tau = Math.max(16, finiteOr(tauMs, 250)) / 1000;
   const t = 1 - Math.exp(-Math.max(0, dt) / tau);
   return lerpContextGrade(current, target, t);
+}
+
+/**
+ * Frame-rate independent scalar lerp (outdoor weight, spatial bias, etc.).
+ *
+ * @param {number} current
+ * @param {number} target
+ * @param {number} dt
+ * @param {number} tauMs
+ * @returns {number}
+ */
+export function lerpScalarFast(current, target, dt, tauMs = 250) {
+  const tau = Math.max(16, finiteOr(tauMs, 250)) / 1000;
+  const t = 1 - Math.exp(-Math.max(0, dt) / tau);
+  const c = finiteOr(current, 0);
+  const g = finiteOr(target, 0);
+  return c + (g - c) * t;
+}
+
+/**
+ * Building shadow lit thresholds from sensitivity slider or manual overrides.
+ *
+ * @param {Record<string, *>} params
+ * @returns {{ buildLow: number, buildHigh: number, partialDetect: boolean }}
+ */
+export function resolveBuildingShadowThresholds(params = {}) {
+  const partialDetect = params?.buildingShadowPartialDetect !== false;
+  if (params?.buildingShadowUseAdvancedThresholds === true) {
+    return {
+      buildLow: finiteOr(params?.buildingShadowLitLow, 0.88),
+      buildHigh: finiteOr(params?.buildingShadowLitHigh, 0.94),
+      partialDetect,
+    };
+  }
+  const sens = Math.max(0, Math.min(100, finiteOr(params?.buildingShadowSensitivity, 75)));
+  const t = sens / 100;
+  const buildHigh = 0.68 + t * 0.31;
+  const buildLow = Math.max(0.15, buildHigh - (0.04 + (1 - t) * 0.14));
+  return { buildLow, buildHigh, partialDetect };
+}
+
+/**
+ * @param {number|null|undefined} lit - 1 sunlit, 0 full shadow
+ * @param {{ buildLow: number, buildHigh: number, partialDetect: boolean }} thresholds
+ * @param {boolean} [wasActive]
+ * @returns {boolean}
+ */
+export function classifyBuildingShadowLit(lit, thresholds, wasActive = false) {
+  const { buildLow, buildHigh, partialDetect } = thresholds ?? resolveBuildingShadowThresholds();
+  const s = Number(lit);
+  if (!Number.isFinite(s)) return false;
+  if (s >= buildHigh) return false;
+  if (s <= buildLow) return true;
+  if (partialDetect) return true;
+  return wasActive;
 }

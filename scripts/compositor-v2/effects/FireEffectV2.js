@@ -54,6 +54,7 @@ import {
   EmberLifecycleBehavior,
   SmokeLifecycleBehavior,
   FlameShapeFrameBehavior,
+  SmokeShapeFrameBehavior,
   FireSpinBehavior,
   deferVisualBehaviorsOnSystem,
   applyEmberSpriteTextureTransform,
@@ -61,10 +62,12 @@ import {
   filterFirePointsByOutdoor,
   filterFirePointsByAlbedoAlpha,
   filterFirePointsRequireNeighbor,
+  applyFireShelterMaskToParticle,
 } from './fire-behaviors.js';
 import {
   buildEffectSceneBoundsFromCanvas,
   sampleAuthoredOutdoorsAtWorld,
+  syncSharedOutdoorsMaskForFloor,
 } from './water-splash-behaviors.js';
 import {
   ParticleSystem as QuarksParticleSystem,
@@ -166,6 +169,7 @@ const FIRE_MAX_SPATIAL_BUCKET_SIZE_PX = 16384;
 /** Behavior types re-evaluated every render frame for smooth flipbook / colour. */
 const FIRE_VISUAL_BEHAVIOR_TYPES = new Set([
   'FlameShapeFrameBehavior',
+  'SmokeShapeFrameBehavior',
   'FlameLifecycle',
   'EmberLifecycle',
   'SmokeLifecycle',
@@ -202,8 +206,8 @@ const FIRE_ATLAS_ANIM_FRAMES = FIRE_ATLAS_COLS;
 const FIRE_ATLAS_FRAMES = FIRE_ATLAS_COLS * FIRE_ATLAS_ROWS;
 const FIRE_ATLAS_CELL_SIZE = 64;
 
-// Procedural smoke flipbook — 4×8 atlas: rows = wispy shape archetypes, cols = drift frames.
-const SMOKE_ATLAS_COLS = 8;
+// Procedural smoke atlas — 4×1: one static silhouette per shape row (no flipbook morph).
+const SMOKE_ATLAS_COLS = 1;
 const SMOKE_ATLAS_ROWS = 4;
 const SMOKE_ATLAS_SHAPE_COUNT = SMOKE_ATLAS_ROWS;
 const SMOKE_ATLAS_ANIM_FRAMES = SMOKE_ATLAS_COLS;
@@ -267,6 +271,20 @@ class ProceduralTextureBuilder {
       tY: Math.sin(t) * 1.1,
       tX2: Math.cos(t * 2.0 + 0.8) * 0.72,
       tY2: Math.sin(t * 2.0 + 0.8) * 0.72,
+    };
+  }
+
+  /** @private Gentler drift for smoke flipbook — adjacent frames stay similar. */
+  static _smokeAtlasAnimDrift(animCol, animCols) {
+    const t = (animCol / animCols) * Math.PI * 2;
+    const amp = 0.28;
+    const amp2 = 0.18;
+    return {
+      t,
+      tX: Math.cos(t) * amp,
+      tY: Math.sin(t) * amp,
+      tX2: Math.cos(t * 2.0 + 0.8) * amp2,
+      tY2: Math.sin(t * 2.0 + 0.8) * amp2,
     };
   }
 
@@ -428,7 +446,7 @@ class ProceduralTextureBuilder {
 
   /** @private Shape 0 — Soft rolling billow: domain-warped diffuse smoke body. */
   static _smokeShapeRollingBillow(nx, ny, animCol, animCols, baseSeed) {
-    const { tX, tY } = this._fireAtlasAnimDrift(animCol, animCols);
+    const { tX, tY } = this._smokeAtlasAnimDrift(animCol, animCols);
 
     const warpX = this._fbm(nx * 2.8 + tX + baseSeed + 91.3, ny * 2.8 + tY, 2) * 0.32;
     const warpY = this._fbm(nx * 2.8 - tY + 17.1, ny * 2.8 + tX + baseSeed, 2) * 0.32;
@@ -450,7 +468,7 @@ class ProceduralTextureBuilder {
 
   /** @private Shape 1 — Tendril plume: polar noise pulls soft smoke fingers outward. */
   static _smokeShapeTendrilPlume(nx, ny, animCol, animCols, baseSeed) {
-    const { tX2, tY2 } = this._fireAtlasAnimDrift(animCol, animCols);
+    const { tX2, tY2 } = this._smokeAtlasAnimDrift(animCol, animCols);
 
     const dx = (nx - 0.5) * 2.0;
     const dy = (ny - 0.5) * 2.0;
@@ -470,7 +488,7 @@ class ProceduralTextureBuilder {
 
   /** @private Shape 2 — Splitting puff: low-frequency warp separates soft smoke lobes. */
   static _smokeShapeSplittingPuff(nx, ny, animCol, animCols, baseSeed) {
-    const { tX, tY } = this._fireAtlasAnimDrift(animCol, animCols);
+    const { tX, tY } = this._smokeAtlasAnimDrift(animCol, animCols);
 
     const splitN = this._fbm(nx * 1.6 - tX + baseSeed + 203.7, ny * 1.6 - tY, 2);
     const dx = (nx - 0.5 + splitN * 0.38) * 2.0;
@@ -488,7 +506,7 @@ class ProceduralTextureBuilder {
 
   /** @private Shape 3 — Filament wisps: gauzy veil broken into detached soft pockets. */
   static _smokeShapeFilamentWisps(nx, ny, animCol, animCols, baseSeed) {
-    const { tX, tY } = this._fireAtlasAnimDrift(animCol, animCols);
+    const { tX, tY } = this._smokeAtlasAnimDrift(animCol, animCols);
 
     const dx = (nx - 0.5) * 2.0;
     const dy = (ny - 0.5) * 2.0;
@@ -742,7 +760,7 @@ export class FireEffectV2 {
       indoorEmberLifeScale: 0.05,
       indoorEmberSuppression: 0.2,
       smokeEnabled: true,
-      smokeFlipbookCycles: 1,
+      smokeFlipbookCycles: 0,
       smokeRatio: 2,
       smokeOpacity: 0.19,
       smokeColorWarmth: 0.53,
@@ -1486,17 +1504,19 @@ export class FireEffectV2 {
         smokeFlipbookCycles: {
           type: 'slider',
           label: 'Flipbook Cycles',
-          min: 0.5,
-          max: 4.0,
-          step: 0.1,
-          default: 1,
-          tooltip: 'How many full smoke sprite loops each puff completes over its lifetime.',
+          min: 0,
+          max: 2.0,
+          step: 0.05,
+          default: 0,
+          tooltip: 'Optional atlas loops per puff (requires multi-frame atlas). 0 = static silhouette — recommended.',
         },
+        smokeAlphaStart: { type: 'slider', label: 'Opacity ramp from (life %)', min: 0.0, max: 1.0, step: 0.01, default: 0.16,
+          tooltip: 'Life % when opacity begins rising from zero. Must be ≤ Peak opacity at.' },
+        smokeAlphaPeak: { type: 'slider', label: 'Peak opacity at (life %)', min: 0.0, max: 1.0, step: 0.01, default: 0.9,
+          tooltip: 'Life % at full opacity. If below “ramp from”, treated as same point (hold, then fade).' },
         smokeUpdraft: { type: 'slider', label: 'Updraft', min: 0.0, max: 20.0, step: 0.1, default: 0.8 },
         smokeTurbulence: { type: 'slider', label: 'Turbulence', min: 0.0, max: 5.0, step: 0.05, default: 0.05 },
         smokeWindInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 10.0, step: 0.1, default: 4.5 },
-        smokeAlphaStart: { type: 'slider', label: 'Opacity ramp from (life %)', min: 0.0, max: 1.0, step: 0.01, default: 0.16 },
-        smokeAlphaPeak: { type: 'slider', label: 'Peak opacity at (life %)', min: 0.0, max: 1.0, step: 0.01, default: 0.9 },
         smokeAlphaEnd: { type: 'slider', label: 'Opacity reaches zero at (life %)', min: 0.0, max: 1.0, step: 0.01, default: 1 },
         fireMaskMinBrightness: {
           type: 'slider',
@@ -2339,6 +2359,17 @@ export class FireEffectV2 {
     } catch (_) {}
   }
 
+  /** Pre-warm per-floor _Outdoors CPU snapshots for drift containment sampling. @private */
+  _syncActiveFloorOutdoorsMasks() {
+    const token = this._outdoorsMaskFrameToken ?? 0;
+    const levelContext = window.MapShine?.activeLevelContext ?? null;
+    for (const floorIndex of this._activeFloors) {
+      try {
+        syncSharedOutdoorsMaskForFloor(floorIndex, token, levelContext);
+      } catch (_) {}
+    }
+  }
+
   /**
    * Per-frame update. Steps the BatchedRenderer simulation.
    * @param {{ elapsed: number, delta: number }} timeInfo
@@ -2347,8 +2378,9 @@ export class FireEffectV2 {
     if (!this._initialized || !this._enabled) return;
 
     this._bindPerfRecorder();
+    this._sceneBounds = buildEffectSceneBoundsFromCanvas();
     if (this._glowSceneContext) {
-      this._glowSceneContext.sceneBounds = buildEffectSceneBoundsFromCanvas();
+      this._glowSceneContext.sceneBounds = this._sceneBounds;
     }
 
     // Coal bed time — always advance when the effect is enabled (even with no particle floors).
@@ -2367,6 +2399,8 @@ export class FireEffectV2 {
       ? weatherController.simulationSpeed : 2.0;
 
     if (this._activeFloors.size === 0) return;
+
+    this._syncActiveFloorOutdoorsMasks();
 
     const paramsToken = this._beginPerfSpan('systemParams');
     try {
@@ -2556,6 +2590,11 @@ export class FireEffectV2 {
       batchRenderer.systemToBatchIndex.forEach((_, ps) => {
         ps._msDeferVisualToRefresh = true;
         ps.update(simDt);
+        const particles = ps.particles;
+        const pNum = ps.particleNum;
+        for (let i = 0; i < pNum; i++) {
+          applyFireShelterMaskToParticle(particles[i], ps, 0.35);
+        }
       });
     } finally {
       this._endPerfSpan(simToken);
@@ -2625,9 +2664,17 @@ export class FireEffectV2 {
         }
       }
 
+      for (let i = 0; i < pNum; i++) {
+        applyFireShelterMaskToParticle(particles[i], ps, afterPhysics ? 0.32 : 0.22);
+      }
+
       for (let j = 0; j < ps.behaviors.length; j++) {
         const beh = ps.behaviors[j];
         if (!FIRE_VISUAL_BEHAVIOR_TYPES.has(beh.type)) continue;
+        if ((beh.type === 'SmokeShapeFrameBehavior' || beh.type === 'FlameShapeFrameBehavior') &&
+            typeof beh.frameUpdate === 'function') {
+          beh.frameUpdate(0);
+        }
         const isSizeOverLife = beh.type === 'SizeOverLife';
         const hasSystemParam = typeof beh.update === 'function' && beh.update.length >= 3;
         for (let i = 0; i < pNum; i++) {
@@ -3607,6 +3654,7 @@ export class FireEffectV2 {
 
   /** Rebuild glow pools when authored _Outdoors CPU decode updates (async mask load). */
   onOutdoorsMaskUpdated() {
+    this._outdoorsMaskFrameToken += 1;
     if (!this.params.fireGlowEnabled) return;
     this._reclusterGlowFromStoredPoints();
     this._needsGlowRebuild = true;
@@ -4051,7 +4099,7 @@ export class FireEffectV2 {
       // Use a small offset above the floor plane so particles aren't Z-fighting.
       const shape = new FireMaskShape(
         bucketPoints, sceneW, sceneH, sceneX, sceneY,
-        this, GROUND_Z + (Number(floorIndex) || 0), 0.55
+        this, floorIndex, GROUND_Z + (Number(floorIndex) || 0), 0.55
       );
 
       // Fire system.
@@ -4063,9 +4111,17 @@ export class FireEffectV2 {
 
       let outdoorPoints = null;
       let indoorPoints = null;
+      const outdoorCtx = {
+        sceneX,
+        sceneY,
+        sceneW,
+        sceneH,
+        floorIndex,
+        ownerEffect: this,
+      };
       if (splitOutdoor) {
-        outdoorPoints = filterFirePointsByOutdoor(bucketPoints, 'outdoor');
-        indoorPoints = filterFirePointsByOutdoor(bucketPoints, 'indoor');
+        outdoorPoints = filterFirePointsByOutdoor(bucketPoints, 'outdoor', outdoorCtx);
+        indoorPoints = filterFirePointsByOutdoor(bucketPoints, 'indoor', outdoorCtx);
       }
 
       // Embers — optional split: outdoor sparks above tree/bush canopies, indoor under overhead.
@@ -4076,7 +4132,7 @@ export class FireEffectV2 {
             const wOutdoor = weight * (outdoorN / bucketN);
             const outdoorShape = new FireMaskShape(
               outdoorPoints, sceneW, sceneH, sceneX, sceneY,
-              this, GROUND_Z + (Number(floorIndex) || 0), 0.55
+              this, floorIndex, GROUND_Z + (Number(floorIndex) || 0), 0.55
             );
             const outdoorEmber = this._createEmberSystem(outdoorShape, wOutdoor, floorIndex, { outdoorLayer: true });
             if (outdoorEmber) {
@@ -4089,7 +4145,7 @@ export class FireEffectV2 {
             const wIndoor = weight * (indoorN / bucketN);
             const indoorShape = new FireMaskShape(
               indoorPoints, sceneW, sceneH, sceneX, sceneY,
-              this, GROUND_Z + (Number(floorIndex) || 0), 0.55
+              this, floorIndex, GROUND_Z + (Number(floorIndex) || 0), 0.55
             );
             const indoorEmber = this._createEmberSystem(indoorShape, wIndoor, floorIndex, { outdoorLayer: false });
             if (indoorEmber) {
@@ -4114,7 +4170,7 @@ export class FireEffectV2 {
             const wOutdoor = weight * (outdoorN / bucketN);
             const outdoorShape = new FireMaskShape(
               outdoorPoints, sceneW, sceneH, sceneX, sceneY,
-              this, GROUND_Z + (Number(floorIndex) || 0), 0.55
+              this, floorIndex, GROUND_Z + (Number(floorIndex) || 0), 0.55
             );
             const outdoorSmoke = this._createSmokeSystem(outdoorShape, wOutdoor, floorIndex, { outdoorLayer: true });
             if (outdoorSmoke) {
@@ -4127,7 +4183,7 @@ export class FireEffectV2 {
             const wIndoor = weight * (indoorN / bucketN);
             const indoorShape = new FireMaskShape(
               indoorPoints, sceneW, sceneH, sceneX, sceneY,
-              this, GROUND_Z + (Number(floorIndex) || 0), 0.55
+              this, floorIndex, GROUND_Z + (Number(floorIndex) || 0), 0.55
             );
             const indoorSmoke = this._createSmokeSystem(indoorShape, wIndoor, floorIndex, { outdoorLayer: false });
             if (indoorSmoke) {
@@ -4228,6 +4284,7 @@ export class FireEffectV2 {
 
     system.userData = {
       ownerEffect: this,
+      floorIndex,
       updraftForce: buoyancy,
       baseUpdraftMag: p.fireHeight * 0.125,
       turbulence,
@@ -4316,6 +4373,7 @@ export class FireEffectV2 {
 
     system.userData = {
       ownerEffect: this,
+      floorIndex,
       updraftForce: buoyancy,
       baseUpdraftMag: p.fireHeight * 0.4,
       turbulence,
@@ -4367,10 +4425,10 @@ export class FireEffectV2 {
     const smokeRatio = Math.max(0.0, p.smokeRatio ?? 0.3);
     const maxParticles = this._scaledMaxParticles(p.fireSmokeMaxParticles ?? 600, weight, 16);
 
-    const smokeShapeFrames = new FlameShapeFrameBehavior(SMOKE_ATLAS_SHAPE_COUNT, SMOKE_ATLAS_ANIM_FRAMES, {
+    const smokeShapeFrames = new SmokeShapeFrameBehavior(SMOKE_ATLAS_SHAPE_COUNT, SMOKE_ATLAS_ANIM_FRAMES, {
       ownerEffect: this,
       cyclesParamKey: 'smokeFlipbookCycles',
-      defaultCycles: 1,
+      defaultCycles: 0,
     });
     const smokeLifecycle = new SmokeLifecycleBehavior(this);
     const smokeUpdraftMag = Math.max(0.0, p.smokeUpdraft ?? 2.5);
@@ -4380,7 +4438,7 @@ export class FireEffectV2 {
     const smokeWindInfluence = Math.max(0.0, p.smokeWindInfluence ?? 1.0);
     const smokeTurbMult = Math.max(0.0, p.smokeTurbulence ?? 1.0);
     const smokeCurlStrengthBase = new THREE.Vector3(200 * smokeTurbMult, 200 * smokeTurbMult, 80 * smokeTurbMult);
-    const turbulence = new FixedCurlNoiseField(new THREE.Vector3(100, 100, 40), smokeCurlStrengthBase.clone(), 2.0);
+    const turbulence = new FixedCurlNoiseField(new THREE.Vector3(100, 100, 40), smokeCurlStrengthBase.clone(), 0.85);
     const smokeForces = new FireForcesBehavior('smoke');
     smokeForces.bindTurbulence(turbulence);
     const outdoorLayer = opts.outdoorLayer === true;
@@ -4404,7 +4462,7 @@ export class FireEffectV2 {
       renderOrder: this._computeSmokeRenderOrder(floorIndex, outdoorLayer),
       uTileCount: SMOKE_ATLAS_COLS,
       vTileCount: SMOKE_ATLAS_ROWS,
-      blendTiles: true,
+      blendTiles: false,
       startTileIndex: new ConstantValue(0),
       startRotation: new ConstantValue(0),
       behaviors: [
@@ -4416,6 +4474,7 @@ export class FireEffectV2 {
 
     system.userData = {
       ownerEffect: this,
+      floorIndex,
       updraftForce: smokeUpdraft,
       baseUpdraftMag: smokeUpdraftMag,
       turbulence,

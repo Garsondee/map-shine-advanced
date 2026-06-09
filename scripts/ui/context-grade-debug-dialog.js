@@ -73,6 +73,10 @@ export function formatContextGradeDiagnosticReport(mgr) {
     lines.push(`  Canopy:            ${d.dimensions.canopy ?? '—'} (sky reach ${d.skyReachSample ?? '—'})`);
     lines.push(`  Interior light:    ${d.dimensions.interiorLight ?? '—'} (window ${d.windowLit ? 'lit' : 'no'})`);
     lines.push(`  Cover shadow:      ${d.dimensions.coverShadow ?? '—'} (building ${d.buildingShadowLit ?? '—'}, painted ${d.paintedShadowLit ?? '—'}, tree ${d.treeShadowLit ?? '—'})`);
+  if (d.buildingShadowThresholds) {
+    const th = d.buildingShadowThresholds;
+    lines.push(`  Building detect:   sens ${d.buildingShadowSensitivity ?? '—'}, footprint ×${d.buildingShadowProbeFootprint ?? '—'}, shadow if lit < ${th.buildHigh?.toFixed?.(3) ?? '—'}${th.partialDetect ? ', partial on' : ''}`);
+  }
   }
   lines.push(`  Token outdoor bias:  ${d.tokenOutdoorBias ?? '—'}`);
   lines.push(`  Eye adaptation:      ${d.eyeAdaptationWeight != null ? `${Math.round(d.eyeAdaptationWeight * 100)}% offset` : '—'}`);
@@ -89,8 +93,21 @@ export function formatContextGradeDiagnosticReport(mgr) {
   lines.push(`  Classified:          ${d.classifiedState}`);
   lines.push(`  Target state:        ${d.targetState}`);
   lines.push(`  Transition:          ${d.transitionLabel}`);
+  lines.push(`  Eye adapt (base):    ${d.eyeAdaptationBaseWeight != null ? `${Math.round(d.eyeAdaptationBaseWeight * 100)}%` : '—'}  (${d.eyeAdaptationSec ?? 60}s indoor/outdoor)`);
+  lines.push(`  Eye adapt (mod):     ${d.eyeAdaptationModWeight != null ? `${Math.round(d.eyeAdaptationModWeight * 100)}%` : '—'}  (ambient; ${d.eyeAdaptationSec ?? 60}s)`);
   lines.push(`  Thresholds:          outdoor ≥ ${d.outdoorThresholdHigh}, indoor ≤ ${d.indoorThresholdLow}`);
   lines.push('');
+
+  if (d.coverModifierTarget || d.coverModifierApplied) {
+    lines.push('[ Cover shadow CC layer ]');
+    lines.push(`  Target exposure:   ${d.coverModifierTarget?.exposure ?? '—'}`);
+    lines.push(`  Applied exposure:  ${d.coverModifierApplied?.exposure ?? '—'}`);
+    lines.push(`  Target vignette:   ${d.coverModifierTarget?.vignetteStrength ?? '—'}`);
+    if (d.coverReleaseActive) {
+      lines.push(`  Release fade:      active (${d.coverReleaseWeight != null ? `${Math.round(d.coverReleaseWeight * 100)}%` : '—'} shadow → sunlit, ${d.coverShadowEyeAdaptationSec ?? 3}s)`);
+    }
+    lines.push('');
+  }
 
   lines.push('[ Applied CC overlay ]');
   lines.push(`  exposure:          ${d.applied.exposure}`);
@@ -105,6 +122,8 @@ export function formatContextGradeDiagnosticReport(mgr) {
   lines.push(`  contextExposure:     ${d.cc.contextExposure}`);
   lines.push(`  contextSaturation:   ${d.cc.contextSaturation}`);
   lines.push(`  contextVignette:     ${d.cc.contextVignetteStrength}`);
+  lines.push(`  vignetteInner:       ${d.cc.contextVignetteInner}`);
+  lines.push(`  vignetteSoftness:    ${d.cc.contextVignetteSoftness}`);
   lines.push(`  spatialEnabled:    ${d.cc.contextSpatialEnabled}`);
   lines.push(`  spatialStrength:   ${d.cc.contextSpatialStrength}`);
   lines.push(`  tokenOutdoorBias:  ${d.cc.contextTokenOutdoorBias}`);

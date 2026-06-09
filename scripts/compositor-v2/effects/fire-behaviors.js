@@ -18,6 +18,12 @@ import { weatherController } from '../../core/WeatherController.js';
 import { sceneWindField } from '../../core/SceneWindField.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
 import { CurlNoiseField, Vector3 } from '../../libs/quarks.core.module.js';
+import {
+  buildEffectSceneBoundsFromCanvas,
+  sampleAuthoredOutdoorsAtWorld,
+  sampleOutdoorsFromSnapshot,
+  syncSharedOutdoorsMaskForFloor,
+} from './water-splash-behaviors.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // FixedCurlNoiseField — corrects three.quarks CurlNoiseField time integration
@@ -175,8 +181,18 @@ export class FireForcesBehavior {
   }
 
   /** @private */
+  _currentOutdoorFactor(particle, system) {
+    const owner = system?.userData?.ownerEffect;
+    if (owner && particle?.position) {
+      return readFireParticleCurrentOutdoor(particle, owner, system);
+    }
+    const fallback = particle._windSusceptibility;
+    return Number.isFinite(fallback) ? clamp01(fallback) : 1.0;
+  }
+
+  /** @private */
   _rainUpdraftScale(particle, system) {
-    const outdoor = Math.max(0, Math.min(1, particle._windSusceptibility ?? 1.0));
+    const outdoor = this._currentOutdoorFactor(particle, system);
     if (outdoor <= 0.001) return 1.0;
 
     const precip = this._framePrecip;
@@ -193,9 +209,7 @@ export class FireForcesBehavior {
     if (!particle?.velocity) return;
 
     const isSmoke = this.profile === 'smoke' || !!(system?.userData?.isSmoke);
-    let susceptibility = typeof particle._windSusceptibility === 'number'
-      ? particle._windSusceptibility
-      : 1.0;
+    let susceptibility = this._currentOutdoorFactor(particle, system);
     if (typeof particle._flameMotionScale === 'number' && Number.isFinite(particle._flameMotionScale)) {
       susceptibility *= Math.max(0, Math.min(1, particle._flameMotionScale));
     }
@@ -504,6 +518,83 @@ function smoothstep01(x) {
   return u * u * (3.0 - 2.0 * u);
 }
 
+/** Deterministic 0..1 hash from world XY — stable silhouette per spawn site. */
+function hashWorld01(x, y, salt = 0) {
+  const s = Math.sin((Number(x) || 0) * 0.0173 + (Number(y) || 0) * 0.0237 + salt * 1.91) * 43758.5453;
+  return s - Math.floor(s);
+}
+
+/** @param {Float32Array} lut @param {number} t */
+function sampleScalarLUT(lut, t) {
+  const f = clamp01(t) * 255;
+  const i0 = f | 0;
+  const frac = f - i0;
+  const i1 = Math.min(255, i0 + 1);
+  return lut[i0] * (1.0 - frac) + lut[i1] * frac;
+}
+
+/** @param {Float32Array} lut @param {number} t @param {{ r: number, g: number, b: number }} temp */
+function sampleColorLUT3(lut, t, temp) {
+  const f = clamp01(t) * 255;
+  const i0 = (f | 0) * 3;
+  const frac = f - (f | 0);
+  const i1 = Math.min(255, (f | 0) + 1) * 3;
+  const om = 1.0 - frac;
+  temp.r = lut[i0] * om + lut[i1] * frac;
+  temp.g = lut[i0 + 1] * om + lut[i1 + 1] * frac;
+  temp.b = lut[i0 + 2] * om + lut[i1 + 2] * frac;
+  return temp;
+}
+
+/**
+ * Smoke opacity envelope over normalized life.
+ * When peak is left of start (mis-ordered UI), holds full opacity from start→end.
+ *
+ * @param {number} t
+ * @param {number} aStart
+ * @param {number} aPeak
+ * @param {number} aEnd
+ */
+function smokeAlphaEnvelope(t, aStart, aPeak, aEnd) {
+  const u = t < 0 ? 0 : t > 1 ? 1 : t;
+  const start = clamp01(aStart);
+  let peak = clamp01(aPeak);
+  let end = clamp01(aEnd);
+  if (peak < start) peak = start;
+  if (end < peak) end = peak;
+  if (end <= 0 || u >= end) return 0;
+  if (u < start) {
+    return start > 1e-5 ? smoothstep01(u / start) : 1.0;
+  }
+  if (u < peak) {
+    const rampT = (u - start) / Math.max(1e-5, peak - start);
+    return smoothstep01(rampT);
+  }
+  const fadeT = (u - peak) / Math.max(1e-5, end - peak);
+  return 1.0 - smoothstep01(fadeT);
+}
+
+/** Low-pass filter for indoor/drift masks — faster when sheltering in, slower when leaving. */
+function smoothParticleVisualMask(particle, target, rate = 0.08) {
+  const t = clamp01(target);
+  const prev = particle._msVisualMaskSmoothed;
+  if (!Number.isFinite(prev)) {
+    particle._msVisualMaskSmoothed = t;
+    return t;
+  }
+  const blend = t < prev ? Math.min(1, rate * 2.8) : rate;
+  const next = prev + (t - prev) * blend;
+  particle._msVisualMaskSmoothed = next;
+  return next;
+}
+
+/** Scene bounds for _Outdoors CPU sampling (matches WaterSplashes / glow). */
+function resolveFireSceneBounds(ownerEffect) {
+  return ownerEffect?._sceneBounds
+    ?? ownerEffect?._glowSceneContext?.sceneBounds
+    ?? buildEffectSceneBoundsFromCanvas();
+}
+
 /** @returns {number} 0→1→0 fade over normalized life; fractions are span at birth/death. */
 function particleSpawnDeathFade(t, fadeIn = 0.14, fadeOut = 0.16) {
   const u = t < 0 ? 0 : t > 1 ? 1 : t;
@@ -624,16 +715,18 @@ export class FireMaskShape {
    * @param {number} offsetX - Scene X origin in world units
    * @param {number} offsetY - Scene Y origin in world units
    * @param {object} ownerEffect - Effect instance for reading params/weather
+   * @param {number} [floorIndex=0] - Authored floor for _Outdoors sampling
    * @param {number} [groundZ=1000] - Z position for ground plane
    * @param {number} [floorElevation=0] - Z offset above groundZ for this floor
    */
-  constructor(points, width, height, offsetX, offsetY, ownerEffect, groundZ = 1000, floorElevation = 0) {
+  constructor(points, width, height, offsetX, offsetY, ownerEffect, floorIndex = 0, groundZ = 1000, floorElevation = 0) {
     this.points = points;
     this.width = width;
     this.height = height;
     this.offsetX = offsetX;
     this.offsetY = offsetY;
     this.ownerEffect = ownerEffect;
+    this.floorIndex = Number.isFinite(Number(floorIndex)) ? Math.max(0, Math.floor(Number(floorIndex))) : 0;
     this.groundZ = groundZ;
     this.floorElevation = Number.isFinite(floorElevation) ? floorElevation : 0;
     this.type = 'fire_mask';
@@ -659,21 +752,22 @@ export class FireMaskShape {
 
     // Map UV to world-space position. v=0 is image top, world Y grows upward,
     // so we use (1-v) for the Y mapping.
-    p.position.x = this.offsetX + u * this.width;
-    p.position.y = this.offsetY + (1.0 - v) * this.height;
+    const worldX = this.offsetX + u * this.width;
+    const worldY = this.offsetY + (1.0 - v) * this.height;
+    p.position.x = worldX;
+    p.position.y = worldY;
     p.position.z = this.groundZ + this.floorElevation;
 
-    // Query outdoor mask for wind susceptibility.
-    let outdoorFactor = 1.0;
-    try {
-      if (weatherController && typeof weatherController.getRoofMaskIntensity === 'function') {
-        outdoorFactor = weatherController.getRoofMaskIntensity(u, v);
-      }
-    } catch (_) {
-      outdoorFactor = 1.0;
-    }
-    if (!Number.isFinite(outdoorFactor) || outdoorFactor < 0) outdoorFactor = 0;
-    if (outdoorFactor > 1) outdoorFactor = 1;
+    const spawnSize = typeof p.size === 'number' ? p.size : 0;
+    const outdoorFactor = resolveFireOutdoorFootprintMin(
+      worldX,
+      worldY,
+      spawnSize,
+      this.ownerEffect,
+      this.floorIndex,
+    );
+    p._spawnOutdoorFactor = outdoorFactor;
+    p._msFloorIndex = this.floorIndex;
     p._windSusceptibility = outdoorFactor;
 
     const params = this.ownerEffect?.params;
@@ -776,7 +870,7 @@ export class FlameLifecycleBehavior {
     zeroParticleVisual(particle);
   }
 
-  update(particle, delta) {
+  update(particle, delta, system) {
     const life = particle.life;
     if (life <= 0) return;
     let age = particle._msDisplayAge;
@@ -791,8 +885,9 @@ export class FlameLifecycleBehavior {
       ? (fb < this._minBrightness ? this._minBrightness : fb)
       : this._minBrightness;
 
-    const emission = this._emissionLUT[idx] * heat * brightness;
-    const alpha = this._alphaLUT[idx] * brightness;
+    const zoneMask = readFireParticleAppliedVisualMask(particle);
+    const emission = this._emissionLUT[idx] * heat * brightness * zoneMask;
+    const alpha = this._alphaLUT[idx] * brightness * zoneMask;
     const ci = idx * 3;
     particle.color.x = this._colorLUT[ci] * emission;
     particle.color.y = this._colorLUT[ci + 1] * emission;
@@ -898,7 +993,8 @@ export class EmberLifecycleBehavior {
     if (particle._flameBrightness === undefined) particle._flameBrightness = 1.0;
 
     const params = this.ownerEffect?.params;
-    let outdoorFactor = particle._windSusceptibility;
+    let outdoorFactor = particle._spawnOutdoorFactor;
+    if (!Number.isFinite(outdoorFactor)) outdoorFactor = particle._windSusceptibility;
     if (!Number.isFinite(outdoorFactor)) outdoorFactor = 1.0;
     outdoorFactor = clamp01(outdoorFactor);
 
@@ -917,7 +1013,7 @@ export class EmberLifecycleBehavior {
     zeroParticleVisual(particle);
   }
 
-  update(particle, delta) {
+  update(particle, delta, system) {
     const life = particle.life;
     if (life <= 0) return;
     let age = particle._msDisplayAge;
@@ -931,12 +1027,10 @@ export class EmberLifecycleBehavior {
     const brightness = fb !== undefined ? (fb < 0.3 ? 0.3 : fb) : 1.0;
 
     const params = this.ownerEffect?.params;
-    let outdoorFactor = particle._windSusceptibility;
-    if (!Number.isFinite(outdoorFactor)) outdoorFactor = 1.0;
-    const indoorScale = computeIndoorSuppressionScale(params?.indoorEmberSuppression, outdoorFactor);
+    const visualMask = readFireParticleAppliedVisualMask(particle);
 
-    const emission = this._emissionLUT[idx] * heat * brightness * indoorScale;
-    const alpha = this._alphaLUT[idx] * brightness * indoorScale;
+    const emission = this._emissionLUT[idx] * heat * brightness * visualMask;
+    const alpha = this._alphaLUT[idx] * brightness * visualMask;
     const ci = idx * 3;
     particle.color.x = this._colorLUT[ci] * emission;
     particle.color.y = this._colorLUT[ci + 1] * emission;
@@ -1044,36 +1138,57 @@ export class SmokeLifecycleBehavior {
     // Softer than 0.5× so bright-mask spawns stay readable as smoke, not paper-thin.
     particle._smokeDensity = Math.max(0.65, 1.0 - brightness * 0.28);
     particle._smokeStartSize = particle.size;
+
+    const params = this.ownerEffect?.params;
+    let outdoorFactor = particle._spawnOutdoorFactor;
+    if (!Number.isFinite(outdoorFactor)) outdoorFactor = particle._windSusceptibility;
+    if (!Number.isFinite(outdoorFactor)) outdoorFactor = 1.0;
+    const indoorScale = computeIndoorSuppressionScale(params?.indoorSmokeSuppression, outdoorFactor);
+    particle._indoorSmokeScale = indoorScale;
+    if (indoorScale <= 0.001) {
+      if (typeof particle.life === 'number') particle.life = 0;
+      zeroParticleVisual(particle);
+      return;
+    }
+
     // Lift slightly above the fire plane so smoke reads above ground art (top-down view).
     if (particle.position && typeof particle.position.z === 'number') {
       particle.position.z += 12 + Math.random() * 18;
     }
   }
 
-  update(particle, delta) {
+  update(particle, delta, system) {
     const life = particle.life;
     if (life <= 0) return;
     let age = particle._msDisplayAge;
     if (age === undefined) age = particle.age;
     let t = age / (life > 0.001 ? life : 0.001);
     if (t < 0) t = 0; else if (t > 1) t = 1;
-    const idx = (t * 255) | 0;
 
     const density = particle._smokeDensity ?? 0.75;
     const params = this.ownerEffect?.params;
-    let outdoorFactor = particle._windSusceptibility;
-    if (!Number.isFinite(outdoorFactor)) outdoorFactor = 1.0;
-    const indoorSmoke = computeIndoorSuppressionScale(params?.indoorSmokeSuppression, outdoorFactor);
+    const visualMask = readFireParticleAppliedVisualMask(particle);
+    particle._indoorSmokeScale = visualMask;
 
-    const ci = idx * 3;
-    particle.color.x = this._colorLUT[ci];
-    particle.color.y = this._colorLUT[ci + 1];
-    particle.color.z = this._colorLUT[ci + 2];
-    particle.color.w = this._alphaLUT[idx] * density * indoorSmoke;
+    const lifeFade = particleSpawnDeathFade(t, 0.14, 0.22);
+    const color = sampleColorLUT3(this._colorLUT, t, _smokeColorTemp);
+    const alpha = sampleScalarLUT(this._alphaLUT, t) * density * visualMask * lifeFade;
+    const sizeMul = sampleScalarLUT(this._sizeLUT, t);
+
+    particle.color.x = color.r * visualMask;
+    particle.color.y = color.g * visualMask;
+    particle.color.z = color.b * visualMask;
+    particle.color.w = alpha;
 
     const startSize = particle._smokeStartSize;
     if (startSize > 0) {
-      particle.size = startSize * this._sizeLUT[idx];
+      const prev = particle._smokeSizeSmoothed;
+      const target = startSize * sizeMul;
+      const next = Number.isFinite(prev)
+        ? prev + (target - prev) * 0.14
+        : target;
+      particle._smokeSizeSmoothed = next;
+      particle.size = next;
     }
   }
 
@@ -1086,17 +1201,16 @@ export class SmokeLifecycleBehavior {
     this._alphaStart = Math.max(0.0, Math.min(1.0, p?.smokeAlphaStart ?? 0.0));
     let peak = Math.max(0.0, Math.min(1.0, p?.smokeAlphaPeak ?? 0.75));
     let end = Math.max(0.0, Math.min(1.0, p?.smokeAlphaEnd ?? 1.0));
-    peak = Math.max(this._alphaStart, peak);
-    // If "fade end" is left of peak on the timeline, treat end as the opacity cutoff
-    // and pull peak back instead of silently bumping end upward.
-    if (end < peak) peak = end;
+    if (peak < this._alphaStart) peak = this._alphaStart;
+    if (end < peak) end = peak;
     this._alphaPeak = peak;
-    this._alphaEnd = Math.max(peak, end);
+    this._alphaEnd = end;
 
     const darknessResponse = Math.max(0.0, Math.min(1.0, p?.smokeDarknessResponse ?? 0.8));
     const envState = weatherController._environmentState;
     const sceneDarkness = envState?.sceneDarkness ?? 0.0;
-    this._darknessFactor = 1.0 - sceneDarkness * darknessResponse * 0.85;
+    const rawDark = 1.0 - sceneDarkness * darknessResponse * 0.85;
+    this._darknessFactor = Math.round(rawDark * 100) / 100;
 
     const precip = weatherController.currentState?.precipitation || 0;
     this._precipMult = Math.max(0.2, 1.0 - precip * 0.5);
@@ -1178,19 +1292,10 @@ export class SmokeLifecycleBehavior {
       colorLUT[ci + 1] = clamp01(baseG * brightDark) + emissionG;
       colorLUT[ci + 2] = clamp01(baseB * brightDark) + emissionB;
 
-      let alphaEnv = 0.0;
-      if (t > aStart && t < aEnd) {
-        if (t < aPeak) {
-          const rampT = (t - aStart) / Math.max(1e-5, aPeak - aStart);
-          alphaEnv = smoothstep01(rampT);
-        } else {
-          const fadeT = (t - aPeak) / Math.max(1e-5, aEnd - aPeak);
-          alphaEnv = 1.0 - smoothstep01(fadeT);
-        }
-      }
+      const alphaEnv = smokeAlphaEnvelope(t, aStart, aPeak, aEnd);
       alphaLUT[idx] = alphaEnv * smokeOpacity * precipMult;
 
-      const st = t * t * (3.0 - 2.0 * t);
+      const st = smoothstep01(t);
       sizeLUT[idx] = 1.0 + (sizeGrowth - 1.0) * st;
     }
   }
@@ -1274,6 +1379,86 @@ export class FlameShapeFrameBehavior {
   reset() {}
   clone() {
     return new FlameShapeFrameBehavior(this.shapeCount, this.animFrames, {
+      ownerEffect: this.ownerEffect,
+      cyclesParamKey: this.cyclesParamKey,
+      defaultCycles: this.defaultCycles,
+    });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SmokeShapeFrameBehavior — slow, eased smoke flipbook (less morphing between tiles)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export class SmokeShapeFrameBehavior extends FlameShapeFrameBehavior {
+  /**
+   * @param {number} [shapeCount=4]
+   * @param {number} [animFrames=1] One static tile per shape row (no flipbook morph).
+   * @param {{ ownerEffect?: object, cyclesParamKey?: string, defaultCycles?: number }} [options]
+   */
+  constructor(shapeCount = 4, animFrames = 1, options = {}) {
+    super(shapeCount, animFrames, {
+      ownerEffect: options.ownerEffect ?? null,
+      cyclesParamKey: options.cyclesParamKey ?? 'smokeFlipbookCycles',
+      defaultCycles: options.defaultCycles ?? 0,
+    });
+    this.type = 'SmokeShapeFrameBehavior';
+  }
+
+  /** @override Allow 0 = static puff silhouette for entire life. */
+  _resolveCycles() {
+    const raw = this.ownerEffect?.params?.[this.cyclesParamKey];
+    const cycles = typeof raw === 'number' && Number.isFinite(raw) ? raw : this.defaultCycles;
+    return Math.max(0, cycles);
+  }
+
+  /** @override Stable shape from spawn XY — avoids random pop-in silhouettes. */
+  initialize(particle) {
+    if (!particle) return;
+    const px = particle.position?.x ?? 0;
+    const py = particle.position?.y ?? 0;
+    particle._flameShapeRow = Math.floor(hashWorld01(px, py, 0.13) * this.shapeCount) % this.shapeCount;
+    particle._flameAnimOffset = this.animFrames > 1
+      ? Math.floor(hashWorld01(px, py, 2.71) * this.animFrames)
+      : 0;
+    this._applyTile(particle, particle._flameAnimOffset);
+  }
+
+  /** @override Smoke stays on integer tiles; flipbook only when cycles ≥ 1. */
+  update(particle, delta) {
+    if (!particle) return;
+    const life = particle.life;
+    if (!Number.isFinite(life) || life <= 0) return;
+    const offset = particle._flameAnimOffset ?? 0;
+    const cycles = this._cachedCycles;
+
+    if (cycles <= 0.001 || this.animFrames <= 1) {
+      this._applyTile(particle, offset);
+      return;
+    }
+
+    let age = particle._msDisplayAge;
+    if (age === undefined) age = particle.age;
+    const t = age < 0 ? 0 : age > life ? 1 : age / life;
+    const loopT = offset + (t * cycles * this.animFrames);
+    this._applyTile(particle, loopT);
+  }
+
+  /** @override Always integer tile index — no fractional cross-blend. */
+  _applyTile(particle, loopT) {
+    const row = particle._flameShapeRow ?? 0;
+    let col = Math.floor(loopT);
+    if (!Number.isFinite(col) || col < 0) col = 0;
+    if (col >= this.animFrames) col = this.animFrames - 1;
+    particle.uvTile = row * this.animFrames + col;
+  }
+
+  frameUpdate() {
+    this._cachedCycles = this._resolveCycles();
+  }
+
+  clone() {
+    return new SmokeShapeFrameBehavior(this.shapeCount, this.animFrames, {
       ownerEffect: this.ownerEffect,
       cyclesParamKey: this.cyclesParamKey,
       defaultCycles: this.defaultCycles,
@@ -1638,6 +1823,244 @@ export function filterFirePointsRequireNeighbor(points, imgW, imgH, minDistPx = 
 
 const OUTDOOR_SMOKE_POINT_THRESHOLD = 0.5;
 
+/**
+ * Sample authored _Outdoors at Three world XY (per-floor compositor snapshot).
+ * Falls back to WeatherController scene UV when the CPU snapshot is unavailable.
+ *
+ * @param {number} worldX
+ * @param {number} worldY
+ * @param {object|null|undefined} ownerEffect
+ * @param {number} [floorIndex=0]
+ * @returns {number} 0 = indoors, 1 = outdoors
+ */
+/**
+ * Sample authored _Outdoors at one world XY (sync + classify/raw min).
+ * @returns {number|null} null when no mask source is available
+ */
+function sampleFireOutdoorsAtWorld(worldX, worldY, ownerEffect, floorIndex = 0) {
+  if (!Number.isFinite(worldX) || !Number.isFinite(worldY)) return null;
+  const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Math.floor(Number(floorIndex))) : 0;
+  const sceneBounds = resolveFireSceneBounds(ownerEffect);
+  if (!sceneBounds || !(sceneBounds.sw > 0 && sceneBounds.sh > 0)) return null;
+
+  const frameToken = ownerEffect?._outdoorsMaskFrameToken ?? 0;
+  const levelContext = window.MapShine?.activeLevelContext ?? null;
+
+  try {
+    const snap = syncSharedOutdoorsMaskForFloor(fi, frameToken, levelContext);
+    if (snap?.hasOutdoorsMask && snap.outdoorsMaskData) {
+      const shelter = sampleOutdoorsFromSnapshot(snap, worldX, worldY, sceneBounds, { shelterBias: true });
+      if (shelter != null && Number.isFinite(shelter)) return clamp01(shelter);
+    }
+    const authored = sampleAuthoredOutdoorsAtWorld(
+      fi,
+      worldX,
+      worldY,
+      sceneBounds,
+      frameToken,
+      levelContext,
+      { shelterBias: true },
+    );
+    if (authored != null && Number.isFinite(authored)) return clamp01(authored);
+  } catch (_) {}
+
+  return null;
+}
+
+export function resolveFireOutdoorFactor(worldX, worldY, ownerEffect, floorIndex = 0) {
+  const sampled = sampleFireOutdoorsAtWorld(worldX, worldY, ownerEffect, floorIndex);
+  return sampled != null ? sampled : 1.0;
+}
+
+/**
+ * Min outdoors sample across particle footprint — large billboards can extend indoors
+ * while their center still reads outdoor.
+ *
+ * @param {number} worldX
+ * @param {number} worldY
+ * @param {number} [particleSize=0]
+ * @param {object|null|undefined} ownerEffect
+ * @param {number} [floorIndex=0]
+ * @returns {number}
+ */
+export function resolveFireOutdoorFootprintMin(worldX, worldY, particleSize, ownerEffect, floorIndex = 0) {
+  const r = Math.max(24, Number(particleSize) || 0) * 0.42;
+  const offsets = (r > 1)
+    ? [
+      [0, 0],
+      [r, 0],
+      [-r, 0],
+      [0, r],
+      [0, -r],
+      [r * 0.72, r * 0.72],
+      [-r * 0.72, r * 0.72],
+      [r * 0.72, -r * 0.72],
+      [-r * 0.72, -r * 0.72],
+    ]
+    : [[0, 0]];
+
+  let minOutdoor = 1.0;
+  let gotSample = false;
+  for (const [ox, oy] of offsets) {
+    const s = sampleFireOutdoorsAtWorld(worldX + ox, worldY + oy, ownerEffect, floorIndex);
+    if (s == null || !Number.isFinite(s)) continue;
+    gotSample = true;
+    if (s < minOutdoor) minOutdoor = s;
+  }
+  return gotSample ? clamp01(minOutdoor) : 1.0;
+}
+
+/** @param {object|null|undefined} particle @param {object|null|undefined} system */
+function readParticleFloorIndex(particle, system) {
+  if (Number.isFinite(particle?._msFloorIndex)) {
+    return Math.max(0, Math.floor(Number(particle._msFloorIndex)));
+  }
+  const udFi = system?.userData?.floorIndex;
+  if (Number.isFinite(Number(udFi))) return Math.max(0, Math.floor(Number(udFi)));
+  return 0;
+}
+
+/** Outdoor weight frozen at spawn — used for drift containment. */
+function readParticleSpawnOutdoor(particle) {
+  if (Number.isFinite(particle?._spawnOutdoorFactor)) return clamp01(particle._spawnOutdoorFactor);
+  if (Number.isFinite(particle?._windSusceptibility)) return clamp01(particle._windSusceptibility);
+  return 1.0;
+}
+
+/**
+ * Live _Outdoors sample at the particle's current world XY.
+ * @param {object|null|undefined} particle
+ * @param {object|null|undefined} ownerEffect
+ * @param {object|null|undefined} [system]
+ * @returns {number}
+ */
+export function readFireParticleCurrentOutdoor(particle, ownerEffect, system = null) {
+  if (!particle?.position || !ownerEffect) return readParticleSpawnOutdoor(particle);
+  return resolveFireOutdoorFootprintMin(
+    particle.position.x,
+    particle.position.y,
+    particle.size,
+    ownerEffect,
+    readParticleFloorIndex(particle, system),
+  );
+}
+
+/**
+ * Fade particles that drift across the indoor/outdoor boundary from their spawn zone.
+ * Doorways use a soft band so containment eases rather than popping.
+ *
+ * @param {number} spawnOutdoor 0..1 at spawn
+ * @param {number} currentOutdoor 0..1 at current world XY
+ * @returns {number} 1 = fully visible, 0 = fully masked
+ */
+export function computeFireZoneContainmentMask(spawnOutdoor, currentOutdoor) {
+  const spawn = clamp01(spawnOutdoor);
+  const current = clamp01(currentOutdoor);
+
+  // Outdoor-born: visibility tracks absolute shelter at the puff footprint.
+  if (spawn >= 0.50) {
+    if (current >= 0.46) return 1.0;
+    if (current <= 0.06) return 0.0;
+    return smoothstep01((current - 0.06) / (0.46 - 0.06));
+  }
+
+  // Indoor-born: hide when footprint reads open sky.
+  if (spawn <= 0.50) {
+    if (current <= 0.54) return 1.0;
+    if (current >= 0.94) return 0.0;
+    return 1.0 - smoothstep01((current - 0.54) / (0.94 - 0.54));
+  }
+
+  return 1.0;
+}
+
+/**
+ * Combined indoor suppression + drift containment for fire particle visuals.
+ *
+ * @param {object|null|undefined} particle
+ * @param {object|null|undefined} ownerEffect
+ * @param {object|null|undefined} [system]
+ * @param {number} [indoorSuppression=0] indoorSmokeSuppression / indoorEmberSuppression param
+ * @returns {{ spawnOutdoor: number, currentOutdoor: number, zoneMask: number, indoorScale: number, visualMask: number }}
+ */
+export function resolveFireParticleVisualMask(particle, ownerEffect, system = null, indoorSuppression = 0) {
+  const spawnOutdoor = readParticleSpawnOutdoor(particle);
+  const currentOutdoor = readFireParticleCurrentOutdoor(particle, ownerEffect, system);
+  const zoneMask = computeFireZoneContainmentMask(spawnOutdoor, currentOutdoor);
+  const indoorScale = indoorSuppression > 0
+    ? computeIndoorSuppressionScale(indoorSuppression, currentOutdoor)
+    : 1.0;
+  const visualMask = zoneMask * (indoorSuppression > 0 ? indoorScale : 1.0);
+  return {
+    spawnOutdoor,
+    currentOutdoor,
+    zoneMask,
+    indoorScale,
+    visualMask,
+  };
+}
+
+/**
+ * Resolve zone + indoor mask with temporal smoothing (shared by flame/ember/smoke visuals).
+ * @param {object|null|undefined} particle
+ * @param {object|null|undefined} ownerEffect
+ * @param {object|null|undefined} [system]
+ * @param {number} [indoorSuppression=0]
+ * @param {number} [smoothRate=0.14]
+ * @returns {number}
+ */
+export function resolveFireParticleVisualMaskSmoothed(
+  particle,
+  ownerEffect,
+  system = null,
+  indoorSuppression = 0,
+  smoothRate = 0.14,
+) {
+  const target = resolveFireParticleVisualMask(
+    particle,
+    ownerEffect,
+    system,
+    indoorSuppression,
+  ).visualMask;
+  return smoothParticleVisualMask(particle, target, smoothRate);
+}
+
+/** Read mask written by {@link applyFireShelterMaskToParticle}. */
+export function readFireParticleAppliedVisualMask(particle) {
+  const m = particle?._msFireVisualMask;
+  return Number.isFinite(m) ? clamp01(m) : 1.0;
+}
+
+/**
+ * Update per-particle indoor/outdoor shelter mask after physics or before visual upload.
+ * @param {object|null|undefined} particle
+ * @param {object|null|undefined} system
+ * @param {number} [smoothRate=0.28]
+ * @returns {number}
+ */
+export function applyFireShelterMaskToParticle(particle, system, smoothRate = 0.28) {
+  if (!particle || particle.died) return 1;
+  const owner = system?.userData?.ownerEffect;
+  if (!owner) return 1;
+
+  let indoorSuppression = 0;
+  if (system.userData?.isSmoke) {
+    indoorSuppression = owner.params?.indoorSmokeSuppression ?? 0;
+  } else if (system.userData?.isEmber) {
+    indoorSuppression = owner.params?.indoorEmberSuppression ?? 0;
+  }
+
+  const mask = resolveFireParticleVisualMaskSmoothed(
+    particle,
+    owner,
+    system,
+    indoorSuppression,
+    smoothRate,
+  );
+  particle._msFireVisualMask = mask;
+  return mask;
+}
+
 /** @param {number} outdoorFactor 0 = fully under roof, 1 = open sky */
 export function computeIndoorBlend(outdoorFactor) {
   return clamp01(1.0 - clamp01(outdoorFactor));
@@ -1676,12 +2099,27 @@ export function applyEmberSpriteTextureTransform(texture, params) {
 /**
  * Split packed fire-mask spawn points by roof/outdoor mask intensity.
  *
- * @param {Float32Array} points - Packed (u, v, brightness) triples
+ * @param {Float32Array} points - Packed (u, v, brightness) triples in scene UV space
  * @param {'outdoor'|'indoor'} mode
+ * @param {{
+ *   sceneX?: number,
+ *   sceneY?: number,
+ *   sceneW?: number,
+ *   sceneH?: number,
+ *   floorIndex?: number,
+ *   ownerEffect?: object|null,
+ * }|null} [ctx]
  * @returns {Float32Array|null}
  */
-export function filterFirePointsByOutdoor(points, mode = 'outdoor') {
+export function filterFirePointsByOutdoor(points, mode = 'outdoor', ctx = null) {
   if (!points || points.length < 3) return null;
+
+  const sceneX = Number(ctx?.sceneX) || 0;
+  const sceneY = Number(ctx?.sceneY) || 0;
+  const sceneW = Number(ctx?.sceneW) || 1;
+  const sceneH = Number(ctx?.sceneH) || 1;
+  const floorIndex = Number.isFinite(Number(ctx?.floorIndex)) ? Number(ctx.floorIndex) : 0;
+  const ownerEffect = ctx?.ownerEffect ?? null;
 
   const out = [];
   for (let i = 0; i < points.length; i += 3) {
@@ -1692,15 +2130,9 @@ export function filterFirePointsByOutdoor(points, mode = 'outdoor') {
       continue;
     }
 
-    let outdoorFactor = 1.0;
-    try {
-      if (weatherController && typeof weatherController.getRoofMaskIntensity === 'function') {
-        outdoorFactor = weatherController.getRoofMaskIntensity(u, v);
-      }
-    } catch (_) {
-      outdoorFactor = 1.0;
-    }
-    outdoorFactor = clamp01(outdoorFactor);
+    const worldX = sceneX + u * sceneW;
+    const worldY = sceneY + (1.0 - v) * sceneH;
+    const outdoorFactor = resolveFireOutdoorFactor(worldX, worldY, ownerEffect, floorIndex);
     const isOutdoor = outdoorFactor > OUTDOOR_SMOKE_POINT_THRESHOLD;
 
     if (mode === 'outdoor' && isOutdoor) out.push(u, v, brightness);

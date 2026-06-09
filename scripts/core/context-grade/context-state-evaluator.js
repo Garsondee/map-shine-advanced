@@ -3,7 +3,7 @@
  * @module core/context-grade/context-state-evaluator
  */
 
-import { finiteOr } from './context-grade-spec.js';
+import { finiteOr, classifyBuildingShadowLit, resolveBuildingShadowThresholds } from './context-grade-spec.js';
 import { createEmptyDimensionSnapshot } from './context-dimensions.js';
 
 /**
@@ -88,10 +88,9 @@ export function classifyCoverShadow(probe, previous = 'unknown', params = {}) {
 
   const treeLow = finiteOr(params?.treeShadowLitLow, 0.93);
   const treeHigh = finiteOr(params?.treeShadowLitHigh, 0.98);
-  const buildLow = finiteOr(params?.buildingShadowLitLow, 0.58);
-  const buildHigh = finiteOr(params?.buildingShadowLitHigh, 0.72);
-  const paintLow = finiteOr(params?.paintedShadowLitLow, 0.75);
-  const paintHigh = finiteOr(params?.paintedShadowLitHigh, 0.88);
+  const buildingThresholds = resolveBuildingShadowThresholds(params);
+  const paintLow = finiteOr(params?.paintedShadowLitLow, 0.85);
+  const paintHigh = finiteOr(params?.paintedShadowLitHigh, 0.94);
   const dayThr = finiteOr(params?.treeDappleDayThreshold, 0.35);
   const canopyShadedThr = finiteOr(params?.canopyShadedThreshold, 0.38);
 
@@ -119,13 +118,13 @@ export function classifyCoverShadow(probe, previous = 'unknown', params = {}) {
     || treeDarkerThanBuilding
     || (canopyShaded
       && Number.isFinite(buildingLit)
-      && buildingLit >= buildHigh
+      && buildingLit >= buildingThresholds.buildHigh
       && (!Number.isFinite(treeLit) || treeLit < treeHigh));
 
-  if (treeInShadow && isDay) return 'treeDapple';
-
-  const buildingInShadow = inBand(buildingLit, buildLow, buildHigh, wasBuilding);
+  const buildingInShadow = classifyBuildingShadowLit(buildingLit, buildingThresholds, wasBuilding);
   const paintedInShadow = inBand(paintedLit, paintLow, paintHigh, wasPainted);
+
+  if (treeInShadow && isDay && !buildingInShadow && !paintedInShadow) return 'treeDapple';
 
   if (paintedInShadow && !buildingInShadow) return 'paintedShadow';
   if (buildingInShadow) return 'buildingShadow';

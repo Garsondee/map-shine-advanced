@@ -28,27 +28,32 @@ import {
 
 } from './context-grade-coherence.js';
 
+import {
+  computeOutdoorBlendWeight,
+  createNeutralContextGrade,
+  finiteOr,
+  lerpContextGradeFast,
+  lerpScalarFast,
+  resolveBuildingShadowThresholds,
+} from './context-grade-spec.js';
+
 import { formatContextKey, formatContextKeyMultiline } from './context-dimensions.js';
 
 import {
 
   resolveEnvModifierOverlay,
 
-  resolveTokenContextOverlay,
+  resolveTokenAmbientModifierOverlaySoft,
+
+  resolveTokenBaseOverlaySoft,
+
+  resolveTokenCoverShadowOverlaySoft,
 
   resolveTokenOutdoorBias,
 
   resolveTreeDappleShaderState,
 
 } from './context-pack-resolver.js';
-
-import {
-
-  createNeutralContextGrade,
-
-  lerpContextGradeFast,
-
-} from './context-grade-spec.js';
 
 import {
 
@@ -140,6 +145,12 @@ export class ContextualSceneGradeManager {
 
     this._paramsRef = null;
 
+    /** @type {'sunlit'|'buildingShadow'|'paintedShadow'|'treeDapple'|'unknown'} */
+    this._lastCoverShadow = 'unknown';
+
+    /** @type {number} 0..1 spatial CC blend — lerped to avoid outdoor view snapping bright. */
+    this._spatialOutdoorBiasCurrent = 1;
+
     /** @type {{ elapsed?: number, delta?: number }|null} */
 
     this._lastTimeInfo = null;
@@ -230,6 +241,41 @@ export class ContextualSceneGradeManager {
 
   }
 
+  /** @returns {{ dayPhase: string, calendarDayWeight: number }} */
+  _getDramaEnv() {
+    return {
+      dayPhase: this._envResolver.dayPhase,
+      calendarDayWeight: this._envResolver.calendarDayWeight,
+    };
+  }
+
+  /** @param {Record<string, *>} p */
+  _resolveSpatialOutdoorBiasTarget(p) {
+    return resolveTokenOutdoorBias(
+      this._evaluator.dimensions,
+      this.debugState.outdoorsSample,
+      p,
+    );
+  }
+
+  /**
+   * @param {number} dt
+   * @param {Record<string, *>} p
+   */
+  _tickSpatialOutdoorBias(dt, p) {
+    const target = this._resolveSpatialOutdoorBiasTarget(p);
+    const tau = Math.max(
+      16,
+      finiteOr(p?.spatialBiasFadeMs, finiteOr(p?.fadeOutMs, 7200)),
+    );
+    this._spatialOutdoorBiasCurrent = lerpScalarFast(
+      this._spatialOutdoorBiasCurrent,
+      target,
+      dt,
+      tau,
+    );
+  }
+
 
 
   _resolveFinalOverlay(p) {
@@ -238,9 +284,9 @@ export class ContextualSceneGradeManager {
 
     const combined = combineOverlaysWithEnv(base, this._appliedEnvOverlay);
 
-    const rawT = this._engine.getTransitionProgress();
+    const rawT = this._engine.getDramaProgress?.() ?? 0;
 
-    const dramaPeak = estimateDramaPeak(rawT, p ?? {}, this._engine.targetState);
+    const dramaPeak = estimateDramaPeak(rawT, p ?? {}, this._engine.targetState, this._getDramaEnv());
 
     return applyCoherenceClamp(combined, p ?? {}, {
 
@@ -270,15 +316,7 @@ export class ContextualSceneGradeManager {
 
     const overlay = this._resolveFinalOverlay(p);
 
-    const outdoorBias = resolveTokenOutdoorBias(
-
-      this._evaluator.dimensions,
-
-      this.debugState.outdoorsSample,
-
-      p,
-
-    );
+    const outdoorBias = this._spatialOutdoorBiasCurrent;
 
 
 
@@ -303,6 +341,10 @@ export class ContextualSceneGradeManager {
     cc.params.contextTint = overlay.tint;
 
     cc.params.contextVignetteStrength = overlay.vignetteStrength;
+
+    cc.params.contextVignetteSoftness = Number(p.contextVignetteSoftness) || 0.55;
+
+    cc.params.contextVignetteInner = Number(p.contextVignetteInner) || 0.42;
 
     cc.params.contextMasterGamma = overlay.masterGamma;
 
@@ -346,6 +388,10 @@ export class ContextualSceneGradeManager {
 
       u.uContextVignetteStrength.value = overlay.vignetteStrength;
 
+      if (u.uContextVignetteSoftness) u.uContextVignetteSoftness.value = cc.params.contextVignetteSoftness;
+
+      if (u.uContextVignetteInner) u.uContextVignetteInner.value = cc.params.contextVignetteInner;
+
       u.uContextMasterGamma.value = overlay.masterGamma;
 
       if (u.uContextSpatialEnabled) u.uContextSpatialEnabled.value = cc.params.contextSpatialEnabled ? 1.0 : 0.0;
@@ -373,9 +419,9 @@ export class ContextualSceneGradeManager {
 
     if (dem?.params && p.coherenceEnabled !== false) {
 
-      const rawT = this._engine.getTransitionProgress();
+      const rawT = this._engine.getDramaProgress?.() ?? 0;
 
-      const dramaPeak = estimateDramaPeak(rawT, p, this._engine.targetState);
+      const dramaPeak = estimateDramaPeak(rawT, p, this._engine.targetState, this._getDramaEnv());
 
       dem.params.dazzleContextGradeGate = dramaPeak > 0.35 ? coherence.dazzleGate : 1;
 
@@ -430,13 +476,14 @@ export class ContextualSceneGradeManager {
     const cover = this._evaluator.dimensions.coverShadow;
     p.statusCoverShadow = cover === 'unknown' ? '—' : cover;
 
-    const adaptW = this._engine.getEyeAdaptationWeight?.() ?? 1;
+    const adaptBase = this._engine.getBaseEyeAdaptationWeight?.() ?? 1;
+    const adaptMod = this._engine.getModifierEyeAdaptationWeight?.() ?? 1;
     if (p.eyeAdaptationEnabled === false || !this._subjectTokenId) {
       p.statusEyeAdaptation = '—';
     } else if (this._engine.targetState === 'neutral') {
       p.statusEyeAdaptation = 'neutral';
     } else {
-      p.statusEyeAdaptation = `${Math.round(adaptW * 100)}% offset`;
+      p.statusEyeAdaptation = `base ${Math.round(adaptBase * 100)}% · mod ${Math.round(adaptMod * 100)}%`;
     }
 
 
@@ -487,8 +534,6 @@ export class ContextualSceneGradeManager {
 
   _applyTargetFromProbe(p, result) {
 
-    const prevIo = this._evaluator.indoorOutdoor;
-
     const ioState = this._evaluator.updateIndoorOutdoor(result.outdoors, {
 
       outdoorHigh: Number(p.outdoorThresholdHigh) || 0.82,
@@ -523,44 +568,45 @@ export class ContextualSceneGradeManager {
 
     this.debugState.contextKey = formatContextKey(this._evaluator.dimensions, this._envResolver);
 
-    if (ioState === 'unknown') return;
+    if (result.outdoors == null || !Number.isFinite(Number(result.outdoors))) return;
 
 
 
-    const baseState = ioState === 'indoor' ? 'indoor' : 'outdoor';
+    const outdoorWeight = computeOutdoorBlendWeight(result.outdoors, p);
 
-    const tokenOnlyOverlay = resolveTokenContextOverlay(
-
-      baseState,
-
+    const baseOverlay = resolveTokenBaseOverlaySoft(
+      result.outdoors,
       this._evaluator.dimensions,
-
       p,
-
     );
 
+    const ambientMod = resolveTokenAmbientModifierOverlaySoft(
+      outdoorWeight,
+      this._evaluator.dimensions,
+      p,
+    );
 
+    const coverMod = resolveTokenCoverShadowOverlaySoft(
+      outdoorWeight,
+      this._evaluator.dimensions,
+      p,
+    );
 
-    const ioChanged = prevIo !== ioState
+    const coverShadow = this._evaluator.dimensions.coverShadow;
+    const coverShadowChanged = coverShadow !== this._lastCoverShadow;
+    this._lastCoverShadow = coverShadow;
 
-      && (prevIo === 'indoor' || prevIo === 'outdoor')
+    this._engine.setBaseTarget(baseOverlay, outdoorWeight, p, this._getDramaEnv());
 
-      && (ioState === 'indoor' || ioState === 'outdoor');
+    this._engine.setAmbientModifierTarget(ambientMod, p);
 
+    this._engine.setCoverModifierTarget(coverMod, p, {
+      coverShadowChanged: coverShadowChanged && outdoorWeight >= 0.35,
+    });
 
-
-    if (ioChanged) {
-
-      this._engine.setTargetOverlay(baseState, tokenOnlyOverlay, p);
-
-    } else {
-
-      this._engine.updateTargetOverlay(baseState, tokenOnlyOverlay, p);
-
-    }
-
-    this.debugState.resolvedState = baseState;
-
+    this.debugState.resolvedState = outdoorWeight >= 0.55
+      ? 'outdoor'
+      : (outdoorWeight <= 0.2 ? 'indoor' : this._engine.targetState);
   }
 
 
@@ -577,7 +623,7 @@ export class ContextualSceneGradeManager {
 
     const center = getSubjectTokenCenterFoundry(this._subjectTokenId);
 
-    const result = probeTokenContextAtCenter(this._subjectTokenId, floorIndex);
+    const result = probeTokenContextAtCenter(this._subjectTokenId, floorIndex, p ?? {});
 
 
 
@@ -821,6 +867,12 @@ export class ContextualSceneGradeManager {
 
       buildingShadowLit: this.debugState.buildingShadowLit,
 
+      buildingShadowThresholds: resolveBuildingShadowThresholds(p ?? {}),
+
+      buildingShadowSensitivity: Number(p?.buildingShadowSensitivity) ?? 75,
+
+      buildingShadowProbeFootprint: Number(p?.buildingShadowProbeFootprint) ?? 1,
+
       paintedShadowLit: this.debugState.paintedShadowLit,
 
       treeShadowLit: this.debugState.treeShadowLit,
@@ -857,6 +909,22 @@ export class ContextualSceneGradeManager {
 
       eyeAdaptationWeight: this._engine.getEyeAdaptationWeight?.() ?? 1,
 
+      eyeAdaptationBaseWeight: this._engine.getBaseEyeAdaptationWeight?.() ?? 1,
+
+      eyeAdaptationModWeight: this._engine.getModifierEyeAdaptationWeight?.() ?? 1,
+
+      eyeAdaptationSec: Number(p?.eyeAdaptationSec) || 60,
+
+      coverShadowEyeAdaptationSec: Number(p?.coverShadowEyeAdaptationSec) || 3,
+
+      coverModifierTarget: { ...this._engine.getCoverModifierTarget?.() },
+
+      coverModifierApplied: { ...this._engine.getCoverAppliedOverlay?.() },
+
+      coverReleaseWeight: this._engine.getCoverReleaseWeight?.() ?? 1,
+
+      coverReleaseActive: this._engine.isCoverReleaseActive?.() === true,
+
       applied: { ...overlay },
 
       cc: {
@@ -868,6 +936,10 @@ export class ContextualSceneGradeManager {
         contextSaturation: cc.contextSaturation ?? 0,
 
         contextVignetteStrength: cc.contextVignetteStrength ?? 0,
+
+        contextVignetteSoftness: cc.contextVignetteSoftness ?? 0.55,
+
+        contextVignetteInner: cc.contextVignetteInner ?? 0.42,
 
         contextSpatialEnabled: !!cc.contextSpatialEnabled,
 
@@ -911,7 +983,7 @@ export class ContextualSceneGradeManager {
 
       this._engine.fadeToNeutral(p ?? {});
 
-      this._engine.update(dt, p ?? {}, nowMs);
+      this._engine.update(dt, p ?? {}, nowMs, this._getDramaEnv());
 
       this._targetEnvOverlay = createNeutralContextGrade();
 
@@ -944,7 +1016,9 @@ export class ContextualSceneGradeManager {
 
       this._frozenByExternalDrive = true;
 
-      this._engine.update(dt, p, nowMs);
+      this._engine.update(dt, p, nowMs, this._getDramaEnv());
+
+      this._tickSpatialOutdoorBias(dt, p);
 
       this._applyToColorCorrection();
 
@@ -986,9 +1060,13 @@ export class ContextualSceneGradeManager {
 
       this._evaluator.reset();
 
+      this._lastCoverShadow = 'unknown';
+
+      this._spatialOutdoorBiasCurrent = 0.5;
+
       this._engine.fadeToNeutral(p, nowMs);
 
-      this._engine.update(dt, p, nowMs);
+      this._engine.update(dt, p, nowMs, this._getDramaEnv());
 
       this._applyToColorCorrection();
 
@@ -1005,6 +1083,10 @@ export class ContextualSceneGradeManager {
       this._probeTimer = 0;
 
       this._lastProbeCenter = null;
+
+      this._engine.resetDramaTracking();
+
+      this._spatialOutdoorBiasCurrent = 0.5;
 
       this._maybeProbe(p, isAnimating, { force: true, reason: 'token-changed' });
 
@@ -1048,7 +1130,9 @@ export class ContextualSceneGradeManager {
 
 
 
-    this._engine.update(dt, p, nowMs);
+    this._engine.update(dt, p, nowMs, this._getDramaEnv());
+
+    this._tickSpatialOutdoorBias(dt, p);
 
     this._applyToColorCorrection();
 

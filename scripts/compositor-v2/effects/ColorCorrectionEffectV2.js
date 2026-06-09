@@ -317,6 +317,8 @@ export class ColorCorrectionEffectV2 {
       contextTemperature: 0,
       contextTint: 0,
       contextVignetteStrength: 0,
+      contextVignetteSoftness: 0.55,
+      contextVignetteInner: 0.42,
       contextMasterGamma: 0,
       contextSpatialEnabled: true,
       contextSpatialStrength: 0.72,
@@ -983,6 +985,8 @@ export class ColorCorrectionEffectV2 {
         uContextTemperature: { value: 0.0 },
         uContextTint: { value: 0.0 },
         uContextVignetteStrength: { value: 0.0 },
+        uContextVignetteSoftness: { value: 0.55 },
+        uContextVignetteInner: { value: 0.42 },
         uContextMasterGamma: { value: 0.0 },
         uContextSpatialEnabled: { value: 0.0 },
         uContextSpatialStrength: { value: 0.72 },
@@ -1079,6 +1083,8 @@ export class ColorCorrectionEffectV2 {
         uniform float uContextTemperature;
         uniform float uContextTint;
         uniform float uContextVignetteStrength;
+        uniform float uContextVignetteSoftness;
+        uniform float uContextVignetteInner;
         uniform float uContextMasterGamma;
         uniform float uContextSpatialEnabled;
         uniform float uContextSpatialStrength;
@@ -1581,12 +1587,19 @@ export class ColorCorrectionEffectV2 {
           vec2 dist = (vUv - 0.5) * 2.0;
           float len = length(dist);
           vec3 preVignetteColor = color;
-          float vignetteAmt = uVignetteStrength;
-          if (uContextGradeEnabled > 0.5) {
-            vignetteAmt += uContextVignetteStrength;
+          if (uVignetteStrength > 0.0) {
+            color *= mix(1.0, smoothstep(1.5, 0.5, len), uVignetteStrength);
           }
-          if (vignetteAmt > 0.0) {
-            color *= mix(1.0, smoothstep(1.5, 0.5, len), vignetteAmt);
+          if (uContextGradeEnabled > 0.5 && abs(uContextVignetteStrength) > 0.0001) {
+            float vigInner = clamp(uContextVignetteInner, 0.05, 1.2);
+            float vigOuter = vigInner + max(0.05, uContextVignetteSoftness);
+            float vigMask = smoothstep(vigInner, vigOuter, len);
+            if (uContextVignetteStrength > 0.0) {
+              color *= mix(1.0, 1.0 - vigMask, clamp(uContextVignetteStrength, 0.0, 1.0));
+            } else {
+              float lift = clamp(-uContextVignetteStrength, 0.0, 0.25);
+              color *= mix(1.0, 1.0 + vigMask * 0.35, lift / 0.25);
+            }
           }
           if (emissivePreserve > 0.0001) {
             color = mix(color, preVignetteColor, emissivePreserve * 0.75);
@@ -2077,6 +2090,8 @@ export class ColorCorrectionEffectV2 {
     u.uContextTemperature.value = p.contextTemperature ?? 0.0;
     u.uContextTint.value = p.contextTint ?? 0.0;
     u.uContextVignetteStrength.value = p.contextVignetteStrength ?? 0.0;
+    u.uContextVignetteSoftness.value = p.contextVignetteSoftness ?? 0.55;
+    u.uContextVignetteInner.value = p.contextVignetteInner ?? 0.42;
     u.uContextMasterGamma.value = p.contextMasterGamma ?? 0.0;
     if (u.uContextSpatialEnabled) u.uContextSpatialEnabled.value = p.contextSpatialEnabled ? 1.0 : 0.0;
     if (u.uContextSpatialStrength) u.uContextSpatialStrength.value = p.contextSpatialStrength ?? 0.72;

@@ -5,6 +5,7 @@
  */
 
 import { weatherController, WeatherController } from './WeatherController.js';
+import { deriveWindProfile } from './wind-profile.js';
 import { windDirFromBearingDeg } from '../compositor-v2/effects/resolve-effect-wind.js';
 
 const MAX_WIND_MS = WeatherController.MAX_WIND_MS;
@@ -97,6 +98,15 @@ export class SceneWindField {
     /** @type {import('./wind-profile.js').ReturnType<import('./wind-profile.js').deriveWindProfile>|null} */
     this._activeProfile = null;
 
+    /** @private Last astrolabe/profile snapshot (authoritative wind01 target for consumers). */
+    this._nominalProfile = null;
+
+    /**
+     * Smoothed 0..1 tier shared by vegetation temporal drive and spatial gust uniforms.
+     * @private
+     */
+    this._smoothedWind01 = 0;
+
     /** @private Effective runtime params merged from profile + tuning. */
     this._runtime = {
       gapRatio: 0.55,
@@ -135,17 +145,28 @@ export class SceneWindField {
   }
 
   /**
-   * Merge astrolabe wind profile with scene authoring tuners.
-   * @param {ReturnType<import('./wind-profile.js').deriveWindProfile>} profile
+   * Vegetation/shared smoothed wind tier (0..1) — matches spatial gust uniforms.
+   * @returns {number}
    */
-  applyWindProfile(profile) {
+  getSmoothedWind01() {
+    return Math.max(0, Math.min(1, Number(this._smoothedWind01) || 0));
+  }
+
+  /** @private */
+  _clampProfileTune(v, fb = 1) {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.max(0.05, Math.min(3, n)) : fb;
+  }
+
+  /**
+   * Derive spatial runtime + active profile from the smoothed tier (not raw slider).
+   * @param {ReturnType<import('./wind-profile.js').deriveWindProfile>} profile
+   * @private
+   */
+  _mergeProfileIntoRuntime(profile) {
     if (!profile) return;
-    this._activeProfile = profile;
     const p = this.params;
-    const clampTune = (v, fb = 1) => {
-      const n = Number(v);
-      return Number.isFinite(n) ? Math.max(0.05, Math.min(3, n)) : fb;
-    };
+    const clampTune = (v, fb = 1) => this._clampProfileTune(v, fb);
 
     this._runtime.gapRatio = Math.max(0, Math.min(0.95,
       profile.gapRatio * clampTune(p.gapRatioTune)));
@@ -163,14 +184,59 @@ export class SceneWindField {
       ...profile,
       stormSwingRad: profile.stormSwingRad * clampTune(p.stormSwingTune),
     };
+  }
 
-    this._refreshUniformCache();
+  /**
+   * Soften storm/windy-tier gap/sharpness for canopy shaders — full profile kept near hurricane.
+   * @param {number} wind01
+   * @private
+   */
+  _applyVegetationSpatialRuntimeCap(wind01) {
+    const w = Math.max(0, Math.min(1, Number(wind01) || 0));
+    if (w >= 0.97) return;
+    const t = Math.max(0, Math.min(1, w / 0.97));
+    const rt = this._runtime;
+    rt.gapRatio = Math.min(Number(rt.gapRatio) || 0, 0.08 + t * 0.12);
+    rt.waveSharpness = Math.min(Number(rt.waveSharpness) || 2.5, 1.55 + t * 1.55);
+    rt.spatialFloor = Math.min(Number(rt.spatialFloor) || 0, 0.06 + t * 0.18);
+  }
+
+  /** @private */
+  _refreshRuntimeFromSmoothedTier() {
+    this._mergeProfileIntoRuntime(deriveWindProfile(this._smoothedWind01));
+    this._applyVegetationSpatialRuntimeCap(this._smoothedWind01);
+  }
+
+  /**
+   * Catch up smoothed tier to live weather speed using vegetation attack/decay ramps.
+   * @param {number} delta
+   * @private
+   */
+  _advanceSmoothedWindTier(delta) {
+    const dt = Math.max(0, Number(delta) || 0);
+    const target = Math.max(0, Math.min(1, Number(this._speed01) || 0));
+    const attack = Math.max(0.001, Number(this.params.windAttackRamp) || 2.5);
+    const decay = Math.max(0.001, Number(this.params.windDecayRamp) || 0.88);
+    const ramp = target > this._smoothedWind01 ? attack : decay;
+    const lerpT = Math.min(1.0, dt * ramp);
+    this._smoothedWind01 += (target - this._smoothedWind01) * lerpT;
+  }
+
+  /**
+   * Record astrolabe wind profile; spatial uniforms follow {@link getSmoothedWind01} in update().
+   * @param {ReturnType<import('./wind-profile.js').deriveWindProfile>} profile
+   */
+  applyWindProfile(profile) {
+    if (!profile) return;
+    this._nominalProfile = profile;
     this.propagateToConsumers();
   }
 
   initialize() {
     this.initialized = true;
     this._syncFromWeather();
+    this._smoothedWind01 = Math.max(0, Math.min(1, Number(this._speed01) || 0));
+    this._refreshRuntimeFromSmoothedTier();
     this._refreshUniformCache();
   }
 
@@ -228,11 +294,13 @@ export class SceneWindField {
   update(delta = 0.016, time = 0) {
     if (!this.initialized) this.initialize();
     this._syncFromWeather();
+    this._advanceSmoothedWindTier(delta);
+    this._refreshRuntimeFromSmoothedTier();
 
     if (!this._isExternallyDriven() && this.params.enabled !== false) {
       const travel = Math.max(0, Number(this.params.waveTravelSpeed) || 0.7);
       const phaseDelta = Math.min(0.25, Math.max(0, delta));
-      const speedScale = 0.35 + this._speed01 * 0.65;
+      const speedScale = 0.35 + this.getSmoothedWind01() * 0.65;
       this._wavePhase += phaseDelta * travel * speedScale;
     }
 
@@ -271,7 +339,7 @@ export class SceneWindField {
       _dirYThree: this._dirYThree,
     };
     const spatial = computeSceneWindStrength(x, y, sampleParams, this._wavePhase);
-    const strength01 = this._speed01 * spatial;
+    const strength01 = this.getSmoothedWind01() * spatial;
     return {
       strength01,
       spatial01: spatial,
@@ -294,11 +362,8 @@ export class SceneWindField {
   applyParamChange(paramId, value) {
     if (!Object.prototype.hasOwnProperty.call(this.params, paramId)) return;
     this.params[paramId] = value;
-    if (this._activeProfile) {
-      this.applyWindProfile(this._activeProfile);
-    } else {
-      this._refreshUniformCache();
-    }
+    this._refreshRuntimeFromSmoothedTier();
+    this._refreshUniformCache();
   }
 
   /**

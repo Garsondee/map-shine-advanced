@@ -553,6 +553,8 @@ export class WeatherParticlesV2 {
    */
   _needsParticleSimulationTick() {
     if (!this._initialized || !this.enabled) return false;
+    // Bridge consumers (e.g. SmellyFlies) must keep simulating even when weather is idle/off.
+    if (this._hasExternalBatchConsumerWork()) return true;
     if (weatherController?.enabled === false) return false;
     if (weatherController?.elevationWeatherSuppressed === true) return false;
     const state = (typeof weatherController?.getCurrentState === 'function')
@@ -572,6 +574,49 @@ export class WeatherParticlesV2 {
 
     if ((wp?._roofDripTailRemainingSec ?? 0) > 0.01) return true;
     return this._hasLiveQuarksParticles();
+  }
+
+  /**
+   * Systems owned by WeatherParticles — excluded from external-consumer scans.
+   * @returns {Set<object>}
+   * @private
+   */
+  _getWeatherOwnedSystemSet() {
+    const wp = this._weatherParticles;
+    if (!wp) return new Set();
+    const systems = [
+      wp.rainSystem,
+      wp.snowSystem,
+      wp.ashSystem,
+      wp.ashEmberSystem,
+      wp.roofDripSystem,
+      wp.splashSystem,
+      wp._foamSystem,
+      wp._rainImpactSplashSystem,
+      ...(wp.splashSystems ?? []),
+      ...(wp._waterHitSplashSystems?.map((entry) => entry?.system) ?? []),
+    ];
+    return new Set(systems.filter(Boolean));
+  }
+
+  /**
+   * True when non-weather systems on the shared BatchedRenderer still need sim.
+   * @returns {boolean}
+   * @private
+   */
+  _hasExternalBatchConsumerWork() {
+    const map = this._batchRenderer?.systemToBatchIndex;
+    if (!map || typeof map.entries !== 'function') return false;
+
+    const owned = this._getWeatherOwnedSystemSet();
+    for (const [sys] of map.entries()) {
+      if (!sys || owned.has(sys)) continue;
+      const emission = sys.emissionOverTime?.value;
+      if (typeof emission === 'number' && emission > 0) return true;
+      const live = sys.particleNum;
+      if (typeof live === 'number' && live > 0) return true;
+    }
+    return false;
   }
 
   /**

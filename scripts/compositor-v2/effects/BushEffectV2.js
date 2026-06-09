@@ -184,8 +184,7 @@ export class BushEffectV2 {
     /** @type {Map<string, boolean>} */
     this._deriveAlphaByTileId = new Map();
 
-    // Temporal state (smoothed wind coupling)
-    this._currentWindSpeed = 0.0;
+    // Temporal state (wind tier smoothing lives on sceneWindField)
     this._windFieldPhase = 0.0;
     this._wavePhase = 0.0;
     this._flutterPhase = 0.0;
@@ -204,12 +203,12 @@ export class BushEffectV2 {
       windRampSpeed: 7.64,
       windAttackRamp: 2.5,
       windDecayRamp: 0.88,
-      gustFrequency: 0.0136,
+      gustFrequency: 0.0142,
       gustSpeed: 0.52,
       waveSpatialFrequency: 0.0018,
       waveTravelSpeed: 0.85,
       waveSharpness: 2.2,
-      waveInfluence: 0.65,
+      waveInfluence: 0.54,
       ambientMotion: 0.115,
       rustleFloorScale: 0.25,
       flutterBaseDrive: 0.3,
@@ -221,21 +220,21 @@ export class BushEffectV2 {
       bendMinStrength: 0.38,
       bendWindStart: 0.0,
       bendWindFull: 1.0,
-      minRustleSpeed: 0.18,
+      minRustleSpeed: 0.01,
       edgeFadeStart: 0.0,
-      edgeFadeEnd: 0.04,
+      edgeFadeEnd: 0.02,
 
       // -- Bulk sway (vertex) + leaf flutter (fragment) --
       bulkSway: 0.013,
       bulkSwayScale: 1.31,
       bulkSwaySpeed: 1.69,
       bulkSwaySpread: 0.32,
-      elasticity: 5.0,
+      elasticity: 0.5,
 
       // -- Leaf Flutter --
-      flutterIntensity: 0.0003,
+      flutterIntensity: 0.0002,
       flutterSpeed: 3.89,
-      flutterScale: 0.005,
+      flutterScale: 0.016,
 
       // -- Color --
       exposure: -0.4,
@@ -246,7 +245,7 @@ export class BushEffectV2 {
       tint: 0.0,
 
       // Canopy shadow (offset sample + blur in fragment shader)
-      shadowOpacity: 0.22,
+      shadowOpacity: 0.08,
       shadowLength: 0.02,
       shadowSoftness: 0.7,
 
@@ -255,8 +254,11 @@ export class BushEffectV2 {
       buildingShadowDarkenStrength: 0.8,
       buildingShadowDarkenCurve: 1,
       ...VEGETATION_PAINTED_SHADOW_DEFAULTS,
+      paintedShadowDarkenStrength: 1,
+      paintedShadowDarkenCurve: 1.15,
       ...VEGETATION_LANDSCAPE_LIGHTNING_DEFAULTS,
       ...VEGETATION_CLUMP_FIELD_DEFAULTS,
+      clumpIdDebug: 0,
     };
 
     log.debug('BushEffectV2 created');
@@ -459,7 +461,7 @@ export class BushEffectV2 {
           min: 0.0,
           max: 0.05,
           step: 0.0001,
-          default: 0.0136,
+          default: 0.0142,
           throttle: 100,
           tooltip: 'Procedural gust noise scale on foliage (fine chop layered on scene wind).',
         },
@@ -512,7 +514,7 @@ export class BushEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.65,
+          default: 0.54,
           throttle: 100,
           tooltip: 'How much the traveling wave modulates bend and flutter.',
         },
@@ -632,7 +634,7 @@ export class BushEffectV2 {
           min: 0.0,
           max: 0.6,
           step: 0.01,
-          default: 0.18,
+          default: 0.01,
           throttle: 100,
           tooltip: 'Minimum effective wind speed for motion when the scene reports calm air.',
         },
@@ -682,7 +684,7 @@ export class BushEffectV2 {
           min: 0.5,
           max: 5.0,
           step: 0.01,
-          default: 5.0,
+          default: 0.5,
           throttle: 100,
           tooltip: 'Branch sway speed (slow oscillation — leaf flutter uses Flutter speed).',
         },
@@ -692,7 +694,7 @@ export class BushEffectV2 {
           min: 0.0,
           max: 0.02,
           step: 0.0001,
-          default: 0.0003,
+          default: 0.0002,
           throttle: 100,
           tooltip: 'Fine per-pixel leaf UV shimmer (layer 3 — after canopy sway and branch bend).',
         },
@@ -712,7 +714,7 @@ export class BushEffectV2 {
           min: 0.005,
           max: 0.1,
           step: 0.001,
-          default: 0.005,
+          default: 0.016,
           throttle: 100,
           tooltip: 'World-space scale of noise driving flutter.',
         },
@@ -782,7 +784,7 @@ export class BushEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.22,
+          default: 0.08,
           throttle: 100,
           tooltip: 'Opacity of the offset canopy shadow pass.',
         },
@@ -827,7 +829,7 @@ export class BushEffectV2 {
           min: 0.02,
           max: 0.4,
           step: 0.005,
-          default: 0.04,
+          default: 0.02,
           throttle: 100,
           tooltip: 'Scene-edge distance where motion and shadow are fully suppressed.',
         },
@@ -1087,20 +1089,11 @@ export class BushEffectV2 {
       ? Number(timeInfo.delta)
       : 0.016);
 
-    // Wind coupling — use WeatherController's smoothed state.
     const weather = weatherController?.currentState;
     const windDir = weather?.windDirection;
-    const windSpeed01 = Number(weather?.windSpeed ?? 0);
-
-    // Smooth wind speed to avoid snapping.
-    const attack = Math.max(0.001, Number(this.params.windAttackRamp ?? this.params.windRampSpeed ?? 1));
-    const decay = Math.max(0.001, Number(this.params.windDecayRamp ?? attack * 0.35));
-    const ramp = windSpeed01 > this._currentWindSpeed ? attack : decay;
-    const lerpT = Math.min(1.0, delta * ramp);
-    this._currentWindSpeed = this._currentWindSpeed + (windSpeed01 - this._currentWindSpeed) * lerpT;
+    const rawWind = sceneWindField.getSmoothedWind01();
 
     const phaseDelta = Math.min(0.25, Math.max(0.0, delta));
-    const rawWind = Math.max(0.0, Math.min(1.0, this._currentWindSpeed));
     const speed = Math.max(0.0, rawWind * Number(this.params.windSpeedGlobal ?? 0.0));
     const rustleFloor = Math.max(0.0, Number(this.params.minRustleSpeed ?? 0.0) * Math.max(0.0, Number(this.params.rustleFloorScale ?? 0.0)));
     const rustleSpeed = Math.max(speed, rustleFloor);
@@ -1128,7 +1121,7 @@ export class BushEffectV2 {
         // Weather wind vectors are Foundry-space (Y-down); shader world is Three-space (Y-up).
         this._sharedUniforms.uWindDir.value.set(windDir.x, -windDir.y);
       }
-      this._sharedUniforms.uWindSpeed.value = this._currentWindSpeed;
+      this._sharedUniforms.uWindSpeed.value = rawWind;
 
       // Params
       this._sharedUniforms.uIntensity.value = (this.params.intensity ?? 1.0);

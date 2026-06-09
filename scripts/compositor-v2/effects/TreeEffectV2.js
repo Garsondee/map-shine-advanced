@@ -179,8 +179,7 @@ export class TreeEffectV2 {
     /** @type {Map<string, {width:number, height:number, data:Uint8ClampedArray}>} */
     this._alphaSampleByTileId = new Map();
 
-    // Temporal state (smoothed wind coupling)
-    this._currentWindSpeed = 0.0;
+    // Temporal state (wind tier smoothing lives on sceneWindField)
     this._windFieldPhase = 0.0;
     this._wavePhase = 0.0;
     this._flutterPhase = 0.0;
@@ -247,19 +246,19 @@ export class TreeEffectV2 {
       turbulenceScale: 0.00022,
       minRustleSpeed: 0.12,
       edgeFadeStart: 0.0,
-      edgeFadeEnd: 0.03,
+      edgeFadeEnd: 0.02,
 
       // -- Bulk sway (vertex) + leaf flutter (fragment) --
       bulkSway: 0.029,
       bulkSwayScale: 0.68,
       bulkSwaySpeed: 2.36,
       bulkSwaySpread: 0.48,
-      elasticity: 0.5,
+      elasticity: 5.0,
 
       // -- Leaf Flutter --
-      flutterIntensity: 0.0005,
-      flutterSpeed: 2.25,
-      flutterScale: 0.005,
+      flutterIntensity: 0.0002,
+      flutterSpeed: 6.64,
+      flutterScale: 0.0123,
 
       // -- Color --
       exposure: -0.4,
@@ -270,15 +269,20 @@ export class TreeEffectV2 {
       tint: 0.0,
 
       // Canopy shadow (offset alpha sample — same model as BushEffectV2)
-      shadowOpacity: 0.35,
+      shadowOpacity: 0.2,
       shadowLength: 0.04,
       shadowSoftness: 0.8,
 
       ...VEGETATION_CLOUD_SHADOW_DEFAULTS,
       ...VEGETATION_BUILDING_SHADOW_DEFAULTS,
+      buildingShadowDarkenStrength: 1,
+      buildingShadowDarkenCurve: 1.15,
       ...VEGETATION_PAINTED_SHADOW_DEFAULTS,
+      paintedShadowDarkenStrength: 1,
+      paintedShadowDarkenCurve: 1.15,
       ...VEGETATION_LANDSCAPE_LIGHTNING_DEFAULTS,
       ...VEGETATION_CLUMP_FIELD_DEFAULTS,
+      clumpIdDebug: 0,
     };
 
     log.debug('TreeEffectV2 created');
@@ -726,7 +730,7 @@ export class TreeEffectV2 {
           min: 0.5,
           max: 5.0,
           step: 0.01,
-          default: 0.5,
+          default: 5.0,
           throttle: 100,
           tooltip: 'Oscillation rate mixed into bulk sway (leaf flutter uses Flutter speed).',
         },
@@ -736,7 +740,7 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 0.02,
           step: 0.0001,
-          default: 0.0005,
+          default: 0.0002,
           throttle: 100,
           tooltip: 'Fine per-pixel leaf UV shimmer (layer 3 — after canopy sway and branch bend).',
         },
@@ -746,7 +750,7 @@ export class TreeEffectV2 {
           min: 1.0,
           max: 20.0,
           step: 0.05,
-          default: 2.25,
+          default: 6.64,
           throttle: 100,
           tooltip: 'How fast the flutter phase advances.',
         },
@@ -756,7 +760,7 @@ export class TreeEffectV2 {
           min: 0.005,
           max: 0.1,
           step: 0.0001,
-          default: 0.005,
+          default: 0.0123,
           throttle: 100,
           tooltip: 'World-space scale of noise driving flutter.',
         },
@@ -826,7 +830,7 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.35,
+          default: 0.2,
           throttle: 100,
           tooltip: 'Opacity of the offset canopy shadow pass.',
         },
@@ -871,7 +875,7 @@ export class TreeEffectV2 {
           min: 0.02,
           max: 0.4,
           step: 0.005,
-          default: 0.03,
+          default: 0.02,
           throttle: 100,
           tooltip: 'Scene-edge distance where motion and shadow are fully suppressed.',
         },
@@ -1120,16 +1124,9 @@ export class TreeEffectV2 {
 
     const weather = weatherController?.currentState;
     const windDir = weather?.windDirection;
-    const windSpeed01 = Number(weather?.windSpeed ?? 0);
-
-    const attack = Math.max(0.001, Number(this.params.windAttackRamp ?? this.params.windRampSpeed ?? 1));
-    const decay = Math.max(0.001, Number(this.params.windDecayRamp ?? attack * 0.35));
-    const ramp = windSpeed01 > this._currentWindSpeed ? attack : decay;
-    const lerpT = Math.min(1.0, delta * ramp);
-    this._currentWindSpeed = this._currentWindSpeed + (windSpeed01 - this._currentWindSpeed) * lerpT;
+    const rawWind = sceneWindField.getSmoothedWind01();
 
     const phaseDelta = Math.min(0.25, Math.max(0.0, delta));
-    const rawWind = Math.max(0.0, Math.min(1.0, this._currentWindSpeed));
     const speed = Math.max(0.0, rawWind * Number(this.params.windSpeedGlobal ?? 0.0));
     const rustleFloor = Math.max(0.0, Number(this.params.minRustleSpeed ?? 0.0) * Math.max(0.0, Number(this.params.rustleFloorScale ?? 0.0)));
     const rustleSpeed = Math.max(speed, rustleFloor);
@@ -1156,7 +1153,7 @@ export class TreeEffectV2 {
         // Weather wind vectors are Foundry-space (Y-down); shader world is Three-space (Y-up).
         this._sharedUniforms.uWindDir.value.set(windDir.x, -windDir.y);
       }
-      this._sharedUniforms.uWindSpeed.value = this._currentWindSpeed;
+      this._sharedUniforms.uWindSpeed.value = rawWind;
 
       this._sharedUniforms.uIntensity.value = (this.params.intensity ?? 1.0);
       this._syncWindUniforms();

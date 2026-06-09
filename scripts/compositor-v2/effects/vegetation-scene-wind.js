@@ -32,6 +32,19 @@ export const VEGETATION_SCENE_WIND_STRENGTH_GLSL = `
           return mix(floorVal, 1.0, spatial);
         }
 
+        // Motion drive only — matches sceneWindStrength but lifts deep lulls so mask UV
+        // distortion stays coherent below hurricane tier (avoids boil/shred on trees/bushes).
+        float vegetationMotionSceneStrength(vec2 worldPos, vec2 windDir) {
+          if (uSceneWindEnabled < 0.5) return 1.0;
+          float spatial = sceneWindStrength(worldPos, windDir);
+          float rawWind = clamp(uWindSpeed, 0.0, 1.0);
+          float calmLift = max(
+            uSceneWindStrengthFloor,
+            mix(0.44, 0.58, smoothstep(0.68, 1.0, rawWind))
+          );
+          return max(spatial, calmLift);
+        }
+
         vec2 clumpWindDir(vec2 baseDir, float clumpId01, float spreadRad) {
           vec2 dir = normalize(baseDir);
           if (length(dir) < 0.01) dir = vec2(1.0, 0.0);

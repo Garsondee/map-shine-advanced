@@ -2812,18 +2812,25 @@ body.msa-level-transition-active #loading-text {
   opacity: 0.85;
 }
 
-.msa-gfx__select {
+/* Native <select> list must stay readable across UI colour schemes */
+#map-shine-graphics-settings .msa-gfx__select {
   width: 100%;
   padding: 6px 8px;
   border-radius: 6px;
   border: 1px solid var(--ms-ui-border, rgba(255, 255, 255, 0.16));
   background: var(--ms-ui-input-bg, rgba(255, 255, 255, 0.07));
-  color: inherit;
+  color: var(--ms-ui-text, rgba(245, 248, 255, 0.95));
+  color-scheme: inherit;
   font-family: inherit;
   font-size: 12px;
 }
 
-.msa-gfx__select:focus {
+#map-shine-graphics-settings .msa-gfx__select option {
+  background-color: var(--ms-ui-select-option-bg, #1a1f28);
+  color: var(--ms-ui-text, rgba(245, 248, 255, 0.95));
+}
+
+#map-shine-graphics-settings .msa-gfx__select:focus {
   outline: none;
   border-color: var(--ms-ui-border-strong, rgba(255, 255, 255, 0.28));
 }

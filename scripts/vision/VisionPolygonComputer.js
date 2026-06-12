@@ -215,6 +215,89 @@ export class VisionPolygonComputer {
   }
 
   /**
+   * When a light center sits on a blocking wall segment, return two probe centers
+   * offset to opposite sides of that wall (Foundry px). Visibility from the exact
+   * wall line often collapses to one room; dual probes restore light on both sides.
+   *
+   * @param {{x:number,y:number}} center
+   * @param {Wall[]} [walls]
+   * @param {{blockGeometry?:boolean, elevation?:number, onSegmentSlopPx?:number, probeOffsetPx?:number}|null} [options]
+   * @returns {Array<{x:number,y:number}>|null} Two centers, or null when not wall-bisected.
+   */
+  findWallBisectProbeCenters(center, walls = null, options = null) {
+    if (!center || !Number.isFinite(center.x) || !Number.isFinite(center.y)) return null;
+
+    const allWalls = walls ?? canvas?.walls?.placeables ?? [];
+    if (!allWalls?.length) return null;
+
+    const blockGeometry = !!(options && options.blockGeometry);
+    const elevation = (options && typeof options.elevation === 'number' && Number.isFinite(options.elevation))
+      ? options.elevation
+      : undefined;
+    const hasElevation = elevation !== undefined;
+    const slopPx = Math.max(0.5, Number(options?.onSegmentSlopPx) || 4);
+    const slopSq = slopPx * slopPx;
+    const offsetPx = Math.max(1, Number(options?.probeOffsetPx) || 4);
+
+    let bestDistSq = Infinity;
+    let bestNx = 0;
+    let bestNy = 0;
+
+    for (const wall of allWalls) {
+      const doc = wall?.document;
+      if (!doc) continue;
+
+      if (!blockGeometry) {
+        if (Number(doc.light ?? doc.sight ?? 0) === 0) continue;
+      }
+      if (wallDocDoorIsOpenForVision(doc)) continue;
+
+      if (hasElevation) {
+        const { bottom: whBottomRaw, top: whTopRaw } = readWallHeightFlags(doc);
+        let whBottom = whBottomRaw;
+        let whTop = whTopRaw;
+        if (whTop < whBottom) { const s = whBottom; whBottom = whTop; whTop = s; }
+        const inWallRange = elevation >= whBottom && (whTop === Infinity || elevation < whTop);
+        if (!inWallRange) continue;
+      }
+
+      const c = doc.c;
+      if (!c || c.length < 4) continue;
+
+      const ax = c[0];
+      const ay = c[1];
+      const bx = c[2];
+      const by = c[3];
+      const dx = bx - ax;
+      const dy = by - ay;
+      const lenSq = dx * dx + dy * dy;
+      if (lenSq <= 1e-12) continue;
+
+      let t = ((center.x - ax) * dx + (center.y - ay) * dy) / lenSq;
+      if (t < 0 || t > 1) continue;
+
+      const closestX = ax + t * dx;
+      const closestY = ay + t * dy;
+      const dpx = center.x - closestX;
+      const dpy = center.y - closestY;
+      const distSq = dpx * dpx + dpy * dpy;
+      if (distSq > slopSq || distSq >= bestDistSq) continue;
+
+      const len = Math.sqrt(lenSq);
+      bestDistSq = distSq;
+      bestNx = -dy / len;
+      bestNy = dx / len;
+    }
+
+    if (!Number.isFinite(bestDistSq) || bestDistSq === Infinity) return null;
+
+    return [
+      { x: center.x + bestNx * offsetPx, y: center.y + bestNy * offsetPx },
+      { x: center.x - bestNx * offsetPx, y: center.y - bestNy * offsetPx },
+    ];
+  }
+
+  /**
    * Filter walls that block vision
    * @param {Wall[]} walls - Array of wall placeables
    * @returns {Wall[]} Walls that block sight

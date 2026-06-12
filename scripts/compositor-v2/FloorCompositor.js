@@ -1508,27 +1508,40 @@ export class FloorCompositor {
     let drew = false;
 
     if (shadowDrawGroups.length > 0) {
-      const halfRT = this._ensureVegetationShadowHalfRT(renderer);
-      if (halfRT) {
-        try { this._treeEffect?.setShadowTapLod?.(0.5); } catch (_) {}
-        try { this._bushEffect?.setShadowTapLod?.(0.5); } catch (_) {}
-        const shadowDrew = this._compositeBusOverlayVisibilityGate(
+      if (this._isVegetationHalfResEnabled()) {
+        const halfRT = this._ensureVegetationShadowHalfRT(renderer);
+        if (halfRT) {
+          try { this._treeEffect?.setShadowTapLod?.(0.5); } catch (_) {}
+          try { this._bushEffect?.setShadowTapLod?.(0.5); } catch (_) {}
+          const shadowDrew = this._compositeBusOverlayVisibilityGate(
+            renderer,
+            halfRT,
+            this._getVegetationOverlayRoots(),
+            {
+              vegetationOnly: true,
+              profileDrawGroups: shadowDrawGroups,
+              profileSpanPrefix: 'postBloom.worldOverlays.vegetation',
+              clearTransparent: true,
+            },
+          );
+          try { this._treeEffect?.setShadowTapLod?.(1.0); } catch (_) {}
+          try { this._bushEffect?.setShadowTapLod?.(1.0); } catch (_) {}
+          if (shadowDrew) {
+            this._blitVegetationShadowHalfToTarget(renderer, halfRT, targetRT);
+            drew = true;
+          }
+        }
+      } else {
+        drew = this._compositeBusOverlayVisibilityGate(
           renderer,
-          halfRT,
+          targetRT,
           this._getVegetationOverlayRoots(),
           {
             vegetationOnly: true,
             profileDrawGroups: shadowDrawGroups,
             profileSpanPrefix: 'postBloom.worldOverlays.vegetation',
-            clearTransparent: true,
           },
-        );
-        try { this._treeEffect?.setShadowTapLod?.(1.0); } catch (_) {}
-        try { this._bushEffect?.setShadowTapLod?.(1.0); } catch (_) {}
-        if (shadowDrew) {
-          this._blitVegetationShadowHalfToTarget(renderer, halfRT, targetRT);
-          drew = true;
-        }
+        ) || drew;
       }
     }
 
@@ -1572,14 +1585,25 @@ export class FloorCompositor {
   }
 
   /**
-   * Half-res canopy only when the map is minified enough that the upsample is
-   * invisible (PIXI stage scale ≤ 0.5 ⇒ each scene px covers ≤ half a screen px).
+   * Client graphics setting: half-res bush/tree composite for performance.
+   * @returns {boolean}
+   * @private
+   */
+  _isVegetationHalfResEnabled() {
+    if (window.MapShine?.__msaDisableHalfResVegetationCanopy === true) return false;
+    const gsm = window.MapShine?.graphicsSettings ?? window.MapShine?.graphicsSettingsManager ?? null;
+    return gsm?.getVegetationHalfResEnabled?.() === true;
+  }
+
+  /**
+   * Half-res canopy when the client opts in and the map is minified enough that
+   * the upsample is invisible (PIXI stage scale ≤ 0.5 ⇒ each scene px covers ≤ half a screen px).
    * Escape hatch: `window.MapShine.__msaDisableHalfResVegetationCanopy = true`.
    * @returns {boolean}
    * @private
    */
   _shouldUseHalfResVegetationCanopy() {
-    if (window.MapShine?.__msaDisableHalfResVegetationCanopy === true) return false;
+    if (!this._isVegetationHalfResEnabled()) return false;
     const zoom = Number(globalThis.canvas?.stage?.scale?.x);
     return Number.isFinite(zoom) && zoom <= 0.5;
   }
@@ -1885,6 +1909,7 @@ export class FloorCompositor {
       this._lightningEffect?.setMapPointsSources?.(mapPoints);
       this._candleFlamesEffect?.setMapPointsSources?.(mapPoints);
       this._dustEffect?.setMapPointsSources?.(mapPoints);
+      this._fireEffect?.setMapPointsSources?.(mapPoints);
       this._smellyFliesEffect?.setActiveLevelContext?.(activeLevelContext);
       this._lightningEffect?.setActiveLevelContext?.(activeLevelContext);
       this._candleFlamesEffect?.setActiveLevelContext?.(activeLevelContext);
@@ -1892,10 +1917,10 @@ export class FloorCompositor {
 
       this._wiredMapPointsManager = mapPoints;
       if (mapPoints) {
-        log.info('Map-point effect wiring refreshed (smelly flies / lightning / candle flames / dust)');
+        log.info('Map-point effect wiring refreshed (smelly flies / lightning / candle flames / dust / fire)');
       }
     } catch (err) {
-      log.warn('Map-point effect wiring failed (smelly flies / lightning / candle flames / dust):', err);
+      log.warn('Map-point effect wiring failed (smelly flies / lightning / candle flames / dust / fire):', err);
     }
   }
 

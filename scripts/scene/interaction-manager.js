@@ -8659,10 +8659,14 @@ export class InteractionManager {
     const mapPointsManager = window.MapShine?.mapPointsManager;
     if (!mapPointsManager?.showControlHud) return false;
 
+    const camera = this.sceneComposer?.camera;
+    if (!camera) return false;
+
+    this.updateMouseCoords(event);
     const clusterId = mapPointsManager.pickEffectControlCluster(
-      event,
       this.raycaster,
-      this.sceneComposer?.camera
+      camera,
+      this.mouse
     );
     if (!clusterId) return false;
 

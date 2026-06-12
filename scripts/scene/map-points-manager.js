@@ -9,8 +9,15 @@ import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import {
   recomputeControlClusters,
+  recomputeMaskFireClusters,
   buildGroupIdToClusterIdMap,
+  buildPointKeyToClusterIdMap,
+  buildMaskBucketToClusterIdMap,
 } from './map-point-control-clusters.js';
+import {
+  invalidateWallSegmentCache,
+  resolveClusteringElevation,
+} from './map-point-wall-clustering.js';
 
 const log = createLogger('MapPointsManager');
 
@@ -144,6 +151,15 @@ export class MapPointsManager {
     /** @type {Map<string, string>} groupId -> clusterId */
     this._groupIdToClusterId = new Map();
 
+    /** @type {Map<string, string>} `groupId:pointIndex` -> clusterId */
+    this._pointKeyToClusterId = new Map();
+
+    /** @type {Map<string, string>} `floorIndex:bucketKey` -> clusterId */
+    this._maskBucketToClusterId = new Map();
+
+    /** @type {Map<number, number>} floorIndex -> mask bucket size (px) */
+    this._maskBucketSizeByFloor = new Map();
+
     /** @type {Map<string, THREE.Object3D>} */
     this.controlHudObjects = new Map();
 
@@ -152,6 +168,9 @@ export class MapPointsManager {
 
     /** @type {ReturnType<typeof setTimeout>|null} */
     this._recomputeClustersTimer = null;
+
+    /** @type {Map<string, THREE.Texture>} */
+    this._powerHudTextureCache = new Map();
     
     /** @type {Function[]} */
     this.changeListeners = [];
@@ -398,6 +417,11 @@ export class MapPointsManager {
 
       if (!groupsData || typeof groupsData !== 'object') {
         log.debug('No map point groups found in scene flags');
+        this._recomputeControlClusters(false);
+        if (prevShowControlHud && game.user?.isGM) {
+          this.showControlHud = true;
+          this._refreshControlHud();
+        }
         return;
       }
 
@@ -524,7 +548,7 @@ export class MapPointsManager {
       reason: group.reason || '',
       
       // Ensure effect source settings exist
-      isEffectSource: group.isEffectSource ?? false,
+      isEffectSource: group.isEffectSource === false ? false : !!(String(group.effectTarget || '').trim()),
       effectTarget: group.effectTarget || ''
     };
   }
@@ -689,6 +713,18 @@ export class MapPointsManager {
 
     Hooks.on('canvasReady', canvasReadyHandler);
     this._hookRegistrations.push({ hook: 'canvasReady', fn: canvasReadyHandler });
+
+    const invalidateWallsHandler = () => {
+      invalidateWallSegmentCache();
+      if (this.showControlHud) {
+        this._recomputeControlClusters(false);
+        this._refreshControlHud();
+      }
+    };
+    for (const hook of ['updateWall', 'createWall', 'deleteWall']) {
+      Hooks.on(hook, invalidateWallsHandler);
+      this._hookRegistrations.push({ hook, fn: invalidateWallsHandler });
+    }
   }
 
   /**
@@ -713,10 +749,233 @@ export class MapPointsManager {
    * @param {string} effectTarget - Effect key (e.g., 'fire', 'lightning')
    * @returns {MapPointGroup[]}
    */
+  /**
+   * @param {object} group
+   * @returns {boolean}
+   * @private
+   */
+  _isGroupEffectSource(group) {
+    if (!group || typeof group !== 'object') return false;
+    if (group.isEffectSource === false) return false;
+    const target = typeof group.effectTarget === 'string' ? group.effectTarget.trim() : '';
+    return target.length > 0;
+  }
+
+  /**
+   * @returns {number}
+   * @private
+   */
+  _getMapPointGateRadius() {
+    const grid = Number(canvas?.dimensions?.size) || 100;
+    return Math.max(48, grid * 1.25);
+  }
+
+  /**
+   * @param {number} worldX
+   * @param {number} worldY
+   * @param {object} group
+   * @returns {boolean}
+   * @private
+   */
+  _worldPointInGroup(worldX, worldY, group) {
+    const points = Array.isArray(group?.points) ? group.points : [];
+    if (points.length === 0) return false;
+
+    const type = group.type;
+    const radius = this._getMapPointGateRadius();
+    const radiusSq = radius * radius;
+
+    if (type === 'area' && points.length >= 3) {
+      let inside = false;
+      for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+        const xi = Number(points[i]?.x);
+        const yi = Number(points[i]?.y);
+        const xj = Number(points[j]?.x);
+        const yj = Number(points[j]?.y);
+        if (!Number.isFinite(xi) || !Number.isFinite(yi) || !Number.isFinite(xj) || !Number.isFinite(yj)) continue;
+        const intersect = ((yi > worldY) !== (yj > worldY))
+          && (worldX < (xj - xi) * (worldY - yi) / (yj - yi) + xi);
+        if (intersect) inside = !inside;
+      }
+      return inside;
+    }
+
+    if ((type === 'line' || type === 'rope') && points.length >= 2) {
+      for (let i = 0; i < points.length - 1; i++) {
+        const ax = Number(points[i]?.x);
+        const ay = Number(points[i]?.y);
+        const bx = Number(points[i + 1]?.x);
+        const by = Number(points[i + 1]?.y);
+        if (!Number.isFinite(ax) || !Number.isFinite(ay) || !Number.isFinite(bx) || !Number.isFinite(by)) continue;
+        const dx = bx - ax;
+        const dy = by - ay;
+        const lenSq = dx * dx + dy * dy;
+        if (lenSq <= 1e-6) {
+          const ddx = worldX - ax;
+          const ddy = worldY - ay;
+          if (ddx * ddx + ddy * ddy <= radiusSq) return true;
+          continue;
+        }
+        const t = Math.max(0, Math.min(1, ((worldX - ax) * dx + (worldY - ay) * dy) / lenSq));
+        const px = ax + t * dx;
+        const py = ay + t * dy;
+        const distSq = (worldX - px) * (worldX - px) + (worldY - py) * (worldY - py);
+        if (distSq <= radiusSq) return true;
+      }
+      return false;
+    }
+
+    for (const p of points) {
+      const px = Number(p?.x);
+      const py = Number(p?.y);
+      if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
+      const dx = worldX - px;
+      const dy = worldY - py;
+      if (dx * dx + dy * dy <= radiusSq) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Whether mask/world fire at (worldX, worldY) should render for an effect.
+   * Points inside a gated map-point group are off when that group's cluster is disabled.
+   *
+   * @param {number} worldX
+   * @param {number} worldY
+   * @param {string} effectTarget
+   * @param {any} [levelContext=null]
+   * @returns {boolean}
+   */
+  isWorldPointEffectEnabled(worldX, worldY, effectTarget, levelContext = null) {
+    const target = typeof effectTarget === 'string' ? effectTarget.trim() : '';
+    if (!target) return true;
+
+    for (const group of this.groups.values()) {
+      if (!this._isGroupEffectSource(group)) continue;
+      if (group.effectTarget !== target) continue;
+      if (!this._groupMatchesLevelContext(group, levelContext)) continue;
+      if (!this._worldPointInGroup(worldX, worldY, group)) continue;
+      if (!this._isGroupClusterEnabled(group.id)) return false;
+    }
+
+    return true;
+  }
+
+  /**
+   * Whether tile-mask fire at (worldX, worldY) should render.
+   * Honors disabled clusters for both `fire` and `candleFlame` map-point regions.
+   *
+   * @param {number} worldX
+   * @param {number} worldY
+   * @param {any} [levelContext=null]
+   * @returns {boolean}
+   */
+  isWorldPointMaskFireEnabled(worldX, worldY, levelContext = null, floorIndex = null) {
+    for (const group of this.groups.values()) {
+      if (!this._isGroupEffectSource(group)) continue;
+      if (group.effectTarget !== 'fire' && group.effectTarget !== 'candleFlame') continue;
+      if (!this._groupMatchesLevelContext(group, levelContext)) continue;
+      if (!this._worldPointInGroup(worldX, worldY, group)) continue;
+      if (!this._isGroupClusterEnabled(group.id)) return false;
+    }
+
+    if (Number.isFinite(Number(floorIndex))) {
+      const fi = Number(floorIndex);
+      const bucketSize = this._maskBucketSizeByFloor.get(fi);
+      if (Number.isFinite(bucketSize) && bucketSize > 0) {
+        const bx = Math.floor(worldX / bucketSize);
+        const by = Math.floor(worldY / bucketSize);
+        const bucketKey = `${bx},${by}`;
+        const clusterId = this._maskBucketToClusterId.get(`${fi}:${bucketKey}`);
+        if (clusterId) {
+          const cluster = this.controlClusters.get(clusterId);
+          if (cluster && cluster.enabled === false) return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  /**
+   * @param {number} floorIndex
+   * @param {string} bucketKey
+   * @returns {boolean}
+   */
+  isMaskFireBucketEnabled(floorIndex, bucketKey) {
+    const clusterId = this._maskBucketToClusterId.get(`${Number(floorIndex)}:${bucketKey}`);
+    if (!clusterId) return true;
+    const cluster = this.controlClusters.get(clusterId);
+    if (!cluster) return true;
+    return cluster.enabled !== false;
+  }
+
+  /**
+   * @param {string} groupId
+   * @param {number} pointIndex
+   * @returns {boolean}
+   */
+  isGroupPointEnabled(groupId, pointIndex) {
+    const pointKey = `${groupId}:${pointIndex}`;
+    const pointClusterId = this._pointKeyToClusterId.get(pointKey);
+    if (pointClusterId) {
+      const cluster = this.controlClusters.get(pointClusterId);
+      if (cluster) return cluster.enabled !== false;
+    }
+    return this._isGroupClusterEnabled(groupId);
+  }
+
+  /**
+   * @param {object} group
+   * @returns {boolean}
+   * @private
+   */
+  _groupHasAnyEnabledPoint(group) {
+    if (!group?.points?.length) return false;
+    for (let i = 0; i < group.points.length; i++) {
+      if (this.isGroupPointEnabled(group.id, i)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Merge tile-mask fire spatial buckets into control clusters.
+   * @param {import('./map-point-control-clusters.js').SpatialControlBucket[]} spatialBuckets
+   */
+  syncMaskFireControlClusters(spatialBuckets) {
+    const previous = new Map(this.controlClusters);
+    const groupClusters = recomputeControlClusters(this.groups, previous, {
+      elevation: resolveClusteringElevation(),
+    });
+    const maskClusters = recomputeMaskFireClusters(spatialBuckets, previous);
+
+    const next = new Map(groupClusters);
+    for (const [id, cluster] of maskClusters) {
+      next.set(id, cluster);
+    }
+
+    this._maskBucketSizeByFloor.clear();
+    for (const bucket of spatialBuckets || []) {
+      const fi = Number(bucket?.floorIndex);
+      const size = Number(bucket?.bucketSizePx);
+      if (Number.isFinite(fi) && Number.isFinite(size) && size > 0) {
+        this._maskBucketSizeByFloor.set(fi, size);
+      }
+    }
+
+    this.controlClusters = next;
+    this._rebuildClusterMaps();
+    if (this.showControlHud) this._refreshControlHud();
+  }
+
   getGroupsByEffect(effectTarget) {
     const result = [];
     for (const group of this.groups.values()) {
-      if (group.isEffectSource && group.effectTarget === effectTarget && this._isGroupClusterEnabled(group.id)) {
+      if (!this._isGroupEffectSource(group) || group.effectTarget !== effectTarget) continue;
+      const isShape = group.type === 'line' || group.type === 'area' || group.type === 'rope';
+      if (isShape) {
+        if (this._isGroupClusterEnabled(group.id)) result.push(group);
+      } else if (this._groupHasAnyEnabledPoint(group)) {
         result.push(group);
       }
     }
@@ -1603,16 +1862,37 @@ export class MapPointsManager {
         : [];
       const cx = Number(cluster.centroid?.x);
       const cy = Number(cluster.centroid?.y);
+      const memberPointIndices = Array.isArray(cluster.memberPointIndices)
+        ? cluster.memberPointIndices.filter((idx) => Number.isFinite(Number(idx))).map((idx) => Number(idx))
+        : undefined;
+      const maskBucket = (cluster.maskBucket && typeof cluster.maskBucket === 'object')
+        ? {
+            floorIndex: Number(cluster.maskBucket.floorIndex),
+            bucketKey: typeof cluster.maskBucket.bucketKey === 'string' ? cluster.maskBucket.bucketKey : '',
+            bucketSizePx: Number.isFinite(Number(cluster.maskBucket.bucketSizePx))
+              ? Number(cluster.maskBucket.bucketSizePx)
+              : undefined,
+            memberCellKeys: Array.isArray(cluster.maskBucket.memberCellKeys)
+              ? cluster.maskBucket.memberCellKeys.filter((k) => typeof k === 'string' && k.length > 0)
+              : undefined,
+          }
+        : undefined;
+      const source = cluster.source === 'mask'
+        ? 'mask'
+        : (cluster.source === 'group' ? 'group' : 'auto');
+
       this.controlClusters.set(id, {
         id,
         effectTarget: typeof cluster.effectTarget === 'string' ? cluster.effectTarget : '',
         enabled: cluster.enabled !== false,
         memberGroupIds,
+        memberPointIndices,
+        maskBucket,
         centroid: {
           x: Number.isFinite(cx) ? cx : 0,
           y: Number.isFinite(cy) ? cy : 0,
         },
-        source: cluster.source === 'group' ? 'group' : 'auto',
+        source,
       });
     }
 
@@ -1625,9 +1905,32 @@ export class MapPointsManager {
    */
   _recomputeControlClusters(persist = false) {
     const previous = new Map(this.controlClusters);
-    const next = recomputeControlClusters(this.groups, previous);
+    const next = recomputeControlClusters(this.groups, previous, {
+      elevation: resolveClusteringElevation(),
+    });
+
+    const fireEffect = window.MapShine?.floorCompositorV2?._fireEffect
+      ?? window.MapShine?.effectComposer?._floorCompositorV2?._fireEffect
+      ?? null;
+    const spatialBuckets = typeof fireEffect?.getSpatialControlBuckets === 'function'
+      ? fireEffect.getSpatialControlBuckets()
+      : [];
+    const maskClusters = recomputeMaskFireClusters(spatialBuckets, previous);
+    for (const [id, cluster] of maskClusters) {
+      next.set(id, cluster);
+    }
+
+    this._maskBucketSizeByFloor.clear();
+    for (const bucket of spatialBuckets) {
+      const fi = Number(bucket?.floorIndex);
+      const size = Number(bucket?.bucketSizePx);
+      if (Number.isFinite(fi) && Number.isFinite(size) && size > 0) {
+        this._maskBucketSizeByFloor.set(fi, size);
+      }
+    }
+
     this.controlClusters = next;
-    this._rebuildGroupIdToClusterIdMap();
+    this._rebuildClusterMaps();
     if (persist) {
       this._saveClustersToSceneNow().catch((e) => {
         log.error('Failed to persist control clusters after recompute:', e);
@@ -1638,8 +1941,15 @@ export class MapPointsManager {
   /**
    * @private
    */
-  _rebuildGroupIdToClusterIdMap() {
+  _rebuildClusterMaps() {
     this._groupIdToClusterId = buildGroupIdToClusterIdMap(this.controlClusters);
+    this._pointKeyToClusterId = buildPointKeyToClusterIdMap(this.controlClusters);
+    this._maskBucketToClusterId = buildMaskBucketToClusterIdMap(this.controlClusters);
+  }
+
+  /** @private */
+  _rebuildGroupIdToClusterIdMap() {
+    this._rebuildClusterMaps();
   }
 
   /**
@@ -1792,9 +2102,48 @@ export class MapPointsManager {
    * @returns {Promise<boolean>}
    */
   async toggleClusterForGroup(groupId) {
-    const clusterId = this._groupIdToClusterId.get(groupId);
-    if (!clusterId) return false;
-    return this.toggleClusterEnabled(clusterId);
+    return this._enqueueOp(async () => {
+      if (!game.user?.isGM) return false;
+      if (!this._canEditScene()) return false;
+
+      let clusterIds = [];
+      for (const cluster of this.controlClusters.values()) {
+        const ids = cluster?.memberGroupIds;
+        if (!Array.isArray(ids) || !ids.includes(groupId)) continue;
+        if (cluster?.source === 'mask') continue;
+        if (cluster?.id) clusterIds.push(cluster.id);
+      }
+
+      if (clusterIds.length === 0) {
+        this._recomputeControlClusters(false);
+        for (const cluster of this.controlClusters.values()) {
+          const ids = cluster?.memberGroupIds;
+          if (!Array.isArray(ids) || !ids.includes(groupId)) continue;
+          if (cluster?.source === 'mask') continue;
+          if (cluster?.id) clusterIds.push(cluster.id);
+        }
+      }
+
+      if (clusterIds.length === 0) return false;
+
+      const anyOn = clusterIds.some((id) => this.controlClusters.get(id)?.enabled !== false);
+      const targetOn = !anyOn;
+
+      for (const id of clusterIds) {
+        const cluster = this.controlClusters.get(id);
+        if (cluster) cluster.enabled = targetOn;
+      }
+
+      const ok = await this._saveClustersToSceneNow();
+      if (!ok) {
+        this._recomputeControlClusters(false);
+        return false;
+      }
+
+      this._refreshControlHud();
+      this.notifyListeners();
+      return true;
+    });
   }
 
   /**
@@ -1805,6 +2154,7 @@ export class MapPointsManager {
     if (this.showControlHud) {
       this._recomputeControlClusters(false);
       this._refreshControlHud();
+      this.notifyListeners();
       if (this._canEditScene()) {
         this._saveClustersToSceneNow().catch(() => {});
       }
@@ -1821,12 +2171,12 @@ export class MapPointsManager {
   }
 
   /**
-   * @param {PointerEvent} event
    * @param {THREE.Raycaster} raycaster
    * @param {THREE.Camera} [camera]
+   * @param {{x:number,y:number}|THREE.Vector2} [ndc]
    * @returns {string|null} clusterId
    */
-  pickEffectControlCluster(event, raycaster, camera = null) {
+  pickEffectControlCluster(raycaster, camera = null, ndc = null) {
     if (!game.user?.isGM || !this.showControlHud || !this.controlHudGroup) return null;
     if (!raycaster || typeof raycaster.setFromCamera !== 'function') return null;
 
@@ -1835,16 +2185,9 @@ export class MapPointsManager {
       ?? window.MapShine?.interactionManager?.sceneComposer?.camera;
     if (!cam) return null;
 
-    const rect = canvas?.app?.view?.getBoundingClientRect?.()
-      ?? document.getElementById('board')?.getBoundingClientRect?.();
-    if (!rect?.width || !rect?.height) return null;
-
-    const clientX = Number(event?.clientX);
-    const clientY = Number(event?.clientY);
-    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
-
-    const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
-    const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
+    const ndcX = Number(ndc?.x);
+    const ndcY = Number(ndc?.y);
+    if (!Number.isFinite(ndcX) || !Number.isFinite(ndcY)) return null;
 
     const THREE = window.THREE;
     const prevMask = raycaster.layers?.mask;
@@ -1884,6 +2227,19 @@ export class MapPointsManager {
   }
 
   /**
+   * Promote overlay late-pass rendering when GM HUD icons are present.
+   * @private
+   */
+  _notifyOverlayLayerPresence() {
+    if (!this.controlHudObjects.size) return;
+    try {
+      const fc = window.MapShine?.floorCompositorV2 ?? window.MapShine?.effectComposer?._floorCompositorV2;
+      if (fc) fc._hasOverlayLayerContent = true;
+    } catch (_) {
+    }
+  }
+
+  /**
    * @private
    */
   _ensureControlHudGroup() {
@@ -1919,12 +2275,14 @@ export class MapPointsManager {
 
     const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 1000;
     const uiScale = canvas?.dimensions?.uiScale ?? 1;
-    const iconSize = 28 * uiScale;
+    const iconSize = 22 * uiScale;
 
     for (const cluster of this.controlClusters.values()) {
       if (!cluster?.id || !cluster.centroid) continue;
       this._createOrUpdateControlHudSprite(cluster, groundZ, iconSize);
     }
+
+    this._notifyOverlayLayerPresence();
   }
 
   /**
@@ -1933,6 +2291,68 @@ export class MapPointsManager {
    * @param {number} iconSize
    * @private
    */
+  /**
+   * @param {boolean} enabled
+   * @returns {THREE.Texture|null}
+   * @private
+   */
+  _getPowerHudTexture(enabled) {
+    const THREE = window.THREE;
+    if (!THREE) return null;
+
+    const key = enabled ? 'on' : 'off';
+    const cached = this._powerHudTextureCache.get(key);
+    if (cached) return cached;
+
+    const size = 64;
+    const canvasEl = document.createElement('canvas');
+    canvasEl.width = size;
+    canvasEl.height = size;
+    const ctx = canvasEl.getContext('2d');
+    if (!ctx) return null;
+
+    const cx = size * 0.5;
+    const cy = size * 0.5;
+    const r = size * 0.44;
+
+    ctx.clearRect(0, 0, size, size);
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = enabled ? 'rgba(24, 42, 28, 0.88)' : 'rgba(28, 28, 32, 0.82)';
+    ctx.fill();
+    ctx.strokeStyle = enabled ? 'rgba(120, 220, 140, 0.95)' : 'rgba(110, 110, 120, 0.85)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.strokeStyle = enabled ? '#f2fff4' : '#b8b8c0';
+    ctx.lineWidth = 3.5;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(cx, cy + 3, 11, Math.PI * 0.2, Math.PI * 0.8, true);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - 11);
+    ctx.lineTo(cx, cy + 1);
+    ctx.stroke();
+
+    if (!enabled) {
+      ctx.strokeStyle = 'rgba(255, 120, 120, 0.9)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(cx - 12, cy + 12);
+      ctx.lineTo(cx + 12, cy - 12);
+      ctx.stroke();
+    }
+
+    const tex = new THREE.CanvasTexture(canvasEl);
+    tex.needsUpdate = true;
+    if (THREE.SRGBColorSpace) {
+      try { tex.colorSpace = THREE.SRGBColorSpace; } catch (_) {}
+    }
+    this._powerHudTextureCache.set(key, tex);
+    return tex;
+  }
+
   _createOrUpdateControlHudSprite(cluster, groundZ, iconSize) {
     const THREE = window.THREE;
     if (!THREE) return;
@@ -1953,14 +2373,13 @@ export class MapPointsManager {
       hudGroup.name = `MapPointControlHud_${clusterId}`;
       hudGroup.userData = { type: 'mapPointEffectControl', clusterId };
 
-      const fillColor = enabled ? 0x44cc66 : 0x666666;
-      const ringColor = enabled ? 0xffffff : 0x999999;
-
-      const iconGeo = new THREE.CircleGeometry(iconSize * 0.42, 24);
+      const tex = this._getPowerHudTexture(enabled);
+      const planeSize = iconSize * 0.95;
+      const iconGeo = new THREE.PlaneGeometry(planeSize, planeSize);
       const iconMat = new THREE.MeshBasicMaterial({
-        color: fillColor,
+        map: tex || null,
         transparent: true,
-        opacity: enabled ? 0.92 : 0.55,
+        opacity: 0.96,
         depthTest: false,
         depthWrite: false,
       });
@@ -1968,36 +2387,21 @@ export class MapPointsManager {
       const icon = new THREE.Mesh(iconGeo, iconMat);
       icon.renderOrder = 260000;
       icon.layers.set(OVERLAY_THREE_LAYER);
-      icon.userData = { type: 'mapPointEffectControl', clusterId };
+      icon.userData = { type: 'mapPointEffectControl', clusterId, hudRole: 'icon' };
       hudGroup.add(icon);
-
-      const ringGeo = new THREE.RingGeometry(iconSize * 0.42, iconSize * 0.5, 24);
-      const ringMat = new THREE.MeshBasicMaterial({
-        color: ringColor,
-        transparent: true,
-        opacity: 0.9,
-        depthTest: false,
-        depthWrite: false,
-      });
-      ringMat.toneMapped = false;
-      const ring = new THREE.Mesh(ringGeo, ringMat);
-      ring.renderOrder = 260001;
-      ring.layers.set(OVERLAY_THREE_LAYER);
-      ring.userData = { type: 'mapPointEffectControl', clusterId };
-      hudGroup.add(ring);
 
       const hitGeo = new THREE.CircleGeometry(iconSize * 0.85, 16);
       const hitMat = new THREE.MeshBasicMaterial({
         transparent: true,
-        opacity: 0.001,
+        opacity: 0,
         depthTest: false,
         depthWrite: false,
         side: THREE.DoubleSide,
       });
+      hitMat.colorWrite = false;
       const hit = new THREE.Mesh(hitGeo, hitMat);
       hit.position.z = 0.5;
       hit.renderOrder = 259000;
-      hit.layers.set(0);
       hit.userData = { type: 'mapPointEffectControlHit', clusterId };
       hudGroup.add(hit);
 
@@ -2009,17 +2413,12 @@ export class MapPointsManager {
     hudGroup.userData.clusterId = clusterId;
     hudGroup.userData.effectTarget = cluster.effectTarget;
 
-    const iconMesh = hudGroup.children.find((c) => c.userData?.type === 'mapPointEffectControl');
-    const ringMesh = hudGroup.children.find((c) => c.geometry?.type === 'RingGeometry');
-    const fillColor = enabled ? 0x44cc66 : 0x666666;
-    if (iconMesh?.material) {
-      iconMesh.material.color.setHex(fillColor);
-      iconMesh.material.opacity = enabled ? 0.92 : 0.55;
+    const iconMesh = hudGroup.children.find((c) => c.userData?.hudRole === 'icon');
+    const tex = this._getPowerHudTexture(enabled);
+    if (iconMesh?.material && tex) {
+      iconMesh.material.map = tex;
+      iconMesh.material.opacity = enabled ? 0.96 : 0.72;
       iconMesh.material.needsUpdate = true;
-    }
-    if (ringMesh?.material) {
-      ringMesh.material.color.setHex(enabled ? 0xffffff : 0x999999);
-      ringMesh.material.needsUpdate = true;
     }
   }
 
@@ -2078,10 +2477,17 @@ export class MapPointsManager {
     this._hookRegistrations = [];
 
     this.clearVisualObjects();
+    for (const tex of this._powerHudTextureCache.values()) {
+      try { tex.dispose(); } catch (_) {}
+    }
+    this._powerHudTextureCache.clear();
     this._clearControlHud();
     this.groups.clear();
     this.controlClusters.clear();
     this._groupIdToClusterId.clear();
+    this._pointKeyToClusterId.clear();
+    this._maskBucketToClusterId.clear();
+    this._maskBucketSizeByFloor.clear();
     this.showControlHud = false;
     this.changeListeners = [];
     this.initialized = false;

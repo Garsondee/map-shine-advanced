@@ -36,20 +36,11 @@ export const PARTICLE_SPAWN_UI_TIERS = Object.freeze([
 
 /** @typedef {'best60'|'balanced30'|'powerSaver'|'custom'} PerformanceProfileId */
 
+const DEFAULT_PERFORMANCE_PROFILE = 'balanced30';
+const DEFAULT_PROFILE_FPS = 30;
+
 /** @type {Record<PerformanceProfileId, { label: string, apply: (state: GraphicsSettingsState) => void }>} */
 const PERFORMANCE_PROFILES = Object.freeze({
-  best60: {
-    label: 'Best (60 fps)',
-    apply(state) {
-      state.renderPresentationPacingEnabled = true;
-      state.renderAdaptiveFpsEnabled = true;
-      state.renderStrictSyncEnabled = false;
-      state.renderIdleFps = 60;
-      state.renderActiveFps = 60;
-      state.renderPresentationFps = 60;
-      state.renderContinuousFps = 60;
-    },
-  },
   balanced30: {
     label: 'Balanced (30 fps)',
     apply(state) {
@@ -60,6 +51,18 @@ const PERFORMANCE_PROFILES = Object.freeze({
       state.renderActiveFps = 30;
       state.renderPresentationFps = 30;
       state.renderContinuousFps = 30;
+    },
+  },
+  best60: {
+    label: 'Best (60 fps)',
+    apply(state) {
+      state.renderPresentationPacingEnabled = true;
+      state.renderAdaptiveFpsEnabled = true;
+      state.renderStrictSyncEnabled = false;
+      state.renderIdleFps = 60;
+      state.renderActiveFps = 60;
+      state.renderPresentationFps = 60;
+      state.renderContinuousFps = 60;
     },
   },
   powerSaver: {
@@ -198,6 +201,7 @@ const STYLISTIC_EFFECT_IDS_DEFAULT_OFF = new Set([
  * @property {boolean} renderPresentationPacingEnabled
  * @property {boolean} renderStrictSyncEnabled
  * @property {boolean} tokenDepthInteraction - P4-02: tokens participate in depth buffer when true
+ * @property {boolean} vegetationHalfResEnabled - half-res bush/tree composite (performance)
  * @property {number} particleSpawnTier - 0..6; 3 = Medium (100% spawn)
  * @property {'best60'|'balanced30'|'powerSaver'|'custom'|undefined} [performanceProfile]
  * @property {Object<string, {enabled?: boolean}>} effectOverrides
@@ -221,15 +225,16 @@ export class GraphicsSettingsManager {
       globalDisableAll: false,
       renderResolutionPreset: 'native',
       renderAdaptiveFpsEnabled: true,
-      renderIdleFps: 60,
-      renderActiveFps: 60,
-      renderContinuousFps: 60,
-      renderPresentationFps: 60,
+      renderIdleFps: DEFAULT_PROFILE_FPS,
+      renderActiveFps: DEFAULT_PROFILE_FPS,
+      renderContinuousFps: DEFAULT_PROFILE_FPS,
+      renderPresentationFps: DEFAULT_PROFILE_FPS,
       renderPresentationPacingEnabled: true,
       renderStrictSyncEnabled: false,
       tokenDepthInteraction: false,
+      vegetationHalfResEnabled: false,
       particleSpawnTier: 3,
-      performanceProfile: 'best60',
+      performanceProfile: DEFAULT_PERFORMANCE_PROFILE,
       effectOverrides: {}
     };
 
@@ -423,21 +428,21 @@ export class GraphicsSettingsManager {
    * @returns {number}
    */
   getRenderIdleFps() {
-    return this._coerceFps(this.state?.renderIdleFps, 60, 5, 60);
+    return this._coerceFps(this.state?.renderIdleFps, DEFAULT_PROFILE_FPS, 5, 60);
   }
 
   /**
    * @returns {number}
    */
   getRenderActiveFps() {
-    return this._coerceFps(this.state?.renderActiveFps, 60, 5, 120);
+    return this._coerceFps(this.state?.renderActiveFps, DEFAULT_PROFILE_FPS, 5, 120);
   }
 
   /**
    * @returns {number}
    */
   getRenderContinuousFps() {
-    return this._coerceFps(this.state?.renderContinuousFps, 60, 5, 120);
+    return this._coerceFps(this.state?.renderContinuousFps, DEFAULT_PROFILE_FPS, 5, 120);
   }
 
   /**
@@ -445,7 +450,7 @@ export class GraphicsSettingsManager {
    */
   getRenderPresentationFps() {
     const p = this.state?.renderPresentationFps;
-    if (Number.isFinite(p)) return this._coerceFps(p, 60, 5, 60);
+    if (Number.isFinite(p)) return this._coerceFps(p, DEFAULT_PROFILE_FPS, 5, 60);
     return this.getRenderContinuousFps();
   }
 
@@ -535,6 +540,22 @@ export class GraphicsSettingsManager {
   }
 
   /**
+   * When true, bush/tree overlays may render at half resolution (upsampled) to save GPU.
+   * @returns {boolean}
+   */
+  getVegetationHalfResEnabled() {
+    return this.state.vegetationHalfResEnabled === true;
+  }
+
+  /**
+   * @param {boolean} enabled
+   */
+  setVegetationHalfResEnabled(enabled) {
+    this.state.vegetationHalfResEnabled = enabled === true;
+    this.saveState();
+  }
+
+  /**
    * @param {string} preset
    */
   setRenderResolutionPreset(preset) {
@@ -563,7 +584,7 @@ export class GraphicsSettingsManager {
    * @param {number} fps
    */
   setRenderIdleFps(fps) {
-    this.state.renderIdleFps = this._coerceFps(fps, 60, 5, 60);
+    this.state.renderIdleFps = this._coerceFps(fps, DEFAULT_PROFILE_FPS, 5, 60);
     this.state.performanceProfile = this.inferPerformanceProfile();
     this.applyRenderPerformanceSettings();
     this.saveState();
@@ -573,7 +594,7 @@ export class GraphicsSettingsManager {
    * @param {number} fps
    */
   setRenderActiveFps(fps) {
-    this.state.renderActiveFps = this._coerceFps(fps, 60, 5, 120);
+    this.state.renderActiveFps = this._coerceFps(fps, DEFAULT_PROFILE_FPS, 5, 120);
     this.state.performanceProfile = this.inferPerformanceProfile();
     this.applyRenderPerformanceSettings();
     this.saveState();
@@ -583,7 +604,7 @@ export class GraphicsSettingsManager {
    * @param {number} fps
    */
   setRenderContinuousFps(fps) {
-    this.state.renderContinuousFps = this._coerceFps(fps, 60, 5, 120);
+    this.state.renderContinuousFps = this._coerceFps(fps, DEFAULT_PROFILE_FPS, 5, 120);
     this.state.renderPresentationFps = this.state.renderContinuousFps;
     this.state.performanceProfile = this.inferPerformanceProfile();
     this.applyRenderPerformanceSettings();
@@ -594,7 +615,7 @@ export class GraphicsSettingsManager {
    * @param {number} fps
    */
   setRenderPresentationFps(fps) {
-    this.state.renderPresentationFps = this._coerceFps(fps, 60, 5, 60);
+    this.state.renderPresentationFps = this._coerceFps(fps, DEFAULT_PROFILE_FPS, 5, 60);
     this.state.renderContinuousFps = this.state.renderPresentationFps;
     this.state.performanceProfile = this.inferPerformanceProfile();
     this.applyRenderPerformanceSettings();
@@ -696,7 +717,7 @@ export class GraphicsSettingsManager {
    * @param {PerformanceProfileId|string} profileId
    */
   applyPerformanceProfile(profileId) {
-    const id = String(profileId || 'best60');
+    const id = String(profileId || DEFAULT_PERFORMANCE_PROFILE);
     if (id === 'custom' || !PERFORMANCE_PROFILES[id]) {
       this.state.performanceProfile = 'custom';
       this.saveState();
@@ -1192,13 +1213,13 @@ export class GraphicsSettingsManager {
       if (typeof parsed.renderResolutionPreset === 'string') this.state.renderResolutionPreset = parsed.renderResolutionPreset;
       if (typeof parsed.renderAdaptiveFpsEnabled === 'boolean') this.state.renderAdaptiveFpsEnabled = parsed.renderAdaptiveFpsEnabled;
       if (typeof parsed.renderStrictSyncEnabled === 'boolean') this.state.renderStrictSyncEnabled = parsed.renderStrictSyncEnabled;
-      if (parsed.renderIdleFps !== undefined) this.state.renderIdleFps = this._coerceFps(parsed.renderIdleFps, 60, 5, 60);
-      if (parsed.renderActiveFps !== undefined) this.state.renderActiveFps = this._coerceFps(parsed.renderActiveFps, 60, 5, 120);
+      if (parsed.renderIdleFps !== undefined) this.state.renderIdleFps = this._coerceFps(parsed.renderIdleFps, DEFAULT_PROFILE_FPS, 5, 60);
+      if (parsed.renderActiveFps !== undefined) this.state.renderActiveFps = this._coerceFps(parsed.renderActiveFps, DEFAULT_PROFILE_FPS, 5, 120);
       if (parsed.renderContinuousFps !== undefined) {
-        this.state.renderContinuousFps = this._coerceFps(parsed.renderContinuousFps, 60, 5, 120);
+        this.state.renderContinuousFps = this._coerceFps(parsed.renderContinuousFps, DEFAULT_PROFILE_FPS, 5, 120);
       }
       if (parsed.renderPresentationFps !== undefined) {
-        this.state.renderPresentationFps = this._coerceFps(parsed.renderPresentationFps, 60, 5, 60);
+        this.state.renderPresentationFps = this._coerceFps(parsed.renderPresentationFps, DEFAULT_PROFILE_FPS, 5, 60);
       } else {
         this.state.renderPresentationFps = this.state.renderContinuousFps;
       }
@@ -1206,6 +1227,9 @@ export class GraphicsSettingsManager {
         this.state.renderPresentationPacingEnabled = parsed.renderPresentationPacingEnabled;
       }
       if (typeof parsed.tokenDepthInteraction === 'boolean') this.state.tokenDepthInteraction = parsed.tokenDepthInteraction;
+      if (typeof parsed.vegetationHalfResEnabled === 'boolean') {
+        this.state.vegetationHalfResEnabled = parsed.vegetationHalfResEnabled;
+      }
       if (parsed.particleSpawnTier !== undefined) {
         this.state.particleSpawnTier = this._coerceParticleSpawnTier(parsed.particleSpawnTier);
       }

@@ -520,6 +520,42 @@ export function resolveParticleDisplayAge(particle) {
   return particle._msDisplayAge !== undefined ? particle._msDisplayAge : particle.age;
 }
 
+/**
+ * Effective visual animation speed for a fire layer.
+ * Master `fireVisualSpeed` multiplies per-layer keys (flameAnimSpeed, etc.).
+ * Independent of timeScale / fireSimHz — only sprite flicker and colour envelopes.
+ * @param {object|null|undefined} ownerEffect
+ * @param {string} layerKey
+ * @param {number} [layerDefault=1]
+ * @returns {number}
+ */
+export function resolveFireLayerAnimSpeed(ownerEffect, layerKey, layerDefault = 1) {
+  const params = ownerEffect?.params;
+  const master = typeof params?.fireVisualSpeed === 'number' && Number.isFinite(params.fireVisualSpeed)
+    ? params.fireVisualSpeed
+    : 1;
+  const local = typeof params?.[layerKey] === 'number' && Number.isFinite(params[layerKey])
+    ? params[layerKey]
+    : layerDefault;
+  return Math.max(0.1, Math.min(8, master * local));
+}
+
+/**
+ * Normalized life fraction with animation-speed multiplier (clamped 0..1).
+ * @param {number} age
+ * @param {number} life
+ * @param {number} animSpeed
+ * @returns {number}
+ */
+export function applyFireAnimSpeedToLifeT(age, life, animSpeed) {
+  const safeLife = life > 0.001 ? life : 0.001;
+  let t = age / safeLife;
+  if (t < 0) t = 0;
+  else if (t > 1) t = 1;
+  t *= Math.max(0.1, animSpeed);
+  return t > 1 ? 1 : t;
+}
+
 function smoothstep01(x) {
   const u = x < 0 ? 0 : x > 1 ? 1 : x;
   return u * u * (3.0 - 2.0 * u);
@@ -847,6 +883,142 @@ export class FireMaskShape {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// FireWorldPointShape — Emitter shape for map-point world fire sources
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export class FireWorldPointShape {
+  /**
+   * @param {Float32Array} points - Packed (worldX, worldY, brightness) triples
+   * @param {object} ownerEffect
+   * @param {number} [floorIndex=0]
+   * @param {number} [groundZ=1000]
+   * @param {number} [floorElevation=0]
+   */
+  constructor(points, ownerEffect, floorIndex = 0, groundZ = 1000, floorElevation = 0) {
+    this.points = points;
+    this.ownerEffect = ownerEffect;
+    this.floorIndex = Number.isFinite(Number(floorIndex)) ? Math.max(0, Math.floor(Number(floorIndex))) : 0;
+    this.groundZ = groundZ;
+    this.floorElevation = Number.isFinite(floorElevation) ? floorElevation : 0;
+    this.type = 'fire_world_point';
+  }
+
+  initialize(p) {
+    const count = this.points.length / 3;
+    if (count === 0) return;
+
+    const idx = Math.floor(Math.random() * count) * 3;
+    const worldX = this.points[idx];
+    const worldY = this.points[idx + 1];
+    const brightness = this.points[idx + 2];
+
+    if (!Number.isFinite(worldX) || !Number.isFinite(worldY) || !Number.isFinite(brightness) || brightness <= 0) {
+      if (typeof p.life === 'number') p.life = 0;
+      if (p.color && typeof p.color.w === 'number') p.color.w = 0;
+      if (typeof p.size === 'number') p.size = 0;
+      return;
+    }
+
+    p.position.x = worldX;
+    p.position.y = worldY;
+    p.position.z = this.groundZ + this.floorElevation;
+
+    const spawnSize = typeof p.size === 'number' ? p.size : 0;
+    const outdoorFactor = resolveFireOutdoorFootprintMin(
+      worldX,
+      worldY,
+      spawnSize,
+      this.ownerEffect,
+      this.floorIndex,
+    );
+    p._spawnOutdoorFactor = outdoorFactor;
+    p._msFloorIndex = this.floorIndex;
+    p._windSusceptibility = outdoorFactor;
+
+    const params = this.ownerEffect?.params;
+    p._indoorSmokeScale = computeIndoorSuppressionScale(params?.indoorSmokeSuppression, outdoorFactor);
+    p._indoorEmberScale = computeIndoorSuppressionScale(params?.indoorEmberSuppression, outdoorFactor);
+
+    const indoorTimeScale = Math.max(0.05, Math.min(1.0, params?.indoorTimeScale ?? 0.6));
+    p._msTimeScaleFactor = indoorTimeScale + (1.0 - indoorTimeScale) * outdoorFactor;
+
+    if (outdoorFactor <= 0.01 && typeof p.life === 'number') {
+      const indoorLifeScale = params?.indoorLifeScale ?? 0.2;
+      p.life *= indoorLifeScale;
+    }
+
+    if (typeof p.life === 'number') p.life *= (0.3 + 0.7 * brightness);
+    if (typeof p.size === 'number') p.size *= (0.4 + 0.6 * brightness);
+    p._flameBrightness = brightness;
+
+    if (p.velocity) p.velocity.set(0, 0, 0);
+    zeroParticleVisual(p);
+  }
+
+  update() { /* static world points */ }
+}
+
+/**
+ * @param {number} u
+ * @param {number} v
+ * @param {number} sceneW
+ * @param {number} sceneH
+ * @param {number} sceneX
+ * @param {number} sceneY
+ * @returns {{x:number,y:number}}
+ */
+export function fireSceneUvToWorldXY(u, v, sceneW, sceneH, sceneX, sceneY) {
+  return {
+    x: sceneX + u * sceneW,
+    y: sceneY + (1.0 - v) * sceneH,
+  };
+}
+
+/**
+ * Remove packed fire-mask spawn points that fall inside disabled map-point regions.
+ *
+ * @param {Float32Array|null} points
+ * @param {number} sceneW
+ * @param {number} sceneH
+ * @param {number} sceneX
+ * @param {number} sceneY
+ * @param {import('../../scene/map-points-manager.js').MapPointsManager|null} mapPointsManager
+ * @param {string} [effectTarget='fire']
+ * @param {any} [levelContext=null]
+ * @returns {Float32Array|null}
+ */
+export function filterFirePointsByMapPointGates(
+  points,
+  sceneW,
+  sceneH,
+  sceneX,
+  sceneY,
+  mapPointsManager,
+  effectTarget = 'fire',
+  levelContext = null,
+  floorIndex = null,
+) {
+  if (!points || points.length < 3 || !mapPointsManager) return points;
+
+  const kept = [];
+  for (let i = 0; i < points.length; i += 3) {
+    const u = points[i];
+    const v = points[i + 1];
+    const b = points[i + 2];
+    const { x, y } = fireSceneUvToWorldXY(u, v, sceneW, sceneH, sceneX, sceneY);
+    const enabled = (typeof mapPointsManager.isWorldPointMaskFireEnabled === 'function')
+      ? mapPointsManager.isWorldPointMaskFireEnabled(x, y, levelContext, floorIndex)
+      : mapPointsManager.isWorldPointEffectEnabled?.(x, y, effectTarget, levelContext) !== false;
+    if (enabled) {
+      kept.push(u, v, b);
+    }
+  }
+
+  if (kept.length === 0) return null;
+  return new Float32Array(kept);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // FlameLifecycleBehavior — Blackbody color, HDR emission, alpha envelope
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -860,6 +1032,7 @@ export class FlameLifecycleBehavior {
     this._hdrGain = FIRE_HDR_LINEAR_GAIN;
     this._temperature = 0.5;
     this._minBrightness = 0.75;
+    this._cachedAnimSpeed = 1;
     this._colorLUT = new Float32Array(256 * 3);
     this._emissionLUT = new Float32Array(256);
     this._alphaLUT = new Float32Array(256);
@@ -882,8 +1055,7 @@ export class FlameLifecycleBehavior {
     if (life <= 0) return;
     let age = particle._msDisplayAge;
     if (age === undefined) age = particle.age;
-    let t = age / (life > 0.001 ? life : 0.001);
-    if (t < 0) t = 0; else if (t > 1) t = 1;
+    const t = applyFireAnimSpeedToLifeT(age, life, this._cachedAnimSpeed);
     const idx = (t * 255) | 0;
 
     const heat = particle._flameHeat ?? 1.0;
@@ -924,6 +1096,7 @@ export class FlameLifecycleBehavior {
       this._updateGradientsForTemperature(nextTemp);
     }
     this._temperature = nextTemp;
+    this._cachedAnimSpeed = resolveFireLayerAnimSpeed(this.ownerEffect, 'flameAnimSpeed', 1);
 
     if (this._lutDirty) {
       this._rebuildLUTs();
@@ -989,6 +1162,7 @@ export class EmberLifecycleBehavior {
     this._hdrGain = FIRE_HDR_LINEAR_GAIN;
     this._peakOpacity = 1.0;
     this._temperature = 0.5;
+    this._cachedAnimSpeed = 1;
     this._colorLUT = new Float32Array(256 * 3);
     this._emissionLUT = new Float32Array(256);
     this._alphaLUT = new Float32Array(256);
@@ -1025,8 +1199,7 @@ export class EmberLifecycleBehavior {
     if (life <= 0) return;
     let age = particle._msDisplayAge;
     if (age === undefined) age = particle.age;
-    let t = age / (life > 0.001 ? life : 0.001);
-    if (t < 0) t = 0; else if (t > 1) t = 1;
+    const t = applyFireAnimSpeedToLifeT(age, life, this._cachedAnimSpeed);
     const idx = (t * 255) | 0;
 
     const heat = particle._emberHeat ?? 1.0;
@@ -1066,6 +1239,7 @@ export class EmberLifecycleBehavior {
       this._updateGradientsForTemperature(nextTemp);
     }
     this._temperature = nextTemp;
+    this._cachedAnimSpeed = resolveFireLayerAnimSpeed(this.ownerEffect, 'emberAnimSpeed', 1);
 
     if (this._lutDirty) {
       this._rebuildLUTs();
@@ -1133,6 +1307,7 @@ export class SmokeLifecycleBehavior {
     this._colorGradient = null;
     this._emissionGradient = null;
     this._smokeEmissionHdr = FIRE_SMOKE_HDR_EMISSION_GAIN * FIRE_HDR_LINEAR_GAIN;
+    this._cachedAnimSpeed = 1;
     this._colorLUT = new Float32Array(256 * 3);
     this._alphaLUT = new Float32Array(256);
     this._sizeLUT = new Float32Array(256);
@@ -1169,8 +1344,7 @@ export class SmokeLifecycleBehavior {
     if (life <= 0) return;
     let age = particle._msDisplayAge;
     if (age === undefined) age = particle.age;
-    let t = age / (life > 0.001 ? life : 0.001);
-    if (t < 0) t = 0; else if (t > 1) t = 1;
+    const t = applyFireAnimSpeedToLifeT(age, life, this._cachedAnimSpeed);
 
     const density = particle._smokeDensity ?? 0.75;
     const params = this.ownerEffect?.params;
@@ -1221,6 +1395,7 @@ export class SmokeLifecycleBehavior {
 
     const precip = weatherController.currentState?.precipitation || 0;
     this._precipMult = Math.max(0.2, 1.0 - precip * 0.5);
+    this._cachedAnimSpeed = resolveFireLayerAnimSpeed(this.ownerEffect, 'smokeAnimSpeed', 1);
 
     this._colorGradient = normalizeColorStops(p?.smokeColorGradient);
     this._emissionGradient = normalizeColorStops(p?.smokeEmissionGradient);
@@ -1331,9 +1506,11 @@ export class FlameShapeFrameBehavior {
     this.animFrames = Math.max(1, animFrames | 0);
     this.ownerEffect = options.ownerEffect ?? null;
     this.cyclesParamKey = options.cyclesParamKey ?? 'flameFlipbookCycles';
+    this.animSpeedParamKey = options.animSpeedParamKey ?? 'flameAnimSpeed';
     this.defaultCycles = Math.max(0.1, Number(options.defaultCycles) || 2);
     this.type = 'FlameShapeFrameBehavior';
     this._cachedCycles = this.defaultCycles;
+    this._cachedAnimSpeed = 1;
   }
 
   /** @private */
@@ -1359,7 +1536,7 @@ export class FlameShapeFrameBehavior {
     const t = age < 0 ? 0 : age > life ? 1 : age / life;
     const cycles = this._cachedCycles;
     const offset = particle._flameAnimOffset ?? 0;
-    const loopT = ((t * cycles * this.animFrames) + offset) % this.animFrames;
+    const loopT = ((t * cycles * this._cachedAnimSpeed * this.animFrames) + offset) % this.animFrames;
     this._applyTile(particle, loopT);
   }
 
@@ -1382,6 +1559,7 @@ export class FlameShapeFrameBehavior {
 
   frameUpdate() {
     this._cachedCycles = this._resolveCycles();
+    this._cachedAnimSpeed = resolveFireLayerAnimSpeed(this.ownerEffect, this.animSpeedParamKey, 1);
   }
   reset() {}
   clone() {
@@ -1407,6 +1585,7 @@ export class SmokeShapeFrameBehavior extends FlameShapeFrameBehavior {
     super(shapeCount, animFrames, {
       ownerEffect: options.ownerEffect ?? null,
       cyclesParamKey: options.cyclesParamKey ?? 'smokeFlipbookCycles',
+      animSpeedParamKey: options.animSpeedParamKey ?? 'smokeAnimSpeed',
       defaultCycles: options.defaultCycles ?? 0,
     });
     this.type = 'SmokeShapeFrameBehavior';
@@ -1447,7 +1626,7 @@ export class SmokeShapeFrameBehavior extends FlameShapeFrameBehavior {
     let age = particle._msDisplayAge;
     if (age === undefined) age = particle.age;
     const t = age < 0 ? 0 : age > life ? 1 : age / life;
-    const loopT = offset + (t * cycles * this.animFrames);
+    const loopT = offset + (t * cycles * this._cachedAnimSpeed * this.animFrames);
     this._applyTile(particle, loopT);
   }
 

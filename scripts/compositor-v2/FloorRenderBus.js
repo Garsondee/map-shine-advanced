@@ -36,9 +36,11 @@ import {
   getVisibleLevelBackgroundLayers,
   hasV14NativeLevels,
   resolveV14BackgroundFloorIndexForSrc,
+  resolveV14LevelIdToFloorStackIndex,
   normalizeFoundryAssetUrlKey,
   getViewedV14Level,
 } from '../foundry/levels-scene-flags.js';
+import { resolveFloorIndexForElevation } from '../ui/levels-editor/level-boundaries.js';
 import {
   isTileOverhead,
   getTileVisualCenterFoundryXY,
@@ -104,13 +106,18 @@ function finalizeBackgroundFloorIndexForBus(scene, src, floorIdx, ctx) {
   if (out !== 0) return out;
   try {
     if (globalThis.canvas?.scene?.id === scene?.id) {
-      const r = Number(globalThis.canvas?.level?.index);
-      if (Number.isFinite(r)) return Math.max(0, Math.floor(r));
+      const levelId = globalThis.canvas?.level?.id;
+      if (levelId) {
+        const stackIdx = resolveV14LevelIdToFloorStackIndex(scene, levelId);
+        if (stackIdx !== null) return stackIdx;
+      }
     }
   } catch (_) {}
   const vl = getViewedV14Level(scene);
-  const r = Number(vl?.index);
-  if (Number.isFinite(r)) return Math.max(0, Math.floor(r));
+  if (vl?.levelId) {
+    const stackIdx = resolveV14LevelIdToFloorStackIndex(scene, vl.levelId);
+    if (stackIdx !== null) return stackIdx;
+  }
   return out;
 }
 
@@ -1550,7 +1557,8 @@ export class FloorRenderBus {
       const overlayRole = String(entry?.overlayRole || '');
       const isStackedOverlay = overlayRole === 'stackedFloorEffect';
       const isLegacyStackedOverlay =
-        String(tileId).startsWith('ms_fire_batch_');
+        String(tileId).startsWith('ms_fire_batch_')
+        || String(tileId).startsWith('ms_fire_coal_bed_');
       let inRange;
       if (
         (isStackedOverlay || isLegacyStackedOverlay)
@@ -1709,9 +1717,10 @@ export class FloorRenderBus {
    * @param {string} key - Unique overlay key (e.g. `${tileId}_specular`)
    * @param {import('three').Object3D} mesh
    * @param {number} floorIndex
+   * @param {{ overlayRole?: string }} [options]
    * @returns {boolean}
    */
-  addTileAttachedOverlay(tileId, key, mesh, floorIndex) {
+  addTileAttachedOverlay(tileId, key, mesh, floorIndex, options = {}) {
     if (!this._initialized || !this._scene || !tileId || !key || !mesh) return false;
 
     const tileEntry = this._tiles.get(tileId);
@@ -1729,7 +1738,8 @@ export class FloorRenderBus {
       material: mesh.material,
       floorIndex,
       root: null,
-      attachedToTileId: tileId
+      attachedToTileId: tileId,
+      overlayRole: String(options?.overlayRole || ''),
     };
     this._tiles.set(key, entry);
     mesh.visible = this._computeEntryVisibleForSlice(key, entry);
@@ -1947,7 +1957,7 @@ export class FloorRenderBus {
    *
    * @param {string} src - New image path to load
    * @param {object} fd  - foundrySceneData (for dimensions)
-   * @param {{ viewedLevelIndex?: number }} [swapOpts] - Optional native level {@link foundry.documents.BaseLevel#index}
+   * @param {{ viewedLevelIndex?: number }} [swapOpts] - Optional FloorStack band index
    *   from `mapShineLevelContextChanged` so floor placement stays correct before `canvas.level` commits.
    */
   swapBackgroundImage(src, fd, swapOpts = {}) {
@@ -2421,10 +2431,8 @@ export class FloorRenderBus {
     if (v14Idx !== null) return v14Idx;
 
     const elev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
-    for (let i = 0; i < floors.length; i++) {
-      const f = floors[i];
-      if (elev >= f.elevationMin && elev <= f.elevationMax) return i;
-    }
+    const byElev = resolveFloorIndexForElevation(elev, floors);
+    if (byElev >= 0) return byElev;
     return 0;
   }
 

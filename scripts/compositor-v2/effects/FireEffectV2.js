@@ -22,7 +22,7 @@
  *
  * V1 → V2 cleanup:
  *   - No EffectMaskRegistry / GpuSceneMaskCompositor (masks loaded per tile)
- *   - No MapPointsManager integration (mask-only fire sources)
+ *   - Map-point groups gate mask fire and can add world-point fire sources
  *   - No V1 EffectBase / RenderLayers dependency
  *   - Clean floor isolation via system swapping (no floor-presence gate)
  *   - Behaviors extracted into fire-behaviors.js for reuse
@@ -46,8 +46,10 @@ import {
   getViewedLevelBackgroundSrc,
   hasV14NativeLevels,
 } from '../../foundry/levels-scene-flags.js';
+import { resolveFloorIndexForElevation } from '../../ui/levels-editor/level-boundaries.js';
 import {
   FireMaskShape,
+  filterFirePointsByMapPointGates,
   FixedCurlNoiseField,
   FireForcesBehavior,
   FlameLifecycleBehavior,
@@ -66,6 +68,7 @@ import {
   smoothFireParticleShelterMaskOnly,
   applyFireShelterMaskToParticle,
   cacheFireParticleOutdoorFootprintForWind,
+  resolveFireLayerAnimSpeed,
 } from './fire-behaviors.js';
 import {
   buildEffectSceneBoundsFromCanvas,
@@ -94,6 +97,13 @@ import {
   tileStackedOverlayOrder,
 } from '../LayerOrderPolicy.js';
 import { resolveEffectEnabled } from '../../effects/resolve-effect-enabled.js';
+import {
+  clusterFireMaskPointsWithWalls,
+  fireBucketsToSpatialControls,
+  CONTROL_FIRE_BUCKET_SIZE_PX,
+  CONTROL_FIRE_MAX_BUCKETS,
+  resolveClusteringElevation,
+} from '../../scene/map-point-wall-clustering.js';
 import { tagQuarkSystem } from '../../core/quark-diagnostics.js';
 import {
   COAL_BED_DEFAULT_PARAMS,
@@ -183,7 +193,11 @@ const FIRE_VISUAL_BEHAVIOR_TYPES = new Set([
 // Must NOT start with "__" — FloorRenderBus.renderFloorRangeTo treats "__*" keys like
 // background planes (visibility = includeBackground only), ignoring floorIndex.
 const FIRE_BATCH_OVERLAY_PREFIX = 'ms_fire_batch_';
+/** Background full-scene coal bed — same bus-key rules as {@link FIRE_BATCH_OVERLAY_PREFIX}. */
+const FIRE_COAL_BED_BG_PREFIX = 'ms_fire_coal_bed_';
 const FIRE_COAL_BED_OVERLAY_SUFFIX = '_coalBed';
+/** Same bus overlay semantics as {@link FIRE_BATCH_OVERLAY_PREFIX} batches. */
+const FIRE_STACKED_OVERLAY_OPTS = Object.freeze({ overlayRole: 'stackedFloorEffect' });
 /** Local Z lift on tile-attached coal overlays (on albedo, under particles). */
 const COAL_BED_Z_OFFSET = 0.02;
 /** tileStackedOverlayOrder delta — paints after albedo, before FLOOR_EFFECTS particles. */
@@ -660,7 +674,7 @@ export class FireEffectV2 {
     this._glowRootGroup = null;
     /** @type {Map<number, THREE.Group>} Per-floor glow groups */
     this._glowFloorGroups = new Map();
-    /** @type {Map<number, Map<string, object>>} floorIndex → bucketKey → { lightMesh, baseColor, intensity, phase, outdoor } */
+    /** @type {Map<number, Map<string, object>>} floorIndex → bucketKey → { lightMesh, lightMeshes?, baseColor, intensity, phase, outdoor } */
     this._glowBucketsByFloor = new Map();
     /** @type {Map<number, object[]>} floorIndex → cluster metadata for rebuilds */
     this._glowClustersByFloor = new Map();
@@ -719,9 +733,18 @@ export class FireEffectV2 {
     /** @type {string} Last applied coal-bed preset id */
     this._lastCoalBedPreset = '';
 
+    /** @type {import('../../scene/map-points-manager.js').MapPointsManager|null} */
+    this._mapPointsManager = null;
+    /** @type {(() => void)|null} */
+    this._mapPointsChangeListener = null;
+
+    /** @type {Map<number, import('../../scene/map-point-control-clusters.js').SpatialControlBucket[]>} */
+    this._spatialControlBucketsByFloor = new Map();
+
     // Effect parameters — fire-sparks defaults (map-scale flames + smoke).
     this.params = {
       ...COAL_BED_DEFAULT_PARAMS,
+      coalBedAnimSpeed: 1,
       enabled: true,
       globalFireRate: 2.6,
       fireHeight: 600,
@@ -749,6 +772,7 @@ export class FireEffectV2 {
       emberSizeMax: 26,
       emberLifeMin: 1.1,
       emberLifeMax: 11.3,
+      emberAnimSpeed: 1,
       fireUpdraft: 1,
       emberUpdraft: 0.2,
       flameStationaryFraction: 0.95,
@@ -757,12 +781,14 @@ export class FireEffectV2 {
       weatherPrecipKill: 5,
       weatherWindKill: 0.9,
       timeScale: 3,
+      fireVisualSpeed: 1.5,
       lightIntensity: 1.4,
       nightHdrBrightness: 2.4,
       indoorLifeScale: 0.7,
       indoorTimeScale: 0.4,
       flamePeakOpacity: 0.19,
-      flameFlipbookCycles: 2,
+      flameFlipbookCycles: 4,
+      flameAnimSpeed: 1,
       coreEmission: 1.4,
       flameBrightnessFloor: 0,
       emberEmission: 12,
@@ -771,6 +797,7 @@ export class FireEffectV2 {
       indoorEmberSuppression: 0.2,
       smokeEnabled: true,
       smokeFlipbookCycles: 0,
+      smokeAnimSpeed: 1,
       smokeRatio: 2,
       smokeOpacity: 0.19,
       smokeColorWarmth: 0.53,
@@ -1171,10 +1198,10 @@ export class FireEffectV2 {
       },
       groups: [
         createMaskStatusSchemaGroup('fire'),
-        { name: 'flames', label: 'Flames', type: 'folder', advanced: true, expanded: false, parameters: ['globalFireRate', 'fireHeight', 'fireTemperature', 'flamePeakOpacity', 'coreEmission', 'flameBrightnessFloor', 'fireSizeMin', 'fireSizeMax', 'fireLifeMin', 'fireLifeMax', 'flameFlipbookCycles', 'fireSpinEnabled', 'fireSpinSpeedMin', 'fireSpinSpeedMax', 'flameStationaryFraction', 'fireUpdraft', 'fireCurlStrength'] },
+        { name: 'flames', label: 'Flames', type: 'folder', advanced: true, expanded: false, parameters: ['globalFireRate', 'fireHeight', 'fireTemperature', 'flamePeakOpacity', 'coreEmission', 'flameBrightnessFloor', 'fireSizeMin', 'fireSizeMax', 'fireLifeMin', 'fireLifeMax', 'flameFlipbookCycles', 'flameAnimSpeed', 'fireSpinEnabled', 'fireSpinSpeedMin', 'fireSpinSpeedMax', 'flameStationaryFraction', 'fireUpdraft', 'fireCurlStrength'] },
         { name: 'flame-texture', label: 'Flame Texture', type: 'folder', advanced: true, expanded: false, parameters: ['flameTextureOpacity', 'flameTextureBrightness', 'flameTextureScaleX', 'flameTextureScaleY', 'flameTextureOffsetX', 'flameTextureOffsetY', 'flameTextureRotation', 'flameTextureFlipX', 'flameTextureFlipY'] },
-        { name: 'embers', label: 'Embers', type: 'folder', advanced: true, expanded: false, parameters: ['emberRate', 'emberEmission', 'emberPeakOpacity', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'indoorEmberLifeScale', 'indoorEmberSuppression', 'emberUpdraft', 'emberCurlStrength'] },
-        { name: 'smoke', label: 'Smoke', type: 'folder', expanded: true, parameters: ['smokeEnabled', 'smokeOutdoorAboveCanopy', 'smokeRatio', 'smokeOpacity', 'indoorSmokeSuppression', 'smokeColorWarmth', 'smokeColorBrightness', 'smokeDarknessResponse', 'smokeColorGradient', 'smokeEmissionGradient', 'smokeAlphaStart', 'smokeAlphaPeak', 'smokeAlphaEnd', 'smokeSizeMin', 'smokeSizeMax', 'smokeSizeOverLife', 'smokeLifeMin', 'smokeLifeMax', 'smokeFlipbookCycles', 'smokeUpdraft', 'smokeTurbulence', 'smokeWindInfluence'] },
+        { name: 'embers', label: 'Embers', type: 'folder', advanced: true, expanded: false, parameters: ['emberRate', 'emberEmission', 'emberPeakOpacity', 'emberSizeMin', 'emberSizeMax', 'emberLifeMin', 'emberLifeMax', 'emberAnimSpeed', 'indoorEmberLifeScale', 'indoorEmberSuppression', 'emberUpdraft', 'emberCurlStrength'] },
+        { name: 'smoke', label: 'Smoke', type: 'folder', expanded: true, parameters: ['smokeEnabled', 'smokeOutdoorAboveCanopy', 'smokeRatio', 'smokeOpacity', 'indoorSmokeSuppression', 'smokeColorWarmth', 'smokeColorBrightness', 'smokeDarknessResponse', 'smokeColorGradient', 'smokeEmissionGradient', 'smokeAlphaStart', 'smokeAlphaPeak', 'smokeAlphaEnd', 'smokeSizeMin', 'smokeSizeMax', 'smokeSizeOverLife', 'smokeLifeMin', 'smokeLifeMax', 'smokeFlipbookCycles', 'smokeAnimSpeed', 'smokeUpdraft', 'smokeTurbulence', 'smokeWindInfluence'] },
         {
           name: 'fire-mask-pickup',
           label: 'Fire Mask Pickup',
@@ -1270,7 +1297,7 @@ export class FireEffectV2 {
             'fireGlowNightEdgeSoftness',
           ],
         },
-        { name: 'environment', label: 'Environment', type: 'folder', advanced: true, expanded: false, parameters: ['timeScale', 'lightIntensity', 'nightHdrBrightness', 'indoorLifeScale', 'indoorTimeScale', 'weatherPrecipKill'] },
+        { name: 'environment', label: 'Environment', type: 'folder', advanced: true, expanded: false, parameters: ['fireVisualSpeed', 'timeScale', 'lightIntensity', 'nightHdrBrightness', 'indoorLifeScale', 'indoorTimeScale', 'weatherPrecipKill'] },
         {
           name: 'fire-performance',
           label: 'Performance',
@@ -1353,6 +1380,7 @@ export class FireEffectV2 {
             'coalBedScrollAngle',
             'coalBedEvolveSpeed',
             'coalBedPulseSpeed',
+            'coalBedAnimSpeed',
             'coalBedHeatLevels',
             'coalBedEdgeSoftness',
             'coalBedFlareChaos',
@@ -1394,8 +1422,17 @@ export class FireEffectV2 {
           min: 0.5,
           max: 6.0,
           step: 0.1,
-          default: 2,
+          default: 4,
           tooltip: 'How many full sprite flipbook loops each flame completes over its lifetime. Higher = faster flicker without changing fade or size.',
+        },
+        flameAnimSpeed: {
+          type: 'slider',
+          label: 'Animation Speed',
+          min: 0.25,
+          max: 4.0,
+          step: 0.05,
+          default: 1,
+          tooltip: 'Sprite flicker and colour envelope rate for flames. Stacks with Flipbook Cycles and Environment → Visual Speed. Does not change particle lifespan or motion.',
         },
         fireSpinEnabled: { type: 'checkbox', label: 'Spin Enabled', default: true, hidden: true },
         fireSpinSpeedMin: { type: 'slider', label: 'Spin Speed Min', min: 0.0, max: 50.0, step: 0.1, default: 0, hidden: true },
@@ -1447,6 +1484,15 @@ export class FireEffectV2 {
         emberSizeMax: { type: 'slider', label: 'Size Max', min: 1.0, max: 60.0, step: 1.0, default: 26 },
         emberLifeMin: { type: 'slider', label: 'Life Min (s)', min: 0.1, max: 8.0, step: 0.1, default: 1.1 },
         emberLifeMax: { type: 'slider', label: 'Life Max (s)', min: 0.1, max: 12.0, step: 0.1, default: 11.3 },
+        emberAnimSpeed: {
+          type: 'slider',
+          label: 'Animation Speed',
+          min: 0.25,
+          max: 4.0,
+          step: 0.05,
+          default: 1,
+          tooltip: 'How fast ember colour and brightness evolve over each particle life. Does not change lifespan or drift.',
+        },
         indoorEmberLifeScale: {
           type: 'slider',
           label: 'Indoor Life Scale',
@@ -1519,6 +1565,15 @@ export class FireEffectV2 {
           step: 0.05,
           default: 0,
           tooltip: 'Optional atlas loops per puff (requires multi-frame atlas). 0 = static silhouette — recommended.',
+        },
+        smokeAnimSpeed: {
+          type: 'slider',
+          label: 'Animation Speed',
+          min: 0.25,
+          max: 4.0,
+          step: 0.05,
+          default: 1,
+          tooltip: 'Smoke colour, opacity, and size envelope rate. Does not change rise speed or lifespan.',
         },
         smokeAlphaStart: { type: 'slider', label: 'Opacity ramp from (life %)', min: 0.0, max: 1.0, step: 0.01, default: 0.16,
           tooltip: 'Life % when opacity begins rising from zero. Must be ≤ Peak opacity at.' },
@@ -1705,7 +1760,24 @@ export class FireEffectV2 {
         fireGlowWallClipEnabled: { type: 'checkbox', label: 'Wall Clip Glow', default: true },
         fireGlowWallClipRadiusScale: { type: 'slider', label: 'Wall Clip Radius Scale', min: 0.25, max: 2, step: 0.01, default: 1.0 },
         windInfluence: { type: 'slider', label: 'Wind Influence', min: 0.0, max: 5.0, step: 0.1, default: 0.7, hidden: true },
-        timeScale: { type: 'slider', label: 'Time Scale', min: 0.1, max: 3.0, step: 0.05, default: 3 },
+        timeScale: {
+          type: 'slider',
+          label: 'Time Scale',
+          min: 0.1,
+          max: 3.0,
+          step: 0.05,
+          default: 3,
+          tooltip: 'Shortens particle lifespan and speeds emission churn. Does not change sprite flipbook flicker — use Visual Speed or per-layer Animation Speed for that.',
+        },
+        fireVisualSpeed: {
+          type: 'slider',
+          label: 'Visual Speed',
+          min: 0.25,
+          max: 4.0,
+          step: 0.05,
+          default: 1.5,
+          tooltip: 'Master multiplier for flame, ember, smoke, and coal-bed visual animation. Independent of Time Scale and Simulation Rate.',
+        },
         lightIntensity: {
           type: 'slider',
           label: 'HDR Brightness (Day)',
@@ -1949,6 +2021,15 @@ export class FireEffectV2 {
           default: 1.8,
           tooltip: 'How often each spark cell flares up and dies. Higher = faster flicker.',
         },
+        coalBedAnimSpeed: {
+          type: 'slider',
+          label: 'Animation Speed',
+          min: 0.25,
+          max: 4.0,
+          step: 0.05,
+          default: 1,
+          tooltip: 'Scales smolder drift and spark timing on the coal bed. Stacks with Environment → Visual Speed.',
+        },
         coalBedTurbulence: {
           type: 'slider',
           label: 'Crack / Organic Warp',
@@ -2035,6 +2116,188 @@ export class FireEffectV2 {
 
     this._initialized = true;
     log.info('FireEffectV2 initialized');
+  }
+
+  /**
+   * Wire map-point fire gates / supplemental world fire sources.
+   * @param {import('../../scene/map-points-manager.js').MapPointsManager|null} manager
+   */
+  /**
+   * @returns {import('../../scene/map-point-control-clusters.js').SpatialControlBucket[]}
+   */
+  getSpatialControlBuckets() {
+    const out = [];
+    for (const list of this._spatialControlBucketsByFloor.values()) {
+      if (Array.isArray(list)) out.push(...list);
+    }
+    return out;
+  }
+
+  /**
+   * @param {number} floorIndex
+   * @param {Float32Array} points
+   * @param {number} sceneW
+   * @param {number} sceneH
+   * @param {number} sceneX
+   * @param {number} sceneY
+   * @private
+   */
+  _captureSpatialControlBucketsForFloor(floorIndex, points, sceneW, sceneH, sceneX, sceneY) {
+    if (!points || points.length < 3) {
+      this._spatialControlBucketsByFloor.set(floorIndex, []);
+      return;
+    }
+
+    const elevation = resolveClusteringElevation(floorIndex);
+    const { buckets, bucketSizePx } = clusterFireMaskPointsWithWalls(
+      points,
+      sceneW,
+      sceneH,
+      sceneX,
+      sceneY,
+      CONTROL_FIRE_BUCKET_SIZE_PX,
+      CONTROL_FIRE_MAX_BUCKETS,
+      elevation,
+    );
+
+    const list = fireBucketsToSpatialControls(
+      buckets,
+      sceneW,
+      sceneH,
+      sceneX,
+      sceneY,
+      floorIndex,
+      bucketSizePx,
+    );
+
+    this._spatialControlBucketsByFloor.set(floorIndex, list);
+  }
+
+  setMapPointsSources(manager) {
+    const prev = this._mapPointsManager;
+    if (this._mapPointsChangeListener && prev) {
+      prev.removeChangeListener(this._mapPointsChangeListener);
+    }
+
+    this._mapPointsManager = manager || null;
+    this._mapPointsChangeListener = () => this._queueRebuild();
+
+    if (this._mapPointsManager) {
+      this._mapPointsManager.addChangeListener(this._mapPointsChangeListener);
+    }
+
+    this._queueRebuild();
+  }
+
+  /**
+   * @param {number} floorIndex
+   * @returns {object|null}
+   * @private
+   */
+  _getLevelContextForFloorIndex(floorIndex) {
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    if (!Array.isArray(floors) || floors.length <= 1) return null;
+    const fi = Number(floorIndex);
+    const floor = floors[fi];
+    if (!floor) return { count: floors.length };
+    return {
+      count: floors.length,
+      bottom: floor.elevationMin,
+      top: floor.elevationMax,
+      levelId: floor.id ?? floor.key ?? null,
+    };
+  }
+
+  /**
+   * @param {number} floorIndex
+   * @param {number} sceneW
+   * @param {number} sceneH
+   * @param {number} sceneX
+   * @param {number} sceneY
+   * @returns {Float32Array|null}
+   * @private
+   */
+  _resolveMapPointGroupFloorIndex(group, floors) {
+    if (!Array.isArray(floors) || floors.length === 0) return 0;
+    const binding = group?.metadata?.levelBinding;
+    if (binding?.mode === 'locked') {
+      const b = Number(binding.bottom);
+      const t = Number(binding.top ?? binding.bottom);
+      if (Number.isFinite(b) && Number.isFinite(t)) {
+        const lo = Math.min(b, t);
+        const hi = Math.max(b, t);
+        for (let i = 0; i < floors.length; i++) {
+          const f = floors[i];
+          const min = Number(f?.elevationMin);
+          const max = Number(f?.elevationMax);
+          if (!Number.isFinite(min) || !Number.isFinite(max)) continue;
+          if (!(hi < min || lo > max)) return i;
+        }
+      }
+    }
+    return 0;
+  }
+
+  /**
+   * @param {Map<number, {pointArrays: Float32Array[]}>} floorFireData
+   * @param {object[]} floors
+   * @private
+   */
+  _ensureMapPointFireFloorsInData(floorFireData, floors) {
+    const manager = this._mapPointsManager;
+    if (!manager || typeof manager.getGroupsByEffect !== 'function') return;
+    const groups = manager.getGroupsByEffect('fire') || [];
+    for (const group of groups) {
+      const fi = this._resolveMapPointGroupFloorIndex(group, floors);
+      if (!floorFireData.has(fi)) {
+        floorFireData.set(fi, { pointArrays: [] });
+      }
+    }
+  }
+
+  _buildMapPointFireScenePointsForFloor(floorIndex, sceneW, sceneH, sceneX, sceneY) {
+    const manager = this._mapPointsManager;
+    if (!manager || typeof manager.getGroupsByEffectForContext !== 'function') return null;
+
+    const levelContext = this._getLevelContextForFloorIndex(floorIndex);
+    const groups = manager.getGroupsByEffectForContext('fire', levelContext) || [];
+    const coords = [];
+
+    for (const group of groups) {
+      if (!group?.points?.length) continue;
+      const intensityRaw = group?.emission?.intensity;
+      const intensity = Number.isFinite(Number(intensityRaw)) ? Math.max(0.35, Number(intensityRaw)) : 1.0;
+
+      if (group.type === 'area' && group.points.length >= 3) {
+        const bounds = manager.getAreaBounds?.(group.id) ?? manager._computeBounds?.(group.points);
+        if (!bounds) continue;
+        const samples = Math.max(6, Math.min(24, group.points.length * 2));
+        for (let i = 0; i < samples; i++) {
+          const t = i / samples;
+          const p0 = group.points[Math.floor(t * group.points.length) % group.points.length];
+          const p1 = group.points[(Math.floor(t * group.points.length) + 1) % group.points.length];
+          const wx = (Number(p0.x) + Number(p1.x)) * 0.5;
+          const wy = (Number(p0.y) + Number(p1.y)) * 0.5;
+          if (!Number.isFinite(wx) || !Number.isFinite(wy)) continue;
+          const u = (wx - sceneX) / sceneW;
+          const v = 1.0 - ((wy - sceneY) / sceneH);
+          coords.push(u, v, intensity);
+        }
+        continue;
+      }
+
+      for (const p of group.points) {
+        const wx = Number(p?.x);
+        const wy = Number(p?.y);
+        if (!Number.isFinite(wx) || !Number.isFinite(wy)) continue;
+        const u = (wx - sceneX) / sceneW;
+        const v = 1.0 - ((wy - sceneY) / sceneH);
+        coords.push(u, v, intensity);
+      }
+    }
+
+    if (coords.length === 0) return null;
+    return new Float32Array(coords);
   }
 
   /**
@@ -2235,6 +2498,8 @@ export class FireEffectV2 {
       this._endPerfSpan(_scanToken);
     }
 
+    this._ensureMapPointFireFloorsInData(floorFireData, floors);
+
     let _buildToken = this._beginPerfSpan('populate.build');
     try {
     // Build particle systems per floor.
@@ -2252,11 +2517,48 @@ export class FireEffectV2 {
     for (const [floorIndex, { pointArrays }] of floorFireData) {
       // Merge all point arrays for this floor into one.
       const totalLen = pointArrays.reduce((sum, arr) => sum + arr.length, 0);
-      const merged = new Float32Array(totalLen);
+      let merged = totalLen > 0 ? new Float32Array(totalLen) : new Float32Array(0);
       let offset = 0;
       for (const arr of pointArrays) {
         merged.set(arr, offset);
         offset += arr.length;
+      }
+
+      this._captureSpatialControlBucketsForFloor(
+        floorIndex,
+        merged.length > 0 ? merged : new Float32Array(0),
+        sceneWidth,
+        sceneHeight,
+        sceneX,
+        sceneY,
+      );
+
+      const levelContext = this._getLevelContextForFloorIndex(floorIndex);
+      const gated = filterFirePointsByMapPointGates(
+        merged.length > 0 ? merged : null,
+        sceneWidth,
+        sceneHeight,
+        sceneX,
+        sceneY,
+        this._mapPointsManager,
+        'fire',
+        levelContext,
+        floorIndex,
+      );
+      merged = gated ?? new Float32Array(0);
+
+      const mapPointScenePts = this._buildMapPointFireScenePointsForFloor(
+        floorIndex,
+        sceneWidth,
+        sceneHeight,
+        sceneX,
+        sceneY,
+      );
+      if (mapPointScenePts && mapPointScenePts.length >= 3) {
+        const combined = new Float32Array(merged.length + mapPointScenePts.length);
+        combined.set(merged, 0);
+        combined.set(mapPointScenePts, merged.length);
+        merged = combined;
       }
 
       const state = this._buildFloorSystems(
@@ -2272,7 +2574,7 @@ export class FireEffectV2 {
           key,
           state.batchRenderer,
           floorIndex,
-          { overlayRole: 'stackedFloorEffect' }
+          FIRE_STACKED_OVERLAY_OPTS,
         );
         log.info(`FireEffectV2: ${key} added to bus (floor ${floorIndex}), parent=${state.batchRenderer.parent?.type}`);
       }
@@ -2299,10 +2601,18 @@ export class FireEffectV2 {
 
     this._structuralSignature = this._computeStructuralSignature();
 
-    await this._populateCoalOverlays(foundrySceneData);
+    await this._populateCoalOverlays(foundrySceneData, floorFireData);
     } finally {
       this._endPerfSpan(_buildToken);
     }
+
+    try {
+      const mapPoints = this._mapPointsManager ?? window.MapShine?.mapPointsManager ?? null;
+      if (mapPoints && typeof mapPoints.syncMaskFireControlClusters === 'function') {
+        mapPoints.syncMaskFireControlClusters(this.getSpatialControlBuckets());
+      }
+    } catch (_) {}
+
     try { refreshEffectMaskStatusUi('fire-sparks'); } catch (_) {}
   }
 
@@ -2853,6 +3163,7 @@ export class FireEffectV2 {
     this._clearAllGlow();
     this._glowClustersByFloor.clear();
     this._glowSourcePointsByFloor.clear();
+    this._spatialControlBucketsByFloor.clear();
     this._invalidateHeatDistortionMask();
 
     this._structuralSignature = '';
@@ -2868,6 +3179,11 @@ export class FireEffectV2 {
   }
 
   dispose() {
+    if (this._mapPointsChangeListener && this._mapPointsManager) {
+      try { this._mapPointsManager.removeChangeListener(this._mapPointsChangeListener); } catch (_) {}
+    }
+    this._mapPointsChangeListener = null;
+    this._mapPointsManager = null;
     this.clear();
     this._unregisterGlowWallHooks();
     this._fireTexture?.dispose();
@@ -2911,13 +3227,19 @@ export class FireEffectV2 {
   }
 
   /**
-   * Build per-tile coal-bed overlays for every discovered `_Fire` mask.
+   * Build coal-bed overlays on the same floor buckets as particle fire.
+   * Only floors present in `floorFireData` receive overlays (mirrors populate scan).
+   *
    * @param {object} foundrySceneData
+   * @param {Map<number, { pointArrays: Float32Array[] }>} floorFireData
    * @private
    */
-  async _populateCoalOverlays(foundrySceneData) {
+  async _populateCoalOverlays(foundrySceneData, floorFireData) {
     if (!this._initialized || !this._coalTextureLoader) return;
     this._clearCoalOverlays();
+
+    const fireFloors = floorFireData instanceof Map ? floorFireData : new Map();
+    if (!fireFloors.size) return;
 
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
     const d = canvas?.dimensions;
@@ -2932,20 +3254,23 @@ export class FireEffectV2 {
     const ingestBackgroundCoal = async (bgSrcRaw, floorIndex) => {
       const bgSrc = typeof bgSrcRaw === 'string' ? bgSrcRaw.trim() : '';
       if (!bgSrc) return;
+      const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Math.floor(Number(floorIndex))) : 0;
+      if (!fireFloors.has(fi)) return;
       const dotIdx = bgSrc.lastIndexOf('.');
       const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
-      const dedupeKey = `${floorIndex}|${bgBasePath}`;
+      const dedupeKey = `${fi}|${bgBasePath}`;
       if (seenBgKeys.has(dedupeKey)) return;
 
       const fireResult = await probeMaskFile(bgBasePath, '_Fire');
       if (!fireResult?.path) return;
 
-      const tileId = `__bg_fire_${floorIndex}__`;
+      const tileId = `${FIRE_COAL_BED_BG_PREFIX}${fi}`;
       const centerX = sceneX + sceneWidth / 2;
       const centerY = worldH - (sceneY + sceneHeight / 2);
-      const z = GROUND_Z + floorIndex + COAL_BED_Z_OFFSET;
+      const z = GROUND_Z + fi + COAL_BED_Z_OFFSET;
+      const bgBusKey = fi === 0 ? '__bg_image__' : `__bg_image__${fi}`;
 
-      this._createCoalOverlay(tileId, floorIndex, {
+      this._createCoalOverlay(tileId, fi, {
         maskUrl: fireResult.path,
         centerX,
         centerY,
@@ -2953,7 +3278,7 @@ export class FireEffectV2 {
         tileW: sceneWidth,
         tileH: sceneHeight,
         rotation: 0,
-        busTileId: '__bg_image__',
+        busTileId: bgBusKey,
       });
       seenBgKeys.add(dedupeKey);
     };
@@ -2995,6 +3320,7 @@ export class FireEffectV2 {
       if (!fireResult?.path) continue;
 
       const floorIndex = this._resolveFloorIndex(tileDoc, floors);
+      if (!fireFloors.has(floorIndex)) continue;
       const tileW = Number(tileDoc.width) || 1;
       const tileH = Number(tileDoc.height) || 1;
       const centerX = (Number(tileDoc.x) || 0) + tileW / 2;
@@ -3077,10 +3403,12 @@ export class FireEffectV2 {
     const overlayKey = this._coalBedOverlayKey(tileId);
     let attached = false;
     if (canAttachToTileRoot && typeof this._renderBus?.addTileAttachedOverlay === 'function') {
-      attached = this._renderBus.addTileAttachedOverlay(busTileId, overlayKey, mesh, floorIndex) === true;
+      attached = this._renderBus.addTileAttachedOverlay(
+        busTileId, overlayKey, mesh, floorIndex, FIRE_STACKED_OVERLAY_OPTS,
+      ) === true;
     }
     if (!attached) {
-      this._renderBus.addEffectOverlay(overlayKey, mesh, floorIndex);
+      this._renderBus.addEffectOverlay(overlayKey, mesh, floorIndex, FIRE_STACKED_OVERLAY_OPTS);
       if (!String(busTileId).startsWith('__')) {
         try {
           const busEntry = this._renderBus?._tiles?.get?.(overlayKey);
@@ -3167,29 +3495,53 @@ export class FireEffectV2 {
   }
 
   /**
+   * Match {@link onFloorChange} / `_activeFloors` — same bands as particle fire sim.
+   * @param {number} floorIndex
+   * @returns {boolean}
+   * @private
+   */
+  _isCoalBedFloorVisible(floorIndex) {
+    if (!resolveEffectEnabled(this) || this.params?.coalBedEnabled === false) return false;
+    const fi = Number(floorIndex);
+    return Number.isFinite(fi) && this._activeFloors.has(fi);
+  }
+
+  /**
+   * Apply floor-slice visibility to coal-bed meshes without touching uniforms.
+   * @private
+   */
+  _syncCoalBedOverlayVisibility() {
+    const effectOn = resolveEffectEnabled(this) && this.params?.coalBedEnabled !== false;
+    for (const [, entry] of this._coalOverlays) {
+      const mesh = entry?.mesh;
+      if (!mesh) continue;
+      mesh.visible = effectOn && this._isCoalBedFloorVisible(entry.floorIndex);
+    }
+  }
+
+  /**
    * Sync coal-bed visibility and shader uniforms.
    * @param {number} [elapsed]
    * @private
    */
   _syncCoalBedOverlays(elapsed) {
-    const visible = resolveEffectEnabled(this) && this.params?.coalBedEnabled !== false;
     const signature = this._getCoalBedParamSignature();
     const paramsDirty = signature !== this._coalBedParamSignature;
     if (paramsDirty) this._coalBedParamSignature = signature;
 
     for (const [, entry] of this._coalOverlays) {
-      const mesh = entry?.mesh;
       const material = entry?.material;
-      if (!mesh || !material) continue;
-      mesh.visible = visible;
+      if (!material) continue;
       if (paramsDirty) {
         syncCoalBedUniforms(material, this.params, { effectEnabled: resolveEffectEnabled(this) });
         applyCoalBedBlending(material, window.THREE);
       }
       if (typeof elapsed === 'number' && material.uniforms?.uTime) {
-        material.uniforms.uTime.value = elapsed;
+        const coalAnim = resolveFireLayerAnimSpeed(this, 'coalBedAnimSpeed', 1);
+        material.uniforms.uTime.value = elapsed * coalAnim;
       }
     }
+    this._syncCoalBedOverlayVisibility();
   }
 
   // ── Private: Fire glow (HDR darkness cancel via LightMesh) ─────────────────
@@ -3260,6 +3612,7 @@ export class FireEffectV2 {
       ? Math.max(0, Math.floor(Number(maxFloorIndex)))
       : 0;
     this._applyGlowVisibility();
+    this._syncCoalBedOverlayVisibility();
     if (!this._glowRootGroup) return;
     for (const [fi, group] of this._glowFloorGroups) {
       group.visible = this._isGlowFloorGroupVisible(fi);
@@ -3513,9 +3866,9 @@ export class FireEffectV2 {
 
     for (const buckets of this._glowBucketsByFloor.values()) {
       for (const entry of buckets.values()) {
-        const lm = entry?.lightMesh;
+        this._forEachGlowLightMesh(entry, (lm) => {
         const u = lm?.material?.uniforms;
-        if (!u?.uColor?.value) continue;
+        if (!u?.uColor?.value) return;
 
         const outdoor = entry.outdoor ?? 1.0;
         const glow = this._resolveCachedFireGlowParams(outdoor);
@@ -3528,7 +3881,7 @@ export class FireEffectV2 {
         lm.setFalloffExponent?.(glow.falloffExponent);
         lm.setEdgeSoftness?.(glow.edgeSoftness);
 
-        if (falloffEdgeOnly) continue;
+        if (falloffEdgeOnly) return;
 
         const indoorMul = this._computeFireGlowIndoorNightBoost(outdoor);
         const outdoorMul = this._computeFireGlowOutdoorNightBoost(outdoor);
@@ -3550,6 +3903,7 @@ export class FireEffectV2 {
         } else if (u.uEmissionGain) {
           u.uEmissionGain.value = emissionGain;
         }
+        });
       }
     }
   }
@@ -3606,6 +3960,48 @@ export class FireEffectV2 {
     const darkness = clamp01(LightingDirector.get().masterDarkness);
     const outdoor = this._snapFireGlowBalanceOutdoor(outdoor01);
     return 1.0 + boost * outdoor * darkness;
+  }
+
+  /** @private */
+  _disposeGlowBucketEntry(entry) {
+    const meshes = entry?.lightMeshes?.length
+      ? entry.lightMeshes
+      : (entry?.lightMesh ? [entry.lightMesh] : []);
+    for (const lm of meshes) {
+      try { lm?.dispose?.(); } catch (_) {}
+      try { lm?.mesh?.removeFromParent?.(); } catch (_) {}
+    }
+  }
+
+  /** @private */
+  _forEachGlowLightMesh(entry, fn) {
+    if (!entry || typeof fn !== 'function') return;
+    if (entry.lightMeshes?.length) {
+      for (const lm of entry.lightMeshes) fn(lm);
+      return;
+    }
+    if (entry.lightMesh) fn(entry.lightMesh);
+  }
+
+  /**
+   * Resolve one or two wall-clip origins when a fire sits on a blocking wall.
+   * @private
+   * @returns {Array<{x:number,y:number}>}
+   */
+  _resolveFireGlowClipCenters(centerFoundry, walls, wallClipOptions) {
+    const centers = [{ x: centerFoundry.x, y: centerFoundry.y }];
+    if (!this.params.fireGlowWallClipEnabled) return centers;
+
+    try {
+      const probes = this._visionComputer.findWallBisectProbeCenters(
+        centerFoundry,
+        walls,
+        wallClipOptions
+      );
+      if (probes?.length === 2) return probes;
+    } catch (_) {}
+
+    return centers;
   }
 
   _buildGlowWallClipOptions() {
@@ -3769,8 +4165,7 @@ export class FireEffectV2 {
     const buckets = this._glowBucketsByFloor.get(floorIndex);
     if (buckets) {
       for (const entry of buckets.values()) {
-        try { entry?.lightMesh?.dispose?.(); } catch (_) {}
-        try { entry?.lightMesh?.mesh?.removeFromParent?.(); } catch (_) {}
+        this._disposeGlowBucketEntry(entry);
       }
       buckets.clear();
     }
@@ -3873,54 +4268,70 @@ export class FireEffectV2 {
         const radiusPx = Math.max(48, glow.radiusPx * sizeBoost * wallClipScale);
         const clipRadiusPx = radiusPx;
 
-        let foundryPoly = null;
-        if (this.params.fireGlowWallClipEnabled) {
-          try {
-            foundryPoly = this._visionComputer.compute(
-              { x: c.cxFoundry, y: c.cyFoundry },
-              clipRadiusPx,
-              walls,
-              sceneBounds,
-              wallClipOptions
-            );
-          } catch (_) {
-            foundryPoly = null;
+        const centerFoundry = { x: c.cxFoundry, y: c.cyFoundry };
+        const clipCenters = this._resolveFireGlowClipCenters(centerFoundry, walls, wallClipOptions);
+        const lightMeshes = [];
+
+        for (const clipCenter of clipCenters) {
+          let foundryPoly = null;
+          if (this.params.fireGlowWallClipEnabled) {
+            try {
+              foundryPoly = this._visionComputer.compute(
+                clipCenter,
+                clipRadiusPx,
+                walls,
+                sceneBounds,
+                wallClipOptions
+              );
+            } catch (_) {
+              foundryPoly = null;
+            }
           }
+
+          let worldPoints = null;
+          if (foundryPoly && foundryPoly.length >= 6) {
+            worldPoints = [];
+            for (let i = 0; i < foundryPoly.length; i += 2) {
+              const wp = Coordinates.toWorld(foundryPoly[i], foundryPoly[i + 1]);
+              worldPoints.push(wp.x, wp.y);
+            }
+          } else if (this.params.fireGlowWallClipEnabled) {
+            if (outdoor < 0.45) {
+              continue;
+            }
+            // Outdoor campfire: radial pool when wall clip fails in open areas.
+          }
+
+          const centerWorld = clipCenters.length > 1
+            ? (() => {
+              const wp = Coordinates.toWorld(clipCenter.x, clipCenter.y);
+              return new THREE.Vector2(wp.x, wp.y);
+            })()
+            : new THREE.Vector2(c.cxWorld, c.cyWorld);
+          const lm = new LightMesh(centerWorld, radiusPx, c.color, {
+            innerRadiusPx: Math.max(1, radiusPx * glow.innerScale),
+            worldPoints,
+            falloffExponent: glow.falloffExponent,
+            achromaticRgb: false,
+            edgeSoftness: glow.edgeSoftness,
+          });
+
+          lm.setEmissionGain?.(0);
+
+          if (lm?.mesh) {
+            lm.mesh.renderOrder = 88;
+            lm.mesh.position.z = GROUND_Z + (Number(floorIndex) || 0) + 0.18;
+            floorGroup.add(lm.mesh);
+          }
+
+          lightMeshes.push(lm);
         }
 
-        let worldPoints = null;
-        if (foundryPoly && foundryPoly.length >= 6) {
-          worldPoints = [];
-          for (let i = 0; i < foundryPoly.length; i += 2) {
-            const wp = Coordinates.toWorld(foundryPoly[i], foundryPoly[i + 1]);
-            worldPoints.push(wp.x, wp.y);
-          }
-        } else if (this.params.fireGlowWallClipEnabled) {
-          if (outdoor < 0.45) {
-            continue;
-          }
-          // Outdoor campfire: radial pool when wall clip fails in open areas.
-        }
-
-        const centerWorld = new THREE.Vector2(c.cxWorld, c.cyWorld);
-        const lm = new LightMesh(centerWorld, radiusPx, c.color, {
-          innerRadiusPx: Math.max(1, radiusPx * glow.innerScale),
-          worldPoints,
-          falloffExponent: glow.falloffExponent,
-          achromaticRgb: false,
-          edgeSoftness: glow.edgeSoftness,
-        });
-
-        lm.setEmissionGain?.(0);
-
-        if (lm?.mesh) {
-          lm.mesh.renderOrder = 88;
-          lm.mesh.position.z = GROUND_Z + (Number(floorIndex) || 0) + 0.18;
-          floorGroup.add(lm.mesh);
-        }
+        if (!lightMeshes.length) continue;
 
         buckets.set(c.key, {
-          lightMesh: lm,
+          lightMesh: lightMeshes[0],
+          lightMeshes,
           baseColor: new THREE.Color(c.color.r, c.color.g, c.color.b),
           intensity: c.intensity,
           phase: c.phase,
@@ -3962,9 +4373,9 @@ export class FireEffectV2 {
       const buckets = this._glowBucketsByFloor.get(floorIndex);
       if (!buckets?.size) continue;
       for (const entry of buckets.values()) {
-        const lm = entry?.lightMesh;
+        this._forEachGlowLightMesh(entry, (lm) => {
         const u = lm?.material?.uniforms;
-        if (!u?.uColor?.value) continue;
+        if (!u?.uColor?.value) return;
 
         const phase = entry.phase || 0;
         const outdoor = entry.outdoor ?? 1.0;
@@ -4018,6 +4429,7 @@ export class FireEffectV2 {
         } else if (u.uEmissionGain) {
           u.uEmissionGain.value = emissionGain;
         }
+        });
       }
     }
   }
@@ -4177,7 +4589,17 @@ export class FireEffectV2 {
     const batchRenderer = this._createBatchedRendererForFloor(floorIndex);
     const state = { systems: [], emberSystems: [], smokeSystems: [], batchRenderer };
 
-    const buckets = this._coarsenFireSpatialBuckets(points, sceneW, sceneH, sceneX, sceneY);
+    const elevation = resolveClusteringElevation(floorIndex);
+    const { buckets } = clusterFireMaskPointsWithWalls(
+      points,
+      sceneW,
+      sceneH,
+      sceneX,
+      sceneY,
+      CONTROL_FIRE_BUCKET_SIZE_PX,
+      CONTROL_FIRE_MAX_BUCKETS,
+      elevation,
+    );
     const maxSystems = Math.max(8, Number(this.params.fireMaxSystemsPerFloor) | 0 || FIRE_DEFAULT_MAX_SYSTEMS_PER_FLOOR);
     const splitMaxBuckets = Math.max(2, Number(this.params.fireOutdoorSplitMaxBuckets) | 0 || FIRE_DEFAULT_OUTDOOR_SPLIT_MAX_BUCKETS);
     const splitOutdoor = this.params.smokeOutdoorAboveCanopy !== false && buckets.size <= splitMaxBuckets;
@@ -4189,13 +4611,21 @@ export class FireEffectV2 {
     // when the floor also has large fires — buckets approach zero emission and read as
     // flickery on/off. Sqrt compresses dynamic range so small sources keep a steady stream.
     let sumSqrtBucket = 0;
-    for (const [, arr] of buckets) {
-      if (arr.length < 3) continue;
+    for (const [bucketKey, entry] of buckets) {
+      const arr = entry?.points;
+      if (!arr || arr.length < 3) continue;
+      if (this._mapPointsManager && typeof this._mapPointsManager.isMaskFireBucketEnabled === 'function') {
+        if (!this._mapPointsManager.isMaskFireBucketEnabled(floorIndex, bucketKey)) continue;
+      }
       sumSqrtBucket += Math.sqrt(arr.length / 3);
     }
 
-    for (const [, arr] of buckets) {
-      if (arr.length < 3) continue;
+    for (const [bucketKey, entry] of buckets) {
+      const arr = entry?.points;
+      if (!arr || arr.length < 3) continue;
+      if (this._mapPointsManager && typeof this._mapPointsManager.isMaskFireBucketEnabled === 'function') {
+        if (!this._mapPointsManager.isMaskFireBucketEnabled(floorIndex, bucketKey)) continue;
+      }
       const bucketPoints = new Float32Array(arr);
       const bucketN = bucketPoints.length / 3;
       const weight = sumSqrtBucket > 0 ? Math.sqrt(bucketN) / sumSqrtBucket : 1.0;
@@ -4355,7 +4785,7 @@ export class FireEffectV2 {
     const flameShapeFrames = new FlameShapeFrameBehavior(FIRE_ATLAS_SHAPE_COUNT, FIRE_ATLAS_ANIM_FRAMES, {
       ownerEffect: this,
       cyclesParamKey: 'flameFlipbookCycles',
-      defaultCycles: 3.5,
+      defaultCycles: 4,
     });
     const buoyancy = new ApplyForce(new THREE.Vector3(0, 0, 1), new ConstantValue(p.fireHeight * 0.125));
     const turbulence = new FixedCurlNoiseField(
@@ -5040,10 +5470,8 @@ export class FireEffectV2 {
     } catch (_) {}
 
     const elev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
-    for (let i = 0; i < floors.length; i++) {
-      const f = floors[i];
-      if (elev >= f.elevationMin && elev <= f.elevationMax) return i;
-    }
+    const byElev = resolveFloorIndexForElevation(elev, floors);
+    if (byElev >= 0) return byElev;
     return 0;
   }
 

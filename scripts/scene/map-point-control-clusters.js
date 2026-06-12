@@ -1,10 +1,17 @@
 /**
- * @fileoverview Proximity clustering for map-point effect GM toggles.
+ * @fileoverview Control clusters for map-point effect GM toggles.
  * @module scene/map-point-control-clusters
  */
 
-/** Default proximity radius in grid units for autoclustering single-point groups. */
-export const DEFAULT_CLUSTER_DISTANCE_GRIDS = 4;
+import {
+  CONTROL_CLUSTER_DISTANCE_GRIDS,
+  computeClusterDistanceThreshold,
+  clusterPointSamplesWithWalls,
+  resolveClusteringElevation,
+} from './map-point-wall-clustering.js';
+
+/** Default proximity radius in grid units for point clusters inside a group. */
+export const DEFAULT_CLUSTER_DISTANCE_GRIDS = CONTROL_CLUSTER_DISTANCE_GRIDS;
 
 /** Minimum overlap ratio to inherit `enabled` from a previous cluster on rebuild. */
 const ENABLED_INHERIT_OVERLAP_RATIO = 0.5;
@@ -15,8 +22,18 @@ const ENABLED_INHERIT_OVERLAP_RATIO = 0.5;
  * @property {string} effectTarget
  * @property {boolean} enabled
  * @property {string[]} memberGroupIds
+ * @property {number[]} [memberPointIndices]
+ * @property {{floorIndex:number,bucketKey:string,bucketSizePx?:number,memberCellKeys?:string[]}} [maskBucket]
  * @property {{x:number,y:number}} centroid
- * @property {'auto'|'group'} source
+ * @property {'auto'|'group'|'mask'} source
+ */
+
+/**
+ * @typedef {Object} SpatialControlBucket
+ * @property {number} floorIndex
+ * @property {string} bucketKey
+ * @property {number} [bucketSizePx]
+ * @property {{x:number,y:number}} centroid
  */
 
 /**
@@ -42,26 +59,26 @@ export function computeGroupCentroid(group) {
   return { x: sumX / n, y: sumY / n };
 }
 
-/**
- * @param {number} [clusterDistanceGrids]
- * @returns {number}
- */
-export function computeClusterDistanceThreshold(clusterDistanceGrids = DEFAULT_CLUSTER_DISTANCE_GRIDS) {
-  const gridSize = Number(canvas?.dimensions?.size) || 100;
-  const grids = Number.isFinite(clusterDistanceGrids) ? clusterDistanceGrids : DEFAULT_CLUSTER_DISTANCE_GRIDS;
-  return Math.max(64, gridSize * grids);
-}
+export { computeClusterDistanceThreshold };
 
 /**
  * @param {string[]} memberGroupIds
+ * @param {number[]} [memberPointIndices]
  * @returns {string}
  */
-function shortHash(memberGroupIds) {
+function shortHash(memberGroupIds, memberPointIndices = []) {
   const sorted = [...memberGroupIds].sort();
   let h = 2166136261;
   for (const id of sorted) {
     for (let i = 0; i < id.length; i++) {
       h ^= id.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+  }
+  if (memberPointIndices.length > 0) {
+    const pts = [...memberPointIndices].sort((a, b) => a - b);
+    for (const idx of pts) {
+      h ^= idx;
       h = Math.imul(h, 16777619);
     }
   }
@@ -101,29 +118,80 @@ function inheritEnabledFromPrevious(newMemberIds, previousClusters) {
   return inherited;
 }
 
-class UnionFind {
-  constructor(n) {
-    this.parent = Array.from({ length: n }, (_, i) => i);
-  }
+/**
+ * @param {string} groupId
+ * @param {number[]} newPointIndices
+ * @param {Record<string, MapPointControlCluster>|Map<string, MapPointControlCluster>} previousClusters
+ * @returns {boolean}
+ */
+function inheritEnabledFromPointCluster(groupId, newPointIndices, previousClusters) {
+  const newSet = new Set(newPointIndices);
+  let bestRatio = 0;
+  let inherited = true;
 
-  find(i) {
-    let p = this.parent[i];
-    while (p !== this.parent[p]) {
-      this.parent[p] = this.parent[this.parent[p]];
-      p = this.parent[p];
+  const entries = previousClusters instanceof Map
+    ? previousClusters.values()
+    : Object.values(previousClusters || {});
+
+  for (const old of entries) {
+    if (old?.source === 'mask') continue;
+    const oldGroupIds = Array.isArray(old?.memberGroupIds) ? old.memberGroupIds : [];
+    if (!oldGroupIds.includes(groupId)) continue;
+    const oldPts = Array.isArray(old?.memberPointIndices) ? old.memberPointIndices : [];
+    if (oldPts.length === 0) continue;
+
+    let overlap = 0;
+    for (const idx of oldPts) {
+      if (newSet.has(idx)) overlap += 1;
     }
-    return p;
+    const denom = Math.max(oldPts.length, newPointIndices.length);
+    const ratio = overlap / denom;
+    if (ratio >= ENABLED_INHERIT_OVERLAP_RATIO && ratio > bestRatio) {
+      bestRatio = ratio;
+      inherited = old.enabled !== false;
+    }
   }
 
-  union(a, b) {
-    const ra = this.find(a);
-    const rb = this.find(b);
-    if (ra !== rb) this.parent[rb] = ra;
+  if (bestRatio > 0) return inherited;
+  return inheritEnabledFromPrevious([groupId], previousClusters);
+}
+
+/**
+ * @param {number} floorIndex
+ * @param {string} bucketKey
+ * @param {Record<string, MapPointControlCluster>|Map<string, MapPointControlCluster>} previousClusters
+ * @returns {boolean}
+ */
+function inheritMaskBucketEnabled(floorIndex, bucketKey, previousClusters) {
+  const entries = previousClusters instanceof Map
+    ? previousClusters.values()
+    : Object.values(previousClusters || {});
+
+  for (const old of entries) {
+    const mb = old?.maskBucket;
+    if (!mb) continue;
+    if (Number(mb.floorIndex) === Number(floorIndex) && mb.bucketKey === bucketKey) {
+      return old.enabled !== false;
+    }
   }
+  return true;
+}
+
+/**
+ * @param {object} group
+ * @returns {boolean}
+ */
+function isGroupEffectSource(group) {
+  if (!group || typeof group !== 'object') return false;
+  if (group.isEffectSource === false) return false;
+  const effectTarget = typeof group.effectTarget === 'string' ? group.effectTarget.trim() : '';
+  return effectTarget.length > 0;
 }
 
 /**
  * Recompute control clusters from map point groups.
+ * - Point groups: proximity buckets within the group (room-scale toggles).
+ * - Line/area/rope: one toggle per authored group.
  *
  * @param {Iterable<[string, object]>|Map<string, object>} groups
  * @param {Record<string, MapPointControlCluster>|Map<string, MapPointControlCluster>} [previousClusters={}]
@@ -132,110 +200,108 @@ class UnionFind {
  */
 export function recomputeControlClusters(groups, previousClusters = {}, options = {}) {
   const threshold = computeClusterDistanceThreshold(options.clusterDistanceGrids);
-  const thresholdSq = threshold * threshold;
+  const elevation = Number.isFinite(Number(options.elevation))
+    ? Number(options.elevation)
+    : resolveClusteringElevation(options.floorIndex ?? null);
   const result = new Map();
-
-  /** @type {Map<string, Array<{id:string, group:object, centroid:{x:number,y:number}}>>} */
-  const byEffect = new Map();
 
   const groupEntries = groups instanceof Map ? groups.entries() : groups;
 
   for (const [id, group] of groupEntries) {
-    if (!group || typeof group !== 'object') continue;
-    if (!group.isEffectSource) continue;
+    if (!isGroupEffectSource(group)) continue;
+
     const effectTarget = typeof group.effectTarget === 'string' ? group.effectTarget.trim() : '';
     if (!effectTarget) continue;
 
-    const centroid = computeGroupCentroid(group);
-    if (!centroid) continue;
+    const type = group.type;
+    const isShapeGroup = type === 'line' || type === 'area' || type === 'rope';
 
-    if (!byEffect.has(effectTarget)) byEffect.set(effectTarget, []);
-    byEffect.get(effectTarget).push({ id, group, centroid });
-  }
-
-  for (const [effectTarget, entries] of byEffect) {
-    /** @type {Array<{id:string, group:object, centroid:{x:number,y:number}}>} */
-    const shapeGroups = [];
-    /** @type {Array<{groupId:string, x:number, y:number}>} */
-    const pointSamples = [];
-
-    for (const entry of entries) {
-      const g = entry.group;
-      const type = g.type;
-      const isLineOrArea = type === 'line' || type === 'area' || type === 'rope';
-
-      if (isLineOrArea) {
-        shapeGroups.push(entry);
-        continue;
-      }
-
-      // Point-type (and unknown): cluster by individual point proximity so a single
-      // authored group with many candles still splits into room-scale toggles.
-      const pts = Array.isArray(g.points) ? g.points : [];
-      for (const p of pts) {
-        const x = Number(p?.x);
-        const y = Number(p?.y);
-        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-        pointSamples.push({ groupId: entry.id, x, y });
-      }
-    }
-
-    for (const entry of shapeGroups) {
-      const memberGroupIds = [entry.id];
+    if (isShapeGroup) {
+      const centroid = computeGroupCentroid(group);
+      if (!centroid) continue;
+      const memberGroupIds = [id];
       const clusterId = `cluster_${effectTarget}_${shortHash(memberGroupIds)}`;
       result.set(clusterId, {
         id: clusterId,
         effectTarget,
         enabled: inheritEnabledFromPrevious(memberGroupIds, previousClusters),
         memberGroupIds,
-        centroid: { ...entry.centroid },
+        centroid: { ...centroid },
         source: 'group',
       });
+      continue;
     }
 
-    if (pointSamples.length > 0) {
-      const uf = new UnionFind(pointSamples.length);
-      for (let i = 0; i < pointSamples.length; i++) {
-        for (let j = i + 1; j < pointSamples.length; j++) {
-          const dx = pointSamples[i].x - pointSamples[j].x;
-          const dy = pointSamples[i].y - pointSamples[j].y;
-          if (dx * dx + dy * dy <= thresholdSq) {
-            uf.union(i, j);
-          }
-        }
-      }
-
-      /** @type {Map<number, number[]>} */
-      const components = new Map();
-      for (let i = 0; i < pointSamples.length; i++) {
-        const root = uf.find(i);
-        if (!components.has(root)) components.set(root, []);
-        components.get(root).push(i);
-      }
-
-      for (const indices of components.values()) {
-        const memberSet = new Set();
-        let sumX = 0;
-        let sumY = 0;
-        for (const idx of indices) {
-          const sample = pointSamples[idx];
-          memberSet.add(sample.groupId);
-          sumX += sample.x;
-          sumY += sample.y;
-        }
-        const memberGroupIds = [...memberSet].sort();
-        const n = indices.length;
-        const clusterId = `cluster_${effectTarget}_${shortHash(memberGroupIds)}`;
-        result.set(clusterId, {
-          id: clusterId,
-          effectTarget,
-          enabled: inheritEnabledFromPrevious(memberGroupIds, previousClusters),
-          memberGroupIds,
-          centroid: { x: sumX / n, y: sumY / n },
-          source: 'auto',
-        });
-      }
+    const pts = Array.isArray(group.points) ? group.points : [];
+    /** @type {Array<{pointIndex:number,x:number,y:number}>} */
+    const samples = [];
+    for (let pointIndex = 0; pointIndex < pts.length; pointIndex++) {
+      const p = pts[pointIndex];
+      const x = Number(p?.x);
+      const y = Number(p?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      samples.push({ pointIndex, x, y });
     }
+
+    if (samples.length === 0) continue;
+
+    const components = clusterPointSamplesWithWalls(samples, threshold, elevation);
+
+    for (const comp of components) {
+      const memberPointIndices = comp.pointIndices;
+      const memberGroupIds = [id];
+      const clusterId = `cluster_${effectTarget}_${shortHash(memberGroupIds, memberPointIndices)}`;
+      result.set(clusterId, {
+        id: clusterId,
+        effectTarget,
+        enabled: inheritEnabledFromPointCluster(id, memberPointIndices, previousClusters),
+        memberGroupIds,
+        memberPointIndices,
+        centroid: { ...comp.centroid },
+        source: 'auto',
+      });
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Build GM toggles for tile-mask fire spatial buckets (one per particle bucket per floor).
+ *
+ * @param {SpatialControlBucket[]} spatialBuckets
+ * @param {Record<string, MapPointControlCluster>|Map<string, MapPointControlCluster>} [previousClusters={}]
+ * @returns {Map<string, MapPointControlCluster>}
+ */
+export function recomputeMaskFireClusters(spatialBuckets, previousClusters = {}) {
+  const result = new Map();
+  if (!Array.isArray(spatialBuckets) || spatialBuckets.length === 0) return result;
+
+  for (const bucket of spatialBuckets) {
+    if (!bucket || typeof bucket !== 'object') continue;
+    const floorIndex = Number(bucket.floorIndex);
+    const bucketKey = typeof bucket.bucketKey === 'string' ? bucket.bucketKey : '';
+    const centroid = bucket.centroid;
+    const cx = Number(centroid?.x);
+    const cy = Number(centroid?.y);
+    if (!bucketKey || !Number.isFinite(floorIndex) || !Number.isFinite(cx) || !Number.isFinite(cy)) continue;
+
+    const safeKey = bucketKey.replace(/,/g, '_');
+    const clusterId = `cluster_fire_mask_f${floorIndex}_${safeKey}`;
+    result.set(clusterId, {
+      id: clusterId,
+      effectTarget: 'fire',
+      enabled: inheritMaskBucketEnabled(floorIndex, bucketKey, previousClusters),
+      memberGroupIds: [],
+      maskBucket: {
+        floorIndex,
+        bucketKey,
+        bucketSizePx: Number.isFinite(Number(bucket.bucketSizePx)) ? Number(bucket.bucketSizePx) : undefined,
+        memberCellKeys: Array.isArray(bucket.memberCellKeys) ? [...bucket.memberCellKeys] : [bucketKey],
+      },
+      centroid: { x: cx, y: cy },
+      source: 'mask',
+    });
   }
 
   return result;
@@ -248,11 +314,59 @@ export function recomputeControlClusters(groups, previousClusters = {}, options 
 export function buildGroupIdToClusterIdMap(clusters) {
   const map = new Map();
   for (const cluster of clusters.values()) {
+    if (cluster?.source === 'mask') continue;
+    const hasPointIndices = Array.isArray(cluster?.memberPointIndices) && cluster.memberPointIndices.length > 0;
+    if (hasPointIndices) continue;
     const ids = cluster?.memberGroupIds;
     if (!Array.isArray(ids)) continue;
     for (const groupId of ids) {
       if (typeof groupId === 'string' && groupId.length > 0) {
         map.set(groupId, cluster.id);
+      }
+    }
+  }
+  return map;
+}
+
+/**
+ * @param {Map<string, MapPointControlCluster>} clusters
+ * @returns {Map<string, string>}
+ */
+export function buildPointKeyToClusterIdMap(clusters) {
+  const map = new Map();
+  for (const cluster of clusters.values()) {
+    if (cluster?.source === 'mask') continue;
+    const groupIds = cluster?.memberGroupIds;
+    const pointIndices = cluster?.memberPointIndices;
+    if (!Array.isArray(groupIds) || groupIds.length !== 1) continue;
+    if (!Array.isArray(pointIndices) || pointIndices.length === 0) continue;
+    const groupId = groupIds[0];
+    for (const pointIndex of pointIndices) {
+      if (Number.isFinite(pointIndex)) {
+        map.set(`${groupId}:${pointIndex}`, cluster.id);
+      }
+    }
+  }
+  return map;
+}
+
+/**
+ * @param {Map<string, MapPointControlCluster>} clusters
+ * @returns {Map<string, string>}
+ */
+export function buildMaskBucketToClusterIdMap(clusters) {
+  const map = new Map();
+  for (const cluster of clusters.values()) {
+    const mb = cluster?.maskBucket;
+    if (!mb || typeof mb.bucketKey !== 'string') continue;
+    const fi = Number(mb.floorIndex);
+    if (!Number.isFinite(fi)) continue;
+    const cellKeys = Array.isArray(mb.memberCellKeys) && mb.memberCellKeys.length > 0
+      ? mb.memberCellKeys
+      : [mb.bucketKey];
+    for (const cellKey of cellKeys) {
+      if (typeof cellKey === 'string' && cellKey.length > 0) {
+        map.set(`${fi}:${cellKey}`, cluster.id);
       }
     }
   }

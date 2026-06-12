@@ -82,6 +82,7 @@ import {
   resolvePlayerLightModeAllowance
 } from '../core/player-light-allowance.js';
 import { DARKNESS_PRIORITY, DARKNESS_PRIORITY_CHOICES } from '../core/LightingDirector.js';
+import * as sceneSettings from '../settings/scene-settings.js';
 
 const log = createLogger('ControlPanel');
 
@@ -2474,6 +2475,11 @@ export class ControlPanelManager {
     }
   }
 
+  _isMapShineSceneEnabled() {
+    const scene = canvas?.scene ?? null;
+    return !!scene && sceneSettings.isEnabled(scene);
+  }
+
   _applyControlPanelUIState(state) {
     if (!state || !this.container) return;
 
@@ -2485,6 +2491,8 @@ export class ControlPanelManager {
       this.container.style.left = `${left}px`;
       this.container.style.top = `${top}px`;
     }
+
+    if (!this._isMapShineSceneEnabled()) return;
 
     if (state.minimized === true && isUserGM()) {
       const x = Number.isFinite(left) ? left : 20;
@@ -2682,6 +2690,7 @@ export class ControlPanelManager {
 
   _finalizeGmPanelVisibility() {
     if (!isUserGM()) return;
+    if (!this._isMapShineSceneEnabled()) return;
 
     if (this._isMinimized) {
       const left = this._readPx(this._minimizedDock?.style?.left);

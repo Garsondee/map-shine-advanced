@@ -449,18 +449,32 @@ try {
   globalThis.localStorage?.removeItem?.('msa-disable-water-effect');
 } catch (_) {}
 
+// Rolling buffer of recent uncaught errors. Read by the WebGL crash recovery
+// diagnostic report (scripts/core/webgl-crash-recovery.js) so crash dialogs
+// can include the errors that immediately preceded a GPU reset.
 try {
   if (!window.__msaCrisisGlobalHandlersInstalled) {
     window.__msaCrisisGlobalHandlersInstalled = true;
+    window.__msaRecentErrors = window.__msaRecentErrors ?? [];
+
+    const pushRecentError = (entry) => {
+      try {
+        const buf = window.__msaRecentErrors;
+        if (!Array.isArray(buf)) return;
+        buf.push({ at: new Date().toISOString(), ...entry });
+        if (buf.length > 20) buf.splice(0, buf.length - 20);
+      } catch (_) {
+      }
+    };
 
     window.addEventListener('error', (ev) => {
       try {
-        const msg = ev?.message ?? 'unknown error';
-        const file = ev?.filename ?? '';
-        const line = (typeof ev?.lineno === 'number') ? ev.lineno : '';
-        const col = (typeof ev?.colno === 'number') ? ev.colno : '';
-        const err = ev?.error;
-        const stack = err?.stack ?? null;
+        pushRecentError({
+          type: 'error',
+          message: String(ev?.message ?? 'unknown error'),
+          source: `${ev?.filename ?? ''}:${typeof ev?.lineno === 'number' ? ev.lineno : ''}`,
+          stack: (typeof ev?.error?.stack === 'string') ? ev.error.stack.split('\n').slice(0, 4).join('\n') : null,
+        });
       } catch (_) {
       }
     });
@@ -468,8 +482,11 @@ try {
     window.addEventListener('unhandledrejection', (ev) => {
       try {
         const reason = ev?.reason;
-        const msg = (reason && typeof reason === 'object' && 'message' in reason) ? reason.message : String(reason);
-        const stack = reason?.stack ?? null;
+        pushRecentError({
+          type: 'unhandledrejection',
+          message: (reason && typeof reason === 'object' && 'message' in reason) ? String(reason.message) : String(reason),
+          stack: (typeof reason?.stack === 'string') ? reason.stack.split('\n').slice(0, 4).join('\n') : null,
+        });
       } catch (_) {
       }
     });
@@ -988,25 +1005,15 @@ Hooks.once('init', async function() {
             heading: 'Map Point Effect Controls',
             items: [{ paragraph: 'Show on-map toggles to enable or disable localized map-point effect clusters.' }]
           },
-          onChange: () => {
+          onChange: (_event, active) => {
             const mapPointsManager = window.MapShine?.mapPointsManager;
             if (!mapPointsManager) {
               ui.notifications?.warn?.('Map Points Manager is not available yet. The scene may still be initializing.');
               return;
             }
-            let active = false;
-            try {
-              const tools = tokenControls.tools;
-              if (Array.isArray(tools)) {
-                active = !!tools.find((t) => t?.name === 'map-shine-gm-effect-controls')?.active;
-              } else if (tools && typeof tools === 'object') {
-                active = !!tools['map-shine-gm-effect-controls']?.active;
-              }
-            } catch (_) {
-              active = !mapPointsManager.showControlHud;
-            }
-            mapPointsManager.setShowControlHud(active);
-            _setToolActiveStateOnSceneControls('map-shine-gm-effect-controls', active);
+            const show = active !== false;
+            mapPointsManager.setShowControlHud(show);
+            _setToolActiveStateOnSceneControls('map-shine-gm-effect-controls', show);
             queueMicrotask(() => rerenderControls());
           }
         });

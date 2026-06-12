@@ -13,7 +13,7 @@
 
 import { createLogger } from '../core/log.js';
 import { getEffectMaskRegistry, loadAssetBundle, probeMaskFile, clearCache } from '../assets/loader.js';
-import { readSceneLevelsFlag, isLevelsEnabledForScene, readTileLevelsFlags, tileHasLevelsRange, readWallHeightFlags, wallHasHeightBounds, readDocLevelsRange, getSceneBackgroundElevation, getSceneWeatherElevation, getSceneLightMasking, getFlagReaderDiagnostics, getCanvasForegroundElevationSplit, readV14SceneLevels, getViewedV14Level, hasV14NativeLevels } from '../foundry/levels-scene-flags.js';
+import { readSceneLevelsFlag, isLevelsEnabledForScene, readTileLevelsFlags, tileHasLevelsRange, readWallHeightFlags, wallHasHeightBounds, readDocLevelsRange, getSceneBackgroundElevation, getSceneWeatherElevation, getSceneLightMasking, getFlagReaderDiagnostics, getCanvasForegroundElevationSplit, readV14SceneLevels, getViewedV14Level, getViewedLevelBackgroundSrc, getVisibleLevelBackgroundLayers, getVisibleLevelForegroundLayers, hasV14NativeLevels, resolveV14BackgroundFloorIndexForSrc, resolveV14LevelIdToFloorStackIndex, resolveV14NativeDocFloorIndexMin } from '../foundry/levels-scene-flags.js';
 import { detectLevelsRuntimeInteropState, getLevelsCompatibilityMode, detectKnownModuleConflicts } from '../foundry/levels-compatibility.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { peekSnapshot, getSnapshot } from '../core/levels-import/LevelsSnapshotStore.js';
@@ -331,6 +331,167 @@ function _normalizeLevelBands(availableLevels) {
     top: _formatNumber(lvl?.top),
     center: _formatNumber(lvl?.center),
   }));
+}
+
+/** @param {number} floorIdx */
+function _backgroundBusKeyForFloorIndex(floorIdx) {
+  const fi = Number.isFinite(Number(floorIdx)) ? Math.max(0, Math.floor(Number(floorIdx))) : 0;
+  return fi === 0 ? '__bg_image__' : `__bg_image__${fi}`;
+}
+
+/**
+ * Full scene image inventory for levels/floor debugging (backgrounds, foregrounds, tiles, bus planes).
+ *
+ * @param {object} params
+ * @param {Scene|null} params.scene
+ * @param {object|null} params.floorStack
+ * @param {object|null} params.renderBus
+ * @param {Array<object>} params.v14Bands
+ * @param {number} params.activeFloorIndex
+ * @returns {object}
+ */
+function _buildSceneImageInventory({
+  scene,
+  floorStack,
+  renderBus,
+  v14Bands,
+  activeFloorIndex,
+}) {
+  try {
+    const busMap = renderBus?._tiles instanceof Map ? renderBus._tiles : new Map();
+    const busPlaneRows = [];
+    for (const [key, entry] of busMap.entries()) {
+      const k = String(key || '');
+      if (!/^__bg_image__$|^__bg_image__[1-9]\d*$/.test(k)) continue;
+      const rootVisible = (typeof entry?.root?.visible === 'boolean') ? entry.root.visible : null;
+      const meshVisible = (typeof entry?.mesh?.visible === 'boolean') ? entry.mesh.visible : null;
+      const map = entry?.material?.map ?? null;
+      busPlaneRows.push({
+        busKey: k,
+        floorIndex: Number.isFinite(Number(entry?.floorIndex)) ? Number(entry.floorIndex) : null,
+        rootVisible,
+        meshVisible,
+        effectiveVisible: rootVisible === false ? false : (meshVisible === false ? false : true),
+        textureReady: !!(map?.image && map.image.width > 0 && map.image.height > 0),
+        textureSize: map?.image ? { width: map.image.width, height: map.image.height } : null,
+      });
+    }
+
+    const backgrounds = [];
+    const bands = Array.isArray(v14Bands) ? v14Bands : [];
+    for (const band of bands) {
+      const levelId = String(band?.levelId || '');
+      let levelDoc = null;
+      try { levelDoc = levelId ? scene?.levels?.get?.(levelId) : null; } catch (_) { levelDoc = null; }
+      const src = String(levelDoc?.background?.src || '').trim() || null;
+      const floorStackIndex = levelId ? resolveV14LevelIdToFloorStackIndex(scene, levelId) : null;
+      const resolvedFromSrc = src ? resolveV14BackgroundFloorIndexForSrc(scene, src) : null;
+      const busKey = _backgroundBusKeyForFloorIndex(floorStackIndex ?? resolvedFromSrc ?? 0);
+      const busEntry = busMap.get(busKey) ?? null;
+      backgrounds.push({
+        levelId: levelId || null,
+        label: band?.label ?? null,
+        v14NativeIndex: band?.index ?? null,
+        floorStackIndex,
+        elevationBottom: band?.bottom ?? null,
+        elevationTop: band?.top ?? null,
+        isView: band?.isView ?? null,
+        isVisible: band?.isVisible ?? null,
+        src,
+        expectedBusKey: busKey,
+        resolvedFloorIndexFromSrc: resolvedFromSrc,
+        nativeIndexDiffersFromFloorStack: (
+          Number.isFinite(Number(band?.index))
+          && floorStackIndex !== null
+          && Number(band.index) !== floorStackIndex
+        ),
+        bus: busEntry ? {
+          present: true,
+          busKey,
+          floorIndex: Number.isFinite(Number(busEntry.floorIndex)) ? Number(busEntry.floorIndex) : null,
+          floorIndexMatchesExpected: Number(busEntry.floorIndex) === (floorStackIndex ?? resolvedFromSrc ?? 0),
+          meshVisible: typeof busEntry?.mesh?.visible === 'boolean' ? busEntry.mesh.visible : null,
+          mapReady: !!(busEntry?.material?.map?.image?.width > 0),
+        } : { present: false, busKey, floorIndex: null },
+      });
+    }
+
+    const viewedBgSrc = getViewedLevelBackgroundSrc(scene);
+    const activeFloorBgKey = _backgroundBusKeyForFloorIndex(activeFloorIndex);
+    const foregroundByLevel = [];
+    try {
+      const sortedLevels = scene?.levels?.sorted ?? [];
+      for (const level of sortedLevels) {
+        const fg = String(level?.foreground?.src || '').trim();
+        if (!fg) continue;
+        const levelId = String(level?.id || '');
+        foregroundByLevel.push({
+          levelId: levelId || null,
+          label: level?.name || null,
+          v14NativeIndex: Number.isFinite(Number(level?.index)) ? Number(level.index) : null,
+          floorStackIndex: levelId ? resolveV14LevelIdToFloorStackIndex(scene, levelId) : null,
+          src: fg,
+        });
+      }
+    } catch (_) {}
+    const visibleForegroundLayers = getVisibleLevelForegroundLayers(scene);
+
+    const tileRows = [];
+    const tileDocs = scene?.tiles?.contents ?? [];
+    for (const tileDoc of tileDocs) {
+      const id = String(tileDoc?.id || '');
+      const src = String(tileDoc?.texture?.src ?? tileDoc?.img ?? '').trim() || null;
+      const elevation = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : null;
+      let rangeBottom = null;
+      let rangeTop = null;
+      if (tileHasLevelsRange(tileDoc)) {
+        const flags = readTileLevelsFlags(tileDoc);
+        rangeBottom = _formatNumber(flags.rangeBottom);
+        rangeTop = _formatNumber(flags.rangeTop);
+      }
+      const v14FloorIdx = resolveV14NativeDocFloorIndexMin(tileDoc, scene);
+      const busEntry = id ? (busMap.get(id) ?? null) : null;
+      let levelRole = null;
+      try { levelRole = getTileLevelRole(tileDoc); } catch (_) { levelRole = null; }
+      tileRows.push({
+        id,
+        name: String(tileDoc?.name || '').trim() || null,
+        src,
+        elevation,
+        rangeBottom,
+        rangeTop,
+        v14FloorStackIndex: v14FloorIdx,
+        levelRole,
+        hidden: Boolean(tileDoc?.hidden),
+        overhead: Boolean(tileDoc?.overhead),
+        sort: Number.isFinite(Number(tileDoc?.sort)) ? Number(tileDoc.sort) : null,
+        alpha: Number.isFinite(Number(tileDoc?.alpha)) ? Number(tileDoc.alpha) : null,
+        bus: busEntry ? {
+          present: true,
+          floorIndex: Number.isFinite(Number(busEntry.floorIndex)) ? Number(busEntry.floorIndex) : null,
+          rootVisible: typeof busEntry?.root?.visible === 'boolean' ? busEntry.root.visible : null,
+          meshVisible: typeof busEntry?.mesh?.visible === 'boolean' ? busEntry.mesh.visible : null,
+          mapReady: !!(busEntry?.material?.map?.image?.width > 0),
+        } : { present: false },
+      });
+    }
+
+    return {
+      activeFloorIndex: Number.isFinite(activeFloorIndex) ? activeFloorIndex : null,
+      viewedBackgroundSrc: viewedBgSrc || null,
+      activeFloorBackgroundBusKey: activeFloorBgKey,
+      activeFloorBackgroundPresent: busMap.has(activeFloorBgKey),
+      backgrounds,
+      foregrounds: {
+        byLevel: foregroundByLevel,
+        visibleConfiguredLayers: visibleForegroundLayers,
+      },
+      tiles: tileRows,
+      busBackgroundPlanes: busPlaneRows,
+    };
+  } catch (e) {
+    return { error: String(e?.message || e) };
+  }
 }
 
 function _findLevelIndexesForRange(levelBands, bottom, top) {
@@ -2447,10 +2608,19 @@ export class DiagnosticCenterDialog {
           const albedo = sc2?._albedoTexture ?? null;
           const busTiles = renderBus?._tiles;
           const hasSolid = !!(busTiles?.has?.('__bg_solid__'));
-          const hasImage = !!(busTiles?.has?.('__bg_image__'));
-          const imgEntry = busTiles?.get?.('__bg_image__');
+          const activeFloorIdxRaw = Number(ms?.floorStack?.getActiveFloor?.()?.index);
+          const activeFloorIdx = Number.isFinite(activeFloorIdxRaw) ? activeFloorIdxRaw : 0;
+          const viewedBgSrc = (() => {
+            try { return getViewedLevelBackgroundSrc(canvas?.scene) || _getBackgroundSrc(); } catch (_) { return _getBackgroundSrc(); }
+          })();
+          const expectedBgFloorIdx = viewedBgSrc
+            ? resolveV14BackgroundFloorIndexForSrc(canvas?.scene, viewedBgSrc)
+            : activeFloorIdx;
+          const expectedBgKey = _backgroundBusKeyForFloorIndex(expectedBgFloorIdx);
+          const hasImage = !!(busTiles?.has?.(expectedBgKey));
+          const imgEntry = busTiles?.get?.(expectedBgKey);
           const map = imgEntry?.material?.map ?? null;
-          const bgSrc = _getBackgroundSrc();
+          const bgSrc = viewedBgSrc || _getBackgroundSrc();
           const albedoReady = !!(albedo?.image && albedo.image.width > 0 && albedo.image.height > 0);
           const mapReady = !!(map?.image && map.image.width > 0 && map.image.height > 0);
           let split = null;
@@ -2498,7 +2668,7 @@ export class DiagnosticCenterDialog {
           let busMessage = 'V2 FloorRenderBus background state looks consistent';
           if (bgSrc && hasSolid && !hasImage && albedoReady) {
             busStatus = 'FAIL';
-            busMessage = 'Background src set and albedo texture has pixels, but bus has no __bg_image__ (populate/layout bug)';
+            busMessage = `Background src set and albedo texture has pixels, but bus has no ${expectedBgKey} on floor stack index ${expectedBgFloorIdx} (populate/layout bug — check native index vs elevation-sorted floor stack)`;
           } else if (bgSrc && hasSolid && !hasImage && !albedoReady && !!v2?._populateComplete) {
             busStatus = 'WARN';
             busMessage = 'Background src set but bus has no __bg_image__ after populate (check TextureLoader errors / scene rect)';
@@ -2520,6 +2690,10 @@ export class DiagnosticCenterDialog {
           }
           checks.push(_mkCheck('Floor', 'floor.v2.busBackground', busStatus, busMessage, {
             bgSrc: bgSrc || null,
+            viewedBackgroundSrc: viewedBgSrc || null,
+            expectedBackgroundBusKey: expectedBgKey,
+            expectedBackgroundFloorIndex: expectedBgFloorIdx,
+            activeFloorStackIndex: activeFloorIdx,
             hasSolidBgPlane: hasSolid,
             hasImageBgPlane: hasImage,
             foundrySceneData: fd2 ? {
@@ -4412,8 +4586,14 @@ export class DiagnosticCenterDialog {
     for (let pi = 0; pi < perLevel.length; pi += 1) {
       const row = perLevel[pi];
       const idx = row.index;
-      row.renderBusTileCount = floorRenderBusState?.byFloor?.[String(idx)] ?? null;
-      row.floorStackBand = floorBands[idx] ?? null;
+      const stackIdx = resolveV14LevelIdToFloorStackIndex(scene, row.levelId);
+      row.floorStackIndex = stackIdx;
+      row.renderBusTileCount = (stackIdx !== null)
+        ? (floorRenderBusState?.byFloor?.[String(stackIdx)] ?? null)
+        : null;
+      row.floorStackBand = (stackIdx !== null && stackIdx >= 0 && stackIdx < floorBands.length)
+        ? floorBands[stackIdx]
+        : null;
       row.legacySceneLevelsFlagEntry = Array.isArray(rawSceneLevelsForFlags) ? (rawSceneLevelsForFlags[idx] ?? null) : null;
       const v14Match = (Array.isArray(v14BandsAll) ? v14BandsAll : []).find((vb) => String(vb?.levelId || '') === String(row.levelId || ''))
         || (Array.isArray(v14BandsAll) ? v14BandsAll[idx] : null)
@@ -4633,6 +4813,14 @@ export class DiagnosticCenterDialog {
       }
     })();
 
+    const sceneImageInventory = _buildSceneImageInventory({
+      scene,
+      floorStack,
+      renderBus: floorCompositorV2?._renderBus || ms?.floorRenderBus || null,
+      v14Bands: v14BandsAll,
+      activeFloorIndex,
+    });
+
     const diagnostics = (() => {
       const issues = [];
       const currentFloor = Number.isFinite(Number(activeFloorIndex)) ? Number(activeFloorIndex) : null;
@@ -4704,6 +4892,33 @@ export class DiagnosticCenterDialog {
           message: `${stuckEffects.length} enabled effect(s) expose a floor state that does not match current floor`,
           effectIds: stuckEffects.map((e) => e.id).slice(0, 20),
         });
+      }
+      if (Array.isArray(sceneImageInventory?.backgrounds)) {
+        for (const bg of sceneImageInventory.backgrounds) {
+          if (!bg?.nativeIndexDiffersFromFloorStack) continue;
+          issues.push({
+            severity: 'warn',
+            code: 'levels.background.floorStackIndexMismatch',
+            message: `Level "${bg.label || bg.levelId}" native index ${bg.v14NativeIndex} maps to floor stack ${bg.floorStackIndex} — bus must use floor stack index for __bg_image__* placement`,
+            levelId: bg.levelId,
+            v14NativeIndex: bg.v14NativeIndex,
+            floorStackIndex: bg.floorStackIndex,
+            src: bg.src,
+            expectedBusKey: bg.expectedBusKey,
+          });
+        }
+        if (
+          sceneImageInventory.viewedBackgroundSrc
+          && sceneImageInventory.activeFloorBackgroundPresent === false
+        ) {
+          issues.push({
+            severity: 'error',
+            code: 'floor.background.missingOnActiveFloor',
+            message: `Viewed background has no bus plane on active floor stack index ${sceneImageInventory.activeFloorIndex} (expected ${sceneImageInventory.activeFloorBackgroundBusKey})`,
+            viewedBackgroundSrc: sceneImageInventory.viewedBackgroundSrc,
+            activeFloorBackgroundBusKey: sceneImageInventory.activeFloorBackgroundBusKey,
+          });
+        }
       }
       return { issues };
     })();
@@ -4856,6 +5071,7 @@ export class DiagnosticCenterDialog {
         hasFloorCompositorV2: Boolean(floorCompositorV2),
       },
       floorRenderBus: floorRenderBusState,
+      sceneImageInventory,
       water: waterState,
       cloudShadowWiring,
       unifiedShadowWiring,

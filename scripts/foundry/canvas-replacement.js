@@ -7,6 +7,7 @@ import { isGmLike, isUserGM } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import { safeCall, safeCallAsync, safeDispose, Severity } from '../core/safe-call.js';
+import { webglCrashRecovery } from '../core/webgl-crash-recovery.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 import { wipeMapShineAdvancedFlagsFireAndForget } from '../settings/scene-msa-flag-wipe.js';
 import { SceneComposer } from '../scene/composer.js';
@@ -127,7 +128,7 @@ import { ExternalEffectsCompositor } from '../integrations/external-effects/Exte
 import { DepthPassManager } from '../scene/depth-pass-manager.js';
 import { isSoundAudibleForPerspective } from './elevation-context.js';
 import { getFloorStackBandsSignature, getSceneBandsForFloorStack } from './levels-floor-stack-bands.js';
-import { hasV14NativeLevels, getViewedLevelBackgroundSrc, isLevelsEnabledForScene } from './levels-scene-flags.js';
+import { hasV14NativeLevels, getViewedLevelBackgroundSrc, isLevelsEnabledForScene, resolveV14LevelIdToFloorStackIndex } from './levels-scene-flags.js';
 import { installSnapshotStoreHooks, getSnapshot as getLevelsSnapshot } from '../core/levels-import/LevelsSnapshotStore.js';
 import { ZoneManager } from './zone-manager.js';
 import { IntroZoomEffect } from './intro-zoom-effect.js';
@@ -620,6 +621,148 @@ let _createThreeCanvasCurrentRun = null;
 let _lastCreateThreeCanvasFailure = null;
 const CREATE_THREE_CANVAS_FAILURE_COOLDOWN_MS = 3000;
 
+/**
+ * Scenes for which an automatic post-failure load retry was already scheduled
+ * this session. One retry per scene keeps recovery useful without risking a
+ * fail/retry loop on persistently broken scenes.
+ * @type {Set<string>}
+ */
+const _autoLoadRetryScenes = new Set();
+const CREATE_THREE_CANVAS_AUTO_RETRY_DELAY_MS = 3500;
+
+/**
+ * Schedule a single automatic createThreeCanvas retry after a failed load.
+ * @param {Scene} scene - The scene whose load just failed.
+ * @returns {boolean} True when a retry was scheduled.
+ * @private
+ */
+function _scheduleCreateThreeCanvasAutoRetry(scene) {
+  const sceneId = String(scene?.id ?? '');
+  if (!sceneId) return false;
+  if (_autoLoadRetryScenes.has(sceneId)) return false;
+  // A lost WebGL context is handled by the crash-recovery restore watchdog;
+  // retrying while the context is still gone would deterministically fail.
+  if (_threeContextLost) return false;
+
+  _autoLoadRetryScenes.add(sceneId);
+  log.warn(`[loading] Scheduling one automatic scene load retry in ${CREATE_THREE_CANVAS_AUTO_RETRY_DELAY_MS}ms`);
+  safeCall(
+    () => ui?.notifications?.warn?.('Map Shine: Scene initialization failed — retrying automatically...'),
+    'autoRetry.notify',
+    Severity.COSMETIC
+  );
+
+  setTimeout(() => {
+    safeCall(() => {
+      // Bail when the world has moved on: a different scene is active, a load
+      // is already running, or the context died in the meantime. Release the
+      // overlay if we own it so a bailed retry can't lock the user out.
+      const activeScene = canvas?.scene ?? null;
+      const bail = !activeScene
+        || String(activeScene.id) !== sceneId
+        || _createThreeCanvasRunning
+        || _threeContextLost
+        || !sceneSettings.isEnabled(activeScene);
+      if (bail) {
+        if (!_createThreeCanvasRunning) {
+          safeCall(() => loadingOverlay.fadeIn?.(400)?.catch?.(() => {}), 'autoRetry.bailDismissOverlay', Severity.COSMETIC);
+        }
+        return;
+      }
+
+      log.warn('[loading] Running automatic scene load retry');
+      loadCoordinator.beginSceneLoad(activeScene.id, activeScene.name);
+      Promise.resolve()
+        .then(() => createThreeCanvas(activeScene, { skipLoadingOverlay: false }))
+        .catch((e) => log.error('Automatic scene load retry failed:', e));
+    }, 'autoRetry.run', Severity.DEGRADED);
+  }, CREATE_THREE_CANVAS_AUTO_RETRY_DELAY_MS);
+  return true;
+}
+
+/** @type {number|null} */
+let _bootstrapLateRecoveryIntervalId = null;
+
+/**
+ * Bootstrap missed the canvasReady deadline (typically a backgrounded tab).
+ * Keep polling for late completion and re-enter onCanvasReady when it lands,
+ * instead of leaving the module permanently uninitialized until a refresh.
+ * @param {Scene} scene - Scene that was active when the deadline expired.
+ * @private
+ */
+function _scheduleBootstrapLateRecovery(scene) {
+  if (_bootstrapLateRecoveryIntervalId != null) return;
+  const sceneId = String(scene?.id ?? '');
+  const startedAtMs = Date.now();
+  const GIVE_UP_AFTER_MS = 300000;
+
+  log.warn('[loading] Watching for late bootstrap completion (background-tab recovery)');
+  _bootstrapLateRecoveryIntervalId = setInterval(() => {
+    safeCall(() => {
+      const elapsed = Date.now() - startedAtMs;
+      const done = window.MapShine?.initialized === true;
+      const failed = window.MapShine?.bootstrapComplete === true && !done;
+
+      if (failed || elapsed > GIVE_UP_AFTER_MS) {
+        clearInterval(_bootstrapLateRecoveryIntervalId);
+        _bootstrapLateRecoveryIntervalId = null;
+        if (failed) {
+          const err = window.MapShine?.bootstrapError ? ` (${window.MapShine.bootstrapError})` : '';
+          log.error(`Late bootstrap recovery: bootstrap completed with failure${err}`);
+        } else {
+          log.error('Late bootstrap recovery: gave up waiting for bootstrap');
+          ui?.notifications?.error?.('Map Shine: Initialization never completed. Please refresh the page.');
+        }
+        return;
+      }
+      if (!done) return;
+
+      clearInterval(_bootstrapLateRecoveryIntervalId);
+      _bootstrapLateRecoveryIntervalId = null;
+
+      const activeScene = canvas?.scene ?? null;
+      if (!activeScene || (sceneId && String(activeScene.id) !== sceneId)) {
+        log.warn('Late bootstrap recovery: scene changed while waiting — skipping re-entry');
+        return;
+      }
+      if (_createThreeCanvasRunning || window.MapShine?.__msaSceneLoading === true) return;
+
+      log.info('Late bootstrap recovery: bootstrap completed — re-entering canvasReady flow');
+      Promise.resolve()
+        .then(() => onCanvasReady(canvas))
+        .catch((e) => log.error('Late bootstrap recovery re-entry failed:', e));
+    }, 'bootstrapLateRecovery.poll', Severity.DEGRADED);
+  }, 2000);
+}
+
+/**
+ * Rebuild the Three.js stack after an unrecovered WebGL context loss.
+ * Passed to webglCrashRecovery.configure(); returns success so the recovery
+ * module can escalate to "please refresh" guidance when rebuilding fails.
+ * @param {string} reason
+ * @returns {Promise<boolean>}
+ * @private
+ */
+async function _attemptWebglRecoveryRebuild(reason) {
+  const scene = canvas?.scene ?? null;
+  if (!scene || !sceneSettings.isEnabled(scene)) return false;
+  if (_createThreeCanvasRunning || window.MapShine?.__msaSceneLoading === true) return false;
+
+  log.warn(`WebGL crash recovery rebuild starting (reason: ${reason})`);
+  try {
+    await resetScene();
+  } catch (e) {
+    log.error('WebGL crash recovery rebuild failed:', e);
+    return false;
+  }
+  // resetScene never throws on load failure; consult the failure record.
+  const failure = _lastCreateThreeCanvasFailure;
+  const failedJustNow = failure
+    && failure.sceneId === String(scene.id)
+    && (performance.now() - failure.atMs) < 30000;
+  return !failedJustNow && !_threeContextLost;
+}
+
 /** @type {number|null} */
 let _loadHiddenPumpIntervalId = null;
 /** @type {number|null} */
@@ -1075,10 +1218,6 @@ try {
  * @type {GraphicsSettingsManager|null}
  */
 let graphicsSettings = null;
-
-// One-shot safety mode flag: if the GPU drops the WebGL context during loading,
-// apply conservative settings so we don't keep hard-freezing on subsequent loads.
-let _autoSafeModeApplied = false;
 
 /** @type {EffectCapabilitiesRegistry|null} */
 let effectCapabilitiesRegistry = null;
@@ -2176,6 +2315,14 @@ export function initialize() {
     return true;
   }
 
+  // WebGL crash recovery: give the recovery center its rebuild path and expose
+  // it for diagnostics (e.g. MapShine.webglCrashRecovery.showLastCrashDialog()).
+  safeCall(() => {
+    webglCrashRecovery.configure({ requestRebuild: _attemptWebglRecoveryRebuild });
+    if (!window.MapShine) window.MapShine = {};
+    window.MapShine.webglCrashRecovery = webglCrashRecovery;
+  }, 'webglCrashRecovery.configure', Severity.COSMETIC);
+
   // ->->->-> Expose scene cleaning commands on window.MapShine ->->->->->->->->->->->->->->->->->->->->->->->->->->
   // Available immediately so GMs can run them from the browser console
   // even if the rest of initialization fails or hangs.
@@ -3005,9 +3152,9 @@ export function initialize() {
             let swapLevelIndex = Number.NaN;
             try {
               const lid = payload?.context?.levelId ?? canvas?.level?.id ?? null;
-              const doc = lid && canvas.scene?.levels?.get ? canvas.scene.levels.get(lid) : null;
-              if (doc && Number.isFinite(Number(doc.index))) {
-                swapLevelIndex = Math.max(0, Math.floor(Number(doc.index)));
+              if (lid) {
+                const stackIdx = resolveV14LevelIdToFloorStackIndex(canvas.scene, lid);
+                if (stackIdx !== null) swapLevelIndex = stackIdx;
               }
             } catch (_) {}
             bus.swapBackgroundImage(
@@ -3951,15 +4098,58 @@ function installCanvasDrawWrapper() {
         const sceneForHangCheck = canvas?.scene ?? this?.scene ?? (args?.[0] ?? null);
         const isMsaEnabledForHangCheck = sceneForHangCheck ? sceneSettings.isEnabled(sceneForHangCheck) : false;
         const HANG_TIMEOUT_MS = 8000;
+        // Background tabs throttle timers, rAF and image decoding to a crawl,
+        // so a hidden-tab draw that takes >8s is usually slow, NOT hung. Give
+        // it a much longer leash before forcing recovery mode, plus one normal
+        // watchdog window after the tab becomes visible again.
+        const HIDDEN_HANG_CAP_MS = 120000;
 
         const drawPromise = (ret && typeof ret.then === 'function')
           ? ret
           : Promise.resolve(ret);
+        const wrappedDrawPromise = drawPromise
+          .then((v) => ({ ok: true, value: v }))
+          .catch((err) => ({ ok: false, err }));
 
-        const raced = await Promise.race([
-          drawPromise.then((v) => ({ ok: true, value: v })).catch((err) => ({ ok: false, err })),
+        let raced = await Promise.race([
+          wrappedDrawPromise,
           new Promise((resolve) => setTimeout(() => resolve({ timeout: true }), HANG_TIMEOUT_MS))
         ]);
+
+        if (raced && raced.timeout && _msaIsDocumentHidden()) {
+          try {
+            console.warn('MapShine: Canvas.draw() exceeded 8s while the tab is hidden — extending hang watchdog (background-tab throttling is the likely cause, not a hang)');
+          } catch (_) {}
+          raced = await Promise.race([
+            wrappedDrawPromise,
+            new Promise((resolve) => {
+              let settled = false;
+              let visListener = null;
+              const finish = () => {
+                if (settled) return;
+                settled = true;
+                try {
+                  if (visListener) document.removeEventListener('visibilitychange', visListener);
+                } catch (_) {}
+                resolve({ timeout: true });
+              };
+              visListener = () => {
+                try {
+                  if (document.visibilityState !== 'visible') return;
+                } catch (_) {
+                  return;
+                }
+                // Tab is visible again: allow one normal watchdog window for
+                // the draw to finish at full speed before declaring a hang.
+                setTimeout(finish, HANG_TIMEOUT_MS);
+              };
+              try {
+                document.addEventListener('visibilitychange', visListener);
+              } catch (_) {}
+              setTimeout(finish, HIDDEN_HANG_CAP_MS);
+            })
+          ]);
+        }
 
         if (raced && raced.timeout) {
           try {
@@ -5920,8 +6110,11 @@ async function onCanvasReady(canvas) {
   if (!window.MapShine || !window.MapShine.initialized) {
     log.info('Waiting for bootstrap to complete...');
     
-    // Wait up to 15 seconds for bootstrap (increased for slow systems)
+    // Wait up to 15 seconds for bootstrap (increased for slow systems).
+    // Hidden/unfocused tabs throttle timers and slow bootstrap dramatically,
+    // so the deadline is much more generous while the tab is in the background.
     const MAX_WAIT_MS = 15000;
+    const MAX_WAIT_HIDDEN_MS = 120000;
     const POLL_INTERVAL_MS = 100;
     const startTime = Date.now();
     let lastLogTime = startTime;
@@ -5929,7 +6122,7 @@ async function onCanvasReady(canvas) {
     while (
       !window.MapShine?.initialized &&
       !window.MapShine?.bootstrapComplete &&
-      (Date.now() - startTime) < MAX_WAIT_MS
+      (Date.now() - startTime) < (_msaIsDocumentHidden() ? MAX_WAIT_HIDDEN_MS : MAX_WAIT_MS)
     ) {
       await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
       
@@ -5949,8 +6142,12 @@ async function onCanvasReady(canvas) {
         return;
       }
 
+      // Don't give up permanently: keep watching for late bootstrap completion
+      // (common when the tab was backgrounded during load) and re-enter the
+      // canvasReady flow once it lands.
       log.error('Bootstrap timeout - module did not initialize in time');
-      ui.notifications.error('Map Shine: Initialization timeout. Try refreshing the page.');
+      ui.notifications.error('Map Shine: Initialization is taking unusually long — will keep trying in the background.');
+      _scheduleBootstrapLateRecovery(scene);
       return;
     }
     
@@ -6650,6 +6847,11 @@ async function createThreeCanvas(scene, createOptions = {}) {
   } catch (_) {
   }
 
+  // If a previous session crashed and auto-reduced the render resolution,
+  // restore the user's original preset now (before GraphicsSettingsManager
+  // reads localStorage) — unless crashes have been repeating recently.
+  safeCall(() => webglCrashRecovery.maybeRestoreResolutionBeforeLoad(), 'webglCrashRecovery.restoreResolution', Severity.COSMETIC);
+
   safeCall(() => {
     _ensureLoadVisibilityLifecycleHooks();
     if (window.MapShine?.__loadVisibilityDebug === true) {
@@ -6828,11 +7030,26 @@ async function createThreeCanvas(scene, createOptions = {}) {
 
   // Get MapShine state from global (set by bootstrap)
   let mapShine = window.MapShine;
+
+  // A renderer whose WebGL context is lost and was never restored (GPU crash)
+  // is unusable — rebuilding the scene on top of it would deterministically
+  // fail. Dispose it so the lazy bootstrap below creates a fresh context.
+  safeCall(() => {
+    const existing = mapShine?.renderer ?? null;
+    const lost = existing?.getContext?.()?.isContextLost?.() === true;
+    if (!existing || !lost) return;
+    log.warn('Existing renderer has a lost WebGL context — disposing it so a fresh context can be created');
+    try { existing.dispose(); } catch (_) {}
+    mapShine.renderer = null;
+    if (renderer === existing) renderer = null;
+  }, 'disposeLostContextRenderer', Severity.DEGRADED);
+
   if (!mapShine || !mapShine.renderer) {
     // Try a lazy bootstrap as a recovery path.
     // This runs when the renderer was disposed during teardown of a previous scene
     // (including non-MSA scenes that had _threeCanvasWasActive=false, which now
-    // skips the renderer disposal — so this path is less likely to be needed).
+    // skips the renderer disposal — so this path is less likely to be needed),
+    // or when the previous renderer's context was lost and never restored.
     log.warn('MapShine renderer missing, attempting lazy bootstrap...');
     const bootstrapOk = await safeCallAsync(async () => {
       const mod = await import('../core/bootstrap.js');
@@ -7133,6 +7350,13 @@ async function createThreeCanvas(scene, createOptions = {}) {
     renderer = mapShine.renderer;
     const rendererCanvas = renderer.domElement;
 
+    // Re-sync the context-lost flag with the renderer we are actually using.
+    // After a crash-recovery rebuild this is a fresh renderer with a live
+    // context; the flag must not stay latched from the previous one.
+    safeCall(() => {
+      _threeContextLost = renderer?.getContext?.()?.isContextLost?.() === true;
+    }, 'syncContextLostFlag', Severity.COSMETIC);
+
     // Resolve background colour from Foundry scene (fallback to Foundry default #999999)
     // scene.backgroundColor is a hex string like "#999999" in modern Foundry versions
     const sceneBgColorStr = (scene && typeof scene.backgroundColor === 'string' && scene.backgroundColor.trim().length > 0)
@@ -7212,25 +7436,18 @@ async function createThreeCanvas(scene, createOptions = {}) {
         _threeContextLost = true;
         log.warn('WebGL context lost - rendering paused (rAF loop continues)');
 
-        // AUTO RECOVERY: If this happens during the loading screen, unblock the UI and
-        // reduce render resolution for this client to prevent repeated freezes.
-        if (!_autoSafeModeApplied) {
-          _autoSafeModeApplied = true;
-          safeCall(() => {
-            // Drop render resolution for this client. 720p is a good safety floor.
-            if (graphicsSettings && typeof graphicsSettings.setRenderResolutionPreset === 'function') {
-              graphicsSettings.setRenderResolutionPreset('1280x720');
-              graphicsSettings.saveState?.();
-            }
-          }, 'autoSafeMode.renderResolution', Severity.DEGRADED);
-
-          safeCall(() => {
-            const msg = 'WebGL reset detected ->-> entering Safe Mode (reduced effects)';
-            loadingOverlay.setStage?.('final', 1.0, msg, { immediate: true });
-            loadingOverlay.fadeIn?.(300)?.catch?.(() => {});
-            globalThis.ui?.notifications?.warn?.(msg);
-          }, 'autoSafeMode.dismissOverlay', Severity.COSMETIC);
-        }
+        // Crash recovery center: records diagnostics, applies the one-shot
+        // safe-mode resolution downgrade, shows the crash dialog, and arms a
+        // restore watchdog that rebuilds the scene if the browser never
+        // restores the context.
+        safeCall(() => {
+          webglCrashRecovery.onContextLost({
+            renderer,
+            graphicsSettings,
+            loadingOverlay,
+            phase: _createThreeCanvasProgress?.step ?? null,
+          });
+        }, 'webglCrashRecovery.onContextLost', Severity.DEGRADED);
         // IMPORTANT: do NOT stop the render loop here.
         // RenderLoop.render() already skips rendering while the context is lost,
         // but it must keep scheduling requestAnimationFrame so we can resume
@@ -7240,6 +7457,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
       _webglContextRestoredHandler = () => {
         _threeContextLost = false;
         log.info('WebGL context restored - attempting to resume rendering');
+        safeCall(() => webglCrashRecovery.onContextRestored(), 'webglCrashRecovery.onContextRestored', Severity.COSMETIC);
         safeCall(() => {
           const r = threeCanvas?.getBoundingClientRect?.();
           if (r && renderer) {
@@ -7999,9 +8217,9 @@ async function createThreeCanvas(scene, createOptions = {}) {
               let coldSwapIdx = Number.NaN;
               try {
                 const lid = window.MapShine?.activeLevelContext?.levelId ?? canvas?.level?.id ?? null;
-                const doc = lid && v14Scene?.levels?.get ? v14Scene.levels.get(lid) : null;
-                if (doc && Number.isFinite(Number(doc.index))) {
-                  coldSwapIdx = Math.max(0, Math.floor(Number(doc.index)));
+                if (lid) {
+                  const stackIdx = resolveV14LevelIdToFloorStackIndex(v14Scene, lid);
+                  if (stackIdx !== null) coldSwapIdx = stackIdx;
                 }
               } catch (_) {}
               bus.swapBackgroundImage(
@@ -9951,6 +10169,10 @@ async function createThreeCanvas(scene, createOptions = {}) {
       }
     }, 'wallClockTimer', Severity.COSMETIC);
 
+    // Surface any pending crash-recovery messaging (e.g. "resolution restored
+    // to full") now that the load demonstrably succeeded.
+    safeCall(() => webglCrashRecovery.onLoadSucceeded(), 'webglCrashRecovery.onLoadSucceeded', Severity.COSMETIC);
+
   } catch (error) {
     _createThreeCanvasFailed = true;
     log.error('Failed to initialize three.js scene:', error);
@@ -9966,9 +10188,16 @@ async function createThreeCanvas(scene, createOptions = {}) {
     // scene init. Also restore Foundry's PIXI state in case we modified it
     // before the error occurred.
     safeCall(() => restoreFoundryStateFromSnapshot(), 'restoreSnapshot(error)', Severity.COSMETIC);
+
+    // Self-recovery: retry the load once per scene per session. Skipped when
+    // the failure came from a lost WebGL context — the crash recovery watchdog
+    // owns that path (rebuilding mid-loss would just fail again).
+    const willAutoRetry = _scheduleCreateThreeCanvasAutoRetry(scene);
+
     await safeCallAsync(async () => {
-      loadingOverlay.setStage?.('final', 1.0, 'Scene init failed', { immediate: true });
-      await loadingOverlay.fadeIn(500);
+      const failMsg = willAutoRetry ? 'Scene init failed — retrying automatically...' : 'Scene init failed';
+      loadingOverlay.setStage?.('final', 1.0, failMsg, { immediate: true });
+      if (!willAutoRetry) await loadingOverlay.fadeIn(500);
     }, 'overlay.fadeIn(error)', Severity.COSMETIC);
   } finally {
     _createThreeCanvasRunning = false;

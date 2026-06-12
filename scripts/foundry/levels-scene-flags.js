@@ -231,14 +231,71 @@ export function getVisibleLevelBackgroundSrcs(scene) {
 }
 
 /**
- * Map a background image URL to the native V14 level {@link foundry.documents.BaseLevel#index}
- * whose `background.src` matches (after {@link normalizeFoundryAssetUrlKey}).
- * Used when Foundry's texture stack lists only the viewed level so array position
- * is not a reliable floor index for FloorRenderBus / per-floor albedo.
+ * Map a V14 level id to the FloorStack band index (0 = lowest elevation band).
+ * Prefers the live {@link FloorStack} when the band carries `levelId`; otherwise
+ * uses elevation-sorted {@link readV14SceneLevels} (same order as
+ * {@link resolveV14NativeDocFloorIndexMin}).
+ *
+ * @param {Scene|null|undefined} scene
+ * @param {string|null|undefined} levelId
+ * @returns {number|null}
+ */
+export function resolveV14LevelIdToFloorStackIndex(scene, levelId) {
+  const lid = (levelId != null) ? String(levelId) : '';
+  if (!lid) return null;
+  try {
+    const floors = globalThis.window?.MapShine?.floorStack?.getFloors?.() ?? [];
+    for (const f of floors) {
+      if (String(f?.levelId || '') !== lid) continue;
+      const idx = Number(f?.index);
+      if (Number.isFinite(idx)) return Math.max(0, Math.floor(idx));
+    }
+  } catch (_) {}
+  if (!hasV14NativeLevels(scene)) return null;
+  try {
+    const sorted = [...readV14SceneLevels(scene)].sort((a, b) => {
+      const ab = Number(a.bottom);
+      const bb = Number(b.bottom);
+      return (Number.isFinite(ab) ? ab : 0) - (Number.isFinite(bb) ? bb : 0);
+    });
+    for (let i = 0; i < sorted.length; i += 1) {
+      if (String(sorted[i]?.levelId || '') === lid) return i;
+    }
+  } catch (_) {}
+  return null;
+}
+
+/**
+ * @param {string} bgSrc
+ * @param {string} target
+ * @param {string} targetFile
+ * @returns {boolean}
+ */
+function _v14BackgroundSrcMatches(bgSrc, target, targetFile) {
+  const bg = String(bgSrc || '').trim();
+  if (!bg) return false;
+  if (target && normalizeFoundryAssetUrlKey(bg) === target) return true;
+  if (!targetFile) return false;
+  try {
+    const k = normalizeFoundryAssetUrlKey(bg);
+    const f = (k.split('/').pop() || '').split('?')[0].toLowerCase();
+    return !!(f && f === targetFile);
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Map a background image URL to the FloorStack band index whose V14 level owns
+ * that `background.src` (after {@link normalizeFoundryAssetUrlKey}).
+ *
+ * **Do not use Foundry {@link foundry.documents.BaseLevel#index}** — when the
+ * basement band sits below ground in elevation but has a higher native index,
+ * bus keys like `__bg_image__1` would land on the wrong floor stack band.
  *
  * @param {Scene|null|undefined} scene
  * @param {string} src
- * @returns {number} Non-negative floor index (defaults to 0 if unmatched)
+ * @returns {number} Non-negative floor stack index (defaults to 0 if unmatched)
  */
 export function resolveV14BackgroundFloorIndexForSrc(scene, src) {
   const raw = typeof src === 'string' ? src.trim() : '';
@@ -257,26 +314,12 @@ export function resolveV14BackgroundFloorIndexForSrc(scene, src) {
     const sorted = scene.levels.sorted ?? scene.levels.contents ?? [];
     for (const level of sorted) {
       const bg = String(level?.background?.src || '').trim();
-      if (!bg) continue;
-      if (target && normalizeFoundryAssetUrlKey(bg) === target) {
-        const idx = Number(level?.index);
-        return Number.isFinite(idx) ? Math.max(0, Math.floor(idx)) : 0;
-      }
-    }
-    if (targetFile) {
-      for (const level of sorted) {
-        const bg = String(level?.background?.src || '').trim();
-        if (!bg) continue;
-        let f = '';
-        try {
-          const k = normalizeFoundryAssetUrlKey(bg);
-          f = (k.split('/').pop() || '').split('?')[0].toLowerCase();
-        } catch (_) { f = ''; }
-        if (f && f === targetFile) {
-          const idx = Number(level?.index);
-          return Number.isFinite(idx) ? Math.max(0, Math.floor(idx)) : 0;
-        }
-      }
+      if (!_v14BackgroundSrcMatches(bg, target, targetFile)) continue;
+      const levelId = (level?.id != null) ? String(level.id) : '';
+      const stackIdx = levelId ? resolveV14LevelIdToFloorStackIndex(scene, levelId) : null;
+      if (stackIdx !== null) return stackIdx;
+      const idx = Number(level?.index);
+      return Number.isFinite(idx) ? Math.max(0, Math.floor(idx)) : 0;
     }
   } catch (_) {}
   return 0;

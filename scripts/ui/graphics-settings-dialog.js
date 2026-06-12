@@ -82,6 +82,11 @@ export class GraphicsSettingsDialog {
             <span class="msa-gfx__label">Weather &amp; particles</span>
             <select class="msa-gfx__select" data-input="particleSpawn"></select>
           </label>
+          <label class="msa-gfx__check">
+            <input type="checkbox" data-input="vegetationHalfRes">
+            <span>Lower-resolution trees &amp; bushes (performance)</span>
+          </label>
+          <p class="msa-gfx__hint">When enabled, foliage may look softer but uses less GPU. Off by default for full quality.</p>
         </section>
 
         <section class="msa-gfx__section">
@@ -203,6 +208,10 @@ export class GraphicsSettingsDialog {
         this.manager.setTokenDepthInteraction(target.checked);
         return;
       }
+      if (target.matches('[data-input="vegetationHalfRes"]')) {
+        this.manager.setVegetationHalfResEnabled(target.checked);
+        return;
+      }
       if (target.matches('[data-input="effect-enabled"]')) {
         const effectId = target.dataset.effectId;
         if (!effectId) return;
@@ -314,6 +323,11 @@ export class GraphicsSettingsDialog {
     const tokenDepth = root.querySelector('[data-input="tokenDepth"]');
     if (tokenDepth instanceof HTMLInputElement) {
       tokenDepth.checked = this.manager.getTokenDepthInteraction();
+    }
+
+    const vegetationHalfRes = root.querySelector('[data-input="vegetationHalfRes"]');
+    if (vegetationHalfRes instanceof HTMLInputElement) {
+      vegetationHalfRes.checked = this.manager.getVegetationHalfResEnabled();
     }
   }
 

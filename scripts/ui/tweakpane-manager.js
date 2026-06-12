@@ -10256,9 +10256,12 @@ export class TweakpaneManager {
         const effectLabel = effectOptions[group.effectTarget] || group.effectTarget || 'None';
         const typeLabel = group.effectTarget === 'rope' ? 'Rope' : (groupTypeLabels[group.type] || group.type);
         const pointCount = group.points?.length || 0;
-        const cluster = mapPointsManager.getClusterForGroup?.(group.id);
-        const clusterActive = cluster ? cluster.enabled !== false : true;
-        const showPowerBtn = isGM && group.isEffectSource && group.effectTarget;
+        const groupClusters = (mapPointsManager.getControlClusters?.() || [])
+          .filter((c) => c?.source !== 'mask' && Array.isArray(c?.memberGroupIds) && c.memberGroupIds.includes(group.id));
+        const clusterActive = groupClusters.length === 0
+          ? true
+          : groupClusters.some((c) => c.enabled !== false);
+        const showPowerBtn = isGM && !!group.effectTarget && group.isEffectSource !== false;
         const powerBg = clusterActive ? '#3a5a3a' : '#4a4a4a';
         const powerTitle = clusterActive ? 'Turn off effect cluster' : 'Turn on effect cluster';
         
@@ -10324,7 +10327,8 @@ export class TweakpaneManager {
         </div>
         ${game.user?.isGM ? `
         <p style="font-size: 10px; color: #888; margin: 0 0 8px 0;">
-          Use the <i class="fas fa-eye"></i> tool on the token bar to show on-map cluster toggles.
+          Use the <i class="fas fa-eye"></i> tool on the token bar to show on-map toggles.
+          Point groups split by proximity (walls block merging); <code>_Fire</code> mask flames get wall-aware spatial buckets (~600px cells).
         </p>
         ` : ''}
         <div class="groups-list" style="max-height: 300px; overflow-y: auto; margin-bottom: 12px;">

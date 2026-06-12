@@ -1004,17 +1004,31 @@ export class LevelTransitionCurtain {
           resolve();
           return;
         }
-        try {
-          requestAnimationFrame(tick);
-        } catch (_) {
-          setTimeout(tick, 16);
-        }
+        scheduleNext();
       };
-      try {
-        requestAnimationFrame(tick);
-      } catch (_) {
-        setTimeout(tick, 16);
-      }
+      const scheduleNext = () => {
+        // Background tabs suspend rAF entirely; race each frame against a
+        // timer so this wait can never deadlock a hidden-tab load/transition.
+        let advanced = false;
+        const advance = () => {
+          if (advanced) return;
+          advanced = true;
+          tick();
+        };
+        try {
+          requestAnimationFrame(advance);
+        } catch (_) {
+        }
+        const hidden = (() => {
+          try {
+            return typeof document !== 'undefined' && document.hidden === true;
+          } catch (_) {
+            return false;
+          }
+        })();
+        setTimeout(advance, hidden ? 100 : 250);
+      };
+      scheduleNext();
     });
   }
 

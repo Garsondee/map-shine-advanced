@@ -1637,8 +1637,13 @@ export class CandleFlamesEffectV2 {
     for (const g of groups) {
       if (!g?.points?.length) continue;
       const intensity = (g.emission && typeof g.emission.intensity === 'number') ? g.emission.intensity : 1.0;
-      for (const p of g.points) {
+      for (let pointIndex = 0; pointIndex < g.points.length; pointIndex++) {
+        const p = g.points[pointIndex];
         if (!p) continue;
+        if (typeof this._mapPointsManager.isGroupPointEnabled === 'function'
+          && !this._mapPointsManager.isGroupPointEnabled(g.id, pointIndex)) {
+          continue;
+        }
         points.push({ x: p.x, y: p.y, intensity });
       }
     }

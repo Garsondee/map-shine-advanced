@@ -1925,6 +1925,10 @@ export class InteractionManager {
    * @param {{ropeType?: 'rope'|'chain'}|null} [options=null] - Optional draw options
    */
   startMapPointDrawing(effectTarget, groupType = 'area', snapToGrid = false, options = null) {
+    if (!isGmLike()) {
+      ui?.notifications?.warn?.('Map Points are available to the GM only.');
+      return;
+    }
     this.mapPointDrawHandler.start(effectTarget, groupType, snapToGrid, options);
   }
 

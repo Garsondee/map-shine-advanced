@@ -2139,11 +2139,13 @@ export class TweakpaneManager {
 
     addGroupBreak();
 
-    addGridButton('🎯 Map Points', () => {
-      this.openMapPointsManagerDialog();
-    }, {
-      title: 'Manage map-point groups (area, line, point, rope) and bind particle or effect emitters to regions you draw on the map.',
-    });
+    if (isGmLike()) {
+      addGridButton('🎯 Map Points', () => {
+        this.openMapPointsManagerDialog();
+      }, {
+        title: 'Manage map-point groups (area, line, point, rope) and bind particle or effect emitters to regions you draw on the map.',
+      });
+    }
 
     addGridButton('🧭 Tile Motion', () => {
       this.tileMotionDialog?.toggle?.();
@@ -10008,6 +10010,11 @@ export class TweakpaneManager {
    * Open a dialog to select effect type and start map point drawing
    */
   openMapPointDrawingDialog() {
+    if (!isGmLike()) {
+      ui.notifications?.warn?.('Map Points are available to the GM only.');
+      return;
+    }
+
     const interactionManager = window.MapShine?.interactionManager;
     const mapPointsManager = window.MapShine?.mapPointsManager;
     if (!interactionManager) {
@@ -10201,6 +10208,11 @@ export class TweakpaneManager {
    * Open a dialog to manage existing map point groups
    */
   openMapPointsManagerDialog() {
+    if (!isGmLike()) {
+      ui.notifications?.warn?.('Map Points are available to the GM only.');
+      return;
+    }
+
     const mapPointsManager = window.MapShine?.mapPointsManager;
     const interactionManager = window.MapShine?.interactionManager;
     

@@ -8,8 +8,8 @@
  *   causes and lets the user copy a diagnostic report or rebuild the scene.
  * - Apply a one-shot "safe mode" render-resolution downgrade when a crash
  *   happens, then restore the previous resolution automatically on the next
- *   load once no WebGL crash has occurred in the last 30 minutes — otherwise
- *   safe mode sticks and the user is told why.
+ *   scene load. Safe mode is not re-applied on every subsequent load unless
+ *   the user crashes again in that session.
  * - Watchdog: if the browser never restores the context, trigger an automatic
  *   scene rebuild (fresh canvas + fresh WebGL context) once per session.
  *
@@ -28,10 +28,10 @@ const HISTORY_KEY = 'map-shine-advanced.webglCrashLog';
 const SAFE_MODE_KEY = 'map-shine-advanced.webglSafeMode';
 const SAFE_MODE_PRESET = '1280x720';
 const HISTORY_MAX = 20;
-/** Crashes within this window count as "repeated" and keep safe mode active. */
+/** Crashes within this window count toward "repeated" crash messaging only. */
 const REPEAT_CRASH_WINDOW_MS = 30 * 60 * 1000;
-/** Any crash inside REPEAT_CRASH_WINDOW_MS keeps safe mode active across reloads. */
-const REPEAT_CRASH_THRESHOLD = 1;
+/** Repeated-crash notice threshold (does not block auto-restore on next load). */
+const REPEAT_CRASH_THRESHOLD = 3;
 /** How long to wait for webglcontextrestored before forcing a rebuild. */
 const RESTORE_WATCHDOG_MS = 12000;
 /** Delay before the crash dialog appears (lets the restore race settle first). */
@@ -529,50 +529,16 @@ function _countRecentCrashes(nowMs = Date.now()) {
 }
 
 /**
- * When WebGL crashed recently, ensure persisted graphics overrides stay at or
- * below the safe-mode preset even if a prior reload already restored native.
+ * Previously re-applied safe mode on every load after any recent crash.
+ * Safe mode is now one-shot per context loss; restore happens on the next load
+ * via maybeRestoreResolutionBeforeLoad().
  *
  * @param {{ id?: string|null }|null} [scene]
- * @returns {boolean} True when a downgrade was applied or reaffirmed.
+ * @returns {boolean}
  */
 export function ensureConservativeGraphicsForLoad(scene = null) {
-  try {
-    const now = Date.now();
-    const sceneId = scene?.id ?? canvas?.scene?.id ?? null;
-    const history = getCrashHistory();
-    const recentOnScene = history.filter((c) => {
-      if ((now - (c?.atMs ?? 0)) >= REPEAT_CRASH_WINDOW_MS) return false;
-      if (!sceneId) return true;
-      return c?.sceneId === sceneId;
-    }).length;
-    const recentAny = _countRecentCrashes(now);
-    if (recentOnScene < REPEAT_CRASH_THRESHOLD && recentAny < REPEAT_CRASH_THRESHOLD) return false;
-
-    const storageKey = _buildGraphicsStorageKey();
-    const stored = _readJson(storageKey) ?? {};
-    const currentPreset = stored.renderResolutionPreset ?? 'native';
-    if (!_presetAtOrBelow(currentPreset, SAFE_MODE_PRESET)) {
-      stored.renderResolutionPreset = SAFE_MODE_PRESET;
-      _writeJson(storageKey, stored);
-      log.warn(`Load guard: render resolution capped to ${SAFE_MODE_PRESET} after recent WebGL crash`);
-    }
-
-    const marker = _readJson(SAFE_MODE_KEY);
-    if (!marker?.active) {
-      _writeJson(SAFE_MODE_KEY, {
-        active: true,
-        previousPreset: currentPreset,
-        storageKey,
-        at: now,
-        sessionId: SESSION_ID,
-      });
-    }
-    _pendingLoadNotice = { type: 'staying-reduced' };
-    return true;
-  } catch (e) {
-    log.warn('ensureConservativeGraphicsForLoad failed', e);
-    return false;
-  }
+  void scene;
+  return false;
 }
 
 /**
@@ -588,17 +554,6 @@ export function maybeRestoreResolutionBeforeLoad() {
     const marker = _readJson(SAFE_MODE_KEY);
     if (!marker?.active) return;
 
-    // Crash happened in THIS session: keep the reduced resolution until the
-    // next full reload so we don't immediately re-trigger the same crash.
-    if (marker.sessionId === SESSION_ID) return;
-
-    const recentCrashes = _countRecentCrashes();
-    if (recentCrashes >= REPEAT_CRASH_THRESHOLD) {
-      _pendingLoadNotice = { type: 'staying-reduced' };
-      log.warn(`Safe mode kept active (${recentCrashes} recent WebGL crash(es))`);
-      return;
-    }
-
     const previousPreset = marker.previousPreset || 'native';
     const stored = _readJson(marker.storageKey);
     if (stored && typeof stored === 'object') {
@@ -607,9 +562,6 @@ export function maybeRestoreResolutionBeforeLoad() {
     }
     _removeKey(SAFE_MODE_KEY);
 
-    // Only announce the restore when it affects the settings the current
-    // client will actually load; restoring another scene's key is silent.
-    // The live manager builds its key once at construction, so prefer it.
     const activeKey = window.MapShine?.graphicsSettings?._storageKey ?? _buildGraphicsStorageKey();
     if (marker.storageKey === activeKey) {
       _pendingLoadNotice = { type: 'restored', preset: previousPreset };

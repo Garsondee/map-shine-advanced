@@ -195,14 +195,39 @@ export class StreamedBackgroundGrid {
    * @returns {boolean}
    * @private
    */
-  _residentLodAcceptable(existingLod, cell, viewRect, requestedLod) {
+  _residentLodAcceptable(existingLod, cell, viewRect, requestedLod, panStabilize = false) {
     const el = Number(existingLod) || 0;
     const zoomLod = this._effectiveLod(requestedLod);
     const cellTarget = viewRect
       ? this._effectiveLodForCell(cell, viewRect, requestedLod)
       : zoomLod;
     if (el <= cellTarget) return true;
-    return el <= zoomLod + this._vramLodSlack();
+    if (panStabilize) return el <= zoomLod + this._vramLodSlack();
+    return false;
+  }
+
+  /**
+   * True when a required cell still needs visibility, residency, or a sharper LOD.
+   * @param {{ key: string, cellX: number, cellY: number }} cell
+   * @param {{ minX: number, minY: number, maxX: number, maxY: number }} viewRect
+   * @param {number} requestedLod
+   * @param {{ panStabilize?: boolean }} [options]
+   * @returns {boolean}
+   * @private
+   */
+  _cellNeedsWork(cell, viewRect, requestedLod, options = {}) {
+    const panStabilize = options.panStabilize === true;
+    if (this._inflight.has(cell.key)) return false;
+    const existing = this._cells.get(cell.key);
+    if (!existing?.mesh) return true;
+    if (!existing.mesh.visible) return true;
+    return !this._residentLodAcceptable(
+      existing.lod,
+      cell,
+      viewRect,
+      requestedLod,
+      panStabilize,
+    );
   }
 
   /**
@@ -251,25 +276,34 @@ export class StreamedBackgroundGrid {
       this._manifest.sourceHeight,
     );
     if (this._inflight.size > 0) return true;
-    return required.some((cell) => {
-      if (this._inflight.has(cell.key)) return false;
-      const existing = this._cells.get(cell.key);
-      if (!existing?.mesh) return true;
-      return !this._residentLodAcceptable(existing.lod, cell, viewRect, lod);
-    });
+    return required.some((cell) =>
+      this._cellNeedsWork(cell, viewRect, lod, { panStabilize: false }),
+    );
   }
 
   /**
    * Start or continue pyramid loads for cells in the current view.
    * @private
    */
-  _scheduleRequiredCellLoads(required, effectiveLod, epoch, viewRect = null, requestedLod = effectiveLod) {
+  _scheduleRequiredCellLoads(required, effectiveLod, epoch, viewRect = null, requestedLod = effectiveLod, panStabilize = true) {
     const budget = getTextureBudgetTracker();
     const sorted = [...required].sort((a, b) => {
       const la = this._effectiveLodForCell(a, viewRect, requestedLod);
       const lb = this._effectiveLodForCell(b, viewRect, requestedLod);
-      const needA = !this._residentLodAcceptable(this._cells.get(a.key)?.lod ?? 99, a, viewRect, requestedLod);
-      const needB = !this._residentLodAcceptable(this._cells.get(b.key)?.lod ?? 99, b, viewRect, requestedLod);
+      const needA = !this._residentLodAcceptable(
+        this._cells.get(a.key)?.lod ?? 99,
+        a,
+        viewRect,
+        requestedLod,
+        panStabilize,
+      );
+      const needB = !this._residentLodAcceptable(
+        this._cells.get(b.key)?.lod ?? 99,
+        b,
+        viewRect,
+        requestedLod,
+        panStabilize,
+      );
       if (needA !== needB) return needA ? -1 : 1;
       if (!viewRect) return 0;
       const region = this._getSceneRegion();
@@ -292,7 +326,7 @@ export class StreamedBackgroundGrid {
       this._cellLastUsed.set(cell.key, performance.now());
       const existing = this._cells.get(cell.key);
       if (existing?.mesh) {
-        if (this._residentLodAcceptable(existing.lod, cell, viewRect, requestedLod)) {
+        if (this._residentLodAcceptable(existing.lod, cell, viewRect, requestedLod, panStabilize)) {
           existing.mesh.visible = this._isFloorVisible();
           this._setCellState(cell.key, existing.lod === 0 ? STATE_RESIDENT_HI : STATE_RESIDENT_LO);
           continue;
@@ -499,7 +533,13 @@ export class StreamedBackgroundGrid {
     for (const cell of required) {
       this._cellLastUsed.set(cell.key, now);
       const existing = this._cells.get(cell.key);
-      if (existing?.mesh) existing.mesh.visible = floorVis;
+      if (existing?.mesh) {
+        existing.mesh.visible = floorVis;
+        if (floorVis) {
+          const lod = Number(existing.lod) || 0;
+          this._setCellState(cell.key, lod === 0 ? STATE_RESIDENT_HI : STATE_RESIDENT_LO);
+        }
+      }
     }
   }
 
@@ -581,12 +621,14 @@ export class StreamedBackgroundGrid {
   /**
    * @param {{ minX: number, minY: number, maxX: number, maxY: number }} viewRect
    * @param {number} lod
+   * @param {{ sharpenOnZoom?: boolean }} [options]
    */
-  async syncToView(viewRect, lod) {
+  async syncToView(viewRect, lod, options = {}) {
     const region = this._getSceneRegion();
     if (!this._manifest || !viewRect || !region) return;
     const epoch = this._decodeEpoch;
     const effectiveLod = this._stabilizeLod(this._effectiveLod(lod));
+    const panStabilize = !options.sharpenOnZoom;
     const required = getImageCellsForWorldView(
       viewRect,
       region,
@@ -596,17 +638,18 @@ export class StreamedBackgroundGrid {
     );
     const requiredKeys = new Set(required.map((c) => c.key));
     const syncKey = buildViewSyncKey(effectiveLod, requiredKeys);
-    const needsSharpen = required.some((cell) => {
+    const needsSharpen = options.sharpenOnZoom && required.some((cell) => {
       const existing = this._cells.get(cell.key);
-      if (!existing?.mesh?.visible) return false;
-      return !this._residentLodAcceptable(existing.lod, cell, viewRect, lod);
+      if (!existing?.mesh) return false;
+      return !this._residentLodAcceptable(existing.lod, cell, viewRect, lod, false);
     });
-    const needsLoad = required.some((cell) => {
-      if (this._inflight.has(cell.key)) return false;
-      const existing = this._cells.get(cell.key);
-      if (!existing?.mesh) return true;
-      return !this._residentLodAcceptable(existing.lod, cell, viewRect, lod);
-    });
+    const needsLoad = required.some((cell) =>
+      this._cellNeedsWork(cell, viewRect, lod, { panStabilize }),
+    );
+    const budget = getTextureBudgetTracker();
+    if (budget.getUsedFraction() > 1.0 && (needsSharpen || needsLoad)) {
+      this.evictCells(budget, 4);
+    }
     if (syncKey === this._syncKey && !needsSharpen && !needsLoad) {
       this._applyRequiredCellVisibility(required);
       this._maybeReleaseFallback();
@@ -622,7 +665,7 @@ export class StreamedBackgroundGrid {
       }
     }
 
-    this._scheduleRequiredCellLoads(required, effectiveLod, epoch, viewRect, lod);
+    this._scheduleRequiredCellLoads(required, effectiveLod, epoch, viewRect, lod, panStabilize);
 
     this._syncFallbackVisibility(required);
     this._maybeReleaseFallback();
@@ -802,6 +845,112 @@ export class StreamedBackgroundGrid {
   /** @returns {boolean} */
   isMounted() {
     return !!this._manifest;
+  }
+
+  /**
+   * Background source + pyramid manifest for debug UI (minimap overview).
+   * @returns {{ sourceUrl: string, manifest: object|null, cellSize: number }|null}
+   */
+  getStreamInfo() {
+    if (!this._manifest) return null;
+    return {
+      sourceUrl: this._src,
+      manifest: this._manifest,
+      cellSize: this._cellSize,
+    };
+  }
+
+  /**
+   * Per-frame visibility reconcile — ensures required cells are shown even when
+   * syncToView early-outs with a stale sync key.
+   * @param {{ minX: number, minY: number, maxX: number, maxY: number }} viewRect
+   */
+  reconcileVisibility(viewRect) {
+    const region = this._getSceneRegion();
+    if (!this._manifest || !viewRect || !region) return;
+    const required = getImageCellsForWorldView(
+      viewRect,
+      region,
+      this._cellSize,
+      this._manifest.sourceWidth,
+      this._manifest.sourceHeight,
+    );
+    this._applyRequiredCellVisibility(required);
+    this._syncFallbackVisibility(required);
+  }
+
+  /**
+   * Live minimap snapshot — reads resident GPU cells, not the stale _cellStates log.
+   * Only includes in-frustum or visible residents so culled history does not wash out greens.
+   *
+   * @param {{ minX: number, minY: number, maxX: number, maxY: number }|null} [viewRect]
+   * @returns {Array<{ bounds: object, state: string, lod: number, visible: boolean }>}
+   */
+  getMinimapDisplayCells(viewRect = null) {
+    const region = this._getSceneRegion();
+    if (!this._manifest || !region) return [];
+
+    /** @type {Set<string>|null} */
+    let requiredKeys = null;
+    if (viewRect) {
+      requiredKeys = new Set(
+        getImageCellsForWorldView(
+          viewRect,
+          region,
+          this._cellSize,
+          this._manifest.sourceWidth,
+          this._manifest.sourceHeight,
+        ).map((c) => c.key),
+      );
+    }
+
+    /** @type {Array<{ bounds: object, state: string, lod: number, visible: boolean }>} */
+    const out = [];
+
+    const pushKey = (key, state, lod, visible) => {
+      const parts = key.split(',');
+      if (parts.length !== 2) return;
+      out.push({
+        bounds: imageCellToWorldBounds(
+          Number(parts[0]),
+          Number(parts[1]),
+          this._cellSize,
+          this._manifest.sourceWidth,
+          this._manifest.sourceHeight,
+          region,
+        ),
+        state,
+        lod,
+        visible,
+      });
+    };
+
+    for (const [key, entry] of this._cells) {
+      if (!entry?.mesh) continue;
+      const inView = !requiredKeys || requiredKeys.has(key);
+      const visible = entry.mesh.visible === true;
+      const loading = this._inflight.has(key);
+      if (!inView && !visible && !loading) continue;
+
+      const lod = Number(entry.lod) || 0;
+      let state;
+      if (loading) {
+        state = STATE_LOADING;
+      } else if (visible) {
+        state = lod === 0 ? STATE_RESIDENT_HI : STATE_RESIDENT_LO;
+      } else {
+        state = 'hidden';
+      }
+      pushKey(key, state, lod, visible);
+    }
+
+    for (const key of this._inflight) {
+      if (this._cells.has(key)) continue;
+      if (requiredKeys && !requiredKeys.has(key)) continue;
+      pushKey(key, STATE_LOADING, 99, false);
+    }
+
+    return out;
   }
 
   /**
@@ -1051,12 +1200,24 @@ export class StreamedRegionGrid {
     const budget = getTextureBudgetTracker();
     let effective = Math.max(0, Math.floor(Number(lod) || 0));
     const used = budget.getUsedFraction();
-    if (used > 1.0) {
-      effective = Math.min(this._maxLod, effective + 2);
-    } else if (used > 0.92) {
+    if (used > 0.98) {
       effective = Math.min(this._maxLod, effective + 1);
     }
     return Math.min(effective, this._maxLod);
+  }
+
+  /**
+   * @param {{ key: string }} cell
+   * @param {number} effectiveLod
+   * @returns {boolean}
+   * @private
+   */
+  _cellNeedsWork(cell, effectiveLod) {
+    if (this._inflight.has(cell.key)) return false;
+    const existing = this._cells.get(cell.key);
+    if (!existing?.mesh) return true;
+    if (!existing.mesh.visible) return true;
+    return Number(existing.lod) > effectiveLod;
   }
 
   /** @private */
@@ -1096,7 +1257,7 @@ export class StreamedRegionGrid {
       this._manifest.sourceHeight,
     );
     if (this._inflight.size > 0) return true;
-    return countUnmetRequiredCells(required, effectiveLod, this._cells, this._inflight) > 0;
+    return required.some((cell) => this._cellNeedsWork(cell, effectiveLod));
   }
 
   /**
@@ -1148,7 +1309,35 @@ export class StreamedRegionGrid {
     for (const cell of required) {
       this._cellLastUsed.set(cell.key, now);
       const existing = this._cells.get(cell.key);
-      if (existing?.mesh) existing.mesh.visible = floorVis;
+      if (existing?.mesh) {
+        existing.mesh.visible = floorVis;
+        if (floorVis) {
+          const lod = Number(existing.lod) || 0;
+          this._setCellState(cell.key, lod === 0 ? STATE_RESIDENT_HI : STATE_RESIDENT_LO);
+        }
+      }
+    }
+  }
+
+  /**
+   * @param {{ minX: number, minY: number, maxX: number, maxY: number }} viewRect
+   */
+  reconcileVisibility(viewRect) {
+    if (!this._manifest || !viewRect || !this._region) return;
+    const required = getImageCellsForWorldView(
+      viewRect,
+      this._region,
+      this._cellSize,
+      this._manifest.sourceWidth,
+      this._manifest.sourceHeight,
+    );
+    this._applyRequiredCellVisibility(required);
+    if (this._fallbackMesh) {
+      const hasStreamedCover = [...this._cells.values()].some((e) => {
+        const img = e?.mesh?.material?.map?.image;
+        return !!e?.mesh?.visible && !!(img && (img.width > 0 || img.height > 0));
+      });
+      this._fallbackMesh.visible = this._isFloorVisible() && !hasStreamedCover;
     }
   }
 
@@ -1212,8 +1401,9 @@ export class StreamedRegionGrid {
   /**
    * @param {{ minX: number, minY: number, maxX: number, maxY: number }} viewRect
    * @param {number} lod
+   * @param {{ sharpenOnZoom?: boolean }} [options]
    */
-  async syncToView(viewRect, lod) {
+  async syncToView(viewRect, lod, options = {}) {
     if (!this._manifest || !viewRect || !this._region) return;
 
     if (!this._isFloorVisible()) {
@@ -1235,10 +1425,15 @@ export class StreamedRegionGrid {
     );
     const requiredKeys = new Set(required.map((c) => c.key));
     const syncKey = buildViewSyncKey(effectiveLod, requiredKeys);
-    const needsSharpen = [...this._cells.values()].some(
-      (e) => e?.mesh?.visible && Number(e.lod) > effectiveLod,
-    );
-    const needsLoad = countUnmetRequiredCells(required, effectiveLod, this._cells, this._inflight) > 0;
+    const needsSharpen = options.sharpenOnZoom && required.some((cell) => {
+      const existing = this._cells.get(cell.key);
+      return !!existing?.mesh && Number(existing.lod) > effectiveLod;
+    });
+    const needsLoad = required.some((cell) => this._cellNeedsWork(cell, effectiveLod));
+    const budget = getTextureBudgetTracker();
+    if (budget.getUsedFraction() > 1.0 && (needsSharpen || needsLoad)) {
+      this.evictCells(budget, 4);
+    }
     if (syncKey === this._syncKey && !needsSharpen && !needsLoad) {
       this._applyRequiredCellVisibility(required);
       if (this._fallbackMesh) {
@@ -1361,6 +1556,76 @@ export class StreamedRegionGrid {
     this._bus._registerStreamingMesh?.(busKey, mesh, mat, this._floorIndex);
     mesh.visible = this._isFloorVisible();
     return mesh;
+  }
+
+  /**
+   * @param {{ minX: number, minY: number, maxX: number, maxY: number }|null} [viewRect]
+   * @returns {Array<{ bounds: object, state: string, lod: number, visible: boolean }>}
+   */
+  getMinimapDisplayCells(viewRect = null) {
+    if (!this._manifest || !this._region) return [];
+
+    /** @type {Set<string>|null} */
+    let requiredKeys = null;
+    if (viewRect) {
+      requiredKeys = new Set(
+        getImageCellsForWorldView(
+          viewRect,
+          this._region,
+          this._cellSize,
+          this._manifest.sourceWidth,
+          this._manifest.sourceHeight,
+        ).map((c) => c.key),
+      );
+    }
+
+    /** @type {Array<{ bounds: object, state: string, lod: number, visible: boolean }>} */
+    const out = [];
+
+    const pushKey = (key, state, lod, visible) => {
+      const parts = key.split(',');
+      if (parts.length !== 2) return;
+      out.push({
+        bounds: imageCellToWorldBounds(
+          Number(parts[0]),
+          Number(parts[1]),
+          this._cellSize,
+          this._manifest.sourceWidth,
+          this._manifest.sourceHeight,
+          this._region,
+        ),
+        state,
+        lod,
+        visible,
+      });
+    };
+
+    for (const [key, entry] of this._cells) {
+      if (!entry?.mesh) continue;
+      const inView = !requiredKeys || requiredKeys.has(key);
+      const visible = entry.mesh.visible === true;
+      const loading = this._inflight.has(key);
+      if (!inView && !visible && !loading) continue;
+
+      const lod = Number(entry.lod) || 0;
+      let state;
+      if (loading) {
+        state = STATE_LOADING;
+      } else if (visible) {
+        state = lod === 0 ? STATE_RESIDENT_HI : STATE_RESIDENT_LO;
+      } else {
+        state = 'hidden';
+      }
+      pushKey(key, state, lod, visible);
+    }
+
+    for (const key of this._inflight) {
+      if (this._cells.has(key)) continue;
+      if (requiredKeys && !requiredKeys.has(key)) continue;
+      pushKey(key, STATE_LOADING, 99, false);
+    }
+
+    return out;
   }
 
   /**

@@ -17,6 +17,7 @@ import { clearPyramidMemoryCaches } from './texture-pyramid-builder.js';
  * @property {number} backgroundMaxSize
  * @property {number} tileAlbedoMaxSize
  * @property {number} sceneMegapixels
+ * @property {string} budgetReason
  */
 
 /**
@@ -46,7 +47,9 @@ export function computeTextureBudgetPolicy(renderer = null, capabilities = {}, o
   const sceneMp = Number(options.sceneMegapixels) || estimateSceneMegapixels();
   const deviceMem = Number(navigator?.deviceMemory) || 4;
 
+  const tierHigh = tier === 'high';
   let budgetMB = 512;
+  let budgetReason = 'default';
   if (tier === 'low') budgetMB = 256;
   else if (deviceMem >= 16) budgetMB = 1024;
   else if (deviceMem >= 8) budgetMB = 768;
@@ -57,8 +60,19 @@ export function computeTextureBudgetPolicy(renderer = null, capabilities = {}, o
   const isLargeScene = sceneMp >= 90;
   const isHugeScene = sceneMp >= 130;
 
-  if (isLargeScene) budgetMB = Math.min(budgetMB, 768);
-  if (isHugeScene) budgetMB = Math.min(budgetMB, 384);
+  if (isLargeScene && budgetMB > 768) {
+    budgetMB = 768;
+    budgetReason = 'large scene (≥90 MP)';
+  }
+  if (isHugeScene) {
+    // Software budget for Map Shine textures — not total GPU VRAM. Huge scenes still
+    // need a conservative cap, but high-end desktops can use more headroom than 384 MB.
+    const hugeCap = tierHigh && deviceMem >= 8 ? 640 : (tierHigh ? 512 : 384);
+    if (budgetMB > hugeCap) {
+      budgetMB = hugeCap;
+      budgetReason = `huge scene (≥130 MP, ${hugeCap} MB cap)`;
+    }
+  }
 
   const fd = window.MapShine?.sceneComposer?.foundrySceneData ?? {};
   const sr = globalThis.canvas?.dimensions?.sceneRect ?? {};
@@ -98,6 +112,7 @@ export function computeTextureBudgetPolicy(renderer = null, capabilities = {}, o
     backgroundMaxSize,
     tileAlbedoMaxSize,
     sceneMegapixels: sceneMp,
+    budgetReason,
   };
 }
 

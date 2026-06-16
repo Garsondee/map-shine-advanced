@@ -4960,6 +4960,7 @@ export class FloorCompositor {
 
     if (populateSlimRender) {
       this._runPopulateSlimRenderFrame();
+      try { this._renderBus?.syncStreaming?.(); } catch (_) {}
       try { getStreamingMinimap()?.update?.(); } catch (_) {}
       this._ensureDefaultFramebuffer();
       return;

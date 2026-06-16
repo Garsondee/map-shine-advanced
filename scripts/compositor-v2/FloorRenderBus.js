@@ -281,8 +281,8 @@ export class FloorRenderBus {
    */
   syncStreaming() {
     try {
-      this._applyTileVisibility();
       getTileStreamingManager().update();
+      this._applyTileVisibility();
     } catch (_) {}
   }
 

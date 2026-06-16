@@ -4,7 +4,7 @@
  */
 
 import { createLogger } from '../core/log.js';
-import { getVisibleWorldRect } from './view-projection-service.js';
+import { resolveStreamingViewRect } from './view-projection-service.js';
 import { selectLodFromZoom } from './streaming-grid.js';
 import {
   StreamedBackgroundGrid,
@@ -31,7 +31,7 @@ export class TileStreamingManager {
     /** @type {number} */
     this._heldZoom = 0;
     /** @type {string} */
-    this._viewSnapKey = '';
+    this._lastViewRectSig = '';
     /** @type {number} */
     this._lastStreamLod = 99;
   }
@@ -85,6 +85,104 @@ export class TileStreamingManager {
     if (mp >= 144) return cellPad;
     if (mp > 64) return Math.max(cellPad, 384);
     return Math.max(this._viewPadding, cellPad);
+  }
+
+  /**
+   * Quantized view-rect signature — detects zoom/pan frustum changes finer than cell buckets.
+   * @param {{ minX: number, minY: number, maxX: number, maxY: number }} view
+   * @param {number} lod
+   * @returns {string}
+   * @private
+   */
+  _buildViewRectSig(view, lod) {
+    const q = (n) => Math.round(Number(n) / 128);
+    return `${lod}:${q(view.minX)},${q(view.minY)},${q(view.maxX)},${q(view.maxY)}`;
+  }
+
+  /**
+   * @param {{ minX: number, minY: number, maxX: number, maxY: number }} view
+   * @param {number} lod
+   * @returns {boolean}
+   * @private
+   */
+  _hasPendingCellWork(view, lod) {
+    for (const grid of this._grids.values()) {
+      if (grid.hasPendingCellWork?.(view, lod)) return true;
+    }
+    for (const grid of this._regionGrids.values()) {
+      if (grid.hasPendingCellWork?.(view, lod)) return true;
+    }
+    return false;
+  }
+
+  /** Per-frame sync — call after camera update. */
+  update() {
+    if (!this._enabled) return;
+    if (this._grids.size === 0 && this._regionGrids.size === 0) return;
+
+    const padding = this._viewPaddingForScene();
+    const view = resolveStreamingViewRect(padding);
+    if (!view) return;
+
+    for (const [id, grid] of [...this._regionGrids.entries()]) {
+      if (grid._region && this._regionRedundantWithBackground(grid._region)) {
+        log.info(`Disposing redundant region stream [${id}]`);
+        grid.dispose();
+        this._regionGrids.delete(id);
+      }
+    }
+
+    const zoom = Number(window.MapShine?.sceneComposer?.currentZoom) || 1;
+    const budget = getTextureBudgetTracker();
+    const mp = estimateSceneMegapixels();
+    let lod = selectLodFromZoom(zoom, budget.getMaxLodLevel(), mp);
+
+    // Hold finer LOD briefly while zoom stabilizes — coarsening on zoom-out is immediate.
+    if (this._heldZoomLod !== 99) {
+      const zBase = Math.max(0.05, this._heldZoom);
+      const zDelta = Math.abs(zoom - this._heldZoom) / zBase;
+      if (zDelta < 0.1 && lod < this._heldZoomLod) {
+        lod = this._heldZoomLod;
+      }
+    }
+    this._heldZoomLod = lod;
+    this._heldZoom = zoom;
+
+    const lodChanged = lod !== this._lastStreamLod;
+    const viewRectSig = this._buildViewRectSig(view, lod);
+    const viewChanged = viewRectSig !== this._lastViewRectSig;
+    const pendingWork = this._hasPendingCellWork(view, lod);
+    const syncOptions = { sharpenOnZoom: lodChanged };
+
+    if (lodChanged || viewChanged || pendingWork) {
+      if (lodChanged) {
+        this._lastStreamLod = lod;
+        for (const grid of this._grids.values()) {
+          grid.notifyZoomLod?.(lod);
+        }
+        for (const grid of this._regionGrids.values()) {
+          grid.notifyZoomLod?.(lod);
+        }
+      }
+      if (viewChanged) this._lastViewRectSig = viewRectSig;
+      for (const grid of this._grids.values()) {
+        void grid.syncToView(view, lod, syncOptions);
+      }
+      for (const grid of this._regionGrids.values()) {
+        void grid.syncToView(view, lod, syncOptions);
+      }
+    }
+
+    for (const grid of this._grids.values()) {
+      grid.reconcileVisibility?.(view);
+    }
+    for (const grid of this._regionGrids.values()) {
+      grid.reconcileVisibility?.(view);
+    }
+
+    if (budget.getUsedFraction() > 0.96) {
+      budget.enforceBudget();
+    }
   }
 
   /**
@@ -159,79 +257,9 @@ export class TileStreamingManager {
     return true;
   }
 
-  /** Per-frame sync — call after camera update. */
-  update() {
-    if (!this._enabled) return;
-    if (this._grids.size === 0 && this._regionGrids.size === 0) return;
-
-    const view = getVisibleWorldRect(this._viewPaddingForScene());
-    if (!view) return;
-
-    for (const [id, grid] of [...this._regionGrids.entries()]) {
-      if (grid._region && this._regionRedundantWithBackground(grid._region)) {
-        log.info(`Disposing redundant region stream [${id}]`);
-        grid.dispose();
-        this._regionGrids.delete(id);
-      }
-    }
-
-    const zoom = Number(window.MapShine?.sceneComposer?.currentZoom) || 1;
-    const budget = getTextureBudgetTracker();
-    const mp = estimateSceneMegapixels();
-    let lod = selectLodFromZoom(zoom, budget.getMaxLodLevel(), mp);
-
-    if (this._heldZoomLod !== 99) {
-      const zBase = Math.max(0.05, this._heldZoom);
-      const zDelta = Math.abs(zoom - this._heldZoom) / zBase;
-      if (zDelta < 0.1 && lod !== this._heldZoomLod) {
-        lod = this._heldZoomLod;
-      }
-    }
-    this._heldZoomLod = lod;
-    this._heldZoom = zoom;
-
-    const cs = budget.getRecommendedTileSize();
-    const viewSnapKey = `${lod}:${Math.floor(view.minX / cs)},${Math.floor(view.minY / cs)},${Math.ceil(view.maxX / cs)},${Math.ceil(view.maxY / cs)}`;
-    const lodChanged = lod !== this._lastStreamLod;
-    const hasPendingWork = () => {
-      for (const grid of this._grids.values()) {
-        if (grid.hasPendingCellWork?.(view, lod)) return true;
-      }
-      for (const grid of this._regionGrids.values()) {
-        if (grid.hasPendingCellWork?.(view, lod)) return true;
-      }
-      return false;
-    };
-    const viewChanged = viewSnapKey !== this._viewSnapKey;
-    if (lodChanged) {
-      this._lastStreamLod = lod;
-      this._viewSnapKey = '';
-      for (const grid of this._grids.values()) {
-        grid.notifyZoomLod?.(lod);
-        void grid.syncToView(view, lod);
-      }
-      for (const grid of this._regionGrids.values()) {
-        grid.notifyZoomLod?.(lod);
-        void grid.syncToView(view, lod);
-      }
-    } else if (viewChanged || hasPendingWork()) {
-      if (viewChanged) this._viewSnapKey = viewSnapKey;
-      for (const grid of this._grids.values()) {
-        void grid.syncToView(view, lod);
-      }
-      for (const grid of this._regionGrids.values()) {
-        void grid.syncToView(view, lod);
-      }
-    }
-
-    if (budget.getUsedFraction() > 0.96) {
-      budget.enforceBudget();
-    }
-  }
-
   /** Force all streaming grids to reload pyramid cells (cache/schema change). */
   reloadAllCells() {
-    this._viewSnapKey = '';
+    this._lastViewRectSig = '';
     this._lastStreamLod = 99;
     for (const grid of this._grids.values()) {
       grid.reloadAllCells?.();

@@ -10,7 +10,7 @@ import { estimateSceneMegapixels } from '../streaming/texture-budget-policy.js';
 import { selectLodFromZoom } from '../streaming/streaming-grid.js';
 import {
   getSceneRectMeta,
-  getVisibleWorldRect,
+  resolveStreamingViewRect,
 } from '../streaming/view-projection-service.js';
 
 const log = createLogger('TileStreamingReport');
@@ -268,7 +268,7 @@ export function buildTileStreamingReport() {
   const zoom = Number(window.MapShine?.sceneComposer?.currentZoom) || 1;
   const mp = estimateSceneMegapixels();
   const meta = getSceneRectMeta();
-  const viewRect = getVisibleWorldRect();
+  const viewRect = resolveStreamingViewRect();
   const zoomLod = selectLodFromZoom(zoom, budget.getMaxLodLevel(), mp);
 
   /** @type {object[]} */

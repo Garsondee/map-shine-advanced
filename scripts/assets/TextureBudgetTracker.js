@@ -100,6 +100,9 @@ export class TextureBudgetTracker {
     /** @type {number} GPU maxTextureSize snapshot */
     this.maxTextureSize = 8192;
 
+    /** @type {string} Human-readable reason for the active budget cap */
+    this.budgetReason = 'default';
+
     /** @type {number} */
     this._lastEnforceMs = 0;
 
@@ -119,8 +122,9 @@ export class TextureBudgetTracker {
     this.backgroundMaxSize = policy.backgroundMaxSize ?? this.backgroundMaxSize;
     this.tileAlbedoMaxSize = policy.tileAlbedoMaxSize ?? this.tileAlbedoMaxSize;
     this.maxTextureSize = policy.maxTextureSize ?? this.maxTextureSize;
+    this.budgetReason = policy.budgetReason ?? this.budgetReason;
     log.info(
-      `TextureBudgetTracker configured — ${(this.budgetBytes / 1024 / 1024).toFixed(0)} MB, `
+      `TextureBudgetTracker configured — ${(this.budgetBytes / 1024 / 1024).toFixed(0)} MB (${this.budgetReason}), `
       + `cell=${this.cellSize}, maskScale=${this.maskResolutionScale.toFixed(2)}`,
     );
   }

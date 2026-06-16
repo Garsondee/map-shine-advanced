@@ -81,6 +81,74 @@ export function getVisibleWorldRect(padding = 0) {
 }
 
 /**
+ * Stable ground-plane view rect for debug overlays (minimap).
+ * Uses the live Three camera after PIXI sync — avoids stale raycast cache
+ * when called outside the EffectComposer camera phase.
+ *
+ * @returns {{ minX: number, minY: number, maxX: number, maxY: number }|null}
+ */
+export function getStableViewRectForMinimap() {
+  const camera = window.MapShine?.sceneComposer?.camera ?? null;
+  if (!camera) return getVisibleWorldRect(0);
+
+  if (camera.isOrthographicCamera) {
+    const zoom = Math.max(1e-6, Number(camera.zoom) || 1);
+    return {
+      minX: camera.position.x + camera.left / zoom,
+      minY: camera.position.y + camera.bottom / zoom,
+      maxX: camera.position.x + camera.right / zoom,
+      maxY: camera.position.y + camera.top / zoom,
+    };
+  }
+
+  if (camera.isPerspectiveCamera) {
+    const gz = resolveGroundZ();
+    const dist = Math.max(1e-3, Math.abs(Number(camera.position.z) - gz));
+    const fovRad = ((Number(camera.fov) || 60) * Math.PI) / 180;
+    const halfH = dist * Math.tan(fovRad * 0.5);
+    const aspect = Math.max(1e-6, Number(camera.aspect) || 1);
+    const halfW = halfH * aspect;
+    return {
+      minX: camera.position.x - halfW,
+      minY: camera.position.y - halfH,
+      maxX: camera.position.x + halfW,
+      maxY: camera.position.y + halfH,
+    };
+  }
+
+  return getVisibleWorldRect(0);
+}
+
+/**
+ * View rect for tile streaming — always ticks projection first, then picks the
+ * larger of raycast vs stable FOV box so zoom-out never keeps a stale small frustum.
+ *
+ * @param {number} [padding=0]
+ * @returns {{ minX: number, minY: number, maxX: number, maxY: number }|null}
+ */
+export function resolveStreamingViewRect(padding = 0) {
+  tickViewProjection(
+    window.MapShine?.sceneComposer?.camera ?? null,
+    resolveGroundZ(),
+  );
+  const pad = Math.max(0, Number(padding) || 0);
+  const expand = (r) => ({
+    minX: r.minX - pad,
+    minY: r.minY - pad,
+    maxX: r.maxX + pad,
+    maxY: r.maxY + pad,
+  });
+  const raycast = getVisibleWorldRect(0);
+  const stable = getStableViewRectForMinimap();
+  const stablePad = stable ? expand(stable) : null;
+  if (!raycast && !stablePad) return null;
+  if (!raycast) return stablePad;
+  if (!stablePad) return raycast;
+  const area = (r) => Math.max(1, r.maxX - r.minX) * Math.max(1, r.maxY - r.minY);
+  return area(stablePad) > area(raycast) * 1.02 ? stablePad : raycast;
+}
+
+/**
  * Foundry scene rect metadata from canvas dimensions.
  * @returns {{ x: number, y: number, width: number, height: number, canvasWidth: number, canvasHeight: number }}
  */

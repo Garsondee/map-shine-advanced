@@ -67,6 +67,41 @@ function pickOverviewLod(manifest, cellSize, targetPx = 220) {
   return lod;
 }
 
+/**
+ * @param {{ minX: number, minY: number, maxX: number, maxY: number }|null|undefined} rect
+ * @returns {boolean}
+ */
+function isFiniteViewRect(rect) {
+  if (!rect) return false;
+  const { minX, minY, maxX, maxY } = rect;
+  return [minX, minY, maxX, maxY].every((n) => Number.isFinite(n))
+    && maxX > minX
+    && maxY > minY;
+}
+
+/**
+ * @param {(wx: number, wy: number) => { x: number, y: number }} toMini
+ * @param {{ minX: number, minY: number, maxX: number, maxY: number }|null} cameraView
+ * @returns {{ x: number, y: number }|null}
+ */
+function resolveMinimapCameraCenter(toMini, cameraView) {
+  const cam = window.MapShine?.sceneComposer?.camera
+    ?? window.MapShine?.floorCompositorV2?.camera
+    ?? null;
+  const px = cam?.position?.x;
+  const py = cam?.position?.y;
+  if (Number.isFinite(px) && Number.isFinite(py)) {
+    return toMini(px, py);
+  }
+  if (isFiniteViewRect(cameraView)) {
+    return toMini(
+      (cameraView.minX + cameraView.maxX) * 0.5,
+      (cameraView.minY + cameraView.maxY) * 0.5,
+    );
+  }
+  return null;
+}
+
 export class StreamingMinimap {
   constructor() {
     this._root = null;
@@ -384,7 +419,10 @@ export class StreamingMinimap {
       const budget = getTextureBudgetTracker();
       const manager = getTileStreamingManager();
       const grids = manager.getGrids();
+      // Streaming tiles use the union frustum; the orange camera overlay uses the
+      // stable FOV box so it does not flip between raycast vs stable near the 1.02 area gate.
       const streamView = resolveStreamingViewRect(0);
+      const cameraView = getStableViewRectForMinimap();
 
       let cellSize = resolveRecommendedTileSize(budget);
       for (const grid of grids.values()) {
@@ -401,11 +439,15 @@ export class StreamingMinimap {
       const overlayCells = [];
       let visibleCellCount = 0;
       for (const grid of grids.values()) {
-        for (const cell of grid.getMinimapDisplayCells?.(streamView) ?? []) {
-          overlayCells.push(cell);
-          if (cell.visible && (cell.state === 'resident-hi' || cell.state === 'resident-lo')) {
-            visibleCellCount += 1;
+        try {
+          for (const cell of grid.getMinimapDisplayCells?.(streamView) ?? []) {
+            overlayCells.push(cell);
+            if (cell.visible && (cell.state === 'resident-hi' || cell.state === 'resident-lo')) {
+              visibleCellCount += 1;
+            }
           }
+        } catch (gridErr) {
+          log.warn('StreamingMinimap grid snapshot failed', gridErr);
         }
       }
       overlayCells.sort(
@@ -426,24 +468,23 @@ export class StreamingMinimap {
       ctx.lineWidth = 1.5;
       ctx.strokeRect(sceneTl.x + 0.5, sceneTl.y + 0.5, Math.max(0, sceneWpx - 1), Math.max(0, sceneHpx - 1));
 
-      const view = streamView ?? getStableViewRectForMinimap();
-      if (view) {
-        const vtl = toMini(view.minX, view.maxY);
-        const vw = (view.maxX - view.minX) * scale;
-        const vh = (view.maxY - view.minY) * scale;
+      if (isFiniteViewRect(cameraView)) {
+        const vtl = toMini(cameraView.minX, cameraView.maxY);
+        const vw = (cameraView.maxX - cameraView.minX) * scale;
+        const vh = (cameraView.maxY - cameraView.minY) * scale;
         ctx.fillStyle = 'rgba(251,146,60,0.12)';
         ctx.fillRect(vtl.x, vtl.y, vw, vh);
         ctx.strokeStyle = '#fb923c';
         ctx.lineWidth = 2;
         ctx.strokeRect(vtl.x + 0.5, vtl.y + 0.5, Math.max(0, vw - 1), Math.max(0, vh - 1));
 
-        const cx = (view.minX + view.maxX) * 0.5;
-        const cy = (view.minY + view.maxY) * 0.5;
-        const center = toMini(cx, cy);
-        ctx.fillStyle = '#fb923c';
-        ctx.beginPath();
-        ctx.arc(center.x, center.y, 3, 0, Math.PI * 2);
-        ctx.fill();
+        const center = resolveMinimapCameraCenter(toMini, cameraView);
+        if (center) {
+          ctx.fillStyle = '#fb923c';
+          ctx.beginPath();
+          ctx.arc(center.x, center.y, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
 
       ctx.fillStyle = 'rgba(15,23,42,0.72)';
@@ -453,9 +494,9 @@ export class StreamingMinimap {
       ctx.fillText(`g${grids.size} c${visibleCellCount}`, margin + 4, margin + 10);
 
       const bs = resolveBudgetState(budget);
-      const uv = view ? (() => {
-        const tl = worldToSceneUv(view.minX, view.maxY);
-        const br = worldToSceneUv(view.maxX, view.minY);
+      const uv = streamView ? (() => {
+        const tl = worldToSceneUv(streamView.minX, streamView.maxY);
+        const br = worldToSceneUv(streamView.maxX, streamView.minY);
         return {
           uMin: Math.min(tl.u, br.u),
           vMin: Math.min(tl.v, br.v),
@@ -476,7 +517,8 @@ export class StreamingMinimap {
         grids: grids.size,
         streamedCellCount,
         visibleCellCount,
-        hasView: !!view,
+        hasView: !!streamView,
+        hasCameraView: !!cameraView,
         cellSize,
         budgetReason,
       };
@@ -487,7 +529,7 @@ export class StreamingMinimap {
           `grids ${grids.size}`,
           `${Math.round(meta.width)}×${Math.round(meta.height)}`,
           `cell ${cellSize}px`,
-          view && uv ? `view ${((uv.uMax - uv.uMin) * 100).toFixed(0)}×${((uv.vMax - uv.vMin) * 100).toFixed(0)}%` : 'view —',
+          streamView && uv ? `view ${((uv.uMax - uv.uMin) * 100).toFixed(0)}×${((uv.vMax - uv.vMin) * 100).toFixed(0)}%` : 'view —',
         ].join(' · ');
         const line2 = [
           `budget ${(bs.usedBytes / 1024 / 1024).toFixed(0)}/${(bs.budgetBytes / 1024 / 1024).toFixed(0)} MB${overPct}`,
@@ -499,7 +541,8 @@ export class StreamingMinimap {
         statsEl.style.whiteSpace = 'pre-wrap';
       }
     } catch (err) {
-      this._lastDebug = { error: String(err?.message ?? err), enabled: this._enabled };
+      const errText = String(err?.message ?? err ?? 'unknown');
+      this._lastDebug = { error: errText, enabled: this._enabled };
       log.warn('StreamingMinimap update failed', err);
       try {
         ctx.fillStyle = '#7f1d1d';
@@ -507,6 +550,8 @@ export class StreamingMinimap {
         ctx.fillStyle = '#fecaca';
         ctx.font = '11px sans-serif';
         ctx.fillText('minimap error', 8, 20);
+        const detail = errText.slice(0, 120);
+        if (detail) ctx.fillText(detail, 8, 36);
       } catch (_) {}
     }
   }

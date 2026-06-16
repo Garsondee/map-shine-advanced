@@ -4,6 +4,7 @@
  */
 
 import { applyVegetationWindAnchorToOverlay } from './vegetation-bulk-wind.js';
+import { remapPlaneMaskUvs } from '../../streaming/vegetation-streaming-bridge.js';
 
 /** @type {import('three').DataTexture|null} */
 let _fallbackClumpTex = null;
@@ -1265,7 +1266,16 @@ export function homogenizeClumpWindAttributesOnGeometry(geometry, islandBySeed =
  * @param {import('three').DataTexture|null} clumpTex
  * @returns {number} segment count used
  */
-export function upgradeWindDisplacedGeometry(entry, tileW, tileH, centerX, centerY, clumpTex, islandCount = 1) {
+export function upgradeWindDisplacedGeometry(
+  entry,
+  tileW,
+  tileH,
+  centerX,
+  centerY,
+  clumpTex,
+  islandCount = 1,
+  maskUvRect = null,
+) {
   const THREE = window.THREE;
   if (!THREE || !entry?.mesh) return 0;
 
@@ -1274,6 +1284,9 @@ export function upgradeWindDisplacedGeometry(entry, tileW, tileH, centerX, cente
   const seg = windDisplacedMeshSegments(tileW, tileH, maskW, maskH, islandCount);
   const oldGeo = entry.mesh.geometry;
   const newGeo = new THREE.PlaneGeometry(tileW, tileH, seg, seg);
+  if (maskUvRect) {
+    remapPlaneMaskUvs(newGeo, maskUvRect);
+  }
   initClumpWindAttributesOnGeometry(newGeo, centerX, centerY, 0);
 
   entry.mesh.geometry = newGeo;
@@ -1641,7 +1654,7 @@ export function bindClumpCoordTextureToOverlayMaterials(
     const tileH = Number(placement?.tileH) || 0;
     if (clumpTex && tileW > 0 && tileH > 0) {
       entry._windMeshSegments = upgradeWindDisplacedGeometry(
-        entry, tileW, tileH, centerX, centerY, clumpTex, islandCount,
+        entry, tileW, tileH, centerX, centerY, clumpTex, islandCount, entry.maskUv ?? null,
       );
     }
     entry._clumpVertexBake = bakeClumpWindAttributesToMeshes(

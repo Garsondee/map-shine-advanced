@@ -5,6 +5,7 @@
 
 import { createLogger } from '../core/log.js';
 import { GROUND_Z } from '../compositor-v2/LayerOrderPolicy.js';
+import { TILE_FEATURE_LAYERS } from '../core/render-layers.js';
 import { intersectRects, rectsIntersect } from './streaming-grid.js';
 import {
   buildPyramidManifest,
@@ -14,7 +15,7 @@ import {
 import { isHugeImageSource } from './probe-image-dimensions.js';
 import { loadImageTexture } from '../assets/image-texture-loader.js';
 import { getTextureBudgetTracker, estimateTextureBytes } from '../assets/TextureBudgetTracker.js';
-import { getSceneRegionFromFoundryData } from './view-projection-service.js';
+import { getCameraGroundCenter, getSceneRegionFromFoundryData } from './view-projection-service.js';
 import { estimateSceneMegapixels } from './texture-budget-policy.js';
 
 const log = createLogger('StreamedBackgroundGrid');
@@ -29,6 +30,11 @@ const STATE_RESIDENT_HI = 'resident-hi';
 const STATE_RESIDENT_LO = 'resident-lo';
 /** @type {import('./streaming-grid.js').StreamingCellState} */
 const STATE_FALLBACK = 'fallback-only';
+
+/** Only the camera-centered tile is ring 0; ring 1 is the immediate neighbor shell. */
+const FOCAL_RING = 0;
+/** Inner frustum rings that always target zoom-native LOD (focal + neighbors). */
+const INNER_SHARP_RING_MAX = 2;
 
 /** @param {number} effectiveLod @param {Iterable<string>} requiredKeys */
 function buildViewSyncKey(effectiveLod, requiredKeys) {
@@ -55,6 +61,61 @@ function countUnmetRequiredCells(required, effectiveLod, cells, inflight) {
     }
   }
   return n;
+}
+
+/**
+ * Image pyramid cell containing a world-space ground point.
+ *
+ * @param {number} worldX
+ * @param {number} worldY
+ * @param {{ minX: number, minY: number, maxX: number, maxY: number }} region
+ * @param {number} cellSize
+ * @param {number} sourceW
+ * @param {number} sourceH
+ * @returns {{ cellX: number, cellY: number, key: string }|null}
+ */
+export function worldPointToImageCell(worldX, worldY, region, cellSize, sourceW, sourceH) {
+  if (!region || !(sourceW > 0 && sourceH > 0)) return null;
+  const rw = Math.max(1, region.maxX - region.minX);
+  const rh = Math.max(1, region.maxY - region.minY);
+  const u = (worldX - region.minX) / rw;
+  const v = (worldY - region.minY) / rh;
+  const px = u * sourceW;
+  const py = (1 - v) * sourceH;
+  const cs = Math.max(1, cellSize);
+  const cellX = Math.floor(px / cs);
+  const cellY = Math.floor(py / cs);
+  if (cellX < 0 || cellY < 0) return null;
+  if (cellX * cs >= sourceW || cellY * cs >= sourceH) return null;
+  return { cellX, cellY, key: `${cellX},${cellY}` };
+}
+
+/**
+ * Chebyshev ring index for spiral-outward tile priority (0 = focal cell).
+ *
+ * @param {number} focalCellX
+ * @param {number} focalCellY
+ * @param {number} cellX
+ * @param {number} cellY
+ * @returns {number}
+ */
+export function imageCellChebyshevRing(focalCellX, focalCellY, cellX, cellY) {
+  return Math.max(Math.abs(cellX - focalCellX), Math.abs(cellY - focalCellY));
+}
+
+/**
+ * Resolve the image cell under the camera center for a mapped region.
+ *
+ * @param {{ minX: number, minY: number, maxX: number, maxY: number }} region
+ * @param {number} cellSize
+ * @param {number} sourceW
+ * @param {number} sourceH
+ * @returns {{ cellX: number, cellY: number, key: string }|null}
+ */
+export function resolveFocalImageCell(region, cellSize, sourceW, sourceH) {
+  const cam = getCameraGroundCenter();
+  if (!cam) return null;
+  return worldPointToImageCell(cam.x, cam.y, region, cellSize, sourceW, sourceH);
 }
 
 /** @returns {number} */
@@ -131,6 +192,46 @@ export class StreamedBackgroundGrid {
   }
 
   /** @private */
+  _countVisibleLod0Residents() {
+    let n = 0;
+    for (const entry of this._cells.values()) {
+      if (entry?.mesh?.visible && (Number(entry.lod) || 0) === 0) n += 1;
+    }
+    return n;
+  }
+
+  /**
+   * Cap how many visible cells may stay at LOD 0 when the software budget is tight.
+   * @param {number} cellLod
+   * @param {{ cellX: number, cellY: number }} cell
+   * @param {{ cellX: number, cellY: number }|null} focalCell
+   * @returns {number}
+   * @private
+   */
+  _clampCellLodForBudget(cellLod, cell, focalCell) {
+    if (cellLod > 0) return cellLod;
+
+    const ring = this._cellFrustumRing(cell, focalCell);
+    const used = getTextureBudgetTracker().getUsedFraction();
+    // Frustum core may always decode LOD 0 while under the hard budget cap.
+    if (ring <= INNER_SHARP_RING_MAX && used <= 1.0) return 0;
+    if (used <= 0.98) return 0;
+
+    const mp = estimateSceneMegapixels();
+    let maxLod0 = mp >= 144 ? 8 : 12;
+    if (used > 1.0) maxLod0 = mp >= 144 ? 6 : 8;
+
+    const lod0Count = this._countVisibleLod0Residents();
+    if (lod0Count >= maxLod0) return 1;
+    return 0;
+  }
+
+  /** @private */
+  _zoomNativeLod(lod) {
+    return Math.min(this._maxLod, Math.max(0, Math.floor(Number(lod) || 0)));
+  }
+
+  /** @private */
   _effectiveLod(lod) {
     const budget = getTextureBudgetTracker();
     let effective = Math.max(0, Math.floor(Number(lod) || 0));
@@ -142,42 +243,104 @@ export class StreamedBackgroundGrid {
   }
 
   /**
-   * Per-cell LOD target — center of view keeps full resolution under VRAM pressure.
-   * @param {{ cellX: number, cellY: number }} cell
-   * @param {{ minX: number, minY: number, maxX: number, maxY: number }} viewRect
-   * @param {number} lod
+   * Sharpen LOD for camera-centered rings when budget headroom allows.
+   * Global zoom LOD may be 1 at moderate zoom, but the focal tile still targets LOD 0.
+   *
+   * @param {number} native
+   * @param {number} ring
+   * @param {number} used
    * @returns {number}
    * @private
    */
-  _effectiveLodForCell(cell, viewRect, lod) {
-    const base = this._effectiveLod(lod);
+  _innerSharpLodTarget(native, ring, used) {
+    if (ring > INNER_SHARP_RING_MAX) return native;
+    if (used > 1.0) return Math.min(this._maxLod, native + (ring === FOCAL_RING ? 1 : 0));
+    if (ring === FOCAL_RING) return 0;
+    if (used <= 0.99) return Math.max(0, native - (ring <= 1 ? 1 : 0));
+    return native;
+  }
+
+  /**
+   * Per-cell LOD target — camera-centered tile keeps full resolution under VRAM pressure.
+   * @param {{ cellX: number, cellY: number }} cell
+   * @param {{ minX: number, minY: number, maxX: number, maxY: number }} viewRect
+   * @param {number} lod
+   * @param {{ cellX: number, cellY: number }|null} [focalCell]
+   * @returns {number}
+   * @private
+   */
+  _effectiveLodForCell(cell, viewRect, lod, focalCell = null) {
+    const native = this._zoomNativeLod(lod);
     const budget = getTextureBudgetTracker();
     const used = budget.getUsedFraction();
-    if (used <= 0.92 || !viewRect || !this._manifest) return base;
+    if (!this._manifest) return native;
 
     const region = this._getSceneRegion();
-    if (!region) return base;
+    if (!region) return native;
 
-    const bounds = imageCellToWorldBounds(
-      cell.cellX,
-      cell.cellY,
+    const focal = focalCell ?? resolveFocalImageCell(
+      region,
       this._cellSize,
       this._manifest.sourceWidth,
       this._manifest.sourceHeight,
-      region,
     );
-    const bcx = (bounds.minX + bounds.maxX) * 0.5;
-    const bcy = (bounds.minY + bounds.maxY) * 0.5;
-    const vcx = (viewRect.minX + viewRect.maxX) * 0.5;
-    const vcy = (viewRect.minY + viewRect.maxY) * 0.5;
-    const vw = Math.max(1, viewRect.maxX - viewRect.minX);
-    const vh = Math.max(1, viewRect.maxY - viewRect.minY);
-    const dist = Math.max(Math.abs(bcx - vcx) / (vw * 0.5), Math.abs(bcy - vcy) / (vh * 0.5));
+    if (!focal) {
+      if (!viewRect || used <= 0.92) return native;
+      const bounds = imageCellToWorldBounds(
+        cell.cellX,
+        cell.cellY,
+        this._cellSize,
+        this._manifest.sourceWidth,
+        this._manifest.sourceHeight,
+        region,
+      );
+      const bcx = (bounds.minX + bounds.maxX) * 0.5;
+      const bcy = (bounds.minY + bounds.maxY) * 0.5;
+      const vcx = (viewRect.minX + viewRect.maxX) * 0.5;
+      const vcy = (viewRect.minY + viewRect.maxY) * 0.5;
+      const vw = Math.max(1, viewRect.maxX - viewRect.minX);
+      const vh = Math.max(1, viewRect.maxY - viewRect.minY);
+      const dist = Math.max(Math.abs(bcx - vcx) / (vw * 0.5), Math.abs(bcy - vcy) / (vh * 0.5));
+      if (dist <= 0.5) return native;
+      if (used > 1.0) return Math.min(this._maxLod, native + (dist <= 1.05 ? 1 : 2));
+      if (used > 0.96) return Math.min(this._maxLod, native + 1);
+      return native;
+    }
 
-    if (dist <= 0.5) return base;
-    if (used > 1.0) return Math.min(this._maxLod, base + (dist <= 1.05 ? 1 : 2));
-    if (used > 0.95) return Math.min(this._maxLod, base + 1);
-    return base;
+    const ring = imageCellChebyshevRing(focal.cellX, focal.cellY, cell.cellX, cell.cellY);
+
+    if (ring <= INNER_SHARP_RING_MAX) {
+      return this._innerSharpLodTarget(native, ring, used);
+    }
+
+    if (used <= 0.92) return native;
+    if (ring === 2 && used <= 0.96) return native;
+    if (used > 1.0) return Math.min(this._maxLod, native + (ring <= 3 ? 1 : 2));
+    if (used > 0.96) return Math.min(this._maxLod, native + (ring <= 2 ? 0 : 1));
+    return native;
+  }
+
+  /**
+   * @param {{ cellX: number, cellY: number }} cell
+   * @param {{ cellX: number, cellY: number }|null} focalCell
+   * @returns {number}
+   * @private
+   */
+  _cellFrustumRing(cell, focalCell) {
+    if (!focalCell) return 9999;
+    return imageCellChebyshevRing(focalCell.cellX, focalCell.cellY, cell.cellX, cell.cellY);
+  }
+
+  /**
+   * @param {{ cellX: number, cellY: number }} cell
+   * @param {{ cellX: number, cellY: number }|null} focalCell
+   * @returns {boolean}
+   * @private
+   */
+  _isFocalCell(cell, focalCell) {
+    return !!focalCell
+      && cell.cellX === focalCell.cellX
+      && cell.cellY === focalCell.cellY;
   }
 
   /** @private */
@@ -195,14 +358,33 @@ export class StreamedBackgroundGrid {
    * @returns {boolean}
    * @private
    */
-  _residentLodAcceptable(existingLod, cell, viewRect, requestedLod, panStabilize = false) {
+  _residentLodAcceptable(existingLod, cell, viewRect, requestedLod, panStabilize = false, focalCell = null) {
     const el = Number(existingLod) || 0;
+    const nativeLod = this._zoomNativeLod(requestedLod);
     const zoomLod = this._effectiveLod(requestedLod);
+    const focal = focalCell ?? (this._manifest && this._getSceneRegion()
+      ? resolveFocalImageCell(
+        this._getSceneRegion(),
+        this._cellSize,
+        this._manifest.sourceWidth,
+        this._manifest.sourceHeight,
+      )
+      : null);
+    const ring = this._cellFrustumRing(cell, focal);
     const cellTarget = viewRect
-      ? this._effectiveLodForCell(cell, viewRect, requestedLod)
+      ? this._effectiveLodForCell(cell, viewRect, requestedLod, focal)
       : zoomLod;
+
+    if (ring <= INNER_SHARP_RING_MAX) {
+      if (el <= cellTarget) return true;
+      return false;
+    }
+
     if (el <= cellTarget) return true;
-    if (panStabilize) return el <= zoomLod + this._vramLodSlack();
+    if (panStabilize) {
+      const panFloor = Math.min(cellTarget, zoomLod + this._vramLodSlack());
+      return el <= panFloor;
+    }
     return false;
   }
 
@@ -276,6 +458,34 @@ export class StreamedBackgroundGrid {
       this._manifest.sourceHeight,
     );
     if (this._inflight.size > 0) return true;
+
+    const budget = getTextureBudgetTracker();
+    const overBudget = budget.getUsedFraction() > 1.0;
+    const focal = resolveFocalImageCell(
+      region,
+      this._cellSize,
+      this._manifest.sourceWidth,
+      this._manifest.sourceHeight,
+    );
+
+    if (overBudget) {
+      return required.some((cell) => {
+        if (this._inflight.has(cell.key)) return true;
+        const entry = this._cells.get(cell.key);
+        if (!entry?.mesh || !entry.mesh.visible) return true;
+        const ring = focal ? this._cellFrustumRing(cell, focal) : 9999;
+        if (ring > INNER_SHARP_RING_MAX) return false;
+        return !this._residentLodAcceptable(
+          entry.lod,
+          cell,
+          viewRect,
+          lod,
+          false,
+          focal,
+        );
+      });
+    }
+
     return required.some((cell) =>
       this._cellNeedsWork(cell, viewRect, lod, { panStabilize: false }),
     );
@@ -287,60 +497,95 @@ export class StreamedBackgroundGrid {
    */
   _scheduleRequiredCellLoads(required, effectiveLod, epoch, viewRect = null, requestedLod = effectiveLod, panStabilize = true) {
     const budget = getTextureBudgetTracker();
+    const region = this._getSceneRegion();
+    const focal = region && this._manifest
+      ? resolveFocalImageCell(
+        region,
+        this._cellSize,
+        this._manifest.sourceWidth,
+        this._manifest.sourceHeight,
+      )
+      : null;
+
     const sorted = [...required].sort((a, b) => {
-      const la = this._effectiveLodForCell(a, viewRect, requestedLod);
-      const lb = this._effectiveLodForCell(b, viewRect, requestedLod);
+      const la = viewRect
+        ? this._effectiveLodForCell(a, viewRect, requestedLod, focal)
+        : effectiveLod;
+      const lb = viewRect
+        ? this._effectiveLodForCell(b, viewRect, requestedLod, focal)
+        : effectiveLod;
+      const existingA = this._cells.get(a.key);
+      const existingB = this._cells.get(b.key);
       const needA = !this._residentLodAcceptable(
-        this._cells.get(a.key)?.lod ?? 99,
+        existingA?.lod ?? 99,
         a,
         viewRect,
         requestedLod,
         panStabilize,
+        focal,
       );
       const needB = !this._residentLodAcceptable(
-        this._cells.get(b.key)?.lod ?? 99,
+        existingB?.lod ?? 99,
         b,
         viewRect,
         requestedLod,
         panStabilize,
+        focal,
       );
       if (needA !== needB) return needA ? -1 : 1;
-      if (!viewRect) return 0;
-      const region = this._getSceneRegion();
-      if (!region || !this._manifest) return 0;
+
+      const ringA = focal
+        ? imageCellChebyshevRing(focal.cellX, focal.cellY, a.cellX, a.cellY)
+        : 9999;
+      const ringB = focal
+        ? imageCellChebyshevRing(focal.cellX, focal.cellY, b.cellX, b.cellY)
+        : 9999;
+      if (ringA !== ringB) return ringA - ringB;
+
+      const gapA = needA ? Math.max(0, (Number(existingA?.lod) || 99) - la) : 0;
+      const gapB = needB ? Math.max(0, (Number(existingB?.lod) || 99) - lb) : 0;
+      if (gapA !== gapB) return gapB - gapA;
+
+      if (la !== lb) return la - lb;
+
+      if (!viewRect || !region || !this._manifest) return 0;
       const ba = imageCellToWorldBounds(a.cellX, a.cellY, this._cellSize, this._manifest.sourceWidth, this._manifest.sourceHeight, region);
       const bb = imageCellToWorldBounds(b.cellX, b.cellY, this._cellSize, this._manifest.sourceWidth, this._manifest.sourceHeight, region);
-      const vcx = (viewRect.minX + viewRect.maxX) * 0.5;
-      const vcy = (viewRect.minY + viewRect.maxY) * 0.5;
-      const da = (ba.minX + ba.maxX) * 0.5 - vcx;
-      const db = (bb.minX + bb.maxX) * 0.5 - vcx;
-      const dya = (ba.minY + ba.maxY) * 0.5 - vcy;
-      const dyb = (bb.minY + bb.maxY) * 0.5 - vcy;
+      const cam = getCameraGroundCenter();
+      const anchorX = cam?.x ?? (viewRect.minX + viewRect.maxX) * 0.5;
+      const anchorY = cam?.y ?? (viewRect.minY + viewRect.maxY) * 0.5;
+      const da = (ba.minX + ba.maxX) * 0.5 - anchorX;
+      const db = (bb.minX + bb.maxX) * 0.5 - anchorX;
+      const dya = (ba.minY + ba.maxY) * 0.5 - anchorY;
+      const dyb = (bb.minY + bb.maxY) * 0.5 - anchorY;
       return (da * da + dya * dya) - (db * db + dyb * dyb);
     });
 
     for (const cell of sorted) {
-      const cellLod = viewRect
-        ? this._effectiveLodForCell(cell, viewRect, requestedLod)
+      let cellLod = viewRect
+        ? this._effectiveLodForCell(cell, viewRect, requestedLod, focal)
         : effectiveLod;
+      cellLod = this._clampCellLodForBudget(cellLod, cell, focal);
       this._cellLastUsed.set(cell.key, performance.now());
       const existing = this._cells.get(cell.key);
       if (existing?.mesh) {
-        if (this._residentLodAcceptable(existing.lod, cell, viewRect, requestedLod, panStabilize)) {
+        if (this._residentLodAcceptable(existing.lod, cell, viewRect, requestedLod, panStabilize, focal)) {
           existing.mesh.visible = this._isFloorVisible();
           this._setCellState(cell.key, existing.lod === 0 ? STATE_RESIDENT_HI : STATE_RESIDENT_LO);
           continue;
         }
         existing.mesh.visible = this._isFloorVisible();
         if (this._inflight.has(cell.key)) continue;
-        if (this._inflight.size >= this._maxConcurrent) continue;
+        const innerSharp = focal && this._cellFrustumRing(cell, focal) <= INNER_SHARP_RING_MAX;
+        if (!innerSharp && this._inflight.size >= this._maxConcurrent) continue;
         this._setCellState(cell.key, STATE_LOADING);
         this._inflight.add(cell.key);
         void this._loadCell(cell.cellX, cell.cellY, cellLod, epoch);
         continue;
       }
       if (this._inflight.has(cell.key)) continue;
-      if (this._inflight.size >= this._maxConcurrent) continue;
+      const innerSharp = focal && this._cellFrustumRing(cell, focal) <= INNER_SHARP_RING_MAX;
+      if (!innerSharp && this._inflight.size >= this._maxConcurrent) continue;
       if (this._cells.size >= this._maxTotalResidentCells()) {
         this.evictCells(budget, 1);
       }
@@ -418,33 +663,62 @@ export class StreamedBackgroundGrid {
    */
   async _mountCoarseGridFallback(lod = 3) {
     const region = this._getSceneRegion();
-    if (!region || !this._manifest || !this._scene) return false;
+    const manifest = this._manifest;
+    if (!region || !manifest || !this._scene) return false;
     const epoch = this._decodeEpoch;
+    const sourceWidth = manifest.sourceWidth;
+    const sourceHeight = manifest.sourceHeight;
+    const cols = manifest.cols;
+    const rows = manifest.rows;
+    const cellSize = this._cellSize;
+    const src = this._src;
 
     /** @type {import('three').Mesh[]} */
     const meshes = [];
-    const { cols, rows } = this._manifest;
+
+    /** @param {import('three').Mesh[]} list @private */
+    const disposeBuiltMeshes = (list) => {
+      for (const mesh of list) {
+        try {
+          const tex = mesh.material?.map;
+          const fbKey = mesh.userData?.tileId;
+          if (fbKey) this._bus._unregisterStreamingMesh?.(fbKey);
+          getTextureBudgetTracker().unregister(tex);
+          mesh.removeFromParent();
+          mesh.geometry?.dispose?.();
+          mesh.material?.dispose?.();
+        } catch (_) {}
+      }
+    };
 
     for (let cellY = 0; cellY < rows; cellY += 1) {
       for (let cellX = 0; cellX < cols; cellX += 1) {
-        if (epoch !== this._decodeEpoch) return false;
+        if (epoch !== this._decodeEpoch) {
+          disposeBuiltMeshes(meshes);
+          return false;
+        }
         const tex = await loadPyramidTileTexture(
-          this._src,
+          src,
           cellX,
           cellY,
           lod,
-          this._cellSize,
-          this._manifest.sourceWidth,
-          this._manifest.sourceHeight,
+          cellSize,
+          sourceWidth,
+          sourceHeight,
         );
+        if (epoch !== this._decodeEpoch) {
+          try { tex?.dispose?.(); } catch (_) {}
+          disposeBuiltMeshes(meshes);
+          return false;
+        }
         if (!tex) continue;
 
         const bounds = imageCellToWorldBounds(
           cellX,
           cellY,
-          this._cellSize,
-          this._manifest.sourceWidth,
-          this._manifest.sourceHeight,
+          cellSize,
+          sourceWidth,
+          sourceHeight,
           region,
         );
         const mesh = this._createCellMesh(cellX, cellY, bounds, tex, lod);
@@ -460,6 +734,11 @@ export class StreamedBackgroundGrid {
         );
         meshes.push(mesh);
       }
+    }
+
+    if (epoch !== this._decodeEpoch) {
+      disposeBuiltMeshes(meshes);
+      return false;
     }
 
     this._fallbackCellMeshes = meshes;
@@ -586,7 +865,9 @@ export class StreamedBackgroundGrid {
 
     if (useCoarseFallback) {
       const fallbackLod = mp > 144 ? 4 : 3;
-      void this._mountCoarseGridFallback(fallbackLod);
+      void this._mountCoarseGridFallback(fallbackLod).catch((err) => {
+        log.warn('StreamedBackgroundGrid: coarse fallback mount failed', src, err);
+      });
     } else {
       let fallbackTex = await loadFallbackTexture(src, fallbackMax);
       if (!fallbackTex) {
@@ -627,7 +908,7 @@ export class StreamedBackgroundGrid {
     const region = this._getSceneRegion();
     if (!this._manifest || !viewRect || !region) return;
     const epoch = this._decodeEpoch;
-    const effectiveLod = this._stabilizeLod(this._effectiveLod(lod));
+    const effectiveLod = this._stabilizeLod(lod);
     const panStabilize = !options.sharpenOnZoom;
     const required = getImageCellsForWorldView(
       viewRect,
@@ -643,11 +924,14 @@ export class StreamedBackgroundGrid {
       if (!existing?.mesh) return false;
       return !this._residentLodAcceptable(existing.lod, cell, viewRect, lod, false);
     });
-    const needsLoad = required.some((cell) =>
-      this._cellNeedsWork(cell, viewRect, lod, { panStabilize }),
-    );
     const budget = getTextureBudgetTracker();
-    if (budget.getUsedFraction() > 1.0 && (needsSharpen || needsLoad)) {
+    const overBudget = budget.getUsedFraction() > 1.0;
+    const needsLoad = overBudget
+      ? this.hasPendingCellWork(viewRect, lod)
+      : required.some((cell) =>
+        this._cellNeedsWork(cell, viewRect, lod, { panStabilize }),
+      );
+    if (overBudget && (needsSharpen || needsLoad)) {
       this.evictCells(budget, 4);
     }
     if (syncKey === this._syncKey && !needsSharpen && !needsLoad) {
@@ -1121,6 +1405,11 @@ export class StreamedRegionGrid {
     this._rotation = 0;
     this._manifest = null;
     this._fallbackMesh = null;
+    this._isOverhead = false;
+    this._roofShadowCaster = false;
+    this._cloudShadowBlockerEnabled = false;
+    this._tileRenderOrder = 0;
+    this._alpha = 1;
     /** @type {Map<string, { mesh: import('three').Object3D, lod: number }>} */
     this._cells = new Map();
     /** @type {Map<string, import('./streaming-grid.js').StreamingCellState>} */
@@ -1207,6 +1496,20 @@ export class StreamedRegionGrid {
   }
 
   /**
+   * Zoom-native LOD unless severely over the software budget cap.
+   * @param {number} lod
+   * @returns {number}
+   * @private
+   */
+  _streamingLodTarget(lod) {
+    const native = Math.max(0, Math.floor(Number(lod) || 0));
+    if (getTextureBudgetTracker().getUsedFraction() <= 1.0) {
+      return Math.min(native, this._maxLod);
+    }
+    return this._effectiveLod(lod);
+  }
+
+  /**
    * @param {{ key: string }} cell
    * @param {number} effectiveLod
    * @returns {boolean}
@@ -1248,7 +1551,7 @@ export class StreamedRegionGrid {
    */
   hasPendingCellWork(viewRect, lod) {
     if (!this._manifest || !viewRect || !this._region) return false;
-    const effectiveLod = this._stabilizeLod(this._effectiveLod(lod));
+    const effectiveLod = this._stabilizeLod(this._streamingLodTarget(lod));
     const required = getImageCellsForWorldView(
       viewRect,
       this._region,
@@ -1265,7 +1568,36 @@ export class StreamedRegionGrid {
    */
   _scheduleRequiredCellLoads(required, effectiveLod, epoch) {
     const budget = getTextureBudgetTracker();
-    for (const cell of required) {
+    const focal = this._region && this._manifest
+      ? resolveFocalImageCell(
+        this._region,
+        this._cellSize,
+        this._manifest.sourceWidth,
+        this._manifest.sourceHeight,
+      )
+      : null;
+
+    const sorted = [...required].sort((a, b) => {
+      const existingA = this._cells.get(a.key);
+      const existingB = this._cells.get(b.key);
+      const needA = this._cellNeedsWork(a, effectiveLod);
+      const needB = this._cellNeedsWork(b, effectiveLod);
+      if (needA !== needB) return needA ? -1 : 1;
+
+      const ringA = focal
+        ? imageCellChebyshevRing(focal.cellX, focal.cellY, a.cellX, a.cellY)
+        : 9999;
+      const ringB = focal
+        ? imageCellChebyshevRing(focal.cellX, focal.cellY, b.cellX, b.cellY)
+        : 9999;
+      if (ringA !== ringB) return ringA - ringB;
+
+      const gapA = needA ? Math.max(0, (Number(existingA?.lod) || 99) - effectiveLod) : 0;
+      const gapB = needB ? Math.max(0, (Number(existingB?.lod) || 99) - effectiveLod) : 0;
+      return gapB - gapA;
+    });
+
+    for (const cell of sorted) {
       this._cellLastUsed.set(cell.key, performance.now());
       const existing = this._cells.get(cell.key);
       if (existing?.mesh) {
@@ -1355,6 +1687,11 @@ export class StreamedRegionGrid {
    * @param {number} [options.worldH]
    * @param {number} [options.z]
    * @param {number} [options.rotation]
+   * @param {boolean} [options.isOverhead]
+   * @param {boolean} [options.roofShadowCaster]
+   * @param {boolean} [options.cloudShadowBlockerEnabled]
+   * @param {number} [options.renderOrder]
+   * @param {number} [options.alpha]
    */
   async mount(src, options) {
     this.dispose();
@@ -1365,6 +1702,11 @@ export class StreamedRegionGrid {
     this._worldH = options.worldH ?? 1000;
     this._z = options.z ?? 0;
     this._rotation = options.rotation ?? 0;
+    this._isOverhead = !!options.isOverhead;
+    this._roofShadowCaster = !!options.roofShadowCaster;
+    this._cloudShadowBlockerEnabled = !!options.cloudShadowBlockerEnabled;
+    this._tileRenderOrder = Number(options.renderOrder) || 0;
+    this._alpha = typeof options.alpha === 'number' ? options.alpha : 1;
     this._decodeEpoch += 1;
 
     const budget = getTextureBudgetTracker();
@@ -1415,7 +1757,7 @@ export class StreamedRegionGrid {
     }
 
     const epoch = this._decodeEpoch;
-    const effectiveLod = this._stabilizeLod(this._effectiveLod(lod));
+    const effectiveLod = this._stabilizeLod(this._streamingLodTarget(lod));
     const required = getImageCellsForWorldView(
       viewRect,
       this._region,
@@ -1538,18 +1880,29 @@ export class StreamedRegionGrid {
       depthTest: false,
       blending: THREE.NormalBlending,
       side: THREE.DoubleSide,
+      opacity: this._alpha,
     });
     const mesh = new THREE.Mesh(geom, mat);
     mesh.frustumCulled = false;
     mesh.scale.set(1, -1, 1);
     mesh.position.set(centerX, centerY, this._z + (isFallback ? -0.001 : 0.002 + lod * 0.0001));
     mesh.rotation.z = this._rotation;
-    mesh.renderOrder = isFallback ? 0 : 1 + lod;
+    mesh.renderOrder = isFallback ? this._tileRenderOrder : this._tileRenderOrder + lod * 0.001;
+    mesh.layers.set(0);
+    if (this._roofShadowCaster) {
+      mesh.layers.enable(20);
+      if (this._cloudShadowBlockerEnabled) {
+        mesh.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+      }
+    }
     mesh.userData = {
       tileId: busKey,
+      foundryTileId: this._key,
+      mapShineBusTile: true,
       mapShineStreaming: true,
       mapShineStreamingFallback: isFallback,
       mapShineStreamingCell: !isFallback,
+      isOverhead: this._isOverhead,
       floorIndex: this._floorIndex,
     };
     this._scene.add(mesh);
@@ -1651,6 +2004,135 @@ export class StreamedRegionGrid {
       });
     }
     return out;
+  }
+
+  /**
+   * Apply live tile transform/metadata changes without remounting the pyramid.
+   * @param {object} options
+   * @param {{ minX: number, minY: number, maxX: number, maxY: number }} [options.region]
+   * @param {number} [options.floorIndex]
+   * @param {number} [options.z]
+   * @param {number} [options.rotation]
+   * @param {boolean} [options.isOverhead]
+   * @param {boolean} [options.roofShadowCaster]
+   * @param {boolean} [options.cloudShadowBlockerEnabled]
+   * @param {number} [options.renderOrder]
+   * @param {number} [options.alpha]
+   * @returns {boolean}
+   */
+  applyLayoutUpdate(options = {}) {
+    const prevRegion = this._region;
+    const nextRegion = options.region ?? prevRegion;
+    if (!prevRegion || !nextRegion) return false;
+
+    if ('floorIndex' in options) this._floorIndex = Number(options.floorIndex) || 0;
+    if ('z' in options) this._z = Number(options.z) || 0;
+    if ('rotation' in options) this._rotation = Number(options.rotation) || 0;
+    if ('isOverhead' in options) this._isOverhead = !!options.isOverhead;
+    if ('roofShadowCaster' in options) this._roofShadowCaster = !!options.roofShadowCaster;
+    if ('cloudShadowBlockerEnabled' in options) {
+      this._cloudShadowBlockerEnabled = !!options.cloudShadowBlockerEnabled;
+    }
+    if ('renderOrder' in options) this._tileRenderOrder = Number(options.renderOrder) || 0;
+    if ('alpha' in options) this._alpha = typeof options.alpha === 'number' ? options.alpha : 1;
+
+    const prevW = prevRegion.maxX - prevRegion.minX;
+    const prevH = prevRegion.maxY - prevRegion.minY;
+    const nextW = nextRegion.maxX - nextRegion.minX;
+    const nextH = nextRegion.maxY - nextRegion.minY;
+    const sizeChanged = Math.abs(prevW - nextW) > 0.001 || Math.abs(prevH - nextH) > 0.001;
+
+    const prevCx = (prevRegion.minX + prevRegion.maxX) / 2;
+    const prevCy = (prevRegion.minY + prevRegion.maxY) / 2;
+    const nextCx = (nextRegion.minX + nextRegion.maxX) / 2;
+    const nextCy = (nextRegion.minY + nextRegion.maxY) / 2;
+
+    this._region = nextRegion;
+
+    if (sizeChanged) {
+      this.reloadAllCells();
+      this._reshapeFallbackMesh();
+    } else {
+      const dx = nextCx - prevCx;
+      const dy = nextCy - prevCy;
+      if (Math.abs(dx) > 0.001 || Math.abs(dy) > 0.001) {
+        for (const entry of this._cells.values()) {
+          if (entry?.mesh) {
+            entry.mesh.position.x += dx;
+            entry.mesh.position.y += dy;
+          }
+        }
+        if (this._fallbackMesh) {
+          this._fallbackMesh.position.x += dx;
+          this._fallbackMesh.position.y += dy;
+        }
+      }
+    }
+
+    this._applyLayoutToAllMeshes();
+    this._syncKey = '';
+    return true;
+  }
+
+  /** @private */
+  _reshapeFallbackMesh() {
+    if (!this._fallbackMesh || !this._region) return;
+    const THREE = window.THREE;
+    if (!THREE) return;
+
+    const w = this._region.maxX - this._region.minX;
+    const h = this._region.maxY - this._region.minY;
+    const centerX = this._region.minX + w / 2;
+    const centerY = this._region.minY + h / 2;
+
+    try { this._fallbackMesh.geometry?.dispose?.(); } catch (_) {}
+    this._fallbackMesh.geometry = new THREE.PlaneGeometry(w, h);
+    this._fallbackMesh.position.set(centerX, centerY, this._z - 0.001);
+    this._applyLayoutToMesh(this._fallbackMesh, true, 0);
+  }
+
+  /** @private */
+  _applyLayoutToAllMeshes() {
+    if (this._fallbackMesh) this._applyLayoutToMesh(this._fallbackMesh, true, 0);
+    for (const entry of this._cells.values()) {
+      const lod = Number(entry?.lod) || 0;
+      if (entry?.mesh) this._applyLayoutToMesh(entry.mesh, false, lod);
+    }
+  }
+
+  /**
+   * @param {import('three').Mesh} mesh
+   * @param {boolean} isFallback
+   * @param {number} lod
+   * @private
+   */
+  _applyLayoutToMesh(mesh, isFallback, lod = 0) {
+    mesh.rotation.z = this._rotation;
+    mesh.position.z = this._z + (isFallback ? -0.001 : 0.002 + lod * 0.0001);
+    mesh.renderOrder = isFallback ? this._tileRenderOrder : this._tileRenderOrder + lod * 0.001;
+
+    if (mesh.material) {
+      mesh.material.opacity = this._alpha;
+      mesh.material.needsUpdate = true;
+    }
+
+    mesh.layers.set(0);
+    if (this._roofShadowCaster) {
+      mesh.layers.enable(20);
+      if (this._cloudShadowBlockerEnabled) {
+        mesh.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+      } else {
+        mesh.layers.disable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+      }
+    } else {
+      mesh.layers.disable(20);
+      mesh.layers.disable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+    }
+
+    mesh.userData = mesh.userData || {};
+    mesh.userData.isOverhead = this._isOverhead;
+    mesh.userData.floorIndex = this._floorIndex;
+    mesh.visible = this._isFloorVisible();
   }
 
   /** Drop resident cells for cache/schema reload. */

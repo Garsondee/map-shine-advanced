@@ -3,13 +3,27 @@
  * @module compositor-v2/effects/vegetation-mask-load
  */
 
+import { buildClumpCoordTexture } from './vegetation-clump-field.js';
+
 /** Max dimension for Tree hover opacity CPU cache. */
 export const VEGETATION_ALPHA_SAMPLE_MAX_DIM = 512;
 /** Max dimension for vegetation mask CPU readback (matches clump bake cap). */
 export const VEGETATION_MASK_READ_MAX_DIM = 1024;
 
+/** Max stream-cell overlays created per sync (avoids load spikes). */
+export const VEGETATION_STREAM_OVERLAY_CREATE_BUDGET = 2;
+
 /** @type {{ enqueue: (fn: () => void|Promise<void>) => Promise<void> }|null} */
 let _sharedMaskLoadQueue = null;
+
+/** @type {Map<string, { tex: import('three').Texture|null, refCount: number, loading: Promise<import('three').Texture>|null }>} */
+const _sharedMaskTextures = new Map();
+
+/** @type {Map<string, { data: Uint8ClampedArray, width: number, height: number, srcWidth: number, srcHeight: number }>} */
+const _sharedMaskReadbacks = new Map();
+
+/** @type {Map<string, { texture: import('three').DataTexture, islandBySeed: object|null, primaryAnchor: object|null, islandCount: number, refCount: number }>} */
+const _sharedClumpBakes = new Map();
 
 /**
  * Global bounded queue for vegetation mask post-load CPU work (readback + clump bake).
@@ -46,6 +60,232 @@ export function getVegetationMaskLoadQueue(concurrency = 2) {
     },
   };
   return _sharedMaskLoadQueue;
+}
+
+/** @type {Map<string, boolean>} */
+const _sharedDeriveAlphaByUrl = new Map();
+
+/**
+ * @param {string} url
+ * @returns {string}
+ */
+export function vegetationSharedClumpKey(url, deriveAlpha) {
+  return `${String(url || '')}|${deriveAlpha ? 1 : 0}`;
+}
+
+/**
+ * Configure sRGB on a loaded vegetation mask texture.
+ * @param {import('three').Texture} tex
+ */
+export function configureVegetationMaskTexture(tex) {
+  const THREE = window.THREE;
+  if (!tex) return;
+  tex.flipY = true;
+  if ('colorSpace' in tex && THREE?.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
+  else if ('encoding' in tex && THREE?.sRGBEncoding) tex.encoding = THREE.sRGBEncoding;
+  tex.needsUpdate = true;
+}
+
+/**
+ * Load or reuse one GPU mask texture per URL (stream cells share the same full-scene mask).
+ * @param {import('three').TextureLoader} loader
+ * @param {string} url
+ * @returns {Promise<import('three').Texture>}
+ */
+export function acquireVegetationMaskTexture(loader, url) {
+  const key = String(url || '').trim();
+  if (!loader || !key) return Promise.reject(new Error('acquireVegetationMaskTexture: missing loader or url'));
+
+  const existing = _sharedMaskTextures.get(key);
+  if (existing?.tex) {
+    existing.refCount += 1;
+    return Promise.resolve(existing.tex);
+  }
+  if (existing?.loading) {
+    return existing.loading.then((tex) => {
+      existing.refCount += 1;
+      return tex;
+    });
+  }
+
+  /** @type {{ tex: import('three').Texture|null, refCount: number, loading: Promise<import('three').Texture>|null }} */
+  const slot = { tex: null, refCount: 1, loading: null };
+  _sharedMaskTextures.set(key, slot);
+  slot.loading = new Promise((resolve, reject) => {
+    loader.load(
+      key,
+      (tex) => {
+        configureVegetationMaskTexture(tex);
+        slot.tex = tex;
+        slot.loading = null;
+        resolve(tex);
+      },
+      undefined,
+      (err) => {
+        if (_sharedMaskTextures.get(key) === slot) _sharedMaskTextures.delete(key);
+        slot.loading = null;
+        reject(err);
+      },
+    );
+  });
+  return slot.loading;
+}
+
+/**
+ * @param {string} url
+ */
+export function releaseVegetationMaskTexture(url) {
+  const key = String(url || '').trim();
+  const slot = _sharedMaskTextures.get(key);
+  if (!slot) return;
+  slot.refCount = Math.max(0, slot.refCount - 1);
+  if (slot.refCount > 0) return;
+  try { slot.tex?.dispose?.(); } catch (_) {}
+  _sharedMaskTextures.delete(key);
+  _sharedMaskReadbacks.delete(key);
+  _sharedDeriveAlphaByUrl.delete(key);
+}
+
+/**
+ * Cached CPU readback for a shared mask URL.
+ * @param {string} url
+ * @param {import('three').Texture} tex
+ * @returns {{ data: Uint8ClampedArray, width: number, height: number, srcWidth: number, srcHeight: number }|null}
+ */
+export function getSharedVegetationMaskReadback(url, tex) {
+  const key = String(url || '').trim();
+  if (!key) return null;
+  const cached = _sharedMaskReadbacks.get(key);
+  if (cached) return cached;
+  const read = readMaskImageData(tex, VEGETATION_MASK_READ_MAX_DIM);
+  if (read) _sharedMaskReadbacks.set(key, read);
+  return read;
+}
+
+/**
+ * Whether a vegetation mask needs derive-alpha (white backdrop in opaque alpha).
+ * @param {Uint8ClampedArray} data
+ * @param {number} width
+ * @param {number} height
+ * @returns {boolean}
+ */
+export function detectVegetationBackdropNeedsDeriveAlpha(data, width, height) {
+  if (!data || !(width > 0) || !(height > 0)) return true;
+  const pixelCount = width * height;
+  let anyLowAlpha = false;
+  let whiteOpaque = 0;
+  let sampled = 0;
+  const stride = pixelCount > 262144 ? Math.ceil(pixelCount / 262144) : 1;
+  for (let i = 0; i < pixelCount; i += stride) {
+    sampled += 1;
+    const idx = i * 4;
+    const a = data[idx + 3];
+    if (a < 250) {
+      anyLowAlpha = true;
+      continue;
+    }
+    const r = data[idx];
+    const g = data[idx + 1];
+    const b = data[idx + 2];
+    const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    const chroma = Math.max(r, g, b) - Math.min(r, g, b);
+    if (lum >= 217 && chroma < 15) whiteOpaque += 1;
+  }
+  if (!anyLowAlpha) return true;
+  return whiteOpaque > sampled * 0.02;
+}
+
+/**
+ * Cached derive-alpha flag for a shared vegetation mask URL.
+ * @param {string} url
+ * @param {import('three').Texture} tex
+ * @returns {boolean}
+ */
+export function inferVegetationMaskDeriveAlpha(url, tex) {
+  const key = String(url || '').trim();
+  if (!key) return true;
+  const maskRead = getSharedVegetationMaskReadback(key, tex);
+  const path = key.toLowerCase();
+  if (path.includes('_bush') || path.includes('_tree')) {
+    return true;
+  }
+  if (!maskRead) return false;
+  return detectDerivedAlphaFromImageData(maskRead.data, maskRead.width, maskRead.height);
+}
+
+/**
+ * Cached derive-alpha flag for a shared vegetation mask URL.
+ * @param {string} url
+ * @param {import('three').Texture} tex
+ * @returns {boolean}
+ */
+export function getSharedVegetationDeriveAlpha(url, tex) {
+  const key = String(url || '').trim();
+  if (!key) return true;
+  const path = key.toLowerCase();
+  if (path.includes('_bush') || path.includes('_tree')) {
+    _sharedDeriveAlphaByUrl.set(key, true);
+    return true;
+  }
+  if (_sharedDeriveAlphaByUrl.has(key)) return _sharedDeriveAlphaByUrl.get(key) === true;
+  const derive = inferVegetationMaskDeriveAlpha(key, tex);
+  _sharedDeriveAlphaByUrl.set(key, derive);
+  return derive;
+}
+
+/**
+ * @param {string} cacheKey
+ * @param {() => ReturnType<typeof buildClumpCoordTexture>} factory
+ */
+export function acquireSharedClumpBake(cacheKey, factory) {
+  const key = String(cacheKey || '').trim();
+  if (!key) return null;
+  const existing = _sharedClumpBakes.get(key);
+  if (existing) {
+    existing.refCount += 1;
+    return existing;
+  }
+  const built = factory();
+  if (!built?.texture) return null;
+  const slot = {
+    texture: built.texture,
+    islandBySeed: built.islandBySeed ?? null,
+    primaryAnchor: built.primaryAnchor ?? null,
+    islandCount: Number(built.islandCount) || 1,
+    refCount: 1,
+  };
+  _sharedClumpBakes.set(key, slot);
+  return slot;
+}
+
+/**
+ * @param {string} cacheKey
+ */
+export function releaseSharedClumpBake(cacheKey) {
+  const key = String(cacheKey || '').trim();
+  const slot = _sharedClumpBakes.get(key);
+  if (!slot) return;
+  slot.refCount = Math.max(0, slot.refCount - 1);
+  if (slot.refCount > 0) return;
+  try { slot.texture?.dispose?.(); } catch (_) {}
+  _sharedClumpBakes.delete(key);
+}
+
+/**
+ * Bake or reuse a full-scene clump field for stream-split overlays.
+ * @param {string} cacheKey
+ * @param {import('three').Texture} tex
+ * @param {boolean} deriveAlpha
+ * @param {object} clumpPlacement
+ * @param {object|null} imageDataOpts
+ */
+export function acquireSharedClumpBakeFromMask(cacheKey, tex, deriveAlpha, clumpPlacement, imageDataOpts = null) {
+  return acquireSharedClumpBake(cacheKey, () => buildClumpCoordTexture(
+    tex,
+    deriveAlpha,
+    clumpPlacement,
+    imageDataOpts,
+  ));
 }
 
 /** Yield one animation frame so populate does not spawn every overlay in one turn. */

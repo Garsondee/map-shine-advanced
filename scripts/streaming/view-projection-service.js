@@ -88,31 +88,39 @@ export function getVisibleWorldRect(padding = 0) {
  * @returns {{ minX: number, minY: number, maxX: number, maxY: number }|null}
  */
 export function getStableViewRectForMinimap() {
-  const camera = window.MapShine?.sceneComposer?.camera ?? null;
-  if (!camera) return getVisibleWorldRect(0);
+  const camera = window.MapShine?.sceneComposer?.camera
+    ?? window.MapShine?.floorCompositorV2?.camera
+    ?? null;
+  const pos = camera?.position;
+  if (!camera || !pos) return getVisibleWorldRect(0);
+
+  const px = Number(pos.x);
+  const py = Number(pos.y);
+  if (!Number.isFinite(px) || !Number.isFinite(py)) return getVisibleWorldRect(0);
 
   if (camera.isOrthographicCamera) {
     const zoom = Math.max(1e-6, Number(camera.zoom) || 1);
     return {
-      minX: camera.position.x + camera.left / zoom,
-      minY: camera.position.y + camera.bottom / zoom,
-      maxX: camera.position.x + camera.right / zoom,
-      maxY: camera.position.y + camera.top / zoom,
+      minX: px + (Number(camera.left) || 0) / zoom,
+      minY: py + (Number(camera.bottom) || 0) / zoom,
+      maxX: px + (Number(camera.right) || 0) / zoom,
+      maxY: py + (Number(camera.top) || 0) / zoom,
     };
   }
 
   if (camera.isPerspectiveCamera) {
     const gz = resolveGroundZ();
-    const dist = Math.max(1e-3, Math.abs(Number(camera.position.z) - gz));
+    const pz = Number(pos.z);
+    const dist = Number.isFinite(pz) ? Math.max(1e-3, Math.abs(pz - gz)) : 1;
     const fovRad = ((Number(camera.fov) || 60) * Math.PI) / 180;
     const halfH = dist * Math.tan(fovRad * 0.5);
     const aspect = Math.max(1e-6, Number(camera.aspect) || 1);
     const halfW = halfH * aspect;
     return {
-      minX: camera.position.x - halfW,
-      minY: camera.position.y - halfH,
-      maxX: camera.position.x + halfW,
-      maxY: camera.position.y + halfH,
+      minX: px - halfW,
+      minY: py - halfH,
+      maxX: px + halfW,
+      maxY: py + halfH,
     };
   }
 
@@ -236,6 +244,23 @@ export function getVisibleSceneUvRect(padding = 0) {
     uMax: Math.max(tl.u, br.u),
     vMax: Math.max(tl.v, br.v),
   };
+}
+
+/**
+ * Camera ground-plane center in Three.js world XY (tile under crosshair).
+ * Ticks projection when the cache is stale.
+ *
+ * @returns {{ x: number, y: number }|null}
+ */
+export function getCameraGroundCenter() {
+  if (!_cache?.isValid) {
+    tickViewProjection(
+      window.MapShine?.sceneComposer?.camera ?? null,
+      resolveGroundZ(),
+    );
+  }
+  if (!_cache?.isValid) return null;
+  return { x: _cache.px, y: _cache.py };
 }
 
 /**

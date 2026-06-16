@@ -5,9 +5,11 @@
 
 import { getTextureBudgetTracker } from '../assets/TextureBudgetTracker.js';
 import { estimateSceneMegapixels } from './texture-budget-policy.js';
-import { getSceneRegionFromFoundryData } from './view-projection-service.js';
-import { imageCellToWorldBounds } from './streamed-background-grid.js';
+import { getSceneRegionFromFoundryData, resolveStreamingViewRect } from './view-projection-service.js';
 import { getTileStreamingManager } from './tile-streaming-manager.js';
+import { overlayWorldBounds, tileBoundsIntersectView } from '../compositor-v2/effects/vegetation-overlay-runtime.js';
+import { tileAlbedoOrder } from '../compositor-v2/LayerOrderPolicy.js';
+import { imageCellToWorldBounds } from './streamed-background-grid.js';
 
 /**
  * True when background tree/bush overlays should wait for streamed tiles.
@@ -22,6 +24,70 @@ export function shouldGateBackgroundVegetationOnStreaming(sceneW, sceneH) {
 }
 
 /**
+ * Image-space bleed for stream-cell vegetation planes (matches bulk wind cap ~0.13 UV).
+ * @param {number} cellSize
+ * @returns {number}
+ */
+export function resolveVegetationStreamCellBleedPx(cellSize) {
+  const cs = Math.max(1, Number(cellSize) || 1);
+  return Math.max(48, Math.ceil(cs * 0.15));
+}
+
+/**
+ * @param {number} cellX
+ * @param {number} cellY
+ * @param {number} cellSize
+ * @param {number} sourceW
+ * @param {number} sourceH
+ * @param {number} [bleedPx=0]
+ * @returns {{ pxMin: number, pyMin: number, pxMax: number, pyMax: number }}
+ */
+export function imageCellPixelRect(cellX, cellY, cellSize, sourceW, sourceH, bleedPx = 0) {
+  const cs = Math.max(1, cellSize);
+  const bp = Math.max(0, Math.floor(Number(bleedPx) || 0));
+  return {
+    pxMin: Math.max(0, cellX * cs - bp),
+    pyMin: Math.max(0, cellY * cs - bp),
+    pxMax: Math.min(Math.max(1, sourceW), cellX * cs + cs + bp),
+    pyMax: Math.min(Math.max(1, sourceH), cellY * cs + cs + bp),
+  };
+}
+
+/**
+ * @param {number} cellX
+ * @param {number} cellY
+ * @param {number} cellSize
+ * @param {number} sourceW
+ * @param {number} sourceH
+ * @param {{ minX: number, minY: number, maxX: number, maxY: number }} region
+ * @param {number} [bleedPx=0]
+ * @returns {{ minX: number, minY: number, maxX: number, maxY: number }}
+ */
+export function imageCellToWorldBoundsBleed(
+  cellX,
+  cellY,
+  cellSize,
+  sourceW,
+  sourceH,
+  region,
+  bleedPx = 0,
+) {
+  const { pxMin, pyMin, pxMax, pyMax } = imageCellPixelRect(
+    cellX, cellY, cellSize, sourceW, sourceH, bleedPx,
+  );
+  const rw = Math.max(1, region.maxX - region.minX);
+  const rh = Math.max(1, region.maxY - region.minY);
+  const sw = Math.max(1, sourceW);
+  const sh = Math.max(1, sourceH);
+  return {
+    minX: region.minX + (pxMin / sw) * rw,
+    maxX: region.minX + (pxMax / sw) * rw,
+    minY: region.minY + (1 - pyMax / sh) * rh,
+    maxY: region.minY + (1 - pyMin / sh) * rh,
+  };
+}
+
+/**
  * @param {number} cellX
  * @param {number} cellY
  * @param {number} cellSize
@@ -29,14 +95,12 @@ export function shouldGateBackgroundVegetationOnStreaming(sceneW, sceneH) {
  * @param {number} sourceH
  * @returns {{ u0: number, v0: number, u1: number, v1: number }}
  */
-export function maskUvRectForImageCell(cellX, cellY, cellSize, sourceW, sourceH) {
-  const cs = Math.max(1, cellSize);
+export function maskUvRectForImageCell(cellX, cellY, cellSize, sourceW, sourceH, bleedPx = 0) {
+  const { pxMin, pyMin, pxMax, pyMax } = imageCellPixelRect(
+    cellX, cellY, cellSize, sourceW, sourceH, bleedPx,
+  );
   const sw = Math.max(1, sourceW);
   const sh = Math.max(1, sourceH);
-  const pxMin = cellX * cs;
-  const pyMin = cellY * cs;
-  const pxMax = Math.min(sw, pxMin + cs);
-  const pyMax = Math.min(sh, pyMin + cs);
   return {
     u0: pxMin / sw,
     u1: pxMax / sw,
@@ -64,13 +128,199 @@ export function remapPlaneMaskUvs(geometry, rect) {
 }
 
 /**
- * Background vegetation uses a single full-scene overlay gated by streaming residency.
- * Per-cell mesh splits were removed — clump/wind geometry rebuild reset UVs to 0–1
- * against the full mask, duplicating the canopy on every streaming cell.
+ * Per-cell vegetation planes stay disabled: cell-sized quads still show opaque white
+ * mask backdrops despite derive-alpha (sub-rect UV + clump wind geometry). Streaming
+ * benefit comes from gating visibility, draw scissor, and half-res shadows instead.
+ * @param {number} _sceneW
+ * @param {number} _sceneH
  * @returns {boolean}
  */
-export function shouldSplitBackgroundVegetation() {
+export function shouldSplitBackgroundVegetation(_sceneW, _sceneH) {
   return false;
+}
+
+/**
+ * True when the camera view rect intersects any resident streaming cell.
+ * @param {string} gridKey
+ * @param {Set<string>} visibleCells
+ * @param {{ minX: number, minY: number, maxX: number, maxY: number }|null} viewRect
+ * @returns {boolean}
+ */
+export function viewIntersectsAnyStreamingCell(gridKey, visibleCells, viewRect) {
+  if (!visibleCells?.size) return false;
+  if (!viewRect) return true;
+  try {
+    const manager = getTileStreamingManager();
+    const grid = manager.getGrids?.()?.get?.(gridKey)
+      ?? manager.getRegionGrids?.()?.get?.(gridKey)
+      ?? null;
+    const manifest = grid?._manifest;
+    const fd = window.MapShine?.sceneComposer?.foundrySceneData ?? {};
+    const region = getSceneRegionFromFoundryData(fd);
+    const sourceW = Number(manifest?.sourceWidth ?? fd.sceneWidth ?? fd.width ?? 0);
+    const sourceH = Number(manifest?.sourceHeight ?? fd.sceneHeight ?? fd.height ?? 0);
+    if (!(region && sourceW > 0 && sourceH > 0)) return true;
+
+    const cellSize = getTextureBudgetTracker().getRecommendedTileSize();
+    for (const cellKey of visibleCells) {
+      const parts = String(cellKey).split(',');
+      if (parts.length !== 2) continue;
+      const cx = Number(parts[0]);
+      const cy = Number(parts[1]);
+      if (!Number.isFinite(cx) || !Number.isFinite(cy)) continue;
+      const bounds = imageCellToWorldBounds(cx, cy, cellSize, sourceW, sourceH, region);
+      if (tileBoundsIntersectView(bounds, viewRect)) return true;
+    }
+    return false;
+  } catch (_) {
+    return visibleCells.size > 0;
+  }
+}
+
+/**
+ * View padding aligned with {@link TileStreamingManager} cell hysteresis.
+ * @returns {number}
+ */
+export function resolveVegetationStreamingViewPadding() {
+  const budget = getTextureBudgetTracker();
+  const cs = budget.getRecommendedTileSize();
+  const mp = estimateSceneMegapixels();
+  const cellPad = Math.max(256, Math.floor(cs * 0.5));
+  if (mp >= 144) return cellPad;
+  if (mp > 64) return Math.max(cellPad, 384);
+  return Math.max(cellPad, 128);
+}
+
+/**
+ * Ground-plane view rect shared with tile streaming (raycast ∪ stable FOV).
+ * @returns {{ minX: number, minY: number, maxX: number, maxY: number }|null}
+ */
+export function resolveVegetationStreamingViewRect() {
+  return resolveStreamingViewRect(resolveVegetationStreamingViewPadding());
+}
+
+/**
+ * @param {Iterable<string>} keys
+ * @returns {string}
+ */
+export function streamingCellKeysSignature(keys) {
+  return [...keys].sort().join(',');
+}
+
+/**
+ * Change-detection signature across one or more bus grid keys (`__bg_image__`, …).
+ * @param {Iterable<string>} gridKeys
+ * @returns {string}
+ */
+export function streamingCellKeysSignatureForGrids(gridKeys) {
+  const parts = [];
+  for (const gridKey of gridKeys) {
+    const cells = getVisibleStreamingCellKeys(gridKey);
+    parts.push(`${gridKey}:${streamingCellKeysSignature(cells)}`);
+  }
+  parts.sort();
+  return parts.join('|');
+}
+
+/**
+ * Render order of a resident streamed background cell mesh (for vegetation stacking).
+ * @param {string} streamingGridKey
+ * @param {string} streamingCellKey
+ * @param {number} [floorIndex=0]
+ * @returns {number|null}
+ */
+export function resolveStreamingCellAlbedoRenderOrder(
+  streamingGridKey,
+  streamingCellKey,
+  floorIndex = 0,
+) {
+  if (!streamingGridKey || !streamingCellKey) return null;
+  try {
+    const manager = getTileStreamingManager();
+    const grid = manager.getGrids?.()?.get?.(streamingGridKey)
+      ?? manager.getRegionGrids?.()?.get?.(streamingGridKey)
+      ?? null;
+    const entry = grid?._cells?.get?.(streamingCellKey);
+    const ro = Number(entry?.mesh?.renderOrder);
+    if (Number.isFinite(ro)) return ro;
+  } catch (_) {}
+  return tileAlbedoOrder(floorIndex, 0);
+}
+
+/**
+ * @typedef {object} BackgroundVegetationSpawnSpec
+ * @property {string} tileId
+ * @property {number} centerX
+ * @property {number} centerY
+ * @property {number} tileW
+ * @property {number} tileH
+ * @property {{ minX: number, minY: number, maxX: number, maxY: number }} bounds
+ * @property {string|null} streamingGridKey
+ * @property {string|null} streamingCellKey
+ * @property {{ u0: number, v0: number, u1: number, v1: number }|null} maskUv
+ * @property {{ centerX: number, centerY: number, tileW: number, tileH: number, rotationRad: number }|null} clumpPlacement
+ */
+
+/**
+ * Spawn one full-scene or per-streaming-cell overlay plan for a background layer.
+ *
+ * @param {string} bgKey
+ * @param {object|null|undefined} foundrySceneData
+ * @param {number} worldH
+ * @param {number} sceneX
+ * @param {number} sceneY
+ * @param {number} sceneW
+ * @param {number} sceneH
+ * @param {boolean} gateStreaming
+ * @returns {BackgroundVegetationSpawnSpec[]}
+ */
+export function buildBackgroundVegetationSpawnPlan(
+  bgKey,
+  foundrySceneData,
+  worldH,
+  sceneX,
+  sceneY,
+  sceneW,
+  sceneH,
+  gateStreaming,
+) {
+  const centerX = sceneX + sceneW / 2;
+  const centerY = worldH - (sceneY + sceneH / 2);
+  const fullClumpPlacement = {
+    centerX,
+    centerY,
+    tileW: sceneW,
+    tileH: sceneH,
+    rotationRad: 0,
+  };
+  if (!gateStreaming || !shouldSplitBackgroundVegetation(sceneW, sceneH)) {
+    return [{
+      tileId: bgKey,
+      centerX,
+      centerY,
+      tileW: sceneW,
+      tileH: sceneH,
+      bounds: overlayWorldBounds(centerX, centerY, sceneW, sceneH),
+      streamingGridKey: gateStreaming ? bgKey : null,
+      streamingCellKey: null,
+      maskUv: null,
+      clumpPlacement: null,
+    }];
+  }
+
+  const specs = buildBackgroundVegetationCellSpecs(foundrySceneData, worldH);
+  return specs.map((spec) => ({
+    tileId: `${bgKey}__stream_${spec.cellKey}`,
+    centerX: spec.centerX,
+    centerY: spec.centerY,
+    tileW: spec.tileW,
+    tileH: spec.tileH,
+    bounds: spec.bounds,
+    streamingGridKey: bgKey,
+    streamingCellKey: spec.cellKey,
+    maskUv: spec.maskUv,
+    clumpPlacement: fullClumpPlacement,
+  }));
 }
 
 /**
@@ -89,6 +339,7 @@ export function buildBackgroundVegetationCellSpecs(foundrySceneData, worldH = 0)
   if (!(sourceW > 0 && sourceH > 0)) return [];
 
   const cellSize = getTextureBudgetTracker().getRecommendedTileSize();
+  const bleedPx = resolveVegetationStreamCellBleedPx(cellSize);
   const cols = Math.ceil(sourceW / cellSize);
   const rows = Math.ceil(sourceH / cellSize);
   /** @type {Array<{ cellKey: string, cellX: number, cellY: number, centerX: number, centerY: number, tileW: number, tileH: number, bounds: object, maskUv: object }>} */
@@ -96,7 +347,9 @@ export function buildBackgroundVegetationCellSpecs(foundrySceneData, worldH = 0)
 
   for (let cy = 0; cy < rows; cy += 1) {
     for (let cx = 0; cx < cols; cx += 1) {
-      const bounds = imageCellToWorldBounds(cx, cy, cellSize, sourceW, sourceH, region);
+      const bounds = imageCellToWorldBoundsBleed(
+        cx, cy, cellSize, sourceW, sourceH, region, bleedPx,
+      );
       const tileW = bounds.maxX - bounds.minX;
       const tileH = bounds.maxY - bounds.minY;
       if (!(tileW > 0 && tileH > 0)) continue;
@@ -109,7 +362,7 @@ export function buildBackgroundVegetationCellSpecs(foundrySceneData, worldH = 0)
         tileW,
         tileH,
         bounds,
-        maskUv: maskUvRectForImageCell(cx, cy, cellSize, sourceW, sourceH),
+        maskUv: maskUvRectForImageCell(cx, cy, cellSize, sourceW, sourceH, bleedPx),
       });
     }
   }
@@ -152,6 +405,166 @@ export function isVegetationStreamingCellVisible(entry, visibleCells = null) {
   if (entry.streamingCellKey) {
     return cells.has(entry.streamingCellKey);
   }
-  // Full-scene overlay: show when any streamed background cell is resident.
-  return cells.size > 0;
+  const view = resolveVegetationStreamingViewRect();
+  return viewIntersectsAnyStreamingCell(gridKey, cells, view);
+}
+
+/**
+ * @typedef {object} StreamVegetationBgPlan
+ * @property {string} url
+ * @property {number} floorIndex
+ * @property {number} z
+ * @property {Map<string, BackgroundVegetationSpawnSpec>} specsByCellKey
+ */
+
+/**
+ * Create overlays for newly resident stream cells; evict overlays for cells that left residency.
+ * @param {{
+ *   streamPlans: Map<string, StreamVegetationBgPlan>,
+ *   overlays: Map<string, object>,
+ *   createOverlay: (spec: BackgroundVegetationSpawnSpec, plan: StreamVegetationBgPlan) => void,
+ *   destroyOverlay: (tileId: string) => void,
+ *   createBudget?: number,
+ * }} ctx
+ * @returns {boolean} True when overlay membership changed.
+ */
+export function syncStreamVegetationOverlays(ctx) {
+  const {
+    streamPlans,
+    overlays,
+    createOverlay,
+    destroyOverlay,
+    createBudget = 4,
+  } = ctx;
+  if (!streamPlans?.size) return false;
+
+  /** @type {Set<string>} */
+  const keepTileIds = new Set();
+  let changed = false;
+  let created = 0;
+
+  for (const [gridKey, plan] of streamPlans) {
+    const streamCells = getVisibleStreamingCellKeys(gridKey);
+    for (const cellKey of streamCells) {
+      const spec = plan.specsByCellKey?.get?.(cellKey);
+      if (!spec) continue;
+      keepTileIds.add(spec.tileId);
+      if (!overlays.has(spec.tileId)) {
+        if (created >= createBudget) continue;
+        createOverlay(spec, plan);
+        created += 1;
+        changed = true;
+      }
+    }
+  }
+
+  for (const [tileId, entry] of overlays) {
+    if (!entry?.streamingCellKey) continue;
+    if (keepTileIds.has(tileId)) continue;
+    destroyOverlay(tileId);
+    changed = true;
+  }
+
+  return changed;
+}
+
+/**
+ * @param {string} gridKey
+ * @returns {{ region: object|null, sourceW: number, sourceH: number, cellSize: number }}
+ */
+function resolveGridStreamManifest(gridKey) {
+  try {
+    const manager = getTileStreamingManager();
+    const grid = manager.getGrids?.()?.get?.(gridKey)
+      ?? manager.getRegionGrids?.()?.get?.(gridKey)
+      ?? null;
+    const manifest = grid?._manifest;
+    const fd = window.MapShine?.sceneComposer?.foundrySceneData ?? {};
+    const region = getSceneRegionFromFoundryData(fd);
+    const sourceW = Number(manifest?.sourceWidth ?? fd.sceneWidth ?? fd.width ?? 0);
+    const sourceH = Number(manifest?.sourceHeight ?? fd.sceneHeight ?? fd.height ?? 0);
+    const cellSize = getTextureBudgetTracker().getRecommendedTileSize();
+    return { region, sourceW, sourceH, cellSize };
+  } catch (_) {
+    return { region: null, sourceW: 0, sourceH: 0, cellSize: 1024 };
+  }
+}
+
+/**
+ * Screen-space scissor rect (pixels, bottom-left origin) covering resident streaming
+ * cells so a full-scene vegetation plane only shades visible albedo residency.
+ * @param {import('three').WebGLRenderTarget} targetRT
+ * @param {import('three').Camera} camera
+ * @param {Iterable<string>} gridKeys
+ * @returns {{ x: number, y: number, w: number, h: number }|null}
+ */
+export function resolveVegetationStreamingDrawScissor(targetRT, camera, gridKeys) {
+  const THREE = window.THREE;
+  if (!THREE || !camera || !targetRT?.width || !targetRT?.height || !gridKeys) return null;
+
+  const groundZ = Number(window.MapShine?.sceneComposer?.groundZ ?? 0);
+  const vec = new THREE.Vector3();
+  let ndcMinX = Infinity;
+  let ndcMinY = Infinity;
+  let ndcMaxX = -Infinity;
+  let ndcMaxY = -Infinity;
+  let any = false;
+
+  const addWorldBounds = (bounds) => {
+    const corners = [
+      [bounds.minX, bounds.minY],
+      [bounds.maxX, bounds.minY],
+      [bounds.maxX, bounds.maxY],
+      [bounds.minX, bounds.maxY],
+    ];
+    for (const [wx, wy] of corners) {
+      vec.set(wx, wy, groundZ);
+      vec.project(camera);
+      if (!Number.isFinite(vec.x) || !Number.isFinite(vec.y)) continue;
+      ndcMinX = Math.min(ndcMinX, vec.x);
+      ndcMaxX = Math.max(ndcMaxX, vec.x);
+      ndcMinY = Math.min(ndcMinY, vec.y);
+      ndcMaxY = Math.max(ndcMaxY, vec.y);
+      any = true;
+    }
+  };
+
+  for (const gridKey of gridKeys) {
+    const { region, sourceW, sourceH, cellSize } = resolveGridStreamManifest(gridKey);
+    if (!(region && sourceW > 0 && sourceH > 0)) continue;
+    const bleedPx = resolveVegetationStreamCellBleedPx(cellSize);
+    const cells = getVisibleStreamingCellKeys(gridKey);
+    for (const cellKey of cells) {
+      const parts = String(cellKey).split(',');
+      if (parts.length !== 2) continue;
+      const cx = Number(parts[0]);
+      const cy = Number(parts[1]);
+      if (!Number.isFinite(cx) || !Number.isFinite(cy)) continue;
+      addWorldBounds(imageCellToWorldBoundsBleed(
+        cx, cy, cellSize, sourceW, sourceH, region, bleedPx,
+      ));
+    }
+  }
+
+  if (!any) return null;
+
+  ndcMinX = Math.max(-1, ndcMinX);
+  ndcMaxX = Math.min(1, ndcMaxX);
+  ndcMinY = Math.max(-1, ndcMinY);
+  ndcMaxY = Math.min(1, ndcMaxY);
+  if (ndcMaxX <= ndcMinX || ndcMaxY <= ndcMinY) return null;
+
+  const rtW = targetRT.width;
+  const rtH = targetRT.height;
+  const x0 = Math.floor((ndcMinX * 0.5 + 0.5) * rtW);
+  const x1 = Math.ceil((ndcMaxX * 0.5 + 0.5) * rtW);
+  const y0 = Math.floor((-ndcMaxY * 0.5 + 0.5) * rtH);
+  const y1 = Math.ceil((-ndcMinY * 0.5 + 0.5) * rtH);
+  const pad = 12;
+  const x = Math.max(0, x0 - pad);
+  const y = Math.max(0, y0 - pad);
+  const w = Math.min(rtW - x, Math.max(1, (x1 - x0) + pad * 2));
+  const h = Math.min(rtH - y, Math.max(1, (y1 - y0) + pad * 2));
+  if (w * h >= rtW * rtH * 0.92) return null;
+  return { x, y, w, h };
 }

@@ -24,6 +24,7 @@ import {
   GROUND_Z,
   MAX_INTRA_ROLE_OFFSET,
   tileAlbedoOrder,
+  tileStackedOverlayOrder,
   treeOverlayRenderOrders,
 } from '../LayerOrderPolicy.js';
 import {
@@ -111,6 +112,12 @@ import {
   shouldGateBackgroundVegetationOnStreaming,
   getVisibleStreamingCellKeys,
   isVegetationStreamingCellVisible,
+  buildBackgroundVegetationSpawnPlan,
+  streamingCellKeysSignatureForGrids,
+  resolveVegetationStreamingViewRect,
+  remapPlaneMaskUvs,
+  syncStreamVegetationOverlays,
+  resolveStreamingCellAlbedoRenderOrder,
 } from '../../streaming/vegetation-streaming-bridge.js';
 import {
   VEGETATION_WIND_NOISE_GLSL,
@@ -133,12 +140,17 @@ import {
 } from './vegetation-wind-params.js';
 import {
   probeVegetationMaskPathsBatch,
-  readMaskImageData,
-  detectDerivedAlphaFromImageData,
   buildAlphaSampleCache,
-  VEGETATION_MASK_READ_MAX_DIM,
   getVegetationMaskLoadQueue,
   yieldVegetationPopulateFrame,
+  acquireVegetationMaskTexture,
+  releaseVegetationMaskTexture,
+  getSharedVegetationMaskReadback,
+  getSharedVegetationDeriveAlpha,
+  acquireSharedClumpBakeFromMask,
+  releaseSharedClumpBake,
+  vegetationSharedClumpKey,
+  VEGETATION_STREAM_OVERLAY_CREATE_BUDGET,
 } from './vegetation-mask-load.js';
 
 const log = createLogger('TreeEffectV2');
@@ -169,6 +181,10 @@ export class TreeEffectV2 {
     this._overlays = new Map();
     this._gateBackgroundOnStreaming = false;
     this._lastVisibleStreamCellCount = -1;
+    /** @type {string} */
+    this._lastStreamCellSignature = '';
+    /** @type {Map<string, import('../../streaming/vegetation-streaming-bridge.js').StreamVegetationBgPlan>} */
+    this._streamBgPlans = new Map();
 
     /** @type {Set<string>} */
     this._negativeCache = new Set();
@@ -1032,26 +1048,51 @@ export class TreeEffectV2 {
       const basePath = bgSrc.replace(/\.[^.]+$/, '');
       const url = maskUrls.get(basePath);
       if (!url) continue;
-      const centerX = sceneX + sceneW / 2;
-      const centerY = worldH - (sceneY + sceneH / 2);
-      const tileW = sceneW;
-      const tileH = sceneH;
       const z = GROUND_Z - 1 + TREE_Z_OFFSET;
       const gateStreaming = shouldGateBackgroundVegetationOnStreaming(sceneW, sceneH);
-      this._createOverlay(bg.key, bg.floorIndex, {
-        url,
-        centerX,
-        centerY,
-        z,
-        tileW,
-        tileH,
-        rotation: 0,
-        streamingGridKey: gateStreaming ? bg.key : null,
-      });
-      if (gateStreaming) this._gateBackgroundOnStreaming = true;
-      spawnIdx += 1;
-      if (spawnIdx % 2 === 0) await yieldVegetationPopulateFrame();
+      const spawnPlan = buildBackgroundVegetationSpawnPlan(
+        bg.key,
+        foundrySceneData,
+        worldH,
+        sceneX,
+        sceneY,
+        sceneW,
+        sceneH,
+        gateStreaming,
+      );
+      const splitStreaming = gateStreaming && spawnPlan.some((spec) => spec.streamingCellKey);
+      if (splitStreaming) {
+        /** @type {Map<string, import('../../streaming/vegetation-streaming-bridge.js').BackgroundVegetationSpawnSpec>} */
+        const specsByCellKey = new Map();
+        for (const spec of spawnPlan) {
+          if (spec.streamingCellKey) specsByCellKey.set(spec.streamingCellKey, spec);
+        }
+        this._streamBgPlans.set(bg.key, { url, floorIndex: bg.floorIndex, z, specsByCellKey });
+        this._gateBackgroundOnStreaming = true;
+      } else {
+        for (const spec of spawnPlan) {
+          this._createOverlay(spec.tileId, bg.floorIndex, {
+            url,
+            centerX: spec.centerX,
+            centerY: spec.centerY,
+            z,
+            tileW: spec.tileW,
+            tileH: spec.tileH,
+            rotation: 0,
+            streamingGridKey: spec.streamingGridKey,
+            streamingCellKey: spec.streamingCellKey,
+            maskUv: spec.maskUv,
+            bounds: spec.bounds,
+            clumpPlacement: spec.clumpPlacement,
+          });
+          spawnIdx += 1;
+          if (spawnIdx % 2 === 0) await yieldVegetationPopulateFrame();
+        }
+        if (gateStreaming) this._gateBackgroundOnStreaming = true;
+      }
     }
+
+    this._syncStreamCellOverlays();
 
     for (const tileDoc of tileDocs) {
       const src = tileDoc?.texture?.src ?? tileDoc?.img ?? '';
@@ -1079,7 +1120,7 @@ export class TreeEffectV2 {
     this._resetAllOverlayHoverAndStacking();
 
     const n = this._overlays.size;
-    this._maskDiscoveryPhase = n > 0 ? 'found' : 'missing';
+    this._maskDiscoveryPhase = (n > 0 || this._streamBgPlans.size > 0) ? 'found' : 'missing';
     this._notifyMaskStatusUi();
     log.info(`TreeEffectV2 populated: ${n} overlays`);
   }
@@ -1118,11 +1159,14 @@ export class TreeEffectV2 {
     const viewChanged = this._viewBoundsMayHaveChanged();
     if (floorChanged) this._lastVisibilityFloorIndex = maxFloor;
     if (this._gateBackgroundOnStreaming) {
-      const streamCount = getVisibleStreamingCellKeys('__bg_image__').size;
-      if (streamCount !== this._lastVisibleStreamCellCount) {
-        this._lastVisibleStreamCellCount = streamCount;
-        this._syncOverlayVisibility();
+      const streamSig = streamingCellKeysSignatureForGrids(this._backgroundStreamGridKeys());
+      const streamChanged = streamSig !== this._lastStreamCellSignature;
+      if (streamChanged) {
+        this._lastStreamCellSignature = streamSig;
+        this._lastVisibleStreamCellCount = this._countVisibleBackgroundStreamCells();
       }
+      const streamSynced = this._syncStreamCellOverlays();
+      if (streamChanged || streamSynced) this._syncOverlayVisibility();
     }
     if (floorChanged || viewChanged) this._syncOverlayVisibility();
     this._advanceHoverFadeUniforms(delta);
@@ -1137,11 +1181,14 @@ export class TreeEffectV2 {
     const viewChanged = this._viewBoundsMayHaveChanged();
     if (floorChanged) this._lastVisibilityFloorIndex = maxFloor;
     if (this._gateBackgroundOnStreaming) {
-      const streamCount = getVisibleStreamingCellKeys('__bg_image__').size;
-      if (streamCount !== this._lastVisibleStreamCellCount) {
-        this._lastVisibleStreamCellCount = streamCount;
-        this._syncOverlayVisibility();
+      const streamSig = streamingCellKeysSignatureForGrids(this._backgroundStreamGridKeys());
+      const streamChanged = streamSig !== this._lastStreamCellSignature;
+      if (streamChanged) {
+        this._lastStreamCellSignature = streamSig;
+        this._lastVisibleStreamCellCount = this._countVisibleBackgroundStreamCells();
       }
+      const streamSynced = this._syncStreamCellOverlays();
+      if (streamChanged || streamSynced) this._syncOverlayVisibility();
     }
     if (floorChanged || viewChanged) this._syncOverlayVisibility();
 
@@ -1594,8 +1641,10 @@ export class TreeEffectV2 {
       this._teardownOverlayEntry(tileId, entry);
     }
     this._overlays.clear();
+    this._streamBgPlans.clear();
     this._gateBackgroundOnStreaming = false;
     this._lastVisibleStreamCellCount = -1;
+    this._lastStreamCellSignature = '';
     this._deriveAlphaByTileId.clear();
     this._alphaSampleByTileId.clear();
     this._hoverHidden = false;
@@ -1671,6 +1720,30 @@ export class TreeEffectV2 {
     this._sharedUniforms.uShadowTapLod.value = Number.isFinite(v) ? v : 1.0;
   }
 
+  /** @returns {boolean} */
+  isBackgroundVegetationStreamGated() {
+    return this._gateBackgroundOnStreaming === true;
+  }
+
+  /** @returns {string[]} */
+  getBackgroundVegetationStreamGridKeys() {
+    return this._backgroundStreamGridKeys();
+  }
+
+  /**
+   * @returns {string[]}
+   * @private
+   */
+  _backgroundStreamGridKeys() {
+    if (this._streamBgPlans.size) return [...this._streamBgPlans.keys()];
+    /** @type {Set<string>} */
+    const keys = new Set();
+    for (const entry of this._overlays.values()) {
+      if (entry?.streamingGridKey) keys.add(entry.streamingGridKey);
+    }
+    return [...keys];
+  }
+
   /**
    * @returns {{mesh: import('three').Mesh, uniforms: object}[]}
    */
@@ -1733,7 +1806,13 @@ export class TreeEffectV2 {
     try { if (entry.shadowMesh) entry.shadowMesh.material = null; } catch (_) {}
     try { if (entry.mesh) entry.mesh.material = null; } catch (_) {}
     const tex = entry.material?.uniforms?.uTreeMask?.value ?? null;
-    disposeClumpCoordTexture(entry.clumpCoordTexture ?? null);
+    if (entry._sharedClumpRef && entry.sharedClumpKey) {
+      releaseSharedClumpBake(entry.sharedClumpKey);
+      entry.clumpCoordTexture = null;
+      entry._sharedClumpRef = false;
+    } else {
+      disposeClumpCoordTexture(entry.clumpCoordTexture ?? null);
+    }
     try { entry.material?.dispose?.(); } catch (_) {}
     try { entry.shadowMaterial?.dispose?.(); } catch (_) {}
     const geom = entry.mesh?.geometry ?? entry.shadowMesh?.geometry ?? null;
@@ -1742,9 +1821,54 @@ export class TreeEffectV2 {
       try { entry.shadowMesh.geometry = null; } catch (_) {}
       try { geom.dispose(); } catch (_) {}
     }
-    if (tex?.dispose) {
+    if (entry.sharedMaskUrl) {
+      releaseVegetationMaskTexture(entry.sharedMaskUrl);
+    } else if (tex?.dispose) {
       try { tex.dispose(); } catch (_) {}
     }
+  }
+
+  /**
+   * @param {string} tileId
+   * @private
+   */
+  _teardownStreamCellOverlay(tileId) {
+    const entry = this._overlays.get(tileId);
+    if (!entry) return;
+    this._teardownOverlayEntry(tileId, entry);
+    this._overlays.delete(tileId);
+    try { this._deriveAlphaByTileId.delete(tileId); } catch (_) {}
+    try { this._alphaSampleByTileId.delete(tileId); } catch (_) {}
+  }
+
+  /**
+   * @returns {boolean}
+   * @private
+   */
+  _syncStreamCellOverlays() {
+    if (!this._gateBackgroundOnStreaming || !this._streamBgPlans.size) return false;
+    return syncStreamVegetationOverlays({
+      streamPlans: this._streamBgPlans,
+      overlays: this._overlays,
+      createOverlay: (spec, plan) => {
+        this._createOverlay(spec.tileId, plan.floorIndex, {
+          url: plan.url,
+          centerX: spec.centerX,
+          centerY: spec.centerY,
+          z: plan.z,
+          tileW: spec.tileW,
+          tileH: spec.tileH,
+          rotation: 0,
+          streamingGridKey: spec.streamingGridKey,
+          streamingCellKey: spec.streamingCellKey,
+          maskUv: spec.maskUv,
+          bounds: spec.bounds,
+          clumpPlacement: spec.clumpPlacement,
+        });
+      },
+      destroyOverlay: (tileId) => this._teardownStreamCellOverlay(tileId),
+      createBudget: VEGETATION_STREAM_OVERLAY_CREATE_BUDGET,
+    });
   }
 
   /**
@@ -1865,16 +1989,47 @@ export class TreeEffectV2 {
     const entry = this._overlays.get(tileId);
     if (!entry) return;
 
-    disposeClumpCoordTexture(entry.clumpCoordTexture ?? null);
+    if (entry._sharedClumpRef && entry.sharedClumpKey) {
+      releaseSharedClumpBake(entry.sharedClumpKey);
+      entry._sharedClumpRef = false;
+    } else {
+      disposeClumpCoordTexture(entry.clumpCoordTexture ?? null);
+    }
     entry.clumpCoordTexture = null;
 
-    const built = buildClumpCoordTexture(tex, deriveAlpha, {
-      centerX: placement.centerX,
-      centerY: placement.centerY,
-      tileW: placement.tileW,
-      tileH: placement.tileH,
-      rotationRad: Number(placement.rotation) || 0,
-    }, imageDataOpts);
+    const rotationRad = Number(placement.rotation) || 0;
+    const clumpPlacement = entry.clumpPlacement
+      ? { ...entry.clumpPlacement, rotationRad }
+      : { ...placement, rotationRad };
+
+    const sharedClumpKey = entry.sharedMaskUrl && entry.clumpPlacement
+      ? vegetationSharedClumpKey(entry.sharedMaskUrl, deriveAlpha)
+      : null;
+
+    if (sharedClumpKey) {
+      const shared = acquireSharedClumpBakeFromMask(
+        sharedClumpKey,
+        tex,
+        deriveAlpha,
+        clumpPlacement,
+        imageDataOpts,
+      );
+      if (shared?.texture) {
+        entry.sharedClumpKey = sharedClumpKey;
+        entry._sharedClumpRef = true;
+        entry.clumpCoordTexture = shared.texture;
+        entry.clumpIslandBySeed = shared.islandBySeed ?? null;
+        bindClumpCoordTextureToOverlayMaterials(
+          entry, shared.texture, this.params, shared.primaryAnchor,
+          placement.centerX, placement.centerY, placement, shared.islandCount,
+        );
+        log.debug(`TreeEffectV2 clump map (shared): ${tileId} (${shared.islandCount} islands)`);
+        return;
+      }
+    }
+
+    entry.sharedClumpKey = null;
+    const built = buildClumpCoordTexture(tex, deriveAlpha, clumpPlacement, imageDataOpts);
 
     if (built?.texture) {
       entry.clumpCoordTexture = built.texture;
@@ -2049,14 +2204,14 @@ export class TreeEffectV2 {
     if (!THREE || !this._sharedUniforms) return;
 
     const { url, centerX, centerY, z, tileW, tileH, rotation } = opts;
-    const overlayBounds = overlayWorldBounds(centerX, centerY, tileW, tileH);
+    const overlayBounds = opts.bounds ?? overlayWorldBounds(centerX, centerY, tileW, tileH);
 
     const uniforms = {
       ...this._sharedUniforms,
       ...createVegetationClumpFieldOverlayUniforms(THREE),
       ...createVegetationWindOverlayUniforms(THREE, tileW, tileH, centerX, centerY),
       uTreeMask: { value: null },
-      uDeriveAlpha: { value: 0.0 },
+      uDeriveAlpha: { value: 1.0 },
       uHoverFade: { value: 1.0 },
       uCanopyHoverFade: { value: 1.0 },
       uVegetationPass: { value: 2.0 },
@@ -2068,7 +2223,7 @@ export class TreeEffectV2 {
       ...createVegetationWindOverlayUniforms(THREE, tileW, tileH, centerX, centerY),
       ...createVegetationShadowLightningUniforms(THREE),
       uTreeMask: { value: null },
-      uDeriveAlpha: { value: 0.0 },
+      uDeriveAlpha: { value: 1.0 },
       uHoverFade: { value: 1.0 },
       uCanopyHoverFade: { value: 1.0 },
       uVegetationPass: { value: 1.0 },
@@ -2246,7 +2401,7 @@ ${VEGETATION_PAINTED_SHADOW_SAMPLE_GLSL}
 
         float safeAlpha(vec4 s) {
           float a = s.a;
-          if (uDeriveAlpha > 0.5 && a > 0.99) {
+          if (a > 0.99) {
             float lum    = dot(s.rgb, vec3(0.2126, 0.7152, 0.0722));
             float maxC   = max(s.r, max(s.g, s.b));
             float minC   = min(s.r, min(s.g, s.b));
@@ -2381,6 +2536,9 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
 
     const windSeg = windDisplacedMeshSegments(tileW, tileH, 0, 0, 1);
     const geometry = new THREE.PlaneGeometry(tileW, tileH, windSeg, windSeg);
+    if (opts.maskUv) {
+      remapPlaneMaskUvs(geometry, opts.maskUv);
+    }
     initClumpWindAttributesOnGeometry(geometry, centerX, centerY, 0);
     const shadowMesh = new THREE.Mesh(geometry, shadowMaterial);
     const mesh = new THREE.Mesh(geometry, material);
@@ -2401,7 +2559,7 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
     shadowMesh.rotation.z = rotation;
     mesh.rotation.z = rotation;
 
-    this._applyTreeOverlayRenderOrders(shadowMesh, mesh, tileId, floorIndex);
+    this._applyTreeOverlayRenderOrders(shadowMesh, mesh, tileId, floorIndex, opts);
     applyVegetationAboveWaterLayer(shadowMesh, {});
     applyVegetationAboveWaterLayer(mesh, { retainWeatherRoofLayer: true });
 
@@ -2421,16 +2579,18 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
       maskReady: false,
       streamingGridKey: opts.streamingGridKey ?? null,
       streamingCellKey: opts.streamingCellKey ?? null,
+      maskUv: opts.maskUv ?? null,
+      clumpPlacement: opts.clumpPlacement ?? null,
+      sharedMaskUrl: String(url || ''),
     });
     mesh.visible = false;
     shadowMesh.visible = false;
     this._viewBoundsMayHaveChanged();
 
-    // Load mask texture.
     const maskLoadQueue = getVegetationMaskLoadQueue(2);
-    this._loader.load(url, (tex) => {
+    acquireVegetationMaskTexture(this._loader, url).then((tex) => {
       if (populateGen !== this._populateGeneration) {
-        try { tex.dispose(); } catch (_) {}
+        releaseVegetationMaskTexture(url);
         return;
       }
       const entry = this._overlays.get(tileId);
@@ -2438,18 +2598,18 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
         || entry.maskLoadSerial !== maskLoadSerial
         || entry.material !== material
         || entry.shadowMaterial !== shadowMaterial) {
-        try { tex.dispose(); } catch (_) {}
+        releaseVegetationMaskTexture(url);
         return;
       }
-      tex.flipY = true;
-      // Tree masks carry visible color data, so sample in sRGB for correct contrast.
-      if ('colorSpace' in tex && THREE?.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
-      else if ('encoding' in tex && THREE?.sRGBEncoding) tex.encoding = THREE.sRGBEncoding;
-      tex.needsUpdate = true;
       material.uniforms.uTreeMask.value = tex;
       shadowMaterial.uniforms.uTreeMask.value = tex;
+      const derive = getSharedVegetationDeriveAlpha(url, tex);
+      material.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
+      shadowMaterial.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
+      this._deriveAlphaByTileId.set(tileId, derive);
       entry.maskReady = true;
       this._syncOverlayVisibility();
+      const maskRead = getSharedVegetationMaskReadback(url, tex);
       maskLoadQueue.enqueue(() => {
         if (populateGen !== this._populateGeneration) return;
         const liveEntry = this._overlays.get(tileId);
@@ -2457,13 +2617,6 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
           || liveEntry.maskLoadSerial !== maskLoadSerial
           || liveEntry.material !== material
           || liveEntry.shadowMaterial !== shadowMaterial) return;
-        const maskRead = readMaskImageData(tex, VEGETATION_MASK_READ_MAX_DIM);
-        const derive = maskRead
-          ? detectDerivedAlphaFromImageData(maskRead.data, maskRead.width, maskRead.height)
-          : false;
-        this._deriveAlphaByTileId.set(tileId, derive);
-        material.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
-        shadowMaterial.uniforms.uDeriveAlpha.value = derive ? 1.0 : 0.0;
         if (maskRead) {
           this._alphaSampleByTileId.set(
             tileId,
@@ -2475,11 +2628,11 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
         }, maskRead);
         try {
           if (liveEntry?.shadowMesh && liveEntry?.mesh) {
-            this._applyTreeOverlayRenderOrders(liveEntry.shadowMesh, liveEntry.mesh, tileId, floorIndex);
+            this._applyTreeOverlayRenderOrders(liveEntry.shadowMesh, liveEntry.mesh, tileId, floorIndex, liveEntry);
           }
         } catch (_) {}
       }).catch(() => {});
-    }, undefined, (err) => {
+    }).catch((err) => {
       log.warn(`TreeEffectV2: failed to load mask for ${tileId}: ${url}`, err);
     });
   }
@@ -2497,6 +2650,16 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
    * @private
    */
   _viewBoundsMayHaveChanged() {
+    if (this._gateBackgroundOnStreaming) {
+      const view = resolveVegetationStreamingViewRect();
+      const sig = view
+        ? `${view.minX}|${view.minY}|${view.maxX}|${view.maxY}`
+        : '';
+      if (sig === this._viewBoundsSignature) return false;
+      this._viewBoundsSignature = sig;
+      this._cachedViewBounds = view;
+      return true;
+    }
     const cam = window.MapShine?.sceneComposer?.camera;
     const sig = cameraViewBoundsSignature(cam);
     if (sig === this._viewBoundsSignature) return false;
@@ -2510,18 +2673,56 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
   }
 
   /**
+   * @returns {number}
+   * @private
+   */
+  _countVisibleBackgroundStreamCells() {
+    let count = 0;
+    for (const gridKey of this._backgroundStreamGridKeys()) {
+      count += getVisibleStreamingCellKeys(gridKey).size;
+    }
+    return count;
+  }
+
+  /**
    * Floor + camera view culling for overlay meshes.
    * @private
    */
   _syncOverlayVisibility() {
     const maxFloor = this._getSafeVisibleMaxFloorIndex();
     const view = this._cachedViewBounds;
-    const streamCells = getVisibleStreamingCellKeys('__bg_image__');
-    for (const entry of this._overlays.values()) {
+    /** @type {Map<string, Set<string>>} */
+    const streamCellsByGrid = new Map();
+    const streamCellsForGrid = (gridKey) => {
+      const key = gridKey ?? '__bg_image__';
+      let cells = streamCellsByGrid.get(key);
+      if (!cells) {
+        cells = getVisibleStreamingCellKeys(key);
+        streamCellsByGrid.set(key, cells);
+      }
+      return cells;
+    };
+    for (const [tileId, entry] of this._overlays) {
+      if (entry?.streamingCellKey && entry?.streamingGridKey && entry?.mesh && entry?.shadowMesh) {
+        const streamRo = resolveStreamingCellAlbedoRenderOrder(
+          entry.streamingGridKey,
+          entry.streamingCellKey,
+          entry.floorIndex,
+        );
+        if (Number.isFinite(streamRo) && streamRo !== entry._lastStreamAlbedoOrder) {
+          entry._lastStreamAlbedoOrder = streamRo;
+          this._applyTreeOverlayRenderOrders(
+            entry.shadowMesh, entry.mesh, tileId, entry.floorIndex, entry,
+          );
+        }
+      }
       const floorOk = this._enabled && Number(entry.floorIndex) <= maxFloor;
       const viewOk = !view || tileBoundsIntersectView(entry.bounds, view);
       const maskReady = entry.maskReady === true;
-      const streamOk = isVegetationStreamingCellVisible(entry, streamCells);
+      const streamOk = isVegetationStreamingCellVisible(
+        entry,
+        entry.streamingGridKey ? streamCellsForGrid(entry.streamingGridKey) : null,
+      );
       const visible = floorOk && viewOk && maskReady && streamOk;
       if (entry._lastSyncedVisible !== visible) {
         entry._lastSyncedVisible = visible;
@@ -2595,10 +2796,22 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
    * @param {number} floorIndex
    * @private
    */
-  _applyTreeOverlayRenderOrders(shadowM, canopyM, tileId, floorIndex) {
+  _applyTreeOverlayRenderOrders(shadowM, canopyM, tileId, floorIndex, opts = {}) {
     try {
       const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
-      const isBgPlane = /^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId));
+      const streamGridKey = opts.streamingGridKey ?? null;
+      const streamCellKey = opts.streamingCellKey ?? null;
+      const streamRo = streamGridKey && streamCellKey
+        ? resolveStreamingCellAlbedoRenderOrder(streamGridKey, streamCellKey, fi)
+        : null;
+
+      if (Number.isFinite(streamRo)) {
+        shadowM.renderOrder = tileStackedOverlayOrder(streamRo, fi, 1);
+        canopyM.renderOrder = tileStackedOverlayOrder(streamRo, fi, 2);
+        return;
+      }
+
+      const isBgPlane = String(tileId).startsWith('__bg_image__');
       let baseOrder = null;
       if (isBgPlane) {
         baseOrder = tileAlbedoOrder(fi, 0);

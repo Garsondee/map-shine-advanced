@@ -56,7 +56,7 @@ export class VegetationBillboardShadowPass {
 
         float safeAlpha(vec4 s) {
           float a = s.a;
-          if (uDeriveAlpha > 0.5 && a > 0.99) {
+          if (a > 0.99) {
             float lum  = dot(s.rgb, vec3(0.2126, 0.7152, 0.0722));
             float maxC = max(s.r, max(s.g, s.b));
             float minC = min(s.r, min(s.g, s.b));

@@ -163,8 +163,10 @@ export function selectLodFromZoom(zoom, maxLod = 4, sceneMegapixels = 0) {
 
   const mp = Number(sceneMegapixels) || 0;
   if (mp >= 130) {
-    if (z >= 0.28) lod = Math.min(lod, 0);
-    else if (z >= 0.12) lod = Math.min(lod, 1);
+    if (z >= 1.2) lod = Math.min(lod, 0);
+    else if (z >= 0.55) lod = Math.min(lod, 1);
+    else if (z >= 0.28) lod = Math.min(lod, 2);
+    else if (z >= 0.12) lod = Math.min(lod, 3);
   }
 
   return Math.min(lod, maxLod);

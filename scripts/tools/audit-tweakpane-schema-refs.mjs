@@ -39,7 +39,6 @@ const FILES = [
   'compositor-v2/effects/IridescenceEffectV2.js',
   'compositor-v2/effects/PrismEffectV2.js',
   'compositor-v2/effects/AshDisturbanceEffectV2.js',
-  'effects/DebugLayerEffect.js',
   'compositor-v2/effects/CandleFlamesEffectV2.js',
   'compositor-v2/effects/LightningEffectV2.js',
   'compositor-v2/effects/BloomEffectV2.js',
@@ -51,8 +50,6 @@ const FILES = [
   'compositor-v2/effects/DazzleOverlayEffectV2.js',
   'compositor-v2/effects/ColorCorrectionEffectV2.js',
   'compositor-v2/effects/SharpenEffectV2.js',
-  'particles/DustMotesEffect.js',
-  'effects/MaskDebugEffect.js',
 ];
 
 const SCHEMA_METHOD_NAMES = [

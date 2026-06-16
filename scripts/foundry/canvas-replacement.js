@@ -19,8 +19,6 @@ import { EffectComposer } from '../effects/EffectComposer.js';
 import { CandleFlamesEffectV2 } from '../compositor-v2/effects/CandleFlamesEffectV2.js';
 import { LightningEffectV2 } from '../compositor-v2/effects/LightningEffectV2.js';
 import { WeatherLightningEffectV2 } from '../compositor-v2/effects/WeatherLightningEffectV2.js';
-import { MaskManager } from '../masks/MaskManager.js';
-import { ParticleSystem } from '../particles/ParticleSystem.js';
 // Effect wiring: capabilities registry + V2 class re-exports for static getControlSchema() calls
 import {
   registerAllCapabilities,
@@ -44,7 +42,6 @@ import {
   FogOfWarEffectV2,
   PlayerLightEffectV2,
 } from './effect-wiring.js';
-import { TileEffectBindingManager } from '../scene/TileEffectBindingManager.js';
 import { RenderLoop } from '../core/render-loop.js';
 import { normalizeEffectRgbParam } from '../ui/parameter-validator.js';
 import { ControlPanelManager } from '../ui/control-panel-manager.js';
@@ -101,7 +98,7 @@ import { MapPointsManager } from '../scene/map-points-manager.js';
 import { PhysicsRopeManager } from '../scene/physics-rope-manager.js';
 import { DropHandler } from './drop-handler.js';
 import { sceneDebug } from '../utils/scene-debug.js';
-import { clearCache as clearAssetCache, warmupBundleTextures, getCacheStats } from '../assets/loader.js';
+import { warmupBundleTextures, getCacheStats } from '../assets/loader.js';
 import * as assetLoader from '../assets/loader.js';
 import { globalLoadingProfiler } from '../core/loading-profiler.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
@@ -117,7 +114,6 @@ import { applyWeatherManualParam, syncDirectedCustomPresetFromWeatherController 
 import { inferWeatherPanelView } from '../settings/control-state-sanitize.js';
 import { getWeatherSyncBridge } from './weather-sync-bridge.js';
 import { createEnhancedLightsApi } from '../effects/EnhancedLightsApi.js';
-import { LightEnhancementStore } from '../effects/LightEnhancementStore.js';
 import { OverlayUIManager } from '../ui/overlay-ui-manager.js';
 import { EffectCapabilitiesRegistry } from '../effects/effect-capabilities-registry.js';
 import { GraphicsSettingsManager } from '../ui/graphics-settings-manager.js';
@@ -134,7 +130,6 @@ import {
   disposeLevelTransitionCurtain,
 } from './manager-wiring.js';
 import { ExternalEffectsCompositor } from '../integrations/external-effects/ExternalEffectsCompositor.js';
-import { DepthPassManager } from '../scene/depth-pass-manager.js';
 import { isSoundAudibleForPerspective } from './elevation-context.js';
 import { getFloorStackBandsSignature, getSceneBandsForFloorStack } from './levels-floor-stack-bands.js';
 import { hasV14NativeLevels, getViewedLevelBackgroundSrc, isLevelsEnabledForScene, resolveV14LevelIdToFloorStackIndex } from './levels-scene-flags.js';
@@ -2240,9 +2235,6 @@ let resizeHandler = null;
 
 /** @type {ModeManager|null} */
 let modeManager = null;
-
-/** @type {DepthPassManager|null} */
-let depthPassManager = null;
 
 /** @type {Function|null} */
 let _webglContextLostHandler = null;
@@ -6661,10 +6653,6 @@ function onCanvasTearDown(canvas) {
 
   // EffectMaskRegistry removed - GpuSceneMaskCompositor handles all masks
 
-  if (!lightNativeSameScenePath && window.MapShine?.maskManager && typeof window.MapShine.maskManager.dispose === 'function') {
-    safeDispose(() => window.MapShine.maskManager.dispose(), 'MaskManager.dispose');
-  }
-
   // Reset compositor floor-tracking state so stale floor keys don't bleed
   // into the next scene load. clearFloorState() keeps the render target cache
   // in place (they'll be LRU-evicted or disposed when the compositor itself
@@ -6853,14 +6841,6 @@ async function createThreeCanvas(scene, createOptions = {}) {
   try {
     if (window.MapShine) delete window.MapShine.__msaShaderWarmupComplete;
   } catch (_) {}
-  // Runtime testing/isolation modes disabled: always execute the full load path.
-  const isolateCanvasOnly = false;
-  const isolateProbeOnly = false;
-  const isolateWarmupOnly = false;
-  const isolateCompositorOnly = false;
-  const isolateFloorsOnly = false;
-  const isolateBindingOnly = false;
-  const isolateShaderOnly = false;
   const sceneId = String(scene?.id ?? '');
 
   // Prevent tight fail/retry loops for the same scene.
@@ -6961,15 +6941,6 @@ async function createThreeCanvas(scene, createOptions = {}) {
       log.warn(`LoadCoordinator transition failed at ${label}; continuing load path`);
     }
     return true;
-  };
-  const _finishIsolation = (message) => {
-    safeCall(() => {
-      loadingOverlay.setStage?.('final', 1.0, message, { immediate: true });
-      loadingOverlay.fadeIn?.(200)?.catch?.(() => {});
-    }, 'overlay.isolation.finish', Severity.COSMETIC);
-    loadCoordinator.enterDegraded('isolation-mode');
-    session.finish();
-    if (window.MapShine) window.MapShine._loadSession = session;
   };
 
   _setCreateThreeCanvasProgress('entered');
@@ -7356,27 +7327,21 @@ async function createThreeCanvas(scene, createOptions = {}) {
     
     // Hide replaced PIXI layers immediately (background, grid, etc.)
     // These are rendered by Three.js, so they must be hidden.
-    // In isolation mode we keep PIXI visible to avoid black-screening while
-    // we validate the load pipeline scaffolding.
-    if (!isolateCanvasOnly) {
-      if (canvas.background) canvas.background.visible = false;
-      _setGridVisualSuppressed(true);
-      if (canvas.primary) {
-        canvas.primary.visible = true;
-        if (canvas.primary.background) canvas.primary.background.visible = false;
-        if (canvas.primary.foreground) canvas.primary.foreground.visible = false;
-        if (canvas.primary.tiles) canvas.primary.tiles.visible = false;
-        if (Array.isArray(canvas.primary.levelTextures)) {
-          for (const lt of canvas.primary.levelTextures) {
-            if (lt) lt.visible = false;
-          }
+    if (canvas.background) canvas.background.visible = false;
+    _setGridVisualSuppressed(true);
+    if (canvas.primary) {
+      canvas.primary.visible = true;
+      if (canvas.primary.background) canvas.primary.background.visible = false;
+      if (canvas.primary.foreground) canvas.primary.foreground.visible = false;
+      if (canvas.primary.tiles) canvas.primary.tiles.visible = false;
+      if (Array.isArray(canvas.primary.levelTextures)) {
+        for (const lt of canvas.primary.levelTextures) {
+          if (lt) lt.visible = false;
         }
       }
-      if (canvas.weather) canvas.weather.visible = false;
-      if (canvas.environment) canvas.environment.visible = false;
-    } else {
-      _setGridVisualSuppressed(false);
     }
+    if (canvas.weather) canvas.weather.visible = false;
+    if (canvas.environment) canvas.environment.visible = false;
     
     // CRITICAL: Tokens layer needs special handling
     // - Visual rendering is done by Three.js (TokenManager)
@@ -7529,12 +7494,6 @@ async function createThreeCanvas(scene, createOptions = {}) {
       }
     }, 'viewport.deferredHiddenAttach', Severity.COSMETIC);
 
-    // Isolation baseline: stop after core canvas+renderer attach.
-    if (isolateCanvasOnly) {
-      _finishIsolation('Isolation mode: canvas-only ready');
-      return;
-    }
-
     // Robustness: Handle WebGL context loss/restoration.
     // Some UI operations or GPU resets can trigger a context loss; in that case we must
     // stop the RAF loop (otherwise we can wind up in a broken render state) and then
@@ -7641,10 +7600,6 @@ async function createThreeCanvas(scene, createOptions = {}) {
     dlp.event(`sceneComposer: DONE ->-> ${bundle?.masks?.length ?? 0} masks loaded`);
     stepLog(' -> Step: sceneComposer.initialize DONE (' + (bundle?.masks?.length ?? 0) + ' masks)');
     _sectionEnd('sceneComposer.initialize');
-    if (isolateProbeOnly) {
-      _finishIsolation('Isolation mode: probe-only ready');
-      return;
-    }
 
     // Capture asset cache stats for the debug profiler
     if (isDebugLoad) {
@@ -7744,14 +7699,6 @@ async function createThreeCanvas(scene, createOptions = {}) {
     effectComposer.initialize(mapShine.capabilities);
     if (isDebugLoad) dlp.end('effectComposer.initialize');
     stepLog(' -> Step: effectComposer.initialize DONE');
-    if (isolateWarmupOnly) {
-      _finishIsolation('Isolation mode: warmup-only ready');
-      return;
-    }
-    if (isolateCompositorOnly) {
-      _finishIsolation('Isolation mode: compositor-only ready');
-      return;
-    }
 
     // Ensure TimeManager immediately matches Foundry's current pause state.
     safeCall(() => {
@@ -7774,7 +7721,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
     // Progress tracker for dependent effects (Phase 2).
     // Independent effects use registerEffectBatch with its own onProgress.
     let _depEffectIndex = 0;
-    const _depEffectTotal = 7; // Particles, Fire, Dust, Ash, LightEnhancementStore, Lighting, CandleFlames
+    const _depEffectTotal = 6; // Fire, Dust, Ash, weather, lighting, candle flames
     const _setEffectInitStep = (label) => {
       _depEffectIndex++;
       const t = Math.max(0, Math.min(1, _depEffectIndex / _depEffectTotal));
@@ -8000,10 +7947,6 @@ async function createThreeCanvas(scene, createOptions = {}) {
     );
     if (window.MapShine) window.MapShine.floorStack = floorStack;
     log.info('FloorStack initialized');
-    if (isolateFloorsOnly) {
-      _finishIsolation('Isolation mode: floors-only ready');
-      return;
-    }
 
     // Step 4b.0.1: Initialize FloorLayerManager (Compositor V2).
     // KEEP for V2 ->-> essential for assigning tiles to floor layers.
@@ -9678,19 +9621,6 @@ async function createThreeCanvas(scene, createOptions = {}) {
     stepLog(' -> Step: initializeUI DONE');
     if (isDebugLoad) dlp.end('fin.initializeUI');
     _sectionEnd('fin.initializeUI');
-    if (isolateBindingOnly) {
-      // Normal startup defers renderLoop.start until compositor populate completes;
-      // this early-exit path skips that block, so start RAF here.
-      if (renderLoop && !renderLoop.running()) {
-        try {
-          renderLoop.start();
-          log.info('Render loop started (isolateBindingOnly early exit)');
-        } catch (_) {}
-      }
-      safeCall(() => _startLoadHiddenPump(), 'loadHiddenPump.start(isolateBinding)', Severity.COSMETIC);
-      _finishIsolation('Isolation mode: binding-only ready');
-      return;
-    }
 
     stepLog(' -> Step: overlay.finalProgress');
     // Only begin fading-in once we have proof that Three has actually rendered.
@@ -9901,10 +9831,6 @@ async function createThreeCanvas(scene, createOptions = {}) {
     stepLog(' -> Step: shaderCompile DONE');
     if (isDebugLoad) dlp.end('fin.shaderCompile');
     _sectionEnd('fin.shaderCompile');
-    if (isolateShaderOnly) {
-      _finishIsolation('Isolation mode: shader-only ready');
-      return;
-    }
 
     // LoadCoordinator: transition to ACTIVATING and check pre-running invariants
     if (_bailIfSessionStale('fin.activating.pre')) return;
@@ -10705,14 +10631,6 @@ function destroyThreeCanvas() {
     mapPointsManager.dispose();
     mapPointsManager = null;
     log.debug('Map points manager disposed');
-  }
-
-  // Dispose depth pass manager (before effect composer since it's an updatable)
-  if (depthPassManager) {
-    safeDispose(() => { if (effectComposer) effectComposer.removeUpdatable(depthPassManager); }, 'removeUpdatable(depthPass)');
-    safeDispose(() => depthPassManager.dispose(), 'depthPassManager.dispose');
-    depthPassManager = null;
-    log.debug('Depth pass manager disposed');
   }
 
   // Dispose effect composer

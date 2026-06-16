@@ -16,7 +16,6 @@ import { getPlayerLightPickerDialog } from './ui/player-light-picker-dialog.js';
 import { getWeatherSyncBridge } from './foundry/weather-sync-bridge.js';
 
 import { registerLevelNavigationKeybindings } from './foundry/level-navigation-keybindings.js';
-import './scene/level-transition-curtain.js';
 
 const MSA_SOCKET_CHANNEL = 'module.map-shine-advanced';
 
@@ -434,8 +433,6 @@ function getPlayerLightEffectInstance() {
     return null;
   }
 }
-
-_installGlobalPasswordManagerInsertGuard();
 
 
 // -- diagnostic kill-switch cleanup --
@@ -1299,14 +1296,8 @@ Hooks.once('init', async function() {
   });
 
   // Initialize canvas replacement hooks (deferred — avoids parallel load races with tweakpane-manager).
-  try {
-  } catch (_) {
-  }
   const canvasReplacement = await import('./foundry/canvas-replacement.js');
   canvasReplacement.initialize();
-  try {
-  } catch (_) {
-  }
 });
 
 /**

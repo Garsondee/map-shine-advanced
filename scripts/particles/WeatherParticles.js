@@ -168,6 +168,9 @@ function roofDripTileIsExplicitOverhead(tile, doc) {
 /** @param {string} key @param {number|boolean} fallback */
 function _roofDripTuningVal(key, fallback) {
   try {
+    if (key === 'enabled' && typeof weatherController?.isRoofDripEnabled === 'function') {
+      return weatherController.isRoofDripEnabled();
+    }
     const v = weatherController?.roofDripTuning?.[key];
     if (typeof fallback === 'boolean') {
       if (v === false) return false;
@@ -2358,6 +2361,7 @@ export class WeatherParticles {
   }
 
   stepRoofDripWarmup(frameBudgetMs = this._roofDripWarmupFrameBudgetMs) {
+    if (!_roofDripTuningVal('enabled', false)) return true;
     const budgetMs = Math.max(0.25, Number(frameBudgetMs) || this._roofDripWarmupFrameBudgetMs);
     if (this._roofDripWarmupState !== 'warming') return this.isRoofDripWarmupReady();
 
@@ -2393,6 +2397,7 @@ export class WeatherParticles {
   }
 
   markRoofDripPoolStale(reason = 'unknown') {
+    if (!_roofDripTuningVal('enabled', false)) return;
     this._roofDripWarmupState = 'stale';
     this._roofDripPendingStaleReason = reason;
     this._roofDripDiagLastReason = `stale:${reason}`;
@@ -7753,12 +7758,22 @@ export class WeatherParticles {
     })();
 
     // Simplified lifecycle: build once, then rebuild only on explicit stale invalidation.
-    const dripOn = _roofDripTuningVal('enabled', true);
+    const dripOn = _roofDripTuningVal('enabled', false);
+    if (!dripOn) {
+      this._roofDripTailRemainingSec = 0;
+      this._roofDripTailHoldRemainingSec = 0;
+      this._roofDripTailTaperRemainingSec = 0;
+      this._roofDripRebuildJob = null;
+      if (this.roofDripSystem?.emitter) this.roofDripSystem.emitter.visible = false;
+      if (this.roofDripSystem?.emissionOverTime) this.roofDripSystem.emissionOverTime.value = 0;
+    }
     const roofDripEmitIdle =
       !dripOn ||
       suppressPrecip ||
       (rainLevel01 <= 0.001 && roofDripTail01 <= 0.0001);
-    const shouldBuildDrips = !roofDripEmitIdle || this._roofDripWarmupState === 'stale' || !this._roofDripBasePoints;
+    const shouldBuildDrips = dripOn && (
+      !roofDripEmitIdle || this._roofDripWarmupState === 'stale' || !this._roofDripBasePoints
+    );
     if (shouldBuildDrips && this._roofDripRebuildJob) this._roofDripRebuildJobTick();
     if (shouldBuildDrips && !this._roofDripRebuildJob && (!this._roofDripBasePoints || this._roofDripWarmupState === 'stale')) {
       const sig = this._computeRoofDripSourceSignature();
@@ -7768,29 +7783,36 @@ export class WeatherParticles {
     }
     if (roofDripEmitIdle && this._roofDripRebuildJob) this._roofDripRebuildJob = null;
     if (this._roofDripShape) {
-      const base = this._roofDripBasePoints;
-      if (!base || base.length < 5) {
-        this._roofDripDiagStats.lastBasePointCount = 0;
-        this._roofDripDiagStats.lastViewPointCount = 0;
-        this._roofDripDiagLastReason = dripOn ? 'points:empty-base' : 'points:disabled';
+      if (!dripOn) {
         if (this._roofDripActivePointsRef !== null) {
           this._roofDripActivePointsRef = null;
           this._roofDripShape.setPoints(null);
         }
       } else {
-        this._roofDripDiagStats.lastBasePointCount = Math.floor(base.length / 5);
-        let viewPts = this._getViewFilteredRoofDripPoints(base);
-        const focusedMinCount = 140;
-        const viewCount = viewPts ? Math.floor(viewPts.length / 5) : 0;
-        if (viewCount < focusedMinCount) {
-          const near = this._getNearestRoofDripPointsToView(base, 220);
-          if (near && near.length >= 5) viewPts = near;
-        }
-        if (!viewPts || viewPts.length < 5) viewPts = base;
-        this._roofDripDiagStats.lastViewPointCount = viewPts ? Math.floor(viewPts.length / 5) : 0;
-        if (viewPts !== this._roofDripActivePointsRef) {
-          this._roofDripActivePointsRef = viewPts;
-          this._roofDripShape.setPoints(viewPts);
+        const base = this._roofDripBasePoints;
+        if (!base || base.length < 5) {
+          this._roofDripDiagStats.lastBasePointCount = 0;
+          this._roofDripDiagStats.lastViewPointCount = 0;
+          this._roofDripDiagLastReason = 'points:empty-base';
+          if (this._roofDripActivePointsRef !== null) {
+            this._roofDripActivePointsRef = null;
+            this._roofDripShape.setPoints(null);
+          }
+        } else {
+          this._roofDripDiagStats.lastBasePointCount = Math.floor(base.length / 5);
+          let viewPts = this._getViewFilteredRoofDripPoints(base);
+          const focusedMinCount = 140;
+          const viewCount = viewPts ? Math.floor(viewPts.length / 5) : 0;
+          if (viewCount < focusedMinCount) {
+            const near = this._getNearestRoofDripPointsToView(base, 220);
+            if (near && near.length >= 5) viewPts = near;
+          }
+          if (!viewPts || viewPts.length < 5) viewPts = base;
+          this._roofDripDiagStats.lastViewPointCount = viewPts ? Math.floor(viewPts.length / 5) : 0;
+          if (viewPts !== this._roofDripActivePointsRef) {
+            this._roofDripActivePointsRef = viewPts;
+            this._roofDripShape.setPoints(viewPts);
+          }
         }
       }
     }
@@ -7888,7 +7910,7 @@ export class WeatherParticles {
     }
 
     if (this.roofDripSystem) {
-      const dripOn = _roofDripTuningVal('enabled', true);
+      const dripOn = _roofDripTuningVal('enabled', false);
       if (this.roofDripSystem.emitter) {
         this.roofDripSystem.emitter.visible = dripOn && !suppressPrecip;
       }

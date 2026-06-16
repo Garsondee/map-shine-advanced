@@ -773,6 +773,29 @@ export class FireMaskShape {
     this.groundZ = groundZ;
     this.floorElevation = Number.isFinite(floorElevation) ? floorElevation : 0;
     this.type = 'fire_mask';
+    /** @type {Float32Array|null} */
+    this._allPoints = points;
+    this.points = points;
+  }
+
+  /**
+   * Restrict spawn pool to camera view (scene UV rect).
+   * @param {number} uMin
+   * @param {number} uMax
+   * @param {number} vMin
+   * @param {number} vMax
+   */
+  setViewBoundsUv(uMin, uMax, vMin, vMax) {
+    const all = this._allPoints ?? this.points;
+    if (!all?.length) return;
+    const tmp = [];
+    for (let i = 0; i < all.length; i += 3) {
+      const u = all[i];
+      const v = all[i + 1];
+      if (u < uMin || u > uMax || v < vMin || v > vMax) continue;
+      tmp.push(all[i], all[i + 1], all[i + 2]);
+    }
+    this.points = tmp.length >= 9 ? new Float32Array(tmp) : all;
   }
 
   initialize(p) {

@@ -79,7 +79,144 @@ export class TextureBudgetTracker {
     /** @type {number} Monotonic counter for eviction ordering */
     this._evictSeq = 0;
 
+    /** @type {Array<(tracker: TextureBudgetTracker) => number>} */
+    this._evictionHandlers = [];
+
+    /** @type {number} Recommended streaming cell size (world px) */
+    this.cellSize = 2048;
+
+    /** @type {number} Max LOD level for tile pyramids */
+    this.maxLod = 4;
+
+    /** @type {number} Mask compositor resolution scale (0..1) */
+    this.maskResolutionScale = 1.0;
+
+    /** @type {number} Max single background decode dimension */
+    this.backgroundMaxSize = 8192;
+
+    /** @type {number} Max single bus-tile albedo decode dimension */
+    this.tileAlbedoMaxSize = 4096;
+
+    /** @type {number} GPU maxTextureSize snapshot */
+    this.maxTextureSize = 8192;
+
+    /** @type {number} */
+    this._lastEnforceMs = 0;
+
     log.debug(`TextureBudgetTracker created — budget: ${(this.budgetBytes / 1024 / 1024).toFixed(0)} MB`);
+  }
+
+  /**
+   * Apply policy from computeTextureBudgetPolicy().
+   * @param {import('../streaming/texture-budget-policy.js').TextureBudgetPolicy} policy
+   */
+  configureFromPolicy(policy) {
+    if (!policy) return;
+    this.budgetBytes = Math.max(64, policy.budgetMB ?? 512) * 1024 * 1024;
+    this.cellSize = policy.cellSize ?? this.cellSize;
+    this.maxLod = policy.maxLod ?? this.maxLod;
+    this.maskResolutionScale = policy.maskResolutionScale ?? 1.0;
+    this.backgroundMaxSize = policy.backgroundMaxSize ?? this.backgroundMaxSize;
+    this.tileAlbedoMaxSize = policy.tileAlbedoMaxSize ?? this.tileAlbedoMaxSize;
+    this.maxTextureSize = policy.maxTextureSize ?? this.maxTextureSize;
+    log.info(
+      `TextureBudgetTracker configured — ${(this.budgetBytes / 1024 / 1024).toFixed(0)} MB, `
+      + `cell=${this.cellSize}, maskScale=${this.maskResolutionScale.toFixed(2)}`,
+    );
+  }
+
+  /**
+   * Register a global eviction handler invoked when over budget.
+   * Handler should dispose GPU resources and return count evicted.
+   * @param {(tracker: TextureBudgetTracker) => number} handler
+   */
+  addEvictionHandler(handler) {
+    if (typeof handler === 'function' && !this._evictionHandlers.includes(handler)) {
+      this._evictionHandlers.push(handler);
+    }
+  }
+
+  /**
+   * Remove a previously registered eviction handler.
+   * @param {(tracker: TextureBudgetTracker) => number} handler
+   */
+  removeEvictionHandler(handler) {
+    this._evictionHandlers = this._evictionHandlers.filter((h) => h !== handler);
+  }
+
+  /**
+   * Run eviction handlers until under budget or handlers exhausted.
+   * @returns {number} Total entries evicted
+   */
+  enforceBudget() {
+    const now = performance.now();
+    const frac = this.getUsedFraction();
+    const minIntervalMs = frac > 2 ? 100 : 750;
+    if (now - this._lastEnforceMs < minIntervalMs) return 0;
+    if (!this.isOverBudget()) return 0;
+    this._lastEnforceMs = now;
+    let total = 0;
+    for (const handler of this._evictionHandlers) {
+      if (!this.isOverBudget()) break;
+      try {
+        total += Number(handler(this)) || 0;
+      } catch (e) {
+        log.warn('enforceBudget handler failed', e);
+      }
+    }
+    return total;
+  }
+
+  /** @returns {number} */
+  getRecommendedTileSize() {
+    return this.cellSize;
+  }
+
+  /** @returns {number} */
+  getMaxLodLevel() {
+    return this.maxLod;
+  }
+
+  /** @returns {number} */
+  getTileAlbedoMaxSize() {
+    const base = this.tileAlbedoMaxSize ?? this.backgroundMaxSize ?? 4096;
+    let max = Math.max(512, Math.floor(base * this.getDownscaleFactor()));
+    if (!this.isOverBudget() && this.getUsedFraction() < 0.85) {
+      max = Math.min(this.maxTextureSize ?? 8192, Math.max(max, 2048));
+    }
+    return max;
+  }
+
+  /** @returns {number} */
+  getMaskResolutionScale() {
+    const base = this.maskResolutionScale;
+    return base * this.getDownscaleFactor();
+  }
+
+  /**
+   * Stable mask resolution scale that ignores the volatile over-budget downscale
+   * factor. Used for large cached data masks (outdoors/floorAlpha/skyReach/floorId)
+   * so they don't oscillate in size as budget pressure fluctuates.
+   * @returns {number}
+   */
+  getStableMaskResolutionScale() {
+    return this.maskResolutionScale;
+  }
+
+  /**
+   * Register a WebGLRenderTarget with automatic byte estimation.
+   * @param {import('three').WebGLRenderTarget} rt
+   * @param {string} label
+   * @param {object} [options]
+   */
+  registerRenderTarget(rt, label, options = {}) {
+    if (!rt) return;
+    const w = rt.width ?? rt.texture?.image?.width ?? 0;
+    const h = rt.height ?? rt.texture?.image?.height ?? 0;
+    const fmt = rt.texture?.type === window.THREE?.FloatType ? 'float'
+      : rt.texture?.type === window.THREE?.HalfFloatType ? 'halfFloat' : 'ubyte';
+    const bytes = estimateTextureBytes(w, h, fmt);
+    this.register(rt, label, bytes, { source: options.source ?? 'renderTarget', floorKey: options.floorKey ?? null });
   }
 
   // ── Registration API ──────────────────────────────────────────────────────
@@ -248,6 +385,7 @@ export class TextureBudgetTracker {
   dispose() {
     this._entries.clear();
     this._usedBytes = 0;
+    this._evictionHandlers = [];
   }
 }
 
@@ -256,6 +394,44 @@ export class TextureBudgetTracker {
  * @type {TextureBudgetTracker|null}
  */
 let _instance = null;
+
+export function resolveTileAlbedoMaxSize(tracker = null) {
+  const budget = tracker ?? getTextureBudgetTracker();
+  if (typeof budget?.getTileAlbedoMaxSize === 'function') {
+    return budget.getTileAlbedoMaxSize();
+  }
+  const base = budget?.tileAlbedoMaxSize ?? budget?.backgroundMaxSize ?? 4096;
+  const factor = typeof budget?.getDownscaleFactor === 'function' ? budget.getDownscaleFactor() : 1;
+  return Math.max(512, Math.floor(base * factor));
+}
+
+/** @returns {number} */
+export function resolveRecommendedTileSize(tracker = null) {
+  const budget = tracker ?? getTextureBudgetTracker();
+  if (typeof budget?.getRecommendedTileSize === 'function') {
+    return budget.getRecommendedTileSize();
+  }
+  return budget?.cellSize ?? 2048;
+}
+
+/**
+ * @param {import('./TextureBudgetTracker.js').TextureBudgetTracker|null} [tracker]
+ * @returns {import('./TextureBudgetTracker.js').BudgetState}
+ */
+export function resolveBudgetState(tracker = null) {
+  const budget = tracker ?? getTextureBudgetTracker();
+  if (typeof budget?.getBudgetState === 'function') {
+    return budget.getBudgetState();
+  }
+  return {
+    usedBytes: budget?._usedBytes ?? 0,
+    budgetBytes: budget?.budgetBytes ?? 512 * 1024 * 1024,
+    usedFraction: 0,
+    overBudget: false,
+    entryCount: 0,
+    topEntries: [],
+  };
+}
 
 /**
  * Get or create the global TextureBudgetTracker singleton.

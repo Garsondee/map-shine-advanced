@@ -6,7 +6,6 @@ import {
   buildEffectSceneBoundsFromCanvas,
   sampleAuthoredOutdoorsAtWorld,
 } from './water-splash-behaviors.js';
-import { refreshShelterOutdoorsMaskForActiveFloor } from '../outdoors-mask-sample.js';
 import { getPerspectiveElevation } from '../../foundry/elevation-context.js';
 import { hasV14NativeLevels } from '../../foundry/levels-scene-flags.js';
 import { VisionPolygonComputer } from '../../vision/VisionPolygonComputer.js';
@@ -189,6 +188,8 @@ export class CandleFlamesEffectV2 {
     this._hookIds = [];
     this._needsGlowRebuild = false;
     this._lastGlowRebuildAt = -Infinity;
+    this._outdoorsGlowRebuildPending = false;
+    this._lastOutdoorsGlowRebuildAt = -Infinity;
 
     this._sourceFlameCount = 0;
 
@@ -936,6 +937,13 @@ export class CandleFlamesEffectV2 {
       this._lastGlowRebuildAt = timeInfo.elapsed;
     }
 
+    if (this._outdoorsGlowRebuildPending
+      && (timeInfo.elapsed - this._lastOutdoorsGlowRebuildAt) > 0.4) {
+      this._rebuildGlowMeshes();
+      this._outdoorsGlowRebuildPending = false;
+      this._lastOutdoorsGlowRebuildAt = timeInfo.elapsed;
+    }
+
     this._updateGlowFlicker(timeInfo);
   }
 
@@ -1657,7 +1665,8 @@ export class CandleFlamesEffectV2 {
     }
 
     this._syncSceneBounds();
-    try { refreshShelterOutdoorsMaskForActiveFloor(); } catch (_) {}
+    // Outdoors CPU snapshot is refreshed when the mask binding signature changes
+    // (FloorCompositor._syncOutdoorsMaskConsumers) — not every update tick.
 
     const groundZ = this._getGroundZ();
 
@@ -1834,7 +1843,7 @@ export class CandleFlamesEffectV2 {
       if (!c) continue;
       c.outdoor = this._sampleGlowOutdoorAtWorld(c.cxWorld, c.cyWorld);
     }
-    this._rebuildGlowMeshes();
+    this._outdoorsGlowRebuildPending = true;
   }
 
   _rebuildGlowMeshes() {

@@ -563,6 +563,17 @@ export class WeatherParticlesV2 {
   }
 
   /**
+   * @returns {boolean}
+   * @private
+   */
+  _hasActiveRoofDripTail() {
+    if (typeof weatherController?.isRoofDripEnabled === 'function' && !weatherController.isRoofDripEnabled()) {
+      return false;
+    }
+    return (this._weatherParticles?._roofDripTailRemainingSec ?? 0) > 0.01;
+  }
+
+  /**
    * Granular reason for FloorCompositor continuous-render diagnostics.
    * @returns {string|null}
    */
@@ -570,7 +581,7 @@ export class WeatherParticlesV2 {
     if (!this._weatherNeedsContinuousPresentation()) return null;
     if (this._hasActivePrecipOrAsh()) return 'weather:precip-or-ash';
     if (this._hasActiveWeatherEmission()) return 'weather:emission-tail';
-    if ((this._weatherParticles?._roofDripTailRemainingSec ?? 0) > 0.01) return 'weather:roof-drip-tail';
+    if (this._hasActiveRoofDripTail()) return 'weather:roof-drip-tail';
     if (this._hasLiveWeatherQuarksParticles()) return 'weather:live-particles';
     return 'weather:idle';
   }
@@ -587,7 +598,7 @@ export class WeatherParticlesV2 {
     if (weatherController?.elevationWeatherSuppressed === true) return false;
     if (this._hasActivePrecipOrAsh()) return true;
     if (this._hasActiveWeatherEmission()) return true;
-    if ((this._weatherParticles?._roofDripTailRemainingSec ?? 0) > 0.01) return true;
+    if (this._hasActiveRoofDripTail()) return true;
     return this._hasLiveWeatherQuarksParticles();
   }
 
@@ -632,7 +643,7 @@ export class WeatherParticlesV2 {
     if (weatherController?.elevationWeatherSuppressed === true) return false;
     if (this._hasActivePrecipOrAsh()) return true;
     if (this._hasActiveWeatherEmission()) return true;
-    if ((this._weatherParticles?._roofDripTailRemainingSec ?? 0) > 0.01) return true;
+    if (this._hasActiveRoofDripTail()) return true;
     return this._hasLiveWeatherQuarksParticles();
   }
 
@@ -646,7 +657,7 @@ export class WeatherParticlesV2 {
   _updateIdleParticleDrain() {
     const weatherActive = this._hasActivePrecipOrAsh()
       || this._hasActiveWeatherEmission()
-      || (this._weatherParticles?._roofDripTailRemainingSec ?? 0) > 0.01;
+      || this._hasActiveRoofDripTail();
     if (weatherActive || !this._hasLiveWeatherQuarksParticles()) {
       this._idleDrainStartMs = 0;
       return;

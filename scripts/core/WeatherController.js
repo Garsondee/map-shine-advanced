@@ -391,7 +391,7 @@ export class WeatherController {
      * Pool rebuild key: `_computeRoofDripSourceSignature()` tunSig (not a global epoch).
      */
     this.roofDripTuning = {
-      enabled: true,
+      enabled: false,
       emissionRainMult: 300,
       emissionTailMult: 260,
       tailDurationSec: 300,
@@ -712,12 +712,30 @@ export class WeatherController {
   }
 
   /**
+   * Roof / tree canopy drips (WeatherParticles roofDripSystem).
+   * Disabled by default — enable via Tweakpane when tuning; expensive on large maps.
+   * @returns {boolean}
+   */
+  isRoofDripEnabled() {
+    try {
+      if (window.MapShine?.disableRoofDrips === true) return false;
+    } catch (_) {}
+    return this.roofDripTuning?.enabled === true;
+  }
+
+  /**
    * Set the Roof Map (Indoor/Outdoor Mask) texture
    * @param {THREE.Texture} texture - The _Outdoors texture
    */
   setRoofMap(texture) {
+    if (texture === this.roofMap) return;
     this.roofMap = texture;
-    log.info('Roof Map set from _Outdoors texture');
+
+    if (!this.isRoofDripEnabled()) {
+      return;
+    }
+
+    log.debug('Roof Map set from _Outdoors texture');
 
     if (!texture) {
       this.roofMaskData = null;
@@ -725,7 +743,7 @@ export class WeatherController {
       this._disposeRoofDistanceMap();
       return;
     }
-    if (texture.image) {
+    if (texture.image && this._isDrawableRoofMaskImage(texture.image)) {
       this._extractRoofMaskData(texture.image);
       return;
     }
@@ -737,6 +755,30 @@ export class WeatherController {
     this.roofMaskData = null;
     this.roofMaskSize = { width: 0, height: 0 };
     this._disposeRoofDistanceMap();
+  }
+
+  /**
+   * @param {unknown} image
+   * @returns {boolean}
+   * @private
+   */
+  _isDrawableRoofMaskImage(image) {
+    if (!image) return false;
+    try {
+      if (typeof HTMLImageElement !== 'undefined' && image instanceof HTMLImageElement) {
+        return image.complete && image.naturalWidth > 0 && image.naturalHeight > 0;
+      }
+      if (typeof HTMLCanvasElement !== 'undefined' && image instanceof HTMLCanvasElement) {
+        return image.width > 0 && image.height > 0;
+      }
+      if (typeof ImageBitmap !== 'undefined' && image instanceof ImageBitmap) {
+        return image.width > 0 && image.height > 0;
+      }
+      if (typeof OffscreenCanvas !== 'undefined' && image instanceof OffscreenCanvas) {
+        return image.width > 0 && image.height > 0;
+      }
+    } catch (_) {}
+    return false;
   }
 
   /**
@@ -3616,7 +3658,7 @@ export class WeatherController {
 
         roofDripEnabled: {
           label: 'Drips Enabled',
-          default: true,
+          default: false,
           type: 'boolean',
           group: 'roofDrips'
         },

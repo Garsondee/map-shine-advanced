@@ -6,6 +6,11 @@
  */
 
 import { createLogger } from './log.js';
+import {
+  getViewProjectionCache,
+  tickViewProjection,
+  resolveGroundZ,
+} from '../streaming/view-projection-service.js';
 
 const log = createLogger('FrameState');
 
@@ -137,8 +142,8 @@ export class FrameState {
       this.sceneHeight = sceneRect.height ?? canvas.dimensions.height ?? 1;
     }
 
-    // Update view bounds (world space visible area)
-    this._updateViewBounds(camera);
+    // Update view bounds (world space visible area) via canonical ground-plane raycast.
+    this._updateViewBounds(camera, sceneComposer);
 
     // Detect changes
     this.cameraChanged = (
@@ -156,9 +161,23 @@ export class FrameState {
    * Compute view bounds from camera
    * @private
    */
-  _updateViewBounds(camera) {
+  _updateViewBounds(camera, sceneComposer = null) {
     if (!camera) return;
 
+    const groundZ = Number(sceneComposer?.groundZ);
+    const gz = Number.isFinite(groundZ) ? groundZ : resolveGroundZ();
+
+    tickViewProjection(camera, gz);
+    const cache = getViewProjectionCache();
+    if (cache?.isValid) {
+      this.viewMinX = cache.vMinX;
+      this.viewMaxX = cache.vMaxX;
+      this.viewMinY = cache.vMinY;
+      this.viewMaxY = cache.vMaxY;
+      return;
+    }
+
+    // Fallback: FOV box (legacy path if raycast fails).
     const THREE = window.THREE;
     if (!THREE) return;
 
@@ -170,52 +189,15 @@ export class FrameState {
       this.viewMinY = camPos.y + camera.bottom / zoom;
       this.viewMaxY = camPos.y + camera.top / zoom;
     } else if (camera.isPerspectiveCamera) {
-      // For perspective camera, reconstruct view bounds at ground plane
-      const origin = camera.position;
-      const ndc = new THREE.Vector3();
-      const world = new THREE.Vector3();
-      const dir = new THREE.Vector3();
-      const groundZ = 0;
-
-      let minX = Infinity;
-      let minY = Infinity;
-      let maxX = -Infinity;
-      let maxY = -Infinity;
-
-      // Test four corners of NDC space
-      const corners = [
-        [-1, -1],
-        [1, -1],
-        [-1, 1],
-        [1, 1]
-      ];
-
-      for (const [cx, cy] of corners) {
-        ndc.set(cx, cy, 0.5);
-        world.copy(ndc).unproject(camera);
-
-        dir.subVectors(world, origin).normalize();
-        const dz = dir.z;
-        if (Math.abs(dz) < 1e-6) continue;
-
-        const t = (groundZ - origin.z) / dz;
-        if (!Number.isFinite(t) || t <= 0) continue;
-
-        const ix = origin.x + dir.x * t;
-        const iy = origin.y + dir.y * t;
-
-        if (ix < minX) minX = ix;
-        if (iy < minY) minY = iy;
-        if (ix > maxX) maxX = ix;
-        if (iy > maxY) maxY = iy;
-      }
-
-      if (Number.isFinite(minX)) {
-        this.viewMinX = minX;
-        this.viewMaxX = maxX;
-        this.viewMinY = minY;
-        this.viewMaxY = maxY;
-      }
+      const dist = Math.max(1e-3, Math.abs((camera.position?.z ?? 0) - gz));
+      const fovRad = ((Number(camera.fov) || 60) * Math.PI) / 180;
+      const halfH = dist * Math.tan(fovRad * 0.5);
+      const aspect = Number(camera.aspect) || 1;
+      const halfW = halfH * aspect;
+      this.viewMinX = camera.position.x - halfW;
+      this.viewMaxX = camera.position.x + halfW;
+      this.viewMinY = camera.position.y - halfH;
+      this.viewMaxY = camera.position.y + halfH;
     }
   }
 

@@ -8,8 +8,8 @@
  *   causes and lets the user copy a diagnostic report or rebuild the scene.
  * - Apply a one-shot "safe mode" render-resolution downgrade when a crash
  *   happens, then restore the previous resolution automatically on the next
- *   load — unless crashes keep repeating, in which case safe mode sticks and
- *   the user is told why.
+ *   load once no WebGL crash has occurred in the last 30 minutes — otherwise
+ *   safe mode sticks and the user is told why.
  * - Watchdog: if the browser never restores the context, trigger an automatic
  *   scene rebuild (fresh canvas + fresh WebGL context) once per session.
  *
@@ -20,6 +20,7 @@
  */
 
 import { createLogger } from './log.js';
+import { buildTileStreamingCrashSnapshot, buildCompositorPopulateSnapshot } from '../ui/tile-streaming-report.js';
 
 const log = createLogger('WebGLCrashRecovery');
 
@@ -29,8 +30,8 @@ const SAFE_MODE_PRESET = '1280x720';
 const HISTORY_MAX = 20;
 /** Crashes within this window count as "repeated" and keep safe mode active. */
 const REPEAT_CRASH_WINDOW_MS = 30 * 60 * 1000;
-/** How many recent crashes are needed before safe mode persists across loads. */
-const REPEAT_CRASH_THRESHOLD = 2;
+/** Any crash inside REPEAT_CRASH_WINDOW_MS keeps safe mode active across reloads. */
+const REPEAT_CRASH_THRESHOLD = 1;
 /** How long to wait for webglcontextrestored before forcing a rebuild. */
 const RESTORE_WATCHDOG_MS = 12000;
 /** Delay before the crash dialog appears (lets the restore race settle first). */
@@ -135,6 +136,11 @@ function _compactRecord(record) {
     restored: record.restored === true,
     restoredAfterMs: record.restoredAfterMs ?? null,
     safeModeDowngradeApplied: record.safeModeDowngradeApplied === true,
+    streamVramPct: record.tileStreaming?.budget?.usedPct ?? null,
+    streamInflight: record.tileStreaming?.totals?.inflight ?? null,
+    streamResidentCells: record.tileStreaming?.totals?.residentCells ?? null,
+    streamBgGrids: record.tileStreaming?.manager?.backgroundGridCount ?? null,
+    streamRegionGrids: record.tileStreaming?.manager?.regionGridCount ?? null,
   };
 }
 
@@ -184,6 +190,8 @@ export function collectDiagnostics(extra = {}) {
     browser: {},
     crashHistorySummary: {},
     recentErrors: [],
+    tileStreaming: null,
+    populate: null,
   };
 
   try {
@@ -310,6 +318,18 @@ export function collectDiagnostics(extra = {}) {
     if (Array.isArray(errs)) record.recentErrors = errs.slice(-10);
   } catch (_) {}
 
+  try {
+    record.populate = buildCompositorPopulateSnapshot();
+  } catch (e) {
+    record.populate = { error: String(e?.message ?? e) };
+  }
+
+  try {
+    record.tileStreaming = buildTileStreamingCrashSnapshot({ maxCellsPerGrid: 20 });
+  } catch (e) {
+    record.tileStreaming = { error: String(e?.message ?? e) };
+  }
+
   return record;
 }
 
@@ -334,6 +354,59 @@ export function diagnoseCrash(record) {
     const sceneMegapixels = ((record.scene?.width ?? 0) * (record.scene?.height ?? 0)) / 1e6;
     const dpr = record.graphics?.devicePixelRatio ?? 1;
     const preset = record.graphics?.renderResolutionPreset ?? 'native';
+    const stream = record.tileStreaming ?? null;
+    const populate = record.populate ?? stream?.populate ?? null;
+
+    if (loading && populate?.populateComplete !== true) {
+      causes.push(
+        'FloorCompositor bus populate had not finished before the crash '
+        + `(coordinator: ${populate?.coordinatorState ?? record.load?.coordinatorState ?? '?'}, `
+        + `bus tiles: ${populate?.busTileCount ?? 0}). `
+        + 'Tile streaming cannot register until populate runs — this crash blocked the map from loading.',
+      );
+    } else if (loading && (stream?.manager?.backgroundGridCount ?? 0) === 0 && (record.scene?.width ?? 0) >= 10000) {
+      causes.push(
+        'Large-scene tile streaming was not registered at crash time — background pyramid mount '
+        + 'likely still in flight or populate had not reached the background loader yet.',
+      );
+    }
+
+    if (stream?.budget?.overBudget) {
+      causes.push(
+        `Texture VRAM budget was exceeded (${stream.budget.usedPct ?? '?'}% of `
+        + `${stream.budget.budgetMB ?? '?'} MB) — tile streaming, masks, and compositor RTs may have `
+        + 'competed for GPU memory.',
+      );
+    } else if (stream?.budget?.usedPct != null && stream.budget.usedPct >= 92) {
+      causes.push(
+        `Texture VRAM was near budget (${stream.budget.usedPct}% used) — streaming may have been `
+        + 'under pressure to load or retain pyramid cells.',
+      );
+    }
+
+    if (stream?.totals?.inflight > 0 && loading) {
+      causes.push(
+        `${stream.totals.inflight} tile streaming decode/upload(s) were in flight during the crash `
+        + '— concurrent pyramid loads during scene init can spike GPU memory.'
+      );
+    }
+
+    if (stream?.totals?.residentCells > 24 && loading) {
+      causes.push(
+        `${stream.totals.residentCells} streamed tile cells were resident in GPU memory at crash time.`
+      );
+    }
+
+    if (stream?.manager?.regionGridCount > 0 && stream?.manager?.backgroundGridCount > 0) {
+      causes.push(
+        `Both background (${stream.manager.backgroundGridCount}) and region (${stream.manager.regionGridCount}) `
+        + 'streaming grids were active — redundant region grids multiply VRAM use on large maps.'
+      );
+    }
+
+    if (Array.isArray(stream?.warnings) && stream.warnings.length) {
+      causes.push(`Tile streaming warnings at crash: ${stream.warnings.slice(0, 2).join(' ')}`);
+    }
 
     if (repeated) {
       causes.push(
@@ -446,12 +519,69 @@ function _applySafeModeDowngrade(ctx) {
 }
 
 /**
+ * @param {number} [nowMs]
+ * @returns {number}
+ */
+function _countRecentCrashes(nowMs = Date.now()) {
+  return getCrashHistory()
+    .filter((c) => (nowMs - (c?.atMs ?? 0)) < REPEAT_CRASH_WINDOW_MS)
+    .length;
+}
+
+/**
+ * When WebGL crashed recently, ensure persisted graphics overrides stay at or
+ * below the safe-mode preset even if a prior reload already restored native.
+ *
+ * @param {{ id?: string|null }|null} [scene]
+ * @returns {boolean} True when a downgrade was applied or reaffirmed.
+ */
+export function ensureConservativeGraphicsForLoad(scene = null) {
+  try {
+    const now = Date.now();
+    const sceneId = scene?.id ?? canvas?.scene?.id ?? null;
+    const history = getCrashHistory();
+    const recentOnScene = history.filter((c) => {
+      if ((now - (c?.atMs ?? 0)) >= REPEAT_CRASH_WINDOW_MS) return false;
+      if (!sceneId) return true;
+      return c?.sceneId === sceneId;
+    }).length;
+    const recentAny = _countRecentCrashes(now);
+    if (recentOnScene < REPEAT_CRASH_THRESHOLD && recentAny < REPEAT_CRASH_THRESHOLD) return false;
+
+    const storageKey = _buildGraphicsStorageKey();
+    const stored = _readJson(storageKey) ?? {};
+    const currentPreset = stored.renderResolutionPreset ?? 'native';
+    if (!_presetAtOrBelow(currentPreset, SAFE_MODE_PRESET)) {
+      stored.renderResolutionPreset = SAFE_MODE_PRESET;
+      _writeJson(storageKey, stored);
+      log.warn(`Load guard: render resolution capped to ${SAFE_MODE_PRESET} after recent WebGL crash`);
+    }
+
+    const marker = _readJson(SAFE_MODE_KEY);
+    if (!marker?.active) {
+      _writeJson(SAFE_MODE_KEY, {
+        active: true,
+        previousPreset: currentPreset,
+        storageKey,
+        at: now,
+        sessionId: SESSION_ID,
+      });
+    }
+    _pendingLoadNotice = { type: 'staying-reduced' };
+    return true;
+  } catch (e) {
+    log.warn('ensureConservativeGraphicsForLoad failed', e);
+    return false;
+  }
+}
+
+/**
  * Called at the start of every scene load (before graphics settings are read).
  *
  * If a previous session crashed and auto-downgraded the resolution, restore the
  * original preset so the user gets full quality back without manual action —
- * unless crashes have been repeating recently, in which case safe mode stays
- * and the user is told why (after the load succeeds).
+ * unless any WebGL crash is still fresh, in which case safe mode stays and the
+ * user is told why (after the load succeeds).
  */
 export function maybeRestoreResolutionBeforeLoad() {
   try {
@@ -462,13 +592,10 @@ export function maybeRestoreResolutionBeforeLoad() {
     // next full reload so we don't immediately re-trigger the same crash.
     if (marker.sessionId === SESSION_ID) return;
 
-    const now = Date.now();
-    const recentCrashes = getCrashHistory()
-      .filter((c) => (now - (c?.atMs ?? 0)) < REPEAT_CRASH_WINDOW_MS).length;
-
+    const recentCrashes = _countRecentCrashes();
     if (recentCrashes >= REPEAT_CRASH_THRESHOLD) {
       _pendingLoadNotice = { type: 'staying-reduced' };
-      log.warn(`Safe mode kept active (${recentCrashes} recent WebGL crashes)`);
+      log.warn(`Safe mode kept active (${recentCrashes} recent WebGL crash(es))`);
       return;
     }
 
@@ -718,6 +845,24 @@ async function _copyReportToClipboard(record) {
   }
 }
 
+/**
+ * @param {object|null|undefined} stream
+ * @returns {string|null}
+ */
+function _streamingDialogSummary(stream) {
+  if (!stream) return null;
+  if (stream.error) return `unavailable (${stream.error})`;
+  const vram = stream.budget
+    ? `${stream.budget.usedMB ?? '?'} / ${stream.budget.budgetMB ?? '?'} MB (${stream.budget.usedPct ?? '?'}%)`
+    : 'n/a';
+  const grids = `${stream.manager?.backgroundGridCount ?? 0} bg, ${stream.manager?.regionGridCount ?? 0} region`;
+  const cells = stream.totals
+    ? `${stream.totals.residentCells ?? 0} resident, ${stream.totals.inflight ?? 0} inflight`
+    : 'n/a';
+  const view = stream.view?.visibleCellsInFrustum ?? '?';
+  return `${vram}; ${grids}; ${cells}; ${view} textured in view`;
+}
+
 function _buildDialogContent(record) {
   const causes = diagnoseCrash(record);
   const restored = record.restored === true;
@@ -740,6 +885,26 @@ function _buildDialogContent(record) {
       : 'n/a'],
     ['Recent crashes (30 min)', record.crashHistorySummary?.withinLast30Min ?? 0],
   ];
+
+  const streamSummary = _streamingDialogSummary(record.tileStreaming);
+  if (streamSummary) {
+    detailRows.push(['Tile streaming', streamSummary]);
+  }
+
+  const populate = record.populate ?? record.tileStreaming?.populate ?? null;
+  if (populate && !populate.error) {
+    detailRows.push([
+      'Compositor populate',
+      populate.populateComplete
+        ? `complete (${populate.busTileCount ?? 0} bus tiles)`
+        : `in flight=${populate.populateInFlight === true}, bus tiles=${populate.busTileCount ?? 0}, bg jobs=${populate.pendingBackgroundJobs ?? 0}`,
+    ]);
+  }
+
+  const streamWarnings = record.tileStreaming?.warnings;
+  if (Array.isArray(streamWarnings) && streamWarnings.length) {
+    detailRows.push(['Streaming warnings', streamWarnings.slice(0, 3).join(' · ')]);
+  }
 
   return `
     <div class="msa-webgl-crash-dialog">
@@ -840,6 +1005,7 @@ export const webglCrashRecovery = {
   onContextLost,
   onContextRestored,
   maybeRestoreResolutionBeforeLoad,
+  ensureConservativeGraphicsForLoad,
   onLoadSucceeded,
   collectDiagnostics,
   diagnoseCrash,

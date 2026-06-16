@@ -17,6 +17,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { getVisibleWorldRect } from '../../streaming/view-projection-service.js';
 import { tagQuarkSystem } from '../../core/quark-diagnostics.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
@@ -184,10 +185,31 @@ class DustFadeOverLifeBehavior {
 
 class DustMaskShape {
   constructor(pointsWorld, ownerEffect, floorZ) {
+    this._allPoints = pointsWorld;
     this.points = pointsWorld;
     this.ownerEffect = ownerEffect;
     this.floorZ = floorZ;
     this.type = 'dust_mask_v2';
+  }
+
+  /**
+   * Restrict spawn pool to world-space view rect.
+   * @param {number} minX
+   * @param {number} minY
+   * @param {number} maxX
+   * @param {number} maxY
+   */
+  setViewBoundsWorld(minX, minY, maxX, maxY) {
+    const all = this._allPoints ?? this.points;
+    if (!all?.length) return;
+    const tmp = [];
+    for (let i = 0; i < all.length; i += 3) {
+      const x = all[i];
+      const y = all[i + 1];
+      if (x < minX || x > maxX || y < minY || y > maxY) continue;
+      tmp.push(all[i], all[i + 1], all[i + 2]);
+    }
+    this.points = tmp.length >= 9 ? new Float32Array(tmp) : all;
   }
 
   initialize(p) {
@@ -566,6 +588,8 @@ export class DustEffectV2 {
 
     this._updateSystemParams();
 
+    this._applyViewBoundsToDustShapes();
+
     try {
       this._batchRenderer.update(dt);
     } catch (err) {
@@ -640,6 +664,21 @@ export class DustEffectV2 {
           this._queueRebuild();
         }
       });
+  }
+
+  _applyViewBoundsToDustShapes() {
+    const view = getVisibleWorldRect(640);
+    if (!view) return;
+    for (const idx of this._activeFloors) {
+      const state = this._floorStates.get(idx);
+      if (!state?.systems) continue;
+      for (const sys of state.systems) {
+        const shape = sys?.emitter?.shape;
+        if (shape && typeof shape.setViewBoundsWorld === 'function') {
+          shape.setViewBoundsWorld(view.minX, view.minY, view.maxX, view.maxY);
+        }
+      }
+    }
   }
 
   _updateSystemParams() {

@@ -36,6 +36,81 @@ export function normalizeTextureUrl(path) {
 }
 
 /**
+ * Resolve an image blob via Foundry's PIXI cache, then plain fetch.
+ * Used by streaming pyramids and any path that cannot rely on fetch alone.
+ *
+ * @param {string} url
+ * @returns {Promise<Blob|null>}
+ */
+export async function fetchImageBlob(url) {
+  const absoluteUrl = normalizeTextureUrl(url);
+  if (!absoluteUrl) return null;
+
+  const loadTextureFn = globalThis.foundry?.canvas?.loadTexture ?? globalThis.loadTexture;
+  if (loadTextureFn) {
+    try {
+      const pixiTexture = await loadTextureFn(absoluteUrl);
+      const rawSource = pixiTexture?.baseTexture?.resource?.source;
+      const fromPixi = await _canvasSourceToBlob(rawSource);
+      if (fromPixi) return fromPixi;
+    } catch (_) {}
+  }
+
+  try {
+    const response = await fetch(absoluteUrl);
+    if (!response.ok) return null;
+    return await response.blob();
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * @param {CanvasImageSource|null|undefined} source
+ * @returns {Promise<Blob|null>}
+ */
+async function _canvasSourceToBlob(source) {
+  if (!source) return null;
+
+  if (source instanceof HTMLImageElement && !source.complete) {
+    try {
+      await new Promise((resolve, reject) => {
+        source.addEventListener('load', resolve, { once: true });
+        source.addEventListener('error', reject, { once: true });
+      });
+    } catch (_) {
+      return null;
+    }
+  }
+
+  let w = 0;
+  let h = 0;
+  if (source instanceof HTMLImageElement) {
+    w = source.naturalWidth;
+    h = source.naturalHeight;
+    if (!(w > 0 && h > 0)) return null;
+  } else if (source instanceof ImageBitmap) {
+    w = source.width;
+    h = source.height;
+  } else if (source instanceof HTMLCanvasElement) {
+    w = source.width;
+    h = source.height;
+  } else {
+    return null;
+  }
+
+  if (!(w > 0 && h > 0)) return null;
+
+  const cv = document.createElement('canvas');
+  cv.width = w;
+  cv.height = h;
+  const ctx = cv.getContext('2d');
+  if (!ctx) return null;
+  ctx.drawImage(source, 0, 0, w, h);
+  return new Promise((resolve) => cv.toBlob((blob) => resolve(blob), 'image/png'));
+}
+
+/**
  * @param {string} url
  * @param {object} options
  * @returns {string}
@@ -154,7 +229,14 @@ async function _loadImageTextureImpl(url, options) {
   const _isDbg = _dlp?.debugMode;
 
   if (tryFoundryCache) {
-    const fromPixi = await _tryLoadFromFoundryPixi(absoluteUrl, role, markOwned, stabilizeCanvas);
+    const fromPixi = await _tryLoadFromFoundryPixi(
+      absoluteUrl,
+      role,
+      markOwned,
+      stabilizeCanvas,
+      maxSize,
+      premultiplyAlpha,
+    );
     if (fromPixi) return fromPixi;
   }
 
@@ -220,14 +302,73 @@ async function _loadImageTextureImpl(url, options) {
 }
 
 /**
+ * Downscale a canvas/image source to fit within maxSize (longest edge).
+ * @param {CanvasImageSource} source
+ * @param {number} maxSize
+ * @param {'none'|'premultiply'} premultiplyAlpha
+ * @returns {Promise<CanvasImageSource|null>}
+ */
+async function _downscaleSourceToMaxSize(source, maxSize, premultiplyAlpha = 'none') {
+  const w = Number(source?.naturalWidth ?? source?.width ?? 0);
+  const h = Number(source?.naturalHeight ?? source?.height ?? 0);
+  if (!(w > 0 && h > 0) || !(maxSize > 0)) return null;
+  if (Math.max(w, h) <= maxSize) return source;
+
+  if (_hasImageBitmap) {
+    try {
+      const bitmap = source instanceof ImageBitmap
+        ? source
+        : await createImageBitmap(source, { premultiplyAlpha, colorSpaceConversion: 'none' });
+      const scale = maxSize / Math.max(w, h);
+      const newW = Math.max(1, Math.round(w * scale));
+      const newH = Math.max(1, Math.round(h * scale));
+      const resized = await createImageBitmap(bitmap, 0, 0, w, h, {
+        resizeWidth: newW,
+        resizeHeight: newH,
+        resizeQuality: 'medium',
+        premultiplyAlpha,
+      });
+      if (bitmap !== source && typeof bitmap.close === 'function') bitmap.close();
+      return _stabilizeBitmapOnCanvas(resized);
+    } catch (err) {
+      log.warn('Downscale via ImageBitmap failed', err);
+    }
+  }
+
+  try {
+    const scale = maxSize / Math.max(w, h);
+    const newW = Math.max(1, Math.round(w * scale));
+    const newH = Math.max(1, Math.round(h * scale));
+    const canvasEl = document.createElement('canvas');
+    canvasEl.width = newW;
+    canvasEl.height = newH;
+    const ctx = canvasEl.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(source, 0, 0, newW, newH);
+    return canvasEl;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
  * Use Foundry's loadTexture (PIXI.Assets cache) when the scene already decoded the image.
  * @param {string} absoluteUrl
  * @param {string} role
  * @param {boolean} markOwned
  * @param {boolean} stabilizeCanvas
+ * @param {number} [maxSize=0]
+ * @param {'none'|'premultiply'} [premultiplyAlpha='none']
  * @returns {Promise<import('three').Texture|null>}
  */
-async function _tryLoadFromFoundryPixi(absoluteUrl, role, markOwned, stabilizeCanvas) {
+async function _tryLoadFromFoundryPixi(
+  absoluteUrl,
+  role,
+  markOwned,
+  stabilizeCanvas,
+  maxSize = 0,
+  premultiplyAlpha = 'none',
+) {
   const THREE = window.THREE;
   const loadTextureFn = globalThis.foundry?.canvas?.loadTexture ?? globalThis.loadTexture;
   if (!loadTextureFn) return null;
@@ -238,8 +379,19 @@ async function _tryLoadFromFoundryPixi(absoluteUrl, role, markOwned, stabilizeCa
     const rawSource = resource?.source;
     if (!rawSource) return null;
 
+    const w = Number(rawSource?.naturalWidth ?? rawSource?.width ?? 0);
+    const h = Number(rawSource?.naturalHeight ?? rawSource?.height ?? 0);
+    if (!(w > 0 && h > 0)) return null;
+
+    if (maxSize > 0 && Math.max(w, h) > maxSize && (role === 'TILE_ALBEDO' || role === 'ALBEDO')) {
+      return null;
+    }
+
     let texSource = rawSource;
-    if (
+    if (maxSize > 0 && Math.max(w, h) > maxSize) {
+      const downscaled = await _downscaleSourceToMaxSize(rawSource, maxSize, premultiplyAlpha);
+      if (downscaled) texSource = downscaled;
+    } else if (
       stabilizeCanvas &&
       (
         rawSource instanceof HTMLImageElement ||
@@ -247,17 +399,13 @@ async function _tryLoadFromFoundryPixi(absoluteUrl, role, markOwned, stabilizeCa
         rawSource instanceof ImageBitmap
       )
     ) {
-      const w = Number(rawSource?.naturalWidth ?? rawSource?.width ?? 0);
-      const h = Number(rawSource?.naturalHeight ?? rawSource?.height ?? 0);
-      if (w > 0 && h > 0) {
-        const canvasEl = document.createElement('canvas');
-        canvasEl.width = w;
-        canvasEl.height = h;
-        const ctx = canvasEl.getContext('2d');
-        if (ctx) {
-          ctx.drawImage(rawSource, 0, 0, w, h);
-          texSource = canvasEl;
-        }
+      const canvasEl = document.createElement('canvas');
+      canvasEl.width = w;
+      canvasEl.height = h;
+      const ctx = canvasEl.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(rawSource, 0, 0, w, h);
+        texSource = canvasEl;
       }
     }
 

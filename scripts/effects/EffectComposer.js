@@ -11,6 +11,7 @@ import { globalLoadingProfiler } from '../core/loading-profiler.js';
 import { getCacheStats as getAssetCacheStats } from '../assets/loader.js';
 import { frameCoordinator } from '../core/frame-coordinator.js';
 import { getGlobalFrameState } from '../core/frame-state.js';
+import { tickViewProjection, resolveGroundZ } from '../streaming/view-projection-service.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 import {
   resolveStylisticEnabled,
@@ -727,8 +728,9 @@ export class EffectComposer {
     this._runUpdatablesPhase('camera', schedulerDelta, timeInfo, doProfile, recording, profiler, perfRecorder);
 
     try {
-      const frameState = getGlobalFrameState();
       const sceneComposer = window.MapShine?.sceneComposer;
+      tickViewProjection(this.camera, resolveGroundZ());
+      const frameState = getGlobalFrameState();
       frameState.update(this.camera, sceneComposer, canvas, timeInfo.frameCount, timeInfo.delta);
     } catch (e) {
       // Frame state update is non-critical; ignore errors

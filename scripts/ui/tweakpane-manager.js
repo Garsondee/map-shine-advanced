@@ -2090,6 +2090,29 @@ export class TweakpaneManager {
       title: 'Open the render-stack panel showing effect enable state, compositor layer order, mask wiring, and dependency hints for the live scene.',
     });
 
+    addGridButton('Tile Streaming Report', async () => {
+      try {
+        const { logTileStreamingReport, formatTileStreamingReportText } =
+          await import('./tile-streaming-report.js');
+        const report = logTileStreamingReport();
+        const text = formatTileStreamingReportText(report);
+        const warnCount = report.warnings?.length ?? 0;
+        ui.notifications?.info?.(
+          warnCount
+            ? `Tile streaming report logged (${warnCount} warning${warnCount === 1 ? '' : 's'}) — see console; text at MapShine.lastTileStreamingReportText`
+            : 'Tile streaming report logged — see console (MapShine.lastTileStreamingReport)',
+        );
+        if (navigator.clipboard?.writeText && warnCount > 0) {
+          try { await navigator.clipboard.writeText(text); } catch (_) {}
+        }
+      } catch (e) {
+        log.warn('Tile streaming report failed:', e);
+        ui.notifications?.error?.(`Tile streaming report failed: ${e?.message || e}`);
+      }
+    }, {
+      title: 'Log a tile streaming diagnostic report to the console: VRAM budget, LOD, grid cells, floor visibility, and grey-screen warnings. Copy text when warnings are present.',
+    });
+
     addGridButton('Diagnostic Center', () => {
       if (this.diagnosticCenter) this.diagnosticCenter.toggle();
     }, {

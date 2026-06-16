@@ -20,6 +20,8 @@ import { isGmLike } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
 import * as assetLoader from '../assets/loader.js';
 import { getEffectMaskRegistry } from '../assets/loader.js';
+import { getTextureBudgetTracker, estimateTextureBytes } from '../assets/TextureBudgetTracker.js';
+import { PACKED_MASK_CHANNELS } from '../streaming/mask-channel-pack.js';
 import { SceneMaskCompositor } from './scene-mask-compositor.js';
 import { SKY_REACH_VERT, SKY_REACH_FRAG, OVERHEAD_ACCUM_FRAG } from './shaders/skyReachShader.js';
 import {
@@ -653,6 +655,7 @@ export class GpuSceneMaskCompositor {
     const ctx = options.levelContext;
     const floorKey = options.floorKey ??
       (ctx ? `${ctx.bottom}:${ctx.top}` : 'ground');
+    this._composingFloorKey = floorKey;
 
     const registry = getEffectMaskRegistry();
 
@@ -730,14 +733,19 @@ export class GpuSceneMaskCompositor {
       }
       targetMax = Math.min(targetMax, maxTex);
 
-      const scale = Math.min(1.0, targetMax / Math.max(1, sceneW), targetMax / Math.max(1, sceneH));
+      const maskScale = getTextureBudgetTracker().getMaskResolutionScale();
+      const scale = Math.min(
+        1.0,
+        (targetMax * maskScale) / Math.max(1, sceneW),
+        (targetMax * maskScale) / Math.max(1, sceneH),
+      );
       const outW = Math.max(1, Math.round(sceneW * scale));
       const outH = Math.max(1, Math.round(sceneH * scale));
 
       // Get or create render target for this mask type on this floor.
       let rt = floorTargets.get(maskType);
       if (!rt || rt.width !== outW || rt.height !== outH) {
-        rt?.dispose();
+        this._disposeMaskRenderTarget(rt);
         rt = this._createRenderTarget(THREE, outW, outH, maskType);
         floorTargets.set(maskType, rt);
         // Bump cache version so strict-sync consumers observe this async
@@ -861,6 +869,23 @@ export class GpuSceneMaskCompositor {
       renderer, THREE, floorKey, sceneW, sceneH
     );
     if (skyReachEntry) compositeMasks.push(skyReachEntry);
+
+    try {
+      this._buildParticleChannelPack(floorKey, floorTargets, renderer);
+      const packRt = floorTargets.get('particlePack');
+      if (packRt?.texture) {
+        compositeMasks.push({
+          id: 'particlePack',
+          suffix: '_ParticlePack',
+          type: 'particlePack',
+          texture: packRt.texture,
+          required: false,
+          channels: PACKED_MASK_CHANNELS,
+        });
+      }
+    } catch (err) {
+      log.warn('particlePack build failed', err);
+    }
 
     if (compositeMasks.length === 0) return null;
 
@@ -1977,7 +2002,8 @@ export class GpuSceneMaskCompositor {
     const sceneW = sr.width;
     const sceneH = sr.height;
     const maxTex = renderer.capabilities?.maxTextureSize ?? 16384;
-    const scale = Math.min(1.0, HIGH_DETAIL_DATA_MAX / Math.max(1, sceneW), HIGH_DETAIL_DATA_MAX / Math.max(1, sceneH),
+    const hdMax = this._highDetailMaskTarget(maxTex);
+    const scale = Math.min(1.0, hdMax / Math.max(1, sceneW), hdMax / Math.max(1, sceneH),
                                 maxTex / Math.max(1, sceneW), maxTex / Math.max(1, sceneH));
     const outW = Math.max(1, Math.round(sceneW * scale));
     const outH = Math.max(1, Math.round(sceneH * scale));
@@ -2204,7 +2230,7 @@ export class GpuSceneMaskCompositor {
     // to return stale mask data from the previous scene on the new scene.
     for (const maskMap of this._floorCache.values()) {
       for (const rt of maskMap.values()) {
-        try { rt.dispose(); } catch (_) {}
+        this._disposeMaskRenderTarget(rt);
       }
     }
     this._floorCache.clear();
@@ -2463,7 +2489,7 @@ export class GpuSceneMaskCompositor {
     const rt = floorTargets?.get('outdoors');
     const tex = rt?.texture ?? null;
     if (!tex?.userData?.msaBundleBake) return;
-    try { rt?.dispose?.(); } catch (_) {}
+    this._disposeMaskRenderTarget(rt);
     floorTargets?.delete('outdoors');
     try { floorTargets?.delete('skyReach'); } catch (_) {}
     try { floorTargets?.delete('floorAlpha'); } catch (_) {}
@@ -2577,10 +2603,11 @@ export class GpuSceneMaskCompositor {
     const sceneW = sr.width;
     const sceneH = sr.height;
     const maxTex = renderer.capabilities?.maxTextureSize ?? 16384;
+    const hdMax = this._highDetailMaskTarget(maxTex);
     const scale = Math.min(
       1.0,
-      HIGH_DETAIL_DATA_MAX / Math.max(1, sceneW),
-      HIGH_DETAIL_DATA_MAX / Math.max(1, sceneH),
+      hdMax / Math.max(1, sceneW),
+      hdMax / Math.max(1, sceneH),
       maxTex / Math.max(1, sceneW),
       maxTex / Math.max(1, sceneH),
     );
@@ -2590,7 +2617,7 @@ export class GpuSceneMaskCompositor {
     const floorTargets = this._getOrCreateFloorTargets(key);
     let rt = floorTargets.get('outdoors');
     if (!rt || rt.width !== outW || rt.height !== outH) {
-      try { rt?.dispose?.(); } catch (_) {}
+      this._disposeMaskRenderTarget(rt);
       rt = this._createRenderTarget(THREE, outW, outH, 'outdoors');
       floorTargets.set('outdoors', rt);
       this._floorCacheVersion++;
@@ -2663,10 +2690,11 @@ export class GpuSceneMaskCompositor {
     if (!outdoorsTex) return null;
 
     const maxTex = renderer.capabilities?.maxTextureSize ?? 16384;
+    const hdMax = this._highDetailMaskTarget(maxTex);
     const scale = Math.min(
       1.0,
-      HIGH_DETAIL_DATA_MAX / Math.max(1, sceneW),
-      HIGH_DETAIL_DATA_MAX / Math.max(1, sceneH),
+      hdMax / Math.max(1, sceneW),
+      hdMax / Math.max(1, sceneH),
       maxTex / Math.max(1, sceneW),
       maxTex / Math.max(1, sceneH),
     );
@@ -2675,7 +2703,7 @@ export class GpuSceneMaskCompositor {
 
     let alphaRt = floorTargets.get('floorAlpha');
     if (!alphaRt || alphaRt.width !== outW || alphaRt.height !== outH) {
-      try { alphaRt?.dispose?.(); } catch (_) {}
+      this._disposeMaskRenderTarget(alphaRt);
       alphaRt = this._createRenderTarget(THREE, outW, outH, 'floorAlpha');
       floorTargets.set('floorAlpha', alphaRt);
       this._floorCacheVersion++;
@@ -2815,7 +2843,7 @@ export class GpuSceneMaskCompositor {
     this._activeFloorKey = null;
     for (const floorTargets of this._floorCache.values()) {
       for (const rt of floorTargets.values()) {
-        try { rt.dispose(); } catch (_) {}
+        this._disposeMaskRenderTarget(rt);
       }
     }
     this._floorCache.clear();
@@ -3444,8 +3472,8 @@ export class GpuSceneMaskCompositor {
     let rtA = this._stackedOutdoorsRtA;
     let rtB = this._stackedOutdoorsRtB;
     if (!rtA || rtA.width !== refW || rtA.height !== refH) {
-      try { rtA?.dispose(); } catch (_) {}
-      try { rtB?.dispose(); } catch (_) {}
+      this._disposeMaskRenderTarget(rtA);
+      this._disposeMaskRenderTarget(rtB);
       rtA = this._createRenderTarget(THREE, refW, refH, 'stackedOutdoorsA');
       rtB = this._createRenderTarget(THREE, refW, refH, 'stackedOutdoorsB');
       this._stackedOutdoorsRtA = rtA;
@@ -3570,8 +3598,8 @@ export class GpuSceneMaskCompositor {
     let rtA = this._stackedSkyReachRtA;
     let rtB = this._stackedSkyReachRtB;
     if (!rtA || rtA.width !== refW || rtA.height !== refH) {
-      try { rtA?.dispose(); } catch (_) {}
-      try { rtB?.dispose(); } catch (_) {}
+      this._disposeMaskRenderTarget(rtA);
+      this._disposeMaskRenderTarget(rtB);
       rtA = this._createRenderTarget(THREE, refW, refH, 'stackedSkyReachA');
       rtB = this._createRenderTarget(THREE, refW, refH, 'stackedSkyReachB');
       this._stackedSkyReachRtA = rtA;
@@ -3633,6 +3661,42 @@ export class GpuSceneMaskCompositor {
   }
 
   /**
+   * Resolve the effective maximum dimension for HIGH_DETAIL data masks
+   * (outdoors / floorAlpha / skyReach / floorId / overheadAccum). These masks
+   * previously ignored the texture budget and always built at HIGH_DETAIL_DATA_MAX
+   * (8192), which on a 12000px scene meant ~256MB per mask × many floors/variants =
+   * multi-GB VRAM blowout. We now apply the stable mask-resolution scale from the
+   * budget policy so huge scenes build them small. A floor keeps them usable for
+   * indoor/outdoor classification.
+   * @param {number} [maxTex] Optional GPU max texture size clamp.
+   * @returns {number}
+   * @private
+   */
+  _highDetailMaskTarget(maxTex) {
+    let scale = 1.0;
+    try {
+      scale = getTextureBudgetTracker().getStableMaskResolutionScale?.() ?? 1.0;
+    } catch (_) {}
+    if (!Number.isFinite(scale) || scale <= 0) scale = 1.0;
+    // Don't let data masks collapse to uselessly small sizes.
+    scale = Math.max(scale, 0.18);
+    let target = HIGH_DETAIL_DATA_MAX * scale;
+    if (Number.isFinite(maxTex) && maxTex > 0) target = Math.min(target, maxTex);
+    return Math.max(256, Math.round(target));
+  }
+
+  /**
+   * Dispose a mask RT and remove it from the texture budget tracker.
+   * @param {import('three').WebGLRenderTarget|null|undefined} rt
+   * @private
+   */
+  _disposeMaskRenderTarget(rt) {
+    if (!rt) return;
+    try { getTextureBudgetTracker().unregister(rt); } catch (_) {}
+    try { rt.dispose?.(); } catch (_) {}
+  }
+
+  /**
    * Create a WebGLRenderTarget for a mask type.
    * @param {object} THREE
    * @param {number} width
@@ -3657,7 +3721,124 @@ export class GpuSceneMaskCompositor {
     rt.texture.wrapT = THREE.ClampToEdgeWrapping;
     rt.texture._msaWidth = width;
     rt.texture._msaHeight = height;
+    try {
+      getTextureBudgetTracker().registerRenderTarget(rt, `mask:${maskType}`, {
+        source: 'sceneMask',
+        floorKey: this._composingFloorKey ?? this._activeFloorKey ?? null,
+      });
+    } catch (_) {}
     return rt;
+  }
+
+  /**
+   * Evict GPU mask RTs for floors far from the active floor (budget pressure).
+   * @param {string|null} activeFloorKey
+   * @returns {number}
+   */
+  evictDistantFloorCaches(activeFloorKey) {
+    if (!activeFloorKey || !this._floorCache?.size) return 0;
+    if (this._floorCache.size <= 1) return 0;
+    let evicted = 0;
+    for (const [floorKey, targets] of this._floorCache.entries()) {
+      if (floorKey === activeFloorKey) continue;
+      for (const rt of targets.values()) {
+        try {
+          getTextureBudgetTracker().unregister(rt);
+          rt.dispose?.();
+        } catch (_) {}
+      }
+      this._floorCache.delete(floorKey);
+      const lruIdx = this._lruOrder.indexOf(floorKey);
+      if (lruIdx >= 0) this._lruOrder.splice(lruIdx, 1);
+      evicted += 1;
+    }
+    if (evicted > 0) {
+      this._floorCacheVersion++;
+      log.debug(`GpuSceneMaskCompositor: budget-evicted ${evicted} non-active floor caches`);
+    }
+    return evicted;
+  }
+
+  /**
+   * Build RGBA particle mask atlas (fire=R, dust=G, ash=B, outdoors=A) from composited RTs.
+   * Disposes individual packable particle RTs after pack to save VRAM.
+   *
+   * @param {string} floorKey
+   * @param {Map<string, import('three').WebGLRenderTarget>} floorTargets
+   * @param {import('three').WebGLRenderer} renderer
+   * @private
+   */
+  _buildParticleChannelPack(floorKey, floorTargets, renderer) {
+    const THREE = window.THREE;
+    if (!THREE || !renderer || !floorTargets?.size) return;
+
+    const refRt = floorTargets.get('fire')
+      ?? floorTargets.get('dust')
+      ?? floorTargets.get('outdoors')
+      ?? floorTargets.get('ash');
+    if (!refRt) return;
+
+    const w = refRt.width;
+    const h = refRt.height;
+    let packRt = floorTargets.get('particlePack');
+    if (!packRt || packRt.width !== w || packRt.height !== h) {
+      packRt?.dispose?.();
+      packRt = this._createRenderTarget(THREE, w, h, 'particlePack');
+      floorTargets.set('particlePack', packRt);
+    }
+
+    if (!this._packMaterial) {
+      this._packMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          tFire: { value: null },
+          tDust: { value: null },
+          tAsh: { value: null },
+          tOutdoors: { value: null },
+        },
+        vertexShader: /* glsl */`
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = vec4(position.xy, 0.0, 1.0);
+          }
+        `,
+        fragmentShader: /* glsl */`
+          uniform sampler2D tFire;
+          uniform sampler2D tDust;
+          uniform sampler2D tAsh;
+          uniform sampler2D tOutdoors;
+          varying vec2 vUv;
+          float lum(vec4 s) { return max(s.r, max(s.g, s.b)) * s.a; }
+          void main() {
+            float r = lum(texture2D(tFire, vUv));
+            float g = lum(texture2D(tDust, vUv));
+            float b = lum(texture2D(tAsh, vUv));
+            float a = lum(texture2D(tOutdoors, vUv));
+            gl_FragColor = vec4(r, g, b, a);
+          }
+        `,
+        depthTest: false,
+        depthWrite: false,
+      });
+      this._packScene = new THREE.Scene();
+      this._packCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+      const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._packMaterial);
+      this._packScene.add(quad);
+    }
+
+    const u = this._packMaterial.uniforms;
+    u.tFire.value = floorTargets.get('fire')?.texture ?? null;
+    u.tDust.value = floorTargets.get('dust')?.texture ?? null;
+    u.tAsh.value = floorTargets.get('ash')?.texture ?? null;
+    u.tOutdoors.value = floorTargets.get('outdoors')?.texture ?? null;
+
+    const prevTarget = renderer.getRenderTarget();
+    renderer.setRenderTarget(packRt);
+    renderer.render(this._packScene, this._packCam);
+    renderer.setRenderTarget(prevTarget);
+
+    this._floorCacheVersion++;
+    log.debug(`GpuSceneMaskCompositor: particlePack built for ${floorKey}`);
   }
 
   /**
@@ -3679,7 +3860,7 @@ export class GpuSceneMaskCompositor {
     if (!map) return;
     const rt = map.get(maskType);
     if (!rt) return;
-    try { rt.dispose(); } catch (_) {}
+    this._disposeMaskRenderTarget(rt);
     map.delete(maskType);
     this._floorCacheVersion++;
   }
@@ -3755,14 +3936,30 @@ export class GpuSceneMaskCompositor {
    * from a clean slate.
    * @private
    */
+  /**
+   * Public: dispose all cached per-floor mask GPU resources so they rebuild.
+   * Used when the texture budget policy tightens mask resolution after load.
+   */
+  purgeAllFloorCaches() {
+    this._purgeAllFloorCaches();
+  }
+
   _purgeAllFloorCaches() {
     // Dispose all GPU RTs.
     for (const targets of this._floorCache.values()) {
       for (const rt of targets.values()) {
-        try { rt?.dispose?.(); } catch (_) {}
+        this._disposeMaskRenderTarget(rt);
       }
     }
     this._floorCache.clear();
+    this._disposeMaskRenderTarget(this._stackedOutdoorsRtA);
+    this._disposeMaskRenderTarget(this._stackedOutdoorsRtB);
+    this._disposeMaskRenderTarget(this._stackedSkyReachRtA);
+    this._disposeMaskRenderTarget(this._stackedSkyReachRtB);
+    this._stackedOutdoorsRtA = null;
+    this._stackedOutdoorsRtB = null;
+    this._stackedSkyReachRtA = null;
+    this._stackedSkyReachRtB = null;
     this._floorCacheVersion++;
     this._lruOrder.length = 0;
 
@@ -3786,7 +3983,7 @@ export class GpuSceneMaskCompositor {
       if (oldest && this._floorCache.has(oldest)) {
         const targets = this._floorCache.get(oldest);
         for (const rt of targets.values()) {
-          try { rt.dispose(); } catch (_) {}
+          this._disposeMaskRenderTarget(rt);
         }
         this._floorCache.delete(oldest);
         this._floorCacheVersion++;
@@ -4161,13 +4358,14 @@ export class GpuSceneMaskCompositor {
     // Use HIGH_DETAIL_DATA_MAX resolution — the floor alpha is a binary-ish mask; no need for
     // visual-quality resolution. Half-res of HIGH_DETAIL_DATA_MAX is sufficient but HIGH_DETAIL_DATA_MAX
     // gives clean edges for tiles that have detailed alpha channels.
-    const scale = Math.min(1.0, HIGH_DETAIL_DATA_MAX / Math.max(1, sceneW), HIGH_DETAIL_DATA_MAX / Math.max(1, sceneH));
+    const hdMax = this._highDetailMaskTarget();
+    const scale = Math.min(1.0, hdMax / Math.max(1, sceneW), hdMax / Math.max(1, sceneH));
     const outW = Math.max(1, Math.round(sceneW * scale));
     const outH = Math.max(1, Math.round(sceneH * scale));
 
     let rt = floorTargets.get(FLOOR_ALPHA_ID);
     if (!rt || rt.width !== outW || rt.height !== outH) {
-      rt?.dispose();
+      this._disposeMaskRenderTarget(rt);
       rt = this._createRenderTarget(THREE, outW, outH, FLOOR_ALPHA_ID);
       floorTargets.set(FLOOR_ALPHA_ID, rt);
       this._floorCacheVersion++;
@@ -4349,12 +4547,13 @@ export class GpuSceneMaskCompositor {
    * @private
    */
   _ensureOverheadAccumRt(THREE, sceneW, sceneH) {
-    const scale = Math.min(1.0, HIGH_DETAIL_DATA_MAX / Math.max(1, sceneW), HIGH_DETAIL_DATA_MAX / Math.max(1, sceneH));
+    const hdMax = this._highDetailMaskTarget();
+    const scale = Math.min(1.0, hdMax / Math.max(1, sceneW), hdMax / Math.max(1, sceneH));
     const outW = Math.max(1, Math.round(sceneW * scale));
     const outH = Math.max(1, Math.round(sceneH * scale));
     let rt = this._overheadAccumRt;
     if (!rt || rt.width !== outW || rt.height !== outH) {
-      try { rt?.dispose(); } catch (_) {}
+      this._disposeMaskRenderTarget(rt);
       rt = this._createRenderTarget(THREE, outW, outH, 'skyReach_overheadAccum');
       rt.texture.colorSpace = THREE.NoColorSpace ?? '';
       this._overheadAccumRt = rt;

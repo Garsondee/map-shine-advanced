@@ -10,7 +10,7 @@ import {
   syncSharedOutdoorsMaskForFloor,
 } from './effects/water-splash-behaviors.js';
 
-/** Monotonic token so syncSharedOutdoorsMaskForFloor invalidates per refresh. */
+/** Monotonic token — only bumped when explicitly clearing shelter cache. */
 let _shelterRefreshToken = 0;
 
 /** Drop shared outdoors CPU mirrors (splashes + shelter refresh). */
@@ -40,10 +40,14 @@ export function refreshShelterOutdoorsMaskForActiveFloor(_outdoorsTex = null) {
   } catch (_) {}
 
   const levelContext = window.MapShine?.activeLevelContext ?? null;
-  _shelterRefreshToken += 1;
+  const compositorGen = Number(
+    window.MapShine?.sceneComposer?._sceneMaskCompositor?.getFloorCacheVersion?.() ?? 0,
+  );
 
   try {
-    syncSharedOutdoorsMaskForFloor(floorIndex, _shelterRefreshToken, levelContext);
+    // Use compositor generation as the sync token — pixel data only invalidates when
+    // mask RTs rebuild, not every call (CandleFlames used to force getImageData every frame).
+    syncSharedOutdoorsMaskForFloor(floorIndex, compositorGen, levelContext);
   } catch (_) {}
 }
 

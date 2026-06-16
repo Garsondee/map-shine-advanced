@@ -519,6 +519,9 @@ const _sharedOutdoorsByFloor = new Map();
 /** Fallback canvas readback keyed by texture/image identity (shared across all floors). */
 const _imageOutdoorsCpuCache = new Map();
 
+/** Max side for CPU outdoors sampling — full GPU mask RTs can be 3k+ px. */
+const MAX_CPU_OUTDOORS_SAMPLE = 1024;
+
 /** @type {OutdoorsMaskSnapshot} */
 const EMPTY_OUTDOORS_SNAPSHOT = Object.freeze({
   hasOutdoorsMask: false,
@@ -746,9 +749,9 @@ function readOutdoorsMaskPixelsFromImage(tex, cacheSalt = 0) {
   try {
     const img = tex?.image;
     if (!img || !(Number(img.width) > 0) || !(Number(img.height) > 0)) return null;
-    const imgUuid = img?.src ?? tex?.uuid ?? null;
+    const imgUuid = tex?.uuid ?? img?.src ?? null;
     if (!imgUuid) return null;
-    const cacheKey = `${imgUuid}::${cacheSalt}`;
+    const cacheKey = `${imgUuid}::${cacheSalt}::${MAX_CPU_OUTDOORS_SAMPLE}`;
     const cached = _imageOutdoorsCpuCache.get(cacheKey);
     if (cached) return cached;
 
@@ -756,16 +759,27 @@ function readOutdoorsMaskPixelsFromImage(tex, cacheSalt = 0) {
     const h = Number(img?.height) || Number(img?.videoHeight) || 0;
     if (!(w > 0 && h > 0)) return null;
 
+    const maxDim = Math.max(w, h);
+    let sampleW = w;
+    let sampleH = h;
+    if (maxDim > MAX_CPU_OUTDOORS_SAMPLE) {
+      const scale = MAX_CPU_OUTDOORS_SAMPLE / maxDim;
+      sampleW = Math.max(1, Math.round(w * scale));
+      sampleH = Math.max(1, Math.round(h * scale));
+    }
+
+    let raw;
     const c = document.createElement('canvas');
-    c.width = w;
-    c.height = h;
+    c.width = sampleW;
+    c.height = sampleH;
     const ctx = c.getContext('2d');
     if (!ctx) return null;
-    ctx.drawImage(img, 0, 0, w, h);
-    const raw = ctx.getImageData(0, 0, w, h).data;
+    ctx.drawImage(img, 0, 0, sampleW, sampleH);
+    raw = ctx.getImageData(0, 0, sampleW, sampleH).data;
+
     const data = new Uint8Array(raw.length);
     data.set(raw);
-    const entry = { data, w, h };
+    const entry = { data, w: sampleW, h: sampleH };
     _imageOutdoorsCpuCache.set(cacheKey, entry);
     return entry;
   } catch (_) {
@@ -809,11 +823,12 @@ export function syncSharedOutdoorsMaskForFloor(floorIndex, frameToken, levelCont
   }
   if (
     prev
-    && prev.frameToken === frameToken
     && prev.compositorGen === compositorGen
     && prev.floorKey === floorKey
     && prev.ctxBandKey === ctxBandKey
+    && prev.outdoorsMaskData
   ) {
+    prev.frameToken = frameToken;
     return prev;
   }
 
@@ -873,8 +888,20 @@ export function syncSharedOutdoorsMaskForFloor(floorIndex, frameToken, levelCont
       }
     }
 
-    // CPU-only: never readRenderTargetPixels here (feedback loop if _Outdoors RT is bound/sampled).
-    // Canvas readback from floor-addressable outdoors (never the viewed-floor water uniform).
+    // Prefer compositor CPU cache (single readRenderTargetPixels per floor/mask) before
+    // canvas readback from GPU texture.image (was ~40MB getImageData per busted cache hit).
+    if (compositor && floorKey !== 'none') {
+      const fromCpu = readOutdoorsCpuPixelsForFloor(compositor, floorKey);
+      if (fromCpu) {
+        snap.outdoorsMaskData = fromCpu.data;
+        snap.outdoorsMaskW = fromCpu.w;
+        snap.outdoorsMaskH = fromCpu.h;
+        snap.outdoorsMaskGpuRowOrder = true;
+        _sharedOutdoorsByFloor.set(fi, snap);
+        return snap;
+      }
+    }
+
     if (floorOutdoorsTex) {
       const fromImage = readOutdoorsMaskPixelsFromImage(floorOutdoorsTex, compositorGen);
       if (fromImage) {
@@ -886,11 +913,11 @@ export function syncSharedOutdoorsMaskForFloor(floorIndex, frameToken, levelCont
     }
 
     if (!snap.outdoorsMaskData && compositor && floorKey !== 'none') {
-      const fromCpu = readOutdoorsCpuPixelsForFloor(compositor, floorKey);
-      if (fromCpu) {
-        snap.outdoorsMaskData = fromCpu.data;
-        snap.outdoorsMaskW = fromCpu.w;
-        snap.outdoorsMaskH = fromCpu.h;
+      const fromRt = readOutdoorsMaskPixelsFromFloorRt(compositor, floorKey);
+      if (fromRt) {
+        snap.outdoorsMaskData = fromRt.data;
+        snap.outdoorsMaskW = fromRt.w;
+        snap.outdoorsMaskH = fromRt.h;
         snap.outdoorsMaskGpuRowOrder = true;
       }
     }

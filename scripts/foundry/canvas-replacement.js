@@ -56,6 +56,15 @@ import { VisibilityController } from '../vision/VisibilityController.js';
 import { DetectionFilterEffect } from '../effects/DetectionFilterEffect.js';
 import { TileManager } from '../scene/tile-manager.js';
 import { getTextureBudgetTracker } from '../assets/TextureBudgetTracker.js';
+import { computeTextureBudgetPolicy } from '../streaming/texture-budget-policy.js';
+import { initStreamingMinimap, getStreamingMinimap } from '../ui/streaming-minimap.js';
+import {
+  getViewProjectionCache,
+  tickViewProjection,
+  getVisibleWorldRect,
+  getVisibleSceneUvRect,
+} from '../streaming/view-projection-service.js';
+import { getTileStreamingManager, disposeTileStreamingManager } from '../streaming/tile-streaming-manager.js';
 import { TileMotionManager } from '../scene/tile-motion-manager.js';
 import { SurfaceRegistry } from '../scene/surface-registry.js';
 import { WallManager } from '../scene/wall-manager.js';
@@ -143,6 +152,53 @@ import { PerformanceRecorder } from '../core/diagnostics/PerformanceRecorder.js'
 import { PerformanceRecorderDialog } from '../ui/performance-recorder-dialog.js';
 
 const log = createLogger('Canvas');
+
+/**
+ * Texture budget eviction: drop non-active floor GPU mask caches.
+ * @param {import('../assets/TextureBudgetTracker.js').TextureBudgetTracker} tracker
+ * @returns {number}
+ */
+function _textureBudgetMaskEvictionHandler(tracker) {
+  if (!tracker?.isOverBudget?.()) return 0;
+  const compositor = window.MapShine?.gpuSceneMaskCompositor
+    ?? window.MapShine?.sceneComposer?._sceneMaskCompositor
+    ?? null;
+  const activeKey = compositor?._activeFloorKey
+    ?? (() => {
+      const ctx = window.MapShine?.activeLevelContext ?? null;
+      return ctx ? `${ctx.bottom}:${ctx.top}` : null;
+    })();
+  if (!activeKey) return 0;
+  if (typeof compositor?.evictDistantFloorCaches === 'function') {
+    return compositor.evictDistantFloorCaches(activeKey);
+  }
+  return tracker.evictStaleFloorCaches(activeKey, (ref) => {
+    try { ref?.dispose?.(); } catch (_) {}
+  });
+}
+
+/**
+ * Texture budget eviction: drop streamed background cells (culled first).
+ * @param {import('../assets/TextureBudgetTracker.js').TextureBudgetTracker} tracker
+ * @returns {number}
+ */
+function _textureBudgetStreamingEvictionHandler(tracker) {
+  if (!tracker?.isOverBudget?.()) return 0;
+  if (tracker.getUsedFraction() < 0.95) return 0;
+  const manager = getTileStreamingManager();
+  let evicted = 0;
+  for (const grid of manager.getGrids?.()?.values?.() ?? []) {
+    if (typeof grid.evictCells === 'function') {
+      evicted += grid.evictCells(tracker, 2);
+    }
+  }
+  for (const grid of manager.getRegionGrids?.()?.values?.() ?? []) {
+    if (typeof grid.evictCells === 'function') {
+      evicted += grid.evictCells(tracker, 1);
+    }
+  }
+  return evicted;
+}
 
 /** @type {typeof import('../ui/tweakpane-manager.js').TweakpaneManager|null} */
 let TweakpaneManagerClass = null;
@@ -1234,6 +1290,32 @@ function _applyRenderResolutionToRenderer(viewportWidthCss, viewportHeightCss) {
       : baseDpr;
     renderer.setPixelRatio(effective);
   }, 'applyRenderResolution', Severity.DEGRADED);
+}
+
+/**
+ * Load persisted render-resolution preset before FloorCompositor allocates RTs.
+ * Full dialog init still runs later during initializeUI.
+ */
+function _bootstrapEarlyGraphicsSettings() {
+  safeCall(() => {
+    if (!effectCapabilitiesRegistry) {
+      effectCapabilitiesRegistry = new EffectCapabilitiesRegistry();
+      registerAllCapabilities(effectCapabilitiesRegistry);
+    }
+    if (!graphicsSettings) {
+      graphicsSettings = new GraphicsSettingsManager(null, effectCapabilitiesRegistry, {
+        onApplyRenderResolution: () => {
+          safeCall(() => {
+            if (!threeCanvas) return;
+            const rect = threeCanvas.getBoundingClientRect();
+            resize(rect.width, rect.height);
+          }, 'graphicsSettings.resize', Severity.COSMETIC);
+        },
+      });
+    }
+    graphicsSettings.bootstrapForLoad();
+    if (window.MapShine) window.MapShine.graphicsSettings = graphicsSettings;
+  }, 'graphicsSettings.bootstrapForLoad', Severity.DEGRADED);
 }
 
 /**
@@ -6851,6 +6933,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
   // restore the user's original preset now (before GraphicsSettingsManager
   // reads localStorage) — unless crashes have been repeating recently.
   safeCall(() => webglCrashRecovery.maybeRestoreResolutionBeforeLoad(), 'webglCrashRecovery.restoreResolution', Severity.COSMETIC);
+  safeCall(() => webglCrashRecovery.ensureConservativeGraphicsForLoad(scene), 'webglCrashRecovery.loadGraphicsGuard', Severity.COSMETIC);
 
   safeCall(() => {
     _ensureLoadVisibilityLifecycleHooks();
@@ -7394,6 +7477,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
     // Avoid setSize() overwriting our CSS sizing (width/height=100%).
     // If updateStyle=true, three will set style width/height to fixed pixel values,
     // preventing future container resizes from affecting the canvas element.
+    _bootstrapEarlyGraphicsSettings();
     _applyRenderResolutionToRenderer(viewport.width, viewport.height);
 
     // CRITICAL: ensure the Three renderer clears opaquely.
@@ -7404,6 +7488,31 @@ async function createThreeCanvas(scene, createOptions = {}) {
       if (renderer?.setClearColor) renderer.setClearColor(0x000000, 1);
       if (typeof renderer?.setClearAlpha === 'function') renderer.setClearAlpha(1);
     }, 'renderer.forceOpaqueClear', Severity.COSMETIC);
+
+    safeCall(() => {
+      const budget = getTextureBudgetTracker();
+      const policy = computeTextureBudgetPolicy(renderer, mapShine?.capabilities ?? {}, {});
+      budget.configureFromPolicy(policy);
+      budget.removeEvictionHandler(_textureBudgetMaskEvictionHandler);
+      budget.addEvictionHandler(_textureBudgetMaskEvictionHandler);
+      budget.removeEvictionHandler(_textureBudgetStreamingEvictionHandler);
+      budget.addEvictionHandler(_textureBudgetStreamingEvictionHandler);
+      mapShine.textureBudget = budget;
+      mapShine.viewProjection = {
+        tick: tickViewProjection,
+        getCache: getViewProjectionCache,
+        getVisibleWorldRect,
+        getVisibleSceneUvRect,
+      };
+      mapShine.tileStreamingManager = getTileStreamingManager();
+      // Performance triage: roof drips + CPU/GPU roof-mask extraction are disabled until
+      // validated on large maps. Re-enable via Tweakpane "Drips Enabled" or:
+      //   MapShine.disableRoofDrips = false; weatherController.roofDripTuning.enabled = true;
+      mapShine.disableRoofDrips = true;
+      if (weatherController?.roofDripTuning) weatherController.roofDripTuning.enabled = false;
+      initStreamingMinimap(true);
+      mapShine.streamingMinimap = getStreamingMinimap();
+    }, 'textureBudget.configure', Severity.DEGRADED);
 
     safeCall(() => renderer.setSize(viewport.width, viewport.height, false), 'renderer.setSize', Severity.DEGRADED, {
       onError: () => renderer.setSize(viewport.width, viewport.height)
@@ -7751,6 +7860,15 @@ async function createThreeCanvas(scene, createOptions = {}) {
       }, 'v2.floorCompositor.create', Severity.DEGRADED);
 
       await effectComposer.ensureFloorCompositorV2Initialized();
+
+      // Start bus/effect populate in parallel with manager init so Mansion-scale
+      // background streaming can register before the heavy Tweakpane bind phase.
+      safeCall(() => {
+        const fcKick = effectComposer._floorCompositorV2 ?? fc;
+        if (fcKick?.prewarmForLoading) {
+          void fcKick.prewarmForLoading({ awaitPopulate: false, prewarmAllFloors: false });
+        }
+      }, 'v2.populate.kickoffEarly', Severity.COSMETIC);
       
       // Yield again after creation to let the browser breathe.
       await new Promise(resolve => setTimeout(resolve, 10));
@@ -8544,8 +8662,22 @@ async function createThreeCanvas(scene, createOptions = {}) {
       }
     }, 5000);
 
-    // Initialize Tweakpane UI
+    // Initialize Tweakpane UI — after bus populate so large-map streaming is registered.
     if (!_transitionOrBail(CoordinatorState.BINDING_EFFECTS, 'UI + effect wiring', 'binding_effects')) return;
+
+    await safeCallAsync(async () => {
+      if (_bailIfSessionStale('prewarm.beforeUI')) return;
+      const fcPre = effectComposer?._floorCompositorV2 ?? window.MapShine?.effectComposer?._floorCompositorV2;
+      if (!fcPre?.prewarmForLoading) return;
+      safeCall(
+        () => loadingOverlay.setStage('scene.prepare', 0.0, 'Populating scene layers...', { keepAuto: false }),
+        'overlay.populate.preUI',
+        Severity.COSMETIC,
+      );
+      await fcPre.prewarmForLoading({ awaitPopulate: true, prewarmAllFloors: false });
+      await fcPre._renderBus?.awaitBackgroundStreamingReady?.();
+    }, 'v2.prewarm.beforeUI', Severity.DEGRADED);
+
     // V2: We still need UI so we can validate layering / debugging, but we do NOT
     // register effect controls or apply weather snapshots.
     _sectionStart('fin.initializeUI');
@@ -10325,6 +10457,12 @@ function destroyThreeCanvas() {
     safeDispose(() => healthEvaluator.dispose(), 'healthEvaluator.dispose');
     healthEvaluator = null;
   }
+
+  safeCall(() => {
+    disposeTileStreamingManager();
+    getStreamingMinimap()?.dispose?.();
+    getTextureBudgetTracker()?.removeEvictionHandler?.(_textureBudgetMaskEvictionHandler);
+  }, 'streaming.dispose', Severity.COSMETIC);
 
   safeCall(() => {
     if (!window.MapShine) return;

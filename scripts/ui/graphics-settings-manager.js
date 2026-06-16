@@ -393,12 +393,18 @@ export class GraphicsSettingsManager {
   /**
    * Initialize UI and load persisted state.
    */
-  async initialize() {
+  /**
+   * Synchronous preset load for the scene-load pipeline — before FloorCompositor
+   * allocates render targets. Does not open the settings dialog.
+   */
+  bootstrapForLoad() {
     this.loadState();
-
-    // Render loop reads these values from window.MapShine each frame.
     this.applyRenderPerformanceSettings();
     this.applyParticleSpawnScale();
+  }
+
+  async initialize() {
+    this.bootstrapForLoad();
 
     try {
       this._onApplyRenderResolution?.();

@@ -24,7 +24,14 @@
  */
 
 import { createLogger } from '../core/log.js';
-import { loadImageTexture } from '../assets/image-texture-loader.js';
+import { loadImageTexture, normalizeTextureUrl } from '../assets/image-texture-loader.js';
+import { applyTexturePolicy } from '../assets/texture-policies.js';
+import { getTextureBudgetTracker, estimateTextureBytes, resolveTileAlbedoMaxSize } from '../assets/TextureBudgetTracker.js';
+import { getTileStreamingManager } from '../streaming/tile-streaming-manager.js';
+import { loadFallbackTexture, fetchSourceImageMeta } from '../streaming/texture-pyramid-builder.js';
+import { isHugeImageSource } from '../streaming/probe-image-dimensions.js';
+import { shouldStreamBackground } from '../streaming/streamed-background-grid.js';
+import { reconfigureTextureBudgetForScene } from '../streaming/texture-budget-policy.js';
 import { DOOR_FLOOR_INDEX_GLOBAL } from '../scene/DoorMeshManager.js';
 import { TILE_FEATURE_LAYERS } from '../core/render-layers.js';
 import {
@@ -229,7 +236,75 @@ export class FloorRenderBus {
      */
     this._bgDecodeEpoch = 0;
 
+    /** @type {Set<Promise<unknown>>} In-flight background decode / streaming mount jobs. */
+    this._pendingBackgroundJobs = new Set();
+
+    /** @type {import('../streaming/tile-streaming-manager.js').TileStreamingManager|null} */
+    this._streamingManager = null;
+
     log.debug('FloorRenderBus created');
+  }
+
+  /**
+   * @returns {import('three').Scene|null}
+   */
+  getScene() {
+    return this._scene;
+  }
+
+  /**
+   * Register a streaming background mesh in _tiles for lifecycle tracking.
+   * @param {string} key
+   * @param {import('three').Object3D} mesh
+   * @param {import('three').Material} material
+   * @param {number} floorIndex
+   */
+  _registerStreamingMesh(key, mesh, material, floorIndex) {
+    const fi = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
+    mesh.userData = mesh.userData || {};
+    mesh.userData.floorIndex = fi;
+    this._tiles.set(key, { mesh, material, floorIndex: fi });
+    mesh.visible = this._computeEntryVisibleForSlice(key, { floorIndex: fi });
+  }
+
+  /**
+   * Remove a streaming cell/fallback entry from bus lifecycle tracking.
+   * @param {string} key
+   */
+  _unregisterStreamingMesh(key) {
+    if (!key) return;
+    this._tiles.delete(String(key));
+  }
+
+  /**
+   * Per-frame tile streaming sync (background cell residency).
+   */
+  syncStreaming() {
+    try {
+      this._applyTileVisibility();
+      getTileStreamingManager().update();
+    } catch (_) {}
+  }
+
+  /**
+   * Debug snapshot of bus texture residency (console troubleshooting).
+   * @returns {Array<{ id: string, hasMap: boolean, shared: boolean, textureSrc: string|null, visible: boolean }>}
+   */
+  getTextureDiagnostics() {
+    /** @type {Array<{ id: string, hasMap: boolean, shared: boolean, textureSrc: string|null, visible: boolean }>} */
+    const out = [];
+    for (const [id, entry] of this._tiles) {
+      const map = entry?.material?.map ?? null;
+      const node = entry?.root || entry?.mesh;
+      out.push({
+        id: String(id),
+        hasMap: !!map,
+        shared: !!map?.userData?.mapShineSharedComposerTexture,
+        textureSrc: entry?.textureSrc ? String(entry.textureSrc) : null,
+        visible: node?.visible !== false,
+      });
+    }
+    return out;
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────────
@@ -269,6 +344,8 @@ export class FloorRenderBus {
 
     const fd = sceneComposer?.foundrySceneData;
     if (!fd) { log.warn('FloorRenderBus.populate: no foundrySceneData'); return; }
+
+    try { reconfigureTextureBudgetForScene(window.MapShine?.renderer ?? null); } catch (_) {}
 
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
 
@@ -310,6 +387,7 @@ export class FloorRenderBus {
         floorsLen: floors.length,
         viewedBg: viewedBgReuse,
       });
+      this._markSharedComposerTexture(bgTexture);
       this._addBackgroundImage(fd, bgTexture, floorIdxReuse, backgroundBusKeyForFloorIndex(floorIdxReuse));
       if (visibleBgLayers.length > 1) {
         // Composer albedo only matches the viewed level texture; load other visible
@@ -345,6 +423,7 @@ export class FloorRenderBus {
             });
             const keyRaf = backgroundBusKeyForFloorIndex(fiRaf);
             if (!this._tiles.has(keyRaf)) {
+              this._markSharedComposerTexture(bgTexture);
               this._addBackgroundImage(fd, bgTexture, fiRaf, keyRaf);
             }
             return;
@@ -544,6 +623,8 @@ export class FloorRenderBus {
   clear() {
     if (!this._scene) return;
     this._bgDecodeEpoch += 1;
+    this._pendingBackgroundJobs?.clear?.();
+    try { getTileStreamingManager().clearGrids(); } catch (_) {}
 
     log.info(`[V2 DEBUG] FloorRenderBus.clear() called - scene has ${this._scene.children.length} children before clear`);
     
@@ -566,16 +647,7 @@ export class FloorRenderBus {
       // `material` or `geometry`. Treat those as effect-owned and only detach.
       try {
         const mat = material ?? mesh?.material ?? null;
-        if (mat) {
-          // Support arrays for multi-material meshes.
-          const mats = Array.isArray(mat) ? mat : [mat];
-          for (const m of mats) {
-            if (!m) continue;
-            try { m.map?.dispose?.(); } catch (_) {}
-            try { m.alphaMap?.dispose?.(); } catch (_) {}
-            try { m.dispose?.(); } catch (_) {}
-          }
-        }
+        if (mat) this._disposeBusMaterial(mat);
       } catch (_) {}
 
       try {
@@ -720,18 +792,27 @@ export class FloorRenderBus {
       const node = entry?.root || entry?.mesh;
       if (!node) continue;
 
-      // Background planes and internal effect overlays stay visible.
-      if (tileId.startsWith('__')) {
+      // World-spanning solid underlay only — level backgrounds respect floor slice.
+      if (tileId === '__bg_solid__') {
         node.visible = true;
         continue;
       }
 
       const inVisibleFloorSlice = entry.floorIndex <= this._visibleMaxFloorIndex;
+      const floorVisible = inVisibleFloorSlice && !this._suppressTileAlbedoForEditing;
+      const streamingManaged = node.userData?.mapShineStreaming === true;
+
       if (!tileId.startsWith('__') && !inVisibleFloorSlice && node.visible === true) {
         preApplyLeakCount += 1;
         if (preApplyLeakKeys.length < 40) preApplyLeakKeys.push(String(tileId));
       }
-      node.visible = inVisibleFloorSlice && !this._suppressTileAlbedoForEditing;
+
+      if (streamingManaged) {
+        // Streaming sync owns frustum culling; only force-hide when the floor slice excludes this entry.
+        if (!floorVisible) node.visible = false;
+        continue;
+      }
+      node.visible = floorVisible;
     }
 
     for (const ch of this._scene?.children ?? []) {
@@ -765,7 +846,7 @@ export class FloorRenderBus {
    * @private
    */
   _computeEntryVisibleForSlice(key, entry) {
-    if (String(key || '').startsWith('__')) return true;
+    if (String(key || '') === '__bg_solid__') return true;
     const floorIndex = Number(entry?.floorIndex);
     if (!Number.isFinite(floorIndex)) return !this._suppressTileAlbedoForEditing;
     return floorIndex <= this._visibleMaxFloorIndex && !this._suppressTileAlbedoForEditing;
@@ -1854,6 +1935,48 @@ export class FloorRenderBus {
   }
 
   /**
+   * SceneComposer owns this GPU texture — bus must never dispose it on clear().
+   * @param {import('three').Texture|null|undefined} tex
+   * @private
+   */
+  _markSharedComposerTexture(tex) {
+    if (!tex) return;
+    tex.userData = tex.userData || {};
+    tex.userData.mapShineSharedComposerTexture = true;
+  }
+
+  /**
+   * @param {import('three').Material|import('three').Material[]|null|undefined} mat
+   * @private
+   */
+  _disposeBusMaterial(mat) {
+    if (!mat) return;
+    const mats = Array.isArray(mat) ? mat : [mat];
+    for (const m of mats) {
+      if (!m) continue;
+      this._releaseMaterialTexture(m.map);
+      this._releaseMaterialTexture(m.alphaMap);
+      try { m.dispose?.(); } catch (_) {}
+    }
+  }
+
+  /**
+   * @param {import('three').Texture|null|undefined} tex
+   * @private
+   */
+  _releaseMaterialTexture(tex) {
+    if (!tex) return;
+    try {
+      const ud = tex.userData || {};
+      if (ud.mapShineSharedComposerTexture || ud.mapShineSharedExternalTexture) return;
+      if (ud.mapShineTextureOwned) {
+        getTextureBudgetTracker().unregister(tex);
+      }
+      tex.dispose?.();
+    } catch (_) {}
+  }
+
+  /**
    * Add a solid-colour plane covering the full world canvas at the lowest Z.
    * Ensures no transparent black shows in padding areas.
    * @param {object} fd - foundrySceneData
@@ -2111,91 +2234,79 @@ export class FloorRenderBus {
     const THREE = window.THREE;
     if (!THREE) return;
     const decodeEpochAtSchedule = this._bgDecodeEpoch;
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      if (decodeEpochAtSchedule !== this._bgDecodeEpoch) return;
-      try {
-        const w = img.naturalWidth || img.width;
-        const h = img.naturalHeight || img.height;
-        if (!(w > 0 && h > 0)) {
-          log.warn('FloorRenderBus: bg image has no dimensions after load:', src);
+    const bus = this;
+
+    const job = (async () => {
+      if (decodeEpochAtSchedule !== bus._bgDecodeEpoch) return;
+
+      const budget = getTextureBudgetTracker();
+      const streamThreshold = Math.max(4096, budget.getRecommendedTileSize() * 2);
+      const meta = await fetchSourceImageMeta(src);
+      if (decodeEpochAtSchedule !== bus._bgDecodeEpoch) return;
+
+      if (meta && shouldStreamBackground(meta.width, meta.height, streamThreshold)) {
+        // Streaming is the whole point of large maps — always prefer it when the
+        // source qualifies. Bigger scenes benefit MORE, not less.
+        const streamed = await getTileStreamingManager().registerBackground(bus, src, fd, zIndex, key);
+        if (streamed && decodeEpochAtSchedule === bus._bgDecodeEpoch) {
+          bus._applyTileVisibility();
+          log.info(
+            `FloorRenderBus: streaming background [${key}] (${meta.width}x${meta.height})`,
+          );
           return;
         }
-
-        // Decode → straight-alpha RGBA via 2D canvas.
-        // `willReadFrequently: false` is correct here — we read once then
-        // throw the canvas away. `colorSpaceConversion: 'none'` avoids
-        // the browser applying any display colour profile to the decoded
-        // pixels; our downstream pipeline does its own colour management
-        // via `tex.colorSpace = SRGBColorSpace`.
-        const cv = document.createElement('canvas');
-        cv.width = w;
-        cv.height = h;
-        const cx = cv.getContext('2d', {
-          willReadFrequently: false,
-          colorSpace: 'srgb',
-        });
-        if (!cx) {
-          log.warn('FloorRenderBus: could not acquire 2D context for bg decode:', src);
-          return;
-        }
-        cx.clearRect(0, 0, w, h);
-        cx.drawImage(img, 0, 0);
-        const imageData = cx.getImageData(0, 0, w, h);
-
-        // Copy into a plain Uint8Array — three.js's DataTexture path
-        // rejects Uint8ClampedArray in some builds because `instanceof
-        // Uint8Array` fails.
-        const bytes = new Uint8Array(imageData.data.buffer.slice(
-          imageData.data.byteOffset,
-          imageData.data.byteOffset + imageData.data.byteLength,
-        ));
-
-        const tex = new THREE.DataTexture(
-          bytes,
-          w,
-          h,
-          THREE.RGBAFormat,
-          THREE.UnsignedByteType,
-        );
-        tex.colorSpace = THREE.SRGBColorSpace;
-        // `DataTexture` defaults to `flipY = false`. Keep it that way —
-        // the mesh's `scale.y = -1` already handles the Y flip. Setting
-        // `flipY = true` on a DataTexture triggers a `[.WebGL-xxx] GL_INVALID_OPERATION`
-        // warning in three.js since r160.
-        tex.flipY = false;
-        tex.generateMipmaps = false;
-        tex.minFilter = THREE.LinearFilter;
-        tex.magFilter = THREE.LinearFilter;
-        tex.wrapS = THREE.ClampToEdgeWrapping;
-        tex.wrapT = THREE.ClampToEdgeWrapping;
-        // Bytes written to `tex.image.data` are straight-alpha RGBA.
-        // Tell WebGL not to premultiply during upload so the GPU stores
-        // the exact same values. Combined with NormalBlending on the
-        // material (non-premultiplied), the per-level sceneRT receives
-        // `outA = srcA`, preserving authored holes.
-        tex.premultiplyAlpha = false;
-        tex.needsUpdate = true;
-        tex.userData = tex.userData || {};
-        tex.userData.mapShineBackgroundSrc = src;
-        // Mark the decode path so diagnostics can distinguish this from
-        // legacy TextureLoader uploads.
-        tex.userData.mapShineBgDecodePath = 'canvas-getImageData';
-        log.info(
-          `FloorRenderBus: bg image decoded via canvas (straight-alpha) `
-          + `[${key}] (${w}x${h}, src=${src.split('/').pop()})`,
-        );
-        this._addBackgroundImage(fd, tex, zIndex, key);
-        this._applyTileVisibility();
-      } catch (err) {
-        log.warn('FloorRenderBus: straight-alpha bg decode failed:', { src, key }, err);
       }
-    };
-    img.onerror = (err) => {
-      log.warn('FloorRenderBus: bg image load failed:', { src, key }, err);
-    };
-    img.src = src;
+
+      const maxSize = budget.backgroundMaxSize ?? 4096;
+      let tex = await loadFallbackTexture(src, maxSize);
+      if (!tex) {
+        if (meta && isHugeImageSource(meta.width, meta.height, maxSize * 2)) {
+          log.warn(
+            `FloorRenderBus: refusing full-image decode for huge background [${key}] (${meta.width}x${meta.height})`,
+          );
+          return;
+        }
+        try {
+          tex = await loadImageTexture(src, {
+            role: 'ALBEDO',
+            maxSize,
+            premultiplyAlpha: 'none',
+          });
+        } catch (err) {
+          log.warn(`FloorRenderBus: bg load failed [${key}] ${src}`, err);
+          return;
+        }
+      }
+      if (!tex || decodeEpochAtSchedule !== bus._bgDecodeEpoch) return;
+
+      getTextureBudgetTracker().register(
+        tex,
+        `bus:bg:${key}`,
+        estimateTextureBytes(tex.image?.width ?? 512, tex.image?.height ?? 512, 'ubyte'),
+        { source: 'busBackground' },
+      );
+      bus._addBackgroundImage(fd, tex, zIndex, key);
+      bus._applyTileVisibility();
+      log.info(
+        `FloorRenderBus: bg loaded [${key}]`
+        + (meta ? ` (${meta.width}x${meta.height} → ${tex.image?.width ?? '?'}x${tex.image?.height ?? '?'})` : ''),
+      );
+    })();
+
+    this._pendingBackgroundJobs.add(job);
+    void job.finally(() => {
+      this._pendingBackgroundJobs.delete(job);
+    });
+  }
+
+  /**
+   * Await all in-flight background image / streaming mount jobs started by populate.
+   * @returns {Promise<void>}
+   */
+  async awaitBackgroundStreamingReady() {
+    const pending = [...this._pendingBackgroundJobs];
+    if (!pending.length) return;
+    await Promise.allSettled(pending);
   }
 
   /**
@@ -2322,14 +2433,100 @@ export class FloorRenderBus {
     if (!src || !tileId) return;
     const entry = this._tiles.get(tileId);
     if (entry) entry.textureSrc = src;
-    loadImageTexture(src, { role: 'TILE_ALBEDO' })
-      .then((tex) => {
-        this._applyTileAlbedoTexture(tileId, src, tex);
-        log.debug(`FloorRenderBus: texture loaded for tile ${tileId} (floor ${floorIndex})`);
-      })
-      .catch((err) => {
-        log.warn(`FloorRenderBus: failed to load texture for tile ${tileId}: ${src}`, err);
-      });
+
+    void this._loadTileAlbedoFromUrlAsync(tileId, src, floorIndex);
+  }
+
+  /**
+   * @param {string} tileId
+   * @param {string} src
+   * @param {number} floorIndex
+   * @private
+   */
+  async _loadTileAlbedoFromUrlAsync(tileId, src, floorIndex) {
+    const budget = getTextureBudgetTracker();
+    const maxSize = resolveTileAlbedoMaxSize(budget);
+    const entry = this._tiles.get(tileId);
+
+    if (entry?.root && entry?.mesh) {
+      const streamThreshold = Math.max(4096, budget.getRecommendedTileSize() * 2);
+      const meta = await fetchSourceImageMeta(src);
+      const rotation = Number(entry.root.rotation?.z) || 0;
+      const geom = entry.mesh.geometry;
+      const planeW = Number(geom?.parameters?.width) || 0;
+      const planeH = Number(geom?.parameters?.height) || 0;
+      if (
+        meta
+        && planeW > 0
+        && planeH > 0
+        && Math.abs(rotation) < 0.001
+        && shouldStreamBackground(meta.width, meta.height, streamThreshold)
+      ) {
+        const cx = Number(entry.root.position.x) || 0;
+        const cy = Number(entry.root.position.y) || 0;
+        const region = {
+          minX: cx - planeW / 2,
+          maxX: cx + planeW / 2,
+          minY: cy - planeH / 2,
+          maxY: cy + planeH / 2,
+        };
+        const fd = window.MapShine?.sceneComposer?.foundrySceneData ?? {};
+        const streamed = await getTileStreamingManager().registerBusTile(this, tileId, src, {
+          floorIndex,
+          region,
+          worldH: fd.height ?? planeH,
+          z: Number(entry.root.position.z) || 0,
+          rotation: 0,
+        });
+        if (streamed) {
+          entry.mesh.visible = false;
+          entry.material.map = null;
+          entry.material.needsUpdate = true;
+          entry.mapShineStreamedRegion = true;
+          log.info(`FloorRenderBus: streaming bus tile [${tileId}] (${meta.width}x${meta.height})`);
+          return;
+        }
+      }
+    }
+
+    let tex = null;
+
+    try {
+      tex = await loadImageTexture(src, { role: 'TILE_ALBEDO', maxSize });
+    } catch (err) {
+      log.warn(`FloorRenderBus: loadImageTexture failed for tile ${tileId}`, err);
+    }
+
+    if (!tex) {
+      try {
+        tex = await loadImageTexture(src, { role: 'TILE_ALBEDO', maxSize, tryFoundryCache: false });
+      } catch (err) {
+        log.warn(`FloorRenderBus: loadImageTexture retry failed for tile ${tileId}`, err);
+      }
+    }
+
+    if (!tex && window.THREE) {
+      try {
+        const url = normalizeTextureUrl(src);
+        tex = await new Promise((resolve, reject) => {
+          new window.THREE.TextureLoader().load(url, resolve, undefined, reject);
+        });
+        applyTexturePolicy(tex, 'TILE_ALBEDO');
+        tex.userData = tex.userData || {};
+        tex.userData.mapShineTextureOwned = true;
+        tex.userData.mapShineDecodePath = 'TextureLoader-fallback';
+        tex.needsUpdate = true;
+        log.warn(`FloorRenderBus: TextureLoader fallback (unbounded) for tile ${tileId}`);
+      } catch (err) {
+        log.warn(`FloorRenderBus: TextureLoader fallback failed for tile ${tileId}: ${src}`, err);
+        return;
+      }
+    }
+
+    if (!tex) return;
+    this._applyTileAlbedoTexture(tileId, src, tex);
+    getTextureBudgetTracker().enforceBudget();
+    log.info(`FloorRenderBus: tile albedo ready ${tileId} (${tex.image?.width ?? '?'}x${tex.image?.height ?? '?'})`);
   }
 
   /**
@@ -2348,6 +2545,18 @@ export class FloorRenderBus {
     try { entry.material?.map?.dispose?.(); } catch (_) {}
     entry.material.map = tex;
     entry.material.needsUpdate = true;
+    try {
+      const w = tex.image?.width ?? tex.image?.naturalWidth ?? 0;
+      const h = tex.image?.height ?? tex.image?.naturalHeight ?? 0;
+      if (w > 0 && h > 0) {
+        getTextureBudgetTracker().register(
+          tex,
+          `bus:tile:${tileId}`,
+          estimateTextureBytes(w, h, 'ubyte'),
+          { source: 'busTile' },
+        );
+      }
+    } catch (_) {}
   }
 
   /**

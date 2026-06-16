@@ -108,6 +108,11 @@ import {
 } from './vegetation-scene-wind.js';
 import { sceneWindField } from '../../core/SceneWindField.js';
 import {
+  shouldGateBackgroundVegetationOnStreaming,
+  getVisibleStreamingCellKeys,
+  isVegetationStreamingCellVisible,
+} from '../../streaming/vegetation-streaming-bridge.js';
+import {
   VEGETATION_WIND_NOISE_GLSL,
   VEGETATION_WIND_OVERLAY_UNIFORM_GLSL,
   VEGETATION_WIND_LAYER_UNIFORM_GLSL,
@@ -162,6 +167,8 @@ export class TreeEffectV2 {
      * @type {Map<string, {mesh: THREE.Mesh, shadowMesh: THREE.Mesh, material: THREE.ShaderMaterial, shadowMaterial: THREE.ShaderMaterial, floorIndex: number}>}
      */
     this._overlays = new Map();
+    this._gateBackgroundOnStreaming = false;
+    this._lastVisibleStreamCellCount = -1;
 
     /** @type {Set<string>} */
     this._negativeCache = new Set();
@@ -1030,7 +1037,18 @@ export class TreeEffectV2 {
       const tileW = sceneW;
       const tileH = sceneH;
       const z = GROUND_Z - 1 + TREE_Z_OFFSET;
-      this._createOverlay(bg.key, bg.floorIndex, { url, centerX, centerY, z, tileW, tileH, rotation: 0 });
+      const gateStreaming = shouldGateBackgroundVegetationOnStreaming(sceneW, sceneH);
+      this._createOverlay(bg.key, bg.floorIndex, {
+        url,
+        centerX,
+        centerY,
+        z,
+        tileW,
+        tileH,
+        rotation: 0,
+        streamingGridKey: gateStreaming ? bg.key : null,
+      });
+      if (gateStreaming) this._gateBackgroundOnStreaming = true;
       spawnIdx += 1;
       if (spawnIdx % 2 === 0) await yieldVegetationPopulateFrame();
     }
@@ -1099,6 +1117,13 @@ export class TreeEffectV2 {
     const floorChanged = maxFloor !== this._lastVisibilityFloorIndex;
     const viewChanged = this._viewBoundsMayHaveChanged();
     if (floorChanged) this._lastVisibilityFloorIndex = maxFloor;
+    if (this._gateBackgroundOnStreaming) {
+      const streamCount = getVisibleStreamingCellKeys('__bg_image__').size;
+      if (streamCount !== this._lastVisibleStreamCellCount) {
+        this._lastVisibleStreamCellCount = streamCount;
+        this._syncOverlayVisibility();
+      }
+    }
     if (floorChanged || viewChanged) this._syncOverlayVisibility();
     this._advanceHoverFadeUniforms(delta);
     this._lastFrameTime = time;
@@ -1111,6 +1136,13 @@ export class TreeEffectV2 {
     const floorChanged = maxFloor !== this._lastVisibilityFloorIndex;
     const viewChanged = this._viewBoundsMayHaveChanged();
     if (floorChanged) this._lastVisibilityFloorIndex = maxFloor;
+    if (this._gateBackgroundOnStreaming) {
+      const streamCount = getVisibleStreamingCellKeys('__bg_image__').size;
+      if (streamCount !== this._lastVisibleStreamCellCount) {
+        this._lastVisibleStreamCellCount = streamCount;
+        this._syncOverlayVisibility();
+      }
+    }
     if (floorChanged || viewChanged) this._syncOverlayVisibility();
 
     const time = Number.isFinite(timeInfo?.elapsed)
@@ -1562,6 +1594,8 @@ export class TreeEffectV2 {
       this._teardownOverlayEntry(tileId, entry);
     }
     this._overlays.clear();
+    this._gateBackgroundOnStreaming = false;
+    this._lastVisibleStreamCellCount = -1;
     this._deriveAlphaByTileId.clear();
     this._alphaSampleByTileId.clear();
     this._hoverHidden = false;
@@ -2015,6 +2049,7 @@ export class TreeEffectV2 {
     if (!THREE || !this._sharedUniforms) return;
 
     const { url, centerX, centerY, z, tileW, tileH, rotation } = opts;
+    const overlayBounds = overlayWorldBounds(centerX, centerY, tileW, tileH);
 
     const uniforms = {
       ...this._sharedUniforms,
@@ -2372,7 +2407,7 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
 
     this._renderBus.addEffectOverlay(`${tileId}_tree_shadow`, shadowMesh, floorIndex);
     this._renderBus.addEffectOverlay(`${tileId}_tree`, mesh, floorIndex);
-    const bounds = overlayWorldBounds(centerX, centerY, tileW, tileH);
+    const bounds = overlayBounds;
     const maskLoadSerial = ++this._maskLoadSerial;
     const populateGen = this._populateGeneration;
     this._overlays.set(tileId, {
@@ -2384,6 +2419,8 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
       bounds,
       maskLoadSerial,
       maskReady: false,
+      streamingGridKey: opts.streamingGridKey ?? null,
+      streamingCellKey: opts.streamingCellKey ?? null,
     });
     mesh.visible = false;
     shadowMesh.visible = false;
@@ -2479,11 +2516,13 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
   _syncOverlayVisibility() {
     const maxFloor = this._getSafeVisibleMaxFloorIndex();
     const view = this._cachedViewBounds;
+    const streamCells = getVisibleStreamingCellKeys('__bg_image__');
     for (const entry of this._overlays.values()) {
       const floorOk = this._enabled && Number(entry.floorIndex) <= maxFloor;
       const viewOk = !view || tileBoundsIntersectView(entry.bounds, view);
       const maskReady = entry.maskReady === true;
-      const visible = floorOk && viewOk && maskReady;
+      const streamOk = isVegetationStreamingCellVisible(entry, streamCells);
+      const visible = floorOk && viewOk && maskReady && streamOk;
       if (entry._lastSyncedVisible !== visible) {
         entry._lastSyncedVisible = visible;
         if (entry?.mesh) {

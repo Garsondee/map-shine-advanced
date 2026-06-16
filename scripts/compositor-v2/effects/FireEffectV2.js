@@ -31,6 +31,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { getVisibleSceneUvRect, getVisibleWorldRect } from '../../streaming/view-projection-service.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
 import { probeMaskFile } from '../../assets/loader.js';
@@ -2722,6 +2723,8 @@ export class FireEffectV2 {
 
     this._syncActiveFloorOutdoorsMasks();
 
+    this._applyViewBoundsToFireShapes();
+
     const paramsToken = this._beginPerfSpan('systemParams');
     try {
       this._updateSystemParams();
@@ -3107,6 +3110,36 @@ export class FireEffectV2 {
     });
 
     this._uploadFireBatchBuffers(batchRenderer);
+  }
+
+  /**
+   * Restrict fire spawn shapes to the camera view (streaming / TODO 19 dust pattern).
+   * @private
+   */
+  _applyViewBoundsToFireShapes() {
+    const uv = getVisibleSceneUvRect(640);
+    if (!uv) return;
+    const pad = 0.03;
+    const uMin = Math.max(0, uv.uMin - pad);
+    const uMax = Math.min(1, uv.uMax + pad);
+    const vMin = Math.max(0, uv.vMin - pad);
+    const vMax = Math.min(1, uv.vMax + pad);
+
+    for (const idx of this._activeFloors) {
+      const state = this._floorStates.get(idx);
+      if (!state) continue;
+      const allSystems = [
+        ...(state.systems ?? []),
+        ...(state.emberSystems ?? []),
+        ...(state.smokeSystems ?? []),
+      ];
+      for (const sys of allSystems) {
+        const shape = sys?.emitter?.shape;
+        if (shape && typeof shape.setViewBoundsUv === 'function') {
+          shape.setViewBoundsUv(uMin, uMax, vMin, vMax);
+        }
+      }
+    }
   }
 
   /**

@@ -49,6 +49,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { getStreamingMinimap } from '../ui/streaming-minimap.js';
 import { suppressFloorPreloadAfterLevelChange } from './floor-sim-decimation.js';
 import { isCameraNavigationActive } from '../foundry/camera-navigation-state.js';
 import { yieldToMain } from '../core/yield-to-main.js';
@@ -3896,6 +3897,10 @@ export class FloorCompositor {
         force: true,
       });
 
+      try {
+        await this._renderBus?.awaitBackgroundStreamingReady?.();
+      } catch (_) {}
+
       this._populateComplete = true;
       // Ensure at least one fresh frame after async populate finishes.
       // Without this, first-load occlusion/shadow masks can remain stale until a
@@ -4955,6 +4960,7 @@ export class FloorCompositor {
 
     if (populateSlimRender) {
       this._runPopulateSlimRenderFrame();
+      try { getStreamingMinimap()?.update?.(); } catch (_) {}
       this._ensureDefaultFramebuffer();
       return;
     }
@@ -5027,7 +5033,10 @@ export class FloorCompositor {
     try {
       this._prepareBusOcclusionMaskBeforeBus();
       this._renderBus?.syncRuntimeTileState?.(this._replicaOcclusionMaskPass);
+      this._renderBus?.syncStreaming?.();
     } catch (_) {}
+
+    try { getStreamingMinimap()?.update?.(); } catch (_) {}
 
     // Source shadow passes need current-frame light presence so torches, Foundry
     // lights, and WindowLightEffectV2 clear shadows without one-frame swimming.
@@ -6854,8 +6863,8 @@ export class FloorCompositor {
 
       if (signatureChanged) {
         try { clearShelterOutdoorsMaskCache(); } catch (_) {}
+        try { refreshShelterOutdoorsMaskForActiveFloor(outdoorsTex); } catch (_) {}
       }
-      try { refreshShelterOutdoorsMaskForActiveFloor(outdoorsTex); } catch (_) {}
 
       if (typeof weatherController?.setRoofMap === 'function') {
         weatherController.setRoofMap(outdoorsTex);

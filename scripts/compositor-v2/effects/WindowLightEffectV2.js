@@ -93,6 +93,7 @@ const WINDOW_LIGHT_CORE_DEFAULTS = Object.freeze({
   cloudShadowMinLight: 0,
   glassRefractionEnabled: true,
   rgbShiftAmount: 12.89,
+  rgbShiftSoftness: 0,
   rgbShiftAngle: 30,
   rgbShiftSpread: 0.46,
   rgbShiftEdgeWeight: 1,
@@ -367,6 +368,7 @@ const EMIT_FRAG = `
   uniform float uTime;
   uniform float uGlassRefractionEnabled;
   uniform float uRgbShiftAmount;
+  uniform float uRgbShiftSoftness;
   uniform float uRgbShiftAngle;
   uniform float uRgbShiftSpread;
   uniform float uRgbShiftEdgeWeight;
@@ -511,6 +513,8 @@ const EMIT_FRAG = `
       float maskB = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, sceneUv, bOffset), uFalloff);
 
       vec3 chromaRaw = vec3(maskR, maskG, maskB);
+      float shiftSoft = clamp(uRgbShiftSoftness, 0.0, 1.0);
+      chromaRaw = mix(chromaRaw, vec3(maskG), shiftSoft);
       chromaRaw = wlApplyFringeSaturation(chromaRaw, uRgbFringeSaturation);
       chromaRaw *= clamp(uRgbFringeBalance, vec3(0.0), vec3(3.0));
       lightMap = pow(max(chromaRaw, vec3(0.0)), vec3(max(uFalloff, 0.001)));
@@ -939,6 +943,7 @@ export class WindowLightEffectV2 {
           parameters: [
             'glassRefractionEnabled',
             'rgbShiftAmount',
+            'rgbShiftSoftness',
             'rgbShiftAngle',
             'rgbShiftSpread',
             'rgbShiftEdgeWeight',
@@ -1080,6 +1085,15 @@ export class WindowLightEffectV2 {
           step: 0.01,
           default: WINDOW_LIGHT_CORE_DEFAULTS.rgbShiftAmount,
           tooltip: 'Chromatic offset in mask texels along the shift angle.',
+        },
+        rgbShiftSoftness: {
+          type: 'slider',
+          label: 'RGB Shift Softness',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.rgbShiftSoftness,
+          tooltip: 'Blends prismatic fringes toward neutral window glow (0 = full chromatic split, 1 = soft/monochrome).',
         },
         rgbShiftAngle: {
           type: 'slider',
@@ -1467,6 +1481,7 @@ export class WindowLightEffectV2 {
       p.glassRefractionEnabled !== false ? 1 : 0,
       p.sparkleEnabled !== false ? 1 : 0,
       Number(p.rgbShiftAmount ?? 0).toFixed(2),
+      Number(p.rgbShiftSoftness ?? 0).toFixed(2),
     ].join('|');
   }
 
@@ -1764,6 +1779,7 @@ export class WindowLightEffectV2 {
       u.uGlassRefractionEnabled.value = p.glassRefractionEnabled !== false ? 1.0 : 0.0;
     }
     if (u.uRgbShiftAmount) u.uRgbShiftAmount.value = Math.max(0.0, Number(p.rgbShiftAmount) || 0);
+    if (u.uRgbShiftSoftness) u.uRgbShiftSoftness.value = clamp(Number(p.rgbShiftSoftness) || 0, 0, 1);
     if (u.uRgbShiftAngle) {
       u.uRgbShiftAngle.value = (Number(p.rgbShiftAngle) || 0) * (Math.PI / 180.0);
     }
@@ -2630,6 +2646,7 @@ export class WindowLightEffectV2 {
         uTime: { value: 0.0 },
         uGlassRefractionEnabled: { value: 1.0 },
         uRgbShiftAmount: { value: 4.42 },
+        uRgbShiftSoftness: { value: 0.0 },
         uRgbShiftAngle: { value: 30.0 * (Math.PI / 180.0) },
         uRgbShiftSpread: { value: 0.35 },
         uRgbShiftEdgeWeight: { value: 0.55 },

@@ -1187,7 +1187,6 @@ static getControlSchema() {
           label: 'Wind Override',
           type: 'folder',
           expanded: false,
-          hidden: true,
           parameters: [
             'windOverrideEnabled',
             'windOverrideBearingDeg',
@@ -1593,9 +1592,8 @@ static getControlSchema() {
           type: 'boolean',
           default: true,
           label: 'Override scene wind',
-          hidden: true,
           tooltip:
-            'Moved to Scene Wind → Water wind override.',
+            'Drive water wave travel from a fixed compass bearing instead of scene weather wind. Mirrored under Scene Wind → Water Coupling.',
         },
         windOverrideBearingDeg: {
           type: 'slider',
@@ -1604,9 +1602,7 @@ static getControlSchema() {
           step: 1,
           default: 90,
           label: 'Flow bearing (deg)',
-          hidden: true,
-          tooltip:
-            'Moved to Scene Wind → Override bearing.',
+          tooltip: 'Compass bearing for water flow when override is enabled.',
         },
         windOverrideSpeed01: {
           type: 'slider',
@@ -1615,9 +1611,7 @@ static getControlSchema() {
           step: 0.01,
           default: 0.2,
           label: 'Flow strength',
-          hidden: true,
-          tooltip:
-            'Moved to Scene Wind → Override speed.',
+          tooltip: 'Wave travel strength when wind override is enabled (0–1).',
         },
 
         refractionMultiTapEnabled: { type: 'boolean', default: true, label: 'Multi-Tap Refraction' },
@@ -3038,6 +3032,26 @@ static getControlSchema() {
     try {
       const recorder = this._activePerfRecorder ?? window.MapShine?.performanceRecorder;
       recorder?.endEffectCall?.(token);
+    } catch (_) {}
+  }
+
+  /**
+   * Keep Scene Wind water-coupling params aligned when edited from the Water panel.
+   * @param {string} paramId
+   * @param {unknown} value
+   */
+  applyParamChange(paramId, value) {
+    const coupled = new Set([
+      'windOverrideEnabled',
+      'windOverrideBearingDeg',
+      'windOverrideSpeed01',
+      'windDirResponsiveness',
+    ]);
+    if (!coupled.has(paramId)) return;
+    try {
+      const sceneWind = window.MapShine?.sceneWindField;
+      if (!sceneWind?.params || !Object.prototype.hasOwnProperty.call(sceneWind.params, paramId)) return;
+      sceneWind.applyParamChange(paramId, value);
     } catch (_) {}
   }
 

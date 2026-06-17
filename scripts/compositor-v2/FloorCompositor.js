@@ -138,7 +138,6 @@ import { VegetationBillboardShadowPass } from './shadow-system/VegetationBillboa
 import { TreeCanopyOcclusionPass } from './shadow-system/TreeCanopyOcclusionPass.js';
 import { resolveEffectShadowSun2D } from './shadow-system/ShadowSunDirection.js';
 import { resolveEffectEnabled, resolveOverlayEffectActive, resolveFloorEffectActive, syncStylisticEffectGate, isStylisticEffectFcKey } from '../effects/resolve-effect-enabled.js';
-import { resolveVegetationStreamingDrawScissor } from '../streaming/vegetation-streaming-bridge.js';
 
 const log = createLogger('FloorCompositor');
 
@@ -1410,18 +1409,6 @@ export class FloorCompositor {
       renderer.setClearColor(0x000000, 0);
       renderer.clear(true, false, false);
     }
-    const streamScissor = options.vegetationOnly === true
-      ? this._resolveVegetationStreamingScissor(targetRT)
-      : null;
-    const prevScissorTest = (typeof renderer.getScissorTest === 'function')
-      ? renderer.getScissorTest()
-      : false;
-    const prevScissor = THREE ? new THREE.Vector4() : null;
-    if (streamScissor && typeof renderer.setScissorTest === 'function') {
-      if (typeof renderer.getScissor === 'function' && prevScissor) renderer.getScissor(prevScissor);
-      renderer.setScissorTest(true);
-      renderer.setScissor(streamScissor.x, streamScissor.y, streamScissor.w, streamScissor.h);
-    }
     try {
       if (options.vegetationOnly === true) {
         camera.layers.set(VEGETATION_ABOVE_WATER_LAYER);
@@ -1464,12 +1451,6 @@ export class FloorCompositor {
       }
       return drew;
     } finally {
-      if (streamScissor && typeof renderer.setScissorTest === 'function') {
-        renderer.setScissorTest(prevScissorTest);
-        if (prevScissor && typeof renderer.setScissor === 'function') {
-          renderer.setScissor(prevScissor.x, prevScissor.y, prevScissor.z, prevScissor.w);
-        }
-      }
       if (options.clearTransparent && prevClearColor) {
         renderer.setClearColor(prevClearColor, prevClearAlpha);
       }
@@ -1625,25 +1606,6 @@ export class FloorCompositor {
   _isBackgroundVegetationStreamGated() {
     return this._treeEffect?.isBackgroundVegetationStreamGated?.() === true
       || this._bushEffect?.isBackgroundVegetationStreamGated?.() === true;
-  }
-
-  /**
-   * @param {THREE.WebGLRenderTarget} targetRT
-   * @returns {{ x: number, y: number, w: number, h: number }|null}
-   * @private
-   */
-  _resolveVegetationStreamingScissor(targetRT) {
-    if (!this._isBackgroundVegetationStreamGated()) return null;
-    /** @type {Set<string>} */
-    const gridKeys = new Set();
-    for (const key of this._treeEffect?.getBackgroundVegetationStreamGridKeys?.() ?? []) {
-      gridKeys.add(key);
-    }
-    for (const key of this._bushEffect?.getBackgroundVegetationStreamGridKeys?.() ?? []) {
-      gridKeys.add(key);
-    }
-    if (!gridKeys.size) return null;
-    return resolveVegetationStreamingDrawScissor(targetRT, this.camera, gridKeys);
   }
 
   /**

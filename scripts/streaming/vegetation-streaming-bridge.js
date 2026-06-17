@@ -130,7 +130,7 @@ export function remapPlaneMaskUvs(geometry, rect) {
 /**
  * Per-cell vegetation planes stay disabled: cell-sized quads still show opaque white
  * mask backdrops despite derive-alpha (sub-rect UV + clump wind geometry). Streaming
- * benefit comes from gating visibility, draw scissor, and half-res shadows instead.
+ * benefit comes from gating visibility and half-res shadows instead.
  * @param {number} _sceneW
  * @param {number} _sceneH
  * @returns {boolean}
@@ -475,103 +475,3 @@ export function syncStreamVegetationOverlays(ctx) {
   return changed;
 }
 
-/**
- * @param {string} gridKey
- * @returns {{ region: object|null, sourceW: number, sourceH: number, cellSize: number }}
- */
-function resolveGridStreamManifest(gridKey) {
-  try {
-    const manager = getTileStreamingManager();
-    const grid = manager.getGrids?.()?.get?.(gridKey)
-      ?? manager.getRegionGrids?.()?.get?.(gridKey)
-      ?? null;
-    const manifest = grid?._manifest;
-    const fd = window.MapShine?.sceneComposer?.foundrySceneData ?? {};
-    const region = getSceneRegionFromFoundryData(fd);
-    const sourceW = Number(manifest?.sourceWidth ?? fd.sceneWidth ?? fd.width ?? 0);
-    const sourceH = Number(manifest?.sourceHeight ?? fd.sceneHeight ?? fd.height ?? 0);
-    const cellSize = getTextureBudgetTracker().getRecommendedTileSize();
-    return { region, sourceW, sourceH, cellSize };
-  } catch (_) {
-    return { region: null, sourceW: 0, sourceH: 0, cellSize: 1024 };
-  }
-}
-
-/**
- * Screen-space scissor rect (pixels, bottom-left origin) covering resident streaming
- * cells so a full-scene vegetation plane only shades visible albedo residency.
- * @param {import('three').WebGLRenderTarget} targetRT
- * @param {import('three').Camera} camera
- * @param {Iterable<string>} gridKeys
- * @returns {{ x: number, y: number, w: number, h: number }|null}
- */
-export function resolveVegetationStreamingDrawScissor(targetRT, camera, gridKeys) {
-  const THREE = window.THREE;
-  if (!THREE || !camera || !targetRT?.width || !targetRT?.height || !gridKeys) return null;
-
-  const groundZ = Number(window.MapShine?.sceneComposer?.groundZ ?? 0);
-  const vec = new THREE.Vector3();
-  let ndcMinX = Infinity;
-  let ndcMinY = Infinity;
-  let ndcMaxX = -Infinity;
-  let ndcMaxY = -Infinity;
-  let any = false;
-
-  const addWorldBounds = (bounds) => {
-    const corners = [
-      [bounds.minX, bounds.minY],
-      [bounds.maxX, bounds.minY],
-      [bounds.maxX, bounds.maxY],
-      [bounds.minX, bounds.maxY],
-    ];
-    for (const [wx, wy] of corners) {
-      vec.set(wx, wy, groundZ);
-      vec.project(camera);
-      if (!Number.isFinite(vec.x) || !Number.isFinite(vec.y)) continue;
-      ndcMinX = Math.min(ndcMinX, vec.x);
-      ndcMaxX = Math.max(ndcMaxX, vec.x);
-      ndcMinY = Math.min(ndcMinY, vec.y);
-      ndcMaxY = Math.max(ndcMaxY, vec.y);
-      any = true;
-    }
-  };
-
-  for (const gridKey of gridKeys) {
-    const { region, sourceW, sourceH, cellSize } = resolveGridStreamManifest(gridKey);
-    if (!(region && sourceW > 0 && sourceH > 0)) continue;
-    const bleedPx = resolveVegetationStreamCellBleedPx(cellSize);
-    const cells = getVisibleStreamingCellKeys(gridKey);
-    for (const cellKey of cells) {
-      const parts = String(cellKey).split(',');
-      if (parts.length !== 2) continue;
-      const cx = Number(parts[0]);
-      const cy = Number(parts[1]);
-      if (!Number.isFinite(cx) || !Number.isFinite(cy)) continue;
-      addWorldBounds(imageCellToWorldBoundsBleed(
-        cx, cy, cellSize, sourceW, sourceH, region, bleedPx,
-      ));
-    }
-  }
-
-  if (!any) return null;
-
-  ndcMinX = Math.max(-1, ndcMinX);
-  ndcMaxX = Math.min(1, ndcMaxX);
-  ndcMinY = Math.max(-1, ndcMinY);
-  ndcMaxY = Math.min(1, ndcMaxY);
-  if (ndcMaxX <= ndcMinX || ndcMaxY <= ndcMinY) return null;
-
-  const rtW = targetRT.width;
-  const rtH = targetRT.height;
-  const x0 = Math.floor((ndcMinX * 0.5 + 0.5) * rtW);
-  const x1 = Math.ceil((ndcMaxX * 0.5 + 0.5) * rtW);
-  const y0 = Math.floor((-ndcMaxY * 0.5 + 0.5) * rtH);
-  const y1 = Math.ceil((-ndcMinY * 0.5 + 0.5) * rtH);
-  const pad = 12;
-  const x = Math.max(0, x0 - pad);
-  const y = Math.max(0, y0 - pad);
-  const w = Math.min(rtW - x, Math.max(1, (x1 - x0) + pad * 2));
-  const h = Math.min(rtH - y, Math.max(1, (y1 - y0) + pad * 2));
-  if (w * h >= rtW * rtH * 0.92) return null;
-  return { x, y, w, h };
-}

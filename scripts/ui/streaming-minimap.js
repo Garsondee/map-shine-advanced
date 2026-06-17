@@ -565,7 +565,7 @@ export class StreamingMinimap {
         this._kv('Scene', `${report.scene?.name ?? '?'} (${report.scene?.scenePx?.w ?? '?'}x${report.scene?.scenePx?.h ?? '?'})`),
         this._kv('Megapixels', `${Number(report.scene?.sceneMp ?? 0).toFixed(1)} MP`),
         this._kv('Zoom', `${Number(report.scene?.zoom ?? 0).toFixed(3)}`),
-        this._kv('Zoom LOD', `${report.scene?.zoomLod ?? '?'} (held ${report.streaming?.heldZoomLod ?? '?'})`),
+        this._kv('Zoom LOD', `target ${report.scene?.zoomLod ?? '?'}, active ${report.streaming?.lastStreamLod ?? '?'}${report.streaming?.isPanning ? ' (panning)' : ''}`),
         this._kv('View textured cells', String(report.view?.visibleCellsInFrustum ?? 0)),
         this._kv('View padding', String(report.view?.padding ?? '?')),
       ].join('');

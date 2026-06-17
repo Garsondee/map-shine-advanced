@@ -255,6 +255,31 @@ function _deriveWarnings(report) {
     warnings.push('No background cells cover the current view frustum.');
   }
 
+  const targetLod = Number(report.scene.zoomLod);
+  const activeLod = Number(report.streaming.lastStreamLod);
+  const heldLod = Number(report.streaming.heldZoomLod);
+  if (Number.isFinite(targetLod) && Number.isFinite(activeLod) && targetLod < activeLod) {
+    if (report.streaming.isPanning) {
+      warnings.push(`Pan active — streaming LOD ${activeLod} is coarser than zoom target LOD ${targetLod}; sharpen resumes after pan stops.`);
+    } else if (Number.isFinite(heldLod) && heldLod > targetLod && report.streaming.zoomStable === false) {
+      warnings.push(`Zoom still changing — streaming LOD ${activeLod} held coarser than target LOD ${targetLod} until zoom settles or jumps ≥10%.`);
+    } else {
+      warnings.push(`Streaming LOD ${activeLod} is coarser than zoom target LOD ${targetLod} — visible cells may look soft.`);
+    }
+  }
+
+  for (const g of report.streaming.backgroundGrids) {
+    const visCells = g.cells.filter((c) => c.visible && c.hasMap);
+    if (!visCells.length || !Number.isFinite(targetLod)) continue;
+    const finestVisible = Math.min(...visCells.map((c) => Number(c.lod) || 99));
+    if (finestVisible > targetLod + 1) {
+      warnings.push(`Background [${g.key}]: finest visible cell is LOD ${finestVisible}, target is LOD ${targetLod}.`);
+    }
+    if (targetLod === 0 && (g.cellSummary.lod0 ?? 0) === 0 && visCells.length > 0) {
+      warnings.push(`Background [${g.key}]: zoom requests LOD 0 but no lod0 textures are loaded (${g.cellSummary.lod1 ?? 0} at lod1, ${g.cellSummary.residentLo ?? 0} resident-lo).`);
+    }
+  }
+
   return warnings;
 }
 
@@ -272,6 +297,11 @@ export function buildTileStreamingReport() {
   const meta = getSceneRectMeta();
   const viewRect = resolveStreamingViewRect();
   const zoomLod = selectLodFromZoom(zoom, budget.getMaxLodLevel(), mp);
+  const lastStreamLod = manager._lastStreamLod === 99 ? null : manager._lastStreamLod;
+  const heldZoomLod = manager._heldZoomLod === 99 ? null : manager._heldZoomLod;
+  const heldZoom = Number(manager._heldZoom) || 0;
+  const zoomDeltaPct = heldZoom > 0 ? (Math.abs(zoom - heldZoom) / Math.max(0.05, heldZoom)) * 100 : 0;
+  const zoomStable = zoomDeltaPct < 0.001;
 
   /** @type {object[]} */
   const backgroundGrids = [];
@@ -357,7 +387,11 @@ export function buildTileStreamingReport() {
       isPanning: manager.isPanning?.() === true,
       backgroundGridCount: backgroundGrids.length,
       regionGridCount: regionGrids.length,
-      heldZoomLod: manager._heldZoomLod ?? null,
+      lastStreamLod,
+      heldZoomLod,
+      heldZoom,
+      zoomStable,
+      zoomDeltaPct: Number(zoomDeltaPct.toFixed(2)),
       decodePool,
       bakeProgress,
       backgroundGrids,
@@ -505,7 +539,7 @@ export function formatTileStreamingReportText(report) {
   lines.push('=== Map Shine Tile Streaming Report ===');
   lines.push(`Generated: ${report.generatedAt}`);
   lines.push(`Scene: ${report.scene.name ?? '?'} (${report.scene.scenePx?.w ?? '?'}×${report.scene.scenePx?.h ?? '?'}) ${report.scene.sceneMp.toFixed(1)} MP`);
-  lines.push(`Zoom: ${report.scene.zoom.toFixed(3)} × ${report.scene.pixelRatio?.toFixed(2) ?? '?'} DPR = ${report.scene.streamingZoom?.toFixed(3) ?? '?'} → LOD ${report.scene.zoomLod} (held ${report.streaming.heldZoomLod})`);
+  lines.push(`Zoom: ${report.scene.zoom.toFixed(3)} × ${report.scene.pixelRatio?.toFixed(2) ?? '?'} DPR = ${report.scene.streamingZoom?.toFixed(3) ?? '?'} → target LOD ${report.scene.zoomLod}, active LOD ${report.streaming.lastStreamLod ?? '?'}${report.streaming.isPanning ? ' (panning)' : ''}`);
   lines.push(`VRAM: ${report.budget.usedMB}/${report.budget.budgetMB} MB (${report.budget.usedPct}%)${report.budget.overBudget ? ' OVER' : ''}`);
   lines.push(`Bus visible floors: 0–${report.bus.visibleMaxFloorIndex}`);
   lines.push(`Grids: ${report.streaming.backgroundGridCount} background, ${report.streaming.regionGridCount} region`);

@@ -363,11 +363,13 @@ export class TileStreamingManager {
     const mp = estimateSceneMegapixels();
     let lod = selectLodFromZoom(zoom, budget.getMaxLodLevel(), mp);
 
-    // Hold finer LOD briefly while zoom stabilizes — coarsening on zoom-out is immediate.
+    // Defer finer LOD only while zoom is still changing slowly (mid-gesture).
+    // Once zoom is stable, sharpen immediately. Coarsening on zoom-out is always immediate.
     if (this._heldZoomLod !== 99) {
       const zBase = Math.max(0.05, this._heldZoom);
       const zDelta = Math.abs(zoom - this._heldZoom) / zBase;
-      if (zDelta < 0.1 && lod < this._heldZoomLod) {
+      const zoomStable = zDelta < 1e-5;
+      if (!zoomStable && zDelta < 0.1 && lod < this._heldZoomLod) {
         lod = this._heldZoomLod;
       }
     }

@@ -8,6 +8,7 @@ import {
 } from './water-splash-behaviors.js';
 import { getPerspectiveElevation } from '../../foundry/elevation-context.js';
 import { hasV14NativeLevels } from '../../foundry/levels-scene-flags.js';
+import { resolveClusteringElevation } from '../../scene/map-point-wall-clustering.js';
 import { VisionPolygonComputer } from '../../vision/VisionPolygonComputer.js';
 import { LightMesh } from '../../scene/LightMesh.js';
 
@@ -1339,8 +1340,46 @@ export class CandleFlamesEffectV2 {
     return 1.0 + boost * outdoor * darkness;
   }
 
+  /**
+   * Elevation for wall-height filtering on the active floor (not the controlled token).
+   * Glow clipping must match the floor the candles belong to, otherwise upper-floor
+   * walls are skipped when a lower-floor token is selected.
+   * @private
+   * @returns {number}
+   */
+  _resolveActiveFloorClipElevation() {
+    const ctx = this._activeLevelContext ?? window.MapShine?.activeLevelContext ?? null;
+    if (ctx && (ctx.count ?? 0) > 1) {
+      if (Number.isFinite(Number(ctx.center))) return Number(ctx.center);
+      const b = Number(ctx.bottom);
+      const t = Number(ctx.top);
+      if (Number.isFinite(b) && Number.isFinite(t)) {
+        return (Math.min(b, t) + Math.max(b, t)) * 0.5;
+      }
+    }
+    return resolveClusteringElevation(this._resolveGlowFloorIndex());
+  }
+
+  /**
+   * Wall-clip elevation for one map-point group (level-locked groups use their band center).
+   * @private
+   * @param {import('../../scene/map-points-manager.js').MapPointGroup|null|undefined} group
+   * @returns {number}
+   */
+  _resolveGroupWallClipElevation(group) {
+    const binding = group?.metadata?.levelBinding;
+    if (binding?.mode === 'locked') {
+      const b = Number(binding.bottom);
+      const t = Number(binding.top ?? binding.bottom);
+      if (Number.isFinite(b) && Number.isFinite(t)) {
+        return (Math.min(b, t) + Math.max(b, t)) * 0.5;
+      }
+    }
+    return this._resolveActiveFloorClipElevation();
+  }
+
   /** Clip glow using Foundry light rules (solid walls block; windows / proximity pass through). */
-  _buildGlowWallClipOptions() {
+  _buildGlowWallClipOptions(sourceElevation = null) {
     const opts = {
       sense: 'light',
       blockGeometry: false,
@@ -1353,9 +1392,14 @@ export class CandleFlamesEffectV2 {
         opts.wallPaddingPx = Math.max(0, pad);
       }
       if (hasV14NativeLevels(canvas?.scene)) {
-        const pe = getPerspectiveElevation();
-        if (Number.isFinite(pe?.losHeight)) {
-          opts.elevation = pe.losHeight;
+        const clipElev = Number(sourceElevation);
+        if (Number.isFinite(clipElev)) {
+          opts.elevation = clipElev;
+        } else {
+          const pe = getPerspectiveElevation();
+          if (Number.isFinite(pe?.losHeight)) {
+            opts.elevation = pe.losHeight;
+          }
         }
       }
     } catch (_) {
@@ -1675,7 +1719,12 @@ export class CandleFlamesEffectV2 {
           && !this._mapPointsManager.isGroupPointEnabled(g.id, pointIndex)) {
           continue;
         }
-        points.push({ x: p.x, y: p.y, intensity });
+        points.push({
+          x: p.x,
+          y: p.y,
+          intensity,
+          clipElevation: this._resolveGroupWallClipElevation(g),
+        });
       }
     }
 
@@ -1719,13 +1768,24 @@ export class CandleFlamesEffectV2 {
 
       let b = buckets.get(key);
       if (!b) {
-        b = { sumX: 0, sumY: 0, sumI: 0, sumOutdoor: 0, minOutdoor: 1.0, count: 0 };
+        b = {
+          sumX: 0,
+          sumY: 0,
+          sumI: 0,
+          sumOutdoor: 0,
+          sumClipElevation: 0,
+          minOutdoor: 1.0,
+          count: 0,
+        };
         buckets.set(key, b);
       }
       b.sumX += wx;
       b.sumY += wy;
       b.sumI += pt.intensity;
       b.sumOutdoor += outdoor;
+      b.sumClipElevation += Number.isFinite(Number(pt.clipElevation))
+        ? Number(pt.clipElevation)
+        : this._resolveActiveFloorClipElevation();
       b.minOutdoor = Math.min(b.minOutdoor, outdoor);
       b.count += 1;
 
@@ -1803,6 +1863,7 @@ export class CandleFlamesEffectV2 {
         cyFoundry: foundryCenter.y,
         radiusPx,
         clipRadiusPx,
+        clipElevation: b.sumClipElevation / Math.max(1, b.count),
         intensity,
         phase,
         outdoor: outdoorForGlow,
@@ -1925,8 +1986,6 @@ export class CandleFlamesEffectV2 {
     const sceneH = d?.sceneHeight ?? d?.height ?? 1;
 
     const sceneBounds = { x: sceneX, y: sceneY, width: sceneW, height: sceneH };
-    const wallClipOptions = this._buildGlowWallClipOptions();
-
     for (const c of this._clusters) {
       if (!c) continue;
 
@@ -1936,6 +1995,7 @@ export class CandleFlamesEffectV2 {
       const clipScale = Math.max(0.1, Number(this.params.wallClipRadiusScale) || 1.0);
       const radiusPx = Math.max(32, glow.radiusPx * clipScale);
       const clipRadiusPx = radiusPx;
+      const wallClipOptions = this._buildGlowWallClipOptions(c.clipElevation);
 
       const clipCenters = this._resolveGlowClipCenters(centerFoundry, walls, wallClipOptions);
       const lightMeshes = [];

@@ -22,6 +22,7 @@ import {
   readDocLevelsRange,
   getSceneLightMasking,
   hasV14NativeLevels,
+  readV14SceneLevels,
 } from './levels-scene-flags.js';
 
 // ---------------------------------------------------------------------------
@@ -300,10 +301,29 @@ export function getPerspectiveForRenderFloorIndex(floorIndex) {
     mid = (bottom + top) * 0.5;
   }
   if (!Number.isFinite(mid)) return null;
+
+  let levelId = (typeof f.levelId === 'string' && f.levelId.length > 0) ? f.levelId : null;
+  if (!levelId && scene) {
+    const bands = readV14SceneLevels(scene);
+    const lo = Number(f.elevationMin);
+    const hi = Number(f.elevationMax);
+    for (const band of bands) {
+      if (Number(band.bottom) === lo && Number(band.top) === hi && band.levelId) {
+        levelId = String(band.levelId);
+        break;
+      }
+    }
+    if (!levelId && bands[fi]?.levelId) {
+      levelId = String(bands[fi].levelId);
+    }
+  }
+
   return {
     elevation: mid,
     losHeight: mid,
     source: 'render-floor',
+    floorIndex: fi,
+    levelId,
     tokenId: null,
     backgroundElevation: getSceneBackgroundElevation(scene),
   };
@@ -335,7 +355,19 @@ export function isLightVisibleForPerspective(lightDoc, perspectiveOverride = nul
   /** @type {{ ok: boolean, skipLegacyLosMasking: boolean }} */
   let levelGate = { ok: true, skipLegacyLosMasking: false };
   try {
-    levelGate = getAmbientLightLevelGate(lightDoc, scene);
+    /** @type {{ targetLevelId?: string|null, renderFloorIndex?: number|null }} */
+    const gateOptions = {};
+    if (perspectiveOverride) {
+      if (typeof perspectiveOverride.levelId === 'string' && perspectiveOverride.levelId.length > 0) {
+        gateOptions.targetLevelId = perspectiveOverride.levelId;
+      } else if (
+        perspectiveOverride.source === 'render-floor'
+        && Number.isFinite(Number(perspectiveOverride.floorIndex))
+      ) {
+        gateOptions.renderFloorIndex = Number(perspectiveOverride.floorIndex);
+      }
+    }
+    levelGate = getAmbientLightLevelGate(lightDoc, scene, gateOptions);
   } catch (_) {}
   if (!levelGate.ok) return false;
 
@@ -379,6 +411,21 @@ export function isLightVisibleForPerspective(lightDoc, perspectiveOverride = nul
   // lightMasking=true (default): light visible if rangeBottom <= viewerLOS
   // This is the simpler mode — lights on the viewer's level or below are visible.
   if (lightMasking) {
+    let activeBandBottom = NaN;
+    if (perspectiveOverride?.source === 'render-floor') {
+      const fi = Number(perspectiveOverride.floorIndex);
+      const floors = globalThis.window?.MapShine?.floorStack?.getFloors?.() ?? [];
+      if (Number.isFinite(fi) && floors[fi]) {
+        activeBandBottom = Number(floors[fi].elevationMin);
+      }
+    }
+    if (!Number.isFinite(activeBandBottom)) {
+      activeBandBottom = Number(window.MapShine?.activeLevelContext?.bottom);
+    }
+    // V14 multi-floor: do not bleed lower-floor point lights through upper decks.
+    if (Number.isFinite(activeBandBottom) && rangeBottom < activeBandBottom) {
+      return false;
+    }
     return rangeBottom <= viewerLOS;
   }
 

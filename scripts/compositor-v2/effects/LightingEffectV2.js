@@ -416,10 +416,19 @@ export class LightingEffectV2 {
     this._stackLightCamera = null;
     /** @type {THREE.ShaderMaterial|null} */
     this._stackLightMaterial = null;
+    /** @type {THREE.ShaderMaterial|null} */
+    this._lightRtCopyMaterial = null;
+    /** @type {THREE.Scene|null} */
+    this._lightRtCopyScene = null;
     /** @type {boolean} */
     this._stackedLightActive = false;
     /** @type {number} */
     this._stackedLightLayerCount = 0;
+    /**
+     * Per-floor copies of `_lightRT` during multi-floor passes (key = floor index).
+     * @type {Map<number, THREE.WebGLRenderTarget>}
+     */
+    this._perFloorLightSnapshotRts = new Map();
 
     // ── Foundry hooks ───────────────────────────────────────────────────
     /** @type {Array<{hook: string, id: number}>} */
@@ -1376,6 +1385,7 @@ export class LightingEffectV2 {
    */
   beginStackedLightBuffer(renderer) {
     if (!renderer || !this._stackedLightRtA) return;
+    this._invalidateLightMaskPrepassCache();
     this._bindPerfRecorder();
     const _perfToken = this._beginPerfSpan('stackedLight.begin', 'render');
     const prevTarget = renderer.getRenderTarget();
@@ -1398,6 +1408,11 @@ export class LightingEffectV2 {
     if (!renderer || !this._lightRT?.texture || !this._stackLightMaterial) return;
     this._perfSession.stackedLightAccumulates += 1;
     if (!this._stackedLightActive) this.beginStackedLightBuffer(renderer);
+
+    const floorIdx = Number(this._renderFloorIndexForLights);
+    if (Number.isFinite(floorIdx)) {
+      this._snapshotLightRtForFloor(renderer, floorIdx);
+    }
 
     const accumTex = this._stackedLightResult?.texture ?? this._stackedLightRtA?.texture;
     if (!accumTex) return;
@@ -1443,6 +1458,18 @@ export class LightingEffectV2 {
    */
   getLocalLightBufferBinding() {
     const stackedActive = this._stackedLightActive && this._stackedLightLayerCount > 0;
+    if (stackedActive && this._stackedLightLayerCount > 1) {
+      const activeIdx = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
+      if (Number.isFinite(activeIdx)) {
+        const snap = this._perFloorLightSnapshotRts.get(Math.floor(activeIdx));
+        if (snap?.texture) {
+          return { texture: snap.texture, alphaBaseline: 0.0 };
+        }
+      }
+      if (this._lightRT?.texture) {
+        return { texture: this._lightRT.texture, alphaBaseline: 0.0 };
+      }
+    }
     if (stackedActive && this._stackedLightResult?.texture) {
       return { texture: this._stackedLightResult.texture, alphaBaseline: 0.0 };
     }
@@ -1454,6 +1481,45 @@ export class LightingEffectV2 {
   endStackedLightBuffer() {
     this._stackedLightActive = false;
     this._stackedLightLayerCount = 0;
+    this._perFloorLightSnapshotRts.clear();
+  }
+
+  /**
+   * Copy the current `_lightRT` into a per-floor snapshot for post-merge CC.
+   * @private
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {number} floorIndex
+   */
+  _snapshotLightRtForFloor(renderer, floorIndex) {
+    const THREE = window.THREE;
+    if (!renderer || !THREE || !this._lightRT || !this._lightRtCopyMaterial || !this._lightRtCopyScene) {
+      return;
+    }
+    const fi = Math.floor(Number(floorIndex));
+    if (!Number.isFinite(fi)) return;
+
+    let dst = this._perFloorLightSnapshotRts.get(fi);
+    const w = this._lightRT.width;
+    const h = this._lightRT.height;
+    if (!dst || dst.width !== w || dst.height !== h) {
+      try { dst?.dispose?.(); } catch (_) {}
+      dst = new THREE.WebGLRenderTarget(w, h, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.HalfFloatType,
+        depthBuffer: false,
+        stencilBuffer: false,
+      });
+      dst.texture.colorSpace = THREE.LinearSRGBColorSpace;
+      this._perFloorLightSnapshotRts.set(fi, dst);
+    }
+
+    this._lightRtCopyMaterial.uniforms.tSrc.value = this._lightRT.texture;
+    const prevTarget = renderer.getRenderTarget();
+    renderer.setRenderTarget(dst);
+    renderer.render(this._lightRtCopyScene, this._stackLightCamera);
+    renderer.setRenderTarget(prevTarget);
   }
 
   /**
@@ -3073,6 +3139,31 @@ export class LightingEffectV2 {
     stackQuad.frustumCulled = false;
     this._stackLightScene.add(stackQuad);
 
+    this._lightRtCopyMaterial = new THREE.ShaderMaterial({
+      uniforms: { tSrc: { value: null } },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        uniform sampler2D tSrc;
+        varying vec2 vUv;
+        void main() {
+          gl_FragColor = texture2D(tSrc, vUv);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+    });
+    this._lightRtCopyMaterial.toneMapped = false;
+    this._lightRtCopyScene = new THREE.Scene();
+    const copyQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._lightRtCopyMaterial);
+    copyQuad.frustumCulled = false;
+    this._lightRtCopyScene.add(copyQuad);
+
     // ── Foundry hooks for light CRUD ──────────────────────────────────
     this._registerHook('createAmbientLight', (doc) => this._onLightCreate(doc));
     this._registerHook('updateAmbientLight', (doc, changes) => this._onLightUpdate(doc, changes));
@@ -4051,10 +4142,12 @@ export class LightingEffectV2 {
     // flicker and miss attenuation/softness changes (hard on/off rims). Within a
     // frame, prepass and compose push identical uniforms — reuse is lossless.
     if (this.params.lightPrepassReuseEnabled === false) return false;
+    if (this._stackedLightActive) return false;
     const c = this._lightMaskPrepassCache;
     if (!c.valid) return false;
     if (c.frameSeq !== this._lightUpdateFrameSeq) return false;
     if (c.floorIndex !== renderFloor) return false;
+    if (this._lightRtContentFloor !== renderFloor) return false;
     if (c.rtW !== w || c.rtH !== h) return false;
     const lightGain = Math.max(0, Number(this.params.lightIntensity) || 0);
     return c.lightGain === lightGain;
@@ -4693,9 +4786,19 @@ export class LightingEffectV2 {
     try { this._stackedLightRtA?.dispose(); } catch (_) {}
     try { this._stackedLightRtB?.dispose(); } catch (_) {}
     try { this._stackLightMaterial?.dispose(); } catch (_) {}
+    try { this._lightRtCopyMaterial?.dispose(); } catch (_) {}
     try {
       const sq = this._stackLightScene?.children?.[0];
       sq?.geometry?.dispose?.();
+    } catch (_) {}
+    try {
+      const cq = this._lightRtCopyScene?.children?.[0];
+      cq?.geometry?.dispose?.();
+    } catch (_) {}
+    try {
+      for (const rt of this._perFloorLightSnapshotRts.values()) {
+        rt?.dispose?.();
+      }
     } catch (_) {}
     try { this._darknessRT?.dispose(); } catch (_) {}
     try {
@@ -4725,6 +4828,9 @@ export class LightingEffectV2 {
     this._stackLightScene = null;
     this._stackLightCamera = null;
     this._stackLightMaterial = null;
+    this._lightRtCopyMaterial = null;
+    this._lightRtCopyScene = null;
+    this._perFloorLightSnapshotRts.clear();
     this._stackedLightActive = false;
     this._stackedLightLayerCount = 0;
     this._darknessRT = null;

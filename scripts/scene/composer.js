@@ -91,7 +91,8 @@ export class SceneComposer {
      * @type {GpuSceneMaskCompositor}
      * @private
      */
-    this._sceneMaskCompositor = new GpuSceneMaskCompositor();
+    /** @type {{ sceneId: string|null, promise: Promise<{ctx: object, result: object}> }|null} */
+    this._earlyMaskBundleLoad = null;
   }
 
   _markOwnedTexture(texture) {
@@ -437,6 +438,131 @@ export class SceneComposer {
   }
 
   /**
+   * Resolve mask bundle base path and manifest inputs for a Foundry scene.
+   *
+   * @param {Scene} foundryScene
+   * @returns {{ bgPath: string|null, maskSourceSrc: string|null, enabledMaskIds: string[] }}
+   * @private
+   */
+  _resolveMaskLoadContext(foundryScene) {
+    const maskSourceSrc = this._resolveMaskSourceSrc(foundryScene);
+    let bgPath = null;
+    if (maskSourceSrc) {
+      bgPath = this.extractBasePath(maskSourceSrc);
+      log.info(`Mask source: ${maskSourceSrc}`);
+      log.info(`Loading effect masks for: ${bgPath}`);
+    }
+    if (!bgPath && this._lastMaskBasePath) {
+      bgPath = this._lastMaskBasePath;
+      log.info(`Using cached mask basePath: ${bgPath}`);
+    }
+    return {
+      bgPath,
+      maskSourceSrc,
+      enabledMaskIds: collectEnabledMaskIds(foundryScene),
+    };
+  }
+
+  /**
+   * Load suffix mask bundle textures for a resolved mask context.
+   *
+   * @param {Scene} foundryScene
+   * @param {{ bgPath: string|null, maskSourceSrc: string|null, enabledMaskIds: string[] }} ctx
+   * @param {{ onProgress?: Function }} [options]
+   * @param {{ lp?: object, doLoadProfile?: boolean, spanToken?: number, _dlp?: object, _isDbg?: boolean }} [profiling]
+   * @returns {Promise<object>}
+   * @private
+   */
+  async _loadMaskBundleFromContext(foundryScene, ctx, options = {}, profiling = {}) {
+    const { bgPath, maskSourceSrc, enabledMaskIds } = ctx;
+    if (!bgPath) {
+      return { success: false, bundle: { masks: [] }, warnings: [] };
+    }
+
+    const { lp, doLoadProfile, spanToken, _dlp, _isDbg } = profiling;
+
+    const prepManifest = await prepareSceneMaskManifestForLoad(foundryScene, {
+      basePath: bgPath,
+      maskSourceSrc,
+      enabledMaskIds,
+    });
+
+    const _skipMaskIds = ['water'];
+
+    if (doLoadProfile) {
+      try {
+        lp.begin(`sceneComposer.loadAssetBundle:${spanToken}`, { basePath: bgPath });
+      } catch (e) {
+      }
+    }
+    if (_isDbg) _dlp.begin('sc.loadAssetBundle', 'texture');
+    try {
+      return await assetLoader.loadAssetBundle(
+        bgPath,
+        (loaded, total, asset) => {
+          log.debug(`Asset loading: ${loaded}/${total} - ${asset}`);
+          try {
+            if (typeof options?.onProgress === 'function') {
+              options.onProgress(loaded, total, asset);
+            }
+          } catch (e) {
+            log.warn('Asset progress callback failed:', e);
+          }
+        },
+        {
+          skipBaseTexture: true,
+          skipMaskIds: _skipMaskIds,
+          maskManifest: prepManifest.maskManifest,
+          maskExtension: prepManifest.maskExtension,
+          maskIds: enabledMaskIds,
+          cacheKeySuffix: prepManifest.cacheKeySuffix,
+          maskConventionFallback: prepManifest.maskConventionFallback,
+        },
+      );
+    } finally {
+      if (_isDbg) _dlp.end('sc.loadAssetBundle');
+      if (doLoadProfile) {
+        try {
+          lp.end(`sceneComposer.loadAssetBundle:${spanToken}`);
+        } catch (e) {
+        }
+      }
+    }
+  }
+
+  /**
+   * Start mask bundle disk/network I/O before SceneComposer.initialize() so it
+   * can overlap renderer attach and FloorCompositor RT allocation on cold load.
+   *
+   * @param {Scene} foundryScene
+   * @param {{ onProgress?: (loaded:number, total:number, asset:string)=>void }} [options]
+   * @returns {Promise<{ctx: object, result: object}>|null}
+   */
+  startEarlyMaskBundleLoad(foundryScene, options = {}) {
+    if (!foundryScene) return null;
+
+    const sceneId = foundryScene?.id ? String(foundryScene.id) : null;
+    const ctx = this._resolveMaskLoadContext(foundryScene);
+    if (!ctx.bgPath) {
+      this._earlyMaskBundleLoad = null;
+      return null;
+    }
+
+    const promise = this._loadMaskBundleFromContext(foundryScene, ctx, options)
+      .then((result) => ({ ctx, result }))
+      .catch((err) => {
+        log.warn('Early mask bundle load failed; initialize will retry', err);
+        return {
+          ctx,
+          result: { success: false, bundle: { masks: [] }, warnings: [] },
+        };
+      });
+
+    this._earlyMaskBundleLoad = { sceneId, bgPath: ctx.bgPath, promise };
+    return promise;
+  }
+
+  /**
    * Initialize a new scene from Foundry scene data
    * @param {Scene} foundryScene - Foundry VTT scene object
    * @param {number} viewportWidth - Viewport width in pixels
@@ -506,28 +632,38 @@ export class SceneComposer {
     ));
     
     let baseTexture = null;
-    let bgPath = null;
+    const maskCtx = this._resolveMaskLoadContext(foundryScene);
+    let bgPath = maskCtx.bgPath;
 
-    // Determine which source image drives suffix-mask discovery.
-    // This may be the scene background or a full-scene tile (common for layered maps).
-    const maskSourceSrc = this._resolveMaskSourceSrc(foundryScene);
-    if (maskSourceSrc) {
-      bgPath = this.extractBasePath(maskSourceSrc);
-      log.info(`Mask source: ${maskSourceSrc}`);
-      log.info(`Loading effect masks for: ${bgPath}`);
+    const profiling = { lp, doLoadProfile, spanToken, _dlp, _isDbg };
+    const earlyLoad = this._earlyMaskBundleLoad;
+    const sceneId = foundryScene?.id ? String(foundryScene.id) : null;
+    const useEarlyMaskLoad = !!(
+      earlyLoad
+      && earlyLoad.sceneId === sceneId
+      && earlyLoad.bgPath === maskCtx.bgPath
+      && earlyLoad.promise
+    );
+
+    let maskLoadPromise;
+    if (useEarlyMaskLoad) {
+      maskLoadPromise = earlyLoad.promise;
+    } else if (bgPath) {
+      maskLoadPromise = this._loadMaskBundleFromContext(
+        foundryScene,
+        maskCtx,
+        options,
+        profiling,
+      ).then((result) => ({ ctx: maskCtx, result }));
+    } else {
+      maskLoadPromise = Promise.resolve({
+        ctx: maskCtx,
+        result: { success: false, bundle: { masks: [] }, warnings: [] },
+      });
     }
 
-    // If mask source resolution failed (or a previous run discovered a good basePath),
-    // use a cached/probed basePath. This is critical for robustness during grid
-    // type changes where canvas/tile readiness can be transient.
-    if (!bgPath && this._lastMaskBasePath) {
-      bgPath = this._lastMaskBasePath;
-      log.info(`Using cached mask basePath: ${bgPath}`);
-    }
-
+    let bgTexturePromise = Promise.resolve(null);
     if (hasBackgroundImage) {
-      // Use Foundry's already-loaded background texture instead of reloading
-      // Foundry's canvas.primary.background.texture is already loaded and accessible
       if (doLoadProfile) {
         try {
           lp.begin(`sceneComposer.getFoundryBackgroundTexture:${spanToken}`);
@@ -535,9 +671,7 @@ export class SceneComposer {
         }
       }
       if (_isDbg) _dlp.begin('sc.getFoundryBgTexture', 'texture');
-      try {
-        baseTexture = await this.getFoundryBackgroundTexture(foundryScene);
-      } finally {
+      bgTexturePromise = this.getFoundryBackgroundTexture(foundryScene).finally(() => {
         if (_isDbg) _dlp.end('sc.getFoundryBgTexture');
         if (doLoadProfile) {
           try {
@@ -545,67 +679,25 @@ export class SceneComposer {
           } catch (e) {
           }
         }
-      }
-      if (!baseTexture) {
-        log.warn('Could not access Foundry background texture, using fallback');
-      }
+      });
     } else {
       log.info('Scene has no background image, using solid color fallback');
     }
-    
-    // Load effect masks if we have a background path
-    let result = { success: false, bundle: { masks: [] }, warnings: [] };
-    const enabledMaskIds = collectEnabledMaskIds(foundryScene);
 
-    if (bgPath) {
-      const prepManifest = await prepareSceneMaskManifestForLoad(foundryScene, {
-        basePath: bgPath,
-        maskSourceSrc,
-        enabledMaskIds,
-      });
+    const [resolvedBaseTexture, maskOutcome] = await Promise.all([
+      bgTexturePromise,
+      maskLoadPromise,
+    ]);
+    baseTexture = resolvedBaseTexture;
+    if (!baseTexture && hasBackgroundImage) {
+      log.warn('Could not access Foundry background texture, using fallback');
+    }
 
-      // V2-only runtime: scene bundle no longer consumes legacy _Water mask.
-      const _skipMaskIds = ['water'];
+    this._earlyMaskBundleLoad = null;
 
-      if (doLoadProfile) {
-        try {
-          lp.begin(`sceneComposer.loadAssetBundle:${spanToken}`, { basePath: bgPath });
-        } catch (e) {
-        }
-      }
-      if (_isDbg) _dlp.begin('sc.loadAssetBundle', 'texture');
-      try {
-        result = await assetLoader.loadAssetBundle(
-          bgPath,
-          (loaded, total, asset) => {
-            log.debug(`Asset loading: ${loaded}/${total} - ${asset}`);
-            try {
-              if (typeof options?.onProgress === 'function') {
-                options.onProgress(loaded, total, asset);
-              }
-            } catch (e) {
-              log.warn('Asset progress callback failed:', e);
-            }
-          },
-          {
-            skipBaseTexture: true,
-            skipMaskIds: _skipMaskIds,
-            maskManifest: prepManifest.maskManifest,
-            maskExtension: prepManifest.maskExtension,
-            maskIds: enabledMaskIds,
-            cacheKeySuffix: prepManifest.cacheKeySuffix,
-            maskConventionFallback: prepManifest.maskConventionFallback,
-          }
-        );
-      } finally {
-        if (_isDbg) _dlp.end('sc.loadAssetBundle');
-        if (doLoadProfile) {
-          try {
-            lp.end(`sceneComposer.loadAssetBundle:${spanToken}`);
-          } catch (e) {
-          }
-        }
-      }
+    let result = maskOutcome?.result ?? { success: false, bundle: { masks: [] }, warnings: [] };
+    if (maskOutcome?.ctx?.bgPath) {
+      bgPath = maskOutcome.ctx.bgPath;
     }
 
     // No alternate runtime branch: keep a single authoritative load pass from

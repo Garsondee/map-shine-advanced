@@ -45,6 +45,7 @@ const SKIP_CURTAIN_REASONS = new Set([
   'canvas-ready',
   'canvas-ready-force-resync',
   'sync-viewed-level',
+  'native-level-redraw',
   'edges-initialized',
   'scene-update',
   'refresh-level-bands',

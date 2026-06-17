@@ -135,9 +135,21 @@ import {
   disposeLevelTransitionCurtain,
 } from './manager-wiring.js';
 import { ExternalEffectsCompositor } from '../integrations/external-effects/ExternalEffectsCompositor.js';
-import { isSoundAudibleForPerspective } from './elevation-context.js';
+import { isSoundAudibleForPerspective, getPerspectiveForRenderFloorIndex, isLightVisibleForPerspective, getPerspectiveElevation } from './elevation-context.js';
 import { getFloorStackBandsSignature, getSceneBandsForFloorStack } from './levels-floor-stack-bands.js';
-import { hasV14NativeLevels, getViewedLevelBackgroundSrc, isLevelsEnabledForScene, resolveV14LevelIdToFloorStackIndex, readV14SceneLevels } from './levels-scene-flags.js';
+import {
+  hasV14NativeLevels,
+  getViewedLevelBackgroundSrc,
+  isLevelsEnabledForScene,
+  resolveV14LevelIdToFloorStackIndex,
+  readV14SceneLevels,
+  collectAmbientLightLevelIdStrings,
+  ambientLightHasExplicitV14LevelSet,
+  isAmbientLightOnV14Level,
+  getAmbientLightLevelGate,
+  resolveTargetLevelIdForAmbientLightGate,
+  readDocLevelsRange,
+} from './levels-scene-flags.js';
 import { installSnapshotStoreHooks, getSnapshot as getLevelsSnapshot } from '../core/levels-import/LevelsSnapshotStore.js';
 import { ZoneManager } from './zone-manager.js';
 import { IntroZoomEffect } from './intro-zoom-effect.js';
@@ -2611,6 +2623,223 @@ export function initialize() {
     };
 
     /**
+     * Diagnose V14 level gating for one AmbientLight (selected on canvas, or by id/name).
+     * Run on the **upper floor** while the ground-only light still bleeds — paste the
+     * returned object here for analysis.
+     *
+     * @param {{ id?: string, name?: string }} [options]
+     * @returns {object|null}
+     *
+     * @example
+     * // Select a light on the canvas, go to upper floor, then:
+     * MapShine.probeAmbientLightLevels()
+     *
+     * @example
+     * MapShine.probeAmbientLightLevels({ id: 'abc123' })
+     */
+    window.MapShine.probeAmbientLightLevels = function probeAmbientLightLevels(options = {}) {
+      const normLevelEntry = (entry) => {
+        if (entry == null) return null;
+        if (typeof entry === 'string' || typeof entry === 'number') return String(entry);
+        if (typeof entry === 'object') {
+          return String(
+            entry.id ?? entry._id ?? entry.document?.id ?? entry.document?._id ?? entry,
+          );
+        }
+        return String(entry);
+      };
+
+      const serializeLevelsField = (levels) => {
+        if (levels == null) return { kind: 'null', size: 0, raw: [], normalized: [] };
+        try {
+          if (levels instanceof Set) {
+            const raw = [...levels];
+            return {
+              kind: 'Set',
+              size: levels.size,
+              raw,
+              normalized: raw.map(normLevelEntry),
+            };
+          }
+          if (Array.isArray(levels)) {
+            return {
+              kind: 'Array',
+              size: levels.length,
+              raw: levels,
+              normalized: levels.map(normLevelEntry),
+            };
+          }
+          if (typeof levels.values === 'function') {
+            const raw = [...levels.values()];
+            return {
+              kind: 'Iterable',
+              size: raw.length,
+              raw,
+              normalized: raw.map(normLevelEntry),
+            };
+          }
+        } catch (e) {
+          return { kind: 'error', error: String(e) };
+        }
+        return { kind: typeof levels, raw: levels, normalized: [] };
+      };
+
+      const resolveDoc = () => {
+        const wantId = options.id != null ? String(options.id) : '';
+        const wantName = options.name != null ? String(options.name).toLowerCase() : '';
+
+        if (wantId) {
+          return canvas?.scene?.lights?.get?.(wantId)
+            ?? canvas?.lighting?.get?.(wantId)?.document
+            ?? null;
+        }
+
+        const controlled = canvas?.lighting?.controlled;
+        if (Array.isArray(controlled) && controlled.length > 0) {
+          return controlled[0]?.document ?? controlled[0] ?? null;
+        }
+
+        if (wantName) {
+          let found = null;
+          try {
+            canvas?.scene?.lights?.forEach?.((d) => {
+              if (found) return;
+              const n = String(d?.name ?? '').toLowerCase();
+              if (n.includes(wantName)) found = d;
+            });
+          } catch (_) {}
+          return found;
+        }
+
+        return null;
+      };
+
+      try {
+        const scene = canvas?.scene ?? null;
+        const doc = resolveDoc();
+        if (!doc) {
+          console.warn(
+            'MapShine.probeAmbientLightLevels: no light resolved. Select one on the canvas or pass { id } / { name }.',
+          );
+          return null;
+        }
+
+        const lightingEffect = window.MapShine?.lightingEffect
+          ?? window.MapShine?.floorCompositorV2?._lightingEffect
+          ?? window.MapShine?.effectComposer?._floorCompositorV2?._lightingEffect
+          ?? null;
+
+        const lightId = String(doc.id ?? doc._id ?? '');
+        let threeSource = null;
+        if (lightingEffect?._lights?.get) {
+          threeSource = lightingEffect._lights.get(lightId)
+            ?? lightingEffect._lights.get(`Scene.${lightId}`)
+            ?? null;
+        }
+
+        const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+        const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+        const sceneBands = readV14SceneLevels(scene);
+        const perspectiveNow = getPerspectiveElevation();
+        const collectedIds = collectAmbientLightLevelIdStrings(doc);
+        const hasExplicitSet = ambientLightHasExplicitV14LevelSet(doc);
+        const levelsRange = readDocLevelsRange(doc);
+
+        const perFloor = floors.map((floor, fi) => {
+          const pOverride = getPerspectiveForRenderFloorIndex(fi);
+          const gateOpts = {};
+          if (pOverride?.levelId) gateOpts.targetLevelId = pOverride.levelId;
+          else if (Number.isFinite(pOverride?.floorIndex)) gateOpts.renderFloorIndex = pOverride.floorIndex;
+
+          const targetLevelId = resolveTargetLevelIdForAmbientLightGate(scene, gateOpts);
+          const levelGate = getAmbientLightLevelGate(doc, scene, gateOpts);
+          const onLevel = targetLevelId ? isAmbientLightOnV14Level(doc, targetLevelId) : null;
+          const visibleForPerspective = isLightVisibleForPerspective(doc, pOverride);
+
+          let includedInLevel = null;
+          if (typeof doc.includedInLevel === 'function' && targetLevelId) {
+            try { includedInLevel = doc.includedInLevel(targetLevelId); } catch (e) {
+              includedInLevel = `error: ${e}`;
+            }
+          }
+
+          return {
+            floorIndex: fi,
+            elevationMin: floor.elevationMin,
+            elevationMax: floor.elevationMax,
+            floorStackLevelId: floor.levelId ?? null,
+            perspective: pOverride,
+            targetLevelId,
+            levelGate,
+            isAmbientLightOnV14Level: onLevel,
+            includedInLevel_api: includedInLevel,
+            isLightVisibleForPerspective: visibleForPerspective,
+            isActiveFloor: activeFloor?.index === fi,
+          };
+        });
+
+        const report = {
+          probedAt: new Date().toISOString(),
+          scene: {
+            id: scene?.id ?? null,
+            name: scene?.name ?? null,
+            hasV14NativeLevels: hasV14NativeLevels(scene),
+            canvasLevelId: canvas?.level?.id ?? null,
+            activeLevelContext: window.MapShine?.activeLevelContext ?? null,
+          },
+          light: {
+            id: lightId,
+            name: doc.name ?? '',
+            x: doc.x,
+            y: doc.y,
+            elevation: doc.elevation,
+            hidden: doc.hidden === true,
+            negative: !!(doc.config?.negative || doc.negative),
+            levelsField: serializeLevelsField(doc.levels),
+            sourceLevels: serializeLevelsField(doc._source?.levels),
+            collectedLevelIds: collectedIds,
+            ambientLightHasExplicitV14LevelSet: hasExplicitSet,
+            readDocLevelsRange: levelsRange,
+            flagsLevels: doc.flags?.levels ?? null,
+          },
+          mapShineRuntime: {
+            activeFloorIndex: activeFloor?.index ?? null,
+            renderFloorIndexForLights: lightingEffect?._renderFloorIndexForLights ?? null,
+            stackedLightActive: lightingEffect?._stackedLightActive ?? null,
+            stackedLightLayerCount: lightingEffect?._stackedLightLayerCount ?? null,
+            lightRtContentFloor: lightingEffect?._lightRtContentFloor ?? null,
+            threeMeshVisible: threeSource?.mesh?.visible ?? null,
+            threeCachedDocId: threeSource?._cachedDoc?.id ?? null,
+            threeCachedDocLevelsSize: threeSource?._cachedDoc?.levels?.size ?? null,
+          },
+          perspectiveNow,
+          sceneLevelBands: sceneBands,
+          perFloorGating: perFloor,
+        };
+
+        console.group(`MapShine.probeAmbientLightLevels — "${report.light.name || lightId}"`);
+        console.log('Full report (copy this object):', report);
+        console.table(perFloor.map((row) => ({
+          floor: row.floorIndex,
+          band: `${row.elevationMin}–${row.elevationMax}`,
+          targetLevelId: row.targetLevelId,
+          gateOk: row.levelGate?.ok,
+          skipLegacyLos: row.levelGate?.skipLegacyLosMasking,
+          onV14Level: row.isAmbientLightOnV14Level,
+          includedInLevel: row.includedInLevel_api,
+          visibleForPerspective: row.isLightVisibleForPerspective,
+          active: row.isActiveFloor ? '★' : '',
+        })));
+        console.groupEnd();
+
+        return report;
+      } catch (e) {
+        console.error('MapShine.probeAmbientLightLevels:', e);
+        return null;
+      }
+    };
+
+    /**
      * GM: delete every embedded AmbientLight on the **current** scene (including darkness
      * sources that are still AmbientLight documents). Requires explicit confirm string.
      * @param {{ confirm?: string }} [options] — pass `{ confirm: 'DELETE_ALL_AMBIENT_LIGHTS' }`
@@ -3290,6 +3519,8 @@ export function initialize() {
         let pathChanged = false;
         let masksRecomposed = false;
 
+        let warmBandRevisit = false;
+
         if (hasV14NativeLevels(canvas?.scene) && sc && bus && fd) {
           const viewedBgSrc = getViewedLevelBackgroundSrc(canvas.scene);
           const currentBasePath = sc._lastMaskBasePath ?? sc.extractBasePath?.(
@@ -3302,10 +3533,19 @@ export function initialize() {
             ?? null;
           pathChanged = !!(viewedBgSrc && newBasePath && newBasePath !== currentBasePath);
           const levelChanged = !!(levelId && levelId !== sc._lastV14BusBgLevelId);
+          warmBandRevisit = !!(
+            activeBandKey
+            && !pathChanged
+            && compositor?.isBandWarmForOutdoorsStack?.(activeBandKey, sceneDoc)
+          );
 
           // Path-only swap misses the common case where two levels share the same image file
           // (same basePath) but Foundry's viewed composite was stale on first paint.
-          if (viewedBgSrc && newBasePath && (pathChanged || levelChanged)) {
+          // On warm revisits (e.g. ground → upper → ground) tearing down every
+          // `__bg_image__*` entry and reloading the full visible stack leaves the
+          // curtain stuck in "Warming up" while `_populateComplete` still reads true.
+          const needsBgSwap = pathChanged || (levelChanged && !warmBandRevisit);
+          if (viewedBgSrc && newBasePath && needsBgSwap) {
             if (pathChanged) {
               log.info(`Level background changed: ${currentBasePath} → ${newBasePath}`);
             } else if (levelChanged) {
@@ -3341,14 +3581,23 @@ export function initialize() {
             }
 
             didV14Resync = true;
+          } else if (levelChanged && levelId) {
+            sc._lastV14BusBgLevelId = levelId;
+            if (warmBandRevisit) {
+              log.debug(
+                `Level revisit: skipping bus bg swap for warm band ${activeBandKey} (art unchanged)`,
+              );
+            }
           }
         }
 
-        const warmBandRevisit = !!(
-          activeBandKey
-          && !pathChanged
-          && compositor?.isBandWarmForOutdoorsStack?.(activeBandKey, sceneDoc)
-        );
+        if (!warmBandRevisit) {
+          warmBandRevisit = !!(
+            activeBandKey
+            && !pathChanged
+            && compositor?.isBandWarmForOutdoorsStack?.(activeBandKey, sceneDoc)
+          );
+        }
         suppressFloorPreloadAfterLevelChange(warmBandRevisit ? 1500 : 10000);
 
         // Proactively (re)compose the newly active band's per-floor mask
@@ -3472,6 +3721,14 @@ export function initialize() {
             log.info(
               'Level change: skipping forceRepopulate (cached masks, art unchanged)',
             );
+          }
+        }
+
+        if (didV14Resync && bus && typeof bus.awaitBackgroundStreamingReady === 'function') {
+          try {
+            await bus.awaitBackgroundStreamingReady();
+          } catch (bgErr) {
+            log.debug('Level change: awaitBackgroundStreamingReady failed', bgErr);
           }
         }
 
@@ -7517,6 +7774,22 @@ async function createThreeCanvas(scene, createOptions = {}) {
     }
     
     const viewport = _resolveInitialViewportCssPixels(threeCanvas);
+
+    if (!sceneComposer) {
+      sceneComposer = new SceneComposer();
+    }
+    safeCall(() => {
+      sceneComposer.startEarlyMaskBundleLoad(scene, {
+        onProgress: (loaded, total) => {
+          safeCall(() => {
+            const denom = total > 0 ? total : 1;
+            const v = Math.max(0, Math.min(1, loaded / denom));
+            loadingOverlay.setStage('assets.load', v, formatTextureLoadMessage(loaded, total), { keepAuto: true });
+          }, 'overlay.assetProgress.early', Severity.COSMETIC);
+        },
+      });
+    }, 'sceneComposer.earlyMaskLoad', Severity.DEGRADED);
+
     // Avoid setSize() overwriting our CSS sizing (width/height=100%).
     // If updateStyle=true, three will set style width/height to fixed pixel values,
     // preventing future container resizes from affecting the canvas element.
@@ -7651,7 +7924,9 @@ async function createThreeCanvas(scene, createOptions = {}) {
     dlp.event('sceneComposer: BEGIN ->-> loading masks + textures');
     stepLog(' -> Step: sceneComposer.initialize (loading masks + textures)');
 
-    sceneComposer = new SceneComposer();
+    if (!sceneComposer) {
+      sceneComposer = new SceneComposer();
+    }
     if (doLoadProfile) safeCall(() => lp.begin('sceneComposer.initialize'), 'lp.begin', Severity.COSMETIC);
     const { scene: threeScene, camera, bundle } = await sceneComposer.initialize(
       scene,

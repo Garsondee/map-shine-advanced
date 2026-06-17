@@ -16,6 +16,7 @@ import { createLogger } from '../core/log.js';
 import { getShaderCompileMonitor } from '../core/diagnostics/ShaderCompileMonitor.js';
 import { loadingOverlay } from '../ui/loading-overlay.js';
 import * as sceneSettings from '../settings/scene-settings.js';
+import { getTileStreamingManager } from '../streaming/tile-streaming-manager.js';
 
 const log = createLogger('LevelTransitionCurtain');
 
@@ -40,6 +41,8 @@ const FRAME_INPUTS_TIMEOUT_MS = 8000;
 const COMPILED_PROGRAMS_STABLE_POLLS = 6;
 const FRAME_INPUTS_STABLE_POLLS = 6;
 const READINESS_POLL_MS = 50;
+/** Max time to prefetch streamed background cells while the curtain is up. */
+const STREAMING_PREFETCH_TIMEOUT_MS = 2500;
 
 /** @type {{ proto: object, original: Function }|null} */
 let _sceneViewLevelWrapperRestore = null;
@@ -409,30 +412,35 @@ export class LevelTransitionCurtain {
       iterations += 1;
     }
 
-    // 5. Wait for real readiness signals (NOT a fixed timer).
-    try {
-      await this._waitForLevelReady(pipelineStartMs);
-    } catch (err) {
-      log.warn('_waitForLevelReady failed', err);
-    }
+    // 5. Wait for real readiness signals (NOT a fixed timer). Re-run when a
+    // coalesced perform lands mid-wait so we never fade in on a stale floor.
+    // Always reuse pipelineStartMs so HARD_CAP_BLACK_MS is one absolute budget
+    // for the whole curtain — not reset per late perform (which could stall 200s+).
+    let readinessPasses = 0;
+    const MAX_READINESS_PASSES = MAX_PERFORM_ITERATIONS + 2;
+    while (readinessPasses < MAX_READINESS_PASSES && !this._disposed) {
+      let waitResult = { ready: false, targetChanged: false };
+      try {
+        waitResult = await this._waitForLevelReady(pipelineStartMs);
+      } catch (err) {
+        log.warn('_waitForLevelReady failed', err);
+      }
+      readinessPasses += 1;
 
-    // 6. Handle any performs that arrived during the readiness wait — each
-    // is the user requesting another switch while we were already black.
-    // We re-wait after each so we never fade in on a stale state.
-    while (this._latestPerform && iterations < MAX_PERFORM_ITERATIONS && !this._disposed) {
-      const p = this._latestPerform;
-      this._latestPerform = null;
-      try {
-        await p();
-      } catch (err) {
-        log.warn('late perform threw', err);
+      if (!this._latestPerform) break;
+
+      while (this._latestPerform && iterations < MAX_PERFORM_ITERATIONS && !this._disposed) {
+        const p = this._latestPerform;
+        this._latestPerform = null;
+        try {
+          await p();
+        } catch (err) {
+          log.warn('late perform threw', err);
+        }
+        iterations += 1;
       }
-      try {
-        await this._waitForLevelReady(performance.now());
-      } catch (err) {
-        log.warn('late _waitForLevelReady failed', err);
-      }
-      iterations += 1;
+
+      if (!waitResult?.targetChanged && !this._latestPerform) break;
     }
 
     // 7. Final render kick so the first frame after fade-in is current.
@@ -596,6 +604,9 @@ export class LevelTransitionCurtain {
     if (targetChanged()) return { ready: false, targetChanged: true };
 
     this._setStage('compositor', 1);
+
+    await this._prefetchStreamingDuringTransition(remaining());
+    if (targetChanged()) return { ready: false, targetChanged: true };
 
     this._setStage('warmup', 0.2);
     await this._awaitFloorCompositorPopulate(
@@ -787,15 +798,17 @@ export class LevelTransitionCurtain {
     if (!fc) return;
 
     const deadline = performance.now() + Math.max(50, timeoutMs);
-    let sawIncomplete = fc._populateComplete !== true || fc._busPopulated === false;
+
+    // Warm floor revisit: levelMaskRebuild often skips forceRepopulate, so the
+    // compositor is already settled. The old sawIncomplete guard spun here for
+    // the full timeout because settled && !sawIncomplete never returned early.
+    if (fc._populateComplete === true && fc._busPopulated !== false) {
+      return;
+    }
 
     while (performance.now() < deadline && !this._disposed) {
-      if (fc._populateComplete !== true || fc._busPopulated === false) {
-        sawIncomplete = true;
-      }
-
       const settled = fc._populateComplete === true && fc._busPopulated !== false;
-      if (settled && sawIncomplete) return;
+      if (settled) return;
 
       if (fc._populatePromise) {
         try {
@@ -840,6 +853,36 @@ export class LevelTransitionCurtain {
   }
 
   /**
+   * Prefetch streamed background cells while the curtain is black so decode
+   * overlaps mask rebuild instead of starting only after reveal.
+   *
+   * @param {number} budgetMs
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _prefetchStreamingDuringTransition(budgetMs) {
+    const streaming = getTileStreamingManager?.();
+    if (!streaming?.hasActiveStreaming?.()) return;
+
+    const timeoutMs = Math.max(
+      50,
+      Math.min(
+        STREAMING_PREFETCH_TIMEOUT_MS,
+        Math.floor(Number(budgetMs) || STREAMING_PREFETCH_TIMEOUT_MS),
+      ),
+    );
+
+    try {
+      await streaming.prefetchDuringLevelTransitionAsync({
+        timeoutMs,
+        minSteps: 4,
+      });
+    } catch (err) {
+      log.debug('Streaming prefetch failed during level transition', err);
+    }
+  }
+
+  /**
    * Pump compositor frames synchronously so lazy init continues while the
    * curtain is up (mirrors createThreeCanvas hidden-tab load pumps).
    *
@@ -851,7 +894,12 @@ export class LevelTransitionCurtain {
     const rl = window.MapShine?.renderLoop;
     if (!rl) return;
 
+    const streaming = getTileStreamingManager?.();
+
     for (let i = 0; i < n; i++) {
+      try {
+        streaming?.pumpStreamingSync?.();
+      } catch (_) {}
       try {
         if (typeof rl.pumpBackgroundLoadFrame === 'function') {
           rl.pumpBackgroundLoadFrame();

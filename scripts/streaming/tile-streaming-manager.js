@@ -326,6 +326,84 @@ export class TileStreamingManager {
 
   /** Per-frame sync — call after camera update. */
   update() {
+    this._runStreamingSync(false);
+  }
+
+  /**
+   * Whether any background or region streaming grids are registered.
+   * @returns {boolean}
+   */
+  hasActiveStreaming() {
+    return this._grids.size > 0 || this._regionGrids.size > 0;
+  }
+
+  /**
+   * End the post-floor-change decode pause so sync can resume immediately.
+   */
+  resumeAfterFloorTransition() {
+    this._floorTransitionUntil = 0;
+    this._lastViewRectSig = '';
+  }
+
+  /**
+   * Drive one forced streaming sync (used while the level curtain is up).
+   */
+  pumpStreamingSync() {
+    this.resumeAfterFloorTransition();
+    this._runStreamingSync(true);
+  }
+
+  /**
+   * While the level-transition curtain is black, resume tile decode and pump
+   * streaming sync until visible cells settle or the budget elapses.
+   *
+   * @param {object} [options]
+   * @param {number} [options.timeoutMs=2000]
+   * @param {number} [options.minSteps=4]
+   * @returns {Promise<boolean>} True when visible cells have no pending work.
+   */
+  async prefetchDuringLevelTransitionAsync(options = {}) {
+    if (!this.hasActiveStreaming()) return true;
+
+    const timeoutMs = Math.max(
+      50,
+      Math.min(8000, Number(options.timeoutMs) || 2000),
+    );
+    const minSteps = Math.max(1, Math.min(32, Math.floor(Number(options.minSteps) || 4)));
+    const deadline = performance.now() + timeoutMs;
+
+    this.resumeAfterFloorTransition();
+
+    let steps = 0;
+    while (performance.now() < deadline) {
+      this._runStreamingSync(true);
+      steps += 1;
+
+      const padding = this.getViewPaddingOptions();
+      const view = resolveStreamingViewRect(padding);
+      if (view && steps >= minSteps) {
+        const zoom = Number(window.MapShine?.sceneComposer?.currentZoom) || 1;
+        const budget = getTextureBudgetTracker();
+        const mp = estimateSceneMegapixels();
+        const lod = selectLodFromZoom(zoom, budget.getMaxLodLevel(), mp);
+        if (!this._hasPendingCellWork(view, lod)) {
+          log.debug('Streaming prefetch settled during level transition', { steps });
+          return true;
+        }
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 32));
+    }
+
+    log.debug('Streaming prefetch timed out during level transition', { steps });
+    return false;
+  }
+
+  /**
+   * @param {boolean} [force=false] When true, sync even during floor transition pause.
+   * @private
+   */
+  _runStreamingSync(force = false) {
     if (!this._enabled) return;
     if (this._grids.size === 0 && this._regionGrids.size === 0) return;
 
@@ -334,7 +412,7 @@ export class TileStreamingManager {
     const view = resolveStreamingViewRect(padding);
     if (!view) return;
 
-    const inFloorTransition = performance.now() < this._floorTransitionUntil;
+    const inFloorTransition = !force && performance.now() < this._floorTransitionUntil;
     const viewPlausible = viewRectIntersectsScene(view);
     if (inFloorTransition || !viewPlausible) {
       if (viewPlausible) {
@@ -380,11 +458,11 @@ export class TileStreamingManager {
     const viewRectSig = this._buildViewRectSig(view, lod);
     const viewChanged = viewRectSig !== this._lastViewRectSig;
     const pendingWork = this._hasPendingCellWork(view, lod);
-    const syncOptions = { sharpenOnZoom: lodChanged, isPanning: this._isPanning };
+    const syncOptions = { sharpenOnZoom: lodChanged || force, isPanning: force ? false : this._isPanning };
     const globalInflightCap = this._globalInflightCap();
     const globalInflight = this._totalInflightLoads();
 
-    if (lodChanged || viewChanged || pendingWork) {
+    if (lodChanged || viewChanged || pendingWork || force) {
       if (lodChanged) {
         this._lastStreamLod = lod;
         for (const grid of this._grids.values()) {
@@ -394,7 +472,7 @@ export class TileStreamingManager {
           grid.notifyZoomLod?.(lod);
         }
       }
-      if (viewChanged) this._lastViewRectSig = viewRectSig;
+      if (viewChanged || force) this._lastViewRectSig = viewRectSig;
       if (globalInflight < globalInflightCap) {
         for (const grid of this._grids.values()) {
           void grid.syncToView(view, lod, syncOptions);

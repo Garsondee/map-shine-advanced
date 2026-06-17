@@ -877,6 +877,238 @@ export function readDocLevelsRange(doc) {
 const FOUNDRY_SCENE_DEFAULT_LEVEL_PLACEHOLDER_ID = 'defaultLevel0000';
 
 /**
+ * Collect V14 level id strings authored on an AmbientLight document.
+ * @param {object|null|undefined} doc
+ * @returns {string[]}
+ */
+export function collectAmbientLightLevelIdStrings(doc) {
+  const docObj = doc?.document ?? doc;
+  if (!docObj) return [];
+
+  const cfg = docObj.config && typeof docObj.config === 'object' ? docObj.config : {};
+  const levelsSources = [
+    docObj.levels,
+    docObj?._source?.levels,
+    docObj?.light?.levels,
+    docObj?.document?.light?.levels,
+    cfg.levels,
+    cfg?.light?.levels,
+    docObj?.flags?.levels?.levels,
+    docObj?.flags?.levels?.inclusive,
+  ];
+
+  /** @type {string[]} */
+  const arr = [];
+  const pushId = (raw) => {
+    if (raw == null) return;
+    if (typeof raw === 'string' || typeof raw === 'number') {
+      const s = String(raw).trim();
+      if (s) arr.push(s);
+      return;
+    }
+    if (typeof raw === 'object') {
+      const id =
+        raw?.id
+        ?? raw?._id
+        ?? raw?.document?.id
+        ?? raw?.document?._id
+        ?? null;
+      if (id != null) {
+        const s = String(id).trim();
+        if (s) arr.push(s);
+      }
+    }
+  };
+  const pushFromShape = (src) => {
+    if (!src) return;
+    if (Array.isArray(src)) {
+      for (const v of src) pushFromShape(v);
+      return;
+    }
+    if (typeof src === 'string' || typeof src === 'number') {
+      pushId(src);
+      return;
+    }
+    if (src instanceof Set) {
+      for (const v of src.values()) pushFromShape(v);
+      return;
+    }
+    if (src instanceof Map) {
+      for (const [k, v] of src.entries()) {
+        pushFromShape(k);
+        if (v === true || v === 1 || v === '1') pushFromShape(k);
+        else pushFromShape(v);
+      }
+      return;
+    }
+    if (typeof src.forEach === 'function') {
+      src.forEach((v) => pushFromShape(v));
+      return;
+    }
+    if (typeof src === 'object') {
+      for (const [k, v] of Object.entries(src)) {
+        if (v === true || v === 1 || v === '1') pushId(k);
+      }
+      pushId(src);
+    }
+  };
+
+  try {
+    for (const src of levelsSources) {
+      if (!src) continue;
+      pushFromShape(src);
+    }
+  } catch (_) {}
+
+  return arr;
+}
+
+/**
+ * True when an AmbientLight explicitly lists one or more V14 levels (dropdown),
+ * excluding placeholder-only legacy ids.
+ * @param {object|null|undefined} doc
+ * @returns {boolean}
+ */
+export function ambientLightHasExplicitV14LevelSet(doc) {
+  const docObj = doc?.document ?? doc;
+  if (docObj?.levels?.size > 0) return true;
+
+  const srcLevels = docObj?._source?.levels;
+  if (Array.isArray(srcLevels) && srcLevels.length > 0) return true;
+  if (srcLevels instanceof Set && srcLevels.size > 0) return true;
+
+  const trimmed = collectAmbientLightLevelIdStrings(doc)
+    .map((s) => String(s ?? '').trim())
+    .filter(Boolean);
+  if (!trimmed.length) return false;
+
+  return !trimmed.every((s) => s === FOUNDRY_SCENE_DEFAULT_LEVEL_PLACEHOLDER_ID);
+}
+
+/**
+ * Normalize a V14 `levels` Set entry (string id or Level document) to a level id string.
+ * @param {unknown} entry
+ * @returns {string|null}
+ */
+function normalizeLevelIdFromSetEntry(entry) {
+  if (entry == null) return null;
+  if (typeof entry === 'string' || typeof entry === 'number') {
+    const s = String(entry).trim();
+    return s.length > 0 ? s : null;
+  }
+  if (typeof entry === 'object') {
+    const id = entry.id ?? entry._id ?? entry.document?.id ?? entry.document?._id;
+    if (id != null) {
+      const s = String(id).trim();
+      return s.length > 0 ? s : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether an AmbientLight applies to a V14 level (Foundry `levels` dropdown).
+ * Non-empty `levels` is exclusive — empty means global (all levels).
+ *
+ * Uses **set membership** only. Do not delegate to {@link BaseCanvasDocument#includedInLevel}:
+ * that API encodes inter-level visibility (stairs/openings), not which levels were
+ * checked in the light's Levels dropdown.
+ *
+ * @param {object|null|undefined} doc
+ * @param {string|null|undefined} levelId
+ * @returns {boolean}
+ */
+export function isAmbientLightOnV14Level(doc, levelId) {
+  const docObj = doc?.document ?? doc;
+  if (!docObj || !levelId) return true;
+
+  const target = String(levelId).trim();
+  if (!target) return true;
+
+  if (!ambientLightHasExplicitV14LevelSet(doc)) {
+    return true;
+  }
+
+  const scene = globalThis.canvas?.scene ?? null;
+  const rawIds = collectAmbientLightLevelIdStrings(doc)
+    .map((s) => String(s ?? '').trim())
+    .filter(Boolean);
+  const expanded = expandFoundryDefaultLevelPlaceholderIds(scene, rawIds);
+  if (expanded.length > 0) {
+    return expanded.some((id) => String(id) === target);
+  }
+
+  const levelsSet = docObj.levels;
+  if (levelsSet?.size > 0) {
+    if (typeof levelsSet.has === 'function' && levelsSet.has(target)) return true;
+    for (const entry of levelsSet) {
+      const eid = normalizeLevelIdFromSetEntry(entry);
+      if (eid && String(eid) === target) return true;
+    }
+    return false;
+  }
+
+  const srcLevels = docObj?._source?.levels;
+  if (Array.isArray(srcLevels) && srcLevels.length > 0) {
+    return srcLevels.some((id) => String(id) === target);
+  }
+
+  return false;
+}
+
+/**
+ * Resolve the V14 Level document id that ambient-light gating should test against.
+ * Prefers an explicit render-floor index (per-level compositor passes), then the
+ * active navigation context, then the canvas viewed level.
+ *
+ * @param {Scene|null|undefined} scene
+ * @param {{ targetLevelId?: string|null, renderFloorIndex?: number|null }} [options]
+ * @returns {string|null}
+ */
+export function resolveTargetLevelIdForAmbientLightGate(scene, options = {}) {
+  if (typeof options.targetLevelId === 'string' && options.targetLevelId.length > 0) {
+    return options.targetLevelId;
+  }
+
+  const renderFloorIndex = Number(options.renderFloorIndex);
+  if (Number.isFinite(renderFloorIndex)) {
+    const fi = Math.max(0, Math.floor(renderFloorIndex));
+    const floors = globalThis.window?.MapShine?.floorStack?.getFloors?.() ?? [];
+    const floor = floors[fi];
+    const fromStack = floor?.levelId;
+    if (typeof fromStack === 'string' && fromStack.length > 0) return fromStack;
+
+    if (floor && scene) {
+      const lo = Number(floor.elevationMin);
+      const hi = Number(floor.elevationMax);
+      const bands = readV14SceneLevels(scene);
+      for (const band of bands) {
+        if (Number(band.bottom) === lo && Number(band.top) === hi && band.levelId) {
+          return String(band.levelId);
+        }
+      }
+      if (bands[fi]?.levelId) return String(bands[fi].levelId);
+    }
+  }
+
+  try {
+    if (globalThis.canvas?.scene?.id === scene?.id) {
+      const canvasLevelId = globalThis.canvas?.level?.id ?? null;
+      if (typeof canvasLevelId === 'string' && canvasLevelId.length > 0) return canvasLevelId;
+    }
+  } catch (_) {}
+
+  const msCtx = globalThis.window?.MapShine?.activeLevelContext ?? null;
+  const ctxLevelId = msCtx?.levelId ?? null;
+  if (typeof ctxLevelId === 'string' && ctxLevelId.length > 0) return ctxLevelId;
+
+  const viewed = getViewedV14Level(scene);
+  if (viewed?.levelId) return viewed.levelId;
+
+  return null;
+}
+
+/**
  * Expand Foundry placeholder level ids on AmbientLight docs to real Level document ids.
  * Lights may still store `defaultLevel0000` while `scene.levels` uses UUIDs.
  *
@@ -935,14 +1167,40 @@ function expandFoundryDefaultLevelPlaceholderIds(scene, ids) {
  *
  * @param {object|null|undefined} doc - AmbientLight document or plain object
  * @param {object|null|undefined} scene - Foundry Scene document
+ * @param {{ targetLevelId?: string|null, renderFloorIndex?: number|null }} [options]
  * @returns {{ ok: boolean, skipLegacyLosMasking: boolean }}
  */
-export function getAmbientLightLevelGate(doc, scene) {
+export function getAmbientLightLevelGate(doc, scene, options = {}) {
   const sorted = scene?.levels?.sorted;
   if (!Array.isArray(sorted) || sorted.length <= 1) {
     return { ok: true, skipLegacyLosMasking: false };
   }
   if (!doc) return { ok: true, skipLegacyLosMasking: false };
+
+  const docObj = doc?.document ?? doc;
+
+  const trimmedLevelIds = collectAmbientLightLevelIdStrings(doc)
+    .map((s) => String(s ?? '').trim())
+    .filter(Boolean);
+  const placeholderOnly = trimmedLevelIds.length > 0
+    && trimmedLevelIds.every((s) => s === FOUNDRY_SCENE_DEFAULT_LEVEL_PLACEHOLDER_ID);
+  if (placeholderOnly) {
+    const targetLevelId = resolveTargetLevelIdForAmbientLightGate(scene, options);
+    if (!targetLevelId) {
+      return { ok: true, skipLegacyLosMasking: true };
+    }
+    const expanded = expandFoundryDefaultLevelPlaceholderIds(scene, trimmedLevelIds);
+    const ok = expanded.some((id) => String(id) === String(targetLevelId));
+    return { ok, skipLegacyLosMasking: true };
+  }
+
+  const targetLevelId = resolveTargetLevelIdForAmbientLightGate(scene, options);
+  if (targetLevelId && ambientLightHasExplicitV14LevelSet(doc)) {
+    return {
+      ok: isAmbientLightOnV14Level(docObj, targetLevelId),
+      skipLegacyLosMasking: true,
+    };
+  }
 
   const msCtx = (typeof window !== 'undefined' && window.MapShine?.activeLevelContext) || null;
 
@@ -991,20 +1249,6 @@ export function getAmbientLightLevelGate(doc, scene) {
   const safeIdx = Number.isFinite(levelIndex) ? levelIndex : sorted.indexOf(Lv);
   const idxForNext = safeIdx >= 0 ? safeIdx : 0;
 
-  const levelIdsTarget = new Set(
-    [
-      Lv?.id,
-      Lv?._id,
-      Lv?.uuid,
-      Lv?.document?.id,
-      Lv?.document?._id,
-      Lv?.document?.uuid,
-      safeIdx >= 0 ? safeIdx : null,
-    ]
-      .map((v) => (v == null ? '' : String(v).trim()))
-      .filter(Boolean),
-  );
-
   const readFinite = (v) => {
     const n = Number(v);
     return Number.isFinite(n) ? n : null;
@@ -1031,94 +1275,15 @@ export function getAmbientLightLevelGate(doc, scene) {
   const levelBottom = readBandBottom(Lv);
   const levelTop = readBandTop(Lv, sorted[idxForNext + 1]);
 
-  const cfg = doc?.config && typeof doc.config === 'object' ? doc.config : {};
-  const levelsSources = [
-    doc.levels,
-    doc?.light?.levels,
-    doc?.document?.light?.levels,
-    cfg.levels,
-    cfg?.light?.levels,
-    doc?.flags?.levels?.levels,
-    doc?.flags?.levels?.inclusive,
-  ];
-  /** @type {string[]} */
-  const arr = [];
-  const pushId = (raw) => {
-    if (raw == null) return;
-    if (typeof raw === 'string' || typeof raw === 'number') {
-      const s = String(raw).trim();
-      if (s) arr.push(s);
-      return;
-    }
-    if (typeof raw === 'object') {
-      const id =
-        raw?.id
-        ?? raw?._id
-        ?? raw?.document?.id
-        ?? raw?.document?._id
-        ?? null;
-      if (id != null) {
-        const s = String(id).trim();
-        if (s) arr.push(s);
-      }
-    }
-  };
-  const pushFromShape = (src) => {
-    if (!src) return;
-    if (Array.isArray(src)) {
-      for (const v of src) pushFromShape(v);
-      return;
-    }
-    if (typeof src === 'string' || typeof src === 'number') {
-      pushId(src);
-      return;
-    }
-    if (src instanceof Set) {
-      for (const v of src.values()) pushFromShape(v);
-      return;
-    }
-    if (src instanceof Map) {
-      for (const [k, v] of src.entries()) {
-        pushFromShape(k);
-        if (v === true || v === 1 || v === '1') pushFromShape(k);
-        else pushFromShape(v);
-      }
-      return;
-    }
-    if (typeof src.forEach === 'function') {
-      src.forEach((v) => pushFromShape(v));
-      return;
-    }
-    if (typeof src === 'object') {
-      for (const [k, v] of Object.entries(src)) {
-        if (v === true || v === 1 || v === '1') pushId(k);
-      }
-      pushId(src);
-    }
-  };
-  try {
-    for (const src of levelsSources) {
-      if (!src) continue;
-      pushFromShape(src);
-    }
-  } catch (_) {}
+  const arrForMatch = expandFoundryDefaultLevelPlaceholderIds(
+    scene,
+    collectAmbientLightLevelIdStrings(doc),
+  );
+  const gateLevelId = targetLevelId ?? resolveTargetLevelIdForAmbientLightGate(scene, options);
 
-  // Lights may list only `defaultLevel0000` (Scene.metadata.defaultLevelId) after migration from
-  // single-level scenes. Expanding that to initialLevel + sorted[0] breaks as soon as the user
-  // changes the scene default or views another floor — those ids are not "every legacy level".
-  // Until authors pick real Level UUIDs in the light config, treat placeholder-only as unscoped.
-  const trimmedLevelIds = arr.map((s) => String(s ?? '').trim()).filter(Boolean);
-  const placeholderOnly = trimmedLevelIds.length > 0
-    && trimmedLevelIds.every((s) => s === FOUNDRY_SCENE_DEFAULT_LEVEL_PLACEHOLDER_ID);
-  if (placeholderOnly) {
-    return { ok: true, skipLegacyLosMasking: true };
-  }
-
-  const arrForMatch = expandFoundryDefaultLevelPlaceholderIds(scene, arr);
-
-  if (arrForMatch.length > 0 && levelIdsTarget.size > 0) {
+  if (arrForMatch.length > 0 && gateLevelId) {
     for (const id of arrForMatch) {
-      if (levelIdsTarget.has(String(id))) {
+      if (String(id) === String(gateLevelId)) {
         return { ok: true, skipLegacyLosMasking: true };
       }
     }
@@ -1134,7 +1299,12 @@ export function getAmbientLightLevelGate(doc, scene) {
   const targetBottom = levelBottom ?? -Infinity;
   const targetTop = levelTop ?? Infinity;
   const sourceBottom = lightBottom ?? -Infinity;
-  const sourceTop = lightTop ?? Infinity;
+  let sourceTop = lightTop;
+  if (sourceTop == null && lightBottom != null) {
+    sourceTop = lightBottom;
+  } else if (sourceTop == null) {
+    sourceTop = Infinity;
+  }
   const overlap = sourceBottom < targetTop && sourceTop >= targetBottom;
   return { ok: overlap, skipLegacyLosMasking: false };
 }

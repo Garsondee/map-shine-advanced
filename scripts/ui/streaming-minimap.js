@@ -13,7 +13,7 @@ import {
 } from '../streaming/view-projection-service.js';
 import { getImageCellsForWorldView, imageCellToWorldBounds } from '../streaming/streamed-background-grid.js';
 import { getTileStreamingManager } from '../streaming/tile-streaming-manager.js';
-import { lodPixelSize } from '../streaming/streaming-grid.js';
+import { lodPixelSize, selectLodFromZoom } from '../streaming/streaming-grid.js';
 import { fetchSourceImageMeta, loadFallbackTexture } from '../streaming/texture-pyramid-builder.js';
 import { estimateSceneMegapixels } from '../streaming/texture-budget-policy.js';
 import {
@@ -21,11 +21,22 @@ import {
   resolveBudgetState,
   resolveRecommendedTileSize,
 } from '../assets/TextureBudgetTracker.js';
+import {
+  buildTileStreamingReport,
+  buildCompositorPopulateSnapshot,
+  copyTileStreamingReportToClipboard,
+} from './tile-streaming-report.js';
 
 const log = createLogger('StreamingMinimap');
 
 /** @type {StreamingMinimap|null} */
 let _instance = null;
+
+/** Minimum ms between full report rebuilds during live update. */
+const REPORT_REFRESH_MS = 1000;
+
+/** Minimum ms between dashboard DOM refreshes (live summary still updates here). */
+const DASHBOARD_REFRESH_MS = 500;
 
 const STATE_COLORS = {
   'resident-hi': 'rgba(34,197,94,0.82)',
@@ -35,6 +46,16 @@ const STATE_COLORS = {
   hidden: 'rgba(251,146,60,0.6)',
   culled: 'rgba(71,85,105,0.35)',
   unknown: 'rgba(148,163,184,0.45)',
+};
+
+const STATE_LABELS = {
+  'resident-hi': 'Resident hi',
+  'resident-lo': 'Resident lo',
+  'fallback-only': 'Fallback only',
+  loading: 'Loading',
+  hidden: 'Hidden',
+  culled: 'Culled',
+  unknown: 'Unknown',
 };
 
 /** Draw order — resident tiles on top. */
@@ -102,11 +123,42 @@ function resolveMinimapCameraCenter(toMini, cameraView) {
   return null;
 }
 
+/**
+ * Clamp overlay position inside the viewport.
+ * @param {number} left
+ * @param {number} top
+ * @param {number} width
+ * @param {number} height
+ * @returns {{ left: number, top: number }}
+ */
+function clampOverlayPosition(left, top, width, height) {
+  const pad = 8;
+  const maxLeft = Math.max(pad, window.innerWidth - width - pad);
+  const maxTop = Math.max(pad, window.innerHeight - height - pad);
+  return {
+    left: Math.max(pad, Math.min(left, maxLeft)),
+    top: Math.max(pad, Math.min(top, maxTop)),
+  };
+}
+
+/**
+ * @param {string} text
+ * @returns {string}
+ */
+function escapeHtml(text) {
+  return String(text ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 export class StreamingMinimap {
   constructor() {
     this._root = null;
     this._canvas = null;
     this._ctx = null;
+    this._dashboardEl = null;
     this._enabled = false;
     this._width = 260;
     this._height = 260;
@@ -117,6 +169,14 @@ export class StreamingMinimap {
     this._overviewKey = '';
     /** @type {Promise<void>|null} */
     this._overviewLoad = null;
+    /** @type {object|null} */
+    this._cachedReport = null;
+    /** @type {number} */
+    this._lastReportAt = 0;
+    /** @type {number} */
+    this._lastDashboardRenderAt = 0;
+    /** @type {boolean} */
+    this._dragInstalled = false;
   }
 
   /** @param {boolean} enabled */
@@ -140,6 +200,12 @@ export class StreamingMinimap {
     return this._enabled;
   }
 
+  /** Toggle visibility. @returns {boolean} new enabled state */
+  toggle() {
+    this.setEnabled(!this._enabled);
+    return this._enabled;
+  }
+
   /** @returns {object|null} */
   getDebugState() {
     if (!this._lastDebug && this._enabled) this.update();
@@ -147,41 +213,97 @@ export class StreamingMinimap {
   }
 
   _ensureDom() {
-    if (this._root && this._canvas && this._ctx) {
+    if (this._root && this._canvas && this._ctx && this._dashboardEl) {
       this._root.style.display = 'block';
       return;
     }
 
     if (this._root) {
       try { this._root.remove(); } catch (_) {}
+      this._dragInstalled = false;
     }
 
     const root = document.createElement('div');
     root.id = 'msa-streaming-minimap';
+    root.className = 'map-shine-overlay-ui msa-streaming-minimap';
     root.style.cssText = [
       'position:fixed',
       'bottom:12px',
       'right:12px',
       'z-index:99999',
-      'background:rgba(15,23,42,0.94)',
+      'background:rgba(15,23,42,0.96)',
       'border:1px solid rgba(248,250,252,0.35)',
       'border-radius:8px',
-      'padding:8px',
+      'padding:0',
       'font:11px/1.35 sans-serif',
       'color:#f8fafc',
-      'pointer-events:none',
+      'pointer-events:auto',
       'user-select:none',
       'box-shadow:0 8px 24px rgba(0,0,0,0.45)',
+      'width:276px',
+      'max-width:calc(100vw - 16px)',
+      'display:flex',
+      'flex-direction:column',
+      'overflow:hidden',
+    ].join(';');
+
+    const header = document.createElement('div');
+    header.className = 'msa-sm-header';
+    header.setAttribute('data-drag-handle', '');
+    header.style.cssText = [
+      'display:flex',
+      'align-items:center',
+      'gap:6px',
+      'padding:6px 8px',
+      'border-bottom:1px solid rgba(248,250,252,0.12)',
+      'cursor:grab',
+      'flex-shrink:0',
     ].join(';');
 
     const title = document.createElement('div');
+    title.className = 'msa-sm-title';
     title.textContent = 'Tile Streaming';
-    title.style.marginBottom = '6px';
-    title.style.fontWeight = '600';
+    title.style.cssText = 'flex:1 1 auto;font-weight:600;font-size:11px;min-width:0;';
+
+    const actions = document.createElement('div');
+    actions.className = 'msa-sm-actions';
+    actions.style.cssText = 'display:flex;gap:4px;flex-shrink:0;';
+
+    const reportBtn = document.createElement('button');
+    reportBtn.type = 'button';
+    reportBtn.className = 'msa-sm-btn';
+    reportBtn.textContent = 'Copy Report';
+    reportBtn.title = 'Copy full tile streaming diagnostic report to clipboard';
+    reportBtn.style.cssText = this._buttonStyle(false);
+    reportBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      void this._runReport(true);
+    });
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'msa-sm-btn';
+    closeBtn.textContent = 'X';
+    closeBtn.title = 'Hide streaming minimap';
+    closeBtn.style.cssText = this._buttonStyle(true);
+    closeBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      this.setEnabled(false);
+    });
+
+    actions.appendChild(reportBtn);
+    actions.appendChild(closeBtn);
+    header.appendChild(title);
+    header.appendChild(actions);
+
+    const body = document.createElement('div');
+    body.className = 'msa-sm-body';
+    body.style.cssText = 'padding:8px;display:flex;flex-direction:column;gap:6px;min-height:0;';
 
     const canvas = document.createElement('canvas');
     canvas.width = this._width;
     canvas.height = this._height;
+    canvas.className = 'msa-sm-canvas';
     canvas.style.cssText = [
       'display:block',
       `width:${this._width}px`,
@@ -189,24 +311,385 @@ export class StreamingMinimap {
       'border:1px solid rgba(248,250,252,0.25)',
       'border-radius:4px',
       'background:#0f172a',
+      'flex-shrink:0',
     ].join(';');
 
-    const stats = document.createElement('div');
-    stats.id = 'msa-streaming-minimap-stats';
-    stats.style.marginTop = '6px';
-    stats.style.opacity = '0.92';
-    stats.style.maxWidth = `${this._width}px`;
-    stats.style.lineHeight = '1.45';
+    const dashboard = document.createElement('div');
+    dashboard.id = 'msa-streaming-minimap-dashboard';
+    dashboard.className = 'msa-sm-dashboard';
+    dashboard.style.cssText = [
+      'max-height:min(340px,40vh)',
+      'overflow-y:auto',
+      'overflow-x:hidden',
+      'font-size:10px',
+      'line-height:1.4',
+      'scrollbar-width:thin',
+      'scrollbar-color:rgba(148,163,184,0.5) rgba(15,23,42,0.5)',
+    ].join(';');
 
-    root.appendChild(title);
-    root.appendChild(canvas);
-    root.appendChild(stats);
+    body.appendChild(canvas);
+    body.appendChild(dashboard);
+    root.appendChild(header);
+    root.appendChild(body);
     document.body.appendChild(root);
 
     this._root = root;
     this._canvas = canvas;
     this._ctx = canvas.getContext('2d');
+    this._dashboardEl = dashboard;
     if (!this._ctx) log.warn('StreamingMinimap: 2D context unavailable');
+
+    if (!this._dragInstalled) {
+      this._installDrag(header);
+      this._dragInstalled = true;
+    }
+  }
+
+  /**
+   * @param {boolean} [compact]
+   * @returns {string}
+   * @private
+   */
+  _buttonStyle(compact = false) {
+    return [
+      'appearance:none',
+      '-webkit-appearance:none',
+      'margin:0',
+      'padding:2px 6px',
+      'border:1px solid rgba(248,250,252,0.22)',
+      'border-radius:4px',
+      'background:rgba(255,255,255,0.08)',
+      'color:#f8fafc',
+      'font:inherit',
+      `font-size:${compact ? '10px' : '9.5px'}`,
+      'line-height:1.2',
+      'cursor:pointer',
+      'pointer-events:auto',
+    ].join(';');
+  }
+
+  /**
+   * @param {HTMLElement} handle
+   * @private
+   */
+  _installDrag(handle) {
+    const root = this._root;
+    if (!root || !handle) return;
+
+    let dragging = false;
+    let startX = 0;
+    let startY = 0;
+    let baseLeft = 0;
+    let baseTop = 0;
+
+    const onMove = (ev) => {
+      if (!dragging || !root) return;
+      const rect = root.getBoundingClientRect();
+      const next = clampOverlayPosition(
+        baseLeft + (ev.clientX - startX),
+        baseTop + (ev.clientY - startY),
+        rect.width,
+        rect.height,
+      );
+      root.style.left = `${next.left}px`;
+      root.style.top = `${next.top}px`;
+      root.style.right = 'auto';
+      root.style.bottom = 'auto';
+      root.style.transform = 'none';
+    };
+
+    const onUp = () => {
+      dragging = false;
+      handle.style.cursor = 'grab';
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+    };
+
+    handle.addEventListener('pointerdown', (ev) => {
+      if (ev.target?.closest?.('button')) return;
+      dragging = true;
+      handle.style.cursor = 'grabbing';
+      const rect = root.getBoundingClientRect();
+      startX = ev.clientX;
+      startY = ev.clientY;
+      baseLeft = rect.left;
+      baseTop = rect.top;
+      root.style.left = `${baseLeft}px`;
+      root.style.top = `${baseTop}px`;
+      root.style.right = 'auto';
+      root.style.bottom = 'auto';
+      root.style.transform = 'none';
+      document.addEventListener('pointermove', onMove);
+      document.addEventListener('pointerup', onUp);
+      try { ev.preventDefault(); } catch (_) {}
+    });
+  }
+
+  /**
+   * Build report, copy to clipboard, and refresh dashboard.
+   * @param {boolean} [notify=false]
+   * @private
+   */
+  async _runReport(notify = false) {
+    try {
+      const { report, text, copied } = await copyTileStreamingReportToClipboard();
+      this._cachedReport = report;
+      this._lastReportAt = performance.now();
+      this._renderDashboard(report, this._lastDebug);
+      if (notify) {
+        const warnCount = report.warnings?.length ?? 0;
+        if (copied) {
+          ui.notifications?.info?.(
+            warnCount
+              ? `Tile streaming report copied to clipboard (${warnCount} warning${warnCount === 1 ? '' : 's'})`
+              : 'Tile streaming report copied to clipboard',
+          );
+        } else {
+          log.warn('Tile streaming report clipboard unavailable; text logged to console');
+          console.log(text);
+          ui.notifications?.warn?.(
+            warnCount
+              ? `Could not copy report — see browser console (${warnCount} warning${warnCount === 1 ? '' : 's'})`
+              : 'Could not copy report — see browser console',
+          );
+        }
+      }
+    } catch (err) {
+      log.warn('StreamingMinimap report failed', err);
+      ui.notifications?.error?.(`Tile streaming report failed: ${err?.message || err}`);
+    }
+  }
+
+  /**
+   * @param {object|null} report
+   * @param {object|null} live
+   * @private
+   */
+  _maybeRefreshReport(live) {
+    const now = performance.now();
+    let reportRefreshed = false;
+
+    if (!this._cachedReport || (now - this._lastReportAt) >= REPORT_REFRESH_MS) {
+      try {
+        this._cachedReport = buildTileStreamingReport();
+        this._lastReportAt = now;
+        reportRefreshed = true;
+      } catch (err) {
+        log.warn('StreamingMinimap report build failed', err);
+      }
+    }
+
+    if (
+      reportRefreshed
+      || !this._lastDashboardRenderAt
+      || (now - this._lastDashboardRenderAt) >= DASHBOARD_REFRESH_MS
+    ) {
+      this._renderDashboard(this._cachedReport, live);
+      this._lastDashboardRenderAt = now;
+    }
+  }
+
+  /**
+   * @param {string} title
+   * @param {string} bodyHtml
+   * @param {{ tone?: 'warn'|'error'|'ok' }} [opts]
+   * @returns {string}
+   * @private
+   */
+  _sectionHtml(title, bodyHtml, opts = {}) {
+    const tone = opts.tone ?? 'ok';
+    const border = tone === 'warn'
+      ? 'rgba(251,191,36,0.35)'
+      : tone === 'error'
+        ? 'rgba(248,113,113,0.4)'
+        : 'rgba(248,250,252,0.1)';
+    const bg = tone === 'warn'
+      ? 'rgba(251,191,36,0.08)'
+      : tone === 'error'
+        ? 'rgba(127,29,29,0.25)'
+        : 'rgba(255,255,255,0.03)';
+    return `
+      <section class="msa-sm-section" style="margin-bottom:6px;padding:5px 6px;border:1px solid ${border};border-radius:4px;background:${bg};">
+        <div class="msa-sm-section-title" style="font-weight:600;font-size:9.5px;text-transform:uppercase;letter-spacing:0.04em;opacity:0.85;margin-bottom:3px;">${escapeHtml(title)}</div>
+        <div class="msa-sm-section-body" style="white-space:pre-wrap;word-break:break-word;">${bodyHtml}</div>
+      </section>`;
+  }
+
+  /**
+   * @param {string} label
+   * @param {string} value
+   * @returns {string}
+   * @private
+   */
+  _kv(label, value) {
+    return `<div><span style="opacity:0.7">${escapeHtml(label)}:</span> ${escapeHtml(value)}</div>`;
+  }
+
+  /**
+   * @param {object|null} report
+   * @param {object|null} live
+   * @private
+   */
+  _renderDashboard(report, live) {
+    const el = this._dashboardEl;
+    if (!el) return;
+
+    const sections = [];
+
+    if (live?.error) {
+      sections.push(this._sectionHtml('Fault', escapeHtml(live.error), { tone: 'error' }));
+    }
+
+    const warnList = report?.warnings ?? [];
+    if (warnList.length) {
+      const body = warnList.map((w) => `• ${escapeHtml(w)}`).join('\n');
+      sections.push(this._sectionHtml(`Warnings (${warnList.length})`, body, { tone: 'warn' }));
+    } else if (report) {
+      sections.push(this._sectionHtml('Warnings', 'None detected', { tone: 'ok' }));
+    }
+
+    if (live) {
+      const summaryLines = [
+        this._kv('Background grids', String(live.grids ?? 0)),
+        this._kv('Overlay cells', String(live.streamedCellCount ?? 0)),
+        this._kv('Visible resident', String(live.visibleCellCount ?? 0)),
+        this._kv('Cell size', `${live.cellSize ?? '?'} px`),
+        this._kv('Stream view', live.hasView ? 'active' : 'missing'),
+        this._kv('Camera overlay', live.hasCameraView ? 'active' : 'missing'),
+      ].join('');
+      sections.push(this._sectionHtml('Live Summary', summaryLines));
+    }
+
+    if (report) {
+      const sceneLines = [
+        this._kv('Scene', `${report.scene?.name ?? '?'} (${report.scene?.scenePx?.w ?? '?'}x${report.scene?.scenePx?.h ?? '?'})`),
+        this._kv('Megapixels', `${Number(report.scene?.sceneMp ?? 0).toFixed(1)} MP`),
+        this._kv('Zoom', `${Number(report.scene?.zoom ?? 0).toFixed(3)}`),
+        this._kv('Zoom LOD', `${report.scene?.zoomLod ?? '?'} (held ${report.streaming?.heldZoomLod ?? '?'})`),
+        this._kv('View textured cells', String(report.view?.visibleCellsInFrustum ?? 0)),
+        this._kv('View padding', String(report.view?.padding ?? '?')),
+      ].join('');
+      sections.push(this._sectionHtml('Scene / View', sceneLines));
+
+      const budget = report.budget ?? {};
+      const budgetLines = [
+        this._kv('VRAM', `${budget.usedMB ?? '?'} / ${budget.budgetMB ?? '?'} MB (${budget.usedPct ?? '?'}%)${budget.overBudget ? ' OVER' : ''}`),
+        this._kv('Entries', String(budget.entryCount ?? 0)),
+        this._kv('Cell size', `${budget.cellSize ?? '?'} px`),
+        this._kv('Max LOD', String(budget.maxLod ?? '?')),
+        this._kv('Background max', String(budget.backgroundMaxSize ?? '?')),
+        this._kv('Tile albedo max', String(budget.tileAlbedoMaxSize ?? '?')),
+        this._kv('Downscale', String(budget.downscale ?? '?')),
+      ].join('');
+      sections.push(this._sectionHtml('VRAM Budget', budgetLines, {
+        tone: budget.overBudget ? 'warn' : 'ok',
+      }));
+
+      const mgr = report.streaming ?? {};
+      const pool = mgr.decodePool ?? {};
+      const gridTotals = [
+        this._kv('Manager', mgr.managerEnabled ? 'enabled' : 'DISABLED'),
+        this._kv('Focal LOD', String(mgr.focalLod ?? '?')),
+        this._kv('Detail tier', String(mgr.detailTier ?? '?')),
+        this._kv('Panning', mgr.isPanning ? 'yes' : 'no'),
+        this._kv('Background grids', String(mgr.backgroundGridCount ?? 0)),
+        this._kv('Region grids', String(mgr.regionGridCount ?? 0)),
+        this._kv('Bus streaming tiles', String(mgr.busStreamingTiles?.length ?? 0)),
+        this._kv('Decode workers', pool.enabled ? `${pool.activeRequests ?? 0} active / q=${pool.queueDepth ?? 0} (${pool.poolSize ?? 0} workers)` : 'legacy main-thread'),
+      ].join('');
+      sections.push(this._sectionHtml('Grid Totals', gridTotals));
+
+      const bakeEntries = Object.entries(mgr.bakeProgress ?? {});
+      if (bakeEntries.length) {
+        const bakeLines = bakeEntries.map(([key, p]) => {
+          const pct = Math.round((p.fraction ?? 0) * 100);
+          return this._kv(key, `${p.done ?? 0}/${p.total ?? 0} (${pct}%)`);
+        }).join('');
+        sections.push(this._sectionHtml('Pyramid Bake', bakeLines));
+      }
+
+      for (const g of mgr.backgroundGrids ?? []) {
+        const cs = g.cellSummary ?? {};
+        const gridBody = [
+          this._kv('Floor', String(g.floorIndex ?? '?')),
+          this._kv('Mounted', g.mounted ? 'yes' : 'NO'),
+          this._kv('Eff LOD', String(g.effectiveServedLod ?? g.servedLodRaw ?? '?')),
+          this._kv('Cells', `${cs.total ?? 0} total, ${cs.visible ?? 0} vis, ${cs.withTexture ?? 0} tex`),
+          this._kv('States', `hi=${cs.residentHi ?? 0} lo=${cs.residentLo ?? 0} load=${cs.loading ?? 0} culled=${cs.culled ?? 0}`),
+          this._kv('Inflight', String(g.inflightCount ?? 0)),
+          g.coarseBaseReady ? this._kv('Coarse base', 'ready') : this._kv('Coarse base', 'pending'),
+          g.fallbackMesh
+            ? this._kv('Fallback', `vis=${g.fallbackMesh.visible} ${g.fallbackMesh.w}x${g.fallbackMesh.h}`)
+            : '',
+          g.fallbackCellCount ? this._kv('Coarse fallback cells', String(g.fallbackCellCount)) : '',
+        ].filter(Boolean).join('');
+        const tone = (!g.mounted || (cs.total > 0 && cs.withTexture === 0)) ? 'warn' : 'ok';
+        sections.push(this._sectionHtml(`Background [${g.key ?? '?'}]`, gridBody, { tone }));
+      }
+
+      for (const g of mgr.regionGrids ?? []) {
+        const cs = g.cellSummary ?? {};
+        const gridBody = [
+          this._kv('Floor', String(g.floorIndex ?? '?')),
+          this._kv('Z', String(g.z ?? '?')),
+          this._kv('Cells', `${cs.total ?? 0} total, ${cs.visible ?? 0} vis, ${cs.withTexture ?? 0} tex`),
+          this._kv('Inflight', String(g.inflightCount ?? 0)),
+        ].join('');
+        const tone = (cs.total > 0 && cs.withTexture === 0) ? 'warn' : 'ok';
+        sections.push(this._sectionHtml(`Region [${g.key ?? '?'}]`, gridBody, { tone }));
+      }
+    }
+
+    if (live) {
+      const liveExtra = [
+        this._kv('Budget reason', String(live.budgetReason ?? '?')),
+        live.viewPct ? this._kv('View UV span', live.viewPct) : '',
+        live.deviceMem ? this._kv('Device RAM', live.deviceMem) : '',
+        live.sceneMp ? this._kv('Scene MP (live)', live.sceneMp) : '',
+      ].filter(Boolean).join('');
+      if (liveExtra) sections.push(this._sectionHtml('Live Budget', liveExtra));
+    }
+
+    const populate = buildCompositorPopulateSnapshot();
+    const bus = report?.bus ?? {};
+    const busLines = [
+      this._kv('Visible max floor', String(bus.visibleMaxFloorIndex ?? '?')),
+      this._kv('Bus tile count', String(bus.tileCount ?? populate.busTileCount ?? '?')),
+      this._kv('BG solid visible', String(bus.bgSolidVisible ?? '?')),
+      this._kv('Populate complete', populate.populateComplete ? 'yes' : 'no'),
+      this._kv('Populate in flight', populate.populateInFlight ? 'YES' : 'no'),
+      this._kv('Bus populated', populate.busPopulated ? 'yes' : 'no'),
+      this._kv('Pending bg jobs', String(populate.pendingBackgroundJobs ?? 0)),
+      this._kv('Coordinator', String(populate.coordinatorState ?? '?')),
+      this._kv('Scene loading', populate.sceneLoading ? 'YES' : 'no'),
+    ].join('');
+    sections.push(this._sectionHtml('Bus / Populate', busLines, {
+      tone: (populate.populateInFlight || populate.sceneLoading) ? 'warn' : 'ok',
+    }));
+
+    const legendItems = Object.entries(STATE_COLORS).map(([state, color]) => {
+      const label = STATE_LABELS[state] ?? state;
+      return `<span style="display:inline-flex;align-items:center;gap:3px;margin-right:8px;margin-bottom:2px;">
+        <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${color};"></span>${escapeHtml(label)}
+      </span>`;
+    }).join('');
+    sections.push(this._sectionHtml('Legend', `<div style="display:flex;flex-wrap:wrap;">${legendItems}</div>`));
+
+    if (report?.generatedAt) {
+      sections.push(`<div style="opacity:0.55;font-size:9px;padding:2px 0;">Report ${escapeHtml(report.generatedAt)}</div>`);
+    }
+
+    el.innerHTML = sections.join('');
+  }
+
+  /** Apply a report object from an external caller (e.g. Quick Actions). @param {object} report */
+  applyExternalReport(report) {
+    if (!report) return;
+    this._cachedReport = report;
+    this._lastReportAt = performance.now();
+    if (this._enabled) {
+      this._renderDashboard(report, this._lastDebug);
+    }
   }
 
   _hide() {
@@ -419,6 +902,7 @@ export class StreamingMinimap {
       const budget = getTextureBudgetTracker();
       const manager = getTileStreamingManager();
       const grids = manager.getGrids();
+      const regionGrids = manager.getRegionGrids?.() ?? new Map();
       // Streaming tiles use the union frustum; the orange camera overlay uses the
       // stable FOV box so it does not flip between raycast vs stable near the 1.02 area gate.
       const streamView = resolveStreamingViewRect(0);
@@ -488,10 +972,10 @@ export class StreamingMinimap {
       }
 
       ctx.fillStyle = 'rgba(15,23,42,0.72)';
-      ctx.fillRect(margin, margin, 72, 14);
+      ctx.fillRect(margin, margin, 88, 14);
       ctx.fillStyle = '#f8fafc';
       ctx.font = '10px sans-serif';
-      ctx.fillText(`g${grids.size} c${visibleCellCount}`, margin + 4, margin + 10);
+      ctx.fillText(`g${grids.size} r${regionGrids.size} c${visibleCellCount}`, margin + 4, margin + 10);
 
       const bs = resolveBudgetState(budget);
       const uv = streamView ? (() => {
@@ -504,10 +988,15 @@ export class StreamingMinimap {
           vMax: Math.max(tl.v, br.v),
         };
       })() : null;
-      const overPct = bs.overBudget ? ' ⚠' : '';
       const deviceMem = Number(navigator?.deviceMemory) || 0;
       const mp = estimateSceneMegapixels();
       const budgetReason = budget.budgetReason || 'default';
+      const zoom = Number(window.MapShine?.sceneComposer?.currentZoom) || 1;
+      const zoomLod = selectLodFromZoom(zoom, budget.getMaxLodLevel(), mp);
+
+      const viewPct = streamView && uv
+        ? `${((uv.uMax - uv.uMin) * 100).toFixed(0)}x${((uv.vMax - uv.vMin) * 100).toFixed(0)}%`
+        : null;
 
       this._lastDebug = {
         enabled: this._enabled,
@@ -515,35 +1004,29 @@ export class StreamingMinimap {
         sceneWorld,
         scale,
         grids: grids.size,
+        regionGrids: regionGrids.size,
         streamedCellCount,
         visibleCellCount,
         hasView: !!streamView,
         hasCameraView: !!cameraView,
         cellSize,
         budgetReason,
+        viewPct,
+        deviceMem: deviceMem > 0 ? `~${deviceMem} GB` : null,
+        sceneMp: mp > 0 ? `${mp.toFixed(1)} MP` : null,
+        zoom,
+        zoomLod,
+        overBudget: !!bs.overBudget,
+        budgetUsedMb: (bs.usedBytes / 1024 / 1024).toFixed(0),
+        budgetTotalMb: (bs.budgetBytes / 1024 / 1024).toFixed(0),
       };
 
-      const statsEl = this._root?.querySelector('#msa-streaming-minimap-stats');
-      if (statsEl) {
-        const line1 = [
-          `grids ${grids.size}`,
-          `${Math.round(meta.width)}×${Math.round(meta.height)}`,
-          `cell ${cellSize}px`,
-          streamView && uv ? `view ${((uv.uMax - uv.uMin) * 100).toFixed(0)}×${((uv.vMax - uv.vMin) * 100).toFixed(0)}%` : 'view —',
-        ].join(' · ');
-        const line2 = [
-          `budget ${(bs.usedBytes / 1024 / 1024).toFixed(0)}/${(bs.budgetBytes / 1024 / 1024).toFixed(0)} MB${overPct}`,
-          budgetReason,
-          deviceMem > 0 ? `sysRAM~${deviceMem}GB` : null,
-          mp > 0 ? `${mp.toFixed(0)} MP` : null,
-        ].filter(Boolean).join(' · ');
-        statsEl.textContent = `${line1}\n${line2}`;
-        statsEl.style.whiteSpace = 'pre-wrap';
-      }
+      this._maybeRefreshReport(this._lastDebug);
     } catch (err) {
       const errText = String(err?.message ?? err ?? 'unknown');
       this._lastDebug = { error: errText, enabled: this._enabled };
       log.warn('StreamingMinimap update failed', err);
+      this._renderDashboard(this._cachedReport, this._lastDebug);
       try {
         ctx.fillStyle = '#7f1d1d';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -562,10 +1045,15 @@ export class StreamingMinimap {
     this._root = null;
     this._canvas = null;
     this._ctx = null;
+    this._dashboardEl = null;
     this._overviewCanvas = null;
     this._overviewKey = '';
     this._overviewLoad = null;
     this._lastDebug = null;
+    this._cachedReport = null;
+    this._lastReportAt = 0;
+    this._lastDashboardRenderAt = 0;
+    this._dragInstalled = false;
   }
 }
 
@@ -589,6 +1077,7 @@ export function initStreamingMinimap(defaultEnabled = true) {
     window.MapShine.toggleStreamingMinimap = (on) => {
       mm.setEnabled(on !== undefined ? !!on : !mm.isEnabled());
       log.info(`Streaming minimap ${mm.isEnabled() ? 'ON' : 'OFF'}`);
+      return mm.isEnabled();
     };
   }
   return mm;

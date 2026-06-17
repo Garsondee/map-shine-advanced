@@ -9,15 +9,13 @@
     "scripts/release/release.js",
     "scripts/tools/*.mjs",
     "tests/playwright/**/*.js",
-    "map_macros/**/*.js",
-    "V3_module/scripts/module.js"
+    "map_macros/**/*.js"
   ],
   "project": [
     "scripts/**/*.js",
     "scripts/**/*.mjs",
     "tests/**/*.js",
-    "map_macros/**/*.js",
-    "V3_module/**/*.js"
+    "map_macros/**/*.js"
   ],
   "ignore": [
     "scripts/vendor/**",

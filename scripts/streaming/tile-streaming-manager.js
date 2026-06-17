@@ -5,18 +5,32 @@
 
 import { createLogger } from '../core/log.js';
 import { normalizeTextureUrl } from '../assets/image-texture-loader.js';
-import { resolveStreamingViewRect } from './view-projection-service.js';
+import { resolveStreamingViewRect, getCameraGroundCenter, viewRectIntersectsScene } from './view-projection-service.js';
 import { selectLodFromZoom } from './streaming-grid.js';
 import {
   StreamedBackgroundGrid,
   StreamedRegionGrid,
   shouldStreamBackground,
 } from './streamed-background-grid.js';
-import { fetchSourceImageMeta, clearPyramidMemoryCaches, loadFallbackTexture } from './texture-pyramid-builder.js';
+import { fetchSourceImageMeta, clearPyramidMemoryCaches, loadFallbackTexture, warmPyramidForManifest } from './texture-pyramid-builder.js';
 import { getTextureBudgetTracker } from '../assets/TextureBudgetTracker.js';
 import { estimateSceneMegapixels } from './texture-budget-policy.js';
+import { lodToDetailTier } from './streaming-detail-api.js';
+import { getVisibleStreamingCellKeys } from './vegetation-streaming-bridge.js';
 
 const log = createLogger('TileStreamingManager');
+
+/** Ground speed (world units/sec) above which pan mode activates. */
+const PAN_SPEED_THRESHOLD = 800;
+/** Consecutive fast frames before pan mode engages. */
+const PAN_FRAMES_REQUIRED = 2;
+/** Milliseconds below speed threshold before sharpen resumes after pan. */
+const PAN_STOP_MS = 200;
+/** Pause tile decode while floor visibility / camera projection stabilizes. */
+const FLOOR_TRANSITION_PAUSE_MS = 500;
+/** Max concurrent cell loads across all streaming grids (144+ MP scenes). */
+const GLOBAL_INFLIGHT_CAP_HUGE = 10;
+const GLOBAL_INFLIGHT_CAP_DEFAULT = 14;
 
 export class TileStreamingManager {
   constructor() {
@@ -35,6 +49,63 @@ export class TileStreamingManager {
     this._lastViewRectSig = '';
     /** @type {number} */
     this._lastStreamLod = 99;
+    /** @type {{ x: number, y: number, t: number }|null} */
+    this._lastPanSample = null;
+    /** @type {{ vx: number, vy: number, speed: number }} */
+    this._panVelocity = { vx: 0, vy: 0, speed: 0 };
+    /** @type {boolean} */
+    this._isPanning = false;
+    /** @type {number} */
+    this._panFastFrames = 0;
+    /** @type {number} */
+    this._panStoppedAt = 0;
+    /** @type {number|null} */
+    this._idleWarmHandle = null;
+    /** @type {boolean} */
+    this._idleWarmScheduled = false;
+    /** @type {number} */
+    this._floorTransitionUntil = 0;
+    /** @type {number} */
+    this._visibleMaxFloorIndex = Infinity;
+  }
+
+  /** @returns {boolean} */
+  isPanning() {
+    return this._isPanning;
+  }
+
+  /** Current zoom-native streaming LOD (last frame). @returns {number} */
+  getFocalLod() {
+    return this._lastStreamLod === 99 ? 2 : this._lastStreamLod;
+  }
+
+  /** Effect detail tier derived from focal LOD. @returns {import('./streaming-detail-api.js').StreamingDetailTier} */
+  getDetailTier() {
+    const budget = getTextureBudgetTracker();
+    return lodToDetailTier(this.getFocalLod(), budget.getMaxLodLevel());
+  }
+
+  /**
+   * Visible resident cell keys for a grid.
+   * @param {string} gridKey
+   * @returns {Set<string>}
+   */
+  getVisibleCellKeys(gridKey) {
+    return getVisibleStreamingCellKeys(gridKey);
+  }
+
+  /**
+   * @param {string} gridKey
+   * @param {string} cellKey
+   * @returns {boolean}
+   */
+  isCellResident(gridKey, cellKey) {
+    return getVisibleStreamingCellKeys(gridKey).has(cellKey);
+  }
+
+  /** @returns {{ vx: number, vy: number, speed: number }} */
+  getPanVelocity() {
+    return this._panVelocity;
   }
 
   /** @returns {Map<string, StreamedBackgroundGrid>} */
@@ -63,7 +134,7 @@ export class TileStreamingManager {
    * @private
    */
   _regionRedundantWithBackground(region, tileSrc, isOverhead = false) {
-    if (isOverhead || !this._grids.has('__bg_image__') || !region || !tileSrc) return false;
+    if (!this._grids.has('__bg_image__') || !region || !tileSrc) return false;
 
     const bgGrid = this._grids.get('__bg_image__');
     const bgSrc = bgGrid?._src ?? '';
@@ -77,7 +148,60 @@ export class TileStreamingManager {
     const rw = Math.max(0, region.maxX - region.minX);
     const rh = Math.max(0, region.maxY - region.minY);
     const coverage = (rw * rh) / (sceneW * sceneH);
-    return coverage >= 0.72;
+    const fullCoverage = coverage >= 0.72;
+    // Partial overhead stamps need their own grid; full-scene duplicates share the background pyramid.
+    if (isOverhead && !fullCoverage) return false;
+    return fullCoverage;
+  }
+
+  /**
+   * Cancel in-flight decodes when the active floor band changes.
+   * @param {number} maxFloorIndex
+   */
+  onVisibleFloorsChanged(maxFloorIndex) {
+    this._visibleMaxFloorIndex = Number.isFinite(Number(maxFloorIndex))
+      ? Number(maxFloorIndex)
+      : Infinity;
+    this._floorTransitionUntil = performance.now() + FLOOR_TRANSITION_PAUSE_MS;
+    this._lastViewRectSig = '';
+    this._lastStreamLod = 99;
+
+    if (this._idleWarmHandle != null) {
+      if (typeof cancelIdleCallback === 'function') {
+        try { cancelIdleCallback(this._idleWarmHandle); } catch (_) {}
+      } else {
+        try { clearTimeout(this._idleWarmHandle); } catch (_) {}
+      }
+      this._idleWarmHandle = null;
+    }
+    this._idleWarmScheduled = false;
+
+    for (const grid of this._grids.values()) {
+      grid.pauseDecodeWork?.();
+    }
+    for (const grid of this._regionGrids.values()) {
+      grid.pauseDecodeWork?.();
+    }
+    log.info(`Floor transition pause — visible floors 0–${this._visibleMaxFloorIndex}`);
+  }
+
+  /** @returns {number} @private */
+  _globalInflightCap() {
+    return estimateSceneMegapixels() >= 144
+      ? GLOBAL_INFLIGHT_CAP_HUGE
+      : GLOBAL_INFLIGHT_CAP_DEFAULT;
+  }
+
+  /** @returns {number} @private */
+  _totalInflightLoads() {
+    let n = 0;
+    for (const grid of this._grids.values()) {
+      n += grid._inflight?.size ?? 0;
+    }
+    for (const grid of this._regionGrids.values()) {
+      n += grid._inflight?.size ?? 0;
+    }
+    return n;
   }
 
   /** @returns {number} @private */
@@ -87,7 +211,7 @@ export class TileStreamingManager {
   }
 
   /** @returns {number} @private */
-  _viewPaddingForScene() {
+  _baseViewPaddingForScene() {
     const budget = getTextureBudgetTracker();
     const cs = budget.getRecommendedTileSize();
     const mp = estimateSceneMegapixels();
@@ -96,6 +220,80 @@ export class TileStreamingManager {
     if (mp >= 144) return cellPad;
     if (mp > 64) return Math.max(cellPad, 384);
     return Math.max(this._viewPadding, cellPad);
+  }
+
+  /**
+   * Per-edge view padding — extends ahead of pan velocity on huge scenes.
+   * @returns {import('./view-projection-service.js').StreamingViewPadding}
+   */
+  getViewPaddingOptions() {
+    const base = this._baseViewPaddingForScene();
+    const vel = this._panVelocity;
+    if (!this._isPanning || vel.speed < 100) {
+      return { uniform: base };
+    }
+
+    const budget = getTextureBudgetTracker();
+    const cs = budget.getRecommendedTileSize();
+    const mp = estimateSceneMegapixels();
+    const maxExtra = mp >= 144 ? cs * 2 : cs;
+    const extra = Math.min(maxExtra, vel.speed * 0.25);
+    const nx = vel.vx / vel.speed;
+    const ny = vel.vy / vel.speed;
+
+    return {
+      minX: base + Math.max(0, -nx) * extra,
+      minY: base + Math.max(0, -ny) * extra,
+      maxX: base + Math.max(0, nx) * extra,
+      maxY: base + Math.max(0, ny) * extra,
+    };
+  }
+
+  /** @private */
+  _updatePanState() {
+    const cam = getCameraGroundCenter();
+    const now = performance.now();
+    if (!cam) {
+      this._isPanning = false;
+      this._panFastFrames = 0;
+      this._panVelocity = { vx: 0, vy: 0, speed: 0 };
+      return;
+    }
+
+    const prev = this._lastPanSample;
+    this._lastPanSample = { x: cam.x, y: cam.y, t: now };
+    if (!prev) {
+      this._panVelocity = { vx: 0, vy: 0, speed: 0 };
+      return;
+    }
+
+    const dt = Math.max(0.001, (now - prev.t) / 1000);
+    const vx = (cam.x - prev.x) / dt;
+    const vy = (cam.y - prev.y) / dt;
+    const speed = Math.hypot(vx, vy);
+    this._panVelocity = { vx, vy, speed };
+
+    if (speed >= PAN_SPEED_THRESHOLD) {
+      this._panFastFrames += 1;
+      this._panStoppedAt = 0;
+      if (this._panFastFrames >= PAN_FRAMES_REQUIRED) {
+        this._isPanning = true;
+      }
+      return;
+    }
+
+    this._panFastFrames = 0;
+    if (!this._isPanning) return;
+
+    if (speed < PAN_SPEED_THRESHOLD * 0.5) {
+      if (!this._panStoppedAt) this._panStoppedAt = now;
+      if (now - this._panStoppedAt >= PAN_STOP_MS) {
+        this._isPanning = false;
+        this._panStoppedAt = 0;
+      }
+    } else {
+      this._panStoppedAt = 0;
+    }
   }
 
   /**
@@ -131,9 +329,24 @@ export class TileStreamingManager {
     if (!this._enabled) return;
     if (this._grids.size === 0 && this._regionGrids.size === 0) return;
 
-    const padding = this._viewPaddingForScene();
+    this._updatePanState();
+    const padding = this.getViewPaddingOptions();
     const view = resolveStreamingViewRect(padding);
     if (!view) return;
+
+    const inFloorTransition = performance.now() < this._floorTransitionUntil;
+    const viewPlausible = viewRectIntersectsScene(view);
+    if (inFloorTransition || !viewPlausible) {
+      if (viewPlausible) {
+        for (const grid of this._grids.values()) {
+          grid.reconcileVisibility?.(view);
+        }
+        for (const grid of this._regionGrids.values()) {
+          grid.reconcileVisibility?.(view);
+        }
+      }
+      return;
+    }
 
     for (const [id, grid] of [...this._regionGrids.entries()]) {
       if (grid._region && this._regionRedundantWithBackground(grid._region, grid._src, grid._isOverhead)) {
@@ -165,7 +378,9 @@ export class TileStreamingManager {
     const viewRectSig = this._buildViewRectSig(view, lod);
     const viewChanged = viewRectSig !== this._lastViewRectSig;
     const pendingWork = this._hasPendingCellWork(view, lod);
-    const syncOptions = { sharpenOnZoom: lodChanged };
+    const syncOptions = { sharpenOnZoom: lodChanged, isPanning: this._isPanning };
+    const globalInflightCap = this._globalInflightCap();
+    const globalInflight = this._totalInflightLoads();
 
     if (lodChanged || viewChanged || pendingWork) {
       if (lodChanged) {
@@ -178,11 +393,13 @@ export class TileStreamingManager {
         }
       }
       if (viewChanged) this._lastViewRectSig = viewRectSig;
-      for (const grid of this._grids.values()) {
-        void grid.syncToView(view, lod, syncOptions);
-      }
-      for (const grid of this._regionGrids.values()) {
-        void grid.syncToView(view, lod, syncOptions);
+      if (globalInflight < globalInflightCap) {
+        for (const grid of this._grids.values()) {
+          void grid.syncToView(view, lod, syncOptions);
+        }
+        for (const grid of this._regionGrids.values()) {
+          void grid.syncToView(view, lod, syncOptions);
+        }
       }
     }
 
@@ -225,6 +442,7 @@ export class TileStreamingManager {
 
     this._grids.set(key, grid);
     log.info(`Streaming background registered [${key}] ${meta.width}x${meta.height}`);
+    this._scheduleIdlePyramidWarm();
     return true;
   }
 
@@ -347,7 +565,52 @@ export class TileStreamingManager {
 
     this._regionGrids.set(tileId, grid);
     log.info(`Streaming bus tile registered [${tileId}] ${meta.width}x${meta.height}`);
+    this._scheduleIdlePyramidWarm();
     return true;
+  }
+
+  /**
+   * Schedule background pyramid warming when the browser is idle.
+   * @private
+   */
+  _scheduleIdlePyramidWarm() {
+    if (this._idleWarmScheduled) return;
+    this._idleWarmScheduled = true;
+
+    const run = () => {
+      this._idleWarmScheduled = false;
+      this._idleWarmHandle = null;
+      void this._runIdlePyramidWarm().catch((err) => {
+        log.debug('Idle pyramid warm failed', err);
+      });
+    };
+
+    if (typeof requestIdleCallback === 'function') {
+      this._idleWarmHandle = requestIdleCallback(run, { timeout: 8000 });
+    } else {
+      this._idleWarmHandle = setTimeout(run, 250);
+    }
+  }
+
+  /** @private */
+  async _runIdlePyramidWarm() {
+    const budget = getTextureBudgetTracker();
+    if (budget.getUsedFraction() > 0.85) return;
+
+    for (const grid of this._grids.values()) {
+      const manifest = grid._manifest;
+      if (!manifest) continue;
+      await warmPyramidForManifest(manifest, {
+        coarseLod: grid._coarseFallbackLod ?? manifest.maxLod ?? 4,
+      });
+    }
+    for (const grid of this._regionGrids.values()) {
+      const manifest = grid._manifest;
+      if (!manifest) continue;
+      await warmPyramidForManifest(manifest, {
+        coarseLod: manifest.maxLod ?? 4,
+      });
+    }
   }
 
   /** Force all streaming grids to reload pyramid cells (cache/schema change). */
@@ -379,6 +642,15 @@ export class TileStreamingManager {
   }
 
   dispose() {
+    if (this._idleWarmHandle != null) {
+      if (typeof cancelIdleCallback === 'function') {
+        try { cancelIdleCallback(this._idleWarmHandle); } catch (_) {}
+      } else {
+        try { clearTimeout(this._idleWarmHandle); } catch (_) {}
+      }
+      this._idleWarmHandle = null;
+    }
+    this._idleWarmScheduled = false;
     this.clearGrids();
     clearPyramidMemoryCaches();
   }

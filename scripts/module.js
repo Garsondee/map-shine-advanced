@@ -769,17 +769,24 @@ Hooks.once('init', async function() {
   sceneSettings.registerSettings();
   sceneSettings.applyDebugModeFromSettings();
 
+  const nativeRenderingBypass = sceneSettings.isNativeFoundryRenderingEnabled();
+  if (!window.MapShine) window.MapShine = {};
+  window.MapShine.nativeRenderingBypass = nativeRenderingBypass;
 
-  try {
-    await loadingOverlay.initialize();
-  } catch (e) {
-    console.warn('Map Shine: failed to initialize loading screen service', e);
-  }
+  if (nativeRenderingBypass) {
+    info('Native Foundry rendering enabled — Map Shine rendering bypassed for this client');
+  } else {
+    try {
+      await loadingOverlay.initialize();
+    } catch (e) {
+      console.warn('Map Shine: failed to initialize loading screen service', e);
+    }
 
-  try {
-    loadingOverlay.prepareForCover('Initializing...');
-  } catch (e) {
-    console.warn('Map Shine: failed to initialize loading overlay', e);
+    try {
+      loadingOverlay.prepareForCover('Initializing...');
+    } catch (e) {
+      console.warn('Map Shine: failed to initialize loading overlay', e);
+    }
   }
 
 
@@ -829,6 +836,8 @@ Hooks.once('init', async function() {
   // Foundry v13+ uses Record<string, SceneControl> with tools as Record<string, SceneControlTool>
   Hooks.on('getSceneControlButtons', (controls) => {
     try {
+      if (game.settings.get(MODULE_ID, 'useNativeFoundryRendering') === true) return;
+
       const isGM = isUserGM();
 
       // NOTE: In Foundry v13, accessing ui.controls.tool
@@ -1305,8 +1314,9 @@ Hooks.once('init', async function() {
  * Main bootstrap happens here
  */
 Hooks.once('ready', async function() {
-  const [{ info }, loadingService] = await Promise.all([
+  const [{ info }, sceneSettings, loadingService] = await Promise.all([
     import('./core/log.js'),
+    import('./settings/scene-settings.js'),
     import('./ui/loading-screen/loading-screen-service.js')
   ]);
 
@@ -1315,6 +1325,22 @@ Hooks.once('ready', async function() {
   MapShine.loadingScreenService = loadingOverlay;
   info('Ready hook fired');
 
+  if (sceneSettings.isNativeFoundryRenderingEnabled()) {
+    if (!window.MapShine) window.MapShine = {};
+    MapShine.nativeRenderingBypass = true;
+    MapShine.bootstrapComplete = true;
+    MapShine.initialized = false;
+    MapShine.bootstrapError = null;
+    info('Native Foundry rendering mode — skipping Three.js bootstrap');
+    try {
+      ui.notifications?.info?.(
+        game.i18n.localize('MAPSHINE.NativeFoundryRenderingStatusOn'),
+        { permanent: false }
+      );
+    } catch (_) {
+    }
+    return;
+  }
 
   try {
     // Defer slightly so the rest of Foundry UI finishes settling before we show a modal.

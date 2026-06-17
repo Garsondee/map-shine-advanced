@@ -905,6 +905,9 @@ export class FloorRenderBus {
     this._lastSetVisibleMaxFloorIndex = this._visibleMaxFloorIndex;
     this._applyTileVisibility();
     log.debug(`FloorRenderBus: showing floors 0–${maxFloorIndex}`);
+    try {
+      getTileStreamingManager().onVisibleFloorsChanged(this._visibleMaxFloorIndex);
+    } catch (_) {}
   }
 
   /**

@@ -167,7 +167,7 @@ export class LevelTransitionCurtain {
         levelId == null
         || !canvas?.scene
         || String(canvas.scene.id) !== String(sceneDoc.id)
-        || !sceneSettings.isEnabled(sceneDoc)
+        || !sceneSettings.isMapShineRenderingActive(sceneDoc)
       ) {
         return original.call(this, options, ...rest);
       }

@@ -1389,12 +1389,8 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
     renderer.getDrawingBufferSize(this._tempScreenSize);
     const invW = 1.0 / Math.max(1.0, this._tempScreenSize.x);
     const invH = 1.0 / Math.max(1.0, this._tempScreenSize.y);
-    const mm = window.MapShine?.maskManager;
-    let ropeMaskTex = mm ? mm.getTexture('ropeMask.screen') : null;
-    if (!ropeMaskTex) {
-      const le = window.MapShine?.lightingEffect;
-      ropeMaskTex = le?.ropeMaskTarget?.texture ?? null;
-    }
+    const le = window.MapShine?.lightingEffect;
+    let ropeMaskTex = le?.ropeMaskTarget?.texture ?? null;
     const hasRopeMask = ropeMaskTex ? 1.0 : 0.0;
     const changed = invW !== this._lastInvScreenW
       || invH !== this._lastInvScreenH
@@ -1464,12 +1460,7 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
    */
   _getFlashlightTokenMaskScreenTexture() {
     try {
-      const mm = window.MapShine?.maskManager;
-      let tex = mm?.getTexture?.('tokenMask.screen') ?? null;
-      if (!tex) {
-        tex = window.MapShine?.lightingEffect?.tokenMaskTarget?.texture ?? null;
-      }
-      return tex || null;
+      return window.MapShine?.lightingEffect?.tokenMaskTarget?.texture ?? null;
     } catch (_) {
       return null;
     }

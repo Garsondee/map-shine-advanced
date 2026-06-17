@@ -8,6 +8,7 @@ import {
   createSceneViewProjectionCache,
   updateSceneViewProjectionFromCamera,
 } from '../compositor-v2/scene-view-projection.js';
+import { intersectRects } from './streaming-grid.js';
 
 /** @type {import('../compositor-v2/scene-view-projection.js').SceneViewProjectionCache} */
 let _cache = createSceneViewProjectionCache();
@@ -128,10 +129,33 @@ export function getStableViewRectForMinimap() {
 }
 
 /**
+ * @typedef {{ minX?: number, minY?: number, maxX?: number, maxY?: number, uniform?: number }} StreamingViewPadding
+ */
+
+/**
+ * Normalize padding to per-edge world units.
+ * @param {number|StreamingViewPadding} [padding=0]
+ * @returns {{ minX: number, minY: number, maxX: number, maxY: number }}
+ */
+export function normalizeStreamingViewPadding(padding = 0) {
+  if (typeof padding === 'number') {
+    const pad = Math.max(0, Number(padding) || 0);
+    return { minX: pad, minY: pad, maxX: pad, maxY: pad };
+  }
+  const uniform = Math.max(0, Number(padding?.uniform) || 0);
+  return {
+    minX: Math.max(0, Number(padding?.minX) || uniform),
+    minY: Math.max(0, Number(padding?.minY) || uniform),
+    maxX: Math.max(0, Number(padding?.maxX) || uniform),
+    maxY: Math.max(0, Number(padding?.maxY) || uniform),
+  };
+}
+
+/**
  * View rect for tile streaming — always ticks projection first, then picks the
  * larger of raycast vs stable FOV box so zoom-out never keeps a stale small frustum.
  *
- * @param {number} [padding=0]
+ * @param {number|StreamingViewPadding} [padding=0]
  * @returns {{ minX: number, minY: number, maxX: number, maxY: number }|null}
  */
 export function resolveStreamingViewRect(padding = 0) {
@@ -139,12 +163,12 @@ export function resolveStreamingViewRect(padding = 0) {
     window.MapShine?.sceneComposer?.camera ?? null,
     resolveGroundZ(),
   );
-  const pad = Math.max(0, Number(padding) || 0);
+  const pad = normalizeStreamingViewPadding(padding);
   const expand = (r) => ({
-    minX: r.minX - pad,
-    minY: r.minY - pad,
-    maxX: r.maxX + pad,
-    maxY: r.maxY + pad,
+    minX: r.minX - pad.minX,
+    minY: r.minY - pad.minY,
+    maxX: r.maxX + pad.maxX,
+    maxY: r.maxY + pad.maxY,
   });
   const raycast = getVisibleWorldRect(0);
   const stable = getStableViewRectForMinimap();
@@ -154,6 +178,31 @@ export function resolveStreamingViewRect(padding = 0) {
   if (!stablePad) return raycast;
   const area = (r) => Math.max(1, r.maxX - r.minX) * Math.max(1, r.maxY - r.minY);
   return area(stablePad) > area(raycast) * 1.02 ? stablePad : raycast;
+}
+
+/**
+ * True when a streaming view rect plausibly overlaps scene content.
+ * Rejects stale projection during floor transitions (camera not yet synced).
+ *
+ * @param {{ minX: number, minY: number, maxX: number, maxY: number }|null} viewRect
+ * @param {number} [margin=1.25] Expand scene bounds by this factor for padding tolerance.
+ * @returns {boolean}
+ */
+export function viewRectIntersectsScene(viewRect, margin = 1.25) {
+  if (!viewRect) return false;
+  const scene = getSceneWorldRect();
+  const sw = Math.max(1, scene.maxX - scene.minX);
+  const sh = Math.max(1, scene.maxY - scene.minY);
+  const m = Math.max(1, Number(margin) || 1);
+  const padX = sw * (m - 1) * 0.5;
+  const padY = sh * (m - 1) * 0.5;
+  const expanded = {
+    minX: scene.minX - padX,
+    minY: scene.minY - padY,
+    maxX: scene.maxX + padX,
+    maxY: scene.maxY + padY,
+  };
+  return !!intersectRects(viewRect, expanded);
 }
 
 /**

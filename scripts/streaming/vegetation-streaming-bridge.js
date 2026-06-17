@@ -179,16 +179,23 @@ export function viewIntersectsAnyStreamingCell(gridKey, visibleCells, viewRect) 
 
 /**
  * View padding aligned with {@link TileStreamingManager} cell hysteresis.
- * @returns {number}
+ * @returns {import('./view-projection-service.js').StreamingViewPadding}
  */
 export function resolveVegetationStreamingViewPadding() {
+  try {
+    const manager = getTileStreamingManager();
+    if (manager?.getViewPaddingOptions) {
+      return manager.getViewPaddingOptions();
+    }
+  } catch (_) {}
+
   const budget = getTextureBudgetTracker();
   const cs = budget.getRecommendedTileSize();
   const mp = estimateSceneMegapixels();
   const cellPad = Math.max(256, Math.floor(cs * 0.5));
-  if (mp >= 144) return cellPad;
-  if (mp > 64) return Math.max(cellPad, 384);
-  return Math.max(cellPad, 128);
+  if (mp >= 144) return { uniform: cellPad };
+  if (mp > 64) return { uniform: Math.max(cellPad, 384) };
+  return { uniform: Math.max(cellPad, 128) };
 }
 
 /**

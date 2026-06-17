@@ -1,0 +1,33 @@
+<div class="msa-native-menu">
+  <p class="msa-native-menu__lead">{{localize "MAPSHINE.NativeFoundryRenderingMenuLead"}}</p>
+
+  <div class="msa-native-menu__callout">
+    <p>{{localize "MAPSHINE.NativeFoundryRenderingMenuBody"}}</p>
+    <ul>
+      <li>{{localize "MAPSHINE.NativeFoundryRenderingMenuBullet1"}}</li>
+      <li>{{localize "MAPSHINE.NativeFoundryRenderingMenuBullet2"}}</li>
+      <li>{{localize "MAPSHINE.NativeFoundryRenderingMenuBullet3"}}</li>
+    </ul>
+  </div>
+
+  <div class="form-group">
+    <label class="msa-native-menu__toggle">
+      <input type="checkbox" name="useNativeFoundryRendering" {{#if enabled}}checked{{/if}} />
+      <span>{{localize "MAPSHINE.NativeFoundryRenderingName"}}</span>
+    </label>
+    <p class="notes">{{localize "MAPSHINE.NativeFoundryRenderingHint"}}</p>
+    <p class="msa-native-menu__status" data-native-rendering-status>
+      {{#if enabled}}
+        {{localize "MAPSHINE.NativeFoundryRenderingStatusOn"}}
+      {{else}}
+        {{localize "MAPSHINE.NativeFoundryRenderingStatusOff"}}
+      {{/if}}
+    </p>
+  </div>
+
+  <div class="form-group">
+    <button type="button" data-action="reload">
+      <i class="fas fa-rotate-right"></i> {{localize "MAPSHINE.NativeFoundryRenderingReloadButton"}}
+    </button>
+  </div>
+</div>

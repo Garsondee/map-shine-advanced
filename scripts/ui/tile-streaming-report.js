@@ -7,7 +7,8 @@ import { createLogger } from '../core/log.js';
 import { getTileStreamingManager } from '../streaming/tile-streaming-manager.js';
 import { getTextureBudgetTracker } from '../assets/TextureBudgetTracker.js';
 import { estimateSceneMegapixels } from '../streaming/texture-budget-policy.js';
-import { selectLodFromZoom } from '../streaming/streaming-grid.js';
+import { selectLodFromZoom, resolveStreamingPixelRatio, resolveStreamingZoom } from '../streaming/streaming-grid.js';
+import { getTileDecodePoolStats, getPyramidBakeProgress } from '../streaming/texture-pyramid-builder.js';
 import {
   getSceneRectMeta,
   resolveStreamingViewRect,
@@ -114,6 +115,7 @@ function _summarizeBackgroundGrid(grid, kind) {
     cellSize: grid._cellSize ?? null,
     maxConcurrent: grid._maxConcurrent ?? null,
     inflightCount: grid._inflight?.size ?? 0,
+    coarseBaseReady: grid._coarseBaseReady === true,
     manifest: grid._manifest
       ? {
         sourceWidth: grid._manifest.sourceWidth,
@@ -303,6 +305,16 @@ export function buildTileStreamingReport() {
     visibleCellsInFrustum += g.cells.filter((c) => c.visible && c.hasMap).length;
   }
 
+  const decodePool = getTileDecodePoolStats();
+  /** @type {Record<string, { done: number, total: number, fraction: number }>} */
+  const bakeProgress = {};
+  for (const grid of manager.getGrids?.()?.values?.() ?? []) {
+    const sk = grid._manifest?.sourceKey;
+    if (!sk) continue;
+    const p = getPyramidBakeProgress(sk);
+    if (p) bakeProgress[grid._key ?? sk] = p;
+  }
+
   const report = {
     generatedAt: new Date().toISOString(),
     scene: {
@@ -311,6 +323,8 @@ export function buildTileStreamingReport() {
       sceneMp: mp,
       scenePx: meta ? { w: meta.width, h: meta.height } : null,
       zoom,
+      streamingZoom: resolveStreamingZoom(zoom),
+      pixelRatio: resolveStreamingPixelRatio(),
       zoomLod,
     },
     view: {
@@ -338,9 +352,14 @@ export function buildTileStreamingReport() {
     },
     streaming: {
       managerEnabled: manager._enabled !== false,
+      focalLod: manager.getFocalLod?.() ?? zoomLod,
+      detailTier: manager.getDetailTier?.() ?? 'medium',
+      isPanning: manager.isPanning?.() === true,
       backgroundGridCount: backgroundGrids.length,
       regionGridCount: regionGrids.length,
       heldZoomLod: manager._heldZoomLod ?? null,
+      decodePool,
+      bakeProgress,
       backgroundGrids,
       regionGrids,
       busStreamingTiles,
@@ -486,7 +505,7 @@ export function formatTileStreamingReportText(report) {
   lines.push('=== Map Shine Tile Streaming Report ===');
   lines.push(`Generated: ${report.generatedAt}`);
   lines.push(`Scene: ${report.scene.name ?? '?'} (${report.scene.scenePx?.w ?? '?'}×${report.scene.scenePx?.h ?? '?'}) ${report.scene.sceneMp.toFixed(1)} MP`);
-  lines.push(`Zoom: ${report.scene.zoom.toFixed(3)} → LOD ${report.scene.zoomLod} (held ${report.streaming.heldZoomLod})`);
+  lines.push(`Zoom: ${report.scene.zoom.toFixed(3)} × ${report.scene.pixelRatio?.toFixed(2) ?? '?'} DPR = ${report.scene.streamingZoom?.toFixed(3) ?? '?'} → LOD ${report.scene.zoomLod} (held ${report.streaming.heldZoomLod})`);
   lines.push(`VRAM: ${report.budget.usedMB}/${report.budget.budgetMB} MB (${report.budget.usedPct}%)${report.budget.overBudget ? ' OVER' : ''}`);
   lines.push(`Bus visible floors: 0–${report.bus.visibleMaxFloorIndex}`);
   lines.push(`Grids: ${report.streaming.backgroundGridCount} background, ${report.streaming.regionGridCount} region`);
@@ -523,19 +542,44 @@ export function formatTileStreamingReportText(report) {
 }
 
 /**
- * Log report to console (collapsed group + tables). Stores last report on MapShine.
- * @returns {object} report
+ * Build report, format plain text, and store on MapShine globals (no console dump).
+ * @returns {{ report: object, text: string }}
  */
-export function logTileStreamingReport() {
+export function buildTileStreamingReportSnapshot() {
   const report = buildTileStreamingReport();
   const text = formatTileStreamingReportText(report);
-
   try {
     window.MapShine = window.MapShine || {};
     window.MapShine.lastTileStreamingReport = report;
     window.MapShine.lastTileStreamingReportText = text;
   } catch (_) {}
+  return { report, text };
+}
 
+/**
+ * Build report and copy plain text to the clipboard.
+ * @returns {Promise<{ report: object, text: string, copied: boolean }>}
+ */
+export async function copyTileStreamingReportToClipboard() {
+  const { report, text } = buildTileStreamingReportSnapshot();
+  let copied = false;
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch (err) {
+      log.warn('Tile streaming report clipboard copy failed', err);
+    }
+  }
+  return { report, text, copied };
+}
+
+/**
+ * Log report to console (collapsed group + tables). Stores last report on MapShine.
+ * @returns {object} report
+ */
+export function logTileStreamingReport() {
+  const { report, text } = buildTileStreamingReportSnapshot();
   const warnBadge = report.warnings.length ? ` ⚠ ${report.warnings.length} warning(s)` : '';
   console.groupCollapsed(
     `%cMap Shine Tile Streaming Report${warnBadge}`,

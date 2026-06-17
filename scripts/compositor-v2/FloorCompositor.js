@@ -1392,6 +1392,7 @@ export class FloorCompositor {
     const camera = this.camera;
     if (!camera || !renderer || !targetRT || !keepRoots?.size) return false;
 
+    const THREE = window.THREE;
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
     const prevDepthTest = renderer.depthTest;
@@ -1402,7 +1403,7 @@ export class FloorCompositor {
     renderer.depthTest = false;
     renderer.depthWrite = false;
     let drew = false;
-    const prevClearColor = options.clearTransparent ? new THREE.Color() : null;
+    const prevClearColor = (options.clearTransparent && THREE) ? new THREE.Color() : null;
     const prevClearAlpha = options.clearTransparent ? renderer.getClearAlpha() : 0;
     if (options.clearTransparent) {
       renderer.getClearColor(prevClearColor);
@@ -1412,7 +1413,6 @@ export class FloorCompositor {
     const streamScissor = options.vegetationOnly === true
       ? this._resolveVegetationStreamingScissor(targetRT)
       : null;
-    const THREE = window.THREE;
     const prevScissorTest = (typeof renderer.getScissorTest === 'function')
       ? renderer.getScissorTest()
       : false;
@@ -1981,7 +1981,7 @@ export class FloorCompositor {
    * Initialize the compositor. Currently just sets up the bus and the
    * floor-change hook. Render targets will be added when effects need them.
    * @param {object} [options]
-   * @param {(label: string, index: number, total: number) => void} [options.onProgress]
+   * @param {(index: number, total: number) => void} [options.onProgress]
    *   Optional callback fired after each effect is initialized.
    *   `index` is 1-based; `total` is the expected total number of init steps.
    * @param {{maskIds?: string[]|Set<string>}|null} [options.effectHints]
@@ -1994,9 +1994,9 @@ export class FloorCompositor {
     // Total number of named effect init steps in this method — update when adding/removing effects.
     const TOTAL_EFFECT_INITS = 41;
     let _effectInitIndex = 0;
-    const _reportProgress = (label) => {
+    const _reportProgress = () => {
       if (!_onProgress) return;
-      try { _onProgress(label, ++_effectInitIndex, TOTAL_EFFECT_INITS); } catch (_) {}
+      try { _onProgress(++_effectInitIndex, TOTAL_EFFECT_INITS); } catch (_) {}
     };
     const THREE = window.THREE;
     if (!THREE || !this.renderer) {
@@ -2641,7 +2641,7 @@ export class FloorCompositor {
       } catch (err) {
         log.warn(`FloorCompositor: ${label} initialize failed:`, err);
       }
-      _reportProgress(label);
+      _reportProgress();
       await yieldToMain();
     };
 
@@ -6331,10 +6331,6 @@ export class FloorCompositor {
 
     if (!compositor) {
       if (bundleMask) return { texture: bundleMask, floorKey: 'bundle' };
-      if (!skipGroundGlobalFallback) {
-        const mmMask = window.MapShine?.maskManager?.getTexture?.('outdoors.scene') ?? null;
-        if (mmMask) return { texture: mmMask, floorKey: 'maskManager' };
-      }
       if (!allowWeatherRoofMap) {
         const regMask = window.MapShine?.effectMaskRegistry?.getMask?.('outdoors') ?? null;
         if (regMask) return { texture: regMask, floorKey: 'registry' };
@@ -6366,11 +6362,6 @@ export class FloorCompositor {
 
     if (allowBundleFallback && bundleMask) {
       return { texture: bundleMask, floorKey: 'bundle' };
-    }
-
-    if (!skipGroundGlobalFallback) {
-      const mmMask = window.MapShine?.maskManager?.getTexture?.('outdoors.scene') ?? null;
-      if (mmMask) return { texture: mmMask, floorKey: 'maskManager' };
     }
 
     if (!allowWeatherRoofMap) {
@@ -7362,9 +7353,6 @@ export class FloorCompositor {
       (m) => (m?.id === 'fire' || m?.type === 'fire')
     )?.texture ?? null;
     if (bundleTex) return { fireMask: bundleTex, fireMaskSource: 'bundle-mask' };
-
-    const managerTex = window.MapShine?.maskManager?.getTexture?.('fire.scene') ?? null;
-    if (managerTex) return { fireMask: managerTex, fireMaskSource: 'mask-manager' };
 
     const runtimeTex = fire?.buildHeatDistortionMaskTexture?.() ?? null;
     if (runtimeTex) return { fireMask: runtimeTex, fireMaskSource: 'fire-runtime-clusters' };

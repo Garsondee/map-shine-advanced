@@ -685,9 +685,6 @@ function outdoorsRuntimeLoadedCount() {
   try {
     if (globalThis.weatherController?.roofMap) return 1;
   } catch (_) {}
-  try {
-    if (window.MapShine?.maskManager?.getTexture?.('outdoors.scene')) return 1;
-  } catch (_) {}
   return 0;
 }
 

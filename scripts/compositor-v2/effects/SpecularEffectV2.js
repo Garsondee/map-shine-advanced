@@ -1125,12 +1125,6 @@ export class SpecularEffectV2 {
           if (roofTex) singleFloorRoofSource = 'sceneComposerBundle';
         }
         if (!roofTex) {
-          const mmMask = window.MapShine?.maskManager?.getTexture?.('outdoors.scene') ?? null;
-          roofTex = mmMask;
-          recordAttempt('maskManager.getTexture(outdoors.scene)', roofTex, 'outdoors.scene');
-          if (roofTex) singleFloorRoofSource = 'maskManager.outdoors.scene';
-        }
-        if (!roofTex) {
           const regMask = window.MapShine?.effectMaskRegistry?.getMask?.('outdoors') ?? null;
           roofTex = regMask;
           recordAttempt('effectMaskRegistry.getMask(outdoors)', roofTex, 'outdoors');
@@ -1312,11 +1306,7 @@ export class SpecularEffectV2 {
     // Prevent floor specular overlays from brightening on top of tokens.
     // tokenMask.screen is authored in screen UV space (alpha=1 inside token silhouette).
     try {
-      const mm = window.MapShine?.maskManager;
-      let tokenMaskTex = mm?.getTexture?.('tokenMask.screen') ?? null;
-      if (!tokenMaskTex) {
-        tokenMaskTex = window.MapShine?.lightingEffect?.tokenMaskTarget?.texture ?? null;
-      }
+      let tokenMaskTex = window.MapShine?.lightingEffect?.tokenMaskTarget?.texture ?? null;
       u.uTokenMask.value = tokenMaskTex || this._fallbackBlack;
       u.uHasTokenMask.value = !!tokenMaskTex;
     } catch (_) {

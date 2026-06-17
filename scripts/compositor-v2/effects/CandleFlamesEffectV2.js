@@ -1237,43 +1237,44 @@ export class CandleFlamesEffectV2 {
     const clipScale = Math.max(0.1, Number(this.params.wallClipRadiusScale) || 1.0);
 
     for (const entry of this._glowBuckets.values()) {
-      const lm = entry?.lightMesh;
-      const u = lm?.material?.uniforms;
-      if (!u?.uColor?.value) continue;
+      this._forEachGlowLightMesh(entry, (lm) => {
+        const u = lm?.material?.uniforms;
+        if (!u?.uColor?.value) return;
 
-      const outdoor = entry.outdoor ?? 1.0;
-      const glow = this._resolveGlowParams(null, outdoor);
-      const radiusPx = Math.max(32, glow.radiusPx * clipScale);
-      const innerRadiusPx = Math.max(1, radiusPx * glow.innerScale);
+        const outdoor = entry.outdoor ?? 1.0;
+        const glow = this._resolveGlowParams(null, outdoor);
+        const radiusPx = Math.max(32, glow.radiusPx * clipScale);
+        const innerRadiusPx = Math.max(1, radiusPx * glow.innerScale);
 
-      lm.setOuterRadiusPx?.(radiusPx);
-      lm.setInnerRadiusPx?.(innerRadiusPx);
-      lm.setFalloffExponent?.(glow.falloffExponent);
-      lm.setEdgeSoftness?.(glow.edgeSoftness);
+        lm.setOuterRadiusPx?.(radiusPx);
+        lm.setInnerRadiusPx?.(innerRadiusPx);
+        lm.setFalloffExponent?.(glow.falloffExponent);
+        lm.setEdgeSoftness?.(glow.edgeSoftness);
 
-      if (falloffEdgeOnly) continue;
+        if (falloffEdgeOnly) return;
 
-      const indoorMul = this._computeGlowIndoorNightBoost(outdoor);
-      const outdoorMul = this._computeGlowOutdoorNightBoost(outdoor);
-      const visualMul = Math.max(
-        0.0,
-        glow.intensity
-          * Math.max(0.25, entry.intensity)
-          * dayNightMul
-          * indoorMul
-          * outdoorMul
-      );
+        const indoorMul = this._computeGlowIndoorNightBoost(outdoor);
+        const outdoorMul = this._computeGlowOutdoorNightBoost(outdoor);
+        const visualMul = Math.max(
+          0.0,
+          glow.intensity
+            * Math.max(0.25, entry.intensity)
+            * dayNightMul
+            * indoorMul
+            * outdoorMul
+        );
 
-      const glowColor = this._computeGlowColor(glow.warmth);
-      u.uColor.value.setRGB(glowColor.r, glowColor.g, glowColor.b);
-      lm.setAchromaticRgb?.(false);
+        const glowColor = this._computeGlowColor(glow.warmth);
+        u.uColor.value.setRGB(glowColor.r, glowColor.g, glowColor.b);
+        lm.setAchromaticRgb?.(false);
 
-      const emissionGain = this._computeGlowEmissionGain(visualMul, glow.cancel);
-      if (typeof lm.setEmissionGain === 'function') {
-        lm.setEmissionGain(emissionGain);
-      } else if (u.uEmissionGain) {
-        u.uEmissionGain.value = emissionGain;
-      }
+        const emissionGain = this._computeGlowEmissionGain(visualMul, glow.cancel);
+        if (typeof lm.setEmissionGain === 'function') {
+          lm.setEmissionGain(emissionGain);
+        } else if (u.uEmissionGain) {
+          u.uEmissionGain.value = emissionGain;
+        }
+      });
     }
   }
 
@@ -1338,10 +1339,11 @@ export class CandleFlamesEffectV2 {
     return 1.0 + boost * outdoor * darkness;
   }
 
-  /** Clip glow to physical wall segments (blocks light-pass-through / window walls). */
+  /** Clip glow using Foundry light rules (solid walls block; windows / proximity pass through). */
   _buildGlowWallClipOptions() {
     const opts = {
-      blockGeometry: true,
+      sense: 'light',
+      blockGeometry: false,
       // Smooth glow pool boundary (default VisionPolygonComputer uses 32).
       circleSegments: 96,
     };
@@ -1359,6 +1361,27 @@ export class CandleFlamesEffectV2 {
     } catch (_) {
     }
     return opts;
+  }
+
+  /**
+   * Resolve one or two wall-clip origins when a candle sits on a blocking wall.
+   * @private
+   * @returns {Array<{x:number,y:number}>}
+   */
+  _resolveGlowClipCenters(centerFoundry, walls, wallClipOptions) {
+    const centers = [{ x: centerFoundry.x, y: centerFoundry.y }];
+    if (!this.params.wallClipEnabled) return centers;
+
+    try {
+      const probes = this._visionComputer.findWallBisectProbeCenters(
+        centerFoundry,
+        walls,
+        wallClipOptions
+      );
+      if (probes?.length === 2) return probes;
+    } catch (_) {}
+
+    return centers;
   }
 
   _createFlameMesh() {
@@ -1809,19 +1832,32 @@ export class CandleFlamesEffectV2 {
     if (this._attrColor) this._attrColor.needsUpdate = true;
   }
 
+  /** @private */
+  _disposeGlowBucketEntry(entry) {
+    const meshes = entry?.lightMeshes?.length
+      ? entry.lightMeshes
+      : (entry?.lightMesh ? [entry.lightMesh] : []);
+    for (const lm of meshes) {
+      try { lm?.dispose?.(); } catch (_) {}
+      try { lm?.mesh?.removeFromParent?.(); } catch (_) {}
+    }
+  }
+
+  /** @private */
+  _forEachGlowLightMesh(entry, fn) {
+    if (!entry || typeof fn !== 'function') return;
+    if (entry.lightMeshes?.length) {
+      for (const lm of entry.lightMeshes) fn(lm);
+      return;
+    }
+    if (entry.lightMesh) fn(entry.lightMesh);
+  }
+
   _clearGlowBuckets() {
     if (!this._glowGroup) return;
 
     for (const entry of this._glowBuckets.values()) {
-      try {
-        entry?.lightMesh?.dispose?.();
-      } catch (_) {
-      }
-
-      try {
-        entry?.lightMesh?.mesh?.removeFromParent?.();
-      } catch (_) {
-      }
+      this._disposeGlowBucketEntry(entry);
     }
 
     this._glowBuckets.clear();
@@ -1896,66 +1932,79 @@ export class CandleFlamesEffectV2 {
 
       const outdoor = Math.max(0, Math.min(1, Number(c.outdoor) ?? 1));
       const glow = this._resolveGlowParams(null, outdoor);
-      const cxFoundry = c.cxFoundry;
-      const cyFoundry = c.cyFoundry;
+      const centerFoundry = { x: c.cxFoundry, y: c.cyFoundry };
       const clipScale = Math.max(0.1, Number(this.params.wallClipRadiusScale) || 1.0);
       const radiusPx = Math.max(32, glow.radiusPx * clipScale);
       const clipRadiusPx = radiusPx;
 
-      let foundryPoly = null;
-      if (this.params.wallClipEnabled) {
-        try {
-          foundryPoly = this._visionComputer.compute(
-            { x: cxFoundry, y: cyFoundry },
-            clipRadiusPx,
-            walls,
-            sceneBounds,
-            wallClipOptions
-          );
-        } catch (_) {
-          foundryPoly = null;
+      const clipCenters = this._resolveGlowClipCenters(centerFoundry, walls, wallClipOptions);
+      const lightMeshes = [];
+
+      for (const clipCenter of clipCenters) {
+        let foundryPoly = null;
+        if (this.params.wallClipEnabled) {
+          try {
+            foundryPoly = this._visionComputer.compute(
+              clipCenter,
+              clipRadiusPx,
+              walls,
+              sceneBounds,
+              wallClipOptions
+            );
+          } catch (_) {
+            foundryPoly = null;
+          }
+        }
+
+        let worldPoints = null;
+        if (foundryPoly && foundryPoly.length >= 6) {
+          worldPoints = [];
+          for (let i = 0; i < foundryPoly.length; i += 2) {
+            const wp = Coordinates.toWorld(foundryPoly[i], foundryPoly[i + 1]);
+            worldPoints.push(wp.x, wp.y);
+          }
+        } else if (this.params.wallClipEnabled) {
+          if (outdoor < 0.45) {
+            // Indoor: no circle fallback — prevents wall bleed-through.
+            continue;
+          }
+          // Outdoor: radial pool when wall clip fails (open yard / partial geometry).
+        }
+
+        const centerWorld = clipCenters.length > 1
+          ? (() => {
+            const wp = Coordinates.toWorld(clipCenter.x, clipCenter.y);
+            return new THREE.Vector2(wp.x, wp.y);
+          })()
+          : new THREE.Vector2(c.cxWorld, c.cyWorld);
+
+        const innerRadiusPx = Math.max(1, radiusPx * glow.innerScale);
+
+        const lm = new LightMesh(centerWorld, radiusPx, c.color, {
+          innerRadiusPx,
+          worldPoints,
+          falloffExponent: glow.falloffExponent,
+          achromaticRgb: false,
+          edgeSoftness: glow.edgeSoftness,
+        });
+
+        lm.setAchromaticRgb?.(false);
+        lm.setEmissionGain?.(0);
+
+        if (lm?.mesh) {
+          lm.mesh.renderOrder = 90;
+          this._glowGroup.add(lm.mesh);
+          lightMeshes.push(lm);
         }
       }
 
-      const centerWorld = new THREE.Vector2(c.cxWorld, c.cyWorld);
-
-      let worldPoints = null;
-      if (foundryPoly && foundryPoly.length >= 6) {
-        worldPoints = [];
-        for (let i = 0; i < foundryPoly.length; i += 2) {
-          const wp = Coordinates.toWorld(foundryPoly[i], foundryPoly[i + 1]);
-          worldPoints.push(wp.x, wp.y);
-        }
-      } else if (this.params.wallClipEnabled) {
-        if (outdoor < 0.45) {
-          // Indoor: no circle fallback — prevents wall bleed-through.
-          continue;
-        }
-        // Outdoor: radial pool when wall clip fails (open yard / partial geometry).
-      }
-
-      const innerRadiusPx = Math.max(1, radiusPx * glow.innerScale);
-
-      const lm = new LightMesh(centerWorld, radiusPx, c.color, {
-        innerRadiusPx,
-        worldPoints,
-        falloffExponent: glow.falloffExponent,
-        achromaticRgb: false,
-        edgeSoftness: glow.edgeSoftness,
-      });
-
-      lm.setAchromaticRgb?.(false);
-      lm.setEmissionGain?.(0);
-
-      if (lm?.mesh) {
-        lm.mesh.renderOrder = 90;
-        this._glowGroup.add(lm.mesh);
-      }
+      if (!lightMeshes.length) continue;
 
       const baseColor = new THREE.Color(c.color.r, c.color.g, c.color.b);
 
       this._glowBuckets.set(c.key, {
-        lightMesh: lm,
+        lightMesh: lightMeshes[0],
+        lightMeshes,
         baseColor,
         intensity: c.intensity,
         phase: c.phase,
@@ -1982,10 +2031,6 @@ export class CandleFlamesEffectV2 {
     const dayNightMul = this._computeGlowDayNightIntensityMul();
 
     for (const entry of this._glowBuckets.values()) {
-      const lm = entry?.lightMesh;
-      const u = lm?.material?.uniforms;
-      if (!u?.uColor?.value) continue;
-
       const phase = entry.phase || 0;
       const outdoor = entry.outdoor ?? 1.0;
       const glow = this._resolveGlowParams(null, outdoor);
@@ -1996,11 +2041,6 @@ export class CandleFlamesEffectV2 {
       const clipScale = Math.max(0.1, Number(this.params.wallClipRadiusScale) || 1.0);
       const radiusPx = Math.max(32, glow.radiusPx * clipScale);
       const innerRadiusPx = Math.max(1, radiusPx * glow.innerScale);
-
-      lm.setOuterRadiusPx?.(radiusPx);
-      lm.setInnerRadiusPx?.(innerRadiusPx);
-      lm.setFalloffExponent?.(glow.falloffExponent);
-      lm.setEdgeSoftness?.(glow.edgeSoftness);
 
       // Stable per-bucket jitter so nearby candles can still share a glow bucket,
       // but buckets won't flicker in perfect sync.
@@ -2037,16 +2077,27 @@ export class CandleFlamesEffectV2 {
       );
 
       const glowColor = this._computeGlowColor(glow.warmth);
-      // Hue only in uColor — intensity/flicker scales uEmissionGain (matches point-light buffer model).
-      u.uColor.value.setRGB(glowColor.r, glowColor.g, glowColor.b);
-      lm.setAchromaticRgb?.(false);
-
       const emissionGain = this._computeGlowEmissionGain(visualMul, glow.cancel);
-      if (typeof lm.setEmissionGain === 'function') {
-        lm.setEmissionGain(emissionGain);
-      } else if (lm.material?.uniforms?.uEmissionGain) {
-        lm.material.uniforms.uEmissionGain.value = emissionGain;
-      }
+
+      this._forEachGlowLightMesh(entry, (lm) => {
+        const u = lm?.material?.uniforms;
+        if (!u?.uColor?.value) return;
+
+        lm.setOuterRadiusPx?.(radiusPx);
+        lm.setInnerRadiusPx?.(innerRadiusPx);
+        lm.setFalloffExponent?.(glow.falloffExponent);
+        lm.setEdgeSoftness?.(glow.edgeSoftness);
+
+        // Hue only in uColor — intensity/flicker scales uEmissionGain (matches point-light buffer model).
+        u.uColor.value.setRGB(glowColor.r, glowColor.g, glowColor.b);
+        lm.setAchromaticRgb?.(false);
+
+        if (typeof lm.setEmissionGain === 'function') {
+          lm.setEmissionGain(emissionGain);
+        } else if (lm.material?.uniforms?.uEmissionGain) {
+          lm.material.uniforms.uEmissionGain.value = emissionGain;
+        }
+      });
     }
   }
 }

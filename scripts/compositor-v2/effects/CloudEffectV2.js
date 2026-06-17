@@ -220,8 +220,12 @@ export class CloudEffectV2 {
     this._shadowRawCacheKey = '';
     /** Norm-UV / fade quantize steps for shadow motion signature (see `_computeShadowMotionSignature`). */
     // Coarser buckets → fewer raw shadow RT redraws when sprites drift slowly (perf).
+    // Sub-bucket drift is compensated in the shadow mask shader via `_shadowCacheMotionRef`.
     this._shadowMotionUStep = 0.028;
     this._shadowMotionFadeStep = 0.2;
+    /** Average sprite norm UV when `_shadowRawCacheKey` was last rendered (for smooth UV offset). */
+    this._shadowCacheMotionRef = { normU: 0.5, normV: 0.5 };
+    this._lastShadowMotionUvOffset = { x: 0, y: 0 };
     this._shadowMaskCacheKey = '';
     this._cloudTopCacheKey = '';
     /** World-space bucket size for view-bound driven shadow mask UVs. */
@@ -1045,7 +1049,13 @@ export class CloudEffectV2 {
       const rawCacheKey = this._composeShadowRawCacheKey(staticKey, motionSig);
       const rawCacheHit = rawCacheKey === this._shadowRawCacheKey && !!this._shadowRawCacheKey;
       const maskKey = this._computeShadowMaskCacheKey(staticKey);
-      const maskCacheHit = rawCacheHit && maskKey === this._shadowMaskCacheKey && !!this._shadowMaskCacheKey;
+      this._updateShadowMaskUniforms();
+      const shadowMotionOffsetActive = Math.abs(this._lastShadowMotionUvOffset.x) > 1e-6
+        || Math.abs(this._lastShadowMotionUvOffset.y) > 1e-6;
+      const maskCacheHit = rawCacheHit
+        && maskKey === this._shadowMaskCacheKey
+        && !!this._shadowMaskCacheKey
+        && !shadowMotionOffsetActive;
       const cloudTopKey = this._computeCloudTopCacheKey(staticKey, topFade, motionSig);
       const animatedCloudTop = this._isAnimatedCloudTop();
       const cloudTopCacheHit = !animatedCloudTop && cloudTopKey === this._cloudTopCacheKey && !!this._cloudTopCacheKey;
@@ -1068,7 +1078,6 @@ export class CloudEffectV2 {
         else this._shadowCacheStats.cloudTopMiss++;
       }
 
-      this._updateShadowMaskUniforms();
       this._endPerfSpan(_perfToken);
 
       if (rawCacheHit) {
@@ -1079,6 +1088,18 @@ export class CloudEffectV2 {
         try {
           this._renderShadows(renderer);
           this._shadowRawCacheKey = rawCacheKey;
+          const motionRef = this._computeShadowMotionReference();
+          this._shadowCacheMotionRef.normU = motionRef.normU;
+          this._shadowCacheMotionRef.normV = motionRef.normV;
+          // The raw RT is now rendered at the exact current sprite positions, so the
+          // smoothing offset must reset to zero — otherwise `_applyShadowMasks` below
+          // would re-apply the stale (pre-render) offset to an already-aligned RT,
+          // producing a per-re-render snap/twitch. See _computeShadowMotionUvOffset.
+          this._lastShadowMotionUvOffset.x = 0;
+          this._lastShadowMotionUvOffset.y = 0;
+          if (this._shadowMaskMat?.uniforms?.uShadowUvOffset?.value?.set) {
+            this._shadowMaskMat.uniforms.uShadowUvOffset.value.set(0, 0);
+          }
           this._shadowMaskCacheKey = '';
           this._cloudTopCacheKey = '';
         } finally {
@@ -1187,6 +1208,60 @@ export class CloudEffectV2 {
     this._shadowRawCacheKey = '';
     this._shadowMaskCacheKey = '';
     this._cloudTopCacheKey = '';
+    this._shadowCacheMotionRef.normU = 0.5;
+    this._shadowCacheMotionRef.normV = 0.5;
+    this._lastShadowMotionUvOffset.x = 0;
+    this._lastShadowMotionUvOffset.y = 0;
+  }
+
+  /**
+   * Opacity-weighted centroid of visible sprite norm UV — tracks bulk wind drift
+   * between shadow RT cache hits. Weighting by fade keeps recycling sprites (which
+   * teleport far upwind while invisible) from yanking the reference and snapping the
+   * cached shadow; their pull grows smoothly only as they fade back in.
+   * @private
+   * @returns {{ normU: number, normV: number }}
+   */
+  _computeShadowMotionReference() {
+    let sumU = 0;
+    let sumV = 0;
+    let weightSum = 0;
+    for (const sprite of this._cloudSprites) {
+      if (!sprite?.mesh.visible) continue;
+      const w = Math.max(0, Number(sprite.fadeMul ?? 1));
+      if (w <= 1e-4) continue;
+      sumU += (Number(sprite.normU) || 0) * w;
+      sumV += (Number(sprite.normV) || 0) * w;
+      weightSum += w;
+    }
+    if (weightSum <= 1e-4) return { normU: 0.5, normV: 0.5 };
+    return { normU: sumU / weightSum, normV: sumV / weightSum };
+  }
+
+  /**
+   * Capture-UV shift that aligns a cached raw shadow RT with current sprite positions.
+   * @private
+   * @returns {{ x: number, y: number }}
+   */
+  _computeShadowMotionUvOffset() {
+    if (!this._shadowRawCacheKey) return { x: 0, y: 0 };
+
+    const cached = this._shadowCacheMotionRef;
+    const current = this._computeShadowMotionReference();
+    const du = current.normU - cached.normU;
+    const dv = current.normV - cached.normV;
+    if (Math.abs(du) < 1e-9 && Math.abs(dv) < 1e-9) return { x: 0, y: 0 };
+
+    this._syncCaptureBounds();
+    const captureW = Math.max(1e-5, this._captureBounds.maxX - this._captureBounds.minX);
+    const captureH = Math.max(1e-5, this._captureBounds.maxY - this._captureBounds.minY);
+    const geom = this._sceneGeometry;
+    const sceneW = Math.max(1, geom?.sceneW ?? 4000);
+    const sceneH = Math.max(1, geom?.sceneH ?? 3000);
+    return {
+      x: (du * sceneW) / captureW,
+      y: (-dv * sceneH) / captureH,
+    };
   }
 
   /**
@@ -2081,6 +2156,13 @@ export class CloudEffectV2 {
     const anyTex = this._outdoorsMasks.find((t) => !!t) ?? this._outdoorsMask ?? null;
     u.uOutdoorsMaskFlipY.value = anyTex?.flipY ? 1.0 : 0.0;
     u.tShadowRaw.value = this._shadowRawRT?.texture ?? null;
+
+    const motionOffset = this._computeShadowMotionUvOffset();
+    this._lastShadowMotionUvOffset.x = motionOffset.x;
+    this._lastShadowMotionUvOffset.y = motionOffset.y;
+    if (u.uShadowUvOffset?.value?.set) {
+      u.uShadowUvOffset.value.set(motionOffset.x, motionOffset.y);
+    }
   }
 
   /** @private */

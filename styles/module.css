@@ -3072,6 +3072,76 @@ body.msa-level-transition-active #loading-text {
   background: rgba(255, 255, 255, 0.16);
 }
 
+.msa-native-menu {
+  padding: 8px 4px 4px;
+}
+
+.msa-native-menu__lead {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.45;
+  font-weight: 600;
+}
+
+.msa-native-menu__callout {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 196, 96, 0.35);
+  background: rgba(255, 196, 96, 0.08);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.msa-native-menu__callout p {
+  margin: 0 0 8px;
+}
+
+.msa-native-menu__callout ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.msa-native-menu__callout li + li {
+  margin-top: 4px;
+}
+
+.msa-native-menu__toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.msa-native-menu__toggle input {
+  margin-top: 2px;
+}
+
+.msa-native-menu__status {
+  margin: 8px 0 0;
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.msa-native-menu button[data-action="reload"] {
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.1);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.msa-native-menu button[data-action="reload"]:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
 #map-shine-player-light-picker {
   position: fixed;
   left: 50%;

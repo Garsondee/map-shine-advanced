@@ -28,6 +28,8 @@ import {
   collectSilhouetteEdgePixels,
   pickEvenlyPerComponentEdges
 } from './RoofDripEdgeSampling.js';
+import { getStreamingEffectGateState, shouldRunExpensiveEffects } from '../streaming/streaming-detail-api.js';
+import { applyViewBoundsToUvShape } from '../streaming/particle-cell-gate.js';
 import { WorldVolumeKillBehavior } from './world-volume-kill-behavior.js';
 
 const log = createLogger('WeatherParticles');
@@ -7008,6 +7010,13 @@ export class WeatherParticles {
       this.ashEmberSystem.emitter.position.x = emitCX;
       this.ashEmberSystem.emitter.position.y = emitCY;
     }
+
+    try {
+      applyViewBoundsToUvShape(this.rainSystem?.emitterShape, 512);
+      applyViewBoundsToUvShape(this.snowSystem?.emitterShape, 512);
+      applyViewBoundsToUvShape(this.ashSystem?.emitterShape, 512);
+      applyViewBoundsToUvShape(this.ashEmberSystem?.emitterShape, 512);
+    } catch (_) {}
   }
 
   update(dt, sceneBoundsVec4) {
@@ -7098,8 +7107,11 @@ export class WeatherParticles {
     const zoom = sceneComposer?.currentZoom || 1.0;
     const splashZoomLod = (zoom < 1.0) ? Math.max(0.15, zoom) : 1.0;
     const splashGlobalScale = Number.isFinite(ms?.weatherSplashScale) ? Math.max(0.0, ms.weatherSplashScale) : 1.0;
-    const splashEmissionScale = splashGlobalScale * splashZoomLod * splashZoomLod;
-    const spawnGfx = readGraphicsParticleSpawnScale();
+    const streamGate = getStreamingEffectGateState();
+    const streamingParticleScale = streamGate.particleScale;
+    const streamingExpensiveOk = shouldRunExpensiveEffects(streamGate.tier);
+    const splashEmissionScale = splashGlobalScale * splashZoomLod * splashZoomLod * streamingParticleScale;
+    const spawnGfx = readGraphicsParticleSpawnScale() * streamingParticleScale;
 
     const dbgKey = `${debugDisableWeatherSplashes ? 1 : 0}|${debugDisableWeatherFoam ? 1 : 0}|${debugDisableWeatherBehaviors ? 1 : 0}`;
     if (dbgKey !== this._lastDebugKey) {
@@ -7230,22 +7242,14 @@ export class WeatherParticles {
       try {
         if (Number.isFinite(waterParams?.maskFlipY)) {
           waterFlipV = waterParams.maskFlipY > 0.5;
+        } else if (typeof waterTex?.flipY === 'boolean') {
+          // THREE.Texture.flipY refers to how the texture is uploaded/sampled in WebGL.
+          // Our mask UVs (uvMask) are authored in scene-UV space (Y-down), so when a texture
+          // has flipY=false (common for masks we force to avoid extra flips), we must flip V
+          // ourselves to sample it correctly.
+          waterFlipV = waterTex.flipY === false;
         } else {
-          // Prefer MaskManager metadata when available; it represents the correct scene-UV sampling
-          // orientation for the authored mask (and may account for pre-flipped ImageBitmap decode).
-          const mm = window.MapShine?.maskManager;
-          const rec = mm?.getRecord ? mm.getRecord('water.scene') : null;
-          if (rec && typeof rec.uvFlipY === 'boolean') {
-            waterFlipV = rec.uvFlipY;
-          } else if (typeof waterTex?.flipY === 'boolean') {
-            // THREE.Texture.flipY refers to how the texture is uploaded/sampled in WebGL.
-            // Our mask UVs (uvMask) are authored in scene-UV space (Y-down), so when a texture
-            // has flipY=false (common for masks we force to avoid extra flips), we must flip V
-            // ourselves to sample it correctly.
-            waterFlipV = waterTex.flipY === false;
-          } else {
-            waterFlipV = false;
-          }
+          waterFlipV = false;
         }
         // Debug escape hatch: force invert if needed for a given scene.
         if (waterParams?.foamPlumeDebugFlipV === true) waterFlipV = !waterFlipV;
@@ -7547,18 +7551,7 @@ export class WeatherParticles {
     }
 
     // Update roof/outdoors texture and mask state from WeatherController
-    let roofTex = weatherController.roofMap || null;
-    if (!roofTex) {
-      try {
-        const mm = window.MapShine?.maskManager;
-        const rec = mm?.getRecord ? mm.getRecord('outdoors.scene') : null;
-        if (rec?.texture) {
-          roofTex = rec.texture;
-          if (weatherController?.setRoofMap) weatherController.setRoofMap(roofTex);
-        }
-      } catch (e) {
-      }
-    }
+    const roofTex = weatherController.roofMap || null;
     this._roofTexture = roofTex;
     
     // DUAL-MASK SYSTEM:
@@ -7582,7 +7575,6 @@ export class WeatherParticles {
     let screenWidth = 1920;
     let screenHeight = 1080;
     try {
-      const mm = window.MapShine?.maskManager;
       const fc = window.MapShine?.floorCompositorV2 ?? window.MapShine?.effectComposer?._floorCompositorV2;
       const ose = fc?._overheadShadowEffect;
       const rainOcclusionBlock = ose && ose.rainOcclusionBlockTexture ? ose.rainOcclusionBlockTexture : null;
@@ -7597,18 +7589,11 @@ export class WeatherParticles {
           screenHeight = rt.height;
         }
       } else {
-        const rec = mm ? mm.getRecord('weatherRoofAlpha.screen') : null;
-        if (rec && rec.texture) {
-          roofAlphaTexture = rec.texture;
-          screenWidth = rec.width || 1920;
-          screenHeight = rec.height || 1080;
-        } else {
-          const le = window.MapShine?.lightingEffect;
-          if (le && le.weatherRoofAlphaTarget && le.weatherRoofAlphaTarget.texture) {
-            roofAlphaTexture = le.weatherRoofAlphaTarget.texture;
-            screenWidth = le.weatherRoofAlphaTarget.width || 1920;
-            screenHeight = le.weatherRoofAlphaTarget.height || 1080;
-          }
+        const le = window.MapShine?.lightingEffect;
+        if (le && le.weatherRoofAlphaTarget && le.weatherRoofAlphaTarget.texture) {
+          roofAlphaTexture = le.weatherRoofAlphaTarget.texture;
+          screenWidth = le.weatherRoofAlphaTarget.width || 1920;
+          screenHeight = le.weatherRoofAlphaTarget.height || 1080;
         }
       }
     } catch (e) {
@@ -7640,12 +7625,8 @@ export class WeatherParticles {
 
     let cloudShadowTexture = null;
     try {
-      const mm = window.MapShine?.maskManager;
-      cloudShadowTexture = mm ? mm.getTexture('cloudShadow.screen') : null;
-      if (!cloudShadowTexture) {
-        const cloud = window.MapShine?.cloudEffectV2;
-        cloudShadowTexture = cloud?.cloudShadowTarget?.texture || null;
-      }
+      const cloud = window.MapShine?.cloudEffectV2;
+      cloudShadowTexture = cloud?.cloudShadowTarget?.texture || null;
     } catch (_) {
       cloudShadowTexture = null;
     }
@@ -7930,7 +7911,7 @@ export class WeatherParticles {
       if (dripEmission && typeof dripEmission.value === 'number') {
         let dripRate = 0;
         let dripReason = 'emit:off';
-        if (dripOn && !suppressPrecip) {
+        if (dripOn && !suppressPrecip && streamingExpensiveOk) {
           const emR = _roofDripTuningVal('emissionRainMult', ROOF_DRIP_EMISSION_RAIN_MULT);
           const emT = _roofDripTuningVal('emissionTailMult', ROOF_DRIP_EMISSION_TAIL_MULT);
           // Tail behavior: 60s full strength hold, then slow 240s taper.

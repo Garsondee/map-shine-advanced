@@ -876,9 +876,7 @@ export class WaterSplashesEffectV2 {
       let waterFlipV = false;
       if (waterMaskTex) {
         try {
-          const rec = window.MapShine?.maskManager?.getRecord?.('water.scene');
-          if (rec && typeof rec.uvFlipY === 'boolean') waterFlipV = rec.uvFlipY;
-          else if (typeof waterMaskTex?.flipY === 'boolean') waterFlipV = waterMaskTex.flipY === false;
+          if (typeof waterMaskTex?.flipY === 'boolean') waterFlipV = waterMaskTex.flipY === false;
         } catch (_) {
           waterFlipV = waterMaskTex?.flipY === false;
         }

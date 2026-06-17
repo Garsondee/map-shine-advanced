@@ -494,35 +494,40 @@ export class TextureManagerUI {
   }
 
   async refresh() {
-    const mm = window.MapShine?.maskManager;
     const sceneComposer = window.MapShine?.sceneComposer;
     const basePath = sceneComposer?.currentBundle?.basePath || '—';
+    const registry = getEffectMaskRegistry();
 
-    const ids = (mm && typeof mm.listIds === 'function') ? mm.listIds() : [];
     const records = [];
-    for (const id of ids) {
+    for (const [maskId] of Object.entries(registry)) {
       try {
-        const rec = mm.getRecord(id);
-        if (rec) records.push(rec);
+        const tex = window.MapShine?.effectMaskRegistry?.getMask?.(maskId) ?? null;
+        if (!tex) continue;
+        records.push({
+          id: `${maskId}.scene`,
+          source: 'assetMask',
+          space: 'sceneUv',
+          texture: tex,
+          width: tex.image?.width ?? tex.source?.data?.width ?? null,
+          height: tex.image?.height ?? tex.source?.data?.height ?? null,
+          channels: 'rgba',
+        });
       } catch (e) {
       }
     }
 
     const counts = {
       total: records.length,
-      assetMask: 0,
+      assetMask: records.length,
       renderTarget: 0,
       derived: 0
     };
 
-    for (const r of records) {
-      if (r?.source === 'assetMask') counts.assetMask++;
-      else if (r?.source === 'renderTarget') counts.renderTarget++;
-      else if (r?.source === 'derived') counts.derived++;
-    }
-
     const warnings = [];
-    const hasOutdoors = !!(mm && (mm.getTexture?.('outdoors.scene') || mm.getTexture?.('outdoors.screen')));
+    const hasOutdoors = !!(
+      window.MapShine?.effectMaskRegistry?.getMask?.('outdoors')
+      || globalThis.weatherController?.roofMap
+    );
     if (!hasOutdoors) warnings.push('No _Outdoors mask found');
 
     this._summaryState.basePath = basePath;
@@ -535,7 +540,7 @@ export class TextureManagerUI {
 
     this._rebuildColumnPanes();
     this._buildFoundPane(records);
-    this._buildCatalogPane(mm, basePath);
+    this._buildCatalogPane(basePath);
 
     window.MapShine?.uiManager?.registerAdvancedElement?.(this.foundPane?.element);
     window.MapShine?.uiManager?.registerAdvancedElement?.(this.catalogPane?.element);
@@ -624,7 +629,7 @@ export class TextureManagerUI {
     }
   }
 
-  _buildCatalogPane(mm, basePath) {
+  _buildCatalogPane(basePath) {
     const pane = this.catalogPane;
     if (!pane) return;
 
@@ -647,8 +652,8 @@ export class TextureManagerUI {
       const suffix = def?.suffix || '';
       const expected = `${baseFilename}${suffix}.(webp|png|jpg|jpeg)`;
       const idScene = `${maskId}.scene`;
-      const rec = mm?.getRecord?.(idScene) || null;
-      const isFound = !!(rec || mm?.getTexture?.(idScene));
+      const tex = window.MapShine?.effectMaskRegistry?.getMask?.(maskId) ?? null;
+      const isFound = !!tex;
       const desc = def?.description || '';
       const usedBy = this._getCatalogUsedBy(maskId);
       const usedByLine = this._formatUsedByLine(usedBy);
@@ -658,7 +663,7 @@ export class TextureManagerUI {
       this._appendRow(folder, {
         title: suffix,
         subtitle,
-        texture: rec?.texture || null,
+        texture: tex || null,
         onClick: (e) => {
           if (isFound && e?.shiftKey) {
             this._openMaskDebug(idScene);
@@ -741,11 +746,10 @@ export class TextureManagerUI {
     try {
       const registry = getEffectMaskRegistry();
       const baseFilename = this._getBaseFilename(basePath);
-      const mm = window.MapShine?.maskManager;
       for (const [maskId, def] of Object.entries(registry)) {
         const suffix = def?.suffix || '';
         const expected = `${baseFilename}${suffix}.(webp|png|jpg|jpeg)`;
-        const isFound = !!(mm && (mm.getRecord?.(`${maskId}.scene`) || mm.getTexture?.(`${maskId}.scene`)));
+        const isFound = !!window.MapShine?.effectMaskRegistry?.getMask?.(maskId);
         lines.push(`- ${suffix} | ${isFound ? 'Found' : 'Missing'} | ${expected}`);
       }
     } catch (e) {

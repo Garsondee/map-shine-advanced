@@ -12,6 +12,9 @@ export const MIN_CELL_SIZE = 512;
 /** Maximum cell size. */
 export const MAX_CELL_SIZE = 4096;
 
+/** Reference cell size used when tuning resident caps and LOD-0 budgets. */
+export const REFERENCE_CELL_SIZE = 2048;
+
 /**
  * @typedef {'resident-hi'|'resident-lo'|'fallback-only'|'loading'|'culled'|'unknown'} StreamingCellState
  */
@@ -34,6 +37,23 @@ export function resolveCellSize(maxTextureSize = 8192, sceneWidth = 4096, sceneH
   if (maxDim <= 4096) return Math.min(1024, texCap);
   if (maxDim <= 8192) return Math.min(2048, texCap);
   return Math.min(MAX_CELL_SIZE, texCap);
+}
+
+/**
+ * Scale a resident-cell cap when cell size is smaller than the 2048 px reference.
+ * Halving cell size roughly doubles cells in the same view frustum.
+ *
+ * @param {number} baseCap
+ * @param {number} cellSize
+ * @param {number} [referenceCellSize=REFERENCE_CELL_SIZE]
+ * @returns {number}
+ */
+export function scaleStreamingResidentCap(baseCap, cellSize, referenceCellSize = REFERENCE_CELL_SIZE) {
+  const base = Math.max(1, Math.floor(Number(baseCap) || 1));
+  const cs = Math.max(MIN_CELL_SIZE, Math.floor(Number(cellSize) || referenceCellSize));
+  const ref = Math.max(MIN_CELL_SIZE, Math.floor(referenceCellSize));
+  if (cs >= ref) return base;
+  return Math.min(base * 4, Math.ceil(base * (ref / cs)));
 }
 
 /**
@@ -144,6 +164,39 @@ export function parseCellKey(key) {
 }
 
 /**
+ * Device pixel ratio for streaming LOD (drawing buffer px / CSS px).
+ * High-DPI displays need finer pyramid levels at the same Foundry zoom.
+ *
+ * @returns {number}
+ */
+export function resolveStreamingPixelRatio() {
+  const canvas = globalThis.canvas;
+  const renderer = canvas?.app?.renderer;
+  if (renderer?.getDrawingBufferSize) {
+    const buf = { x: 0, y: 0, width: 0, height: 0 };
+    renderer.getDrawingBufferSize(buf);
+    const view = renderer.domElement ?? canvas?.app?.view;
+    const cssW = Number(view?.clientWidth) || 0;
+    if (cssW > 0 && buf.width > 0) {
+      return Math.min(3, Math.max(1, buf.width / cssW));
+    }
+  }
+  const dpr = Number(globalThis.window?.devicePixelRatio);
+  return Number.isFinite(dpr) && dpr > 0 ? Math.min(3, Math.max(1, dpr)) : 1;
+}
+
+/**
+ * Zoom scaled for streaming LOD — includes display pixel density.
+ *
+ * @param {number} zoom - sceneComposer.currentZoom (Foundry / PIXI scale)
+ * @returns {number}
+ */
+export function resolveStreamingZoom(zoom) {
+  const z = Math.max(0.05, Number(zoom) || 1);
+  return z * resolveStreamingPixelRatio();
+}
+
+/**
  * Select LOD level from zoom (higher zoom = finer LOD).
  * LOD 0 = full cell resolution; higher = coarser (half size per level).
  *
@@ -153,19 +206,19 @@ export function parseCellKey(key) {
  * @returns {number}
  */
 export function selectLodFromZoom(zoom, maxLod = 4, sceneMegapixels = 0) {
-  const z = Math.max(0.05, Number(zoom) || 1);
+  const z = resolveStreamingZoom(zoom);
   let lod;
-  if (z >= 2.5) lod = 0;
-  else if (z >= 1.2) lod = 1;
-  else if (z >= 0.55) lod = 2;
-  else if (z >= 0.28) lod = 3;
+  if (z >= 2.2) lod = 0;
+  else if (z >= 1.0) lod = 1;
+  else if (z >= 0.50) lod = 2;
+  else if (z >= 0.25) lod = 3;
   else lod = Math.min(maxLod, 4);
 
   const mp = Number(sceneMegapixels) || 0;
   if (mp >= 130) {
-    if (z >= 1.2) lod = Math.min(lod, 0);
-    else if (z >= 0.55) lod = Math.min(lod, 1);
-    else if (z >= 0.28) lod = Math.min(lod, 2);
+    if (z >= 1.0) lod = Math.min(lod, 0);
+    else if (z >= 0.50) lod = Math.min(lod, 1);
+    else if (z >= 0.25) lod = Math.min(lod, 2);
     else if (z >= 0.12) lod = Math.min(lod, 3);
   }
 

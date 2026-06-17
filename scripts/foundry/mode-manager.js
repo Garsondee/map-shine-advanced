@@ -45,7 +45,7 @@ export class ModeManager {
    *   initially and set later as managers are created.
    * @param {HTMLCanvasElement|null} deps.threeCanvas
    * @param {import('../core/render-loop.js').RenderLoop|null} deps.renderLoop
-   * @param {import('./controls-integration.js').ControlsIntegration|null} deps.controlsIntegration
+   * @param {Object|null} deps.controlsIntegration - Legacy V1 input routing (always null in V2)
    * @param {import('../scene/tile-manager.js').TileManager|null} deps.tileManager
    * @param {import('../scene/wall-manager.js').WallManager|null} deps.wallManager
    * @param {import('../scene/light-icon-manager.js').LightIconManager|null} deps.lightIconManager
@@ -280,7 +280,7 @@ export class ModeManager {
    */
   updateSelectRectSuppression(forceValue = null) {
     try {
-      if (canvas?.scene && !sceneSettings.isEnabled(canvas.scene)) {
+      if (canvas?.scene && !sceneSettings.isMapShineRenderingActive(canvas.scene)) {
         this.forceRestoreFoundrySelectRect();
         return;
       }

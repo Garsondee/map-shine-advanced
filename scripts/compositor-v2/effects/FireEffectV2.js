@@ -4039,7 +4039,8 @@ export class FireEffectV2 {
 
   _buildGlowWallClipOptions() {
     const opts = {
-      blockGeometry: true,
+      sense: 'light',
+      blockGeometry: false,
       circleSegments: 96,
     };
     try {

@@ -1874,142 +1874,6 @@ export class TweakpaneManager {
       this.saveUIState();
     });
 
-    const dynamicExposureFolder = tokensFolder.addFolder({
-      title: 'Dynamic Exposure',
-      expanded: this.accordionStates['token_dynamicExposure'] ?? false
-    });
-
-    const applyDynamicExposure = () => {
-      try {
-        const dem = window.MapShine?.dynamicExposureManager;
-        if (dem && typeof dem.setParams === 'function') {
-          dem.setParams(this.globalParams.dynamicExposure);
-        }
-      } catch (_) {
-      }
-    };
-
-    const onDynamicExposureChange = (param) => (ev) => {
-      this.globalParams.dynamicExposure[param] = ev.value;
-      applyDynamicExposure();
-      this.saveUIState();
-    };
-
-    dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'enabled', {
-      label: 'Enabled'
-    }).on('change', onDynamicExposureChange('enabled'));
-
-    dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'minExposure', {
-      label: 'Min Exposure',
-      min: 0.1,
-      max: 2,
-      step: 0.01
-    }).on('change', onDynamicExposureChange('minExposure'));
-
-    dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'maxExposure', {
-      label: 'Max Exposure',
-      min: 0.1,
-      max: 4,
-      step: 0.01
-    }).on('change', onDynamicExposureChange('maxExposure'));
-
-    const probeHzBinding = dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'probeHz', {
-      label: 'Probe Hz',
-      min: 0.5,
-      max: 30,
-      step: 0.5
-    }).on('change', onDynamicExposureChange('probeHz'));
-    this._registerBindingAsAdvanced(probeHzBinding);
-
-    const tauBrightenBinding = dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'tauBrighten', {
-      label: 'Decay Up (s)',
-      min: 0.05,
-      max: 30,
-      step: 0.01
-    }).on('change', onDynamicExposureChange('tauBrighten'));
-    this._registerBindingAsAdvanced(tauBrightenBinding);
-
-    const tauDarkenBinding = dynamicExposureFolder.addBinding(this.globalParams.dynamicExposure, 'tauDarken', {
-      label: 'Decay Down (s)',
-      min: 0.05,
-      max: 30,
-      step: 0.01
-    }).on('change', onDynamicExposureChange('tauDarken'));
-    this._registerBindingAsAdvanced(tauDarkenBinding);
-
-    const dynamicExposureDebugFolder = dynamicExposureFolder.addFolder({
-      title: 'Debug (Selected Token)',
-      expanded: this.accordionStates['token_dynamicExposure_debug'] ?? false
-    });
-    this._registerFolderAsAdvanced(dynamicExposureDebugFolder);
-
-    // These bindings are updated by the UI loop.
-    this._dynamicExposureDebugBindings = [];
-
-    this._dynamicExposureDebugBindings.push(dynamicExposureDebugFolder.addBinding(this.globalParams.dynamicExposureDebug, 'subjectTokenId', {
-      label: 'Subject',
-      readonly: true
-    }));
-    this._dynamicExposureDebugBindings.push(dynamicExposureDebugFolder.addBinding(this.globalParams.dynamicExposureDebug, 'measuredLuma', {
-      label: 'Luma',
-      readonly: true
-    }));
-    this._dynamicExposureDebugBindings.push(dynamicExposureDebugFolder.addBinding(this.globalParams.dynamicExposureDebug, 'outdoors', {
-      label: 'Outdoors',
-      readonly: true
-    }));
-    this._dynamicExposureDebugBindings.push(dynamicExposureDebugFolder.addBinding(this.globalParams.dynamicExposureDebug, 'targetExposure', {
-      label: 'Target',
-      readonly: true
-    }));
-    this._dynamicExposureDebugBindings.push(dynamicExposureDebugFolder.addBinding(this.globalParams.dynamicExposureDebug, 'appliedExposure', {
-      label: 'Applied',
-      readonly: true
-    }));
-
-    this._dynamicExposureDebugBindings.push(dynamicExposureDebugFolder.addBinding(this.globalParams.dynamicExposureDebug, 'screenU', {
-      label: 'U',
-      readonly: true
-    }));
-    this._dynamicExposureDebugBindings.push(dynamicExposureDebugFolder.addBinding(this.globalParams.dynamicExposureDebug, 'screenV', {
-      label: 'V',
-      readonly: true
-    }));
-
-    this._dynamicExposureDebugBindings.push(dynamicExposureDebugFolder.addBinding(this.globalParams.dynamicExposureDebug, 'lastProbeAgeSeconds', {
-      label: 'Probe Age (s)',
-      readonly: true
-    }));
-
-    dynamicExposureDebugFolder.on('fold', (ev) => {
-      this.accordionStates['token_dynamicExposure_debug'] = ev.expanded;
-      this.saveUIState();
-    });
-
-    dynamicExposureFolder.addButton({
-      title: 'Reset Dynamic Exposure'
-    }).on('click', () => {
-      this.globalParams.dynamicExposure.enabled = true;
-      this.globalParams.dynamicExposure.minExposure = 0.35;
-      this.globalParams.dynamicExposure.maxExposure = 3.0;
-      this.globalParams.dynamicExposure.probeHz = 8;
-      this.globalParams.dynamicExposure.tauBrighten = 15.0;
-      this.globalParams.dynamicExposure.tauDarken = 15.0;
-
-      try {
-        dynamicExposureFolder.refresh();
-      } catch (_) {
-      }
-
-      applyDynamicExposure();
-      this.saveUIState();
-    });
-
-    dynamicExposureFolder.on('fold', (ev) => {
-      this.accordionStates['token_dynamicExposure'] = ev.expanded;
-      this.saveUIState();
-    });
-
     tokensFolder.on('fold', (ev) => {
       this.accordionStates['tokens'] = ev.expanded;
       this.saveUIState();
@@ -2017,7 +1881,6 @@ export class TweakpaneManager {
 
     // Push initial state into runtime managers so UI and runtime match.
     applyTokenCC();
-    applyDynamicExposure();
     this._tokensSectionBuilt = true;
   }
 
@@ -2090,27 +1953,55 @@ export class TweakpaneManager {
       title: 'Open the render-stack panel showing effect enable state, compositor layer order, mask wiring, and dependency hints for the live scene.',
     });
 
+    addGridButton('Streaming Minimap', () => {
+      const toggle = window.MapShine?.toggleStreamingMinimap;
+      if (typeof toggle === 'function') {
+        const on = toggle();
+        ui.notifications?.info?.(`Streaming minimap ${on ? 'shown' : 'hidden'}.`);
+        return;
+      }
+      const mm = window.MapShine?.streamingMinimap;
+      if (!mm) {
+        ui.notifications?.warn?.('Streaming minimap not available (Map Shine canvas may still be initializing).');
+        return;
+      }
+      mm.setEnabled(!mm.isEnabled());
+      ui.notifications?.info?.(`Streaming minimap ${mm.isEnabled() ? 'shown' : 'hidden'}.`);
+    }, {
+      advanced: true,
+      title: 'Toggle the live tile streaming minimap overlay (grid cells, frustum, VRAM stats, and fault dashboard).',
+    });
+
     addGridButton('Tile Streaming Report', async () => {
       try {
-        const { logTileStreamingReport, formatTileStreamingReportText } =
+        const { copyTileStreamingReportToClipboard } =
           await import('./tile-streaming-report.js');
-        const report = logTileStreamingReport();
-        const text = formatTileStreamingReportText(report);
+        const { report, text, copied } = await copyTileStreamingReportToClipboard();
         const warnCount = report.warnings?.length ?? 0;
-        ui.notifications?.info?.(
-          warnCount
-            ? `Tile streaming report logged (${warnCount} warning${warnCount === 1 ? '' : 's'}) — see console; text at MapShine.lastTileStreamingReportText`
-            : 'Tile streaming report logged — see console (MapShine.lastTileStreamingReport)',
-        );
-        if (navigator.clipboard?.writeText && warnCount > 0) {
-          try { await navigator.clipboard.writeText(text); } catch (_) {}
+        try {
+          window.MapShine?.streamingMinimap?.applyExternalReport?.(report);
+        } catch (_) {}
+        if (copied) {
+          ui.notifications?.info?.(
+            warnCount
+              ? `Tile streaming report copied to clipboard (${warnCount} warning${warnCount === 1 ? '' : 's'})`
+              : 'Tile streaming report copied to clipboard',
+          );
+        } else {
+          log.warn('Tile streaming report clipboard unavailable; text logged to console');
+          console.log(text);
+          ui.notifications?.warn?.(
+            warnCount
+              ? `Could not copy report — see browser console (${warnCount} warning${warnCount === 1 ? '' : 's'})`
+              : 'Could not copy report — see browser console',
+          );
         }
       } catch (e) {
         log.warn('Tile streaming report failed:', e);
         ui.notifications?.error?.(`Tile streaming report failed: ${e?.message || e}`);
       }
     }, {
-      title: 'Log a tile streaming diagnostic report to the console: VRAM budget, LOD, grid cells, floor visibility, and grey-screen warnings. Copy text when warnings are present.',
+      title: 'Copy a tile streaming diagnostic report to the clipboard: VRAM budget, LOD, grid cells, floor visibility, and grey-screen warnings.',
     });
 
     addGridButton('Diagnostic Center', () => {
@@ -3628,11 +3519,6 @@ export class TweakpaneManager {
 
     debugFolder.addBlade({ view: 'separator' });
 
-    // ── Depth Pass Debug Section ──────────────────────────────────────────
-    this._buildDepthPassDebugSection(debugFolder);
-
-    debugFolder.addBlade({ view: 'separator' });
-
     // P5-10/11/12/13: Mask Registry debug panel
     this._buildMaskRegistryDebugSection(debugFolder);
 
@@ -4047,83 +3933,6 @@ export class TweakpaneManager {
    * @param {Object} parentFolder - Tweakpane folder to add into
    * @private
    */
-  _buildDepthPassDebugSection(parentFolder) {
-    if (!parentFolder) return;
-
-    // Backing params object for Tweakpane bindings
-    if (!this._depthPassDebugParams) {
-      this._depthPassDebugParams = {
-        enabled: true,
-        continuous: true,
-        debugOverlay: false,
-        displayMode: 0, // 0 = raw device depth, 1 = linear depth
-      };
-    }
-    const params = this._depthPassDebugParams;
-
-    const depthFolder = parentFolder.addFolder({
-      title: 'Depth Pass',
-      expanded: this.accordionStates['debug_depthPass'] ?? false
-    });
-
-    // Enabled toggle — controls whether the depth pass renders at all
-    depthFolder.addBinding(params, 'enabled', {
-      label: 'Enabled'
-    }).on('change', (ev) => {
-      const dpm = window.MapShine?.depthPassManager;
-      if (dpm) dpm.setEnabled(ev.value);
-    });
-
-    // Continuous toggle — re-render every frame vs on-invalidation only
-    depthFolder.addBinding(params, 'continuous', {
-      label: 'Continuous'
-    }).on('change', (ev) => {
-      const dpm = window.MapShine?.depthPassManager;
-      if (dpm) dpm.setContinuous(ev.value);
-    });
-
-    depthFolder.addBlade({ view: 'separator' });
-
-    // Debug overlay toggle — renders depth visualization to screen
-    depthFolder.addBinding(params, 'debugOverlay', {
-      label: 'Show Depth'
-    }).on('change', (ev) => {
-      const dpm = window.MapShine?.depthPassManager;
-      if (dpm) dpm.setDebugEnabled(ev.value);
-    });
-
-    // Display mode — raw device depth vs linearized
-    depthFolder.addBinding(params, 'displayMode', {
-      label: 'Display Mode',
-      options: {
-        'Layer View (±6u)': 0,
-        'Sort Zoom (FG ±1u)': 1,
-        'Raw Device Depth': 2,
-      }
-    }).on('change', (ev) => {
-      const dpm = window.MapShine?.depthPassManager;
-      if (dpm) dpm.setDebugDisplayMode(ev.value);
-    });
-
-    // Manual invalidation button for non-continuous mode testing
-    depthFolder.addButton({
-      title: 'Force Invalidate'
-    }).on('click', () => {
-      const dpm = window.MapShine?.depthPassManager;
-      if (dpm) {
-        dpm.invalidate();
-        log.info('Depth pass manually invalidated');
-      }
-    });
-
-    depthFolder.on('fold', (ev) => {
-      this.accordionStates['debug_depthPass'] = ev.expanded;
-      this.saveUIState();
-    });
-
-    this._depthPassFolder = depthFolder;
-  }
-
   buildRopesSection() {
     if (!this.pane) return;
     if (this._ropesFolder) return;
@@ -8855,34 +8664,6 @@ export class TweakpaneManager {
         }
       } else {
         this.perf.warningCount = 0;
-      }
-
-      // Dynamic Exposure debug monitoring (read-only fields)
-      try {
-        const dem = window.MapShine?.dynamicExposureManager;
-        const src = dem?.debugState;
-        const dst = this.globalParams?.dynamicExposureDebug;
-        if (src && dst) {
-          dst.subjectTokenId = String(src.subjectTokenId ?? '');
-          dst.measuredLuma = Number.isFinite(src.measuredLuma) ? src.measuredLuma : 0.0;
-          dst.outdoors = Number.isFinite(src.outdoors) ? src.outdoors : 0.0;
-          dst.targetExposure = Number.isFinite(src.targetExposure) ? src.targetExposure : 1.0;
-          dst.appliedExposure = Number.isFinite(src.appliedExposure) ? src.appliedExposure : 1.0;
-          dst.screenU = Number.isFinite(src.screenU) ? src.screenU : 0.0;
-          dst.screenV = Number.isFinite(src.screenV) ? src.screenV : 0.0;
-          dst.lastProbeAgeSeconds = Number.isFinite(src.lastProbeAgeSeconds) ? src.lastProbeAgeSeconds : 0.0;
-
-          const bindings = this._dynamicExposureDebugBindings;
-          if (Array.isArray(bindings)) {
-            for (const b of bindings) {
-              try {
-                b?.refresh?.();
-              } catch (_) {
-              }
-            }
-          }
-        }
-      } catch (_) {
       }
 
       // Contextual Scene Grade — mirror live status from runtime into readonly Tweakpane fields.

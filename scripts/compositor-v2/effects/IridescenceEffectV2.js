@@ -515,11 +515,7 @@ export class IridescenceEffectV2 {
 
     // Screen-space token mask: suppress iridescence where token silhouettes exist.
     try {
-      const mm = window.MapShine?.maskManager;
-      let tokenMaskTex = mm?.getTexture?.('tokenMask.screen') ?? null;
-      if (!tokenMaskTex) {
-        tokenMaskTex = window.MapShine?.lightingEffect?.tokenMaskTarget?.texture ?? null;
-      }
+      let tokenMaskTex = window.MapShine?.lightingEffect?.tokenMaskTarget?.texture ?? null;
       u.uTokenMask.value = tokenMaskTex || this._fallbackBlack;
       u.uHasTokenMask.value = tokenMaskTex ? 1.0 : 0.0;
     } catch (_) {

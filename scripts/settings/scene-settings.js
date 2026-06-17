@@ -11,6 +11,7 @@ import { createDefaultStyledLoadingScreenConfig } from '../ui/loading-screen/loa
 import { createDefaultLoadingHints } from '../ui/loading-screen/loading-hints.js';
 import { LightingDirector } from '../core/LightingDirector.js';
 import { GraphicsSettingsMenuApp } from '../ui/graphics-settings-menu-app.js';
+import { NativeRenderingSettingsMenuApp } from '../ui/native-rendering-settings-menu-app.js';
 
 const log = createLogger('Settings');
 
@@ -24,6 +25,8 @@ const FLAG_NAMESPACE = 'map-shine-advanced';
 const LEGACY_FLAG_NAMESPACE = 'map-shine';
 
 /** Module setting keys */
+/** Per-client opt-out: use Foundry's native PIXI canvas instead of Map Shine Three.js. */
+export const NATIVE_FOUNDRY_RENDERING_SETTING = 'useNativeFoundryRendering';
 const DEBUG_LOADING_MODE_SETTING = 'debugLoadingMode';
 const LEVELS_COMPATIBILITY_MODE_SETTING = 'levelsCompatibilityMode';
 const LEVELS_EDITOR_V2_SETTING = 'levelsEditorV2Enabled';
@@ -212,6 +215,47 @@ function _silentlyPersistEnabled(scene) {
       await scene.setFlag(FLAG_NAMESPACE, 'enabled', true);
     } catch (_) {}
   });
+}
+
+/**
+ * Whether this client has opted into native Foundry/PIXI rendering and bypassed
+ * Map Shine's Three.js pipeline entirely.
+ * @returns {boolean}
+ * @public
+ */
+export function isNativeFoundryRenderingEnabled() {
+  try {
+    return game.settings.get(FLAG_NAMESPACE, NATIVE_FOUNDRY_RENDERING_SETTING) === true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Whether Map Shine should replace the canvas for this client on the given scene.
+ * Respects both the scene `enabled` flag and the per-client native-rendering opt-out.
+ * @param {Scene} scene
+ * @returns {boolean}
+ * @public
+ */
+export function isMapShineRenderingActive(scene) {
+  if (isNativeFoundryRenderingEnabled()) return false;
+  return isEnabled(scene);
+}
+
+/**
+ * Notify the user that a page reload is required after toggling native rendering.
+ * @param {boolean} enabled
+ * @public
+ */
+export function notifyNativeRenderingReloadRequired(enabled) {
+  try {
+    const message = enabled
+      ? game.i18n.localize('MAPSHINE.NativeFoundryRenderingReloadOn')
+      : game.i18n.localize('MAPSHINE.NativeFoundryRenderingReloadOff');
+    ui.notifications?.info?.(message, { permanent: true });
+  } catch (_) {
+  }
 }
 
 /**
@@ -825,6 +869,27 @@ function createDefaultSettings() {
 export function registerSettings() {
   // Note: Per-scene player overrides are registered dynamically
   // This is just a placeholder for module-wide settings
+
+  game.settings.register(FLAG_NAMESPACE, NATIVE_FOUNDRY_RENDERING_SETTING, {
+    name: 'MAPSHINE.NativeFoundryRenderingName',
+    hint: 'MAPSHINE.NativeFoundryRenderingHint',
+    scope: 'client',
+    config: true,
+    type: Boolean,
+    default: false,
+    onChange: (enabled) => {
+      notifyNativeRenderingReloadRequired(!!enabled);
+    },
+  });
+
+  game.settings.registerMenu(FLAG_NAMESPACE, 'nativeRendering', {
+    name: 'MAPSHINE.NativeFoundryRenderingMenuTitle',
+    label: 'MAPSHINE.NativeFoundryRenderingMenuButton',
+    hint: 'MAPSHINE.NativeFoundryRenderingMenuHint',
+    icon: 'fas fa-feather',
+    type: NativeRenderingSettingsMenuApp,
+    restricted: false,
+  });
 
   // Centralised lighting/darkness orchestrator (scripts/core/LightingDirector.js).
   try { LightingDirector.registerSettings(); } catch (_) {}

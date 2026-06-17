@@ -54,6 +54,8 @@ export function createShadowMaskMaterial(THREE) {
       uSceneOrigin: { value: new THREE.Vector2(0, 0) },
       uSceneSize: { value: new THREE.Vector2(4000, 3000) },
       uSceneDimensions: { value: new THREE.Vector2(4000, 3000) },
+      /** Sub-bucket sprite drift applied in capture UV space (smooth motion between shadow RT cache hits). */
+      uShadowUvOffset: { value: new THREE.Vector2(0, 0) },
     },
     vertexShader: /* glsl */`
       varying vec2 vUv;
@@ -83,6 +85,7 @@ export function createShadowMaskMaterial(THREE) {
       uniform vec2 uSceneOrigin;
       uniform vec2 uSceneSize;
       uniform vec2 uSceneDimensions;
+      uniform vec2 uShadowUvOffset;
       varying vec2 vUv;
 
       vec2 worldToSceneUv(vec2 worldPos) {
@@ -124,7 +127,7 @@ export function createShadowMaskMaterial(THREE) {
           for (int dx = -1; dx <= 1; dx++) {
             float w = (dx == 0 && dy == 0) ? 2.0 : 1.0;
             vec2 captureUv = clamp(
-              baseCaptureUv + vec2(float(dx), float(dy)) * stepCaptureUv,
+              baseCaptureUv + uShadowUvOffset + vec2(float(dx), float(dy)) * stepCaptureUv,
               vec2(0.0),
               vec2(1.0)
             );

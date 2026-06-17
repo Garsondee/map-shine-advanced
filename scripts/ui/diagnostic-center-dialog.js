@@ -2938,7 +2938,6 @@ export class DiagnosticCenterDialog {
           const weatherController = ms?.weatherController ?? null;
           const roofMap = weatherController?.roofMap ?? null;
           const bundleOutdoors = sc?.currentBundle?.masks?.find?.((m) => (m?.id === 'outdoors' || m?.type === 'outdoors'))?.texture ?? null;
-          const maskManagerOutdoors = ms?.maskManager?.getTexture?.('outdoors.scene') ?? null;
           const registryOutdoors = ms?.effectMaskRegistry?.getMask?.('outdoors') ?? null;
 
           const compositorMetaRows = [];
@@ -3017,7 +3016,7 @@ export class DiagnosticCenterDialog {
 
           const hasActiveStrict = !!strictTex;
           const hasDirectAnyFloor = allLevelOutdoors.some((r) => !!r?.compositorDirect?.texture?.present);
-          const hasAnySource = [bundleOutdoors, maskManagerOutdoors, registryOutdoors, roofMap].some(Boolean) || hasDirectAnyFloor;
+          const hasAnySource = [bundleOutdoors, registryOutdoors, roofMap].some(Boolean) || hasDirectAnyFloor;
           const hasAnyConsumerTex = [
             consumers.floorCompositorSync.lastOutdoorsTexture.present,
             consumers.buildingShadows.outdoorsMask.present,
@@ -3049,7 +3048,6 @@ export class DiagnosticCenterDialog {
               },
               sources: {
                 bundleOutdoors: _textureBrief(bundleOutdoors),
-                maskManagerOutdoorsScene: _textureBrief(maskManagerOutdoors),
                 registryOutdoors: _textureBrief(registryOutdoors),
                 weatherRoofMap: _textureBrief(roofMap),
               },

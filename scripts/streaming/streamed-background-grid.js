@@ -6,11 +6,15 @@
 import { createLogger } from '../core/log.js';
 import { GROUND_Z } from '../compositor-v2/LayerOrderPolicy.js';
 import { TILE_FEATURE_LAYERS } from '../core/render-layers.js';
-import { intersectRects, rectsIntersect } from './streaming-grid.js';
+import { intersectRects, rectsIntersect, scaleStreamingResidentCap } from './streaming-grid.js';
 import {
   buildPyramidManifest,
   loadPyramidTileTexture,
   loadFallbackTexture,
+  releasePyramidTileTexture,
+  DECODE_PRIORITY,
+  hashSourceKey,
+  reprioritizeDecodeQueueForSharpen,
 } from './texture-pyramid-builder.js';
 import { isHugeImageSource } from './probe-image-dimensions.js';
 import { loadImageTexture } from '../assets/image-texture-loader.js';
@@ -35,10 +39,75 @@ const STATE_FALLBACK = 'fallback-only';
 const FOCAL_RING = 0;
 /** Inner frustum rings that always target zoom-native LOD (focal + neighbors). */
 const INNER_SHARP_RING_MAX = 2;
+/** Hard per-grid inflight cap — inner-ring bypass must not exceed this. */
+const GRID_INFLIGHT_HARD_CAP = 10;
+
+/**
+ * Integer renderOrder for streamed cells — fallbacks draw beneath resident tiles.
+ * @param {number} baseOrder
+ * @param {number} lod
+ * @param {boolean} [isFallback=false]
+ * @returns {number}
+ */
+function streamingCellRenderOrder(baseOrder, lod, isFallback = false) {
+  const base = Math.floor(Number(baseOrder) || 0);
+  const level = Math.max(0, Math.floor(Number(lod) || 0));
+  if (isFallback) return base * 10;
+  return base * 10 + 1 + level;
+}
+
+/**
+ * Release GPU memory for a streaming mesh albedo texture.
+ * @param {import('three').Texture|null|undefined} tex
+ */
+function disposeStreamingTexture(tex) {
+  if (!tex) return;
+  try {
+    if (tex.userData?.mapShineStreamingTileKey) {
+      releasePyramidTileTexture(tex);
+    }
+    tex.dispose();
+  } catch (_) {}
+}
+
+/**
+ * Tear down a streaming mesh and its texture budget entry.
+ * @param {import('three').Mesh|null|undefined} mesh
+ * @param {import('../assets/TextureBudgetTracker.js').TextureBudgetTracker} [tracker]
+ */
+function disposeStreamingMesh(mesh, tracker = getTextureBudgetTracker()) {
+  if (!mesh) return;
+  try {
+    const tex = mesh.material?.map ?? null;
+    tracker.unregister(tex);
+    if (mesh.material) mesh.material.map = null;
+    disposeStreamingTexture(tex);
+    mesh.removeFromParent?.();
+    mesh.geometry?.dispose?.();
+    mesh.material?.dispose?.();
+  } catch (_) {}
+}
 
 /** @param {number} effectiveLod @param {Iterable<string>} requiredKeys */
 function buildViewSyncKey(effectiveLod, requiredKeys) {
   return `${effectiveLod}:${[...requiredKeys].sort().join(',')}`;
+}
+
+/**
+ * Re-read texture budget policy into an mounted grid (cell size / manifest / concurrency).
+ * @param {{ _src: string, _cellSize: number, _maxLod: number, _maxConcurrent: number, _manifest: object|null, _syncKey: string }} grid
+ */
+async function refreshGridCellPolicy(grid) {
+  const budget = getTextureBudgetTracker();
+  const newCellSize = budget.getRecommendedTileSize();
+  if (!grid._src || newCellSize === grid._cellSize) return;
+  grid._cellSize = newCellSize;
+  grid._maxLod = budget.getMaxLodLevel();
+  const mp = estimateSceneMegapixels();
+  grid._maxConcurrent = mp >= 144 ? (grid._cellSize <= 1024 ? 3 : 2) : mp > 64 ? 3 : 4;
+  const manifest = await buildPyramidManifest(grid._src, grid._cellSize, grid._maxLod);
+  if (manifest) grid._manifest = manifest;
+  grid._syncKey = '';
 }
 
 /**
@@ -119,11 +188,11 @@ export function resolveFocalImageCell(region, cellSize, sourceW, sourceH) {
 }
 
 /** @returns {number} */
-function maxTotalResidentCellsForScene() {
+function maxTotalResidentCellsForScene(cellSize = 2048) {
   const mp = estimateSceneMegapixels();
-  if (mp >= 144) return 18;
-  if (mp > 64) return 24;
-  return 32;
+  if (mp >= 144) return scaleStreamingResidentCap(18, cellSize);
+  if (mp > 64) return scaleStreamingResidentCap(24, cellSize);
+  return scaleStreamingResidentCap(32, cellSize);
 }
 
 export class StreamedBackgroundGrid {
@@ -159,6 +228,20 @@ export class StreamedBackgroundGrid {
     this._syncKey = '';
     /** @type {Map<string, number>} */
     this._cellLastUsed = new Map();
+    /** @type {number} */
+    this._coarseFallbackLod = 3;
+    /** @type {boolean} */
+    this._lazyCoarseFallback = false;
+    /** @type {boolean} True once coarse per-cell fallback grid is resident (never-blank coverage). */
+    this._coarseBaseReady = false;
+    /** @type {Set<string>} */
+    this._inflightFallback = new Set();
+    /** @type {boolean} */
+    this._isPanning = false;
+    /** @type {Set<string>} */
+    this._activeRequiredKeys = new Set();
+    /** @type {Map<string, number>} */
+    this._pendingUpgrades = new Map();
   }
 
   /** @private */
@@ -171,15 +254,16 @@ export class StreamedBackgroundGrid {
   /** @private */
   _maxResidentCells() {
     const mp = estimateSceneMegapixels();
-    // Typical frustum on 12000² @ 0.3 zoom needs ~9 cells (3×3).
-    if (mp >= 144) return 9;
-    if (mp > 64) return 12;
-    return 16;
+    const cs = this._cellSize || 2048;
+    // Typical frustum on 12000² @ 0.3 zoom needs ~9 cells (3×3) at 2048 px.
+    if (mp >= 144) return scaleStreamingResidentCap(9, cs);
+    if (mp > 64) return scaleStreamingResidentCap(12, cs);
+    return scaleStreamingResidentCap(16, cs);
   }
 
   /** @private */
   _maxTotalResidentCells() {
-    return maxTotalResidentCellsForScene();
+    return maxTotalResidentCellsForScene(this._cellSize);
   }
 
   /** @private */
@@ -200,6 +284,73 @@ export class StreamedBackgroundGrid {
     return n;
   }
 
+  /** @private */
+  _budgetHasHeadroom() {
+    return getTextureBudgetTracker().getUsedFraction() <= 0.55;
+  }
+
+  /** @private */
+  _maxInflightLoads() {
+    const budget = getTextureBudgetTracker();
+    const used = budget.getUsedFraction();
+    if (used > 0.92) return Math.max(this._maxConcurrent, 3);
+    if (!this._isPanning && this._budgetHasHeadroom()) {
+      return Math.min(GRID_INFLIGHT_HARD_CAP, Math.max(this._maxConcurrent, 8));
+    }
+    if (this._budgetHasHeadroom()) {
+      return Math.min(GRID_INFLIGHT_HARD_CAP, Math.max(this._maxConcurrent, 5));
+    }
+    return this._maxConcurrent;
+  }
+
+  /** @private */
+  _atInflightCap() {
+    return this._inflight.size >= this._maxInflightLoads();
+  }
+
+  /**
+   * True when visible residents still need a finer LOD after pan stops.
+   * @param {Array<{ key: string, cellX: number, cellY: number }>} required
+   * @param {{ minX: number, minY: number, maxX: number, maxY: number }} viewRect
+   * @param {number} requestedLod
+   * @param {{ cellX: number, cellY: number }|null} focal
+   * @returns {boolean}
+   * @private
+   */
+  _hasSharpenBacklog(required, viewRect, requestedLod, focal) {
+    if (this._isPanning || !this._budgetHasHeadroom()) return false;
+    if (this._countUncoveredRequired(required) > 0) return false;
+    if (this._pendingUpgrades.size > 0) return true;
+    return required.some((cell) => {
+      const existing = this._cells.get(cell.key);
+      if (!existing?.mesh) return false;
+      return !this._residentLodAcceptable(
+        existing.lod,
+        cell,
+        viewRect,
+        requestedLod,
+        false,
+        focal,
+      );
+    });
+  }
+
+  /**
+   * @param {{ mesh?: import('three').Object3D, lod?: number }|undefined} existing
+   * @param {number|null} upgradeToLod
+   * @param {number} loadLod
+   * @returns {number}
+   * @private
+   */
+  _decodePriorityForCellLoad(existing, upgradeToLod, loadLod) {
+    if (upgradeToLod != null) return DECODE_PRIORITY.COVERAGE;
+    if (existing?.mesh && loadLod < (Number(existing.lod) || 99)) {
+      return DECODE_PRIORITY.UPGRADE;
+    }
+    if (!existing?.mesh) return DECODE_PRIORITY.COVERAGE;
+    return DECODE_PRIORITY.STREAM;
+  }
+
   /**
    * Cap how many visible cells may stay at LOD 0 when the software budget is tight.
    * @param {number} cellLod
@@ -218,8 +369,12 @@ export class StreamedBackgroundGrid {
     if (used <= 0.98) return 0;
 
     const mp = estimateSceneMegapixels();
-    let maxLod0 = mp >= 144 ? 8 : 12;
-    if (used > 1.0) maxLod0 = mp >= 144 ? 6 : 8;
+    let maxLod0 = scaleStreamingResidentCap(mp >= 144 ? 8 : 12, this._cellSize);
+    if (this._budgetHasHeadroom()) {
+      maxLod0 = scaleStreamingResidentCap(mp >= 144 ? 28 : 32, this._cellSize);
+    } else if (used > 1.0) {
+      maxLod0 = scaleStreamingResidentCap(mp >= 144 ? 6 : 8, this._cellSize);
+    }
 
     const lod0Count = this._countVisibleLod0Residents();
     if (lod0Count >= maxLod0) return 1;
@@ -249,12 +404,22 @@ export class StreamedBackgroundGrid {
    * @param {number} native
    * @param {number} ring
    * @param {number} used
+   * @param {boolean} [isPanning=false]
    * @returns {number}
    * @private
    */
-  _innerSharpLodTarget(native, ring, used) {
+  _innerSharpLodTarget(native, ring, used, isPanning = false) {
     if (ring > INNER_SHARP_RING_MAX) return native;
+    if (isPanning) return native;
+    // At moderate zoom-out on 1× displays, zoom-native LOD is already correct.
+    if (native >= 2) return native;
     if (used > 1.0) return Math.min(this._maxLod, native + (ring === FOCAL_RING ? 1 : 0));
+    if (native >= 1) {
+      if (used <= 0.55 && ring === FOCAL_RING) return 0;
+      if (used <= 0.99 && ring <= INNER_SHARP_RING_MAX) return 0;
+      return native;
+    }
+    if (used <= 0.55) return 0;
     if (ring === FOCAL_RING) return 0;
     if (used <= 0.99) return Math.max(0, native - (ring <= 1 ? 1 : 0));
     return native;
@@ -310,9 +475,10 @@ export class StreamedBackgroundGrid {
     const ring = imageCellChebyshevRing(focal.cellX, focal.cellY, cell.cellX, cell.cellY);
 
     if (ring <= INNER_SHARP_RING_MAX) {
-      return this._innerSharpLodTarget(native, ring, used);
+      return this._innerSharpLodTarget(native, ring, used, this._isPanning);
     }
 
+    if (used <= 0.55) return Math.max(0, native - 1);
     if (used <= 0.92) return native;
     if (ring === 2 && used <= 0.96) return native;
     if (used > 1.0) return Math.min(this._maxLod, native + (ring <= 3 ? 1 : 2));
@@ -397,7 +563,7 @@ export class StreamedBackgroundGrid {
    * @returns {boolean}
    * @private
    */
-  _cellNeedsWork(cell, viewRect, requestedLod, options = {}) {
+  _cellNeedsWork(cell, viewRect, requestedLod, options = {}, focalCell = null) {
     const panStabilize = options.panStabilize === true;
     if (this._inflight.has(cell.key)) return false;
     const existing = this._cells.get(cell.key);
@@ -409,6 +575,7 @@ export class StreamedBackgroundGrid {
       viewRect,
       requestedLod,
       panStabilize,
+      focalCell,
     );
   }
 
@@ -457,7 +624,12 @@ export class StreamedBackgroundGrid {
       this._manifest.sourceWidth,
       this._manifest.sourceHeight,
     );
-    if (this._inflight.size > 0) return true;
+    const requiredKeys = new Set(required.map((c) => c.key));
+    const inflightActive = [...this._inflight].some((k) => requiredKeys.has(k))
+      || [...this._inflightFallback].some((k) => requiredKeys.has(k));
+    if (inflightActive) return true;
+    if (!this._isPanning && this._pendingUpgrades.size > 0) return true;
+    if (this._countUncoveredRequired(required) > 0) return true;
 
     const budget = getTextureBudgetTracker();
     const overBudget = budget.getUsedFraction() > 1.0;
@@ -487,8 +659,125 @@ export class StreamedBackgroundGrid {
     }
 
     return required.some((cell) =>
-      this._cellNeedsWork(cell, viewRect, lod, { panStabilize: false }),
+      this._cellNeedsWork(cell, viewRect, lod, { panStabilize: false }, focal),
     );
+  }
+
+  /**
+   * Drop inflight keys for cells that left the required view set.
+   * @param {Set<string>} requiredKeys
+   * @private
+   */
+  _cancelStaleInflight(requiredKeys) {
+    for (const key of [...this._inflight]) {
+      if (!requiredKeys.has(key)) {
+        this._inflight.delete(key);
+        this._pendingUpgrades.delete(key);
+      }
+    }
+    for (const key of [...this._inflightFallback]) {
+      if (!requiredKeys.has(key)) {
+        this._inflightFallback.delete(key);
+      }
+    }
+  }
+
+  /**
+   * @param {Array<{ key: string }>} required
+   * @returns {number}
+   * @private
+   */
+  _countUncoveredRequired(required) {
+    /** @type {Set<string>} */
+    const fallbackKeys = new Set();
+    for (const mesh of this._fallbackCellMeshes) {
+      const cx = mesh.userData?.streamCellX;
+      const cy = mesh.userData?.streamCellY;
+      if (Number.isFinite(cx) && Number.isFinite(cy)) fallbackKeys.add(`${cx},${cy}`);
+    }
+
+    let n = 0;
+    for (const cell of required) {
+      const streamEntry = this._cells.get(cell.key);
+      if (this._hasTexturedVisibleCell(streamEntry)) continue;
+      if (fallbackKeys.has(cell.key)) continue;
+      if (this._inflightFallback.has(cell.key)) continue;
+      n += 1;
+    }
+    return n;
+  }
+
+  /**
+   * @param {number} cellLod
+   * @param {number} effectiveLod
+   * @param {{ mesh?: import('three').Object3D }|undefined} existing
+   * @returns {{ loadLod: number, upgradeToLod: number|null }}
+   * @private
+   */
+  _resolveProgressiveLoadLod(cellLod, effectiveLod, existing) {
+    if (existing?.mesh) {
+      return { loadLod: cellLod, upgradeToLod: null };
+    }
+    if (this._coarseBaseReady || this._fallbackMesh || this._fallbackCellMeshes.length > 0) {
+      return { loadLod: cellLod, upgradeToLod: null };
+    }
+    const loadLod = Math.max(cellLod, effectiveLod);
+    const upgradeToLod = cellLod < loadLod ? cellLod : null;
+    return { loadLod, upgradeToLod };
+  }
+
+  /**
+   * @private
+   */
+  _schedulePendingUpgrades(epoch, viewRect, requestedLod, required = null) {
+    if (!this._pendingUpgrades.size) return;
+    if (this._isPanning && !this._budgetHasHeadroom()) return;
+    if (required && this._countUncoveredRequired(required) > 0 && this._isPanning) return;
+    const region = this._getSceneRegion();
+    const focal = region && this._manifest
+      ? resolveFocalImageCell(
+        region,
+        this._cellSize,
+        this._manifest.sourceWidth,
+        this._manifest.sourceHeight,
+      )
+      : null;
+
+    const entries = [...this._pendingUpgrades.entries()].sort((a, b) => {
+      if (!focal) return 0;
+      const partsA = a[0].split(',');
+      const partsB = b[0].split(',');
+      if (partsA.length !== 2 || partsB.length !== 2) return 0;
+      const ringA = imageCellChebyshevRing(focal.cellX, focal.cellY, Number(partsA[0]), Number(partsA[1]));
+      const ringB = imageCellChebyshevRing(focal.cellX, focal.cellY, Number(partsB[0]), Number(partsB[1]));
+      if (ringA !== ringB) return ringA - ringB;
+      return a[1] - b[1];
+    });
+
+    for (const [key, targetLod] of entries) {
+      if (!this._activeRequiredKeys.has(key)) {
+        this._pendingUpgrades.delete(key);
+        continue;
+      }
+      if (this._inflight.has(key)) continue;
+      const parts = key.split(',');
+      if (parts.length !== 2) {
+        this._pendingUpgrades.delete(key);
+        continue;
+      }
+      const cell = { key, cellX: Number(parts[0]), cellY: Number(parts[1]) };
+      const existing = this._cells.get(key);
+      if (existing?.mesh && Number(existing.lod) <= targetLod) {
+        this._pendingUpgrades.delete(key);
+        continue;
+      }
+      this._pendingUpgrades.delete(key);
+      this._inflight.add(key);
+      void this._loadCell(cell.cellX, cell.cellY, targetLod, epoch, {
+        decodePriority: DECODE_PRIORITY.UPGRADE,
+        fastSharpen: true,
+      });
+    }
   }
 
   /**
@@ -506,6 +795,20 @@ export class StreamedBackgroundGrid {
         this._manifest.sourceHeight,
       )
       : null;
+    const sharpenBacklog = this._hasSharpenBacklog(required, viewRect, requestedLod, focal);
+    const uncovered = this._countUncoveredRequired(required);
+    /** Cap concurrent LOD-0 GPU uploads on huge scenes (higher when VRAM has headroom). */
+    const mp = estimateSceneMegapixels();
+    const maxLod0Inflight = mp >= 144
+      ? (this._budgetHasHeadroom() ? 3 : 2)
+      : 4;
+    let lod0Inflight = 0;
+    for (const key of this._inflight) {
+      const entry = this._cells.get(key);
+      const pendingTarget = this._pendingUpgrades.get(key);
+      const targetLod = pendingTarget ?? entry?.lod;
+      if (Number(targetLod) === 0) lod0Inflight += 1;
+    }
 
     const sorted = [...required].sort((a, b) => {
       const la = viewRect
@@ -568,6 +871,27 @@ export class StreamedBackgroundGrid {
       cellLod = this._clampCellLodForBudget(cellLod, cell, focal);
       this._cellLastUsed.set(cell.key, performance.now());
       const existing = this._cells.get(cell.key);
+      if (uncovered > 0 && existing?.mesh) {
+        const acceptable = this._residentLodAcceptable(
+          existing.lod,
+          cell,
+          viewRect,
+          requestedLod,
+          panStabilize,
+          focal,
+        );
+        if (acceptable) {
+          // Fall through — handled below as already sharp enough.
+        } else {
+          const ring = this._cellFrustumRing(cell, focal);
+          // Keep coverage-first for outer cells; still sharpen the focal ring while panning.
+          if (ring > INNER_SHARP_RING_MAX) continue;
+        }
+      }
+      if (sharpenBacklog && !existing?.mesh) {
+        const ring = this._cellFrustumRing(cell, focal);
+        if (ring > INNER_SHARP_RING_MAX + 1) continue;
+      }
       if (existing?.mesh) {
         if (this._residentLodAcceptable(existing.lod, cell, viewRect, requestedLod, panStabilize, focal)) {
           existing.mesh.visible = this._isFloorVisible();
@@ -576,16 +900,22 @@ export class StreamedBackgroundGrid {
         }
         existing.mesh.visible = this._isFloorVisible();
         if (this._inflight.has(cell.key)) continue;
-        const innerSharp = focal && this._cellFrustumRing(cell, focal) <= INNER_SHARP_RING_MAX;
-        if (!innerSharp && this._inflight.size >= this._maxConcurrent) continue;
+        if (this._atInflightCap()) continue;
+        const { loadLod, upgradeToLod } = this._resolveProgressiveLoadLod(cellLod, effectiveLod, existing);
+        if (loadLod === 0 && lod0Inflight >= maxLod0Inflight) continue;
+        if (loadLod === 0) lod0Inflight += 1;
+        const decodePriority = this._decodePriorityForCellLoad(existing, upgradeToLod, loadLod);
         this._setCellState(cell.key, STATE_LOADING);
         this._inflight.add(cell.key);
-        void this._loadCell(cell.cellX, cell.cellY, cellLod, epoch);
+        void this._loadCell(cell.cellX, cell.cellY, loadLod, epoch, {
+          upgradeToLod,
+          decodePriority,
+          fastSharpen: decodePriority === DECODE_PRIORITY.UPGRADE,
+        });
         continue;
       }
       if (this._inflight.has(cell.key)) continue;
-      const innerSharp = focal && this._cellFrustumRing(cell, focal) <= INNER_SHARP_RING_MAX;
-      if (!innerSharp && this._inflight.size >= this._maxConcurrent) continue;
+      if (this._atInflightCap()) continue;
       if (this._cells.size >= this._maxTotalResidentCells()) {
         this.evictCells(budget, 1);
       }
@@ -593,10 +923,18 @@ export class StreamedBackgroundGrid {
         this.evictCells(budget, 1);
       }
 
+      const { loadLod, upgradeToLod } = this._resolveProgressiveLoadLod(cellLod, effectiveLod, undefined);
+      if (loadLod === 0 && lod0Inflight >= maxLod0Inflight) continue;
+      if (loadLod === 0) lod0Inflight += 1;
       this._setCellState(cell.key, STATE_LOADING);
       this._inflight.add(cell.key);
-      void this._loadCell(cell.cellX, cell.cellY, cellLod, epoch);
+      void this._loadCell(cell.cellX, cell.cellY, loadLod, epoch, {
+        upgradeToLod,
+        decodePriority: DECODE_PRIORITY.COVERAGE,
+      });
     }
+
+    this._schedulePendingUpgrades(epoch, viewRect, requestedLod, required);
   }
 
   /** @private */
@@ -643,12 +981,8 @@ export class StreamedBackgroundGrid {
   /** @private */
   _disposeCell(key, entry) {
     try {
-      const tex = entry?.mesh?.material?.map;
       this._bus._unregisterStreamingMesh?.(this._cellBusKey(key));
-      entry.mesh?.removeFromParent?.();
-      entry.mesh?.geometry?.dispose?.();
-      entry.mesh?.material?.dispose?.();
-      getTextureBudgetTracker().unregister(tex);
+      disposeStreamingMesh(entry?.mesh);
     } catch (_) {}
     this._cellLastUsed.delete(key);
     this._cells.delete(key);
@@ -673,30 +1007,32 @@ export class StreamedBackgroundGrid {
     const cellSize = this._cellSize;
     const src = this._src;
 
-    /** @type {import('three').Mesh[]} */
-    const meshes = [];
-
     /** @param {import('three').Mesh[]} list @private */
     const disposeBuiltMeshes = (list) => {
       for (const mesh of list) {
         try {
-          const tex = mesh.material?.map;
           const fbKey = mesh.userData?.tileId;
           if (fbKey) this._bus._unregisterStreamingMesh?.(fbKey);
-          getTextureBudgetTracker().unregister(tex);
-          mesh.removeFromParent();
-          mesh.geometry?.dispose?.();
-          mesh.material?.dispose?.();
+          disposeStreamingMesh(mesh);
         } catch (_) {}
       }
     };
 
+    const tasks = [];
     for (let cellY = 0; cellY < rows; cellY += 1) {
       for (let cellX = 0; cellX < cols; cellX += 1) {
-        if (epoch !== this._decodeEpoch) {
-          disposeBuiltMeshes(meshes);
-          return false;
-        }
+        tasks.push({ cellX, cellY });
+      }
+    }
+
+    const batchSize = estimateSceneMegapixels() >= 144 ? 4 : 6;
+    /** @type {import('three').Mesh[]} */
+    const built = [];
+    for (let i = 0; i < tasks.length; i += batchSize) {
+      if (epoch !== this._decodeEpoch) break;
+      const batch = tasks.slice(i, i + batchSize);
+      const batchMeshes = await Promise.all(batch.map(async ({ cellX, cellY }) => {
+        if (epoch !== this._decodeEpoch) return null;
         const tex = await loadPyramidTileTexture(
           src,
           cellX,
@@ -705,13 +1041,13 @@ export class StreamedBackgroundGrid {
           cellSize,
           sourceWidth,
           sourceHeight,
+          { priority: DECODE_PRIORITY.FALLBACK },
         );
         if (epoch !== this._decodeEpoch) {
-          try { tex?.dispose?.(); } catch (_) {}
-          disposeBuiltMeshes(meshes);
-          return false;
+          disposeStreamingTexture(tex);
+          return null;
         }
-        if (!tex) continue;
+        if (!tex) return null;
 
         const bounds = imageCellToWorldBounds(
           cellX,
@@ -721,28 +1057,146 @@ export class StreamedBackgroundGrid {
           sourceHeight,
           region,
         );
-        const mesh = this._createCellMesh(cellX, cellY, bounds, tex, lod);
+        const mesh = this._createCellMesh(cellX, cellY, bounds, tex, lod, true);
         mesh.userData.mapShineStreamingFallback = true;
         mesh.userData.streamCellX = cellX;
         mesh.userData.streamCellY = cellY;
-        mesh.renderOrder = 0;
         getTextureBudgetTracker().register(
           tex,
           `stream:fallback-cell:${this._key}:${cellX},${cellY}:L${lod}`,
           estimateTextureBytes(tex.image?.width ?? 128, tex.image?.height ?? 128, 'ubyte'),
           { source: 'streamFallback' },
         );
-        meshes.push(mesh);
+        return mesh;
+      }));
+      for (const mesh of batchMeshes) {
+        if (mesh) built.push(mesh);
       }
     }
 
     if (epoch !== this._decodeEpoch) {
-      disposeBuiltMeshes(meshes);
+      disposeBuiltMeshes(built);
       return false;
     }
 
+    const meshes = built;
+
+    if (!meshes.length) return false;
+
     this._fallbackCellMeshes = meshes;
-    return meshes.length > 0;
+    this._coarseBaseReady = true;
+    return true;
+  }
+
+  /**
+   * Load coarse fallback tiles only for visible cells that lack stream cover.
+   * Avoids monopolizing the decode queue with a full-scene 12×12 preload.
+   * @param {Array<{ key: string, cellX: number, cellY: number }>} required
+   * @param {number} fallbackLod
+   * @param {{ isPanning?: boolean, uncovered?: number }} [options]
+   * @private
+   */
+  _ensureFallbackForRequired(required, fallbackLod = 3, options = {}) {
+    const isPanning = options.isPanning === true;
+    const region = this._getSceneRegion();
+    if (!region || !this._manifest || !this._scene || this._fallbackMesh) return;
+
+    /** @type {Set<string>} */
+    const existingKeys = new Set();
+    for (const mesh of this._fallbackCellMeshes) {
+      const cx = mesh.userData?.streamCellX;
+      const cy = mesh.userData?.streamCellY;
+      if (Number.isFinite(cx) && Number.isFinite(cy)) existingKeys.add(`${cx},${cy}`);
+    }
+
+    const uncovered = Number.isFinite(options.uncovered)
+      ? Number(options.uncovered)
+      : this._countUncoveredRequired(required);
+    const maxPerSync = uncovered > 0
+      ? Math.min(16, isPanning ? 12 : 8 + Math.min(uncovered, 8))
+      : 3;
+
+    const focal = resolveFocalImageCell(
+      region,
+      this._cellSize,
+      this._manifest.sourceWidth,
+      this._manifest.sourceHeight,
+    );
+    const sorted = isPanning && focal
+      ? [...required].sort((a, b) => {
+        const ringA = imageCellChebyshevRing(focal.cellX, focal.cellY, a.cellX, a.cellY);
+        const ringB = imageCellChebyshevRing(focal.cellX, focal.cellY, b.cellX, b.cellY);
+        return ringB - ringA;
+      })
+      : required;
+
+    const epoch = this._decodeEpoch;
+    let queued = 0;
+
+    for (const cell of sorted) {
+      if (queued >= maxPerSync) break;
+      if (existingKeys.has(cell.key) || this._inflightFallback.has(cell.key)) continue;
+      const streamEntry = this._cells.get(cell.key);
+      if (this._hasTexturedVisibleCell(streamEntry)) continue;
+
+      queued += 1;
+      this._inflightFallback.add(cell.key);
+      void this._loadFallbackCell(cell.cellX, cell.cellY, fallbackLod, epoch).finally(() => {
+        this._inflightFallback.delete(cell.key);
+      });
+    }
+  }
+
+  /** @private */
+  async _loadFallbackCell(cellX, cellY, lod, epoch) {
+    const region = this._getSceneRegion();
+    const manifest = this._manifest;
+    if (!region || !manifest || !this._scene) return;
+    const key = `${cellX},${cellY}`;
+    try {
+      if (epoch !== this._decodeEpoch) return;
+      if (!this._activeRequiredKeys.has(key)) return;
+      const tex = await loadPyramidTileTexture(
+        this._src,
+        cellX,
+        cellY,
+        lod,
+        this._cellSize,
+        manifest.sourceWidth,
+        manifest.sourceHeight,
+        { priority: DECODE_PRIORITY.FALLBACK },
+      );
+      if (epoch !== this._decodeEpoch || !tex) {
+        disposeStreamingTexture(tex);
+        return;
+      }
+      if (!this._activeRequiredKeys.has(key)) {
+        disposeStreamingTexture(tex);
+        return;
+      }
+
+      const bounds = imageCellToWorldBounds(
+        cellX,
+        cellY,
+        this._cellSize,
+        manifest.sourceWidth,
+        manifest.sourceHeight,
+        region,
+      );
+      const mesh = this._createCellMesh(cellX, cellY, bounds, tex, lod, true);
+      mesh.userData.mapShineStreamingFallback = true;
+      mesh.userData.streamCellX = cellX;
+      mesh.userData.streamCellY = cellY;
+      getTextureBudgetTracker().register(
+        tex,
+        `stream:fallback-cell:${this._key}:${cellX},${cellY}:L${lod}`,
+        estimateTextureBytes(tex.image?.width ?? 128, tex.image?.height ?? 128, 'ubyte'),
+        { source: 'streamFallback' },
+      );
+      this._fallbackCellMeshes.push(mesh);
+    } catch (err) {
+      log.warn('StreamedBackgroundGrid: lazy fallback cell failed', key, err);
+    }
   }
 
   /**
@@ -788,13 +1242,9 @@ export class StreamedBackgroundGrid {
   _releaseFallbackCellMeshes() {
     for (const mesh of this._fallbackCellMeshes) {
       try {
-        const tex = mesh.material?.map;
         const fbKey = mesh.userData?.tileId;
         if (fbKey) this._bus._unregisterStreamingMesh?.(fbKey);
-        getTextureBudgetTracker().unregister(tex);
-        mesh.removeFromParent();
-        mesh.geometry?.dispose?.();
-        mesh.material?.dispose?.();
+        disposeStreamingMesh(mesh);
       } catch (_) {}
     }
     this._fallbackCellMeshes = [];
@@ -848,7 +1298,7 @@ export class StreamedBackgroundGrid {
     this._cellSize = budget.getRecommendedTileSize();
     this._maxLod = budget.getMaxLodLevel();
     const mp = estimateSceneMegapixels();
-    this._maxConcurrent = mp >= 144 ? 2 : mp > 64 ? 3 : 4;
+    this._maxConcurrent = mp >= 144 ? (this._cellSize <= 1024 ? 3 : 2) : mp > 64 ? 3 : 4;
 
     this._manifest = await buildPyramidManifest(src, this._cellSize, this._maxLod);
     if (!this._manifest) {
@@ -864,10 +1314,14 @@ export class StreamedBackgroundGrid {
     );
 
     if (useCoarseFallback) {
-      const fallbackLod = mp > 144 ? 4 : 3;
-      void this._mountCoarseGridFallback(fallbackLod).catch((err) => {
-        log.warn('StreamedBackgroundGrid: coarse fallback mount failed', src, err);
-      });
+      this._coarseFallbackLod = mp >= 144 ? 4 : 3;
+      const gridCells = this._manifest.cols * this._manifest.rows;
+      this._lazyCoarseFallback = gridCells > 36;
+      if (!this._lazyCoarseFallback) {
+        void this._mountCoarseGridFallback(this._coarseFallbackLod).catch((err) => {
+          log.warn('StreamedBackgroundGrid: coarse fallback mount failed', src, err);
+        });
+      }
     } else {
       let fallbackTex = await loadFallbackTexture(src, fallbackMax);
       if (!fallbackTex) {
@@ -895,6 +1349,7 @@ export class StreamedBackgroundGrid {
           estimateTextureBytes(fallbackTex.image?.width ?? 512, fallbackTex.image?.height ?? 512, 'ubyte'),
           { source: 'streamFallback' },
         );
+        this._coarseBaseReady = true;
       }
     }
   }
@@ -902,14 +1357,21 @@ export class StreamedBackgroundGrid {
   /**
    * @param {{ minX: number, minY: number, maxX: number, maxY: number }} viewRect
    * @param {number} lod
-   * @param {{ sharpenOnZoom?: boolean }} [options]
+   * @param {{ sharpenOnZoom?: boolean, isPanning?: boolean }} [options]
    */
   async syncToView(viewRect, lod, options = {}) {
     const region = this._getSceneRegion();
     if (!this._manifest || !viewRect || !region) return;
+    if (!intersectRects(viewRect, region)) {
+      this._activeRequiredKeys.clear();
+      this._cancelStaleInflight(new Set());
+      return;
+    }
+    this._isPanning = options.isPanning === true;
     const epoch = this._decodeEpoch;
     const effectiveLod = this._stabilizeLod(lod);
-    const panStabilize = !options.sharpenOnZoom;
+    const headroom = this._budgetHasHeadroom();
+    const panStabilize = !options.sharpenOnZoom && !headroom && !this._isPanning;
     const required = getImageCellsForWorldView(
       viewRect,
       region,
@@ -918,18 +1380,31 @@ export class StreamedBackgroundGrid {
       this._manifest.sourceHeight,
     );
     const requiredKeys = new Set(required.map((c) => c.key));
+    this._activeRequiredKeys = requiredKeys;
+    this._cancelStaleInflight(requiredKeys);
     const syncKey = buildViewSyncKey(effectiveLod, requiredKeys);
-    const needsSharpen = options.sharpenOnZoom && required.some((cell) => {
+    const focal = resolveFocalImageCell(
+      region,
+      this._cellSize,
+      this._manifest.sourceWidth,
+      this._manifest.sourceHeight,
+    );
+    const needsSharpen = !this._isPanning && (options.sharpenOnZoom || headroom) && required.some((cell) => {
       const existing = this._cells.get(cell.key);
       if (!existing?.mesh) return false;
-      return !this._residentLodAcceptable(existing.lod, cell, viewRect, lod, false);
+      return !this._residentLodAcceptable(existing.lod, cell, viewRect, lod, false, focal);
     });
+    const uncovered = this._countUncoveredRequired(required);
+    const sharpenBacklog = this._hasSharpenBacklog(required, viewRect, lod, focal);
+    if (sharpenBacklog && this._src) {
+      reprioritizeDecodeQueueForSharpen(hashSourceKey(this._src));
+    }
     const budget = getTextureBudgetTracker();
     const overBudget = budget.getUsedFraction() > 1.0;
     const needsLoad = overBudget
       ? this.hasPendingCellWork(viewRect, lod)
       : required.some((cell) =>
-        this._cellNeedsWork(cell, viewRect, lod, { panStabilize }),
+        this._cellNeedsWork(cell, viewRect, lod, { panStabilize }, focal),
       );
     if (overBudget && (needsSharpen || needsLoad)) {
       this.evictCells(budget, 4);
@@ -937,7 +1412,14 @@ export class StreamedBackgroundGrid {
     if (syncKey === this._syncKey && !needsSharpen && !needsLoad) {
       this._applyRequiredCellVisibility(required);
       this._maybeReleaseFallback();
+      if (this._lazyCoarseFallback && (uncovered > 0 || !sharpenBacklog)) {
+        this._ensureFallbackForRequired(required, this._coarseFallbackLod, {
+          isPanning: this._isPanning,
+          uncovered,
+        });
+      }
       this._syncFallbackVisibility(required);
+      this._schedulePendingUpgrades(epoch, viewRect, lod, required);
       return;
     }
     this._syncKey = syncKey;
@@ -949,9 +1431,17 @@ export class StreamedBackgroundGrid {
       }
     }
 
+    if (this._lazyCoarseFallback && (uncovered > 0 || !sharpenBacklog)) {
+      this._ensureFallbackForRequired(required, this._coarseFallbackLod, {
+        isPanning: this._isPanning,
+        uncovered,
+      });
+    }
+
     this._scheduleRequiredCellLoads(required, effectiveLod, epoch, viewRect, lod, panStabilize);
 
     this._syncFallbackVisibility(required);
+    this._schedulePendingUpgrades(epoch, viewRect, lod, required);
     this._maybeReleaseFallback();
   }
 
@@ -964,13 +1454,26 @@ export class StreamedBackgroundGrid {
   }
 
   /**
+   * @param {number} cellX
+   * @param {number} cellY
+   * @param {number} lod
+   * @param {number} epoch
+   * @param {{ upgradeToLod?: number|null, decodePriority?: number, fastSharpen?: boolean }} [options]
    * @private
    */
-  async _loadCell(cellX, cellY, lod, epoch) {
+  async _loadCell(cellX, cellY, lod, epoch, options = {}) {
     const key = `${cellX},${cellY}`;
     const region = this._getSceneRegion();
+    const upgradeToLod = Number.isFinite(options.upgradeToLod) ? Number(options.upgradeToLod) : null;
+    const decodePriority = Number.isFinite(options.decodePriority)
+      ? Number(options.decodePriority)
+      : DECODE_PRIORITY.STREAM;
+    const fastSharpen = options.fastSharpen === true;
+    /** @type {{ cellX: number, cellY: number, upgradeToLod: number, epoch: number }|null} */
+    let scheduleUpgrade = null;
     try {
       if (epoch !== this._decodeEpoch || !region) return;
+      if (!this._activeRequiredKeys.has(key)) return;
       const tex = await loadPyramidTileTexture(
         this._src,
         cellX,
@@ -979,17 +1482,18 @@ export class StreamedBackgroundGrid {
         this._cellSize,
         this._manifest.sourceWidth,
         this._manifest.sourceHeight,
+        { priority: decodePriority, fastSharpen },
       );
       if (epoch !== this._decodeEpoch || !tex) return;
+      if (!this._activeRequiredKeys.has(key)) {
+        disposeStreamingTexture(tex);
+        return;
+      }
 
       const old = this._cells.get(key);
       if (old?.mesh) {
-        const oldTex = old.mesh.material?.map;
         this._bus._unregisterStreamingMesh?.(this._cellBusKey(key));
-        old.mesh.removeFromParent();
-        old.mesh.geometry?.dispose?.();
-        old.mesh.material?.dispose?.();
-        getTextureBudgetTracker().unregister(oldTex);
+        disposeStreamingMesh(old.mesh);
       }
 
       const bounds = imageCellToWorldBounds(
@@ -1011,8 +1515,27 @@ export class StreamedBackgroundGrid {
         { source: 'streamTile' },
       );
       this._syncFallbackCellVisibility(key);
+
+      if (upgradeToLod != null && upgradeToLod < lod) {
+        if (this._isPanning) {
+          this._pendingUpgrades.set(key, upgradeToLod);
+        } else if (this._activeRequiredKeys.has(key)) {
+          scheduleUpgrade = { cellX, cellY, upgradeToLod, epoch };
+        }
+      }
     } finally {
       this._inflight.delete(key);
+    }
+
+    if (scheduleUpgrade && this._activeRequiredKeys.has(key) && !this._inflight.has(key)) {
+      this._inflight.add(key);
+      void this._loadCell(
+        scheduleUpgrade.cellX,
+        scheduleUpgrade.cellY,
+        scheduleUpgrade.upgradeToLod,
+        scheduleUpgrade.epoch,
+        { decodePriority: DECODE_PRIORITY.UPGRADE, fastSharpen: true },
+      );
     }
   }
 
@@ -1069,7 +1592,7 @@ export class StreamedBackgroundGrid {
     mesh.scale.set(1, -1, 1);
     const z = GROUND_Z - 1 + floorIndex * 0.01 - (isFallback ? 0.001 : 0);
     mesh.position.set(centerX, centerY, z);
-    mesh.renderOrder = 0;
+    mesh.renderOrder = streamingCellRenderOrder(0, 0, isFallback);
     mesh.userData = { tileId: busKey, mapShineStreaming: true, mapShineStreamingFallback: isFallback };
     this._scene.add(mesh);
     this._bus._registerStreamingMesh?.(busKey, mesh, mat, floorIndex);
@@ -1079,7 +1602,7 @@ export class StreamedBackgroundGrid {
   /**
    * @private
    */
-  _createCellMesh(cellX, cellY, bounds, texture, lod) {
+  _createCellMesh(cellX, cellY, bounds, texture, lod, isFallback = false) {
     const THREE = window.THREE;
     const w = bounds.maxX - bounds.minX;
     const h = bounds.maxY - bounds.minY;
@@ -1094,13 +1617,14 @@ export class StreamedBackgroundGrid {
       depthWrite: false,
       depthTest: false,
       blending: THREE.NormalBlending,
+      side: THREE.DoubleSide,
     });
     const mesh = new THREE.Mesh(geom, mat);
     mesh.frustumCulled = false;
     mesh.scale.set(1, -1, 1);
-    const z = GROUND_Z - 1 + this._floorIndex * 0.01 + 0.002;
+    const z = GROUND_Z - 1 + this._floorIndex * 0.01 + (isFallback ? -0.001 : 0.002 + lod * 0.001);
     mesh.position.set(centerX, centerY, z);
-    mesh.renderOrder = 1 + lod;
+    mesh.renderOrder = streamingCellRenderOrder(0, lod, isFallback);
     const busKey = this._cellBusKey(`${cellX},${cellY}`);
     mesh.userData = {
       mapShineStreaming: true,
@@ -1120,10 +1644,21 @@ export class StreamedBackgroundGrid {
     for (const [key, entry] of [...this._cells.entries()]) {
       this._disposeCell(key, entry);
     }
+    void refreshGridCellPolicy(this);
     this._decodeEpoch += 1;
     this._servedLod = 99;
     this._syncKey = '';
     this._cellLastUsed.clear();
+  }
+
+  /** Abort queued decodes without disposing resident GPU cells (floor transition). */
+  pauseDecodeWork() {
+    this._decodeEpoch += 1;
+    this._inflight?.clear?.();
+    this._inflightFallback?.clear?.();
+    this._pendingUpgrades?.clear?.();
+    this._activeRequiredKeys?.clear?.();
+    this._syncKey = '';
   }
 
   /** @returns {boolean} */
@@ -1267,38 +1802,32 @@ export class StreamedBackgroundGrid {
     this._decodeEpoch += 1;
     for (const [cellKey, entry] of this._cells) {
       try {
-        const tex = entry.mesh?.material?.map;
         this._bus._unregisterStreamingMesh?.(this._cellBusKey(cellKey));
-        entry.mesh?.removeFromParent?.();
-        entry.mesh?.geometry?.dispose?.();
-        entry.mesh?.material?.dispose?.();
-        getTextureBudgetTracker().unregister(tex);
+        disposeStreamingMesh(entry?.mesh);
       } catch (_) {}
     }
     this._cells.clear();
     this._cellStates.clear();
     this._inflight.clear();
+    this._inflightFallback.clear();
+    this._activeRequiredKeys.clear();
+    this._pendingUpgrades.clear();
     if (this._fallbackMesh) {
       try {
-        getTextureBudgetTracker().unregister(this._fallbackMesh.material?.map);
-        this._fallbackMesh.removeFromParent();
-        this._fallbackMesh.geometry?.dispose?.();
-        this._fallbackMesh.material?.dispose?.();
+        this._bus._unregisterStreamingMesh?.(`${this._key}__fallback`);
+        disposeStreamingMesh(this._fallbackMesh);
       } catch (_) {}
       this._fallbackMesh = null;
     }
     for (const mesh of this._fallbackCellMeshes) {
       try {
-        const tex = mesh.material?.map;
         const fbKey = mesh.userData?.tileId;
         if (fbKey) this._bus._unregisterStreamingMesh?.(fbKey);
-        getTextureBudgetTracker().unregister(tex);
-        mesh.removeFromParent();
-        mesh.geometry?.dispose?.();
-        mesh.material?.dispose?.();
+        disposeStreamingMesh(mesh);
       } catch (_) {}
     }
     this._fallbackCellMeshes = [];
+    this._coarseBaseReady = false;
     this._manifest = null;
     this._sceneRegion = null;
   }
@@ -1425,14 +1954,26 @@ export class StreamedRegionGrid {
     this._syncKey = '';
     /** @type {Map<string, number>} */
     this._cellLastUsed = new Map();
+    /** @type {Set<string>} */
+    this._activeRequiredKeys = new Set();
+  }
+
+  /** @private */
+  _cancelStaleInflight(requiredKeys) {
+    for (const key of [...this._inflight]) {
+      if (!requiredKeys.has(key)) {
+        this._inflight.delete(key);
+      }
+    }
   }
 
   /** @private */
   _maxTotalResidentCells() {
     const mp = estimateSceneMegapixels();
-    if (mp >= 144) return 6;
-    if (mp > 64) return 10;
-    return maxTotalResidentCellsForScene();
+    const cs = this._cellSize || 2048;
+    if (mp >= 144) return scaleStreamingResidentCap(6, cs);
+    if (mp > 64) return scaleStreamingResidentCap(10, cs);
+    return maxTotalResidentCellsForScene(cs);
   }
 
   /**
@@ -1472,12 +2013,8 @@ export class StreamedRegionGrid {
   /** @private */
   _disposeCell(key, entry) {
     try {
-      const tex = entry?.mesh?.material?.map;
       this._bus._unregisterStreamingMesh?.(`${this._key}:${key}`);
-      entry.mesh?.removeFromParent?.();
-      entry.mesh?.geometry?.dispose?.();
-      entry.mesh?.material?.dispose?.();
-      getTextureBudgetTracker().unregister(tex);
+      disposeStreamingMesh(entry?.mesh);
     } catch (_) {}
     this._cellLastUsed.delete(key);
     this._cells.delete(key);
@@ -1559,7 +2096,8 @@ export class StreamedRegionGrid {
       this._manifest.sourceWidth,
       this._manifest.sourceHeight,
     );
-    if (this._inflight.size > 0) return true;
+    const requiredKeys = new Set(required.map((c) => c.key));
+    if ([...this._inflight].some((k) => requiredKeys.has(k))) return true;
     return required.some((cell) => this._cellNeedsWork(cell, effectiveLod));
   }
 
@@ -1720,7 +2258,7 @@ export class StreamedRegionGrid {
     }
 
     const mp = estimateSceneMegapixels();
-    this._maxConcurrent = mp >= 144 ? 2 : mp > 64 ? 3 : 4;
+    this._maxConcurrent = mp >= 144 ? (this._cellSize <= 1024 ? 3 : 2) : mp > 64 ? 3 : 4;
 
     const fallbackMax = Math.min(2048, budget.backgroundMaxSize ?? 2048);
     const fallbackTex = await loadFallbackTexture(src, fallbackMax);
@@ -1743,16 +2281,23 @@ export class StreamedRegionGrid {
   /**
    * @param {{ minX: number, minY: number, maxX: number, maxY: number }} viewRect
    * @param {number} lod
-   * @param {{ sharpenOnZoom?: boolean }} [options]
+   * @param {{ sharpenOnZoom?: boolean, isPanning?: boolean }} [options]
    */
   async syncToView(viewRect, lod, options = {}) {
     if (!this._manifest || !viewRect || !this._region) return;
 
     if (!this._isFloorVisible()) {
+      this.pauseDecodeWork?.();
       for (const [key, entry] of [...this._cells.entries()]) {
         this._disposeCell(key, entry);
       }
       if (this._fallbackMesh) this._fallbackMesh.visible = false;
+      return;
+    }
+
+    if (!intersectRects(viewRect, this._region)) {
+      this._activeRequiredKeys.clear();
+      this._cancelStaleInflight(new Set());
       return;
     }
 
@@ -1766,8 +2311,11 @@ export class StreamedRegionGrid {
       this._manifest.sourceHeight,
     );
     const requiredKeys = new Set(required.map((c) => c.key));
+    this._activeRequiredKeys = requiredKeys;
+    this._cancelStaleInflight(requiredKeys);
     const syncKey = buildViewSyncKey(effectiveLod, requiredKeys);
-    const needsSharpen = options.sharpenOnZoom && required.some((cell) => {
+    const isPanning = options.isPanning === true;
+    const needsSharpen = !isPanning && options.sharpenOnZoom && required.some((cell) => {
       const existing = this._cells.get(cell.key);
       return !!existing?.mesh && Number(existing.lod) > effectiveLod;
     });
@@ -1812,6 +2360,7 @@ export class StreamedRegionGrid {
     const key = `${cellX},${cellY}`;
     try {
       if (epoch !== this._decodeEpoch) return;
+      if (!this._activeRequiredKeys.has(key)) return;
       const tex = await loadPyramidTileTexture(
         this._src,
         cellX,
@@ -1820,8 +2369,13 @@ export class StreamedRegionGrid {
         this._cellSize,
         this._manifest.sourceWidth,
         this._manifest.sourceHeight,
+        { priority: DECODE_PRIORITY.STREAM },
       );
       if (epoch !== this._decodeEpoch || !tex || !this._region) return;
+      if (!this._activeRequiredKeys.has(key)) {
+        disposeStreamingTexture(tex);
+        return;
+      }
 
       const old = this._cells.get(key);
       if (old?.mesh) {
@@ -1885,9 +2439,9 @@ export class StreamedRegionGrid {
     const mesh = new THREE.Mesh(geom, mat);
     mesh.frustumCulled = false;
     mesh.scale.set(1, -1, 1);
-    mesh.position.set(centerX, centerY, this._z + (isFallback ? -0.001 : 0.002 + lod * 0.0001));
+    mesh.position.set(centerX, centerY, this._z + (isFallback ? -0.001 : 0.002 + lod * 0.001));
     mesh.rotation.z = this._rotation;
-    mesh.renderOrder = isFallback ? this._tileRenderOrder : this._tileRenderOrder + lod * 0.001;
+    mesh.renderOrder = streamingCellRenderOrder(this._tileRenderOrder, lod, isFallback);
     mesh.layers.set(0);
     if (this._roofShadowCaster) {
       mesh.layers.enable(20);
@@ -2108,8 +2662,8 @@ export class StreamedRegionGrid {
    */
   _applyLayoutToMesh(mesh, isFallback, lod = 0) {
     mesh.rotation.z = this._rotation;
-    mesh.position.z = this._z + (isFallback ? -0.001 : 0.002 + lod * 0.0001);
-    mesh.renderOrder = isFallback ? this._tileRenderOrder : this._tileRenderOrder + lod * 0.001;
+    mesh.position.z = this._z + (isFallback ? -0.001 : 0.002 + lod * 0.001);
+    mesh.renderOrder = streamingCellRenderOrder(this._tileRenderOrder, lod, isFallback);
 
     if (mesh.material) {
       mesh.material.opacity = this._alpha;
@@ -2135,20 +2689,25 @@ export class StreamedRegionGrid {
     mesh.visible = this._isFloorVisible();
   }
 
+  /** Abort queued decodes without disposing resident GPU cells (floor transition). */
+  pauseDecodeWork() {
+    this._decodeEpoch += 1;
+    this._inflight?.clear?.();
+    this._activeRequiredKeys?.clear?.();
+    this._syncKey = '';
+  }
+
   /** Drop resident cells for cache/schema reload. */
   reloadAllCells() {
     for (const [key, entry] of [...this._cells.entries()]) {
       try {
-        const tex = entry?.mesh?.material?.map;
         this._bus._unregisterStreamingMesh?.(`${this._key}:${key}`);
-        entry.mesh?.removeFromParent?.();
-        entry.mesh?.geometry?.dispose?.();
-        entry.mesh?.material?.dispose?.();
-        getTextureBudgetTracker().unregister(tex);
+        disposeStreamingMesh(entry?.mesh);
       } catch (_) {}
-      this._cells.delete(key);
       this._setCellState(key, STATE_CULLED);
     }
+    this._cells.clear();
+    void refreshGridCellPolicy(this);
     this._decodeEpoch += 1;
     this._servedLod = 99;
     this._syncKey = '';
@@ -2160,22 +2719,17 @@ export class StreamedRegionGrid {
     for (const [key, entry] of this._cells) {
       try {
         this._bus._unregisterStreamingMesh?.(`${this._key}:${key}`);
-        entry.mesh?.removeFromParent?.();
-        entry.mesh?.geometry?.dispose?.();
-        entry.mesh?.material?.dispose?.();
-        getTextureBudgetTracker().unregister(entry.mesh?.material?.map);
+        disposeStreamingMesh(entry?.mesh);
       } catch (_) {}
     }
     this._cells.clear();
     this._cellStates.clear();
     this._inflight.clear();
+    this._activeRequiredKeys.clear();
     if (this._fallbackMesh) {
       try {
         this._bus._unregisterStreamingMesh?.(`${this._key}__fallback`);
-        getTextureBudgetTracker().unregister(this._fallbackMesh.material?.map);
-        this._fallbackMesh.removeFromParent();
-        this._fallbackMesh.geometry?.dispose?.();
-        this._fallbackMesh.material?.dispose?.();
+        disposeStreamingMesh(this._fallbackMesh);
       } catch (_) {}
       this._fallbackMesh = null;
     }

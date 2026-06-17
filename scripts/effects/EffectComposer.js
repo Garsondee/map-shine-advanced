@@ -96,9 +96,6 @@ export class EffectComposer {
     /** @type {TimeManager} - Centralized time management */
     this.timeManager = new TimeManager();
 
-    /** @type {import('../scene/depth-pass-manager.js').DepthPassManager|null} */
-    this._depthPassManager = null;
-
     // ── Compositor V2 ─────────────────────────────────────────────────────────
     // V2-only runtime: floor rendering is delegated to FloorCompositor.
     // FloorCompositor uses Three.js layers for floor isolation (no per-frame
@@ -788,7 +785,7 @@ export class EffectComposer {
    * Get or lazily create the FloorCompositor V2 instance.
    * Created on first use so the constructor doesn't run during module init.
    * @param {object} [options]
-   * @param {(label: string, index: number, total: number) => void} [options.onProgress]
+   * @param {(index: number, total: number) => void} [options.onProgress]
    *   Forwarded to FloorCompositor.initialize() for loading-screen progress updates.
    *   Only used on the first call (when the compositor is actually created).
    * @param {{maskIds?: string[]|Set<string>}|null} [options.effectHints]
@@ -1234,15 +1231,6 @@ export class EffectComposer {
       log.debug(`Resized render target: ${name} (${renderW}x${renderH})`);
     }
 
-    // Resize depth pass manager render target
-    if (this._depthPassManager) {
-      try {
-        this._depthPassManager.resize(renderW, renderH);
-      } catch (e) {
-        // Non-critical; depth pass will auto-resize on next render
-      }
-    }
-
     // Notify all effects of resize
     for (const effect of this.effects.values()) {
       if (effect.onResize) {
@@ -1315,22 +1303,6 @@ export class EffectComposer {
       const sceneComposer = window.MapShine?.sceneComposer;
       frameState.update(this.camera, sceneComposer, canvas, info.frameCount, info.delta);
     } catch (_) {}
-  }
-
-  /**
-   * Set the depth pass manager reference for debug overlay rendering.
-   * @param {import('../scene/depth-pass-manager.js').DepthPassManager|null} manager
-   */
-  setDepthPassManager(manager) {
-    this._depthPassManager = manager;
-  }
-
-  /**
-   * Get the depth pass manager.
-   * @returns {import('../scene/depth-pass-manager.js').DepthPassManager|null}
-   */
-  getDepthPassManager() {
-    return this._depthPassManager;
   }
 
   /**

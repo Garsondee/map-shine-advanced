@@ -2711,15 +2711,9 @@ export class DistortionManager {
       // by the render loop (the upper floor). Use compositor.getGroundFloorMaskTexture.
       try {
         let outdoorsTex = null;
-        let outdoorsRec = null;
         const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
         if (compositor?.getGroundFloorMaskTexture) {
           outdoorsTex = compositor.getGroundFloorMaskTexture('outdoors');
-        }
-        if (!outdoorsTex) {
-          const mm = window.MapShine?.maskManager;
-          outdoorsTex = mm ? mm.getTexture('outdoors.scene') : null;
-          outdoorsRec = mm ? mm.getRecord?.('outdoors.scene') : null;
         }
         if (!outdoorsTex) {
           const wle = window.MapShine?.windowLightEffect;
@@ -2729,8 +2723,7 @@ export class DistortionManager {
         if (au.tOutdoorsMask) au.tOutdoorsMask.value = outdoorsTex;
         if (au.uHasOutdoorsMask) au.uHasOutdoorsMask.value = outdoorsTex ? 1.0 : 0.0;
         if (au.uOutdoorsMaskFlipY) {
-          const metaFlipY = (outdoorsRec && typeof outdoorsRec.uvFlipY === 'boolean') ? outdoorsRec.uvFlipY : null;
-          const flip = (metaFlipY !== null) ? metaFlipY : (outdoorsTex?.flipY ?? false);
+          const flip = outdoorsTex?.flipY ?? false;
           au.uOutdoorsMaskFlipY.value = flip ? 1.0 : 0.0;
         }
       } catch (e) {
@@ -2738,33 +2731,21 @@ export class DistortionManager {
 
       // Cloud shadows (CloudEffect cloudShadowTarget: 1 lit, 0 shadowed; indoors forced to 1)
       try {
-        const mm = window.MapShine?.maskManager;
-        const cloudShadowTex = mm ? mm.getTexture('cloudShadow.screen') : null;
+        const cloud = window.MapShine?.cloudEffectV2;
+        const cloudShadowTex = (cloud && cloud.enabled && cloud.cloudShadowTarget?.texture)
+          ? cloud.cloudShadowTarget.texture
+          : null;
         if (au.tCloudShadow) au.tCloudShadow.value = cloudShadowTex;
         if (au.uHasCloudShadow) au.uHasCloudShadow.value = cloudShadowTex ? 1.0 : 0.0;
-
-        if (!cloudShadowTex) {
-          const cloud = window.MapShine?.cloudEffectV2;
-          const fallback = (cloud && cloud.enabled && cloud.cloudShadowTarget?.texture)
-            ? cloud.cloudShadowTarget.texture
-            : null;
-          if (au.tCloudShadow) au.tCloudShadow.value = fallback;
-          if (au.uHasCloudShadow) au.uHasCloudShadow.value = fallback ? 1.0 : 0.0;
-        }
       } catch (e) {
         if (au.tCloudShadow) au.tCloudShadow.value = null;
         if (au.uHasCloudShadow) au.uHasCloudShadow.value = 0.0;
       }
 
-      // Token mask (LightingEffect tokenMaskTarget, published via MaskManager).
-      // This is screen-space and is used to prevent distortion + water shading from affecting tokens.
+      // Token mask (LightingEffect tokenMaskTarget).
       try {
-        const mm = window.MapShine?.maskManager;
-        let tokenMaskTex = mm ? mm.getTexture('tokenMask.screen') : null;
-        if (!tokenMaskTex) {
-          const le = window.MapShine?.lightingEffect;
-          tokenMaskTex = le?.tokenMaskTarget?.texture || null;
-        }
+        const le = window.MapShine?.lightingEffect;
+        const tokenMaskTex = le?.tokenMaskTarget?.texture || null;
         if (au.tTokenMask) au.tTokenMask.value = tokenMaskTex;
         if (au.uHasTokenMask) au.uHasTokenMask.value = tokenMaskTex ? 1.0 : 0.0;
       } catch (_) {
@@ -2776,12 +2757,6 @@ export class DistortionManager {
       try {
         const wle = window.MapShine?.windowLightEffect;
         let windowLightTex = null;
-
-        const mm = window.MapShine?.maskManager;
-        const mmWindowLightTex = mm ? mm.getTexture('windowLight.screen') : null;
-        if (mmWindowLightTex) {
-          windowLightTex = mmWindowLightTex;
-        }
 
         if (wle && typeof wle.getLightTexture === 'function') {
           // Keep the light target up to date if caustics are enabled.
@@ -2859,19 +2834,12 @@ export class DistortionManager {
       }
     }
     
-    const mm = window.MapShine?.maskManager;
-    const roofAlphaTex = mm ? mm.getTexture('roofAlpha.screen') : null;
-    if (roofAlphaTex) {
-      u.tRoofAlpha.value = roofAlphaTex;
+    const lightingEffect = window.MapShine?.lightingEffect;
+    if (lightingEffect?.roofAlphaTarget) {
+      u.tRoofAlpha.value = lightingEffect.roofAlphaTarget.texture;
       u.uHasRoofAlpha.value = 1.0;
     } else {
-      const lightingEffect = window.MapShine?.lightingEffect;
-      if (lightingEffect?.roofAlphaTarget) {
-        u.tRoofAlpha.value = lightingEffect.roofAlphaTarget.texture;
-        u.uHasRoofAlpha.value = 1.0;
-      } else {
-        u.uHasRoofAlpha.value = 0.0;
-      }
+      u.uHasRoofAlpha.value = 0.0;
     }
     
     // Update apply material debug flags

@@ -330,6 +330,85 @@ export function getPerspectiveForRenderFloorIndex(floorIndex) {
 }
 
 /**
+ * Resolve the vertical span [bottom, top] of an AmbientLight for floor-band tests.
+ * When no explicit `flags.levels.rangeTop` is authored, treat the light as a point
+ * at its bottom/elevation (not unbounded upward).
+ *
+ * @param {object|null|undefined} lightDoc
+ * @returns {{ rangeBottom: number, rangeTop: number }}
+ */
+export function resolveLightVerticalSpan(lightDoc) {
+  const range = readDocLevelsRange(lightDoc);
+  let lo = range.rangeBottom;
+  let hi = range.rangeTop;
+  if (!Number.isFinite(lo)) {
+    const e = Number(lightDoc?.elevation);
+    lo = Number.isFinite(e) ? e : -Infinity;
+  }
+  const flagsLevels = lightDoc?.flags?.levels;
+  const hasExplicitTop = flagsLevels
+    && flagsLevels.rangeTop !== undefined
+    && flagsLevels.rangeTop !== null;
+  if (!Number.isFinite(hi) || (hi === Infinity && !hasExplicitTop)) {
+    hi = Number.isFinite(lo) ? lo : Infinity;
+  }
+  if (hi < lo) {
+    const swap = lo;
+    lo = hi;
+    hi = swap;
+  }
+  return { rangeBottom: lo, rangeTop: hi };
+}
+
+/**
+ * Whether a light's vertical span overlaps a floor elevation band.
+ *
+ * @param {object|null|undefined} lightDoc
+ * @param {{ elevationMin?: number, elevationMax?: number }|null|undefined} floorBand
+ * @returns {boolean}
+ */
+export function lightVerticalSpanOverlapsFloorBand(lightDoc, floorBand) {
+  const { rangeBottom: lo, rangeTop: hi } = resolveLightVerticalSpan(lightDoc);
+  const fmin = Number(floorBand?.elevationMin);
+  const fmax = Number(floorBand?.elevationMax);
+  if (!Number.isFinite(fmin) || !Number.isFinite(fmax)) return true;
+  return lo <= fmax && fmin <= hi;
+}
+
+/**
+ * Floor band used to gate lights for the current compositor slice or active level.
+ *
+ * @param {ReturnType<typeof getPerspectiveElevation>|null|undefined} perspectiveOverride
+ * @returns {{ elevationMin: number, elevationMax: number }|null}
+ */
+function resolveFloorElevationBandForLightPerspective(perspectiveOverride) {
+  if (perspectiveOverride?.source === 'render-floor') {
+    const fi = Number(perspectiveOverride.floorIndex);
+    const floors = globalThis.window?.MapShine?.floorStack?.getFloors?.() ?? [];
+    const f = floors[fi];
+    if (!f) return null;
+    return {
+      elevationMin: Number(f.elevationMin),
+      elevationMax: Number(f.elevationMax),
+    };
+  }
+  const ctx = globalThis.window?.MapShine?.activeLevelContext ?? null;
+  const ctxBottom = Number(ctx?.bottom);
+  const ctxTop = Number(ctx?.top);
+  if (Number.isFinite(ctxBottom) && Number.isFinite(ctxTop)) {
+    return { elevationMin: ctxBottom, elevationMax: ctxTop };
+  }
+  const active = globalThis.window?.MapShine?.floorStack?.getActiveFloor?.() ?? null;
+  if (active) {
+    return {
+      elevationMin: Number(active.elevationMin),
+      elevationMax: Number(active.elevationMax),
+    };
+  }
+  return null;
+}
+
+/**
  * Check if an ambient light should be visible based on its elevation range
  * and the current perspective elevation.
  *
@@ -382,6 +461,16 @@ export function isLightVisibleForPerspective(lightDoc, perspectiveOverride = nul
     const rangeTop = range.rangeTop;
     const viewerLOS = perspective.losHeight;
     if (viewerLOS >= bgElevation && rangeTop < bgElevation) return false;
+
+    // Level dropdown can include a floor while doc.elevation sits below that deck
+    // (e.g. elev 10 on ground, also listed on upper level). Per-floor compositor
+    // passes must not apply those lights to the upper slice — they only reach
+    // upstairs through LevelCompositePass alpha holes in lower-floor renders.
+    const floorBand = resolveFloorElevationBandForLightPerspective(perspectiveOverride);
+    if (floorBand && !lightVerticalSpanOverlapsFloorBand(lightDoc, floorBand)) {
+      return false;
+    }
+
     return true;
   }
 
@@ -411,19 +500,8 @@ export function isLightVisibleForPerspective(lightDoc, perspectiveOverride = nul
   // lightMasking=true (default): light visible if rangeBottom <= viewerLOS
   // This is the simpler mode — lights on the viewer's level or below are visible.
   if (lightMasking) {
-    let activeBandBottom = NaN;
-    if (perspectiveOverride?.source === 'render-floor') {
-      const fi = Number(perspectiveOverride.floorIndex);
-      const floors = globalThis.window?.MapShine?.floorStack?.getFloors?.() ?? [];
-      if (Number.isFinite(fi) && floors[fi]) {
-        activeBandBottom = Number(floors[fi].elevationMin);
-      }
-    }
-    if (!Number.isFinite(activeBandBottom)) {
-      activeBandBottom = Number(window.MapShine?.activeLevelContext?.bottom);
-    }
-    // V14 multi-floor: do not bleed lower-floor point lights through upper decks.
-    if (Number.isFinite(activeBandBottom) && rangeBottom < activeBandBottom) {
+    const floorBand = resolveFloorElevationBandForLightPerspective(perspectiveOverride);
+    if (floorBand && !lightVerticalSpanOverlapsFloorBand(lightDoc, floorBand)) {
       return false;
     }
     return rangeBottom <= viewerLOS;

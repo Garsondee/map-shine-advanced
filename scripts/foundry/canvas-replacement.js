@@ -135,7 +135,7 @@ import {
   disposeLevelTransitionCurtain,
 } from './manager-wiring.js';
 import { ExternalEffectsCompositor } from '../integrations/external-effects/ExternalEffectsCompositor.js';
-import { isSoundAudibleForPerspective, getPerspectiveForRenderFloorIndex, isLightVisibleForPerspective, getPerspectiveElevation } from './elevation-context.js';
+import { isSoundAudibleForPerspective, getPerspectiveForRenderFloorIndex, isLightVisibleForPerspective, getPerspectiveElevation, resolveLightVerticalSpan, lightVerticalSpanOverlapsFloorBand } from './elevation-context.js';
 import { getFloorStackBandsSignature, getSceneBandsForFloorStack } from './levels-floor-stack-bands.js';
 import {
   hasV14NativeLevels,
@@ -2744,6 +2744,7 @@ export function initialize() {
         const collectedIds = collectAmbientLightLevelIdStrings(doc);
         const hasExplicitSet = ambientLightHasExplicitV14LevelSet(doc);
         const levelsRange = readDocLevelsRange(doc);
+        const verticalSpan = resolveLightVerticalSpan(doc);
 
         const perFloor = floors.map((floor, fi) => {
           const pOverride = getPerspectiveForRenderFloorIndex(fi);
@@ -2754,6 +2755,7 @@ export function initialize() {
           const targetLevelId = resolveTargetLevelIdForAmbientLightGate(scene, gateOpts);
           const levelGate = getAmbientLightLevelGate(doc, scene, gateOpts);
           const onLevel = targetLevelId ? isAmbientLightOnV14Level(doc, targetLevelId) : null;
+          const overlapsFloorBand = lightVerticalSpanOverlapsFloorBand(doc, floor);
           const visibleForPerspective = isLightVisibleForPerspective(doc, pOverride);
 
           let includedInLevel = null;
@@ -2772,6 +2774,7 @@ export function initialize() {
             targetLevelId,
             levelGate,
             isAmbientLightOnV14Level: onLevel,
+            overlapsFloorElevationBand: overlapsFloorBand,
             includedInLevel_api: includedInLevel,
             isLightVisibleForPerspective: visibleForPerspective,
             isActiveFloor: activeFloor?.index === fi,
@@ -2800,6 +2803,7 @@ export function initialize() {
             collectedLevelIds: collectedIds,
             ambientLightHasExplicitV14LevelSet: hasExplicitSet,
             readDocLevelsRange: levelsRange,
+            resolveLightVerticalSpan: verticalSpan,
             flagsLevels: doc.flags?.levels ?? null,
           },
           mapShineRuntime: {
@@ -2826,6 +2830,7 @@ export function initialize() {
           gateOk: row.levelGate?.ok,
           skipLegacyLos: row.levelGate?.skipLegacyLosMasking,
           onV14Level: row.isAmbientLightOnV14Level,
+          overlapsBand: row.overlapsFloorElevationBand,
           includedInLevel: row.includedInLevel_api,
           visibleForPerspective: row.isLightVisibleForPerspective,
           active: row.isActiveFloor ? '★' : '',

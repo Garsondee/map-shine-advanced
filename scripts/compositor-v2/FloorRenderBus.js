@@ -148,6 +148,28 @@ function isBackgroundImageAlbedoBusKey(key) {
   return /^__bg_image__$|^__bg_image__[1-9]\d*$/.test(String(key || ''));
 }
 
+/**
+ * True for post-bloom background effect overlays (`__bg_image___tree`, …).
+ * @param {string} key
+ * @returns {boolean}
+ */
+function isBackgroundImageEffectOverlayBusKey(key) {
+  return /^__bg_image__(?:[1-9]\d*)?_(?!cell:)/.test(String(key || ''));
+}
+
+/**
+ * True for bus background draws in per-level RTs: albedo planes and streamed
+ * cell meshes (`__bg_image__:cell:*`), excluding vegetation/specular overlays.
+ * @param {string} key
+ * @returns {boolean}
+ */
+function isBackgroundImageBusRenderKey(key) {
+  const s = String(key || '');
+  if (isBackgroundImageAlbedoBusKey(s)) return true;
+  if (isBackgroundImageEffectOverlayBusKey(s)) return false;
+  return /^__bg_image__(?:[1-9]\d*)?:cell:/.test(s);
+}
+
 const MAX_SORT_WITHIN_FLOOR_GROUP = MAX_INTRA_ROLE_OFFSET;
 const UPPER_FLOOR_ALPHA_CUTOFF = 0.4;
 
@@ -817,6 +839,16 @@ export class FloorRenderBus {
       // World-spanning solid underlay only — level backgrounds respect floor slice.
       if (tileId === '__bg_solid__') {
         node.visible = true;
+        continue;
+      }
+
+      // Tree/Bush V2 overlays manage floor + view + streaming visibility in the effect.
+      if (
+        tileId.endsWith('_bush')
+        || tileId.endsWith('_bush_shadow')
+        || tileId.endsWith('_tree')
+        || tileId.endsWith('_tree_shadow')
+      ) {
         continue;
       }
 
@@ -1523,7 +1555,7 @@ export class FloorRenderBus {
       }
 
       if (tileId.startsWith('__')) {
-        const isBgImage = tileId.startsWith('__bg_image__');
+        const isBgImage = isBackgroundImageBusRenderKey(tileId);
         if (!isBgImage || !includeBackground) {
           node.visible = false;
           continue;
@@ -1757,7 +1789,15 @@ export class FloorRenderBus {
           node.visible = showSolid;
           continue;
         }
-        if (filterBackgroundByFloor && tileId.startsWith('__bg_image__')) {
+        if (isBackgroundImageEffectOverlayBusKey(tileId)) {
+          node.visible = false;
+          continue;
+        }
+        if (!isBackgroundImageBusRenderKey(tileId)) {
+          node.visible = false;
+          continue;
+        }
+        if (filterBackgroundByFloor) {
           const bgFloorIdx = Number(entry.floorIndex);
           const inRange = Number.isFinite(bgFloorIdx) && bgFloorIdx >= minFloorIndex && bgFloorIdx <= maxFloorIndex;
           node.visible = includeBackground && inRange;
@@ -1885,7 +1925,7 @@ export class FloorRenderBus {
     const fi = Number(floorIndex);
     if (!Number.isFinite(fi)) return null;
     for (const [tileId, entry] of this._tiles) {
-      if (!String(tileId).startsWith('__bg_image__')) continue;
+      if (!isBackgroundImageAlbedoBusKey(tileId)) continue;
       if (Number(entry?.floorIndex) !== fi) continue;
       const map = entry?.material?.map ?? null;
       return map || null;

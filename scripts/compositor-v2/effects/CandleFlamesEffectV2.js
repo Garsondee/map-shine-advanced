@@ -7,7 +7,11 @@ import {
   sampleAuthoredOutdoorsAtWorld,
 } from './water-splash-behaviors.js';
 import { getPerspectiveElevation } from '../../foundry/elevation-context.js';
-import { hasV14NativeLevels } from '../../foundry/levels-scene-flags.js';
+import {
+  hasV14NativeLevels,
+  isWallOnV14Level,
+  readWallHeightFlags,
+} from '../../foundry/levels-scene-flags.js';
 import { resolveClusteringElevation } from '../../scene/map-point-wall-clustering.js';
 import { VisionPolygonComputer } from '../../vision/VisionPolygonComputer.js';
 import { LightMesh } from '../../scene/LightMesh.js';
@@ -1341,70 +1345,380 @@ export class CandleFlamesEffectV2 {
   }
 
   /**
-   * Elevation for wall-height filtering on the active floor (not the controlled token).
-   * Glow clipping must match the floor the candles belong to, otherwise upper-floor
-   * walls are skipped when a lower-floor token is selected.
+   * Half-open wall-height band for a floor index (matches levels-create-defaults seam rules).
    * @private
-   * @returns {number}
+   * @param {number} floorIndex
+   * @returns {{bottom:number, top:number, floorIndex:number, levelId:string|null}|null}
    */
-  _resolveActiveFloorClipElevation() {
-    const ctx = this._activeLevelContext ?? window.MapShine?.activeLevelContext ?? null;
-    if (ctx && (ctx.count ?? 0) > 1) {
-      if (Number.isFinite(Number(ctx.center))) return Number(ctx.center);
-      const b = Number(ctx.bottom);
-      const t = Number(ctx.top);
-      if (Number.isFinite(b) && Number.isFinite(t)) {
-        return (Math.min(b, t) + Math.max(b, t)) * 0.5;
-      }
+  _resolveFloorWallHeightBand(floorIndex) {
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const fi = Math.max(0, Math.floor(Number(floorIndex) || 0));
+    const floor = floors[fi];
+    if (!floor) return null;
+
+    let bottom = Number(floor.elevationMin);
+    if (!Number.isFinite(bottom)) return null;
+
+    let top = Number(floor.elevationMax);
+    if (fi + 1 < floors.length) {
+      const nextBottom = Number(floors[fi + 1]?.elevationMin);
+      if (Number.isFinite(nextBottom)) top = nextBottom;
+    } else if (Number.isFinite(top)) {
+      top += 1;
+    } else {
+      top = Infinity;
     }
-    return resolveClusteringElevation(this._resolveGlowFloorIndex());
+
+    const levelId = (typeof floor.levelId === 'string' && floor.levelId.length > 0)
+      ? floor.levelId
+      : null;
+
+    return { bottom, top, floorIndex: fi, levelId };
   }
 
   /**
-   * Wall-clip elevation for one map-point group (level-locked groups use their band center).
+   * Pick a test elevation inside a half-open [bottom, top) wall band.
    * @private
-   * @param {import('../../scene/map-points-manager.js').MapPointGroup|null|undefined} group
+   * @param {{bottom:number, top:number}|null} band
    * @returns {number}
    */
-  _resolveGroupWallClipElevation(group) {
-    const binding = group?.metadata?.levelBinding;
-    if (binding?.mode === 'locked') {
-      const b = Number(binding.bottom);
-      const t = Number(binding.top ?? binding.bottom);
-      if (Number.isFinite(b) && Number.isFinite(t)) {
-        return (Math.min(b, t) + Math.max(b, t)) * 0.5;
-      }
+  _resolveClipElevationFromBand(band) {
+    if (!band || !Number.isFinite(Number(band.bottom))) {
+      return resolveClusteringElevation(this._resolveGlowFloorIndex());
     }
-    return this._resolveActiveFloorClipElevation();
+
+    const bottom = Number(band.bottom);
+    if (!Number.isFinite(band.top) || band.top === Infinity) {
+      return bottom + 1;
+    }
+
+    const top = Number(band.top);
+    const span = top - bottom;
+    if (!(span > 0)) return bottom + 0.5;
+    return bottom + Math.min(Math.max(span * 0.5, 0.5), span - 0.01);
   }
 
-  /** Clip glow using Foundry light rules (solid walls block; windows / proximity pass through). */
-  _buildGlowWallClipOptions(sourceElevation = null) {
-    const opts = {
+  /**
+   * Floor / level context for wall clipping from a map-point group's level binding.
+   * Map points only store x/y — floor ownership lives on the group metadata.
+   * @private
+   * @param {import('../../scene/map-points-manager.js').MapPointGroup|null|undefined} group
+   * @returns {{floorIndex:number, levelId:string|null, bandBottom:number, bandTop:number, clipElevation:number}}
+   */
+  _resolveGroupFloorContext(group) {
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    let floorIndex = this._resolveGlowFloorIndex();
+    let levelId = this._activeLevelContext?.levelId
+      ?? window.MapShine?.activeLevelContext?.levelId
+      ?? null;
+    let bandBottom = NaN;
+    let bandTop = NaN;
+
+    const binding = group?.metadata?.levelBinding;
+    if (binding?.mode === 'locked') {
+      if (typeof binding.floorKey === 'string' && binding.floorKey.length > 0) {
+        levelId = binding.floorKey;
+        const idx = floors.findIndex((f) => f?.levelId === binding.floorKey);
+        if (idx >= 0) floorIndex = idx;
+      }
+
+      const b = Number(binding.bottom);
+      const tRaw = binding.top;
+      const t = Number.isFinite(Number(tRaw)) ? Number(tRaw) : Number(binding.bottom);
+      if (Number.isFinite(b) && Number.isFinite(t)) {
+        bandBottom = Math.min(b, t);
+        bandTop = Math.max(b, t);
+        if (!(typeof binding.floorKey === 'string' && binding.floorKey.length > 0)) {
+          for (let i = 0; i < floors.length; i++) {
+            const f = floors[i];
+            const min = Number(f?.elevationMin);
+            const max = Number(f?.elevationMax);
+            if (!Number.isFinite(min) || !Number.isFinite(max)) continue;
+            if (bandTop < min || bandBottom > max) continue;
+            floorIndex = i;
+            if (!levelId && typeof f?.levelId === 'string') levelId = f.levelId;
+            break;
+          }
+        }
+      }
+    }
+
+    const stackBand = this._resolveFloorWallHeightBand(floorIndex);
+    if (stackBand) {
+      if (!Number.isFinite(bandBottom)) bandBottom = stackBand.bottom;
+      if (!Number.isFinite(bandTop)) bandTop = stackBand.top;
+      if (!levelId) levelId = stackBand.levelId;
+    }
+
+    const clipElevation = this._resolveClipElevationFromBand(
+      Number.isFinite(bandBottom) ? { bottom: bandBottom, top: bandTop } : null,
+    );
+
+    return {
+      floorIndex,
+      levelId,
+      bandBottom,
+      bandTop,
+      clipElevation,
+    };
+  }
+
+  /**
+   * Resolve the V14 Level document id used for wall membership tests on a cluster.
+   * @private
+   * @param {{levelId?:string|null, floorIndex?:number}|null} floorCtx
+   * @returns {string|null}
+   */
+  _resolveGlowClipLevelId(floorCtx) {
+    const direct = (typeof floorCtx?.levelId === 'string' && floorCtx.levelId.length > 0)
+      ? floorCtx.levelId
+      : null;
+    if (direct) return direct;
+
+    const fi = Number(floorCtx?.floorIndex);
+    if (Number.isFinite(fi)) {
+      const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+      const levelId = floors[Math.max(0, Math.floor(fi))]?.levelId;
+      if (typeof levelId === 'string' && levelId.length > 0) return levelId;
+    }
+
+    const ctxLevelId = this._activeLevelContext?.levelId
+      ?? window.MapShine?.activeLevelContext?.levelId
+      ?? null;
+    return (typeof ctxLevelId === 'string' && ctxLevelId.length > 0) ? ctxLevelId : null;
+  }
+
+  /**
+   * All scene wall documents for glow clipping. Prefer the embedded collection
+   * (every level) over canvas placeables (often only the viewed level's layer).
+   * @private
+   * @returns {object[]}
+   */
+  _collectGlowClipWallSources() {
+    const scene = canvas?.scene;
+    const embedded = scene?.walls;
+    if (embedded?.size > 0) {
+      const out = [];
+      for (const doc of embedded) {
+        if (!doc) continue;
+        const placeable = canvas?.walls?.get?.(doc.id) ?? null;
+        out.push(placeable ?? doc);
+      }
+      if (out.length > 0) return out;
+    }
+    return canvas?.walls?.placeables ?? [];
+  }
+
+  /**
+   * Walls that block glow for a candle cluster's floor.
+   * V14-native: Foundry assigns walls to floors via document.levels (dropdown),
+   * not per-wall elevation — match that membership first.
+   * Legacy: fall back to wall-height / Levels elevation bands.
+   * @private
+   * @param {object[]} walls
+   * @param {{levelId?:string|null, floorIndex?:number, clipElevation?:number}|null} floorCtx
+   * @returns {object[]}
+   */
+  _filterWallsForClusterClip(walls, floorCtx) {
+    const list = Array.isArray(walls) ? walls : [];
+    if (!list.length || !floorCtx) return list;
+
+    const scene = canvas?.scene;
+    if (hasV14NativeLevels(scene)) {
+      const levelId = this._resolveGlowClipLevelId(floorCtx);
+      if (levelId) {
+        return list.filter((wallLike) => {
+          const doc = wallLike?.document ?? wallLike;
+          return !!doc && isWallOnV14Level(doc, levelId);
+        });
+      }
+    }
+
+    const elevation = Number(floorCtx.clipElevation);
+    if (!Number.isFinite(elevation)) return list;
+
+    return list.filter((wallLike) => {
+      const doc = wallLike?.document ?? wallLike;
+      if (!doc) return false;
+
+      const bounds = readWallHeightFlags(doc);
+      let wallBottom = Number(bounds?.bottom);
+      let wallTop = Number(bounds?.top);
+      if (!Number.isFinite(wallBottom)) wallBottom = -Infinity;
+      if (!Number.isFinite(wallTop)) wallTop = Infinity;
+      if (wallTop < wallBottom) {
+        const swap = wallBottom;
+        wallBottom = wallTop;
+        wallTop = swap;
+      }
+
+      return elevation >= wallBottom && (wallTop === Infinity || elevation < wallTop);
+    });
+  }
+
+  /**
+   * @private
+   */
+  _countPhysicalGlowWallSegments(centerFoundry, radiusPx, walls, elevation) {
+    if (!centerFoundry || !(radiusPx > 0) || !walls?.length) return 0;
+    if (!Number.isFinite(Number(elevation))) return 0;
+    return this._countGlowWallSegments(centerFoundry, radiusPx, walls, {
       sense: 'light',
-      blockGeometry: false,
-      // Smooth glow pool boundary (default VisionPolygonComputer uses 32).
+      blockGeometry: true,
+      elevation: Number(elevation),
+    });
+  }
+
+  /**
+   * Count wall segments that would participate in a glow clip (excludes boundary circle).
+   * @private
+   */
+  _countGlowWallSegments(centerFoundry, radiusPx, walls, wallClipOptions) {
+    if (!centerFoundry || !(radiusPx > 0) || !walls?.length) return 0;
+    try {
+      const segments = [];
+      this._visionComputer.wallsToSegments(
+        walls,
+        centerFoundry,
+        radiusPx,
+        wallClipOptions?.sense === 'light' ? 'light' : 'sight',
+        segments,
+        wallClipOptions?.elevation,
+        null,
+        null,
+        !!wallClipOptions?.blockGeometry,
+      );
+      return segments.length;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /**
+   * Build clipped pool boundary points, or null for an unconstrained radial pool.
+   * @private
+   * @returns {{ worldPoints: number[]|null, skip: boolean }}
+   */
+  _resolveGlowClipWorldPoints(clipCenter, clipRadiusPx, walls, sceneBounds, wallClipOptions, indoor) {
+    if (!this.params.wallClipEnabled) {
+      return { worldPoints: null, skip: false };
+    }
+
+    const elevation = wallClipOptions?.elevation;
+    const physicalSegCount = this._countPhysicalGlowWallSegments(
+      clipCenter,
+      clipRadiusPx,
+      walls,
+      elevation,
+    );
+
+    const polyToWorld = (foundryPoly) => {
+      const worldPoints = [];
+      for (let i = 0; i < foundryPoly.length; i += 2) {
+        const wp = Coordinates.toWorld(foundryPoly[i], foundryPoly[i + 1]);
+        worldPoints.push(wp.x, wp.y);
+      }
+      return worldPoints;
+    };
+
+    const tryCompute = (options) => {
+      try {
+        return this._visionComputer.compute(
+          clipCenter,
+          clipRadiusPx,
+          walls,
+          sceneBounds,
+          options,
+        );
+      } catch (_) {
+        return null;
+      }
+    };
+
+    const tryModes = indoor
+      ? [
+        wallClipOptions,
+        { ...wallClipOptions, blockGeometry: true },
+        { ...wallClipOptions, blockGeometry: false, sense: 'light' },
+      ]
+      : [
+        wallClipOptions,
+        { ...wallClipOptions, blockGeometry: true },
+      ];
+
+    for (const options of tryModes) {
+      const foundryPoly = tryCompute(options);
+      if (!foundryPoly || foundryPoly.length < 6) continue;
+      if (this._isUnoccludedCircleClip(foundryPoly, clipCenter, clipRadiusPx)) continue;
+      return { worldPoints: polyToWorld(foundryPoly), skip: false };
+    }
+
+    // Open interior — no physical walls in range at this elevation.
+    if (physicalSegCount === 0) {
+      return { worldPoints: null, skip: false };
+    }
+
+    // Physical walls exist but every clip mode returned a full circle — suppress bleed.
+    return { worldPoints: null, skip: indoor };
+  }
+
+  /**
+   * True when a clip polygon is essentially the unoccluded boundary circle (wall clip missed).
+   * @private
+   */
+  _isUnoccludedCircleClip(flatFoundryPoints, center, radiusPx) {
+    if (!flatFoundryPoints || flatFoundryPoints.length < 6 || !center) return true;
+
+    const r = Math.max(1, Number(radiusPx) || 1);
+    const rMin = r * 0.9;
+    const rMax = r * 1.1;
+    const verts = flatFoundryPoints.length / 2;
+    let onRim = 0;
+
+    for (let i = 0; i < flatFoundryPoints.length; i += 2) {
+      const dx = flatFoundryPoints[i] - center.x;
+      const dy = flatFoundryPoints[i + 1] - center.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist >= rMin && dist <= rMax) onRim += 1;
+    }
+
+    return onRim >= verts * 0.82;
+  }
+
+  /**
+   * Clip glow using Foundry light rules (solid walls block; windows / proximity pass through).
+   * @param {number|null} [sourceElevation]
+   * @param {{ indoor?: boolean, v14LevelScoped?: boolean }} [opts]
+   */
+  _buildGlowWallClipOptions(sourceElevation = null, opts = {}) {
+    const indoor = opts.indoor === true;
+    const v14LevelScoped = opts.v14LevelScoped === true;
+    const clipOpts = {
+      // Indoor: physical segments first so sight-only walls still block gameplay glow.
+      // Outdoor: Foundry light thresholds so windows / proximity walls pass through.
+      sense: 'light',
+      blockGeometry: indoor,
       circleSegments: 96,
     };
     try {
       const pad = window.MapShine?.lightingEffect?.params?.wallPaddingPx;
       if (typeof pad === 'number' && isFinite(pad) && pad > 0) {
-        opts.wallPaddingPx = Math.max(0, pad);
+        clipOpts.wallPaddingPx = Math.max(0, pad);
       }
-      if (hasV14NativeLevels(canvas?.scene)) {
+      if (hasV14NativeLevels(canvas?.scene) && !v14LevelScoped) {
         const clipElev = Number(sourceElevation);
         if (Number.isFinite(clipElev)) {
-          opts.elevation = clipElev;
+          clipOpts.elevation = clipElev;
         } else {
           const pe = getPerspectiveElevation();
           if (Number.isFinite(pe?.losHeight)) {
-            opts.elevation = pe.losHeight;
+            clipOpts.elevation = pe.losHeight;
           }
         }
       }
     } catch (_) {
     }
-    return opts;
+    return clipOpts;
   }
 
   /**
@@ -1723,7 +2037,7 @@ export class CandleFlamesEffectV2 {
           x: p.x,
           y: p.y,
           intensity,
-          clipElevation: this._resolveGroupWallClipElevation(g),
+          floorCtx: this._resolveGroupFloorContext(g),
         });
       }
     }
@@ -1776,16 +2090,18 @@ export class CandleFlamesEffectV2 {
           sumClipElevation: 0,
           minOutdoor: 1.0,
           count: 0,
+          floorCtx: null,
         };
         buckets.set(key, b);
       }
+      if (!b.floorCtx && pt.floorCtx) b.floorCtx = pt.floorCtx;
       b.sumX += wx;
       b.sumY += wy;
       b.sumI += pt.intensity;
       b.sumOutdoor += outdoor;
-      b.sumClipElevation += Number.isFinite(Number(pt.clipElevation))
-        ? Number(pt.clipElevation)
-        : this._resolveActiveFloorClipElevation();
+      b.sumClipElevation += Number.isFinite(Number(pt.floorCtx?.clipElevation))
+        ? Number(pt.floorCtx.clipElevation)
+        : 0;
       b.minOutdoor = Math.min(b.minOutdoor, outdoor);
       b.count += 1;
 
@@ -1854,6 +2170,10 @@ export class CandleFlamesEffectV2 {
       const clipRadiusPx = radiusPx;
 
       const foundryCenter = Coordinates.toFoundry(cxWorld, cyWorld);
+      const floorCtx = b.floorCtx ?? this._resolveGroupFloorContext(null);
+      const clipElevation = b.sumClipElevation > 0
+        ? (b.sumClipElevation / Math.max(1, b.count))
+        : floorCtx.clipElevation;
 
       this._clusters.push({
         key: b.key,
@@ -1863,7 +2183,11 @@ export class CandleFlamesEffectV2 {
         cyFoundry: foundryCenter.y,
         radiusPx,
         clipRadiusPx,
-        clipElevation: b.sumClipElevation / Math.max(1, b.count),
+        clipElevation,
+        floorCtx: {
+          ...floorCtx,
+          clipElevation,
+        },
         intensity,
         phase,
         outdoor: outdoorForGlow,
@@ -1977,7 +2301,7 @@ export class CandleFlamesEffectV2 {
     const THREE = window.THREE;
     if (!THREE) return;
 
-    const walls = canvas?.walls?.placeables ?? [];
+    const allWalls = this._collectGlowClipWallSources();
 
     const d = canvas?.dimensions;
     const sceneX = d?.sceneX ?? 0;
@@ -1990,46 +2314,36 @@ export class CandleFlamesEffectV2 {
       if (!c) continue;
 
       const outdoor = Math.max(0, Math.min(1, Number(c.outdoor) ?? 1));
+      const indoor = outdoor < GLOW_BALANCE_OUTDOOR_THRESHOLD;
       const glow = this._resolveGlowParams(null, outdoor);
       const centerFoundry = { x: c.cxFoundry, y: c.cyFoundry };
       const clipScale = Math.max(0.1, Number(this.params.wallClipRadiusScale) || 1.0);
       const radiusPx = Math.max(32, glow.radiusPx * clipScale);
       const clipRadiusPx = radiusPx;
-      const wallClipOptions = this._buildGlowWallClipOptions(c.clipElevation);
+      const floorCtx = c.floorCtx ?? null;
+      const clipElevation = Number.isFinite(Number(c.clipElevation))
+        ? Number(c.clipElevation)
+        : floorCtx?.clipElevation;
+      const v14LevelScoped = hasV14NativeLevels(canvas?.scene)
+        && !!this._resolveGlowClipLevelId(floorCtx);
+      const wallClipOptions = this._buildGlowWallClipOptions(clipElevation, { indoor, v14LevelScoped });
+      const walls = this._filterWallsForClusterClip(allWalls, floorCtx);
 
       const clipCenters = this._resolveGlowClipCenters(centerFoundry, walls, wallClipOptions);
       const lightMeshes = [];
 
       for (const clipCenter of clipCenters) {
-        let foundryPoly = null;
-        if (this.params.wallClipEnabled) {
-          try {
-            foundryPoly = this._visionComputer.compute(
-              clipCenter,
-              clipRadiusPx,
-              walls,
-              sceneBounds,
-              wallClipOptions
-            );
-          } catch (_) {
-            foundryPoly = null;
-          }
-        }
+        const clipResult = this._resolveGlowClipWorldPoints(
+          clipCenter,
+          clipRadiusPx,
+          walls,
+          sceneBounds,
+          wallClipOptions,
+          indoor,
+        );
+        if (clipResult.skip) continue;
 
-        let worldPoints = null;
-        if (foundryPoly && foundryPoly.length >= 6) {
-          worldPoints = [];
-          for (let i = 0; i < foundryPoly.length; i += 2) {
-            const wp = Coordinates.toWorld(foundryPoly[i], foundryPoly[i + 1]);
-            worldPoints.push(wp.x, wp.y);
-          }
-        } else if (this.params.wallClipEnabled) {
-          if (outdoor < 0.45) {
-            // Indoor: no circle fallback — prevents wall bleed-through.
-            continue;
-          }
-          // Outdoor: radial pool when wall clip fails (open yard / partial geometry).
-        }
+        const worldPoints = clipResult.worldPoints;
 
         const centerWorld = clipCenters.length > 1
           ? (() => {

@@ -31,6 +31,15 @@ import {
   repairSceneControlStateFlag
 } from '../settings/control-state-sanitize.js';
 import Coordinates from '../utils/coordinates.js';
+import {
+  describeMapPointGroupLevelBinding,
+  escapeMapPointHtml,
+  getMapPointLevelOptions,
+  readMapPointLevelBindingFromForm,
+  renderMapPointDrawLevelStamp,
+  renderMapPointLevelBindingEditor,
+  renderMapPointLevelListBadge,
+} from './map-point-level-binding-ui.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import {
   applyManualWeatherFromSceneEffectSettings,
@@ -9910,6 +9919,7 @@ export class TweakpaneManager {
           </p>
         </div>
         <hr style="margin: 12px 0; border: none; border-top: 1px solid #444;">
+        ${renderMapPointDrawLevelStamp(window.MapShine?.activeLevelContext ?? null)}
         <div class="form-group" style="display: flex; justify-content: space-between; align-items: center;">
           <span style="font-size: 11px; color: #888;">
             ${existingGroupCount} existing group${existingGroupCount !== 1 ? 's' : ''} on this scene
@@ -10050,6 +10060,9 @@ export class TweakpaneManager {
       rope: 'Rope'
     };
 
+    const activeLevelContext = window.MapShine?.activeLevelContext ?? null;
+    const levelOptions = getMapPointLevelOptions();
+
     // Build groups list HTML
     const buildGroupsList = () => {
       const groups = Array.from(mapPointsManager.groups.values());
@@ -10080,6 +10093,9 @@ export class TweakpaneManager {
         const showPowerBtn = isGM && !!group.effectTarget && group.isEffectSource !== false;
         const powerBg = clusterActive ? '#3a5a3a' : '#4a4a4a';
         const powerTitle = clusterActive ? 'Turn off effect cluster' : 'Turn on effect cluster';
+        const levelInfo = describeMapPointGroupLevelBinding(group, activeLevelContext, levelOptions);
+        const levelBadge = renderMapPointLevelListBadge(levelInfo);
+        const rowOpacity = (levelInfo.isMultiFloorScene && !levelInfo.visibleOnActiveView) ? 0.72 : 1;
         
         return `
           <div class="map-point-group-item" data-group-id="${group.id}" style="
@@ -10091,15 +10107,17 @@ export class TweakpaneManager {
             border-radius: 4px;
             border-left: 4px solid ${colorHex};
             cursor: pointer;
+            opacity: ${rowOpacity};
             transition: background 0.15s;
           " onmouseover="this.style.background='#3a3a4e'" onmouseout="this.style.background='#2a2a3e'">
             <div style="flex: 1; min-width: 0;">
               <div style="font-weight: bold; font-size: 12px; color: #ddd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
-                ${group.label || 'Unnamed Group'}
+                ${escapeMapPointHtml(group.label || 'Unnamed Group')}
               </div>
               <div style="font-size: 10px; color: #888; margin-top: 2px;">
                 ${typeLabel} • ${effectLabel} • ${pointCount} point${pointCount !== 1 ? 's' : ''}
               </div>
+              ${levelBadge}
             </div>
             <div style="display: flex; gap: 4px; margin-left: 8px;">
               ${showPowerBtn ? `
@@ -10143,8 +10161,8 @@ export class TweakpaneManager {
         </div>
         ${game.user?.isGM ? `
         <p style="font-size: 10px; color: #888; margin: 0 0 8px 0;">
-          Use the <i class="fas fa-eye"></i> tool on the token bar to show on-map toggles.
-          Point groups split by proximity (walls block merging); <code>_Fire</code> mask flames get wall-aware spatial buckets (~600px cells).
+          Level badges show each group’s floor lock and whether it is visible on the level you are viewing now.
+          Use the <i class="fas fa-eye"></i> tool on the token bar for on-map toggles.
         </p>
         ` : ''}
         <div class="groups-list" style="max-height: 300px; overflow-y: auto; margin-bottom: 12px;">
@@ -10275,7 +10293,7 @@ export class TweakpaneManager {
         });
       }
     }, {
-      width: 400,
+      width: 440,
       height: 'auto'
     });
     
@@ -10358,6 +10376,13 @@ export class TweakpaneManager {
       : 'modules/map-shine-advanced/assets/rope.webp';
 
     const pointCount = group.points?.length || 0;
+    const levelOptions = getMapPointLevelOptions();
+    const levelBindingInfo = describeMapPointGroupLevelBinding(
+      group,
+      window.MapShine?.activeLevelContext ?? null,
+      levelOptions,
+    );
+    const levelBindingEditorHtml = renderMapPointLevelBindingEditor(group, levelBindingInfo, levelOptions);
 
     const h = canvas?.dimensions?.height;
     const pointsListHtml = (pointCount > 0)
@@ -10508,6 +10533,7 @@ export class TweakpaneManager {
             Active (drives effect)
           </label>
         </div>
+        ${levelBindingEditorHtml}
         <hr style="margin: 12px 0; border: none; border-top: 1px solid #444;">
         <div class="form-group">
           <label>Emission Intensity</label>
@@ -10594,6 +10620,9 @@ export class TweakpaneManager {
               updates.uvRepeatWorld = preset.uvRepeatWorld;
               updates.ropeEndStiffness = preset.ropeEndStiffness;
             }
+
+            const levelSelection = readMapPointLevelBindingFromForm(html);
+            updates.metadata = mapPointsManager.buildMetadataFromLevelSelection(levelSelection);
             
             await mapPointsManager.updateGroup(groupId, updates);
             ui.notifications.info('Group updated');
@@ -10669,6 +10698,27 @@ export class TweakpaneManager {
         html.find('[name="type"]').on('change', updateRopeControlsVisibility);
         html.find('[name="effectTarget"]').on('change', updateRopeControlsVisibility);
         updateRopeControlsVisibility();
+
+        const syncLevelFloorRow = () => {
+          const locked = html.find('[name="levelBindingMode"]').val() === 'locked';
+          html.find('.msa-mp-level-floor-row').css('display', locked ? 'block' : 'none');
+        };
+        html.find('[name="levelBindingMode"]').on('change', syncLevelFloorRow);
+        syncLevelFloorRow();
+
+        html.find('.msa-mp-use-viewed-floor-btn').on('click', (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const viewedId = window.MapShine?.activeLevelContext?.levelId;
+          if (typeof viewedId === 'string' && viewedId.length > 0) {
+            html.find('[name="levelBindingMode"]').val('locked');
+            html.find('[name="levelBindingFloor"]').val(viewedId);
+            syncLevelFloorRow();
+            ui.notifications.info('Assigned to currently viewed floor (save to apply).');
+          } else {
+            ui.notifications.warn('No viewed floor level id is available on this scene.');
+          }
+        });
 
         const updateSegLenText = () => {
           const v = Number(html.find('[name="ropeSegmentLength"]').val());
@@ -10781,7 +10831,8 @@ export class TweakpaneManager {
         }
       }
     }, {
-      width: 350
+      width: 460,
+      height: 'auto'
     });
 
     dialog.render(true);

@@ -137,7 +137,7 @@ import {
 import { ExternalEffectsCompositor } from '../integrations/external-effects/ExternalEffectsCompositor.js';
 import { isSoundAudibleForPerspective } from './elevation-context.js';
 import { getFloorStackBandsSignature, getSceneBandsForFloorStack } from './levels-floor-stack-bands.js';
-import { hasV14NativeLevels, getViewedLevelBackgroundSrc, isLevelsEnabledForScene, resolveV14LevelIdToFloorStackIndex } from './levels-scene-flags.js';
+import { hasV14NativeLevels, getViewedLevelBackgroundSrc, isLevelsEnabledForScene, resolveV14LevelIdToFloorStackIndex, readV14SceneLevels } from './levels-scene-flags.js';
 import { installSnapshotStoreHooks, getSnapshot as getLevelsSnapshot } from '../core/levels-import/LevelsSnapshotStore.js';
 import { ZoneManager } from './zone-manager.js';
 import { IntroZoomEffect } from './intro-zoom-effect.js';
@@ -198,6 +198,76 @@ function _textureBudgetStreamingEvictionHandler(tracker) {
     }
   }
   return evicted;
+}
+
+/**
+ * Band keys (`bottom:top`) required before scene reveal: visible stack (0..active)
+ * for stacked rendering and Camera Grade outdoors. Falls back to active level context.
+ * @returns {Set<string>}
+ */
+function _collectRevealPriorityBandKeys() {
+  const keys = new Set();
+  try {
+    const visible = window.MapShine?.floorStack?.getVisibleFloors?.() ?? [];
+    for (const f of visible) {
+      const k = f?.compositorKey;
+      if (k != null && String(k).length > 0) keys.add(String(k));
+    }
+  } catch (_) {}
+  if (keys.size === 0) {
+    const ctx = window.MapShine?.activeLevelContext;
+    const b = Number(ctx?.bottom);
+    const t = Number(ctx?.top);
+    if (Number.isFinite(b) && Number.isFinite(t)) keys.add(`${b}:${t}`);
+  }
+  return keys;
+}
+
+/**
+ * @param {object|null} sceneDoc
+ * @returns {number}
+ */
+function _countSceneLevelBands(sceneDoc) {
+  if (!sceneDoc) return 0;
+  if (hasV14NativeLevels(sceneDoc)) {
+    try {
+      return readV14SceneLevels(sceneDoc).length;
+    } catch (_) {
+      return 0;
+    }
+  }
+  if (isLevelsEnabledForScene(sceneDoc)) {
+    try {
+      const bands = getSceneBandsForFloorStack();
+      return Array.isArray(bands) ? bands.length : 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+  return 0;
+}
+
+/**
+ * Warm remaining level-band masks after reveal so cold load is not blocked on every floor.
+ * @param {object|null} sceneDoc
+ * @param {object} preloadOpts
+ */
+function _scheduleDeferredFloorPreload(sceneDoc, preloadOpts) {
+  const sceneId = sceneDoc?.id ? String(sceneDoc.id) : null;
+  const run = () => {
+    void safeCallAsync(async () => {
+      if (sceneId && String(canvas?.scene?.id ?? '') !== sceneId) return;
+      const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+      if (!compositor || !sceneDoc || typeof compositor.preloadAllFloors !== 'function') return;
+      log.info('V2: background preloadAllFloors (remaining level bands)');
+      await compositor.preloadAllFloors(sceneDoc, preloadOpts);
+    }, 'v2.preloadAllFloors.deferred', Severity.COSMETIC);
+  };
+  if (typeof requestIdleCallback === 'function') {
+    requestIdleCallback(run, { timeout: 6000 });
+  } else {
+    setTimeout(run, 2000);
+  }
 }
 
 /** @type {typeof import('../ui/tweakpane-manager.js').TweakpaneManager|null} */
@@ -3184,13 +3254,29 @@ export function initialize() {
       // the visible "scene rebuilds one element at a time" effect that the
       // user observed on first-visit level transitions.
       const levelMaskRebuildPromise = safeCallAsync(async () => {
-        suppressFloorPreloadAfterLevelChange(10000);
         const ms = window.MapShine;
         if (!sceneSettings.isMapShineRenderingActive(canvas?.scene)) return;
 
         const sc = ms?.sceneComposer;
         const bus = ms?.floorCompositorV2?._renderBus;
         const fd = sc?.foundrySceneData;
+        const ctx = payload?.context ?? ms?.activeLevelContext ?? null;
+        const ctxBottom = Number(ctx?.bottom);
+        const ctxTop = Number(ctx?.top);
+        const compositor = sc?._sceneMaskCompositor ?? null;
+        const sceneDoc = canvas?.scene ?? null;
+        const hasLevels = sceneDoc
+          ? (hasV14NativeLevels(sceneDoc) || isLevelsEnabledForScene(sceneDoc))
+          : false;
+        const activeBandKey = (
+          compositor
+          && hasLevels
+          && ctx
+          && Number.isFinite(ctxBottom)
+          && Number.isFinite(ctxTop)
+        )
+          ? `${ctxBottom}:${ctxTop}`
+          : null;
 
         // Track whether anything below required mask compositor re-work for
         // the newly active band. We always trigger a fresh composeFloor on a
@@ -3201,6 +3287,8 @@ export function initialize() {
         // preload (~1s in multi-floor scenes) and consumers fall back to
         // sibling/lower-floor/bundle textures in the meantime.
         let didV14Resync = false;
+        let pathChanged = false;
+        let masksRecomposed = false;
 
         if (hasV14NativeLevels(canvas?.scene) && sc && bus && fd) {
           const viewedBgSrc = getViewedLevelBackgroundSrc(canvas.scene);
@@ -3212,7 +3300,7 @@ export function initialize() {
             ?? canvas?.level?.id
             ?? canvas?.scene?._view
             ?? null;
-          const pathChanged = !!(viewedBgSrc && newBasePath && newBasePath !== currentBasePath);
+          pathChanged = !!(viewedBgSrc && newBasePath && newBasePath !== currentBasePath);
           const levelChanged = !!(levelId && levelId !== sc._lastV14BusBgLevelId);
 
           // Path-only swap misses the common case where two levels share the same image file
@@ -3256,6 +3344,13 @@ export function initialize() {
           }
         }
 
+        const warmBandRevisit = !!(
+          activeBandKey
+          && !pathChanged
+          && compositor?.isBandWarmForOutdoorsStack?.(activeBandKey, sceneDoc)
+        );
+        suppressFloorPreloadAfterLevelChange(warmBandRevisit ? 1500 : 10000);
+
         // Proactively (re)compose the newly active band's per-floor mask
         // bundle. The `mapShineLevelContextChanged` hook flow otherwise never
         // calls `composeFloor()` directly — `_applyCurrentFloorVisibility`
@@ -3268,21 +3363,8 @@ export function initialize() {
         // different band — producing visually wrong outdoor/indoor lighting
         // in multi-floor stacked scenes.
         //
-        // `primeFloorForRecompose` first clears any sticky per-band state
-        // that previous preloads may have left in place:
-        //   - empty `_floorMeta` sentinel (`{ masks: [], basePath: null }`)
-        //   - `_upperBandNoOutdoorsAccepted` lock (permanent before this fix)
-        //   - `_upperOutdoorsMetaRepairCount` (capped at 2 retries before)
-        // so the band gets a genuinely fresh attempt on every user-driven
-        // level navigation, regardless of what earlier preloads decided.
-        const ctx = payload?.context ?? ms?.activeLevelContext ?? null;
-        const ctxBottom = Number(ctx?.bottom);
-        const ctxTop = Number(ctx?.top);
-        const compositor = sc?._sceneMaskCompositor ?? null;
-        const sceneDoc = canvas?.scene ?? null;
-        const hasLevels = sceneDoc
-          ? (hasV14NativeLevels(sceneDoc) || isLevelsEnabledForScene(sceneDoc))
-          : false;
+        // `primeFloorForRecompose` clears sticky per-band state only when the band is
+        // not already warm — revisits skip prime + GPU compose and only sync active key.
         if (
           compositor
           && hasLevels
@@ -3290,23 +3372,30 @@ export function initialize() {
           && Number.isFinite(ctxBottom)
           && Number.isFinite(ctxTop)
         ) {
-          const bandKey = `${ctxBottom}:${ctxTop}`;
+          const bandKey = activeBandKey;
           try {
-            if (typeof compositor.primeFloorForRecompose === 'function') {
-              compositor.primeFloorForRecompose(bandKey);
-            }
-            if (typeof compositor.composeFloor === 'function') {
-              const cfResult = await compositor.composeFloor(
-                { bottom: ctxBottom, top: ctxTop },
-                sceneDoc,
-                { cacheOnly: false },
-              );
-              if (cfResult?.masks?.length) {
-                log.info(
-                  `Level change: composed ${cfResult.masks.length} mask(s) for band ${bandKey}`,
+            if (warmBandRevisit && !pathChanged) {
+              try { compositor.syncActiveFloorFromFloorStack?.(); } catch (_) {}
+              masksRecomposed = false;
+              log.debug(`Level change: active band ${bandKey} already warm — skipping compose`);
+            } else {
+              if (typeof compositor.primeFloorForRecompose === 'function') {
+                compositor.primeFloorForRecompose(bandKey);
+              }
+              if (typeof compositor.composeFloor === 'function') {
+                const cfResult = await compositor.composeFloor(
+                  { bottom: ctxBottom, top: ctxTop },
+                  sceneDoc,
+                  { cacheOnly: false },
                 );
-              } else {
-                log.debug(`Level change: composeFloor returned no masks for band ${bandKey}`);
+                masksRecomposed = cfResult?.recomposed === true;
+                if (cfResult?.masks?.length) {
+                  log.info(
+                    `Level change: composed ${cfResult.masks.length} mask(s) for band ${bandKey}`,
+                  );
+                } else {
+                  log.debug(`Level change: composeFloor returned no masks for band ${bandKey}`);
+                }
               }
             }
           } catch (err) {
@@ -3320,22 +3409,37 @@ export function initialize() {
             const visibleKeys = visibleFloors
               .map((f) => (f?.compositorKey != null ? String(f.compositorKey) : ''))
               .filter((k) => k.length > 0);
-            if (visibleKeys.length > 0 && typeof compositor.warmVisibleFloorsForOutdoorsStack === 'function') {
-              for (const vk of visibleKeys) {
-                try { compositor.primeFloorForRecompose(vk); } catch (_) {}
-              }
-              const warmResult = await compositor.warmVisibleFloorsForOutdoorsStack(sceneDoc, visibleKeys);
-              if (warmResult?.skippedKeys?.length) {
-                log.debug('Level change: visible-floor outdoors warm incomplete', warmResult);
+            const keysNeedingWarm = visibleKeys.filter(
+              (k) => !compositor.isBandWarmForOutdoorsStack?.(k, sceneDoc),
+            );
+            if (visibleKeys.length > 0) {
+              if (
+                keysNeedingWarm.length > 0
+                && typeof compositor.warmVisibleFloorsForOutdoorsStack === 'function'
+              ) {
+                for (const vk of keysNeedingWarm) {
+                  try { compositor.primeFloorForRecompose(vk); } catch (_) {}
+                }
+                const warmResult = await compositor.warmVisibleFloorsForOutdoorsStack(
+                  sceneDoc,
+                  visibleKeys,
+                );
+                if (warmResult?.skippedKeys?.length) {
+                  log.debug('Level change: visible-floor outdoors warm incomplete', warmResult);
+                }
+              } else if (keysNeedingWarm.length === 0) {
+                log.debug('Level change: skipping visible-floor outdoors warm (all bands cached)');
               }
               const renderer = ms?.renderer ?? null;
               compositor.prepareVisibleFloorsForOutdoorsStack?.(renderer, visibleKeys, sceneDoc);
               compositor.rebuildFloorIdFromVisibleFloorKeys?.(visibleKeys);
             }
-            try {
-              const { getIndoorOutdoorMaskService } = await import('../masks/IndoorOutdoorMaskService.js');
-              getIndoorOutdoorMaskService(compositor)?.invalidateCache?.();
-            } catch (_) {}
+            if (keysNeedingWarm.length > 0) {
+              try {
+                const { getIndoorOutdoorMaskService } = await import('../masks/IndoorOutdoorMaskService.js');
+                getIndoorOutdoorMaskService(compositor)?.invalidateCache?.();
+              } catch (_) {}
+            }
           } catch (warmErr) {
             log.debug('Level change: visible-floor outdoors warm failed', warmErr);
           }
@@ -3343,10 +3447,10 @@ export function initialize() {
 
         // Now that the new band's masks (or definitive absence thereof) are
         // in `_floorMeta` / `_floorCache`, push them to consumers and rebuild
-        // the effect graph. The order matters: `_syncOutdoorsMaskConsumers`
-        // runs the resolution that picks the band's freshly-composed outdoors
-        // texture; `forceRepopulate` then rebuilds each effect against the
-        // newly-bound masks.
+        // the effect graph when masks or art actually changed. On revisits
+        // (composeFloor cache hit, same mask bundle), `_applyCurrentFloorVisibility`
+        // and `_syncOutdoorsMaskConsumers` are enough — skip the full populate queue.
+        const needsEffectRepopulate = pathChanged || masksRecomposed;
         const floorCompositor = ms?.floorCompositorV2 ?? null;
         if (didV14Resync || (compositor && hasLevels)) {
           if (
@@ -3359,10 +3463,15 @@ export function initialize() {
             });
           }
           if (
-            floorCompositor
+            needsEffectRepopulate
+            && floorCompositor
             && typeof floorCompositor.forceRepopulate === 'function'
           ) {
             await floorCompositor.forceRepopulate({ source: 'level-context-resync' });
+          } else if (!needsEffectRepopulate) {
+            log.info(
+              'Level change: skipping forceRepopulate (cached masks, art unchanged)',
+            );
           }
         }
 
@@ -3370,7 +3479,7 @@ export function initialize() {
         // up so lazy effect init / shader compiles run before fade-in.
         try {
           const ec = ms?.effectComposer;
-          if (ec && typeof ec.progressiveWarmup === 'function') {
+          if (needsEffectRepopulate && ec && typeof ec.progressiveWarmup === 'function') {
             await ec.progressiveWarmup();
           }
         } catch (warmErr) {
@@ -6491,6 +6600,7 @@ async function onCanvasReady(canvas) {
  */
 function onCanvasTearDown(canvas) {
   if (!window.MapShine) window.MapShine = {};
+  try { delete window.MapShine.__msaDeferredFloorPreload; } catch (_) {}
   const lightNativeLevelSwitch = !!window.MapShine.__nativeSameSceneLevelSwitch;
   const tearDownSceneId = canvas?.scene?.id ?? null;
   const _tearDownSid = tearDownSceneId != null ? String(tearDownSceneId) : _msaEffectiveSceneIdForLifecycle();
@@ -9650,13 +9760,29 @@ async function createThreeCanvas(scene, createOptions = {}) {
       const sceneDoc = canvas?.scene ?? null;
       if (!compositor || !sceneDoc || typeof compositor.preloadAllFloors !== 'function') return;
 
-      // Deterministic startup warmup: block here so first floor-step does not hit
-      // cold per-floor mask composition on demand.
-      await compositor.preloadAllFloors(sceneDoc, {
+      const preloadOpts = {
         activeLevelContext: window.MapShine?.activeLevelContext ?? null,
         lastMaskBasePath: compositor?._activeFloorBasePath ?? sc?.currentBundle?.basePath ?? null,
         initialMasks: sc?.currentBundle?.masks ?? null,
+      };
+      const priorityBandKeys = _collectRevealPriorityBandKeys();
+      const bandCount = _countSceneLevelBands(sceneDoc);
+      const usePriorityOnly = bandCount > 1
+        && priorityBandKeys.size > 0
+        && priorityBandKeys.size < bandCount;
+
+      // Block on visible-stack bands only; defer upper/unvisited bands until after reveal.
+      await compositor.preloadAllFloors(sceneDoc, {
+        ...preloadOpts,
+        ...(usePriorityOnly ? { onlyBandKeys: priorityBandKeys } : {}),
       });
+
+      if (usePriorityOnly) {
+        if (!window.MapShine) window.MapShine = {};
+        window.MapShine.__msaDeferredFloorPreload = () => {
+          _scheduleDeferredFloorPreload(sceneDoc, preloadOpts);
+        };
+      }
     }, 'v2.preloadAllFloors.await', Severity.DEGRADED);
     safeCall(() => loadingOverlay.setStage('scene.prepare', 0.40, undefined, { immediate: true }), 'overlay.preloadFloors.done', Severity.COSMETIC);
 
@@ -10048,6 +10174,14 @@ async function createThreeCanvas(scene, createOptions = {}) {
     // Mark the load session as successfully completed (records duration).
     session.finish();
     if (window.MapShine) window.MapShine._loadSession = session;
+
+    try {
+      const deferredFloorPreload = window.MapShine?.__msaDeferredFloorPreload;
+      if (typeof deferredFloorPreload === 'function') {
+        delete window.MapShine.__msaDeferredFloorPreload;
+        deferredFloorPreload();
+      }
+    } catch (_) {}
 
     // Debug helper: call window.MapShine._debugRenderState() in the browser console
     // to dump the current render pipeline state for diagnosing albedo/mask issues.

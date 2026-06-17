@@ -975,8 +975,6 @@ export class TreeEffectV2 {
     this._syncSceneBoundsUniforms(true);
 
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
-    const activeFloorIdxRaw = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
-    const activeFloorIdx = Number.isFinite(activeFloorIdxRaw) ? activeFloorIdxRaw : 0;
     const { worldH, sceneX, sceneY, sceneW, sceneH } = this._resolvePopulateSceneGeometry(foundrySceneData);
 
     // Background overlays: prefer native scene.levels so every floor's authored
@@ -1007,7 +1005,6 @@ export class TreeEffectV2 {
             : i;
           const keyIndex = Math.max(0, Math.floor(Number(level?.index)));
           const key = (keyIndex === 0) ? '__bg_image__' : `__bg_image__${keyIndex}`;
-          if (Number.isFinite(activeFloorIdx) && floorIndex !== activeFloorIdx) continue;
           bgEntries.push({ src, floorIndex, key });
         }
       }
@@ -1018,7 +1015,6 @@ export class TreeEffectV2 {
         const src = String(bgLayers[i]?.src || '').trim();
         if (!src) continue;
         const floorIndex = resolveV14BackgroundFloorIndexForSrc(scene, src);
-        if (Number.isFinite(activeFloorIdx) && floorIndex !== activeFloorIdx) continue;
         const key = floorIndex === 0 ? '__bg_image__' : `__bg_image__${floorIndex}`;
         bgEntries.push({ src, floorIndex, key });
       }

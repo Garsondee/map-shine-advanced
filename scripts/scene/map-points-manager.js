@@ -18,6 +18,7 @@ import {
   invalidateWallSegmentCache,
   resolveClusteringElevation,
 } from './map-point-wall-clustering.js';
+import { createMapPointMarkerGroup } from './map-point-marker-visual.js';
 
 const log = createLogger('MapPointsManager');
 
@@ -298,6 +299,66 @@ export class MapPointsManager {
       : this._getDefaultLevelBinding();
 
     return this._normalizeMetadata({ levelBinding });
+  }
+
+  /**
+   * Build metadata from the floor picker in Map Point group UI.
+   * @param {{ mode?: 'all-levels'|'locked', levelId?: string|null }} selection
+   * @returns {MapPointMetadata}
+   */
+  buildMetadataFromLevelSelection(selection = {}) {
+    const mode = selection?.mode === 'locked' ? 'locked' : 'all-levels';
+    if (mode !== 'locked') {
+      return this._normalizeMetadata({ levelBinding: this._getDefaultLevelBinding() });
+    }
+
+    const levelId = (typeof selection?.levelId === 'string' && selection.levelId.length > 0)
+      ? selection.levelId
+      : null;
+
+    const levels = window.MapShine?.cameraFollower?.getAvailableLevels?.()
+      ?? window.MapShine?.availableLevels
+      ?? window.MapShine?.floorStack?.getFloors?.()?.map((f, index) => ({
+        levelId: f?.levelId ?? null,
+        index: Number.isFinite(Number(f?.index)) ? Number(f.index) : index,
+        label: `Floor ${index + 1}`,
+        bottom: Number(f?.elevationMin),
+        top: Number(f?.elevationMax),
+      }))
+      ?? [];
+
+    const match = levelId ? levels.find((l) => l?.levelId === levelId) : null;
+    if (!match) {
+      return this.buildMetadataFromLevelContext(window.MapShine?.activeLevelContext ?? null);
+    }
+
+    const bottom = Number(match.bottom);
+    let top = Number(match.top);
+    if (!Number.isFinite(bottom)) {
+      return this.buildMetadataFromLevelContext(window.MapShine?.activeLevelContext ?? null);
+    }
+    if (!Number.isFinite(top)) top = bottom;
+
+    return this._normalizeMetadata({
+      levelBinding: {
+        mode: 'locked',
+        bottom: Math.min(bottom, top),
+        top: Math.max(bottom, top),
+        floorKey: match.levelId ?? levelId,
+      },
+    });
+  }
+
+  /**
+   * Whether a group is visible for the active/provided level context.
+   * @param {string} groupId
+   * @param {any} [context=null]
+   * @returns {boolean}
+   */
+  isGroupVisibleForContext(groupId, context = null) {
+    const group = this.getGroup(groupId);
+    if (!group) return false;
+    return this._groupMatchesLevelContext(group, context);
   }
 
   /**
@@ -1317,6 +1378,10 @@ export class MapPointsManager {
       this.notifyListeners();
       this._scheduleRecomputeClusters();
 
+      if (this.showVisualHelpers) {
+        this.createVisualHelper(id, group);
+      }
+
       log.info(`Created map point group: ${id} (${group.label})`);
       return group;
     });
@@ -1716,63 +1781,15 @@ export class MapPointsManager {
    * @returns {THREE.Group}
    * @private
    */
-  _createPointMarkerMesh(x, y, z, color, index) {
+  _createPointMarkerMesh(x, y, z, color, index, groupId) {
+    const marker = createMapPointMarkerGroup(x, y, z, color, index, {
+      groupId: typeof groupId === 'string' ? groupId : undefined,
+      renderOrderBase: 1001,
+    });
+    if (marker) return marker;
+
     const THREE = window.THREE;
-    const group = new THREE.Group();
-    group.position.set(x, y, z);
-
-    // White outer ring (border)
-    const outerRing = new THREE.RingGeometry(16, 22, 32);
-    const outerMat = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
-      transparent: true,
-      opacity: 0.9,
-      depthTest: false,
-      side: THREE.DoubleSide
-    });
-    const outerMesh = new THREE.Mesh(outerRing, outerMat);
-    group.add(outerMesh);
-
-    // Inner filled circle (effect color)
-    const innerCircle = new THREE.CircleGeometry(14, 32);
-    const innerMat = new THREE.MeshBasicMaterial({
-      color: color,
-      transparent: true,
-      opacity: 0.85,
-      depthTest: false,
-      side: THREE.DoubleSide
-    });
-    const innerMesh = new THREE.Mesh(innerCircle, innerMat);
-    innerMesh.position.z = 0.1;
-    group.add(innerMesh);
-
-    // Center dot (darker)
-    const centerDot = new THREE.CircleGeometry(4, 16);
-    const centerMat = new THREE.MeshBasicMaterial({
-      color: 0x000000,
-      transparent: true,
-      opacity: 0.5,
-      depthTest: false,
-      side: THREE.DoubleSide
-    });
-    const centerMesh = new THREE.Mesh(centerDot, centerMat);
-    centerMesh.position.z = 0.2;
-    group.add(centerMesh);
-
-    group.renderOrder = 1001 + index;
-    if (arguments.length >= 6) {
-      const groupId = arguments[5];
-      const data = {
-        type: 'mapPointHandle',
-        groupId,
-        pointIndex: index
-      };
-      group.userData = { ...(group.userData || {}), ...data };
-      group.traverse((child) => {
-        child.userData = { ...(child.userData || {}), ...data };
-      });
-    }
-    return group;
+    return new THREE.Group();
   }
 
   /**

@@ -925,7 +925,7 @@ export class GpuSceneMaskCompositor {
    * @param {object} [options]
    * @param {string|null} [options.lastMaskBasePath] - Background basePath fallback
    * @param {boolean} [options.cacheOnly=false] - Preload mode: warm cache without activating
-   * @returns {Promise<{masks: Array, masksChanged: boolean, levelElevation: number, basePath: string|null}|null>}
+   * @returns {Promise<{masks: Array, masksChanged: boolean, recomposed: boolean, levelElevation: number, basePath: string|null}|null>}
    */
   async composeFloor(levelContext, scene, options = {}) {
     const { lastMaskBasePath = null, cacheOnly = false } = options;
@@ -1024,7 +1024,7 @@ export class GpuSceneMaskCompositor {
       // output and should pass through unfiltered.
 
       if (cacheOnly) {
-        return { masks: cached.masks, masksChanged: false, levelElevation, basePath: cached.basePath };
+        return { masks: cached.masks, masksChanged: false, recomposed: false, levelElevation, basePath: cached.basePath };
       }
       // masksChanged must be true whenever the active floor key changes, even if
       // basePath is the same. Two floors on the same tile set share a basePath but
@@ -1051,7 +1051,7 @@ export class GpuSceneMaskCompositor {
         this._cpuPixelCache.clear();
       }
       log.debug('composeFloor: cache hit', { floorKey, masksChanged, basePath: cached.basePath });
-      return { masks: cached.masks, masksChanged, levelElevation, basePath: cached.basePath };
+      return { masks: cached.masks, masksChanged, recomposed: false, levelElevation, basePath: cached.basePath };
     }
 
     log.debug('composeFloor: cache miss, compositing floor', { floorKey, bandBottom, bandTop });
@@ -1350,7 +1350,7 @@ export class GpuSceneMaskCompositor {
 
     if (cacheOnly) {
       log.debug('composeFloor: preloaded (cacheOnly)', { floorKey, maskCount: newMasks.length });
-      return { masks: newMasks, masksChanged: false, levelElevation, basePath: primaryBasePath };
+      return { masks: newMasks, masksChanged: false, recomposed: true, levelElevation, basePath: primaryBasePath };
     }
 
     // masksChanged is true whenever the floor key changes, not just basePath.
@@ -1381,7 +1381,7 @@ export class GpuSceneMaskCompositor {
       levelElevation, masksChanged
     });
 
-    return { masks: newMasks, masksChanged, levelElevation, basePath: primaryBasePath };
+    return { masks: newMasks, masksChanged, recomposed: true, levelElevation, basePath: primaryBasePath };
   }
 
   /**
@@ -1394,6 +1394,7 @@ export class GpuSceneMaskCompositor {
    * @param {string|null} [options.lastMaskBasePath] - Background basePath fallback
    * @param {Array|null} [options.initialMasks] - Already-loaded masks for the current floor
    * @param {object|null} [options.activeLevelContext] - Current active level context
+   * @param {Set<string>|string[]|null} [options.onlyBandKeys] - When set, compose only these bands (priority preload)
    * @returns {Promise<void>}
    */
   async preloadAllFloors(scene, options = {}) {
@@ -1402,7 +1403,15 @@ export class GpuSceneMaskCompositor {
     }
     const opts = options;
     this._preloadAllFloorsInFlight = (async () => {
-      const { lastMaskBasePath = null, initialMasks = null, activeLevelContext = null } = opts;
+      const {
+        lastMaskBasePath = null,
+        initialMasks = null,
+        activeLevelContext = null,
+        onlyBandKeys = null,
+      } = opts;
+      const onlyBandSet = onlyBandKeys
+        ? new Set(Array.isArray(onlyBandKeys) ? onlyBandKeys : [...onlyBandKeys])
+        : null;
       try {
       const sc = scene || canvas?.scene;
       if (!sc || (!hasV14NativeLevels(sc) && !isLevelsEnabledForScene(sc))) return;
@@ -1518,6 +1527,7 @@ export class GpuSceneMaskCompositor {
 
         for (const target of uniqueTargets) {
           const floorKey = target.key;
+          if (onlyBandSet && !onlyBandSet.has(floorKey)) continue;
           if (!this._disableFloorCaching && this._singleBandPreloadDone.has(floorKey)) {
             log.debug('preloadAllFloors: single-band — already warmed (session), skip', { floorKey });
             continue;
@@ -1549,6 +1559,11 @@ export class GpuSceneMaskCompositor {
       }
 
       log.debug('preloadAllFloors: warming cache for', bands.size, 'level bands');
+      if (onlyBandSet) {
+        log.info(
+          `preloadAllFloors: priority pass (${onlyBandSet.size} of ${bands.size} band(s))`,
+        );
+      }
 
       const sortedBandKeys = [...bands].sort((a, b) => {
         const [ab, at] = String(a).split(':').map(Number);
@@ -1586,6 +1601,7 @@ export class GpuSceneMaskCompositor {
 
       const isGM = isGmLike();
       for (const bandKey of sortedBandKeys) {
+        if (onlyBandSet && !onlyBandSet.has(bandKey)) continue;
         await _yieldIfNeeded();
         const [bottom, top] = bandKey.split(':').map(Number);
 
@@ -2266,6 +2282,51 @@ export class GpuSceneMaskCompositor {
   hasSingleBandPreloadDone(floorKey) {
     if (!floorKey) return false;
     return this._singleBandPreloadDone.has(floorKey);
+  }
+
+  /**
+   * Whether a band already has the GPU stack data that {@link warmVisibleFloorsForOutdoorsStack}
+   * would produce. Used to skip redundant prime/compose on level revisits.
+   *
+   * @param {string} floorKey
+   * @param {object|null} [scene=null]
+   * @returns {boolean}
+   */
+  isBandWarmForOutdoorsStack(floorKey, scene = null) {
+    if (!floorKey) return false;
+    const key = String(floorKey);
+    const sc = scene || canvas?.scene;
+    if (!sc || !this._floorMeta.has(key)) return false;
+
+    const parts = key.split(':').map(Number);
+    let bottom = parts[0];
+    let top = parts[1];
+    if (!Number.isFinite(top)) {
+      try {
+        const floorBand = (window.MapShine?.floorStack?.getFloors?.() ?? [])
+          .find((f) => String(f.compositorKey) === key);
+        top = Number(floorBand?.elevationMax);
+      } catch (_) {
+        top = Number.NaN;
+      }
+    }
+    if (!Number.isFinite(bottom) || !Number.isFinite(top)) return false;
+
+    const bandCtx = { bottom, top };
+    const hasGpuOutdoors = !!this._floorCache.get(key)?.get('outdoors')?.texture;
+    const hasFloorAlpha = !!this.getFloorTexture(key, 'floorAlpha');
+    const hasSkyReach = !!this.getFloorTexture(key, 'skyReach');
+    const hasTiles = (this._getActiveLevelTiles(sc, bandCtx)?.length ?? 0) > 0;
+
+    if (!hasGpuOutdoors) {
+      if (this.getFloorTexture(key, 'outdoors')) {
+        return !hasTiles || (hasFloorAlpha && hasSkyReach);
+      }
+      return this._upperBandNoOutdoorsAccepted.has(key);
+    }
+
+    if (hasTiles && (!hasFloorAlpha || !hasSkyReach)) return false;
+    return !!this.getFloorTexture(key, 'outdoors');
   }
 
   /**
@@ -3351,6 +3412,11 @@ export class GpuSceneMaskCompositor {
           if (!Number.isFinite(bottom) || !Number.isFinite(top)) {
             skippedKeys.push(key);
             reasons[key] = 'invalid-key';
+            continue;
+          }
+
+          if (this.isBandWarmForOutdoorsStack(key, sc)) {
+            preparedKeys.push(key);
             continue;
           }
 

@@ -456,6 +456,12 @@ export class LoadingOverlay {
     return (performance.now() - this._timerStart) / 1000;
   }
 
+  /** Reset and start the elapsed-time display (level transitions, panel re-show). */
+  restartTimer() {
+    this.ensure();
+    this._startTimer();
+  }
+
   async whenPresentable(_maxWaitMs = 3000) {
     this.ensure();
     try {
@@ -803,6 +809,8 @@ export class LoadingOverlay {
     const d = Math.max(0, Number.isFinite(durationMs) ? durationMs : 300);
 
     if (!this._contentEl) return;
+
+    this._startTimer();
 
     const startOpacity = parseFloat(this._contentEl.style.opacity || '0') || 0;
     if (startOpacity >= 0.999) {

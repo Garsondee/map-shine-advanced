@@ -65,6 +65,7 @@ class LoadingScreenService {
       setDebugLog: () => {},
       showDebugDismiss: () => {},
       getElapsedSeconds: () => 0,
+      restartTimer: () => {},
     };
 
     /** @type {LoadingScreenRuntimeSettings} */
@@ -373,6 +374,7 @@ class LoadingScreenService {
   setDebugLog(text) { this._active().setDebugLog?.(text); }
   showDebugDismiss(callback) { this._active().showDebugDismiss?.(callback); }
   getElapsedSeconds() { return this._active().getElapsedSeconds?.() ?? 0; }
+  restartTimer() { this._active().restartTimer?.(); }
 
   /**
    * Resolved presentation timings from styled config, with reduced-motion scaling.

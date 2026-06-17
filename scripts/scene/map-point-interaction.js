@@ -14,6 +14,11 @@
 import { createLogger } from '../core/log.js';
 import Coordinates from '../utils/coordinates.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
+import {
+  MAP_POINT_HIT_RADIUS,
+  createMapPointCursorPreviewMesh,
+  createMapPointMarkerGroup,
+} from './map-point-marker-visual.js';
 
 const log = createLogger('MapPointDraw');
 
@@ -133,7 +138,7 @@ export class MapPointDrawHandler {
     pointsGeo.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
     const pointsMat = new THREE.PointsMaterial({
       color: 0x00ff00,
-      size: 16,
+      size: 6,
       sizeAttenuation: false,
       depthTest: false
     });
@@ -155,17 +160,11 @@ export class MapPointDrawHandler {
     this.state.previewGroup.add(this.state.previewFill);
 
     // Cursor point preview
-    const cursorGeo = new THREE.RingGeometry(12, 16, 32);
-    const cursorMat = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
-      transparent: true,
-      opacity: 0.8,
-      depthTest: false,
-      side: THREE.DoubleSide
-    });
-    this.state.cursorPoint = new THREE.Mesh(cursorGeo, cursorMat);
-    this.state.cursorPoint.visible = false;
-    this.state.previewGroup.add(this.state.cursorPoint);
+    this.state.cursorPoint = createMapPointCursorPreviewMesh(0xffffff);
+    if (this.state.cursorPoint) {
+      this.state.cursorPoint.visible = false;
+      this.state.previewGroup.add(this.state.cursorPoint);
+    }
 
     // Initialize point markers array
     this.state.pointMarkers = [];
@@ -343,6 +342,13 @@ export class MapPointDrawHandler {
 
         log.info(`Created map point group: ${group.id}`);
         ui.notifications.info(isRope ? 'Created rope' : `Created ${effectTarget} spawn ${groupType}`);
+
+        if (mapPointsManager.showVisualHelpers) {
+          const savedGroup = mapPointsManager.getGroup(group.id);
+          if (savedGroup) {
+            mapPointsManager.createVisualHelper(group.id, savedGroup);
+          }
+        }
       }
     } catch (e) {
       log.error('Failed to save map point group:', e);
@@ -593,7 +599,7 @@ export class MapPointDrawHandler {
     const worldPos = this._im.screenToWorld(clientX, clientY);
     if (!worldPos) return null;
 
-    const clickRadius = 30;
+    const clickRadius = MAP_POINT_HIT_RADIUS;
 
     for (const [groupId, group] of mapPointsManager.groups) {
       if (!group.points || group.points.length === 0) continue;
@@ -850,37 +856,11 @@ export class MapPointDrawHandler {
    * @private
    */
   _createPointMarker(x, y, z, color, index) {
+    const marker = createMapPointMarkerGroup(x, y, z, color, index, { renderOrderBase: 10000 });
+    if (marker) return marker;
+
     const THREE = window.THREE;
-    const group = new THREE.Group();
-    group.position.set(x, y, z);
-
-    // Outer ring (white border)
-    const outerRing = new THREE.RingGeometry(18, 24, 32);
-    const outerMat = new THREE.MeshBasicMaterial({
-      color: 0xffffff, transparent: true, opacity: 0.9, depthTest: false, side: THREE.DoubleSide
-    });
-    group.add(new THREE.Mesh(outerRing, outerMat));
-
-    // Inner filled circle (effect color)
-    const innerCircle = new THREE.CircleGeometry(16, 32);
-    const innerMat = new THREE.MeshBasicMaterial({
-      color: color, transparent: true, opacity: 0.8, depthTest: false, side: THREE.DoubleSide
-    });
-    const innerMesh = new THREE.Mesh(innerCircle, innerMat);
-    innerMesh.position.z = 0.1;
-    group.add(innerMesh);
-
-    // Center dot
-    const centerDot = new THREE.CircleGeometry(4, 16);
-    const centerMat = new THREE.MeshBasicMaterial({
-      color: 0x000000, transparent: true, opacity: 0.6, depthTest: false, side: THREE.DoubleSide
-    });
-    const centerMesh = new THREE.Mesh(centerDot, centerMat);
-    centerMesh.position.z = 0.2;
-    group.add(centerMesh);
-
-    group.renderOrder = 10000 + index;
-    return group;
+    return new THREE.Group();
   }
 
   /**

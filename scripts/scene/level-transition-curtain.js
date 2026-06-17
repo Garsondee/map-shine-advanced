@@ -389,6 +389,9 @@ export class LevelTransitionCurtain {
       }
     }
 
+    // Start elapsed timer after stage pills / panel DOM is stable (rebuild clears _timerEl).
+    try { loadingOverlay.restartTimer?.(); } catch (_) {}
+
     // 2. Keep the compositor ticking while covered.
     this._keepRendering();
 

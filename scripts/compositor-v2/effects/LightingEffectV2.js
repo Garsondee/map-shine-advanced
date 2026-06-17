@@ -3078,10 +3078,10 @@ export class LightingEffectV2 {
     this._registerHook('updateAmbientLight', (doc, changes) => this._onLightUpdate(doc, changes));
     this._registerHook('deleteAmbientLight', (doc) => this._onLightDelete(doc));
     this._registerHook('updateScene', (scene, changes) => this._onSceneUpdate(scene, changes));
-    // Full dispose+rebuild so wall-clipped LOS geometry and materials are not reused
-    // across floors (placeables/embedded docs can change; baked polygons must match the active band).
+    // Rebuild wall-clip geometry for the new floor perspective without disposing
+    // every ShaderMaterial (full syncAllLights remains for inset/param changes).
     this._registerHook('mapShineLevelContextChanged', () => {
-      this.syncAllLights();
+      this.refreshLightsForLevelContext();
     });
     this._registerHook('lightingRefresh', () => {
       this._reconcileMissingEmbeddedLights();
@@ -3374,6 +3374,60 @@ export class LightingEffectV2 {
     this._pushPointLightFalloffUniforms();
     log.info(`LightingEffectV2: synced ${this._lights.size} lights, ${this._darknessSources.size} darkness sources`);
     this._endPerfSpan(_perfToken);
+  }
+
+  /**
+   * Level-change path: reconcile add/prune, rebuild wall-clip geometry for the
+   * active band, and refresh visibility — without disposing ShaderMaterials.
+   */
+  refreshLightsForLevelContext() {
+    if (!this._initialized) return;
+    this._bindPerfRecorder();
+    this._invalidateLightMaskPrepassCache();
+
+    let _perfToken = this._beginPerfSpan('refreshLightsForLevelContext.detachForeign', 'update', { cpuOnly: true });
+    if (this._lightScene) {
+      const trackedMeshes = new Set();
+      for (let i = 0; i < this._lightList.length; i++) {
+        const light = this._lightList[i];
+        if (light?.mesh) trackedMeshes.add(light.mesh);
+      }
+      for (const ch of [...this._lightScene.children]) {
+        if (!trackedMeshes.has(ch)) {
+          try { this._lightScene.remove(ch); } catch (_) {}
+        }
+      }
+    }
+    this._endPerfSpan(_perfToken);
+
+    _perfToken = this._beginPerfSpan('refreshLightsForLevelContext.reconcile', 'update', { cpuOnly: true });
+    this._reconcileMissingEmbeddedLights();
+    this._endPerfSpan(_perfToken);
+
+    _perfToken = this._beginPerfSpan('refreshLightsForLevelContext.rebuildGeometry', 'update', { cpuOnly: true });
+    for (let i = 0; i < this._lightList.length; i++) {
+      const light = this._lightList[i];
+      const doc = this._liveAmbientDocForGating(light) ?? light?.document ?? null;
+      if (doc && typeof light.updateData === 'function') {
+        try { light.updateData(doc, true); } catch (_) {}
+      }
+    }
+    for (let i = 0; i < this._darknessList.length; i++) {
+      const ds = this._darknessList[i];
+      const doc = this._liveAmbientDocForGating(ds) ?? ds?.document ?? null;
+      if (doc && typeof ds.updateData === 'function') {
+        try { ds.updateData(doc, true); } catch (_) {}
+      }
+    }
+    this._endPerfSpan(_perfToken);
+
+    this._perspectiveRefreshDirty = true;
+    this._refreshLightsForLevelsPerspective();
+    this._pushLightBufferUniformsToMeshes();
+    this._pushPointLightFalloffUniforms();
+    log.debug(
+      `LightingEffectV2: refreshed for level context (${this._lights.size} lights, ${this._darknessSources.size} darkness)`,
+    );
   }
 
   /**

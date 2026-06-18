@@ -91,7 +91,8 @@ export class SceneComposer {
      * @type {GpuSceneMaskCompositor}
      * @private
      */
-    /** @type {{ sceneId: string|null, promise: Promise<{ctx: object, result: object}> }|null} */
+    this._sceneMaskCompositor = new GpuSceneMaskCompositor();
+    /** @type {{ sceneId: string|null, bgPath?: string, promise: Promise<{ctx: object, result: object}> }|null} */
     this._earlyMaskBundleLoad = null;
   }
 

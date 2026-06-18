@@ -65,7 +65,25 @@ function _isSamplingActiveRenderTarget(renderer, texture) {
 
 /** Glow colour endpoints for warmth slider (0 = neutral, 1 = deep candle / torch amber). */
 const GLOW_COLOR_COOL = { r: 1.0, g: 1.0, b: 1.0 };
-const GLOW_COLOR_WARM = { r: 1.0, g: 0.45, b: 0.06 };
+const GLOW_COLOR_WARM = { r: 1.0, g: 0.58, b: 0.12 };
+
+/**
+ * Candle pools: remap authored Hot Core Scale so the bright region reads as most of the flame,
+ * not a pinprick inside a saturated orange disc (legacy low slider values were too small).
+ * @param {number} raw 0.05..1 from Tweakpane
+ * @returns {number} effective inner/outer radius ratio for LightMesh
+ */
+function remapCandleGlowInnerScale(raw) {
+  const s = Math.max(0.05, Math.min(1, Number(raw) || 0.2));
+  const t = Math.pow((s - 0.05) / 0.95, 0.55);
+  return 0.52 + t * 0.36;
+}
+
+/** Softer halo falloff — lower exponent widens the gentle rim instead of a dense orange blob. */
+function remapCandleGlowFalloffExponent(raw) {
+  const e = Math.max(0.5, Number(raw) || 1.25);
+  return Math.max(0.45, e * 0.78);
+}
 
 export class CandleFlamesEffectV2 {
   constructor() {
@@ -111,9 +129,9 @@ export class CandleFlamesEffectV2 {
       glowBucketSizePx: 288.0,
       glowMaxBuckets: 512,
       glowRadiusPx: 514.0,
-      glowInnerRadiusScale: 0.35,
-      glowFalloffExponent: 1.25,
-      glowEdgeSoftness: 0.88,
+      glowInnerRadiusScale: 0.55,
+      glowFalloffExponent: 0.95,
+      glowEdgeSoftness: 0.92,
       glowIntensity: 0.49,
       glowWarmth: 1.0,
       glowDarknessCancel: 0.6,
@@ -137,14 +155,29 @@ export class CandleFlamesEffectV2 {
       glowNightIntensity: 0,
       glowNightDarknessCancel: 2.6,
       glowNightRadiusPx: 802.0,
-      glowNightInnerRadiusScale: 0.15,
-      glowNightFalloffExponent: 1.7,
-      glowNightEdgeSoftness: 0.52,
+      glowNightInnerRadiusScale: 0.48,
+      glowNightFalloffExponent: 1.15,
+      glowNightEdgeSoftness: 0.72,
       glowNightFlickerStrength: 0,
       glowNightFlickerSpeed: 6.3,
       glowNightFlickerStrengthJitter: 0.78,
       glowNightFlickerSpeedJitter: 0.68,
       wallClipEnabled: true,
+
+      glowShapeMotionEnabled: true,
+      glowShapeMaster: 0.32,
+      glowShapeSpeed: 0.85,
+      glowShapeLinkFlameMotion: true,
+      glowShapeChaos: 0.25,
+      glowShapeCenterShift: 0.38,
+      glowShapeCenterVertical: 0.55,
+      glowShapeOvalStretch: 0.28,
+      glowShapeOvalRotate: 0.22,
+      glowShapeReachPulse: 0.24,
+      glowShapeCorePulse: 0.28,
+      glowShapeBrightnessLink: 0.3,
+      glowShapeIndoorScale: 0.85,
+      glowShapeOutdoorScale: 1.0,
 
       autoDayNightBalance: true,
       dayIntensityScale: 1.5,
@@ -290,6 +323,28 @@ export class CandleFlamesEffectV2 {
           ],
         },
         {
+          name: 'glow-shape',
+          label: 'Glow — Light Shape',
+          type: 'folder',
+          expanded: true,
+          parameters: [
+            'glowShapeMotionEnabled',
+            'glowShapeMaster',
+            'glowShapeSpeed',
+            'glowShapeLinkFlameMotion',
+            'glowShapeChaos',
+            'glowShapeCenterShift',
+            'glowShapeCenterVertical',
+            'glowShapeOvalStretch',
+            'glowShapeOvalRotate',
+            'glowShapeReachPulse',
+            'glowShapeCorePulse',
+            'glowShapeBrightnessLink',
+            'glowShapeIndoorScale',
+            'glowShapeOutdoorScale',
+          ],
+        },
+        {
           name: 'glow-day',
           label: 'Glow — Day Pool',
           type: 'folder',
@@ -410,6 +465,66 @@ export class CandleFlamesEffectV2 {
         },
 
         glowEnabled: { type: 'boolean', default: true, label: 'Enabled' },
+        glowShapeMotionEnabled: {
+          type: 'boolean',
+          default: true,
+          label: 'Shape Motion',
+          tooltip: 'Organic pool deformation: center wander, oval stretch, and size pulse synced to flame motion.',
+        },
+        glowShapeMaster: {
+          type: 'slider', min: 0, max: 1.5, step: 0.01, default: 0.32, label: 'Master Scale',
+          tooltip: 'Overall strength of all light-shape motion. Lower = calmer, more stable pools.',
+        },
+        glowShapeSpeed: {
+          type: 'slider', min: 0.05, max: 2.5, step: 0.05, default: 0.85, label: 'Motion Speed',
+          tooltip: 'How fast the pool shape oscillates. Does not affect glow brightness flicker.',
+        },
+        glowShapeLinkFlameMotion: {
+          type: 'boolean',
+          default: true,
+          label: 'Follow Flame Motion',
+          tooltip: 'When on, shape motion uses Flames folder wobble/sway/draft/wind. When off, uses Chaos only.',
+        },
+        glowShapeChaos: {
+          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.25, label: 'Standalone Chaos',
+          tooltip: 'Agitation when Follow Flame Motion is off, or extra noise mixed in when on.',
+        },
+        glowShapeCenterShift: {
+          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.38, label: 'Center Wander',
+          tooltip: 'How far the bright core drifts horizontally from the candle anchor.',
+        },
+        glowShapeCenterVertical: {
+          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.55, label: 'Vertical Wander',
+          tooltip: 'Vertical component of center drift (0 = mostly horizontal lean).',
+        },
+        glowShapeOvalStretch: {
+          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.28, label: 'Oval Stretch',
+          tooltip: 'How much the pool breathes between wide and tall ellipses.',
+        },
+        glowShapeOvalRotate: {
+          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.22, label: 'Oval Rotation',
+          tooltip: 'How much the ellipse orientation spins with draft or wind.',
+        },
+        glowShapeReachPulse: {
+          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.24, label: 'Pool Size Pulse',
+          tooltip: 'Outer pool radius breathe — expands and contracts with flicker.',
+        },
+        glowShapeCorePulse: {
+          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.28, label: 'Hot Core Pulse',
+          tooltip: 'Bright-core fraction pulse — mimics flame brightening without moving the rim.',
+        },
+        glowShapeBrightnessLink: {
+          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.3, label: 'Brightness Link',
+          tooltip: 'How much flame flicker modulates glow intensity (separate from shape motion).',
+        },
+        glowShapeIndoorScale: {
+          type: 'slider', min: 0, max: 1.5, step: 0.01, default: 0.85, label: 'Indoor Scale',
+          tooltip: 'Extra multiplier on shape motion for indoor (roof) pools.',
+        },
+        glowShapeOutdoorScale: {
+          type: 'slider', min: 0, max: 1.5, step: 0.01, default: 1.0, label: 'Outdoor Scale',
+          tooltip: 'Extra multiplier on shape motion for outdoor pools.',
+        },
         glowWarmth: {
           type: 'slider', min: 0, max: 1.0, step: 0.01, default: 1.0, label: 'Pool Warmth',
           tooltip: 'Daylight pool hue at full day. Blends toward Glow — Night Pool at darkness.',
@@ -499,14 +614,15 @@ export class CandleFlamesEffectV2 {
           tooltip: 'Night pool reach at full darkness. Blends from day radius as scene darkens.',
         },
         glowNightInnerRadiusScale: {
-          type: 'slider', min: 0.05, max: 1.0, step: 0.01, default: 0.22, label: 'Hot Core Scale',
+          type: 'slider', min: 0.05, max: 1.0, step: 0.01, default: 0.48, label: 'Hot Core Scale',
+          tooltip: 'Bright pool fraction at full night. Values are remapped so the hot core reads as most of the flame, not a pinprick in an orange disc.',
         },
         glowNightFalloffExponent: {
-          type: 'slider', min: 0.5, max: 5.0, step: 0.05, default: 1.35, label: 'Falloff Exponent',
-          tooltip: 'Night core tightness. Lower = wider soft midnight pool.',
+          type: 'slider', min: 0.5, max: 5.0, step: 0.05, default: 1.15, label: 'Falloff Exponent',
+          tooltip: 'Night halo softness. Lower = wider gentle rim; higher = tighter core (remapped for candle pools).',
         },
         glowNightEdgeSoftness: {
-          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.52, label: 'Pool Edge Softness',
+          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.72, label: 'Pool Edge Softness',
           tooltip: 'Night rim feather in the HDR light buffer.',
         },
         glowFlickerStrength: { type: 'slider', min: 0, max: 10.0, step: 0.05, default: 0.05, label: 'Flicker Strength' },
@@ -514,13 +630,16 @@ export class CandleFlamesEffectV2 {
         glowFlickerStrengthJitter: { type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.24, label: 'Flicker Strength Jitter' },
         glowFlickerSpeedJitter: { type: 'slider', min: 0, max: 1.0, step: 0.01, default: 1.0, label: 'Flicker Speed Jitter' },
         glowRadiusPx: { type: 'slider', min: 8, max: 1200, step: 2, default: 514.0, label: 'Pool Radius (px)' },
-        glowInnerRadiusScale: { type: 'slider', min: 0.05, max: 1.0, step: 0.01, default: 0.35, label: 'Hot Core Scale' },
+        glowInnerRadiusScale: {
+          type: 'slider', min: 0.05, max: 1.0, step: 0.01, default: 0.55, label: 'Hot Core Scale',
+          tooltip: 'Bright pool fraction at full day. Remapped so the HDR core occupies most of the pool.',
+        },
         glowFalloffExponent: {
-          type: 'slider', min: 0.5, max: 5.0, step: 0.05, default: 1.25, label: 'Falloff Exponent',
-          tooltip: 'Core tightness for unified radial falloff. Lower = wider soft pool; higher ≈ inverse-square hot core.',
+          type: 'slider', min: 0.5, max: 5.0, step: 0.05, default: 0.95, label: 'Falloff Exponent',
+          tooltip: 'Day halo softness. Lower = wider gentle rim (remapped for candle pools).',
         },
         glowEdgeSoftness: {
-          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.88, label: 'Pool Edge Softness',
+          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.92, label: 'Pool Edge Softness',
           tooltip: 'Feathers the glow rim in the HDR light buffer. Drives shader attenuation + rim geometry (higher = wider, softer pool).',
         },
         glowBucketSizePx: {
@@ -1155,18 +1274,18 @@ export class CandleFlamesEffectV2 {
       intensity: Math.max(0, this._blendGlowDayNightParam('glowIntensity', 'glowNightIntensity', 0.42, t)),
       cancel: Math.max(0, this._blendGlowDayNightParam('glowDarknessCancel', 'glowNightDarknessCancel', 3.0, t)),
       radiusPx: Math.max(32, this._blendGlowDayNightParam('glowRadiusPx', 'glowNightRadiusPx', 172.0, t)),
-      innerScale: Math.max(0.05, Math.min(1, this._blendGlowDayNightParam(
+      innerScale: Math.min(0.92, remapCandleGlowInnerScale(this._blendGlowDayNightParam(
         'glowInnerRadiusScale',
         'glowNightInnerRadiusScale',
         0.2,
         t,
       ))),
-      falloffExponent: Math.min(5.0, Math.max(0.5, this._blendGlowDayNightParam(
+      falloffExponent: Math.min(5.0, Math.max(0.45, remapCandleGlowFalloffExponent(this._blendGlowDayNightParam(
         'glowFalloffExponent',
         'glowNightFalloffExponent',
         2.0,
         t,
-      ))),
+      )))),
       edgeSoftness: Math.max(0, Math.min(1.0, this._blendGlowDayNightParam(
         'glowEdgeSoftness',
         'glowNightEdgeSoftness',
@@ -1941,24 +2060,31 @@ export class CandleFlamesEffectV2 {
           float wobble = mix(1.0 - noiseAmp, 1.0 + noiseAmp, n);
           r *= wobble;
 
-          float alpha = smoothstep(1.0, 0.0, r);
+          // Teardrop: hotter and wider at the base, tighter at the tip.
+          float tip = clamp(vUv.y, 0.0, 1.0);
+          float tearR = r * mix(0.88, 1.12, tip * tip);
 
-          float core = smoothstep(0.35, 0.0, r);
+          // HDR flame zones — bright core occupies most of the sprite; outer halo is whisper-soft.
+          float coreMask = smoothstep(0.78, 0.06, tearR);
+          float bodyMask = smoothstep(0.98, 0.28, tearR);
+          float haloMask = smoothstep(1.08, 0.58, tearR) * (1.0 - bodyMask * 0.92);
 
-          vec3 hot = vec3(1.0, 0.95, 0.85);
-          vec3 warm = vec3(1.0, 0.65, 0.18);
-          vec3 cool = vec3(1.0, 0.18, 0.02);
+          vec3 coreRad = vec3(4.2, 3.4, 2.1);
+          vec3 bodyRad = vec3(2.6, 1.75, 0.55);
+          vec3 haloRad = vec3(1.15, 0.48, 0.10);
 
-          vec3 col = mix(cool, warm, 1.0 - r);
-          col = mix(col, hot, core);
-
+          vec3 col = haloRad * haloMask;
+          col = mix(col, bodyRad, bodyMask);
+          col = mix(col, coreRad, coreMask);
           col *= vColor;
+
+          float shapeAlpha = clamp(max(coreMask, bodyMask * 0.82) + haloMask * 0.18, 0.0, 1.0);
 
           float flickerBase = 0.9 + 0.1 * sin(t * 0.7 + vPhase * 2.0);
           float flickerShape = sin(t) * 0.65 + sin(t * 1.73 + 2.0) * 0.35;
           float flicker = flickerBase + flickerStrength * 0.35 * flickerShape;
           flicker = max(0.55, flicker);
-          float finalAlpha = alpha * uOpacity * clamp(vIntensity, 0.0, 3.0) * flicker;
+          float finalAlpha = shapeAlpha * uOpacity * clamp(vIntensity, 0.0, 3.0) * flicker;
 
           // Floor-presence gate: occlude candle flames under current-floor
           // solid tiles (layer-23 floorPresenceTarget, screen-space).
@@ -2061,8 +2187,8 @@ export class CandleFlamesEffectV2 {
     const sizeJitter = Math.max(0.0, Math.min(1.0, Number(this.params.flameSizeJitter) || 0.0));
 
     const baseR = 1.0;
-    const baseG = 0.85;
-    const baseB = 0.55;
+    const baseG = 1.0;
+    const baseB = 1.0;
 
     const buckets = new Map();
     const bucketSize = Math.max(32, this.params.glowBucketSizePx);
@@ -2394,6 +2520,191 @@ export class CandleFlamesEffectV2 {
     }
   }
 
+  /** @private @param {number} [flameFlicker=1] */
+  _neutralGlowShapeMotion(flameFlicker = 1.0) {
+    return {
+      flameFlicker,
+      offsetX: 0,
+      offsetY: 0,
+      ovalX: 1,
+      ovalY: 1,
+      ovalAngle: 0,
+      radiusMul: 1,
+      innerMul: 1,
+    };
+  }
+
+  /** @private */
+  _shapeParam(key, fallback = 0) {
+    const v = Number(this.params[key]);
+    return Number.isFinite(v) ? v : fallback;
+  }
+
+  /**
+   * Flame-aligned flicker + organic motion for gameplay glow pools (matches sprite shader signals).
+   * @private
+   * @param {number} t elapsed seconds
+   * @param {number} phase per-bucket hash
+   * @param {number} outdoor 0..1
+   * @param {number} poolRadiusPx outer pool radius in px
+   * @returns {{
+   *   flameFlicker: number,
+   *   offsetX: number,
+   *   offsetY: number,
+   *   ovalX: number,
+   *   ovalY: number,
+   *   ovalAngle: number,
+   *   radiusMul: number,
+   *   innerMul: number,
+   * }}
+   */
+  _computeUnifiedCandleMotion(t, phase, outdoor, poolRadiusPx) {
+    const indoor = outdoor < GLOW_BALANCE_OUTDOOR_THRESHOLD;
+    const poolR = Math.max(32, Number(poolRadiusPx) || 32);
+
+    const rand01 = this._hash2(phase, 0.13);
+    const rand01b = this._hash2(phase, 0.37);
+    const sj = clamp01(Number(this.params.flameFlickerSpeedJitter) || 0);
+    const stj = clamp01(Number(this.params.flameFlickerStrengthJitter) || 0);
+    const speedVar = (1.0 - sj) + 2.0 * sj * rand01;
+    const strengthVar = (1.0 - stj) + 2.0 * stj * rand01b;
+
+    const flameSpeed = Math.max(0, Number(this.params.flameFlickerSpeed) || 0) * speedVar;
+    const flameStrength = Math.max(0, Number(this.params.flameFlickerStrength) || 0) * strengthVar;
+    const ft = t * flameSpeed + phase * 25.0;
+    const flickerBase = 0.9 + 0.1 * Math.sin(ft * 0.7 + phase * 2.0);
+    const flickerShape = Math.sin(ft) * 0.65 + Math.sin(ft * 1.73 + 2.0) * 0.35;
+    const flameFlicker = Math.max(0.55, flickerBase + flameStrength * 0.35 * flickerShape);
+
+    if (!this.params.glowShapeMotionEnabled) {
+      return this._neutralGlowShapeMotion(flameFlicker);
+    }
+
+    const envScale = indoor
+      ? Math.max(0, this._shapeParam('glowShapeIndoorScale', 0.85))
+      : Math.max(0, this._shapeParam('glowShapeOutdoorScale', 1.0));
+    const master = Math.max(0, this._shapeParam('glowShapeMaster', 0.32)) * envScale;
+    if (master <= 1e-5) {
+      return this._neutralGlowShapeMotion(flameFlicker);
+    }
+
+    const speedMul = Math.max(0.05, this._shapeParam('glowShapeSpeed', 0.85));
+    const tM = t * speedMul;
+    const chaosMix = clamp01(this._shapeParam('glowShapeChaos', 0.25));
+    const linkFlame = this.params.glowShapeLinkFlameMotion !== false;
+
+    let windSpeed = 0.0;
+    let windDirX = 1.0;
+    let windDirY = 0.0;
+    if (linkFlame) {
+      try {
+        windSpeed = Number(weatherController?.getCurrentState?.()?.windSpeed
+          ?? weatherController?.currentState?.windSpeed ?? 0.0) || 0.0;
+        windSpeed = Math.max(0.0, Math.min(1.0, windSpeed));
+        const state = weatherController?.getCurrentState?.() ?? weatherController?.currentState;
+        const dir = state?.windDirection;
+        if (dir && Number.isFinite(dir.x) && Number.isFinite(dir.y)) {
+          windDirX = dir.x;
+          windDirY = -dir.y;
+        }
+      } catch (_) {
+      }
+      const windLen = Math.hypot(windDirX, windDirY);
+      if (windLen > 1e-4) {
+        windDirX /= windLen;
+        windDirY /= windLen;
+      }
+    }
+
+    const draftDirX = Math.sin(phase * 9.17);
+    const draftDirY = Math.cos(phase * 6.11);
+    const draftLen = Math.hypot(draftDirX, draftDirY) || 1.0;
+
+    let wAmp;
+    let shapeDistort;
+    let wTime;
+    let sway;
+    let draftiness;
+    let windInfl;
+    let leanX;
+    let leanY;
+
+    if (linkFlame) {
+      const wobbleSpeed = Math.max(0, Number(this.params.flameWobbleSpeed) || 0);
+      wTime = tM * wobbleSpeed + phase * 19.7;
+      wAmp = Math.max(0, Number(this.params.flameWobble) || 0)
+        * (0.35 + 0.65 * (indoor ? 0.35 : windSpeed));
+      shapeDistort = Math.max(0, Number(this.params.flameShapeDistort) || 0);
+      wAmp += chaosMix * 0.18;
+
+      if (indoor) {
+        sway = (Number(this.params.flameIndoorSway) || 0)
+          * (Math.sin(tM * 1.4 + phase * 5.1) * 0.5 + Math.sin(tM * 2.2 + phase * 8.3) * 0.5);
+      } else {
+        sway = (Number(this.params.outdoorSway) || 0)
+          * (Math.sin(tM * 1.7 + phase * 6.2831) * 0.5 + Math.sin(tM * 2.9 + phase * 9.1) * 0.5);
+      }
+
+      draftiness = Math.max(0, Number(this.params.draftiness) || 0);
+      windInfl = Math.max(0, Number(this.params.outdoorWindInfluence) || 0);
+      leanX = indoor
+        ? (draftDirX / draftLen) * draftiness
+        : windDirX * windInfl * windSpeed;
+      leanY = indoor
+        ? (draftDirY / draftLen) * draftiness * 0.35
+        : windDirY * windInfl * windSpeed * 0.35;
+    } else {
+      wTime = tM * 4.5 + phase * 19.7;
+      wAmp = chaosMix * 0.42;
+      shapeDistort = 0.85;
+      sway = Math.sin(tM * 1.5 + phase * 5.1) * chaosMix * 0.22;
+      draftiness = 0;
+      windInfl = 0;
+      leanX = Math.sin(tM * 1.1 + phase * 3.7) * chaosMix * 0.12;
+      leanY = Math.cos(tM * 1.3 + phase * 4.9) * chaosMix * 0.08;
+    }
+
+    const wobX = Math.sin(wTime * 1.31);
+    const wobY = Math.sin(wTime * 1.77 + 0.8);
+    const wobZ = Math.sin(wTime * 1.03 + phase * 4.2);
+
+    const wanderScale = poolR * (0.022 + wAmp * 0.07 + (indoor ? draftiness : windInfl * windSpeed) * 0.04);
+    const rawOffsetX = (sway + leanX * 0.55) * poolR * 0.22 + wobX * wanderScale;
+    const rawOffsetY = wobY * wanderScale * 0.62 + wobZ * wanderScale * 0.28 + leanY * poolR * 0.12;
+
+    const ovalDrive = wAmp * shapeDistort * (0.32 + flameStrength * 0.22);
+    const rawOvalX = 1.0 + wobX * ovalDrive + (flameFlicker - 1.0) * 0.08;
+    const rawOvalY = 1.0 - wobY * ovalDrive * 0.62 - (flameFlicker - 1.0) * 0.05;
+
+    const baseAngle = indoor
+      ? Math.atan2(draftDirY, draftDirX)
+      : Math.atan2(windDirY, windDirX);
+    const rawOvalAngle = baseAngle * (indoor ? 0.35 : 0.55)
+      + wobZ * wAmp * shapeDistort * 0.85
+      + sway * 1.6;
+
+    const rawRadiusMul = 0.90 + flameFlicker * 0.14 + wobX * wAmp * 0.045;
+    const rawInnerMul = 0.82 + flameFlicker * 0.28 + Math.max(0, wobY) * wAmp * 0.06;
+
+    const centerShift = master * clamp01(this._shapeParam('glowShapeCenterShift', 0.38));
+    const vertBias = clamp01(this._shapeParam('glowShapeCenterVertical', 0.55));
+    const ovalStretch = master * clamp01(this._shapeParam('glowShapeOvalStretch', 0.28));
+    const ovalRotate = master * clamp01(this._shapeParam('glowShapeOvalRotate', 0.22));
+    const reachPulse = master * clamp01(this._shapeParam('glowShapeReachPulse', 0.24));
+    const corePulse = master * clamp01(this._shapeParam('glowShapeCorePulse', 0.28));
+
+    return {
+      flameFlicker,
+      offsetX: rawOffsetX * centerShift,
+      offsetY: rawOffsetY * centerShift * (0.35 + vertBias * 0.65),
+      ovalX: Math.max(0.55, 1.0 + (rawOvalX - 1.0) * ovalStretch),
+      ovalY: Math.max(0.55, 1.0 + (rawOvalY - 1.0) * ovalStretch),
+      ovalAngle: rawOvalAngle * ovalRotate,
+      radiusMul: Math.max(0.72, 1.0 + (rawRadiusMul - 1.0) * reachPulse),
+      innerMul: Math.max(0.65, 1.0 + (rawInnerMul - 1.0) * corePulse),
+    };
+  }
+
   _updateGlowFlicker(timeInfo) {
     if (!this.params.glowEnabled) return;
     if (!this._glowBuckets.size) return;
@@ -2413,8 +2724,12 @@ export class CandleFlamesEffectV2 {
       const speedJ = glow.flickerSpeedJitter;
       const strengthJ = glow.flickerStrengthJitter;
       const clipScale = Math.max(0.1, Number(this.params.wallClipRadiusScale) || 1.0);
-      const radiusPx = Math.max(32, glow.radiusPx * clipScale);
-      const innerRadiusPx = Math.max(1, radiusPx * glow.innerScale);
+      const baseRadiusPx = Math.max(32, glow.radiusPx * clipScale);
+      const baseInnerRadiusPx = Math.max(1, baseRadiusPx * glow.innerScale);
+
+      const motion = this._computeUnifiedCandleMotion(t, phase, outdoor, baseRadiusPx);
+      const radiusPx = baseRadiusPx;
+      const innerRadiusPx = baseInnerRadiusPx;
 
       // Stable per-bucket jitter so nearby candles can still share a glow bucket,
       // but buckets won't flicker in perfect sync.
@@ -2434,9 +2749,13 @@ export class CandleFlamesEffectV2 {
       const n2 = Math.sin(t * (spd * 1.73) + phase * 11.7);
       const n3 = Math.sin(t * (spd * 2.91) + phase * 23.1);
 
-      // Stronger, more chaotic candle-light flicker. This only affects the glow.
-      const chaos = (0.55 * n1 + 0.30 * n2 + 0.15 * n3);
-      const flicker = Math.max(0.05, 1.0 + (baseAmp * strength * Math.max(0.05, strengthVar)) * chaos);
+      const poolChaos = (0.55 * n1 + 0.30 * n2 + 0.15 * n3);
+      const glowFlicker = Math.max(0.05, 1.0 + (baseAmp * strength * Math.max(0.05, strengthVar)) * poolChaos);
+      const brightLink = clamp01(this._shapeParam('glowShapeBrightnessLink', 0.3));
+      const flicker = Math.max(
+        0.05,
+        glowFlicker * (1.0 - brightLink + motion.flameFlicker * brightLink),
+      );
 
       const indoorMul = this._computeGlowIndoorNightBoost(outdoor);
       const outdoorMul = this._computeGlowOutdoorNightBoost(outdoor);
@@ -2461,6 +2780,14 @@ export class CandleFlamesEffectV2 {
         lm.setInnerRadiusPx?.(innerRadiusPx);
         lm.setFalloffExponent?.(glow.falloffExponent);
         lm.setEdgeSoftness?.(glow.edgeSoftness);
+        lm.setOrganicFalloff?.(
+          motion.offsetX,
+          motion.offsetY,
+          motion.ovalX,
+          motion.ovalY,
+          motion.ovalAngle,
+        );
+        lm.setPhotometricPulse?.(motion.radiusMul, motion.innerMul);
 
         // Hue only in uColor — intensity/flicker scales uEmissionGain (matches point-light buffer model).
         u.uColor.value.setRGB(glowColor.r, glowColor.g, glowColor.b);

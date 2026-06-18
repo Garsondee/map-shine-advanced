@@ -128,6 +128,16 @@ export class LightMesh {
         uRgbGain: { value: this.rgbGain },
         /** Rim fade width as a fraction of outer radius (0 = hard edge). */
         uEdgeSoftness: { value: this.edgeSoftness },
+        /** Local-space falloff origin shift (px) — candle glow wander. */
+        uFalloffOffset: { value: new THREE.Vector2(0, 0) },
+        /** Ellipse scale on falloff axes (1 = circle). */
+        uFalloffOvalScale: { value: new THREE.Vector2(1, 1) },
+        /** Falloff ellipse rotation (radians). */
+        uFalloffOvalAngle: { value: 0.0 },
+        /** >1 expands lit reach within fixed mesh; candle pool breathe. */
+        uReachScale: { value: 1.0 },
+        /** Scales bright-core fraction (inner/outer ratio). */
+        uCorePulse: { value: 1.0 },
         ...createPointLightFalloffUniforms(window.THREE),
       },
       vertexShader: `
@@ -150,15 +160,30 @@ export class LightMesh {
         uniform float uAchromaticRgb;
         uniform float uRgbGain;
         uniform float uEdgeSoftness;
+        uniform vec2 uFalloffOffset;
+        uniform vec2 uFalloffOvalScale;
+        uniform float uFalloffOvalAngle;
+        uniform float uReachScale;
+        uniform float uCorePulse;
         ${POINT_LIGHT_FALLOFF_GLSL}
         ${MSA_LIGHT_RADIANCE_GLSL}
         void main() {
-          float dist = length(vLocalPos);
-          float outerR = max(uOuterRadius, 1e-4);
+          vec2 falloffPos = vLocalPos - uFalloffOffset;
+          float ca = cos(uFalloffOvalAngle);
+          float sa = sin(uFalloffOvalAngle);
+          vec2 rotPos = vec2(
+            ca * falloffPos.x - sa * falloffPos.y,
+            sa * falloffPos.x + ca * falloffPos.y
+          );
+          vec2 oval = max(abs(uFalloffOvalScale), vec2(1e-4));
+          rotPos /= oval;
+          float dist = length(rotPos);
+          float reach = max(uReachScale, 0.45);
+          float outerR = max(uOuterRadius * reach, 1e-4);
           float d = dist / outerR;
 
           float att = clamp(uAttenuation, 0.0, 1.0);
-          float b = clamp(uInnerRadius / outerR, 0.0, 1.0);
+          float b = clamp((uInnerRadius / max(uOuterRadius, 1e-4)) * clamp(uCorePulse, 0.55, 1.45), 0.0, 1.0);
           float cover = msaPointLightFalloff(
             d, b, att, uEdgeSoftness, uFalloffExponent, 0.5, 0.5
           );
@@ -515,6 +540,54 @@ export class LightMesh {
     this._lastEffectiveRim = this._getEffectiveRimSoftness();
     if (Math.abs((prevRim ?? -1) - this._lastEffectiveRim) > 0.004) {
       this._rebuildGeometryForRimChange();
+    }
+  }
+
+  /**
+   * Organic falloff deformation (candle glow): shift bright core, oval stretch, rotation.
+   * Defaults (0 offset, 1 oval, 0 angle) preserve circular point-light behaviour.
+   * @param {number} [offsetX=0]
+   * @param {number} [offsetY=0]
+   * @param {number} [ovalX=1]
+   * @param {number} [ovalY=1]
+   * @param {number} [angle=0]
+   */
+  setOrganicFalloff(offsetX = 0, offsetY = 0, ovalX = 1, ovalY = 1, angle = 0) {
+    const u = this.material?.uniforms;
+    if (!u) return;
+    if (u.uFalloffOffset?.value) {
+      u.uFalloffOffset.value.set(Number(offsetX) || 0, Number(offsetY) || 0);
+    }
+    if (u.uFalloffOvalScale?.value) {
+      u.uFalloffOvalScale.value.set(
+        Math.max(0.22, Number(ovalX) || 1),
+        Math.max(0.22, Number(ovalY) || 1),
+      );
+    }
+    if (u.uFalloffOvalAngle) {
+      u.uFalloffOvalAngle.value = Number(angle) || 0;
+    }
+  }
+
+  /** Reset organic falloff to a circular profile centred on the mesh origin. */
+  resetOrganicFalloff() {
+    this.setOrganicFalloff(0, 0, 1, 1, 0);
+    this.setPhotometricPulse(1, 1);
+  }
+
+  /**
+   * Runtime reach/core pulse without rebuilding mesh geometry (candle flicker breathe).
+   * @param {number} [reachScale=1]
+   * @param {number} [corePulse=1]
+   */
+  setPhotometricPulse(reachScale = 1, corePulse = 1) {
+    const u = this.material?.uniforms;
+    if (!u) return;
+    if (u.uReachScale) {
+      u.uReachScale.value = Math.max(0.45, Number(reachScale) || 1);
+    }
+    if (u.uCorePulse) {
+      u.uCorePulse.value = Math.max(0.55, Math.min(1.45, Number(corePulse) || 1));
     }
   }
 

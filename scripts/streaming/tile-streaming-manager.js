@@ -17,6 +17,9 @@ import { getTextureBudgetTracker } from '../assets/TextureBudgetTracker.js';
 import { estimateSceneMegapixels } from './texture-budget-policy.js';
 import { lodToDetailTier } from './streaming-detail-api.js';
 import { getVisibleStreamingCellKeys } from './vegetation-streaming-bridge.js';
+import { getGpuWorkScheduler } from './gpu-work-scheduler.js';
+import { getAdaptiveBudgetController } from './adaptive-budget-controller.js';
+import { noteRendererTextureSample } from '../core/texture-leak-probe.js';
 
 const log = createLogger('TileStreamingManager');
 
@@ -383,6 +386,12 @@ export class TileStreamingManager {
 
   /** Per-frame sync — call after camera update. */
   update() {
+    // Drain frame-paced GPU work first so deferred uploads commit even on frames
+    // where the streaming sync itself short-circuits.
+    try { getGpuWorkScheduler().tick(); } catch (_) {}
+    // Sample real GPU signals (internally throttled to ~1s) for self-adjustment.
+    try { getAdaptiveBudgetController().sample(); } catch (_) {}
+    try { noteRendererTextureSample(window.MapShine?.renderer); } catch (_) {}
     this._runStreamingSync(false);
   }
 
@@ -463,6 +472,15 @@ export class TileStreamingManager {
   _runStreamingSync(force = false) {
     if (!this._enabled) return;
     if (this._grids.size === 0 && this._regionGrids.size === 0) return;
+
+    // Forced syncs run while a transition curtain hides the canvas (level change,
+    // prefetch). Commit all paced GPU work immediately so cells are ready when the
+    // curtain lifts, instead of trickling in over visible frames.
+    if (force) {
+      const gov = getGpuWorkScheduler();
+      gov.requestFlush();
+      gov.tick();
+    }
 
     this._updatePanState();
     const padding = this.getViewPaddingOptions();
@@ -808,6 +826,7 @@ export class TileStreamingManager {
     this._grids.clear();
     for (const grid of this._regionGrids.values()) grid.dispose();
     this._regionGrids.clear();
+    try { getGpuWorkScheduler().clear(); } catch (_) {}
   }
 
   dispose() {

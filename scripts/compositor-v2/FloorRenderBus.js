@@ -305,6 +305,20 @@ export class FloorRenderBus {
   }
 
   /**
+   * Drop a bus tile albedo map and release its GPU texture + budget entry.
+   * @param {{ material?: import('three').Material|null }} entry
+   * @private
+   */
+  _clearBusTileAlbedoMap(entry) {
+    const tex = entry?.material?.map ?? null;
+    if (!tex?.isTexture) return;
+    try { getTextureBudgetTracker().unregister(tex); } catch (_) {}
+    entry.material.map = null;
+    try { tex.dispose?.(); } catch (_) {}
+    entry.material.needsUpdate = true;
+  }
+
+  /**
    * Mark a bus tile as covered by the scene background streaming pyramid.
    * Keeps the tile mesh hidden — never loads a full-resolution albedo fallback.
    * @param {string} tileId
@@ -316,10 +330,7 @@ export class FloorRenderBus {
     entry.mapShineStreamedRegion = true;
     entry.mapShineBackgroundStreamServed = true;
     if (entry.mesh) entry.mesh.visible = false;
-    if (entry.material?.map) {
-      entry.material.map = null;
-      entry.material.needsUpdate = true;
-    }
+    this._clearBusTileAlbedoMap(entry);
   }
 
   /**
@@ -1343,10 +1354,7 @@ export class FloorRenderBus {
       if (entry.mesh) {
         entry.mesh.visible = false;
       }
-      if (entry.material) {
-        entry.material.map = null;
-        entry.material.needsUpdate = true;
-      }
+      this._clearBusTileAlbedoMap(entry);
       return true;
     }
 

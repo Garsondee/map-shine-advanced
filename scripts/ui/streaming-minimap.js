@@ -13,6 +13,9 @@ import {
 } from '../streaming/view-projection-service.js';
 import { getImageCellsForWorldView, imageCellToWorldBounds } from '../streaming/streamed-background-grid.js';
 import { getTileStreamingManager } from '../streaming/tile-streaming-manager.js';
+import { getGpuWorkScheduler } from '../streaming/gpu-work-scheduler.js';
+import { getAdaptiveBudgetController } from '../streaming/adaptive-budget-controller.js';
+import { getTextureLeakProbeReport } from '../core/texture-leak-probe.js';
 import { lodPixelSize, selectLodFromZoom } from '../streaming/streaming-grid.js';
 import { fetchSourceImageMeta, loadFallbackTexture } from '../streaming/texture-pyramid-builder.js';
 import { estimateSceneMegapixels } from '../streaming/texture-budget-policy.js';
@@ -159,6 +162,12 @@ export class StreamingMinimap {
     this._canvas = null;
     this._ctx = null;
     this._dashboardEl = null;
+    /** @type {HTMLElement|null} */
+    this._tuningBarEl = null;
+    /** @type {HTMLButtonElement|null} */
+    this._sharpenBtn = null;
+    /** @type {HTMLSpanElement|null} */
+    this._uploadLabel = null;
     this._enabled = false;
     this._width = 260;
     this._height = 260;
@@ -328,6 +337,7 @@ export class StreamingMinimap {
     ].join(';');
 
     body.appendChild(canvas);
+    body.appendChild(this._buildTuningBar());
     body.appendChild(dashboard);
     root.appendChild(header);
     root.appendChild(body);
@@ -338,6 +348,7 @@ export class StreamingMinimap {
     this._ctx = canvas.getContext('2d');
     this._dashboardEl = dashboard;
     if (!this._ctx) log.warn('StreamingMinimap: 2D context unavailable');
+    this._updateTuningBar();
 
     if (!this._dragInstalled) {
       this._installDrag(header);
@@ -366,6 +377,73 @@ export class StreamingMinimap {
       'cursor:pointer',
       'pointer-events:auto',
     ].join(';');
+  }
+
+  /**
+   * Persistent tuning bar (survives dashboard re-renders): focal LOD-0 sharpen
+   * toggle and per-frame GPU upload budget steppers. Wired to the GPU work
+   * governor via window.MapShine.streamingTuning semantics.
+   * @returns {HTMLElement}
+   * @private
+   */
+  _buildTuningBar() {
+    const bar = document.createElement('div');
+    bar.className = 'msa-sm-tuning';
+    bar.style.cssText = [
+      'display:flex', 'align-items:center', 'gap:4px', 'flex-wrap:wrap',
+      'font-size:9.5px', 'flex-shrink:0',
+    ].join(';');
+
+    const mkBtn = (label, title, onClick) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'msa-sm-btn';
+      b.textContent = label;
+      b.title = title;
+      b.style.cssText = this._buttonStyle(true);
+      b.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        try { onClick(); } catch (_) {}
+        this._updateTuningBar();
+      });
+      return b;
+    };
+
+    this._sharpenBtn = mkBtn('Sharpen: ?', 'Toggle focal LOD-0 sharpening (load finer than zoom on the focal cell)', () => {
+      const gov = getGpuWorkScheduler();
+      gov.focalSharpenEnabled = gov.focalSharpenEnabled === false;
+    });
+    const downBtn = mkBtn('Upload -', 'Reduce GPU upload budget per frame (gentler, fewer spikes)', () => {
+      const gov = getGpuWorkScheduler();
+      gov.setBaseFrameCreditMb(Math.max(8, gov.getBaseFrameCreditMb() - 8));
+    });
+    const upBtn = mkBtn('Upload +', 'Increase GPU upload budget per frame (faster tiles, more risk)', () => {
+      const gov = getGpuWorkScheduler();
+      gov.setBaseFrameCreditMb(Math.min(64, gov.getBaseFrameCreditMb() + 8));
+    });
+
+    this._uploadLabel = document.createElement('span');
+    this._uploadLabel.style.cssText = 'min-width:64px;color:#cbd5e1;';
+
+    bar.appendChild(this._sharpenBtn);
+    bar.appendChild(downBtn);
+    bar.appendChild(this._uploadLabel);
+    bar.appendChild(upBtn);
+    this._tuningBarEl = bar;
+    return bar;
+  }
+
+  /** Refresh tuning-bar labels from the live governor state. @private */
+  _updateTuningBar() {
+    try {
+      const gov = getGpuWorkScheduler();
+      if (this._sharpenBtn) {
+        this._sharpenBtn.textContent = `Sharpen: ${gov.focalSharpenEnabled === false ? 'OFF' : 'ON'}`;
+      }
+      if (this._uploadLabel) {
+        this._uploadLabel.textContent = `${gov.getBaseFrameCreditMb()} MB/f`;
+      }
+    } catch (_) {}
   }
 
   /**
@@ -534,6 +612,8 @@ export class StreamingMinimap {
     const el = this._dashboardEl;
     if (!el) return;
 
+    this._updateTuningBar();
+
     const sections = [];
 
     if (live?.error) {
@@ -584,6 +664,48 @@ export class StreamingMinimap {
       sections.push(this._sectionHtml('VRAM Budget', budgetLines, {
         tone: budget.overBudget ? 'warn' : 'ok',
       }));
+
+      // Memory governor: software budget vs live GPU textures, self-adjusting
+      // headroom, crash-adaptive degradation, and per-frame GPU work pacing.
+      try {
+        const gov = getGpuWorkScheduler();
+        const ctrl = getAdaptiveBudgetController();
+        const tracker = getTextureBudgetTracker();
+        const govStats = gov.getStats();
+        const adaptive = ctrl.getState();
+        const live = adaptive.liveTextureCount || (window.MapShine?.renderer?.info?.memory?.textures ?? 0);
+        const cooldownMs = Math.round(gov.lod0CooldownRemainingMs());
+        const govLines = [
+          this._kv('Live GPU textures', `${live} (peak ${adaptive.peakTextureCount ?? 0})`),
+          this._kv('Software budget', `policy ${tracker.getPolicyBudgetMB?.() ?? '?'} MB + bonus ${adaptive.adaptiveBonusMB ?? 0} MB`),
+          this._kv('Downscale', tracker.isDownscaleEngaged?.() ? 'engaged (0.5)' : 'off (1.0)'),
+          this._kv('Degradation', `level ${adaptive.degradationLevel ?? 0} (crashes ${adaptive.crashCount ?? 0})`),
+          this._kv('Throttle', `level ${govStats.throttleLevel ?? 0}`),
+          this._kv('Upload credit', `${gov.getBaseFrameCreditMb()} MB/frame`),
+          this._kv('Work last frame', `${govStats.committedLastFrame ?? 0} done / ${govStats.deferredLastFrame ?? 0} deferred`),
+          this._kv('Focal LOD-0 sharpen', gov.focalSharpenEnabled === false ? 'disabled' : 'enabled'),
+          this._kv('LOD-0 cooldown', cooldownMs > 0 ? `${(cooldownMs / 1000).toFixed(1)}s` : 'none'),
+        ].join('');
+        sections.push(this._sectionHtml('Memory Governor', govLines, {
+          tone: adaptive.degradationLevel > 0 || adaptive.growthAlert ? 'warn' : 'ok',
+        }));
+        if (adaptive.growthAlert) {
+          let leakDetail = 'Live GPU texture count is climbing well above the session floor.';
+          try {
+            const probe = getTextureLeakProbeReport(3);
+            const top = probe?.topSites?.[0];
+            if (top) {
+              const site = String(top.site ?? '');
+              const shortSite = site.length > 140 ? `${site.slice(0, 137)}...` : site;
+              leakDetail += ` Top site: ${top.cls} alloc=${top.allocated} gcLeaked=${top.gcLeaked} alive=${top.alive} — ${shortSite}`;
+            } else if (probe?.installed === false) {
+              leakDetail += ' Leak probe not installed — hard refresh after updating the module.';
+            }
+          } catch (_) {}
+          leakDetail += ' Run MapShine.textureLeakProbe.summary() in the console for the full table.';
+          sections.push(this._sectionHtml('Leak Watch', leakDetail, { tone: 'warn' }));
+        }
+      } catch (_) {}
 
       const mgr = report.streaming ?? {};
       const pool = mgr.decodePool ?? {};

@@ -13,6 +13,7 @@
 
 import { createLogger } from '../core/log.js';
 import { isWallDoorStateOnlyUpdate } from '../utils/wall-update-classify.js';
+import { markExternalGlTexture } from '../core/texture-leak-probe.js';
 import { getMaxTextureAnisotropy } from '../assets/texture-policies.js';
 import { hasV14NativeLevels, isDocMemberOfV14LevelSet } from './levels-scene-flags.js';
 import { elevationInBand } from '../ui/levels-editor/level-boundaries.js';
@@ -340,14 +341,13 @@ export class PixiContentLayerBridge {
 
       // Inject the PIXI GL texture handle into Three.js's property map.
       // Three.js will bind this handle directly during rendering — zero copies.
-      const properties = threeRenderer.properties.get(worldTexture);
-      properties.__webglTexture = glTexture.texture;
-      properties.__webglInit = true;
-      // Sync internal version so Three.js won't try to re-upload the canvas.
-      properties.__version = worldTexture.version;
+      markExternalGlTexture(worldTexture, threeRenderer, glTexture.texture);
 
       // Update image dimensions for compositor UV mapping.
-      worldTexture.image = { width: rtWidth, height: rtHeight };
+      if (!this._worldImageStub) this._worldImageStub = { width: 1, height: 1 };
+      this._worldImageStub.width = rtWidth;
+      this._worldImageStub.height = rtHeight;
+      worldTexture.image = this._worldImageStub;
       // CRITICAL: do NOT set needsUpdate — that would increment version and
       // trigger Three.js to overwrite our injected handle with the canvas data.
       worldTexture.needsUpdate = false;

@@ -238,7 +238,11 @@ function _deriveWarnings(report) {
   }
 
   if (report.budget.overBudget) {
-    warnings.push(`VRAM over budget (${report.budget.usedPct}%) — LOD may be coarse or cells evicted.`);
+    warnings.push(
+      `Map Shine software texture budget over target (${report.budget.usedPct}% of `
+      + `${report.budget.budgetMB} MB) — this is Map Shine's internal cap, NOT your physical GPU VRAM; `
+      + 'LOD may be coarse or cells evicted.',
+    );
   }
 
   if (report.streaming.backgroundGridCount > 0 && report.streaming.regionGridCount > 0) {
@@ -271,7 +275,12 @@ function _deriveWarnings(report) {
   for (const g of report.streaming.backgroundGrids) {
     const visCells = g.cells.filter((c) => c.visible && c.hasMap);
     if (!visCells.length || !Number.isFinite(targetLod)) continue;
-    const finestVisible = Math.min(...visCells.map((c) => Number(c.lod) || 99));
+    // NB: use a finite check, not `|| 99` — LOD 0 is valid and falsy, which
+    // previously reported a fully-sharp (LOD 0) grid as "finest visible LOD 99".
+    const finestVisible = Math.min(...visCells.map((c) => {
+      const n = Number(c.lod);
+      return Number.isFinite(n) ? n : 99;
+    }));
     if (finestVisible > targetLod + 1) {
       warnings.push(`Background [${g.key}]: finest visible cell is LOD ${finestVisible}, target is LOD ${targetLod}.`);
     }

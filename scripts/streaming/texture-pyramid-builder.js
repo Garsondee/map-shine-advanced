@@ -66,6 +66,45 @@ export function getTileTextureCacheLimit() {
 
 
 /**
+ * @returns {number} Decoded pyramid tile textures currently held in the RAM cache.
+ */
+export function getTileTextureCacheSize() {
+  return _tileTextureCache.size;
+}
+
+/**
+ * Compare pyramid RAM cache entries against live scene-graph texture references.
+ * `alsoOnMesh` > 0 means adoptPyramidTileTexture() was skipped after decode.
+ *
+ * @param {Set<object>|null|undefined} sceneTextures
+ * @returns {{ size: number, limit: number, generation: number, inCacheOnly: number, alsoOnMesh: number, cacheOnlySample: string[] }}
+ */
+export function auditPyramidTextureCache(sceneTextures = null) {
+  let inCacheOnly = 0;
+  let alsoOnMesh = 0;
+  /** @type {string[]} */
+  const cacheOnlySample = [];
+  for (const [key, tex] of _tileTextureCache) {
+    if (sceneTextures?.has(tex)) {
+      alsoOnMesh += 1;
+    } else {
+      inCacheOnly += 1;
+      if (cacheOnlySample.length < 12) cacheOnlySample.push(key);
+    }
+  }
+  return {
+    size: _tileTextureCache.size,
+    limit: _maxTileTextureCache,
+    generation: _cacheGeneration,
+    inCacheOnly,
+    alsoOnMesh,
+    cacheOnlySample,
+  };
+}
+
+
+
+/**
  * @returns {number}
  */
 export function getSourceBlobCacheLimit() {
@@ -593,7 +632,29 @@ function _trimTileTextureCache(exceptKey = null) {
 
 /**
 
- * Release a pyramid tile texture from the in-memory cache (e.g. when a cell is culled).
+ * Remove a decoded tile from the LRU cache without disposing it — call when a cell
+
+ * mesh takes ownership so cache eviction cannot destroy a live albedo map.
+
+ * @param {import('three').Texture|null|undefined} tex
+
+ */
+
+export function adoptPyramidTileTexture(tex) {
+
+  const key = tex?.userData?.mapShineStreamingTileKey;
+
+  if (!key) return;
+
+  if (_tileTextureCache.get(key) === tex) _tileTextureCache.delete(key);
+
+}
+
+
+
+/**
+
+ * Release a pyramid tile texture (cache entry + GPU object).
 
  * @param {import('three').Texture|null|undefined} tex
 
@@ -601,19 +662,11 @@ function _trimTileTextureCache(exceptKey = null) {
 
 export function releasePyramidTileTexture(tex) {
 
-  const key = tex?.userData?.mapShineStreamingTileKey;
+  if (!tex) return;
 
-  if (!key) return;
+  adoptPyramidTileTexture(tex);
 
-  const cached = _tileTextureCache.get(key);
-
-  if (cached === tex) {
-
-    _tileTextureCache.delete(key);
-
-    try { tex.dispose?.(); } catch (_) {}
-
-  }
+  try { tex.dispose?.(); } catch (_) {}
 
 }
 

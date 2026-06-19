@@ -1268,6 +1268,8 @@ export class FogOfWarEffectV2 {
   _createVisionRenderTarget() {
     const THREE = window.THREE;
     this._disposeVisionDoorSeamResources(THREE);
+    try { this.visionRenderTarget?.dispose(); } catch (_) {}
+    this.visionRenderTarget = null;
     const { width, height } = this.sceneRect;
     
     // Use a reasonable resolution (can be lower than scene for performance)

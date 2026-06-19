@@ -210,17 +210,21 @@ export class FoundryFogBridge {
       this[textureKey] = threeTexture;
     }
     
-    // Always update the WebGL texture handle (it may change when PIXI re-renders)
-    // This is the key fix - we update the handle every frame
+    // Always update the WebGL texture handle (it may change when PIXI re-renders).
+    // Sync renderer properties so three.js does not allocate a duplicate GPU
+    // texture when this wrapper is bound (same pattern as pixi-content-layer-bridge).
+    const width = baseTexture.realWidth || baseTexture.width || 1;
+    const height = baseTexture.realHeight || baseTexture.height || 1;
+    if (!this._pixiImageStub) this._pixiImageStub = { width: 1, height: 1 };
+    this._pixiImageStub.width = width;
+    this._pixiImageStub.height = height;
+    threeTexture.image = this._pixiImageStub;
+    threeTexture.needsUpdate = false;
+
     const properties = this.renderer.properties.get(threeTexture);
     properties.__webglTexture = currentGLTexture;
     properties.__webglInit = true;
-    
-    // Update dimensions
-    const width = baseTexture.realWidth || baseTexture.width || 1;
-    const height = baseTexture.realHeight || baseTexture.height || 1;
-    threeTexture.image = { width, height };
-    threeTexture.needsUpdate = false; // Don't re-upload
+    properties.__version = threeTexture.version;
     
     // Track for debugging
     this[lastGLKey] = currentGLTexture;

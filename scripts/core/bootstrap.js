@@ -45,7 +45,15 @@ export async function bootstrap(options = {}) {
     // Step 1: Load three.js (bundled from node_modules via build script)
     logger.info('Loading three.js...');
     const THREE = await import('../vendor/three/three.custom.js');
-    window.THREE = THREE; // Expose globally for debugging
+    // ES module namespaces are frozen — expose a mutable shallow copy for app code,
+    // then install the leak probe against that copy (and GL createTexture hooks).
+    window.THREE = { ...THREE };
+    try {
+      const { installTextureLeakProbe } = await import('./texture-leak-probe.js');
+      installTextureLeakProbe(window.THREE);
+    } catch (probeErr) {
+      logger.warn('Texture leak probe install failed (continuing):', probeErr);
+    }
     logger.info(`three.js r${THREE.REVISION} loaded`);
 
     // Step 2: Detect GPU capabilities

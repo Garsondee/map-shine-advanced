@@ -1481,7 +1481,9 @@ export class LightingEffectV2 {
   endStackedLightBuffer() {
     this._stackedLightActive = false;
     this._stackedLightLayerCount = 0;
-    this._perFloorLightSnapshotRts.clear();
+    // Keep _perFloorLightSnapshotRts entries alive across frames — they are reused
+    // by _snapshotLightRtForFloor(). Clearing without dispose() was leaking one
+    // WebGLRenderTarget per frame (~570/session in crash reports).
   }
 
   /**

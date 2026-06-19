@@ -18,6 +18,11 @@ import { createLogger } from '../core/log.js';
 
 const log = createLogger('TextureBudgetTracker');
 
+/** Once downscale engages, it only releases below (threshold - margin) — anti-flap. */
+const DOWNSCALE_RELEASE_MARGIN = 0.15;
+/** Minimum time downscale must stay engaged before it may release (ms). */
+const DOWNSCALE_MIN_DWELL_MS = 4000;
+
 /**
  * Estimate bytes for a WebGLRenderTarget or texture given its dimensions and format.
  * Defaults to RGBA HalfFloat (8 bytes/pixel) for render targets, RGBA UByte (4 bytes/pixel)
@@ -67,8 +72,20 @@ export class TextureBudgetTracker {
     /** @type {number} Total tracked bytes */
     this._usedBytes = 0;
 
-    /** @type {number} Budget ceiling in bytes */
+    /** @type {number} Effective budget ceiling in bytes (policy base + adaptive bonus) */
     this.budgetBytes = Math.max(1, (options.budgetMB ?? 512)) * 1024 * 1024;
+
+    /** @type {number} Policy-derived base budget (before adaptive bonus). */
+    this._policyBudgetBytes = this.budgetBytes;
+
+    /** @type {number} Extra budget granted by the adaptive controller on stable high-VRAM GPUs. */
+    this._adaptiveBonusBytes = 0;
+
+    /** @type {boolean} Sticky downscale state (hysteresis). */
+    this._downscaleEngaged = false;
+
+    /** @type {number} performance.now() of the last downscale state change. */
+    this._lastDownscaleChangeMs = 0;
 
     /** @type {number} Fraction at which eviction triggers (default 0.8 = 80%) */
     this.evictThreshold = options.evictThreshold ?? 0.8;
@@ -115,7 +132,8 @@ export class TextureBudgetTracker {
    */
   configureFromPolicy(policy) {
     if (!policy) return;
-    this.budgetBytes = Math.max(64, policy.budgetMB ?? 512) * 1024 * 1024;
+    this._policyBudgetBytes = Math.max(64, policy.budgetMB ?? 512) * 1024 * 1024;
+    this._recomputeBudget();
     this.cellSize = policy.cellSize ?? this.cellSize;
     this.maxLod = policy.maxLod ?? this.maxLod;
     this.maskResolutionScale = policy.maskResolutionScale ?? 1.0;
@@ -127,6 +145,34 @@ export class TextureBudgetTracker {
       `TextureBudgetTracker configured — ${(this.budgetBytes / 1024 / 1024).toFixed(0)} MB (${this.budgetReason}), `
       + `cell=${this.cellSize}, maskScale=${this.maskResolutionScale.toFixed(2)}`,
     );
+  }
+
+  /** @private */
+  _recomputeBudget() {
+    this.budgetBytes = Math.max(64 * 1024 * 1024, this._policyBudgetBytes + this._adaptiveBonusBytes);
+  }
+
+  /**
+   * Grant (or clear) extra budget headroom on top of the policy base. The adaptive
+   * controller raises this on stable high-VRAM GPUs so the software cap stops
+   * forcing downscale churn, and drops it to 0 on crash / unexpected growth.
+   * @param {number} mb
+   */
+  setAdaptiveBonusMB(mb) {
+    const bytes = Math.max(0, Number(mb) || 0) * 1024 * 1024;
+    if (bytes === this._adaptiveBonusBytes) return;
+    this._adaptiveBonusBytes = bytes;
+    this._recomputeBudget();
+  }
+
+  /** @returns {number} */
+  getAdaptiveBonusMB() {
+    return Math.round(this._adaptiveBonusBytes / (1024 * 1024));
+  }
+
+  /** @returns {number} */
+  getPolicyBudgetMB() {
+    return Math.round(this._policyBudgetBytes / (1024 * 1024));
   }
 
   /**
@@ -293,12 +339,38 @@ export class TextureBudgetTracker {
   }
 
   /**
-   * P5-07: Returns 0.5 when over the downscale threshold, 1.0 otherwise.
-   * Callers use this to halve visual mask resolution when VRAM is tight.
+   * P5-07: Returns 0.5 when VRAM is tight, 1.0 otherwise — used to halve mask /
+   * tile-albedo resolution under pressure.
+   *
+   * Hysteresis: engages immediately at `downscaleThreshold` (protective), but only
+   * releases once usage falls below `threshold - DOWNSCALE_RELEASE_MARGIN` AND it
+   * has been engaged at least DOWNSCALE_MIN_DWELL_MS. This stops the 1.0<->0.5
+   * oscillation that repeatedly purged + rebuilt masks at ~80% — a GPU work spike
+   * right in the danger zone.
    * @returns {0.5|1.0}
    */
   getDownscaleFactor() {
-    return this.getUsedFraction() >= this.downscaleThreshold ? 0.5 : 1.0;
+    const frac = this.getUsedFraction();
+    const now = performance.now();
+    if (!this._downscaleEngaged) {
+      if (frac >= this.downscaleThreshold) {
+        this._downscaleEngaged = true;
+        this._lastDownscaleChangeMs = now;
+      }
+    } else {
+      const releaseAt = Math.max(0.4, this.downscaleThreshold - DOWNSCALE_RELEASE_MARGIN);
+      const dwellOk = (now - this._lastDownscaleChangeMs) >= DOWNSCALE_MIN_DWELL_MS;
+      if (frac <= releaseAt && dwellOk) {
+        this._downscaleEngaged = false;
+        this._lastDownscaleChangeMs = now;
+      }
+    }
+    return this._downscaleEngaged ? 0.5 : 1.0;
+  }
+
+  /** @returns {boolean} Current sticky downscale state (for telemetry/UI). */
+  isDownscaleEngaged() {
+    return this._downscaleEngaged;
   }
 
   /**
@@ -381,6 +453,20 @@ export class TextureBudgetTracker {
       breakdown[entry.source] = (breakdown[entry.source] ?? 0) + entry.sizeBytes;
     }
     return breakdown;
+  }
+
+  /**
+   * Returns tracked entry counts grouped by source category (for crash diagnostics).
+   * @returns {Record<string, number>}
+   */
+  getSourceEntryCounts() {
+    /** @type {Record<string, number>} */
+    const counts = {};
+    for (const entry of this._entries.values()) {
+      const src = entry.source ?? 'other';
+      counts[src] = (counts[src] ?? 0) + 1;
+    }
+    return counts;
   }
 
   /**

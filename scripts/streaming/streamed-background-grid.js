@@ -11,6 +11,7 @@ import {
   buildPyramidManifest,
   loadPyramidTileTexture,
   loadFallbackTexture,
+  adoptPyramidTileTexture,
   releasePyramidTileTexture,
   DECODE_PRIORITY,
   hashSourceKey,
@@ -21,6 +22,7 @@ import { loadImageTexture } from '../assets/image-texture-loader.js';
 import { getTextureBudgetTracker, estimateTextureBytes } from '../assets/TextureBudgetTracker.js';
 import { getCameraGroundCenter, getSceneRegionFromFoundryData } from './view-projection-service.js';
 import { estimateSceneMegapixels } from './texture-budget-policy.js';
+import { getGpuWorkScheduler, GPU_WORK_PRIORITY } from './gpu-work-scheduler.js';
 
 const log = createLogger('StreamedBackgroundGrid');
 
@@ -41,6 +43,16 @@ const FOCAL_RING = 0;
 const INNER_SHARP_RING_MAX = 2;
 /** Hard per-grid inflight cap — inner-ring bypass must not exceed this. */
 const GRID_INFLIGHT_HARD_CAP = 10;
+/**
+ * Largest focal ring permitted to load *finer* than the zoom-native LOD. Keeping
+ * this tiny (focal cell + immediate neighbors) prevents the whole frustum from
+ * jumping to LOD 0 — the burst that tripped GPU context loss.
+ */
+const FOCAL_SHARPEN_RING_MAX = 1;
+/** Only sharpen below zoom-native LOD when real VRAM headroom exists. */
+const FOCAL_SHARPEN_MAX_USED = 0.6;
+/** View must be settled (no pan / zoom / required-set change) this long to sharpen. */
+const FOCAL_SHARPEN_IDLE_MS = 350;
 
 /**
  * Integer renderOrder for streamed cells — fallbacks draw beneath resident tiles.
@@ -78,8 +90,9 @@ function disposeStreamingTexture(tex) {
   try {
     if (tex.userData?.mapShineStreamingTileKey) {
       releasePyramidTileTexture(tex);
+    } else {
+      tex.dispose();
     }
-    tex.dispose();
   } catch (_) {}
 }
 
@@ -255,6 +268,27 @@ export class StreamedBackgroundGrid {
     this._activeRequiredKeys = new Set();
     /** @type {Map<string, number>} */
     this._pendingUpgrades = new Map();
+    /** @type {number} performance.now() of the last view/zoom/required-set change. */
+    this._lastViewChangeMs = 0;
+  }
+
+  /**
+   * True when this grid may load a focal cell finer than the zoom-native LOD.
+   * All gates must pass: not panning, real VRAM headroom, view settled long
+   * enough, and not inside a post-crash LOD-0 cooldown.
+   * @param {number} used Current budget used fraction.
+   * @returns {boolean}
+   * @private
+   */
+  _canSharpenBelowNative(used) {
+    if (this._isPanning) return false;
+    if (used > FOCAL_SHARPEN_MAX_USED) return false;
+    try {
+      const gov = getGpuWorkScheduler();
+      if (gov.focalSharpenEnabled === false) return false;
+      if (!gov.isLod0Allowed()) return false;
+    } catch (_) {}
+    return (performance.now() - this._lastViewChangeMs) >= FOCAL_SHARPEN_IDLE_MS;
   }
 
   /** @private */
@@ -375,6 +409,10 @@ export class StreamedBackgroundGrid {
   _clampCellLodForBudget(cellLod, cell, focalCell) {
     if (cellLod > 0) return cellLod;
 
+    // Post-crash recovery: forbid LOD-0 (largest) uploads entirely until cooldown
+    // elapses, regardless of zoom — coarser but safe while the GPU settles.
+    try { if (!getGpuWorkScheduler().isLod0Allowed()) return 1; } catch (_) {}
+
     const ring = this._cellFrustumRing(cell, focalCell);
     const used = getTextureBudgetTracker().getUsedFraction();
     // Frustum core may always decode LOD 0 while under the hard budget cap.
@@ -427,14 +465,13 @@ export class StreamedBackgroundGrid {
     // At moderate zoom-out on 1× displays, zoom-native LOD is already correct.
     if (native >= 2) return native;
     if (used > 1.0) return Math.min(this._maxLod, native + (ring === FOCAL_RING ? 1 : 0));
-    if (native >= 1) {
-      if (used <= 0.55 && ring === FOCAL_RING) return 0;
-      if (used <= 0.99 && ring <= INNER_SHARP_RING_MAX) return 0;
-      return native;
+    // Zoom-native LOD is the ceiling: never load *finer* than the zoom requires
+    // across the frustum. Only a tiny focal ring may sharpen one level finer, and
+    // only when idle + headroom + no post-crash cooldown (see _canSharpenBelowNative).
+    // This is the fix for the whole-frustum LOD-0 jump that tripped context loss.
+    if (ring <= FOCAL_SHARPEN_RING_MAX && this._canSharpenBelowNative(used)) {
+      return Math.max(0, native - 1);
     }
-    if (used <= 0.55) return 0;
-    if (ring === FOCAL_RING) return 0;
-    if (used <= 0.99) return Math.max(0, native - (ring <= 1 ? 1 : 0));
     return native;
   }
 
@@ -491,7 +528,8 @@ export class StreamedBackgroundGrid {
       return this._innerSharpLodTarget(native, ring, used, this._isPanning);
     }
 
-    if (used <= 0.55) return Math.max(0, native - 1);
+    // Outer rings: zoom-native LOD is the ceiling — only ever coarsen under VRAM
+    // pressure, never sharpen finer than the zoom needs.
     if (used <= 0.92) return native;
     if (ring === 2 && used <= 0.96) return native;
     if (used > 1.0) return Math.min(this._maxLod, native + (ring <= 3 ? 1 : 2));
@@ -1075,6 +1113,8 @@ export class StreamedBackgroundGrid {
         }
         if (!tex) return null;
 
+        adoptPyramidTileTexture(tex);
+
         const bounds = imageCellToWorldBounds(
           cellX,
           cellY,
@@ -1200,6 +1240,20 @@ export class StreamedBackgroundGrid {
         disposeStreamingTexture(tex);
         return;
       }
+
+      for (let i = 0; i < this._fallbackCellMeshes.length; i += 1) {
+        const existing = this._fallbackCellMeshes[i];
+        if (existing?.userData?.streamCellX !== cellX || existing?.userData?.streamCellY !== cellY) continue;
+        try {
+          const fbKey = existing.userData?.tileId;
+          if (fbKey) this._bus._unregisterStreamingMesh?.(fbKey);
+          disposeStreamingMesh(existing);
+        } catch (_) {}
+        this._fallbackCellMeshes.splice(i, 1);
+        break;
+      }
+
+      adoptPyramidTileTexture(tex);
 
       const bounds = imageCellToWorldBounds(
         cellX,
@@ -1395,6 +1449,7 @@ export class StreamedBackgroundGrid {
       return;
     }
     this._isPanning = options.isPanning === true;
+    if (this._isPanning) this._lastViewChangeMs = performance.now();
     const epoch = this._decodeEpoch;
     const effectiveLod = this._stabilizeLod(lod);
     const headroom = this._budgetHasHeadroom();
@@ -1410,6 +1465,9 @@ export class StreamedBackgroundGrid {
     this._activeRequiredKeys = requiredKeys;
     this._cancelStaleInflight(requiredKeys);
     const syncKey = buildViewSyncKey(effectiveLod, requiredKeys);
+    // Any change to the required set or LOD resets the idle timer that gates focal
+    // LOD-0 sharpening, so sharpening only happens once the view has settled.
+    if (syncKey !== this._syncKey) this._lastViewChangeMs = performance.now();
     const focal = resolveFocalImageCell(
       region,
       this._cellSize,
@@ -1491,8 +1549,9 @@ export class StreamedBackgroundGrid {
       ? Number(options.decodePriority)
       : DECODE_PRIORITY.STREAM;
     const fastSharpen = options.fastSharpen === true;
-    /** @type {{ cellX: number, cellY: number, upgradeToLod: number, epoch: number }|null} */
-    let scheduleUpgrade = null;
+    // True once ownership of the inflight key + decoded texture transfers to a
+    // governor commit. Until then this method is responsible for cleanup.
+    let handedOff = false;
     try {
       if (epoch !== this._decodeEpoch || !region) return;
       if (!this._activeRequiredKeys.has(key)) return;
@@ -1506,8 +1565,62 @@ export class StreamedBackgroundGrid {
         this._manifest.sourceHeight,
         { priority: decodePriority, fastSharpen },
       );
-      if (epoch !== this._decodeEpoch || !tex) return;
+      if (epoch !== this._decodeEpoch) {
+        disposeStreamingTexture(tex);
+        return;
+      }
+      if (!tex) return;
       if (!this._activeRequiredKeys.has(key)) {
+        disposeStreamingTexture(tex);
+        return;
+      }
+
+      // The decode is done; the GPU upload happens when the mesh is attached and
+      // first rendered. Pace that attach through the governor so many decodes
+      // completing in one frame don't all upload together and trip a context loss.
+      handedOff = true;
+      const costMb = estimateTextureBytes(
+        tex.image?.width ?? 256,
+        tex.image?.height ?? 256,
+        'ubyte',
+      ) / (1024 * 1024);
+      const priority = decodePriority === DECODE_PRIORITY.UPGRADE
+        ? GPU_WORK_PRIORITY.UPGRADE
+        : GPU_WORK_PRIORITY.COVERAGE;
+      getGpuWorkScheduler().enqueue({
+        id: `${this._key}:cellcommit:${key}`,
+        priority,
+        costMb,
+        commit: () => this._commitCellLoad(key, cellX, cellY, lod, epoch, tex, upgradeToLod),
+        onDrop: () => {
+          this._inflight.delete(key);
+          disposeStreamingTexture(tex);
+        },
+      });
+    } finally {
+      if (!handedOff) this._inflight.delete(key);
+    }
+  }
+
+  /**
+   * Commit a decoded cell texture to the scene (the paced GPU upload step).
+   * Runs from the GpuWorkScheduler; re-validates state captured at decode time.
+   * @param {string} key
+   * @param {number} cellX
+   * @param {number} cellY
+   * @param {number} lod
+   * @param {number} epoch
+   * @param {import('three').Texture} tex
+   * @param {number|null} upgradeToLod
+   * @private
+   */
+  _commitCellLoad(key, cellX, cellY, lod, epoch, tex, upgradeToLod) {
+    /** @type {{ cellX: number, cellY: number, upgradeToLod: number, epoch: number }|null} */
+    let scheduleUpgrade = null;
+    try {
+      const region = this._getSceneRegion();
+      if (epoch !== this._decodeEpoch || !region || !this._manifest
+        || !this._activeRequiredKeys.has(key)) {
         disposeStreamingTexture(tex);
         return;
       }
@@ -1517,6 +1630,8 @@ export class StreamedBackgroundGrid {
         this._bus._unregisterStreamingMesh?.(this._cellBusKey(key));
         disposeStreamingMesh(old.mesh);
       }
+
+      adoptPyramidTileTexture(tex);
 
       const bounds = imageCellToWorldBounds(
         cellX,
@@ -1676,6 +1791,7 @@ export class StreamedBackgroundGrid {
   /** Abort queued decodes without disposing resident GPU cells (floor transition). */
   pauseDecodeWork() {
     this._decodeEpoch += 1;
+    try { getGpuWorkScheduler().cancelByPrefix(`${this._key}:cellcommit:`); } catch (_) {}
     this._inflight?.clear?.();
     this._inflightFallback?.clear?.();
     this._pendingUpgrades?.clear?.();
@@ -1822,6 +1938,7 @@ export class StreamedBackgroundGrid {
 
   dispose() {
     this._decodeEpoch += 1;
+    try { getGpuWorkScheduler().cancelByPrefix(`${this._key}:cellcommit:`); } catch (_) {}
     for (const [cellKey, entry] of this._cells) {
       try {
         this._bus._unregisterStreamingMesh?.(this._cellBusKey(cellKey));
@@ -2389,6 +2506,7 @@ export class StreamedRegionGrid {
   /** @private */
   async _loadCell(cellX, cellY, lod, epoch) {
     const key = `${cellX},${cellY}`;
+    let handedOff = false;
     try {
       if (epoch !== this._decodeEpoch) return;
       if (!this._activeRequiredKeys.has(key)) return;
@@ -2402,8 +2520,52 @@ export class StreamedRegionGrid {
         this._manifest.sourceHeight,
         { priority: DECODE_PRIORITY.STREAM },
       );
-      if (epoch !== this._decodeEpoch || !tex || !this._region) return;
+      if (epoch !== this._decodeEpoch || !this._region) {
+        disposeStreamingTexture(tex);
+        return;
+      }
+      if (!tex) return;
       if (!this._activeRequiredKeys.has(key)) {
+        disposeStreamingTexture(tex);
+        return;
+      }
+
+      // Pace the GPU upload (mesh attach) through the governor.
+      handedOff = true;
+      const costMb = estimateTextureBytes(
+        tex.image?.width ?? 256,
+        tex.image?.height ?? 256,
+        'ubyte',
+      ) / (1024 * 1024);
+      getGpuWorkScheduler().enqueue({
+        id: `${this._key}:cellcommit:${key}`,
+        priority: GPU_WORK_PRIORITY.COVERAGE,
+        costMb,
+        commit: () => this._commitCellLoad(key, cellX, cellY, lod, epoch, tex),
+        onDrop: () => {
+          this._inflight.delete(key);
+          disposeStreamingTexture(tex);
+        },
+      });
+    } finally {
+      if (!handedOff) this._inflight.delete(key);
+    }
+  }
+
+  /**
+   * Commit a decoded region-cell texture to the scene (paced GPU upload step).
+   * @param {string} key
+   * @param {number} cellX
+   * @param {number} cellY
+   * @param {number} lod
+   * @param {number} epoch
+   * @param {import('three').Texture} tex
+   * @private
+   */
+  _commitCellLoad(key, cellX, cellY, lod, epoch, tex) {
+    try {
+      if (epoch !== this._decodeEpoch || !this._region || !this._manifest
+        || !this._activeRequiredKeys.has(key)) {
         disposeStreamingTexture(tex);
         return;
       }
@@ -2412,6 +2574,8 @@ export class StreamedRegionGrid {
       if (old?.mesh) {
         this._disposeCell(key, old);
       }
+
+      adoptPyramidTileTexture(tex);
 
       const bounds = imageCellToWorldBounds(
         cellX,
@@ -2723,6 +2887,7 @@ export class StreamedRegionGrid {
   /** Abort queued decodes without disposing resident GPU cells (floor transition). */
   pauseDecodeWork() {
     this._decodeEpoch += 1;
+    try { getGpuWorkScheduler().cancelByPrefix(`${this._key}:cellcommit:`); } catch (_) {}
     this._inflight?.clear?.();
     this._activeRequiredKeys?.clear?.();
     this._syncKey = '';
@@ -2747,6 +2912,7 @@ export class StreamedRegionGrid {
 
   dispose() {
     this._decodeEpoch += 1;
+    try { getGpuWorkScheduler().cancelByPrefix(`${this._key}:cellcommit:`); } catch (_) {}
     for (const [key, entry] of this._cells) {
       try {
         this._bus._unregisterStreamingMesh?.(`${this._key}:${key}`);

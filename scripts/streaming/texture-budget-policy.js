@@ -149,13 +149,28 @@ export function reconfigureTextureBudgetForScene(renderer = null) {
 
   // Masks composed before the scene-sized policy was known stay cached at their
   // original (often full-res) size. When the mask resolution tightens, purge the
-  // mask caches so they rebuild at the smaller size next compose.
+  // mask caches so they rebuild at the smaller size next compose. Route the purge
+  // (and the implicit rebuild on the next compose) through the GPU work governor
+  // so it is serialized against streaming uploads rather than spiking in the same
+  // frame and tripping a context loss.
   const newMaskScale = Number(policy?.maskResolutionScale) || 1.0;
   if (newMaskScale < prevMaskScale - 0.01) {
-    const compositor = window.MapShine?.gpuSceneMaskCompositor
-      ?? window.MapShine?.sceneComposer?._sceneMaskCompositor
-      ?? null;
-    try { compositor?.purgeAllFloorCaches?.(); } catch (_) {}
+    const purge = () => {
+      const compositor = window.MapShine?.gpuSceneMaskCompositor
+        ?? window.MapShine?.sceneComposer?._sceneMaskCompositor
+        ?? null;
+      try { compositor?.purgeAllFloorCaches?.(); } catch (_) {}
+    };
+    void import('./gpu-work-scheduler.js')
+      .then(({ getGpuWorkScheduler, GPU_WORK_PRIORITY }) => {
+        getGpuWorkScheduler().enqueue({
+          id: 'mask:purgeAllFloorCaches',
+          priority: GPU_WORK_PRIORITY.MASK,
+          costMb: 0,
+          commit: purge,
+        });
+      })
+      .catch(() => { purge(); });
   }
   return policy;
 }

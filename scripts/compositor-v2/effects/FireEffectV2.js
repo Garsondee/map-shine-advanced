@@ -5229,8 +5229,15 @@ export class FireEffectV2 {
       if (sys.emitter && br) {
         br.remove(sys.emitter);
       }
-      // Dispose material.
       try { sys.material?.dispose(); } catch (_) {}
+      try { sys.dispose?.(); } catch (_) {}
+    }
+    if (br) {
+      for (const batch of br.batches ?? []) {
+        try { batch.material?.dispose?.(); } catch (_) {}
+        try { batch.dispose?.(); } catch (_) {}
+      }
+      try { br.removeFromParent?.(); } catch (_) {}
     }
     state.systems.length = 0;
     state.emberSystems.length = 0;

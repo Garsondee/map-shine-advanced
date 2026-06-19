@@ -854,8 +854,7 @@ export class GpuSceneMaskCompositor {
     // keeps returning stale/cleared pixels and mergeMasks file textures never bind.
     const producedMaskIds = new Set(compositeMasks.map((m) => m.id ?? m.type));
     if (!producedMaskIds.has('outdoors') && floorTargets.has('outdoors')) {
-      const oRt = floorTargets.get('outdoors');
-      try { oRt?.dispose?.(); } catch (_) {}
+      this._disposeMaskRenderTarget(floorTargets.get('outdoors'));
       floorTargets.delete('outdoors');
     }
 
@@ -1918,7 +1917,7 @@ export class GpuSceneMaskCompositor {
           if (!this._waterPatchTempRt ||
               this._waterPatchTempRt.width !== w ||
               this._waterPatchTempRt.height !== h) {
-            this._waterPatchTempRt?.dispose();
+            this._disposeMaskRenderTarget(this._waterPatchTempRt);
             this._waterPatchTempRt = this._createRenderTarget(THREE, w, h, 'waterPatchTemp');
           }
 
@@ -2024,7 +2023,7 @@ export class GpuSceneMaskCompositor {
 
     // (Re)create RT if resolution changed.
     if (!this._floorIdTarget || this._floorIdTarget.width !== outW || this._floorIdTarget.height !== outH) {
-      this._floorIdTarget?.dispose();
+      this._disposeMaskRenderTarget(this._floorIdTarget);
       this._floorIdTarget = new THREE.WebGLRenderTarget(outW, outH, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
@@ -3860,7 +3859,7 @@ export class GpuSceneMaskCompositor {
     const h = refRt.height;
     let packRt = floorTargets.get('particlePack');
     if (!packRt || packRt.width !== w || packRt.height !== h) {
-      packRt?.dispose?.();
+      this._disposeMaskRenderTarget(packRt);
       packRt = this._createRenderTarget(THREE, w, h, 'particlePack');
       floorTargets.set('particlePack', packRt);
     }
@@ -4678,7 +4677,7 @@ export class GpuSceneMaskCompositor {
       // Remove any stale skyReach so consumers fall back to neutral.
       const staleRt = floorTargets?.get(SKY_REACH_ID);
       if (staleRt) {
-        try { staleRt.dispose(); } catch (_) {}
+        this._disposeMaskRenderTarget(staleRt);
         floorTargets.delete(SKY_REACH_ID);
         this._floorCacheVersion++;
       }
@@ -4690,7 +4689,7 @@ export class GpuSceneMaskCompositor {
     const outH = outdoorsRt.height;
     let skyRt = floorTargets.get(SKY_REACH_ID);
     if (!skyRt || skyRt.width !== outW || skyRt.height !== outH) {
-      try { skyRt?.dispose(); } catch (_) {}
+      this._disposeMaskRenderTarget(skyRt);
       skyRt = this._createRenderTarget(THREE, outW, outH, SKY_REACH_ID);
       skyRt.texture.colorSpace = THREE.NoColorSpace ?? '';
       floorTargets.set(SKY_REACH_ID, skyRt);

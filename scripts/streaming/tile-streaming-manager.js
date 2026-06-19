@@ -23,6 +23,16 @@ import { noteRendererTextureSample } from '../core/texture-leak-probe.js';
 
 const log = createLogger('TileStreamingManager');
 
+/** @param {string} key */
+function isBackgroundStreamingGridKey(key) {
+  return /^__bg_image__$|^__bg_image__[1-9]\d*$/.test(String(key || ''));
+}
+
+/** @param {string} key */
+function isForegroundStreamingGridKey(key) {
+  return /^__fg_image__$|^__fg_image__[1-9]\d*$/.test(String(key || ''));
+}
+
 /** Ground speed (world units/sec) above which pan mode activates. */
 const PAN_SPEED_THRESHOLD = 800;
 /** Consecutive fast frames before pan mode engages. */
@@ -31,6 +41,8 @@ const PAN_FRAMES_REQUIRED = 2;
 const PAN_STOP_MS = 200;
 /** Pause tile decode while floor visibility / camera projection stabilizes. */
 const FLOOR_TRANSITION_PAUSE_MS = 500;
+/** Longer pause when multiple background pyramids are registered (multi-floor). */
+const FLOOR_TRANSITION_PAUSE_MULTI_MS = 900;
 /** Max concurrent cell loads across all streaming grids (144+ MP scenes). */
 const GLOBAL_INFLIGHT_CAP_HUGE = 10;
 const GLOBAL_INFLIGHT_CAP_DEFAULT = 14;
@@ -141,6 +153,9 @@ export class TileStreamingManager {
    */
   _regionRedundantWithBackground(region, tileSrc, isOverhead = false, imageMeta = null) {
     if (!this._grids.size || !region || !tileSrc) return false;
+    // Overhead tiles must always keep their own region stream — they render in
+    // FLOOR_OVERHEAD, not the background band, even when the source image matches.
+    if (isOverhead) return false;
 
     const normTile = normalizeTextureUrl(tileSrc);
     let rw = 0;
@@ -159,25 +174,37 @@ export class TileStreamingManager {
     const imgW = Number(imageMeta?.width) || 0;
     const imgH = Number(imageMeta?.height) || 0;
 
-    for (const bgGrid of this._grids.values()) {
+    for (const [gridKey, bgGrid] of this._grids.entries()) {
+      if (!isBackgroundStreamingGridKey(gridKey)) continue;
       const manifest = bgGrid?._manifest;
 
-      // Same image dimensions as an active background pyramid — one grid is enough.
-      // Tile vs scene background URLs often differ (relative vs absolute paths).
+      // Same image dimensions as an active background pyramid — one grid is enough
+      // for ground-layer tiles that cover most of the scene. Tile vs scene
+      // background URLs often differ (relative vs absolute paths).
       if (imgW > 0 && imgH > 0 && manifest
         && manifest.sourceWidth === imgW && manifest.sourceHeight === imgH) {
-        if (isOverhead && !fullCoverage) return false;
-        return true;
+        return fullCoverage;
       }
 
       const bgSrc = bgGrid?._src ?? '';
       if (!bgSrc || normalizeTextureUrl(bgSrc) !== normTile) continue;
 
-      if (isOverhead && !fullCoverage) return false;
       if (fullCoverage) return true;
     }
 
     return false;
+  }
+
+  /**
+   * Whether a bus-tile region is covered by an active background pyramid (not foreground).
+   * @param {{ minX: number, minY: number, maxX: number, maxY: number }} region
+   * @param {string} tileSrc
+   * @param {boolean} [isOverhead=false]
+   * @param {{ width?: number, height?: number }|null} [imageMeta]
+   * @returns {boolean}
+   */
+  isRegionRedundantWithBackground(region, tileSrc, isOverhead = false, imageMeta = null) {
+    return this._regionRedundantWithBackground(region, tileSrc, isOverhead, imageMeta);
   }
 
   /**
@@ -200,6 +227,7 @@ export class TileStreamingManager {
   _purgeRedundantRegionGrids(bgSrc, meta) {
     if (!meta) return;
     for (const [id, grid] of [...this._regionGrids.entries()]) {
+      if (grid._isOverhead) continue;
       const gridMeta = grid._manifest
         ? { width: grid._manifest.sourceWidth, height: grid._manifest.sourceHeight }
         : null;
@@ -207,7 +235,7 @@ export class TileStreamingManager {
         || this._regionRedundantWithBackground(
           grid._region,
           grid._src ?? bgSrc,
-          grid._isOverhead,
+          false,
           gridMeta ?? meta,
         );
       if (!redundant) continue;
@@ -227,7 +255,11 @@ export class TileStreamingManager {
     this._visibleMaxFloorIndex = Number.isFinite(Number(maxFloorIndex))
       ? Number(maxFloorIndex)
       : Infinity;
-    this._floorTransitionUntil = performance.now() + FLOOR_TRANSITION_PAUSE_MS;
+    const multiFloorBg = this._countVisibleBackgroundGrids() > 1;
+    const pauseMs = multiFloorBg
+      ? FLOOR_TRANSITION_PAUSE_MULTI_MS
+      : FLOOR_TRANSITION_PAUSE_MS;
+    this._floorTransitionUntil = performance.now() + pauseMs;
     this._lastViewRectSig = '';
     this._lastStreamLod = 99;
 
@@ -237,19 +269,40 @@ export class TileStreamingManager {
     this._idleWarmScheduled = false;
 
     for (const grid of this._grids.values()) {
-      grid.pauseDecodeWork?.();
+      if (grid._isFloorVisible?.()) {
+        grid.pauseDecodeWork?.();
+      } else {
+        grid.suspendForHiddenFloor?.();
+      }
     }
     for (const grid of this._regionGrids.values()) {
-      grid.pauseDecodeWork?.();
+      if (grid._isFloorVisible?.()) {
+        grid.pauseDecodeWork?.();
+      } else {
+        grid.suspendForHiddenFloor?.();
+      }
     }
     log.info(`Floor transition pause — visible floors 0–${this._visibleMaxFloorIndex}`);
   }
 
   /** @returns {number} @private */
+  _countVisibleBackgroundGrids() {
+    let n = 0;
+    for (const [key, grid] of this._grids.entries()) {
+      if (!isBackgroundStreamingGridKey(key)) continue;
+      if (grid._isFloorVisible?.()) n += 1;
+    }
+    return n;
+  }
+
+  /** @returns {number} @private */
   _globalInflightCap() {
-    return estimateSceneMegapixels() >= 144
+    const base = estimateSceneMegapixels() >= 144
       ? GLOBAL_INFLIGHT_CAP_HUGE
       : GLOBAL_INFLIGHT_CAP_DEFAULT;
+    const visibleBg = Math.max(1, this._countVisibleBackgroundGrids());
+    if (visibleBg <= 1) return base;
+    return Math.max(4, Math.floor(base / visibleBg));
   }
 
   /** @returns {number} @private */
@@ -376,9 +429,11 @@ export class TileStreamingManager {
    */
   _hasPendingCellWork(view, lod) {
     for (const grid of this._grids.values()) {
+      if (!grid._isFloorVisible?.()) continue;
       if (grid.hasPendingCellWork?.(view, lod)) return true;
     }
     for (const grid of this._regionGrids.values()) {
+      if (!grid._isFloorVisible?.()) continue;
       if (grid.hasPendingCellWork?.(view, lod)) return true;
     }
     return false;
@@ -387,6 +442,7 @@ export class TileStreamingManager {
   /** @private */
   _hasSharpenBacklog(view, lod) {
     for (const grid of this._grids.values()) {
+      if (!grid._isFloorVisible?.()) continue;
       if (grid.hasSharpenBacklog?.(view, lod)) return true;
     }
     return false;
@@ -500,10 +556,25 @@ export class TileStreamingManager {
     if (inFloorTransition || !viewPlausible) {
       if (viewPlausible) {
         for (const grid of this._grids.values()) {
+          if (!grid._isFloorVisible?.()) {
+            grid.suspendForHiddenFloor?.();
+            continue;
+          }
           grid.reconcileVisibility?.(view);
         }
         for (const grid of this._regionGrids.values()) {
+          if (!grid._isFloorVisible?.()) {
+            grid.suspendForHiddenFloor?.();
+            continue;
+          }
           grid.reconcileVisibility?.(view);
+        }
+      } else {
+        for (const grid of this._grids.values()) {
+          if (!grid._isFloorVisible?.()) grid.suspendForHiddenFloor?.();
+        }
+        for (const grid of this._regionGrids.values()) {
+          if (!grid._isFloorVisible?.()) grid.suspendForHiddenFloor?.();
         }
       }
       return;
@@ -559,20 +630,52 @@ export class TileStreamingManager {
         }
       }
       if (viewChanged || force) this._lastViewRectSig = viewRectSig;
-      if (globalInflight < globalInflightCap) {
-        for (const grid of this._grids.values()) {
-          void grid.syncToView(view, lod, syncOptions);
+
+      const syncVisibleGrid = (grid) => {
+        if (!grid._isFloorVisible?.()) {
+          grid.suspendForHiddenFloor?.();
+          return;
+        }
+        void grid.syncToView(view, lod, syncOptions);
+      };
+
+      const atCap = globalInflight >= globalInflightCap;
+
+      // Foreground level art and overhead tile regions must not starve behind the
+      // full-scene background pyramid, which can monopolize the global inflight cap.
+      for (const [key, grid] of this._grids.entries()) {
+        if (!isForegroundStreamingGridKey(key)) continue;
+        syncVisibleGrid(grid);
+      }
+      for (const grid of this._regionGrids.values()) {
+        if (!grid._isOverhead) continue;
+        syncVisibleGrid(grid);
+      }
+
+      if (!atCap) {
+        for (const [key, grid] of this._grids.entries()) {
+          if (isForegroundStreamingGridKey(key)) continue;
+          syncVisibleGrid(grid);
         }
         for (const grid of this._regionGrids.values()) {
-          void grid.syncToView(view, lod, syncOptions);
+          if (grid._isOverhead) continue;
+          syncVisibleGrid(grid);
         }
       }
     }
 
     for (const grid of this._grids.values()) {
+      if (!grid._isFloorVisible?.()) {
+        grid.suspendForHiddenFloor?.();
+        continue;
+      }
       grid.reconcileVisibility?.(view);
     }
     for (const grid of this._regionGrids.values()) {
+      if (!grid._isFloorVisible?.()) {
+        grid.suspendForHiddenFloor?.();
+        continue;
+      }
       grid.reconcileVisibility?.(view);
     }
 
@@ -588,7 +691,7 @@ export class TileStreamingManager {
    * @param {number} floorIndex
    * @param {string} key
    */
-  async registerBackground(bus, src, fd, floorIndex, key) {
+  async registerBackground(bus, src, fd, floorIndex, key, options = {}) {
     if (!this._enabled || !bus || !src) return false;
 
     const meta = await fetchSourceImageMeta(src);
@@ -599,21 +702,43 @@ export class TileStreamingManager {
     }
 
     const grid = new StreamedBackgroundGrid(bus);
-    await grid.mount(src, fd, floorIndex, key);
+    await grid.mount(src, fd, floorIndex, key, options);
     if (!grid.isMounted()) {
       grid.dispose();
       log.warn(`Streaming background mount failed [${key}] ${meta.width}x${meta.height}`);
       return false;
     }
 
+    const prev = this._grids.get(key);
+    if (prev && prev !== grid) {
+      prev.dispose();
+      this._grids.delete(key);
+    }
     this._grids.set(key, grid);
     log.info(`Streaming background registered [${key}] ${meta.width}x${meta.height}`);
-    this._purgeRedundantRegionGrids(src, meta);
+    if (isBackgroundStreamingGridKey(key)) {
+      this._purgeRedundantRegionGrids(src, meta);
+    }
+    try { bus?.recoverWronglyBackgroundStreamServedTiles?.(); } catch (_) {}
     this._scheduleIdlePyramidWarm();
     this._lastViewRectSig = '';
     this._heldZoomLod = 99;
     this._runStreamingSync(true);
     return true;
+  }
+
+  /**
+   * Tear down one full-scene streaming grid (background or foreground).
+   * @param {string} key
+   */
+  unregisterGrid(key) {
+    const id = String(key || '');
+    if (!id) return;
+    const grid = this._grids.get(id);
+    if (!grid) return;
+    grid.dispose();
+    this._grids.delete(id);
+    this._lastViewRectSig = '';
   }
 
   /**
@@ -666,9 +791,11 @@ export class TileStreamingManager {
     const meta = await fetchSourceImageMeta(src);
     if (meta && options?.region
       && this._regionRedundantWithBackground(options.region, src, options.isOverhead, meta)) {
+      if (options.isOverhead) return false;
       if (this._regionGrids.has(tileId)) this.unregisterBusTile(tileId);
       try { bus?.markTileServedByBackgroundStream?.(tileId); } catch (_) {}
-      return true;
+      const entry = bus._tiles?.get?.(tileId);
+      return !!entry?.mapShineBackgroundStreamServed;
     }
 
     const existing = this._regionGrids.get(tileId);
@@ -718,9 +845,11 @@ export class TileStreamingManager {
 
     const region = options.region;
     if (region && this._regionRedundantWithBackground(region, src, options.isOverhead, meta)) {
+      if (options.isOverhead) return false;
       log.info(`Skipping redundant region stream [${tileId}] — same source as background grid`);
       try { bus?.markTileServedByBackgroundStream?.(tileId); } catch (_) {}
-      return true;
+      const entry = bus._tiles?.get?.(tileId);
+      return !!entry?.mapShineBackgroundStreamServed;
     }
 
     const grid = new StreamedRegionGrid(bus);
@@ -743,6 +872,13 @@ export class TileStreamingManager {
     }
 
     this._regionGrids.set(tileId, grid);
+    try {
+      const entry = bus._tiles?.get?.(tileId);
+      if (entry) {
+        entry.mapShineBackgroundStreamServed = false;
+        entry.mapShineStreamedRegion = true;
+      }
+    } catch (_) {}
     log.info(`Streaming bus tile registered [${tileId}] ${meta.width}x${meta.height}`);
     this._scheduleIdlePyramidWarm();
     return true;

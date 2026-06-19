@@ -286,6 +286,8 @@ export class StreamedBackgroundGrid {
     this._pendingUpgrades = new Map();
     /** @type {number} performance.now() of the last view/zoom/required-set change. */
     this._lastViewChangeMs = 0;
+    /** Base renderOrder for streamed cells (albedo or overhead band). */
+    this._tileRenderOrder = 0;
   }
 
   /**
@@ -692,6 +694,7 @@ export class StreamedBackgroundGrid {
    * @returns {boolean}
    */
   hasPendingCellWork(viewRect, lod) {
+    if (!this._isFloorVisible()) return false;
     const region = this._getSceneRegion();
     if (!this._manifest || !viewRect || !region) return false;
     const required = getImageCellsForWorldView(
@@ -891,6 +894,7 @@ export class StreamedBackgroundGrid {
    * @private
    */
   _scheduleRequiredCellLoads(required, effectiveLod, epoch, viewRect = null, requestedLod = effectiveLod, panStabilize = true) {
+    if (!this._isFloorVisible()) return;
     const budget = getTextureBudgetTracker();
     const region = this._getSceneRegion();
     const focal = region && this._manifest
@@ -1219,6 +1223,7 @@ export class StreamedBackgroundGrid {
    * @private
    */
   _ensureFallbackForRequired(required, fallbackLod = 3, options = {}) {
+    if (!this._isFloorVisible()) return;
     const isPanning = options.isPanning === true;
     const region = this._getSceneRegion();
     if (!region || !this._manifest || !this._scene || this._fallbackMesh) return;
@@ -1421,12 +1426,13 @@ export class StreamedBackgroundGrid {
    * @param {number} floorIndex
    * @param {string} key
    */
-  async mount(src, fd, floorIndex, key) {
+  async mount(src, fd, floorIndex, key, options = {}) {
     this.dispose();
     this._src = src;
     this._key = key;
     this._floorIndex = floorIndex;
     this._fd = fd;
+    this._tileRenderOrder = Number(options.renderOrderBase) || 0;
     this._sceneRegion = null;
     this._decodeEpoch += 1;
 
@@ -1502,6 +1508,10 @@ export class StreamedBackgroundGrid {
   async syncToView(viewRect, lod, options = {}) {
     const region = this._getSceneRegion();
     if (!this._manifest || !viewRect || !region) return;
+    if (!this._isFloorVisible()) {
+      this.suspendForHiddenFloor();
+      return;
+    }
     if (!intersectRects(viewRect, region)) {
       this._activeRequiredKeys.clear();
       this._cancelStaleInflight(new Set());
@@ -1793,7 +1803,7 @@ export class StreamedBackgroundGrid {
     mesh.scale.set(1, -1, 1);
     const z = GROUND_Z - 1 + floorIndex * 0.01 - (isFallback ? 0.001 : 0);
     mesh.position.set(centerX, centerY, z);
-    mesh.renderOrder = streamingCellRenderOrder(0, 0, isFallback);
+    mesh.renderOrder = streamingCellRenderOrder(this._tileRenderOrder, 0, isFallback);
     mesh.userData = { tileId: busKey, mapShineStreaming: true, mapShineStreamingFallback: isFallback };
     this._scene.add(mesh);
     this._bus._registerStreamingMesh?.(busKey, mesh, mat, floorIndex);
@@ -1825,7 +1835,7 @@ export class StreamedBackgroundGrid {
     mesh.scale.set(1, -1, 1);
     const z = GROUND_Z - 1 + this._floorIndex * 0.01 + streamingCellLodZOffset(lod, isFallback);
     mesh.position.set(centerX, centerY, z);
-    mesh.renderOrder = streamingCellRenderOrder(0, lod, isFallback);
+    mesh.renderOrder = streamingCellRenderOrder(this._tileRenderOrder, lod, isFallback);
     const busKey = this._cellBusKey(`${cellX},${cellY}`);
     mesh.userData = {
       mapShineStreaming: true,
@@ -1863,6 +1873,20 @@ export class StreamedBackgroundGrid {
     this._syncKey = '';
   }
 
+  /**
+   * Stop all decode work and release GPU cells when this floor is above the
+   * visible stack (e.g. switching from floor 1 down to floor 0).
+   */
+  suspendForHiddenFloor() {
+    if (this._isFloorVisible()) return;
+    this.pauseDecodeWork();
+    for (const [key, entry] of [...this._cells.entries()]) {
+      this._disposeCell(key, entry);
+    }
+    if (this._fallbackMesh) this._fallbackMesh.visible = false;
+    this._releaseFallbackCellMeshes();
+  }
+
   /** @returns {boolean} */
   isMounted() {
     return !!this._manifest;
@@ -1889,6 +1913,10 @@ export class StreamedBackgroundGrid {
   reconcileVisibility(viewRect) {
     const region = this._getSceneRegion();
     if (!this._manifest || !viewRect || !region) return;
+    if (!this._isFloorVisible()) {
+      this.suspendForHiddenFloor();
+      return;
+    }
     const required = getImageCellsForWorldView(
       viewRect,
       region,
@@ -2303,6 +2331,7 @@ export class StreamedRegionGrid {
    * @returns {boolean}
    */
   hasPendingCellWork(viewRect, lod) {
+    if (!this._isFloorVisible()) return false;
     if (!this._manifest || !viewRect || !this._region) return false;
     const effectiveLod = this._stabilizeLod(this._streamingLodTarget(lod));
     const required = getImageCellsForWorldView(
@@ -2410,6 +2439,10 @@ export class StreamedRegionGrid {
    */
   reconcileVisibility(viewRect) {
     if (!this._manifest || !viewRect || !this._region) return;
+    if (!this._isFloorVisible()) {
+      this.suspendForHiddenFloor();
+      return;
+    }
     const required = getImageCellsForWorldView(
       viewRect,
       this._region,
@@ -2503,11 +2536,7 @@ export class StreamedRegionGrid {
     if (!this._manifest || !viewRect || !this._region) return;
 
     if (!this._isFloorVisible()) {
-      this.pauseDecodeWork?.();
-      for (const [key, entry] of [...this._cells.entries()]) {
-        this._disposeCell(key, entry);
-      }
-      if (this._fallbackMesh) this._fallbackMesh.visible = false;
+      this.suspendForHiddenFloor();
       return;
     }
 
@@ -2955,6 +2984,16 @@ export class StreamedRegionGrid {
     this._inflight?.clear?.();
     this._activeRequiredKeys?.clear?.();
     this._syncKey = '';
+  }
+
+  /** Stop decode work and release cells when this floor is above the visible stack. */
+  suspendForHiddenFloor() {
+    if (this._isFloorVisible()) return;
+    this.pauseDecodeWork();
+    for (const [key, entry] of [...this._cells.entries()]) {
+      this._disposeCell(key, entry);
+    }
+    if (this._fallbackMesh) this._fallbackMesh.visible = false;
   }
 
   /** Drop resident cells for cache/schema reload. */

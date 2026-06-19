@@ -326,6 +326,65 @@ export function resolveV14BackgroundFloorIndexForSrc(scene, src) {
 }
 
 /**
+ * Foreground (overhead) image for the level the canvas is currently rendering.
+ *
+ * @param {Scene|null|undefined} scene
+ * @returns {string|null}
+ */
+export function getViewedLevelForegroundSrc(scene) {
+  if (!scene) return null;
+  try {
+    const cv = globalThis.canvas;
+    if (cv?.scene?.id === scene.id && hasV14NativeLevels(scene)) {
+      const direct = cv.level?.foreground?.src;
+      if (typeof direct === 'string' && direct.trim()) return direct.trim();
+    }
+  } catch (_) {}
+  try {
+    const level = _resolveViewedV14LevelDoc(scene);
+    const src = level?.foreground?.src;
+    if (typeof src === 'string' && src.trim()) return src.trim();
+  } catch (_) {}
+  return null;
+}
+
+/**
+ * Map a foreground image URL to the FloorStack band index whose V14 level owns
+ * that `foreground.src`.
+ *
+ * @param {Scene|null|undefined} scene
+ * @param {string} src
+ * @returns {number}
+ */
+export function resolveV14ForegroundFloorIndexForSrc(scene, src) {
+  const raw = typeof src === 'string' ? src.trim() : '';
+  if (!raw || !scene?.levels?.size) return 0;
+  const target = normalizeFoundryAssetUrlKey(raw);
+  const targetFile = (() => {
+    try {
+      const tail = (target.split('/').pop() || '').split('?')[0] || '';
+      return tail.toLowerCase();
+    } catch (_) {
+      return '';
+    }
+  })();
+  if (!target && !targetFile) return 0;
+  try {
+    const sorted = scene.levels.sorted ?? scene.levels.contents ?? [];
+    for (const level of sorted) {
+      const fg = String(level?.foreground?.src || '').trim();
+      if (!_v14BackgroundSrcMatches(fg, target, targetFile)) continue;
+      const levelId = (level?.id != null) ? String(level.id) : '';
+      const stackIdx = levelId ? resolveV14LevelIdToFloorStackIndex(scene, levelId) : null;
+      if (stackIdx !== null) return stackIdx;
+      const idx = Number(level?.index);
+      return Number.isFinite(idx) ? Math.max(0, Math.floor(idx)) : 0;
+    }
+  } catch (_) {}
+  return 0;
+}
+
+/**
  * Get ordered visible background layer metadata from Foundry's level config.
  *
  * @param {Scene|null|undefined} scene
@@ -399,6 +458,25 @@ export function getVisibleLevelForegroundLayers(scene) {
     }
   } catch (_) {}
   if (out.length) return out;
+
+  // Populate / cold-load hooks can run before `_configureLevelTextures` reflects
+  // the viewed stack. Collect every level that declares foreground art so the
+  // bus can mount `__fg_image__*` once Foundry level docs are hydrated.
+  try {
+    const sorted = scene?.levels?.sorted ?? scene?.levels?.contents ?? [];
+    const seen = new Set();
+    for (const level of sorted) {
+      const src = String(level?.foreground?.src || '').trim();
+      if (!src || seen.has(src)) continue;
+      seen.add(src);
+      const sortRaw = Number(level?.index);
+      const sort = Number.isFinite(sortRaw) ? Math.max(0, Math.floor(sortRaw)) : out.length;
+      out.push({ src, sort });
+    }
+  } catch (_) {}
+
+  if (out.length) return out;
+
   try {
     const level = _resolveViewedV14LevelDoc(scene);
     const src = String(level?.foreground?.src || '').trim();

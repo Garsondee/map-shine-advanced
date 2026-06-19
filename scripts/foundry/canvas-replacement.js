@@ -140,6 +140,7 @@ import { getFloorStackBandsSignature, getSceneBandsForFloorStack } from './level
 import {
   hasV14NativeLevels,
   getViewedLevelBackgroundSrc,
+  getViewedLevelForegroundSrc,
   isLevelsEnabledForScene,
   resolveV14LevelIdToFloorStackIndex,
   readV14SceneLevels,
@@ -3572,6 +3573,12 @@ export function initialize() {
               fd,
               Number.isFinite(swapLevelIndex) ? { viewedLevelIndex: swapLevelIndex } : {},
             );
+            const viewedFgSrc = getViewedLevelForegroundSrc(canvas.scene);
+            bus.swapForegroundImage?.(
+              viewedFgSrc,
+              fd,
+              Number.isFinite(swapLevelIndex) ? { viewedLevelIndex: swapLevelIndex } : {},
+            );
 
             if (pathChanged) {
               try {
@@ -3593,6 +3600,19 @@ export function initialize() {
                 `Level revisit: skipping bus bg swap for warm band ${activeBandKey} (art unchanged)`,
               );
             }
+            try {
+              let swapLevelIndex = Number.NaN;
+              const lid = payload?.context?.levelId ?? canvas?.level?.id ?? null;
+              if (lid) {
+                const stackIdx = resolveV14LevelIdToFloorStackIndex(canvas.scene, lid);
+                if (stackIdx !== null) swapLevelIndex = stackIdx;
+              }
+              bus.syncForegroundStackFromScene?.(
+                fd,
+                Number.isFinite(swapLevelIndex) ? { viewedLevelIndex: swapLevelIndex } : {},
+                getViewedLevelForegroundSrc(canvas.scene),
+              );
+            } catch (_) {}
           }
         }
 
@@ -8620,34 +8640,51 @@ async function createThreeCanvas(scene, createOptions = {}) {
                   if (stackIdx !== null) coldSwapIdx = stackIdx;
                 }
               } catch (_) {}
-              bus.swapBackgroundImage(
-                viewedBg,
-                fd,
-                Number.isFinite(coldSwapIdx) ? { viewedLevelIndex: coldSwapIdx } : {},
-              );
-              const lid = window.MapShine?.activeLevelContext?.levelId ?? canvas?.level?.id ?? null;
-              if (lid) sc._lastV14BusBgLevelId = lid;
-              if (typeof sc.extractBasePath === 'function' && typeof sc._loadMasksOnlyForBasePath === 'function') {
-                const bp = sc.extractBasePath(viewedBg);
-                if (bp) {
-                  sc._loadMasksOnlyForBasePath(bp)
-                    .then((r) => {
-                      if (r?.masks?.length) sc._lastMaskBasePath = bp;
-                    })
-                    .catch(() => {});
+              const swapOpts = Number.isFinite(coldSwapIdx) ? { viewedLevelIndex: coldSwapIdx } : {};
+              const finishColdResync = () => {
+                try {
+                  bus.syncForegroundStackFromScene?.(
+                    fd,
+                    swapOpts,
+                    getViewedLevelForegroundSrc(v14Scene),
+                  );
+                } catch (_) {}
+                const lid = window.MapShine?.activeLevelContext?.levelId ?? canvas?.level?.id ?? null;
+                if (lid) sc._lastV14BusBgLevelId = lid;
+                if (typeof sc.extractBasePath === 'function' && typeof sc._loadMasksOnlyForBasePath === 'function') {
+                  const bp = sc.extractBasePath(viewedBg);
+                  if (bp) {
+                    sc._loadMasksOnlyForBasePath(bp)
+                      .then((r) => {
+                        if (r?.masks?.length) sc._lastMaskBasePath = bp;
+                      })
+                      .catch(() => {});
+                  }
                 }
-              }
-              if (typeof fc._syncOutdoorsMaskConsumers === 'function') {
-                fc._syncOutdoorsMaskConsumers({
-                  context: window.MapShine?.activeLevelContext ?? null,
-                  force: true,
-                });
-              }
+                if (typeof fc._syncOutdoorsMaskConsumers === 'function') {
+                  fc._syncOutdoorsMaskConsumers({
+                    context: window.MapShine?.activeLevelContext ?? null,
+                    force: true,
+                  });
+                }
+                window.MapShine?.renderLoop?.requestRender?.();
+                window.MapShine?.renderLoop?.requestContinuousRender?.(300);
+              };
+
+              // Repopulate rebuilds the full bus (tiles + bg/fg stacks). Pre-swap only
+              // races async decodes and can cancel foreground loads before any __fg_image__*
+              // cells register — especially when getViewedLevelForegroundSrc() is still null.
               if (typeof fc.forceRepopulate === 'function') {
-                void fc.forceRepopulate({ source: 'cold-load-bg-resync' });
+                void fc.forceRepopulate({ source: 'cold-load-bg-resync' }).finally(finishColdResync);
+              } else {
+                bus.swapBackgroundImage(viewedBg, fd, swapOpts);
+                bus.syncForegroundStackFromScene?.(
+                  fd,
+                  swapOpts,
+                  getViewedLevelForegroundSrc(v14Scene),
+                );
+                finishColdResync();
               }
-              window.MapShine?.renderLoop?.requestRender?.();
-              window.MapShine?.renderLoop?.requestContinuousRender?.(300);
             } catch (_) {
             }
           };

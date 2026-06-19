@@ -89,8 +89,12 @@ export function tileDocRestrictsLight(tileDoc) {
 }
 
 export function isTileOverhead(tileDoc) {
-  // Read persisted data only — do not use TileDocument#overhead (deprecated on PF2e v12+).
-  // Legacy/core persisted overhead marker.
+  // Foundry v14+ exposes a computed getter from elevation vs the active foreground split.
+  try {
+    if (typeof tileDoc?.overhead === 'boolean') return tileDoc.overhead;
+  } catch (_) {}
+
+  // Legacy persisted overhead marker (pre-v14 scenes / migrated data).
   const sourceOverhead = tileDoc?._source?.overhead;
   if (typeof sourceOverhead === 'boolean') return sourceOverhead;
 
@@ -5003,7 +5007,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // Per-tile motion toggle can force overhead-style draw ordering so the tile
     // participates in the proven roof-style depth/render path (avoids custom band
     // ordering regressions with post effects).
-    let naturalOverhead = isTileOverhead(tileDoc) && !treatAsCurrentFloor;
+    let naturalOverhead = isTileOverhead(tileDoc);
+    // Same-band floor slabs stay walkable albedo; roof/foreground art on the active
+    // level must still draw in the overhead band above tokens.
+    if (naturalOverhead && treatAsCurrentFloor && msaLevelRole === 'floor') {
+      naturalOverhead = false;
+    }
     if (msaLevelRole === 'ceiling') {
       naturalOverhead = true;
     } else if (msaLevelRole === 'floor') {

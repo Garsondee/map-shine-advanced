@@ -40,10 +40,13 @@ import {
   readTileLevelsFlags,
   resolveV14NativeDocFloorIndexMin,
   getViewedLevelBackgroundSrc,
+  getViewedLevelForegroundSrc,
   getVisibleLevelBackgroundSrcs,
   getVisibleLevelBackgroundLayers,
+  getVisibleLevelForegroundLayers,
   hasV14NativeLevels,
   resolveV14BackgroundFloorIndexForSrc,
+  resolveV14ForegroundFloorIndexForSrc,
   resolveV14LevelIdToFloorStackIndex,
   normalizeFoundryAssetUrlKey,
   getViewedV14Level,
@@ -137,6 +140,41 @@ function backgroundBusKeyForFloorIndex(floorIdx) {
   return fi === 0 ? '__bg_image__' : `__bg_image__${fi}`;
 }
 
+/** @param {number} floorIdx */
+function foregroundBusKeyForFloorIndex(floorIdx) {
+  const fi = Number.isFinite(Number(floorIdx)) ? Math.max(0, Math.floor(Number(floorIdx))) : 0;
+  return fi === 0 ? '__fg_image__' : `__fg_image__${fi}`;
+}
+
+/**
+ * True only for the bus overhead foreground plane keys (`__fg_image__`, `__fg_image__1`, …).
+ * @param {string} key
+ * @returns {boolean}
+ */
+function isForegroundImageAlbedoBusKey(key) {
+  return /^__fg_image__$|^__fg_image__[1-9]\d*$/.test(String(key || ''));
+}
+
+/**
+ * True for bus foreground draws in per-level RTs: albedo planes and streamed cells.
+ * @param {string} key
+ * @returns {boolean}
+ */
+function isForegroundImageBusRenderKey(key) {
+  const s = String(key || '');
+  if (isForegroundImageAlbedoBusKey(s)) return true;
+  return /^__fg_image__(?:[1-9]\d*)?:cell:/.test(s);
+}
+
+/**
+ * Background or foreground full-scene level image (albedo or streamed cell mesh).
+ * @param {string} key
+ * @returns {boolean}
+ */
+function isLevelStackImageBusRenderKey(key) {
+  return isBackgroundImageBusRenderKey(key) || isForegroundImageBusRenderKey(key);
+}
+
 /**
  * True only for the bus albedo background plane keys (`__bg_image__`, `__bg_image__1`, …).
  * Effect overlays use the same prefix (`__bg_image__1_bush`, `_tree`, `_specular`, …) and must
@@ -169,6 +207,32 @@ function isBackgroundImageBusRenderKey(key) {
   if (isBackgroundImageAlbedoBusKey(s)) return true;
   if (isBackgroundImageEffectOverlayBusKey(s)) return false;
   return /^__bg_image__(?:[1-9]\d*)?:cell:/.test(s);
+}
+
+/**
+ * Background albedo, streamed cells, and coarse fallbacks — not effect overlays.
+ * @param {string} key
+ * @returns {boolean}
+ */
+function isBackgroundStreamingBusTileKey(key) {
+  const k = String(key || '');
+  if (isBackgroundImageEffectOverlayBusKey(k)) return false;
+  if (isBackgroundImageAlbedoBusKey(k)) return true;
+  if (isBackgroundImageBusRenderKey(k)) return true;
+  return /^__bg_image__(?:[1-9]\d*)?__fallback$/.test(k);
+}
+
+/**
+ * Foreground albedo, streamed cells, and coarse fallbacks.
+ * @param {string} key
+ * @returns {boolean}
+ */
+function isForegroundStreamingBusTileKey(key) {
+  const k = String(key || '');
+  if (!k.startsWith('__fg_image__')) return false;
+  if (isForegroundImageAlbedoBusKey(k)) return true;
+  if (isForegroundImageBusRenderKey(k)) return true;
+  return /^__fg_image__(?:[1-9]\d*)?__fallback$/.test(k);
 }
 
 const MAX_SORT_WITHIN_FLOOR_GROUP = MAX_INTRA_ROLE_OFFSET;
@@ -257,12 +321,21 @@ export class FloorRenderBus {
 
     /**
      * Incremented when background decodes are invalidated (bus clear / bg swap).
-     * Async `Image.onload` from an earlier swap or populate must not call `_addBackgroundImage`.
+     * Async loads from an earlier swap or populate must not call `_addBackgroundImage`.
      */
     this._bgDecodeEpoch = 0;
 
+    /**
+     * Separate epoch for foreground (overhead) level images so a foreground swap
+     * does not cancel in-flight background decodes scheduled just before it.
+     */
+    this._fgDecodeEpoch = 0;
+
     /** @type {Set<Promise<unknown>>} In-flight background decode / streaming mount jobs. */
     this._pendingBackgroundJobs = new Set();
+
+    /** @type {boolean} One-shot guard for deferred foreground stack mount. */
+    this._pendingForegroundEnsure = false;
 
     /** @type {import('../streaming/tile-streaming-manager.js').TileStreamingManager|null} */
     this._streamingManager = null;
@@ -326,6 +399,7 @@ export class FloorRenderBus {
   markTileServedByBackgroundStream(tileId) {
     const entry = this._tiles.get(tileId);
     if (!entry) return;
+    if (this._isOverheadBandBusEntry(entry, tileId)) return;
     getTileStreamingManager().unregisterBusTile(tileId);
     entry.mapShineStreamedRegion = true;
     entry.mapShineBackgroundStreamServed = true;
@@ -340,8 +414,15 @@ export class FloorRenderBus {
    */
   _releaseStreamedRegionTile(tileId) {
     const entry = this._tiles.get(tileId);
-    if (!entry?.mapShineStreamedRegion) return;
+    if (!entry?.mapShineStreamedRegion && !entry?.mapShineBackgroundStreamServed) return;
     if (entry.mapShineBackgroundStreamServed) {
+      try {
+        if (getTileStreamingManager().hasBusTile(tileId)) {
+          entry.mapShineBackgroundStreamServed = false;
+          entry.mapShineStreamedRegion = true;
+          return;
+        }
+      } catch (_) {}
       if (entry.mesh) entry.mesh.visible = false;
       return;
     }
@@ -358,31 +439,240 @@ export class FloorRenderBus {
   }
 
   /**
+   * Re-evaluate ground tiles wrongly hidden as background-served (e.g. after a
+   * foreground pyramid registered with the same source dimensions).
+   */
+  recoverWronglyBackgroundStreamServedTiles() {
+    for (const [tileId, entry] of this._tiles) {
+      if (!entry?.mapShineBackgroundStreamServed) continue;
+      if (this._isOverheadBandBusEntry(entry, tileId)) continue;
+      void this._evaluateTileStreaming(tileId, entry, Number(entry.floorIndex) || 0);
+    }
+  }
+
+  /**
    * Per-frame tile streaming sync (background cell residency).
    */
   syncStreaming() {
     try {
+      for (const [tileId, entry] of this._tiles) {
+        if (!entry?.mapShineBackgroundStreamServed) continue;
+        if (!this._isOverheadBandBusEntry(entry, tileId)) continue;
+        void this._evaluateTileStreaming(tileId, entry, Number(entry.floorIndex) || 0);
+      }
+      this._recoverStuckOverheadBandTiles();
+      this._maybeEnsureForegroundStackLoaded();
       getTileStreamingManager().update();
       this._applyTileVisibility();
     } catch (_) {}
   }
 
   /**
+   * @param {string|null|undefined} tileId
+   * @returns {object|null}
+   * @private
+   */
+  _getFoundryTileDoc(tileId) {
+    const id = String(tileId || '');
+    if (!id) return null;
+    try {
+      return canvas?.scene?.tiles?.get(id) ?? null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * True when a bus tile draws in the FLOOR_OVERHEAD band (Foundry overhead flag,
+   * high-elevation slab, or renderOrder at/above tileOverheadOrder baseline).
+   * @param {object|null|undefined} entry
+   * @param {string|null|undefined} [tileId]
+   * @returns {boolean}
+   * @private
+   */
+  _isOverheadBandBusEntry(entry, tileId = null) {
+    if (!entry) return false;
+    const id = tileId
+      ?? entry.material?.userData?.foundryTileId
+      ?? entry.root?.userData?.foundryTileId
+      ?? null;
+    const tileDoc = this._getFoundryTileDoc(id);
+    if (tileDoc && isTileOverhead(tileDoc)) return true;
+    if (tileDoc && this._isActiveLevelElevatedBusTile(tileDoc)) return true;
+    if (entry.isOverhead ?? entry.root?.userData?.isOverhead) return true;
+    const ro = Number(entry.mesh?.renderOrder);
+    if (!Number.isFinite(ro)) return false;
+    const fi = Number(entry.floorIndex) || 0;
+    return ro >= tileOverheadOrder(fi, 0);
+  }
+
+  /**
+   * @param {{ minX: number, minY: number, maxX: number, maxY: number }|null|undefined} region
+   * @returns {number}
+   * @private
+   */
+  _sceneCoverageForBusRegion(region) {
+    const fd = window.MapShine?.sceneComposer?.foundrySceneData ?? {};
+    const sceneW = Number(fd.sceneWidth ?? fd.width ?? 0);
+    const sceneH = Number(fd.sceneHeight ?? fd.height ?? 0);
+    if (sceneW <= 0 || sceneH <= 0 || !region) return 0;
+    const rw = Math.max(0, region.maxX - region.minX);
+    const rh = Math.max(0, region.maxY - region.minY);
+    return (rw * rh) / (sceneW * sceneH);
+  }
+
+  /**
+   * @param {string} tileId
+   * @returns {boolean}
+   * @private
+   */
+  _busTileHasStreamingCells(tileId) {
+    const id = String(tileId || '');
+    if (!id) return false;
+    const cellPrefix = `${id}:`;
+    const fallbackKey = `${id}__fallback`;
+    for (const key of this._tiles.keys()) {
+      const k = String(key);
+      if (k === fallbackKey || k.startsWith(cellPrefix)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Re-mount full-scene overhead tiles that were hidden by background dedup or
+   * left with a hidden placeholder mesh and no streamed region cells.
+   * @private
+   */
+  _recoverStuckOverheadBandTiles() {
+    const manager = getTileStreamingManager();
+    for (const [tileId, entry] of this._tiles) {
+      if (String(tileId).startsWith('__')) continue;
+      if (!this._isOverheadBandBusEntry(entry, tileId)) continue;
+      if (entry.material?.map) continue;
+      if (this._busTileHasStreamingCells(tileId)) continue;
+      if (entry.mapShineOverheadAlbedoRecovery) continue;
+      if (!entry.textureSrc) continue;
+
+      entry.mapShineBackgroundStreamServed = false;
+      entry.mapShineStreamedRegion = false;
+      if (manager.hasBusTile(tileId)) {
+        try { manager.unregisterBusTile(tileId); } catch (_) {}
+      }
+      if (entry.mesh) {
+        entry.mesh.visible = this._computeEntryVisibleForSlice(tileId, entry);
+      }
+      entry.mapShineOverheadAlbedoRecovery = true;
+      void this._loadTileAlbedoFromUrlAsync(
+        tileId,
+        entry.textureSrc,
+        Number(entry.floorIndex) || 0,
+        { forceNonStreaming: true },
+      ).finally(() => {
+        entry.mapShineOverheadAlbedoRecovery = false;
+      });
+    }
+  }
+
+  /**
+   * Whether any foreground plane or streamed cell is registered on the bus.
+   * @returns {boolean}
+   * @private
+   */
+  _hasForegroundBusResidency() {
+    for (const key of this._tiles.keys()) {
+      if (isForegroundStreamingBusTileKey(key)) return true;
+    }
+    try {
+      for (const key of getTileStreamingManager().getGrids().keys()) {
+        if (isForegroundImageAlbedoBusKey(key)) return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  /**
+   * Mount or refresh V14 foreground (overhead) level images when Foundry exposes them.
+   * Safe to call repeatedly — no-ops when the stack is already resident or still loading.
+   *
+   * @param {object} fd
+   * @param {{ skipFirst?: boolean, viewedLevelIndex?: number }} [options]
+   * @param {string|null|undefined} [fallbackSrc]
+   */
+  syncForegroundStackFromScene(fd, options = {}, fallbackSrc = null) {
+    if (!this._initialized || !fd) return;
+    const scene = globalThis.canvas?.scene ?? null;
+    const visibleLayers = getVisibleLevelForegroundLayers(scene);
+    if (visibleLayers.length > 0) {
+      this.swapVisibleLevelForegroundImages(visibleLayers, fd, options);
+      return;
+    }
+    const viewedSrc = String(
+      getViewedLevelForegroundSrc(scene) || fallbackSrc || '',
+    ).trim();
+    if (viewedSrc) {
+      this.swapVisibleLevelForegroundImages([{ src: viewedSrc, sort: 0 }], fd, options);
+      return;
+    }
+    if (this._hasForegroundBusResidency()) {
+      this._removeForegroundImageEntries();
+    }
+  }
+
+  /**
+   * Deferred foreground mount when early populate / swap hooks ran before Foundry
+   * published level.foreground.src.
+   * @private
+   */
+  _maybeEnsureForegroundStackLoaded() {
+    if (this._hasForegroundBusResidency()) return;
+    if (this._pendingForegroundEnsure) return;
+    const fd = window.MapShine?.sceneComposer?.foundrySceneData;
+    if (!fd) return;
+    const layers = getVisibleLevelForegroundLayers(globalThis.canvas?.scene ?? null);
+    if (!layers.length) return;
+    this._pendingForegroundEnsure = true;
+    queueMicrotask(() => {
+      this._pendingForegroundEnsure = false;
+      if (this._hasForegroundBusResidency()) return;
+      const scene = globalThis.canvas?.scene ?? null;
+      let viewedLevelIndex;
+      try {
+        const lid = window.MapShine?.activeLevelContext?.levelId ?? canvas?.level?.id ?? null;
+        if (lid && scene) {
+          const stackIdx = resolveV14LevelIdToFloorStackIndex(scene, lid);
+          if (stackIdx !== null) viewedLevelIndex = stackIdx;
+        }
+      } catch (_) {}
+      const opts = Number.isFinite(viewedLevelIndex) ? { viewedLevelIndex } : {};
+      this.syncForegroundStackFromScene(fd, opts);
+    });
+  }
+
+  /**
    * Debug snapshot of bus texture residency (console troubleshooting).
-   * @returns {Array<{ id: string, hasMap: boolean, shared: boolean, textureSrc: string|null, visible: boolean }>}
+   * @returns {Array<object>}
    */
   getTextureDiagnostics() {
-    /** @type {Array<{ id: string, hasMap: boolean, shared: boolean, textureSrc: string|null, visible: boolean }>} */
+    /** @type {Array<object>} */
     const out = [];
     for (const [id, entry] of this._tiles) {
       const map = entry?.material?.map ?? null;
       const node = entry?.root || entry?.mesh;
+      const doc = this._getFoundryTileDoc(id);
       out.push({
         id: String(id),
         hasMap: !!map,
         shared: !!map?.userData?.mapShineSharedComposerTexture,
         textureSrc: entry?.textureSrc ? String(entry.textureSrc) : null,
         visible: node?.visible !== false,
+        rootVisible: entry?.root?.visible,
+        meshVisible: entry?.mesh?.visible,
+        floorIndex: entry?.floorIndex,
+        isOverhead: !!entry?.isOverhead,
+        opacity: entry?.material?.opacity,
+        elevation: Number.isFinite(Number(doc?.elevation)) ? Number(doc.elevation) : null,
+        levelIds: doc?.levels?.size ? [...doc.levels] : [],
+        activeLevelVisible: this._isBusTileOnActiveLevelView(id),
       });
     }
     return out;
@@ -430,6 +720,19 @@ export class FloorRenderBus {
     try { applySavedMemoryPresetsForScene(); } catch (_) {}
 
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
+    const stackViewIdx = (() => {
+      try {
+        const lid = window.MapShine?.activeLevelContext?.levelId ?? canvas?.level?.id ?? null;
+        if (lid && scene) {
+          const idx = resolveV14LevelIdToFloorStackIndex(scene, lid);
+          if (idx !== null) return idx;
+        }
+        const af = window.MapShine?.floorStack?.getActiveFloor?.()?.index;
+        if (Number.isFinite(Number(af))) return Number(af);
+      } catch (_) {}
+      return undefined;
+    })();
+    const stackLoadOpts = Number.isFinite(stackViewIdx) ? { viewedLevelIndex: stackViewIdx } : {};
 
     // Solid background colour plane (full world canvas, lowest Z).
     this._addSolidBackground(fd);
@@ -474,10 +777,10 @@ export class FloorRenderBus {
       if (visibleBgLayers.length > 1) {
         // Composer albedo only matches the viewed level texture; load other visible
         // background layers explicitly so upper-floor views include lower levels.
-        this._loadVisibleBackgroundStack(visibleBgLayers, fd, { skipFirst: true });
+        this._loadVisibleBackgroundStack(visibleBgLayers, fd, { skipFirst: true, ...stackLoadOpts });
       }
     } else if (visibleBgLayers.length > 0) {
-      this._loadVisibleBackgroundStack(visibleBgLayers, fd);
+      this._loadVisibleBackgroundStack(visibleBgLayers, fd, stackLoadOpts);
     } else if (bgSrc) {
       // Route legacy single-background load through the same
       // `_loadVisibleBackgroundStack` path used for multi-level stacks.
@@ -486,7 +789,7 @@ export class FloorRenderBus {
       // holes survive to the GPU. Previously this fell back to
       // `TextureLoader`, which silently flattens WebP alpha in browsers
       // that decode HTMLImageElement with premultiplied RGB.
-      this._loadVisibleBackgroundStack([{ src: bgSrc, alphaThreshold: 0 }], fd);
+      this._loadVisibleBackgroundStack([{ src: bgSrc, alphaThreshold: 0 }], fd, stackLoadOpts);
       log.info('FloorRenderBus: bg image load routed through ImageBitmap stack loader');
     } else if (bgTexture) {
       let frames = 0;
@@ -555,12 +858,14 @@ export class FloorRenderBus {
       const tileId = tileDoc.id ?? tileDoc._id ?? `tile_${tileCount}`;
 
       const isOverhead = this._isOverheadForBusTile(tileDoc, tileId);
-      const roofShadowCaster = this._usesRoofShadowCaptureLayer(tileDoc, floorIndex, isOverhead);
-      const cloudShadowBlockerEnabled = this._shouldTileBlockCloudShadows(tileDoc, roofShadowCaster);
+      const usesOverheadBand = this._usesOverheadRenderBand(tileDoc, isOverhead);
+      const busOverhead = isOverhead || usesOverheadBand;
+      const roofShadowCaster = this._usesRoofShadowCaptureLayer(tileDoc, floorIndex, busOverhead);
+      const cloudShadowBlockerEnabled = this._shouldTileBlockCloudShadows(tileDoc, busOverhead);
       const motionRenderAboveTokens = !!window.MapShine?.tileMotionManager?.getTileConfig?.(tileId)?.renderAboveTokens;
       floorCounts[floorIndex] = floorCounts[floorIndex] ?? { regular: 0, overhead: 0 };
       const groupCounts = floorCounts[floorIndex];
-      if (isOverhead) groupCounts.overhead += 1;
+      if (busOverhead) groupCounts.overhead += 1;
       else groupCounts.regular += 1;
       const sortWithinFloor = this._computeSortWithinFloor(tileDoc);
       const renderOrder = this._resolveBusTileRenderOrder(
@@ -573,7 +878,7 @@ export class FloorRenderBus {
 
       // Create mesh immediately with null texture (invisible until loaded).
       const restrictsLight = tileDocRestrictsLight(tileDoc);
-      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead, roofShadowCaster, cloudShadowBlockerEnabled, planeSignX, planeSignY, restrictsLight);
+      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, busOverhead, roofShadowCaster, cloudShadowBlockerEnabled, planeSignX, planeSignY, restrictsLight);
 
       const entryRadial = this._tiles.get(tileId);
       const populateOcclFlags = getTileOcclusionModeFlags(tileDoc);
@@ -587,6 +892,18 @@ export class FloorRenderBus {
       this._loadTileAlbedoFromUrl(tileId, src, floorIndex);
 
       tileCount++;
+    }
+
+    const visibleFgLayers = getVisibleLevelForegroundLayers(scene);
+    if (visibleFgLayers.length > 0) {
+      this._loadVisibleForegroundStack(visibleFgLayers, fd, stackLoadOpts);
+      log.info(`FloorRenderBus: loading ${visibleFgLayers.length} foreground/overhead layer(s)`);
+    } else {
+      // Foundry may not expose foreground layers until after the first populate pass.
+      queueMicrotask(() => {
+        if (this._hasForegroundBusResidency()) return;
+        this.syncForegroundStackFromScene(fd, stackLoadOpts);
+      });
     }
 
     // Diagnostic: log overhead tile assignment so we can spot mis-classified tiles.
@@ -603,6 +920,9 @@ export class FloorRenderBus {
     // setVisibleFloors() may have been called before populate completed.
     this._applyTileVisibility();
     log.info(`FloorRenderBus populated: ${tileCount} tiles (${floors.length} floors)`, floorCounts);
+    queueMicrotask(() => {
+      try { this._recoverStuckOverheadBandTiles(); } catch (_) {}
+    });
   }
 
   /**
@@ -708,6 +1028,7 @@ export class FloorRenderBus {
   clear() {
     if (!this._scene) return;
     this._bgDecodeEpoch += 1;
+    this._fgDecodeEpoch += 1;
     this._pendingBackgroundJobs?.clear?.();
     try { getTileStreamingManager().clearGrids(); } catch (_) {}
 
@@ -894,7 +1215,7 @@ export class FloorRenderBus {
       }
 
       const inVisibleFloorSlice = entry.floorIndex <= this._visibleMaxFloorIndex;
-      const floorVisible = inVisibleFloorSlice && !this._suppressTileAlbedoForEditing;
+      const floorVisible = this._computeEntryVisibleForSlice(tileId, entry);
       const streamingManaged = node.userData?.mapShineStreaming === true;
 
       if (!tileId.startsWith('__') && !inVisibleFloorSlice && node.visible === true) {
@@ -907,6 +1228,12 @@ export class FloorRenderBus {
         if (!floorVisible) node.visible = false;
         continue;
       }
+
+      if (entry.mapShineBackgroundStreamServed || (entry.mapShineStreamedRegion && !entry.material?.map)) {
+        node.visible = false;
+        continue;
+      }
+
       node.visible = floorVisible;
     }
 
@@ -932,6 +1259,47 @@ export class FloorRenderBus {
   }
 
   /**
+   * Whether a bus tile belongs to the level currently being viewed. V14 native
+   * `levels` membership is authoritative; elevation is only a fallback for
+   * documents without native level assignment.
+   * @param {string|null|undefined} tileId
+   * @returns {boolean}
+   * @private
+   */
+  _isBusTileOnActiveLevelView(tileId) {
+    const doc = this._getFoundryTileDoc(tileId);
+    if (!doc) return false;
+
+    const scene = globalThis.canvas?.scene;
+    const ctx = window.MapShine?.activeLevelContext;
+    if (!(hasV14NativeLevels(scene) || isLevelsEnabledForScene(scene))) return false;
+    if (!this._hasFiniteActiveLevelBand(ctx)) return false;
+
+    const activeLevelId = ctx?.levelId ?? canvas?.level?.id ?? null;
+    if (hasV14NativeLevels(scene) && doc.levels?.size) {
+      if (!activeLevelId) return false;
+      return doc.levels.has(activeLevelId);
+    }
+
+    const bandBottom = Number(ctx.bottom);
+    const bandTop = Number(ctx.top);
+
+    if (tileHasLevelsRange(doc)) {
+      const flags = readTileLevelsFlags(doc);
+      const tileBottom = Number(flags.rangeBottom);
+      const tileTop = Number(flags.rangeTop);
+      if (Number.isFinite(tileBottom) && Number.isFinite(tileTop)
+        && Number.isFinite(bandBottom) && Number.isFinite(bandTop)) {
+        return !(tileTop <= bandBottom || tileBottom >= bandTop);
+      }
+    }
+
+    const elev = Number(doc.elevation);
+    if (!Number.isFinite(elev) || !Number.isFinite(bandBottom)) return false;
+    return Number.isFinite(bandTop) && elev >= bandBottom && elev < bandTop;
+  }
+
+  /**
    * Compute whether a bus entry should currently be visible for floor slicing.
    * Internal/background entries (`__*`) always remain visible.
    *
@@ -942,9 +1310,20 @@ export class FloorRenderBus {
    */
   _computeEntryVisibleForSlice(key, entry) {
     if (String(key || '') === '__bg_solid__') return true;
+    if (this._suppressTileAlbedoForEditing) return false;
+
     const floorIndex = Number(entry?.floorIndex);
-    if (!Number.isFinite(floorIndex)) return !this._suppressTileAlbedoForEditing;
-    return floorIndex <= this._visibleMaxFloorIndex && !this._suppressTileAlbedoForEditing;
+    if (!Number.isFinite(floorIndex)) return true;
+
+    if (floorIndex <= this._visibleMaxFloorIndex) return true;
+
+    // Some V14 overhead tiles can have a floorIndex that lags the active view
+    // during init/rebuild, but only the live active level may pierce the slice.
+    if (this._isOverheadBandBusEntry(entry, key)) {
+      if (this._isBusTileOnActiveLevelView(key)) return true;
+    }
+
+    return false;
   }
 
   /**
@@ -1126,8 +1505,10 @@ export class FloorRenderBus {
       ? (tileDoc.rotation * Math.PI) / 180
       : 0;
     const isOverhead = this._isOverheadForBusTile(tileDoc, tileId);
-    const roofShadowCaster = this._usesRoofShadowCaptureLayer(tileDoc, floorIndex, isOverhead);
-    const cloudShadowBlockerEnabled = this._shouldTileBlockCloudShadows(tileDoc, roofShadowCaster);
+    const usesOverheadBand = this._usesOverheadRenderBand(tileDoc, isOverhead);
+    const busOverhead = isOverhead || usesOverheadBand;
+    const roofShadowCaster = this._usesRoofShadowCaptureLayer(tileDoc, floorIndex, busOverhead);
+    const cloudShadowBlockerEnabled = this._shouldTileBlockCloudShadows(tileDoc, busOverhead);
     const motionRenderAboveTokens = !!window.MapShine?.tileMotionManager?.getTileConfig?.(tileId)?.renderAboveTokens;
 
     const sortWithinFloor = this._computeSortWithinFloor(tileDoc);
@@ -1142,7 +1523,7 @@ export class FloorRenderBus {
     const restrictsLight = tileDocRestrictsLight(tileDoc);
     let entry = this._tiles.get(tileId);
     if (!entry) {
-      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, isOverhead, roofShadowCaster, cloudShadowBlockerEnabled, planeSignX, planeSignY, restrictsLight);
+      this._addTileMesh(tileId, floorIndex, null, centerX, centerY, z, tileW, tileH, rotation, alpha, renderOrder, busOverhead, roofShadowCaster, cloudShadowBlockerEnabled, planeSignX, planeSignY, restrictsLight);
       entry = this._tiles.get(tileId);
       if (!entry) return false;
     }
@@ -1152,7 +1533,7 @@ export class FloorRenderBus {
       root.position.set(centerX, centerY, z);
       if (root.rotation) root.rotation.z = rotation;
       root.userData = root.userData || {};
-      root.userData.isOverhead = isOverhead;
+      root.userData.isOverhead = busOverhead;
       root.userData.floorIndex = floorIndex;
       root.userData.restrictsLight = !!restrictsLight;
     }
@@ -1202,7 +1583,7 @@ export class FloorRenderBus {
     }
 
     entry.roofShadowCaster = !!roofShadowCaster;
-    entry.isOverhead = !!isOverhead;
+    entry.isOverhead = !!busOverhead;
     entry.cloudShadowBlockerEnabled = !!cloudShadowBlockerEnabled;
 
     if (entry.material) {
@@ -1280,7 +1661,7 @@ export class FloorRenderBus {
       worldH: fd.height ?? planeH,
       z: Number(entry.root.position.z) || 0,
       rotation: Number(entry.root.rotation?.z) || 0,
-      isOverhead: !!(entry.isOverhead ?? entry.root?.userData?.isOverhead),
+      isOverhead: this._isOverheadBandBusEntry(entry, tileId),
       roofShadowCaster: !!(entry.roofShadowCaster),
       cloudShadowBlockerEnabled: !!(entry.cloudShadowBlockerEnabled),
       renderOrder: Number(entry.mesh.renderOrder) || 0,
@@ -1299,6 +1680,16 @@ export class FloorRenderBus {
   async _evaluateTileStreaming(tileId, entry, floorIndex) {
     const src = entry?.textureSrc;
     if (!src || !entry?.root || !entry?.mesh) return false;
+
+    const isOverheadTile = this._isOverheadBandBusEntry(entry, tileId);
+    let recoveredOverheadFromBackground = false;
+    let recoveredGroundFromBackground = false;
+    if (isOverheadTile && entry.mapShineBackgroundStreamServed) {
+      recoveredOverheadFromBackground = true;
+      entry.mapShineBackgroundStreamServed = false;
+      entry.mapShineStreamedRegion = false;
+      try { getTileStreamingManager().unregisterBusTile(tileId); } catch (_) {}
+    }
 
     const gen = (this._tileStreamingGen.get(tileId) || 0) + 1;
     this._tileStreamingGen.set(tileId, gen);
@@ -1323,9 +1714,9 @@ export class FloorRenderBus {
     if (!(planeW > 0 && planeH > 0) || Math.abs(rotation) >= 0.001) {
       if (wasStreamed) {
         releaseStreaming();
-        if (!entry.material?.map) {
-          void this._loadTileAlbedoFromUrlAsync(tileId, src, floorIndex, { forceNonStreaming: true });
-        }
+      }
+      if (!entry.material?.map && (wasStreamed || recoveredOverheadFromBackground || recoveredGroundFromBackground)) {
+        void this._loadTileAlbedoFromUrlAsync(tileId, src, floorIndex, { forceNonStreaming: true });
       }
       return false;
     }
@@ -1336,15 +1727,47 @@ export class FloorRenderBus {
     if (!meta || !shouldStreamBackground(meta.width, meta.height, streamThreshold)) {
       if (wasStreamed) {
         releaseStreaming();
-        if (!entry.material?.map) {
-          void this._loadTileAlbedoFromUrlAsync(tileId, src, floorIndex, { forceNonStreaming: true });
-        }
+      }
+      if (!entry.material?.map && (wasStreamed || recoveredOverheadFromBackground || recoveredGroundFromBackground)) {
+        void this._loadTileAlbedoFromUrlAsync(tileId, src, floorIndex, { forceNonStreaming: true });
       }
       return false;
     }
 
     const options = this._buildTileStreamingOptions(tileId, entry, floorIndex);
     if (!options?.region) return false;
+
+    const sceneCoverage = this._sceneCoverageForBusRegion(options.region);
+    // Full-scene overhead tiles must not compete with the bg pyramid for streaming
+    // budget — load a downscaled albedo directly so the layer always appears.
+    if (isOverheadTile && sceneCoverage >= 0.72) {
+      if (wasStreamed || manager.hasBusTile(tileId)) {
+        releaseStreaming();
+      }
+      entry.mapShineBackgroundStreamServed = false;
+      if (entry.mesh && !entry.material?.map) {
+        entry.mesh.visible = this._computeEntryVisibleForSlice(tileId, entry);
+      }
+      if (!entry.material?.map) {
+        void this._loadTileAlbedoFromUrlAsync(tileId, src, floorIndex, { forceNonStreaming: true });
+      }
+      return false;
+    }
+
+    if (entry.mapShineBackgroundStreamServed && !isOverheadTile) {
+      const stillRedundant = manager.isRegionRedundantWithBackground(
+        options.region,
+        src,
+        false,
+        meta,
+      );
+      if (!stillRedundant) {
+        recoveredGroundFromBackground = true;
+        entry.mapShineBackgroundStreamServed = false;
+        entry.mapShineStreamedRegion = false;
+        try { manager.unregisterBusTile(tileId); } catch (_) {}
+      }
+    }
 
     const streamed = await manager.syncBusTile(this, tileId, src, options);
     if (this._tileStreamingGen.get(tileId) !== gen) return false;
@@ -1356,6 +1779,14 @@ export class FloorRenderBus {
       }
       this._clearBusTileAlbedoMap(entry);
       return true;
+    }
+
+    if ((recoveredOverheadFromBackground || recoveredGroundFromBackground)
+      && !manager.hasBusTile(tileId) && !entry.material?.map) {
+      if (entry.mesh) {
+        entry.mesh.visible = this._computeEntryVisibleForSlice(tileId, entry);
+      }
+      void this._loadTileAlbedoFromUrlAsync(tileId, src, floorIndex, { forceNonStreaming: true });
     }
 
     if (wasStreamed) releaseStreaming();
@@ -1593,7 +2024,7 @@ export class FloorRenderBus {
       }
 
       if (tileId.startsWith('__')) {
-        const isBgImage = isBackgroundImageBusRenderKey(tileId);
+        const isBgImage = isLevelStackImageBusRenderKey(tileId);
         if (!isBgImage || !includeBackground) {
           node.visible = false;
           continue;
@@ -1831,7 +2262,7 @@ export class FloorRenderBus {
           node.visible = false;
           continue;
         }
-        if (!isBackgroundImageBusRenderKey(tileId)) {
+        if (!isLevelStackImageBusRenderKey(tileId)) {
           node.visible = false;
           continue;
         }
@@ -2127,22 +2558,48 @@ export class FloorRenderBus {
     return !!isOverheadForBus || this._isUpperFloorSlabRoofCaster(tileDoc, floorIndex);
   }
 
+  /**
+   * V14 native tiles use elevation for primary canvas ordering and no longer
+   * expose a stable TileDocument#overhead boolean. Within the active level band,
+   * elevated non-floor tiles should therefore use the overhead bus path.
+   * @param {object} tileDoc
+   * @returns {boolean}
+   * @private
+   */
+  _isActiveLevelElevatedBusTile(tileDoc) {
+    try {
+      if (this._getMsaLevelRole(tileDoc) === 'floor') return false;
+      const scene = globalThis.canvas?.scene;
+      if (!hasV14NativeLevels(scene)) return false;
+      const ctx = window.MapShine?.activeLevelContext;
+      if (!this._hasFiniteActiveLevelBand(ctx)) return false;
+      if (!this._isBusTileOnActiveLevelView(tileDoc?.id ?? tileDoc?._id)) return false;
+
+      const elev = Number(tileDoc?.elevation);
+      const bottom = Number(ctx.bottom);
+      const top = Number(ctx.top);
+      if (!Number.isFinite(elev) || !Number.isFinite(bottom) || !Number.isFinite(top)) return false;
+      return elev > bottom && elev < top;
+    } catch (_) {
+      return false;
+    }
+  }
+
   _isOverheadForBusTile(tileDoc, tileId = null) {
     const msaRole = this._getMsaLevelRole(tileDoc);
     if (msaRole === 'ceiling') return true;
+    // Foundry overhead (v14 getter / elevation split) wins over levelRole:floor.
+    if (isTileOverhead(tileDoc)) return true;
     if (msaRole === 'floor') return false;
+    if (this._isActiveLevelElevatedBusTile(tileDoc)) return true;
 
     const resolvedTileId = tileId ?? tileDoc?.id ?? tileDoc?._id ?? null;
     const motionConfig = resolvedTileId
       ? window.MapShine?.tileMotionManager?.getTileConfig?.(resolvedTileId)
       : null;
     const renderAboveTokens = !!motionConfig?.renderAboveTokens;
-    const treatAsCurrentFloor = this._treatAsCurrentFloorForBusTile(tileDoc);
-    let naturalOverhead = isTileOverhead(tileDoc) && !treatAsCurrentFloor;
-    if (msaRole === 'ceiling') naturalOverhead = true;
-    else if (msaRole === 'floor') naturalOverhead = false;
 
-    return naturalOverhead || renderAboveTokens;
+    return renderAboveTokens;
   }
 
   /**
@@ -2401,6 +2858,61 @@ export class FloorRenderBus {
   }
 
   /**
+   * Add a full-scene foreground (overhead) image plane for a V14 level.
+   * Rendered in the FLOOR_OVERHEAD band above ground tiles and tokens.
+   *
+   * @param {object} fd
+   * @param {import('three').Texture} texture
+   * @param {number} floorIndex
+   * @param {string} key
+   * @private
+   */
+  _addForegroundImage(fd, texture, floorIndex = 0, key = '__fg_image__') {
+    const THREE = window.THREE;
+    const sceneW = fd.sceneWidth ?? fd.width ?? 0;
+    const sceneH = fd.sceneHeight ?? fd.height ?? 0;
+    const worldH = fd.height ?? 0;
+    if (sceneW <= 0 || sceneH <= 0) return;
+
+    const sceneX = fd.sceneX ?? 0;
+    const sceneY = fd.sceneY ?? 0;
+    const centerX = sceneX + sceneW / 2;
+    const centerY = worldH - (sceneY + sceneH / 2);
+
+    texture.flipY = false;
+    texture.needsUpdate = true;
+
+    const mat = new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      alphaTest: 0,
+      side: THREE.DoubleSide,
+    });
+    const geom = new THREE.PlaneGeometry(sceneW, sceneH);
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.name = 'BusFg_image';
+    mesh.frustumCulled = false;
+    const fgFloorIndex = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
+    mesh.renderOrder = tileOverheadOrder(fgFloorIndex, 0);
+    mesh.position.set(centerX, centerY, GROUND_Z + fgFloorIndex * Z_PER_FLOOR + 0.02);
+    mesh.scale.set(1, -1, 1);
+    mesh.userData = mesh.userData || {};
+    mesh.userData.isOverhead = true;
+    mesh.userData.mapShineBusTile = true;
+    mesh.userData.floorIndex = fgFloorIndex;
+    this._scene.add(mesh);
+    this._tiles.set(key, {
+      mesh,
+      material: mat,
+      floorIndex: fgFloorIndex,
+      isOverhead: true,
+    });
+    log.info(`FloorRenderBus: fg/overhead image plane [${key}] (${sceneW}x${sceneH})`);
+  }
+
+  /**
    * Replace the background image texture with a new one (e.g. when switching
    * between V14 levels that have different per-level backgrounds).
    *
@@ -2435,14 +2947,46 @@ export class FloorRenderBus {
   }
 
   /**
+   * Replace foreground (overhead) level images for the visible stack.
+   *
+   * @param {Array<string|{src:string, sort?: number}>} srcsOrLayers
+   * @param {object} fd
+   * @param {{ skipFirst?: boolean, viewedLevelIndex?: number }} [options]
+   */
+  swapVisibleLevelForegroundImages(srcsOrLayers, fd, options = {}) {
+    if (!this._initialized || !fd || !Array.isArray(srcsOrLayers) || srcsOrLayers.length === 0) return;
+    this._removeForegroundImageEntries();
+    this._loadVisibleForegroundStack(srcsOrLayers, fd, options);
+  }
+
+  /**
+   * Swap the viewed level foreground image (V14 overhead layer art).
+   *
+   * @param {string} src
+   * @param {object} fd
+   * @param {{ viewedLevelIndex?: number }} [swapOpts]
+   */
+  swapForegroundImage(src, fd, swapOpts = {}) {
+    if (!this._initialized || !fd) return;
+    this.syncForegroundStackFromScene(fd, swapOpts, src);
+  }
+
+  /**
    * Remove all background image entries (`__bg_image__*`).
    * @private
    */
   _removeBackgroundImageEntries() {
     this._bgDecodeEpoch += 1;
+    try {
+      const manager = getTileStreamingManager();
+      for (const gridKey of [...manager.getGrids().keys()]) {
+        if (!isBackgroundImageAlbedoBusKey(gridKey)) continue;
+        manager.unregisterGrid(gridKey);
+      }
+    } catch (_) {}
     const keys = [];
     for (const key of this._tiles.keys()) {
-      if (isBackgroundImageAlbedoBusKey(key)) keys.push(String(key));
+      if (isBackgroundStreamingBusTileKey(key)) keys.push(String(key));
     }
     for (const key of keys) {
       const existing = this._tiles.get(key);
@@ -2453,6 +2997,142 @@ export class FloorRenderBus {
       }
       this._tiles.delete(key);
     }
+  }
+
+  /**
+   * Remove all foreground image entries (`__fg_image__*`).
+   * @private
+   */
+  _removeForegroundImageEntries() {
+    this._fgDecodeEpoch += 1;
+    try {
+      const manager = getTileStreamingManager();
+      for (const gridKey of [...manager.getGrids().keys()]) {
+        if (!isForegroundImageAlbedoBusKey(gridKey)) continue;
+        manager.unregisterGrid(gridKey);
+      }
+    } catch (_) {}
+    const keys = [];
+    for (const key of this._tiles.keys()) {
+      if (isForegroundStreamingBusTileKey(key)) keys.push(String(key));
+    }
+    for (const key of keys) {
+      const existing = this._tiles.get(key);
+      if (existing?.mesh) {
+        existing.mesh.removeFromParent();
+        existing.mesh.geometry?.dispose?.();
+        existing.material?.dispose?.();
+      }
+      this._tiles.delete(key);
+    }
+  }
+
+  /**
+   * Load and add all visible foreground (overhead) layers in order.
+   * @param {Array<string|{src:string, sort?: number}>} srcsOrLayers
+   * @param {object} fd
+   * @param {{skipFirst?: boolean, viewedLevelIndex?: number}} [options]
+   * @private
+   */
+  _loadVisibleForegroundStack(srcsOrLayers, fd, options = {}) {
+    const list = Array.isArray(srcsOrLayers) ? srcsOrLayers : [];
+    const { skipFirst = false, viewedLevelIndex } = options;
+    if (!list.length) return;
+    const scene = globalThis.canvas?.scene ?? null;
+    let loadCount = 0;
+    for (let i = 0; i < list.length; i += 1) {
+      if (skipFirst && i === 0) continue;
+      const raw = list[i];
+      const src = (typeof raw === 'string') ? String(raw).trim() : String(raw?.src || '').trim();
+      if (src) loadCount += 1;
+    }
+    const floorsLen = (window.MapShine?.floorStack?.getFloors?.() ?? []).length;
+    const viewedFg = String(getViewedLevelForegroundSrc(scene) || '').trim();
+
+    for (let i = 0; i < list.length; i += 1) {
+      if (skipFirst && i === 0) continue;
+      const raw = list[i];
+      const src = (typeof raw === 'string') ? String(raw).trim() : String(raw?.src || '').trim();
+      if (!src) continue;
+      let floorIdx = resolveV14ForegroundFloorIndexForSrc(scene, src);
+      floorIdx = finalizeBackgroundFloorIndexForBus(scene, src, floorIdx, {
+        loadCount,
+        floorsLen,
+        viewedBg: viewedFg,
+        viewedLevelIndexOverride: viewedLevelIndex,
+      });
+      const key = foregroundBusKeyForFloorIndex(floorIdx);
+      this._loadFgImageStraightAlpha(src, fd, floorIdx, key);
+    }
+  }
+
+  /**
+   * @param {string} src
+   * @param {object} fd
+   * @param {number} floorIndex
+   * @param {string} key
+   * @private
+   */
+  _loadFgImageStraightAlpha(src, fd, floorIndex, key) {
+    const decodeEpochAtSchedule = this._fgDecodeEpoch;
+    const bus = this;
+
+    const job = (async () => {
+      if (decodeEpochAtSchedule !== bus._fgDecodeEpoch) return;
+
+      const budget = getTextureBudgetTracker();
+      const streamThreshold = Math.max(4096, budget.getRecommendedTileSize() * 2);
+      const meta = await fetchSourceImageMeta(src);
+      if (decodeEpochAtSchedule !== bus._fgDecodeEpoch) return;
+
+      const renderOrderBase = tileOverheadOrder(floorIndex, 0);
+
+      if (meta && shouldStreamBackground(meta.width, meta.height, streamThreshold)) {
+        const streamed = await getTileStreamingManager().registerBackground(
+          bus, src, fd, floorIndex, key, { renderOrderBase },
+        );
+        if (streamed && decodeEpochAtSchedule === bus._fgDecodeEpoch) {
+          bus._applyTileVisibility();
+          log.info(`FloorRenderBus: streaming foreground [${key}] (${meta.width}x${meta.height})`);
+          return;
+        }
+      }
+
+      const maxSize = budget.backgroundMaxSize ?? 4096;
+      let tex = await loadFallbackTexture(src, maxSize);
+      if (!tex) {
+        if (meta && isHugeImageSource(meta.width, meta.height, maxSize * 2)) {
+          log.warn(`FloorRenderBus: refusing full-image decode for huge foreground [${key}]`);
+          return;
+        }
+        try {
+          tex = await loadImageTexture(src, {
+            role: 'TILE_ALBEDO',
+            maxSize,
+            premultiplyAlpha: 'none',
+          });
+        } catch (err) {
+          log.warn(`FloorRenderBus: fg load failed [${key}] ${src}`, err);
+          return;
+        }
+      }
+      if (!tex || decodeEpochAtSchedule !== bus._fgDecodeEpoch) return;
+
+      getTextureBudgetTracker().register(
+        tex,
+        `bus:fg:${key}`,
+        estimateTextureBytes(tex.image?.width ?? 512, tex.image?.height ?? 512, 'ubyte'),
+        { source: 'busForeground' },
+      );
+      bus._addForegroundImage(fd, tex, floorIndex, key);
+      bus._applyTileVisibility();
+      log.info(`FloorRenderBus: fg loaded [${key}]`);
+    })();
+
+    this._pendingBackgroundJobs.add(job);
+    void job.finally(() => {
+      this._pendingBackgroundJobs.delete(job);
+    });
   }
 
   /**
@@ -2782,12 +3462,15 @@ export class FloorRenderBus {
         log.info(`FloorRenderBus: streaming bus tile [${tileId}] (live sync)`);
         return;
       }
-    } else if (forceNonStreaming || entry?.mapShineStreamedRegion) {
+    } else if (forceNonStreaming || entry?.mapShineStreamedRegion || entry?.mapShineBackgroundStreamServed) {
       try {
         getTileStreamingManager().unregisterBusTile(tileId);
       } catch (_) {
       }
-      if (entry) entry.mapShineStreamedRegion = false;
+      if (entry) {
+        entry.mapShineStreamedRegion = false;
+        entry.mapShineBackgroundStreamServed = false;
+      }
     }
 
     let tex = null;
@@ -2846,6 +3529,13 @@ export class FloorRenderBus {
     try { entry.material?.map?.dispose?.(); } catch (_) {}
     entry.material.map = tex;
     entry.material.needsUpdate = true;
+    entry.mapShineStreamedRegion = false;
+    entry.mapShineBackgroundStreamServed = false;
+    const node = entry.root || entry.mesh;
+    if (node) {
+      node.visible = this._computeEntryVisibleForSlice(tileId, entry);
+    }
+    try { this._applyTileVisibility(); } catch (_) {}
     try {
       const w = tex.image?.width ?? tex.image?.naturalWidth ?? 0;
       const h = tex.image?.height ?? tex.image?.naturalHeight ?? 0;

@@ -36,10 +36,14 @@ import {
   escapeMapPointHtml,
   getMapPointLevelOptions,
   readMapPointLevelBindingFromForm,
+  readMapPointRenderLayerFromForm,
+  mapPointEffectSupportsRenderLayer,
   renderMapPointDrawLevelStamp,
   renderMapPointLevelBindingEditor,
   renderMapPointLevelListBadge,
+  renderMapPointRenderLayerEditor,
 } from './map-point-level-binding-ui.js';
+import { copyMapPointGroupInfoToClipboard } from './map-point-group-info.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import {
   applyManualWeatherFromSceneEffectSettings,
@@ -9820,6 +9824,17 @@ export class TweakpaneManager {
   }
 
   /**
+   * Tag Foundry dialog chrome for map-point dialog CSS (footer button row, etc.).
+   * @param {JQuery} html
+   * @private
+   */
+  _applyMapPointDialogChrome(html) {
+    const app = html.closest('.app.window-app');
+    if (!app?.length) return;
+    app.find('footer, .dialog-buttons, .form-footer').addClass('msa-mp-dialog-footer');
+  }
+
+  /**
    * Open a dialog to select effect type and start map point drawing
    */
   openMapPointDrawingDialog() {
@@ -9883,61 +9898,62 @@ export class TweakpaneManager {
 
     // Build dialog content
     const content = `
-      <form>
-        <div class="form-group">
-          <label>Effect Type</label>
-          <select name="effectTarget" style="width: 100%;">
-            ${Object.entries(effectOptions).map(([key, label]) => 
-              `<option value="${key}" ${key === lastEffect ? 'selected' : ''}>${label}</option>`
-            ).join('')}
-          </select>
+      <form class="msa-mp-form">
+        <div class="msa-mp-grid-2">
+          <div class="form-group">
+            <label>Effect type</label>
+            <select name="effectTarget">
+              ${Object.entries(effectOptions).map(([key, label]) =>
+                `<option value="${key}" ${key === lastEffect ? 'selected' : ''}>${label}</option>`
+              ).join('')}
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Group type</label>
+            <select name="groupType">
+              ${Object.entries(groupTypeOptions).map(([key, label]) =>
+                `<option value="${key}" ${key === 'area' ? 'selected' : ''}>${label}</option>`
+              ).join('')}
+            </select>
+          </div>
         </div>
-        <div class="form-group">
-          <label>Group Type</label>
-          <select name="groupType" style="width: 100%;">
-            ${Object.entries(groupTypeOptions).map(([key, label]) => 
-              `<option value="${key}" ${key === 'area' ? 'selected' : ''}>${label}</option>`
-            ).join('')}
-          </select>
+        <div class="msa-mp-render-layer-panel" style="display: ${mapPointEffectSupportsRenderLayer(lastEffect) ? 'block' : 'none'};">
+          ${renderMapPointRenderLayerEditor(lastEffect)}
         </div>
 
         <div class="form-group rope-type-row" style="display:none;">
-          <label>Rope Type</label>
-          <select name="ropeType" style="width: 100%;">
+          <label>Rope preset</label>
+          <select name="ropeType">
             ${Object.entries(ropeTypeOptions).map(([key, label]) =>
               `<option value="${key}" ${key === lastRopeType ? 'selected' : ''}>${label}</option>`
             ).join('')}
           </select>
         </div>
-        <div class="form-group">
+        <div class="form-group msa-mp-checkbox-row">
           <label>
-            <input type="checkbox" name="snapToGrid" style="margin-right: 6px;">
-            Snap to Grid (half-grid subdivisions)
+            <input type="checkbox" name="snapToGrid">
+            Snap to grid (half-grid subdivisions)
           </label>
-          <p class="notes" style="margin: 4px 0 0 0; font-size: 10px; color: #666;">
-            When enabled, points snap to grid. Hold Shift to temporarily toggle.
-          </p>
+          <p class="msa-mp-hint">When enabled, points snap to grid. Hold Shift to temporarily toggle.</p>
         </div>
-        <hr style="margin: 12px 0; border: none; border-top: 1px solid #444;">
         ${renderMapPointDrawLevelStamp(window.MapShine?.activeLevelContext ?? null)}
-        <div class="form-group" style="display: flex; justify-content: space-between; align-items: center;">
-          <span style="font-size: 11px; color: #888;">
+        <div class="msa-mp-toolbar msa-mp-toolbar--between">
+          <span class="msa-mp-toolbar__meta">
             ${existingGroupCount} existing group${existingGroupCount !== 1 ? 's' : ''} on this scene
           </span>
-          <label style="font-size: 11px; cursor: pointer;">
-            <input type="checkbox" name="showExisting" ${showHelpers ? 'checked' : ''} style="margin-right: 4px;">
+          <label class="msa-mp-checkbox-row">
+            <input type="checkbox" name="showExisting" ${showHelpers ? 'checked' : ''}>
             Show existing
           </label>
         </div>
-        <hr style="margin: 12px 0; border: none; border-top: 1px solid #444;">
-        <div style="background: #1a1a2e; padding: 10px; border-radius: 4px; margin-top: 8px;">
-          <p style="margin: 0 0 6px 0; font-size: 11px; color: #aaa; font-weight: bold;">Controls:</p>
-          <ul style="margin: 0; padding-left: 16px; font-size: 10px; color: #888; line-height: 1.6;">
-            <li><strong>Click</strong> - Place a point</li>
-            <li><strong>Double-click</strong> or <strong>Enter</strong> - Finish drawing</li>
-            <li><strong>Backspace</strong> - Remove last point</li>
-            <li><strong>Escape</strong> - Cancel drawing</li>
-            <li><strong>Shift</strong> - Toggle grid snap</li>
+        <div class="msa-mp-controls-box">
+          <p class="msa-mp-controls-box__title">Drawing controls</p>
+          <ul>
+            <li><strong>Click</strong> — place a point</li>
+            <li><strong>Double-click</strong> or <strong>Enter</strong> — finish</li>
+            <li><strong>Backspace</strong> — remove last point</li>
+            <li><strong>Escape</strong> — cancel</li>
+            <li><strong>Shift</strong> — toggle grid snap</li>
           </ul>
         </div>
       </form>
@@ -9972,7 +9988,10 @@ export class TweakpaneManager {
               }
             } catch (e) {
             }
-            interactionManager.startMapPointDrawing(effectTarget, groupType, snapToGrid, { ropeType: ropePreset });
+            interactionManager.startMapPointDrawing(effectTarget, groupType, snapToGrid, {
+              ropeType: ropePreset,
+              renderLayer: readMapPointRenderLayerFromForm(html, effectTarget),
+            });
           }
         },
         manage: {
@@ -9989,6 +10008,8 @@ export class TweakpaneManager {
       },
       default: 'draw',
       render: (html) => {
+        html.closest('.app.window-app')?.addClass('msa-mp-dialog msa-mp-dialog--draw');
+        this._applyMapPointDialogChrome(html);
         // Prevent UI clicks from leaking through to the underlying canvas.
         html.closest('.app.window-app')?.on('pointerdown', (ev) => {
           ev.stopPropagation();
@@ -10002,6 +10023,10 @@ export class TweakpaneManager {
           if (isRope) typeSelect.val('line');
 
           html.find('.rope-type-row').css('display', isRope ? 'block' : 'none');
+          html.find('.msa-mp-render-layer-panel').css(
+            'display',
+            mapPointEffectSupportsRenderLayer(effectTarget) ? 'block' : 'none',
+          );
         };
 
         html.find('[name="effectTarget"]').on('change', updateGroupTypeForRope);
@@ -10015,6 +10040,10 @@ export class TweakpaneManager {
           }
         });
       }
+    }, {
+      width: 520,
+      height: 'auto',
+      classes: ['msa-mp-dialog', 'msa-mp-dialog--draw'],
     }).render(true);
   }
 
@@ -10069,8 +10098,8 @@ export class TweakpaneManager {
       
       if (groups.length === 0) {
         return `
-          <div style="text-align: center; padding: 20px; color: #888;">
-            <i class="fas fa-map-marker-alt" style="font-size: 24px; margin-bottom: 8px; display: block;"></i>
+          <div class="msa-mp-manager-empty">
+            <i class="fas fa-map-marker-alt"></i>
             No map point groups on this scene.<br>
             <small>Use "Draw New" to create one.</small>
           </div>
@@ -10091,55 +10120,48 @@ export class TweakpaneManager {
           ? true
           : groupClusters.some((c) => c.enabled !== false);
         const showPowerBtn = isGM && !!group.effectTarget && group.isEffectSource !== false;
-        const powerBg = clusterActive ? '#3a5a3a' : '#4a4a4a';
         const powerTitle = clusterActive ? 'Turn off effect cluster' : 'Turn on effect cluster';
         const levelInfo = describeMapPointGroupLevelBinding(group, activeLevelContext, levelOptions);
         const levelBadge = renderMapPointLevelListBadge(levelInfo);
+        const overheadLayerBadge = (mapPointEffectSupportsRenderLayer(group.effectTarget)
+          && group.metadata?.renderLayer === 'above-overhead')
+          ? '<span class="msa-mp-overhead-badge">On overhead layer</span>'
+          : '';
         const rowOpacity = (levelInfo.isMultiFloorScene && !levelInfo.visibleOnActiveView) ? 0.72 : 1;
         
         return `
-          <div class="map-point-group-item" data-group-id="${group.id}" style="
-            display: flex;
-            align-items: center;
-            padding: 8px 10px;
-            margin-bottom: 6px;
-            background: #2a2a3e;
-            border-radius: 4px;
-            border-left: 4px solid ${colorHex};
-            cursor: pointer;
-            opacity: ${rowOpacity};
-            transition: background 0.15s;
-          " onmouseover="this.style.background='#3a3a4e'" onmouseout="this.style.background='#2a2a3e'">
-            <div style="flex: 1; min-width: 0;">
-              <div style="font-weight: bold; font-size: 12px; color: #ddd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+          <div class="msa-mp-group-item map-point-group-item" data-group-id="${group.id}" style="--msa-mp-accent: ${colorHex}; opacity: ${rowOpacity};">
+            <div class="msa-mp-group-item__main">
+              <div class="msa-mp-group-item__title">
                 ${escapeMapPointHtml(group.label || 'Unnamed Group')}
               </div>
-              <div style="font-size: 10px; color: #888; margin-top: 2px;">
-                ${typeLabel} • ${effectLabel} • ${pointCount} point${pointCount !== 1 ? 's' : ''}
+              <div class="msa-mp-group-item__meta">
+                ${typeLabel} · ${effectLabel} · ${pointCount} point${pointCount !== 1 ? 's' : ''}
               </div>
-              ${levelBadge}
+              <div class="msa-mp-group-item__badges">
+                ${levelBadge}
+                ${overheadLayerBadge}
+              </div>
             </div>
-            <div style="display: flex; gap: 4px; margin-left: 8px;">
+            <div class="msa-mp-group-actions">
               ${showPowerBtn ? `
-              <button type="button" class="group-action-btn group-power-btn" data-action="toggle-power" data-group-id="${group.id}"
-                style="padding: 4px 8px; font-size: 10px; background: ${powerBg}; border: none; border-radius: 3px; color: #ddd; cursor: pointer;"
-                title="${powerTitle}">
+              <button type="button" class="msa-mp-btn msa-mp-btn--icon group-action-btn group-power-btn" data-action="toggle-power" data-group-id="${group.id}" title="${powerTitle}">
                 <i class="fas fa-power-off"></i>
               </button>
               ` : ''}
-              <button type="button" class="group-action-btn group-edit-btn" data-action="edit" data-group-id="${group.id}" 
-                style="padding: 4px 8px; font-size: 10px; background: #4a4a6a; border: none; border-radius: 3px; color: #ddd; cursor: pointer;"
-                title="Edit group">
-                <i class="fas fa-edit"></i>
+              <button type="button" class="msa-mp-btn msa-mp-btn--secondary group-action-btn group-info-btn" data-action="info" data-group-id="${group.id}" title="Copy group debug info to clipboard">
+                <i class="fas fa-info-circle"></i> Info
               </button>
-              <button type="button" class="group-action-btn group-focus-btn" data-action="focus" data-group-id="${group.id}"
-                style="padding: 4px 8px; font-size: 10px; background: #4a4a6a; border: none; border-radius: 3px; color: #ddd; cursor: pointer;"
-                title="Focus on group">
-                <i class="fas fa-crosshairs"></i>
+              <button type="button" class="msa-mp-btn msa-mp-btn--secondary group-action-btn group-edit-btn" data-action="edit" data-group-id="${group.id}" title="Edit group">
+                <i class="fas fa-edit"></i> Edit
               </button>
-              <button type="button" class="group-action-btn group-delete-btn" data-action="delete" data-group-id="${group.id}"
-                style="padding: 4px 8px; font-size: 10px; background: #6a3a3a; border: none; border-radius: 3px; color: #ddd; cursor: pointer;"
-                title="Delete group">
+              <button type="button" class="msa-mp-btn msa-mp-btn--secondary group-action-btn group-focus-btn" data-action="focus" data-group-id="${group.id}" title="Focus on group">
+                <i class="fas fa-crosshairs"></i> Focus
+              </button>
+              <button type="button" class="msa-mp-btn msa-mp-btn--secondary group-action-btn group-duplicate-btn" data-action="duplicate" data-group-id="${group.id}" title="Duplicate group">
+                <i class="fas fa-copy"></i> Copy
+              </button>
+              <button type="button" class="msa-mp-btn msa-mp-btn--danger msa-mp-btn--icon group-action-btn group-delete-btn" data-action="delete" data-group-id="${group.id}" title="Delete group">
                 <i class="fas fa-trash"></i>
               </button>
             </div>
@@ -10149,32 +10171,32 @@ export class TweakpaneManager {
     };
 
     const content = `
-      <div class="map-points-manager-dialog">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-          <label style="font-size: 11px; cursor: pointer;">
-            <input type="checkbox" name="showHelpers" ${mapPointsManager.showVisualHelpers ? 'checked' : ''} style="margin-right: 6px;">
+      <div class="map-points-manager-dialog msa-mp-form">
+        <div class="msa-mp-manager-header">
+          <label class="msa-mp-checkbox-row">
+            <input type="checkbox" name="showHelpers" ${mapPointsManager.showVisualHelpers ? 'checked' : ''}>
             Show visual helpers
           </label>
-          <span style="font-size: 11px; color: #888;">
-            ${mapPointsManager.groups.size} group${mapPointsManager.groups.size !== 1 ? 's' : ''}
-          </span>
+          <div class="msa-mp-toolbar">
+            <span class="msa-mp-toolbar__meta">
+              ${mapPointsManager.groups.size} group${mapPointsManager.groups.size !== 1 ? 's' : ''}
+            </span>
+            ${game.user?.isGM ? `
+            <button type="button" class="msa-mp-btn msa-mp-btn--secondary rebuild-clusters-btn" title="Recompute effect control clusters for this scene">
+              <i class="fas fa-object-group"></i> Rebuild clusters
+            </button>
+            ` : ''}
+          </div>
         </div>
         ${game.user?.isGM ? `
-        <p style="font-size: 10px; color: #888; margin: 0 0 8px 0;">
+        <p class="msa-mp-manager-lede">
           Level badges show each group’s floor lock and whether it is visible on the level you are viewing now.
           Use the <i class="fas fa-eye"></i> tool on the token bar for on-map toggles.
         </p>
         ` : ''}
-        <div class="groups-list" style="max-height: 300px; overflow-y: auto; margin-bottom: 12px;">
+        <div class="groups-list msa-mp-groups-list">
           ${buildGroupsList()}
         </div>
-        ${game.user?.isGM ? `
-        <div style="margin-bottom: 8px;">
-          <button type="button" class="rebuild-clusters-btn" style="width: 100%; padding: 6px; font-size: 11px; background: #3a3a5a; border: none; border-radius: 4px; color: #ddd; cursor: pointer;">
-            <i class="fas fa-object-group"></i> Rebuild effect clusters
-          </button>
-        </div>
-        ` : ''}
       </div>
     `;
 
@@ -10202,6 +10224,8 @@ export class TweakpaneManager {
         mapPointsManager.setShowVisualHelpers(false);
       },
       render: (html) => {
+        html.closest('.app.window-app')?.addClass('msa-mp-dialog msa-mp-dialog--manage');
+        this._applyMapPointDialogChrome(html);
         // Prevent UI clicks from leaking through to the underlying canvas.
         html.closest('.app.window-app')?.on('pointerdown', (ev) => {
           ev.stopPropagation();
@@ -10254,9 +10278,33 @@ export class TweakpaneManager {
             } else {
               ui.notifications.warn('Failed to toggle effect cluster.');
             }
+          } else if (action === 'info') {
+            await copyMapPointGroupInfoToClipboard(groupId, mapPointsManager);
           } else if (action === 'edit') {
             dialog.close();
             this.openGroupEditDialog(groupId);
+          } else if (action === 'duplicate') {
+            const group = mapPointsManager.getGroup(groupId);
+            if (!group) return;
+            const newGroup = await mapPointsManager.createGroup({
+              ...group,
+              id: undefined,
+              label: `${group.label || 'Group'} (copy)`,
+              metadata: mapPointsManager.buildMetadataFromLevelSelection(
+                {
+                  mode: group.metadata?.levelBinding?.mode === 'locked' ? 'locked' : 'all-levels',
+                  levelId: group.metadata?.levelBinding?.floorKey ?? null,
+                  renderLayer: group.metadata?.renderLayer,
+                },
+                group.metadata,
+              ),
+            });
+            ui.notifications.info(`Duplicated: ${newGroup.label}`);
+            if (mapPointsManager.showVisualHelpers) {
+              mapPointsManager.setShowVisualHelpers(true);
+            }
+            dialog.close();
+            this.openMapPointsManagerDialog();
           } else if (action === 'focus') {
             const group = mapPointsManager.getGroup(groupId);
             if (group && group.points && group.points.length > 0) {
@@ -10293,8 +10341,9 @@ export class TweakpaneManager {
         });
       }
     }, {
-      width: 440,
-      height: 'auto'
+      width: 680,
+      height: 'auto',
+      classes: ['msa-mp-dialog', 'msa-mp-dialog--manage'],
     });
     
     dialog.render(true);
@@ -10387,7 +10436,7 @@ export class TweakpaneManager {
     const h = canvas?.dimensions?.height;
     const pointsListHtml = (pointCount > 0)
       ? `
-        <div class="points-list" style="margin-top: 10px; max-height: 140px; overflow: auto;">
+        <div class="points-list msa-mp-points-list">
           ${group.points.map((p, idx) => {
             const x = Number(p?.x);
             const yWorld = Number(p?.y);
@@ -10395,29 +10444,13 @@ export class TweakpaneManager {
             const xTxt = Number.isFinite(x) ? x.toFixed(0) : '—';
             const yTxt = Number.isFinite(y) ? y.toFixed(0) : '—';
             return `
-              <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; padding:4px 0; border-top: 1px solid rgba(255,255,255,0.06);">
-                <span style="font-size: 10px; color: #aaa;">#${idx + 1}: (${xTxt}, ${yTxt})</span>
-                <div style="display:flex; gap:4px; align-items:center;">
-                  <button type="button" class="center-point-btn" data-point-index="${idx}" title="Center map on this point" style="
-                    padding: 2px 8px;
-                    font-size: 10px;
-                    background: rgba(60, 100, 160, 0.65);
-                    border: none;
-                    border-radius: 3px;
-                    color: #eee;
-                    cursor: pointer;
-                  ">
+              <div class="msa-mp-point-row">
+                <span class="msa-mp-point-coords" title="Scene coordinates">#${idx + 1}: (${xTxt}, ${yTxt})</span>
+                <div class="msa-mp-point-actions">
+                  <button type="button" class="msa-mp-btn msa-mp-btn--secondary msa-mp-btn--icon center-point-btn" data-point-index="${idx}" title="Center map on this point">
                     <i class="fas fa-crosshairs"></i>
                   </button>
-                  <button type="button" class="remove-point-btn" data-point-index="${idx}" title="Remove this point" style="
-                    padding: 2px 8px;
-                    font-size: 10px;
-                    background: rgba(180, 60, 60, 0.65);
-                    border: none;
-                    border-radius: 3px;
-                    color: #eee;
-                    cursor: pointer;
-                  ">
+                  <button type="button" class="msa-mp-btn msa-mp-btn--danger msa-mp-btn--icon remove-point-btn" data-point-index="${idx}" title="Remove this point">
                     <i class="fas fa-times"></i>
                   </button>
                 </div>
@@ -10426,157 +10459,118 @@ export class TweakpaneManager {
           }).join('')}
         </div>
       `
-      : `<div style="margin-top: 10px; font-size: 10px; color: #666;">No points yet.</div>`;
+      : `<div class="msa-mp-empty">No points yet. Use <strong>Add Points</strong> to place coordinates on the map.</div>`;
 
     const isRopeGroup = group.effectTarget === 'rope' || group.type === 'rope';
+    const intensityPct = ((group.emission?.intensity ?? 1.0) * 100).toFixed(0);
 
     const content = `
-      <style>
-        form.group-edit-form.mapshine-map-point-edit .rope-controls,
-        form.group-edit-form.mapshine-map-point-edit .rope-controls * {
-          color: #ddd;
-        }
-        form.group-edit-form.mapshine-map-point-edit .rope-controls .notes {
-          color: #aaa;
-        }
-        form.group-edit-form.mapshine-map-point-edit .rope-controls input,
-        form.group-edit-form.mapshine-map-point-edit .rope-controls select {
-          background: rgba(0, 0, 0, 0.25);
-          color: #ddd;
-          border: 1px solid rgba(255, 255, 255, 0.15);
-        }
-        form.group-edit-form.mapshine-map-point-edit .rope-controls input::placeholder {
-          color: rgba(255, 255, 255, 0.45);
-        }
-        form.group-edit-form.mapshine-map-point-edit .rope-texture-browse,
-        form.group-edit-form.mapshine-map-point-edit .add-points-btn,
-        form.group-edit-form.mapshine-map-point-edit .clear-points-btn,
-        form.group-edit-form.mapshine-map-point-edit .center-point-btn,
-        form.group-edit-form.mapshine-map-point-edit .remove-point-btn {
-          width: auto !important;
-          min-width: 0;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          gap: 6px;
-          line-height: 1;
-        }
-        form.group-edit-form.mapshine-map-point-edit .points-list .center-point-btn,
-        form.group-edit-form.mapshine-map-point-edit .points-list .remove-point-btn {
-          flex: 0 0 auto;
-        }
-      </style>
-      <form class="group-edit-form mapshine-map-point-edit">
-        <div class="form-group">
-          <label>Label</label>
-          <input type="text" name="label" value="${group.label || ''}" style="width: 100%;" placeholder="Group name">
-        </div>
-        <div class="form-group">
-          <label>Effect Type</label>
-          <select name="effectTarget" style="width: 100%;">
-            ${Object.entries(effectOptions).map(([key, label]) => 
-              `<option value="${key}" ${key === group.effectTarget ? 'selected' : ''}>${label}</option>`
-            ).join('')}
-          </select>
-        </div>
-        <div class="form-group">
-          <label>Group Type</label>
-          <select name="type" style="width: 100%;">
-            ${Object.entries(groupTypeOptions).map(([key, label]) => 
-              `<option value="${key}" ${key === group.type ? 'selected' : ''}>${label}</option>`
-            ).join('')}
-          </select>
-        </div>
-
-        <div class="rope-controls" style="display: ${isRopeGroup ? 'block' : 'none'};">
-          <hr style="margin: 12px 0; border: none; border-top: 1px solid #444;">
-          <div style="background: #1a1a2e; padding: 10px; border-radius: 4px;">
+      <form class="group-edit-form mapshine-map-point-edit msa-mp-form msa-mp-edit-form">
+        <section class="msa-mp-section">
+          <h4 class="msa-mp-section__title"><i class="fas fa-tag"></i> Identity & effect</h4>
+          <div class="msa-mp-grid-3">
             <div class="form-group">
-              <label>Rope Preset</label>
-              <select name="ropeType" style="width: 100%;">
-                ${Object.entries(ropeTypeOptions).map(([key, label]) =>
-                  `<option value="${key}" ${key === ropeTypeValue ? 'selected' : ''}>${label}</option>`
+              <label>Label</label>
+              <input type="text" name="label" value="${escapeMapPointHtml(group.label || '')}" placeholder="Group name">
+            </div>
+            <div class="form-group">
+              <label>Effect type</label>
+              <select name="effectTarget">
+                ${Object.entries(effectOptions).map(([key, label]) =>
+                  `<option value="${key}" ${key === group.effectTarget ? 'selected' : ''}>${label}</option>`
                 ).join('')}
               </select>
-              <p class="notes" style="margin: 4px 0 0 0; font-size: 10px; color: #666;">
-                Presets set physics defaults (you can still edit values later).
-              </p>
             </div>
+            <div class="form-group">
+              <label>Group type</label>
+              <select name="type">
+                ${Object.entries(groupTypeOptions).map(([key, label]) =>
+                  `<option value="${key}" ${key === group.type ? 'selected' : ''}>${label}</option>`
+                ).join('')}
+              </select>
+            </div>
+          </div>
+          <div class="form-group msa-mp-checkbox-row">
+            <label>
+              <input type="checkbox" name="isEffectSource" ${group.isEffectSource ? 'checked' : ''}>
+              Active (drives effect)
+            </label>
+          </div>
+        </section>
 
-            <div class="form-group" style="display:flex; gap:6px; align-items:center;">
-              <label style="flex: 0 0 70px;">Texture</label>
-              <input type="text" name="ropeTexturePath" value="${texturePathValue}" style="flex: 1;" placeholder="modules/.../rope.webp">
-              <button type="button" class="rope-texture-browse" style="
-                padding: 4px 8px;
-                font-size: 10px;
-                background: #4a4a6a;
-                border: none;
-                border-radius: 3px;
-                color: #ddd;
-                cursor: pointer;
-              ">
+        <section class="msa-mp-section msa-mp-placement-row">
+          <div class="msa-mp-render-layer-panel" style="display: ${mapPointEffectSupportsRenderLayer(group.effectTarget) ? 'block' : 'none'};">
+            ${renderMapPointRenderLayerEditor(group)}
+          </div>
+          ${levelBindingEditorHtml}
+        </section>
+
+        <div class="rope-controls msa-mp-rope-controls" style="display: ${isRopeGroup ? 'block' : 'none'};">
+          <hr class="msa-mp-divider">
+          <div class="msa-mp-panel msa-mp-panel--muted">
+            <h4 class="msa-mp-section__title"><i class="fas fa-link"></i> Rope settings</h4>
+            <div class="msa-mp-grid-2">
+              <div class="form-group">
+                <label>Rope preset</label>
+                <select name="ropeType">
+                  ${Object.entries(ropeTypeOptions).map(([key, label]) =>
+                    `<option value="${key}" ${key === ropeTypeValue ? 'selected' : ''}>${label}</option>`
+                  ).join('')}
+                </select>
+                <p class="msa-mp-hint">Presets set physics defaults (you can still edit values later).</p>
+              </div>
+              <div class="form-group msa-mp-slider-row">
+                <div>
+                  <label>Segment length</label>
+                  <input type="range" name="ropeSegmentLength" min="6" max="64" step="1" value="${Number(group.segmentLength ?? (ropeTypePresetDefaults[ropeTypeValue]?.segmentLength ?? 20))}">
+                </div>
+                <span class="msa-mp-slider-value rope-seglen-value"></span>
+              </div>
+            </div>
+            <div class="form-group msa-mp-rope-texture-row">
+              <label>Texture</label>
+              <input type="text" name="ropeTexturePath" value="${escapeMapPointHtml(texturePathValue)}" placeholder="modules/.../rope.webp">
+              <button type="button" class="msa-mp-btn msa-mp-btn--secondary rope-texture-browse" title="Browse for rope texture">
                 <i class="fas fa-file-image"></i>
               </button>
-            </div>
-
-            <div class="form-group">
-              <label>Segment Length</label>
-              <input type="range" name="ropeSegmentLength" min="6" max="64" step="1" value="${Number(group.segmentLength ?? (ropeTypePresetDefaults[ropeTypeValue]?.segmentLength ?? 20))}" style="width: 100%;">
-              <span class="rope-seglen-value" style="font-size: 10px; color: #888;"></span>
             </div>
           </div>
         </div>
 
-        <div class="form-group">
-          <label>
-            <input type="checkbox" name="isEffectSource" ${group.isEffectSource ? 'checked' : ''} style="margin-right: 6px;">
-            Active (drives effect)
-          </label>
-        </div>
-        ${levelBindingEditorHtml}
-        <hr style="margin: 12px 0; border: none; border-top: 1px solid #444;">
-        <div class="form-group">
-          <label>Emission Intensity</label>
-          <input type="range" name="emissionIntensity" min="0" max="1" step="0.05" 
-            value="${group.emission?.intensity ?? 1.0}" style="width: 100%;">
-          <span class="intensity-value" style="font-size: 10px; color: #888;">${((group.emission?.intensity ?? 1.0) * 100).toFixed(0)}%</span>
-        </div>
-        <hr style="margin: 12px 0; border: none; border-top: 1px solid #444;">
-        <div style="background: #1a1a2e; padding: 10px; border-radius: 4px;">
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <span style="font-size: 11px; color: #aaa;">
-              <strong>${pointCount}</strong> point${pointCount !== 1 ? 's' : ''}
-            </span>
-            <div style="display: flex; gap: 4px;">
-              <button type="button" class="add-points-btn" style="
-                padding: 4px 10px; 
-                font-size: 10px; 
-                background: #3a5a3a; 
-                border: none; 
-                border-radius: 3px; 
-                color: #ddd; 
-                cursor: pointer;
-              ">
-                <i class="fas fa-plus"></i> Add Points
+        <section class="msa-mp-section">
+          <h4 class="msa-mp-section__title"><i class="fas fa-sun"></i> Emission</h4>
+          <div class="form-group msa-mp-slider-row">
+            <div>
+              <label>Intensity</label>
+              <input type="range" name="emissionIntensity" min="0" max="1" step="0.05" value="${group.emission?.intensity ?? 1.0}">
+            </div>
+            <span class="msa-mp-slider-value intensity-value">${intensityPct}%</span>
+          </div>
+        </section>
+
+        <section class="msa-mp-section msa-mp-panel msa-mp-panel--points msa-mp-panel--muted">
+          <div class="msa-mp-toolbar msa-mp-toolbar--between">
+            <span class="msa-mp-toolbar__meta"><strong>${pointCount}</strong> point${pointCount !== 1 ? 's' : ''}</span>
+            <div class="msa-mp-toolbar">
+              <button type="button" class="msa-mp-btn msa-mp-btn--secondary copy-group-info-btn" title="Copy group debug info to clipboard">
+                <i class="fas fa-info-circle"></i> Copy info
               </button>
-              <button type="button" class="clear-points-btn" style="
-                padding: 4px 10px; 
-                font-size: 10px; 
-                background: #6a3a3a; 
-                border: none; 
-                border-radius: 3px; 
-                color: #ddd; 
-                cursor: pointer;
-              ">
+              <button type="button" class="msa-mp-btn msa-mp-btn--secondary focus-group-btn" title="Pan map to group center and show helpers">
+                <i class="fas fa-crosshairs"></i> Focus group
+              </button>
+              <button type="button" class="msa-mp-btn msa-mp-btn--primary add-points-btn" title="Place more points on the map">
+                <i class="fas fa-plus"></i> Add points
+              </button>
+              <button type="button" class="msa-mp-btn msa-mp-btn--danger clear-points-btn" title="Remove all points from this group">
                 <i class="fas fa-eraser"></i> Clear
               </button>
             </div>
           </div>
-          <p style="margin: 8px 0 0 0; font-size: 10px; color: #666;">
-            Click "Add Points" to add more points to this group.
+          <p class="msa-mp-hint msa-mp-hint--inline">
+            Drag handles on the map to reposition points. Use per-point buttons to jump the camera or remove a coordinate.
           </p>
           ${pointsListHtml}
-        </div>
+        </section>
       </form>
     `;
 
@@ -10622,7 +10616,11 @@ export class TweakpaneManager {
             }
 
             const levelSelection = readMapPointLevelBindingFromForm(html);
-            updates.metadata = mapPointsManager.buildMetadataFromLevelSelection(levelSelection);
+            levelSelection.renderLayer = readMapPointRenderLayerFromForm(html, nextEffect);
+            updates.metadata = mapPointsManager.buildMetadataFromLevelSelection(
+              levelSelection,
+              group.metadata,
+            );
             
             await mapPointsManager.updateGroup(groupId, updates);
             ui.notifications.info('Group updated');
@@ -10631,6 +10629,13 @@ export class TweakpaneManager {
             if (mapPointsManager.showVisualHelpers) {
               mapPointsManager.setShowVisualHelpers(true);
             }
+          }
+        },
+        info: {
+          icon: '<i class="fas fa-info-circle"></i>',
+          label: 'Copy Info',
+          callback: () => {
+            copyMapPointGroupInfoToClipboard(groupId, mapPointsManager);
           }
         },
         back: {
@@ -10665,6 +10670,8 @@ export class TweakpaneManager {
       },
       default: 'save',
       render: (html) => {
+        html.closest('.app.window-app')?.addClass('msa-mp-dialog msa-mp-dialog--edit');
+        this._applyMapPointDialogChrome(html);
         // Prevent UI clicks from leaking through to the underlying canvas.
         html.closest('.app.window-app')?.on('pointerdown', (ev) => {
           ev.stopPropagation();
@@ -10696,7 +10703,14 @@ export class TweakpaneManager {
         };
 
         html.find('[name="type"]').on('change', updateRopeControlsVisibility);
-        html.find('[name="effectTarget"]').on('change', updateRopeControlsVisibility);
+        html.find('[name="effectTarget"]').on('change', () => {
+          updateRopeControlsVisibility();
+          const effect = String(html.find('[name="effectTarget"]').val() ?? '');
+          html.find('.msa-mp-render-layer-panel').css(
+            'display',
+            mapPointEffectSupportsRenderLayer(effect) ? 'block' : 'none',
+          );
+        });
         updateRopeControlsVisibility();
 
         const syncLevelFloorRow = () => {
@@ -10822,6 +10836,28 @@ export class TweakpaneManager {
           }
         });
 
+        html.find('.copy-group-info-btn').on('click', async (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          await copyMapPointGroupInfoToClipboard(groupId, mapPointsManager);
+        });
+
+        html.find('.focus-group-btn').on('click', (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const bounds = mapPointsManager.getAreaBounds(groupId) || mapPointsManager._computeBounds(group.points);
+          if (!bounds) return;
+          const worldY = bounds.centerY;
+          const foundryY = Number.isFinite(h) ? (h - worldY) : worldY;
+          try {
+            canvas?.animatePan?.({ x: bounds.centerX, y: foundryY, duration: 250 });
+          } catch (_) {
+            canvas?.pan?.({ x: bounds.centerX, y: foundryY });
+          }
+          mapPointsManager.setShowVisualHelpers(true);
+          ui.notifications.info('Centered on group');
+        });
+
         // Focus on group
         const bounds = mapPointsManager.getAreaBounds(groupId) || mapPointsManager._computeBounds(group.points);
         if (bounds) {
@@ -10831,8 +10867,9 @@ export class TweakpaneManager {
         }
       }
     }, {
-      width: 460,
-      height: 'auto'
+      width: 820,
+      height: 'auto',
+      classes: ['msa-mp-dialog', 'msa-mp-dialog--edit'],
     });
 
     dialog.render(true);

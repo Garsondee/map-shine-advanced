@@ -13,16 +13,22 @@ import {
   readWallHeightFlags,
 } from '../../foundry/levels-scene-flags.js';
 import { resolveClusteringElevation } from '../../scene/map-point-wall-clustering.js';
+import {
+  MAP_POINT_RENDER_LAYER_ABOVE,
+  MAP_POINT_RENDER_LAYER_BELOW,
+} from '../../scene/map-points-manager.js';
+import {
+  effectAboveOverheadOrder,
+  effectUnderOverheadOrder,
+} from '../LayerOrderPolicy.js';
 import { VisionPolygonComputer } from '../../vision/VisionPolygonComputer.js';
 import { LightMesh } from '../../scene/LightMesh.js';
 
 const log = createLogger('CandleFlamesEffectV2');
 
-// IMPORTANT (V2): FloorRenderBus tiles use very large renderOrder ranges
-// (floorIndex * 10000 + tile sort). If candle flames keep low renderOrder
-// values (~120), they draw before tiles and get overwritten, making flames
-// appear invisible while glow/light flicker still works.
-const CANDLE_FLAME_RENDER_ORDER = 200100;
+// Flame sprites use per-band renderOrder (below vs above overhead); see _applyFlameMeshRenderOrders.
+const CANDLE_FLAME_BELOW_INTRA = 60;
+const CANDLE_FLAME_ABOVE_INTRA = 60;
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
@@ -199,21 +205,24 @@ export class CandleFlamesEffectV2 {
     this._lightingEffect = null;
 
     this._group = null;
-    this._flameMesh = null;
+    this._groupBelow = null;
+    this._groupAbove = null;
+    this._flameMeshBelow = null;
+    this._flameMeshAbove = null;
     this._flameMaterial = null;
-    this._flameGeometry = null;
+    this._flameGeometryBelow = null;
+    this._flameGeometryAbove = null;
 
     this._dummy = null;
 
-    this._attrPhase = null;
-    this._attrOutdoor = null;
-    this._attrIntensity = null;
-    this._attrColor = null;
-
-    this._phaseArray = null;
-    this._outdoorArray = null;
-    this._intensityArray = null;
-    this._colorArray = null;
+    this._phaseArrayBelow = null;
+    this._phaseArrayAbove = null;
+    this._outdoorArrayBelow = null;
+    this._outdoorArrayAbove = null;
+    this._intensityArrayBelow = null;
+    this._intensityArrayAbove = null;
+    this._colorArrayBelow = null;
+    this._colorArrayAbove = null;
 
     this._visionComputer = new VisionPolygonComputer();
 
@@ -735,8 +744,11 @@ export class CandleFlamesEffectV2 {
 
     if (paramId === 'maxFlames') {
       this._createFlameMesh();
-      if (this._group && this._flameMesh && !this._flameMesh.parent) {
-        this._group.add(this._flameMesh);
+      if (this._group && this._flameMeshBelow && !this._flameMeshBelow.parent) {
+        this._groupBelow?.add(this._flameMeshBelow);
+      }
+      if (this._group && this._flameMeshAbove && !this._flameMeshAbove.parent) {
+        this._groupAbove?.add(this._flameMeshAbove);
       }
       this._rebuildFromMapPoints();
       return;
@@ -845,8 +857,12 @@ export class CandleFlamesEffectV2 {
       this._group.visible = show;
     }
 
-    if (this._flameMesh) {
-      this._flameMesh.visible = show && !!this.params.flamesEnabled && (this._flameMesh.count > 0);
+    const showFlames = show && !!this.params.flamesEnabled;
+    if (this._flameMeshBelow) {
+      this._flameMeshBelow.visible = showFlames && (this._flameMeshBelow.count > 0);
+    }
+    if (this._flameMeshAbove) {
+      this._flameMeshAbove.visible = showFlames && (this._flameMeshAbove.count > 0);
     }
 
     if (this._glowGroup) {
@@ -867,12 +883,20 @@ export class CandleFlamesEffectV2 {
 
     this._group = new THREE.Group();
     this._group.name = 'CandleFlames';
-    this._group.renderOrder = CANDLE_FLAME_RENDER_ORDER;
+    this._groupBelow = new THREE.Group();
+    this._groupBelow.name = 'CandleFlamesBelow';
+    this._groupAbove = new THREE.Group();
+    this._groupAbove.name = 'CandleFlamesAbove';
+    this._group.add(this._groupBelow);
+    this._group.add(this._groupAbove);
 
     this._createFlameMesh();
 
-    if (this._flameMesh) {
-      this._group.add(this._flameMesh);
+    if (this._flameMeshBelow) {
+      this._groupBelow.add(this._flameMeshBelow);
+    }
+    if (this._flameMeshAbove) {
+      this._groupAbove.add(this._flameMeshAbove);
     }
 
     if (this.scene) {
@@ -939,11 +963,11 @@ export class CandleFlamesEffectV2 {
       }
     }
 
-    if (this._flameMesh && this._flameMesh.parent !== this._group) {
-      try {
-        this._group.add(this._flameMesh);
-      } catch (_) {
-      }
+    if (this._flameMeshBelow && this._flameMeshBelow.parent !== this._groupBelow) {
+      try { this._groupBelow.add(this._flameMeshBelow); } catch (_) {}
+    }
+    if (this._flameMeshAbove && this._flameMeshAbove.parent !== this._groupAbove) {
+      try { this._groupAbove.add(this._flameMeshAbove); } catch (_) {}
     }
   }
 
@@ -1077,6 +1101,7 @@ export class CandleFlamesEffectV2 {
   onFloorChange(_maxFloorIndex) {
     this.setActiveLevelContext(window.MapShine?.activeLevelContext ?? null);
     this._sceneBounds = buildEffectSceneBoundsFromCanvas();
+    this._applyFlameMeshRenderOrders();
   }
 
   /** @private */
@@ -1140,10 +1165,10 @@ export class CandleFlamesEffectV2 {
     }
 
     try {
-      if (this._flameMesh) {
-        this._flameMesh.removeFromParent();
-      }
-      if (this._flameGeometry) this._flameGeometry.dispose();
+      if (this._flameMeshBelow) this._flameMeshBelow.removeFromParent();
+      if (this._flameMeshAbove) this._flameMeshAbove.removeFromParent();
+      if (this._flameGeometryBelow) this._flameGeometryBelow.dispose();
+      if (this._flameGeometryAbove) this._flameGeometryAbove.dispose();
       if (this._flameMaterial) this._flameMaterial.dispose();
     } catch (_) {
     }
@@ -1153,10 +1178,14 @@ export class CandleFlamesEffectV2 {
     } catch (_) {
     }
 
-    this._flameMesh = null;
-    this._flameGeometry = null;
+    this._flameMeshBelow = null;
+    this._flameMeshAbove = null;
+    this._flameGeometryBelow = null;
+    this._flameGeometryAbove = null;
     this._flameMaterial = null;
     this._group = null;
+    this._groupBelow = null;
+    this._groupAbove = null;
     this._glowGroup = null;
     this.isInitialized = false;
   }
@@ -1714,6 +1743,94 @@ export class CandleFlamesEffectV2 {
   }
 
   /**
+   * Walls that block sight but not light still block indoor candle glow.
+   * @private
+   */
+  _collectIndoorSightOnlyAdditionalSegments(centerFoundry, radiusPx, walls, elevation) {
+    if (!centerFoundry || !(radiusPx > 0) || !walls?.length) return [];
+    if (!Number.isFinite(Number(elevation))) return [];
+
+    const sightOnlyWalls = [];
+    for (const wallLike of walls) {
+      const doc = wallLike?.document ?? wallLike;
+      if (!doc) continue;
+      if (Number(doc.light ?? 0) !== 0) continue;
+      if (Number(doc.sight ?? 0) === 0) continue;
+      sightOnlyWalls.push(wallLike);
+    }
+    if (!sightOnlyWalls.length) return [];
+
+    const segments = [];
+    try {
+      this._visionComputer.wallsToSegments(
+        sightOnlyWalls,
+        centerFoundry,
+        radiusPx,
+        'sight',
+        segments,
+        Number(elevation),
+        null,
+        null,
+        false,
+      );
+    } catch (_) {
+      return [];
+    }
+
+    const out = [];
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      if (!seg?.a || !seg?.b) continue;
+      out.push({ x0: seg.a.x, y0: seg.a.y, x1: seg.b.x, y1: seg.b.y });
+    }
+    return out;
+  }
+
+  /**
+   * @private
+   * @param {import('../../scene/map-points-manager.js').MapPointGroup|null|undefined} group
+   * @returns {'below-overhead'|'above-overhead'}
+   */
+  _resolveGroupRenderLayer(group) {
+    return group?.metadata?.renderLayer === MAP_POINT_RENDER_LAYER_ABOVE
+      ? MAP_POINT_RENDER_LAYER_ABOVE
+      : MAP_POINT_RENDER_LAYER_BELOW;
+  }
+
+  /** @private */
+  _applyFlameMeshRenderOrders() {
+    const floorIndex = this._resolveGlowFloorIndex();
+    if (this._groupBelow) {
+      this._groupBelow.renderOrder = effectUnderOverheadOrder(
+        floorIndex,
+        CANDLE_FLAME_BELOW_INTRA,
+      );
+    }
+    if (this._groupAbove) {
+      this._groupAbove.renderOrder = effectAboveOverheadOrder(
+        floorIndex,
+        CANDLE_FLAME_ABOVE_INTRA,
+      );
+    }
+    if (this._flameMeshBelow) this._flameMeshBelow.renderOrder = 0;
+    if (this._flameMeshAbove) this._flameMeshAbove.renderOrder = 0;
+  }
+
+  /**
+   * @private
+   * @param {import('../../scene/LightMesh.js').LightMesh|null|undefined} lm
+   * @param {'below-overhead'|'above-overhead'} renderLayer
+   */
+  _tagGlowMeshRenderLayer(lm, renderLayer) {
+    const mesh = lm?.mesh;
+    if (!mesh) return;
+    mesh.layers.set(0);
+    mesh.userData.msaRoofLightGate = renderLayer === MAP_POINT_RENDER_LAYER_ABOVE
+      ? MAP_POINT_RENDER_LAYER_ABOVE
+      : MAP_POINT_RENDER_LAYER_BELOW;
+  }
+
+  /**
    * Build clipped pool boundary points, or null for an unconstrained radial pool.
    * @private
    * @returns {{ worldPoints: number[]|null, skip: boolean }}
@@ -1754,16 +1871,27 @@ export class CandleFlamesEffectV2 {
       }
     };
 
-    const tryModes = indoor
-      ? [
-        wallClipOptions,
-        { ...wallClipOptions, blockGeometry: true },
-        { ...wallClipOptions, blockGeometry: false, sense: 'light' },
-      ]
-      : [
-        wallClipOptions,
-        { ...wallClipOptions, blockGeometry: true },
-      ];
+    const lightSenseOpts = {
+      ...wallClipOptions,
+      blockGeometry: false,
+      sense: 'light',
+    };
+    if (indoor) {
+      const extra = this._collectIndoorSightOnlyAdditionalSegments(
+        clipCenter,
+        clipRadiusPx,
+        walls,
+        elevation,
+      );
+      if (extra.length) {
+        lightSenseOpts.additionalSegments = extra;
+      }
+    }
+
+    const tryModes = [
+      lightSenseOpts,
+      { ...wallClipOptions, blockGeometry: true },
+    ];
 
     for (const options of tryModes) {
       const foundryPoly = tryCompute(options);
@@ -1777,8 +1905,9 @@ export class CandleFlamesEffectV2 {
       return { worldPoints: null, skip: false };
     }
 
-    // Physical walls exist but every clip mode returned a full circle — suppress bleed.
-    return { worldPoints: null, skip: indoor };
+    // Clip produced only full circles (open center / clip miss) — fall back to radial pool.
+    // Do not skip indoor clusters: center-room chandeliers must still emit glow.
+    return { worldPoints: null, skip: false };
   }
 
   /**
@@ -1810,13 +1939,10 @@ export class CandleFlamesEffectV2 {
    * @param {{ indoor?: boolean, v14LevelScoped?: boolean }} [opts]
    */
   _buildGlowWallClipOptions(sourceElevation = null, opts = {}) {
-    const indoor = opts.indoor === true;
     const v14LevelScoped = opts.v14LevelScoped === true;
     const clipOpts = {
-      // Indoor: physical segments first so sight-only walls still block gameplay glow.
-      // Outdoor: Foundry light thresholds so windows / proximity walls pass through.
       sense: 'light',
-      blockGeometry: indoor,
+      blockGeometry: false,
       circleSegments: 96,
     };
     try {
@@ -1865,20 +1991,22 @@ export class CandleFlamesEffectV2 {
     const THREE = window.THREE;
     if (!THREE) return;
 
-    if (this._flameMesh) {
-      try {
-        this._flameMesh.removeFromParent();
-      } catch (_) {
-      }
-      this._flameMesh = null;
+    if (this._flameMeshBelow) {
+      try { this._flameMeshBelow.removeFromParent(); } catch (_) {}
+      this._flameMeshBelow = null;
+    }
+    if (this._flameMeshAbove) {
+      try { this._flameMeshAbove.removeFromParent(); } catch (_) {}
+      this._flameMeshAbove = null;
     }
 
-    if (this._flameGeometry) {
-      try {
-        this._flameGeometry.dispose();
-      } catch (_) {
-      }
-      this._flameGeometry = null;
+    if (this._flameGeometryBelow) {
+      try { this._flameGeometryBelow.dispose(); } catch (_) {}
+      this._flameGeometryBelow = null;
+    }
+    if (this._flameGeometryAbove) {
+      try { this._flameGeometryAbove.dispose(); } catch (_) {}
+      this._flameGeometryAbove = null;
     }
 
     if (this._flameMaterial) {
@@ -1888,8 +2016,6 @@ export class CandleFlamesEffectV2 {
       }
       this._flameMaterial = null;
     }
-
-    const geometry = new THREE.PlaneGeometry(1, 1, 1, 1);
 
     const material = new THREE.ShaderMaterial({
       uniforms: {
@@ -2105,35 +2231,68 @@ export class CandleFlamesEffectV2 {
     });
 
     material.toneMapped = false;
+    this._flameMaterial = material;
 
-    this._phaseArray = new Float32Array(this.params.maxFlames);
-    this._outdoorArray = new Float32Array(this.params.maxFlames);
-    this._intensityArray = new Float32Array(this.params.maxFlames);
-    this._colorArray = new Float32Array(this.params.maxFlames * 3);
+    const below = this._buildFlameInstancedMesh(material);
+    this._flameGeometryBelow = below.geometry;
+    this._flameMeshBelow = below.mesh;
+    this._phaseArrayBelow = below.phaseArray;
+    this._outdoorArrayBelow = below.outdoorArray;
+    this._intensityArrayBelow = below.intensityArray;
+    this._colorArrayBelow = below.colorArray;
 
-    this._attrPhase = new THREE.InstancedBufferAttribute(this._phaseArray, 1);
-    this._attrOutdoor = new THREE.InstancedBufferAttribute(this._outdoorArray, 1);
-    this._attrIntensity = new THREE.InstancedBufferAttribute(this._intensityArray, 1);
-    this._attrColor = new THREE.InstancedBufferAttribute(this._colorArray, 3);
+    const above = this._buildFlameInstancedMesh(material);
+    this._flameGeometryAbove = above.geometry;
+    this._flameMeshAbove = above.mesh;
+    this._phaseArrayAbove = above.phaseArray;
+    this._outdoorArrayAbove = above.outdoorArray;
+    this._intensityArrayAbove = above.intensityArray;
+    this._colorArrayAbove = above.colorArray;
 
-    this._attrPhase.setUsage(THREE.DynamicDrawUsage);
-    this._attrOutdoor.setUsage(THREE.DynamicDrawUsage);
-    this._attrIntensity.setUsage(THREE.DynamicDrawUsage);
-    this._attrColor.setUsage(THREE.DynamicDrawUsage);
+    this._applyFlameMeshRenderOrders();
+  }
 
-    geometry.setAttribute('aPhase', this._attrPhase);
-    geometry.setAttribute('aOutdoor', this._attrOutdoor);
-    geometry.setAttribute('aIntensity', this._attrIntensity);
-    geometry.setAttribute('aColor', this._attrColor);
+  /**
+   * @private
+   * @param {import('three').ShaderMaterial} material
+   */
+  _buildFlameInstancedMesh(material) {
+    const THREE = window.THREE;
+    const maxFlames = Math.max(0, this.params.maxFlames | 0);
+    const geometry = new THREE.PlaneGeometry(1, 1, 1, 1);
 
-    const mesh = new THREE.InstancedMesh(geometry, material, this.params.maxFlames);
+    const phaseArray = new Float32Array(maxFlames);
+    const outdoorArray = new Float32Array(maxFlames);
+    const intensityArray = new Float32Array(maxFlames);
+    const colorArray = new Float32Array(maxFlames * 3);
+
+    const attrPhase = new THREE.InstancedBufferAttribute(phaseArray, 1);
+    const attrOutdoor = new THREE.InstancedBufferAttribute(outdoorArray, 1);
+    const attrIntensity = new THREE.InstancedBufferAttribute(intensityArray, 1);
+    const attrColor = new THREE.InstancedBufferAttribute(colorArray, 3);
+
+    attrPhase.setUsage(THREE.DynamicDrawUsage);
+    attrOutdoor.setUsage(THREE.DynamicDrawUsage);
+    attrIntensity.setUsage(THREE.DynamicDrawUsage);
+    attrColor.setUsage(THREE.DynamicDrawUsage);
+
+    geometry.setAttribute('aPhase', attrPhase);
+    geometry.setAttribute('aOutdoor', attrOutdoor);
+    geometry.setAttribute('aIntensity', attrIntensity);
+    geometry.setAttribute('aColor', attrColor);
+
+    const mesh = new THREE.InstancedMesh(geometry, material, maxFlames);
     mesh.frustumCulled = false;
     mesh.count = 0;
-    mesh.renderOrder = CANDLE_FLAME_RENDER_ORDER;
 
-    this._flameGeometry = geometry;
-    this._flameMaterial = material;
-    this._flameMesh = mesh;
+    return {
+      mesh,
+      geometry,
+      phaseArray,
+      outdoorArray,
+      intensityArray,
+      colorArray,
+    };
   }
 
   _rebuildFromMapPoints() {
@@ -2164,6 +2323,7 @@ export class CandleFlamesEffectV2 {
           y: p.y,
           intensity,
           floorCtx: this._resolveGroupFloorContext(g),
+          renderLayer: this._resolveGroupRenderLayer(g),
         });
       }
     }
@@ -2193,18 +2353,20 @@ export class CandleFlamesEffectV2 {
     const buckets = new Map();
     const bucketSize = Math.max(32, this.params.glowBucketSizePx);
 
-    let written = 0;
+    let writtenBelow = 0;
+    let writtenAbove = 0;
 
     for (let i = 0; i < points.length; i++) {
       const pt = points[i];
       const wx = pt.x;
       const wy = pt.y;
+      const renderLayer = pt.renderLayer ?? MAP_POINT_RENDER_LAYER_BELOW;
 
       const outdoor = this._sampleGlowOutdoorAtWorld(wx, wy);
 
       const bx = Math.floor(wx / bucketSize);
       const by = Math.floor(wy / bucketSize);
-      const key = `${bx},${by}`;
+      const key = `${bx},${by}:${renderLayer}`;
 
       let b = buckets.get(key);
       if (!b) {
@@ -2217,6 +2379,7 @@ export class CandleFlamesEffectV2 {
           minOutdoor: 1.0,
           count: 0,
           floorCtx: null,
+          renderLayer,
         };
         buckets.set(key, b);
       }
@@ -2231,10 +2394,13 @@ export class CandleFlamesEffectV2 {
       b.minOutdoor = Math.min(b.minOutdoor, outdoor);
       b.count += 1;
 
-      if (written < maxFlames) {
+      const aboveOverhead = renderLayer === MAP_POINT_RENDER_LAYER_ABOVE;
+      const flameMesh = aboveOverhead ? this._flameMeshAbove : this._flameMeshBelow;
+      const writeIdx = aboveOverhead ? writtenAbove : writtenBelow;
+      if (flameMesh && writeIdx < maxFlames) {
         const phase = this._hash2(wx, wy);
 
-        // Stable per-candle size variance (avoids synchronous ΓÇ£cloneΓÇ¥ look).
+        // Stable per-candle size variance (avoids synchronous “clone” look).
         const sizeRand = Math.sin((phase + 0.13) * 1000.0) * 43758.5453;
         const size01 = sizeRand - Math.floor(sizeRand);
         const sizeVar = 1.0 + (size01 * 2.0 - 1.0) * sizeJitter;
@@ -2244,43 +2410,58 @@ export class CandleFlamesEffectV2 {
         this._dummy.rotation.set(0, 0, phase * Math.PI * 2);
         this._dummy.scale.set(s, s, 1);
         this._dummy.updateMatrix();
-        this._flameMesh.setMatrixAt(written, this._dummy.matrix);
+        flameMesh.setMatrixAt(writeIdx, this._dummy.matrix);
 
-        this._phaseArray[written] = phase;
-        this._outdoorArray[written] = outdoor;
-        // Keep a small minimum so flames remain visible even when map-point
-        // emission intensity is authored as 0 (glow already uses a similar floor).
-        this._intensityArray[written] = Math.max(0.25, Number(pt.intensity) || 0);
+        const phaseArray = aboveOverhead ? this._phaseArrayAbove : this._phaseArrayBelow;
+        const outdoorArray = aboveOverhead ? this._outdoorArrayAbove : this._outdoorArrayBelow;
+        const intensityArray = aboveOverhead ? this._intensityArrayAbove : this._intensityArrayBelow;
+        const colorArray = aboveOverhead ? this._colorArrayAbove : this._colorArrayBelow;
 
-        const cIdx = written * 3;
-        this._colorArray[cIdx] = baseR;
-        this._colorArray[cIdx + 1] = baseG;
-        this._colorArray[cIdx + 2] = baseB;
+        phaseArray[writeIdx] = phase;
+        outdoorArray[writeIdx] = outdoor;
+        intensityArray[writeIdx] = Math.max(0.25, Number(pt.intensity) || 0);
 
-        written++;
+        const cIdx = writeIdx * 3;
+        colorArray[cIdx] = baseR;
+        colorArray[cIdx + 1] = baseG;
+        colorArray[cIdx + 2] = baseB;
+
+        if (aboveOverhead) writtenAbove += 1;
+        else writtenBelow += 1;
       }
     }
 
-    this._sourceFlameCount = written;
-    this._setFlameCount(this.params.flamesEnabled ? written : 0);
+    this._sourceFlameCount = writtenBelow + writtenAbove;
+    this._setFlameCounts(
+      this.params.flamesEnabled ? writtenBelow : 0,
+      this.params.flamesEnabled ? writtenAbove : 0,
+    );
+    this._applyFlameMeshRenderOrders();
 
     this._clusters.length = 0;
 
     const maxBuckets = Math.max(1, this.params.glowMaxBuckets | 0);
-    const list = [];
+    const belowList = [];
+    const aboveList = [];
     for (const [key, b] of buckets.entries()) {
       if (!b || b.count <= 0) continue;
-      list.push({ key, ...b });
+      const item = { key, ...b };
+      if ((b.renderLayer ?? MAP_POINT_RENDER_LAYER_BELOW) === MAP_POINT_RENDER_LAYER_ABOVE) {
+        aboveList.push(item);
+      } else {
+        belowList.push(item);
+      }
     }
 
-    list.sort((a, b) => (b.sumI - a.sumI) || (b.count - a.count));
+    belowList.sort((a, b) => (b.sumI - a.sumI) || (b.count - a.count));
+    aboveList.sort((a, b) => (b.sumI - a.sumI) || (b.count - a.count));
 
-    const take = Math.min(list.length, maxBuckets);
+    const takeBelow = Math.min(belowList.length, maxBuckets);
+    const takeAbove = Math.min(aboveList.length, maxBuckets);
 
     const clipRadiusScale = Math.max(0.1, Number(this.params.wallClipRadiusScale) || 1.0);
 
-    for (let i = 0; i < take; i++) {
-      const b = list[i];
+    const pushClusterFromBucket = (b) => {
       const cxWorld = b.sumX / b.count;
       const cyWorld = b.sumY / b.count;
       const outdoorAtCenter = this._sampleGlowOutdoorAtWorld(cxWorld, cyWorld);
@@ -2318,29 +2499,63 @@ export class CandleFlamesEffectV2 {
         phase,
         outdoor: outdoorForGlow,
         color: this._computeGlowColor(glow.warmth),
+        renderLayer: b.renderLayer ?? MAP_POINT_RENDER_LAYER_BELOW,
       });
+    };
+
+    for (let i = 0; i < takeBelow; i++) {
+      pushClusterFromBucket(belowList[i]);
+    }
+    for (let i = 0; i < takeAbove; i++) {
+      pushClusterFromBucket(aboveList[i]);
     }
 
     this._rebuildGlowMeshes();
   }
 
-  _setFlameCount(n) {
+  _setFlameCounts(belowCount, aboveCount) {
     const THREE = window.THREE;
-    if (!THREE || !this._flameMesh) return;
+    if (!THREE) return;
 
-    const count = Math.max(0, Math.min(this.params.maxFlames | 0, n | 0));
+    const maxFlames = Math.max(0, this.params.maxFlames | 0);
+    const below = Math.max(0, Math.min(maxFlames, belowCount | 0));
+    const above = Math.max(0, Math.min(maxFlames, aboveCount | 0));
+    const showFlames = !!this.params.flamesEnabled;
 
-    this._flameMesh.count = count;
-    this._flameMesh.visible = !!this.params.flamesEnabled && count > 0;
-
-    if (this._flameMesh.instanceMatrix) {
-      this._flameMesh.instanceMatrix.needsUpdate = true;
+    if (this._flameMeshBelow) {
+      this._flameMeshBelow.count = below;
+      this._flameMeshBelow.visible = showFlames && below > 0;
+      if (this._flameMeshBelow.instanceMatrix) {
+        this._flameMeshBelow.instanceMatrix.needsUpdate = true;
+      }
     }
 
-    if (this._attrPhase) this._attrPhase.needsUpdate = true;
-    if (this._attrOutdoor) this._attrOutdoor.needsUpdate = true;
-    if (this._attrIntensity) this._attrIntensity.needsUpdate = true;
-    if (this._attrColor) this._attrColor.needsUpdate = true;
+    if (this._flameMeshAbove) {
+      this._flameMeshAbove.count = above;
+      this._flameMeshAbove.visible = showFlames && above > 0;
+      if (this._flameMeshAbove.instanceMatrix) {
+        this._flameMeshAbove.instanceMatrix.needsUpdate = true;
+      }
+    }
+
+    const geos = [
+      this._flameGeometryBelow?.attributes?.aPhase,
+      this._flameGeometryBelow?.attributes?.aOutdoor,
+      this._flameGeometryBelow?.attributes?.aIntensity,
+      this._flameGeometryBelow?.attributes?.aColor,
+      this._flameGeometryAbove?.attributes?.aPhase,
+      this._flameGeometryAbove?.attributes?.aOutdoor,
+      this._flameGeometryAbove?.attributes?.aIntensity,
+      this._flameGeometryAbove?.attributes?.aColor,
+    ];
+    for (const attr of geos) {
+      if (attr) attr.needsUpdate = true;
+    }
+  }
+
+  /** @private @param {number} n Legacy single-mesh count (below band only). */
+  _setFlameCount(n) {
+    this._setFlameCounts(n, 0);
   }
 
   /** @private */
@@ -2362,6 +2577,17 @@ export class CandleFlamesEffectV2 {
       return;
     }
     if (entry.lightMesh) fn(entry.lightMesh);
+  }
+
+  /** @returns {boolean} True when any live glow bucket is tagged above-overhead. */
+  hasAboveOverheadGlowBuckets() {
+    if (!this.params?.glowEnabled || !this._glowBuckets?.size) return false;
+    for (const entry of this._glowBuckets.values()) {
+      if ((entry?.renderLayer ?? MAP_POINT_RENDER_LAYER_BELOW) === MAP_POINT_RENDER_LAYER_ABOVE) {
+        return true;
+      }
+    }
+    return false;
   }
 
   _clearGlowBuckets() {
@@ -2493,6 +2719,7 @@ export class CandleFlamesEffectV2 {
 
         if (lm?.mesh) {
           lm.mesh.renderOrder = 90;
+          this._tagGlowMeshRenderLayer(lm, c.renderLayer ?? MAP_POINT_RENDER_LAYER_BELOW);
           this._glowGroup.add(lm.mesh);
           lightMeshes.push(lm);
         }
@@ -2508,7 +2735,8 @@ export class CandleFlamesEffectV2 {
         baseColor,
         intensity: c.intensity,
         phase: c.phase,
-        outdoor: c.outdoor
+        outdoor: c.outdoor,
+        renderLayer: c.renderLayer ?? MAP_POINT_RENDER_LAYER_BELOW,
       });
     }
 

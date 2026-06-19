@@ -80,14 +80,37 @@ export class MapPointDrawHandler {
   /**
    * Resolve map-point metadata for the currently active level context.
    * Falls back to an all-levels contract if level context is unavailable.
+   * @param {{ renderLayer?: 'below-overhead'|'above-overhead'|null, preserveGroup?: import('./map-points-manager.js').MapPointGroup|null }} [opts]
    * @returns {Object}
    * @private
    */
-  _getActiveLevelMetadata() {
+  _getActiveLevelMetadata(opts = {}) {
     const mapPointsManager = window.MapShine?.mapPointsManager;
-    if (typeof mapPointsManager?.buildMetadataFromLevelContext === 'function') {
-      return mapPointsManager.buildMetadataFromLevelContext(window.MapShine?.activeLevelContext ?? null);
+    const preserveGroup = opts?.preserveGroup ?? null;
+    const renderLayer = opts?.renderLayer
+      ?? preserveGroup?.metadata?.renderLayer
+      ?? null;
+
+    if (typeof mapPointsManager?.buildMetadataFromLevelSelection === 'function') {
+      const binding = preserveGroup?.metadata?.levelBinding;
+      const mode = binding?.mode === 'locked' ? 'locked' : 'all-levels';
+      const levelId = (typeof binding?.floorKey === 'string' && binding.floorKey.length > 0)
+        ? binding.floorKey
+        : null;
+      return mapPointsManager.buildMetadataFromLevelSelection(
+        { mode, levelId, renderLayer },
+        preserveGroup?.metadata ?? null,
+      );
     }
+
+    if (typeof mapPointsManager?.buildMetadataFromLevelContext === 'function') {
+      const base = mapPointsManager.buildMetadataFromLevelContext(window.MapShine?.activeLevelContext ?? null);
+      if (renderLayer) {
+        return { ...base, renderLayer };
+      }
+      return base;
+    }
+
     return {
       levelBinding: {
         mode: 'all-levels',
@@ -95,6 +118,7 @@ export class MapPointDrawHandler {
         top: null,
         floorKey: null,
       },
+      renderLayer: renderLayer ?? 'below-overhead',
     };
   }
 
@@ -206,6 +230,7 @@ export class MapPointDrawHandler {
     this.state.effectTarget = effectTarget;
     this.state.groupType = groupType;
     this.state.ropeType = (options?.ropeType === 'rope' || options?.ropeType === 'chain') ? options.ropeType : null;
+    this.state.renderLayer = options?.renderLayer ?? null;
     this.state.points = [];
     this.state.editingGroupId = null;
     this.state.snapToGrid = snapToGrid;
@@ -296,7 +321,7 @@ export class MapPointDrawHandler {
         const isExistingRopeGroup = existingGroup?.effectTarget === 'rope' || existingGroup?.type === 'rope';
         const updates = {
           points: points.map(p => ({ x: p.x, y: p.y })),
-          metadata: this._getActiveLevelMetadata(),
+          metadata: this._getActiveLevelMetadata({ preserveGroup: existingGroup }),
         };
 
         // Preserve rope-specific properties when editing a rope group
@@ -337,7 +362,7 @@ export class MapPointDrawHandler {
           isEffectSource: isRope ? false : true,
           effectTarget: isRopeEffect ? 'rope' : (isRope ? '' : effectTarget),
           ropeType: isRopeEffect ? ropePreset : undefined,
-          metadata: this._getActiveLevelMetadata(),
+          metadata: this._getActiveLevelMetadata({ renderLayer: this.state.renderLayer }),
         });
 
         log.info(`Created map point group: ${group.id}`);
@@ -728,7 +753,7 @@ export class MapPointDrawHandler {
               ...group,
               id: undefined,
               label: `${group.label} (copy)`,
-              metadata: this._getActiveLevelMetadata(),
+              metadata: this._getActiveLevelMetadata({ preserveGroup: group }),
             });
             log.info(`Created map point group: ${newGroup.id}`);
             ui.notifications.info(`Duplicated: ${newGroup.label}`);

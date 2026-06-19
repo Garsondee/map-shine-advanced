@@ -2411,6 +2411,16 @@ export class StreamedRegionGrid {
 
   /** @private */
   _isFloorVisible() {
+    if (this._bus && typeof this._bus._computeEntryVisibleForSlice === 'function') {
+      const entry = this._bus._tiles?.get?.(this._key) ?? null;
+      if (entry) {
+        return this._bus._computeEntryVisibleForSlice(this._key, entry);
+      }
+      if (this._isOverhead && typeof this._bus._isBusTileOnActiveLevelView === 'function') {
+        return this._bus._isBusTileOnActiveLevelView(this._key)
+          && !this._bus._suppressTileAlbedoForEditing;
+      }
+    }
     const maxFloor = Number.isFinite(Number(this._bus?._visibleMaxFloorIndex))
       ? Number(this._bus._visibleMaxFloorIndex)
       : Infinity;

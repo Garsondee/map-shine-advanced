@@ -461,6 +461,7 @@ export class FloorRenderBus {
         void this._evaluateTileStreaming(tileId, entry, Number(entry.floorIndex) || 0);
       }
       this._recoverStuckOverheadBandTiles();
+      this._migrateOverheadStaticAlbedoToStreaming();
       this._maybeEnsureForegroundStackLoaded();
       getTileStreamingManager().update();
       this._applyTileVisibility();
@@ -550,25 +551,51 @@ export class FloorRenderBus {
       if (!this._isOverheadBandBusEntry(entry, tileId)) continue;
       if (entry.material?.map) continue;
       if (this._busTileHasStreamingCells(tileId)) continue;
+      if (entry.mapShineStreamedRegion || manager.hasBusTile(tileId)) continue;
       if (entry.mapShineOverheadAlbedoRecovery) continue;
       if (!entry.textureSrc) continue;
 
       entry.mapShineBackgroundStreamServed = false;
-      entry.mapShineStreamedRegion = false;
-      if (manager.hasBusTile(tileId)) {
-        try { manager.unregisterBusTile(tileId); } catch (_) {}
-      }
       if (entry.mesh) {
         entry.mesh.visible = this._computeEntryVisibleForSlice(tileId, entry);
       }
       entry.mapShineOverheadAlbedoRecovery = true;
-      void this._loadTileAlbedoFromUrlAsync(
-        tileId,
-        entry.textureSrc,
-        Number(entry.floorIndex) || 0,
-        { forceNonStreaming: true },
-      ).finally(() => {
-        entry.mapShineOverheadAlbedoRecovery = false;
+      const floorIndex = Number(entry.floorIndex) || 0;
+      void this._evaluateTileStreaming(tileId, entry, floorIndex)
+        .then((streamed) => {
+          if (streamed || entry.material?.map || this._busTileHasStreamingCells(tileId)) return;
+          return this._loadTileAlbedoFromUrlAsync(
+            tileId,
+            entry.textureSrc,
+            floorIndex,
+            { forceNonStreaming: true },
+          );
+        })
+        .finally(() => {
+          entry.mapShineOverheadAlbedoRecovery = false;
+        });
+    }
+  }
+
+  /**
+   * Move overhead tiles off a one-shot downscaled placeholder albedo onto the
+   * streaming pyramid so LOD can sharpen after the initial coarse coverage load.
+   * @private
+   */
+  _migrateOverheadStaticAlbedoToStreaming() {
+    const manager = getTileStreamingManager();
+    for (const [tileId, entry] of this._tiles) {
+      if (String(tileId).startsWith('__')) continue;
+      if (!this._isOverheadBandBusEntry(entry, tileId)) continue;
+      if (entry.mapShineStreamedRegion || manager.hasBusTile(tileId) || this._busTileHasStreamingCells(tileId)) {
+        continue;
+      }
+      if (!entry.material?.map || !entry.textureSrc) continue;
+      if (entry.mapShineOverheadStreamMigrate) continue;
+      entry.mapShineOverheadStreamMigrate = true;
+      const floorIndex = Number(entry.floorIndex) || 0;
+      void this._evaluateTileStreaming(tileId, entry, floorIndex).finally(() => {
+        entry.mapShineOverheadStreamMigrate = false;
       });
     }
   }
@@ -1736,23 +1763,6 @@ export class FloorRenderBus {
 
     const options = this._buildTileStreamingOptions(tileId, entry, floorIndex);
     if (!options?.region) return false;
-
-    const sceneCoverage = this._sceneCoverageForBusRegion(options.region);
-    // Full-scene overhead tiles must not compete with the bg pyramid for streaming
-    // budget — load a downscaled albedo directly so the layer always appears.
-    if (isOverheadTile && sceneCoverage >= 0.72) {
-      if (wasStreamed || manager.hasBusTile(tileId)) {
-        releaseStreaming();
-      }
-      entry.mapShineBackgroundStreamServed = false;
-      if (entry.mesh && !entry.material?.map) {
-        entry.mesh.visible = this._computeEntryVisibleForSlice(tileId, entry);
-      }
-      if (!entry.material?.map) {
-        void this._loadTileAlbedoFromUrlAsync(tileId, src, floorIndex, { forceNonStreaming: true });
-      }
-      return false;
-    }
 
     if (entry.mapShineBackgroundStreamServed && !isOverheadTile) {
       const stillRedundant = manager.isRegionRedundantWithBackground(

@@ -75,9 +75,15 @@ export const EFFECT_SOURCE_OPTIONS = {
  * @property {string|null} floorKey - Optional stable floor identifier
  */
 
+/** Map point effect sits below overhead tiles (default); glow is roof-gated. */
+export const MAP_POINT_RENDER_LAYER_BELOW = 'below-overhead';
+/** Map point effect sits on / above overhead layer; glow reaches ground and overhead. */
+export const MAP_POINT_RENDER_LAYER_ABOVE = 'above-overhead';
+
 /**
  * @typedef {Object} MapPointMetadata
  * @property {LevelBinding} levelBinding - Level ownership/visibility contract
+ * @property {'below-overhead'|'above-overhead'} [renderLayer] - Draw / light band vs overhead tiles
  */
 
 /**
@@ -251,11 +257,18 @@ export class MapPointsManager {
    * @returns {MapPointMetadata}
    * @private
    */
+  _normalizeRenderLayer(raw) {
+    return raw === MAP_POINT_RENDER_LAYER_ABOVE
+      ? MAP_POINT_RENDER_LAYER_ABOVE
+      : MAP_POINT_RENDER_LAYER_BELOW;
+  }
+
   _normalizeMetadata(metadata) {
     const normalized = (metadata && typeof metadata === 'object' && !Array.isArray(metadata))
       ? { ...metadata }
       : {};
     normalized.levelBinding = this._normalizeLevelBinding(normalized.levelBinding);
+    normalized.renderLayer = this._normalizeRenderLayer(normalized.renderLayer);
     return normalized;
   }
 
@@ -306,10 +319,16 @@ export class MapPointsManager {
    * @param {{ mode?: 'all-levels'|'locked', levelId?: string|null }} selection
    * @returns {MapPointMetadata}
    */
-  buildMetadataFromLevelSelection(selection = {}) {
+  buildMetadataFromLevelSelection(selection = {}, prevMetadata = null) {
+    const renderLayer = this._normalizeRenderLayer(
+      selection?.renderLayer ?? prevMetadata?.renderLayer,
+    );
     const mode = selection?.mode === 'locked' ? 'locked' : 'all-levels';
     if (mode !== 'locked') {
-      return this._normalizeMetadata({ levelBinding: this._getDefaultLevelBinding() });
+      return this._normalizeMetadata({
+        levelBinding: this._getDefaultLevelBinding(),
+        renderLayer,
+      });
     }
 
     const levelId = (typeof selection?.levelId === 'string' && selection.levelId.length > 0)
@@ -346,6 +365,7 @@ export class MapPointsManager {
         top: Math.max(bottom, top),
         floorKey: match.levelId ?? levelId,
       },
+      renderLayer,
     });
   }
 

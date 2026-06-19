@@ -67,6 +67,9 @@ export const FLOOR_ALBEDO_OFFSET      = ROLE_OFFSETS.FLOOR_ALBEDO;
 export const FLOOR_EFFECTS_OFFSET     = ROLE_OFFSETS.FLOOR_EFFECTS;
 export const FLOOR_OVERHEAD_OFFSET    = ROLE_OFFSETS.FLOOR_OVERHEAD;
 export const FLOOR_OVERHEAD_FX_OFFSET = ROLE_OFFSETS.FLOOR_OVERHEAD_FX;
+
+/** Three.js layer for gameplay lights that bypass roof / overhead stamp gating. */
+export const MSA_ABOVE_OVERHEAD_LIGHT_LAYER = 25;
 export const FLOOR_MOTION_TOP_OFFSET  = ROLE_OFFSETS.FLOOR_MOTION_TOP;
 
 // ── Z constants (unchanged from FloorRenderBus, re-exported for convenience) ─

@@ -4,6 +4,10 @@
  */
 
 import { readV14SceneLevels } from '../foundry/levels-scene-flags.js';
+import {
+  MAP_POINT_RENDER_LAYER_ABOVE,
+  MAP_POINT_RENDER_LAYER_BELOW,
+} from '../scene/map-points-manager.js';
 
 /**
  * @param {unknown} value
@@ -291,13 +295,13 @@ export function describeActiveMapPointLevelStamp(activeContext = null) {
 export function renderMapPointLevelListBadge(info) {
   if (!info?.isMultiFloorScene) return '';
 
-  const palette = {
-    ok: { bg: 'rgba(60, 120, 80, 0.35)', border: '#4a8a5a', text: '#b8e0c8' },
-    global: { bg: 'rgba(120, 100, 40, 0.35)', border: '#9a8040', text: '#e8dcb0' },
-    hidden: { bg: 'rgba(120, 60, 60, 0.35)', border: '#9a5050', text: '#e8c0c0' },
-    unknown: { bg: 'rgba(120, 80, 40, 0.35)', border: '#a07030', text: '#ecd0a8' },
-  };
-  const p = palette[info.status] ?? palette.ok;
+  const statusClass = {
+    ok: 'msa-mp-level-badge--ok',
+    global: 'msa-mp-level-badge--global',
+    hidden: 'msa-mp-level-badge--hidden',
+    unknown: 'msa-mp-level-badge--unknown',
+  }[info.status] ?? 'msa-mp-level-badge--ok';
+
   const modeShort = info.mode === 'locked' ? escapeMapPointHtml(info.levelLabel) : 'All floors';
   const band = escapeMapPointHtml(info.bandText);
   const viewTag = info.mode === 'locked'
@@ -305,21 +309,9 @@ export function renderMapPointLevelListBadge(info) {
     : '';
 
   return `
-    <span class="msa-mp-level-badge" title="${escapeMapPointHtml(info.hint || '')}" style="
-      display: inline-block;
-      margin-top: 3px;
-      padding: 1px 6px;
-      border-radius: 3px;
-      font-size: 9px;
-      line-height: 1.35;
-      background: ${p.bg};
-      border: 1px solid ${p.border};
-      color: ${p.text};
-      max-width: 100%;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    ">${modeShort} (${band})${escapeMapPointHtml(viewTag)}</span>
+    <span class="msa-mp-level-badge ${statusClass}" title="${escapeMapPointHtml(info.hint || '')}">
+      ${modeShort} (${band})${escapeMapPointHtml(viewTag)}
+    </span>
   `;
 }
 
@@ -332,17 +324,8 @@ export function renderMapPointDrawLevelStamp(activeContext = null) {
   const stamp = describeActiveMapPointLevelStamp(activeContext);
   if (!stamp.isMultiFloor) {
     return `
-      <div class="msa-mp-draw-level-stamp" style="
-        background: #1a1a2e;
-        border: 1px solid rgba(255,255,255,0.08);
-        border-radius: 4px;
-        padding: 10px;
-        margin-top: 8px;
-        font-size: 10px;
-        color: #aaa;
-        line-height: 1.5;
-      ">
-        <div style="font-weight: bold; color: #ccc; margin-bottom: 4px;">
+      <div class="msa-mp-draw-level-stamp">
+        <div class="msa-mp-draw-level-stamp__title">
           <i class="fas fa-layer-group"></i> Floor / elevation
         </div>
         Single-level scene — new groups are not floor-locked.
@@ -357,27 +340,85 @@ export function renderMapPointDrawLevelStamp(activeContext = null) {
   const clipTxt = Number.isFinite(Number(clip)) ? ` Wall-clip test height ≈ ${Number(clip).toFixed(1)}.` : '';
 
   return `
-    <div class="msa-mp-draw-level-stamp" style="
-      background: #142018;
-      border: 1px solid rgba(90, 160, 110, 0.35);
-      border-radius: 4px;
-      padding: 10px;
-      margin-top: 8px;
-      font-size: 10px;
-      color: #b8d0c0;
-      line-height: 1.55;
-    ">
-      <div style="font-weight: bold; color: #d0ecd8; margin-bottom: 4px;">
+    <div class="msa-mp-draw-level-stamp msa-mp-draw-level-stamp--multi">
+      <div class="msa-mp-draw-level-stamp__title">
         <i class="fas fa-layer-group"></i> New group will lock to this floor
       </div>
       <strong>${escapeMapPointHtml(stamp.label)}</strong>
-      <span style="color: #8ab89a;">(elev ${escapeMapPointHtml(stamp.bandText)})</span>${escapeMapPointHtml(clipTxt)}
-      <div style="margin-top: 6px; color: #8aa892;">
+      <span class="msa-mp-draw-level-stamp__band">(elev ${escapeMapPointHtml(stamp.bandText)})</span>${escapeMapPointHtml(clipTxt)}
+      <div class="msa-mp-draw-level-stamp__note">
         Switch the scene level <em>before</em> drawing if you need points on another floor.
         Points store x/y only — floor ownership is saved on the group.
       </div>
     </div>
   `;
+}
+
+/**
+ * Whether a map-point effect supports overhead render-layer placement.
+ * @param {string|null|undefined} effectTarget
+ * @returns {boolean}
+ */
+export function mapPointEffectSupportsRenderLayer(effectTarget) {
+  return effectTarget === 'candleFlame' || effectTarget === 'fire';
+}
+
+/**
+ * Render-layer picker for candle / fire groups (below vs on overhead art).
+ * @param {import('../scene/map-points-manager.js').MapPointGroup|string|null|undefined} groupOrEffectTarget
+ * @param {'below-overhead'|'above-overhead'|null|undefined} [currentRenderLayer]
+ * @returns {string}
+ */
+export function renderMapPointRenderLayerEditor(groupOrEffectTarget, currentRenderLayer = undefined) {
+  const effectTarget = (typeof groupOrEffectTarget === 'object' && groupOrEffectTarget !== null)
+    ? groupOrEffectTarget.effectTarget
+    : groupOrEffectTarget;
+  if (!mapPointEffectSupportsRenderLayer(effectTarget)) return '';
+
+  const fromGroup = (typeof groupOrEffectTarget === 'object' && groupOrEffectTarget !== null)
+    ? groupOrEffectTarget?.metadata?.renderLayer
+    : undefined;
+  const resolved = currentRenderLayer ?? fromGroup;
+  const current = resolved === MAP_POINT_RENDER_LAYER_ABOVE
+    ? MAP_POINT_RENDER_LAYER_ABOVE
+    : MAP_POINT_RENDER_LAYER_BELOW;
+
+  const belowHelp = 'Glow stays under ceiling / overhead art. Best for candles on tables and ground-level fire.';
+  const aboveHelp = 'Glow reaches ground and overhead tiles. Best for hanging candelabra and chandeliers.';
+
+  return `
+    <div class="msa-mp-panel msa-mp-panel--muted msa-mp-render-layer-panel-inner">
+      <h4 class="msa-mp-section__title"><i class="fas fa-layer-group"></i> Layer vs overhead</h4>
+      <div class="form-group msa-mp-render-layer-row">
+        <label title="Controls flame draw order and roof / overhead glow blocking">Draw band</label>
+        <select name="renderLayer" title="${escapeMapPointHtml(belowHelp)} / ${escapeMapPointHtml(aboveHelp)}">
+          <option value="${MAP_POINT_RENDER_LAYER_BELOW}" title="${escapeMapPointHtml(belowHelp)}" ${current === MAP_POINT_RENDER_LAYER_BELOW ? 'selected' : ''}>
+            Below overhead
+          </option>
+          <option value="${MAP_POINT_RENDER_LAYER_ABOVE}" title="${escapeMapPointHtml(aboveHelp)}" ${current === MAP_POINT_RENDER_LAYER_ABOVE ? 'selected' : ''}>
+            On overhead layer
+          </option>
+        </select>
+        <p class="msa-mp-hint msa-mp-render-layer-hint">
+          <strong>Below overhead:</strong> glow does not brighten ceiling art.
+          <strong>On overhead layer:</strong> glow reaches hanging fixtures and overhead stamps.
+        </p>
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * @param {JQuery} html
+ * @param {string|null|undefined} [effectTarget]
+ * @returns {'below-overhead'|'above-overhead'|undefined}
+ */
+export function readMapPointRenderLayerFromForm(html, effectTarget = null) {
+  if (!mapPointEffectSupportsRenderLayer(effectTarget)) return undefined;
+  const raw = String(html.find('[name="renderLayer"]').val() ?? MAP_POINT_RENDER_LAYER_BELOW);
+  return raw === MAP_POINT_RENDER_LAYER_ABOVE
+    ? MAP_POINT_RENDER_LAYER_ABOVE
+    : MAP_POINT_RENDER_LAYER_BELOW;
 }
 
 /**
@@ -388,73 +429,53 @@ export function renderMapPointDrawLevelStamp(activeContext = null) {
  * @returns {string}
  */
 export function renderMapPointLevelBindingEditor(group, info, levelOptions) {
-  const binding = group?.metadata?.levelBinding ?? {};
   const isLocked = info.mode === 'locked';
   const selectedLevelId = info.floorKey
     ?? info.matchedLevel?.levelId
     ?? '';
 
-  const statusColors = {
-    ok: '#8ecaa0',
-    global: '#dcc890',
-    hidden: '#d0a0a0',
-    unknown: '#dcb080',
-  };
-  const statusColor = statusColors[info.status] ?? '#aaa';
+  const statusClass = {
+    ok: 'msa-mp-level-summary--ok',
+    global: 'msa-mp-level-summary--global',
+    hidden: 'msa-mp-level-summary--hidden',
+    unknown: 'msa-mp-level-summary--unknown',
+  }[info.status] ?? 'msa-mp-level-summary--ok';
 
   const levelRows = levelOptions.map((lvl) => {
     const band = formatMapPointElevationRange(lvl.bottom, lvl.top);
     const id = escapeMapPointHtml(lvl.levelId ?? '');
     const selected = (selectedLevelId && lvl.levelId === selectedLevelId) ? 'selected' : '';
-    return `<option value="${id}" data-floor-index="${lvl.index}" ${selected}>${escapeMapPointHtml(lvl.label)} (elev ${escapeMapPointHtml(band)})</option>`;
+    const title = escapeMapPointHtml(`${lvl.label} — elevation ${band}`);
+    return `<option value="${id}" data-floor-index="${lvl.index}" title="${title}" ${selected}>${escapeMapPointHtml(lvl.label)}</option>`;
   }).join('');
 
   return `
-    <hr style="margin: 12px 0; border: none; border-top: 1px solid #444;">
-    <div class="msa-mp-level-panel" style="background: #1a1a2e; padding: 10px; border-radius: 4px;">
-      <div style="font-size: 11px; font-weight: bold; color: #ccc; margin-bottom: 8px;">
-        <i class="fas fa-layer-group"></i> Floor / elevation binding
-      </div>
-      <p style="margin: 0 0 8px 0; font-size: 10px; color: #888; line-height: 1.45;">
-        Map points only store <strong>x/y</strong>. This group’s floor assignment controls which level shows the effect and which walls block glow.
+    <div class="msa-mp-panel msa-mp-panel--muted msa-mp-level-panel">
+      <h4 class="msa-mp-section__title"><i class="fas fa-layer-group"></i> Floor / elevation</h4>
+      <p class="msa-mp-hint">
+        Points store <strong>x/y</strong> only. Floor binding controls visibility and wall clipping.
       </p>
-      <div class="form-group" style="margin-bottom: 8px;">
-        <label style="font-size: 11px;">Visibility</label>
-        <select name="levelBindingMode" style="width: 100%;">
-          <option value="all-levels" ${!isLocked ? 'selected' : ''}>All levels (global — legacy)</option>
-          <option value="locked" ${isLocked ? 'selected' : ''}>Locked to one floor</option>
+      <div class="form-group">
+        <label title="Whether this group appears on every floor or one assigned floor">Visibility</label>
+        <select name="levelBindingMode">
+          <option value="all-levels" title="Visible on every floor; wall clip follows viewed level" ${!isLocked ? 'selected' : ''}>All levels (global)</option>
+          <option value="locked" title="Only visible on the assigned floor" ${isLocked ? 'selected' : ''}>Locked to one floor</option>
         </select>
       </div>
-      <div class="form-group msa-mp-level-floor-row" style="margin-bottom: 8px; ${isLocked ? '' : 'display: none;'}">
-        <label style="font-size: 11px;">Assigned floor</label>
-        <select name="levelBindingFloor" style="width: 100%;">
+      <div class="form-group msa-mp-level-floor-row" style="${isLocked ? '' : 'display: none;'}">
+        <label title="Scene floor band used for visibility and wall clipping">Assigned floor</label>
+        <select name="levelBindingFloor" title="Elevation band shown in tooltip on each option">
           ${levelRows || '<option value="">No levels detected on this scene</option>'}
         </select>
-        <button type="button" class="msa-mp-use-viewed-floor-btn" style="
-          margin-top: 6px;
-          padding: 4px 8px;
-          font-size: 10px;
-          background: #3a5a4a;
-          border: none;
-          border-radius: 3px;
-          color: #ddd;
-          cursor: pointer;
-        ">
-          <i class="fas fa-eye"></i> Use currently viewed floor
+        <button type="button" class="msa-mp-btn msa-mp-btn--primary msa-mp-use-viewed-floor-btn" title="Lock this group to the floor you are currently viewing">
+          <i class="fas fa-eye"></i> Use viewed floor
         </button>
       </div>
-      <div class="msa-mp-level-summary" style="
-        font-size: 10px;
-        color: ${statusColor};
-        line-height: 1.5;
-        padding: 8px;
-        border-radius: 3px;
-        background: rgba(0,0,0,0.22);
-      ">
+      <div class="msa-mp-level-summary ${statusClass}">
         <div><strong>Band:</strong> ${escapeMapPointHtml(info.bandText)}</div>
         <div><strong>Wall-clip test elev:</strong> ${escapeMapPointHtml(info.clipElevationText)}</div>
         <div><strong>On current view:</strong> ${info.visibleOnActiveView ? 'Visible' : 'Hidden'}</div>
-        ${info.hint ? `<div style="margin-top: 4px; color: #aaa;">${escapeMapPointHtml(info.hint)}</div>` : ''}
+        ${info.hint ? `<div class="msa-mp-level-summary__hint">${escapeMapPointHtml(info.hint)}</div>` : ''}
       </div>
     </div>
   `;

@@ -80,6 +80,10 @@ import {
   MSA_LIGHT_RADIANCE_GLSL,
 } from '../../scene/point-light-falloff.js';
 import { resolveEffectEnabled } from '../../effects/resolve-effect-enabled.js';
+import {
+  MAP_POINT_RENDER_LAYER_ABOVE,
+  MAP_POINT_RENDER_LAYER_BELOW,
+} from '../../scene/map-points-manager.js';
 
 const log = createLogger('LightingEffectV2');
 const MODULE_ID = 'map-shine-advanced';
@@ -431,6 +435,14 @@ export class LightingEffectV2 {
     this._perFloorLightSnapshotRts = new Map();
     /** @type {THREE.WebGLRenderTarget|null} Gameplay-only light buffer for CC local ToD override */
     this._gameplayLocalLightRT = null;
+    /** @type {THREE.WebGLRenderTarget|null} Above-overhead gameplay glow (skips roof gating in compose) */
+    this._aboveOverheadLightRT = null;
+    /** @type {THREE.Scene|null} Post-compose additive pass for above-overhead lights */
+    this._aboveOverheadComposeAddScene = null;
+    /** @type {THREE.OrthographicCamera|null} */
+    this._aboveOverheadComposeAddCamera = null;
+    /** @type {THREE.ShaderMaterial|null} */
+    this._aboveOverheadComposeAddMaterial = null;
     /**
      * Per-floor gameplay light snapshots (excludes scene AmbientLights).
      * @type {Map<number, THREE.WebGLRenderTarget>}
@@ -446,6 +458,8 @@ export class LightingEffectV2 {
 
     /** @type {THREE.WebGLRenderer|null} Last renderer from hot paths; used to clear ceiling RT on resize. */
     this._lastCompositorRenderer = null;
+    /** @type {import('./CandleFlamesEffectV2.js').default|null} */
+    this._candleFlamesEffect = null;
 
     /** @type {THREE.Vector2|null} Reusable size vector */
     this._sizeVec = null;
@@ -839,6 +853,9 @@ export class LightingEffectV2 {
     if (this._gameplayLocalLightRT && (this._gameplayLocalLightRT.width !== this._lightSize.w || this._gameplayLocalLightRT.height !== this._lightSize.h)) {
       this._gameplayLocalLightRT.setSize(this._lightSize.w, this._lightSize.h);
     }
+    if (this._aboveOverheadLightRT && (this._aboveOverheadLightRT.width !== this._lightSize.w || this._aboveOverheadLightRT.height !== this._lightSize.h)) {
+      this._aboveOverheadLightRT.setSize(this._lightSize.w, this._lightSize.h);
+    }
     if (this._stackedLightRtA && (this._stackedLightRtA.width !== this._lightSize.w || this._stackedLightRtA.height !== this._lightSize.h)) {
       this._stackedLightRtA.setSize(this._lightSize.w, this._lightSize.h);
     }
@@ -1167,6 +1184,21 @@ export class LightingEffectV2 {
     const n = Number(floorIndex);
     this._renderFloorIndexForLights = Number.isFinite(n) ? n : null;
     this._perspectiveRefreshDirty = true;
+  }
+
+  /**
+   * Direct ref to the live candle effect (avoids stale window.MapShine global during split RT draws).
+   * @param {import('./CandleFlamesEffectV2.js').default|null|undefined} effect
+   */
+  setCandleFlamesEffect(effect) {
+    this._candleFlamesEffect = effect || null;
+  }
+
+  /** @private @returns {import('./CandleFlamesEffectV2.js').default|null} */
+  _resolveCandleFlamesEffect() {
+    return this._candleFlamesEffect
+      ?? window.MapShine?.candleFlamesEffectV2
+      ?? null;
   }
 
   /**
@@ -1567,15 +1599,158 @@ export class LightingEffectV2 {
   }
 
   /**
-   * Render gameplay-only light buffer (player torch/flash, candle/fire glow, etc.)
-   * excluding scene-authored AmbientLights so CC local ToD override does not
-   * treat placed lamps as campfires.
+   * Restrict candle glow LightMeshes to one render-layer band for split RT draws.
+   * @private
+   * @param {'below-overhead'|'above-overhead'} renderLayer
+   * @param {() => void} drawFn
+   */
+  _withCandleGlowRenderLayerOnly(renderLayer, drawFn) {
+    /** @type {Array<[object, boolean]>} */
+    const restore = [];
+    try {
+      const candles = this._resolveCandleFlamesEffect();
+      const showGlow = !!(candles?.params?.enabled && candles?.params?.glowEnabled);
+      if (candles?._glowGroup) {
+        restore.push([candles._glowGroup, !!candles._glowGroup.visible]);
+        if (showGlow) candles._glowGroup.visible = true;
+      }
+      const buckets = candles?._glowBuckets;
+      if (buckets?.size && typeof candles._forEachGlowLightMesh === 'function') {
+        for (const entry of buckets.values()) {
+          const layer = entry?.renderLayer ?? MAP_POINT_RENDER_LAYER_BELOW;
+          const allowed = layer === renderLayer;
+          candles._forEachGlowLightMesh(entry, (lm) => {
+            const mesh = lm?.mesh;
+            if (!mesh) return;
+            restore.push([mesh, !!mesh.visible]);
+            mesh.visible = allowed ? showGlow : false;
+          });
+        }
+      }
+    } catch (_) {}
+    try {
+      drawFn();
+    } finally {
+      for (const [mesh, visible] of restore) {
+        try { mesh.visible = visible; } catch (_) {}
+      }
+    }
+  }
+
+  /**
+   * Hide candle/fire gameplay glow meshes while drawing Foundry lamps to `_lightRT`.
+   * @private
+   * @param {() => void} drawFn
+   */
+  _withGameplayGlowHiddenForFoundryDraw(drawFn) {
+    /** @type {Array<[object, boolean]>} */
+    const restore = [];
+    try {
+      const candles = this._resolveCandleFlamesEffect();
+      if (candles?._glowGroup) {
+        restore.push([candles._glowGroup, !!candles._glowGroup.visible]);
+        candles._glowGroup.visible = false;
+      }
+    } catch (_) {}
+    try {
+      const fire = window.MapShine?.fireEffectV2;
+      if (fire?._glowRootGroup) {
+        restore.push([fire._glowRootGroup, !!fire._glowRootGroup.visible]);
+        fire._glowRootGroup.visible = false;
+      }
+    } catch (_) {}
+    try {
+      drawFn();
+    } finally {
+      for (const [obj, visible] of restore) {
+        try { obj.visible = visible; } catch (_) {}
+      }
+    }
+  }
+
+  /**
+   * Max-blend `layerRT` into `dstRT` via stacked ping-pong.
    * @private
    * @param {THREE.WebGLRenderer} renderer
-   * @param {THREE.Camera} camera
+   * @param {THREE.WebGLRenderTarget} dstRT
+   * @param {THREE.WebGLRenderTarget} layerRT
    */
-  _renderGameplayLocalLightBuffer(renderer, camera) {
-    if (!renderer || !camera || !this._gameplayLocalLightRT || !this._lightScene) return;
+  _maxBlendLayerIntoTarget(renderer, dstRT, layerRT) {
+    if (!renderer || !dstRT?.texture || !layerRT?.texture
+      || !this._stackLightMaterial || !this._stackLightScene || !this._lightRtCopyMaterial
+      || !this._lightRtCopyScene) {
+      return;
+    }
+    const ping = this._stackedLightRtB;
+    if (!ping) return;
+
+    this._stackLightMaterial.uniforms.tAccum.value = dstRT.texture;
+    this._stackLightMaterial.uniforms.tLayer.value = layerRT.texture;
+
+    const prevTarget = renderer.getRenderTarget();
+    try {
+      renderer.setRenderTarget(ping);
+      renderer.render(this._stackLightScene, this._stackLightCamera);
+      this._lightRtCopyMaterial.uniforms.tSrc.value = ping.texture;
+      renderer.setRenderTarget(dstRT);
+      renderer.render(this._lightRtCopyScene, this._stackLightCamera);
+    } finally {
+      renderer.setRenderTarget(prevTarget);
+    }
+  }
+
+  /** Max-blend below-overhead gameplay glow into `_lightRT` for compose. @private */
+  _mergeGameplayLocalIntoLightRt(renderer) {
+    if (!renderer || !this._lightRT?.texture || !this._gameplayLocalLightRT?.texture) return;
+    const ping = this._stackedLightRtA;
+    if (!ping || !this._stackLightMaterial || !this._stackLightScene || !this._lightRtCopyMaterial
+      || !this._lightRtCopyScene) {
+      return;
+    }
+
+    this._stackLightMaterial.uniforms.tAccum.value = this._lightRT.texture;
+    this._stackLightMaterial.uniforms.tLayer.value = this._gameplayLocalLightRT.texture;
+
+    const prevTarget = renderer.getRenderTarget();
+    try {
+      renderer.setRenderTarget(ping);
+      renderer.render(this._stackLightScene, this._stackLightCamera);
+      this._lightRtCopyMaterial.uniforms.tSrc.value = ping.texture;
+      renderer.setRenderTarget(this._lightRT);
+      renderer.render(this._lightRtCopyScene, this._stackLightCamera);
+    } finally {
+      renderer.setRenderTarget(prevTarget);
+    }
+  }
+
+  /**
+   * Fold above-overhead gameplay glow into the CC local-light buffer so post-merge
+   * ToD override treats chandelier pools like below-overhead candles.
+   * @private
+   * @param {THREE.WebGLRenderer} renderer
+   */
+  _mergeAboveOverheadIntoGameplayLocalLightRt(renderer) {
+    if (!renderer || !this._aboveOverheadLightRT?.texture || !this._gameplayLocalLightRT) return;
+    if (!this._resolveCandleFlamesEffect()?.hasAboveOverheadGlowBuckets?.()) return;
+    this._maxBlendLayerIntoTarget(renderer, this._gameplayLocalLightRT, this._aboveOverheadLightRT);
+  }
+
+  /**
+   * After compose, merge above-overhead glow into `_lightRT` for CC lamp-preserve
+   * (does not affect the compose draw that already completed this frame).
+   * @private
+   * @param {THREE.WebGLRenderer} renderer
+   */
+  _mergeAboveOverheadIntoLightRtForCc(renderer) {
+    if (!renderer || !this._aboveOverheadLightRT?.texture || !this._lightRT) return;
+    if (!this._resolveCandleFlamesEffect()?.hasAboveOverheadGlowBuckets?.()) return;
+    this._maxBlendLayerIntoTarget(renderer, this._lightRT, this._aboveOverheadLightRT);
+  }
+
+  _renderAboveOverheadLightBuffer(renderer, camera) {
+    if (!renderer || !camera || !this._aboveOverheadLightRT || !this._lightScene) return;
+
+    try { this._resolveCandleFlamesEffect()?._tryAttachGlowGroup?.(); } catch (_) {}
 
     const hidden = [];
     for (const light of this._lights.values()) {
@@ -1588,14 +1763,97 @@ export class LightingEffectV2 {
 
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
+    const prevMask = camera.layers.mask;
     try {
-      renderer.setRenderTarget(this._gameplayLocalLightRT);
-      renderer.setClearColor(0x000000, 0);
-      renderer.autoClear = true;
-      renderer.render(this._lightScene, camera);
+      camera.layers.enableAll();
+      this._withCandleGlowRenderLayerOnly(MAP_POINT_RENDER_LAYER_ABOVE, () => {
+        renderer.setRenderTarget(this._aboveOverheadLightRT);
+        renderer.setClearColor(0x000000, 0);
+        renderer.autoClear = true;
+        renderer.clear(true, true, true);
+        renderer.render(this._lightScene, camera);
+      });
+    } finally {
+      camera.layers.mask = prevMask;
+      renderer.setRenderTarget(prevTarget);
+      renderer.autoClear = prevAutoClear;
+      for (const mesh of hidden) {
+        mesh.visible = true;
+      }
+    }
+  }
+
+  /**
+   * Add above-overhead gameplay light after compose (avoids extra compose shader samplers).
+   * @private
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {THREE.WebGLRenderTarget} outputRT
+   * @param {THREE.WebGLRenderTarget} sceneRT
+   */
+  _compositeAboveOverheadLightContribution(renderer, outputRT, sceneRT) {
+    if (!renderer || !outputRT?.texture || !sceneRT?.texture || !this._aboveOverheadLightRT?.texture) return;
+    if (!this._aboveOverheadComposeAddScene || !this._aboveOverheadComposeAddMaterial) return;
+    const ping = this._stackedLightRtB;
+    if (!ping || !this._lightRtCopyMaterial || !this._lightRtCopyScene) return;
+
+    const mat = this._aboveOverheadComposeAddMaterial;
+    mat.uniforms.tComposed.value = outputRT.texture;
+    mat.uniforms.tAboveLight.value = this._aboveOverheadLightRT.texture;
+    mat.uniforms.tAlbedo.value = sceneRT.texture;
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    try {
+      renderer.setRenderTarget(ping);
+      renderer.autoClear = false;
+      renderer.render(this._aboveOverheadComposeAddScene, this._aboveOverheadComposeAddCamera);
+      this._lightRtCopyMaterial.uniforms.tSrc.value = ping.texture;
+      renderer.setRenderTarget(outputRT);
+      renderer.autoClear = false;
+      renderer.render(this._lightRtCopyScene, this._stackLightCamera);
     } finally {
       renderer.setRenderTarget(prevTarget);
       renderer.autoClear = prevAutoClear;
+    }
+  }
+
+  /**
+   * Render gameplay-only light buffer (player torch/flash, candle/fire glow, etc.)
+   * excluding scene-authored AmbientLights so CC local ToD override does not
+   * treat placed lamps as campfires.
+   * @private
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {THREE.Camera} camera
+   */
+  _renderGameplayLocalLightBuffer(renderer, camera) {
+    if (!renderer || !camera || !this._gameplayLocalLightRT || !this._lightScene) return;
+
+    try { this._resolveCandleFlamesEffect()?._tryAttachGlowGroup?.(); } catch (_) {}
+
+    const hidden = [];
+    for (const light of this._lights.values()) {
+      const mesh = light?.mesh;
+      if (mesh?.visible) {
+        mesh.visible = false;
+        hidden.push(mesh);
+      }
+    }
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    const prevMask = camera.layers.mask;
+    try {
+      camera.layers.enableAll();
+      this._withCandleGlowRenderLayerOnly(MAP_POINT_RENDER_LAYER_BELOW, () => {
+        renderer.setRenderTarget(this._gameplayLocalLightRT);
+        renderer.setClearColor(0x000000, 0);
+        renderer.autoClear = true;
+        renderer.render(this._lightScene, camera);
+      });
+    } finally {
+      renderer.setRenderTarget(prevTarget);
+      renderer.autoClear = prevAutoClear;
+      camera.layers.mask = prevMask;
       for (const mesh of hidden) {
         mesh.visible = true;
       }
@@ -2431,6 +2689,8 @@ export class LightingEffectV2 {
     this._lightRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
     this._gameplayLocalLightRT = new THREE.WebGLRenderTarget(this._lightSize.w, this._lightSize.h, rtOpts);
     this._gameplayLocalLightRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
+    this._aboveOverheadLightRT = new THREE.WebGLRenderTarget(this._lightSize.w, this._lightSize.h, rtOpts);
+    this._aboveOverheadLightRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
     const windowRtOpts = {
       ...rtOpts,
       type: this.params.windowLightUseHalfFloat ? THREE.HalfFloatType : THREE.UnsignedByteType,
@@ -2491,6 +2751,8 @@ export class LightingEffectV2 {
         uHasPaintedShadowLit: { value: 0 },
         tPaintedShadowAtAndAboveLit: { value: null },
         uHasPaintedShadowAtAndAboveLit: { value: 0 },
+        /** Multiplexes tPaintedShadowAtAndAboveLit when painted shadow is absent. */
+        uHasAboveOverheadLight: { value: 0 },
         uPaintedShadowMgrOpacity: { value: 1.0 },
         uLightingPaintedFloorIndex: { value: 0 },
         uPaintedShadowInCombined: { value: 1.0 },
@@ -2617,6 +2879,7 @@ export class LightingEffectV2 {
         uniform float uHasPaintedShadowLit;
         uniform sampler2D tPaintedShadowAtAndAboveLit;
         uniform float uHasPaintedShadowAtAndAboveLit;
+        uniform float uHasAboveOverheadLight;
         uniform float uPaintedShadowMgrOpacity;
         uniform float uLightingPaintedFloorIndex;
         uniform float uPaintedShadowInCombined;
@@ -3172,6 +3435,19 @@ export class LightingEffectV2 {
             }
           }
 
+          // Above-overhead gameplay glow (chandeliers): bypass roof visS gating on tLightSources.
+          if (uHasAboveOverheadLight > 0.5) {
+            vec4 aboveSrc = texture2D(tPaintedShadowAtAndAboveLit, vUv);
+            float aboveEnergy = max(aboveSrc.a, 0.0);
+            if (aboveEnergy > 0.00001) {
+              vec3 aboveChroma = max(aboveSrc.rgb, vec3(0.0));
+              float aboveMag = length(aboveChroma);
+              vec3 aboveHue = (aboveMag > 1e-5) ? (aboveChroma / aboveMag) : vec3(1.0);
+              vec3 aboveDirect = msaLightDirectIllumination(vec3(aboveEnergy), aboveHue, 1.0);
+              totalIllumination += aboveDirect * structuralDirectMul;
+            }
+          }
+
           vec3 litColor = baseColor.rgb * totalIllumination;
 
           if (uHasLightWindow > 0.5) {
@@ -3283,6 +3559,54 @@ export class LightingEffectV2 {
     const copyQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this._lightRtCopyMaterial);
     copyQuad.frustumCulled = false;
     this._lightRtCopyScene.add(copyQuad);
+
+    this._aboveOverheadComposeAddCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this._aboveOverheadComposeAddMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tComposed: { value: null },
+        tAboveLight: { value: null },
+        tAlbedo: { value: null },
+      },
+      vertexShader: /* glsl */`
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */`
+        ${MSA_LIGHT_RADIANCE_GLSL}
+        uniform sampler2D tComposed;
+        uniform sampler2D tAboveLight;
+        uniform sampler2D tAlbedo;
+        varying vec2 vUv;
+        void main() {
+          vec3 lit = texture2D(tComposed, vUv).rgb;
+          vec4 src = texture2D(tAboveLight, vUv);
+          float lampEnergyA = max(src.a, 0.0);
+          if (lampEnergyA <= 0.00001) {
+            gl_FragColor = vec4(lit, 1.0);
+            return;
+          }
+          vec3 lampChroma = max(src.rgb, vec3(0.0));
+          float chromaMag = length(lampChroma);
+          vec3 lampHue = (chromaMag > 1e-5) ? (lampChroma / chromaMag) : vec3(1.0);
+          vec3 direct = msaLightDirectIllumination(vec3(lampEnergyA), lampHue, 1.0);
+          vec3 baseColor = max(texture2D(tAlbedo, vUv).rgb, vec3(0.0));
+          gl_FragColor = vec4(lit + baseColor * direct, 1.0);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+    });
+    this._aboveOverheadComposeAddMaterial.toneMapped = false;
+    this._aboveOverheadComposeAddScene = new THREE.Scene();
+    const aboveAddQuad = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      this._aboveOverheadComposeAddMaterial,
+    );
+    aboveAddQuad.frustumCulled = false;
+    this._aboveOverheadComposeAddScene.add(aboveAddQuad);
 
     // ── Foundry hooks for light CRUD ──────────────────────────────────
     this._registerHook('createAmbientLight', (doc) => this._onLightCreate(doc));
@@ -3425,7 +3749,7 @@ export class LightingEffectV2 {
     }
     // Candle glow buckets share _lightScene; refresh HDR emission when point-light gain changes.
     try {
-      const candles = window.MapShine?.candleFlamesEffectV2;
+      const candles = this._resolveCandleFlamesEffect();
       if (candles?.params?.glowFollowLightIntensity && candles._glowBuckets?.size) {
         candles._updateGlowFlicker?.({ elapsed: performance.now() * 0.001 });
       }
@@ -3453,9 +3777,16 @@ export class LightingEffectV2 {
       }
     } catch (_) {}
     try {
-      const candles = window.MapShine?.candleFlamesEffectV2?._glowBuckets;
-      if (candles) {
-        for (const entry of candles.values()) {
+      const candleBuckets = this._resolveCandleFlamesEffect()?._glowBuckets;
+      if (candleBuckets) {
+        for (const entry of candleBuckets.values()) {
+          if (entry?.lightMeshes?.length) {
+            for (const lm of entry.lightMeshes) {
+              const u = lm?.material?.uniforms;
+              if (u) fn(u);
+            }
+            continue;
+          }
           const u = entry?.lightMesh?.material?.uniforms;
           if (u) fn(u);
         }
@@ -4352,13 +4683,16 @@ export class LightingEffectV2 {
       camera.layers.enableAll();
 
       _perfToken = this._beginPerfSpan('lightOverride.foundryDraw', 'render', { cpuOnly: true });
-      renderer.setRenderTarget(this._lightRT);
-      renderer.setClearColor(0x000000, 0);
-      renderer.autoClear = true;
-      if (this._lightScene) {
-        renderer.render(this._lightScene, camera);
-      }
+      this._withGameplayGlowHiddenForFoundryDraw(() => {
+        renderer.setRenderTarget(this._lightRT);
+        renderer.setClearColor(0x000000, 0);
+        renderer.autoClear = true;
+        if (this._lightScene) {
+          renderer.render(this._lightScene, camera);
+        }
+      });
       this._renderGameplayLocalLightBuffer(renderer, camera);
+      this._mergeGameplayLocalIntoLightRt(renderer);
       this._endPerfSpan(_perfToken);
 
       // Window glow for shadow lift is written to WindowLightEffectV2._emitRT (scene-UV).
@@ -4548,7 +4882,6 @@ export class LightingEffectV2 {
     const reuseFoundryPrepass = this._canReuseLightMaskPrepassFoundryDraw(w, h, renderFloorForLights);
 
     // ── Pass 1: Accumulate Foundry light mesh contributions ───────────
-    // ThreeLightSource meshes live on layer 0.
     camera.layers.enableAll();
 
     if (reuseFoundryPrepass) {
@@ -4558,18 +4891,29 @@ export class LightingEffectV2 {
     } else {
       this._perfSession.prepassRedraw += 1;
       _perfToken = this._beginPerfSpan('lightSourcesDraw', 'render', { cpuOnly: true });
-      renderer.setRenderTarget(this._lightRT);
-      renderer.setClearColor(0x000000, 0);
-      renderer.autoClear = true;
-      if (this._lightScene) {
-        renderer.render(this._lightScene, camera);
-      }
+      this._withGameplayGlowHiddenForFoundryDraw(() => {
+        renderer.setRenderTarget(this._lightRT);
+        renderer.setClearColor(0x000000, 0);
+        renderer.autoClear = true;
+        if (this._lightScene) {
+          renderer.render(this._lightScene, camera);
+        }
+      });
       // Re-mark so a later same-frame pass for this floor can reuse this draw.
       this._markLightMaskPrepassFoundryDraw(w, h, renderFloorForLights);
       this._endPerfSpan(_perfToken);
     }
     _perfToken = this._beginPerfSpan('lightSourcesDraw.gameplayLocal', 'render', { cpuOnly: true });
     this._renderGameplayLocalLightBuffer(renderer, camera);
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('lightSourcesDraw.mergeGameplayLocal', 'render', { cpuOnly: true });
+    this._mergeGameplayLocalIntoLightRt(renderer);
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('lightSourcesDraw.aboveOverhead', 'render', { cpuOnly: true });
+    this._renderAboveOverheadLightBuffer(renderer, camera);
+    this._endPerfSpan(_perfToken);
+    _perfToken = this._beginPerfSpan('lightSourcesDraw.mergeAboveIntoGameplayLocal', 'render', { cpuOnly: true });
+    this._mergeAboveOverheadIntoGameplayLocalLightRt(renderer);
     this._endPerfSpan(_perfToken);
 
     // ── Pass 1b: Window glow → WindowLightEffectV2 emit RT (compose samples emit) ─
@@ -4656,9 +5000,20 @@ export class LightingEffectV2 {
       cu.tPaintedShadowLit.value = null;
       cu.uHasPaintedShadowLit.value = 0;
     }
+    let aboveOverheadIntegratedInCompose = false;
+    cu.uHasAboveOverheadLight.value = 0;
+    const wantsAboveOverheadLight = !!(
+      this._aboveOverheadLightRT?.texture
+      && this._resolveCandleFlamesEffect()?.hasAboveOverheadGlowBuckets?.()
+    );
     if (paintedShadowAtAndAboveLitTexture) {
       cu.tPaintedShadowAtAndAboveLit.value = paintedShadowAtAndAboveLitTexture;
       cu.uHasPaintedShadowAtAndAboveLit.value = 1;
+    } else if (wantsAboveOverheadLight) {
+      cu.tPaintedShadowAtAndAboveLit.value = this._aboveOverheadLightRT.texture;
+      cu.uHasAboveOverheadLight.value = 1;
+      cu.uHasPaintedShadowAtAndAboveLit.value = 0;
+      aboveOverheadIntegratedInCompose = true;
     } else {
       cu.tPaintedShadowAtAndAboveLit.value = null;
       cu.uHasPaintedShadowAtAndAboveLit.value = 0;
@@ -4740,6 +5095,13 @@ export class LightingEffectV2 {
     this._perfSession.composeDraws += 1;
     if (sceneRT === outputRT || sceneRT?.texture === outputRT?.texture) {
       log.warn('LightingEffectV2: compose sceneRT aliases outputRT — skipping draw to avoid framebuffer feedback');
+      if (!aboveOverheadIntegratedInCompose) {
+        _perfToken = this._beginPerfSpan('composeDraw.aboveOverheadAdd', 'render', {
+          gpuSlot: { index: 0, count: 1 },
+        });
+        this._compositeAboveOverheadLightContribution(renderer, outputRT, sceneRT);
+        this._endPerfSpan(_perfToken);
+      }
     } else {
       _perfToken = this._beginPerfSpan('composeDraw', 'render', {
         gpuSlot: { index: 1, count: 2 },
@@ -4749,7 +5111,17 @@ export class LightingEffectV2 {
       renderer.autoClear = true;
       renderer.render(this._composeScene, this._composeCamera);
       this._endPerfSpan(_perfToken);
+      if (!aboveOverheadIntegratedInCompose) {
+        _perfToken = this._beginPerfSpan('composeDraw.aboveOverheadAdd', 'render', {
+          gpuSlot: { index: 2, count: 2 },
+        });
+        this._compositeAboveOverheadLightContribution(renderer, outputRT, sceneRT);
+        this._endPerfSpan(_perfToken);
+      }
     }
+    _perfToken = this._beginPerfSpan('lightSourcesDraw.mergeAboveIntoLightRtForCc', 'render', { cpuOnly: true });
+    this._mergeAboveOverheadIntoLightRtForCc(renderer);
+    this._endPerfSpan(_perfToken);
     } finally {
       camera.layers.mask = prevLayerMask;
       renderer.autoClear = prevAutoClear;
@@ -4897,6 +5269,7 @@ export class LightingEffectV2 {
     // Dispose GPU resources
     try { this._lightRT?.dispose(); } catch (_) {}
     try { this._gameplayLocalLightRT?.dispose(); } catch (_) {}
+    try { this._aboveOverheadLightRT?.dispose(); } catch (_) {}
     try { this._windowLightRT?.dispose(); } catch (_) {}
     try { this._windowEmitBlitMaterial?.dispose(); } catch (_) {}
     try {
@@ -4907,6 +5280,11 @@ export class LightingEffectV2 {
     try { this._stackedLightRtB?.dispose(); } catch (_) {}
     try { this._stackLightMaterial?.dispose(); } catch (_) {}
     try { this._lightRtCopyMaterial?.dispose(); } catch (_) {}
+    try { this._aboveOverheadComposeAddMaterial?.dispose(); } catch (_) {}
+    try {
+      const aq = this._aboveOverheadComposeAddScene?.children?.[0];
+      aq?.geometry?.dispose?.();
+    } catch (_) {}
     try {
       const sq = this._stackLightScene?.children?.[0];
       sq?.geometry?.dispose?.();
@@ -4940,6 +5318,7 @@ export class LightingEffectV2 {
     this._lightScene = null;
     this._darknessScene = null;
     this._lightRT = null;
+    this._aboveOverheadLightRT = null;
     this._windowLightRT = null;
     this._windowComposeBlitValid = false;
     this._windowEmitBlitScene = null;
@@ -4953,6 +5332,9 @@ export class LightingEffectV2 {
     this._stackLightMaterial = null;
     this._lightRtCopyMaterial = null;
     this._lightRtCopyScene = null;
+    this._aboveOverheadComposeAddMaterial = null;
+    this._aboveOverheadComposeAddScene = null;
+    this._aboveOverheadComposeAddCamera = null;
     this._perFloorLightSnapshotRts.clear();
     this._perFloorGameplayLightSnapshotRts.clear();
     this._stackedLightActive = false;

@@ -881,6 +881,8 @@ export class TileStreamingManager {
     } catch (_) {}
     log.info(`Streaming bus tile registered [${tileId}] ${meta.width}x${meta.height}`);
     this._scheduleIdlePyramidWarm();
+    this._lastViewRectSig = '';
+    this._runStreamingSync(true);
     return true;
   }
 

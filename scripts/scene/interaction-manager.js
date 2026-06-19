@@ -1922,7 +1922,7 @@ export class InteractionManager {
    * @param {string} effectTarget - Effect key (e.g., 'smellyFlies', 'fire')
    * @param {'point'|'area'|'line'|'rope'} [groupType='area'] - Type of group to create
    * @param {boolean} [snapToGrid=false] - Whether to snap to grid by default
-   * @param {{ropeType?: 'rope'|'chain'}|null} [options=null] - Optional draw options
+   * @param {{ropeType?: 'rope'|'chain', renderLayer?: 'below-overhead'|'above-overhead'}|null} [options=null] - Optional draw options
    */
   startMapPointDrawing(effectTarget, groupType = 'area', snapToGrid = false, options = null) {
     if (!isGmLike()) {

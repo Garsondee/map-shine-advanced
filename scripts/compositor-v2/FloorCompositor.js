@@ -2698,6 +2698,7 @@ export class FloorCompositor {
     try {
       this._candleFlamesEffect?.initialize?.(this.renderer, this._renderBus._scene, this.camera);
       this._candleFlamesEffect?.setLightingEffect?.(this._lightingEffect);
+      this._lightingEffect?.setCandleFlamesEffect?.(this._candleFlamesEffect);
       this._fireEffect?.setLightingEffect?.(this._lightingEffect);
     } catch (err) {
       log.warn('FloorCompositor: CandleFlamesEffectV2 initialize failed:', err);

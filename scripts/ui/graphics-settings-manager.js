@@ -12,6 +12,21 @@
 import { createLogger } from '../core/log.js';
 import { GraphicsSettingsDialog } from './graphics-settings-dialog.js';
 import { isStylisticEffectId } from '../effects/resolve-effect-enabled.js';
+import {
+  GPU_VRAM_PRESET_IDS,
+  SYSTEM_RAM_PRESET_IDS,
+  listGpuVramPresetOptions,
+  listSystemRamPresetOptions,
+  getDetectedSystemRamGB,
+  resolveEffectiveSystemRamGB,
+  resolveEffectiveGpuVramGB,
+  resolveSystemRamProfile,
+  resolveEffectMaskVramBudgetMB,
+  isGpuVramUserOverride,
+  resolveAutoBudgetMBFromRam,
+  resolveGpuVramBaseBudgetMB,
+  applyStreamingMemorySideEffects,
+} from '../streaming/memory-settings.js';
 
 const log = createLogger('GraphicsSettings');
 
@@ -204,6 +219,8 @@ const STYLISTIC_EFFECT_IDS_DEFAULT_OFF = new Set([
  * @property {boolean} vegetationHalfResEnabled - half-res bush/tree composite (performance)
  * @property {number} particleSpawnTier - 0..6; 3 = Medium (100% spawn)
  * @property {'best60'|'balanced30'|'powerSaver'|'custom'|undefined} [performanceProfile]
+ * @property {'auto'|'4'|'6'|'8'|'12'|'16'|'24'} [gpuVramPreset]
+ * @property {'auto'|'4'|'8'|'16'|'32'|'64'} [systemRamPreset]
  * @property {Object<string, {enabled?: boolean}>} effectOverrides
  */
 
@@ -235,6 +252,8 @@ export class GraphicsSettingsManager {
       vegetationHalfResEnabled: false,
       particleSpawnTier: 3,
       performanceProfile: DEFAULT_PERFORMANCE_PROFILE,
+      gpuVramPreset: 'auto',
+      systemRamPreset: 'auto',
       effectOverrides: {}
     };
 
@@ -839,6 +858,148 @@ export class GraphicsSettingsManager {
   }
 
   /**
+   * @private
+   * @param {string} value
+   * @returns {'auto'|'4'|'6'|'8'|'12'|'16'|'24'}
+   */
+  _coerceGpuVramPreset(value) {
+    const v = String(value ?? 'auto');
+    return /** @type {any} */ (GPU_VRAM_PRESET_IDS.includes(v) ? v : 'auto');
+  }
+
+  /**
+   * @private
+   * @param {string} value
+   * @returns {'auto'|'4'|'8'|'16'|'32'|'64'}
+   */
+  _coerceSystemRamPreset(value) {
+    const v = String(value ?? 'auto');
+    return /** @type {any} */ (SYSTEM_RAM_PRESET_IDS.includes(v) ? v : 'auto');
+  }
+
+  /**
+   * @returns {'auto'|'4'|'6'|'8'|'12'|'16'|'24'}
+   */
+  getGpuVramPreset() {
+    return this._coerceGpuVramPreset(this.state?.gpuVramPreset);
+  }
+
+  /**
+   * @returns {'auto'|'4'|'8'|'16'|'32'|'64'}
+   */
+  getSystemRamPreset() {
+    return this._coerceSystemRamPreset(this.state?.systemRamPreset);
+  }
+
+  /**
+   * @returns {Array<{ id: string, label: string }>}
+   */
+  listGpuVramPresetOptions() {
+    return listGpuVramPresetOptions();
+  }
+
+  /**
+   * @returns {Array<{ id: string, label: string }>}
+   */
+  listSystemRamPresetOptions() {
+    return listSystemRamPresetOptions();
+  }
+
+  /**
+   * @param {string} presetId
+   */
+  setGpuVramPreset(presetId) {
+    this.state.gpuVramPreset = this._coerceGpuVramPreset(presetId);
+    this.applyMemorySettings({ userInitiated: true });
+    this.saveState();
+  }
+
+  /**
+   * @param {string} presetId
+   */
+  setSystemRamPreset(presetId) {
+    this.state.systemRamPreset = this._coerceSystemRamPreset(presetId);
+    this.applyMemorySettings({ userInitiated: true });
+    this.saveState();
+  }
+
+  /**
+   * Summary for memory settings UI hints and diagnostics.
+   * @returns {object}
+   */
+  getMemorySettingsSummary() {
+    const tier = window.MapShine?.capabilities?.tier ?? 'high';
+    const detectedRam = getDetectedSystemRamGB();
+    const effectiveRam = resolveEffectiveSystemRamGB();
+    const effectiveVram = resolveEffectiveGpuVramGB();
+    const gpuVramOverride = isGpuVramUserOverride();
+    const autoBudgetMB = resolveAutoBudgetMBFromRam(detectedRam, tier);
+    const ramProfile = resolveSystemRamProfile(effectiveRam);
+
+    let appliedBudgetMB = resolveGpuVramBaseBudgetMB(
+      effectiveVram,
+      tier,
+      gpuVramOverride,
+      effectiveRam,
+    );
+    let budgetReason = gpuVramOverride ? `user GPU VRAM (${effectiveVram} GB)` : 'default';
+
+    const tracker = window.MapShine?.textureBudget;
+    if (tracker?.budgetBytes > 0) {
+      appliedBudgetMB = tracker.budgetBytes / (1024 * 1024);
+      budgetReason = tracker.budgetReason || budgetReason;
+    }
+
+    return {
+      detectedRamGB: detectedRam,
+      effectiveRamGB: effectiveRam,
+      effectiveVramGB: effectiveVram,
+      gpuVramPreset: this.getGpuVramPreset(),
+      systemRamPreset: this.getSystemRamPreset(),
+      autoBudgetMB,
+      appliedBudgetMB,
+      budgetReason,
+      tileCacheLimit: ramProfile.tileCache,
+      workerCount: ramProfile.workers,
+      gpuVramOverride,
+      systemRamOverride: this.getSystemRamPreset() !== 'auto',
+    };
+  }
+
+  /**
+   * Apply GPU VRAM / system RAM presets to streaming and mask budgets.
+   * Only runs once the WebGL renderer is live — never during early bootstrap.
+   * @param {{ userInitiated?: boolean }} [options]
+   */
+  applyMemorySettings(options = {}) {
+    if (!window.MapShine?.renderer) return;
+
+    const userInitiated = options.userInitiated === true;
+    const ramProfile = resolveSystemRamProfile(resolveEffectiveSystemRamGB());
+
+    void (async () => {
+      try {
+        applyStreamingMemorySideEffects(ramProfile);
+
+        const { reconfigureTextureBudgetForScene } = await import('../streaming/texture-budget-policy.js');
+        reconfigureTextureBudgetForScene(window.MapShine?.renderer ?? null);
+
+        const maskMb = resolveEffectMaskVramBudgetMB(
+          resolveEffectiveGpuVramGB(),
+          isGpuVramUserOverride(),
+        );
+        window.MapShine?.tileManager?.setEffectMaskVramBudget?.(maskMb * 1024 * 1024);
+
+        if (userInitiated) {
+          window.MapShine?.tileStreamingManager?.reloadAllCells?.();
+        }
+      } catch (e) {
+        log.warn('Failed to apply memory settings', e);
+      }
+    })();
+  }
+
+  /**
    * Push current frame pacing settings into the runtime namespace consumed by RenderLoop.
    */
   applyRenderPerformanceSettings() {
@@ -1241,6 +1402,12 @@ export class GraphicsSettingsManager {
       }
       if (typeof parsed.performanceProfile === 'string') {
         this.state.performanceProfile = parsed.performanceProfile;
+      }
+      if (typeof parsed.gpuVramPreset === 'string') {
+        this.state.gpuVramPreset = this._coerceGpuVramPreset(parsed.gpuVramPreset);
+      }
+      if (typeof parsed.systemRamPreset === 'string') {
+        this.state.systemRamPreset = this._coerceSystemRamPreset(parsed.systemRamPreset);
       }
       if (parsed.effectOverrides && typeof parsed.effectOverrides === 'object') {
         this.state.effectOverrides = parsed.effectOverrides;

@@ -9,6 +9,10 @@ import { tileStorageKey } from './texture-pyramid-builder.js';
 import { lodPixelSize } from './streaming-grid.js';
 import { estimateSceneMegapixels } from './texture-budget-policy.js';
 import { getTextureBudgetTracker } from '../assets/TextureBudgetTracker.js';
+import {
+  resolveEffectiveSystemRamGB,
+  resolveSystemRamProfile,
+} from './memory-settings.js';
 
 const log = createLogger('TileDecodePool');
 
@@ -30,12 +34,12 @@ let _pool = null;
  */
 export function resolveWorkerPoolSize() {
   const cores = Number(navigator?.hardwareConcurrency) || 2;
-  const mem = Number(navigator?.deviceMemory) || 4;
+  const mem = resolveEffectiveSystemRamGB();
+  const profile = resolveSystemRamProfile(mem);
   const mp = estimateSceneMegapixels();
   if (mem <= 2) return 1;
-  if (mp >= 130 || mem <= 4) return 1;
-  if (mem <= 8) return Math.min(2, cores);
-  return Math.min(3, Math.max(2, Math.floor(cores / 2)));
+  if (mp >= 130 && mem <= 4) return 1;
+  return Math.min(profile.workers, cores);
 }
 
 export class TileDecodePool {
@@ -606,6 +610,20 @@ export function disposeTileDecodePool() {
     _pool.dispose();
     _pool = null;
   }
+}
+
+/**
+ * Resize worker pool when system RAM preset changes mid-session.
+ * @param {number|null} [targetSize]
+ */
+export function resizeDecodePoolIfNeeded(targetSize = null) {
+  const size = Math.max(1, targetSize ?? resolveWorkerPoolSize());
+  if (!_pool) return;
+  if (_pool.poolSize === size && _pool._workers.length === size) return;
+  try {
+    _pool.dispose();
+  } catch (_) {}
+  _pool = new TileDecodePool(size);
 }
 
 /**

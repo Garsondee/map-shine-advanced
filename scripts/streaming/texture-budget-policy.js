@@ -6,6 +6,14 @@
 import { resolveCellSize } from './streaming-grid.js';
 import { getTextureBudgetTracker } from '../assets/TextureBudgetTracker.js';
 import { clearPyramidMemoryCaches } from './texture-pyramid-builder.js';
+import {
+  isGpuVramUserOverride,
+  resolveEffectiveGpuVramGB,
+  resolveEffectiveSystemRamGB,
+  resolveGpuVramBaseBudgetMB,
+  resolveHugeSceneCapMB,
+  resolveLargeSceneCapMB,
+} from './memory-settings.js';
 
 /**
  * @typedef {object} TextureBudgetPolicy
@@ -45,29 +53,29 @@ export function computeTextureBudgetPolicy(renderer = null, capabilities = {}, o
   const maxTextureSize = Number(renderer?.capabilities?.maxTextureSize) || 8192;
   const tier = String(capabilities?.tier ?? 'high');
   const sceneMp = Number(options.sceneMegapixels) || estimateSceneMegapixels();
-  const deviceMem = Number(navigator?.deviceMemory) || 4;
+  const deviceMem = resolveEffectiveSystemRamGB();
+  const gpuVramGB = resolveEffectiveGpuVramGB();
+  const userVramOverride = isGpuVramUserOverride();
 
   const tierHigh = tier === 'high';
-  let budgetMB = 512;
-  let budgetReason = 'default';
-  if (tier === 'low') budgetMB = 256;
-  else if (deviceMem >= 16) budgetMB = 1024;
-  else if (deviceMem >= 8) budgetMB = 768;
-  else if (deviceMem >= 4) budgetMB = 512;
-  else budgetMB = 384;
+  let budgetMB = resolveGpuVramBaseBudgetMB(gpuVramGB, tier, userVramOverride, deviceMem);
+  let budgetReason = userVramOverride
+    ? `user GPU VRAM (${gpuVramGB} GB)`
+    : 'default';
 
   // Boundaries use >= so an exactly-144 MP scene (12000×12000) hits the huge tier.
   const isLargeScene = sceneMp >= 90;
   const isHugeScene = sceneMp >= 130;
 
-  if (isLargeScene && budgetMB > 768) {
-    budgetMB = 768;
-    budgetReason = 'large scene (≥90 MP)';
+  const largeCap = resolveLargeSceneCapMB(gpuVramGB, userVramOverride);
+  if (isLargeScene && budgetMB > largeCap) {
+    budgetMB = largeCap;
+    budgetReason = `large scene (≥90 MP, ${largeCap} MB cap)`;
   }
   if (isHugeScene) {
     // Software budget for Map Shine textures — not total GPU VRAM. Huge scenes still
     // need a conservative cap, but high-end desktops can use more headroom than 384 MB.
-    const hugeCap = tierHigh && deviceMem >= 8 ? 640 : (tierHigh ? 512 : 384);
+    const hugeCap = resolveHugeSceneCapMB(gpuVramGB, userVramOverride, tierHigh, deviceMem);
     if (budgetMB > hugeCap) {
       budgetMB = hugeCap;
       budgetReason = `huge scene (≥130 MP, ${hugeCap} MB cap)`;

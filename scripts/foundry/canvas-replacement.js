@@ -1393,8 +1393,8 @@ function _bootstrapEarlyGraphicsSettings() {
         },
       });
     }
-    graphicsSettings.bootstrapForLoad();
     if (window.MapShine) window.MapShine.graphicsSettings = graphicsSettings;
+    graphicsSettings.bootstrapForLoad();
   }, 'graphicsSettings.bootstrapForLoad', Severity.DEGRADED);
 }
 

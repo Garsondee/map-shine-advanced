@@ -32,6 +32,7 @@ import { loadFallbackTexture, fetchSourceImageMeta } from '../streaming/texture-
 import { isHugeImageSource } from '../streaming/probe-image-dimensions.js';
 import { shouldStreamBackground } from '../streaming/streamed-background-grid.js';
 import { reconfigureTextureBudgetForScene } from '../streaming/texture-budget-policy.js';
+import { applySavedMemoryPresetsForScene } from '../streaming/memory-settings.js';
 import { DOOR_FLOOR_INDEX_GLOBAL } from '../scene/DoorMeshManager.js';
 import { TILE_FEATURE_LAYERS } from '../core/render-layers.js';
 import {
@@ -304,6 +305,24 @@ export class FloorRenderBus {
   }
 
   /**
+   * Mark a bus tile as covered by the scene background streaming pyramid.
+   * Keeps the tile mesh hidden — never loads a full-resolution albedo fallback.
+   * @param {string} tileId
+   */
+  markTileServedByBackgroundStream(tileId) {
+    const entry = this._tiles.get(tileId);
+    if (!entry) return;
+    getTileStreamingManager().unregisterBusTile(tileId);
+    entry.mapShineStreamedRegion = true;
+    entry.mapShineBackgroundStreamServed = true;
+    if (entry.mesh) entry.mesh.visible = false;
+    if (entry.material?.map) {
+      entry.material.map = null;
+      entry.material.needsUpdate = true;
+    }
+  }
+
+  /**
    * Restore a bus tile whose streamed region grid was torn down (e.g. redundancy
    * eviction). Re-enables the placeholder mesh and reloads a non-streaming albedo.
    * @param {string} tileId
@@ -311,7 +330,12 @@ export class FloorRenderBus {
   _releaseStreamedRegionTile(tileId) {
     const entry = this._tiles.get(tileId);
     if (!entry?.mapShineStreamedRegion) return;
+    if (entry.mapShineBackgroundStreamServed) {
+      if (entry.mesh) entry.mesh.visible = false;
+      return;
+    }
     entry.mapShineStreamedRegion = false;
+    entry.mapShineBackgroundStreamServed = false;
     const src = entry.textureSrc;
     const floorIndex = Number(entry.floorIndex) || 0;
     if (entry.mesh) entry.mesh.visible = true;
@@ -392,6 +416,7 @@ export class FloorRenderBus {
     if (!fd) { log.warn('FloorRenderBus.populate: no foundrySceneData'); return; }
 
     try { reconfigureTextureBudgetForScene(window.MapShine?.renderer ?? null); } catch (_) {}
+    try { applySavedMemoryPresetsForScene(); } catch (_) {}
 
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
 
@@ -455,11 +480,14 @@ export class FloorRenderBus {
     } else if (bgTexture) {
       let frames = 0;
       const maxFrames = 120;
+      const tickEpoch = this._bgDecodeEpoch;
       const tick = () => {
+        if (this._bgDecodeEpoch !== tickEpoch) return;
         frames += 1;
         try {
           const img = bgTexture?.image;
           if (img && img.width > 0 && img.height > 0) {
+            if (this._bgDecodeEpoch !== tickEpoch) return;
             const viewedBgRaf = String(getViewedLevelBackgroundSrc(scene) || '').trim();
             let fiRaf = resolveV14BackgroundFloorIndexForSrc(scene, bgSrc);
             fiRaf = finalizeBackgroundFloorIndexForBus(scene, bgSrc, fiRaf, {
@@ -475,8 +503,10 @@ export class FloorRenderBus {
             return;
           }
         } catch (_) {}
-        if (frames < maxFrames) requestAnimationFrame(tick);
-        else log.warn('FloorRenderBus.populate: _albedoTexture never gained pixel dimensions (no bgSrc fallback)');
+        if (frames < maxFrames && this._bgDecodeEpoch === tickEpoch) requestAnimationFrame(tick);
+        else if (frames >= maxFrames) {
+          log.warn('FloorRenderBus.populate: _albedoTexture never gained pixel dimensions (no bgSrc fallback)');
+        }
       };
       requestAnimationFrame(tick);
     }
@@ -1881,7 +1911,7 @@ export class FloorRenderBus {
     const prevColor     = renderer.getClearColor(new THREE.Color());
     const prevAlpha     = renderer.getClearAlpha();
     const prevLayerMask = camera.layers.mask;
-    camera.layers.enable(0);
+    camera.layers.set(0);
     for (let i = 1; i <= 19; i++) camera.layers.enable(i);
 
     renderer.setRenderTarget(target);

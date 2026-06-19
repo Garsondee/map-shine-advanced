@@ -2787,6 +2787,15 @@ body.msa-level-transition-active #loading-text {
   gap: 8px;
 }
 
+.msa-gfx__subsection-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.6;
+  margin-top: 4px;
+}
+
 .msa-gfx__count-tag,
 .msa-gfx__group-count {
   font-size: 10px;

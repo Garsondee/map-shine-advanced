@@ -63,6 +63,8 @@ export class TileStreamingManager {
     this._idleWarmHandle = null;
     /** @type {boolean} */
     this._idleWarmScheduled = false;
+    /** @type {boolean} */
+    this._idleWarmUsesRequestIdle = false;
     /** @type {number} */
     this._floorTransitionUntil = 0;
     /** @type {number} */
@@ -130,28 +132,88 @@ export class TileStreamingManager {
    * @param {{ minX: number, minY: number, maxX: number, maxY: number }} region
    * @param {string} tileSrc
    * @param {boolean} [isOverhead=false]
+   * @param {{ width?: number, height?: number }|null} [imageMeta]
    * @returns {boolean}
    * @private
    */
-  _regionRedundantWithBackground(region, tileSrc, isOverhead = false) {
-    if (!this._grids.has('__bg_image__') || !region || !tileSrc) return false;
+  _regionRedundantWithBackground(region, tileSrc, isOverhead = false, imageMeta = null) {
+    if (!this._grids.size || !region || !tileSrc) return false;
 
-    const bgGrid = this._grids.get('__bg_image__');
-    const bgSrc = bgGrid?._src ?? '';
-    if (!bgSrc) return false;
-    if (normalizeTextureUrl(bgSrc) !== normalizeTextureUrl(tileSrc)) return false;
-
+    const normTile = normalizeTextureUrl(tileSrc);
+    let rw = 0;
+    let rh = 0;
+    let coverage = 0;
     const fd = window.MapShine?.sceneComposer?.foundrySceneData ?? {};
     const sceneW = Number(fd.sceneWidth ?? fd.width ?? 0);
     const sceneH = Number(fd.sceneHeight ?? fd.height ?? 0);
-    if (!(sceneW > 0 && sceneH > 0)) return false;
-    const rw = Math.max(0, region.maxX - region.minX);
-    const rh = Math.max(0, region.maxY - region.minY);
-    const coverage = (rw * rh) / (sceneW * sceneH);
+    if (sceneW > 0 && sceneH > 0) {
+      rw = Math.max(0, region.maxX - region.minX);
+      rh = Math.max(0, region.maxY - region.minY);
+      coverage = (rw * rh) / (sceneW * sceneH);
+    }
     const fullCoverage = coverage >= 0.72;
-    // Partial overhead stamps need their own grid; full-scene duplicates share the background pyramid.
-    if (isOverhead && !fullCoverage) return false;
-    return fullCoverage;
+
+    const imgW = Number(imageMeta?.width) || 0;
+    const imgH = Number(imageMeta?.height) || 0;
+
+    for (const bgGrid of this._grids.values()) {
+      const manifest = bgGrid?._manifest;
+
+      // Same image dimensions as an active background pyramid — one grid is enough.
+      // Tile vs scene background URLs often differ (relative vs absolute paths).
+      if (imgW > 0 && imgH > 0 && manifest
+        && manifest.sourceWidth === imgW && manifest.sourceHeight === imgH) {
+        if (isOverhead && !fullCoverage) return false;
+        return true;
+      }
+
+      const bgSrc = bgGrid?._src ?? '';
+      if (!bgSrc || normalizeTextureUrl(bgSrc) !== normTile) continue;
+
+      if (isOverhead && !fullCoverage) return false;
+      if (fullCoverage) return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * @param {{ width: number, height: number }} metaA
+   * @param {{ sourceWidth?: number, sourceHeight?: number }|null} manifestB
+   * @returns {boolean}
+   * @private
+   */
+  _manifestMatchesMeta(metaA, manifestB) {
+    if (!metaA || !manifestB) return false;
+    return manifestB.sourceWidth === metaA.width && manifestB.sourceHeight === metaA.height;
+  }
+
+  /**
+   * Drop region grids that duplicate an active background pyramid (same source/dimensions).
+   * @param {string} bgSrc
+   * @param {{ width: number, height: number }} meta
+   * @private
+   */
+  _purgeRedundantRegionGrids(bgSrc, meta) {
+    if (!meta) return;
+    for (const [id, grid] of [...this._regionGrids.entries()]) {
+      const gridMeta = grid._manifest
+        ? { width: grid._manifest.sourceWidth, height: grid._manifest.sourceHeight }
+        : null;
+      const redundant = this._manifestMatchesMeta(meta, grid._manifest)
+        || this._regionRedundantWithBackground(
+          grid._region,
+          grid._src ?? bgSrc,
+          grid._isOverhead,
+          gridMeta ?? meta,
+        );
+      if (!redundant) continue;
+      log.info(`Disposing redundant region stream [${id}] — background grid owns this source`);
+      const bus = grid._bus;
+      grid.dispose();
+      this._regionGrids.delete(id);
+      try { bus?.markTileServedByBackgroundStream?.(id); } catch (_) {}
+    }
   }
 
   /**
@@ -167,12 +229,7 @@ export class TileStreamingManager {
     this._lastStreamLod = 99;
 
     if (this._idleWarmHandle != null) {
-      if (typeof cancelIdleCallback === 'function') {
-        try { cancelIdleCallback(this._idleWarmHandle); } catch (_) {}
-      } else {
-        try { clearTimeout(this._idleWarmHandle); } catch (_) {}
-      }
-      this._idleWarmHandle = null;
+      this._cancelIdleWarmHandle();
     }
     this._idleWarmScheduled = false;
 
@@ -427,12 +484,15 @@ export class TileStreamingManager {
     }
 
     for (const [id, grid] of [...this._regionGrids.entries()]) {
-      if (grid._region && this._regionRedundantWithBackground(grid._region, grid._src, grid._isOverhead)) {
+      const meta = grid._manifest
+        ? { width: grid._manifest.sourceWidth, height: grid._manifest.sourceHeight }
+        : null;
+      if (this._regionRedundantWithBackground(grid._region, grid._src, grid._isOverhead, meta)) {
         log.info(`Disposing redundant region stream [${id}]`);
         const bus = grid._bus;
         grid.dispose();
         this._regionGrids.delete(id);
-        try { bus?._releaseStreamedRegionTile?.(id); } catch (_) {}
+        try { bus?.markTileServedByBackgroundStream?.(id); } catch (_) {}
       }
     }
 
@@ -522,6 +582,7 @@ export class TileStreamingManager {
 
     this._grids.set(key, grid);
     log.info(`Streaming background registered [${key}] ${meta.width}x${meta.height}`);
+    this._purgeRedundantRegionGrids(src, meta);
     this._scheduleIdlePyramidWarm();
     return true;
   }
@@ -573,6 +634,14 @@ export class TileStreamingManager {
   async syncBusTile(bus, tileId, src, options) {
     if (!this._enabled || !bus || !src || !tileId) return false;
 
+    const meta = await fetchSourceImageMeta(src);
+    if (meta && options?.region
+      && this._regionRedundantWithBackground(options.region, src, options.isOverhead, meta)) {
+      if (this._regionGrids.has(tileId)) this.unregisterBusTile(tileId);
+      try { bus?.markTileServedByBackgroundStream?.(tileId); } catch (_) {}
+      return true;
+    }
+
     const existing = this._regionGrids.get(tileId);
     if (!existing) {
       return await this.registerBusTile(bus, tileId, src, options);
@@ -619,9 +688,10 @@ export class TileStreamingManager {
     }
 
     const region = options.region;
-    if (region && this._regionRedundantWithBackground(region, src, options.isOverhead)) {
+    if (region && this._regionRedundantWithBackground(region, src, options.isOverhead, meta)) {
       log.info(`Skipping redundant region stream [${tileId}] — same source as background grid`);
-      return false;
+      try { bus?.markTileServedByBackgroundStream?.(tileId); } catch (_) {}
+      return true;
     }
 
     const grid = new StreamedRegionGrid(bus);
@@ -650,6 +720,21 @@ export class TileStreamingManager {
   }
 
   /**
+   * Cancel a pending idle pyramid warm using the same scheduler that created it.
+   * @private
+   */
+  _cancelIdleWarmHandle() {
+    if (this._idleWarmHandle == null) return;
+    if (this._idleWarmUsesRequestIdle && typeof cancelIdleCallback === 'function') {
+      try { cancelIdleCallback(this._idleWarmHandle); } catch (_) {}
+    } else {
+      try { clearTimeout(this._idleWarmHandle); } catch (_) {}
+    }
+    this._idleWarmHandle = null;
+    this._idleWarmUsesRequestIdle = false;
+  }
+
+  /**
    * Schedule background pyramid warming when the browser is idle.
    * @private
    */
@@ -660,14 +745,18 @@ export class TileStreamingManager {
     const run = () => {
       this._idleWarmScheduled = false;
       this._idleWarmHandle = null;
+      this._idleWarmUsesRequestIdle = false;
       void this._runIdlePyramidWarm().catch((err) => {
         log.debug('Idle pyramid warm failed', err);
       });
     };
 
-    if (typeof requestIdleCallback === 'function') {
+    const canUseIdle = typeof requestIdleCallback === 'function';
+    if (canUseIdle) {
+      this._idleWarmUsesRequestIdle = true;
       this._idleWarmHandle = requestIdleCallback(run, { timeout: 8000 });
     } else {
+      this._idleWarmUsesRequestIdle = false;
       this._idleWarmHandle = setTimeout(run, 250);
     }
   }
@@ -722,14 +811,7 @@ export class TileStreamingManager {
   }
 
   dispose() {
-    if (this._idleWarmHandle != null) {
-      if (typeof cancelIdleCallback === 'function') {
-        try { cancelIdleCallback(this._idleWarmHandle); } catch (_) {}
-      } else {
-        try { clearTimeout(this._idleWarmHandle); } catch (_) {}
-      }
-      this._idleWarmHandle = null;
-    }
+    this._cancelIdleWarmHandle();
     this._idleWarmScheduled = false;
     this.clearGrids();
     clearPyramidMemoryCaches();

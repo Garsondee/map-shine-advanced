@@ -46,13 +46,50 @@ export const PYRAMID_TILE_CACHE_VERSION = 2;
 
 /** Max decoded tile textures kept in RAM (LRU eviction). */
 
-const MAX_TILE_TEXTURE_CACHE = 64;
+let _maxTileTextureCache = 64;
 
 
 
 /** Max source blobs cached in RAM simultaneously. */
 
-const MAX_SOURCE_BLOB_CACHE = 3;
+let _maxSourceBlobCache = 3;
+
+
+
+/**
+ * @returns {number}
+ */
+export function getTileTextureCacheLimit() {
+  return _maxTileTextureCache;
+}
+
+
+
+/**
+ * @returns {number}
+ */
+export function getSourceBlobCacheLimit() {
+  return _maxSourceBlobCache;
+}
+
+
+
+/**
+ * Apply RAM-profile cache limits from graphics settings.
+ * @param {{ tileCache?: number, blobCache?: number }} profile
+ */
+export function configurePyramidMemoryCaches(profile = {}) {
+  const tileCache = Number(profile.tileCache);
+  const blobCache = Number(profile.blobCache);
+  if (Number.isFinite(tileCache) && tileCache >= 8) {
+    _maxTileTextureCache = Math.floor(tileCache);
+  }
+  if (Number.isFinite(blobCache) && blobCache >= 1) {
+    _maxSourceBlobCache = Math.floor(blobCache);
+  }
+  _trimSourceBlobCache();
+  _trimTileTextureCache();
+}
 
 
 
@@ -506,7 +543,7 @@ export function hashSourceKey(src) {
 
 function _trimSourceBlobCache() {
 
-  while (_sourceBlobCache.size > MAX_SOURCE_BLOB_CACHE) {
+  while (_sourceBlobCache.size > _maxSourceBlobCache) {
 
     const oldest = _sourceBlobCache.keys().next().value;
 
@@ -524,7 +561,7 @@ function _trimSourceBlobCache() {
 
 function _trimTileTextureCache(exceptKey = null) {
 
-  while (_tileTextureCache.size > MAX_TILE_TEXTURE_CACHE) {
+  while (_tileTextureCache.size > _maxTileTextureCache) {
 
     let evictKey = null;
 

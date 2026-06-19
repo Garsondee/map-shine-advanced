@@ -87,6 +87,17 @@ export class GraphicsSettingsDialog {
             <span>Lower-resolution trees &amp; bushes (performance)</span>
           </label>
           <p class="msa-gfx__hint">When enabled, foliage may look softer but uses less GPU. Off by default for full quality.</p>
+          <div class="msa-gfx__subsection-title">Memory</div>
+          <label class="msa-gfx__field">
+            <span class="msa-gfx__label">GPU VRAM</span>
+            <select class="msa-gfx__select" data-input="gpuVram"></select>
+          </label>
+          <p class="msa-gfx__hint" data-bind="gpu-vram-hint"></p>
+          <label class="msa-gfx__field">
+            <span class="msa-gfx__label">System RAM</span>
+            <select class="msa-gfx__select" data-input="systemRam"></select>
+          </label>
+          <p class="msa-gfx__hint" data-bind="system-ram-hint"></p>
         </section>
 
         <section class="msa-gfx__section">
@@ -212,6 +223,16 @@ export class GraphicsSettingsDialog {
         this.manager.setVegetationHalfResEnabled(target.checked);
         return;
       }
+      if (target.matches('[data-input="gpuVram"]')) {
+        this.manager.setGpuVramPreset(target.value);
+        this.refresh();
+        return;
+      }
+      if (target.matches('[data-input="systemRam"]')) {
+        this.manager.setSystemRamPreset(target.value);
+        this.refresh();
+        return;
+      }
       if (target.matches('[data-input="effect-enabled"]')) {
         const effectId = target.dataset.effectId;
         if (!effectId) return;
@@ -328,6 +349,51 @@ export class GraphicsSettingsDialog {
     const vegetationHalfRes = root.querySelector('[data-input="vegetationHalfRes"]');
     if (vegetationHalfRes instanceof HTMLInputElement) {
       vegetationHalfRes.checked = this.manager.getVegetationHalfResEnabled();
+    }
+
+    this._populateMemoryControls();
+  }
+
+  /** @private */
+  _populateMemoryControls() {
+    const root = this.container;
+    if (!root) return;
+
+    const gpuSelect = root.querySelector('[data-input="gpuVram"]');
+    const currentGpu = this.manager.getGpuVramPreset();
+    if (gpuSelect instanceof HTMLSelectElement) {
+      gpuSelect.innerHTML = this.manager.listGpuVramPresetOptions()
+        .map((row) => `<option value="${escapeHtml(row.id)}"${row.id === currentGpu ? ' selected' : ''}>${escapeHtml(row.label)}</option>`)
+        .join('');
+    }
+
+    const ramSelect = root.querySelector('[data-input="systemRam"]');
+    const currentRam = this.manager.getSystemRamPreset();
+    if (ramSelect instanceof HTMLSelectElement) {
+      ramSelect.innerHTML = this.manager.listSystemRamPresetOptions()
+        .map((row) => `<option value="${escapeHtml(row.id)}"${row.id === currentRam ? ' selected' : ''}>${escapeHtml(row.label)}</option>`)
+        .join('');
+    }
+
+    const summary = this.manager.getMemorySettingsSummary();
+    const gpuHint = root.querySelector('[data-bind="gpu-vram-hint"]');
+    if (gpuHint instanceof HTMLElement) {
+      const autoLine = `Auto detected ${summary.detectedRamGB} GB system RAM — typical budget ${summary.autoBudgetMB} MB.`;
+      if (summary.gpuVramOverride) {
+        gpuHint.textContent = `${autoLine} Your selection: ${summary.effectiveVramGB} GB GPU → ${summary.appliedBudgetMB} MB texture budget (${summary.budgetReason}).`;
+      } else {
+        gpuHint.textContent = `${autoLine} Active texture budget: ${summary.appliedBudgetMB} MB (${summary.budgetReason}).`;
+      }
+    }
+
+    const ramHint = root.querySelector('[data-bind="system-ram-hint"]');
+    if (ramHint instanceof HTMLElement) {
+      const autoLine = `Browser reports ${summary.detectedRamGB} GB RAM (may under-report on high-memory PCs).`;
+      if (summary.systemRamOverride) {
+        ramHint.textContent = `${autoLine} Your selection: ${summary.effectiveRamGB} GB → ${summary.workerCount} decode workers, ${summary.tileCacheLimit} tile RAM cache.`;
+      } else {
+        ramHint.textContent = `${autoLine} Active profile: ${summary.workerCount} decode workers, ${summary.tileCacheLimit} tile RAM cache.`;
+      }
     }
   }
 

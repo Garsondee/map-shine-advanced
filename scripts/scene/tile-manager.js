@@ -718,6 +718,16 @@ export class TileManager {
      */
     this.effectMaskVramBudget = 512 * 1024 * 1024;
 
+    /**
+     * Update the per-tile effect mask VRAM cap (bytes).
+     * @param {number} budgetBytes
+     */
+    this.setEffectMaskVramBudget = (budgetBytes) => {
+      const bytes = Number(budgetBytes);
+      if (!Number.isFinite(bytes) || bytes < 64 * 1024 * 1024) return;
+      this.effectMaskVramBudget = Math.floor(bytes);
+    };
+
     // Cache directory listings so we can avoid 404 spam when probing optional mask files.
     // Key: directory path (with trailing slash), Value: string[] of file paths
     this._dirFileListCache = new Map();

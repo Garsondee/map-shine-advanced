@@ -1934,15 +1934,13 @@ export class GpuSceneMaskCompositor {
           renderer.render(this._waterPatchScene, this._orthoCamera);
 
           // Pass 2: blit temp RT back into the lower water RT.
-          // uMode=2 (alpha-extract) outputs s.a directly — since the patch shader
-          // writes vec4(result, result, result, result), s.a == result. This avoids
-          // the uMode=0 squaring bug (lum*alpha = result*result).
+          // uMode=1 (source-over) preserves soft SDF gradients; uMode=2 defringes alpha.
           const blitMat = this._tileMaterial;
           blitMat.uniforms.tMask.value     = this._waterPatchTempRt.texture;
           blitMat.uniforms.uTileRect.value.set(0, 0, 1, 1);
           blitMat.uniforms.uScaleSign.value.set(1, 1);
           blitMat.uniforms.uRotation.value = 0.0;
-          blitMat.uniforms.uMode.value     = 2; // alpha-extract: outputs s.a directly
+          blitMat.uniforms.uMode.value     = 1; // source-over: full RGBA as-is
           blitMat.blending = THREE.NoBlending;
 
           const blitMesh = this._quadMesh;
@@ -2040,6 +2038,9 @@ export class GpuSceneMaskCompositor {
     const mat  = this._floorIdMaterial;
     const prev = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
+    const prevClearColor = new THREE.Color();
+    renderer.getClearColor(prevClearColor);
+    const prevClearAlpha = renderer.getClearAlpha();
 
     renderer.setRenderTarget(this._floorIdTarget);
     renderer.setClearColor(0x000000, 0); // R=0 = floor index 0 (background)
@@ -2065,6 +2066,7 @@ export class GpuSceneMaskCompositor {
     }
 
     renderer.autoClear = prevAutoClear;
+    renderer.setClearColor(prevClearColor, prevClearAlpha);
     renderer.setRenderTarget(prev);
 
     log.debug('buildFloorIdTexture: built for', visibleFloorBundles.length, 'floors', outW, 'x', outH);
@@ -2685,6 +2687,9 @@ export class GpuSceneMaskCompositor {
     }
 
     const prevTarget = renderer.getRenderTarget();
+    const prevClearColor = new THREE.Color();
+    renderer.getClearColor(prevClearColor);
+    const prevClearAlpha = renderer.getClearAlpha();
     const mat = this._tileMaterial;
     mat.blending = THREE.NormalBlending;
     mat.uniforms.uMode.value = 1;
@@ -2700,9 +2705,11 @@ export class GpuSceneMaskCompositor {
       renderer.render(this._quadScene, this._orthoCamera);
     } catch (e) {
       log.debug('ensureSceneSpaceOutdoorsForFloor: bake failed', { floorKey: key, err: e });
+      renderer.setClearColor(prevClearColor, prevClearAlpha);
       renderer.setRenderTarget(prevTarget);
       return null;
     }
+    renderer.setClearColor(prevClearColor, prevClearAlpha);
     renderer.setRenderTarget(prevTarget);
 
     const outTex = rt.texture;
@@ -2773,6 +2780,9 @@ export class GpuSceneMaskCompositor {
     this._ensureGpuResources(THREE);
     const mat = this._tileMaterial;
     const prevTarget = renderer.getRenderTarget();
+    const prevClearColor = new THREE.Color();
+    renderer.getClearColor(prevClearColor);
+    const prevClearAlpha = renderer.getClearAlpha();
     mat.blending = THREE.NoBlending;
     mat.uniforms.uMode.value = 4;
     mat.uniforms.tMask.value = outdoorsTex;
@@ -2787,9 +2797,11 @@ export class GpuSceneMaskCompositor {
       renderer.render(this._quadScene, this._orthoCamera);
     } catch (e) {
       log.debug('_ensureFloorAlphaFromOutdoors: bake failed', { floorKey: key, err: e });
+      renderer.setClearColor(prevClearColor, prevClearAlpha);
       renderer.setRenderTarget(prevTarget);
       return null;
     }
+    renderer.setClearColor(prevClearColor, prevClearAlpha);
     renderer.setRenderTarget(prevTarget);
 
     const tex = alphaRt.texture;
@@ -4284,6 +4296,9 @@ export class GpuSceneMaskCompositor {
   _composeMaskType(renderer, THREE, rt, sortedEntries, maskType,
                    sceneX, sceneY, sceneW, sceneH, isLighten) {
     const prevTarget = renderer.getRenderTarget();
+    const prevClearColor = new THREE.Color();
+    renderer.getClearColor(prevClearColor);
+    const prevClearAlpha = renderer.getClearAlpha();
     renderer.setRenderTarget(rt);
     renderer.setClearColor(0x000000, 0);
     renderer.clear();
@@ -4368,6 +4383,7 @@ export class GpuSceneMaskCompositor {
       renderer.setScissor(prevScissor);
     }
 
+    renderer.setClearColor(prevClearColor, prevClearAlpha);
     renderer.setRenderTarget(prevTarget);
     return anyDrawn;
   }
@@ -4439,6 +4455,9 @@ export class GpuSceneMaskCompositor {
 
     const mat = this._tileMaterial;
     const prevTarget = renderer.getRenderTarget();
+    const prevClearColor = new THREE.Color();
+    renderer.getClearColor(prevClearColor);
+    const prevClearAlpha = renderer.getClearAlpha();
 
     renderer.setRenderTarget(rt);
     renderer.setClearColor(0x000000, 0);
@@ -4502,6 +4521,7 @@ export class GpuSceneMaskCompositor {
       renderer.setScissor(prevScissor);
     }
 
+    renderer.setClearColor(prevClearColor, prevClearAlpha);
     renderer.setRenderTarget(prevTarget);
 
     if (!anyDrawn) return null;

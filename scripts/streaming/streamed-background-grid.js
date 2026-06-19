@@ -53,7 +53,20 @@ function streamingCellRenderOrder(baseOrder, lod, isFallback = false) {
   const base = Math.floor(Number(baseOrder) || 0);
   const level = Math.max(0, Math.floor(Number(lod) || 0));
   if (isFallback) return base * 10;
-  return base * 10 + 1 + level;
+  // LOD 0 = sharpest — draw last (highest renderOrder) over coarser cells during progressive load.
+  return base * 10 + 9 - Math.min(8, level);
+}
+
+/**
+ * Z offset for a streaming cell by LOD (sharper = slightly closer when depthTest is enabled).
+ * @param {number} lod
+ * @param {boolean} [isFallback=false]
+ * @returns {number}
+ */
+function streamingCellLodZOffset(lod, isFallback = false) {
+  if (isFallback) return -0.001;
+  const level = Math.max(0, Math.floor(Number(lod) || 0));
+  return 0.01 - level * 0.001;
 }
 
 /**
@@ -990,6 +1003,19 @@ export class StreamedBackgroundGrid {
   }
 
   /**
+   * Release GPU textures for cells outside the current view frustum.
+   * @param {Set<string>} requiredKeys
+   * @private
+   */
+  _releaseOffViewCells(requiredKeys) {
+    for (const [key, entry] of [...this._cells.entries()]) {
+      if (requiredKeys.has(key)) continue;
+      if (this._inflight.has(key)) continue;
+      this._disposeCell(key, entry);
+    }
+  }
+
+  /**
    * Build a coarse tiled fallback from pyramid cells (avoids full-image decode on 12k sources).
    * @param {number} [lod=3]
    * @returns {Promise<boolean>}
@@ -1365,6 +1391,7 @@ export class StreamedBackgroundGrid {
     if (!intersectRects(viewRect, region)) {
       this._activeRequiredKeys.clear();
       this._cancelStaleInflight(new Set());
+      this._releaseOffViewCells(new Set());
       return;
     }
     this._isPanning = options.isPanning === true;
@@ -1424,12 +1451,7 @@ export class StreamedBackgroundGrid {
     }
     this._syncKey = syncKey;
 
-    for (const [key, entry] of this._cells) {
-      if (!requiredKeys.has(key)) {
-        this._setCellState(key, STATE_CULLED);
-        if (entry?.mesh) entry.mesh.visible = false;
-      }
-    }
+    this._releaseOffViewCells(requiredKeys);
 
     if (this._lazyCoarseFallback && (uncovered > 0 || !sharpenBacklog)) {
       this._ensureFallbackForRequired(required, this._coarseFallbackLod, {
@@ -1622,7 +1644,7 @@ export class StreamedBackgroundGrid {
     const mesh = new THREE.Mesh(geom, mat);
     mesh.frustumCulled = false;
     mesh.scale.set(1, -1, 1);
-    const z = GROUND_Z - 1 + this._floorIndex * 0.01 + (isFallback ? -0.001 : 0.002 + lod * 0.001);
+    const z = GROUND_Z - 1 + this._floorIndex * 0.01 + streamingCellLodZOffset(lod, isFallback);
     mesh.position.set(centerX, centerY, z);
     mesh.renderOrder = streamingCellRenderOrder(0, lod, isFallback);
     const busKey = this._cellBusKey(`${cellX},${cellY}`);
@@ -2021,6 +2043,19 @@ export class StreamedRegionGrid {
     this._setCellState(key, STATE_CULLED);
   }
 
+  /**
+   * Release GPU textures for cells outside the current view frustum.
+   * @param {Set<string>} requiredKeys
+   * @private
+   */
+  _releaseOffViewCells(requiredKeys) {
+    for (const [key, entry] of [...this._cells.entries()]) {
+      if (requiredKeys.has(key)) continue;
+      if (this._inflight.has(key)) continue;
+      this._disposeCell(key, entry);
+    }
+  }
+
   /** @private */
   _effectiveLod(lod) {
     const budget = getTextureBudgetTracker();
@@ -2298,6 +2333,7 @@ export class StreamedRegionGrid {
     if (!intersectRects(viewRect, this._region)) {
       this._activeRequiredKeys.clear();
       this._cancelStaleInflight(new Set());
+      this._releaseOffViewCells(new Set());
       return;
     }
 
@@ -2337,12 +2373,7 @@ export class StreamedRegionGrid {
     }
     this._syncKey = syncKey;
 
-    for (const [key, entry] of this._cells) {
-      if (!requiredKeys.has(key)) {
-        this._setCellState(key, STATE_CULLED);
-        if (entry?.mesh) entry.mesh.visible = false;
-      }
-    }
+    this._releaseOffViewCells(requiredKeys);
 
     this._scheduleRequiredCellLoads(required, effectiveLod, epoch);
 
@@ -2439,7 +2470,7 @@ export class StreamedRegionGrid {
     const mesh = new THREE.Mesh(geom, mat);
     mesh.frustumCulled = false;
     mesh.scale.set(1, -1, 1);
-    mesh.position.set(centerX, centerY, this._z + (isFallback ? -0.001 : 0.002 + lod * 0.001));
+    mesh.position.set(centerX, centerY, this._z + streamingCellLodZOffset(lod, isFallback));
     mesh.rotation.z = this._rotation;
     mesh.renderOrder = streamingCellRenderOrder(this._tileRenderOrder, lod, isFallback);
     mesh.layers.set(0);
@@ -2662,7 +2693,7 @@ export class StreamedRegionGrid {
    */
   _applyLayoutToMesh(mesh, isFallback, lod = 0) {
     mesh.rotation.z = this._rotation;
-    mesh.position.z = this._z + (isFallback ? -0.001 : 0.002 + lod * 0.001);
+    mesh.position.z = this._z + streamingCellLodZOffset(lod, isFallback);
     mesh.renderOrder = streamingCellRenderOrder(this._tileRenderOrder, lod, isFallback);
 
     if (mesh.material) {

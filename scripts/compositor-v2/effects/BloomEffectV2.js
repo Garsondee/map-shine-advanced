@@ -1,10 +1,11 @@
 /**
  * @fileoverview BloomEffectV2 — V2 screen-space bloom post-processing pass.
  *
- * Wraps THREE.UnrealBloomPass to produce high-quality multi-mip bloom glow.
- * Pipeline: threshold bright pixels → progressive mip-chain blur → additive composite.
+ * Dual-layer mip-chain bloom — half-res Gaussian mips, full-res upscale before blend.
+ * Mip chain is computed at half-res for cost; upscaling half-res bloom directly onto
+ * full-res scene exposes a 2×2 pixel grid at high strength.
  *
- * Fog clip: before UnrealBloomPass, HDR input is multiplied by the token LOS
+ * Fog clip: before the bloom blur, HDR input is multiplied by the token LOS
  * vision mask so unseen areas never contribute energy to the blur (prevents
  * in-fog lights from bleeding into visible map regions).
  *
@@ -18,7 +19,7 @@
  *   - Bloom tint color (warm/cool glow)
  *   - Blend opacity
  *
- * Outdoor spill suppress: after UnrealBloomPass, dark outdoor pixels (_Outdoors)
+ * Outdoor spill suppress: after bloom, dark outdoor pixels (_Outdoors)
  * lose convolved bloom unless the pre-bloom HDR scene is already bright there —
  * stops indoor window glow halos on surrounding ground without killing legitimate
  * outdoor highlights (sun, torches, water specular).
@@ -36,6 +37,156 @@ import {
 } from '../scene-view-projection.js';
 
 const log = createLogger('BloomEffectV2');
+
+/** Mip levels in each bloom chain. */
+const BLOOM_N_MIPS = 5;
+/** Per-mip separable Gaussian tap counts (min 5 for smooth tight halos). */
+const SURFACE_MIP_KERNEL_TAPS = [5, 5, 7, 7, 9];
+const ATMO_MIP_KERNEL_TAPS = [5, 7, 7, 9, 9];
+/** Per-mip spread multiplier at radius scale 1.0 (mip downscale carries reach). */
+const SURFACE_MIP_SPREAD_PX = [3, 4, 5, 6, 7];
+const ATMO_MIP_SPREAD_PX = [5, 7, 9, 12, 16];
+/** Weighted mip combine factors. */
+const BLOOM_MIP_FACTORS = [1, 0.8, 0.6, 0.4, 0.2];
+/** UI / param range caps for radius sliders. */
+const SURFACE_RADIUS_MAX = 2;
+const ATMO_RADIUS_MAX = 12;
+/** Full-res upscale + polish after half-res mip composite (hides 2×2 pixel grid). */
+const FULLRES_POLISH_KERNEL = 7;
+const FULLRES_UPSAMPLE_SPREAD = 1.5;
+const FULLRES_POLISH_SPREAD = 1.1;
+
+/** Precompute Gaussian weights for a separable kernel (matches UnrealBloomPass). */
+function buildGaussianCoefficients(kernelRadius) {
+  const coefficients = [];
+  for (let i = 0; i < kernelRadius; i++) {
+    coefficients.push(
+      0.39894 * Math.exp(-0.5 * i * i / (kernelRadius * kernelRadius)) / kernelRadius,
+    );
+  }
+  return coefficients;
+}
+
+const BLOOM_FULLSCREEN_VERT = /* glsl */`
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = vec4(position.xy, 0.0, 1.0);
+  }
+`;
+
+/** Separable Gaussian blur (horizontal or vertical). KERNEL_RADIUS set per material. */
+const BLOOM_GAUSSIAN_FRAG = /* glsl */`
+  uniform sampler2D colorTexture;
+  uniform vec2 invSize;
+  uniform vec2 direction;
+  uniform float uRadiusScale;
+  uniform float gaussianCoefficients[KERNEL_RADIUS];
+  varying vec2 vUv;
+
+  void main() {
+    float scale = max(uRadiusScale, 0.001);
+    float weightSum = gaussianCoefficients[0];
+    vec3 diffuseSum = texture2D(colorTexture, vUv).rgb * weightSum;
+    for (int i = 1; i < KERNEL_RADIUS; i++) {
+      float x = float(i);
+      float w = gaussianCoefficients[i];
+      vec2 uvOffset = direction * invSize * x * scale;
+      vec3 sample1 = texture2D(colorTexture, vUv + uvOffset).rgb;
+      vec3 sample2 = texture2D(colorTexture, vUv - uvOffset).rgb;
+      diffuseSum += (sample1 + sample2) * w;
+      weightSum += 2.0 * w;
+    }
+    gl_FragColor = vec4(diffuseSum / max(weightSum, 1.0e-5), 1.0);
+  }
+`;
+
+/** Upsample half-res bloom composite to full-res with a small tent filter. */
+const BLOOM_UPSAMPLE_FRAG = /* glsl */`
+  uniform sampler2D tDiffuse;
+  uniform vec2 uTexelSize;
+  varying vec2 vUv;
+
+  void main() {
+    vec3 sum = texture2D(tDiffuse, vUv).rgb * 4.0;
+    sum += texture2D(tDiffuse, vUv + vec2( uTexelSize.x, 0.0)).rgb;
+    sum += texture2D(tDiffuse, vUv + vec2(-uTexelSize.x, 0.0)).rgb;
+    sum += texture2D(tDiffuse, vUv + vec2(0.0,  uTexelSize.y)).rgb;
+    sum += texture2D(tDiffuse, vUv + vec2(0.0, -uTexelSize.y)).rgb;
+    vec2 d = uTexelSize * ${FULLRES_UPSAMPLE_SPREAD.toFixed(1)};
+    sum += texture2D(tDiffuse, vUv + vec2( d.x,  d.y)).rgb;
+    sum += texture2D(tDiffuse, vUv + vec2(-d.x,  d.y)).rgb;
+    sum += texture2D(tDiffuse, vUv + vec2( d.x, -d.y)).rgb;
+    sum += texture2D(tDiffuse, vUv + vec2(-d.x, -d.y)).rgb;
+    gl_FragColor = vec4(sum / 12.0, 1.0);
+  }
+`;
+
+const BLOOM_HIGH_PASS_FRAG = /* glsl */`
+  uniform sampler2D tDiffuse;
+  uniform vec3 defaultColor;
+  uniform float defaultOpacity;
+  uniform float luminosityThreshold;
+  uniform float smoothWidth;
+  varying vec2 vUv;
+
+  float bloomLuma(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+  }
+
+  void main() {
+    vec4 texel = texture2D(tDiffuse, vUv);
+    float luma = bloomLuma(texel.rgb);
+
+    float rq = clamp(luma - luminosityThreshold + smoothWidth * 0.5, 0.0, smoothWidth);
+    float curve = smoothWidth > 0.001
+      ? (rq * rq) / (2.0 * smoothWidth)
+      : max(luma - luminosityThreshold, 0.0);
+
+    float intensity = max(luma - luminosityThreshold, curve);
+    vec3 extracted = texel.rgb * (intensity / max(luma, 1.0e-5));
+
+    gl_FragColor = vec4(extracted, texel.a);
+  }
+`;
+
+const BLOOM_COMPOSITE_FRAG = /* glsl */`
+  varying vec2 vUv;
+  uniform sampler2D blurTexture1;
+  uniform sampler2D blurTexture2;
+  uniform sampler2D blurTexture3;
+  uniform sampler2D blurTexture4;
+  uniform sampler2D blurTexture5;
+  uniform float bloomStrength;
+  uniform float bloomRadius;
+  uniform float bloomFactors[5];
+  uniform vec3 bloomTintColors[5];
+
+  float lerpBloomFactor(const in float factor) {
+    float mirrorFactor = 1.2 - factor;
+    return mix(factor, mirrorFactor, bloomRadius);
+  }
+
+  void main() {
+    gl_FragColor = bloomStrength * (
+      lerpBloomFactor(bloomFactors[0]) * vec4(bloomTintColors[0], 1.0) * texture2D(blurTexture1, vUv) +
+      lerpBloomFactor(bloomFactors[1]) * vec4(bloomTintColors[1], 1.0) * texture2D(blurTexture2, vUv) +
+      lerpBloomFactor(bloomFactors[2]) * vec4(bloomTintColors[2], 1.0) * texture2D(blurTexture3, vUv) +
+      lerpBloomFactor(bloomFactors[3]) * vec4(bloomTintColors[3], 1.0) * texture2D(blurTexture4, vUv) +
+      lerpBloomFactor(bloomFactors[4]) * vec4(bloomTintColors[4], 1.0) * texture2D(blurTexture5, vUv)
+    );
+  }
+`;
+
+const BLOOM_ADDITIVE_FRAG = /* glsl */`
+  uniform float opacity;
+  uniform sampler2D tDiffuse;
+  varying vec2 vUv;
+
+  void main() {
+    gl_FragColor = opacity * texture2D(tDiffuse, vUv);
+  }
+`;
 
 /** Shared GLSL for sampling FogOfWar vision in bloom pre-pass (Foundry scene UV). */
 const BLOOM_FOG_VISION_GLSL = /* glsl */`
@@ -91,7 +242,13 @@ export class BloomEffectV2 {
       threshold: 3.01,
       tintColor: { r: 1, g: 1, b: 1 },
       blendOpacity: 1.0,
-      // WaterEffectV2 writes a linear specular mask; injected here before UnrealBloom threshold.
+      // Wide atmospheric scatter from the same bright extract (air catching surface light).
+      atmoEnabled: true,
+      atmoStrength: 0.42,
+      atmoRadius: 3.5,
+      atmoTintColor: { r: 1, g: 0.92, b: 0.78 },
+      atmoBlendOpacity: 0.72,
+      // WaterEffectV2 writes a linear specular mask; injected here before bloom threshold.
       waterSpecularBloomEnabled: true,
       waterSpecularBloomStrength: 8,
       waterSpecularBloomGamma: 0.81,
@@ -118,20 +275,68 @@ export class BloomEffectV2 {
     this._effectiveStrength = 0.4;
     /** @type {number} Effective pass threshold after lightning adaptation. */
     this._effectiveThreshold = 2;
-    /** @type {number} Effective pass radius after lightning adaptation. */
+    /** @type {number} Effective surface radius after lightning adaptation. */
     this._effectiveRadius = 1;
     /** @type {number} Effective blend opacity after lightning adaptation. */
     this._effectiveBlendOpacity = 1;
+    /** @type {number} Effective atmospheric strength after lightning adaptation. */
+    this._effectiveAtmoStrength = 0.42;
+    /** @type {number} Effective atmospheric radius after lightning adaptation. */
+    this._effectiveAtmoRadius = 3.5;
+    /** @type {number} Effective atmospheric blend opacity after lightning adaptation. */
+    this._effectiveAtmoBlendOpacity = 0.72;
     /** @type {boolean} Skip bloom entirely during the brightest strike peak. */
     this._lightningPassthrough = false;
 
-    // ── GPU resources ───────────────────────────────────────────────────
-    /** @type {THREE.UnrealBloomPass|null} */
-    this._pass = null;
+    // ── Bloom GPU resources ──────────────────────────────────────────────
+    /** @type {THREE.ShaderMaterial|null} Luminance high-pass extract. */
+    this._bloomHighPassMaterial = null;
+    /** @type {Object|null} High-pass uniforms (smoothWidth for lightning adapt). */
+    this._bloomHighPassUniforms = null;
+    /** @type {THREE.ShaderMaterial[]} Separable Gaussian blur per surface mip. */
+    this._surfaceBlurMaterials = [];
+    /** @type {THREE.ShaderMaterial[]} Separable Gaussian blur per atmosphere mip. */
+    this._atmoBlurMaterials = [];
+    /** @type {THREE.Vector2|null} Blur axis scratch (horizontal). */
+    this._blurDirX = null;
+    /** @type {THREE.Vector2|null} Blur axis scratch (vertical). */
+    this._blurDirY = null;
+    /** @type {THREE.ShaderMaterial|null} Mip composite. */
+    this._bloomCompositeMaterial = null;
+    /** @type {THREE.ShaderMaterial|null} Additive bloom blend. */
+    this._bloomBlendMaterial = null;
+    /** @type {Object|null} Blend opacity uniform. */
+    this._bloomCopyUniforms = null;
+    /** @type {THREE.Vector3[]} Per-mip tint colors (surface). */
+    this._bloomTintColors = null;
+    /** @type {THREE.Vector3[]} Per-mip tint colors (atmosphere). */
+    this._atmoTintColors = null;
+    /** @type {THREE.WebGLRenderTarget|null} Half-res bright extract. */
+    this._bloomBrightRT = null;
+    /** @type {THREE.WebGLRenderTarget[]} Surface mip blur targets. */
+    this._bloomMipRTs = [];
+    /** @type {THREE.WebGLRenderTarget[]} Atmospheric mip blur targets. */
+    this._atmoMipRTs = [];
+    /** @type {THREE.WebGLRenderTarget|null} Blur / pre-blur scratch. */
+    this._bloomBlurPingRT = null;
+    /** @type {THREE.WebGLRenderTarget|null} Weighted mip composite output (half-res). */
+    this._bloomCompositeRT = null;
+    /** @type {THREE.WebGLRenderTarget|null} Full-res bloom after upscale + polish. */
+    this._bloomFullResRT = null;
+    /** @type {THREE.ShaderMaterial|null} Half-res → full-res tent upsample. */
+    this._bloomUpsampleMaterial = null;
+    /** @type {THREE.ShaderMaterial|null} Full-res separable polish (kernel 7). */
+    this._fullResPolishMaterial = null;
+    /** @type {THREE.Scene|null} Fullscreen quad scene for internal bloom passes. */
+    this._bloomProcessScene = null;
+    /** @type {THREE.OrthographicCamera|null} */
+    this._bloomProcessCamera = null;
+    /** @type {THREE.Mesh|null} */
+    this._bloomProcessQuad = null;
 
     /**
-     * Internal RT used as the "readBuffer" for UnrealBloomPass.
-     * We copy inputRT → this RT, run the pass (which writes back into it),
+     * Internal RT used as the bloom read/write buffer.
+     * We copy inputRT → this RT, run bloom (which writes back into it),
      * then copy the result → outputRT.
      * @type {THREE.WebGLRenderTarget|null}
      */
@@ -149,9 +354,14 @@ export class BloomEffectV2 {
 
     /** @type {THREE.Vector3|null} */
     this._tintVec = null;
+    /** @type {THREE.Vector3|null} */
+    this._atmoTintVec = null;
     this._lastTintR = null;
     this._lastTintG = null;
     this._lastTintB = null;
+    this._lastAtmoTintR = null;
+    this._lastAtmoTintG = null;
+    this._lastAtmoTintB = null;
 
     /** @type {THREE.Texture|null} Second target from WaterEffectV2 MRT (linear RGB mask). */
     this._waterSpecBloomTexture = null;
@@ -171,7 +381,7 @@ export class BloomEffectV2 {
     /** @type {THREE.Texture|null} Current vision mask from FogOfWarEffectV2. */
     this._fogVisionTexture = null;
 
-    /** @type {THREE.WebGLRenderTarget|null} Scene HDR snapshot before UnrealBloomPass. */
+    /** @type {THREE.WebGLRenderTarget|null} Scene HDR snapshot before bloom. */
     this._preBloomSceneRT = null;
 
     /** @type {import('../scene-view-projection.js').SceneViewProjectionCache} */
@@ -242,20 +452,26 @@ export class BloomEffectV2 {
       help: {
         title: 'Bloom (glow)',
         summary: [
-          'Adds screen-space glow around bright pixels (highlights, lamps, sky, specular) using a multi-pass blur.',
+          'Separable Gaussian mip-chain bloom — smooth gradients without Vogel-disk grain. Mip downscaling provides wide atmospheric reach.',
           'No tile masks required. Runs after the main scene is composited (post-processing).',
+          'Surface and atmosphere share threshold, fog clip, water specular inject, and lightning adaptation — only strength, radius, tint, and mix are independent.',
           'Water specular can feed a dedicated linear mask (see Water → Bloom link) so sun glints bloom strongly without over-brightening the base image.',
           'During lightning strikes bloom can adapt automatically (Lightning strike folder) to avoid banded halos from broad HDR flash lifts.',
           'Fog clip (advanced) uses the Fog of War vision mask so bloom cannot spill into unexplored or out-of-LOS areas.',
-          'Performance: extra full-screen passes and mip blur — lower radius and blend on large maps or weak GPUs if needed.',
+          'Performance: one shared bright extract, then two Gaussian mip chains — disable atmosphere or lower radii on weak GPUs.',
           'Persistence: these controls save with the scene (not World Based).',
         ].join('\n\n'),
         glossary: {
-          Strength: 'How much glow is added on top of the image.',
-          Radius: 'Spread of the glow (blur footprint). Higher = wider halos.',
+          Strength: 'Surface glow intensity — tight halo on bright pixels (lamps, fire, specular).',
+          Radius: 'Surface glow spread (0–2). Small values stay near the source; 2 is a wide surface halo.',
           Threshold: 'Brightness cutoff (linear). Only pixels above this contribute to bloom.',
-          'Glow tint': 'Multiplies bloom color per mip (warm candlelight vs cool moonlight).',
-          'Blend opacity': 'Master mix for the entire bloom composite (0 = off).',
+          'Glow tint': 'Tint on the surface bloom layer.',
+          'Blend opacity': 'Mix for the surface bloom layer.',
+          'Atmosphere enabled': 'Wide secondary bloom from the same bright extract (air catching light).',
+          'Atmosphere strength': 'Intensity of the wide atmospheric scatter.',
+          'Atmosphere radius': 'Atmospheric spread (0–12). Much larger than surface — simulates air glow.',
+          'Atmosphere tint': 'Tint on the atmospheric layer (warm dusk haze by default).',
+          'Atmosphere blend': 'Mix for the atmospheric bloom layer.',
           'Water bloom (specular)': 'Adds linear HDR from water specular/highlight mask before threshold — strong glints without crushing the beauty pass.',
           'Water bloom strength': 'How much of the water mask is added into the bloom input (linear).',
           'Water bloom gamma': 'Curve on the injected mask (<1 = punchier peaks, >1 = softer).',
@@ -276,10 +492,17 @@ export class BloomEffectV2 {
       groups: [
         {
           name: 'look',
-          label: 'Look',
+          label: 'Surface',
           type: 'folder',
           expanded: true,
           parameters: ['strength', 'radius', 'threshold'],
+        },
+        {
+          name: 'atmosphere',
+          label: 'Atmosphere',
+          type: 'folder',
+          expanded: true,
+          parameters: ['atmoEnabled', 'atmoStrength', 'atmoRadius', 'atmoTintColor', 'atmoBlendOpacity'],
         },
         {
           name: 'water-spec-bloom',
@@ -291,7 +514,7 @@ export class BloomEffectV2 {
         },
         {
           name: 'grade',
-          label: 'Grade',
+          label: 'Surface grade',
           type: 'folder',
           expanded: true,
           parameters: ['tintColor', 'blendOpacity'],
@@ -338,21 +561,21 @@ export class BloomEffectV2 {
         enabled: { type: 'boolean', default: true, hidden: true },
         strength: {
           type: 'slider',
-          label: 'Strength',
+          label: 'Surface strength',
           min: 0,
           max: 3,
           step: 0.01,
           default: 1.08,
-          tooltip: 'Intensity of the glow added on top of the scene.',
+          tooltip: 'Tight surface glow on bright pixels (hot source / specular).',
         },
         radius: {
           type: 'slider',
-          label: 'Radius',
+          label: 'Surface radius',
           min: 0,
-          max: 1,
+          max: SURFACE_RADIUS_MAX,
           step: 0.01,
           default: 1,
-          tooltip: 'How far the glow spreads (blur size).',
+          tooltip: 'Spread of the tight surface halo (0–2).',
         },
         threshold: {
           type: 'slider',
@@ -366,18 +589,58 @@ export class BloomEffectV2 {
         tintColor: {
           type: 'color',
           colorType: 'float',
-          label: 'Glow tint',
+          label: 'Surface tint',
           default: { r: 1, g: 1, b: 1 },
-          tooltip: 'Tint applied to bloom (white = neutral).',
+          tooltip: 'Tint on the tight surface bloom.',
         },
         blendOpacity: {
           type: 'slider',
-          label: 'Blend opacity',
+          label: 'Surface blend',
           min: 0,
           max: 1,
           step: 0.01,
           default: 1.0,
-          tooltip: 'Overall bloom mix. Use 0 to disable without turning the effect off.',
+          tooltip: 'Mix for the surface bloom layer.',
+        },
+        atmoEnabled: {
+          type: 'boolean',
+          default: true,
+          label: 'Atmosphere enabled',
+          tooltip: 'Wide secondary bloom from the same bright pixels — air catching surface light.',
+        },
+        atmoStrength: {
+          type: 'slider',
+          label: 'Atmosphere strength',
+          min: 0,
+          max: 3,
+          step: 0.01,
+          default: 0.42,
+          tooltip: 'Intensity of the wide atmospheric scatter.',
+        },
+        atmoRadius: {
+          type: 'slider',
+          label: 'Atmosphere radius',
+          min: 0,
+          max: ATMO_RADIUS_MAX,
+          step: 0.05,
+          default: 3.5,
+          tooltip: `Atmospheric spread (0–${ATMO_RADIUS_MAX}). Much wider than surface — haze and air glow.`,
+        },
+        atmoTintColor: {
+          type: 'color',
+          colorType: 'float',
+          label: 'Atmosphere tint',
+          default: { r: 1, g: 0.92, b: 0.78 },
+          tooltip: 'Tint on the atmospheric layer (warm haze by default).',
+        },
+        atmoBlendOpacity: {
+          type: 'slider',
+          label: 'Atmosphere blend',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.72,
+          tooltip: 'Mix for the atmospheric bloom layer.',
         },
         waterSpecularBloomEnabled: {
           type: 'boolean',
@@ -586,20 +849,12 @@ export class BloomEffectV2 {
    */
   initialize(w, h) {
     const THREE = window.THREE;
-    if (!THREE || !THREE.UnrealBloomPass) {
-      log.warn('THREE.UnrealBloomPass not available — bloom disabled');
+    if (!THREE) {
+      log.warn('THREE not available — bloom disabled');
       return;
     }
 
-    const size = new THREE.Vector2(w, h);
-
-    // Create the UnrealBloomPass with default params
-    this._pass = new THREE.UnrealBloomPass(
-      size,
-      this.params.strength,
-      this.params.radius,
-      this.params.threshold
-    );
+    this._buildBloomBlurResources(w, h);
 
     // Internal RT for the pass to read from and write back to.
     // LinearSRGBColorSpace: bloom operates in linear space so the threshold
@@ -623,6 +878,16 @@ export class BloomEffectV2 {
       stencilBuffer: false,
     });
     this._preBloomSceneRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
+
+    this._bloomFullResRT = new THREE.WebGLRenderTarget(w, h, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.HalfFloatType,
+      depthBuffer: false,
+      stencilBuffer: false,
+    });
+    this._bloomFullResRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
 
     this._projTmpNdc = new THREE.Vector3();
     this._projTmpWorld = new THREE.Vector3();
@@ -689,10 +954,375 @@ export class BloomEffectV2 {
     this._waterBloomCompositeScene.add(wbQuad);
 
     this._tintVec = new THREE.Vector3(1, 1, 1);
+    this._atmoTintVec = new THREE.Vector3(1, 0.92, 0.78);
     this._updateTintColor();
+    this._updateAtmoTintColor();
 
     this._initialized = true;
-    log.info(`BloomEffectV2 initialized (${w}x${h})`);
+    log.info(`BloomEffectV2 initialized (${w}x${h}, dual Gaussian bloom)`);
+  }
+
+  /**
+   * @param {typeof window.THREE} THREE
+   * @param {number} kernelRadius
+   * @returns {THREE.ShaderMaterial}
+   * @private
+   */
+  _createGaussianBlurMaterial(THREE, kernelRadius) {
+    return new THREE.ShaderMaterial({
+      defines: { KERNEL_RADIUS: kernelRadius },
+      uniforms: {
+        colorTexture: { value: null },
+        invSize: { value: new THREE.Vector2(0.5, 0.5) },
+        direction: { value: new THREE.Vector2(1, 0) },
+        uRadiusScale: { value: 1.0 },
+        gaussianCoefficients: { value: buildGaussianCoefficients(kernelRadius) },
+      },
+      vertexShader: BLOOM_FULLSCREEN_VERT,
+      fragmentShader: BLOOM_GAUSSIAN_FRAG,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+  }
+
+  /**
+   * Build mip-chain bloom resources (separable Gaussian per mip).
+   * @param {number} w
+   * @param {number} h
+   * @private
+   */
+  _buildBloomBlurResources(w, h) {
+    const THREE = window.THREE;
+    const rtOpts = {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.HalfFloatType,
+      depthBuffer: false,
+      stencilBuffer: false,
+    };
+
+    let resx = Math.round(w / 2);
+    let resy = Math.round(h / 2);
+
+    this._bloomBrightRT = new THREE.WebGLRenderTarget(resx, resy, rtOpts);
+    this._bloomBrightRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
+    this._bloomBrightRT.texture.generateMipmaps = false;
+
+    this._bloomMipRTs = [];
+    this._atmoMipRTs = [];
+    for (let i = 0; i < BLOOM_N_MIPS; i++) {
+      const rt = new THREE.WebGLRenderTarget(resx, resy, rtOpts);
+      rt.texture.colorSpace = THREE.LinearSRGBColorSpace;
+      rt.texture.generateMipmaps = false;
+      this._bloomMipRTs.push(rt);
+
+      const atmoRt = new THREE.WebGLRenderTarget(resx, resy, rtOpts);
+      atmoRt.texture.colorSpace = THREE.LinearSRGBColorSpace;
+      atmoRt.texture.generateMipmaps = false;
+      this._atmoMipRTs.push(atmoRt);
+
+      resx = Math.round(resx / 2);
+      resy = Math.round(resy / 2);
+    }
+
+    this._bloomCompositeRT = new THREE.WebGLRenderTarget(
+      Math.round(w / 2),
+      Math.round(h / 2),
+      rtOpts,
+    );
+    this._bloomCompositeRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
+    this._bloomCompositeRT.texture.generateMipmaps = false;
+
+    this._bloomBlurPingRT = new THREE.WebGLRenderTarget(
+      Math.round(w / 2),
+      Math.round(h / 2),
+      rtOpts,
+    );
+    this._bloomBlurPingRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
+    this._bloomBlurPingRT.texture.generateMipmaps = false;
+
+    this._blurDirX = new THREE.Vector2(1, 0);
+    this._blurDirY = new THREE.Vector2(0, 1);
+
+    this._surfaceBlurMaterials = SURFACE_MIP_KERNEL_TAPS.map(
+      (k) => this._createGaussianBlurMaterial(THREE, k),
+    );
+    this._atmoBlurMaterials = ATMO_MIP_KERNEL_TAPS.map(
+      (k) => this._createGaussianBlurMaterial(THREE, k),
+    );
+
+    this._fullResPolishMaterial = this._createGaussianBlurMaterial(THREE, FULLRES_POLISH_KERNEL);
+
+    this._bloomUpsampleMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tDiffuse: { value: null },
+        uTexelSize: { value: new THREE.Vector2(1, 1) },
+      },
+      vertexShader: BLOOM_FULLSCREEN_VERT,
+      fragmentShader: BLOOM_UPSAMPLE_FRAG,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+
+    this._bloomHighPassUniforms = {
+      tDiffuse: { value: null },
+      luminosityThreshold: { value: this.params.threshold },
+      smoothWidth: { value: 0.01 },
+      defaultColor: { value: new THREE.Color(0) },
+      defaultOpacity: { value: 0 },
+    };
+    this._bloomHighPassMaterial = new THREE.ShaderMaterial({
+      uniforms: this._bloomHighPassUniforms,
+      vertexShader: BLOOM_FULLSCREEN_VERT,
+      fragmentShader: BLOOM_HIGH_PASS_FRAG,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+
+    this._bloomTintColors = [];
+    this._atmoTintColors = [];
+    for (let i = 0; i < BLOOM_N_MIPS; i++) {
+      this._bloomTintColors.push(new THREE.Vector3(1, 1, 1));
+      this._atmoTintColors.push(new THREE.Vector3(1, 1, 1));
+    }
+
+    this._bloomCompositeMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        blurTexture1: { value: this._bloomMipRTs[0].texture },
+        blurTexture2: { value: this._bloomMipRTs[1].texture },
+        blurTexture3: { value: this._bloomMipRTs[2].texture },
+        blurTexture4: { value: this._bloomMipRTs[3].texture },
+        blurTexture5: { value: this._bloomMipRTs[4].texture },
+        bloomStrength: { value: this.params.strength },
+        bloomRadius: { value: this.params.radius / SURFACE_RADIUS_MAX },
+        bloomFactors: { value: BLOOM_MIP_FACTORS },
+        bloomTintColors: { value: this._bloomTintColors },
+      },
+      vertexShader: BLOOM_FULLSCREEN_VERT,
+      fragmentShader: BLOOM_COMPOSITE_FRAG,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+
+    this._bloomCopyUniforms = {
+      tDiffuse: { value: null },
+      opacity: { value: this.params.blendOpacity },
+    };
+    this._bloomBlendMaterial = new THREE.ShaderMaterial({
+      uniforms: this._bloomCopyUniforms,
+      vertexShader: BLOOM_FULLSCREEN_VERT,
+      fragmentShader: BLOOM_ADDITIVE_FRAG,
+      blending: THREE.AdditiveBlending,
+      depthTest: false,
+      depthWrite: false,
+      transparent: true,
+      toneMapped: false,
+    });
+
+    this._bloomProcessScene = new THREE.Scene();
+    this._bloomProcessCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this._bloomProcessQuad = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      this._bloomHighPassMaterial,
+    );
+    this._bloomProcessQuad.frustumCulled = false;
+    this._bloomProcessScene.add(this._bloomProcessQuad);
+  }
+
+  /**
+   * @private
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {THREE.ShaderMaterial} material
+   * @param {THREE.WebGLRenderTarget} targetRT
+   */
+  _renderBloomFullscreen(renderer, material, targetRT) {
+    this._bloomProcessQuad.material = material;
+    renderer.setRenderTarget(targetRT);
+    renderer.clear();
+    renderer.render(this._bloomProcessScene, this._bloomProcessCamera);
+  }
+
+  /**
+   * Separable Gaussian blur from `srcTex` into `destRT` (H → ping, V → dest).
+   * @private
+   */
+  _gaussianBlurMip(renderer, srcTex, destRT, mipIndex, radius, layerOpts = {}) {
+    const radiusMax = layerOpts.radiusMax ?? SURFACE_RADIUS_MAX;
+    const spreadBase = layerOpts.spreadBase ?? 0.55;
+    const spreadGain = layerOpts.spreadGain ?? 1.0;
+    const spreadTable = layerOpts.spreadTable ?? SURFACE_MIP_SPREAD_PX;
+    const blurMaterials = layerOpts.blurMaterials ?? this._surfaceBlurMaterials;
+
+    const w = destRT.width;
+    const h = destRT.height;
+    const mat = blurMaterials[mipIndex] ?? blurMaterials[blurMaterials.length - 1];
+    if (!mat) return;
+
+    const baseSpread = spreadTable[mipIndex] ?? spreadTable[spreadTable.length - 1];
+    const radiusNorm = Math.max(0, Number(radius) || 0) / Math.max(radiusMax, 1e-3);
+    const radiusScale = (spreadBase + radiusNorm * spreadGain) * (baseSpread / 4.0);
+
+    if (this._bloomBlurPingRT.width !== w || this._bloomBlurPingRT.height !== h) {
+      this._bloomBlurPingRT.setSize(w, h);
+    }
+
+    const u = mat.uniforms;
+    u.invSize.value.set(1 / Math.max(1, w), 1 / Math.max(1, h));
+    u.uRadiusScale.value = radiusScale;
+
+    u.colorTexture.value = srcTex;
+    u.direction.value.copy(this._blurDirX);
+    this._renderBloomFullscreen(renderer, mat, this._bloomBlurPingRT);
+
+    u.colorTexture.value = this._bloomBlurPingRT.texture;
+    u.direction.value.copy(this._blurDirY);
+    this._renderBloomFullscreen(renderer, mat, destRT);
+  }
+
+  /**
+   * Upsample half-res composite to full-res and polish (removes blocky upscale grid).
+   * @private
+   */
+  _upsampleAndPolishBloom(renderer, halfResTex, fullW, fullH) {
+    if (!this._bloomFullResRT || !this._bloomUpsampleMaterial || !this._fullResPolishMaterial) {
+      return halfResTex;
+    }
+
+    if (this._bloomFullResRT.width !== fullW || this._bloomFullResRT.height !== fullH) {
+      this._bloomFullResRT.setSize(fullW, fullH);
+    }
+    if (this._bloomBlurPingRT.width !== fullW || this._bloomBlurPingRT.height !== fullH) {
+      this._bloomBlurPingRT.setSize(fullW, fullH);
+    }
+
+    const up = this._bloomUpsampleMaterial.uniforms;
+    up.tDiffuse.value = halfResTex;
+    up.uTexelSize.value.set(1 / Math.max(1, fullW), 1 / Math.max(1, fullH));
+    this._renderBloomFullscreen(renderer, this._bloomUpsampleMaterial, this._bloomFullResRT);
+
+    const polish = this._fullResPolishMaterial.uniforms;
+    polish.invSize.value.set(1 / Math.max(1, fullW), 1 / Math.max(1, fullH));
+    polish.uRadiusScale.value = FULLRES_POLISH_SPREAD;
+
+    polish.colorTexture.value = this._bloomFullResRT.texture;
+    polish.direction.value.copy(this._blurDirX);
+    this._renderBloomFullscreen(renderer, this._fullResPolishMaterial, this._bloomBlurPingRT);
+
+    polish.colorTexture.value = this._bloomBlurPingRT.texture;
+    polish.direction.value.copy(this._blurDirY);
+    this._renderBloomFullscreen(renderer, this._fullResPolishMaterial, this._bloomFullResRT);
+
+    return this._bloomFullResRT.texture;
+  }
+
+  /**
+   * Run one Gaussian mip chain + composite + additive blend onto readBuffer.
+   * @private
+   */
+  _accumulateBloomLayer(renderer, readBuffer, brightTex, layer) {
+    const isAtmo = layer === 'atmo';
+    const mipRTs = isAtmo ? this._atmoMipRTs : this._bloomMipRTs;
+    const layerOpts = isAtmo
+      ? {
+        blurMaterials: this._atmoBlurMaterials,
+        spreadTable: ATMO_MIP_SPREAD_PX,
+        radiusMax: ATMO_RADIUS_MAX,
+        spreadBase: 0.7,
+        spreadGain: 2.2,
+      }
+      : {
+        blurMaterials: this._surfaceBlurMaterials,
+        spreadTable: SURFACE_MIP_SPREAD_PX,
+        radiusMax: SURFACE_RADIUS_MAX,
+        spreadBase: 0.55,
+        spreadGain: 1.0,
+      };
+
+    const strength = isAtmo ? this._effectiveAtmoStrength : this._effectiveStrength;
+    const radius = isAtmo ? this._effectiveAtmoRadius : this._effectiveRadius;
+    const blendOpacity = isAtmo ? this._effectiveAtmoBlendOpacity : this._effectiveBlendOpacity;
+    const radiusMax = isAtmo ? ATMO_RADIUS_MAX : SURFACE_RADIUS_MAX;
+    const tintColors = isAtmo ? this._atmoTintColors : this._bloomTintColors;
+
+    if (!(strength > 1e-6) || !(blendOpacity > 1e-6)) return;
+
+    let inputTex = brightTex;
+    for (let i = 0; i < BLOOM_N_MIPS; i++) {
+      this._gaussianBlurMip(renderer, inputTex, mipRTs[i], i, radius, layerOpts);
+      inputTex = mipRTs[i].texture;
+    }
+
+    const cu = this._bloomCompositeMaterial.uniforms;
+    cu.blurTexture1.value = mipRTs[0].texture;
+    cu.blurTexture2.value = mipRTs[1].texture;
+    cu.blurTexture3.value = mipRTs[2].texture;
+    cu.blurTexture4.value = mipRTs[3].texture;
+    cu.blurTexture5.value = mipRTs[4].texture;
+    cu.bloomStrength.value = strength;
+    cu.bloomRadius.value = Math.min(1, Math.max(0, radius / radiusMax));
+    cu.bloomTintColors.value = tintColors;
+    this._renderBloomFullscreen(renderer, this._bloomCompositeMaterial, this._bloomCompositeRT);
+
+    const fullW = readBuffer.width;
+    const fullH = readBuffer.height;
+    const fullResTex = this._upsampleAndPolishBloom(
+      renderer,
+      this._bloomCompositeRT.texture,
+      fullW,
+      fullH,
+    );
+
+    this._bloomCopyUniforms.tDiffuse.value = fullResTex;
+    this._bloomCopyUniforms.opacity.value = blendOpacity;
+    this._bloomProcessQuad.material = this._bloomBlendMaterial;
+    renderer.setRenderTarget(readBuffer);
+    renderer.render(this._bloomProcessScene, this._bloomProcessCamera);
+  }
+
+  /**
+   * Run dual-layer Gaussian mip-chain bloom and additively composite onto readBuffer.
+   * @private
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {THREE.WebGLRenderTarget} readBuffer
+   */
+  _runBloomCore(renderer, readBuffer) {
+    const THREE = window.THREE;
+    const oldClearColor = new THREE.Color();
+    renderer.getClearColor(oldClearColor);
+    const oldClearAlpha = renderer.getClearAlpha();
+    const oldAutoClear = renderer.autoClear;
+
+    renderer.autoClear = false;
+    renderer.setClearColor(0x000000, 0);
+
+    const surfaceActive = this._effectiveStrength > 1e-6 && this._effectiveBlendOpacity > 1e-6;
+    const atmoActive = this.params.atmoEnabled !== false
+      && this._effectiveAtmoStrength > 1e-6
+      && this._effectiveAtmoBlendOpacity > 1e-6;
+
+    try {
+      // Shared bright extract (threshold + water spec already in readBuffer).
+      this._bloomHighPassUniforms.tDiffuse.value = readBuffer.texture;
+      this._bloomHighPassUniforms.luminosityThreshold.value = this._effectiveThreshold;
+      this._renderBloomFullscreen(renderer, this._bloomHighPassMaterial, this._bloomBrightRT);
+
+      const brightTex = this._bloomBrightRT.texture;
+
+      if (surfaceActive) {
+        this._accumulateBloomLayer(renderer, readBuffer, brightTex, 'surface');
+      }
+      if (atmoActive) {
+        this._accumulateBloomLayer(renderer, readBuffer, brightTex, 'atmo');
+      }
+    } finally {
+      renderer.setClearColor(oldClearColor, oldClearAlpha);
+      renderer.autoClear = oldAutoClear;
+    }
   }
 
   // ── Per-frame update ──────────────────────────────────────────────────
@@ -1020,11 +1650,11 @@ export class BloomEffectV2 {
   }
 
   /**
-   * Push current params to the UnrealBloomPass.
+   * Push current params to the bloom pass.
    * @param {{ elapsed: number, delta: number }} _timeInfo
    */
   update(_timeInfo) {
-    if (!this._initialized || !this._pass) return;
+    if (!this._initialized || !this._bloomHighPassMaterial) return;
     if (!this.params.enabled) return;
     this._bindPerfRecorder();
 
@@ -1032,11 +1662,17 @@ export class BloomEffectV2 {
     this._applyLightningAdaptationToPass();
     this._endPerfSpan(_perfToken);
 
-    // Update tint color if changed
+    // Update tint colors if changed
     const tc = this.params.tintColor;
     if (tc.r !== this._lastTintR || tc.g !== this._lastTintG || tc.b !== this._lastTintB) {
       _perfToken = this._beginPerfSpan('tintColor', 'update', { cpuOnly: true });
       this._updateTintColor();
+      this._endPerfSpan(_perfToken);
+    }
+    const atc = this.params.atmoTintColor;
+    if (atc.r !== this._lastAtmoTintR || atc.g !== this._lastAtmoTintG || atc.b !== this._lastAtmoTintB) {
+      _perfToken = this._beginPerfSpan('atmoTintColor', 'update', { cpuOnly: true });
+      this._updateAtmoTintColor();
       this._endPerfSpan(_perfToken);
     }
   }
@@ -1079,6 +1715,9 @@ export class BloomEffectV2 {
    *   threshold: number,
    *   radius: number,
    *   blendOpacity: number,
+   *   atmoStrength: number,
+   *   atmoRadius: number,
+   *   atmoBlendOpacity: number,
    *   smoothWidth: number,
    *   passthrough: boolean,
    * }}
@@ -1091,6 +1730,11 @@ export class BloomEffectV2 {
     const baseThreshold = Math.max(0, Number(p.threshold) || 0);
     const baseRadius = Math.max(0, Number(p.radius) || 0);
     const baseBlend = Math.max(0, Math.min(1, Number(p.blendOpacity) ?? 1));
+    const baseAtmoStrength = p.atmoEnabled === false
+      ? 0
+      : Math.max(0, Number(p.atmoStrength) || 0);
+    const baseAtmoRadius = Math.max(0, Number(p.atmoRadius) || 0);
+    const baseAtmoBlend = Math.max(0, Math.min(1, Number(p.atmoBlendOpacity) ?? 1));
 
     if (w <= 1e-4) {
       return {
@@ -1098,6 +1742,9 @@ export class BloomEffectV2 {
         threshold: baseThreshold,
         radius: baseRadius,
         blendOpacity: baseBlend,
+        atmoStrength: baseAtmoStrength,
+        atmoRadius: baseAtmoRadius,
+        atmoBlendOpacity: baseAtmoBlend,
         smoothWidth: 0.01,
         passthrough: false,
       };
@@ -1115,27 +1762,33 @@ export class BloomEffectV2 {
     const effectiveThreshold = baseThreshold + w * thresholdBoost;
     const effectiveRadius = baseRadius * lerp(1, radiusMul);
     const effectiveBlend = baseBlend * lerp(1, blendMul);
-    const passthrough = w >= passthroughPeak
-      || (effectiveStrength <= 1e-6)
-      || (effectiveBlend <= 1e-6);
+    const effectiveAtmoStrength = baseAtmoStrength * lerp(1, strengthMul);
+    const effectiveAtmoRadius = baseAtmoRadius * lerp(1, radiusMul);
+    const effectiveAtmoBlend = baseAtmoBlend * lerp(1, blendMul);
+    const anyBloom = (effectiveStrength > 1e-6 && effectiveBlend > 1e-6)
+      || (effectiveAtmoStrength > 1e-6 && effectiveAtmoBlend > 1e-6);
+    const passthrough = w >= passthroughPeak || !anyBloom;
 
     return {
       strength: effectiveStrength,
       threshold: effectiveThreshold,
       radius: effectiveRadius,
       blendOpacity: effectiveBlend,
+      atmoStrength: effectiveAtmoStrength,
+      atmoRadius: effectiveAtmoRadius,
+      atmoBlendOpacity: effectiveAtmoBlend,
       smoothWidth: lerp(0.01, smoothPeak),
       passthrough,
     };
   }
 
   /**
-   * Push strike-aware params to UnrealBloomPass. Called from update() and render()
+   * Push strike-aware params to the bloom pass. Called from update() and render()
    * so bloom reads the same-frame environment (weather lightning publishes after update).
    * @private
    */
   _applyLightningAdaptationToPass() {
-    if (!this._pass) return;
+    if (!this._bloomHighPassMaterial) return;
 
     const adapt = this._computeLightningAdaptation(this._resolveLightningAdaptWeight());
     this._lightningPassthrough = adapt.passthrough;
@@ -1143,41 +1796,43 @@ export class BloomEffectV2 {
     this._effectiveThreshold = adapt.threshold;
     this._effectiveRadius = adapt.radius;
     this._effectiveBlendOpacity = adapt.blendOpacity;
+    this._effectiveAtmoStrength = adapt.atmoStrength;
+    this._effectiveAtmoRadius = adapt.atmoRadius;
+    this._effectiveAtmoBlendOpacity = adapt.atmoBlendOpacity;
 
-    this._pass.strength = this._effectiveStrength;
-    this._pass.radius = this._effectiveRadius;
-    this._pass.threshold = this._effectiveThreshold;
-
-    try {
-      if (this._pass.highPassUniforms?.smoothWidth) {
-        this._pass.highPassUniforms.smoothWidth.value = adapt.smoothWidth;
-      }
-    } catch (_) {}
-
-    try {
-      const u = this._pass.copyUniforms || this._pass.blendMaterial?.uniforms;
-      if (u?.opacity?.value !== undefined) {
-        u.opacity.value = this._effectiveBlendOpacity;
-      }
-    } catch (_) {}
+    if (this._bloomHighPassUniforms?.smoothWidth) {
+      this._bloomHighPassUniforms.smoothWidth.value = adapt.smoothWidth;
+    }
   }
 
   _updateTintColor() {
-    if (!this._pass || !this._tintVec) return;
+    if (!this._bloomTintColors || !this._tintVec) return;
 
     const tc = this.params.tintColor;
     this._tintVec.set(tc.r, tc.g, tc.b);
 
-    const tintColors = this._pass.bloomTintColors;
-    if (tintColors) {
-      for (let i = 0; i < tintColors.length; i++) {
-        tintColors[i].copy(this._tintVec);
-      }
+    for (let i = 0; i < this._bloomTintColors.length; i++) {
+      this._bloomTintColors[i].copy(this._tintVec);
     }
 
     this._lastTintR = tc.r;
     this._lastTintG = tc.g;
     this._lastTintB = tc.b;
+  }
+
+  _updateAtmoTintColor() {
+    if (!this._atmoTintColors || !this._atmoTintVec) return;
+
+    const tc = this.params.atmoTintColor;
+    this._atmoTintVec.set(tc.r, tc.g, tc.b);
+
+    for (let i = 0; i < this._atmoTintColors.length; i++) {
+      this._atmoTintColors[i].copy(this._atmoTintVec);
+    }
+
+    this._lastAtmoTintR = tc.r;
+    this._lastAtmoTintG = tc.g;
+    this._lastAtmoTintB = tc.b;
   }
 
   // ── Render ────────────────────────────────────────────────────────────
@@ -1210,7 +1865,7 @@ export class BloomEffectV2 {
    * 1. Copy inputRT → _bloomInputRT (optional water specular inject)
    * 2. Optional fog input mask (zero HDR outside token LOS)
    * 3. Pre-bloom snapshot → _preBloomSceneRT
-   * 4. UnrealBloomPass adds bloom into _bloomInputRT
+   * 4. Dual-layer Gaussian bloom adds glow into _bloomInputRT
    * 5. Optional outdoor spill composite → outputRT
    *
    * @param {THREE.WebGLRenderer} renderer
@@ -1220,7 +1875,7 @@ export class BloomEffectV2 {
    * @returns {boolean} True when outputRT was written (bloom or passthrough).
    */
   render(renderer, inputRT, outputRT, camera = null) {
-    if (!this._initialized || !this._pass || !inputRT || !outputRT) return false;
+    if (!this._initialized || !this._bloomHighPassMaterial || !inputRT || !outputRT) return false;
     this._bindPerfRecorder();
 
     let _perfToken = this._beginPerfSpan('lightningAdapt', 'render', { cpuOnly: true });
@@ -1228,11 +1883,14 @@ export class BloomEffectV2 {
     this._endPerfSpan(_perfToken);
 
     const p = this.params;
+    const surfaceActive = this._effectiveStrength > 1e-6 && this._effectiveBlendOpacity > 1e-6;
+    const atmoActive = p.atmoEnabled !== false
+      && this._effectiveAtmoStrength > 1e-6
+      && this._effectiveAtmoBlendOpacity > 1e-6;
     if (
       !this.params.enabled
       || this._lightningPassthrough
-      || !(this._effectiveStrength > 1e-6)
-      || !(this._effectiveBlendOpacity > 1e-6)
+      || (!surfaceActive && !atmoActive)
     ) {
       _perfToken = this._beginPerfSpan('passthrough', 'render');
       try {
@@ -1288,9 +1946,9 @@ export class BloomEffectV2 {
         this._endPerfSpan(_perfToken);
       }
 
-      // Step 3: UnrealBloomPass (reads + writes _bloomInputRT in place).
-      _perfToken = this._beginPerfSpan('unrealBloomPass', 'render');
-      this._pass.render(renderer, null, this._bloomInputRT, 0.016, false);
+      // Step 3: Dual-layer Gaussian bloom (reads + writes _bloomInputRT in place).
+      _perfToken = this._beginPerfSpan('bloomPass', 'render');
+      this._runBloomCore(renderer, this._bloomInputRT);
       this._endPerfSpan(_perfToken);
 
       const useSpillSuppress = p0.outdoorSpillSuppressEnabled !== false
@@ -1344,13 +2002,30 @@ export class BloomEffectV2 {
   // ── Resize ────────────────────────────────────────────────────────────
 
   /**
-   * Resize internal render targets and the UnrealBloomPass.
+   * Resize internal render targets and the bloom mip chain.
    * @param {number} w
    * @param {number} h
    */
   onResize(w, h) {
-    if (this._pass) {
-      this._pass.setSize(w, h);
+    if (this._bloomBrightRT) {
+      this._bloomBrightRT.setSize(Math.round(w / 2), Math.round(h / 2));
+    }
+    if (this._bloomCompositeRT) {
+      this._bloomCompositeRT.setSize(Math.round(w / 2), Math.round(h / 2));
+    }
+    if (this._bloomBlurPingRT) {
+      this._bloomBlurPingRT.setSize(Math.round(w / 2), Math.round(h / 2));
+    }
+    let resx = Math.round(w / 2);
+    let resy = Math.round(h / 2);
+    for (let i = 0; i < this._bloomMipRTs.length; i++) {
+      this._bloomMipRTs[i]?.setSize(resx, resy);
+      this._atmoMipRTs[i]?.setSize(resx, resy);
+      resx = Math.round(resx / 2);
+      resy = Math.round(resy / 2);
+    }
+    if (this._bloomFullResRT) {
+      this._bloomFullResRT.setSize(w, h);
     }
     if (this._bloomInputRT) {
       this._bloomInputRT.setSize(w, h);
@@ -1363,7 +2038,28 @@ export class BloomEffectV2 {
   // ── Cleanup ───────────────────────────────────────────────────────────
 
   dispose() {
-    try { this._pass?.dispose(); } catch (_) {}
+    try { this._bloomHighPassMaterial?.dispose(); } catch (_) {}
+    for (const mat of this._surfaceBlurMaterials) {
+      try { mat?.dispose(); } catch (_) {}
+    }
+    for (const mat of this._atmoBlurMaterials) {
+      try { mat?.dispose(); } catch (_) {}
+    }
+    try { this._bloomCompositeMaterial?.dispose(); } catch (_) {}
+    try { this._bloomBlendMaterial?.dispose(); } catch (_) {}
+    try { this._fullResPolishMaterial?.dispose(); } catch (_) {}
+    try { this._bloomUpsampleMaterial?.dispose(); } catch (_) {}
+    try { this._bloomFullResRT?.dispose(); } catch (_) {}
+    try { this._bloomBrightRT?.dispose(); } catch (_) {}
+    try { this._bloomCompositeRT?.dispose(); } catch (_) {}
+    try { this._bloomBlurPingRT?.dispose(); } catch (_) {}
+    for (const rt of this._bloomMipRTs) {
+      try { rt?.dispose(); } catch (_) {}
+    }
+    for (const rt of this._atmoMipRTs) {
+      try { rt?.dispose(); } catch (_) {}
+    }
+    try { this._bloomProcessQuad?.geometry?.dispose(); } catch (_) {}
     try { this._bloomInputRT?.dispose(); } catch (_) {}
     try { this._preBloomSceneRT?.dispose(); } catch (_) {}
     try { this._copyMaterial?.dispose(); } catch (_) {}
@@ -1389,7 +2085,28 @@ export class BloomEffectV2 {
     this._waterBloomCompositeMaterial = null;
     this._black1x1Texture = null;
     this._waterSpecBloomTexture = null;
-    this._pass = null;
+    this._bloomHighPassMaterial = null;
+    this._bloomHighPassUniforms = null;
+    this._surfaceBlurMaterials = [];
+    this._atmoBlurMaterials = [];
+    this._blurDirX = null;
+    this._blurDirY = null;
+    this._fullResPolishMaterial = null;
+    this._bloomUpsampleMaterial = null;
+    this._bloomCompositeMaterial = null;
+    this._bloomBlendMaterial = null;
+    this._bloomCopyUniforms = null;
+    this._bloomTintColors = null;
+    this._atmoTintColors = null;
+    this._bloomBrightRT = null;
+    this._bloomMipRTs = [];
+    this._atmoMipRTs = [];
+    this._bloomBlurPingRT = null;
+    this._bloomCompositeRT = null;
+    this._bloomFullResRT = null;
+    this._bloomProcessScene = null;
+    this._bloomProcessCamera = null;
+    this._bloomProcessQuad = null;
     this._bloomInputRT = null;
     this._preBloomSceneRT = null;
     this._outdoorsMask = null;

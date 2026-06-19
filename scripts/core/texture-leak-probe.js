@@ -80,6 +80,8 @@ let _sessionMinTexCount = null;
 let _lastSampleTexCount = 0;
 /** @type {number} Consecutive samples where live count rose. */
 let _climbStreak = 0;
+/** @type {boolean} When true, log top allocation sites while the live counter climbs. */
+let _autoClimbLog = false;
 /** @type {number} performance.now() of last auto leak-watch dump. */
 let _lastClimbLogMs = 0;
 /** @type {number} Ms between auto leak-watch dumps while climbing. */
@@ -262,6 +264,8 @@ function _exposeProbeApi() {
     ms.textureLeakProbe = {
       get enabled() { return _enabled; },
       set enabled(v) { _enabled = !!v; },
+      get autoClimbLog() { return _autoClimbLog; },
+      set autoClimbLog(v) { _autoClimbLog = !!v; },
       summary: (n) => summarizeTextureLeakProbe(n),
       top: (n) => getTextureLeakProbeReport(n),
       reset: resetTextureLeakProbe,
@@ -407,9 +411,9 @@ export function resetTextureLeakProbe() {
 }
 
 /**
- * Per-frame (or throttled) sample of the renderer's live texture counter.
- * When the count keeps climbing, periodically dumps the top allocation sites
- * to the console so the leak source is visible before a context-loss crash.
+ * Sample the renderer's live texture counter for crash-report telemetry.
+ * Automatic console dumps are off by default; use {@link summarizeTextureLeakProbe}
+ * or set `MapShine.textureLeakProbe.autoClimbLog = true` to re-enable.
  *
  * @param {import('three').WebGLRenderer|null|undefined} renderer
  */
@@ -428,6 +432,8 @@ export function noteRendererTextureSample(renderer) {
     _climbStreak = 0;
   }
   _lastSampleTexCount = count;
+
+  if (!_autoClimbLog) return;
 
   const floor = _sessionMinTexCount ?? count;
   const delta = count - floor;

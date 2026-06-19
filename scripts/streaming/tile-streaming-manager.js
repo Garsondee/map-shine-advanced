@@ -384,6 +384,14 @@ export class TileStreamingManager {
     return false;
   }
 
+  /** @private */
+  _hasSharpenBacklog(view, lod) {
+    for (const grid of this._grids.values()) {
+      if (grid.hasSharpenBacklog?.(view, lod)) return true;
+    }
+    return false;
+  }
+
   /** Per-frame sync — call after camera update. */
   update() {
     // Drain frame-paced GPU work first so deferred uploads commit even on frames
@@ -519,13 +527,12 @@ export class TileStreamingManager {
     const mp = estimateSceneMegapixels();
     let lod = selectLodFromZoom(zoom, budget.getMaxLodLevel(), mp);
 
-    // Defer finer LOD only while zoom is still changing slowly (mid-gesture).
-    // Once zoom is stable, sharpen immediately. Coarsening on zoom-out is always immediate.
+    // Defer finer LOD only during an active zoom-in gesture — not idle micro-jitter.
     if (this._heldZoomLod !== 99) {
       const zBase = Math.max(0.05, this._heldZoom);
       const zDelta = Math.abs(zoom - this._heldZoom) / zBase;
-      const zoomStable = zDelta < 1e-5;
-      if (!zoomStable && zDelta < 0.1 && lod < this._heldZoomLod) {
+      const zoomActive = zDelta >= 0.02 && zDelta < 0.15;
+      if (zoomActive && lod < this._heldZoomLod) {
         lod = this._heldZoomLod;
       }
     }
@@ -536,11 +543,12 @@ export class TileStreamingManager {
     const viewRectSig = this._buildViewRectSig(view, lod);
     const viewChanged = viewRectSig !== this._lastViewRectSig;
     const pendingWork = this._hasPendingCellWork(view, lod);
+    const sharpenBacklog = this._hasSharpenBacklog(view, lod);
     const syncOptions = { sharpenOnZoom: lodChanged || force, isPanning: force ? false : this._isPanning };
     const globalInflightCap = this._globalInflightCap();
     const globalInflight = this._totalInflightLoads();
 
-    if (lodChanged || viewChanged || pendingWork || force) {
+    if (lodChanged || viewChanged || pendingWork || sharpenBacklog || force) {
       if (lodChanged) {
         this._lastStreamLod = lod;
         for (const grid of this._grids.values()) {
@@ -602,6 +610,9 @@ export class TileStreamingManager {
     log.info(`Streaming background registered [${key}] ${meta.width}x${meta.height}`);
     this._purgeRedundantRegionGrids(src, meta);
     this._scheduleIdlePyramidWarm();
+    this._lastViewRectSig = '';
+    this._heldZoomLod = 99;
+    this._runStreamingSync(true);
     return true;
   }
 

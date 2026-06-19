@@ -9199,6 +9199,10 @@ export class FloorCompositor {
               lbTexture,
               lbAlphaBaseline,
             );
+            const sceneLightBinding = this._lightingEffect?.getSceneLightBufferBinding?.() ?? null;
+            this._colorCorrectionEffect.setSceneLightTexture?.(
+              sceneLightBinding?.texture ?? null,
+            );
           } catch (_) {}
           ccWrote = this._colorCorrectionEffect.render(
             this.renderer, mergedCompositeOut, ccOut,
@@ -9206,6 +9210,7 @@ export class FloorCompositor {
         } finally {
           try {
             this._colorCorrectionEffect.setLocalLightTexture?.(null);
+            this._colorCorrectionEffect.setSceneLightTexture?.(null);
             this._colorCorrectionEffect.setCombinedShadowTexture?.(null);
             if (outdoorsForCc) {
               this._colorCorrectionEffect.setOutdoorsMask(outdoorsForCc);

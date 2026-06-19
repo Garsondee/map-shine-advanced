@@ -207,19 +207,21 @@ export function resolveStreamingZoom(zoom) {
  */
 export function selectLodFromZoom(zoom, maxLod = 4, sceneMegapixels = 0) {
   const z = resolveStreamingZoom(zoom);
+  // Breakpoints include DPR via resolveStreamingZoom — bias finer so moderate
+  // play zoom (typical VTT overview) does not sit on visibly soft pyramid levels.
   let lod;
-  if (z >= 2.2) lod = 0;
-  else if (z >= 1.0) lod = 1;
-  else if (z >= 0.50) lod = 2;
-  else if (z >= 0.25) lod = 3;
+  if (z >= 1.85) lod = 0;
+  else if (z >= 0.68) lod = 1;
+  else if (z >= 0.36) lod = 2;
+  else if (z >= 0.17) lod = 3;
   else lod = Math.min(maxLod, 4);
 
   const mp = Number(sceneMegapixels) || 0;
-  if (mp >= 130) {
-    if (z >= 1.0) lod = Math.min(lod, 0);
-    else if (z >= 0.50) lod = Math.min(lod, 1);
-    else if (z >= 0.25) lod = Math.min(lod, 2);
-    else if (z >= 0.12) lod = Math.min(lod, 3);
+  if (mp >= 32) {
+    if (z >= 1.85) lod = Math.min(lod, 0);
+    else if (z >= 0.55) lod = Math.min(lod, 1);
+    else if (z >= 0.28) lod = Math.min(lod, 2);
+    else if (z >= 0.14) lod = Math.min(lod, 3);
   }
 
   return Math.min(lod, maxLod);

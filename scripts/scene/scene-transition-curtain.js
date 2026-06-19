@@ -194,6 +194,7 @@ export class SceneTransitionCurtain {
 
         this._panelVisible = true;
         this._panelShownAt = performance.now();
+        try { loadingOverlay.restartTimer?.(); } catch (_) {}
       } catch (err) {
         log.warn('revealPanel() error (continuing)', err);
         try {

@@ -346,6 +346,8 @@ export class StyledLoadingScreenRenderer {
     this._renderStagePills();
     this._restartEntranceAnimations();
     this._startHintsRotation();
+    this._rebindTimerEl();
+    this._startTimer();
 
     const startOpacity = parseFloat(this._contentEl.style.opacity || '0') || 0;
     if (startOpacity >= 0.999) {
@@ -599,11 +601,14 @@ export class StyledLoadingScreenRenderer {
   /** Reset and start the elapsed-time display (level transitions, panel re-show). */
   restartTimer() {
     this.ensure();
-    if (!this._timerEl) {
-      const bound = this._elementsById.get('timer');
-      if (bound) this._timerEl = bound;
-    }
+    this._rebindTimerEl();
     this._startTimer();
+  }
+
+  /** @private */
+  _rebindTimerEl() {
+    const bound = this._elementsById.get('timer');
+    if (bound) this._timerEl = bound;
   }
 
   _applyProgress(value01) {

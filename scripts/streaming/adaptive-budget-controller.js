@@ -17,8 +17,6 @@ import { createLogger } from '../core/log.js';
 import { getTextureBudgetTracker } from '../assets/TextureBudgetTracker.js';
 import { getGpuWorkScheduler } from './gpu-work-scheduler.js';
 import { resolveEffectiveGpuVramGB } from './memory-settings.js';
-import { getTileTextureCacheSize } from './texture-pyramid-builder.js';
-import { summarizeTextureLeakProbe } from '../core/texture-leak-probe.js';
 
 const log = createLogger('AdaptiveBudgetController');
 
@@ -29,7 +27,7 @@ const STABLE_RAISE_INTERVAL_MS = 5000;
 /** Headroom granted per ramp step. */
 const BONUS_STEP_MB = 128;
 /** Live texture count this far above the session floor signals a leak/churn. */
-const GROWTH_ALERT_DELTA = 96;
+const GROWTH_ALERT_DELTA = 220;
 /** Sustained growth samples before proactive degradation (sample interval = 1s). */
 const GROWTH_DEGRADE_STREAK = 12;
 /** Delta above session floor required before proactive degradation. */
@@ -49,8 +47,6 @@ export class AdaptiveBudgetController {
     this._minTextureCount = Infinity;
     this._peakTextureCount = 0;
     this._growthAlert = false;
-    /** @type {boolean} Rising-edge tracker for the leak-watch warning. */
-    this._wasGrowthAlert = false;
     /** @type {number} Consecutive growth-alert samples. */
     this._growthAlertStreak = 0;
     /** @type {number} 0 none .. 3 severe */
@@ -98,26 +94,6 @@ export class AdaptiveBudgetController {
         + `proactive degradation level ${this._degradationLevel}`,
       );
     }
-
-    // Dev leak-watch: on the rising edge of a growth alert, log an actionable
-    // breakdown so the untracked-texture source can be pinpointed without waiting
-    // for a crash report. Uses only cheap counters (no scene-graph walk).
-    if (this._growthAlert && !this._wasGrowthAlert) {
-      let budgetEntries = 0;
-      let pyramidCacheSize = 0;
-      try { budgetEntries = getTextureBudgetTracker().getBudgetState().entryCount; } catch (_) {}
-      try { pyramidCacheSize = getTileTextureCacheSize(); } catch (_) {}
-      const unregisteredAlive = Math.max(0, texCount - budgetEntries - pyramidCacheSize);
-      log.warn(
-        `Texture growth alert: live=${texCount} (floor ${floor}), tracked=${budgetEntries}, `
-        + `pyramidCache=${pyramidCacheSize}, ~unregisteredAlive=${unregisteredAlive}. `
-        + 'If this climbs steadily, an untracked texture is leaking — top allocation sites below.',
-      );
-      // Print the attributed allocation sites so the leak source is named in the
-      // console immediately, without waiting for a context-loss crash report.
-      try { summarizeTextureLeakProbe(10); } catch (_) {}
-    }
-    this._wasGrowthAlert = this._growthAlert;
 
     // Relax one degradation level after a stable window since the last crash.
     if (this._degradationLevel > 0 && (now - this._lastCrashMs) >= CRASH_RELAX_MS) {

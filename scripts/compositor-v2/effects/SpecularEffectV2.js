@@ -51,6 +51,7 @@ import {
   isLightVisibleForPerspective,
 } from '../../foundry/elevation-context.js';
 import Coordinates from '../../utils/coordinates.js';
+import { foundryLuminosityIllumMultiplier } from '../../scene/point-light-falloff.js';
 import { getTileBusPlaneSizeAndMirror, getTileVisualCenterFoundryXY } from '../../scene/tile-manager.js';
 import { getVertexShader, getFragmentShader } from './specular-shader.js';
 
@@ -2032,7 +2033,7 @@ export class SpecularEffectV2 {
     }
 
     const luminosity = config.luminosity ?? 0.5;
-    const intensity = luminosity * 2.0;
+    const intensity = foundryLuminosityIllumMultiplier(luminosity);
     const dim = config.dim || 0;
     const bright = config.bright || 0;
     const radiusGrid = Math.max(dim, bright);

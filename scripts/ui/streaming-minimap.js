@@ -15,7 +15,6 @@ import { getImageCellsForWorldView, imageCellToWorldBounds } from '../streaming/
 import { getTileStreamingManager } from '../streaming/tile-streaming-manager.js';
 import { getGpuWorkScheduler } from '../streaming/gpu-work-scheduler.js';
 import { getAdaptiveBudgetController } from '../streaming/adaptive-budget-controller.js';
-import { getTextureLeakProbeReport } from '../core/texture-leak-probe.js';
 import { lodPixelSize, selectLodFromZoom } from '../streaming/streaming-grid.js';
 import { fetchSourceImageMeta, loadFallbackTexture } from '../streaming/texture-pyramid-builder.js';
 import { estimateSceneMegapixels } from '../streaming/texture-budget-policy.js';
@@ -687,24 +686,8 @@ export class StreamingMinimap {
           this._kv('LOD-0 cooldown', cooldownMs > 0 ? `${(cooldownMs / 1000).toFixed(1)}s` : 'none'),
         ].join('');
         sections.push(this._sectionHtml('Memory Governor', govLines, {
-          tone: adaptive.degradationLevel > 0 || adaptive.growthAlert ? 'warn' : 'ok',
+          tone: (adaptive.degradationLevel ?? 0) > 0 ? 'warn' : 'ok',
         }));
-        if (adaptive.growthAlert) {
-          let leakDetail = 'Live GPU texture count is climbing well above the session floor.';
-          try {
-            const probe = getTextureLeakProbeReport(3);
-            const top = probe?.topSites?.[0];
-            if (top) {
-              const site = String(top.site ?? '');
-              const shortSite = site.length > 140 ? `${site.slice(0, 137)}...` : site;
-              leakDetail += ` Top site: ${top.cls} alloc=${top.allocated} gcLeaked=${top.gcLeaked} alive=${top.alive} — ${shortSite}`;
-            } else if (probe?.installed === false) {
-              leakDetail += ' Leak probe not installed — hard refresh after updating the module.';
-            }
-          } catch (_) {}
-          leakDetail += ' Run MapShine.textureLeakProbe.summary() in the console for the full table.';
-          sections.push(this._sectionHtml('Leak Watch', leakDetail, { tone: 'warn' }));
-        }
       } catch (_) {}
 
       const mgr = report.streaming ?? {};

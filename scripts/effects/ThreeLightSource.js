@@ -331,7 +331,7 @@ export class ThreeLightSource {
         uPulse: { value: 0.0 },
         uBrightness: { value: 1.0 },
         // Foundry photometric controls:
-        // - uLuminosity = Foundry illumination multiplier (0.5 → 1.0 neutral)
+        // - uLuminosity = Foundry illumination multiplier (0.5 → half of reference gain, 1 → full)
         // - uColorIntensity01 = Foundry Color Intensity slider (config.alpha / colorIntensity)
         uLuminosity: { value: 1.0 },
         uColorIntensity01: { value: 0.5 },
@@ -1017,9 +1017,6 @@ export class ThreeLightSource {
     );
     const prevShaderSoftness = this._shaderSoftness;
     this._shaderSoftness = this.material.uniforms.uAttenuation?.value ?? 0.5;
-    if (this.material.uniforms.uFalloffExponent) {
-      this.material.uniforms.uFalloffExponent.value = DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT;
-    }
 
     // Cable Swing uses shader-space offsets. Reset them here so stale state doesn't
     // persist across config edits or geometry rebuilds.

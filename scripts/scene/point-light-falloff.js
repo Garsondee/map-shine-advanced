@@ -142,9 +142,10 @@ export function computeLightFalloffHalfDistances(
   const t = { ...DEFAULT_POINT_LIGHT_FALLOFF_TUNING, ...tuning };
   const attT = computeFalloffAttBlendT(foundryAtt, attCurvePower);
   const b = Math.max(0, Math.min(1, Number(brightNorm) || 0));
-  let halfIn = lerpHalfDistanceForFalloff(t.halfInAtAtt0, t.halfInAtAtt1, attT, t.halfMin);
+  // Larger half-distance = softer falloff; Foundry att 1 is soft, att 0 is hard.
+  let halfIn = lerpHalfDistanceForFalloff(t.halfInAtAtt1, t.halfInAtAtt0, attT, t.halfMin);
   halfIn *= mixNum(1.0, t.brightNormInfluence, b);
-  const halfOut = lerpHalfDistanceForFalloff(t.halfOutAtAtt0, t.halfOutAtAtt1, attT, t.halfMin);
+  const halfOut = lerpHalfDistanceForFalloff(t.halfOutAtAtt1, t.halfOutAtAtt0, attT, t.halfMin);
   return { halfIn, halfOut, attT };
 }
 
@@ -204,16 +205,27 @@ export function foundryShaderAttenuationFromData(dataAttenuation) {
 }
 
 /**
- * Foundry luminosity 0..1 → illumination multiplier (0.5 = neutral / full, not half).
- * Matches V3 `exposure = luminosity * 2 - 1` with uniform +exposure boost.
+ * HDR illumination multiplier at luminosity 1.0.
+ * {@link MSA_LUMINOSITY_MID_LIFT} tapers from 0.5 → 1.0 so mid luminosity can sit
+ * slightly below strict half of full without changing the 1.0 anchor.
+ */
+export const MSA_LUMINOSITY_REFERENCE_GAIN = 3.2;
+
+/** Mid-luminosity scale at 0.5 (tapers to 1.0 at luminosity 1.0). ~0.89 ≈ 33% dimmer than prior 1.33 lift. */
+export const MSA_LUMINOSITY_MID_LIFT = 0.89;
+
+/**
+ * Foundry luminosity 0..1 → illumination multiplier.
+ * Linear in luminosity with mid taper: 0.5 sits ~33% below the previous mid lift; 1.0 unchanged.
  * @param {number} luminosity01
  * @returns {number}
  */
 export function foundryLuminosityIllumMultiplier(luminosity01) {
-  const lum = clampFoundryAttenuation(luminosity01);
-  const exposure = lum * 2.0 - 1.0;
-  if (exposure <= 0) return Math.max(0, 1.0 + exposure);
-  return 1.0 + exposure * 0.5;
+  const l = clampFoundryAttenuation(luminosity01);
+  const midLift = (l <= 0.5)
+    ? MSA_LUMINOSITY_MID_LIFT
+    : (MSA_LUMINOSITY_MID_LIFT + (1.0 - MSA_LUMINOSITY_MID_LIFT) * ((l - 0.5) * 2.0));
+  return l * MSA_LUMINOSITY_REFERENCE_GAIN * midLift;
 }
 
 /**
@@ -491,8 +503,8 @@ export function computeLightFalloffHardnessValues(
   const t = { ...DEFAULT_POINT_LIGHT_FALLOFF_TUNING, ...tuning };
   const attT = computeFalloffAttBlendT(foundryAtt, attCurvePower);
   const base = foundryHardnessFromAttBlend(attT);
-  const refIn = lerpHalfDistanceForFalloff(t.halfInAtAtt0, t.halfInAtAtt1, attT, t.halfMin);
-  const refOut = lerpHalfDistanceForFalloff(t.halfOutAtAtt0, t.halfOutAtAtt1, attT, t.halfMin);
+  const refIn = lerpHalfDistanceForFalloff(t.halfInAtAtt1, t.halfInAtAtt0, attT, t.halfMin);
+  const refOut = lerpHalfDistanceForFalloff(t.halfOutAtAtt1, t.halfOutAtAtt0, attT, t.halfMin);
   const scaleIn = Math.max(0.35, Math.min(2.2, halfIn / Math.max(refIn, 0.03)));
   const scaleOut = Math.max(0.35, Math.min(2.2, halfOut / Math.max(refOut, 0.03)));
   return {
@@ -643,6 +655,11 @@ export const POINT_LIGHT_FALLOFF_GLSL = `
     return max(softness, ${POINT_LIGHT_FADE_WIDTH_MIN.toFixed(4)});
   }
 
+  float msaPointLightExpHalving(float dn, float halfDist) {
+    float h = max(halfDist, uFalloffHalfMin);
+    return exp(-0.6931471805599453 * dn / h);
+  }
+
   float msaPointLightFalloff(
     float d,
     float brightNorm,
@@ -661,28 +678,41 @@ export const POINT_LIGHT_FALLOFF_GLSL = `
     float wOut = max(outerW, 0.0);
     float wIn = max(innerW, 0.0);
 
-    float hFoundry = mix(0.10, 0.98, attT);
-    float h = clamp(mix(hFoundry, uFalloffHardnessDim, 0.45), 0.08, 0.99);
-    h += edgeSoft * uFalloffEdgeSoftBoost.y * 0.18;
+    // Halving distances from CPU (Foundry att × Tweakpane endpoints).
+    float halfIn = max(uFalloffHalfIn, uFalloffHalfMin);
+    float halfOut = max(uFalloffHalfOut, uFalloffHalfMin);
+    halfIn *= 1.0 + edgeSoft * uFalloffEdgeSoftBoost.x * 0.42;
+    halfOut *= 1.0 + edgeSoft * uFalloffEdgeSoftBoost.y * 0.42;
 
-    // One continuous smoothstep to the photometric edge (no cliff at bright/dim boundary).
-    float body = 1.0 - smoothstep(1.0 - h, 1.0, dn);
+    float brightBody = msaPointLightExpHalving(dn, halfIn);
+    float dimBody = msaPointLightExpHalving(dn, halfOut);
+    float ringT = smoothstep(max(b - 0.03, 0.0), min(b + 0.14, 0.98), dn);
+    float dimMix = clamp(ringT * uFalloffDimRingWeight * (wOut / max(wIn + wOut, 0.001)), 0.0, 1.0);
+    float body = mix(brightBody, dimBody, dimMix);
 
-    // Gentle core lift inside Foundry bright radius (multiplicative, fades to 1.0 at dn = b).
+    // Foundry edge envelope — CPU hardness already encodes att + slider halving distances.
+    float hBright = clamp(uFalloffHardnessBright, 0.06, 0.99);
+    float hDim = clamp(uFalloffHardnessDim, 0.06, 0.99);
+    float hEdge = mix(hBright, hDim, dimMix);
+    hEdge += edgeSoft * uFalloffEdgeSoftBoost.y * 0.14;
+    float edgeEnv = 1.0 - smoothstep(1.0 - hEdge, 1.0, dn);
+    body *= edgeEnv;
+
+    // Core lift inside Foundry bright radius.
     if (b > 0.02) {
       float coreT = 1.0 - smoothstep(0.0, b, dn);
-      float coreBoost = mix(1.0, 1.22, coreT * clamp(uFalloffHardnessBright / max(h, 0.1), 0.85, 1.35));
+      float coreBoost = mix(1.0, 1.18, coreT * clamp(hBright / max(hEdge, 0.1), 0.85, 1.25));
       body *= mix(1.0, coreBoost, smoothstep(0.0, 1.0, wIn / max(wIn + wOut, 0.001)));
     }
 
-    // Mild highlight compression (avoids flat white disk without killing mid-radius gradient).
-    body = body / (1.0 + body * 0.32);
+    // Gentle compression — keep enough headroom for att / slider differences to read.
+    body = body / (1.0 + body * 0.18);
 
-    // Rim AA only on the outer fraction so the dim ring keeps a smooth roll-off.
+    // Rim AA at photometric edge.
     float rimReach = 1.0 + edgeAA * 3.5;
-    float rimStart = max(0.72, 1.0 - fadeWidth * uFalloffRimAAScale * mix(1.0, 0.45, attT));
+    float rimStart = max(0.68, 1.0 - fadeWidth * uFalloffRimAAScale * mix(1.0, 0.5, attT));
     float rimFade = smoothstep(rimStart - edgeAA * 2.0, rimReach, dn);
-    body *= 1.0 - rimFade * 0.42;
+    body *= 1.0 - rimFade * 0.38;
 
     return max(body, 0.0);
   }

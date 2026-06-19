@@ -48,11 +48,11 @@ const GRID_INFLIGHT_HARD_CAP = 10;
  * this tiny (focal cell + immediate neighbors) prevents the whole frustum from
  * jumping to LOD 0 — the burst that tripped GPU context loss.
  */
-const FOCAL_SHARPEN_RING_MAX = 1;
-/** Only sharpen below zoom-native LOD when real VRAM headroom exists. */
-const FOCAL_SHARPEN_MAX_USED = 0.6;
+const FOCAL_SHARPEN_RING_MAX = 2;
+/** Only sharpen below zoom-native LOD when software budget headroom exists. */
+const FOCAL_SHARPEN_MAX_USED = 0.88;
 /** View must be settled (no pan / zoom / required-set change) this long to sharpen. */
-const FOCAL_SHARPEN_IDLE_MS = 350;
+const FOCAL_SHARPEN_IDLE_MS = 120;
 
 /**
  * Integer renderOrder for streamed cells — fallbacks draw beneath resident tiles.
@@ -207,10 +207,26 @@ export function imageCellChebyshevRing(focalCellX, focalCellY, cellX, cellY) {
  * @param {number} sourceH
  * @returns {{ cellX: number, cellY: number, key: string }|null}
  */
-export function resolveFocalImageCell(region, cellSize, sourceW, sourceH) {
+export function resolveFocalImageCell(region, cellSize, sourceW, sourceH, viewRect = null) {
+  let wx = NaN;
+  let wy = NaN;
   const cam = getCameraGroundCenter();
-  if (!cam) return null;
-  return worldPointToImageCell(cam.x, cam.y, region, cellSize, sourceW, sourceH);
+  if (cam) {
+    wx = cam.x;
+    wy = cam.y;
+  } else {
+    const pos = window.MapShine?.sceneComposer?.camera?.position
+      ?? window.MapShine?.floorCompositorV2?.camera?.position;
+    if (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
+      wx = pos.x;
+      wy = pos.y;
+    } else if (viewRect) {
+      wx = (viewRect.minX + viewRect.maxX) * 0.5;
+      wy = (viewRect.minY + viewRect.maxY) * 0.5;
+    }
+  }
+  if (!Number.isFinite(wx) || !Number.isFinite(wy)) return null;
+  return worldPointToImageCell(wx, wy, region, cellSize, sourceW, sourceH);
 }
 
 /** @returns {number} */
@@ -273,22 +289,35 @@ export class StreamedBackgroundGrid {
   }
 
   /**
-   * True when this grid may load a focal cell finer than the zoom-native LOD.
-   * All gates must pass: not panning, real VRAM headroom, view settled long
-   * enough, and not inside a post-crash LOD-0 cooldown.
+   * True when the view has been settled long enough to run a focal sharpen pass.
    * @param {number} used Current budget used fraction.
    * @returns {boolean}
    * @private
    */
-  _canSharpenBelowNative(used) {
+  _sharpenPassUnlocked(used) {
     if (this._isPanning) return false;
     if (used > FOCAL_SHARPEN_MAX_USED) return false;
     try {
-      const gov = getGpuWorkScheduler();
-      if (gov.focalSharpenEnabled === false) return false;
-      if (!gov.isLod0Allowed()) return false;
+      if (getGpuWorkScheduler().focalSharpenEnabled === false) return false;
     } catch (_) {}
     return (performance.now() - this._lastViewChangeMs) >= FOCAL_SHARPEN_IDLE_MS;
+  }
+
+  /**
+   * @param {number} used
+   * @param {number} [targetLod]
+   * @returns {boolean}
+   * @private
+   */
+  _canSharpenBelowNative(used, targetLod = null) {
+    if (!this._sharpenPassUnlocked(used)) return false;
+    const target = Number.isFinite(Number(targetLod)) ? Math.max(0, Math.floor(Number(targetLod))) : null;
+    if (target === 0) {
+      try {
+        if (!getGpuWorkScheduler().isLod0Allowed()) return false;
+      } catch (_) {}
+    }
+    return true;
   }
 
   /** @private */
@@ -365,7 +394,7 @@ export class StreamedBackgroundGrid {
    * @private
    */
   _hasSharpenBacklog(required, viewRect, requestedLod, focal) {
-    if (this._isPanning || !this._budgetHasHeadroom()) return false;
+    if (this._isPanning) return false;
     if (this._countUncoveredRequired(required) > 0) return false;
     if (this._pendingUpgrades.size > 0) return true;
     return required.some((cell) => {
@@ -462,15 +491,12 @@ export class StreamedBackgroundGrid {
   _innerSharpLodTarget(native, ring, used, isPanning = false) {
     if (ring > INNER_SHARP_RING_MAX) return native;
     if (isPanning) return native;
-    // At moderate zoom-out on 1× displays, zoom-native LOD is already correct.
-    if (native >= 2) return native;
     if (used > 1.0) return Math.min(this._maxLod, native + (ring === FOCAL_RING ? 1 : 0));
-    // Zoom-native LOD is the ceiling: never load *finer* than the zoom requires
-    // across the frustum. Only a tiny focal ring may sharpen one level finer, and
-    // only when idle + headroom + no post-crash cooldown (see _canSharpenBelowNative).
-    // This is the fix for the whole-frustum LOD-0 jump that tripped context loss.
-    if (ring <= FOCAL_SHARPEN_RING_MAX && this._canSharpenBelowNative(used)) {
-      return Math.max(0, native - 1);
+    // Zoom-native LOD is the ceiling for the frustum; focal rings may sharpen one level
+    // when idle and under budget pressure (the LightingEffectV2 RT leak was the real crash cause).
+    const sharpenTarget = Math.max(0, native - 1);
+    if (ring <= FOCAL_SHARPEN_RING_MAX && this._canSharpenBelowNative(used, sharpenTarget)) {
+      return sharpenTarget;
     }
     return native;
   }
@@ -689,7 +715,10 @@ export class StreamedBackgroundGrid {
       this._cellSize,
       this._manifest.sourceWidth,
       this._manifest.sourceHeight,
+      viewRect,
     );
+
+    if (this._hasSharpenBacklog(required, viewRect, lod, focal)) return true;
 
     if (overBudget) {
       return required.some((cell) => {
@@ -712,6 +741,32 @@ export class StreamedBackgroundGrid {
     return required.some((cell) =>
       this._cellNeedsWork(cell, viewRect, lod, { panStabilize: false }, focal),
     );
+  }
+
+  /**
+   * True when visible residents still need a focal sharpen pass (manager sync pump).
+   * @param {{ minX: number, minY: number, maxX: number, maxY: number }} viewRect
+   * @param {number} lod
+   * @returns {boolean}
+   */
+  hasSharpenBacklog(viewRect, lod) {
+    const region = this._getSceneRegion();
+    if (!this._manifest || !viewRect || !region) return false;
+    const required = getImageCellsForWorldView(
+      viewRect,
+      region,
+      this._cellSize,
+      this._manifest.sourceWidth,
+      this._manifest.sourceHeight,
+    );
+    const focal = resolveFocalImageCell(
+      region,
+      this._cellSize,
+      this._manifest.sourceWidth,
+      this._manifest.sourceHeight,
+      viewRect,
+    );
+    return this._hasSharpenBacklog(required, viewRect, lod, focal);
   }
 
   /**
@@ -844,6 +899,7 @@ export class StreamedBackgroundGrid {
         this._cellSize,
         this._manifest.sourceWidth,
         this._manifest.sourceHeight,
+        viewRect,
       )
       : null;
     const sharpenBacklog = this._hasSharpenBacklog(required, viewRect, requestedLod, focal);
@@ -1432,6 +1488,10 @@ export class StreamedBackgroundGrid {
         this._coarseBaseReady = true;
       }
     }
+
+    // First sync may sharpen immediately — do not wait for a camera nudge.
+    this._lastViewChangeMs = performance.now() - FOCAL_SHARPEN_IDLE_MS;
+    this._syncKey = '';
   }
 
   /**
@@ -1452,8 +1512,10 @@ export class StreamedBackgroundGrid {
     if (this._isPanning) this._lastViewChangeMs = performance.now();
     const epoch = this._decodeEpoch;
     const effectiveLod = this._stabilizeLod(lod);
-    const headroom = this._budgetHasHeadroom();
-    const panStabilize = !options.sharpenOnZoom && !headroom && !this._isPanning;
+    const budget = getTextureBudgetTracker();
+    const usedFrac = budget.getUsedFraction();
+    const sharpenReady = this._sharpenPassUnlocked(usedFrac);
+    const panStabilize = !options.sharpenOnZoom && !sharpenReady && !this._isPanning;
     const required = getImageCellsForWorldView(
       viewRect,
       region,
@@ -1466,15 +1528,18 @@ export class StreamedBackgroundGrid {
     this._cancelStaleInflight(requiredKeys);
     const syncKey = buildViewSyncKey(effectiveLod, requiredKeys);
     // Any change to the required set or LOD resets the idle timer that gates focal
-    // LOD-0 sharpening, so sharpening only happens once the view has settled.
-    if (syncKey !== this._syncKey) this._lastViewChangeMs = performance.now();
+    // sharpening — skip the very first sync after mount (empty _syncKey).
+    if (syncKey !== this._syncKey && this._syncKey !== '') {
+      this._lastViewChangeMs = performance.now();
+    }
     const focal = resolveFocalImageCell(
       region,
       this._cellSize,
       this._manifest.sourceWidth,
       this._manifest.sourceHeight,
+      viewRect,
     );
-    const needsSharpen = !this._isPanning && (options.sharpenOnZoom || headroom) && required.some((cell) => {
+    const needsSharpen = !this._isPanning && (options.sharpenOnZoom || sharpenReady) && required.some((cell) => {
       const existing = this._cells.get(cell.key);
       if (!existing?.mesh) return false;
       return !this._residentLodAcceptable(existing.lod, cell, viewRect, lod, false, focal);
@@ -1484,8 +1549,7 @@ export class StreamedBackgroundGrid {
     if (sharpenBacklog && this._src) {
       reprioritizeDecodeQueueForSharpen(hashSourceKey(this._src));
     }
-    const budget = getTextureBudgetTracker();
-    const overBudget = budget.getUsedFraction() > 1.0;
+    const overBudget = usedFrac > 1.0;
     const needsLoad = overBudget
       ? this.hasPendingCellWork(viewRect, lod)
       : required.some((cell) =>

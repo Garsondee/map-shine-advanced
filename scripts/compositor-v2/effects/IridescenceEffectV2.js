@@ -11,6 +11,7 @@ import { createLogger } from '../../core/log.js';
 import { createMaskStatusSchemaGroup, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import Coordinates from '../../utils/coordinates.js';
+import { foundryLuminosityIllumMultiplier } from '../../scene/point-light-falloff.js';
 import { tileHasLevelsRange, readTileLevelsFlags } from '../../foundry/levels-scene-flags.js';
 import { getAuthoritativeAmbientLightDocuments } from '../../foundry/ambient-light-documents.js';
 import { getTileBusPlaneSizeAndMirror, getTileVisualCenterFoundryXY } from '../../scene/tile-manager.js';
@@ -747,7 +748,7 @@ export class IridescenceEffectV2 {
 
     const worldPos = Coordinates.toWorld(doc.x, doc.y);
     const luminosity = config.luminosity ?? 0.5;
-    const intensity = luminosity * 2.0;
+    const intensity = foundryLuminosityIllumMultiplier(luminosity);
 
     this._lights.set(idKey, {
       position: worldPos,

@@ -429,6 +429,13 @@ export class LightingEffectV2 {
      * @type {Map<number, THREE.WebGLRenderTarget>}
      */
     this._perFloorLightSnapshotRts = new Map();
+    /** @type {THREE.WebGLRenderTarget|null} Gameplay-only light buffer for CC local ToD override */
+    this._gameplayLocalLightRT = null;
+    /**
+     * Per-floor gameplay light snapshots (excludes scene AmbientLights).
+     * @type {Map<number, THREE.WebGLRenderTarget>}
+     */
+    this._perFloorGameplayLightSnapshotRts = new Map();
 
     // ── Foundry hooks ───────────────────────────────────────────────────
     /** @type {Array<{hook: string, id: number}>} */
@@ -828,6 +835,9 @@ export class LightingEffectV2 {
 
     if (this._lightRT && (this._lightRT.width !== this._lightSize.w || this._lightRT.height !== this._lightSize.h)) {
       this._lightRT.setSize(this._lightSize.w, this._lightSize.h);
+    }
+    if (this._gameplayLocalLightRT && (this._gameplayLocalLightRT.width !== this._lightSize.w || this._gameplayLocalLightRT.height !== this._lightSize.h)) {
+      this._gameplayLocalLightRT.setSize(this._lightSize.w, this._lightSize.h);
     }
     if (this._stackedLightRtA && (this._stackedLightRtA.width !== this._lightSize.w || this._stackedLightRtA.height !== this._lightSize.h)) {
       this._stackedLightRtA.setSize(this._lightSize.w, this._lightSize.h);
@@ -1412,6 +1422,7 @@ export class LightingEffectV2 {
     const floorIdx = Number(this._renderFloorIndexForLights);
     if (Number.isFinite(floorIdx)) {
       this._snapshotLightRtForFloor(renderer, floorIdx);
+      this._snapshotGameplayLightRtForFloor(renderer, floorIdx);
     }
 
     const accumTex = this._stackedLightResult?.texture ?? this._stackedLightRtA?.texture;
@@ -1453,10 +1464,40 @@ export class LightingEffectV2 {
 
   /**
    * Texture + alpha baseline for post-merge CC local ToD override.
+   * Uses gameplay-only light buffer (excludes scene AmbientLights) so placed
+   * lamps are not treated as torches for local warm-grade cancel.
    * Raw `_lightRT` and stacked buffers clear alpha=0; CC subtracts {@link #getLocalLightBufferBinding}.alphaBaseline.
    * @returns {{ texture: THREE.Texture|null, alphaBaseline: number }}
    */
   getLocalLightBufferBinding() {
+    const stackedActive = this._stackedLightActive && this._stackedLightLayerCount > 0;
+    if (stackedActive && this._stackedLightLayerCount > 1) {
+      const activeIdx = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
+      if (Number.isFinite(activeIdx)) {
+        const gameplaySnap = this._perFloorGameplayLightSnapshotRts.get(Math.floor(activeIdx));
+        if (gameplaySnap?.texture) {
+          return { texture: gameplaySnap.texture, alphaBaseline: 0.0 };
+        }
+      }
+      if (this._gameplayLocalLightRT?.texture) {
+        return { texture: this._gameplayLocalLightRT.texture, alphaBaseline: 0.0 };
+      }
+      return { texture: null, alphaBaseline: 0.0 };
+    }
+    if (stackedActive && this._gameplayLocalLightRT?.texture) {
+      return { texture: this._gameplayLocalLightRT.texture, alphaBaseline: 0.0 };
+    }
+    if (this._gameplayLocalLightRT?.texture) {
+      return { texture: this._gameplayLocalLightRT.texture, alphaBaseline: 0.0 };
+    }
+    return { texture: null, alphaBaseline: 0.0 };
+  }
+
+  /**
+   * Full scene light buffer (all AmbientLights + gameplay) for CC lamp-light preserve.
+   * @returns {{ texture: THREE.Texture|null, alphaBaseline: number }}
+   */
+  getSceneLightBufferBinding() {
     const stackedActive = this._stackedLightActive && this._stackedLightLayerCount > 0;
     if (stackedActive && this._stackedLightLayerCount > 1) {
       const activeIdx = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
@@ -1469,6 +1510,7 @@ export class LightingEffectV2 {
       if (this._lightRT?.texture) {
         return { texture: this._lightRT.texture, alphaBaseline: 0.0 };
       }
+      return { texture: null, alphaBaseline: 0.0 };
     }
     if (stackedActive && this._stackedLightResult?.texture) {
       return { texture: this._stackedLightResult.texture, alphaBaseline: 0.0 };
@@ -1518,6 +1560,80 @@ export class LightingEffectV2 {
     }
 
     this._lightRtCopyMaterial.uniforms.tSrc.value = this._lightRT.texture;
+    const prevTarget = renderer.getRenderTarget();
+    renderer.setRenderTarget(dst);
+    renderer.render(this._lightRtCopyScene, this._stackLightCamera);
+    renderer.setRenderTarget(prevTarget);
+  }
+
+  /**
+   * Render gameplay-only light buffer (player torch/flash, candle/fire glow, etc.)
+   * excluding scene-authored AmbientLights so CC local ToD override does not
+   * treat placed lamps as campfires.
+   * @private
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {THREE.Camera} camera
+   */
+  _renderGameplayLocalLightBuffer(renderer, camera) {
+    if (!renderer || !camera || !this._gameplayLocalLightRT || !this._lightScene) return;
+
+    const hidden = [];
+    for (const light of this._lights.values()) {
+      const mesh = light?.mesh;
+      if (mesh?.visible) {
+        mesh.visible = false;
+        hidden.push(mesh);
+      }
+    }
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevAutoClear = renderer.autoClear;
+    try {
+      renderer.setRenderTarget(this._gameplayLocalLightRT);
+      renderer.setClearColor(0x000000, 0);
+      renderer.autoClear = true;
+      renderer.render(this._lightScene, camera);
+    } finally {
+      renderer.setRenderTarget(prevTarget);
+      renderer.autoClear = prevAutoClear;
+      for (const mesh of hidden) {
+        mesh.visible = true;
+      }
+    }
+  }
+
+  /**
+   * Copy gameplay-only light buffer for post-merge CC on multi-floor scenes.
+   * @private
+   * @param {THREE.WebGLRenderer} renderer
+   * @param {number} floorIndex
+   */
+  _snapshotGameplayLightRtForFloor(renderer, floorIndex) {
+    const THREE = window.THREE;
+    if (!renderer || !THREE || !this._gameplayLocalLightRT || !this._lightRtCopyMaterial || !this._lightRtCopyScene) {
+      return;
+    }
+    const fi = Math.floor(Number(floorIndex));
+    if (!Number.isFinite(fi)) return;
+
+    let dst = this._perFloorGameplayLightSnapshotRts.get(fi);
+    const w = this._gameplayLocalLightRT.width;
+    const h = this._gameplayLocalLightRT.height;
+    if (!dst || dst.width !== w || dst.height !== h) {
+      try { dst?.dispose?.(); } catch (_) {}
+      dst = new THREE.WebGLRenderTarget(w, h, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.HalfFloatType,
+        depthBuffer: false,
+        stencilBuffer: false,
+      });
+      dst.texture.colorSpace = THREE.LinearSRGBColorSpace;
+      this._perFloorGameplayLightSnapshotRts.set(fi, dst);
+    }
+
+    this._lightRtCopyMaterial.uniforms.tSrc.value = this._gameplayLocalLightRT.texture;
     const prevTarget = renderer.getRenderTarget();
     renderer.setRenderTarget(dst);
     renderer.render(this._lightRtCopyScene, this._stackLightCamera);
@@ -1805,7 +1921,7 @@ export class LightingEffectV2 {
           default: 0.51,
           label: 'Halving dist. (att 0, bright)',
           tooltip:
-            'Maps to Foundry smoothstep hardness in the bright ring (larger = softer, wider bright fill). Attenuation 0.5 uses the geometric mean vs the att=1 value.',
+            'Bright-ring halving distance at the soft end (Foundry Attenuation 1). Larger = wider, softer pool.',
         },
         falloffHalfInAtAtt1: {
           type: 'slider',
@@ -1815,7 +1931,7 @@ export class LightingEffectV2 {
           default: 0.22,
           label: 'Halving dist. (att 1, bright)',
           tooltip:
-            'Tweak scale for bright-ring softness. Attenuation now drives Foundry hardness (att 1 ≈ linear smoothstep); lower slider = tighter core.',
+            'Bright-ring halving distance at the hard end (Foundry Attenuation 0). Smaller = tighter core.',
         },
         falloffHalfOutAtAtt0: {
           type: 'slider',
@@ -2313,6 +2429,8 @@ export class LightingEffectV2 {
     this._lightRT = new THREE.WebGLRenderTarget(this._lightSize.w, this._lightSize.h, rtOpts);
     // Linear storage: light accumulation is max-blended in linear space.
     this._lightRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
+    this._gameplayLocalLightRT = new THREE.WebGLRenderTarget(this._lightSize.w, this._lightSize.h, rtOpts);
+    this._gameplayLocalLightRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
     const windowRtOpts = {
       ...rtOpts,
       type: this.params.windowLightUseHalfFloat ? THREE.HalfFloatType : THREE.UnsignedByteType,
@@ -3372,19 +3490,14 @@ export class LightingEffectV2 {
   _pushPointLightFalloffUniforms() {
     if (!this._initialized) return;
     const tuning = getPointLightFalloffTuningFromParams(this.params);
-    const sig = JSON.stringify(tuning);
     const exp = Math.max(
       0.5,
       Number(this.params.falloffExponent) || DEFAULT_POINT_LIGHT_FALLOFF_EXPONENT,
     );
-    const sigWithExp = `${sig}|${exp}`;
-    if (this._lastFalloffTuningSig !== sigWithExp) {
-      this._lastFalloffTuningSig = sigWithExp;
-      this._forEachPointLightUniforms((uniforms) => {
-        applyPointLightFalloffUniforms(uniforms, tuning);
-        if (uniforms.uFalloffExponent) uniforms.uFalloffExponent.value = exp;
-      });
-    }
+    this._forEachPointLightUniforms((uniforms) => {
+      applyPointLightFalloffUniforms(uniforms, tuning);
+      if (uniforms.uFalloffExponent) uniforms.uFalloffExponent.value = exp;
+    });
     for (let i = 0; i < this._lightList.length; i++) {
       const light = this._lightList[i];
       const rawAtt = light?._foundryAttenuation;
@@ -4245,6 +4358,7 @@ export class LightingEffectV2 {
       if (this._lightScene) {
         renderer.render(this._lightScene, camera);
       }
+      this._renderGameplayLocalLightBuffer(renderer, camera);
       this._endPerfSpan(_perfToken);
 
       // Window glow for shadow lift is written to WindowLightEffectV2._emitRT (scene-UV).
@@ -4454,6 +4568,9 @@ export class LightingEffectV2 {
       this._markLightMaskPrepassFoundryDraw(w, h, renderFloorForLights);
       this._endPerfSpan(_perfToken);
     }
+    _perfToken = this._beginPerfSpan('lightSourcesDraw.gameplayLocal', 'render', { cpuOnly: true });
+    this._renderGameplayLocalLightBuffer(renderer, camera);
+    this._endPerfSpan(_perfToken);
 
     // ── Pass 1b: Window glow → WindowLightEffectV2 emit RT (compose samples emit) ─
     if (windowLightScene) {
@@ -4779,6 +4896,7 @@ export class LightingEffectV2 {
 
     // Dispose GPU resources
     try { this._lightRT?.dispose(); } catch (_) {}
+    try { this._gameplayLocalLightRT?.dispose(); } catch (_) {}
     try { this._windowLightRT?.dispose(); } catch (_) {}
     try { this._windowEmitBlitMaterial?.dispose(); } catch (_) {}
     try {
@@ -4799,6 +4917,9 @@ export class LightingEffectV2 {
     } catch (_) {}
     try {
       for (const rt of this._perFloorLightSnapshotRts.values()) {
+        rt?.dispose?.();
+      }
+      for (const rt of this._perFloorGameplayLightSnapshotRts.values()) {
         rt?.dispose?.();
       }
     } catch (_) {}
@@ -4833,6 +4954,7 @@ export class LightingEffectV2 {
     this._lightRtCopyMaterial = null;
     this._lightRtCopyScene = null;
     this._perFloorLightSnapshotRts.clear();
+    this._perFloorGameplayLightSnapshotRts.clear();
     this._stackedLightActive = false;
     this._stackedLightLayerCount = 0;
     this._darknessRT = null;

@@ -175,6 +175,7 @@ const COLOR_CORRECTION_CORE_DEFAULTS = Object.freeze({
   localTodOverrideExposure: 1,
   localTodOverrideSaturation: 1,
   localWarmEmissiveAdd: 1,
+  lampLightPreserve: 0.9,
 });
 
 /** Baseline camera-grade atmosphere defaults (neutral; atmosphere off by default). */
@@ -426,6 +427,15 @@ export class ColorCorrectionEffectV2 {
         default: COLOR_CORRECTION_CORE_DEFAULTS.localWarmEmissiveAdd,
         tooltip: 'Skips time-of-day and atmosphere darkening on HDR flames, sparks, and other emissive art (1 = full preserve). Base exposure/WB still apply.',
       },
+      lampLightPreserve: {
+        type: 'slider',
+        label: 'Lamp Light Preserve',
+        min: 0,
+        max: 1,
+        step: 0.01,
+        default: COLOR_CORRECTION_CORE_DEFAULTS.lampLightPreserve,
+        tooltip: 'Foundry AmbientLight pools resist interior timeline / context darkening so 0.5 vs 1.0 luminosity stays visible indoors.',
+      },
     };
 
     const addTintMultiplierSliders = (index, track, channelDefaults, scopeLabel) => {
@@ -601,7 +611,7 @@ export class ColorCorrectionEffectV2 {
           type: 'folder',
           advanced: true,
           expanded: false,
-          parameters: ['todTimelineEnabled', 'localWarmLightPreserve', 'localTodOverrideExposure', 'localTodOverrideSaturation', 'localWarmEmissiveAdd'],
+          parameters: ['todTimelineEnabled', 'localWarmLightPreserve', 'localTodOverrideExposure', 'localTodOverrideSaturation', 'localWarmEmissiveAdd', 'lampLightPreserve'],
         },
         {
           name: 'outdoor-atmosphere',
@@ -1028,6 +1038,10 @@ export class ColorCorrectionEffectV2 {
         uHasLocalLightBuffer: { value: 0.0 },
         uLocalLightAlphaBaseline: { value: 0.0 },
         uLocalLightTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
+        uLampLightPreserve: { value: 0.9 },
+        tSceneLightBuffer: { value: null },
+        uHasSceneLightBuffer: { value: 0.0 },
+        uSceneLightTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
         uGradeEnabled: { value: 1.0 },
 
         uAtmosphereEnabled: { value: 1.0 },
@@ -1126,6 +1140,10 @@ export class ColorCorrectionEffectV2 {
         uniform float uHasLocalLightBuffer;
         uniform float uLocalLightAlphaBaseline;
         uniform vec2 uLocalLightTexelSize;
+        uniform float uLampLightPreserve;
+        uniform sampler2D tSceneLightBuffer;
+        uniform float uHasSceneLightBuffer;
+        uniform vec2 uSceneLightTexelSize;
         uniform float uGradeEnabled;
 
         uniform float uAtmosphereEnabled;
@@ -1388,6 +1406,41 @@ export class ColorCorrectionEffectV2 {
           return localInfluenceFromBlur(illumCenter, illumBlur, outdoorW);
         }
 
+        // Full scene light buffer (AmbientLights + gameplay) — lamp-lit pixels resist interior crush.
+        float sampleSceneLightBufferAlphaAt(vec2 uv) {
+          if (uHasSceneLightBuffer < 0.5) return 0.0;
+          vec4 L = texture2D(tSceneLightBuffer, uv);
+          return max(L.a, 0.0);
+        }
+
+        float sampleBlurredSceneLightAlpha(vec2 uv, float blurScale) {
+          vec2 t = uSceneLightTexelSize * max(blurScale, 1.0);
+          float s = sampleSceneLightBufferAlphaAt(uv) * 0.16;
+          s += sampleSceneLightBufferAlphaAt(uv + t * vec2( 1.0,  0.0)) * 0.08;
+          s += sampleSceneLightBufferAlphaAt(uv + t * vec2(-1.0,  0.0)) * 0.08;
+          s += sampleSceneLightBufferAlphaAt(uv + t * vec2( 0.0,  1.0)) * 0.08;
+          s += sampleSceneLightBufferAlphaAt(uv + t * vec2( 0.0, -1.0)) * 0.08;
+          vec2 t8 = t * 8.0;
+          s += sampleSceneLightBufferAlphaAt(uv + t8 * vec2( 0.707,  0.707)) * 0.05;
+          s += sampleSceneLightBufferAlphaAt(uv + t8 * vec2(-0.707,  0.707)) * 0.05;
+          s += sampleSceneLightBufferAlphaAt(uv + t8 * vec2( 0.707, -0.707)) * 0.05;
+          s += sampleSceneLightBufferAlphaAt(uv + t8 * vec2(-0.707, -0.707)) * 0.05;
+          vec2 t20 = t * 20.0;
+          s += sampleSceneLightBufferAlphaAt(uv + t20 * vec2( 1.0,  0.0)) * 0.03;
+          s += sampleSceneLightBufferAlphaAt(uv + t20 * vec2(-1.0,  0.0)) * 0.03;
+          s += sampleSceneLightBufferAlphaAt(uv + t20 * vec2( 0.0,  1.0)) * 0.03;
+          s += sampleSceneLightBufferAlphaAt(uv + t20 * vec2( 0.0, -1.0)) * 0.03;
+          return s;
+        }
+
+        float sampleLampLightPreserveWeight(vec2 uv) {
+          if (uHasSceneLightBuffer < 0.5 || uLampLightPreserve < 0.0001) return 0.0;
+          float center = sampleSceneLightBufferAlphaAt(uv);
+          float blur = sampleBlurredSceneLightAlpha(uv, 1.15);
+          float punch = max(center, blur * 0.85);
+          return smoothstep(0.006, 0.18, punch);
+        }
+
         void main() {
           vec4 texel = texture2D(tDiffuse, vUv);
           if (uGradeEnabled < 0.5) {
@@ -1442,6 +1495,7 @@ export class ColorCorrectionEffectV2 {
           if (uTodEnabled > 0.5) {
             float indoorW = clamp(sampleIndoorWeight(vUv), 0.0, 1.0);
             float outdoorW = 1.0 - indoorW;
+            float lampPreserveW = sampleLampLightPreserveWeight(vUv);
 
             vec3 globalSceneGrade = applyTimelineGrade(
               color,
@@ -1450,9 +1504,14 @@ export class ColorCorrectionEffectV2 {
               uTodGlobalTintColor
             );
             float interiorExposureTotal = uTodGlobalExposure + uTodInteriorExposure;
+            float interiorExpForPixel = interiorExposureTotal;
+            if (lampPreserveW > 0.0001 && indoorW > 0.0001) {
+              float preserveAmt = clamp(lampPreserveW * uLampLightPreserve * indoorW, 0.0, 1.0);
+              interiorExpForPixel = mix(interiorExposureTotal, uTodGlobalExposure, preserveAmt);
+            }
             vec3 interiorSceneGrade = applyTimelineGrade(
               color,
-              interiorExposureTotal,
+              interiorExpForPixel,
               uTodInteriorSaturation,
               uTodInteriorTintColor
             );
@@ -1476,7 +1535,7 @@ export class ColorCorrectionEffectV2 {
             // Keep exposure boost under the blurred influence rim (low rimFloor caused dark halos around lamps).
             expBoost *= mix(0.92, 1.0, pow(clamp(localInfluence, 0.0, 1.0), 1.1));
             float localGlobalExp = uTodGlobalExposure + expBoost;
-            float localInteriorExp = interiorExposureTotal + expBoost;
+            float localInteriorExp = interiorExpForPixel + expBoost;
             float satFloor = uLocalOverrideSaturationMin + punchNorm * 0.42;
             float localGlobalSat = max(uTodGlobalSaturation, satFloor);
             float localInteriorSat = max(uTodInteriorSaturation, satFloor);
@@ -1531,6 +1590,7 @@ export class ColorCorrectionEffectV2 {
           }
 
           // 5c. Contextual Scene Grade — token-driven overlay (per-client, optional spatial blend).
+          float lampPreserveWCtx = sampleLampLightPreserveWeight(vUv);
           if (uContextGradeEnabled > 0.5) {
             vec3 preContextColor = color;
             float pixelOutdoorW = 1.0;
@@ -1573,6 +1633,15 @@ export class ColorCorrectionEffectV2 {
               color *= shade;
               vec3 leafTint = uContextTreeDappleGreen;
               color = mix(color, color * leafTint, dapple * str * 0.62);
+            }
+
+            if (lampPreserveWCtx > 0.0001 && uLampLightPreserve > 0.0001) {
+              float indoorPreserveW = 1.0;
+              if (uHasOutdoorsMask > 0.5) {
+                indoorPreserveW = clamp(sampleIndoorWeight(vUv), 0.0, 1.0);
+              }
+              float ctxPreserve = clamp(lampPreserveWCtx * uLampLightPreserve * indoorPreserveW, 0.0, 1.0);
+              color = mix(color, preContextColor, ctxPreserve * spatialW);
             }
           }
 
@@ -1778,6 +1847,20 @@ export class ColorCorrectionEffectV2 {
     const tw = Math.max(1, lightTex?.image?.width ?? 1024);
     const th = Math.max(1, lightTex?.image?.height ?? 1024);
     u.uLocalLightTexelSize.value.set(1 / tw, 1 / th);
+  }
+
+  /**
+   * Full scene light buffer (AmbientLights + gameplay) for lamp-light preserve during CC.
+   * @param {THREE.Texture|null} lightTex
+   */
+  setSceneLightTexture(lightTex) {
+    const u = this._composeMaterial?.uniforms;
+    if (!u) return;
+    u.tSceneLightBuffer.value = lightTex ?? this._fallbackWhite;
+    u.uHasSceneLightBuffer.value = lightTex ? 1.0 : 0.0;
+    const tw = Math.max(1, lightTex?.image?.width ?? 1024);
+    const th = Math.max(1, lightTex?.image?.height ?? 1024);
+    u.uSceneLightTexelSize.value.set(1 / tw, 1 / th);
   }
 
   /**
@@ -2006,7 +2089,8 @@ export class ColorCorrectionEffectV2 {
       ||       paramId === 'localWarmLightPreserve'
       || paramId === 'localTodOverrideExposure'
       || paramId === 'localTodOverrideSaturation'
-      ||       paramId === 'localWarmEmissiveAdd'
+      || paramId === 'localWarmEmissiveAdd'
+      || paramId === 'lampLightPreserve'
       || paramId === 'atmosphereEnabled'
       || paramId === 'intensity'
       || paramId === 'shadowGradePreserve'
@@ -2039,6 +2123,7 @@ export class ColorCorrectionEffectV2 {
       : 2.75;
     u.uLocalOverrideSaturationMin.value = Math.max(0.5, Math.min(2, Number(p.localTodOverrideSaturation) ?? 1.25));
     u.uLocalEmissiveAdd.value = Math.max(0, Math.min(1.5, Number(p.localWarmEmissiveAdd) ?? 1.0));
+    u.uLampLightPreserve.value = Math.max(0, Math.min(1, Number(p.lampLightPreserve) ?? 0.9));
     if (!applyTimeline) return;
 
     const grade = this._evaluateTodTimeline(this._resolveTimelineHour());

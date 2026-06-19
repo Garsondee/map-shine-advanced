@@ -262,30 +262,37 @@ function _deriveWarnings(report) {
   const targetLod = Number(report.scene.zoomLod);
   const activeLod = Number(report.streaming.lastStreamLod);
   const heldLod = Number(report.streaming.heldZoomLod);
-  if (Number.isFinite(targetLod) && Number.isFinite(activeLod) && targetLod < activeLod) {
-    if (report.streaming.isPanning) {
-      warnings.push(`Pan active — streaming LOD ${activeLod} is coarser than zoom target LOD ${targetLod}; sharpen resumes after pan stops.`);
-    } else if (Number.isFinite(heldLod) && heldLod > targetLod && report.streaming.zoomStable === false) {
-      warnings.push(`Zoom still changing — streaming LOD ${activeLod} held coarser than target LOD ${targetLod} until zoom settles or jumps ≥10%.`);
-    } else {
-      warnings.push(`Streaming LOD ${activeLod} is coarser than zoom target LOD ${targetLod} — visible cells may look soft.`);
-    }
-  }
 
   for (const g of report.streaming.backgroundGrids) {
     const visCells = g.cells.filter((c) => c.visible && c.hasMap);
     if (!visCells.length || !Number.isFinite(targetLod)) continue;
-    // NB: use a finite check, not `|| 99` — LOD 0 is valid and falsy, which
-    // previously reported a fully-sharp (LOD 0) grid as "finest visible LOD 99".
+    const loading = (g.inflightCount ?? 0) > 0 || (g.cellSummary.loading ?? 0) > 0;
     const finestVisible = Math.min(...visCells.map((c) => {
       const n = Number(c.lod);
       return Number.isFinite(n) ? n : 99;
     }));
-    if (finestVisible > targetLod + 1) {
+    // Only flag when visibly too coarse by 2+ pyramid levels and nothing is in flight.
+    if (!loading && finestVisible > targetLod + 1) {
       warnings.push(`Background [${g.key}]: finest visible cell is LOD ${finestVisible}, target is LOD ${targetLod}.`);
     }
-    if (targetLod === 0 && (g.cellSummary.lod0 ?? 0) === 0 && visCells.length > 0) {
-      warnings.push(`Background [${g.key}]: zoom requests LOD 0 but no lod0 textures are loaded (${g.cellSummary.lod1 ?? 0} at lod1, ${g.cellSummary.residentLo ?? 0} resident-lo).`);
+    // LOD 0 requested but nothing sharper than lod2 loaded yet — skip while upgrades are pending.
+    if (!loading && targetLod === 0 && (g.cellSummary.lod0 ?? 0) === 0 && finestVisible >= 2) {
+      warnings.push(`Background [${g.key}]: zoom requests LOD 0 but visible cells are still at LOD ${finestVisible}+.`);
+    }
+  }
+
+  // Soft LOD lag: only when streaming is 2+ levels coarser than zoom, settled, and idle.
+  if (
+    Number.isFinite(targetLod)
+    && Number.isFinite(activeLod)
+    && activeLod >= targetLod + 2
+    && !report.streaming.isPanning
+    && report.streaming.zoomStable !== false
+    && !(Number.isFinite(heldLod) && heldLod > targetLod)
+  ) {
+    const anyInflight = report.streaming.backgroundGrids.some((g) => (g.inflightCount ?? 0) > 0);
+    if (!anyInflight) {
+      warnings.push(`Streaming LOD ${activeLod} is much coarser than zoom target LOD ${targetLod}.`);
     }
   }
 

@@ -1,4 +1,8 @@
 import { createLogger } from '../../core/log.js';
+import {
+  inferMapPointGroupEmissionShape,
+  sampleRandomWorldPointOnPolyline,
+} from '../../scene/map-point-emission-sampling.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
 import Coordinates from '../../utils/coordinates.js';
 import { getPerspectiveElevation } from '../../foundry/elevation-context.js';
@@ -769,12 +773,32 @@ export class LightningEffectV2 {
       if (!g || g.isBroken) continue;
       if (!g.points || g.points.length < 2) continue;
 
-      const isLine = g.type === 'line';
-      const isPointLine = g.type === 'point' && g.points.length >= 2;
-      if (!isLine && !isPointLine) continue;
+      const shape = inferMapPointGroupEmissionShape(g);
+      const isLineSource = shape === 'line';
+      const isPointEndpoints = shape === 'point' && g.points.length >= 2;
+      if (!isLineSource && !isPointEndpoints) continue;
 
-      const start = this._toWorldPoint(g.points[0]);
-      const end = this._toWorldPoint(g.points[g.points.length - 1]);
+      let startPt;
+      let endPt;
+      if (isLineSource && g.points.length > 2) {
+        startPt = sampleRandomWorldPointOnPolyline(g.points);
+        endPt = sampleRandomWorldPointOnPolyline(g.points);
+        for (let attempt = 0; attempt < 8 && startPt && endPt
+          && Math.hypot(endPt.x - startPt.x, endPt.y - startPt.y) < 40; attempt++) {
+          endPt = sampleRandomWorldPointOnPolyline(g.points);
+        }
+      } else if (isLineSource) {
+        startPt = g.points[0];
+        endPt = g.points[g.points.length - 1];
+      } else {
+        startPt = g.points[0];
+        endPt = g.points[g.points.length - 1];
+      }
+
+      if (!startPt || !endPt) continue;
+
+      const start = this._toWorldPoint(startPt);
+      const end = this._toWorldPoint(endPt);
 
       const rng = { state: this._hashStringToUint(g.id || String(i)) };
 

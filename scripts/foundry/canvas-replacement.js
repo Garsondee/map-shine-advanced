@@ -7851,7 +7851,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
       //   MapShine.disableRoofDrips = false; weatherController.roofDripTuning.enabled = true;
       mapShine.disableRoofDrips = true;
       if (weatherController?.roofDripTuning) weatherController.roofDripTuning.enabled = false;
-      initStreamingMinimap(true);
+      initStreamingMinimap();
       mapShine.streamingMinimap = getStreamingMinimap();
     }, 'textureBudget.configure', Severity.DEGRADED);
 

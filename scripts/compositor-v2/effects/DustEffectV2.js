@@ -17,6 +17,11 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import {
+  buildMapPointGroupSpawnPool,
+  inferMapPointGroupEmissionShape,
+  resolveMapPointGroupFloorIndices,
+} from '../../scene/map-point-emission-sampling.js';
 import { getVisibleWorldRect } from '../../streaming/view-projection-service.js';
 import { tagQuarkSystem } from '../../core/quark-diagnostics.js';
 import { weatherController } from '../../core/WeatherController.js';
@@ -994,9 +999,9 @@ export class DustEffectV2 {
     const manager = this._mapPointsManager;
     if (!manager) return;
 
-    const groups = typeof manager.getGroupsByEffect === 'function'
-      ? manager.getGroupsByEffect('dust')
-      : [];
+    const groups = (typeof manager.getGroupsByEffectForContext === 'function')
+      ? (manager.getGroupsByEffectForContext('dust', this._activeLevelContext) || [])
+      : (typeof manager.getGroupsByEffect === 'function' ? manager.getGroupsByEffect('dust') : []);
     if (!Array.isArray(groups) || groups.length === 0) return;
 
     let contributingGroups = 0;
@@ -1005,16 +1010,10 @@ export class DustEffectV2 {
     for (const group of groups) {
       if (!group || !Array.isArray(group.points) || group.points.length === 0) continue;
 
-      const floorIndices = this._resolveMapPointGroupFloorIndices(group, floors);
+      const floorIndices = resolveMapPointGroupFloorIndices(group, floors);
       if (!floorIndices.length) continue;
 
-      let points = null;
-      if (group.type === 'area' && group.points.length >= 3) {
-        points = this._sampleMapPointAreaToWorldPoints(group);
-      } else if (group.type === 'point') {
-        points = this._sampleMapPointPointGroupToWorldPoints(group);
-      }
-
+      const { triples: points } = buildMapPointGroupSpawnPool(group);
       if (!points || points.length === 0) continue;
       contributingGroups += 1;
       contributedPointTriples += Math.floor(points.length / 3);
@@ -1029,121 +1028,6 @@ export class DustEffectV2 {
         sampledPoints: contributedPointTriples,
       });
     }
-  }
-
-  _resolveMapPointGroupFloorIndices(group, floors) {
-    if (!Array.isArray(floors) || floors.length === 0) return [0];
-
-    const binding = group?.metadata?.levelBinding;
-    const mode = String(binding?.mode || 'all-levels');
-    if (mode !== 'locked') {
-      return floors.map((_, idx) => idx);
-    }
-
-    const bottom = Number(binding?.bottom);
-    const top = Number(binding?.top);
-    if (!Number.isFinite(bottom) || !Number.isFinite(top)) {
-      const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.();
-      const idx = Number.isFinite(activeFloor?.index) ? activeFloor.index : 0;
-      return [idx];
-    }
-
-    const matched = [];
-    for (let i = 0; i < floors.length; i++) {
-      const floor = floors[i];
-      const fMin = Number(floor?.elevationMin);
-      const fMax = Number(floor?.elevationMax);
-      if (!Number.isFinite(fMin) || !Number.isFinite(fMax)) continue;
-      if (top >= fMin && bottom <= fMax) matched.push(i);
-    }
-
-    if (matched.length > 0) return matched;
-    const activeFloor = window.MapShine?.floorStack?.getActiveFloor?.();
-    const idx = Number.isFinite(activeFloor?.index) ? activeFloor.index : 0;
-    return [idx];
-  }
-
-  _sampleMapPointPointGroupToWorldPoints(group) {
-    const points = group?.points;
-    if (!Array.isArray(points) || points.length === 0) return null;
-
-    const out = [];
-    const intensity = this._mapPointEmissionIntensity(group);
-    for (const point of points) {
-      const fx = Number(point?.x);
-      const fy = Number(point?.y);
-      if (!Number.isFinite(fx) || !Number.isFinite(fy)) continue;
-      out.push(fx, fy, intensity);
-    }
-    return out.length ? new Float32Array(out) : null;
-  }
-
-  _sampleMapPointAreaToWorldPoints(group) {
-    const polygon = group?.points;
-    if (!Array.isArray(polygon) || polygon.length < 3) return null;
-
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const p of polygon) {
-      const x = Number(p?.x);
-      const y = Number(p?.y);
-      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
-    }
-
-    if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
-      return null;
-    }
-
-    const width = Math.max(1, maxX - minX);
-    const height = Math.max(1, maxY - minY);
-    const stride = Math.max(24, Math.min(160, Math.floor(Math.max(width, height) / 24)));
-    const intensity = this._mapPointEmissionIntensity(group);
-    const out = [];
-
-    // Include vertices so very small polygons still emit.
-    for (const p of polygon) {
-      const x = Number(p?.x);
-      const y = Number(p?.y);
-      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-      out.push(x, y, intensity);
-    }
-
-    for (let y = minY; y <= maxY; y += stride) {
-      for (let x = minX; x <= maxX; x += stride) {
-        if (!this._isPointInPolygon(x, y, polygon)) continue;
-        out.push(x, y, intensity);
-      }
-    }
-
-    return out.length ? new Float32Array(out) : null;
-  }
-
-  _mapPointEmissionIntensity(group) {
-    const i = Number(group?.emission?.intensity);
-    if (!Number.isFinite(i)) return 1.0;
-    return Math.max(0.05, Math.min(1.0, i));
-  }
-
-  _isPointInPolygon(x, y, polygon) {
-    let inside = false;
-    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-      const xi = Number(polygon[i]?.x);
-      const yi = Number(polygon[i]?.y);
-      const xj = Number(polygon[j]?.x);
-      const yj = Number(polygon[j]?.y);
-      if (!Number.isFinite(xi) || !Number.isFinite(yi) || !Number.isFinite(xj) || !Number.isFinite(yj)) continue;
-
-      const crosses = ((yi > y) !== (yj > y))
-        && (x < ((xj - xi) * (y - yi) / Math.max(1e-6, (yj - yi)) + xi));
-      if (crosses) inside = !inside;
-    }
-    return inside;
   }
 
   _scanDustMaskToWorldPoints(dustImage, outdoorsImage, { x, y, w, h, worldH }) {

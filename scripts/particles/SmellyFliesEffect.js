@@ -22,6 +22,12 @@ import {
 import Coordinates from '../utils/coordinates.js';
 import { weatherController } from '../core/WeatherController.js';
 import { resolveEffectEnabled } from '../effects/resolve-effect-enabled.js';
+import {
+  computePointBounds,
+  inferMapPointGroupEmissionShape,
+  isPointInPolygon,
+  sampleRandomWorldPointInMapPointGroup,
+} from '../scene/map-point-emission-sampling.js';
 
 const log = createLogger('SmellyFliesEffect');
 
@@ -90,8 +96,73 @@ const DEFAULT_FLY_CONFIG = {
 };
 
 /**
- * Emitter shape that spawns particles within a polygon area
- * Uses rejection sampling to find valid spawn points
+ * Emitter shape that spawns particles from a map-point group (point / line / area).
+ */
+class MapPointGroupSpawnShape {
+  /**
+   * @param {object} group - Map point group
+   * @param {{minX:number,minY:number,maxX:number,maxY:number,centerX:number,centerY:number,width:number,height:number}|null} bounds
+   * @param {Array<{x:number,y:number}>|null} walkPolygon - Constraint polygon for walking (areas only)
+   * @param {SmellyFliesEffect} ownerEffect
+   */
+  constructor(group, bounds, walkPolygon, ownerEffect) {
+    this.group = group;
+    this.bounds = bounds;
+    this.walkPolygon = walkPolygon;
+    this.ownerEffect = ownerEffect;
+    this.type = 'map_point_spawn';
+  }
+
+  initialize(particle) {
+    const groundZ = this._getGroundZ();
+    const sample = sampleRandomWorldPointInMapPointGroup(this.group);
+    let x = sample?.x;
+    let y = sample?.y;
+
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      x = this.bounds?.centerX ?? 0;
+      y = this.bounds?.centerY ?? 0;
+    }
+
+    particle.position.x = x;
+    particle.position.y = y;
+    particle.position.z = groundZ;
+
+    particle.userData = particle.userData || {};
+    particle.userData.state = FLY_STATE.WALKING;
+    particle.userData.stateTimer = 0;
+    particle.userData.home = { x, y };
+    particle.userData.velocity = { x: 0, y: 0 };
+    particle.userData.walkState = WALK_STATE.IDLE;
+    particle.userData.walkTarget = null;
+    particle.userData.idleTimer = Math.random() * 2.0;
+    particle.userData.rotation = Math.random() * Math.PI * 2;
+    particle.userData.polygon = this.walkPolygon;
+    particle.userData.bounds = this.bounds;
+    particle.userData.spawnTime = 0;
+    const spawnOutdoors = this.ownerEffect?._classifyWorldOutdoors?.(x, y);
+    particle.userData.spawnOutdoors = (spawnOutdoors === true || spawnOutdoors === false)
+      ? spawnOutdoors
+      : null;
+
+    if (particle.velocity) {
+      particle.velocity.set(0, 0, 0);
+    }
+    particle.rotation = particle.userData.rotation;
+  }
+
+  _getGroundZ() {
+    const sceneComposer = window.MapShine?.sceneComposer;
+    return (sceneComposer && typeof sceneComposer.groundZ === 'number')
+      ? sceneComposer.groundZ
+      : 1000;
+  }
+
+  update() { /* static */ }
+}
+
+/**
+ * @deprecated Use MapPointGroupSpawnShape — kept for backward compatibility during migration.
  */
 class AreaSpawnShape {
   /**
@@ -709,20 +780,7 @@ class FlyBehavior {
    * @private
    */
   _isPointInPolygon(x, y, polygon) {
-    let inside = false;
-    const n = polygon.length;
-    
-    for (let i = 0, j = n - 1; i < n; j = i++) {
-      const xi = polygon[i].x, yi = polygon[i].y;
-      const xj = polygon[j].x, yj = polygon[j].y;
-      
-      if (((yi > y) !== (yj > y)) &&
-          (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
-        inside = !inside;
-      }
-    }
-    
-    return inside;
+    return isPointInPolygon(x, y, polygon);
   }
 
   /**
@@ -1260,19 +1318,19 @@ export class SmellyFliesEffect {
       ?? (Number.isFinite(ctx?.floorIndex) ? `floor:${ctx.floorIndex}` : null)
       ?? String(ctx ?? 'none');
 
-    const areas = (typeof this.mapPointsManager.getAreasForEffectForContext === 'function')
-      ? this.mapPointsManager.getAreasForEffectForContext('smellyFlies', this._activeLevelContext)
-      : this.mapPointsManager.getAreasForEffect('smellyFlies');
+    const groups = (typeof this.mapPointsManager.getEmissionGroupsForEffectForContext === 'function')
+      ? this.mapPointsManager.getEmissionGroupsForEffectForContext('smellyFlies', this._activeLevelContext)
+      : (typeof this.mapPointsManager.getGroupsByEffectForContext === 'function'
+        ? this.mapPointsManager.getGroupsByEffectForContext('smellyFlies', this._activeLevelContext)
+        : this.mapPointsManager.getGroupsByEffect('smellyFlies'));
 
-    const pointGroups = (typeof this.mapPointsManager.getGroupsByEffectForContext === 'function'
-      ? this.mapPointsManager.getGroupsByEffectForContext('smellyFlies', this._activeLevelContext)
-      : this.mapPointsManager.getGroupsByEffect('smellyFlies'))
-      .filter(g => g.type === 'point' && g.points && g.points.length > 0);
+    const groupIds = (groups || [])
+      .filter((g) => g?.points?.length)
+      .map((g) => `${g.id}:${inferMapPointGroupEmissionShape(g)}`)
+      .sort()
+      .join(',');
 
-    const areaIds = areas.map(a => a.groupId).sort().join(',');
-    const groupIds = pointGroups.map(g => g.id).sort().join(',');
-
-    return `${ctxKey}|a:${areaIds}|g:${groupIds}`;
+    return `${ctxKey}|g:${groupIds}`;
   }
 
   /**
@@ -1366,32 +1424,19 @@ export class SmellyFliesEffect {
       return;
     }
     
-    // Get all smellyFlies areas
-    const areas = (typeof this.mapPointsManager.getAreasForEffectForContext === 'function')
-      ? this.mapPointsManager.getAreasForEffectForContext('smellyFlies', this._activeLevelContext)
-      : this.mapPointsManager.getAreasForEffect('smellyFlies');
-    
-    // Also support point groups (single spawn location)
-    const pointGroups = (typeof this.mapPointsManager.getGroupsByEffectForContext === 'function'
-      ? this.mapPointsManager.getGroupsByEffectForContext('smellyFlies', this._activeLevelContext)
-      : this.mapPointsManager.getGroupsByEffect('smellyFlies'))
-      .filter(g => g.type === 'point' && g.points && g.points.length > 0);
-    
-    if (areas.length > 0 || pointGroups.length > 0) {
-      log.debug(`Creating fly systems: ${areas.length} areas, ${pointGroups.length} point groups`);
+    const groups = (typeof this.mapPointsManager.getEmissionGroupsForEffectForContext === 'function')
+      ? this.mapPointsManager.getEmissionGroupsForEffectForContext('smellyFlies', this._activeLevelContext)
+      : (typeof this.mapPointsManager.getGroupsByEffectForContext === 'function'
+        ? this.mapPointsManager.getGroupsByEffectForContext('smellyFlies', this._activeLevelContext)
+        : this.mapPointsManager.getGroupsByEffect('smellyFlies'));
+
+    const validGroups = (groups || []).filter((g) => g?.points?.length);
+    if (validGroups.length > 0) {
+      log.debug(`Creating fly systems for ${validGroups.length} map-point group(s)`);
     }
 
-    // Create system for each area
-    for (const area of areas) {
-      const system = this._createFlySystem(area);
-      if (system) {
-        this.flySystems.set(area.groupId, system);
-      }
-    }
-    
-    // Create system for each point group
-    for (const group of pointGroups) {
-      const system = this._createPointFlySystem(group);
+    for (const group of validGroups) {
+      const system = this._createGroupFlySystem(group);
       if (system) {
         this.flySystems.set(group.id, system);
       }
@@ -1401,10 +1446,155 @@ export class SmellyFliesEffect {
   }
 
   /**
+   * Resolve walk constraint polygon and bounds for a map-point group.
+   * @param {object} group
+   * @returns {{bounds: object|null, walkPolygon: Array<{x:number,y:number}>|null}}
+   * @private
+   */
+  _resolveFlyGroupBounds(group) {
+    const shape = inferMapPointGroupEmissionShape(group);
+    const points = group.points;
+
+    if (shape === 'area') {
+      const bounds = computePointBounds(points);
+      return { bounds, walkPolygon: points };
+    }
+
+    if (shape === 'line') {
+      const bounds = computePointBounds(points);
+      if (bounds) {
+        const pad = 80;
+        return {
+          bounds: {
+            ...bounds,
+            minX: bounds.minX - pad,
+            minY: bounds.minY - pad,
+            maxX: bounds.maxX + pad,
+            maxY: bounds.maxY + pad,
+            width: bounds.width + pad * 2,
+            height: bounds.height + pad * 2,
+            centerX: bounds.centerX,
+            centerY: bounds.centerY,
+          },
+          walkPolygon: null,
+        };
+      }
+    }
+
+    const bounds = computePointBounds(points);
+    if (bounds) {
+      const pad = 100;
+      return {
+        bounds: {
+          minX: bounds.centerX - pad,
+          minY: bounds.centerY - pad,
+          maxX: bounds.centerX + pad,
+          maxY: bounds.centerY + pad,
+          centerX: bounds.centerX,
+          centerY: bounds.centerY,
+          width: pad * 2,
+          height: pad * 2,
+        },
+        walkPolygon: null,
+      };
+    }
+
+    return { bounds: null, walkPolygon: null };
+  }
+
+  /**
+   * Create a fly system for any map-point group (point / line / area).
+   * @param {object} group
+   * @returns {ParticleSystem|null}
+   * @private
+   */
+  _createGroupFlySystem(group) {
+    const THREE = window.THREE;
+    if (!THREE || !this.atlasTexture || !group?.points?.length) return null;
+
+    const cfg = this.params;
+    const { bounds, walkPolygon } = this._resolveFlyGroupBounds(group);
+    if (!bounds) return null;
+
+    const material = new THREE.MeshBasicMaterial({
+      map: this.atlasTexture,
+      transparent: true,
+      depthWrite: false,
+      depthTest: true,
+      blending: THREE.NormalBlending,
+      side: THREE.DoubleSide,
+    });
+
+    const shape = new MapPointGroupSpawnShape(group, bounds, walkPolygon, this);
+    const shapeKind = inferMapPointGroupEmissionShape(group);
+    const maxParticles = shapeKind === 'point'
+      ? Math.max(2, cfg.maxParticles)
+      : cfg.maxParticles;
+    const avgLifetime = 22.5;
+    const emissionRate = maxParticles / avgLifetime;
+
+    const system = new ParticleSystem({
+      duration: 1,
+      looping: true,
+      startLife: new IntervalValue(15, 30),
+      startSpeed: new ConstantValue(0),
+      startSize: new IntervalValue(cfg.visual.flyingScale * 0.9, cfg.visual.flyingScale * 1.1),
+      startColor: new ColorRange(
+        new Vector4(1.0, 1.0, 1.0, 1.0),
+        new Vector4(1.0, 1.0, 1.0, 1.0),
+      ),
+      worldSpace: true,
+      maxParticles,
+      emissionOverTime: new ConstantValue(emissionRate),
+      shape,
+      material,
+      renderMode: RenderMode.BillBoard,
+      renderOrder: 52,
+      uTileCount: 2,
+      vTileCount: 1,
+      startTileIndex: new ConstantValue(shapeKind === 'point' ? 0 : 1),
+      behaviors: [
+        new FlyBehavior(cfg, this),
+      ],
+    });
+
+    system.emitter.position.set(0, 0, 0);
+
+    if (system.emitter) {
+      system.emitter.userData = system.emitter.userData || {};
+      system.emitter.userData.msOverlayLayer = false;
+      const minX = bounds.minX;
+      const minY = bounds.minY;
+      const maxX = bounds.maxX;
+      const maxY = bounds.maxY;
+      if ([minX, minY, maxX, maxY].every(Number.isFinite)) {
+        const cx = (minX + maxX) * 0.5;
+        const cy = (minY + maxY) * 0.5;
+        const dx = Math.max(0, maxX - minX);
+        const dy = Math.max(0, maxY - minY);
+        const r2d = 0.5 * Math.sqrt(dx * dx + dy * dy);
+        system.emitter.userData.msBounds2D = { cx, cy, r2d };
+      }
+    }
+
+    this.batchRenderer.addSystem(system);
+    tagQuarkSystem(system, 'smellyFlies', `${shapeKind}/${group.id}`);
+
+    system.userData = {
+      areaId: group.id,
+      ownerEffect: this,
+    };
+
+    log.debug(`Created fly system for group ${group.id} (${shapeKind}) with ${maxParticles} max particles`);
+    return system;
+  }
+
+  /**
    * Create a fly system for an area polygon
    * @param {AreaPolygon} area
    * @returns {ParticleSystem|null}
    * @private
+   * @deprecated Use _createGroupFlySystem
    */
   _createFlySystem(area) {
     const THREE = window.THREE;

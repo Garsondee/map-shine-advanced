@@ -14,6 +14,10 @@ import {
 } from '../../foundry/levels-scene-flags.js';
 import { resolveClusteringElevation } from '../../scene/map-point-wall-clustering.js';
 import {
+  buildMapPointGroupSpawnPool,
+  inferMapPointGroupEmissionShape,
+} from '../../scene/map-point-emission-sampling.js';
+import {
   MAP_POINT_RENDER_LAYER_ABOVE,
   MAP_POINT_RENDER_LAYER_BELOW,
 } from '../../scene/map-points-manager.js';
@@ -60,6 +64,34 @@ const GLOW_BALANCE_PHOTOMETRY_PARAMS = new Set([
   'glowOutdoorCancelScale',
   'glowIndoorNightBoost',
   'glowOutdoorNightBoost',
+]);
+
+/** Day/night gameplay-light pool params — live uniform sync keyed off master darkness. */
+const GLOW_DAY_NIGHT_POOL_PARAMS = new Set([
+  'glowDayIntensityScale',
+  'glowNightIntensityScale',
+  'glowWarmth',
+  'glowIntensity',
+  'glowDarknessCancel',
+  'glowFlickerStrength',
+  'glowFlickerSpeed',
+  'glowFlickerStrengthJitter',
+  'glowFlickerSpeedJitter',
+  'glowRadiusPx',
+  'glowInnerRadiusScale',
+  'glowFalloffExponent',
+  'glowEdgeSoftness',
+  'glowNightWarmth',
+  'glowNightIntensity',
+  'glowNightDarknessCancel',
+  'glowNightFlickerStrength',
+  'glowNightFlickerSpeed',
+  'glowNightFlickerStrengthJitter',
+  'glowNightFlickerSpeedJitter',
+  'glowNightRadiusPx',
+  'glowNightInnerRadiusScale',
+  'glowNightFalloffExponent',
+  'glowNightEdgeSoftness',
 ]);
 
 /** @param {import('three').WebGLRenderer|null} renderer @param {import('three').Texture|null} texture */
@@ -782,7 +814,12 @@ export class CandleFlamesEffectV2 {
       return;
     }
 
-    if (paramId === 'glowWarmth' || paramId === 'glowNightWarmth') {
+    if (GLOW_DAY_NIGHT_POOL_PARAMS.has(paramId)) {
+      this._applyLiveGlowBalance();
+      if (GLOW_REBUILD_PARAMS.has(paramId)) {
+        this._refreshGlowClusterRadii();
+        this._scheduleGlowRebuild();
+      }
       return;
     }
 
@@ -820,7 +857,7 @@ export class CandleFlamesEffectV2 {
   _refreshGlowClusterRadii() {
     if (!this._clusters?.length) return;
     const clipScale = Math.max(0.1, Number(this.params.wallClipRadiusScale) || 1.0);
-    const darkness = LightingDirector.get().masterDarkness;
+    const darkness = this._resolveMasterDarkness();
     for (const c of this._clusters) {
       if (!c) continue;
       const outdoor = Math.max(0, Math.min(1, Number(c.outdoor) ?? 1));
@@ -1238,13 +1275,25 @@ export class CandleFlamesEffectV2 {
   }
 
   /**
+   * Fresh canonical scene darkness for day/night pool blending.
+   * Particle ticks can run before FloorCompositor.render(); update here so glow
+   * pools never stick on the neutral pre-render default (0 = full day).
+   * @private
+   * @returns {number}
+   */
+  _resolveMasterDarkness() {
+    try { LightingDirector.update(); } catch (_) {}
+    return clamp01(LightingDirector.get().masterDarkness);
+  }
+
+  /**
    * Darkness-driven scale for flame sprites only.
    * @returns {number}
    */
   _computeDayNightIntensityMul() {
     if (!this.params.autoDayNightBalance) return 1.0;
 
-    const darkness = clamp01(LightingDirector.get().masterDarkness);
+    const darkness = this._resolveMasterDarkness();
     const dayFloor = 0.55;
     const day = Math.max(dayFloor, Math.max(0, Number(this.params.dayIntensityScale) || 0));
     const night = Math.max(day, Math.max(0, Number(this.params.nightIntensityScale) || 0));
@@ -1257,7 +1306,7 @@ export class CandleFlamesEffectV2 {
   _blendGlowDayNightParam(dayKey, nightKey, fallback = 0, darkness = null) {
     const t = clamp01(Number.isFinite(Number(darkness))
       ? Number(darkness)
-      : LightingDirector.get().masterDarkness);
+      : this._resolveMasterDarkness());
     const dayRaw = Number(this.params[dayKey]);
     const day = Number.isFinite(dayRaw) ? dayRaw : fallback;
     const nightRaw = Number(this.params[nightKey]);
@@ -1296,7 +1345,7 @@ export class CandleFlamesEffectV2 {
   _resolveGlowParams(darkness = null, outdoor01 = null) {
     const t = clamp01(Number.isFinite(Number(darkness))
       ? Number(darkness)
-      : LightingDirector.get().masterDarkness);
+      : this._resolveMasterDarkness());
     const base = {
       t,
       warmth: clamp01(this._blendGlowDayNightParam('glowWarmth', 'glowNightWarmth', 1.0, t)),
@@ -1432,7 +1481,7 @@ export class CandleFlamesEffectV2 {
   }
 
   _computeGlowDayNightIntensityMul() {
-    const darkness = clamp01(LightingDirector.get().masterDarkness);
+    const darkness = this._resolveMasterDarkness();
     const dayFloor = 0.55;
     const day = Math.max(dayFloor, Math.max(0, Number(this.params.glowDayIntensityScale) || 0));
     const night = Math.max(day, Math.max(0, Number(this.params.glowNightIntensityScale) || 0));
@@ -1455,7 +1504,7 @@ export class CandleFlamesEffectV2 {
       lightMul = Number.isFinite(li) ? Math.max(0.25, li) : 2.0;
     }
 
-    const darkness = clamp01(LightingDirector.get().masterDarkness);
+    const darkness = this._resolveMasterDarkness();
     const nightBoost = Math.max(1, Number(this.params.glowDarknessNightBoost) || 1);
     const nightMul = 1.0 + darkness * (nightBoost - 1.0);
 
@@ -1478,7 +1527,7 @@ export class CandleFlamesEffectV2 {
     const legacy = Number(this.params.indoorNightBoost);
     const boost = Math.max(0, Number(this.params.glowIndoorNightBoost ?? legacy) || 0);
     if (boost <= 0) return 1.0;
-    const darkness = clamp01(LightingDirector.get().masterDarkness);
+    const darkness = this._resolveMasterDarkness();
     const indoor = 1.0 - this._snapGlowBalanceOutdoor(outdoor01);
     return 1.0 + boost * indoor * darkness;
   }
@@ -1487,7 +1536,7 @@ export class CandleFlamesEffectV2 {
   _computeGlowOutdoorNightBoost(outdoor01) {
     const boost = Math.max(0, Number(this.params.glowOutdoorNightBoost) || 0);
     if (boost <= 0) return 1.0;
-    const darkness = clamp01(LightingDirector.get().masterDarkness);
+    const darkness = this._resolveMasterDarkness();
     const outdoor = this._snapGlowBalanceOutdoor(outdoor01);
     return 1.0 + boost * outdoor * darkness;
   }
@@ -2310,20 +2359,38 @@ export class CandleFlamesEffectV2 {
     const points = [];
     for (const g of groups) {
       if (!g?.points?.length) continue;
-      const intensity = (g.emission && typeof g.emission.intensity === 'number') ? g.emission.intensity : 1.0;
-      for (let pointIndex = 0; pointIndex < g.points.length; pointIndex++) {
-        const p = g.points[pointIndex];
-        if (!p) continue;
-        if (typeof this._mapPointsManager.isGroupPointEnabled === 'function'
-          && !this._mapPointsManager.isGroupPointEnabled(g.id, pointIndex)) {
-          continue;
+      const floorCtx = this._resolveGroupFloorContext(g);
+      const renderLayer = this._resolveGroupRenderLayer(g);
+      const emissionShape = inferMapPointGroupEmissionShape(g);
+
+      if (emissionShape === 'point') {
+        for (let pointIndex = 0; pointIndex < g.points.length; pointIndex++) {
+          const p = g.points[pointIndex];
+          if (!p) continue;
+          if (typeof this._mapPointsManager.isGroupPointEnabled === 'function'
+            && !this._mapPointsManager.isGroupPointEnabled(g.id, pointIndex)) {
+            continue;
+          }
+          points.push({
+            x: p.x,
+            y: p.y,
+            intensity: (g.emission && typeof g.emission.intensity === 'number') ? g.emission.intensity : 1.0,
+            floorCtx,
+            renderLayer,
+          });
         }
+        continue;
+      }
+
+      const { triples } = buildMapPointGroupSpawnPool(g);
+      if (!triples) continue;
+      for (let i = 0; i < triples.length; i += 3) {
         points.push({
-          x: p.x,
-          y: p.y,
-          intensity,
-          floorCtx: this._resolveGroupFloorContext(g),
-          renderLayer: this._resolveGroupRenderLayer(g),
+          x: triples[i],
+          y: triples[i + 1],
+          intensity: triples[i + 2],
+          floorCtx,
+          renderLayer,
         });
       }
     }

@@ -19,6 +19,10 @@ import {
   resolveClusteringElevation,
 } from './map-point-wall-clustering.js';
 import { createMapPointMarkerGroup } from './map-point-marker-visual.js';
+import {
+  inferMapPointGroupEmissionShape,
+  isWorldPointInMapPointGroup,
+} from './map-point-emission-sampling.js';
 
 const log = createLogger('MapPointsManager');
 
@@ -859,62 +863,7 @@ export class MapPointsManager {
    * @private
    */
   _worldPointInGroup(worldX, worldY, group) {
-    const points = Array.isArray(group?.points) ? group.points : [];
-    if (points.length === 0) return false;
-
-    const type = group.type;
-    const radius = this._getMapPointGateRadius();
-    const radiusSq = radius * radius;
-
-    if (type === 'area' && points.length >= 3) {
-      let inside = false;
-      for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
-        const xi = Number(points[i]?.x);
-        const yi = Number(points[i]?.y);
-        const xj = Number(points[j]?.x);
-        const yj = Number(points[j]?.y);
-        if (!Number.isFinite(xi) || !Number.isFinite(yi) || !Number.isFinite(xj) || !Number.isFinite(yj)) continue;
-        const intersect = ((yi > worldY) !== (yj > worldY))
-          && (worldX < (xj - xi) * (worldY - yi) / (yj - yi) + xi);
-        if (intersect) inside = !inside;
-      }
-      return inside;
-    }
-
-    if ((type === 'line' || type === 'rope') && points.length >= 2) {
-      for (let i = 0; i < points.length - 1; i++) {
-        const ax = Number(points[i]?.x);
-        const ay = Number(points[i]?.y);
-        const bx = Number(points[i + 1]?.x);
-        const by = Number(points[i + 1]?.y);
-        if (!Number.isFinite(ax) || !Number.isFinite(ay) || !Number.isFinite(bx) || !Number.isFinite(by)) continue;
-        const dx = bx - ax;
-        const dy = by - ay;
-        const lenSq = dx * dx + dy * dy;
-        if (lenSq <= 1e-6) {
-          const ddx = worldX - ax;
-          const ddy = worldY - ay;
-          if (ddx * ddx + ddy * ddy <= radiusSq) return true;
-          continue;
-        }
-        const t = Math.max(0, Math.min(1, ((worldX - ax) * dx + (worldY - ay) * dy) / lenSq));
-        const px = ax + t * dx;
-        const py = ay + t * dy;
-        const distSq = (worldX - px) * (worldX - px) + (worldY - py) * (worldY - py);
-        if (distSq <= radiusSq) return true;
-      }
-      return false;
-    }
-
-    for (const p of points) {
-      const px = Number(p?.x);
-      const py = Number(p?.y);
-      if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
-      const dx = worldX - px;
-      const dy = worldY - py;
-      if (dx * dx + dy * dy <= radiusSq) return true;
-    }
-    return false;
+    return isWorldPointInMapPointGroup(worldX, worldY, group, this._getMapPointGateRadius());
   }
 
   /**
@@ -1053,7 +1002,8 @@ export class MapPointsManager {
     const result = [];
     for (const group of this.groups.values()) {
       if (!this._isGroupEffectSource(group) || group.effectTarget !== effectTarget) continue;
-      const isShape = group.type === 'line' || group.type === 'area' || group.type === 'rope';
+      const shape = inferMapPointGroupEmissionShape(group);
+      const isShape = shape === 'line' || shape === 'area';
       if (isShape) {
         if (this._isGroupClusterEnabled(group.id)) result.push(group);
       } else if (this._groupHasAnyEnabledPoint(group)) {
@@ -1061,6 +1011,18 @@ export class MapPointsManager {
       }
     }
     return result;
+  }
+
+  /**
+   * Get effect-source groups for particle emission, filtered by level context.
+   * Prefer this over getAreasForEffect / raw type checks in effects.
+   *
+   * @param {string} effectTarget
+   * @param {any} [context=null]
+   * @returns {MapPointGroup[]}
+   */
+  getEmissionGroupsForEffectForContext(effectTarget, context = null) {
+    return this.getGroupsByEffectForContext(effectTarget, context);
   }
 
   /**
@@ -1119,23 +1081,22 @@ export class MapPointsManager {
   getLinesForEffect(effectTarget) {
     const groups = this.getGroupsByEffect(effectTarget);
     const lines = [];
-    
+
     for (const group of groups) {
-      if (group.type !== 'line' || !group.points || group.points.length < 2) {
+      if (inferMapPointGroupEmissionShape(group) !== 'line' || !group.points || group.points.length < 2) {
         continue;
       }
-      
-      // Create line segments from consecutive points
+
       for (let i = 0; i < group.points.length - 1; i++) {
         lines.push({
           start: group.points[i],
           end: group.points[i + 1],
           groupId: group.id,
-          emission: group.emission
+          emission: group.emission,
         });
       }
     }
-    
+
     return lines;
   }
 
@@ -1184,20 +1145,20 @@ export class MapPointsManager {
   getAreasForEffect(effectTarget) {
     const groups = this.getGroupsByEffect(effectTarget);
     const areas = [];
-    
+
     for (const group of groups) {
-      if (group.type !== 'area' || !group.points || group.points.length < 3) {
+      if (inferMapPointGroupEmissionShape(group) !== 'area' || !group.points || group.points.length < 3) {
         continue;
       }
-      
+
       areas.push({
         groupId: group.id,
         points: group.points,
         emission: group.emission,
-        bounds: this._computeBounds(group.points)
+        bounds: this._computeBounds(group.points),
       });
     }
-    
+
     return areas;
   }
 
@@ -1212,7 +1173,7 @@ export class MapPointsManager {
     const areas = [];
 
     for (const group of groups) {
-      if (group.type !== 'area' || !group.points || group.points.length < 3) {
+      if (inferMapPointGroupEmissionShape(group) !== 'area' || !group.points || group.points.length < 3) {
         continue;
       }
 
@@ -1220,7 +1181,7 @@ export class MapPointsManager {
         groupId: group.id,
         points: group.points,
         emission: group.emission,
-        bounds: this._computeBounds(group.points)
+        bounds: this._computeBounds(group.points),
       });
     }
 

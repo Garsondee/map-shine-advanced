@@ -13,6 +13,12 @@ import {
   MAP_POINT_RENDER_LAYER_ABOVE,
   MAP_POINT_RENDER_LAYER_BELOW,
 } from '../scene/map-points-manager.js';
+import {
+  buildMapPointGroupSpawnPool,
+  inferMapPointGroupEmissionShape,
+  resolveMapPointGroupEmissionWeight,
+  triangulateMapPointPolygon,
+} from '../scene/map-point-emission-sampling.js';
 
 const log = createLogger('MapPointGroupInfo');
 
@@ -174,6 +180,14 @@ export function buildMapPointGroupInfoPayload(group, mapPointsManager) {
     ?? mapPointsManager._computeBounds?.(group.points)
     ?? null;
 
+  const emissionShape = inferMapPointGroupEmissionShape(group);
+  const spawnPool = buildMapPointGroupSpawnPool(group);
+  const spawnSiteCount = spawnPool.triples ? Math.floor(spawnPool.triples.length / 3) : 0;
+  const emissionWeight = resolveMapPointGroupEmissionWeight(group, spawnPool.triples);
+  const triangleCount = emissionShape === 'area' && group.points?.length
+    ? triangulateMapPointPolygon(group.points).length
+    : 0;
+
   /** @type {Record<string, unknown>} */
   const payload = {
     reportType: 'MapShine Map Point Group Info',
@@ -203,6 +217,13 @@ export function buildMapPointGroupInfoPayload(group, mapPointsManager) {
       pointCount: points.length,
       points,
       bounds,
+    },
+    emissionSampling: {
+      inferredShape: emissionShape,
+      authoredType: group.type,
+      spawnSiteCount,
+      emissionWeight,
+      triangleCount,
     },
     levelBinding: levelInfo,
     controlClusters,
@@ -234,6 +255,10 @@ export function formatMapPointGroupInfoReport(payload) {
     `Active effect source: ${payload.group?.isEffectSource}`,
     `Points: ${payload.group?.pointCount}`,
     `Emission intensity: ${payload.group?.emission?.intensity ?? '?'}`,
+    `Inferred emission shape: ${payload.emissionSampling?.inferredShape ?? '?'}`,
+    `Precomputed spawn sites: ${payload.emissionSampling?.spawnSiteCount ?? '?'}`,
+    `Emission triangles: ${payload.emissionSampling?.triangleCount ?? '?'}`,
+    `Emission weight: ${payload.emissionSampling?.emissionWeight ?? '?'}`,
     '',
     '--- Level binding ---',
     JSON.stringify(payload.levelBinding, null, 2),

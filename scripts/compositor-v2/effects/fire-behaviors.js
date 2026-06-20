@@ -24,6 +24,11 @@ import {
   sampleOutdoorsFromSnapshot,
   syncSharedOutdoorsMaskForFloor,
 } from './water-splash-behaviors.js';
+import {
+  buildMapPointGroupSpawnPool,
+  resolveMapPointGroupEmissionWeight,
+  sampleRandomWorldPointInMapPointGroup,
+} from '../../scene/map-point-emission-sampling.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // FixedCurlNoiseField — corrects three.quarks CurlNoiseField time integration
@@ -746,6 +751,96 @@ function lerpScalarStops(stops, t) {
   return a.v + (b.v - a.v) * f;
 }
 
+/**
+ * Shared fire particle setup after a world-space spawn site is chosen.
+ *
+ * @param {object} p
+ * @param {number} worldX
+ * @param {number} worldY
+ * @param {number} brightness
+ * @param {{ownerEffect: object, floorIndex: number, groundZ: number, floorElevation: number, mapPointAuthored?: boolean}} ctx
+ */
+function applyFireParticleWorldSpawn(p, worldX, worldY, brightness, ctx) {
+  const { ownerEffect, floorIndex, groundZ, floorElevation } = ctx;
+  const mapPointAuthored = ctx.mapPointAuthored === true;
+
+  p.position.x = worldX;
+  p.position.y = worldY;
+  p.position.z = groundZ + floorElevation;
+
+  const spawnSize = typeof p.size === 'number' ? p.size : 0;
+  const outdoorFactor = mapPointAuthored
+    ? sampleMapPointFireOutdoorAtWorld(worldX, worldY, ownerEffect, floorIndex)
+    : resolveFireOutdoorFootprintMin(
+      worldX,
+      worldY,
+      spawnSize,
+      ownerEffect,
+      floorIndex,
+      { tapCount: 5 },
+    );
+  if (mapPointAuthored) p._msMapPointAuthoredFire = true;
+  p._spawnOutdoorFactor = outdoorFactor;
+  p._msFloorIndex = floorIndex;
+  p._windSusceptibility = outdoorFactor;
+
+  const params = ownerEffect?.params;
+  p._indoorSmokeScale = computeIndoorSuppressionScale(params?.indoorSmokeSuppression, outdoorFactor);
+  p._indoorEmberScale = computeIndoorSuppressionScale(params?.indoorEmberSuppression, outdoorFactor);
+
+  const indoorTimeScale = Math.max(0.05, Math.min(1.0, params?.indoorTimeScale ?? 0.6));
+  p._msTimeScaleFactor = indoorTimeScale + (1.0 - indoorTimeScale) * outdoorFactor;
+
+  if (outdoorFactor <= 0.01 && typeof p.life === 'number') {
+    const indoorLifeScale = params?.indoorLifeScale ?? 0.2;
+    p.life *= indoorLifeScale;
+  }
+
+  let weather = {};
+  try {
+    weather = (weatherController && typeof weatherController.getCurrentState === 'function')
+      ? weatherController.getCurrentState()
+      : {};
+  } catch (_) {
+    weather = {};
+  }
+  let precip = weather?.precipitation ?? 0;
+  let wind = weather?.windSpeed ?? 0;
+  if (!Number.isFinite(precip)) precip = 0;
+  if (!Number.isFinite(wind)) wind = 0;
+
+  if (outdoorFactor > 0.01 && (precip > 0.05 || wind > 0.1)) {
+    const precipKill = params?.weatherPrecipKill ?? 0.8;
+    const windKill = params?.weatherWindKill ?? 0.4;
+    let spatialWind = wind;
+    try {
+      if (sceneWindField?.params?.enabled !== false) {
+        spatialWind *= sceneWindField.getSampleWorld(0, 0).spatial01;
+      }
+    } catch (_) {}
+    const weatherStress = 0.5 * (precip * precipKill + spatialWind * windKill) * outdoorFactor;
+    const survival = Math.max(0.1, 1.0 - weatherStress);
+    if (typeof p.life === 'number') p.life *= survival;
+    if (typeof p.size === 'number') p.size *= (0.6 + 0.4 * survival);
+  }
+
+  if (typeof p.life === 'number') p.life *= (0.3 + 0.7 * brightness);
+  if (typeof p.size === 'number') p.size *= (0.4 + 0.6 * brightness);
+  p._flameBrightness = brightness;
+
+  if (p.velocity) p.velocity.set(0, 0, 0);
+  zeroParticleVisual(p);
+
+  const tooBig = (val) => !Number.isFinite(val) || Math.abs(val) > 1e6;
+  if ((p.position && (tooBig(p.position.x) || tooBig(p.position.y) || tooBig(p.position.z))) ||
+      (typeof p.life === 'number' && tooBig(p.life)) ||
+      (typeof p.size === 'number' && tooBig(p.size))) {
+    if (typeof p.life === 'number') p.life = 0;
+    if (typeof p.size === 'number') p.size = 0;
+    if (p.color && typeof p.color.w === 'number') p.color.w = 0;
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // FireMaskShape — Emitter shape that spawns from precomputed _Fire mask pixels
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -816,90 +911,14 @@ export class FireMaskShape {
       return;
     }
 
-    // Map UV to world-space position. v=0 is image top, world Y grows upward,
-    // so we use (1-v) for the Y mapping.
     const worldX = this.offsetX + u * this.width;
     const worldY = this.offsetY + (1.0 - v) * this.height;
-    p.position.x = worldX;
-    p.position.y = worldY;
-    p.position.z = this.groundZ + this.floorElevation;
-
-    const spawnSize = typeof p.size === 'number' ? p.size : 0;
-    const outdoorFactor = resolveFireOutdoorFootprintMin(
-      worldX,
-      worldY,
-      spawnSize,
-      this.ownerEffect,
-      this.floorIndex,
-    );
-    p._spawnOutdoorFactor = outdoorFactor;
-    p._msFloorIndex = this.floorIndex;
-    p._windSusceptibility = outdoorFactor;
-
-    const params = this.ownerEffect?.params;
-
-    // Indoor smoke / ember density scales (re-read each frame in lifecycle behaviors too).
-    p._indoorSmokeScale = computeIndoorSuppressionScale(params?.indoorSmokeSuppression, outdoorFactor);
-    p._indoorEmberScale = computeIndoorSuppressionScale(params?.indoorEmberSuppression, outdoorFactor);
-
-    // Indoor time scaling.
-    const indoorTimeScale = Math.max(0.05, Math.min(1.0, params?.indoorTimeScale ?? 0.6));
-    p._msTimeScaleFactor = indoorTimeScale + (1.0 - indoorTimeScale) * outdoorFactor;
-
-    // Indoor life shortening.
-    if (outdoorFactor <= 0.01 && typeof p.life === 'number') {
-      const indoorLifeScale = params?.indoorLifeScale ?? 0.2;
-      p.life *= indoorLifeScale;
-    }
-
-    // Weather guttering: rain + wind kills exposed fire.
-    let weather = {};
-    try {
-      weather = (weatherController && typeof weatherController.getCurrentState === 'function')
-        ? weatherController.getCurrentState()
-        : {};
-    } catch (_) {
-      weather = {};
-    }
-    let precip = weather?.precipitation ?? 0;
-    let wind = weather?.windSpeed ?? 0;
-    if (!Number.isFinite(precip)) precip = 0;
-    if (!Number.isFinite(wind)) wind = 0;
-
-    if (outdoorFactor > 0.01 && (precip > 0.05 || wind > 0.1)) {
-      const precipKill = params?.weatherPrecipKill ?? 0.8;
-      const windKill = params?.weatherWindKill ?? 0.4;
-      let spatialWind = wind;
-      try {
-        if (sceneWindField?.params?.enabled !== false) {
-          spatialWind *= sceneWindField.getSampleWorld(0, 0).spatial01;
-        }
-      } catch (_) {}
-      const weatherStress = 0.5 * (precip * precipKill + spatialWind * windKill) * outdoorFactor;
-      const survival = Math.max(0.1, 1.0 - weatherStress);
-      if (typeof p.life === 'number') p.life *= survival;
-      if (typeof p.size === 'number') p.size *= (0.6 + 0.4 * survival);
-    }
-
-    // Brightness-based modifiers.
-    if (typeof p.life === 'number') p.life *= (0.3 + 0.7 * brightness);
-    if (typeof p.size === 'number') p.size *= (0.4 + 0.6 * brightness);
-    p._flameBrightness = brightness;
-
-    // Reset velocity.
-    if (p.velocity) p.velocity.set(0, 0, 0);
-
-    zeroParticleVisual(p);
-
-    // Final sanity check.
-    const tooBig = (val) => !Number.isFinite(val) || Math.abs(val) > 1e6;
-    if ((p.position && (tooBig(p.position.x) || tooBig(p.position.y) || tooBig(p.position.z))) ||
-        (typeof p.life === 'number' && tooBig(p.life)) ||
-        (typeof p.size === 'number' && tooBig(p.size))) {
-      if (typeof p.life === 'number') p.life = 0;
-      if (typeof p.size === 'number') p.size = 0;
-      if (p.color && typeof p.color.w === 'number') p.color.w = 0;
-    }
+    applyFireParticleWorldSpawn(p, worldX, worldY, brightness, {
+      ownerEffect: this.ownerEffect,
+      floorIndex: this.floorIndex,
+      groundZ: this.groundZ,
+      floorElevation: this.floorElevation,
+    });
   }
 
   update(system, delta) { /* static mask — no per-frame evolution */ }
@@ -942,43 +961,92 @@ export class FireWorldPointShape {
       return;
     }
 
-    p.position.x = worldX;
-    p.position.y = worldY;
-    p.position.z = this.groundZ + this.floorElevation;
-
-    const spawnSize = typeof p.size === 'number' ? p.size : 0;
-    const outdoorFactor = resolveFireOutdoorFootprintMin(
-      worldX,
-      worldY,
-      spawnSize,
-      this.ownerEffect,
-      this.floorIndex,
-    );
-    p._spawnOutdoorFactor = outdoorFactor;
-    p._msFloorIndex = this.floorIndex;
-    p._windSusceptibility = outdoorFactor;
-
-    const params = this.ownerEffect?.params;
-    p._indoorSmokeScale = computeIndoorSuppressionScale(params?.indoorSmokeSuppression, outdoorFactor);
-    p._indoorEmberScale = computeIndoorSuppressionScale(params?.indoorEmberSuppression, outdoorFactor);
-
-    const indoorTimeScale = Math.max(0.05, Math.min(1.0, params?.indoorTimeScale ?? 0.6));
-    p._msTimeScaleFactor = indoorTimeScale + (1.0 - indoorTimeScale) * outdoorFactor;
-
-    if (outdoorFactor <= 0.01 && typeof p.life === 'number') {
-      const indoorLifeScale = params?.indoorLifeScale ?? 0.2;
-      p.life *= indoorLifeScale;
-    }
-
-    if (typeof p.life === 'number') p.life *= (0.3 + 0.7 * brightness);
-    if (typeof p.size === 'number') p.size *= (0.4 + 0.6 * brightness);
-    p._flameBrightness = brightness;
-
-    if (p.velocity) p.velocity.set(0, 0, 0);
-    zeroParticleVisual(p);
+    applyFireParticleWorldSpawn(p, worldX, worldY, brightness, {
+      ownerEffect: this.ownerEffect,
+      floorIndex: this.floorIndex,
+      groundZ: this.groundZ,
+      floorElevation: this.floorElevation,
+      mapPointAuthored: true,
+    });
   }
 
   update() { /* static world points */ }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FireMapPointVolumeShape — random in-volume spawn for map-point area/line/point
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export class FireMapPointVolumeShape {
+  /**
+   * @param {{type?: string, points?: Array<{x?: number, y?: number}>, emission?: {intensity?: number}}} group
+   * @param {object} ownerEffect
+   * @param {number} [floorIndex=0]
+   * @param {number} [groundZ=1000]
+   * @param {number} [floorElevation=0]
+   * @param {{min?: number}} [spawnOptions]
+   */
+  constructor(group, ownerEffect, floorIndex = 0, groundZ = 1000, floorElevation = 0, spawnOptions = {}) {
+    this.group = group;
+    this.ownerEffect = ownerEffect;
+    this.floorIndex = Number.isFinite(Number(floorIndex)) ? Math.max(0, Math.floor(Number(floorIndex))) : 0;
+    this.groundZ = groundZ;
+    this.floorElevation = Number.isFinite(floorElevation) ? floorElevation : 0;
+    this.spawnOptions = spawnOptions;
+    this.type = 'fire_map_point_volume';
+  }
+
+  initialize(p) {
+    const sample = sampleRandomWorldPointInMapPointGroup(this.group, this.spawnOptions);
+    if (!sample) {
+      if (typeof p.life === 'number') p.life = 0;
+      if (p.color && typeof p.color.w === 'number') p.color.w = 0;
+      if (typeof p.size === 'number') p.size = 0;
+      return;
+    }
+
+    applyFireParticleWorldSpawn(p, sample.x, sample.y, sample.intensity, {
+      ownerEffect: this.ownerEffect,
+      floorIndex: this.floorIndex,
+      groundZ: this.groundZ,
+      floorElevation: this.floorElevation,
+      mapPointAuthored: true,
+    });
+  }
+
+  update() { /* volume is static; random site chosen per particle */ }
+}
+
+/**
+ * Shape-aware fire emitter for a map-point group.
+ * Area groups use a precomputed spawn pool; line/point groups use per-particle volume sampling.
+ *
+ * @param {{type?: string, points?: Array<{x?: number, y?: number}>, emission?: {intensity?: number}}} group
+ * @param {{ownerEffect: object, floorIndex?: number, groundZ?: number, floorElevation?: number, spawnOptions?: object, poolOptions?: object}} ctx
+ * @returns {{shape: FireWorldPointShape|FireMapPointVolumeShape, weight: number, poolTriples: Float32Array|null, emissionShape: 'point'|'line'|'area'}}
+ */
+export function resolveFireMapPointEmitter(group, ctx) {
+  const {
+    ownerEffect,
+    floorIndex = 0,
+    groundZ = 1000,
+    floorElevation = 0,
+    spawnOptions = {},
+    poolOptions = {},
+  } = ctx;
+
+  const mergedOptions = { min: 0.35, ...poolOptions, ...spawnOptions };
+  const pool = buildMapPointGroupSpawnPool(group, mergedOptions);
+  const weight = resolveMapPointGroupEmissionWeight(group, pool.triples, mergedOptions);
+
+  // Per-particle volume sampling gives true random interior spawn for areas
+  // (not uniform pick from a finite vertex/grid pool).
+  return {
+    shape: new FireMapPointVolumeShape(group, ownerEffect, floorIndex, groundZ, floorElevation, spawnOptions),
+    weight,
+    poolTriples: pool.triples,
+    emissionShape: pool.shape,
+  };
 }
 
 /**
@@ -2082,6 +2150,41 @@ export function resolveFireOutdoorFactor(worldX, worldY, ownerEffect, floorIndex
 }
 
 /**
+ * Map-point fire outdoor sample — matches CandleFlamesEffectV2 (_sampleGlowOutdoorAtWorld):
+ * authored _Outdoors at the spawn site without shelter-bias or footprint widening.
+ *
+ * @param {number} worldX
+ * @param {number} worldY
+ * @param {object|null|undefined} ownerEffect
+ * @param {number} [floorIndex=0]
+ * @returns {number}
+ */
+function sampleMapPointFireOutdoorAtWorld(worldX, worldY, ownerEffect, floorIndex = 0) {
+  if (!Number.isFinite(worldX) || !Number.isFinite(worldY)) return 1.0;
+  const sceneBounds = resolveFireSceneBounds(ownerEffect);
+  if (!sceneBounds || !(sceneBounds.sw > 0 && sceneBounds.sh > 0)) return 1.0;
+
+  const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Math.floor(Number(floorIndex))) : 0;
+  const frameToken = ownerEffect?._outdoorsMaskFrameToken ?? 0;
+  const levelContext = window.MapShine?.activeLevelContext ?? null;
+
+  try {
+    syncSharedOutdoorsMaskForFloor(fi, frameToken, levelContext);
+    const raw = sampleAuthoredOutdoorsAtWorld(
+      fi,
+      worldX,
+      worldY,
+      sceneBounds,
+      frameToken,
+      levelContext,
+    );
+    if (raw != null && Number.isFinite(raw)) return clamp01(raw);
+  } catch (_) {}
+
+  return 1.0;
+}
+
+/**
  * Footprint sample offsets — 5-tap (center + cardinals) for hot paths; 9-tap at spawn.
  * @param {number} particleSize
  * @param {number} [tapCount=9]
@@ -2286,7 +2389,9 @@ export function resolveFireParticleVisualMask(
   const currentOutdoor = Number.isFinite(currentOutdoorOverride)
     ? clamp01(currentOutdoorOverride)
     : readFireParticleOutdoorAtSize(particle, ownerEffect, system, footprintSize);
-  const zoneMask = computeFireZoneContainmentMask(spawnOutdoor, currentOutdoor);
+  const zoneMask = particle?._msMapPointAuthoredFire
+    ? 1.0
+    : computeFireZoneContainmentMask(spawnOutdoor, currentOutdoor);
   const indoorScale = indoorSuppression > 0
     ? computeIndoorSuppressionScale(indoorSuppression, currentOutdoor)
     : 1.0;
@@ -2366,15 +2471,18 @@ export function syncFireParticleOutdoorFootprint(
   const tapCount = opts.tapCount === 9 ? 9 : 5;
   const smoothRate = Number.isFinite(opts.smoothRate) ? opts.smoothRate : 0.32;
   const bounds = sceneBounds ?? resolveFireSceneBounds(ownerEffect);
+  const fi = readParticleFloorIndex(particle, system);
 
-  const footprint = resolveFireOutdoorFootprintMinFromSnapshot(
-    snap,
-    bounds,
-    wx,
-    wy,
-    particle.size,
-    { tapCount },
-  );
+  const footprint = particle._msMapPointAuthoredFire
+    ? sampleMapPointFireOutdoorAtWorld(wx, wy, ownerEffect, fi)
+    : resolveFireOutdoorFootprintMinFromSnapshot(
+      snap,
+      bounds,
+      wx,
+      wy,
+      particle.size,
+      { tapCount },
+    );
   particle._msCurrentOutdoorFootprint = footprint;
   particle._msOutdoorFrameToken = ownerEffect._outdoorsMaskFrameToken ?? 0;
 

@@ -49,7 +49,13 @@ import {
 } from '../../foundry/levels-scene-flags.js';
 import { resolveFloorIndexForElevation } from '../../ui/levels-editor/level-boundaries.js';
 import {
+  resolveMapPointGroupFloorIndices,
+  sampleMapPointGroupGlowSceneUvTriples,
+  worldTriplesToFireSceneUvTriples,
+} from '../../scene/map-point-emission-sampling.js';
+import {
   FireMaskShape,
+  resolveFireMapPointEmitter,
   filterFirePointsByMapPointGates,
   FixedCurlNoiseField,
   FireForcesBehavior,
@@ -681,6 +687,8 @@ export class FireEffectV2 {
     this._glowClustersByFloor = new Map();
     /** @type {Map<number, Float32Array>} floorIndex → merged fire-mask points for glow re-cluster */
     this._glowSourcePointsByFloor = new Map();
+    /** @type {Map<number, Float32Array>} floorIndex → map-point interior glow samples */
+    this._glowMapPointSourcePointsByFloor = new Map();
     /** @type {object|null} Scene bounds cached for glow wall clipping */
     this._glowSceneContext = null;
     /** @type {THREE.DataTexture|null} CPU-built heat-haze mask from glow clusters */
@@ -962,20 +970,22 @@ export class FireEffectV2 {
       );
       const pointRadiusPx = Math.max(48, avgSize * 0.85);
       for (const idx of this._activeFloors ?? []) {
-        const points = this._glowSourcePointsByFloor.get(idx);
-        if (!points || points.length < 3) continue;
-        const stride = Math.max(1, Math.ceil((points.length / 3) / 900));
-        for (let i = 0; i < points.length; i += 3 * stride) {
-          const u = points[i];
-          const v = points[i + 1];
-          const b = points[i + 2];
-          if (!Number.isFinite(u) || !Number.isFinite(v) || !Number.isFinite(b) || b <= 0) continue;
-          stamps.push({
-            u,
-            v,
-            strength: Math.max(0.12, Math.min(1.0, b)),
-            radiusPx: pointRadiusPx,
-          });
+        for (const store of [this._glowSourcePointsByFloor, this._glowMapPointSourcePointsByFloor]) {
+          const points = store.get(idx);
+          if (!points || points.length < 3) continue;
+          const stride = Math.max(1, Math.ceil((points.length / 3) / 900));
+          for (let i = 0; i < points.length; i += 3 * stride) {
+            const u = points[i];
+            const v = points[i + 1];
+            const b = points[i + 2];
+            if (!Number.isFinite(u) || !Number.isFinite(v) || !Number.isFinite(b) || b <= 0) continue;
+            stamps.push({
+              u,
+              v,
+              strength: Math.max(0.12, Math.min(1.0, b)),
+              radiusPx: pointRadiusPx,
+            });
+          }
         }
       }
     }
@@ -2211,32 +2221,34 @@ export class FireEffectV2 {
 
   /**
    * @param {number} floorIndex
-   * @param {number} sceneW
-   * @param {number} sceneH
-   * @param {number} sceneX
-   * @param {number} sceneY
-   * @returns {Float32Array|null}
+   * @returns {object[]}
    * @private
    */
+  _getFireMapPointGroupsForFloor(floorIndex) {
+    const manager = this._mapPointsManager;
+    if (!manager) return [];
+
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const levelContext = this._getLevelContextForFloorIndex(floorIndex);
+    const groups = (typeof manager.getGroupsByEffectForContext === 'function')
+      ? (manager.getGroupsByEffectForContext('fire', levelContext) || [])
+      : (manager.getGroupsByEffect('fire') || []);
+
+    return groups.filter((group) => (
+      resolveMapPointGroupFloorIndices(group, floors).includes(floorIndex)
+    ));
+  }
+
+  /**
+   * @param {object} group
+   * @param {object[]} floors
+   * @returns {number}
+   * @private
+   * @deprecated Use resolveMapPointGroupFloorIndices — kept for callers needing a single floor.
+   */
   _resolveMapPointGroupFloorIndex(group, floors) {
-    if (!Array.isArray(floors) || floors.length === 0) return 0;
-    const binding = group?.metadata?.levelBinding;
-    if (binding?.mode === 'locked') {
-      const b = Number(binding.bottom);
-      const t = Number(binding.top ?? binding.bottom);
-      if (Number.isFinite(b) && Number.isFinite(t)) {
-        const lo = Math.min(b, t);
-        const hi = Math.max(b, t);
-        for (let i = 0; i < floors.length; i++) {
-          const f = floors[i];
-          const min = Number(f?.elevationMin);
-          const max = Number(f?.elevationMax);
-          if (!Number.isFinite(min) || !Number.isFinite(max)) continue;
-          if (!(hi < min || lo > max)) return i;
-        }
-      }
-    }
-    return 0;
+    const indices = resolveMapPointGroupFloorIndices(group, floors);
+    return indices.length ? indices[0] : 0;
   }
 
   /**
@@ -2249,56 +2261,136 @@ export class FireEffectV2 {
     if (!manager || typeof manager.getGroupsByEffect !== 'function') return;
     const groups = manager.getGroupsByEffect('fire') || [];
     for (const group of groups) {
-      const fi = this._resolveMapPointGroupFloorIndex(group, floors);
-      if (!floorFireData.has(fi)) {
-        floorFireData.set(fi, { pointArrays: [] });
+      for (const fi of resolveMapPointGroupFloorIndices(group, floors)) {
+        if (!floorFireData.has(fi)) {
+          floorFireData.set(fi, { pointArrays: [] });
+        }
       }
     }
   }
 
   _buildMapPointFireScenePointsForFloor(floorIndex, sceneW, sceneH, sceneX, sceneY) {
-    const manager = this._mapPointsManager;
-    if (!manager || typeof manager.getGroupsByEffectForContext !== 'function') return null;
-
-    const levelContext = this._getLevelContextForFloorIndex(floorIndex);
-    const groups = manager.getGroupsByEffectForContext('fire', levelContext) || [];
-    const coords = [];
+    const groups = this._getFireMapPointGroupsForFloor(floorIndex);
+    const chunks = [];
 
     for (const group of groups) {
       if (!group?.points?.length) continue;
-      const intensityRaw = group?.emission?.intensity;
-      const intensity = Number.isFinite(Number(intensityRaw)) ? Math.max(0.35, Number(intensityRaw)) : 1.0;
-
-      if (group.type === 'area' && group.points.length >= 3) {
-        const bounds = manager.getAreaBounds?.(group.id) ?? manager._computeBounds?.(group.points);
-        if (!bounds) continue;
-        const samples = Math.max(6, Math.min(24, group.points.length * 2));
-        for (let i = 0; i < samples; i++) {
-          const t = i / samples;
-          const p0 = group.points[Math.floor(t * group.points.length) % group.points.length];
-          const p1 = group.points[(Math.floor(t * group.points.length) + 1) % group.points.length];
-          const wx = (Number(p0.x) + Number(p1.x)) * 0.5;
-          const wy = (Number(p0.y) + Number(p1.y)) * 0.5;
-          if (!Number.isFinite(wx) || !Number.isFinite(wy)) continue;
-          const u = (wx - sceneX) / sceneW;
-          const v = 1.0 - ((wy - sceneY) / sceneH);
-          coords.push(u, v, intensity);
-        }
-        continue;
-      }
-
-      for (const p of group.points) {
-        const wx = Number(p?.x);
-        const wy = Number(p?.y);
-        if (!Number.isFinite(wx) || !Number.isFinite(wy)) continue;
-        const u = (wx - sceneX) / sceneW;
-        const v = 1.0 - ((wy - sceneY) / sceneH);
-        coords.push(u, v, intensity);
-      }
+      const sampled = sampleMapPointGroupGlowSceneUvTriples(
+        group,
+        sceneW,
+        sceneH,
+        sceneX,
+        sceneY,
+        { min: 0.35, glowSampleCount: 96 },
+      );
+      if (sampled?.length) chunks.push(sampled);
     }
 
-    if (coords.length === 0) return null;
-    return new Float32Array(coords);
+    if (chunks.length === 0) return null;
+
+    let totalLength = 0;
+    for (const chunk of chunks) totalLength += chunk.length;
+    const merged = new Float32Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return merged;
+  }
+
+  /**
+   * Split a large area spawn pool into spatial buckets for distributed particle budget.
+   * @param {Float32Array} worldTriples
+   * @param {number} sceneW
+   * @param {number} sceneH
+   * @param {number} sceneX
+   * @param {number} sceneY
+   * @param {number} floorIndex
+   * @returns {Float32Array[]}
+   * @private
+   */
+  _bucketLargeMapPointAreaPool(worldTriples, sceneW, sceneH, sceneX, sceneY, floorIndex) {
+    const uvTriples = worldTriplesToFireSceneUvTriples(worldTriples, sceneW, sceneH, sceneX, sceneY);
+    const elevation = resolveClusteringElevation(floorIndex);
+    const { buckets } = clusterFireMaskPointsWithWalls(
+      uvTriples,
+      sceneW,
+      sceneH,
+      sceneX,
+      sceneY,
+      CONTROL_FIRE_BUCKET_SIZE_PX,
+      CONTROL_FIRE_MAX_BUCKETS,
+      elevation,
+    );
+
+    if (!buckets || buckets.size <= 1) return [worldTriples];
+
+    const out = [];
+    for (const entry of buckets.values()) {
+      const uvPts = entry?.points;
+      if (!uvPts || uvPts.length < 3) continue;
+      const worldChunk = [];
+      for (let i = 0; i < uvPts.length; i += 3) {
+        const u = uvPts[i];
+        const v = uvPts[i + 1];
+        const b = uvPts[i + 2];
+        worldChunk.push(
+          sceneX + u * sceneW,
+          sceneY + (1.0 - v) * sceneH,
+          b,
+        );
+      }
+      if (worldChunk.length >= 3) out.push(new Float32Array(worldChunk));
+    }
+    return out.length ? out : [worldTriples];
+  }
+
+  /**
+   * Add dedicated fire systems for map-point shape groups so interior spawn sites
+   * are not diluted by unrelated tile/_Fire mask buckets.
+   *
+   * @param {object} state
+   * @param {number} floorIndex
+   * @param {number} sceneW
+   * @param {number} sceneH
+   * @param {number} sceneX
+   * @param {number} sceneY
+   * @private
+   */
+  _appendMapPointGroupFireSystems(state, floorIndex, sceneW, sceneH, sceneX, sceneY) {
+    if (!state) return;
+
+    const groups = this._getFireMapPointGroupsForFloor(floorIndex);
+    if (!groups.length) return;
+
+    const groundZ = GROUND_Z + (Number(floorIndex) || 0);
+    const floorElevation = 0.55;
+    const spawnOptions = { min: 0.35 };
+
+    for (const group of groups) {
+      if (!group?.points?.length) continue;
+
+      const resolved = resolveFireMapPointEmitter(group, {
+        ownerEffect: this,
+        floorIndex,
+        groundZ,
+        floorElevation,
+        spawnOptions,
+      });
+
+      const fireSys = this._createFireSystem(resolved.shape, resolved.weight, floorIndex);
+      if (!fireSys) continue;
+      fireSys.userData.isMapPointVolume = true;
+      tagQuarkSystem(fireSys, 'fire', `mapPoint/${group.id}`);
+      state.systems.push(fireSys);
+    }
+
+    // Map-point-only floors have no _Fire mask points, so _buildFloorSystems leaves
+    // batchRenderer null — create one now so systems can register and render.
+    if (state.systems.length > 0 && !state.batchRenderer) {
+      state.batchRenderer = this._createBatchedRendererForFloor(floorIndex);
+    }
   }
 
   /**
@@ -2555,19 +2647,19 @@ export class FireEffectV2 {
         sceneX,
         sceneY,
       );
-      if (mapPointScenePts && mapPointScenePts.length >= 3) {
-        const combined = new Float32Array(merged.length + mapPointScenePts.length);
-        combined.set(merged, 0);
-        combined.set(mapPointScenePts, merged.length);
-        merged = combined;
-      }
 
       const state = this._buildFloorSystems(
         merged, sceneWidth, sceneHeight, sceneX, sceneY, floorIndex
       );
+      this._appendMapPointGroupFireSystems(state, floorIndex, sceneWidth, sceneHeight, sceneX, sceneY);
+
       this._floorStates.set(floorIndex, state);
-      this._glowSourcePointsByFloor.set(floorIndex, merged);
-      this._buildGlowClustersForFloor(floorIndex, merged, sceneWidth, sceneHeight, sceneX, sceneY);
+      this._glowSourcePointsByFloor.set(floorIndex, merged.length > 0 ? merged : new Float32Array(0));
+      this._glowMapPointSourcePointsByFloor.set(
+        floorIndex,
+        mapPointScenePts?.length >= 3 ? mapPointScenePts : new Float32Array(0),
+      );
+      this._rebuildFloorGlowClusters(floorIndex);
       totalSystems += state.systems.length + state.emberSystems.length + state.smokeSystems.length;
       if (state.batchRenderer) {
         const key = `${FIRE_BATCH_OVERLAY_PREFIX}${floorIndex}`;
@@ -3196,6 +3288,7 @@ export class FireEffectV2 {
     this._clearAllGlow();
     this._glowClustersByFloor.clear();
     this._glowSourcePointsByFloor.clear();
+    this._glowMapPointSourcePointsByFloor.clear();
     this._spatialControlBucketsByFloor.clear();
     this._invalidateHeatDistortionMask();
 
@@ -4057,17 +4150,24 @@ export class FireEffectV2 {
   }
 
   /**
-   * Cluster fire-mask pixels into glow pool metadata for one floor.
+   * Cluster fire-mask / map-point pixels into glow pool metadata.
+   * @param {number} floorIndex
+   * @param {Float32Array} points
+   * @param {number} sceneW
+   * @param {number} sceneH
+   * @param {number} sceneX
+   * @param {number} sceneY
+   * @param {{ mapPointAuthored?: boolean }} [options]
+   * @returns {object[]}
    * @private
    */
-  _buildGlowClustersForFloor(floorIndex, points, sceneW, sceneH, sceneX, sceneY) {
-    if (!points || points.length < 3) {
-      this._glowClustersByFloor.set(floorIndex, []);
-      return;
-    }
+  _computeGlowClustersFromPoints(floorIndex, points, sceneW, sceneH, sceneX, sceneY, options = {}) {
+    if (!points || points.length < 3) return [];
 
+    const mapPointAuthored = options.mapPointAuthored === true;
     const bucketSize = Math.max(128, Number(this.params.fireGlowBucketSizePx) || 512);
     const buckets = new Map();
+    const sceneBoundsForSample = this._glowSceneContext?.sceneBounds ?? buildEffectSceneBoundsFromCanvas();
 
     for (let i = 0; i < points.length; i += 3) {
       const u = points[i];
@@ -4081,12 +4181,11 @@ export class FireEffectV2 {
       const by = Math.floor(wy / bucketSize);
       const key = `${bx},${by}`;
 
-      const sceneBounds = this._glowSceneContext?.sceneBounds ?? buildEffectSceneBoundsFromCanvas();
       const rawOutdoor = sampleAuthoredOutdoorsAtWorld(
         floorIndex,
         wx,
         wy,
-        sceneBounds,
+        sceneBoundsForSample,
         this._outdoorsMaskFrameToken,
         window.MapShine?.activeLevelContext ?? null,
       );
@@ -4112,8 +4211,6 @@ export class FireEffectV2 {
     }
     list.sort((a, b) => (b.sumI - a.sumI) || (b.count - a.count));
 
-    const maxBuckets = Math.max(1, Number(this.params.fireGlowMaxBuckets) | 0);
-    const take = Math.min(list.length, maxBuckets);
     const ctx = this._glowSceneContext;
     const sceneWidth = ctx?.sceneWidth ?? sceneW;
     const sceneHeight = ctx?.sceneHeight ?? sceneH;
@@ -4124,8 +4221,7 @@ export class FireEffectV2 {
     const wallClipScale = Math.max(0.25, Number(this.params.fireGlowWallClipRadiusScale) || 1.0);
     const clusters = [];
 
-    for (let i = 0; i < take; i++) {
-      const b = list[i];
+    for (const b of list) {
       const cxWorld = b.sumX / b.count;
       const cyWorld = b.sumY / b.count;
       const sceneBounds = ctx?.sceneBounds ?? buildEffectSceneBoundsFromCanvas();
@@ -4160,6 +4256,7 @@ export class FireEffectV2 {
         intensity,
         phase,
         outdoor: outdoorForGlow,
+        mapPointAuthored,
         color: baseGlowColor,
         foundrySceneX,
         foundrySceneY,
@@ -4168,6 +4265,61 @@ export class FireEffectV2 {
       });
     }
 
+    return clusters;
+  }
+
+  /**
+   * Merge mask + map-point glow clusters for one floor (shared bucket budget).
+   * @param {number} floorIndex
+   * @private
+   */
+  _rebuildFloorGlowClusters(floorIndex) {
+    const ctx = this._glowSceneContext;
+    if (!ctx) {
+      this._glowClustersByFloor.set(floorIndex, []);
+      return;
+    }
+
+    const maskPts = this._glowSourcePointsByFloor.get(floorIndex);
+    const mpPts = this._glowMapPointSourcePointsByFloor.get(floorIndex);
+
+    let clusters = [];
+    if (maskPts?.length >= 3) {
+      clusters = clusters.concat(this._computeGlowClustersFromPoints(
+        floorIndex,
+        maskPts,
+        ctx.sceneWidth,
+        ctx.sceneHeight,
+        ctx.sceneX,
+        ctx.sceneY,
+      ));
+    }
+    if (mpPts?.length >= 3) {
+      clusters = clusters.concat(this._computeGlowClustersFromPoints(
+        floorIndex,
+        mpPts,
+        ctx.sceneWidth,
+        ctx.sceneHeight,
+        ctx.sceneX,
+        ctx.sceneY,
+        { mapPointAuthored: true },
+      ));
+    }
+
+    clusters.sort((a, b) => (b.intensity - a.intensity) || (b.radiusPx - a.radiusPx));
+    const maxBuckets = Math.max(1, Number(this.params.fireGlowMaxBuckets) | 0);
+    this._glowClustersByFloor.set(floorIndex, clusters.slice(0, maxBuckets));
+    this._invalidateHeatDistortionMask();
+  }
+
+  /**
+   * Cluster fire-mask pixels into glow pool metadata for one floor.
+   * @private
+   */
+  _buildGlowClustersForFloor(floorIndex, points, sceneW, sceneH, sceneX, sceneY, options = {}) {
+    const clusters = this._computeGlowClustersFromPoints(
+      floorIndex, points, sceneW, sceneH, sceneX, sceneY, options,
+    );
     this._glowClustersByFloor.set(floorIndex, clusters);
     this._invalidateHeatDistortionMask();
   }
@@ -4175,15 +4327,12 @@ export class FireEffectV2 {
   _reclusterGlowFromStoredPoints() {
     const ctx = this._glowSceneContext;
     if (!ctx) return;
-    for (const [floorIndex, points] of this._glowSourcePointsByFloor) {
-      this._buildGlowClustersForFloor(
-        floorIndex,
-        points,
-        ctx.sceneWidth,
-        ctx.sceneHeight,
-        ctx.sceneX,
-        ctx.sceneY
-      );
+    const floorIndices = new Set([
+      ...this._glowSourcePointsByFloor.keys(),
+      ...this._glowMapPointSourcePointsByFloor.keys(),
+    ]);
+    for (const floorIndex of floorIndices) {
+      this._rebuildFloorGlowClusters(floorIndex);
     }
   }
 
@@ -4329,11 +4478,10 @@ export class FireEffectV2 {
               const wp = Coordinates.toWorld(foundryPoly[i], foundryPoly[i + 1]);
               worldPoints.push(wp.x, wp.y);
             }
-          } else if (this.params.fireGlowWallClipEnabled) {
-            if (outdoor < 0.45) {
-              continue;
-            }
-            // Outdoor campfire: radial pool when wall clip fails in open areas.
+          } else if (this.params.fireGlowWallClipEnabled && !c.mapPointAuthored && outdoor < 0.45) {
+            // Tile-mask campfires only — map-point volumes keep a radial pool indoors
+            // (matches CandleFlames: do not skip indoor clusters).
+            continue;
           }
 
           const centerWorld = clipCenters.length > 1

@@ -40,6 +40,15 @@ export function registerUISettings() {
     default: {}
   });
 
+  game.settings.register('map-shine-advanced', 'streaming-minimap-enabled', {
+    name: 'Streaming Minimap',
+    hint: 'Show the tile streaming debug minimap overlay (toggle via Quick Actions).',
+    scope: 'client',
+    config: false,
+    type: Boolean,
+    default: false,
+  });
+
   game.settings.register('map-shine-advanced', 'rope-default-textures', {
     name: 'Rope Default Textures',
     scope: 'world',

@@ -31,8 +31,29 @@ import {
 
 const log = createLogger('StreamingMinimap');
 
+const STREAMING_MINIMAP_SETTING = 'streaming-minimap-enabled';
+
 /** @type {StreamingMinimap|null} */
 let _instance = null;
+
+/** @type {boolean} */
+let _initComplete = false;
+
+function readStreamingMinimapSetting(fallback = false) {
+  try {
+    if (game?.settings) {
+      return game.settings.get('map-shine-advanced', STREAMING_MINIMAP_SETTING) === true;
+    }
+  } catch (_) {}
+  return !!fallback;
+}
+
+async function persistStreamingMinimapSetting(enabled) {
+  if (!_initComplete) return;
+  try {
+    await game.settings.set('map-shine-advanced', STREAMING_MINIMAP_SETTING, !!enabled);
+  } catch (_) {}
+}
 
 /** Minimum ms between full report rebuilds during live update. */
 const REPORT_REFRESH_MS = 1000;
@@ -201,6 +222,7 @@ export class StreamingMinimap {
     } else {
       this._hide();
     }
+    void persistStreamingMinimapSetting(this._enabled);
   }
 
   /** @returns {boolean} */
@@ -1172,10 +1194,11 @@ export function getStreamingMinimap() {
   return _instance;
 }
 
-/** @param {boolean} [defaultEnabled=true] */
-export function initStreamingMinimap(defaultEnabled = true) {
+/** @param {boolean} [defaultEnabled=false] */
+export function initStreamingMinimap(defaultEnabled = false) {
   const mm = getStreamingMinimap();
-  mm.setEnabled(defaultEnabled);
+  mm.setEnabled(readStreamingMinimapSetting(defaultEnabled));
+  _initComplete = true;
   if (typeof window !== 'undefined') {
     window.MapShine = window.MapShine || {};
     window.MapShine.streamingMinimap = mm;

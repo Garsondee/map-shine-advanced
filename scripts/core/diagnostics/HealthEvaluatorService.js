@@ -1551,6 +1551,9 @@ export class HealthEvaluatorService {
               return { pass: true, message: 'Batch renderer present' };
             }
             if (nSys === 0) {
+              if (instance._isFireViewStreamingEnabled?.() && (st.bucketRegistry?.length ?? 0) > 0) {
+                return { pass: true, skipped: true, message: 'View streaming: off-screen buckets culled' };
+              }
               return { pass: true, skipped: true, message: 'No fire on this floor' };
             }
             return { pass: false, message: 'Fire batch renderer missing' };

@@ -7,50 +7,17 @@
 
 import { createLogger } from '../core/log.js';
 import { readTileLevelsFlags, tileHasLevelsRange, hasV14NativeLevels, readWallHeightFlags } from '../foundry/levels-scene-flags.js';
+import {
+  getEdgeDirections,
+  getEdgeSenseTypes,
+  readWallDocScalar,
+  readWallEdgeDirection,
+  readWallSenseRestriction,
+  wallDocDoorIsOpenForVision,
+} from '../foundry/wall-document-api.js';
 import { tileDocRestrictsLight } from '../scene/tile-manager.js';
 
 const log = createLogger('VisionPolygonComputer');
-
-/**
- * True when a wall is a door that is open for LOS purposes.
- * Coerces `ds` — some Foundry / sync payloads use string door states.
- * @param {object|null|undefined} doc
- * @returns {boolean}
- */
-function wallDocDoorIsOpenForVision(doc) {
-  const open = (typeof CONST !== 'undefined' && CONST.WALL_DOOR_STATES)
-    ? CONST.WALL_DOOR_STATES.OPEN
-    : 1;
-  return Number(doc?.door) > 0 && Number(doc?.ds) === open;
-}
-
-/** @returns {Readonly<{BOTH:number,LEFT:number,RIGHT:number}>} */
-function wallEdgeDirections() {
-  const edge = CONST?.EDGE_DIRECTIONS;
-  const legacy = CONST?.WALL_DIRECTIONS;
-  return {
-    BOTH: edge?.BOTH ?? legacy?.BOTH ?? 0,
-    LEFT: edge?.LEFT ?? legacy?.LEFT ?? 1,
-    RIGHT: edge?.RIGHT ?? legacy?.RIGHT ?? 2,
-  };
-}
-
-/**
- * Foundry one-way wall direction from document / edge data.
- * @param {object|null|undefined} wall
- * @param {object|null|undefined} doc
- * @returns {number}
- */
-function readWallEdgeDirection(wall, doc) {
-  const { BOTH, LEFT, RIGHT } = wallEdgeDirections();
-  let raw = doc?.dir;
-  if (raw == null && wall) {
-    raw = wall.edge?.direction ?? wall.edge?.dir;
-  }
-  const n = Number(raw);
-  if (n === LEFT || n === RIGHT) return n;
-  return BOTH;
-}
 
 /**
  * True when a one-way wall blocks the viewer at `center` (Foundry ClockwiseSweep inclusion).
@@ -61,7 +28,7 @@ function readWallEdgeDirection(wall, doc) {
  * @returns {boolean}
  */
 function wallEdgeBlocksViewer(dir, a, b, center) {
-  const { BOTH, LEFT, RIGHT } = wallEdgeDirections();
+  const { BOTH, LEFT, RIGHT } = getEdgeDirections();
   if (dir === BOTH) return true;
   const orient = (a.y - center.y) * (b.x - center.x) - (a.x - center.x) * (b.y - center.y);
   if (Math.abs(orient) < 1e-9) return false;
@@ -248,7 +215,7 @@ export class VisionPolygonComputer {
       if (!doc) continue;
 
       if (!blockGeometry) {
-        if (Number(doc.light ?? doc.sight ?? 0) === 0) continue;
+        if (readWallDocScalar(doc, 'light') === 0 && readWallDocScalar(doc, 'sight') === 0) continue;
       }
       if (wallDocDoorIsOpenForVision(doc)) continue;
 
@@ -307,9 +274,9 @@ export class VisionPolygonComputer {
       const doc = wall.document;
       if (!doc) return false;
       
-      // CONST.WALL_SENSE_TYPES: 0=None, 10=Limited, 20=Normal
+      // Edge sense: 0=None, 10=Limited, 20=Normal
       // Skip walls that don't block sight at all
-      if (doc.sight === 0) return false;
+      if (readWallSenseRestriction(doc, 'sight') === 0) return false;
       
       // Skip open doors.
       if (wallDocDoorIsOpenForVision(doc)) return false;
@@ -331,8 +298,8 @@ export class VisionPolygonComputer {
       const doc = wall.document;
       if (!doc) return false;
 
-      // CONST.WALL_SENSE_TYPES: 0=None, 10=Limited, 20=Normal
-      if (doc.light === 0) return false;
+      // Edge sense: 0=None, 10=Limited, 20=Normal
+      if (readWallSenseRestriction(doc, 'light') === 0) return false;
 
       // Skip open doors.
       if (wallDocDoorIsOpenForVision(doc)) return false;
@@ -360,7 +327,7 @@ export class VisionPolygonComputer {
     const segments = outSegments ?? [];
     let writeIndex = segments.length;
     const radiusSq = radius * radius;
-    const { BOTH: WALL_DIRECTION_BOTH } = wallEdgeDirections();
+    const { BOTH: WALL_DIRECTION_BOTH } = getEdgeDirections();
     const hasElevation = (elevation !== undefined);
 
     // MS-LVL-035: Pre-collect bounds of tiles with allWallBlockSight=true.
@@ -399,7 +366,7 @@ export class VisionPolygonComputer {
       const doc = wall?.document;
       if (!doc) continue;
       const wid = String(doc?.id ?? '');
-      if (wid && Number(doc.door ?? 0) > 0 && skipDoorWallIds?.has(wid)) continue;
+      if (wid && readWallDocScalar(doc, 'door') > 0 && skipDoorWallIds?.has(wid)) continue;
 
       // Inline filtering to avoid allocating a filtered walls array.
       // blockGeometry: every placed wall segment blocks (windows, proximity walls, etc.).
@@ -407,9 +374,9 @@ export class VisionPolygonComputer {
       // tile, skip the sight=0 check and force it to block.
       if (!blockGeometry) {
         if (sense === 'light') {
-          if (doc.light === 0) continue;
+          if (readWallSenseRestriction(doc, 'light') === 0) continue;
         } else {
-          if (doc.sight === 0) {
+          if (readWallSenseRestriction(doc, 'sight') === 0) {
             // Check if this wall is overridden by allWallBlockSight tiles
             if (allBlockTileBounds) {
               const c = doc.c;
@@ -524,7 +491,7 @@ export class VisionPolygonComputer {
     const pad = Math.max(0, Number(padPx) || 0);
     if (pad <= 0 || !segments?.length) return;
 
-    const { BOTH: WALL_DIRECTION_BOTH } = wallEdgeDirections();
+    const { BOTH: WALL_DIRECTION_BOTH } = getEdgeDirections();
     const sourceCount = segments.length;
     let writeIndex = 0;
 
@@ -815,11 +782,11 @@ export class VisionPolygonComputer {
    * @private
    */
   _wallBlocksSenseWithThreshold(doc, sense, source, elevation) {
-    const value = Number(sense === 'light' ? doc?.light : doc?.sight);
+    const value = readWallSenseRestriction(doc, sense);
     if (!Number.isFinite(value) || value <= 0) return false;
 
     // Normal walls are unconditional blockers after existing door/dir/elevation checks.
-    const normal = Number(CONST?.WALL_SENSE_TYPES?.NORMAL ?? 20);
+    const normal = Number(getEdgeSenseTypes().NORMAL ?? 20);
     if (value === normal) return true;
 
     const c = doc?.c;

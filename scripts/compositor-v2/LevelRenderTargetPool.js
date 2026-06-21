@@ -24,6 +24,8 @@ export class LevelRenderTargetPool {
     /** @type {number|null} THREE texture type (HalfFloatType or UnsignedByteType) */
     this._rtType = null;
     this._initialized = false;
+    /** @type {import('three').Color|null} Reused by _clearTargetsToBlack (avoids per-call GC). */
+    this._clearColorScratch = null;
   }
 
   /**
@@ -97,7 +99,7 @@ export class LevelRenderTargetPool {
       ? renderer.getScissorTest()
       : null;
     const prevColor = (THREE && typeof renderer.getClearColor === 'function')
-      ? renderer.getClearColor(new THREE.Color())
+      ? renderer.getClearColor(this._clearColorScratch ?? (this._clearColorScratch = new THREE.Color()))
       : null;
     const prevAlpha = (typeof renderer.getClearAlpha === 'function')
       ? renderer.getClearAlpha()

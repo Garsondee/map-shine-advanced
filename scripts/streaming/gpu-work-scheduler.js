@@ -44,6 +44,14 @@ const MIN_FRAME_OPS = 1;
 const THROTTLE_SCALE = Object.freeze([1.0, 0.6, 0.35, 0.2]);
 
 /**
+ * Extra credit scale applied while the user is actively panning/zooming. Large
+ * single-frame uploads are the most common pan stutter source, so we spread the
+ * same work over more frames (coverage still flows, just in smaller bites) to
+ * keep frame pacing even. Full-detail uploads resume the moment motion stops.
+ */
+const NAVIGATION_CREDIT_SCALE = 0.5;
+
+/**
  * @typedef {object} GpuWorkItem
  * @property {string} id Stable id used to dedupe queued work (e.g. a cell key).
  * @property {number} priority One of GPU_WORK_PRIORITY.
@@ -226,15 +234,28 @@ export class GpuWorkScheduler {
     this._flushOnce = true;
   }
 
+  /**
+   * @returns {number} Soft credit scale while the camera is panning/zooming.
+   * Reads the authoritative per-frame navigation flag published by the render
+   * loop / FloorCompositor (no extra dependency / import cycle).
+   * @private
+   */
+  _navigationScale() {
+    try {
+      if (window.MapShine?.__v2NavigationLiteUpdates === true) return NAVIGATION_CREDIT_SCALE;
+    } catch (_) {}
+    return 1.0;
+  }
+
   /** @returns {number} @private */
   _frameCreditMb() {
-    const scale = THROTTLE_SCALE[this._throttleLevel] ?? 1.0;
+    const scale = (THROTTLE_SCALE[this._throttleLevel] ?? 1.0) * this._navigationScale();
     return Math.max(MIN_FRAME_CREDIT_MB, Math.round(this.getBaseFrameCreditMb() * scale));
   }
 
   /** @returns {number} @private */
   _frameOps() {
-    const scale = THROTTLE_SCALE[this._throttleLevel] ?? 1.0;
+    const scale = (THROTTLE_SCALE[this._throttleLevel] ?? 1.0) * this._navigationScale();
     return Math.max(MIN_FRAME_OPS, Math.round(BASE_FRAME_OPS * scale));
   }
 

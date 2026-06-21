@@ -10,6 +10,7 @@ import { tagQuarkSystem } from '../../core/quark-diagnostics.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
 import Coordinates from '../../utils/coordinates.js';
 import { readWallHeightFlags } from '../../foundry/levels-scene-flags.js';
+import { getEdgeSenseTypes, readWallSenseRestriction } from '../../foundry/wall-document-api.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { 
   ParticleSystem as QuarksParticleSystem,
@@ -2578,9 +2579,10 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       // Flashlight should follow optical transparency behavior: proximity/distance
       // walls are treated as pass-through for beam clipping.
       if (options?.flashlightOpticalPassThrough === true && (type === 'sight' || type === 'light')) {
-        const senseValue = Number(type === 'light' ? wallDoc?.light : wallDoc?.sight);
-        const proximity = Number(CONST?.WALL_SENSE_TYPES?.PROXIMITY ?? 30);
-        const distance = Number(CONST?.WALL_SENSE_TYPES?.DISTANCE ?? 40);
+        const senseValue = readWallSenseRestriction(wallDoc, type === 'light' ? 'light' : 'sight');
+        const senseTypes = getEdgeSenseTypes();
+        const proximity = Number(senseTypes.PROXIMITY ?? 30);
+        const distance = Number(senseTypes.DISTANCE ?? 40);
         if (senseValue === proximity || senseValue === distance) continue;
       }
 
@@ -4545,24 +4547,44 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
    * lights (world px, radii px). Call in the same frame after {@link #_updateDynamicLightSources}
    * (FloorCompositor runs `specular.render` after all effect updates).
    *
+   * Return value is reused scratch storage — read-only in the same frame; do not retain.
+   *
    * @returns {Array<{x:number,y:number,z:number,r:number,g:number,b:number,radius:number,brightRadiusPx:number,attenuation:number}>}
    */
   getSpecularAnalyticLightSnapshots() {
     this._bindPerfRecorder();
     const _perfToken = this._beginPerfSpan('specularSnapshots', 'update', { cpuOnly: true });
-    const a = this._threeLightSourceToSpecularSnapshot(this._torchLightSource);
-    const b = this._threeLightSourceToSpecularSnapshot(this._flashlightLightSource);
-    const result = [...(a ? [a] : []), ...(b ? [b] : [])];
+    const result = this._specularSnapScratch ?? (this._specularSnapScratch = []);
+    result.length = 0;
+    const slotA = this._specularSnapSlotA ?? (this._specularSnapSlotA = this._createSpecularSnapSlot());
+    const slotB = this._specularSnapSlotB ?? (this._specularSnapSlotB = this._createSpecularSnapSlot());
+    const a = this._threeLightSourceToSpecularSnapshot(this._torchLightSource, slotA);
+    const b = this._threeLightSourceToSpecularSnapshot(this._flashlightLightSource, slotB);
+    if (a) result.push(a);
+    if (b) result.push(b);
     this._endPerfSpan(_perfToken);
     return result;
   }
 
   /**
    * @private
-   * @param {import('../../effects/ThreeLightSource.js').ThreeLightSource|null|undefined} src
-   * @returns {{x:number,y:number,z:number,r:number,g:number,b:number,radius:number,brightRadiusPx:number,attenuation:number}|null}
+   * @returns {{x:number,y:number,z:number,r:number,g:number,b:number,radius:number,brightRadiusPx:number,attenuation:number}}
    */
-  _threeLightSourceToSpecularSnapshot(src) {
+  _createSpecularSnapSlot() {
+    return {
+      x: 0, y: 0, z: 0,
+      r: 0, g: 0, b: 0,
+      radius: 0, brightRadiusPx: 0, attenuation: 0,
+    };
+  }
+
+  /**
+   * @private
+   * @param {import('../../effects/ThreeLightSource.js').ThreeLightSource|null|undefined} src
+   * @param {{x:number,y:number,z:number,r:number,g:number,b:number,radius:number,brightRadiusPx:number,attenuation:number}} out
+   * @returns {typeof out|null}
+   */
+  _threeLightSourceToSpecularSnapshot(src, out) {
     try {
       if (!src?.mesh || src.mesh.visible !== true || !src.mesh.parent) return null;
       const uniforms = src.material?.uniforms;
@@ -4606,15 +4628,16 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
       const gain = Math.max(0.15, Math.min(4.0, Number(uniforms.uOutputGain?.value) || 1.0));
       const scale = intensity * br * gain;
 
-      return {
-        x, y, z,
-        r: c.r * scale,
-        g: c.g * scale,
-        b: c.b * scale,
-        radius: rPx,
-        brightRadiusPx: bPx,
-        attenuation,
-      };
+      out.x = x;
+      out.y = y;
+      out.z = z;
+      out.r = c.r * scale;
+      out.g = c.g * scale;
+      out.b = c.b * scale;
+      out.radius = rPx;
+      out.brightRadiusPx = bPx;
+      out.attenuation = attenuation;
+      return out;
     } catch (_) {
       return null;
     }

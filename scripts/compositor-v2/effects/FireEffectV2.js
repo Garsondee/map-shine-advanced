@@ -31,7 +31,19 @@
  */
 
 import { createLogger } from '../../core/log.js';
-import { getVisibleSceneUvRect, getVisibleWorldRect } from '../../streaming/view-projection-service.js';
+import { getVisibleSceneUvRect } from '../../streaming/view-projection-service.js';
+import {
+  buildFireMinimapEntries,
+  fireBucketWorldBounds,
+  glowCentroidBounds,
+  isFireBucketInView,
+  resolveFireStreamingViewRect,
+} from '../../streaming/fire-streaming-bridge.js';
+import {
+  detailTierParticleScale,
+  getStreamingDetailTier,
+  getStreamingEffectGateState,
+} from '../../streaming/streaming-detail-api.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
 import { probeMaskFile } from '../../assets/loader.js';
@@ -219,8 +231,12 @@ const REBUILD_PARAM_KEYS = [
   'timeScale',
   'fireMaxSpatialBuckets', 'fireMaxParticles', 'fireEmberMaxParticles', 'fireSmokeMaxParticles',
   'fireMaxSystemsPerFloor', 'fireOutdoorSplitMaxBuckets',
+  'fireViewStreaming',
   ...FIRE_MASK_PICKUP_PARAM_KEYS,
 ];
+
+/** Max fire buckets materialized per frame when view streaming is on. */
+const FIRE_STREAM_CREATE_BUDGET = 4;
 const REBUILD_PARAM_SET = new Set(REBUILD_PARAM_KEYS);
 
 // Procedural flame flipbook — 4×8 atlas: rows = fluid shape archetypes, cols = anim frames.
@@ -729,6 +745,10 @@ export class FireEffectV2 {
     this._renderFloorSliceStrict = false;
     /** @type {number} Highest floor index visible for stacked particle/glow visibility. */
     this._maxVisibleFloorIndex = 0;
+    /** @type {import('../../streaming/streaming-detail-api.js').StreamingDetailTier} */
+    this._lastDetailTier = 'full';
+    /** @type {number} Cached particle scale from streaming detail tier. */
+    this._detailTierParticleScale = 1;
 
     /**
      * Per-tile / per-background coal-bed shader overlays.
@@ -755,6 +775,7 @@ export class FireEffectV2 {
       ...COAL_BED_DEFAULT_PARAMS,
       coalBedAnimSpeed: 1,
       enabled: true,
+      fireViewStreaming: true,
       globalFireRate: 2.6,
       fireHeight: 600,
       fireSize: 18.0,
@@ -1320,6 +1341,7 @@ export class FireEffectV2 {
             'fireMaxSpatialBuckets',
             'fireMaxSystemsPerFloor',
             'fireOutdoorSplitMaxBuckets',
+            'fireViewStreaming',
             'fireMaxParticles',
             'fireEmberMaxParticles',
             'fireSmokeMaxParticles',
@@ -1852,6 +1874,12 @@ export class FireEffectV2 {
           default: FIRE_DEFAULT_OUTDOOR_SPLIT_MAX_BUCKETS,
           tooltip: 'Indoor/outdoor ember+smoke split only applies when spatial bucket count is at or below this value.',
         },
+        fireViewStreaming: {
+          type: 'checkbox',
+          label: 'View Streaming (Cull Off-Screen)',
+          default: true,
+          tooltip: 'Only create and simulate fire clusters inside the camera view. Off-screen buckets are torn down to save CPU.',
+        },
         fireMaxParticles: {
           type: 'slider',
           label: 'Max Flame Particles / Bucket',
@@ -2379,17 +2407,58 @@ export class FireEffectV2 {
         spawnOptions,
       });
 
-      const fireSys = this._createFireSystem(resolved.shape, resolved.weight, floorIndex);
-      if (!fireSys) continue;
-      fireSys.userData.isMapPointVolume = true;
-      tagQuarkSystem(fireSys, 'fire', `mapPoint/${group.id}`);
-      state.systems.push(fireSys);
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const pt of group.points) {
+        if (!pt) continue;
+        const wx = Number(pt.x);
+        const wy = Number(pt.y);
+        if (!Number.isFinite(wx) || !Number.isFinite(wy)) continue;
+        minX = Math.min(minX, wx);
+        minY = Math.min(minY, wy);
+        maxX = Math.max(maxX, wx);
+        maxY = Math.max(maxY, wy);
+      }
+      const bounds = Number.isFinite(minX)
+        ? {
+          minX: minX - 128,
+          minY: minY - 128,
+          maxX: maxX + 128,
+          maxY: maxY + 128,
+        }
+        : glowCentroidBounds(0, 0, 128);
+
+      /** @type {object} */
+      const registryEntry = {
+        bucketKey: `mp:${group.id}`,
+        bounds,
+        memberCellKeys: [],
+        bucketSizePx: 256,
+        bucketIndex: state.bucketRegistry?.length ?? 0,
+        bucketPoints: null,
+        mapPointShape: resolved.shape,
+        weight: resolved.weight,
+        outdoorPoints: null,
+        indoorPoints: null,
+        active: false,
+        systems: null,
+        isMapPoint: true,
+      };
+      state.bucketRegistry = state.bucketRegistry ?? [];
+      state.bucketRegistry.push(registryEntry);
     }
 
-    // Map-point-only floors have no _Fire mask points, so _buildFloorSystems leaves
-    // batchRenderer null — create one now so systems can register and render.
-    if (state.systems.length > 0 && !state.batchRenderer) {
+    if (state.bucketRegistry?.length > 0 && !state.batchRenderer) {
       state.batchRenderer = this._createBatchedRendererForFloor(floorIndex);
+    }
+
+    if (!this._isFireViewStreamingEnabled()) {
+      for (const entry of state.bucketRegistry ?? []) {
+        if (!entry.isMapPoint) continue;
+        this._activateFireBucket(floorIndex, state, entry, { attachToBatch: false });
+      }
     }
   }
 
@@ -2660,7 +2729,8 @@ export class FireEffectV2 {
         mapPointScenePts?.length >= 3 ? mapPointScenePts : new Float32Array(0),
       );
       this._rebuildFloorGlowClusters(floorIndex);
-      totalSystems += state.systems.length + state.emberSystems.length + state.smokeSystems.length;
+      totalSystems += state.bucketRegistry?.length
+        ?? (state.systems.length + state.emberSystems.length + state.smokeSystems.length);
       if (state.batchRenderer) {
         const key = `${FIRE_BATCH_OVERLAY_PREFIX}${floorIndex}`;
         this._renderBus.addEffectOverlay(
@@ -2675,6 +2745,9 @@ export class FireEffectV2 {
 
     // Activate the current floor's systems.
     this._activateCurrentFloor();
+    if (this._isFireViewStreamingEnabled()) {
+      this._syncFireBucketView({ createBudget: Infinity });
+    }
 
     this._rebuildAllFloorGlowMeshes();
     this._invalidateGlowParamCache();
@@ -2796,8 +2869,12 @@ export class FireEffectV2 {
       this._glowSceneContext.sceneBounds = this._sceneBounds;
     }
 
-    // Coal bed time — always advance when the effect is enabled (even with no particle floors).
-    this._syncCoalBedOverlays(timeInfo?.elapsed ?? 0);
+    const streamGate = getStreamingEffectGateState();
+    this._onDetailTierChanged(streamGate.tier);
+
+    // Coal bed time — skip animation advance at minimal zoom LOD (static coal bed).
+    const coalElapsed = this._isMinimalDetailTier() ? 0 : (timeInfo?.elapsed ?? 0);
+    this._syncCoalBedOverlays(coalElapsed);
 
     try {
       if (window.MapShine?.__v2NavigationLiteUpdates === true) return;
@@ -2813,13 +2890,23 @@ export class FireEffectV2 {
 
     if (this._activeFloors.size === 0) return;
 
-    this._syncActiveFloorOutdoorsMasks();
+    if (this._isFireViewStreamingEnabled()) {
+      this._syncFireBucketView();
+    }
 
-    this._applyViewBoundsToFireShapes();
+    const hasParticleSystems = !this._isMinimalDetailTier()
+      && this._hasActiveFireSystemsOnVisibleFloors();
+
+    if (hasParticleSystems) {
+      this._syncActiveFloorOutdoorsMasks();
+      if (!this._isFireViewStreamingEnabled()) {
+        this._applyViewBoundsToFireShapes();
+      }
+    }
 
     const paramsToken = this._beginPerfSpan('systemParams');
     try {
-      this._updateSystemParams();
+      if (hasParticleSystems) this._updateSystemParams();
     } finally {
       this._endPerfSpan(paramsToken);
     }
@@ -2849,6 +2936,8 @@ export class FireEffectV2 {
     } finally {
       this._endPerfSpan(flickerToken);
     }
+
+    if (!hasParticleSystems) return;
 
     const frameId = Number(timeInfo?.frameCount);
     if (Number.isFinite(frameId) && frameId !== this._fireUpdateFrameId) {
@@ -2909,6 +2998,9 @@ export class FireEffectV2 {
   _resolveEffectiveSimHz(timeInfo) {
     const userHz = Math.max(8, Math.min(FIRE_MAX_SIM_HZ, Number(this.params.fireSimHz) || FIRE_DEFAULT_SIM_HZ));
     let capHz = userHz;
+    const tier = this._lastDetailTier ?? 'full';
+    if (tier === 'coarse') capHz = Math.min(capHz, 30);
+    if (tier === 'minimal') capHz = 8;
     const targetFps = Number(timeInfo?.targetFps);
     if (Number.isFinite(targetFps) && targetFps >= 8 && targetFps < capHz) {
       capHz = Math.max(8, Math.floor(targetFps));
@@ -2962,7 +3054,7 @@ export class FireEffectV2 {
    */
   _runFirePhysicsAndVisuals(simDt, ageRate, afterPhysics, timeInfo) {
     const physicsFloors = this._getPhysicsFloorsThisFrame();
-    const physicsSet = new Set(physicsFloors);
+    const physicsFloorIndex = physicsFloors.length > 0 ? physicsFloors[0] : null;
     const elapsed = Number(timeInfo?.elapsed) || 0;
 
     const physicsToken = this._beginPerfSpan('physics');
@@ -2988,7 +3080,7 @@ export class FireEffectV2 {
         const st = this._floorStates.get(floorIndex);
         if (!st?.batchRenderer) continue;
         try {
-          if (physicsSet.has(floorIndex)) {
+          if (floorIndex === physicsFloorIndex) {
             this._refreshFireVisuals(st.batchRenderer, 0, ageRate, afterPhysics);
           } else {
             const lastAt = this._floorLastPhysicsAt.get(floorIndex);
@@ -3264,6 +3356,9 @@ export class FireEffectV2 {
     log.info(`onFloorChange(${maxFloorIndex}): desired=[${[...desired]}] prev=[${[...this._activeFloors]}] states=[${[...this._floorStates.keys()]}]`);
     this._activeFloors = desired;
     this._systemParamsSignature = '';
+    if (this._isFireViewStreamingEnabled()) {
+      this._syncFireBucketView({ createBudget: Infinity });
+    }
     this._applyGlowFloorVisibility(maxFloorIndex);
   }
 
@@ -4700,7 +4795,8 @@ export class FireEffectV2 {
   _scaledMaxParticles(baseMax, weight, min = 16) {
     const base = Math.max(min, Number(baseMax) || min);
     const w = Math.max(0.06, Number(weight) || 0.06);
-    return Math.max(min, Math.floor(base * w));
+    const tierScale = Math.max(0.1, Number(this._detailTierParticleScale) || 1);
+    return Math.max(min, Math.floor(base * w * tierScale));
   }
 
   /**
@@ -4758,21 +4854,543 @@ export class FireEffectV2 {
     sys.emissionOverTime.b = capped.b;
   }
 
+  /** @private */
+  _isFireViewStreamingEnabled() {
+    return this.params.fireViewStreaming !== false;
+  }
+
+  /** @private */
+  _isMinimalDetailTier() {
+    return (this._lastDetailTier ?? 'full') === 'minimal';
+  }
+
+  /** @private */
+  _includeSecondaryFireParticles() {
+    const tier = this._lastDetailTier ?? 'full';
+    return tier === 'full' || tier === 'medium';
+  }
+
   /**
-   * Build fire + ember + smoke systems from merged points for a single floor.
-   * Points are spatially bucketed for culling efficiency.
+   * Whether any active floor has resident in-view particle systems.
+   * @returns {boolean}
+   * @private
+   */
+  _hasActiveFireSystemsOnVisibleFloors() {
+    for (const idx of this._activeFloors) {
+      if (this._countFloorSystems(this._floorStates.get(idx)) > 0) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Minimap / debug snapshot of fire bucket view-streaming state.
+   * @returns {{ clusters: Array<{ floorIndex: number, bucketKey: string, bounds: object, state: string }>, activeCount: number, totalCount: number }}
+   */
+  getFireStreamingMinimapSnapshot() {
+    const tier = this._lastDetailTier ?? getStreamingDetailTier();
+    const view = resolveFireStreamingViewRect();
+    /** @type {Array<{ floorIndex: number, bucketKey: string, bounds: object, active: boolean, glowOnly?: boolean }>} */
+    const rows = [];
+    for (const [floorIndex, state] of this._floorStates) {
+      for (const entry of state?.bucketRegistry ?? []) {
+        if (!entry?.bounds) continue;
+        const inView = isFireBucketInView(entry.bounds, view);
+        const active = !!entry.active;
+        const glowOnly = tier === 'minimal' && inView && !active;
+        rows.push({
+          floorIndex,
+          bucketKey: entry.bucketKey,
+          bounds: entry.bounds,
+          active: active || glowOnly,
+          glowOnly,
+        });
+      }
+    }
+    const clusters = buildFireMinimapEntries(rows);
+    const activeCount = clusters.filter((c) => c.state === 'fire-active').length;
+    return { clusters, activeCount, totalCount: clusters.length };
+  }
+
+  /**
+   * Compact fire streaming summary for diagnostic reports.
+   * @returns {{ viewStreaming: boolean, detailTier: string, totalBuckets: number, activeBuckets: number, culledBuckets: number, floorsWithFire: number }}
+   */
+  getFireStreamingReportSummary() {
+    const snap = this.getFireStreamingMinimapSnapshot();
+    const floorsWithFire = new Set(snap.clusters.map((c) => c.floorIndex)).size;
+    return {
+      viewStreaming: this._isFireViewStreamingEnabled(),
+      detailTier: this._lastDetailTier ?? getStreamingDetailTier(),
+      totalBuckets: snap.totalCount,
+      activeBuckets: snap.activeCount,
+      culledBuckets: Math.max(0, snap.totalCount - snap.activeCount),
+      floorsWithFire,
+    };
+  }
+
+  /**
+   * @param {object|null|undefined} state
+   * @returns {number}
+   * @private
+   */
+  _countFloorSystems(state) {
+    if (!state) return 0;
+    return (state.systems?.length ?? 0)
+      + (state.emberSystems?.length ?? 0)
+      + (state.smokeSystems?.length ?? 0);
+  }
+
+  /**
+   * @param {import('../../libs/three.quarks.module.js').BatchedRenderer} br
+   * @param {object} sys
+   * @private
+   */
+  _attachSystemToBatch(br, sys) {
+    if (!br || !sys) return;
+    try {
+      br.addSystem(sys);
+    } catch (err) {
+      log.warn('FireEffectV2: addSystem failed', err);
+    }
+    if (sys.emitter) {
+      try {
+        br.add(sys.emitter);
+      } catch (err) {
+        log.warn('FireEffectV2: add emitter failed', err);
+      }
+    }
+    if (typeof sys.play === 'function') sys.play();
+  }
+
+  /**
+   * @param {import('../../libs/three.quarks.module.js').BatchedRenderer} br
+   * @private
+   */
+  _reindexFireBatchRenderer(br) {
+    if (!br?.systemToBatchIndex) return;
+    br.systemToBatchIndex.clear();
+    for (let i = 0; i < (br.batches?.length ?? 0); i += 1) {
+      const batch = br.batches[i];
+      for (const sys of batch?.systems ?? []) {
+        br.systemToBatchIndex.set(sys, i);
+      }
+    }
+  }
+
+  /**
+   * @param {import('../../libs/three.quarks.module.js').BatchedRenderer|null|undefined} br
+   * @private
+   */
+  _pruneEmptyFireBatches(br) {
+    if (!br?.batches?.length) return;
+    let pruned = false;
+    for (let i = br.batches.length - 1; i >= 0; i -= 1) {
+      const batch = br.batches[i];
+      if ((batch?.systems?.size ?? 0) > 0) continue;
+      try { batch.geometry?.dispose(); } catch (_) {}
+      try { batch.material?.dispose(); } catch (_) {}
+      try { br.remove(batch); } catch (_) {}
+      br.batches.splice(i, 1);
+      pruned = true;
+    }
+    if (pruned) this._reindexFireBatchRenderer(br);
+  }
+
+  /**
+   * @param {number} floorIndex
+   * @param {object} state
+   * @private
+   */
+  _ensureFloorBatchRenderer(floorIndex, state) {
+    if (state?.batchRenderer) return state.batchRenderer;
+    const br = this._createBatchedRendererForFloor(floorIndex);
+    state.batchRenderer = br;
+    const key = `${FIRE_BATCH_OVERLAY_PREFIX}${floorIndex}`;
+    try {
+      this._renderBus?.addEffectOverlay?.(key, br, floorIndex, FIRE_STACKED_OVERLAY_OPTS);
+    } catch (err) {
+      log.warn('FireEffectV2: failed to reattach batch overlay', key, err);
+    }
+    return br;
+  }
+
+  /**
+   * @param {number} floorIndex
+   * @param {object} state
+   * @private
+   */
+  _releaseIdleFloorBatchRenderer(floorIndex, state) {
+    const br = state?.batchRenderer;
+    if (!br) return;
+    const activeSystems = br.systemToBatchIndex?.size ?? 0;
+    if (activeSystems > 0) {
+      this._pruneEmptyFireBatches(br);
+      return;
+    }
+    const key = `${FIRE_BATCH_OVERLAY_PREFIX}${floorIndex}`;
+    try { this._renderBus?.removeEffectOverlay?.(key); } catch (_) {}
+    this._pruneEmptyFireBatches(br);
+    try { br.removeFromParent?.(); } catch (_) {}
+    state.batchRenderer = null;
+  }
+
+  /**
+   * @param {object} state
+   * @param {object[]} systems
+   * @private
+   */
+  _removeSystemsFromFloorState(state, systems) {
+    if (!state || !systems?.length) return;
+    const drop = new Set(systems);
+    state.systems = (state.systems ?? []).filter((s) => !drop.has(s));
+    state.emberSystems = (state.emberSystems ?? []).filter((s) => !drop.has(s));
+    state.smokeSystems = (state.smokeSystems ?? []).filter((s) => !drop.has(s));
+  }
+
+  /**
+   * Sync fire bucket residency to the camera view rect.
+   * @param {{ createBudget?: number }} [options]
+   * @returns {boolean}
+   * @private
+   */
+  _syncFireBucketView(options = {}) {
+    if (!this._isFireViewStreamingEnabled()) return false;
+    if (this._isMinimalDetailTier()) {
+      let deactivated = false;
+      for (const floorIndex of this._activeFloors) {
+        const state = this._floorStates.get(floorIndex);
+        for (const entry of state?.bucketRegistry ?? []) {
+          if (entry.active) {
+            this._deactivateFireBucket(floorIndex, state, entry);
+            deactivated = true;
+          }
+        }
+      }
+      return deactivated;
+    }
+
+    const createBudget = Number.isFinite(Number(options.createBudget))
+      ? Math.max(0, Math.floor(Number(options.createBudget)))
+      : FIRE_STREAM_CREATE_BUDGET;
+    const view = resolveFireStreamingViewRect();
+    let changed = false;
+    let created = 0;
+
+    for (const floorIndex of this._activeFloors) {
+      const state = this._floorStates.get(floorIndex);
+      if (!state?.bucketRegistry?.length) continue;
+
+      for (const entry of state.bucketRegistry) {
+        if (this._mapPointsManager && typeof this._mapPointsManager.isMaskFireBucketEnabled === 'function') {
+          if (!entry.isMapPoint && !this._mapPointsManager.isMaskFireBucketEnabled(floorIndex, entry.bucketKey)) {
+            if (entry.active) {
+              this._deactivateFireBucket(floorIndex, state, entry);
+              changed = true;
+            }
+            continue;
+          }
+        }
+
+        const inView = isFireBucketInView(entry.bounds, view);
+        if (inView) {
+          if (!entry.active) {
+            if (created >= createBudget) continue;
+            if (this._activateFireBucket(floorIndex, state, entry)) {
+              created += 1;
+              changed = true;
+            }
+          }
+        } else if (entry.active) {
+          this._deactivateFireBucket(floorIndex, state, entry);
+          changed = true;
+        }
+      }
+    }
+
+    return changed;
+  }
+
+  /**
+   * @param {number} floorIndex
+   * @param {object} state
+   * @param {object} entry
+   * @param {{ attachToBatch?: boolean }} [options]
+   * @returns {boolean}
+   * @private
+   */
+  _activateFireBucket(floorIndex, state, entry, options = {}) {
+    if (this._isMinimalDetailTier()) return false;
+
+    const attachToBatch = options.attachToBatch !== false;
+    const br = this._ensureFloorBatchRenderer(floorIndex, state);
+    if (entry.active) return false;
+    if (!entry.isMapPoint && !entry?.bucketPoints?.length) return false;
+    if (entry.isMapPoint && !entry.mapPointShape) return false;
+
+    const {
+      sceneW, sceneH, sceneX, sceneY, splitOutdoor, maxSystems,
+    } = state;
+    const bucketPoints = entry.bucketPoints;
+    const bucketN = bucketPoints ? bucketPoints.length / 3 : 1;
+    const weight = entry.weight ?? 1;
+    const bucketIndex = entry.bucketIndex ?? 0;
+    let systemCount = this._countFloorSystems(state);
+    const includeSecondary = this._includeSecondaryFireParticles();
+
+    const shape = entry.isMapPoint
+      ? entry.mapPointShape
+      : new FireMaskShape(
+        bucketPoints, sceneW, sceneH, sceneX, sceneY,
+        this, floorIndex, GROUND_Z + (Number(floorIndex) || 0), 0.55,
+      );
+
+    /** @type {object[]} */
+    const createdSystems = [];
+
+    const fireSys = this._createFireSystem(shape, weight, floorIndex);
+    if (fireSys) {
+      if (entry.isMapPoint) fireSys.userData.isMapPointVolume = true;
+      tagQuarkSystem(fireSys, 'fire', entry.isMapPoint
+        ? `mapPoint/${entry.bucketKey}`
+        : `flame/f${floorIndex}/b${bucketIndex}`);
+      state.systems.push(fireSys);
+      createdSystems.push(fireSys);
+      systemCount += 1;
+    }
+
+    if (entry.isMapPoint || !includeSecondary) {
+      for (const sys of createdSystems) {
+        if (attachToBatch) this._attachSystemToBatch(br, sys);
+      }
+      if (!createdSystems.length) return false;
+      entry.active = true;
+      entry.systems = createdSystems;
+      state.activeBucketKeys?.add?.(entry.bucketKey);
+      return true;
+    }
+
+    let outdoorPoints = entry.outdoorPoints ?? null;
+    let indoorPoints = entry.indoorPoints ?? null;
+    const outdoorCtx = {
+      sceneX,
+      sceneY,
+      sceneW,
+      sceneH,
+      floorIndex,
+      ownerEffect: this,
+    };
+    if (splitOutdoor && !outdoorPoints && !indoorPoints) {
+      outdoorPoints = filterFirePointsByOutdoor(bucketPoints, 'outdoor', outdoorCtx);
+      indoorPoints = filterFirePointsByOutdoor(bucketPoints, 'indoor', outdoorCtx);
+    }
+
+    if (systemCount < maxSystems) {
+      if (splitOutdoor) {
+        if (outdoorPoints && systemCount < maxSystems) {
+          const outdoorN = outdoorPoints.length / 3;
+          const wOutdoor = weight * (outdoorN / bucketN);
+          const outdoorShape = new FireMaskShape(
+            outdoorPoints, sceneW, sceneH, sceneX, sceneY,
+            this, floorIndex, GROUND_Z + (Number(floorIndex) || 0), 0.55,
+          );
+          const outdoorEmber = this._createEmberSystem(outdoorShape, wOutdoor, floorIndex, { outdoorLayer: true });
+          if (outdoorEmber) {
+            tagQuarkSystem(outdoorEmber, 'fire', `ember/outdoor/f${floorIndex}/b${bucketIndex}`);
+            state.emberSystems.push(outdoorEmber);
+            createdSystems.push(outdoorEmber);
+            systemCount += 1;
+          }
+        }
+        if (indoorPoints && systemCount < maxSystems) {
+          const indoorN = indoorPoints.length / 3;
+          const wIndoor = weight * (indoorN / bucketN);
+          const indoorShape = new FireMaskShape(
+            indoorPoints, sceneW, sceneH, sceneX, sceneY,
+            this, floorIndex, GROUND_Z + (Number(floorIndex) || 0), 0.55,
+          );
+          const indoorEmber = this._createEmberSystem(indoorShape, wIndoor, floorIndex, { outdoorLayer: false });
+          if (indoorEmber) {
+            tagQuarkSystem(indoorEmber, 'fire', `ember/indoor/f${floorIndex}/b${bucketIndex}`);
+            state.emberSystems.push(indoorEmber);
+            createdSystems.push(indoorEmber);
+            systemCount += 1;
+          }
+        }
+      } else {
+        const emberSys = this._createEmberSystem(shape, weight, floorIndex);
+        if (emberSys) {
+          tagQuarkSystem(emberSys, 'fire', `ember/f${floorIndex}/b${bucketIndex}`);
+          state.emberSystems.push(emberSys);
+          createdSystems.push(emberSys);
+          systemCount += 1;
+        }
+      }
+    }
+
+    if (this.params.smokeEnabled && systemCount < maxSystems) {
+      if (splitOutdoor) {
+        if (outdoorPoints && systemCount < maxSystems) {
+          const outdoorN = outdoorPoints.length / 3;
+          const wOutdoor = weight * (outdoorN / bucketN);
+          const outdoorShape = new FireMaskShape(
+            outdoorPoints, sceneW, sceneH, sceneX, sceneY,
+            this, floorIndex, GROUND_Z + (Number(floorIndex) || 0), 0.55,
+          );
+          const outdoorSmoke = this._createSmokeSystem(outdoorShape, wOutdoor, floorIndex, { outdoorLayer: true });
+          if (outdoorSmoke) {
+            tagQuarkSystem(outdoorSmoke, 'fire', `smoke/outdoor/f${floorIndex}/b${bucketIndex}`);
+            state.smokeSystems.push(outdoorSmoke);
+            createdSystems.push(outdoorSmoke);
+            systemCount += 1;
+          }
+        }
+        if (indoorPoints && systemCount < maxSystems) {
+          const indoorN = indoorPoints.length / 3;
+          const wIndoor = weight * (indoorN / bucketN);
+          const indoorShape = new FireMaskShape(
+            indoorPoints, sceneW, sceneH, sceneX, sceneY,
+            this, floorIndex, GROUND_Z + (Number(floorIndex) || 0), 0.55,
+          );
+          const indoorSmoke = this._createSmokeSystem(indoorShape, wIndoor, floorIndex, { outdoorLayer: false });
+          if (indoorSmoke) {
+            tagQuarkSystem(indoorSmoke, 'fire', `smoke/indoor/f${floorIndex}/b${bucketIndex}`);
+            state.smokeSystems.push(indoorSmoke);
+            createdSystems.push(indoorSmoke);
+            systemCount += 1;
+          }
+        }
+      } else if (systemCount < maxSystems) {
+        const smokeSys = this._createSmokeSystem(shape, weight, floorIndex, { outdoorLayer: false });
+        if (smokeSys) {
+          tagQuarkSystem(smokeSys, 'fire', `smoke/f${floorIndex}/b${bucketIndex}`);
+          state.smokeSystems.push(smokeSys);
+          createdSystems.push(smokeSys);
+        }
+      }
+    }
+
+    for (const sys of createdSystems) {
+      if (attachToBatch) this._attachSystemToBatch(br, sys);
+    }
+
+    if (!createdSystems.length) return false;
+
+    entry.active = true;
+    entry.systems = createdSystems;
+    state.activeBucketKeys?.add?.(entry.bucketKey);
+    return true;
+  }
+
+  /**
+   * @param {number} floorIndex
+   * @param {object} state
+   * @param {object} entry
+   * @private
+   */
+  _deactivateFireBucket(floorIndex, state, entry) {
+    const systems = entry?.systems ?? [];
+    const br = state?.batchRenderer;
+    if (!entry?.active || !systems.length) {
+      entry.active = false;
+      entry.systems = null;
+      state.activeBucketKeys?.delete?.(entry.bucketKey);
+      return;
+    }
+
+    for (const sys of systems) {
+      if (typeof sys.stop === 'function') {
+        try { sys.stop(); } catch (_) {}
+      } else if (typeof sys.pause === 'function') {
+        try { sys.pause(); } catch (_) {}
+      }
+      try { br?.deleteSystem?.(sys); } catch (_) {}
+      if (sys.emitter && br) {
+        try { br.remove(sys.emitter); } catch (_) {}
+      }
+      try { sys.dispose(); } catch (_) {}
+    }
+
+    this._removeSystemsFromFloorState(state, systems);
+    entry.active = false;
+    entry.systems = null;
+    state.activeBucketKeys?.delete?.(entry.bucketKey);
+    this._pruneOrReleaseIdleFloorBatch(floorIndex, state);
+  }
+
+  /**
+   * @param {number} floorIndex
+   * @param {object} state
+   * @private
+   */
+  _pruneOrReleaseIdleFloorBatch(floorIndex, state) {
+    const anyActive = state?.bucketRegistry?.some((entry) => entry.active);
+    if (anyActive) {
+      this._pruneEmptyFireBatches(state?.batchRenderer);
+      return;
+    }
+    this._releaseIdleFloorBatchRenderer(floorIndex, state);
+  }
+
+  /**
+   * @param {import('../../streaming/streaming-detail-api.js').StreamingDetailTier} tier
+   * @private
+   */
+  _onDetailTierChanged(tier) {
+    const prev = this._lastDetailTier;
+    if (prev === tier) return;
+    this._lastDetailTier = tier;
+    this._detailTierParticleScale = detailTierParticleScale(tier);
+
+    for (const floorIndex of this._activeFloors) {
+      const state = this._floorStates.get(floorIndex);
+      for (const entry of state?.bucketRegistry ?? []) {
+        if (!entry.active) continue;
+        this._deactivateFireBucket(floorIndex, state, entry);
+      }
+    }
+
+    if (this._isFireViewStreamingEnabled()) {
+      this._syncFireBucketView({ createBudget: Infinity });
+    } else if (!this._isMinimalDetailTier()) {
+      for (const [floorIndex, state] of this._floorStates) {
+        if (!this._activeFloors.has(floorIndex)) continue;
+        for (const entry of state?.bucketRegistry ?? []) {
+          this._activateFireBucket(floorIndex, state, entry, { attachToBatch: false });
+        }
+        this._activateFloor(floorIndex);
+      }
+    }
+  }
+
+  /**
+   * Build fire bucket registry (+ optional eager systems) for a single floor.
    * @private
    */
   _buildFloorSystems(points, sceneW, sceneH, sceneX, sceneY, floorIndex) {
+    const emptyState = {
+      systems: [],
+      emberSystems: [],
+      smokeSystems: [],
+      batchRenderer: null,
+      bucketRegistry: [],
+      activeBucketKeys: new Set(),
+      sceneW,
+      sceneH,
+      sceneX,
+      sceneY,
+      splitOutdoor: false,
+      maxSystems: 0,
+      bucketSizePx: CONTROL_FIRE_BUCKET_SIZE_PX,
+    };
+
     const totalCount = points.length / 3;
-    if (totalCount === 0) {
-      return { systems: [], emberSystems: [], smokeSystems: [], batchRenderer: null };
-    }
+    if (totalCount === 0) return emptyState;
+
     const batchRenderer = this._createBatchedRendererForFloor(floorIndex);
-    const state = { systems: [], emberSystems: [], smokeSystems: [], batchRenderer };
+    const state = { ...emptyState, batchRenderer };
 
     const elevation = resolveClusteringElevation(floorIndex);
-    const { buckets } = clusterFireMaskPointsWithWalls(
+    const { buckets, bucketSizePx } = clusterFireMaskPointsWithWalls(
       points,
       sceneW,
       sceneH,
@@ -4782,19 +5400,17 @@ export class FireEffectV2 {
       CONTROL_FIRE_MAX_BUCKETS,
       elevation,
     );
+    state.bucketSizePx = bucketSizePx;
+
     const maxSystems = Math.max(8, Number(this.params.fireMaxSystemsPerFloor) | 0 || FIRE_DEFAULT_MAX_SYSTEMS_PER_FLOOR);
     const splitMaxBuckets = Math.max(2, Number(this.params.fireOutdoorSplitMaxBuckets) | 0 || FIRE_DEFAULT_OUTDOOR_SPLIT_MAX_BUCKETS);
     const splitOutdoor = this.params.smokeOutdoorAboveCanopy !== false && buckets.size <= splitMaxBuckets;
-    let systemCount = 0;
-    let bucketIndex = 0;
+    state.splitOutdoor = splitOutdoor;
+    state.maxSystems = maxSystems;
 
-    // Emission weight per bucket: √(pixel count) normalized across buckets.
-    // Linear weight (bucketCount/totalCount) starves sparse masks (torches = few dots)
-    // when the floor also has large fires — buckets approach zero emission and read as
-    // flickery on/off. Sqrt compresses dynamic range so small sources keep a steady stream.
     let sumSqrtBucket = 0;
-    for (const [bucketKey, entry] of buckets) {
-      const arr = entry?.points;
+    for (const [bucketKey, bucketEntry] of buckets) {
+      const arr = bucketEntry?.points;
       if (!arr || arr.length < 3) continue;
       if (this._mapPointsManager && typeof this._mapPointsManager.isMaskFireBucketEnabled === 'function') {
         if (!this._mapPointsManager.isMaskFireBucketEnabled(floorIndex, bucketKey)) continue;
@@ -4802,130 +5418,58 @@ export class FireEffectV2 {
       sumSqrtBucket += Math.sqrt(arr.length / 3);
     }
 
-    for (const [bucketKey, entry] of buckets) {
-      const arr = entry?.points;
+    let bucketIndex = 0;
+    const outdoorCtx = {
+      sceneX,
+      sceneY,
+      sceneW,
+      sceneH,
+      floorIndex,
+      ownerEffect: this,
+    };
+
+    for (const [bucketKey, bucketEntry] of buckets) {
+      const arr = bucketEntry?.points;
       if (!arr || arr.length < 3) continue;
       if (this._mapPointsManager && typeof this._mapPointsManager.isMaskFireBucketEnabled === 'function') {
         if (!this._mapPointsManager.isMaskFireBucketEnabled(floorIndex, bucketKey)) continue;
       }
+
       const bucketPoints = new Float32Array(arr);
       const bucketN = bucketPoints.length / 3;
       const weight = sumSqrtBucket > 0 ? Math.sqrt(bucketN) / sumSqrtBucket : 1.0;
-      // V2 bus layering contract:
-      // - Tiles are placed at Z = GROUND_Z + floorIndex
-      // - Effects should follow the same scheme to avoid clipping / depth issues.
-      // Use a small offset above the floor plane so particles aren't Z-fighting.
-      const shape = new FireMaskShape(
-        bucketPoints, sceneW, sceneH, sceneX, sceneY,
-        this, floorIndex, GROUND_Z + (Number(floorIndex) || 0), 0.55
-      );
+      const memberCellKeys = Array.isArray(bucketEntry.memberCellKeys)
+        ? bucketEntry.memberCellKeys
+        : [bucketKey];
 
-      // Fire system.
-      const fireSys = this._createFireSystem(shape, weight, floorIndex);
-      if (fireSys) {
-        tagQuarkSystem(fireSys, 'fire', `flame/f${floorIndex}/b${bucketIndex}`);
-        state.systems.push(fireSys);
-        systemCount += 1;
-      }
-
-      let outdoorPoints = null;
-      let indoorPoints = null;
-      const outdoorCtx = {
-        sceneX,
-        sceneY,
-        sceneW,
-        sceneH,
-        floorIndex,
-        ownerEffect: this,
+      /** @type {object} */
+      const registryEntry = {
+        bucketKey,
+        bounds: fireBucketWorldBounds(memberCellKeys, bucketSizePx),
+        memberCellKeys,
+        bucketSizePx,
+        bucketIndex,
+        bucketPoints,
+        weight,
+        outdoorPoints: null,
+        indoorPoints: null,
+        active: false,
+        systems: null,
       };
+
       if (splitOutdoor) {
-        outdoorPoints = filterFirePointsByOutdoor(bucketPoints, 'outdoor', outdoorCtx);
-        indoorPoints = filterFirePointsByOutdoor(bucketPoints, 'indoor', outdoorCtx);
+        registryEntry.outdoorPoints = filterFirePointsByOutdoor(bucketPoints, 'outdoor', outdoorCtx);
+        registryEntry.indoorPoints = filterFirePointsByOutdoor(bucketPoints, 'indoor', outdoorCtx);
       }
 
-      // Embers — optional split: outdoor sparks above tree/bush canopies, indoor under overhead.
-      if (systemCount < maxSystems) {
-        if (splitOutdoor) {
-          if (outdoorPoints && systemCount < maxSystems) {
-            const outdoorN = outdoorPoints.length / 3;
-            const wOutdoor = weight * (outdoorN / bucketN);
-            const outdoorShape = new FireMaskShape(
-              outdoorPoints, sceneW, sceneH, sceneX, sceneY,
-              this, floorIndex, GROUND_Z + (Number(floorIndex) || 0), 0.55
-            );
-            const outdoorEmber = this._createEmberSystem(outdoorShape, wOutdoor, floorIndex, { outdoorLayer: true });
-            if (outdoorEmber) {
-              tagQuarkSystem(outdoorEmber, 'fire', `ember/outdoor/f${floorIndex}/b${bucketIndex}`);
-              state.emberSystems.push(outdoorEmber);
-              systemCount += 1;
-            }
-          }
-          if (indoorPoints && systemCount < maxSystems) {
-            const indoorN = indoorPoints.length / 3;
-            const wIndoor = weight * (indoorN / bucketN);
-            const indoorShape = new FireMaskShape(
-              indoorPoints, sceneW, sceneH, sceneX, sceneY,
-              this, floorIndex, GROUND_Z + (Number(floorIndex) || 0), 0.55
-            );
-            const indoorEmber = this._createEmberSystem(indoorShape, wIndoor, floorIndex, { outdoorLayer: false });
-            if (indoorEmber) {
-              tagQuarkSystem(indoorEmber, 'fire', `ember/indoor/f${floorIndex}/b${bucketIndex}`);
-              state.emberSystems.push(indoorEmber);
-              systemCount += 1;
-            }
-          }
-        } else {
-          const emberSys = this._createEmberSystem(shape, weight, floorIndex);
-          if (emberSys) {
-            tagQuarkSystem(emberSys, 'fire', `ember/f${floorIndex}/b${bucketIndex}`);
-            state.emberSystems.push(emberSys);
-            systemCount += 1;
-          }
-        }
-      }
-
-      // Smoke — optional split: outdoor puffs above tree/bush canopies, indoor under overhead.
-      if (this.params.smokeEnabled && systemCount < maxSystems) {
-        if (splitOutdoor) {
-          if (outdoorPoints && systemCount < maxSystems) {
-            const outdoorN = outdoorPoints.length / 3;
-            const wOutdoor = weight * (outdoorN / bucketN);
-            const outdoorShape = new FireMaskShape(
-              outdoorPoints, sceneW, sceneH, sceneX, sceneY,
-              this, floorIndex, GROUND_Z + (Number(floorIndex) || 0), 0.55
-            );
-            const outdoorSmoke = this._createSmokeSystem(outdoorShape, wOutdoor, floorIndex, { outdoorLayer: true });
-            if (outdoorSmoke) {
-              tagQuarkSystem(outdoorSmoke, 'fire', `smoke/outdoor/f${floorIndex}/b${bucketIndex}`);
-              state.smokeSystems.push(outdoorSmoke);
-              systemCount += 1;
-            }
-          }
-          if (indoorPoints && systemCount < maxSystems) {
-            const indoorN = indoorPoints.length / 3;
-            const wIndoor = weight * (indoorN / bucketN);
-            const indoorShape = new FireMaskShape(
-              indoorPoints, sceneW, sceneH, sceneX, sceneY,
-              this, floorIndex, GROUND_Z + (Number(floorIndex) || 0), 0.55
-            );
-            const indoorSmoke = this._createSmokeSystem(indoorShape, wIndoor, floorIndex, { outdoorLayer: false });
-            if (indoorSmoke) {
-              tagQuarkSystem(indoorSmoke, 'fire', `smoke/indoor/f${floorIndex}/b${bucketIndex}`);
-              state.smokeSystems.push(indoorSmoke);
-              systemCount += 1;
-            }
-          }
-        } else if (systemCount < maxSystems) {
-          const smokeSys = this._createSmokeSystem(shape, weight, floorIndex, { outdoorLayer: false });
-          if (smokeSys) {
-            tagQuarkSystem(smokeSys, 'fire', `smoke/f${floorIndex}/b${bucketIndex}`);
-            state.smokeSystems.push(smokeSys);
-            systemCount += 1;
-          }
-        }
-      }
-
+      state.bucketRegistry.push(registryEntry);
       bucketIndex += 1;
+    }
+
+    if (!this._isFireViewStreamingEnabled() && !this._isMinimalDetailTier()) {
+      for (const registryEntry of state.bucketRegistry) {
+        this._activateFireBucket(floorIndex, state, registryEntry, { attachToBatch: false });
+      }
     }
 
     return state;
@@ -5313,48 +5857,52 @@ export class FireEffectV2 {
     return effectUnderOverheadOrder(floorIndex, safeTypeOffset);
   }
 
-  /** Add a floor's systems to that floor's BatchedRenderer + scene. @private */
+  /** Add a floor's in-view bucket systems to that floor's BatchedRenderer + scene. @private */
   _activateFloor(floorIndex) {
     const state = this._floorStates.get(floorIndex);
-    const br = state?.batchRenderer;
-    if (!state || !br) {
-      log.warn(`FireEffectV2: _activateFloor(${floorIndex}) failed - state=${!!state}, batchRenderer=${!!br}`);
+    if (!state) {
+      log.warn(`FireEffectV2: _activateFloor(${floorIndex}) failed - no state`);
+      return;
+    }
+
+    if (this._isFireViewStreamingEnabled()) {
+      this._syncFireBucketView({ createBudget: Infinity });
+      log.info(`FireEffectV2: activating floor ${floorIndex} (view streaming sync)`);
+      return;
+    }
+
+    const br = state.batchRenderer;
+    if (!br) {
+      log.warn(`FireEffectV2: _activateFloor(${floorIndex}) failed - no batchRenderer`);
       return;
     }
 
     const allSystems = [...state.systems, ...state.emberSystems, ...state.smokeSystems];
     log.info(`FireEffectV2: activating floor ${floorIndex} with ${allSystems.length} systems (${state.systems.length} fire, ${state.emberSystems.length} ember, ${state.smokeSystems.length} smoke)`);
-    
+
     for (const sys of allSystems) {
-      try {
-        br.addSystem(sys);
-      } catch (err) {
-        log.warn(`  addSystem() failed:`, err);
-      }
-      // Emitters must be in the scene graph for three.quarks to update their
-      // world matrices. Adding them as children of the BatchedRenderer (which
-      // is already in the bus scene) achieves this without exposing the bus's
-      // private scene reference.
-      if (sys.emitter) {
-        try {
-          br.add(sys.emitter);
-        } catch (err) {
-          log.warn(`  Failed to add emitter:`, err);
-        }
-      }
-      if (typeof sys.play === 'function') sys.play();
+      this._attachSystemToBatch(br, sys);
     }
   }
 
   /** Remove a specific floor's systems from its BatchedRenderer. @private */
   _deactivateFloor(floorIndex) {
     const state = this._floorStates.get(floorIndex);
-    const br = state?.batchRenderer;
+    if (!state) return;
+
+    if (this._isFireViewStreamingEnabled()) {
+      for (const entry of state.bucketRegistry ?? []) {
+        if (entry.active) this._deactivateFireBucket(floorIndex, state, entry);
+      }
+      log.debug(`FireEffectV2: deactivated floor ${floorIndex} (view streaming)`);
+      return;
+    }
+
+    const br = state.batchRenderer;
     if (!br) return;
 
     const allSystems = [...state.systems, ...state.emberSystems, ...state.smokeSystems];
     for (const sys of allSystems) {
-      // Clear live particles so hidden floors do not retain simulation debt.
       if (typeof sys.stop === 'function') {
         try { sys.stop(); } catch (_) {}
       } else if (typeof sys.pause === 'function') {
@@ -5369,6 +5917,18 @@ export class FireEffectV2 {
   /** Dispose all systems in a floor state. @private */
   _disposeFloorState(state) {
     const br = state.batchRenderer;
+    for (const entry of state.bucketRegistry ?? []) {
+      if (entry.active) {
+        for (const sys of entry.systems ?? []) {
+          try { sys.dispose(); } catch (_) {}
+        }
+        entry.active = false;
+        entry.systems = null;
+      }
+    }
+    state.bucketRegistry = [];
+    state.activeBucketKeys?.clear?.();
+
     const allSystems = [...state.systems, ...state.emberSystems, ...state.smokeSystems];
     for (const sys of allSystems) {
       try {
@@ -5381,6 +5941,7 @@ export class FireEffectV2 {
       try { sys.dispose?.(); } catch (_) {}
     }
     if (br) {
+      this._pruneEmptyFireBatches(br);
       for (const batch of br.batches ?? []) {
         try { batch.material?.dispose?.(); } catch (_) {}
         try { batch.dispose?.(); } catch (_) {}

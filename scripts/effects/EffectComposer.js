@@ -76,6 +76,15 @@ export class EffectComposer {
      */
     this._updatableAccum = new Map();
 
+    // PERFORMANCE: Cache phase-filtered/sorted updatable lists so the per-frame
+    // hot path (run every rAF during camera navigation via tickCameraPipeline)
+    // does not spread + filter + sort the Set on every call. Rebuilt lazily when
+    // updatables are added/removed.
+    /** @type {Object[]|null} */
+    this._cachedCameraUpdatables = null;
+    /** @type {Object[]|null} */
+    this._cachedDefaultUpdatables = null;
+
     // ── T2-B: Adaptive effect decimation ──────────────────────────────────
     // Track rolling average frame time and dynamically skip non-critical
     // effects when budget is exceeded. Hysteresis prevents oscillation.
@@ -502,15 +511,44 @@ export class EffectComposer {
    * @param {object|null} perfRecorder
    * @private
    */
-  _runUpdatablesPhase(phase, schedulerDelta, timeInfo, doProfile, recording, profiler, perfRecorder) {
-    const list = [...this.updatables].filter((u) => {
-      const p = u?.updatePhase || 'default';
-      return p === phase;
-    });
-
+  /**
+   * Return the cached, phase-filtered (and for `camera`, pipeline-ordered) list
+   * of updatables. Rebuilt only when the updatable set changes.
+   * @param {'camera'|'default'} phase
+   * @returns {Object[]}
+   * @private
+   */
+  _getPhaseUpdatables(phase) {
     if (phase === 'camera') {
-      list.sort((a, b) => (a.cameraPipelineOrder ?? 0) - (b.cameraPipelineOrder ?? 0));
+      if (!this._cachedCameraUpdatables) {
+        const list = [];
+        for (const u of this.updatables) {
+          if ((u?.updatePhase || 'default') === 'camera') list.push(u);
+        }
+        list.sort((a, b) => (a.cameraPipelineOrder ?? 0) - (b.cameraPipelineOrder ?? 0));
+        this._cachedCameraUpdatables = list;
+      }
+      return this._cachedCameraUpdatables;
     }
+
+    if (!this._cachedDefaultUpdatables) {
+      const list = [];
+      for (const u of this.updatables) {
+        if ((u?.updatePhase || 'default') !== 'camera') list.push(u);
+      }
+      this._cachedDefaultUpdatables = list;
+    }
+    return this._cachedDefaultUpdatables;
+  }
+
+  /** @private */
+  _invalidateUpdatableCaches() {
+    this._cachedCameraUpdatables = null;
+    this._cachedDefaultUpdatables = null;
+  }
+
+  _runUpdatablesPhase(phase, schedulerDelta, timeInfo, doProfile, recording, profiler, perfRecorder) {
+    const list = this._getPhaseUpdatables(phase);
 
     for (const updatable of list) {
       try {
@@ -553,6 +591,7 @@ export class EffectComposer {
     }
     
     this.updatables.add(updatable);
+    this._invalidateUpdatableCaches();
     log.debug('Updatable registered');
   }
 
@@ -563,6 +602,7 @@ export class EffectComposer {
   removeUpdatable(updatable) {
     this.updatables.delete(updatable);
     this._updatableAccum.delete(updatable);
+    this._invalidateUpdatableCaches();
   }
 
   /**

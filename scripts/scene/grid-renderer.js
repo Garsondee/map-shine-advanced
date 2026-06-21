@@ -49,6 +49,15 @@ export class GridRenderer {
 
     /** @type {number} */
     this._lastResolution = -1;
+
+    // Cached inputs to `_computeGridResolution` so a pure pan (zoom unchanged)
+    // can skip the per-present recompute. NaN forces the first update to run.
+    /** @type {number} */
+    this._lastGridResZoom = NaN;
+    /** @type {number} */
+    this._lastGridResScreenH = NaN;
+    /** @type {number} */
+    this._lastGridResViewH = NaN;
     
     // Grid settings
     // Parity-first: default behavior uses Foundry's scene grid settings.
@@ -527,6 +536,24 @@ export class GridRenderer {
       if (!this.gridMaterial?.uniforms) return;
 
       const frameState = getGlobalFrameState();
+
+      // Grid resolution only depends on zoom + screen/view height — pure panning
+      // (the common case) leaves it unchanged, so skip the recompute when those
+      // inputs are stable. Saves arithmetic on every present while dragging.
+      const zoom = Number(frameState?.zoom ?? 0);
+      const screenH = Number(frameState?.screenHeight ?? 0);
+      const viewH = Number(frameState?.viewMaxY ?? 0) - Number(frameState?.viewMinY ?? 0);
+      if (
+        zoom === this._lastGridResZoom
+        && screenH === this._lastGridResScreenH
+        && viewH === this._lastGridResViewH
+      ) {
+        return;
+      }
+      this._lastGridResZoom = zoom;
+      this._lastGridResScreenH = screenH;
+      this._lastGridResViewH = viewH;
+
       const resolution = this._computeGridResolution(frameState);
       if (resolution == null) return;
 

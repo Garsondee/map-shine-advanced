@@ -54,6 +54,7 @@ import {
   scanWaterInteriorPoints,
   syncSharedOutdoorsMaskForFloor,
   clearSharedOutdoorsMaskCache,
+  buildEffectSceneBoundsFromCanvas,
 } from './water-splash-behaviors.js';
 import {
   ParticleSystem as QuarksParticleSystem,
@@ -1431,8 +1432,8 @@ export class WaterSplashesEffectV2 {
     if (!shouldRender) return;
 
     // One outdoors CPU readback per active floor (shared by all bucketed lifecycle behaviors).
-    this._outdoorsMaskFrameToken += 1;
-    const outdoorsToken = this._outdoorsMaskFrameToken;
+    this._sceneBounds = buildEffectSceneBoundsFromCanvas();
+    const outdoorsToken = this._outdoorsMaskFrameToken ?? 0;
     for (const floorIndex of this._activeFloors) {
       try { syncSharedOutdoorsMaskForFloor(floorIndex, outdoorsToken); } catch (_) {}
     }
@@ -1708,6 +1709,14 @@ export class WaterSplashesEffectV2 {
         delete sys.userData._msEmissionScaleDynamic;
       }
     }
+  }
+
+  /**
+   * Invalidate per-particle outdoors samples when authored _Outdoors CPU decode updates.
+   */
+  onOutdoorsMaskUpdated() {
+    this._outdoorsMaskFrameToken = (this._outdoorsMaskFrameToken ?? 0) + 1;
+    clearSharedOutdoorsMaskCache();
   }
 
   /**

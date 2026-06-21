@@ -2184,6 +2184,9 @@ function sampleMapPointFireOutdoorAtWorld(worldX, worldY, ownerEffect, floorInde
   return 1.0;
 }
 
+/** Reused footprint offset tables keyed by `${tapCount}:${roundedRadius}`. */
+const _fireFootprintOffsetCache = new Map();
+
 /**
  * Footprint sample offsets — 5-tap (center + cardinals) for hot paths; 9-tap at spawn.
  * @param {number} particleSize
@@ -2192,27 +2195,45 @@ function sampleMapPointFireOutdoorAtWorld(worldX, worldY, ownerEffect, floorInde
  */
 function fireFootprintOffsets(particleSize, tapCount = 9) {
   const r = Math.max(24, Number(particleSize) || 0) * 0.42;
-  if (r <= 1) return [[0, 0]];
-  if (tapCount <= 5) {
-    return [
+  if (r <= 1) {
+    let centerOnly = _fireFootprintOffsetCache.get('c:0');
+    if (!centerOnly) {
+      centerOnly = [[0, 0]];
+      _fireFootprintOffsetCache.set('c:0', centerOnly);
+    }
+    return centerOnly;
+  }
+  const tc = tapCount <= 5 ? 5 : 9;
+  const rKey = Math.round(r);
+  const cacheKey = `${tc}:${rKey}`;
+  const cached = _fireFootprintOffsetCache.get(cacheKey);
+  if (cached) return cached;
+
+  let offsets;
+  if (tc <= 5) {
+    offsets = [
       [0, 0],
       [r, 0],
       [-r, 0],
       [0, r],
       [0, -r],
     ];
+  } else {
+    const d = r * 0.72;
+    offsets = [
+      [0, 0],
+      [r, 0],
+      [-r, 0],
+      [0, r],
+      [0, -r],
+      [d, d],
+      [-d, d],
+      [d, -d],
+      [-d, -d],
+    ];
   }
-  return [
-    [0, 0],
-    [r, 0],
-    [-r, 0],
-    [0, r],
-    [0, -r],
-    [r * 0.72, r * 0.72],
-    [-r * 0.72, r * 0.72],
-    [r * 0.72, -r * 0.72],
-    [-r * 0.72, -r * 0.72],
-  ];
+  _fireFootprintOffsetCache.set(cacheKey, offsets);
+  return offsets;
 }
 
 /**

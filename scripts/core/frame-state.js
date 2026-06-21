@@ -107,11 +107,22 @@ export class FrameState {
 
       this.cameraZ = camera.position.z;
 
+      // Reuse persistent Matrix4 instances and copy in-place. These snapshots are
+      // refreshed every camera-pipeline tick (every rAF during navigation), so
+      // cloning here churned two Matrix4 allocations per tick for no benefit.
       if (camera.projectionMatrix) {
-        this.projectionMatrix = camera.projectionMatrix.clone();
+        if (this.projectionMatrix) {
+          this.projectionMatrix.copy(camera.projectionMatrix);
+        } else {
+          this.projectionMatrix = camera.projectionMatrix.clone();
+        }
       }
       if (camera.matrixWorldInverse) {
-        this.viewMatrix = camera.matrixWorldInverse.clone();
+        if (this.viewMatrix) {
+          this.viewMatrix.copy(camera.matrixWorldInverse);
+        } else {
+          this.viewMatrix = camera.matrixWorldInverse.clone();
+        }
       }
     }
 
@@ -124,13 +135,19 @@ export class FrameState {
       this.zoom = sceneComposer.currentZoom ?? 1.0;
     }
 
-    // Update screen dimensions
+    // Update screen dimensions. Reuse a scratch Vector2 — this runs every
+    // camera-pipeline tick (every rAF during pan), so a fresh allocation here
+    // was steady GC pressure.
     if (canvas && canvas.app && canvas.app.renderer) {
-      const size = new (window.THREE?.Vector2)();
-      canvas.app.renderer.getDrawingBufferSize(size);
-      this.screenWidth = size.width;
-      this.screenHeight = size.height;
-      this.aspectRatio = this.screenWidth / Math.max(1, this.screenHeight);
+      const THREE = window.THREE;
+      if (THREE) {
+        if (!this._drawBufferSize) this._drawBufferSize = new THREE.Vector2();
+        const size = this._drawBufferSize;
+        canvas.app.renderer.getDrawingBufferSize(size);
+        this.screenWidth = size.width;
+        this.screenHeight = size.height;
+        this.aspectRatio = this.screenWidth / Math.max(1, this.screenHeight);
+      }
     }
 
     // Update scene bounds

@@ -3,8 +3,20 @@ import Coordinates from '../../utils/coordinates.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
 import { weatherController } from '../../core/WeatherController.js';
 import {
+  buildCandleMinimapEntries,
+  glowCentroidBounds,
+  isFireBucketInView,
+  resolveFireStreamingViewRect,
+} from '../../streaming/fire-streaming-bridge.js';
+import {
+  getStreamingDetailTier,
+  getStreamingEffectGateState,
+  resolveFocalLodFromZoom,
+} from '../../streaming/streaming-detail-api.js';
+import {
   buildEffectSceneBoundsFromCanvas,
   sampleAuthoredOutdoorsAtWorld,
+  syncSharedOutdoorsMaskForFloor,
 } from './water-splash-behaviors.js';
 import { getPerspectiveElevation } from '../../foundry/elevation-context.js';
 import {
@@ -12,6 +24,7 @@ import {
   isWallOnV14Level,
   readWallHeightFlags,
 } from '../../foundry/levels-scene-flags.js';
+import { readWallSenseRestriction } from '../../foundry/wall-document-api.js';
 import { resolveClusteringElevation } from '../../scene/map-point-wall-clustering.js';
 import {
   buildMapPointGroupSpawnPool,
@@ -33,6 +46,13 @@ const log = createLogger('CandleFlamesEffectV2');
 // Flame sprites use per-band renderOrder (below vs above overhead); see _applyFlameMeshRenderOrders.
 const CANDLE_FLAME_BELOW_INTRA = 60;
 const CANDLE_FLAME_ABOVE_INTRA = 60;
+
+/** Max candle clusters activated per frame when view streaming is on. */
+const CANDLE_STREAM_CREATE_BUDGET = 4;
+/** Focal LOD before candle flames economize (tile streaming may already be coarse at LOD 2). */
+const CANDLE_FLAME_COMPACT_FOCAL_LOD = 3;
+/** Focal LOD for flicker-only flames and throttled glow updates. */
+const CANDLE_FLAME_MINIMAL_FOCAL_LOD = 4;
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
@@ -143,6 +163,7 @@ export class CandleFlamesEffectV2 {
 
     this.params = {
       enabled: true,
+      candleViewStreaming: true,
 
       flamesEnabled: true,
       maxFlames: 20000,
@@ -261,6 +282,13 @@ export class CandleFlamesEffectV2 {
     this._glowGroup = null;
     this._glowBuckets = new Map();
     this._clusters = [];
+    /** @type {Array<object>} Full cluster registry (view streaming). */
+    this._clusterRegistry = [];
+    /** @type {Set<string>} Active in-view cluster keys. */
+    this._activeClusterKeys = new Set();
+    /** @type {import('../../streaming/streaming-detail-api.js').StreamingDetailTier} */
+    this._lastDetailTier = 'full';
+    this._glowFlickerSkipCounter = 0;
 
     this._tempColor = null;
 
@@ -334,6 +362,7 @@ export class CandleFlamesEffectV2 {
             'glowDarknessNightBoost',
             'glowBucketSizePx',
             'glowMaxBuckets',
+            'candleViewStreaming',
             'wallClipEnabled',
             'wallClipRadiusScale',
           ],
@@ -688,6 +717,12 @@ export class CandleFlamesEffectV2 {
           tooltip: 'Spatial cluster size for glow pools. Lower values improve wall clipping; large buckets merge distant candles and can bleed through walls.',
         },
         glowMaxBuckets: { type: 'slider', min: 1, max: 512, step: 1, default: 256, label: 'Max Buckets' },
+        candleViewStreaming: {
+          type: 'checkbox',
+          label: 'View Streaming (Cull Off-Screen)',
+          default: true,
+          tooltip: 'Only simulate and render candle clusters inside the camera view. Off-screen clusters are torn down to save CPU.',
+        },
         wallClipEnabled: { type: 'boolean', default: true, label: 'Wall Clip' },
         wallClipRadiusScale: { type: 'slider', min: 0.1, max: 2.0, step: 0.01, default: 0.3, label: 'Clip Radius Scale' }
       }
@@ -709,23 +744,23 @@ export class CandleFlamesEffectV2 {
     }
 
     if (paramId === 'flameOpacity' && this._flameMaterial?.uniforms?.uOpacity) {
-      this._flameMaterial.uniforms.uOpacity.value = this.params.flameOpacity * this._computeDayNightIntensityMul();
+      this._syncFlameShaderUniforms();
     }
 
     if (paramId === 'flameFlickerSpeed' && this._flameMaterial?.uniforms?.uFlickerSpeed) {
-      this._flameMaterial.uniforms.uFlickerSpeed.value = this.params.flameFlickerSpeed;
+      this._syncFlameShaderUniforms();
     }
 
     if (paramId === 'flameFlickerStrength' && this._flameMaterial?.uniforms?.uFlickerStrength) {
-      this._flameMaterial.uniforms.uFlickerStrength.value = this.params.flameFlickerStrength;
+      this._syncFlameShaderUniforms();
     }
 
     if (paramId === 'flameFlickerSpeedJitter' && this._flameMaterial?.uniforms?.uFlickerSpeedJitter) {
-      this._flameMaterial.uniforms.uFlickerSpeedJitter.value = this.params.flameFlickerSpeedJitter;
+      this._syncFlameShaderUniforms();
     }
 
     if (paramId === 'flameFlickerStrengthJitter' && this._flameMaterial?.uniforms?.uFlickerStrengthJitter) {
-      this._flameMaterial.uniforms.uFlickerStrengthJitter.value = this.params.flameFlickerStrengthJitter;
+      this._syncFlameShaderUniforms();
     }
 
     if (paramId === 'flameSizeJitter') {
@@ -734,39 +769,39 @@ export class CandleFlamesEffectV2 {
     }
 
     if (paramId === 'flameOvality' && this._flameMaterial?.uniforms?.uOvality) {
-      this._flameMaterial.uniforms.uOvality.value = this.params.flameOvality;
+      this._syncFlameShaderUniforms();
     }
 
     if (paramId === 'flameWobble' && this._flameMaterial?.uniforms?.uWobble) {
-      this._flameMaterial.uniforms.uWobble.value = this.params.flameWobble;
+      this._syncFlameShaderUniforms();
     }
 
     if (paramId === 'flameWobbleSpeed' && this._flameMaterial?.uniforms?.uWobbleSpeed) {
-      this._flameMaterial.uniforms.uWobbleSpeed.value = this.params.flameWobbleSpeed;
+      this._syncFlameShaderUniforms();
     }
 
     if (paramId === 'flameWobbleNoise' && this._flameMaterial?.uniforms?.uWobbleNoise) {
-      this._flameMaterial.uniforms.uWobbleNoise.value = this.params.flameWobbleNoise;
+      this._syncFlameShaderUniforms();
     }
 
     if (paramId === 'flameShapeDistort' && this._flameMaterial?.uniforms?.uShapeDistort) {
-      this._flameMaterial.uniforms.uShapeDistort.value = this.params.flameShapeDistort;
+      this._syncFlameShaderUniforms();
     }
 
     if (paramId === 'flameIndoorSway' && this._flameMaterial?.uniforms?.uIndoorSway) {
-      this._flameMaterial.uniforms.uIndoorSway.value = this.params.flameIndoorSway;
+      this._syncFlameShaderUniforms();
     }
 
     if (paramId === 'draftiness' && this._flameMaterial?.uniforms?.uDraftiness) {
-      this._flameMaterial.uniforms.uDraftiness.value = this.params.draftiness;
+      this._syncFlameShaderUniforms();
     }
 
     if (paramId === 'outdoorWindInfluence' && this._flameMaterial?.uniforms?.uOutdoorWindInfluence) {
-      this._flameMaterial.uniforms.uOutdoorWindInfluence.value = this.params.outdoorWindInfluence;
+      this._syncFlameShaderUniforms();
     }
 
     if (paramId === 'outdoorSway' && this._flameMaterial?.uniforms?.uOutdoorSway) {
-      this._flameMaterial.uniforms.uOutdoorSway.value = this.params.outdoorSway;
+      this._syncFlameShaderUniforms();
     }
 
     if (paramId === 'flamesEnabled') {
@@ -894,7 +929,7 @@ export class CandleFlamesEffectV2 {
       this._group.visible = show;
     }
 
-    const showFlames = show && !!this.params.flamesEnabled;
+    const showFlames = show && !!this.params.flamesEnabled && this._effectiveShowFlames();
     if (this._flameMeshBelow) {
       this._flameMeshBelow.visible = showFlames && (this._flameMeshBelow.count > 0);
     }
@@ -1014,6 +1049,9 @@ export class CandleFlamesEffectV2 {
       return;
     }
 
+    const streamGate = getStreamingEffectGateState();
+    this._lastDetailTier = streamGate.tier;
+
     const THREE = window.THREE;
     if (!THREE) return;
 
@@ -1021,86 +1059,15 @@ export class CandleFlamesEffectV2 {
 
     this._tryAttachGlowGroup();
 
+    if (this._isCandleViewStreamingEnabled()) {
+      this._syncCandleClusterView();
+    }
+
     if (this._flameMaterial?.uniforms?.uTime) {
       this._flameMaterial.uniforms.uTime.value = timeInfo.elapsed;
     }
 
-    if (this._flameMaterial?.uniforms?.uOpacity) {
-      this._flameMaterial.uniforms.uOpacity.value = this.params.flameOpacity * this._computeDayNightIntensityMul();
-    }
-
-    if (this._flameMaterial?.uniforms?.uFlickerSpeed) {
-      this._flameMaterial.uniforms.uFlickerSpeed.value = this.params.flameFlickerSpeed;
-    }
-
-    if (this._flameMaterial?.uniforms?.uFlickerStrength) {
-      this._flameMaterial.uniforms.uFlickerStrength.value = this.params.flameFlickerStrength;
-    }
-
-    if (this._flameMaterial?.uniforms?.uFlickerSpeedJitter) {
-      this._flameMaterial.uniforms.uFlickerSpeedJitter.value = this.params.flameFlickerSpeedJitter;
-    }
-
-    if (this._flameMaterial?.uniforms?.uFlickerStrengthJitter) {
-      this._flameMaterial.uniforms.uFlickerStrengthJitter.value = this.params.flameFlickerStrengthJitter;
-    }
-
-    if (this._flameMaterial?.uniforms?.uOvality) {
-      this._flameMaterial.uniforms.uOvality.value = this.params.flameOvality;
-    }
-
-    if (this._flameMaterial?.uniforms?.uWobble) {
-      this._flameMaterial.uniforms.uWobble.value = this.params.flameWobble;
-    }
-
-    if (this._flameMaterial?.uniforms?.uWobbleSpeed) {
-      this._flameMaterial.uniforms.uWobbleSpeed.value = this.params.flameWobbleSpeed;
-    }
-
-    if (this._flameMaterial?.uniforms?.uWobbleNoise) {
-      this._flameMaterial.uniforms.uWobbleNoise.value = this.params.flameWobbleNoise;
-    }
-
-    if (this._flameMaterial?.uniforms?.uShapeDistort) {
-      this._flameMaterial.uniforms.uShapeDistort.value = this.params.flameShapeDistort;
-    }
-
-    if (this._flameMaterial?.uniforms?.uIndoorSway) {
-      this._flameMaterial.uniforms.uIndoorSway.value = this.params.flameIndoorSway;
-    }
-
-    if (this._flameMaterial?.uniforms?.uDraftiness) {
-      this._flameMaterial.uniforms.uDraftiness.value = this.params.draftiness;
-    }
-
-    if (this._flameMaterial?.uniforms?.uOutdoorWindInfluence) {
-      this._flameMaterial.uniforms.uOutdoorWindInfluence.value = this.params.outdoorWindInfluence;
-    }
-
-    if (this._flameMaterial?.uniforms?.uOutdoorSway) {
-      this._flameMaterial.uniforms.uOutdoorSway.value = this.params.outdoorSway;
-    }
-
-    if (this._flameMaterial?.uniforms?.uWindSpeed) {
-      let ws = 0.0;
-      try {
-        ws = Number(weatherController?.getCurrentState?.()?.windSpeed ?? weatherController?.currentState?.windSpeed ?? 0.0) || 0.0;
-      } catch (_) {
-        ws = 0.0;
-      }
-      this._flameMaterial.uniforms.uWindSpeed.value = Math.max(0.0, Math.min(1.0, ws));
-    }
-
-    if (this._flameMaterial?.uniforms?.uWindDir) {
-      try {
-        const state = weatherController?.getCurrentState?.() ?? weatherController?.currentState;
-        const dir = state?.windDirection;
-        if (dir && Number.isFinite(dir.x) && Number.isFinite(dir.y)) {
-          this._flameMaterial.uniforms.uWindDir.value.set(dir.x, -dir.y);
-        }
-      } catch (_) {
-      }
-    }
+    this._syncFlameShaderUniforms();
 
     // Keep flame sprites visible in V2: floor-presence masking can resolve to
     // full-scene coverage in current post stack and zero out flame alpha.
@@ -1132,6 +1099,255 @@ export class CandleFlamesEffectV2 {
     this._updateGlowFlicker(timeInfo);
   }
 
+  /** @private */
+  _isCandleViewStreamingEnabled() {
+    return this.params.candleViewStreaming !== false;
+  }
+
+  /** @private */
+  _effectiveShowFlames() {
+    return !!this.params.flamesEnabled;
+  }
+
+  /**
+   * Zoom LOD profile for instanced candle flame sprites.
+   * Lags behind tile streaming detail — full flames until overview focal LOD.
+   *
+   * @returns {{ motionMul: number, detailMul: number, compact: boolean, throttleGlow: boolean, lodKey: 'full'|'compact'|'minimal' }}
+   * @private
+   */
+  _resolveCandleFlameLodProfile() {
+    const focalLod = resolveFocalLodFromZoom();
+    if (focalLod >= CANDLE_FLAME_MINIMAL_FOCAL_LOD) {
+      return { motionMul: 0.0, detailMul: 0.0, compact: true, throttleGlow: true, lodKey: 'minimal' };
+    }
+    if (focalLod >= CANDLE_FLAME_COMPACT_FOCAL_LOD) {
+      return { motionMul: 0.35, detailMul: 0.15, compact: true, throttleGlow: false, lodKey: 'compact' };
+    }
+    return { motionMul: 1.0, detailMul: 1.0, compact: false, throttleGlow: false, lodKey: 'full' };
+  }
+
+  /** @private */
+  _syncFlameShaderUniforms() {
+    const m = this._flameMaterial;
+    if (!m?.uniforms) return;
+
+    const profile = this._resolveCandleFlameLodProfile();
+    const p = this.params;
+    const u = m.uniforms;
+
+    if (u.uOpacity) {
+      u.uOpacity.value = p.flameOpacity * this._computeDayNightIntensityMul();
+    }
+    if (u.uFlickerSpeed) u.uFlickerSpeed.value = p.flameFlickerSpeed;
+    if (u.uFlickerStrength) u.uFlickerStrength.value = p.flameFlickerStrength;
+    if (u.uFlickerSpeedJitter) u.uFlickerSpeedJitter.value = p.flameFlickerSpeedJitter;
+    if (u.uFlickerStrengthJitter) u.uFlickerStrengthJitter.value = p.flameFlickerStrengthJitter;
+    if (u.uOvality) u.uOvality.value = p.flameOvality;
+    if (u.uWobble) u.uWobble.value = p.flameWobble * profile.detailMul;
+    if (u.uWobbleSpeed) u.uWobbleSpeed.value = p.flameWobbleSpeed;
+    if (u.uWobbleNoise) u.uWobbleNoise.value = p.flameWobbleNoise * profile.detailMul;
+    if (u.uShapeDistort) u.uShapeDistort.value = p.flameShapeDistort * profile.detailMul;
+    if (u.uIndoorSway) u.uIndoorSway.value = p.flameIndoorSway * profile.motionMul;
+    if (u.uDraftiness) u.uDraftiness.value = p.draftiness * profile.motionMul;
+    if (u.uOutdoorWindInfluence) u.uOutdoorWindInfluence.value = p.outdoorWindInfluence * profile.motionMul;
+    if (u.uOutdoorSway) u.uOutdoorSway.value = p.outdoorSway * profile.motionMul;
+
+    if (u.uWindSpeed) {
+      let ws = 0.0;
+      try {
+        ws = Number(weatherController?.getCurrentState?.()?.windSpeed ?? weatherController?.currentState?.windSpeed ?? 0.0) || 0.0;
+      } catch (_) {
+        ws = 0.0;
+      }
+      u.uWindSpeed.value = Math.max(0.0, Math.min(1.0, ws * profile.motionMul));
+    }
+
+    if (u.uWindDir) {
+      try {
+        const state = weatherController?.getCurrentState?.() ?? weatherController?.currentState;
+        const dir = state?.windDirection;
+        if (dir && Number.isFinite(dir.x) && Number.isFinite(dir.y)) {
+          u.uWindDir.value.set(dir.x, -dir.y);
+        }
+      } catch (_) {
+      }
+    }
+  }
+
+  /**
+   * Minimap snapshot of candle cluster view-streaming state.
+   * @returns {{ clusters: Array<{ clusterKey: string, bounds: object, state: string }>, activeCount: number, totalCount: number }}
+   */
+  getCandleStreamingMinimapSnapshot() {
+    const profile = this._resolveCandleFlameLodProfile();
+    const view = resolveFireStreamingViewRect();
+    /** @type {Array<{ clusterKey: string, bounds: object, active: boolean, compact?: boolean }>} */
+    const rows = [];
+    for (const entry of this._clusterRegistry) {
+      if (!entry?.bounds) continue;
+      const inView = !this._isCandleViewStreamingEnabled() || isFireBucketInView(entry.bounds, view);
+      const active = this._activeClusterKeys.has(entry.key);
+      const compact = profile.compact && inView && active && this._effectiveShowFlames();
+      rows.push({
+        clusterKey: entry.key,
+        bounds: entry.bounds,
+        active: inView && active,
+        compact,
+      });
+    }
+    const clusters = buildCandleMinimapEntries(rows);
+    const activeCount = clusters.filter((c) => c.state === 'candle-active' || c.state === 'candle-compact').length;
+    return { clusters, activeCount, totalCount: clusters.length };
+  }
+
+  /**
+   * @returns {{ viewStreaming: boolean, detailTier: string, totalClusters: number, activeClusters: number, culledClusters: number }}
+   */
+  getCandleStreamingReportSummary() {
+    const snap = this.getCandleStreamingMinimapSnapshot();
+    const profile = this._resolveCandleFlameLodProfile();
+    return {
+      viewStreaming: this._isCandleViewStreamingEnabled(),
+      detailTier: this._lastDetailTier ?? getStreamingDetailTier(),
+      candleFlameLod: profile.lodKey,
+      focalLod: resolveFocalLodFromZoom(),
+      totalClusters: snap.totalCount,
+      activeClusters: snap.activeCount,
+      culledClusters: Math.max(0, snap.totalCount - snap.activeCount),
+    };
+  }
+
+  /**
+   * @param {Set<string>} activeKeys
+   * @param {import('../../streaming/streaming-detail-api.js').StreamingDetailTier} [tier]
+   * @private
+   */
+  _applyActiveClusters(activeKeys, tier = this._lastDetailTier) {
+    this._activeClusterKeys = new Set(activeKeys ?? []);
+    const showFlames = this._effectiveShowFlames();
+
+    this._clusters.length = 0;
+    for (const entry of this._clusterRegistry) {
+      if (!this._activeClusterKeys.has(entry.key)) continue;
+      if (entry.cluster) this._clusters.push(entry.cluster);
+    }
+
+    const maxFlames = Math.max(0, this.params.maxFlames | 0);
+    const flameSize = Math.max(1, this.params.flameSizePx);
+    const sizeJitter = Math.max(0.0, Math.min(1.0, Number(this.params.flameSizeJitter) || 0.0));
+    const groundZ = this._getGroundZ();
+    const baseR = 1.0;
+    const baseG = 1.0;
+    const baseB = 1.0;
+
+    let writtenBelow = 0;
+    let writtenAbove = 0;
+
+    if (showFlames) {
+      for (const entry of this._clusterRegistry) {
+        if (!this._activeClusterKeys.has(entry.key)) continue;
+        for (const pt of entry.points ?? []) {
+          const wx = pt.x;
+          const wy = pt.y;
+          const renderLayer = pt.renderLayer ?? MAP_POINT_RENDER_LAYER_BELOW;
+          const outdoor = Number.isFinite(Number(pt.outdoor))
+            ? Number(pt.outdoor)
+            : this._sampleGlowOutdoorAtWorld(wx, wy, {
+              floorIndex: pt.floorCtx?.floorIndex,
+              renderLayer,
+            });
+          const aboveOverhead = renderLayer === MAP_POINT_RENDER_LAYER_ABOVE;
+          const flameMesh = aboveOverhead ? this._flameMeshAbove : this._flameMeshBelow;
+          const writeIdx = aboveOverhead ? writtenAbove : writtenBelow;
+          if (!flameMesh || writeIdx >= maxFlames) continue;
+
+          const phase = this._hash2(wx, wy);
+          const sizeRand = Math.sin((phase + 0.13) * 1000.0) * 43758.5453;
+          const size01 = sizeRand - Math.floor(sizeRand);
+          const sizeVar = 1.0 + (size01 * 2.0 - 1.0) * sizeJitter;
+          const s = Math.max(1.0, flameSize * Math.max(0.2, sizeVar));
+
+          this._dummy.position.set(wx, wy, groundZ + 3.5);
+          this._dummy.rotation.set(0, 0, phase * Math.PI * 2);
+          this._dummy.scale.set(s, s, 1);
+          this._dummy.updateMatrix();
+          flameMesh.setMatrixAt(writeIdx, this._dummy.matrix);
+
+          const phaseArray = aboveOverhead ? this._phaseArrayAbove : this._phaseArrayBelow;
+          const outdoorArray = aboveOverhead ? this._outdoorArrayAbove : this._outdoorArrayBelow;
+          const intensityArray = aboveOverhead ? this._intensityArrayAbove : this._intensityArrayBelow;
+          const colorArray = aboveOverhead ? this._colorArrayAbove : this._colorArrayBelow;
+
+          phaseArray[writeIdx] = phase;
+          outdoorArray[writeIdx] = outdoor;
+          intensityArray[writeIdx] = Math.max(0.25, Number(pt.intensity) || 0);
+          const cIdx = writeIdx * 3;
+          colorArray[cIdx] = baseR;
+          colorArray[cIdx + 1] = baseG;
+          colorArray[cIdx + 2] = baseB;
+
+          if (aboveOverhead) writtenAbove += 1;
+          else writtenBelow += 1;
+        }
+      }
+    }
+
+    this._sourceFlameCount = writtenBelow + writtenAbove;
+    this._setFlameCounts(
+      showFlames && this.params.flamesEnabled ? writtenBelow : 0,
+      showFlames && this.params.flamesEnabled ? writtenAbove : 0,
+    );
+    this._applyFlameMeshRenderOrders();
+    this._applyVisibility();
+
+    if (this._clusters.length) {
+      this._rebuildGlowMeshes();
+    } else {
+      this._clearGlowBuckets();
+    }
+  }
+
+  /**
+   * @param {{ createBudget?: number }} [options]
+   * @returns {boolean}
+   * @private
+   */
+  _syncCandleClusterView(options = {}) {
+    if (!this._clusterRegistry.length) return false;
+
+    const createBudget = Number.isFinite(Number(options.createBudget))
+      ? Math.max(0, Math.floor(Number(options.createBudget)))
+      : CANDLE_STREAM_CREATE_BUDGET;
+    const view = this._isCandleViewStreamingEnabled() ? resolveFireStreamingViewRect() : null;
+
+    /** @type {Set<string>} */
+    const nextActive = new Set();
+    let created = 0;
+
+    if (!this._isCandleViewStreamingEnabled()) {
+      for (const entry of this._clusterRegistry) nextActive.add(entry.key);
+    } else {
+      for (const entry of this._clusterRegistry) {
+        const inView = isFireBucketInView(entry.bounds, view);
+        if (inView) {
+          if (!this._activeClusterKeys.has(entry.key)) {
+            if (created >= createBudget) continue;
+            created += 1;
+          }
+          nextActive.add(entry.key);
+        }
+      }
+    }
+
+    const sig = [...nextActive].sort().join(',');
+    const prevSig = [...this._activeClusterKeys].sort().join(',');
+    if (sig === prevSig) return false;
+
+    this._applyActiveClusters(nextActive);
+    return true;
+  }
+
   render() {
   }
 
@@ -1158,24 +1374,96 @@ export class CandleFlamesEffectV2 {
   }
 
   /**
+   * Default outdoors strength when the _Outdoors CPU snapshot is unavailable.
+   * Chandeliers (above-overhead) assume indoor; ground candles assume outdoor.
+   * @private
+   * @param {'below-overhead'|'above-overhead'} [renderLayer]
+   * @returns {number}
+   */
+  _resolveCandleOutdoorFallback(renderLayer = MAP_POINT_RENDER_LAYER_BELOW) {
+    return renderLayer === MAP_POINT_RENDER_LAYER_ABOVE ? 0.0 : 1.0;
+  }
+
+  /**
    * Authored _Outdoors at Three world XY (per-floor compositor mask, not WeatherController roof cache).
    * @private
    * @param {number} worldX
    * @param {number} worldY
+   * @param {{ floorIndex?: number, renderLayer?: 'below-overhead'|'above-overhead' }} [opts]
    * @returns {number} 0..1 outdoors strength
    */
-  _sampleGlowOutdoorAtWorld(worldX, worldY) {
+  _sampleGlowOutdoorAtWorld(worldX, worldY, opts = {}) {
+    const renderLayer = opts.renderLayer === MAP_POINT_RENDER_LAYER_ABOVE
+      ? MAP_POINT_RENDER_LAYER_ABOVE
+      : MAP_POINT_RENDER_LAYER_BELOW;
+    const floorIndex = Number.isFinite(Number(opts.floorIndex))
+      ? Math.max(0, Math.floor(Number(opts.floorIndex)))
+      : this._resolveGlowFloorIndex();
+    const levelContext = this._activeLevelContext ?? window.MapShine?.activeLevelContext ?? null;
     const bounds = this._sceneBounds ?? buildEffectSceneBoundsFromCanvas();
+    const fallback = this._resolveCandleOutdoorFallback(renderLayer);
+
+    try {
+      syncSharedOutdoorsMaskForFloor(floorIndex, this._outdoorsMaskFrameToken, levelContext);
+    } catch (_) {}
+
     const raw = sampleAuthoredOutdoorsAtWorld(
-      this._resolveGlowFloorIndex(),
+      floorIndex,
       worldX,
       worldY,
       bounds,
       this._outdoorsMaskFrameToken,
-      this._activeLevelContext ?? window.MapShine?.activeLevelContext ?? null,
+      levelContext,
     );
-    if (raw == null || !Number.isFinite(raw)) return 1.0;
+    if (raw == null || !Number.isFinite(raw)) return fallback;
     return clamp01(raw);
+  }
+
+  /**
+   * Re-sample indoor/outdoor for every registry point + cluster after _Outdoors decode.
+   * @private
+   */
+  _refreshCandleOutdoorsClassification() {
+    if (!this._clusterRegistry?.length) return;
+
+    this._syncSceneBounds();
+
+    for (const entry of this._clusterRegistry) {
+      if (!entry) continue;
+      const cluster = entry.cluster;
+      const renderLayer = cluster?.renderLayer
+        ?? entry.points?.[0]?.renderLayer
+        ?? MAP_POINT_RENDER_LAYER_BELOW;
+      const floorIndex = cluster?.floorCtx?.floorIndex
+        ?? entry.points?.[0]?.floorCtx?.floorIndex;
+
+      let minOutdoor = 1.0;
+      let count = 0;
+
+      for (const pt of entry.points ?? []) {
+        if (!pt) continue;
+        const outdoor = this._sampleGlowOutdoorAtWorld(pt.x, pt.y, {
+          floorIndex: pt.floorCtx?.floorIndex ?? floorIndex,
+          renderLayer: pt.renderLayer ?? renderLayer,
+        });
+        pt.outdoor = outdoor;
+        minOutdoor = Math.min(minOutdoor, outdoor);
+        count += 1;
+      }
+
+      if (!cluster || count <= 0) continue;
+
+      const outdoorAtCenter = this._sampleGlowOutdoorAtWorld(cluster.cxWorld, cluster.cyWorld, {
+        floorIndex,
+        renderLayer,
+      });
+      cluster.outdoor = Math.min(
+        Number.isFinite(minOutdoor) ? minOutdoor : outdoorAtCenter,
+        outdoorAtCenter,
+      );
+    }
+
+    this._applyActiveClusters(this._activeClusterKeys);
   }
 
   dispose() {
@@ -1320,8 +1608,18 @@ export class CandleFlamesEffectV2 {
    * @param {number} outdoor01
    * @returns {0|1}
    */
+  _resolveGlowBalanceOutdoorThreshold() {
+    const raw = Number(this.params.indoorThreshold);
+    return Number.isFinite(raw) ? clamp01(raw) : GLOW_BALANCE_OUTDOOR_THRESHOLD;
+  }
+
+  /** @private @param {number} outdoor01 @returns {boolean} */
+  _isCandleIndoorOutdoorSample(outdoor01) {
+    return clamp01(Number(outdoor01) || 0) <= this._resolveGlowBalanceOutdoorThreshold();
+  }
+
   _snapGlowBalanceOutdoor(outdoor01) {
-    return clamp01(Number(outdoor01) || 0) > GLOW_BALANCE_OUTDOOR_THRESHOLD ? 1.0 : 0.0;
+    return this._isCandleIndoorOutdoorSample(outdoor01) ? 0.0 : 1.0;
   }
 
   /** @private @param {number} outdoor01 */
@@ -1803,8 +2101,8 @@ export class CandleFlamesEffectV2 {
     for (const wallLike of walls) {
       const doc = wallLike?.document ?? wallLike;
       if (!doc) continue;
-      if (Number(doc.light ?? 0) !== 0) continue;
-      if (Number(doc.sight ?? 0) === 0) continue;
+      if (readWallSenseRestriction(doc, 'light') !== 0) continue;
+      if (readWallSenseRestriction(doc, 'sight') === 0) continue;
       sightOnlyWalls.push(wallLike);
     }
     if (!sightOnlyWalls.length) return [];
@@ -2349,6 +2647,8 @@ export class CandleFlamesEffectV2 {
       this._sourceFlameCount = 0;
       this._setFlameCount(0);
       this._clusters.length = 0;
+      this._clusterRegistry = [];
+      this._activeClusterKeys.clear();
       this._clearGlowBuckets();
       return;
     }
@@ -2399,6 +2699,8 @@ export class CandleFlamesEffectV2 {
       this._sourceFlameCount = 0;
       this._setFlameCount(0);
       this._clusters.length = 0;
+      this._clusterRegistry = [];
+      this._activeClusterKeys.clear();
       this._clearGlowBuckets();
       return;
     }
@@ -2409,19 +2711,8 @@ export class CandleFlamesEffectV2 {
 
     const groundZ = this._getGroundZ();
 
-    const maxFlames = Math.max(0, this.params.maxFlames | 0);
-    const flameSize = Math.max(1, this.params.flameSizePx);
-    const sizeJitter = Math.max(0.0, Math.min(1.0, Number(this.params.flameSizeJitter) || 0.0));
-
-    const baseR = 1.0;
-    const baseG = 1.0;
-    const baseB = 1.0;
-
     const buckets = new Map();
     const bucketSize = Math.max(32, this.params.glowBucketSizePx);
-
-    let writtenBelow = 0;
-    let writtenAbove = 0;
 
     for (let i = 0; i < points.length; i++) {
       const pt = points[i];
@@ -2429,7 +2720,10 @@ export class CandleFlamesEffectV2 {
       const wy = pt.y;
       const renderLayer = pt.renderLayer ?? MAP_POINT_RENDER_LAYER_BELOW;
 
-      const outdoor = this._sampleGlowOutdoorAtWorld(wx, wy);
+      const outdoor = this._sampleGlowOutdoorAtWorld(wx, wy, {
+        floorIndex: pt.floorCtx?.floorIndex,
+        renderLayer,
+      });
 
       const bx = Math.floor(wx / bucketSize);
       const by = Math.floor(wy / bucketSize);
@@ -2447,6 +2741,7 @@ export class CandleFlamesEffectV2 {
           count: 0,
           floorCtx: null,
           renderLayer,
+          points: [],
         };
         buckets.set(key, b);
       }
@@ -2460,52 +2755,10 @@ export class CandleFlamesEffectV2 {
         : 0;
       b.minOutdoor = Math.min(b.minOutdoor, outdoor);
       b.count += 1;
-
-      const aboveOverhead = renderLayer === MAP_POINT_RENDER_LAYER_ABOVE;
-      const flameMesh = aboveOverhead ? this._flameMeshAbove : this._flameMeshBelow;
-      const writeIdx = aboveOverhead ? writtenAbove : writtenBelow;
-      if (flameMesh && writeIdx < maxFlames) {
-        const phase = this._hash2(wx, wy);
-
-        // Stable per-candle size variance (avoids synchronous “clone” look).
-        const sizeRand = Math.sin((phase + 0.13) * 1000.0) * 43758.5453;
-        const size01 = sizeRand - Math.floor(sizeRand);
-        const sizeVar = 1.0 + (size01 * 2.0 - 1.0) * sizeJitter;
-        const s = Math.max(1.0, flameSize * Math.max(0.2, sizeVar));
-
-        this._dummy.position.set(wx, wy, groundZ + 3.5);
-        this._dummy.rotation.set(0, 0, phase * Math.PI * 2);
-        this._dummy.scale.set(s, s, 1);
-        this._dummy.updateMatrix();
-        flameMesh.setMatrixAt(writeIdx, this._dummy.matrix);
-
-        const phaseArray = aboveOverhead ? this._phaseArrayAbove : this._phaseArrayBelow;
-        const outdoorArray = aboveOverhead ? this._outdoorArrayAbove : this._outdoorArrayBelow;
-        const intensityArray = aboveOverhead ? this._intensityArrayAbove : this._intensityArrayBelow;
-        const colorArray = aboveOverhead ? this._colorArrayAbove : this._colorArrayBelow;
-
-        phaseArray[writeIdx] = phase;
-        outdoorArray[writeIdx] = outdoor;
-        intensityArray[writeIdx] = Math.max(0.25, Number(pt.intensity) || 0);
-
-        const cIdx = writeIdx * 3;
-        colorArray[cIdx] = baseR;
-        colorArray[cIdx + 1] = baseG;
-        colorArray[cIdx + 2] = baseB;
-
-        if (aboveOverhead) writtenAbove += 1;
-        else writtenBelow += 1;
-      }
+      b.points.push({ ...pt, outdoor });
     }
 
-    this._sourceFlameCount = writtenBelow + writtenAbove;
-    this._setFlameCounts(
-      this.params.flamesEnabled ? writtenBelow : 0,
-      this.params.flamesEnabled ? writtenAbove : 0,
-    );
-    this._applyFlameMeshRenderOrders();
-
-    this._clusters.length = 0;
+    this._clusterRegistry = [];
 
     const maxBuckets = Math.max(1, this.params.glowMaxBuckets | 0);
     const belowList = [];
@@ -2531,7 +2784,12 @@ export class CandleFlamesEffectV2 {
     const pushClusterFromBucket = (b) => {
       const cxWorld = b.sumX / b.count;
       const cyWorld = b.sumY / b.count;
-      const outdoorAtCenter = this._sampleGlowOutdoorAtWorld(cxWorld, cyWorld);
+      const floorCtx = b.floorCtx ?? this._resolveGroupFloorContext(null);
+      const bucketRenderLayer = b.renderLayer ?? MAP_POINT_RENDER_LAYER_BELOW;
+      const outdoorAtCenter = this._sampleGlowOutdoorAtWorld(cxWorld, cyWorld, {
+        floorIndex: floorCtx.floorIndex,
+        renderLayer: bucketRenderLayer,
+      });
       const outdoorForGlow = Math.min(
         Number.isFinite(b.minOutdoor) ? b.minOutdoor : outdoorAtCenter,
         outdoorAtCenter,
@@ -2544,12 +2802,11 @@ export class CandleFlamesEffectV2 {
       const clipRadiusPx = radiusPx;
 
       const foundryCenter = Coordinates.toFoundry(cxWorld, cyWorld);
-      const floorCtx = b.floorCtx ?? this._resolveGroupFloorContext(null);
       const clipElevation = b.sumClipElevation > 0
         ? (b.sumClipElevation / Math.max(1, b.count))
         : floorCtx.clipElevation;
 
-      this._clusters.push({
+      return {
         key: b.key,
         cxWorld,
         cyWorld,
@@ -2567,17 +2824,32 @@ export class CandleFlamesEffectV2 {
         outdoor: outdoorForGlow,
         color: this._computeGlowColor(glow.warmth),
         renderLayer: b.renderLayer ?? MAP_POINT_RENDER_LAYER_BELOW,
-      });
+      };
     };
 
     for (let i = 0; i < takeBelow; i++) {
-      pushClusterFromBucket(belowList[i]);
+      const b = belowList[i];
+      const cluster = pushClusterFromBucket(b);
+      this._clusterRegistry.push({
+        key: b.key,
+        bounds: glowCentroidBounds(cluster.cxWorld, cluster.cyWorld, cluster.radiusPx),
+        points: b.points ?? [],
+        cluster,
+      });
     }
     for (let i = 0; i < takeAbove; i++) {
-      pushClusterFromBucket(aboveList[i]);
+      const b = aboveList[i];
+      const cluster = pushClusterFromBucket(b);
+      this._clusterRegistry.push({
+        key: b.key,
+        bounds: glowCentroidBounds(cluster.cxWorld, cluster.cyWorld, cluster.radiusPx),
+        points: b.points ?? [],
+        cluster,
+      });
     }
 
-    this._rebuildGlowMeshes();
+    this._clusters.length = 0;
+    this._syncCandleClusterView({ createBudget: Infinity });
   }
 
   _setFlameCounts(belowCount, aboveCount) {
@@ -2587,7 +2859,7 @@ export class CandleFlamesEffectV2 {
     const maxFlames = Math.max(0, this.params.maxFlames | 0);
     const below = Math.max(0, Math.min(maxFlames, belowCount | 0));
     const above = Math.max(0, Math.min(maxFlames, aboveCount | 0));
-    const showFlames = !!this.params.flamesEnabled;
+    const showFlames = !!this.params.flamesEnabled && this._effectiveShowFlames();
 
     if (this._flameMeshBelow) {
       this._flameMeshBelow.count = below;
@@ -2677,12 +2949,9 @@ export class CandleFlamesEffectV2 {
 
   /** Refresh glow pool outdoor classification + meshes after _Outdoors CPU decode updates. */
   onOutdoorsMaskUpdated() {
-    if (!this.params.glowEnabled || !this._clusters?.length) return;
-    this._syncSceneBounds();
-    for (const c of this._clusters) {
-      if (!c) continue;
-      c.outdoor = this._sampleGlowOutdoorAtWorld(c.cxWorld, c.cyWorld);
-    }
+    this._outdoorsMaskFrameToken += 1;
+    if (!this.params.enabled || !this._clusterRegistry?.length) return;
+    this._refreshCandleOutdoorsClassification();
     this._outdoorsGlowRebuildPending = true;
   }
 
@@ -2733,7 +3002,7 @@ export class CandleFlamesEffectV2 {
       if (!c) continue;
 
       const outdoor = Math.max(0, Math.min(1, Number(c.outdoor) ?? 1));
-      const indoor = outdoor < GLOW_BALANCE_OUTDOOR_THRESHOLD;
+      const indoor = this._isCandleIndoorOutdoorSample(outdoor);
       const glow = this._resolveGlowParams(null, outdoor);
       const centerFoundry = { x: c.cxFoundry, y: c.cyFoundry };
       const clipScale = Math.max(0.1, Number(this.params.wallClipRadiusScale) || 1.0);
@@ -2854,7 +3123,7 @@ export class CandleFlamesEffectV2 {
    * }}
    */
   _computeUnifiedCandleMotion(t, phase, outdoor, poolRadiusPx) {
-    const indoor = outdoor < GLOW_BALANCE_OUTDOOR_THRESHOLD;
+    const indoor = this._isCandleIndoorOutdoorSample(outdoor);
     const poolR = Math.max(32, Number(poolRadiusPx) || 32);
 
     const rand01 = this._hash2(phase, 0.13);
@@ -3003,6 +3272,14 @@ export class CandleFlamesEffectV2 {
   _updateGlowFlicker(timeInfo) {
     if (!this.params.glowEnabled) return;
     if (!this._glowBuckets.size) return;
+
+    const profile = this._resolveCandleFlameLodProfile();
+    if (profile.throttleGlow) {
+      this._glowFlickerSkipCounter += 1;
+      if (this._glowFlickerSkipCounter % 3 !== 0) return;
+    } else {
+      this._glowFlickerSkipCounter = 0;
+    }
 
     const THREE = window.THREE;
     if (!THREE) return;

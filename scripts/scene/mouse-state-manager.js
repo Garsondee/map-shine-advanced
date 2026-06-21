@@ -8,6 +8,7 @@
  */
 
 import Coordinates from '../utils/coordinates.js';
+import { CanvasRectCache } from '../utils/canvas-rect-cache.js';
 
 export class MouseStateManager {
   /**
@@ -19,8 +20,9 @@ export class MouseStateManager {
     this.canvasElement = canvasElement;
     this.sceneComposer = sceneComposer;
 
-    this._canvasRectCache = { left: 0, top: 0, width: 0, height: 0, ts: 0 };
-    this._canvasRectCacheMaxAgeMs = 250;
+    /** @type {CanvasRectCache} */
+    this.canvasRectCache = new CanvasRectCache();
+    if (canvasElement) this.canvasRectCache.attach(canvasElement);
 
     const THREE = window.THREE;
     this._raycaster = THREE ? new THREE.Raycaster() : null;
@@ -43,7 +45,7 @@ export class MouseStateManager {
   /** @param {HTMLElement} canvasElement */
   setCanvasElement(canvasElement) {
     this.canvasElement = canvasElement;
-    this.getCanvasRectCached(true);
+    this.canvasRectCache.attach(canvasElement);
   }
 
   /** @param {object} sceneComposer */
@@ -52,30 +54,8 @@ export class MouseStateManager {
   }
 
   getCanvasRectCached(force = false) {
-    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-    const cache = this._canvasRectCache;
-
-    if (!force && cache.width > 0 && cache.height > 0 && (now - (cache.ts || 0)) < this._canvasRectCacheMaxAgeMs) {
-      return cache;
-    }
-
-    const rect = this.canvasElement?.getBoundingClientRect?.() ?? null;
-    if (rect) {
-      cache.left = rect.left;
-      cache.top = rect.top;
-      cache.width = rect.width;
-      cache.height = rect.height;
-    }
-
-    if (!cache.width || !cache.height) {
-      cache.left = 0;
-      cache.top = 0;
-      cache.width = window.innerWidth;
-      cache.height = window.innerHeight;
-    }
-
-    cache.ts = now;
-    return cache;
+    if (force) this.canvasRectCache.refreshSync();
+    return this.canvasRectCache.get();
   }
 
   /**

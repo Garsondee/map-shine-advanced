@@ -934,6 +934,8 @@ export class FloorCompositor {
     this._tempVec3_3 = null;
 
     this._tempActiveLevels = new Set();
+    /** @type {Map<number, object>|null} Reused by _renderPerLevelPipeline floor lookup. */
+    this._floorsByIndexCache = null;
     this._tempLevelFinalRTs = [];
     this._tempLevelSceneRTs = [];
     this._tempPerLevelEntries = [];
@@ -3116,6 +3118,20 @@ export class FloorCompositor {
    *
    * @returns {number}
    */
+  /**
+   * @returns {import('./effects/FireEffectV2.js').FireEffectV2}
+   */
+  getFireEffect() {
+    return this._fireEffect;
+  }
+
+  /**
+   * @returns {import('./effects/CandleFlamesEffectV2.js').CandleFlamesEffectV2}
+   */
+  getCandleFlamesEffect() {
+    return this._candleFlamesEffect;
+  }
+
   getPreferredContinuousFps() {
     try {
       if (this.wantsContinuousRender()) {
@@ -6877,6 +6893,7 @@ export class FloorCompositor {
       if (signatureChanged) {
         try { this._fireEffect?.onOutdoorsMaskUpdated?.(); } catch (_) {}
         try { this._candleFlamesEffect?.onOutdoorsMaskUpdated?.(); } catch (_) {}
+        try { this._waterSplashesEffect?.onOutdoorsMaskUpdated?.(); } catch (_) {}
       }
     } catch (err) {
       log.warn('FloorCompositor: outdoors mask sync failed:', err);
@@ -8497,9 +8514,11 @@ export class FloorCompositor {
     // when multiple floors are visible.
     const dbgWaterOcc = _alphaIsoDebug?.disableWaterOccluder;
     const _disableWaterOccluder = dbgWaterOcc === true;
-    const floorsByIndex = new Map(
-      (floorStack?.getFloors?.() ?? []).map((f) => [Number(f?.index), f]),
-    );
+    const floorsByIndex = this._floorsByIndexCache ?? (this._floorsByIndexCache = new Map());
+    floorsByIndex.clear();
+    for (const f of floorStack?.getFloors?.() ?? []) {
+      floorsByIndex.set(Number(f?.index), f);
+    }
     const resolveWaterOutdoorsForFloor = (floorIndex) => {
       try {
         const idx = Number(floorIndex);
@@ -8559,7 +8578,8 @@ export class FloorCompositor {
     const topVisibleFloorIndexForFire = Number(visibleFloors[visibleFloors.length - 1]?.index ?? 0);
 
     // Track which level indices are active so we can release stale pool entries.
-    const activeLevels = new Set();
+    const activeLevels = this._tempActiveLevels;
+    activeLevels.clear();
     const levelFinalRTs = [];
     const levelLitRTs = [];
     // Parallel array of raw sceneRTs (post-`renderFloorRangeTo`, pre-any-pass).

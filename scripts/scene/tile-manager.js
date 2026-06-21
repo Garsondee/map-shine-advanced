@@ -222,7 +222,82 @@ function occlusionModeEntryToBit(m) {
 }
 
 /**
- * Bitmask of Foundry tile occlusion modes (v14 `occlusion.modes` set/array, or legacy `occlusion.mode`).
+ * Per-TileDocument cache for {@link getTileOcclusionModeFlags}. Invalidated when
+ * the live `occlusion.modes` reference changes or via {@link invalidateTileOcclusionModeFlagsCache}.
+ * @type {WeakMap<object, { modesRef: unknown, flags: number }>}
+ */
+const _tileOcclusionFlagsCache = new WeakMap();
+
+/**
+ * Drop cached occlusion flags for a tile (call from updateTile when occlusion changes).
+ * @param {object|null|undefined} tileDoc
+ */
+export function invalidateTileOcclusionModeFlagsCache(tileDoc) {
+  if (tileDoc && typeof tileDoc === 'object') {
+    _tileOcclusionFlagsCache.delete(tileDoc);
+  }
+}
+
+/**
+ * Read legacy single-mode from raw document source only.
+ * Foundry v14 exposes `occlusion.mode` as a deprecated getter that calls
+ * `logCompatibilityWarning` on every access — never read it from live documents.
+ * @param {object|null|undefined} tileDoc
+ * @returns {unknown}
+ */
+function readLegacyOcclusionModeFromSource(tileDoc) {
+  const src = tileDoc?._source?.occlusion;
+  if (!src || typeof src !== 'object') return null;
+  if (!Object.prototype.hasOwnProperty.call(src, 'mode')) return null;
+  return src.mode;
+}
+
+/**
+ * @param {object} o - occlusion sub-object (`occlusion` or `_source.occlusion`)
+ * @returns {number}
+ */
+function accumulateOcclusionModes(o) {
+  const NONE = (typeof CONST !== 'undefined' && CONST.TILE_OCCLUSION_MODES)
+    ? CONST.TILE_OCCLUSION_MODES.NONE
+    : 0;
+
+  let flags = NONE;
+  const modes = o.modes;
+  if (modes == null) return flags;
+
+  if (modes instanceof Set) {
+    for (const m of modes) {
+      const v = occlusionModeEntryToBit(m);
+      if (Number.isFinite(v)) flags |= v;
+    }
+  } else if (typeof modes.forEach === 'function' && !Array.isArray(modes)) {
+    try {
+      modes.forEach((m) => {
+        const v = occlusionModeEntryToBit(m);
+        if (Number.isFinite(v)) flags |= v;
+      });
+    } catch (_) {
+    }
+  } else if (Array.isArray(modes)) {
+    for (let i = 0; i < modes.length; i++) {
+      const v = occlusionModeEntryToBit(modes[i]);
+      if (Number.isFinite(v)) flags |= v;
+    }
+  } else if (typeof modes[Symbol.iterator] === 'function' && typeof modes !== 'string') {
+    try {
+      for (const m of modes) {
+        const v = occlusionModeEntryToBit(m);
+        if (Number.isFinite(v)) flags |= v;
+      }
+    } catch (_) {
+    }
+  }
+  return flags;
+}
+
+/**
+ * Bitmask of Foundry tile occlusion modes (v14 `occlusion.modes` set/array).
+ * Legacy pre-v14 single `mode` is read from `_source.occlusion.mode` only.
  * @param {object|null|undefined} tileDoc
  * @returns {number}
  */
@@ -230,44 +305,33 @@ export function getTileOcclusionModeFlags(tileDoc) {
   const NONE = (typeof CONST !== 'undefined' && CONST.TILE_OCCLUSION_MODES)
     ? CONST.TILE_OCCLUSION_MODES.NONE
     : 0;
-  const o = tileDoc?.occlusion ?? tileDoc?._source?.occlusion;
-  if (!o || typeof o !== 'object') return NONE;
+  if (!tileDoc || typeof tileDoc !== 'object') return NONE;
 
-  let flags = NONE;
-  const modes = o.modes;
-  if (modes != null) {
-    if (modes instanceof Set) {
-      for (const m of modes) {
-        const v = occlusionModeEntryToBit(m);
-        if (Number.isFinite(v)) flags |= v;
-      }
-    } else if (typeof modes.forEach === 'function' && !Array.isArray(modes)) {
-      try {
-        modes.forEach((m) => {
-          const v = occlusionModeEntryToBit(m);
-          if (Number.isFinite(v)) flags |= v;
-        });
-      } catch (_) {
-      }
-    } else if (Array.isArray(modes)) {
-      for (let i = 0; i < modes.length; i++) {
-        const v = occlusionModeEntryToBit(modes[i]);
-        if (Number.isFinite(v)) flags |= v;
-      }
-    } else if (modes && typeof modes[Symbol.iterator] === 'function' && typeof modes !== 'string') {
-      try {
-        for (const m of modes) {
-          const v = occlusionModeEntryToBit(m);
-          if (Number.isFinite(v)) flags |= v;
-        }
-      } catch (_) {
-      }
+  const liveOcclusion = tileDoc.occlusion;
+  const modesRef = liveOcclusion?.modes ?? tileDoc._source?.occlusion?.modes;
+  const cached = _tileOcclusionFlagsCache.get(tileDoc);
+  if (cached && cached.modesRef === modesRef) return cached.flags;
+
+  const o = liveOcclusion ?? tileDoc._source?.occlusion;
+  if (!o || typeof o !== 'object') {
+    _tileOcclusionFlagsCache.set(tileDoc, { modesRef, flags: NONE });
+    return NONE;
+  }
+
+  let flags = accumulateOcclusionModes(o);
+
+  // Pre-v14 documents may only have `_source.occlusion.mode` (no `modes` field).
+  // v14 always exposes `occlusion.modes` (often an empty Set = NONE); never touch
+  // the deprecated `occlusion.mode` getter on live documents.
+  if (flags === NONE && modesRef == null) {
+    const legacyMode = readLegacyOcclusionModeFromSource(tileDoc);
+    if (legacyMode != null) {
+      const v = occlusionModeEntryToBit(legacyMode);
+      if (Number.isFinite(v)) flags |= v;
     }
   }
-  if (flags === NONE && o.mode != null) {
-    const v = occlusionModeEntryToBit(o.mode);
-    if (Number.isFinite(v)) flags |= v;
-  }
+
+  _tileOcclusionFlagsCache.set(tileDoc, { modesRef, flags });
   return flags;
 }
 
@@ -2873,6 +2937,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // Update existing tile
     this._hookIds.push(['updateTile', Hooks.on('updateTile', (tileDoc, changes, options, userId) => {
       log.debug(`Tile updated: ${tileDoc.id}`, changes);
+      if (changes && typeof changes === 'object' && 'occlusion' in changes) {
+        invalidateTileOcclusionModeFlagsCache(tileDoc);
+      }
       this.updateTileSprite(tileDoc, changes);
 
       // V2 surface effects (specular, fluid, …) are populated once at scene load.

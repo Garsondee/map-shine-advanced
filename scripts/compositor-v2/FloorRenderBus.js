@@ -343,7 +343,88 @@ export class FloorRenderBus {
     /** @type {Map<string, number>} Stale-async guard for live tile streaming sync. */
     this._tileStreamingGen = new Map();
 
+    /** @type {import('three').Color|null} Reused by render paths (avoids per-call GC). */
+    this._clearColorScratch = null;
+    /** @type {Map<string, boolean>|null} Pooled visibility save maps — cleared before each borrow. */
+    this._savedVisibilityMap = null;
+    this._savedDoorVisibilityMap = null;
+    this._savedDrawingVisibilityMap = null;
+    this._savedSplashVisibilityMap = null;
+    this._savedMaterialStateMap = null;
+    this._savedDoorMaskVisibilityMap = null;
+
     log.debug('FloorRenderBus created');
+  }
+
+  /**
+   * Lazily allocate render-path scratch objects (Color + visibility Maps).
+   * @private
+   */
+  _ensureRenderScratch() {
+    const THREE = window.THREE;
+    if (THREE && !this._clearColorScratch) {
+      this._clearColorScratch = new THREE.Color();
+    }
+    if (!this._savedVisibilityMap) this._savedVisibilityMap = new Map();
+    if (!this._savedDoorVisibilityMap) this._savedDoorVisibilityMap = new Map();
+    if (!this._savedDrawingVisibilityMap) this._savedDrawingVisibilityMap = new Map();
+    if (!this._savedSplashVisibilityMap) this._savedSplashVisibilityMap = new Map();
+    if (!this._savedMaterialStateMap) this._savedMaterialStateMap = new Map();
+    if (!this._savedDoorMaskVisibilityMap) this._savedDoorMaskVisibilityMap = new Map();
+  }
+
+  /**
+   * @private
+   * @param {'tile'|'door'|'drawing'|'splash'|'material'|'doorMask'} kind
+   * @returns {Map}
+   */
+  _borrowVisibilityMap(kind) {
+    this._ensureRenderScratch();
+    let map;
+    switch (kind) {
+      case 'door': map = this._savedDoorVisibilityMap; break;
+      case 'drawing': map = this._savedDrawingVisibilityMap; break;
+      case 'splash': map = this._savedSplashVisibilityMap; break;
+      case 'material': map = this._savedMaterialStateMap; break;
+      case 'doorMask': map = this._savedDoorMaskVisibilityMap; break;
+      default: map = this._savedVisibilityMap;
+    }
+    map.clear();
+    return map;
+  }
+
+  /**
+   * @private
+   * @param {import('three').WebGLRenderer} renderer
+   * @returns {{ color: import('three').Color|null, alpha: number|null }}
+   */
+  _saveRendererClearState(renderer) {
+    this._ensureRenderScratch();
+    const THREE = window.THREE;
+    if (!THREE || typeof renderer.getClearColor !== 'function') {
+      return { color: null, alpha: null };
+    }
+    return {
+      color: renderer.getClearColor(this._clearColorScratch),
+      alpha: typeof renderer.getClearAlpha === 'function' ? renderer.getClearAlpha() : null,
+    };
+  }
+
+  /**
+   * @private
+   * @param {import('three').WebGLRenderer} renderer
+   * @param {{ color: import('three').Color|null, alpha: number|null }} saved
+   * @param {number} [restoreAlphaOverride] - When set, forces clear alpha on restore.
+   */
+  _restoreRendererClearState(renderer, saved, restoreAlphaOverride) {
+    if (!saved?.color || typeof renderer.setClearColor !== 'function') return;
+    const alpha = restoreAlphaOverride != null
+      ? restoreAlphaOverride
+      : (saved.alpha != null ? saved.alpha : 1);
+    renderer.setClearColor(saved.color, alpha);
+    if (typeof renderer.setClearAlpha === 'function') {
+      try { renderer.setClearAlpha(alpha); } catch (_) {}
+    }
   }
 
   /**
@@ -965,7 +1046,6 @@ export class FloorRenderBus {
    */
   renderTo(renderer, camera, target = null) {
     if (!this._initialized || !this._scene) return;
-    const THREE = window.THREE;
 
     // FINAL GUARD: enforce floor-slice visibility immediately before draw.
     // Some async/runtime paths can flip node.visible after earlier floor updates.
@@ -990,8 +1070,7 @@ export class FloorRenderBus {
     // Save renderer state.
     const prevTarget    = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
-    const prevColor     = renderer.getClearColor(new THREE.Color());
-    const prevAlpha     = renderer.getClearAlpha();
+    const prevClear     = this._saveRendererClearState(renderer);
 
     // Save camera layer mask and explicitly configure the main-pass layer set.
     // Tokens and tiles are assigned to floor layers (1-19) by FloorLayerManager,
@@ -1004,7 +1083,7 @@ export class FloorRenderBus {
       camera.layers.enable(i);
     }
 
-    const savedSplashVisibility = new Map();
+    const savedSplashVisibility = this._borrowVisibilityMap('splash');
     for (const [tileId, entry] of this._tiles) {
       if (!String(tileId).startsWith('ms_water_splash_batch_')) continue;
       const node = entry?.root || entry?.mesh;
@@ -1031,10 +1110,7 @@ export class FloorRenderBus {
     // CRITICAL (V2): Do not restore a transparent clearAlpha.
     // A clearAlpha of 0 makes the Three canvas effectively transparent and can
     // reveal underlying stale content as a camera-locked "ghost" overlay.
-    renderer.setClearColor(prevColor, 1);
-    if (typeof renderer.setClearAlpha === 'function') {
-      try { renderer.setClearAlpha(1); } catch (_) {}
-    }
+    this._restoreRendererClearState(renderer, prevClear, 1);
     renderer.setRenderTarget(prevTarget);
   }
 
@@ -1470,10 +1546,22 @@ export class FloorRenderBus {
 
       const tileDocForRadial = doc;
       const syncOcclFlags = tileDocForRadial ? getTileOcclusionModeFlags(tileDocForRadial) : 0;
+      const prevOcclFlags = entry._msCachedOcclFlags;
+      const occlFlagsUnchanged = prevOcclFlags === syncOcclFlags;
+      entry._msCachedOcclFlags = syncOcclFlags;
+
       const radialOn = !!(syncOcclFlags & CONST.TILE_OCCLUSION_MODES.RADIAL);
       const visionOn = !!(syncOcclFlags & CONST.TILE_OCCLUSION_MODES.VISION);
       const surfaceOn = !!(syncOcclFlags & (CONST.TILE_OCCLUSION_MODES.SURFACE ?? 2));
       const wantsFoundryMask = radialOn || visionOn || surfaceOn;
+
+      // Occlusion uniforms are expensive (shader install + radial circle push).
+      // Skip when flags are stable and this tile never needed a mask.
+      if (occlFlagsUnchanged && !wantsFoundryMask && !entry._msHadOcclusionMask) {
+        continue;
+      }
+      if (wantsFoundryMask) entry._msHadOcclusionMask = true;
+
       if (tileDocForRadial && wantsFoundryMask) {
         installBusMeshRadialOcclusionShader(entry.material);
         const busSh = entry.material?.userData?._msBusRadialOcclusionShader;
@@ -1481,6 +1569,7 @@ export class FloorRenderBus {
         applyRadialOcclusionUniformsToShader(busSh, tileDocForRadial, circles, radialOn);
         applyFoundryOcclusionMaskBusUniforms(busSh, tileDocForRadial, occBridge, true);
       } else {
+        entry._msHadOcclusionMask = false;
         const busSh = entry.material?.userData?._msBusRadialOcclusionShader;
         if (busSh) {
           const d = tileDocForRadial || doc;
@@ -2011,13 +2100,12 @@ export class FloorRenderBus {
       : (Array.isArray(excludeTileIdsRaw) ? new Set(excludeTileIdsRaw) : null);
 
     // Save each tile's current visibility so we can restore it after.
-    const savedVisibility = new Map();
-    const savedMaterialState = new Map();
-    const savedDoorMaskVisibility = new Map();
+    const savedVisibility = this._borrowVisibilityMap('tile');
+    const savedMaterialState = this._borrowVisibilityMap('material');
+    const savedDoorMaskVisibility = this._borrowVisibilityMap('doorMask');
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
-    const prevColor = renderer.getClearColor(new THREE.Color());
-    const prevAlpha = renderer.getClearAlpha();
+    const prevClear = this._saveRendererClearState(renderer);
     const prevLayerMask = camera.layers.mask;
 
     try {
@@ -2171,10 +2259,7 @@ export class FloorRenderBus {
       camera.layers.mask = prevLayerMask;
       renderer.autoClear = prevAutoClear;
       // CRITICAL (V2): Do not restore a transparent clearAlpha.
-      renderer.setClearColor(prevColor, 1);
-      if (typeof renderer.setClearAlpha === 'function') {
-        try { renderer.setClearAlpha(1); } catch (_) {}
-      }
+      this._restoreRendererClearState(renderer, prevClear, 1);
       renderer.setRenderTarget(prevTarget);
 
       for (const [tileId, wasVisible] of savedVisibility) {
@@ -2228,7 +2313,6 @@ export class FloorRenderBus {
    */
   renderFloorRangeTo(renderer, camera, minFloorIndex, maxFloorIndex, target, options = {}) {
     if (!this._initialized || !this._scene) return;
-    const THREE = window.THREE;
     const {
       includeBackground = true,
       clearBeforeRender = true,
@@ -2253,7 +2337,7 @@ export class FloorRenderBus {
     //   3. the global tile-albedo editing suppression flag
     // All other "wasVisible" state (user toggles, effect gating, warmups)
     // is a view-slice concern and is faithfully restored after the render.
-    const savedVisibility = new Map();
+    const savedVisibility = this._borrowVisibilityMap('tile');
     for (const [tileId, entry] of this._tiles) {
       const node = entry?.root || entry?.mesh;
       if (!node) continue;
@@ -2331,7 +2415,7 @@ export class FloorRenderBus {
 
     // Door meshes live on the bus scene but are not in `_tiles`; gate them the
     // same way as tiles so per-level RTs do not paint every door on every slice.
-    const savedDoorVisibility = new Map();
+    const savedDoorVisibility = this._borrowVisibilityMap('door');
     for (const ch of this._scene?.children ?? []) {
       if (ch?.userData?.type !== 'doorMesh') continue;
       savedDoorVisibility.set(ch, ch.visible === true);
@@ -2342,7 +2426,7 @@ export class FloorRenderBus {
       ch.visible = inRange && !this._suppressTileAlbedoForEditing;
     }
 
-    const savedDrawingVisibility = new Map();
+    const savedDrawingVisibility = this._borrowVisibilityMap('drawing');
     for (const ch of this._scene?.children ?? []) {
       if (ch?.userData?.type !== 'sceneDrawingsRoot') continue;
       for (const drawingGroup of ch.children ?? []) {
@@ -2357,8 +2441,8 @@ export class FloorRenderBus {
     // Save and configure renderer state.
     const prevTarget    = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
-    const prevColor     = renderer.getClearColor(new THREE.Color());
-    const prevAlpha     = renderer.getClearAlpha();
+    const prevClear     = this._saveRendererClearState(renderer);
+    const prevAlpha     = prevClear.alpha;
     const prevLayerMask = camera.layers.mask;
     camera.layers.set(0);
     for (let i = 1; i <= 19; i++) camera.layers.enable(i);
@@ -2371,10 +2455,7 @@ export class FloorRenderBus {
     // Restore camera and renderer state.
     camera.layers.mask = prevLayerMask;
     renderer.autoClear = prevAutoClear;
-    renderer.setClearColor(prevColor, prevAlpha);
-    if (typeof renderer.setClearAlpha === 'function') {
-      try { renderer.setClearAlpha(prevAlpha); } catch (_) {}
-    }
+    this._restoreRendererClearState(renderer, prevClear, prevAlpha);
     renderer.setRenderTarget(prevTarget);
 
     // Restore original tile visibility.

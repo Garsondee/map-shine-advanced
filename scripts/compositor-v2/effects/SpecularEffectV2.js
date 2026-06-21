@@ -805,6 +805,9 @@ export class SpecularEffectV2 {
    */
   update(timeInfo) {
     if (!this._initialized || !this._sharedUniforms) return;
+    // No _Specular masks on this scene — render() is already a no-op; skip per-light
+    // floor visibility work (isLightVisibleForPerspective × lights × floors each frame).
+    if (this._overlays.size === 0) return;
     const u = this._sharedUniforms;
 
     // ── Time ──────────────────────────────────────────────────────────────

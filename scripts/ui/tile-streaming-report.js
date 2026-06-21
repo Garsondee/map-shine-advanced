@@ -17,6 +17,28 @@ import {
 const log = createLogger('TileStreamingReport');
 
 /**
+ * @returns {import('../compositor-v2/effects/FireEffectV2.js').FireEffectV2|null}
+ */
+function resolveFireEffectForReport() {
+  try {
+    return window.MapShine?.floorCompositorV2?.getFireEffect?.() ?? null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * @returns {import('../compositor-v2/effects/CandleFlamesEffectV2.js').CandleFlamesEffectV2|null}
+ */
+function resolveCandleEffectForReport() {
+  try {
+    return window.MapShine?.floorCompositorV2?.getCandleFlamesEffect?.() ?? null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
  * Resolve the live FloorRenderBus from MapShine globals (V2 paths vary by load phase).
  * @returns {import('../compositor-v2/FloorRenderBus.js').FloorRenderBus|null}
  */
@@ -361,6 +383,35 @@ export function buildTileStreamingReport() {
     if (p) bakeProgress[grid._key ?? sk] = p;
   }
 
+  let fireSummary = {
+    viewStreaming: false,
+    detailTier: 'full',
+    totalBuckets: 0,
+    activeBuckets: 0,
+    culledBuckets: 0,
+    floorsWithFire: 0,
+  };
+  try {
+    const fire = resolveFireEffectForReport();
+    if (fire && typeof fire.getFireStreamingReportSummary === 'function') {
+      fireSummary = fire.getFireStreamingReportSummary();
+    }
+  } catch (_) {}
+
+  let candleSummary = {
+    viewStreaming: false,
+    detailTier: 'full',
+    totalClusters: 0,
+    activeClusters: 0,
+    culledClusters: 0,
+  };
+  try {
+    const candle = resolveCandleEffectForReport();
+    if (candle && typeof candle.getCandleStreamingReportSummary === 'function') {
+      candleSummary = candle.getCandleStreamingReportSummary();
+    }
+  } catch (_) {}
+
   const report = {
     generatedAt: new Date().toISOString(),
     scene: {
@@ -414,6 +465,8 @@ export function buildTileStreamingReport() {
       regionGrids,
       busStreamingTiles,
     },
+    fire: fireSummary,
+    candle: candleSummary,
     warnings: [],
   };
 
@@ -560,6 +613,12 @@ export function formatTileStreamingReportText(report) {
   lines.push(`Bus visible floors: 0–${report.bus.visibleMaxFloorIndex}`);
   lines.push(`Grids: ${report.streaming.backgroundGridCount} background, ${report.streaming.regionGridCount} region`);
   lines.push(`View textured cells: ${report.view.visibleCellsInFrustum}`);
+  if (report.fire) {
+    lines.push(`Fire: ${report.fire.activeBuckets}/${report.fire.totalBuckets} active (${report.fire.culledBuckets} culled), streaming=${report.fire.viewStreaming ? 'on' : 'off'}, tier=${report.fire.detailTier ?? '?'}, floors=${report.fire.floorsWithFire ?? 0}`);
+  }
+  if (report.candle) {
+    lines.push(`Candles: ${report.candle.activeClusters}/${report.candle.totalClusters} active (${report.candle.culledClusters} culled), streaming=${report.candle.viewStreaming ? 'on' : 'off'}, tier=${report.candle.detailTier ?? '?'}, flameLod=${report.candle.candleFlameLod ?? '?'} (focal ${report.candle.focalLod ?? '?'})`);
+  }
 
   if (report.warnings.length) {
     lines.push('');

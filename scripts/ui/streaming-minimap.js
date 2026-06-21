@@ -31,6 +31,28 @@ import {
 
 const log = createLogger('StreamingMinimap');
 
+/**
+ * @returns {import('../compositor-v2/effects/FireEffectV2.js').FireEffectV2|null}
+ */
+function resolveFireEffect() {
+  try {
+    return window.MapShine?.floorCompositorV2?.getFireEffect?.() ?? null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * @returns {import('../compositor-v2/effects/CandleFlamesEffectV2.js').CandleFlamesEffectV2|null}
+ */
+function resolveCandleEffect() {
+  try {
+    return window.MapShine?.floorCompositorV2?.getCandleFlamesEffect?.() ?? null;
+  } catch (_) {
+    return null;
+  }
+}
+
 const STREAMING_MINIMAP_SETTING = 'streaming-minimap-enabled';
 
 /** @type {StreamingMinimap|null} */
@@ -69,6 +91,12 @@ const STATE_COLORS = {
   hidden: 'rgba(251,146,60,0.6)',
   culled: 'rgba(71,85,105,0.35)',
   unknown: 'rgba(148,163,184,0.45)',
+  'fire-active': 'rgba(239,68,68,0.88)',
+  'fire-culled': 'rgba(127,29,29,0.35)',
+  'fire-glow-only': 'rgba(251,146,60,0.55)',
+  'candle-active': 'rgba(250,204,21,0.88)',
+  'candle-culled': 'rgba(113,63,18,0.35)',
+  'candle-compact': 'rgba(253,224,71,0.72)',
 };
 
 const STATE_LABELS = {
@@ -79,18 +107,116 @@ const STATE_LABELS = {
   hidden: 'Hidden',
   culled: 'Culled',
   unknown: 'Unknown',
+  'fire-active': 'Fire active',
+  'fire-culled': 'Fire culled',
+  'fire-glow-only': 'Fire glow-only',
+  'candle-active': 'Candle active',
+  'candle-culled': 'Candle culled',
+  'candle-compact': 'Candle compact',
 };
 
-/** Draw order — resident tiles on top. */
+/** Draw order — resident tiles on top; flame overlays above culled tiles. */
 const STATE_DRAW_ORDER = {
   culled: 0,
   hidden: 1,
+  'fire-culled': 2,
+  'candle-culled': 2,
   'fallback-only': 2,
   loading: 3,
-  'resident-lo': 4,
-  'resident-hi': 5,
+  'fire-glow-only': 4,
+  'candle-compact': 4,
+  'fire-active': 5,
+  'candle-active': 5,
+  'resident-lo': 6,
+  'resident-hi': 7,
   unknown: 1,
 };
+
+/** Glyph kinds for legend + canvas overlays. */
+const GLYPH_KINDS = new Set([
+  'fire-active', 'fire-culled', 'fire-glow-only',
+  'candle-active', 'candle-culled', 'candle-compact',
+]);
+
+/**
+ * Draw a small icon at minimap cluster center.
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {number} cx
+ * @param {number} cy
+ * @param {string} kind
+ * @param {number} [scale=1]
+ */
+function drawMinimapGlyph(ctx, cx, cy, kind, scale = 1) {
+  const s = Math.max(0.6, scale);
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.lineWidth = Math.max(0.75, 1.1 * s);
+
+  if (kind === 'fire-active' || kind === 'fire-culled' || kind === 'fire-glow-only') {
+    if (kind === 'fire-glow-only') {
+      ctx.fillStyle = STATE_COLORS['fire-glow-only'];
+      ctx.beginPath();
+      ctx.arc(0, 0, 2.2 * s, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+    ctx.beginPath();
+    ctx.moveTo(0, -3.5 * s);
+    ctx.quadraticCurveTo(2.8 * s, -1.2 * s, 1.6 * s, 2.8 * s);
+    ctx.quadraticCurveTo(0, 1.2 * s, -1.6 * s, 2.8 * s);
+    ctx.quadraticCurveTo(-2.8 * s, -1.2 * s, 0, -3.5 * s);
+    if (kind === 'fire-active') {
+      ctx.fillStyle = STATE_COLORS['fire-active'];
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = 'rgba(248,113,113,0.75)';
+      ctx.stroke();
+    }
+    ctx.restore();
+    return;
+  }
+
+  if (kind === 'candle-active' || kind === 'candle-culled' || kind === 'candle-compact') {
+    if (kind === 'candle-compact') {
+      ctx.fillStyle = STATE_COLORS['candle-compact'];
+      ctx.beginPath();
+      ctx.arc(0, -0.8 * s, 1.6 * s, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(0, -2.2 * s);
+      ctx.quadraticCurveTo(0.9 * s, -3.4 * s, 0, -4.4 * s);
+      ctx.quadraticCurveTo(-0.9 * s, -3.4 * s, 0, -2.2 * s);
+      ctx.fillStyle = 'rgba(254,243,199,0.9)';
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+    const bodyW = 2.4 * s;
+    const bodyH = 4.2 * s;
+    if (typeof ctx.roundRect === 'function') {
+      ctx.beginPath();
+      ctx.roundRect(-bodyW * 0.5, -bodyH * 0.35, bodyW, bodyH, bodyW * 0.35);
+    } else {
+      ctx.beginPath();
+      ctx.rect(-bodyW * 0.5, -bodyH * 0.35, bodyW, bodyH);
+    }
+    if (kind === 'candle-active') {
+      ctx.fillStyle = STATE_COLORS['candle-active'];
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(0, -bodyH * 0.35 - 0.5 * s);
+      ctx.quadraticCurveTo(1.2 * s, -bodyH * 0.35 - 2.2 * s, 0, -bodyH * 0.35 - 3.2 * s);
+      ctx.quadraticCurveTo(-1.2 * s, -bodyH * 0.35 - 2.2 * s, 0, -bodyH * 0.35 - 0.5 * s);
+      ctx.fillStyle = 'rgba(254,243,199,0.95)';
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = 'rgba(253,224,71,0.55)';
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
 
 /**
  * Pick pyramid LOD so the overview fits the minimap canvas.
@@ -204,6 +330,10 @@ export class StreamingMinimap {
     this._lastReportAt = 0;
     /** @type {number} */
     this._lastDashboardRenderAt = 0;
+    /** @type {number} Wall-clock of last canvas repaint (throttle gate). */
+    this._lastDrawAt = 0;
+    /** @type {number} Minimum ms between repaints (~20 Hz). */
+    this._drawIntervalMs = 50;
     /** @type {boolean} */
     this._dragInstalled = false;
   }
@@ -650,15 +780,22 @@ export class StreamingMinimap {
     }
 
     if (live) {
-      const summaryLines = [
+      const glowOnly = live.fireGlowOnlyCount ?? 0;
+      const candleCompact = live.candleCompactCount ?? 0;
+      const liveSummaryLines = [
         this._kv('Background grids', String(live.grids ?? 0)),
         this._kv('Overlay cells', String(live.streamedCellCount ?? 0)),
         this._kv('Visible resident', String(live.visibleCellCount ?? 0)),
+        this._kv('Fire clusters', `${live.fireActiveCount ?? 0}/${live.fireTotalCount ?? 0} active${glowOnly ? ` (${glowOnly} glow-only)` : ''}`),
+        this._kv('Candle clusters', `${live.candleActiveCount ?? 0}/${live.candleTotalCount ?? 0} active${candleCompact ? ` (${candleCompact} compact)` : ''}`),
+        live.detailTier && live.detailTier !== 'full'
+          ? this._kv('Detail tier', String(live.detailTier))
+          : '',
         this._kv('Cell size', `${live.cellSize ?? '?'} px`),
         this._kv('Stream view', live.hasView ? 'active' : 'missing'),
         this._kv('Camera overlay', live.hasCameraView ? 'active' : 'missing'),
-      ].join('');
-      sections.push(this._sectionHtml('Live Summary', summaryLines));
+      ].filter(Boolean).join('');
+      sections.push(this._sectionHtml('Live Summary', liveSummaryLines));
     }
 
     if (report) {
@@ -725,6 +862,29 @@ export class StreamingMinimap {
         this._kv('Decode workers', pool.enabled ? `${pool.activeRequests ?? 0} active / q=${pool.queueDepth ?? 0} (${pool.poolSize ?? 0} workers)` : 'legacy main-thread'),
       ].join('');
       sections.push(this._sectionHtml('Grid Totals', gridTotals));
+
+      const fire = report.fire ?? {};
+      if ((fire.totalBuckets ?? 0) > 0 || fire.viewStreaming != null) {
+        const fireLines = [
+          this._kv('View streaming', fire.viewStreaming ? 'on' : 'off'),
+          this._kv('Detail tier', String(fire.detailTier ?? '?')),
+          this._kv('Buckets', `${fire.activeBuckets ?? 0} active / ${fire.totalBuckets ?? 0} total`),
+          this._kv('Culled', String(fire.culledBuckets ?? 0)),
+          this._kv('Floors with fire', String(fire.floorsWithFire ?? 0)),
+        ].join('');
+        sections.push(this._sectionHtml('Fire Clusters', fireLines));
+      }
+
+      const candle = report.candle ?? {};
+      if ((candle.totalClusters ?? 0) > 0 || candle.viewStreaming != null) {
+        const candleLines = [
+          this._kv('View streaming', candle.viewStreaming ? 'on' : 'off'),
+          this._kv('Detail tier', String(candle.detailTier ?? '?')),
+          this._kv('Clusters', `${candle.activeClusters ?? 0} active / ${candle.totalClusters ?? 0} total`),
+          this._kv('Culled', String(candle.culledClusters ?? 0)),
+        ].join('');
+        sections.push(this._sectionHtml('Candle Clusters', candleLines));
+      }
 
       const bakeEntries = Object.entries(mgr.bakeProgress ?? {});
       if (bakeEntries.length) {
@@ -796,8 +956,11 @@ export class StreamingMinimap {
 
     const legendItems = Object.entries(STATE_COLORS).map(([state, color]) => {
       const label = STATE_LABELS[state] ?? state;
+      const glyph = GLYPH_KINDS.has(state)
+        ? `<canvas width="12" height="12" data-glyph="${escapeHtml(state)}" style="vertical-align:middle;"></canvas>`
+        : `<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${color};"></span>`;
       return `<span style="display:inline-flex;align-items:center;gap:3px;margin-right:8px;margin-bottom:2px;">
-        <span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${color};"></span>${escapeHtml(label)}
+        ${glyph}${escapeHtml(label)}
       </span>`;
     }).join('');
     sections.push(this._sectionHtml('Legend', `<div style="display:flex;flex-wrap:wrap;">${legendItems}</div>`));
@@ -807,6 +970,24 @@ export class StreamingMinimap {
     }
 
     el.innerHTML = sections.join('');
+    this._paintLegendGlyphs(el);
+  }
+
+  /**
+   * Paint mini-glyphs on legend canvas elements.
+   * @param {HTMLElement} root
+   * @private
+   */
+  _paintLegendGlyphs(root) {
+    if (!root) return;
+    for (const cv of root.querySelectorAll('canvas[data-glyph]')) {
+      const kind = cv.getAttribute('data-glyph');
+      if (!kind) continue;
+      const cx = cv.getContext('2d');
+      if (!cx) continue;
+      cx.clearRect(0, 0, cv.width, cv.height);
+      drawMinimapGlyph(cx, cv.width * 0.5, cv.height * 0.5, kind, 0.85);
+    }
   }
 
   /** Apply a report object from an external caller (e.g. Quick Actions). @param {object} report */
@@ -985,6 +1166,14 @@ export class StreamingMinimap {
    */
   update() {
     if (!this._enabled) return;
+
+    // The minimap is a diagnostic overlay; a full 2D canvas repaint (grid + cell
+    // + fire/candle snapshots + camera overlay) every compositor present is wasted
+    // work, especially while panning. Cap it to ~20 Hz — visually indistinguishable.
+    const nowMs = performance.now();
+    if ((nowMs - this._lastDrawAt) < this._drawIntervalMs) return;
+    this._lastDrawAt = nowMs;
+
     this._ensureDom();
     const ctx = this._ctx;
     const canvas = this._canvas;
@@ -1073,7 +1262,56 @@ export class StreamingMinimap {
         ctx.fillRect(tl.x, tl.y, w, h);
       }
 
+      /** @type {Array<{ bounds: object, state: string }>} */
+      const flameOverlayCells = [];
+      let fireActiveCount = 0;
+      let fireGlowOnlyCount = 0;
+      try {
+        const fireSnap = resolveFireEffect()?.getFireStreamingMinimapSnapshot?.();
+        for (const cluster of fireSnap?.clusters ?? []) {
+          flameOverlayCells.push({ bounds: cluster.bounds, state: cluster.state });
+          if (cluster.state === 'fire-active') fireActiveCount += 1;
+          if (cluster.state === 'fire-glow-only') fireGlowOnlyCount += 1;
+        }
+      } catch (fireErr) {
+        log.debug('StreamingMinimap fire snapshot failed', fireErr);
+      }
+
+      let candleActiveCount = 0;
+      let candleCompactCount = 0;
+      try {
+        const candleSnap = resolveCandleEffect()?.getCandleStreamingMinimapSnapshot?.();
+        for (const cluster of candleSnap?.clusters ?? []) {
+          flameOverlayCells.push({ bounds: cluster.bounds, state: cluster.state });
+          if (cluster.state === 'candle-active' || cluster.state === 'candle-compact') candleActiveCount += 1;
+          if (cluster.state === 'candle-compact') candleCompactCount += 1;
+        }
+      } catch (candleErr) {
+        log.debug('StreamingMinimap candle snapshot failed', candleErr);
+      }
+
+      flameOverlayCells.sort(
+        (a, b) => (STATE_DRAW_ORDER[a.state] ?? 1) - (STATE_DRAW_ORDER[b.state] ?? 1),
+      );
+      for (const { bounds, state } of flameOverlayCells) {
+        const tl = toMini(bounds.minX, bounds.maxY);
+        const w = (bounds.maxX - bounds.minX) * scale;
+        const h = (bounds.maxY - bounds.minY) * scale;
+        ctx.fillStyle = STATE_COLORS[state] ?? STATE_COLORS.unknown;
+        ctx.fillRect(tl.x, tl.y, w, h);
+        if (state === 'fire-culled' || state === 'candle-culled') {
+          ctx.strokeStyle = state === 'fire-culled' ? 'rgba(248,113,113,0.55)' : 'rgba(253,224,71,0.45)';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(tl.x + 0.5, tl.y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
+        }
+        const cx = tl.x + w * 0.5;
+        const cy = tl.y + h * 0.5;
+        drawMinimapGlyph(ctx, cx, cy, state, Math.min(1.2, Math.max(0.7, Math.min(w, h) * 0.08)));
+      }
+
       const streamedCellCount = overlayCells.length;
+      const fireTotal = flameOverlayCells.filter((c) => c.state.startsWith('fire-')).length;
+      const candleTotal = flameOverlayCells.filter((c) => c.state.startsWith('candle-')).length;
 
       ctx.strokeStyle = '#e2e8f0';
       ctx.lineWidth = 1.5;
@@ -1099,10 +1337,14 @@ export class StreamingMinimap {
       }
 
       ctx.fillStyle = 'rgba(15,23,42,0.72)';
-      ctx.fillRect(margin, margin, 88, 14);
+      ctx.fillRect(margin, margin, 148, 14);
       ctx.fillStyle = '#f8fafc';
       ctx.font = '10px sans-serif';
-      ctx.fillText(`g${grids.size} r${regionGrids.size} c${visibleCellCount}`, margin + 4, margin + 10);
+      ctx.fillText(
+        `g${grids.size} r${regionGrids.size} c${visibleCellCount} f${fireActiveCount}/${fireTotal} n${candleActiveCount}/${candleTotal}`,
+        margin + 4,
+        margin + 10,
+      );
 
       const bs = resolveBudgetState(budget);
       const uv = streamView ? (() => {
@@ -1134,6 +1376,13 @@ export class StreamingMinimap {
         regionGrids: regionGrids.size,
         streamedCellCount,
         visibleCellCount,
+        fireActiveCount,
+        fireTotalCount: fireTotal,
+        fireGlowOnlyCount,
+        candleActiveCount,
+        candleTotalCount: candleTotal,
+        candleCompactCount,
+        detailTier: manager.getDetailTier?.() ?? '?',
         hasView: !!streamView,
         hasCameraView: !!cameraView,
         cellSize,

@@ -31,10 +31,17 @@ export class OverlayUIManager {
   /**
    * @param {HTMLElement} canvasElement
    * @param {Object} sceneComposer
+   * @param {{canvasRectCache?: import('../utils/canvas-rect-cache.js').CanvasRectCache}} [options]
    */
-  constructor(canvasElement, sceneComposer) {
+  constructor(canvasElement, sceneComposer, options = {}) {
     this.canvasElement = canvasElement;
     this.sceneComposer = sceneComposer;
+
+    /**
+     * Shared layout-safe rect cache — must not call getBoundingClientRect per frame.
+     * @type {import('../utils/canvas-rect-cache.js').CanvasRectCache|null}
+     */
+    this._canvasRectCache = options.canvasRectCache ?? null;
 
     /**
      * Sub-rate update lane — DOM overlay projection is expensive; 30 Hz is visually smooth.
@@ -55,10 +62,6 @@ export class OverlayUIManager {
 
     // PERF: reuse projected return object (avoid allocating {x,y,behind} per overlay per frame)
     this._tmpProjected = { x: 0, y: 0, behind: false };
-
-    // PERF: cache canvas bounding rect to avoid per-frame DOMRect allocations.
-    this._rectCache = { left: 0, top: 0, width: 0, height: 0, ts: 0 };
-    this._rectCacheMaxAgeMs = 250;
 
     this._lastRect = null;
   }
@@ -194,41 +197,10 @@ export class OverlayUIManager {
     h.lockedScreenPos = null;
   }
 
-  _getCanvasRectCached(force = false) {
-    const el = this.canvasElement;
-    if (!el) return null;
-
-    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-    const cache = this._rectCache;
-    const maxAge = (typeof this._rectCacheMaxAgeMs === 'number') ? this._rectCacheMaxAgeMs : 250;
-
-    if (!force && cache && cache.width > 0 && cache.height > 0 && (now - (cache.ts || 0)) < maxAge) {
-      return cache;
-    }
-
-    let rect;
-    try {
-      rect = el.getBoundingClientRect();
-    } catch (_) {
-      rect = null;
-    }
-
-    if (rect) {
-      cache.left = rect.left;
-      cache.top = rect.top;
-      cache.width = rect.width;
-      cache.height = rect.height;
-    }
-
-    if (!cache.width || !cache.height) {
-      cache.left = 0;
-      cache.top = 0;
-      cache.width = window.innerWidth;
-      cache.height = window.innerHeight;
-    }
-
-    cache.ts = now;
-    return cache;
+  _getCanvasRectCached() {
+    const cached = this._canvasRectCache?.get?.();
+    if (cached?.width > 0 && cached?.height > 0) return cached;
+    return { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
   }
 
   _getCamera() {
@@ -280,7 +252,7 @@ export class OverlayUIManager {
     if (!THREE) return;
 
     const rect = this._getCanvasRectCached();
-    if (!rect) return;
+    if (!rect?.width || !rect?.height) return;
     this._lastRect = rect;
 
     if (!this._tmpWorld) this._tmpWorld = new THREE.Vector3();

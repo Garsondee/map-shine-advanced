@@ -507,7 +507,7 @@ function findTilesAtWorld(wx, wy, activeFloorIndex) {
         height: doc.height,
         hidden: !!doc.hidden,
         alpha: Number(doc.alpha ?? 1),
-        occlusionMode: doc.occlusion?.mode ?? null,
+        occlusionMode: doc._source?.occlusion?.mode ?? null,
         levelsFlags: levels,
         textureSrc: typeof tex === 'string' ? tex.slice(-80) : null,
         sort: Number(doc.sort ?? placeable?.sort ?? 0),

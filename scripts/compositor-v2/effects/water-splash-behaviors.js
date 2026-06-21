@@ -390,22 +390,60 @@ export class WaterInteriorMaskShape {
 // OutdoorsMaskState — shared CPU _Outdoors readback for particle wind shelter
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/** World-unit distance² before re-sampling outdoors shelter after wind drift. */
+const SPLASH_OUTDOOR_RESAMPLE_DIST_SQ = 56 * 56;
+
+/**
+ * Record splash particle position used for the current outdoors shelter sample.
+ * @param {object} particle
+ */
+function recordSplashOutdoorSamplePosition(particle) {
+  const pos = particle?.position;
+  if (!pos) return;
+  particle._msOutdoorSampleX = pos.x;
+  particle._msOutdoorSampleY = pos.y;
+}
+
 /**
  * Splash particles cache outdoors shelter on first sample; invalidate when the
  * camera floor changes so upper-floor visits cannot stick on ground systems.
+ * Re-sample when wind drift moves the particle beyond {@link SPLASH_OUTDOOR_RESAMPLE_DIST_SQ}.
  * @param {object} particle
  * @param {object|null} ownerEffect - WaterSplashesEffectV2 (or bubbles proxy)
  */
 function syncParticleOutdoorStrengthCache(particle, ownerEffect) {
   const epoch = ownerEffect?._splashViewEpoch ?? 0;
-  const frameTok = ownerEffect?._outdoorsMaskFrameToken ?? 0;
+  const maskTok = ownerEffect?._outdoorsMaskFrameToken ?? 0;
   if (
     particle._msOutdoorViewEpoch !== epoch
-    || particle._msOutdoorFrameToken !== frameTok
+    || particle._msOutdoorFrameToken !== maskTok
   ) {
     particle._msOutdoorStrength = null;
     particle._msOutdoorViewEpoch = epoch;
-    particle._msOutdoorFrameToken = frameTok;
+    particle._msOutdoorFrameToken = maskTok;
+    return;
+  }
+
+  if (particle._msOutdoorStrength == null) return;
+
+  const px = particle?.position?.x;
+  const py = particle?.position?.y;
+  if (!Number.isFinite(px) || !Number.isFinite(py)) {
+    particle._msOutdoorStrength = null;
+    return;
+  }
+
+  const lx = particle._msOutdoorSampleX;
+  const ly = particle._msOutdoorSampleY;
+  if (!Number.isFinite(lx) || !Number.isFinite(ly)) {
+    particle._msOutdoorStrength = null;
+    return;
+  }
+
+  const dx = px - lx;
+  const dy = py - ly;
+  if ((dx * dx + dy * dy) > SPLASH_OUTDOOR_RESAMPLE_DIST_SQ) {
+    particle._msOutdoorStrength = null;
   }
 }
 
@@ -927,13 +965,27 @@ export function syncSharedOutdoorsMaskForFloor(floorIndex, frameToken, levelCont
   return snap;
 }
 
+/** Per-rAF cache so fire, splashes, and candles share one bounds object per frame. */
+let _effectSceneBoundsFrameCache = { frameId: -1, bounds: null };
+
 /**
  * Three.js scene bounds for CPU _Outdoors sampling (matches WaterSplashesEffectV2).
  * @returns {{ sx: number, syWorld: number, sw: number, sh: number }|null}
  */
 export function buildEffectSceneBoundsFromCanvas() {
+  let frameId = -1;
+  try {
+    frameId = Number(window?.MapShine?.renderLoop?.frameCount);
+  } catch (_) {}
+  if (frameId >= 0 && _effectSceneBoundsFrameCache.frameId === frameId) {
+    return _effectSceneBoundsFrameCache.bounds;
+  }
+
   const d = canvas?.dimensions;
-  if (!d) return null;
+  if (!d) {
+    if (frameId >= 0) _effectSceneBoundsFrameCache = { frameId, bounds: null };
+    return null;
+  }
 
   const fd = canvas?.foundry?.dimensions ?? d;
   const sceneRect = d.sceneRect;
@@ -955,12 +1007,14 @@ export function buildEffectSceneBoundsFromCanvas() {
   const sceneX = foundrySceneX;
   const sceneY = worldH - foundrySceneY - sceneHeight;
 
-  return {
+  const bounds = {
     sx: sceneX,
     syWorld: sceneY,
     sw: sceneWidth,
     sh: sceneHeight,
   };
+  if (frameId >= 0) _effectSceneBoundsFrameCache = { frameId, bounds };
+  return bounds;
 }
 
 /**
@@ -1169,7 +1223,10 @@ export class FoamPlumeLifecycleBehavior {
     syncParticleOutdoorStrengthCache(particle, this.ownerEffect);
     if (particle._msOutdoorStrength == null) {
       const outdoor = this._outMask.sampleAtWorld(particle?.position?.x, particle?.position?.y, this.ownerEffect);
-      if (Number.isFinite(outdoor)) particle._msOutdoorStrength = outdoor;
+      if (Number.isFinite(outdoor)) {
+        particle._msOutdoorStrength = outdoor;
+        recordSplashOutdoorSamplePosition(particle);
+      }
     }
 
     const t = age / Math.max(0.001, life);
@@ -1239,16 +1296,12 @@ export class FoamPlumeLifecycleBehavior {
     this._tintStrength = clamp01(p?.tintStrength ?? 0.0);
     this._tintJitter = clamp01(p?.tintJitter ?? 1.0) * 2.0;
     if (p) {
-      this._tintA = {
-        r: clamp01(p.tintAColorR ?? this._tintA.r),
-        g: clamp01(p.tintAColorG ?? this._tintA.g),
-        b: clamp01(p.tintAColorB ?? this._tintA.b),
-      };
-      this._tintB = {
-        r: clamp01(p.tintBColorR ?? this._tintB.r),
-        g: clamp01(p.tintBColorG ?? this._tintB.g),
-        b: clamp01(p.tintBColorB ?? this._tintB.b),
-      };
+      this._tintA.r = clamp01(p.tintAColorR ?? this._tintA.r);
+      this._tintA.g = clamp01(p.tintAColorG ?? this._tintA.g);
+      this._tintA.b = clamp01(p.tintAColorB ?? this._tintA.b);
+      this._tintB.r = clamp01(p.tintBColorR ?? this._tintB.r);
+      this._tintB.g = clamp01(p.tintBColorG ?? this._tintB.g);
+      this._tintB.b = clamp01(p.tintBColorB ?? this._tintB.b);
     }
 
     const rw = resolveEffectWindParticleDrift();
@@ -1319,7 +1372,10 @@ export class SplashRingLifecycleBehavior {
     syncParticleOutdoorStrengthCache(particle, this.ownerEffect);
     if (particle._msOutdoorStrength == null) {
       const outdoor = this._outMask.sampleAtWorld(particle?.position?.x, particle?.position?.y, this.ownerEffect);
-      if (Number.isFinite(outdoor)) particle._msOutdoorStrength = outdoor;
+      if (Number.isFinite(outdoor)) {
+        particle._msOutdoorStrength = outdoor;
+        recordSplashOutdoorSamplePosition(particle);
+      }
     }
 
     const t = age / Math.max(0.001, life);
@@ -1378,16 +1434,12 @@ export class SplashRingLifecycleBehavior {
     this._tintStrength = clamp01(p?.tintStrength ?? 0.0);
     this._tintJitter = clamp01(p?.tintJitter ?? 1.0) * 2.0;
     if (p) {
-      this._tintA = {
-        r: clamp01(p.tintAColorR ?? this._tintA.r),
-        g: clamp01(p.tintAColorG ?? this._tintA.g),
-        b: clamp01(p.tintAColorB ?? this._tintA.b),
-      };
-      this._tintB = {
-        r: clamp01(p.tintBColorR ?? this._tintB.r),
-        g: clamp01(p.tintBColorG ?? this._tintB.g),
-        b: clamp01(p.tintBColorB ?? this._tintB.b),
-      };
+      this._tintA.r = clamp01(p.tintAColorR ?? this._tintA.r);
+      this._tintA.g = clamp01(p.tintAColorG ?? this._tintA.g);
+      this._tintA.b = clamp01(p.tintAColorB ?? this._tintA.b);
+      this._tintB.r = clamp01(p.tintBColorR ?? this._tintB.r);
+      this._tintB.g = clamp01(p.tintBColorG ?? this._tintB.g);
+      this._tintB.b = clamp01(p.tintBColorB ?? this._tintB.b);
     }
 
     // Scale splash intensity by current precipitation.

@@ -8539,7 +8539,9 @@ async function createThreeCanvas(scene, createOptions = {}) {
     // Step 5b: Initialize DOM overlay UI system (world-anchored overlays)
     if (isDebugLoad) dlp.begin('manager.OverlayUI.init', 'manager');
     _setCreateThreeCanvasProgress('scene.managers.overlayUI.init');
-    overlayUIManager = new OverlayUIManager(threeCanvas, sceneComposer);
+    overlayUIManager = new OverlayUIManager(threeCanvas, sceneComposer, {
+      canvasRectCache: interactionManager?.mouseStateManager?.canvasRectCache ?? null,
+    });
     overlayUIManager.initialize();
     effectComposer.addUpdatable(overlayUIManager);
     if (isDebugLoad) dlp.end('manager.OverlayUI.init');

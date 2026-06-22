@@ -10772,7 +10772,7 @@ function destroyThreeCanvas() {
 
   safeCall(() => {
     disposeTileStreamingManager();
-    getStreamingMinimap()?.dispose?.();
+    getStreamingMinimap()?.resetForNewScene?.(null);
     getTextureBudgetTracker()?.removeEvictionHandler?.(_textureBudgetMaskEvictionHandler);
   }, 'streaming.dispose', Severity.COSMETIC);
 

@@ -139,6 +139,15 @@ const GLYPH_KINDS = new Set([
 ]);
 
 /**
+ * Iterate background + region streaming grids.
+ * @param {import('../streaming/tile-streaming-manager.js').TileStreamingManager} manager
+ */
+function* iterStreamingGrids(manager) {
+  yield* manager.getGrids().values();
+  yield* (manager.getRegionGrids?.().values() ?? []);
+}
+
+/**
  * Draw a small icon at minimap cluster center.
  * @param {CanvasRenderingContext2D} ctx
  * @param {number} cx
@@ -324,6 +333,14 @@ export class StreamingMinimap {
     this._overviewKey = '';
     /** @type {Promise<void>|null} */
     this._overviewLoad = null;
+    /** @type {'background'|'region'} */
+    this._overviewScope = 'background';
+    /** @type {{ minX: number, minY: number, maxX: number, maxY: number }|null} */
+    this._overviewRegion = null;
+    /** @type {string|null} */
+    this._sceneId = null;
+    /** @type {number} Bumped on scene change to ignore stale async overview loads. */
+    this._overviewEpoch = 0;
     /** @type {object|null} */
     this._cachedReport = null;
     /** @type {number} */
@@ -1005,15 +1022,43 @@ export class StreamingMinimap {
   }
 
   /**
-   * Resolve the primary streaming background for overview generation.
-   * @returns {{ sourceUrl: string, manifest: object, cellSize: number }|null}
+   * Drop scene-bound caches when the active scene changes. Keeps DOM + user enabled state.
+   * @param {string|null} [sceneId]
+   */
+  resetForNewScene(sceneId = null) {
+    const nextId = sceneId != null ? String(sceneId) : null;
+    if (nextId === this._sceneId) return;
+    this._sceneId = nextId;
+    this._overviewEpoch += 1;
+    this._overviewCanvas = null;
+    this._overviewKey = '';
+    this._overviewLoad = null;
+    this._overviewScope = 'background';
+    this._overviewRegion = null;
+    this._cachedReport = null;
+    this._lastReportAt = 0;
+    this._lastDashboardRenderAt = 0;
+    this._lastDebug = null;
+  }
+
+  /**
+   * Resolve the primary streaming source for overview generation.
+   * @returns {{ sourceUrl: string, manifest: object, cellSize: number, scope: 'background'|'region', region: object|null }|null}
    * @private
    */
   _resolvePrimaryStreamInfo() {
     const manager = getTileStreamingManager();
     for (const grid of manager.getGrids().values()) {
       const info = grid.getStreamInfo?.();
-      if (info?.manifest && info.sourceUrl) return info;
+      if (info?.manifest && info.sourceUrl) {
+        return { ...info, scope: 'background', region: null };
+      }
+    }
+    for (const grid of manager.getRegionGrids?.().values() ?? []) {
+      const info = grid.getStreamInfo?.();
+      if (info?.manifest && info.sourceUrl) {
+        return { ...info, scope: 'region', region: info.region ?? null };
+      }
     }
     return null;
   }
@@ -1023,16 +1068,18 @@ export class StreamingMinimap {
    * @private
    */
   _kickOverviewLoad(info) {
-    const { sourceUrl, manifest, cellSize } = info;
-    const key = `${manifest.sourceKey}:${manifest.cols}x${manifest.rows}:cs${cellSize}`;
+    const { sourceUrl, manifest, cellSize, scope, region } = info;
+    const key = `${scope}:${manifest.sourceKey}:${manifest.cols}x${manifest.rows}:cs${cellSize}`;
     if (this._overviewKey === key && this._overviewCanvas) return;
     if (this._overviewLoad) return;
 
+    const epoch = this._overviewEpoch;
     this._overviewLoad = (async () => {
       try {
         const meta = await fetchSourceImageMeta(sourceUrl);
+        if (epoch !== this._overviewEpoch) return;
         if (!meta) {
-          await this._trySingleImageOverview(sourceUrl, manifest);
+          await this._trySingleImageOverview(sourceUrl, manifest, scope, region, epoch);
           return;
         }
 
@@ -1079,6 +1126,10 @@ export class StreamingMinimap {
             } catch (_) {
               continue;
             }
+            if (epoch !== this._overviewEpoch) {
+              bitmap.close();
+              return;
+            }
 
             const dx = (cellX / manifest.cols) * thumbW;
             const dy = (cellY / manifest.rows) * thumbH;
@@ -1089,8 +1140,11 @@ export class StreamingMinimap {
           }
         }
 
+        if (epoch !== this._overviewEpoch) return;
         this._overviewCanvas = cv;
         this._overviewKey = key;
+        this._overviewScope = scope;
+        this._overviewRegion = region;
       } catch (err) {
         log.warn('StreamingMinimap overview build failed', err);
       } finally {
@@ -1103,8 +1157,12 @@ export class StreamingMinimap {
    * Fallback for scenes small enough to downscale the full image.
    * @private
    */
-  async _trySingleImageOverview(sourceUrl, manifest) {
+  async _trySingleImageOverview(sourceUrl, manifest, scope = 'background', region = null, epoch = this._overviewEpoch) {
     const tex = await loadFallbackTexture(sourceUrl, 512);
+    if (epoch !== this._overviewEpoch) {
+      tex?.dispose?.();
+      return;
+    }
     const img = tex?.image;
     if (!img || !(img.width > 0)) {
       tex?.dispose?.();
@@ -1127,8 +1185,11 @@ export class StreamingMinimap {
     }
     cx.drawImage(img, 0, 0, thumbW, thumbH);
     tex.dispose?.();
+    if (epoch !== this._overviewEpoch) return;
     this._overviewCanvas = cv;
-    this._overviewKey = `${manifest.sourceKey}:single`;
+    this._overviewKey = `${scope}:${manifest.sourceKey}:single`;
+    this._overviewScope = scope;
+    this._overviewRegion = region;
   }
 
   /**
@@ -1180,6 +1241,9 @@ export class StreamingMinimap {
     if (!ctx || !canvas) return;
 
     try {
+      const activeSceneId = canvas?.scene?.id != null ? String(canvas.scene.id) : null;
+      this.resetForNewScene(activeSceneId);
+
       const meta = getSceneRectMeta();
       const sceneWorld = getSceneWorldRect();
       const worldW = Math.max(1, sceneWorld.maxX - sceneWorld.minX);
@@ -1209,7 +1273,15 @@ export class StreamingMinimap {
       }
 
       if (this._overviewCanvas) {
-        ctx.drawImage(this._overviewCanvas, sceneTl.x, sceneTl.y, sceneWpx, sceneHpx);
+        if (this._overviewScope === 'region' && this._overviewRegion) {
+          const r = this._overviewRegion;
+          const tl = toMini(r.minX, r.maxY);
+          const w = (r.maxX - r.minX) * scale;
+          const h = (r.maxY - r.minY) * scale;
+          ctx.drawImage(this._overviewCanvas, tl.x, tl.y, w, h);
+        } else {
+          ctx.drawImage(this._overviewCanvas, sceneTl.x, sceneTl.y, sceneWpx, sceneHpx);
+        }
       } else {
         ctx.fillStyle = '#1e293b';
         ctx.fillRect(sceneTl.x, sceneTl.y, sceneWpx, sceneHpx);
@@ -1225,7 +1297,7 @@ export class StreamingMinimap {
       const cameraView = getStableViewRectForMinimap();
 
       let cellSize = resolveRecommendedTileSize(budget);
-      for (const grid of grids.values()) {
+      for (const grid of iterStreamingGrids(manager)) {
         const info = grid.getStreamInfo?.();
         if (info?.cellSize > 0) {
           cellSize = info.cellSize;
@@ -1238,7 +1310,7 @@ export class StreamingMinimap {
       /** @type {Array<{ bounds: object, state: string, visible?: boolean }>} */
       const overlayCells = [];
       let visibleCellCount = 0;
-      for (const grid of grids.values()) {
+      for (const grid of iterStreamingGrids(manager)) {
         try {
           for (const cell of grid.getMinimapDisplayCells?.(streamView) ?? []) {
             overlayCells.push(cell);
@@ -1417,18 +1489,12 @@ export class StreamingMinimap {
 
   dispose() {
     this._enabled = false;
+    this.resetForNewScene(null);
     try { this._root?.remove(); } catch (_) {}
     this._root = null;
     this._canvas = null;
     this._ctx = null;
     this._dashboardEl = null;
-    this._overviewCanvas = null;
-    this._overviewKey = '';
-    this._overviewLoad = null;
-    this._lastDebug = null;
-    this._cachedReport = null;
-    this._lastReportAt = 0;
-    this._lastDashboardRenderAt = 0;
     this._dragInstalled = false;
   }
 }
@@ -1446,6 +1512,8 @@ export function getStreamingMinimap() {
 /** @param {boolean} [defaultEnabled=false] */
 export function initStreamingMinimap(defaultEnabled = false) {
   const mm = getStreamingMinimap();
+  const sceneId = canvas?.scene?.id != null ? String(canvas.scene.id) : null;
+  mm.resetForNewScene(sceneId);
   mm.setEnabled(readStreamingMinimapSetting(defaultEnabled));
   _initComplete = true;
   if (typeof window !== 'undefined') {

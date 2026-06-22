@@ -2764,6 +2764,20 @@ export class StreamedRegionGrid {
   }
 
   /**
+   * Region tile source + pyramid manifest for debug UI (minimap overview).
+   * @returns {{ sourceUrl: string, manifest: object|null, cellSize: number, region: object|null }|null}
+   */
+  getStreamInfo() {
+    if (!this._manifest) return null;
+    return {
+      sourceUrl: this._src,
+      manifest: this._manifest,
+      cellSize: this._cellSize,
+      region: this._region,
+    };
+  }
+
+  /**
    * @param {{ minX: number, minY: number, maxX: number, maxY: number }|null} [viewRect]
    * @returns {Array<{ bounds: object, state: string, lod: number, visible: boolean }>}
    */

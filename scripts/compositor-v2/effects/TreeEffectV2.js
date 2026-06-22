@@ -127,10 +127,13 @@ import {
   VEGETATION_BULK_WIND_OFFSET_GLSL,
   VEGETATION_BULK_VERTEX_DISPLACEMENT_GLSL,
   VEGETATION_BULK_WIND_TURBULENCE_GLSL,
+  VEGETATION_MOTION_ENVELOPE_GLSL,
+  VEGETATION_MOTION_ENVELOPE_UNIFORM_GLSL,
   VEGETATION_FLUTTER_UV_GLSL,
   VEGETATION_FLUTTER_FRAGMENT_GLSL,
   VEGETATION_BILLBOARD_SHADOW_GLSL,
   createVegetationWindOverlayUniforms,
+  vegetationMotionPhaseRate,
 } from './vegetation-bulk-wind.js';
 import {
   isVegetationWindTuningParam,
@@ -254,20 +257,20 @@ export class TreeEffectV2 {
       waveTravelSpeed: 0.7,
       waveSharpness: 2.0,
       waveInfluence: 0.6,
-      ambientMotion: 0.07,
+      ambientMotion: 0.015,
       rustleFloorScale: 0.25,
-      flutterBaseDrive: 0.1,
+      flutterBaseDrive: 0.0,
       flutterWindStart: 0.0,
       flutterWindFull: 0.12,
-      flutterLowWindBoost: 1.67,
+      flutterLowWindBoost: 1.0,
       flutterLowWindFadeEnd: 0.37,
-      flutterGustFloor: 0.49,
-      bendMinStrength: 0.19,
+      flutterGustFloor: 0.0,
+      bendMinStrength: 0.06,
       bendWindStart: 0.22,
       bendWindFull: 0.78,
-      turbulence: 0.45,
+      turbulence: 0.2,
       turbulenceScale: 0.00022,
-      minRustleSpeed: 0.12,
+      minRustleSpeed: 0.0,
       edgeFadeStart: 0.0,
       edgeFadeEnd: 0.02,
 
@@ -573,9 +576,9 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 2.0,
           step: 0.01,
-          default: 0.45,
+          default: 0.2,
           throttle: 100,
-          tooltip: 'Extra procedural chop (0 = bush-identical wind UV; raise for livelier treetops).',
+          tooltip: 'Mid-wind treetop chop (off at calm; peaks in breeze–windy band).',
         },
         turbulenceScale: {
           type: 'slider',
@@ -593,9 +596,9 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 0.35,
           step: 0.005,
-          default: 0.07,
+          default: 0.015,
           throttle: 100,
-          tooltip: 'Baseline motion when wind is calm.',
+          tooltip: 'Extra bulk motion layered on the wind envelope (scales in above dead calm).',
         },
         rustleFloorScale: {
           type: 'slider',
@@ -613,9 +616,9 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.1,
+          default: 0.0,
           throttle: 100,
-          tooltip: 'Minimum flutter response before wind ramps it up.',
+          tooltip: 'Optional minimum flutter within the wind envelope (0 = envelope only).',
         },
         flutterWindStart: {
           type: 'slider',
@@ -643,9 +646,9 @@ export class TreeEffectV2 {
           min: 1.0,
           max: 2.5,
           step: 0.01,
-          default: 1.67,
+          default: 1.0,
           throttle: 100,
-          tooltip: 'Extra flutter when wind is barely moving.',
+          tooltip: 'Scales breeze-tier flutter within the envelope (astrolabe may override).',
         },
         flutterLowWindFadeEnd: {
           type: 'slider',
@@ -663,9 +666,9 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.49,
+          default: 0.0,
           throttle: 100,
-          tooltip: 'Minimum gust modulation on flutter in calm wind.',
+          tooltip: 'Minimum gust pulse on HF flutter when breeze-tier motion is active.',
         },
         bendMinStrength: {
           type: 'slider',
@@ -673,9 +676,9 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.19,
+          default: 0.06,
           throttle: 100,
-          tooltip: 'Floor on bend strength in light wind.',
+          tooltip: 'Light-wind bend scaler within the envelope (not an absolute motion floor).',
         },
         bendWindStart: {
           type: 'slider',
@@ -703,9 +706,9 @@ export class TreeEffectV2 {
           min: 0.0,
           max: 0.6,
           step: 0.01,
-          default: 0.12,
+          default: 0.0,
           throttle: 100,
-          tooltip: 'Minimum effective wind speed when the scene reports calm air.',
+          tooltip: 'Optional flutter bump in the breeze band (0 = true calm at zero wind).',
         },
         bulkSway: {
           type: 'slider',
@@ -1140,9 +1143,10 @@ export class TreeEffectV2 {
       ? Number(timeInfo.motionDelta)
       : (Number.isFinite(timeInfo?.delta) ? Number(timeInfo.delta) : 0.016);
     const phaseDelta = Math.min(0.25, Math.max(0.0, delta));
-    this._windFieldPhase += phaseDelta * 0.16;
-    this._wavePhase += phaseDelta * 0.2;
-    this._flutterPhase += phaseDelta * 0.3;
+    const phaseRate = vegetationMotionPhaseRate(sceneWindField.getSmoothedWind01());
+    this._windFieldPhase += phaseDelta * 0.16 * phaseRate;
+    this._wavePhase += phaseDelta * 0.2 * phaseRate;
+    this._flutterPhase += phaseDelta * 0.3 * phaseRate;
     if (this._sharedUniforms) {
       this._sharedUniforms.uTime.value = time;
       this._sharedUniforms.uWindFieldPhase.value = this._windFieldPhase;
@@ -1200,22 +1204,17 @@ export class TreeEffectV2 {
     const weather = weatherController?.currentState;
     const windDir = weather?.windDirection;
     const rawWind = sceneWindField.getSmoothedWind01();
-
     const phaseDelta = Math.min(0.25, Math.max(0.0, delta));
-    const speed = Math.max(0.0, rawWind * Number(this.params.windSpeedGlobal ?? 0.0));
-    const rustleFloor = Math.max(0.0, Number(this.params.minRustleSpeed ?? 0.0) * Math.max(0.0, Number(this.params.rustleFloorScale ?? 0.0)));
-    const rustleSpeed = Math.max(speed, rustleFloor);
-    const windFieldTravel = rawWind <= 0.0
-      ? 0.16
-      : (0.16 + (Math.max(0.16, Number(this.params.gustSpeed ?? 0.0)) - 0.16) * rawWind);
-    this._windFieldPhase += phaseDelta * windFieldTravel * (0.2 + rawWind);
+    const phaseRate = vegetationMotionPhaseRate(rawWind);
+    const gustSpeed = Math.max(0.16, Number(this.params.gustSpeed ?? 0.0));
+    const windFieldTravel = 0.16 + (gustSpeed - 0.16) * rawWind;
+    this._windFieldPhase += phaseDelta * windFieldTravel * phaseRate;
     if (sceneWindField.params.enabled !== false) {
       this._wavePhase = sceneWindField.getUniforms().uSceneWindWavePhase;
     } else {
-      this._wavePhase += phaseDelta * Math.max(0.0, Number(this.params.waveTravelSpeed ?? 0.0)) * (0.35 + rustleSpeed);
+      this._wavePhase += phaseDelta * Math.max(0.0, Number(this.params.waveTravelSpeed ?? 0.0)) * phaseRate;
     }
-    this._flutterPhase += phaseDelta * Math.max(0.0, Number(this.params.flutterSpeed ?? 0.0))
-      * (0.85 + rustleSpeed);
+    this._flutterPhase += phaseDelta * Math.max(0.0, Number(this.params.flutterSpeed ?? 0.0)) * phaseRate;
 
     this._syncSceneBoundsUniforms();
 
@@ -2246,13 +2245,10 @@ export class TreeEffectV2 {
         uniform float uGustFrequency;
         uniform float uWaveSpatialFrequency;
         uniform float uWaveSharpness;
-        uniform float uWaveInfluence;
-        uniform float uAmbientMotion;
-        uniform float uRustleFloorScale;
+${VEGETATION_MOTION_ENVELOPE_UNIFORM_GLSL}
         uniform float uBendMinStrength;
         uniform float uBendWindStart;
         uniform float uBendWindFull;
-        uniform float uMinRustleSpeed;
         uniform float uEdgeFadeStart;
         uniform float uEdgeFadeEnd;
         uniform float uElasticity;
@@ -2388,6 +2384,7 @@ ${VEGETATION_CLUMP_ID_GLSL}
 ${VEGETATION_CLUMP_DEBUG_GLSL}
 ${VEGETATION_WIND_NOISE_GLSL}
 ${VEGETATION_SCENE_WIND_STRENGTH_GLSL}
+${VEGETATION_MOTION_ENVELOPE_GLSL}
 ${VEGETATION_FLUTTER_UV_GLSL}
 ${VEGETATION_FLUTTER_FRAGMENT_GLSL}
 ${VEGETATION_BULK_WIND_TURBULENCE_GLSL}

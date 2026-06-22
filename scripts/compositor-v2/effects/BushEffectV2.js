@@ -123,10 +123,13 @@ import {
   VEGETATION_CLUMP_WIND_VARYING_GLSL,
   VEGETATION_BULK_WIND_OFFSET_GLSL,
   VEGETATION_BULK_VERTEX_DISPLACEMENT_GLSL,
+  VEGETATION_MOTION_ENVELOPE_GLSL,
+  VEGETATION_MOTION_ENVELOPE_UNIFORM_GLSL,
   VEGETATION_FLUTTER_UV_GLSL,
   VEGETATION_FLUTTER_FRAGMENT_GLSL,
   VEGETATION_BILLBOARD_SHADOW_GLSL,
   createVegetationWindOverlayUniforms,
+  vegetationMotionPhaseRate,
 } from './vegetation-bulk-wind.js';
 import {
   isVegetationWindTuningParam,
@@ -232,18 +235,18 @@ export class BushEffectV2 {
       waveTravelSpeed: 0.85,
       waveSharpness: 2.2,
       waveInfluence: 0.54,
-      ambientMotion: 0.115,
+      ambientMotion: 0.02,
       rustleFloorScale: 0.25,
-      flutterBaseDrive: 0.3,
+      flutterBaseDrive: 0.0,
       flutterWindStart: 0.0,
       flutterWindFull: 0.6,
-      flutterLowWindBoost: 2.08,
+      flutterLowWindBoost: 1.0,
       flutterLowWindFadeEnd: 0.35,
-      flutterGustFloor: 0.35,
-      bendMinStrength: 0.38,
+      flutterGustFloor: 0.0,
+      bendMinStrength: 0.08,
       bendWindStart: 0.0,
       bendWindFull: 1.0,
-      minRustleSpeed: 0.01,
+      minRustleSpeed: 0.0,
       edgeFadeStart: 0.0,
       edgeFadeEnd: 0.02,
 
@@ -547,9 +550,9 @@ export class BushEffectV2 {
           min: 0.0,
           max: 0.35,
           step: 0.005,
-          default: 0.115,
+          default: 0.02,
           throttle: 100,
-          tooltip: 'Baseline motion added even when wind is calm.',
+          tooltip: 'Extra bulk motion layered on the wind envelope (scales in above dead calm).',
         },
         rustleFloorScale: {
           type: 'slider',
@@ -567,9 +570,9 @@ export class BushEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.3,
+          default: 0.0,
           throttle: 100,
-          tooltip: 'Minimum flutter response before wind ramps it up.',
+          tooltip: 'Optional minimum flutter within the wind envelope (0 = envelope only).',
         },
         flutterWindStart: {
           type: 'slider',
@@ -597,9 +600,9 @@ export class BushEffectV2 {
           min: 1.0,
           max: 2.5,
           step: 0.01,
-          default: 2.08,
+          default: 1.0,
           throttle: 100,
-          tooltip: 'Extra flutter multiplier when wind is barely moving.',
+          tooltip: 'Scales breeze-tier flutter within the envelope (astrolabe may override).',
         },
         flutterLowWindFadeEnd: {
           type: 'slider',
@@ -617,9 +620,9 @@ export class BushEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.35,
+          default: 0.0,
           throttle: 100,
-          tooltip: 'Minimum gust modulation applied to flutter in calm wind.',
+          tooltip: 'Minimum gust pulse on HF flutter when breeze-tier motion is active.',
         },
         bendMinStrength: {
           type: 'slider',
@@ -627,9 +630,9 @@ export class BushEffectV2 {
           min: 0.0,
           max: 1.0,
           step: 0.01,
-          default: 0.38,
+          default: 0.08,
           throttle: 100,
-          tooltip: 'Floor on bend strength so branches still lean slightly in light wind.',
+          tooltip: 'Light-wind bend scaler within the envelope (not an absolute motion floor).',
         },
         bendWindStart: {
           type: 'slider',
@@ -657,9 +660,9 @@ export class BushEffectV2 {
           min: 0.0,
           max: 0.6,
           step: 0.01,
-          default: 0.01,
+          default: 0.0,
           throttle: 100,
-          tooltip: 'Minimum effective wind speed for motion when the scene reports calm air.',
+          tooltip: 'Optional flutter bump in the breeze band (0 = true calm at zero wind).',
         },
         bulkSway: {
           type: 'slider',
@@ -1108,9 +1111,10 @@ export class BushEffectV2 {
       ? Number(timeInfo.motionDelta)
       : (Number.isFinite(timeInfo?.delta) ? Number(timeInfo.delta) : 0.016);
     const phaseDelta = Math.min(0.25, Math.max(0.0, delta));
-    this._windFieldPhase += phaseDelta * 0.16;
-    this._wavePhase += phaseDelta * 0.2;
-    this._flutterPhase += phaseDelta * 0.3;
+    const phaseRate = vegetationMotionPhaseRate(sceneWindField.getSmoothedWind01());
+    this._windFieldPhase += phaseDelta * 0.16 * phaseRate;
+    this._wavePhase += phaseDelta * 0.2 * phaseRate;
+    this._flutterPhase += phaseDelta * 0.3 * phaseRate;
     if (this._sharedUniforms) {
       this._sharedUniforms.uTime.value = time;
       this._sharedUniforms.uWindFieldPhase.value = this._windFieldPhase;
@@ -1167,22 +1171,17 @@ export class BushEffectV2 {
     const weather = weatherController?.currentState;
     const windDir = weather?.windDirection;
     const rawWind = sceneWindField.getSmoothedWind01();
-
     const phaseDelta = Math.min(0.25, Math.max(0.0, delta));
-    const speed = Math.max(0.0, rawWind * Number(this.params.windSpeedGlobal ?? 0.0));
-    const rustleFloor = Math.max(0.0, Number(this.params.minRustleSpeed ?? 0.0) * Math.max(0.0, Number(this.params.rustleFloorScale ?? 0.0)));
-    const rustleSpeed = Math.max(speed, rustleFloor);
-    const windFieldTravel = rawWind <= 0.0
-      ? 0.16
-      : (0.16 + (Math.max(0.16, Number(this.params.gustSpeed ?? 0.0)) - 0.16) * rawWind);
-    this._windFieldPhase += phaseDelta * windFieldTravel * (0.2 + rawWind);
+    const phaseRate = vegetationMotionPhaseRate(rawWind);
+    const gustSpeed = Math.max(0.16, Number(this.params.gustSpeed ?? 0.0));
+    const windFieldTravel = 0.16 + (gustSpeed - 0.16) * rawWind;
+    this._windFieldPhase += phaseDelta * windFieldTravel * phaseRate;
     if (sceneWindField.params.enabled !== false) {
       this._wavePhase = sceneWindField.getUniforms().uSceneWindWavePhase;
     } else {
-      this._wavePhase += phaseDelta * Math.max(0.0, Number(this.params.waveTravelSpeed ?? 0.0)) * (0.35 + rustleSpeed);
+      this._wavePhase += phaseDelta * Math.max(0.0, Number(this.params.waveTravelSpeed ?? 0.0)) * phaseRate;
     }
-    this._flutterPhase += phaseDelta * Math.max(0.0, Number(this.params.flutterSpeed ?? 0.0))
-      * (0.85 + rustleSpeed);
+    this._flutterPhase += phaseDelta * Math.max(0.0, Number(this.params.flutterSpeed ?? 0.0)) * phaseRate;
 
     this._syncSceneBoundsUniforms();
 
@@ -1885,13 +1884,10 @@ export class BushEffectV2 {
         uniform float uGustFrequency;
         uniform float uWaveSpatialFrequency;
         uniform float uWaveSharpness;
-        uniform float uWaveInfluence;
-        uniform float uAmbientMotion;
-        uniform float uRustleFloorScale;
+${VEGETATION_MOTION_ENVELOPE_UNIFORM_GLSL}
         uniform float uBendMinStrength;
         uniform float uBendWindStart;
         uniform float uBendWindFull;
-        uniform float uMinRustleSpeed;
         uniform float uEdgeFadeStart;
         uniform float uEdgeFadeEnd;
         uniform float uElasticity;
@@ -2020,6 +2016,7 @@ ${VEGETATION_CLUMP_ID_GLSL}
 ${VEGETATION_CLUMP_DEBUG_GLSL}
 ${VEGETATION_WIND_NOISE_GLSL}
 ${VEGETATION_SCENE_WIND_STRENGTH_GLSL}
+${VEGETATION_MOTION_ENVELOPE_GLSL}
 ${VEGETATION_FLUTTER_UV_GLSL}
 ${VEGETATION_FLUTTER_FRAGMENT_GLSL}
 

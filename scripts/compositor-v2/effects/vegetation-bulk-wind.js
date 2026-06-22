@@ -65,10 +65,50 @@ export const VEGETATION_SCENE_EDGE_FADE_GLSL = `
 `;
 
 /**
+ * Uniforms required by vegetationMotionEnvelope in vertex shaders.
+ */
+export const VEGETATION_MOTION_ENVELOPE_UNIFORM_GLSL = `
+        uniform float uAmbientMotion;
+        uniform float uRustleFloorScale;
+        uniform float uFlutterBaseDrive;
+        uniform float uMinRustleSpeed;
+        uniform float uWaveInfluence;
+`;
+
+/**
+ * Unified motion envelope — calm micro-breath through hurricane bulk/flutter/spatial mix.
+ * Returns vec4(bulkDrive, flutterDrive, phaseRate, spatialMix).
+ */
+export const VEGETATION_MOTION_ENVELOPE_GLSL = `
+        vec4 vegetationMotionEnvelope(float rawWind) {
+          float w = clamp(rawWind, 0.0, 1.0);
+
+          const float microBreath = 0.065;
+          const float microFlutter = 0.035;
+          float bulkWindDrive = pow(smoothstep(0.08, 0.55, w), 1.45);
+          float bulkDrive = microBreath + bulkWindDrive * (1.0 - microBreath);
+          bulkDrive += uAmbientMotion * smoothstep(0.0, 0.22, w);
+
+          float flutterEmergence = smoothstep(0.10, 0.28, w) * (1.0 - smoothstep(0.72, 0.95, w));
+          float flutterUser = uFlutterBaseDrive * smoothstep(0.0, 0.18, w);
+          float flutterDrive = microFlutter + max(flutterEmergence, flutterUser) * (1.0 - microFlutter);
+          float rustleFloor = max(0.0, uMinRustleSpeed * max(0.0, uRustleFloorScale));
+          flutterDrive = max(flutterDrive, rustleFloor * smoothstep(0.0, 0.18, w) * (1.0 - smoothstep(0.18, 0.42, w)));
+
+          float phaseRate = mix(0.05, 1.0, smoothstep(0.0, 0.35, w));
+          float spatialMix = smoothstep(0.12, 0.42, w) * clamp(uWaveInfluence, 0.0, 1.0);
+
+          return vec4(bulkDrive, flutterDrive, phaseRate, spatialMix);
+        }
+`;
+
+/**
  * Unified bulk sway — one direction + one oscillator per clump island (vertex displacement).
  * Expects wind + scene-wind uniforms in scope.
  */
-export const VEGETATION_BULK_WIND_OFFSET_GLSL = `
+export const VEGETATION_BULK_WIND_OFFSET_GLSL =
+  VEGETATION_MOTION_ENVELOPE_GLSL
+  + `
         float vegetationBulkSwayRate(float swaySpeed) {
           float s = clamp(swaySpeed, 0.2, 3.0);
           return mix(0.45, 1.65, (s - 0.2) / 2.8);
@@ -84,13 +124,12 @@ export const VEGETATION_BULK_WIND_OFFSET_GLSL = `
           if (length(windDir) < 0.01) windDir = vec2(1.0, 0.0);
 
           float rawWind = clamp(uWindSpeed, 0.0, 1.0);
-          float speed = max(0.0, rawWind * uWindSpeedGlobal);
-          float rustleFloor = max(0.0, uMinRustleSpeed * max(0.0, uRustleFloorScale));
-          float rustleSpeed = max(speed, rustleFloor);
+          vec4 env = vegetationMotionEnvelope(rawWind);
+          float bulkDrive = env.x;
+          float spatialMixBase = env.w;
           float bendLo = min(uBendWindStart, uBendWindFull - 0.001);
           float bendHi = max(bendLo + 1e-4, uBendWindFull);
           float bendDrive = smoothstep(bendLo, bendHi, rawWind);
-          float effectiveSpeed = uAmbientMotion + rustleSpeed;
 
           float clumpId = fract(clumpSeed + 1e-4);
           float idMix = vegetationHash(vec2(
@@ -116,14 +155,13 @@ export const VEGETATION_BULK_WIND_OFFSET_GLSL = `
           // Same traveling gust field as fragment shaders (global wind bearing — not per-clump).
           float sceneStrength = vegetationMotionSceneStrength(anchorWorld, windDir);
 
-          float spatialInfluence = clamp(uWaveInfluence, 0.0, 1.0);
-          float spatialBlend = spatialInfluence * smoothstep(0.16, 0.68, rawWind);
+          float spatialBlend = spatialMixBase * smoothstep(0.16, 0.68, rawWind);
           if (uSceneWindEnabled > 0.5) {
             spatialBlend *= mix(0.58, 1.0, smoothstep(0.68, 0.98, rawWind));
           }
           float bendSpatialMod = uSceneWindEnabled > 0.5
             ? mix(1.0, sceneStrength, spatialBlend)
-            : legacyWaveMod;
+            : mix(1.0, legacyWaveMod, spatialMixBase);
 
           float bulkOscRate = mix(
             vegetationBulkSwayRate(uBulkSwaySpeed),
@@ -139,21 +177,19 @@ export const VEGETATION_BULK_WIND_OFFSET_GLSL = `
           float rollSpatial = max(0.000018, uWaveSpatialFrequency * 0.038);
           float roll = sin(along * rollSpatial - uWavePhase * 0.07 + phaseSeed);
 
-          float bendStrength = (uBendMinStrength + (1.0 - uBendMinStrength) * rawWind)
-                             * mix(0.58, 1.0, bendDrive);
+          float bendStrength = mix(uBendMinStrength, 1.0, bendDrive) * bulkDrive;
           float bendWave = uSceneWindEnabled > 0.5
             ? smoothstep(0.0, max(0.05, uBendRiseSoftness), bendSpatialMod)
             : bendSpatialMod;
-          float bendEffectiveSpeed = uSceneWindEnabled > 0.5 ? rustleSpeed * bendWave : effectiveSpeed;
           float swayCoupling = uSceneWindEnabled > 0.5
-            ? mix(0.86, sceneStrength, spatialBlend * 0.42)
-            : (0.65 + 0.35 * bendSpatialMod);
+            ? mix(1.0, sceneStrength, spatialBlend * 0.42)
+            : mix(1.0, bendSpatialMod, spatialMixBase);
 
           float hurricaneBoost = mix(1.0, 1.35, smoothstep(0.72, 0.98, rawWind));
           float bulkScale = min(max(0.0, uBulkSwayScale), 2.5);
           float bulkAmp = min(max(0.0, uBulkSway), 0.14) * bulkScale * clumpAmp * hurricaneBoost;
-          float windDrive = max(0.42, bendEffectiveSpeed) * bendStrength * swayCoupling;
-          float windGate = mix(0.72, 1.0, bendDrive);
+          float windDrive = bulkDrive * bendStrength * swayCoupling * bendWave;
+          float windGate = bendDrive;
 
           float gustEnvelope = 0.78 + 0.22 * sin(uWavePhase * 0.38 + phaseSeed * 0.17);
           float primaryMotion = (orbitSway * 0.8 + orbitSwayB * 0.2) * bulkAmp * windDrive * windGate;
@@ -364,18 +400,13 @@ export const VEGETATION_FLUTTER_FRAGMENT_GLSL =
         }
 `;
 
-/** Tree-only turbulence added to bulk offset. */
+/** Tree-only turbulence added to bulk offset (requires vegetationMotionEnvelope in scope). */
 export const VEGETATION_BULK_WIND_TURBULENCE_GLSL = `
         vec2 computeVegetationBulkTurbulenceUvOffset(vec2 anchorWorld, float clumpSeed, vec2 windDirIn, vec2 bulkSoFar) {
           float rawWind = clamp(uWindSpeed, 0.0, 1.0);
-          float speed = max(0.0, rawWind * uWindSpeedGlobal);
-          float rustleFloor = max(0.0, uMinRustleSpeed * max(0.0, uRustleFloorScale));
-          float rustleSpeed = max(speed, rustleFloor);
-          float bendLo = min(uBendWindStart, uBendWindFull - 0.001);
-          float bendHi = max(bendLo + 1e-4, uBendWindFull);
-          float bendDrive = smoothstep(bendLo, bendHi, rawWind);
-          float ambientMotion = uAmbientMotion;
-          float effectiveSpeed = ambientMotion + rustleSpeed;
+          vec4 env = vegetationMotionEnvelope(rawWind);
+          float bulkDrive = env.x;
+          float spatialMixBase = env.w;
 
           vec2 windDir = normalize(windDirIn);
           if (length(windDir) < 0.01) windDir = vec2(1.0, 0.0);
@@ -395,18 +426,16 @@ export const VEGETATION_BULK_WIND_TURBULENCE_GLSL = `
           float waveFront = pow(clamp(waveCarrier, 0.0, 1.0), max(0.1, uWaveSharpness));
           float legacyWaveMod = mix(1.0, waveFront, clamp(uWaveInfluence, 0.0, 1.0));
           float sceneStrength = vegetationMotionSceneStrength(anchorWorld, windDir);
-          float spatialInfluence = clamp(uWaveInfluence, 0.0, 1.0);
-          float spatialBlend = spatialInfluence * smoothstep(0.16, 0.68, rawWind);
+          float spatialBlend = spatialMixBase * smoothstep(0.16, 0.68, rawWind);
           if (uSceneWindEnabled > 0.5) {
             spatialBlend *= mix(0.58, 1.0, smoothstep(0.68, 0.98, rawWind));
           }
           float bendSpatialMod = uSceneWindEnabled > 0.5
             ? mix(1.0, sceneStrength, spatialBlend)
-            : legacyWaveMod;
+            : mix(1.0, legacyWaveMod, spatialMixBase);
           float bendWave = uSceneWindEnabled > 0.5
             ? smoothstep(0.0, max(0.05, uBendRiseSoftness), bendSpatialMod)
             : bendSpatialMod;
-          float bendEffectiveSpeed = uSceneWindEnabled > 0.5 ? rustleSpeed * bendWave : effectiveSpeed;
           float turbulenceStrength = max(0.0, uTurbulence);
           float turbulenceScale = max(0.00001, uTurbulenceScale);
           float swirlNoise = vegetationNoise(anchorWorld * (turbulenceScale * 0.4) - (bendBaseDir * uTime * 0.15));
@@ -424,21 +453,23 @@ export const VEGETATION_BULK_WIND_TURBULENCE_GLSL = `
           float turbulenceFieldB = vegetationNoise((turbulencePos * 1.9) - vec2(uTime * 0.61, uTime * 0.47));
           float turbulenceSigned = ((turbulenceFieldA * 0.65 + turbulenceFieldB * 0.35) - 0.5) * 2.0;
           float turbulenceGustCoupling = 0.45 + 0.55 * windPulse;
-          float turbWaveCoupling = uSceneWindEnabled > 0.5 ? bendSpatialMod : (0.55 + 0.45 * bendSpatialMod);
+          float turbWaveCoupling = uSceneWindEnabled > 0.5 ? bendSpatialMod : mix(1.0, bendSpatialMod, spatialMixBase);
           float turbulenceHighWindDamp = mix(1.0, 0.48, smoothstep(0.65, 0.98, rawWind));
           float midWindTurbulenceTame = mix(
             1.0,
             0.55,
             smoothstep(0.20, 0.48, rawWind) * (1.0 - smoothstep(0.48, 0.78, rawWind))
           );
-          float turbulenceMagnitude = turbulenceStrength * bendEffectiveSpeed * turbulenceGustCoupling
-                                    * turbWaveCoupling * turbulenceHighWindDamp * midWindTurbulenceTame;
+          float turbulenceWindGate = smoothstep(0.25, 0.55, rawWind);
+          float turbulenceMagnitude = turbulenceStrength * bulkDrive * bendWave * turbulenceGustCoupling
+                                    * turbWaveCoupling * turbulenceHighWindDamp * midWindTurbulenceTame
+                                    * turbulenceWindGate;
           return (localWindDir * (turbulenceSigned * uBulkSway * 0.85 * turbulenceMagnitude))
                + (localPerpDir * (((turbulenceFieldB - 0.5) * 2.0) * uBulkSway * 0.15 * turbulenceMagnitude));
         }
 `;
 
-/** Small per-pixel flutter — safe UV wobble only (bulk bend lives in vertex displacement). */
+/** Small per-pixel flutter — safe UV wobble only (requires vegetationMotionEnvelope in scope). */
 export const VEGETATION_FLUTTER_UV_GLSL = `
         vec2 computeVegetationFlutterUvOffset(vec2 worldPos, vec2 clumpAnchor, float clumpSeed, vec2 windDirIn) {
           if (uFlutterIntensity < 1e-6) return vec2(0.0);
@@ -447,52 +478,38 @@ export const VEGETATION_FLUTTER_UV_GLSL = `
           if (length(windDir) < 0.01) windDir = vec2(1.0, 0.0);
 
           float rawWind = clamp(uWindSpeed, 0.0, 1.0);
-          float speed = max(0.0, rawWind * uWindSpeedGlobal);
-          float rustleFloor = max(0.0, uMinRustleSpeed * max(0.0, uRustleFloorScale));
-          float rustleSpeed = max(speed, rustleFloor);
-          float flutterDrive = uFlutterBaseDrive + (1.0 - uFlutterBaseDrive)
-                            * smoothstep(uFlutterWindStart, max(uFlutterWindStart + 1e-4, uFlutterWindFull), rawWind);
-          float bendLo = min(uBendWindStart, uBendWindFull - 0.001);
-          float bendHi = max(bendLo + 1e-4, uBendWindFull);
-          float bendDrive = smoothstep(bendLo, bendHi, rawWind);
-
-          float windFieldFrequency = mix(0.0003, max(0.0003, uGustFrequency), rawWind);
-          float windField = vegetationNoise(worldPos * windFieldFrequency - windDir * uWindFieldPhase);
-          float windPulse = mix(0.65, 1.28, smoothstep(0.08, 0.92, windField));
-          windPulse *= (0.35 + 0.65 * rawWind);
+          vec4 env = vegetationMotionEnvelope(rawWind);
+          float flutterDrive = env.y;
 
           float clumpId = fract(clumpSeed + 1e-4);
           float spread = clamp(uBulkSwaySpread, 0.08, 0.75) * 0.35;
           vec2 bendWindDir = clumpWindDir(windDir, clumpId, spread);
           vec2 perpDir = vec2(-bendWindDir.y, bendWindDir.x);
 
-          float flutterCoupling = uSceneWindEnabled > 0.5
-            ? max(0.38, 0.42 + 0.58 * flutterDrive)
-            : 0.75;
-
           float flutterScale = max(0.00001, uFlutterScale);
           vec2 leafPos = worldPos;
-          float noiseA = vegetationNoise(leafPos * flutterScale);
-          float noiseB = vegetationNoise(leafPos * flutterScale * 2.85 + vec2(clumpId * 5.17, clumpId * 11.3));
-          float noiseC = vegetationNoise(leafPos * flutterScale * 6.4 + clumpAnchor * 0.0013);
           float phaseSeed = clumpId * 6.2831853 * 1.35;
-          float flutterPhase = uFlutterPhase + noiseA * 6.2831853 + noiseB * 4.18879 + phaseSeed;
+          float hfMix = smoothstep(0.12, 0.38, flutterDrive);
+          float noiseA = vegetationNoise(leafPos * flutterScale) * hfMix;
+          float noiseB = vegetationNoise(leafPos * flutterScale * 2.85 + vec2(clumpId * 5.17, clumpId * 11.3)) * hfMix;
+          float noiseC = vegetationNoise(leafPos * flutterScale * 6.4 + clumpAnchor * 0.0013) * hfMix;
+          float flutterPhase = uFlutterPhase + phaseSeed + noiseA * 6.2831853 + noiseB * 4.18879;
           float flutterFast = sin(flutterPhase * 1.93 + uTime * max(uFlutterSpeed, 0.08) * 1.15 + noiseC * 2.4);
-          float flutterSlow = sin(flutterPhase * 0.71 + noiseB * 1.7);
-          // HF leaf shimmer peaks in the mid band when only high-wind damp is active — bias slow at 50%.
+          float flutterSlow = sin(flutterPhase * 0.71 + phaseSeed * 0.41);
           float flutterFastMix = mix(
-            0.42,
+            0.08,
             0.24,
             smoothstep(0.22, 0.50, rawWind) * (1.0 - smoothstep(0.50, 0.82, rawWind))
-          );
+          ) * hfMix;
           float flutter = flutterSlow * (1.0 - flutterFastMix) + flutterFast * flutterFastMix;
 
-          float legacyFlutterFloor = clamp(uFlutterGustFloor, 0.0, 1.0);
-          float flutterWindPulse = mix(legacyFlutterFloor, 1.0, clamp(windPulse, 0.0, 1.0));
+          float windFieldFrequency = mix(0.0003, max(0.0003, uGustFrequency), rawWind);
+          float windField = vegetationNoise(worldPos * windFieldFrequency - windDir * uWindFieldPhase);
+          float windPulse = mix(0.65, 1.28, smoothstep(0.08, 0.92, windField));
+          windPulse *= (0.35 + 0.65 * rawWind);
+          float flutterWindPulse = mix(clamp(uFlutterGustFloor, 0.0, 1.0), 1.0, clamp(windPulse, 0.0, 1.0) * hfMix);
 
-          float lowWindBoost = mix(uFlutterLowWindBoost, 1.0, smoothstep(0.04, max(0.041, uFlutterLowWindFadeEnd), rawWind));
-          float calmFlutterBoost = (1.0 + 0.85 * (1.0 - bendDrive))
-                                   * mix(1.0, 0.58, smoothstep(0.38, 0.78, rawWind));
+          float lowWindBoost = mix(uFlutterLowWindBoost, 1.0, smoothstep(0.12, max(0.121, uFlutterLowWindFadeEnd), rawWind));
           float midWindFlutterTame = mix(
             1.0,
             0.50,
@@ -502,14 +519,12 @@ export const VEGETATION_FLUTTER_UV_GLSL = `
           if (uSceneWindEnabled > 0.5) {
             float hurricaneEase = smoothstep(0.58, 0.96, rawWind);
             lowWindBoost = mix(lowWindBoost, 1.0, hurricaneEase * 0.85);
-            calmFlutterBoost = mix(calmFlutterBoost, 1.0, hurricaneEase * 0.72);
             midWindFlutterTame = mix(midWindFlutterTame, 1.0, hurricaneEase * 0.55);
           }
-          float leafMod = 0.48 + 0.52 * vegetationNoise(leafPos * flutterScale * 4.6 + vec2(phaseSeed * 0.17));
+          float leafMod = mix(1.0, 0.48 + 0.52 * vegetationNoise(leafPos * flutterScale * 4.6 + vec2(phaseSeed * 0.17)), hfMix);
           float flutterAmp = uFlutterIntensity * 12.0;
           float flutterMagnitude = flutter * flutterAmp * leafMod * flutterWindPulse * lowWindBoost
-                                 * max(0.22, flutterDrive) * flutterCoupling * calmFlutterBoost
-                                 * midWindFlutterTame * highWindFlutterDamp;
+                                 * flutterDrive * midWindFlutterTame * highWindFlutterDamp;
           return (bendWindDir * flutterMagnitude) + (perpDir * (flutterMagnitude * 0.14));
         }
 `;
@@ -540,6 +555,14 @@ export const VEGETATION_WIND_ISLAND_CLAMP_GLSL = `
  * @param {number} centerY
  * @returns {Record<string, { value: unknown }>}
  */
+/** @param {number} rawWind01 Smoothed scene wind 0..1 */
+export function vegetationMotionPhaseRate(rawWind01) {
+  const w = Math.max(0, Math.min(1, Number(rawWind01) || 0));
+  const t = Math.max(0, Math.min(1, w / 0.35));
+  const smooth = t * t * (3 - 2 * t);
+  return 0.05 + smooth * 0.95;
+}
+
 /** @param {number} ax @param {number} ay @param {number} [explicitSeed] */
 export function vegetationOverlayWindSeed(ax, ay, explicitSeed = 0) {
   const base = Number(explicitSeed) || 0;

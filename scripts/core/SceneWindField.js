@@ -287,6 +287,21 @@ export class SceneWindField {
     this._uniforms.uBendRiseSoftness = Math.max(0.05, Math.min(1, Number(p.bendRiseSoftness) ?? 0.35));
   }
 
+  /** @private */
+  _syncVegetationProfileToConsumers() {
+    try {
+      const fc = window.MapShine?.effectComposer?._floorCompositorV2 ?? null;
+      if (!fc) return;
+      const rt = this._runtime;
+      for (const key of ['_treeEffect', '_bushEffect']) {
+        const veg = fc[key];
+        if (!veg?.params) continue;
+        veg.params.flutterLowWindBoost = rt.flutterLowWindBoost;
+        veg.params.bendWindStart = rt.bendWindStart;
+      }
+    } catch (_) {}
+  }
+
   /**
    * @param {number} delta
    * @param {number} [time]
@@ -296,6 +311,7 @@ export class SceneWindField {
     this._syncFromWeather();
     this._advanceSmoothedWindTier(delta);
     this._refreshRuntimeFromSmoothedTier();
+    this._syncVegetationProfileToConsumers();
 
     if (!this._isExternallyDriven() && this.params.enabled !== false) {
       const travel = Math.max(0, Number(this.params.waveTravelSpeed) || 0.7);
@@ -422,6 +438,8 @@ export class SceneWindField {
       veg.params.waveInfluence = p.vegetationWaveInfluence;
       veg.params.windAttackRamp = p.windAttackRamp;
       veg.params.windDecayRamp = p.windDecayRamp;
+      veg.params.flutterLowWindBoost = this._runtime.flutterLowWindBoost;
+      veg.params.bendWindStart = this._runtime.bendWindStart;
       if (typeof veg._syncWindUniforms === 'function') {
         veg._syncWindUniforms();
       }

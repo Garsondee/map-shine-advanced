@@ -277,8 +277,11 @@ function _deriveWarnings(report) {
     }
   }
 
-  if (report.view.visibleCellsInFrustum === 0 && report.streaming.backgroundGridCount > 0) {
-    warnings.push('No background cells cover the current view frustum.');
+  if (
+    report.view.visibleCellsInFrustum === 0
+    && (report.streaming.backgroundGridCount > 0 || report.streaming.regionGridCount > 0)
+  ) {
+    warnings.push('No streaming cells with textures cover the current view frustum.');
   }
 
   const targetLod = Number(report.scene.zoomLod);
@@ -370,6 +373,9 @@ export function buildTileStreamingReport() {
 
   let visibleCellsInFrustum = 0;
   for (const g of backgroundGrids) {
+    visibleCellsInFrustum += g.cells.filter((c) => c.visible && c.hasMap).length;
+  }
+  for (const g of regionGrids) {
     visibleCellsInFrustum += g.cells.filter((c) => c.visible && c.hasMap).length;
   }
 

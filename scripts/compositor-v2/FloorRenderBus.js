@@ -188,12 +188,24 @@ function isBackgroundImageAlbedoBusKey(key) {
 }
 
 /**
- * True for post-bloom background effect overlays (`__bg_image___tree`, …).
+ * Post-bloom background vegetation overlays (`__bg_image___tree`, `_bush`, …).
+ * Specular / iridescence / prism use {@link isBackgroundPreBusEffectOverlayBusKey}
+ * and participate in the bus albedo pass like tile-attached overlays.
  * @param {string} key
  * @returns {boolean}
  */
 function isBackgroundImageEffectOverlayBusKey(key) {
-  return /^__bg_image__(?:[1-9]\d*)?_(?!cell:)/.test(String(key || ''));
+  return /^__bg_image__(?:[1-9]\d*)?_(?:tree|bush)(?:_shadow)?$/.test(String(key || ''));
+}
+
+/**
+ * Background specular / iridescence / prism — captured into per-level scene RTs
+ * with tile albedo, not the post-bloom vegetation pass.
+ * @param {string} key
+ * @returns {boolean}
+ */
+function isBackgroundPreBusEffectOverlayBusKey(key) {
+  return /^__bg_image__(?:[1-9]\d*)?_(?:specular|iridescence|prism)$/.test(String(key || ''));
 }
 
 /**
@@ -265,17 +277,20 @@ function _normalizeBgUrlKey(s) {
 function _composerAlbedoMatchesViewedBg(bgTexture, bgSrc) {
   if (!bgTexture) return false;
   if (!bgSrc) return true;
+  const normViewed = normalizeFoundryAssetUrlKey(bgSrc);
+  const keysMatch = (candidate) => {
+    const raw = String(candidate || '').trim();
+    if (!raw) return false;
+    if (normalizeFoundryAssetUrlKey(raw) === normViewed) return true;
+    return _normalizeBgUrlKey(raw) === _normalizeBgUrlKey(bgSrc);
+  };
   try {
     const stamped = bgTexture.userData?.mapShineBackgroundSrc;
-    if (typeof stamped === 'string' && stamped.trim()) {
-      return _normalizeBgUrlKey(stamped) === _normalizeBgUrlKey(bgSrc);
-    }
+    if (keysMatch(stamped)) return true;
   } catch (_) {}
   try {
     const img = bgTexture.image;
-    if (img && typeof img.src === 'string' && img.src.trim()) {
-      return _normalizeBgUrlKey(img.src) === _normalizeBgUrlKey(bgSrc);
-    }
+    if (img && keysMatch(img.src)) return true;
   } catch (_) {}
   return false;
 }
@@ -536,6 +551,9 @@ export class FloorRenderBus {
    */
   syncStreaming() {
     try {
+      const sc = window.MapShine?.sceneComposer ?? null;
+      const fd = sc?.foundrySceneData ?? null;
+      if (sc && fd) this.tryMountViewedBackgroundFromComposer(sc, fd);
       for (const [tileId, entry] of this._tiles) {
         if (!entry?.mapShineBackgroundStreamServed) continue;
         if (!this._isOverheadBandBusEntry(entry, tileId)) continue;
@@ -546,6 +564,10 @@ export class FloorRenderBus {
       this._maybeEnsureForegroundStackLoaded();
       getTileStreamingManager().update();
       this._applyTileVisibility();
+      try {
+        window.MapShine?.effectComposer?._floorCompositorV2?._specularEffect
+          ?.syncOverlaysAfterTileStreaming?.();
+      } catch (_) {}
     } catch (_) {}
   }
 
@@ -900,37 +922,32 @@ export class FloorRenderBus {
       this._loadVisibleBackgroundStack([{ src: bgSrc, alphaThreshold: 0 }], fd, stackLoadOpts);
       log.info('FloorRenderBus: bg image load routed through ImageBitmap stack loader');
     } else if (bgTexture) {
-      let frames = 0;
-      const maxFrames = 120;
-      const tickEpoch = this._bgDecodeEpoch;
-      const tick = () => {
-        if (this._bgDecodeEpoch !== tickEpoch) return;
-        frames += 1;
-        try {
-          const img = bgTexture?.image;
-          if (img && img.width > 0 && img.height > 0) {
-            if (this._bgDecodeEpoch !== tickEpoch) return;
-            const viewedBgRaf = String(getViewedLevelBackgroundSrc(scene) || '').trim();
-            let fiRaf = resolveV14BackgroundFloorIndexForSrc(scene, bgSrc);
-            fiRaf = finalizeBackgroundFloorIndexForBus(scene, bgSrc, fiRaf, {
-              loadCount: 1,
-              floorsLen: floors.length,
-              viewedBg: viewedBgRaf,
-            });
-            const keyRaf = backgroundBusKeyForFloorIndex(fiRaf);
-            if (!this._tiles.has(keyRaf)) {
-              this._markSharedComposerTexture(bgTexture);
-              this._addBackgroundImage(fd, bgTexture, fiRaf, keyRaf);
-            }
-            return;
-          }
-        } catch (_) {}
-        if (frames < maxFrames && this._bgDecodeEpoch === tickEpoch) requestAnimationFrame(tick);
-        else if (frames >= maxFrames) {
-          log.warn('FloorRenderBus.populate: _albedoTexture never gained pixel dimensions (no bgSrc fallback)');
+      this._scheduleViewedBackgroundComposerRetry(sceneComposer, fd, {
+        viewedLevelIndex: stackLoadOpts.viewedLevelIndex,
+      });
+    }
+
+    if (!multiFloorV14) {
+      const viewedBgRetry = String(getViewedLevelBackgroundSrc(scene) || bgSrc || '').trim();
+      if (viewedBgRetry) {
+        let fiRetry = resolveV14BackgroundFloorIndexForSrc(scene, viewedBgRetry);
+        fiRetry = finalizeBackgroundFloorIndexForBus(scene, viewedBgRetry, fiRetry, {
+          loadCount: 1,
+          floorsLen: floors.length,
+          viewedBg: viewedBgRetry,
+          viewedLevelIndexOverride: stackLoadOpts.viewedLevelIndex,
+        });
+        const keyRetry = backgroundBusKeyForFloorIndex(fiRetry);
+        if (!this._hasDirectBackgroundImagePlane(keyRetry)
+          && !this.tryMountViewedBackgroundFromComposer(sceneComposer, fd, stackLoadOpts)) {
+          this._scheduleViewedBackgroundComposerRetry(sceneComposer, fd, {
+            bgSrc: viewedBgRetry,
+            floorIdx: fiRetry,
+            key: keyRetry,
+            viewedLevelIndex: stackLoadOpts.viewedLevelIndex,
+          });
         }
-      };
-      requestAnimationFrame(tick);
+      }
     }
 
     // Tile planes — read directly from Foundry, no TileManager dependency.
@@ -1307,12 +1324,13 @@ export class FloorRenderBus {
         continue;
       }
 
-      // Tree/Bush V2 overlays manage floor + view + streaming visibility in the effect.
+      // Tree/Bush/Specular V2 overlays manage floor + view + streaming visibility in the effect.
       if (
         tileId.endsWith('_bush')
         || tileId.endsWith('_bush_shadow')
         || tileId.endsWith('_tree')
         || tileId.endsWith('_tree_shadow')
+        || tileId.endsWith('_specular')
       ) {
         continue;
       }
@@ -1500,10 +1518,11 @@ export class FloorRenderBus {
       if (!entry?.material) continue;
       // Skip internal background/effect entries.
       if (tileId.startsWith('__')) continue;
-      // Tree/Bush V2 shaders output premultiplied RGB + manage their own fringes; do not
-      // force floor-based premultipliedAlpha (would break ground-floor blending).
+      // Tree/Bush/Specular V2 shaders manage their own opacity / visibility; do not mirror
+      // PIXI sprite opacity onto additive overlay ShaderMaterials.
       if (tileId.endsWith('_tree') || tileId.endsWith('_bush')
-        || tileId.endsWith('_tree_shadow') || tileId.endsWith('_bush_shadow')) continue;
+        || tileId.endsWith('_tree_shadow') || tileId.endsWith('_bush_shadow')
+        || tileId.endsWith('_specular')) continue;
 
       const sourceTileId = entry.attachedToTileId || tileId;
       const data = tileManager.getTileSpriteData(sourceTileId);
@@ -2356,6 +2375,12 @@ export class FloorRenderBus {
           node.visible = false;
           continue;
         }
+        if (isBackgroundPreBusEffectOverlayBusKey(tileId)) {
+          const fi = Number(entry?.floorIndex);
+          const inRange = Number.isFinite(fi) && fi >= minFloorIndex && fi <= maxFloorIndex;
+          node.visible = includeBackground && inRange && !this._suppressTileAlbedoForEditing;
+          continue;
+        }
         if (!isLevelStackImageBusRenderKey(tileId)) {
           node.visible = false;
           continue;
@@ -2820,6 +2845,131 @@ export class FloorRenderBus {
   }
 
   /**
+   * @param {{ material?: import('three').Material|null, mesh?: import('three').Object3D|null, root?: import('three').Object3D|null }} entry
+   * @returns {boolean}
+   * @private
+   */
+  _busEntryMapReady(entry) {
+    const map = entry?.material?.map ?? null;
+    return !!(map?.image && map.image.width > 0 && map.image.height > 0);
+  }
+
+  /**
+   * True when a full-scene `__bg_image__*` plane (not streamed cells) is resident.
+   *
+   * @param {string} [key='__bg_image__']
+   * @returns {boolean}
+   */
+  _hasDirectBackgroundImagePlane(key = '__bg_image__') {
+    const base = String(key || '__bg_image__');
+    const direct = this._tiles.get(base);
+    if (!direct || !this._busEntryMapReady(direct)) return false;
+    if (direct.root?.visible === false) return false;
+    return direct.mesh?.visible !== false;
+  }
+
+  /**
+   * True when the bus has a visible textured draw for a background grid key
+   * (`__bg_image__`, streamed cells, or streaming fallback).
+   *
+   * @param {string} [key='__bg_image__']
+   * @returns {boolean}
+   */
+  _hasBackgroundAlbedoCoverage(key = '__bg_image__') {
+    const base = String(key || '__bg_image__');
+    const direct = this._tiles.get(base);
+    if (direct && this._busEntryMapReady(direct)) {
+      if (direct.root?.visible === false) return false;
+      if (direct.mesh?.visible !== false) return true;
+    }
+    const fallback = this._tiles.get(`${base}__fallback`);
+    if (fallback && this._busEntryMapReady(fallback) && fallback.mesh?.visible !== false) {
+      return true;
+    }
+    const prefix = `${base}:cell:`;
+    for (const [busKey, entry] of this._tiles) {
+      if (!String(busKey).startsWith(prefix)) continue;
+      if (entry?.mesh?.visible === false) continue;
+      if (this._busEntryMapReady(entry)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Mount the viewed level background on the bus from SceneComposer's albedo texture
+   * when it is ready and matches the viewed level URL. Single-floor scenes only.
+   *
+   * @param {import('../scene/composer.js').SceneComposer} sceneComposer
+   * @param {object} fd
+   * @param {{ viewedLevelIndex?: number }} [options]
+   * @returns {boolean}
+   */
+  tryMountViewedBackgroundFromComposer(sceneComposer, fd, options = {}) {
+    if (!this._initialized || !fd || !sceneComposer) return false;
+
+    const scene = canvas?.scene ?? null;
+    const bgSrc = String(getViewedLevelBackgroundSrc(scene) || scene?.background?.src || '').trim();
+    if (!bgSrc) return false;
+
+    const floors = window.MapShine?.floorStack?.getFloors() ?? [];
+    const nativeLevelCount = scene?.levels?.size ?? 0;
+    const multiFloorV14 = !!(hasV14NativeLevels(scene) && (floors.length > 1 || nativeLevelCount > 1));
+    if (multiFloorV14) return false;
+
+    let floorIdx = resolveV14BackgroundFloorIndexForSrc(scene, bgSrc);
+    floorIdx = finalizeBackgroundFloorIndexForBus(scene, bgSrc, floorIdx, {
+      loadCount: 1,
+      floorsLen: floors.length,
+      viewedBg: bgSrc,
+      viewedLevelIndexOverride: options.viewedLevelIndex,
+    });
+    const key = backgroundBusKeyForFloorIndex(floorIdx);
+    if (this._hasDirectBackgroundImagePlane(key)) return true;
+
+    const bgTexture = sceneComposer?._albedoTexture ?? null;
+    const albedoImageReady = !!(bgTexture?.image && bgTexture.image.width > 0 && bgTexture.image.height > 0);
+    if (!albedoImageReady || !_composerAlbedoMatchesViewedBg(bgTexture, bgSrc)) return false;
+
+    this._markSharedComposerTexture(bgTexture);
+    this._addBackgroundImage(fd, bgTexture, floorIdx, key);
+    this._applyTileVisibility();
+    log.info(`FloorRenderBus: mounted viewed background from SceneComposer [${key}]`);
+    return true;
+  }
+
+  /**
+   * Retry mounting the viewed background from SceneComposer until pixels are ready
+   * or the bus already has albedo coverage.
+   *
+   * @param {import('../scene/composer.js').SceneComposer} sceneComposer
+   * @param {object} fd
+   * @param {{ bgSrc?: string, floorIdx?: number, key?: string, viewedLevelIndex?: number }} [ctx]
+   * @private
+   */
+  _scheduleViewedBackgroundComposerRetry(sceneComposer, fd, ctx = {}) {
+    const tickEpoch = this._bgDecodeEpoch;
+    const key = String(ctx.key || '__bg_image__');
+    let frames = 0;
+    const maxFrames = 180;
+    const tick = () => {
+      if (this._bgDecodeEpoch !== tickEpoch) return;
+      frames += 1;
+      try {
+        if (this._hasBackgroundAlbedoCoverage(key)) return;
+        if (this.tryMountViewedBackgroundFromComposer(sceneComposer, fd, {
+          viewedLevelIndex: ctx.viewedLevelIndex,
+        })) return;
+      } catch (_) {}
+      if (frames < maxFrames && this._bgDecodeEpoch === tickEpoch) {
+        requestAnimationFrame(tick);
+      } else if (frames >= maxFrames) {
+        log.warn(`FloorRenderBus: viewed background [${key}] still missing after composer retry`);
+      }
+    };
+    requestAnimationFrame(tick);
+  }
+
+  /**
    * @param {import('three').Material|import('three').Material[]|null|undefined} mat
    * @private
    */
@@ -2945,7 +3095,37 @@ export class FloorRenderBus {
     // Preserve stack order as floor index so floor-aware mask passes (water occluder)
     // can include only upper visible background layers.
     this._tiles.set(key, { mesh, material: mat, floorIndex: bgFloorIndex });
+    this._detachStreamingBackgroundForKey(key);
     log.info(`FloorRenderBus: bg image plane [${key}] (${sceneW}x${sceneH} at ${centerX},${centerY})`);
+  }
+
+  /**
+   * Remove streamed background cells/fallback once a full-scene plane owns the key.
+   * Coarse cells stacked on a composer/fallback plane fight the lit albedo pass.
+   *
+   * @param {string} key
+   * @private
+   */
+  _detachStreamingBackgroundForKey(key) {
+    const base = String(key || '__bg_image__');
+    if (!isBackgroundImageAlbedoBusKey(base)) return;
+    try {
+      getTileStreamingManager().unregisterGrid(base);
+    } catch (_) {}
+    const prefix = `${base}:cell:`;
+    const fallbackKey = `${base}__fallback`;
+    for (const busKey of [...this._tiles.keys()]) {
+      const s = String(busKey);
+      if (!s.startsWith(prefix) && s !== fallbackKey) continue;
+      const entry = this._tiles.get(busKey);
+      if (entry?.mesh) {
+        entry.mesh.removeFromParent();
+        entry.mesh.geometry?.dispose?.();
+        this._disposeBusMaterial(entry.material);
+      }
+      this._tiles.delete(busKey);
+    }
+    log.info(`FloorRenderBus: detached streaming overlays for [${base}]`);
   }
 
   /**
@@ -3344,14 +3524,32 @@ export class FloorRenderBus {
       if (meta && shouldStreamBackground(meta.width, meta.height, streamThreshold)) {
         // Streaming is the whole point of large maps — always prefer it when the
         // source qualifies. Bigger scenes benefit MORE, not less.
-        const streamed = await getTileStreamingManager().registerBackground(bus, src, fd, zIndex, key);
+        const renderOrderBase = tileAlbedoOrder(
+          Number.isFinite(Number(zIndex)) ? Number(zIndex) : 0,
+          0,
+        );
+        const streamed = await getTileStreamingManager().registerBackground(
+          bus, src, fd, zIndex, key, { renderOrderBase },
+        );
         if (streamed && decodeEpochAtSchedule === bus._bgDecodeEpoch) {
           bus._applyTileVisibility();
-          log.info(
-            `FloorRenderBus: streaming background [${key}] (${meta.width}x${meta.height})`,
+          if (bus._hasBackgroundAlbedoCoverage(key)) {
+            log.info(
+              `FloorRenderBus: streaming background [${key}] (${meta.width}x${meta.height})`,
+            );
+            return;
+          }
+          log.warn(
+            `FloorRenderBus: streaming [${key}] registered without bus albedo coverage`
+            + ` (${meta.width}x${meta.height}) — installing downscaled fallback plane`,
           );
-          return;
         }
+      }
+
+      if (decodeEpochAtSchedule !== bus._bgDecodeEpoch) return;
+      if (bus._hasBackgroundAlbedoCoverage(key)) {
+        bus._applyTileVisibility();
+        return;
       }
 
       const maxSize = budget.backgroundMaxSize ?? 4096;

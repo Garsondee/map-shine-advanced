@@ -230,7 +230,7 @@ export function resolveFocalImageCell(region, cellSize, sourceW, sourceH, viewRe
 }
 
 /** @returns {number} */
-function maxTotalResidentCellsForScene(cellSize = 2048) {
+function maxTotalResidentCellsForScene(cellSize = 1024) {
   const mp = estimateSceneMegapixels();
   if (mp >= 144) return scaleStreamingResidentCap(18, cellSize);
   if (mp > 64) return scaleStreamingResidentCap(24, cellSize);
@@ -257,7 +257,7 @@ export class StreamedBackgroundGrid {
     this._cells = new Map();
     /** @type {Map<string, import('./streaming-grid.js').StreamingCellState>} */
     this._cellStates = new Map();
-    this._cellSize = options.cellSize ?? 2048;
+    this._cellSize = options.cellSize ?? 1024;
     this._maxLod = options.maxLod ?? 4;
     this._decodeEpoch = 0;
     /** @type {Set<string>} */
@@ -332,8 +332,8 @@ export class StreamedBackgroundGrid {
   /** @private */
   _maxResidentCells() {
     const mp = estimateSceneMegapixels();
-    const cs = this._cellSize || 2048;
-    // Typical frustum on 12000² @ 0.3 zoom needs ~9 cells (3×3) at 2048 px.
+    const cs = this._cellSize || 1024;
+    // Typical frustum on 12000² @ 0.3 zoom needs more cells at 1024 px than at 2048.
     if (mp >= 144) return scaleStreamingResidentCap(9, cs);
     if (mp > 64) return scaleStreamingResidentCap(12, cs);
     return scaleStreamingResidentCap(16, cs);
@@ -2174,7 +2174,7 @@ export class StreamedRegionGrid {
     this._cells = new Map();
     /** @type {Map<string, import('./streaming-grid.js').StreamingCellState>} */
     this._cellStates = new Map();
-    this._cellSize = 2048;
+    this._cellSize = 1024;
     this._maxLod = 4;
     this._decodeEpoch = 0;
     /** @type {Set<string>} */
@@ -2201,7 +2201,7 @@ export class StreamedRegionGrid {
   /** @private */
   _maxTotalResidentCells() {
     const mp = estimateSceneMegapixels();
-    const cs = this._cellSize || 2048;
+    const cs = this._cellSize || 1024;
     if (mp >= 144) return scaleStreamingResidentCap(6, cs);
     if (mp > 64) return scaleStreamingResidentCap(10, cs);
     return maxTotalResidentCellsForScene(cs);

@@ -2,6 +2,7 @@
 .idea/
 node_modules
 gamesystemsourcecode
+foundryvttsourcecode_v14/
 oldmapshinemodulecode
 module-staging
 dist

@@ -832,7 +832,7 @@ export async function buildPyramidManifest(url, cellSize, maxLod = 4) {
 
 export function tileStorageKey(sourceKey, cellX, cellY, lod, cellSize, sourceWidth, sourceHeight) {
 
-  const cs = Math.max(512, Math.floor(cellSize) || 2048);
+  const cs = Math.max(512, Math.floor(cellSize) || 1024);
 
   const sw = Math.max(1, Math.floor(sourceWidth) || 1);
 

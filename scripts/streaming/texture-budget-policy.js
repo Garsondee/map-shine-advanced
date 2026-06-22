@@ -87,11 +87,7 @@ export function computeTextureBudgetPolicy(renderer = null, capabilities = {}, o
   const sceneW = Number(sr.width ?? fd.sceneWidth ?? 4096);
   const sceneH = Number(sr.height ?? fd.sceneHeight ?? 4096);
 
-  let cellSize = resolveCellSize(maxTextureSize, sceneW, sceneH);
-  // Huge scenes (≥130 MP): 1024 px cells — quarter LOD-0 VRAM per cell and tighter
-  // prefetch rings so panning can load new chunks without stale off-view residents.
-  if (isHugeScene) cellSize = 1024;
-  else if (isLargeScene) cellSize = Math.min(cellSize, 2048);
+  const cellSize = resolveCellSize(maxTextureSize, sceneW, sceneH);
 
   let maxLod = 4;
   if (tier === 'low' || budgetMB <= 384) maxLod = 3;

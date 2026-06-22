@@ -100,7 +100,7 @@ export class TextureBudgetTracker {
     this._evictionHandlers = [];
 
     /** @type {number} Recommended streaming cell size (world px) */
-    this.cellSize = 2048;
+    this.cellSize = 1024;
 
     /** @type {number} Max LOD level for tile pyramids */
     this.maxLod = 4;

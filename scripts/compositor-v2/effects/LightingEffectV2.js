@@ -3369,6 +3369,14 @@ export class LightingEffectV2 {
             }
             shadowFactorMix = clamp(shadowFactorMix * vegetationLit * overheadLit, 0.0, 1.0);
             shadowSunSlice = min(shadowFactorMix, coreStructLiftedGlobal);
+            {
+              // Noon outdoors: unified overhead/canopy shadows must not zero the sun-ambient
+              // slice (probe: lit/scene ≈ 0.13 with calendarDayWeight≈1 and valid outdoors).
+              float outdoorSunGuard = isOutdoorForInteriorDimSafe
+                * calendarDayWeight
+                * (1.0 - baseDarknessLevel);
+              shadowSunSlice = max(shadowSunSlice, outdoorSunGuard * 0.50);
+            }
             wSkySunSlice = clamp(
               (1.0 - baseDarknessLevel)
                 * calendarDayWeight
@@ -3412,7 +3420,14 @@ export class LightingEffectV2 {
           vec3 minIllum = mix(ambientDay, ambientNight, localDarknessLevel)
             * (0.1 * max(uMinIlluminationScale, 0.0));
           float floorReach = clamp(ambientShadowMixOut, 0.0, 1.0);
-          totalIllumination = max(totalIllumination, minIllum * mix(0.18, 1.0, floorReach));
+          float minFloorScale = mix(0.18, 1.0, floorReach);
+          {
+            float outdoorDayMinKeep = isOutdoorForInteriorDimSafe
+              * calendarDayWeight
+              * (1.0 - baseDarknessLevel);
+            minFloorScale = max(minFloorScale, outdoorDayMinKeep * 0.55);
+          }
+          totalIllumination = max(totalIllumination, minIllum * minFloorScale);
 
           // Window light: HDR spill on illumination stack + small additive core (no litColor *=).
           if (uHasLightWindow > 0.5) {

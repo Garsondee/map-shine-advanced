@@ -407,13 +407,12 @@ export function getVisibleStreamingCellKeys(gridKey) {
  */
 export function isVegetationStreamingCellVisible(entry, visibleCells = null) {
   if (!entry?.streamingGridKey) return true;
+  // Full-scene background overlays only use streamingGridKey for render-order
+  // stacking (see SpecularEffectV2). Per-cell splits gate on residency.
+  if (!entry.streamingCellKey) return true;
   const gridKey = entry.streamingGridKey;
   const cells = visibleCells ?? getVisibleStreamingCellKeys(gridKey);
-  if (entry.streamingCellKey) {
-    return cells.has(entry.streamingCellKey);
-  }
-  const view = resolveVegetationStreamingViewRect();
-  return viewIntersectsAnyStreamingCell(gridKey, cells, view);
+  return cells.has(entry.streamingCellKey);
 }
 
 /**

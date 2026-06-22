@@ -35,6 +35,9 @@ import { createMaskStatusSchemaGroups, refreshEffectMaskStatusUi } from '../../u
 import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { loadImageTexture, VISUAL_MASK_MAX_SIZE } from '../../assets/image-texture-loader.js';
+import { fetchSourceImageMeta } from '../../streaming/texture-pyramid-builder.js';
+import { shouldStreamBackground } from '../../streaming/streamed-background-grid.js';
+import { getTextureBudgetTracker } from '../../assets/TextureBudgetTracker.js';
 import { createFallback1x1Texture } from '../../assets/texture-policies.js';
 import { getBandOutdoorsMask } from '../../masks/indoor-outdoor-mask-api.js';
 import {
@@ -54,6 +57,14 @@ import Coordinates from '../../utils/coordinates.js';
 import { foundryLuminosityIllumMultiplier } from '../../scene/point-light-falloff.js';
 import { getTileBusPlaneSizeAndMirror, getTileVisualCenterFoundryXY } from '../../scene/tile-manager.js';
 import { getVertexShader, getFragmentShader } from './specular-shader.js';
+import {
+  shouldGateBackgroundVegetationOnStreaming,
+  getVisibleStreamingCellKeys,
+  isVegetationStreamingCellVisible,
+  resolveStreamingCellAlbedoRenderOrder,
+  streamingCellKeysSignatureForGrids,
+} from '../../streaming/vegetation-streaming-bridge.js';
+import { getTileStreamingManager } from '../../streaming/tile-streaming-manager.js';
 
 const log = createLogger('SpecularEffectV2');
 
@@ -62,7 +73,7 @@ const log = createLogger('SpecularEffectV2');
 // but large enough to consistently render on top of the albedo tile.
 const SPECULAR_Z_OFFSET = 0.1;
 
-import { tileAlbedoOrder, tileStackedOverlayOrder } from '../LayerOrderPolicy.js';
+import { GROUND_Z, tileAlbedoOrder, tileOverheadOrder, tileStackedOverlayOrder } from '../LayerOrderPolicy.js';
 
 // Intra-band delta for specular overlays relative to their tile.
 const SPECULAR_EFFECT_DELTA = 1;
@@ -170,6 +181,15 @@ export class SpecularEffectV2 {
     this._shaderCompileFailures = 0;
     /** @type {string|null} Last deferred compile error */
     this._lastShaderCompileError = null;
+
+    /** When true, background specular waits for streamed albedo cell residency. */
+    this._gateBackgroundOnStreaming = false;
+    /** @type {string} Signature of visible streaming cells (background + streamed tiles). */
+    this._lastStreamCellSignature = '';
+    /** @type {string} Active streaming grid keys (detects pyramid mount). */
+    this._lastStreamGridSetSignature = '';
+    /** @type {number} Last floor index used for overlay visibility sync. */
+    this._lastVisibilityFloorIndex = NaN;
 
     // Foundry hook IDs for light tracking.
     this._hookIds = {};
@@ -697,16 +717,32 @@ export class SpecularEffectV2 {
           ? (bgFloorIndex === 0 ? '__bg_image__' : `__bg_image__${bgFloorIndex}`)
           : '__bg_image__';
 
-        // Keep background below tile plane within its floor band.
-        const GROUND_Z = 1000;
-        const z = GROUND_Z + bgFloorIndex - 1 + SPECULAR_Z_OFFSET;
+        // Match FloorRenderBus / StreamedBackgroundGrid: bg sits at GROUND_Z - 1 + floor×0.01.
+        const z = GROUND_Z - 1 + bgFloorIndex * 0.01 + SPECULAR_Z_OFFSET;
+        const gateStreaming = shouldGateBackgroundVegetationOnStreaming(sceneW, sceneH);
+        let bgWillStream = false;
+        try {
+          const meta = await fetchSourceImageMeta(bgSrc);
+          const streamThreshold = Math.max(
+            4096,
+            (getTextureBudgetTracker()?.getRecommendedTileSize?.() ?? 1024) * 2,
+          );
+          bgWillStream = meta
+            ? shouldStreamBackground(meta.width, meta.height, streamThreshold)
+            : gateStreaming;
+        } catch (_) {
+          bgWillStream = gateStreaming;
+        }
 
         await this._createOverlay(bgBusTileId, bgFloorIndex, {
           specularUrl: bgSpecResult.path,
           albedoUrl: bgSrc,
           centerX, centerY, z,
           tileW: sceneW, tileH: sceneH, rotation: 0,
+          streamingGridKey: bgWillStream ? bgBusTileId : null,
         });
+
+        if (bgWillStream) this._gateBackgroundOnStreaming = true;
 
         overlayCount++;
         log.info(`SpecularEffectV2: created background overlay (${sceneW}x${sceneH})`);
@@ -952,6 +988,21 @@ export class SpecularEffectV2 {
     if (u.uAmbientLightFloorGate) {
       u.uAmbientLightFloorGate.value = floors.length > 1 ? 1.0 : 0.0;
     }
+
+    this._syncStreamingOverlayState();
+  }
+
+  /**
+   * Called by FloorRenderBus.syncStreaming() after albedo cell residency updates so
+   * additive overlays stack above streamed tiles in the same frame the bus draws.
+   */
+  syncOverlaysAfterTileStreaming() {
+    // Streaming cell renderOrder / residency can change without altering the
+    // visible-cell signature — always restack bg + streamed overlays each sync.
+    if (this._overlays.size > 0) {
+      this._syncOverlayVisibility();
+    }
+    this._syncStreamingOverlayState();
   }
 
   /**
@@ -1146,6 +1197,8 @@ export class SpecularEffectV2 {
       const overlayByFloor = {};
       /** @type {Record<string, number>} */
       const overlayMaterialKinds = {};
+      /** @type {Record<string, number>} */
+      const overlayAlbedoBindingModes = {};
       let overlaysWithShaderUniforms = 0;
       /** @type {Record<string, number>} */
       const outdoorsFloorIdxHistogram = {};
@@ -1154,6 +1207,8 @@ export class SpecularEffectV2 {
         overlayByFloor[fi] = (overlayByFloor[fi] || 0) + 1;
         const mk = String(ent.material?.type || 'UnknownMaterial');
         overlayMaterialKinds[mk] = (overlayMaterialKinds[mk] || 0) + 1;
+        const abm = String(ent.albedoBindingMode || 'unknown');
+        overlayAlbedoBindingModes[abm] = (overlayAlbedoBindingModes[abm] || 0) + 1;
         if (ent.material?.uniforms?.uSpecularMap && ent.material?.uniforms?.uAlbedoMap) {
           overlaysWithShaderUniforms++;
         }
@@ -1243,6 +1298,7 @@ export class SpecularEffectV2 {
         lastShaderCompileError: this._lastShaderCompileError ?? null,
         overlayByFloor,
         overlayMaterialKinds,
+        overlayAlbedoBindingModes,
         overlaysWithShaderUniforms,
         outdoorsFloorIdxHistogram,
         compositorPresent: !!compositor,
@@ -1346,6 +1402,10 @@ export class SpecularEffectV2 {
     }
     this._overlays.clear();
     this._lights.clear();
+    this._gateBackgroundOnStreaming = false;
+    this._lastStreamCellSignature = '';
+    this._lastStreamGridSetSignature = '';
+    this._lastVisibilityFloorIndex = NaN;
     this._healthDiagnostics = null;
     this._notifyMaskStatusUi();
   }
@@ -1453,6 +1513,7 @@ export class SpecularEffectV2 {
     const {
       centerX, centerY, tileW, tileH, rotation, z, floorIndex,
       albedoUrl, specularUrl, planeSignX = 1, planeSignY = 1,
+      streamingGridKey = null,
     } = opts;
 
     const THREE = window.THREE;
@@ -1471,7 +1532,11 @@ export class SpecularEffectV2 {
       material = this._compiledBaseMaterial.clone();
       material.uniforms = newUniforms;
 
-      void this._bindOverlayTileTextures(tileId, material.uniforms, { albedoUrl, specularUrl });
+      void this._bindOverlayTileTextures(tileId, material.uniforms, {
+        albedoUrl,
+        specularUrl,
+        streamingGridKey,
+      });
     } else {
       // DEFERRED: Use MeshBasicMaterial (no shader compile) initially.
       // Real ShaderMaterial with full GLSL will be created and swapped in later
@@ -1493,18 +1558,25 @@ export class SpecularEffectV2 {
       // Store texture URLs for later shader upgrade
       material._tempAlbedoUrl = albedoUrl;
       material._tempSpecularUrl = specularUrl;
+      material._tempStreamingGridKey = streamingGridKey;
       material._tempTileId = tileId;
     }
 
+    const isBgPlane = /^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId));
     const geometry = new THREE.PlaneGeometry(tileW, tileH);
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = `SpecV2_${tileId}`;
     mesh.frustumCulled = false;
-    mesh.scale.set(
-      Number.isFinite(planeSignX) && planeSignX !== 0 ? planeSignX : 1,
-      Number.isFinite(planeSignY) && planeSignY !== 0 ? planeSignY : 1,
-      1,
-    );
+    if (isBgPlane) {
+      // Match FloorRenderBus._addBackgroundImage / streamed cell meshes (flipY=false on texture).
+      mesh.scale.set(1, -1, 1);
+    } else {
+      mesh.scale.set(
+        Number.isFinite(planeSignX) && planeSignX !== 0 ? planeSignX : 1,
+        Number.isFinite(planeSignY) && planeSignY !== 0 ? planeSignY : 1,
+        1,
+      );
+    }
     const baseEntry = this._renderBus?._tiles?.get?.(tileId);
     const canAttachToTileRoot = !!baseEntry && !String(tileId).startsWith('__');
     if (canAttachToTileRoot) {
@@ -1528,14 +1600,12 @@ export class SpecularEffectV2 {
     // policy instead of the live bus mesh for backgrounds.
     try {
       const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
-      const isBgPlane = /^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId));
       if (isBgPlane) {
-        const baseAlbedoOrder = tileAlbedoOrder(fi, 0);
-        mesh.renderOrder = tileStackedOverlayOrder(baseAlbedoOrder, fi, SPECULAR_EFFECT_DELTA);
+        this._applySpecularMeshRenderOrder(mesh, fi, tileId, { streamingGridKey, floorIndex: fi });
       } else {
         const baseOrder = Number(baseEntry?.mesh?.renderOrder);
         if (Number.isFinite(baseOrder)) {
-          mesh.renderOrder = tileStackedOverlayOrder(baseOrder, fi, SPECULAR_EFFECT_DELTA);
+          this._applySpecularMeshRenderOrder(mesh, fi, tileId, { streamingGridKey, floorIndex: fi });
         }
       }
     } catch (_) {}
@@ -1553,7 +1623,13 @@ export class SpecularEffectV2 {
     if (!attached) {
       this._renderBus.addEffectOverlay(`${tileId}_specular`, mesh, floorIndex);
     }
-    this._overlays.set(tileId, { mesh, material, floorIndex });
+    this._overlays.set(tileId, {
+      mesh,
+      material,
+      floorIndex,
+      streamingGridKey,
+      albedoBindingMode: isBgPlane && streamingGridKey ? 'opaqueFallbackForStreamedBackground' : null,
+    });
     this._syncOverlayVisibility();
 
     // Textures will be loaded after real shader is compiled.
@@ -1632,7 +1708,11 @@ export class SpecularEffectV2 {
 
         const albedoUrl = oldMat._tempAlbedoUrl;
         const specularUrl = oldMat._tempSpecularUrl;
-        await this._bindOverlayTileTextures(tileId, newMat.uniforms, { albedoUrl, specularUrl });
+        await this._bindOverlayTileTextures(tileId, newMat.uniforms, {
+          albedoUrl,
+          specularUrl,
+          streamingGridKey: overlay.streamingGridKey ?? oldMat._tempStreamingGridKey ?? null,
+        });
 
         // Dispose old MeshBasicMaterial
         oldMat.dispose();
@@ -1667,15 +1747,300 @@ export class SpecularEffectV2 {
   /**
    * Specular overlays are bus-resident geometry. Disabling this effect must
    * explicitly hide those meshes, otherwise placeholders can still render.
+   * When tile streaming is active, stack above streamed albedo cells and gate
+   * visibility to resident cells (same contract as BushEffectV2 / TreeEffectV2).
    * @private
    */
   _syncOverlayVisibility() {
-    const visible = !!(this._enabled && this.params?.enabled !== false);
-    for (const [, entry] of this._overlays) {
+    const effectOn = !!(this._enabled && this.params?.enabled !== false);
+    const maxFloor = this._getSafeVisibleMaxFloorIndex();
+    /** @type {Map<string, Set<string>>} */
+    const streamCellsByGrid = new Map();
+    const streamCellsForGrid = (gridKey) => {
+      const key = gridKey ?? '__bg_image__';
+      let cells = streamCellsByGrid.get(key);
+      if (!cells) {
+        cells = getVisibleStreamingCellKeys(key);
+        streamCellsByGrid.set(key, cells);
+      }
+      return cells;
+    };
+
+    for (const [tileId, entry] of this._overlays) {
       const mesh = entry?.mesh;
       if (!mesh) continue;
-      mesh.visible = visible;
+
+      this._applySpecularMeshRenderOrder(mesh, entry.floorIndex, tileId, entry);
+
+      const floorOk = effectOn && Number(entry.floorIndex) <= maxFloor;
+      const gridKey = this._resolveOverlayStreamingGridKey(tileId, entry);
+      if (gridKey) entry.streamingGridKey = gridKey;
+      // Full-scene overlays stay visible when the effect is on; only per-cell splits
+      // (future) use vegetation residency gating. Render order handles streaming stack.
+      let streamOk = true;
+      if (gridKey && entry?.streamingCellKey) {
+        streamOk = isVegetationStreamingCellVisible(
+          { streamingGridKey: gridKey, streamingCellKey: entry.streamingCellKey },
+          streamCellsForGrid(gridKey),
+        );
+      }
+      mesh.visible = floorOk && streamOk;
     }
+  }
+
+  /**
+   * Track streaming cell residency / renderOrder changes and refresh overlay stack.
+   * @private
+   */
+  _syncStreamingOverlayState() {
+    if (this._overlays.size === 0) return;
+
+    const maxFloor = this._getSafeVisibleMaxFloorIndex();
+    const floorChanged = maxFloor !== this._lastVisibilityFloorIndex;
+    if (floorChanged) this._lastVisibilityFloorIndex = maxFloor;
+
+    const gridKeys = this._collectStreamingGridKeys();
+    const gridSetSig = gridKeys.slice().sort().join('|');
+    const gridSetChanged = gridSetSig !== this._lastStreamGridSetSignature;
+    if (gridSetChanged) this._lastStreamGridSetSignature = gridSetSig;
+
+    if (gridKeys.length > 0 || this._gateBackgroundOnStreaming) {
+      const streamSig = streamingCellKeysSignatureForGrids(
+        gridKeys.length ? gridKeys : ['__bg_image__'],
+      );
+      const streamChanged = streamSig !== this._lastStreamCellSignature;
+      if (streamChanged) this._lastStreamCellSignature = streamSig;
+      // Always refresh background stack RO after streaming sync — cell residency and
+      // renderOrder can change without altering the visible-cell signature.
+      if (streamChanged || floorChanged || gridSetChanged || this._gateBackgroundOnStreaming) {
+        this._syncOverlayVisibility();
+      }
+      return;
+    }
+
+    if (floorChanged) this._syncOverlayVisibility();
+  }
+
+  /**
+   * @returns {number}
+   * @private
+   */
+  _getSafeVisibleMaxFloorIndex() {
+    const busIdx = Number(this._renderBus?._visibleMaxFloorIndex);
+    const activeIdx = Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index);
+    if (Number.isFinite(busIdx)) return busIdx;
+    if (Number.isFinite(activeIdx)) return activeIdx;
+    return 0;
+  }
+
+  /**
+   * @returns {string[]}
+   * @private
+   */
+  _collectStreamingGridKeys() {
+    /** @type {Set<string>} */
+    const keys = new Set();
+    for (const [tileId, entry] of this._overlays) {
+      const gk = this._resolveOverlayStreamingGridKey(tileId, entry);
+      if (gk) keys.add(gk);
+    }
+    return [...keys];
+  }
+
+  /**
+   * @param {string} key
+   * @returns {boolean}
+   * @private
+   */
+  _hasActiveStreamingGrid(key) {
+    const id = String(key || '');
+    if (!id) return false;
+    try {
+      const manager = getTileStreamingManager();
+      if (manager.getGrids?.()?.has?.(id)) return true;
+      if (manager.getRegionGrids?.()?.has?.(id)) return true;
+    } catch (_) {}
+    return false;
+  }
+
+  /**
+   * Active streamed level image grid for a floor (background then foreground).
+   * @param {number} floorIndex
+   * @returns {string|null}
+   * @private
+   */
+  _resolveStackImageStreamGridKeyForFloor(floorIndex) {
+    const fi = Math.max(0, Number(floorIndex) || 0);
+    const bgKey = fi === 0 ? '__bg_image__' : `__bg_image__${fi}`;
+    if (this._hasActiveStreamingGrid(bgKey)) return bgKey;
+    const fgKey = fi === 0 ? '__fg_image__' : `__fg_image__${fi}`;
+    if (this._hasActiveStreamingGrid(fgKey)) return fgKey;
+    return null;
+  }
+
+  /**
+   * @param {string} gridKey
+   * @returns {boolean}
+   * @private
+   */
+  _busHasStreamDrawsForGrid(gridKey) {
+    const id = String(gridKey || '');
+    if (!id) return false;
+    try {
+      if (this._renderBus?._tiles?.has?.(`${id}__fallback`)) return true;
+      const prefix = `${id}:cell:`;
+      for (const k of this._renderBus?._tiles?.keys?.() ?? []) {
+        if (String(k).startsWith(prefix)) return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  /**
+   * Base renderOrder the streaming pyramid was mounted with (see registerBackground).
+   * @param {string} gridKey
+   * @param {number} floorIndex
+   * @returns {number}
+   * @private
+   */
+  _getStreamingGridBaseRenderOrder(gridKey, floorIndex) {
+    const fi = Math.max(0, Number(floorIndex) || 0);
+    try {
+      const manager = getTileStreamingManager();
+      const grid = manager.getGrids?.()?.get?.(gridKey)
+        ?? manager.getRegionGrids?.()?.get?.(gridKey)
+        ?? null;
+      const ro = Number(grid?._tileRenderOrder);
+      if (Number.isFinite(ro)) return ro;
+    } catch (_) {}
+    return tileAlbedoOrder(fi, 0);
+  }
+
+  /**
+   * Sharpest streamed cell renderOrder when no resident cells are visible yet.
+   * Matches streamingCellRenderOrder(base, lod=0) in streamed-background-grid.js.
+   * @param {string} gridKey
+   * @param {number} floorIndex
+   * @returns {number}
+   * @private
+   */
+  _predictedStreamingSharpestRenderOrder(gridKey, floorIndex) {
+    const base = Math.floor(this._getStreamingGridBaseRenderOrder(gridKey, floorIndex));
+    return base * 10 + 9;
+  }
+
+  /**
+   * @param {string} tileId
+   * @param {object|null|undefined} entry
+   * @returns {string|null}
+   * @private
+   */
+  _resolveOverlayStreamingGridKey(tileId, entry) {
+    const tid = String(tileId || '');
+    if (tid.includes('__stream_')) return null;
+
+    if (/^__bg_image__(?:|[1-9]\d*)$/.test(tid)) {
+      if (entry?.streamingGridKey) return entry.streamingGridKey;
+      if (this._hasActiveStreamingGrid(tid) || this._busHasStreamDrawsForGrid(tid)) return tid;
+      return null;
+    }
+
+    try {
+      const busEntry = this._renderBus?._tiles?.get?.(tid);
+      const fi = Number(entry?.floorIndex ?? busEntry?.floorIndex) || 0;
+
+      if (busEntry?.mapShineBackgroundStreamServed) {
+        return this._resolveStackImageStreamGridKeyForFloor(fi);
+      }
+
+      if (this._hasActiveStreamingGrid(tid)) return tid;
+
+      const manager = getTileStreamingManager();
+      if (busEntry?.mapShineStreamedRegion && manager?.hasBusTile?.(tid)) return tid;
+    } catch (_) {}
+    return null;
+  }
+
+  /**
+   * Highest visible streamed albedo renderOrder for a grid (cells use base×10+lod).
+   * Includes bus-resident cell/fallback meshes registered by StreamedBackgroundGrid.
+   * @param {string} gridKey
+   * @param {number} floorIndex
+   * @returns {number|null}
+   * @private
+   */
+  _maxStreamingDrawRenderOrder(gridKey, floorIndex) {
+    if (!gridKey) return null;
+    let maxRo = null;
+    const consider = (ro) => {
+      if (!Number.isFinite(ro)) return;
+      maxRo = maxRo == null ? ro : Math.max(maxRo, ro);
+    };
+
+    const cells = getVisibleStreamingCellKeys(gridKey);
+    for (const cellKey of cells) {
+      consider(resolveStreamingCellAlbedoRenderOrder(gridKey, cellKey, floorIndex));
+    }
+
+    try {
+      const prefix = `${gridKey}:cell:`;
+      for (const [k, ent] of this._renderBus?._tiles ?? []) {
+        const key = String(k);
+        if (!key.startsWith(prefix)) continue;
+        if (!ent?.mesh?.visible) continue;
+        consider(Number(ent.mesh.renderOrder));
+      }
+      const fallback = this._renderBus?._tiles?.get?.(`${gridKey}__fallback`);
+      if (fallback?.mesh?.visible) {
+        consider(Number(fallback.mesh.renderOrder));
+      }
+    } catch (_) {}
+
+    return maxRo;
+  }
+
+  /**
+   * Stack additive specular immediately after the albedo it covers — including
+   * streamed pyramid cells whose renderOrder is base×10+lod, not tileStacked base+ε.
+   * @param {import('three').Mesh} mesh
+   * @param {number} floorIndex
+   * @param {string} tileId
+   * @param {object|null|undefined} entry
+   * @private
+   */
+  _applySpecularMeshRenderOrder(mesh, floorIndex, tileId, entry = null) {
+    if (!mesh) return;
+    const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Number(floorIndex)) : 0;
+    const gridKey = this._resolveOverlayStreamingGridKey(tileId, entry);
+    const streamRo = gridKey ? this._maxStreamingDrawRenderOrder(gridKey, fi) : null;
+    if (gridKey && entry) entry.streamingGridKey = gridKey;
+
+    let next;
+    if (Number.isFinite(streamRo)) {
+      // Streamed albedo cells use base×10+lod (see streamingCellRenderOrder) — stack
+      // additively above the sharpest resident cell, not tileStackedOverlayOrder(base).
+      next = streamRo + SPECULAR_EFFECT_DELTA * 0.01;
+    } else if (gridKey) {
+      // Pyramid registered / gated but no textured cells yet — still stack above the
+      // sharpest LOD slot so we are not trapped at tileAlbedoOrder+ε under base×10+9.
+      next = this._predictedStreamingSharpestRenderOrder(gridKey, fi) + SPECULAR_EFFECT_DELTA * 0.01;
+    } else {
+      let baseOrder = null;
+      const isBgPlane = /^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId));
+      const baseEntry = this._renderBus?._tiles?.get?.(tileId);
+      const isOverhead = !!(baseEntry?.isOverhead || baseEntry?.root?.userData?.isOverhead);
+      if (isBgPlane) {
+        baseOrder = tileAlbedoOrder(fi, 0);
+      } else if (isOverhead) {
+        const fromTile = Number(baseEntry?.mesh?.renderOrder);
+        baseOrder = Number.isFinite(fromTile) ? fromTile : tileOverheadOrder(fi, 0);
+      } else {
+        const fromTile = Number(baseEntry?.mesh?.renderOrder);
+        baseOrder = Number.isFinite(fromTile) ? fromTile : tileAlbedoOrder(fi, 0);
+      }
+      next = tileStackedOverlayOrder(baseOrder, fi, SPECULAR_EFFECT_DELTA);
+    }
+    if (mesh.renderOrder !== next) mesh.renderOrder = next;
   }
 
   /**
@@ -1701,13 +2066,11 @@ export class SpecularEffectV2 {
 
     bg.floorIndex = nextFloor;
 
-    // Background is absolute-positioned (not tile-attached); keep it in the
-    // same floor Z band as the active floor.
-    const GROUND_Z = 1000;
-    bg.mesh.position.z = GROUND_Z + nextFloor - 1 + SPECULAR_Z_OFFSET;
+    // Background is absolute-positioned (not tile-attached); keep it in the bus bg Z band.
+    bg.mesh.position.z = GROUND_Z - 1 + nextFloor * 0.01 + SPECULAR_Z_OFFSET;
+    bg.mesh.scale.set(1, -1, 1);
 
-    const baseAlbedoOrder = tileAlbedoOrder(nextFloor, 0);
-    bg.mesh.renderOrder = tileStackedOverlayOrder(baseAlbedoOrder, nextFloor, SPECULAR_EFFECT_DELTA);
+    this._applySpecularMeshRenderOrder(bg.mesh, nextFloor, bgTileId, bg);
 
     if (bg.material?.uniforms?.uOutdoorsFloorIdx) {
       bg.material.uniforms.uOutdoorsFloorIdx.value = nextFloor;
@@ -1882,8 +2245,39 @@ export class SpecularEffectV2 {
    * @private
    */
   _resolveBusAlbedoTexture(tileId) {
-    if (!tileId || /^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId))) return null;
+    if (!tileId) return null;
+    const tid = String(tileId);
+    if (/^__bg_image__(?:|[1-9]\d*)$/.test(tid)) {
+      return this._renderBus?._tiles?.get?.(tid)?.material?.map ?? null;
+    }
+    if (tid.startsWith('__')) return null;
     return this._renderBus?._tiles?.get?.(tileId)?.material?.map ?? null;
+  }
+
+  /**
+   * @param {string} tileId
+   * @returns {boolean}
+   * @private
+   */
+  _isBackgroundBusPlane(tileId) {
+    return /^__bg_image__(?:|[1-9]\d*)$/.test(String(tileId || ''));
+  }
+
+  /**
+   * Streamed scene backgrounds no longer guarantee a full-plane bus albedo texture.
+   * Do not block `_Specular` mask binding on a duplicate full background decode; the
+   * streamed cells already own albedo display and the specular mask is the highlight gate.
+   * @param {string} tileId
+   * @param {object|null|undefined} entry
+   * @param {string|null|undefined} streamingGridKey
+   * @returns {boolean}
+   * @private
+   */
+  _shouldUseOpaqueBackgroundAlbedoFallback(tileId, entry = null, streamingGridKey = null) {
+    if (!this._isBackgroundBusPlane(tileId)) return false;
+    if (streamingGridKey || entry?.streamingGridKey) return true;
+    if (this._hasActiveStreamingGrid(tileId) || this._busHasStreamDrawsForGrid(tileId)) return true;
+    return false;
   }
 
   /**
@@ -1903,40 +2297,71 @@ export class SpecularEffectV2 {
    * Bind per-tile albedo (bus reuse or off-thread load) and specular mask.
    * @param {string} tileId
    * @param {Record<string, { value: import('three').Texture }>} uniforms
-   * @param {{ albedoUrl?: string, specularUrl?: string }} urls
+   * @param {{ albedoUrl?: string, specularUrl?: string, streamingGridKey?: string|null }} urls
    * @private
    */
-  async _bindOverlayTileTextures(tileId, uniforms, { albedoUrl, specularUrl }) {
-    const busAlbedo = this._resolveBusAlbedoTexture(tileId);
-    if (busAlbedo) {
-      uniforms.uAlbedoMap.value = busAlbedo;
-    } else if (albedoUrl) {
+  async _bindOverlayTileTextures(tileId, uniforms, { albedoUrl, specularUrl, streamingGridKey = null }) {
+    const isBgPlane = this._isBackgroundBusPlane(tileId);
+    const entry = this._overlays.get(tileId) ?? null;
+    const useOpaqueBgAlbedoFallback = this._shouldUseOpaqueBackgroundAlbedoFallback(
+      tileId,
+      entry,
+      streamingGridKey,
+    );
+
+    const bindAlbedo = async () => {
+      if (useOpaqueBgAlbedoFallback) {
+        uniforms.uAlbedoMap.value = this._fallbackWhite;
+        if (entry) entry.albedoBindingMode = 'opaqueFallbackForStreamedBackground';
+        return;
+      }
+
+      const busAlbedo = this._resolveBusAlbedoTexture(tileId);
+      if (busAlbedo) {
+        uniforms.uAlbedoMap.value = busAlbedo;
+        if (entry) entry.albedoBindingMode = 'busTexture';
+        return;
+      }
+
+      if (!albedoUrl) return;
       try {
-        const tex = await loadImageTexture(albedoUrl, { role: 'TILE_ALBEDO' });
+        const budget = getTextureBudgetTracker();
+        const maxSize = isBgPlane ? (budget?.backgroundMaxSize ?? 4096) : undefined;
+        const tex = await loadImageTexture(albedoUrl, isBgPlane
+          ? { role: 'ALBEDO', premultiplyAlpha: 'none', maxSize }
+          : { role: 'TILE_ALBEDO' });
         if (this._overlays.has(tileId)) {
           uniforms.uAlbedoMap.value = tex;
+          const liveEntry = this._overlays.get(tileId);
+          if (liveEntry) liveEntry.albedoBindingMode = isBgPlane ? 'loadedBackgroundFallback' : 'loadedTileAlbedo';
         } else {
           try { tex.dispose(); } catch (_) {}
         }
       } catch (err) {
         log.warn(`Failed to load albedo for ${tileId}:`, err);
       }
-    }
+    };
 
-    if (!specularUrl) return;
-    try {
-      const tex = await loadImageTexture(specularUrl, {
-        role: 'OVERLAY_DATA_MASK',
-        maxSize: VISUAL_MASK_MAX_SIZE,
-      });
-      if (this._overlays.has(tileId)) {
-        uniforms.uSpecularMap.value = tex;
-      } else {
-        try { tex.dispose(); } catch (_) {}
+    const bindSpecular = async () => {
+      if (!specularUrl) return;
+      try {
+        const tex = await loadImageTexture(specularUrl, isBgPlane
+          ? { role: 'DATA_MASK', maxSize: VISUAL_MASK_MAX_SIZE }
+          : {
+            role: 'OVERLAY_DATA_MASK',
+            maxSize: VISUAL_MASK_MAX_SIZE,
+          });
+        if (this._overlays.has(tileId)) {
+          uniforms.uSpecularMap.value = tex;
+        } else {
+          try { tex.dispose(); } catch (_) {}
+        }
+      } catch (err) {
+        log.warn(`Failed to load specular mask for ${tileId}:`, err);
       }
-    } catch (err) {
-      log.warn(`Failed to load specular mask for ${tileId}:`, err);
-    }
+    };
+
+    await Promise.allSettled([bindSpecular(), bindAlbedo()]);
   }
 
   // ── Private: Light management ──────────────────────────────────────────────

@@ -4,13 +4,13 @@
  */
 
 /** Default cell size in world pixels (Foundry/Three units). */
-export const DEFAULT_CELL_SIZE = 2048;
+export const DEFAULT_CELL_SIZE = 1024;
 
 /** Minimum cell size (never go below 512). */
 export const MIN_CELL_SIZE = 512;
 
-/** Maximum cell size. */
-export const MAX_CELL_SIZE = 4096;
+/** Maximum cell size — LOD-0 pyramid tiles never exceed this dimension. */
+export const MAX_CELL_SIZE = 1024;
 
 /** Reference cell size used when tuning resident caps and LOD-0 budgets. */
 export const REFERENCE_CELL_SIZE = 2048;
@@ -32,10 +32,7 @@ export function resolveCellSize(maxTextureSize = 8192, sceneWidth = 4096, sceneH
   if (budgetCellSize >= MIN_CELL_SIZE) {
     return Math.min(MAX_CELL_SIZE, budgetCellSize);
   }
-  const maxDim = Math.max(sceneWidth, sceneHeight, 1);
   const texCap = Math.max(MIN_CELL_SIZE, Math.floor(maxTextureSize / 2));
-  if (maxDim <= 4096) return Math.min(1024, texCap);
-  if (maxDim <= 8192) return Math.min(2048, texCap);
   return Math.min(MAX_CELL_SIZE, texCap);
 }
 

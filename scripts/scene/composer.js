@@ -1049,7 +1049,14 @@ export class SceneComposer {
     // FloorCompositor can create its own material if needed.
     this._albedoMaterial = material;
     this._albedoTexture = texture || null;
-    
+    try {
+      const bus = window.MapShine?.floorCompositorV2?._renderBus;
+      const fd = this.foundrySceneData;
+      if (bus && fd && typeof bus.tryMountViewedBackgroundFromComposer === 'function') {
+        bus.tryMountViewedBackgroundFromComposer(this, fd);
+      }
+    } catch (_) {}
+
     // Create red back-face for orientation debugging
     const backMaterial = new THREE.MeshBasicMaterial({
       color: 0xff0000,

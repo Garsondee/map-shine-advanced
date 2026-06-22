@@ -8,6 +8,11 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import {
+  applySceneViewProjectionToUniforms,
+  createSceneViewProjectionCache,
+  updateSceneViewProjectionFromCamera,
+} from '../scene-view-projection.js';
 
 const log = createLogger('ShadowManagerV2');
 
@@ -58,6 +63,16 @@ export class ShadowManagerV2 {
     this._landscapeLightningShadowWeight = 0;
     this._landscapeLightningShadowDarkness = 1.0;
     this._inputList = null;
+    /** @type {import('../scene-view-projection.js').SceneViewProjectionCache|null} */
+    this._viewProjectionCache = null;
+    this._tmpNdcVec = null;
+    this._tmpWorldVec = null;
+    this._tmpDirVec = null;
+    /** Reused WebGLRenderTarget options — avoid per-resize object churn. */
+    this._rtOpts = null;
+    /** Cached scene rect in Foundry pixels (x, y, width, height). */
+    this._sceneRectVec = null;
+    this._hasSceneRect = false;
   }
 
   /**
@@ -97,6 +112,19 @@ export class ShadowManagerV2 {
     if (this._initialized) return;
 
     this._sizeVec = new THREE.Vector2();
+    this._sceneRectVec = new THREE.Vector4();
+    this._viewProjectionCache = createSceneViewProjectionCache();
+    this._tmpNdcVec = new THREE.Vector3();
+    this._tmpWorldVec = new THREE.Vector3();
+    this._tmpDirVec = new THREE.Vector3();
+    this._rtOpts = {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      depthBuffer: false,
+      stencilBuffer: false,
+    };
     this._scene = new THREE.Scene();
     this._camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     this._material = new THREE.ShaderMaterial({
@@ -127,7 +155,7 @@ export class ShadowManagerV2 {
         uTreeBillboardOpacity: { value: 1.0 },
         uBushBillboardOpacity: { value: 1.0 },
         // Coordinate conversion uniforms for building shadows (world space)
-        uSceneRect: { value: new THREE.Vector4() },
+        uSceneRect: { value: this._sceneRectVec },
         uHasSceneRect: { value: 0.0 },
         // Match water-shader.js + LightingEffectV2: vUv → Foundry → sceneUv for tBuildingShadow.
         uViewBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
@@ -351,18 +379,42 @@ export class ShadowManagerV2 {
     if (!THREE || !this._initialized) return;
     const w = Math.max(1, Number(width) || 1);
     const h = Math.max(1, Number(height) || 1);
-    const opts = {
-      minFilter: THREE.LinearFilter,
-      magFilter: THREE.LinearFilter,
-      format: THREE.RGBAFormat,
-      type: THREE.UnsignedByteType,
-      depthBuffer: false,
-      stencilBuffer: false,
-    };
+    const opts = this._rtOpts;
     if (this._combinedRT) this._combinedRT.setSize(w, h);
     else this._combinedRT = new THREE.WebGLRenderTarget(w, h, opts);
     if (this._combinedRawRT) this._combinedRawRT.setSize(w, h);
     else this._combinedRawRT = new THREE.WebGLRenderTarget(w, h, opts);
+  }
+
+  /**
+   * Zero-allocation per-frame texture binding (preferred over {@link #setInputList}).
+   * @param {THREE.Texture|null} cloudShadowTexture
+   * @param {THREE.Texture|null} cloudShadowRawTexture
+   * @param {THREE.Texture|null} overheadShadowTexture
+   * @param {THREE.Texture|null} buildingShadowTexture
+   * @param {THREE.Texture|null} paintedShadowTexture
+   * @param {THREE.Texture|null} skyReachShadowTexture
+   * @param {THREE.Texture|null} treeBillboardShadowTexture
+   * @param {THREE.Texture|null} bushBillboardShadowTexture
+   */
+  bindTextures(
+    cloudShadowTexture,
+    cloudShadowRawTexture,
+    overheadShadowTexture,
+    buildingShadowTexture,
+    paintedShadowTexture,
+    skyReachShadowTexture,
+    treeBillboardShadowTexture,
+    bushBillboardShadowTexture,
+  ) {
+    this._cloudShadowTexture = cloudShadowTexture ?? null;
+    this._cloudShadowRawTexture = cloudShadowRawTexture ?? null;
+    this._overheadShadowTexture = overheadShadowTexture ?? null;
+    this._buildingShadowTexture = buildingShadowTexture ?? null;
+    this._paintedShadowTexture = paintedShadowTexture ?? null;
+    this._skyReachShadowTexture = skyReachShadowTexture ?? null;
+    this._treeBillboardShadowTexture = treeBillboardShadowTexture ?? null;
+    this._bushBillboardShadowTexture = bushBillboardShadowTexture ?? null;
   }
 
   setInputs({ cloudShadowTexture = null, cloudShadowRawTexture = null, overheadShadowTexture = null, buildingShadowTexture = null, paintedShadowTexture = null, skyReachShadowTexture = null, treeBillboardShadowTexture = null, bushBillboardShadowTexture = null } = {}) {
@@ -419,7 +471,47 @@ export class ShadowManagerV2 {
    * @param {THREE.Vector4} sceneRect - (x, y, width, height) in Foundry coordinates
    */
   setSceneRect(sceneRect) {
-    this._sceneRect = sceneRect;
+    if (!this._sceneRectVec || !sceneRect) {
+      this._hasSceneRect = false;
+      return;
+    }
+    if (sceneRect.isVector4) {
+      this._sceneRectVec.copy(sceneRect);
+    } else {
+      this._sceneRectVec.set(
+        Number(sceneRect.x) || 0,
+        Number(sceneRect.y) || 0,
+        Number(sceneRect.z ?? sceneRect.width) || 1,
+        Number(sceneRect.w ?? sceneRect.height) || 1,
+      );
+    }
+    this._hasSceneRect = true;
+  }
+
+  /** @private Read Foundry sceneRect into cached uniforms without per-frame object churn. */
+  _syncSceneRectUniforms() {
+    const u = this._material?.uniforms;
+    if (!u?.uSceneRect) return;
+    try {
+      const dims = globalThis.canvas?.dimensions;
+      if (!dims) {
+        u.uHasSceneRect.value = 0.0;
+        this._hasSceneRect = false;
+        return;
+      }
+      const rect = dims.sceneRect ?? dims;
+      this._sceneRectVec.set(
+        rect?.x ?? dims.sceneX ?? 0,
+        rect?.y ?? dims.sceneY ?? 0,
+        rect?.width ?? dims.sceneWidth ?? dims.width ?? 1,
+        rect?.height ?? dims.sceneHeight ?? dims.height ?? 1,
+      );
+      u.uHasSceneRect.value = 1.0;
+      this._hasSceneRect = true;
+    } catch (_) {
+      u.uHasSceneRect.value = 0.0;
+      this._hasSceneRect = false;
+    }
   }
 
   /**
@@ -435,14 +527,9 @@ export class ShadowManagerV2 {
       u.uHasBuildingUvRemap.value = 0.0;
       return;
     }
-    const THREE = window.THREE;
-    if (!THREE) {
-      u.uHasBuildingUvRemap.value = 0.0;
-      return;
-    }
     try {
       const dims = globalThis.canvas?.dimensions;
-      if (!dims || !this._sceneRect) {
+      if (!dims || !this._hasSceneRect) {
         u.uHasBuildingUvRemap.value = 0.0;
         return;
       }
@@ -450,57 +537,36 @@ export class ShadowManagerV2 {
       const totalH = Math.max(1, Number(dims.height) || 1);
       u.uSceneDimensions.value.set(totalW, totalH);
 
-      if (camera.isOrthographicCamera) {
-        const camPos = camera.position;
-        const zoom = Math.max(0.001, camera.zoom ?? 1.0);
-        u.uViewBounds.value.set(
-          camPos.x + camera.left / zoom,
-          camPos.y + camera.bottom / zoom,
-          camPos.x + camera.right / zoom,
-          camPos.y + camera.top / zoom,
-        );
-      } else if (camera.isPerspectiveCamera) {
-        const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 0;
-        const ndc = new THREE.Vector3();
-        const world = new THREE.Vector3();
-        const dir = new THREE.Vector3();
-        let minX = Infinity;
-        let minY = Infinity;
-        let maxX = -Infinity;
-        let maxY = -Infinity;
-        const corners = [[-1, -1], [1, -1], [-1, 1], [1, 1]];
-        for (let i = 0; i < 4; i++) {
-          ndc.set(corners[i][0], corners[i][1], 0.5);
-          world.copy(ndc).unproject(camera);
-          dir.copy(world).sub(camera.position);
-          const dz = dir.z;
-          if (Math.abs(dz) < 1e-6) continue;
-          const t = (groundZ - camera.position.z) / dz;
-          if (!Number.isFinite(t) || t <= 0) continue;
-          const ix = camera.position.x + dir.x * t;
-          const iy = camera.position.y + dir.y * t;
-          if (ix < minX) minX = ix;
-          if (iy < minY) minY = iy;
-          if (ix > maxX) maxX = ix;
-          if (iy > maxY) maxY = iy;
-        }
-        if (minX === Infinity) {
-          u.uHasBuildingUvRemap.value = 0.0;
-          return;
-        }
-        u.uViewBounds.value.set(minX, minY, maxX, maxY);
-      } else {
+      const sc = window.MapShine?.sceneComposer;
+      const groundZ = sc?.basePlaneMesh?.position?.z ?? (sc?.groundZ ?? 0);
+      const cache = this._viewProjectionCache;
+      if (!cache) {
         u.uHasBuildingUvRemap.value = 0.0;
         return;
       }
+      const ok = updateSceneViewProjectionFromCamera(
+        camera,
+        groundZ,
+        cache,
+        {
+          ndc: this._tmpNdcVec,
+          world: this._tmpWorldVec,
+          dir: this._tmpDirVec,
+        },
+      );
+      if (!ok || !cache.isValid) {
+        u.uHasBuildingUvRemap.value = 0.0;
+        return;
+      }
+      applySceneViewProjectionToUniforms(cache, u);
       u.uHasBuildingUvRemap.value = 1.0;
     } catch (_) {
       u.uHasBuildingUvRemap.value = 0.0;
     }
   }
 
-  _renderOne(renderer, target, useRawCloud) {
-    if (!renderer || !target || !this._material || !this._scene || !this._camera) return;
+  /** @private Sync uniforms shared by combined + raw combine passes. */
+  _syncCombineUniforms() {
     const u = this._material.uniforms;
     u.tCloudShadow.value = this._cloudShadowTexture;
     u.tCloudShadowRaw.value = this._cloudShadowRawTexture;
@@ -531,7 +597,6 @@ export class ShadowManagerV2 {
     u.uHasSkyReachShadow.value = this._skyReachShadowTexture ? 1.0 : 0.0;
     u.uHasTreeBillboardShadow.value = this._treeBillboardShadowTexture ? 1.0 : 0.0;
     u.uHasBushBillboardShadow.value = this._bushBillboardShadowTexture ? 1.0 : 0.0;
-    u.uUseRawCloud.value = useRawCloud ? 1.0 : 0.0;
     u.uCloudWeight.value = Math.max(0.0, Math.min(1.0, Number(this.params.cloudWeight) || 0));
     u.uCloudOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.cloudOpacity) || 0));
     u.uOverheadOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.overheadOpacity) || 0));
@@ -540,15 +605,11 @@ export class ShadowManagerV2 {
     u.uSkyReachOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.skyReachOpacity) || 1.0));
     u.uTreeBillboardOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.treeBillboardOpacity) || 1.0));
     u.uBushBillboardOpacity.value = Math.max(0.0, Math.min(1.0, Number(this.params.bushBillboardOpacity) || 1.0));
-    
-    // Bind scene rect for coordinate conversion (world-space building shadows)
-    if (this._sceneRect) {
-      u.uSceneRect.value.set(this._sceneRect.x, this._sceneRect.y, this._sceneRect.z, this._sceneRect.w);
-      u.uHasSceneRect.value = 1.0;
-    } else {
-      u.uHasSceneRect.value = 0.0;
-    }
+  }
 
+  _renderOne(renderer, target, useRawCloud) {
+    if (!renderer || !target || !this._material || !this._scene || !this._camera) return;
+    this._material.uniforms.uUseRawCloud.value = useRawCloud ? 1.0 : 0.0;
     renderer.setRenderTarget(target);
     renderer.setClearColor(0xffffff, 1);
     renderer.clear();
@@ -566,9 +627,11 @@ export class ShadowManagerV2 {
       renderer.getDrawingBufferSize(this._sizeVec);
       this.onResize(this._sizeVec.x, this._sizeVec.y);
     }
+    this._syncSceneRectUniforms();
     try {
       if (camera) this.applyBuildingShadowUvRemap(camera);
     } catch (_) {}
+    this._syncCombineUniforms();
     const prevTarget = renderer.getRenderTarget();
     try {
       this._renderOne(renderer, this._combinedRT, false);

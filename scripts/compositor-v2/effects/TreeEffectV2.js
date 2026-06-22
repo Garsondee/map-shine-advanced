@@ -2715,10 +2715,14 @@ ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
       const floorOk = this._enabled && Number(entry.floorIndex) <= maxFloor;
       const viewOk = !view || tileBoundsIntersectView(entry.bounds, view);
       const maskReady = entry.maskReady === true;
-      const streamOk = isVegetationStreamingCellVisible(
-        entry,
-        entry.streamingGridKey ? streamCellsForGrid(entry.streamingGridKey) : null,
-      );
+      // Full-scene overlays stay visible when enabled; only per-cell splits use residency gating.
+      let streamOk = true;
+      if (entry?.streamingGridKey && entry?.streamingCellKey) {
+        streamOk = isVegetationStreamingCellVisible(
+          entry,
+          streamCellsForGrid(entry.streamingGridKey),
+        );
+      }
       const visible = floorOk && viewOk && maskReady && streamOk;
       if (entry._lastSyncedVisible !== visible) {
         entry._lastSyncedVisible = visible;

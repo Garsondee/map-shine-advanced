@@ -3929,6 +3929,9 @@ export class FloorCompositor {
       try {
         await this._renderBus?.awaitBackgroundStreamingReady?.();
       } catch (_) {}
+      try {
+        this._specularEffect?.syncOverlaysAfterTileStreaming?.();
+      } catch (_) {}
 
       this._populateComplete = true;
       // Ensure at least one fresh frame after async populate finishes.
@@ -4504,7 +4507,18 @@ export class FloorCompositor {
     const skyReachTex = (this._skyReachShadowEffect?.params?.enabled)
       ? (this._skyReachShadowEffect.shadowFactorTexture ?? null)
       : null;
-    if (typeof sm.setInputList === 'function') {
+    if (typeof sm.bindTextures === 'function') {
+      sm.bindTextures(
+        cloudTex ?? null,
+        cloudRawTex ?? null,
+        overheadTex,
+        buildingTexForCombine,
+        paintedTex,
+        skyReachTex,
+        this._treeBillboardShadowTexture ?? null,
+        this._bushBillboardShadowTexture ?? null,
+      );
+    } else if (typeof sm.setInputList === 'function') {
       sm.setInputList([
         { id: 'cloud', texture: cloudTex ?? null, rawTexture: cloudRawTex ?? null, uvSpace: 'screen', opacity: sm.params?.cloudOpacity ?? 1 },
         { id: 'overhead', texture: overheadTex, uvSpace: 'screen', opacity: sm.params?.overheadOpacity ?? 1 },
@@ -4526,17 +4540,6 @@ export class FloorCompositor {
         bushBillboardShadowTexture: this._bushBillboardShadowTexture ?? null,
       });
     }
-    try {
-      const dims = globalThis.canvas?.dimensions;
-      if (dims) {
-        const rect = dims.sceneRect ?? dims;
-        const sx = rect?.x ?? dims.sceneX ?? 0;
-        const sy = rect?.y ?? dims.sceneY ?? 0;
-        const sw = rect?.width ?? dims.sceneWidth ?? dims.width ?? 1;
-        const sh = rect?.height ?? dims.sceneHeight ?? dims.height ?? 1;
-        sm.setSceneRect({ x: sx, y: sy, z: sw, w: sh });
-      }
-    } catch (_) {}
     try {
       return sm.render(this.renderer, this.camera) === true;
     } catch (err) {

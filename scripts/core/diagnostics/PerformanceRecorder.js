@@ -32,6 +32,7 @@ import {
 import { buildFrameBudgetSection } from './performance-recorder-frame-budget.js';
 import { buildLightingPerfSection, resolveLightingEffect } from './performance-recorder-lighting.js';
 import { buildWorldOverlaysPerfSection } from './performance-recorder-world-overlays.js';
+import { buildBloomPerfSection } from './performance-recorder-bloom.js';
 import {
   buildWeatherPerfSection,
   buildWindowLightPerfSection,
@@ -1406,6 +1407,19 @@ export class PerformanceRecorder {
       });
     } catch (_) {}
 
+    let bloom = null;
+    try {
+      bloom = buildBloomPerfSection({
+        effects,
+        v2PassTimings,
+        session: {
+          frameTime: {
+            avg: frameTimes.length > 0 ? frameTimes.reduce((s, v) => s + v, 0) / frameTimes.length : 0,
+          },
+        },
+      });
+    } catch (_) {}
+
     let weatherParticles = null;
     try {
       weatherParticles = buildWeatherPerfSection({ effects });
@@ -1506,6 +1520,7 @@ export class PerformanceRecorder {
       cloudShadowCache,
       lighting,
       worldOverlays,
+      bloom,
       weatherParticles,
       windowLight,
       quarksParticles,

@@ -9114,13 +9114,15 @@ export class FloorCompositor {
       let bloomWrote = false;
       if (_profiling) _profileT0 = performance.now();
       const outdoorsForBloom = stackedOutdoorsForPostMerge ?? null;
-      this._bloomEffect?.setOutdoorsMask?.(outdoorsForBloom ?? null);
-      this._bloomEffect?.setFogClipBindings?.(this._fogEffect?.getBloomClipBindings?.() ?? null);
+      this._profileEffectCall('bloom.postMerge.bindings', 'render', () => {
+        this._bloomEffect?.setOutdoorsMask?.(outdoorsForBloom ?? null);
+        this._bloomEffect?.setFogClipBindings?.(this._fogEffect?.getBloomClipBindings?.() ?? null);
+      }, 'Bloom pre-render mask bindings', { cpuOnly: true });
       this._profileEffectCall('bloom.postMerge', 'render', () => {
         bloomWrote = !!this._bloomEffect.render(
           this.renderer, mergedCompositeOut, bloomOut, this.camera,
         );
-      }, 'BloomEffectV2 postMerge render');
+      }, 'BloomEffectV2 postMerge render', { cpuOnly: true });
       if (_profiling) this._recordPassTiming('postMerge_bloom', _profileT0);
       if (bloomWrote) mergedCompositeOut = bloomOut;
     }

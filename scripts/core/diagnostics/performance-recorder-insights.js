@@ -9,6 +9,7 @@ import { rollupEffectKey } from './performance-recorder-export.js';
 import { analyzeStutters, formatStutterEventLines } from './performance-recorder-stutters.js';
 import { buildLightingSpanRows } from './performance-recorder-lighting.js';
 import { buildWorldOverlaysSpanRows } from './performance-recorder-world-overlays.js';
+import { buildBloomSpanRows } from './performance-recorder-bloom.js';
 import {
   buildWeatherSpanRows,
   buildWindowLightSpanRows,
@@ -508,6 +509,68 @@ export function buildPerformanceInsights(snapshot, frames = [], ticks = []) {
         title: 'Vegetation overlay inventory',
         detail: `${rootCount} draw roots (bush shadow/canopy ${kinds.bush?.shadow ?? 0}/${kinds.bush?.canopy ?? 0}, tree ${kinds.tree?.shadow ?? 0}/${kinds.tree?.canopy ?? 0}) at ${live.drawingBuffer?.w ?? '?'}×${live.drawingBuffer?.h ?? '?'} buffer.`,
         tags: ['worldOverlays', 'vegetation'],
+      });
+    }
+  }
+
+  const bloomSection = snapshot.bloom;
+  if (bloomSection && typeof bloomSection === 'object') {
+    const rollup = bloomSection.gpuRollup;
+    const topSpans = (bloomSection.spans ?? buildBloomSpanRows(effects, { cap: 8 }))
+      .filter((s) => (s.gpuAvg ?? 0) > 0 || (s.cpuAvg ?? 0) > 0.05)
+      .slice(0, 4);
+    const postMergeBloom = bloomSection.passes?.postMerge_bloom?.avg ?? 0;
+    const estimatedGpu = rollup?.estimatedBloomGpuAvgMs ?? 0;
+    if (estimatedGpu >= 0.2 || postMergeBloom >= 0.2 || topSpans.length > 0) {
+      const spanList = topSpans.length > 0
+        ? topSpans.map((s) => {
+          const gpu = Number(s.gpuAvg) || 0;
+          const cpu = Number(s.cpuAvg) || 0;
+          if (gpu > 0) return `${s.span} ~${fmtMs(gpu)} ms GPU`;
+          return `${s.span} ~${fmtMs(cpu)} ms CPU`;
+        }).join('; ')
+        : `compositor pass ~${fmtMs(postMergeBloom)} ms`;
+      const live = bloomSection.live ?? {};
+      const layerNote = [
+        live.surfaceActive ? 'surface' : null,
+        live.atmoActive ? 'atmo' : null,
+      ].filter(Boolean).join('+') || 'inactive';
+      const passNote = live.estimatedFullscreenPassesPerFrame != null
+        ? ` ~${live.estimatedFullscreenPassesPerFrame} fullscreen draws/frame`
+        : '';
+      const blurParts = [];
+      if ((rollup?.blurMipsGpuAvgMs ?? 0) > 0) {
+        blurParts.push(`shared blur mips ~${fmtMs(rollup.blurMipsGpuAvgMs)} ms GPU`);
+      }
+      if ((rollup?.highPassGpuAvgMs ?? 0) > 0) {
+        blurParts.push(`highPass ~${fmtMs(rollup.highPassGpuAvgMs)} ms GPU`);
+      }
+      const rollupNote = blurParts.length > 0 ? ` Rollup: ${blurParts.join('; ')}.` : '';
+      insights.push({
+        severity: (estimatedGpu >= 1.5 || postMergeBloom >= 1.5) ? 'warn' : 'info',
+        title: 'Bloom post-merge breakdown',
+        detail: `${spanList}. Layers: ${layerNote}${passNote} at ${live.rtFull?.w ?? live.drawingBuffer?.w ?? '?'}×${live.rtFull?.h ?? live.drawingBuffer?.h ?? '?'} (~${fmtMs(live.estimatedRtVramMb ?? 0)} MB RTs).${rollupNote} See export \`bloom.spans\` and \`bloom.live\`.`,
+        tags: ['gpu', 'bloom', 'postMerge'],
+      });
+    }
+
+    const blocked = Number(bloomSection.gpuCoverage?.blockedSamples) || 0;
+    if (blocked > 20) {
+      insights.push({
+        severity: 'warn',
+        title: 'Bloom GPU probes partially blocked',
+        detail: `${blocked} blocked sample(s) — ensure parent \`bloom.postMerge\` is cpuOnly and reload before re-export. GPU slots rotate across prep/highPass/shared blur mips/final combine.`,
+        tags: ['bloom', 'gpu', 'coverage'],
+      });
+    }
+
+    if ((bloomSection.live?.atmoActive) && (bloomSection.live?.surfaceActive)
+      && (rollup?.blurMipsGpuAvgMs ?? 0) >= 0.4) {
+      insights.push({
+        severity: 'info',
+        title: 'Shared bloom mip chain active',
+        detail: `Surface + atmosphere share one blur chain (~${fmtMs(rollup.blurMipsGpuAvgMs)} ms GPU). Disable atmosphere or lower both radii to cut blur cost.`,
+        tags: ['bloom', 'atmo', 'tuning'],
       });
     }
   }

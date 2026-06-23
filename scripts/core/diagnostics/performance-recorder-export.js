@@ -7,6 +7,7 @@
 
 import { buildSummaryLightingSection } from './performance-recorder-lighting.js';
 import { buildSummaryWorldOverlaysSection } from './performance-recorder-world-overlays.js';
+import { buildSummaryBloomSection } from './performance-recorder-bloom.js';
 import {
   buildSummaryWeatherSection,
   buildSummaryWindowLightSection,
@@ -274,6 +275,7 @@ export function buildSummaryPayload(recorder) {
     sequencer,
     lighting: _lighting,
     worldOverlays: _worldOverlays,
+    bloom: _bloom,
     weatherParticles: _weatherParticles,
     windowLight: _windowLight,
     quarksParticles: _quarksParticles,
@@ -283,6 +285,7 @@ export function buildSummaryPayload(recorder) {
   const insights = recorder.getInsights?.() ?? [];
   const lighting = buildSummaryLightingSection(snap) ?? _lighting ?? null;
   const worldOverlays = buildSummaryWorldOverlaysSection(snap) ?? _worldOverlays ?? null;
+  const bloom = buildSummaryBloomSection(snap) ?? _bloom ?? null;
   const weatherParticles = buildSummaryWeatherSection(snap) ?? _weatherParticles ?? null;
   const windowLight = buildSummaryWindowLightSection(snap) ?? _windowLight ?? null;
   const quarksParticles = buildSummaryQuarksSection(snap.quarksParticles ?? _quarksParticles) ?? null;
@@ -296,6 +299,7 @@ export function buildSummaryPayload(recorder) {
     effects: buildSummaryEffects(_effects),
     lighting,
     worldOverlays,
+    bloom,
     weatherParticles,
     windowLight,
     quarksParticles,

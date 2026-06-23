@@ -3510,14 +3510,18 @@ export class LightingEffectV2 {
               shadowFactorMix *= paintedEffective;
             }
             shadowFactorMix = clamp(shadowFactorMix * vegetationLit * overheadLit, 0.0, 1.0);
-            shadowSunSlice = min(shadowFactorMix, coreStructLiftedGlobal);
             {
-              // Noon outdoors: unified overhead/canopy shadows must not zero the sun-ambient
-              // slice (probe: lit/scene ≈ 0.13 with calendarDayWeight≈1 and valid outdoors).
+              // Noon outdoors: lift overhead/canopy only — building structural shadows must
+              // stay visible under full sun (outdoorSunGuard on the combined factor erased them).
               float outdoorSunGuard = isOutdoorForInteriorDimSafe
                 * calendarDaylightHours
                 * (1.0 - baseDarknessLevel);
-              shadowSunSlice = max(shadowSunSlice, outdoorSunGuard * 0.50);
+              float shadowCoreForSun = min(
+                shadowFactorMix / max(overheadLit, 0.001),
+                coreStructLiftedGlobal
+              );
+              float guardedOverhead = max(overheadLit, outdoorSunGuard * 0.50);
+              shadowSunSlice = min(shadowCoreForSun * guardedOverhead, 1.0);
             }
             wSkySunSlice = clamp(
               (1.0 - baseDarknessLevel)
@@ -3562,6 +3566,9 @@ export class LightingEffectV2 {
           vec3 minIllum = mix(ambientDay, ambientNight, localDarknessLevel)
             * (0.1 * max(uMinIlluminationScale, 0.0));
           float floorReach = clamp(ambientShadowMixOut, 0.0, 1.0);
+          if (uHasBuildingShadowLit > 0.5) {
+            floorReach = min(floorReach, mix(1.0, buildStructU, inSceneBounds));
+          }
           float minFloorScale = mix(0.18, 1.0, floorReach);
           {
             float twilightMinKeepMul = mix(
@@ -3570,7 +3577,7 @@ export class LightingEffectV2 {
               indoorAmbientW
             );
             float dayMinKeep = calendarDaylightHours * (1.0 - baseDarknessLevel);
-            minFloorScale = max(minFloorScale, dayMinKeep * twilightMinKeepMul);
+            minFloorScale = max(minFloorScale, dayMinKeep * twilightMinKeepMul * floorReach);
           }
           totalIllumination = max(totalIllumination, minIllum * minFloorScale);
 

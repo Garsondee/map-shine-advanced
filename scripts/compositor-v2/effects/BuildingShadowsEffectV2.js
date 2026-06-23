@@ -718,14 +718,16 @@ export class BuildingShadowsEffectV2 {
             vec2 dynUv = clamp(sceneUvToDynScreenUv(vUv), vec2(0.0), vec2(1.0));
             float dynI = 0.0;
             if (uHasDynamicLight > 0.5) {
-              vec3 dyn = texture2D(tDynamicLight, dynUv).rgb;
-              dynI = max(dynI, clamp(max(dyn.r, max(dyn.g, dyn.b)), 0.0, 1.0));
+              vec4 dyn = texture2D(tDynamicLight, dynUv);
+              // Alpha = lamp magnitude; wide AmbientLight RGB wash must not erase sun shadows.
+              dynI = max(dynI, clamp(dyn.a, 0.0, 1.0));
             }
             if (uHasWindowLight > 0.5) {
               vec3 win = texture2D(tWindowLight, vUv).rgb;
               dynI = max(dynI, clamp(max(win.r, max(win.g, win.b)), 0.0, 1.0));
             }
-            float dynPresence = smoothstep(0.28, 0.92, dynI);
+            // Match LightingEffectV2 dynamicShadowLiftStructural — torches/candles/fire only.
+            float dynPresence = smoothstep(0.52, 0.93, dynI);
             float dynLift = clamp(dynPresence * max(uDynamicLightShadowOverrideStrength, 0.0), 0.0, 1.0);
             strength = mix(strength, 0.0, dynLift);
           }

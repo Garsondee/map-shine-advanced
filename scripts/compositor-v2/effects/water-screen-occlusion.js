@@ -5,9 +5,11 @@
  * @module compositor-v2/effects/water-screen-occlusion
  */
 
+import { createSplashStructuralShadowUniforms } from './water-splash-structural-shadow.js';
+
 /** Splash/bubble shader marker — bump {@link SPLASH_OCCLUSION_SHADER_EPOCH} when GLSL changes. */
 export const SPLASH_OCCLUSION_MASK_MARKER = '/* MS_WATER_SPLASHES_MASKING_V2 */';
-export const SPLASH_OCCLUSION_SHADER_EPOCH = 6;
+export const SPLASH_OCCLUSION_SHADER_EPOCH = 9;
 
 /**
  * GLSL helpers (must stay in sync with water-shader.js).
@@ -129,6 +131,7 @@ export function createSplashOcclusionUniforms(THREE) {
     uCombinedShadowMapRaw: { value: null },
     uHasCombinedShadowRaw: { value: 0.0 },
     uSplashAmbientDay: { value: 1.0 },
+    ...createSplashStructuralShadowUniforms(THREE),
   };
 }
 

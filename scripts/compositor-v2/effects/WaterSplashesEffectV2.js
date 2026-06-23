@@ -85,6 +85,13 @@ import {
   resolveSplashOcclusionBindings,
   splashShaderHasWaterScreenOcclusion,
 } from './water-screen-occlusion.js';
+import {
+  SPLASH_STRUCTURAL_SHADOW_SHARED_UNIFORM_KEYS,
+  applySplashStructuralShadowFloorIndex,
+  injectSplashStructuralShadowGlsl,
+  splashShaderHasStructuralShadow,
+  syncSplashStructuralShadowUniforms,
+} from './water-splash-structural-shadow.js';
 
 const log = createLogger('WaterSplashesV2');
 
@@ -155,13 +162,17 @@ const SPLASH_SHADOW_UNIFORM_DECL =
   'uniform float uSplashAmbientDay;\n';
 
 /**
- * Ground lighting for foam/splashes ({@link SHADOW_DARKEN_FS}): conservative occlusion
- * (min filtered + raw), a steep shade curve toward open water, plus a daylight axis from sky
- * / Foundry darkness so noon can hit white spray without glowing at night.
+ * Ground lighting for foam/splashes ({@link SHADOW_DARKEN_FS}).
+ * NormalBlending contribution per pixel is roughly rgb × alpha, so shadow must dim
+ * albedo (RGB) with a visible floor while keeping coverage (alpha) high enough that
+ * overlapping particles still stack into denser foam.
  */
-const SPLASH_OCCLUSION_DEADBAND = 0.055;
-const SPLASH_OCCLUSION_POWER = 2.02;
-const SPLASH_OCCLUSION_RGB_FLOOR = 0.032;
+const SPLASH_OCCLUSION_DEADBAND = 0.04;
+const SPLASH_OCCLUSION_POWER = 1.38;
+/** Lit-factor → albedo scale floor in deep shadow (not near-black). */
+const SPLASH_OCCLUSION_RGB_FLOOR = 0.26;
+/** Absolute post-tone albedo floor so normal-blend pixels stay visible in shade. */
+const SPLASH_SHADOW_MIN_RGB = 0.22;
 /** Base linear multiplier before daylight / occlusion shoulders (post-tone). */
 const SPLASH_SURFACE_RGB_GAIN = 2.52;
 /** Extra multiplication when shadows show open sky / sun-lit water (`occ` gate). */
@@ -170,7 +181,8 @@ const SPLASH_NOON_RGB_BOOST = 4.62;
 const SPLASH_NOON_OPEN_GATE = 0.325;
 /** Headroom — real display still clamps later; avoids flattening mids in the multiplier. */
 const SPLASH_RGB_POST_CAP = 48.0;
-const SPLASH_ALPHA_OCCLUSION_FLOOR = 0.34;
+/** Deepest shadow still retains this fraction of particle coverage (overlap stacking). */
+const SPLASH_ALPHA_SHADOW_RETAIN = 0.90;
 /** Post-tone HDR shoulder: ramps extra gain toward sun-lit open water. */
 const SPLASH_SUN_SHOULDER_MAX = 4.85;
 /** Soft-open × occ used for shoulders (moderates shadow edge chatter). */
@@ -182,10 +194,11 @@ const SPLASH_SUN_VEIL = 1.06;
 
 /**
  * GLSL appended after `#include <tonemapping_fragment>` so shadow response is not
- * undone by tone mapping; scales RGB and alpha for foam/splashes/bubbles.
+ * undone by tone mapping. Lighting dims albedo; coverage alpha is preserved so
+ * overlapping splashes/bubbles compound under NormalBlending.
  */
 const SHADOW_DARKEN_FS = `
-  // MS_WATER_SPLASHES_SHADOW_DARKEN_V10
+  // MS_WATER_SPLASHES_SHADOW_DARKEN_V12
   {
     vec2 msUv = vec2(
       (gl_FragCoord.x + 0.5) / max(uResolution.x, 1.0),
@@ -197,23 +210,108 @@ const SHADOW_DARKEN_FS = `
       float raw = clamp(texture2D(uCombinedShadowMapRaw, msUv).r, 0.0, 1.0);
       occ = min(filt, raw);
     }
+    if (uSplashStructuralInCombined < 0.5) {
+      vec2 msSceneUv = vec2(
+        (vMsWorldPos.x - uSceneBounds.x) / max(uSceneBounds.z, 1e-5),
+        (vMsWorldPos.y - uSceneBounds.y) / max(uSceneBounds.w, 1e-5)
+      );
+      if (uBuildingShadowEnabled > 0.5) {
+        float bldLit = msaVegetationBuildingShadowLit(msSceneUv);
+        occ *= bldLit;
+      }
+      if (uPaintedShadowEnabled > 0.5) {
+        float pntLit = msaVegetationPaintedShadowLit(msSceneUv);
+        pntLit = mix(1.0, pntLit, clamp(uPaintedShadowOpacity, 0.0, 1.0));
+        occ *= pntLit;
+      }
+    }
     float open = clamp((occ - ${SPLASH_OCCLUSION_DEADBAND.toFixed(3)}) / max(1.0 - ${SPLASH_OCCLUSION_DEADBAND.toFixed(3)}, 1e-3), 0.0, 1.0);
-    float shade = mix(${SPLASH_OCCLUSION_RGB_FLOOR.toFixed(3)}, 1.0, pow(open, ${SPLASH_OCCLUSION_POWER.toFixed(3)}));
+    float lit = pow(open, ${SPLASH_OCCLUSION_POWER.toFixed(3)});
+    float shade = mix(${SPLASH_OCCLUSION_RGB_FLOOR.toFixed(3)}, 1.0, lit);
     float day = clamp(uSplashAmbientDay, 0.0, 1.0);
     float noon = mix(1.0, ${SPLASH_NOON_RGB_BOOST.toFixed(3)}, day * smoothstep(${SPLASH_NOON_OPEN_GATE.toFixed(3)}, 0.999, occ));
     float sunKey = clamp(day * pow(open, ${SPLASH_SUN_OPEN_POW.toFixed(3)}) * smoothstep(${SPLASH_SUN_OCC_GATE_LO.toFixed(3)}, 1.002, occ), 0.0, 1.0);
     float shoulder = mix(1.0, ${SPLASH_SUN_SHOULDER_MAX.toFixed(3)}, sunKey);
-    float rgbMul = clamp(${SPLASH_SURFACE_RGB_GAIN.toFixed(3)} * shade * noon * shoulder, 0.02, ${SPLASH_RGB_POST_CAP.toFixed(2)});
+    float rgbMul = clamp(${SPLASH_SURFACE_RGB_GAIN.toFixed(3)} * shade * noon * shoulder, 0.12, ${SPLASH_RGB_POST_CAP.toFixed(2)});
     vec3 tinted = clamp(gl_FragColor.rgb * rgbMul, 0.0, 1.0);
     float peak = max(max(tinted.r, tinted.g), tinted.b);
     float veilNeed = clamp(1.0 - peak * ${(1.18).toFixed(3)}, 0.0, 1.0);
     tinted = clamp(tinted + ${SPLASH_SUN_VEIL.toFixed(3)} * sunKey * veilNeed * sunKey, 0.0, 1.0);
-    gl_FragColor.rgb = tinted;
-    float aGate = sqrt(open * 0.88 + 0.12);
-    float aMul = mix(${SPLASH_ALPHA_OCCLUSION_FLOOR.toFixed(3)}, 1.0, aGate);
-    gl_FragColor.a = clamp(gl_FragColor.a * aMul, 0.0, 1.0);
+    float shadowDepth = 1.0 - lit;
+    tinted = mix(tinted, max(tinted, vec3(${SPLASH_SHADOW_MIN_RGB.toFixed(3)})), shadowDepth * 0.88);
+    gl_FragColor.rgb = clamp(tinted, 0.0, 1.0);
+    float coverage = gl_FragColor.a;
+    float covShadow = mix(${SPLASH_ALPHA_SHADOW_RETAIN.toFixed(3)}, 1.0, pow(lit, 0.55));
+    gl_FragColor.a = clamp(coverage * covShadow, 0.0, 1.0);
   }
+  // MS_WATER_SPLASHES_SHADOW_DARKEN_END
 `;
+
+/** Balanced `}` for splash shadow-darken strip/repair (nested `if` blocks). */
+function findSplashShaderBraceClose(source, openBraceIndex) {
+  if (typeof source !== 'string' || openBraceIndex < 0 || source[openBraceIndex] !== '{') return -1;
+  let depth = 0;
+  for (let i = openBraceIndex; i < source.length; i++) {
+    const ch = source[i];
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Remove every splash shadow-darken injection (legacy regex only matched the first `}`).
+ * @param {string} fs
+ * @returns {string}
+ */
+function stripAllSplashShadowDarkenBlocks(fs) {
+  if (typeof fs !== 'string') return fs;
+  let s = fs;
+  // Delimited blocks (V13+).
+  s = s.replace(
+    /\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V\d+\s*\{[\s\S]*?\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_END\s*/g,
+    '',
+  );
+  // V2–V12 and any legacy undelimited block — walk balanced braces from each anchor.
+  const anchorRe = /\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V(\d+)\s*\{/g;
+  for (let guard = 0; guard < 32; guard++) {
+    anchorRe.lastIndex = 0;
+    const m = anchorRe.exec(s);
+    if (!m) break;
+    const start = m.index;
+    const braceStart = m.index + m[0].length - 1;
+    const end = findSplashShaderBraceClose(s, braceStart);
+    if (end < braceStart) break;
+    s = s.slice(0, start) + s.slice(end + 1);
+  }
+  return s;
+}
+
+/**
+ * Orphan tail left when an old non-greedy strip removed only the first inner `}`.
+ * @param {string} fs
+ * @returns {string}
+ */
+function repairOrphanSplashStructuralDarken(fs) {
+  if (typeof fs !== 'string' || !fs.includes('occ *= bldLit')) return fs;
+  let s = fs;
+  for (let guard = 0; guard < 8; guard++) {
+    const hit = s.indexOf('occ *= bldLit');
+    if (hit < 0) break;
+    const before = s.slice(Math.max(0, hit - 1400), hit);
+    if (/\bfloat\s+occ\s*=/.test(before)) break;
+    const structuralStart = s.lastIndexOf('if (uSplashStructuralInCombined', hit);
+    if (structuralStart < 0 || structuralStart < hit - 1600) break;
+    const braceStart = s.indexOf('{', structuralStart);
+    const end = findSplashShaderBraceClose(s, braceStart);
+    if (end <= braceStart) break;
+    s = s.slice(0, structuralStart) + s.slice(end + 1);
+  }
+  return s;
+}
 
 /**
  * Strip misplaced darken blocks, prepend splash volume modulation, append shadow darken after tonemap.
@@ -231,16 +329,8 @@ function patchSplashParticleFragmentShader(fs) {
  * @returns {string}
  */
 function injectShadowDarkenAfterTonemapping(fs) {
-  let s = fs
-    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V2\s*\{[\s\S]*?\}\s*/g, '')
-    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V3\s*\{[\s\S]*?\}\s*/g, '')
-    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V4\s*\{[\s\S]*?\}\s*/g, '')
-    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V5\s*\{[\s\S]*?\}\s*/g, '')
-    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V6\s*\{[\s\S]*?\}\s*/g, '')
-    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V7\s*\{[\s\S]*?\}\s*/g, '')
-    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V8\s*\{[\s\S]*?\}\s*/g, '')
-    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V9\s*\{[\s\S]*?\}\s*/g, '')
-    .replace(/\/\/ MS_WATER_SPLASHES_SHADOW_DARKEN_V10\s*\{[\s\S]*?\}\s*/g, '');
+  let s = stripAllSplashShadowDarkenBlocks(fs);
+  s = repairOrphanSplashStructuralDarken(s);
   const tonemap = '#include <tonemapping_fragment>';
   if (s.includes(tonemap)) {
     return s.replace(tonemap, `${tonemap}\n${SHADOW_DARKEN_FS}`);
@@ -513,6 +603,9 @@ export class WaterSplashesEffectV2 {
       uni.uCombinedShadowMapRaw = uniforms.uCombinedShadowMapRaw;
       uni.uHasCombinedShadowRaw = uniforms.uHasCombinedShadowRaw;
       uni.uSplashAmbientDay = uniforms.uSplashAmbientDay;
+      for (const key of SPLASH_STRUCTURAL_SHADOW_SHARED_UNIFORM_KEYS) {
+        if (uniforms[key]) uni[key] = uniforms[key];
+      }
     };
 
     const patchWorldPosVertex = (vs) => {
@@ -553,8 +646,12 @@ export class WaterSplashesEffectV2 {
           out = out.replace(SPLASH_OCCLUSION_MASK_MARKER + '\n', `${SPLASH_OCCLUSION_MASK_MARKER}\n${SPLASH_SHADOW_UNIFORM_DECL}`);
         }
       }
+      out = repairOrphanSplashStructuralDarken(out);
       out = repairSplashOcclusionShaderIfLegacy(out);
       out = repairSplashWaterMaskAlphaClip(out);
+      if (!splashShaderHasStructuralShadow(out)) {
+        out = injectSplashStructuralShadowGlsl(out);
+      }
       if (!out.includes(SPLASH_OCCLUSION_MASK_MARKER)) {
         const header =
           'varying vec3 vMsWorldPos;\n' +
@@ -583,7 +680,7 @@ export class WaterSplashesEffectV2 {
       } else if (!splashShaderHasWaterScreenOcclusion(out)) {
         out = injectSplashWaterScreenOcclusion(out);
       }
-      if (!out.includes(SPLASH_VOLUME_BEGIN) || !out.includes('MS_WATER_SPLASHES_SHADOW_DARKEN_V10')) {
+      if (!out.includes(SPLASH_VOLUME_BEGIN) || !out.includes('MS_WATER_SPLASHES_SHADOW_DARKEN_END')) {
         out = patchSplashParticleFragmentShader(out);
       }
       return out;
@@ -640,6 +737,9 @@ export class WaterSplashesEffectV2 {
     uni.uCombinedShadowMapRaw = uniforms.uCombinedShadowMapRaw;
     uni.uHasCombinedShadowRaw = uniforms.uHasCombinedShadowRaw;
     uni.uSplashAmbientDay = uniforms.uSplashAmbientDay;
+    for (const key of SPLASH_STRUCTURAL_SHADOW_SHARED_UNIFORM_KEYS) {
+      if (uniforms[key]) uni[key] = uniforms[key];
+    }
   }
 
   // ── Public API ─────────────────────────────────────────────────────────────
@@ -1379,8 +1479,12 @@ export class WaterSplashesEffectV2 {
 
     const systems = this._activeSystemsFlat;
 
-    const applyU = (u) => {
+    const applyU = (u, floorIndex) => {
       if (!u) return;
+      syncSplashStructuralShadowUniforms(u, { combinedShadowReady: !!combinedTex });
+      if (Number.isFinite(Number(floorIndex))) {
+        applySplashStructuralShadowFloorIndex(u, floorIndex);
+      }
       if (u.uCombinedShadowMap) u.uCombinedShadowMap.value = texForShader;
       if (u.uCombinedShadowMapRaw) u.uCombinedShadowMapRaw.value = texRawForShader;
       if (u.uHasCombinedShadowRaw) u.uHasCombinedShadowRaw.value = hasSeparateRaw ? 1.0 : 0.0;
@@ -1396,13 +1500,13 @@ export class WaterSplashesEffectV2 {
       const batches = br?.batches;
       const map = br?.systemToBatchIndex;
       if (sys.material) {
-        applyU(sys.material.userData?._msSplashOcclusionUniforms);
+        applyU(sys.material.userData?._msSplashOcclusionUniforms, floorIndex);
       }
       const idx = (map && typeof map.get === 'function') ? map.get(sys) : undefined;
       const batch = (idx !== undefined && batches) ? batches[idx] : null;
       const batchMat = batch?.material;
       if (batchMat) {
-        applyU(batchMat.userData?._msSplashOcclusionUniforms);
+        applyU(batchMat.userData?._msSplashOcclusionUniforms, floorIndex);
         const bu = batchMat.uniforms;
         if (bu?.uCombinedShadowMap) bu.uCombinedShadowMap.value = texForShader;
         if (bu?.uCombinedShadowMapRaw) bu.uCombinedShadowMapRaw.value = texRawForShader;

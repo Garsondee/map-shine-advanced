@@ -250,20 +250,27 @@ export class ShadowManagerV2 {
          * uSceneRect is in Foundry pixels, so that expression clamps to (1,1) and
          * wipes all world-space shadows in this combiner.
          */
+        bool smUseSceneUvRemap() {
+          if (uHasSceneRect < 0.5) return false;
+          if (uHasBuildingUvRemap > 0.5) return true;
+          float spanX = abs(uViewBounds.z - uViewBounds.x);
+          float spanY = abs(uViewBounds.w - uViewBounds.y);
+          return (uSceneDimensions.x > 2.0 && uSceneDimensions.y > 2.0
+            && spanX > 1e-4 && spanY > 1e-4);
+        }
+
         vec2 smSceneUvForWorldTextures(vec2 screenUv) {
-          if (uHasSceneRect < 0.5) return screenUv;
-          bool useRemap = (uHasBuildingUvRemap > 0.5);
-          if (!useRemap) {
-            float spanX = abs(uViewBounds.z - uViewBounds.x);
-            float spanY = abs(uViewBounds.w - uViewBounds.y);
-            useRemap = (uSceneDimensions.x > 2.0 && uSceneDimensions.y > 2.0
-              && spanX > 1e-4 && spanY > 1e-4);
-          }
-          if (useRemap) {
-            vec2 foundryPos = smScreenUvToFoundry(screenUv);
-            return clamp(smFoundryToSceneUv(foundryPos), vec2(0.0), vec2(1.0));
-          }
-          return screenUv;
+          if (!smUseSceneUvRemap()) return screenUv;
+          vec2 foundryPos = smScreenUvToFoundry(screenUv);
+          return clamp(smFoundryToSceneUv(foundryPos), vec2(0.0), vec2(1.0));
+        }
+
+        float smSceneInBounds(vec2 screenUv) {
+          if (!smUseSceneUvRemap()) return 1.0;
+          vec2 foundryPos = smScreenUvToFoundry(screenUv);
+          vec2 sceneUvRaw = smFoundryToSceneUv(foundryPos);
+          vec2 inBounds2 = step(vec2(0.0), sceneUvRaw) * step(sceneUvRaw, vec2(1.0));
+          return inBounds2.x * inBounds2.y;
         }
 
         float readCloudShadow() {
@@ -293,6 +300,8 @@ export class ShadowManagerV2 {
 
         float readBuildingShadow() {
           if (uHasBuildingShadow < 0.5) return 1.0;
+          float bounds = smSceneInBounds(vUv);
+          if (bounds < 0.5) return 1.0;
           vec2 sceneUv = smSceneUvForWorldTextures(vUv);
           float liveV = clamp(texture2D(tBuildingShadow, sceneUv).r, 0.0, 1.0);
           if (uHasLightningBuilding < 0.5) return liveV;
@@ -302,6 +311,8 @@ export class ShadowManagerV2 {
 
         float readPaintedShadow() {
           if (uHasPaintedShadow < 0.5) return 1.0;
+          float bounds = smSceneInBounds(vUv);
+          if (bounds < 0.5) return 1.0;
           vec2 sceneUv = smSceneUvForWorldTextures(vUv);
           float liveV = clamp(texture2D(tPaintedShadow, sceneUv).r, 0.0, 1.0);
           if (uHasLightningPainted < 0.5) return liveV;
@@ -311,6 +322,8 @@ export class ShadowManagerV2 {
 
         float readSkyReachShadow() {
           if (uHasSkyReachShadow < 0.5) return 1.0;
+          float bounds = smSceneInBounds(vUv);
+          if (bounds < 0.5) return 1.0;
           vec2 sceneUv = smSceneUvForWorldTextures(vUv);
           float liveV = clamp(texture2D(tSkyReachShadow, sceneUv).r, 0.0, 1.0);
           if (uHasLightningSkyReach < 0.5) return liveV;

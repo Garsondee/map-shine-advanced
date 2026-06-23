@@ -21,7 +21,7 @@
  *
  * Canvas padding: this pass renders scene-sized RTs (mask space), not full canvas.
  * Do not clip with `canvas.dimensions.sceneRect` offsets here — that mixes spaces.
- * {@link LightingEffectV2} already gates `tBuildingShadow` with `inSceneBounds`.
+ * {@link LightingEffectV2} gates scene-UV shadow samples with `inSceneBounds`.
  */
 
 import { createLogger } from '../../core/log.js';
@@ -584,6 +584,14 @@ export class BuildingShadowsEffectV2 {
             : 1.0;
         }
 
+        float uvInBounds(vec2 uv) {
+          vec2 safeMin = max(uTexelSize * 0.5, vec2(0.0));
+          vec2 safeMax = min(vec2(1.0) - uTexelSize * 0.5, vec2(1.0));
+          vec2 ge0 = step(safeMin, uv);
+          vec2 le1 = step(uv, safeMax);
+          return ge0.x * ge0.y * le1.x * le1.y;
+        }
+
         float readOutdoorsMask(vec2 uv) {
           vec2 suv = clamp(uv, 0.0, 1.0);
           if (uOutdoorsMaskFlipY > 0.5) {
@@ -629,8 +637,11 @@ export class BuildingShadowsEffectV2 {
         }
 
         float sampleCasterIndoor(vec2 uv, float receiverOutdoorGate) {
+          // Ray steps past scene edges must not clamp and re-sample border
+          // casters — that smears building silhouettes into the padded margin.
+          float valid = uvInBounds(uv);
           float casterOutdoors = readOutdoorsMask(uv);
-          return (1.0 - casterOutdoors) * receiverOutdoorGate;
+          return (1.0 - casterOutdoors) * receiverOutdoorGate * valid;
         }
 
         vec2 sceneUvToDynScreenUv(vec2 sceneUv) {
@@ -718,6 +729,7 @@ export class BuildingShadowsEffectV2 {
             float dynLift = clamp(dynPresence * max(uDynamicLightShadowOverrideStrength, 0.0), 0.0, 1.0);
             strength = mix(strength, 0.0, dynLift);
           }
+          strength *= uvInBounds(vUv);
           gl_FragColor = vec4(vec3(clamp(strength, 0.0, 1.0)), 1.0);
         }
       `,
@@ -765,6 +777,14 @@ export class BuildingShadowsEffectV2 {
         uniform vec2 uStrengthTexelSize;
         varying vec2 vUv;
 
+        float uvInBounds(vec2 uv) {
+          vec2 safeMin = max(uStrengthTexelSize * 0.5, vec2(0.0));
+          vec2 safeMax = min(vec2(1.0) - uStrengthTexelSize * 0.5, vec2(1.0));
+          vec2 ge0 = step(safeMin, uv);
+          vec2 le1 = step(uv, safeMax);
+          return ge0.x * ge0.y * le1.x * le1.y;
+        }
+
         float mergedStrength(vec2 suv) {
           float sBlur = clamp(texture2D(tStrength, suv).r, 0.0, 1.0);
           float sSharp = clamp(texture2D(tSharpStrength, suv).r, 0.0, 1.0);
@@ -796,6 +816,7 @@ export class BuildingShadowsEffectV2 {
           float boost = clamp(uShadowStrengthBoost, 1.0, 10.0);
           float darkening = clamp(s * clamp(uOpacity, 0.0, 1.0) * boost, 0.0, 1.0);
           float factor = 1.0 - darkening;
+          factor = mix(1.0, factor, uvInBounds(vUv));
           gl_FragColor = vec4(vec3(factor), 1.0);
         }
       `,
@@ -827,22 +848,35 @@ export class BuildingShadowsEffectV2 {
         uniform float uRadius;
         varying vec2 vUv;
 
+        float uvInBounds(vec2 uv) {
+          vec2 safeMin = max(uTexelSize * 0.5, vec2(0.0));
+          vec2 safeMax = min(vec2(1.0) - uTexelSize * 0.5, vec2(1.0));
+          vec2 ge0 = step(safeMin, uv);
+          vec2 le1 = step(uv, safeMax);
+          return ge0.x * ge0.y * le1.x * le1.y;
+        }
+
+        float blurTap(vec2 uv) {
+          return texture2D(tInput, uv).r * uvInBounds(uv);
+        }
+
         void main() {
           float r = clamp(uRadius, 0.0, 4.0);
           vec2 stepUv = uDirection * uTexelSize * r;
 
           // 9-tap separable Gaussian (wider kernel than 5-tap; fewer boxy gaps at high uRadius).
-          float s = texture2D(tInput, vUv).r * 0.2270270270;
-          s += texture2D(tInput, vUv + stepUv * 1.0).r * 0.1945945946;
-          s += texture2D(tInput, vUv - stepUv * 1.0).r * 0.1945945946;
-          s += texture2D(tInput, vUv + stepUv * 2.0).r * 0.1216216216;
-          s += texture2D(tInput, vUv - stepUv * 2.0).r * 0.1216216216;
-          s += texture2D(tInput, vUv + stepUv * 3.0).r * 0.0540540541;
-          s += texture2D(tInput, vUv - stepUv * 3.0).r * 0.0540540541;
-          s += texture2D(tInput, vUv + stepUv * 4.0).r * 0.0162162162;
-          s += texture2D(tInput, vUv - stepUv * 4.0).r * 0.0162162162;
+          float s = blurTap(vUv) * 0.2270270270;
+          s += blurTap(vUv + stepUv * 1.0) * 0.1945945946;
+          s += blurTap(vUv - stepUv * 1.0) * 0.1945945946;
+          s += blurTap(vUv + stepUv * 2.0) * 0.1216216216;
+          s += blurTap(vUv - stepUv * 2.0) * 0.1216216216;
+          s += blurTap(vUv + stepUv * 3.0) * 0.0540540541;
+          s += blurTap(vUv - stepUv * 3.0) * 0.0540540541;
+          s += blurTap(vUv + stepUv * 4.0) * 0.0162162162;
+          s += blurTap(vUv - stepUv * 4.0) * 0.0162162162;
 
-          gl_FragColor = vec4(vec3(clamp(s, 0.0, 1.0)), 1.0);
+          s = clamp(s, 0.0, 1.0) * uvInBounds(vUv);
+          gl_FragColor = vec4(vec3(s), 1.0);
         }
       `,
       depthTest: false,

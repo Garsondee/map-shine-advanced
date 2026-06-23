@@ -54,25 +54,25 @@ export const VEGETATION_PAINTED_SHADOW_SAMPLE_GLSL = `
         float msaVegetationPaintedShadowLit(vec2 sceneUv) {
           vec2 pntUv = vec2(sceneUv.x, 1.0 - sceneUv.y);
           float fi = clamp(uBuildingShadowFloorIndex, 0.0, 3.0);
+          float lit = 1.0;
           if (uPaintedShadowMultiFloor > 0.5) {
             if (fi < 0.5 && uHasPaintedShadow0 > 0.5) {
-              return clamp(texture2D(tPaintedShadow0, pntUv).r, 0.0, 1.0);
+              lit = clamp(texture2D(tPaintedShadow0, pntUv).r, 0.0, 1.0);
+            } else if (fi < 1.5 && uHasPaintedShadow1 > 0.5) {
+              lit = clamp(texture2D(tPaintedShadow1, pntUv).r, 0.0, 1.0);
+            } else if (fi < 2.5 && uHasPaintedShadow2 > 0.5) {
+              lit = clamp(texture2D(tPaintedShadow2, pntUv).r, 0.0, 1.0);
+            } else if (uHasPaintedShadow3 > 0.5) {
+              lit = clamp(texture2D(tPaintedShadow3, pntUv).r, 0.0, 1.0);
             }
-            if (fi < 1.5 && uHasPaintedShadow1 > 0.5) {
-              return clamp(texture2D(tPaintedShadow1, pntUv).r, 0.0, 1.0);
-            }
-            if (fi < 2.5 && uHasPaintedShadow2 > 0.5) {
-              return clamp(texture2D(tPaintedShadow2, pntUv).r, 0.0, 1.0);
-            }
-            if (uHasPaintedShadow3 > 0.5) {
-              return clamp(texture2D(tPaintedShadow3, pntUv).r, 0.0, 1.0);
-            }
-            return 1.0;
+          } else if (uHasPaintedShadow0 > 0.5) {
+            lit = clamp(texture2D(tPaintedShadow0, pntUv).r, 0.0, 1.0);
           }
-          if (uHasPaintedShadow0 > 0.5) {
-            return clamp(texture2D(tPaintedShadow0, pntUv).r, 0.0, 1.0);
-          }
-          return 1.0;
+          // sceneUv is clamped from world — fade painted darkening at scene borders
+          // so padding pixels that clamp to the edge stay unshadowed.
+          float edgeDist = min(min(sceneUv.x, 1.0 - sceneUv.x), min(sceneUv.y, 1.0 - sceneUv.y));
+          float borderGate = smoothstep(0.0, 0.0025, edgeDist);
+          return mix(1.0, lit, borderGate);
         }
 `;
 

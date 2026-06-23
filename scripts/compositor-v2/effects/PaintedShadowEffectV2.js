@@ -12,8 +12,9 @@
  * Blur: optional `_sharpHoldTarget` snapshot + invert merge (see `contactShadowPreserve`)
  * matches {@link BuildingShadowsEffectV2} so separable blur does not eat contact edges.
  *
- * Internal render targets use the same half-res budgeting as building shadows to keep
- * the project + separable blur chain from burning fill rate on very large mask textures.
+ * Internal render targets use scene/_Outdoors mask dimensions (like
+ * {@link BuildingShadowsEffectV2}), not raw painted-mask pixel size, so
+ * LightingEffectV2 scene UV sampling stays aligned at canvas padding edges.
  *
  * Render cadence mirrors {@link BuildingShadowsEffectV2}: hard/soft dirty detection with
  * throttled refresh when sun or dynamic-light inputs drift slowly.
@@ -934,6 +935,7 @@ export class PaintedShadowEffectV2 {
         uOpacity: { value: this.params.opacity },
         uShadowStrengthBoost: { value: this.params.shadowStrengthBoost ?? 1 },
         uLength: { value: this.params.length },
+        uTexelSize: { value: new THREE.Vector2(1 / 1024, 1 / 1024) },
         uSceneDimensions: { value: new THREE.Vector2(1, 1) },
         tDynamicLight: { value: null },
         tWindowLight: { value: null },
@@ -995,6 +997,7 @@ export class PaintedShadowEffectV2 {
         uniform float uOpacity;
         uniform float uShadowStrengthBoost;
         uniform float uLength;
+        uniform vec2 uTexelSize;
         uniform vec2 uSceneDimensions;
         uniform sampler2D tDynamicLight;
         uniform sampler2D tWindowLight;
@@ -1051,6 +1054,20 @@ export class PaintedShadowEffectV2 {
           if (floorIdx < 1.5) return readMaskShadowStrength(tPaintedShadow1, uv, uPainted1FlipY);
           if (floorIdx < 2.5) return readMaskShadowStrength(tPaintedShadow2, uv, uPainted2FlipY);
           return readMaskShadowStrength(tPaintedShadow3, uv, uPainted3FlipY);
+        }
+
+        float uvInBounds(vec2 uv) {
+          vec2 safeMin = max(uTexelSize * 0.5, vec2(0.0));
+          vec2 safeMax = min(vec2(1.0) - uTexelSize * 0.5, vec2(1.0));
+          vec2 ge0 = step(safeMin, uv);
+          vec2 le1 = step(uv, safeMax);
+          return ge0.x * ge0.y * le1.x * le1.y;
+        }
+
+        float samplePaintedByFloor(float floorIdx, vec2 uv) {
+          // Projected caster UV past scene edges must not clamp and re-sample
+          // border shadow art — that smears silhouettes into the padded margin.
+          return readPaintedByFloor(floorIdx, uv) * uvInBounds(uv);
         }
 
         vec2 sceneUvToDynScreenUv(vec2 sceneUv) {
@@ -1143,14 +1160,14 @@ export class PaintedShadowEffectV2 {
           vec2 safeSceneSize = max(uSceneDimensions, vec2(1.0));
           float pixelLen = uLength * 1080.0;
           vec2 offsetUv = dir * (pixelLen / safeSceneSize);
-          vec2 casterUv = clamp(vUv + offsetUv, vec2(0.0), vec2(1.0));
+          vec2 casterUv = vUv + offsetUv;
 
           float strength;
           if (uReceiverFloorIndex >= 0.0) {
             float recvIdx = clamp(uReceiverFloorIndex, 0.0, 3.0);
             float litAccum = 1.0;
             if (hasLitMaskForFloor(recvIdx) > 0.5) {
-              float paintedF = readPaintedByFloor(recvIdx, casterUv);
+              float paintedF = samplePaintedByFloor(recvIdx, casterUv);
               float outdoorsF = readOutdoorsByFloor(recvIdx, vUv);
               float strF = clamp(
                 paintedF * clamp(uOpacity, 0.0, 1.0) * outdoorsF * clamp(uShadowStrengthBoost, 1.0, 10.0),
@@ -1166,11 +1183,11 @@ export class PaintedShadowEffectV2 {
             float outdoors;
             if (uPaintedFloorIndex >= 0.0) {
               float forcedFloor = clamp(uPaintedFloorIndex, 0.0, 3.0);
-              painted = readPaintedByFloor(forcedFloor, casterUv);
+              painted = samplePaintedByFloor(forcedFloor, casterUv);
               outdoors = readOutdoorsByFloor(forcedFloor, vUv);
             } else {
               float floorIdx = readFloorIndex(vUv);
-              painted = readPaintedByFloor(floorIdx, casterUv);
+              painted = samplePaintedByFloor(floorIdx, casterUv);
               outdoors = readOutdoors(vUv);
             }
             strength = clamp(
@@ -1180,6 +1197,7 @@ export class PaintedShadowEffectV2 {
             );
             strength = applyDynamicLightShadowLift(strength, vUv);
           }
+          strength *= uvInBounds(vUv);
           gl_FragColor = vec4(strength, strength, strength, 1.0);
         }
       `,
@@ -1217,6 +1235,14 @@ export class PaintedShadowEffectV2 {
         uniform vec2 uStrengthTexelSize;
         varying vec2 vUv;
 
+        float uvInBounds(vec2 uv) {
+          vec2 safeMin = max(uStrengthTexelSize * 0.5, vec2(0.0));
+          vec2 safeMax = min(vec2(1.0) - uStrengthTexelSize * 0.5, vec2(1.0));
+          vec2 ge0 = step(safeMin, uv);
+          vec2 le1 = step(uv, safeMax);
+          return ge0.x * ge0.y * le1.x * le1.y;
+        }
+
         float mergedStrength(vec2 suv) {
           float sBlur = clamp(texture2D(tStrength, suv).r, 0.0, 1.0);
           float sSharp = clamp(texture2D(tSharpStrength, suv).r, 0.0, 1.0);
@@ -1242,6 +1268,7 @@ export class PaintedShadowEffectV2 {
               mergedStrength(clamp(suv + vec2(0.0, duv.y), edge, edge2))));
           }
           float lit = 1.0 - s;
+          lit = mix(1.0, lit, uvInBounds(vUv));
           gl_FragColor = vec4(lit, lit, lit, 1.0);
         }
       `,
@@ -1273,14 +1300,27 @@ export class PaintedShadowEffectV2 {
         uniform float uRadius;
         varying vec2 vUv;
 
+        float uvInBounds(vec2 uv) {
+          vec2 safeMin = max(uTexelSize * 0.5, vec2(0.0));
+          vec2 safeMax = min(vec2(1.0) - uTexelSize * 0.5, vec2(1.0));
+          vec2 ge0 = step(safeMin, uv);
+          vec2 le1 = step(uv, safeMax);
+          return ge0.x * ge0.y * le1.x * le1.y;
+        }
+
+        float blurTap(vec2 uv) {
+          return texture2D(tInput, uv).r * uvInBounds(uv);
+        }
+
         void main() {
           vec2 stepUv = uDirection * uTexelSize * max(uRadius, 0.0);
-          float c0 = texture2D(tInput, vUv).r * 0.22702703;
-          float c1 = texture2D(tInput, vUv + stepUv * 1.38461538).r * 0.31621622;
-          float c2 = texture2D(tInput, vUv - stepUv * 1.38461538).r * 0.31621622;
-          float c3 = texture2D(tInput, vUv + stepUv * 3.23076923).r * 0.07027027;
-          float c4 = texture2D(tInput, vUv - stepUv * 3.23076923).r * 0.07027027;
+          float c0 = blurTap(vUv) * 0.22702703;
+          float c1 = blurTap(vUv + stepUv * 1.38461538) * 0.31621622;
+          float c2 = blurTap(vUv - stepUv * 1.38461538) * 0.31621622;
+          float c3 = blurTap(vUv + stepUv * 3.23076923) * 0.07027027;
+          float c4 = blurTap(vUv - stepUv * 3.23076923) * 0.07027027;
           float v = clamp(c0 + c1 + c2 + c3 + c4, 0.0, 1.0);
+          v *= uvInBounds(vUv);
           gl_FragColor = vec4(v, v, v, 1.0);
         }
       `,
@@ -1415,6 +1455,41 @@ export class PaintedShadowEffectV2 {
       h = Math.max(1, Math.round(h * s));
     }
     return { w, h };
+  }
+
+  /**
+   * Scene-space RT dimensions — match {@link BuildingShadowsEffectV2} so lit
+   * factors align with LightingEffectV2 scene UV (not raw painted-mask pixels).
+   * @param {object|null} compositor
+   * @param {import('three').Texture|null} outdoorsTex
+   * @param {import('three').Texture|null} paintedTex
+   * @returns {{ x: number, y: number }}
+   * @private
+   */
+  _resolveSceneTargetSize(compositor, outdoorsTex, paintedTex) {
+    void compositor;
+    const fromTex = (tex) => {
+      const w = Number(tex?.image?.width ?? tex?.source?.data?.width ?? tex?.source?.width ?? 0);
+      const h = Number(tex?.image?.height ?? tex?.source?.data?.height ?? tex?.source?.height ?? 0);
+      if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+        return { x: Math.max(1, Math.round(w)), y: Math.max(1, Math.round(h)) };
+      }
+      return null;
+    };
+
+    const outdoorsSize = fromTex(outdoorsTex);
+    if (outdoorsSize) return outdoorsSize;
+
+    const paintedSize = fromTex(paintedTex);
+    if (paintedSize) return paintedSize;
+
+    const rect = canvas?.dimensions?.sceneRect;
+    const sw = Number(rect?.width ?? canvas?.dimensions?.sceneWidth ?? canvas?.dimensions?.width ?? 1);
+    const sh = Number(rect?.height ?? canvas?.dimensions?.sceneHeight ?? canvas?.dimensions?.height ?? 1);
+    return {
+      x: Math.max(1, Math.round(sw)),
+      y: Math.max(1, Math.round(sh)),
+    };
   }
 
   /** @private */
@@ -1839,12 +1914,12 @@ export class PaintedShadowEffectV2 {
     return null;
   }
 
-  _ensureTargets(renderer, paintedTex) {
+  _ensureTargets(renderer, paintedTex, outdoorsTex) {
     const THREE = window.THREE;
     if (!THREE || !renderer || !paintedTex?.image) return false;
-    const imgW = Math.max(1, Number(paintedTex.image.width) || 1);
-    const imgH = Math.max(1, Number(paintedTex.image.height) || 1);
-    const { w, h } = this._computePaintedRtSize(imgW, imgH);
+    const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+    const sceneSize = this._resolveSceneTargetSize(compositor, outdoorsTex, paintedTex);
+    const { w, h } = this._computePaintedRtSize(sceneSize.x, sceneSize.y);
     const rtOpts = {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
@@ -1865,7 +1940,8 @@ export class PaintedShadowEffectV2 {
     else this._litScratchTarget.setSize(w, h);
     if (!this._groundOnlyLitTarget) this._groundOnlyLitTarget = new THREE.WebGLRenderTarget(w, h, rtOpts);
     else this._groundOnlyLitTarget.setSize(w, h);
-    this._projectMaterial.uniforms.uSceneDimensions.value.set(imgW, imgH);
+    this._projectMaterial.uniforms.uSceneDimensions.value.set(sceneSize.x, sceneSize.y);
+    this._projectMaterial.uniforms.uTexelSize.value.set(1 / Math.max(1, w), 1 / Math.max(1, h));
     this._blurMaterial.uniforms.uTexelSize.value.set(1 / Math.max(1, w), 1 / Math.max(1, h));
     return true;
   }
@@ -2266,7 +2342,7 @@ export class PaintedShadowEffectV2 {
     }
     this._lastPaintedSourceSig = bandSig;
 
-    if (!this._ensureTargets(renderer, paintedTex)) {
+    if (!this._ensureTargets(renderer, paintedTex, outdoorsTex)) {
       this._invalidatePerFloorLitCache();
       this._invalidateShadowRenderCache();
       this._clearShadowTargetToWhite(renderer);

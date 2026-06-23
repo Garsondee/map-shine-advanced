@@ -3396,13 +3396,24 @@ export class LightingEffectV2 {
             : 1.0;
           float paintedStructU = 1.0;
           if (uHasPaintedShadowLit > 0.5) {
-            float pbStrU = clamp(texture2D(tPaintedShadowLit, sceneUvFoundry).r, 0.0, 1.0);
+            float pbStrU = mix(
+              1.0,
+              clamp(texture2D(tPaintedShadowLit, sceneUvFoundry).r, 0.0, 1.0),
+              inSceneBounds
+            );
             float pApplyStrU = pbStrU;
             if (uHasPaintedShadowAtAndAboveLit > 0.5 && uLightingPaintedFloorIndex > 0.5) {
-              pApplyStrU = clamp(texture2D(tPaintedShadowAtAndAboveLit, sceneUvFoundry).r, 0.0, 1.0);
+              pApplyStrU = mix(
+                1.0,
+                clamp(texture2D(tPaintedShadowAtAndAboveLit, sceneUvFoundry).r, 0.0, 1.0),
+                inSceneBounds
+              );
             }
             paintedStructU = mix(1.0, pApplyStrU, clamp(uPaintedShadowMgrOpacity, 0.0, 1.0));
           }
+          // Padding pixels clamp sceneUvFoundry to the scene edge — gate structural
+          // shadow so grey canvas margin stays unshadowed (same as window emit).
+          buildStructU = mix(1.0, buildStructU, inSceneBounds);
           float coreStructUnified = clamp(buildStructU * paintedStructU, 0.0, 1.0);
           float coreStructLiftedGlobal = mix(coreStructUnified, 1.0, dynamicShadowLiftStructural);
           float structuralDirectMul = mix(1.0, coreStructLiftedGlobal, clamp(uDirectStructuralOcclusionStrength, 0.0, 1.0));
@@ -3454,7 +3465,11 @@ export class LightingEffectV2 {
             structuralLit = clamp(shadowFactor / max(vegetationLit * overheadLit, 0.001), 0.0, 1.0);
             paintedEffective = 1.0;
             if (uPaintedShadowInCombined < 0.5 && uHasPaintedShadowLit > 0.5) {
-              paintedApply = clamp(texture2D(tPaintedShadowLit, sceneUvFoundry).r, 0.0, 1.0);
+              paintedApply = mix(
+                1.0,
+                clamp(texture2D(tPaintedShadowLit, sceneUvFoundry).r, 0.0, 1.0),
+                inSceneBounds
+              );
               paintedEffective = mix(1.0, paintedApply, clamp(uPaintedShadowMgrOpacity, 0.0, 1.0));
               shadowFactorMix = mix(
                 1.0,
@@ -3466,10 +3481,18 @@ export class LightingEffectV2 {
             } else {
               paintedBaked = 1.0;
               if (uHasPaintedShadowLit > 0.5) {
-                paintedBaked = clamp(texture2D(tPaintedShadowLit, sceneUvFoundry).r, 0.0, 1.0);
+                paintedBaked = mix(
+                  1.0,
+                  clamp(texture2D(tPaintedShadowLit, sceneUvFoundry).r, 0.0, 1.0),
+                  inSceneBounds
+                );
                 paintedApply = paintedBaked;
                 if (uHasPaintedShadowAtAndAboveLit > 0.5 && uLightingPaintedFloorIndex > 0.5) {
-                  paintedApply = clamp(texture2D(tPaintedShadowAtAndAboveLit, sceneUvFoundry).r, 0.0, 1.0);
+                  paintedApply = mix(
+                    1.0,
+                    clamp(texture2D(tPaintedShadowAtAndAboveLit, sceneUvFoundry).r, 0.0, 1.0),
+                    inSceneBounds
+                  );
                 }
                 paintedEffective = mix(1.0, paintedApply, clamp(uPaintedShadowMgrOpacity, 0.0, 1.0));
               }

@@ -369,6 +369,9 @@ export class StreamedBackgroundGrid {
 
   /** @private */
   _maxInflightLoads() {
+    if (window.MapShine?.__msaSceneLoading === true) {
+      return Math.min(2, this._maxConcurrent);
+    }
     const budget = getTextureBudgetTracker();
     const used = budget.getUsedFraction();
     if (used > 0.92) return Math.max(this._maxConcurrent, 3);

@@ -1536,7 +1536,18 @@ float waterCombinedShadowLit(vec2 screenUv, vec2 sceneUv01) {
     lit = clamp(texture2D(tCombinedShadow, screenUv).r, 0.0, 1.0);
   }
   if (uHasPaintedShadowLit > 0.5) {
-    float paintedLit = clamp(texture2D(tPaintedShadowLit, sceneUv01).r, 0.0, 1.0);
+    float inScene = 1.0;
+    if (uHasSceneRect > 0.5) {
+      vec2 foundryPos = screenUvToFoundry(screenUv);
+      vec2 sceneUvRaw = foundryToSceneUv(foundryPos);
+      inScene = step(0.0, sceneUvRaw.x) * step(sceneUvRaw.x, 1.0)
+        * step(0.0, sceneUvRaw.y) * step(sceneUvRaw.y, 1.0);
+    }
+    float paintedLit = mix(
+      1.0,
+      clamp(texture2D(tPaintedShadowLit, sceneUv01).r, 0.0, 1.0),
+      inScene
+    );
     paintedLit = mix(1.0, paintedLit, clamp(uPaintedShadowOpacity, 0.0, 1.0));
     lit *= paintedLit;
   }

@@ -3330,14 +3330,16 @@ export class FloorCompositor {
   }
 
   /**
-   * While the async populate IIFE is in flight, skip heavy per-frame effect
-   * updates and the full post chain so `setTimeout(0)` yields are not filled
-   * by concurrent shader work.
+   * While populate or scene load is in flight, skip heavy per-frame effect updates
+   * and the full post chain. Populate can finish before `__msaSceneLoading` clears
+   * (binding_effects / shader warmup); without extending this gate, the compositor
+   * runs lighting + water + bloom while streaming uploads are still in flight.
    *
    * @returns {boolean}
    * @private
    */
   _populateSlimRenderActive() {
+    if (window.MapShine?.__msaSceneLoading === true) return true;
     return !!this._populatePromise && !this._populateComplete;
   }
 
@@ -3472,8 +3474,9 @@ export class FloorCompositor {
       : Date.now();
     if (!this._populateSlimRenderLogNextAt || now >= this._populateSlimRenderLogNextAt) {
       this._populateSlimRenderLogNextAt = now + 2500;
+      const sceneLoading = window.MapShine?.__msaSceneLoading === true;
       log.warn(
-        `[POPULATE RENDER-SLIM] skipping full effect updates + post chain until populate completes | busPopulated=${this._busPopulated}`,
+        `[RENDER-SLIM] skipping full effect updates + post chain until ${sceneLoading ? 'scene load completes' : 'populate completes'} | busPopulated=${this._busPopulated}`,
       );
     }
     try {
@@ -4792,7 +4795,9 @@ export class FloorCompositor {
     const populateSlimRender = this._populateSlimRenderActive();
     try {
       if (window.MapShine) {
-        window.MapShine.__v2CompositorRenderPath = populateSlimRender ? 'populate-slim' : 'full';
+        window.MapShine.__v2CompositorRenderPath = populateSlimRender
+          ? (window.MapShine?.__msaSceneLoading ? 'load-slim' : 'populate-slim')
+          : 'full';
         window.MapShine.__v2PopulateComplete = !!this._populateComplete;
         if (window.MapShine.__v2FrameTraceEnabled === true) {
           const ctx = window.MapShine?.activeLevelContext ?? null;

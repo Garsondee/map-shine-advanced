@@ -7,7 +7,7 @@
 
 /** Splash/bubble shader marker — bump {@link SPLASH_OCCLUSION_SHADER_EPOCH} when GLSL changes. */
 export const SPLASH_OCCLUSION_MASK_MARKER = '/* MS_WATER_SPLASHES_MASKING_V2 */';
-export const SPLASH_OCCLUSION_SHADER_EPOCH = 4;
+export const SPLASH_OCCLUSION_SHADER_EPOCH = 6;
 
 /**
  * GLSL helpers (must stay in sync with water-shader.js).
@@ -25,18 +25,27 @@ float msaWaterOccluderAlphaSoft(vec2 screenUv) {
   return 0.72 * c + 0.07 * (n + s + e + w);
 }
 
-float msaWaterRoofBlockOcc(vec2 screenUv) {
+float msaWaterDeckMaskOcc(vec2 screenUv) {
   if (uHasOverheadRoofBlock < 0.5) return 0.0;
-  return smoothstep(0.34, 0.66, texture2D(tOverheadRoofBlock, screenUv).a);
+  return smoothstep(0.34, 0.66, texture2D(tOverheadRoofBlock, screenUv).r);
+}
+
+float msaWaterOverheadTileOcc(vec2 screenUv) {
+  if (uHasOverheadRoofBlock < 0.5) return 0.0;
+  return smoothstep(0.08, 0.88, texture2D(tOverheadRoofBlock, screenUv).a);
+}
+
+float msaWaterRoofBlockOcc(vec2 screenUv) {
+  return max(msaWaterOverheadTileOcc(screenUv), msaWaterDeckMaskOcc(screenUv));
 }
 
 float msaWaterSourceScreenOcc(vec2 screenUv) {
-  float deck = msaWaterRoofBlockOcc(screenUv);
-  if (deck < 0.001) return 0.0;
+  float overheadOcc = msaWaterOverheadTileOcc(screenUv);
+  float deckOcc = msaWaterDeckMaskOcc(screenUv);
   if (uHasSliceAlpha > 0.5) {
-    return deck * smoothstep(0.10, 0.88, texture2D(tSliceAlpha, screenUv).a);
+    deckOcc *= smoothstep(0.10, 0.88, texture2D(tSliceAlpha, screenUv).a);
   }
-  return deck;
+  return max(overheadOcc, deckOcc);
 }
 
 float msaWaterBgTransmittanceAt(vec2 screenUv) {

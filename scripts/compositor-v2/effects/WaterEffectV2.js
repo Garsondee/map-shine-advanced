@@ -33,8 +33,8 @@
  * (levelSceneRT alpha is not reliable vs river holes on many maps).
  *
  * Layering: `tWaterOccluderAlpha` stacks full sceneRT alpha for slices above the
- * water-source floor. `tOverheadRoofBlock` is a bus overhead-only mask on the
- * source floor (gated by raw water mask in the shader — not full slice alpha).
+ * water-source floor. `tOverheadRoofBlock` merges the water-source deck bus mask
+ * with OverheadStamp roof-block alpha (screen-space overhead tile coverage).
  *
  * @module compositor-v2/effects/WaterEffectV2
  */

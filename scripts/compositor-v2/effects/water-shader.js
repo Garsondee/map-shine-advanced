@@ -100,7 +100,7 @@ uniform vec2 uWaterRawMaskTexelSize;  // 1 / dimensions of composited _Water RT 
 
 uniform sampler2D tWaterOccluderAlpha; // Screen-space upper-floor occluder mask
 uniform float uHasWaterOccluderAlpha;  // 1.0 when occluder mask is valid
-uniform sampler2D tOverheadRoofBlock;  // Water-source floor overhead-only bus mask
+uniform sampler2D tOverheadRoofBlock;  // R=deck mask, G=vegetation, A=overhead stamp alpha
 uniform float uHasOverheadRoofBlock;   // 1.0 when tOverheadRoofBlock is valid
 uniform sampler2D tSliceAlpha;         // Authoritative per-level albedo alpha (pre-post chain)
 uniform float uHasSliceAlpha;          // 1.0 when tSliceAlpha is valid
@@ -508,11 +508,8 @@ float valueNoise2D(vec2 p) {
   vec2 i = floor(p);
   vec2 f = fract(p);
   vec2 u = f * f * (3.0 - 2.0 * f);
-  float a = MSA_TEXTURE_LOD(tNoiseMap, (i + 0.5) * NOISE_INV, 0.0).r;
-  float b = MSA_TEXTURE_LOD(tNoiseMap, (i + vec2(1.5, 0.5)) * NOISE_INV, 0.0).r;
-  float c = MSA_TEXTURE_LOD(tNoiseMap, (i + vec2(0.5, 1.5)) * NOISE_INV, 0.0).r;
-  float d = MSA_TEXTURE_LOD(tNoiseMap, (i + vec2(1.5, 1.5)) * NOISE_INV, 0.0).r;
-  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+  vec2 uv = (i + u + 0.5) * NOISE_INV;
+  return MSA_TEXTURE_LOD(tNoiseMap, uv, 0.0).r;
 }
 
 // V1 compatibility: older code calls valueNoise().
@@ -654,12 +651,11 @@ vec2 computeRainOffsetPx(vec2 uv) {
 }
 
 vec2 curlNoise2D(vec2 p) {
-  float e = 0.02;
-  float n1 = valueNoise2D(p + vec2(0.0, e));
-  float n2 = valueNoise2D(p - vec2(0.0, e));
-  float n3 = valueNoise2D(p + vec2(e, 0.0));
-  float n4 = valueNoise2D(p - vec2(e, 0.0));
-  return vec2((n1 - n2) / (2.0 * e), -(n3 - n4) / (2.0 * e));
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  vec2 uv = (i + u + 0.5) * NOISE_INV;
+  return MSA_TEXTURE_LOD(tNoiseMap, uv, 0.0).gb * 2.0 - 1.0;
 }
 
 float sceneAspectRatio() {
@@ -912,36 +908,13 @@ vec3 calculateWaveForWind(vec2 sceneUv, float t, float motion01, vec2 windDirInp
     float grainNoise2 = valueNoise2D(grainUv * 1.73 + vec2(0.5, 0.3)) * 0.02;
     totalH += grainNoise + grainNoise2;
 
-    // 6. SECONDARY GERSTNER LAYER (different angle, vec4 batch)
-    vec2 windBasis2 = rotate2D(windBasis, 0.4);
-    float totalH2 = 0.0;
-    vec2 totalDxy2 = vec2(0.0);
-    float totalDz2 = 0.0;
-    gerstnerAccum4(
-      totalH2, totalDxy2, totalDz2,
-      uv, windBasis2, t, jitterField,
-      globalSteepness, windStrength,
-      0.8, 0.4 / 3.0, 0.7,
-      0.5, 2.0, 3.0,
-      1.5,
-      vec4(0.14, 0.08, 0.04, 1.0),
-      vec4(0.58, -0.71, 0.94, 0.0) * 0.6,
-      vec4(0.0, 1.0, 2.0, 0.0),
-      vec4(1.0, 1.0, 1.0, 0.0),
-      false
-    );
-
-    // Blend secondary layer
-    totalH += totalH2 * 0.3;
-    totalDxy += totalDxy2 * 0.3;
-
-    // 7. TROCHOIDAL PEAK SHARPENING
+    // 6. TROCHOIDAL PEAK SHARPENING
     // This ensures peaks are sharp and troughs are wide (less like a sine wave)
     float pinchMod = mix(0.7, 0.25, motion01);
     float pinch = max(pinchMod, 1.0 - abs(totalDz));
     vec2 slope = totalDxy / pinch;
 
-    // 8. FINAL GRAINY BREAKUP ON SLOPES
+    // 7. FINAL GRAINY BREAKUP ON SLOPES
     // Add high-frequency noise directly to slopes for specular breakup
     vec2 slopeGrainUv = uv * 40.0 + vec2(t * 3.1, -t * 2.1);
     vec2 slopeGrain = vec2(
@@ -1191,7 +1164,7 @@ struct FloatingFoamData {
 };
 
 // waveGradPre: pre-computed waveGrad2D result from main() to avoid redundant wave calculation.
-void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 waveGradPre, float sceneLuma, float darkness, float outdoorStrength, float indoorWindMotion, out float shoreFoamOut, out FloatingFoamData floatingOut) {
+void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 waveGradPre, float sceneLuma, float darkness, float outdoorStrength, float indoorWindMotion, bool isShadow, out float shoreFoamOut, out FloatingFoamData floatingOut) {
   vec2 foamWindOffsetUv = uWindOffsetUv * indoorWindMotion;
   vec2 foamSceneUv = sceneUv - (foamWindOffsetUv * 0.5);
   float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
@@ -1399,61 +1372,64 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
   float clumpC2 = valueNoise(evolutionUv * 2.1 + 5.2);
   float c = clumpC1 * 0.7 + clumpC2 * 0.3;
   
-  // Phase 2: Multi-layer complexity
+  // Phase 2: Multi-layer complexity (skipped for shadow pass — macro shape only)
   float complexFoam = c;
-  int layerCount = int(clamp(uFloatingFoamLayerCount, 1.0, 4.0));
-  
-  // Add multiple octaves for thickness variation (use evolution UV)
-  if (uFloatingFoamThicknessVariation > 0.01) {
-    float thickScale = max(0.1, uFloatingFoamThicknessScale);
-    float thick1 = valueNoise(evolutionUv * thickScale);
-    float thick2 = valueNoise(evolutionUv * thickScale * 2.3 + 7.1);
-    float thickness = thick1 * 0.6 + thick2 * 0.4;
-    thickness = mix(1.0, thickness, clamp(uFloatingFoamThicknessVariation, 0.0, 1.0));
-    complexFoam *= thickness;
-  }
-  
-  // Add filaments and tendrils (Phase 2)
-  if (uFloatingFoamFilamentsEnabled > 0.5 && uFloatingFoamFilamentsStrength > 0.01) {
-    float filScale = max(0.1, uFloatingFoamFilamentsScale);
-    float filLength = clamp(uFloatingFoamFilamentsLength, 0.1, 4.0);
-    float filWidth = clamp(uFloatingFoamFilamentsWidth, 0.01, 0.5);
-    
-    // Create elongated filaments using directional noise (use evolution UV)
-    vec2 filUv = evolutionUv * filScale;
-    vec2 windStretch = windBasis * filLength;
-    
-    // Multiple filament layers at different angles
-    float filaments = 0.0;
-    for (int i = 0; i < 3; i++) {
-      float angle = float(i) * 0.523599; // ~30 degrees apart
-      vec2 rotUv = vec2(
-        filUv.x * cos(angle) - filUv.y * sin(angle),
-        filUv.x * sin(angle) + filUv.y * cos(angle)
-      );
-      rotUv += windStretch * float(i) * 0.3;
-      
-      // Elongated noise for filaments
-      float fil = valueNoise(rotUv * vec2(1.0, filLength));
-      fil = smoothstep(1.0 - filWidth, 1.0, fil);
-      filaments = max(filaments, fil);
+
+  if (!isShadow) {
+    int layerCount = int(clamp(uFloatingFoamLayerCount, 1.0, 4.0));
+
+    // Add multiple octaves for thickness variation (use evolution UV)
+    if (uFloatingFoamThicknessVariation > 0.01) {
+      float thickScale = max(0.1, uFloatingFoamThicknessScale);
+      float thick1 = valueNoise(evolutionUv * thickScale);
+      float thick2 = valueNoise(evolutionUv * thickScale * 2.3 + 7.1);
+      float thickness = thick1 * 0.6 + thick2 * 0.4;
+      thickness = mix(1.0, thickness, clamp(uFloatingFoamThicknessVariation, 0.0, 1.0));
+      complexFoam *= thickness;
     }
-    
-    float filStr = clamp(uFloatingFoamFilamentsStrength, 0.0, 1.0);
-    complexFoam = max(complexFoam, filaments * filStr);
-  }
-  
-  // Add edge detail and breakup (Phase 2, use evolution UV)
-  if (uFloatingFoamEdgeDetail > 0.01) {
-    float edgeScale = max(0.1, uFloatingFoamEdgeDetailScale);
-    float edge1 = valueNoise(evolutionUv * edgeScale * 3.0);
-    float edge2 = valueNoise(evolutionUv * edgeScale * 7.0 + 13.7);
-    float edgeNoise = edge1 * 0.6 + edge2 * 0.4;
-    
-    // Apply edge detail as erosion/expansion
-    float edgeStr = clamp(uFloatingFoamEdgeDetail, 0.0, 1.0);
-    float edgeOffset = (edgeNoise - 0.5) * edgeStr * 0.3;
-    complexFoam = clamp(complexFoam + edgeOffset, 0.0, 1.0);
+
+    // Add filaments and tendrils (Phase 2)
+    if (uFloatingFoamFilamentsEnabled > 0.5 && uFloatingFoamFilamentsStrength > 0.01) {
+      float filScale = max(0.1, uFloatingFoamFilamentsScale);
+      float filLength = clamp(uFloatingFoamFilamentsLength, 0.1, 4.0);
+      float filWidth = clamp(uFloatingFoamFilamentsWidth, 0.01, 0.5);
+
+      // Create elongated filaments using directional noise (use evolution UV)
+      vec2 filUv = evolutionUv * filScale;
+      vec2 windStretch = windBasis * filLength;
+
+      // Multiple filament layers at different angles
+      float filaments = 0.0;
+      for (int i = 0; i < 3; i++) {
+        float angle = float(i) * 0.523599; // ~30 degrees apart
+        vec2 rotUv = vec2(
+          filUv.x * cos(angle) - filUv.y * sin(angle),
+          filUv.x * sin(angle) + filUv.y * cos(angle)
+        );
+        rotUv += windStretch * float(i) * 0.3;
+
+        // Elongated noise for filaments
+        float fil = valueNoise(rotUv * vec2(1.0, filLength));
+        fil = smoothstep(1.0 - filWidth, 1.0, fil);
+        filaments = max(filaments, fil);
+      }
+
+      float filStr = clamp(uFloatingFoamFilamentsStrength, 0.0, 1.0);
+      complexFoam = max(complexFoam, filaments * filStr);
+    }
+
+    // Add edge detail and breakup (Phase 2, use evolution UV)
+    if (uFloatingFoamEdgeDetail > 0.01) {
+      float edgeScale = max(0.1, uFloatingFoamEdgeDetailScale);
+      float edge1 = valueNoise(evolutionUv * edgeScale * 3.0);
+      float edge2 = valueNoise(evolutionUv * edgeScale * 7.0 + 13.7);
+      float edgeNoise = edge1 * 0.6 + edge2 * 0.4;
+
+      // Apply edge detail as erosion/expansion
+      float edgeStr = clamp(uFloatingFoamEdgeDetail, 0.0, 1.0);
+      float edgeOffset = (edgeNoise - 0.5) * edgeStr * 0.3;
+      complexFoam = clamp(complexFoam + edgeOffset, 0.0, 1.0);
+    }
   }
   
   float clumps = smoothstep(1.0 - clamp(uFloatingFoamCoverage, 0.0, 1.0), 1.0, complexFoam);
@@ -1733,10 +1709,20 @@ float waterOccluderAlphaSoft(vec2 screenUv) {
   return 0.72 * c + 0.07 * (n + s + e + w);
 }
 
-// Non-_Water bus tiles on the water-source floor (cached deck mask, RT alpha).
-float waterRoofBlockOcc(vec2 screenUv) {
+// Screen-space occlusion RT packing (WaterFootholdMaskMerge):
+//   R = water-source deck bus mask, G = vegetation canopy, A = overhead stamp alpha.
+float waterDeckMaskOcc(vec2 screenUv) {
   if (uHasOverheadRoofBlock < 0.5) return 0.0;
-  return smoothstep(0.34, 0.66, texture2D(tOverheadRoofBlock, screenUv).a);
+  return smoothstep(0.34, 0.66, texture2D(tOverheadRoofBlock, screenUv).r);
+}
+
+float waterOverheadTileOcc(vec2 screenUv) {
+  if (uHasOverheadRoofBlock < 0.5) return 0.0;
+  return smoothstep(0.08, 0.88, texture2D(tOverheadRoofBlock, screenUv).a);
+}
+
+float waterRoofBlockOcc(vec2 screenUv) {
+  return max(waterOverheadTileOcc(screenUv), waterDeckMaskOcc(screenUv));
 }
 
 // Bush/tree canopy in RT green — suppress refraction under foliage (G channel, same sampler).
@@ -1745,14 +1731,14 @@ float waterVegetationFoothold(vec2 screenUv) {
   return smoothstep(0.10, 0.88, texture2D(tOverheadRoofBlock, screenUv).g);
 }
 
-// Deck mask × source slice scene alpha (screen-space punch over river UV).
+// Deck mask × slice alpha for bridges; overhead stamp alpha is screen-authoritative.
 float waterSourceScreenOcc(vec2 screenUv) {
-  float deck = waterRoofBlockOcc(screenUv);
-  if (deck < 0.001) return 0.0;
+  float overheadOcc = waterOverheadTileOcc(screenUv);
+  float deckOcc = waterDeckMaskOcc(screenUv);
   if (uHasSliceAlpha > 0.5) {
-    return deck * smoothstep(0.10, 0.88, texture2D(tSliceAlpha, screenUv).a);
+    deckOcc *= smoothstep(0.10, 0.88, texture2D(tSliceAlpha, screenUv).a);
   }
-  return deck;
+  return max(overheadOcc, deckOcc);
 }
 
 // Post-merge background transmittance mask in screen UV.
@@ -1987,7 +1973,8 @@ void main() {
     inside *= m;
     distInside *= m;
   }
-  // Water-source floor: cached deck mask × live slice alpha, gated by raw water.
+  // Water-source floor + visible overhead tiles: suppress water under deck/bridge
+  // and under overhead stamp alpha (screen-space, all visible ROOF_LAYER tiles).
   {
     float srcOcc = waterSourceScreenOcc(vUv);
     float sourceOverheadGate = srcOcc * smoothstep(0.02, 0.08, rawAuth);
@@ -2427,7 +2414,7 @@ void main() {
   
   float shoreFoamAmount;
   FloatingFoamData floatingFoam;
-  getFoamData(sceneUv, shore, inside, rainOffPx, waveGrad, sceneLuma, darkness, outdoorStrength, indoorWindMotion, shoreFoamAmount, floatingFoam);
+  getFoamData(sceneUv, shore, inside, rainOffPx, waveGrad, sceneLuma, darkness, outdoorStrength, indoorWindMotion, false, shoreFoamAmount, floatingFoam);
   // Softer foam presence + less pop vs blurred bus (mask still drives physics above).
   float fdbFoam = uFloorDepthBlurWaterSoft;
   float shoreFoamVis = shoreFoamAmount * mix(1.0, 0.58, fdbFoam);
@@ -2446,7 +2433,7 @@ void main() {
     // Sample foam at offset position for directional shadow
     float shoreFoamShadow;
     FloatingFoamData shadowFoam;
-    getFoamData(shadowUv, shore, inside, rainOffPx, waveGrad, sceneLuma, darkness, outdoorStrength, indoorWindMotion, shoreFoamShadow, shadowFoam);
+    getFoamData(shadowUv, shore, inside, rainOffPx, waveGrad, sceneLuma, darkness, outdoorStrength, indoorWindMotion, true, shoreFoamShadow, shadowFoam);
     
     float shadowDarken = shadowFoam.amount * floatingFoam.shadowStrength;
     shadowDarken *= mix(1.0, 0.22, uFloorDepthBlurWaterSoft);

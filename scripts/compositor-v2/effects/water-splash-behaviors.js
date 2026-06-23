@@ -84,6 +84,18 @@ function lerpScalarStops(stops, t) {
   return a.v + (b.v - a.v) * f;
 }
 
+// Pre-bake the stops into instant O(1) lookup tables.
+function buildLUT(stops) {
+  const lut = new Float32Array(256);
+  for (let i = 0; i < 256; i++) lut[i] = lerpScalarStops(stops, i / 255);
+  return lut;
+}
+
+const FOAM_ALPHA_LUT = buildLUT(FOAM_ALPHA_STOPS);
+const FOAM_SIZE_LUT = buildLUT(FOAM_SIZE_STOPS);
+const SPLASH_ALPHA_LUT = buildLUT(SPLASH_ALPHA_STOPS);
+const SPLASH_SIZE_LUT = buildLUT(SPLASH_SIZE_STOPS);
+
 /**
  * Apply a scalar size to a Quarks particle that may store size as either:
  * - a number, or
@@ -1124,7 +1136,7 @@ class OutdoorsMaskState {
    * @returns {number|null}
    */
   sampleAtWorld(worldX, worldY, ownerEffect) {
-    return sampleOutdoorsFromSnapshot(this._snap(), worldX, worldY, ownerEffect?._sceneBounds);
+    return sampleOutdoorsFromSnapshot(this._snap(), worldX, worldY, ownerEffect?._sceneBounds, { bilinear: false });
   }
 }
 
@@ -1208,8 +1220,19 @@ export class FoamPlumeLifecycleBehavior {
     particle._foamFlipX = Math.random() < 0.5 ? -1.0 : 1.0;
     particle._foamFlipY = Math.random() < 0.5 ? -1.0 : 1.0;
 
-    // Random tint mix selection for this particle (stable over its lifetime).
-    particle._msTintRand = Math.random();
+    let r = this._foamColorR;
+    let g = this._foamColorG;
+    let b = this._foamColorB;
+    if (this._tintStrength > 0.0001) {
+      const rand = Math.random();
+      const tMix = clamp01(0.5 + (rand - 0.5) * this._tintJitter);
+      r = lerp(r, lerp(this._tintA.r, this._tintB.r, tMix), this._tintStrength);
+      g = lerp(g, lerp(this._tintA.g, this._tintB.g, tMix), this._tintStrength);
+      b = lerp(b, lerp(this._tintA.b, this._tintB.b, tMix), this._tintStrength);
+    }
+    particle._colorR = r;
+    particle._colorG = g;
+    particle._colorB = b;
 
     // Lazy: CPU mask readback may not exist on first frame (GPU RT). Sample in update().
     particle._msOutdoorStrength = null;
@@ -1230,36 +1253,20 @@ export class FoamPlumeLifecycleBehavior {
     }
 
     const t = age / Math.max(0.001, life);
+    const idx = Math.min(255, (t * 255) | 0);
 
     // Alpha envelope.
-    const alphaBase = lerpScalarStops(FOAM_ALPHA_STOPS, t);
+    const alphaBase = FOAM_ALPHA_LUT[idx];
     const edgeStr = particle._edgeStrength ?? 1.0;
     const opRand = particle._foamOpacityRand ?? 1.0;
 
-    let r = this._foamColorR;
-    let g = this._foamColorG;
-    let b = this._foamColorB;
-
-    // Apply optional two-color tint jitter to better match water/sky mood.
-    if (this._tintStrength > 0.0001) {
-      const rand = particle._msTintRand ?? 0.5;
-      const tMix = clamp01(0.5 + (rand - 0.5) * this._tintJitter);
-      const tr = lerp(this._tintA.r, this._tintB.r, tMix);
-      const tg = lerp(this._tintA.g, this._tintB.g, tMix);
-      const tb = lerp(this._tintA.b, this._tintB.b, tMix);
-      const s = clamp01(this._tintStrength);
-      r = lerp(r, tr, s);
-      g = lerp(g, tg, s);
-      b = lerp(b, tb, s);
-    }
-
-    particle.color.x = r;
-    particle.color.y = g;
-    particle.color.z = b;
+    particle.color.x = particle._colorR;
+    particle.color.y = particle._colorG;
+    particle.color.z = particle._colorB;
     particle.color.w = alphaBase * this._peakOpacity * edgeStr * opRand;
 
     // Size growth.
-    const sizeScale = lerpScalarStops(FOAM_SIZE_STOPS, t);
+    const sizeScale = FOAM_SIZE_LUT[idx];
     const baseSize = particle._splashBaseSize ?? 50;
     applyParticleScalarSize(
       particle,
@@ -1358,8 +1365,19 @@ export class SplashRingLifecycleBehavior {
     }
     particle._splashOpacityRand = 0.6 + Math.random() * 0.4;
 
-    // Random tint mix selection for this particle (stable over its lifetime).
-    particle._msTintRand = Math.random();
+    let r = 0.982;
+    let g = 0.988;
+    let b = 1.0;
+    if (this._tintStrength > 0.0001) {
+      const rand = Math.random();
+      const tMix = clamp01(0.5 + (rand - 0.5) * this._tintJitter);
+      r = lerp(r, lerp(this._tintA.r, this._tintB.r, tMix), this._tintStrength);
+      g = lerp(g, lerp(this._tintA.g, this._tintB.g, tMix), this._tintStrength);
+      b = lerp(b, lerp(this._tintA.b, this._tintB.b, tMix), this._tintStrength);
+    }
+    particle._colorR = r;
+    particle._colorG = g;
+    particle._colorB = b;
 
     particle._msOutdoorStrength = null;
   }
@@ -1379,34 +1397,19 @@ export class SplashRingLifecycleBehavior {
     }
 
     const t = age / Math.max(0.001, life);
+    const idx = Math.min(255, (t * 255) | 0);
 
     // Alpha: sharp pop then rapid fade.
-    const alpha = lerpScalarStops(SPLASH_ALPHA_STOPS, t);
+    const alpha = SPLASH_ALPHA_LUT[idx];
     const opRand = particle._splashOpacityRand ?? 1.0;
-    // Near-white vertex color; shading (V10) clamps night/shadow vs sun spray.
-    let r = 0.982;
-    let g = 0.988;
-    let b = 1.0;
 
-    if (this._tintStrength > 0.0001) {
-      const rand = particle._msTintRand ?? 0.5;
-      const tMix = clamp01(0.5 + (rand - 0.5) * this._tintJitter);
-      const tr = lerp(this._tintA.r, this._tintB.r, tMix);
-      const tg = lerp(this._tintA.g, this._tintB.g, tMix);
-      const tb = lerp(this._tintA.b, this._tintB.b, tMix);
-      const s = clamp01(this._tintStrength);
-      r = lerp(r, tr, s);
-      g = lerp(g, tg, s);
-      b = lerp(b, tb, s);
-    }
-
-    particle.color.x = r;
-    particle.color.y = g;
-    particle.color.z = b;
+    particle.color.x = particle._colorR;
+    particle.color.y = particle._colorG;
+    particle.color.z = particle._colorB;
     particle.color.w = alpha * this._peakOpacity * opRand * this._precipMult;
 
     // Size: expand outward from impact.
-    const sizeScale = lerpScalarStops(SPLASH_SIZE_STOPS, t);
+    const sizeScale = SPLASH_SIZE_LUT[idx];
     const baseSize = particle._splashBaseSize ?? 20;
     applyParticleScalarSize(particle, baseSize * sizeScale);
 

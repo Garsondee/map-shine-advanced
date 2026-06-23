@@ -17,7 +17,9 @@
  *
  * Outputs are intentionally narrow:
  *   - `masterDarkness`: 0..1, the single canonical darkness value
- *   - `calendarDayWeight`: 0..1, daylight gating from `getFoundrySunlightFactor`
+ *   - `calendarDayWeight`: 0..1, solar elevation strength (`getFoundrySunlightFactor`)
+ *   - `calendarSunStrength`: alias of `calendarDayWeight`
+ *   - `calendarDaylightHours`: 1 between sunrise and sunset, else 0
  *   - `hour`: 0..24, Map Shine time of day (or Foundry phase when linked)
  *   - `sunAzDeg` / `sunElDeg`: solar angles for shadow / specular consumers
  *
@@ -29,8 +31,10 @@ import {
   computeTimeOfDayDarkness01,
   getFoundryTimePhaseHours,
   getFoundrySunlightFactor,
+  getWrappedHourProgress,
 } from './foundry-time-phases.js';
 import { computeSunAnglesFromHour } from '../compositor-v2/shadow-system/SunDirection.js';
+import { weatherController as coreWeatherController } from './WeatherController.js';
 
 const log = createLogger('LightingDirector');
 
@@ -71,7 +75,9 @@ const clamp01 = (v) => Math.max(0, Math.min(1, v));
 /**
  * @typedef {object} LightingDirectorState
  * @property {number} masterDarkness Canonical 0..1 scene darkness for the frame.
- * @property {number} calendarDayWeight Daylight gate from sunlight factor (0..1).
+ * @property {number} calendarDayWeight Solar elevation strength from sunlight factor (0..1).
+ * @property {number} calendarSunStrength Same as `calendarDayWeight`.
+ * @property {number} calendarDaylightHours 1 during daylight hours, 0 at night.
  * @property {number} hour Resolved time of day in 0..24 hours, or NaN.
  * @property {number} sunAzDeg Sun azimuth in degrees.
  * @property {number} sunElDeg Sun elevation in degrees.
@@ -89,6 +95,8 @@ const clamp01 = (v) => Math.max(0, Math.min(1, v));
 const NEUTRAL_STATE = Object.freeze({
   masterDarkness: 0,
   calendarDayWeight: 1,
+  calendarSunStrength: 1,
+  calendarDaylightHours: 1,
   hour: 12,
   sunAzDeg: 180,
   sunElDeg: 60,
@@ -180,6 +188,16 @@ class LightingDirectorImpl {
   }
 
   /** @private */
+  _readTwilightDarknessOverride() {
+    try {
+      const fx = globalThis.window?.MapShine?.effectComposer?._floorCompositorV2?._lightingEffect;
+      const v = Number(fx?.params?.twilightDarkness);
+      if (Number.isFinite(v)) return clamp01(v);
+    } catch (_) {}
+    return null;
+  }
+
+  /** @private */
   _readFoundryDarkness() {
     try {
       const sceneLevel = globalThis.canvas?.scene?.environment?.darknessLevel;
@@ -193,9 +211,25 @@ class LightingDirectorImpl {
   }
 
   /** @private */
+  _resolveWeatherController() {
+    try {
+      const fromMapShine = globalThis.window?.MapShine?.weatherController;
+      if (fromMapShine) return fromMapShine;
+    } catch (_) {}
+    try {
+      if (coreWeatherController) return coreWeatherController;
+    } catch (_) {}
+    try {
+      return globalThis.window?.weatherController ?? null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /** @private */
   _readWeatherDarkness() {
     try {
-      const wc = globalThis.window?.MapShine?.weatherController;
+      const wc = this._resolveWeatherController();
       const env = wc?.getEnvironment?.();
       const v = Number(env?.effectiveDarkness);
       if (Number.isFinite(v)) return clamp01(v);
@@ -206,13 +240,17 @@ class LightingDirectorImpl {
   /** @private */
   _resolveHour() {
     try {
-      const wc = globalThis.window?.MapShine?.weatherController;
-      const fromWc = Number(wc?.timeOfDay);
-      if (Number.isFinite(fromWc)) return ((fromWc % 24) + 24) % 24;
-    } catch (_) {}
-    try {
       const fromPanel = Number(globalThis.window?.MapShine?.controlPanel?.controlState?.timeOfDay);
       if (Number.isFinite(fromPanel)) return ((fromPanel % 24) + 24) % 24;
+    } catch (_) {}
+    try {
+      const fromRemote = Number(globalThis.window?.MapShine?.remoteControlState?.timeOfDay);
+      if (Number.isFinite(fromRemote)) return ((fromRemote % 24) + 24) % 24;
+    } catch (_) {}
+    try {
+      const wc = this._resolveWeatherController();
+      const fromWc = Number(wc?.timeOfDay);
+      if (Number.isFinite(fromWc)) return ((fromWc % 24) + 24) % 24;
     } catch (_) {}
     return Number.NaN;
   }
@@ -230,8 +268,12 @@ class LightingDirectorImpl {
   update() {
     const foundryDarkness = this._readFoundryDarkness();
     const hour = this._resolveHour();
+    const twilightDarkness = this._readTwilightDarknessOverride();
+    const twilightOpts = Number.isFinite(twilightDarkness)
+      ? { dawnDuskDarkness: twilightDarkness }
+      : {};
     const calendarDarknessRaw = Number.isFinite(hour)
-      ? computeTimeOfDayDarkness01(hour)
+      ? computeTimeOfDayDarkness01(hour, twilightOpts)
       : null;
     const calendarDarkness = Number.isFinite(calendarDarknessRaw)
       ? clamp01(calendarDarknessRaw)
@@ -257,15 +299,20 @@ class LightingDirectorImpl {
     }
     masterDarkness = clamp01(masterDarkness);
 
-    const calendarDayWeight = Number.isFinite(hour)
-      ? clamp01(getFoundrySunlightFactor(hour))
+    const phases = Number.isFinite(hour) ? getFoundryTimePhaseHours() : null;
+    const dayProgress = (phases && Number.isFinite(hour))
+      ? getWrappedHourProgress(hour, phases.sunrise, phases.sunset)
+      : null;
+    const calendarDaylightHours = Number.isFinite(dayProgress) ? 1 : 0;
+    const calendarSunStrength = Number.isFinite(dayProgress)
+      ? clamp01(getFoundrySunlightFactor(hour, phases))
       : 0;
+    const calendarDayWeight = calendarSunStrength;
 
     let sunAzDeg = NEUTRAL_STATE.sunAzDeg;
     let sunElDeg = NEUTRAL_STATE.sunElDeg;
     try {
       if (Number.isFinite(hour) && typeof computeSunAnglesFromHour === 'function') {
-        const phases = getFoundryTimePhaseHours?.() ?? null;
         const sunriseHour = Number.isFinite(Number(phases?.sunrise))
           ? Number(phases.sunrise)
           : 6;
@@ -279,6 +326,8 @@ class LightingDirectorImpl {
     this._state = Object.freeze({
       masterDarkness,
       calendarDayWeight,
+      calendarSunStrength,
+      calendarDaylightHours,
       hour,
       sunAzDeg,
       sunElDeg,

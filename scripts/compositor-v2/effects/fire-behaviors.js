@@ -777,7 +777,7 @@ function applyFireParticleWorldSpawn(p, worldX, worldY, brightness, ctx) {
       spawnSize,
       ownerEffect,
       floorIndex,
-      { tapCount: 5 },
+      { tapCount: 1 },
     );
   if (mapPointAuthored) p._msMapPointAuthoredFire = true;
   p._spawnOutdoorFactor = outdoorFactor;
@@ -2188,12 +2188,24 @@ function sampleMapPointFireOutdoorAtWorld(worldX, worldY, ownerEffect, floorInde
 const _fireFootprintOffsetCache = new Map();
 
 /**
- * Footprint sample offsets — 5-tap (center + cardinals) for hot paths; 9-tap at spawn.
+ * Normalize tap count for JS-side outdoors footprint sampling (1, 4, or 5 — no 9-tap).
+ * @param {number|undefined} tapCount
+ * @returns {1|4|5}
+ */
+function normalizeFireFootprintTapCount(tapCount) {
+  const tc = Number(tapCount);
+  if (tc <= 1) return 1;
+  if (tc <= 4) return 4;
+  return 5;
+}
+
+/**
+ * Footprint sample offsets — 1-tap (center) default; 4/5-tap for large billboards.
  * @param {number} particleSize
- * @param {number} [tapCount=9]
+ * @param {number} [tapCount=1]
  * @returns {number[][]}
  */
-function fireFootprintOffsets(particleSize, tapCount = 9) {
+function fireFootprintOffsets(particleSize, tapCount = 1) {
   const r = Math.max(24, Number(particleSize) || 0) * 0.42;
   if (r <= 1) {
     let centerOnly = _fireFootprintOffsetCache.get('c:0');
@@ -2203,33 +2215,29 @@ function fireFootprintOffsets(particleSize, tapCount = 9) {
     }
     return centerOnly;
   }
-  const tc = tapCount <= 5 ? 5 : 9;
+  const tc = normalizeFireFootprintTapCount(tapCount);
   const rKey = Math.round(r);
   const cacheKey = `${tc}:${rKey}`;
   const cached = _fireFootprintOffsetCache.get(cacheKey);
   if (cached) return cached;
 
   let offsets;
-  if (tc <= 5) {
+  if (tc <= 1) {
+    offsets = [[0, 0]];
+  } else if (tc <= 4) {
     offsets = [
-      [0, 0],
       [r, 0],
       [-r, 0],
       [0, r],
       [0, -r],
     ];
   } else {
-    const d = r * 0.72;
     offsets = [
       [0, 0],
       [r, 0],
       [-r, 0],
       [0, r],
       [0, -r],
-      [d, d],
-      [-d, d],
-      [d, -d],
-      [-d, -d],
     ];
   }
   _fireFootprintOffsetCache.set(cacheKey, offsets);
@@ -2256,7 +2264,7 @@ export function resolveFireOutdoorFootprintMinFromSnapshot(
   opts = {},
 ) {
   if (!Number.isFinite(worldX) || !Number.isFinite(worldY)) return 1.0;
-  const tapCount = opts.tapCount === 5 ? 5 : 9;
+  const tapCount = normalizeFireFootprintTapCount(opts.tapCount);
   const offsets = fireFootprintOffsets(particleSize, tapCount);
   const sampleOpts = { shelterBias: true };
 
@@ -2289,7 +2297,7 @@ export function resolveFireOutdoorFootprintMinFromSnapshot(
  * @returns {number}
  */
 export function resolveFireOutdoorFootprintMin(worldX, worldY, particleSize, ownerEffect, floorIndex = 0, opts = {}) {
-  const tapCount = opts.tapCount === 5 ? 5 : 9;
+  const tapCount = normalizeFireFootprintTapCount(opts.tapCount);
   const offsets = fireFootprintOffsets(particleSize, tapCount);
 
   let minOutdoor = 1.0;
@@ -2489,7 +2497,7 @@ export function syncFireParticleOutdoorFootprint(
     return readFireParticleAppliedVisualMask(particle);
   }
 
-  const tapCount = opts.tapCount === 9 ? 9 : 5;
+  const tapCount = normalizeFireFootprintTapCount(opts.tapCount ?? 1);
   const smoothRate = Number.isFinite(opts.smoothRate) ? opts.smoothRate : 0.32;
   const bounds = sceneBounds ?? resolveFireSceneBounds(ownerEffect);
   const fi = readParticleFloorIndex(particle, system);
@@ -2566,7 +2574,7 @@ export function cacheFireParticleOutdoorFootprintForWind(
   const wx = particle.position?.x;
   const wy = particle.position?.y;
   if (!Number.isFinite(wx) || !Number.isFinite(wy)) return;
-  const tapCount = opts.tapCount === 5 ? 5 : 9;
+  const tapCount = normalizeFireFootprintTapCount(opts.tapCount ?? 5);
   const bounds = sceneBounds ?? resolveFireSceneBounds(ownerEffect);
   const footprint = resolveFireOutdoorFootprintMinFromSnapshot(
     snap,

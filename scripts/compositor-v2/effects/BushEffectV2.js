@@ -82,6 +82,12 @@ import {
   syncVegetationCameraGradeForEffect,
 } from './vegetation-camera-grade.js';
 import {
+  VEGETATION_AMBIENT_LIGHT_UNIFORM_GLSL,
+  VEGETATION_AMBIENT_LIGHT_APPLY_GLSL,
+  createVegetationAmbientLightUniforms,
+  syncVegetationAmbientLightForEffect,
+} from './vegetation-ambient-light.js';
+import {
   VEGETATION_CLUMP_FIELD_DEFAULTS,
   VEGETATION_CLUMP_FIELD_CONTROL_SCHEMA,
   VEGETATION_CLUMP_DEBUG_SCHEMA_GROUP,
@@ -1237,6 +1243,14 @@ export class BushEffectV2 {
   }
 
   /**
+   * Push outdoor ambient illumination (Lighting → Ambient light linear HDR) before composite.
+   */
+  syncAmbientLightUniforms() {
+    if (!this._initialized) return;
+    syncVegetationAmbientLightForEffect(this);
+  }
+
+  /**
    * Bind CloudEffectV2 shadow map for canopy darkening (call after cloud render each frame).
    */
   syncCloudShadowUniforms() {
@@ -1655,6 +1669,7 @@ export class BushEffectV2 {
       ...createVegetationPaintedShadowUniforms(THREE, this.params),
       ...createVegetationLandscapeLightningUniforms(THREE, this.params),
       ...createVegetationCameraGradeUniforms(THREE),
+      ...createVegetationAmbientLightUniforms(THREE),
       ...createVegetationClumpFieldSharedUniforms(this.params),
       ...createVegetationSceneWindSharedUniforms(sceneWindField.params),
     };
@@ -1998,6 +2013,7 @@ ${VEGETATION_WIND_OVERLAY_UNIFORM_GLSL}
 ${VEGETATION_CLUMP_FIELD_UNIFORM_GLSL}
 ${VEGETATION_SCENE_WIND_UNIFORM_GLSL}
 ${VEGETATION_CAMERA_GRADE_UNIFORM_GLSL}
+${VEGETATION_AMBIENT_LIGHT_UNIFORM_GLSL}
 ${VEGETATION_CLOUD_SHADOW_UNIFORM_GLSL}
 ${VEGETATION_BUILDING_SHADOW_UNIFORM_GLSL}
 ${VEGETATION_PAINTED_SHADOW_UNIFORM_GLSL}
@@ -2107,6 +2123,7 @@ ${VEGETATION_LANDSCAPE_LIGHTNING_APPLY_GLSL}
 ${VEGETATION_CLOUD_SHADOW_APPLY_GLSL}
 ${VEGETATION_BUILDING_SHADOW_APPLY_GLSL}
 ${VEGETATION_PAINTED_SHADOW_APPLY_GLSL}
+${VEGETATION_AMBIENT_LIGHT_APPLY_GLSL}
           if (uCcGradeEnabled > 0.5
               || abs(uExposure) + abs(uBrightness) + abs(uContrast - 1.0)
                  + abs(uSaturation - 1.0) + abs(uTemperature) + abs(uTint) > 0.0001) {

@@ -138,8 +138,19 @@ const log = createLogger('FireEffectV2');
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
+/** Explicit null/undefined means "resolve live"; never coerce null → 0 (full day). */
+function resolveOptionalDarkness01(darkness, resolveLive) {
+  if (darkness != null && Number.isFinite(Number(darkness))) {
+    return clamp01(Number(darkness));
+  }
+  return clamp01(resolveLive());
+}
+
 /** Matches glow band split at 0.5 — Indoor/Outdoor Balance folders are exclusive. */
 const FIRE_GLOW_BALANCE_OUTDOOR_THRESHOLD = 0.5;
+
+/** Outdoor footprint mask samples run on 1/N particles per frame (rotating slice). */
+const FIRE_OUTDOOR_SYNC_SLICE_COUNT = 5;
 
 /** Deep orange fire pool hue (linear HDR direction — magnitude lives in emission gain). */
 const FIRE_GLOW_COLOR_COOL = { r: 1.0, g: 0.72, b: 0.28 };
@@ -739,6 +750,10 @@ export class FireEffectV2 {
     this._activePerfRecorder = null;
     /** @type {[string, number][]} */
     this._glowHookIds = [];
+    /** @type {(() => void)|null} Debounced wall-change handler for glow rebuilds. */
+    this._glowWallChangedDebounced = null;
+    /** Rotating slice index — outdoor footprint sync touches ~20% of particles per frame. */
+    this._outdoorSyncSlice = 0;
     /** @type {number|null} Per-pass lighting floor (strict slice during per-level compose). */
     this._renderFloorIndexForGlow = null;
     /** @type {boolean} When true, only {@link _renderFloorIndexForGlow} emits into `_lightRT`. */
@@ -3150,6 +3165,8 @@ export class FireEffectV2 {
     try {
       const snap = this._resolveOutdoorSnapForFloor(floorIndex);
       const sceneBounds = this._sceneBounds ?? buildEffectSceneBoundsFromCanvas();
+      const slice = this._outdoorSyncSlice % FIRE_OUTDOOR_SYNC_SLICE_COUNT;
+      this._outdoorSyncSlice = (slice + 1) % FIRE_OUTDOOR_SYNC_SLICE_COUNT;
 
       batchRenderer.systemToBatchIndex.forEach((_, ps) => {
         const particles = ps.particles;
@@ -3158,11 +3175,15 @@ export class FireEffectV2 {
         for (let i = 0; i < pNum; i++) {
           const particle = particles[i];
           if (particle.died) continue;
+          if (i % FIRE_OUTDOOR_SYNC_SLICE_COUNT !== slice) {
+            if (!isSmoke) smoothFireParticleShelterMaskOnly(particle, 0.32);
+            continue;
+          }
           if (isSmoke) {
-            cacheFireParticleOutdoorFootprintForWind(particle, this, snap, sceneBounds, ps, { tapCount: 9 });
+            cacheFireParticleOutdoorFootprintForWind(particle, this, snap, sceneBounds, ps, { tapCount: 5 });
           } else {
             syncFireParticleOutdoorFootprint(particle, ps, this, snap, sceneBounds, {
-              tapCount: 5,
+              tapCount: 1,
               smoothRate: 0.32,
             });
           }
@@ -3775,9 +3796,13 @@ export class FireEffectV2 {
       } catch (_) {}
     };
     const onWallChanged = () => { this._needsGlowRebuild = true; };
-    safeOn('createWall', onWallChanged);
-    safeOn('updateWall', onWallChanged);
-    safeOn('deleteWall', onWallChanged);
+    const debounced = typeof foundry?.utils?.debounce === 'function'
+      ? foundry.utils.debounce(onWallChanged, 250)
+      : onWallChanged;
+    this._glowWallChangedDebounced = debounced;
+    safeOn('createWall', debounced);
+    safeOn('updateWall', debounced);
+    safeOn('deleteWall', debounced);
   }
 
   _unregisterGlowWallHooks() {
@@ -3785,6 +3810,8 @@ export class FireEffectV2 {
       try { Hooks.off(hook, id); } catch (_) {}
     }
     this._glowHookIds.length = 0;
+    try { this._glowWallChangedDebounced?.cancel?.(); } catch (_) {}
+    this._glowWallChangedDebounced = null;
   }
 
   _tryAttachGlowRoot() {
@@ -3902,9 +3929,10 @@ export class FireEffectV2 {
 
   /** @private @param {number} [darkness] */
   _blendGlowDayNightParam(dayKey, nightKey, fallback = 0, darkness = null) {
-    const t = clamp01(Number.isFinite(Number(darkness))
-      ? Number(darkness)
-      : LightingDirector.get().masterDarkness);
+    const t = resolveOptionalDarkness01(darkness, () => {
+      try { LightingDirector.update(); } catch (_) {}
+      return LightingDirector.get().masterDarkness;
+    });
     const dayRaw = Number(this.params[dayKey]);
     const day = Number.isFinite(dayRaw) ? dayRaw : fallback;
     const nightRaw = Number(this.params[nightKey]);
@@ -3940,9 +3968,10 @@ export class FireEffectV2 {
    * @private
    */
   _resolveFireGlowParams(darkness = null, outdoor01 = null) {
-    const t = clamp01(Number.isFinite(Number(darkness))
-      ? Number(darkness)
-      : LightingDirector.get().masterDarkness);
+    const t = resolveOptionalDarkness01(darkness, () => {
+      try { LightingDirector.update(); } catch (_) {}
+      return LightingDirector.get().masterDarkness;
+    });
     const base = {
       t,
       warmth: clamp01(this._blendGlowDayNightParam('fireGlowWarmth', 'fireGlowNightWarmth', 1.0, t)),
@@ -4642,8 +4671,27 @@ export class FireEffectV2 {
 
     const t = timeInfo.elapsed;
     const dayNightMul = this._computeFireGlowDayNightMul();
-    /** @type {Map<number, { glow: object, hue: {r:number,g:number,b:number} }>} */
-    const glowBandPack = new Map();
+
+    // Pre-resolve per-band env (darkness/weather are global — not per mesh).
+    const glowIndoor = this._resolveCachedFireGlowParams(0);
+    const glowOutdoor = this._resolveCachedFireGlowParams(1);
+    const bandPack = [
+      {
+        glow: glowIndoor,
+        hue: this._computeFireGlowColor(glowIndoor.warmth),
+        nightMul: this._computeFireGlowIndoorNightBoost(0) * this._computeFireGlowOutdoorNightBoost(0),
+        baseAmp: 0.42,
+        baseSpd: 0.85,
+      },
+      {
+        glow: glowOutdoor,
+        hue: this._computeFireGlowColor(glowOutdoor.warmth),
+        nightMul: this._computeFireGlowIndoorNightBoost(1) * this._computeFireGlowOutdoorNightBoost(1),
+        baseAmp: 0.62,
+        baseSpd: 1.05,
+      },
+    ];
+
     const flickerFloors = this._getGlowFlickerFloorsThisFrame();
 
     for (const floorIndex of flickerFloors) {
@@ -4656,13 +4704,7 @@ export class FireEffectV2 {
 
         const phase = entry.phase || 0;
         const outdoor = entry.outdoor ?? 1.0;
-        const glowBand = outdoor > 0.5 ? 1 : 0;
-        let pack = glowBandPack.get(glowBand);
-        if (!pack) {
-          const glow = this._resolveCachedFireGlowParams(glowBand);
-          pack = { glow, hue: this._computeFireGlowColor(glow.warmth) };
-          glowBandPack.set(glowBand, pack);
-        }
+        const pack = bandPack[outdoor > 0.5 ? 1 : 0];
         const glow = pack.glow;
         const strength = glow.flickerStrength;
         const speed = glow.flickerSpeed;
@@ -4676,26 +4718,21 @@ export class FireEffectV2 {
         const speedVar = 1.0 + (rand01 * 2.0 - 1.0) * speedJ;
         const strengthVar = 1.0 + (rand01b * 2.0 - 1.0) * strengthJ;
 
-        const baseAmp = outdoor > 0.5 ? 0.62 : 0.42;
-        const baseSpd = outdoor > 0.5 ? 1.05 : 0.85;
-        const spd = (speed > 0 ? (speed * baseSpd) : (baseSpd * 4.5)) * Math.max(0.05, speedVar);
+        const spd = (speed > 0 ? (speed * pack.baseSpd) : (pack.baseSpd * 4.5)) * Math.max(0.05, speedVar);
 
         const n1 = Math.sin(t * spd + phase * 6.2831);
         const n2 = Math.sin(t * (spd * 1.73) + phase * 11.7);
         const n3 = Math.sin(t * (spd * 2.91) + phase * 23.1);
         const chaos = (0.55 * n1 + 0.30 * n2 + 0.15 * n3);
-        const flicker = Math.max(0.08, 1.0 + (baseAmp * strength * Math.max(0.05, strengthVar)) * chaos);
+        const flicker = Math.max(0.08, 1.0 + (pack.baseAmp * strength * Math.max(0.05, strengthVar)) * chaos);
 
-        const indoorMul = this._computeFireGlowIndoorNightBoost(outdoor);
-        const outdoorMul = this._computeFireGlowOutdoorNightBoost(outdoor);
         const visualMul = Math.max(
           0,
           glow.intensity
             * Math.max(0.35, entry.intensity)
             * flicker
             * dayNightMul
-            * indoorMul
-            * outdoorMul
+            * pack.nightMul
         );
 
         u.uColor.value.setRGB(pack.hue.r, pack.hue.g, pack.hue.b);

@@ -169,16 +169,20 @@ export function getFoundrySunlightFactor(hour, phases = getFoundryTimePhaseHours
  * Used by {@link LightingEffectV2} and {@link SkyColorEffectV2} so sky grading tracks midnight.
  *
  * @param {number} hourRaw - Weather / control-panel hour 0..24
+ * @param {{ dawnDuskDarkness?: number }} [options] - Optional overrides from Lighting → twilight controls.
  * @returns {number|null} null if hour is not finite
  */
-export function computeTimeOfDayDarkness01(hourRaw) {
+export function computeTimeOfDayDarkness01(hourRaw, options = {}) {
   const h = Number(hourRaw);
   if (!Number.isFinite(h)) return null;
 
   const safeHour = normalizeHour24(h);
   const phases = getFoundryTimePhaseHours();
 
-  const dawnDuskDarkness = 0.55;
+  const dawnDuskOverride = Number(options.dawnDuskDarkness);
+  const dawnDuskDarkness = Number.isFinite(dawnDuskOverride)
+    ? Math.max(0, Math.min(1, dawnDuskOverride))
+    : 0.32;
   const noonDarkness = 0.0;
   const midnightDarkness = 0.95;
 

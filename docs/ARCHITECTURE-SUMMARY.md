@@ -1,9 +1,9 @@
 # Map Shine Advanced — Architecture Summary
 
-**Module**: `map-shine-advanced` v0.1.9.3  
-**Foundry VTT Compatibility**: v13  
+**Module**: `map-shine-advanced` v0.5.4.19  
+**Foundry VTT Compatibility**: v14  
 **Renderer**: Three.js r170 (PerspectiveCamera, FOV-based zoom)  
-**Last Updated**: 2026-03-19
+**Last Updated**: 2026-06-22
 
 ---
 
@@ -11,7 +11,7 @@
 
 Map Shine Advanced is a Foundry VTT module that **completely replaces Foundry's PIXI-based canvas** with a custom Three.js 2.5D rendering engine. It renders battlemaps with cinematic PBR materials, GPU particle effects, dynamic weather, real-time lighting, fog of war, and a full post-processing stack — all driven by a **suffix-based texture system** that requires zero configuration from map creators beyond naming their image files.
 
-The rendering system runs entirely in **Compositor V2** mode: a complete ground-up rewrite of the rendering pipeline built around the `FloorCompositor`, which supports multi-floor rendering (Levels module), per-floor GPU mask compositing via `GpuSceneMaskCompositor`, a dedicated `FloorRenderBus` scene for tile albedo rendering, and ~40 fully rebuilt V2 effect classes in `compositor-v2/effects/`.
+The rendering system runs entirely in **Compositor V2** mode: a complete ground-up rewrite of the rendering pipeline built around the `FloorCompositor`, which supports multi-floor rendering (Levels module), per-floor GPU mask compositing via `GpuSceneMaskCompositor`, a dedicated `FloorRenderBus` scene for tile albedo rendering, **per-level RT pooling** (`LevelRenderTargetPool` + `LevelCompositePass`), unified shadow composition via `ShadowManagerV2`, and ~45 V2 effect classes in `compositor-v2/effects/`. Large maps can stream tile pyramids through `TileStreamingManager` instead of loading full-resolution backgrounds at once.
 
 ### What Three.js Renders (Everything Visual)
 
@@ -25,7 +25,9 @@ The rendering system runs entirely in **Compositor V2** mode: a complete ground-
 - Animated vegetation (bushes, trees with wind)
 - Water surfaces with reflections, caustics, flow, and foam
 - Cloud shadows, building shadows, overhead shadows
-- Post-processing (bloom, sky color, color correction, lens, film grain, sharpen, halftone, ASCII, dazzle, sepia, invert, vision modes, floor depth blur)
+- Post-processing (per-level lighting, post-merge fog/bloom/camera grade, lens, film grain, sharpen, halftone, ASCII, dazzle, sepia, invert, vision modes, floor depth blur)
+- Contextual per-client scene grading (token proximity, cover, outdoor bias)
+- Third-party effect integration (Dice So Nice canvas composite, Sequencer/JB2A sprite mirrors)
 - Movement preview (path lines, ghost tokens, drag ghosts)
 - Cinematic intro zoom on scene load
 
@@ -54,16 +56,23 @@ scripts/
 │
 ├── core/                        # Bootstrap, renderer, time, weather, profiling
 │   ├── bootstrap.js             # Initialization orchestrator (GPU detect → renderer → scene)
+│   ├── LoadCoordinator.js       # V14-aligned scene load state machine (idle → running/degraded)
+│   ├── LightingDirector.js      # Single CPU authority for darkness, sun angles, calendar blend
+│   ├── SceneWindField.js          # Spatial gust-field on top of WeatherController (vegetation/cloud/water)
 │   ├── capabilities.js          # GPU tier detection (WebGL2/none)
 │   ├── renderer-strategy.js     # Tiered renderer creation with fallback
+│   ├── webgl-crash-recovery.js  # WebGL context loss detection + automatic scene rebuild
 │   ├── time.js                  # Centralized TimeManager (all effects MUST use this)
+│   ├── tod-timeline.js          # Time-of-day timeline helpers for camera grade
 │   ├── render-loop.js           # RAF loop with adaptive idle throttling
-│   ├── render-layers.js         # Canonical Three.js layer constants (floors 1-19, bloom 30, overlay 31)
+│   ├── render-layers.js         # Canonical Three.js layer constants (floors 1-19, bloom 30, overlay 31-33)
 │   ├── frame-coordinator.js     # PIXI↔Three.js frame synchronization
 │   ├── frame-state.js           # Per-frame camera state snapshot
 │   ├── WeatherController.js     # Global weather state machine (precip, wind, clouds, fog, wetness)
+│   ├── wind-profile.js          # Wind speed/direction profile derivation
 │   ├── DynamicExposureManager.js  # Token-based eye adaptation
 │   ├── game-system.js           # Adapter-based game system compatibility (PF2e, D&D 5e, etc.)
+│   ├── gm-parity.js             # GM/player capability parity helpers
 │   ├── render-invalidation.js   # Dirty-flag caching for static scenes
 │   ├── resource-registry.js     # Centralized GPU resource disposal
 │   ├── load-session.js          # Scene load session tracking (staleness detection)
@@ -73,8 +82,21 @@ scripts/
 │   ├── safe-call.js             # Safe async call wrapper with severity/fallback handling
 │   ├── foundry-time-phases.js   # Time-of-day phase calculations (dawn, dusk, night, etc.)
 │   ├── shader-validator.js      # GLSL compile-time validation
+│   ├── texture-leak-probe.js    # Renderer texture sampling diagnostics
+│   ├── yield-to-main.js         # Cooperative main-thread yielding during heavy loads
 │   ├── log.js                   # Namespaced logger
 │   ├── errors.js                # User-facing error notifications
+│   ├── context-grade/           # Per-client contextual scene grade engine
+│   │   ├── ContextualSceneGradeManager.js  # Runtime manager (token/cover/outdoor probes)
+│   │   ├── context-grade-engine.js
+│   │   ├── context-pack-resolver.js
+│   │   └── …                    # coherence, dimensions, env/state evaluators
+│   ├── diagnostics/             # Breaker Box, performance recorder, health graph
+│   │   ├── RenderStackSnapshotService.js
+│   │   ├── RenderStackRules.js
+│   │   ├── HealthEvaluatorService.js
+│   │   ├── PerformanceRecorder.js
+│   │   └── …
 │   └── levels-import/
 │       ├── LevelsImportSnapshot.js  # Immutable frozen snapshot of Levels flag data per scene
 │       └── LevelsSnapshotStore.js   # Per-scene cache with auto-invalidation hooks
@@ -115,35 +137,62 @@ scripts/
 │   ├── level-navigation-keybindings.js # Keyboard shortcuts for floor navigation
 │   └── region-levels-compat.js  # Region↔Levels stair/elevator compatibility
 │
+├── streaming/                   # Frustum-driven tile pyramid streaming (large maps)
+│   ├── tile-streaming-manager.js    # Orchestrator: LOD selection, pan mode, floor-transition pause
+│   ├── streamed-background-grid.js  # Background/foreground streaming grids (`__bg_image__*`)
+│   ├── texture-pyramid-builder.js   # Multi-LOD pyramid build + IndexedDB cache
+│   ├── tile-decode-pool.js          # Worker-backed image decode pool
+│   ├── gpu-work-scheduler.js        # Defers GPU uploads under budget pressure
+│   ├── adaptive-budget-controller.js
+│   ├── vegetation-streaming-bridge.js  # Cell-gated vegetation mask loading
+│   ├── fire-streaming-bridge.js
+│   └── view-projection-service.js
+│
+├── integrations/                # Third-party module bridges
+│   └── external-effects/        # Dice So Nice + Sequencer/JB2A (see §20)
+│
 ├── compositor-v2/               # V2 rendering pipeline (the primary runtime)
 │   ├── FloorCompositor.js       # V2 render orchestrator — owns FloorRenderBus, drives all passes
 │   ├── FloorRenderBus.js        # Separate THREE.Scene with all tile meshes Z-ordered by floor
+│   ├── LevelRenderTargetPool.js # Per-level sceneRT/postA/postB allocation pool
+│   ├── LevelCompositePass.js    # Bottom→top alpha blend of per-level final RTs
 │   ├── LayerOrderPolicy.js      # Centralized render-order role bands (albedo/effects/overhead/overhead-fx)
 │   ├── FloorLayerManager.js     # Assigns tiles/tokens to Three.js layers (1-19) by floor index
-│   └── effects/                 # All V2 effect implementations (~40 classes)
+│   ├── LightingPerspectiveContext.js  # Shared lighting perspective uniforms
+│   ├── msa-post-stylize-input.glsl.js  # Shared HDR shoulder compress for post-CC stylize passes
+│   ├── shadow-system/           # Directional shadow projection, vegetation billboard shadows, sun direction
+│   └── effects/                 # All V2 effect implementations (~45 classes + shared vegetation/shader modules)
 │       ├── SpecularEffectV2.js      # Per-tile additive specular overlays (_Specular mask)
 │       ├── FluidEffectV2.js         # Animated fluid surface overlays (_Fluid mask)
 │       ├── IridescenceEffectV2.js   # Holographic thin-film overlays (_Iridescence mask)
 │       ├── PrismEffectV2.js         # Crystal/glass refraction overlays (_Prism mask)
-│       ├── BushEffectV2.js          # Wind-animated bush sprites (_Bush mask)
-│       ├── TreeEffectV2.js          # Wind-animated tree canopy sprites (_Tree mask)
+│       ├── BushEffectV2.js          # Wind-animated bush sprites (_Bush mask); layer 32 post-bloom
+│       ├── TreeEffectV2.js          # Wind-animated tree canopy sprites (_Tree mask); layer 32 post-bloom
+│       ├── vegetation-*.js          # Shared GLSL/uniforms: bulk wind, ambient light, painted shadow, camera grade
 │       ├── FireEffectV2.js          # Per-floor fire + embers + smoke particles (_Fire mask)
+│       ├── AshCloudEffectV2.js      # Ambient ash cloud particles (weather-driven)
 │       ├── fire-behaviors.js        # Quarks behavior classes for fire particles
 │       ├── DustEffectV2.js          # Per-floor ambient dust particles (_Dust mask)
-│       ├── WaterSplashesEffectV2.js # Per-floor foam plume + rain splash particles (_Water mask)
+│       ├── WaterSplashesEffectV2.js # Per-floor foam plume + rain splash particles (_Water mask); layer 33
 │       ├── water-splash-behaviors.js  # Quarks behaviors for water splash particles
 │       ├── AshDisturbanceEffectV2.js  # Token-movement ash bursts (_Ash mask)
 │       ├── WeatherParticlesV2.js    # Rain, snow, ash weather particles (shared BatchedRenderer)
+│       ├── WeatherLightningEffectV2.js  # Map-wide atmospheric lightning (weather-driven)
 │       ├── WindowLightEffectV2.js   # Window light pools in isolated scene (_Windows mask)
-│       ├── LightingEffectV2.js      # Post-process: ambient + dynamic lights + cloud shadow + window light
-│       ├── CloudEffectV2.js         # Cloud density, shadow RT (fed to Lighting), cloud-top RT
-│       ├── WaterEffectV2.js         # Fullscreen water post-process (_Water mask, per-floor SDF)
-│       ├── water-shader.js          # Water GLSL shader source (~900 lines)
-│       ├── OverheadShadowsEffectV2.js # Overhead tile shadow projection (depth-pass gated)
+│       ├── LightingEffectV2.js      # CPU ambient compose + dynamic lights; multiplies albedo × light
+│       ├── ambient-compose-cpu.js   # CPU twilight/outdoor ambient illumination math
+│       ├── CloudEffectV2.js         # Cloud density, shadow RT (fed to ShadowManager), cloud-top RT
+│       ├── ShadowManagerV2.js       # Combines cloud + overhead + building + painted + sky-reach + vegetation shadows
+│       ├── OverheadStampEffectV2.js # Directional overhead-tile stamp shadows + roof alpha for lighting
 │       ├── BuildingShadowsEffectV2.js # Raymarched building shadows (cached world-space RT)
-│       ├── SkyColorEffectV2.js      # Time-of-day atmospheric color grading
-│       ├── BloomEffectV2.js         # HDR bloom via UnrealBloomPass
-│       ├── ColorCorrectionEffectV2.js # User-authored color grade
+│       ├── PaintedShadowEffectV2.js # Hand-painted outdoor shadows (_Shadow mask)
+│       ├── SkyReachShadowsEffectV2.js # Sky-reach shadow factor from stacked outdoors masks
+│       ├── WaterEffectV2.js         # Fullscreen water post-process (_Water mask, per-floor SDF)
+│       ├── water-shader.js          # Water GLSL shader source
+│       ├── SkyColorEffectV2.js      # CPU-only sky environment exports (sun angles, tint) for consumers
+│       ├── ContextualSceneGradeEffectV2.js  # Tweakpane params for per-client contextual grade overlays
+│       ├── BloomEffectV2.js         # HDR bloom via UnrealBloomPass (post-merge)
+│       ├── ColorCorrectionEffectV2.js # Sole HDR→LDR camera grade owner (post-merge)
 │       ├── FilterEffectV2.js        # Multiplicative overlay (ink wash, AO darkening)
 │       ├── AtmosphericFogEffectV2.js  # Weather-driven distance fog (_Outdoors mask aware)
 │       ├── FogOfWarEffectV2.js      # LOS vision polygons + exploration fog overlay
@@ -195,6 +244,8 @@ scripts/
 │   ├── physics-rope-manager.js  # Rope/chain physics simulation
 │   ├── portal-detector.js       # Detects wall portals for multi-floor traversal
 │   ├── surface-registry.js      # Tracks which surfaces exist (ground, overhead, roof)
+│   ├── level-transition-curtain.js  # Fade curtain on floor/level switches
+│   ├── scene-transition-curtain.js  # Fade curtain on scene transitions
 │   └── LightMesh.js             # Light source mesh representation
 │
 ├── effects/                     # Shared V1/V2 support layer
@@ -238,8 +289,11 @@ scripts/
 │   ├── light-editor-tweakpane.js  # In-world light property editor
 │   ├── enhanced-light-inspector.js  # Enhanced light inspector UI
 │   ├── texture-manager.js       # Texture browser/manager UI
+│   ├── register-ui-settings.js  # Foundry client settings registration (incl. LightingDirector)
+│   ├── streaming-minimap.js     # Debug minimap for tile streaming cells
+│   ├── tile-streaming-report.js # Streaming diagnostics report UI
 │   ├── parameter-validator.js   # Parameter range validation
-│   └── diagnostic-center-dialog.js  # Debug diagnostic tools
+│   └── diagnostic-center-dialog.js  # Debug diagnostic tools (Breaker Box, mask viewers)
 │
 ├── utils/                       # Shared utilities
 │   ├── coordinates.js           # Foundry↔Three.js coordinate conversion
@@ -262,8 +316,8 @@ The module boots through a precise sequence of Foundry hooks:
 
 ### Phase 1: `init` Hook (`module.js`)
 1. Show black loading overlay immediately
-2. Register Foundry settings (`scene-settings.js`)
-3. Register UI settings (`tweakpane-manager.js`)
+2. Register Foundry settings (`scene-settings.js` — includes `LightingDirector.registerSettings()`)
+3. Register UI settings (`register-ui-settings.js`, `tweakpane-manager.js`)
 4. Register scene control buttons (Config, Control Panel, Graphics Settings, Player Lights)
 5. Inject tile config UI (Roof toggle, Bypass Effects, Cloud toggles, Tile Motion)
 6. Call `canvasReplacement.initialize()` — registers all Foundry hooks
@@ -280,45 +334,52 @@ The module boots through a precise sequence of Foundry hooks:
 ### Phase 3: `canvasReady` Hook (`canvas-replacement.js`)
 This is where the real work happens. If the scene has `map-shine-advanced.enabled = true`:
 
-1. **Wait** for bootstrap completion and Foundry canvas readiness
-2. **Create Three.js canvas** as a sibling to the PIXI `#board` element
-3. **Configure PIXI** — replaced layers hidden, world rendered offscreen for texture bridge
-4. **Initialize `PixiContentLayerBridge`** — captures PIXI world and UI channels as textures composited into the Three.js frame
-5. **Capture Foundry state snapshot** for clean teardown later
-6. **Initialize `LevelsSnapshotStore`** — caches Levels module floor data for the active scene
-7. **Initialize `FloorStack`** — builds ordered floor bands from Levels snapshot (or single-floor fallback)
-8. **Initialize `GpuSceneMaskCompositor`** — preloads per-floor mask composites for all levels
-9. **Initialize `SceneComposer`** — loads scene background, sets up PerspectiveCamera, discovers and loads all suffix masks
-10. **Initialize `MaskManager`** — registers discovered masks, defines derived masks (indoor, roofVisible, etc.)
-11. **Wire `WeatherController`** — connects `_Outdoors` mask for indoor/outdoor awareness
-12. **Initialize `FloorCompositor`** (V2) — creates `FloorRenderBus`, `FloorLayerManager`, all V2 effects; wires shared render targets
-13. **Initialize `EffectComposer`** — creates `TimeManager`, registers `FloorCompositor` as the V2 delegate
-14. **Initialize `DepthPassManager`** — sets up dedicated depth render pass, publishes to `MaskManager`
-15. **Initialize Graphics Settings** — register V2 effect capabilities, wire effect instances
-16. **Initialize scene managers** — `FloorStack` assignment, `TileManager`, `TokenManager`, `WallManager`, `DoorMeshManager`, `GridRenderer`, `DrawingManager`, `NoteManager`, `TemplateManager`, `LightIconManager`, `MapPointsManager`, `PhysicsRopeManager`, `TileMotionManager`, `TokenMovementManager` (parallelized where independent)
-17. **Wire map points** to V2 particle effects (fire, candle, flies, lightning)
-18. **Initialize `InteractionManager`** — selection, drag/drop, wall drawing, light placement, movement preview
-19. **Initialize camera system** — `CameraFollower` (PIXI→Three.js each frame), `PixiInputBridge` (pan/zoom gestures)
-20. **Initialize `ControlsIntegration`** — PIXI overlay for Foundry edit tools, floor-filtering for walls/lights
-21. **Initialize `LevelsPerspectiveBridge`** — bidirectional floor sync with Levels module
-22. **Initialize level navigation** — keybindings, `LevelNavigatorOverlay` HUD
-23. **Start `RenderLoop`** — RAF with adaptive idle throttling
-24. **Initialize `FrameCoordinator`** — PIXI ticker hook for vision/fog sync
-25. **Initialize Tweakpane UI** — all V2 effect parameter panels
-26. **Preload all floor masks** — `GpuSceneMaskCompositor.preloadAllFloors()`
-27. **Wait for readiness** — effect promises, tile texture decoding, stable Three.js frames
-28. **Apply time of day** from saved scene state
-29. **Play intro zoom** — `IntroZoomEffect` cinematic camera animation
-30. **Fade in** — cinematic 5-second overlay dissolve
+1. **LoadCoordinator** begins tracking the session (`awaiting_canvas_ready` → … → `running` / `degraded`)
+2. **Wait** for bootstrap completion and Foundry canvas readiness
+3. **Create Three.js canvas** as a sibling to the PIXI `#board` element
+4. **Configure PIXI** — replaced layers hidden, world rendered offscreen for texture bridge
+5. **Initialize `PixiContentLayerBridge`** — captures PIXI world and UI channels as textures composited into the Three.js frame
+6. **Capture Foundry state snapshot** for clean teardown later
+7. **Initialize `LevelsSnapshotStore`** — caches Levels module floor data for the active scene
+8. **Initialize `FloorStack`** — builds ordered floor bands from Levels snapshot (or single-floor fallback)
+9. **Initialize `GpuSceneMaskCompositor`** — preloads per-floor mask composites for all levels
+10. **Initialize `SceneComposer`** — loads scene background, sets up PerspectiveCamera, discovers and loads all suffix masks
+11. **Initialize `MaskManager`** — registers discovered masks, defines derived masks (indoor, roofVisible, etc.)
+12. **Wire `WeatherController`** — connects `_Outdoors` mask for indoor/outdoor awareness
+13. **Initialize `FloorCompositor`** (V2) — creates `FloorRenderBus`, `LevelRenderTargetPool`, all V2 effects; wires shared render targets
+14. **Initialize `ExternalEffectsCompositor`** — Dice So Nice + Sequencer/JB2A bridges (when modules active)
+15. **Initialize `EffectComposer`** — creates `TimeManager`, registers `FloorCompositor` as the V2 delegate
+16. **Initialize `DepthPassManager`** — sets up dedicated depth render pass, publishes to `MaskManager`
+17. **Initialize Graphics Settings** — register V2 effect capabilities, wire effect instances
+18. **Initialize scene managers** — `FloorStack` assignment, `TileManager`, `TokenManager`, `WallManager`, `DoorMeshManager`, `GridRenderer`, `DrawingManager`, `MapPointsManager`, `PhysicsRopeManager`, `TileMotionManager`, `TokenMovementManager` (parallelized where independent)
+19. **Wire `TileStreamingManager`** — frustum-driven pyramid streaming for large `__bg_image__*` backgrounds
+20. **Wire map points** to V2 particle effects (fire, candle, flies, lightning)
+21. **Initialize `InteractionManager`** — selection, drag/drop, wall drawing, light placement, movement preview
+22. **Initialize camera system** — `CameraFollower` (PIXI→Three.js each frame), `PixiInputBridge` (pan/zoom gestures), `LevelTransitionCurtain`
+23. **Initialize `ControlsIntegration`** — PIXI overlay for Foundry edit tools, floor-filtering for walls/lights
+24. **Initialize `LevelsPerspectiveBridge`** — bidirectional floor sync with Levels module
+25. **Initialize level navigation** — keybindings, `LevelNavigatorOverlay` HUD
+26. **Start `RenderLoop`** — RAF with adaptive idle throttling
+27. **Initialize `FrameCoordinator`** — PIXI ticker hook for vision/fog sync
+28. **Initialize Tweakpane UI** — all V2 effect parameter panels
+29. **Preload all floor masks** — `GpuSceneMaskCompositor.preloadAllFloors()`
+30. **Wait for readiness** — effect promises, tile texture decoding, stable Three.js frames
+31. **Apply time of day** from saved scene state
+32. **Play intro zoom** — `IntroZoomEffect` cinematic camera animation
+33. **Fade in** — cinematic 5-second overlay dissolve
+34. **LoadCoordinator** enters `running` (or `degraded` if invariant checks failed)
 
 ### Teardown: `canvasTearDown` Hook
-1. Pause `TimeManager`
-2. Dispose `FrameCoordinator`
-3. Dispose `MaskManager` and `GpuSceneMaskCompositor`
-4. Dispose `FloorCompositor` (all V2 effects + `FloorRenderBus`)
-5. Destroy Three.js canvas and all scene managers
-6. Dispose `PixiContentLayerBridge`
-7. Clear global references (preserves renderer/capabilities for reuse)
+1. **LoadCoordinator** cancels the active session → `idle`
+2. Pause `TimeManager`
+3. Dispose `FrameCoordinator`
+4. Dispose `MaskManager` and `GpuSceneMaskCompositor`
+5. Dispose `FloorCompositor` (all V2 effects + `FloorRenderBus` + `LevelRenderTargetPool`)
+6. Dispose `ExternalEffectsCompositor`
+7. Dispose `TileStreamingManager`
+8. Destroy Three.js canvas and all scene managers
+9. Dispose `PixiContentLayerBridge`
+10. Clear global references (preserves renderer/capabilities for reuse)
 
 ---
 
@@ -362,6 +423,8 @@ Layer 25    ROPE_MASK_LAYER      — rope meshes for rope mask sampling
 Layer 29    GLOBAL_SCENE_LAYER   — floor-agnostic objects (rendered once per frame)
 Layer 30    BLOOM_HOTSPOT_LAYER  — meshes that emit into the bloom threshold pass
 Layer 31    OVERLAY_THREE_LAYER  — world-space overlay (rendered after post-FX)
+Layer 32    VEGETATION_ABOVE_WATER_LAYER — bush/tree composited after bloom, before camera grade
+Layer 33    WATER_SPLASH_ABOVE_WATER_LAYER — splash batches drawn after water, before vegetation
 ```
 
 ### Z-Ordering in FloorRenderBus
@@ -398,60 +461,58 @@ scene object sorted by renderOrder with decoded role, floor, and visibility.
 
 ### Per-Frame Render Sequence (`FloorCompositor.render()`)
 
-1. **Time Update** — `TimeManager.update()` produces `TimeInfo` (elapsed, delta, fps, paused, scale)
+The pipeline is **per-level** for lighting, then **post-merge** for HDR grading. See `FloorCompositor.js` file header for the canonical summary.
+
+#### A. Frame setup
+1. **Time Update** — `TimeManager.update()` produces `TimeInfo`; `LightingDirector.update()` freezes canonical darkness/sun angles for all consumers
 2. **Updatables** — All registered updatables receive `timeInfo`:
-   - `CameraFollower` (PIXI → Three.js camera sync, emits floor context changes)
-   - `WeatherController` (evolve weather state, Wanderer loop)
-   - `DynamicExposureManager` (token-based eye adaptation)
-   - `TileManager` (animated tiles, V2 bus sync)
-   - `TileMotionManager` (moving/rotating tile animations)
-   - `GridRenderer` (grid animation)
-   - `DoorMeshManager` (door open/close animation)
-   - `InteractionManager` (HUD positioning, movement preview, selection visuals)
-   - `PhysicsRopeManager` (rope/chain simulation)
-   - `TokenMovementManager` (pathfinding step advancement)
-3. **PIXI Update** — Read PIXI world + UI channels via `PixiContentLayerBridge`
-4. **Bus Scene Render** — `FloorRenderBus` renders all tile meshes + bus overlay effects to `sceneRT`:
-   - Bus overlay effects (in the same scene, benefit from floor visibility): `SpecularEffectV2`, `FluidEffectV2`, `IridescenceEffectV2`, `PrismEffectV2`, `BushEffectV2`, `TreeEffectV2`, `FireEffectV2`, `DustEffectV2`, `WaterSplashesEffectV2`, `AshDisturbanceEffectV2`, `WeatherParticlesV2`
-5. **Post-Processing Chain** — Sequential fullscreen passes reading from `sceneRT`:
-   1. `OverheadShadowsEffectV2` — overhead tile shadow projection (depth-pass gated)
-   2. `BuildingShadowsEffectV2` — raymarched building shadows (cached world-space RT)
-   3. `CloudEffectV2` — generates shadow RT (fed into Lighting) + cloud-top RT
-   4. `LightingEffectV2` — `Final = Albedo × Light` (ambient + dynamic + cloud shadow). **Sub-pass:** `WindowLightEffectV2`'s isolated scene is rendered into the light accumulation RT (additive) before the compose step, so window glow is multiplied by surface albedo.
-   5. Cloud tops blit
-   6. `WaterEffectV2` — water tint/distortion/specular/foam driven by `_Water` masks
-   7. `SkyColorEffectV2` — time-of-day atmospheric color grading
-   8. `BloomEffectV2` — HDR bloom via `UnrealBloomPass`
-   9. `ColorCorrectionEffectV2` — user color grade
-   10. `FilterEffectV2` — multiplicative overlay (ink, AO)
-   11. `AtmosphericFogEffectV2` — weather-driven distance fog
-   12. `DistortionManager` — heat haze, water ripple, magic swirl
-   13. `DotScreenEffectV2` / `HalftoneEffectV2` / `AsciiEffectV2` — stylistic filters
-   14. `DazzleOverlayEffectV2` — bright-light dazzle
-   15. `VisionModeEffectV2` — vision mode adjustments
-   16. `InvertEffectV2` / `SepiaEffectV2` — color transforms
-   17. `SharpenEffectV2` — unsharp mask
-   18. `FloorDepthBlurEffect` — Kawase blur on below-active floors
-   19. PIXI world channel composite (drawings, templates, notes, etc.)
-   20. `FogOfWarEffectV2` — LOS + exploration fog overlay
-   21. `LensEffectV2` — lens distortion, chromatic aberration, grime
-6. **Late Overlays** — Rendered directly to screen in Three Layer 31:
-   - `MovementPreviewEffectV2` path lines/ghost tokens
-   - `SelectionBoxEffectV2` drag-select rectangle
-   - `PlayerLightEffectV2` cone/flashlight overlay
-   - Map-point particles (`CandleFlamesEffectV2`, `LightningEffectV2`, `SmellyFliesEffect`)
-7. **PIXI UI Overlay** — Foundry's HTML/PIXI HUD composited on top
-8. **Idle Throttling** — Static scenes render at 15fps; `requiresContinuousRender` bypasses throttle
+   - `CameraFollower`, `WeatherController`, `SceneWindField`, `DynamicExposureManager`, `ContextualSceneGradeManager`
+   - `TileManager`, `TileMotionManager`, `GridRenderer`, `DoorMeshManager`, `InteractionManager`
+   - `PhysicsRopeManager`, `TokenMovementManager`, shadow producers (`BuildingShadows`, `PaintedShadow`, `SkyReach`, `OverheadStamp`, vegetation billboard passes)
+   - `SkyColorEffectV2` (CPU exports only), bus overlay effects
+
+#### B. Global shadow + cloud prep (before bus render)
+3. **Shadow producers** — Building, painted, sky-reach, overhead-stamp, vegetation billboard, tree canopy occlusion passes render/update their factor RTs
+4. **ShadowManagerV2 combine** — Multiplies cloud + overhead + building + painted + sky-reach + vegetation billboard factors into unified `combinedShadowTexture` (runs pre-cloud with previous frame's cloud, then again after fresh cloud render)
+5. **CloudEffectV2** — Generates shadow RT + cloud-top RT; feeds ShadowManager on the second combine
+6. **External effects tick** — `externalEffects.tickBeforeBusRender()` syncs Sequencer/JB2A mirror transforms
+
+#### C. Per-level pipeline (`_renderPerLevelPipeline`)
+7. **Bus prepass** — For each visible floor (bottom→top): `FloorRenderBus.renderFloorRangeTo()` → per-level `sceneRT` from `LevelRenderTargetPool`. Bus overlays in this pass: specular, fluid, iridescence, prism, fire, dust, ash disturbance, ash cloud, weather particles
+8. **Per-level lighting** — `LightingEffectV2` (CPU ambient compose + dynamic lights) multiplies each level's `sceneRT` into `levelPostA`; `WindowLightEffectV2` isolated scene rendered into the light accumulation RT first
+9. **Per-level water** — `WaterEffectV2` runs **inside** the per-level loop only when a **single** floor is visible (preserves bloom MRT / specular path)
+10. **Alpha rebind** — Each level's post-chain RT alpha is clamped to the raw `sceneRT` alpha (authoritative floor solidity mask)
+11. **LevelCompositePass** — Blends per-level final RTs bottom→top using straight-alpha compositing
+12. **Post-merge water** — On multi-floor scenes, `WaterEffectV2` runs **once** on the merged composite so stacking/holes are already correct
+13. **Post-merge HDR chain** (single pass on merged composite):
+    1. `AtmosphericFogEffectV2` — distance fog with stacked outdoors mask
+    2. `BloomEffectV2` — HDR bloom (consumes water specular bloom texture when present)
+    3. Water splashes (layer 33) + bush/tree vegetation (layer 32) composited into the merged frame
+    4. `ColorCorrectionEffectV2` — **sole HDR→LDR owner** (exposure, white balance, ToD timeline, vignette, grain, tone mapping, contextual grade inputs)
+    5. Post-CC stylization (`_runPostMergeStylizationPasses`): Filter → Sharpen → DotScreen → Halftone → ASCII → Dazzle → VisionMode → Invert → Sepia (each gated by `enabled`)
+
+#### D. Global late passes (on merged composite)
+14. **Dice So Nice** — `externalEffects.renderDsnPass()` composites DSN canvas (when rolling)
+15. **DistortionManager** — Heat haze / water ripple / magic swirl; vegetation distortion mask prevents warping under canopy
+16. **PIXI world composite** — Drawings, templates, notes via `PixiContentLayerBridge` (after stylization so they are not color-graded)
+17. **FogOfWarEffectV2** — LOS + exploration fog composited into RT chain
+18. **LensEffectV2** — Distortion, chromatic aberration, grime (runs above fog)
+19. **Late overlays** (Layer 31, direct to screen): `MovementPreviewEffectV2`, `SelectionBoxEffectV2`, `PlayerLightEffectV2`, map-point particles
+20. **PIXI UI overlay** — Foundry HUD composited on top
+21. **Idle throttling** — Static scenes render at 15fps; `requiresContinuousRender` bypasses throttle
+
+**Not in the main chain:** `SkyColorEffectV2` no longer performs a fullscreen color-grade pass — it exports CPU sky environment values (sun angles, tint) consumed by water, clouds, windows, and shadows. Outdoor atmosphere and ToD grading live in post-merge `ColorCorrectionEffectV2` + `ContextualSceneGradeManager`.
 
 ### Render Targets
 
-All post-processing buffers use `THREE.FloatType` (HDR throughout). The lighting shader includes dithering for smooth dark gradients. Key RTs:
-- `sceneRT` — FloorRenderBus output (albedo + bus overlays)
-- `cloudShadowRT` — Cloud shadow coverage (fed to LightingEffectV2)
-- `cloudTopRT` — Cloud tops (blitted after lighting)
-- `windowLightRT` — Window light accumulation (fed to LightingEffectV2)
-- `depthRT` — Dedicated depth pass (device depth, DepthPassManager)
-- Ping-pong pair `rtA`/`rtB` — Post-processing swap chain
+All post-processing buffers use `THREE.FloatType` (HDR throughout the lighting chain). `ColorCorrectionEffectV2` is the mandatory HDR→LDR boundary (tone mapping, grain, vignette). Key RTs:
+- `LevelRenderTargetPool` — Per-level `{ sceneRT, postA, postB }` acquired/released per visible floor
+- `combinedShadowTexture` — `ShadowManagerV2` unified shadow factor RT (fed to lighting + water)
+- `cloudShadowRT` / `cloudTopRT` — Cloud shadow and cloud-top coverage
+- `windowLightRT` — Window light accumulation (fed to `LightingEffectV2`)
+- `depthRT` — Dedicated depth pass (device depth, `DepthPassManager`)
+- `_postA` / `_postB` — Global post-merge ping-pong swap chain
+- `_hdrScenePreGradeRT` — Linear HDR buffer after bloom, before color correction (night-vision probe source)
 
 ---
 
@@ -468,10 +529,12 @@ Map creators provide effect masks by appending suffixes to their base map filena
 | `_Ash` | `AshDisturbanceEffectV2` | Ash particle placement mask |
 | `_Dust` | `DustEffectV2` | Dust mote placement mask |
 | `_Outdoors` | Multiple | Indoor/outdoor area mask (white = outdoors) |
+| `_Outdoors_0` / `_Outdoors_1` | Per-level outdoors | Level-specific outdoors variants (Levels scenes) |
+| `_Shadow` | `PaintedShadowEffectV2` | Hand-painted outdoor shadow mask |
 | `_Iridescence` | `IridescenceEffectV2` | Holographic/thin-film interference mask |
 | `_Fluid` | `FluidEffectV2` | Animated fluid surface mask |
 | `_Prism` | `PrismEffectV2` | Crystal/glass refraction mask |
-| `_Windows` | `WindowLightEffectV2` | Window light pool mask |
+| `_Windows` / `_Structural` | `WindowLightEffectV2` | Window light pool mask |
 | `_Bush` | `BushEffectV2` | Animated bush texture (RGBA) |
 | `_Tree` | `TreeEffectV2` | Animated tree canopy texture (RGBA) |
 | `_Water` | `WaterEffectV2` / `WaterSplashesEffectV2` | Water depth/area mask |
@@ -486,12 +549,13 @@ The `AssetLoader` (`assets/loader.js`) probes for all known suffixes via Foundry
 
 ### FloorCompositor (`compositor-v2/FloorCompositor.js`)
 
-The V2 render orchestrator. It owns `FloorRenderBus`, `FloorLayerManager`, and all V2 effect instances:
-- **Initialization** — Creates and initializes ~40 V2 effects with `concurrency=4` batch init
-- **Per-frame render** — Drives the full post-processing chain described in §5
+The V2 render orchestrator. It owns `FloorRenderBus`, `FloorLayerManager`, `LevelRenderTargetPool`, and all V2 effect instances:
+- **Initialization** — Creates and initializes ~45 V2 effects with `concurrency=4` batch init
+- **Per-frame render** — Drives the per-level + post-merge pipeline described in §5
 - **Floor change** — `onFloorChange(floorIndex)` propagates to all floor-aware effects; each effect independently swaps to its per-floor data
 - **Effect enable/disable** — Graphics Settings toggle effects at capability-level; disabled effects skip initialization
 - **Continuous render detection** — `requiresContinuousRender` on any effect forces full-rate RAF
+- **Stacked lit cache** — Reuses per-level lit RT snapshots when camera/floor context is stable across frames
 
 ### FloorRenderBus (`compositor-v2/FloorRenderBus.js`)
 
@@ -504,40 +568,39 @@ A standalone `THREE.Scene` that holds all tile meshes:
 
 ### V2 Effect Categories
 
-**Bus Overlays** (meshes added to `FloorRenderBus` scene; rendered in step 4):
-- `SpecularEffectV2` — Per-tile additive specular overlays driven by `_Specular` masks. Tile `flipY` is independent of compositor copy; texture is cloned with `flipY=true` for per-tile overlay pipeline.
-- `FluidEffectV2` — Animated fluid surface driven by `_Fluid` masks
-- `IridescenceEffectV2` — "Perturbed Spectral Phase" holographic thin-film (Screen UV + World noise + mask distort + time → spectral colors). Additive blending, separate mesh from base plane.
-- `PrismEffectV2` — Crystal/glass refraction via `_Prism` mask
-- `BushEffectV2` / `TreeEffectV2` — Wind-animated vegetation sprites (sin-wave + noise + `WeatherController` wind)
-- `FireEffectV2` — Per-floor fire + embers + smoke particle systems. Uses **Lookup Map technique**: scan `_Fire` mask once → `DataTexture` of bright-pixel UVs → vertex shader samples position map (no per-frame rejection sampling).
-- `DustEffectV2` — Per-floor ambient dust from `_Dust` mask
-- `WaterSplashesEffectV2` — Per-floor foam plumes + rain splash impacts from `_Water` mask; own `BatchedRenderer`
-- `AshDisturbanceEffectV2` — Token-movement-triggered ash bursts from `_Ash` mask
-- `WeatherParticlesV2` — Rain/snow/ash with **drag-inertia physics** (rain: `pos = wind*(t - (1-exp(-3t))/3)`, snow: steeper curve), shared `BatchedRenderer`
+**Bus Overlays** (meshes in `FloorRenderBus`; rendered during per-level `renderFloorRangeTo`):
+- `SpecularEffectV2`, `FluidEffectV2`, `IridescenceEffectV2`, `PrismEffectV2`
+- `FireEffectV2`, `DustEffectV2`, `AshDisturbanceEffectV2`, `AshCloudEffectV2`, `WeatherParticlesV2`
+- Bush/tree **sprites** live in the bus scene but are **drawn after bloom** on layer 32 (not in the bus albedo pass)
+- `WaterSplashesEffectV2` draws on layer 33 after water, before vegetation
 
-**Post-Processing Effects** (fullscreen passes in step 5):
-- `LightingEffectV2` — Ambient + Foundry token lights + darkness + cloud shadow + window light. Reconstructs world XY from screen UVs via `uViewBounds`. `Final = Albedo × Light`. Roof alpha pre-pass for indoor occlusion.
-- `CloudEffectV2` — Procedural density field → shadow RT + cloud-top RT. Shadow RT fed to Lighting; cloud tops blitted after Lighting. Overhead-tile blocker pass for floor-aware shadow occlusion.
-- `WaterEffectV2` — Complete water system: noise, rain ripples, storm distortion, waves, foam, sand, murk (advected dual-FBM with wind), specular (GGX), chromatic aberration. Per-floor water data is built internally from composited `_Water` masks; **tile→floor classification uses the same `_resolveFloorIndex` rules as `FloorRenderBus`** (elevation bands / Levels flags) so masks stay aligned with tile placement. Murk grain uses animated multi-octave `valueNoise` with wind advection via `uWindOffsetUv`.
-- `OverheadShadowsEffectV2` — Drop-shadow from overhead tiles. Depth-pass gated for tile projection shadows only; roof/indoor overhead contribution uses mask-derived depth (not `depthMod`).
-- `BuildingShadowsEffectV2` — Raymarched building shadows, baked to 2048² world-space RT; re-renders only on time/param change
-- `SkyColorEffectV2` — Time-of-day color tinting (dawn pink → dusk orange → night blue)
-- `BloomEffectV2` — `UnrealBloomPass` with hotspot layer (Layer 30) for emissive meshes
-- `ColorCorrectionEffectV2` — Brightness, contrast, saturation, hue grade
-- `FilterEffectV2` — Multiplicative overlay (ink wash, AO darkening)
-- `AtmosphericFogEffectV2` — Distance-based fog with `_Outdoors` mask awareness
-- `DistortionManager` — Unified distortion accumulator: heat haze (fire), water ripple, magic swirl. `FireEffectV2` registers heat sources; distortion intensity is floor-isolated.
-- `FogOfWarEffectV2` — LOS vision polygon rendering + exploration fog. Vision polygons from `VisionManager` (100ms throttle, object-pooled). Exploration texture shared zero-copy from Foundry PIXI via `FoundryFogBridge`.
-- `LensEffectV2` — Lens distortion, chromatic aberration, barrel/pincushion, grime overlay
-- `FloorDepthBlurEffect` — Kawase multi-pass blur applied to below-active floors to create depth-of-field separation
-- `VisionModeEffectV2` / `InvertEffectV2` / `SepiaEffectV2` / `DotScreenEffectV2` / `HalftoneEffectV2` / `AsciiEffectV2` / `DazzleOverlayEffectV2` / `SharpenEffectV2` — Stylistic filters
+**Shadow Producers** (factor RTs combined by `ShadowManagerV2` before lighting):
+- `CloudEffectV2` — procedural cloud shadow + cloud-top RTs
+- `OverheadStampEffectV2` — directional overhead-tile stamp shadows + roof alpha / ceiling transmittance for lighting
+- `BuildingShadowsEffectV2` — raymarched building shadows (cached world-space RT)
+- `PaintedShadowEffectV2` — hand-painted outdoor shadows from `_Shadow` mask
+- `SkyReachShadowsEffectV2` — sky-reach factor from stacked outdoors masks
+- Vegetation billboard shadow passes (`shadow-system/VegetationBillboardShadowPass.js`) for bush/tree canopies
+
+**Per-Level Post-Processing** (inside `_renderPerLevelPipeline`):
+- `LightingEffectV2` — CPU ambient compose (`ambient-compose-cpu.js`) + dynamic Foundry lights + darkness; reads `LightingDirector` + `ShadowManagerV2` combined shadow; `Final = Albedo × Light`. Window light scene rendered into light RT first.
+- `WaterEffectV2` — per-level when single floor visible; post-merge when multi-floor
+
+**Post-Merge Post-Processing** (on merged composite):
+- `AtmosphericFogEffectV2`, `BloomEffectV2`, splashes + vegetation overlays
+- `ColorCorrectionEffectV2` — sole HDR→LDR camera grade (ToD timeline, exposure, grain, tone map, contextual grade)
+- Stylization bundle via `_runPostMergeStylizationPasses`: `FilterEffectV2`, `SharpenEffectV2`, `DotScreenEffectV2`, `HalftoneEffectV2`, `AsciiEffectV2`, `DazzleOverlayEffectV2`, `VisionModeEffectV2`, `InvertEffectV2`, `SepiaEffectV2`
+
+**CPU-Only / Non-Pass Consumers**:
+- `SkyColorEffectV2` — exports sun angles and sky tint to water, clouds, windows, shadows (no fullscreen grade pass)
+- `ContextualSceneGradeManager` — per-client token/cover/outdoor probes feed into `ColorCorrectionEffectV2`
+
+**Global Late Passes**:
+- `DistortionManager`, PIXI world composite, `FogOfWarEffectV2`, `LensEffectV2`
 
 **World-Space Overlays** (Layer 31, rendered after post-FX):
-- `MovementPreviewEffectV2` — Path lines, ghost token positions, drag preview
-- `SelectionBoxEffectV2` — GPU drag-select rectangle (Blueprint, Marching Ants, Neon presets)
-- `PlayerLightEffectV2` — Token-attached torch/flashlight. Wall collision via Foundry `checkCollision` with prioritized types `['sight','light','move']`. Dynamic flashlight aims clamped to wall-blocked target.
-- `CandleFlamesEffectV2` / `LightningEffectV2` / `SmellyFliesEffect` — Map-point effects (`WindowLightEffectV2` is **not** here; it contributes via `LightingEffectV2` light RT)
+- `MovementPreviewEffectV2`, `SelectionBoxEffectV2`, `PlayerLightEffectV2`
+- `CandleFlamesEffectV2`, `LightningEffectV2`, `SmellyFliesEffect`, `WeatherLightningEffectV2`
 
 ### TimeManager (`core/time.js`)
 
@@ -587,7 +650,7 @@ Replaces the old `SceneComposer`-based mask pipeline with a GPU-accelerated per-
 
 ### Breaker Box render stack (Phase 1 diagnostics)
 
-The in-game **Breaker Box** panel includes a **render stack** column (metadata-only): ordered passes mirroring `FloorCompositor.render()`, with subpasses under `LightingEffectV2` (including **WindowLightEffectV2 → lightRT**). It explains that window glow is **not** drawn under bus albedo; it accumulates in the light buffer and is applied in the lighting compose step (`albedo × illumination`). Data is produced by `RenderStackSnapshotService` and stack rules by `RenderStackRules` (see `scripts/core/diagnostics/`).
+The in-game **Breaker Box** panel includes a **render stack** column (metadata-only): ordered passes mirroring `FloorCompositor.render()`, with per-level lighting subpasses and `ShadowManagerV2` combine steps. Subpasses under `LightingEffectV2` include **WindowLightEffectV2 → lightRT**. Window glow is **not** drawn under bus albedo; it accumulates in the light buffer and is applied in the lighting compose step (`albedo × illumination`). Data is produced by `RenderStackSnapshotService` and stack rules by `RenderStackRules` (see `scripts/core/diagnostics/`).
 
 For **WindowLightEffectV2**, the snapshot also carries a capped **per-overlay inventory** (`tileId`, `floorIndex`, `renderOrder`, `visible`, `uMaskReady`) surfaced in the Breaker Box pipeline detail panel. `RenderStackRules` emits extra findings when the **active floor** has no matching overlays but other tiles do, or when every overlay is still classified as floor `0` while a higher floor is active — typical clues for Levels / floor-index wiring issues.
 
@@ -622,12 +685,24 @@ Centralized registry for all texture masks:
 
 Global weather state machine driving all environmental effects:
 
-- **State**: precipitation (0-1), precipType (rain/snow/hail/ash), cloudCover, windSpeed, windDirection, windOffsetUv (scene-UV wind vector), fogDensity, wetness, freezeLevel
+- **State**: precipitation (0-1), precipType (rain/snow/hail/ash), cloudCover, windSpeed, windDirection, windOffsetUv (scene-UV wind vector), fogDensity, wetness, freezeLevel, effectiveDarkness
 - **Transitions**: Smooth interpolation between weather presets with configurable duration
 - **Dynamic Weather**: Autonomous evolution system with Perlin noise-driven variability
 - **Wanderer Loop**: Natural-feeling weather variation without repetition
 - **GM Authority**: Weather state persisted to scene flags, replicated to all clients via `updateScene` hook
 - **`_Outdoors` mask integration**: CPU pixel extraction for O(1) indoor/outdoor lookups; drives particle spawn-time tagging
+
+### LightingDirector (`core/LightingDirector.js`)
+
+Single CPU authority for scene darkness and solar angles. Evaluated once per frame **before** lighting passes:
+
+- **Inputs**: Foundry `canvas.scene.environment.darknessLevel`, calendar/time-of-day curve (`computeTimeOfDayDarkness01`), weather `effectiveDarkness`
+- **Merge mode**: Configurable via `lightingDarknessPriority` setting (`max` legacy default, or `foundrySlider` / `calendar` / `weather` only)
+- **Outputs**: `masterDarkness`, `hour`, `sunAzDeg` / `sunElDeg`, `calendarDayWeight` — consumed by `LightingEffectV2`, `ColorCorrectionEffectV2`, `ambient-compose-cpu.js`, shadow producers
+
+### SceneWindField (`core/SceneWindField.js`)
+
+Spatial gust-field layered on top of `WeatherController` base wind. Produces traveling wave fronts with lulls that couple to vegetation bulk wind (`vegetation-bulk-wind.js`), cloud advection, and water wind override. Updated each frame alongside weather.
 
 ### Indoor/Outdoor Awareness
 
@@ -800,6 +875,7 @@ Per-client settings allowing players/GMs to:
 
 The main GM configuration interface:
 - All V2 effect parameter panels with live preview
+- Shared **texture status row** pattern for mask-dependent effects (see `Docs/tweakpane-texture-status-instruction.md`)
 - Presets, import/export, reset to defaults
 - Effect folders with enable/status indicators
 - UI scale control with debounced update to prevent feedback loops
@@ -853,7 +929,7 @@ Cinematic loading experience:
 
 ### GPU Optimization
 - **FloatType buffers**: HDR throughout the post-processing chain (prevents 8-bit quantization banding)
-- **Half-resolution shadows**: `OverheadShadowsEffectV2` at 50% resolution (75% fill rate savings)
+- **Half-resolution shadows**: `OverheadStampEffectV2` tile projection at reduced resolution where configured (fill-rate savings)
 - **World-space baking**: `BuildingShadowsEffectV2` bakes raymarching to 2048² RT; re-renders only on time/param change
 - **Lazy effect initialization**: Disabled effects skip shader compilation; initialized on first enable
 - **Parallel effect init**: Concurrency=4 balances GPU driver contention vs speed
@@ -872,8 +948,10 @@ Cinematic loading experience:
 - **Texture policies**: Standardized `ALBEDO`, `DATA_MASK`, `LOOKUP_MAP`, `NORMAL_MAP`, `RENDER_TARGET` configs prevent misconfiguration
 - **Semaphore-limited loading**: Max 4 concurrent texture loads
 - **Asset caching**: Loaded bundles cached by path; critical masks validated on cache hit
+- **Tile streaming**: `TileStreamingManager` loads multi-LOD pyramid cells on demand for large `__bg_image__*` backgrounds; pan mode defers sharpen; floor transitions pause decode
 - **Fog texture sharing**: Exploration texture shared zero-copy from Foundry PIXI via `FoundryFogBridge`
 - **Specular texture cloning**: `_tileSpecularMaskCache` clones compositor texture with independent `flipY=true` per-tile to prevent shared-object corruption on level changes
+- **Stacked lit RT cache**: Per-level lit snapshots reused when multi-floor camera context is stable
 
 ---
 
@@ -882,14 +960,21 @@ Cinematic loading experience:
 | Decision | Rationale |
 |---|---|
 | **Compositor V2 as sole runtime** | FloorRenderBus straight-alpha textures + floor layer isolation solved premult corruption and per-floor rendering in one design. V1 pipeline removed. |
+| **Per-level RT pipeline + post-merge grade** | Each visible floor gets independent lighting; `LevelCompositePass` alpha-blends bottom→top; fog/bloom/CC run once on the merged HDR composite for mathematically correct multi-floor blending. |
+| **ShadowManagerV2 unified combine** | Cloud, overhead, building, painted, sky-reach, and vegetation billboard factors multiply into one RT consumed by lighting/water — avoids divergent shadow math across effects. |
+| **LightingDirector CPU authority** | One canonical darkness/sun-angle evaluation per frame; eliminates shader disagreements between lighting, sky, and camera grade. |
+| **ColorCorrection as sole HDR→LDR owner** | Post-merge camera grade handles exposure, ToD timeline, grain, tone mapping — stylization passes run after with `msaPostStylizePrepareRgb` shoulder compress. |
 | **Full canvas replacement + PIXI bridge** | Complete rendering control. PIXI world composited via texture bridge so Foundry's native layers (drawings, templates) still work. |
 | **PerspectiveCamera with FOV zoom** | Fixed Z prevents depth buffer precision issues. FOV zoom preserves 3D parallax for particles. Use `sceneComposer.currentZoom` not `camera.zoom`. |
 | **FloorRenderBus with THREE.TextureLoader** | `<img>` element delivers straight-alpha data; avoids canvas-2D premultiplied-alpha corruption that plagued all earlier tile-loading approaches. |
+| **Tile streaming for large backgrounds** | Pyramid LOD cells loaded by frustum view rect; avoids loading 4096²+ backgrounds whole-cloth on scene entry. |
 | **PIXI as camera authority** | One source of truth. `CameraFollower` follows PIXI each frame. Eliminates bidirectional sync races. |
+| **LoadCoordinator state machine** | V14-aligned single authority for scene load lifecycle with invariant gates and `degraded` recovery path. |
 | **GpuSceneMaskCompositor for floor masks** | GPU-based tile compositing is fast enough to preload all floors at scene load. `composeFloor()` API makes floor mask management self-contained. |
 | **Server-authoritative token movement** | No optimistic updates. `changes` merged into `targetDoc` prevents stale-position lag. Move-lock owner entries prevent stale finalize unlocks. |
 | **Lookup Map for fire/dust particles** | Scan mask once → `DataTexture` → vertex shader samples position. O(1) per particle, no per-frame rejection sampling, deterministic placement. |
 | **DistortionManager centralized pass** | All screen-space distortions (heat, water, magic) combine in one pass; effects register sources via API instead of each owning a distortion pass. |
+| **Vegetation after bloom (layer 32)** | Bush/tree overlays skip bus albedo and post-bloom composite so water tint never paints over canopy; distortion masked under foliage. |
 | **Suffix-based assets** (not glTF) | Zero-config for map creators. 2.5D doesn't need 3D meshes. Full shader control over each mask type. |
 | **Centralized TimeManager** | Synchronized animations, global pause, time scaling, testability. Never use `performance.now()` in effects. |
 | **Three-tier settings** | Map creators set baselines, GMs tweak for their game, players control their own performance. |
@@ -916,21 +1001,25 @@ window.MapShine = {
   maskManager,         // MaskManager (mask registry)
   gpuSceneMaskCompositor, // GpuSceneMaskCompositor (per-floor GPU compositing)
   depthPassManager,    // DepthPassManager (depth texture)
+  loadCoordinator,     // LoadCoordinator (scene load state machine)
+  tileStreamingManager,// TileStreamingManager (pyramid streaming for large maps)
 
   // Scene Managers
   tokenManager, tileManager, wallManager, doorMeshManager,
   gridRenderer, interactionManager, mapPointsManager,
   physicsRopeManager, surfaceRegistry,
   tileMotionManager, tokenMovementManager, tileEffectBindingManager,
+  levelTransitionCurtain, sceneTransitionCurtain,
 
   // Foundry Integration
   cameraFollower, pixiInputBridge, pixiContentLayerBridge,
   controlsIntegration, frameCoordinator,
   levelsPerspectiveBridge, levelsSnapshotStore,
+  externalEffects,     // ExternalEffectsCompositor (DSN + Sequencer)
 
   // V2 Effects (all individually accessible via effect-wiring.js exports)
   lightingEffect, fogEffect, specularEffect, bloomEffect,
-  cloudEffect, waterEffect, distortionManager, /* ...all ~40 V2 effects */
+  cloudEffect, waterEffect, shadowManagerEffect, distortionManager, /* …all V2 effects */
 
   // UI
   uiManager,           // TweakpaneManager
@@ -966,8 +1055,9 @@ window.MapShine = {
 
 ## 18. Compatibility Notes
 
-- **Foundry v13** only (API contract verified against v13 source)
+- **Foundry v14** (minimum, verified, maximum all v14; API contract verified against v14 source)
 - **Levels module**: Full integration. Scenes without Levels use single-floor fallback. `LevelsCompatibility` warns on detected conflicts.
+- **Recommended modules**: Dice So Nice and Sequencer/JB2A integrated via `external-effects/` (Graphics Settings toggles)
 - **Game system agnostic**: `GameSystemManager` adapter pattern handles PF2e vision type differences, D&D 5e defaults, etc.
 - **Module conflicts**: Modules that directly manipulate PIXI world layers may conflict in Gameplay mode (they work in Map Maker mode). `LevelsCompatibility` handles Better Roofs and similar.
 - **Performance floor**: Requires WebGL2. No WebGPU requirement (but future path is open).
@@ -977,7 +1067,7 @@ window.MapShine = {
 
 ## 19. Architectural Review — Findings & Considerations
 
-_Added 2026-03-19. This section records the results of a codebase-backed investigation into
+_Added 2026-03-19, pipeline notes refreshed 2026-06-22. This section records the results of a codebase-backed investigation into
 externally proposed architectural concerns and alternatives. Each point is evaluated against
 the actual implementation, not just the documented intent._
 
@@ -1024,30 +1114,11 @@ independent fullscreen passes.
 
 **Claim**: ~20 sequential fullscreen passes will bottleneck GPU memory bandwidth at 4K.
 
-**Codebase finding**: The chain in `FloorCompositor.render()` (lines 1942-2178) has these
-post-processing passes: Lighting → SkyColor → ColorCorrection → Filter → Water →
-Distortion → AtmosphericFog → Bloom → Sharpen → DotScreen → Halftone → ASCII →
-DazzleOverlay → VisionMode → Invert → Sepia → PIXI composite → Fog overlay → Lens.
-That is **up to 18 post passes** through ping-pong RTs (`_postA` / `_postB`).
+**Codebase finding (2026-06-22)**: The pipeline has been restructured since the original review. Per-level work is now dominated by `LightingEffectV2` (CPU ambient compose + light RT sub-passes) inside `_renderPerLevelPipeline`. Post-merge passes on the **merged composite** are: AtmosphericFog → Bloom → (splashes/vegetation draw calls) → ColorCorrection (mandatory HDR→LDR) → up to 8 stylization passes in `_runPostMergeStylizationPasses`. Global late passes add Distortion, PIXI composite, Fog overlay, and Lens.
 
-**However**: Every single pass is gated by `params.enabled` or `.enabled`. In a typical
-session, only **4-6 passes** actually execute (Lighting, SkyColor, Water, Bloom,
-Fog overlay, Lens). The stylistic filters (DotScreen, Halftone, ASCII, Dazzle, Sepia,
-Invert, VisionMode) are disabled by default and are novelty/debug tools. Sharpen is
-disabled by default. Filter and AtmosphericFog are situational.
+**However**: Stylization passes (DotScreen, Halftone, ASCII, Dazzle, Sepia, Invert, VisionMode, Sharpen, Filter) are all gated by `params.enabled`. In a typical session, only **5-8 post-merge passes** actually execute (fog, bloom, color correction, fog overlay, lens). Per-level lighting runs once per visible floor (typically 1-3).
 
-**Verdict on "Uber Shader" proposal**: Consolidating Color Correction + Sky Color + Sepia +
-Invert into a single pass via `#define` macros is a **valid optimization** but the
-expected gain is modest (~2-3 fewer RT swaps, saving ~2-4ms at 4K). The real bandwidth
-cost comes from Lighting (3 sub-passes: lightRT, darknessRT, compose), Water (SDF +
-noise + specular), and Bloom (threshold + mip blur chain). These cannot be consolidated
-because they have fundamentally different input/output requirements.
-
-**Recommendation**: Worth doing as a polish pass. Combine the "cheap" color-grade passes
-(SkyColor + ColorCorrection + Filter + Sepia + Invert) into a single "FinalGrade" uber
-shader with `#define` toggles. This saves 3-4 RT swaps in the worst case and is low-risk.
-The Bloom and Water passes cannot be simplified this way. The current gating-by-enabled
-already prevents the worst case from occurring in practice.
+**Verdict on "Uber Shader" proposal**: Partially addressed — `msa-post-stylize-input.glsl.js` now shared-compresses HDR shoulders for post-CC stylize passes. Consolidating Filter + Sepia + Invert + Sharpen into a single uber shader remains a valid polish (~2-3 fewer RT swaps). The dominant bandwidth cost is now per-level lighting (CPU compose + light RT) and post-merge bloom on true HDR input.
 
 #### B. PIXI ↔ Three.js Texture Bridge
 
@@ -1216,7 +1287,7 @@ effect already causes no errors.
 
 #### C. Custom Effect Registration API
 
-**Claim**: ~40 hardcoded effects in `FloorCompositor.js` prevent third-party extensibility.
+**Claim**: ~45 hardcoded effects in `FloorCompositor.js` prevent third-party extensibility.
 
 **Codebase finding**: Effects are constructed explicitly in `FloorCompositor._initializeEffects()`
 and wired into the render chain via named fields (`this._lightingEffect`,
@@ -1424,16 +1495,15 @@ Two injection points in the existing render pipeline:
    `_renderPerLevelPipeline()` so Sequencer mirrors in
    `FloorRenderBus._scene` are validated before bus render.
 2. **`externalEffects.renderDsnPass(renderer, currentInput, outputRT)`** —
-   called after `_renderPerLevelPipeline()` and before the `distortion` /
-   `pixi-world-composite` / `fog-of-war` / `lens` post-FX block. Dice
-   therefore receive distortion, fog, lens, and night-vision tints from
-   the post-composite chain. Bloom + color correction live inside the
-   per-level pipeline and are already applied to the scene below before
-   dice are stamped on top.
+   called after `_renderPerLevelPipeline()` (which includes post-merge fog, bloom,
+   vegetation overlays, and color correction) and before the `distortion` /
+   `pixi-world-composite` / `fog-of-war` / `lens` block. Dice therefore receive
+   the camera-graded scene plus distortion, fog, and lens — but **not** a second
+   bloom pass on top of themselves.
 
-Per-level bloom on the dice themselves was considered but is not feasible
-without restructuring `_renderPerLevelPipeline()`, since bloom runs once
-per level inside that loop.
+Sequencer mirrors render inside the bus albedo pass and receive per-level lighting
+during `_renderPerLevelPipeline()`; they also receive post-merge bloom and camera grade
+because those run on the merged composite before the late global passes.
 
 ### 20.4. Graphics Settings Integration
 

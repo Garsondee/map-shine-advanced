@@ -133,7 +133,7 @@ async function main() {
   const moduleJsonPath = path.join(repoRoot, 'module.json');
   const readmePath = path.join(repoRoot, 'README.md');
 
-  const requiredDirs = ['scripts', 'styles', 'languages', 'assets'].map((d) => path.join(repoRoot, d));
+  const requiredDirs = ['scripts', 'styles', 'languages', 'assets', 'data'].map((d) => path.join(repoRoot, d));
   for (const d of requiredDirs) {
     if (!(await pathExists(d))) throw new Error(`Missing required directory: ${d}`);
   }
@@ -162,7 +162,15 @@ async function main() {
     if (!args.force) {
       throw new Error(`Release directory already exists: ${releaseDir} (use --force to overwrite)`);
     }
-    await fs.promises.rm(releaseDir, { recursive: true, force: true });
+    try {
+      await fs.promises.rm(releaseDir, { recursive: true, force: true });
+    } catch (err) {
+      if (err?.code !== 'EBUSY' && err?.code !== 'EPERM') throw err;
+      const entries = await fs.promises.readdir(releaseDir, { withFileTypes: true });
+      for (const entry of entries) {
+        await fs.promises.rm(path.join(releaseDir, entry.name), { recursive: true, force: true });
+      }
+    }
   }
 
   await ensureDir(stagingDir);
@@ -174,6 +182,7 @@ async function main() {
     await copyDir(path.join(repoRoot, 'styles'), path.join(stagingDir, 'styles'));
     await copyDir(path.join(repoRoot, 'languages'), path.join(stagingDir, 'languages'));
     await copyDir(path.join(repoRoot, 'assets'), path.join(stagingDir, 'assets'));
+    await copyDir(path.join(repoRoot, 'data'), path.join(stagingDir, 'data'));
 
     await ensureDir(releaseDir);
 

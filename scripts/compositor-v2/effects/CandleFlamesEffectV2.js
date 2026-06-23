@@ -1,7 +1,9 @@
 import { createLogger } from '../../core/log.js';
 import Coordinates from '../../utils/coordinates.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
+import { computeTimeOfDayDarkness01 } from '../../core/foundry-time-phases.js';
 import { weatherController } from '../../core/WeatherController.js';
+import { resolveTwilightDarkness01 } from './ambient-compose-cpu.js';
 import {
   buildCandleMinimapEntries,
   glowCentroidBounds,
@@ -55,6 +57,14 @@ const CANDLE_FLAME_COMPACT_FOCAL_LOD = 3;
 const CANDLE_FLAME_MINIMAL_FOCAL_LOD = 4;
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
+/** Explicit null/undefined means "resolve live"; never coerce null → 0 (full day). */
+function resolveOptionalDarkness01(darkness, resolveLive) {
+  if (darkness != null && Number.isFinite(Number(darkness))) {
+    return clamp01(Number(darkness));
+  }
+  return clamp01(resolveLive());
+}
 
 /** Matches flame shader `step(0.5, vOutdoor)` — balance folders are exclusive, not blended. */
 const GLOW_BALANCE_OUTDOOR_THRESHOLD = 0.5;
@@ -1566,12 +1576,49 @@ export class CandleFlamesEffectV2 {
    * Fresh canonical scene darkness for day/night pool blending.
    * Particle ticks can run before FloorCompositor.render(); update here so glow
    * pools never stick on the neutral pre-render default (0 = full day).
+   *
+   * Interior scenes often keep Foundry's darkness slider near 0 while the clock
+   * is at night — candle pools must follow calendar time (and every authoritative
+   * hour source), not only the live Foundry mirror.
    * @private
    * @returns {number}
    */
+  _resolveCandleSceneHourCandidates() {
+    /** @type {number[]} */
+    const out = [];
+    const push = (raw) => {
+      const h = Number(raw);
+      if (!Number.isFinite(h)) return;
+      out.push(((h % 24) + 24) % 24);
+    };
+    try { push(window.MapShine?.controlPanel?.controlState?.timeOfDay); } catch (_) {}
+    try { push(window.MapShine?.remoteControlState?.timeOfDay); } catch (_) {}
+    try { push(weatherController?.timeOfDay); } catch (_) {}
+    try { push(LightingDirector.get()?.hour); } catch (_) {}
+    return out;
+  }
+
+  /** @private @returns {number} */
   _resolveMasterDarkness() {
     try { LightingDirector.update(); } catch (_) {}
-    return clamp01(LightingDirector.get().masterDarkness);
+    const state = LightingDirector.get();
+    let darkness = clamp01(state.masterDarkness);
+
+    const twilight = resolveTwilightDarkness01(this._lightingEffect);
+    const twilightOpts = Number.isFinite(twilight)
+      ? { dawnDuskDarkness: clamp01(twilight) }
+      : {};
+
+    if (Number.isFinite(state.calendarDarkness)) {
+      darkness = Math.max(darkness, clamp01(state.calendarDarkness));
+    }
+
+    for (const hour of this._resolveCandleSceneHourCandidates()) {
+      const cal = computeTimeOfDayDarkness01(hour, twilightOpts);
+      if (Number.isFinite(cal)) darkness = Math.max(darkness, clamp01(cal));
+    }
+
+    return darkness;
   }
 
   /**
@@ -1592,9 +1639,7 @@ export class CandleFlamesEffectV2 {
 
   /** @private @param {number} [darkness] */
   _blendGlowDayNightParam(dayKey, nightKey, fallback = 0, darkness = null) {
-    const t = clamp01(Number.isFinite(Number(darkness))
-      ? Number(darkness)
-      : this._resolveMasterDarkness());
+    const t = resolveOptionalDarkness01(darkness, () => this._resolveMasterDarkness());
     const dayRaw = Number(this.params[dayKey]);
     const day = Number.isFinite(dayRaw) ? dayRaw : fallback;
     const nightRaw = Number(this.params[nightKey]);
@@ -1641,9 +1686,7 @@ export class CandleFlamesEffectV2 {
    * @private
    */
   _resolveGlowParams(darkness = null, outdoor01 = null) {
-    const t = clamp01(Number.isFinite(Number(darkness))
-      ? Number(darkness)
-      : this._resolveMasterDarkness());
+    const t = resolveOptionalDarkness01(darkness, () => this._resolveMasterDarkness());
     const base = {
       t,
       warmth: clamp01(this._blendGlowDayNightParam('glowWarmth', 'glowNightWarmth', 1.0, t)),

@@ -441,25 +441,11 @@ export function getCoalBedFragmentShader() {
       return env * sparkFalloff(pxPos, cell, pxSize);
     }
 
-    // 3×3 neighbor blend — enough halo overlap without the 5×5 cost.
+    // Single-cell spark — neighbor blend removed for GPU cost (was 3×3 per layer).
     float sparkLayerAggregated(vec2 pxPos, float time, float pxSize, vec2 cellOffset) {
       float px = max(2.0, pxSize);
       vec2 baseCell = floor(pxPos / px);
-      float s = softenNorm();
-      float sum = sparkAt(pxPos, baseCell + cellOffset, time, px) * 0.34;
-      float wSum = 0.34;
-
-      for (int oy = -1; oy <= 1; oy++) {
-        for (int ox = -1; ox <= 1; ox++) {
-          if (ox != 0 || oy != 0) {
-            vec2 off = vec2(float(ox), float(oy));
-            float w = mix(0.11, 0.22, s);
-            sum += sparkAt(pxPos, baseCell + off + cellOffset, time, px) * w;
-            wSum += w;
-          }
-        }
-      }
-      return sum / max(0.0001, wSum);
+      return sparkAt(pxPos, baseCell + cellOffset, time, px);
     }
 
     vec3 sparkFieldAt(vec2 pxPos, float time) {

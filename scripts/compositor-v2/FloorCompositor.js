@@ -9175,6 +9175,12 @@ export class FloorCompositor {
           try { this._treeEffect?.syncCameraGradeUniforms?.(); } catch (err) {
             log.warn('TreeEffectV2 pre-vegetation syncCameraGradeUniforms threw, skipping:', err);
           }
+          try { this._bushEffect?.syncAmbientLightUniforms?.(); } catch (err) {
+            log.warn('BushEffectV2 pre-vegetation syncAmbientLightUniforms threw, skipping:', err);
+          }
+          try { this._treeEffect?.syncAmbientLightUniforms?.(); } catch (err) {
+            log.warn('TreeEffectV2 pre-vegetation syncAmbientLightUniforms threw, skipping:', err);
+          }
         }, 'Vegetation uniform sync before CC', { cpuOnly: true });
         this._profileEffectCall('postBloom.worldOverlays.vegetation.draw', 'render', () => {
           this._compositeVegetationAboveWater(this.renderer, mergedCompositeOut);

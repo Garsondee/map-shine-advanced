@@ -84,6 +84,7 @@ import {
   MAP_POINT_RENDER_LAYER_ABOVE,
   MAP_POINT_RENDER_LAYER_BELOW,
 } from '../../scene/map-points-manager.js';
+import { TWILIGHT_AMBIENT_DEFAULTS } from './ambient-compose-cpu.js';
 
 const log = createLogger('LightingEffectV2');
 const MODULE_ID = 'map-shine-advanced';
@@ -222,6 +223,16 @@ export class LightingEffectV2 {
       ambientNightScale: 0,
       ambientNightScaleOutdoor: 1,
       ambientNightScaleIndoor: 1.1,
+      /** Calendar darkness at dawn/dusk (not midnight). Drives time-of-day curve via LightingDirector. */
+      twilightDarkness: TWILIGHT_AMBIENT_DEFAULTS.darkness,
+      /** Minimum day-ambient multiplier at the horizon — outdoor (_Outdoors) pixels. */
+      twilightDayFloorOutdoor: TWILIGHT_AMBIENT_DEFAULTS.dayFloorOutdoor,
+      /** Minimum day-ambient multiplier at the horizon — indoor pixels. */
+      twilightDayFloorIndoor: TWILIGHT_AMBIENT_DEFAULTS.dayFloorIndoor,
+      /** Daylight-hours minimum-light floor strength — outdoor. */
+      twilightMinLightKeepOutdoor: TWILIGHT_AMBIENT_DEFAULTS.minLightKeepOutdoor,
+      /** Daylight-hours minimum-light floor strength — indoor. */
+      twilightMinLightKeepIndoor: TWILIGHT_AMBIENT_DEFAULTS.minLightKeepIndoor,
       lightIntensity: 1,
       /** Half-life falloff: normalized radius per halving at Foundry attenuation 0 (gentle). */
       falloffHalfInAtAtt0: 0.51,
@@ -1282,6 +1293,31 @@ export class LightingEffectV2 {
     u.uNegativeDarknessStrength.value = this.params.negativeDarknessStrength;
     u.uDarknessPunchGain.value = this.params.darknessPunchGain;
     u.uInteriorDarkness.value = Math.max(0, Number(this.params.interiorDarkness) || 0);
+    const tw = TWILIGHT_AMBIENT_DEFAULTS;
+    if (u.uTwilightDayFloorOutdoor) {
+      u.uTwilightDayFloorOutdoor.value = Math.max(
+        0,
+        Number(this.params.twilightDayFloorOutdoor) ?? tw.dayFloorOutdoor,
+      );
+    }
+    if (u.uTwilightDayFloorIndoor) {
+      u.uTwilightDayFloorIndoor.value = Math.max(
+        0,
+        Number(this.params.twilightDayFloorIndoor) ?? tw.dayFloorIndoor,
+      );
+    }
+    if (u.uTwilightMinLightKeepOutdoor) {
+      u.uTwilightMinLightKeepOutdoor.value = Math.max(
+        0,
+        Number(this.params.twilightMinLightKeepOutdoor) ?? tw.minLightKeepOutdoor,
+      );
+    }
+    if (u.uTwilightMinLightKeepIndoor) {
+      u.uTwilightMinLightKeepIndoor.value = Math.max(
+        0,
+        Number(this.params.twilightMinLightKeepIndoor) ?? tw.minLightKeepIndoor,
+      );
+    }
     this._paramsDirty = false;
   }
 
@@ -1943,6 +1979,9 @@ export class LightingEffectV2 {
         glossary: {
           'Day ambient': 'Foundry ambientBrightest at low darkness; outdoor vs indoor scales use the _Outdoors mask.',
           'Night ambient': 'Foundry ambientDarkness at high darkness; outdoor/indoor split for porches vs rooms.',
+          'Twilight darkness': 'How dark the calendar curve is at dawn and dusk (before full night).',
+          'Twilight day floor': 'Minimum day-ambient kept when the sun is on the horizon (solar strength ≈ 0).',
+          'Twilight min-light keep': 'Extra minimum-light floor during daylight hours so porches and rooms do not clip black.',
           'Point light gain':
             'Multiplies AmbientLight/torch emission in ThreeLightSource before max-blend into `_lightRT`. Tune falloff shape under Point light falloff (half-life). Overlaps take the brighter sample, not the sum. Window glow unaffected.',
           'Minimum light floor': 'Safety floor that prevents pure-black collapse without replacing actual lights.'
@@ -1960,6 +1999,19 @@ export class LightingEffectV2 {
             'ambientNightScaleOutdoor',
             'ambientNightScaleIndoor',
             'minIlluminationScale',
+          ],
+        },
+        {
+          name: 'ambientTwilight',
+          label: 'Dawn / dusk (twilight)',
+          type: 'folder',
+          expanded: true,
+          parameters: [
+            'twilightDarkness',
+            'twilightDayFloorOutdoor',
+            'twilightDayFloorIndoor',
+            'twilightMinLightKeepOutdoor',
+            'twilightMinLightKeepIndoor',
           ],
         },
         {
@@ -2160,6 +2212,51 @@ export class LightingEffectV2 {
           default: 0,
           label: 'Minimum light floor',
           tooltip: 'Scales the darkest-scene safety floor so interiors never clip to pure black.',
+        },
+        twilightDarkness: {
+          type: 'slider',
+          min: 0,
+          max: 0.85,
+          step: 0.01,
+          default: TWILIGHT_AMBIENT_DEFAULTS.darkness,
+          label: 'Twilight darkness',
+          tooltip: 'Calendar darkness at dawn and dusk. Lower = brighter golden hour; higher = sooner toward night.',
+        },
+        twilightDayFloorOutdoor: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: TWILIGHT_AMBIENT_DEFAULTS.dayFloorOutdoor,
+          label: 'Day floor — outdoor',
+          tooltip: 'Minimum day-ambient multiplier at sunrise/sunset on outdoor-classified pixels (porches, courtyards).',
+        },
+        twilightDayFloorIndoor: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: TWILIGHT_AMBIENT_DEFAULTS.dayFloorIndoor,
+          label: 'Day floor — indoor',
+          tooltip: 'Minimum day-ambient at the horizon inside rooms (usually lower than outdoor).',
+        },
+        twilightMinLightKeepOutdoor: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: TWILIGHT_AMBIENT_DEFAULTS.minLightKeepOutdoor,
+          label: 'Min-light keep — outdoor',
+          tooltip: 'Boosts the safety minimum-light floor during daylight hours outdoors.',
+        },
+        twilightMinLightKeepIndoor: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: TWILIGHT_AMBIENT_DEFAULTS.minLightKeepIndoor,
+          label: 'Min-light keep — indoor',
+          tooltip: 'Same floor boost for indoor pixels during daylight hours.',
         },
         lightIntensity: {
           type: 'slider',
@@ -2784,8 +2881,10 @@ export class LightingEffectV2 {
         uBldSceneOrigin:   { value: new THREE.Vector2(0, 0) },
         uBldSceneSize:     { value: new THREE.Vector2(1, 1) },
         uDarknessLevel:      { value: 0.0 },
-        /** 0 at night, 1 at solar noon — gates Day ambient (noon) scale independently of Foundry darkness. */
+        /** 0 at night, 1 at solar noon — solar elevation strength for ambient gating. */
         uCalendarDayWeight:  { value: 0.0 },
+        /** 1 between sunrise and sunset — keeps twilight day ambient during horizon hours. */
+        uCalendarDaylightHours: { value: 1.0 },
         uAmbientBrightest:   { value: new THREE.Color(1, 1, 1) },
         uAmbientDarkness:    { value: new THREE.Color(0.141, 0.141, 0.282) },
         uAmbientDayScale:    { value: 1.3 },
@@ -2795,6 +2894,10 @@ export class LightingEffectV2 {
         uAmbientNightScaleOutdoor: { value: 0.32 },
         uAmbientNightScaleIndoor: { value: 0.27 },
         uMinIlluminationScale: { value: 1.0 },
+        uTwilightDayFloorOutdoor: { value: TWILIGHT_AMBIENT_DEFAULTS.dayFloorOutdoor },
+        uTwilightDayFloorIndoor: { value: TWILIGHT_AMBIENT_DEFAULTS.dayFloorIndoor },
+        uTwilightMinLightKeepOutdoor: { value: TWILIGHT_AMBIENT_DEFAULTS.minLightKeepOutdoor },
+        uTwilightMinLightKeepIndoor: { value: TWILIGHT_AMBIENT_DEFAULTS.minLightKeepIndoor },
         uChromaticRadianceGain: { value: 4.0 },
         uColorationReflectivity: { value: 0.0 },
         uColorationSaturationBoost: { value: 0.0 },
@@ -2900,6 +3003,7 @@ export class LightingEffectV2 {
         uniform vec2 uBldSceneSize;
         uniform float uDarknessLevel;
         uniform float uCalendarDayWeight;
+        uniform float uCalendarDaylightHours;
         uniform vec3 uAmbientBrightest;
         uniform vec3 uAmbientDarkness;
         uniform float uAmbientDayScale;
@@ -2909,6 +3013,10 @@ export class LightingEffectV2 {
         uniform float uAmbientNightScaleOutdoor;
         uniform float uAmbientNightScaleIndoor;
         uniform float uMinIlluminationScale;
+        uniform float uTwilightDayFloorOutdoor;
+        uniform float uTwilightDayFloorIndoor;
+        uniform float uTwilightMinLightKeepOutdoor;
+        uniform float uTwilightMinLightKeepIndoor;
         uniform float uChromaticRadianceGain;
         uniform float uColorationReflectivity;
         uniform float uColorationSaturationBoost;
@@ -3033,14 +3141,25 @@ export class LightingEffectV2 {
 
           // Ambient: interpolate between day and night based on darkness level.
           // Day and night scales are separate so you can run bright noon and deep night together.
-          // uCalendarDayWeight (sun above horizon) zeroes day ambient at night even if
-          // Foundry darkness lags the Map Shine clock.
-          float calendarDayWeight = clamp(uCalendarDayWeight, 0.0, 1.0);
+          // uCalendarDayWeight is solar elevation (0 at horizon); uCalendarDaylightHours is
+          // 1 between sunrise and sunset so twilight keeps partial day ambient.
+          float calendarSunStrength = clamp(uCalendarDayWeight, 0.0, 1.0);
+          float calendarDaylightHours = clamp(uCalendarDaylightHours, 0.0, 1.0);
+          float calendarDayWeight = calendarSunStrength;
           float indoorAmbientW = 0.0;
           if (uHasOutdoorsForRoofLight > 0.5 && inSceneBounds > 0.5) {
             float indoorSig = clamp(1.0 - isOutdoorForInteriorDim, 0.0, 1.0);
             indoorAmbientW = smoothstep(0.20, 0.75, indoorSig);
           }
+          float twilightDayFloor = mix(
+            max(uTwilightDayFloorOutdoor, 0.0),
+            max(uTwilightDayFloorIndoor, 0.0),
+            indoorAmbientW
+          );
+          float dayAmbientMul = max(
+            calendarSunStrength,
+            twilightDayFloor * calendarDaylightHours
+          );
           float dayScale = mix(
             max(uAmbientDayScaleOutdoor, 0.0),
             max(uAmbientDayScaleIndoor, 0.0),
@@ -3051,7 +3170,7 @@ export class LightingEffectV2 {
             max(uAmbientNightScaleIndoor, 0.0),
             indoorAmbientW
           );
-          vec3 ambientDay   = uAmbientBrightest * dayScale * calendarDayWeight;
+          vec3 ambientDay   = uAmbientBrightest * dayScale * dayAmbientMul;
           vec3 ambientNight = uAmbientDarkness  * nightScale;
           vec3 ambient = mix(ambientDay, ambientNight, baseDarknessLevel);
 
@@ -3373,7 +3492,7 @@ export class LightingEffectV2 {
               // Noon outdoors: unified overhead/canopy shadows must not zero the sun-ambient
               // slice (probe: lit/scene ≈ 0.13 with calendarDayWeight≈1 and valid outdoors).
               float outdoorSunGuard = isOutdoorForInteriorDimSafe
-                * calendarDayWeight
+                * calendarDaylightHours
                 * (1.0 - baseDarknessLevel);
               shadowSunSlice = max(shadowSunSlice, outdoorSunGuard * 0.50);
             }
@@ -3422,10 +3541,13 @@ export class LightingEffectV2 {
           float floorReach = clamp(ambientShadowMixOut, 0.0, 1.0);
           float minFloorScale = mix(0.18, 1.0, floorReach);
           {
-            float outdoorDayMinKeep = isOutdoorForInteriorDimSafe
-              * calendarDayWeight
-              * (1.0 - baseDarknessLevel);
-            minFloorScale = max(minFloorScale, outdoorDayMinKeep * 0.55);
+            float twilightMinKeepMul = mix(
+              max(uTwilightMinLightKeepOutdoor, 0.0),
+              max(uTwilightMinLightKeepIndoor, 0.0),
+              indoorAmbientW
+            );
+            float dayMinKeep = calendarDaylightHours * (1.0 - baseDarknessLevel);
+            minFloorScale = max(minFloorScale, dayMinKeep * twilightMinKeepMul);
           }
           totalIllumination = max(totalIllumination, minIllum * minFloorScale);
 
@@ -4428,7 +4550,18 @@ export class LightingEffectV2 {
     const sceneDarkness = clamp01(state.masterDarkness);
     this.params.darknessLevel = sceneDarkness;
     u.uDarknessLevel.value = sceneDarkness;
-    u.uCalendarDayWeight.value = clamp01(state.calendarDayWeight);
+    u.uCalendarDayWeight.value = clamp01(state.calendarSunStrength ?? state.calendarDayWeight);
+    if (u.uCalendarDaylightHours) {
+      u.uCalendarDaylightHours.value = clamp01(state.calendarDaylightHours);
+    }
+  }
+
+  /**
+   * Effective outdoor/indoor ambient scales for external consumers (vegetation, probes).
+   * @returns {{ dayOutdoor: number, dayIndoor: number, nightOutdoor: number, nightIndoor: number, minIllum: number }}
+   */
+  resolveEffectiveAmbientScales() {
+    return this._resolveEffectiveAmbientScalesForCompose();
   }
 
   /**

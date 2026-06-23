@@ -138,6 +138,21 @@ const GLYPH_KINDS = new Set([
   'candle-active', 'candle-culled', 'candle-compact',
 ]);
 
+/** Fixed glyph scale for fire/candle markers on the map (not cluster bounds). */
+const FLAME_MINIMAP_GLYPH_SCALE = 0.42;
+
+/**
+ * World-space center of an axis-aligned bounds box.
+ * @param {{ minX: number, minY: number, maxX: number, maxY: number }} bounds
+ * @returns {{ x: number, y: number }}
+ */
+function boundsCenter(bounds) {
+  return {
+    x: (bounds.minX + bounds.maxX) * 0.5,
+    y: (bounds.minY + bounds.maxY) * 0.5,
+  };
+}
+
 /**
  * Iterate background + region streaming grids.
  * @param {import('../streaming/tile-streaming-manager.js').TileStreamingManager} manager
@@ -156,7 +171,7 @@ function* iterStreamingGrids(manager) {
  * @param {number} [scale=1]
  */
 function drawMinimapGlyph(ctx, cx, cy, kind, scale = 1) {
-  const s = Math.max(0.6, scale);
+  const s = Math.max(0.35, scale);
   ctx.save();
   ctx.translate(cx, cy);
   ctx.lineWidth = Math.max(0.75, 1.1 * s);
@@ -1366,19 +1381,9 @@ export class StreamingMinimap {
         (a, b) => (STATE_DRAW_ORDER[a.state] ?? 1) - (STATE_DRAW_ORDER[b.state] ?? 1),
       );
       for (const { bounds, state } of flameOverlayCells) {
-        const tl = toMini(bounds.minX, bounds.maxY);
-        const w = (bounds.maxX - bounds.minX) * scale;
-        const h = (bounds.maxY - bounds.minY) * scale;
-        ctx.fillStyle = STATE_COLORS[state] ?? STATE_COLORS.unknown;
-        ctx.fillRect(tl.x, tl.y, w, h);
-        if (state === 'fire-culled' || state === 'candle-culled') {
-          ctx.strokeStyle = state === 'fire-culled' ? 'rgba(248,113,113,0.55)' : 'rgba(253,224,71,0.45)';
-          ctx.lineWidth = 1;
-          ctx.strokeRect(tl.x + 0.5, tl.y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
-        }
-        const cx = tl.x + w * 0.5;
-        const cy = tl.y + h * 0.5;
-        drawMinimapGlyph(ctx, cx, cy, state, Math.min(1.2, Math.max(0.7, Math.min(w, h) * 0.08)));
+        const center = boundsCenter(bounds);
+        const pt = toMini(center.x, center.y);
+        drawMinimapGlyph(ctx, pt.x, pt.y, state, FLAME_MINIMAP_GLYPH_SCALE);
       }
 
       const streamedCellCount = overlayCells.length;

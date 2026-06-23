@@ -11,6 +11,7 @@ import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
 import { mapShinePushSceneDarknessLevel } from '../utils/msa-v2-darkness.js';
 import { weatherController as coreWeatherController } from '../core/WeatherController.js';
 import { computeTimeOfDayDarkness01 } from '../core/foundry-time-phases.js';
+import { resolveTwilightDarkness01 } from '../compositor-v2/effects/ambient-compose-cpu.js';
 import {
   environmentFadeController,
   fadeExtrasFromControlState,
@@ -593,7 +594,14 @@ export class StateApplier {
       // This avoids a second hand-maintained dawn/noon/midnight curve fighting
       // the canonical lighting model.
       const safeHour = ((Number(hour) % 24) + 24) % 24;
-      let targetDarkness = computeTimeOfDayDarkness01(safeHour);
+      let lightingFx = null;
+      try {
+        lightingFx = window.MapShine?.effectComposer?._floorCompositorV2?._lightingEffect ?? null;
+      } catch (_) {}
+      const twilightDarkness = resolveTwilightDarkness01(lightingFx);
+      let targetDarkness = computeTimeOfDayDarkness01(safeHour, {
+        dawnDuskDarkness: twilightDarkness,
+      });
       if (!Number.isFinite(targetDarkness)) targetDarkness = 0.0;
 
       // Clamp to valid range

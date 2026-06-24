@@ -674,118 +674,103 @@ export class LensEffectV2 {
       enabled: false,
       groups: [
         {
-          name: 'lens-dynamics',
-          label: 'Dynamic Layer Behavior',
+          name: 'lens-autofocus-motion',
+          label: 'Autofocus & motion',
           type: 'folder',
-          advanced: true,
           expanded: true,
-          parameters: ['dynamicLayersEnabled', 'layerCycleSeconds', 'lumaSmoothingSeconds', 'layerSwapFadeSeconds']
-        },
-        {
-          name: 'lens-autofocus',
-          label: 'Autofocus Defocus Pulses',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'autoFocusEnabled',
-            'autoFocusMinIntervalSeconds', 'autoFocusMaxIntervalSeconds',
-            'autoFocusDefocusDurationSeconds', 'autoFocusMaxBlurPx', 'autoFocusMaxShiftPx',
-            'autoFocusZoomTriggerEnabled', 'autoFocusZoomTriggerThreshold',
-            'autoFocusZoomTriggerCooldownSeconds', 'autoFocusZoomTriggerStrength'
+          subgroups: [
+            {
+              label: 'Motion blur',
+              parameters: [
+                'motionBlurEnabled', 'motionBlurStrength', 'motionBlurMaxPx',
+                'motionBlurZoomStrength', 'motionBlurSmoothingSeconds'
+              ]
+            },
+            {
+              label: 'Autofocus',
+              advanced: true,
+              parameters: [
+                'autoFocusEnabled',
+                'autoFocusMinIntervalSeconds', 'autoFocusMaxIntervalSeconds',
+                'autoFocusDefocusDurationSeconds', 'autoFocusMaxBlurPx', 'autoFocusMaxShiftPx',
+                'autoFocusZoomTriggerEnabled', 'autoFocusZoomTriggerThreshold',
+                'autoFocusZoomTriggerCooldownSeconds', 'autoFocusZoomTriggerStrength'
+              ]
+            },
+            {
+              label: 'Light burn',
+              advanced: true,
+              parameters: [
+                'lightBurnEnabled',
+                'lightBurnThreshold', 'lightBurnThresholdSoftness',
+                'lightBurnPersistenceSeconds', 'lightBurnResponse',
+                'lightBurnIntensity', 'lightBurnBlurPx',
+                'lightBurnDarknessGateEnabled', 'lightBurnDarknessStart',
+                'lightBurnDarknessEnd', 'lightBurnDarknessInfluence'
+              ]
+            },
+            {
+              label: 'Dynamic layers',
+              advanced: true,
+              parameters: ['dynamicLayersEnabled', 'layerCycleSeconds', 'lumaSmoothingSeconds', 'layerSwapFadeSeconds']
+            }
           ]
         },
         {
-          name: 'lens-light-burn',
-          label: 'Light Burn Persistence',
+          name: 'lens-overlays',
+          label: 'Overlays',
           type: 'folder',
-          advanced: true,
           expanded: false,
-          parameters: [
-            'lightBurnEnabled',
-            'lightBurnThreshold', 'lightBurnThresholdSoftness',
-            'lightBurnPersistenceSeconds', 'lightBurnResponse',
-            'lightBurnIntensity', 'lightBurnBlurPx',
-            'lightBurnDarknessGateEnabled', 'lightBurnDarknessStart',
-            'lightBurnDarknessEnd', 'lightBurnDarknessInfluence'
-          ]
-        },
-        {
-          name: 'lens-motion',
-          label: 'Camera Motion Response',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'motionBlurEnabled', 'motionBlurStrength', 'motionBlurMaxPx',
-            'motionBlurZoomStrength', 'motionBlurSmoothingSeconds'
-          ]
-        },
-        {
-          name: 'lens-viewfinder',
-          label: 'Viewfinder Overlay',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'viewfinderEnabled', 'viewfinderSelection',
-            'viewfinderIntensity',
-            'viewfinderLumaReactivity', 'viewfinderLumaBoost',
-            'viewfinderDriftX', 'viewfinderDriftY',
-            'viewfinderPulseMag', 'viewfinderPulseFreq',
-          ]
-        },
-        {
-          name: 'lens-structural',
-          label: 'Structural Imperfections (Dust / Grease / Scratches)',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'structuralSelection',
-            'structuralIntensity',
-            'structuralLumaReactivity', 'structuralLumaBoost',
-            'structuralLumaMin', 'structuralLumaMax', 'structuralLumaInfluence',
-            'structuralClearRadius', 'structuralClearSoftness',
-            'structuralDriftX', 'structuralDriftY',
-            'structuralPulseMag', 'structuralPulseFreq',
-          ]
-        },
-        {
-          name: 'lens-optical',
-          label: 'Optical Artifacts (Lens Leaks / Rings)',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'opticalSelection',
-            'opticalIntensity',
-            'opticalLumaReactivity', 'opticalLumaBoost',
-            'opticalLumaMin', 'opticalLumaMax', 'opticalLumaInfluence',
-            'opticalClearRadius', 'opticalClearSoftness',
-            'opticalDriftX', 'opticalDriftY',
-            'opticalPulseMag', 'opticalPulseFreq',
-          ]
-        },
-        {
-          name: 'lens-reactive',
-          label: 'Illumination-Reactive Leaks / Chroma',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'reactiveSelection',
-            'reactiveIntensity',
-            'reactiveLumaReactivity', 'reactiveLumaBoost',
-            'reactiveLumaMin', 'reactiveLumaMax', 'reactiveLumaInfluence',
-            'reactiveClearRadius', 'reactiveClearSoftness',
-            'reactiveDriftX', 'reactiveDriftY',
-            'reactivePulseMag', 'reactivePulseFreq',
+          subgroups: [
+            {
+              label: 'Viewfinder',
+              advanced: true,
+              parameters: [
+                'viewfinderEnabled', 'viewfinderSelection',
+                'viewfinderIntensity',
+                'viewfinderLumaReactivity', 'viewfinderLumaBoost',
+                'viewfinderDriftX', 'viewfinderDriftY',
+                'viewfinderPulseMag', 'viewfinderPulseFreq',
+              ]
+            },
+            {
+              label: 'Dust & scratches',
+              advanced: true,
+              parameters: [
+                'structuralSelection',
+                'structuralIntensity',
+                'structuralLumaReactivity', 'structuralLumaBoost',
+                'structuralLumaMin', 'structuralLumaMax', 'structuralLumaInfluence',
+                'structuralClearRadius', 'structuralClearSoftness',
+                'structuralDriftX', 'structuralDriftY',
+                'structuralPulseMag', 'structuralPulseFreq',
+              ]
+            },
+            {
+              label: 'Leaks & chroma',
+              advanced: true,
+              parameters: [
+                'opticalSelection',
+                'opticalIntensity',
+                'opticalLumaReactivity', 'opticalLumaBoost',
+                'opticalLumaMin', 'opticalLumaMax', 'opticalLumaInfluence',
+                'opticalClearRadius', 'opticalClearSoftness',
+                'opticalDriftX', 'opticalDriftY',
+                'opticalPulseMag', 'opticalPulseFreq',
+                'reactiveSelection',
+                'reactiveIntensity',
+                'reactiveLumaReactivity', 'reactiveLumaBoost',
+                'reactiveLumaMin', 'reactiveLumaMax', 'reactiveLumaInfluence',
+                'reactiveClearRadius', 'reactiveClearSoftness',
+                'reactiveDriftX', 'reactiveDriftY',
+                'reactivePulseMag', 'reactivePulseFreq',
+              ]
+            }
           ]
         },
         {
           name: 'lens-core',
-          label: 'Lens Core Distortion / Grading',
+          label: 'Optical distortions',
           type: 'folder',
           expanded: true,
           parameters: [

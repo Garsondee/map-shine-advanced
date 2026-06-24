@@ -414,60 +414,49 @@ export class TreeEffectV2 {
           tooltip: 'Extra foliage tweaks on top of Camera Grade and Time of Day (applied automatically).',
         },
         {
-          name: 'shadow',
-          label: 'Canopy shadow',
+          name: 'shadowCoupling',
+          label: 'Shadow coupling',
           type: 'folder',
           advanced: true,
           expanded: false,
-          parameters: ['shadowOpacity', 'shadowLength', 'shadowSoftness'],
-        },
-        {
-          name: 'cloudShadow',
-          label: 'Cloud shadows',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'cloudShadowEnabled',
-            'cloudShadowDarkenStrength',
-            'cloudShadowDarkenCurve',
-          ],
-        },
-        {
-          name: 'buildingShadow',
-          label: 'Building shadows',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'buildingShadowEnabled',
-            'buildingShadowDarkenStrength',
-            'buildingShadowDarkenCurve',
-          ],
-        },
-        {
-          name: 'paintedShadow',
-          label: 'Painted shadows',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'paintedShadowEnabled',
-            'paintedShadowDarkenStrength',
-            'paintedShadowDarkenCurve',
-          ],
-        },
-        {
-          name: 'landscapeLightning',
-          label: 'Landscape lightning',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'lightningVegetationEnabled',
-            'lightningVegetationBrightnessBoost',
-            'lightningVegetationContrastBoost',
-            'lightningVegetationTintStrength',
+          subgroups: [
+            {
+              label: 'Canopy shadow',
+              parameters: ['shadowOpacity', 'shadowLength', 'shadowSoftness'],
+            },
+            {
+              label: 'Cloud shadows',
+              parameters: [
+                'cloudShadowEnabled',
+                'cloudShadowDarkenStrength',
+                'cloudShadowDarkenCurve',
+              ],
+            },
+            {
+              label: 'Building shadows',
+              parameters: [
+                'buildingShadowEnabled',
+                'buildingShadowDarkenStrength',
+                'buildingShadowDarkenCurve',
+              ],
+            },
+            {
+              label: 'Painted shadows',
+              parameters: [
+                'paintedShadowEnabled',
+                'paintedShadowDarkenStrength',
+                'paintedShadowDarkenCurve',
+              ],
+            },
+            {
+              label: 'Atmospheric flash lighting',
+              parameters: [
+                'lightningVegetationEnabled',
+                'lightningVegetationBrightnessBoost',
+                'lightningVegetationContrastBoost',
+                'lightningVegetationTintStrength',
+              ],
+            },
           ],
         },
         {

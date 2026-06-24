@@ -876,9 +876,33 @@ export class StreamingMinimap {
           this._kv('Focal LOD-0 sharpen', gov.focalSharpenEnabled === false ? 'disabled' : 'enabled'),
           this._kv('LOD-0 cooldown', cooldownMs > 0 ? `${(cooldownMs / 1000).toFixed(1)}s` : 'none'),
         ].join('');
+        const growthDiag = adaptive.growthDiagnosis;
+        const growthTone = (adaptive.degradationLevel ?? 0) > 0 || adaptive.growthAlert
+          ? 'warn'
+          : 'ok';
+        let growthSection = '';
+        if (adaptive.growthAlert || growthDiag) {
+          const delta = Math.max(0, live - (adaptive.minTextureCount ?? live));
+          const growthLines = [
+            this._kv(
+              'Texture inflation',
+              growthDiag?.label
+                ?? (delta > 0 ? `+${delta} above session floor ${adaptive.minTextureCount ?? '?'}` : 'rising'),
+            ),
+          ];
+          if (growthDiag?.summary) {
+            growthLines.push(this._kv('Detail', growthDiag.summary));
+          } else if (delta > 0) {
+            growthLines.push(
+              this._kv('Hint', 'Run MapShine.diagnoseTextures() in the console for classification'),
+            );
+          }
+          growthSection = this._sectionHtml('Texture Growth', growthLines.join(''), { tone: growthTone });
+        }
         sections.push(this._sectionHtml('Memory Governor', govLines, {
           tone: (adaptive.degradationLevel ?? 0) > 0 ? 'warn' : 'ok',
         }));
+        if (growthSection) sections.push(growthSection);
       } catch (_) {}
 
       const mgr = report.streaming ?? {};

@@ -11,6 +11,7 @@
     "perf:install-browsers": "playwright install",
     "chart:generate": "node scripts/tools/generate-calibration-chart.mjs",
     "preset:insight": "node scripts/tools/preset-insight.mjs",
+    "audit:controls": "node scripts/tools/audit-control-wiring.mjs",
     "knip": "knip",
     "knip:files": "knip --include files"
   },

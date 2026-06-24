@@ -84,6 +84,44 @@ export const MAP_POINT_RENDER_LAYER_BELOW = 'below-overhead';
 /** Map point effect sits on / above overhead layer; glow reaches ground and overhead. */
 export const MAP_POINT_RENDER_LAYER_ABOVE = 'above-overhead';
 
+/** Human-readable labels for map-point effect targets (UI + on-map tags). */
+export const MAP_POINT_EFFECT_LABELS = Object.freeze({
+  rope: 'Rope',
+  smellyFlies: 'Smelly Flies',
+  fire: 'Fire Particles',
+  candleFlame: 'Candle Flame',
+  sparks: 'Sparks',
+  dust: 'Dust Motes',
+  lightning: 'Lightning',
+  pressurisedSteam: 'Pressurised Steam',
+  water: 'Water Surface',
+  cloudShadows: 'Cloud Shadows',
+  canopy: 'Canopy Shadows',
+  structuralShadows: 'Structural Shadows',
+});
+
+/** Texture mask suffixes for effects that can spawn from painted masks (not map points). */
+export const MAP_POINT_EFFECT_MASK_SUFFIXES = Object.freeze({
+  fire: '_Fire',
+  water: '_Water',
+});
+
+/** Short effect names for on-map cluster labels. */
+export const MAP_POINT_EFFECT_SHORT_LABELS = Object.freeze({
+  rope: 'Rope',
+  smellyFlies: 'Flies',
+  fire: 'Fire',
+  candleFlame: 'Candle',
+  sparks: 'Sparks',
+  dust: 'Dust',
+  lightning: 'Lightning',
+  pressurisedSteam: 'Steam',
+  water: 'Water',
+  cloudShadows: 'Clouds',
+  canopy: 'Canopy',
+  structuralShadows: 'Structural',
+});
+
 /**
  * @typedef {Object} MapPointMetadata
  * @property {LevelBinding} levelBinding - Level ownership/visibility contract
@@ -150,8 +188,14 @@ export class MapPointsManager {
     this.initialized = false;
     
     /** @type {boolean} */
-    /** When true, on-map handles/lines for existing groups are shown (Manage Map Points → "Show visual helpers"). */
+    /** When true, on-map handles/lines are shown (map-point manager / edit UI open). */
     this.showVisualHelpers = false;
+
+    /** Reference count for map-point editor UIs (manager / edit / draw). */
+    this._editorModeDepth = 0;
+
+    /** When set, only this group's visual helper is shown (group edit dialog session). */
+    this.editFocusGroupId = null;
 
     /** When true, GM effect-cluster toggle HUD is shown on the canvas. */
     this.showControlHud = false;
@@ -182,6 +226,12 @@ export class MapPointsManager {
 
     /** @type {Map<string, THREE.Texture>} */
     this._powerHudTextureCache = new Map();
+
+    /** @type {Map<string, THREE.Object3D>} */
+    this.clusterLabelObjects = new Map();
+
+    /** @type {Map<string, THREE.Texture>} */
+    this._clusterLabelTextureCache = new Map();
     
     /** @type {Function[]} */
     this.changeListeners = [];
@@ -1538,6 +1588,68 @@ export class MapPointsManager {
       }
 
       this.notifyListeners();
+      this._scheduleRecomputeClusters();
+      if (this.showVisualHelpers) {
+        this.createVisualHelper(groupId, group);
+      }
+      return true;
+    });
+  }
+
+  /**
+   * Remove multiple points from a group in one save (indices applied high-to-low).
+   * @param {string} groupId
+   * @param {number[]} pointIndices
+   * @returns {Promise<boolean>}
+   */
+  async removePoints(groupId, pointIndices) {
+    const unique = [...new Set(pointIndices)]
+      .filter((idx) => Number.isFinite(idx))
+      .map((idx) => Math.trunc(idx))
+      .sort((a, b) => b - a);
+    if (!unique.length) return false;
+
+    return this._enqueueOp(async () => {
+      if (!this._canEditScene()) {
+        ui?.notifications?.warn?.('You do not have permission to edit map points on this scene.');
+        return false;
+      }
+
+      const group = this.groups.get(groupId);
+      if (!group?.points?.length) return false;
+
+      const prev = { ...group, points: group.points.slice() };
+      for (const idx of unique) {
+        if (idx < 0 || idx >= group.points.length) continue;
+        group.points.splice(idx, 1);
+      }
+
+      if (group.points.length === 0) {
+        this.groups.delete(groupId);
+        this.removeVisualObject(groupId);
+        const ok = await this._saveToSceneNow();
+        if (!ok) {
+          this.groups.set(groupId, prev);
+          if (this.showVisualHelpers) this.createVisualHelper(groupId, prev);
+          return false;
+        }
+        this.notifyListeners();
+        log.info(`Deleted map point group: ${groupId}`);
+        return true;
+      }
+
+      const ok = await this._saveToSceneNow();
+      if (!ok) {
+        this.groups.set(groupId, prev);
+        if (this.showVisualHelpers) this.createVisualHelper(groupId, prev);
+        return false;
+      }
+
+      this.notifyListeners();
+      this._scheduleRecomputeClusters();
+      if (this.showVisualHelpers) {
+        this.createVisualHelper(groupId, group);
+      }
       return true;
     });
   }
@@ -1581,10 +1693,51 @@ export class MapPointsManager {
    */
   setShowVisualHelpers(show) {
     this.showVisualHelpers = !!show;
+    if (!this.showVisualHelpers) {
+      this.editFocusGroupId = null;
+    }
     if (this.showVisualHelpers) {
       this.createVisualHelpers();
     } else {
       this.clearVisualObjects();
+    }
+  }
+
+  /**
+   * Enter map-point editor mode (manager, edit dialog, or draw UI open).
+   * Helpers stay visible until every editor UI has exited.
+   */
+  enterEditorMode() {
+    this._editorModeDepth += 1;
+    if (this._editorModeDepth === 1) {
+      this.setShowVisualHelpers(true);
+    }
+  }
+
+  /**
+   * Leave map-point editor mode (paired with enterEditorMode).
+   */
+  exitEditorMode() {
+    this._editorModeDepth = Math.max(0, this._editorModeDepth - 1);
+    if (this._editorModeDepth === 0) {
+      this.setEditFocusGroupId(null);
+      this.setShowVisualHelpers(false);
+    }
+  }
+
+  /** @returns {boolean} */
+  isEditorModeActive() {
+    return this._editorModeDepth > 0;
+  }
+
+  /**
+   * Limit on-map helpers to one group while the edit dialog is open.
+   * @param {string|null} groupId
+   */
+  setEditFocusGroupId(groupId) {
+    this.editFocusGroupId = (typeof groupId === 'string' && groupId.length > 0) ? groupId : null;
+    if (this.showVisualHelpers) {
+      this.createVisualHelpers();
     }
   }
 
@@ -1599,8 +1752,11 @@ export class MapPointsManager {
     this.clearVisualObjects();
 
     for (const [id, group] of this.groups) {
+      if (this.editFocusGroupId && id !== this.editFocusGroupId) continue;
       this.createVisualHelper(id, group);
     }
+
+    this.refreshClusterLabels();
   }
 
   /**
@@ -1787,6 +1943,7 @@ export class MapPointsManager {
       lightning: 0x00aaff,
       dust: 0xaaaaaa,
       smellyFlies: 0x00ff00,
+      rope: 0xccaa66,
       water: 0x0066ff,
       pressurisedSteam: 0xcccccc,
       cloudShadows: 0x666666,
@@ -1795,6 +1952,351 @@ export class MapPointsManager {
     };
     
     return colors[effectTarget] || 0xffffff;
+  }
+
+  /**
+   * Human-readable label for an effect target key.
+   * @param {string|null|undefined} effectTarget
+   * @returns {string}
+   */
+  getEffectLabel(effectTarget) {
+    if (!effectTarget) return 'None';
+    return MAP_POINT_EFFECT_LABELS[effectTarget] || String(effectTarget);
+  }
+
+  /**
+   * Short effect name for compact on-map labels.
+   * @param {string|null|undefined} effectTarget
+   * @returns {string}
+   */
+  getEffectShortLabel(effectTarget) {
+    if (!effectTarget) return 'Effect';
+    return MAP_POINT_EFFECT_SHORT_LABELS[effectTarget] || this.getEffectLabel(effectTarget);
+  }
+
+  /**
+   * Primary + subtitle lines for a control-cluster on-map label.
+   * @param {import('./map-point-control-clusters.js').MapPointControlCluster} cluster
+   * @returns {{ title: string, subtitle: string }}
+   */
+  getClusterLabelLines(cluster) {
+    if (!cluster) return { title: 'Map points', subtitle: '' };
+
+    const effectShort = this.getEffectShortLabel(cluster.effectTarget);
+
+    if (cluster.source === 'mask') {
+      const suffix = MAP_POINT_EFFECT_MASK_SUFFIXES[cluster.effectTarget]
+        || `_${effectShort}`;
+      return {
+        title: `${suffix} texture based`,
+        subtitle: 'painted mask',
+      };
+    }
+
+    const memberPoints = this._collectClusterMemberPoints(cluster);
+    const pointCount = memberPoints.length;
+    const groupCount = Array.isArray(cluster.memberGroupIds) ? cluster.memberGroupIds.length : 0;
+
+    let shapeHint = 'points';
+    if (cluster.source === 'group' && groupCount === 1) {
+      const group = this.groups.get(cluster.memberGroupIds[0]);
+      if (group?.type === 'area') shapeHint = 'area';
+      else if (group?.type === 'line' || group?.type === 'rope') shapeHint = 'line';
+      else if (group?.type === 'point') shapeHint = 'point';
+    } else if (Array.isArray(cluster.memberPointIndices) && cluster.memberPointIndices.length > 0) {
+      shapeHint = 'point cluster';
+    }
+
+    const title = `${effectShort} · map points`;
+    let subtitle = '';
+    if (pointCount > 0) {
+      subtitle = `${pointCount} point${pointCount !== 1 ? 's' : ''}`;
+      if (shapeHint !== 'points' && shapeHint !== 'point cluster') {
+        subtitle += ` · ${shapeHint}`;
+      }
+    } else if (groupCount > 0) {
+      subtitle = `${groupCount} group${groupCount !== 1 ? 's' : ''}`;
+    } else {
+      subtitle = shapeHint;
+    }
+
+    return { title, subtitle };
+  }
+
+  /**
+   * Build / refresh control-cluster labels (same groupings as the on/off toggles).
+   * @private
+   */
+  refreshClusterLabels() {
+    const THREE = window.THREE;
+    if (!THREE || !this.showVisualHelpers) {
+      this.clearClusterLabels();
+      return;
+    }
+
+    this.clearClusterLabels();
+
+    const groundZ = window.MapShine?.sceneComposer?.groundZ ?? 1000;
+    const labelZ = groundZ + 12;
+
+    for (const cluster of this.controlClusters.values()) {
+      if (!cluster?.id) continue;
+      const mesh = this._createClusterLabelMesh(cluster, labelZ);
+      if (!mesh) continue;
+      this.scene.add(mesh);
+      this.clusterLabelObjects.set(cluster.id, mesh);
+    }
+  }
+
+  /** @private */
+  clearClusterLabels() {
+    for (const id of [...this.clusterLabelObjects.keys()]) {
+      const obj = this.clusterLabelObjects.get(id);
+      if (obj) {
+        obj.traverse((child) => {
+          if (child.geometry) child.geometry.dispose();
+          if (child.material) {
+            if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
+            else child.material.dispose();
+          }
+        });
+        this.scene.remove(obj);
+      }
+      this.clusterLabelObjects.delete(id);
+    }
+  }
+
+  /**
+   * World points to steer a cluster label away from (handles + cluster members).
+   * @param {import('./map-point-control-clusters.js').MapPointControlCluster} cluster
+   * @returns {Array<{x:number,y:number}>}
+   * @private
+   */
+  _collectLabelAvoidancePoints(cluster) {
+    const memberPoints = this._collectClusterMemberPoints(cluster);
+    if (memberPoints.length > 0) return memberPoints;
+
+    if (cluster?.source !== 'mask') return memberPoints;
+
+    const cx = Number(cluster.centroid?.x);
+    const cy = Number(cluster.centroid?.y);
+    if (!Number.isFinite(cx) || !Number.isFinite(cy)) return memberPoints;
+
+    const radius = 96;
+    const radiusSq = radius * radius;
+    /** @type {Array<{x:number,y:number}>} */
+    const nearby = [];
+
+    for (const group of this.groups.values()) {
+      if (!group?.points?.length) continue;
+      for (const p of group.points) {
+        if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+        const dx = p.x - cx;
+        const dy = p.y - cy;
+        if (dx * dx + dy * dy <= radiusSq) nearby.push({ x: p.x, y: p.y });
+      }
+    }
+
+    return nearby;
+  }
+
+  /**
+   * Collect world points represented by a control cluster.
+   * @param {import('./map-point-control-clusters.js').MapPointControlCluster} cluster
+   * @returns {Array<{x:number,y:number}>}
+   * @private
+   */
+  _collectClusterMemberPoints(cluster) {
+    /** @type {Array<{x:number,y:number}>} */
+    const points = [];
+    const memberGroupIds = Array.isArray(cluster.memberGroupIds) ? cluster.memberGroupIds : [];
+    const memberPointIndices = Array.isArray(cluster.memberPointIndices) ? cluster.memberPointIndices : null;
+
+    for (const groupId of memberGroupIds) {
+      const group = this.groups.get(groupId);
+      if (!group?.points?.length) continue;
+
+      if (memberPointIndices && memberPointIndices.length > 0 && memberGroupIds.length === 1) {
+        for (const idx of memberPointIndices) {
+          const p = group.points[idx];
+          if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) {
+            points.push({ x: p.x, y: p.y });
+          }
+        }
+        continue;
+      }
+
+      for (const p of group.points) {
+        if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) {
+          points.push({ x: p.x, y: p.y });
+        }
+      }
+    }
+
+    return points;
+  }
+
+  /**
+   * Offset a label away from the nearest member point so it does not sit on handles.
+   * @param {number} cx
+   * @param {number} cy
+   * @param {Array<{x:number,y:number}>} memberPoints
+   * @returns {{x:number,y:number}}
+   * @private
+   */
+  _computeClusterLabelPosition(cx, cy, memberPoints) {
+    const offsetDist = 58;
+    if (!memberPoints.length) {
+      return { x: cx, y: cy + offsetDist };
+    }
+
+    let nearestX = memberPoints[0].x;
+    let nearestY = memberPoints[0].y;
+    let minDist = Infinity;
+    for (const p of memberPoints) {
+      const dx = cx - p.x;
+      const dy = cy - p.y;
+      const d = Math.hypot(dx, dy);
+      if (d < minDist) {
+        minDist = d;
+        nearestX = p.x;
+        nearestY = p.y;
+      }
+    }
+
+    let dx = cx - nearestX;
+    let dy = cy - nearestY;
+    const len = Math.hypot(dx, dy);
+    if (len < 20) {
+      dx = 0;
+      dy = 1;
+    } else {
+      dx /= len;
+      dy /= len;
+    }
+
+    const extra = minDist < 36 ? (36 - minDist) * 0.65 : 0;
+    const dist = offsetDist + extra;
+
+    return {
+      x: cx + dx * dist,
+      y: cy + dy * dist,
+    };
+  }
+
+  /**
+   * @param {import('./map-point-control-clusters.js').MapPointControlCluster} cluster
+   * @param {number} z
+   * @returns {THREE.Mesh|null}
+   * @private
+   */
+  _createClusterLabelMesh(cluster, z) {
+    const THREE = window.THREE;
+    if (!THREE || !cluster) return null;
+
+    const cx = Number(cluster.centroid?.x);
+    const cy = Number(cluster.centroid?.y);
+    if (!Number.isFinite(cx) || !Number.isFinite(cy)) return null;
+
+    const memberPoints = this._collectLabelAvoidancePoints(cluster);
+    const pos = this._computeClusterLabelPosition(cx, cy, memberPoints);
+    const { title: effectLabel, subtitle } = this.getClusterLabelLines(cluster);
+
+    const cacheKey = `${cluster.id}|${effectLabel}|${subtitle}|${cluster.enabled === false ? 'off' : 'on'}`;
+    let tex = this._clusterLabelTextureCache.get(cacheKey);
+    if (!tex) {
+      tex = this._buildClusterLabelTexture(effectLabel, subtitle, cluster.effectTarget, cluster.enabled !== false);
+      if (tex) this._clusterLabelTextureCache.set(cacheKey, tex);
+    }
+    if (!tex) return null;
+
+    const titleWidth = Math.min(220, Math.max(132, effectLabel.length * 7.2));
+    const planeW = titleWidth;
+    const planeH = 34;
+    const mat = new THREE.MeshBasicMaterial({
+      map: tex,
+      transparent: true,
+      opacity: cluster.enabled === false ? 0.55 : 0.94,
+      depthTest: false,
+      depthWrite: false,
+    });
+    mat.toneMapped = false;
+
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(planeW, planeH), mat);
+    mesh.position.set(pos.x, pos.y, z);
+    mesh.renderOrder = 1002;
+    mesh.userData = {
+      type: 'mapPointClusterLabel',
+      clusterId: cluster.id,
+      helperZ: z,
+    };
+    return mesh;
+  }
+
+  /**
+   * @param {string} effectLabel
+   * @param {string} subtitle
+   * @param {string|null|undefined} effectTarget
+   * @param {boolean} enabled
+   * @returns {THREE.CanvasTexture|null}
+   * @private
+   */
+  _buildClusterLabelTexture(effectLabel, subtitle, effectTarget, enabled) {
+    const THREE = window.THREE;
+    if (!THREE) return null;
+
+    const canvasEl = document.createElement('canvas');
+    canvasEl.width = 440;
+    canvasEl.height = 68;
+    const ctx = canvasEl.getContext('2d');
+    if (!ctx) return null;
+
+    const colorHex = `#${this.getEffectColor(effectTarget).toString(16).padStart(6, '0')}`;
+
+    ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+    ctx.fillStyle = enabled ? 'rgba(12, 14, 22, 0.9)' : 'rgba(18, 18, 22, 0.72)';
+    ctx.strokeStyle = enabled ? colorHex : 'rgba(120, 120, 130, 0.85)';
+    ctx.lineWidth = 2;
+    this._roundRect(ctx, 4, 4, canvasEl.width - 8, canvasEl.height - 8, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = enabled ? '#f2f4f8' : '#a8acb8';
+    ctx.font = 'bold 18px Signika, sans-serif';
+    const title = effectLabel.length > 34 ? `${effectLabel.slice(0, 33)}…` : effectLabel;
+    ctx.fillText(title, canvasEl.width / 2, 22);
+
+    ctx.fillStyle = enabled ? colorHex : '#888';
+    ctx.font = '15px Signika, sans-serif';
+    const sub = subtitle.length > 40 ? `${subtitle.slice(0, 39)}…` : subtitle;
+    ctx.fillText(sub, canvasEl.width / 2, 44);
+
+    const tex = new THREE.CanvasTexture(canvasEl);
+    tex.needsUpdate = true;
+    if (THREE.SRGBColorSpace) {
+      try { tex.colorSpace = THREE.SRGBColorSpace; } catch (_) {}
+    }
+    return tex;
+  }
+
+  /**
+   * @param {CanvasRenderingContext2D} ctx
+   * @private
+   */
+  _roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
   }
 
   /**
@@ -1826,6 +2328,7 @@ export class MapPointsManager {
    * @private
    */
   clearVisualObjects() {
+    this.clearClusterLabels();
     for (const id of this.visualObjects.keys()) {
       this.removeVisualObject(id);
     }

@@ -1,8 +1,8 @@
 /**
  * @fileoverview Procedural coal / wood bed shader for FireEffectV2.
  *
- * All noise + sparks operate in **overlay pixel space** (stable on 8k maps).
- * Individual spark cells flare up and die via sin envelopes — no whole-mask flash.
+ * All noise + embers operate in **overlay pixel space** (stable on 8k maps).
+ * Continuous smooth-noise ember field with sin flicker — no discrete spark grid.
  * @module compositor-v2/effects/fire-coal-bed-shader
  */
 
@@ -57,8 +57,8 @@ export const COAL_BED_DEFAULT_PARAMS = {
   coalBedChunkScale: 36.0,
   coalBedChunkContrast: 0.5,
   coalBedChunkAspect: 3.0,
-  /** HDR spark cell size in overlay pixels (lower = more, smaller flares). */
-  coalBedGrainScale: 2.0,
+  /** Ember feature size in overlay pixels (lower = finer, denser glows). */
+  coalBedGrainScale: 6.0,
   coalBedGrainAngle: 1.7,
 
   coalBedColorChar: '#1a100c',
@@ -75,9 +75,9 @@ export const COAL_BED_DEFAULT_PARAMS = {
   coalBedSaturation: 0.95,
   coalBedContrast: 1.22,
   coalBedRimStrength: 0.04,
-  coalBedEmissiveGain: 12.5,
-  /** Fraction of spark cells that can flare (0–1). Higher = more coverage. */
-  coalBedFlareDensity: 0.37,
+  coalBedEmissiveGain: 8.0,
+  /** Ember coverage (0–1). Higher = more simultaneous hot spots. */
+  coalBedFlareDensity: 0.45,
 
   coalBedScrollSpeed: 0.0,
   coalBedScrollAngle: 0.0,
@@ -93,8 +93,8 @@ export const COAL_BED_DEFAULT_PARAMS = {
 
   coalBedMaskLo: 0.8,
   coalBedMaskHi: 1.0,
-  /** Post-process soften radius in overlay pixels (blurs cell squares + mask border). */
-  coalBedEdgeSoftness: 3.0,
+  /** Post-process soften radius in overlay pixels (blurs smolder + embers + mask border). */
+  coalBedEdgeSoftness: 10.0,
   coalBedMaskExpand: 0.0,
   coalBedMaskDither: 0.5,
 };
@@ -118,7 +118,7 @@ export const COAL_BED_PRESETS = Object.freeze({
   charcoal: {
     coalBedChunkScale: 28.0,
     coalBedChunkContrast: 3.0,
-    coalBedGrainScale: 4.0,
+    coalBedGrainScale: 5.0,
     coalBedHeatLevels: 8.0,
     coalBedColorHot: '#ff5522',
     coalBedColorWarm: '#cc2200',
@@ -319,16 +319,13 @@ export function getCoalBedFragmentShader() {
       return clamp(max(veins, vorCracks) * crackMix, 0.0, 1.0);
     }
 
-    float smolderHeatCell(vec2 cell, float time) {
-      float seed = hash21(cell);
-
-      float drift = sin(time * uEvolveSpeed * mix(0.25, 1.0, seed) + seed * 6.28318) * 0.5 + 0.5;
-      float tick = floor(time * uEvolveSpeed * mix(0.05, 0.35, seed));
-      float n = hash21(cell + tick * 13.0);
-
-      float thresh = 0.52 - uChunkContrast * 0.06;
-      float soft = mix(0.08, 0.62, softenNorm()) + uSoftenPx / max(6.0, uSmolderBlockPx);
-      return smoothstep(thresh - soft, thresh + soft, n) * mix(0.10, 0.40, drift);
+    float quantizeBedHeat(float h) {
+      float s = softenNorm();
+      float levels = max(2.0, uHeatLevels);
+      float quantAmt = (1.0 - s) * smoothstep(16.0, 4.0, levels);
+      if (quantAmt <= 0.001) return h;
+      float hQuant = floor(h * levels + 0.001) / levels;
+      return mix(h, hQuant, quantAmt);
     }
 
     float smolderHeatAt(vec2 pxPos, float time) {
@@ -344,56 +341,30 @@ export function getCoalBedFragmentShader() {
       float crackMix = mix(0.62 + uTurbulence * 0.22, 0.48 + uTurbulence * 0.14, softenNorm());
       float h = mix(hGrid * (1.0 - cracks * 0.55), max(hGrid, cracks * 0.92), crackMix);
 
-      float grit = smoothNoise(pxWarp / max(2.0, uFlarePixelPx * 0.5) + time * 3.0);
-      float gritSoft = mix(0.05, 0.42, softenNorm()) + uSoftenPx * 0.02;
-      float gritAmt = mix(0.16, 0.06, softenNorm());
-      h = max(h, smoothstep(0.78 - uChunkContrast * 0.04 - gritSoft, 0.78 - uChunkContrast * 0.04 + gritSoft, grit) * gritAmt);
+      float grit = smoothNoise(pxWarp / max(4.0, uFlarePixelPx) + time * 3.0);
+      float gritSoft = mix(0.12, 0.48, softenNorm()) + uSoftenPx * 0.015;
+      float gritAmt = mix(0.08, 0.04, softenNorm());
+      float gritHot = smoothstep(0.72 - gritSoft, 0.72 + gritSoft, grit);
+      h = max(h, gritHot * gritHot * gritAmt);
 
-      float levels = max(2.0, mix(uHeatLevels, 48.0, softenNorm() * 0.88));
-      float hQuant = floor(h * levels + 0.001) / levels;
-      float softenMix = clamp(uSoftenPx / 5.0, 0.0, 1.0);
-      return mix(hQuant, h, max(softenMix, 0.8));
+      return quantizeBedHeat(h);
     }
 
-    // Grid-only smolder — no cracks / grit / warp. Cheap taps for spatial soften.
-    float smolderHeatGridAt(vec2 pxPos, float time) {
-      float blockPx = max(8.0, uSmolderBlockPx);
-      vec2 smolderPx = rotate2(pxPos, uGrainAngle);
-      smolderPx.x /= max(0.25, uChunkAspect);
-      vec2 g = smolderPx / blockPx;
-      vec2 i = floor(g);
-      vec2 f = fract(g);
-      float blend = mix(0.12, 0.92, softenNorm()) + uSoftenPx / max(blockPx, 4.0);
-      blend = clamp(blend, 0.12, 0.95);
-      f = smoothstep(0.5 - blend, 0.5 + blend, f);
-
-      float h00 = smolderHeatCell(i, time);
-      float h10 = smolderHeatCell(i + vec2(1.0, 0.0), time);
-      float h01 = smolderHeatCell(i + vec2(0.0, 1.0), time);
-      float h11 = smolderHeatCell(i + vec2(1.0, 1.0), time);
-      float hGrid = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
-
-      float levels = max(2.0, mix(uHeatLevels, 48.0, softenNorm() * 0.88));
-      float hQuant = floor(hGrid * levels + 0.001) / levels;
-      float softenMix = clamp(uSoftenPx / 5.0, 0.0, 1.0);
-      return mix(hQuant, hGrid, max(softenMix, 0.8));
-    }
-
-    // 5-tap quincunx on cheap grid heat — smooth round falloff, ~5× cheaper than 7×7 separable.
+    // 5-tap quincunx blur on smooth smolder heat.
     float smolderHeatBlurred(vec2 pxPos, float time) {
       float hFull = smolderHeatAt(pxPos, time);
       if (uSoftenPx < 1.5) return hFull;
 
       float s = softenNorm();
       float r = max(1.5, uSoftenPx * mix(0.32, 0.52, s));
-      float hC = smolderHeatGridAt(pxPos, time);
-      float hX = smolderHeatGridAt(pxPos + vec2(r, 0.0), time);
-      float hXm = smolderHeatGridAt(pxPos + vec2(-r, 0.0), time);
-      float hY = smolderHeatGridAt(pxPos + vec2(0.0, r), time);
-      float hYm = smolderHeatGridAt(pxPos + vec2(0.0, -r), time);
+      float hC = smolderHeatAt(pxPos, time);
+      float hX = smolderHeatAt(pxPos + vec2(r, 0.0), time);
+      float hXm = smolderHeatAt(pxPos + vec2(-r, 0.0), time);
+      float hY = smolderHeatAt(pxPos + vec2(0.0, r), time);
+      float hYm = smolderHeatAt(pxPos + vec2(0.0, -r), time);
       float hSoft = hC * 0.40 + (hX + hXm + hY + hYm) * 0.15;
 
-      return mix(hFull, max(hFull, hSoft), s * 0.92);
+      return mix(hFull, hSoft, s * 0.85);
     }
 
     // Lightweight mask feather — derivative soften + 4 cardinal taps (no 49-tap separable pass).
@@ -414,62 +385,50 @@ export function getCoalBedFragmentShader() {
       return clamp(w, 0.0, 1.0);
     }
 
-    float sparkEnvelope(vec2 sparkCell, float time) {
-      float seed = hash21(sparkCell);
-
-      if (hash21(sparkCell + 91.7) > uFlareDensity) return 0.0;
-
-      float period = mix(0.35, 2.8, seed) / max(0.15, uPulseSpeed);
-      float phase = fract(time / period + seed * 13.0);
-
-      float env = sin(phase * 3.14159265);
-      env = env * env;
-
-      float micro = sin(time * mix(12.0, 28.0, seed) + seed * 40.0) * 0.5 + 0.5;
-      return env * mix(0.65, 1.0, micro);
-    }
-
-    float sparkFalloff(vec2 pxPos, vec2 cell, float pxSize) {
-      vec2 center = cell * pxSize + pxSize * 0.5;
-      vec2 d = pxPos - center;
+    // Continuous ember layer — smooth-noise density + sin flicker, no floor() cell grid.
+    float emberLayer(vec2 pxPos, float time, float scale, vec2 uvOffset, float timePhase) {
       float s = softenNorm();
-      float coreR = max(1.2, pxSize * mix(0.28, 0.16, s));
-      float softR = max(coreR + 2.5, uSoftenPx * mix(0.75, 1.85, s) + pxSize * mix(0.48, 1.2, s));
-      float core = exp(-dot(d, d) / (coreR * coreR));
-      float halo = exp(-dot(d, d) / (softR * softR));
-      float fall = mix(halo, core, mix(0.50, 0.14, s));
-      float fw = fwidth(fall) * mix(0.5, uSoftenPx * 0.14, s);
-      return smoothstep(0.0, max(0.001, fw + 0.004), fall);
+      float px = max(3.0, scale);
+      vec2 p = (pxPos + uvOffset) / px;
+      p += vec2(sin(time * 0.15 + timePhase) * 0.35, -time * mix(0.05, 0.18, clamp(uFlareChaos, 0.0, 2.0) * 0.5 + 0.15));
+
+      float n0 = smoothNoise(p);
+      float n1 = smoothNoise(p * 2.1 + vec2(17.3, 31.7) - time * 0.08);
+      float n2 = smoothNoise(p * 4.3 + vec2(91.2, 13.5) + time * 0.05);
+      float density = n0 * 0.52 + n1 * 0.33 + n2 * 0.15;
+
+      float thresh = 1.0 - uFlareDensity;
+      float gateSoft = mix(0.08, 0.22, s);
+      float coverage = smoothstep(thresh - gateSoft, thresh + gateSoft, density);
+
+      float flicker = sin(time * uPulseSpeed * mix(0.6, 1.3, n0) + timePhase + n1 * 6.28318);
+      flicker = flicker * 0.5 + 0.5;
+      flicker = flicker * flicker;
+      float micro = sin(time * mix(8.0, 20.0, n2) + timePhase * 2.7) * 0.5 + 0.5;
+      flicker *= mix(0.7, 1.0, micro);
+
+      float bloom = smoothNoise(p * 0.65 + time * 0.03);
+      float hot = pow(max(0.0, density - 0.35), mix(1.5, 0.9, s));
+      hot = hot * coverage * flicker;
+      hot = max(hot, bloom * coverage * flicker * 0.35);
+
+      float glowW = mix(0.25, 0.55, s);
+      return hot * smoothstep(0.0, glowW, hot + 0.01);
     }
 
-    float sparkAt(vec2 pxPos, vec2 cell, float time, float pxSize) {
-      float env = sparkEnvelope(cell, time);
-      if (env <= 0.0005) return 0.0;
-      return env * sparkFalloff(pxPos, cell, pxSize);
-    }
-
-    // Single-cell spark — neighbor blend removed for GPU cost (was 3×3 per layer).
-    float sparkLayerAggregated(vec2 pxPos, float time, float pxSize, vec2 cellOffset) {
-      float px = max(2.0, pxSize);
-      vec2 baseCell = floor(pxPos / px);
-      return sparkAt(pxPos, baseCell + cellOffset, time, px);
-    }
-
-    vec3 sparkFieldAt(vec2 pxPos, float time) {
-      float px = max(2.0, uFlarePixelPx);
+    vec3 emberFieldAt(vec2 pxPos, float time) {
+      float px = max(3.0, uFlarePixelPx);
       vec3 hdr = vec3(0.0);
 
-      float eA = sparkLayerAggregated(pxPos, time, px, vec2(0.0));
+      float eA = emberLayer(pxPos, time, px, vec2(0.0), 0.0);
       hdr += uColorHot * eA;
 
-      float pxB = max(2.0, px * 0.55);
-      float eB = sparkLayerAggregated(pxPos, time + 17.0, pxB, vec2(50.0, 50.0)) * 0.55;
+      float eB = emberLayer(pxPos, time + 17.0, px * 0.72, vec2(113.0, 67.0), 17.0) * 0.55;
       hdr += uColorWarm * eB;
 
-      float pxC = max(2.0, px * 0.32);
       vec2 driftPos = pxPos;
       driftPos.y -= time * mix(6.0, 22.0, clamp(uFlareChaos, 0.0, 2.0) * 0.5 + 0.15);
-      float eC = sparkLayerAggregated(driftPos, time + 31.0, pxC, vec2(113.0, 113.0)) * 0.38;
+      float eC = emberLayer(driftPos, time + 31.0, px * 0.48, vec2(227.0, 143.0), 31.0) * 0.38;
       hdr += uColorHot * eC;
 
       return hdr * (uEmissiveGain * 12.0 / 9.0);
@@ -517,7 +476,7 @@ export function getCoalBedFragmentShader() {
       vec3 diffuse = paletteSoft(normalizeBedHeat(roughHeat));
       diffuse *= intensity;
 
-      vec3 emissive = sparkFieldAt(pxPos, uTime);
+      vec3 emissive = emberFieldAt(pxPos, uTime);
       emissive *= windBreath(vUv, uTime);
       emissive = compressHotPixels(emissive, soften);
       emissive = tonemapEmissive(emissive);
@@ -563,7 +522,7 @@ export function createCoalBedUniforms(THREE, params = {}) {
     uSmolderBlockPx: { value: Math.max(8, Number(p.coalBedChunkScale) || 36) },
     uChunkContrast: { value: Number(p.coalBedChunkContrast) || 2.0 },
     uChunkAspect: { value: Math.max(0.25, Number(p.coalBedChunkAspect) || 1.0) },
-    uFlarePixelPx: { value: Math.max(2, Number(p.coalBedGrainScale) || 5) },
+    uFlarePixelPx: { value: Math.max(3, Number(p.coalBedGrainScale) || 6) },
     uGrainAngle: { value: Number(p.coalBedGrainAngle) || 0.0 },
 
     uColorChar: { value: new THREE.Color(String(p.coalBedColorChar ?? '#1a100c')) },
@@ -617,7 +576,7 @@ export function syncCoalBedUniforms(material, params = {}, opts = {}) {
   u.uSmolderBlockPx.value = Math.max(8, Number(p.coalBedChunkScale) || 36);
   u.uChunkContrast.value = Number(p.coalBedChunkContrast) || 2.0;
   u.uChunkAspect.value = Math.max(0.25, Number(p.coalBedChunkAspect) || 1.0);
-  u.uFlarePixelPx.value = Math.max(2, Number(p.coalBedGrainScale) || 5);
+  u.uFlarePixelPx.value = Math.max(3, Number(p.coalBedGrainScale) || 6);
   u.uGrainAngle.value = Number(p.coalBedGrainAngle) || 0.0;
 
   applyColorUniform(u.uColorChar, p.coalBedColorChar, '#1a100c');

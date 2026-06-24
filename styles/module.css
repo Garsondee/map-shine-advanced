@@ -296,6 +296,17 @@
   padding: 0 2px;
 }
 
+#map-shine-ui .ms-quick-actions-heading {
+  grid-column: 1 / -1;
+  margin: 4px 0 1px;
+  padding: 0 2px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ms-ui-text-dim, rgba(245, 248, 255, 0.55));
+}
+
 #map-shine-ui .ms-quick-actions-break {
   grid-column: 1 / -1;
   height: 1px;
@@ -7835,6 +7846,23 @@ body.map-shine-cinematic-player-hide-ui #map-shine-overlay-root {
 
 .msa-mp-dialog--edit.window-app {
   min-width: min(780px, calc(100vw - 32px));
+}
+
+.msa-mp-manager-lede--canvas {
+  margin-top: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(255, 221, 68, 0.08);
+  border: 1px solid rgba(255, 221, 68, 0.22);
+}
+
+.msa-mp-marquee-overlay {
+  position: fixed;
+  pointer-events: none;
+  z-index: 99990;
+  border: 2px dashed rgba(255, 221, 68, 0.95);
+  background: rgba(255, 221, 68, 0.12);
+  box-sizing: border-box;
 }
 
 .msa-mp-dialog--manage.window-app {

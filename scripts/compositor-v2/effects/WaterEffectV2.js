@@ -1118,343 +1118,282 @@ static getControlSchema() {
       groups: [
         createMaskStatusSchemaGroup('water'),
         {
-          name: 'water-core',
-          label: 'Core',
+          name: 'water-appearance-depth',
+          label: 'Water Appearance & Depth',
           type: 'folder',
           expanded: true,
-          parameters: [
-            'tintColor', 'tintStrength',
-            'distortionStrengthPx',
-            'debugView', 'debugWindArrow'
+          subgroups: [
+            {
+              label: 'Core',
+              parameters: [
+                'tintColor', 'tintStrength',
+                'distortionStrengthPx',
+                'debugView', 'debugWindArrow'
+              ]
+            },
+            {
+              label: 'Bathymetry (Volumetric)',
+              advanced: true,
+              parameters: [
+                'bathymetryEnabled',
+                'bathymetryDepthCurve', 'bathymetryMaxDepth', 'bathymetryStrength',
+                'bathymetryAbsorptionCoeff', 'bathymetryDeepScatterColor'
+              ]
+            },
+            {
+              label: 'Water Depth Enhancement',
+              advanced: true,
+              parameters: [
+                'waterDepthShadowEnabled',
+                'waterDepthShadowStrength',
+                'waterDepthShadowMinBrightness'
+              ]
+            }
           ]
         },
         {
-          name: 'water-depth-enhancement',
-          label: 'Water Depth Enhancement',
+          name: 'water-waves-wind',
+          label: 'Waves & Wind',
+          type: 'folder',
+          expanded: false,
+          subgroups: [
+            {
+              label: 'Core waves',
+              parameters: [
+                'waveScale', 'waveSpeed', 'waveStrength', 'waveMotion01',
+                'lockWaveTravelToWind', 'waveDirOffsetDeg', 'waveAppearanceRotDeg'
+              ]
+            },
+            {
+              label: 'Wind coupling',
+              advanced: true,
+              parameters: [
+                'waveSpeedWindMinFactor', 'waveSpeedWindMaxFactor', 'waveGustSlewRate', 'waveStrengthWindMinFactor',
+                'waveIndoorDampingEnabled', 'waveIndoorDampingStrength', 'waveIndoorMinFactor',
+                'windDirResponsiveness',
+                'waveTriBlendAngleDeg', 'waveTriSideWeight',
+                'advectionDirOffsetDeg', 'advectionSpeed01',
+                'windOverrideEnabled',
+                'windOverrideBearingDeg',
+                'windOverrideSpeed01'
+              ]
+            },
+            {
+              label: 'Breakup & micro-chop',
+              advanced: true,
+              parameters: [
+                'microChopIntensity', 'microChopScale', 'microChopSpeed',
+                'waveWarpLargeStrength', 'waveWarpSmallStrength', 'waveWarpMicroStrength', 'waveWarpTimeSpeed',
+                'waveBreakupStrength', 'waveBreakupScale', 'waveBreakupSpeed', 'waveBreakupWarp',
+                'waveBreakupDistortionStrength', 'waveBreakupSpecularStrength',
+                'waveMicroNormalStrength', 'waveMicroNormalScale', 'waveMicroNormalSpeed', 'waveMicroNormalWarp',
+                'waveMicroNormalDistortionStrength', 'waveMicroNormalSpecularStrength',
+                'waveEvolutionEnabled', 'waveEvolutionSpeed', 'waveEvolutionAmount', 'waveEvolutionScale'
+              ]
+            }
+          ]
+        },
+        {
+          name: 'water-surface-lighting',
+          label: 'Surface Lighting',
+          type: 'folder',
+          expanded: false,
+          subgroups: [
+            {
+              label: 'Specular core',
+              parameters: [
+                'specStrength', 'specPower', 'specModel', 'specClamp',
+                'specSunAzimuthDeg', 'specSunElevationDeg', 'specSunIntensity',
+                'specNormalStrength', 'specNormalScale', 'specNormalMode',
+                'specMicroStrength', 'specMicroScale', 'specAAStrength', 'specWaveStepMul',
+                'specForceFlatNormal', 'specDisableMasking', 'specDisableRainSlope',
+                'specRoughnessMin', 'specRoughnessMax', 'specSurfaceChaos', 'specF0', 'specMaskGamma',
+                'specSkyTint', 'skyIntensity', 'specShoreBias',
+                'specDistortionNormalStrength', 'specAnisotropy', 'specAnisoRatio'
+              ]
+            },
+            {
+              label: 'Highlights & bloom',
+              parameters: [
+                'specHighlightsEnabled', 'specHighlightsStrength', 'specHighlightsPower', 'specHighlightsClamp',
+                'specHighlightsSunAzimuthDeg', 'specHighlightsSunElevationDeg', 'specHighlightsSunIntensity',
+                'specHighlightsNormalStrength', 'specHighlightsNormalScale',
+                'specHighlightsRoughnessMin', 'specHighlightsRoughnessMax',
+                'specHighlightsF0', 'specHighlightsSkyTint', 'specHighlightsMaskGamma', 'specHighlightsShoreBias',
+                'bloomSpecularEmit'
+              ]
+            },
+            {
+              label: 'Environment reflections',
+              parameters: [
+                'cloudReflectionEnabled',
+                'cloudReflectionStrength',
+                'cloudShadowEnabled',
+                'cloudShadowDarkenStrength', 'cloudShadowDarkenCurve',
+                'cloudShadowSpecularKill', 'cloudShadowSpecularCurve'
+              ]
+            },
+            {
+              label: 'Chromatic aberration',
+              advanced: true,
+              parameters: [
+                'chromaticAberrationEnabled',
+                'chromaticAberrationStrengthPx',
+                'chromaticAberrationThreshold', 'chromaticAberrationThresholdSoftness',
+                'chromaticAberrationKawaseBlurPx', 'chromaticAberrationSampleSpread',
+                'chromaticAberrationEdgeCenter', 'chromaticAberrationEdgeFeather',
+                'chromaticAberrationEdgeGamma', 'chromaticAberrationEdgeMin',
+                'chromaticAberrationDeadzone', 'chromaticAberrationDeadzoneSoftness'
+              ]
+            }
+          ]
+        },
+        {
+          name: 'water-foam-detail',
+          label: 'Foam & Detail',
           type: 'folder',
           advanced: true,
           expanded: false,
-          parameters: [
-            'waterDepthShadowEnabled',
-            'waterDepthShadowStrength',
-            'waterDepthShadowMinBrightness'
+          subgroups: [
+            {
+              label: 'Shoreline foam',
+              parameters: [
+                'shoreFoamEnabled',
+                'shoreFoamStrength', 'shoreFoamThreshold', 'shoreFoamScale', 'shoreFoamSpeed',
+                'shoreFoamCoverage', 'shoreFoamSeedOffsetX', 'shoreFoamSeedOffsetY', 'shoreFoamTimeOffset',
+                'shoreFoamColor', 'shoreFoamTint', 'shoreFoamTintStrength',
+                'shoreFoamColorVariation', 'shoreFoamOpacity',
+                'shoreFoamBrightness', 'shoreFoamContrast', 'shoreFoamGamma',
+                'shoreFoamLightingEnabled',
+                'shoreFoamAmbientLight', 'shoreFoamSceneLightInfluence',
+                'shoreFoamDarknessResponse',
+                'shoreFoamFilamentsEnabled',
+                'shoreFoamFilamentsStrength', 'shoreFoamFilamentsScale',
+                'shoreFoamFilamentsLength', 'shoreFoamFilamentsWidth',
+                'shoreFoamThicknessVariation', 'shoreFoamThicknessScale',
+                'shoreFoamEdgeDetail', 'shoreFoamEdgeDetailScale',
+                'shoreFoamWaveDistortionStrength',
+                'shoreFoamNoiseDistortionEnabled',
+                'shoreFoamNoiseDistortionStrength', 'shoreFoamNoiseDistortionScale',
+                'shoreFoamNoiseDistortionSpeed',
+                'shoreFoamEvolutionEnabled',
+                'shoreFoamEvolutionSpeed', 'shoreFoamEvolutionAmount',
+                'shoreFoamEvolutionScale',
+                'shoreFoamCoreWidth', 'shoreFoamCoreFalloff',
+                'shoreFoamTailWidth', 'shoreFoamTailFalloff',
+                'floatingFoamStrength', 'floatingFoamCoverage', 'floatingFoamScale', 'floatingFoamWaveDistortion',
+                'foamFlecksEnabled', 'foamFlecksIntensity'
+              ]
+            },
+            {
+              label: 'Floating foam',
+              parameters: [
+                'floatingFoamColor', 'floatingFoamTint', 'floatingFoamTintStrength',
+                'floatingFoamColorVariation', 'floatingFoamOpacity',
+                'floatingFoamBrightness', 'floatingFoamContrast', 'floatingFoamGamma',
+                'floatingFoamLightingEnabled',
+                'floatingFoamAmbientLight', 'floatingFoamSceneLightInfluence',
+                'floatingFoamDarknessResponse',
+                'floatingFoamShadowEnabled',
+                'floatingFoamShadowStrength', 'floatingFoamShadowSoftness',
+                'floatingFoamShadowDepth',
+                'floatingFoamFilamentsEnabled',
+                'floatingFoamFilamentsStrength', 'floatingFoamFilamentsScale',
+                'floatingFoamFilamentsLength', 'floatingFoamFilamentsWidth',
+                'floatingFoamThicknessVariation', 'floatingFoamThicknessScale',
+                'floatingFoamEdgeDetail', 'floatingFoamEdgeDetailScale',
+                'floatingFoamLayerCount', 'floatingFoamLayerOffset',
+                'floatingFoamWaveDistortionStrength',
+                'floatingFoamNoiseDistortionEnabled',
+                'floatingFoamNoiseDistortionStrength', 'floatingFoamNoiseDistortionScale',
+                'floatingFoamNoiseDistortionSpeed',
+                'floatingFoamEvolutionEnabled',
+                'floatingFoamEvolutionSpeed', 'floatingFoamEvolutionAmount',
+                'floatingFoamEvolutionScale'
+              ]
+            }
           ]
         },
         {
-          name: 'water-micro-chop',
-          label: 'Micro-Chop',
+          name: 'water-murk-refraction',
+          label: 'Murk & Refraction',
           type: 'folder',
           advanced: true,
           expanded: false,
-          parameters: [
-            'microChopIntensity',
-            'microChopScale',
-            'microChopSpeed'
-          ]
-        },
-        {
-          name: 'water-waves',
-          label: 'Waves',
-          type: 'folder',
-          expanded: false,
-          parameters: [
-            'waveScale', 'waveSpeed', 'waveStrength', 'waveMotion01',
-            'lockWaveTravelToWind', 'waveDirOffsetDeg', 'waveAppearanceRotDeg',
-            'waveWarpLargeStrength', 'waveWarpSmallStrength', 'waveWarpMicroStrength', 'waveWarpTimeSpeed',
-            'waveBreakupStrength', 'waveBreakupScale', 'waveBreakupSpeed', 'waveBreakupWarp',
-            'waveBreakupDistortionStrength', 'waveBreakupSpecularStrength',
-            'waveMicroNormalStrength', 'waveMicroNormalScale', 'waveMicroNormalSpeed', 'waveMicroNormalWarp',
-            'waveMicroNormalDistortionStrength', 'waveMicroNormalSpecularStrength',
-            'waveEvolutionEnabled', 'waveEvolutionSpeed', 'waveEvolutionAmount', 'waveEvolutionScale'
-          ]
-        },
-        {
-          name: 'water-wind-coupling',
-          label: 'Wind Coupling',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'waveSpeedWindMinFactor', 'waveSpeedWindMaxFactor', 'waveGustSlewRate', 'waveStrengthWindMinFactor',
-            'waveIndoorDampingEnabled', 'waveIndoorDampingStrength', 'waveIndoorMinFactor',
-            'windDirResponsiveness',
-            'waveTriBlendAngleDeg', 'waveTriSideWeight',
-            'advectionDirOffsetDeg', 'advectionSpeed01'
-          ]
-        },
-        {
-          name: 'water-wind-override',
-          label: 'Wind Override',
-          type: 'folder',
-          expanded: false,
-          parameters: [
-            'windOverrideEnabled',
-            'windOverrideBearingDeg',
-            'windOverrideSpeed01'
-          ]
-        },
-        {
-          name: 'water-refraction',
-          label: 'Refraction',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'refractionMultiTapEnabled',
-            'distortionEdgeCenter', 'distortionEdgeFeather', 'distortionEdgeGamma',
-            'distortionShoreRemapLo', 'distortionShoreRemapHi', 'distortionShorePow', 'distortionShoreMin'
-          ]
-        },
-        {
-          name: 'water-chromatic-aberration',
-          label: 'Chromatic Aberration',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'chromaticAberrationEnabled',
-            'chromaticAberrationStrengthPx',
-            'chromaticAberrationThreshold', 'chromaticAberrationThresholdSoftness',
-            'chromaticAberrationKawaseBlurPx', 'chromaticAberrationSampleSpread',
-            'chromaticAberrationEdgeCenter', 'chromaticAberrationEdgeFeather',
-            'chromaticAberrationEdgeGamma', 'chromaticAberrationEdgeMin',
-            'chromaticAberrationDeadzone', 'chromaticAberrationDeadzoneSoftness'
-          ]
-        },
-        {
-          name: 'water-rain',
-          label: 'Precipitation Distortion',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'rainDistortionEnabled',
-            'rainDistortionUseWeather',
-            'rainDistortionPrecipitationOverride',
-            'rainDistortionStrengthPx', 'rainDistortionScale', 'rainDistortionSpeed',
-            'rainIndoorDampingEnabled', 'rainIndoorDampingStrength'
-          ]
-        },
-        {
-          name: 'water-specular',
-          label: 'Specular',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'specStrength', 'specPower', 'specModel', 'specClamp',
-            'specSunAzimuthDeg', 'specSunElevationDeg', 'specSunIntensity',
-            'specNormalStrength', 'specNormalScale', 'specNormalMode',
-            'specMicroStrength', 'specMicroScale', 'specAAStrength', 'specWaveStepMul',
-            'specForceFlatNormal', 'specDisableMasking', 'specDisableRainSlope',
-            'specRoughnessMin', 'specRoughnessMax', 'specSurfaceChaos', 'specF0', 'specMaskGamma',
-            'specSkyTint', 'skyIntensity', 'specShoreBias',
-            'specDistortionNormalStrength', 'specAnisotropy', 'specAnisoRatio'
-          ]
-        },
-        {
-          name: 'water-specular-highlights',
-          label: 'Specular Highlights',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'specHighlightsEnabled', 'specHighlightsStrength', 'specHighlightsPower', 'specHighlightsClamp',
-            'specHighlightsSunAzimuthDeg', 'specHighlightsSunElevationDeg', 'specHighlightsSunIntensity',
-            'specHighlightsNormalStrength', 'specHighlightsNormalScale',
-            'specHighlightsRoughnessMin', 'specHighlightsRoughnessMax',
-            'specHighlightsF0', 'specHighlightsSkyTint', 'specHighlightsMaskGamma', 'specHighlightsShoreBias'
-          ]
-        },
-        {
-          name: 'water-bloom-spec',
-          label: 'Bloom link (specular)',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: ['bloomSpecularEmit'],
-        },
-        {
-          name: 'water-cloud-shadow',
-          label: 'Cloud Shadow Modulation',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'cloudShadowEnabled',
-            'cloudShadowDarkenStrength', 'cloudShadowDarkenCurve',
-            'cloudShadowSpecularKill', 'cloudShadowSpecularCurve'
-          ]
-        },
-        {
-          name: 'water-cloud-reflection',
-          label: 'Cloud Reflection',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'cloudReflectionEnabled',
-            'cloudReflectionStrength'
-          ]
-        },
-        {
-          name: 'water-caustics',
-          label: 'Caustics',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'causticsEnabled',
-            'causticsBrightnessMaskEnabled',
-            'causticsIntensity', 'causticsScale', 'causticsSpeed', 'causticsSharpness',
-            'causticsEdgeLo', 'causticsEdgeHi',
-            'causticsBrightnessThreshold', 'causticsBrightnessSoftness', 'causticsBrightnessGamma'
-          ]
-        },
-        {
-          name: 'water-shore-foam-advanced',
-          label: 'Shore Foam (Advanced)',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'shoreFoamEnabled',
-            'shoreFoamStrength', 'shoreFoamThreshold', 'shoreFoamScale', 'shoreFoamSpeed',
-            'shoreFoamCoverage', 'shoreFoamSeedOffsetX', 'shoreFoamSeedOffsetY', 'shoreFoamTimeOffset',
-            'shoreFoamColor', 'shoreFoamTint', 'shoreFoamTintStrength',
-            'shoreFoamColorVariation', 'shoreFoamOpacity',
-            'shoreFoamBrightness', 'shoreFoamContrast', 'shoreFoamGamma',
-            'shoreFoamLightingEnabled',
-            'shoreFoamAmbientLight', 'shoreFoamSceneLightInfluence',
-            'shoreFoamDarknessResponse',
-            'shoreFoamFilamentsEnabled',
-            'shoreFoamFilamentsStrength', 'shoreFoamFilamentsScale',
-            'shoreFoamFilamentsLength', 'shoreFoamFilamentsWidth',
-            'shoreFoamThicknessVariation', 'shoreFoamThicknessScale',
-            'shoreFoamEdgeDetail', 'shoreFoamEdgeDetailScale',
-            'shoreFoamWaveDistortionStrength',
-            'shoreFoamNoiseDistortionEnabled',
-            'shoreFoamNoiseDistortionStrength', 'shoreFoamNoiseDistortionScale',
-            'shoreFoamNoiseDistortionSpeed',
-            'shoreFoamEvolutionEnabled',
-            'shoreFoamEvolutionSpeed', 'shoreFoamEvolutionAmount',
-            'shoreFoamEvolutionScale',
-            'shoreFoamCoreWidth', 'shoreFoamCoreFalloff',
-            'shoreFoamTailWidth', 'shoreFoamTailFalloff',
-            'floatingFoamStrength', 'floatingFoamCoverage', 'floatingFoamScale', 'floatingFoamWaveDistortion',
-            'foamFlecksEnabled', 'foamFlecksIntensity'
-          ]
-        },
-        {
-          name: 'water-floating-foam-advanced',
-          label: 'Floating Foam (Advanced)',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'floatingFoamColor', 'floatingFoamTint', 'floatingFoamTintStrength',
-            'floatingFoamColorVariation', 'floatingFoamOpacity',
-            'floatingFoamBrightness', 'floatingFoamContrast', 'floatingFoamGamma',
-            'floatingFoamLightingEnabled',
-            'floatingFoamAmbientLight', 'floatingFoamSceneLightInfluence',
-            'floatingFoamDarknessResponse',
-            'floatingFoamShadowEnabled',
-            'floatingFoamShadowStrength', 'floatingFoamShadowSoftness',
-            'floatingFoamShadowDepth',
-            'floatingFoamFilamentsEnabled',
-            'floatingFoamFilamentsStrength', 'floatingFoamFilamentsScale',
-            'floatingFoamFilamentsLength', 'floatingFoamFilamentsWidth',
-            'floatingFoamThicknessVariation', 'floatingFoamThicknessScale',
-            'floatingFoamEdgeDetail', 'floatingFoamEdgeDetailScale',
-            'floatingFoamLayerCount', 'floatingFoamLayerOffset',
-            'floatingFoamWaveDistortionStrength',
-            'floatingFoamNoiseDistortionEnabled',
-            'floatingFoamNoiseDistortionStrength', 'floatingFoamNoiseDistortionScale',
-            'floatingFoamNoiseDistortionSpeed',
-            'floatingFoamEvolutionEnabled',
-            'floatingFoamEvolutionSpeed', 'floatingFoamEvolutionAmount',
-            'floatingFoamEvolutionScale'
-          ]
-        },
-        {
-          name: 'water-murk',
-          label: 'Murk',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'murkEnabled',
-            'murkIntensity', 'murkScale', 'murkSpeed',
-            'murkSeedOffsetX', 'murkSeedOffsetY',
-            'murkDepthLo', 'murkDepthHi', 'murkDepthFade',
-            'murkShadowEnabled', 'murkShadowStrength'
-          ]
-        },
-        {
-          name: 'water-murk-color',
-          label: 'Murk — Color',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'murkColor', 'murkColorAlt', 'murkColorVariation',
-            'murkHueScatter', 'murkSaturation', 'murkLumaVariation'
-          ]
-        },
-        {
-          name: 'water-murk-clouds',
-          label: 'Murk — Clouds & Patches',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'murkCloudLo', 'murkCloudHi', 'murkCloudGamma',
-            'murkPatchScale', 'murkPatchMix',
-            'murkDetailScale', 'murkDetailMix',
-            'murkDensityContrast', 'murkWarpStrength'
-          ]
-        },
-        {
-          name: 'water-murk-thickness',
-          label: 'Murk — Thickness',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'murkThicknessVariation', 'murkThicknessChaos',
-            'murkStrengthLo', 'murkStrengthHi'
-          ]
-        },
-        {
-          name: 'water-murk-chaos',
-          label: 'Murk — Chaos',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'murkChaos', 'murkChaosSpeed'
-          ]
-        },
-        {
-          name: 'water-murk-grain',
-          label: 'Murk — Grain',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'murkGrainScale', 'murkGrainSpeed', 'murkGrainStrength'
-          ]
-        },
-        {
-          name: 'water-bathymetry',
-          label: 'Bathymetry (Volumetric)',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'bathymetryEnabled',
-            'bathymetryDepthCurve', 'bathymetryMaxDepth', 'bathymetryStrength',
-            'bathymetryAbsorptionCoeff', 'bathymetryDeepScatterColor'
+          subgroups: [
+            {
+              label: 'Refraction',
+              parameters: [
+                'refractionMultiTapEnabled',
+                'distortionEdgeCenter', 'distortionEdgeFeather', 'distortionEdgeGamma',
+                'distortionShoreRemapLo', 'distortionShoreRemapHi', 'distortionShorePow', 'distortionShoreMin'
+              ]
+            },
+            {
+              label: 'Murk visibility',
+              parameters: [
+                'murkEnabled',
+                'murkIntensity', 'murkScale', 'murkSpeed',
+                'murkSeedOffsetX', 'murkSeedOffsetY',
+                'murkDepthLo', 'murkDepthHi', 'murkDepthFade',
+                'murkShadowEnabled', 'murkShadowStrength'
+              ]
+            },
+            {
+              label: 'Murk color',
+              parameters: [
+                'murkColor', 'murkColorAlt', 'murkColorVariation',
+                'murkHueScatter', 'murkSaturation', 'murkLumaVariation'
+              ]
+            },
+            {
+              label: 'Murk clouds & patches',
+              parameters: [
+                'murkCloudLo', 'murkCloudHi', 'murkCloudGamma',
+                'murkPatchScale', 'murkPatchMix',
+                'murkDetailScale', 'murkDetailMix',
+                'murkDensityContrast', 'murkWarpStrength'
+              ]
+            },
+            {
+              label: 'Murk thickness',
+              parameters: [
+                'murkThicknessVariation', 'murkThicknessChaos',
+                'murkStrengthLo', 'murkStrengthHi'
+              ]
+            },
+            {
+              label: 'Murk chaos',
+              parameters: [
+                'murkChaos', 'murkChaosSpeed'
+              ]
+            },
+            {
+              label: 'Murk grain',
+              parameters: [
+                'murkGrainScale', 'murkGrainSpeed', 'murkGrainStrength'
+              ]
+            },
+            {
+              label: 'Caustics',
+              parameters: [
+                'causticsEnabled',
+                'causticsBrightnessMaskEnabled',
+                'causticsIntensity', 'causticsScale', 'causticsSpeed', 'causticsSharpness',
+                'causticsEdgeLo', 'causticsEdgeHi',
+                'causticsBrightnessThreshold', 'causticsBrightnessSoftness', 'causticsBrightnessGamma'
+              ]
+            },
+            {
+              label: 'Precipitation distortion',
+              parameters: [
+                'rainDistortionEnabled',
+                'rainDistortionUseWeather',
+                'rainDistortionPrecipitationOverride',
+                'rainDistortionStrengthPx', 'rainDistortionScale', 'rainDistortionSpeed',
+                'rainIndoorDampingEnabled', 'rainIndoorDampingStrength'
+              ]
+            }
           ]
         }
       ],
@@ -1486,9 +1425,9 @@ static getControlSchema() {
         waterDepthShadowEnabled: { type: 'boolean', default: false, label: 'Enable Depth Shadow' },
         waterDepthShadowStrength: { type: 'slider', min: 0, max: 0.5, step: 0.01, default: 0.15, label: 'Shadow Strength' },
         waterDepthShadowMinBrightness: { type: 'slider', min: 0.3, max: 1, step: 0.01, default: 0.68, label: 'Min Brightness' },
-        microChopIntensity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.71, label: 'Micro-Chop Intensity' },
-        microChopScale: { type: 'slider', min: 0.1, max: 3, step: 0.1, default: 1, label: 'Micro-Chop Scale' },
-        microChopSpeed: { type: 'slider', min: 0.1, max: 3, step: 0.1, default: 1.7, label: 'Micro-Chop Speed' },
+        microChopIntensity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.71, label: 'Intensity' },
+        microChopScale: { type: 'slider', min: 0.1, max: 3, step: 0.1, default: 1, label: 'Scale' },
+        microChopSpeed: { type: 'slider', min: 0.1, max: 3, step: 0.1, default: 1.7, label: 'Speed' },
 
         waveScale: { type: 'slider', min: 0.1, max: 16, step: 0.05, default: 6.35, label: 'Wave Scale' },
         waveSpeed: {
@@ -1500,7 +1439,7 @@ static getControlSchema() {
           label: 'Wave speed scale',
           tooltip: 'Multiplies wind-driven Gerstner phase speed (between calm and gust values below).',
         },
-        waveStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.2, label: 'Wave Strength' },
+        waveStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.2, label: 'Wave intensity' },
         waveMotion01: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Wave Motion Blend' },
         waveWarpLargeStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0, label: 'Warp Large Strength' },
         waveWarpSmallStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.02, label: 'Warp Small Strength' },
@@ -1518,7 +1457,7 @@ static getControlSchema() {
         waveMicroNormalWarp: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.85, label: 'Micro Normal Warp' },
         waveMicroNormalDistortionStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.1, label: 'Micro Distortion' },
         waveMicroNormalSpecularStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.35, label: 'Micro Specular' },
-        waveEvolutionEnabled: { type: 'boolean', default: true, label: 'Wave Evolution Enabled' },
+        waveEvolutionEnabled: { type: 'boolean', default: true, label: 'Evolution enabled' },
         waveEvolutionSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 2, label: 'Evolution Speed' },
         waveEvolutionAmount: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.3, label: 'Evolution Amount' },
         waveEvolutionScale: { type: 'slider', min: 0.05, max: 4, step: 0.01, default: 0.5, label: 'Evolution Scale' },
@@ -1615,17 +1554,17 @@ static getControlSchema() {
         },
 
         refractionMultiTapEnabled: { type: 'boolean', default: true, label: 'Multi-Tap Refraction' },
-        chromaticAberrationEnabled: { type: 'boolean', default: false, label: 'Chromatic Aberration Enabled' },
-        chromaticAberrationStrengthPx: { type: 'slider', min: 0, max: 8, step: 0.05, default: 2.5, label: 'Chromatic Strength (px)' },
-        chromaticAberrationThreshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.2, label: 'Chromatic Luma Threshold' },
-        chromaticAberrationThresholdSoftness: { type: 'slider', min: 0.001, max: 1, step: 0.01, default: 0.35, label: 'Chromatic Threshold Softness' },
-        chromaticAberrationKawaseBlurPx: { type: 'slider', min: 0, max: 8, step: 0.05, default: 1.75, label: 'Chromatic Kawase Blur (px)' },
-        chromaticAberrationSampleSpread: { type: 'slider', min: 0.25, max: 3, step: 0.01, default: 1, label: 'Chromatic Sample Spread' },
-        chromaticAberrationEdgeCenter: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Chromatic Edge Center' },
-        chromaticAberrationEdgeFeather: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.1, label: 'Chromatic Edge Feather' },
-        chromaticAberrationEdgeGamma: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 1, label: 'Chromatic Edge Gamma' },
-        chromaticAberrationEdgeMin: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0, label: 'Chromatic Edge Min' },
-        chromaticAberrationDeadzone: { type: 'slider', min: 0, max: 0.25, step: 0.001, default: 0.02, label: 'Chromatic Deadzone' },
+        chromaticAberrationEnabled: { type: 'boolean', default: false, label: 'Enabled' },
+        chromaticAberrationStrengthPx: { type: 'slider', min: 0, max: 8, step: 0.05, default: 2.5, label: 'Strength (px)' },
+        chromaticAberrationThreshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.2, label: 'Luma threshold' },
+        chromaticAberrationThresholdSoftness: { type: 'slider', min: 0.001, max: 1, step: 0.01, default: 0.35, label: 'Threshold softness' },
+        chromaticAberrationKawaseBlurPx: { type: 'slider', min: 0, max: 8, step: 0.05, default: 1.75, label: 'Kawase blur (px)' },
+        chromaticAberrationSampleSpread: { type: 'slider', min: 0.25, max: 3, step: 0.01, default: 1, label: 'Sample spread' },
+        chromaticAberrationEdgeCenter: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Edge center' },
+        chromaticAberrationEdgeFeather: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.1, label: 'Edge feather' },
+        chromaticAberrationEdgeGamma: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 1, label: 'Edge gamma' },
+        chromaticAberrationEdgeMin: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0, label: 'Edge min' },
+        chromaticAberrationDeadzone: { type: 'slider', min: 0, max: 0.25, step: 0.001, default: 0.02, label: 'Deadzone' },
         chromaticAberrationDeadzoneSoftness: { type: 'slider', min: 0.001, max: 0.25, step: 0.001, default: 0.02, label: 'Deadzone Softness' },
         distortionEdgeCenter: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Distortion Edge Center' },
         distortionEdgeFeather: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.06, label: 'Distortion Edge Feather' },
@@ -1635,7 +1574,7 @@ static getControlSchema() {
         distortionShorePow: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 1, label: 'Shore Power' },
         distortionShoreMin: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0, label: 'Shore Min' },
 
-        rainDistortionEnabled: { type: 'boolean', default: true, label: 'Precip Distortion Enabled' },
+        rainDistortionEnabled: { type: 'boolean', default: true, label: 'Enabled' },
         rainDistortionUseWeather: { type: 'boolean', default: true, label: 'Use Weather Precipitation' },
         rainDistortionPrecipitationOverride: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0, label: 'Precip Override' },
         rainDistortionStrengthPx: { type: 'slider', min: 0, max: 24, step: 0.1, default: 6, label: 'Distortion Strength (px)' },
@@ -1644,18 +1583,18 @@ static getControlSchema() {
         rainIndoorDampingEnabled: { type: 'boolean', default: true, label: 'Indoor Damping' },
         rainIndoorDampingStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1, label: 'Indoor Damping Strength' },
 
-        specStrength: { type: 'slider', min: 0, max: 200, step: 0.1, default: 50.2, label: 'Spec Strength' },
-        specPower: { type: 'slider', min: 0.1, max: 64, step: 0.1, default: 2.9, label: 'Spec Power' },
+        specStrength: { type: 'slider', min: 0, max: 200, step: 0.1, default: 50.2, label: 'Strength' },
+        specPower: { type: 'slider', min: 0.1, max: 64, step: 0.1, default: 2.9, label: 'Power' },
         specModel: {
           type: 'dropdown',
           default: 1,
-          label: 'Spec Model',
+          label: 'Model',
           options: {
             Legacy: 0,
             GGX: 1
           }
         },
-        specClamp: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.65, label: 'Spec Clamp' },
+        specClamp: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.65, label: 'Clamp' },
         specSunAzimuthDeg: { type: 'slider', min: 0, max: 360, step: 1, default: 135, label: 'Sun Azimuth (deg)' },
         specSunElevationDeg: { type: 'slider', min: 0, max: 90, step: 1, default: 45, label: 'Sun Elevation (deg)' },
         specSunIntensity: { type: 'slider', min: 0, max: 8, step: 0.01, default: 2.5, label: 'Sun Intensity' },
@@ -1674,7 +1613,7 @@ static getControlSchema() {
         },
         specMicroStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.92, label: 'Micro Strength' },
         specMicroScale: { type: 'slider', min: 0.1, max: 8, step: 0.01, default: 1.83, label: 'Micro Scale' },
-        specAAStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0, label: 'Spec AA Strength' },
+        specAAStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0, label: 'AA strength' },
         specWaveStepMul: { type: 'slider', min: 0.1, max: 6, step: 0.01, default: 2, label: 'Wave Step Multiplier' },
         specForceFlatNormal: { type: 'boolean', default: false, label: 'Force Flat Normal' },
         specDisableMasking: { type: 'boolean', default: false, label: 'Disable Spec Masking' },
@@ -1727,7 +1666,7 @@ static getControlSchema() {
         specSunElevationFalloffEnd: { type: 'slider', min: 0, max: 90, step: 0.5, default: 10, label: 'Falloff End (deg)' },
         specSunElevationFalloffCurve: { type: 'slider', min: 0.1, max: 8, step: 0.1, default: 2.5, label: 'Falloff Curve' },
 
-        cloudShadowEnabled: { type: 'boolean', default: true, label: 'Cloud Shadow Enabled' },
+        cloudShadowEnabled: { type: 'boolean', default: true, label: 'Shadow enabled' },
         cloudShadowDarkenStrength: { type: 'slider', min: 0, max: 3, step: 0.01, default: 1.25, label: 'Darken Strength' },
         cloudShadowDarkenCurve: { type: 'slider', min: 0.1, max: 8, step: 0.01, default: 1.5, label: 'Darken Curve' },
         cloudShadowSpecularKill: { type: 'slider', min: 0, max: 3, step: 0.01, default: 1, label: 'Specular Kill' },
@@ -1736,7 +1675,7 @@ static getControlSchema() {
         cloudReflectionEnabled: { type: 'boolean', default: true, label: 'Enabled' },
         cloudReflectionStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Strength' },
 
-        causticsEnabled: { type: 'boolean', default: true, label: 'Caustics Enabled' },
+        causticsEnabled: { type: 'boolean', default: true, label: 'Enabled' },
         causticsBrightnessMaskEnabled: { type: 'boolean', default: true, label: 'Brightness Masking' },
         causticsIntensity: { type: 'slider', min: 0, max: 20, step: 0.1, default: 15.5, label: 'Intensity' },
         causticsScale: { type: 'slider', min: 1, max: 200, step: 0.1, default: 174.3, label: 'Scale' },
@@ -1748,7 +1687,7 @@ static getControlSchema() {
         causticsBrightnessSoftness: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Brightness Softness' },
         causticsBrightnessGamma: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 0.49, label: 'Brightness Gamma' },
 
-        shoreFoamEnabled: { type: 'boolean', default: true, label: 'Shore Foam Enabled' },
+        shoreFoamEnabled: { type: 'boolean', default: true, label: 'Enabled' },
         shoreFoamStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.05, label: 'Strength' },
         shoreFoamThreshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Threshold' },
         shoreFoamScale: { type: 'slider', min: 1, max: 100, step: 0.1, default: 20, label: 'Scale' },
@@ -1838,7 +1777,7 @@ static getControlSchema() {
         foamFlecksEnabled: { type: 'boolean', default: false, label: 'Flecks Enabled' },
         foamFlecksIntensity: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.6, label: 'Flecks Intensity' },
 
-        murkEnabled: { type: 'boolean', default: true, label: 'Murk Enabled' },
+        murkEnabled: { type: 'boolean', default: true, label: 'Enabled' },
         murkIntensity: { type: 'slider', min: 0, max: 2, step: 0.01, default: 1.76, label: 'Intensity' },
         murkColor: { type: 'color', default: { r: 0.15, g: 0.22, b: 0.12 }, label: 'Base Color' },
         murkColorAlt: { type: 'color', default: { r: 0.12, g: 0.22, b: 0.08 }, label: 'Alt Color' },
@@ -1874,7 +1813,7 @@ static getControlSchema() {
         murkShadowEnabled: { type: 'boolean', default: true, label: 'Shadow Enabled' },
         murkShadowStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.7, label: 'Shadow Strength' },
 
-        bathymetryEnabled: { type: 'boolean', default: true, label: 'Bathymetry Enabled' },
+        bathymetryEnabled: { type: 'boolean', default: true, label: 'Enabled' },
         bathymetryDepthCurve: { type: 'slider', min: 0.05, max: 6, step: 0.01, default: 2, label: 'Depth Curve' },
         bathymetryMaxDepth: { type: 'slider', min: 0, max: 10, step: 0.1, default: 2, label: 'Max Depth' },
         bathymetryStrength: { type: 'slider', min: 0, max: 3, step: 0.01, default: 1, label: 'Strength' },

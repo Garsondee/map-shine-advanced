@@ -92,6 +92,38 @@ export function createMapPointMarkerGroup(x, y, z, color, index, options = {}) {
   return group;
 }
 
+/** Selection highlight ring color. */
+export const MAP_POINT_SELECTED_RING_COLOR = 0xffdd44;
+
+/**
+ * Apply or clear the selected-state visual on a handle group.
+ * @param {THREE.Group|null|undefined} handleGroup
+ * @param {boolean} selected
+ */
+export function applyMapPointHandleSelectionStyle(handleGroup, selected) {
+  if (!handleGroup) return;
+
+  const scale = selected ? 1.35 : 1;
+  handleGroup.scale.set(scale, scale, 1);
+
+  handleGroup.traverse((child) => {
+    if (!child?.isMesh || !child.material) return;
+    const geo = child.geometry;
+    if (!geo) return;
+
+    const params = geo.parameters;
+    const isOuterRing = params?.thetaSegments === MAP_POINT_MARKER_SEGMENTS
+      && params?.innerRadius === MAP_POINT_MARKER_RING.inner
+      && params?.outerRadius === MAP_POINT_MARKER_RING.outer;
+
+    if (isOuterRing && child.material.color) {
+      child.material.color.setHex(selected ? MAP_POINT_SELECTED_RING_COLOR : 0xffffff);
+      child.material.opacity = selected ? 1 : 0.92;
+      child.material.needsUpdate = true;
+    }
+  });
+}
+
 /**
  * Build the cursor preview ring used while placing points.
  * @param {number} color - Hex color

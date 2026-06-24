@@ -1915,6 +1915,15 @@ export class TweakpaneManager {
     const grid = document.createElement('div');
     grid.className = 'ms-quick-actions-grid';
 
+    const addGroupHeading = (title, opts = {}) => {
+      const heading = document.createElement('div');
+      heading.className = 'ms-quick-actions-heading';
+      heading.textContent = title;
+      grid.appendChild(heading);
+      if (opts.advanced) this._registerDomStripAsAdvanced(heading);
+      return heading;
+    };
+
     const addGroupBreak = () => {
       const divider = document.createElement('div');
       divider.className = 'ms-quick-actions-break';
@@ -1935,6 +1944,8 @@ export class TweakpaneManager {
       return btn;
     };
 
+    addGroupHeading('Scene Management');
+
     addGridButton('Defaults', () => {
       this.onMasterResetToDefaults();
     }, {
@@ -1950,8 +1961,6 @@ export class TweakpaneManager {
       title: 'Restore all effect parameters and global controls to the snapshot taken immediately before the last Defaults reset.',
     });
 
-    addGroupBreak();
-
     addGridButton('Texture Manager', () => {
       if (this.textureManager) this.textureManager.toggle();
     }, {
@@ -1965,6 +1974,60 @@ export class TweakpaneManager {
       advanced: true,
       title: 'Open the render-stack panel showing effect enable state, compositor layer order, mask wiring, and dependency hints for the live scene.',
     });
+
+    if (isGmLike()) {
+      addGridButton('Apply to All Scenes…', async () => {
+        await this.applyCurrentEffectsToAllScenes();
+      }, {
+        advanced: true,
+        title: 'Push the current UI settings for selected effects to every scene in the world. World Based effects update shared global storage instead of per-scene flags.',
+      });
+    }
+
+    addGridButton('Scene Recovery', async () => {
+      await this.attemptSceneRecovery();
+    }, {
+      danger: true,
+      advanced: true,
+      title: 'Create a new “[Recovered]” scene by cloning tiles, walls, tokens, and other content into a clean document. Does not delete the current scene; strips Map Shine flags that may be corrupt.',
+    });
+
+    addGridButton('Scene Reset', async () => {
+      try {
+        const fn = window.MapShine?.resetScene;
+        if (typeof fn !== 'function') {
+          ui.notifications.warn('Map Shine: Scene reset not available');
+          return;
+        }
+
+        const confirmed = await Dialog.confirm({
+          title: 'Confirm Scene Reset',
+          content: '<p>Reset Map Shine for this scene now?</p><p>This rebuilds Three.js rendering and may take a few seconds.</p>',
+          yes: () => true,
+          no: () => false,
+          defaultYes: false
+        });
+        if (!confirmed) return;
+
+        await fn();
+      } catch (e) {
+        try {
+          ui.notifications.error('Map Shine: Scene reset failed (see console)');
+        } catch (_) {
+        }
+        try {
+          console.error('[MapShine] Scene reset failed', e);
+        } catch (_) {
+        }
+      }
+    }, {
+      danger: true,
+      advanced: true,
+      title: 'Rebuild Map Shine Three.js rendering for this scene from scratch. Confirms before running; may take a few seconds but can fix a stuck or corrupted compositor.',
+    });
+
+    addGroupBreak();
+    addGroupHeading('Camera & Movement');
 
     addGridButton('Streaming Minimap', () => {
       const toggle = window.MapShine?.toggleStreamingMinimap;
@@ -1981,7 +2044,6 @@ export class TweakpaneManager {
       mm.setEnabled(!mm.isEnabled());
       ui.notifications?.info?.(`Streaming minimap ${mm.isEnabled() ? 'shown' : 'hidden'}.`);
     }, {
-      advanced: true,
       title: 'Toggle the live tile streaming minimap overlay (grid cells, frustum, VRAM stats, and fault dashboard).',
     });
 
@@ -2016,6 +2078,50 @@ export class TweakpaneManager {
     }, {
       title: 'Copy a tile streaming diagnostic report to the clipboard: VRAM budget, LOD, grid cells, floor visibility, and grey-screen warnings.',
     });
+
+    addGridButton('Token Movement', () => {
+      this.tokenMovementDialog?.toggle?.();
+    }, {
+      title: 'Configure token movement and elevation rules used when tokens travel across the Map Shine canvas and floor bands.',
+    });
+
+    addGridButton('Tile Motion', () => {
+      this.tileMotionDialog?.toggle?.();
+    }, {
+      title: 'Author animated tile motion: translate, rotate, and scale selected tiles with timing and easing for ambient movement.',
+    });
+
+    if (isGmLike()) {
+      addGridButton('Map Points', () => {
+        this.openMapPointsManagerDialog();
+      }, {
+        title: 'Manage map-point groups (area, line, point, rope) and bind particle or effect emitters to regions you draw on the map.',
+      });
+
+      addGridButton('Camera Path', () => {
+        if (!this.cameraPathDialog) {
+          ui.notifications?.warn?.('Camera Path not available (Map Shine not fully initialized yet)');
+          return;
+        }
+        this.cameraPathDialog.toggle();
+      }, {
+        title: 'Design cinematic camera sweeps with keyframes; preview pans, zooms, and optional time-of-day or environment ramps along the path.',
+      });
+
+      addGridButton('Levels Authoring', () => {
+        const dlg = window.MapShine?.levelsAuthoring;
+        if (!dlg) {
+          ui.notifications?.warn?.('Levels Authoring not available (Map Shine not fully initialized yet)');
+          return;
+        }
+        dlg.toggle?.();
+      }, {
+        title: 'Edit multi-floor level bands, elevations, and per-floor mask associations for stacked or multi-level scenes.',
+      });
+    }
+
+    addGroupBreak();
+    addGroupHeading('Developer & Diagnostics', { advanced: true });
 
     addGridButton('Diagnostic Center', () => {
       if (this.diagnosticCenter) this.diagnosticCenter.toggle();
@@ -2064,49 +2170,7 @@ export class TweakpaneManager {
       title: 'Record per-effect CPU and GPU timing, frame statistics, and draw-call deltas; export profiling data to find performance bottlenecks.',
     });
 
-    addGroupBreak();
-
     if (isGmLike()) {
-      addGridButton('🎯 Map Points', () => {
-        this.openMapPointsManagerDialog();
-      }, {
-        title: 'Manage map-point groups (area, line, point, rope) and bind particle or effect emitters to regions you draw on the map.',
-      });
-    }
-
-    addGridButton('🧭 Tile Motion', () => {
-      this.tileMotionDialog?.toggle?.();
-    }, {
-      title: 'Author animated tile motion: translate, rotate, and scale selected tiles with timing and easing for ambient movement.',
-    });
-
-    addGridButton('🚶 Token Movement', () => {
-      this.tokenMovementDialog?.toggle?.();
-    }, {
-      title: 'Configure token movement and elevation rules used when tokens travel across the Map Shine canvas and floor bands.',
-    });
-
-    if (isGmLike()) {
-      addGridButton('🎬 Camera Path', () => {
-        if (!this.cameraPathDialog) {
-          ui.notifications?.warn?.('Camera Path not available (Map Shine not fully initialized yet)');
-          return;
-        }
-        this.cameraPathDialog.toggle();
-      }, {
-        title: 'Design cinematic camera sweeps with keyframes; preview pans, zooms, and optional time-of-day or environment ramps along the path.',
-      });
-      addGridButton('🧱 Levels Authoring', () => {
-        const dlg = window.MapShine?.levelsAuthoring;
-        if (!dlg) {
-          ui.notifications?.warn?.('Levels Authoring not available (Map Shine not fully initialized yet)');
-          return;
-        }
-        dlg.toggle?.();
-      }, {
-        title: 'Edit multi-floor level bands, elevations, and per-floor mask associations for stacked or multi-level scenes.',
-      });
-
       addGridButton('Copy From Scene', async () => {
         await this.importSingleEffectFromScene();
       }, {
@@ -2120,58 +2184,7 @@ export class TweakpaneManager {
         advanced: true,
         title: 'Pick which registered effects on this scene should be reset to schema defaults without touching effects you leave unchecked.',
       });
-
-      addGridButton('Apply to All Scenes…', async () => {
-        await this.applyCurrentEffectsToAllScenes();
-      }, {
-        advanced: true,
-        title: 'Push the current UI settings for selected effects to every scene in the world. World Based effects update shared global storage instead of per-scene flags.',
-      });
     }
-
-    addGroupBreak();
-
-    addGridButton('Scene Recovery', async () => {
-      await this.attemptSceneRecovery();
-    }, {
-      danger: true,
-      advanced: true,
-      title: 'Create a new “[Recovered]” scene by cloning tiles, walls, tokens, and other content into a clean document. Does not delete the current scene; strips Map Shine flags that may be corrupt.',
-    });
-
-    addGridButton('Scene Reset', async () => {
-      try {
-        const fn = window.MapShine?.resetScene;
-        if (typeof fn !== 'function') {
-          ui.notifications.warn('Map Shine: Scene reset not available');
-          return;
-        }
-
-        const confirmed = await Dialog.confirm({
-          title: 'Confirm Scene Reset',
-          content: '<p>Reset Map Shine for this scene now?</p><p>This rebuilds Three.js rendering and may take a few seconds.</p>',
-          yes: () => true,
-          no: () => false,
-          defaultYes: false
-        });
-        if (!confirmed) return;
-
-        await fn();
-      } catch (e) {
-        try {
-          ui.notifications.error('Map Shine: Scene reset failed (see console)');
-        } catch (_) {
-        }
-        try {
-          console.error('[MapShine] Scene reset failed', e);
-        } catch (_) {
-        }
-      }
-    }, {
-      danger: true,
-      advanced: true,
-      title: 'Rebuild Map Shine Three.js rendering for this scene from scratch. Confirms before running; may take a few seconds but can fix a stuck or corrupted compositor.',
-    });
 
     contentElement.appendChild(grid);
 
@@ -4801,6 +4814,19 @@ export class TweakpaneManager {
     }
   }
 
+  registerEffectHub(hubId, hubTitle, categoryId = null, options = {}) {
+    const schema = {
+      uiContainerOnly: true,
+      enabled: true,
+      advanced: options.advanced === true,
+      groups: [],
+      parameters: {
+        enabled: { type: 'boolean', default: true, hidden: true },
+      },
+    };
+    this.registerEffect(hubId, hubTitle, schema, () => {}, categoryId);
+  }
+
   registerEffectUnderEffect(parentEffectId, effectId, effectName, schema, updateCallback) {
     const parentEffect = this.effectFolders[parentEffectId];
     if (!parentEffect?.folder) {
@@ -5054,6 +5080,18 @@ export class TweakpaneManager {
       statusElement: null,
       dependencyState: {}
     };
+
+    if (schema.uiContainerOnly === true) {
+      this.effectCallbacks.set(effectId, updateCallback);
+      folder.on('fold', (ev) => {
+        this.accordionStates[effectId] = ev.expanded;
+        this.saveUIState();
+      });
+      if (schema.advanced === true && folder.element) {
+        this._registerAdvancedTarget(folder.element, { advanced: true, kind: 'effect' });
+      }
+      return;
+    }
 
     if (!schema.parameters) schema.parameters = {};
     if (!schema.parameters.enabled) {
@@ -5630,26 +5668,71 @@ export class TweakpaneManager {
         this._registerAdvancedTarget(targetContainer.element, { advanced: true, kind: 'group' });
       }
 
-      for (const paramId of group.parameters || []) {
-        const paramDef = schema.parameters[paramId];
-        if (!paramDef) {
-          log.warn(`Parameter ${paramId} not found in schema`);
-          continue;
-        }
-
-        const effectiveDef = group.advanced === true
-          ? { ...paramDef, advanced: paramDef.advanced ?? true }
-          : paramDef;
-
-        this.buildParameterControl(
+      if (group.parameters?.length) {
+        this._buildSchemaGroupParameters(
           effectId,
           targetContainer,
-          paramId,
-          effectiveDef,
+          schema,
+          group.parameters,
+          group.advanced,
+          group.type,
           updateCallback,
           savedParams
         );
       }
+
+      for (const subgroup of group.subgroups || []) {
+        let subContainer = targetContainer;
+        if (subgroup.label) {
+          subContainer = targetContainer.addFolder({
+            title: subgroup.label,
+            expanded: subgroup.expanded ?? false
+          });
+        }
+
+        if (subgroup.advanced === true && subContainer?.element) {
+          this._registerAdvancedTarget(subContainer.element, { advanced: true, kind: 'group' });
+        }
+
+        const subgroupAdvanced = subgroup.advanced ?? group.advanced;
+        this._buildSchemaGroupParameters(
+          effectId,
+          subContainer,
+          schema,
+          subgroup.parameters,
+          subgroupAdvanced,
+          group.type,
+          updateCallback,
+          savedParams
+        );
+      }
+    }
+  }
+
+  /**
+   * Build parameter controls for a schema group or subgroup parameter list.
+   * @private
+   */
+  _buildSchemaGroupParameters(effectId, container, schema, paramIds, groupAdvanced, groupType, updateCallback, savedParams) {
+    for (const paramId of paramIds || []) {
+      const paramDef = schema.parameters[paramId];
+      if (!paramDef) {
+        log.warn(`Parameter ${paramId} not found in schema`);
+        continue;
+      }
+
+      const effectiveDef = groupAdvanced === true && groupType !== 'folder'
+        ? { ...paramDef, advanced: paramDef.advanced ?? true }
+        : paramDef;
+
+      this.buildParameterControl(
+        effectId,
+        container,
+        paramId,
+        effectiveDef,
+        updateCallback,
+        savedParams
+      );
     }
   }
 
@@ -5684,23 +5767,40 @@ export class TweakpaneManager {
           this._registerAdvancedTarget(targetContainer.element, { advanced: true, kind: 'group' });
         }
 
-        // Build controls for this group's parameters
-        for (const paramId of group.parameters) {
-          const paramDef = schema.parameters[paramId];
-          if (!paramDef) {
-            log.warn(`Parameter ${paramId} not found in schema`);
-            continue;
-          }
-
-          const effectiveDef = group.advanced === true && group.type !== 'folder'
-            ? { ...paramDef, advanced: paramDef.advanced ?? true }
-            : paramDef;
-
-          this.buildParameterControl(
+        if (group.parameters?.length) {
+          this._buildSchemaGroupParameters(
             effectId,
             targetContainer,
-            paramId,
-            effectiveDef,
+            schema,
+            group.parameters,
+            group.advanced,
+            group.type,
+            updateCallback,
+            savedParams
+          );
+        }
+
+        for (const subgroup of group.subgroups || []) {
+          let subContainer = targetContainer;
+          if (subgroup.label) {
+            subContainer = targetContainer.addFolder({
+              title: subgroup.label,
+              expanded: subgroup.expanded ?? false
+            });
+          }
+
+          if (subgroup.advanced === true && subContainer?.element) {
+            this._registerAdvancedTarget(subContainer.element, { advanced: true, kind: 'group' });
+          }
+
+          const subgroupAdvanced = subgroup.advanced ?? group.advanced;
+          this._buildSchemaGroupParameters(
+            effectId,
+            subContainer,
+            schema,
+            subgroup.parameters,
+            subgroupAdvanced,
+            group.type,
             updateCallback,
             savedParams
           );
@@ -6296,6 +6396,7 @@ export class TweakpaneManager {
   _getRegisteredEffectsRowsForBulkUi() {
     const rows = [];
     for (const effectId of Object.keys(this.effectFolders || {})) {
+      if (this.effectFolders[effectId]?.schema?.uiContainerOnly === true) continue;
       const display = this.effectFolders[effectId]?.folder?.title || effectId;
       rows.push({
         targetEffectId: effectId,
@@ -6725,6 +6826,10 @@ export class TweakpaneManager {
     const effectData = this.effectFolders[effectId];
     if (!effectData) {
       log.error(`Cannot reset ${effectId}: effect not registered`);
+      return;
+    }
+
+    if (effectData.schema?.uiContainerOnly === true) {
       return;
     }
 
@@ -9956,6 +10061,46 @@ export class TweakpaneManager {
   }
 
   /**
+   * Build the per-point rows for the group edit dialog.
+   * @param {import('../scene/map-points-manager.js').MapPointGroup} group
+   * @param {number|null|undefined} canvasHeight
+   * @returns {string}
+   * @private
+   */
+  _buildMapPointPointsListHtml(group, canvasHeight) {
+    const pointCount = group.points?.length || 0;
+    const h = canvasHeight;
+    if (pointCount <= 0) {
+      return `<div class="msa-mp-empty">No points yet. Use <strong>Add Points</strong> to place coordinates on the map.</div>`;
+    }
+
+    return `
+      <div class="points-list msa-mp-points-list">
+        ${group.points.map((p, idx) => {
+          const x = Number(p?.x);
+          const yWorld = Number(p?.y);
+          const y = Number.isFinite(h) ? (h - yWorld) : yWorld;
+          const xTxt = Number.isFinite(x) ? x.toFixed(0) : '—';
+          const yTxt = Number.isFinite(y) ? y.toFixed(0) : '—';
+          return `
+            <div class="msa-mp-point-row">
+              <span class="msa-mp-point-coords" title="Scene coordinates">#${idx + 1}: (${xTxt}, ${yTxt})</span>
+              <div class="msa-mp-point-actions">
+                <button type="button" class="msa-mp-btn msa-mp-btn--secondary msa-mp-btn--icon center-point-btn" data-point-index="${idx}" title="Center map on this point">
+                  <i class="fas fa-crosshairs"></i>
+                </button>
+                <button type="button" class="msa-mp-btn msa-mp-btn--danger msa-mp-btn--icon remove-point-btn" data-point-index="${idx}" title="Remove this point">
+                  <i class="fas fa-times"></i>
+                </button>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `;
+  }
+
+  /**
    * Open a dialog to select effect type and start map point drawing
    */
   openMapPointDrawingDialog() {
@@ -10015,7 +10160,6 @@ export class TweakpaneManager {
 
     // Count existing groups
     const existingGroupCount = mapPointsManager?.groups?.size || 0;
-    const showHelpers = mapPointsManager?.showVisualHelpers || false;
 
     // Build dialog content
     const content = `
@@ -10062,10 +10206,6 @@ export class TweakpaneManager {
           <span class="msa-mp-toolbar__meta">
             ${existingGroupCount} existing group${existingGroupCount !== 1 ? 's' : ''} on this scene
           </span>
-          <label class="msa-mp-checkbox-row">
-            <input type="checkbox" name="showExisting" ${showHelpers ? 'checked' : ''}>
-            Show existing
-          </label>
         </div>
         <div class="msa-mp-controls-box">
           <p class="msa-mp-controls-box__title">Drawing controls</p>
@@ -10086,7 +10226,8 @@ export class TweakpaneManager {
       close: () => {
         const im = window.MapShine?.interactionManager;
         if (!im?.mapPointDraw?.active) {
-          mapPointsManager?.setShowVisualHelpers?.(false);
+          im?.mapPointDrawHandler?.endManagerSession?.();
+          mapPointsManager?.exitEditorMode?.();
         }
       },
       buttons: {
@@ -10153,13 +10294,9 @@ export class TweakpaneManager {
         html.find('[name="effectTarget"]').on('change', updateGroupTypeForRope);
         updateGroupTypeForRope();
 
-        // Handle "Show existing" checkbox toggle
-        html.find('[name="showExisting"]').on('change', (ev) => {
-          const show = ev.target.checked;
-          if (mapPointsManager) {
-            mapPointsManager.setShowVisualHelpers(show);
-          }
-        });
+        if (existingGroupCount > 0) {
+          mapPointsManager?.enterEditorMode?.();
+        }
       }
     }, {
       width: 520,
@@ -10294,10 +10431,6 @@ export class TweakpaneManager {
     const content = `
       <div class="map-points-manager-dialog msa-mp-form">
         <div class="msa-mp-manager-header">
-          <label class="msa-mp-checkbox-row">
-            <input type="checkbox" name="showHelpers" ${mapPointsManager.showVisualHelpers ? 'checked' : ''}>
-            Show visual helpers
-          </label>
           <div class="msa-mp-toolbar">
             <span class="msa-mp-toolbar__meta">
               ${mapPointsManager.groups.size} group${mapPointsManager.groups.size !== 1 ? 's' : ''}
@@ -10309,6 +10442,11 @@ export class TweakpaneManager {
             ` : ''}
           </div>
         </div>
+        <p class="msa-mp-manager-lede msa-mp-manager-lede--canvas">
+          <strong>On the map:</strong> drag handles to move points; drag on empty space to box-select (Shift adds, Ctrl removes).
+          <strong>Delete</strong> removes selected points. <strong>Right-click</strong> a group for quick actions.
+          Labels match the same clusters as the on/off toggles.
+        </p>
         ${game.user?.isGM ? `
         <p class="msa-mp-manager-lede">
           Level badges show each group’s floor lock and whether it is visible on the level you are viewing now.
@@ -10336,13 +10474,13 @@ export class TweakpaneManager {
           icon: '<i class="fas fa-times"></i>',
           label: 'Close',
           callback: () => {
-            mapPointsManager.setShowVisualHelpers(false);
+            window.MapShine?.interactionManager?.mapPointDrawHandler?.endManagerSession?.();
           }
         }
       },
       default: 'close',
       close: () => {
-        mapPointsManager.setShowVisualHelpers(false);
+        window.MapShine?.interactionManager?.mapPointDrawHandler?.endManagerSession?.();
       },
       render: (html) => {
         html.closest('.app.window-app')?.addClass('msa-mp-dialog msa-mp-dialog--manage');
@@ -10352,114 +10490,108 @@ export class TweakpaneManager {
           ev.stopPropagation();
         });
 
-        // Handle show helpers toggle
-        html.find('[name="showHelpers"]').on('change', (ev) => {
-          mapPointsManager.setShowVisualHelpers(ev.target.checked);
+        const interactionManager = window.MapShine?.interactionManager;
+        const refreshGroupsList = () => {
+          html.find('.msa-mp-groups-list').html(buildGroupsList());
+          bindGroupActions();
+        };
+
+        interactionManager?.mapPointDrawHandler?.startManagerSession?.({
+          onGroupsChanged: refreshGroupsList,
         });
 
-        html.find('.rebuild-clusters-btn').on('click', async (ev) => {
-          ev.preventDefault();
-          ev.stopPropagation();
-          await mapPointsManager.rebuildControlClusters();
-          dialog.close();
-          this.openMapPointsManagerDialog();
-        });
-
-        // Handle group action buttons
-        html.find('.group-action-btn').on('click', async (ev) => {
-          ev.stopPropagation();
-          const btn = ev.currentTarget;
-          const action = btn.dataset.action;
-          const groupId = btn.dataset.groupId;
-          
-          if (action === 'delete') {
-            const group = mapPointsManager.getGroup(groupId);
-            const confirmed = await Dialog.confirm({
-              title: 'Delete Map Point Group',
-              content: `<p>Are you sure you want to delete "${group?.label || 'this group'}"?</p><p>This cannot be undone.</p>`,
-              yes: () => true,
-              no: () => false
-            });
-            
-            if (confirmed) {
-              const ok = await mapPointsManager.deleteGroup(groupId);
-              if (ok) {
-                ui.notifications.info('Map point group deleted');
-                dialog.close();
-                this.openMapPointsManagerDialog();
-              } else {
-                ui.notifications.warn('Failed to delete map point group (insufficient permissions or save error).');
-              }
-            }
-          } else if (action === 'toggle-power') {
-            const ok = await mapPointsManager.toggleClusterForGroup(groupId);
-            if (ok) {
-              dialog.close();
-              this.openMapPointsManagerDialog();
-            } else {
-              ui.notifications.warn('Failed to toggle effect cluster.');
-            }
-          } else if (action === 'info') {
-            await copyMapPointGroupInfoToClipboard(groupId, mapPointsManager);
-          } else if (action === 'edit') {
-            dialog.close();
-            this.openGroupEditDialog(groupId);
-          } else if (action === 'duplicate') {
-            const group = mapPointsManager.getGroup(groupId);
-            if (!group) return;
-            const newGroup = await mapPointsManager.createGroup({
-              ...group,
-              id: undefined,
-              label: `${group.label || 'Group'} (copy)`,
-              metadata: mapPointsManager.buildMetadataFromLevelSelection(
-                {
-                  mode: group.metadata?.levelBinding?.mode === 'locked' ? 'locked' : 'all-levels',
-                  levelId: group.metadata?.levelBinding?.floorKey ?? null,
-                  renderLayer: group.metadata?.renderLayer,
-                },
-                group.metadata,
-              ),
-            });
-            ui.notifications.info(`Duplicated: ${newGroup.label}`);
-            if (mapPointsManager.showVisualHelpers) {
-              mapPointsManager.setShowVisualHelpers(true);
-            }
+        const bindGroupActions = () => {
+          html.find('.rebuild-clusters-btn').off('click').on('click', async (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            await mapPointsManager.rebuildControlClusters();
             dialog.close();
             this.openMapPointsManagerDialog();
-          } else if (action === 'focus') {
-            const group = mapPointsManager.getGroup(groupId);
-            if (group && group.points && group.points.length > 0) {
-              // Calculate center of group
-              const bounds = mapPointsManager.getAreaBounds(groupId) || mapPointsManager._computeBounds(group.points);
-              if (bounds) {
-                // Pan canvas to center on group
-                const foundryPos = Coordinates.toFoundry(bounds.centerX, bounds.centerY);
-                canvas.pan({ x: foundryPos.x, y: foundryPos.y });
-                // Ensure helpers are visible
-                mapPointsManager.setShowVisualHelpers(true);
-                html.find('[name="showHelpers"]').prop('checked', true);
+          });
+
+          html.find('.group-action-btn').off('click').on('click', async (ev) => {
+            ev.stopPropagation();
+            const btn = ev.currentTarget;
+            const action = btn.dataset.action;
+            const groupId = btn.dataset.groupId;
+            
+            if (action === 'delete') {
+              const group = mapPointsManager.getGroup(groupId);
+              const confirmed = await Dialog.confirm({
+                title: 'Delete Map Point Group',
+                content: `<p>Are you sure you want to delete "${group?.label || 'this group'}"?</p><p>This cannot be undone.</p>`,
+                yes: () => true,
+                no: () => false
+              });
+              
+              if (confirmed) {
+                const ok = await mapPointsManager.deleteGroup(groupId);
+                if (ok) {
+                  ui.notifications.info('Map point group deleted');
+                  refreshGroupsList();
+                } else {
+                  ui.notifications.warn('Failed to delete map point group (insufficient permissions or save error).');
+                }
+              }
+            } else if (action === 'toggle-power') {
+              const ok = await mapPointsManager.toggleClusterForGroup(groupId);
+              if (ok) {
+                refreshGroupsList();
+              } else {
+                ui.notifications.warn('Failed to toggle effect cluster.');
+              }
+            } else if (action === 'info') {
+              await copyMapPointGroupInfoToClipboard(groupId, mapPointsManager);
+            } else if (action === 'edit') {
+              dialog.close();
+              this.openGroupEditDialog(groupId);
+            } else if (action === 'duplicate') {
+              const group = mapPointsManager.getGroup(groupId);
+              if (!group) return;
+              const newGroup = await mapPointsManager.createGroup({
+                ...group,
+                id: undefined,
+                label: `${group.label || 'Group'} (copy)`,
+                metadata: mapPointsManager.buildMetadataFromLevelSelection(
+                  {
+                    mode: group.metadata?.levelBinding?.mode === 'locked' ? 'locked' : 'all-levels',
+                    levelId: group.metadata?.levelBinding?.floorKey ?? null,
+                    renderLayer: group.metadata?.renderLayer,
+                  },
+                  group.metadata,
+                ),
+              });
+              ui.notifications.info(`Duplicated: ${newGroup.label}`);
+              refreshGroupsList();
+            } else if (action === 'focus') {
+              const group = mapPointsManager.getGroup(groupId);
+              if (group?.points?.length > 0) {
+                const bounds = mapPointsManager.getAreaBounds(groupId) || mapPointsManager._computeBounds(group.points);
+                if (bounds) {
+                  const foundryPos = Coordinates.toFoundry(bounds.centerX, bounds.centerY);
+                  canvas.pan({ x: foundryPos.x, y: foundryPos.y });
+                }
               }
             }
-          }
-        });
+          });
 
-        // Handle clicking on a group item (select/highlight)
-        html.find('.map-point-group-item').on('click', (ev) => {
-          if (ev.target.closest('.group-action-btn')) return;
-          
-          const groupId = ev.currentTarget.dataset.groupId;
-          const group = mapPointsManager.getGroup(groupId);
-          
-          if (group && group.points && group.points.length > 0) {
-            const bounds = mapPointsManager.getAreaBounds(groupId) || mapPointsManager._computeBounds(group.points);
-            if (bounds) {
-              const foundryPos = Coordinates.toFoundry(bounds.centerX, bounds.centerY);
-              canvas.pan({ x: foundryPos.x, y: foundryPos.y });
-              mapPointsManager.setShowVisualHelpers(true);
-              html.find('[name="showHelpers"]').prop('checked', true);
+          html.find('.map-point-group-item').off('click').on('click', (ev) => {
+            if (ev.target.closest('.group-action-btn')) return;
+            
+            const groupId = ev.currentTarget.dataset.groupId;
+            const group = mapPointsManager.getGroup(groupId);
+            
+            if (group?.points?.length > 0) {
+              const bounds = mapPointsManager.getAreaBounds(groupId) || mapPointsManager._computeBounds(group.points);
+              if (bounds) {
+                const foundryPos = Coordinates.toFoundry(bounds.centerX, bounds.centerY);
+                canvas.pan({ x: foundryPos.x, y: foundryPos.y });
+              }
             }
-          }
-        });
+          });
+        };
+
+        bindGroupActions();
       }
     }, {
       width: 680,
@@ -10555,32 +10687,7 @@ export class TweakpaneManager {
     const levelBindingEditorHtml = renderMapPointLevelBindingEditor(group, levelBindingInfo, levelOptions);
 
     const h = canvas?.dimensions?.height;
-    const pointsListHtml = (pointCount > 0)
-      ? `
-        <div class="points-list msa-mp-points-list">
-          ${group.points.map((p, idx) => {
-            const x = Number(p?.x);
-            const yWorld = Number(p?.y);
-            const y = Number.isFinite(h) ? (h - yWorld) : yWorld;
-            const xTxt = Number.isFinite(x) ? x.toFixed(0) : '—';
-            const yTxt = Number.isFinite(y) ? y.toFixed(0) : '—';
-            return `
-              <div class="msa-mp-point-row">
-                <span class="msa-mp-point-coords" title="Scene coordinates">#${idx + 1}: (${xTxt}, ${yTxt})</span>
-                <div class="msa-mp-point-actions">
-                  <button type="button" class="msa-mp-btn msa-mp-btn--secondary msa-mp-btn--icon center-point-btn" data-point-index="${idx}" title="Center map on this point">
-                    <i class="fas fa-crosshairs"></i>
-                  </button>
-                  <button type="button" class="msa-mp-btn msa-mp-btn--danger msa-mp-btn--icon remove-point-btn" data-point-index="${idx}" title="Remove this point">
-                    <i class="fas fa-times"></i>
-                  </button>
-                </div>
-              </div>
-            `;
-          }).join('')}
-        </div>
-      `
-      : `<div class="msa-mp-empty">No points yet. Use <strong>Add Points</strong> to place coordinates on the map.</div>`;
+    const pointsListHtml = this._buildMapPointPointsListHtml(group, h);
 
     const isRopeGroup = group.effectTarget === 'rope' || group.type === 'rope';
     const intensityPct = ((group.emission?.intensity ?? 1.0) * 100).toFixed(0);
@@ -10688,7 +10795,10 @@ export class TweakpaneManager {
             </div>
           </div>
           <p class="msa-mp-hint msa-mp-hint--inline">
-            Drag handles on the map to reposition points. Use per-point buttons to jump the camera or remove a coordinate.
+            Points are shown on the map while this dialog is open. Drag handles to move; drag empty space to box-select.
+            <strong>Right-click</strong> the group on the map for quick actions.
+            <strong>Shift</strong> adds to selection, <strong>Ctrl</strong> removes. <strong>Delete</strong> removes selected points.
+            Hold <strong>Shift</strong> while dragging to snap to grid.
           </p>
           ${pointsListHtml}
         </section>
@@ -10698,6 +10808,9 @@ export class TweakpaneManager {
     const dialog = new Dialog({
       title: `Edit: ${group.label || 'Map Point Group'}`,
       content,
+      close: () => {
+        window.MapShine?.interactionManager?.mapPointDrawHandler?.endGroupEditSession?.();
+      },
       buttons: {
         save: {
           icon: '<i class="fas fa-save"></i>',
@@ -10745,11 +10858,7 @@ export class TweakpaneManager {
             
             await mapPointsManager.updateGroup(groupId, updates);
             ui.notifications.info('Group updated');
-            
-            // Refresh visual helpers if visible
-            if (mapPointsManager.showVisualHelpers) {
-              mapPointsManager.setShowVisualHelpers(true);
-            }
+            mapPointsManager.createVisualHelper(groupId, mapPointsManager.getGroup(groupId));
           }
         },
         info: {
@@ -10797,6 +10906,75 @@ export class TweakpaneManager {
         html.closest('.app.window-app')?.on('pointerdown', (ev) => {
           ev.stopPropagation();
         });
+
+        const interactionManager = window.MapShine?.interactionManager;
+        const refreshPointsPanel = () => {
+          const currentGroup = mapPointsManager.getGroup(groupId);
+          if (!currentGroup) {
+            dialog.close();
+            return;
+          }
+          const count = currentGroup.points?.length || 0;
+          html.find('.msa-mp-panel--points .msa-mp-toolbar__meta strong').text(String(count));
+          const panel = html.find('.msa-mp-panel--points');
+          panel.find('.msa-mp-points-list, .msa-mp-empty').remove();
+          panel.append(this._buildMapPointPointsListHtml(currentGroup, h));
+          bindPointRowHandlers();
+          interactionManager?.mapPointDrawHandler?.refreshHandleSelectionVisuals?.();
+        };
+
+        const bindPointRowHandlers = () => {
+          html.find('.center-point-btn').off('click').on('click', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            const idx = parseInt(ev.currentTarget.dataset.pointIndex);
+            if (!Number.isFinite(idx)) return;
+
+            const currentGroup = mapPointsManager.getGroup(groupId);
+            const point = currentGroup?.points?.[idx];
+            const x = Number(point?.x);
+            const yWorld = Number(point?.y);
+            if (!Number.isFinite(x) || !Number.isFinite(yWorld)) return;
+
+            const foundryY = Number.isFinite(h) ? (h - yWorld) : yWorld;
+            try {
+              canvas?.animatePan?.({ x, y: foundryY, duration: 250 });
+            } catch (_) {
+              canvas?.pan?.({ x, y: foundryY });
+            }
+          });
+
+          html.find('.remove-point-btn').off('click').on('click', async (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            const idx = parseInt(ev.currentTarget.dataset.pointIndex);
+            if (!Number.isFinite(idx)) return;
+
+            const confirmed = await Dialog.confirm({
+              title: 'Remove Point',
+              content: '<p>Remove this point from the group?</p>',
+              yes: () => true,
+              no: () => false
+            });
+            if (!confirmed) return;
+
+            const ok = await mapPointsManager.removePoint(groupId, idx);
+            if (!ok) return;
+
+            ui.notifications.info('Point removed');
+            if (!mapPointsManager.getGroup(groupId)) {
+              dialog.close();
+              this.openMapPointsManagerDialog();
+              return;
+            }
+            refreshPointsPanel();
+          });
+        };
+
+        interactionManager?.mapPointDrawHandler?.startGroupEditSession?.(groupId, {
+          onPointsChanged: refreshPointsPanel,
+        });
+        bindPointRowHandlers();
 
         // Prevent accidental Dialog submission (and closure) when selecting files in FilePicker.
         // Foundry Dialogs trigger the default button on Enter; FilePicker interactions can leak
@@ -10889,47 +11067,9 @@ export class TweakpaneManager {
           html.find('.intensity-value').text(`${(val * 100).toFixed(0)}%`);
         });
 
-        // Center map on a single point
-        html.find('.center-point-btn').on('click', (ev) => {
-          ev.preventDefault();
-          ev.stopPropagation();
-          const idx = parseInt(ev.currentTarget.dataset.pointIndex);
-          if (!Number.isFinite(idx)) return;
+        // Center map on a single point — handled by bindPointRowHandlers / refreshPointsPanel
 
-          const point = group.points?.[idx];
-          const x = Number(point?.x);
-          const yWorld = Number(point?.y);
-          if (!Number.isFinite(x) || !Number.isFinite(yWorld)) return;
-
-          const foundryY = Number.isFinite(h) ? (h - yWorld) : yWorld;
-          try {
-            canvas?.animatePan?.({ x, y: foundryY, duration: 250 });
-          } catch (_) {
-            canvas?.pan?.({ x, y: foundryY });
-          }
-        });
-
-        // Remove a single point
-        html.find('.remove-point-btn').on('click', async (ev) => {
-          ev.preventDefault();
-          ev.stopPropagation();
-          const idx = parseInt(ev.currentTarget.dataset.pointIndex);
-          if (!Number.isFinite(idx)) return;
-
-          const confirmed = await Dialog.confirm({
-            title: 'Remove Point',
-            content: '<p>Remove this point from the group?</p>',
-            yes: () => true,
-            no: () => false
-          });
-          if (!confirmed) return;
-
-          await mapPointsManager.removePoint(groupId, idx);
-          ui.notifications.info('Point removed');
-
-          dialog.close();
-          this.openGroupEditDialog(groupId);
-        });
+        // Remove a single point — handled by bindPointRowHandlers / refreshPointsPanel
 
         // Add points button
         html.find('.add-points-btn').on('click', () => {
@@ -10975,7 +11115,8 @@ export class TweakpaneManager {
           } catch (_) {
             canvas?.pan?.({ x: bounds.centerX, y: foundryY });
           }
-          mapPointsManager.setShowVisualHelpers(true);
+          mapPointsManager.createVisualHelpers();
+          interactionManager?.mapPointDrawHandler?.refreshHandleSelectionVisuals?.();
           ui.notifications.info('Centered on group');
         });
 

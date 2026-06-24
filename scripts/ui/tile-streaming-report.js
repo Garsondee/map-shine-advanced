@@ -6,6 +6,7 @@
 import { createLogger } from '../core/log.js';
 import { getTileStreamingManager } from '../streaming/tile-streaming-manager.js';
 import { getTextureBudgetTracker } from '../assets/TextureBudgetTracker.js';
+import { getAdaptiveBudgetController } from '../streaming/adaptive-budget-controller.js';
 import { estimateSceneMegapixels } from '../streaming/texture-budget-policy.js';
 import { selectLodFromZoom, resolveStreamingPixelRatio, resolveStreamingZoom } from '../streaming/streaming-grid.js';
 import { getTileDecodePoolStats, getPyramidBakeProgress } from '../streaming/texture-pyramid-builder.js';
@@ -266,6 +267,22 @@ function _deriveWarnings(report) {
       + 'LOD may be coarse or cells evicted.',
     );
   }
+
+  try {
+    const adaptive = getAdaptiveBudgetController().getState();
+    if (adaptive.growthAlert || adaptive.growthDiagnosis) {
+      const diag = adaptive.growthDiagnosis;
+      const delta = Math.max(0, (adaptive.liveTextureCount ?? 0) - (adaptive.minTextureCount ?? 0));
+      if (diag?.summary) {
+        warnings.push(`GPU texture inflation: ${diag.summary}`);
+      } else if (delta > 0) {
+        warnings.push(
+          `GPU texture count +${delta} above session floor ${adaptive.minTextureCount ?? '?'} `
+          + '— run MapShine.diagnoseTextures() to classify.',
+        );
+      }
+    }
+  } catch (_) {}
 
   if (report.streaming.backgroundGridCount > 0 && report.streaming.regionGridCount > 0) {
     const hiddenRegionTex = report.streaming.regionGrids.reduce((n, g) => {

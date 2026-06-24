@@ -9330,7 +9330,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
             } catch (_) {}
           };
 
-          uiManager.registerEffect('weather', 'Weather', weatherSchema, onWeatherUpdate, 'atmospheric');
+          uiManager.registerEffect('weather', 'Precipitation & Global Weather', weatherSchema, onWeatherUpdate, 'atmospheric');
         }, 'v2.registerWeatherUI.early', Severity.DEGRADED);
 
         safeCall(() => {
@@ -9615,62 +9615,70 @@ async function createThreeCanvas(scene, createOptions = {}) {
         }, 'v2.registerBloomUI', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect(
-            'overhead-shadows', 'Overhead Shadows',
-            OverheadShadowsEffectV2.getControlSchema(), _makeV2Callback('_overheadShadowEffect'), 'lighting'
+          uiManager.registerEffectHub('shadow-casters', 'Shadow Caster Systems', 'lighting');
+        }, 'v2.registerShadowCastersHubUI', Severity.DEGRADED);
+
+        safeCall(() => {
+          uiManager.registerEffectUnderEffect(
+            'shadow-casters', 'overhead-shadows', 'Overhead',
+            OverheadShadowsEffectV2.getControlSchema(), _makeV2Callback('_overheadShadowEffect'),
           );
         }, 'v2.registerOverheadShadowsUI', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect(
-            'building-shadows', 'Building Shadows',
-            BuildingShadowsEffectV2.getControlSchema(), _makeV2Callback('_buildingShadowEffect'), 'lighting'
+          uiManager.registerEffectUnderEffect(
+            'shadow-casters', 'building-shadows', 'Building',
+            BuildingShadowsEffectV2.getControlSchema(), _makeV2Callback('_buildingShadowEffect'),
           );
         }, 'v2.registerBuildingShadowsUI', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect(
-            'sky-reach-shadows', 'Sky Reach Shadows',
-            SkyReachShadowsEffectV2.getControlSchema(), _makeV2Callback('_skyReachShadowEffect'), 'lighting'
+          uiManager.registerEffectUnderEffect(
+            'shadow-casters', 'sky-reach-shadows', 'Sky Reach',
+            SkyReachShadowsEffectV2.getControlSchema(), _makeV2Callback('_skyReachShadowEffect'),
           );
         }, 'v2.registerSkyReachShadowsUI', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect(
-            'painted-shadows', 'Painted Shadows',
-            PaintedShadowEffectV2.getControlSchema(), _makeV2Callback('_paintedShadowEffect'), 'lighting'
+          uiManager.registerEffectUnderEffect(
+            'shadow-casters', 'painted-shadows', 'Painted',
+            PaintedShadowEffectV2.getControlSchema(), _makeV2Callback('_paintedShadowEffect'),
           );
         }, 'v2.registerPaintedShadowsUI', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect('atmospheric-fog', 'Fog & Air',
+          uiManager.registerEffect('atmospheric-fog', 'Atmospheric Fog & Air',
             AtmosphericFogEffectV2.getControlSchema(), _makeV2Callback('_atmosphericFogEffect'), 'atmospheric');
         }, 'v2.registerAtmosphericFogUI', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect('lightning', 'Lightning',
+          uiManager.registerEffectHub('cloud-systems', 'Cloud Systems', 'atmospheric');
+        }, 'v2.registerCloudSystemsHubUI', Severity.DEGRADED);
+
+        safeCall(() => {
+          uiManager.registerEffect('lightning', 'Overhead Lightning Bolts',
             LightningEffectV2.getControlSchema(), _makeV2Callback('_lightningEffect'), 'atmospheric');
         }, 'v2.registerLightningUI(V2)', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect('weather-lightning', 'Landscape Lightning',
+          uiManager.registerEffect('weather-lightning', 'Atmospheric Flash Lighting',
             WeatherLightningEffectV2.getControlSchema(), _makeV2Callback('_weatherLightningEffect'), 'atmospheric');
         }, 'v2.registerWeatherLightningUI(V2)', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect(
+          uiManager.registerEffectUnderEffect(
+            'cloud-systems',
             'ash-clouds',
             'Ash Ground Clouds',
             AshCloudEffectV2.getControlSchema(),
             _makeV2Callback('_ashCloudEffect'),
-            'atmospheric'
           );
         }, 'v2.registerAshCloudsUI', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect(
-            'cloud', 'Sprite Clouds',
-            CloudEffectV2.getControlSchema(), _makeV2Callback('_cloudEffect'), 'atmospheric'
+          uiManager.registerEffectUnderEffect(
+            'cloud-systems', 'cloud', 'Sprite Clouds',
+            CloudEffectV2.getControlSchema(), _makeV2Callback('_cloudEffect'),
           );
         }, 'v2.registerCloudUI', Severity.DEGRADED);
 
@@ -9695,13 +9703,17 @@ async function createThreeCanvas(scene, createOptions = {}) {
         }, 'v2.registerPrismUI', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect('bush', 'Bush',
-            BushEffectV2.getControlSchema(), _makeV2Callback('_bushEffect'), 'surface');
+          uiManager.registerEffectHub('foliage', 'Foliage & Vegetation', 'surface');
+        }, 'v2.registerFoliageHubUI', Severity.DEGRADED);
+
+        safeCall(() => {
+          uiManager.registerEffectUnderEffect('foliage', 'bush', 'Bush',
+            BushEffectV2.getControlSchema(), _makeV2Callback('_bushEffect'));
         }, 'v2.registerBushUI', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect('tree', 'Tree',
-            TreeEffectV2.getControlSchema(), _makeV2Callback('_treeEffect'), 'surface');
+          uiManager.registerEffectUnderEffect('foliage', 'tree', 'Tree',
+            TreeEffectV2.getControlSchema(), _makeV2Callback('_treeEffect'));
         }, 'v2.registerTreeUI', Severity.DEGRADED);
 
         safeCall(() => {
@@ -9752,14 +9764,9 @@ async function createThreeCanvas(scene, createOptions = {}) {
         }, 'v2.registerCandleFlamesUI(V2)', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect('colorCorrection', 'Camera Grade (HDR → LDR)',
+          uiManager.registerEffect('colorCorrection', 'Camera Grade',
             ColorCorrectionEffectV2.getControlSchema(), _makeV2Callback('_colorCorrectionEffect'), 'post');
         }, 'v2.registerColorCorrectionUI', Severity.DEGRADED);
-
-        safeCall(() => {
-          uiManager.registerEffect('sharpen', 'Sharpen',
-            SharpenEffectV2.getControlSchema(), _makeV2Callback('_sharpenEffect'), 'post');
-        }, 'v2.registerSharpenUI', Severity.DEGRADED);
 
         safeCall(() => {
           uiManager.registerEffect('lens', 'Lens',
@@ -9767,34 +9774,43 @@ async function createThreeCanvas(scene, createOptions = {}) {
         }, 'v2.registerLensUI', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect('dotScreen', 'Dot Screen',
-            DotScreenEffectV2.getControlSchema(), _makeV2Callback('_dotScreenEffect'), 'post');
+          uiManager.registerEffectHub('stylized-post', 'Stylized Post-Processing', 'post', { advanced: true });
+        }, 'v2.registerStylizedPostHubUI', Severity.DEGRADED);
+
+        safeCall(() => {
+          uiManager.registerEffectUnderEffect('stylized-post', 'sharpen', 'Sharpen',
+            SharpenEffectV2.getControlSchema(), _makeV2Callback('_sharpenEffect'));
+        }, 'v2.registerSharpenUI', Severity.DEGRADED);
+
+        safeCall(() => {
+          uiManager.registerEffectUnderEffect('stylized-post', 'dotScreen', 'Dot Screen',
+            DotScreenEffectV2.getControlSchema(), _makeV2Callback('_dotScreenEffect'));
         }, 'v2.registerDotScreenUI', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect('halftone', 'Halftone',
-            HalftoneEffectV2.getControlSchema(), _makeV2Callback('_halftoneEffect'), 'post');
+          uiManager.registerEffectUnderEffect('stylized-post', 'halftone', 'Halftone',
+            HalftoneEffectV2.getControlSchema(), _makeV2Callback('_halftoneEffect'));
         }, 'v2.registerHalftoneUI', Severity.DEGRADED);
         safeCall(() => loadingOverlay.setStage('final.controls', 0.70, undefined, { keepAuto: true }), 'overlay.ui.p3', Severity.COSMETIC);
 
         safeCall(() => {
-          uiManager.registerEffect('ascii', 'ASCII Art',
-            AsciiEffectV2.getControlSchema(), _makeV2Callback('_asciiEffect'), 'post');
+          uiManager.registerEffectUnderEffect('stylized-post', 'ascii', 'ASCII Art',
+            AsciiEffectV2.getControlSchema(), _makeV2Callback('_asciiEffect'));
         }, 'v2.registerAsciiUI', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect('dazzleOverlay', 'Dazzle Overlay',
-            DazzleOverlayEffectV2.getControlSchema(), _makeV2Callback('_dazzleOverlayEffect'), 'post');
+          uiManager.registerEffectUnderEffect('stylized-post', 'dazzleOverlay', 'Dazzle Overlay',
+            DazzleOverlayEffectV2.getControlSchema(), _makeV2Callback('_dazzleOverlayEffect'));
         }, 'v2.registerDazzleOverlayUI', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect('invert', 'Color Invert',
-            InvertEffectV2.getControlSchema(), _makeV2Callback('_invertEffect'), 'post');
+          uiManager.registerEffectUnderEffect('stylized-post', 'invert', 'Color Invert',
+            InvertEffectV2.getControlSchema(), _makeV2Callback('_invertEffect'));
         }, 'v2.registerInvertUI', Severity.DEGRADED);
 
         safeCall(() => {
-          uiManager.registerEffect('sepia', 'Sepia Tone',
-            SepiaEffectV2.getControlSchema(), _makeV2Callback('_sepiaEffect'), 'post');
+          uiManager.registerEffectUnderEffect('stylized-post', 'sepia', 'Sepia Tone',
+            SepiaEffectV2.getControlSchema(), _makeV2Callback('_sepiaEffect'));
         }, 'v2.registerSepiaUI', Severity.DEGRADED);
         safeCall(() => loadingOverlay.setStage('final.controls', 1.0, undefined, { keepAuto: true }), 'overlay.ui.p4', Severity.COSMETIC);
 

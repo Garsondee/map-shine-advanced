@@ -621,300 +621,241 @@ export class PlayerLightEffectV2 extends EffectBaseShim {
           ]
         },
         {
-          name: 'torch-behavior',
-          label: 'Torch: Behavior',
+          name: 'flashlight',
+          label: 'Flashlight',
           type: 'folder',
-          advanced: true,
-          parameters: [
-            'springStiffness',
-            'springDamping',
-            'torchLightEnabled',
-            'torchBaseIntensity',
-            'emberIntensity',
-            'torchGutterDisableLight',
-            'torchGutterLifeScale',
-            'torchReigniteRequiresTouch',
-            'torchReigniteTouchExtraUnits',
-            'intensityRiseSpeed',
-            'intensityFallSpeed',
-            'torchLightColor',
-            'flickerIntensity',
-            'flickerSpeed',
-            'wanderPixels',
-            'wanderSpeed'
+          expanded: true,
+          subgroups: [
+            {
+              label: 'Beam',
+              expanded: true,
+              parameters: [
+                'flashlightIntensity',
+                'flashlightAngleDeg',
+                'flashlightLengthUnits',
+                'flashlightBeamAngleDeg',
+                'flashlightBeamLengthUnits',
+                'flashlightBeamWidthScale',
+                'flashlightBeamNearWidth',
+                'flashlightBeamFarWidth',
+                'flashlightBeamWidthCurve',
+                'flashlightBeamEdgeSoftness',
+                'flashlightBeamCoreIntensity',
+                'flashlightBeamCoreSharpness',
+                'flashlightBeamMidIntensity',
+                'flashlightBeamMidSharpness',
+                'flashlightBeamRimIntensity',
+                'flashlightBeamRimSharpness',
+                'flashlightBeamNearBoost',
+                'flashlightBeamNearBoostCurve',
+                'flashlightBeamLongFalloffExp',
+                'flashlightBeamNoiseIntensity',
+                'flashlightBeamNoiseScale',
+                'flashlightBeamNoiseSpeed'
+              ]
+            },
+            {
+              label: 'Dynamic light',
+              advanced: true,
+              parameters: [
+                'flashlightLightEnabled',
+                'flashlightLightColor',
+                'flashlightLightDim',
+                'flashlightLightBright',
+                'flashlightLightAlpha',
+                'flashlightLightAttenuation',
+                'flashlightLightLuminosity',
+                'flashlightLightAnimType',
+                'flashlightLightAnimSpeed',
+                'flashlightLightAnimIntensity',
+                'flashlightLightUseCookiePosition',
+                'flashlightLightDistanceScaleEnabled',
+                'flashlightLightDistanceScaleNear',
+                'flashlightLightDistanceScaleFar'
+              ]
+            },
+            {
+              label: 'Cookie / Gobo',
+              advanced: true,
+              parameters: [
+                'flashlightCookieIntensity',
+                'flashlightCookieSizePx',
+                'flashlightCookieSizeFromBeam',
+                'flashlightCookieMaskRadius',
+                'flashlightCookieMaskSoftness',
+                'flashlightCookieCoreIntensity',
+                'flashlightCookieCoreSharpness',
+                'flashlightCookieRimIntensity',
+                'flashlightCookieRimRadius',
+                'flashlightCookieRimWidth',
+                'flashlightCookiePerspectiveEnabled',
+                'flashlightCookiePerspectiveNearScale',
+                'flashlightCookiePerspectiveFarScale',
+                'flashlightCookiePerspectiveCurve',
+                'flashlightCookiePerspectiveAnamorphic',
+                'flashlightCookieTexture',
+                'flashlightCookieRotation',
+                'flashlightCookieRotationSpeed'
+              ]
+            }
           ]
         },
         {
-          name: 'torch-flame',
-          label: 'Torch: Flame VFX',
+          name: 'torch',
+          label: 'Torch',
           type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'torchFlameSizeMin',
-            'torchFlameSizeMax',
-            'torchFlameRateMin',
-            'torchFlameRateMax',
-            'torchFlameUpdraft',
-            'torchFlameWindInfluence'
+          expanded: true,
+          subgroups: [
+            {
+              label: 'Behavior',
+              parameters: [
+                'springStiffness',
+                'springDamping',
+                'torchLightEnabled',
+                'torchBaseIntensity',
+                'emberIntensity',
+                'torchGutterDisableLight',
+                'torchGutterLifeScale',
+                'torchReigniteRequiresTouch',
+                'torchReigniteTouchExtraUnits',
+                'intensityRiseSpeed',
+                'intensityFallSpeed',
+                'torchLightColor',
+                'flickerIntensity',
+                'flickerSpeed',
+                'wanderPixels',
+                'wanderSpeed'
+              ]
+            },
+            {
+              label: 'Dynamic light',
+              advanced: true,
+              parameters: [
+                'torchLightDim',
+                'torchLightBright',
+                'torchLightAlpha',
+                'torchLightAttenuation',
+                'torchLightLuminosity',
+                'torchLightAnimType',
+                'torchLightAnimSpeed',
+                'torchLightAnimIntensity',
+                'torchLightScaleWithIntensity'
+              ]
+            },
+            {
+              label: 'Flame VFX',
+              advanced: true,
+              parameters: [
+                'torchFlameSizeMin',
+                'torchFlameSizeMax',
+                'torchFlameRateMin',
+                'torchFlameRateMax',
+                'torchFlameUpdraft',
+                'torchFlameWindInfluence'
+              ]
+            },
+            {
+              label: 'Sparks VFX',
+              advanced: true,
+              parameters: [
+                'torchSparksEnabled',
+                'torchSparksRate',
+                'torchSparksSizeMin',
+                'torchSparksSizeMax',
+                'torchSparksLifeMin',
+                'torchSparksLifeMax',
+                'torchSparksUpdraft',
+                'torchSparksWindInfluence',
+                'torchSparksSpeedFactor'
+              ]
+            }
           ]
         },
         {
-          name: 'torch-sparks',
-          label: 'Torch: Sparks VFX',
+          name: 'night-vision',
+          label: 'Night vision',
           type: 'folder',
-          advanced: true,
           expanded: false,
-          parameters: [
-            'torchSparksEnabled',
-            'torchSparksRate',
-            'torchSparksSizeMin',
-            'torchSparksSizeMax',
-            'torchSparksLifeMin',
-            'torchSparksLifeMax',
-            'torchSparksUpdraft',
-            'torchSparksWindInfluence',
-            'torchSparksSpeedFactor'
-          ]
-        },
-        {
-          name: 'torch-dynamic-light',
-          label: 'Torch: Dynamic Light',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'torchLightEnabled',
-            'torchLightDim',
-            'torchLightBright',
-            'torchLightAlpha',
-            'torchLightAttenuation',
-            'torchLightLuminosity',
-            'torchLightAnimType',
-            'torchLightAnimSpeed',
-            'torchLightAnimIntensity',
-            'torchLightScaleWithIntensity'
-          ]
-        },
-        {
-          name: 'flashlight-beam',
-          label: 'Flashlight: Beam',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'flashlightIntensity',
-            'flashlightAngleDeg',
-            'flashlightLengthUnits',
-            'flashlightBeamAngleDeg',
-            'flashlightBeamLengthUnits',
-            'flashlightBeamWidthScale',
-            'flashlightBeamNearWidth',
-            'flashlightBeamFarWidth',
-            'flashlightBeamWidthCurve',
-            'flashlightBeamEdgeSoftness',
-            'flashlightBeamCoreIntensity',
-            'flashlightBeamCoreSharpness',
-            'flashlightBeamMidIntensity',
-            'flashlightBeamMidSharpness',
-            'flashlightBeamRimIntensity',
-            'flashlightBeamRimSharpness',
-            'flashlightBeamNearBoost',
-            'flashlightBeamNearBoostCurve',
-            'flashlightBeamLongFalloffExp',
-            'flashlightBeamNoiseIntensity',
-            'flashlightBeamNoiseScale',
-            'flashlightBeamNoiseSpeed'
-          ]
-        },
-        {
-          name: 'flashlight-cookie',
-          label: 'Flashlight: Cookie',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'flashlightCookieIntensity',
-            'flashlightCookieSizePx',
-            'flashlightCookieSizeFromBeam',
-            'flashlightCookieMaskRadius',
-            'flashlightCookieMaskSoftness',
-            'flashlightCookieCoreIntensity',
-            'flashlightCookieCoreSharpness',
-            'flashlightCookieRimIntensity',
-            'flashlightCookieRimRadius',
-            'flashlightCookieRimWidth',
-            'flashlightCookiePerspectiveEnabled',
-            'flashlightCookiePerspectiveNearScale',
-            'flashlightCookiePerspectiveFarScale',
-            'flashlightCookiePerspectiveCurve',
-            'flashlightCookiePerspectiveAnamorphic',
-            'flashlightCookieTexture',
-            'flashlightCookieRotation',
-            'flashlightCookieRotationSpeed'
-          ]
-        },
-        {
-          name: 'flashlight-dynamic-light',
-          label: 'Flashlight: Dynamic Light',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'flashlightLightEnabled',
-            'flashlightLightColor',
-            'flashlightLightDim',
-            'flashlightLightBright',
-            'flashlightLightAlpha',
-            'flashlightLightAttenuation',
-            'flashlightLightLuminosity',
-            'flashlightLightAnimType',
-            'flashlightLightAnimSpeed',
-            'flashlightLightAnimIntensity',
-            'flashlightLightUseCookiePosition',
-            'flashlightLightDistanceScaleEnabled',
-            'flashlightLightDistanceScaleNear',
-            'flashlightLightDistanceScaleFar'
-          ]
-        },
-        {
-          name: 'night-vision-tube',
-          label: 'Night Vision: Tube & Tint',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'nightVisionTint',
-            'nightVisionTintStrength',
-            'nightVisionSaturation',
-            'nightVisionBrightness'
-          ]
-        },
-        {
-          name: 'night-vision-purkinje',
-          label: 'Night Vision: Purkinje (Low-light)',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'nightVisionPurkinjeStrength',
-            'nightVisionPurkinjeDarkStart',
-            'nightVisionPurkinjeBrightEnd',
-            'nightVisionPurkinjeCurve'
-          ]
-        },
-        {
-          name: 'night-vision-gain',
-          label: 'Night Vision: Light Amplification',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'nightVisionGain',
-            'nightVisionGamma',
-            'nightVisionMaxLuma',
-            'nightVisionDarkLift'
-          ]
-        },
-        {
-          name: 'night-vision-eyepiece',
-          label: 'Night Vision: Eyepiece',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'nightVisionEyepieceStyle',
-            'nightVisionEyepieceRadius',
-            'nightVisionEyepieceSoftness',
-            'nightVisionEyepieceIntensity',
-            'nightVisionEyepieceColor',
-            'nightVisionEyepieceSeparation'
-          ]
-        },
-        {
-          name: 'night-vision-scanlines',
-          label: 'Night Vision: Scanlines',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'nightVisionScanlinesEnabled',
-            'nightVisionScanlinesIntensity',
-            'nightVisionScanlinesDensity',
-            'nightVisionScanlinesSpeed',
-            'nightVisionScanlinesThickness'
-          ]
-        },
-        {
-          name: 'night-vision-noise',
-          label: 'Night Vision: Noise & Phosphor',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'nightVisionNoiseAmount',
-            'nightVisionNoiseLowLightBoost',
-            'nightVisionNoiseSpeed',
-            'nightVisionNoiseScale',
-            'nightVisionPhosphorFlickerAmount',
-            'nightVisionPhosphorFlickerSpeed',
-            'nightVisionPhosphorSize',
-            'nightVisionPhosphorDensity',
-            'nightVisionPhosphorIntensity'
-          ]
-        },
-        {
-          name: 'night-vision-bloom',
-          label: 'Night Vision: Bloom / Burn-In',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'nightVisionBloomEnabled',
-            'nightVisionBloomThreshold',
-            'nightVisionBloomThresholdSoftness',
-            'nightVisionBloomIntensity',
-            'nightVisionBloomBlurPx',
-            'nightVisionBloomPersistenceSeconds',
-            'nightVisionBloomResponse'
-          ]
-        },
-        {
-          name: 'night-vision-optical',
-          label: 'Night Vision: Optical',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'nightVisionDistortionAmount',
-            'nightVisionCAAmount',
-            'nightVisionCAEdgePower'
-          ]
-        },
-        {
-          name: 'night-vision-power',
-          label: 'Night Vision: Power & Warm-up',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'nightVisionWarmupSeconds',
-            'nightVisionShutdownSeconds',
-            'nightVisionPowerFlickerEnabled',
-            'nightVisionPowerFlickerIntensity'
-          ]
-        },
-        {
-          name: 'night-vision-darkness',
-          label: 'Night Vision: Auto-Dim',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'nightVisionDarknessGateEnabled',
-            'nightVisionDarknessStart',
-            'nightVisionDarknessEnd',
-            'nightVisionDarknessInfluence'
+          subgroups: [
+            {
+              label: 'Core setup',
+              parameters: [
+                'nightVisionEyepieceStyle',
+                'nightVisionEyepieceRadius',
+                'nightVisionEyepieceSoftness',
+                'nightVisionEyepieceIntensity',
+                'nightVisionEyepieceColor',
+                'nightVisionEyepieceSeparation',
+                'nightVisionTint',
+                'nightVisionTintStrength',
+                'nightVisionSaturation',
+                'nightVisionBrightness'
+              ]
+            },
+            {
+              label: 'Light amplification',
+              advanced: true,
+              parameters: [
+                'nightVisionGain',
+                'nightVisionGamma',
+                'nightVisionMaxLuma',
+                'nightVisionDarkLift',
+                'nightVisionPurkinjeStrength',
+                'nightVisionPurkinjeDarkStart',
+                'nightVisionPurkinjeBrightEnd',
+                'nightVisionPurkinjeCurve'
+              ]
+            },
+            {
+              label: 'Sensor noise',
+              advanced: true,
+              parameters: [
+                'nightVisionNoiseAmount',
+                'nightVisionNoiseLowLightBoost',
+                'nightVisionNoiseSpeed',
+                'nightVisionNoiseScale',
+                'nightVisionPhosphorFlickerAmount',
+                'nightVisionPhosphorFlickerSpeed',
+                'nightVisionPhosphorSize',
+                'nightVisionPhosphorDensity',
+                'nightVisionPhosphorIntensity',
+                'nightVisionScanlinesEnabled',
+                'nightVisionScanlinesIntensity',
+                'nightVisionScanlinesDensity',
+                'nightVisionScanlinesSpeed',
+                'nightVisionScanlinesThickness'
+              ]
+            },
+            {
+              label: 'Optics & bloom',
+              advanced: true,
+              parameters: [
+                'nightVisionBloomEnabled',
+                'nightVisionBloomThreshold',
+                'nightVisionBloomThresholdSoftness',
+                'nightVisionBloomIntensity',
+                'nightVisionBloomBlurPx',
+                'nightVisionBloomPersistenceSeconds',
+                'nightVisionBloomResponse',
+                'nightVisionDistortionAmount',
+                'nightVisionCAAmount',
+                'nightVisionCAEdgePower'
+              ]
+            },
+            {
+              label: 'Simulation',
+              advanced: true,
+              parameters: [
+                'nightVisionWarmupSeconds',
+                'nightVisionShutdownSeconds',
+                'nightVisionPowerFlickerEnabled',
+                'nightVisionPowerFlickerIntensity',
+                'nightVisionDarknessGateEnabled',
+                'nightVisionDarknessStart',
+                'nightVisionDarknessEnd',
+                'nightVisionDarknessInfluence'
+              ]
+            }
           ]
         }
       ],

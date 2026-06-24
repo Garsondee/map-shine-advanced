@@ -15,6 +15,13 @@
 
 import { createLogger } from '../core/log.js';
 import { getTextureBudgetTracker } from '../assets/TextureBudgetTracker.js';
+import {
+  collectLiveTextureAudit,
+  describeTextureSituation,
+  diagnoseTextures,
+  exposeTextureDiagnosticsApi,
+  formatTextureGrowthAlert,
+} from '../core/texture-diagnostics.js';
 import { getGpuWorkScheduler } from './gpu-work-scheduler.js';
 import { resolveEffectiveGpuVramGB } from './memory-settings.js';
 
@@ -54,6 +61,10 @@ export class AdaptiveBudgetController {
     this._lastCrashMs = 0;
     this._crashCount = 0;
     this._bonusMB = 0;
+    /** @type {object|null} Last classified growth diagnosis for UI / console. */
+    this._lastGrowthDiagnosis = null;
+    /** Throttle repeated growth-alert info logs. */
+    this._lastGrowthInfoLogMs = 0;
   }
 
   /**
@@ -87,11 +98,19 @@ export class AdaptiveBudgetController {
       && (texCount - floor) >= GROWTH_DEGRADE_DELTA
       && this._degradationLevel < 2
     ) {
-      this._setDegradation(Math.min(2, this._degradationLevel + 1));
+      const nextLevel = Math.min(2, this._degradationLevel + 1);
+      this._setDegradation(nextLevel);
       this._growthAlertStreak = 0;
-      log.warn(
-        `Sustained texture growth (+${texCount - floor} above floor ${floor}) — `
-        + `proactive degradation level ${this._degradationLevel}`,
+      this._logTextureGrowthEscalation(texCount, floor, nextLevel);
+    } else if (
+      this._growthAlert
+      && this._growthAlertStreak === 3
+      && now - this._lastGrowthInfoLogMs >= 15000
+    ) {
+      this._lastGrowthInfoLogMs = now;
+      log.info(
+        `GPU texture count rising (+${texCount - floor} above session floor ${floor}, `
+        + `${this._growthAlertStreak}s) — run MapShine.diagnoseTextures() if this continues`,
       );
     }
 
@@ -119,6 +138,46 @@ export class AdaptiveBudgetController {
   /** @returns {number} */
   getDegradationLevel() {
     return this._degradationLevel;
+  }
+
+  /**
+   * Classify sustained texture inflation and log a readable escalation message.
+   * @param {number} texCount
+   * @param {number} floor
+   * @param {number} degradationLevel
+   * @private
+   */
+  _logTextureGrowthEscalation(texCount, floor, degradationLevel) {
+    const growthDelta = texCount - floor;
+    const growthStreakSec = GROWTH_DEGRADE_STREAK;
+    try {
+      const audit = collectLiveTextureAudit({ maxCellsPerGrid: 12, probeLimit: 8 });
+      const diagnosis = describeTextureSituation(audit, {
+        growthDelta,
+        sessionFloor: floor,
+        growthStreakSec,
+        degradationLevel,
+        action: `Raising proactive degradation to level ${degradationLevel} `
+          + '(throttle GPU uploads, LOD-0 cooldown). Run MapShine.diagnoseTextures() for full audit.',
+      });
+      this._lastGrowthDiagnosis = diagnosis;
+      log.warn(formatTextureGrowthAlert(audit, {
+        growthDelta,
+        sessionFloor: floor,
+        growthStreakSec,
+        degradationLevel,
+      }));
+    } catch (err) {
+      this._lastGrowthDiagnosis = {
+        leakId: 'none',
+        label: 'Texture inflation',
+        headline: `Texture inflation: ${texCount} GPU textures (+${growthDelta} above floor ${floor})`,
+        summary: `Sustained growth ~${growthStreakSec}s — proactive degradation level ${degradationLevel}`,
+        detail: String(err?.message ?? err),
+        metrics: '',
+      };
+      log.warn(this._lastGrowthDiagnosis.summary);
+    }
   }
 
   /** @param {number} gpuVramGB @returns {number} @private */
@@ -179,6 +238,8 @@ export class AdaptiveBudgetController {
       minTextureCount: Number.isFinite(this._minTextureCount) ? this._minTextureCount : 0,
       peakTextureCount: this._peakTextureCount,
       growthAlert: this._growthAlert,
+      growthAlertStreak: this._growthAlertStreak,
+      growthDiagnosis: this._lastGrowthDiagnosis,
       adaptiveBonusMB: this._bonusMB,
     };
   }
@@ -213,6 +274,9 @@ export function getStreamingTuningApi() {
         governor: getGpuWorkScheduler().getStats(),
       };
     },
+
+    /** Classify live GPU texture inflation (console tables + lastTextureAudit global). */
+    diagnoseTextures: (opts) => diagnoseTextures(opts),
   };
 }
 
@@ -227,6 +291,7 @@ export function getAdaptiveBudgetController() {
       if (window.MapShine) {
         window.MapShine.adaptiveBudgetController = _instance;
         window.MapShine.streamingTuning = getStreamingTuningApi();
+        exposeTextureDiagnosticsApi();
       }
     } catch (_) {}
   }

@@ -115,7 +115,9 @@ export class InteractionManager {
       previews: new Map(), // Map<string, THREE.Sprite> - Drag previews
       mapPointGroupId: null,
       mapPointIndex: null,
-      mapPointPoints: null
+      mapPointPoints: null,
+      mapPointIndices: null,
+      mapPointDragStartPositions: null,
     };
 
     // Token double-click (click-left2) state.
@@ -3471,8 +3473,44 @@ export class InteractionManager {
           return;
         }
 
-        // Foundry must own token selection/targeting/marquee workflows.
-        if (this._isTokensContextActive() && !this.mapPointDraw?.active) {
+        // Map point canvas editing — must run before the Tokens-layer early return.
+        if (this.mapPointDrawHandler.isMapPointsEditorActive() && event.button === 0) {
+          const handleHit = this.mapPointDrawHandler.getHandleAtPosition(event.clientX, event.clientY);
+          if (handleHit) {
+            event.preventDefault();
+            event.stopPropagation();
+            if (this.mapPointDrawHandler.isGroupEditSessionActive()) {
+              const focusGroupId = this.mapPointDrawHandler.getGroupEditSessionGroupId();
+              if (handleHit.groupId === focusGroupId) {
+                this.mapPointDrawHandler.handleEditSessionPointerDown(handleHit, event);
+                return;
+              }
+            }
+            if (this.mapPointDrawHandler.isManagerSessionActive()) {
+              this.mapPointDrawHandler.handleManagerPointerDown(handleHit, event);
+              return;
+            }
+          }
+
+          const clickedGroupId = this.mapPointDrawHandler.getGroupAtPosition(event.clientX, event.clientY);
+          if (clickedGroupId && this.mapPointDrawHandler.isManagerSessionActive()) {
+            event.preventDefault();
+            event.stopPropagation();
+            const uiManager = window.MapShine?.uiManager;
+            if (uiManager?.openGroupEditDialog) {
+              uiManager.openGroupEditDialog(clickedGroupId);
+            }
+            return;
+          }
+
+          event.preventDefault();
+          event.stopPropagation();
+          this.mapPointDrawHandler.startEditSessionMarquee(event.clientX, event.clientY, event);
+          return;
+        }
+
+        // Foundry must own token selection/targeting/marquee workflows (left-click only).
+        if (event.button === 0 && this._isTokensContextActive() && !this.mapPointDraw?.active && !this.mapPointDrawHandler?.isMapPointsEditorActive?.()) {
           return;
         }
 
@@ -3584,40 +3622,18 @@ export class InteractionManager {
           }
         }
 
-        // Handle right-click on map point helpers (context menu)
-        if (this.mapPointDraw.active && event.button === 2) {
+        // Handle right-click on map point groups (context menu)
+        if (event.button === 2 && (
+          this.mapPointDrawHandler.isMapPointsEditorActive()
+          || window.MapShine?.mapPointsManager?.showVisualHelpers
+          || this.mapPointDraw.active
+        )) {
           const clickedGroupId = this.mapPointDrawHandler.getGroupAtPosition(event.clientX, event.clientY);
           if (clickedGroupId) {
             event.preventDefault();
             event.stopPropagation();
             this.mapPointDrawHandler.showContextMenu(clickedGroupId, event.clientX, event.clientY);
             return;
-          }
-        }
-
-        // Handle left-click on map point helpers (select/edit)
-        if (event.button === 0) {
-          const mapPointsManager = window.MapShine?.mapPointsManager;
-          if (mapPointsManager?.showVisualHelpers) {
-            const handleHit = this.mapPointDrawHandler.getHandleAtPosition(event.clientX, event.clientY);
-            if (handleHit) {
-              event.preventDefault();
-              event.stopPropagation();
-              this.mapPointDrawHandler.startHandleDrag(handleHit.object, handleHit.hitPoint, handleHit.groupId, handleHit.pointIndex);
-              return;
-            }
-
-            const clickedGroupId = this.mapPointDrawHandler.getGroupAtPosition(event.clientX, event.clientY);
-            if (clickedGroupId) {
-              event.preventDefault();
-              event.stopPropagation();
-              // Open edit dialog for this group
-              const uiManager = window.MapShine?.uiManager;
-              if (uiManager?.openGroupEditDialog) {
-                uiManager.openGroupEditDialog(clickedGroupId);
-              }
-              return;
-            }
           }
         }
 
@@ -4564,6 +4580,8 @@ export class InteractionManager {
     if (Number(movementManager?.activeTracks?.size || 0) > 0) return true;
     if (this.wallDraw?.active || this.lightPlacement?.active || this.soundPlacement?.active) return true;
     if (this.mapPointDrawHandler?.state?.active) return true;
+    if (this.mapPointDrawHandler?.isMapPointsEditorActive?.()) return true;
+    if (this.mapPointDrawHandler?.editSessionMarquee?.active) return true;
     if (this._lightRadiusRings?.dragging) return true;
     if (this._lightTranslate?.group?.visible) return true;
     if (this._selectedLightOutline?.line?.visible) return true;
@@ -4880,6 +4898,8 @@ export class InteractionManager {
   _isTokensLayerGameplayPassthrough() {
     return this._isTokensContextActive()
       && !this.mapPointDraw?.active
+      && !this.mapPointDrawHandler?.isMapPointsEditorActive?.()
+      && !this.mapPointDrawHandler?.editSessionMarquee?.active
       && !this.dragState?.active
       && !this.dragSelect?.active
       && !this.wallDraw?.active
@@ -5827,6 +5847,12 @@ export class InteractionManager {
         }
 
 
+        // Case 0.35: Map Point Edit Session Marquee
+        if (this.mapPointDrawHandler.editSessionMarquee?.active) {
+          this.mapPointDrawHandler.updateEditSessionMarquee(event.clientX, event.clientY);
+          return;
+        }
+
         // Case 0.4: Map Point Handle Drag
         if (this.dragState.active && this.dragState.mode === 'mapPointHandle') {
           this.updateMouseCoords(event);
@@ -5847,15 +5873,26 @@ export class InteractionManager {
               y = snapped.y;
             }
 
-            this.dragState.object.position.set(x, y, targetZ);
-            this.dragState.hasMoved = true;
-
             const idx = this.dragState.mapPointIndex;
-            if (Array.isArray(this.dragState.mapPointPoints) && Number.isFinite(idx) && this.dragState.mapPointPoints[idx]) {
-              this.dragState.mapPointPoints[idx].x = x;
-              this.dragState.mapPointPoints[idx].y = y;
+            const origin = this.dragState.mapPointDragStartPositions?.[idx];
+            if (origin && Array.isArray(this.dragState.mapPointPoints) && Number.isFinite(idx)) {
+              const dx = x - origin.x;
+              const dy = y - origin.y;
+              const indices = Array.isArray(this.dragState.mapPointIndices) && this.dragState.mapPointIndices.length > 0
+                ? this.dragState.mapPointIndices
+                : [idx];
+
+              for (const i of indices) {
+                const start = this.dragState.mapPointDragStartPositions?.[i];
+                if (start && this.dragState.mapPointPoints[i]) {
+                  this.dragState.mapPointPoints[i].x = start.x + dx;
+                  this.dragState.mapPointPoints[i].y = start.y + dy;
+                }
+              }
             }
 
+            this.dragState.object.position.set(x, y, targetZ);
+            this.dragState.hasMoved = true;
             this.mapPointDrawHandler.updateDraggedHelperGeometry();
           }
           return;
@@ -6346,6 +6383,8 @@ export class InteractionManager {
           this._isTokensContextActive() &&
           !this.dragState?.active &&
           !this.dragSelect?.active &&
+          !this.mapPointDrawHandler?.editSessionMarquee?.active &&
+          !this.mapPointDrawHandler?.isMapPointsEditorActive?.() &&
           !this.wallDraw?.active &&
           !this.lightPlacement?.active &&
           !this.soundPlacement?.active &&
@@ -6694,6 +6733,7 @@ export class InteractionManager {
                 if (group) {
                   mapPointsManager.createVisualHelper(groupId, group);
                 }
+                mapPointsManager.refreshClusterLabels?.();
               }
             }, 'pointerUp.updateMapPointGroup', Severity.DEGRADED);
           }
@@ -6702,6 +6742,16 @@ export class InteractionManager {
           this.dragState.mapPointGroupId = null;
           this.dragState.mapPointIndex = null;
           this.dragState.mapPointPoints = null;
+          this.dragState.mapPointIndices = null;
+          this.dragState.mapPointDragStartPositions = null;
+          this.mapPointDrawHandler.groupEditSession.onPointsChanged?.();
+          this.mapPointDrawHandler.managerSession.onGroupsChanged?.();
+          return;
+        }
+
+        // Handle Map Point Edit Session Marquee End
+        if (this.mapPointDrawHandler.editSessionMarquee?.active) {
+          this.mapPointDrawHandler.finishEditSessionMarquee(event);
           return;
         }
 
@@ -8024,6 +8074,29 @@ export class InteractionManager {
     // When PIXI owns tiles, we only intercept if non-tile items are selected.
     if ((event.key === 'Delete' || event.key === 'Backspace') && (this.mapPointDraw.active || this.selection.size > 0 || controlledTileIds.size > 0)) {
       this._consumeKeyEvent(event);
+    }
+
+    // Map point group edit session (dialog open)
+    if (this.mapPointDrawHandler?.isGroupEditSessionActive?.()) {
+      const target = event.target;
+      const tag = String(target?.tagName || '').toLowerCase();
+      const isFormField = tag === 'input' || tag === 'textarea' || tag === 'select' || !!target?.isContentEditable;
+
+      if (!isFormField) {
+        if (event.key === 'Delete' || event.key === 'Backspace') {
+          const selectedCount = this.mapPointDrawHandler.getSelectedPoints().length;
+          if (selectedCount > 0) {
+            await this.mapPointDrawHandler.deleteSelectedPoints();
+            this._consumeKeyEvent(event);
+            return;
+          }
+        }
+        if (event.key === 'Escape') {
+          this.mapPointDrawHandler.clearPointSelection();
+          this._consumeKeyEvent(event);
+          return;
+        }
+      }
     }
 
     // Handle Map Point Drawing Mode keys

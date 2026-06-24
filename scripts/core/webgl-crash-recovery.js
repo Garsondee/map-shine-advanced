@@ -22,10 +22,10 @@
 import { createLogger } from './log.js';
 import { buildTileStreamingCrashSnapshot, buildCompositorPopulateSnapshot } from '../ui/tile-streaming-report.js';
 import { getTextureBudgetTracker } from '../assets/TextureBudgetTracker.js';
-import { auditPyramidTextureCache, getTileDecodePoolStats } from '../streaming/texture-pyramid-builder.js';
 import { getAdaptiveBudgetController } from '../streaming/adaptive-budget-controller.js';
 import { getGpuWorkScheduler } from '../streaming/gpu-work-scheduler.js';
 import { getTextureLeakProbeReport } from './texture-leak-probe.js';
+import { collectTextureAudit, formatTextureAuditLine } from './texture-diagnostics.js';
 
 const log = createLogger('WebGLCrashRecovery');
 
@@ -172,396 +172,6 @@ function _appendHistory(record) {
   const history = getCrashHistory();
   history.push(_compactRecord(record));
   _saveCrashHistory(history);
-}
-
-/** Material map slots counted when auditing scene-graph texture references. */
-const _TEXTURE_MAP_KEYS = [
-  'map', 'normalMap', 'alphaMap', 'emissiveMap', 'roughnessMap', 'metalnessMap',
-  'aoMap', 'lightMap', 'bumpMap', 'displacementMap', 'envMap',
-];
-
-/**
- * Register every THREE.Texture reachable from a material (map slots + shader uniforms).
- * @param {object|null|undefined} mat
- * @param {Set<object>} textures
- */
-function _addTexturesFromMaterial(mat, textures) {
-  if (!mat) return;
-  const mats = Array.isArray(mat) ? mat : [mat];
-  for (const m of mats) {
-    for (const key of _TEXTURE_MAP_KEYS) {
-      const tex = m?.[key];
-      if (tex?.isTexture) textures.add(tex);
-    }
-    const uniforms = m?.uniforms;
-    if (uniforms && typeof uniforms === 'object') {
-      for (const entry of Object.values(uniforms)) {
-        const val = entry?.value ?? entry;
-        if (val?.isTexture) textures.add(val);
-      }
-    }
-  }
-}
-
-/**
- * Collect unique THREE.Texture references reachable from an Object3D subtree.
- * @param {import('three').Object3D|null|undefined} root
- * @returns {Set<object>}
- */
-function _collectTexturesFromObject3D(root) {
-  /** @type {Set<object>} */
-  const textures = new Set();
-  if (!root || typeof root.traverse !== 'function') return textures;
-
-  try {
-    root.traverse((obj) => _addTexturesFromMaterial(obj?.material, textures));
-  } catch (_) {}
-
-  return textures;
-}
-
-/**
- * @returns {object}
- */
-function _collectCompositorRenderTargetAudit() {
-  /** @type {Set<object>} */
-  const textures = new Set();
-  let renderTargetCount = 0;
-  try {
-    const comp = window.MapShine?.floorCompositorV2 ?? window.MapShine?.floorCompositor ?? null;
-    const candidates = [
-      comp?._sceneRT,
-      comp?._postA,
-      comp?._postB,
-      comp?._levelCompositeRT,
-      comp?._levelCompositeScratch,
-    ];
-    for (const rt of candidates) {
-      if (!rt?.isWebGLRenderTarget) continue;
-      renderTargetCount += 1;
-      if (rt.texture?.isTexture) textures.add(rt.texture);
-      if (rt.depthTexture?.isTexture) textures.add(rt.depthTexture);
-    }
-  } catch (_) {}
-  return { renderTargetCount, textureRefs: textures.size };
-}
-
-/**
- * Snapshot active particle / candle effect state for crash reports.
- * @returns {object}
- */
-function _collectEffectTextureAudit() {
-  /** @type {object} */
-  const out = {
-    fire: {
-      floorStates: 0,
-      activeFloors: 0,
-      batchRenderers: 0,
-      batchCount: 0,
-      particleSystems: 0,
-      coalOverlays: 0,
-      sharedSpriteTextures: 0,
-    },
-    candle: {
-      flameInstances: 0,
-      glowBuckets: 0,
-    },
-    tileManagerSprites: 0,
-  };
-  try {
-    const comp = window.MapShine?.floorCompositorV2 ?? window.MapShine?.floorCompositor ?? null;
-    const fire = comp?._fireEffect ?? null;
-    if (fire) {
-      out.fire.floorStates = fire._floorStates?.size ?? 0;
-      out.fire.activeFloors = fire._activeFloors?.size ?? 0;
-      out.fire.coalOverlays = fire._coalOverlays?.size ?? 0;
-      out.fire.sharedSpriteTextures = [fire._fireTexture, fire._emberTexture, fire._smokeTexture]
-        .filter((t) => t?.isTexture).length;
-      for (const st of fire._floorStates?.values?.() ?? []) {
-        if (st?.batchRenderer) {
-          out.fire.batchRenderers += 1;
-          out.fire.batchCount += st.batchRenderer.batches?.length ?? 0;
-        }
-        out.fire.particleSystems += (st?.systems?.length ?? 0)
-          + (st?.emberSystems?.length ?? 0)
-          + (st?.smokeSystems?.length ?? 0);
-      }
-    }
-    const candle = comp?._candleFlamesEffect ?? null;
-    if (candle) {
-      out.candle.flameInstances = candle._flameMesh?.count ?? 0;
-      out.candle.glowBuckets = candle._glowBucketsByFloor?.size ?? 0;
-    }
-    const tm = window.MapShine?.tileManager ?? null;
-    for (const { sprite } of tm?.tileSprites?.values?.() ?? []) {
-      const tex = sprite?.material?.map ?? null;
-      if (tex?.isTexture) out.tileManagerSprites += 1;
-    }
-  } catch (_) {}
-  return out;
-}
-
-/**
- * @param {import('../compositor-v2/FloorRenderBus.js').FloorRenderBus|null|undefined} bus
- * @returns {{ busTexturesWithMap: number, busStreamingWithMap: number }}
- */
-function _countBusTextureMaps(bus) {
-  let busTexturesWithMap = 0;
-  let busStreamingWithMap = 0;
-  try {
-    for (const [id, entry] of bus?._tiles?.entries?.() ?? []) {
-      const key = String(id ?? '');
-      if (key.startsWith('__')) continue;
-      const tex = entry?.material?.map ?? entry?.mesh?.material?.map ?? null;
-      if (!tex?.isTexture) continue;
-      busTexturesWithMap += 1;
-      if (entry?.mapShineStreamedRegion || entry?.mesh?.userData?.mapShineStreaming) {
-        busStreamingWithMap += 1;
-      }
-    }
-  } catch (_) {}
-  return { busTexturesWithMap, busStreamingWithMap };
-}
-
-/**
- * @param {object|null} tileStreaming
- * @returns {{ streamCellsWithMap: number, streamFallbackCells: number, culledWithMap: number }}
- */
-function _summarizeStreamingTextureCells(tileStreaming) {
-  let streamCellsWithMap = 0;
-  let streamFallbackCells = 0;
-  let culledWithMap = 0;
-  try {
-    for (const grid of [...(tileStreaming?.backgroundGrids ?? []), ...(tileStreaming?.regionGrids ?? [])]) {
-      streamFallbackCells += Number(grid?.fallbackCellCount) || 0;
-      for (const cell of grid?.cells ?? []) {
-        if (cell?.hasMap) {
-          streamCellsWithMap += 1;
-          if (cell.state === 'culled') culledWithMap += 1;
-        }
-      }
-    }
-  } catch (_) {}
-  return { streamCellsWithMap, streamFallbackCells, culledWithMap };
-}
-
-/**
- * @param {object} audit
- * @returns {string}
- */
-function _resolvePrimaryLeakId(audit) {
-  if (audit.pyramidCache?.alsoOnMesh > 0) return 'pyramid_cache_mesh_overlap';
-  if (audit.culledWithMap > 0) return 'streaming_culled_cell_leak';
-  if (audit.pyramidCache?.inCacheOnly > Math.max(8, (audit.streamCellsWithMap ?? 0) + 4)) {
-    return 'pyramid_cache_leak';
-  }
-  const trueGap = audit.trueOrphanEstimate ?? audit.gapVsAccounted ?? 0;
-  const probe = audit.textureLeakProbe ?? null;
-  const topSite = String(probe?.topSites?.[0]?.site ?? '');
-  if (topSite.includes('LightingEffectV2._snapshotLightRtForFloor')) {
-    return 'lighting_per_floor_snapshot_leak';
-  }
-  const climbDelta = (probe?.lastSampleTextures ?? 0) - (probe?.sessionMinTextures ?? 0);
-  const activeClimb = (probe?.climbStreak ?? 0) >= 30 && climbDelta >= 96;
-  const streamingClean = (audit.streamCellsWithMap ?? 0) <= (audit.visibleStreamCells ?? 0) + 2
-    && (audit.culledStreamCells ?? 0) === 0
-    && (audit.pyramidCache?.inCacheOnly ?? 0) === 0;
-  if (trueGap > 100 && activeClimb && streamingClean) {
-    return 'active_untracked_texture_leak';
-  }
-  if (trueGap > 100 && (audit.budgetBySource?.streamTile ?? 0) > (audit.streamResidentCells ?? 0) + 4) {
-    return 'streaming_budget_over_register';
-  }
-  if (trueGap > 100 && streamingClean) {
-    if (trueGap > 200 && !activeClimb) return 'probable_historical_stream_leak';
-    return 'untracked_texture_leak';
-  }
-  if (trueGap > 100) return 'streaming_lod_texture_leak';
-  if ((audit.untrackedEstimate ?? 0) > 150) return 'untracked_texture_leak';
-  if ((audit.orphanEstimate ?? 0) > 100) return 'scene_graph_orphan_estimate';
-  return 'none';
-}
-
-/**
- * Compare Three.js renderer texture counter vs textures actually referenced by the scene.
- * @param {any} renderer
- * @param {object|null} tileStreaming
- * @returns {object}
- */
-function _collectTextureAudit(renderer, tileStreaming) {
-  const rendererCounter = renderer?.info?.memory?.textures ?? null;
-
-  let budgetEntryCount = null;
-  /** @type {Record<string, number>} */
-  let budgetBySource = {};
-  try {
-    const tracker = getTextureBudgetTracker();
-    budgetEntryCount = tracker.getBudgetState()?.entryCount ?? null;
-    budgetBySource = tracker.getSourceEntryCounts?.() ?? {};
-  } catch (_) {}
-
-  /** @type {Set<object>} */
-  const sceneTextures = new Set();
-  /** @type {{ floorRenderBus: number, sceneComposer: number, compositorBus: number }} */
-  const sceneGraphBySubsystem = { floorRenderBus: 0, sceneComposer: 0, compositorBus: 0 };
-  try {
-    const ms = window.MapShine ?? {};
-    const busSet = _collectTexturesFromObject3D(ms.floorRenderBus?._scene);
-    const composerSet = _collectTexturesFromObject3D(ms.sceneComposer?.scene);
-    const compositor = ms.floorCompositorV2 ?? ms.floorCompositor ?? null;
-    const compositorBusSet = _collectTexturesFromObject3D(compositor?._renderBus?._scene);
-    sceneGraphBySubsystem.floorRenderBus = busSet.size;
-    sceneGraphBySubsystem.sceneComposer = composerSet.size;
-    sceneGraphBySubsystem.compositorBus = compositorBusSet.size;
-    for (const tex of busSet) sceneTextures.add(tex);
-    for (const tex of composerSet) sceneTextures.add(tex);
-    for (const tex of compositorBusSet) sceneTextures.add(tex);
-  } catch (_) {}
-
-  const effects = _collectEffectTextureAudit();
-  const compositorRts = _collectCompositorRenderTargetAudit();
-  /** @type {Set<object>} */
-  const referencedTextures = new Set(sceneTextures);
-  try {
-    const comp = window.MapShine?.floorCompositorV2 ?? window.MapShine?.floorCompositor ?? null;
-    for (const rt of [comp?._sceneRT, comp?._postA, comp?._postB, comp?._levelCompositeRT]) {
-      if (rt?.texture?.isTexture) referencedTextures.add(rt.texture);
-      if (rt?.depthTexture?.isTexture) referencedTextures.add(rt.depthTexture);
-    }
-  } catch (_) {}
-
-  let pyramidCache = null;
-  try {
-    pyramidCache = auditPyramidTextureCache(sceneTextures);
-  } catch (_) {}
-
-  const streamResidentCells = tileStreaming?.totals?.residentCells ?? null;
-  const visibleStreamCells = tileStreaming?.view?.visibleCellsInFrustum ?? null;
-  const {
-    streamCellsWithMap,
-    streamFallbackCells,
-    culledWithMap,
-  } = _summarizeStreamingTextureCells(tileStreaming);
-
-  let culledStreamCells = 0;
-  try {
-    for (const grid of [...(tileStreaming?.backgroundGrids ?? []), ...(tileStreaming?.regionGrids ?? [])]) {
-      culledStreamCells += Number(grid?.cellSummary?.culled) || 0;
-    }
-  } catch (_) {}
-
-  const { busTexturesWithMap, busStreamingWithMap } = _countBusTextureMaps(
-    window.MapShine?.floorRenderBus ?? null,
-  );
-
-  const compositorRtCount = (budgetBySource.renderTarget ?? 0)
-    + (budgetBySource.tileMask ?? 0)
-    + (budgetBySource.sceneMask ?? 0);
-
-  let preRenderLeakCount = null;
-  try {
-    preRenderLeakCount = Number(window.MapShine?.floorRenderBus?._lastPreRenderLeakCount ?? 0);
-  } catch (_) {}
-
-  let decodePool = null;
-  try {
-    const stats = getTileDecodePoolStats?.() ?? null;
-    if (stats) {
-      decodePool = {
-        queueDepth: stats.queueDepth ?? null,
-        activeRequests: stats.activeRequests ?? null,
-        completedRequests: stats.completedRequests ?? null,
-      };
-    }
-  } catch (_) {}
-
-  const orphanEstimate = (Number.isFinite(rendererCounter) && referencedTextures.size >= 0)
-    ? Math.max(0, rendererCounter - referencedTextures.size)
-    : null;
-  const trueOrphanEstimate = orphanEstimate;
-  const untrackedEstimate = (Number.isFinite(rendererCounter) && Number.isFinite(budgetEntryCount))
-    ? Math.max(0, rendererCounter - budgetEntryCount)
-    : null;
-  const cacheExcess = (Number.isFinite(pyramidCache?.size) && Number.isFinite(streamResidentCells))
-    ? Math.max(0, pyramidCache.size - streamResidentCells)
-    : 0;
-  const residentExcess = (Number.isFinite(streamResidentCells) && Number.isFinite(visibleStreamCells))
-    ? Math.max(0, streamResidentCells - visibleStreamCells)
-    : 0;
-  const accountedEstimate = (Number.isFinite(rendererCounter))
-    ? Math.min(
-      rendererCounter,
-      referencedTextures.size
-        + (pyramidCache?.inCacheOnly ?? 0)
-        + Math.max(0, (budgetEntryCount ?? 0) - referencedTextures.size),
-    )
-    : null;
-  const gapVsAccounted = (Number.isFinite(rendererCounter) && Number.isFinite(accountedEstimate))
-    ? Math.max(0, rendererCounter - accountedEstimate)
-    : null;
-  const unregisteredAlive = (Number.isFinite(rendererCounter))
-    ? Math.max(
-      0,
-      rendererCounter
-        - (budgetEntryCount ?? 0)
-        - (pyramidCache?.inCacheOnly ?? 0),
-    )
-    : null;
-
-  const likelyStreamingLeak = (
-    (culledWithMap > 0 || culledStreamCells > 0)
-    || (pyramidCache?.alsoOnMesh ?? 0) > 0
-    || (
-      (gapVsAccounted ?? 0) > 100
-      && (unregisteredAlive ?? 0) > 80
-      && (
-        cacheExcess > 8
-        || residentExcess > 8
-        || (streamCellsWithMap ?? 0) < (streamResidentCells ?? 0)
-      )
-    )
-  );
-
-  const likelyUntrackedLeak = (unregisteredAlive ?? 0) > 150 && !likelyStreamingLeak;
-
-  const audit = {
-    rendererCounter,
-    sceneGraphTextures: sceneTextures.size,
-    referencedTextures: referencedTextures.size,
-    sceneGraphBySubsystem,
-    budgetEntryCount,
-    budgetBySource,
-    pyramidCache,
-    streamResidentCells,
-    visibleStreamCells,
-    streamCellsWithMap,
-    streamFallbackCells,
-    culledStreamCells,
-    culledWithMap,
-    busTexturesWithMap,
-    busStreamingWithMap,
-    compositorRtCount,
-    compositorRts,
-    effects,
-    preRenderLeakCount,
-    decodePool,
-    orphanEstimate,
-    trueOrphanEstimate,
-    untrackedEstimate,
-    accountedEstimate,
-    gapVsAccounted,
-    unregisteredAlive,
-    likelyStreamingLeak,
-    likelyUntrackedLeak,
-    primaryLeakId: 'pending',
-  };
-  try {
-    audit.textureLeakProbe = getTextureLeakProbeReport(8);
-  } catch (_) {
-    audit.textureLeakProbe = null;
-  }
-  audit.primaryLeakId = _resolvePrimaryLeakId(audit);
-  return audit;
 }
 
 /** Re-persist the most recent history entry from the live record (e.g. after restore). */
@@ -747,7 +357,7 @@ export function collectDiagnostics(extra = {}) {
   }
 
   try {
-    record.textureAudit = _collectTextureAudit(renderer, record.tileStreaming);
+    record.textureAudit = collectTextureAudit(renderer, record.tileStreaming);
   } catch (e) {
     record.textureAudit = { error: String(e?.message ?? e) };
   }
@@ -927,6 +537,7 @@ export function diagnoseCrash(record) {
           + fireLine + candleLine,
         );
       } else if (leakId === 'lighting_per_floor_snapshot_leak') {
+        const probe = audit.textureLeakProbe ?? record.textureLeakProbe ?? null;
         causes.push(
           'Lighting per-floor snapshot leak: LightingEffectV2._snapshotLightRtForFloor created '
           + `${probe?.topSites?.[0]?.allocated ?? '?'} WebGLRenderTargets without dispose() `
@@ -1348,30 +959,7 @@ async function _copyReportToClipboard(record) {
  * @returns {string}
  */
 function _formatTextureAuditLine(record) {
-  const counter = record.rendererStats?.textures;
-  const audit = record.textureAudit ?? null;
-  if (!Number.isFinite(counter)) return 'n/a';
-  if (!audit || audit.error) return String(counter);
-
-  const parts = [`${counter} Three.js counter`];
-  if (Number.isFinite(audit.sceneGraphTextures)) {
-    parts.push(`${audit.sceneGraphTextures} in scene graph`);
-  }
-  if (Number.isFinite(audit.budgetEntryCount)) {
-    parts.push(`${audit.budgetEntryCount} budget-tracked`);
-  }
-  if (Number.isFinite(audit.streamCellsWithMap)) {
-    parts.push(`${audit.streamCellsWithMap}/${audit.streamResidentCells ?? '?'} stream textured`);
-  }
-  if (Number.isFinite(audit.gapVsAccounted) && audit.gapVsAccounted > 20) {
-    parts.push(`~${audit.gapVsAccounted} unaccounted`);
-  } else if (Number.isFinite(audit.unregisteredAlive) && audit.unregisteredAlive > 50) {
-    parts.push(`~${audit.unregisteredAlive} unregistered`);
-  }
-  if (audit.primaryLeakId && audit.primaryLeakId !== 'none') {
-    parts.push(audit.primaryLeakId);
-  }
-  return parts.join(', ');
+  return formatTextureAuditLine(record.textureAudit ?? { rendererCounter: record.rendererStats?.textures });
 }
 
 /**
@@ -1441,7 +1029,10 @@ function _buildDialogContent(record) {
       adaptive.downscaleEngaged ? 'downscale ON' : 'downscale off',
     ];
     if (live) parts.push(live);
-    if (adaptive.growthAlert) parts.push('growth alert');
+    if (adaptive.growthAlert) {
+      const diag = adaptive.growthDiagnosis;
+      parts.push(diag?.label ? `growth: ${diag.label}` : 'growth alert');
+    }
     detailRows.push(['Memory governor', parts.join('; ')]);
   }
   if (gov && !gov.error) {

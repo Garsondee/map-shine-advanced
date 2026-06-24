@@ -445,7 +445,7 @@ export function noteRendererTextureSample(renderer) {
 
   log.warn(
     `Live GPU textures climbing: ${count} (+${delta} above session min ${floor}). `
-    + 'Top allocation sites:',
+    + 'Run MapShine.diagnoseTextures() to classify — top allocation sites:',
   );
   try { summarizeTextureLeakProbe(8); } catch (_) {}
 }

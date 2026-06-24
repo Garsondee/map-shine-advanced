@@ -50,6 +50,10 @@ const log = createLogger('CandleFlamesEffectV2');
 // Flame sprites use per-band renderOrder (below vs above overhead); see _applyFlameMeshRenderOrders.
 const CANDLE_FLAME_BELOW_INTRA = 60;
 const CANDLE_FLAME_ABOVE_INTRA = 60;
+/** Inner UV scale for the flame silhouette — leaves mesh margin for wobble/distort. */
+const FLAME_UV_CONTENT_SCALE = 0.68;
+/** World-scale compensator so flameSizePx stays visually correct after UV inset. */
+const FLAME_SPRITE_PAD = 1.0 / FLAME_UV_CONTENT_SCALE;
 
 /** Max candle clusters activated per frame when view streaming is on. */
 const CANDLE_STREAM_CREATE_BUDGET = 4;
@@ -1314,7 +1318,7 @@ export class CandleFlamesEffectV2 {
           const sizeRand = Math.sin((phase + 0.13) * 1000.0) * 43758.5453;
           const size01 = sizeRand - Math.floor(sizeRand);
           const sizeVar = 1.0 + (size01 * 2.0 - 1.0) * sizeJitter;
-          const s = Math.max(1.0, flameSize * Math.max(0.2, sizeVar));
+          const s = Math.max(1.0, flameSize * Math.max(0.2, sizeVar)) * FLAME_SPRITE_PAD;
 
           this._dummy.position.set(wx, wy, groundZ + 3.5);
           this._dummy.rotation.set(0, 0, phase * Math.PI * 2);
@@ -2576,6 +2580,8 @@ export class CandleFlamesEffectV2 {
         }
 
         void main() {
+          const float kUvContent = ${FLAME_UV_CONTENT_SCALE.toFixed(4)};
+
           vec2 uv = vUv;
 
           float sway = 0.0;
@@ -2586,7 +2592,8 @@ export class CandleFlamesEffectV2 {
           }
           uv.x += sway;
 
-          vec2 p = uv - vec2(0.5);
+          // Shrink authored shape inside the quad so wobble/distort have margin.
+          vec2 p = (uv - vec2(0.5)) * kUvContent;
 
           float oval = clamp(uOvality, 0.0, 0.95);
           p.x *= (1.0 + oval);
@@ -2601,7 +2608,15 @@ export class CandleFlamesEffectV2 {
             sin(wTime * 1.77 + p.x * 5.0)
           );
           float distort = max(0.0, uShapeDistort);
-          p += wob * wAmp * distort * (0.35 + 0.65 * p.y);
+          vec2 disp = wob * wAmp * distort * (0.35 + 0.65 * p.y);
+
+          float bound = 0.5 * kUvContent;
+          float roomX = bound - abs(p.x);
+          float roomY = bound - abs(p.y);
+          float room = max(0.0, min(roomX, roomY)) * 0.94;
+          float dLen = length(disp);
+          if (dLen > room) disp *= room / max(dLen, 1e-4);
+          p += disp;
           float r = length(p) * 2.0;
 
           // Use vPhase (stable per candle) to vary flicker per-instance.
@@ -2618,19 +2633,23 @@ export class CandleFlamesEffectV2 {
           float flickerStrength = uFlickerStrength * strengthVar;
 
           float t = uTime * flickerSpeed + vPhase * 25.0;
+          float r0 = r;
           float noiseAmp = clamp(uWobbleNoise, 0.0, 0.5);
-          float n = smoothNoise(p * 6.0 + vec2(t * 0.15, t * 0.11));
-          float wobble = mix(1.0 - noiseAmp, 1.0 + noiseAmp, n);
-          r *= wobble;
+          float n = smoothNoise((p / kUvContent) * 6.0 + vec2(t * 0.15, t * 0.11));
+          float edgeMx = max(abs(p.x), abs(p.y));
+          float growRoom = max(0.0, (bound - edgeMx) * 2.0) / max(r0 * 1.15, 0.05);
+          float amp = noiseAmp * min(1.0, growRoom);
+          float wobble = mix(1.0 - amp, 1.0 + amp, n);
+          r = r0 * wobble;
 
           // Teardrop: hotter and wider at the base, tighter at the tip.
           float tip = clamp(vUv.y, 0.0, 1.0);
           float tearR = r * mix(0.88, 1.12, tip * tip);
 
-          // HDR flame zones — wider band separation keeps teardrop crisp at low LOD pixel counts.
-          float coreMask = smoothstep(0.75, 0.05, tearR);
-          float bodyMask = smoothstep(1.05, 0.35, tearR);
-          float haloMask = smoothstep(1.15, 0.62, tearR) * (1.0 - bodyMask * 0.92);
+          // Thresholds scale with kUvContent — p is inset so raw r values are smaller.
+          float coreMask = smoothstep(0.75 * kUvContent, 0.05 * kUvContent, tearR);
+          float bodyMask = smoothstep(1.05 * kUvContent, 0.35 * kUvContent, tearR);
+          float haloMask = smoothstep(1.15 * kUvContent, 0.62 * kUvContent, tearR) * (1.0 - bodyMask * 0.92);
 
           vec3 coreRad = vec3(4.2, 3.4, 2.1);
           vec3 bodyRad = vec3(2.6, 1.75, 0.55);

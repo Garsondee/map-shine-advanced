@@ -97,7 +97,7 @@ const WINDOW_LIGHT_CORE_DEFAULTS = Object.freeze({
   rgbShiftAngle: 30,
   rgbShiftSpread: 0.46,
   rgbShiftEdgeWeight: 1,
-  rgbFringeSaturation: 0,
+  rgbFringeSaturation: 1,
   rgbFringeBalance: { r: 1, g: 1, b: 1 },
   rgbShiftAnimate: true,
   rgbShiftAnimSpeed: 0.45,
@@ -608,8 +608,6 @@ const EMIT_FRAG = `
 
     if (useRefract > 0.5) {
       float shiftPx = uRgbShiftAmount * (1.0 + flash01 * max(uLightningWindowRgbBoost, 0.0));
-      float edgeW = clamp(uRgbShiftEdgeWeight, 0.0, 1.0);
-      shiftPx *= mix(1.0, edgeAmt, edgeW);
 
       vec2 shiftDir = uRgbShiftDir;
       if (uRgbShiftAnimate > 0.5) {
@@ -632,8 +630,21 @@ const EMIT_FRAG = `
       float maskB = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, refractedUv, bOffset), uFalloff);
 
       vec3 chromaRaw = vec3(maskR, maskG, maskB);
+      float edgeW = clamp(uRgbShiftEdgeWeight, 0.0, 1.0);
+      float fringeVis = mix(1.0, max(edgeAmt, 0.14), edgeW);
+      chromaRaw = mix(vec3(maskG), chromaRaw, fringeVis);
       float shiftSoft = clamp(uRgbShiftSoftness, 0.0, 1.0);
       chromaRaw = mix(chromaRaw, vec3(maskG), shiftSoft);
+      vec3 fringe = chromaRaw - vec3(maskG);
+      float fringeMag = length(fringe);
+      if (fringeMag > 1e-5) {
+        vec3 prismGain = vec3(
+          1.0 + 0.72 * max(uRgbFringeBalance.r - 1.0, 0.0),
+          0.48,
+          1.0 + 0.72 * max(uRgbFringeBalance.b - 1.0, 0.0)
+        );
+        chromaRaw = vec3(maskG) + fringe * prismGain * (1.25 + fringeMag * 2.2);
+      }
       chromaRaw = wlApplyFringeSaturation(chromaRaw, uRgbFringeSaturation);
       chromaRaw *= clamp(uRgbFringeBalance, vec3(0.0), vec3(3.0));
       lightMap = pow(max(chromaRaw, vec3(0.0)), vec3(max(uFalloff, 0.001)));
@@ -1715,6 +1726,13 @@ export class WindowLightEffectV2 {
       p.sparkleEnabled !== false ? 1 : 0,
       Number(p.rgbShiftAmount ?? 0).toFixed(2),
       Number(p.rgbShiftSoftness ?? 0).toFixed(2),
+      Number(p.rgbShiftAngle ?? 0).toFixed(0),
+      Number(p.rgbShiftSpread ?? 0).toFixed(2),
+      Number(p.rgbShiftEdgeWeight ?? 0).toFixed(2),
+      p.rgbShiftAnimate !== false ? 1 : 0,
+      p.rgbShiftAnimate !== false
+        ? Math.floor(Number(this._emitMaterial?.uniforms?.uTime?.value ?? 0) * 8)
+        : 0,
     ].join('|');
   }
 
@@ -2050,7 +2068,12 @@ export class WindowLightEffectV2 {
       u.uRainGlassFallbackDir.value.set(Math.cos(angleRad), Math.sin(angleRad));
     }
     if (u.uRgbFringeSaturation) {
-      u.uRgbFringeSaturation.value = Math.max(0.0, Number(p.rgbFringeSaturation) || 1);
+      const fringeSat = Number(p.rgbFringeSaturation);
+      u.uRgbFringeSaturation.value = clamp(
+        Number.isFinite(fringeSat) ? fringeSat : WINDOW_LIGHT_CORE_DEFAULTS.rgbFringeSaturation,
+        0,
+        3,
+      );
     }
     if (u.uRgbFringeBalance) {
       const bal = p.rgbFringeBalance;

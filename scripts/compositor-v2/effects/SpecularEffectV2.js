@@ -41,6 +41,7 @@ import { shouldStreamBackground } from '../../streaming/streamed-background-grid
 import { getTextureBudgetTracker } from '../../assets/TextureBudgetTracker.js';
 import { createFallback1x1Texture } from '../../assets/texture-policies.js';
 import { getBandOutdoorsMask } from '../../masks/indoor-outdoor-mask-api.js';
+import { resolveEffectShadowSun2D } from '../shadow-system/ShadowSunDirection.js';
 import {
   tileHasLevelsRange,
   readTileLevelsFlags,
@@ -300,10 +301,10 @@ export class SpecularEffectV2 {
     /** Frame counter for throttled AmbientLight doc refresh. */
     this._lightRefreshTick = 0;
 
-    // Effect parameters — same defaults as V1 for visual parity (minus retired unused fields).
+    // Effect parameters — tuned defaults for outdoor shimmer + rain wet sheen.
     this.params = {
       enabled: true,
-      intensity: 0.25,
+      intensity: 1.23,
       lightColor: { r: 1.0, g: 1.0, b: 1.0 },
       /** How much _Specular mask RGB tints highlights (0 = neutral white, 1 = mask colour). */
       specularMaskSaturation: 1.0,
@@ -320,36 +321,36 @@ export class SpecularEffectV2 {
       stripe1Frequency: 11.0,
       stripe1Speed: 0.0,
       stripe1Angle: 115.0,
-      stripe1Width: 0.21,
+      stripe1Width: 0.59,
       stripe1Intensity: 5.0,
       stripe1Parallax: 0.2,
       stripe1Wave: 1.7,
       stripe1Gaps: 0.31,
-      stripe1Softness: 2.14,
+      stripe1Softness: 5.0,
 
       // Layer 2
       stripe2Enabled: true,
       stripe2Frequency: 15.5,
       stripe2Speed: 0.0,
       stripe2Angle: 111.0,
-      stripe2Width: 0.38,
+      stripe2Width: 0.49,
       stripe2Intensity: 5.0,
       stripe2Parallax: 0.1,
       stripe2Wave: 1.6,
       stripe2Gaps: 0.5,
-      stripe2Softness: 3.93,
+      stripe2Softness: 5.0,
 
       // Layer 3
       stripe3Enabled: true,
       stripe3Frequency: 5.0,
       stripe3Speed: 0.0,
       stripe3Angle: 162.0,
-      stripe3Width: 0.09,
+      stripe3Width: 0.61,
       stripe3Intensity: 5.0,
       stripe3Parallax: -0.1,
       stripe3Wave: 0.4,
       stripe3Gaps: 0.37,
-      stripe3Softness: 3.44,
+      stripe3Softness: 5.0,
 
       // Micro Sparkle
       sparkleEnabled: false,
@@ -364,15 +365,15 @@ export class SpecularEffectV2 {
 
       // Wet Surface (Rain)
       wetSpecularEnabled: true,
-      wetInputBrightness: 0.0,
-      wetInputGamma: 1.0,
-      wetSpecularContrast: 2.5,
-      wetBlackPoint: 0.55,
-      wetWhitePoint: 0.92,
-      wetSpecularIntensity: 1.5,
-      wetOutputMax: 1.0,
-      wetOutputGamma: 1.0,
-      wetBaseSheen: 0.12,
+      wetInputBrightness: -0.09,
+      wetInputGamma: 0.77,
+      wetSpecularContrast: 1.0,
+      wetBlackPoint: 0.0,
+      wetWhitePoint: 1.0,
+      wetSpecularIntensity: 2.3,
+      wetOutputMax: 0.07,
+      wetOutputGamma: 3.0,
+      wetBaseSheen: 0.0,
       wetWindRippleStrength: 1.0,
 
       // Frost / Ice Glaze
@@ -1932,6 +1933,7 @@ export class SpecularEffectV2 {
       uDarknessLevel: { value: 0 },
       uAmbientDaylight: { value: new THREE.Color(1, 1, 1) },
       uAmbientDarkness: { value: new THREE.Color(0.14, 0.14, 0.28) },
+      uLightAzimuth: { value: 0 },
 
       // Dynamic lights
       numLights: { value: 0 },
@@ -2718,6 +2720,17 @@ export class SpecularEffectV2 {
         apply(colors.ambientDaylight, u.uAmbientDaylight.value);
         apply(colors.ambientDarkness, u.uAmbientDarkness.value);
       }
+
+      // Scene sun azimuth for anisotropic grain lighting (shared shadow sun resolver).
+      const driverAz = window.MapShine?.__shadowDriverState?.sun?.azimuthDeg;
+      const fc = window.MapShine?.effectComposer?._floorCompositorV2
+        ?? window.MapShine?.floorCompositorV2;
+      const sky = fc?._skyColorEffect;
+      const sun2d = resolveEffectShadowSun2D({
+        azimuthDeg: Number.isFinite(driverAz) ? driverAz : sky?.currentSunAzimuthDeg,
+        elevationDeg: sky?.currentSunElevationDeg,
+      });
+      u.uLightAzimuth.value = sun2d.azimuthDeg * (Math.PI / 180);
     } catch (_) { /* canvas may not be ready */ }
   }
 

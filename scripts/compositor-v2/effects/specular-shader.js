@@ -13,7 +13,7 @@
  *   - uTileAlphaClip (alpha clipping handled by simple discard on albedo.a)
  *
  * Preserved from V1 (all visual features):
- *   - Multi-layer animated stripes with parallax, waviness, gaps
+ *   - Multi-layer top-down shimmer (anisotropic micro-glint blobs + cellular FBM)
  *   - Micro sparkles
  *   - Wet surface (rain) specular from albedo grayscale
  *   - Frost/ice glaze
@@ -21,7 +21,7 @@
  *   - Dynamic light falloff and color tinting
  *   - Building shadow suppression
  *   - Wind-driven ripple on wet surfaces
- *   - Outdoor-only stripe scroll (manual layer speeds + wind drift along wind direction)
+ *   - Outdoor-only shimmer scroll (manual layer speeds + wind drift along wind direction)
  *   - Reinhard-Jodie tone mapping
  *   - World-space pattern coordinates
  *
@@ -73,6 +73,9 @@ export function getFragmentShader(maxLights = 64) {
 
     // ── Time ──────────────────────────────────────────────────────────────────
     uniform float uTime;
+
+    // Sun / scene light azimuth (radians) — biases anisotropic grain brightness.
+    uniform float uLightAzimuth;
 
     // ── Multi-layer stripe system ─────────────────────────────────────────────
     uniform bool  uStripeEnabled;
@@ -199,10 +202,6 @@ export function getFragmentShader(maxLights = 64) {
 
     // ── Noise helpers (texture-backed — replaces per-pixel simplex) ───────────
 
-    float noise1D(float p) {
-      return fract(sin(p * 127.1) * 43758.5453);
-    }
-
     float hash12(vec2 p) {
       vec3 p3  = fract(vec3(p.xyx) * .1031);
       p3 += dot(p3, p3.yzx + 33.33);
@@ -270,88 +269,137 @@ export function getFragmentShader(maxLights = 64) {
       return result;
     }
 
-    // ── Stripe layer generator ────────────────────────────────────────────────
+    // ── Top-down shimmer helpers ──────────────────────────────────────────────
 
-    float generateStripeLayer(
+    // Brushed-metal / wood-grain bias: brightest when light is perpendicular to grain.
+    float anisotropicLightBias(vec2 grainDir, float lightAzimuth) {
+      vec2 lightDir = vec2(cos(lightAzimuth), sin(lightAzimuth));
+      vec2 grainPerp = vec2(-grainDir.y, grainDir.x);
+      return mix(0.35, 1.0, abs(dot(lightDir, grainPerp)));
+    }
+
+    // Tiled Gaussian clusters stretched along a grain axis (top-down anisotropic glints).
+    float anisotropicBlob(vec2 uv, vec2 grainDir, float scale, float elongation, float spread, float wave) {
+      vec2 perp = vec2(-grainDir.y, grainDir.x);
+      float along = dot(uv, grainDir) * scale;
+      float across = dot(uv, perp) * scale / max(elongation, 0.18);
+      vec2 cell = floor(vec2(along, across));
+      vec2 offset = fract(vec2(along, across)) - 0.5;
+
+      float cellHash = hash12(cell + vec2(17.3, 91.7));
+      float rotAngle = (cellHash - 0.5) * wave * 1.4;
+      float cr = cos(rotAngle);
+      float sr = sin(rotAngle);
+      vec2 localOff = vec2(offset.x * cr - offset.y * sr, offset.x * sr + offset.y * cr);
+
+      vec2 seed = vec2(
+        hash12(cell + vec2(127.1, 311.7)),
+        hash12(cell + vec2(269.5, 183.3))
+      );
+      localOff -= (seed - 0.5) * 0.6;
+
+      float spreadMul = mix(18.0, 5.0, clamp(spread, 0.0, 1.0));
+      vec2 stretch = vec2(1.0, max(elongation, 0.18));
+      return exp(-dot(localOff * stretch, localOff * stretch) * spreadMul);
+    }
+
+    // Multi-octave voronoi × value noise — irregular highlight islands, no band seams.
+    float cellularShimmerFBM(vec2 uv, float cellScale, float time) {
+      float sum = 0.0;
+      float amp = 0.55;
+      float freq = max(cellScale, 0.5);
+      for (int o = 0; o < 3; o++) {
+        vec2 oUv = uv * freq + vec2(time * 0.013, time * 0.009);
+        float vor = sampleVoronoi01(oUv);
+        float val = sampleNoiseSigned(oUv * 0.7) * 0.5 + 0.5;
+        sum += vor * val * amp;
+        amp *= 0.5;
+        freq *= 1.9;
+      }
+      return smoothstep(0.28, 0.72, sum);
+    }
+
+    // Worley F2−F1 — soft caustic rings without hard voronoi cell walls.
+    vec2 worleyDistances(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      float F1 = 8.0;
+      float F2 = 8.0;
+      for (int yy = -1; yy <= 1; yy++) {
+        for (int xx = -1; xx <= 1; xx++) {
+          vec2 g = vec2(float(xx), float(yy));
+          vec2 lattice = i + g;
+          vec2 rnd = vec2(hash12(lattice), hash12(lattice + 53.7));
+          vec2 diff = g + rnd - f;
+          float d = dot(diff, diff);
+          if (d < F1) {
+            F2 = F1;
+            F1 = d;
+          } else if (d < F2) {
+            F2 = d;
+          }
+        }
+      }
+      return vec2(sqrt(F1), sqrt(F2));
+    }
+
+    float worleyCaustic(vec2 uv) {
+      vec2 d = worleyDistances(uv);
+      return max(0.0, d.y - d.x);
+    }
+
+    // ── Shimmer layer generator (replaces fract-based stripe bands) ───────────
+
+    float generateShimmerLayer(
       vec2 uv,
       vec3 worldPos,
       vec3 cameraPos,
       float time,
       float frequency,
       float speed,
-      vec2 stripeDir,
+      vec2 grainDir,
       float width,
       float parallaxDepth,
       float parallaxStrength,
       float wave,
       float gaps,
       float softness,
-      float outdoorWeight
+      float outdoorWeight,
+      float lightAzimuth
     ) {
-      // Stripe motion (scroll / pulse / wave phase) only where _Outdoors mask reads outdoor.
       float ow = clamp(outdoorWeight, 0.0, 1.0);
-      // Freeze animation when speed is effectively zero.
       float timeAnim = (abs(speed) > 0.000001) ? time * ow : 0.0;
       float speedAnimScale = clamp(abs(speed) / 0.01, 0.0, 10.0) * ow;
 
-      // Camera-based parallax offset
-      vec2 parallaxUv = uv;
+      vec2 patternUv = uv;
       if (parallaxDepth != 0.0) {
-        vec2 offset = uCameraOffset * parallaxDepth * parallaxStrength * 0.001;
-        parallaxUv -= offset;
+        vec2 offset = uCameraOffset * parallaxDepth * parallaxStrength * 0.0006;
+        patternUv -= offset;
       }
 
-      // Waviness distortion (texture noise replaces simplex)
       if (wave > 0.0) {
-        float waveNoise = sampleNoiseSigned(parallaxUv * 2.0 + timeAnim * (0.1 * speedAnimScale));
-        parallaxUv += waveNoise * wave * 0.05;
+        float waveNoise = sampleNoiseSigned(patternUv * 2.0 + timeAnim * (0.1 * speedAnimScale));
+        patternUv += waveNoise * wave * 0.04;
       }
 
-      // Rotate UV by precomputed direction vector (cos/sin from JS)
-      vec2 rotUv = vec2(
-        parallaxUv.x * stripeDir.x - parallaxUv.y * stripeDir.y,
-        parallaxUv.x * stripeDir.y + parallaxUv.y * stripeDir.x
-      );
+      // Scroll along grain (suppressed outdoors — wind handles drift there).
+      float scrollAlong = timeAnim * speed * (1.0 - ow);
+      vec2 scrollUv = patternUv + grainDir * scrollAlong * 0.08;
 
-      // Band-axis scroll: each layer uses a different stripe angle, so timeAnim*speed slides bands in
-      // different directions. Outdoors we rely on shared wind UV drift only (see main); suppress
-      // per-layer scroll there so all stripe layers move consistently with wind. Indoors ow=0
-      // ⇒ timeAnim is already zero.
-      float scrollAlongBands = timeAnim * speed * (1.0 - ow);
-      float pos = rotUv.x * frequency + scrollAlongBands;
-      float stripe = fract(pos);
+      float elongation = mix(0.25, 4.0, clamp(softness / 5.0, 0.0, 1.0));
+      float spread = clamp(gaps, 0.0, 1.0);
+      float scale = max(frequency, 0.25);
 
-      // Map width (0-1) to band half-size
+      float blob = anisotropicBlob(scrollUv, grainDir, scale, elongation, spread, wave);
+
+      // Width thins or fattens glint clusters.
       float w = clamp(width, 0.0, 1.0);
-      float bandHalfWidth = mix(0.02, 0.48, w);
+      float widthGate = smoothstep(mix(0.55, 0.08, w), mix(0.95, 0.45, w), blob);
 
-      // Subtle jitter per stripe
-      float noiseVal = noise1D(floor(pos));
-      bandHalfWidth *= (0.95 + 0.1 * noiseVal);
+      float lightBias = anisotropicLightBias(grainDir, lightAzimuth);
+      float pulse = 0.88 + 0.12 * sin(timeAnim * (0.7 * speedAnimScale) + frequency * 1.23);
 
-      // Distance from center of period
-      float d = abs(stripe - 0.5);
-
-      // Soft edges
-      float s = clamp(softness, 0.0, 1.0);
-      float edgeSoftness = mix(0.005, 0.18, s);
-      float innerRadius = max(bandHalfWidth - edgeSoftness, 0.0);
-
-      float stripePattern = smoothstep(bandHalfWidth, innerRadius, d);
-
-      // Temporal pulse
-      float pulse = 0.9 + 0.1 * sin(timeAnim * (0.7 * speedAnimScale) + frequency * 1.23);
-      stripePattern *= pulse;
-
-      // Gap breakup (texture noise)
-      if (gaps > 0.0) {
-        float gapNoise = sampleNoiseSigned(rotUv * 5.0 + timeAnim * (0.2 * speedAnimScale));
-        float normNoise = gapNoise * 0.5 + 0.5;
-        float gapMask = smoothstep(gaps, gaps + 0.2, normNoise);
-        stripePattern *= gapMask;
-      }
-
-      return stripePattern;
+      return widthGate * lightBias * pulse;
     }
 
     // ── Blend modes ───────────────────────────────────────────────────────────
@@ -558,7 +606,7 @@ export function getFragmentShader(maxLights = 64) {
         stripePatternUv += windAccumPattern * uWindStripeInfluence * outdoorFactor * kWindStripeScrollMul;
       }
 
-      // ── Multi-layer stripes ───────────────────────────────────────────────
+      // ── Multi-layer shimmer (anisotropic blobs + cellular FBM) ────────────
       float stripeMaskAnimated = 0.0;
 
       if (uStripeEnabled) {
@@ -566,33 +614,41 @@ export function getFragmentShader(maxLights = 64) {
         float layer2 = 0.0;
         float layer3 = 0.0;
 
+        // Brighter mask → finer, denser micro-facet cells (wet albedo mask counts too).
+        float maskCellScale = mix(2.5, 13.0, max(specularStrength, wetMask));
+        float shimmerBase = cellularShimmerFBM(
+          stripePatternUv,
+          maskCellScale,
+          uTime * outdoorFactor
+        );
+
         if (uStripeLayerEnabled[0] > 0.5) {
-          layer1 = generateStripeLayer(
+          layer1 = generateShimmerLayer(
             stripePatternUv, vWorldPosition, uCameraPosition, uTime,
             uStripeFrequency[0], uStripeSpeed[0], uStripeDir[0],
             uStripeWidth[0], uStripeParallax[0], uParallaxStrength,
             uStripeWave[0], uStripeGaps[0], uStripeSoftness[0],
-            outdoorFactor
+            outdoorFactor, uLightAzimuth
           ) * uStripeIntensity[0];
         }
 
         if (uStripeLayerEnabled[1] > 0.5) {
-          layer2 = generateStripeLayer(
+          layer2 = generateShimmerLayer(
             stripePatternUv, vWorldPosition, uCameraPosition, uTime,
             uStripeFrequency[1], uStripeSpeed[1], uStripeDir[1],
             uStripeWidth[1], uStripeParallax[1], uParallaxStrength,
             uStripeWave[1], uStripeGaps[1], uStripeSoftness[1],
-            outdoorFactor
+            outdoorFactor, uLightAzimuth
           ) * uStripeIntensity[1];
         }
 
         if (uStripeLayerEnabled[2] > 0.5) {
-          layer3 = generateStripeLayer(
+          layer3 = generateShimmerLayer(
             stripePatternUv, vWorldPosition, uCameraPosition, uTime,
             uStripeFrequency[2], uStripeSpeed[2], uStripeDir[2],
             uStripeWidth[2], uStripeParallax[2], uParallaxStrength,
             uStripeWave[2], uStripeGaps[2], uStripeSoftness[2],
-            outdoorFactor
+            outdoorFactor, uLightAzimuth
           ) * uStripeIntensity[2];
         }
 
@@ -603,6 +659,9 @@ export function getFragmentShader(maxLights = 64) {
         if (uStripeLayerEnabled[2] > 0.5) {
           stripeMaskAnimated = blendMode(stripeMaskAnimated, layer3, uStripeBlendMode);
         }
+
+        // Blend blob layers with mask-scaled cellular shimmer (no parallel band seams).
+        stripeMaskAnimated = stripeMaskAnimated * (0.55 + shimmerBase * 0.45) + shimmerBase * 0.22;
       }
 
       // ── Sparkles ──────────────────────────────────────────────────────────
@@ -658,31 +717,38 @@ export function getFragmentShader(maxLights = 64) {
         * totalModulator * uSpecularIntensity
         * effectiveLightColor * totalIncidentLight * buildingShadowFactor;
 
-      // ── Wind ripple (wet surfaces only) — dual-panned voronoi caustics ─────
+      // ── Wind ripple (wet surfaces only) — Worley F2−F1 caustic pools ───────
       float windRipple = 0.0;
       if (uWindDrivenStripesEnabled && uWindStripeInfluence > 0.0
           && uRainWetness > 0.001 && outdoorFactor > 0.01) {
         vec2 windUv = worldPatternUv + uWindAccum * uWindStripeInfluence;
         float t = uTime * 0.04;
-        vec2 vorUv1 = windUv * 8.0 + vec2(t, -t * 0.7);
-        vec2 vorUv2 = windUv * 8.0 + vec2(-t * 0.6, t);
-        float ripple1 = sampleVoronoi01(vorUv1);
-        float ripple2 = sampleVoronoi01(vorUv2);
-        windRipple = max(0.0, ripple1 * ripple2 * 4.0 - 0.5) * outdoorFactor;
+        vec2 adv = windUv * 6.0 + vec2(t * 0.5, -t * 0.35);
+        float caustic = worleyCaustic(adv);
+        windRipple = pow(caustic, 0.65) * 2.8 * outdoorFactor;
       }
 
       // ── Wet specular ─────────────────────────────────────────────────────
-      // Layer animated effects on top; wetMask (from albedo highlights) gates all terms.
-      float wetEffects = effectsOnly + (windRipple * max(0.0, uWetWindRippleStrength));
-      wetEffects += max(0.0, uWetBaseSheen) * outdoorFactor;
-      vec3 wetSpecularColor = vec3(wetMask) * wetEffects * uWetSpecularIntensity
+      // wetMask gates WHERE shimmer appears; stripeMaskAnimated supplies parallax shimmer.
+      // Full-strength stripes (outdoorStripeBlend only dampens the _Specular mask pass).
+      float wetShimmer = stripeMaskAnimated;
+      wetShimmer += windRipple * max(0.0, uWetWindRippleStrength);
+      wetShimmer += max(0.0, uWetBaseSheen) * outdoorFactor;
+      wetShimmer += sparkleVal * uSparkleIntensity;
+      if (uOutdoorCloudSpecularEnabled && uHasCloudShadowMap) {
+        wetShimmer += cloudLit * uCloudSpecularIntensity * outdoorFactor;
+      }
+      vec3 wetSpecularColor = vec3(wetMask) * wetShimmer * uWetSpecularIntensity
         * effectiveLightColor * totalIncidentLight * buildingShadowFactor;
 
-      // Output CC for wet specular
+      // Output CC for wet specular — scale peak to cap (preserves stripe contrast vs hard clamp).
       if (uWetOutputGamma != 1.0) {
         wetSpecularColor = pow(max(wetSpecularColor, vec3(0.0)), vec3(max(uWetOutputGamma, 0.01)));
       }
-      wetSpecularColor = min(wetSpecularColor, vec3(uWetOutputMax));
+      float wetPeak = max(max(wetSpecularColor.r, wetSpecularColor.g), wetSpecularColor.b);
+      if (wetPeak > uWetOutputMax && uWetOutputMax > 0.0) {
+        wetSpecularColor *= (uWetOutputMax / wetPeak);
+      }
 
       // ── Frost / Ice Glaze ─────────────────────────────────────────────────
       vec3 frostSpecularColor = vec3(0.0);

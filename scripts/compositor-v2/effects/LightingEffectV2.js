@@ -3762,6 +3762,12 @@ export class LightingEffectV2 {
                 albedoCouple
               );
               vec3 winIllum = msaLightDirectIllumination(vec3(indirectAmt), winHue, winWarmth);
+              vec3 winChroma = winSafe - vec3(dot(winSafe, MSA_LUMA_W));
+              float winChromaMag = length(winChroma);
+              if (winChromaMag > 1e-5) {
+                float fringeGate = smoothstep(0.0008, 0.028, winChromaMag);
+                winIllum += winChroma * (indirectAmt * fringeGate * mix(0.42, 0.95, winWarmth));
+              }
               totalIllumination += winIllum;
             }
           }
@@ -3788,6 +3794,12 @@ export class LightingEffectV2 {
             if (spillAmt > 1e-5) {
               vec3 winHueLit = winSafe / max(winMagLit, 1e-4);
               litColor += winHueLit * spillAmt;
+            }
+            vec3 winChromaLit = winSafe - vec3(dot(winSafe, MSA_LUMA_W));
+            float winChromaMagLit = length(winChromaLit);
+            if (winChromaMagLit > 1e-5) {
+              float fringeSpill = smoothstep(0.0008, 0.032, winChromaMagLit) * spillGain * 0.78;
+              litColor += winChromaLit * fringeSpill;
             }
           }
           // Albedo tint: linear in CI. Fade tint when direct already carries hue so CI steps read on illumination first.

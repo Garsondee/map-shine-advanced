@@ -34,8 +34,9 @@ import {
   getViewedLevelBackgroundSrc,
   hasV14NativeLevels,
 } from '../../foundry/levels-scene-flags.js';
-// OVERLAY_THREE_LAYER not needed — dust uses layer 0 only; stacking handled
-// by LayerOrderPolicy FLOOR_EFFECTS band.
+import { OVERLAY_THREE_LAYER } from '../../core/render-layers.js';
+// Dust quarks batches render on OVERLAY_THREE_LAYER (31) in FloorCompositor's
+// late world overlay pass — after post-FX — so subtle motes stay visible.
 import {
   ParticleSystem as QuarksParticleSystem,
   BatchedRenderer,
@@ -371,9 +372,14 @@ export class DustEffectV2 {
 
   get enabled() { return this._enabled; }
   set enabled(v) {
-    this._enabled = !!v;
+    const next = !!v;
+    const prev = this._enabled;
+    this._enabled = next;
     if (this.params && Object.prototype.hasOwnProperty.call(this.params, 'enabled')) {
       this.params.enabled = this._enabled;
+    }
+    if (next && !prev && this._initialized && this._floorStates.size === 0) {
+      this._queueRebuild();
     }
   }
 
@@ -391,10 +397,15 @@ export class DustEffectV2 {
     this._batchRenderer.frustumCulled = false;
     try {
       if (this._batchRenderer.layers && typeof this._batchRenderer.layers.set === 'function') {
-        this._batchRenderer.layers.set(0);
+        this._batchRenderer.layers.set(OVERLAY_THREE_LAYER);
       }
     } catch (_) {
     }
+
+    // IMPORTANT (V2): Do NOT register the BatchedRenderer into the bus here.
+    // FloorRenderBus.populate()/clear() removes tracked overlays; registering
+    // too early leaves parent=null and quarks self-disposes systems on update.
+    // We register (or re-register) in populate() and _ensureSceneAttachment().
 
     this._texturesReady = this._loadTextures();
 
@@ -404,7 +415,11 @@ export class DustEffectV2 {
 
   applyParamChange(paramId, value) {
     if (paramId === 'enabled' || paramId === 'masterEnabled') {
+      const prev = this.enabled;
       this.enabled = !!value;
+      if (this.enabled && !prev && this._floorStates.size === 0) {
+        this._queueRebuild();
+      }
       return;
     }
     if (!this.params || !Object.prototype.hasOwnProperty.call(this.params, paramId)) return;
@@ -470,8 +485,10 @@ export class DustEffectV2 {
   }
 
   async populate(foundrySceneData) {
+    if (foundrySceneData) {
+      this._lastPopulateSceneData = foundrySceneData;
+    }
     if (!this._initialized) return;
-    this._lastPopulateSceneData = foundrySceneData ?? this._lastPopulateSceneData;
 
     this.clear();
     if (this._texturesReady) await this._texturesReady;
@@ -561,11 +578,20 @@ export class DustEffectV2 {
     const systemsByFloor = Array.from(this._floorStates.entries()).map(([k, v]) => [k, v.systems?.length ?? 0]);
     const totalSystems = systemsByFloor.reduce((sum, [, n]) => sum + n, 0);
 
-    if (this._batchRenderer) {
-      this._renderBus.addEffectOverlay('__dust_batch__', this._batchRenderer, 0);
-    }
-
+    this._ensureSceneAttachment();
     this._activateCurrentFloor();
+    this._ensureActiveSystemsRegistered();
+    this._syncDustBatchLayers();
+
+    if (this._activeFloors.size === 0 && this._floorStates.size > 0) {
+      for (const idx of this._floorStates.keys()) {
+        this._activateFloor(idx);
+        this._activeFloors.add(idx);
+      }
+      log.warn('DustEffectV2: fallback activated all floors with dust spawn data', {
+        floors: [...this._floorStates.keys()],
+      });
+    }
 
     if (this._floorStates.size === 0) {
       log.debug('DustEffectV2: no spawn points found from _Dust masks or dust map points');
@@ -582,6 +608,12 @@ export class DustEffectV2 {
 
   update(timeInfo) {
     if (!this._initialized || !this._batchRenderer || !this._enabled || !this.params.enabled) return;
+
+    // Re-attach after FloorRenderBus.clear() evicts the shared overlay. three.quarks
+    // self-disposes particle systems when their emitter chain no longer reaches Scene.
+    this._ensureSceneAttachment();
+    this._ensureActiveSystemsRegistered();
+    this._syncDustBatchLayers();
 
     const deltaSec = typeof timeInfo?.motionDelta === 'number'
       ? timeInfo.motionDelta
@@ -678,7 +710,7 @@ export class DustEffectV2 {
       const state = this._floorStates.get(idx);
       if (!state?.systems) continue;
       for (const sys of state.systems) {
-        const shape = sys?.emitter?.shape;
+        const shape = sys?.emitterShape;
         if (shape && typeof shape.setViewBoundsWorld === 'function') {
           shape.setViewBoundsWorld(view.minX, view.minY, view.maxX, view.maxY);
         }
@@ -726,6 +758,240 @@ export class DustEffectV2 {
     if (!this._batchRenderer) return;
     const safeFloorIndex = Number.isFinite(Number(maxFloorIndex)) ? Number(maxFloorIndex) : 0;
     this._batchRenderer.renderOrder = effectUnderOverheadOrder(safeFloorIndex, 30);
+    this._syncDustBatchLayers(safeFloorIndex);
+  }
+
+  /**
+   * Keep quarks SpriteBatches on OVERLAY_THREE_LAYER so they draw in the late
+   * world overlay pass (after post-FX). Matches the pre-V2 dust path and
+   * WeatherParticlesV2 layer forcing for overlay-layer batches.
+   * @param {number|null} [activeFloorIndex]
+   * @private
+   */
+  _syncDustBatchLayers(activeFloorIndex = null) {
+    const br = this._batchRenderer;
+    if (!br) return;
+
+    try { br.layers?.set?.(OVERLAY_THREE_LAYER); } catch (_) {}
+    br.visible = true;
+
+    const map = br.systemToBatchIndex;
+    const batches = br.batches;
+    if (!map || !batches) return;
+
+    const floorIdx = Number.isFinite(Number(activeFloorIndex))
+      ? Number(activeFloorIndex)
+      : (Number(window.MapShine?.floorStack?.getActiveFloor?.()?.index) || 0);
+    const particleRenderOrder = effectUnderOverheadOrder(floorIdx, 30);
+
+    for (const [ps, idx] of map.entries()) {
+      const batch = batches[idx];
+      try { batch?.layers?.set?.(OVERLAY_THREE_LAYER); } catch (_) {}
+      if (batch && Number.isFinite(particleRenderOrder)) {
+        batch.renderOrder = particleRenderOrder;
+      }
+      const emitter = ps?.emitter;
+      if (emitter) {
+        emitter.visible = true;
+        try { emitter.layers?.set?.(OVERLAY_THREE_LAYER); } catch (_) {}
+      }
+      if (ps && Number.isFinite(particleRenderOrder)) {
+        ps.renderOrder = particleRenderOrder;
+      }
+    }
+
+    if (map.size > 0) {
+      try {
+        const fc = window.MapShine?.floorCompositorV2 ?? window.MapShine?.effectComposer?._floorCompositorV2;
+        if (fc) fc._hasOverlayLayerContent = true;
+      } catch (_) {}
+    }
+  }
+
+  _getBusScene() {
+    return this._renderBus?._scene ?? null;
+  }
+
+  /**
+   * Re-attach the BatchedRenderer to the bus scene when evicted by FloorRenderBus.clear().
+   * @private
+   */
+  _ensureSceneAttachment() {
+    if (!this._batchRenderer || !this._renderBus) return;
+    const busScene = this._getBusScene();
+    if (!busScene) return;
+
+    if (this._batchRenderer.parent !== busScene) {
+      if (!this._batchRenderer.parent) {
+        this._renderBus.addEffectOverlay('__dust_batch__', this._batchRenderer, 0);
+      } else {
+        try { busScene.add(this._batchRenderer); } catch (_) {}
+      }
+    }
+
+    this._reattachActiveFloorSystems();
+  }
+
+  /**
+   * Ensure active floor systems remain registered after a bus clear / quarks self-dispose.
+   * @private
+   */
+  _reattachActiveFloorSystems() {
+    if (!this._batchRenderer) return;
+    const map = this._batchRenderer.systemToBatchIndex;
+
+    for (const floorIndex of this._activeFloors) {
+      const state = this._floorStates.get(floorIndex);
+      if (!state?.systems?.length) continue;
+
+      let needsRebuild = false;
+      for (const sys of state.systems) {
+        if (!map?.has?.(sys)) {
+          needsRebuild = true;
+          break;
+        }
+      }
+
+      if (needsRebuild) {
+        this._rebuildSystemsForFloor(floorIndex, state.points);
+        continue;
+      }
+
+      for (const sys of state.systems) {
+        this._attachEmitterToBusScene(sys);
+      }
+    }
+  }
+
+  /**
+   * Defensive: keep every active dust system registered with the batch renderer.
+   * Mirrors WeatherParticlesV2._ensureWeatherSystemsRegistered().
+   * @private
+   */
+  _ensureActiveSystemsRegistered() {
+    if (!this._batchRenderer) return;
+    for (const floorIndex of this._activeFloors) {
+      const state = this._floorStates.get(floorIndex);
+      if (!state?.systems?.length) continue;
+      for (const sys of state.systems) {
+        this._attachSystemToBatch(sys);
+      }
+    }
+  }
+
+  /**
+   * @param {QuarksParticleSystem} sys
+   * @private
+   */
+  _attachSystemToBatch(sys) {
+    if (!this._batchRenderer || !sys) return;
+
+    const map = this._batchRenderer.systemToBatchIndex;
+    if (!map?.has?.(sys)) {
+      try {
+        this._batchRenderer.addSystem(sys);
+      } catch (err) {
+        log.warn('DustEffectV2: addSystem failed', err);
+        return;
+      }
+    }
+
+    this._attachEmitterToBusScene(sys);
+    this._syncDustBatchLayers();
+    try { sys.play?.(); } catch (_) {}
+  }
+
+  /**
+   * Parent the quarks emitter under the bus scene (Weather/SmellyFlies pattern).
+   * three.quarks requires the emitter chain to reach Scene before simulating.
+   * @param {QuarksParticleSystem} sys
+   * @private
+   */
+  _attachEmitterToBusScene(sys) {
+    const emitter = sys?.emitter;
+    const busScene = this._getBusScene();
+    if (!emitter || !busScene) return;
+
+    emitter.position.set(0, 0, 0);
+    this._configureDustEmitter(emitter, sys.userData?._msBucketCull);
+
+    try {
+      if (emitter.parent && emitter.parent !== busScene) {
+        emitter.parent.remove(emitter);
+      }
+      if (emitter.parent !== busScene) {
+        busScene.add(emitter);
+      }
+    } catch (err) {
+      log.warn('DustEffectV2: bus scene emitter attach failed', err);
+    }
+  }
+
+  /**
+   * Tag emitter metadata and layer for late-overlay quarks batches.
+   * @param {import('three').Object3D} emitter
+   * @param {{ cx?: number, cy?: number, cz?: number, radius?: number }|null|undefined} bucketCull
+   * @private
+   */
+  _configureDustEmitter(emitter, bucketCull = null) {
+    if (!emitter) return;
+    const ud = emitter.userData || (emitter.userData = {});
+    // Late overlay pass (layer 31) — drawn after post-FX so motes stay visible.
+    ud.msOverlayLayer = true;
+    ud.msAutoCull = false;
+    if (bucketCull && Number.isFinite(bucketCull.cx) && Number.isFinite(bucketCull.cy)) {
+      ud.msCullCenter = {
+        x: bucketCull.cx,
+        y: bucketCull.cy,
+        z: Number.isFinite(bucketCull.cz) ? bucketCull.cz : GROUND_Z,
+      };
+      if (Number.isFinite(bucketCull.radius) && bucketCull.radius > 0) {
+        ud.msCullRadius = bucketCull.radius;
+      }
+    }
+  }
+
+  /**
+   * @param {Float32Array} pointsWorld
+   * @param {number} floorIndex
+   * @returns {{ cx: number, cy: number, cz: number, radius: number }|null}
+   * @private
+   */
+  _computeBucketCullMeta(pointsWorld, floorIndex) {
+    if (!pointsWorld?.length) return null;
+
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (let i = 0; i < pointsWorld.length; i += 3) {
+      const x = pointsWorld[i];
+      const y = pointsWorld[i + 1];
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+    if (!Number.isFinite(minX) || !Number.isFinite(minY)) return null;
+
+    const p = this.params;
+    const zMin = Number.isFinite(Number(p.zMin)) ? Number(p.zMin) : 10;
+    const zMax = Number.isFinite(Number(p.zMax)) ? Number(p.zMax) : 140;
+    const floorZ = GROUND_Z + (Number(floorIndex) || 0);
+    const cz = floorZ + zMin + Math.max(0, zMax - zMin) * 0.5;
+    const dx = Math.max(0, maxX - minX);
+    const dy = Math.max(0, maxY - minY);
+    const r2d = 0.5 * Math.sqrt(dx * dx + dy * dy);
+    const vz = Math.max(0, zMax - zMin) * 0.5;
+    const radius = Math.sqrt(r2d * r2d + vz * vz) + 250;
+
+    return {
+      cx: (minX + maxX) * 0.5,
+      cy: (minY + maxY) * 0.5,
+      cz,
+      radius,
+    };
   }
 
   _activateFloor(floorIndex) {
@@ -735,11 +1001,7 @@ export class DustEffectV2 {
     log.info(`DustEffectV2: activating floor ${floorIndex} with ${state.systems.length} system(s)`);
 
     for (const sys of state.systems) {
-      try { this._batchRenderer.addSystem(sys); } catch (_) {}
-      if (sys.emitter) {
-        try { this._batchRenderer.add(sys.emitter); } catch (_) {}
-      }
-      try { sys.play?.(); } catch (_) {}
+      this._attachSystemToBatch(sys);
     }
   }
 
@@ -750,7 +1012,9 @@ export class DustEffectV2 {
 
     for (const sys of state.systems) {
       try { this._batchRenderer.deleteSystem(sys); } catch (_) {}
-      if (sys.emitter) this._batchRenderer.remove(sys.emitter);
+      try {
+        if (sys?.emitter?.parent) sys.emitter.parent.remove(sys.emitter);
+      } catch (_) {}
     }
   }
 
@@ -872,7 +1136,7 @@ export class DustEffectV2 {
       shape,
       material,
       renderMode: RenderMode.BillBoard,
-      renderOrder: 200010,
+      renderOrder: effectUnderOverheadOrder(floorIndex, 30),
       behaviors: [
         driftForce,
         curl,
@@ -885,8 +1149,14 @@ export class DustEffectV2 {
       curl,
       baseCurlStrength: new THREE.Vector3(1, 1, 1),
       _msEmissionScale: weight,
+      _msFloorIndex: floorIndex,
+      _msBucketCull: this._computeBucketCullMeta(pointsWorld, floorIndex),
       ownerEffect: this,
     };
+
+    if (system.emitter) {
+      this._configureDustEmitter(system.emitter, system.userData._msBucketCull);
+    }
 
     return system;
   }

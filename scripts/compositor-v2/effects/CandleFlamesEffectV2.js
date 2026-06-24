@@ -77,6 +77,9 @@ function resolveOptionalDarkness01(darkness, resolveLive) {
 /** Matches flame shader `step(0.5, vOutdoor)` — balance folders are exclusive, not blended. */
 const GLOW_BALANCE_OUTDOOR_THRESHOLD = 0.5;
 
+/** Minimum day-side intensity scale for flame sprites and glow pools (shared day/night floor). */
+const CANDLE_DAY_INTENSITY_FLOOR = 0.55;
+
 const GLOW_REBUILD_PARAMS = new Set([
   'glowBucketSizePx',
   'glowMaxBuckets',
@@ -115,8 +118,6 @@ const GLOW_DAY_NIGHT_POOL_PARAMS = new Set([
   'glowFlickerSpeed',
   'glowFlickerStrengthJitter',
   'glowFlickerSpeedJitter',
-  'glowRadiusPx',
-  'glowInnerRadiusScale',
   'glowFalloffExponent',
   'glowEdgeSoftness',
   'glowNightWarmth',
@@ -200,7 +201,7 @@ export class CandleFlamesEffectV2 {
       glowRadiusPx: 514.0,
       glowInnerRadiusScale: 0.55,
       glowFalloffExponent: 0.95,
-      glowEdgeSoftness: 0.92,
+      glowEdgeSoftness: 0.72,
       glowIntensity: 0.49,
       glowWarmth: 1.0,
       glowDarknessCancel: 0.6,
@@ -251,7 +252,7 @@ export class CandleFlamesEffectV2 {
       autoDayNightBalance: true,
       dayIntensityScale: 1.5,
       nightIntensityScale: 4,
-      dayNightCurve: 0.95,
+      dayNightCurve: 1.4,
 
       indoorThreshold: 0.5,
       wallClipRadiusScale: 0.3,
@@ -550,7 +551,7 @@ export class CandleFlamesEffectV2 {
           min: 0.25,
           max: 3,
           step: 0.05,
-          default: 1.15,
+          default: 1.4,
           label: 'Darkness Curve',
           tooltip: 'Above 1 = flame sprites stay dim longer into dusk; below 1 = ramp up earlier.',
         },
@@ -730,7 +731,7 @@ export class CandleFlamesEffectV2 {
           tooltip: 'Day halo softness. Lower = wider gentle rim (remapped for candle pools).',
         },
         glowEdgeSoftness: {
-          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.92, label: 'Pool Edge Softness',
+          type: 'slider', min: 0, max: 1.0, step: 0.01, default: 0.72, label: 'Pool Edge Softness',
           tooltip: 'Feathers the glow rim in the HDR light buffer. Drives shader attenuation + rim geometry (higher = wider, softer pool).',
         },
         glowBucketSizePx: {
@@ -902,6 +903,15 @@ export class CandleFlamesEffectV2 {
     }
 
     if (GLOW_REBUILD_PARAMS.has(paramId)) {
+      if (
+        paramId === 'glowRadiusPx' || paramId === 'glowInnerRadiusScale'
+        || paramId === 'glowNightRadiusPx' || paramId === 'glowNightInnerRadiusScale'
+      ) {
+        this._applyLiveGlowBalance();
+        this._refreshGlowClusterRadii();
+        this._scheduleGlowRebuild();
+        return;
+      }
       this._rebuildFromMapPoints();
     }
   }
@@ -1668,8 +1678,7 @@ export class CandleFlamesEffectV2 {
     if (!this.params.autoDayNightBalance) return 1.0;
 
     const darkness = this._resolveMasterDarkness();
-    const dayFloor = 0.55;
-    const day = Math.max(dayFloor, Math.max(0, Number(this.params.dayIntensityScale) || 0));
+    const day = Math.max(CANDLE_DAY_INTENSITY_FLOOR, Math.max(0, Number(this.params.dayIntensityScale) || 0));
     const night = Math.max(day, Math.max(0, Number(this.params.nightIntensityScale) || 0));
     const curve = Math.max(0.05, Number(this.params.dayNightCurve) || 1);
     const t = Math.pow(darkness, curve);
@@ -1862,8 +1871,7 @@ export class CandleFlamesEffectV2 {
 
   _computeGlowDayNightIntensityMul() {
     const darkness = this._resolveMasterDarkness();
-    const dayFloor = 0.55;
-    const day = Math.max(dayFloor, Math.max(0, Number(this.params.glowDayIntensityScale) || 0));
+    const day = Math.max(CANDLE_DAY_INTENSITY_FLOOR, Math.max(0, Number(this.params.glowDayIntensityScale) || 0));
     const night = Math.max(day, Math.max(0, Number(this.params.glowNightIntensityScale) || 0));
     return day + (night - day) * darkness;
   }
@@ -2359,7 +2367,7 @@ export class CandleFlamesEffectV2 {
       if (dist >= rMin && dist <= rMax) onRim += 1;
     }
 
-    return onRim >= verts * 0.82;
+    return onRim >= verts * 0.72;
   }
 
   /**
@@ -2619,10 +2627,10 @@ export class CandleFlamesEffectV2 {
           float tip = clamp(vUv.y, 0.0, 1.0);
           float tearR = r * mix(0.88, 1.12, tip * tip);
 
-          // HDR flame zones — bright core occupies most of the sprite; outer halo is whisper-soft.
-          float coreMask = smoothstep(0.78, 0.06, tearR);
-          float bodyMask = smoothstep(0.98, 0.28, tearR);
-          float haloMask = smoothstep(1.08, 0.58, tearR) * (1.0 - bodyMask * 0.92);
+          // HDR flame zones — wider band separation keeps teardrop crisp at low LOD pixel counts.
+          float coreMask = smoothstep(0.75, 0.05, tearR);
+          float bodyMask = smoothstep(1.05, 0.35, tearR);
+          float haloMask = smoothstep(1.15, 0.62, tearR) * (1.0 - bodyMask * 0.92);
 
           vec3 coreRad = vec3(4.2, 3.4, 2.1);
           vec3 bodyRad = vec3(2.6, 1.75, 0.55);

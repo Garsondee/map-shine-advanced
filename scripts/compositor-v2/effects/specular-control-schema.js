@@ -27,6 +27,7 @@ export function getSpecularControlSchema() {
         _Specular: 'Whether the scene found at least one `_Specular` texture after load (row under Enabled).',
         Intensity: 'Overall strength of the shine pass.',
         'Specular tint': 'Color multiplied into highlights (white keeps the map neutral).',
+        'Mask colour saturation': 'How much _Specular mask RGB tints highlights (0 = neutral white, 1 = full mask colour, up to 2 for extra punch).',
         'World scale': 'How large world-space stripe patterns are — higher = bigger, calmer bands.',
         'Outdoor blend': 'How much outdoor areas mix stripe modulation with cloud-lit specular.',
         'Wet surface': 'Rain-driven sheen from bright, fairly white albedo highlights (outdoor pixels only).',
@@ -42,7 +43,7 @@ export function getSpecularControlSchema() {
         label: 'Look',
         type: 'folder',
         expanded: true,
-        parameters: ['intensity', 'lightColor', 'playerLightSpecularBoost'],
+        parameters: ['intensity', 'lightColor', 'specularMaskSaturation', 'playerLightSpecularBoost'],
       },
       {
         name: 'stripes',
@@ -162,6 +163,16 @@ export function getSpecularControlSchema() {
         label: 'Specular tint',
         default: { ...white },
         tooltip: 'Tint multiplied into specular highlights (linear 0–1 per channel).',
+      },
+      specularMaskSaturation: {
+        type: 'slider',
+        label: 'Mask colour saturation',
+        min: 0,
+        max: 2,
+        step: 0.01,
+        default: 1.0,
+        throttle: 100,
+        tooltip: 'How much _Specular mask RGB tints highlights. 0 = neutral white (legacy), 1 = full mask colour, up to 2 for extra chroma.',
       },
       playerLightSpecularBoost: {
         type: 'slider',

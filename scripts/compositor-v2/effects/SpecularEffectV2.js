@@ -305,6 +305,8 @@ export class SpecularEffectV2 {
       enabled: true,
       intensity: 0.25,
       lightColor: { r: 1.0, g: 1.0, b: 1.0 },
+      /** How much _Specular mask RGB tints highlights (0 = neutral white, 1 = mask colour). */
+      specularMaskSaturation: 1.0,
 
       // Multi-layer stripe system
       stripeEnabled: true,
@@ -1858,6 +1860,7 @@ export class SpecularEffectV2 {
       uEffectEnabled: { value: this._enabled },
 
       uSpecularIntensity: { value: this.params.intensity },
+      uSpecularMaskSaturation: { value: this.params.specularMaskSaturation },
       uLightColor: { value: new THREE.Vector3(1, 1, 1) },
       uCameraPosition: { value: new THREE.Vector3(0, 0, 100) },
       uCameraOffset: { value: new THREE.Vector2(0, 0) },
@@ -2582,6 +2585,7 @@ export class SpecularEffectV2 {
 
     u.uEffectEnabled.value = this._enabled;
     u.uSpecularIntensity.value = this.params.intensity;
+    u.uSpecularMaskSaturation.value = this.params.specularMaskSaturation ?? 1.0;
 
     // Specular tint must not land on (0,0,0): the fragment shader multiplies the
     // entire additive pass by uLightColor (and dynamic-light tint only replaces

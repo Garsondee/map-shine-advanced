@@ -64,6 +64,7 @@ export function getFragmentShader(maxLights = 64) {
 
     // ── Strength & tint ───────────────────────────────────────────────────────
     uniform float uSpecularIntensity;
+    uniform float uSpecularMaskSaturation;
 
     // ── Lighting ──────────────────────────────────────────────────────────────
     uniform vec3 uLightColor;
@@ -249,6 +250,24 @@ export function getFragmentShader(maxLights = 64) {
       float a = clamp(s.a, 0.0, 1.0);
       if (a < 1e-4) return lum;
       return lum * a;
+    }
+
+    // Blend neutral (grayscale strength) with _Specular mask RGB. 0 = white highlights,
+    // 1 = full mask colour, >1 boosts chroma while preserving decoded strength luma.
+    vec3 applySpecularMaskColor(vec3 maskRgb, float strength, float saturation) {
+      float sat = clamp(saturation, 0.0, 2.0);
+      vec3 neutral = vec3(strength);
+      float maskLum = max(dot(maskRgb, vec3(0.2126, 0.7152, 0.0722)), 1e-4);
+      vec3 colored = maskRgb * (strength / maskLum);
+      vec3 result = mix(neutral, colored, min(sat, 1.0));
+      if (sat > 1.0) {
+        float baseLum = dot(result, vec3(0.2126, 0.7152, 0.0722));
+        vec3 chroma = result - vec3(baseLum);
+        result = max(vec3(baseLum) + chroma * sat, vec3(0.0));
+        float outLum = dot(result, vec3(0.2126, 0.7152, 0.0722));
+        if (outLum > 1e-5) result *= (baseLum / outLum);
+      }
+      return result;
     }
 
     // ── Stripe layer generator ────────────────────────────────────────────────
@@ -632,7 +651,10 @@ export function getFragmentShader(maxLights = 64) {
       }
 
       // ── Base specular color ───────────────────────────────────────────────
-      vec3 specularColor = vec3(specularStrength)
+      vec3 specularMaskColor = applySpecularMaskColor(
+        specularMask.rgb, specularStrength, uSpecularMaskSaturation
+      );
+      vec3 specularColor = specularMaskColor
         * totalModulator * uSpecularIntensity
         * effectiveLightColor * totalIncidentLight * buildingShadowFactor;
 

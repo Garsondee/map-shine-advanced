@@ -340,102 +340,111 @@ class ProceduralTextureBuilder {
     };
   }
 
-  /** @private Shape 0 — Fluid Rolling Core: Dense, boiling hot center with warped edges. */
+  /** @private Shape 0 — Plasma Core: Smooth, rolling metaball. Warps the domain to simulate a bubbling fluid surface rather than adding spiky noise. */
   static _fireShapeRollingCore(nx, ny, animCol, animCols, baseSeed) {
     const { tX, tY } = this._fireAtlasAnimDrift(animCol, animCols);
 
-    // Domain Warping: distort space before calculating distance to center
-    const warpX = this._fbm(nx * 3.5 + tX + baseSeed, ny * 3.5 + tY, 2) * 0.25;
-    const warpY = this._fbm(nx * 3.5 - tY, ny * 3.5 + tX + baseSeed, 2) * 0.25;
+    // Low-frequency domain warp (shifts the coordinates, keeping edges perfectly smooth)
+    const warpX = this._fbm(nx * 2.5 + tX + baseSeed, ny * 2.5, 2) * 0.3;
+    const warpY = this._fbm(nx * 2.5, ny * 2.5 + tY + baseSeed, 2) * 0.3;
 
     const dx = (nx - 0.5 + warpX) * 2.0;
     const dy = (ny - 0.5 + warpY) * 2.0;
     const dist = Math.sqrt(dx * dx + dy * dy);
 
-    // Exponential hot plasma core
-    const core = Math.exp(-dist * dist * 6.0);
+    // Fat, smooth blob
+    let alpha = Math.exp(-dist * dist * 4.5);
 
-    // Crisp but turbulent outer edge
-    const detailN = this._fbm(nx * 7.0 - tX, ny * 7.0 - tY, 3);
-    const edge = 1.0 - this._smoothstep(0.4, 0.8, dist - detailN * 0.15);
+    // Slight dip in the center to simulate the hollow core of a rising thermal plume
+    const centerDip = 1.0 - this._smoothstep(0.0, 0.4, dist);
+    alpha = alpha * (1.0 - centerDip * 0.35);
 
-    let alpha = core * 0.7 + edge * 0.5;
-    // Hard fade at canvas boundaries
     alpha *= 1.0 - this._smoothstep(0.85, 1.0, dist);
     return Math.pow(Math.max(0, Math.min(1, alpha)), 1.2);
   }
 
-  /** @private Shape 1 — Licking Tendrils: Organic, asymmetric tongues of flame reaching outward. */
+  /** @private Shape 1 — Convection Crescent: Simulates cold air pushing into the flame column, creating a sheared "C" or horseshoe shape. */
   static _fireShapeLickingTendrils(nx, ny, animCol, animCols, baseSeed) {
-    const { tX2, tY2 } = this._fireAtlasAnimDrift(animCol, animCols);
+    const { t } = this._fireAtlasAnimDrift(animCol, animCols);
 
-    const dx = (nx - 0.5) * 2.0;
-    const dy = (ny - 0.5) * 2.0;
-    const baseDist = Math.sqrt(dx * dx + dy * dy);
-    const angle = Math.atan2(dy, dx);
+    let dx = (nx - 0.5) * 2.0;
+    let dy = (ny - 0.5) * 2.0;
 
-    // Polar noise pulls the perimeter outward into spiky licks
-    const polarN = this._fbm(Math.cos(angle) * 2.2 + tX2 + baseSeed, Math.sin(angle) * 2.2 + tY2, 3);
-    const dist = baseDist - polarN * 0.35;
+    // Rotate the coordinate space slowly over time
+    const rot = t + baseSeed;
+    const rx = dx * Math.cos(rot) - dy * Math.sin(rot);
+    const ry = dx * Math.sin(rot) + dy * Math.cos(rot);
 
-    const core = Math.exp(-dist * dist * 8.0);
-    const edge = 1.0 - this._smoothstep(0.3, 0.7, dist);
+    const dist = Math.sqrt(rx * rx + ry * ry);
 
-    let alpha = core * 0.6 + edge * 0.6;
-    alpha *= 1.0 - this._smoothstep(0.9, 1.0, baseDist);
+    // Create an offset inner cutout to form the crescent shape
+    const hx = rx - 0.35; // Shift the hollow center to one side
+    const hy = ry;
+    const hollowDist = Math.sqrt(hx * hx + hy * hy);
+
+    const outer = Math.exp(-dist * dist * 4.5);
+    const inner = Math.exp(-hollowDist * hollowDist * 7.0);
+
+    // Add very low-frequency warp so the crescent isn't geometrically perfect
+    const warp = this._fbm(nx * 3.0 + t, ny * 3.0, 2) * 0.15;
+    let alpha = (outer - inner * 0.85) + (warp * outer);
+
+    alpha *= 1.0 - this._smoothstep(0.9, 1.0, dist);
     return Math.pow(Math.max(0, Math.min(1, alpha)), 1.4);
   }
 
-  /** @private Shape 2 — Splitting Flame: Heavy turbulence that bifurcates the core blob. */
+  /** @private Shape 2 — Vortex Swirl: Twists the coordinates based on distance from the center, creating an S-curve that mimics a spinning updraft. */
   static _fireShapeSplitting(nx, ny, animCol, animCols, baseSeed) {
-    const { tX, tY } = this._fireAtlasAnimDrift(animCol, animCols);
+    const { t } = this._fireAtlasAnimDrift(animCol, animCols);
 
-    // Low frequency, high amplitude warp to pull the blob apart
-    const splitN = this._fbm(nx * 2.0 - tX + baseSeed, ny * 2.0 - tY, 2);
-    const dx = (nx - 0.5 + splitN * 0.3) * 2.0;
-    const dy = (ny - 0.5 - splitN * 0.3) * 2.0;
+    const dx = (nx - 0.5) * 2.0;
+    const dy = (ny - 0.5) * 2.0;
     const dist = Math.sqrt(dx * dx + dy * dy);
 
-    const core = Math.exp(-dist * dist * 5.0);
+    // Whirlpool twist: rotation amount increases closer to the center
+    const twist = (1.0 - dist) * 3.5 - (t * 1.5) + baseSeed;
+    const tx = dx * Math.cos(twist) - dy * Math.sin(twist);
+    const ty = dx * Math.sin(twist) + dy * Math.cos(twist);
 
-    // Add medium detail to the torn edges
-    const detailN = this._fbm(nx * 5.0 + tX, ny * 5.0 + tY, 2);
-    const mask = 1.0 - this._smoothstep(0.4, 0.8, dist + detailN * 0.2);
+    // Squish the Y axis to create two elongated lobes (an S-shape)
+    const squishDist = Math.sqrt(tx * tx + (ty * 2.2) * (ty * 2.2));
 
-    let alpha = core * 0.5 + mask * 0.6;
-    alpha *= 1.0 - this._smoothstep(0.8, 1.0, Math.sqrt((nx - 0.5) ** 2 + (ny - 0.5) ** 2) * 2.0);
+    let alpha = Math.exp(-squishDist * squishDist * 5.0);
+
+    // Add small detached wisps orbiting the main swirl
+    const wispN = this._fbm(nx * 5.0, ny * 5.0 + t, 2);
+    alpha += this._smoothstep(0.6, 0.8, wispN) * Math.exp(-dist * dist * 3.0) * 0.4;
+
+    alpha *= 1.0 - this._smoothstep(0.8, 1.0, dist);
     return Math.pow(Math.max(0, Math.min(1, alpha)), 1.3);
   }
 
-  /** @private Shape 3 — Archipelago Pool: Coherent fire body with HF noise edge lobes, not speckled wisps. */
+  /** @private Shape 3 — Thermal Ring: A hollow, expanding heat mushroom viewed from the top. Detached, uneven rings of flame. */
   static _fireShapeArchipelagoPool(nx, ny, animCol, animCols, baseSeed) {
-    const { tX, tY, tX2, tY2 } = this._fireAtlasAnimDrift(animCol, animCols);
+    const { tX, tY } = this._fireAtlasAnimDrift(animCol, animCols);
 
-    const warpX = this._fbm(nx * 2.8 + tX + baseSeed + 63.1, ny * 2.8 + tY, 2) * 0.2;
-    const warpY = this._fbm(nx * 2.8 - tY + 11.4, ny * 2.8 + tX + baseSeed, 2) * 0.2;
+    // Medium warp to push the ring out of perfect symmetry
+    const warpX = this._fbm(nx * 3.0 - tY, ny * 3.0 + tX + baseSeed, 2) * 0.25;
+    const warpY = this._fbm(nx * 3.0 + tX + baseSeed, ny * 3.0 - tY, 2) * 0.25;
     const dx = (nx - 0.5 + warpX) * 2.0;
     const dy = (ny - 0.5 + warpY) * 2.0;
     const dist = Math.sqrt(dx * dx + dy * dy);
 
-    const core = Math.exp(-dist * dist * 5.5);
+    // Create a target radius for the ring that wobbles
+    const ringRadius = 0.4 + this._fbm(nx * 3.5, ny * 3.5, 2) * 0.15;
+    const ringDist = Math.abs(dist - ringRadius);
 
-    // Medium-frequency lobes — a handful of flame islands, not a furry speckle field.
-    const lobeN = this._fbm(nx * 5.5 + tX2 + baseSeed, ny * 5.5 + tY2, 3);
-    const lobeMask = this._smoothstep(0.05, 0.45, lobeN);
+    // Gaussian falloff centered entirely on the rim
+    let alpha = Math.exp(-ringDist * ringDist * 18.0);
 
-    // High-frequency ripples on the outer rim for boiling detail.
-    const detailN = this._fbm(nx * 10.0 + tX, ny * 10.0 + tY, 2);
-    const edgeRipple = 1.0 - this._smoothstep(0.38, 0.75, dist - detailN * 0.1);
+    // Use noise to "break" the ring so it forms disconnected arcs rather than a full circle
+    const breakMask = this._fbm(nx * 4.0 + tX, ny * 4.0 + tY, 2);
+    alpha *= this._smoothstep(0.2, 0.5, breakMask + 0.15);
 
-    // Archipelago ring: narrow HF channels carve gaps between connected flame lobes.
-    const poolEdge = 1.0 - this._smoothstep(0.25, 0.85, dist);
-    const channelN = this._fbm(nx * 9.0 + tX * 1.1 + baseSeed + 88.0, ny * 9.0 + tY * 1.1, 3);
-    const channels = this._smoothstep(0.35, 0.65, channelN);
-    const midRing = this._smoothstep(0.2, 0.45, dist) * (1.0 - this._smoothstep(0.55, 0.8, dist));
-    const archipelago = poolEdge * (1.0 - midRing + midRing * channels) * lobeMask;
+    // Add a faint central core so the middle isn't entirely black
+    alpha += Math.exp(-dist * dist * 12.0) * 0.4;
 
-    let alpha = core * 0.7 + edgeRipple * 0.35 + archipelago * 0.55;
-    alpha *= 1.0 - this._smoothstep(0.88, 1.0, dist);
+    alpha *= 1.0 - this._smoothstep(0.85, 1.0, dist);
     return Math.pow(Math.max(0, Math.min(1, alpha)), 1.2);
   }
 
@@ -452,7 +461,7 @@ class ProceduralTextureBuilder {
 
   /**
    * Build a cols×rows flipbook of top-down campfire pools.
-   * Rows = four fluid shape archetypes (rolling core, licking tendrils, splitting, archipelago pool); cols = flicker frames.
+   * Rows = four fluid shape archetypes (plasma core, convection crescent, vortex swirl, thermal ring); cols = flicker frames.
    * @param {number} cols Animation frames per shape.
    * @param {number} rows Shape archetype count.
    * @param {number} cellSize Pixel size of each atlas cell.

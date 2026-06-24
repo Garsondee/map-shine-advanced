@@ -7,6 +7,7 @@ import { canPersistSceneDocument, isGmLike } from '../core/gm-parity.js';
 import { createLogger, LogLevel, setLogLevel } from '../core/log.js';
 import { repairSceneControlStateFlag } from './control-state-sanitize.js';
 import { wipeMapShineAdvancedFlagsAsync } from './scene-msa-flag-wipe.js';
+import { extendMsaLocalFlagWriteGuard } from '../utils/msa-local-flag-guard.js';
 import { createDefaultStyledLoadingScreenConfig } from '../ui/loading-screen/loading-screen-config.js';
 import { createDefaultLoadingHints } from '../ui/loading-screen/loading-hints.js';
 import { LightingDirector } from '../core/LightingDirector.js';
@@ -669,6 +670,91 @@ export async function enable(scene, options = {}) {
 export async function disable(scene) {
   await scene.setFlag(FLAG_NAMESPACE, 'enabled', false);
   log.info(`Map Shine disabled for scene: ${scene.name}`);
+}
+
+/**
+ * True when the scene document carries any Map Shine flag data (MSA or legacy v1).
+ * @param {Scene|null|undefined} scene
+ * @returns {boolean}
+ * @public
+ */
+export function sceneHasMapShineFlags(scene) {
+  if (!scene?.flags) return false;
+  try {
+    const msa = scene.flags[FLAG_NAMESPACE];
+    if (msa && typeof msa === 'object' && Object.keys(msa).length > 0) return true;
+    const leg = scene.flags[LEGACY_FLAG_NAMESPACE];
+    return !!(leg && typeof leg === 'object' && Object.keys(leg).length > 0);
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * True when the scene still has Map Shine data worth stripping (beyond an explicit `enabled: false` marker).
+ * @param {Scene|null|undefined} scene
+ * @returns {boolean}
+ * @public
+ */
+export function sceneHasRemovableMapShineData(scene) {
+  if (!scene?.flags) return false;
+  try {
+    const msa = scene.flags[FLAG_NAMESPACE];
+    if (msa && typeof msa === 'object') {
+      for (const [key, val] of Object.entries(msa)) {
+        if (key === 'enabled' && val === false) continue;
+        return true;
+      }
+    }
+    const leg = scene.flags[LEGACY_FLAG_NAMESPACE];
+    return !!(leg && typeof leg === 'object' && Object.keys(leg).length > 0);
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Remove all Map Shine Advanced scene flags from a single scene and mark it disabled.
+ * Does not touch other scenes, world settings, or per-client player overrides.
+ *
+ * @param {Scene} scene - Foundry scene object
+ * @returns {Promise<Scene>} Refreshed scene document
+ * @public
+ */
+export async function stripAndDisable(scene) {
+  if (!scene?.id) {
+    throw new Error('Map Shine: no scene to strip');
+  }
+  if (!canPersistSceneDocument()) {
+    throw new Error('Map Shine: only GMs can strip Map Shine flags from a scene');
+  }
+
+  const sceneId = scene.id;
+  const sceneName = scene.name ?? sceneId;
+
+  extendMsaLocalFlagWriteGuard(4000);
+
+  await wipeMapShineAdvancedFlagsAsync(scene, 'strip-and-disable');
+  let s = game.scenes?.get?.(sceneId) ?? scene;
+
+  await removeLegacyMapShineNamespace(s);
+  s = game.scenes?.get?.(sceneId) ?? s;
+
+  await s.setFlag(FLAG_NAMESPACE, 'enabled', false);
+  s = game.scenes?.get?.(sceneId) ?? s;
+
+  if (s.getFlag(FLAG_NAMESPACE, 'enabled') !== false) {
+    throw new Error('Map Shine: disable flag did not persist on the scene document');
+  }
+
+  const remaining = s.flags?.[FLAG_NAMESPACE] ?? {};
+  const extraKeys = Object.keys(remaining).filter((k) => k !== 'enabled');
+  if (extraKeys.length > 0) {
+    log.warn(`Map Shine strip: unexpected remaining flag keys on "${sceneName}": ${extraKeys.join(', ')}`);
+  }
+
+  log.info(`Map Shine stripped and disabled for scene: ${sceneName} (${sceneId})`);
+  return s;
 }
 
 /**

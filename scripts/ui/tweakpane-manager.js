@@ -2236,27 +2236,129 @@ export class TweakpaneManager {
     toggle.className = 'ms-scene-status-toggle';
     toggle.textContent = 'Enable';
 
+    const stripButton = document.createElement('button');
+    stripButton.type = 'button';
+    stripButton.className = 'ms-scene-status-toggle ms-scene-status-strip';
+    stripButton.textContent = 'Strip & Disable';
+    stripButton.title = 'Remove all Map Shine Advanced flags from this scene only, then disable Map Shine';
+
     toggle.addEventListener('click', async (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
       await this._onSceneEnableQuickToggleClick();
     });
 
+    stripButton.addEventListener('click', async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      await this._onSceneStripDisableClick();
+    });
+
     for (const evt of ['mousedown', 'pointerdown', 'dblclick', 'contextmenu']) {
       toggle.addEventListener(evt, (e) => e.stopPropagation());
+      stripButton.addEventListener(evt, (e) => e.stopPropagation());
     }
 
     bar.appendChild(badge);
     bar.appendChild(toggle);
+    bar.appendChild(stripButton);
     rotv.insertBefore(bar, contentAnchor);
 
     this._sceneEnableStatusBarEl = bar;
     this._sceneEnableStatusBadgeEl = badge;
     this._sceneEnableStatusChipEl = chip;
     this._sceneEnableQuickToggleButtonEl = toggle;
+    this._sceneStripDisableButtonEl = stripButton;
     this._sceneEnableQuickToggleSceneId = null;
     this._sceneEnableQuickToggleState = null;
     this._refreshSceneEnableQuickToggle({ force: true });
+  }
+
+  /**
+   * Ask GM to confirm stripping Map Shine data from the active scene only.
+   * @param {Scene} scene
+   * @returns {Promise<boolean>}
+   * @private
+   */
+  _promptStripDisableScene(scene) {
+    const name = scene?.name ? String(scene.name) : 'this scene';
+    return new Promise((resolve) => {
+      const dialog = new Dialog({
+        title: 'Strip Map Shine from Scene',
+        content: `
+          <p>Remove <strong>all</strong> Map Shine Advanced flags from <strong>${foundry.utils.escapeHTML(name)}</strong> and disable Map Shine for that scene.</p>
+          <ul style="margin:8px 0 8px 18px;line-height:1.45;">
+            <li>Only this scene is affected — other scenes and world settings are left unchanged.</li>
+            <li>Effect parameters, presets, zones, weather snapshots, and other Map Shine scene data will be deleted.</li>
+            <li>Foundry will reload afterward so the scene returns to native rendering.</li>
+          </ul>
+        `,
+        buttons: {
+          strip: {
+            icon: '<i class="fas fa-eraser"></i>',
+            label: 'Strip & Disable',
+            callback: () => resolve(true)
+          },
+          cancel: {
+            icon: '<i class="fas fa-times"></i>',
+            label: 'Cancel',
+            callback: () => resolve(false)
+          }
+        },
+        default: 'cancel',
+        close: () => resolve(false)
+      });
+      dialog.render(true);
+    });
+  }
+
+  /**
+   * Strip all Map Shine flags from the active scene and disable Map Shine for it.
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _onSceneStripDisableClick() {
+    if (this._sceneEnableQuickToggleBusy) return;
+
+    const scene = canvas?.scene;
+    if (!scene) {
+      ui.notifications?.warn?.('Map Shine: No active scene to strip.');
+      return;
+    }
+
+    if (!canPersistSceneDocument()) {
+      ui.notifications?.warn?.('Map Shine: Only GMs can strip Map Shine flags from a scene.');
+      return;
+    }
+
+    if (!sceneSettings.isEnabled(scene) && !sceneSettings.sceneHasRemovableMapShineData(scene)) {
+      ui.notifications?.info?.('Map Shine: This scene has no Map Shine flags to remove.');
+      return;
+    }
+
+    const confirmed = await this._promptStripDisableScene(scene);
+    if (!confirmed) return;
+
+    this._sceneEnableQuickToggleBusy = true;
+    this._refreshSceneEnableQuickToggle({ force: true });
+
+    try {
+      const refreshed = await sceneSettings.stripAndDisable(scene);
+      const verified = refreshed.getFlag('map-shine-advanced', 'enabled') === false;
+      if (!verified) {
+        ui.notifications?.error?.('Map Shine: Failed to persist scene disable after strip. Check console for details.');
+        return;
+      }
+
+      this._refreshSceneEnableQuickToggle({ force: true });
+      scenePresets.requestSceneStripDisablePageReload(refreshed);
+    } catch (e) {
+      log.error('MapShine scene strip & disable failed:', e);
+      ui.notifications?.error?.('Map Shine: Failed to strip this scene. Check console for details.');
+    } finally {
+      this._sceneEnableQuickToggleBusy = false;
+      this._refreshSceneEnableQuickToggle({ force: true });
+    }
   }
 
   /**
@@ -2327,24 +2429,43 @@ export class TweakpaneManager {
     const badge = this._sceneEnableStatusBadgeEl;
     const chip = this._sceneEnableStatusChipEl;
     const toggle = this._sceneEnableQuickToggleButtonEl;
+    const stripButton = this._sceneStripDisableButtonEl;
     if (!badge || !chip || !toggle) return;
 
     const scene = canvas?.scene ?? null;
     const sceneId = scene?.id ?? null;
     const enabled = !!scene && sceneSettings.isEnabled(scene);
+    const hasRemovableData = !!scene && (
+      enabled || sceneSettings.sceneHasRemovableMapShineData(scene)
+    );
 
-    if (!force && sceneId === this._sceneEnableQuickToggleSceneId && enabled === this._sceneEnableQuickToggleState) {
+    if (
+      !force
+      && sceneId === this._sceneEnableQuickToggleSceneId
+      && enabled === this._sceneEnableQuickToggleState
+      && hasRemovableData === this._sceneStripDisableHasFlags
+    ) {
       return;
     }
 
     this._sceneEnableQuickToggleSceneId = sceneId;
     this._sceneEnableQuickToggleState = enabled;
+    this._sceneStripDisableHasFlags = hasRemovableData;
 
     const hasScene = !!scene;
     const canEdit = hasScene && canPersistSceneDocument();
     const busy = this._sceneEnableQuickToggleBusy;
 
     toggle.disabled = !hasScene || !canEdit || busy;
+
+    if (stripButton) {
+      const showStrip = hasScene && hasRemovableData;
+      stripButton.hidden = !showStrip;
+      stripButton.disabled = !canEdit || busy || !showStrip;
+      stripButton.title = busy
+        ? 'Applying scene changes…'
+        : 'Remove all Map Shine Advanced flags from this scene only, then disable Map Shine';
+    }
 
     if (!hasScene) {
       badge.className = 'ms-scene-status-badge ms-scene-status-badge--idle';

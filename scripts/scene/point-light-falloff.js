@@ -393,6 +393,12 @@ export const MSA_LIGHT_RADIANCE_GLSL = `
     return clamp((mx - mn) / mx, 0.0, 1.0);
   }
 
+  // Wide illumination envelope for saturation boosts — tracks mag falloff, not the tight CI gel core.
+  float msaLightIllumPresenceEnvelope(float mag) {
+    float e = smoothstep(0.003, 0.86, max(mag, 0.0));
+    return pow(e, 0.58);
+  }
+
   // Tint weight: chroma magnitude × penumbra envelope (never length/mag — that is flat until the rim).
   float msaLightTintWeight(vec3 chromaSig, float mag) {
     float chromaMag = length(max(chromaSig, vec3(0.0)));

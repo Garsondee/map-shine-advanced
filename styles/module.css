@@ -488,6 +488,21 @@
   cursor: not-allowed;
 }
 
+#map-shine-ui .ms-scene-status-strip {
+  border-color: var(--ms-ui-danger-border, rgba(255, 120, 120, 0.38));
+  background: var(--ms-ui-danger-bg, rgba(120, 0, 0, 0.16));
+  color: var(--ms-ui-danger, rgba(255, 210, 210, 0.95));
+}
+
+#map-shine-ui .ms-scene-status-strip:hover:not(:disabled) {
+  background: var(--ms-ui-danger-bg-hover, rgba(140, 20, 20, 0.26));
+  border-color: var(--ms-ui-danger-border-hover, rgba(255, 140, 140, 0.5));
+}
+
+#map-shine-ui .ms-scene-status-strip[hidden] {
+  display: none;
+}
+
 /* Lighting HDR UI facelift: make the dense Tweakpane hierarchy easier to scan. */
 #map-shine-ui .ms-support-links {
   padding: 6px 2px 4px;

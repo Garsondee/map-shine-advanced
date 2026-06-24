@@ -34,6 +34,27 @@ const log = createLogger('ThreeLightSource');
 // uses full this.animation.time via animateTorch().
 const FIRE_SHADER_TIME_WRAP = Math.PI * 2 * 256;
 
+/** Animation types driven by animateTime() + shader chunk (type string → uAnimType id). */
+const BASIC_TIME_ANIMS = {
+  wave: 1,
+  chroma: 3,
+  energy: 4,
+  witchwave: 5,
+  revolving: 6,
+  fog: 8,
+  sunburst: 9,
+  dome: 10,
+  emanation: 11,
+  hexa: 12,
+  ghost: 13,
+  vortex: 14,
+  rainbowswirl: 15,
+  radialrainbow: 16,
+  grid: 17,
+  starlight: 18,
+  smokepatch: 19,
+};
+
 class SmoothNoise {
   constructor({ amplitude = 1, scale = 1, maxReferences = 256 } = {}) {
     this.amplitude = amplitude;
@@ -44,6 +65,7 @@ class SmoothNoise {
     }
 
     this._maxReferences = maxReferences;
+    this._mask = maxReferences - 1;
     this._references = [];
     for (let i = 0; i < this._maxReferences; i++) {
       this._references.push(Math.random());
@@ -77,8 +99,8 @@ class SmoothNoise {
     const xFloor = Math.floor(scaledX);
     const t = scaledX - xFloor;
     const tSmooth = t * t * (3 - 2 * t);
-    const i0 = xFloor & (this._maxReferences - 1);
-    const i1 = (i0 + 1) & (this._maxReferences - 1);
+    const i0 = xFloor & this._mask;
+    const i1 = (i0 + 1) & this._mask;
     const y = (this._references[i0] * (1 - tSmooth)) + (this._references[i1] * tSmooth);
     return y * this._amplitude;
   }
@@ -166,27 +188,22 @@ export class ThreeLightSource {
   }
 
   _getOutdoorFactorAtFoundryXY(x, y) {
-    try {
-      const rect = canvas?.dimensions?.sceneRect;
-      const sceneX = Number(rect?.x) || 0;
-      const sceneY = Number(rect?.y) || 0;
-      const sceneW = Number(rect?.width) || 1;
-      const sceneH = Number(rect?.height) || 1;
+    const rect = canvas?.dimensions?.sceneRect;
+    const sceneX = Number(rect?.x) || 0;
+    const sceneY = Number(rect?.y) || 0;
+    const sceneW = Number(rect?.width) || 1;
+    const sceneH = Number(rect?.height) || 1;
 
-      const u0 = (x - sceneX) / Math.max(1, sceneW);
-      // WeatherController.getRoofMaskIntensity reads mask data extracted from an HTMLCanvas
-      // (top-left origin), so v=0 is top and v=1 is bottom (no flip).
-      const v0 = (y - sceneY) / Math.max(1, sceneH);
-      const u = Math.max(0.0, Math.min(1.0, u0));
-      const v = Math.max(0.0, Math.min(1.0, v0));
+    const u = this._clamp((x - sceneX) / Math.max(1, sceneW), 0.0, 1.0);
+    // WeatherController.getRoofMaskIntensity reads mask data extracted from an HTMLCanvas
+    // (top-left origin), so v=0 is top and v=1 is bottom (no flip).
+    const v = this._clamp((y - sceneY) / Math.max(1, sceneH), 0.0, 1.0);
 
-      const w = this._getWeatherController();
-      if (!w || typeof w.getRoofMaskIntensity !== 'function') return 1.0;
-      const f = w.getRoofMaskIntensity(u, v);
-      return (typeof f === 'number' && Number.isFinite(f)) ? Math.max(0.0, Math.min(1.0, f)) : 1.0;
-    } catch (_) {
-      return 1.0;
-    }
+    const w = this._getWeatherController();
+    if (typeof w?.getRoofMaskIntensity !== 'function') return 1.0;
+
+    const f = w.getRoofMaskIntensity(u, v);
+    return (typeof f === 'number' && Number.isFinite(f)) ? this._clamp(f, 0.0, 1.0) : 1.0;
   }
 
   _getWeatherController() {
@@ -211,21 +228,13 @@ export class ThreeLightSource {
   }
 
   _getWallInsetPx() {
-    try {
-      const inset = window.MapShine?.lightingEffect?.params?.wallInsetPx;
-      return (typeof inset === 'number' && isFinite(inset)) ? Math.max(0, inset) : 0;
-    } catch (_) {
-      return 0;
-    }
+    const inset = window.MapShine?.lightingEffect?.params?.wallInsetPx;
+    return (typeof inset === 'number' && isFinite(inset)) ? Math.max(0, inset) : 0;
   }
 
   _getWallPaddingPx() {
-    try {
-      const pad = window.MapShine?.lightingEffect?.params?.wallPaddingPx;
-      return (typeof pad === 'number' && isFinite(pad)) ? Math.max(0, pad) : 0;
-    } catch (_) {
-      return 0;
-    }
+    const pad = window.MapShine?.lightingEffect?.params?.wallPaddingPx;
+    return (typeof pad === 'number' && isFinite(pad)) ? Math.max(0, pad) : 0;
   }
 
   _getWallInsetWorldPx(zoomOverride = null) {
@@ -306,6 +315,7 @@ export class ThreeLightSource {
     const THREE = window.THREE;
 
     this.material = new THREE.ShaderMaterial({
+      defines: { ANIM_TYPE: 0 },
       uniforms: {
         uColor: { value: new THREE.Color() },
         uRadius: { value: 0 },       // Max radius (dim)
@@ -342,6 +352,10 @@ export class ThreeLightSource {
          * not in compose post-multiply.
          */
         uComposeLightGain: { value: 0.35 },
+        /** Foundry-only brightness multiplier (LightingEffectV2; 1 = neutral; torch keeps 1). */
+        uFoundryLightGain: { value: 1.0 },
+        /** Foundry-only CI / chroma push before buffer write (1 = neutral). */
+        uFoundryChromaBoost: { value: 1.0 },
         uColorationMixScale: { value: 1.0 },
         uColorationMaxMix: { value: 1.0 },
         // Cookie/gobo texture (optional)
@@ -388,6 +402,8 @@ export class ThreeLightSource {
         uniform float uBrightness;
         uniform float uLuminosity;
         uniform float uComposeLightGain;
+        uniform float uFoundryLightGain;
+        uniform float uFoundryChromaBoost;
         uniform float uColorIntensity01;
         uniform float uColorationAlpha;
         uniform float uColorationMixScale;
@@ -587,9 +603,13 @@ export class ThreeLightSource {
           float iAnimDrive = clamp((clamp(uAnimIntensity, 0.0, 10.0) - 1.0) / 9.0, 0.0, 1.0);
 
           // 20 = torch, 21 = flame - both are fire lights: tight screen-space core, not the full dim disk.
-          float isTorch = step(19.5, uAnimType) * (1.0 - step(20.5, uAnimType));
-          float isFlame = step(20.5, uAnimType) * (1.0 - step(21.5, uAnimType));
-          float isFireCore = max(isTorch, isFlame);
+          #if ANIM_TYPE == 20 || ANIM_TYPE == 21
+          float isFlame = float(ANIM_TYPE == 21);
+          float isFireCore = 1.0;
+          #else
+          float isFlame = 0.0;
+          float isFireCore = 0.0;
+          #endif
 
           // uAttenuation maps Foundry attenuation → rim width (see updateData).
           float att = clamp(uAttenuation, 0.0, 1.0);
@@ -598,7 +618,7 @@ export class ThreeLightSource {
           float intensity;
 
           // Torch (20) + flame (21): wind-warped ember + dim disk (local warp on p only; vUvs/cookies unchanged).
-          if (isFireCore > 0.5) {
+          #if ANIM_TYPE == 20 || ANIM_TYPE == 21
             float fireChaosAmt = smoothstep(0.03, 0.92, iAnimDrive);
             float ai = mix(0.03, 1.0, pow(iAnimDrive, 0.78));
             float coreGrowth = smoothstep(0.0, 1.0, iAnimDrive);
@@ -697,11 +717,11 @@ export class ThreeLightSource {
             float fireRadialMul = mix(0.68, 2.0, pow(iAnimDrive, 1.02));
             float radialBase = ember + disk * 0.52;
             intensity = radialBase * fireRadialMul * flickStable;
-          } else {
+          #else
             intensity = msaPointLightFalloff(
               r, brightNorm, att, uEdgeSoftness, uFalloffExponent, uOuterWeight, uInnerWeight
             );
-          }
+          #endif
 
           // Shader-driven animation factor and potential color shift.
           float animAlphaMul = 1.0;
@@ -750,82 +770,69 @@ export class ThreeLightSource {
           // 12 = hexa, 13 = ghost, 14 = vortex, 15 = rainbowswirl, 16 = radialrainbow
           // 17 = grid, 18 = starlight, 19 = smokepatch
           // 20 = torch, 21 = flame, 22 = pulse (also reactivepulse)
-          if (uAnimType > 0.5 && uAnimType < 1.5) {
-            // Wave: moving concentric ripples.
-            // Keep the modulation mostly in the mid falloff like Foundry.
+          #if ANIM_TYPE == 1
             ${FoundryLightingShaderChunks.wave}
-          } else if (uAnimType > 1.5 && uAnimType < 2.5) {
-            // Foundry VTT fairy-light (ported 1:1 from fairy-light.mjs coloration shader).
-            // Uses fbm-based distortions + rainbow coloration.
+          #elif ANIM_TYPE == 2
             ${FoundryLightingShaderChunks.fairy}
-          } else if (uAnimType > 2.5 && uAnimType < 3.5) {
-            // Foundry VTT chroma (ported from chroma.mjs).
+          #elif ANIM_TYPE == 3
             ${FoundryLightingShaderChunks.chroma}
-          } else if (uAnimType > 3.5 && uAnimType < 4.5) {
-            // Foundry VTT energy field (ported from energy-field.mjs).
+          #elif ANIM_TYPE == 4
             ${FoundryLightingShaderChunks.energyField}
-          } else if (uAnimType > 4.5 && uAnimType < 5.5) {
-            // Foundry VTT bewitching wave (ported from bewitching-wave.mjs).
+          #elif ANIM_TYPE == 5
             ${FoundryLightingShaderChunks.bewitchingWave}
-          } else if (uAnimType > 5.5 && uAnimType < 6.5) {
-            // Foundry VTT revolving (ported from revolving-light.mjs).
+          #elif ANIM_TYPE == 6
             ${FoundryLightingShaderChunks.revolving}
-          } else if (uAnimType > 6.5 && uAnimType < 7.5) {
-            // Foundry VTT siren (ported from siren-light.mjs).
+          #elif ANIM_TYPE == 7
             ${FoundryLightingShaderChunks.siren}
-          } else if (uAnimType > 7.5 && uAnimType < 8.5) {
-            // Foundry VTT fog (ported from fog.mjs).
+          #elif ANIM_TYPE == 8
             ${FoundryLightingShaderChunks.fog}
-          } else if (uAnimType > 8.5 && uAnimType < 9.5) {
-            // Foundry VTT sunburst (ported from sunburst.mjs).
+          #elif ANIM_TYPE == 9
             ${FoundryLightingShaderChunks.sunburst}
-          } else if (uAnimType > 9.5 && uAnimType < 10.5) {
-            // Foundry VTT dome (ported from light-dome.mjs).
+          #elif ANIM_TYPE == 10
             ${FoundryLightingShaderChunks.lightDome}
-          } else if (uAnimType > 10.5 && uAnimType < 11.5) {
-            // Foundry VTT emanation (ported from emanation.mjs).
+          #elif ANIM_TYPE == 11
             ${FoundryLightingShaderChunks.emanation}
-          } else if (uAnimType > 11.5 && uAnimType < 12.5) {
-            // Foundry VTT hexa dome (ported from hexa-dome.mjs).
+          #elif ANIM_TYPE == 12
             ${FoundryLightingShaderChunks.hexaDome}
-          } else if (uAnimType > 12.5 && uAnimType < 13.5) {
-            // Foundry VTT ghost light (ported from ghost-light.mjs).
+          #elif ANIM_TYPE == 13
             ${FoundryLightingShaderChunks.ghostLight}
-          } else if (uAnimType > 13.5 && uAnimType < 14.5) {
-            // Foundry VTT vortex (ported from vortex.mjs).
+          #elif ANIM_TYPE == 14
             ${FoundryLightingShaderChunks.vortex}
-          } else if (uAnimType > 14.5 && uAnimType < 15.5) {
-            // Foundry VTT swirling rainbow (ported from swirling-rainbow.mjs).
+          #elif ANIM_TYPE == 15
             ${FoundryLightingShaderChunks.swirlingRainbow}
-          } else if (uAnimType > 15.5 && uAnimType < 16.5) {
-            // Foundry VTT radial rainbow (ported from radial-rainbow.mjs).
+          #elif ANIM_TYPE == 16
             ${FoundryLightingShaderChunks.radialRainbow}
-          } else if (uAnimType > 16.5 && uAnimType < 17.5) {
-            // Foundry VTT force grid (ported from force-grid.mjs).
+          #elif ANIM_TYPE == 17
             ${FoundryLightingShaderChunks.forceGrid}
-          } else if (uAnimType > 17.5 && uAnimType < 18.5) {
-            // Foundry VTT star light (ported from star-light.mjs).
+          #elif ANIM_TYPE == 18
             ${FoundryLightingShaderChunks.starLight}
-          } else if (uAnimType > 18.5 && uAnimType < 19.5) {
-            // Foundry VTT smoke patch (ported from smoke-patch.mjs).
+          #elif ANIM_TYPE == 19
             ${FoundryLightingShaderChunks.smokePatch}
-          } else if (uAnimType > 19.5 && uAnimType < 20.5) {
+          #elif ANIM_TYPE == 20
             ${FoundryLightingShaderChunks.torch}
-          } else if (uAnimType > 20.5 && uAnimType < 21.5) {
-            // Foundry VTT flame (mimic coloration: noisy inner/outer flame lobes).
+          #elif ANIM_TYPE == 21
             ${FoundryLightingShaderChunks.flame}
-          } else if (uAnimType > 21.5 && uAnimType < 22.5) {
-            // Foundry VTT pulse/reactivepulse (mimic illumination+coloration).
+          #elif ANIM_TYPE == 22
             ${FoundryLightingShaderChunks.pulse}
-          }
+          #endif
 
           // Falloff shape (0..1): alpha = illumination; RGB = hue × same envelope (see LightMesh).
+          #if ANIM_TYPE == 20 || ANIM_TYPE == 21
           float uAlphaEff = mix(uAlpha, min(1.0, max(uAlpha, 0.92)), isFireCore);
+          #else
+          float uAlphaEff = uAlpha;
+          #endif
           float cover = intensity * uAlphaEff * uIntensity * animAlphaMul * cookieFactor * max(uOutputGain, 0.0);
 
-          float fairyBoost = (uAnimType > 1.5 && uAnimType < 2.5) ? 2.05 : 1.0;
+          #if ANIM_TYPE == 2
+          float fairyBoost = 2.05;
+          #else
+          float fairyBoost = 1.0;
+          #endif
           cover *= fairyBoost;
+          #if ANIM_TYPE == 20 || ANIM_TYPE == 21
           cover *= mix(1.0, 1.75, isFireCore * iAnimDrive);
+          #endif
 
           float lumMul = max(uLuminosity, 0.0);
           float illumMag = cover * lumMul;
@@ -835,23 +842,23 @@ export class ThreeLightSource {
           float chroma = (maxC > 1e-5) ? ((maxC - minC) / maxC) : 0.0;
           vec3 lampCol = (chroma > 0.04) ? (lightColor / maxC) : vec3(1.0);
           float gel = clamp(
-            uColorIntensity01 * max(uColorationMixScale, 0.0),
+            uColorIntensity01 * max(uColorationMixScale, 0.0) * max(uFoundryChromaBoost, 0.0),
             0.0,
             clamp(uColorationMaxMix, 0.0, 1.0)
           );
 
           float cookieColorMul = (uHasCookie > 0.5) ? cookieFactor : 1.0;
           float brightMul = uBrightness * (0.75 + 0.25 * fairyBoost) * cookieColorMul;
-          float mag = illumMag * brightMul * clamp(uComposeLightGain, 0.0, 8.0);
+          float mag = illumMag * brightMul * clamp(uComposeLightGain * max(uFoundryLightGain, 0.0), 0.0, 32.0);
           float edgeFade = smoothstep(0.0, 0.012, cover);
           mag *= edgeFade;
 
           vec3 chromaSig = msaLightChromaSignal(lampCol, gel, mag);
-          if (isFireCore > 0.5) {
+          #if ANIM_TYPE == 20 || ANIM_TYPE == 21
             float hotHi = mix(1.05, 3.35, pow(iAnimDrive, 1.04));
             vec3 fire = vec3(1.0, 0.52, 0.14);
             chromaSig = mix(chromaSig * hotHi, msaLightChromaSignal(fire, gel, mag) * hotHi * 0.42, mix(0.22, 0.38, iAnimDrive));
-          }
+          #endif
 
           if (mag <= 0.000001) discard;
           gl_FragColor = vec4(chromaSig, mag);
@@ -1157,6 +1164,24 @@ export class ThreeLightSource {
     return value;
   }
 
+  /**
+   * Sync shader ANIM_TYPE define (compile-time branch selection) and uAnimType uniform.
+   * @param {number} animType
+   * @private
+   */
+  _setAnimType(animType) {
+    const target = Number.isFinite(animType) ? Math.floor(animType) : 0;
+    const u = this.material?.uniforms;
+    if (u?.uAnimType) u.uAnimType.value = target;
+
+    const mat = this.material;
+    if (!mat?.defines) return;
+    if (mat.defines.ANIM_TYPE !== target) {
+      mat.defines.ANIM_TYPE = target;
+      mat.needsUpdate = true;
+    }
+  }
+
   _mix(a, b, t) {
     return (a * (1 - t)) + (b * t);
   }
@@ -1437,23 +1462,15 @@ export class ThreeLightSource {
   _resolveLiveLightDoc() {
     const id = this.id;
     if (id == null) return null;
-    try {
-      const lighting = typeof canvas !== 'undefined' ? canvas?.lighting : null;
-      if (lighting?.placeables?.length) {
-        for (let i = 0; i < lighting.placeables.length; i++) {
-          const p = lighting.placeables[i];
-          if (p?.id === id || p?.document?.id === id) {
-            return p.document ?? p;
-          }
-        }
-      }
-      const col = canvas?.scene?.lights;
-      if (col) {
-        const placeable = col.get?.(id) ?? col.get?.(String(id));
-        const d = placeable?.document ?? placeable;
-        if (d && typeof d === 'object') return d;
-      }
-    } catch (_) {}
+
+    // O(1) placeable lookup (grabs live unsaved drag state).
+    const placeable = canvas?.lighting?.get(id) ?? canvas?.lighting?.get(String(id));
+    if (placeable) return placeable.document ?? placeable;
+
+    // O(1) document fallback.
+    const sceneDoc = canvas?.scene?.lights?.get(id) ?? canvas?.scene?.lights?.get(String(id));
+    if (sceneDoc) return sceneDoc.document ?? sceneDoc;
+
     return null;
   }
 
@@ -1725,7 +1742,7 @@ export class ThreeLightSource {
         ? w.getCurrentState()
         : (w?.currentState ?? null);
       const windSpeed01 = (weather && typeof weather.windSpeed === 'number' && Number.isFinite(weather.windSpeed))
-        ? Math.max(0.0, Math.min(1.0, weather.windSpeed))
+        ? this._clamp(weather.windSpeed, 0.0, 1.0)
         : 0.0;
 
       const windDirF = weather?.windDirection;
@@ -1756,10 +1773,10 @@ export class ThreeLightSource {
       // Provide a subtle idle baseline so cable swing still animates when wind is calm,
       // while honoring per-light motion influence (localWindInfluence) later in windMul.
       const intensity01 = this._clamp(intensity, 0, 10) / 10;
-      const idleWindBase = Math.max(0.0, Math.min(0.35, 0.08 + intensity01 * 0.12));
+      const idleWindBase = this._clamp(0.08 + intensity01 * 0.12, 0.0, 0.35);
       const windBase = Math.max(windSpeed01, idleWindBase);
       const gustStrength = 0.08 + 0.22 * windBase;
-      const windSpeedVar = Math.max(0.0, Math.min(1.0, windBase + gustSigned * gustStrength));
+      const windSpeedVar = this._clamp(windBase + gustSigned * gustStrength, 0.0, 1.0);
 
       // Direction meander: max ~20deg at full wind.
       const maxAngleRad = (20.0 * Math.PI / 180.0) * windSpeedVar;
@@ -1778,7 +1795,7 @@ export class ThreeLightSource {
       // high wind, which looks like "no animation".
       const windMulRaw = windSpeedVar * globalWindInfluence * localWindInfluence * outdoorFactor * responseMul;
       const windMulSaturate = 1.0 - Math.exp(-Math.max(0.0, Math.min(10.0, windMulRaw)));
-      const windMul = Math.max(0.0, Math.min(1.0, windMulSaturate));
+      const windMul = this._clamp(windMulSaturate, 0.0, 1.0);
 
       // --- Pendulum-style forcing ---
       // We keep the mesh + LOS polygon anchored, and only swing the illumination center
@@ -1805,8 +1822,8 @@ export class ThreeLightSource {
 
       const ph = this._motion.swingPhase;
       const swing = Math.sin(ph);
-      const bob = Math.sin(ph * 0.5 + meanderSigned * 1.1);
-      const sway = Math.sin(ph + 0.6 + meanderSigned * 0.8);
+      const bob = Math.sin(ph * 0.53 + meanderSigned * 1.1);
+      const sway = Math.sin(ph * 1.17 + 0.6 + meanderSigned * 0.8);
 
       // Modulate swing amplitude slightly with gust so gusts "pump" the motion.
       const gustAmp = Math.max(0.6, Math.min(1.4, 1.0 + gustSigned * (0.15 + 0.20 * windSpeedVar)));
@@ -2212,13 +2229,13 @@ export class ThreeLightSource {
       if (dr && typeof dr === 'object' && dr.enabled === true) {
         hasDarknessResponse = true;
         const d0 = (typeof globalDarkness === 'number' && Number.isFinite(globalDarkness)) ? globalDarkness : 0.0;
-        let d = Math.max(0.0, Math.min(1.0, d0));
+        let d = this._clamp(d0, 0.0, 1.0);
         const skyOcc = Number(shadowContext?.skyOcclusion01);
         if (Number.isFinite(skyOcc)) {
           // Sky occlusion is open-sky (1=open, 0=covered). Treat covered areas
           // as locally darker for darknessResponse lights while preserving the
           // global day/night curve.
-          d = Math.max(d, 1.0 - Math.max(0.0, Math.min(1.0, skyOcc)));
+          d = Math.max(d, 1.0 - this._clamp(skyOcc, 0.0, 1.0));
         }
 
         // invert=true means "day=1" at darkness=0.
@@ -2227,13 +2244,13 @@ export class ThreeLightSource {
 
         const exp0 = (typeof dr.exponent === 'number' && Number.isFinite(dr.exponent)) ? dr.exponent : 1.0;
         const exp = Math.max(0.01, exp0);
-        x = Math.pow(Math.max(0.0, Math.min(1.0, x)), exp);
+        x = Math.pow(this._clamp(x, 0.0, 1.0), exp);
 
         const min0 = (typeof dr.min === 'number' && Number.isFinite(dr.min)) ? dr.min : 0.0;
         const max0 = (typeof dr.max === 'number' && Number.isFinite(dr.max)) ? dr.max : 1.0;
 
-        const minV = Math.max(0.0, Math.min(1.0, min0));
-        const maxV = Math.max(0.0, Math.min(1.0, max0));
+        const minV = this._clamp(min0, 0.0, 1.0);
+        const maxV = this._clamp(max0, 0.0, 1.0);
 
         darknessMul = minV + (maxV - minV) * x;
         // Keep a small floor so we don't hit degenerate states.
@@ -2375,9 +2392,9 @@ export class ThreeLightSource {
     u.uBrightRadius.value = this._baseBrightRadiusPx;
     u.uIntensity.value = darknessMul;
     u.uTime.value = this.animation.time;
-    u.uAnimType.value = 0;
     u.uAnimIntensity.value = 0;
     u.uPulse.value = 0.0;
+    let targetAnimType = 0;
 
     // Reset Cable Swing offsets unless the animation explicitly sets them.
     if (u.uCenterOffset?.value?.set) u.uCenterOffset.value.set(0, 0);
@@ -2388,16 +2405,17 @@ export class ThreeLightSource {
     }
 
     if (!type || this._baseRadiusPx <= 0) {
+      this._setAnimType(0);
       return;
     }
 
     if (type === 'torch') {
       const { brightnessPulse } = this.animateTorch(tMs, { speed, intensity, reverse });
       // Main beat is in the fragment shader; uIntensity follows SmoothNoise — ease jumps at cell boundaries.
-      const iDr = Math.max(0, Math.min(1, (this._clamp(intensity, 0, 10) - 1) / 9));
+      const iDr = this._clamp((this._clamp(intensity, 0, 10) - 1) / 9, 0, 1);
       const minPulse = 0.88 - 0.26 * iDr;
       const maxPulse = 1.05 + 0.23 * iDr;
-      const target = Math.max(minPulse, Math.min(maxPulse, brightnessPulse));
+      const target = this._clamp(brightnessPulse, minPulse, maxPulse);
       if (typeof this._fireBrightnessSmoothed !== 'number' || !Number.isFinite(this._fireBrightnessSmoothed)) {
         this._fireBrightnessSmoothed = target;
       } else {
@@ -2406,7 +2424,7 @@ export class ThreeLightSource {
       }
       u.uIntensity.value = this._fireBrightnessSmoothed * darknessMul;
       u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uAnimType.value = 20;
+      targetAnimType = 20;
       u.uTime.value = this._shaderFireClock(this.animation.time);
     } else if (type === 'siren') {
       // Foundry siren uses animateTorch for brightnessPulse and a shader beam pattern.
@@ -2419,16 +2437,16 @@ export class ThreeLightSource {
       });
       u.uIntensity.value = brightnessPulse * darknessMul;
       u.uBrightRadius.value = this._baseRadiusPx * this._clamp(ratioPulse, 0, 1);
-      u.uAnimType.value = 7;
+      targetAnimType = 7;
       u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
       u.uTime.value = this.animation.time;
     } else if (type === 'flame') {
       // Match torch: flicker on uIntensity only; keep authored bright/dim radii (no full-disk “breathing”).
       const { brightnessPulse } = this.animateTorch(tMs, { speed, intensity, reverse });
-      const iDr = Math.max(0, Math.min(1, (this._clamp(intensity, 0, 10) - 1) / 9));
+      const iDr = this._clamp((this._clamp(intensity, 0, 10) - 1) / 9, 0, 1);
       const minPulse = 0.88 - 0.26 * iDr;
       const maxPulse = 1.05 + 0.23 * iDr;
-      const target = Math.max(minPulse, Math.min(maxPulse, brightnessPulse));
+      const target = this._clamp(brightnessPulse, minPulse, maxPulse);
       if (typeof this._fireBrightnessSmoothed !== 'number' || !Number.isFinite(this._fireBrightnessSmoothed)) {
         this._fireBrightnessSmoothed = target;
       } else {
@@ -2436,7 +2454,7 @@ export class ThreeLightSource {
         this._fireBrightnessSmoothed += (target - this._fireBrightnessSmoothed) * Math.min(0.08, Math.max(0.02, alpha));
       }
       u.uIntensity.value = this._fireBrightnessSmoothed * darknessMul;
-      u.uAnimType.value = 21;
+      targetAnimType = 21;
       u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
       u.uTime.value = this._shaderFireClock(this.animation.time);
     } else if (type === 'pulse') {
@@ -2445,7 +2463,7 @@ export class ThreeLightSource {
       u.uIntensity.value = 1.0 * darknessMul;
       u.uPulse.value = pulse;
       u.uBrightRadius.value = this._baseRadiusPx * this._clamp(ratioPulse, 0, 1);
-      u.uAnimType.value = 22;
+      targetAnimType = 22;
       u.uTime.value = this.animation.time;
     } else if (type === 'reactivepulse') {
       const { pulse, ratioPulse } = this.animateSoundPulse(dtMs, { speed, intensity, reverse });
@@ -2453,109 +2471,35 @@ export class ThreeLightSource {
       u.uIntensity.value = 1.0 * darknessMul;
       u.uPulse.value = pulse;
       u.uBrightRadius.value = this._baseRadiusPx * this._clamp(ratioPulse, 0, 1);
-      u.uAnimType.value = 22;
+      targetAnimType = 22;
     } else if (type === 'fairy') {
       const { pulse, ratioPulse } = this.animateFairy(tMs, { speed, intensity, reverse });
-      u.uAnimType.value = 2;
+      targetAnimType = 2;
       u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
       u.uIntensity.value = pulse * darknessMul;
       u.uBrightRadius.value = this._baseRadiusPx * this._clamp(ratioPulse, 0, 1);
       u.uTime.value = this.animation.time;
-    } else if (type === 'wave') {
-      // Foundry wave is a shader-driven ripple pattern; drive via uTime + uAnimType.
-      const tSec = (reverse ? -tMs : tMs) / 1000;
-      u.uAnimType.value = 1;
-      // Foundry wave shaders expect the raw intensity scale (0..10).
-      u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uTime.value = tSec;
-    } else if (type === 'chroma') {
-      // Foundry chroma uses animateTime (config.mjs) and drives shader coloration.
-      this.animateTime(tMs, { speed, intensity, reverse });
-      u.uAnimType.value = 3;
-      u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uTime.value = this.animation.time;
-    } else if (type === 'energy') {
-      // Foundry energy-field uses animateTime (config.mjs) and is coloration-only.
-      this.animateTime(tMs, { speed, intensity, reverse });
-      u.uAnimType.value = 4;
-      u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uTime.value = this.animation.time;
-    } else if (type === 'witchwave') {
-      // Foundry bewitching-wave uses animateTime (config.mjs).
-      this.animateTime(tMs, { speed, intensity, reverse });
-      u.uAnimType.value = 5;
-      u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uTime.value = this.animation.time;
-    } else if (type === 'revolving') {
-      this.animateTime(tMs, { speed, intensity, reverse });
-      u.uAnimType.value = 6;
-      u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uTime.value = this.animation.time;
-    } else if (type === 'fog') {
-      this.animateTime(tMs, { speed, intensity, reverse });
-      u.uAnimType.value = 8;
-      u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uTime.value = this.animation.time;
-    } else if (type === 'sunburst') {
-      this.animateTime(tMs, { speed, intensity, reverse });
-      u.uAnimType.value = 9;
-      u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uTime.value = this.animation.time;
-    } else if (type === 'dome') {
-      this.animateTime(tMs, { speed, intensity, reverse });
-      u.uAnimType.value = 10;
-      u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uTime.value = this.animation.time;
-    } else if (type === 'emanation') {
-      this.animateTime(tMs, { speed, intensity, reverse });
-      u.uAnimType.value = 11;
-      u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uTime.value = this.animation.time;
-    } else if (type === 'hexa') {
-      this.animateTime(tMs, { speed, intensity, reverse });
-      u.uAnimType.value = 12;
-      u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uTime.value = this.animation.time;
-    } else if (type === 'ghost') {
-      this.animateTime(tMs, { speed, intensity, reverse });
-      u.uAnimType.value = 13;
-      u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uTime.value = this.animation.time;
-    } else if (type === 'vortex') {
-      this.animateTime(tMs, { speed, intensity, reverse });
-      u.uAnimType.value = 14;
-      u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uTime.value = this.animation.time;
-    } else if (type === 'rainbowswirl') {
-      this.animateTime(tMs, { speed, intensity, reverse });
-      u.uAnimType.value = 15;
-      u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uTime.value = this.animation.time;
-    } else if (type === 'radialrainbow') {
-      this.animateTime(tMs, { speed, intensity, reverse });
-      u.uAnimType.value = 16;
-      u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uTime.value = this.animation.time;
-    } else if (type === 'grid') {
-      this.animateTime(tMs, { speed, intensity, reverse });
-      u.uAnimType.value = 17;
-      u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uTime.value = this.animation.time;
-    } else if (type === 'starlight') {
-      this.animateTime(tMs, { speed, intensity, reverse });
-      u.uAnimType.value = 18;
-      u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uTime.value = this.animation.time;
-    } else if (type === 'smokepatch') {
-      this.animateTime(tMs, { speed, intensity, reverse });
-      u.uAnimType.value = 19;
-      u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
-      u.uTime.value = this.animation.time;
     } else {
-      // For time-driven animations we still advance time to match Foundry.
-      this.animateTime(tMs, { speed, intensity, reverse });
-      u.uTime.value = this.animation.time;
+      const basicTypeMap = BASIC_TIME_ANIMS[type];
+
+      if (basicTypeMap !== undefined) {
+        if (type === 'wave') {
+          // Foundry wave shaders expect raw elapsed seconds (not animateTime seed offset).
+          u.uTime.value = (reverse ? -tMs : tMs) / 1000;
+        } else {
+          this.animateTime(tMs, { speed, intensity, reverse });
+          u.uTime.value = this.animation.time;
+        }
+        targetAnimType = basicTypeMap;
+        u.uAnimIntensity.value = this._clamp(intensity, 0, 10);
+      } else {
+        // For unknown time-driven animations we still advance time to match Foundry.
+        this.animateTime(tMs, { speed, intensity, reverse });
+        u.uTime.value = this.animation.time;
+      }
     }
+
+    this._setAnimType(targetAnimType);
 
     // If we had to fall back to a simple circle because the LOS polygon
     // was not yet available when this light was created, try to upgrade

@@ -9372,16 +9372,25 @@ export class FloorCompositor {
       this._treeVegetationBillboardPass?.dispose?.();
       this._bushVegetationBillboardPass?.dispose?.();
       this._treeCanopyOcclusionPass?.dispose?.();
+      this._vegetationDistortionMaskPass?.dispose?.();
     } catch (_) {}
+    try { this._upperFloorAlphaCompositor?.dispose?.(); } catch (_) {}
+    try { this._skyOcclusionPrimitive?.dispose?.(); } catch (_) {}
     this._lightingPerspectiveContext = null;
     try { this._lightingEffect?.setLightingPerspectiveContext?.(null); } catch (_) {}
     try { this._lightingEffect?.dispose?.(); } catch (_) {}
     try { this._skyColorEffect?.dispose?.(); } catch (_) {}
     try { this._atmosphericFogEffect?.dispose?.(); } catch (_) {}
     try { this._fogEffect?.dispose?.(); } catch (_) {}
+    try { this._filterEffect?.dispose?.(); } catch (_) {}
     try { this._bloomEffect?.dispose?.(); } catch (_) {}
     try { this._contextualSceneGradeManager?.dispose?.(); } catch (_) {}
     try { this._colorCorrectionEffect?.dispose?.(); } catch (_) {}
+    try { this._sharpenEffect?.dispose?.(); } catch (_) {}
+    try { this._waterSplashesEffect?.dispose?.(); } catch (_) {}
+    this._underwaterBubblesEffect = null;
+    try { this._waterEffect?.dispose?.(); } catch (_) {}
+    try { this._weatherParticles?.dispose?.(); } catch (_) {}
     try { this._overheadShadowEffect?.dispose?.(); } catch (_) {}
     try { this._buildingShadowEffect?.dispose?.(); } catch (_) {}
     try { this._skyReachShadowEffect?.dispose?.(); } catch (_) {}
@@ -9400,6 +9409,7 @@ export class FloorCompositor {
     try { this._sepiaEffect?.dispose?.(); } catch (_) {}
     try { this._lensEffect?.dispose?.(); } catch (_) {}
     try { this._distortionEffect?.dispose?.(); } catch (_) {}
+    try { this._movementPreviewEffect?.dispose?.(); } catch (_) {}
     try { this._floorDepthBlurEffect?.dispose?.(); } catch (_) {}
     try { this._maskDebugOverlayPass?.dispose?.(); } catch (_) {}
     try { this._replicaOcclusionMaskPass?.dispose?.(); } catch (_) {}

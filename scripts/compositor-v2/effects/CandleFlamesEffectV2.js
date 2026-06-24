@@ -135,22 +135,14 @@ function _isSamplingActiveRenderTarget(renderer, texture) {
 const GLOW_COLOR_COOL = { r: 1.0, g: 1.0, b: 1.0 };
 const GLOW_COLOR_WARM = { r: 1.0, g: 0.58, b: 0.12 };
 
-/**
- * Candle pools: remap authored Hot Core Scale so the bright region reads as most of the flame,
- * not a pinprick inside a saturated orange disc (legacy low slider values were too small).
- * @param {number} raw 0.05..1 from Tweakpane
- * @returns {number} effective inner/outer radius ratio for LightMesh
- */
+/** Hot Core Scale — pass-through so Tweakpane values map directly to LightMesh inner/outer ratio. */
 function remapCandleGlowInnerScale(raw) {
-  const s = Math.max(0.05, Math.min(1, Number(raw) || 0.2));
-  const t = Math.pow((s - 0.05) / 0.95, 0.55);
-  return 0.52 + t * 0.36;
+  return Math.max(0.01, Math.min(1.0, Number(raw) || 0.2));
 }
 
-/** Softer halo falloff — lower exponent widens the gentle rim instead of a dense orange blob. */
+/** Falloff exponent — pass-through; 2.0 is standard inverse-square. */
 function remapCandleGlowFalloffExponent(raw) {
-  const e = Math.max(0.5, Number(raw) || 1.25);
-  return Math.max(0.45, e * 0.78);
+  return Math.max(0.1, Number(raw) || 1.25);
 }
 
 export class CandleFlamesEffectV2 {
@@ -299,6 +291,16 @@ export class CandleFlamesEffectV2 {
     /** @type {import('../../streaming/streaming-detail-api.js').StreamingDetailTier} */
     this._lastDetailTier = 'full';
     this._glowFlickerSkipCounter = 0;
+    this._motionResult = {
+      flameFlicker: 0,
+      offsetX: 0,
+      offsetY: 0,
+      ovalX: 1,
+      ovalY: 1,
+      ovalAngle: 0,
+      radiusMul: 1,
+      innerMul: 1,
+    };
 
     this._tempColor = null;
 
@@ -1699,7 +1701,7 @@ export class CandleFlamesEffectV2 {
         0.2,
         t,
       ))),
-      falloffExponent: Math.min(5.0, Math.max(0.45, remapCandleGlowFalloffExponent(this._blendGlowDayNightParam(
+      falloffExponent: Math.min(5.0, Math.max(0.1, remapCandleGlowFalloffExponent(this._blendGlowDayNightParam(
         'glowFalloffExponent',
         'glowNightFalloffExponent',
         2.0,
@@ -3127,18 +3129,17 @@ export class CandleFlamesEffectV2 {
     }
   }
 
-  /** @private @param {number} [flameFlicker=1] */
-  _neutralGlowShapeMotion(flameFlicker = 1.0) {
-    return {
-      flameFlicker,
-      offsetX: 0,
-      offsetY: 0,
-      ovalX: 1,
-      ovalY: 1,
-      ovalAngle: 0,
-      radiusMul: 1,
-      innerMul: 1,
-    };
+  /** @private @param {number} [flameFlicker=1] @param {object} out */
+  _neutralGlowShapeMotion(flameFlicker = 1.0, out) {
+    out.flameFlicker = flameFlicker;
+    out.offsetX = 0;
+    out.offsetY = 0;
+    out.ovalX = 1;
+    out.ovalY = 1;
+    out.ovalAngle = 0;
+    out.radiusMul = 1;
+    out.innerMul = 1;
+    return out;
   }
 
   /** @private */
@@ -3154,18 +3155,10 @@ export class CandleFlamesEffectV2 {
    * @param {number} phase per-bucket hash
    * @param {number} outdoor 0..1
    * @param {number} poolRadiusPx outer pool radius in px
-   * @returns {{
-   *   flameFlicker: number,
-   *   offsetX: number,
-   *   offsetY: number,
-   *   ovalX: number,
-   *   ovalY: number,
-   *   ovalAngle: number,
-   *   radiusMul: number,
-   *   innerMul: number,
-   * }}
+   * @param {object} out reusable result object (avoids per-bucket allocations in _updateGlowFlicker)
+   * @returns {object} out
    */
-  _computeUnifiedCandleMotion(t, phase, outdoor, poolRadiusPx) {
+  _computeUnifiedCandleMotion(t, phase, outdoor, poolRadiusPx, out) {
     const indoor = this._isCandleIndoorOutdoorSample(outdoor);
     const poolR = Math.max(32, Number(poolRadiusPx) || 32);
 
@@ -3184,7 +3177,7 @@ export class CandleFlamesEffectV2 {
     const flameFlicker = Math.max(0.55, flickerBase + flameStrength * 0.35 * flickerShape);
 
     if (!this.params.glowShapeMotionEnabled) {
-      return this._neutralGlowShapeMotion(flameFlicker);
+      return this._neutralGlowShapeMotion(flameFlicker, out);
     }
 
     const envScale = indoor
@@ -3192,7 +3185,7 @@ export class CandleFlamesEffectV2 {
       : Math.max(0, this._shapeParam('glowShapeOutdoorScale', 1.0));
     const master = Math.max(0, this._shapeParam('glowShapeMaster', 0.32)) * envScale;
     if (master <= 1e-5) {
-      return this._neutralGlowShapeMotion(flameFlicker);
+      return this._neutralGlowShapeMotion(flameFlicker, out);
     }
 
     const speedMul = Math.max(0.05, this._shapeParam('glowShapeSpeed', 0.85));
@@ -3300,16 +3293,15 @@ export class CandleFlamesEffectV2 {
     const reachPulse = master * clamp01(this._shapeParam('glowShapeReachPulse', 0.24));
     const corePulse = master * clamp01(this._shapeParam('glowShapeCorePulse', 0.28));
 
-    return {
-      flameFlicker,
-      offsetX: rawOffsetX * centerShift,
-      offsetY: rawOffsetY * centerShift * (0.35 + vertBias * 0.65),
-      ovalX: Math.max(0.55, 1.0 + (rawOvalX - 1.0) * ovalStretch),
-      ovalY: Math.max(0.55, 1.0 + (rawOvalY - 1.0) * ovalStretch),
-      ovalAngle: rawOvalAngle * ovalRotate,
-      radiusMul: Math.max(0.72, 1.0 + (rawRadiusMul - 1.0) * reachPulse),
-      innerMul: Math.max(0.65, 1.0 + (rawInnerMul - 1.0) * corePulse),
-    };
+    out.flameFlicker = flameFlicker;
+    out.offsetX = rawOffsetX * centerShift;
+    out.offsetY = rawOffsetY * centerShift * (0.35 + vertBias * 0.65);
+    out.ovalX = Math.max(0.55, 1.0 + (rawOvalX - 1.0) * ovalStretch);
+    out.ovalY = Math.max(0.55, 1.0 + (rawOvalY - 1.0) * ovalStretch);
+    out.ovalAngle = rawOvalAngle * ovalRotate;
+    out.radiusMul = Math.max(0.72, 1.0 + (rawRadiusMul - 1.0) * reachPulse);
+    out.innerMul = Math.max(0.65, 1.0 + (rawInnerMul - 1.0) * corePulse);
+    return out;
   }
 
   _updateGlowFlicker(timeInfo) {
@@ -3342,7 +3334,7 @@ export class CandleFlamesEffectV2 {
       const baseRadiusPx = Math.max(32, glow.radiusPx * clipScale);
       const baseInnerRadiusPx = Math.max(1, baseRadiusPx * glow.innerScale);
 
-      const motion = this._computeUnifiedCandleMotion(t, phase, outdoor, baseRadiusPx);
+      const motion = this._computeUnifiedCandleMotion(t, phase, outdoor, baseRadiusPx, this._motionResult);
       const radiusPx = baseRadiusPx;
       const innerRadiusPx = baseInnerRadiusPx;
 

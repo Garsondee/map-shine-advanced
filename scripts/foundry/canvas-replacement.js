@@ -452,6 +452,9 @@ let threeCanvas = null;
 /** @type {boolean} */
 let isMapMakerMode = false;
 
+/** @type {boolean} */
+let _lastCanvasReadyUsedUiOnlyRoute = false;
+
 const NATIVE_RENDERING_MODE_STORAGE_KEY = 'map-shine-advanced.native-foundry-rendering-mode';
 const NATIVE_RENDERING_RESTART_BLOCKER_ID = 'map-shine-native-rendering-restart-blocker';
 
@@ -5545,15 +5548,14 @@ function _msaSceneUpdateDeltaSkipsMapShineRebuild(changes) {
 }
 
 /**
- * Flag-only weather/control saves often trigger a same-scene `canvas.draw` → `tearDown`, but
+ * Safe scene document saves often trigger a same-scene `canvas.draw` -> `tearDown`, but
  * `computeNativeSameSceneDrawIntent` can miss (brief `canvas.scene === null`) or `canvasReady`
  * can clear `__nativeSameSceneRedraw` before a nested teardown. Arm a short TTL so
- * {@link _tearDownWrapper} skips the "Switching scenes..." overlay, AND pre-arm
- * `__nativeSameSceneRedraw` so {@link onCanvasTearDown} preserves the live Map Shine runtime
- * instead of destroying it before {@link onCanvasReady}'s fallback can run.
+ * {@link _tearDownWrapper} skips the loading overlay and {@link onCanvasTearDown} preserves
+ * the live Map Shine runtime for harmless edits such as scene-name changes.
  * @param {*} scene - Foundry Scene document
  */
-function _armPredictSameSceneRedrawFromMsaFlags(scene) {
+function _armPredictSameSceneRedrawFromSafeSceneUpdate(scene) {
   try {
     if (!window.MapShine) window.MapShine = {};
     const sid = scene?.id != null ? String(scene.id) : '';
@@ -5578,6 +5580,13 @@ function _armPredictSameSceneRedrawFromMsaFlags(scene) {
     // `__msaPredictSameSceneRedrawSceneId`) and will derive `__nativeSameSceneRedraw`
     // correctly when a redraw cycle actually starts.
   } catch (_) {}
+}
+
+/**
+ * @param {*} scene - Foundry Scene document
+ */
+function _armPredictSameSceneRedrawFromMsaFlags(scene) {
+  _armPredictSameSceneRedrawFromSafeSceneUpdate(scene);
 }
 
 /**
@@ -5679,6 +5688,7 @@ async function onUpdateScene(scene, changes, _options, _userId) {
   const echoOnly = _msaMapShineFlagDiffIsEchoOnly(changes);
   const msaDiffKeys = _msaGetMsaFlagChanges(changes);
   const hasMsaSettingsDiff = msaDiffKeys.includes('settings');
+  const safeSceneUpdateOnly = _msaSceneUpdateDeltaSkipsMapShineRebuild(changes);
 
   // Debounced slider saves (wind/rain/cloud) → setFlag controlState + weather-snapshot only.
   // Foundry will redraw the canvas; arm tearDown overlay skip for that predictable path.
@@ -5702,6 +5712,13 @@ async function onUpdateScene(scene, changes, _options, _userId) {
   // Cinematic camera toggles persist `advancedCameraState` — same-scene redraw must keep Map Shine alive.
   if (msaDiffKeys.includes('advancedCameraState') && !hasMsaSettingsDiff) {
     _armPredictSameSceneRedrawFromMsaFlags(scene);
+  }
+
+  // Scene Config metadata saves (for example changing only the scene name) can still
+  // make Foundry redraw the same scene. Preserve the runtime and avoid the loading
+  // curtain for deltas that cannot affect Map Shine geometry or assets.
+  if (safeSceneUpdateOnly && !hasMsaSettingsDiff) {
+    _armPredictSameSceneRedrawFromSafeSceneUpdate(scene);
   }
 
   const skipAuthoritativeMsaResync =
@@ -5853,7 +5870,7 @@ async function onUpdateScene(scene, changes, _options, _userId) {
 
   // Weather / control panel persists only `flags` (+ harmless doc keys). Never schedule
   // createThreeCanvas from those deltas — full reload loading screen on rain slider.
-  if (_msaSceneUpdateDeltaSkipsMapShineRebuild(changes)) {
+  if (safeSceneUpdateOnly) {
     log.debug('updateScene: flags/metadata-only delta -> skipping Map Shine canvas rebuild');
     return;
   }
@@ -6641,6 +6658,7 @@ async function onCanvasReady(canvas) {
   // If scene is not enabled for Map Shine, run UI-only mode so GMs can
   // configure and enable Map Shine without replacing the Foundry canvas.
   if (!sceneSettings.isMapShineRenderingActive(scene)) {
+    _lastCanvasReadyUsedUiOnlyRoute = true;
     log.debug(`Scene not enabled for Map Shine, initializing UI-only mode: ${scene.name}`);
     if (!uiManager) {
       await safeCallAsync(async () => {
@@ -6719,6 +6737,9 @@ async function onCanvasReady(canvas) {
     safeCall(() => loadingOverlay.fadeIn(500).catch(() => {}), 'overlay.fadeIn', Severity.COSMETIC);
     return;
   }
+
+  const forceGameplayModeFromUiOnlyRoute = _lastCanvasReadyUsedUiOnlyRoute;
+  _lastCanvasReadyUsedUiOnlyRoute = false;
 
   log.info(`Initializing Map Shine canvas for scene: ${scene.name}`);
 
@@ -6864,7 +6885,10 @@ async function onCanvasReady(canvas) {
   }, WATCHDOG_INTERVAL_MS);
 
   try {
-    await createThreeCanvas(scene, { skipLoadingOverlay: false });
+    await createThreeCanvas(scene, {
+      skipLoadingOverlay: false,
+      forceGameplayMode: forceGameplayModeFromUiOnlyRoute,
+    });
   } finally {
     clearInterval(_watchdogId);
     safeCall(() => _msaReleaseSceneLoadInputGuards(), 'overlay.canvasReady.releaseGuards', Severity.COSMETIC);
@@ -6976,7 +7000,7 @@ function onCanvasTearDown(canvas) {
     if (!window.MapShine) window.MapShine = {};
     // Same-scene V14 redraws (level switch or environment redraw): do not flag
     // a full scene transition (prevents loading overlay/reload UX for time/darkness).
-    if (!window.MapShine.__nativeSameSceneRedraw && !window.MapShine.__nativeSameSceneLevelSwitch) {
+    if (!lightNativeSameScenePath) {
       window.MapShine.__sceneTransitionActive = true;
     }
   } catch (_) {}
@@ -7620,9 +7644,19 @@ async function createThreeCanvas(scene, createOptions = {}) {
     // P0.3: Capture Foundry state before modifying it
     captureFoundryStateSnapshot();
 
-    // Restore persisted rendering mode preference.
+    // Restore persisted rendering mode preference unless this is the first
+    // Map Shine bind after a UI-only/non-MSA scene. That route is already PIXI
+    // by definition, so carrying parity mode into the next MSA scene leaves the
+    // newly-created Three runtime immediately disabled.
     // True means parity mode (native Foundry PIXI), false means gameplay (Map Shine Three.js).
-    isMapMakerMode = _readNativeFoundryRenderingModePreference();
+    isMapMakerMode = createOptions?.forceGameplayMode === true
+      ? false
+      : _readNativeFoundryRenderingModePreference();
+    safeCall(() => {
+      if (!window.MapShine) return;
+      window.MapShine.isMapMakerMode = isMapMakerMode;
+      window.MapShine.nativeRenderingBypass = false;
+    }, 'renderMode.syncAtCreate', Severity.COSMETIC);
 
     // Create new canvas element
     if (isDebugLoad) dlp.begin('canvas.create', 'setup');

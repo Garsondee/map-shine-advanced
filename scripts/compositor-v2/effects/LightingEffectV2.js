@@ -41,8 +41,9 @@
  * Legacy per-effect fallbacks (`tOverheadShadow`, cloud-only) were removed —
  * ShadowManagerV2 owns the combined factor.
  *
- * **Point light gain (`lightIntensity`):** Applied in {@link ThreeLightSource} as
- * `uComposeLightGain` on HDR radiance before max-blend into `_lightRT`.
+ * **Point light gain (`lightIntensity`):** Base `uComposeLightGain` on torch/flash and Foundry meshes.
+ * **Foundry lamp boost (`foundryLightBrightness` / `foundryLightColorBoost`):** Extra gain and CI
+ *   push on Foundry AmbientLight meshes only — candle/fire glow and window light unaffected.
  * Falloff uses {@link POINT_LIGHT_FALLOFF_GLSL}. Buffer RGB = Foundry tinted colour
  * (`lampHue × CI gel × mag`); alpha = mag. Compose: additive HDR `totalIllum = ambient + direct`
  * where direct uses lamp mag only; day/night ambient from Foundry env × ambientDay/Night scales.
@@ -204,6 +205,8 @@ export class LightingEffectV2 {
     this._legacyGlobalIlluminationSeeded = false;
     /** @type {boolean} */
     this._splitAmbientParamsMigrated = false;
+    /** @type {{ dayOutdoor: number, dayIndoor: number, nightOutdoor: number, nightIndoor: number, minIllum: number }} */
+    this._ambientScalesOut = { dayOutdoor: 0, dayIndoor: 0, nightOutdoor: 0, nightIndoor: 0, minIllum: 0 };
 
     // ── Tuning parameters (match V1 defaults) ──────────────────────────
     this.params = {
@@ -234,12 +237,16 @@ export class LightingEffectV2 {
       /** Daylight-hours minimum-light floor strength — indoor. */
       twilightMinLightKeepIndoor: TWILIGHT_AMBIENT_DEFAULTS.minLightKeepIndoor,
       lightIntensity: 1,
+      /** Extra brightness on Foundry AmbientLight meshes only (not candle/fire glow). */
+      foundryLightBrightness: 1,
+      /** Extra CI / chroma on Foundry AmbientLight meshes only. */
+      foundryLightColorBoost: 1,
       /** Half-life falloff: normalized radius per halving at Foundry attenuation 0 (gentle). */
-      falloffHalfInAtAtt0: 0.51,
+      falloffHalfInAtAtt0: 0.15,
       /** Foundry zone hardness at attenuation 1 (bright ring); larger = softer, fills radius. */
-      falloffHalfInAtAtt1: 0.22,
-      falloffHalfOutAtAtt0: 0.38,
-      falloffHalfOutAtAtt1: 0.22,
+      falloffHalfInAtAtt1: 0.05,
+      falloffHalfOutAtAtt0: 0.65,
+      falloffHalfOutAtAtt1: 0.35,
       falloffHalfMin: 0.02,
       falloffEdgeSoftBoostIn: 0.1,
       falloffEdgeSoftBoostOut: 0.08,
@@ -263,7 +270,7 @@ export class LightingEffectV2 {
       /** smoothstep low edge for gel vs lampEnergyA (higher = tint starts further in). */
       colorationFalloffStart: 0.0,
       /** smoothstep high edge on lamp energy (wider = softer colour penumbra). */
-      colorationFalloffEnd: 0.35,
+      colorationFalloffEnd: 0.01,
       /** Exponent on falloff mask after smoothstep. */
       colorationFalloffPower: 1.0,
       /** Scales lampEnergyA before colour falloff (boost without moving photometric alpha). */
@@ -531,14 +538,14 @@ export class LightingEffectV2 {
     /**
      * Validity snapshot for {@link #renderLightOverrideMasks} foundry draw reuse in
      * {@link #render}.
-     * @type {{valid:boolean,floorIndex:number,rtW:number,rtH:number,lightGain:number}}
+     * @type {{valid:boolean,floorIndex:number,rtW:number,rtH:number,lightGain:string}}
      */
     this._lightMaskPrepassCache = {
       valid: false,
       floorIndex: -1,
       rtW: 0,
       rtH: 0,
-      lightGain: NaN,
+      lightGain: '',
       frameSeq: -1,
     };
     /**
@@ -1223,6 +1230,8 @@ export class LightingEffectV2 {
     this._paramsDirty = true;
     if (
       paramId === 'lightIntensity'
+      || paramId === 'foundryLightBrightness'
+      || paramId === 'foundryLightColorBoost'
       || paramId === 'colorationStrength'
       || paramId === 'colorationMixScale'
       || paramId === 'colorationMaxMix'
@@ -1230,6 +1239,7 @@ export class LightingEffectV2 {
     ) {
       this._pushLightBufferUniformsToMeshes();
     }
+    if (paramId === 'foundryLightBrightness') this._invalidateLightMaskPrepassCache();
     if (POINT_LIGHT_FALLOFF_PARAM_KEYS.includes(paramId)) this._pushPointLightFalloffUniforms();
     if (paramId === 'wallInsetPx' || paramId === 'wallPaddingPx') this.syncAllLights();
   }
@@ -1264,7 +1274,7 @@ export class LightingEffectV2 {
     u.uColorationFalloffStart.value = Math.max(0, Number(this.params.colorationFalloffStart) || 0);
     u.uColorationFalloffEnd.value = Math.max(
       u.uColorationFalloffStart.value + 0.001,
-      Number(this.params.colorationFalloffEnd) || 0.35,
+      Number(this.params.colorationFalloffEnd) || 0.01,
     );
     u.uColorationFalloffPower.value = Math.max(0.01, Number(this.params.colorationFalloffPower) || 1);
     u.uColorationEnergyGain.value = Math.max(0, Number(this.params.colorationEnergyGain) || 1);
@@ -1983,7 +1993,11 @@ export class LightingEffectV2 {
           'Twilight day floor': 'Minimum day-ambient kept when the sun is on the horizon (solar strength ≈ 0).',
           'Twilight min-light keep': 'Extra minimum-light floor during daylight hours so porches and rooms do not clip black.',
           'Point light gain':
-            'Multiplies AmbientLight/torch emission in ThreeLightSource before max-blend into `_lightRT`. Tune falloff shape under Point light falloff (half-life). Overlaps take the brighter sample, not the sum. Window glow unaffected.',
+            'Base emission multiplier on torch/flash and Foundry lamps before `_lightRT`. Use Foundry lamps for extra brightness/colour on scene AmbientLights only.',
+          'Foundry lamp brightness':
+            'Extra multiplier on Foundry AmbientLight meshes only. Does not affect candle/fire glow, window glow, or player torch.',
+          'Foundry lamp colour':
+            'Pushes Foundry Color Intensity (gel) on AmbientLight meshes only. Does not affect candle/fire glow.',
           'Minimum light floor': 'Safety floor that prevents pure-black collapse without replacing actual lights.'
         },
       },
@@ -2015,10 +2029,20 @@ export class LightingEffectV2 {
           ],
         },
         {
-          name: 'dynamicLuma',
-          label: 'Point lights',
+          name: 'foundryLamps',
+          label: 'Foundry lamps',
           type: 'folder',
           expanded: true,
+          parameters: [
+            'foundryLightBrightness',
+            'foundryLightColorBoost',
+          ],
+        },
+        {
+          name: 'dynamicLuma',
+          label: 'Player / shared gain',
+          type: 'folder',
+          expanded: false,
           parameters: ['lightIntensity'],
         },
         {
@@ -2258,22 +2282,42 @@ export class LightingEffectV2 {
           label: 'Min-light keep — indoor',
           tooltip: 'Same floor boost for indoor pixels during daylight hours.',
         },
+        foundryLightBrightness: {
+          type: 'slider',
+          min: 0,
+          max: 16,
+          step: 0.05,
+          default: 1,
+          label: 'Brightness boost',
+          tooltip:
+            'Extra emission multiplier on Foundry AmbientLight meshes only (`uFoundryLightGain`). Stacks with Player / shared gain. Does not affect candle or fire glow, window glow, or player torch.',
+        },
+        foundryLightColorBoost: {
+          type: 'slider',
+          min: 0,
+          max: 8,
+          step: 0.05,
+          default: 1,
+          label: 'Colour boost',
+          tooltip:
+            'Scales Foundry Color Intensity (gel) on AmbientLight meshes before the light buffer write. Push above 1 for vivid, saturated pools. Does not affect candle or fire glow.',
+        },
         lightIntensity: {
           type: 'slider',
           min: 0,
-          max: 2,
+          max: 4,
           step: 0.05,
           default: 1,
-          label: 'Point light gain',
+          label: 'Shared point gain',
           tooltip:
-            'Emission multiplier on Foundry lamp meshes (`uComposeLightGain`) before `_lightRT` accumulation; compose reads the RT as-is so buffer overlap or noise does not get a second brightness pass. Torch/flash meshes follow the same value. Separate from Window glow / Day-night ambient.',
+            'Base emission multiplier on torch/flash and Foundry lamps (`uComposeLightGain`) before `_lightRT`. Foundry lamps also use Brightness boost above. Candle glow may follow this when “Follow point light gain” is enabled on Candles.',
         },
         falloffHalfInAtAtt0: {
           type: 'slider',
           min: 0.01,
           max: 2.0,
           step: 0.005,
-          default: 0.51,
+          default: 0.15,
           label: 'Halving dist. (att 0, bright)',
           tooltip:
             'Bright-ring halving distance at the soft end (Foundry Attenuation 1). Larger = wider, softer pool.',
@@ -2283,7 +2327,7 @@ export class LightingEffectV2 {
           min: 0.005,
           max: 1.0,
           step: 0.005,
-          default: 0.22,
+          default: 0.05,
           label: 'Halving dist. (att 1, bright)',
           tooltip:
             'Bright-ring halving distance at the hard end (Foundry Attenuation 0). Smaller = tighter core.',
@@ -2293,7 +2337,7 @@ export class LightingEffectV2 {
           min: 0.01,
           max: 2.0,
           step: 0.005,
-          default: 0.38,
+          default: 0.65,
           label: 'Halving dist. (att 0, dim)',
           tooltip: 'Dim-ring hardness when attenuation is 0 (outer falloff to the photometric edge).',
         },
@@ -2302,7 +2346,7 @@ export class LightingEffectV2 {
           min: 0.005,
           max: 1.0,
           step: 0.005,
-          default: 0.22,
+          default: 0.35,
           label: 'Halving dist. (att 1, dim)',
           tooltip: 'Dim-ring hardness at Attenuation 1 — should stay high enough to reach the dim radius before the edge fade.',
         },
@@ -2405,7 +2449,7 @@ export class LightingEffectV2 {
           step: 0.1,
           default: 1,
           label: 'Saturation boost gain',
-          tooltip: 'Extra albedo saturation push at high CI only (does not map CI 0.5 vs 1.0 — that is linear from the lamp). Leave at default unless you want punchier colour.',
+          tooltip: 'Extra lamp/albedo saturation that follows the soft light falloff (not the tight CI gel core). Does not change brightness halving. Leave at 1 unless you want punchier colour.',
         },
         colorationReflectivity: {
           type: 'slider',
@@ -2465,10 +2509,10 @@ export class LightingEffectV2 {
           type: 'slider',
           min: 0.001,
           max: 4,
-          step: 0.01,
-          default: 0.35,
+          step: 0.001,
+          default: 0.01,
           label: 'Colour falloff end',
-          tooltip: 'Lamp-energy level where CI reaches full strength. Raise (e.g. 0.5–0.8) for softer colour penumbra; must stay below typical lamp core energy or colour stays weak in the centre.',
+          tooltip: 'Lamp-energy level where CI reaches full strength. Lower this to 0.01 to keep lights colored all the way to their edges.',
         },
         colorationFalloffPower: {
           type: 'slider',
@@ -2902,7 +2946,7 @@ export class LightingEffectV2 {
         uColorationReflectivity: { value: 0.0 },
         uColorationSaturationBoost: { value: 0.0 },
         uColorationFalloffStart: { value: 0.0 },
-        uColorationFalloffEnd: { value: 0.35 },
+        uColorationFalloffEnd: { value: 0.01 },
         uColorationFalloffPower: { value: 1.0 },
         uColorationEnergyGain: { value: 1.0 },
         uColorationMixPower: { value: 1.0 },
@@ -3172,7 +3216,8 @@ export class LightingEffectV2 {
           );
           vec3 ambientDay   = uAmbientBrightest * dayScale * dayAmbientMul;
           vec3 ambientNight = uAmbientDarkness  * nightScale;
-          vec3 ambient = mix(ambientDay, ambientNight, baseDarknessLevel);
+          vec3 ambientDiff = ambientNight - ambientDay;
+          vec3 ambient = ambientDay + ambientDiff * baseDarknessLevel;
 
           vec4 roofAlphaSample = vec4(0.0);
           float roofAlphaCached = 0.0;
@@ -3295,8 +3340,9 @@ export class LightingEffectV2 {
           float lampEnergy = lampEnergyA;
           float lightIVisible = lampEnergyA;
           float chromaGain = max(uChromaticRadianceGain, 1.0);
+          float chromaGainDelta = max(chromaGain - 1.0, 0.0);
           float chromaMag = length(lampChroma);
-          vec3 lampHue = (chromaMag > 1e-5) ? (lampChroma / chromaMag) : vec3(1.0);
+          vec3 lampHue = lampChroma / (chromaMag + 1e-5);
           // ciBase = Foundry CI for this lamp (constant in the disk); was chromaMag/mag which
           // ignored falloff and made colour full-strength until the mesh edge (binary ring).
           float ciBase = clamp(chromaMag / max(lampEnergyA, 1e-4), 0.0, 1.0);
@@ -3309,7 +3355,11 @@ export class LightingEffectV2 {
           // MSA_COMPOSE_DIRECT_BASELINE: mag-only direct (point lamps / torches; no 1.0+ wash).
           float baseIllum = lampEnergyA;
           float colorW = clamp(gel01, 0.0, 1.0);
-          vec3 directFromSources = msaLightDirectIllumination(vec3(baseIllum), lampHue, colorW);
+          // Saturation boost gain: widen hue/sat with mag falloff — never the tight gel01 core alone
+          // (that painted a saturated disk inside a neutral pool when gain was raised).
+          float satEnv = msaLightIllumPresenceEnvelope(lampEnergyA);
+          float colorWDirect = clamp(colorW + chromaGainDelta * 0.07 * satEnv, 0.0, 1.0);
+          vec3 directFromSources = msaLightDirectIllumination(vec3(baseIllum), lampHue, colorWDirect);
 
           // Darkness punch: strong nearby lights reduce the effective darkness
           // level locally, letting the ambient brighten under torches/lamps.
@@ -3353,7 +3403,7 @@ export class LightingEffectV2 {
             baseDarknessLevel * (1.0 - punch * max(uNegativeDarknessStrength, 0.0)),
             0.0, 1.0
           );
-          vec3 punchedAmbient = mix(ambientDay, ambientNight, localDarknessLevel);
+          vec3 punchedAmbient = ambientDay + ambientDiff * localDarknessLevel;
           // Outdoor warm ambient retint removed — post-merge CC local ToD override owns
           // timeline colour in gameplay-light pools; compose keeps brightness via punch/direct.
 
@@ -3563,7 +3613,7 @@ export class LightingEffectV2 {
           }
 
           // Minimum illumination floor (scaled down where unified shadow darkens ambient so penumbra survives).
-          vec3 minIllum = mix(ambientDay, ambientNight, localDarknessLevel)
+          vec3 minIllum = (ambientDay + ambientDiff * localDarknessLevel)
             * (0.1 * max(uMinIlluminationScale, 0.0));
           float floorReach = clamp(ambientShadowMixOut, 0.0, 1.0);
           if (uHasBuildingShadowLit > 0.5) {
@@ -3626,17 +3676,16 @@ export class LightingEffectV2 {
               litColor += winHueLit * spillAmt;
             }
           }
-          // Albedo tint: linear in CI (exp×chromaGain flattened 0.5 vs 1.0 to the same weight).
-          // Fade tint when direct already carries hue so CI steps read on illumination first.
+          // Albedo tint: linear in CI. Fade tint when direct already carries hue so CI steps read on illumination first.
           if (chromaMag > 1e-5 && gel01 > 1e-4) {
             float reflPB = max(perceivedBrightness(baseColor.rgb), 0.05);
             float colorReflect = mix(1.0, reflPB, clamp(uColorationReflectivity, 0.0, 1.0));
-            float tintW = clamp(gel01 * colorReflect * mix(1.0, 0.18, colorW), 0.0, 1.0);
+            float tintW = clamp(gel01 * colorReflect * mix(1.0, 0.18, colorWDirect), 0.0, 1.0);
             litColor = msaLightLumaPreserveTint(litColor, lampHue, tintW);
             float satBoost = max(uColorationSaturationBoost, 0.0);
-            if (satBoost > 0.001) {
+            if (satBoost > 0.001 || chromaGainDelta > 0.001) {
               float litL = dot(litColor, MSA_LUMA_W);
-              float satMul = 1.0 + satBoost * gel01 * clamp(chromaGain * 0.18, 0.0, 2.5);
+              float satMul = 1.0 + satBoost * satEnv * clamp(chromaGain * 0.18, 0.0, 2.5);
               litColor = mix(vec3(litL), litColor, satMul);
             }
           }
@@ -3757,7 +3806,7 @@ export class LightingEffectV2 {
           }
           vec3 lampChroma = max(src.rgb, vec3(0.0));
           float chromaMag = length(lampChroma);
-          vec3 lampHue = (chromaMag > 1e-5) ? (lampChroma / chromaMag) : vec3(1.0);
+          vec3 lampHue = lampChroma / (chromaMag + 1e-5);
           vec3 direct = msaLightDirectIllumination(vec3(lampEnergyA), lampHue, 1.0);
           vec3 baseColor = max(texture2D(tAlbedo, vUv).rgb, vec3(0.0));
           gl_FragColor = vec4(lit + baseColor * direct, 1.0);
@@ -3877,18 +3926,31 @@ export class LightingEffectV2 {
     if (!this._initialized) return;
     const g = Math.max(0, Number(this.params.lightIntensity));
     const safeGain = Number.isFinite(g) ? g : 0;
+    const foundryBright = Math.max(0, Number(this.params.foundryLightBrightness));
+    const safeFoundryBright = Number.isFinite(foundryBright) ? foundryBright : 1;
+    const foundryColor = Math.max(0, Number(this.params.foundryLightColorBoost));
+    const safeFoundryColor = Number.isFinite(foundryColor) ? foundryColor : 1;
     const mixScale = Math.max(0, Number(this.params.colorationMixScale) || 0);
     const maxMix = clamp01(Number(this.params.colorationMaxMix) ?? 1);
-    const sig = `${safeGain}|${mixScale}|${maxMix}`;
+    const sig = `${safeGain}|${safeFoundryBright}|${safeFoundryColor}|${mixScale}|${maxMix}`;
     if (this._lastLightBufferUniformSig === sig && !this._lightBufferUniformsDirty) return;
     this._lastLightBufferUniformSig = sig;
     this._lightBufferUniformsDirty = false;
 
-    const apply = (uniforms) => {
+    const applyShared = (uniforms) => {
       if (!uniforms) return;
       if (uniforms.uComposeLightGain) uniforms.uComposeLightGain.value = safeGain;
       if (uniforms.uColorationMixScale) uniforms.uColorationMixScale.value = mixScale;
       if (uniforms.uColorationMaxMix) uniforms.uColorationMaxMix.value = maxMix;
+      if (uniforms.uFoundryLightGain) uniforms.uFoundryLightGain.value = 1;
+      if (uniforms.uFoundryChromaBoost) uniforms.uFoundryChromaBoost.value = 1;
+    };
+
+    const applyFoundry = (uniforms) => {
+      if (!uniforms) return;
+      applyShared(uniforms);
+      if (uniforms.uFoundryLightGain) uniforms.uFoundryLightGain.value = safeFoundryBright;
+      if (uniforms.uFoundryChromaBoost) uniforms.uFoundryChromaBoost.value = safeFoundryColor;
     };
 
     const resyncColoration = (light) => {
@@ -3902,13 +3964,13 @@ export class LightingEffectV2 {
 
     for (let i = 0; i < this._lightList.length; i++) {
       const light = this._lightList[i];
-      apply(light?.material?.uniforms);
+      applyFoundry(light?.material?.uniforms);
       resyncColoration(light);
     }
     try {
       const pl = window.MapShine?.playerLightEffectV2;
       for (const src of [pl?._torchLightSource, pl?._flashlightLightSource]) {
-        apply(src?.material?.uniforms);
+        applyShared(src?.material?.uniforms);
         resyncColoration(src);
       }
     } catch (_) {
@@ -4517,7 +4579,13 @@ export class LightingEffectV2 {
       minIllum = MSA_AMBIENT_COMPOSE_DEFAULTS.minIllum;
     }
 
-    return { dayOutdoor, dayIndoor, nightOutdoor, nightIndoor, minIllum };
+    const out = this._ambientScalesOut;
+    out.dayOutdoor = dayOutdoor;
+    out.dayIndoor = dayIndoor;
+    out.nightOutdoor = nightOutdoor;
+    out.nightIndoor = nightIndoor;
+    out.minIllum = minIllum;
+    return out;
   }
 
   /**
@@ -4773,8 +4841,18 @@ export class LightingEffectV2 {
     if (c.floorIndex !== renderFloor) return false;
     if (this._lightRtContentFloor !== renderFloor) return false;
     if (c.rtW !== w || c.rtH !== h) return false;
-    const lightGain = Math.max(0, Number(this.params.lightIntensity) || 0);
-    return c.lightGain === lightGain;
+    return c.lightGain === this._foundryLightPrepassGainKey();
+  }
+
+  /**
+   * Cache key for light-mask prepass reuse (Foundry mesh gain stack).
+   * @private
+   * @returns {string}
+   */
+  _foundryLightPrepassGainKey() {
+    const base = Math.max(0, Number(this.params.lightIntensity) || 0);
+    const foundry = Math.max(0, Number(this.params.foundryLightBrightness) || 0);
+    return `${base}|${foundry}`;
   }
 
   /**
@@ -4784,7 +4862,7 @@ export class LightingEffectV2 {
    * @private
    */
   _markLightMaskPrepassFoundryDraw(w, h, floorIndex) {
-    const lightGain = Math.max(0, Number(this.params.lightIntensity) || 0);
+    const lightGain = this._foundryLightPrepassGainKey();
     this._lightMaskPrepassCache.valid = true;
     this._lightMaskPrepassCache.floorIndex = floorIndex;
     this._lightMaskPrepassCache.rtW = w;

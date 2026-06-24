@@ -494,7 +494,30 @@ function _armPresetFullSceneReload(scene) {
  * @param {Scene|null|undefined} scene
  */
 export function requestSceneEnablePageReload(scene) {
-  const name = scene?.name ? String(scene.name) : 'this scene';
+  _requestSceneMapShinePageReload(scene, {
+    blockerText: `Enabling Map Shine Advanced for ${scene?.name ? String(scene.name) : 'this scene'}\n\nReloading Foundry…`,
+    notification: 'Map Shine: Reloading Foundry to activate Map Shine on this scene.',
+  });
+}
+
+/**
+ * Reload the Foundry tab after GM strips Map Shine data from the active scene.
+ *
+ * @param {Scene|null|undefined} scene
+ */
+export function requestSceneStripDisablePageReload(scene) {
+  _requestSceneMapShinePageReload(scene, {
+    blockerText: `Removing Map Shine Advanced from ${scene?.name ? String(scene.name) : 'this scene'}\n\nReloading Foundry…`,
+    notification: 'Map Shine: Reloading Foundry to return this scene to native Foundry rendering.',
+  });
+}
+
+/**
+ * @param {Scene|null|undefined} scene
+ * @param {{ blockerText: string, notification: string }} copy
+ * @private
+ */
+function _requestSceneMapShinePageReload(scene, copy) {
   try {
     let blocker = document.getElementById(SCENE_ENABLE_RESTART_BLOCKER_ID);
     if (!blocker) {
@@ -516,8 +539,8 @@ export function requestSceneEnablePageReload(scene) {
       blocker.style.whiteSpace = 'pre-line';
       document.body.appendChild(blocker);
     }
-    blocker.textContent = `Enabling Map Shine Advanced for ${name}\n\nReloading Foundry…`;
-    globalThis.ui?.notifications?.info?.('Map Shine: Reloading Foundry to activate Map Shine on this scene.');
+    blocker.textContent = copy.blockerText;
+    globalThis.ui?.notifications?.info?.(copy.notification);
   } catch (_) {
   }
 

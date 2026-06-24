@@ -209,6 +209,21 @@ export function getCoalBedFragmentShader() {
       return vec2(c * p.x - s * p.y, s * p.x + c * p.y);
     }
 
+    // Smooth Value Noise to replace blocky grid hash
+    float smoothNoise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      // Quintic interpolation (smoother than standard smoothstep)
+      vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+
+      float a = hash21(i);
+      float b = hash21(i + vec2(1.0, 0.0));
+      float c = hash21(i + vec2(0.0, 1.0));
+      float d = hash21(i + vec2(1.0, 1.0));
+
+      return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+    }
+
     float maskSample(vec2 uv) {
       return texture2D(uFireMask, clamp(uv, 0.0, 1.0)).r;
     }
@@ -288,15 +303,17 @@ export function getCoalBedFragmentShader() {
 
       vec2 ci = floor(uvCr * 2.2);
       vec2 cf = fract(uvCr * 2.2);
-      float vorDist = 1.0;
+      float res = 8.0;
       for (int oy = -1; oy <= 1; oy++) {
         for (int ox = -1; ox <= 1; ox++) {
           vec2 neighbor = vec2(float(ox), float(oy));
           vec2 rp = neighbor + vec2(hash21(ci + neighbor), hash21(ci + neighbor + 31.7)) - cf;
-          vorDist = min(vorDist, dot(rp, rp));
+
+          float d = dot(rp, rp);
+          res += exp(-12.0 * d);
         }
       }
-      float vorCracks = smoothstep(0.11, 0.018, sqrt(vorDist));
+      float vorCracks = smoothstep(0.11, 0.018, sqrt(-(1.0 / 12.0) * log(res)));
 
       float crackMix = clamp(0.35 + uTurbulence * 0.45 + uChunkContrast * 0.04, 0.2, 1.0);
       return clamp(max(veins, vorCracks) * crackMix, 0.0, 1.0);
@@ -320,24 +337,14 @@ export function getCoalBedFragmentShader() {
       vec2 smolderPx = rotate2(pxWarp, uGrainAngle);
       smolderPx.x /= max(0.25, uChunkAspect);
       vec2 g = smolderPx / blockPx;
-      vec2 i = floor(g);
-      vec2 f = fract(g);
-      float blend = mix(0.12, 0.92, softenNorm()) + uSoftenPx / max(blockPx, 4.0);
-      blend = clamp(blend, 0.12, 0.95);
-      f = smoothstep(0.5 - blend, 0.5 + blend, f);
 
-      float h00 = smolderHeatCell(i, time);
-      float h10 = smolderHeatCell(i + vec2(1.0, 0.0), time);
-      float h01 = smolderHeatCell(i + vec2(0.0, 1.0), time);
-      float h11 = smolderHeatCell(i + vec2(1.0, 1.0), time);
-      float hGrid = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+      float hGrid = smoothNoise(g) * 0.7 + smoothNoise(g * 2.5 + time * 0.2) * 0.3;
 
       float cracks = crackHeat(pxWarp, time);
       float crackMix = mix(0.62 + uTurbulence * 0.22, 0.48 + uTurbulence * 0.14, softenNorm());
       float h = mix(hGrid * (1.0 - cracks * 0.55), max(hGrid, cracks * 0.92), crackMix);
 
-      vec2 gritCell = floor(pxWarp / max(2.0, uFlarePixelPx * 0.5));
-      float grit = hash21(gritCell + floor(time * mix(2.0, 6.0, hash21(i))));
+      float grit = smoothNoise(pxWarp / max(2.0, uFlarePixelPx * 0.5) + time * 3.0);
       float gritSoft = mix(0.05, 0.42, softenNorm()) + uSoftenPx * 0.02;
       float gritAmt = mix(0.16, 0.06, softenNorm());
       h = max(h, smoothstep(0.78 - uChunkContrast * 0.04 - gritSoft, 0.78 - uChunkContrast * 0.04 + gritSoft, grit) * gritAmt);
@@ -345,7 +352,7 @@ export function getCoalBedFragmentShader() {
       float levels = max(2.0, mix(uHeatLevels, 48.0, softenNorm() * 0.88));
       float hQuant = floor(h * levels + 0.001) / levels;
       float softenMix = clamp(uSoftenPx / 5.0, 0.0, 1.0);
-      return mix(hQuant, h, softenMix);
+      return mix(hQuant, h, max(softenMix, 0.8));
     }
 
     // Grid-only smolder — no cracks / grit / warp. Cheap taps for spatial soften.
@@ -369,7 +376,7 @@ export function getCoalBedFragmentShader() {
       float levels = max(2.0, mix(uHeatLevels, 48.0, softenNorm() * 0.88));
       float hQuant = floor(hGrid * levels + 0.001) / levels;
       float softenMix = clamp(uSoftenPx / 5.0, 0.0, 1.0);
-      return mix(hQuant, hGrid, softenMix);
+      return mix(hQuant, hGrid, max(softenMix, 0.8));
     }
 
     // 5-tap quincunx on cheap grid heat — smooth round falloff, ~5× cheaper than 7×7 separable.

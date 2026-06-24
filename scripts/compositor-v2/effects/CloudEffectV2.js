@@ -15,6 +15,17 @@ import { createLogger } from '../../core/log.js';
 import { loadCloudSpriteTextures } from './cloud-sprites/cloud-asset-loader.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { advanceCloudWindAdvection } from './cloud-wind-advection.js';
+import {
+  CLOUD_CONFIG,
+  copyMotionState,
+  lerpTintLinear,
+  motionStatesEqual,
+  noise1D,
+  quantizeShadowBucket,
+  sanitizeParamNumber,
+  shadowMotionDeltaReason,
+  smoothstep,
+} from './cloud-math.js';
 import { resolveEffectShadowSun2D } from '../shadow-system/ShadowSunDirection.js';
 import {
   CloudSprite,
@@ -34,14 +45,17 @@ import { getCloudControlSchema } from './cloud-sprites/cloud-control-schema.js';
 
 const log = createLogger('CloudEffectV2');
 
-/** Norm-space margin beyond 0..1 before a sprite is recycled off the downwind edge. */
-const OFF_STAGE_MARGIN = 0.28;
-/** Extra norm-space depth for upwind spawns (fully off-stage before drifting in). */
-const UPWIND_SPAWN_DEPTH = 0.2;
-/** Scene-span padding for wrap/roam bounds (fraction of scene width/height). */
-const WRAP_BOUNDS_PAD = 0.24;
-/** Extra norm-space padding beyond sprite half-extent on the spawn arc. */
-const SPAWN_ARC_SPRITE_PAD = 0.06;
+const {
+  OFF_STAGE_MARGIN,
+  UPWIND_SPAWN_DEPTH,
+  WRAP_BOUNDS_PAD,
+  SPAWN_ARC_SPRITE_PAD,
+  CLOUD_TOP_FADE_START,
+  CLOUD_TOP_FADE_END,
+  EPS_LEN,
+  EPS_LEN_SQ,
+  WIND_NORM_SCALE,
+} = CLOUD_CONFIG;
 
 export class CloudEffectV2 {
   constructor() {
@@ -216,14 +230,27 @@ export class CloudEffectV2 {
     this._lastRTSceneKey = '';
     this._activePerfRecorder = null;
 
+    /** Sanitized numeric params for hot paths (updated via `_syncRuntimeParams`). */
+    this._runtimeParams = {};
+    this._syncRuntimeParams();
+
+    /** Cached MapShine refs — avoid try/catch global lookups every frame. */
+    this._mapShineEnvironment = null;
+    this._environmentControlApi = null;
+
+    /** Float32 motion buckets — replaces per-frame string signatures (GC). */
+    this._shadowMotionState = new Float32Array(MAX_SPRITE_POOL_SIZE * 3);
+    this._shadowMotionCachedState = new Float32Array(MAX_SPRITE_POOL_SIZE * 3);
+    this._shadowMotionActiveLen = 0;
+
     /** Cached shadow pass keys — skip RT work when static + sprite motion buckets are unchanged. */
-    this._shadowRawCacheKey = '';
-    /** Norm-UV / fade quantize steps for shadow motion signature (see `_computeShadowMotionSignature`). */
+    this._shadowRawCachedStaticKey = '';
+    /** Norm-UV / fade quantize steps for shadow motion state (see `_updateShadowMotionState`). */
     // Coarser buckets → fewer raw shadow RT redraws when sprites drift slowly (perf).
     // Sub-bucket drift is compensated in the shadow mask shader via `_shadowCacheMotionRef`.
     this._shadowMotionUStep = 0.028;
     this._shadowMotionFadeStep = 0.2;
-    /** Average sprite norm UV when `_shadowRawCacheKey` was last rendered (for smooth UV offset). */
+    /** Average sprite norm UV when shadow cache was last rendered (for smooth UV offset). */
     this._shadowCacheMotionRef = { normU: 0.5, normV: 0.5 };
     this._lastShadowMotionUvOffset = { x: 0, y: 0 };
     this._shadowMaskCacheKey = '';
@@ -338,6 +365,7 @@ export class CloudEffectV2 {
     this._ensureCloudLayerPlanes();
     this._ensureFallbackWhite();
 
+    this._bindMapShineRefs();
     this._initialized = true;
     log.info('CloudEffectV2 initialized');
 
@@ -389,6 +417,7 @@ export class CloudEffectV2 {
     if (!this.params || !Object.prototype.hasOwnProperty.call(this.params, paramId)) return;
     if (typeof value === 'number' && !Number.isFinite(value)) return;
     this.params[paramId] = value;
+    this._syncRuntimeParams();
     if (paramId === 'spritePoolSize' && this._assetsLoaded) {
       this._buildSpritePool();
     } else if (paramId === 'sparseWeight' && this._assetsLoaded) {
@@ -684,7 +713,7 @@ export class CloudEffectV2 {
     const len = Math.hypot(du, dv);
     const t = Math.max(0, Math.min(1, along01));
 
-    if (len < 1e-6) {
+    if (len < EPS_LEN_SQ) {
       const span = 1 + pad * 2;
       this._tempSpawnUV.u = -pad + Math.random() * span;
       this._tempSpawnUV.v = -pad + Math.random() * span;
@@ -695,27 +724,24 @@ export class CloudEffectV2 {
     const wv = dv / len;
     const pu = -wv;
     const pv = wu;
-    const corners = [
-      [-pad, -pad],
-      [1 + pad, -pad],
-      [1 + pad, 1 + pad],
-      [-pad, 1 + pad],
-    ];
 
-    let tMin = Infinity;
-    let tMax = -Infinity;
-    let wMin = Infinity;
-    for (const [cu, cv] of corners) {
-      const proj = cu * pu + cv * pv;
-      tMin = Math.min(tMin, proj);
-      tMax = Math.max(tMax, proj);
-      wMin = Math.min(wMin, cu * wu + cv * wv);
-    }
+    const pp = -pad * pu + -pad * pv;
+    const pN = (1 + pad) * pu + -pad * pv;
+    const Np = (1 + pad) * pu + (1 + pad) * pv;
+    const NN = -pad * pu + (1 + pad) * pv;
+    const tMin = Math.min(pp, pN, Np, NN);
+    const tMax = Math.max(pp, pN, Np, NN);
+    const wMin = Math.min(
+      -pad * wu + -pad * wv,
+      (1 + pad) * wu + -pad * wv,
+      (1 + pad) * wu + (1 + pad) * wv,
+      -pad * wu + (1 + pad) * wv,
+    );
 
     const targetW = wMin - depth;
     const alongT = tMin + t * (tMax - tMin);
     const det = pu * wv - pv * wu;
-    if (Math.abs(det) < 1e-8) {
+    if (Math.abs(det) < EPS_LEN_SQ) {
       this._tempSpawnUV.u = wu >= 0 ? -depth : 1 + depth;
       this._tempSpawnUV.v = -pad + t * (1 + pad * 2);
       return this._tempSpawnUV;
@@ -732,16 +758,20 @@ export class CloudEffectV2 {
    * @returns {number} 0..1 position along arc
    */
   _advanceSpawnArcWalker(windSpeed) {
-    const speed = Math.max(0, Math.min(1, Number(windSpeed) || 0));
+    const speed = Math.max(0, Math.min(1, windSpeed));
     const stepScale = 0.016 + speed * 0.1;
     const jumpChance = 0.004 + speed * 0.028;
     const jumped = Math.random() < jumpChance;
+    const time = this._lastElapsed || 0;
 
     if (jumped) {
-      this._spawnArcWalker = Math.random();
-      this._spawnArcClumping = 0.15 + Math.random() * 0.2;
+      // Noise-driven jump lands on organic cloud fronts rather than uniform scatter.
+      const front = noise1D(time * 0.07 + Math.random() * 50);
+      this._spawnArcWalker = front;
+      this._spawnArcClumping = 0.15 + noise1D(time * 0.11 + 3.7) * 0.2;
     } else {
-      this._spawnArcWalker += (Math.random() * 2 - 1) * stepScale * 2;
+      const noiseBias = (noise1D(time * 0.13 + this._spawnArcWalker * 40) - 0.5) * stepScale;
+      this._spawnArcWalker += noiseBias * 2 + (Math.random() * 2 - 1) * stepScale * 0.35;
       this._spawnArcWalker -= Math.floor(this._spawnArcWalker);
       if (this._spawnArcWalker < 0) this._spawnArcWalker += 1;
       this._spawnArcClumping = Math.min(1, (this._spawnArcClumping ?? 0.5) + 0.1 * (1 - speed * 0.65));
@@ -902,7 +932,7 @@ export class CloudEffectV2 {
       windDirX,
       windDirY,
       windSpeed,
-      this.params,
+      this._runtimeParams,
       { centerX: geom?.centerX, centerY: geom?.centerY },
     );
     this._windOffset.x -= this._windVelocity.x * delta;
@@ -1039,36 +1069,40 @@ export class CloudEffectV2 {
       this._updateCaptureCamera();
 
       const zoom = this._getZoom();
-      const fadeStart = Number(this.params.cloudTopFadeStart) || 0.24;
-      const fadeEnd = Math.max(fadeStart + 0.01, Number(this.params.cloudTopFadeEnd) || 0.39);
-      const topFade = this._smoothstep(fadeEnd, fadeStart, zoom);
+      const rp = this._runtimeParams;
+      const fadeStart = rp.cloudTopFadeStart;
+      const fadeEnd = rp.cloudTopFadeEnd;
+      const topFade = smoothstep(fadeEnd, fadeStart, zoom);
       const topVisible = topFade > 0.01;
 
       const staticKey = this._computeShadowStaticCacheKey();
-      const motionSig = this._computeShadowMotionSignature();
-      const rawCacheKey = this._composeShadowRawCacheKey(staticKey, motionSig);
-      const rawCacheHit = rawCacheKey === this._shadowRawCacheKey && !!this._shadowRawCacheKey;
+      this._updateShadowMotionState();
+      const motionMatches = this._motionStateMatchesCache();
+      const rawCacheHit = !!this._shadowRawCachedStaticKey
+        && staticKey === this._shadowRawCachedStaticKey
+        && motionMatches;
       const maskKey = this._computeShadowMaskCacheKey(staticKey);
       this._updateShadowMaskUniforms();
-      const shadowMotionOffsetActive = Math.abs(this._lastShadowMotionUvOffset.x) > 1e-6
-        || Math.abs(this._lastShadowMotionUvOffset.y) > 1e-6;
+      const shadowMotionOffsetActive = Math.abs(this._lastShadowMotionUvOffset.x) > EPS_LEN
+        || Math.abs(this._lastShadowMotionUvOffset.y) > EPS_LEN;
       const maskCacheHit = rawCacheHit
         && maskKey === this._shadowMaskCacheKey
         && !!this._shadowMaskCacheKey
         && !shadowMotionOffsetActive;
-      const cloudTopKey = this._computeCloudTopCacheKey(staticKey, topFade, motionSig);
+      const cloudTopKey = this._computeCloudTopCacheKey(staticKey, topFade);
       const animatedCloudTop = this._isAnimatedCloudTop();
-      const cloudTopCacheHit = !animatedCloudTop && cloudTopKey === this._cloudTopCacheKey && !!this._cloudTopCacheKey;
+      const cloudTopCacheHit = !animatedCloudTop
+        && cloudTopKey === this._cloudTopCacheKey
+        && !!this._cloudTopCacheKey
+        && motionMatches;
 
       if (rawCacheHit) this._shadowCacheStats.rawHit++;
       else {
         this._shadowCacheStats.rawMiss++;
-        if (!this._shadowRawCacheKey) {
+        if (!this._shadowRawCachedStaticKey) {
           this._shadowCacheStats.lastMissReason = 'coldStart';
         } else {
-          this._shadowCacheStats.lastMissReason = this._shadowCacheMissReason(
-            staticKey, motionSig, this._shadowRawCacheKey,
-          );
+          this._shadowCacheStats.lastMissReason = this._shadowCacheMissReason(staticKey);
         }
       }
       if (maskCacheHit) this._shadowCacheStats.maskHit++;
@@ -1087,7 +1121,12 @@ export class CloudEffectV2 {
         _perfToken = this._beginPerfSpan('shadowRaw', 'render');
         try {
           this._renderShadows(renderer);
-          this._shadowRawCacheKey = rawCacheKey;
+          this._shadowRawCachedStaticKey = staticKey;
+          copyMotionState(
+            this._shadowMotionCachedState,
+            this._shadowMotionState,
+            this._shadowMotionActiveLen,
+          );
           const motionRef = this._computeShadowMotionReference();
           this._shadowCacheMotionRef.normU = motionRef.normU;
           this._shadowCacheMotionRef.normV = motionRef.normV;
@@ -1159,9 +1198,10 @@ export class CloudEffectV2 {
     if (this.params.cloudTopOpacity <= 0) return;
 
     const zoom = this._getZoom();
-    const fadeStart = Number(this.params.cloudTopFadeStart) || 0.24;
-    const fadeEnd = Math.max(fadeStart + 0.01, Number(this.params.cloudTopFadeEnd) || 0.39);
-    if (this._smoothstep(fadeEnd, fadeStart, zoom) <= 0.01) return;
+    const rp = this._runtimeParams;
+    const fadeStart = rp.cloudTopFadeStart;
+    const fadeEnd = rp.cloudTopFadeEnd;
+    if (smoothstep(fadeEnd, fadeStart, zoom) <= 0.01) return;
 
     this._bindPerfRecorder();
     const _legacyToken = this._beginLegacyAggregateSpan('cloud.blitTops', 'render');
@@ -1205,9 +1245,10 @@ export class CloudEffectV2 {
 
   /** @private */
   _invalidateShadowPassCache() {
-    this._shadowRawCacheKey = '';
+    this._shadowRawCachedStaticKey = '';
     this._shadowMaskCacheKey = '';
     this._cloudTopCacheKey = '';
+    this._shadowMotionActiveLen = 0;
     this._shadowCacheMotionRef.normU = 0.5;
     this._shadowCacheMotionRef.normV = 0.5;
     this._lastShadowMotionUvOffset.x = 0;
@@ -1244,7 +1285,7 @@ export class CloudEffectV2 {
    * @returns {{ x: number, y: number }}
    */
   _computeShadowMotionUvOffset() {
-    if (!this._shadowRawCacheKey) return { x: 0, y: 0 };
+    if (!this._shadowRawCachedStaticKey) return { x: 0, y: 0 };
 
     const cached = this._shadowCacheMotionRef;
     const current = this._computeShadowMotionReference();
@@ -1265,81 +1306,52 @@ export class CloudEffectV2 {
   }
 
   /**
-   * Quantized visible-sprite UV + fade state. Bucketed so small drift / fade steps can cache-hit.
+   * Quantized visible-sprite UV + fade state into `_shadowMotionState`.
    * @private
-   * @returns {string}
    */
-  _computeShadowMotionSignature() {
+  _updateShadowMotionState() {
     const uStep = this._shadowMotionUStep;
     const fadeStep = this._shadowMotionFadeStep;
-    const parts = [];
+    const state = this._shadowMotionState;
+    let i = 0;
+
     for (const sprite of this._cloudSprites) {
       if (!sprite?.mesh.visible) continue;
-      parts.push(
-        this._quantizeShadowBucket(sprite.normU, uStep),
-        this._quantizeShadowBucket(sprite.normV, uStep),
-        this._quantizeShadowBucket(sprite.fadeMul ?? 1, fadeStep),
-      );
+      state[i] = quantizeShadowBucket(sprite.normU, uStep);
+      state[i + 1] = quantizeShadowBucket(sprite.normV, uStep);
+      state[i + 2] = quantizeShadowBucket(sprite.fadeMul ?? 1, fadeStep);
+      i += 3;
     }
-    return parts.join(',');
+    this._shadowMotionActiveLen = i;
   }
 
-  /** @private @param {string} staticKey @param {string} motionSig */
-  _composeShadowRawCacheKey(staticKey, motionSig) {
-    return `${staticKey}#${motionSig}`;
+  /** @private */
+  _motionStateMatchesCache() {
+    if (this._shadowMotionActiveLen <= 0) return true;
+    return motionStatesEqual(
+      this._shadowMotionState,
+      this._shadowMotionCachedState,
+      this._shadowMotionActiveLen,
+    );
   }
 
-  /** @private @param {string} rawCacheKey */
-  _parseShadowRawCacheKey(rawCacheKey) {
-    const hash = rawCacheKey.indexOf('#');
-    if (hash < 0) return { staticKey: rawCacheKey, motionSig: '' };
-    return {
-      staticKey: rawCacheKey.slice(0, hash),
-      motionSig: rawCacheKey.slice(hash + 1),
-    };
-  }
-
-  /**
-   * @private
-   * @param {string} staticKey
-   * @param {string} motionSig
-   * @param {string} cachedRawKey
-   * @returns {string}
-   */
-  _shadowCacheMissReason(staticKey, motionSig, cachedRawKey) {
-    const cached = this._parseShadowRawCacheKey(cachedRawKey);
-    if (cached.staticKey !== staticKey) return 'staticKeyChanged';
-    if (cached.motionSig === motionSig) return 'unknown';
-    return this._shadowCacheMotionDeltaReason(cached.motionSig, motionSig);
-  }
-
-  /**
-   * @private
-   * @param {string} prevSig
-   * @param {string} nextSig
-   * @returns {string}
-   */
-  _shadowCacheMotionDeltaReason(prevSig, nextSig) {
-    const prev = prevSig ? prevSig.split(',').map(Number) : [];
-    const next = nextSig ? nextSig.split(',').map(Number) : [];
-    const n = Math.min(prev.length, next.length);
-    let fadeBuckets = 0;
-    let uvBuckets = 0;
-    for (let i = 0; i < n; i += 3) {
-      if (prev[i] !== next[i] || prev[i + 1] !== next[i + 1]) uvBuckets++;
-      if (prev[i + 2] !== next[i + 2]) fadeBuckets++;
-    }
-    if (fadeBuckets > 0 && uvBuckets === 0) return 'spriteFade';
-    if (uvBuckets > 0) return 'spriteDrift';
-    return 'spriteMotion';
+  /** @private @param {string} staticKey */
+  _shadowCacheMissReason(staticKey) {
+    if (this._shadowRawCachedStaticKey !== staticKey) return 'staticKeyChanged';
+    return shadowMotionDeltaReason(
+      this._shadowMotionCachedState,
+      this._shadowMotionState,
+      this._shadowMotionActiveLen,
+    );
   }
 
   /** @private @returns {boolean} True when the raw cache key would change vs the last rendered shadow. */
   _shadowRawCacheWouldMiss() {
-    if (!this._shadowRawCacheKey) return true;
+    if (!this._shadowRawCachedStaticKey) return true;
     const staticKey = this._computeShadowStaticCacheKey();
-    const motionSig = this._computeShadowMotionSignature();
-    return this._composeShadowRawCacheKey(staticKey, motionSig) !== this._shadowRawCacheKey;
+    if (staticKey !== this._shadowRawCachedStaticKey) return true;
+    this._updateShadowMotionState();
+    return !this._motionStateMatchesCache();
   }
 
   /** @private @param {string} paramId */
@@ -1365,33 +1377,21 @@ export class CloudEffectV2 {
       || paramId === 'spriteOpacityMax';
   }
 
-  /** @private */
-  _quantizeShadowBucket(value, step) {
-    const s = Math.max(1e-9, Number(step) || 1);
-    const v = Number(value);
-    if (!Number.isFinite(v)) return 0;
-    return Math.round(v / s);
-  }
-
   /** @private @param {THREE.Texture|null|undefined} tex */
   _textureShadowCacheToken(tex) {
     if (!tex) return '0';
     return String(tex.uuid ?? tex.id ?? tex);
   }
 
-  /** @private — resolution, sun, and pool size (sprite motion is in `_computeShadowMotionSignature`). */
+  /** @private — resolution, sun, and pool size (sprite motion is in `_updateShadowMotionState`). */
   _computeShadowStaticCacheKey() {
     const p = this.params;
-    return [
-      this._lastShadowInternalW,
-      this._lastShadowInternalH,
-      this._lastSceneBoundsKey,
-      this._quantizeShadowBucket(this._sunDir?.x ?? 0, 0.04),
-      this._quantizeShadowBucket(this._sunDir?.y ?? 0, 0.04),
-      this._quantizeShadowBucket(p.shadowOpacity, 0.02),
-      this._quantizeShadowBucket(p.shadowOffsetScale, 0.02),
-      this._lastActiveTotal,
-    ].join('|');
+    return `${this._lastShadowInternalW}|${this._lastShadowInternalH}|${this._lastSceneBoundsKey}|`
+      + `${quantizeShadowBucket(this._sunDir?.x ?? 0, 0.04)}|`
+      + `${quantizeShadowBucket(this._sunDir?.y ?? 0, 0.04)}|`
+      + `${quantizeShadowBucket(p.shadowOpacity, 0.02)}|`
+      + `${quantizeShadowBucket(p.shadowOffsetScale, 0.02)}|`
+      + `${this._lastActiveTotal}`;
   }
 
   /** @private @param {string} staticKey */
@@ -1399,38 +1399,33 @@ export class CloudEffectV2 {
     const p = this.params;
     const vb = this._viewBounds;
     const maskTokens = this._outdoorsMasks.map((tex) => this._textureShadowCacheToken(tex));
-    return [
-      staticKey,
-      this._quantizeShadowBucket(vb.minX, this._shadowViewQuant),
-      this._quantizeShadowBucket(vb.minY, this._shadowViewQuant),
-      this._quantizeShadowBucket(vb.maxX, this._shadowViewQuant),
-      this._quantizeShadowBucket(vb.maxY, this._shadowViewQuant),
-      this._quantizeShadowBucket(this._getZoom(), 0.05),
-      this._quantizeShadowBucket(p.shadowSoftness, 0.05),
-      this._quantizeShadowBucket(p.minShadowBrightness, 0.05),
-      this._quantizeShadowBucket(p.shadowSceneFadeSoftness, 0.01),
-      this._textureShadowCacheToken(this._outdoorsMask),
-      this._textureShadowCacheToken(this._floorIdTex),
-      maskTokens.join(','),
-    ].join('|');
+    return `${staticKey}|`
+      + `${quantizeShadowBucket(vb.minX, this._shadowViewQuant)}|`
+      + `${quantizeShadowBucket(vb.minY, this._shadowViewQuant)}|`
+      + `${quantizeShadowBucket(vb.maxX, this._shadowViewQuant)}|`
+      + `${quantizeShadowBucket(vb.maxY, this._shadowViewQuant)}|`
+      + `${quantizeShadowBucket(this._getZoom(), 0.05)}|`
+      + `${quantizeShadowBucket(p.shadowSoftness, 0.05)}|`
+      + `${quantizeShadowBucket(p.minShadowBrightness, 0.05)}|`
+      + `${quantizeShadowBucket(p.shadowSceneFadeSoftness, 0.01)}|`
+      + `${this._textureShadowCacheToken(this._outdoorsMask)}|`
+      + `${this._textureShadowCacheToken(this._floorIdTex)}|`
+      + `${maskTokens.join(',')}`;
   }
 
-  /** @private @param {string} staticKey @param {number} topFade @param {string} [motionSig=''] */
-  _computeCloudTopCacheKey(staticKey, topFade, motionSig = '') {
+  /** @private @param {string} staticKey @param {number} topFade */
+  _computeCloudTopCacheKey(staticKey, topFade) {
     const p = this.params;
     const lightingBucket = this._computeLightingCacheBucket();
-    return [
-      staticKey,
-      motionSig,
-      this._quantizeShadowBucket(topFade, 0.08),
-      this._quantizeShadowBucket(p.cloudTopOpacity, 0.02),
-      this._quantizeShadowBucket(p.cloudBrightness, 0.02),
-      this._quantizeShadowBucket(p.skyTintStrength, 0.05),
-      this._quantizeShadowBucket(p.sunLightingStrength, 0.05),
-      this._quantizeShadowBucket(p.nightDimStrength, 0.05),
-      this._quantizeShadowBucket(p.spriteBoilStrength, 0.005),
-      lightingBucket,
-    ].join('|');
+    return `${staticKey}|`
+      + `${quantizeShadowBucket(topFade, 0.08)}|`
+      + `${quantizeShadowBucket(p.cloudTopOpacity, 0.02)}|`
+      + `${quantizeShadowBucket(p.cloudBrightness, 0.02)}|`
+      + `${quantizeShadowBucket(p.skyTintStrength, 0.05)}|`
+      + `${quantizeShadowBucket(p.sunLightingStrength, 0.05)}|`
+      + `${quantizeShadowBucket(p.nightDimStrength, 0.05)}|`
+      + `${quantizeShadowBucket(p.spriteBoilStrength, 0.005)}|`
+      + `${lightingBucket}`;
   }
 
   /** @returns {Readonly<typeof this._shadowCacheStats> & { rawHitPct: number, maskHitPct: number, cloudTopHitPct: number }} */
@@ -1532,7 +1527,7 @@ export class CloudEffectV2 {
 
   /** @private */
   _renderNeutral(renderer) {
-    if (this._shadowRawCacheKey || (this._lastActiveTotal ?? 0) > 0) {
+    if (this._shadowRawCachedStaticKey || (this._lastActiveTotal ?? 0) > 0) {
       this._invalidateShadowPassCache();
     }
     if (this._shadowRT) {
@@ -1874,7 +1869,7 @@ export class CloudEffectV2 {
         const sprite = this._cloudSprites[spriteIdx];
         if (!sprite?.mesh.visible) continue;
 
-        if (drift.len > 1e-6) {
+        if (drift.len > EPS_LEN_SQ) {
           const baseAngle = Math.atan2(wind.y, wind.x);
           const angle = baseAngle + (sprite.windAngleRad ?? 0);
           const speed = drift.len * (sprite.windSpeedMult ?? 1) * delta;
@@ -1882,8 +1877,8 @@ export class CloudEffectV2 {
           sprite.normV -= Math.sin(angle) * speed * normScaleV;
         }
 
-        const orbitStrength = Math.max(0, Number(this.params.driftOrbitStrength) ?? 0);
-        if (orbitStrength > 1e-6) {
+        const orbitStrength = this._runtimeParams.driftOrbitStrength;
+        if (orbitStrength > EPS_LEN) {
           const orbit = (sprite.orbitRadius ?? 0.0015) * orbitStrength;
           sprite.orbitPhase += delta * (sprite.orbitSpeed ?? 0.7);
           sprite.normU += Math.cos(sprite.orbitPhase) * orbit * normScaleU;
@@ -1906,9 +1901,9 @@ export class CloudEffectV2 {
     this._lastAppliedLightingBucket = bucket;
 
     const lightning = this._resolveLightningFlash();
-    const boilStrength = Math.max(0, Number(this.params.spriteBoilStrength) ?? 0);
-    const warpSpeed = Math.max(0, Number(this.params.domainWarpSpeed) ?? 1);
-    const warpTime = this._lastElapsed * warpSpeed;
+    const rp = this._runtimeParams;
+    const boilStrength = rp.spriteBoilStrength;
+    const warpTime = this._lastElapsed * rp.domainWarpSpeed;
 
     for (const sprite of this._cloudSprites) {
       if (!sprite.mesh.visible) continue;
@@ -1958,48 +1953,41 @@ export class CloudEffectV2 {
    */
   _resolveLightningFlash() {
     const p = this.params;
-    const disabled = p.lightningCloudEnabled === false;
-    const brightnessBoost = Math.max(0, Number(p.lightningCloudBrightnessBoost) ?? 3.0);
-    const contrastBoost = Math.max(0, Number(p.lightningCloudContrastBoost) ?? 2.5);
-    const tintStrength = Math.max(0, Math.min(1, Number(p.lightningCloudTintStrength) ?? 0.8));
-    if (disabled) {
-      return {
-        flash01: 0,
-        colorR: 0.43,
-        colorG: 0.5,
-        colorB: 0.67,
-        brightnessBoost,
-        contrastBoost,
-        tintStrength,
-      };
+    const brightnessBoost = this._runtimeParams.lightningCloudBrightnessBoost;
+    const contrastBoost = this._runtimeParams.lightningCloudContrastBoost;
+    const tintStrength = this._runtimeParams.lightningCloudTintStrength;
+    if (p.lightningCloudEnabled === false) {
+      return this._getDisabledLightningObj(brightnessBoost, contrastBoost, tintStrength);
     }
 
-    let flash01 = 0;
-    let landscape01 = 0;
-    let mapPoint01 = 0;
+    if (!this._mapShineEnvironment) {
+      this._bindMapShineRefs();
+    }
+    const env = this._mapShineEnvironment;
+    if (!env) {
+      return this._getDisabledLightningObj(brightnessBoost, contrastBoost, tintStrength);
+    }
+
+    const landscape01 = Math.max(0, Math.min(1, env.landscapeLightningFlash01 || 0));
+    const mapPoint01 = Math.max(0, Math.min(1, env.lightningFlash01 || 0));
+    const flash01 = Math.max(landscape01, mapPoint01);
+    const envContrast = Math.max(0, env.landscapeLightningFlashContrast || 0);
+
     let colorR = 0.43;
     let colorG = 0.5;
     let colorB = 0.67;
-    let envContrast = 0;
-    try {
-      const env = window.MapShine?.environment;
-      landscape01 = Math.max(0, Math.min(1, Number(env?.landscapeLightningFlash01) || 0));
-      mapPoint01 = Math.max(0, Math.min(1, Number(env?.lightningFlash01) || 0));
-      flash01 = Math.max(landscape01, mapPoint01);
-      envContrast = Math.max(0, Number(env?.landscapeLightningFlashContrast) || 0);
-      if (landscape01 >= mapPoint01 && landscape01 > 0) {
-        const lr = Number(env?.landscapeLightningFlashColorR);
-        const lg = Number(env?.landscapeLightningFlashColorG);
-        const lb = Number(env?.landscapeLightningFlashColorB);
-        if (Number.isFinite(lr)) colorR = lr;
-        if (Number.isFinite(lg)) colorG = lg;
-        if (Number.isFinite(lb)) colorB = lb;
-      } else if (mapPoint01 > 0) {
-        colorR = 0.55;
-        colorG = 0.62;
-        colorB = 0.82;
-      }
-    } catch (_) {}
+    if (landscape01 >= mapPoint01 && landscape01 > 0) {
+      const lr = env.landscapeLightningFlashColorR;
+      const lg = env.landscapeLightningFlashColorG;
+      const lb = env.landscapeLightningFlashColorB;
+      if (Number.isFinite(lr)) colorR = lr;
+      if (Number.isFinite(lg)) colorG = lg;
+      if (Number.isFinite(lb)) colorB = lb;
+    } else if (mapPoint01 > 0) {
+      colorR = 0.55;
+      colorG = 0.62;
+      colorB = 0.82;
+    }
 
     const contrastMul = 1.0 + envContrast * 0.35;
     return {
@@ -2013,9 +2001,22 @@ export class CloudEffectV2 {
     };
   }
 
+  /** @private */
+  _getDisabledLightningObj(brightnessBoost, contrastBoost, tintStrength) {
+    return {
+      flash01: 0,
+      colorR: 0.43,
+      colorG: 0.5,
+      colorB: 0.67,
+      brightnessBoost,
+      contrastBoost,
+      tintStrength,
+    };
+  }
+
   /** @private Cloud-top RT must refresh every frame when sprite boil or lightning animates. */
   _isAnimatedCloudTop() {
-    if ((Number(this.params.spriteBoilStrength) || 0) > 0.001) return true;
+    if (this._runtimeParams.spriteBoilStrength > 0.001) return true;
     if (this.params.lightningCloudEnabled === false) return false;
     return (this._resolveLightningFlash()?.flash01 ?? 0) > 0.002;
   }
@@ -2025,16 +2026,16 @@ export class CloudEffectV2 {
     const lighting = this._resolveCloudLighting();
     if (!lighting) return '0';
     const bucket = [
-      this._quantizeShadowBucket(lighting.tint.x, 0.04),
-      this._quantizeShadowBucket(lighting.tint.y, 0.04),
-      this._quantizeShadowBucket(lighting.tint.z, 0.04),
-      this._quantizeShadowBucket(lighting.sunDirX, 0.08),
-      this._quantizeShadowBucket(lighting.sunDirY, 0.08),
-      this._quantizeShadowBucket(lighting.sunElevation01, 0.05),
-      this._quantizeShadowBucket(lighting.skyIntensity, 0.05),
-      this._quantizeShadowBucket(lighting.nightDim, 0.05),
-      this._quantizeShadowBucket(this._resolveLightningFlash()?.flash01 ?? 0, 0.04),
-      this._quantizeShadowBucket(Math.max(0, Number(this.params.spriteBoilStrength) ?? 0), 0.005),
+      quantizeShadowBucket(lighting.tint.x, 0.04),
+      quantizeShadowBucket(lighting.tint.y, 0.04),
+      quantizeShadowBucket(lighting.tint.z, 0.04),
+      quantizeShadowBucket(lighting.sunDirX, 0.08),
+      quantizeShadowBucket(lighting.sunDirY, 0.08),
+      quantizeShadowBucket(lighting.sunElevation01, 0.05),
+      quantizeShadowBucket(lighting.skyIntensity, 0.05),
+      quantizeShadowBucket(lighting.nightDim, 0.05),
+      quantizeShadowBucket(this._resolveLightningFlash()?.flash01 ?? 0, 0.04),
+      quantizeShadowBucket(this._runtimeParams.spriteBoilStrength, 0.005),
     ].join(',');
     this._lightingCacheBucket = bucket;
     return bucket;
@@ -2285,30 +2286,30 @@ export class CloudEffectV2 {
     const camPos = this._mainCamera?.position;
     const camX = Number(camPos?.x);
     const camY = Number(camPos?.y);
-    const coverageScale = Math.max(1, Number(this.params.cloudLayerCoverageScale) || 3.0);
-    const driftStrength = Math.max(0, Number(this.params.cloudLayerDriftStrength) || 0.02);
-    const driftDepthBoost = Math.max(0, Number(this.params.cloudLayerDriftDepthBoost) || 0.015);
-    const opacityBase = Math.max(0, Number(this.params.cloudLayerOpacityBase) || 0.75);
-    const opacityFalloff = Math.max(0, Math.min(1, Number(this.params.cloudLayerOpacityFalloff) ?? 0.35));
-    const outerReveal = Math.max(0.05, Math.min(1, Number(this.params.cloudLayerOuterReveal) ?? 0.3));
-    const midReveal = Math.max(0.05, Math.min(1, Number(this.params.cloudLayerMidReveal) ?? 0.9));
+    const rp = this._runtimeParams;
+    const coverageScale = rp.cloudLayerCoverageScale;
+    const driftStrength = rp.cloudLayerDriftStrength;
+    const driftDepthBoost = rp.cloudLayerDriftDepthBoost;
+    const opacityBase = rp.cloudLayerOpacityBase;
+    const opacityFalloff = rp.cloudLayerOpacityFalloff;
+    const outerReveal = rp.cloudLayerOuterReveal;
+    const midReveal = rp.cloudLayerMidReveal;
     const layerReveals = [outerReveal, midReveal, outerReveal];
     const layerNoiseSeeds = [
       [17.3, 8.1],
       [91.7, 42.3],
       [203.5, 156.8],
     ];
-    const noiseScale = Math.max(1e-6, Number(this.params.cloudLayerNoiseScale) || 0.0002);
-    const noiseSoftness = Math.max(0.001, Number(this.params.cloudLayerNoiseSoftness) ?? 0.015);
-    const edgeSoftness = Math.max(0.01, Number(this.params.cloudLayerEdgeSoftness) || 0.12);
-    const opacity = Math.max(0, Number(this.params.cloudTopOpacity) || 0);
+    const noiseScale = rp.cloudLayerNoiseScale;
+    const noiseSoftness = rp.cloudLayerNoiseSoftness;
+    const edgeSoftness = rp.cloudLayerEdgeSoftness;
+    const opacity = rp.cloudTopOpacity;
     const zoom = this._getZoom();
-    const fadeStart = Number(this.params.cloudTopFadeStart) || 0.24;
-    const fadeEnd = Math.max(fadeStart + 0.01, Number(this.params.cloudTopFadeEnd) || 0.39);
-    const topFade = this._smoothstep(fadeEnd, fadeStart, zoom);
-    const warpSpeed = Math.max(0, Number(this.params.domainWarpSpeed) ?? 1);
-    const overlayWarp = Math.max(0, Number(this.params.overlayDomainWarpStrength) ?? 0);
-    const warpTime = this._lastElapsed * warpSpeed;
+    const fadeStart = rp.cloudTopFadeStart;
+    const fadeEnd = rp.cloudTopFadeEnd;
+    const topFade = smoothstep(fadeEnd, fadeStart, zoom);
+    const warpTime = this._lastElapsed * rp.domainWarpSpeed;
+    const overlayWarp = rp.overlayDomainWarpStrength;
 
     const sceneComposer = window.MapShine?.sceneComposer;
     const groundZRaw = Number(sceneComposer?.groundZ);
@@ -2331,8 +2332,8 @@ export class CloudEffectV2 {
       this._syncCaptureBounds();
       u.uCaptureBoundsMin.value.set(this._captureBounds.minX, this._captureBounds.minY);
       u.uCaptureBoundsMax.value.set(this._captureBounds.maxX, this._captureBounds.maxY);
-      u.uAlphaStart.value = Math.max(0, Math.min(0.99, Number(this.params.cloudTopAlphaStart) ?? 0.2));
-      u.uAlphaEnd.value = Math.max(u.uAlphaStart.value + 0.01, Math.min(1, Number(this.params.cloudTopAlphaEnd) ?? 0.6));
+      u.uAlphaStart.value = rp.cloudTopAlphaStart;
+      u.uAlphaEnd.value = Math.max(rp.cloudTopAlphaStart + 0.01, rp.cloudTopAlphaEnd);
       u.uEdgeSoftness.value = edgeSoftness;
       u.uLayerReveal.value = layerReveals[i] ?? midReveal;
       const seed = layerNoiseSeeds[i] ?? layerNoiseSeeds[1];
@@ -2341,7 +2342,7 @@ export class CloudEffectV2 {
       u.uNoiseSoftness.value = noiseSoftness;
       if (u.uWarpTime) u.uWarpTime.value = warpTime;
       if (u.uWarpStrength) u.uWarpStrength.value = overlayWarp;
-      if (u.uWarpSpeed) u.uWarpSpeed.value = warpSpeed;
+      if (u.uWarpSpeed) u.uWarpSpeed.value = rp.domainWarpSpeed;
 
       const layerZRaw = Number(mesh?.position?.z);
       const layerZ = Number.isFinite(layerZRaw) ? layerZRaw : groundZ;
@@ -2350,8 +2351,8 @@ export class CloudEffectV2 {
       const nCamX = Number.isFinite(camX) ? ((camX - centerX) / Math.max(1, sceneW)) : 0;
       const nCamY = Number.isFinite(camY) ? ((camY - centerY) / Math.max(1, sceneH)) : 0;
       const wind = this._windOffset;
-      const windNormX = Math.tanh((wind?.x ?? 0) * 0.08);
-      const windNormY = Math.tanh((wind?.y ?? 0) * 0.08);
+      const windNormX = Math.tanh((wind?.x ?? 0) * WIND_NORM_SCALE);
+      const windNormY = Math.tanh((wind?.y ?? 0) * WIND_NORM_SCALE);
 
       u.uUvOffset.value.set(
         (windNormX * driftStrength) + (nCamX * parallaxStrength * driftDepthBoost * 6.0),
@@ -2396,11 +2397,8 @@ export class CloudEffectV2 {
 
   /** @private True while Camera Path (or similar) owns the environment ramp. */
   _isEnvironmentExternallyDriven() {
-    try {
-      return window.MapShine?.environmentControlApi?.isExternallyDriven?.() === true;
-    } catch (_) {
-      return false;
-    }
+    if (!this._environmentControlApi) this._bindMapShineRefs();
+    return this._environmentControlApi?.isExternallyDriven?.() === true;
   }
 
   /** @private */
@@ -2462,9 +2460,70 @@ export class CloudEffectV2 {
   }
 
   /** @private */
-  _smoothstep(edge0, edge1, x) {
-    const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0 + 1e-8)));
-    return t * t * (3 - 2 * t);
+  _calcTimeOfDayTint() {
+    if (!this._tintResult) return null;
+    let hour = 12;
+    if (typeof weatherController?.timeOfDay === 'number') hour = weatherController.timeOfDay;
+    hour = ((hour % 24) + 24) % 24;
+    const t = this._tintResult;
+    if (hour < 5) t.copy(this._tintNight);
+    else if (hour < 6) lerpTintLinear(t, this._tintNight, this._tintSunrise, hour - 5);
+    else if (hour < 7) lerpTintLinear(t, this._tintSunrise, this._tintDay, hour - 6);
+    else if (hour < 17) t.copy(this._tintDay);
+    else if (hour < 18) lerpTintLinear(t, this._tintDay, this._tintSunset, hour - 17);
+    else if (hour < 19) lerpTintLinear(t, this._tintSunset, this._tintNight, hour - 18);
+    else t.copy(this._tintNight);
+    return t;
+  }
+
+  /** @private Cache MapShine global refs once (avoids try/catch in hot paths). */
+  _bindMapShineRefs() {
+    const ms = window.MapShine;
+    if (!ms) return;
+    if (!this._mapShineEnvironment && ms.environment) {
+      this._mapShineEnvironment = ms.environment;
+    }
+    if (!this._environmentControlApi && ms.environmentControlApi) {
+      this._environmentControlApi = ms.environmentControlApi;
+    }
+  }
+
+  /** @private Sanitize numeric params used in per-frame loops. */
+  _syncRuntimeParams() {
+    const p = this.params;
+    const rp = this._runtimeParams;
+    const fadeStart = sanitizeParamNumber(p.cloudTopFadeStart, CLOUD_TOP_FADE_START);
+    rp.cloudTopFadeStart = fadeStart;
+    rp.cloudTopFadeEnd = Math.max(fadeStart + 0.01, sanitizeParamNumber(p.cloudTopFadeEnd, CLOUD_TOP_FADE_END));
+    rp.cloudTopOpacity = Math.max(0, sanitizeParamNumber(p.cloudTopOpacity, 1));
+    rp.cloudTopAlphaStart = Math.max(0, Math.min(0.99, sanitizeParamNumber(p.cloudTopAlphaStart, 0.2)));
+    rp.cloudTopAlphaEnd = Math.max(
+      rp.cloudTopAlphaStart + 0.01,
+      Math.min(1, sanitizeParamNumber(p.cloudTopAlphaEnd, 0.6)),
+    );
+    rp.windInfluence = Math.max(0, sanitizeParamNumber(p.windInfluence, 1.33));
+    rp.driftSpeed = Math.max(0, sanitizeParamNumber(p.driftSpeed, 0.061));
+    rp.minDriftSpeed = Math.max(0, sanitizeParamNumber(p.minDriftSpeed, 0.002));
+    rp.driftResponsiveness = Math.max(0.01, sanitizeParamNumber(p.driftResponsiveness, 0.75));
+    rp.driftDecelFactor = Math.max(0.02, Math.min(1, sanitizeParamNumber(p.driftDecelFactor, 0.14)));
+    rp.driftMaxSpeed = Math.max(rp.minDriftSpeed, sanitizeParamNumber(p.driftMaxSpeed, 0.5));
+    rp.driftOrbitStrength = Math.max(0, sanitizeParamNumber(p.driftOrbitStrength, 0.05));
+    rp.spriteBoilStrength = Math.max(0, sanitizeParamNumber(p.spriteBoilStrength, 0.12));
+    rp.domainWarpSpeed = Math.max(0, sanitizeParamNumber(p.domainWarpSpeed, 0.06));
+    rp.overlayDomainWarpStrength = Math.max(0, sanitizeParamNumber(p.overlayDomainWarpStrength, 0.15));
+    rp.lightningCloudBrightnessBoost = Math.max(0, sanitizeParamNumber(p.lightningCloudBrightnessBoost, 3.0));
+    rp.lightningCloudContrastBoost = Math.max(0, sanitizeParamNumber(p.lightningCloudContrastBoost, 2.5));
+    rp.lightningCloudTintStrength = Math.max(0, Math.min(1, sanitizeParamNumber(p.lightningCloudTintStrength, 0.8)));
+    rp.cloudLayerCoverageScale = Math.max(1, sanitizeParamNumber(p.cloudLayerCoverageScale, 1.5));
+    rp.cloudLayerDriftStrength = Math.max(0, sanitizeParamNumber(p.cloudLayerDriftStrength, 0.188));
+    rp.cloudLayerDriftDepthBoost = Math.max(0, sanitizeParamNumber(p.cloudLayerDriftDepthBoost, 0.068));
+    rp.cloudLayerOpacityBase = Math.max(0, sanitizeParamNumber(p.cloudLayerOpacityBase, 0.96));
+    rp.cloudLayerOpacityFalloff = Math.max(0, Math.min(1, sanitizeParamNumber(p.cloudLayerOpacityFalloff, 0.79)));
+    rp.cloudLayerOuterReveal = Math.max(0.05, Math.min(1, sanitizeParamNumber(p.cloudLayerOuterReveal, 0.9)));
+    rp.cloudLayerMidReveal = Math.max(0.05, Math.min(1, sanitizeParamNumber(p.cloudLayerMidReveal, 0.82)));
+    rp.cloudLayerNoiseScale = Math.max(CLOUD_CONFIG.EPS_LEN, sanitizeParamNumber(p.cloudLayerNoiseScale, 0.00125));
+    rp.cloudLayerNoiseSoftness = Math.max(0.001, sanitizeParamNumber(p.cloudLayerNoiseSoftness, 0.205));
+    rp.cloudLayerEdgeSoftness = Math.max(0.01, sanitizeParamNumber(p.cloudLayerEdgeSoftness, 0.5));
   }
 
   /** @private */
@@ -2508,23 +2567,6 @@ export class CloudEffectV2 {
       elevationDeg: sky?.currentSunElevationDeg,
     });
     this._sunDir.set(sun2d.x, sun2d.y);
-  }
-
-  /** @private */
-  _calcTimeOfDayTint() {
-    if (!this._tintResult) return null;
-    let hour = 12;
-    try { if (typeof weatherController?.timeOfDay === 'number') hour = weatherController.timeOfDay; } catch (_) {}
-    hour = ((hour % 24) + 24) % 24;
-    const t = this._tintResult;
-    if (hour < 5) t.copy(this._tintNight);
-    else if (hour < 6) t.lerpVectors(this._tintNight, this._tintSunrise, hour - 5);
-    else if (hour < 7) t.lerpVectors(this._tintSunrise, this._tintDay, hour - 6);
-    else if (hour < 17) t.copy(this._tintDay);
-    else if (hour < 18) t.lerpVectors(this._tintDay, this._tintSunset, hour - 17);
-    else if (hour < 19) t.lerpVectors(this._tintSunset, this._tintNight, hour - 18);
-    else t.copy(this._tintNight);
-    return t;
   }
 
   dispose() {

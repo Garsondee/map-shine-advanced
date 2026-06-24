@@ -31,7 +31,8 @@
  */
 
 import { createLogger } from '../../core/log.js';
-import { createMaskStatusSchemaGroups, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
+import { refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
+import { getSpecularControlSchema } from './specular-control-schema.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { probeMaskFile } from '../../assets/loader.js';
 import { loadImageTexture, VISUAL_MASK_MAX_SIZE } from '../../assets/image-texture-loader.js';
@@ -115,6 +116,95 @@ async function mapWithConcurrency(items, limit, fn) {
 
 /** How many `probeMaskFile` calls run at once during populate. */
 const SPECULAR_MASK_PROBE_CONCURRENCY = 8;
+
+/** Stripe layer count — must match GLSL `uStripe*[3]` arrays. */
+const STRIPE_LAYER_COUNT = 3;
+
+/**
+ * Seamlessly tiling noise texture for the specular shader.
+ * R = smooth value noise, G = voronoi F1, B = high-frequency crystalline.
+ * @param {typeof window.THREE} THREE
+ * @returns {import('three').DataTexture}
+ */
+function createSpecularNoiseTexture(THREE) {
+  const size = 256;
+  const cells = 16;
+  const data = new Uint8Array(size * size * 4);
+
+  let seed = 0x5eedc0de;
+  const rand = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967295;
+  };
+
+  const hash2 = (ix, iy) => {
+    const n = (ix * 374761393 + iy * 668265263 + 0x9e3779b9) >>> 0;
+    return ((n ^ (n >>> 13)) * 1274126177) >>> 0;
+  };
+
+  const smoothValue = (x, y) => {
+    const x0 = Math.floor(x);
+    const y0 = Math.floor(y);
+    const fx = x - x0;
+    const fy = y - y0;
+    const sx = fx * fx * (3 - 2 * fx);
+    const sy = fy * fy * (3 - 2 * fy);
+    const v00 = (hash2(x0, y0) & 0xffff) / 65535;
+    const v10 = (hash2(x0 + 1, y0) & 0xffff) / 65535;
+    const v01 = (hash2(x0, y0 + 1) & 0xffff) / 65535;
+    const v11 = (hash2(x0 + 1, y0 + 1) & 0xffff) / 65535;
+    const ix0 = v00 + (v10 - v00) * sx;
+    const ix1 = v01 + (v11 - v01) * sx;
+    return ix0 + (ix1 - ix0) * sy;
+  };
+
+  const featurePoints = [];
+  for (let cy = 0; cy < cells; cy++) {
+    for (let cx = 0; cx < cells; cx++) {
+      featurePoints.push({
+        x: (cx + rand()) / cells,
+        y: (cy + rand()) / cells,
+      });
+    }
+  }
+
+  for (let py = 0; py < size; py++) {
+    for (let px = 0; px < size; px++) {
+      const u = px / size;
+      const v = py / size;
+      const idx = (py * size + px) * 4;
+
+      const valueR = smoothValue(u * 8, v * 8);
+      data[idx] = Math.floor(valueR * 255);
+
+      let minDist = 1e9;
+      for (let i = 0; i < featurePoints.length; i++) {
+        const fp = featurePoints[i];
+        let dx = Math.abs(u - fp.x);
+        let dy = Math.abs(v - fp.y);
+        if (dx > 0.5) dx = 1 - dx;
+        if (dy > 0.5) dy = 1 - dy;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < minDist) minDist = d;
+      }
+      const voronoiG = Math.min(1, minDist * 3.2);
+      data[idx + 1] = Math.floor(voronoiG * 255);
+
+      const crystalB = (hash2(px, py) & 0xffff) / 65535;
+      data[idx + 2] = Math.floor(crystalB * 255);
+      data[idx + 3] = 255;
+    }
+  }
+
+  const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat, THREE.UnsignedByteType);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+  return tex;
+}
 
 /** Yield to the browser so sockets/timers stay healthy on huge maps. */
 async function yieldPopulateEventLoop() {
@@ -200,6 +290,16 @@ export class SpecularEffectV2 {
      */
     this._healthDiagnostics = null;
 
+    /** When true, static UI uniforms are pushed on the next update(). */
+    this._paramsDirty = true;
+
+    /** Tiling noise texture for stripe/wet/frost shader sampling. */
+    /** @type {import('three').DataTexture|null} */
+    this._noiseTexture = null;
+
+    /** Frame counter for throttled AmbientLight doc refresh. */
+    this._lightRefreshTick = 0;
+
     // Effect parameters — same defaults as V1 for visual parity (minus retired unused fields).
     this.params = {
       enabled: true,
@@ -264,13 +364,13 @@ export class SpecularEffectV2 {
       wetSpecularEnabled: true,
       wetInputBrightness: 0.0,
       wetInputGamma: 1.0,
-      wetSpecularContrast: 3.0,
-      wetBlackPoint: 0.2,
-      wetWhitePoint: 1.0,
+      wetSpecularContrast: 2.5,
+      wetBlackPoint: 0.55,
+      wetWhitePoint: 0.92,
       wetSpecularIntensity: 1.5,
       wetOutputMax: 1.0,
       wetOutputGamma: 1.0,
-      wetBaseSheen: 0.3,
+      wetBaseSheen: 0.12,
       wetWindRippleStrength: 1.0,
 
       // Frost / Ice Glaze
@@ -352,299 +452,18 @@ export class SpecularEffectV2 {
   // ── UI schema (moved from V1 SpecularEffect) ─────────────────────────────
 
   static getControlSchema() {
-    const white = { r: 1, g: 1, b: 1 };
-    return {
-      enabled: true,
-      help: {
-        title: 'Metallic / specular (tile overlays)',
-        summary: [
-          'Draws **additive shine** on top of map tiles (and the scene background) wherever a matching **`_Specular`** texture exists beside the art.',
-          'Stripes, sparkles, rain wetness, frost, outdoor/cloud response, and Foundry lights all multiply into that mask — there is no separate PBR roughness or normal-map path.',
-          'Uses one overlay mesh per masked tile, rendered through the floor bus so level visibility stays correct.',
-          'Torch and flashlight from PlayerLightEffectV2 feed a separate analytic pass each frame (after player-light update). On multi-floor scenes they only add to specular overlays on the same floor band as the controlled token’s elevation.',
-          'Performance scales with how many `_Specular` overlays exist and how busy the stripe/sparkle math is; heavy maps benefit from fewer stripe layers or lower intensities.',
-          'Settings are stored on the scene (not World Based).',
-        ].join('\n\n'),
-        glossary: {
-          _Outdoors: 'Whether an indoor/outdoor mask is bound (row under Enabled) — white = outdoor for stripes and wet response.',
-          _Specular: 'Whether the scene found at least one `_Specular` texture after load (row under Enabled).',
-          Intensity: 'Overall strength of the shine pass.',
-          'Specular tint': 'Color multiplied into highlights (white keeps the map neutral).',
-          'World scale': 'How large world-space stripe patterns are — higher = bigger, calmer bands.',
-          'Outdoor blend': 'How much outdoor areas mix stripe modulation with cloud-lit specular.',
-          'Wet surface': 'Rain-driven sheen from albedo brightness, strongest on outdoor pixels.',
-          'Building shadow suppression': 'Pulls specular down where the building shadow map is dark.',
-          'Player light specular boost': 'Scales analytic specular energy from the torch / flashlight ThreeLightSource pass (1 = match disk strength, higher = punchier highlights).',
-        },
-      },
-      presetApplyDefaults: true,
-      groups: [
-        ...createMaskStatusSchemaGroups(['outdoors', 'specular']),
-        {
-          name: 'look',
-          label: 'Look',
-          type: 'folder',
-          expanded: true,
-          parameters: ['intensity', 'lightColor', 'playerLightSpecularBoost'],
-        },
-        {
-          name: 'stripes',
-          label: 'Stripes',
-          type: 'folder',
-          advanced: true,
-          expanded: true,
-          parameters: [
-            'stripeEnabled', 'stripeBlendMode', 'parallaxStrength', 'stripeMaskThreshold', 'worldPatternScale',
-          ],
-        },
-        {
-          name: 'layer1',
-          label: 'Stripe layer 1',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'stripe1Enabled', 'stripe1Frequency', 'stripe1Speed', 'stripe1Angle', 'stripe1Width', 'stripe1Intensity',
-            'stripe1Parallax', 'stripe1Wave', 'stripe1Gaps', 'stripe1Softness',
-          ],
-        },
-        {
-          name: 'layer2',
-          label: 'Stripe layer 2',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'stripe2Enabled', 'stripe2Frequency', 'stripe2Speed', 'stripe2Angle', 'stripe2Width', 'stripe2Intensity',
-            'stripe2Parallax', 'stripe2Wave', 'stripe2Gaps', 'stripe2Softness',
-          ],
-        },
-        {
-          name: 'layer3',
-          label: 'Stripe layer 3',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: [
-            'stripe3Enabled', 'stripe3Frequency', 'stripe3Speed', 'stripe3Angle', 'stripe3Width', 'stripe3Intensity',
-            'stripe3Parallax', 'stripe3Wave', 'stripe3Gaps', 'stripe3Softness',
-          ],
-        },
-        {
-          name: 'sparkle',
-          label: 'Micro sparkle',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: ['sparkleEnabled', 'sparkleIntensity', 'sparkleScale', 'sparkleSpeed'],
-        },
-        {
-          name: 'outdoorCloud',
-          label: 'Outdoor & clouds',
-          type: 'folder',
-          expanded: false,
-          parameters: ['outdoorCloudSpecularEnabled', 'outdoorStripeBlend', 'cloudSpecularIntensity'],
-        },
-        {
-          name: 'wet',
-          label: 'Wet surface (rain)',
-          type: 'folder',
-          expanded: false,
-          parameters: [
-            'wetSpecularEnabled', 'wetInputBrightness', 'wetInputGamma', 'wetSpecularContrast', 'wetBlackPoint', 'wetWhitePoint',
-            'wetSpecularIntensity', 'wetOutputMax', 'wetOutputGamma', 'wetBaseSheen', 'wetWindRippleStrength',
-          ],
-        },
-        {
-          name: 'frost',
-          label: 'Frost / ice',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: ['frostGlazeEnabled', 'frostThreshold', 'frostIntensity', 'frostTintStrength'],
-        },
-        {
-          name: 'lightTint',
-          label: 'Dynamic light tint',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: ['dynamicLightTintEnabled', 'dynamicLightTintStrength'],
-        },
-        {
-          name: 'windStripes',
-          label: 'Wind-linked stripes',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: ['windDrivenStripesEnabled', 'windStripeInfluence'],
-        },
-        {
-          name: 'buildingShadow',
-          label: 'Building shadow suppression',
-          type: 'folder',
-          advanced: true,
-          expanded: false,
-          parameters: ['buildingShadowSuppressionEnabled', 'buildingShadowSuppressionStrength'],
-        },
-      ],
-      parameters: {
-        intensity: {
-          type: 'slider',
-          label: 'Intensity',
-          min: 0,
-          max: 2,
-          step: 0.01,
-          default: 0.15,
-          throttle: 100,
-          tooltip: 'Master strength of the additive specular pass.',
-        },
-        lightColor: {
-          type: 'color',
-          colorType: 'float',
-          label: 'Specular tint',
-          default: { ...white },
-          tooltip: 'Tint multiplied into specular highlights (linear 0–1 per channel).',
-        },
-        playerLightSpecularBoost: {
-          type: 'slider',
-          label: 'Player light specular boost',
-          min: 1,
-          max: 2.5,
-          step: 0.05,
-          default: 1.2,
-          throttle: 100,
-          tooltip: 'Extra strength where torch / flashlight (PlayerLightEffectV2) overlaps the floor specular pass. Uses the same world-space radii as the player light disks.',
-        },
-        stripeEnabled: {
-          type: 'boolean',
-          label: 'Stripes on',
-          default: true,
-          tooltip: 'Animated stripe bands modulate shine in world space.',
-        },
-        stripeBlendMode: {
-          type: 'list',
-          label: 'Layer blend',
-          options: { Add: 0, Multiply: 1, Screen: 2, Overlay: 3 },
-          default: 0,
-          tooltip: 'How stripe layers 2–3 combine with layer 1.',
-        },
-        stripeMaskThreshold: {
-          type: 'slider',
-          label: 'Brightness gate',
-          min: 0,
-          max: 1,
-          step: 0.01,
-          default: 0.08,
-          throttle: 100,
-          tooltip: 'Stripes only where the specular mask is brighter than this (reduces shine in dark mask areas).',
-        },
-        worldPatternScale: {
-          type: 'slider',
-          label: 'World scale (px)',
-          min: 256,
-          max: 16384,
-          step: 16,
-          default: 16384,
-          throttle: 100,
-          tooltip: 'Size of world-space stripe pattern — larger values stretch bands wider.',
-        },
-        parallaxStrength: {
-          type: 'slider',
-          label: 'Parallax',
-          min: 0,
-          max: 2,
-          step: 0.1,
-          default: 1.5,
-          throttle: 100,
-          tooltip: 'How much the camera shifts stripe coordinates (depth illusion).',
-        },
-        stripe1Enabled: { type: 'boolean', label: 'On', default: true },
-        stripe1Frequency: { type: 'slider', label: 'Frequency', min: 0.5, max: 20, step: 0.5, default: 11.0, throttle: 100, tooltip: 'How often bands repeat.' },
-        stripe1Speed: { type: 'slider', label: 'Speed', min: -1, max: 1, step: 0.001, default: 0, throttle: 100, tooltip: 'Scroll speed along the pattern (outdoors only when _Outdoors mask is bound).' },
-        stripe1Angle: { type: 'slider', label: 'Angle (°)', min: 0, max: 360, step: 1, default: 115, throttle: 100, tooltip: 'Band direction in degrees.' },
-        stripe1Width: { type: 'slider', label: 'Width', min: 0, max: 1, step: 0.01, default: 0.21, throttle: 100, tooltip: 'Thickness of each bright band.' },
-        stripe1Intensity: { type: 'slider', label: 'Strength', min: 0, max: 5, step: 0.01, default: 5.0, throttle: 100, tooltip: 'How strong this layer is before blending.' },
-        stripe1Parallax: { type: 'slider', label: 'Parallax mix', min: -2, max: 2, step: 0.1, default: 0.2, throttle: 100, tooltip: 'Per-layer parallax weight vs global parallax.' },
-        stripe1Wave: { type: 'slider', label: 'Wave', min: 0, max: 2, step: 0.1, default: 1.7, throttle: 100, tooltip: 'Waviness along the bands.' },
-        stripe1Gaps: { type: 'slider', label: 'Gaps', min: 0, max: 1, step: 0.01, default: 0.31, throttle: 100, tooltip: 'Noise-driven breaks in the bands.' },
-        stripe1Softness: { type: 'slider', label: 'Softness', min: 0, max: 5, step: 0.01, default: 2.14, throttle: 100, tooltip: 'Edge softness of each band.' },
-        stripe2Enabled: { type: 'boolean', label: 'On', default: true },
-        stripe2Frequency: { type: 'slider', label: 'Frequency', min: 0.5, max: 20, step: 0.5, default: 15.5, throttle: 100, tooltip: 'How often bands repeat.' },
-        stripe2Speed: { type: 'slider', label: 'Speed', min: -1, max: 1, step: 0.001, default: 0, throttle: 100, tooltip: 'Scroll speed along the pattern (outdoors only when _Outdoors mask is bound).' },
-        stripe2Angle: { type: 'slider', label: 'Angle (°)', min: 0, max: 360, step: 1, default: 111, throttle: 100, tooltip: 'Band direction in degrees.' },
-        stripe2Width: { type: 'slider', label: 'Width', min: 0, max: 1, step: 0.01, default: 0.38, throttle: 100, tooltip: 'Thickness of each bright band.' },
-        stripe2Intensity: { type: 'slider', label: 'Strength', min: 0, max: 5, step: 0.01, default: 5.0, throttle: 100, tooltip: 'How strong this layer is before blending.' },
-        stripe2Parallax: { type: 'slider', label: 'Parallax mix', min: -2, max: 2, step: 0.1, default: 0.1, throttle: 100, tooltip: 'Per-layer parallax weight vs global parallax.' },
-        stripe2Wave: { type: 'slider', label: 'Wave', min: 0, max: 2, step: 0.1, default: 1.6, throttle: 100, tooltip: 'Waviness along the bands.' },
-        stripe2Gaps: { type: 'slider', label: 'Gaps', min: 0, max: 1, step: 0.01, default: 0.5, throttle: 100, tooltip: 'Noise-driven breaks in the bands.' },
-        stripe2Softness: { type: 'slider', label: 'Softness', min: 0, max: 5, step: 0.01, default: 3.93, throttle: 100, tooltip: 'Edge softness of each band.' },
-        stripe3Enabled: { type: 'boolean', label: 'On', default: true },
-        stripe3Frequency: { type: 'slider', label: 'Frequency', min: 0.5, max: 20, step: 0.5, default: 5.0, throttle: 100, tooltip: 'How often bands repeat.' },
-        stripe3Speed: { type: 'slider', label: 'Speed', min: -1, max: 1, step: 0.001, default: 0, throttle: 100, tooltip: 'Scroll speed along the pattern (outdoors only when _Outdoors mask is bound).' },
-        stripe3Angle: { type: 'slider', label: 'Angle (°)', min: 0, max: 360, step: 1, default: 162, throttle: 100, tooltip: 'Band direction in degrees.' },
-        stripe3Width: { type: 'slider', label: 'Width', min: 0, max: 1, step: 0.01, default: 0.09, throttle: 100, tooltip: 'Thickness of each bright band.' },
-        stripe3Intensity: { type: 'slider', label: 'Strength', min: 0, max: 5, step: 0.01, default: 5.0, throttle: 100, tooltip: 'How strong this layer is before blending.' },
-        stripe3Parallax: { type: 'slider', label: 'Parallax mix', min: -2, max: 2, step: 0.1, default: -0.1, throttle: 100, tooltip: 'Per-layer parallax weight vs global parallax.' },
-        stripe3Wave: { type: 'slider', label: 'Wave', min: 0, max: 2, step: 0.1, default: 0.4, throttle: 100, tooltip: 'Waviness along the bands.' },
-        stripe3Gaps: { type: 'slider', label: 'Gaps', min: 0, max: 1, step: 0.01, default: 0.37, throttle: 100, tooltip: 'Noise-driven breaks in the bands.' },
-        stripe3Softness: { type: 'slider', label: 'Softness', min: 0, max: 5, step: 0.01, default: 3.44, throttle: 100, tooltip: 'Edge softness of each band.' },
-        sparkleEnabled: { type: 'boolean', label: 'Sparkle on', default: false, tooltip: 'Tiny glints on top of stripe modulation.' },
-        sparkleIntensity: { type: 'slider', label: 'Strength', min: 0, max: 2, step: 0.01, default: 0.95, throttle: 100, tooltip: 'Brightness of sparkle cells.' },
-        sparkleScale: { type: 'slider', label: 'Density', min: 100, max: 10000, step: 1, default: 2460, throttle: 100, tooltip: 'Higher = smaller, busier sparkles.' },
-        sparkleSpeed: { type: 'slider', label: 'Twinkle speed', min: 0, max: 5, step: 0.01, default: 1.38, throttle: 100, tooltip: 'How fast sparkles blink.' },
-        outdoorCloudSpecularEnabled: { type: 'boolean', label: 'Cloud specular', default: true, tooltip: 'Brighten outdoor specular where the cloud shadow map says “lit”. Requires cloud shadows from the cloud effect.' },
-        outdoorStripeBlend: { type: 'slider', label: 'Outdoor stripe mix', min: 0, max: 1, step: 0.01, default: 0.31, throttle: 100, tooltip: 'How much `_Outdoors` reduces stripe modulation (outdoor areas stay punchier).' },
-        cloudSpecularIntensity: { type: 'slider', label: 'Cloud lit boost', min: 0, max: 3, step: 0.01, default: 1, throttle: 100, tooltip: 'Extra additive specular on sunlit outdoor pixels from the cloud pass.' },
-        wetSpecularEnabled: { type: 'boolean', label: 'Wet sheen', default: true, tooltip: 'Rain wetness (from weather) adds sheen from albedo brightness.' },
-        wetInputBrightness: { type: 'slider', label: 'Input lift', min: -0.5, max: 0.5, step: 0.01, default: 0.0, throttle: 100, tooltip: 'Brightness bias before wet mask extraction.' },
-        wetInputGamma: { type: 'slider', label: 'Input gamma', min: 0.1, max: 3.0, step: 0.01, default: 1.0, throttle: 100, tooltip: 'Gamma on albedo grayscale before contrast.' },
-        wetSpecularContrast: { type: 'slider', label: 'Input contrast', min: 1, max: 10, step: 0.1, default: 3.0, throttle: 100, tooltip: 'Contrast of the wet mask source.' },
-        wetBlackPoint: { type: 'slider', label: 'Black point', min: 0.0, max: 1.0, step: 0.01, default: 0.2, throttle: 100, tooltip: 'Floor for wet mask smoothstep.' },
-        wetWhitePoint: { type: 'slider', label: 'White point', min: 0.0, max: 1.0, step: 0.01, default: 1.0, throttle: 100, tooltip: 'Ceiling for wet mask smoothstep.' },
-        wetSpecularIntensity: { type: 'slider', label: 'Wet strength', min: 0, max: 5, step: 0.01, default: 1.5, throttle: 100, tooltip: 'How bright the wet layer is after processing.' },
-        wetOutputMax: { type: 'slider', label: 'Wet clamp', min: 0.0, max: 3.0, step: 0.01, default: 1.0, throttle: 100, tooltip: 'Hard cap on wet specular RGB.' },
-        wetOutputGamma: { type: 'slider', label: 'Wet output gamma', min: 0.1, max: 3.0, step: 0.01, default: 1.0, throttle: 100, tooltip: 'Gamma after clamp (1 = linear).' },
-        wetBaseSheen: { type: 'slider', label: 'Outdoor baseline', min: 0.0, max: 2.0, step: 0.01, default: 0.3, throttle: 100, tooltip: 'Minimum wet modulation outdoors so rain still reads when stripes/clouds are subtle.' },
-        wetWindRippleStrength: { type: 'slider', label: 'Wind ripple', min: 0.0, max: 3.0, step: 0.01, default: 1.0, throttle: 100, tooltip: 'Animated ripple on wet outdoor surfaces from wind integration.' },
-        frostGlazeEnabled: { type: 'boolean', label: 'Frost on', default: true, tooltip: 'Ice glaze on specular when freeze level passes the threshold.' },
-        frostThreshold: { type: 'slider', label: 'Freeze threshold', min: 0, max: 1, step: 0.01, default: 0.55, throttle: 100, tooltip: 'Weather freeze level must pass this before frost ramps in.' },
-        frostIntensity: { type: 'slider', label: 'Frost strength', min: 0, max: 3, step: 0.01, default: 1.2, throttle: 100, tooltip: 'Brightness of the frost pass.' },
-        frostTintStrength: { type: 'slider', label: 'Blue tint', min: 0, max: 1, step: 0.01, default: 0.4, throttle: 100, tooltip: 'How icy-blue the frost appears.' },
-        dynamicLightTintEnabled: { type: 'boolean', label: 'Tint from lights', default: true, tooltip: 'Shift specular tint toward the strongest nearby Foundry light color.' },
-        dynamicLightTintStrength: { type: 'slider', label: 'Tint mix', min: 0, max: 1, step: 0.01, default: 0.6, throttle: 100, tooltip: 'How far specular tint follows dynamic lights vs the base tint above.' },
-        windDrivenStripesEnabled: { type: 'boolean', label: 'Wind-linked motion', default: true, tooltip: 'Integrates weather wind (direction × speed): shifts specular stripe UVs outdoors-only, plus wet-surface ripple sampling.' },
-        windStripeInfluence: { type: 'slider', label: 'Wind amount', min: 0, max: 1, step: 0.01, default: 0.5, throttle: 100, tooltip: 'Scales accumulated wind drift on outdoor stripes and wet ripple strength.' },
-        buildingShadowSuppressionEnabled: { type: 'boolean', label: 'Suppress in shadow', default: true, tooltip: 'Reduce specular where the building shadow map is dark.' },
-        buildingShadowSuppressionStrength: { type: 'slider', label: 'Shadow mix', min: 0, max: 1, step: 0.01, default: 0.8, throttle: 100, tooltip: 'How strongly building shadows multiply specular down.' },
-      },
-      presets: {
-        Gentle: {
-          intensity: 0.22,
-          outdoorStripeBlend: 0.45,
-          cloudSpecularIntensity: 1.4,
-          stripe1Intensity: 3.2,
-          stripe2Intensity: 3.2,
-          stripe3Intensity: 3.2,
-          lightColor: { ...white },
-        },
-        'Rainy sheen': {
-          wetSpecularIntensity: 2.1,
-          wetBaseSheen: 0.55,
-          outdoorStripeBlend: 0.92,
-          wetWindRippleStrength: 1.35,
-          lightColor: { ...white },
-        },
-        'Calmer stripes': {
-          stripe1Intensity: 3.0,
-          stripe2Intensity: 3.0,
-          stripe3Intensity: 3.0,
-          sparkleEnabled: false,
-          parallaxStrength: 1.0,
-          lightColor: { ...white },
-        },
-      },
-    };
+    return getSpecularControlSchema();
+  }
+
+  /**
+   * UI/settings callback used by the V2 control bridge.
+   * @param {string} paramId
+   * @param {unknown} value
+   */
+  applyParamChange(paramId, value) {
+    if (!this.params || !Object.prototype.hasOwnProperty.call(this.params, paramId)) return;
+    this.params[paramId] = value;
+    this._paramsDirty = true;
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -658,7 +477,11 @@ export class SpecularEffectV2 {
     if (!THREE) { log.warn('initialize: THREE not available'); return; }
 
     this._buildFallbackTextures();
+    if (!this._noiseTexture) {
+      this._noiseTexture = createSpecularNoiseTexture(THREE);
+    }
     this._buildSharedUniforms();
+    this._paramsDirty = true;
     this._registerLightHooks();
 
     this._initialized = true;
@@ -793,7 +616,6 @@ export class SpecularEffectV2 {
       const rotation = typeof tileDoc.rotation === 'number'
         ? (tileDoc.rotation * Math.PI) / 180 : 0;
 
-      const GROUND_Z = 1000;
       const z = GROUND_Z + floorIndex + SPECULAR_Z_OFFSET;
 
       await this._createOverlay(tileId, floorIndex, {
@@ -812,6 +634,8 @@ export class SpecularEffectV2 {
 
     const totalCount = overlayCount;
     log.info(`SpecularEffectV2 populated: ${totalCount} overlay(s) (${bgSrc ? '1 bg + ' : ''}${overlayCount - (bgSrc && overlayCount > 0 ? 1 : 0)} tiles)`);
+
+    this._paramsDirty = true;
 
     // DEFERRED: Compile real shader after all overlays created with passthrough materials
     if (totalCount > 0 && !this._realShaderCompiled && !this._shaderCompilePending) {
@@ -883,98 +707,7 @@ export class SpecularEffectV2 {
     u.uFrostLevel.value = frostLevel;
     u.uWindAccum.value.set(this._windAccumX, this._windAccumY);
 
-    // ── Effect parameters ─────────────────────────────────────────────────
-    u.uEffectEnabled.value = this._enabled;
-    u.uSpecularIntensity.value = this.params.intensity;
-
-    // Specular tint must not land on (0,0,0): the fragment shader multiplies the
-    // entire additive pass by uLightColor (and dynamic-light tint only replaces
-    // that when a dominant disk contributes). Black uLightColor + zero dominant
-    // weight — common when AmbientLight docs are floor-gated away on this band —
-    // makes specular vanish even though ambient + masks are fine.
-    {
-      const lc = this.params?.lightColor;
-      let tr = 1;
-      let tg = 1;
-      let tb = 1;
-      if (lc && typeof lc === 'object') {
-        const pr = Number(lc.r);
-        const pg = Number(lc.g);
-        const pb = Number(lc.b);
-        if (Number.isFinite(pr)) tr = pr;
-        if (Number.isFinite(pg)) tg = pg;
-        if (Number.isFinite(pb)) tb = pb;
-      }
-      const eps = 1e-4;
-      if (tr <= eps && tg <= eps && tb <= eps) {
-        tr = 1;
-        tg = 1;
-        tb = 1;
-      }
-      u.uLightColor.value.set(tr, tg, tb);
-    }
-
-    // Stripe globals
-    u.uStripeEnabled.value = this.params.stripeEnabled;
-    u.uStripeBlendMode.value = this.params.stripeBlendMode;
-    u.uParallaxStrength.value = this.params.parallaxStrength;
-    u.uStripeMaskThreshold.value = this.params.stripeMaskThreshold;
-    u.uWorldPatternScale.value = this.params.worldPatternScale;
-
-    // Per-layer stripe params
-    for (let i = 1; i <= 3; i++) {
-      u[`uStripe${i}Enabled`].value = this.params[`stripe${i}Enabled`];
-      u[`uStripe${i}Frequency`].value = this.params[`stripe${i}Frequency`];
-      u[`uStripe${i}Speed`].value = this.params[`stripe${i}Speed`];
-      u[`uStripe${i}Angle`].value = this.params[`stripe${i}Angle`];
-      u[`uStripe${i}Width`].value = this.params[`stripe${i}Width`];
-      u[`uStripe${i}Intensity`].value = this.params[`stripe${i}Intensity`];
-      u[`uStripe${i}Parallax`].value = this.params[`stripe${i}Parallax`];
-      u[`uStripe${i}Wave`].value = this.params[`stripe${i}Wave`];
-      u[`uStripe${i}Gaps`].value = this.params[`stripe${i}Gaps`];
-      u[`uStripe${i}Softness`].value = this.params[`stripe${i}Softness`];
-    }
-
-    // Sparkle
-    u.uSparkleEnabled.value = this.params.sparkleEnabled;
-    u.uSparkleIntensity.value = this.params.sparkleIntensity;
-    u.uSparkleScale.value = this.params.sparkleScale;
-    u.uSparkleSpeed.value = this.params.sparkleSpeed;
-
-    // Outdoor cloud specular
-    u.uOutdoorCloudSpecularEnabled.value = this.params.outdoorCloudSpecularEnabled;
-    u.uOutdoorStripeBlend.value = this.params.outdoorStripeBlend;
-    u.uCloudSpecularIntensity.value = this.params.cloudSpecularIntensity;
-
-    // Wet surface
-    u.uWetSpecularEnabled.value = this.params.wetSpecularEnabled;
-    u.uWetInputBrightness.value = this.params.wetInputBrightness;
-    u.uWetInputGamma.value = this.params.wetInputGamma;
-    u.uWetSpecularContrast.value = this.params.wetSpecularContrast;
-    u.uWetBlackPoint.value = this.params.wetBlackPoint;
-    u.uWetWhitePoint.value = this.params.wetWhitePoint;
-    u.uWetSpecularIntensity.value = this.params.wetSpecularIntensity;
-    u.uWetOutputMax.value = this.params.wetOutputMax;
-    u.uWetOutputGamma.value = this.params.wetOutputGamma;
-    u.uWetBaseSheen.value = this.params.wetBaseSheen;
-    u.uWetWindRippleStrength.value = this.params.wetWindRippleStrength;
-
-    // Frost
-    u.uFrostGlazeEnabled.value = this.params.frostGlazeEnabled;
-    u.uFrostIntensity.value = this.params.frostIntensity;
-    u.uFrostTintStrength.value = this.params.frostTintStrength;
-
-    // Dynamic light tinting
-    u.uDynamicLightTintEnabled.value = this.params.dynamicLightTintEnabled;
-    u.uDynamicLightTintStrength.value = this.params.dynamicLightTintStrength;
-
-    // Wind
-    u.uWindDrivenStripesEnabled.value = this.params.windDrivenStripesEnabled;
-    u.uWindStripeInfluence.value = this.params.windStripeInfluence;
-
-    // Building shadows
-    u.uBuildingShadowSuppressionEnabled.value = this.params.buildingShadowSuppressionEnabled;
-    u.uBuildingShadowSuppressionStrength.value = this.params.buildingShadowSuppressionStrength;
+    this._syncStaticParamUniforms();
 
     // ── Foundry darkness + ambient ────────────────────────────────────────
     this._updateEnvironmentUniforms();
@@ -1467,7 +1200,6 @@ export class SpecularEffectV2 {
     const rotation = typeof tileDoc.rotation === 'number'
       ? (tileDoc.rotation * Math.PI) / 180 : 0;
 
-    const GROUND_Z = 1000;
     const z = GROUND_Z + floorIndex + SPECULAR_Z_OFFSET;
 
     await this._createOverlay(tileId, floorIndex, {
@@ -1492,8 +1224,10 @@ export class SpecularEffectV2 {
     this._compiledBaseMaterial = null;
     this._fallbackBlack?.dispose();
     this._fallbackWhite?.dispose();
+    try { this._noiseTexture?.dispose(); } catch (_) {}
     this._fallbackBlack = null;
     this._fallbackWhite = null;
+    this._noiseTexture = null;
     this._sharedUniforms = null;
     this._initialized = false;
     log.info('SpecularEffectV2 disposed');
@@ -1525,7 +1259,7 @@ export class SpecularEffectV2 {
       // Repopulates after first successful compile must create overlays with the
       // already-compiled shader immediately; otherwise they remain black placeholders.
       const newUniforms = { ...this._sharedUniforms };
-      newUniforms.uAlbedoMap = { value: this._fallbackWhite };
+      newUniforms.uAlbedoMap = { value: this._fallbackBlack };
       newUniforms.uSpecularMap = { value: this._fallbackBlack };
       newUniforms.uTileOpacity = { value: 1.0 };
       newUniforms.uOutdoorsFloorIdx = { value: floorIdx };
@@ -1628,7 +1362,7 @@ export class SpecularEffectV2 {
       material,
       floorIndex,
       streamingGridKey,
-      albedoBindingMode: isBgPlane && streamingGridKey ? 'opaqueFallbackForStreamedBackground' : null,
+      albedoBindingMode: isBgPlane && streamingGridKey ? 'pendingStreamedBackgroundAlbedo' : null,
     });
     this._syncOverlayVisibility();
 
@@ -1694,7 +1428,7 @@ export class SpecularEffectV2 {
         // Create new material with real shader
         const newUniforms = { ...sharedUniforms };
         // Set per-tile uniforms
-        newUniforms.uAlbedoMap = { value: this._fallbackWhite };
+        newUniforms.uAlbedoMap = { value: this._fallbackBlack };
         newUniforms.uSpecularMap = { value: this._fallbackBlack };
         newUniforms.uTileOpacity = { value: 1.0 };
         newUniforms.uOutdoorsFloorIdx = { value: overlay.floorIndex };
@@ -1725,8 +1459,9 @@ export class SpecularEffectV2 {
 
       // _buildSharedUniforms() created fresh light arrays (zeros). Without this,
       // numLights stays 0 until an AmbientLight create/update/delete hook fires.
-      this._refreshTrackedLightsFromFoundry();
+      this._refreshTrackedLightsFromFoundry(true);
       this._updateLightUniforms();
+      this._paramsDirty = true;
 
       const elapsed = (performance?.now?.() ?? Date.now()) - startMs;
       log.warn(`[${elapsed.toFixed(0)}ms] SpecularEffectV2: real shader material attached for ${this._overlays.size} overlays`);
@@ -2089,6 +1824,36 @@ export class SpecularEffectV2 {
   /** @private */
   _buildSharedUniforms() {
     const THREE = window.THREE;
+    const stripeLayerEnabled = new Float32Array(STRIPE_LAYER_COUNT);
+    const stripeFrequency = new Float32Array(STRIPE_LAYER_COUNT);
+    const stripeSpeed = new Float32Array(STRIPE_LAYER_COUNT);
+    const stripeWidth = new Float32Array(STRIPE_LAYER_COUNT);
+    const stripeIntensity = new Float32Array(STRIPE_LAYER_COUNT);
+    const stripeParallax = new Float32Array(STRIPE_LAYER_COUNT);
+    const stripeWave = new Float32Array(STRIPE_LAYER_COUNT);
+    const stripeGaps = new Float32Array(STRIPE_LAYER_COUNT);
+    const stripeSoftness = new Float32Array(STRIPE_LAYER_COUNT);
+    const stripeDir = [
+      new THREE.Vector2(1, 0),
+      new THREE.Vector2(1, 0),
+      new THREE.Vector2(1, 0),
+    ];
+    for (let i = 0; i < STRIPE_LAYER_COUNT; i++) {
+      const n = i + 1;
+      stripeLayerEnabled[i] = this.params[`stripe${n}Enabled`] ? 1 : 0;
+      stripeFrequency[i] = this.params[`stripe${n}Frequency`];
+      stripeSpeed[i] = this.params[`stripe${n}Speed`];
+      stripeWidth[i] = this.params[`stripe${n}Width`];
+      stripeIntensity[i] = this.params[`stripe${n}Intensity`];
+      stripeParallax[i] = this.params[`stripe${n}Parallax`];
+      stripeWave[i] = this.params[`stripe${n}Wave`];
+      stripeGaps[i] = this.params[`stripe${n}Gaps`];
+      stripeSoftness[i] = this.params[`stripe${n}Softness`];
+      const angleDeg = Number(this.params[`stripe${n}Angle`]) || 0;
+      const rad = (angleDeg * Math.PI) / 180;
+      stripeDir[i].set(Math.cos(rad), Math.sin(rad));
+    }
+
     this._sharedUniforms = {
       uEffectEnabled: { value: this._enabled },
 
@@ -2098,6 +1863,8 @@ export class SpecularEffectV2 {
       uCameraOffset: { value: new THREE.Vector2(0, 0) },
       uTime: { value: 0 },
 
+      uNoiseTex: { value: this._noiseTexture || this._fallbackWhite },
+
       // Stripe globals
       uStripeEnabled: { value: this.params.stripeEnabled },
       uStripeBlendMode: { value: this.params.stripeBlendMode },
@@ -2105,41 +1872,17 @@ export class SpecularEffectV2 {
       uStripeMaskThreshold: { value: this.params.stripeMaskThreshold },
       uWorldPatternScale: { value: this.params.worldPatternScale },
 
-      // Layer 1
-      uStripe1Enabled: { value: this.params.stripe1Enabled },
-      uStripe1Frequency: { value: this.params.stripe1Frequency },
-      uStripe1Speed: { value: this.params.stripe1Speed },
-      uStripe1Angle: { value: this.params.stripe1Angle },
-      uStripe1Width: { value: this.params.stripe1Width },
-      uStripe1Intensity: { value: this.params.stripe1Intensity },
-      uStripe1Parallax: { value: this.params.stripe1Parallax },
-      uStripe1Wave: { value: this.params.stripe1Wave },
-      uStripe1Gaps: { value: this.params.stripe1Gaps },
-      uStripe1Softness: { value: this.params.stripe1Softness },
-
-      // Layer 2
-      uStripe2Enabled: { value: this.params.stripe2Enabled },
-      uStripe2Frequency: { value: this.params.stripe2Frequency },
-      uStripe2Speed: { value: this.params.stripe2Speed },
-      uStripe2Angle: { value: this.params.stripe2Angle },
-      uStripe2Width: { value: this.params.stripe2Width },
-      uStripe2Intensity: { value: this.params.stripe2Intensity },
-      uStripe2Parallax: { value: this.params.stripe2Parallax },
-      uStripe2Wave: { value: this.params.stripe2Wave },
-      uStripe2Gaps: { value: this.params.stripe2Gaps },
-      uStripe2Softness: { value: this.params.stripe2Softness },
-
-      // Layer 3
-      uStripe3Enabled: { value: this.params.stripe3Enabled },
-      uStripe3Frequency: { value: this.params.stripe3Frequency },
-      uStripe3Speed: { value: this.params.stripe3Speed },
-      uStripe3Angle: { value: this.params.stripe3Angle },
-      uStripe3Width: { value: this.params.stripe3Width },
-      uStripe3Intensity: { value: this.params.stripe3Intensity },
-      uStripe3Parallax: { value: this.params.stripe3Parallax },
-      uStripe3Wave: { value: this.params.stripe3Wave },
-      uStripe3Gaps: { value: this.params.stripe3Gaps },
-      uStripe3Softness: { value: this.params.stripe3Softness },
+      // Per-layer stripe arrays (angles precomputed as uStripeDir)
+      uStripeLayerEnabled: { value: stripeLayerEnabled },
+      uStripeFrequency: { value: stripeFrequency },
+      uStripeSpeed: { value: stripeSpeed },
+      uStripeDir: { value: stripeDir },
+      uStripeWidth: { value: stripeWidth },
+      uStripeIntensity: { value: stripeIntensity },
+      uStripeParallax: { value: stripeParallax },
+      uStripeWave: { value: stripeWave },
+      uStripeGaps: { value: stripeGaps },
+      uStripeSoftness: { value: stripeSoftness },
 
       // Sparkle
       uSparkleEnabled: { value: this.params.sparkleEnabled },
@@ -2310,35 +2053,53 @@ export class SpecularEffectV2 {
     );
 
     const bindAlbedo = async () => {
-      if (useOpaqueBgAlbedoFallback) {
-        uniforms.uAlbedoMap.value = this._fallbackWhite;
-        if (entry) entry.albedoBindingMode = 'opaqueFallbackForStreamedBackground';
+      // Black placeholder until a real albedo is bound — white reads as "highlight everywhere"
+      // in the wet-mask path and makes rain sheen cover the whole tile.
+      uniforms.uAlbedoMap.value = this._fallbackBlack;
+
+      if (!useOpaqueBgAlbedoFallback) {
+        const busAlbedo = this._resolveBusAlbedoTexture(tileId);
+        if (busAlbedo) {
+          uniforms.uAlbedoMap.value = busAlbedo;
+          if (entry) entry.albedoBindingMode = 'busTexture';
+          return;
+        }
+      }
+
+      if (!albedoUrl) {
+        if (entry) {
+          entry.albedoBindingMode = useOpaqueBgAlbedoFallback
+            ? 'noAlbedoUrlStreamedBackground'
+            : 'noAlbedoUrl';
+        }
         return;
       }
 
-      const busAlbedo = this._resolveBusAlbedoTexture(tileId);
-      if (busAlbedo) {
-        uniforms.uAlbedoMap.value = busAlbedo;
-        if (entry) entry.albedoBindingMode = 'busTexture';
-        return;
-      }
-
-      if (!albedoUrl) return;
       try {
         const budget = getTextureBudgetTracker();
-        const maxSize = isBgPlane ? (budget?.backgroundMaxSize ?? 4096) : undefined;
-        const tex = await loadImageTexture(albedoUrl, isBgPlane
+        const recommended = budget?.getRecommendedTileSize?.() ?? 1024;
+        const maxSize = useOpaqueBgAlbedoFallback
+          ? recommended
+          : (isBgPlane ? (budget?.backgroundMaxSize ?? 4096) : undefined);
+        const tex = await loadImageTexture(albedoUrl, isBgPlane || useOpaqueBgAlbedoFallback
           ? { role: 'ALBEDO', premultiplyAlpha: 'none', maxSize }
           : { role: 'TILE_ALBEDO' });
         if (this._overlays.has(tileId)) {
           uniforms.uAlbedoMap.value = tex;
           const liveEntry = this._overlays.get(tileId);
-          if (liveEntry) liveEntry.albedoBindingMode = isBgPlane ? 'loadedBackgroundFallback' : 'loadedTileAlbedo';
+          if (liveEntry) {
+            liveEntry.albedoBindingMode = useOpaqueBgAlbedoFallback
+              ? 'loadedStreamedBackgroundAlbedo'
+              : (isBgPlane ? 'loadedBackgroundFallback' : 'loadedTileAlbedo');
+          }
         } else {
           try { tex.dispose(); } catch (_) {}
         }
       } catch (err) {
         log.warn(`Failed to load albedo for ${tileId}:`, err);
+        if (entry && useOpaqueBgAlbedoFallback) {
+          entry.albedoBindingMode = 'streamedBackgroundAlbedoLoadFailed';
+        }
       }
     };
 
@@ -2368,21 +2129,27 @@ export class SpecularEffectV2 {
 
   /** @private */
   _registerLightHooks() {
-    this._hookIds.create = Hooks.on('createAmbientLight', (doc) => {
-      this._addLight(doc);
-      this._updateLightUniforms();
-    });
-    this._hookIds.update = Hooks.on('updateAmbientLight', (doc) => {
-      const k = doc?.id != null ? String(doc.id) : '';
+    this._hookIds.create = Hooks.on('createAmbientLight', (doc) => this._onLightChanged(doc, 'create'));
+    this._hookIds.update = Hooks.on('updateAmbientLight', (doc) => this._onLightChanged(doc, 'update'));
+    this._hookIds.delete = Hooks.on('deleteAmbientLight', (doc) => this._onLightChanged(doc, 'delete'));
+  }
+
+  /**
+   * Shared handler for AmbientLight create / update / delete hooks.
+   * @private
+   * @param {object|null|undefined} doc
+   * @param {'create'|'update'|'delete'} action
+   */
+  _onLightChanged(doc, action = 'update') {
+    const k = doc?.id != null ? String(doc.id) : '';
+    if (action === 'delete') {
       if (k) this._lights.delete(k);
-      this._addLight(doc);
-      this._updateLightUniforms();
-    });
-    this._hookIds.delete = Hooks.on('deleteAmbientLight', (doc) => {
-      const k = doc?.id != null ? String(doc.id) : '';
+    } else {
       if (k) this._lights.delete(k);
-      this._updateLightUniforms();
-    });
+      if (doc) this._addLight(doc);
+    }
+    this._refreshTrackedLightsFromFoundry(true);
+    this._updateLightUniforms();
   }
 
   /** @private */
@@ -2396,11 +2163,22 @@ export class SpecularEffectV2 {
 
   /** @private */
   _syncAllLights() {
-    this._lights.clear();
     try {
       const docs = getAuthoritativeAmbientLightDocuments();
+      /** @type {Set<string>} */
+      const seen = new Set();
       for (const doc of docs) {
-        this._addLight(doc);
+        const idKey = doc?.id != null ? String(doc.id) : '';
+        if (!idKey || this._isNegativeLightDoc(doc) || !this._docHasPositiveLightRadius(doc)) continue;
+        let entry = this._lights.get(idKey);
+        if (!entry) entry = this._createLightEntry();
+        if (this._syncLightEntryFromDoc(doc, entry)) {
+          this._lights.set(idKey, entry);
+          seen.add(idKey);
+        }
+      }
+      for (const id of this._lights.keys()) {
+        if (!seen.has(id)) this._lights.delete(id);
       }
       this._updateLightUniforms();
     } catch (_) {}
@@ -2544,11 +2322,12 @@ export class SpecularEffectV2 {
   }
 
   /**
-   * Keep _lights aligned with Foundry docs every frame (position, radius edits, token-carried lights).
+   * Keep _lights aligned with Foundry docs (position, radius edits, token-carried lights).
    * Full resync when membership changes. Complements hook-driven CRUD.
    * @private
+   * @param {boolean} [force=false] When true, sync every light doc this frame.
    */
-  _refreshTrackedLightsFromFoundry() {
+  _refreshTrackedLightsFromFoundry(force = false) {
     let docs;
     try {
       docs = getAuthoritativeAmbientLightDocuments();
@@ -2570,6 +2349,9 @@ export class SpecularEffectV2 {
       return;
     }
 
+    this._lightRefreshTick = (this._lightRefreshTick + 1) & 0x7fffffff;
+    if (!force && (this._lightRefreshTick % 2) !== 0) return;
+
     for (let i = 0; i < positives.length; i++) {
       const doc = positives[i];
       const idKey = doc?.id != null ? String(doc.id) : '';
@@ -2585,26 +2367,70 @@ export class SpecularEffectV2 {
     }
   }
 
-  /** @private */
-  _addLight(doc) {
-    const idKey = doc?.id != null ? String(doc.id) : '';
-    if (!idKey || this._lights.size >= MAX_LIGHTS) return;
-    if (this._isNegativeLightDoc(doc)) return;
-    const config = doc.config;
-    if (!config) return;
-
-    const worldPos = Coordinates.toWorld(doc.x, doc.y);
-    const entry = {
-      position: worldPos,
+  /**
+   * @returns {{ position: THREE.Vector3, color: {r:number,g:number,b:number}, radius: number, brightRadiusPx: number, attenuation: number, floorVisibilityMask: number }}
+   * @private
+   */
+  _createLightEntry() {
+    return {
+      position: new (window.THREE.Vector3)(),
       color: { r: 1, g: 1, b: 1 },
       radius: 0,
       brightRadiusPx: 0,
       attenuation: 0.5,
       floorVisibilityMask: 0,
     };
+  }
+
+  /** @private */
+  _addLight(doc) {
+    const idKey = doc?.id != null ? String(doc.id) : '';
+    if (!idKey || this._lights.size >= MAX_LIGHTS) return;
+    if (this._isNegativeLightDoc(doc)) return;
+    if (!doc.config) return;
+
+    let entry = this._lights.get(idKey);
+    if (!entry) entry = this._createLightEntry();
     if (!this._syncLightEntryFromDoc(doc, entry)) return;
 
     this._lights.set(idKey, entry);
+  }
+
+  /**
+   * Approximate world-space bounds for viewport culling of analytic light disks.
+   * @private
+   * @returns {{ minX: number, maxX: number, minY: number, maxY: number }}
+   */
+  _getSpecularLightCullBounds() {
+    const u = this._sharedUniforms;
+    const cx = Number(u?.uCameraPosition?.value?.x) || 0;
+    const cy = Number(u?.uCameraPosition?.value?.y) || 0;
+    let halfW = 2500;
+    let halfH = 2500;
+    try {
+      const dims = canvas?.dimensions;
+      const stage = canvas?.stage;
+      if (dims && stage) {
+        const scale = Math.max(Number(stage.scale?.x) || 1, 1e-5);
+        halfW = (Number(dims.width) / scale) * 0.5 + 400;
+        halfH = (Number(dims.height) / scale) * 0.5 + 400;
+      }
+    } catch (_) {}
+    return { minX: cx - halfW, maxX: cx + halfW, minY: cy - halfH, maxY: cy + halfH };
+  }
+
+  /**
+   * @private
+   * @param {{ position: THREE.Vector3, radius: number }} light
+   * @param {{ minX: number, maxX: number, minY: number, maxY: number }} bounds
+   * @returns {boolean}
+   */
+  _lightNearViewport(light, bounds) {
+    const r = Number(light.radius) || 0;
+    const x = light.position.x;
+    const y = light.position.y;
+    return x + r >= bounds.minX && x - r <= bounds.maxX
+      && y + r >= bounds.minY && y - r <= bounds.maxY;
   }
 
   /** @private */
@@ -2614,10 +2440,12 @@ export class SpecularEffectV2 {
     const posArr = u.lightPosition.value;
     const colArr = u.lightColor.value;
     const cfgArr = u.lightConfig.value;
+    const bounds = this._getSpecularLightCullBounds();
 
     let idx = 0;
     for (const light of this._lights.values()) {
       if (idx >= MAX_LIGHTS) break;
+      if (!this._lightNearViewport(light, bounds)) continue;
       const i3 = idx * 3;
       const i4 = idx * 4;
       posArr[i3]     = light.position.x;
@@ -2743,6 +2571,117 @@ export class SpecularEffectV2 {
   }
 
   // ── Private: Environment uniforms ──────────────────────────────────────────
+
+  /**
+   * Push static UI parameters to shared uniforms when `_paramsDirty` is set.
+   * @private
+   */
+  _syncStaticParamUniforms() {
+    if (!this._paramsDirty || !this._sharedUniforms) return;
+    const u = this._sharedUniforms;
+
+    u.uEffectEnabled.value = this._enabled;
+    u.uSpecularIntensity.value = this.params.intensity;
+
+    // Specular tint must not land on (0,0,0): the fragment shader multiplies the
+    // entire additive pass by uLightColor (and dynamic-light tint only replaces
+    // that when a dominant disk contributes). Black uLightColor + zero dominant
+    // weight — common when AmbientLight docs are floor-gated away on this band —
+    // makes specular vanish even though ambient + masks are fine.
+    {
+      const lc = this.params?.lightColor;
+      let tr = 1;
+      let tg = 1;
+      let tb = 1;
+      if (lc && typeof lc === 'object') {
+        const pr = Number(lc.r);
+        const pg = Number(lc.g);
+        const pb = Number(lc.b);
+        if (Number.isFinite(pr)) tr = pr;
+        if (Number.isFinite(pg)) tg = pg;
+        if (Number.isFinite(pb)) tb = pb;
+      }
+      const eps = 1e-4;
+      if (tr <= eps && tg <= eps && tb <= eps) {
+        tr = 1;
+        tg = 1;
+        tb = 1;
+      }
+      u.uLightColor.value.set(tr, tg, tb);
+    }
+
+    u.uStripeEnabled.value = this.params.stripeEnabled;
+    u.uStripeBlendMode.value = this.params.stripeBlendMode;
+    u.uParallaxStrength.value = this.params.parallaxStrength;
+    u.uStripeMaskThreshold.value = this.params.stripeMaskThreshold;
+    u.uWorldPatternScale.value = this.params.worldPatternScale;
+
+    const layerEnabled = u.uStripeLayerEnabled.value;
+    const freq = u.uStripeFrequency.value;
+    const speed = u.uStripeSpeed.value;
+    const width = u.uStripeWidth.value;
+    const intensity = u.uStripeIntensity.value;
+    const parallax = u.uStripeParallax.value;
+    const wave = u.uStripeWave.value;
+    const gaps = u.uStripeGaps.value;
+    const softness = u.uStripeSoftness.value;
+    const dirs = u.uStripeDir.value;
+    for (let i = 0; i < STRIPE_LAYER_COUNT; i++) {
+      const n = i + 1;
+      layerEnabled[i] = this.params[`stripe${n}Enabled`] ? 1 : 0;
+      freq[i] = this.params[`stripe${n}Frequency`];
+      speed[i] = this.params[`stripe${n}Speed`];
+      width[i] = this.params[`stripe${n}Width`];
+      intensity[i] = this.params[`stripe${n}Intensity`];
+      parallax[i] = this.params[`stripe${n}Parallax`];
+      wave[i] = this.params[`stripe${n}Wave`];
+      gaps[i] = this.params[`stripe${n}Gaps`];
+      softness[i] = this.params[`stripe${n}Softness`];
+      const angleDeg = Number(this.params[`stripe${n}Angle`]) || 0;
+      const rad = (angleDeg * Math.PI) / 180;
+      dirs[i].set(Math.cos(rad), Math.sin(rad));
+    }
+
+    u.uSparkleEnabled.value = this.params.sparkleEnabled;
+    u.uSparkleIntensity.value = this.params.sparkleIntensity;
+    u.uSparkleScale.value = this.params.sparkleScale;
+    u.uSparkleSpeed.value = this.params.sparkleSpeed;
+
+    u.uOutdoorCloudSpecularEnabled.value = this.params.outdoorCloudSpecularEnabled;
+    u.uOutdoorStripeBlend.value = this.params.outdoorStripeBlend;
+    u.uCloudSpecularIntensity.value = this.params.cloudSpecularIntensity;
+
+    u.uWetSpecularEnabled.value = this.params.wetSpecularEnabled;
+    u.uWetInputBrightness.value = this.params.wetInputBrightness;
+    u.uWetInputGamma.value = this.params.wetInputGamma;
+    u.uWetSpecularContrast.value = this.params.wetSpecularContrast;
+    u.uWetBlackPoint.value = this.params.wetBlackPoint;
+    u.uWetWhitePoint.value = this.params.wetWhitePoint;
+    u.uWetSpecularIntensity.value = this.params.wetSpecularIntensity;
+    u.uWetOutputMax.value = this.params.wetOutputMax;
+    u.uWetOutputGamma.value = this.params.wetOutputGamma;
+    u.uWetBaseSheen.value = this.params.wetBaseSheen;
+    u.uWetWindRippleStrength.value = this.params.wetWindRippleStrength;
+
+    u.uFrostGlazeEnabled.value = this.params.frostGlazeEnabled;
+    u.uFrostIntensity.value = this.params.frostIntensity;
+    u.uFrostTintStrength.value = this.params.frostTintStrength;
+
+    u.uDynamicLightTintEnabled.value = this.params.dynamicLightTintEnabled;
+    u.uDynamicLightTintStrength.value = this.params.dynamicLightTintStrength;
+
+    u.uWindDrivenStripesEnabled.value = this.params.windDrivenStripesEnabled;
+    u.uWindStripeInfluence.value = this.params.windStripeInfluence;
+
+    u.uBuildingShadowSuppressionEnabled.value = this.params.buildingShadowSuppressionEnabled;
+    u.uBuildingShadowSuppressionStrength.value = this.params.buildingShadowSuppressionStrength;
+
+    if (this._noiseTexture && u.uNoiseTex) {
+      u.uNoiseTex.value = this._noiseTexture;
+    }
+
+    this._paramsDirty = false;
+  }
 
   /** @private */
   _updateEnvironmentUniforms() {

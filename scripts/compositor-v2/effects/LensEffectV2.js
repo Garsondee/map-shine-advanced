@@ -130,7 +130,13 @@ function makeCatalogFromPaths(paths) {
     .map((f, i) => {
       const file = String(f).split('/').pop() || '';
       const name = file.replace(/\.[^.]+$/, '');
-      return { index: i, name, path: String(f), group: groupDefaultsForFile(name) };
+      return { 
+        index: i, 
+        name, 
+        path: String(f), 
+        group: groupDefaultsForFile(name),
+        isLensOverlay: isLensOverlayName(name)
+      };
     });
 }
 
@@ -146,7 +152,10 @@ function computeCoverScaleOffset(texW, texH, screenW, screenH) {
   return { sx, sy: 1, ox: (1 - sx) * 0.5, oy: 0 };
 }
 
-function clamp01(v) { return Math.max(0, Math.min(1, Number(v) || 0)); }
+function clamp01(v) { 
+  let n = typeof v === 'number' ? v : (Number(v) || 0);
+  return n < 0 ? 0 : (n > 1 ? 1 : n);
+}
 
 function quantizeDimension(value, align, min = 1) {
   const v = Math.max(min, Math.floor(Number(value) || min));
@@ -169,13 +178,15 @@ export class LensEffectV2 {
 
     /**
      * Catalog entries discovered by FilePicker at init time.
-     * @type {Array<{index:number, name:string, path:string, group:object}>}
+     * @type {Array<{index:number, name:string, path:string, group:object, isLensOverlay:boolean}>}
      */
     this._catalog = [];
     /** @type {Map<string, number>} */
     this._catalogNameToIndex = new Map();
     /** @type {Set<string>} */
     this._catalogNameSet = new Set();
+    /** @type {Map<Array<string>, Array<string>>} */
+    this._availableNamesCache = new Map();
 
     /** @type {Array<THREE.Texture|null>} */
     this._slotTextures = new Array(OVERLAY_SLOT_COUNT).fill(null);
@@ -191,7 +202,7 @@ export class LensEffectV2 {
     this._currentScreenH = 1;
     this._lastUpdateElapsedSec = null;
     this._lastUpdateDeltaSec = 1 / 60;
-    /** @type {Record<string, number|boolean|[number, number]>} */
+    /** @type {Record<string, number|boolean|Float32Array>} */
     this._uniformCache = {};
 
     /** Per-slot runtime state — avoids per-frame object/string churn in the hot path. */
@@ -206,8 +217,19 @@ export class LensEffectV2 {
     this._overlaySlotPulseMag = new Float32Array(OVERLAY_SLOT_COUNT).fill(0.06);
     this._overlaySlotPulseFreq = new Float32Array(OVERLAY_SLOT_COUNT).fill(0.10);
     this._overlaySlotPulsePhase = new Float32Array(OVERLAY_SLOT_COUNT).fill(0);
+    
+    this._resolvedIndices = new Int32Array(OVERLAY_SLOT_COUNT).fill(-1);
+
     /** @type {Array<{ tex: object, prevTex: object, active: object, prevActive: object, blend: object, scaleOffset: object, params: object, anim: object, pulse: object }>|null} */
     this._overlayUniformRefs = null;
+    this._overlayCacheKeys = [];
+    for (let i = 0; i < OVERLAY_SLOT_COUNT; i++) {
+      this._overlayCacheKeys.push({
+        params: `overlayParams${i}`,
+        anim: `overlayAnim${i}`,
+        pulse: `overlayPulse${i}`
+      });
+    }
 
     this._autoFocusEventActive = false;
     this._autoFocusEventElapsedSec = 0;
@@ -217,6 +239,8 @@ export class LensEffectV2 {
     this._autoFocusShiftPx = { x: 0, y: 0 };
     this._autoFocusAmount = 0;
 
+    this._cameraStateCurrent = null;
+    this._cameraStateLast = null;
     this._cameraMotionPx = { x: 0, y: 0 };
     this._cameraMotionSmoothedPx = { x: 0, y: 0 };
     this._cameraMotionBlurPx = { x: 0, y: 0 };
@@ -383,6 +407,7 @@ export class LensEffectV2 {
     this._catalog = Array.isArray(catalogEntries) ? catalogEntries : [];
     this._catalogNameToIndex.clear();
     this._catalogNameSet.clear();
+    this._availableNamesCache.clear();
     for (let i = 0; i < this._catalog.length; i++) {
       const name = String(this._catalog[i]?.name || '').toLowerCase();
       if (!name) continue;
@@ -392,7 +417,6 @@ export class LensEffectV2 {
     }
   }
 
-
   _setScalarUniform(uniform, cacheKey, value) {
     if (this._uniformCache[cacheKey] === value) return;
     this._uniformCache[cacheKey] = value;
@@ -400,16 +424,22 @@ export class LensEffectV2 {
   }
 
   _setVec2Uniform(uniform, cacheKey, x, y) {
-    const prev = this._uniformCache[cacheKey];
+    let prev = this._uniformCache[cacheKey];
     if (prev && prev[0] === x && prev[1] === y) return;
-    this._uniformCache[cacheKey] = [x, y];
+    if (!prev) prev = this._uniformCache[cacheKey] = new Float32Array(2);
+    prev[0] = x;
+    prev[1] = y;
     uniform.value.set(x, y);
   }
 
   _setVec4Uniform(uniform, cacheKey, x, y, z, w) {
-    const prev = this._uniformCache[cacheKey];
+    let prev = this._uniformCache[cacheKey];
     if (prev && prev[0] === x && prev[1] === y && prev[2] === z && prev[3] === w) return;
-    this._uniformCache[cacheKey] = [x, y, z, w];
+    if (!prev) prev = this._uniformCache[cacheKey] = new Float32Array(4);
+    prev[0] = x;
+    prev[1] = y;
+    prev[2] = z;
+    prev[3] = w;
     uniform.value.set(x, y, z, w);
   }
 
@@ -418,9 +448,10 @@ export class LensEffectV2 {
   }
 
   _resolveSlotIndicesWithOverlayRule() {
-    const indices = [];
+    const indices = this._resolvedIndices;
     for (let i = 0; i < OVERLAY_SLOT_COUNT; i++) {
-      indices.push(this._clampOverlayIndex(this._overlaySlotIndex[i]));
+      let raw = this._overlaySlotIndex[i];
+      indices[i] = Number.isInteger(raw) ? raw : Math.floor(raw || -1);
     }
 
     let firstLensOverlaySlot = -1;
@@ -428,7 +459,7 @@ export class LensEffectV2 {
       const idx = indices[i];
       if (idx < 0 || idx >= this._catalog.length) continue;
       const entry = this._catalog[idx];
-      if (entry && isLensOverlayName(entry.name)) {
+      if (entry && entry.isLensOverlay) {
         if (firstLensOverlaySlot === -1) {
           firstLensOverlaySlot = i;
         } else {
@@ -449,12 +480,19 @@ export class LensEffectV2 {
 
   _findCatalogIndexByName(baseName) {
     if (!baseName) return -1;
+    let idx = this._catalogNameToIndex.get(baseName);
+    if (idx !== undefined) return idx;
     const needle = String(baseName).toLowerCase();
     return this._catalogNameToIndex.get(needle) ?? -1;
   }
 
   _getAvailableNames(candidates) {
-    return uniqueNames(candidates).filter(name => this._catalogNameSet.has(name));
+    let cached = this._availableNamesCache.get(candidates);
+    if (!cached) {
+      cached = uniqueNames(candidates).filter(name => this._catalogNameSet.has(name));
+      this._availableNamesCache.set(candidates, cached);
+    }
+    return cached;
   }
 
   _normalizeSelection(paramKey, candidates, { allowNone = true, defaultValue = 'auto' } = {}) {
@@ -479,14 +517,31 @@ export class LensEffectV2 {
     const available = this._getAvailableNames(candidates);
     if (available.length === 0) return null;
 
-    const mode = String(selection ?? 'auto').toLowerCase();
-    if (mode === 'none') return null;
-    if (available.includes(mode)) return mode;
+    let mode = selection;
+    if (mode === 'none' || mode === 'None' || !mode) return null;
+    
+    let isAvailable = false;
+    if (typeof mode === 'string') {
+      for (let i = 0; i < available.length; i++) {
+        if (available[i] === mode) {
+          isAvailable = true;
+          break;
+        }
+      }
+    }
+    
+    if (!isAvailable && mode !== 'auto' && mode !== 'Auto') {
+      mode = String(selection ?? 'auto').toLowerCase();
+      if (mode === 'none') return null;
+      isAvailable = available.includes(mode);
+    }
+
+    if (isAvailable) return mode;
 
     // Auto mode: slowly rotate the active texture to keep subtle variation.
-    const cycleSeconds = Math.max(6, Number(this.params.layerCycleSeconds) || 36);
-    const elapsed = Number(elapsedSeconds) || 0;
-    const phase = Number(phaseOffset) || 0;
+    const cycleSeconds = (this.params.layerCycleSeconds > 6) ? this.params.layerCycleSeconds : 6;
+    const elapsed = elapsedSeconds || 0;
+    const phase = phaseOffset || 0;
     const step = Math.floor((elapsed / cycleSeconds) + phase);
     const idx = ((step % available.length) + available.length) % available.length;
     return available[idx];
@@ -508,20 +563,20 @@ export class LensEffectV2 {
   ) {
     const index = name ? this._findCatalogIndexByName(name) : -1;
     this._overlaySlotIndex[slot] = index >= 0 ? index : -1;
-    this._overlaySlotIntensity[slot] = Math.max(0, Number(intensity) || 0);
-    this._overlaySlotLumaReactivity[slot] = clamp01(lumaReactivity);
-    this._overlaySlotLumaBoost[slot] = Math.max(0.1, Number(lumaBoost) || 1);
-    this._overlaySlotClearRadius[slot] = Math.max(0, Number(clearRadius) || 0);
-    this._overlaySlotClearSoftness[slot] = Math.max(0.001, Number(clearSoftness) || 0.1);
-    this._overlaySlotDriftX[slot] = Number(driftX) || 0;
-    this._overlaySlotDriftY[slot] = Number(driftY) || 0;
-    this._overlaySlotPulseMag[slot] = Math.max(0, Number(pulseMag) || 0);
-    this._overlaySlotPulseFreq[slot] = Math.max(0, Number(pulseFreq) || 0);
-    this._overlaySlotPulsePhase[slot] = Number(pulsePhase) || 0;
+    this._overlaySlotIntensity[slot] = intensity > 0 ? intensity : 0;
+    this._overlaySlotLumaReactivity[slot] = lumaReactivity < 0 ? 0 : (lumaReactivity > 1 ? 1 : (lumaReactivity || 0));
+    this._overlaySlotLumaBoost[slot] = lumaBoost > 0.1 ? lumaBoost : 0.1;
+    this._overlaySlotClearRadius[slot] = clearRadius > 0 ? clearRadius : 0;
+    this._overlaySlotClearSoftness[slot] = clearSoftness > 0.001 ? clearSoftness : 0.001;
+    this._overlaySlotDriftX[slot] = driftX || 0;
+    this._overlaySlotDriftY[slot] = driftY || 0;
+    this._overlaySlotPulseMag[slot] = pulseMag > 0 ? pulseMag : 0;
+    this._overlaySlotPulseFreq[slot] = pulseFreq > 0 ? pulseFreq : 0;
+    this._overlaySlotPulsePhase[slot] = pulsePhase || 0;
   }
 
   _configureOverlaySlotsForCurrentFrame(timeInfo) {
-    const elapsed = Number(timeInfo?.elapsed) || 0;
+    const elapsed = timeInfo ? (Number(timeInfo.elapsed) || 0) : 0;
 
     const structuralName = this._resolveChannelTextureName(this.params.structuralSelection, STRUCTURAL_NAMES, elapsed, 0.00);
     const opticalName = this._resolveChannelTextureName(this.params.opticalSelection, OPTICAL_NAMES, elapsed, 0.33);
@@ -564,7 +619,7 @@ export class LensEffectV2 {
         0
       );
     } else {
-      const cycleSeconds = Math.max(6, Number(this.params.layerCycleSeconds) || 36);
+      const cycleSeconds = (this.params.layerCycleSeconds > 6) ? this.params.layerCycleSeconds : 6;
       const useOptical = (Math.floor(elapsed / cycleSeconds) % 2) === 0;
       if (useOptical) {
         this._applyChannelToSlot(
@@ -1031,8 +1086,8 @@ export class LensEffectV2 {
   }
 
   _scheduleNextAutoFocusEvent() {
-    const minInterval = Math.max(0.5, Number(this.params.autoFocusMinIntervalSeconds) || 45);
-    const maxInterval = Math.max(minInterval, Number(this.params.autoFocusMaxIntervalSeconds) || 130);
+    const minInterval = this.params.autoFocusMinIntervalSeconds > 0.5 ? this.params.autoFocusMinIntervalSeconds : 0.5;
+    const maxInterval = this.params.autoFocusMaxIntervalSeconds > minInterval ? this.params.autoFocusMaxIntervalSeconds : minInterval;
     this._autoFocusTimeToNextEventSec = this._randomInRange(minInterval, maxInterval);
   }
 
@@ -1049,14 +1104,15 @@ export class LensEffectV2 {
   }
 
   _triggerAutoFocusEvent(strength = 1.0) {
-    const s = Math.max(0.1, Number(strength) || 1.0);
+    const s = strength > 0.1 ? strength : 0.1;
     this._autoFocusEventActive = true;
     this._autoFocusEventElapsedSec = 0;
-    const baseDuration = Math.max(0.05, Number(this.params.autoFocusDefocusDurationSeconds) || 0.35);
-    this._autoFocusEventDurationSec = Math.max(0.05, baseDuration / Math.max(0.6, s));
+    const baseDuration = this.params.autoFocusDefocusDurationSeconds > 0.05 ? this.params.autoFocusDefocusDurationSeconds : 0.35;
+    const computedDuration = baseDuration / (s > 0.6 ? s : 0.6);
+    this._autoFocusEventDurationSec = computedDuration > 0.05 ? computedDuration : 0.05;
     this._autoFocusAmount = 0;
 
-    const maxShift = Math.max(0, Number(this.params.autoFocusMaxShiftPx) || 0) * Math.min(1.8, s);
+    const maxShift = (this.params.autoFocusMaxShiftPx > 0 ? this.params.autoFocusMaxShiftPx : 0) * (s < 1.8 ? s : 1.8);
     const theta = Math.random() * (Math.PI * 2);
     const mag = maxShift * this._randomInRange(0.45, 1.0);
     this._autoFocusShiftPx.x = Math.cos(theta) * mag;
@@ -1064,7 +1120,7 @@ export class LensEffectV2 {
   }
 
   _updateAutoFocusState(dtSec) {
-    const dt = Math.max(0, Number(dtSec) || 0);
+    const dt = dtSec > 0 ? dtSec : 0;
     if (!this.params.autoFocusEnabled) {
       this._autoFocusEventActive = false;
       this._autoFocusAmount = 0;
@@ -1075,7 +1131,8 @@ export class LensEffectV2 {
 
     if (this._autoFocusEventActive) {
       this._autoFocusEventElapsedSec += dt;
-      const duration = Math.max(0.05, this._autoFocusEventDurationSec || Number(this.params.autoFocusDefocusDurationSeconds) || 0.35);
+      const paramDur = this.params.autoFocusDefocusDurationSeconds;
+      const duration = this._autoFocusEventDurationSec > 0.05 ? this._autoFocusEventDurationSec : (paramDur > 0.05 ? paramDur : 0.35);
       const phase = this._autoFocusEventElapsedSec / duration;
       this._autoFocusAmount = this._computeAutoFocusAmount(phase);
       if (phase >= 1) {
@@ -1089,7 +1146,9 @@ export class LensEffectV2 {
     }
 
     this._autoFocusTimeToNextEventSec -= dt;
-    this._autoFocusZoomCooldownSec = Math.max(0, this._autoFocusZoomCooldownSec - dt);
+    this._autoFocusZoomCooldownSec = this._autoFocusZoomCooldownSec - dt;
+    if (this._autoFocusZoomCooldownSec < 0) this._autoFocusZoomCooldownSec = 0;
+
     if (this._autoFocusTimeToNextEventSec > 0) return;
 
     this._triggerAutoFocusEvent(1.0);
@@ -1097,15 +1156,14 @@ export class LensEffectV2 {
 
   _readSceneDarknessLevel() {
     let darkness = 0;
-    try {
-      darkness = Number(canvas?.environment?.darknessLevel);
-    } catch (_) {}
-    if (!Number.isFinite(darkness)) {
-      try {
-        darkness = Number(canvas?.scene?.environment?.darknessLevel);
-      } catch (_) {}
+    if (typeof canvas !== 'undefined' && canvas !== null) {
+      if (canvas.environment && typeof canvas.environment.darknessLevel === 'number') {
+        darkness = canvas.environment.darknessLevel;
+      } else if (canvas.scene && canvas.scene.environment && typeof canvas.scene.environment.darknessLevel === 'number') {
+        darkness = canvas.scene.environment.darknessLevel;
+      }
     }
-    return clamp01(Number.isFinite(darkness) ? darkness : 0);
+    return clamp01(darkness);
   }
 
   _computeLightBurnDarknessGate() {
@@ -1113,29 +1171,40 @@ export class LensEffectV2 {
     const darkness = this._readSceneDarknessLevel();
     const d0 = clamp01(this.params.lightBurnDarknessStart);
     const d1 = clamp01(this.params.lightBurnDarknessEnd);
-    const lo = Math.min(d0, d1);
-    const hi = Math.max(d0, d1);
-    const denom = Math.max(0.0001, hi - lo);
-    const x = clamp01((darkness - lo) / denom);
+    const lo = d0 < d1 ? d0 : d1;
+    const hi = d0 > d1 ? d0 : d1;
+    const denom = hi - lo;
+    if (denom < 0.0001) {
+      return darkness >= lo ? (1.0 + (1.0 - 1.0) * clamp01(this.params.lightBurnDarknessInfluence)) : 1.0;
+    }
+    const rawX = (darkness - lo) / denom;
+    const x = rawX < 0 ? 0 : (rawX > 1 ? 1 : rawX);
     const smooth = x * x * (3 - 2 * x);
     return 1.0 + (smooth - 1.0) * clamp01(this.params.lightBurnDarknessInfluence);
   }
 
   _updateCameraMotionState(dtSec) {
-    const dt = Math.max(1 / 240, Number(dtSec) || (1 / 60));
+    const dt = dtSec > 0.004166 ? dtSec : 0.004166;
     const frameState = getGlobalFrameState();
-    const current = {
-      cameraX: Number(frameState?.cameraX) || 0,
-      cameraY: Number(frameState?.cameraY) || 0,
-      zoom: Number(frameState?.zoom) || 1,
-      viewW: Math.max(1e-3, (Number(frameState?.viewMaxX) || 0) - (Number(frameState?.viewMinX) || 0)),
-      viewH: Math.max(1e-3, (Number(frameState?.viewMaxY) || 0) - (Number(frameState?.viewMinY) || 0)),
-      screenW: Math.max(1, Number(frameState?.screenWidth) || 1),
-      screenH: Math.max(1, Number(frameState?.screenHeight) || 1),
-    };
+
+    if (!this._cameraStateCurrent) {
+      this._cameraStateCurrent = { cameraX: 0, cameraY: 0, zoom: 1, viewW: 1, viewH: 1, screenW: 1, screenH: 1 };
+      this._cameraStateLast = { cameraX: 0, cameraY: 0, zoom: 1, viewW: 1, viewH: 1, screenW: 1, screenH: 1 };
+      this._lastCameraFrame = null;
+    }
+    
+    const curr = this._cameraStateCurrent;
+    curr.cameraX = frameState ? (frameState.cameraX || 0) : 0;
+    curr.cameraY = frameState ? (frameState.cameraY || 0) : 0;
+    curr.zoom    = frameState ? (frameState.zoom || 1) : 1;
+    curr.viewW   = Math.max(1e-3, frameState ? ((frameState.viewMaxX || 0) - (frameState.viewMinX || 0)) : 1);
+    curr.viewH   = Math.max(1e-3, frameState ? ((frameState.viewMaxY || 0) - (frameState.viewMinY || 0)) : 1);
+    curr.screenW = Math.max(1, frameState ? (frameState.screenWidth || 1) : 1);
+    curr.screenH = Math.max(1, frameState ? (frameState.screenHeight || 1) : 1);
 
     if (!this._lastCameraFrame) {
-      this._lastCameraFrame = current;
+      Object.assign(this._cameraStateLast, curr);
+      this._lastCameraFrame = this._cameraStateLast;
       this._cameraMotionPx.x = 0;
       this._cameraMotionPx.y = 0;
       this._cameraMotionSmoothedPx.x = 0;
@@ -1147,40 +1216,52 @@ export class LensEffectV2 {
       return;
     }
 
-    const dxWorld = current.cameraX - this._lastCameraFrame.cameraX;
-    const dyWorld = current.cameraY - this._lastCameraFrame.cameraY;
+    const dxWorld = curr.cameraX - this._cameraStateLast.cameraX;
+    const dyWorld = curr.cameraY - this._cameraStateLast.cameraY;
+    
     // Camera move right makes world appear to move left, so invert sign.
-    this._cameraMotionPx.x = -(dxWorld / current.viewW) * current.screenW;
-    this._cameraMotionPx.y = -(dyWorld / current.viewH) * current.screenH;
+    this._cameraMotionPx.x = -(dxWorld / curr.viewW) * curr.screenW;
+    this._cameraMotionPx.y = -(dyWorld / curr.viewH) * curr.screenH;
 
-    const tau = Math.max(0, Number(this.params.motionBlurSmoothingSeconds) || 0);
+    const tau = this.params.motionBlurSmoothingSeconds > 0 ? this.params.motionBlurSmoothingSeconds : 0;
     const alpha = (tau <= 0.0001) ? 1.0 : (1.0 - Math.exp(-dt / tau));
     this._cameraMotionSmoothedPx.x += (this._cameraMotionPx.x - this._cameraMotionSmoothedPx.x) * alpha;
     this._cameraMotionSmoothedPx.y += (this._cameraMotionPx.y - this._cameraMotionSmoothedPx.y) * alpha;
 
-    const motionStrength = Math.max(0, Number(this.params.motionBlurStrength) || 0);
-    const motionMax = Math.max(0, Number(this.params.motionBlurMaxPx) || 0);
-    this._cameraMotionBlurPx.x = Math.max(-motionMax, Math.min(motionMax, this._cameraMotionSmoothedPx.x * motionStrength));
-    this._cameraMotionBlurPx.y = Math.max(-motionMax, Math.min(motionMax, this._cameraMotionSmoothedPx.y * motionStrength));
+    const motionStrength = this.params.motionBlurStrength > 0 ? this.params.motionBlurStrength : 0;
+    const motionMax = this.params.motionBlurMaxPx > 0 ? this.params.motionBlurMaxPx : 0;
+    
+    let xBlur = this._cameraMotionSmoothedPx.x * motionStrength;
+    let yBlur = this._cameraMotionSmoothedPx.y * motionStrength;
+    this._cameraMotionBlurPx.x = xBlur < -motionMax ? -motionMax : (xBlur > motionMax ? motionMax : xBlur);
+    this._cameraMotionBlurPx.y = yBlur < -motionMax ? -motionMax : (yBlur > motionMax ? motionMax : yBlur);
 
-    const zoomDelta = current.zoom - this._lastCameraFrame.zoom;
+    const zoomDelta = curr.zoom - this._cameraStateLast.zoom;
     this._cameraZoomVelocity = zoomDelta / dt;
-    const zoomStrength = Math.max(0, Number(this.params.motionBlurZoomStrength) || 0);
-    this._zoomMotionBlurPx = Math.max(-motionMax, Math.min(motionMax, this._cameraZoomVelocity * zoomStrength));
+    const zoomStrength = this.params.motionBlurZoomStrength > 0 ? this.params.motionBlurZoomStrength : 0;
+    
+    let zBlur = this._cameraZoomVelocity * zoomStrength;
+    this._zoomMotionBlurPx = zBlur < -motionMax ? -motionMax : (zBlur > motionMax ? motionMax : zBlur);
 
-    this._lastCameraFrame = current;
+    this._cameraStateLast.cameraX = curr.cameraX;
+    this._cameraStateLast.cameraY = curr.cameraY;
+    this._cameraStateLast.zoom = curr.zoom;
+    this._cameraStateLast.viewW = curr.viewW;
+    this._cameraStateLast.viewH = curr.viewH;
+    this._cameraStateLast.screenW = curr.screenW;
+    this._cameraStateLast.screenH = curr.screenH;
   }
 
   _maybeTriggerZoomRefocus() {
     if (!this.params.autoFocusEnabled || !this.params.autoFocusZoomTriggerEnabled) return;
     if (this._autoFocusEventActive || this._autoFocusZoomCooldownSec > 0) return;
-    const speed = Math.abs(Number(this._cameraZoomVelocity) || 0);
-    const threshold = Math.max(0.01, Number(this.params.autoFocusZoomTriggerThreshold) || 0.75);
+    const speed = Math.abs(this._cameraZoomVelocity || 0);
+    const threshold = this.params.autoFocusZoomTriggerThreshold > 0.01 ? this.params.autoFocusZoomTriggerThreshold : 0.75;
     if (speed < threshold) return;
-    const strengthScale = Math.max(0.1, Number(this.params.autoFocusZoomTriggerStrength) || 1.0);
+    const strengthScale = this.params.autoFocusZoomTriggerStrength > 0.1 ? this.params.autoFocusZoomTriggerStrength : 1.0;
     const strength = Math.min(2.0, strengthScale * (1.0 + (speed - threshold)));
     this._triggerAutoFocusEvent(strength);
-    this._autoFocusZoomCooldownSec = Math.max(0, Number(this.params.autoFocusZoomTriggerCooldownSeconds) || 0);
+    this._autoFocusZoomCooldownSec = this.params.autoFocusZoomTriggerCooldownSeconds > 0 ? this.params.autoFocusZoomTriggerCooldownSeconds : 0;
   }
 
   _disposeLightBurnTargets() {
@@ -1226,16 +1307,16 @@ export class LensEffectV2 {
     if (!this._ensureLightBurnResources(inputRT.width, inputRT.height)) return;
     if (!this._lightBurnMaterial || !this._lightBurnReadRT || !this._lightBurnWriteRT) return;
 
-    const persist = Math.max(0.05, Number(this.params.lightBurnPersistenceSeconds) || 2.5);
-    const dt = Math.max(1 / 240, Number(dtSec) || (1 / 60));
+    const persist = this.params.lightBurnPersistenceSeconds > 0.05 ? this.params.lightBurnPersistenceSeconds : 2.5;
+    const dt = dtSec > 0.004166 ? dtSec : 0.004166;
     const decay = Math.exp(-dt / persist);
 
     const u = this._lightBurnMaterial.uniforms;
     u.tCurrentScene.value = inputRT.texture;
     u.tPrevBurn.value = this._lightBurnReadRT.texture;
     u.uThreshold.value = clamp01(this.params.lightBurnThreshold);
-    u.uSoftness.value = Math.max(0.001, Number(this.params.lightBurnThresholdSoftness) || 0.12);
-    u.uResponse.value = Math.max(0, Number(this.params.lightBurnResponse) || 1.15);
+    u.uSoftness.value = this.params.lightBurnThresholdSoftness > 0.001 ? this.params.lightBurnThresholdSoftness : 0.12;
+    u.uResponse.value = this.params.lightBurnResponse > 0 ? this.params.lightBurnResponse : 1.15;
     u.uDecayFactor.value = clamp01(decay);
     u.uBurnWriteGain.value = clamp01(darknessGate);
 
@@ -1391,7 +1472,7 @@ export class LensEffectV2 {
       refs.prevTex.value = outgoing;
       refs.prevActive.value = 1.0;
       this._slotBlendT[slot] = 0;
-      this._slotBlendDurationSec[slot] = Math.max(0, Number(this.params.layerSwapFadeSeconds) || 0);
+      this._slotBlendDurationSec[slot] = this.params.layerSwapFadeSeconds > 0 ? this.params.layerSwapFadeSeconds : 0;
       refs.blend.value = (this._slotBlendDurationSec[slot] <= 0.0001) ? 1.0 : 0.0;
       return;
     }
@@ -1418,18 +1499,19 @@ export class LensEffectV2 {
   }
 
   _advanceSlotCrossfades(dt) {
-    const safeDt = Math.max(0, Number(dt) || 0);
+    const safeDt = dt > 0 ? dt : 0;
     for (let i = 0; i < OVERLAY_SLOT_COUNT; i++) {
       const refs = this._overlayUniformRefs?.[i];
       if (!refs) continue;
-      const duration = Math.max(0, Number(this._slotBlendDurationSec[i]) || 0);
+      const duration = this._slotBlendDurationSec[i] > 0 ? this._slotBlendDurationSec[i] : 0;
       if (duration <= 0.0001 || this._slotBlendT[i] >= 1) {
         if (this._slotBlendT[i] < 1) this._slotBlendT[i] = 1;
-        refs.blend.value = 1.0;
+        if (refs.blend.value !== 1.0) refs.blend.value = 1.0;
         if (this._slotPrevTextures[i]) this._finishSlotCrossfade(i);
         continue;
       }
-      this._slotBlendT[i] = Math.min(1, this._slotBlendT[i] + (safeDt / duration));
+      this._slotBlendT[i] += safeDt / duration;
+      if (this._slotBlendT[i] > 1) this._slotBlendT[i] = 1;
       refs.blend.value = this._slotBlendT[i];
       if (this._slotBlendT[i] >= 1) this._finishSlotCrossfade(i);
     }
@@ -1472,9 +1554,9 @@ export class LensEffectV2 {
     if (!this._initialized || !this._composeMaterial) return;
     if (!this.params.enabled) return;
 
-    const elapsed = Number(timeInfo?.elapsed);
-    if (Number.isFinite(elapsed)) {
-      if (Number.isFinite(this._lastUpdateElapsedSec)) {
+    const elapsed = timeInfo && timeInfo.elapsed ? timeInfo.elapsed : 0;
+    if (typeof elapsed === 'number' && Number.isFinite(elapsed)) {
+      if (this._lastUpdateElapsedSec !== null) {
         const rawDt = elapsed - this._lastUpdateElapsedSec;
         if (rawDt > 0 && rawDt < 1.0) this._lastUpdateDeltaSec = rawDt;
       }
@@ -1496,53 +1578,60 @@ export class LensEffectV2 {
     }
 
     const u = this._composeMaterial.uniforms;
-    u.uTime.value = Number(timeInfo?.elapsed) || 0;
+    u.uTime.value = elapsed;
 
-    this._setScalarUniform(u.uDistortionAmount, 'distortionAmount', Number(this.params.distortionAmount) || 0);
+    this._setScalarUniform(u.uDistortionAmount, 'distortionAmount', this.params.distortionAmount || 0);
     this._setVec2Uniform(
       u.uDistortionCenter,
       'distortionCenter',
       clamp01(this.params.distortionCenterX),
       clamp01(this.params.distortionCenterY)
     );
-    this._setScalarUniform(u.uChromaticAmountPx, 'chromaticAmountPx', Math.max(0, Number(this.params.chromaticAmountPx) || 0));
-    this._setScalarUniform(u.uChromaticEdgePower, 'chromaticEdgePower', Math.max(0.01, Number(this.params.chromaticEdgePower) || 1));
+    this._setScalarUniform(u.uChromaticAmountPx, 'chromaticAmountPx', this.params.chromaticAmountPx > 0 ? this.params.chromaticAmountPx : 0);
+    this._setScalarUniform(u.uChromaticEdgePower, 'chromaticEdgePower', this.params.chromaticEdgePower > 0.01 ? this.params.chromaticEdgePower : 1);
     this._setScalarUniform(u.uVignetteIntensity, 'vignetteIntensity', clamp01(this.params.vignetteIntensity));
     this._setScalarUniform(u.uVignetteSoftness, 'vignetteSoftness', Math.max(0.01, clamp01(this.params.vignetteSoftness)));
-    this._setScalarUniform(u.uGrainAmount, 'grainAmount', Math.max(0, Number(this.params.grainAmount) || 0));
-    this._setScalarUniform(u.uGrainSpeed, 'grainSpeed', Math.max(0, Number(this.params.grainSpeed) || 0));
+    this._setScalarUniform(u.uGrainAmount, 'grainAmount', this.params.grainAmount > 0 ? this.params.grainAmount : 0);
+    this._setScalarUniform(u.uGrainSpeed, 'grainSpeed', this.params.grainSpeed > 0 ? this.params.grainSpeed : 0);
     this._setScalarUniform(u.uAdaptiveGrainEnabled, 'adaptiveGrainEnabled', this.params.adaptiveGrainEnabled ? 1.0 : 0.0);
-    this._setScalarUniform(u.uGrainLowLightBoost, 'grainLowLightBoost', Math.max(0, Number(this.params.grainLowLightBoost) || 0));
-    this._setScalarUniform(u.uGrainCellSizeBright, 'grainCellSizeBright', Math.max(1, Number(this.params.grainCellSizeBright) || 1));
-    this._setScalarUniform(u.uGrainCellSizeDark, 'grainCellSizeDark', Math.max(1, Number(this.params.grainCellSizeDark) || 1));
+    this._setScalarUniform(u.uGrainLowLightBoost, 'grainLowLightBoost', this.params.grainLowLightBoost > 0 ? this.params.grainLowLightBoost : 0);
+    this._setScalarUniform(u.uGrainCellSizeBright, 'grainCellSizeBright', this.params.grainCellSizeBright > 1 ? this.params.grainCellSizeBright : 1);
+    this._setScalarUniform(u.uGrainCellSizeDark, 'grainCellSizeDark', this.params.grainCellSizeDark > 1 ? this.params.grainCellSizeDark : 1);
     this._setScalarUniform(u.uDigitalNoiseEnabled, 'digitalNoiseEnabled', this.params.digitalNoiseEnabled ? 1.0 : 0.0);
-    this._setScalarUniform(u.uDigitalNoiseAmount, 'digitalNoiseAmount', Math.max(0, Number(this.params.digitalNoiseAmount) || 0));
+    this._setScalarUniform(u.uDigitalNoiseAmount, 'digitalNoiseAmount', this.params.digitalNoiseAmount > 0 ? this.params.digitalNoiseAmount : 0);
     this._setScalarUniform(u.uDigitalNoiseChance, 'digitalNoiseChance', clamp01(this.params.digitalNoiseChance));
     this._setScalarUniform(u.uDigitalNoiseGreenBias, 'digitalNoiseGreenBias', clamp01(this.params.digitalNoiseGreenBias));
-    this._setScalarUniform(u.uDigitalNoiseLowLightBoost, 'digitalNoiseLowLightBoost', Math.max(0, Number(this.params.digitalNoiseLowLightBoost) || 0));
+    this._setScalarUniform(u.uDigitalNoiseLowLightBoost, 'digitalNoiseLowLightBoost', this.params.digitalNoiseLowLightBoost > 0 ? this.params.digitalNoiseLowLightBoost : 0);
 
-    u.uAutoFocusAmount.value     = clamp01(this._autoFocusAmount);
-    u.uAutoFocusBlurPx.value     = Math.max(0, Number(this.params.autoFocusMaxBlurPx) || 0);
-    u.uAutoFocusShiftPx.value.set(
-      Number(this._autoFocusShiftPx?.x) || 0,
-      Number(this._autoFocusShiftPx?.y) || 0
+    this._setScalarUniform(u.uAutoFocusAmount, 'autoFocusAmount', clamp01(this._autoFocusAmount));
+    this._setScalarUniform(u.uAutoFocusBlurPx, 'autoFocusBlurPx', this.params.autoFocusMaxBlurPx > 0 ? this.params.autoFocusMaxBlurPx : 0);
+    this._setVec2Uniform(
+      u.uAutoFocusShiftPx,
+      'autoFocusShiftPx',
+      this._autoFocusShiftPx.x || 0,
+      this._autoFocusShiftPx.y || 0
     );
-    u.uMotionBlurEnabled.value = this.params.motionBlurEnabled ? 1.0 : 0.0;
-    u.uMotionBlurCameraPx.value.set(
-      Number(this._cameraMotionBlurPx?.x) || 0,
-      Number(this._cameraMotionBlurPx?.y) || 0
+    this._setScalarUniform(u.uMotionBlurEnabled, 'motionBlurEnabled', this.params.motionBlurEnabled ? 1.0 : 0.0);
+    this._setVec2Uniform(
+      u.uMotionBlurCameraPx,
+      'motionBlurCameraPx',
+      this._cameraMotionBlurPx.x || 0,
+      this._cameraMotionBlurPx.y || 0
     );
-    u.uMotionBlurZoomPx.value = Number(this._zoomMotionBlurPx) || 0;
-    u.uLightBurnEnabled.value    = this.params.lightBurnEnabled ? 1.0 : 0.0;
-    u.uLightBurnIntensity.value  = Math.max(0, Number(this.params.lightBurnIntensity) || 0) * clamp01(this._lightBurnDarknessGate);
-    this._setScalarUniform(u.uLightBurnBlurPx, 'lightBurnBlurPx', Math.max(0, Number(this.params.lightBurnBlurPx) || 0));
+    this._setScalarUniform(u.uMotionBlurZoomPx, 'motionBlurZoomPx', this._zoomMotionBlurPx || 0);
+    this._setScalarUniform(u.uLightBurnEnabled, 'lightBurnEnabled', this.params.lightBurnEnabled ? 1.0 : 0.0);
+    this._setScalarUniform(u.uLightBurnIntensity, 'lightBurnIntensity', (this.params.lightBurnIntensity > 0 ? this.params.lightBurnIntensity : 0) * clamp01(this._lightBurnDarknessGate));
+    this._setScalarUniform(u.uLightBurnBlurPx, 'lightBurnBlurPx', this.params.lightBurnBlurPx > 0 ? this.params.lightBurnBlurPx : 0);
 
     for (let i = 0; i < OVERLAY_SLOT_COUNT; i++) {
       const refs = this._overlayUniformRefs?.[i];
       if (!refs) continue;
+      
+      const keys = this._overlayCacheKeys[i];
+
       this._setVec4Uniform(
         refs.params,
-        `overlayParams${i}`,
+        keys.params,
         this._overlaySlotIntensity[i],
         this._overlaySlotLumaReactivity[i],
         this._overlaySlotLumaBoost[i],
@@ -1550,16 +1639,16 @@ export class LensEffectV2 {
       );
       this._setVec4Uniform(
         refs.anim,
-        `overlayAnim${i}`,
-        Math.max(0.001, this._overlaySlotClearSoftness[i] || 0.1),
+        keys.anim,
+        this._overlaySlotClearSoftness[i] > 0.001 ? this._overlaySlotClearSoftness[i] : 0.1,
         this._overlaySlotDriftX[i],
         this._overlaySlotDriftY[i],
-        Math.max(0, this._overlaySlotPulseMag[i] || 0)
+        this._overlaySlotPulseMag[i] > 0 ? this._overlaySlotPulseMag[i] : 0
       );
       this._setVec2Uniform(
         refs.pulse,
-        `overlayPulse${i}`,
-        Math.max(0, this._overlaySlotPulseFreq[i] || 0),
+        keys.pulse,
+        this._overlaySlotPulseFreq[i] > 0 ? this._overlaySlotPulseFreq[i] : 0,
         this._overlaySlotPulsePhase[i] || 0
       );
     }
@@ -1573,8 +1662,8 @@ export class LensEffectV2 {
       this._updateLightBurnMap(renderer, inputRT, this._lastUpdateDeltaSec, this._lightBurnDarknessGate);
     }
 
-    const w = Math.max(1, Number(inputRT.width)  || 1);
-    const h = Math.max(1, Number(inputRT.height) || 1);
+    const w = inputRT.width > 0 ? inputRT.width : 1;
+    const h = inputRT.height > 0 ? inputRT.height : 1;
 
     const u = this._composeMaterial.uniforms;
     u.tDiffuse.value = inputRT.texture;
@@ -1643,6 +1732,7 @@ export class LensEffectV2 {
     this._catalog         = [];
     this._catalogNameToIndex.clear();
     this._catalogNameSet.clear();
+    this._availableNamesCache.clear();
     this._slotLoadedIndices.fill(-2);
     this._overlayUniformRefs = null;
     this._uniformCache = {};

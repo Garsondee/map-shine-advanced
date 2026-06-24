@@ -6,9 +6,11 @@ import { weatherController } from '../../core/WeatherController.js';
 import { resolveTwilightDarkness01 } from './ambient-compose-cpu.js';
 import {
   buildCandleMinimapEntries,
+  FIRE_STREAM_VIEW_PADDING,
   glowCentroidBounds,
   isFireBucketInView,
   resolveFireStreamingViewRect,
+  resolveFlameStreamingViewRect,
 } from '../../streaming/fire-streaming-bridge.js';
 import {
   getStreamingDetailTier,
@@ -51,10 +53,16 @@ const CANDLE_FLAME_ABOVE_INTRA = 60;
 
 /** Max candle clusters activated per frame when view streaming is on. */
 const CANDLE_STREAM_CREATE_BUDGET = 4;
+/** Extra world padding before deactivating an in-view cluster (prevents zoom-edge churn). */
+const CANDLE_STREAM_DEACTIVATE_EXTRA_PADDING = 480;
 /** Focal LOD before candle flames economize (tile streaming may already be coarse at LOD 2). */
 const CANDLE_FLAME_COMPACT_FOCAL_LOD = 3;
 /** Focal LOD for flicker-only flames and throttled glow updates. */
 const CANDLE_FLAME_MINIMAL_FOCAL_LOD = 4;
+/** Hysteresis band — require deeper zoom-out before coarsening, deeper zoom-in before refining. */
+const CANDLE_FLAME_LOD_ENTER_COMPACT = CANDLE_FLAME_COMPACT_FOCAL_LOD + 1;
+const CANDLE_FLAME_LOD_EXIT_COMPACT = CANDLE_FLAME_COMPACT_FOCAL_LOD - 1;
+const CANDLE_FLAME_LOD_EXIT_MINIMAL = CANDLE_FLAME_MINIMAL_FOCAL_LOD - 1;
 
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
@@ -290,6 +298,7 @@ export class CandleFlamesEffectV2 {
     this._activeClusterKeys = new Set();
     /** @type {import('../../streaming/streaming-detail-api.js').StreamingDetailTier} */
     this._lastDetailTier = 'full';
+    this._candleFlameLodKey = 'full';
     this._glowFlickerSkipCounter = 0;
     this._motionResult = {
       flameFlicker: 0,
@@ -1130,10 +1139,24 @@ export class CandleFlamesEffectV2 {
    */
   _resolveCandleFlameLodProfile() {
     const focalLod = resolveFocalLodFromZoom();
-    if (focalLod >= CANDLE_FLAME_MINIMAL_FOCAL_LOD) {
+    let lodKey = this._candleFlameLodKey ?? 'full';
+
+    if (lodKey === 'full') {
+      if (focalLod >= CANDLE_FLAME_MINIMAL_FOCAL_LOD) lodKey = 'minimal';
+      else if (focalLod >= CANDLE_FLAME_LOD_ENTER_COMPACT) lodKey = 'compact';
+    } else if (lodKey === 'compact') {
+      if (focalLod >= CANDLE_FLAME_MINIMAL_FOCAL_LOD) lodKey = 'minimal';
+      else if (focalLod <= CANDLE_FLAME_LOD_EXIT_COMPACT) lodKey = 'full';
+    } else if (lodKey === 'minimal' && focalLod <= CANDLE_FLAME_LOD_EXIT_MINIMAL) {
+      lodKey = focalLod >= CANDLE_FLAME_COMPACT_FOCAL_LOD ? 'compact' : 'full';
+    }
+
+    this._candleFlameLodKey = lodKey;
+
+    if (lodKey === 'minimal') {
       return { motionMul: 0.0, detailMul: 0.0, compact: true, throttleGlow: true, lodKey: 'minimal' };
     }
-    if (focalLod >= CANDLE_FLAME_COMPACT_FOCAL_LOD) {
+    if (lodKey === 'compact') {
       return { motionMul: 0.35, detailMul: 0.15, compact: true, throttleGlow: false, lodKey: 'compact' };
     }
     return { motionMul: 1.0, detailMul: 1.0, compact: false, throttleGlow: false, lodKey: 'full' };
@@ -1233,9 +1256,12 @@ export class CandleFlamesEffectV2 {
   /**
    * @param {Set<string>} activeKeys
    * @param {import('../../streaming/streaming-detail-api.js').StreamingDetailTier} [tier]
+   * @param {{ glowSync?: 'full'|'incremental' }} [options]
    * @private
    */
-  _applyActiveClusters(activeKeys, tier = this._lastDetailTier) {
+  _applyActiveClusters(activeKeys, tier = this._lastDetailTier, options = {}) {
+    const glowSync = options.glowSync === 'incremental' ? 'incremental' : 'full';
+    const prevActiveKeys = this._activeClusterKeys;
     this._activeClusterKeys = new Set(activeKeys ?? []);
     const showFlames = this._effectiveShowFlames();
 
@@ -1313,10 +1339,15 @@ export class CandleFlamesEffectV2 {
     this._applyFlameMeshRenderOrders();
     this._applyVisibility();
 
-    if (this._clusters.length) {
-      this._rebuildGlowMeshes();
-    } else {
+    if (!this.params.glowEnabled || !this._clusters.length) {
       this._clearGlowBuckets();
+      return;
+    }
+
+    if (glowSync === 'incremental') {
+      this._syncGlowBucketsIncremental(prevActiveKeys, this._activeClusterKeys);
+    } else {
+      this._rebuildGlowMeshes();
     }
   }
 
@@ -1331,7 +1362,10 @@ export class CandleFlamesEffectV2 {
     const createBudget = Number.isFinite(Number(options.createBudget))
       ? Math.max(0, Math.floor(Number(options.createBudget)))
       : CANDLE_STREAM_CREATE_BUDGET;
-    const view = this._isCandleViewStreamingEnabled() ? resolveFireStreamingViewRect() : null;
+    const viewActivate = resolveFlameStreamingViewRect(FIRE_STREAM_VIEW_PADDING);
+    const viewDeactivate = resolveFlameStreamingViewRect(
+      FIRE_STREAM_VIEW_PADDING + CANDLE_STREAM_DEACTIVATE_EXTRA_PADDING,
+    );
 
     /** @type {Set<string>} */
     const nextActive = new Set();
@@ -1341,14 +1375,17 @@ export class CandleFlamesEffectV2 {
       for (const entry of this._clusterRegistry) nextActive.add(entry.key);
     } else {
       for (const entry of this._clusterRegistry) {
-        const inView = isFireBucketInView(entry.bounds, view);
-        if (inView) {
-          if (!this._activeClusterKeys.has(entry.key)) {
-            if (created >= createBudget) continue;
-            created += 1;
+        const wasActive = this._activeClusterKeys.has(entry.key);
+        if (wasActive) {
+          if (isFireBucketInView(entry.bounds, viewDeactivate)) {
+            nextActive.add(entry.key);
           }
-          nextActive.add(entry.key);
+          continue;
         }
+        if (!isFireBucketInView(entry.bounds, viewActivate)) continue;
+        if (created >= createBudget) continue;
+        created += 1;
+        nextActive.add(entry.key);
       }
     }
 
@@ -1356,7 +1393,7 @@ export class CandleFlamesEffectV2 {
     const prevSig = [...this._activeClusterKeys].sort().join(',');
     if (sig === prevSig) return false;
 
-    this._applyActiveClusters(nextActive);
+    this._applyActiveClusters(nextActive, this._lastDetailTier, { glowSync: 'incremental' });
     return true;
   }
 
@@ -3000,6 +3037,181 @@ export class CandleFlamesEffectV2 {
     this._outdoorsGlowRebuildPending = true;
   }
 
+  /**
+   * Shared wall/scene context for glow bucket construction.
+   * @private
+   * @returns {{ THREE: typeof import('three'), allWalls: object[], sceneBounds: object, glowGroup: import('three').Group }|null}
+   */
+  _getGlowBuildContext() {
+    const THREE = window.THREE;
+    if (!THREE) return null;
+
+    this._tryAttachGlowGroup();
+    if (!this._glowGroup) return null;
+
+    const d = canvas?.dimensions;
+    return {
+      THREE,
+      allWalls: this._collectGlowClipWallSources(),
+      sceneBounds: {
+        x: d?.sceneX ?? 0,
+        y: d?.sceneY ?? 0,
+        width: d?.sceneWidth ?? d?.width ?? 1,
+        height: d?.sceneHeight ?? d?.height ?? 1,
+      },
+      glowGroup: this._glowGroup,
+    };
+  }
+
+  /**
+   * Build one gameplay glow bucket for a cluster (no detach/clear of sibling buckets).
+   * @private
+   * @param {object} c
+   * @param {{ THREE: typeof import('three'), allWalls: object[], sceneBounds: object, glowGroup: import('three').Group }} ctx
+   * @returns {boolean}
+   */
+  _createGlowBucketForCluster(c, ctx) {
+    if (!c || this._glowBuckets.has(c.key)) return false;
+
+    const { THREE, allWalls, sceneBounds, glowGroup } = ctx;
+    const outdoor = Math.max(0, Math.min(1, Number(c.outdoor) ?? 1));
+    const indoor = this._isCandleIndoorOutdoorSample(outdoor);
+    const glow = this._resolveGlowParams(null, outdoor);
+    const centerFoundry = { x: c.cxFoundry, y: c.cyFoundry };
+    const clipScale = Math.max(0.1, Number(this.params.wallClipRadiusScale) || 1.0);
+    const radiusPx = Math.max(32, glow.radiusPx * clipScale);
+    const clipRadiusPx = radiusPx;
+    const floorCtx = c.floorCtx ?? null;
+    const clipElevation = Number.isFinite(Number(c.clipElevation))
+      ? Number(c.clipElevation)
+      : floorCtx?.clipElevation;
+    const v14LevelScoped = hasV14NativeLevels(canvas?.scene)
+      && !!this._resolveGlowClipLevelId(floorCtx);
+    const wallClipOptions = this._buildGlowWallClipOptions(clipElevation, { indoor, v14LevelScoped });
+    const walls = this._filterWallsForClusterClip(allWalls, floorCtx);
+
+    const clipCenters = this._resolveGlowClipCenters(centerFoundry, walls, wallClipOptions);
+    const lightMeshes = [];
+
+    for (const clipCenter of clipCenters) {
+      const clipResult = this._resolveGlowClipWorldPoints(
+        clipCenter,
+        clipRadiusPx,
+        walls,
+        sceneBounds,
+        wallClipOptions,
+        indoor,
+      );
+      if (clipResult.skip) continue;
+
+      const worldPoints = clipResult.worldPoints;
+
+      const centerWorld = clipCenters.length > 1
+        ? (() => {
+          const wp = Coordinates.toWorld(clipCenter.x, clipCenter.y);
+          return new THREE.Vector2(wp.x, wp.y);
+        })()
+        : new THREE.Vector2(c.cxWorld, c.cyWorld);
+
+      const innerRadiusPx = Math.max(1, radiusPx * glow.innerScale);
+
+      const lm = new LightMesh(centerWorld, radiusPx, c.color, {
+        innerRadiusPx,
+        worldPoints,
+        falloffExponent: glow.falloffExponent,
+        achromaticRgb: false,
+        edgeSoftness: glow.edgeSoftness,
+      });
+
+      lm.setAchromaticRgb?.(false);
+      lm.setEmissionGain?.(0);
+
+      if (lm?.mesh) {
+        lm.mesh.renderOrder = 90;
+        this._tagGlowMeshRenderLayer(lm, c.renderLayer ?? MAP_POINT_RENDER_LAYER_BELOW);
+        glowGroup.add(lm.mesh);
+        lightMeshes.push(lm);
+      }
+    }
+
+    if (!lightMeshes.length) return false;
+
+    const baseColor = new THREE.Color(c.color.r, c.color.g, c.color.b);
+
+    this._glowBuckets.set(c.key, {
+      lightMesh: lightMeshes[0],
+      lightMeshes,
+      baseColor,
+      intensity: c.intensity,
+      phase: c.phase,
+      outdoor: c.outdoor,
+      renderLayer: c.renderLayer ?? MAP_POINT_RENDER_LAYER_BELOW,
+    });
+    return true;
+  }
+
+  /**
+   * @private
+   * @param {Iterable<string>} keys
+   */
+  _removeGlowBucketsForKeys(keys) {
+    for (const key of keys ?? []) {
+      const entry = this._glowBuckets.get(key);
+      if (!entry) continue;
+      this._disposeGlowBucketEntry(entry);
+      this._glowBuckets.delete(key);
+    }
+  }
+
+  /**
+   * @private
+   * @param {object[]} clusters
+   */
+  _addGlowBucketsForClusters(clusters) {
+    const ctx = this._getGlowBuildContext();
+    if (!ctx || !clusters?.length) return;
+
+    for (const c of clusters) {
+      if (!c?.key || this._glowBuckets.has(c.key)) continue;
+      this._createGlowBucketForCluster(c, ctx);
+    }
+  }
+
+  /**
+   * Add/remove glow buckets when view streaming changes — avoids full detach/rebuild flicker.
+   * @private
+   * @param {Set<string>} prevActiveKeys
+   * @param {Set<string>} nextActiveKeys
+   */
+  _syncGlowBucketsIncremental(prevActiveKeys, nextActiveKeys) {
+    if (this._isLightBufferPassActive()) {
+      this._needsGlowRebuild = true;
+      return;
+    }
+
+    /** @type {string[]} */
+    const removed = [];
+    for (const key of prevActiveKeys ?? []) {
+      if (!nextActiveKeys.has(key)) removed.push(key);
+    }
+
+    /** @type {string[]} */
+    const added = [];
+    for (const key of nextActiveKeys ?? []) {
+      if (!prevActiveKeys.has(key)) added.push(key);
+    }
+
+    if (!removed.length && !added.length) return;
+
+    this._removeGlowBucketsForKeys(removed);
+
+    if (added.length) {
+      const addedSet = new Set(added);
+      const clustersToAdd = this._clusters.filter((c) => c?.key && addedSet.has(c.key));
+      this._addGlowBucketsForClusters(clustersToAdd);
+    }
+  }
+
   _rebuildGlowMeshes() {
     if (this._isLightBufferPassActive()) {
       this._needsGlowRebuild = true;
@@ -3031,94 +3243,12 @@ export class CandleFlamesEffectV2 {
 
     this._clearGlowBuckets();
 
-    const THREE = window.THREE;
-    if (!THREE) return;
+    const ctx = this._getGlowBuildContext();
+    if (!ctx) return;
 
-    const allWalls = this._collectGlowClipWallSources();
-
-    const d = canvas?.dimensions;
-    const sceneX = d?.sceneX ?? 0;
-    const sceneY = d?.sceneY ?? 0;
-    const sceneW = d?.sceneWidth ?? d?.width ?? 1;
-    const sceneH = d?.sceneHeight ?? d?.height ?? 1;
-
-    const sceneBounds = { x: sceneX, y: sceneY, width: sceneW, height: sceneH };
     for (const c of this._clusters) {
       if (!c) continue;
-
-      const outdoor = Math.max(0, Math.min(1, Number(c.outdoor) ?? 1));
-      const indoor = this._isCandleIndoorOutdoorSample(outdoor);
-      const glow = this._resolveGlowParams(null, outdoor);
-      const centerFoundry = { x: c.cxFoundry, y: c.cyFoundry };
-      const clipScale = Math.max(0.1, Number(this.params.wallClipRadiusScale) || 1.0);
-      const radiusPx = Math.max(32, glow.radiusPx * clipScale);
-      const clipRadiusPx = radiusPx;
-      const floorCtx = c.floorCtx ?? null;
-      const clipElevation = Number.isFinite(Number(c.clipElevation))
-        ? Number(c.clipElevation)
-        : floorCtx?.clipElevation;
-      const v14LevelScoped = hasV14NativeLevels(canvas?.scene)
-        && !!this._resolveGlowClipLevelId(floorCtx);
-      const wallClipOptions = this._buildGlowWallClipOptions(clipElevation, { indoor, v14LevelScoped });
-      const walls = this._filterWallsForClusterClip(allWalls, floorCtx);
-
-      const clipCenters = this._resolveGlowClipCenters(centerFoundry, walls, wallClipOptions);
-      const lightMeshes = [];
-
-      for (const clipCenter of clipCenters) {
-        const clipResult = this._resolveGlowClipWorldPoints(
-          clipCenter,
-          clipRadiusPx,
-          walls,
-          sceneBounds,
-          wallClipOptions,
-          indoor,
-        );
-        if (clipResult.skip) continue;
-
-        const worldPoints = clipResult.worldPoints;
-
-        const centerWorld = clipCenters.length > 1
-          ? (() => {
-            const wp = Coordinates.toWorld(clipCenter.x, clipCenter.y);
-            return new THREE.Vector2(wp.x, wp.y);
-          })()
-          : new THREE.Vector2(c.cxWorld, c.cyWorld);
-
-        const innerRadiusPx = Math.max(1, radiusPx * glow.innerScale);
-
-        const lm = new LightMesh(centerWorld, radiusPx, c.color, {
-          innerRadiusPx,
-          worldPoints,
-          falloffExponent: glow.falloffExponent,
-          achromaticRgb: false,
-          edgeSoftness: glow.edgeSoftness,
-        });
-
-        lm.setAchromaticRgb?.(false);
-        lm.setEmissionGain?.(0);
-
-        if (lm?.mesh) {
-          lm.mesh.renderOrder = 90;
-          this._tagGlowMeshRenderLayer(lm, c.renderLayer ?? MAP_POINT_RENDER_LAYER_BELOW);
-          this._glowGroup.add(lm.mesh);
-          lightMeshes.push(lm);
-        }
-      }
-
-      if (!lightMeshes.length) continue;
-
-      const baseColor = new THREE.Color(c.color.r, c.color.g, c.color.b);
-
-      this._glowBuckets.set(c.key, {
-        lightMesh: lightMeshes[0],
-        lightMeshes,
-        baseColor,
-        intensity: c.intensity,
-        phase: c.phase,
-        outdoor: c.outdoor,
-        renderLayer: c.renderLayer ?? MAP_POINT_RENDER_LAYER_BELOW,
-      });
+      this._createGlowBucketForCluster(c, ctx);
     }
 
     if (detached && lightScene && glowGroup) {

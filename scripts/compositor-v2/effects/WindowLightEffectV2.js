@@ -102,6 +102,15 @@ const WINDOW_LIGHT_CORE_DEFAULTS = Object.freeze({
   rgbShiftAnimate: true,
   rgbShiftAnimSpeed: 0.45,
   rgbShiftAnimWobbleDeg: 28,
+  rainGlassEnabled: true,
+  rainGlassWeatherResponse: 1,
+  rainGlassStrength: 0.045,
+  rainGlassScale: 90,
+  rainGlassStretch: 0.25,
+  rainGlassSpeed: 1.2,
+  rainGlassSlopeInfluence: 0.85,
+  rainGlassSlopeSamplePx: 42,
+  rainGlassFallbackAngle: 90,
   specularBoost: 2,
   sparkleEnabled: true,
   sparkleStrength: 1.35,
@@ -232,6 +241,74 @@ const WL_REFRACT_GLSL = /* glsl */`
     )) * 43758.5453);
   }
 
+  float wlSampleOutdoorsMask(vec2 sceneUv) {
+    if (uHasOutdoorsMask < 0.5) return 0.0;
+    vec2 suv = clamp(sceneUv, 0.0, 1.0);
+    if (uOutdoorsMaskFlipY > 0.5) suv.y = 1.0 - suv.y;
+    vec4 mask = texture2D(tOutdoorsMask, suv);
+    return dot(mask.rgb, vec3(0.2126, 0.7152, 0.0722)) * max(mask.a, 0.001);
+  }
+
+  vec2 wlRainFlowDir(float floorIdx, vec2 sceneUv, vec2 fallbackDir, float slopeInfluence, float slopeSamplePx) {
+    vec2 baseDir = normalize(fallbackDir + vec2(1e-5, 0.0));
+    vec2 t = max(uMaskTexelSize * max(slopeSamplePx, 1.0), vec2(1e-5));
+    float l;
+    float r;
+    float top;
+    float bottom;
+    if (uHasOutdoorsMask > 0.5) {
+      l = wlSampleOutdoorsMask(sceneUv + vec2(-t.x, 0.0));
+      r = wlSampleOutdoorsMask(sceneUv + vec2(t.x, 0.0));
+      top = wlSampleOutdoorsMask(sceneUv + vec2(0.0, -t.y));
+      bottom = wlSampleOutdoorsMask(sceneUv + vec2(0.0, t.y));
+    } else {
+      l = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, sceneUv, vec2(-t.x, 0.0)), 1.0);
+      r = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, sceneUv, vec2(t.x, 0.0)), 1.0);
+      top = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, sceneUv, vec2(0.0, -t.y)), 1.0);
+      bottom = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, sceneUv, vec2(0.0, t.y)), 1.0);
+    }
+
+    vec2 slopeDir = vec2(r - l, bottom - top);
+    float slopeLen = length(slopeDir);
+    if (slopeLen < 0.001) return baseDir;
+
+    vec2 shapedSlope = slopeDir / slopeLen;
+    return normalize(mix(baseDir, shapedSlope, clamp(slopeInfluence, 0.0, 1.0)) + vec2(1e-5, 0.0));
+  }
+
+  vec2 wlRainDistortion(
+    vec2 uv,
+    float t,
+    float rainAmount,
+    vec2 flowDir,
+    float scale,
+    float stretch,
+    float speed,
+    float strength
+  ) {
+    if (rainAmount < 0.01) return vec2(0.0);
+
+    vec2 dir = normalize(flowDir + vec2(1e-5, 0.0));
+    vec2 tangent = vec2(-dir.y, dir.x);
+    vec2 flowUv = vec2(dot(uv, tangent), dot(uv, dir));
+    float sx = max(scale, 4.0);
+    float sy = max(scale * clamp(stretch, 0.05, 1.0), 2.0);
+    vec2 st = flowUv * vec2(sx, sy);
+    float xHash = fract(sin(floor(st.x) * 12.9898) * 43758.5453);
+    st.y -= t * max(speed, 0.0) * (1.5 + xHash * 2.0) * clamp(rainAmount, 0.5, 1.5);
+
+    vec2 id = floor(st);
+    vec2 f = fract(st);
+    vec2 rnd = wlHash22(id);
+
+    vec2 dropCenter = vec2(0.5) + (rnd - 0.5) * 0.4;
+    float d = length(vec2(f.x - dropCenter.x, (f.y - dropCenter.y) * 0.5));
+    float drop = smoothstep(0.4, 0.1, d);
+    vec2 distortion = (f - dropCenter) * drop;
+
+    return (tangent * distortion.x + dir * distortion.y) * rainAmount * max(strength, 0.0);
+  }
+
   float wlSparklePointAt(vec2 p, vec2 cell, float layerIdx, float timeSlot, float t, float speed, float spawnCut) {
     float spawn = wlHash22(cell + vec2(timeSlot * 19.0 + layerIdx * 47.0, timeSlot * 0.31 + layerIdx * 3.0)).x;
     if (spawn < spawnCut) return 0.0;
@@ -253,14 +330,14 @@ const WL_REFRACT_GLSL = /* glsl */`
     vec2 jitter = wlHash22(vec2(layerIdx * 19.3 + timeSlot * 0.17, timeSlot * 0.09 + 4.1)) * cellTexel * 2.5;
     vec2 p = (uvTexel + jitter) / layerScale;
     vec2 baseCell = floor(p);
+    vec2 fractCell = fract(p);
+    int ox = (fractCell.x > 0.5) ? 1 : 0;
+    int oy = (fractCell.y > 0.5) ? 1 : 0;
     float bestPeak = 0.0;
-    for (int oy = -1; oy <= 1; oy++) {
-      for (int ox = -1; ox <= 1; ox++) {
-        vec2 cell = baseCell + vec2(float(ox), float(oy));
-        float pt = wlSparklePointAt(p, cell, layerIdx, timeSlot, t, speed, spawnCut);
-        bestPeak = max(bestPeak, pt);
-      }
-    }
+    bestPeak = max(bestPeak, wlSparklePointAt(p, baseCell, layerIdx, timeSlot, t, speed, spawnCut));
+    bestPeak = max(bestPeak, wlSparklePointAt(p, baseCell + vec2(float(ox), 0.0), layerIdx, timeSlot, t, speed, spawnCut));
+    bestPeak = max(bestPeak, wlSparklePointAt(p, baseCell + vec2(0.0, float(oy)), layerIdx, timeSlot, t, speed, spawnCut));
+    bestPeak = max(bestPeak, wlSparklePointAt(p, baseCell + vec2(float(ox), float(oy)), layerIdx, timeSlot, t, speed, spawnCut));
     return bestPeak;
   }
 
@@ -297,15 +374,15 @@ const WL_REFRACT_GLSL = /* glsl */`
     float timePrev = max(timeSlot - 1.0, 0.0);
     float slotBlend = smoothstep(0.0, 1.0, fract(slotT));
 
-    float cur = 0.0;
-    cur = max(cur, wlSparkleLayer(uvTexel, cellTexel, 0.0, timeSlot, t, speed, spawnCut));
-    cur = max(cur, wlSparkleLayer(uvTexel, cellTexel, 1.0, timeSlot, t, speed, spawnCut));
-    cur = max(cur, wlSparkleLayer(uvTexel, cellTexel, 2.0, timeSlot, t, speed, spawnCut));
+    float cur = max(
+      wlSparkleLayer(uvTexel, cellTexel, 0.0, timeSlot, t, speed, spawnCut),
+      wlSparkleLayer(uvTexel, cellTexel, 1.0, timeSlot, t, speed, spawnCut)
+    );
 
-    float prev = 0.0;
-    prev = max(prev, wlSparkleLayer(uvTexel, cellTexel, 0.0, timePrev, t, speed, spawnCut));
-    prev = max(prev, wlSparkleLayer(uvTexel, cellTexel, 1.0, timePrev, t, speed, spawnCut));
-    prev = max(prev, wlSparkleLayer(uvTexel, cellTexel, 2.0, timePrev, t, speed, spawnCut));
+    float prev = max(
+      wlSparkleLayer(uvTexel, cellTexel, 0.0, timePrev, t, speed, spawnCut),
+      wlSparkleLayer(uvTexel, cellTexel, 1.0, timePrev, t, speed, spawnCut)
+    );
 
     float peak = mix(prev, cur, slotBlend);
     return smoothstep(0.65, 0.9, peak);
@@ -341,6 +418,7 @@ const EMIT_FRAG = `
   uniform sampler2D tWindow1;
   uniform sampler2D tWindow2;
   uniform sampler2D tWindow3;
+  uniform sampler2D tOutdoorsMask;
   uniform float uHasWindow0;
   uniform float uHasWindow1;
   uniform float uHasWindow2;
@@ -349,6 +427,8 @@ const EMIT_FRAG = `
   uniform float uWindow1FlipY;
   uniform float uWindow2FlipY;
   uniform float uWindow3FlipY;
+  uniform float uHasOutdoorsMask;
+  uniform float uOutdoorsMaskFlipY;
   uniform sampler2D tSpecular0;
   uniform sampler2D tSpecular1;
   uniform sampler2D tSpecular2;
@@ -369,7 +449,7 @@ const EMIT_FRAG = `
   uniform float uGlassRefractionEnabled;
   uniform float uRgbShiftAmount;
   uniform float uRgbShiftSoftness;
-  uniform float uRgbShiftAngle;
+  uniform vec2 uRgbShiftDir;
   uniform float uRgbShiftSpread;
   uniform float uRgbShiftEdgeWeight;
   uniform float uRgbShiftAnimate;
@@ -392,6 +472,16 @@ const EMIT_FRAG = `
   uniform float uLightningWindowRgbBoost;
   uniform float uCloudFactor;
   uniform float uCloudInfluence;
+  uniform float uRainFactor;
+  uniform float uRainGlassEnabled;
+  uniform float uRainGlassWeatherResponse;
+  uniform float uRainGlassStrength;
+  uniform float uRainGlassScale;
+  uniform float uRainGlassStretch;
+  uniform float uRainGlassSpeed;
+  uniform float uRainGlassSlopeInfluence;
+  uniform float uRainGlassSlopeSamplePx;
+  uniform vec2 uRainGlassFallbackDir;
   uniform sampler2D uCloudShadowTex;
   uniform float uHasCloudShadowTex;
   uniform float uCloudShadowContrast;
@@ -470,6 +560,8 @@ const EMIT_FRAG = `
     }
 
     vec4 mask = wlSampleWindowMaskAtFloor(floorIdx, sceneUv, vec2(0.0));
+    vec4 maskSoft = wlSampleWindowMaskAtFloor(floorIdx, sceneUv, uMaskTexelSize * 1.25);
+    mask.rgb = mix(mask.rgb, maskSoft.rgb, 0.3);
     float windowLuma = wlMaskLuma(mask, uFalloff);
     if (mask.a < 0.02 || windowLuma < 0.02) {
       gl_FragColor = vec4(0.0);
@@ -484,33 +576,60 @@ const EMIT_FRAG = `
     float useSparkle = uSparkleEnabled;
     float useSpecular = max(uSpecularBoost, 0.0);
 
+    float rainAmount = (uRainGlassEnabled > 0.5)
+      ? clamp(uRainFactor * max(uRainGlassWeatherResponse, 0.0), 0.0, 1.5)
+      : 0.0;
+    vec2 rainFlowDir = wlRainFlowDir(
+      floorIdx,
+      sceneUv,
+      uRainGlassFallbackDir,
+      uRainGlassSlopeInfluence,
+      uRainGlassSlopeSamplePx
+    );
+    vec2 rainWarp = wlRainDistortion(
+      sceneUv,
+      uTime,
+      rainAmount,
+      rainFlowDir,
+      uRainGlassScale,
+      uRainGlassStretch,
+      uRainGlassSpeed,
+      uRainGlassStrength
+    );
+    vec2 refractedUv = clamp(sceneUv + rainWarp, 0.0, 1.0);
+
     vec3 lightMap;
-    float edgeAmt = wlMaskEdge(floorIdx, sceneUv, uMaskTexelSize, uFalloff);
+    float edgeAmt = 0.0;
+    bool needsEdge = (uGlassRefractionEnabled > 0.5 && uRgbShiftEdgeWeight > 0.001)
+                  || (uSparkleEnabled > 0.5 && uSparkleEdgeBias > 0.001);
+    if (needsEdge) {
+      edgeAmt = wlMaskEdge(floorIdx, sceneUv, uMaskTexelSize, uFalloff);
+    }
 
     if (useRefract > 0.5) {
       float shiftPx = uRgbShiftAmount * (1.0 + flash01 * max(uLightningWindowRgbBoost, 0.0));
       float edgeW = clamp(uRgbShiftEdgeWeight, 0.0, 1.0);
       shiftPx *= mix(1.0, edgeAmt, edgeW);
 
-      float angle = uRgbShiftAngle;
+      vec2 shiftDir = uRgbShiftDir;
       if (uRgbShiftAnimate > 0.5) {
         float wobbleRad = uRgbShiftAnimWobbleDeg * 0.01745329252;
         float tAnim = uTime * max(uRgbShiftAnimSpeed, 0.01);
-        angle += sin(tAnim) * wobbleRad * 1.35;
-        angle += sin(tAnim * 1.71 + 0.8) * wobbleRad * 0.62;
         vec2 facetRnd = wlHash22(floor(sceneUv * 24.0));
-        angle += (facetRnd.x - 0.5) * wobbleRad * 1.15;
+        float facetAngle = (facetRnd.x - 0.5) * wobbleRad * 1.15;
+        float c = cos(facetAngle);
+        float s = sin(facetAngle);
+        shiftDir = vec2(shiftDir.x * c - shiftDir.y * s, shiftDir.x * s + shiftDir.y * c);
         shiftPx *= 1.0 + 0.18 * sin(tAnim * 0.92 + facetRnd.y * 6.28);
       }
 
-      vec2 shiftDir = vec2(cos(angle), sin(angle));
       float spread = clamp(uRgbShiftSpread, 0.0, 1.0);
       vec2 rOffset = shiftDir * shiftPx * (1.0 + spread) * uMaskTexelSize;
       vec2 bOffset = -shiftDir * shiftPx * (1.0 + spread) * uMaskTexelSize;
 
-      float maskR = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, sceneUv, rOffset), uFalloff);
-      float maskG = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, sceneUv, vec2(0.0)), uFalloff);
-      float maskB = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, sceneUv, bOffset), uFalloff);
+      float maskR = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, refractedUv, rOffset), uFalloff);
+      float maskG = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, refractedUv, vec2(0.0)), uFalloff);
+      float maskB = wlMaskLuma(wlSampleWindowMaskAtFloor(floorIdx, refractedUv, bOffset), uFalloff);
 
       vec3 chromaRaw = vec3(maskR, maskG, maskB);
       float shiftSoft = clamp(uRgbShiftSoftness, 0.0, 1.0);
@@ -745,6 +864,8 @@ export class WindowLightEffectV2 {
     this._windowBundleLastAttemptMs = new Map();
     /** @type {import('three').Texture|null} */
     this._floorIdTex = null;
+    /** @type {import('three').Texture|null} Active floor _Outdoors mask for rain-flow slope. */
+    this._outdoorsMask = null;
     /** @type {import('three').Texture|null} 1×1 black — unbound sampler slots must never stay null. */
     this._fallbackMaskTex = null;
     /** @type {import('../scene-view-projection.js').SceneViewProjectionCache} */
@@ -928,6 +1049,7 @@ export class WindowLightEffectV2 {
           'Emissive window glow from _Windows masks (scene UV, per-floor stack); legacy _Structural is supported and shown on the texture row when that is what loads.',
           '_Outdoors marks roofed vs open sky (same mask Specular uses for outdoor gating).',
           'Glass Refraction splits R/G/B mask samples for prismatic window fringes; Sparkle & Glint adds animated highlights (_Specular mask).',
+          'Rain on Glass uses precipitation plus the _Outdoors edge gradient to steer water along plausible wall-facing directions.',
           'Cloud dimming ties window glow to overcast weather and cloud shadow maps.',
           'Time-of-day timeline uses the same eight clock anchors as Camera Grade.',
         ].join('\n\n'),
@@ -958,6 +1080,23 @@ export class WindowLightEffectV2 {
           expanded: false,
           advanced: true,
           parameters: ['rgbShiftAnimate', 'rgbShiftAnimSpeed', 'rgbShiftAnimWobbleDeg'],
+        },
+        {
+          name: 'wl-rain-glass',
+          label: 'Rain on Glass',
+          type: 'folder',
+          expanded: false,
+          parameters: [
+            'rainGlassEnabled',
+            'rainGlassWeatherResponse',
+            'rainGlassStrength',
+            'rainGlassScale',
+            'rainGlassStretch',
+            'rainGlassSpeed',
+            'rainGlassSlopeInfluence',
+            'rainGlassSlopeSamplePx',
+            'rainGlassFallbackAngle',
+          ],
         },
         {
           name: 'wl-sparkle-glint',
@@ -1156,6 +1295,84 @@ export class WindowLightEffectV2 {
           step: 0.5,
           default: WINDOW_LIGHT_CORE_DEFAULTS.rgbShiftAnimWobbleDeg,
           tooltip: 'Peak swing of refraction angle while animated. Higher = more visible rainbow drift.',
+        },
+        rainGlassEnabled: {
+          type: 'boolean',
+          default: WINDOW_LIGHT_CORE_DEFAULTS.rainGlassEnabled,
+          label: 'Rain on Glass',
+          tooltip: 'Weather-driven procedural water streaks that refract window mask samples.',
+        },
+        rainGlassWeatherResponse: {
+          type: 'slider',
+          label: 'Weather Response',
+          min: 0.0,
+          max: 2.0,
+          step: 0.01,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.rainGlassWeatherResponse,
+          tooltip: 'Multiplier for precipitation intensity before it drives glass distortion.',
+        },
+        rainGlassStrength: {
+          type: 'slider',
+          label: 'Distortion Strength',
+          min: 0.0,
+          max: 0.15,
+          step: 0.001,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.rainGlassStrength,
+          tooltip: 'How far water droplets warp the window mask UVs.',
+        },
+        rainGlassScale: {
+          type: 'slider',
+          label: 'Drop Scale',
+          min: 8.0,
+          max: 240.0,
+          step: 1.0,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.rainGlassScale,
+          tooltip: 'Higher values make smaller, denser droplets. Lower values make larger streaks.',
+        },
+        rainGlassStretch: {
+          type: 'slider',
+          label: 'Streak Stretch',
+          min: 0.05,
+          max: 1.0,
+          step: 0.01,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.rainGlassStretch,
+          tooltip: 'Lower values elongate drops along the flow direction.',
+        },
+        rainGlassSpeed: {
+          type: 'slider',
+          label: 'Flow Speed',
+          min: 0.0,
+          max: 4.0,
+          step: 0.01,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.rainGlassSpeed,
+          tooltip: 'How quickly the procedural droplets slide across the pane.',
+        },
+        rainGlassSlopeInfluence: {
+          type: 'slider',
+          label: 'Wall Slope Influence',
+          min: 0.0,
+          max: 1.0,
+          step: 0.01,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.rainGlassSlopeInfluence,
+          tooltip: '0 = fallback direction only; 1 = follow the local _Outdoors gradient around building edges.',
+        },
+        rainGlassSlopeSamplePx: {
+          type: 'slider',
+          label: 'Slope Sample Radius',
+          min: 1.0,
+          max: 160.0,
+          step: 1.0,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.rainGlassSlopeSamplePx,
+          tooltip: 'How far from each window pixel to sample the _Outdoors mask when estimating wall direction. Larger values smooth diagonal and thick-wall cases.',
+        },
+        rainGlassFallbackAngle: {
+          type: 'slider',
+          label: 'Fallback Direction (deg)',
+          min: 0.0,
+          max: 360.0,
+          step: 1.0,
+          default: WINDOW_LIGHT_CORE_DEFAULTS.rainGlassFallbackAngle,
+          tooltip: 'Flow direction used when the _Outdoors/window gradient is too flat. 0 = left to right, 90 = top to bottom.',
         },
         specularBoost: {
           type: 'slider',
@@ -1465,20 +1682,36 @@ export class WindowLightEffectV2 {
       ? `${maskTex.uuid}|${maskDim?.w ?? 0}x${maskDim?.h ?? 0}`
       : 'none';
     const cloudUuid = this._cloudShadowTex?.uuid ?? 'none';
+    const outdoorsUuid = this._outdoorsMask?.uuid ?? 'none';
     const floor = Number.isFinite(this._renderFloorIndex)
       ? String(Math.floor(this._renderFloorIndex))
       : 'all';
     const todBucket = Math.floor((this._resolveTimelineHour() ?? 0) * 4);
     const p = this.params;
+    const rainActive = p.rainGlassEnabled !== false && Number(this._emitMaterial?.uniforms?.uRainFactor?.value ?? 0) > 0.01;
+    const rainTimeBucket = rainActive
+      ? Math.floor(Number(this._emitMaterial?.uniforms?.uTime?.value ?? 0) * 12)
+      : 0;
     return [
       'full',
       floor,
       maskSig,
       this._emitRtSig,
       cloudUuid,
+      outdoorsUuid,
       todBucket,
+      rainTimeBucket,
       Number(p.intensity ?? 0).toFixed(3),
       p.glassRefractionEnabled !== false ? 1 : 0,
+      p.rainGlassEnabled !== false ? 1 : 0,
+      Number(p.rainGlassWeatherResponse ?? 0).toFixed(2),
+      Number(p.rainGlassStrength ?? 0).toFixed(3),
+      Number(p.rainGlassScale ?? 0).toFixed(0),
+      Number(p.rainGlassStretch ?? 0).toFixed(2),
+      Number(p.rainGlassSpeed ?? 0).toFixed(2),
+      Number(p.rainGlassSlopeInfluence ?? 0).toFixed(2),
+      Number(p.rainGlassSlopeSamplePx ?? 0).toFixed(0),
+      Number(p.rainGlassFallbackAngle ?? 0).toFixed(0),
       p.sparkleEnabled !== false ? 1 : 0,
       Number(p.rgbShiftAmount ?? 0).toFixed(2),
       Number(p.rgbShiftSoftness ?? 0).toFixed(2),
@@ -1756,6 +1989,7 @@ export class WindowLightEffectV2 {
     if (
       paramId === 'glassRefractionEnabled'
       || paramId.startsWith('rgb')
+      || paramId.startsWith('rainGlass')
       || paramId.startsWith('sparkle')
       || paramId === 'specularBoost'
       || paramId.startsWith('lightningWindow')
@@ -1780,8 +2014,15 @@ export class WindowLightEffectV2 {
     }
     if (u.uRgbShiftAmount) u.uRgbShiftAmount.value = Math.max(0.0, Number(p.rgbShiftAmount) || 0);
     if (u.uRgbShiftSoftness) u.uRgbShiftSoftness.value = clamp(Number(p.rgbShiftSoftness) || 0, 0, 1);
-    if (u.uRgbShiftAngle) {
-      u.uRgbShiftAngle.value = (Number(p.rgbShiftAngle) || 0) * (Math.PI / 180.0);
+    if (u.uRgbShiftDir) {
+      let angleRad = (Number(p.rgbShiftAngle) || 0) * (Math.PI / 180.0);
+      if (p.rgbShiftAnimate !== false) {
+        const tAnim = (Number(u.uTime?.value) || 0) * Math.max(0.01, Number(p.rgbShiftAnimSpeed) || 0);
+        const wobbleRad = Math.max(0.0, Number(p.rgbShiftAnimWobbleDeg) || 0) * (Math.PI / 180.0);
+        angleRad += Math.sin(tAnim) * wobbleRad * 1.35;
+        angleRad += Math.sin(tAnim * 1.71 + 0.8) * wobbleRad * 0.62;
+      }
+      u.uRgbShiftDir.value.set(Math.cos(angleRad), Math.sin(angleRad));
     }
     if (u.uRgbShiftSpread) u.uRgbShiftSpread.value = clamp(Number(p.rgbShiftSpread) || 0, 0, 1);
     if (u.uRgbShiftEdgeWeight) u.uRgbShiftEdgeWeight.value = clamp(Number(p.rgbShiftEdgeWeight) || 0, 0, 1);
@@ -1789,6 +2030,24 @@ export class WindowLightEffectV2 {
     if (u.uRgbShiftAnimSpeed) u.uRgbShiftAnimSpeed.value = Math.max(0.0, Number(p.rgbShiftAnimSpeed) || 0);
     if (u.uRgbShiftAnimWobbleDeg) {
       u.uRgbShiftAnimWobbleDeg.value = Math.max(0.0, Number(p.rgbShiftAnimWobbleDeg) || 0);
+    }
+    if (u.uRainGlassEnabled) u.uRainGlassEnabled.value = p.rainGlassEnabled !== false ? 1.0 : 0.0;
+    if (u.uRainGlassWeatherResponse) {
+      u.uRainGlassWeatherResponse.value = Math.max(0.0, Number(p.rainGlassWeatherResponse) || 0);
+    }
+    if (u.uRainGlassStrength) u.uRainGlassStrength.value = Math.max(0.0, Number(p.rainGlassStrength) || 0);
+    if (u.uRainGlassScale) u.uRainGlassScale.value = clamp(Number(p.rainGlassScale) || 90, 8, 240);
+    if (u.uRainGlassStretch) u.uRainGlassStretch.value = clamp(Number(p.rainGlassStretch) || 0.25, 0.05, 1);
+    if (u.uRainGlassSpeed) u.uRainGlassSpeed.value = Math.max(0.0, Number(p.rainGlassSpeed) || 0);
+    if (u.uRainGlassSlopeInfluence) {
+      u.uRainGlassSlopeInfluence.value = clamp(Number(p.rainGlassSlopeInfluence) || 0, 0, 1);
+    }
+    if (u.uRainGlassSlopeSamplePx) {
+      u.uRainGlassSlopeSamplePx.value = clamp(Number(p.rainGlassSlopeSamplePx) || 42, 1, 160);
+    }
+    if (u.uRainGlassFallbackDir) {
+      const angleRad = (Number(p.rainGlassFallbackAngle) || 0) * (Math.PI / 180.0);
+      u.uRainGlassFallbackDir.value.set(Math.cos(angleRad), Math.sin(angleRad));
     }
     if (u.uRgbFringeSaturation) {
       u.uRgbFringeSaturation.value = Math.max(0.0, Number(p.rgbFringeSaturation) || 1);
@@ -1995,7 +2254,17 @@ export class WindowLightEffectV2 {
 
   // ── FloorCompositor hooks ───────────────────────────────────────────────────
 
-  setOutdoorsMask(_mask) {}
+  setOutdoorsMask(mask) {
+    const next = mask ?? null;
+    if (next !== this._outdoorsMask) this._invalidateEmitDrawCache();
+    this._outdoorsMask = next;
+    const u = this._emitMaterial?.uniforms;
+    if (!u) return;
+    const fallback = this._fallbackMaskTex ?? null;
+    if (u.tOutdoorsMask) u.tOutdoorsMask.value = this._outdoorsMask ?? fallback;
+    if (u.uHasOutdoorsMask) u.uHasOutdoorsMask.value = this._outdoorsMask ? 1.0 : 0.0;
+    if (u.uOutdoorsMaskFlipY) u.uOutdoorsMaskFlipY.value = this._outdoorsMask?.flipY ? 1.0 : 0.0;
+  }
   setCloudShadowTexture(texture, screenW, screenH, _viewBounds = null) {
     this._cloudShadowTex = texture ?? null;
     this._invalidateEmitDrawCache();
@@ -2542,12 +2811,14 @@ export class WindowLightEffectV2 {
       saved[key] = slot.value;
     };
     snap('uGlassRefractionEnabled');
+    snap('uRainGlassEnabled');
     snap('uSparkleEnabled');
     snap('uSpecularBoost');
     snap('uLightningWindowEnabled');
     snap('uTodEnabled');
     snap('uCloudInfluence');
     if (u.uGlassRefractionEnabled) u.uGlassRefractionEnabled.value = 0.0;
+    if (u.uRainGlassEnabled) u.uRainGlassEnabled.value = 0.0;
     if (u.uSparkleEnabled) u.uSparkleEnabled.value = 0.0;
     if (u.uSpecularBoost) u.uSpecularBoost.value = 0.0;
     if (u.uLightningWindowEnabled) u.uLightningWindowEnabled.value = 0.0;
@@ -2594,6 +2865,7 @@ export class WindowLightEffectV2 {
         tWindow1: { value: fb },
         tWindow2: { value: fb },
         tWindow3: { value: fb },
+        tOutdoorsMask: { value: fb },
         uHasWindow0: { value: 0.0 },
         uHasWindow1: { value: 0.0 },
         uHasWindow2: { value: 0.0 },
@@ -2602,11 +2874,14 @@ export class WindowLightEffectV2 {
         uWindow1FlipY: { value: 0.0 },
         uWindow2FlipY: { value: 0.0 },
         uWindow3FlipY: { value: 0.0 },
+        uHasOutdoorsMask: { value: 0.0 },
+        uOutdoorsMaskFlipY: { value: 0.0 },
         tFloorIdTex: { value: fb },
         uHasFloorIdTex: { value: 0.0 },
         uFloorIdFlipY: { value: 1.0 },
         uCloudFactor: { value: 1.0 },
         uCloudInfluence: { value: Math.max(0.0, Math.min(1.0, Number(this.params.cloudInfluence) || 0.0)) },
+        uRainFactor: { value: 0.0 },
         uCloudShadowTex: { value: fb },
         uHasCloudShadowTex: { value: 0.0 },
         uCloudShadowContrast: { value: Math.max(0.0, Number(this.params.cloudShadowContrast) || 1.0) },
@@ -2647,12 +2922,21 @@ export class WindowLightEffectV2 {
         uGlassRefractionEnabled: { value: 1.0 },
         uRgbShiftAmount: { value: 4.42 },
         uRgbShiftSoftness: { value: 0.0 },
-        uRgbShiftAngle: { value: 30.0 * (Math.PI / 180.0) },
+        uRgbShiftDir: { value: new THREE.Vector2(Math.cos(30.0 * Math.PI / 180.0), Math.sin(30.0 * Math.PI / 180.0)) },
         uRgbShiftSpread: { value: 0.35 },
         uRgbShiftEdgeWeight: { value: 0.55 },
         uRgbShiftAnimate: { value: 1.0 },
         uRgbShiftAnimSpeed: { value: 0.55 },
         uRgbShiftAnimWobbleDeg: { value: 28.0 },
+        uRainGlassEnabled: { value: 1.0 },
+        uRainGlassWeatherResponse: { value: 1.0 },
+        uRainGlassStrength: { value: 0.045 },
+        uRainGlassScale: { value: 90.0 },
+        uRainGlassStretch: { value: 0.25 },
+        uRainGlassSpeed: { value: 1.2 },
+        uRainGlassSlopeInfluence: { value: 0.85 },
+        uRainGlassSlopeSamplePx: { value: 42.0 },
+        uRainGlassFallbackDir: { value: new THREE.Vector2(0, 1) },
         uRgbFringeSaturation: { value: 1.35 },
         uRgbFringeBalance: { value: new THREE.Vector3(1, 1, 1) },
         uSpecularBoost: { value: 2.0 },
@@ -2821,6 +3105,14 @@ export class WindowLightEffectV2 {
     u.uCloudShadowMinLight.value = Math.max(0.0, Math.min(1.0, Number(this.params.cloudShadowMinLight) || 0.0));
     u.uCloudShadowTex.value = this._cloudShadowTex ?? this._fallbackMaskTex ?? null;
     u.uHasCloudShadowTex.value = this._cloudShadowTex ? 1.0 : 0.0;
+
+    const state = weather?.getCurrentState?.() ?? weather?.currentState ?? {};
+    const precipFactor = Math.max(0.0, Math.min(1.0,
+      Number(env?.precipitationFactor) || Number(env?.stormFactor) || Number(state?.precipitation) || 0.0,
+    ));
+    if (u.uRainFactor) {
+      u.uRainFactor.value = Math.pow(precipFactor, 0.7);
+    }
   }
 
   /** @private Match LightingEffectV2 compose: bilinear view corners + scene rect. */
@@ -3270,6 +3562,10 @@ export class WindowLightEffectV2 {
       u[`uHasSpecular${i}`].value = specValid ? 1.0 : 0.0;
       u[`uSpecular${i}FlipY`].value = (specValid && this._litSpecularMasks[i]?.flipY) ? 1.0 : 0.0;
     }
+
+    if (u.tOutdoorsMask) u.tOutdoorsMask.value = this._outdoorsMask ?? fallback;
+    if (u.uHasOutdoorsMask) u.uHasOutdoorsMask.value = this._outdoorsMask ? 1.0 : 0.0;
+    if (u.uOutdoorsMaskFlipY) u.uOutdoorsMaskFlipY.value = this._outdoorsMask?.flipY ? 1.0 : 0.0;
 
     u.tFloorIdTex.value = this._floorIdTex ?? fallback;
     u.uHasFloorIdTex.value = this._floorIdTex ? 1.0 : 0.0;

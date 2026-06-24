@@ -1562,6 +1562,8 @@ export class SmellyFliesEffect {
 
     if (system.emitter) {
       system.emitter.userData = system.emitter.userData || {};
+      // Render fly particles in the main bus pass (layer 0) so they share
+      // the scene depth buffer and can be occluded by world geometry.
       system.emitter.userData.msOverlayLayer = false;
       const minX = bounds.minX;
       const minY = bounds.minY;
@@ -1573,10 +1575,18 @@ export class SmellyFliesEffect {
         const dx = Math.max(0, maxX - minX);
         const dy = Math.max(0, maxY - minY);
         const r2d = 0.5 * Math.sqrt(dx * dx + dy * dy);
-        system.emitter.userData.msBounds2D = { cx, cy, r2d };
+        const sceneComposer = window.MapShine?.sceneComposer;
+        const groundZ = (sceneComposer && typeof sceneComposer.groundZ === 'number') ? sceneComposer.groundZ : 1000;
+        const flyHeight = cfg?.flying?.flyHeight;
+        const vz = Math.max(200, (typeof flyHeight === 'number' && Number.isFinite(flyHeight)) ? flyHeight * 10 : 800);
+        const cz = groundZ + vz * 0.5;
+        const radius = Math.sqrt(r2d * r2d + (vz * 0.5) * (vz * 0.5));
+        system.emitter.userData.msCullCenter = { x: cx, y: cy, z: cz };
+        system.emitter.userData.msCullRadius = radius;
       }
     }
 
+    if (this.scene) this.scene.add(system.emitter);
     this.batchRenderer.addSystem(system);
     tagQuarkSystem(system, 'smellyFlies', `${shapeKind}/${group.id}`);
 

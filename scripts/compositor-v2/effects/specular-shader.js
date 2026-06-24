@@ -56,6 +56,7 @@ export function getFragmentShader(maxLights = 64) {
     // ── Texture samplers ──────────────────────────────────────────────────────
     uniform sampler2D uAlbedoMap;      // Tile albedo (needed for wet specular + alpha clip)
     uniform sampler2D uSpecularMap;    // _Specular mask (intensity)
+    uniform sampler2D uNoiseTex;       // Tiling noise: R=value, G=voronoi, B=crystalline
 
     // ── Global toggles ────────────────────────────────────────────────────────
     uniform bool uEffectEnabled;
@@ -79,41 +80,17 @@ export function getFragmentShader(maxLights = 64) {
     uniform float uStripeMaskThreshold;
     uniform float uWorldPatternScale;
 
-    // Layer 1
-    uniform bool  uStripe1Enabled;
-    uniform float uStripe1Frequency;
-    uniform float uStripe1Speed;
-    uniform float uStripe1Angle;
-    uniform float uStripe1Width;
-    uniform float uStripe1Intensity;
-    uniform float uStripe1Parallax;
-    uniform float uStripe1Wave;
-    uniform float uStripe1Gaps;
-    uniform float uStripe1Softness;
-
-    // Layer 2
-    uniform bool  uStripe2Enabled;
-    uniform float uStripe2Frequency;
-    uniform float uStripe2Speed;
-    uniform float uStripe2Angle;
-    uniform float uStripe2Width;
-    uniform float uStripe2Intensity;
-    uniform float uStripe2Parallax;
-    uniform float uStripe2Wave;
-    uniform float uStripe2Gaps;
-    uniform float uStripe2Softness;
-
-    // Layer 3
-    uniform bool  uStripe3Enabled;
-    uniform float uStripe3Frequency;
-    uniform float uStripe3Speed;
-    uniform float uStripe3Angle;
-    uniform float uStripe3Width;
-    uniform float uStripe3Intensity;
-    uniform float uStripe3Parallax;
-    uniform float uStripe3Wave;
-    uniform float uStripe3Gaps;
-    uniform float uStripe3Softness;
+    // Per-layer stripe params (precomputed uStripeDir = vec2(cos, sin) in JS)
+    uniform float uStripeLayerEnabled[3];
+    uniform float uStripeFrequency[3];
+    uniform float uStripeSpeed[3];
+    uniform vec2  uStripeDir[3];
+    uniform float uStripeWidth[3];
+    uniform float uStripeIntensity[3];
+    uniform float uStripeParallax[3];
+    uniform float uStripeWave[3];
+    uniform float uStripeGaps[3];
+    uniform float uStripeSoftness[3];
 
     // ── Micro Sparkle ─────────────────────────────────────────────────────────
     uniform bool uSparkleEnabled;
@@ -219,7 +196,7 @@ export function getFragmentShader(maxLights = 64) {
     // Drift speed for wind-driven specular stripe UV (full wind vs legacy uWindAccum damping).
     const float kWindStripeScrollMul = 4.0;
 
-    // ── Noise helpers ─────────────────────────────────────────────────────────
+    // ── Noise helpers (texture-backed — replaces per-pixel simplex) ───────────
 
     float noise1D(float p) {
       return fract(sin(p * 127.1) * 43758.5453);
@@ -240,32 +217,17 @@ export function getFragmentShader(maxLights = 64) {
       return blink * rnd;
     }
 
-    // Simplex 2D noise for stripe distortion and gaps
-    vec3 permute(vec3 x) { return mod(((x*34.0)+1.0)*x, 289.0); }
+    // Seamlessly tiling noise texture samples (R = smooth value, G = voronoi, B = crystalline).
+    float sampleNoiseSigned(vec2 uv) {
+      return texture2D(uNoiseTex, fract(uv)).r * 2.0 - 1.0;
+    }
 
-    float snoise(vec2 v) {
-      const vec4 C = vec4(0.211324865405187, 0.366025403784439,
-                          -0.577350269189626, 0.024390243902439);
-      vec2 i  = floor(v + dot(v, C.yy));
-      vec2 x0 = v - i + dot(i, C.xx);
-      vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
-      vec4 x12 = x0.xyxy + C.xxzz;
-      x12.xy -= i1;
-      i = mod(i, 289.0);
-      vec3 p = permute( permute( i.y + vec3(0.0, i1.y, 1.0 ))
-                      + i.x + vec3(0.0, i1.x, 1.0 ));
-      vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
-      m *= m;
-      m *= m;
-      vec3 x = 2.0 * fract(p * C.www) - 1.0;
-      vec3 h = abs(x) - 0.5;
-      vec3 ox = floor(x + 0.5);
-      vec3 a0 = x - ox;
-      m *= 1.79284291400159 - 0.85373472095314 * (a0*a0 + h*h);
-      vec3 g;
-      g.x  = a0.x  * x0.x  + h.x  * x0.y;
-      g.yz = a0.yz * x12.xz + h.yz * x12.yw;
-      return 130.0 * dot(m, g);
+    float sampleVoronoi01(vec2 uv) {
+      return texture2D(uNoiseTex, fract(uv)).g;
+    }
+
+    float sampleCrystal01(vec2 uv) {
+      return texture2D(uNoiseTex, fract(uv)).b;
     }
 
     // _Outdoors RTs store full RGBA (GpuSceneMaskCompositor source-over). Authors often use
@@ -298,7 +260,7 @@ export function getFragmentShader(maxLights = 64) {
       float time,
       float frequency,
       float speed,
-      float angle,
+      vec2 stripeDir,
       float width,
       float parallaxDepth,
       float parallaxStrength,
@@ -320,19 +282,16 @@ export function getFragmentShader(maxLights = 64) {
         parallaxUv -= offset;
       }
 
-      // Waviness distortion
+      // Waviness distortion (texture noise replaces simplex)
       if (wave > 0.0) {
-        float waveNoise = snoise(parallaxUv * 2.0 + timeAnim * (0.1 * speedAnimScale));
+        float waveNoise = sampleNoiseSigned(parallaxUv * 2.0 + timeAnim * (0.1 * speedAnimScale));
         parallaxUv += waveNoise * wave * 0.05;
       }
 
-      // Rotate UV by angle
-      float rad = radians(angle);
-      float cosA = cos(rad);
-      float sinA = sin(rad);
+      // Rotate UV by precomputed direction vector (cos/sin from JS)
       vec2 rotUv = vec2(
-        parallaxUv.x * cosA - parallaxUv.y * sinA,
-        parallaxUv.x * sinA + parallaxUv.y * cosA
+        parallaxUv.x * stripeDir.x - parallaxUv.y * stripeDir.y,
+        parallaxUv.x * stripeDir.y + parallaxUv.y * stripeDir.x
       );
 
       // Band-axis scroll: each layer uses a different stripe angle, so timeAnim*speed slides bands in
@@ -365,9 +324,9 @@ export function getFragmentShader(maxLights = 64) {
       float pulse = 0.9 + 0.1 * sin(timeAnim * (0.7 * speedAnimScale) + frequency * 1.23);
       stripePattern *= pulse;
 
-      // Gap breakup
+      // Gap breakup (texture noise)
       if (gaps > 0.0) {
-        float gapNoise = snoise(rotUv * 5.0 + timeAnim * (0.2 * speedAnimScale));
+        float gapNoise = sampleNoiseSigned(rotUv * 5.0 + timeAnim * (0.2 * speedAnimScale));
         float normNoise = gapNoise * 0.5 + 0.5;
         float gapMask = smoothstep(gaps, gaps + 0.2, normNoise);
         stripePattern *= gapMask;
@@ -407,8 +366,11 @@ export function getFragmentShader(maxLights = 64) {
 
     // Analytic disk contribution (Foundry + player specular lights share this falloff).
     vec3 msSpecularDiskContrib(vec3 lPos, vec3 lColor, float radius, float brightRadius, float attenuation) {
-      float dist = distance(vWorldPosition.xy, lPos.xy);
-      if (dist < radius) {
+      vec2 diff = vWorldPosition.xy - lPos.xy;
+      float distSq = dot(diff, diff);
+      float radiusSq = radius * radius;
+      if (distSq < radiusSq) {
+        float dist = sqrt(distSq);
         float d = dist / max(radius, 1e-5);
         float inner = (radius > 0.0) ? clamp(brightRadius / radius, 0.0, 0.99) : 0.0;
         float falloff = 1.0 - smoothstep(inner, 1.0, d);
@@ -456,9 +418,12 @@ export function getFragmentShader(maxLights = 64) {
         float brightRadius = lightConfig[i].y;
         float attenuation = lightConfig[i].z;
 
-        float dist = distance(vWorldPosition.xy, lPos.xy);
+        vec2 diff = vWorldPosition.xy - lPos.xy;
+        float distSq = dot(diff, diff);
+        float radiusSq = radius * radius;
 
-        if (dist < radius) {
+        if (distSq < radiusSq) {
+          float dist = sqrt(distSq);
           float d = dist / max(radius, 1e-5);
           // Inner edge of falloff = bright core as a fraction of outer radius (Foundry bright/dim).
           float inner = (radius > 0.0) ? clamp(brightRadius / radius, 0.0, 0.99) : 0.0;
@@ -537,7 +502,10 @@ export function getFragmentShader(maxLights = 64) {
       // ── Wet surface mask ──────────────────────────────────────────────────
       float wetMask = 0.0;
       if (uWetSpecularEnabled && uRainWetness > 0.001) {
-        float gray = dot(albedo.rgb, vec3(0.299, 0.587, 0.114));
+        // Target bright, fairly neutral highlights — not every mid-tone or saturated color.
+        float lum = dot(albedo.rgb, vec3(0.299, 0.587, 0.114));
+        float whiteness = min(albedo.r, min(albedo.g, albedo.b));
+        float gray = lum * smoothstep(0.08, 0.32, whiteness);
         gray = clamp(gray + uWetInputBrightness, 0.0, 1.0);
         gray = pow(gray, max(uWetInputGamma, 0.01));
         float contrasted = clamp((gray - 0.5) * uWetSpecularContrast + 0.5, 0.0, 1.0);
@@ -579,41 +547,41 @@ export function getFragmentShader(maxLights = 64) {
         float layer2 = 0.0;
         float layer3 = 0.0;
 
-        if (uStripe1Enabled) {
+        if (uStripeLayerEnabled[0] > 0.5) {
           layer1 = generateStripeLayer(
             stripePatternUv, vWorldPosition, uCameraPosition, uTime,
-            uStripe1Frequency, uStripe1Speed, uStripe1Angle,
-            uStripe1Width, uStripe1Parallax, uParallaxStrength,
-            uStripe1Wave, uStripe1Gaps, uStripe1Softness,
+            uStripeFrequency[0], uStripeSpeed[0], uStripeDir[0],
+            uStripeWidth[0], uStripeParallax[0], uParallaxStrength,
+            uStripeWave[0], uStripeGaps[0], uStripeSoftness[0],
             outdoorFactor
-          ) * uStripe1Intensity;
+          ) * uStripeIntensity[0];
         }
 
-        if (uStripe2Enabled) {
+        if (uStripeLayerEnabled[1] > 0.5) {
           layer2 = generateStripeLayer(
             stripePatternUv, vWorldPosition, uCameraPosition, uTime,
-            uStripe2Frequency, uStripe2Speed, uStripe2Angle,
-            uStripe2Width, uStripe2Parallax, uParallaxStrength,
-            uStripe2Wave, uStripe2Gaps, uStripe2Softness,
+            uStripeFrequency[1], uStripeSpeed[1], uStripeDir[1],
+            uStripeWidth[1], uStripeParallax[1], uParallaxStrength,
+            uStripeWave[1], uStripeGaps[1], uStripeSoftness[1],
             outdoorFactor
-          ) * uStripe2Intensity;
+          ) * uStripeIntensity[1];
         }
 
-        if (uStripe3Enabled) {
+        if (uStripeLayerEnabled[2] > 0.5) {
           layer3 = generateStripeLayer(
             stripePatternUv, vWorldPosition, uCameraPosition, uTime,
-            uStripe3Frequency, uStripe3Speed, uStripe3Angle,
-            uStripe3Width, uStripe3Parallax, uParallaxStrength,
-            uStripe3Wave, uStripe3Gaps, uStripe3Softness,
+            uStripeFrequency[2], uStripeSpeed[2], uStripeDir[2],
+            uStripeWidth[2], uStripeParallax[2], uParallaxStrength,
+            uStripeWave[2], uStripeGaps[2], uStripeSoftness[2],
             outdoorFactor
-          ) * uStripe3Intensity;
+          ) * uStripeIntensity[2];
         }
 
         stripeMaskAnimated = layer1;
-        if (uStripe2Enabled) {
+        if (uStripeLayerEnabled[1] > 0.5) {
           stripeMaskAnimated = blendMode(stripeMaskAnimated, layer2, uStripeBlendMode);
         }
-        if (uStripe3Enabled) {
+        if (uStripeLayerEnabled[2] > 0.5) {
           stripeMaskAnimated = blendMode(stripeMaskAnimated, layer3, uStripeBlendMode);
         }
       }
@@ -668,21 +636,23 @@ export function getFragmentShader(maxLights = 64) {
         * totalModulator * uSpecularIntensity
         * effectiveLightColor * totalIncidentLight * buildingShadowFactor;
 
-      // ── Wind ripple (wet surfaces only) ───────────────────────────────────
+      // ── Wind ripple (wet surfaces only) — dual-panned voronoi caustics ─────
       float windRipple = 0.0;
       if (uWindDrivenStripesEnabled && uWindStripeInfluence > 0.0
           && uRainWetness > 0.001 && outdoorFactor > 0.01) {
         vec2 windUv = worldPatternUv + uWindAccum * uWindStripeInfluence;
-        float ripple1 = snoise(windUv * 8.0) * 0.6;
-        float ripple2 = snoise(windUv * 16.0 + 3.7) * 0.4;
-        windRipple = max(0.0, ripple1 + ripple2) * outdoorFactor;
+        float t = uTime * 0.04;
+        vec2 vorUv1 = windUv * 8.0 + vec2(t, -t * 0.7);
+        vec2 vorUv2 = windUv * 8.0 + vec2(-t * 0.6, t);
+        float ripple1 = sampleVoronoi01(vorUv1);
+        float ripple2 = sampleVoronoi01(vorUv2);
+        windRipple = max(0.0, ripple1 * ripple2 * 4.0 - 0.5) * outdoorFactor;
       }
 
       // ── Wet specular ─────────────────────────────────────────────────────
-      // Keep a baseline outdoor sheen so wetness reads even when stripe/cloud
-      // modulators are subtle, then layer animated effects on top.
-      float wetBase = max(0.0, uWetBaseSheen) * outdoorFactor;
-      float wetEffects = wetBase + effectsOnly + (windRipple * max(0.0, uWetWindRippleStrength));
+      // Layer animated effects on top; wetMask (from albedo highlights) gates all terms.
+      float wetEffects = effectsOnly + (windRipple * max(0.0, uWetWindRippleStrength));
+      wetEffects += max(0.0, uWetBaseSheen) * outdoorFactor;
       vec3 wetSpecularColor = vec3(wetMask) * wetEffects * uWetSpecularIntensity
         * effectiveLightColor * totalIncidentLight * buildingShadowFactor;
 
@@ -697,7 +667,9 @@ export function getFragmentShader(maxLights = 64) {
       if (uFrostGlazeEnabled && uFrostLevel > 0.001) {
         vec3 frostTint = mix(vec3(1.0), vec3(0.75, 0.88, 1.0), uFrostTintStrength);
         float frostMask = max(specularStrength, wetMask) * outdoorFactor * uFrostLevel;
-        frostSpecularColor = frostTint * frostMask * uFrostIntensity
+        float frostCrystal = sampleCrystal01(worldPatternUv * 24.0);
+        frostCrystal = mix(0.55, 1.0, frostCrystal);
+        frostSpecularColor = frostTint * frostMask * frostCrystal * uFrostIntensity
           * totalIncidentLight * buildingShadowFactor;
       }
 

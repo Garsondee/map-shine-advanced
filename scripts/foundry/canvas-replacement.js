@@ -10069,19 +10069,30 @@ async function createThreeCanvas(scene, createOptions = {}) {
     }
     _sectionEnd('fin.waitForTiles');
 
-    // With shaders pre-compiled (Step 7.5), the first render frame should be
-    // fast (~10-50ms). We only need 3 stable frames to confirm the renderer is
-    // healthy ->-> down from 6 frames / 12s timeout when compilation happened here.
-    //
-    // BULLET-PROOF DESIGN: previous versions used dlp.event() inside the
-    // setTimeout callback. If dlp.event() threw, the resolve callback was
-    // never reached and Promise.race hung for 10+ minutes. Now:
-    //   1. Timeout promise resolves FIRST, before any logging
-    //   2. framePromise has .catch() so rejections don't propagate
-    //   3. Outer try/catch ensures _sectionEnd is always called
-    stepLog(' -> Step: waitForThreeFrames SKIPPED (V2)');
-    try { dlp.event('fin.waitForThreeFrames: SKIPPED (V2)', 'warn'); } catch (_) {}
-    if (isDebugLoad) { try { dlp.end('fin.waitForThreeFrames', { skipped: true, v2: true }); } catch (_) {} }
+    // Confirm the render loop has produced stable frames before floor preload /
+    // shader warmup. The scene-transition curtain also waits for valid compositor
+    // inputs at reveal time, but an early proof-of-render prevents lifting the
+    // overlay during first-frame stutter when later steps are skipped or fast-path.
+    _sectionStart('fin.waitForThreeFrames');
+    stepLog(' -> Step: waitForThreeFrames');
+    if (isDebugLoad) dlp.begin('fin.waitForThreeFrames', 'finalize');
+    await safeCallAsync(async () => {
+      const rl = window.MapShine?.renderLoop ?? renderLoop;
+      try {
+        rl?.requestContinuousRender?.(3000);
+        rl?.requestRender?.();
+      } catch (_) {}
+      const ok = await waitForThreeFrames(renderer, rl, 3, 8000, {
+        minCalls: 1,
+        minDelayMs: 50,
+        stableCallsFrames: 2,
+      });
+      if (!ok) {
+        log.warn('fin.waitForThreeFrames: timed out — curtain will wait for valid frame inputs at reveal');
+      }
+    }, 'fin.waitForThreeFrames', Severity.DEGRADED);
+    if (isDebugLoad) dlp.end('fin.waitForThreeFrames');
+    stepLog(' -> Step: waitForThreeFrames DONE');
     _sectionEnd('fin.waitForThreeFrames');
 
     // V2: Time-of-day drives lighting/sky/shadow effects ->-> skip.
@@ -10466,11 +10477,13 @@ async function createThreeCanvas(scene, createOptions = {}) {
 
         const presentation = loadingOverlay.getPresentationTimings?.() ?? {};
 
-        const revealOpts = sceneTransitionCurtain.isActive?.()
-          ? { fast: true, holdMs: 0, finalMessage: readyMsg }
-          : { finalMessage: readyMsg };
+        const revealOpts = { finalMessage: readyMsg };
 
         if (introZoomEffect.isEnabled()) {
+          await sceneTransitionCurtain.awaitSceneReady().catch((err) => {
+            log.warn('introZoom: scene-ready wait failed (continuing)', err);
+          });
+
           await Promise.race([
             loadingOverlay.hidePanel?.(presentation.panelOutFadeMs ?? 4000),
             new Promise((r) => setTimeout(r, (presentation.panelOutFadeMs ?? 4000) + 500)),
@@ -10496,7 +10509,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
             unblockIntroInput();
           }
 
-          await sceneTransitionCurtain.reveal(revealOpts).catch(() => {});
+          await sceneTransitionCurtain.reveal({ ...revealOpts, sceneReady: true }).catch(() => {});
         } else {
           await sceneTransitionCurtain.reveal(revealOpts).catch(() => {});
         }

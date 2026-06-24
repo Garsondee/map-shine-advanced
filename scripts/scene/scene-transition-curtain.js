@@ -9,15 +9,23 @@
  *   cover()       → fade to solid black (content hidden)
  *   revealPanel() → after assets presentable, fade loading UI in
  *   (load runs, progress updates)
- *   reveal()      → min visible + progress settle + hold → panel out → scene in
+ *   reveal()      → min visible + progress settle + hold → full compositor ready → panel out → scene in
  *
  * @module scene/scene-transition-curtain
  */
 
 import { createLogger } from '../core/log.js';
+import { getShaderCompileMonitor } from '../core/diagnostics/ShaderCompileMonitor.js';
 import { loadingScreenService as loadingOverlay } from '../ui/loading-screen/loading-screen-service.js';
+import { getTileStreamingManager } from '../streaming/tile-streaming-manager.js';
 
 const log = createLogger('SceneTransitionCurtain');
+
+const SCENE_READY_TIMEOUT_MS = 20000;
+const SCENE_READY_POLL_MS = 50;
+const SCENE_READY_STABLE_POLLS = 6;
+const SCENE_STREAMING_PREFETCH_MS = 2500;
+const SCENE_COMPILED_PROGRAMS_STABLE_POLLS = 6;
 
 /**
  * Coordinates the loading overlay around full Foundry scene switches.
@@ -221,12 +229,14 @@ export class SceneTransitionCurtain {
    * @param {number} [options.panelOutMs]
    * @param {number} [options.revealMs]
    * @param {string} [options.finalMessage]
-   * @param {boolean} [options.fast=false] Skip min-visible and progress-settle gates
+   * @param {boolean} [options.fast=false] Skip min-visible, progress-settle, and scene-ready gates
+   * @param {boolean} [options.sceneReady=false] Skip scene-ready wait when caller already ran {@link #awaitSceneReady}
    * @returns {Promise<void>}
    */
   async reveal(options = undefined) {
     const timings = loadingOverlay.getPresentationTimings?.() ?? {};
     const fast = options?.fast === true;
+    const sceneReady = options?.sceneReady === true;
     const holdMs = Number.isFinite(options?.holdMs)
       ? options.holdMs
       : (fast ? 0 : timings.readyHoldMs ?? 800);
@@ -271,6 +281,15 @@ export class SceneTransitionCurtain {
 
         if (holdMs > 0) {
           await this._sleep(holdMs);
+          if (token !== this._token) return;
+        }
+
+        if (!fast && !sceneReady) {
+          try {
+            await this._waitForSceneReady();
+          } catch (err) {
+            log.warn('reveal() scene-ready wait error (continuing)', err);
+          }
           if (token !== this._token) return;
         }
 
@@ -332,6 +351,283 @@ export class SceneTransitionCurtain {
 
   _sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+  }
+
+  /**
+   * Wait until the compositor can produce full (non-slim) frames behind the
+   * curtain. Public entry for callers (e.g. intro zoom) that dismiss UI before
+   * {@link #reveal}.
+   *
+   * @returns {Promise<void>}
+   */
+  async awaitSceneReady() {
+    return this._waitForSceneReady();
+  }
+
+  /**
+   * Wait until the compositor can produce full (non-slim) frames behind the
+   * curtain. While `__msaSceneLoading` is true the FloorCompositor stays on the
+   * load-slim path and `_validateFrameInputs()` reports valid too early — that
+   * is the main reason the curtain was lifting before the scene looked ready.
+   *
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _waitForSceneReady() {
+    const deadline = performance.now() + SCENE_READY_TIMEOUT_MS;
+    const fc = window.MapShine?.floorCompositorV2
+      ?? window.MapShine?.effectComposer?._floorCompositorV2
+      ?? null;
+    const renderer = window.MapShine?.renderer ?? null;
+    const canValidate = fc && typeof fc._validateFrameInputs === 'function';
+
+    // Release the load-slim render gate so full compositor frames can run
+    // behind the black curtain before we fade clear.
+    try {
+      if (window.MapShine) window.MapShine.__msaSceneLoading = false;
+    } catch (_) {}
+
+    let populateStable = 0;
+    let fullPathStable = 0;
+    let inputsStable = 0;
+    let programsStable = 0;
+    let programsReadyTotal = -1;
+    let renderCallsStable = 0;
+    let lastInputReason = null;
+    const startRenderFrame = renderer?.info?.render?.frame;
+    const startRenderCalls = renderer?.info?.render?.calls;
+
+    while (performance.now() < deadline) {
+      this._keepRendering(4000);
+      await this._pumpCompositorFrames(1);
+
+      if (fc?._populateComplete === true) {
+        populateStable += 1;
+      } else {
+        populateStable = 0;
+      }
+
+      if (this._isFullCompositorFrameReady(fc)) {
+        fullPathStable += 1;
+      } else {
+        fullPathStable = 0;
+      }
+
+      if (canValidate && fullPathStable >= 2) {
+        let valid = false;
+        let reason = null;
+        try {
+          const probe = fc._validateFrameInputs();
+          valid = probe?.valid === true;
+          reason = probe?.reason ?? null;
+        } catch (_) {}
+
+        if (valid) {
+          inputsStable += 1;
+        } else {
+          inputsStable = 0;
+          lastInputReason = reason;
+        }
+      } else {
+        inputsStable = 0;
+      }
+
+      const programs = renderer?.info?.programs ?? [];
+      const totalPrograms = programs.length;
+      let readyPrograms = 0;
+      for (const p of programs) {
+        try {
+          readyPrograms += (typeof p?.isReady === 'function') ? (p.isReady() ? 1 : 0) : 1;
+        } catch (_) {
+          readyPrograms += 1;
+        }
+      }
+      const allProgramsReady = totalPrograms <= 0 ? true : (readyPrograms >= totalPrograms);
+      if (allProgramsReady) {
+        if (programsReadyTotal === totalPrograms) programsStable += 1;
+        else {
+          programsReadyTotal = totalPrograms;
+          programsStable = 1;
+        }
+      } else {
+        programsStable = 0;
+        programsReadyTotal = -1;
+      }
+
+      let shaderIdle = true;
+      try {
+        shaderIdle = (Number(getShaderCompileMonitor().getStats().activeCompiles) || 0) <= 0;
+      } catch (_) {}
+
+      const calls = renderer?.info?.render?.calls;
+      const frame = renderer?.info?.render?.frame;
+      const drewFrame = Number.isFinite(startRenderFrame) && Number.isFinite(frame)
+        ? (frame > startRenderFrame)
+        : true;
+      const drewCalls = Number.isFinite(startRenderCalls) && Number.isFinite(calls)
+        ? (calls > startRenderCalls)
+        : Number.isFinite(calls) && calls > 0;
+      if (drewFrame && drewCalls && shaderIdle) {
+        renderCallsStable += 1;
+      } else {
+        renderCallsStable = 0;
+      }
+
+      const ready = !fc
+        ? (renderCallsStable >= 3)
+        : (
+          populateStable >= 2
+          && fullPathStable >= 2
+          && (!canValidate || inputsStable >= SCENE_READY_STABLE_POLLS)
+          && programsStable >= SCENE_COMPILED_PROGRAMS_STABLE_POLLS
+          && renderCallsStable >= 2
+        );
+
+      if (ready) {
+        log.debug('Scene ready for curtain reveal', {
+          populateStable,
+          fullPathStable,
+          inputsStable,
+          programsStable,
+          renderCallsStable,
+        });
+        break;
+      }
+
+      await this._sleep(SCENE_READY_POLL_MS);
+    }
+
+    if (performance.now() >= deadline) {
+      log.warn('Scene-ready wait timed out before full compositor frames — revealing anyway', {
+        populateComplete: fc?._populateComplete === true,
+        renderPath: window.MapShine?.__v2CompositorRenderPath ?? null,
+        lastInputReason,
+        inputsStable,
+        programsStable,
+        renderCallsStable,
+      });
+    }
+
+    const streaming = getTileStreamingManager?.();
+    if (streaming?.hasActiveStreaming?.()) {
+      const remainingMs = Math.max(50, Math.min(
+        SCENE_STREAMING_PREFETCH_MS,
+        deadline - performance.now(),
+      ));
+      if (remainingMs > 50) {
+        try {
+          await streaming.prefetchDuringLevelTransitionAsync({
+            timeoutMs: remainingMs,
+            minSteps: 4,
+          });
+        } catch (err) {
+          log.debug('Streaming prefetch during scene reveal failed', err);
+        }
+      }
+    }
+
+    this._keepRendering(2000);
+    await this._pumpCompositorFrames(4);
+    await this._awaitRenderFrames(3);
+  }
+
+  /**
+   * True when the compositor has left load/populate-slim mode and can run the
+   * full effect + post chain for the next on-screen frame.
+   *
+   * @param {object|null} fc
+   * @returns {boolean}
+   * @private
+   */
+  _isFullCompositorFrameReady(fc) {
+    if (!fc) return false;
+    if (fc._populateComplete !== true) return false;
+    if (fc._shaderWarmupGateOpen !== true) return false;
+    if (typeof fc._populateSlimRenderActive === 'function' && fc._populateSlimRenderActive()) {
+      return false;
+    }
+    return window.MapShine?.__v2CompositorRenderPath === 'full';
+  }
+
+  /** @private */
+  _keepRendering(continuousMs = 2000) {
+    try {
+      const ms = window.MapShine;
+      ms?.depthPassManager?.invalidate?.();
+      ms?.renderLoop?.requestRender?.();
+      ms?.renderLoop?.requestContinuousRender?.(Math.max(500, continuousMs));
+    } catch (_) {}
+  }
+
+  /**
+   * @param {number} [count=1]
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _pumpCompositorFrames(count = 1) {
+    const n = Math.max(1, Math.min(8, Math.floor(Number(count) || 1)));
+    const rl = window.MapShine?.renderLoop;
+    if (!rl) return;
+
+    const streaming = getTileStreamingManager?.();
+
+    for (let i = 0; i < n; i++) {
+      try {
+        streaming?.pumpStreamingSync?.();
+      } catch (_) {}
+      try {
+        if (typeof rl.pumpBackgroundLoadFrame === 'function') {
+          rl.pumpBackgroundLoadFrame();
+        } else {
+          rl.requestRender?.();
+        }
+      } catch (_) {}
+      await this._sleep(0);
+    }
+    try {
+      rl.requestContinuousRender?.(Math.max(1200, n * 400));
+      rl.requestRender?.();
+    } catch (_) {}
+  }
+
+  /**
+   * @param {number} [count=1]
+   * @returns {Promise<void>}
+   * @private
+   */
+  _awaitRenderFrames(count = 1) {
+    const n = Math.max(1, Math.floor(count));
+    return new Promise((resolve) => {
+      let remaining = n;
+      const tick = () => {
+        remaining -= 1;
+        if (remaining <= 0) {
+          resolve();
+          return;
+        }
+        scheduleNext();
+      };
+      const scheduleNext = () => {
+        let advanced = false;
+        const advance = () => {
+          if (advanced) return;
+          advanced = true;
+          tick();
+        };
+        try {
+          requestAnimationFrame(advance);
+        } catch (_) {}
+        const hidden = (() => {
+          try {
+            return typeof document !== 'undefined' && document.hidden === true;
+          } catch (_) {
+            return false;
+          }
+        })();
+        setTimeout(advance, hidden ? 100 : 250);
+      };
+      scheduleNext();
+    });
   }
 }
 

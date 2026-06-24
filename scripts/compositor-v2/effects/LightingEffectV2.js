@@ -42,8 +42,8 @@
  * ShadowManagerV2 owns the combined factor.
  *
  * **Point light gain (`lightIntensity`):** Base `uComposeLightGain` on torch/flash and Foundry meshes.
- * **Foundry lamp boost (`foundryLightBrightness` / `foundryLightColorBoost`):** Extra gain and CI
- *   push on Foundry AmbientLight meshes only — candle/fire glow and window light unaffected.
+ * **Foundry lamp boost (day / twilight / night):** Per-phase brightness and colour on
+ *   Foundry AmbientLight meshes only — candle/fire glow and window light unaffected.
  * Falloff uses {@link POINT_LIGHT_FALLOFF_GLSL}. Buffer RGB = Foundry tinted colour
  * (`lampHue × CI gel × mag`); alpha = mag. Compose: additive HDR `totalIllum = ambient + direct`
  * where direct uses lamp mag only; day/night ambient from Foundry env × ambientDay/Night scales.
@@ -62,6 +62,8 @@ import { createLightingPerspectiveContext } from '../LightingPerspectiveContext.
 import {
   computeTimeOfDayDarkness01,
   getFoundrySunlightFactor,
+  getFoundryTimePhaseHours,
+  getWrappedHourProgress,
 } from '../../core/foundry-time-phases.js';
 import { getAuthoritativeAmbientLightDocuments } from '../../foundry/ambient-light-documents.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
@@ -85,7 +87,7 @@ import {
   MAP_POINT_RENDER_LAYER_ABOVE,
   MAP_POINT_RENDER_LAYER_BELOW,
 } from '../../scene/map-points-manager.js';
-import { TWILIGHT_AMBIENT_DEFAULTS } from './ambient-compose-cpu.js';
+import { TWILIGHT_AMBIENT_DEFAULTS, resolveTwilightDarkness01 } from './ambient-compose-cpu.js';
 
 const log = createLogger('LightingEffectV2');
 const MODULE_ID = 'map-shine-advanced';
@@ -112,6 +114,28 @@ const LEGACY_LIGHTING_PARAM_KEYS = [
 ];
 
 const clamp01 = (n) => Math.max(0, Math.min(1, n));
+
+/** Smooth 0..1 step for foundry-lamp day/twilight/night phase weights. */
+const smoothstep01 = (edge0, edge1, x) => {
+  const t = clamp01((x - edge0) / Math.max(1e-5, edge1 - edge0));
+  return t * t * (3 - 2 * t);
+};
+
+/** Param keys that re-push Foundry-lamp phase uniforms (brightness + colour, all phases). */
+const FOUNDRY_LAMP_PHASE_PARAM_KEYS = [
+  'foundryLightBrightnessDay',
+  'foundryLightBrightnessTwilight',
+  'foundryLightBrightnessNight',
+  'foundryLightColorBoostDay',
+  'foundryLightColorBoostTwilight',
+  'foundryLightColorBoostNight',
+];
+
+/** Legacy single-knob Foundry lamp params — migrated to day/twilight/night triplets. */
+const LEGACY_FOUNDRY_LAMP_PARAM_KEYS = [
+  'foundryLightBrightness',
+  'foundryLightColorBoost',
+];
 
 /** Compose-time defaults when saved ambient scales are all zero (uniform-only; does not mutate params). */
 const MSA_AMBIENT_COMPOSE_DEFAULTS = Object.freeze({
@@ -205,6 +229,8 @@ export class LightingEffectV2 {
     this._legacyGlobalIlluminationSeeded = false;
     /** @type {boolean} */
     this._splitAmbientParamsMigrated = false;
+    /** @type {boolean} */
+    this._foundryLampPhaseParamsMigrated = false;
     /** @type {{ dayOutdoor: number, dayIndoor: number, nightOutdoor: number, nightIndoor: number, minIllum: number }} */
     this._ambientScalesOut = { dayOutdoor: 0, dayIndoor: 0, nightOutdoor: 0, nightIndoor: 0, minIllum: 0 };
 
@@ -237,10 +263,12 @@ export class LightingEffectV2 {
       /** Daylight-hours minimum-light floor strength — indoor. */
       twilightMinLightKeepIndoor: TWILIGHT_AMBIENT_DEFAULTS.minLightKeepIndoor,
       lightIntensity: 1,
-      /** Extra brightness on Foundry AmbientLight meshes only (not candle/fire glow). */
-      foundryLightBrightness: 1,
-      /** Extra CI / chroma on Foundry AmbientLight meshes only. */
-      foundryLightColorBoost: 1,
+      foundryLightBrightnessDay: 1,
+      foundryLightBrightnessTwilight: 1,
+      foundryLightBrightnessNight: 1,
+      foundryLightColorBoostDay: 1,
+      foundryLightColorBoostTwilight: 1,
+      foundryLightColorBoostNight: 1,
       /** Half-life falloff: normalized radius per halving at Foundry attenuation 0 (gentle). */
       falloffHalfInAtAtt0: 0.15,
       /** Foundry zone hardness at attenuation 1 (bright ring); larger = softer, fills radius. */
@@ -1230,16 +1258,21 @@ export class LightingEffectV2 {
     this._paramsDirty = true;
     if (
       paramId === 'lightIntensity'
-      || paramId === 'foundryLightBrightness'
-      || paramId === 'foundryLightColorBoost'
+      || FOUNDRY_LAMP_PHASE_PARAM_KEYS.includes(paramId)
       || paramId === 'colorationStrength'
       || paramId === 'colorationMixScale'
       || paramId === 'colorationMaxMix'
       || paramId === 'colorationReflectivity'
     ) {
+      this._lightBufferUniformsDirty = true;
       this._pushLightBufferUniformsToMeshes();
     }
-    if (paramId === 'foundryLightBrightness') this._invalidateLightMaskPrepassCache();
+    if (
+      FOUNDRY_LAMP_PHASE_PARAM_KEYS.includes(paramId)
+      || paramId === 'lightIntensity'
+    ) {
+      this._invalidateLightMaskPrepassCache();
+    }
     if (POINT_LIGHT_FALLOFF_PARAM_KEYS.includes(paramId)) this._pushPointLightFalloffUniforms();
     if (paramId === 'wallInsetPx' || paramId === 'wallPaddingPx') this.syncAllLights();
   }
@@ -1256,7 +1289,11 @@ export class LightingEffectV2 {
     if (!u) return;
 
     this._seedAmbientFromLegacyGlobalIfNeeded();
+    this._seedFoundryLampPhaseParamsIfNeeded();
     for (const k of LEGACY_LIGHTING_PARAM_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(this.params, k)) delete this.params[k];
+    }
+    for (const k of LEGACY_FOUNDRY_LAMP_PARAM_KEYS) {
       if (Object.prototype.hasOwnProperty.call(this.params, k)) delete this.params[k];
     }
     this._pushEffectiveAmbientUniforms(u);
@@ -1995,9 +2032,9 @@ export class LightingEffectV2 {
           'Point light gain':
             'Base emission multiplier on torch/flash and Foundry lamps before `_lightRT`. Use Foundry lamps for extra brightness/colour on scene AmbientLights only.',
           'Foundry lamp brightness':
-            'Extra multiplier on Foundry AmbientLight meshes only. Does not affect candle/fire glow, window glow, or player torch.',
+            'Per-phase extra multiplier on Foundry AmbientLight meshes. Blends by calendar hour (day at noon, twilight at dawn/dusk, night at midnight).',
           'Foundry lamp colour':
-            'Pushes Foundry Color Intensity (gel) on AmbientLight meshes only. Does not affect candle/fire glow.',
+            'Per-phase CI / chroma push on Foundry AmbientLight meshes. Does not affect candle or fire glow.',
           'Minimum light floor': 'Safety floor that prevents pure-black collapse without replacing actual lights.'
         },
       },
@@ -2029,13 +2066,33 @@ export class LightingEffectV2 {
           ],
         },
         {
-          name: 'foundryLamps',
-          label: 'Foundry lamps',
+          name: 'foundryLampsDay',
+          label: 'Foundry lamps — Day',
           type: 'folder',
           expanded: true,
           parameters: [
-            'foundryLightBrightness',
-            'foundryLightColorBoost',
+            'foundryLightBrightnessDay',
+            'foundryLightColorBoostDay',
+          ],
+        },
+        {
+          name: 'foundryLampsTwilight',
+          label: 'Foundry lamps — Twilight',
+          type: 'folder',
+          expanded: true,
+          parameters: [
+            'foundryLightBrightnessTwilight',
+            'foundryLightColorBoostTwilight',
+          ],
+        },
+        {
+          name: 'foundryLampsNight',
+          label: 'Foundry lamps — Night',
+          type: 'folder',
+          expanded: true,
+          parameters: [
+            'foundryLightBrightnessNight',
+            'foundryLightColorBoostNight',
           ],
         },
         {
@@ -2282,7 +2339,7 @@ export class LightingEffectV2 {
           label: 'Min-light keep — indoor',
           tooltip: 'Same floor boost for indoor pixels during daylight hours.',
         },
-        foundryLightBrightness: {
+        foundryLightBrightnessDay: {
           type: 'slider',
           min: 0,
           max: 16,
@@ -2290,7 +2347,64 @@ export class LightingEffectV2 {
           default: 1,
           label: 'Brightness boost',
           tooltip:
-            'Extra emission multiplier on Foundry AmbientLight meshes only (`uFoundryLightGain`). Stacks with Player / shared gain. Does not affect candle or fire glow, window glow, or player torch.',
+            'Foundry AmbientLight emission near solar noon. Does not affect candle/fire glow, window glow, or player torch.',
+        },
+        foundryLightColorBoostDay: {
+          type: 'slider',
+          min: 0,
+          max: 8,
+          step: 0.05,
+          default: 1,
+          label: 'Colour boost',
+          tooltip: 'Foundry Color Intensity (gel) near solar noon on AmbientLight meshes only.',
+        },
+        foundryLightBrightnessTwilight: {
+          type: 'slider',
+          min: 0,
+          max: 16,
+          step: 0.05,
+          default: 1,
+          label: 'Brightness boost',
+          tooltip:
+            'Foundry AmbientLight emission at dawn and dusk (horizon hours). Blends smoothly into day and night.',
+        },
+        foundryLightColorBoostTwilight: {
+          type: 'slider',
+          min: 0,
+          max: 8,
+          step: 0.05,
+          default: 1,
+          label: 'Colour boost',
+          tooltip: 'Foundry Color Intensity (gel) at dawn and dusk on AmbientLight meshes only.',
+        },
+        foundryLightBrightnessNight: {
+          type: 'slider',
+          min: 0,
+          max: 16,
+          step: 0.05,
+          default: 1,
+          label: 'Brightness boost',
+          tooltip:
+            'Foundry AmbientLight emission near midnight. Does not affect candle/fire glow, window glow, or player torch.',
+        },
+        foundryLightColorBoostNight: {
+          type: 'slider',
+          min: 0,
+          max: 8,
+          step: 0.05,
+          default: 1,
+          label: 'Colour boost',
+          tooltip: 'Foundry Color Intensity (gel) near midnight on AmbientLight meshes only.',
+        },
+        foundryLightBrightness: {
+          type: 'slider',
+          min: 0,
+          max: 16,
+          step: 0.05,
+          default: 1,
+          label: 'Brightness boost (legacy)',
+          hidden: true,
+          tooltip: 'Deprecated: migrated to Foundry lamps — Day / Twilight / Night.',
         },
         foundryLightColorBoost: {
           type: 'slider',
@@ -2298,9 +2412,9 @@ export class LightingEffectV2 {
           max: 8,
           step: 0.05,
           default: 1,
-          label: 'Colour boost',
-          tooltip:
-            'Scales Foundry Color Intensity (gel) on AmbientLight meshes before the light buffer write. Push above 1 for vivid, saturated pools. Does not affect candle or fire glow.',
+          label: 'Colour boost (legacy)',
+          hidden: true,
+          tooltip: 'Deprecated: migrated to Foundry lamps — Day / Twilight / Night.',
         },
         lightIntensity: {
           type: 'slider',
@@ -3924,15 +4038,15 @@ export class LightingEffectV2 {
    */
   _pushLightBufferUniformsToMeshes() {
     if (!this._initialized) return;
+    this._seedFoundryLampPhaseParamsIfNeeded();
     const g = Math.max(0, Number(this.params.lightIntensity));
     const safeGain = Number.isFinite(g) ? g : 0;
-    const foundryBright = Math.max(0, Number(this.params.foundryLightBrightness));
-    const safeFoundryBright = Number.isFinite(foundryBright) ? foundryBright : 1;
-    const foundryColor = Math.max(0, Number(this.params.foundryLightColorBoost));
-    const safeFoundryColor = Number.isFinite(foundryColor) ? foundryColor : 1;
+    const boosts = this._resolveFoundryLampEffectiveBoosts();
+    const safeFoundryBright = boosts.brightness;
+    const safeFoundryColor = boosts.color;
     const mixScale = Math.max(0, Number(this.params.colorationMixScale) || 0);
     const maxMix = clamp01(Number(this.params.colorationMaxMix) ?? 1);
-    const sig = `${safeGain}|${safeFoundryBright}|${safeFoundryColor}|${mixScale}|${maxMix}`;
+    const sig = `${safeGain}|${safeFoundryBright.toFixed(4)}|${safeFoundryColor.toFixed(4)}|${mixScale}|${maxMix}`;
     if (this._lastLightBufferUniformSig === sig && !this._lightBufferUniformsDirty) return;
     this._lastLightBufferUniformSig = sig;
     this._lightBufferUniformsDirty = false;
@@ -4533,6 +4647,119 @@ export class LightingEffectV2 {
   }
 
   /**
+   * Copy legacy single-knob Foundry lamp boosts into day/twilight/night triplets once.
+   * @private
+   */
+  _seedFoundryLampPhaseParamsIfNeeded() {
+    if (this._foundryLampPhaseParamsMigrated) return;
+    this._foundryLampPhaseParamsMigrated = true;
+    const p = this.params;
+    const legacyBright = Number(p.foundryLightBrightness);
+    const legacyColor = Number(p.foundryLightColorBoost);
+    let dirty = false;
+
+    if (Object.prototype.hasOwnProperty.call(p, 'foundryLightBrightness')) {
+      const b = Number.isFinite(legacyBright) ? Math.max(0, legacyBright) : 1;
+      for (const key of [
+        'foundryLightBrightnessDay',
+        'foundryLightBrightnessTwilight',
+        'foundryLightBrightnessNight',
+      ]) {
+        if (!Object.prototype.hasOwnProperty.call(p, key)) {
+          p[key] = b;
+          dirty = true;
+        }
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(p, 'foundryLightColorBoost')) {
+      const c = Number.isFinite(legacyColor) ? Math.max(0, legacyColor) : 1;
+      for (const key of [
+        'foundryLightColorBoostDay',
+        'foundryLightColorBoostTwilight',
+        'foundryLightColorBoostNight',
+      ]) {
+        if (!Object.prototype.hasOwnProperty.call(p, key)) {
+          p[key] = c;
+          dirty = true;
+        }
+      }
+    }
+    if (dirty) this._markParamsDirty();
+  }
+
+  /**
+   * Smooth day / twilight / night weights (sum = 1) from calendar hour.
+   * Day peaks at solar noon; twilight at dawn/dusk; night at midnight.
+   * @private
+   * @returns {{ day: number, twilight: number, night: number }}
+   */
+  _resolveFoundryLampPhaseWeights() {
+    try { LightingDirector.update(); } catch (_) {}
+    const state = LightingDirector.get();
+    let hour = Number(state?.hour);
+    if (!Number.isFinite(hour)) hour = Number(this._resolveMapShineTimeOfDayHour());
+    if (!Number.isFinite(hour)) {
+      const darkness = clamp01(state?.masterDarkness ?? 0);
+      const twilightD = clamp01(resolveTwilightDarkness01(this));
+      const dayW = 1 - smoothstep01(twilightD * 0.5, twilightD * 1.5 + 0.08, darkness);
+      const nightW = smoothstep01(twilightD + 0.08, 0.88, darkness);
+      const twilightW = Math.max(0, 1 - dayW - nightW);
+      const sum = dayW + twilightW + nightW;
+      if (sum <= 1e-5) return { day: 0, twilight: 0, night: 1 };
+      return { day: dayW / sum, twilight: twilightW / sum, night: nightW / sum };
+    }
+
+    const phases = getFoundryTimePhaseHours();
+    const dayProgress = getWrappedHourProgress(hour, phases.sunrise, phases.sunset);
+    const twEdge = 0.26;
+    const twFull = 0.54;
+
+    if (Number.isFinite(dayProgress)) {
+      const edgeDist = Math.min(dayProgress, 1 - dayProgress) * 2;
+      const dayW = smoothstep01(twEdge, twFull, edgeDist);
+      const twilightW = 1 - dayW;
+      return { day: dayW, twilight: twilightW, night: 0 };
+    }
+
+    const nightProgress = getWrappedHourProgress(hour, phases.sunset, phases.sunrise);
+    if (Number.isFinite(nightProgress)) {
+      const edgeDist = Math.min(nightProgress, 1 - nightProgress) * 2;
+      const nightW = smoothstep01(twEdge, twFull, edgeDist);
+      const twilightW = 1 - nightW;
+      return { day: 0, twilight: twilightW, night: nightW };
+    }
+
+    return { day: 0, twilight: 0, night: 1 };
+  }
+
+  /**
+   * Phase-blended Foundry-lamp brightness + colour boosts for the current frame.
+   * @private
+   * @returns {{ brightness: number, color: number }}
+   */
+  _resolveFoundryLampEffectiveBoosts() {
+    this._seedFoundryLampPhaseParamsIfNeeded();
+    const w = this._resolveFoundryLampPhaseWeights();
+    const p = this.params;
+    const readBright = (key, fallback = 1) => {
+      const n = Number(p[key]);
+      return Number.isFinite(n) ? Math.max(0, n) : fallback;
+    };
+    const readColor = (key, fallback = 1) => readBright(key, fallback);
+
+    const brightness =
+      readBright('foundryLightBrightnessDay') * w.day
+      + readBright('foundryLightBrightnessTwilight') * w.twilight
+      + readBright('foundryLightBrightnessNight') * w.night;
+    const color =
+      readColor('foundryLightColorBoostDay') * w.day
+      + readColor('foundryLightColorBoostTwilight') * w.twilight
+      + readColor('foundryLightColorBoostNight') * w.night;
+
+    return { brightness, color };
+  }
+
+  /**
    * Effective outdoor/indoor ambient scales for compose (uniforms only when saved values are zero).
    * @returns {{ dayOutdoor: number, dayIndoor: number, nightOutdoor: number, nightIndoor: number, minIllum: number }}
    * @private
@@ -4851,8 +5078,8 @@ export class LightingEffectV2 {
    */
   _foundryLightPrepassGainKey() {
     const base = Math.max(0, Number(this.params.lightIntensity) || 0);
-    const foundry = Math.max(0, Number(this.params.foundryLightBrightness) || 0);
-    return `${base}|${foundry}`;
+    const boosts = this._resolveFoundryLampEffectiveBoosts();
+    return `${base}|${boosts.brightness.toFixed(4)}`;
   }
 
   /**

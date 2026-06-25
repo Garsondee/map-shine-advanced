@@ -72,7 +72,6 @@ const DEF_FOAM_FLECKS = 1 << 0;
 const DEF_MULTITAP = 1 << 1;
 const DEF_SHORE_FOAM = 1 << 2;
 const DEF_CAUSTICS = 1 << 3;
-const DEF_CHROM_ABERR = 1 << 4;
 const DEF_MURK = 1 << 5;
 
 /**
@@ -217,18 +216,18 @@ export class WaterEffectV2 {
       windDirResponsiveness: 10,
 
       // Chromatic aberration
-      chromaticAberrationEnabled: false,
-      chromaticAberrationStrengthPx: 2.5,
-      chromaticAberrationThreshold: 0.2,
-      chromaticAberrationThresholdSoftness: 0.35,
-      chromaticAberrationKawaseBlurPx: 1.75,
-      chromaticAberrationSampleSpread: 1,
-      chromaticAberrationEdgeCenter: 0.5,
-      chromaticAberrationEdgeFeather: 0.1,
-      chromaticAberrationEdgeGamma: 1,
-      chromaticAberrationEdgeMin: 0,
-      chromaticAberrationDeadzone: 0.02,
-      chromaticAberrationDeadzoneSoftness: 0.02,
+      chromaticAberrationEnabled: true,
+      chromaticAberrationStrengthPx: 10.35,
+      chromaticAberrationThreshold: 0,
+      chromaticAberrationThresholdSoftness: 1,
+      chromaticAberrationKawaseBlurPx: 1.35,
+      chromaticAberrationSampleSpread: 3,
+      chromaticAberrationEdgeCenter: 0.61,
+      chromaticAberrationEdgeFeather: 0.23,
+      chromaticAberrationEdgeGamma: 0.8,
+      chromaticAberrationEdgeMin: 0.48,
+      chromaticAberrationDeadzone: 0,
+      chromaticAberrationDeadzoneSoftness: 0.001,
 
       // Distortion edge masking
       distortionEdgeCenter: 0.5,
@@ -451,7 +450,7 @@ export class WaterEffectV2 {
       floatingFoamGamma: 0.1,
       floatingFoamTint: { r: 0.5129908384329089, g: 0.5799452568964684, b: 0.4460364199693495 },
       floatingFoamTintStrength: 1,
-      floatingFoamColorVariation: 0.99,
+      floatingFoamColorVariation: 1,
 
       // Floating Foam Lighting
       floatingFoamLightingEnabled: true,
@@ -460,26 +459,26 @@ export class WaterEffectV2 {
       floatingFoamDarknessResponse: 1,
 
       // Floating Foam Shadow Casting
-      floatingFoamShadowEnabled: false,
-      floatingFoamShadowStrength: 0.65,
+      floatingFoamShadowEnabled: true,
+      floatingFoamShadowStrength: 1,
       floatingFoamShadowSoftness: 0.5,
       floatingFoamShadowDepth: 1,
 
       // Floating Foam Complexity (Phase 2)
       floatingFoamFilamentsEnabled: true,
-      floatingFoamFilamentsStrength: 1,
+      floatingFoamFilamentsStrength: 0.73,
       floatingFoamFilamentsScale: 16.6,
-      floatingFoamFilamentsLength: 1.6,
-      floatingFoamFilamentsWidth: 0.09,
+      floatingFoamFilamentsLength: 2.2,
+      floatingFoamFilamentsWidth: 0.23,
       floatingFoamThicknessVariation: 0.64,
-      floatingFoamThicknessScale: 14.4,
+      floatingFoamThicknessScale: 14.9,
       floatingFoamEdgeDetail: 1,
-      floatingFoamEdgeDetailScale: 31.8,
+      floatingFoamEdgeDetailScale: 40,
       floatingFoamLayerCount: 4,
-      floatingFoamLayerOffset: 0.68,
+      floatingFoamLayerOffset: 1,
 
       // Floating Foam Distortion & Evolution
-      floatingFoamWaveDistortionStrength: 0.2,
+      floatingFoamWaveDistortionStrength: 0.1,
       floatingFoamNoiseDistortionEnabled: true,
       floatingFoamNoiseDistortionStrength: 0.01,
       floatingFoamNoiseDistortionScale: 20,
@@ -1554,21 +1553,53 @@ static getControlSchema() {
         },
 
         refractionMultiTapEnabled: { type: 'boolean', default: true, label: 'Multi-Tap Refraction' },
-        chromaticAberrationEnabled: { type: 'boolean', default: false, label: 'Enabled' },
-        chromaticAberrationStrengthPx: { type: 'slider', min: 0, max: 8, step: 0.05, default: 2.5, label: 'Strength (px)' },
-        chromaticAberrationThreshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.2, label: 'Luma threshold' },
-        chromaticAberrationThresholdSoftness: { type: 'slider', min: 0.001, max: 1, step: 0.01, default: 0.35, label: 'Threshold softness' },
-        chromaticAberrationKawaseBlurPx: { type: 'slider', min: 0, max: 8, step: 0.05, default: 1.75, label: 'Kawase blur (px)' },
-        chromaticAberrationSampleSpread: { type: 'slider', min: 0.25, max: 3, step: 0.01, default: 1, label: 'Sample spread' },
-        chromaticAberrationEdgeCenter: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Edge center' },
-        chromaticAberrationEdgeFeather: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.1, label: 'Edge feather' },
-        chromaticAberrationEdgeGamma: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 1, label: 'Edge gamma' },
-        chromaticAberrationEdgeMin: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0, label: 'Edge min' },
-        chromaticAberrationDeadzone: { type: 'slider', min: 0, max: 0.25, step: 0.001, default: 0.02, label: 'Deadzone' },
-        chromaticAberrationDeadzoneSoftness: { type: 'slider', min: 0.001, max: 0.25, step: 0.001, default: 0.02, label: 'Deadzone Softness' },
-        distortionEdgeCenter: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Distortion Edge Center' },
-        distortionEdgeFeather: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.06, label: 'Distortion Edge Feather' },
-        distortionEdgeGamma: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 1, label: 'Distortion Edge Gamma' },
+        chromaticAberrationEnabled: { type: 'boolean', default: true, label: 'Enabled' },
+        chromaticAberrationStrengthPx: { type: 'slider', min: 0, max: 16, step: 0.05, default: 10.35, label: 'Strength (px)' },
+        chromaticAberrationThreshold: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0,
+          label: 'Luma threshold',
+          tooltip: 'Minimum scene brightness for RGB shift. Set to 0 to apply on all water.',
+        },
+        chromaticAberrationThresholdSoftness: { type: 'slider', min: 0.001, max: 1, step: 0.01, default: 1, label: 'Threshold softness' },
+        chromaticAberrationKawaseBlurPx: { type: 'slider', min: 0, max: 8, step: 0.05, default: 1.35, label: 'Kawase blur (px)' },
+        chromaticAberrationSampleSpread: { type: 'slider', min: 0.25, max: 3, step: 0.01, default: 3, label: 'Sample spread' },
+        chromaticAberrationEdgeCenter: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.61, label: 'Edge center' },
+        chromaticAberrationEdgeFeather: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.23, label: 'Edge feather' },
+        chromaticAberrationEdgeGamma: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 0.8, label: 'Edge gamma' },
+        chromaticAberrationEdgeMin: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.48, label: 'Edge min' },
+        chromaticAberrationDeadzone: { type: 'slider', min: 0, max: 0.25, step: 0.001, default: 0, label: 'Deadzone' },
+        chromaticAberrationDeadzoneSoftness: { type: 'slider', min: 0.001, max: 0.25, step: 0.001, default: 0.001, label: 'Deadzone Softness' },
+        distortionEdgeCenter: {
+          type: 'slider',
+          min: 0,
+          max: 1,
+          step: 0.01,
+          default: 0.5,
+          label: 'Scene Border Fade Start',
+          tooltip: 'Reserved — scene-border distortion fade currently starts at the map edge (0).',
+        },
+        distortionEdgeFeather: {
+          type: 'slider',
+          min: 0,
+          max: 0.25,
+          step: 0.005,
+          default: 0.06,
+          label: 'Scene Border Feather',
+          tooltip: 'Scene-UV inset from each map edge where refraction distortion blends to zero (for full-bleed _Water masks).',
+        },
+        distortionEdgeGamma: {
+          type: 'slider',
+          min: 0.1,
+          max: 4,
+          step: 0.01,
+          default: 1,
+          label: 'Mask Coverage Gamma',
+          tooltip: 'Power curve on _Water mask intensity before refraction (brighter mask = stronger distortion).',
+        },
         distortionShoreRemapLo: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0, label: 'Shore Remap Low' },
         distortionShoreRemapHi: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Shore Remap High' },
         distortionShorePow: { type: 'slider', min: 0.1, max: 4, step: 0.01, default: 1, label: 'Shore Power' },
@@ -1740,7 +1771,7 @@ static getControlSchema() {
         floatingFoamColor: { type: 'color', default: { r: 1.0, g: 1.0, b: 1.0 }, label: 'Color' },
         floatingFoamTint: { type: 'color', default: { r: 0.5129908384329089, g: 0.5799452568964684, b: 0.4460364199693495 }, label: 'Tint' },
         floatingFoamTintStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Tint Strength' },
-        floatingFoamColorVariation: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.99, label: 'Variation' },
+        floatingFoamColorVariation: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Variation' },
         floatingFoamOpacity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Opacity' },
         floatingFoamBrightness: { type: 'slider', min: -1, max: 1, step: 0.01, default: 1, label: 'Brightness' },
         floatingFoamContrast: { type: 'slider', min: 0, max: 4, step: 0.01, default: 4, label: 'Contrast' },
@@ -1749,22 +1780,22 @@ static getControlSchema() {
         floatingFoamAmbientLight: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Ambient' },
         floatingFoamSceneLightInfluence: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Scene Influence' },
         floatingFoamDarknessResponse: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Darkness Response' },
-        floatingFoamShadowEnabled: { type: 'boolean', default: false, label: 'Shadow Enabled' },
-        floatingFoamShadowStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.65, label: 'Shadow Strength' },
+        floatingFoamShadowEnabled: { type: 'boolean', default: true, label: 'Shadow Enabled' },
+        floatingFoamShadowStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Shadow Strength' },
         floatingFoamShadowSoftness: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Shadow Softness' },
         floatingFoamShadowDepth: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Shadow Depth' },
         floatingFoamFilamentsEnabled: { type: 'boolean', default: true, label: 'Filaments Enabled' },
-        floatingFoamFilamentsStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Filaments Strength' },
+        floatingFoamFilamentsStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.73, label: 'Filaments Strength' },
         floatingFoamFilamentsScale: { type: 'slider', min: 0.1, max: 20, step: 0.1, default: 16.6, label: 'Filaments Scale' },
-        floatingFoamFilamentsLength: { type: 'slider', min: 0.1, max: 10, step: 0.1, default: 1.6, label: 'Filaments Length' },
-        floatingFoamFilamentsWidth: { type: 'slider', min: 0.01, max: 1, step: 0.01, default: 0.09, label: 'Filaments Width' },
+        floatingFoamFilamentsLength: { type: 'slider', min: 0.1, max: 10, step: 0.1, default: 2.2, label: 'Filaments Length' },
+        floatingFoamFilamentsWidth: { type: 'slider', min: 0.01, max: 1, step: 0.01, default: 0.23, label: 'Filaments Width' },
         floatingFoamThicknessVariation: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.64, label: 'Thickness Var' },
-        floatingFoamThicknessScale: { type: 'slider', min: 0.1, max: 20, step: 0.1, default: 14.4, label: 'Thickness Scale' },
+        floatingFoamThicknessScale: { type: 'slider', min: 0.1, max: 20, step: 0.1, default: 14.9, label: 'Thickness Scale' },
         floatingFoamEdgeDetail: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Edge Detail' },
-        floatingFoamEdgeDetailScale: { type: 'slider', min: 0.1, max: 40, step: 0.1, default: 31.8, label: 'Edge Scale' },
+        floatingFoamEdgeDetailScale: { type: 'slider', min: 0.1, max: 40, step: 0.1, default: 40, label: 'Edge Scale' },
         floatingFoamLayerCount: { type: 'slider', min: 1, max: 4, step: 1, default: 4, label: 'Layer Count' },
-        floatingFoamLayerOffset: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.68, label: 'Layer Offset' },
-        floatingFoamWaveDistortionStrength: { type: 'slider', min: 0, max: 20, step: 0.1, default: 0.2, label: 'Wave Distortion' },
+        floatingFoamLayerOffset: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Layer Offset' },
+        floatingFoamWaveDistortionStrength: { type: 'slider', min: 0, max: 20, step: 0.1, default: 0.1, label: 'Wave Distortion' },
         floatingFoamNoiseDistortionEnabled: { type: 'boolean', default: true, label: 'Noise Dist Enabled' },
         floatingFoamNoiseDistortionStrength: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.01, label: 'Noise Dist Strength' },
         floatingFoamNoiseDistortionScale: { type: 'slider', min: 0.1, max: 20, step: 0.1, default: 20, label: 'Noise Dist Scale' },
@@ -1891,7 +1922,6 @@ static getControlSchema() {
     if (this.params.refractionMultiTapEnabled) defines.USE_WATER_REFRACTION_MULTITAP = 1;
     if (this.params.shoreFoamEnabled !== false) defines.USE_SHORE_FOAM = 1;
     if (this.params.causticsEnabled !== false) defines.USE_CAUSTICS = 1;
-    if (this.params.chromaticAberrationEnabled === true) defines.USE_CHROMATIC_ABERRATION = 1;
     if (this.params.murkEnabled !== false) defines.USE_MURK = 1;
     // DEFERRED: Create a minimal passthrough material now; heavy shader compiles on first render.
     // This prevents loading hangs caused by ~2400-line GLSL compilation during init.
@@ -2819,6 +2849,22 @@ static getControlSchema() {
       u.uWaterRawMaskThreshold.value = Math.max(0.0, Math.min(1.0, Number(p.maskThreshold ?? 0.15)));
     }
     if (u.uDebugView) u.uDebugView.value = p.debugView ?? 0;
+
+    // Chromatic aberration must stay live on render frames that skip update().
+    if (u.uChromaticAberrationEnabled) {
+      u.uChromaticAberrationEnabled.value = p.chromaticAberrationEnabled ? 1.0 : 0.0;
+      u.uChromaticAberrationStrengthPx.value = safeNum(p.chromaticAberrationStrengthPx, 8.0);
+      u.uChromaticAberrationThreshold.value = safeNum(p.chromaticAberrationThreshold, 0.18);
+      u.uChromaticAberrationThresholdSoftness.value = safeNum(p.chromaticAberrationThresholdSoftness, 0.47);
+      u.uChromaticAberrationKawaseBlurPx.value = safeNum(p.chromaticAberrationKawaseBlurPx, 8.0);
+      u.uChromaticAberrationSampleSpread.value = safeNum(p.chromaticAberrationSampleSpread, 0.54);
+      u.uChromaticAberrationEdgeCenter.value = safeNum(p.chromaticAberrationEdgeCenter, 0.39);
+      u.uChromaticAberrationEdgeFeather.value = safeNum(p.chromaticAberrationEdgeFeather, 0.27);
+      u.uChromaticAberrationEdgeGamma.value = safeNum(p.chromaticAberrationEdgeGamma, 0.85);
+      u.uChromaticAberrationEdgeMin.value = safeNum(p.chromaticAberrationEdgeMin, 0.0);
+      u.uChromaticAberrationDeadzone.value = safeNum(p.chromaticAberrationDeadzone, 0.02);
+      u.uChromaticAberrationDeadzoneSoftness.value = safeNum(p.chromaticAberrationDeadzoneSoftness, 0.02);
+    }
   }
 
   /**
@@ -3818,13 +3864,11 @@ static getControlSchema() {
     const multiTapEnabled = !!p.refractionMultiTapEnabled;
     const shoreFoamEnabled = (p.shoreFoamEnabled ?? true) !== false;
     const causticsEnabled = (p.causticsEnabled ?? true) !== false;
-    const chromaticAberrationEnabled = (p.chromaticAberrationEnabled ?? false) === true;
     const murkEnabled = (p.murkEnabled ?? true) !== false;
     const definesKey = (flecksEnabled ? DEF_FOAM_FLECKS : 0)
       | (multiTapEnabled ? DEF_MULTITAP : 0)
       | (shoreFoamEnabled ? DEF_SHORE_FOAM : 0)
       | (causticsEnabled ? DEF_CAUSTICS : 0)
-      | (chromaticAberrationEnabled ? DEF_CHROM_ABERR : 0)
       | (murkEnabled ? DEF_MURK : 0);
 
     if (definesKey !== this._lastDefinesKey) {
@@ -3833,7 +3877,6 @@ static getControlSchema() {
       if (multiTapEnabled) d.USE_WATER_REFRACTION_MULTITAP = 1; else delete d.USE_WATER_REFRACTION_MULTITAP;
       if (shoreFoamEnabled) d.USE_SHORE_FOAM = 1; else delete d.USE_SHORE_FOAM;
       if (causticsEnabled) d.USE_CAUSTICS = 1; else delete d.USE_CAUSTICS;
-      if (chromaticAberrationEnabled) d.USE_CHROMATIC_ABERRATION = 1; else delete d.USE_CHROMATIC_ABERRATION;
       if (murkEnabled) d.USE_MURK = 1; else delete d.USE_MURK;
       this._composeMaterial.defines = d;
       this._composeMaterial.needsUpdate = true;

@@ -6,6 +6,7 @@
 import { isGmLike, isUserGM } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
+import { shouldUseIncrementalTileResyncOnLevelRedraw } from '../core/texture-overhaul-flags.js';
 import { safeCall, safeCallAsync, safeDispose, Severity } from '../core/safe-call.js';
 import { webglCrashRecovery } from '../core/webgl-crash-recovery.js';
 import * as sceneSettings from '../settings/scene-settings.js';
@@ -3495,6 +3496,10 @@ export function initialize() {
         const ms = window.MapShine;
         if (!sceneSettings.isMapShineRenderingActive(canvas?.scene)) return;
 
+        try {
+          if (ms) ms.__levelMaskRebuildContext = null;
+        } catch (_) {}
+
         const sc = ms?.sceneComposer;
         const bus = ms?.floorCompositorV2?._renderBus;
         const fd = sc?.foundrySceneData;
@@ -3780,6 +3785,21 @@ export function initialize() {
         log.info('Level context changed: requesting render');
         ms?.renderLoop?.requestRender?.();
         ms?.renderLoop?.requestContinuousRender?.(300);
+
+        try {
+          const floorCompositorForCtx = ms?.floorCompositorV2 ?? null;
+          ms.__levelMaskRebuildContext = {
+            warmBandRevisit,
+            pathChanged,
+            masksRecomposed,
+            needsEffectRepopulate,
+            bandKey: activeBandKey,
+            populateComplete: !!(
+              floorCompositorForCtx?._populateComplete === true
+              && floorCompositorForCtx?._busPopulated !== false
+            ),
+          };
+        } catch (_) {}
       }, 'levelMaskRebuild', Severity.DEGRADED);
 
       try {
@@ -6362,7 +6382,15 @@ async function resyncMapShineAfterNativeLevelRedraw(scene) {
     }
 
     wallManager?.syncAllWalls?.();
-    tileManager?.syncAllTiles?.();
+    if (
+      shouldUseIncrementalTileResyncOnLevelRedraw()
+      && tileManager
+      && typeof tileManager.reconcileTilesForLevelRedraw === 'function'
+    ) {
+      tileManager.reconcileTilesForLevelRedraw();
+    } else {
+      tileManager?.syncAllTiles?.();
+    }
     doorMeshManager?.resyncFromCanvas?.();
 
     try {

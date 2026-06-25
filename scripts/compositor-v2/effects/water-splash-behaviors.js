@@ -23,6 +23,67 @@ import {
 import { getBandOutdoorsMask, hasBandOutdoorsMask } from '../../masks/indoor-outdoor-mask-api.js';
 import { resolveEffectWindParticleDrift } from './resolve-effect-wind.js';
 
+const PAINTED_SHADOW_SPAWN_OPEN_THRESHOLD = 0.35;
+const PAINTED_SHADOW_SPAWN_ATTEMPTS = 8;
+
+/**
+ * Scene UV spawn openness from authored _Shadow mask (matches rain CPU gate).
+ * @param {number} u - 0..1 scene U
+ * @param {number} v - 0..1 Foundry image V (0 = top)
+ * @returns {boolean}
+ */
+export function isWaterSplashPaintedShadowSpawnOpen(u, v) {
+  const wc = weatherController;
+  if (wc?.rainTuning?.paintedShadowMaskEnabled === false) return true;
+  if (window.MapShine?.disableWeatherPaintedShadowMask === true) return true;
+  if (!wc?.getPaintedShadowSpawnOpenness) return true;
+  let vSample = v;
+  if (wc.paintedShadowMap?.flipY === true) vSample = 1.0 - v;
+  const open = wc.getPaintedShadowSpawnOpenness(u, vSample);
+  return open >= PAINTED_SHADOW_SPAWN_OPEN_THRESHOLD;
+}
+
+/**
+ * Drop (u,v,*) triples under authored painted shadow.
+ * @param {Float32Array|null|undefined} points
+ * @returns {Float32Array|null}
+ */
+export function filterSplashPointsByPaintedShadow(points) {
+  if (!points || points.length < 3) return points ?? null;
+  const tmp = [];
+  for (let i = 0; i < points.length; i += 3) {
+    const u = points[i];
+    const v = points[i + 1];
+    if (!isWaterSplashPaintedShadowSpawnOpen(u, v)) continue;
+    tmp.push(u, v, points[i + 2]);
+  }
+  if (tmp.length === 0) return new Float32Array(0);
+  if (tmp.length === points.length) return points;
+  return new Float32Array(tmp);
+}
+
+/**
+ * Pick a spawn triple from shape points respecting painted-shadow CPU gate.
+ * @param {Float32Array} points
+ * @param {(u:number,v:number,strength:number)=>boolean} [extraGate]
+ * @returns {{ u:number, v:number, strength:number }|null}
+ */
+function pickSplashSpawnTriple(points, extraGate = null) {
+  const count = Math.floor((points?.length ?? 0) / 3);
+  if (count <= 0) return null;
+  for (let attempt = 0; attempt < PAINTED_SHADOW_SPAWN_ATTEMPTS; attempt++) {
+    const idx = Math.floor(Math.random() * count) * 3;
+    const u = points[idx];
+    const v = points[idx + 1];
+    const strength = points[idx + 2];
+    if (!Number.isFinite(u) || !Number.isFinite(v) || !Number.isFinite(strength) || strength <= 0) continue;
+    if (!isWaterSplashPaintedShadowSpawnOpen(u, v)) continue;
+    if (extraGate && !extraGate(u, v, strength)) continue;
+    return { u, v, strength };
+  }
+  return null;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Gradient / Envelope Constants
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -95,6 +156,10 @@ const FOAM_ALPHA_LUT = buildLUT(FOAM_ALPHA_STOPS);
 const FOAM_SIZE_LUT = buildLUT(FOAM_SIZE_STOPS);
 const SPLASH_ALPHA_LUT = buildLUT(SPLASH_ALPHA_STOPS);
 const SPLASH_SIZE_LUT = buildLUT(SPLASH_SIZE_STOPS);
+
+/** Must match `WaterSplashesEffectV2` splash atlas layout. */
+export const SPLASH_FLIPBOOK_COLS = 6;
+export const SPLASH_FLIPBOOK_ROWS = 4;
 
 /**
  * Apply a scalar size to a Quarks particle that may store size as either:
@@ -214,45 +279,24 @@ export class WaterEdgeMaskShape {
   }
 
   initialize(p) {
-    const count = this.points.length / 3;
-    if (count === 0) {
+    const pick = pickSplashSpawnTriple(this.points);
+    if (!pick) {
       this._killParticle(p);
       return;
     }
+    const { u, v, strength: edgeStrength } = pick;
 
-    // Pick a random point from the precomputed list.
-    const idx = Math.floor(Math.random() * count) * 3;
-    const u = this.points[idx];
-    const v = this.points[idx + 1];
-    const edgeStrength = this.points[idx + 2];
-
-    if (!Number.isFinite(u) || !Number.isFinite(v) || !Number.isFinite(edgeStrength) || edgeStrength <= 0) {
-      this._killParticle(p);
-      return;
-    }
-
-    // Map scene UV to world-space position.
-    // v=0 is image top (Foundry Y-down), world Y grows upward → use (1-v).
     p.position.x = this.sceneX + u * this.sceneWidth;
     p.position.y = this.sceneY + (1.0 - v) * this.sceneHeight;
     p.position.z = this.groundZ + this.floorElevation;
-
-    // Store edge strength for lifecycle behaviors to modulate intensity.
     p._edgeStrength = edgeStrength;
-
-    // Small random XY jitter so particles don't stack exactly on edge pixels.
-    // ±15 world units keeps them near the edge without drifting into open water.
     p.position.x += (Math.random() - 0.5) * 30;
     p.position.y += (Math.random() - 0.5) * 30;
 
-    // Brightness/edge-based modifiers: stronger edges get bigger, longer-lived particles.
     if (typeof p.life === 'number') p.life *= (0.5 + 0.5 * edgeStrength);
     if (typeof p.size === 'number') p.size *= (0.5 + 0.5 * edgeStrength);
-
-    // Reset velocity — foam sits on the water surface.
     if (p.velocity) p.velocity.set(0, 0, 0);
 
-    // Sanity check.
     const tooBig = (val) => !Number.isFinite(val) || Math.abs(val) > 1e6;
     if ((p.position && (tooBig(p.position.x) || tooBig(p.position.y) || tooBig(p.position.z))) ||
         (typeof p.life === 'number' && tooBig(p.life)) ||
@@ -355,31 +399,20 @@ export class WaterInteriorMaskShape {
   }
 
   initialize(p) {
-    const count = this.points.length / 3;
-    if (count === 0) {
+    const pick = pickSplashSpawnTriple(this.points);
+    if (!pick) {
       this._killParticle(p);
       return;
     }
-
-    const idx = Math.floor(Math.random() * count) * 3;
-    const u = this.points[idx];
-    const v = this.points[idx + 1];
-    const brightness = this.points[idx + 2];
-
-    if (!Number.isFinite(u) || !Number.isFinite(v) || !Number.isFinite(brightness) || brightness <= 0) {
-      this._killParticle(p);
-      return;
-    }
+    const { u, v, strength: brightness } = pick;
 
     p.position.x = this.sceneX + u * this.sceneWidth;
     p.position.y = this.sceneY + (1.0 - v) * this.sceneHeight;
     p.position.z = this.groundZ + this.floorElevation;
-
     p._edgeStrength = brightness;
 
     if (typeof p.life === 'number') p.life *= (0.6 + 0.4 * brightness);
     if (typeof p.size === 'number') p.size *= (0.5 + 0.5 * brightness);
-
     if (p.velocity) p.velocity.set(0, 0, 0);
 
     const tooBig = (val) => !Number.isFinite(val) || Math.abs(val) > 1e6;
@@ -1193,6 +1226,8 @@ export class FoamPlumeLifecycleBehavior {
     this._windX = 1.0;
     this._windY = 0.0;
     this._windSpeed01 = 0.0;
+    this._bubbleFoamAnim = false;
+    this._foamUvAnimSpeed = 1.0;
 
     // Color tint jitter.
     this._tintStrength = 0.0;
@@ -1280,6 +1315,10 @@ export class FoamPlumeLifecycleBehavior {
       particle.rotation += particle._foamSpinSpeed * delta;
     }
 
+    if (this._bubbleFoamAnim) {
+      particle.uvTile = clamp01(t * this._foamUvAnimSpeed);
+    }
+
     // Wind drift — keeps foam flowing with the current/wind.
     if (particle.position && this._windDriftScale > 0.001) {
       // Until mask pixels are readable, fail-open (full drift) so foam does not stick.
@@ -1299,6 +1338,9 @@ export class FoamPlumeLifecycleBehavior {
     this._foamColorG = p?.foamColorG ?? 0.982;
     this._foamColorB = p?.foamColorB ?? 1.0;
     this._windDriftScale = Math.max(0.0, p?.foamWindDriftScale ?? 0.3);
+    this._bubbleFoamAnim = this.ownerEffect?._bubbleFoamAnim === true;
+    const foamAnimSpeed = Number(p?.foamUvAnimSpeed);
+    this._foamUvAnimSpeed = Number.isFinite(foamAnimSpeed) ? Math.max(0.0, foamAnimSpeed) : 1.0;
 
     this._tintStrength = clamp01(p?.tintStrength ?? 0.0);
     this._tintJitter = clamp01(p?.tintJitter ?? 1.0) * 2.0;
@@ -1345,6 +1387,11 @@ export class SplashRingLifecycleBehavior {
     this._windY = 0.0;
     this._windSpeed01 = 0.0;
     this._splashWindDriftScale = 1.0;
+    this._splashSpinScale = 0.0;
+    this._flipbookTravel = 1.0;
+    this._flipbookSpeed = 1.0;
+    this._bubbleFoamAnim = false;
+    this._foamUvAnimSpeed = 1.0;
 
     // Color tint jitter.
     this._tintStrength = 0.0;
@@ -1364,6 +1411,9 @@ export class SplashRingLifecycleBehavior {
       }
     }
     particle._splashOpacityRand = 0.6 + Math.random() * 0.4;
+    particle._splashSpinSpeed = (Math.random() - 0.5) * 2.8;
+    particle._splashAtlasRow = Math.floor(Math.random() * SPLASH_FLIPBOOK_ROWS);
+    this._applySplashFlipbookTile(particle, 0.0);
 
     let r = 0.982;
     let g = 0.988;
@@ -1398,6 +1448,12 @@ export class SplashRingLifecycleBehavior {
 
     const t = age / Math.max(0.001, life);
     const idx = Math.min(255, (t * 255) | 0);
+    if (this._bubbleFoamAnim) {
+      particle.uvTile = clamp01(t * this._foamUvAnimSpeed);
+    } else {
+      const frameT = clamp01(t * this._flipbookTravel * this._flipbookSpeed) * (SPLASH_FLIPBOOK_COLS - 1);
+      this._applySplashFlipbookTile(particle, frameT);
+    }
 
     // Alpha: sharp pop then rapid fade.
     const alpha = SPLASH_ALPHA_LUT[idx];
@@ -1412,6 +1468,10 @@ export class SplashRingLifecycleBehavior {
     const sizeScale = SPLASH_SIZE_LUT[idx];
     const baseSize = particle._splashBaseSize ?? 20;
     applyParticleScalarSize(particle, baseSize * sizeScale);
+
+    if (typeof particle.rotation === 'number' && typeof particle._splashSpinSpeed === 'number') {
+      particle.rotation += particle._splashSpinSpeed * this._splashSpinScale * delta;
+    }
 
     // Wind shear on impact rings (weaker than shore foam; respects _Outdoors shelter).
     if (particle.position && this._splashWindDriftScale > 0.001) {
@@ -1428,6 +1488,16 @@ export class SplashRingLifecycleBehavior {
     const p = this.ownerEffect?.params;
     this._peakOpacity = Math.max(0.0, Math.min(1.0, p?.splashPeakOpacity ?? 0.70));
     this._splashWindDriftScale = Math.max(0.0, Number(p?.splashWindDriftScale) || 1.0);
+    this._splashSpinScale = Math.max(0.0, Number(p?.splashSpinScale) || 0.0);
+    this._bubbleFoamAnim = this.ownerEffect?._bubbleFoamAnim === true;
+    const foamAnimSpeed = Number(p?.foamUvAnimSpeed);
+    this._foamUvAnimSpeed = Number.isFinite(foamAnimSpeed) ? Math.max(0.0, foamAnimSpeed) : 1.0;
+    if (!this._bubbleFoamAnim) {
+      const travel = Number(p?.splashFlipbookTravel);
+      const speed = Number(p?.splashAnimSpeed);
+      this._flipbookTravel = Number.isFinite(travel) ? Math.max(0.0, travel) : 1.0;
+      this._flipbookSpeed = Number.isFinite(speed) ? Math.max(0.0, speed) : 1.0;
+    }
 
     const rw = resolveEffectWindParticleDrift();
     this._windX = rw.dirX;
@@ -1453,6 +1523,18 @@ export class SplashRingLifecycleBehavior {
     } catch (_) {
       this._precipMult = 0.0;
     }
+  }
+
+  /** @private */
+  _applySplashFlipbookTile(particle, loopT) {
+    const row = Math.max(0, Math.min(SPLASH_FLIPBOOK_ROWS - 1, particle._splashAtlasRow ?? 0));
+    let colBase = loopT | 0;
+    let frac = loopT - colBase;
+    if (colBase >= SPLASH_FLIPBOOK_COLS - 1) {
+      colBase = SPLASH_FLIPBOOK_COLS - 1;
+      frac = 0;
+    }
+    particle.uvTile = row * SPLASH_FLIPBOOK_COLS + colBase + frac;
   }
 
   reset() {}

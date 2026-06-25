@@ -383,7 +383,12 @@ export class WeatherController {
       splash4LifeMax: 1.40,
       splash4SizeMin: 10.0,
       splash4SizeMax: 24.0,
-      splash4OpacityPeak: 0.08
+      splash4OpacityPeak: 0.08,
+
+      /** When true, suppress rain/splashes under PaintedShadowEffectV2 shadow (lit factor RT). */
+      paintedShadowMaskEnabled: true,
+      /** When true, reject rain spawns under indoors / painted shadow (CPU, saves particle sim). */
+      precipSpawnMaskEnabled: true
     };
 
     /**
@@ -409,7 +414,12 @@ export class WeatherController {
       gravityScale: 0.01,
       windInfluence: 0.85,
       curlStrength: 11.25,
-      flutterStrength: 4.65
+      flutterStrength: 4.65,
+
+      /** When true, suppress snow under PaintedShadowEffectV2 shadow (lit factor RT). */
+      paintedShadowMaskEnabled: true,
+      /** When true, reject snow spawns under indoors / painted shadow (CPU, saves particle sim). */
+      precipSpawnMaskEnabled: true
     };
 
     // Ash precipitation tuning (WeatherParticles + AshGeometry)
@@ -1062,6 +1072,122 @@ export class WeatherController {
     
     // Return normalized intensity (0-255 -> 0.0-1.0)
     return this.roofMaskData[idx] / 255.0;
+  }
+
+  /**
+   * Set the authored _Shadow mask texture for precipitation gating.
+   * Dark pixels = shadow = no rain/snow spawn (same decode as PaintedShadowEffectV2).
+   * @param {import('three').Texture|null} texture
+   */
+  setPaintedShadowMap(texture) {
+    const sameRef = texture === this.paintedShadowMap;
+    this.paintedShadowMap = texture ?? null;
+
+    if (!texture) {
+      this.paintedShadowMaskData = null;
+      this.paintedShadowMaskSize = { width: 0, height: 0 };
+      return;
+    }
+
+    const cpuReady = this.paintedShadowMaskData && (this.paintedShadowMaskSize?.width ?? 0) > 0;
+    if (sameRef && cpuReady) return;
+
+    if (texture.image && this._isDrawableRoofMaskImage(texture.image)) {
+      this._extractPaintedShadowMaskData(texture.image);
+      return;
+    }
+
+    if (!sameRef) {
+      this.paintedShadowMaskData = null;
+      this.paintedShadowMaskSize = { width: 0, height: 0 };
+      log.debug('Painted shadow mask set without CPU image — shader sampling only');
+    }
+  }
+
+  /**
+   * Decode one _Shadow texel to spawn openness 0..1 (matches readMaskShadowStrength inverted).
+   * @param {number} r8
+   * @param {number} g8
+   * @param {number} b8
+   * @param {number} a8
+   * @returns {number}
+   * @private
+   */
+  _decodePaintedShadowSpawnOpenness8(r8, g8, b8, a8) {
+    const r = Math.max(0, Math.min(255, Number(r8) || 0)) / 255;
+    const g = Math.max(0, Math.min(255, Number(g8) || 0)) / 255;
+    const b = Math.max(0, Math.min(255, Number(b8) || 0)) / 255;
+    const a = Math.max(0, Math.min(255, Number(a8) || 0)) / 255;
+    const luma = Math.max(r, g, b);
+    const shadowStrength = (1.0 - luma) * a;
+    return Math.max(0, Math.min(1, 1.0 - shadowStrength));
+  }
+
+  /**
+   * Extract pixel data from the authored _Shadow mask for CPU spawn gating.
+   * @param {HTMLImageElement|HTMLCanvasElement|ImageBitmap} image
+   * @private
+   */
+  _extractPaintedShadowMaskData(image) {
+    try {
+      const canvas = document.createElement('canvas');
+      let w = image.width;
+      let h = image.height;
+      const maxDim = 1024;
+      if (w > maxDim || h > maxDim) {
+        const scale = maxDim / Math.max(w, h);
+        w = Math.floor(w * scale);
+        h = Math.floor(h * scale);
+      }
+
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(image, 0, 0, w, h);
+
+      const imageData = ctx.getImageData(0, 0, w, h);
+      const pixels = imageData.data;
+
+      this.paintedShadowMaskData = new Uint8Array(w * h);
+      for (let i = 0; i < w * h; i++) {
+        const pi = i * 4;
+        const open01 = this._decodePaintedShadowSpawnOpenness8(
+          pixels[pi],
+          pixels[pi + 1],
+          pixels[pi + 2],
+          pixels[pi + 3],
+        );
+        this.paintedShadowMaskData[i] = Math.round(open01 * 255);
+      }
+
+      this.paintedShadowMaskSize = { width: w, height: h };
+      log.info(`Painted shadow mask data extracted: ${w}x${h}`);
+    } catch (e) {
+      log.warn('Failed to extract painted shadow mask data:', e);
+      this.paintedShadowMaskData = null;
+      this.paintedShadowMaskSize = { width: 0, height: 0 };
+    }
+  }
+
+  /**
+   * Spawn openness from authored _Shadow mask (1.0 = allow precip, 0.0 = in shadow).
+   * @param {number} u - Normalized X (0-1), scene UV
+   * @param {number} v - Normalized Y (0-1), scene UV (already flipY-adjusted when needed)
+   * @returns {number}
+   */
+  getPaintedShadowSpawnOpenness(u, v) {
+    if (!this.paintedShadowMaskData || !this.paintedShadowMaskSize?.width) return 1.0;
+
+    const x = Math.max(0, Math.min(1, u));
+    const y = Math.max(0, Math.min(1, v));
+
+    const w = this.paintedShadowMaskSize.width;
+    const h = this.paintedShadowMaskSize.height;
+    const px = Math.floor(x * (w - 1));
+    const py = Math.floor(y * (h - 1));
+    const idx = py * w + px;
+
+    return this.paintedShadowMaskData[idx] / 255.0;
   }
 
   /**

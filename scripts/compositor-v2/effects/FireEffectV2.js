@@ -31,7 +31,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
-import { getVisibleSceneUvRect } from '../../streaming/view-projection-service.js';
+import { getVisibleSceneUvRect, viewRectIntersectsScene } from '../../streaming/view-projection-service.js';
 import {
   buildFireMinimapEntries,
   fireBucketWorldBounds,
@@ -769,6 +769,10 @@ export class FireEffectV2 {
     this._renderFloorSliceStrict = false;
     /** @type {number} Highest floor index visible for stacked particle/glow visibility. */
     this._maxVisibleFloorIndex = 0;
+    /** Last max floor index applied in {@link onFloorChange} (ascend detection). */
+    this._lastAppliedFireViewFloor = 0;
+    /** Post-floor-change frames with aggressive in-view bucket activation. */
+    this._fireViewWarmupFrames = 0;
     /** @type {import('../../streaming/streaming-detail-api.js').StreamingDetailTier} */
     this._lastDetailTier = 'full';
     /** @type {number} Cached particle scale from streaming detail tier. */
@@ -1197,13 +1201,19 @@ export class FireEffectV2 {
    * Scan + filter a tile/background-local _Fire mask into spawn/glow points.
    * @param {HTMLImageElement|ImageBitmap} fireMaskImage
    * @param {HTMLImageElement|ImageBitmap|null} albedoImage
+   * @param {number} [floorIndex=0] - Authored floor; albedo-alpha gating is ground-only
    * @returns {Float32Array|null}
    * @private
    */
-  _pickupFireMaskPoints(fireMaskImage, albedoImage = null) {
+  _pickupFireMaskPoints(fireMaskImage, albedoImage = null, floorIndex = 0) {
     if (!fireMaskImage) return null;
     let points = generateFirePoints(fireMaskImage, this._fireMaskScanOptions());
-    points = filterFirePointsByAlbedoAlpha(points, albedoImage, this._fireAlbedoMinAlpha());
+    // Upper-floor art often uses transparent alpha at the level rim while _Fire still
+    // has valid pixels. GpuSceneMaskCompositor includes those; skipping albedo gating
+    // above ground keeps particles aligned with heat-haze / compositor fire masks.
+    if ((Number(floorIndex) || 0) <= 0) {
+      points = filterFirePointsByAlbedoAlpha(points, albedoImage, this._fireAlbedoMinAlpha());
+    }
     points = filterFirePointsRequireNeighbor(
       points,
       fireMaskImage.width,
@@ -1780,7 +1790,7 @@ export class FireEffectV2 {
           max: 1,
           step: 0.01,
           default: 0.65,
-          tooltip: 'Require the colour texture (tile/background) to be this opaque at the same UV. Suppresses fire on transparent map holes and upper-floor rims.',
+          tooltip: 'Ground floor only: require the colour texture to be this opaque at the same UV. Suppresses fire on transparent map holes. Upper floors use the raw _Fire mask (matches compositor / heat haze).',
         },
         fireMaskIsolationPx: {
           type: 'slider',
@@ -2666,9 +2676,11 @@ export class FireEffectV2 {
       log.info(`  image loaded: ${image ? `${image.width}x${image.height}` : 'null'}`);
       if (!image) return;
 
+      const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Math.floor(Number(floorIndex))) : 0;
+
       log.info(`  calling generateFirePoints (mask pickup gates)`);
       const bgAlbedo = bgSrc ? await this._loadImage(bgSrc) : null;
-      const bgLocalPoints = this._pickupFireMaskPoints(image, bgAlbedo);
+      const bgLocalPoints = this._pickupFireMaskPoints(image, bgAlbedo, fi);
       log.info(`  mask pickup returned: ${bgLocalPoints ? `${bgLocalPoints.length / 3} points` : 'null'}`);
       if (!bgLocalPoints || bgLocalPoints.length === 0) return;
 
@@ -2687,7 +2699,6 @@ export class FireEffectV2 {
         sceneGlobalPoints[i + 2] = bgLocalPoints[i + 2];
       }
 
-      const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Math.floor(Number(floorIndex))) : 0;
       if (!floorFireData.has(fi)) {
         floorFireData.set(fi, { pointArrays: [] });
       }
@@ -2745,8 +2756,9 @@ export class FireEffectV2 {
       // No need for fallback GET probing - it just causes 404 spam.
       if (!image) continue;
 
+      const floorIndex = this._resolveFloorIndex(tileDoc, floors);
       const tileAlbedo = await this._loadImage(src);
-      const tileLocalPoints = this._pickupFireMaskPoints(image, tileAlbedo);
+      const tileLocalPoints = this._pickupFireMaskPoints(image, tileAlbedo, floorIndex);
       if (!tileLocalPoints || tileLocalPoints.length === 0) continue;
 
       // Convert tile-local UVs → scene-global UVs.
@@ -2778,8 +2790,6 @@ export class FireEffectV2 {
         sceneGlobalPoints[i + 2] = tileLocalPoints[i + 2]; // brightness unchanged
       }
 
-      // Resolve floor index.
-      const floorIndex = this._resolveFloorIndex(tileDoc, floors);
       if (!floorFireData.has(floorIndex)) {
         floorFireData.set(floorIndex, { pointArrays: [] });
       }
@@ -3021,7 +3031,13 @@ export class FireEffectV2 {
     if (this._activeFloors.size === 0) return;
 
     if (this._isFireViewStreamingEnabled()) {
-      this._syncFireBucketView();
+      const syncBudget = this._fireViewWarmupFrames > 0
+        ? Infinity
+        : undefined;
+      if (this._fireViewWarmupFrames > 0) this._fireViewWarmupFrames -= 1;
+      this._syncFireBucketView(
+        syncBudget === Infinity ? { createBudget: Infinity } : undefined,
+      );
     }
 
     const hasParticleSystems = !this._isMinimalDetailTier()
@@ -3171,8 +3187,12 @@ export class FireEffectV2 {
   _getPhysicsFloorsThisFrame() {
     const floors = [...this._activeFloors].sort((a, b) => a - b);
     if (floors.length <= 1) return floors;
-    this._physicsFloorCursor = (this._physicsFloorCursor + 1) % floors.length;
-    return [floors[this._physicsFloorCursor]];
+    // Always step the top visible floor so the viewed band stays buttery; rotate
+    // physics across lower stacked floors only to cap CPU.
+    const topFloor = floors[floors.length - 1];
+    const lowerFloors = floors.slice(0, -1);
+    this._physicsFloorCursor = (this._physicsFloorCursor + 1) % lowerFloors.length;
+    return [topFloor, lowerFloors[this._physicsFloorCursor]];
   }
 
   /**
@@ -3470,32 +3490,68 @@ export class FireEffectV2 {
   onFloorChange(maxFloorIndex) {
     if (!this._initialized) return;
 
-    // Re-anchor fire draw order to the currently visible floor band so particles
-    // render below overhead tiles instead of globally on top of all tile layers.
-    this._updateBatchRenderOrder(maxFloorIndex);
+    const nextMax = Number.isFinite(Number(maxFloorIndex))
+      ? Math.max(0, Math.floor(Number(maxFloorIndex)))
+      : 0;
+    const prevActive = new Set(this._activeFloors);
 
-    // Determine which floors should be active.
     const desired = new Set();
-    for (const idx of this._floorStates.keys()) {
-      if (idx <= maxFloorIndex) desired.add(idx);
+    const stackFloors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    if (stackFloors.length > 1) {
+      for (let i = 0; i <= nextMax; i++) desired.add(i);
+    } else {
+      for (const idx of this._floorStates.keys()) {
+        if (idx <= nextMax) desired.add(idx);
+      }
     }
 
-    // Deactivate floors that should no longer be visible.
-    for (const idx of this._activeFloors) {
+    for (const idx of prevActive) {
       if (!desired.has(idx)) this._deactivateFloor(idx);
     }
-    // Activate floors that are newly visible.
-    for (const idx of desired) {
-      if (!this._activeFloors.has(idx)) this._activateFloor(idx);
-    }
 
-    log.info(`onFloorChange(${maxFloorIndex}): desired=[${[...desired]}] prev=[${[...this._activeFloors]}] states=[${[...this._floorStates.keys()]}]`);
     this._activeFloors = desired;
     this._systemParamsSignature = '';
-    if (this._isFireViewStreamingEnabled()) {
-      this._syncFireBucketView({ createBudget: Infinity });
+
+    for (const idx of desired) {
+      if (!prevActive.has(idx)) this._floorLastPhysicsAt.delete(idx);
     }
-    this._applyGlowFloorVisibility(maxFloorIndex);
+
+    this._updateBatchRenderOrder(nextMax);
+
+    if (this._isFireViewStreamingEnabled()) {
+      for (const idx of desired) {
+        this._forceActivateAllFireBucketsForFloor(idx);
+      }
+      this._fireViewWarmupFrames = 8;
+      this._syncFireBucketView({ createBudget: Infinity });
+    } else {
+      for (const idx of desired) {
+        this._activateFloor(idx);
+      }
+    }
+
+    if (this._isMultiFloorScene()) {
+      const topState = this._floorStates.get(nextMax);
+      const topBuckets = topState?.bucketRegistry?.length ?? 0;
+      const topSystems = this._countFloorSystems(topState);
+      if (nextMax > 0 && topBuckets === 0 && topSystems === 0) {
+        try {
+          const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+          const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+          const band = floors.find((f) => Number(f?.index) === nextMax);
+          const key = band?.compositorKey;
+          const hasCompositorFire = !!(key && compositor?.getFloorTexture?.(key, 'fire'));
+          if (hasCompositorFire) {
+            log.info(`FireEffectV2: floor ${nextMax} has compositor fire but no buckets — repopulating`);
+            this._queueRebuild();
+          }
+        } catch (_) {}
+      }
+    }
+
+    this._lastAppliedFireViewFloor = nextMax;
+    log.info(`onFloorChange(${nextMax}): desired=[${[...desired]}] prev=[${[...prevActive]}] states=[${[...this._floorStates.keys()]}]`);
+    this._applyGlowFloorVisibility(nextMax);
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────────────
@@ -3530,6 +3586,8 @@ export class FireEffectV2 {
     this._fireUpdateFrameId = -1;
     this._firePhysicsDoneThisFrame = false;
     this._floorLastPhysicsAt.clear();
+    this._lastAppliedFireViewFloor = 0;
+    this._fireViewWarmupFrames = 0;
     this._invalidateGlowParamCache();
     this._clearCoalOverlays();
     try { refreshEffectMaskStatusUi('fire-sparks'); } catch (_) {}
@@ -5008,7 +5066,10 @@ export class FireEffectV2 {
 
   /** @private */
   _isFireViewStreamingEnabled() {
-    return this.params.fireViewStreaming !== false;
+    if (this.params.fireViewStreaming === false) return false;
+    // Multi-floor scenes used eager per-floor systems before 0.5.4.17 view streaming;
+    // bucket view-culling breaks stacked visibility (particles vanish upstairs).
+    return !this._isMultiFloorScene();
   }
 
   /** @private */
@@ -5199,6 +5260,12 @@ export class FireEffectV2 {
     state.smokeSystems = (state.smokeSystems ?? []).filter((s) => !drop.has(s));
   }
 
+  /** @private */
+  _isMultiFloorScene() {
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    return floors.length > 1 || (this._floorStates?.size ?? 0) > 1;
+  }
+
   /**
    * Sync fire bucket residency to the camera view rect.
    * @param {{ createBudget?: number }} [options]
@@ -5221,10 +5288,12 @@ export class FireEffectV2 {
       return deactivated;
     }
 
+    const multiFloor = this._isMultiFloorScene();
     const createBudget = Number.isFinite(Number(options.createBudget))
       ? Math.max(0, Math.floor(Number(options.createBudget)))
       : FIRE_STREAM_CREATE_BUDGET;
     const view = resolveFireStreamingViewRect();
+    const viewTrustworthy = viewRectIntersectsScene(view);
     let changed = false;
     let created = 0;
 
@@ -5243,7 +5312,9 @@ export class FireEffectV2 {
           }
         }
 
-        const inView = isFireBucketInView(entry.bounds, view);
+        // Multi-floor scenes stack visible bands: never view-cull buckets on active
+        // floors or ground-fire vanishes upstairs unless the camera zooms into it.
+        const inView = multiFloor || !viewTrustworthy || isFireBucketInView(entry.bounds, view);
         if (inView) {
           if (!entry.active) {
             if (created >= createBudget) continue;
@@ -5252,7 +5323,7 @@ export class FireEffectV2 {
               changed = true;
             }
           }
-        } else if (entry.active) {
+        } else if (entry.active && !multiFloor) {
           this._deactivateFireBucket(floorIndex, state, entry);
           changed = true;
         }
@@ -5260,6 +5331,35 @@ export class FireEffectV2 {
     }
 
     return changed;
+  }
+
+  /**
+   * Eagerly activate every bucket on a floor (used when ascending so upper-floor
+   * fire is not left particle-less by a stale post-transition view rect).
+   * @param {number} floorIndex
+   * @private
+   */
+  _forceActivateAllFireBucketsForFloor(floorIndex) {
+    const state = this._floorStates.get(floorIndex);
+    if (!state?.bucketRegistry?.length) return;
+    for (const entry of state.bucketRegistry) {
+      if (entry.active) continue;
+      this._activateFireBucket(floorIndex, state, entry);
+    }
+  }
+
+  /**
+   * Pre-0.5.4.17 eager path: materialize every bucket on a floor without view culling.
+   * @param {number} floorIndex
+   * @private
+   */
+  _eagerMaterializeFloor(floorIndex) {
+    const state = this._floorStates.get(floorIndex);
+    if (!state?.bucketRegistry?.length) return;
+    for (const entry of state.bucketRegistry) {
+      if (entry.active) continue;
+      this._activateFireBucket(floorIndex, state, entry, { attachToBatch: false });
+    }
   }
 
   /**
@@ -5275,7 +5375,16 @@ export class FireEffectV2 {
 
     const attachToBatch = options.attachToBatch !== false;
     const br = this._ensureFloorBatchRenderer(floorIndex, state);
-    if (entry.active) return false;
+    if (entry.active) {
+      const systems = entry.systems ?? [];
+      const resident = systems.length > 0 && systems.every(
+        (sys) => sys && br?.systemToBatchIndex?.has(sys),
+      );
+      if (resident) return false;
+      entry.active = false;
+      entry.systems = null;
+      state.activeBucketKeys?.delete?.(entry.bucketKey);
+    }
     if (!entry.isMapPoint && !entry?.bucketPoints?.length) return false;
     if (entry.isMapPoint && !entry.mapPointShape) return false;
 
@@ -6018,12 +6127,15 @@ export class FireEffectV2 {
     }
 
     if (this._isFireViewStreamingEnabled()) {
+      this._forceActivateAllFireBucketsForFloor(floorIndex);
       this._syncFireBucketView({ createBudget: Infinity });
       log.info(`FireEffectV2: activating floor ${floorIndex} (view streaming sync)`);
       return;
     }
 
-    const br = state.batchRenderer;
+    this._eagerMaterializeFloor(floorIndex);
+
+    const br = state.batchRenderer ?? this._ensureFloorBatchRenderer(floorIndex, state);
     if (!br) {
       log.warn(`FireEffectV2: _activateFloor(${floorIndex}) failed - no batchRenderer`);
       return;
@@ -6033,7 +6145,9 @@ export class FireEffectV2 {
     log.info(`FireEffectV2: activating floor ${floorIndex} with ${allSystems.length} systems (${state.systems.length} fire, ${state.emberSystems.length} ember, ${state.smokeSystems.length} smoke)`);
 
     for (const sys of allSystems) {
-      this._attachSystemToBatch(br, sys);
+      if (!br.systemToBatchIndex?.has(sys)) {
+        this._attachSystemToBatch(br, sys);
+      }
     }
   }
 

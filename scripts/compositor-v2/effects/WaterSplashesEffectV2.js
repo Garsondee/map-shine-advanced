@@ -52,6 +52,7 @@ import {
   SplashRingLifecycleBehavior,
   scanWaterEdgePoints,
   scanWaterInteriorPoints,
+  filterSplashPointsByPaintedShadow,
   syncSharedOutdoorsMaskForFloor,
   clearSharedOutdoorsMaskCache,
   buildEffectSceneBoundsFromCanvas,
@@ -94,6 +95,29 @@ import {
 } from './water-splash-structural-shadow.js';
 
 const log = createLogger('WaterSplashesV2');
+
+const SPLASH_ATLAS_COLS = 6;
+const SPLASH_ATLAS_ROWS = 4;
+const SPLASH_ATLAS_CELL_SIZE = 96;
+
+const SPLASH_UV_MOTION_VERTEX_MARKER = '// MS_WATER_SPLASHES_UV_MOTION_VERTEX';
+const SPLASH_UV_MOTION_FRAGMENT_MARKER = '// MS_WATER_SPLASHES_UV_MOTION_FRAGMENT';
+const SPLASH_UV_MOTION_TILE_FRAGMENT_MARKER = '// MS_WATER_SPLASHES_ANIMATED_TILE_FRAGMENT';
+/** Bump to hot-upgrade splash UV/flipbook shaders on live sessions. */
+const SPLASH_UV_MOTION_SHADER_EPOCH = 2;
+
+const SPLASH_ANIMATED_TILE_FRAGMENT = `
+    ${SPLASH_UV_MOTION_TILE_FRAGMENT_MARKER}
+#ifdef USE_MAP
+    vec2 msSplashUv = msSplashWarpAtlasUv(vUv);
+    vec4 texelColor = texture2D( map, msSplashUv);
+    #ifdef TILE_BLEND
+        vec2 msSplashUvNext = msSplashWarpAtlasUv(vUvNext);
+        texelColor = mix( texelColor, texture2D( map, msSplashUvNext ), vUvBlend );
+    #endif
+    msSplashApplyAnimatedRing(texelColor, vUv);
+    diffuseColor *= texelColor;
+#endif`;
 
 /** Detect legacy splash darken block for one-shot shader upgrade. */
 const SHADOW_DARKEN_V1_ANCHOR = '// MS_WATER_SPLASHES_SHADOW_DARKEN_V1';
@@ -323,6 +347,265 @@ function patchSplashParticleFragmentShader(fs) {
   return injectShadowDarkenAfterTonemapping(s);
 }
 
+/** @param {string} fs */
+function splashUvMotionFragmentHeader() {
+  return `
+${SPLASH_UV_MOTION_FRAGMENT_MARKER}
+varying float vMsSplashUvPhase;
+uniform float uMsSplashUvExpand;
+uniform float uMsSplashUvExpandCurve;
+uniform float uMsSplashRingCompress;
+uniform float uMsSplashRingWidth;
+#ifdef UV_TILE
+uniform vec2 tileCount;
+#endif
+
+vec2 msSplashLocalTileUv(vec2 uv) {
+#ifdef UV_TILE
+  return fract(uv * tileCount);
+#else
+  return uv;
+#endif
+}
+
+vec2 msSplashWarpAtlasUv(vec2 uv) {
+  float phase = pow(clamp(vMsSplashUvPhase, 0.0, 1.0), max(0.05, uMsSplashUvExpandCurve));
+  float scale = 1.0 + max(0.0, uMsSplashUvExpand) * phase;
+#ifdef UV_TILE
+  vec2 tc = max(tileCount, vec2(1.0));
+  vec2 tile = floor(uv * tc);
+  vec2 local = fract(uv * tc);
+  vec2 warped = (local - vec2(0.5)) / max(0.001, scale) + vec2(0.5);
+  warped = clamp(warped, vec2(0.001), vec2(0.999));
+  return (tile + warped) / tc;
+#else
+  vec2 warped = (uv - vec2(0.5)) / max(0.001, scale) + vec2(0.5);
+  return clamp(warped, vec2(0.001), vec2(0.999));
+#endif
+}
+
+void msSplashApplyAnimatedRing(inout vec4 texelColor, vec2 atlasUv) {
+  float compress = clamp(uMsSplashRingCompress, 0.0, 1.0);
+  if (compress <= 0.0001) return;
+  float phase = clamp(vMsSplashUvPhase, 0.0, 1.0);
+  vec2 local = msSplashLocalTileUv(atlasUv);
+  float r = clamp(length(local - vec2(0.5)) * 2.0, 0.0, 1.0);
+  float center = mix(0.20, 0.88, phase);
+  float width = max(0.02, uMsSplashRingWidth);
+  float crest = 1.0 - smoothstep(0.0, width, abs(r - center));
+  float ringMul = mix(1.0, 0.34 + 1.48 * crest, compress);
+  texelColor.a *= ringMul;
+  texelColor.rgb *= mix(1.0, 0.82 + 0.42 * crest, compress);
+}
+`;
+}
+
+/** @param {string} fs */
+function injectSplashUvMotionFragmentHeader(fs) {
+  if (typeof fs !== 'string' || fs.includes(SPLASH_UV_MOTION_FRAGMENT_MARKER)) return fs;
+  const header = splashUvMotionFragmentHeader();
+  const precRE = /precision\s+(?:lowp|mediump|highp)\s+float\s*;\s*/g;
+  let lastPrecEnd = -1;
+  for (;;) {
+    const m = precRE.exec(fs);
+    if (!m) break;
+    lastPrecEnd = precRE.lastIndex;
+  }
+  return lastPrecEnd >= 0
+    ? fs.slice(0, lastPrecEnd) + header + fs.slice(lastPrecEnd)
+    : header + fs;
+}
+
+/** @param {string} fs */
+function injectSplashAnimatedTileFragment(fs) {
+  if (typeof fs !== 'string') return fs;
+  if (fs.includes(SPLASH_UV_MOTION_TILE_FRAGMENT_MARKER)) return fs;
+
+  const mapBlock =
+`#ifdef USE_MAP
+    vec4 texelColor = texture2D( map, vUv);
+    #ifdef TILE_BLEND
+        texelColor = mix( texelColor, texture2D( map, vUvNext ), vUvBlend );
+    #endif
+    diffuseColor *= texelColor;
+#endif`;
+
+  if (fs.includes(mapBlock)) return fs.replace(mapBlock, SPLASH_ANIMATED_TILE_FRAGMENT);
+  const includeTile = '#include <tile_fragment>';
+  if (fs.includes(includeTile)) return fs.replace(includeTile, SPLASH_ANIMATED_TILE_FRAGMENT);
+  return fs;
+}
+
+/** @param {string} fs */
+function patchSplashUvMotionFragmentShader(fs) {
+  if (typeof fs !== 'string') return fs;
+  let out = injectSplashUvMotionFragmentHeader(fs);
+  out = injectSplashAnimatedTileFragment(out);
+  return out;
+}
+
+/** @param {string} vs */
+function patchSplashUvMotionVertexShader(vs) {
+  if (typeof vs !== 'string') return vs;
+  let out = vs;
+  if (!out.includes('varying float vMsSplashUvPhase')) {
+    out = out.replace('void main() {', 'varying float vMsSplashUvPhase;\nuniform float uMsSplashAnimFrames;\nvoid main() {');
+  }
+  if (out.includes(SPLASH_UV_MOTION_VERTEX_MARKER)) return out;
+
+  const phaseCode = `
+  ${SPLASH_UV_MOTION_VERTEX_MARKER}
+#ifdef UV_TILE
+  vMsSplashUvPhase = clamp(mod(uvTile, max(1.0, uMsSplashAnimFrames)) / max(1.0, uMsSplashAnimFrames - 1.0), 0.0, 1.0);
+#else
+  vMsSplashUvPhase = 0.0;
+#endif`;
+
+  const includeTile = '#include <tile_vertex>';
+  if (out.includes(includeTile)) {
+    return out.replace(includeTile, `${includeTile}${phaseCode}`);
+  }
+
+  const uvAssign = 'vUv = (tileTransform *vec3( uv, 1 )).xy;';
+  if (out.includes(uvAssign)) {
+    return out.replace(uvAssign, `${uvAssign}${phaseCode}`);
+  }
+  return out.replace('void main() {', `void main() {\n  vMsSplashUvPhase = 0.0;`);
+}
+
+const BUBBLE_FOAM_UV_VERTEX_MARKER = '// MS_BUBBLE_FOAM_UV_VERTEX';
+const BUBBLE_FOAM_UV_FRAGMENT_MARKER = '// MS_BUBBLE_FOAM_UV_FRAGMENT';
+const BUBBLE_FOAM_MAP_FRAGMENT_MARKER = '// MS_BUBBLE_FOAM_MAP_FRAGMENT';
+/** Bump to hot-upgrade underwater bubble foam shaders on live sessions. */
+const BUBBLE_FOAM_UV_SHADER_EPOCH = 2;
+
+const BUBBLE_FOAM_ANIMATED_MAP_FRAGMENT = `
+    ${BUBBLE_FOAM_MAP_FRAGMENT_MARKER}
+#ifdef USE_MAP
+    float msBubblePhase = clamp(vMsBubbleFoamLifeT, 0.0, 1.0);
+    vec2 msBubbleLocal = vUv - vec2(0.5);
+    float msBubbleExpand = max(0.0, uMsBubbleFoamUvExpand) * pow(msBubblePhase, max(0.05, uMsBubbleFoamUvCurve));
+    float msBubbleScale = 1.0 / max(0.12, 1.0 + msBubbleExpand);
+    vec2 msBubbleUv = msBubbleLocal * msBubbleScale + vec2(0.5);
+    msBubbleUv += vec2(
+      sin(msBubblePhase * 6.2831853 * uMsBubbleFoamSwirl),
+      cos(msBubblePhase * 4.1887902 * uMsBubbleFoamSwirl)
+    ) * 0.04 * uMsBubbleFoamSwirl;
+    msBubbleUv = clamp(msBubbleUv, vec2(0.02), vec2(0.98));
+    vec4 texelColor = texture2D( map, msBubbleUv );
+    float msBubbleNoise = msBubbleFoamHash(msBubbleUv * uMsBubbleFoamNoiseScale + vMsWorldPos.xy * 0.0013);
+    float msBubbleBreak = clamp(uMsBubbleFoamNoiseBreakup, 0.0, 1.0);
+    if (msBubbleBreak > 0.0001) {
+      float msBubbleGate = mix(1.0, smoothstep(0.12, 0.9, msBubbleNoise), msBubbleBreak * (0.3 + 0.7 * msBubblePhase));
+      texelColor.a *= msBubbleGate;
+      float msBubbleRim = smoothstep(0.2, 0.95, length(msBubbleLocal) * 2.0);
+      texelColor.rgb *= mix(1.0, 0.68 + 0.48 * msBubbleNoise, msBubbleBreak * msBubbleRim * 0.7);
+    }
+    float msBubbleR = length(msBubbleLocal) * 2.0;
+    float msBubbleEdgeFade = smoothstep(0.5 + 0.42 * msBubblePhase, 1.02, msBubbleR);
+    texelColor.a *= 1.0 - msBubbleEdgeFade * clamp(uMsBubbleFoamEdgeDissolve, 0.0, 1.0);
+    diffuseColor *= texelColor;
+#endif`;
+
+/** @param {string} fs */
+function bubbleFoamUvFragmentHeader() {
+  return `
+${BUBBLE_FOAM_UV_FRAGMENT_MARKER}
+varying float vMsBubbleFoamLifeT;
+uniform float uMsBubbleFoamUvExpand;
+uniform float uMsBubbleFoamUvCurve;
+uniform float uMsBubbleFoamNoiseBreakup;
+uniform float uMsBubbleFoamNoiseScale;
+uniform float uMsBubbleFoamSwirl;
+uniform float uMsBubbleFoamEdgeDissolve;
+
+float msBubbleFoamHash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+`;
+}
+
+/** @param {string} fs */
+function injectBubbleFoamUvFragmentHeader(fs) {
+  if (typeof fs !== 'string' || fs.includes(BUBBLE_FOAM_UV_FRAGMENT_MARKER)) return fs;
+  const header = bubbleFoamUvFragmentHeader();
+  const precRE = /precision\s+(?:lowp|mediump|highp)\s+float\s*;\s*/g;
+  let lastPrecEnd = -1;
+  for (;;) {
+    const m = precRE.exec(fs);
+    if (!m) break;
+    lastPrecEnd = precRE.lastIndex;
+  }
+  return lastPrecEnd >= 0
+    ? fs.slice(0, lastPrecEnd) + header + fs.slice(lastPrecEnd)
+    : header + fs;
+}
+
+/** @param {string} fs */
+function injectBubbleFoamAnimatedMapFragment(fs) {
+  if (typeof fs !== 'string') return fs;
+  if (fs.includes(BUBBLE_FOAM_MAP_FRAGMENT_MARKER)) return fs;
+
+  const mapBlock =
+`#ifdef USE_MAP
+    vec4 texelColor = texture2D( map, vUv);
+    #ifdef TILE_BLEND
+        texelColor = mix( texelColor, texture2D( map, vUvNext ), vUvBlend );
+    #endif
+    diffuseColor *= texelColor;
+#endif`;
+
+  if (fs.includes(mapBlock)) return fs.replace(mapBlock, BUBBLE_FOAM_ANIMATED_MAP_FRAGMENT);
+  const includeTile = '#include <tile_fragment>';
+  if (fs.includes(includeTile)) return fs.replace(includeTile, BUBBLE_FOAM_ANIMATED_MAP_FRAGMENT);
+  return fs;
+}
+
+/** @param {string} fs */
+function patchBubbleFoamUvFragmentShader(fs) {
+  if (typeof fs !== 'string') return fs;
+  let out = injectBubbleFoamUvFragmentHeader(fs);
+  out = injectBubbleFoamAnimatedMapFragment(out);
+  return out;
+}
+
+/** @param {string} vs */
+function patchBubbleFoamUvVertexShader(vs) {
+  if (typeof vs !== 'string') return vs;
+  let out = vs;
+  if (!out.includes('varying float vMsBubbleFoamLifeT')) {
+    out = out.replace('void main() {', 'varying float vMsBubbleFoamLifeT;\nvoid main() {');
+  }
+
+  // Quarks only declares `uvTile` when UV_TILE is defined (u/vTileCount > 1).
+  // Bubble foam keeps a 1×1 atlas but still writes per-particle phase into uvTile.
+  if (!out.includes('attribute float uvTile')) {
+    if (out.includes('attribute vec3 offset;')) {
+      out = out.replace('attribute vec3 offset;', 'attribute float uvTile;\nattribute vec3 offset;');
+    } else if (out.includes('attribute vec3 position;')) {
+      out = out.replace('attribute vec3 position;', 'attribute float uvTile;\nattribute vec3 position;');
+    } else {
+      out = out.replace('void main() {', 'attribute float uvTile;\nvoid main() {');
+    }
+  }
+
+  if (out.includes(BUBBLE_FOAM_UV_VERTEX_MARKER)) return out;
+
+  const phaseCode = `
+  ${BUBBLE_FOAM_UV_VERTEX_MARKER}
+  vMsBubbleFoamLifeT = clamp(fract(uvTile), 0.0, 1.0);`;
+
+  const includeTile = '#include <tile_vertex>';
+  if (out.includes(includeTile)) {
+    return out.replace(includeTile, `${includeTile}${phaseCode}`);
+  }
+  const uvAssign = 'vUv = (tileTransform *vec3( uv, 1 )).xy;';
+  if (out.includes(uvAssign)) {
+    return out.replace(uvAssign, `${uvAssign}${phaseCode}`);
+  }
+  return out.replace('void main() {', `void main() {\n  vMsBubbleFoamLifeT = 0.0;`);
+}
+
 /**
  * Strip misplaced V2–V10 darken blocks, then append darken after tonemapping when present.
  * @param {string} fs
@@ -414,6 +697,8 @@ export class WaterSplashesEffectV2 {
 
     /** Bumped to force splash masking shader hot-upgrade (see `_ensureSplashMaskShaderEpoch`). */
     this._splashMaskShaderEpoch = 0;
+    /** Bumped to force splash UV/flipbook shader hot-upgrade. */
+    this._splashUvMotionShaderEpoch = 0;
 
     /** Exposed for probes; mirrors `_lastAppliedSplashViewFloor`. */
     this._lastTrackedSplashViewFloor = Number.NaN;
@@ -489,16 +774,23 @@ export class WaterSplashesEffectV2 {
       tintBColorB: 0.76,
 
       foamEnabled: true,
-      foamRate: 13.3,
-      foamSizeMin: 480,
-      foamSizeMax: 686,
+      foamRate: 8,
+      foamSizeMin: 147,
+      foamSizeMax: 288,
       foamLifeMin: 5.5,
       foamLifeMax: 8.75,
-      foamPeakOpacity: 0.04,
+      foamPeakOpacity: 0.03,
       foamColorR: 0.85,
       foamColorG: 1.02,
       foamColorB: 1.22,
-      foamWindDriftScale: 1.24,
+      foamWindDriftScale: 2,
+      foamUvAnimSpeed: 1.0,
+      foamUvExpand: 0.72,
+      foamUvCurve: 0.78,
+      foamNoiseBreakup: 0.58,
+      foamNoiseScale: 9.0,
+      foamUvSwirl: 0.35,
+      foamEdgeDissolve: 0.42,
 
       splashEnabled: true,
       splashRate: 20.2,
@@ -508,6 +800,13 @@ export class WaterSplashesEffectV2 {
       splashLifeMax: 0.8,
       splashPeakOpacity: 0.7,
       splashWindDriftScale: 2,
+      splashAnimSpeed: 1.0,
+      splashFlipbookTravel: 1.0,
+      splashUvExpand: 0.38,
+      splashUvExpandCurve: 0.85,
+      splashRingCompress: 0.48,
+      splashRingWidth: 0.22,
+      splashSpinScale: 0.22,
     };
 
     // Controller wrapper so the V2 UI callback can target `_waterSplashesEffect.bubbles`
@@ -555,6 +854,13 @@ export class WaterSplashesEffectV2 {
       splashLifeMax: 0.8,
       splashPeakOpacity: 0.7,
       splashWindDriftScale: 2,
+      splashAnimSpeed: 1.0,
+      splashFlipbookTravel: 1.0,
+      splashUvExpand: 0.38,
+      splashUvExpandCurve: 0.85,
+      splashRingCompress: 0.48,
+      splashRingWidth: 0.22,
+      splashSpinScale: 0.22,
 
       // Scan settings
       edgeScanStride: 2,
@@ -567,16 +873,139 @@ export class WaterSplashesEffectV2 {
 
   // ── Private: Material patching (water-parity screen occlusion) ─────────────
 
+  /** @private */
+  _createBubbleFoamMotionUniforms(params = this.bubblesParams) {
+    const uniforms = {
+      uMsBubbleFoamUvExpand: { value: 0.72 },
+      uMsBubbleFoamUvCurve: { value: 0.78 },
+      uMsBubbleFoamNoiseBreakup: { value: 0.58 },
+      uMsBubbleFoamNoiseScale: { value: 9.0 },
+      uMsBubbleFoamSwirl: { value: 0.35 },
+      uMsBubbleFoamEdgeDissolve: { value: 0.42 },
+    };
+    this._syncBubbleFoamMotionUniformValues(uniforms, params);
+    return uniforms;
+  }
+
+  /** @private */
+  _syncBubbleFoamMotionUniformValues(uniforms, params = this.bubblesParams) {
+    if (!uniforms) return;
+    const p = params || {};
+    if (uniforms.uMsBubbleFoamUvExpand) uniforms.uMsBubbleFoamUvExpand.value = Math.max(0.0, Number(p.foamUvExpand) || 0.0);
+    if (uniforms.uMsBubbleFoamUvCurve) uniforms.uMsBubbleFoamUvCurve.value = Math.max(0.05, Number(p.foamUvCurve) || 0.78);
+    if (uniforms.uMsBubbleFoamNoiseBreakup) uniforms.uMsBubbleFoamNoiseBreakup.value = Math.max(0.0, Math.min(1.0, Number(p.foamNoiseBreakup) || 0.0));
+    if (uniforms.uMsBubbleFoamNoiseScale) uniforms.uMsBubbleFoamNoiseScale.value = Math.max(0.5, Number(p.foamNoiseScale) || 9.0);
+    if (uniforms.uMsBubbleFoamSwirl) uniforms.uMsBubbleFoamSwirl.value = Math.max(0.0, Number(p.foamUvSwirl) || 0.0);
+    if (uniforms.uMsBubbleFoamEdgeDissolve) uniforms.uMsBubbleFoamEdgeDissolve.value = Math.max(0.0, Math.min(1.0, Number(p.foamEdgeDissolve) || 0.0));
+  }
+
+  /** @private */
+  _syncBubbleFoamMotionMaterial(material, params = this.bubblesParams) {
+    const uniforms = material?.userData?._msBubbleFoamMotionUniforms;
+    if (uniforms) this._syncBubbleFoamMotionUniformValues(uniforms, params);
+  }
+
+  /** @private */
+  _syncBubbleFoamSystemMotion(system, params = this.bubblesParams, state = null) {
+    if (!system?.userData?.isBubbles) return;
+    const opts = { bubbleFoamUvMotion: true, params };
+    if (system.material) {
+      if (system.material.userData?._msBubbleFoamUvMotionEnabled !== true || !system.material.userData?._msBubbleFoamMotionUniforms) {
+        this._patchSplashOcclusionMaterial(system.material, opts);
+      }
+      this._syncBubbleFoamMotionMaterial(system.material, params);
+    }
+
+    const br = state?.batchRenderer;
+    const idx = br?.systemToBatchIndex?.get ? br.systemToBatchIndex.get(system) : undefined;
+    const batchMat = idx !== undefined ? br?.batches?.[idx]?.material : null;
+    if (batchMat) {
+      if (batchMat.userData?._msBubbleFoamUvMotionEnabled !== true || !batchMat.userData?._msBubbleFoamMotionUniforms) {
+        this._patchSplashOcclusionMaterial(batchMat, opts);
+      }
+      this._syncBubbleFoamMotionMaterial(batchMat, params);
+    }
+  }
+
+  /** @private */
+  _createSplashMotionUniforms(params = this.params) {
+    const uniforms = {
+      uMsSplashAnimFrames: { value: SPLASH_ATLAS_COLS },
+      uMsSplashUvExpand: { value: 0.38 },
+      uMsSplashUvExpandCurve: { value: 0.85 },
+      uMsSplashRingCompress: { value: 0.48 },
+      uMsSplashRingWidth: { value: 0.22 },
+    };
+    this._syncSplashMotionUniformValues(uniforms, params);
+    return uniforms;
+  }
+
+  /** @private */
+  _syncSplashMotionUniformValues(uniforms, params = this.params) {
+    if (!uniforms) return;
+    const p = params || {};
+    if (uniforms.uMsSplashAnimFrames) uniforms.uMsSplashAnimFrames.value = SPLASH_ATLAS_COLS;
+    if (uniforms.uMsSplashUvExpand) uniforms.uMsSplashUvExpand.value = Math.max(0.0, Number(p.splashUvExpand) || 0.0);
+    if (uniforms.uMsSplashUvExpandCurve) uniforms.uMsSplashUvExpandCurve.value = Math.max(0.05, Number(p.splashUvExpandCurve) || 0.85);
+    if (uniforms.uMsSplashRingCompress) uniforms.uMsSplashRingCompress.value = Math.max(0.0, Math.min(1.0, Number(p.splashRingCompress) || 0.0));
+    if (uniforms.uMsSplashRingWidth) uniforms.uMsSplashRingWidth.value = Math.max(0.02, Number(p.splashRingWidth) || 0.22);
+  }
+
+  /** @private */
+  _syncSplashMotionMaterial(material, params = this.params) {
+    const uniforms = material?.userData?._msSplashMotionUniforms;
+    if (uniforms) this._syncSplashMotionUniformValues(uniforms, params);
+  }
+
+  /** @private */
+  _syncSplashSystemMotion(system, params = this.params, state = null) {
+    if (!system) return;
+    const opts = { splashUvMotion: true, params };
+    if (system.material) {
+      if (system.material.userData?._msSplashUvMotionEnabled !== true || !system.material.userData?._msSplashMotionUniforms) {
+        this._patchSplashOcclusionMaterial(system.material, opts);
+      }
+      this._syncSplashMotionMaterial(system.material, params);
+    }
+
+    const br = state?.batchRenderer;
+    const idx = br?.systemToBatchIndex?.get ? br.systemToBatchIndex.get(system) : undefined;
+    const batchMat = idx !== undefined ? br?.batches?.[idx]?.material : null;
+    if (batchMat) {
+      if (batchMat.userData?._msSplashUvMotionEnabled !== true || !batchMat.userData?._msSplashMotionUniforms) {
+        this._patchSplashOcclusionMaterial(batchMat, opts);
+      }
+      this._syncSplashMotionMaterial(batchMat, params);
+    }
+  }
+
   /**
    * Patch quarks materials to use the same screen masks as WaterEffectV2 /
    * water-shader.js (tWaterOccluderAlpha, tOverheadRoofBlock, tSliceAlpha, tWaterBgAlphaMask).
    * @private
    */
-  _patchSplashOcclusionMaterial(material) {
+  _patchSplashOcclusionMaterial(material, opts = {}) {
     const THREE = window.THREE;
     if (!material || !THREE) return;
 
     material.userData = material.userData || {};
+    if (opts.splashUvMotion) material.userData._msSplashUvMotionEnabled = true;
+    if (opts.bubbleFoamUvMotion) material.userData._msBubbleFoamUvMotionEnabled = true;
+    const isSplashUvMotionEnabled = () => material.userData?._msSplashUvMotionEnabled === true;
+    const isBubbleFoamUvMotionEnabled = () => material.userData?._msBubbleFoamUvMotionEnabled === true;
+    if (isSplashUvMotionEnabled() && !material.userData._msSplashMotionUniforms) {
+      material.userData._msSplashMotionUniforms = this._createSplashMotionUniforms(opts.params || this.params);
+    }
+    if (isSplashUvMotionEnabled()) {
+      this._syncSplashMotionUniformValues(material.userData._msSplashMotionUniforms, opts.params || this.params);
+    }
+    if (isBubbleFoamUvMotionEnabled() && !material.userData._msBubbleFoamMotionUniforms) {
+      material.userData._msBubbleFoamMotionUniforms = this._createBubbleFoamMotionUniforms(opts.params || this.bubblesParams);
+    }
+    if (isBubbleFoamUvMotionEnabled()) {
+      this._syncBubbleFoamMotionUniformValues(material.userData._msBubbleFoamMotionUniforms, opts.params || this.bubblesParams);
+    }
+
     let uniforms = material.userData._msSplashOcclusionUniforms;
     if (!uniforms) {
       uniforms = createSplashOcclusionUniforms(THREE);
@@ -606,6 +1035,23 @@ export class WaterSplashesEffectV2 {
       for (const key of SPLASH_STRUCTURAL_SHADOW_SHARED_UNIFORM_KEYS) {
         if (uniforms[key]) uni[key] = uniforms[key];
       }
+      const motion = material.userData?._msSplashMotionUniforms;
+      if (motion) {
+        uni.uMsSplashAnimFrames = motion.uMsSplashAnimFrames;
+        uni.uMsSplashUvExpand = motion.uMsSplashUvExpand;
+        uni.uMsSplashUvExpandCurve = motion.uMsSplashUvExpandCurve;
+        uni.uMsSplashRingCompress = motion.uMsSplashRingCompress;
+        uni.uMsSplashRingWidth = motion.uMsSplashRingWidth;
+      }
+      const bubbleFoam = material.userData?._msBubbleFoamMotionUniforms;
+      if (bubbleFoam) {
+        uni.uMsBubbleFoamUvExpand = bubbleFoam.uMsBubbleFoamUvExpand;
+        uni.uMsBubbleFoamUvCurve = bubbleFoam.uMsBubbleFoamUvCurve;
+        uni.uMsBubbleFoamNoiseBreakup = bubbleFoam.uMsBubbleFoamNoiseBreakup;
+        uni.uMsBubbleFoamNoiseScale = bubbleFoam.uMsBubbleFoamNoiseScale;
+        uni.uMsBubbleFoamSwirl = bubbleFoam.uMsBubbleFoamSwirl;
+        uni.uMsBubbleFoamEdgeDissolve = bubbleFoam.uMsBubbleFoamEdgeDissolve;
+      }
     };
 
     const patchWorldPosVertex = (vs) => {
@@ -629,6 +1075,8 @@ export class WaterSplashesEffectV2 {
         const posAttr = /\battribute\s+\S+\s+offset\b/.test(out) ? 'offset' : 'position';
         out = out.replace('void main() {', `void main() {\n  vMsWorldPos = (modelMatrix * vec4(${posAttr}, 1.0)).xyz;`);
       }
+      if (isSplashUvMotionEnabled()) out = patchSplashUvMotionVertexShader(out);
+      if (isBubbleFoamUvMotionEnabled()) out = patchBubbleFoamUvVertexShader(out);
       return out;
     };
 
@@ -649,7 +1097,7 @@ export class WaterSplashesEffectV2 {
       out = repairOrphanSplashStructuralDarken(out);
       out = repairSplashOcclusionShaderIfLegacy(out);
       out = repairSplashWaterMaskAlphaClip(out);
-      if (!splashShaderHasStructuralShadow(out)) {
+      if (!splashShaderHasStructuralShadow(out) || out.includes('tBuildingShadow1')) {
         out = injectSplashStructuralShadowGlsl(out);
       }
       if (!out.includes(SPLASH_OCCLUSION_MASK_MARKER)) {
@@ -683,6 +1131,8 @@ export class WaterSplashesEffectV2 {
       if (!out.includes(SPLASH_VOLUME_BEGIN) || !out.includes('MS_WATER_SPLASHES_SHADOW_DARKEN_END')) {
         out = patchSplashParticleFragmentShader(out);
       }
+      if (isSplashUvMotionEnabled()) out = patchSplashUvMotionFragmentShader(out);
+      if (isBubbleFoamUvMotionEnabled()) out = patchBubbleFoamUvFragmentShader(out);
       return out;
     };
 
@@ -707,9 +1157,7 @@ export class WaterSplashesEffectV2 {
     material.onBeforeCompile = (shader) => {
       linkUniforms(shader.uniforms);
       shader.vertexShader = patchWorldPosVertex(shader.vertexShader);
-      shader.fragmentShader = patchSplashParticleFragmentShader(
-        patchFragment(shader.fragmentShader),
-      );
+      shader.fragmentShader = patchFragment(shader.fragmentShader);
     };
 
     material.needsUpdate = true;
@@ -924,7 +1372,42 @@ export class WaterSplashesEffectV2 {
   syncPostMergeOcclusionUniforms() {
     this._refreshDrawingBufferSize();
     this._ensureSplashMaskShaderEpoch();
+    this._ensureSplashUvMotionShaderEpoch();
     this._syncSplashOcclusionUniforms({ force: true, deferFrameOccluders: false });
+  }
+
+  /** @private */
+  _repatchSplashMaterials() {
+    for (const sys of this._activeSystemsFlat ?? []) {
+      if (!sys?.material) continue;
+      this._patchSplashOcclusionMaterial(sys.material, {
+        splashUvMotion: !!sys.userData?.isSplash && !sys.userData?.isBubbles,
+        bubbleFoamUvMotion: !!sys.userData?.isBubbles && (!!sys.userData?.isFoam || !!sys.userData?.isSplash),
+        params: sys.userData?.isBubbles ? this.bubblesParams : this.params,
+      });
+    }
+
+    for (const st of this._floorStates.values()) {
+      const br = st?.batchRenderer;
+      if (!br?.batches || !br?.systemToBatchIndex) continue;
+
+      const patchBatchForSystem = (sys) => {
+        if (!sys) return;
+        const idx = br.systemToBatchIndex.get(sys);
+        const batchMat = idx !== undefined ? br.batches[idx]?.material : null;
+        if (!batchMat) return;
+        this._patchSplashOcclusionMaterial(batchMat, {
+          splashUvMotion: !!sys.userData?.isSplash && !sys.userData?.isBubbles,
+          bubbleFoamUvMotion: !!sys.userData?.isBubbles && (!!sys.userData?.isFoam || !!sys.userData?.isSplash),
+          params: sys.userData?.isBubbles ? this.bubblesParams : this.params,
+        });
+      };
+
+      for (const sys of st.foamSystems ?? []) patchBatchForSystem(sys);
+      for (const sys of st.splashSystems ?? []) patchBatchForSystem(sys);
+      for (const sys of st.foamSystems2 ?? []) patchBatchForSystem(sys);
+      for (const sys of st.splashSystems2 ?? []) patchBatchForSystem(sys);
+    }
   }
 
   /** @private */
@@ -932,20 +1415,217 @@ export class WaterSplashesEffectV2 {
     const epoch = SPLASH_OCCLUSION_SHADER_EPOCH;
     if (this._splashMaskShaderEpoch === epoch) return;
     this._splashMaskShaderEpoch = epoch;
-    const mats = new Set();
-    for (const sys of this._activeSystemsFlat ?? []) {
-      if (sys?.material) mats.add(sys.material);
+    this._repatchSplashMaterials();
+  }
+
+  /** @private */
+  _ensureSplashUvMotionShaderEpoch() {
+    const epochChanged = this._splashUvMotionShaderEpoch !== SPLASH_UV_MOTION_SHADER_EPOCH;
+    if (epochChanged) {
+      this._splashUvMotionShaderEpoch = SPLASH_UV_MOTION_SHADER_EPOCH;
+      this._repatchSplashMaterials();
     }
-    for (const st of this._floorStates.values()) {
-      for (const batch of st?.batchRenderer?.batches ?? []) {
-        if (batch?.material) mats.add(batch.material);
+    this._upgradeSplashAnimationSystems();
+    this._ensureBubbleFoamUvShaderEpoch();
+  }
+
+  /** @private */
+  _ensureBubbleFoamUvShaderEpoch() {
+    const epochChanged = this._bubbleFoamUvShaderEpoch !== BUBBLE_FOAM_UV_SHADER_EPOCH;
+    if (epochChanged) {
+      this._bubbleFoamUvShaderEpoch = BUBBLE_FOAM_UV_SHADER_EPOCH;
+      this._repatchSplashMaterials();
+    }
+    this._upgradeBubbleFoamAnimationSystems();
+  }
+
+  /**
+   * Shared bubbles-layer owner for foam + ring lifecycles (foam.webp UV animation).
+   * @private
+   */
+  _bubbleLayerOwnerProxy() {
+    if (!this._bubbleLayerOwner) {
+      const owner = { _bubbleFoamAnim: true };
+      Object.defineProperty(owner, 'params', { get: () => this.bubblesParams });
+      Object.defineProperty(owner, '_sceneBounds', { get: () => this._sceneBounds });
+      Object.defineProperty(owner, '_splashViewEpoch', { get: () => this._splashViewEpoch });
+      Object.defineProperty(owner, '_outdoorsMaskFrameToken', { get: () => this._outdoorsMaskFrameToken });
+      this._bubbleLayerOwner = owner;
+    }
+    return this._bubbleLayerOwner;
+  }
+
+  /** @private */
+  _bubbleSplashOwnerProxy() {
+    return this._bubbleLayerOwnerProxy();
+  }
+
+  /**
+   * Replace legacy bubble foam / ring behaviors with fresh lifecycle instances.
+   * @private
+   */
+  _refreshBubbleFoamBehaviors(sys) {
+    if (!sys?.userData?.isBubbles) return;
+    const floorIndex = sys.userData?._msFloorIndex ?? 0;
+    const owner = this._bubbleLayerOwnerProxy();
+    const next = [];
+    let hasLifecycle = false;
+    for (const beh of sys.behaviors ?? []) {
+      if (beh?.type === 'FoamPlumeLifecycle' || beh?.type === 'SplashRingLifecycle' || beh?.type === 'SplashFlipbookBehavior') {
+        if (!hasLifecycle) {
+          if (sys.userData?.isFoam) next.push(new FoamPlumeLifecycleBehavior(owner, floorIndex));
+          else if (sys.userData?.isSplash) next.push(new SplashRingLifecycleBehavior(owner, floorIndex));
+          hasLifecycle = true;
+        }
+        continue;
+      }
+      next.push(beh);
+    }
+    if (!hasLifecycle) {
+      if (sys.userData?.isFoam) next.unshift(new FoamPlumeLifecycleBehavior(owner, floorIndex));
+      else if (sys.userData?.isSplash) next.unshift(new SplashRingLifecycleBehavior(owner, floorIndex));
+    }
+    sys.behaviors = next;
+  }
+
+  /**
+   * Hot-upgrade underwater bubble foam / ring systems for foam.webp UV motion.
+   * @private
+   */
+  _upgradeBubbleFoamAnimationSystem(sys, state) {
+    if (!sys?.userData?.isBubbles) return;
+    if (sys.userData?._msBubbleFoamAnimUpgradeEpoch === BUBBLE_FOAM_UV_SHADER_EPOCH) return;
+    if (!this._foamTexture) return;
+
+    const params = this.bubblesParams;
+    if (sys.uTileCount !== 1) sys.uTileCount = 1;
+    if (sys.vTileCount !== 1) sys.vTileCount = 1;
+    if (sys.blendTiles === true) sys.blendTiles = false;
+
+    if (sys.material?.map !== this._foamTexture) sys.material.map = this._foamTexture;
+    try {
+      if (typeof sys.texture !== 'undefined' && sys.texture !== this._foamTexture) sys.texture = this._foamTexture;
+    } catch (_) {}
+
+    this._refreshBubbleFoamBehaviors(sys);
+    this._syncBubbleFoamSystemMotion(sys, params, state);
+
+    const br = state?.batchRenderer;
+    if (br?.systemToBatchIndex?.has?.(sys)) {
+      try { br.updateSystem(sys); } catch (_) {}
+    } else {
+      sys.neededToUpdateRender = true;
+    }
+
+    sys.userData._msBubbleFoamAnimUpgradeEpoch = BUBBLE_FOAM_UV_SHADER_EPOCH;
+  }
+
+  /** @private */
+  _upgradeBubbleFoamAnimationSystems() {
+    if (!this._foamTexture) return;
+    for (const state of this._floorStates.values()) {
+      for (const list of [state.foamSystems2, state.splashSystems2]) {
+        for (const sys of list ?? []) {
+          this._upgradeBubbleFoamAnimationSystem(sys, state);
+        }
       }
     }
-    for (const mat of mats) {
+  }
+
+  /**
+   * Replace legacy splash behaviors with a fresh lifecycle (flipbook is built-in).
+   * @private
+   */
+  _refreshSplashBehaviors(sys) {
+    if (!sys?.userData?.isSplash) return;
+    const floorIndex = sys.userData?._msFloorIndex ?? 0;
+    const owner = sys.userData?.isBubbles ? this._bubbleSplashOwnerProxy() : this;
+    const next = [];
+    let hasLifecycle = false;
+    for (const beh of sys.behaviors ?? []) {
+      if (beh?.type === 'SplashRingLifecycle' || beh?.type === 'SplashFlipbookBehavior') {
+        if (!hasLifecycle) {
+          next.push(new SplashRingLifecycleBehavior(owner, floorIndex));
+          hasLifecycle = true;
+        }
+        continue;
+      }
+      next.push(beh);
+    }
+    if (!hasLifecycle) next.unshift(new SplashRingLifecycleBehavior(owner, floorIndex));
+    sys.behaviors = next;
+  }
+
+  /**
+   * Hot-upgrade splash systems created before flipbook atlas / UV motion shipped.
+   * @private
+   */
+  _upgradeSplashAnimationSystem(sys, state) {
+    if (!sys?.userData?.isSplash || sys.userData?.isBubbles) return;
+    if (sys.userData?._msSplashAnimUpgradeEpoch === SPLASH_UV_MOTION_SHADER_EPOCH) return;
+
+    const params = sys.userData?.isBubbles ? this.bubblesParams : this.params;
+    const tex = this._splashTexture || this._foamTexture;
+
+    if (sys.uTileCount !== SPLASH_ATLAS_COLS) sys.uTileCount = SPLASH_ATLAS_COLS;
+    if (sys.vTileCount !== SPLASH_ATLAS_ROWS) sys.vTileCount = SPLASH_ATLAS_ROWS;
+    if (sys.blendTiles !== true) sys.blendTiles = true;
+
+    if (tex) {
+      if (sys.material?.map !== tex) sys.material.map = tex;
       try {
-        this._patchSplashOcclusionMaterial(mat);
+        if (typeof sys.texture !== 'undefined' && sys.texture !== tex) sys.texture = tex;
       } catch (_) {}
     }
+
+    this._refreshSplashBehaviors(sys);
+    this._syncSplashSystemMotion(sys, params, state);
+
+    const br = state?.batchRenderer;
+    if (br?.systemToBatchIndex?.has?.(sys)) {
+      try { br.updateSystem(sys); } catch (_) {}
+    } else {
+      sys.neededToUpdateRender = true;
+    }
+
+    sys.userData._msSplashAnimUpgradeEpoch = SPLASH_UV_MOTION_SHADER_EPOCH;
+  }
+
+  /** @private */
+  _upgradeSplashAnimationSystems() {
+    const tex = this._splashTexture || this._foamTexture;
+    if (!tex) return;
+
+    let upgraded = 0;
+    for (const state of this._floorStates.values()) {
+      for (const list of [state.splashSystems, state.splashSystems2]) {
+        for (const sys of list ?? []) {
+          const before = sys.userData?._msSplashAnimUpgradeEpoch;
+          this._upgradeSplashAnimationSystem(sys, state);
+          if (sys.userData?._msSplashAnimUpgradeEpoch !== before) upgraded++;
+        }
+      }
+    }
+
+    try {
+      const dbg = window.MapShine?.debugSplashAnim === true;
+      if (dbg && upgraded > 0) {
+        const sample = [...this._floorStates.values()]
+          .flatMap((st) => [...(st.splashSystems ?? []), ...(st.splashSystems2 ?? [])])
+          .find((s) => s?.userData?.isSplash) ?? null;
+        const br = sample ? this._floorStates.get(sample.userData?._msFloorIndex ?? 0)?.batchRenderer : null;
+        const idx = sample && br?.systemToBatchIndex?.get ? br.systemToBatchIndex.get(sample) : undefined;
+        const batchMat = idx !== undefined ? br?.batches?.[idx]?.material : null;
+        const fs = batchMat?.fragmentShader ?? '';
+        log.info('[WaterSplashesEffectV2] splash anim upgrade', {
+          upgraded,
+          sampleUTileCount: sample?.uTileCount ?? null,
+          sampleBlendTiles: sample?.blendTiles ?? null,
+          batchHasAnimatedTile: fs.includes(SPLASH_UV_MOTION_TILE_FRAGMENT_MARKER),
+          batchHasUvMotion: fs.includes(SPLASH_UV_MOTION_FRAGMENT_MARKER),
+        });
+      }
+    } catch (_) {}
   }
 
   /**
@@ -1402,6 +2082,8 @@ export class WaterSplashesEffectV2 {
       this._activateCurrentFloor();
     }
 
+    this._ensureSplashUvMotionShaderEpoch();
+
     log.info(`WaterSplashesEffectV2 populated: ${floorWaterData.size} floor(s), ${totalSystems} system(s)`);
     try { refreshWaterSplashesMaskStatusUi(); } catch (_) {}
   }
@@ -1481,7 +2163,7 @@ export class WaterSplashesEffectV2 {
 
     const applyU = (u, floorIndex) => {
       if (!u) return;
-      syncSplashStructuralShadowUniforms(u, { combinedShadowReady: !!combinedTex });
+      syncSplashStructuralShadowUniforms(u, { combinedShadowReady: !!combinedTex, floorIndex });
       if (Number.isFinite(Number(floorIndex))) {
         applySplashStructuralShadowFloorIndex(u, floorIndex);
       }
@@ -1535,7 +2217,8 @@ export class WaterSplashesEffectV2 {
     }
     if (!shouldRender) return;
 
-    // One outdoors CPU readback per active floor (shared by all bucketed lifecycle behaviors).
+    this._ensureSplashUvMotionShaderEpoch();
+    this._ensureBubbleFoamUvShaderEpoch();
     this._sceneBounds = buildEffectSceneBoundsFromCanvas();
     const outdoorsToken = this._outdoorsMaskFrameToken ?? 0;
     for (const floorIndex of this._activeFloors) {
@@ -1931,6 +2614,8 @@ export class WaterSplashesEffectV2 {
   _buildFloorSystems(edgePoints, interiorPoints, sceneW, sceneH, sceneX, sceneY, floorIndex) {
     const batchRenderer = this._createBatchedRendererForFloor(floorIndex);
     const state = { foamSystems: [], splashSystems: [], foamSystems2: [], splashSystems2: [], batchRenderer };
+    edgePoints = filterSplashPointsByPaintedShadow(edgePoints);
+    interiorPoints = filterSplashPointsByPaintedShadow(interiorPoints);
 
     // Build foam plume systems from edge points.
     if (edgePoints && edgePoints.length >= 3 && this.params.foamEnabled) {
@@ -2088,7 +2773,7 @@ export class WaterSplashesEffectV2 {
     const THREE = window.THREE;
     if (!THREE) return null;
 
-    // Splash rings use the generic particle texture (or foam texture as fallback).
+    // Splash rings use a generated flipbook atlas (or foam texture as fallback).
     const material = new THREE.MeshBasicMaterial({
       map: this._splashTexture || this._foamTexture,
       transparent: true,
@@ -2099,7 +2784,7 @@ export class WaterSplashesEffectV2 {
       side: THREE.DoubleSide,
     });
     material.toneMapped = false;
-    this._patchSplashOcclusionMaterial(material);
+    this._patchSplashOcclusionMaterial(material, { splashUvMotion: true, params: this.params });
 
     const p = this.params;
     const lifeMin = Math.max(0.01, p.splashLifeMin ?? 0.3);
@@ -2131,6 +2816,10 @@ export class WaterSplashesEffectV2 {
       material,
       renderMode: RenderMode.BillBoard,
       renderOrder: 200001,
+      uTileCount: SPLASH_ATLAS_COLS,
+      vTileCount: SPLASH_ATLAS_ROWS,
+      blendTiles: true,
+      startTileIndex: new ConstantValue(0),
       startRotation: new IntervalValue(0, Math.PI * 2),
       behaviors: [splashLifecycle],
     });
@@ -2139,6 +2828,7 @@ export class WaterSplashesEffectV2 {
       ownerEffect: this,
       _msEmissionScale: weight,
       isSplash: true,
+      _msSplashAnimUpgradeEpoch: SPLASH_UV_MOTION_SHADER_EPOCH,
     };
 
     // Match FireEffectV2: explicitly start systems so quarks cannot stay paused.
@@ -2167,7 +2857,7 @@ export class WaterSplashesEffectV2 {
       side: THREE.DoubleSide,
     });
     material.toneMapped = false;
-    this._patchSplashOcclusionMaterial(material);
+    this._patchSplashOcclusionMaterial(material, { bubbleFoamUvMotion: true, params: this.bubblesParams });
 
     const p = this.bubblesParams;
     const lifeMin = Math.max(0.01, p.foamLifeMin ?? 1.2);
@@ -2177,11 +2867,7 @@ export class WaterSplashesEffectV2 {
 
     const foamRate = Math.max(0.0, Number(p.foamRate) || 0) * WaterSplashesEffectV2._BUBBLE_RATE_MULT;
 
-    // Lifecycle reads bubblesParams but needs `_sceneBounds` from this effect for outdoors sampling.
-    const bubbleFoamOwner = { params: p };
-    Object.defineProperty(bubbleFoamOwner, '_sceneBounds', { get: () => this._sceneBounds });
-    Object.defineProperty(bubbleFoamOwner, '_splashViewEpoch', { get: () => this._splashViewEpoch });
-    Object.defineProperty(bubbleFoamOwner, '_outdoorsMaskFrameToken', { get: () => this._outdoorsMaskFrameToken });
+    const bubbleFoamOwner = this._bubbleLayerOwnerProxy();
     const foamLifecycle = new FoamPlumeLifecycleBehavior(bubbleFoamOwner, floorIndex);
 
     const system = new QuarksParticleSystem({
@@ -2210,6 +2896,7 @@ export class WaterSplashesEffectV2 {
       _msEmissionScale: weight,
       isFoam: true,
       isBubbles: true,
+      _msBubbleFoamAnimUpgradeEpoch: BUBBLE_FOAM_UV_SHADER_EPOCH,
     };
 
     // Match FireEffectV2: explicitly start systems so quarks cannot stay paused.
@@ -2228,7 +2915,7 @@ export class WaterSplashesEffectV2 {
     if (!THREE) return null;
 
     const material = new THREE.MeshBasicMaterial({
-      map: this._splashTexture || this._foamTexture,
+      map: this._foamTexture,
       transparent: true,
       depthWrite: false,
       depthTest: false,
@@ -2237,7 +2924,7 @@ export class WaterSplashesEffectV2 {
       side: THREE.DoubleSide,
     });
     material.toneMapped = false;
-    this._patchSplashOcclusionMaterial(material);
+    this._patchSplashOcclusionMaterial(material, { bubbleFoamUvMotion: true, params: this.bubblesParams });
 
     const p = this.bubblesParams;
     const lifeMin = Math.max(0.01, p.splashLifeMin ?? 0.3);
@@ -2247,10 +2934,7 @@ export class WaterSplashesEffectV2 {
 
     const splashRate = Math.max(0.0, Number(p.splashRate) || 0) * WaterSplashesEffectV2._BUBBLE_RATE_MULT;
 
-    const bubbleSplashOwner = { params: p };
-    Object.defineProperty(bubbleSplashOwner, '_sceneBounds', { get: () => this._sceneBounds });
-    Object.defineProperty(bubbleSplashOwner, '_splashViewEpoch', { get: () => this._splashViewEpoch });
-    Object.defineProperty(bubbleSplashOwner, '_outdoorsMaskFrameToken', { get: () => this._outdoorsMaskFrameToken });
+    const bubbleSplashOwner = this._bubbleSplashOwnerProxy();
     const splashLifecycle = new SplashRingLifecycleBehavior(bubbleSplashOwner, floorIndex);
 
     const system = new QuarksParticleSystem({
@@ -2279,6 +2963,7 @@ export class WaterSplashesEffectV2 {
       _msEmissionScale: weight,
       isSplash: true,
       isBubbles: true,
+      _msBubbleFoamAnimUpgradeEpoch: BUBBLE_FOAM_UV_SHADER_EPOCH,
     };
 
     // Match FireEffectV2: explicitly start systems so quarks cannot stay paused.
@@ -2323,7 +3008,11 @@ export class WaterSplashesEffectV2 {
       const idx = (map && typeof map.get === 'function') ? map.get(sys) : undefined;
       const batch = (idx !== undefined && batches) ? batches[idx] : null;
       const batchMat = batch?.material;
-      if (batchMat) this._patchSplashOcclusionMaterial(batchMat);
+      if (batchMat) this._patchSplashOcclusionMaterial(batchMat, {
+        splashUvMotion: !!sys?.userData?.isSplash && !sys?.userData?.isBubbles,
+        bubbleFoamUvMotion: !!sys?.userData?.isBubbles && (!!sys?.userData?.isFoam || !!sys?.userData?.isSplash),
+        params: sys?.userData?.isBubbles ? this.bubblesParams : this.params,
+      });
     }
 
     // Optional diagnostics for "systems exist but nothing renders".
@@ -2484,6 +3173,7 @@ export class WaterSplashesEffectV2 {
             sys.startSize.a = sizeMin;
             sys.startSize.b = sizeMax;
           }
+          this._syncSplashSystemMotion(sys, p, state);
         } catch (_) {}
 
         const w = (sys.userData._msEmissionScaleDynamic ?? sys.userData._msEmissionScale) ?? 1.0;
@@ -2525,6 +3215,7 @@ export class WaterSplashesEffectV2 {
             sys.startSize.a = sizeMin;
             sys.startSize.b = sizeMax;
           }
+          this._syncBubbleFoamSystemMotion(sys, bp, state);
         } catch (_) {}
 
         const w = (sys.userData._msEmissionScaleDynamic ?? sys.userData._msEmissionScale) ?? 1.0;
@@ -2557,6 +3248,7 @@ export class WaterSplashesEffectV2 {
             sys.startSize.a = sizeMin;
             sys.startSize.b = sizeMax;
           }
+          this._syncBubbleFoamSystemMotion(sys, bp, state);
         } catch (_) {}
 
         const w = (sys.userData._msEmissionScaleDynamic ?? sys.userData._msEmissionScale) ?? 1.0;
@@ -2573,6 +3265,91 @@ export class WaterSplashesEffectV2 {
   }
 
   // ── Private: Texture loading ───────────────────────────────────────────────
+
+  /** @private */
+  _createSplashFlipbookTexture(THREE) {
+    if (!THREE || typeof document === 'undefined') return null;
+
+    const cols = SPLASH_ATLAS_COLS;
+    const rows = SPLASH_ATLAS_ROWS;
+    const cell = SPLASH_ATLAS_CELL_SIZE;
+    const canvas = document.createElement('canvas');
+    canvas.width = cols * cell;
+    canvas.height = rows * cell;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    const smoothstep = (a, b, x) => {
+      const t = Math.max(0, Math.min(1, (x - a) / Math.max(0.0001, b - a)));
+      return t * t * (3 - 2 * t);
+    };
+    const seededNoise = (x, y, seed) => {
+      const s = Math.sin(x * 12.9898 + y * 78.233 + seed * 37.719) * 43758.5453;
+      return s - Math.floor(s);
+    };
+
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const phase = cols <= 1 ? 0 : col / (cols - 1);
+        const image = ctx.createImageData(cell, cell);
+        const data = image.data;
+        const radius = 0.13 + 0.36 * smoothstep(0.0, 1.0, phase);
+        const thickness = 0.026 + 0.018 * phase + (row === 1 ? 0.018 : 0);
+        const fade = 1.0 - smoothstep(0.78, 1.0, phase) * 0.55;
+
+        for (let y = 0; y < cell; y++) {
+          for (let x = 0; x < cell; x++) {
+            const u = (x + 0.5) / cell;
+            const v = (y + 0.5) / cell;
+            const dx = u - 0.5;
+            const dy = v - 0.5;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const angle = Math.atan2(dy, dx);
+            const idx = (y * cell + x) * 4;
+
+            let alpha = 0.0;
+            const ring = 1.0 - smoothstep(0.0, thickness, Math.abs(dist - radius));
+
+            if (row === 0) {
+              alpha = ring;
+            } else if (row === 1) {
+              const gates = 0.48 + 0.52 * Math.max(0, Math.sin(angle * 5.0 + phase * 3.2));
+              const chips = seededNoise(x >> 2, y >> 2, row * 19 + col * 7) > 0.22 ? 1.0 : 0.32;
+              alpha = ring * gates * chips;
+            } else if (row === 2) {
+              const crown = 1.0 - smoothstep(0.0, thickness * 1.18, Math.abs(dist - radius));
+              const ray = Math.pow(Math.max(0, Math.sin(angle * 10.0 + row)), 7.0);
+              const sprayBand = smoothstep(radius - 0.02, radius + 0.16, dist) * (1.0 - smoothstep(radius + 0.16, radius + 0.27, dist));
+              const sparkle = seededNoise(x, y, row * 23 + col * 11) > 0.965 ? 1.0 : 0.0;
+              alpha = Math.max(crown * (0.55 + 0.45 * ray), sprayBand * ray * 0.82, sparkle * sprayBand);
+            } else {
+              const puddle = 1.0 - smoothstep(0.0, 0.24 + 0.08 * phase, dist);
+              const softRing = 1.0 - smoothstep(0.0, thickness * 1.9, Math.abs(dist - radius * 0.86));
+              alpha = Math.max(puddle * (1.0 - phase) * 0.58, softRing * (0.52 + 0.30 * phase));
+            }
+
+            const edgeFade = 1.0 - smoothstep(0.47, 0.52, dist);
+            alpha = Math.max(0, Math.min(1, alpha * edgeFade * fade));
+            data[idx] = 255;
+            data[idx + 1] = 255;
+            data[idx + 2] = 255;
+            data[idx + 3] = Math.round(alpha * 255);
+          }
+        }
+
+        ctx.putImageData(image, col * cell, row * cell);
+      }
+    }
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.generateMipmaps = true;
+    tex.needsUpdate = true;
+    return tex;
+  }
 
   /**
    * Load foam and splash sprite textures. Returns a promise that resolves
@@ -2598,16 +3375,9 @@ export class WaterSplashesEffectV2 {
       }, undefined, () => { log.warn('Failed to load foam.webp'); resolve(); });
     });
 
-    // Use the generic particle texture for splash rings.
-    const splashP = new Promise((resolve) => {
-      loader.load('modules/map-shine-advanced/assets/particle.webp', (tex) => {
-        tex.minFilter = THREE.LinearMipmapLinearFilter;
-        tex.magFilter = THREE.LinearFilter;
-        tex.generateMipmaps = true;
-        tex.needsUpdate = true;
-        this._splashTexture = tex;
-        resolve();
-      }, undefined, () => { log.warn('Failed to load particle.webp'); resolve(); });
+    const splashP = Promise.resolve().then(() => {
+      this._splashTexture = this._createSplashFlipbookTexture(THREE);
+      if (!this._splashTexture) log.warn('Failed to create generated splash flipbook texture');
     });
 
     return Promise.all([foamP, splashP]).then(() => {
@@ -2890,6 +3660,13 @@ export class WaterSplashesEffectV2 {
             'splashSizeMin',
             'splashSizeMax',
             'splashWindDriftScale',
+            'splashAnimSpeed',
+            'splashFlipbookTravel',
+            'splashUvExpand',
+            'splashUvExpandCurve',
+            'splashRingCompress',
+            'splashRingWidth',
+            'splashSpinScale',
           ]
         },
         {
@@ -2935,6 +3712,13 @@ export class WaterSplashesEffectV2 {
         splashSizeMin: { type: 'slider', label: 'Size Min', min: 1, max: 1000, step: 1, default: 8, advanced: true },
         splashSizeMax: { type: 'slider', label: 'Size Max', min: 1, max: 1000, step: 1, default: 25, advanced: true },
         splashWindDriftScale: { type: 'slider', label: 'Splash Wind Drift', min: 0, max: 2, step: 0.01, default: 2, advanced: true },
+        splashAnimSpeed: { type: 'slider', label: 'Anim Speed', min: 0, max: 3, step: 0.01, default: 1.0, advanced: true },
+        splashFlipbookTravel: { type: 'slider', label: 'Anim Travel', min: 0, max: 2, step: 0.01, default: 1.0, advanced: true },
+        splashUvExpand: { type: 'slider', label: 'UV Expand', min: 0, max: 1.5, step: 0.01, default: 0.38, advanced: true },
+        splashUvExpandCurve: { type: 'slider', label: 'UV Curve', min: 0.05, max: 3, step: 0.01, default: 0.85, advanced: true },
+        splashRingCompress: { type: 'slider', label: 'Ring Focus', min: 0, max: 1, step: 0.01, default: 0.48, advanced: true },
+        splashRingWidth: { type: 'slider', label: 'Ring Width', min: 0.02, max: 0.6, step: 0.01, default: 0.22, advanced: true },
+        splashSpinScale: { type: 'slider', label: 'Spin', min: 0, max: 2, step: 0.01, default: 0.22, advanced: true },
 
         maskThreshold: { type: 'slider', label: 'Water Threshold', min: 0.0, max: 1.0, step: 0.01, default: 0.15 },
         edgeScanStride: { type: 'slider', label: 'Edge Stride', min: 1, max: 16, step: 1, default: 2 },
@@ -2956,8 +3740,9 @@ export class WaterSplashesEffectV2 {
       help: {
         title: 'Underwater Bubbles',
         summary: [
-          'Large subsurface bubble plumes and interior rings use the same _Water mask scans as Water Splashes.',
+          'Large subsurface bubble plumes and interior rings sample foam.webp with animated UV breakup.',
           'Edge mask pixels drive shoreline-style bubbles; interior pixels drive ring bursts.',
+          'Foam UV animation controls apply to both bubble plumes and interior rings.',
           'Parent Water must be enabled; tune separately from rain splashes above.',
         ].join('\n\n'),
       },
@@ -2992,6 +3777,13 @@ export class WaterSplashesEffectV2 {
             'foamSizeMin',
             'foamSizeMax',
             'foamWindDriftScale',
+            'foamUvAnimSpeed',
+            'foamUvExpand',
+            'foamUvCurve',
+            'foamNoiseBreakup',
+            'foamNoiseScale',
+            'foamUvSwirl',
+            'foamEdgeDissolve',
             'foamColorR',
             'foamColorG',
             'foamColorB',
@@ -3011,6 +3803,7 @@ export class WaterSplashesEffectV2 {
             'splashSizeMin',
             'splashSizeMax',
             'splashWindDriftScale',
+            'splashSpinScale',
           ]
         },
       ],
@@ -3025,13 +3818,20 @@ export class WaterSplashesEffectV2 {
         tintBColorB: { type: 'slider', label: 'B B', min: 0, max: 2, step: 0.01, default: 0.76 },
 
         foamEnabled: { type: 'boolean', label: 'Enabled', default: true },
-        foamRate: { type: 'slider', label: 'Rate', min: 0, max: 200, step: 0.1, default: 13.3 },
-        foamPeakOpacity: { type: 'slider', label: 'Peak Opacity', min: 0, max: 1, step: 0.01, default: 0.04 },
+        foamRate: { type: 'slider', label: 'Rate', min: 0, max: 200, step: 0.1, default: 8 },
+        foamPeakOpacity: { type: 'slider', label: 'Peak Opacity', min: 0, max: 1, step: 0.01, default: 0.03 },
         foamLifeMin: { type: 'slider', label: 'Life Min', min: 0.05, max: 20, step: 0.05, default: 5.5, advanced: true },
         foamLifeMax: { type: 'slider', label: 'Life Max', min: 0.05, max: 20, step: 0.05, default: 8.75, advanced: true },
-        foamSizeMin: { type: 'slider', label: 'Size Min', min: 1, max: 1000, step: 1, default: 480, advanced: true },
-        foamSizeMax: { type: 'slider', label: 'Size Max', min: 1, max: 1000, step: 1, default: 686, advanced: true },
-        foamWindDriftScale: { type: 'slider', label: 'Wind Drift', min: 0, max: 2, step: 0.01, default: 1.24, advanced: true },
+        foamSizeMin: { type: 'slider', label: 'Size Min', min: 1, max: 1000, step: 1, default: 147, advanced: true },
+        foamSizeMax: { type: 'slider', label: 'Size Max', min: 1, max: 1000, step: 1, default: 288, advanced: true },
+        foamWindDriftScale: { type: 'slider', label: 'Wind Drift', min: 0, max: 2, step: 0.01, default: 2, advanced: true },
+        foamUvAnimSpeed: { type: 'slider', label: 'UV Anim Speed', min: 0, max: 3, step: 0.01, default: 1.0, advanced: true },
+        foamUvExpand: { type: 'slider', label: 'UV Expand', min: 0, max: 2, step: 0.01, default: 0.72, advanced: true },
+        foamUvCurve: { type: 'slider', label: 'UV Curve', min: 0.05, max: 3, step: 0.01, default: 0.78, advanced: true },
+        foamNoiseBreakup: { type: 'slider', label: 'Noise Breakup', min: 0, max: 1, step: 0.01, default: 0.58, advanced: true },
+        foamNoiseScale: { type: 'slider', label: 'Noise Scale', min: 0.5, max: 24, step: 0.1, default: 9.0, advanced: true },
+        foamUvSwirl: { type: 'slider', label: 'UV Swirl', min: 0, max: 2, step: 0.01, default: 0.35, advanced: true },
+        foamEdgeDissolve: { type: 'slider', label: 'Edge Dissolve', min: 0, max: 1, step: 0.01, default: 0.42, advanced: true },
         foamColorR: { type: 'slider', label: 'Color R', min: 0, max: 2, step: 0.01, default: 0.85, advanced: true },
         foamColorG: { type: 'slider', label: 'Color G', min: 0, max: 2, step: 0.01, default: 1.02, advanced: true },
         foamColorB: { type: 'slider', label: 'Color B', min: 0, max: 2, step: 0.01, default: 1.22, advanced: true },
@@ -3044,6 +3844,7 @@ export class WaterSplashesEffectV2 {
         splashSizeMin: { type: 'slider', label: 'Size Min', min: 1, max: 1000, step: 1, default: 35, advanced: true },
         splashSizeMax: { type: 'slider', label: 'Size Max', min: 1, max: 1000, step: 1, default: 77, advanced: true },
         splashWindDriftScale: { type: 'slider', label: 'Splash Wind Drift', min: 0, max: 2, step: 0.01, default: 2, advanced: true },
+        splashSpinScale: { type: 'slider', label: 'Spin', min: 0, max: 2, step: 0.01, default: 0.22, advanced: true },
       }
     };
   }

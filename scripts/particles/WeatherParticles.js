@@ -31,9 +31,44 @@ import {
 import { getStreamingEffectGateState, shouldRunExpensiveEffects } from '../streaming/streaming-detail-api.js';
 import { applyViewBoundsToUvShape } from '../streaming/particle-cell-gate.js';
 import { WorldVolumeKillBehavior } from './world-volume-kill-behavior.js';
+import { resolveEffectEnabled } from '../effects/resolve-effect-enabled.js';
+import { resolveFloorCompositorV2 } from '../compositor-v2/effects/vegetation-building-shadow.js';
 
 const log = createLogger('WeatherParticles');
 const MAX_SPLASHES = 5000;
+/** Fragment marker + GLSL block for painted-shadow precip suppression. */
+const PAINTED_SHADOW_PRECIP_MASK_MARKER = 'MS_PAINTED_SHADOW_PRECIP_MASK';
+const PAINTED_SHADOW_PRECIP_MASK_GLSL =
+  '    // ' + PAINTED_SHADOW_PRECIP_MASK_MARKER + '\n' +
+  '    if (uHasPaintedShadowMap > 0.5 && uRoofEdgeDrip < 0.5) {\n' +
+  '      vec2 psUv = clamp(uvMask, 0.0, 1.0);\n' +
+  '      vec4 psMask = texture2D(uPaintedShadowMap, psUv);\n' +
+  '      float psLuma = max(psMask.r, max(psMask.g, psMask.b));\n' +
+  '      float shadowStrength = clamp((1.0 - psLuma) * psMask.a, 0.0, 1.0);\n' +
+  '      float spawnOpen = 1.0 - shadowStrength;\n' +
+  '      msWaterFade *= spawnOpen;\n' +
+  '      if (msWaterFade <= 0.001) discard;\n' +
+  '    }\n';
+
+/** Foam plume post-soft_fragment clip (foam.webp alpha shaping runs before soft_fragment). */
+const FOAM_POST_PAINTED_SHADOW_MARKER = 'MS_FOAM_PAINTED_SHADOW_POST';
+const FOAM_POST_PAINTED_SHADOW_GLSL =
+  '  // ' + FOAM_POST_PAINTED_SHADOW_MARKER + '\n' +
+  '  gl_FragColor.rgb *= msWaterFade;\n' +
+  '  gl_FragColor.a *= msWaterFade;\n' +
+  '  if (uHasPaintedShadowMap > 0.5) {\n' +
+  '    vec2 foamPsUv = clamp(vec2(\n' +
+  '      (vRoofWorldPos.x - uSceneBounds.x) / max(uSceneBounds.z, 1e-6),\n' +
+  '      1.0 - (vRoofWorldPos.y - uSceneBounds.y) / max(uSceneBounds.w, 1e-6)), 0.0, 1.0);\n' +
+  '    vec4 foamPsMask = texture2D(uPaintedShadowMap, foamPsUv);\n' +
+  '    float foamPsLuma = max(foamPsMask.r, max(foamPsMask.g, foamPsMask.b));\n' +
+  '    float foamSpawnOpen = 1.0 - clamp((1.0 - foamPsLuma) * foamPsMask.a, 0.0, 1.0);\n' +
+  '    gl_FragColor.rgb *= foamSpawnOpen;\n' +
+  '    gl_FragColor.a *= foamSpawnOpen;\n' +
+  '    if (gl_FragColor.a <= 0.001) discard;\n' +
+  '  }\n';
+const FOAM_SOFT_FRAGMENT_TAIL =
+  '#include <soft_fragment>\n  gl_FragColor.rgb *= msWaterFade;\n  gl_FragColor.a *= msWaterFade;\n';
 
 // Match TileManager Z_OVERHEAD_OFFSET — overhead tile sprites sit at groundZ + this (+ elevation).
 const Z_OVERHEAD_TILE_OFFSET = 4.0;
@@ -259,6 +294,57 @@ class RandomRectangleEmitter {
   }
 
   update(system, delta) { /* no-op for now */ }
+}
+
+/**
+ * Rain/snow rectangle emitter that rejects spawn positions under indoors / painted shadow.
+ * Failed attempts immediately age-out the particle (see FoamFleckEmitter).
+ */
+class PrecipSpawnMaskEmitter {
+  constructor(parameters = {}) {
+    this.type = 'precip-spawn-mask';
+    this.width = parameters.width ?? 1;
+    this.height = parameters.height ?? 1;
+    this.centerX = parameters.centerX ?? 0;
+    this.centerY = parameters.centerY ?? 0;
+    this.sceneX = parameters.sceneX ?? 0;
+    this.sceneY = parameters.sceneY ?? 0;
+    this.sceneW = parameters.sceneW ?? this.width;
+    this.sceneH = parameters.sceneH ?? this.height;
+    /** @type {'rain'|'snow'} */
+    this.kind = parameters.kind === 'snow' ? 'snow' : 'rain';
+    /** @type {WeatherParticles|null} */
+    this._host = parameters.host ?? null;
+    this.spawnAttempts = Number.isFinite(parameters.spawnAttempts)
+      ? Math.max(1, Math.floor(parameters.spawnAttempts))
+      : 10;
+  }
+
+  _killParticle(particle) {
+    if (typeof particle.life === 'number') particle.age = particle.life;
+    else particle.age = 1e9;
+  }
+
+  initialize(particle) {
+    const host = this._host;
+    const attempts = this.spawnAttempts;
+    for (let i = 0; i < attempts; i++) {
+      const lx = (Math.random() - 0.5) * this.width;
+      const ly = (Math.random() - 0.5) * this.height;
+      const worldX = this.centerX + lx;
+      const worldY = this.centerY + ly;
+      if (!host || host._isPrecipSpawnLocationAllowed(worldX, worldY, this.kind)) {
+        particle.position.x = lx;
+        particle.position.y = ly;
+        particle.position.z = 0;
+        particle.velocity.set(0, 0, particle.startSpeed);
+        return;
+      }
+    }
+    this._killParticle(particle);
+  }
+
+  update(_system, _delta) { /* no-op */ }
 }
 
 class FoamFleckEmitter {
@@ -2196,6 +2282,9 @@ export class WeatherParticles {
 
     /** @type {THREE.ShaderMaterial|null} quarks batch material for splashes */
     this._splashBatchMaterial = null;
+
+    /** @type {THREE.ShaderMaterial|null} quarks batch material for rain-impact splashes */
+    this._rainImpactSplashBatchMaterial = null;
 
     /** @type {THREE.ShaderMaterial[]} quarks batch materials for per-tile splash systems */
     this._splashBatchMaterials = [];
@@ -4808,6 +4897,20 @@ export class WeatherParticles {
       centerY
     };
 
+    const precipSpawnParams = {
+      width: sceneW,
+      height: sceneH,
+      sceneX,
+      sceneY: sceneYWorld,
+      sceneW,
+      sceneH,
+      centerX,
+      centerY,
+      host: this,
+    };
+    this._rainSpawnShape = new PrecipSpawnMaskEmitter({ ...precipSpawnParams, kind: 'rain' });
+    this._snowSpawnShape = new PrecipSpawnMaskEmitter({ ...precipSpawnParams, kind: 'snow' });
+
     this._splashShape = new RandomRectangleEmitter({ width: sceneW, height: sceneH });
     this._roofDripShape = new RoofEdgeDripEmitter(maskParams);
     this._roofDripShape._host = this;
@@ -4903,7 +5006,7 @@ export class WeatherParticles {
       worldSpace: true,
       maxParticles: 15000,
       emissionOverTime: new ConstantValue(0), 
-      shape: new RandomRectangleEmitter({ width: sceneW, height: sceneH }),
+      shape: this._rainSpawnShape,
       material: rainMaterial,
       renderOrder: 50,
       
@@ -5288,6 +5391,7 @@ export class WeatherParticles {
       if (idx !== undefined && this.batchRenderer.batches && this.batchRenderer.batches[idx]) {
         const batch = this.batchRenderer.batches[idx];
         if (batch.material) {
+          this._rainImpactSplashBatchMaterial = batch.material;
           this._patchRoofMaskMaterial(batch.material);
         }
       }
@@ -5486,7 +5590,7 @@ export class WeatherParticles {
        worldSpace: true,
        maxParticles: 8000,
       emissionOverTime: new ConstantValue(0),
-      shape: new RandomRectangleEmitter({ width: sceneW, height: sceneH }),
+      shape: this._snowSpawnShape,
       material: snowMaterial,
       renderOrder: 50,
       // Snow uses standard Billboards (flakes don't stretch)
@@ -5859,7 +5963,214 @@ export class WeatherParticles {
         'bool isOutdoors = outdoorsMask > 0.5;\n    if (uRoofRainHardBlockEnabled > 0.5 && uRoofEdgeDrip < 0.5) {\n      float rb = clamp(roofBlockAlpha, 0.0, 1.0);\n      float rv = clamp(roofAlpha, 0.0, 1.0);\n      float hiddenBlock = rb * (1.0 - rv);\n      hiddenBlock = smoothstep(0.02, 0.28, hiddenBlock);\n      msWaterFade *= (1.0 - hiddenBlock);\n      if (msWaterFade <= 0.001) discard;\n    }'
       );
     }
+
+    if (!out.includes(PAINTED_SHADOW_PRECIP_MASK_MARKER)) {
+      out = this._injectPaintedShadowPrecipMaskGlsl(out);
+    }
+    if (out.includes('|| (uHasPaintedShadowMap > 0.5)')) {
+      out = out.replace('|| (uHasPaintedShadowMap > 0.5)', '');
+    }
+    if (out.includes('texture2D(uPaintedShadowMap, uvMask)') && !out.includes('vec2 psUv = clamp(uvMask')) {
+      out = out.replace(
+        'vec4 psMask = texture2D(uPaintedShadowMap, uvMask);',
+        'vec2 psUv = clamp(uvMask, 0.0, 1.0);\n      vec4 psMask = texture2D(uPaintedShadowMap, psUv);'
+      );
+    }
+    if (out.includes(FOAM_POST_PAINTED_SHADOW_MARKER) && out.includes('vec2 foamPsUv = vec2(')) {
+      out = out.replace(
+        /vec2 foamPsUv = vec2\(\s*\(vRoofWorldPos\.x - uSceneBounds\.x\) \/ max\(uSceneBounds\.z, 1e-6\),\s*1\.0 - \(vRoofWorldPos\.y - uSceneBounds\.y\) \/ max\(uSceneBounds\.w, 1e-6\)\);/,
+        'vec2 foamPsUv = clamp(vec2(\n      (vRoofWorldPos.x - uSceneBounds.x) / max(uSceneBounds.z, 1e-6),\n      1.0 - (vRoofWorldPos.y - uSceneBounds.y) / max(uSceneBounds.w, 1e-6)), 0.0, 1.0);'
+      );
+    }
     return out;
+  }
+
+  /**
+   * Inject painted-shadow precip mask into an existing roof-mask fragment shader.
+   * @param {string} fs
+   * @returns {string}
+   * @private
+   */
+  _injectPaintedShadowPrecipMaskGlsl(fs) {
+    if (typeof fs !== 'string' || fs.includes(PAINTED_SHADOW_PRECIP_MASK_MARKER)) return fs;
+    let out = fs;
+    if (!out.includes('uniform sampler2D uPaintedShadowMap')) {
+      if (out.includes('uniform float uHasWaterOccluderAlpha;')) {
+        out = out.replace(
+          /uniform float uHasWaterOccluderAlpha;\s*\r?\n/,
+          'uniform float uHasWaterOccluderAlpha;\nuniform sampler2D uPaintedShadowMap;\nuniform float uHasPaintedShadowMap;\n'
+        );
+      } else {
+        out = out.replace(
+          /uniform vec2 uScreenSize;\s*\r?\n/,
+          'uniform vec2 uScreenSize;\nuniform sampler2D uPaintedShadowMap;\nuniform float uHasPaintedShadowMap;\n'
+        );
+      }
+    }
+    const anchors = [
+      '      float visible = 1.0 - clamp(occA, 0.0, 1.0);\n      msWaterFade *= visible;\n      if (msWaterFade <= 0.001) discard;\n    }\n  }\n',
+      '      msWaterFade *= waterFade;\n      if (msWaterFade <= 0.001) discard;\n    }\n  }\n',
+      '      msWaterFade *= pow(max(under, 0.0), 1.35);\n      if (msWaterFade <= 0.001) discard;\n    }\n    if (uWaterMaskEnabled > 0.5) {\n',
+      '      if (!showPrecip) {\n        discard;\n      }\n    }\n    // Roof edge drips: fade under opaque overhead',
+    ];
+    for (const anchor of anchors) {
+      if (!out.includes(anchor)) continue;
+      if (anchor.includes('uWaterMaskEnabled')) {
+        out = out.replace(anchor, PAINTED_SHADOW_PRECIP_MASK_GLSL + anchor);
+        return out;
+      }
+      out = out.replace(anchor, anchor.replace(/\n  \}\n$/, '\n' + PAINTED_SHADOW_PRECIP_MASK_GLSL + '  }\n'));
+      return out;
+    }
+    const markerIdx = out.indexOf('MS_ROOF_WATER_MASK');
+    if (markerIdx >= 0) {
+      const closeIdx = out.indexOf('\n  }\n', markerIdx);
+      if (closeIdx >= 0) {
+        out = out.slice(0, closeIdx) + '\n' + PAINTED_SHADOW_PRECIP_MASK_GLSL + out.slice(closeIdx);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Resolve authored _Shadow mask for precipitation (same source as WeatherController).
+   * @returns {{ texture: import('three').Texture|null, has: boolean }}
+   * @private
+   */
+  _resolvePaintedShadowPrecipMask() {
+    const tex = weatherController?.paintedShadowMap ?? null;
+    if (!tex) return { texture: null, has: false };
+    return { texture: tex, has: true };
+  }
+
+  /**
+   * Push authored _Shadow mask from compositor → WeatherController (async load races).
+   * @private
+   */
+  _refreshPaintedShadowMapBinding() {
+    const wc = weatherController;
+    if (!wc?.setPaintedShadowMap) return;
+    try {
+      const fc = resolveFloorCompositorV2();
+      const ps = fc?._paintedShadowEffect;
+      let shadowTex = null;
+      if (resolveEffectEnabled(ps) && ps?.params?.enabled !== false) {
+        shadowTex = ps._paintedMasks?.[0] ?? null;
+      }
+      wc.setPaintedShadowMap(shadowTex);
+    } catch (_) {}
+  }
+
+  /**
+   * CPU spawn gate for rain/snow emitters (outdoors + authored _Shadow mask).
+   * @param {number} worldX
+   * @param {number} worldY
+   * @param {'rain'|'snow'} kind
+   * @returns {boolean}
+   */
+  _isPrecipSpawnLocationAllowed(worldX, worldY, kind = 'rain') {
+    const wc = weatherController;
+    const tuning = kind === 'snow' ? wc?.snowTuning : wc?.rainTuning;
+    if (tuning?.precipSpawnMaskEnabled === false) return true;
+
+    const bounds = this._sceneBounds;
+    const sceneX = bounds?.x ?? this._viewSceneX ?? 0;
+    const sceneY = bounds?.y ?? this._viewSceneY ?? 0;
+    const sceneW = Math.max(1e-5, bounds?.z ?? this._viewSceneW ?? 1);
+    const sceneH = Math.max(1e-5, bounds?.w ?? this._viewSceneH ?? 1);
+
+    const u = (worldX - sceneX) / sceneW;
+    const v = 1.0 - (worldY - sceneY) / sceneH;
+    if (u < 0 || u > 1 || v < 0 || v > 1) return false;
+
+    if (wc?.getRoofMaskIntensity) {
+      const vRoof = (wc.roofMap?.flipY === true) ? (1.0 - v) : v;
+      const outdoor = wc.getRoofMaskIntensity(u, vRoof);
+      if (outdoor < 0.5) return false;
+    }
+
+    if (tuning?.paintedShadowMaskEnabled !== false && wc?.getPaintedShadowSpawnOpenness) {
+      const vShadow = (wc.paintedShadowMap?.flipY === true) ? (1.0 - v) : v;
+      const spawnOpen = wc.getPaintedShadowSpawnOpenness(u, vShadow);
+      if (spawnOpen < 0.35) return false;
+    }
+
+    return true;
+  }
+
+  /**
+   * Drive painted-shadow precip mask uniforms on a roofUniforms pack.
+   * @param {Record<string, { value: unknown }>|null|undefined} u
+   * @param {'rain'|'snow'} [kind='rain']
+   * @private
+   */
+  _applyPaintedShadowPrecipUniforms(u, kind = 'rain') {
+    if (!u) return;
+    const tex = weatherController?.paintedShadowMap ?? null;
+    const wc = weatherController;
+    const tuningOn = kind === 'snow'
+      ? wc?.snowTuning?.paintedShadowMaskEnabled !== false
+      : wc?.rainTuning?.paintedShadowMaskEnabled !== false;
+    const debugOff = window.MapShine?.disableWeatherPaintedShadowMask === true;
+    const enabled = !debugOff && !!tex && tuningOn;
+    if (u.uPaintedShadowMap) u.uPaintedShadowMap.value = enabled ? tex : null;
+    if (u.uHasPaintedShadowMap) u.uHasPaintedShadowMap.value = enabled ? 1.0 : 0.0;
+  }
+
+  /**
+   * Sync painted-shadow mask uniforms on all precipitation materials (rain/snow/splash).
+   * @private
+   */
+  _syncPaintedShadowPrecipUniforms() {
+    const rainMats = [
+      this._rainMaterial,
+      this._rainBatchMaterial,
+      this._splashMaterial,
+      this._rainImpactSplashBatchMaterial,
+      this._foamMaterial,
+      this._foamBatchMaterial,
+      ...(this._splashBatchMaterials || []),
+      ...(this._waterHitSplashBatchMaterials || []),
+    ];
+    const snowMats = [
+      this._snowMaterial,
+      this._snowBatchMaterial,
+    ];
+    const syncMat = (mat, kind) => {
+      if (!mat) return;
+      const u = mat.userData?.roofUniforms;
+      this._applyPaintedShadowPrecipUniforms(u, kind);
+      const smu = mat.uniforms;
+      if (smu && u) {
+        if (smu.uPaintedShadowMap && u.uPaintedShadowMap) smu.uPaintedShadowMap.value = u.uPaintedShadowMap.value;
+        if (smu.uHasPaintedShadowMap && u.uHasPaintedShadowMap) smu.uHasPaintedShadowMap.value = u.uHasPaintedShadowMap.value;
+      }
+    };
+    for (const mat of rainMats) syncMat(mat, 'rain');
+    for (const mat of snowMats) syncMat(mat, 'snow');
+
+    if (window.MapShine?.debugPaintedShadowPrecipMask === true) {
+      const tex = weatherController?.paintedShadowMap ?? null;
+      const key = [
+        tex ? 1 : 0,
+        tex?.uuid ?? 'null',
+        this._rainBatchMaterial?.fragmentShader?.includes(PAINTED_SHADOW_PRECIP_MASK_MARKER) ? 1 : 0,
+        this._rainBatchMaterial?.userData?.roofUniforms?.uHasPaintedShadowMap?.value ?? -1,
+        weatherController?.paintedShadowMaskSize?.width ?? 0,
+      ].join('|');
+      if (key !== this._lastPaintedShadowPrecipDbgKey) {
+        this._lastPaintedShadowPrecipDbgKey = key;
+        try {
+          console.log('[WeatherParticles] Painted shadow precip mask', {
+            hasMask: !!tex,
+            textureUuid: tex?.uuid ?? null,
+            cpuSize: weatherController?.paintedShadowMaskSize ?? null,
+            rainBatchShaderHasBlock: !!this._rainBatchMaterial?.fragmentShader?.includes(PAINTED_SHADOW_PRECIP_MASK_MARKER),
+            uHasPaintedShadowMap: this._rainBatchMaterial?.userData?.roofUniforms?.uHasPaintedShadowMap?.value,
+          });
+        } catch (_) {}
+      }
+    }
   }
 
   /**
@@ -5936,6 +6247,9 @@ export class WeatherParticles {
       // Screen-space cloud shadow factor from CloudEffect (1.0=lit, 0.0=shadowed)
       tCloudShadow: { value: null },
       uHasCloudShadow: { value: 0.0 },
+      // Authored _Shadow mask (scene UV) — negative precip spawn mask (dark = no rain)
+      uPaintedShadowMap: { value: null },
+      uHasPaintedShadowMap: { value: 0.0 },
       // Foam plume post-alpha shaping (foam.webp only)
       uFoamAdditiveBoost: { value: 1.0 },
       uFoamRadialEnabled: { value: 0.0 },
@@ -5977,6 +6291,8 @@ export class WeatherParticles {
     if (!uniforms.uHasWaterOccluderAlpha) uniforms.uHasWaterOccluderAlpha = { value: 0.0 };
     if (!uniforms.tCloudShadow) uniforms.tCloudShadow = { value: null };
     if (!uniforms.uHasCloudShadow) uniforms.uHasCloudShadow = { value: 0.0 };
+    if (!uniforms.uPaintedShadowMap) uniforms.uPaintedShadowMap = { value: null };
+    if (!uniforms.uHasPaintedShadowMap) uniforms.uHasPaintedShadowMap = { value: 0.0 };
     if (!uniforms.uFoamAdditiveBoost) uniforms.uFoamAdditiveBoost = { value: 1.0 };
     if (!uniforms.uFoamRadialEnabled) uniforms.uFoamRadialEnabled = { value: 0.0 };
     if (!uniforms.uFoamRadialInnerPos) uniforms.uFoamRadialInnerPos = { value: 0.0 };
@@ -6008,6 +6324,17 @@ export class WeatherParticles {
     material.userData = material.userData || {};
     material.userData.roofUniforms = uniforms;
     uniforms.uRoofEdgeDrip.value = (material.userData?.msRoofEdgeDrip === true) ? 1.0 : 0.0;
+
+    if (
+      material.userData._msRoofMaskOnBeforeCompileInstalled === true
+      && !material.isShaderMaterial
+      && existingUniforms
+      && (!existingUniforms.uPaintedShadowMap || existingUniforms.tPaintedShadowLit)
+    ) {
+      material.userData._msRoofMaskOnBeforeCompileInstalled = false;
+      material.userData._msRoofMaskOnBeforeCompileFn = null;
+      material.onBeforeCompile = undefined;
+    }
 
     const isShaderMat = material.isShaderMaterial === true;
 
@@ -6122,6 +6449,7 @@ export class WeatherParticles {
       '      msWaterFade *= visible;\n' +
       '      if (msWaterFade <= 0.001) discard;\n' +
       '    }\n' +
+      PAINTED_SHADOW_PRECIP_MASK_GLSL +
       '  }\n';
 
     const isFoamPlume = material.userData?.msFoamPlume === true;
@@ -6294,6 +6622,8 @@ export class WeatherParticles {
       uni.uHasWaterOccluderAlpha = uniforms.uHasWaterOccluderAlpha;
       uni.tCloudShadow = uniforms.tCloudShadow;
       uni.uHasCloudShadow = uniforms.uHasCloudShadow;
+      uni.uPaintedShadowMap = uniforms.uPaintedShadowMap;
+      uni.uHasPaintedShadowMap = uniforms.uHasPaintedShadowMap;
       uni.uFoamAdditiveBoost = uniforms.uFoamAdditiveBoost;
       uni.uFoamRadialEnabled = uniforms.uFoamRadialEnabled;
       uni.uFoamRadialInnerPos = uniforms.uFoamRadialInnerPos;
@@ -6394,9 +6724,27 @@ export class WeatherParticles {
           || !fs.includes('uHasRoofBlockMap')
           || !fs.includes('uRoofRainHardBlockEnabled')
           || (!fs.includes('hiddenBlock = rb * (1.0 - rv)') && !fs.includes('visibleBlock = rb * rv'))
+          || !fs.includes(PAINTED_SHADOW_PRECIP_MASK_MARKER)
+          || fs.includes('tPaintedShadowLit')
+          || fs.includes('uHasPaintedShadowLit')
         );
 
         if (needsInject) {
+          if (fs.includes(maskMarker) && (!fs.includes(PAINTED_SHADOW_PRECIP_MASK_MARKER) || fs.includes('tPaintedShadowLit'))) {
+            if (fs.includes('tPaintedShadowLit')) {
+              fs = fs.replace(/uniform sampler2D tPaintedShadowLit;\s*\r?\n/g, '');
+              fs = fs.replace(/uniform float uHasPaintedShadowLit;\s*\r?\n/g, '');
+              fs = fs.replace(/uniform float uPaintedShadowOpacity;\s*\r?\n/g, '');
+              fs = fs.replace(PAINTED_SHADOW_PRECIP_MASK_GLSL, '');
+            }
+            fs = this._injectPaintedShadowPrecipMaskGlsl(fs);
+            material.fragmentShader = fs;
+            shaderChanged = true;
+          } else if (!fs.includes(maskMarker)
+            || !fs.includes('uRoofBlockMap')
+            || !fs.includes('uHasRoofBlockMap')
+            || !fs.includes('uRoofRainHardBlockEnabled')
+            || (!fs.includes('hiddenBlock = rb * (1.0 - rv)') && !fs.includes('visibleBlock = rb * rv'))) {
           fs = fs.replace(
             'void main() {',
             'varying vec3 vRoofWorldPos;\n' +
@@ -6416,6 +6764,8 @@ export class WeatherParticles {
             'uniform float uWaterMaskFlipY;\n' +
             'uniform sampler2D tWaterOccluderAlpha;\n' +
             'uniform float uHasWaterOccluderAlpha;\n' +
+            'uniform sampler2D uPaintedShadowMap;\n' +
+            'uniform float uHasPaintedShadowMap;\n' +
             'void main() {\n' +
             '  float msWaterFade = 1.0;'
           );
@@ -6434,6 +6784,7 @@ export class WeatherParticles {
 
           material.fragmentShader = fs;
           shaderChanged = true;
+          }
         }
 
         if (typeof material.fragmentShader === 'string') {
@@ -6445,18 +6796,38 @@ export class WeatherParticles {
         }
 
         if (isFoamPlume && !material.fragmentShader.includes(foamMarker)) {
-          // Ensure foam plume alpha shaping runs before soft particles + tonemapping.
-          // Keep the existing water/roof discard logic intact.
-          // 1) Declare uniforms at global scope
           material.fragmentShader = material.fragmentShader.replace(
             'void main() {',
             foamUniformsCode + 'void main() {'
           );
-          // 2) Inject alpha shaping inside main, before soft particles
-          material.fragmentShader = material.fragmentShader.replace(
-            '#include <soft_fragment>',
-            foamAlphaCode + '#include <soft_fragment>'
-          );
+          const foamSoftReplacement = foamAlphaCode
+            + '#include <soft_fragment>\n'
+            + FOAM_POST_PAINTED_SHADOW_GLSL;
+          if (material.fragmentShader.includes(FOAM_SOFT_FRAGMENT_TAIL)) {
+            material.fragmentShader = material.fragmentShader.replace(
+              FOAM_SOFT_FRAGMENT_TAIL,
+              foamSoftReplacement
+            );
+          } else {
+            material.fragmentShader = material.fragmentShader.replace(
+              '#include <soft_fragment>',
+              foamSoftReplacement
+            );
+          }
+          shaderChanged = true;
+        } else if (isFoamPlume && material.fragmentShader.includes(foamMarker)
+          && !material.fragmentShader.includes(FOAM_POST_PAINTED_SHADOW_MARKER)) {
+          if (material.fragmentShader.includes(FOAM_SOFT_FRAGMENT_TAIL)) {
+            material.fragmentShader = material.fragmentShader.replace(
+              FOAM_SOFT_FRAGMENT_TAIL,
+              '#include <soft_fragment>\n' + FOAM_POST_PAINTED_SHADOW_GLSL
+            );
+          } else {
+            material.fragmentShader = material.fragmentShader.replace(
+              '#include <soft_fragment>',
+              '#include <soft_fragment>\n' + FOAM_POST_PAINTED_SHADOW_GLSL
+            );
+          }
           shaderChanged = true;
         }
 
@@ -6501,6 +6872,8 @@ export class WeatherParticles {
       shader.uniforms.uHasWaterOccluderAlpha = uniforms.uHasWaterOccluderAlpha;
       shader.uniforms.tCloudShadow = uniforms.tCloudShadow;
       shader.uniforms.uHasCloudShadow = uniforms.uHasCloudShadow;
+      shader.uniforms.uPaintedShadowMap = uniforms.uPaintedShadowMap;
+      shader.uniforms.uHasPaintedShadowMap = uniforms.uHasPaintedShadowMap;
       shader.uniforms.uFoamAdditiveBoost = uniforms.uFoamAdditiveBoost;
       shader.uniforms.uFoamRadialEnabled = uniforms.uFoamRadialEnabled;
       shader.uniforms.uFoamRadialInnerPos = uniforms.uFoamRadialInnerPos;
@@ -6586,6 +6959,8 @@ export class WeatherParticles {
           'uniform float uWaterMaskFlipY;\n' +
           'uniform sampler2D tWaterOccluderAlpha;\n' +
           'uniform float uHasWaterOccluderAlpha;\n' +
+          'uniform sampler2D uPaintedShadowMap;\n' +
+          'uniform float uHasPaintedShadowMap;\n' +
           'void main() {\n' +
           '  float msWaterFade = 1.0;'
         );
@@ -6599,7 +6974,15 @@ export class WeatherParticles {
 
         shader.fragmentShader = fs;
       } else {
-        fs = this._migrateRoofEdgeDripShader(shader.fragmentShader);
+        if (fs.includes('tPaintedShadowLit') || !fs.includes(PAINTED_SHADOW_PRECIP_MASK_MARKER)) {
+          if (fs.includes('tPaintedShadowLit')) {
+            fs = fs.replace(/uniform sampler2D tPaintedShadowLit;\s*\r?\n/g, '');
+            fs = fs.replace(/uniform float uHasPaintedShadowLit;\s*\r?\n/g, '');
+            fs = fs.replace(/uniform float uPaintedShadowOpacity;\s*\r?\n/g, '');
+          }
+          fs = this._injectPaintedShadowPrecipMaskGlsl(fs);
+        }
+        fs = this._migrateRoofEdgeDripShader(fs);
         shader.fragmentShader = fs;
       }
 
@@ -6673,14 +7056,32 @@ export class WeatherParticles {
       mat.uniforms.uWaterMaskEnabled &&
       mat.uniforms.uWaterMask &&
       mat.uniforms.uRoofMap &&
-      mat.uniforms.uSceneBounds
+      mat.uniforms.uSceneBounds &&
+      mat.uniforms.uPaintedShadowMap
+    );
+    const vtxOk = !isShaderMat || (
+      typeof mat.vertexShader === 'string' && mat.vertexShader.includes('vRoofWorldPos =')
+    );
+    const foamShaderOk = cacheProp !== '_foamBatchMaterial' || (
+      typeof mat.fragmentShader === 'string'
+      && mat.fragmentShader.includes(FOAM_POST_PAINTED_SHADOW_MARKER)
+      && mat.fragmentShader.includes('clamp(vec2(')
+    );
+    const oobMaskOk = !isShaderMat || !(
+      typeof mat.fragmentShader === 'string'
+      && mat.fragmentShader.includes('uHasPaintedShadowMap > 0.5);')
+      && mat.fragmentShader.includes('msAnyMaskEnabled')
     );
     const alreadyPatched = !!(
       ud._msRoofMaskPatched === true &&
       ud._msRoofMaskPatchedFs === fsRef &&
       ud._msRoofMaskPatchedVs === vsRef &&
       ud.roofUniforms &&
-      uniformsOk
+      uniformsOk &&
+      vtxOk &&
+      oobMaskOk &&
+      foamShaderOk &&
+      (!isShaderMat || (typeof mat.fragmentShader === 'string' && mat.fragmentShader.includes(PAINTED_SHADOW_PRECIP_MASK_MARKER)))
     );
 
     if (this[cacheProp] !== mat || !alreadyPatched) {
@@ -6698,9 +7099,8 @@ export class WeatherParticles {
         }
       }
     }
-    // Roof-drip batch: migrate fragment even when _patchRoofMaskMaterial was skipped (alreadyPatched),
-    // so OOB-uv and other shader fixes apply to previously cached programs.
-    if (cacheProp === '_roofDripBatchMaterial' && isShaderMat && typeof mat.fragmentShader === 'string') {
+    // Migrate fragment shaders (roof drip fixes + painted-shadow precip mask).
+    if (isShaderMat && typeof mat.fragmentShader === 'string') {
       const migrated = this._migrateRoofEdgeDripShader(mat.fragmentShader);
       if (migrated !== mat.fragmentShader) {
         mat.fragmentShader = migrated;
@@ -6978,6 +7378,12 @@ export class WeatherParticles {
       const shape = this.rainSystem.emitterShape;
       if (typeof shape.width === 'number') shape.width = emitW;
       if (typeof shape.height === 'number') shape.height = emitH;
+      if (typeof shape.centerX === 'number') shape.centerX = emitCX;
+      if (typeof shape.centerY === 'number') shape.centerY = emitCY;
+      if (typeof shape.sceneX === 'number') shape.sceneX = this._viewSceneX;
+      if (typeof shape.sceneY === 'number') shape.sceneY = this._viewSceneY;
+      if (typeof shape.sceneW === 'number') shape.sceneW = this._viewSceneW;
+      if (typeof shape.sceneH === 'number') shape.sceneH = this._viewSceneH;
       this.rainSystem.emitter.position.x = emitCX;
       this.rainSystem.emitter.position.y = emitCY;
     }
@@ -6986,6 +7392,12 @@ export class WeatherParticles {
       const shape = this.snowSystem.emitterShape;
       if (typeof shape.width === 'number') shape.width = emitW;
       if (typeof shape.height === 'number') shape.height = emitH;
+      if (typeof shape.centerX === 'number') shape.centerX = emitCX;
+      if (typeof shape.centerY === 'number') shape.centerY = emitCY;
+      if (typeof shape.sceneX === 'number') shape.sceneX = this._viewSceneX;
+      if (typeof shape.sceneY === 'number') shape.sceneY = this._viewSceneY;
+      if (typeof shape.sceneW === 'number') shape.sceneW = this._viewSceneW;
+      if (typeof shape.sceneH === 'number') shape.sceneH = this._viewSceneH;
       this.snowSystem.emitter.position.x = emitCX;
       this.snowSystem.emitter.position.y = emitCY;
     }
@@ -7631,6 +8043,9 @@ export class WeatherParticles {
       cloudShadowTexture = null;
     }
 
+    this._refreshPaintedShadowMapBinding();
+    this._paintedShadowPrecipMask = this._resolvePaintedShadowPrecipMask();
+
     // DIAGNOSTIC: allow disabling the precipitation roof/outdoors masking at runtime.
     // Toggle via console: window.MapShine.disableWeatherRoofMask = true/false
     // This helps A/B test whether the mask sampling/discard path is a major GPU cost.
@@ -7805,6 +8220,17 @@ export class WeatherParticles {
     this._ensureBatchMaterialPatched(this.roofDripSystem, '_roofDripBatchMaterial');
     this._ensureBatchMaterialPatched(this.snowSystem, '_snowBatchMaterial');
     this._ensureBatchMaterialPatched(this._foamSystem, '_foamBatchMaterial');
+    if (this.splashSystems?.length) {
+      for (const splashSys of this.splashSystems) {
+        if (splashSys) this._ensureBatchMaterialPatched(splashSys, '_splashBatchMaterial');
+      }
+    }
+    this._ensureBatchMaterialPatched(this._rainImpactSplashSystem, '_rainImpactSplashBatchMaterial');
+    if (this._waterHitSplashSystems?.length) {
+      for (const entry of this._waterHitSplashSystems) {
+        if (entry?.system) this._ensureBatchMaterialPatched(entry.system, '_waterHitSplashBatchMaterial');
+      }
+    }
 
     if (this.rainSystem) {
         // Minimal per-frame work: just drive emission by precipitation/intensity.
@@ -8223,6 +8649,7 @@ export class WeatherParticles {
           || sbY !== this._lastSplashSceneBoundsY
           || sbW !== this._lastSplashSceneBoundsW
           || sbH !== this._lastSplashSceneBoundsH
+          || (weatherController?.paintedShadowMap?.uuid ?? null) !== this._lastSplashPaintedShadowTexUuid
         );
 
         if (splashRoofUniformsDirty) {
@@ -8238,6 +8665,7 @@ export class WeatherParticles {
           this._lastSplashSceneBoundsY = sbY;
           this._lastSplashSceneBoundsW = sbW;
           this._lastSplashSceneBoundsH = sbH;
+          this._lastSplashPaintedShadowTexUuid = weatherController?.paintedShadowMap?.uuid ?? null;
 
           if (this._splashMaterial && this._splashMaterial.userData.roofUniforms) {
              const u = this._splashMaterial.userData.roofUniforms;
@@ -8250,6 +8678,7 @@ export class WeatherParticles {
              u.uRoofAlphaMap.value = rainHasRoofAlphaMap ? rainRoofAlphaTexture : null;
              if (u.uRoofBlockMap) u.uRoofBlockMap.value = rainHasRoofBlockMap ? rainRoofBlockTexture : null;
              u.uScreenSize.value.set(screenWidth, screenHeight);
+             this._applyPaintedShadowPrecipUniforms(u, 'rain');
           }
 
           if (this._splashBatchMaterials && this._splashBatchMaterials.length > 0) {
@@ -8265,7 +8694,21 @@ export class WeatherParticles {
               u.uRoofAlphaMap.value = rainHasRoofAlphaMap ? rainRoofAlphaTexture : null;
               if (u.uRoofBlockMap) u.uRoofBlockMap.value = rainHasRoofBlockMap ? rainRoofBlockTexture : null;
               u.uScreenSize.value.set(screenWidth, screenHeight);
+              this._applyPaintedShadowPrecipUniforms(u, 'rain');
             }
+          }
+          if (this._rainImpactSplashBatchMaterial?.userData?.roofUniforms) {
+            const u = this._rainImpactSplashBatchMaterial.userData.roofUniforms;
+            u.uRoofMaskEnabled.value = effectiveRoofMaskEnabled ? 1.0 : 0.0;
+            u.uHasRoofAlphaMap.value = rainHasRoofAlphaMap ? 1.0 : 0.0;
+            if (u.uHasRoofBlockMap) u.uHasRoofBlockMap.value = rainHasRoofBlockMap ? 1.0 : 0.0;
+            if (u.uRoofRainHardBlockEnabled) u.uRoofRainHardBlockEnabled.value = rainHardBlockActive ? 1.0 : 0.0;
+            if (this._sceneBounds) u.uSceneBounds.value.copy(this._sceneBounds);
+            u.uRoofMap.value = this._roofTexture;
+            u.uRoofAlphaMap.value = rainHasRoofAlphaMap ? rainRoofAlphaTexture : null;
+            if (u.uRoofBlockMap) u.uRoofBlockMap.value = rainHasRoofBlockMap ? rainRoofBlockTexture : null;
+            u.uScreenSize.value.set(screenWidth, screenHeight);
+            this._applyPaintedShadowPrecipUniforms(u, 'rain');
           }
         }
     }
@@ -8824,6 +9267,7 @@ export class WeatherParticles {
         u.uRoofAlphaMap.value = rainHasRoofAlphaMap ? rainRoofAlphaTexture : null;
         if (u.uRoofBlockMap) u.uRoofBlockMap.value = rainHasRoofBlockMap ? rainRoofBlockTexture : null;
         u.uScreenSize.value.set(screenWidth, screenHeight);
+        this._applyPaintedShadowPrecipUniforms(u, 'rain');
       }
     }
 
@@ -8854,6 +9298,7 @@ export class WeatherParticles {
         u.tCloudShadow.value = cloudShadowTexture;
         u.uHasCloudShadow.value = cloudShadowTexture ? 1.0 : 0.0;
       }
+      this._applyPaintedShadowPrecipUniforms(u, 'rain');
     }
 
     if (this._foamBatchMaterial && this._foamBatchMaterial.userData && this._foamBatchMaterial.userData.roofUniforms) {
@@ -8879,6 +9324,8 @@ export class WeatherParticles {
         u.uHasCloudShadow.value = cloudShadowTexture ? 1.0 : 0.0;
       }
 
+      this._applyPaintedShadowPrecipUniforms(u, 'rain');
+
       // Quarks may rebuild ShaderMaterial.uniforms; also drive the live ShaderMaterial uniforms directly.
       const smu = this._foamBatchMaterial.uniforms;
       if (smu) {
@@ -8898,6 +9345,8 @@ export class WeatherParticles {
         if (smu.uHasWaterOccluderAlpha && u.uHasWaterOccluderAlpha) smu.uHasWaterOccluderAlpha.value = u.uHasWaterOccluderAlpha.value;
         if (smu.tCloudShadow && u.tCloudShadow) smu.tCloudShadow.value = u.tCloudShadow.value;
         if (smu.uHasCloudShadow && u.uHasCloudShadow) smu.uHasCloudShadow.value = u.uHasCloudShadow.value;
+        if (smu.uPaintedShadowMap && u.uPaintedShadowMap) smu.uPaintedShadowMap.value = u.uPaintedShadowMap.value;
+        if (smu.uHasPaintedShadowMap && u.uHasPaintedShadowMap) smu.uHasPaintedShadowMap.value = u.uHasPaintedShadowMap.value;
 
         if (smu.uFoamCurlDisplaceEnabled && u.uFoamCurlDisplaceEnabled) smu.uFoamCurlDisplaceEnabled.value = u.uFoamCurlDisplaceEnabled.value;
         if (smu.uFoamCurlDisplaceUv && u.uFoamCurlDisplaceUv) smu.uFoamCurlDisplaceUv.value = u.uFoamCurlDisplaceUv.value;
@@ -9429,6 +9878,8 @@ export class WeatherParticles {
         }
       }
     }
+
+    this._syncPaintedShadowPrecipUniforms();
   }
 
   dispose() {

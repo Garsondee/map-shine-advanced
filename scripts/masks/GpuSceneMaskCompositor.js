@@ -18,6 +18,7 @@
 import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
+import { shouldBuildParticleChannelPack } from '../core/texture-overhaul-flags.js';
 import * as assetLoader from '../assets/loader.js';
 import { getEffectMaskRegistry } from '../assets/loader.js';
 import { getTextureBudgetTracker, estimateTextureBytes } from '../assets/TextureBudgetTracker.js';
@@ -869,21 +870,25 @@ export class GpuSceneMaskCompositor {
     );
     if (skyReachEntry) compositeMasks.push(skyReachEntry);
 
-    try {
-      this._buildParticleChannelPack(floorKey, floorTargets, renderer);
-      const packRt = floorTargets.get('particlePack');
-      if (packRt?.texture) {
-        compositeMasks.push({
-          id: 'particlePack',
-          suffix: '_ParticlePack',
-          type: 'particlePack',
-          texture: packRt.texture,
-          required: false,
-          channels: PACKED_MASK_CHANNELS,
-        });
+    if (shouldBuildParticleChannelPack()) {
+      try {
+        this._buildParticleChannelPack(floorKey, floorTargets, renderer);
+        const packRt = floorTargets.get('particlePack');
+        if (packRt?.texture) {
+          compositeMasks.push({
+            id: 'particlePack',
+            suffix: '_ParticlePack',
+            type: 'particlePack',
+            texture: packRt.texture,
+            required: false,
+            channels: PACKED_MASK_CHANNELS,
+          });
+        }
+      } catch (err) {
+        log.warn('particlePack build failed', err);
       }
-    } catch (err) {
-      log.warn('particlePack build failed', err);
+    } else {
+      this._evictGpuMaskRtForFloor(floorKey, 'particlePack');
     }
 
     if (compositeMasks.length === 0) return null;
@@ -3846,6 +3851,8 @@ export class GpuSceneMaskCompositor {
    * @private
    */
   _buildParticleChannelPack(floorKey, floorTargets, renderer) {
+    if (!shouldBuildParticleChannelPack()) return;
+
     const THREE = window.THREE;
     if (!THREE || !renderer || !floorTargets?.size) return;
 
@@ -3940,6 +3947,22 @@ export class GpuSceneMaskCompositor {
     this._disposeMaskRenderTarget(rt);
     map.delete(maskType);
     this._floorCacheVersion++;
+  }
+
+  /**
+   * Drop unused `particlePack` RTs from every cached floor (VRAM experiment).
+   * @returns {number} Floors that had a pack evicted.
+   * @public
+   */
+  evictAllParticleChannelPacks() {
+    let evicted = 0;
+    for (const floorKey of this._floorCache.keys()) {
+      const map = this._floorCache.get(floorKey);
+      if (!map?.has('particlePack')) continue;
+      this._evictGpuMaskRtForFloor(floorKey, 'particlePack');
+      evicted++;
+    }
+    return evicted;
   }
 
   /**

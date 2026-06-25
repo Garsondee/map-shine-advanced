@@ -22,6 +22,7 @@ import {
   exposeTextureDiagnosticsApi,
   formatTextureGrowthAlert,
 } from '../core/texture-diagnostics.js';
+import { exposeTextureOverhaulFlagsApi } from '../core/texture-overhaul-flags.js';
 import { getGpuWorkScheduler } from './gpu-work-scheduler.js';
 import { resolveEffectiveGpuVramGB } from './memory-settings.js';
 
@@ -292,6 +293,7 @@ export function getAdaptiveBudgetController() {
         window.MapShine.adaptiveBudgetController = _instance;
         window.MapShine.streamingTuning = getStreamingTuningApi();
         exposeTextureDiagnosticsApi();
+        exposeTextureOverhaulFlagsApi();
       }
     } catch (_) {}
   }

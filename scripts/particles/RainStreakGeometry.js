@@ -54,6 +54,9 @@ export class RainStreakGeometry {
         // Roof / outdoors mask (_Outdoors texture) for indoor/outdoor culling
         uRoofMap: { value: null },
         uRoofMaskEnabled: { value: 0.0 },
+        tPaintedShadowLit: { value: null },
+        uHasPaintedShadowLit: { value: 0.0 },
+        uPaintedShadowOpacity: { value: 1.0 },
         // Spawn density 0..1 controls how many streak instances are active
         uSpawnDensity: { value: 0.0 },
         // Normalized wind speed 0..1 used to modulate droplet breakup in the
@@ -68,6 +71,9 @@ export class RainStreakGeometry {
         uniform float uSpawnDensity;
         uniform sampler2D uRoofMap;
         uniform float uRoofMaskEnabled;
+        uniform sampler2D tPaintedShadowLit;
+        uniform float uHasPaintedShadowLit;
+        uniform float uPaintedShadowOpacity;
 
         attribute float instanceIndex;
 
@@ -268,6 +274,14 @@ export class RainStreakGeometry {
             alpha *= isOutdoor;
           }
 
+          if (uHasPaintedShadowLit > 0.5) {
+            float u = (currentPos.x - uSceneBounds.x) / uSceneBounds.z;
+            float v = 1.0 - (currentPos.y - uSceneBounds.y) / uSceneBounds.w;
+            vec2 shadowUv = clamp(vec2(u, v), 0.0, 1.0);
+            float paintedLit = clamp(texture2D(tPaintedShadowLit, shadowUv).r, 0.0, 1.0);
+            alpha *= paintedLit;
+          }
+
           // Apply spawn density mask last so that precipitation directly
           // controls the fraction of active streaks.
           alpha *= spawnMask;
@@ -459,6 +473,28 @@ export class RainStreakGeometry {
       u.uRoofMaskEnabled.value = 1.0;
     } else {
       u.uRoofMaskEnabled.value = 0.0;
+    }
+
+    try {
+      const fc = window.MapShine?.floorCompositorV2 ?? window.MapShine?.effectComposer?._floorCompositorV2;
+      const ps = fc?._paintedShadowEffect;
+      const rainOn = weatherController?.rainTuning?.paintedShadowMaskEnabled !== false;
+      const debugOff = window.MapShine?.disableWeatherPaintedShadowMask === true;
+      let paintedTex = null;
+      let paintedOpacity = 1.0;
+      if (!debugOff && rainOn && ps?.params?.enabled !== false) {
+        paintedTex = ps.groundOnlyLitTexture ?? ps.shadowFactorTexture ?? null;
+        const po = Number(ps.params?.opacity);
+        if (Number.isFinite(po)) paintedOpacity = Math.max(0, Math.min(1, po));
+        const sm = fc?._shadowManagerEffect;
+        const smo = Number(sm?.params?.paintedOpacity);
+        if (Number.isFinite(smo)) paintedOpacity *= Math.max(0, Math.min(1, smo));
+      }
+      u.tPaintedShadowLit.value = paintedTex;
+      u.uHasPaintedShadowLit.value = paintedTex ? 1.0 : 0.0;
+      u.uPaintedShadowOpacity.value = paintedOpacity;
+    } catch (_) {
+      u.uHasPaintedShadowLit.value = 0.0;
     }
 
     // Bounds

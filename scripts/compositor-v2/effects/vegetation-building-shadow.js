@@ -128,7 +128,7 @@ export function resolveFloorCompositorV2() {
   }
 }
 
-function resolveBuildingShadowTextureForFloor(buildingFx, renderer, floorIndex) {
+export function resolveBuildingShadowTextureForFloor(buildingFx, renderer, floorIndex) {
   if (!buildingFx?.params?.enabled) return null;
   const idx = Math.max(0, Math.min(3, Math.floor(Number(floorIndex))));
   const floorCount = Number(window.MapShine?.floorStack?.getFloors?.()?.length ?? 0);

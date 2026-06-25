@@ -9,7 +9,7 @@ import { createSplashStructuralShadowUniforms } from './water-splash-structural-
 
 /** Splash/bubble shader marker — bump {@link SPLASH_OCCLUSION_SHADER_EPOCH} when GLSL changes. */
 export const SPLASH_OCCLUSION_MASK_MARKER = '/* MS_WATER_SPLASHES_MASKING_V2 */';
-export const SPLASH_OCCLUSION_SHADER_EPOCH = 9;
+export const SPLASH_OCCLUSION_SHADER_EPOCH = 12;
 
 /**
  * GLSL helpers (must stay in sync with water-shader.js).
@@ -277,12 +277,31 @@ export function injectSplashWaterScreenOcclusion(fs) {
     return repairSplashWaterMaskAlphaClip(out);
   }
   if (out.includes('#include <soft_fragment>')) {
-    return out.replace(
+    out = out.replace(
       '#include <soft_fragment>',
       `#include <soft_fragment>\n${SPLASH_WATER_SCREEN_OCCLUSION_CLIP_GLSL}`,
     );
+  } else {
+    out = out.replace(marker + '\n', `${marker}\n${WATER_SCREEN_OCCLUSION_GLSL}\n${SPLASH_WATER_SCREEN_OCCLUSION_CLIP_GLSL}`);
   }
-  return out.replace(marker + '\n', `${marker}\n${WATER_SCREEN_OCCLUSION_GLSL}\n${SPLASH_WATER_SCREEN_OCCLUSION_CLIP_GLSL}`);
+  return stripLegacyAuthoredShadowGpuGlsl(out);
+}
+
+/** Remove GPU authored-shadow clip (uses extra texture unit; CPU spawn gate handles masking). */
+function stripLegacyAuthoredShadowGpuGlsl(fs) {
+  if (typeof fs !== 'string') return fs;
+  if (!fs.includes('uPaintedShadowAuthoredMap') && !fs.includes('MS_WATER_SPLASH_AUTHORED_SHADOW')) return fs;
+  let out = fs;
+  out = out.replace(/uniform sampler2D uPaintedShadowAuthoredMap;\s*\n/g, '');
+  out = out.replace(/uniform float uHasPaintedShadowAuthoredMap;\s*\n/g, '');
+  out = out.replace(/uniform float uPaintedShadowAuthoredMaskEnabled;\s*\n/g, '');
+  out = out.replace(/uniform sampler2D tPaintedShadowAuthored[0-3];\s*\n/g, '');
+  out = out.replace(/uniform float uHasPaintedShadowAuthored[0-3];\s*\n/g, '');
+  out = out.replace(/uniform float uPaintedShadowAuthoredMultiFloor;\s*\n/g, '');
+  out = out.replace(/float msaSplashReadAuthoredShadowOpen[\s\S]*?\n\}\n/g, '');
+  out = out.replace(/float msaSplashAuthoredShadowSpawnOpen[\s\S]*?\n\}\n/g, '');
+  out = out.replace(/\s*\/\/ \/\* MS_WATER_SPLASH_AUTHORED_SHADOW_V\d+ \*\/[\s\S]*?if \(gl_FragColor\.a <= 0\.001\) discard;\s*\}\n/g, '\n');
+  return out;
 }
 
 /**
@@ -317,6 +336,8 @@ export function repairSplashOcclusionShaderIfLegacy(fs) {
   }
   if (!splashShaderHasWaterScreenOcclusion(s)) {
     s = injectSplashWaterScreenOcclusion(s);
+  } else {
+    s = stripLegacyAuthoredShadowGpuGlsl(s);
   }
   return repairSplashWaterMaskAlphaClip(s);
 }

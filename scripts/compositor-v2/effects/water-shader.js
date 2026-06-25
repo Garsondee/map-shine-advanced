@@ -25,9 +25,9 @@
  *   - Shader-based foam flecks (ifdef USE_FOAM_FLECKS)
  *   - Murk (subsurface silt/algae; multi-layer clouds, color/thickness variation, chaos)
  *   - GGX specular with anisotropy + optional surface chaos (patchy roughness, capillary normals)
- *   - Chromatic aberration (runtime toggle + thresholded Kawase blur)
+ *   - Chromatic aberration (runtime toggle + thresholded Kawase blur; follows refraction)
  *   - Multi-tap refraction (ifdef USE_WATER_REFRACTION_MULTITAP)
- *   - Mask-based edge masking for distortion and chromatic aberration
+ *   - Scene-border fade for refraction when _Water masks touch map edges
  *   - Debug views (raw mask, inside, packed mask R, shore band, normals, wave height)
  *   - Screen UV → Foundry → scene UV coordinate pipeline
  *
@@ -1059,21 +1059,22 @@ float distortionInsideFromCoverage(float coverage01) {
   return pow(cov, max(0.01, uDistortionEdgeGamma));
 }
 
+// Fade refraction toward zero near scene UV borders when full-bleed _Water masks
+// touch the map edge. Prevents refract taps from clamping/sampling padding artifacts.
+float distortionSceneBorderFade(vec2 sceneUv01) {
+  vec2 edgeDist = min(sceneUv01, vec2(1.0) - sceneUv01);
+  float minEdge = min(edgeDist.x, edgeDist.y);
+  float feather = max(uDistortionEdgeFeather, 1e-5);
+  return smoothstep(0.0, feather, minEdge);
+}
+
 float chromaticInsideFromCoverage(float coverage01) {
   float cov = clamp(coverage01, 0.0, 1.0);
   float c = clamp(uChromaticAberrationEdgeCenter, 0.0, 1.0);
   float f = max(0.0, uChromaticAberrationEdgeFeather);
-  float inside = (f > 1e-6) ? smoothstep(c - f, c + f, cov) : step(c, cov);
+  float inside = (f > 1e-6) ? smoothstep(c - f, c + f, cov) : cov;
   inside = pow(clamp(inside, 0.0, 1.0), max(0.01, uChromaticAberrationEdgeGamma));
-  inside = max(clamp(uChromaticAberrationEdgeMin, 0.0, 1.0), inside);
-
-  // Deadzone near shoreline edge (water-land transition) to prevent CA overlap
-  // artifacts where mask transitions are sharp.
-  float dz = max(0.0, uChromaticAberrationDeadzone);
-  float dzSoft = max(1e-5, uChromaticAberrationDeadzoneSoftness);
-  float edgeDelta = max(0.0, c - cov);
-  float deadzoneMask = smoothstep(dz, dz + dzSoft, edgeDelta);
-  return inside * deadzoneMask;
+  return max(clamp(uChromaticAberrationEdgeMin, 0.0, 1.0), inside);
 }
 
 // ── Foam flecks (shader-based) ───────────────────────────────────────────
@@ -1802,6 +1803,29 @@ vec4 sampleRefractedSafe(vec2 screenUv, vec4 fallback) {
   return (refractTapValid(screenUv) > 0.5) ? texture2D(tDiffuse, screenUv) : fallback;
 }
 
+// Chromatic refraction taps: clamp + edge fade only. Do not reuse refractTapValid
+// (occluder/bg gates) — shifted R/B samples would fall back to the center channel
+// and the RGB split disappears entirely.
+float chromaticTapFade(vec2 screenUv) {
+  vec2 clamped = clamp(screenUv, vec2(0.001), vec2(0.999));
+  float edge = screenUvEdgeFade(clamped);
+  if (uHasSceneRect > 0.5) {
+    vec2 suv = foundryToSceneUv(screenUvToFoundry(clamped));
+    float inScene = step(0.0, suv.x) * step(suv.x, 1.0) * step(0.0, suv.y) * step(suv.y, 1.0);
+    return edge * inScene;
+  }
+  return edge;
+}
+
+float chromaticChannelSample(vec2 screenUv, float channel, vec3 fallbackRgb) {
+  vec2 clamped = clamp(screenUv, vec2(0.001), vec2(0.999));
+  float fade = chromaticTapFade(clamped);
+  vec3 tap = texture2D(tDiffuse, clamped).rgb;
+  float sampled = (channel < 0.5) ? tap.r : tap.b;
+  float fb = (channel < 0.5) ? fallbackRgb.r : fallbackRgb.b;
+  return mix(fb, sampled, fade);
+}
+
 // ── Specular Highlights Function ─────────────────────────────────────────────
 vec3 calculateSpecularHighlights(
   vec2 sceneUv, float inside, vec3 N, vec3 V, vec3 L, float NoL, float NoV,
@@ -1979,6 +2003,7 @@ void main() {
   float inside = rawAuth;
   float shore = clamp(shoreFromPack * rawAuth, 0.0, 1.0);
   float distInside = distortionInsideFromCoverage(rawAuth);
+  distInside *= distortionSceneBorderFade(sceneUv);
   if (uHasWaterBgAlphaMask > 0.5) {
     float m = texture2D(tWaterBgAlphaMask, vUv).r;
     inside *= m;
@@ -2183,72 +2208,68 @@ void main() {
   vec4 refracted = centerSample;
   #endif
 
-  #ifdef USE_CHROMATIC_ABERRATION
   if (uChromaticAberrationEnabled > 0.5) {
     vec2 texel2 = 1.0 / max(uResolution, vec2(1.0));
-    float caPxBase = clamp(uChromaticAberrationStrengthPx, 0.0, 12.0);
+    float caPxBase = clamp(uChromaticAberrationStrengthPx, 0.0, 24.0);
     float caThresh = clamp(uChromaticAberrationThreshold, 0.0, 1.0);
     float caSoft = max(0.001, uChromaticAberrationThresholdSoftness);
     float lumBase = msLuminance(refracted.rgb);
     float caLumaGate = smoothstep(caThresh - caSoft, caThresh + caSoft, lumBase);
-    vec2 dir = offsetUv; float dirLen = length(dir);
-    vec2 dirN = (dirLen > 1e-6) ? (dir / dirLen) : vec2(1.0, 0.0);
 
-    // Gate CA by shoreline mask + luminance threshold, then confine it to a
-    // narrow raw-mask transition band to avoid broad color fringing.
-    // This keeps CA local to the shoreline even when _Water has soft gradients.
-    float caCoverageMask = chromaticInsideFromCoverage(rawAuth);
-    float caRawEdgeBand = clamp(4.0 * rawAuth * (1.0 - rawAuth), 0.0, 1.0);
-    caRawEdgeBand = pow(caRawEdgeBand, 1.9);
-    // Require actual mask gradient so wide soft plateaus don't get broad CA tint.
-    float caGradGate = smoothstep(0.006, 0.03, rawGrad);
-    float caEdgeMask = caCoverageMask * caRawEdgeBand * caGradGate * caLumaGate;
-    float caPx = caPxBase * caEdgeMask;
+    vec2 dir = offsetUv;
+    float dirLen = length(dir);
+    if (dirLen < 1e-6) {
+      dir = combinedN;
+      dirLen = max(length(dir), 1e-6);
+    }
+    vec2 dirN = dir / dirLen;
+
+    // RGB shift follows active refraction. Luma gate is optional (threshold ≈ 0 disables it).
+    float caWeight = clamp(distMask * inside, 0.0, 1.0);
+    if (caThresh > 0.01) {
+      caWeight *= caLumaGate;
+    }
+    float f = max(0.0, uChromaticAberrationEdgeFeather);
+    if (f > 1e-6) {
+      float caCoverageBias = chromaticInsideFromCoverage(rawAuth);
+      caWeight *= mix(1.0, caCoverageBias, 0.35);
+    }
+    float dz = max(0.0, uChromaticAberrationDeadzone);
+    float dzSoft = max(1e-5, uChromaticAberrationDeadzoneSoftness);
+    float sharpLandCut = smoothstep(dz, dz + dzSoft, rawGrad) * (1.0 - smoothstep(0.08, 0.35, rawAuth));
+    caWeight *= (1.0 - sharpLandCut);
+
+    float caPx = caPxBase;
     float spread = clamp(uChromaticAberrationSampleSpread, 0.25, 3.0);
     float kawasePx = clamp(uChromaticAberrationKawaseBlurPx, 0.0, 8.0);
 
     vec2 caUv = dirN * (caPx * texel2) * zoom;
     vec2 axisBlurUv = dirN * (kawasePx * texel2) * spread * zoom;
 
-    vec2 uvR = clamp(uv1 + caUv, vec2(0.001), vec2(0.999));
-    vec2 uvB = clamp(uv1 - caUv, vec2(0.001), vec2(0.999));
-    vec2 uvRp = clamp(uvR + axisBlurUv, vec2(0.001), vec2(0.999));
-    vec2 uvRm = clamp(uvR - axisBlurUv, vec2(0.001), vec2(0.999));
-    vec2 uvBp = clamp(uvB + axisBlurUv, vec2(0.001), vec2(0.999));
-    vec2 uvBm = clamp(uvB - axisBlurUv, vec2(0.001), vec2(0.999));
+    vec2 uvR = uv1 + caUv;
+    vec2 uvB = uv1 - caUv;
+    vec2 uvRp = uvR + axisBlurUv;
+    vec2 uvRm = uvR - axisBlurUv;
+    vec2 uvBp = uvB + axisBlurUv;
+    vec2 uvBm = uvB - axisBlurUv;
 
-    float vR0 = refractTapValid(uvR);
-    float vRp = refractTapValid(uvRp);
-    float vRm = refractTapValid(uvRm);
-    float vB0 = refractTapValid(uvB);
-    float vBp = refractTapValid(uvBp);
-    float vBm = refractTapValid(uvBm);
+    float edgeR = chromaticTapFade(uvR);
+    float edgeB = chromaticTapFade(uvB);
 
-    float rW0 = 0.50 * vR0;
-    float rWp = 0.25 * vRp;
-    float rWm = 0.25 * vRm;
-    float bW0 = 0.50 * vB0;
-    float bWp = 0.25 * vBp;
-    float bWm = 0.25 * vBm;
+    float r0 = chromaticChannelSample(uvR, 0.0, refracted.rgb);
+    float rp = chromaticChannelSample(uvRp, 0.0, refracted.rgb);
+    float rm = chromaticChannelSample(uvRm, 0.0, refracted.rgb);
 
-    float rSum = max(1e-5, rW0 + rWp + rWm);
-    float bSum = max(1e-5, bW0 + bWp + bWm);
+    float b0 = chromaticChannelSample(uvB, 1.0, refracted.rgb);
+    float bp = chromaticChannelSample(uvBp, 1.0, refracted.rgb);
+    float bm = chromaticChannelSample(uvBm, 1.0, refracted.rgb);
 
-    float r0 = (vR0 > 0.5) ? texture2D(tDiffuse, uvR).r : refracted.r;
-    float rp = (vRp > 0.5) ? texture2D(tDiffuse, uvRp).r : refracted.r;
-    float rm = (vRm > 0.5) ? texture2D(tDiffuse, uvRm).r : refracted.r;
-
-    float b0 = (vB0 > 0.5) ? texture2D(tDiffuse, uvB).b : refracted.b;
-    float bp = (vBp > 0.5) ? texture2D(tDiffuse, uvBp).b : refracted.b;
-    float bm = (vBm > 0.5) ? texture2D(tDiffuse, uvBm).b : refracted.b;
-
-    float rChannel = (r0 * rW0 + rp * rWp + rm * rWm) / rSum;
-    float bChannel = (b0 * bW0 + bp * bWp + bm * bWm) / bSum;
+    float rChannel = (r0 + rp + rm) / 3.0;
+    float bChannel = (b0 + bp + bm) / 3.0;
     vec3 caRgb = vec3(rChannel, refracted.g, bChannel);
-    float caBlend = clamp(caEdgeMask, 0.0, 1.0);
-    refracted.rgb = mix(refracted.rgb, caRgb, caBlend);
+    float caBlend = caWeight * 0.5 * (edgeR + edgeB);
+    refracted.rgb = mix(refracted.rgb, caRgb, clamp(caBlend, 0.0, 1.0));
   }
-  #endif
 
   vec3 col = refracted.rgb;
 

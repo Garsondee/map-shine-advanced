@@ -95,7 +95,7 @@ export const VEGETATION_PAINTED_SHADOW_APPLY_GLSL = `
  * @param {number} floorIndex
  * @returns {import('three').Texture|null}
  */
-function resolvePaintedShadowTextureForFloor(paintedFx, renderer, floorIndex) {
+export function resolvePaintedShadowTextureForFloor(paintedFx, renderer, floorIndex) {
   if (!paintedFx?.params?.enabled) return null;
   const idx = Math.max(0, Math.min(3, Math.floor(Number(floorIndex))));
   const floorCount = Number(window.MapShine?.floorStack?.getFloors?.()?.length ?? 0);

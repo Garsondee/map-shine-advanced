@@ -6905,6 +6905,16 @@ export class FloorCompositor {
       if (typeof weatherController?.setRoofMap === 'function') {
         weatherController.setRoofMap(outdoorsTex);
       }
+      if (typeof weatherController?.setPaintedShadowMap === 'function') {
+        let shadowTex = null;
+        try {
+          const ps = this._paintedShadowEffect;
+          if (resolveEffectEnabled(ps) && ps?.params?.enabled !== false) {
+            shadowTex = ps._paintedMasks?.[0] ?? null;
+          }
+        } catch (_) {}
+        weatherController.setPaintedShadowMap(shadowTex);
+      }
       if (signatureChanged) {
         try { this._fireEffect?.onOutdoorsMaskUpdated?.(); } catch (_) {}
         try { this._candleFlamesEffect?.onOutdoorsMaskUpdated?.(); } catch (_) {}

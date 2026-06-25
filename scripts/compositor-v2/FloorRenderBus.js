@@ -3925,6 +3925,26 @@ export class FloorRenderBus {
     const v14Idx = resolveV14NativeDocFloorIndexMin(tileDoc, globalThis.canvas?.scene);
     if (v14Idx !== null) return v14Idx;
 
+    // V14 native level id on the document when min-index resolver returned null.
+    try {
+      if (hasV14NativeLevels(globalThis.canvas?.scene)) {
+        const singleLevel = tileDoc?.level ?? tileDoc?._source?.level;
+        if (typeof singleLevel === 'string' && singleLevel.length > 0) {
+          for (let i = 0; i < floors.length; i += 1) {
+            if (floors[i].levelId === singleLevel) return i;
+          }
+        }
+        const levelsSet = tileDoc?.levels;
+        if (levelsSet?.size) {
+          for (const lid of levelsSet) {
+            for (let i = 0; i < floors.length; i += 1) {
+              if (floors[i].levelId === lid) return i;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
     const elev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
     const byElev = resolveFloorIndexForElevation(elev, floors);
     if (byElev >= 0) return byElev;

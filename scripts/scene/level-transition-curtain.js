@@ -13,6 +13,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { shouldShortCircuitCurtainWarmGates } from '../core/texture-overhaul-flags.js';
 import { getShaderCompileMonitor } from '../core/diagnostics/ShaderCompileMonitor.js';
 import { loadingOverlay } from '../ui/loading-overlay.js';
 import * as sceneSettings from '../settings/scene-settings.js';
@@ -613,30 +614,68 @@ export class LevelTransitionCurtain {
       Math.min(POPULATE_TIMEOUT_MS, remaining()),
     );
     if (targetChanged()) return { ready: false, targetChanged: true };
-    this._setStage('warmup', 0.55);
-    await this._pumpCompositorFrames(4);
+
+    const warmGateShortCircuit = this._canShortCircuitWarmCurtainGates();
+    if (warmGateShortCircuit) {
+      this._setStage('warmup', 0.55);
+      await this._pumpCompositorFrames(1);
+    } else {
+      this._setStage('warmup', 0.55);
+      await this._pumpCompositorFrames(4);
+    }
     if (targetChanged()) return { ready: false, targetChanged: true };
     this._setStage('warmup', 1);
 
-    this._setStage('shaders', 0.2);
-    await this._awaitShadersIdle(
-      Math.min(SHADERS_IDLE_TIMEOUT_MS, remaining()),
-    );
-    if (targetChanged()) return { ready: false, targetChanged: true };
-    this._setStage('shaders', 0.45);
-    const programsOk = await this._awaitCompiledPrograms(
-      Math.min(COMPILED_PROGRAMS_TIMEOUT_MS, remaining()),
-    );
-    if (targetChanged()) return { ready: false, targetChanged: true };
-    this._setStage('shaders', 1);
+    if (warmGateShortCircuit) {
+      log.debug('Warm level revisit: short-circuiting curtain shader stability gates', {
+        context: window.MapShine?.__levelMaskRebuildContext ?? null,
+      });
+      this._setStage('shaders', 1);
+      this._setStage('finalize', 0.2);
+      await this._awaitRenderFrames(1);
+      if (targetChanged()) return { ready: false, targetChanged: true };
+      this._setStage('finalize', 1);
+    } else {
+      this._setStage('shaders', 0.2);
+      await this._awaitShadersIdle(
+        Math.min(SHADERS_IDLE_TIMEOUT_MS, remaining()),
+      );
+      if (targetChanged()) return { ready: false, targetChanged: true };
+      this._setStage('shaders', 0.45);
+      const programsOk = await this._awaitCompiledPrograms(
+        Math.min(COMPILED_PROGRAMS_TIMEOUT_MS, remaining()),
+      );
+      if (targetChanged()) return { ready: false, targetChanged: true };
+      this._setStage('shaders', 1);
 
-    this._setStage('finalize', 0.2);
-    const inputsOk = await this._awaitValidFrameInputs(
-      Math.min(FRAME_INPUTS_TIMEOUT_MS, remaining()),
-    );
-    if (targetChanged()) return { ready: false, targetChanged: true };
-    await this._awaitRenderFrames(2);
-    this._setStage('finalize', 1);
+      this._setStage('finalize', 0.2);
+      const inputsOk = await this._awaitValidFrameInputs(
+        Math.min(FRAME_INPUTS_TIMEOUT_MS, remaining()),
+      );
+      if (targetChanged()) return { ready: false, targetChanged: true };
+      await this._awaitRenderFrames(2);
+      this._setStage('finalize', 1);
+
+      if (targetChanged()) return { ready: false, targetChanged: true };
+
+      if (performance.now() >= deadline) {
+        log.warn('Hard cap reached during _waitForLevelReady — forcing fade-in', {
+          elapsedMs: Math.round(performance.now() - pipelineStartMs),
+          target,
+        });
+      } else {
+        log.debug('Level ready', {
+          target,
+          elapsedMs: Math.round(performance.now() - pipelineStartMs),
+          canvasReadyObserved: canvasOk,
+          contextMatched: contextOk,
+          compiledPrograms: programsOk,
+          validFrameInputs: inputsOk,
+        });
+      }
+
+      return { ready: true, targetChanged: false };
+    }
 
     if (targetChanged()) return { ready: false, targetChanged: true };
 
@@ -646,17 +685,38 @@ export class LevelTransitionCurtain {
         target,
       });
     } else {
-      log.debug('Level ready', {
+      log.debug('Level ready (warm gate short-circuit)', {
         target,
         elapsedMs: Math.round(performance.now() - pipelineStartMs),
         canvasReadyObserved: canvasOk,
         contextMatched: contextOk,
-        compiledPrograms: programsOk,
-        validFrameInputs: inputsOk,
       });
     }
 
     return { ready: true, targetChanged: false };
+  }
+
+  /**
+   * True when the experiment flag is on and the just-finished mask rebuild was a
+   * warm band revisit with settled compositor state (no art/mask repopulate).
+   * @returns {boolean}
+   * @private
+   */
+  _canShortCircuitWarmCurtainGates() {
+    if (!shouldShortCircuitCurtainWarmGates()) return false;
+
+    const ctx = window.MapShine?.__levelMaskRebuildContext;
+    if (!ctx?.warmBandRevisit || ctx.pathChanged) return false;
+    if (ctx.needsEffectRepopulate || ctx.masksRecomposed) return false;
+
+    const fc = window.MapShine?.floorCompositorV2
+      ?? window.MapShine?.effectComposer?._floorCompositorV2
+      ?? null;
+    if (!(fc?._populateComplete === true && fc?._busPopulated !== false)) {
+      return false;
+    }
+
+    return true;
   }
 
   /**

@@ -36,6 +36,9 @@ export class SnowGeometry {
         uSceneDarkness: { value: 0.0 },
         uRoofMap: { value: null },
         uRoofMaskEnabled: { value: 0.0 },
+        tPaintedShadowLit: { value: null },
+        uHasPaintedShadowLit: { value: 0.0 },
+        uPaintedShadowOpacity: { value: 1.0 },
         uSpawnDensity: { value: 0.0 }
       },
       vertexShader: `
@@ -46,6 +49,9 @@ export class SnowGeometry {
         uniform float uSpawnDensity;
         uniform sampler2D uRoofMap;
         uniform float uRoofMaskEnabled;
+        uniform sampler2D tPaintedShadowLit;
+        uniform float uHasPaintedShadowLit;
+        uniform float uPaintedShadowOpacity;
 
         attribute float instanceIndex;
 
@@ -190,6 +196,14 @@ export class SnowGeometry {
             float roofCover = texture2D(uRoofMap, roofUv).r;
             float isOutdoor = step(0.5, roofCover);
             alpha *= isOutdoor;
+          }
+
+          if (uHasPaintedShadowLit > 0.5) {
+            float u = (currentPos.x - uSceneBounds.x) / uSceneBounds.z;
+            float v = 1.0 - (currentPos.y - uSceneBounds.y) / uSceneBounds.w;
+            vec2 shadowUv = clamp(vec2(u, v), 0.0, 1.0);
+            float paintedLit = clamp(texture2D(tPaintedShadowLit, shadowUv).r, 0.0, 1.0);
+            alpha *= paintedLit;
           }
 
           alpha *= smoothstep(0.0, 0.15, life);
@@ -367,6 +381,28 @@ export class SnowGeometry {
       u.uRoofMaskEnabled.value = 1.0;
     } else {
       u.uRoofMaskEnabled.value = 0.0;
+    }
+
+    try {
+      const fc = window.MapShine?.floorCompositorV2 ?? window.MapShine?.effectComposer?._floorCompositorV2;
+      const ps = fc?._paintedShadowEffect;
+      const snowOn = weatherController?.snowTuning?.paintedShadowMaskEnabled !== false;
+      const debugOff = window.MapShine?.disableWeatherPaintedShadowMask === true;
+      let paintedTex = null;
+      let paintedOpacity = 1.0;
+      if (!debugOff && snowOn && ps?.params?.enabled !== false) {
+        paintedTex = ps.groundOnlyLitTexture ?? ps.shadowFactorTexture ?? null;
+        const po = Number(ps.params?.opacity);
+        if (Number.isFinite(po)) paintedOpacity = Math.max(0, Math.min(1, po));
+        const sm = fc?._shadowManagerEffect;
+        const smo = Number(sm?.params?.paintedOpacity);
+        if (Number.isFinite(smo)) paintedOpacity *= Math.max(0, Math.min(1, smo));
+      }
+      u.tPaintedShadowLit.value = paintedTex;
+      u.uHasPaintedShadowLit.value = paintedTex ? 1.0 : 0.0;
+      u.uPaintedShadowOpacity.value = paintedOpacity;
+    } catch (_) {
+      u.uHasPaintedShadowLit.value = 0.0;
     }
 
     if (bounds) {

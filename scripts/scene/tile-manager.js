@@ -3149,6 +3149,81 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     this._refreshAllTileElevationVisibility();
   }
 
+  /**
+   * Incrementally reconcile tile sprites after a V14 native level redraw.
+   * Removes orphans, creates missing sprites, and refreshes transforms for the
+   * rest without reloading textures. Falls back to {@link syncAllTiles} on error.
+   *
+   * @returns {{ removed: number, created: number, refreshed: number, total: number }|null}
+   * @public
+   */
+  reconcileTilesForLevelRedraw() {
+    if (DISABLE_TILE_UPDATES) {
+      log.warn('TileManager disabled by DISABLE_TILE_UPDATES flag (perf testing).');
+      return null;
+    }
+
+    try {
+      if (!canvas || !canvas.scene || !canvas.scene.tiles) {
+        log.warn('reconcileTilesForLevelRedraw: canvas or scene tiles not available — falling back to syncAllTiles');
+        this.syncAllTiles();
+        return null;
+      }
+
+      const tiles = canvas.scene.tiles;
+      const sceneIds = new Set();
+      for (const tileDoc of tiles) {
+        const tileId = tileDoc?.id;
+        if (tileId) sceneIds.add(tileId);
+      }
+
+      let removed = 0;
+      for (const spriteId of [...this.tileSprites.keys()]) {
+        if (!sceneIds.has(spriteId)) {
+          this.removeTileSprite(spriteId);
+          removed++;
+        }
+      }
+
+      let created = 0;
+      let refreshed = 0;
+      for (const tileDoc of tiles) {
+        const tileId = tileDoc?.id;
+        if (!tileId) continue;
+
+        const spriteData = this.tileSprites.get(tileId);
+        if (!spriteData?.sprite) {
+          this.createTileSprite(tileDoc);
+          created++;
+          continue;
+        }
+
+        spriteData.tileDoc = tileDoc;
+        this.updateSpriteTransform(spriteData.sprite, tileDoc);
+        refreshed++;
+      }
+
+      this._refreshAllTileElevationVisibility();
+
+      const stats = {
+        removed,
+        created,
+        refreshed,
+        total: tiles.size,
+      };
+      log.info('reconcileTilesForLevelRedraw', stats);
+      return stats;
+    } catch (err) {
+      log.warn('reconcileTilesForLevelRedraw failed — falling back to syncAllTiles', err);
+      try {
+        this.syncAllTiles();
+      } catch (fallbackErr) {
+        log.error('syncAllTiles fallback after reconcile failure also failed', fallbackErr);
+      }
+      return null;
+    }
+  }
+
   _notifyInitialLoadWaiters() {
     if (!this._initialLoad?.waiters?.length) return;
 

@@ -13,6 +13,7 @@ import { createDefaultLoadingHints } from '../ui/loading-screen/loading-hints.js
 import { LightingDirector } from '../core/LightingDirector.js';
 import { GraphicsSettingsMenuApp } from '../ui/graphics-settings-menu-app.js';
 import { NativeRenderingSettingsMenuApp } from '../ui/native-rendering-settings-menu-app.js';
+import { SKIP_PARTICLE_CHANNEL_PACK_SETTING, SKIP_CURTAIN_WARM_GATES_SETTING, INCREMENTAL_TILE_RESYNC_SETTING } from '../core/texture-overhaul-flags.js';
 
 const log = createLogger('Settings');
 
@@ -1024,6 +1025,44 @@ export function registerSettings() {
     config: false,
     type: Boolean,
     default: false
+  });
+
+  // Tier-1 VRAM experiment: skip the unused particlePack full-scene RT composite.
+  // Default off = legacy behavior. Toggle live via MapShine.textureOverhaul.skipParticleChannelPack(true).
+  game.settings.register(FLAG_NAMESPACE, SKIP_PARTICLE_CHANNEL_PACK_SETTING, {
+    name: 'Skip particle mask pack (VRAM experiment)',
+    hint: 'Stops building the unused particlePack scene render target during mask composition. Test one change at a time; revert if floor switches or effects regress. Console: MapShine.textureOverhaul.help()',
+    scope: 'client',
+    config: true,
+    type: Boolean,
+    default: false,
+    onChange: (enabled) => {
+      if (!enabled) return;
+      try {
+        const comp = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+        comp?.evictAllParticleChannelPacks?.();
+      } catch (_) {}
+    },
+  });
+
+  // Tier-2 floor-switch experiment: skip curtain shader gates on warm band revisits.
+  game.settings.register(FLAG_NAMESPACE, SKIP_CURTAIN_WARM_GATES_SETTING, {
+    name: 'Skip curtain warm gates (floor-switch experiment)',
+    hint: 'On warm floor revisits (cached masks, no art change), skip shader/program stability waits before fade-in. Cold first visits keep full gating. Console: MapShine.textureOverhaul.skipCurtainWarmGates(true)',
+    scope: 'client',
+    config: true,
+    type: Boolean,
+    default: false,
+  });
+
+  // E1 floor-switch experiment: incremental tile reconcile on native level redraw.
+  game.settings.register(FLAG_NAMESPACE, INCREMENTAL_TILE_RESYNC_SETTING, {
+    name: 'Incremental tile resync on level change (experiment)',
+    hint: 'On V14 same-scene level redraw, refresh existing tile sprites in place instead of dispose-all + recreate-all. Cold scene load is unchanged. Console: MapShine.textureOverhaul.incrementalTileResync(true)',
+    scope: 'client',
+    config: true,
+    type: Boolean,
+    default: false,
   });
 
   game.settings.register('map-shine-advanced', 'fogPersistenceMaxDim', {

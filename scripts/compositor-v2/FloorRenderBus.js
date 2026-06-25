@@ -249,6 +249,7 @@ function isForegroundStreamingBusTileKey(key) {
 
 const MAX_SORT_WITHIN_FLOOR_GROUP = MAX_INTRA_ROLE_OFFSET;
 const UPPER_FLOOR_ALPHA_CUTOFF = 0.4;
+const EMPTY_RADIAL_CIRCLES = [];
 
 /**
  * Strip query/hash for stable asset URL comparison (Foundry / CDN may append tokens).
@@ -357,6 +358,8 @@ export class FloorRenderBus {
 
     /** @type {Map<string, number>} Stale-async guard for live tile streaming sync. */
     this._tileStreamingGen = new Map();
+    /** @type {number} Throttles full-tile streaming maintenance sweeps. */
+    this._streamingMaintenanceFrame = 0;
 
     /** @type {import('three').Color|null} Reused by render paths (avoids per-call GC). */
     this._clearColorScratch = null;
@@ -406,6 +409,35 @@ export class FloorRenderBus {
     }
     map.clear();
     return map;
+  }
+
+  /**
+   * Cache bus-key classifications on the entry so hot render paths don't repeat
+   * string/regex work every frame.
+   *
+   * @private
+   * @param {string} key
+   * @param {object} entry
+   * @returns {object}
+   */
+  _classifyTileEntry(key, entry) {
+    if (!entry) return entry;
+    const id = String(key || '');
+    entry.id = id;
+    entry.isInternal = id.startsWith('__');
+    entry.isSolidBg = id === '__bg_solid__';
+    entry.isVegetation = id.endsWith('_bush')
+      || id.endsWith('_bush_shadow')
+      || id.endsWith('_tree')
+      || id.endsWith('_tree_shadow');
+    entry.isSpecularOverlay = id.endsWith('_specular');
+    entry.isSplash = id.startsWith('ms_water_splash_batch_');
+    entry.isLegacyStackedOverlay = id.startsWith('ms_fire_batch_')
+      || id.startsWith('ms_fire_coal_bed_');
+    entry.isBgImage = isLevelStackImageBusRenderKey(id);
+    entry.isBgImageOverlay = isBackgroundImageEffectOverlayBusKey(id);
+    entry.isBgPreBusEffectOverlay = isBackgroundPreBusEffectOverlayBusKey(id);
+    return entry;
   }
 
   /**
@@ -460,8 +492,9 @@ export class FloorRenderBus {
     const fi = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
     mesh.userData = mesh.userData || {};
     mesh.userData.floorIndex = fi;
-    this._tiles.set(key, { mesh, material, floorIndex: fi });
-    mesh.visible = this._computeEntryVisibleForSlice(key, { floorIndex: fi });
+    const entry = this._classifyTileEntry(key, { mesh, material, floorIndex: fi });
+    this._tiles.set(key, entry);
+    mesh.visible = this._computeEntryVisibleForSlice(key, entry);
   }
 
   /**
@@ -539,8 +572,9 @@ export class FloorRenderBus {
    * foreground pyramid registered with the same source dimensions).
    */
   recoverWronglyBackgroundStreamServedTiles() {
-    for (const [tileId, entry] of this._tiles) {
+    for (const entry of this._tiles.values()) {
       if (!entry?.mapShineBackgroundStreamServed) continue;
+      const tileId = entry.id;
       if (this._isOverheadBandBusEntry(entry, tileId)) continue;
       void this._evaluateTileStreaming(tileId, entry, Number(entry.floorIndex) || 0);
     }
@@ -554,13 +588,17 @@ export class FloorRenderBus {
       const sc = window.MapShine?.sceneComposer ?? null;
       const fd = sc?.foundrySceneData ?? null;
       if (sc && fd) this.tryMountViewedBackgroundFromComposer(sc, fd);
-      for (const [tileId, entry] of this._tiles) {
+      for (const entry of this._tiles.values()) {
         if (!entry?.mapShineBackgroundStreamServed) continue;
+        const tileId = entry.id;
         if (!this._isOverheadBandBusEntry(entry, tileId)) continue;
         void this._evaluateTileStreaming(tileId, entry, Number(entry.floorIndex) || 0);
       }
-      this._recoverStuckOverheadBandTiles();
-      this._migrateOverheadStaticAlbedoToStreaming();
+      const runMaintenanceSweep = (this._streamingMaintenanceFrame++ % 15) === 0;
+      if (runMaintenanceSweep) {
+        this._recoverStuckOverheadBandTiles();
+        this._migrateOverheadStaticAlbedoToStreaming();
+      }
       this._maybeEnsureForegroundStackLoaded();
       getTileStreamingManager().update();
       this._applyTileVisibility();
@@ -649,8 +687,9 @@ export class FloorRenderBus {
    */
   _recoverStuckOverheadBandTiles() {
     const manager = getTileStreamingManager();
-    for (const [tileId, entry] of this._tiles) {
-      if (String(tileId).startsWith('__')) continue;
+    for (const entry of this._tiles.values()) {
+      if (entry?.isInternal) continue;
+      const tileId = entry.id;
       if (!this._isOverheadBandBusEntry(entry, tileId)) continue;
       if (entry.material?.map) continue;
       if (this._busTileHasStreamingCells(tileId)) continue;
@@ -687,8 +726,9 @@ export class FloorRenderBus {
    */
   _migrateOverheadStaticAlbedoToStreaming() {
     const manager = getTileStreamingManager();
-    for (const [tileId, entry] of this._tiles) {
-      if (String(tileId).startsWith('__')) continue;
+    for (const entry of this._tiles.values()) {
+      if (entry?.isInternal) continue;
+      const tileId = entry.id;
       if (!this._isOverheadBandBusEntry(entry, tileId)) continue;
       if (entry.mapShineStreamedRegion || manager.hasBusTile(tileId) || this._busTileHasStreamingCells(tileId)) {
         continue;
@@ -1071,14 +1111,14 @@ export class FloorRenderBus {
     this._lastRenderToAtMs = Date.now();
     const preRenderLeakKeys = [];
     let preRenderLeakCount = 0;
-    for (const [tileId, entry] of this._tiles) {
-      if (String(tileId).startsWith('__')) continue;
+    for (const entry of this._tiles.values()) {
+      if (entry?.isInternal) continue;
       const fi = Number(entry?.floorIndex);
       if (!Number.isFinite(fi) || fi <= this._visibleMaxFloorIndex) continue;
       const node = entry?.root || entry?.mesh;
       if (node?.visible === true) {
         preRenderLeakCount += 1;
-        if (preRenderLeakKeys.length < 40) preRenderLeakKeys.push(String(tileId));
+        if (preRenderLeakKeys.length < 40) preRenderLeakKeys.push(entry.id);
       }
     }
     this._lastPreRenderLeakCount = preRenderLeakCount;
@@ -1100,12 +1140,11 @@ export class FloorRenderBus {
       camera.layers.enable(i);
     }
 
-    const savedSplashVisibility = this._borrowVisibilityMap('splash');
-    for (const [tileId, entry] of this._tiles) {
-      if (!String(tileId).startsWith('ms_water_splash_batch_')) continue;
+    for (const entry of this._tiles.values()) {
+      if (!entry?.isSplash) continue;
       const node = entry?.root || entry?.mesh;
       if (!node) continue;
-      savedSplashVisibility.set(tileId, node.visible === true);
+      entry._savedSplashVisible = node.visible === true;
       node.visible = false;
     }
 
@@ -1115,10 +1154,11 @@ export class FloorRenderBus {
     renderer.autoClear = true;
     renderer.render(this._scene, camera);
 
-    for (const [tileId, wasVisible] of savedSplashVisibility) {
-      const entry = this._tiles.get(tileId);
+    for (const entry of this._tiles.values()) {
+      if (!entry?.isSplash || entry._savedSplashVisible === undefined) continue;
       const node = entry?.root || entry?.mesh;
-      if (node) node.visible = wasVisible;
+      if (node) node.visible = entry._savedSplashVisible;
+      entry._savedSplashVisible = undefined;
     }
 
     // Restore camera layer mask and renderer state.
@@ -1281,8 +1321,8 @@ export class FloorRenderBus {
     const maxV = Number.isFinite(Number(this._visibleMaxFloorIndex))
       ? Number(this._visibleMaxFloorIndex)
       : Infinity;
-    for (const [tileId, entry] of this._tiles) {
-      if (String(tileId).startsWith('__')) continue;
+    for (const entry of this._tiles.values()) {
+      if (entry?.isInternal) continue;
       if (!entry?.roofShadowCaster) continue;
       if (!(entry.floorIndex > maxV)) continue;
       const node = entry.root || entry.mesh;
@@ -1314,34 +1354,28 @@ export class FloorRenderBus {
     let preApplyLeakCount = 0;
     const preApplyLeakKeys = [];
 
-    for (const [tileId, entry] of this._tiles) {
+    for (const entry of this._tiles.values()) {
       const node = entry?.root || entry?.mesh;
       if (!node) continue;
 
       // World-spanning solid underlay only — level backgrounds respect floor slice.
-      if (tileId === '__bg_solid__') {
+      if (entry.isSolidBg) {
         node.visible = true;
         continue;
       }
 
       // Tree/Bush/Specular V2 overlays manage floor + view + streaming visibility in the effect.
-      if (
-        tileId.endsWith('_bush')
-        || tileId.endsWith('_bush_shadow')
-        || tileId.endsWith('_tree')
-        || tileId.endsWith('_tree_shadow')
-        || tileId.endsWith('_specular')
-      ) {
+      if (entry.isVegetation || entry.isSpecularOverlay) {
         continue;
       }
 
       const inVisibleFloorSlice = entry.floorIndex <= this._visibleMaxFloorIndex;
-      const floorVisible = this._computeEntryVisibleForSlice(tileId, entry);
+      const floorVisible = this._computeEntryVisibleForSlice(entry.id, entry);
       const streamingManaged = node.userData?.mapShineStreaming === true;
 
-      if (!tileId.startsWith('__') && !inVisibleFloorSlice && node.visible === true) {
+      if (!entry.isInternal && !inVisibleFloorSlice && node.visible === true) {
         preApplyLeakCount += 1;
-        if (preApplyLeakKeys.length < 40) preApplyLeakKeys.push(String(tileId));
+        if (preApplyLeakKeys.length < 40) preApplyLeakKeys.push(entry.id);
       }
 
       if (streamingManaged) {
@@ -1514,16 +1548,15 @@ export class FloorRenderBus {
     } catch (_) {
     }
 
-    for (const [tileId, entry] of this._tiles) {
+    for (const entry of this._tiles.values()) {
       if (!entry?.material) continue;
       // Skip internal background/effect entries.
-      if (tileId.startsWith('__')) continue;
+      if (entry.isInternal) continue;
       // Tree/Bush/Specular V2 shaders manage their own opacity / visibility; do not mirror
       // PIXI sprite opacity onto additive overlay ShaderMaterials.
-      if (tileId.endsWith('_tree') || tileId.endsWith('_bush')
-        || tileId.endsWith('_tree_shadow') || tileId.endsWith('_bush_shadow')
-        || tileId.endsWith('_specular')) continue;
+      if (entry.isVegetation || entry.isSpecularOverlay) continue;
 
+      const tileId = entry.id;
       const sourceTileId = entry.attachedToTileId || tileId;
       const data = tileManager.getTileSpriteData(sourceTileId);
       const spriteOpacity = Number(data?.sprite?.material?.opacity);
@@ -1584,7 +1617,7 @@ export class FloorRenderBus {
       if (tileDocForRadial && wantsFoundryMask) {
         installBusMeshRadialOcclusionShader(entry.material);
         const busSh = entry.material?.userData?._msBusRadialOcclusionShader;
-        const circles = Array.isArray(data?._msRadialCircles) ? data._msRadialCircles : [];
+        const circles = Array.isArray(data?._msRadialCircles) ? data._msRadialCircles : EMPTY_RADIAL_CIRCLES;
         applyRadialOcclusionUniformsToShader(busSh, tileDocForRadial, circles, radialOn);
         applyFoundryOcclusionMaskBusUniforms(busSh, tileDocForRadial, occBridge, true);
       } else {
@@ -1593,7 +1626,7 @@ export class FloorRenderBus {
         if (busSh) {
           const d = tileDocForRadial || doc;
           if (d) {
-            applyRadialOcclusionUniformsToShader(busSh, d, [], false);
+            applyRadialOcclusionUniformsToShader(busSh, d, EMPTY_RADIAL_CIRCLES, false);
             applyFoundryOcclusionMaskBusUniforms(busSh, d, occBridge, false);
           } else {
             applyFoundryOcclusionMaskBusUniforms(busSh, null, occBridge, false);
@@ -1736,6 +1769,7 @@ export class FloorRenderBus {
     entry.floorIndex = floorIndex;
     const prevSrc = entry.textureSrc || '';
     entry.textureSrc = src;
+    this._classifyTileEntry(tileId, entry);
     this._tiles.set(tileId, entry);
 
     // IMPORTANT: upserts can happen after setVisibleFloors() (live edits, hooks).
@@ -1952,12 +1986,12 @@ export class FloorRenderBus {
     const tileManager = window.MapShine?.tileManager;
     if (!tileManager || typeof tileManager.getTileSpriteData !== 'function') return;
 
-    for (const [tileId, entry] of this._tiles) {
+    for (const entry of this._tiles.values()) {
       if (!entry?.material) continue;
-      if (tileId.startsWith('__')) continue;
-      if (tileId.endsWith('_tree') || tileId.endsWith('_bush')
-        || tileId.endsWith('_tree_shadow') || tileId.endsWith('_bush_shadow')) continue;
+      if (entry.isInternal) continue;
+      if (entry.isVegetation) continue;
 
+      const tileId = entry.id;
       const sourceTileId = entry.attachedToTileId || tileId;
       const data = tileManager.getTileSpriteData(sourceTileId);
       const staticAlphaRaw = Number(data?.tileDoc?.alpha);
@@ -2118,162 +2152,158 @@ export class FloorRenderBus {
       ? excludeTileIdsRaw
       : (Array.isArray(excludeTileIdsRaw) ? new Set(excludeTileIdsRaw) : null);
 
-    // Save each tile's current visibility so we can restore it after.
-    const savedVisibility = this._borrowVisibilityMap('tile');
-    const savedMaterialState = this._borrowVisibilityMap('material');
-    const savedDoorMaskVisibility = this._borrowVisibilityMap('doorMask');
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
     const prevClear = this._saveRendererClearState(renderer);
     const prevLayerMask = camera.layers.mask;
 
     try {
-    for (const [tileId, entry] of this._tiles) {
-      const node = entry?.root || entry?.mesh;
-      if (!node) continue;
-      savedVisibility.set(tileId, node.visible);
+      for (const entry of this._tiles.values()) {
+        const node = entry?.root || entry?.mesh;
+        if (!node) continue;
+        const tileId = entry.id;
+        entry._savedVisible = node.visible;
 
-      // Background planes are optional contributors. Internal effect overlays
-      // (`__*`, except `__bg_image__*` when includeBackground=true) stay hidden.
-      if (excludeTileIds?.has(tileId)) {
-        node.visible = false;
-        continue;
-      }
-
-      if (tileId.startsWith('__')) {
-        const isBgImage = isLevelStackImageBusRenderKey(tileId);
-        if (!isBgImage || !includeBackground) {
+        // Background planes are optional contributors. Internal effect overlays
+        // (`__*`, except `__bg_image__*` when includeBackground=true) stay hidden.
+        if (excludeTileIds?.has(tileId)) {
           node.visible = false;
           continue;
         }
+
+        if (entry.isInternal) {
+          if (!entry.isBgImage || !includeBackground) {
+            node.visible = false;
+            continue;
+          }
+          const mat = entry.material;
+          const hasMap = !!mat?.map;
+          const isBelowFloor = entry.floorIndex < minFloorIndex;
+          const isAboveFloor = entry.floorIndex > maxFloorIndex;
+          if (isBelowFloor || isAboveFloor || !hasMap) {
+            node.visible = false;
+            continue;
+          }
+          node.visible = true;
+          const st = entry._maskSavedState || (entry._maskSavedState = {});
+          st.active = true;
+          st.transparent = mat.transparent;
+          st.opacity = mat.opacity;
+          st.colorHex = mat.color ? mat.color.getHex() : null;
+          st.map = mat.map;
+          st.depthTest = mat.depthTest;
+          st.depthWrite = mat.depthWrite;
+          st.blending = mat.blending;
+          if (mat.color) mat.color.set(1, 1, 1);
+          // Occluder pass should encode pure authored texture alpha, unaffected
+          // by runtime fading/opacity state from the main render path.
+          mat.opacity = 1;
+          mat.transparent = true;
+          mat.depthTest = false;
+          mat.depthWrite = false;
+          mat.blending = THREE.NormalBlending;
+          mat.needsUpdate = true;
+          continue;
+        }
+
+        // Only tiles AT or ABOVE minFloorIndex should contribute to the occluder.
+        // This mask is used to suppress ground-floor water under the currently
+        // viewed floor (upper-floor) geometry. Including lower floors here would
+        // make the occluder alpha become 1 everywhere (because floor 0 typically
+        // covers the entire map), which would incorrectly suppress ALL water.
+
         const mat = entry.material;
         const hasMap = !!mat?.map;
         const isBelowFloor = entry.floorIndex < minFloorIndex;
         const isAboveFloor = entry.floorIndex > maxFloorIndex;
-        if (isBelowFloor || isAboveFloor || !hasMap) {
-          node.visible = false;
-          continue;
+        let includeAsOccluder;
+        if (sourceFloorDeckMask) {
+          if (isBelowFloor || isAboveFloor || !hasMap) {
+            node.visible = false;
+            continue;
+          }
+          const wasVisibleDeck = entry._savedVisible === true;
+          if (!wasVisibleDeck) {
+            node.visible = false;
+            continue;
+          }
+          includeAsOccluder = true;
+        } else if (splashOccluderTilesOnly) {
+          includeAsOccluder = this._tileQualifiesAsSplashScreenOccluder(entry);
+        } else if (roofLayerOnly || (overheadTilesOnly && !roofCastersOnly)) {
+          includeAsOccluder = this._tileQualifiesAsWaterOverhead(entry);
+        } else if (roofCastersOnly) {
+          includeAsOccluder = !!entry.roofShadowCaster
+            || (overheadTilesOnly && this._tileQualifiesAsWaterOverhead(entry));
+        } else {
+          includeAsOccluder = true;
         }
-        node.visible = true;
-        savedMaterialState.set(tileId, {
-          transparent: mat.transparent,
-          opacity: mat.opacity,
-          color: mat.color ? mat.color.clone() : null,
-          map: mat.map,
-          depthTest: mat.depthTest,
-          depthWrite: mat.depthWrite,
-          blending: mat.blending,
-        });
-        if (mat.color) mat.color.set(1, 1, 1);
-        // Occluder pass should encode pure authored texture alpha, unaffected
-        // by runtime fading/opacity state from the main render path.
-        mat.opacity = 1;
-        mat.transparent = true;
-        mat.depthTest = false;
-        mat.depthWrite = false;
-        mat.blending = THREE.NormalBlending;
-        mat.needsUpdate = true;
-        continue;
+        const forceThisFloor = hasForceRevealFloor && entry.floorIndex === forceRevealFloor;
+
+        if (backgroundOnly || isBelowFloor || isAboveFloor || !includeAsOccluder) {
+          // Below minFloorIndex: do not render into the occluder mask.
+          node.visible = false;
+        } else {
+          // At or above minFloorIndex: skip tiles without textures (avoid opaque black).
+          if (!hasMap) {
+            node.visible = false;
+            continue;
+          }
+          // Respect the node's current visibility by default. Optionally reveal
+          // tiles hidden ONLY by floor slicing so above-floor geometry can still
+          // contribute to cross-floor occlusion masks.
+          const wasVisible = entry._savedVisible === true;
+          const hiddenByFloorSlice = entry.floorIndex > this._visibleMaxFloorIndex;
+          const forceRevealForMask = includeHiddenAboveFloors && hiddenByFloorSlice;
+          node.visible = forceThisFloor || wasVisible || forceRevealForMask;
+          if (!node.visible) continue;
+          // Render with real texture alpha so transparent areas are genuine openings.
+          const st = entry._maskSavedState || (entry._maskSavedState = {});
+          st.active = true;
+          st.transparent = mat.transparent;
+          st.opacity = mat.opacity;
+          st.colorHex = mat.color ? mat.color.getHex() : null;
+          st.map = mat.map;
+          st.depthTest = mat.depthTest;
+          st.depthWrite = mat.depthWrite;
+          st.blending = mat.blending;
+          if (mat.color) mat.color.set(1, 1, 1);
+          // Occluder pass should encode pure authored texture alpha, unaffected
+          // by runtime fading/opacity state from the main render path.
+          mat.opacity = 1;
+          mat.transparent = true;
+          mat.depthTest = false;
+          mat.depthWrite = false;
+          mat.blending = THREE.NormalBlending;
+          mat.needsUpdate = true;
+        }
       }
 
-      // Only tiles AT or ABOVE minFloorIndex should contribute to the occluder.
-      // This mask is used to suppress ground-floor water under the currently
-      // viewed floor (upper-floor) geometry. Including lower floors here would
-      // make the occluder alpha become 1 everywhere (because floor 0 typically
-      // covers the entire map), which would incorrectly suppress ALL water.
-
-      const mat = entry.material;
-      const hasMap = !!mat?.map;
-      const isBelowFloor = entry.floorIndex < minFloorIndex;
-      const isAboveFloor = entry.floorIndex > maxFloorIndex;
-      let includeAsOccluder;
-      if (sourceFloorDeckMask) {
-        if (isBelowFloor || isAboveFloor || !hasMap) {
-          node.visible = false;
-          continue;
-        }
-        const wasVisibleDeck = savedVisibility.get(tileId) === true;
-        if (!wasVisibleDeck) {
-          node.visible = false;
-          continue;
-        }
-        includeAsOccluder = true;
-      } else if (splashOccluderTilesOnly) {
-        includeAsOccluder = this._tileQualifiesAsSplashScreenOccluder(entry);
-      } else if (roofLayerOnly || (overheadTilesOnly && !roofCastersOnly)) {
-        includeAsOccluder = this._tileQualifiesAsWaterOverhead(entry);
-      } else if (roofCastersOnly) {
-        includeAsOccluder = !!entry.roofShadowCaster
-          || (overheadTilesOnly && this._tileQualifiesAsWaterOverhead(entry));
-      } else {
-        includeAsOccluder = true;
+      for (const ch of this._scene?.children ?? []) {
+        if (ch?.userData?.type !== 'doorMesh') continue;
+        ch._msBusSavedMaskVisible = ch.visible === true;
+        ch.visible = false;
       }
-      const forceThisFloor = hasForceRevealFloor && entry.floorIndex === forceRevealFloor;
 
-      if (backgroundOnly || isBelowFloor || isAboveFloor || !includeAsOccluder) {
-        // Below minFloorIndex: do not render into the occluder mask.
-        node.visible = false;
-      } else {
-        // At or above minFloorIndex: skip tiles without textures (avoid opaque black).
-        if (!hasMap) {
-          node.visible = false;
-          continue;
-        }
-        // Respect the node's current visibility by default. Optionally reveal
-        // tiles hidden ONLY by floor slicing so above-floor geometry can still
-        // contribute to cross-floor occlusion masks.
-        const wasVisible = savedVisibility.get(tileId) === true;
-        const hiddenByFloorSlice = entry.floorIndex > this._visibleMaxFloorIndex;
-        const forceRevealForMask = includeHiddenAboveFloors && hiddenByFloorSlice;
-        node.visible = forceThisFloor || wasVisible || forceRevealForMask;
-        if (!node.visible) continue;
-        // Render with real texture alpha so transparent areas are genuine openings.
-        savedMaterialState.set(tileId, {
-          transparent: mat.transparent,
-          opacity: mat.opacity,
-          color: mat.color ? mat.color.clone() : null,
-          map: mat.map,
-          depthTest: mat.depthTest,
-          depthWrite: mat.depthWrite,
-          blending: mat.blending,
-        });
-        if (mat.color) mat.color.set(1, 1, 1);
-        // Occluder pass should encode pure authored texture alpha, unaffected
-        // by runtime fading/opacity state from the main render path.
-        mat.opacity = 1;
-        mat.transparent = true;
-        mat.depthTest = false;
-        mat.depthWrite = false;
-        mat.blending = THREE.NormalBlending;
-        mat.needsUpdate = true;
-      }
-    }
-
-    for (const ch of this._scene?.children ?? []) {
-      if (ch?.userData?.type !== 'doorMesh') continue;
-      savedDoorMaskVisibility.set(ch, ch.visible === true);
-      ch.visible = false;
-    }
-
-    if (roofLayerOnly) {
-      camera.layers.set(ROOF_LAYER);
-      camera.layers.enable(WEATHER_ROOF_LAYER);
-    } else if (preserveCameraLayers && includeRoofCaptureLayers) {
-      camera.layers.enable(ROOF_LAYER);
-      camera.layers.enable(WEATHER_ROOF_LAYER);
-    } else {
-      camera.layers.set(0);
-      if (includeRoofCaptureLayers) {
+      if (roofLayerOnly) {
+        camera.layers.set(ROOF_LAYER);
+        camera.layers.enable(WEATHER_ROOF_LAYER);
+      } else if (preserveCameraLayers && includeRoofCaptureLayers) {
         camera.layers.enable(ROOF_LAYER);
         camera.layers.enable(WEATHER_ROOF_LAYER);
+      } else {
+        camera.layers.set(0);
+        if (includeRoofCaptureLayers) {
+          camera.layers.enable(ROOF_LAYER);
+          camera.layers.enable(WEATHER_ROOF_LAYER);
+        }
       }
-    }
 
-    // Clear to transparent black — alpha=0 means "no upper floor coverage".
-    renderer.setRenderTarget(target);
-    renderer.setClearColor(0x000000, 0);
-    renderer.autoClear = true;
-    renderer.render(this._scene, camera);
+      // Clear to transparent black — alpha=0 means "no upper floor coverage".
+      renderer.setRenderTarget(target);
+      renderer.setClearColor(0x000000, 0);
+      renderer.autoClear = true;
+      renderer.render(this._scene, camera);
     } finally {
       camera.layers.mask = prevLayerMask;
       renderer.autoClear = prevAutoClear;
@@ -2281,22 +2311,26 @@ export class FloorRenderBus {
       this._restoreRendererClearState(renderer, prevClear, 1);
       renderer.setRenderTarget(prevTarget);
 
-      for (const [tileId, wasVisible] of savedVisibility) {
-        const entry = this._tiles.get(tileId);
+      for (const entry of this._tiles.values()) {
         const node = entry?.root || entry?.mesh;
-        if (node) node.visible = wasVisible;
+        if (node && entry._savedVisible !== undefined) node.visible = entry._savedVisible;
+        entry._savedVisible = undefined;
       }
-      for (const [doorNode, wasDoorVis] of savedDoorMaskVisibility) {
-        if (doorNode) doorNode.visible = wasDoorVis;
+      for (const ch of this._scene?.children ?? []) {
+        if (ch?._msBusSavedMaskVisible === undefined) continue;
+        ch.visible = ch._msBusSavedMaskVisible;
+        ch._msBusSavedMaskVisible = undefined;
       }
 
-      for (const [tileId, st] of savedMaterialState) {
-        const entry = this._tiles.get(tileId);
+      for (const entry of this._tiles.values()) {
+        const st = entry?._maskSavedState;
+        if (!st?.active) continue;
         const mat = entry?.material;
+        st.active = false;
         if (!mat) continue;
         mat.transparent = st.transparent;
         mat.opacity = st.opacity;
-        if (st.color && mat.color) mat.color.copy(st.color);
+        if (st.colorHex !== null && mat.color) mat.color.setHex(st.colorHex);
         if ('map' in st) mat.map = st.map;
         mat.depthTest = st.depthTest;
         mat.depthWrite = st.depthWrite;
@@ -2356,14 +2390,14 @@ export class FloorRenderBus {
     //   3. the global tile-albedo editing suppression flag
     // All other "wasVisible" state (user toggles, effect gating, warmups)
     // is a view-slice concern and is faithfully restored after the render.
-    const savedVisibility = this._borrowVisibilityMap('tile');
-    for (const [tileId, entry] of this._tiles) {
+    for (const entry of this._tiles.values()) {
       const node = entry?.root || entry?.mesh;
       if (!node) continue;
-      savedVisibility.set(tileId, node.visible === true);
+      const tileId = entry.id;
+      entry._savedVisible = node.visible === true;
 
-      if (tileId.startsWith('__')) {
-        if (tileId === '__bg_solid__') {
+      if (entry.isInternal) {
+        if (entry.isSolidBg) {
           // Include the opaque world-fill only when floor 0 is in range so
           // upper-floor RTs preserve authored transparency.
           const showSolid = includeBackground
@@ -2371,17 +2405,17 @@ export class FloorRenderBus {
           node.visible = showSolid;
           continue;
         }
-        if (isBackgroundImageEffectOverlayBusKey(tileId)) {
+        if (entry.isBgImageOverlay) {
           node.visible = false;
           continue;
         }
-        if (isBackgroundPreBusEffectOverlayBusKey(tileId)) {
+        if (entry.isBgPreBusEffectOverlay) {
           const fi = Number(entry?.floorIndex);
           const inRange = Number.isFinite(fi) && fi >= minFloorIndex && fi <= maxFloorIndex;
           node.visible = includeBackground && inRange && !this._suppressTileAlbedoForEditing;
           continue;
         }
-        if (!isLevelStackImageBusRenderKey(tileId)) {
+        if (!entry.isBgImage) {
           node.visible = false;
           continue;
         }
@@ -2397,16 +2431,11 @@ export class FloorRenderBus {
       }
 
       // Splashes + vegetation are composited after water/bloom (root-scoped overlay draw).
-      if (String(tileId).startsWith('ms_water_splash_batch_')) {
+      if (entry.isSplash) {
         node.visible = false;
         continue;
       }
-      if (
-        tileId.endsWith('_bush')
-        || tileId.endsWith('_tree')
-        || tileId.endsWith('_bush_shadow')
-        || tileId.endsWith('_tree_shadow')
-      ) {
+      if (entry.isVegetation) {
         node.visible = false;
         continue;
       }
@@ -2416,9 +2445,7 @@ export class FloorRenderBus {
       const fireHint = topVisibleFloorIndexForFire;
       const overlayRole = String(entry?.overlayRole || '');
       const isStackedOverlay = overlayRole === 'stackedFloorEffect';
-      const isLegacyStackedOverlay =
-        String(tileId).startsWith('ms_fire_batch_')
-        || String(tileId).startsWith('ms_fire_coal_bed_');
+      const isLegacyStackedOverlay = entry.isLegacyStackedOverlay;
       let inRange;
       if (
         (isStackedOverlay || isLegacyStackedOverlay)
@@ -2440,10 +2467,9 @@ export class FloorRenderBus {
 
     // Door meshes live on the bus scene but are not in `_tiles`; gate them the
     // same way as tiles so per-level RTs do not paint every door on every slice.
-    const savedDoorVisibility = this._borrowVisibilityMap('door');
     for (const ch of this._scene?.children ?? []) {
       if (ch?.userData?.type !== 'doorMesh') continue;
-      savedDoorVisibility.set(ch, ch.visible === true);
+      ch._msBusSavedVisible = ch.visible === true;
       const fi = Number(ch.userData?.floorIndex);
       const globalDoor = fi === DOOR_FLOOR_INDEX_GLOBAL;
       const inRange = globalDoor
@@ -2451,11 +2477,10 @@ export class FloorRenderBus {
       ch.visible = inRange && !this._suppressTileAlbedoForEditing;
     }
 
-    const savedDrawingVisibility = this._borrowVisibilityMap('drawing');
     for (const ch of this._scene?.children ?? []) {
       if (ch?.userData?.type !== 'sceneDrawingsRoot') continue;
       for (const drawingGroup of ch.children ?? []) {
-        savedDrawingVisibility.set(drawingGroup, drawingGroup.visible === true);
+        drawingGroup._msBusSavedVisible = drawingGroup.visible === true;
         const fi = Number(drawingGroup?.userData?.floorIndex);
         const inRange = !Number.isFinite(fi)
           || (fi >= minFloorIndex && fi <= maxFloorIndex);
@@ -2472,28 +2497,36 @@ export class FloorRenderBus {
     camera.layers.set(0);
     for (let i = 1; i <= 19; i++) camera.layers.enable(i);
 
-    renderer.setRenderTarget(target);
-    renderer.setClearColor(clearColor, clearAlpha);
-    renderer.autoClear = !!clearBeforeRender;
-    renderer.render(this._scene, camera);
+    try {
+      renderer.setRenderTarget(target);
+      renderer.setClearColor(clearColor, clearAlpha);
+      renderer.autoClear = !!clearBeforeRender;
+      renderer.render(this._scene, camera);
+    } finally {
+      // Restore camera and renderer state.
+      camera.layers.mask = prevLayerMask;
+      renderer.autoClear = prevAutoClear;
+      this._restoreRendererClearState(renderer, prevClear, prevAlpha);
+      renderer.setRenderTarget(prevTarget);
 
-    // Restore camera and renderer state.
-    camera.layers.mask = prevLayerMask;
-    renderer.autoClear = prevAutoClear;
-    this._restoreRendererClearState(renderer, prevClear, prevAlpha);
-    renderer.setRenderTarget(prevTarget);
-
-    // Restore original tile visibility.
-    for (const [tileId, wasVisible] of savedVisibility) {
-      const entry = this._tiles.get(tileId);
-      const node = entry?.root || entry?.mesh;
-      if (node) node.visible = wasVisible;
-    }
-    for (const [doorNode, wasDoorVis] of savedDoorVisibility) {
-      if (doorNode) doorNode.visible = wasDoorVis;
-    }
-    for (const [drawingNode, wasDrawingVis] of savedDrawingVisibility) {
-      if (drawingNode) drawingNode.visible = wasDrawingVis;
+      // Restore original tile visibility.
+      for (const entry of this._tiles.values()) {
+        const node = entry?.root || entry?.mesh;
+        if (node && entry._savedVisible !== undefined) node.visible = entry._savedVisible;
+        entry._savedVisible = undefined;
+      }
+      for (const ch of this._scene?.children ?? []) {
+        if (ch?._msBusSavedVisible !== undefined) {
+          ch.visible = ch._msBusSavedVisible;
+          ch._msBusSavedVisible = undefined;
+        }
+        if (ch?.userData?.type !== 'sceneDrawingsRoot') continue;
+        for (const drawingGroup of ch.children ?? []) {
+          if (drawingGroup?._msBusSavedVisible === undefined) continue;
+          drawingGroup.visible = drawingGroup._msBusSavedVisible;
+          drawingGroup._msBusSavedVisible = undefined;
+        }
+      }
     }
   }
 
@@ -2561,6 +2594,7 @@ export class FloorRenderBus {
       attachedToTileId: null,
       overlayRole: String(options?.overlayRole || ''),
     };
+    this._classifyTileEntry(key, entry);
     this._tiles.set(key, entry);
     mesh.visible = this._computeEntryVisibleForSlice(key, entry);
     log.debug(`FloorRenderBus: added effect overlay '${key}' (floor ${floorIndex})`);
@@ -2598,6 +2632,7 @@ export class FloorRenderBus {
       attachedToTileId: tileId,
       overlayRole: String(options?.overlayRole || ''),
     };
+    this._classifyTileEntry(key, entry);
     this._tiles.set(key, entry);
     mesh.visible = this._computeEntryVisibleForSlice(key, entry);
     log.debug(`FloorRenderBus: added tile-attached overlay '${key}' -> ${tileId} (floor ${floorIndex})`);
@@ -3032,7 +3067,7 @@ export class FloorRenderBus {
     mesh.position.set(worldW / 2, worldH / 2, GROUND_Z - 2);
     this._scene.add(mesh);
     // Store in _tiles so clear() disposes it and setVisibleFloors always shows it.
-    this._tiles.set('__bg_solid__', { mesh, material: mat, floorIndex: 0 });
+    this._tiles.set('__bg_solid__', this._classifyTileEntry('__bg_solid__', { mesh, material: mat, floorIndex: 0 }));
     log.debug(`FloorRenderBus: solid bg plane (${worldW}x${worldH}, #${bgColorInt.toString(16)})`);
   }
 
@@ -3094,7 +3129,7 @@ export class FloorRenderBus {
     // Store in _tiles so clear() disposes it and setVisibleFloors always shows it.
     // Preserve stack order as floor index so floor-aware mask passes (water occluder)
     // can include only upper visible background layers.
-    this._tiles.set(key, { mesh, material: mat, floorIndex: bgFloorIndex });
+    this._tiles.set(key, this._classifyTileEntry(key, { mesh, material: mat, floorIndex: bgFloorIndex }));
     this._detachStreamingBackgroundForKey(key);
     log.info(`FloorRenderBus: bg image plane [${key}] (${sceneW}x${sceneH} at ${centerX},${centerY})`);
   }
@@ -3174,12 +3209,12 @@ export class FloorRenderBus {
     mesh.userData.mapShineBusTile = true;
     mesh.userData.floorIndex = fgFloorIndex;
     this._scene.add(mesh);
-    this._tiles.set(key, {
+    this._tiles.set(key, this._classifyTileEntry(key, {
       mesh,
       material: mat,
       floorIndex: fgFloorIndex,
       isOverhead: true,
-    });
+    }));
     log.info(`FloorRenderBus: fg/overhead image plane [${key}] (${sceneW}x${sceneH})`);
   }
 
@@ -3690,7 +3725,7 @@ export class FloorRenderBus {
 
     root.add(mesh);
     this._scene.add(root);
-    this._tiles.set(tileId, {
+    const entry = this._classifyTileEntry(tileId, {
       mesh,
       material: mat,
       floorIndex,
@@ -3701,9 +3736,10 @@ export class FloorRenderBus {
       roofShadowCaster: !!roofShadowCaster,
       cloudShadowBlockerEnabled: !!cloudShadowBlockerEnabled,
     });
+    this._tiles.set(tileId, entry);
 
     // New entries must immediately honor current visible floor slice.
-    root.visible = this._computeEntryVisibleForSlice(tileId, { floorIndex });
+    root.visible = this._computeEntryVisibleForSlice(tileId, entry);
   }
 
   /**

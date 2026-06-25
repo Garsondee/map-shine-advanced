@@ -153,3 +153,17 @@ export function resolveEffectWindParticleDrift() {
   const w = resolveEffectWindWorld();
   return { dirX: w.dirX, dirY: w.dirY, speed01: w.speed01 };
 }
+
+/**
+ * Master animation speed from WaterEffectV2 (waves, foam, splashes share one clock).
+ * @returns {number}
+ */
+export function resolveWaterMasterFlowSpeed() {
+  try {
+    const water = getFloorCompositorV2()?._waterEffect;
+    if (water && typeof water.getMasterFlowSpeed === 'function') {
+      return water.getMasterFlowSpeed();
+    }
+  } catch (_) {}
+  return 1.0;
+}

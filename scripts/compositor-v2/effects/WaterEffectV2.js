@@ -54,7 +54,7 @@ import {
   resolveV14BackgroundFloorIndexForSrc,
 } from '../../foundry/levels-scene-flags.js';
 import { DepthShaderChunks } from '../../effects/DepthShaderChunks.js';
-import { getVertexShader, getFragmentShader, getFragmentShaderSafe } from './water-shader.js';
+import { getVertexShader, getFragmentShader, getFragmentShaderSafe, WATER_SHADER_SOURCE_EPOCH } from './water-shader.js';
 import { resolveEffectWindWorld, windDirFromBearingDeg } from './resolve-effect-wind.js';
 import { safeBuildShaderMaterial } from '../../core/diagnostics/SafeShaderBuilder.js';
 import { getTileBusPlaneSizeAndMirror, getTileVisualCenterFoundryXY } from '../../scene/tile-manager.js';
@@ -178,11 +178,11 @@ export class WaterEffectV2 {
       waveScale: 6.35,
       // Global multiplier on wind-mapped wave speed (see waveSpeedWind* factors).
       waveSpeed: 0.79,
-      waveStrength: 0.2,
+      waveStrength: 0.28,
       waveMotion01: 0.5,
-      distortionStrengthPx: 24,
-      waveWarpLargeStrength: 0,
-      waveWarpSmallStrength: 0.02,
+      distortionStrengthPx: 12,
+      waveWarpLargeStrength: 0.4,
+      waveWarpSmallStrength: 0.3,
       waveWarpMicroStrength: 0.01,
       waveWarpTimeSpeed: 0,
 
@@ -267,6 +267,7 @@ export class WaterEffectV2 {
       advectionDirOffsetDeg: 0,
       advectionSpeed01: 0.15,
       advectionSpeed: 1.5,
+      masterFlowSpeed: 1.0,
 
       // Wind override — compass flow axis independent of scene weather
       windOverrideEnabled: true,
@@ -311,7 +312,7 @@ export class WaterEffectV2 {
       specHighlightsSunAzimuthDeg: 56,
       specHighlightsSunElevationDeg: 68,
       specHighlightsSunIntensity: 200,
-      specHighlightsNormalStrength: 4.9,
+      specHighlightsNormalStrength: 3.5,
       specHighlightsNormalScale: 20,
       specHighlightsRoughnessMin: 0,
       specHighlightsRoughnessMax: 1,
@@ -341,7 +342,7 @@ export class WaterEffectV2 {
       cloudReflectionEnabled: true,
       cloudReflectionStrength: 1,
 
-      // Caustics — dual-layer ridged FBM for underwater light filaments
+      // Caustics — wave-normal Jacobian focus (tracks Gerstner refraction field)
       causticsEnabled: true,
       causticsIntensity: 15.5,
       causticsScale: 174.3,
@@ -658,6 +659,8 @@ export class WaterEffectV2 {
     /** @type {number|null} Last elapsed value used to derive motion dt. */
     this._lastAnimElapsed = null;
     this._shaderTime = 0.0;
+    /** Monotonic animation clock scaled by masterFlowSpeed (feeds uTime). */
+    this._scaledTime = 0.0;
 
     // ── Cached sun direction ─────────────────────────────────────────────
     this._cachedSunAzDeg = null;
@@ -771,7 +774,7 @@ export class WaterEffectV2 {
 
     try {
       const fragSrc = this._getSafeWaterShader();
-      const defines = this._pendingDefines || {};
+      const defines = { WATER_SHADER_SOURCE_EPOCH, ...(this._pendingDefines || {}) };
 
       // Build full uniforms for real shader
       const realUniforms = this._buildUniforms(THREE);
@@ -1084,6 +1087,14 @@ export class WaterEffectV2 {
    * Safe to call before water update() — override params are read immediately.
    * @returns {{ dirX: number, dirY: number, speed01: number }}
    */
+  /**
+   * Global animation speed multiplier for water + dependent splash systems.
+   * @returns {number}
+   */
+  getMasterFlowSpeed() {
+    return Math.max(0.0, Number(this.params?.masterFlowSpeed) ?? 1.0);
+  }
+
   getParticleWindDrift() {
     const p = this.params || {};
     if (p.windOverrideEnabled) {
@@ -1165,16 +1176,24 @@ static getControlSchema() {
             },
             {
               label: 'Wind coupling',
-              advanced: true,
               parameters: [
-                'waveSpeedWindMinFactor', 'waveSpeedWindMaxFactor', 'waveGustSlewRate', 'waveStrengthWindMinFactor',
-                'waveIndoorDampingEnabled', 'waveIndoorDampingStrength', 'waveIndoorMinFactor',
-                'windDirResponsiveness',
-                'waveTriBlendAngleDeg', 'waveTriSideWeight',
-                'advectionDirOffsetDeg', 'advectionSpeed01',
+                'masterFlowSpeed',
+                'advectionSpeed01',
+                'waveGustSlewRate',
+                'advectionDirOffsetDeg',
                 'windOverrideEnabled',
                 'windOverrideBearingDeg',
                 'windOverrideSpeed01'
+              ]
+            },
+            {
+              label: 'Wind coupling (advanced)',
+              advanced: true,
+              parameters: [
+                'waveSpeedWindMinFactor', 'waveSpeedWindMaxFactor', 'waveStrengthWindMinFactor',
+                'waveIndoorDampingEnabled', 'waveIndoorDampingStrength', 'waveIndoorMinFactor',
+                'windDirResponsiveness',
+                'waveTriBlendAngleDeg', 'waveTriSideWeight'
               ]
             },
             {
@@ -1378,10 +1397,15 @@ static getControlSchema() {
               parameters: [
                 'causticsEnabled',
                 'causticsBrightnessMaskEnabled',
-                'causticsIntensity', 'causticsScale', 'causticsSpeed', 'causticsSharpness',
+                'causticsIntensity', 'causticsScale', 'causticsSharpness',
                 'causticsEdgeLo', 'causticsEdgeHi',
                 'causticsBrightnessThreshold', 'causticsBrightnessSoftness', 'causticsBrightnessGamma'
               ]
+            },
+            {
+              label: 'Caustics (advanced)',
+              advanced: true,
+              parameters: ['causticsSpeed']
             },
             {
               label: 'Precipitation distortion',
@@ -1401,7 +1425,7 @@ static getControlSchema() {
 
         tintColor: { type: 'color', default: { r: 0.02, g: 0.18, b: 0.28 }, label: 'Tint Color' },
         tintStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.36, label: 'Tint Strength' },
-        distortionStrengthPx: { type: 'slider', min: 0, max: 24, step: 0.1, default: 24, label: 'Distortion (px)' },
+        distortionStrengthPx: { type: 'slider', min: 0, max: 24, step: 0.1, default: 12, label: 'Distortion (px)' },
         debugView: {
           type: 'dropdown',
           default: 0,
@@ -1426,7 +1450,7 @@ static getControlSchema() {
         waterDepthShadowMinBrightness: { type: 'slider', min: 0.3, max: 1, step: 0.01, default: 0.68, label: 'Min Brightness' },
         microChopIntensity: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.71, label: 'Intensity' },
         microChopScale: { type: 'slider', min: 0.1, max: 3, step: 0.1, default: 1, label: 'Scale' },
-        microChopSpeed: { type: 'slider', min: 0.1, max: 3, step: 0.1, default: 1.7, label: 'Speed' },
+        microChopSpeed: { type: 'slider', min: 0.1, max: 3, step: 0.1, default: 1.7, label: 'Speed', advanced: true },
 
         waveScale: { type: 'slider', min: 0.1, max: 16, step: 0.05, default: 6.35, label: 'Wave Scale' },
         waveSpeed: {
@@ -1438,10 +1462,10 @@ static getControlSchema() {
           label: 'Wave speed scale',
           tooltip: 'Multiplies wind-driven Gerstner phase speed (between calm and gust values below).',
         },
-        waveStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.2, label: 'Wave intensity' },
+        waveStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.28, label: 'Wave intensity' },
         waveMotion01: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Wave Motion Blend' },
-        waveWarpLargeStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0, label: 'Warp Large Strength' },
-        waveWarpSmallStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.02, label: 'Warp Small Strength' },
+        waveWarpLargeStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.4, label: 'Warp Large Strength' },
+        waveWarpSmallStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.3, label: 'Warp Small Strength' },
         waveWarpMicroStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.01, label: 'Warp Micro Strength' },
         waveWarpTimeSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0, label: 'Warp Time Speed' },
         waveBreakupStrength: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.69, label: 'Breakup Strength' },
@@ -1524,7 +1548,16 @@ static getControlSchema() {
         waveTriBlendAngleDeg: { type: 'slider', min: 0, max: 90, step: 1, default: 35, label: 'Tri Blend Angle (deg)' },
         waveTriSideWeight: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.35, label: 'Tri Blend Side Weight' },
         advectionDirOffsetDeg: { type: 'slider', min: -180, max: 180, step: 1, default: 0, label: 'Advection Dir Offset (deg)' },
-        advectionSpeed01: { type: 'slider', min: 0, max: 3, step: 0.01, default: 0.15, label: 'Advection Speed' },
+        advectionSpeed01: { type: 'slider', min: 0, max: 3, step: 0.01, default: 0.15, label: 'Flow Speed' },
+        masterFlowSpeed: {
+          type: 'slider',
+          min: 0,
+          max: 5,
+          step: 0.01,
+          default: 1.0,
+          label: 'Master animation speed',
+          tooltip: 'Scales all water motion in lockstep: waves, foam drift, murk, caustics, advection, and coupled splashes.',
+        },
 
         windOverrideEnabled: {
           type: 'boolean',
@@ -1672,7 +1705,7 @@ static getControlSchema() {
         specHighlightsSunAzimuthDeg: { type: 'slider', min: 0, max: 360, step: 1, default: 56, label: 'Sun Azimuth' },
         specHighlightsSunElevationDeg: { type: 'slider', min: 0, max: 90, step: 1, default: 68, label: 'Sun Elevation' },
         specHighlightsSunIntensity: { type: 'slider', min: 0, max: 200, step: 0.1, default: 200, label: 'Intensity' },
-        specHighlightsNormalStrength: { type: 'slider', min: 0, max: 10, step: 0.1, default: 4.9, label: 'Wave Response' },
+        specHighlightsNormalStrength: { type: 'slider', min: 0, max: 10, step: 0.1, default: 3.5, label: 'Wave Response' },
         specHighlightsNormalScale: { type: 'slider', min: 0.1, max: 20, step: 0.1, default: 20, label: 'Normal Scale' },
         specHighlightsRoughnessMin: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0, label: 'Roughness Min' },
         specHighlightsRoughnessMax: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Roughness Max' },
@@ -1708,10 +1741,10 @@ static getControlSchema() {
 
         causticsEnabled: { type: 'boolean', default: true, label: 'Enabled' },
         causticsBrightnessMaskEnabled: { type: 'boolean', default: true, label: 'Brightness Masking' },
-        causticsIntensity: { type: 'slider', min: 0, max: 20, step: 0.1, default: 15.5, label: 'Intensity' },
-        causticsScale: { type: 'slider', min: 1, max: 200, step: 0.1, default: 174.3, label: 'Scale' },
-        causticsSpeed: { type: 'slider', min: 0, max: 10, step: 0.01, default: 0, label: 'Speed' },
-        causticsSharpness: { type: 'slider', min: 0.01, max: 1, step: 0.01, default: 0.25, label: 'Sharpness' },
+        causticsIntensity: { type: 'slider', min: 0, max: 20, step: 0.1, default: 15.5, label: 'Intensity', tooltip: 'Brightness of wave-driven caustic focus.' },
+        causticsScale: { type: 'slider', min: 1, max: 200, step: 0.1, default: 174.3, label: 'Scale', tooltip: 'Jacobian sensitivity — higher values yield finer, more contrasty caustic detail from wave slopes.' },
+        causticsSpeed: { type: 'slider', min: 0, max: 10, step: 0.01, default: 0, label: 'Speed', advanced: true, tooltip: 'Extra focus gain (waves already animate via wind). Higher values amplify caustic contrast.' },
+        causticsSharpness: { type: 'slider', min: 0.01, max: 1, step: 0.01, default: 0.25, label: 'Sharpness', tooltip: 'Ridge tightness of the wave-derived caustic filaments.' },
         causticsEdgeLo: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0, label: 'Edge Low' },
         causticsEdgeHi: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.01, label: 'Edge High' },
         causticsBrightnessThreshold: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.07, label: 'Brightness Threshold' },
@@ -1752,9 +1785,9 @@ static getControlSchema() {
         shoreFoamNoiseDistortionEnabled: { type: 'boolean', default: true, label: 'Noise Dist Enabled' },
         shoreFoamNoiseDistortionStrength: { type: 'slider', min: 0, max: 5, step: 0.01, default: 1, label: 'Noise Dist Strength' },
         shoreFoamNoiseDistortionScale: { type: 'slider', min: 0.1, max: 20, step: 0.1, default: 2.5, label: 'Noise Dist Scale' },
-        shoreFoamNoiseDistortionSpeed: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.4, label: 'Noise Dist Speed' },
+        shoreFoamNoiseDistortionSpeed: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.4, label: 'Noise Dist Speed', advanced: true },
         shoreFoamEvolutionEnabled: { type: 'boolean', default: true, label: 'Evolution Enabled' },
-        shoreFoamEvolutionSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.2, label: 'Evol Speed' },
+        shoreFoamEvolutionSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.2, label: 'Evol Speed', advanced: true },
         shoreFoamEvolutionAmount: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.5, label: 'Evol Amount' },
         shoreFoamEvolutionScale: { type: 'slider', min: 0.1, max: 10, step: 0.1, default: 2, label: 'Evol Scale' },
         shoreFoamCoreWidth: { type: 'slider', min: 0.01, max: 1, step: 0.01, default: 0.15, label: 'Core Width' },
@@ -1799,9 +1832,9 @@ static getControlSchema() {
         floatingFoamNoiseDistortionEnabled: { type: 'boolean', default: true, label: 'Noise Dist Enabled' },
         floatingFoamNoiseDistortionStrength: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.01, label: 'Noise Dist Strength' },
         floatingFoamNoiseDistortionScale: { type: 'slider', min: 0.1, max: 20, step: 0.1, default: 20, label: 'Noise Dist Scale' },
-        floatingFoamNoiseDistortionSpeed: { type: 'slider', min: 0, max: 5, step: 0.01, default: 5, label: 'Noise Dist Speed' },
+        floatingFoamNoiseDistortionSpeed: { type: 'slider', min: 0, max: 5, step: 0.01, default: 5, label: 'Noise Dist Speed', advanced: true },
         floatingFoamEvolutionEnabled: { type: 'boolean', default: true, label: 'Evolution Enabled' },
-        floatingFoamEvolutionSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 2, label: 'Evol Speed' },
+        floatingFoamEvolutionSpeed: { type: 'slider', min: 0, max: 2, step: 0.01, default: 2, label: 'Evol Speed', advanced: true },
         floatingFoamEvolutionAmount: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.96, label: 'Evol Amount' },
         floatingFoamEvolutionScale: { type: 'slider', min: 0.1, max: 10, step: 0.1, default: 7, label: 'Evol Scale' },
 
@@ -1837,7 +1870,7 @@ static getControlSchema() {
         murkStrengthHi: { type: 'slider', min: 0, max: 1, step: 0.01, default: 1, label: 'Strength High' },
         murkWarpStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.45, label: 'Warp Strength' },
         murkChaos: { type: 'slider', min: 0, max: 1, step: 0.01, default: 0.12, label: 'Chaos' },
-        murkChaosSpeed: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.02, label: 'Chaos Speed' },
+        murkChaosSpeed: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.02, label: 'Chaos Speed', advanced: true },
         murkGrainScale: { type: 'slider', min: 10, max: 6000, step: 10, default: 80, label: 'Grain Scale' },
         murkGrainSpeed: { type: 'slider', min: 0, max: 5, step: 0.01, default: 0.3, label: 'Grain Speed' },
         murkGrainStrength: { type: 'slider', min: 0, max: 2, step: 0.01, default: 0.4, label: 'Grain Strength' },
@@ -1917,7 +1950,7 @@ static getControlSchema() {
     this._noiseTexture = WaterEffectV2._createNoiseTexture(THREE);
 
     // Build initial defines based on default params
-    const defines = {};
+    const defines = { WATER_SHADER_SOURCE_EPOCH };
     if (this.params.foamFlecksEnabled) defines.USE_FOAM_FLECKS = 1;
     if (this.params.refractionMultiTapEnabled) defines.USE_WATER_REFRACTION_MULTITAP = 1;
     if (this.params.shoreFoamEnabled !== false) defines.USE_SHORE_FOAM = 1;
@@ -3090,6 +3123,12 @@ static getControlSchema() {
     }
     this._lastAnimElapsed = elapsed;
 
+    const masterSpeed = this.getMasterFlowSpeed();
+    dt *= masterSpeed;
+    if (!paused) {
+      this._scaledTime += dt;
+    }
+
     // Runtime signature: log once on first update with key Wind & Flow params.
     try {
       if (!this._debugSignatureUpdateLogged) {
@@ -3103,8 +3142,8 @@ static getControlSchema() {
       }
     } catch (_) {}
 
-    // ── Time ──────────────────────────────────────────────────────────────
-    u.uTime.value = elapsed;
+    // ── Time (scaled by masterFlowSpeed for all shader animation domains) ─
+    u.uTime.value = this._scaledTime;
     this._endPerfSpan(_perfToken);
     _perfToken = this._beginPerfSpan('wind');
 
@@ -3383,7 +3422,7 @@ static getControlSchema() {
     u.uWaveSpeed.value = 1.0;
     u.uWaveStrength.value = waveStrength;
     if (u.uWaveMotion01) u.uWaveMotion01.value = gust01;
-    u.uDistortionStrengthPx.value = safeNum(p.distortionStrengthPx, 24.0);
+    u.uDistortionStrengthPx.value = safeNum(p.distortionStrengthPx, 12.0);
 
     // Wave breakup noise (new). If unset, fall back to legacy waveMicroNormal* params.
     const breakupStrength = safeNum(p.waveBreakupStrength, safeNum(p.waveMicroNormalStrength, 0.0));
@@ -3415,8 +3454,8 @@ static getControlSchema() {
     if (u.uWaveMicroNormalDistortionStrength) u.uWaveMicroNormalDistortionStrength.value = safeNum(p.waveMicroNormalDistortionStrength, 0.0) * turbStrengthMul;
     if (u.uWaveMicroNormalSpecularStrength) u.uWaveMicroNormalSpecularStrength.value = safeNum(p.waveMicroNormalSpecularStrength, 0.0) * turbStrengthMul;
 
-    u.uWaveWarpLargeStrength.value = safeNum(p.waveWarpLargeStrength, 0.15);
-    u.uWaveWarpSmallStrength.value = safeNum(p.waveWarpSmallStrength, 0.08);
+    u.uWaveWarpLargeStrength.value = safeNum(p.waveWarpLargeStrength, 0.4);
+    u.uWaveWarpSmallStrength.value = safeNum(p.waveWarpSmallStrength, 0.3);
     u.uWaveWarpMicroStrength.value = safeNum(p.waveWarpMicroStrength, 0.04);
     u.uWaveWarpTimeSpeed.value = safeNum(p.waveWarpTimeSpeed, 0.15);
     u.uWaveEvolutionEnabled.value = p.waveEvolutionEnabled ? 1.0 : 0.0;
@@ -3538,7 +3577,7 @@ static getControlSchema() {
     u.uSpecHighlightsPower.value = safeNum(p.specHighlightsPower, 128.0);
     u.uSpecHighlightsClamp.value = safeNum(p.specHighlightsClamp, 1.2);
     u.uSpecHighlightsSunIntensity.value = safeNum(p.specHighlightsSunIntensity, 8.0);
-    u.uSpecHighlightsNormalStrength.value = safeNum(p.specHighlightsNormalStrength, 6.0);
+    u.uSpecHighlightsNormalStrength.value = safeNum(p.specHighlightsNormalStrength, 3.5);
     u.uSpecHighlightsNormalScale.value = safeNum(p.specHighlightsNormalScale, 12.0);
     u.uSpecHighlightsRoughnessMin.value = safeNum(p.specHighlightsRoughnessMin, 0.0);
     u.uSpecHighlightsRoughnessMax.value = safeNum(p.specHighlightsRoughnessMax, 0.2);
@@ -3598,6 +3637,10 @@ static getControlSchema() {
     this._endPerfSpan(_perfToken);
     _perfToken = this._beginPerfSpan('shoreFoam');
 
+    // Faster advection → faster surface-detail evolution (foam boil, murk churn).
+    const advSpeed01ForFlow = this._resolveAdvectionSpeed01(p);
+    const flowMultiplier = 0.5 + advSpeed01ForFlow * 2.0;
+
     // Shore Foam (Advanced)
     const sceneDarkness = globalThis.canvas?.environment?.darknessLevel ?? 0;
     u.uShoreFoamEnabled.value = (p.shoreFoamEnabled ?? true) ? 1.0 : 0.0;
@@ -3645,9 +3688,9 @@ static getControlSchema() {
     u.uShoreFoamNoiseDistortionEnabled.value = (p.shoreFoamNoiseDistortionEnabled ?? true) ? 1.0 : 0.0;
     u.uShoreFoamNoiseDistortionStrength.value = safeNum(p.shoreFoamNoiseDistortionStrength, 1.0);
     u.uShoreFoamNoiseDistortionScale.value = safeNum(p.shoreFoamNoiseDistortionScale, 2.5);
-    u.uShoreFoamNoiseDistortionSpeed.value = safeNum(p.shoreFoamNoiseDistortionSpeed, 0.4);
+    u.uShoreFoamNoiseDistortionSpeed.value = safeNum(p.shoreFoamNoiseDistortionSpeed, 0.4) * flowMultiplier;
     u.uShoreFoamEvolutionEnabled.value = (p.shoreFoamEvolutionEnabled ?? true) ? 1.0 : 0.0;
-    u.uShoreFoamEvolutionSpeed.value = safeNum(p.shoreFoamEvolutionSpeed, 0.2);
+    u.uShoreFoamEvolutionSpeed.value = safeNum(p.shoreFoamEvolutionSpeed, 0.2) * flowMultiplier;
     u.uShoreFoamEvolutionAmount.value = safeNum(p.shoreFoamEvolutionAmount, 0.5);
     u.uShoreFoamEvolutionScale.value = safeNum(p.shoreFoamEvolutionScale, 2.0);
     u.uShoreFoamCoreWidth.value = safeNum(p.shoreFoamCoreWidth, 0.15);
@@ -3774,9 +3817,9 @@ static getControlSchema() {
     u.uFloatingFoamNoiseDistortionEnabled.value = (p.floatingFoamNoiseDistortionEnabled ?? true) ? 1.0 : 0.0;
     u.uFloatingFoamNoiseDistortionStrength.value = safeNum(p.floatingFoamNoiseDistortionStrength, 0.8);
     u.uFloatingFoamNoiseDistortionScale.value = safeNum(p.floatingFoamNoiseDistortionScale, 2.0);
-    u.uFloatingFoamNoiseDistortionSpeed.value = safeNum(p.floatingFoamNoiseDistortionSpeed, 0.3);
+    u.uFloatingFoamNoiseDistortionSpeed.value = safeNum(p.floatingFoamNoiseDistortionSpeed, 0.3) * flowMultiplier;
     u.uFloatingFoamEvolutionEnabled.value = (p.floatingFoamEvolutionEnabled ?? true) ? 1.0 : 0.0;
-    u.uFloatingFoamEvolutionSpeed.value = safeNum(p.floatingFoamEvolutionSpeed, 0.15);
+    u.uFloatingFoamEvolutionSpeed.value = safeNum(p.floatingFoamEvolutionSpeed, 0.15) * flowMultiplier;
     u.uFloatingFoamEvolutionAmount.value = safeNum(p.floatingFoamEvolutionAmount, 0.6);
     u.uFloatingFoamEvolutionScale.value = safeNum(p.floatingFoamEvolutionScale, 1.5);
     this._endPerfSpan(_perfToken);
@@ -3817,7 +3860,7 @@ static getControlSchema() {
     u.uMurkStrengthHi.value = safeNum(p.murkStrengthHi, 1.0);
     u.uMurkWarpStrength.value = safeNum(p.murkWarpStrength, 0.45);
     u.uMurkChaos.value = safeNum(p.murkChaos, 0.32);
-    u.uMurkChaosSpeed.value = safeNum(p.murkChaosSpeed, 0.9);
+    u.uMurkChaosSpeed.value = safeNum(p.murkChaosSpeed, 0.9) * flowMultiplier;
     u.uMurkGrainScale.value = safeNum(p.murkGrainScale, 2600.0);
     u.uMurkGrainSpeed.value = safeNum(p.murkGrainSpeed, 0.6);
     u.uMurkGrainStrength.value = safeNum(p.murkGrainStrength, 0.8);

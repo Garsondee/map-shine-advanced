@@ -72,6 +72,10 @@ import {
   getEffectCategoryTitle,
 } from './effect-categories.js';
 import {
+  getEffectDisplayTitle,
+  getPanelSectionTitle,
+} from './effect-display-titles.js';
+import {
   applyUiColorScheme,
   DEFAULT_UI_COLOR_SCHEME_ID,
   getUiColorSchemeListOptions,
@@ -1656,7 +1660,7 @@ export class TweakpaneManager {
     if (this._appearanceSectionBuilt) return;
 
     const appearanceFolder = this.pane.addFolder({
-      title: 'Panel Appearance',
+      title: getPanelSectionTitle('panel-appearance', 'Panel Appearance'),
       expanded: this.accordionStates['appearance'] ?? false
     });
     this._appearanceFolder = appearanceFolder;
@@ -1712,7 +1716,7 @@ export class TweakpaneManager {
     if (this._introsSectionBuilt) return;
 
     const introFolder = this.pane.addFolder({
-      title: 'Intros',
+      title: getPanelSectionTitle('intros', 'Intros'),
       expanded: this.accordionStates['intros'] ?? this.accordionStates['introSequences'] ?? true
     });
     this._registerPrimaryFolder(introFolder);
@@ -1771,12 +1775,12 @@ export class TweakpaneManager {
     const parent = this.ensureCategoryFolder('gameplay');
 
     const tokensFolder = parent.addFolder({
-      title: 'Tokens & Character Rendering',
+      title: getPanelSectionTitle('tokens-character', 'Tokens & Character Rendering'),
       expanded: this.accordionStates['tokens'] ?? false
     });
 
     const tokenCCFolder = tokensFolder.addFolder({
-      title: 'Color Correction',
+      title: getPanelSectionTitle('token-color-correction', 'Color Correction'),
       expanded: this.accordionStates['token_cc'] ?? false
     });
 
@@ -1905,7 +1909,7 @@ export class TweakpaneManager {
     if (!this.pane) return;
 
     const quickActionsFolder = this.pane.addFolder({
-      title: 'Quick Actions',
+      title: getPanelSectionTitle('quick-actions', 'Quick Actions'),
       expanded: true
     });
     this._quickActionsFolder = quickActionsFolder;
@@ -1946,7 +1950,7 @@ export class TweakpaneManager {
 
     addGroupHeading('Scene Management');
 
-    addGridButton('Defaults', () => {
+    addGridButton('🏠 Defaults', () => {
       this.onMasterResetToDefaults();
     }, {
       danger: true,
@@ -1954,21 +1958,21 @@ export class TweakpaneManager {
       title: 'Reset every registered effect plus global sun, shadow, and UI controls to schema defaults, then save to this scene. Use Undo Defaults to restore the prior snapshot.',
     });
 
-    this._quickUndoButtonEl = addGridButton('Undo Defaults', () => {
+    this._quickUndoButtonEl = addGridButton('↩️ Undo Defaults', () => {
       this.onUndoMasterReset();
     }, {
       advanced: true,
       title: 'Restore all effect parameters and global controls to the snapshot taken immediately before the last Defaults reset.',
     });
 
-    addGridButton('Texture Manager', () => {
+    addGridButton('🖼️ Texture Manager', () => {
       if (this.textureManager) this.textureManager.toggle();
     }, {
       advanced: true,
       title: 'Open the texture catalog to browse, preview, and assign mask and material textures used by Map Shine effects.',
     });
 
-    addGridButton('Effect Stack', () => {
+    addGridButton('📚 Effect Stack', () => {
       if (this.effectStack) this.effectStack.toggle();
     }, {
       advanced: true,
@@ -1976,7 +1980,7 @@ export class TweakpaneManager {
     });
 
     if (isGmLike()) {
-      addGridButton('Apply to All Scenes…', async () => {
+      addGridButton('🌍 Apply to All Scenes…', async () => {
         await this.applyCurrentEffectsToAllScenes();
       }, {
         advanced: true,
@@ -1984,7 +1988,7 @@ export class TweakpaneManager {
       });
     }
 
-    addGridButton('Scene Recovery', async () => {
+    addGridButton('🚑 Scene Recovery', async () => {
       await this.attemptSceneRecovery();
     }, {
       danger: true,
@@ -1992,7 +1996,7 @@ export class TweakpaneManager {
       title: 'Create a new “[Recovered]” scene by cloning tiles, walls, tokens, and other content into a clean document. Does not delete the current scene; strips Map Shine flags that may be corrupt.',
     });
 
-    addGridButton('Scene Reset', async () => {
+    addGridButton('🔃 Scene Reset', async () => {
       try {
         const fn = window.MapShine?.resetScene;
         if (typeof fn !== 'function') {
@@ -2029,7 +2033,7 @@ export class TweakpaneManager {
     addGroupBreak();
     addGroupHeading('Camera & Movement');
 
-    addGridButton('Streaming Minimap', () => {
+    addGridButton('🗺️ Streaming Minimap', () => {
       const toggle = window.MapShine?.toggleStreamingMinimap;
       if (typeof toggle === 'function') {
         const on = toggle();
@@ -2047,7 +2051,7 @@ export class TweakpaneManager {
       title: 'Toggle the live tile streaming minimap overlay (grid cells, frustum, VRAM stats, and fault dashboard).',
     });
 
-    addGridButton('Tile Streaming Report', async () => {
+    addGridButton('📋 Tile Streaming Report', async () => {
       try {
         const { copyTileStreamingReportToClipboard } =
           await import('./tile-streaming-report.js');
@@ -2079,26 +2083,26 @@ export class TweakpaneManager {
       title: 'Copy a tile streaming diagnostic report to the clipboard: VRAM budget, LOD, grid cells, floor visibility, and grey-screen warnings.',
     });
 
-    addGridButton('Token Movement', () => {
+    addGridButton('🚶 Token Movement', () => {
       this.tokenMovementDialog?.toggle?.();
     }, {
       title: 'Configure token movement and elevation rules used when tokens travel across the Map Shine canvas and floor bands.',
     });
 
-    addGridButton('Tile Motion', () => {
+    addGridButton('🎞️ Tile Motion', () => {
       this.tileMotionDialog?.toggle?.();
     }, {
       title: 'Author animated tile motion: translate, rotate, and scale selected tiles with timing and easing for ambient movement.',
     });
 
     if (isGmLike()) {
-      addGridButton('Map Points', () => {
+      addGridButton('📍 Map Points', () => {
         this.openMapPointsManagerDialog();
       }, {
         title: 'Manage map-point groups (area, line, point, rope) and bind particle or effect emitters to regions you draw on the map.',
       });
 
-      addGridButton('Camera Path', () => {
+      addGridButton('🎬 Camera Path', () => {
         if (!this.cameraPathDialog) {
           ui.notifications?.warn?.('Camera Path not available (Map Shine not fully initialized yet)');
           return;
@@ -2108,7 +2112,7 @@ export class TweakpaneManager {
         title: 'Design cinematic camera sweeps with keyframes; preview pans, zooms, and optional time-of-day or environment ramps along the path.',
       });
 
-      addGridButton('Levels Authoring', () => {
+      addGridButton('🏗️ Levels Authoring', () => {
         const dlg = window.MapShine?.levelsAuthoring;
         if (!dlg) {
           ui.notifications?.warn?.('Levels Authoring not available (Map Shine not fully initialized yet)');
@@ -2123,14 +2127,14 @@ export class TweakpaneManager {
     addGroupBreak();
     addGroupHeading('Developer & Diagnostics', { advanced: true });
 
-    addGridButton('Diagnostic Center', () => {
+    addGridButton('🩺 Diagnostic Center', () => {
       if (this.diagnosticCenter) this.diagnosticCenter.toggle();
     }, {
       advanced: true,
       title: 'Open the diagnostics hub: render health summaries, mask readiness, dependency checks, and troubleshooting tools for the current scene.',
     });
 
-    addGridButton('Pixel Probe', async () => {
+    addGridButton('🔬 Pixel Probe', async () => {
       try {
         const { probeScenePixelPick } = await import('../utils/scene-pixel-probe.js');
         const result = probeScenePixelPick({ count: 3 });
@@ -2148,14 +2152,14 @@ export class TweakpaneManager {
       title: 'Click three map locations (A, B, C) to sample and log compositor color, mask, and lighting values at those pixels for debugging.',
     });
 
-    addGridButton('Breaker Box', () => {
+    addGridButton('⚡ Breaker Box', () => {
       window.MapShine?.breakerBoxDialog?.toggle?.();
     }, {
       advanced: true,
       title: 'Open the render dependency graph: trace effects, masks, and data sources into the compositor and spot missing or broken links.',
     });
 
-    addGridButton('Performance Recorder', () => {
+    addGridButton('⏱️ Performance Recorder', () => {
       let dlg = window.MapShine?.performanceRecorderDialog;
       if (!dlg?.container?.isConnected) {
         dlg = PerformanceRecorderDialog.ensureAvailable?.() ?? null;
@@ -2170,15 +2174,22 @@ export class TweakpaneManager {
       title: 'Record per-effect CPU and GPU timing, frame statistics, and draw-call deltas; export profiling data to find performance bottlenecks.',
     });
 
+    addGridButton('📤 Export Preset', async () => {
+      await this.copyScenePresetToClipboard();
+    }, {
+      advanced: true,
+      title: 'Copy preset-ready JSON for this scene to the clipboard. Paste into data/presets/your-preset.json to add a new built-in preset.',
+    });
+
     if (isGmLike()) {
-      addGridButton('Copy From Scene', async () => {
+      addGridButton('📥 Copy From Scene', async () => {
         await this.importSingleEffectFromScene();
       }, {
         advanced: true,
         title: 'Copy selected effect settings from another scene into this one. Choose full copy, parameters only, or enabled flags only.',
       });
 
-      addGridButton('Reset Effects…', async () => {
+      addGridButton('🧹 Reset Effects…', async () => {
         await this.resetSelectedEffectsInScene();
       }, {
         advanced: true,
@@ -2900,7 +2911,7 @@ export class TweakpaneManager {
     const parent = this.ensureCategoryFolder('lighting');
 
     const sunFolder = parent.addFolder({
-      title: 'Sun & Shadows',
+      title: getPanelSectionTitle('sun-shadows', 'Sun & Shadows'),
       expanded: this.accordionStates['sunShadows'] ?? this.accordionStates['cat_sunShadows'] ?? false
     });
     const ss = this.globalParams.shadowSystem;
@@ -3035,7 +3046,7 @@ export class TweakpaneManager {
    */
   _buildPostDsnFolder(parent, dsn, applyAll, persist) {
     const dsnFolder = parent.addFolder({
-      title: 'Dice So Nice',
+      title: getPanelSectionTitle('dice-so-nice', 'Dice So Nice'),
       expanded: this.accordionStates['post_dsn'] ?? true
     });
 
@@ -3171,7 +3182,7 @@ export class TweakpaneManager {
    */
   _buildPostSequencerFolder(parent, seq, applyAll, persist) {
     const seqFolder = parent.addFolder({
-      title: 'Sequencer / JB2A',
+      title: getPanelSectionTitle('sequencer-jb2a', 'Sequencer / JB2A'),
       expanded: this.accordionStates['post_sequencer'] ?? true
     });
 
@@ -3340,7 +3351,7 @@ export class TweakpaneManager {
     if (this._debugFolder) return;
 
     const debugFolder = this.pane.addFolder({
-      title: 'Developer Tools',
+      title: getEffectCategoryTitle('debug'),
       expanded: this.accordionStates['debug'] ?? false
     });
     this._registerPrimaryFolder(debugFolder, { advanced: true });
@@ -3348,7 +3359,7 @@ export class TweakpaneManager {
     this._debugFolder = debugFolder;
 
     const uiFolder = debugFolder.addFolder({
-      title: 'UI',
+      title: getPanelSectionTitle('debug-ui', 'UI'),
       expanded: this.accordionStates['debug_ui'] ?? false
     });
 
@@ -3368,7 +3379,7 @@ export class TweakpaneManager {
     debugFolder.addBlade({ view: 'separator' });
 
     const settingsFolder = debugFolder.addFolder({
-      title: 'Settings',
+      title: getPanelSectionTitle('debug-settings', 'Settings'),
       expanded: this.accordionStates['debug_settings'] ?? false
     });
 
@@ -3398,7 +3409,7 @@ export class TweakpaneManager {
     debugFolder.addBlade({ view: 'separator' });
 
     const sceneFolder = debugFolder.addFolder({
-      title: 'Scene',
+      title: getPanelSectionTitle('debug-scene', 'Scene'),
       expanded: this.accordionStates['debug_scene'] ?? false
     });
 
@@ -3507,7 +3518,7 @@ export class TweakpaneManager {
     debugFolder.addBlade({ view: 'separator' });
 
     const calibrationFolder = debugFolder.addFolder({
-      title: 'Calibration',
+      title: getPanelSectionTitle('debug-calibration', 'Calibration'),
       expanded: this.accordionStates['debug_calibration'] ?? false
     });
     const calibrationState = {
@@ -3696,7 +3707,7 @@ export class TweakpaneManager {
     if (!parentFolder) return;
 
     const folder = parentFolder.addFolder({
-      title: 'Mask Registry',
+      title: getPanelSectionTitle('mask-registry', 'Mask Registry'),
       expanded: this.accordionStates['debug_maskRegistry'] ?? false
     });
 
@@ -3840,7 +3851,7 @@ export class TweakpaneManager {
     if (!parentFolder) return;
 
     const folder = parentFolder.addFolder({
-      title: 'Mask overlay (V2)',
+      title: getPanelSectionTitle('mask-overlay', 'Mask overlay (V2)'),
       expanded: this.accordionStates['debug_maskOverlayV2'] ?? false
     });
 
@@ -3890,7 +3901,7 @@ export class TweakpaneManager {
     if (!parentFolder) return;
 
     const folder = parentFolder.addFolder({
-      title: 'Indoors vs Outdoors (effective mask)',
+      title: getPanelSectionTitle('indoors-outdoors', 'Indoors vs Outdoors (effective mask)'),
       expanded: this.accordionStates['debug_indoorOutdoor'] ?? false,
     });
 
@@ -4017,7 +4028,7 @@ export class TweakpaneManager {
     if (!parentFolder) return;
 
     const folder = parentFolder.addFolder({
-      title: 'VRAM Budget',
+      title: getPanelSectionTitle('vram-budget', 'VRAM Budget'),
       expanded: this.accordionStates['debug_vramBudget'] ?? false
     });
 
@@ -4094,7 +4105,7 @@ export class TweakpaneManager {
     const particleParent = this.ensureCategoryFolder('particle');
 
     const folder = particleParent.addFolder({
-      title: 'Rope & Chain',
+      title: getPanelSectionTitle('rope-chain', 'Rope & Chain'),
       expanded: this.accordionStates['ropes'] ?? false
     });
 
@@ -4520,7 +4531,7 @@ export class TweakpaneManager {
    */
   buildFirstTimeEnableSection() {
     const setupFolder = this.pane.addFolder({
-      title: 'Getting Started',
+      title: getPanelSectionTitle('getting-started', 'Getting Started'),
       expanded: true
     });
     this._registerPrimaryFolder(setupFolder);
@@ -4677,7 +4688,7 @@ export class TweakpaneManager {
    */
   buildBrandingSection() {
     const brandingFolder = this.pane.addFolder({
-      title: 'Support & Links',
+      title: getPanelSectionTitle('support-links', 'Support & Links'),
       expanded: true
     });
     this._registerPrimaryFolder(brandingFolder, { advanced: true });
@@ -4842,7 +4853,7 @@ export class TweakpaneManager {
     log.info(`Registering effect: ${effectName}`);
 
     const folder = parentEffect.folder.addFolder({
-      title: effectName,
+      title: getEffectDisplayTitle(effectId, effectName),
       expanded: this.accordionStates[effectId] ?? false
     });
 
@@ -5068,7 +5079,7 @@ export class TweakpaneManager {
     }
 
     const folder = parent.addFolder({
-      title: effectName,
+      title: getEffectDisplayTitle(effectId, effectName),
       expanded: this.accordionStates[effectId] ?? false
     });
 

@@ -36,8 +36,10 @@
 
 import { DepthShaderChunks } from '../../effects/DepthShaderChunks.js';
 
+/** Bump when GLSL source changes materially — invalidates cached ShaderMaterial compiles. */
+export const WATER_SHADER_SOURCE_EPOCH = 4;
+
 /**
- * Returns the fragment shader source.
  * The old rain ripple/storm cellular automaton loops have been replaced with a
  * simple noise-based precipitation distortion that is GPU-safe on all drivers.
  * This function is kept as an alias for backward compatibility with callers
@@ -488,6 +490,7 @@ float distortionInsideFromCoverage(float coverage01);
 float chromaticInsideFromCoverage(float coverage01);
 vec2 waveGrad2D(vec2 sceneUv, float t, float motion01);
 vec2 curlNoise2D(vec2 p);
+float sceneAspectRatio();
 
 // ── Noise — deterministic 512×512 RGBA random map (tNoiseMap) ───────────
 const float NOISE_SIZE = 512.0;
@@ -510,6 +513,14 @@ float valueNoise2D(vec2 p) {
   vec2 u = f * f * (3.0 - 2.0 * f);
   vec2 uv = (i + u + 0.5) * NOISE_INV;
   return MSA_TEXTURE_LOD(tNoiseMap, uv, 0.0).r;
+}
+
+vec4 valueNoise2D_RGBA(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  vec2 uv = (i + u + 0.5) * NOISE_INV;
+  return MSA_TEXTURE_LOD(tNoiseMap, uv, 0.0);
 }
 
 // V1 compatibility: older code calls valueNoise().
@@ -620,16 +631,16 @@ vec2 computeRainOffsetPx(vec2 uv) {
   float sp = max(0.0, uRainDistortionSpeed);
   float px = clamp(uRainDistortionStrengthPx, 0.0, 24.0);
 
-  // Primary layer: fbmNoise; secondary: valueNoise2D (cheaper, still organic at rain scales).
-  float t = uTime * sp;
+  float t = uWindTime * sp;
   vec2 domain = uv * sc;
-  float n1x = (valueNoise2D(domain + vec2(t * 0.13, -t * 0.09) + vec2(11.7, 7.3)) - 0.5) * 2.0;
-  float n1y = (valueNoise2D(domain + vec2(-t * 0.11, t * 0.14) + vec2(31.1, 19.9)) - 0.5) * 2.0;
-  vec2 dom2 = domain * 1.73 + vec2(t * 0.17, t * 0.07) + vec2(5.3, 41.1);
-  float n2x = (valueNoise2D(dom2) - 0.5) * 2.0;
-  float n2y = (valueNoise2D(domain * 1.73 + vec2(-t * 0.08, -t * 0.15) + vec2(23.7, 3.9)) - 0.5) * 2.0;
 
-  vec2 offset = vec2(n1x * 0.58 + n2x * 0.42, n1y * 0.58 + n2y * 0.42);
+  vec4 n1 = valueNoise2D_RGBA(domain + vec2(t * 0.13, -t * 0.09) + vec2(11.7, 7.3));
+  vec4 n2 = valueNoise2D_RGBA(domain * 1.73 + vec2(-t * 0.08, t * 0.14) + vec2(31.1, 19.9));
+
+  vec2 offset = vec2(
+    (n1.r - 0.5) * 1.16 + (n2.b - 0.5) * 0.84,
+    (n1.g - 0.5) * 1.16 + (n2.a - 0.5) * 0.84
+  );
 
   // Precipitation ramps in smoothly — light rain = subtle, heavy rain = strong
   float ramp = smoothstep(0.0, 0.6, p) * (0.5 + 0.5 * p);
@@ -641,9 +652,7 @@ vec2 computeRainOffsetPx(vec2 uv) {
   vec2 wRaw = uWindDir;
   float wlen = length(wRaw);
   wRaw = (wlen > 1e-6) ? (wRaw / wlen) : vec2(1.0, 0.0);
-  float sa = (uHasSceneRect > 0.5)
-    ? (uSceneRect.z / max(1.0, uSceneRect.w))
-    : (uResolution.x / max(1.0, uResolution.y));
+  float sa = sceneAspectRatio();
   vec2 windBasis = normalize(vec2(wRaw.x * sa, wRaw.y));
   vec2 windShear = windBasis * px * ramp * (2.5 + 9.5 * wind01);
 
@@ -670,53 +679,7 @@ vec2 effectUv(vec2 sceneUv) {
   return vec2(sceneUv.x * sceneAspect, sceneUv.y);
 }
 
-// ── Wave / Warp ──────────────────────────────────────────────────────────
-vec2 warpUv(vec2 sceneUv, float motion01) {
-  float m = clamp(motion01, 0.0, 1.0);
-  float inShelter = waterIndoorWindMotion01(sceneUv);
-  // Important: do NOT advect the wave *domain* using uWindOffsetUv.
-  // Gerstner phase advances via uWaveTime (integrated in JS), not UV offset.
-  // Advecting the domain as well can partially cancel / overtake the phase travel
-  // and produces a standing-wave / ping-pong look.
-  vec2 uv = sceneUv;
-  // Wind-driven warp drift: use integrated uWindDrift (JS) so rotating wind
-  // cannot multiply a huge scalar uWindTime by a slightly changed basis (ping-pong).
-  float sceneAspect = sceneAspectRatio();
-  vec2 windF = uWindDir;
-  float wl = length(windF);
-  windF = (wl > 1e-6) ? (windF / wl) : vec2(1.0, 0.0);
-  // Keep wind in Foundry/scene UV space (Y-down), matching CloudEffectV2.
-  vec2 windDir = vec2(windF.x, windF.y);
-  vec2 windBasis = normalize(vec2(windDir.x * sceneAspect, windDir.y));
-  vec2 windPerp = vec2(-windBasis.y, windBasis.x);
-  vec2 basis = vec2(sceneUv.x * sceneAspect, sceneUv.y);
-  float along = dot(basis, windBasis);
-  float across = dot(basis, windPerp);
-  vec2 streakUv = windBasis * (along * 2.75) + windPerp * (across * 1.0);
-
-  vec2 driftAspect = vec2(uWindDrift.x * sceneAspect, uWindDrift.y) * inShelter;
-  vec2 warpDrift = driftAspect * max(0.0, uWaveWarpTimeSpeed) * m;
-  vec2 warpDriftPerp = vec2(-warpDrift.y, warpDrift.x);
-
-  // No oscillating pulse — warp strength is controlled by uWaveWarpLargeStrength.
-  // Any sin/cos multiplier here would cause periodic amplitude variation that
-  // contributes to the ping-pong appearance.
-  // Sample two noise values per warp layer: one for along-wind, one for cross-wind.
-  // Displace uv along windBasis/windPerp so warp is coherent with wave travel.
-  // Raw vec2(nA, nB) displacement causes arbitrary-direction warp drift -> ping-pong.
-  float lf1 = (valueNoise2D(streakUv * 0.23 + vec2(19.1, 7.3) - warpDrift * 0.07) - 0.5) * 2.0;
-  float lf2 = (valueNoise2D(streakUv * 0.23 + vec2(3.7, 23.9) - warpDriftPerp * 0.04) - 0.5) * 2.0;
-  uv += (windBasis * lf1 + windPerp * lf2) * clamp(uWaveWarpLargeStrength, 0.0, 1.0);
-  float n1 = (valueNoise2D((uv * 2.1) + vec2(13.7, 9.2) - warpDrift * 0.11) - 0.5) * 2.0;
-  float n2 = (valueNoise2D((uv * 2.1) + vec2(41.3, 27.9) - warpDriftPerp * 0.06) - 0.5) * 2.0;
-  uv += (windBasis * n1 + windPerp * n2) * clamp(uWaveWarpSmallStrength, 0.0, 1.0);
-  // Micro warp: single value-noise octaves (4 taps each) — visually similar, less work than fbmNoise.
-  float n3 = (valueNoise2D(uv * 4.7 + vec2(7.9, 19.1) - warpDrift * 0.15) - 0.5) * 2.0;
-  float n4 = (valueNoise2D(uv * 4.7 + vec2(29.4, 3.3) - warpDriftPerp * 0.05) - 0.5) * 2.0;
-  uv += (windBasis * n3 + windPerp * n4) * clamp(uWaveWarpMicroStrength, 0.0, 1.0);
-  return uv;
-}
-
+// ── Wave / Spectrum ───────────────────────────────────────────────────────
 float waveSeaState(vec2 sceneUv, float motion01) {
   if (uWaveEvolutionEnabled < 0.5) return 0.5;
   float sp = max(0.0, uWaveEvolutionSpeed) * clamp(motion01, 0.0, 1.0);
@@ -743,236 +706,114 @@ float msLuminance(vec3 rgb) {
   return dot(rgb, vec3(0.2126, 0.7152, 0.0722));
 }
 
-float waveAngleOffsetSeed(int i) {
-  if (i == 0) return 0.00;
-  if (i == 1) return 0.25;
-  if (i == 2) return -0.32;
-  if (i == 3) return 0.58;
-  if (i == 4) return -0.71;
-  if (i == 5) return 0.94;
-  return -1.15;
-}
-
-float waveWavelengthMul(int i) {
-  if (i == 0) return 1.00; // Primary Swell
-  if (i == 1) return 0.52; // Secondary Swell
-  if (i == 2) return 0.29; // Large Chop
-  if (i == 3) return 0.14; // Medium Chop
-  if (i == 4) return 0.08; // Small Chop
-  if (i == 5) return 0.04; // Micro Ripples
-  return 0.02;
-}
-
-vec4 gerstnerWave(vec2 uv, vec2 dir, float wavelength, float steepness, float t, float phaseOffset) {
-  float lambda = max(wavelength, 1e-3);
-  float k = 6.2831853 / lambda;
-  float omega = sqrt(2.0 * k); // Controls physical speed of wave propagation
-  float phase = k * dot(dir, uv) - (omega * t) + phaseOffset;
-
-  float cosP = cos(phase);
-  float sinP = sin(phase);
-
-  float a = steepness / max(k, 1e-4);
-  float h = a * sinP;
-  vec2 dxy = dir * (steepness * cosP);
-  float dz = steepness * sinP;
-
-  return vec4(h, dxy.x, dxy.y, dz);
-}
-
-// Vectorized Gerstner accumulation: 4 sin/cos pairs per batch instead of 4 scalar loops.
-void gerstnerAccum4(
-  inout float totalH,
-  inout vec2 totalDxy,
-  inout float totalDz,
-  vec2 uv,
-  vec2 windBasis,
-  float t,
-  float jitterField,
-  float globalSteepness,
-  float windStrength,
-  float timeScale,
-  float steepnessNorm,
-  float steepnessWeightBase,
-  float jitterLo,
-  float jitterHi,
-  float jitterDenom,
-  float wlMulScale,
-  vec4 wlMul,
-  vec4 angleSeed,
-  vec4 octaveBase,
-  vec4 activeMask,
-  bool addDz
-) {
-  float ws = mix(0.4, 1.2, windStrength);
-  vec4 wl = max(vec4(0.02), wlMulScale * wlMul);
-  vec4 k = 6.2831853 / wl;
-  vec4 omega = sqrt(9.8 * k);
-
-  vec2 dir0 = rotate2D(windBasis, angleSeed.x * ws);
-  vec2 dir1 = rotate2D(windBasis, angleSeed.y * ws);
-  vec2 dir2 = rotate2D(windBasis, angleSeed.z * ws);
-  vec2 dir3 = rotate2D(windBasis, angleSeed.w * ws);
-
-  vec4 dotU = vec4(dot(dir0, uv), dot(dir1, uv), dot(dir2, uv), dot(dir3, uv));
-  vec4 phaseJitter = jitterField * mix(vec4(jitterLo), vec4(jitterHi), octaveBase / max(1.0, jitterDenom));
-  vec4 phase = k * dotU - (omega * t * timeScale) + phaseJitter;
-  vec4 cosP = cos(phase);
-  vec4 sinP = sin(phase);
-  vec4 steepnessWeight = pow(vec4(steepnessWeightBase), octaveBase);
-  vec4 octaveSteepness = (globalSteepness * steepnessWeight * steepnessNorm) * activeMask;
-
-  vec4 hContrib = (octaveSteepness / k) * sinP;
-  totalH += hContrib.x + hContrib.y + hContrib.z + hContrib.w;
-
-  totalDxy += dir0 * (octaveSteepness.x * cosP.x);
-  totalDxy += dir1 * (octaveSteepness.y * cosP.y);
-  totalDxy += dir2 * (octaveSteepness.z * cosP.z);
-  totalDxy += dir3 * (octaveSteepness.w * cosP.w);
-
-  if (addDz) {
-    totalDz += octaveSteepness.x * sinP.x
-             + octaveSteepness.y * sinP.y
-             + octaveSteepness.z * sinP.z
-             + octaveSteepness.w * sinP.w;
-  }
-}
-
 vec3 calculateWaveForWind(vec2 sceneUv, float t, float motion01, vec2 windDirInput) {
-    float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
+  float sceneAspect = sceneAspectRatio();
 
-    // Travel basis: live wind (optionally) + authored heading offset (deg).
-    // uWaveAppearanceRotRad is applied later to slopes in main() so crests/normals
-    // can be corrected without changing this propagation axis.
-    vec2 wRaw = safeNormalize2(windDirInput);
-    if (length(wRaw) < 1e-5) wRaw = vec2(1.0, 0.0);
-    vec2 wBase = (uLockWaveTravelToWind > 0.5) ? wRaw : vec2(1.0, 0.0);
-    vec2 wTravel = rotate2D(wBase, uWaveDirOffsetRad);
-    if (length(wTravel) < 1e-5) wTravel = vec2(1.0, 0.0);
-    wTravel = normalize(wTravel);
-    
-    // 1. GLOBAL TURBULENCE (Optimized)
-    float windStrength = clamp(uWindSpeed, 0.0, 1.5);
-    float turbulenceAmt = mix(0.05, 0.3, windStrength); 
+  // Travel basis: live wind (optionally) + authored heading offset (deg).
+  // uWaveAppearanceRotRad is applied later to slopes in main() so crests/normals
+  // can be corrected without changing this propagation axis.
+  vec2 wRaw = safeNormalize2(windDirInput);
+  if (length(wRaw) < 1e-5) wRaw = vec2(1.0, 0.0);
+  vec2 wBase = (uLockWaveTravelToWind > 0.5) ? wRaw : vec2(1.0, 0.0);
+  vec2 wTravel = rotate2D(wBase, uWaveDirOffsetRad);
+  if (length(wTravel) < 1e-5) wTravel = vec2(1.0, 0.0);
+  wTravel = normalize(wTravel);
 
-    // 2. DOMAIN COORDINATES
-    vec2 uv = warpUv(sceneUv, motion01) * max(0.01, uWaveScale);
-    uv = vec2(uv.x * sceneAspect, uv.y);
+  // One gentle domain warp replaces the old three-layer warpUv path. The extra
+  // warp controls still contribute, but without additional per-pixel fetches.
+  vec2 uv = sceneUv * vec2(sceneAspect, 1.0) * max(0.01, uWaveScale);
+  float warpTime = t * (0.03 + 0.12 * max(0.0, uWaveWarpTimeSpeed));
+  vec4 warpNoise = valueNoise2D_RGBA(uv * 0.15 + vec2(warpTime, -warpTime * 0.7));
+  float warpStrength = clamp(
+    uWaveWarpLargeStrength * 0.75 +
+    uWaveWarpSmallStrength * 0.35 +
+    uWaveWarpMicroStrength * 0.18,
+    0.0,
+    2.0
+  );
+  uv += (warpNoise.rg - 0.5) * warpStrength;
 
-    // 3. LOCAL WIND ROTATION (Simplified)
-    float windNoise = valueNoise2D(uv * 0.08 + vec2(t * 0.01, -t * 0.005));
-    float localRotation = (windNoise - 0.5) * turbulenceAmt * 1.57;
-    vec2 windBasis = rotate2D(wTravel, localRotation);
+  float totalH = 0.0;
+  vec2 totalDxy = vec2(0.0);
+  float totalDz = 0.0;
 
-    // 4. SPATIAL PHASE JITTER (Simplified)
-    float jitterField = valueNoise2D(uv * 0.2 + vec2(-t * 0.02, t * 0.01));
+  float globalSteepness = clamp(mix(0.3, 1.2, motion01), 0.1, 1.6);
+  float wavelength = 2.0;
+  // Gerstner Q (steepness) sum must stay below 1.0 or waves self-intersect and the
+  // trochoidal pinch denominator collapses into hard-edge clipping artifacts.
+  const float OCTAVE_DECAY = 0.88;
+  const float OCTAVE_STEEPNESS_SUM = 4.9317; // sum(decay^i, i=0..6)
+  const float STEEPNESS_BUDGET = 0.92;
+  float steepness = min(globalSteepness * 0.35, STEEPNESS_BUDGET / OCTAVE_STEEPNESS_SUM);
+  vec2 dir = wTravel;
 
-    float totalH = 0.0;
-    vec2 totalDxy = vec2(0.0);
-    float totalDz = 0.0;
+  const float GOLDEN_ANGLE = 2.39996;
 
-    float globalSteepness = clamp(mix(0.3, 1.2, motion01), 0.1, 1.6);
-    const float invPrimaryCount = 1.0 / 7.0;
+  for (int i = 0; i < 7; i++) {
+    float k = 6.2831853 / wavelength;
+    float omega = sqrt(9.8 * k);
 
-    gerstnerAccum4(
-      totalH, totalDxy, totalDz,
-      uv, windBasis, t, jitterField,
-      globalSteepness, windStrength,
-      1.0, invPrimaryCount, 0.78,
-      1.0, 4.0, 7.0,
-      2.0,
-      vec4(1.00, 0.52, 0.29, 0.14),
-      vec4(0.00, 0.25, -0.32, 0.58),
-      vec4(0.0, 1.0, 2.0, 3.0),
-      vec4(1.0),
-      true
-    );
-    gerstnerAccum4(
-      totalH, totalDxy, totalDz,
-      uv, windBasis, t, jitterField,
-      globalSteepness, windStrength,
-      1.0, invPrimaryCount, 0.78,
-      1.0, 4.0, 7.0,
-      2.0,
-      vec4(0.08, 0.04, 0.02, 1.0),
-      vec4(-0.71, 0.94, -1.15, 0.0),
-      vec4(4.0, 5.0, 6.0, 0.0),
-      vec4(1.0, 1.0, 1.0, 0.0),
-      true
-    );
+    float fi = float(i);
 
-    // 5. HIGH-FREQUENCY GRAINY NOISE BREAKUP
-    // Add very fine, grainy noise to break up perfectly smooth surfaces
-    vec2 grainUv = uv * 25.0 + vec2(t * 2.3, -t * 1.7);
-    float grainNoise = valueNoise2D(grainUv) * 0.03;
-    float grainNoise2 = valueNoise2D(grainUv * 1.73 + vec2(0.5, 0.3)) * 0.02;
-    totalH += grainNoise + grainNoise2;
+    // Fan each octave off the main wind axis so crests intersect instead of stacking in rows.
+    float angleSpread = sin(fi * 2.4) * 0.65;
+    vec2 octaveDir = rotate2D(dir, angleSpread);
 
-    // 6. TROCHOIDAL PEAK SHARPENING
-    // This ensures peaks are sharp and troughs are wide (less like a sine wave)
-    float pinchMod = mix(0.7, 0.25, motion01);
-    float pinch = max(pinchMod, 1.0 - abs(totalDz));
-    vec2 slope = totalDxy / pinch;
+    float phaseJitter = (warpNoise.b - 0.5) * 2.0;
+    float phase = k * dot(octaveDir, uv) - omega * t + fi * GOLDEN_ANGLE * 10.0 + phaseJitter;
+    float cosP = cos(phase);
+    float sinP = sin(phase);
 
-    // 7. FINAL GRAINY BREAKUP ON SLOPES
-    // Add high-frequency noise directly to slopes for specular breakup
-    vec2 slopeGrainUv = uv * 40.0 + vec2(t * 3.1, -t * 2.1);
-    vec2 slopeGrain = vec2(
-        valueNoise2D(slopeGrainUv) - 0.5,
-        valueNoise2D(slopeGrainUv + vec2(0.7, 0.3)) - 0.5
-    ) * 0.015;
-    slope += slopeGrain;
+    float a = steepness / k;
+    totalH += a * sinP;
+    totalDxy += octaveDir * (steepness * cosP);
+    totalDz += steepness * sinP;
 
-    return vec3(totalH, slope.x, slope.y);
+    wavelength *= 0.52;
+    steepness *= OCTAVE_DECAY;
+  }
+
+  vec4 grain = valueNoise2D_RGBA(uv * 15.0 - (dir * t * 1.5) + vec2(warpNoise.a));
+  totalH += (grain.r - 0.5) * 0.04;
+
+  float pinchMod = mix(0.7, 0.4, motion01);
+  float pinch = max(pinchMod, 1.0 - abs(totalDz));
+  vec2 slope = totalDxy / pinch;
+  slope += (grain.gb - 0.5) * 0.03;
+
+  return vec3(totalH, slope.x, slope.y);
 }
 
 // High-frequency breakup + micro-normal perturbation added to wave gradients
 // (refraction distortion). Uniforms are driven from WaterEffectV2 breakup/micro params.
 vec2 waveDetailPerturbGrad(vec2 sceneUv, float t, float motion01, vec2 windDirInput) {
   float m01 = clamp(motion01, 0.0, 1.0);
-  float sceneAspect = sceneAspectRatio();
   vec2 wind = safeNormalize2(windDirInput);
   if (dot(wind, wind) < 1e-6) wind = vec2(1.0, 0.0);
-  vec2 windBasis = normalize(vec2(wind.x * sceneAspect, wind.y));
-  vec2 windPerp = vec2(-windBasis.y, windBasis.x);
-  vec2 basis = effectUv(sceneUv);
+  vec2 uv = effectUv(sceneUv);
   vec2 detailG = vec2(0.0);
 
-  float breakupStrength = clamp(uWaveBreakupStrength, 0.0, 1.0);
-  float breakupDist = clamp(uWaveBreakupDistortionStrength, 0.0, 1.0);
-  if (breakupStrength > 1e-4 && breakupDist > 1e-4) {
-    float bScale = max(0.01, uWaveBreakupScale);
-    float bSpeed = max(0.0, uWaveBreakupSpeed) * m01;
-    float bWarp = clamp(uWaveBreakupWarp, 0.0, 2.0);
-    vec2 bUv = basis * bScale + windBasis * (t * bSpeed * 0.11) + windPerp * (t * bSpeed * 0.05);
-    float bw = valueNoise2D(bUv * 0.17 + vec2(13.1, 9.7)) - 0.5;
-    bUv += (windBasis + windPerp * 0.65) * (bw * 0.65 * bWarp);
-    float bn1 = valueNoise2D(bUv + vec2(17.3, 5.9));
-    float bn2 = valueNoise2D(bUv + vec2(3.1, 29.7));
-    vec2 bVec = (vec2(bn1, bn2) - 0.5);
-    bVec.x *= sceneAspect;
-    float bAmt = clamp(breakupStrength * breakupDist, 0.0, 1.0);
-    bAmt = bAmt * (1.15 + 1.85 * bAmt);
-    detailG += bVec * (0.95 * bAmt);
-  }
+  float bScale = max(0.01, uWaveBreakupScale);
+  float mScale = max(0.01, uWaveMicroNormalScale);
 
-  float microStrength = clamp(uWaveMicroNormalStrength, 0.0, 1.0);
-  float microDist = clamp(uWaveMicroNormalDistortionStrength, 0.0, 1.0);
-  if (microStrength > 1e-4 && microDist > 1e-4) {
-    float mScale = max(0.01, uWaveMicroNormalScale);
-    float mSpeed = max(0.0, uWaveMicroNormalSpeed) * m01;
-    float mWarp = clamp(uWaveMicroNormalWarp, 0.0, 2.0);
-    vec2 mUv = basis * mScale + windBasis * (t * mSpeed * 0.15) + windPerp * (t * mSpeed * 0.07);
-    float mw = valueNoise2D(mUv * 0.27 + vec2(41.7, 12.4)) - 0.5;
-    mUv += (windPerp + windBasis * 0.4) * (mw * 0.55 * mWarp);
-    float mn1 = valueNoise2D(mUv + vec2(7.3, 37.1));
-    float mn2 = valueNoise2D(mUv + vec2(29.9, 11.6));
-    vec2 mVec = (vec2(mn1, mn2) - 0.5);
-    mVec.x *= sceneAspect;
-    float mAmt = clamp(microStrength * microDist, 0.0, 1.0);
-    mAmt = mAmt * (1.25 + 2.15 * mAmt);
-    detailG += mVec * (0.78 * mAmt);
-  }
+  vec2 bUv = uv * bScale + wind * (t * max(0.0, uWaveBreakupSpeed) * m01 * 0.11);
+  vec2 mUv = uv * mScale + wind * (t * max(0.0, uWaveMicroNormalSpeed) * m01 * 0.15);
+
+  vec4 nB = valueNoise2D_RGBA(bUv);
+  vec4 nM = valueNoise2D_RGBA(mUv);
+
+  vec2 bVec = (nB.rg - 0.5) * 2.0;
+  vec2 mVec = (nM.ba - 0.5) * 2.0;
+
+  // Keep the existing warp sliders meaningful by decorrelating the detail vectors.
+  bVec += (nB.ba - 0.5) * clamp(uWaveBreakupWarp, 0.0, 2.0) * 0.35;
+  mVec += (nM.rg - 0.5) * clamp(uWaveMicroNormalWarp, 0.0, 2.0) * 0.28;
+
+  float bAmt = clamp(uWaveBreakupStrength * uWaveBreakupDistortionStrength, 0.0, 1.0);
+  detailG += bVec * (0.95 * bAmt * (1.15 + 1.85 * bAmt));
+
+  float mAmt = clamp(uWaveMicroNormalStrength * uWaveMicroNormalDistortionStrength, 0.0, 1.0);
+  detailG += mVec * (0.78 * mAmt * (1.25 + 2.15 * mAmt));
 
   return detailG;
 }
@@ -1053,6 +894,16 @@ float waterRawMaskAuthoritative(vec2 sceneUv01) {
   return waterRawMaskIntensity(sceneUv01);
 }
 
+// Packed G × coverage: high at shoreline, low in deep water.
+float waterShoreSignal(vec2 sceneUv01) {
+  return clamp(texture2D(tWaterData, sceneUv01).g * waterRawMaskIntensity(sceneUv01), 0.0, 1.0);
+}
+
+// Kept for stale shader snapshots that still call this name. No spatial offset taps.
+float waterShoreSignalBlurred(vec2 sceneUv01, float radiusTexels) {
+  return waterShoreSignal(sceneUv01);
+}
+
 // Scene refraction strength follows _Water mask intensity (brighter = stronger).
 float distortionInsideFromCoverage(float coverage01) {
   float cov = clamp(coverage01, 0.0, 1.0);
@@ -1131,18 +982,35 @@ float waterFbm(vec2 p, int octaves, float lacunarity, float gain) {
   return sum / maxAmp;
 }
 
-// Caustics: ridged blend of two panned noise-map samples (replaces per-pixel FBM).
-float causticsPattern(vec2 sceneUv, float t, float scale, float speed, float sharpness) {
-  vec2 p = effectUv(sceneUv) * scale * NOISE_INV;
-  float tt = t * speed;
-  vec2 uv1 = fract(p + vec2(tt * 0.12, -tt * 0.09));
-  vec2 uv2 = fract(p * 1.7 + vec2(-tt * 0.08, tt * 0.11));
-  float n1 = MSA_TEXTURE_LOD(tNoiseMap, uv1, 0.0).r;
-  float n2 = MSA_TEXTURE_LOD(tNoiseMap, uv2, 0.0).g;
-  float nn = clamp(0.6 * n1 + 0.4 * n2, 0.0, 1.0);
+// Caustics from wave-surface shape: Jacobian of refractive displacement + slope curvature.
+// Uses the same Gerstner gradients as refraction/specular (no procedural noise filaments).
+float causticsFromWaveNormals(vec2 waveGrad, vec2 waveOffsetUv, float scale, float sharpness, float speed) {
+  float gradMag = length(waveGrad);
+  float sens = (scale * 0.0038) * (0.55 + 1.1 * smoothstep(0.0, 0.4, gradMag));
+  sens *= (1.0 + clamp(speed, 0.0, 10.0) * 0.07);
+
+  // Refractive displacement Jacobian: floor UV' = uv + waveOffset(uv).
+  float j11 = 1.0 + dFdx(waveOffsetUv.x) * sens;
+  float j12 = dFdy(waveOffsetUv.x) * sens;
+  float j21 = dFdx(waveOffsetUv.y) * sens;
+  float j22 = 1.0 + dFdy(waveOffsetUv.y) * sens;
+  float det = j11 * j22 - j12 * j21;
+
+  // Slope curvature / folding from the analytical wave gradient field.
+  vec2 wgDx = dFdx(waveGrad);
+  vec2 wgDy = dFdy(waveGrad);
+  float curl = abs(wgDx.y - wgDy.x);
+  float lap = wgDx.x + wgDy.y;
+
+  float detF = 1.0 / max(abs(det), 0.07);
+  float lapF = clamp(1.05 - lap * sens * 1.4, 0.0, 2.0);
+  float foldF = clamp(curl * sens * 2.2, 0.0, 1.2);
+
+  float nn = clamp(detF * 0.10 + lapF * 0.42 + foldF * 0.22, 0.0, 1.0);
+
   float ridge = 1.0 - abs(2.0 * nn - 1.0);
-  float s = max(0.1, sharpness);
-  float w = 0.18 / (1.0 + s * 0.65);
+  float s = max(0.05, sharpness);
+  float w = 0.20 / (1.0 + s * 0.72);
   return smoothstep(1.0 - w, 1.0, ridge);
 }
 
@@ -1165,7 +1033,9 @@ struct FloatingFoamData {
 };
 
 // waveGradPre: pre-computed waveGrad2D result from main() to avoid redundant wave calculation.
-void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 waveGradPre, float sceneLuma, float darkness, float outdoorStrength, float indoorWindMotion, bool isShadow, out float shoreFoamOut, out FloatingFoamData floatingOut) {
+// waveTurb01: combined wave distortion energy (length of refraction vector) for foam breakup coupling.
+void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 waveGradPre, float waveTurb01, float sceneLuma, float darkness, float outdoorStrength, float indoorWindMotion, bool isShadow, out float shoreFoamOut, out FloatingFoamData floatingOut) {
+  float turbFoamMul = 0.65 + 1.35 * clamp(waveTurb01, 0.0, 1.0);
   vec2 foamWindOffsetUv = uWindOffsetUv * indoorWindMotion;
   vec2 foamSceneUv = sceneUv - (foamWindOffsetUv * 0.5);
   float sceneAspect = (uHasSceneRect > 0.5) ? (uSceneRect.z / max(1.0, uSceneRect.w)) : (uResolution.x / max(1.0, uResolution.y));
@@ -1186,7 +1056,7 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
     vec2 shoreDrift = driftAspect * uShoreFoamSpeed + windBasis * (uShoreFoamTimeOffset * uShoreFoamSpeed);
     shoreUv -= shoreDrift;
     
-    float waveDistortStr = clamp(uShoreFoamWaveDistortionStrength, 0.0, 5.0);
+    float waveDistortStr = clamp(uShoreFoamWaveDistortionStrength, 0.0, 5.0) * turbFoamMul;
     shoreUv += waveGradPre * waveDistortStr * 0.15;
     vec2 texel = 1.0 / max(uResolution, vec2(1.0));
     vec2 rainUv = rainOffPx * texel;
@@ -1194,7 +1064,7 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
     shoreUv += rainBasis * waveDistortStr * 0.1;
     
     if (uShoreFoamNoiseDistortionEnabled > 0.5 && uShoreFoamNoiseDistortionStrength > 0.01) {
-      float noiseDistStr = clamp(uShoreFoamNoiseDistortionStrength, 0.0, 2.0);
+      float noiseDistStr = clamp(uShoreFoamNoiseDistortionStrength, 0.0, 2.0) * turbFoamMul;
       float noiseDistScale = max(0.1, uShoreFoamNoiseDistortionScale);
       float noiseDistSpeed = max(0.0, uShoreFoamNoiseDistortionSpeed);
       
@@ -1286,21 +1156,21 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
       complexShore = clamp(complexShore + edgeOffset, 0.0, 1.0);
     }
     
-    // Distance remap: widen band (~2x reach) and apply a curve so foam
-    // is strong very near shore but falls off quickly.
-    float distWide = clamp(shore / max(0.01, uShoreFoamThreshold * 0.5), 0.0, 1.0);
-    float fadeCurve = max(0.25, uShoreFoamFadeCurve);
-    float distNormalized = pow(distWide, fadeCurve);
-    float coreWidth = clamp(uShoreFoamCoreWidth, 0.01, 1.0);
-    float coreFalloff = max(0.01, uShoreFoamCoreFalloff);
-    float coreMask = smoothstep(coreWidth + coreFalloff, coreWidth, distNormalized);
-    float tailWidth = clamp(uShoreFoamTailWidth, 0.01, 1.0);
-    float tailFalloff = max(0.01, uShoreFoamTailFalloff);
-    float tailMask = smoothstep(tailWidth + tailFalloff, 0.0, distNormalized);
+    // Shore proximity: packed G is high at shoreline, 0 in deep water. Threshold
+    // widens/narrows the band via reach (no spatial offset taps — those ghosted).
+    float reach = max(0.04, mix(0.82, 0.06, clamp(uShoreFoamThreshold, 0.0, 1.0)));
+    reach += uShoreFoamTailFalloff * 0.18 + uShoreFoamTailWidth * 0.10;
+    float shoreProx = shore / (shore + reach);
+    float shoreBand = pow(shoreProx, max(0.25, uShoreFoamFadeCurve * 0.6));
+
+    // Core emphasis at the water edge (subtle — does not flatten clump breakup).
+    float coreLo = clamp(uShoreFoamCoreWidth, 0.01, 1.0);
+    float coreHi = min(1.0, coreLo + max(0.04, uShoreFoamCoreFalloff));
+    float coreT = smoothstep(coreLo, coreHi, shoreProx);
+    shoreBand = clamp(shoreBand + (1.0 - shoreBand) * coreT * 0.35, 0.0, 1.0);
 
     float shoreCoverage = clamp(uShoreFoamCoverage, 0.0, 1.0);
     float shoreClumps = smoothstep(1.0 - shoreCoverage, 1.0, complexShore);
-    float shoreBand = clamp(max(coreMask, tailMask), 0.0, 1.0);
     shoreFoamAmount = clamp(shoreClumps * shoreBand, 0.0, 1.0);
     shoreFoamAmount *= inside * max(0.0, uShoreFoamStrength);
   }
@@ -1313,7 +1183,7 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
   // Enhanced wave distortion (much stronger)
   if (uFloatingFoamWaveDistortion > 0.01) {
     float foamDistort = clamp(uFloatingFoamWaveDistortion, 0.0, 2.0);
-    float waveDistortStr = clamp(uFloatingFoamWaveDistortionStrength, 0.0, 5.0);
+    float waveDistortStr = clamp(uFloatingFoamWaveDistortionStrength, 0.0, 5.0) * turbFoamMul;
     // Use pre-computed wave gradient from main() instead of recalculating
     clumpUv += waveGradPre * foamDistort * waveDistortStr * 0.2;
     vec2 texel = 1.0 / max(uResolution, vec2(1.0));
@@ -1325,7 +1195,7 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
   
   // Random noise distortion for organic movement
   if (uFloatingFoamNoiseDistortionEnabled > 0.5 && uFloatingFoamNoiseDistortionStrength > 0.01) {
-    float noiseDistStr = clamp(uFloatingFoamNoiseDistortionStrength, 0.0, 2.0);
+    float noiseDistStr = clamp(uFloatingFoamNoiseDistortionStrength, 0.0, 2.0) * turbFoamMul;
     float noiseDistScale = max(0.1, uFloatingFoamNoiseDistortionScale);
     float noiseDistSpeed = max(0.0, uFloatingFoamNoiseDistortionSpeed);
     
@@ -1831,13 +1701,16 @@ vec3 calculateSpecularHighlights(
   vec2 sceneUv, float inside, vec3 N, vec3 V, vec3 L, float NoL, float NoV,
   float distInside, float edgeStability, float shore, vec2 waveGrad,
   vec2 rainOffPx, float indoorWindMotion, float outdoorStrength, float sceneLuma,
-  float darkness, float combinedShadow, float structuralShadow
+  float darkness, float combinedShadow, float structuralShadow, float foamCoverageVis
 ) {
   // Use tighter roughness range for sharper highlights
   float p01 = clamp((uSpecHighlightsPower - 1.0) / 127.0, 0.0, 1.0);
   float rMin = clamp(uSpecHighlightsRoughnessMin, 0.001, 1.0);
   float rMax = clamp(uSpecHighlightsRoughnessMax, 0.001, 1.0);
   float rough = mix(rMax, rMin, p01);
+  // Wet foam bubbles broaden highlight lobes vs open water.
+  float foamHl01 = clamp(foamCoverageVis, 0.0, 1.0);
+  rough = mix(rough, clamp(rough + 0.22, rMin, rMax), foamHl01 * 0.55);
 
   // Enhanced normal for highlights (stronger response to waves)
   vec2 waveSlope = specWaveSlopeFromGrad(waveGrad) * clamp(uSpecHighlightsNormalStrength, 0.0, 10.0);
@@ -1924,6 +1797,14 @@ vec3 calculateSpecularHighlights(
   float sClamp = max(0.0, uSpecHighlightsClamp);
   if (sClamp > 0.0) {
     specHighlightsCol = min(specHighlightsCol, vec3(sClamp));
+  }
+
+  // Foam (shore + floating): patchy wet-bubble glints keyed to foam density.
+  if (foamHl01 > 0.001) {
+    vec2 sparkUv = effectUv(sceneUv) * 18.0 + vec2(uWindTime * indoorWindMotion * 0.08);
+    float sparkPatch = 0.42 + 0.58 * valueNoise(sparkUv);
+    float foamSparkle = mix(1.0, 1.35 + 0.55 * sparkPatch, foamHl01);
+    specHighlightsCol *= foamSparkle;
   }
 
   return specHighlightsCol;
@@ -2156,6 +2037,7 @@ void main() {
   // Less aggressive normalization so strong waves can actually warp the UV significantly
   combinedVec = combinedVec / (1.0 + 0.35 * length(combinedVec));
   float m = length(combinedVec);
+  float waveTurb01 = clamp(m, 0.0, 1.0);
   float dirMask = smoothstep(0.01, 0.06, m);
   vec2 combinedN = (m > 1e-6) ? (combinedVec / m) * dirMask : vec2(0.0);
   
@@ -2166,7 +2048,8 @@ void main() {
   vec2 texel = 1.0 / max(uResolution, vec2(1.0));
   float px = clamp(distortionPx, 0.0, 128.0); // increased cap
   float zoom = max(uZoom, 0.001);
-  vec2 offsetUvRaw = combinedN * (px * texel) * amp * zoom;
+  vec2 waveOffsetUv = combinedN * (px * texel) * amp * zoom;
+  vec2 offsetUvRaw = waveOffsetUv;
 
   // Rain distortion
   vec2 rainOffPx = computeRainOffsetPx(worldSceneUv);
@@ -2335,7 +2218,7 @@ void main() {
 
   // Murk
   float murkFactor = 0.0;
-  col = applyMurk(sceneUv, uTime, inside, rawAuth, outdoorStrength, indoorWindMotion, col, murkFactor, combinedShadowLit);
+  col = applyMurk(sceneUv, uWindTime, inside, rawAuth, outdoorStrength, indoorWindMotion, col, murkFactor, combinedShadowLit);
 
   // Tint - use darkening approach instead of brightening
   float sceneDarkness = clamp(uSceneDarkness, 0.0, 1.0);
@@ -2349,7 +2232,17 @@ void main() {
   // Use multiply instead of mix to darken
   col = mix(col, col * darkenedTintColor, k);
 
-  // Caustics (underwater highlight patterns) — V1-accurate ridged-FBM filaments.
+  // Foam sample (before caustics so thick foam can occlude underwater light)
+  float sceneLuma = dot(col, vec3(0.299, 0.587, 0.114));
+  float darkness = clamp(uSceneDarkness, 0.0, 1.0);
+  float splashCombinedCsh = combinedShadowLit;
+  
+  float shoreFoamAmount;
+  FloatingFoamData floatingFoam;
+  getFoamData(sceneUv, shore, inside, rainOffPx, waveGrad, waveTurb01, sceneLuma, darkness, outdoorStrength, indoorWindMotion, false, shoreFoamAmount, floatingFoam);
+  float foamOcclude01 = clamp(1.0 - floatingFoam.amount, 0.0, 1.0);
+
+  // Caustics (underwater highlight patterns) — wave-normal Jacobian focus.
   #ifdef USE_CAUSTICS
   if (uCausticsEnabled > 0.5) {
     float lo = clamp(uCausticsEdgeLo, 0.0, 1.0);
@@ -2366,32 +2259,19 @@ void main() {
     float shoreBoost = clamp(shore, 0.0, 1.0);
     float coverage = max(shallow, mix(baseCoverage, 1.0, shoreBoost));
 
-    // Wave-following caustics:
-    // Use the same UV offset field as refraction (offsetUvRaw) so caustics
-    // visibly "track" wave motion, breaking up regular/parallel patterns.
-    // Wind-aware caustics: bias distortion by how local crest direction aligns
-    // with wind, so caustics "feel" advected in a more coherent direction.
-    float windLen = length(uWindDir);
-    vec2 windBasis = (windLen > 1e-6)
-      ? normalize(vec2(uWindDir.x * sceneAspectW, uWindDir.y))
-      : vec2(1.0, 0.0);
-    float crestsAlign = abs(dot(safeNormalize2(perpG), windBasis)); // perpG ~= crest direction
-    float alignW = mix(0.85, 1.15, crestsAlign);
-
-    float caWarpStrength = (0.16 + 0.28 * crestMod) * alignW;
-    vec2 causticsUv = sceneUv + offsetUvRaw * caWarpStrength;
-    // Add a small perpendicular component for extra breakup without changing
-    // the dominant travel direction.
-    causticsUv += perpG * (px * texel) * amp * 0.06 * (0.35 + 0.65 * crestMod) * alignW;
-
-    float causticsSharpEff = clamp(uCausticsSharpness * (0.55 + 1.25 * crestMod), 0.05, 2.0);
+    float causticsSharpEff = clamp(uCausticsSharpness * (0.55 + 1.25 * crestMod), 0.05, 1.0);
     coverage *= (0.65 + 0.70 * crestMod);
 
-    // V1-accurate dual-layer blend: soft base + sharp detail.
-    // Wind-speed coupling: gustier wind speeds up underwater highlight motion.
-    float wind01 = clamp(uWindSpeed, 0.0, 1.0);
-    float caWind = 1.0 + 0.65 * wind01;
-    float c = causticsPattern(causticsUv, uTime * caWind, uCausticsScale, uCausticsSpeed, causticsSharpEff);
+    // Dual-layer: coarse + fine Jacobian sampling (same wave field, different scale).
+    float cSharp = causticsFromWaveNormals(waveGrad, waveOffsetUv, uCausticsScale, causticsSharpEff, uCausticsSpeed);
+    float cSoft = causticsFromWaveNormals(
+      waveGrad,
+      waveOffsetUv,
+      uCausticsScale * 0.58,
+      max(0.05, causticsSharpEff * 0.35),
+      uCausticsSpeed * 0.65
+    );
+    float c = max(cSharp, cSoft * 0.68);
 
     // V1-accurate cloud-shadow caustics kill.
     float causticsCloudLit = 1.0;
@@ -2417,13 +2297,14 @@ void main() {
     float causticsAmt = clamp(uCausticsIntensity, 0.0, 8.0) * coverage;
     causticsAmt *= edge * causticsCloudLit * brightnessGate * inside;
     causticsAmt *= edgeStability;
+    causticsAmt *= foamOcclude01;
     // Treat caustics as LIGHT (illumination) instead of pigment.
     // WindowLightEffectV2 contributes to the lighting accumulation buffer, then
     // LightingEffect composes as: litColor = albedo * totalIllumination.
     // We approximate that behaviour here by multiplying the current colour by a
     // caustics illumination term, which preserves underlying albedo detail.
     float cLight = c * causticsAmt * 1.35;
-    // Caustics are razor-thin FBM filaments — like extra specular; Kawase-blurred
+    // Caustics are thin wave-focus filaments — like extra specular; Kawase-blurred
     // tiles underneath need the same energy reduction as spec/foam softening.
     cLight *= mix(1.0, 0.10, uFloorDepthBlurWaterSoft);
     vec3 warm = vec3(1.0, 1.0, 0.85);
@@ -2434,20 +2315,7 @@ void main() {
   }
   #endif
 
-  // Foam (pass pre-computed waveGrad to avoid redundant calculateWave call)
-  float sceneLuma = dot(col, vec3(0.299, 0.587, 0.114));
-  float darkness = clamp(uSceneDarkness, 0.0, 1.0);
-
-  // WaterSplashesEffectV2 MS_WATER_SPLASHES_SHADOW_DARKEN_V3: combined shadow at
-  // pixel UV (gl_FragCoord / uResolution), then rgb *= csh and a *= csh. Advanced
-  // floating foam uses this path so it tracks the same grid as bus particles (vUv
-  // can sit off the combined RT in some viewport/post setups).
-  float splashCombinedCsh = combinedShadowLit;
-  
-  float shoreFoamAmount;
-  FloatingFoamData floatingFoam;
-  getFoamData(sceneUv, shore, inside, rainOffPx, waveGrad, sceneLuma, darkness, outdoorStrength, indoorWindMotion, false, shoreFoamAmount, floatingFoam);
-  // Softer foam presence + less pop vs blurred bus (mask still drives physics above).
+  // Foam rendering (amounts sampled above for caustics occlusion)
   float fdbFoam = uFloorDepthBlurWaterSoft;
   float shoreFoamVis = shoreFoamAmount * mix(1.0, 0.58, fdbFoam);
   float floatFoamAmtVis = floatingFoam.amount * mix(1.0, 0.58, fdbFoam);
@@ -2465,7 +2333,7 @@ void main() {
     // Sample foam at offset position for directional shadow
     float shoreFoamShadow;
     FloatingFoamData shadowFoam;
-    getFoamData(shadowUv, shore, inside, rainOffPx, waveGrad, sceneLuma, darkness, outdoorStrength, indoorWindMotion, true, shoreFoamShadow, shadowFoam);
+    getFoamData(shadowUv, shore, inside, rainOffPx, waveGrad, waveTurb01, sceneLuma, darkness, outdoorStrength, indoorWindMotion, true, shoreFoamShadow, shadowFoam);
     
     float shadowDarken = shadowFoam.amount * floatingFoam.shadowStrength;
     shadowDarken *= mix(1.0, 0.22, uFloorDepthBlurWaterSoft);
@@ -2669,7 +2537,6 @@ void main() {
   // High-fidelity roughness modulation:
   // - Increase roughness when the surface is more turbulent (wave distortion energy).
   // - Increase roughness near shore where foam/murk breaks up smooth reflections.
-  float waveTurb01 = clamp(m, 0.0, 1.0);
   float foamAmt = clamp(max(shoreFoamAmount, floatingFoam.amount), 0.0, 1.0);
   float shallow01 = clamp(shore, 0.0, 1.0);
   float dynRough = 0.07 * waveTurb01 + 0.11 * shallow01 + 0.08 * foamAmt;
@@ -2836,8 +2703,8 @@ void main() {
   float skySpecI = mix(0.08, 1.0, skyI);
   vec3 tint = mix(vec3(1.0), skyCol, clamp(uSpecSkyTint, 0.0, 1.0));
   vec3 specCol = spec * tint * skySpecI;
-  // Floating foam should read as diffuse/frothy, not mirror-bright.
-  specCol *= mix(1.0, 0.02, floatFoamCoverageVis);
+  // Foam breaks up mirror reflections; shore + floating both soften open-water spec.
+  specCol *= mix(1.0, 0.14, foamCoverageVis);
   float sClamp = max(0.0, uSpecClamp);
   if (sClamp > 0.0) {
     specCol = min(specCol, vec3(sClamp));
@@ -2850,11 +2717,10 @@ void main() {
   vec3 specHighlightsCol = vec3(0.0);
   if (uSpecHighlightsEnabled > 0.5) {
     specHighlightsCol = calculateSpecularHighlights(
-      sceneUv, inside, N, V, L, NoL, NoV, distInside, edgeStability, shore, 
-      waveGrad, rainOffPx, indoorWindMotion, outdoorStrength, sceneLuma, 
-      darkness, combinedShadow, structuralShadow
+      sceneUv, inside, N, V, L, NoL, NoV, distInside, edgeStability, shore,
+      waveGrad, rainOffPx, indoorWindMotion, outdoorStrength, sceneLuma,
+      darkness, combinedShadow, structuralShadow, foamCoverageVis
     );
-    specHighlightsCol *= mix(1.0, 0.02, floatFoamCoverageVis);
     specHighlightsCol *= specSceneLightMul;
     col += specHighlightsCol;
   }

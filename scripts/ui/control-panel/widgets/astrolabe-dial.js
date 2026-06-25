@@ -297,6 +297,7 @@ export function createAstrolabeDial(opts) {
   const RING_INNER_R = R_OUTER * 0.36;
   const RING_OUTER_R = R_OUTER;
   const WIND_SOCK_REACH = RING_INNER_R + (RING_OUTER_R - RING_INNER_R) * 0.48;
+  const windSockMaxH = Math.round(WIND_SOCK_REACH * 1.12);
 
   const container = document.createElement('div');
   container.className = 'msa-cp-astrolabe hero-dial-container';
@@ -380,6 +381,7 @@ export function createAstrolabeDial(opts) {
 
   const windArrowWrap = document.createElement('div');
   windArrowWrap.className = 'msa-cp-astrolabe__wind-arrow-wrap';
+  windArrowWrap.style.setProperty('--wind-arrow-height', `${windSockMaxH}px`);
   windArrowWrap.innerHTML = WIND_ARROW_SVG;
 
   const windGrab = document.createElement('div');
@@ -389,8 +391,11 @@ export function createAstrolabeDial(opts) {
 
   const windArrowTarget = document.createElement('div');
   windArrowTarget.className = 'msa-cp-astrolabe__wind-arrow-wrap msa-cp-astrolabe__wind-arrow-wrap--target';
+  windArrowTarget.style.setProperty('--wind-arrow-height', `${windSockMaxH}px`);
   windArrowTarget.innerHTML = WIND_ARROW_SVG;
   windArrowTarget.hidden = true;
+  let lastWindTargetScale = NaN;
+  let lastWindTargetVisualDeg = NaN;
 
   windDisc.appendChild(windArrowTarget);
   windDisc.appendChild(windArrowWrap);
@@ -418,6 +423,13 @@ export function createAstrolabeDial(opts) {
   let gustPulse = 0;
   let displayVisualDeg = 0;
   let displayVisualInitialized = false;
+  const windSockMinScale = 0.82 / 1.12;
+  let lastWindArrowScale = NaN;
+  let lastWindVisualDeg = NaN;
+  let lastWindHeat = '';
+  let lastWindGust = '';
+  let lastWindSurging = false;
+  let lastWindGusting = false;
 
   const setDialHint = (text) => {
     try {
@@ -446,20 +458,39 @@ export function createAstrolabeDial(opts) {
     const liveNorm = Number.isFinite(liveSpeedMS)
       ? Math.max(0, Math.min(1, liveSpeedMS / maxSpeed))
       : Math.max(0, Math.min(1, wind01));
-    const minH = Math.round(WIND_SOCK_REACH * 0.82);
-    const maxH = Math.round(WIND_SOCK_REACH * 1.12);
-    const arrowH = minH + liveNorm * (maxH - minH);
+    const scaleY = windSockMinScale + liveNorm * (1 - windSockMinScale);
     const visualDeg = aimWindVisualRotation(directionDeg);
 
-    windArrowWrap.style.transform = `translate(-50%, -100%) rotate(${visualDeg}deg)`;
-    windArrowWrap.style.setProperty('--wind-arrow-height', `${arrowH}px`);
+    if (Math.abs(visualDeg - lastWindVisualDeg) > 0.05) {
+      windArrowWrap.style.transform = `translate(-50%, -100%) rotate(${visualDeg}deg)`;
+      lastWindVisualDeg = visualDeg;
+    }
+    if (Math.abs(scaleY - lastWindArrowScale) > 0.004) {
+      windArrowWrap.style.setProperty('--wind-arrow-scale', scaleY.toFixed(3));
+      lastWindArrowScale = scaleY;
+    }
 
     const targetMS = wind01 * maxSpeed;
     const surge = Number.isFinite(liveSpeedMS) && Math.abs(liveSpeedMS - targetMS) > 2.5;
-    windArrowWrap.dataset.heat = wind01 < 0.35 ? 'low' : wind01 < 0.65 ? 'mid' : 'high';
-    windArrowWrap.dataset.gust = wind01 >= 0.75 ? 'high' : wind01 >= 0.4 ? 'mid' : 'low';
-    windArrowWrap.classList.toggle('is-surging', surge);
-    windArrowWrap.classList.toggle('is-gusting', gustPulse > 0.35 || surge);
+    const gusting = gustPulse > 0.35;
+    const heat = wind01 < 0.35 ? 'low' : wind01 < 0.65 ? 'mid' : 'high';
+    const gust = wind01 >= 0.75 ? 'high' : wind01 >= 0.4 ? 'mid' : 'low';
+    if (heat !== lastWindHeat) {
+      windArrowWrap.dataset.heat = heat;
+      lastWindHeat = heat;
+    }
+    if (gust !== lastWindGust) {
+      windArrowWrap.dataset.gust = gust;
+      lastWindGust = gust;
+    }
+    if (surge !== lastWindSurging) {
+      windArrowWrap.classList.toggle('is-surging', surge);
+      lastWindSurging = surge;
+    }
+    if (gusting !== lastWindGusting) {
+      windArrowWrap.classList.toggle('is-gusting', gusting);
+      lastWindGusting = gusting;
+    }
   };
 
   const applyWindTargetVisuals = (targetDir, targetSpeedMS) => {
@@ -468,11 +499,16 @@ export function createAstrolabeDial(opts) {
       return;
     }
     const norm = Math.max(0, Math.min(1, Number(targetSpeedMS) / maxSpeed));
-    const minH = Math.round(WIND_SOCK_REACH * 0.82);
-    const maxH = Math.round(WIND_SOCK_REACH * 1.12);
-    const arrowH = minH + norm * (maxH - minH);
-    windArrowTarget.style.transform = `translate(-50%, -100%) rotate(${windDegToVisualDeg(Number(targetDir))}deg)`;
-    windArrowTarget.style.setProperty('--wind-arrow-height', `${arrowH}px`);
+    const scaleY = windSockMinScale + norm * (1 - windSockMinScale);
+    const targetVisualDeg = windDegToVisualDeg(Number(targetDir));
+    if (Math.abs(targetVisualDeg - lastWindTargetVisualDeg) > 0.05) {
+      windArrowTarget.style.transform = `translate(-50%, -100%) rotate(${targetVisualDeg}deg)`;
+      lastWindTargetVisualDeg = targetVisualDeg;
+    }
+    if (Math.abs(scaleY - lastWindTargetScale) > 0.004) {
+      windArrowTarget.style.setProperty('--wind-arrow-scale', scaleY.toFixed(3));
+      lastWindTargetScale = scaleY;
+    }
     windArrowTarget.hidden = false;
   };
 

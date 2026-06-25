@@ -2186,6 +2186,8 @@ function sampleMapPointFireOutdoorAtWorld(worldX, worldY, ownerEffect, floorInde
 
 /** Reused footprint offset tables keyed by `${tapCount}:${roundedRadius}`. */
 const _fireFootprintOffsetCache = new Map();
+const MAX_FIRE_FOOTPRINT_OFFSET_CACHE = 96;
+const FIRE_SHELTER_SAMPLE_OPTS = { shelterBias: true };
 
 /**
  * Normalize tap count for JS-side outdoors footprint sampling (1, 4, or 5 — no 9-tap).
@@ -2241,7 +2243,45 @@ function fireFootprintOffsets(particleSize, tapCount = 1) {
     ];
   }
   _fireFootprintOffsetCache.set(cacheKey, offsets);
+  if (_fireFootprintOffsetCache.size > MAX_FIRE_FOOTPRINT_OFFSET_CACHE) {
+    for (const oldestKey of _fireFootprintOffsetCache.keys()) {
+      if (oldestKey === 'c:0') continue;
+      _fireFootprintOffsetCache.delete(oldestKey);
+      break;
+    }
+  }
   return offsets;
+}
+
+function resolveFireOutdoorFootprintMinFromSnapshotWithTapCount(
+  snap,
+  sceneBounds,
+  worldX,
+  worldY,
+  particleSize,
+  tapCount,
+) {
+  if (!Number.isFinite(worldX) || !Number.isFinite(worldY)) return 1.0;
+  if (!snap?.hasOutdoorsMask || !snap.outdoorsMaskData || !(sceneBounds?.sw > 0 && sceneBounds?.sh > 0)) return 1.0;
+
+  const offsets = fireFootprintOffsets(particleSize, tapCount);
+  let minOutdoor = 1.0;
+  let gotSample = false;
+
+  for (let i = 0; i < offsets.length; i++) {
+    const off = offsets[i];
+    const s = sampleOutdoorsFromSnapshot(
+      snap,
+      worldX + off[0],
+      worldY + off[1],
+      sceneBounds,
+      FIRE_SHELTER_SAMPLE_OPTS,
+    );
+    if (s == null || !Number.isFinite(s)) continue;
+    gotSample = true;
+    if (s < minOutdoor) minOutdoor = s;
+  }
+  return gotSample ? clamp01(minOutdoor) : 1.0;
 }
 
 /**
@@ -2263,25 +2303,15 @@ export function resolveFireOutdoorFootprintMinFromSnapshot(
   particleSize = 0,
   opts = {},
 ) {
-  if (!Number.isFinite(worldX) || !Number.isFinite(worldY)) return 1.0;
   const tapCount = normalizeFireFootprintTapCount(opts.tapCount);
-  const offsets = fireFootprintOffsets(particleSize, tapCount);
-  const sampleOpts = { shelterBias: true };
-
-  let minOutdoor = 1.0;
-  let gotSample = false;
-
-  if (snap?.hasOutdoorsMask && snap.outdoorsMaskData && sceneBounds?.sw > 0 && sceneBounds?.sh > 0) {
-    for (const [ox, oy] of offsets) {
-      const s = sampleOutdoorsFromSnapshot(snap, worldX + ox, worldY + oy, sceneBounds, sampleOpts);
-      if (s == null || !Number.isFinite(s)) continue;
-      gotSample = true;
-      if (s < minOutdoor) minOutdoor = s;
-    }
-    if (gotSample) return clamp01(minOutdoor);
-  }
-
-  return 1.0;
+  return resolveFireOutdoorFootprintMinFromSnapshotWithTapCount(
+    snap,
+    sceneBounds,
+    worldX,
+    worldY,
+    particleSize,
+    tapCount,
+  );
 }
 
 /**
@@ -2298,12 +2328,34 @@ export function resolveFireOutdoorFootprintMinFromSnapshot(
  */
 export function resolveFireOutdoorFootprintMin(worldX, worldY, particleSize, ownerEffect, floorIndex = 0, opts = {}) {
   const tapCount = normalizeFireFootprintTapCount(opts.tapCount);
-  const offsets = fireFootprintOffsets(particleSize, tapCount);
+  if (!Number.isFinite(worldX) || !Number.isFinite(worldY)) return 1.0;
+
+  const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Math.floor(Number(floorIndex))) : 0;
+  const sceneBounds = resolveFireSceneBounds(ownerEffect);
+  if (!sceneBounds || !(sceneBounds.sw > 0 && sceneBounds.sh > 0)) return 1.0;
+
+  const frameToken = ownerEffect?._outdoorsMaskFrameToken ?? 0;
+  const levelContext = window.MapShine?.activeLevelContext ?? null;
+  try {
+    const snap = syncSharedOutdoorsMaskForFloor(fi, frameToken, levelContext);
+    if (snap?.hasOutdoorsMask && snap.outdoorsMaskData) {
+      return resolveFireOutdoorFootprintMinFromSnapshotWithTapCount(
+        snap,
+        sceneBounds,
+        worldX,
+        worldY,
+        particleSize,
+        tapCount,
+      );
+    }
+  } catch (_) {}
 
   let minOutdoor = 1.0;
   let gotSample = false;
-  for (const [ox, oy] of offsets) {
-    const s = sampleFireOutdoorsAtWorld(worldX + ox, worldY + oy, ownerEffect, floorIndex);
+  const offsets = fireFootprintOffsets(particleSize, tapCount);
+  for (let i = 0; i < offsets.length; i++) {
+    const off = offsets[i];
+    const s = sampleFireOutdoorsAtWorld(worldX + off[0], worldY + off[1], ownerEffect, fi);
     if (s == null || !Number.isFinite(s)) continue;
     gotSample = true;
     if (s < minOutdoor) minOutdoor = s;
@@ -2404,9 +2456,41 @@ export function computeFireZoneContainmentMask(spawnOutdoor, currentOutdoor) {
  * @param {object|null|undefined} ownerEffect
  * @param {object|null|undefined} [system]
  * @param {number} [indoorSuppression=0] indoorSmokeSuppression / indoorEmberSuppression param
+ * @param {number|null} [currentOutdoorOverride=null]
+ * @param {number|null} [footprintSize=null]
+ * @param {{ spawnOutdoor?: number, currentOutdoor?: number, zoneMask?: number, indoorScale?: number, visualMask?: number }} [target]
  * @returns {{ spawnOutdoor: number, currentOutdoor: number, zoneMask: number, indoorScale: number, visualMask: number }}
  */
 export function resolveFireParticleVisualMask(
+  particle,
+  ownerEffect,
+  system = null,
+  indoorSuppression = 0,
+  currentOutdoorOverride = null,
+  footprintSize = null,
+  target = null,
+) {
+  const spawnOutdoor = readParticleSpawnOutdoor(particle);
+  const currentOutdoor = Number.isFinite(currentOutdoorOverride)
+    ? clamp01(currentOutdoorOverride)
+    : readFireParticleOutdoorAtSize(particle, ownerEffect, system, footprintSize);
+  const zoneMask = particle?._msMapPointAuthoredFire
+    ? 1.0
+    : computeFireZoneContainmentMask(spawnOutdoor, currentOutdoor);
+  const indoorScale = indoorSuppression > 0
+    ? computeIndoorSuppressionScale(indoorSuppression, currentOutdoor)
+    : 1.0;
+  const visualMask = zoneMask * (indoorSuppression > 0 ? indoorScale : 1.0);
+  const out = target ?? {};
+  out.spawnOutdoor = spawnOutdoor;
+  out.currentOutdoor = currentOutdoor;
+  out.zoneMask = zoneMask;
+  out.indoorScale = indoorScale;
+  out.visualMask = visualMask;
+  return out;
+}
+
+function resolveFireParticleVisualMaskValue(
   particle,
   ownerEffect,
   system = null,
@@ -2421,17 +2505,8 @@ export function resolveFireParticleVisualMask(
   const zoneMask = particle?._msMapPointAuthoredFire
     ? 1.0
     : computeFireZoneContainmentMask(spawnOutdoor, currentOutdoor);
-  const indoorScale = indoorSuppression > 0
-    ? computeIndoorSuppressionScale(indoorSuppression, currentOutdoor)
-    : 1.0;
-  const visualMask = zoneMask * (indoorSuppression > 0 ? indoorScale : 1.0);
-  return {
-    spawnOutdoor,
-    currentOutdoor,
-    zoneMask,
-    indoorScale,
-    visualMask,
-  };
+  if (indoorSuppression <= 0) return zoneMask;
+  return zoneMask * computeIndoorSuppressionScale(indoorSuppression, currentOutdoor);
 }
 
 /**
@@ -2451,14 +2526,14 @@ export function resolveFireParticleVisualMaskSmoothed(
   smoothRate = 0.14,
   footprintSize = null,
 ) {
-  const target = resolveFireParticleVisualMask(
+  const target = resolveFireParticleVisualMaskValue(
     particle,
     ownerEffect,
     system,
     indoorSuppression,
     null,
     footprintSize,
-  ).visualMask;
+  );
   return smoothParticleVisualMask(particle, target, smoothRate);
 }
 
@@ -2504,13 +2579,13 @@ export function syncFireParticleOutdoorFootprint(
 
   const footprint = particle._msMapPointAuthoredFire
     ? sampleMapPointFireOutdoorAtWorld(wx, wy, ownerEffect, fi)
-    : resolveFireOutdoorFootprintMinFromSnapshot(
+    : resolveFireOutdoorFootprintMinFromSnapshotWithTapCount(
       snap,
       bounds,
       wx,
       wy,
       particle.size,
-      { tapCount },
+      tapCount,
     );
   particle._msCurrentOutdoorFootprint = footprint;
   particle._msOutdoorFrameToken = ownerEffect._outdoorsMaskFrameToken ?? 0;
@@ -2522,7 +2597,7 @@ export function syncFireParticleOutdoorFootprint(
     indoorSuppression = ownerEffect.params?.indoorEmberSuppression ?? 0;
   }
 
-  const { visualMask } = resolveFireParticleVisualMask(
+  const visualMask = resolveFireParticleVisualMaskValue(
     particle,
     ownerEffect,
     system,
@@ -2576,13 +2651,13 @@ export function cacheFireParticleOutdoorFootprintForWind(
   if (!Number.isFinite(wx) || !Number.isFinite(wy)) return;
   const tapCount = normalizeFireFootprintTapCount(opts.tapCount ?? 5);
   const bounds = sceneBounds ?? resolveFireSceneBounds(ownerEffect);
-  const footprint = resolveFireOutdoorFootprintMinFromSnapshot(
+  const footprint = resolveFireOutdoorFootprintMinFromSnapshotWithTapCount(
     snap,
     bounds,
     wx,
     wy,
     particle.size,
-    { tapCount },
+    tapCount,
   );
   particle._msCurrentOutdoorFootprint = footprint;
   particle._msOutdoorFrameToken = ownerEffect._outdoorsMaskFrameToken ?? 0;
@@ -2614,7 +2689,7 @@ export function applyFireShelterMaskToParticle(particle, system, smoothRate = 0.
     ? (particle._smokeStartSize ?? particle.size)
     : particle.size;
 
-  const { visualMask } = resolveFireParticleVisualMask(
+  const visualMask = resolveFireParticleVisualMaskValue(
     particle,
     owner,
     system,

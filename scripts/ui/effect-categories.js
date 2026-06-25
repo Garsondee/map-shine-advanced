@@ -17,17 +17,17 @@ export const EFFECT_CATEGORY_ORDER = Object.freeze([
 
 /** @type {Readonly<Record<string, string>>} */
 export const EFFECT_CATEGORY_TITLES = Object.freeze({
-  gameplay: 'Gameplay & Interaction',
-  lighting: 'Lighting & Shadows',
-  atmospheric: 'Atmosphere & Weather',
-  surface: 'Surface & Materials',
-  particle: 'Particles & VFX',
-  post: 'Camera & Post',
-  debug: 'Developer Tools',
+  gameplay: '🎮 Gameplay & Interaction',
+  lighting: '☀️ Lighting & Shadows',
+  atmospheric: '🌦️ Atmosphere & Weather',
+  surface: '🪨 Surface & Materials',
+  particle: '✨ Particles & VFX',
+  post: '📷 Camera & Post',
+  debug: '🔧 Developer Tools',
   /** Legacy IDs still referenced by schema groups or saved UI state. */
-  water: 'Water',
-  ash: 'Ash',
-  global: 'Camera & Post',
+  water: '💧 Water',
+  ash: '🌋 Ash',
+  global: '📷 Camera & Post',
 });
 
 /**

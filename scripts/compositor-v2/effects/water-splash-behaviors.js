@@ -26,6 +26,11 @@ import { resolveEffectWindParticleDrift } from './resolve-effect-wind.js';
 const PAINTED_SHADOW_SPAWN_OPEN_THRESHOLD = 0.35;
 const PAINTED_SHADOW_SPAWN_ATTEMPTS = 8;
 
+function getMapShineFrameId() {
+  const frameId = Number(window.MapShine?.renderLoop?.frameCount);
+  return Number.isFinite(frameId) ? frameId : -1;
+}
+
 /**
  * Scene UV spawn openness from authored _Shadow mask (matches rain CPU gate).
  * @param {number} u - 0..1 scene U
@@ -692,14 +697,14 @@ export function classifyOutdoorsMaskTexel8(r8, g8, b8, a8) {
  * @param {object|null} [levelContext=null]
  * @returns {string|null}
  */
-function resolveOutdoorsFloorKeyForSampling(compositor, floorIndex, levelContext = null) {
+function resolveOutdoorsFloorKeyForSampling(compositor, floorIndex, levelContext = null, collected = null) {
   const fi = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
   if (!compositor) return null;
 
   const ctx = levelContext ?? window.MapShine?.activeLevelContext ?? null;
-  const { uniqueKeys } = collectCompositorFloorCandidateKeys(compositor, ctx);
+  const { uniqueKeys } = collected ?? collectCompositorFloorCandidateKeys(compositor, ctx);
   /** @type {string[]} */
-  const keys = [...uniqueKeys];
+  const keys = uniqueKeys.slice();
 
   try {
     const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
@@ -893,13 +898,20 @@ function splashOutdoorsWindDriftMul(outdoorStrength) {
  */
 export function syncSharedOutdoorsMaskForFloor(floorIndex, frameToken, levelContext = null) {
   const fi = Number.isFinite(Number(floorIndex)) ? Number(floorIndex) : 0;
+  const prev = _sharedOutdoorsByFloor.get(fi);
+  const frameId = getMapShineFrameId();
   const compositor = resolveSceneMaskCompositor();
   const compositorGen = Number(compositor?.getFloorCacheVersion?.() ?? 0);
-  const ctx = levelContext ?? window.MapShine?.activeLevelContext ?? null;
-  const { ctxBandKey } = collectCompositorFloorCandidateKeys(compositor, ctx);
-  const floorKey = resolveOutdoorsFloorKeyForSampling(compositor, fi, ctx) ?? 'none';
+  if (prev && frameId >= 0 && prev.frameId === frameId && prev.compositorGen === compositorGen) {
+    prev.frameToken = frameToken;
+    return prev;
+  }
 
-  const prev = _sharedOutdoorsByFloor.get(fi);
+  const ctx = levelContext ?? window.MapShine?.activeLevelContext ?? null;
+  const collected = collectCompositorFloorCandidateKeys(compositor, ctx);
+  const { ctxBandKey } = collected;
+  const floorKey = resolveOutdoorsFloorKeyForSampling(compositor, fi, ctx, collected) ?? 'none';
+
   const renderer = window.MapShine?.renderer;
   if (renderer?.getRenderTarget?.()) {
     return prev ?? EMPTY_OUTDOORS_SNAPSHOT;
@@ -925,6 +937,7 @@ export function syncSharedOutdoorsMaskForFloor(floorIndex, frameToken, levelCont
     outdoorsMaskGpuRowOrder: false,
     indoorSuppressionStrength: 0.0,
     frameToken,
+    frameId,
     compositorGen,
     floorKey,
     ctxBandKey,

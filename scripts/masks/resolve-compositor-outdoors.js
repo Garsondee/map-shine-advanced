@@ -37,6 +37,13 @@ function levelsBandKeyFromContext(ctx) {
   return `${b}:${t ?? ''}`;
 }
 
+function floorKeyBottom(key) {
+  const s = String(key ?? '');
+  if (s === '') return Number.NaN;
+  const colon = s.indexOf(':');
+  return Number(colon >= 0 ? s.slice(0, colon) : s);
+}
+
 /**
  * Canonical ordered floor keys to try against GpuSceneMaskCompositor for the viewed band,
  * aligned with `_Outdoors` resolution (stack → context gate → `_activeFloorKey`).
@@ -90,7 +97,12 @@ export function collectCompositorFloorCandidateKeys(compositor = null, levelCont
     }
   }
 
-  const uniqueKeys = [...new Set(candidateKeys.filter(Boolean))];
+  const uniqueKeys = [];
+  for (let i = 0; i < candidateKeys.length; i++) {
+    const key = candidateKeys[i];
+    if (!key || uniqueKeys.includes(key)) continue;
+    uniqueKeys.push(key);
+  }
   return { uniqueKeys, activeFloor, ctx, ctxBandKey, multiFloor, cb };
 }
 
@@ -106,7 +118,8 @@ export function collectCompositorFloorCandidateKeys(compositor = null, levelCont
  */
 export function siblingFloorKeysMatchingBottom(compositor, siblingBottom, exclude = []) {
   if (!compositor || !Number.isFinite(siblingBottom)) return [];
-  const ex = new Set(exclude.map(String));
+  const ex = new Set();
+  for (let i = 0; i < exclude.length; i++) ex.add(String(exclude[i]));
   /** @type {Set<string>} */
   const keySet = new Set();
   try {
@@ -119,9 +132,13 @@ export function siblingFloorKeysMatchingBottom(compositor, siblingBottom, exclud
       for (const k of compositor._floorCache.keys()) keySet.add(String(k));
     }
   } catch (_) {}
-  return [...keySet]
-    .filter((key) => Number(String(key).split(':')[0]) === siblingBottom && !ex.has(key))
-    .sort();
+  const out = [];
+  for (const key of keySet) {
+    if (ex.has(key)) continue;
+    if (floorKeyBottom(key) === siblingBottom) out.push(key);
+  }
+  out.sort();
+  return out;
 }
 
 /**
@@ -386,7 +403,7 @@ export function resolveCompositorOutdoorsTexture(compositor, levelContext = null
       let gb = Infinity;
       try {
         for (const [key] of compositor._floorMeta) {
-          const kb = Number(String(key).split(':')[0]);
+          const kb = floorKeyBottom(key);
           if (Number.isFinite(kb) && kb < gb) {
             gb = kb;
             gk = key;
@@ -405,7 +422,7 @@ export function resolveCompositorOutdoorsTexture(compositor, levelContext = null
       if (compositor._floorMeta && typeof compositor._floorMeta.keys === 'function') {
         for (const k of compositor._floorMeta.keys()) {
           const key = String(k);
-          const kb = Number(key.split(':')[0]);
+          const kb = floorKeyBottom(key);
           if (Number.isFinite(kb)) keyed.push({ key, bottom: kb });
         }
       }
@@ -414,14 +431,25 @@ export function resolveCompositorOutdoorsTexture(compositor, levelContext = null
       if (compositor._floorCache && typeof compositor._floorCache.keys === 'function') {
         for (const k of compositor._floorCache.keys()) {
           const key = String(k);
-          const kb = Number(key.split(':')[0]);
+          const kb = floorKeyBottom(key);
           if (Number.isFinite(kb)) keyed.push({ key, bottom: kb });
         }
       }
     } catch (_) {}
-    const uniqueSorted = [...new Map(keyed.map((r) => [r.key, r])).values()]
-      .filter((r) => r.bottom <= activeBottom)
-      .sort((a, b) => b.bottom - a.bottom);
+    const uniqueSorted = [];
+    for (let i = 0; i < keyed.length; i++) {
+      const row = keyed[i];
+      if (row.bottom > activeBottom) continue;
+      let exists = false;
+      for (let j = 0; j < uniqueSorted.length; j++) {
+        if (uniqueSorted[j].key === row.key) {
+          exists = true;
+          break;
+        }
+      }
+      if (!exists) uniqueSorted.push(row);
+    }
+    uniqueSorted.sort((a, b) => b.bottom - a.bottom);
     for (const row of uniqueSorted) {
       if (uniqueKeys.includes(row.key)) continue;
       tex = tryKey(row.key);

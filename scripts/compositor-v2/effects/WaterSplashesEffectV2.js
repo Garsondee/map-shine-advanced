@@ -71,7 +71,7 @@ import {
   GROUND_Z,
   effectUnderOverheadOrder,
 } from '../LayerOrderPolicy.js';
-import { resolveEffectWindParticleDrift } from './resolve-effect-wind.js';
+import { resolveEffectWindParticleDrift, resolveWaterMasterFlowSpeed } from './resolve-effect-wind.js';
 import { getTileBusPlaneSizeAndMirror, getTileVisualCenterFoundryXY } from '../../scene/tile-manager.js';
 import {
   SPLASH_OCCLUSION_MASK_MARKER,
@@ -2271,7 +2271,8 @@ export class WaterSplashesEffectV2 {
     const clampedDelta = Math.min(deltaSec, 0.1);
     const simSpeed = (weatherController && typeof weatherController.simulationSpeed === 'number')
       ? weatherController.simulationSpeed : 2.0;
-    const dt = clampedDelta * 0.001 * 750 * simSpeed;
+    const masterFlow = resolveWaterMasterFlowSpeed();
+    const dt = clampedDelta * 0.001 * 750 * simSpeed * masterFlow;
 
     // View-dependent spawn concentration is disabled.
     // It set _msEmissionScaleDynamic=0.0 for out-of-view buckets; since 0??fallback

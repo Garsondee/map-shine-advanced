@@ -6168,7 +6168,8 @@ body.map-shine-cinematic-player-hide-ui #map-shine-overlay-root {
   z-index: 11;
   color: var(--msa-cp-accent);
   filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.65)) drop-shadow(0 0 8px var(--msa-cp-accent-dim));
-  transition: height 0.15s ease, color 0.2s, filter 0.2s;
+  contain: layout style paint;
+  transition: color 0.2s;
 }
 
 .msa-cp-astrolabe__wind-grab {
@@ -6221,20 +6222,25 @@ body.map-shine-cinematic-player-hide-ui #map-shine-overlay-root {
   filter: drop-shadow(0 0 6px rgba(231, 76, 60, 0.5));
 }
 
-.msa-cp-astrolabe__wind-arrow-wrap.is-surging,
-.msa-cp-astrolabe__wind-arrow-wrap.is-gusting {
-  animation: msaCpWindGust 0.85s ease-in-out infinite alternate;
+.msa-cp-astrolabe__wind-arrow-wrap.is-gusting:not(.is-surging) .msa-cp-astrolabe__wind-arrow-svg {
+  opacity: 0.94;
 }
 
-@keyframes msaCpWindGust {
-  from { filter: drop-shadow(0 0 4px var(--msa-cp-accent-dim)); opacity: 0.88; }
-  to { filter: drop-shadow(0 0 10px rgba(90, 200, 250, 0.65)); opacity: 1; }
+.msa-cp-astrolabe__wind-arrow-wrap.is-surging .msa-cp-astrolabe__wind-arrow-svg {
+  animation: msaCpWindGustPulse 0.85s ease-in-out infinite alternate;
+}
+
+@keyframes msaCpWindGustPulse {
+  from { opacity: 0.82; }
+  to { opacity: 1; }
 }
 
 .msa-cp-astrolabe__wind-arrow-svg {
   width: 100%;
   height: 100%;
   display: block;
+  transform: scaleY(var(--wind-arrow-scale, 1));
+  transform-origin: 50% 100%;
 }
 
 .msa-cp-astrolabe__gust-hub {

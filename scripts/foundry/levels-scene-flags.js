@@ -6,6 +6,8 @@
  * helpers only and are no longer authoritative at runtime.
  */
 
+import { resolveFloorIndexForElevation } from '../ui/levels-editor/level-boundaries.js';
+
 // ---------------------------------------------------------------------------
 //  V14-native scene level readers
 // ---------------------------------------------------------------------------
@@ -600,6 +602,157 @@ export function resolveV14NativeDocFloorIndexMin(doc, scene = globalThis.canvas?
     if (isDocMemberOfV14LevelSet(docObj, lid) && i < best) best = i;
   }
   return Number.isFinite(best) ? best : null;
+}
+
+/**
+ * Highest FloorStack index for a document's V14 level membership.
+ * Prefer this over {@link resolveV14NativeDocFloorIndexMin} for tiles that still
+ * carry a ground-level id in `levels` while fire/art is authored upstairs.
+ *
+ * @param {foundry.documents.BaseDocument|object|null|undefined} doc
+ * @param {Scene|null|undefined} [scene=globalThis.canvas?.scene]
+ * @returns {number|null}
+ */
+export function resolveV14NativeDocFloorIndexMax(doc, scene = globalThis.canvas?.scene) {
+  if (!hasV14NativeLevels(scene)) return null;
+  const docObj = doc?.document ?? doc;
+  if (!docObj) return null;
+
+  const singleLevel = docObj.level ?? docObj._source?.level;
+  const hasLevelSingular = typeof singleLevel === 'string' && singleLevel.length > 0;
+  const levelsSet = docObj.levels;
+  const hasLevelsSet = levelsSet && levelsSet.size > 0;
+  if (!hasLevelSingular && !hasLevelsSet) return null;
+
+  const sorted = [...readV14SceneLevels(scene)].sort((a, b) => {
+    const ab = Number(a.bottom);
+    const bb = Number(b.bottom);
+    const fa = Number.isFinite(ab) ? ab : 0;
+    const fb = Number.isFinite(bb) ? bb : 0;
+    return fa - fb;
+  });
+  if (!sorted.length) return null;
+
+  if (hasLevelSingular) {
+    for (let i = 0; i < sorted.length; i++) {
+      if (sorted[i]?.levelId === singleLevel) return i;
+    }
+    return null;
+  }
+
+  let best = -1;
+  for (let i = 0; i < sorted.length; i++) {
+    const lid = sorted[i]?.levelId;
+    if (!lid) continue;
+    if (isDocMemberOfV14LevelSet(docObj, lid) && i > best) best = i;
+  }
+  return best >= 0 ? best : null;
+}
+
+/**
+ * Resolve a FloorStack band's level background src without requiring `levelId`
+ * on the band (match elevation range to native Level docs when needed).
+ *
+ * @param {{ levelId?: string|null, elevationMin?: number, elevationMax?: number }|null|undefined} floor
+ * @param {Scene|null|undefined} [scene=globalThis.canvas?.scene]
+ * @returns {string}
+ */
+export function resolveBackgroundSrcForFloorBand(floor, scene = globalThis.canvas?.scene) {
+  if (!floor || !scene) return '';
+  const lid = floor.levelId;
+  if (typeof lid === 'string' && lid.length > 0) {
+    try {
+      const src = scene.levels?.get?.(lid)?.background?.src;
+      if (typeof src === 'string' && src.trim()) return src.trim();
+    } catch (_) {}
+  }
+  if (!hasV14NativeLevels(scene)) return '';
+  const eMin = Number(floor.elevationMin);
+  const eMax = Number(floor.elevationMax);
+  if (!Number.isFinite(eMin) || !Number.isFinite(eMax)) return '';
+  try {
+    for (const lvl of readV14SceneLevels(scene)) {
+      const bottom = Number(lvl.bottom);
+      const top = Number(lvl.top);
+      if (!Number.isFinite(bottom) || !Number.isFinite(top)) continue;
+      if (bottom !== eMin || top !== eMax) continue;
+      const levelId = lvl.levelId;
+      if (!levelId) continue;
+      const src = scene.levels?.get?.(levelId)?.background?.src;
+      if (typeof src === 'string' && src.trim()) return src.trim();
+    }
+  } catch (_) {}
+  return '';
+}
+
+/**
+ * Resolve which FloorStack band a tile document belongs to.
+ * Uses the **highest** matching level index so upper-floor `_Fire` is not
+ * mis-assigned to ground when a tile still lists a ground level id.
+ *
+ * @param {foundry.documents.BaseTile|object|null|undefined} tileDoc
+ * @param {Array<{ elevationMin?: number, elevationMax?: number, levelId?: string|null }>} floors
+ * @param {Scene|null|undefined} [scene=globalThis.canvas?.scene]
+ * @returns {number}
+ */
+export function resolveTileFloorStackIndex(tileDoc, floors, scene = globalThis.canvas?.scene) {
+  if (!floors || floors.length <= 1) return 0;
+
+  if (tileHasLevelsRange(tileDoc)) {
+    const flags = readTileLevelsFlags(tileDoc);
+    const tileBottom = Number(flags.rangeBottom);
+    const tileTop = Number(flags.rangeTop);
+    const tileMid = (tileBottom + tileTop) / 2;
+
+    let bestIdx = -1;
+    for (let i = 0; i < floors.length; i++) {
+      const f = floors[i];
+      if (tileMid >= f.elevationMin && tileMid < f.elevationMax) {
+        bestIdx = Math.max(bestIdx, i);
+      }
+    }
+    if (bestIdx >= 0) return bestIdx;
+
+    bestIdx = -1;
+    for (let i = 0; i < floors.length; i++) {
+      const f = floors[i];
+      if (tileBottom <= f.elevationMax && f.elevationMin <= tileTop) {
+        bestIdx = Math.max(bestIdx, i);
+      }
+    }
+    if (bestIdx >= 0) return bestIdx;
+  }
+
+  const v14Idx = resolveV14NativeDocFloorIndexMax(tileDoc, scene);
+  if (v14Idx !== null) return v14Idx;
+
+  try {
+    if (hasV14NativeLevels(scene)) {
+      const singleLevel = tileDoc?.level ?? tileDoc?._source?.level;
+      if (typeof singleLevel === 'string' && singleLevel.length > 0) {
+        for (let i = floors.length - 1; i >= 0; i -= 1) {
+          if (floors[i].levelId === singleLevel) return i;
+        }
+      }
+      const levelsSet = tileDoc?.levels;
+      if (levelsSet?.size) {
+        let bestIdx = -1;
+        for (const lid of levelsSet) {
+          const stackIdx = resolveV14LevelIdToFloorStackIndex(scene, lid);
+          if (stackIdx !== null) bestIdx = Math.max(bestIdx, stackIdx);
+          for (let i = floors.length - 1; i >= 0; i -= 1) {
+            if (floors[i].levelId === lid) bestIdx = Math.max(bestIdx, i);
+          }
+        }
+        if (bestIdx >= 0) return bestIdx;
+      }
+    }
+  } catch (_) {}
+
+  const elev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
+  const byElev = resolveFloorIndexForElevation(elev, floors);
+  if (byElev >= 0) return byElev;
+  return 0;
 }
 
 // ---------------------------------------------------------------------------

@@ -275,6 +275,10 @@ function _scheduleDeferredFloorPreload(sceneDoc, preloadOpts) {
       if (!compositor || !sceneDoc || typeof compositor.preloadAllFloors !== 'function') return;
       log.info('V2: background preloadAllFloors (remaining level bands)');
       await compositor.preloadAllFloors(sceneDoc, preloadOpts);
+      try {
+        const maxFi = window.MapShine?.floorStack?.getActiveFloor?.()?.index;
+        window.MapShine?.fireEffectV2?.scheduleMissingFloorCompositorRebuild?.(maxFi);
+      } catch (_) {}
     }, 'v2.preloadAllFloors.deferred', Severity.COSMETIC);
   };
   if (typeof requestIdleCallback === 'function') {
@@ -3754,6 +3758,10 @@ export function initialize() {
             log.info(
               'Level change: skipping forceRepopulate (cached masks, art unchanged)',
             );
+            try {
+              const maxFi = window.MapShine?.floorStack?.getActiveFloor?.()?.index;
+              window.MapShine?.fireEffectV2?.scheduleMissingFloorCompositorRebuild?.(maxFi);
+            } catch (_) {}
           }
         }
 

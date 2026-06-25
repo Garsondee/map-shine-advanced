@@ -37,7 +37,7 @@
 import { DepthShaderChunks } from '../../effects/DepthShaderChunks.js';
 
 /** Bump when GLSL source changes materially — invalidates cached ShaderMaterial compiles. */
-export const WATER_SHADER_SOURCE_EPOCH = 4;
+export const WATER_SHADER_SOURCE_EPOCH = 5;
 
 /**
  * The old rain ripple/storm cellular automaton loops have been replaced with a
@@ -356,6 +356,14 @@ uniform float uShoreFoamCoreFalloff;
 uniform float uShoreFoamTailWidth;
 uniform float uShoreFoamTailFalloff;
 uniform float uShoreFoamFadeCurve;
+
+// Hard-edge shore breakup (reuses legacy foam breakup tuning; soft ramps unaffected).
+uniform float uFoamBreakupStrength1;
+uniform float uFoamBreakupScale1;
+uniform float uFoamBreakupSpeed1;
+uniform float uFoamBreakupStrength2;
+uniform float uFoamBreakupScale2;
+uniform float uFoamBreakupSpeed2;
 
 // ── Floating Foam ────────────────────────────────────────────────────────
 uniform float uFloatingFoamStrength;
@@ -904,6 +912,22 @@ float waterShoreSignalBlurred(vec2 sceneUv01, float radiusTexels) {
   return waterShoreSignal(sceneUv01);
 }
 
+// 1 at sharp mask cliffs (pier holes, rocks); ~0 on soft greyscale shore ramps.
+float waterEdgeHardness(vec2 sceneUv01) {
+  float cov = waterRawMaskIntensity(sceneUv01);
+  vec2 ts = uWaterRawMaskTexelSize;
+  float tap = max(ts.x, ts.y);
+  if (tap < 1e-8) return 0.0;
+  float ml = waterRawMaskIntensity(sceneUv01 - vec2(ts.x, 0.0));
+  float mr = waterRawMaskIntensity(sceneUv01 + vec2(ts.x, 0.0));
+  float md = waterRawMaskIntensity(sceneUv01 - vec2(0.0, ts.y));
+  float mu = waterRawMaskIntensity(sceneUv01 + vec2(0.0, ts.y));
+  float grad = length(vec2(mr - ml, mu - md));
+  float soft = clamp(4.0 * cov * (1.0 - cov), 0.0, 1.0);
+  float gradNorm = clamp(grad / max(1e-5, tap * 2.8), 0.0, 1.0);
+  return clamp(gradNorm * (1.0 - soft * 0.92), 0.0, 1.0);
+}
+
 // Scene refraction strength follows _Water mask intensity (brighter = stronger).
 float distortionInsideFromCoverage(float coverage01) {
   float cov = clamp(coverage01, 0.0, 1.0);
@@ -1051,13 +1075,14 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
   
   #ifdef USE_SHORE_FOAM
   if (uShoreFoamEnabled > 0.5 && uShoreFoamStrength > 0.01) {
+    float edgeHardness = waterEdgeHardness(sceneUv);
     float shoreTime = tWind + uShoreFoamTimeOffset;
     vec2 shoreUv = (foamBasis + uShoreFoamSeedOffset) * max(0.1, uShoreFoamScale);
     vec2 shoreDrift = driftAspect * uShoreFoamSpeed + windBasis * (uShoreFoamTimeOffset * uShoreFoamSpeed);
     shoreUv -= shoreDrift;
     
     float waveDistortStr = clamp(uShoreFoamWaveDistortionStrength, 0.0, 5.0) * turbFoamMul;
-    shoreUv += waveGradPre * waveDistortStr * 0.15;
+    shoreUv += waveGradPre * waveDistortStr * (0.15 + edgeHardness * 0.22);
     vec2 texel = 1.0 / max(uResolution, vec2(1.0));
     vec2 rainUv = rainOffPx * texel;
     vec2 rainBasis = vec2(rainUv.x * sceneAspect, rainUv.y);
@@ -1151,7 +1176,7 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
       float sedge2 = valueNoise(shoreEvolUv * edgeScale * 7.0 + 11.9);
       float edgeNoise = sedge1 * 0.6 + sedge2 * 0.4;
       
-      float edgeStr = clamp(uShoreFoamEdgeDetail, 0.0, 1.0);
+      float edgeStr = clamp(uShoreFoamEdgeDetail, 0.0, 1.0) * mix(1.0, 1.45, edgeHardness);
       float edgeOffset = (edgeNoise - 0.5) * edgeStr * 0.3;
       complexShore = clamp(complexShore + edgeOffset, 0.0, 1.0);
     }
@@ -1160,17 +1185,37 @@ void getFoamData(vec2 sceneUv, float shore, float inside, vec2 rainOffPx, vec2 w
     // widens/narrows the band via reach (no spatial offset taps — those ghosted).
     float reach = max(0.04, mix(0.82, 0.06, clamp(uShoreFoamThreshold, 0.0, 1.0)));
     reach += uShoreFoamTailFalloff * 0.18 + uShoreFoamTailWidth * 0.10;
+    reach += edgeHardness * 0.14;
     float shoreProx = shore / (shore + reach);
     float shoreBand = pow(shoreProx, max(0.25, uShoreFoamFadeCurve * 0.6));
 
-    // Core emphasis at the water edge (subtle — does not flatten clump breakup).
+    // Core emphasis at the water edge (soft ramps only — hard cliffs read as outlines).
     float coreLo = clamp(uShoreFoamCoreWidth, 0.01, 1.0);
     float coreHi = min(1.0, coreLo + max(0.04, uShoreFoamCoreFalloff));
     float coreT = smoothstep(coreLo, coreHi, shoreProx);
-    shoreBand = clamp(shoreBand + (1.0 - shoreBand) * coreT * 0.35, 0.0, 1.0);
+    shoreBand = clamp(shoreBand + (1.0 - shoreBand) * coreT * 0.35 * (1.0 - edgeHardness * 0.72), 0.0, 1.0);
 
     float shoreCoverage = clamp(uShoreFoamCoverage, 0.0, 1.0);
     float shoreClumps = smoothstep(1.0 - shoreCoverage, 1.0, complexShore);
+
+    // Hard mask edges: animated multi-scale breakup so foam is not a uniform ring.
+    if (edgeHardness > 0.02) {
+      float hbStr1 = clamp(uFoamBreakupStrength1, 0.0, 1.0);
+      float hbStr2 = clamp(uFoamBreakupStrength2, 0.0, 1.0);
+      float hbSc1 = max(0.1, uFoamBreakupScale1);
+      float hbSc2 = max(0.1, uFoamBreakupScale2);
+      vec2 hbDrift = windBasis * shoreTime;
+      float hb1 = valueNoise(shoreEvolUv * hbSc1 - hbDrift * uFoamBreakupSpeed1 * 8.0);
+      float hb2 = valueNoise(shoreEvolUv * hbSc2 - hbDrift * uFoamBreakupSpeed2 * 11.0);
+      float hb3 = valueNoise(shoreEvolUv * hbSc1 * 2.7 + hbDrift * uFoamBreakupSpeed1 * 4.0 + 17.3);
+      float breakup = (hb1 * hbStr1 + hb2 * hbStr2 + hb3 * hbStr1 * 0.4) / max(0.01, hbStr1 * 1.4 + hbStr2);
+      float hardGate = smoothstep(0.20, 0.76, breakup);
+      shoreClumps *= mix(1.0, hardGate, edgeHardness * 0.95);
+      float bandChop = (valueNoise(shoreEvolUv * 6.5 + hbDrift * 0.06) - 0.5) * edgeHardness * 0.40;
+      shoreBand = clamp(shoreBand + bandChop, 0.0, 1.0);
+      shoreBand *= mix(1.0, 0.42 + hardGate * 0.58, edgeHardness);
+    }
+
     shoreFoamAmount = clamp(shoreClumps * shoreBand, 0.0, 1.0);
     shoreFoamAmount *= inside * max(0.0, uShoreFoamStrength);
   }

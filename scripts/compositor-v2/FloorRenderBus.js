@@ -39,6 +39,7 @@ import {
   tileHasLevelsRange,
   readTileLevelsFlags,
   resolveV14NativeDocFloorIndexMin,
+  resolveV14LevelIdToFloorStackIndex,
   getViewedLevelBackgroundSrc,
   getViewedLevelForegroundSrc,
   getVisibleLevelBackgroundSrcs,
@@ -47,7 +48,6 @@ import {
   hasV14NativeLevels,
   resolveV14BackgroundFloorIndexForSrc,
   resolveV14ForegroundFloorIndexForSrc,
-  resolveV14LevelIdToFloorStackIndex,
   normalizeFoundryAssetUrlKey,
   getViewedV14Level,
   isLevelsEnabledForScene,
@@ -56,6 +56,7 @@ import {
 import { resolveFloorIndexForElevation } from '../ui/levels-editor/level-boundaries.js';
 import {
   isTileOverhead,
+  isTileElevatedOnActiveLevelBand,
   getTileVisualCenterFoundryXY,
   getTileBusPlaneSizeAndMirror,
   tileDocRestrictsLight,
@@ -529,6 +530,10 @@ export class FloorRenderBus {
     const entry = this._tiles.get(tileId);
     if (!entry) return;
     if (this._isOverheadBandBusEntry(entry, tileId)) return;
+    const tileDoc = this._getFoundryTileDoc(tileId);
+    if (tileDoc && this._usesOverheadRenderBand(tileDoc, this._isOverheadForBusTile(tileDoc, tileId))) {
+      return;
+    }
     getTileStreamingManager().unregisterBusTile(tileId);
     entry.mapShineStreamedRegion = true;
     entry.mapShineBackgroundStreamServed = true;
@@ -594,11 +599,8 @@ export class FloorRenderBus {
         if (!this._isOverheadBandBusEntry(entry, tileId)) continue;
         void this._evaluateTileStreaming(tileId, entry, Number(entry.floorIndex) || 0);
       }
-      const runMaintenanceSweep = (this._streamingMaintenanceFrame++ % 15) === 0;
-      if (runMaintenanceSweep) {
-        this._recoverStuckOverheadBandTiles();
-        this._migrateOverheadStaticAlbedoToStreaming();
-      }
+      this._recoverStuckOverheadBandTiles();
+      this._migrateOverheadStaticAlbedoToStreaming();
       this._maybeEnsureForegroundStackLoaded();
       getTileStreamingManager().update();
       this._applyTileVisibility();
@@ -1083,6 +1085,7 @@ export class FloorRenderBus {
     }
     // Ensure any entries created during populate() respect the current floor slice.
     // setVisibleFloors() may have been called before populate completed.
+    this._refreshBusTileOverheadClassification();
     this._applyTileVisibility();
     log.info(`FloorRenderBus populated: ${tileCount} tiles (${floors.length} floors)`, floorCounts);
     queueMicrotask(() => {
@@ -1510,6 +1513,7 @@ export class FloorRenderBus {
     this._visibleMaxFloorIndex = Number.isFinite(Number(maxFloorIndex)) ? Number(maxFloorIndex) : Infinity;
     this._setVisibleFloorsCalls += 1;
     this._lastSetVisibleMaxFloorIndex = this._visibleMaxFloorIndex;
+    this._refreshBusTileOverheadClassification();
     this._applyTileVisibility();
     log.debug(`FloorRenderBus: showing floors 0–${maxFloorIndex}`);
     try {
@@ -2078,6 +2082,13 @@ export class FloorRenderBus {
     const node = entry?.root || entry?.mesh;
     const mesh = entry?.mesh || node?.children?.[0];
     if (node?.userData?.isOverhead) return true;
+    const tileDoc = this._getFoundryTileDoc(entry?.id);
+    if (tileDoc) {
+      if (isTileOverhead(tileDoc)) return true;
+      if (this._getMsaLevelRole(tileDoc) !== 'floor' && isTileElevatedOnActiveLevelBand(tileDoc)) {
+        return true;
+      }
+    }
     if (!mesh || !Number.isFinite(Number(entry?.floorIndex))) return false;
     const fi = Number(entry.floorIndex);
     const base = fi * RENDER_ORDER_PER_FLOOR;
@@ -2158,10 +2169,11 @@ export class FloorRenderBus {
     const prevLayerMask = camera.layers.mask;
 
     try {
-      for (const entry of this._tiles.values()) {
+      for (const [mapKey, entry] of this._tiles) {
         const node = entry?.root || entry?.mesh;
         if (!node) continue;
-        const tileId = entry.id;
+        this._classifyTileEntry(mapKey, entry);
+        const tileId = entry.id || String(mapKey);
         entry._savedVisible = node.visible;
 
         // Background planes are optional contributors. Internal effect overlays
@@ -2216,17 +2228,20 @@ export class FloorRenderBus {
         const hasMap = !!mat?.map;
         const isBelowFloor = entry.floorIndex < minFloorIndex;
         const isAboveFloor = entry.floorIndex > maxFloorIndex;
+        const isStreamedParent = !!(entry.mapShineStreamedRegion && !hasMap);
         let includeAsOccluder;
         if (sourceFloorDeckMask) {
-          if (isBelowFloor || isAboveFloor || !hasMap) {
+          if (isBelowFloor || isAboveFloor || isStreamedParent) {
             node.visible = false;
             continue;
           }
-          const wasVisibleDeck = entry._savedVisible === true;
-          if (!wasVisibleDeck) {
+          if (!hasMap) {
             node.visible = false;
             continue;
           }
+          // Match renderFloorRangeTo: floor-range membership only. View-slice
+          // visibility (background-stream hide, hover-hide) must not drop tiles
+          // that already painted into the level scene RT from the water punch.
           includeAsOccluder = true;
         } else if (splashOccluderTilesOnly) {
           includeAsOccluder = this._tileQualifiesAsSplashScreenOccluder(entry);
@@ -2255,7 +2270,11 @@ export class FloorRenderBus {
           const wasVisible = entry._savedVisible === true;
           const hiddenByFloorSlice = entry.floorIndex > this._visibleMaxFloorIndex;
           const forceRevealForMask = includeHiddenAboveFloors && hiddenByFloorSlice;
-          node.visible = forceThisFloor || wasVisible || forceRevealForMask;
+          const forceRevealDeckFloor = sourceFloorDeckMask
+            || (hasForceRevealFloor && entry.floorIndex === forceRevealFloor);
+          node.visible = forceRevealDeckFloor
+            ? true
+            : (forceThisFloor || wasVisible || forceRevealForMask);
           if (!node.visible) continue;
           // Render with real texture alpha so transparent areas are genuine openings.
           const st = entry._maskSavedState || (entry._maskSavedState = {});
@@ -2720,17 +2739,9 @@ export class FloorRenderBus {
   _isActiveLevelElevatedBusTile(tileDoc) {
     try {
       if (this._getMsaLevelRole(tileDoc) === 'floor') return false;
-      const scene = globalThis.canvas?.scene;
-      if (!hasV14NativeLevels(scene)) return false;
-      const ctx = window.MapShine?.activeLevelContext;
-      if (!this._hasFiniteActiveLevelBand(ctx)) return false;
+      if (!this._hasFiniteActiveLevelBand(window.MapShine?.activeLevelContext)) return false;
       if (!this._isBusTileOnActiveLevelView(tileDoc?.id ?? tileDoc?._id)) return false;
-
-      const elev = Number(tileDoc?.elevation);
-      const bottom = Number(ctx.bottom);
-      const top = Number(ctx.top);
-      if (!Number.isFinite(elev) || !Number.isFinite(bottom) || !Number.isFinite(top)) return false;
-      return elev > bottom && elev < top;
+      return isTileElevatedOnActiveLevelBand(tileDoc);
     } catch (_) {
       return false;
     }
@@ -2817,9 +2828,13 @@ export class FloorRenderBus {
    */
   _usesOverheadRenderBand(tileDoc, isOverhead) {
     if (isOverhead) return true;
-    if (this._getMsaLevelRole(tileDoc) !== 'floor') return false;
     const elev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
+    if (elev <= 0) return false;
     const fg = getCanvasForegroundElevationSplit();
+    // Walkable floor slabs use the foreground split; other elevated art on the
+    // active level (bridges, props) stacks in the overhead band above water.
+    if (this._getMsaLevelRole(tileDoc) === 'floor') return elev > fg;
+    if (isTileElevatedOnActiveLevelBand(tileDoc)) return true;
     return elev > fg;
   }
 
@@ -3945,8 +3960,8 @@ export class FloorRenderBus {
     if (tileHasLevelsRange(tileDoc)) {
       const flags = readTileLevelsFlags(tileDoc);
       const tileBottom = Number(flags.rangeBottom);
-      const tileTop    = Number(flags.rangeTop);
-      const tileMid    = (tileBottom + tileTop) / 2;
+      const tileTop = Number(flags.rangeTop);
+      const tileMid = (tileBottom + tileTop) / 2;
 
       for (let i = 0; i < floors.length; i++) {
         const f = floors[i];
@@ -3961,7 +3976,6 @@ export class FloorRenderBus {
     const v14Idx = resolveV14NativeDocFloorIndexMin(tileDoc, globalThis.canvas?.scene);
     if (v14Idx !== null) return v14Idx;
 
-    // V14 native level id on the document when min-index resolver returned null.
     try {
       if (hasV14NativeLevels(globalThis.canvas?.scene)) {
         const singleLevel = tileDoc?.level ?? tileDoc?._source?.level;
@@ -3985,6 +3999,63 @@ export class FloorRenderBus {
     const byElev = resolveFloorIndexForElevation(elev, floors);
     if (byElev >= 0) return byElev;
     return 0;
+  }
+
+  /**
+   * Re-sync overhead band / roof-capture flags after active level or floor slice changes.
+   * @private
+   */
+  _refreshBusTileOverheadClassification() {
+    if (!this._initialized) return;
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    for (const [mapKey, entry] of this._tiles) {
+      if (entry?.isInternal) continue;
+      const tileId = String(mapKey);
+      const tileDoc = this._getFoundryTileDoc(tileId);
+      if (!tileDoc) continue;
+      const floorIndex = this._resolveFloorIndex(tileDoc, floors);
+      const isOverhead = this._isOverheadForBusTile(tileDoc, tileId);
+      const usesOverheadBand = this._usesOverheadRenderBand(tileDoc, isOverhead);
+      const busOverhead = isOverhead || usesOverheadBand;
+      const roofShadowCaster = this._usesRoofShadowCaptureLayer(tileDoc, floorIndex, busOverhead);
+      const cloudShadowBlockerEnabled = this._shouldTileBlockCloudShadows(tileDoc, busOverhead);
+      const motionRenderAboveTokens = !!window.MapShine?.tileMotionManager?.getTileConfig?.(tileId)?.renderAboveTokens;
+      const sortWithinFloor = this._computeSortWithinFloor(tileDoc);
+      const renderOrder = this._resolveBusTileRenderOrder(
+        tileDoc,
+        floorIndex,
+        isOverhead,
+        motionRenderAboveTokens,
+        sortWithinFloor,
+      );
+
+      entry.floorIndex = floorIndex;
+      entry.isOverhead = !!busOverhead;
+      entry.roofShadowCaster = !!roofShadowCaster;
+      entry.cloudShadowBlockerEnabled = !!cloudShadowBlockerEnabled;
+
+      const root = entry.root || entry.mesh?.parent || null;
+      if (root) {
+        root.userData = root.userData || {};
+        root.userData.isOverhead = busOverhead;
+        root.userData.floorIndex = floorIndex;
+        root.layers.set(0);
+        if (roofShadowCaster) root.layers.enable(20);
+        else root.layers.disable(20);
+      }
+      if (entry.mesh) {
+        entry.mesh.renderOrder = renderOrder;
+        entry.mesh.layers.set(0);
+        if (roofShadowCaster) {
+          entry.mesh.layers.enable(20);
+          if (cloudShadowBlockerEnabled) entry.mesh.layers.enable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+          else entry.mesh.layers.disable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+        } else {
+          entry.mesh.layers.disable(20);
+          entry.mesh.layers.disable(TILE_FEATURE_LAYERS.CLOUD_SHADOW_BLOCKER);
+        }
+      }
+    }
   }
 
   // ── Layer Order Diagnostics ────────────────────────────────────────────────

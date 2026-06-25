@@ -2191,9 +2191,11 @@ export class FloorCompositor {
       uniforms: {
         tDeck: { value: null },
         tOverhead: { value: null },
+        tBusOverhead: { value: null },
         tVegetation: { value: null },
         uHasDeck: { value: 0.0 },
         uHasOverhead: { value: 0.0 },
+        uHasBusOverhead: { value: 0.0 },
         uHasVegetation: { value: 0.0 },
       },
       vertexShader: /* glsl */`
@@ -2207,14 +2209,18 @@ export class FloorCompositor {
         precision mediump float;
         uniform sampler2D tDeck;
         uniform sampler2D tOverhead;
+        uniform sampler2D tBusOverhead;
         uniform sampler2D tVegetation;
         uniform float uHasDeck;
         uniform float uHasOverhead;
+        uniform float uHasBusOverhead;
         uniform float uHasVegetation;
         varying vec2 vUv;
         void main() {
           float deckA = (uHasDeck > 0.5) ? texture2D(tDeck, vUv).a : 0.0;
-          float overheadA = (uHasOverhead > 0.5) ? texture2D(tOverhead, vUv).a : 0.0;
+          float roofStampA = (uHasOverhead > 0.5) ? texture2D(tOverhead, vUv).a : 0.0;
+          float busOverheadA = (uHasBusOverhead > 0.5) ? texture2D(tBusOverhead, vUv).a : 0.0;
+          float overheadA = max(roofStampA, busOverheadA);
           float vegA = (uHasVegetation > 0.5) ? texture2D(tVegetation, vUv).a : 0.0;
           gl_FragColor = vec4(deckA, vegA, 0.0, overheadA);
         }
@@ -7772,8 +7778,33 @@ export class FloorCompositor {
       this._renderBus.renderFloorMaskTo(this.renderer, this.camera, fi, target, {
         sourceFloorDeckMask: true,
         includeRoofCaptureLayers: true,
-        preserveCameraLayers: true,
         maxFloorIndex: fi,
+        forceRevealForFloorIndex: fi,
+        excludeTileIds: this._getWaterTileIdsForFloor(fi),
+      });
+      return target;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * Bus overhead-band alpha on the water-source floor (fallback when roofBlock stamp misses).
+   * @param {number} floorIndex
+   * @param {import('three').WebGLRenderTarget} target
+   * @returns {import('three').WebGLRenderTarget|null}
+   * @private
+   */
+  _buildWaterSourceOverheadBusMaskRT(floorIndex, target) {
+    const fi = Number(floorIndex);
+    if (!Number.isFinite(fi) || fi < 0 || !target) return null;
+    if (!this._renderBus || !this.renderer || !this.camera) return null;
+    try {
+      this._renderBus.renderFloorMaskTo(this.renderer, this.camera, fi, target, {
+        maxFloorIndex: fi,
+        overheadTilesOnly: true,
+        includeRoofCaptureLayers: true,
+        forceRevealForFloorIndex: fi,
         excludeTileIds: this._getWaterTileIdsForFloor(fi),
       });
       return target;
@@ -7868,19 +7899,24 @@ export class FloorCompositor {
     try {
       this._prepareVegetationDistortionMaskPass();
       const deckRT = this._buildWaterSourceDeckMaskRT(dataFloor, this._waterOccluderScratchRT);
+      const busOverheadRT = this._waterBgProductScratchRT
+        ? this._buildWaterSourceOverheadBusMaskRT(dataFloor, this._waterBgProductScratchRT)
+        : null;
       const overheadRoofTex = this._overheadShadowEffect?.roofBlockTexture ?? null;
       let merged = this._mergeWaterFootholdMaskRT(
         deckRT?.texture ?? null,
         this._vegetationDistortionMaskPass?.texture ?? null,
         overheadRoofTex,
         this._waterFootholdMaskRT,
+        busOverheadRT?.texture ?? null,
       );
-      if (!merged?.texture && overheadRoofTex) {
+      if (!merged?.texture && (overheadRoofTex || busOverheadRT?.texture)) {
         merged = this._mergeWaterFootholdMaskRT(
           null,
           null,
           overheadRoofTex,
           this._waterFootholdMaskRT,
+          busOverheadRT?.texture ?? null,
         );
       }
       this._frameWaterSourceDeckTex = merged?.texture ?? null;
@@ -7897,25 +7933,28 @@ export class FloorCompositor {
    * @param {import('three').Texture|null} deckTex
    * @param {import('three').Texture|null} vegetationTex
    * @param {import('three').Texture|null} overheadTex - Screen-space overhead tile alpha (OverheadStamp roofBlock).
+   * @param {import('three').Texture|null} [busOverheadTex] - Bus overhead-band mask fallback.
    * @param {import('three').WebGLRenderTarget} targetRT
    * @returns {import('three').WebGLRenderTarget|null}
    * @private
    */
-  _mergeWaterFootholdMaskRT(deckTex, vegetationTex, overheadTex, targetRT) {
+  _mergeWaterFootholdMaskRT(deckTex, vegetationTex, overheadTex, targetRT, busOverheadTex = null) {
     if (!targetRT || !this.renderer) return null;
-    if (!deckTex && !overheadTex && !vegetationTex) return null;
+    if (!deckTex && !overheadTex && !vegetationTex && !busOverheadTex) return null;
     if (!this._waterFootholdMaskScene || !this._waterFootholdMaskMaterial) return null;
     const renderer = this.renderer;
     const prevTarget = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
-    const dummy = this._waterEffect?._fallbackBlack ?? deckTex ?? overheadTex ?? vegetationTex;
+    const dummy = this._waterEffect?._fallbackBlack ?? deckTex ?? overheadTex ?? busOverheadTex ?? vegetationTex;
     const u = this._waterFootholdMaskMaterial.uniforms;
     try {
       u.tDeck.value = deckTex ?? dummy;
       u.tOverhead.value = overheadTex ?? dummy;
+      u.tBusOverhead.value = busOverheadTex ?? dummy;
       u.tVegetation.value = vegetationTex ?? dummy;
       u.uHasDeck.value = deckTex ? 1.0 : 0.0;
       u.uHasOverhead.value = overheadTex ? 1.0 : 0.0;
+      u.uHasBusOverhead.value = busOverheadTex ? 1.0 : 0.0;
       u.uHasVegetation.value = vegetationTex ? 1.0 : 0.0;
       renderer.setRenderTarget(targetRT);
       renderer.setClearColor(0x000000, 0);

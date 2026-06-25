@@ -53,13 +53,11 @@ import { getPerspectiveElevation } from '../../foundry/elevation-context.js';
 import { VisionPolygonComputer } from '../../vision/VisionPolygonComputer.js';
 import { LightMesh } from '../../scene/LightMesh.js';
 import {
-  tileHasLevelsRange,
-  readTileLevelsFlags,
-  resolveV14NativeDocFloorIndexMin,
+  resolveBackgroundSrcForFloorBand,
+  resolveTileFloorStackIndex,
   getViewedLevelBackgroundSrc,
   hasV14NativeLevels,
 } from '../../foundry/levels-scene-flags.js';
-import { resolveFloorIndexForElevation } from '../../ui/levels-editor/level-boundaries.js';
 import {
   resolveMapPointGroupFloorIndices,
   sampleMapPointGroupGlowSceneUvTriples,
@@ -80,6 +78,7 @@ import {
   deferVisualBehaviorsOnSystem,
   applyEmberSpriteTextureTransform,
   generateFirePoints,
+  generateFirePointsFromSceneRgba,
   filterFirePointsByOutdoor,
   filterFirePointsByAlbedoAlpha,
   filterFirePointsRequireNeighbor,
@@ -778,6 +777,11 @@ export class FireEffectV2 {
     /** @type {number} Cached particle scale from streaming detail tier. */
     this._detailTierParticleScale = 1;
 
+    /** @type {boolean} Coalesced compositor-driven rebuild after floor visits. */
+    this._missingFloorRebuildScheduled = false;
+    /** @type {boolean} One delayed retry when GPU readback is blocked mid-frame. */
+    this._missingFloorRebuildRetryScheduled = false;
+
     /**
      * Per-tile / per-background coal-bed shader overlays.
      * @type {Map<string, { mesh: THREE.Mesh, material: THREE.ShaderMaterial, floorIndex: number }>}
@@ -1221,6 +1225,382 @@ export class FireEffectV2 {
       this._fireMaskIsolationPx(),
     );
     return points;
+  }
+
+  /**
+   * Count packed spawn triples already collected for one floor.
+   * @param {Map<number, { pointArrays: Float32Array[] }>} floorFireData
+   * @param {number} floorIndex
+   * @returns {number}
+   * @private
+   */
+  _countFloorFireDataPoints(floorFireData, floorIndex) {
+    const entry = floorFireData?.get?.(floorIndex);
+    if (!entry?.pointArrays?.length) return 0;
+    return entry.pointArrays.reduce((sum, arr) => sum + (arr?.length ?? 0), 0);
+  }
+
+  /**
+   * Scene rect used for fire UV → world conversion during populate / incremental builds.
+   * @param {object|null} [foundrySceneData]
+   * @returns {{ sceneWidth: number, sceneHeight: number, sceneX: number, sceneY: number, foundrySceneX: number, foundrySceneY: number }|null}
+   * @private
+   */
+  _resolvePopulateSceneCoords(foundrySceneData = null) {
+    const d = foundrySceneData ?? canvas?.dimensions ?? this._lastPopulateSceneData;
+    if (!d) return null;
+    const sceneWidth = d.sceneWidth || d.width;
+    const sceneHeight = d.sceneHeight || d.height;
+    if (!sceneWidth || !sceneHeight) return null;
+    const foundrySceneX = d.sceneX || 0;
+    const foundrySceneY = d.sceneY || 0;
+    const sceneX = foundrySceneX;
+    const sceneY = (d.height || sceneHeight) - foundrySceneY - sceneHeight;
+    return { sceneWidth, sceneHeight, sceneX, sceneY, foundrySceneX, foundrySceneY };
+  }
+
+  /**
+   * Read scene-space fire spawn triples from a compositor floor RT (no file I/O).
+   *
+   * @param {object|null} compositor - GpuSceneMaskCompositor
+   * @param {string} compositorKey
+   * @returns {Float32Array|null}
+   * @private
+   */
+  _readCompositorFireScenePoints(compositor, compositorKey) {
+    if (!compositor || typeof compositor.getCpuPixelsForFloor !== 'function') return null;
+    if (!compositorKey || !compositor.getFloorTexture?.(compositorKey, 'fire')) return null;
+
+    const rgba = compositor.getCpuPixelsForFloor(compositorKey, 'fire');
+    if (!rgba) return null;
+
+    const tex = compositor.getFloorTexture(compositorKey, 'fire');
+    const px = compositor.getMaskTexturePixelSize?.(tex) ?? null;
+    const w = Number(px?.w) || Number(compositor.getOutputDims?.('fire')?.width) || 0;
+    const h = Number(px?.h) || Number(compositor.getOutputDims?.('fire')?.height) || 0;
+    if (w < 2 || h < 2) return null;
+
+    return generateFirePointsFromSceneRgba(rgba, w, h, this._fireMaskScanOptions());
+  }
+
+  /**
+   * Read scene-space fire spawn points from the GPU compositor when direct _Fire
+   * tile/background probes missed a floor. Upper-floor lighten masks are authored
+   * in scene space in GpuSceneMaskCompositor; tile-space bundle masks are stripped
+   * there, so file probes alone often leave particles empty while glow/distortion
+   * (compositor-sourced) still look correct.
+   *
+   * @param {Map<number, { pointArrays: Float32Array[] }>} floorFireData
+   * @param {Array<{ index?: number, compositorKey?: string }>} floors
+   * @private
+   */
+  _supplementFloorFireDataFromCompositor(floorFireData, floors) {
+    const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+    if (!compositor) return;
+
+    const multiFloor = this._isMultiFloorScene();
+    const bands = Array.isArray(floors) && floors.length > 0
+      ? floors
+      : (window.MapShine?.floorStack?.getFloors?.() ?? []);
+
+    for (const band of bands) {
+      const fi = Number(band?.index);
+      if (!Number.isFinite(fi) || fi < 0) continue;
+
+      const compositorKey = typeof band?.compositorKey === 'string' ? band.compositorKey.trim() : '';
+      if (!compositorKey) continue;
+
+      const existingCount = this._countFloorFireDataPoints(floorFireData, fi);
+      const preferCompositor = multiFloor && fi > 0;
+      if (!preferCompositor && existingCount >= 9) continue;
+
+      const scenePoints = this._readCompositorFireScenePoints(compositor, compositorKey);
+      if (!scenePoints || scenePoints.length < 3) continue;
+
+      if (preferCompositor) {
+        floorFireData.set(fi, { pointArrays: [scenePoints] });
+        log.info(
+          `FireEffectV2: compositor authoritative floor ${fi} → ${scenePoints.length / 3} scene fire points`,
+        );
+        continue;
+      }
+
+      if (!floorFireData.has(fi)) {
+        floorFireData.set(fi, { pointArrays: [] });
+      }
+      floorFireData.get(fi).pointArrays.push(scenePoints);
+      log.info(
+        `FireEffectV2: compositor supplement floor ${fi} → ${scenePoints.length / 3} scene fire points`,
+      );
+    }
+  }
+
+  /**
+   * Build particle buckets for one floor from scene-global spawn triples without
+   * clearing or rescanning other floors (cheap compositor backfill path).
+   *
+   * @param {number} floorIndex
+   * @param {Float32Array} merged
+   * @param {{ sceneWidth: number, sceneHeight: number, sceneX: number, sceneY: number, foundrySceneX: number, foundrySceneY: number }} coords
+   * @private
+   */
+  _installFloorFireFromScenePoints(floorIndex, merged, coords) {
+    const {
+      sceneWidth, sceneHeight, sceneX, sceneY, foundrySceneX, foundrySceneY,
+    } = coords;
+    const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Math.floor(Number(floorIndex))) : 0;
+
+    const existing = this._floorStates.get(fi);
+    if (existing) {
+      this._renderBus.removeEffectOverlay(`${FIRE_BATCH_OVERLAY_PREFIX}${fi}`);
+      this._disposeFloorState(existing);
+      this._floorStates.delete(fi);
+    }
+
+    this._glowSceneContext = {
+      sceneWidth,
+      sceneHeight,
+      sceneX,
+      sceneY,
+      foundrySceneX,
+      foundrySceneY,
+      sceneBounds: buildEffectSceneBoundsFromCanvas(),
+    };
+
+    this._captureSpatialControlBucketsForFloor(
+      fi,
+      merged.length > 0 ? merged : new Float32Array(0),
+      sceneWidth,
+      sceneHeight,
+      sceneX,
+      sceneY,
+    );
+
+    const levelContext = this._getLevelContextForFloorIndex(fi);
+    const gated = filterFirePointsByMapPointGates(
+      merged.length > 0 ? merged : null,
+      sceneWidth,
+      sceneHeight,
+      sceneX,
+      sceneY,
+      this._mapPointsManager,
+      'fire',
+      levelContext,
+      fi,
+    );
+    const points = gated ?? new Float32Array(0);
+
+    const mapPointScenePts = this._buildMapPointFireScenePointsForFloor(
+      fi, sceneWidth, sceneHeight, sceneX, sceneY,
+    );
+
+    const state = this._buildFloorSystems(
+      points, sceneWidth, sceneHeight, sceneX, sceneY, fi,
+    );
+    this._appendMapPointGroupFireSystems(state, fi, sceneWidth, sceneHeight, sceneX, sceneY);
+
+    this._floorStates.set(fi, state);
+    this._glowSourcePointsByFloor.set(fi, points.length > 0 ? points : new Float32Array(0));
+    this._glowMapPointSourcePointsByFloor.set(
+      fi,
+      mapPointScenePts?.length >= 3 ? mapPointScenePts : new Float32Array(0),
+    );
+    this._rebuildFloorGlowClusters(fi);
+
+    if (state.batchRenderer) {
+      const key = `${FIRE_BATCH_OVERLAY_PREFIX}${fi}`;
+      this._renderBus.addEffectOverlay(
+        key,
+        state.batchRenderer,
+        fi,
+        FIRE_STACKED_OVERLAY_OPTS,
+      );
+      log.info(`FireEffectV2: ${key} added from compositor (${points.length / 3} spawn points)`);
+    }
+  }
+
+  /**
+   * Single-floor background _Fire probe when compositor GPU readback is not ready.
+   * Cheaper than full populate — only runs for one missing upper floor at a time.
+   *
+   * @param {number} floorIndex
+   * @param {{ sceneWidth: number, sceneHeight: number, foundrySceneX: number, foundrySceneY: number }} coords
+   * @returns {Promise<Float32Array|null>}
+   * @private
+   */
+  async _probeUpperFloorBackgroundScenePoints(floorIndex, coords) {
+    const scene = canvas?.scene ?? null;
+    if (!scene) return null;
+
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const band = floors.find((f) => Number(f?.index) === floorIndex);
+    if (!band) return null;
+
+    const bgSrc = resolveBackgroundSrcForFloorBand(band, scene);
+    if (!bgSrc) return null;
+
+    const dotIdx = bgSrc.lastIndexOf('.');
+    const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
+    const fireResult = await probeMaskFile(bgBasePath, '_Fire');
+    if (!fireResult?.path) return null;
+
+    const image = await this._loadImage(fireResult.path);
+    if (!image) return null;
+
+    const localPoints = this._pickupFireMaskPoints(image, null, floorIndex);
+    if (!localPoints || localPoints.length < 3) return null;
+
+    const { sceneWidth, sceneHeight, foundrySceneX, foundrySceneY } = coords;
+    const sceneGlobalPoints = new Float32Array(localPoints.length);
+    for (let i = 0; i < localPoints.length; i += 3) {
+      const foundryPx = foundrySceneX + localPoints[i] * sceneWidth;
+      const foundryPy = foundrySceneY + localPoints[i + 1] * sceneHeight;
+      sceneGlobalPoints[i] = (foundryPx - foundrySceneX) / sceneWidth;
+      sceneGlobalPoints[i + 1] = (foundryPy - foundrySceneY) / sceneHeight;
+      sceneGlobalPoints[i + 2] = localPoints[i + 2];
+    }
+    return sceneGlobalPoints;
+  }
+
+  /**
+   * Incrementally materialize upper-floor fire buckets from compositor RT readback.
+   * Avoids full populate() (no getImageData on every tile/background).
+   *
+   * @param {number} maxFloorIndex
+   * @returns {Promise<boolean>} true when at least one floor was built
+   * @private
+   */
+  async _buildMissingCompositorFloors(maxFloorIndex) {
+    if (!this._initialized || !this._isMultiFloorScene()) return false;
+
+    const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+    const coords = this._resolvePopulateSceneCoords();
+    if (!coords) return false;
+
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const maxFi = Number.isFinite(Number(maxFloorIndex))
+      ? Math.max(0, Math.floor(Number(maxFloorIndex)))
+      : 0;
+
+    let built = false;
+    for (const band of floors) {
+      const fi = Number(band?.index);
+      if (!Number.isFinite(fi) || fi <= 0 || fi > maxFi) continue;
+
+      const state = this._floorStates.get(fi);
+      if (this._countFloorSystems(state) > 0 || (state?.bucketRegistry?.length ?? 0) > 0) {
+        continue;
+      }
+
+      const compositorKey = typeof band?.compositorKey === 'string' ? band.compositorKey.trim() : '';
+      let scenePoints = compositor
+        ? this._readCompositorFireScenePoints(compositor, compositorKey)
+        : null;
+      if (!scenePoints || scenePoints.length < 3) {
+        scenePoints = await this._probeUpperFloorBackgroundScenePoints(fi, coords);
+      }
+      if (!scenePoints || scenePoints.length < 3) continue;
+
+      this._installFloorFireFromScenePoints(fi, scenePoints, coords);
+      built = true;
+      log.info(
+        `FireEffectV2: upper-floor backfill ${fi} → ${scenePoints.length / 3} spawn points`,
+      );
+    }
+
+    if (!built) return false;
+
+    this._invalidateGlowParamCache();
+    const visibleMax = Math.max(maxFi, this._lastAppliedFireViewFloor ?? 0);
+    for (const idx of this._activeFloors) {
+      if (idx <= visibleMax) this._activateFloor(idx);
+    }
+    this._rebuildAllFloorGlowMeshes();
+    this._applyGlowFloorVisibility(visibleMax);
+    try { refreshEffectMaskStatusUi('fire-sparks'); } catch (_) {}
+    return true;
+  }
+
+  /**
+   * True when a visible upper band has no particle buckets yet (compositor or file).
+   * Must not require compositor `fire` RT — upper-floor spawn often comes from level
+   * background `_Fire` files (see 5a61733) while heat/glow use the compositor path.
+   *
+   * @param {number} maxFloorIndex
+   * @returns {boolean}
+   * @private
+   */
+  _anyUpperFloorMissingFireBuckets(maxFloorIndex) {
+    if (!this._isMultiFloorScene()) return false;
+    const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
+    const maxFi = Number.isFinite(Number(maxFloorIndex))
+      ? Math.max(0, Math.floor(Number(maxFloorIndex)))
+      : 0;
+
+    for (const band of floors) {
+      const fi = Number(band?.index);
+      if (!Number.isFinite(fi) || fi <= 0 || fi > maxFi) continue;
+      const state = this._floorStates.get(fi);
+      if (this._countFloorSystems(state) > 0 || (state?.bucketRegistry?.length ?? 0) > 0) continue;
+      return true;
+    }
+    return false;
+  }
+
+  /** @deprecated Use {@link _anyUpperFloorMissingFireBuckets}. @private */
+  _anyFloorMissingCompositorFireBuckets(maxFloorIndex) {
+    return this._anyUpperFloorMissingFireBuckets(maxFloorIndex);
+  }
+
+  /**
+   * Defer a rebuild until compositor CPU readback is safe (post-RT release).
+   *
+   * @param {number} [maxFloorIndex]
+   */
+  scheduleMissingFloorCompositorRebuild(maxFloorIndex = null) {
+    if (!this._initialized) return;
+    const maxFi = Number.isFinite(Number(maxFloorIndex))
+      ? Math.max(0, Math.floor(Number(maxFloorIndex)))
+      : Math.max(0, this._maxVisibleFloorIndex);
+    this._scheduleMissingFloorCompositorRebuild(maxFi);
+  }
+
+  /**
+   * @param {number} maxFloorIndex
+   * @private
+   */
+  _scheduleMissingFloorCompositorRebuild(maxFloorIndex) {
+    if (this._missingFloorRebuildScheduled) return;
+    this._missingFloorRebuildScheduled = true;
+    const run = async () => {
+      this._missingFloorRebuildScheduled = false;
+      if (!this._initialized) return;
+      if (!this._anyUpperFloorMissingFireBuckets(maxFloorIndex)) return;
+      try {
+        const built = await this._buildMissingCompositorFloors(maxFloorIndex);
+        if (built) return;
+        if (!this._anyUpperFloorMissingFireBuckets(maxFloorIndex)) return;
+        log.debug(
+          `FireEffectV2: upper-floor backfill deferred through floor ${maxFloorIndex} (readback / masks not ready)`,
+        );
+        if (!this._missingFloorRebuildRetryScheduled) {
+          this._missingFloorRebuildRetryScheduled = true;
+          setTimeout(() => {
+            this._missingFloorRebuildRetryScheduled = false;
+            if (this._anyUpperFloorMissingFireBuckets(maxFloorIndex)) {
+              this._scheduleMissingFloorCompositorRebuild(maxFloorIndex);
+            }
+          }, 300);
+        }
+      } catch (err) {
+        log.warn('FireEffectV2: upper-floor backfill failed', err);
+      }
+    };
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => requestAnimationFrame(run));
+    } else {
+      setTimeout(run, 32);
+    }
   }
 
   /**
@@ -2383,7 +2763,7 @@ export class FireEffectV2 {
       count: floors.length,
       bottom: floor.elevationMin,
       top: floor.elevationMax,
-      levelId: floor.id ?? floor.key ?? null,
+      levelId: floor.levelId ?? floor.id ?? floor.key ?? null,
     };
   }
 
@@ -2615,19 +2995,14 @@ export class FireEffectV2 {
     this._lastPopulateSceneData = foundrySceneData ?? this._lastPopulateSceneData;
 
     const floors = window.MapShine?.floorStack?.getFloors() ?? [];
-    const d = canvas?.dimensions;
-    if (!d) { log.warn('populate: no canvas dimensions'); return; }
+    const coords = this._resolvePopulateSceneCoords(foundrySceneData);
+    if (!coords) { log.warn('populate: no canvas dimensions'); return; }
+    const {
+      sceneWidth, sceneHeight, sceneX, sceneY, foundrySceneX, foundrySceneY,
+    } = coords;
+    const multiFloor = this._isMultiFloorScene();
 
-    log.info(`populate: canvas dimensions OK, scene ${d.sceneWidth}x${d.sceneHeight}`);
-
-    const sceneWidth = d.sceneWidth || d.width;
-    const sceneHeight = d.sceneHeight || d.height;
-    // Foundry scene origin (top-left, Y-down) — used for tile UV → scene UV conversion.
-    const foundrySceneX = d.sceneX || 0;
-    const foundrySceneY = d.sceneY || 0;
-    // Three.js scene origin (Y-up) — used by FireMaskShape to position particles.
-    const sceneX = foundrySceneX;
-    const sceneY = (d.height || sceneHeight) - foundrySceneY - sceneHeight;
+    log.info(`populate: canvas dimensions OK, scene ${sceneWidth}x${sceneHeight}`);
 
     // Collect fire points per floor from all tiles AND background.
     // Key: floorIndex, Value: {points: Float32Array[]}
@@ -2655,10 +3030,17 @@ export class FireEffectV2 {
     /**
      * @param {string} bgSrcRaw
      * @param {number} floorIndex
+     * @param {{ allowUpperFloorFileProbe?: boolean }} [opts]
      */
-    const ingestBackgroundFire = async (bgSrcRaw, floorIndex) => {
+    const ingestBackgroundFire = async (bgSrcRaw, floorIndex, opts = {}) => {
       const bgSrc = typeof bgSrcRaw === 'string' ? bgSrcRaw.trim() : '';
       if (!bgSrc) return;
+      const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Math.floor(Number(floorIndex))) : 0;
+      // Bulk populate: upper-floor backgrounds are scene-space in GpuSceneMaskCompositor.
+      // Skip decoding every level's full background during init; backfill handles them on visit.
+      // Exception: probe the active viewed level when the scene loads already upstairs.
+      if (multiFloor && fi > 0 && !opts.allowUpperFloorFileProbe) return;
+
       const dotIdx = bgSrc.lastIndexOf('.');
       const bgBasePath = dotIdx > 0 ? bgSrc.substring(0, dotIdx) : bgSrc;
       const dedupeKey = `${floorIndex}|${bgBasePath}`;
@@ -2676,10 +3058,8 @@ export class FireEffectV2 {
       log.info(`  image loaded: ${image ? `${image.width}x${image.height}` : 'null'}`);
       if (!image) return;
 
-      const fi = Number.isFinite(Number(floorIndex)) ? Math.max(0, Math.floor(Number(floorIndex))) : 0;
-
       log.info(`  calling generateFirePoints (mask pickup gates)`);
-      const bgAlbedo = bgSrc ? await this._loadImage(bgSrc) : null;
+      const bgAlbedo = (fi <= 0 && bgSrc) ? await this._loadImage(bgSrc) : null;
       const bgLocalPoints = this._pickupFireMaskPoints(image, bgAlbedo, fi);
       log.info(`  mask pickup returned: ${bgLocalPoints ? `${bgLocalPoints.length / 3} points` : 'null'}`);
       if (!bgLocalPoints || bgLocalPoints.length === 0) return;
@@ -2709,13 +3089,7 @@ export class FireEffectV2 {
 
     if (hasV14NativeLevels(scene) && floors.length > 0) {
       for (const f of floors) {
-        const lid = f?.levelId;
-        if (typeof lid !== 'string' || !lid.length) continue;
-        let bgSrc = '';
-        try {
-          const lvl = scene.levels?.get?.(lid);
-          bgSrc = String(lvl?.background?.src || '').trim();
-        } catch (_) {}
+        const bgSrc = resolveBackgroundSrcForFloorBand(f, scene);
         if (!bgSrc) continue;
         await ingestBackgroundFire(bgSrc, f.index);
       }
@@ -2731,7 +3105,7 @@ export class FireEffectV2 {
       const fi = (floors.length > 1 && Number.isFinite(Number(activeFi?.index)))
         ? Number(activeFi.index)
         : 0;
-      await ingestBackgroundFire(String(fallbackSrc || ''), fi);
+      await ingestBackgroundFire(String(fallbackSrc || ''), fi, { allowUpperFloorFileProbe: true });
     }
 
     // ── Process tiles ─────────────────────────────────────────────────────────
@@ -2757,7 +3131,7 @@ export class FireEffectV2 {
       if (!image) continue;
 
       const floorIndex = this._resolveFloorIndex(tileDoc, floors);
-      const tileAlbedo = await this._loadImage(src);
+      const tileAlbedo = (Number(floorIndex) || 0) <= 0 ? await this._loadImage(src) : null;
       const tileLocalPoints = this._pickupFireMaskPoints(image, tileAlbedo, floorIndex);
       if (!tileLocalPoints || tileLocalPoints.length === 0) continue;
 
@@ -2799,6 +3173,8 @@ export class FireEffectV2 {
     } finally {
       this._endPerfSpan(_scanToken);
     }
+
+    this._supplementFloorFireDataFromCompositor(floorFireData, floors);
 
     this._ensureMapPointFireFloorsInData(floorFireData, floors);
 
@@ -2920,6 +3296,10 @@ export class FireEffectV2 {
     } catch (_) {}
 
     try { refreshEffectMaskStatusUi('fire-sparks'); } catch (_) {}
+
+    if (this._isMultiFloorScene()) {
+      this._scheduleMissingFloorCompositorRebuild(this._maxVisibleFloorIndex);
+    }
   }
 
   /**
@@ -3045,7 +3425,10 @@ export class FireEffectV2 {
 
     if (hasParticleSystems) {
       this._syncActiveFloorOutdoorsMasks();
-      if (!this._isFireViewStreamingEnabled()) {
+      // View-bounds culling is for single-floor streaming only. Multi-floor scenes
+      // disable bucket view-culling (_isFireViewStreamingEnabled); applying UV
+      // bounds here would incorrectly shrink spawn pools on stacked floors.
+      if (!this._isFireViewStreamingEnabled() && !this._isMultiFloorScene()) {
         this._applyViewBoundsToFireShapes();
       }
     }
@@ -3474,7 +3857,7 @@ export class FireEffectV2 {
         ...(state.smokeSystems ?? []),
       ];
       for (const sys of allSystems) {
-        const shape = sys?.emitter?.shape;
+        const shape = sys?.emitterShape ?? sys?.emitter?.shape;
         if (shape && typeof shape.setViewBoundsUv === 'function') {
           shape.setViewBoundsUv(uMin, uMax, vMin, vMax);
         }
@@ -3530,23 +3913,8 @@ export class FireEffectV2 {
       }
     }
 
-    if (this._isMultiFloorScene()) {
-      const topState = this._floorStates.get(nextMax);
-      const topBuckets = topState?.bucketRegistry?.length ?? 0;
-      const topSystems = this._countFloorSystems(topState);
-      if (nextMax > 0 && topBuckets === 0 && topSystems === 0) {
-        try {
-          const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
-          const floors = window.MapShine?.floorStack?.getFloors?.() ?? [];
-          const band = floors.find((f) => Number(f?.index) === nextMax);
-          const key = band?.compositorKey;
-          const hasCompositorFire = !!(key && compositor?.getFloorTexture?.(key, 'fire'));
-          if (hasCompositorFire) {
-            log.info(`FireEffectV2: floor ${nextMax} has compositor fire but no buckets — repopulating`);
-            this._queueRebuild();
-          }
-        } catch (_) {}
-      }
+    if (this._isMultiFloorScene() && nextMax > 0) {
+      this._scheduleMissingFloorCompositorRebuild(nextMax);
     }
 
     this._lastAppliedFireViewFloor = nextMax;
@@ -3700,13 +4068,7 @@ export class FireEffectV2 {
 
     if (hasV14NativeLevels(scene) && floors.length > 0) {
       for (const f of floors) {
-        const lid = f?.levelId;
-        if (typeof lid !== 'string' || !lid.length) continue;
-        let bgSrc = '';
-        try {
-          const lvl = scene.levels?.get?.(lid);
-          bgSrc = String(lvl?.background?.src || '').trim();
-        } catch (_) {}
+        const bgSrc = resolveBackgroundSrcForFloorBand(f, scene);
         if (!bgSrc) continue;
         await ingestBackgroundCoal(bgSrc, f.index);
       }
@@ -5164,7 +5526,11 @@ export class FireEffectV2 {
       br.addSystem(sys);
     } catch (err) {
       log.warn('FireEffectV2: addSystem failed', err);
+      return;
     }
+    // BatchedRenderer.addSystem assigns the batch internally; rebuild the adapter
+    // map so _stepFirePhysicsSim / _refreshFireVisuals iterate newly attached systems.
+    this._reindexFireBatchRenderer(br);
     if (sys.emitter) {
       try {
         br.add(sys.emitter);
@@ -6149,6 +6515,16 @@ export class FireEffectV2 {
         this._attachSystemToBatch(br, sys);
       }
     }
+
+    // Safety net: bucket entries can retain resident systems after partial deactivations.
+    for (const entry of state.bucketRegistry ?? []) {
+      for (const sys of entry.systems ?? []) {
+        if (sys && !br.systemToBatchIndex?.has(sys)) {
+          this._attachSystemToBatch(br, sys);
+        }
+      }
+    }
+    this._reindexFireBatchRenderer(br);
   }
 
   /** Remove a specific floor's systems from its BatchedRenderer. @private */
@@ -6444,51 +6820,7 @@ export class FireEffectV2 {
    * @private
    */
   _resolveFloorIndex(tileDoc, floors) {
-    if (!floors || floors.length <= 1) return 0;
-
-    if (tileHasLevelsRange(tileDoc)) {
-      const flags = readTileLevelsFlags(tileDoc);
-      const tileBottom = Number(flags.rangeBottom);
-      const tileTop = Number(flags.rangeTop);
-      const tileMid = (tileBottom + tileTop) / 2;
-
-      for (let i = 0; i < floors.length; i++) {
-        const f = floors[i];
-        if (tileMid >= f.elevationMin && tileMid < f.elevationMax) return i;
-      }
-      for (let i = 0; i < floors.length; i++) {
-        const f = floors[i];
-        if (tileBottom <= f.elevationMax && f.elevationMin <= tileTop) return i;
-      }
-    }
-
-    const v14Idx = resolveV14NativeDocFloorIndexMin(tileDoc, globalThis.canvas?.scene);
-    if (v14Idx !== null) return v14Idx;
-
-    // Same FloorCompositor fallback: native level id on the tile vs FloorStack bands.
-    try {
-      if (hasV14NativeLevels(globalThis.canvas?.scene)) {
-        const singleLevel = tileDoc?.level ?? tileDoc?._source?.level;
-        if (typeof singleLevel === 'string' && singleLevel.length > 0) {
-          for (let i = 0; i < floors.length; i += 1) {
-            if (floors[i].levelId === singleLevel) return i;
-          }
-        }
-        const levelsSet = tileDoc?.levels;
-        if (levelsSet?.size) {
-          for (const lid of levelsSet) {
-            for (let i = 0; i < floors.length; i += 1) {
-              if (floors[i].levelId === lid) return i;
-            }
-          }
-        }
-      }
-    } catch (_) {}
-
-    const elev = Number.isFinite(Number(tileDoc?.elevation)) ? Number(tileDoc.elevation) : 0;
-    const byElev = resolveFloorIndexForElevation(elev, floors);
-    if (byElev >= 0) return byElev;
-    return 0;
+    return resolveTileFloorStackIndex(tileDoc, floors, globalThis.canvas?.scene);
   }
 
   /** Get the elevation offset for a floor index (for Z positioning). @private */

@@ -1961,50 +1961,90 @@ function readImageRgba(image) {
  * @param {number} [minMaskAlpha=0.35] - Legacy positional min alpha when 2nd arg is numeric
  * @returns {Float32Array|null} Packed (u, v, brightness) triples, or null if empty
  */
-export function generateFirePoints(image, thresholdOrOptions = 0.1, minMaskAlpha = 0.35) {
-  if (!image) return null;
-
-  /** @type {FireMaskScanOptions} */
-  let opts = {
-    threshold: 0.1,
-    minMaskAlpha: 0.35,
-    minMaskBrightness: 0,
-  };
+/**
+ * @param {number|FireMaskScanOptions} [thresholdOrOptions=0.1]
+ * @param {number} [minMaskAlpha=0.35]
+ * @returns {FireMaskScanOptions}
+ */
+function normalizeFireMaskScanOptions(thresholdOrOptions = 0.1, minMaskAlpha = 0.35) {
   if (thresholdOrOptions && typeof thresholdOrOptions === 'object') {
-    opts = {
+    return {
       threshold: Number(thresholdOrOptions.threshold ?? 0.1),
       minMaskAlpha: Number(thresholdOrOptions.minMaskAlpha ?? 0.35),
       minMaskBrightness: Number(thresholdOrOptions.minMaskBrightness ?? 0),
     };
-  } else {
-    opts.threshold = Number(thresholdOrOptions ?? 0.1);
-    opts.minMaskAlpha = Number(minMaskAlpha ?? 0.35);
   }
+  return {
+    threshold: Number(thresholdOrOptions ?? 0.1),
+    minMaskAlpha: Number(minMaskAlpha ?? 0.35),
+    minMaskBrightness: 0,
+  };
+}
 
-  const rgba = readImageRgba(image);
-  if (!rgba) return null;
-  const { data, width: imgW, height: imgH } = rgba;
+/**
+ * Scan packed RGBA into scene-norm (u, v, brightness) fire spawn triples.
+ *
+ * @param {Uint8Array|Uint8ClampedArray} data
+ * @param {number} width
+ * @param {number} height
+ * @param {FireMaskScanOptions} opts
+ * @param {{ stride?: number, maxPoints?: number }} [scanOpts]
+ * @returns {Float32Array|null}
+ */
+function scanRgbaForFirePoints(data, width, height, opts, scanOpts = {}) {
+  if (!data?.length || width < 2 || height < 2) return null;
+
   const minAlpha255 = Math.max(0, Math.min(255, Math.round(clamp01(opts.minMaskAlpha) * 255)));
   const minLum = clamp01(Number(opts.minMaskBrightness) || 0);
   const premulThreshold = Math.max(0, Number(opts.threshold) || 0);
+  const stride = Math.max(1, Number(scanOpts.stride) || 1);
+  const maxPoints = Math.max(9, Number(scanOpts.maxPoints) || 12000);
+  const uDenom = Math.max(1, width - 1);
+  const vDenom = Math.max(1, height - 1);
 
   const coords = [];
-  for (let i = 0; i < data.length; i += 4) {
-    const a = data[i + 3];
-    if (a < minAlpha255) continue;
-    const lum = Math.max(data[i], data[i + 1], data[i + 2]) / 255.0;
-    if (lum < minLum) continue;
-    const b = lum * (a / 255.0);
-    if (b > premulThreshold) {
-      const idx = i / 4;
-      const x = (idx % imgW) / imgW;
-      const y = Math.floor(idx / imgW) / imgH;
-      coords.push(x, y, b);
+  outer:
+  for (let py = 0; py < height; py += stride) {
+    for (let px = 0; px < width; px += stride) {
+      const i = (py * width + px) * 4;
+      const a = data[i + 3];
+      if (a < minAlpha255) continue;
+      const lum = Math.max(data[i], data[i + 1], data[i + 2]) / 255.0;
+      if (lum < minLum) continue;
+      const b = lum * (a / 255.0);
+      if (b <= premulThreshold) continue;
+      coords.push(px / uDenom, py / vDenom, b);
+      if (coords.length >= maxPoints * 3) break outer;
     }
   }
 
   if (coords.length === 0) return null;
   return new Float32Array(coords);
+}
+
+export function generateFirePoints(image, thresholdOrOptions = 0.1, minMaskAlpha = 0.35) {
+  if (!image) return null;
+  const opts = normalizeFireMaskScanOptions(thresholdOrOptions, minMaskAlpha);
+  const rgba = readImageRgba(image);
+  if (!rgba) return null;
+  return scanRgbaForFirePoints(rgba.data, rgba.width, rgba.height, opts, { stride: 1 });
+}
+
+/**
+ * Scan a GpuSceneMaskCompositor scene-space fire RT (RGBA readback) into spawn
+ * points. UVs match FireEffectV2 scene-global fire coordinates (norm u/v).
+ *
+ * @param {Uint8Array|null} rgba
+ * @param {number} width
+ * @param {number} height
+ * @param {number|FireMaskScanOptions} [thresholdOrOptions=0.1]
+ * @returns {Float32Array|null}
+ */
+export function generateFirePointsFromSceneRgba(rgba, width, height, thresholdOrOptions = 0.1) {
+  if (!rgba || width < 2 || height < 2) return null;
+  const opts = normalizeFireMaskScanOptions(thresholdOrOptions);
+  const stride = Math.max(1, Math.floor(Math.max(width, height) / 640));
+  return scanRgbaForFirePoints(rgba, width, height, opts, { stride });
 }
 
 /**

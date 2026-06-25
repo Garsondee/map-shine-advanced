@@ -88,23 +88,58 @@ export function tileDocRestrictsLight(tileDoc) {
   return false;
 }
 
-export function isTileOverhead(tileDoc) {
-  // Foundry v14+ exposes a computed getter from elevation vs the active foreground split.
+/**
+ * Elevation strictly inside the active level band (above walkable base, below ceiling).
+ * Used for bridge/prop art Foundry still classifies as foreground (`overhead: false`).
+ *
+ * @param {object} tileDoc
+ * @returns {boolean}
+ */
+export function isTileElevatedOnActiveLevelBand(tileDoc) {
   try {
-    if (typeof tileDoc?.overhead === 'boolean') return tileDoc.overhead;
+    const ctx = window.MapShine?.activeLevelContext;
+    const bottom = Number(ctx?.bottom);
+    const top = Number(ctx?.top);
+    const elev = Number(tileDoc?.elevation);
+    if (!Number.isFinite(elev) || !Number.isFinite(bottom) || !Number.isFinite(top)) return false;
+    return elev > bottom && elev < top;
+  } catch (_) {
+    return false;
+  }
+}
+
+/** @param {object|null|undefined} tileDoc */
+function readMsaLevelRole(tileDoc) {
+  return String(tileDoc?.flags?.['map-shine-advanced']?.levelRole ?? '').trim().toLowerCase();
+}
+
+export function isTileOverhead(tileDoc) {
+  // Foundry v14+ getter: authoritative when true (roof / above foreground split).
+  // When false, elevated tiles within the viewed level may still need overhead
+  // draw ordering — do not return early so elevation / band checks can run.
+  try {
+    if (tileDoc?.overhead === true) return true;
   } catch (_) {}
 
   // Legacy persisted overhead marker (pre-v14 scenes / migrated data).
   const sourceOverhead = tileDoc?._source?.overhead;
-  if (typeof sourceOverhead === 'boolean') return sourceOverhead;
+  if (sourceOverhead === true) return true;
 
   // Levels-compatible overhead marker used by some migrated data flows.
   const levelsOverhead = tileDoc?._source?.flags?.levels?.overhead;
-  if (typeof levelsOverhead === 'boolean') return levelsOverhead;
+  if (levelsOverhead === true) return true;
 
   const foregroundElevation = getCanvasForegroundElevationSplit();
   const elev = Number.isFinite(tileDoc?.elevation) ? tileDoc.elevation : 0;
-  return elev >= foregroundElevation;
+  if (elev >= foregroundElevation) return true;
+
+  // Foreground docs can report overhead=false while still elevated on the active
+  // level (e.g. bridge decks at elevation 9 on ground floor over water).
+  if (readMsaLevelRole(tileDoc) !== 'floor' && isTileElevatedOnActiveLevelBand(tileDoc)) {
+    return true;
+  }
+
+  return false;
 }
 
 /**

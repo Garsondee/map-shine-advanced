@@ -457,11 +457,11 @@ Two stages plus a parallel track. Stage A makes today's module *safer and measur
 
 | # | Item | Size | Exit criterion |
 |---|------|------|----------------|
-| A1 | **Git safety net**: commit current work; branch per Stage-A item thereafter | S | Clean baseline commit exists |
-| A2 | **Acceptance scene set**: pick 4–5 golden scenes (single-floor; Mansion 2-floor; plank-prison river; fire-heavy; 144 MP) + a repeatable manual checklist (load → pan → floor-switch → screenshot). Every later item is verified against these | S | Checklist doc committed; baseline screenshots captured |
+| A1 ✅ | **Git safety net**: commit current work; branch per Stage-A item thereafter | S | **Done 2026-07-09** (`4ac1e83` baseline + `af4d3c6` docs; docs/ un-gitignored) |
+| A2 ✅* | **Acceptance scene set**: pick 4–5 golden scenes (single-floor; Mansion 2-floor; plank-prison river; fire-heavy; 144 MP) + a repeatable manual checklist (load → pan → floor-switch → screenshot). Every later item is verified against these | S | Checklist committed (`9603042`, [acceptance-scenes.md](acceptance-scenes.md)). ***User task remaining:** fill in scene names + capture baseline screenshots |
 | A3 | **Diagnostics truth pass** (finish §13): sweep remaining `webgl-crash-recovery.js` lines; add per-mask-type VRAM totals and floor counts to reports so every later stage is measurable | M | Report shows accurate mask/RT/floor numbers on a test crash |
-| A4 | **Delete dead vision files** (§11.4.2): ~1338 lines + stale comments | S | Module loads clean; grep shows no references |
-| A5 | **Fix `_perFloorLightSnapshotRts` eviction** (§7): evict on floor-set change, mirroring `releaseStale` | S | Snapshot count bounded during floor switching (verify via A3 diagnostics) |
+| A4 ✅ | **Delete dead vision files** (§11.4.2): ~1338 lines + stale comments | S | **Done 2026-07-09** (`d2a7b66`, −1,347 lines; 5 stale comments corrected; imports verified clean) |
+| A5 ✅ | **Fix `_perFloorLightSnapshotRts` eviction** (§7): evict on floor-set change, mirroring `releaseStale` | S | **Done 2026-07-09** (`a0f0f74`; also covered `_perFloorGameplayLightSnapshotRts` + `FloorCompositor._stackedLevelLitSnapshots`, same leak class found during implementation). **Needs runtime verify** on Mansion floor-switching |
 | A6 | **Live-path audit + de-legacy, one file at a time** (§12.5): `WaterEffectV2` → `LightingEffectV2` → `BuildingShadows` → `WindowLight` → `SkyReach`. Timeboxed per file; mark live/dead, delete dead, document THE path. No behavior changes | L | Each file's marker count materially down; golden scenes unchanged |
 | A7 | **Mask VRAM quick wins** (§6 Phase 2a/2b): (a) LRU-evict non-active floors' masks to a low-res whole-floor fallback; (b) channel-pack the 4 binary masks (`mask-channel-pack.js` exists) | M–L | A3 diagnostics show mask VRAM materially down on Mansion; **Mansion loads on the 8 GB laptop** |
 | A8 | **Phase 5 first slice — templates natively** (§11.6, easiest content layer): proves the native-reconstruction pattern end-to-end while being small | M | Templates render via Three geometry; one `extract.canvas` cluster retired |

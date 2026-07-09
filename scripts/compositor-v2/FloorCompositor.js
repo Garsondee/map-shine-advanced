@@ -138,6 +138,7 @@ import { MaskDebugOverlayPass } from './MaskDebugOverlayPass.js';
 import { LevelRenderTargetPool } from './LevelRenderTargetPool.js';
 import { LevelCompositePass } from './LevelCompositePass.js';
 import { LevelAlphaRebindPass } from './LevelAlphaRebindPass.js';
+import { PresentationUpscalePass } from './presentation/PresentationUpscalePass.js';
 import { getCompositorInternalSize, writeCompositorInternalSize } from '../core/compositor-resolution.js';
 import { ShadowDriverState } from './shadow-system/ShadowDriverState.js';
 import { UpperFloorAlphaCompositor } from './shadow-system/UpperFloorAlphaCompositor.js';

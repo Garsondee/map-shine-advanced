@@ -434,7 +434,7 @@ function collectOccludableTokensForReplica(busW, busH, camera) {
 
 /**
  * Collect controlled tokens that have vision, for VISION-mode LOS polygon rendering.
- * Mirrors {@link VisionManager} controlled-token model so player and GM views behave
+ * Uses a controlled-tokens-only model so player and GM views behave
  * predictably: GM with nothing selected → no VISION holes (matches Foundry's
  * `_occlusionState.vision` staying 0 when no source covers the tile).
  *
@@ -623,7 +623,7 @@ function regionTriangulationToBusGeometry(regionDoc, sceneHeight) {
   return { vertices: v3, indices: idx };
 }
 
-/** Earcut accessor with PIXI / global fallbacks (matches GeometryConverter). */
+/** Earcut accessor with PIXI / global fallbacks. */
 function _resolveEarcut() {
   try {
     if (typeof PIXI !== 'undefined' && PIXI?.utils?.earcut) return PIXI.utils.earcut;

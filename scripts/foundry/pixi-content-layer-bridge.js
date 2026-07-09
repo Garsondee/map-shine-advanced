@@ -291,8 +291,7 @@ export class PixiContentLayerBridge {
    * texture handle directly into the Three.js world texture, completely
    * bypassing gl.readPixels() and any CPU-side pixel transfer.
    *
-   * This follows the same pattern used by FoundryFogBridge for vision/exploration
-   * texture sharing. WebGL texture handles are only valid within the context that
+   * WebGL texture handles are only valid within the context that
    * created them; this path succeeds only when PIXI and Three use the same gl
    * (see bootstrap sharedContext / __usePixiSharedWebGLContext).
    *

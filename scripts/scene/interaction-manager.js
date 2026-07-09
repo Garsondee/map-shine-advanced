@@ -6327,9 +6327,9 @@ export class InteractionManager {
             this._clearMovementPathPreview();
           }
           
-          // NOTE: Vision updates during drag are now handled natively by Foundry.
-          // FogEffect uses FoundryFogBridge to extract Foundry's vision textures directly,
-          // so we don't need to manually update a custom VisionManager.
+          // NOTE: Vision updates during drag are handled by Foundry's perception
+          // pipeline; FogOfWarEffectV2 consumes Foundry's vision polygons directly
+          // (visionSource.los → ShapeGeometry), so no manual vision update is needed.
         }
     } catch (error) {
         log.error('Error in onPointerMove:', error);
@@ -8480,8 +8480,8 @@ export class InteractionManager {
     }
     this.selection.add(id);
     
-    // NOTE: Vision/fog updates are now handled natively by Foundry.
-    // FogEffect uses FoundryFogBridge to extract Foundry's vision textures directly.
+    // NOTE: Vision/fog updates are handled by Foundry's perception pipeline;
+    // FogOfWarEffectV2 consumes Foundry's vision polygons directly.
   }
 
   /**

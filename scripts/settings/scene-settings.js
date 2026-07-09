@@ -13,6 +13,11 @@ import { createDefaultLoadingHints } from '../ui/loading-screen/loading-hints.js
 import { LightingDirector } from '../core/LightingDirector.js';
 import { GraphicsSettingsMenuApp } from '../ui/graphics-settings-menu-app.js';
 import { NativeRenderingSettingsMenuApp } from '../ui/native-rendering-settings-menu-app.js';
+import {
+  CLIENT_GPU_VRAM_PRESET_SETTING,
+  CLIENT_RENDER_RESOLUTION_PRESET_SETTING,
+  listGpuVramPresetOptions,
+} from '../streaming/memory-settings.js';
 import { SKIP_PARTICLE_CHANNEL_PACK_SETTING, SKIP_CURTAIN_WARM_GATES_SETTING, INCREMENTAL_TILE_RESYNC_SETTING } from '../core/texture-overhaul-flags.js';
 
 const log = createLogger('Settings');
@@ -980,6 +985,35 @@ export function registerSettings() {
 
   // Centralised lighting/darkness orchestrator (scripts/core/LightingDirector.js).
   try { LightingDirector.registerSettings(); } catch (_) {}
+
+  const gpuVramChoices = Object.fromEntries(
+    listGpuVramPresetOptions().map((row) => [row.id, row.label]),
+  );
+
+  game.settings.register(FLAG_NAMESPACE, CLIENT_GPU_VRAM_PRESET_SETTING, {
+    name: 'MAPSHINE.ClientGpuVramPresetName',
+    hint: 'MAPSHINE.ClientGpuVramPresetHint',
+    scope: 'client',
+    config: true,
+    type: String,
+    choices: gpuVramChoices,
+    default: 'auto',
+  });
+
+  game.settings.register(FLAG_NAMESPACE, CLIENT_RENDER_RESOLUTION_PRESET_SETTING, {
+    name: 'MAPSHINE.ClientRenderResolutionPresetName',
+    hint: 'MAPSHINE.ClientRenderResolutionPresetHint',
+    scope: 'client',
+    config: true,
+    type: String,
+    choices: {
+      native: 'Native (full quality)',
+      '1920x1080': '1920×1080',
+      '1280x720': '1280×720',
+      '800x450': '800×450',
+    },
+    default: 'native',
+  });
 
   game.settings.registerMenu(FLAG_NAMESPACE, 'performanceGraphics', {
     name: 'MAPSHINE.PerformanceGraphicsTitle',

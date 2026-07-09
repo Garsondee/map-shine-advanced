@@ -40,6 +40,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { writeCompositorInternalSize } from '../../core/compositor-resolution.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { createMaskStatusSchemaGroup, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
 import { probeMaskFile } from '../../assets/loader.js';
@@ -4053,7 +4054,7 @@ static getControlSchema() {
     if (!u || !renderer) return;
     try {
       if (u.uResolution && this._sizeVec) {
-        renderer.getDrawingBufferSize(this._sizeVec);
+        writeCompositorInternalSize(renderer, this._sizeVec);
         u.uResolution.value.set(Math.max(1, this._sizeVec.x), Math.max(1, this._sizeVec.y));
       }
       if (u.uZoom && camera) {

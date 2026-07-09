@@ -137,6 +137,7 @@ export class GpuWorkScheduler {
       frameCreditMb: BASE_FRAME_CREDIT_MB,
       frameOps: BASE_FRAME_OPS,
       throttleLevel: 0,
+      autoThrottleLevel: 0,
       avgFrameMs: 16.7,
       byCategory: { coverage: 0, upgrade: 0, mask: 0, effect: 0, prefetch: 0 },
       totalCommitted: 0,
@@ -247,15 +248,38 @@ export class GpuWorkScheduler {
     return 1.0;
   }
 
+  /**
+   * Backpressure derived from measured frame time. When frames get long the GPU
+   * is under pressure (heavy uploads / driver stalls), so we shrink the upload
+   * credit *before* a spike trips a context loss. This self-tunes to any GPU and
+   * complements the crash-adaptive ladder ({@link setThrottleLevel}); the higher
+   * of the two wins.
+   * @returns {number} 0..3
+   * @private
+   */
+  _autoThrottleLevel() {
+    const ms = this._avgFrameMs;
+    if (!(ms > 0)) return 0;
+    if (ms > 120) return 3;
+    if (ms > 80) return 2;
+    if (ms > 50) return 1;
+    return 0;
+  }
+
+  /** @returns {number} Effective throttle = max(crash-adaptive, frame-time backpressure). @private */
+  _effectiveThrottleLevel() {
+    return Math.max(this._throttleLevel, this._autoThrottleLevel());
+  }
+
   /** @returns {number} @private */
   _frameCreditMb() {
-    const scale = (THROTTLE_SCALE[this._throttleLevel] ?? 1.0) * this._navigationScale();
+    const scale = (THROTTLE_SCALE[this._effectiveThrottleLevel()] ?? 1.0) * this._navigationScale();
     return Math.max(MIN_FRAME_CREDIT_MB, Math.round(this.getBaseFrameCreditMb() * scale));
   }
 
   /** @returns {number} @private */
   _frameOps() {
-    const scale = (THROTTLE_SCALE[this._throttleLevel] ?? 1.0) * this._navigationScale();
+    const scale = (THROTTLE_SCALE[this._effectiveThrottleLevel()] ?? 1.0) * this._navigationScale();
     return Math.max(MIN_FRAME_OPS, Math.round(BASE_FRAME_OPS * scale));
   }
 
@@ -279,7 +303,8 @@ export class GpuWorkScheduler {
     stats.byCategory = { coverage: 0, upgrade: 0, mask: 0, effect: 0, prefetch: 0 };
     stats.committedLastFrame = 0;
     stats.committedMbLastFrame = 0;
-    stats.throttleLevel = this._throttleLevel;
+    stats.throttleLevel = this._effectiveThrottleLevel();
+    stats.autoThrottleLevel = this._autoThrottleLevel();
     stats.avgFrameMs = Math.round(this._avgFrameMs * 10) / 10;
 
     if (this._queue.size === 0) {
@@ -340,7 +365,13 @@ export class GpuWorkScheduler {
 
   /** @returns {object} Telemetry snapshot for crash report / UI. */
   getStats() {
-    return { ...this._stats, queued: this._queue.size, throttleLevel: this._throttleLevel };
+    return {
+      ...this._stats,
+      queued: this._queue.size,
+      throttleLevel: this._effectiveThrottleLevel(),
+      autoThrottleLevel: this._autoThrottleLevel(),
+      baseThrottleLevel: this._throttleLevel,
+    };
   }
 }
 

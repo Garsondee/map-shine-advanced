@@ -3,8 +3,16 @@
  * @module streaming/memory-settings
  */
 
+import { getEstimatedGpuVramGB } from '../core/gpu-probe.js';
+
 /** @typedef {'auto'|'4'|'6'|'8'|'12'|'16'|'24'} GpuVramPresetId */
 /** @typedef {'auto'|'4'|'8'|'16'|'32'|'64'} SystemRamPresetId */
+
+/** Foundry client setting key — editable before any scene loads (Configure Settings). */
+export const CLIENT_GPU_VRAM_PRESET_SETTING = 'clientGpuVramPreset';
+
+/** Foundry client setting key — default render resolution when a scene has no override yet. */
+export const CLIENT_RENDER_RESOLUTION_PRESET_SETTING = 'clientRenderResolutionPreset';
 
 /** @type {readonly GpuVramPresetId[]} */
 export const GPU_VRAM_PRESET_IDS = Object.freeze(['auto', '4', '6', '8', '12', '16', '24']);
@@ -75,13 +83,71 @@ export function getDetectedSystemRamGB() {
 }
 
 /**
+ * Read persisted per-scene graphics overrides from localStorage (no manager required).
+ * @param {string|null|undefined} [sceneId]
+ * @returns {{ gpuVramPreset?: string, systemRamPreset?: string, renderResolutionPreset?: string }}
+ */
+export function readPersistedGraphicsOverrides(sceneId = null) {
+  try {
+    const sid = sceneId ?? globalThis.canvas?.scene?.id ?? globalThis.game?.scenes?.active?.id ?? null;
+    const userId = globalThis.game?.user?.id || 'no-user';
+    if (!sid) return {};
+    const raw = globalThis.localStorage?.getItem?.(
+      `map-shine-advanced.graphicsOverrides.${sid}.${userId}`,
+    );
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === 'object') ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+/**
+ * @returns {GpuVramPresetId}
+ */
+export function getClientGpuVramPreset() {
+  try {
+    const v = globalThis.game?.settings?.get?.('map-shine-advanced', CLIENT_GPU_VRAM_PRESET_SETTING);
+    if (v && GPU_VRAM_PRESET_IDS.includes(v)) return v;
+  } catch (_) {
+  }
+  return 'auto';
+}
+
+/**
+ * @returns {string}
+ */
+export function getClientRenderResolutionPreset() {
+  try {
+    const v = globalThis.game?.settings?.get?.('map-shine-advanced', CLIENT_RENDER_RESOLUTION_PRESET_SETTING);
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  } catch (_) {
+  }
+  return 'native';
+}
+
+/**
  * @returns {{ gpuVramPreset: GpuVramPresetId, systemRamPreset: SystemRamPresetId }}
  */
 export function getGraphicsMemoryPresets() {
   const gs = window.MapShine?.graphicsSettings;
+  const persisted = gs ? {} : readPersistedGraphicsOverrides();
+  let gpuVramPreset = gs?.getGpuVramPreset?.()
+    ?? persisted.gpuVramPreset
+    ?? 'auto';
+  let systemRamPreset = gs?.getSystemRamPreset?.()
+    ?? persisted.systemRamPreset
+    ?? 'auto';
+
+  if (gpuVramPreset === 'auto') {
+    const client = getClientGpuVramPreset();
+    if (client !== 'auto') gpuVramPreset = client;
+  }
+
   return {
-    gpuVramPreset: gs?.getGpuVramPreset?.() ?? 'auto',
-    systemRamPreset: gs?.getSystemRamPreset?.() ?? 'auto',
+    gpuVramPreset,
+    systemRamPreset,
   };
 }
 
@@ -102,11 +168,34 @@ export function resolveEffectiveSystemRamGB(preset = null) {
 export function resolveEffectiveGpuVramGB(preset = null) {
   const p = preset ?? getGraphicsMemoryPresets().gpuVramPreset;
   if (p && p !== 'auto') return Number(p) || 8;
+  return resolveAutoGpuVramGB();
+}
+
+/**
+ * Resolve the "auto" GPU VRAM budget.
+ *
+ * Historically this inferred VRAM from system RAM alone (16 GB RAM -> 16 GB
+ * VRAM), which is wrong for the common laptop case of 16 GB RAM + an 8 GB
+ * discrete GPU and left every crash guardrail disarmed. We now consult the
+ * actual GPU (renderer string, via {@link module:core/gpu-probe}) and cap the
+ * budget to what the card can hold. When the GPU cannot be identified we refuse
+ * to assume more than 8 GB rather than trusting system RAM.
+ *
+ * @returns {number}
+ */
+export function resolveAutoGpuVramGB() {
   const ram = resolveEffectiveSystemRamGB();
-  if (ram >= 16) return 16;
-  if (ram >= 8) return 8;
-  if (ram >= 4) return 4;
-  return 4;
+  const ramInferred = ram >= 16 ? 16 : ram >= 8 ? 8 : 4;
+
+  let gpuEstimate = null;
+  try { gpuEstimate = getEstimatedGpuVramGB(); } catch (_) {}
+
+  if (gpuEstimate != null && Number.isFinite(gpuEstimate) && gpuEstimate > 0) {
+    // Trust the identified GPU, but never exceed what system RAM can back.
+    return Math.max(4, Math.min(ramInferred, gpuEstimate));
+  }
+  // Unknown GPU: do not assume a discrete card has as much VRAM as system RAM.
+  return Math.min(ramInferred, 8);
 }
 
 /**

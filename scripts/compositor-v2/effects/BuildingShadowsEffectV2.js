@@ -25,6 +25,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { writeCompositorInternalSize } from '../../core/compositor-resolution.js';
 import { isFloorPreloadSuppressedAfterLevelChange } from '../floor-sim-decimation.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { resolveAuthoredOutdoorsForFloorKey, resolveCompositorOutdoorsTexture } from '../../masks/resolve-compositor-outdoors.js';
@@ -917,7 +918,7 @@ export class BuildingShadowsEffectV2 {
     this._quad.frustumCulled = false;
     this._scene.add(this._quad);
 
-    renderer.getDrawingBufferSize(this._tempSize);
+    writeCompositorInternalSize(renderer, this._tempSize);
     this.onResize(this._tempSize.x, this._tempSize.y);
 
     log.info('BuildingShadowsEffectV2 initialized');

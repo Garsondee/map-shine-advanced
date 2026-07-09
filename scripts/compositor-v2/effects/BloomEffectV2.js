@@ -12,6 +12,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { getCompositorInternalSize } from '../../core/compositor-resolution.js';
 import {
   GLSL_DECODE_OUTDOORS_MASK,
   GLSL_SCREEN_TO_SCENE_UV,
@@ -504,9 +505,9 @@ export class BloomEffectV2 {
   getPerformanceRecorderSnapshot(renderer = null) {
     const THREE = window.THREE;
     const p = this.params ?? {};
-    const db = renderer?.getDrawingBufferSize?.(THREE ? new THREE.Vector2() : null) ?? null;
-    const fullW = this._sceneSourceRT?.width ?? this._bloomFullResRT?.width ?? db?.x ?? 0;
-    const fullH = this._sceneSourceRT?.height ?? this._bloomFullResRT?.height ?? db?.y ?? 0;
+    const internal = renderer ? getCompositorInternalSize(renderer) : { w: 0, h: 0 };
+    const fullW = this._sceneSourceRT?.width ?? this._bloomFullResRT?.width ?? internal.w ?? 0;
+    const fullH = this._sceneSourceRT?.height ?? this._bloomFullResRT?.height ?? internal.h ?? 0;
     const halfW = Math.round(fullW / 2);
     const halfH = Math.round(fullH / 2);
 

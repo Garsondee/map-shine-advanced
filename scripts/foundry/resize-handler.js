@@ -137,17 +137,13 @@ export class ResizeHandler {
       this._sceneComposer.resize(width, height);
     }
 
-    // Update effect composer render targets (expects drawing-buffer pixels)
+    // Update effect composer render targets (internal compositor pixels, not display buffer)
     if (this._effectComposer) {
       try {
-        const THREE = window.THREE;
-        const size = (this._renderer && typeof this._renderer.getDrawingBufferSize === 'function' && THREE)
-          ? this._renderer.getDrawingBufferSize(new THREE.Vector2())
-          : null;
-        this._effectComposer.resize(
-          size?.width ?? size?.x ?? width,
-          size?.height ?? size?.y ?? height
-        );
+        const dims = this._graphicsSettings?.resolveCompositorDimensions?.(width, height, window.devicePixelRatio || 1);
+        const internalW = dims?.internal?.w ?? width;
+        const internalH = dims?.internal?.h ?? height;
+        this._effectComposer.resize(internalW, internalH);
       } catch (_) {
         this._effectComposer.resize(width, height);
       }
@@ -254,10 +250,23 @@ export class ResizeHandler {
 
     try {
       const baseDpr = window.devicePixelRatio || 1;
-      const effective = this._graphicsSettings?.computeEffectivePixelRatio
-        ? this._graphicsSettings.computeEffectivePixelRatio(viewportWidthCss, viewportHeightCss, baseDpr)
-        : baseDpr;
-      this._renderer.setPixelRatio(effective);
+      if (this._graphicsSettings?.resolveCompositorDimensions) {
+        const dims = this._graphicsSettings.resolveCompositorDimensions(
+          viewportWidthCss,
+          viewportHeightCss,
+          baseDpr,
+        );
+        this._renderer.setPixelRatio(dims.display.pixelRatio);
+      } else if (this._graphicsSettings?.computeDisplayPixelRatio) {
+        const displayPr = this._graphicsSettings.computeDisplayPixelRatio(
+          viewportWidthCss,
+          viewportHeightCss,
+          baseDpr,
+        );
+        this._renderer.setPixelRatio(displayPr);
+      } else {
+        this._renderer.setPixelRatio(baseDpr);
+      }
     } catch (e) {
       log.warn('Failed to apply render resolution:', e);
     }

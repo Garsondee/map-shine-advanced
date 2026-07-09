@@ -222,3 +222,16 @@ export function isCatalogEffectEnabled(entry, ctx, instance) {
   }
   return isV2InstanceEnabled(instance);
 }
+
+/**
+ * Whether PaintedShadowEffectV2 is an active pass for health / dependency purposes
+ * (scene `painted-shadows` effect on + instance not explicitly disabled).
+ * @param {object} ctx
+ * @param {object|null} instance
+ * @returns {boolean}
+ */
+export function isPaintedShadowCatalogEnabled(ctx, instance) {
+  const entry = getEffectMaskHealthEntry('PaintedShadowEffectV2');
+  if (!entry) return isV2InstanceEnabled(instance);
+  return isCatalogEffectEnabled(entry, ctx, instance);
+}

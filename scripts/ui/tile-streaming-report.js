@@ -56,6 +56,23 @@ export function resolveFloorRenderBus() {
 }
 
 /**
+ * Convert a {source: bytes} map into a {source: MB} map (rounded), sorted so the
+ * largest consumer is first in the serialized crash report.
+ * @param {Record<string, number>|null|undefined} map
+ * @returns {Record<string, number>}
+ */
+function _bytesMapToMB(map) {
+  if (!map || typeof map !== 'object') return {};
+  /** @type {Array<[string, number]>} */
+  const rows = Object.entries(map).map(([k, v]) => [k, Number((Number(v || 0) / 1024 / 1024).toFixed(1))]);
+  rows.sort((a, b) => b[1] - a[1]);
+  /** @type {Record<string, number>} */
+  const out = {};
+  for (const [k, v] of rows) out[k] = v;
+  return out;
+}
+
+/**
  * Populate / compositor state for crash reports and streaming diagnostics.
  * @returns {object}
  */
@@ -463,6 +480,19 @@ export function buildTileStreamingReport() {
       backgroundMaxSize: budget.backgroundMaxSize,
       tileAlbedoMaxSize: budget.getTileAlbedoMaxSize?.(),
       downscale: budget.getDownscaleFactor?.(),
+      // VRAM attribution: which subsystem owns the bytes, and the biggest
+      // individual textures. This is the fastest way to spot a VRAM hog
+      // (e.g. scene-space masks) in a crash report.
+      maskResolutionScale: Number(budget.maskResolutionScale ?? null),
+      stableMaskResolutionScale: budget.getStableMaskResolutionScale?.() ?? null,
+      sourceBytesMB: _bytesMapToMB(budget.getSourceBreakdown?.()),
+      topEntries: Array.isArray(budgetState.topEntries)
+        ? budgetState.topEntries.slice(0, 12).map((e) => ({
+          label: e.label,
+          source: e.source,
+          sizeMB: Number((Number(e.sizeBytes || 0) / 1024 / 1024).toFixed(1)),
+        }))
+        : [],
     },
     bus: {
       visibleMaxFloorIndex: bus?._visibleMaxFloorIndex ?? null,

@@ -1,8 +1,31 @@
 <div class="msa-gfx-menu">
   <p class="msa-gfx-menu__lead">{{localize "MAPSHINE.PerformanceGraphicsMenuLead"}}</p>
+  <p class="notes">{{localize "MAPSHINE.PerformanceGraphicsMenuPreloadHint"}}</p>
+
+  <div class="form-group">
+    <label for="map-shine-client-gpu-vram">{{localize "MAPSHINE.ClientGpuVramPresetName"}}</label>
+    <select id="map-shine-client-gpu-vram" name="clientGpuVramPreset">
+      {{#each gpuVramOptions as |opt|}}
+      <option value="{{opt.id}}"{{#if opt.selected}} selected{{/if}}>{{opt.label}}</option>
+      {{/each}}
+    </select>
+    <p class="notes">{{localize "MAPSHINE.ClientGpuVramPresetHint"}}</p>
+  </div>
+
+  <div class="form-group">
+    <label for="map-shine-client-render-resolution">{{localize "MAPSHINE.ClientRenderResolutionPresetName"}}</label>
+    <select id="map-shine-client-render-resolution" name="clientRenderResolutionPreset">
+      {{#each renderResolutionOptions as |opt|}}
+      <option value="{{opt.id}}"{{#if opt.selected}} selected{{/if}}>{{opt.label}}</option>
+      {{/each}}
+    </select>
+    <p class="notes">{{localize "MAPSHINE.ClientRenderResolutionPresetHint"}}</p>
+  </div>
+
   <div class="form-group">
     <button type="button" data-action="open">
       <i class="fas fa-gauge-high"></i> {{localize "MAPSHINE.PerformanceGraphicsMenuButton"}}
     </button>
+    <p class="notes">{{localize "MAPSHINE.PerformanceGraphicsMenuOpenHint"}}</p>
   </div>
 </div>

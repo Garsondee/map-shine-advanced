@@ -2626,6 +2626,7 @@ export class GpuSceneMaskCompositor {
    */
   ensureSceneSpaceOutdoorsForFloor(floorKey, scene = null) {
     if (!floorKey) return null;
+    if (window.MapShine?.__msaSceneLoading === true) return null;
     const key = String(floorKey);
     const sc = scene || canvas?.scene;
     const usesBg = this._floorBandUsesBackgroundAuthoredOutdoors(key, sc);
@@ -2660,6 +2661,11 @@ export class GpuSceneMaskCompositor {
     const renderer = window.MapShine?.renderer;
     const THREE = window.THREE;
     if (!renderer || !THREE) return null;
+
+    try {
+      const gl = renderer.getContext?.();
+      if (gl?.isContextLost?.()) return null;
+    } catch (_) {}
 
     const d = canvas?.dimensions;
     const sr = d?.sceneRect;
@@ -3306,6 +3312,10 @@ export class GpuSceneMaskCompositor {
     const skippedKeys = [];
     /** @type {Record<string, string>} */
     const reasons = {};
+
+    if (window.MapShine?.__msaSceneLoading === true) {
+      return { preparedKeys, skippedKeys, reasons: { _deferred: 'scene-loading' } };
+    }
 
     if (!Array.isArray(floorKeysBottomToTop) || floorKeysBottomToTop.length === 0) {
       return { preparedKeys, skippedKeys, reasons };

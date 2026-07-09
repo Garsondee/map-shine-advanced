@@ -13,6 +13,8 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { writeCompositorInternalSize } from '../../core/compositor-resolution.js';
+import { resolveEffectiveGpuVramGB } from '../../streaming/memory-settings.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { tileDocRestrictsLight } from '../../scene/tile-manager.js';
 import { resolveEffectEnabled } from '../../effects/resolve-effect-enabled.js';
@@ -231,6 +233,15 @@ export class OverheadStampEffectV2 {
     this._treeRainMaskProbeLastKey = '';
     this._treeRainMaskProbeLastTs = 0;
     this._treeRainDebugHeartbeatLastTs = 0;
+
+    /**
+     * The raw drawing-buffer dimensions (before any RT scale) that were passed
+     * to the last onResize() call. Used by the render-loop resize guard instead
+     * of comparing against the (potentially downscaled) RT dimensions.
+     * @private
+     */
+    this._lastResizeW = 0;
+    this._lastResizeH = 0;
 
     // PERFORMANCE: Per-frame caster cache. Built once at start of render() via
     // a single mainScene.traverse() and reused by all caster/blocker/tile passes.
@@ -1348,7 +1359,7 @@ export class OverheadStampEffectV2 {
     // Pre-allocate targets so lighting never samples an undefined/black texture.
     try {
       const size = new THREE.Vector2();
-      renderer.getDrawingBufferSize(size);
+      writeCompositorInternalSize(renderer, size);
       if (size.x > 0 && size.y > 0) {
         this.onResize(size.x, size.y);
       }
@@ -1392,78 +1403,109 @@ export class OverheadStampEffectV2 {
   }
 
 
+  /**
+   * Scale factor applied to all overhead-stamp render-target dimensions.
+   * On GPUs with ≤8 GB of VRAM the 19+ full-screen RGBA8 targets are a major
+   * VRAM consumer (~160 MB at 1080p, ~480 MB at native 4K). Halving their
+   * resolution saves that memory at a mild cost: shadow masks and roof captures
+   * are composited at half-res and bilinearly upsampled in the final pass.
+   * Screen-space shadow offsets (uTexelSize/uResolution uniforms) are still set
+   * from the full drawing-buffer size so shadow lengths are correct.
+   * @returns {number} 0.5 on ≤8 GB GPUs, 1.0 otherwise
+   * @private
+   */
+  _getOverheadRenderScale() {
+    const vram = resolveEffectiveGpuVramGB();
+    return (vram > 0 && vram <= 8) ? 0.5 : 1.0;
+  }
+
   onResize(width, height) {
     const THREE = window.THREE;
     if (!width || !height || !THREE) return;
 
+    // Record raw drawing-buffer dimensions so the render-loop resize guard can
+    // compare against them rather than against the (potentially scaled) target sizes.
+    this._lastResizeW = width;
+    this._lastResizeH = height;
+
+    // Apply VRAM-based scale to all RT allocations. Screen-space uniforms
+    // (uTexelSize, uResolution) continue to reference the full drawing-buffer
+    // size so shadow direction calculations remain correct.
+    const scale = this._getOverheadRenderScale();
+    const w = Math.max(1, Math.round(width * scale));
+    const h = Math.max(1, Math.round(height * scale));
+
     this._invalidateRoofMaskCaptureCache();
 
     if (!this.roofTarget) {
-      this.roofTarget = new THREE.WebGLRenderTarget(width, height, {
+      this.roofTarget = new THREE.WebGLRenderTarget(w, h, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
         type: THREE.UnsignedByteType
       });
     } else {
-      this.roofTarget.setSize(width, height);
+      this.roofTarget.setSize(w, h);
     }
 
     if (!this.roofBlockTarget) {
-      this.roofBlockTarget = new THREE.WebGLRenderTarget(width, height, {
+      this.roofBlockTarget = new THREE.WebGLRenderTarget(w, h, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
         type: THREE.UnsignedByteType
       });
     } else {
-      this.roofBlockTarget.setSize(width, height);
+      this.roofBlockTarget.setSize(w, h);
     }
 
     if (!this.roofVisibilityTarget) {
-      this.roofVisibilityTarget = new THREE.WebGLRenderTarget(width, height, {
+      this.roofVisibilityTarget = new THREE.WebGLRenderTarget(w, h, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
         type: THREE.UnsignedByteType
       });
     } else {
-      this.roofVisibilityTarget.setSize(width, height);
+      this.roofVisibilityTarget.setSize(w, h);
     }
 
     if (!this.roofRestrictLightTarget) {
-      this.roofRestrictLightTarget = new THREE.WebGLRenderTarget(width, height, {
+      this.roofRestrictLightTarget = new THREE.WebGLRenderTarget(w, h, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
         type: THREE.UnsignedByteType
       });
     } else {
-      this.roofRestrictLightTarget.setSize(width, height);
+      this.roofRestrictLightTarget.setSize(w, h);
     }
 
     if (!this.rainOcclusionVisibilityTarget) {
-      this.rainOcclusionVisibilityTarget = new THREE.WebGLRenderTarget(width, height, {
+      this.rainOcclusionVisibilityTarget = new THREE.WebGLRenderTarget(w, h, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
         type: THREE.UnsignedByteType
       });
     } else {
-      this.rainOcclusionVisibilityTarget.setSize(width, height);
+      this.rainOcclusionVisibilityTarget.setSize(w, h);
     }
 
     if (!this.rainOcclusionBlockTarget) {
-      this.rainOcclusionBlockTarget = new THREE.WebGLRenderTarget(width, height, {
+      this.rainOcclusionBlockTarget = new THREE.WebGLRenderTarget(w, h, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
         type: THREE.UnsignedByteType
       });
     } else {
-      this.rainOcclusionBlockTarget.setSize(width, height);
+      this.rainOcclusionBlockTarget.setSize(w, h);
     }
 
+    // Screen-space uniforms deliberately use the full drawing-buffer dimensions
+    // (not scaled) so shadow-direction offsets and blur step sizes are computed
+    // in final-output screen space rather than in the downscaled target space.
     if (this.material && this.material.uniforms && this.material.uniforms.uTexelSize) {
       this.material.uniforms.uTexelSize.value.set(1 / width, 1 / height);
     }
@@ -1472,14 +1514,14 @@ export class OverheadStampEffectV2 {
     }
 
     if (!this.shadowTarget) {
-      this.shadowTarget = new THREE.WebGLRenderTarget(width, height, {
+      this.shadowTarget = new THREE.WebGLRenderTarget(w, h, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
         type: THREE.UnsignedByteType
       });
     } else {
-      this.shadowTarget.setSize(width, height);
+      this.shadowTarget.setSize(w, h);
     }
 
     // IMPORTANT: Default to fully lit until we've rendered a valid shadow pass.
@@ -1495,58 +1537,58 @@ export class OverheadStampEffectV2 {
     } catch (_) {}
 
     if (!this.fluidRoofTarget) {
-      this.fluidRoofTarget = new THREE.WebGLRenderTarget(width, height, {
+      this.fluidRoofTarget = new THREE.WebGLRenderTarget(w, h, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
         type: THREE.UnsignedByteType
       });
     } else {
-      this.fluidRoofTarget.setSize(width, height);
+      this.fluidRoofTarget.setSize(w, h);
     }
 
     if (!this.tileProjectionTarget) {
-      this.tileProjectionTarget = new THREE.WebGLRenderTarget(width, height, {
+      this.tileProjectionTarget = new THREE.WebGLRenderTarget(w, h, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
         type: THREE.UnsignedByteType
       });
     } else {
-      this.tileProjectionTarget.setSize(width, height);
+      this.tileProjectionTarget.setSize(w, h);
     }
 
     if (!this.tileProjectionSortTarget) {
-      this.tileProjectionSortTarget = new THREE.WebGLRenderTarget(width, height, {
+      this.tileProjectionSortTarget = new THREE.WebGLRenderTarget(w, h, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
         type: THREE.UnsignedByteType
       });
     } else {
-      this.tileProjectionSortTarget.setSize(width, height);
+      this.tileProjectionSortTarget.setSize(w, h);
     }
 
     if (!this.tileReceiverAlphaTarget) {
-      this.tileReceiverAlphaTarget = new THREE.WebGLRenderTarget(width, height, {
+      this.tileReceiverAlphaTarget = new THREE.WebGLRenderTarget(w, h, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
         type: THREE.UnsignedByteType
       });
     } else {
-      this.tileReceiverAlphaTarget.setSize(width, height);
+      this.tileReceiverAlphaTarget.setSize(w, h);
     }
 
     if (!this.tileReceiverSortTarget) {
-      this.tileReceiverSortTarget = new THREE.WebGLRenderTarget(width, height, {
+      this.tileReceiverSortTarget = new THREE.WebGLRenderTarget(w, h, {
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat,
         type: THREE.UnsignedByteType
       });
     } else {
-      this.tileReceiverSortTarget.setSize(width, height);
+      this.tileReceiverSortTarget.setSize(w, h);
     }
 
     const blurOpts = {
@@ -1558,11 +1600,11 @@ export class OverheadStampEffectV2 {
       stencilBuffer: false,
     };
     for (const key of ['roofBlurredTarget', 'tileProjectionBlurredTarget', 'fluidRoofBlurredTarget']) {
-      if (!this[key]) this[key] = new THREE.WebGLRenderTarget(width, height, blurOpts);
-      else this[key].setSize(width, height);
+      if (!this[key]) this[key] = new THREE.WebGLRenderTarget(w, h, blurOpts);
+      else this[key].setSize(w, h);
     }
-    this._maskBlur.ensureTargets(width, height);
-    this._maskCapturePass.ensureTargets(width, height);
+    this._maskBlur.ensureTargets(w, h);
+    this._maskCapturePass.ensureTargets(w, h);
   }
 
   /**
@@ -2088,7 +2130,7 @@ export class OverheadStampEffectV2 {
     // PERFORMANCE: Reuse Vector2 instead of allocating every frame
     if (!this._tempSize) this._tempSize = new THREE.Vector2();
     const size = this._tempSize;
-    renderer.getDrawingBufferSize(size);
+    writeCompositorInternalSize(renderer, size);
 
     if (!this.roofTarget
       || !this.roofBlockTarget
@@ -2103,9 +2145,10 @@ export class OverheadStampEffectV2 {
       || !this.tileReceiverAlphaTarget
       || !this.tileReceiverSortTarget) {
       this.onResize(size.x, size.y);
-    } else if (this.roofTarget.width !== size.x || this.roofTarget.height !== size.y
-      || this.rainOcclusionVisibilityTarget.width !== size.x
-      || this.rainOcclusionVisibilityTarget.height !== size.y) {
+    } else if (this._lastResizeW !== size.x || this._lastResizeH !== size.y) {
+      // Compare against the raw drawing-buffer size last passed to onResize()
+      // rather than against the (possibly downscaled) RT dimensions, to avoid
+      // the guard triggering every frame when _getOverheadRenderScale() < 1.
       this.onResize(size.x, size.y);
     }
 

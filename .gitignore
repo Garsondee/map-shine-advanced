@@ -7,4 +7,5 @@ oldmapshinemodulecode
 module-staging
 dist
 othermodules
-docs/
+# Local AI/editor tooling config
+.continue/

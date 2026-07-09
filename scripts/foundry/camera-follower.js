@@ -98,6 +98,9 @@ export class CameraFollower {
     /** @type {Array<{name:string,id:number}>} */
     this._hookIds = [];
 
+    /** @type {object|null} Level context hook payload deferred until scene load completes. */
+    this._deferredLevelContextPayload = null;
+
     /** @type {Map<string, {until:number, reason:string}>} */
     this._floorFollowSuppressionByTokenId = new Map();
 
@@ -860,6 +863,11 @@ export class CameraFollower {
       window.MapShine.levelNavigationDiagnostics = payload.diagnostics;
     }
 
+    if (window.MapShine?.__msaSceneLoading === true) {
+      this._deferredLevelContextPayload = payload;
+      return;
+    }
+
     try {
       Hooks.callAll('mapShineLevelContextChanged', payload);
     } catch (_) {
@@ -879,6 +887,26 @@ export class CameraFollower {
     }
 
     log.debug('Level context changed', payload);
+  }
+
+  /**
+   * Emit a level-context hook that was deferred during scene loading.
+   * @returns {void}
+   */
+  flushDeferredLevelContextEmit() {
+    const payload = this._deferredLevelContextPayload;
+    if (!payload) return;
+    this._deferredLevelContextPayload = null;
+    try {
+      Hooks.callAll('mapShineLevelContextChanged', payload);
+    } catch (_) {}
+    try {
+      const ms = window.MapShine;
+      ms?.depthPassManager?.invalidate?.();
+      ms?.renderLoop?.requestRender?.();
+      ms?.renderLoop?.requestContinuousRender?.(220);
+    } catch (_) {}
+    log.info('CameraFollower: emitted deferred level context after load');
   }
   
   /**

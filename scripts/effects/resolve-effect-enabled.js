@@ -30,8 +30,16 @@ export const STYLISTIC_EFFECT_FC_KEYS = Object.freeze([
   // dazzleOverlay omitted — enabled at runtime by DynamicExposureManager after updatables.
 ]);
 
+/** Mask-driven passes whose Enabled toggle is scene-flag authoritative. */
+export const SCENE_FLAG_EFFECT_FC_KEYS = Object.freeze([
+  ['painted-shadows', '_paintedShadowEffect'],
+]);
+
 /** @type {Set<string>} */
 const STYLISTIC_FC_KEY_SET = new Set(STYLISTIC_EFFECT_FC_KEYS.map(([, key]) => key));
+
+/** @type {Set<string>} */
+const SCENE_FLAG_EFFECT_FC_KEY_SET = new Set(SCENE_FLAG_EFFECT_FC_KEYS.map(([, key]) => key));
 
 /** @type {Set<string>} */
 const STYLISTIC_EFFECT_ID_SET = new Set(STYLISTIC_EFFECT_FC_KEYS.map(([id]) => id));
@@ -42,6 +50,23 @@ const STYLISTIC_EFFECT_ID_SET = new Set(STYLISTIC_EFFECT_FC_KEYS.map(([id]) => i
  */
 export function isStylisticEffectFcKey(fcKey) {
   return STYLISTIC_FC_KEY_SET.has(fcKey);
+}
+
+/**
+ * @param {string} fcKey
+ * @returns {boolean}
+ */
+export function isSceneFlagEffectFcKey(fcKey) {
+  return SCENE_FLAG_EFFECT_FC_KEY_SET.has(fcKey);
+}
+
+/**
+ * Repopulate snapshots must not resurrect stale `enabled` for these keys.
+ * @param {string} fcKey
+ * @returns {boolean}
+ */
+export function isAuthoritativeSceneEnabledFcKey(fcKey) {
+  return isStylisticEffectFcKey(fcKey) || isSceneFlagEffectFcKey(fcKey);
 }
 
 /**
@@ -169,6 +194,42 @@ export function syncStylisticEffectGate(floorCompositor, scene = null, options =
       fc.applyParam(fcKey, 'enabled', enabled);
     } catch (_) {}
   }
+}
+
+/**
+ * Sync scene-flag authoritative enablement for mask-driven shadow passes.
+ * @param {object|null|undefined} floorCompositor
+ * @param {import('foundry').Scene|null|undefined} [scene]
+ */
+export function syncSceneFlagEffectGates(floorCompositor, scene = null) {
+  const fc = floorCompositor;
+  if (!fc || typeof fc.applyParam !== 'function') return;
+
+  let effects = {};
+  try {
+    const resolvedScene = scene ?? globalThis.canvas?.scene ?? null;
+    if (resolvedScene) {
+      effects = sceneSettings.getEffectiveSettings(resolvedScene)?.effects || {};
+    }
+  } catch (_) {}
+
+  for (const [effectId, fcKey] of SCENE_FLAG_EFFECT_FC_KEYS) {
+    const enabled = !!effects?.[effectId]?.enabled;
+    try {
+      fc.applyParam(fcKey, 'enabled', enabled);
+    } catch (_) {}
+  }
+}
+
+/**
+ * Apply all scene-flag authoritative runtime gates (stylistic + mask-driven passes).
+ * @param {object|null|undefined} floorCompositor
+ * @param {import('foundry').Scene|null|undefined} [scene]
+ * @param {{ syncUi?: boolean }} [options]
+ */
+export function syncRuntimeEffectGates(floorCompositor, scene = null, options = {}) {
+  syncStylisticEffectGate(floorCompositor, scene, options);
+  syncSceneFlagEffectGates(floorCompositor, scene);
 }
 
 /**

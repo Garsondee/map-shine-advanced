@@ -2058,6 +2058,26 @@ export class FloorRenderBus {
   }
 
   /**
+   * Cheap cache-invalidation key for water-source bus overhead masks on a floor.
+   * Counts textured vs total overhead tiles so streaming decode completion re-renders.
+   * @param {number} floorIndex
+   * @returns {string}
+   */
+  getWaterOverheadMaskContentKey(floorIndex) {
+    const fi = Number(floorIndex);
+    if (!Number.isFinite(fi) || fi < 0) return '0/0';
+    let ready = 0;
+    let total = 0;
+    for (const [, entry] of this._tiles) {
+      if (Number(entry?.floorIndex) !== fi) continue;
+      if (!this._tileQualifiesAsWaterOverhead(entry)) continue;
+      total++;
+      if (entry?.material?.map) ready++;
+    }
+    return `${ready}/${total}`;
+  }
+
+  /**
    * Tiles that paint above water splashes on the viewed floor (overhead band + high albedo).
    * @param {object} entry
    * @returns {boolean}
@@ -2393,34 +2413,28 @@ export class FloorRenderBus {
       filterBackgroundByFloor = false,
       topVisibleFloorIndexForFire = null,
     } = options;
-
-    // Save each tile's current visibility so we can restore it after.
-    //
-    // IMPORTANT — visibility is set by floor-range membership here, NOT by
-    // ANDing with the tile's current `wasVisible`. The per-level pipeline
-    // renders EVERY level's RT in a loop, but the bus's slice state
-    // (`setVisibleFloors`) reflects only the currently-viewed floor: entries
-    // on non-viewed floors are sliced to `visible=false`. If we ANDed with
-    // that, every per-level RT except the viewed one would end up empty —
-    // the exact "lower floor RT is entirely transparent" symptom we were
-    // chasing. Render visibility per-call must depend only on:
-    //   1. floor-range membership vs [minFloorIndex, maxFloorIndex]
-    //   2. per-call `includeBackground` / `filterBackgroundByFloor` policy
-    //   3. the global tile-albedo editing suppression flag
-    // All other "wasVisible" state (user toggles, effect gating, warmups)
-    // is a view-slice concern and is faithfully restored after the render.
+  
+    // Hoist and coerce bounds once — used in the hot loop below.
+    const minFI = Number(minFloorIndex);
+    const maxFI = Number(maxFloorIndex);
+    const hasFireHint = topVisibleFloorIndexForFire != null;
+    const fireHintNum = hasFireHint ? Number(topVisibleFloorIndexForFire) : 0;
+    const suppressEdit = this._suppressTileAlbedoForEditing;
+    const showSolid = includeBackground && (!filterBackgroundByFloor || minFI <= 0);
+  
+    // ── Setup pass ────────────────────────────────────────────────────────────
+    // Single loop over _tiles handles all tile + background logic.
+    // We also collect door/drawing children we touch so the finally block
+    // restores them without re-scanning _scene.children.
+    const touchedSceneChildren = [];
+  
     for (const entry of this._tiles.values()) {
       const node = entry?.root || entry?.mesh;
       if (!node) continue;
-      const tileId = entry.id;
       entry._savedVisible = node.visible === true;
-
+  
       if (entry.isInternal) {
         if (entry.isSolidBg) {
-          // Include the opaque world-fill only when floor 0 is in range so
-          // upper-floor RTs preserve authored transparency.
-          const showSolid = includeBackground
-            && (!filterBackgroundByFloor || minFloorIndex <= 0);
           node.visible = showSolid;
           continue;
         }
@@ -2430,8 +2444,9 @@ export class FloorRenderBus {
         }
         if (entry.isBgPreBusEffectOverlay) {
           const fi = Number(entry?.floorIndex);
-          const inRange = Number.isFinite(fi) && fi >= minFloorIndex && fi <= maxFloorIndex;
-          node.visible = includeBackground && inRange && !this._suppressTileAlbedoForEditing;
+          node.visible = includeBackground
+            && Number.isFinite(fi) && fi >= minFI && fi <= maxFI
+            && !suppressEdit;
           continue;
         }
         if (!entry.isBgImage) {
@@ -2440,74 +2455,55 @@ export class FloorRenderBus {
         }
         if (filterBackgroundByFloor) {
           const bgFloorIdx = Number(entry.floorIndex);
-          const inRange = Number.isFinite(bgFloorIdx) && bgFloorIdx >= minFloorIndex && bgFloorIdx <= maxFloorIndex;
-          node.visible = includeBackground && inRange;
+          node.visible = includeBackground
+            && Number.isFinite(bgFloorIdx) && bgFloorIdx >= minFI && bgFloorIdx <= maxFI;
         } else {
-          // Legacy path (single-RT draw): all bg planes follow includeBackground.
           node.visible = includeBackground;
         }
         continue;
       }
-
-      // Splashes + vegetation are composited after water/bloom (root-scoped overlay draw).
-      if (entry.isSplash) {
+  
+      // Splashes and vegetation are composited separately.
+      if (entry.isSplash || entry.isVegetation) {
         node.visible = false;
         continue;
       }
-      if (entry.isVegetation) {
-        node.visible = false;
-        continue;
-      }
-
+  
       const fi = Number(entry?.floorIndex);
-      const minFI = Number(minFloorIndex);
-      const fireHint = topVisibleFloorIndexForFire;
-      const overlayRole = String(entry?.overlayRole || '');
-      const isStackedOverlay = overlayRole === 'stackedFloorEffect';
-      const isLegacyStackedOverlay = entry.isLegacyStackedOverlay;
       let inRange;
-      if (
-        (isStackedOverlay || isLegacyStackedOverlay)
-        && fireHint != null
-        && Number.isFinite(Number(fireHint))
-        && Number.isFinite(minFI) && Number.isFinite(Number(maxFloorIndex))
-        && minFI === Number(maxFloorIndex)
-      ) {
-        const L = minFI;
-        // Stacked floor overlays: show batch F whenever slice L is at or above F (L >= F).
-        // This keeps lower-floor authored effects visible from upper slices while
-        // still letting upper authored alpha occlude during source-over composite.
-        inRange = Number.isFinite(fi) && fi <= L;
+      if (hasFireHint && (entry.overlayRole === 'stackedFloorEffect' || entry.isLegacyStackedOverlay)
+          && Number.isFinite(fireHintNum) && Number.isFinite(minFI) && minFI === maxFI) {
+        // Stacked overlays: visible in slice L when their floor fi <= L.
+        inRange = Number.isFinite(fi) && fi <= minFI;
       } else {
-        inRange = Number.isFinite(fi) && fi >= minFloorIndex && fi <= maxFloorIndex;
+        inRange = Number.isFinite(fi) && fi >= minFI && fi <= maxFI;
       }
-      node.visible = inRange && !this._suppressTileAlbedoForEditing;
+      node.visible = inRange && !suppressEdit;
     }
-
-    // Door meshes live on the bus scene but are not in `_tiles`; gate them the
-    // same way as tiles so per-level RTs do not paint every door on every slice.
-    for (const ch of this._scene?.children ?? []) {
-      if (ch?.userData?.type !== 'doorMesh') continue;
-      ch._msBusSavedVisible = ch.visible === true;
-      const fi = Number(ch.userData?.floorIndex);
-      const globalDoor = fi === DOOR_FLOOR_INDEX_GLOBAL;
-      const inRange = globalDoor
-        || (Number.isFinite(fi) && fi >= minFloorIndex && fi <= maxFloorIndex);
-      ch.visible = inRange && !this._suppressTileAlbedoForEditing;
-    }
-
-    for (const ch of this._scene?.children ?? []) {
-      if (ch?.userData?.type !== 'sceneDrawingsRoot') continue;
-      for (const drawingGroup of ch.children ?? []) {
-        drawingGroup._msBusSavedVisible = drawingGroup.visible === true;
-        const fi = Number(drawingGroup?.userData?.floorIndex);
-        const inRange = !Number.isFinite(fi)
-          || (fi >= minFloorIndex && fi <= maxFloorIndex);
-        drawingGroup.visible = inRange && !this._suppressTileAlbedoForEditing;
+  
+    // ── Scene-children pass (doors + drawings) ────────────────────────────────
+    // One loop, collect everything we touch for O(1) restore in finally.
+    for (const ch of this._scene.children) {
+      const type = ch?.userData?.type;
+      if (type === 'doorMesh') {
+        touchedSceneChildren.push({ ch, savedVisible: ch.visible === true, type: 'door' });
+        const fi = Number(ch.userData?.floorIndex);
+        const globalDoor = fi === DOOR_FLOOR_INDEX_GLOBAL;
+        const inRange = globalDoor
+          || (Number.isFinite(fi) && fi >= minFI && fi <= maxFI);
+        ch.visible = inRange && !suppressEdit;
+      } else if (type === 'sceneDrawingsRoot') {
+        // Save and adjust each drawing group inside the root.
+        for (const drawingGroup of ch.children ?? []) {
+          touchedSceneChildren.push({ ch: drawingGroup, savedVisible: drawingGroup.visible === true, type: 'drawing' });
+          const fi = Number(drawingGroup?.userData?.floorIndex);
+          const inRange = !Number.isFinite(fi) || (fi >= minFI && fi <= maxFI);
+          drawingGroup.visible = inRange && !suppressEdit;
+        }
       }
     }
-
-    // Save and configure renderer state.
+  
+    // ── Render ────────────────────────────────────────────────────────────────
     const prevTarget    = renderer.getRenderTarget();
     const prevAutoClear = renderer.autoClear;
     const prevClear     = this._saveRendererClearState(renderer);
@@ -2515,36 +2511,29 @@ export class FloorRenderBus {
     const prevLayerMask = camera.layers.mask;
     camera.layers.set(0);
     for (let i = 1; i <= 19; i++) camera.layers.enable(i);
-
+  
     try {
       renderer.setRenderTarget(target);
       renderer.setClearColor(clearColor, clearAlpha);
       renderer.autoClear = !!clearBeforeRender;
       renderer.render(this._scene, camera);
     } finally {
-      // Restore camera and renderer state.
+      // ── Restore ───────────────────────────────────────────────────────────
       camera.layers.mask = prevLayerMask;
       renderer.autoClear = prevAutoClear;
       this._restoreRendererClearState(renderer, prevClear, prevAlpha);
       renderer.setRenderTarget(prevTarget);
-
-      // Restore original tile visibility.
+  
+      // Restore tiles — single pass, no _scene.children traversal needed here.
       for (const entry of this._tiles.values()) {
         const node = entry?.root || entry?.mesh;
         if (node && entry._savedVisible !== undefined) node.visible = entry._savedVisible;
         entry._savedVisible = undefined;
       }
-      for (const ch of this._scene?.children ?? []) {
-        if (ch?._msBusSavedVisible !== undefined) {
-          ch.visible = ch._msBusSavedVisible;
-          ch._msBusSavedVisible = undefined;
-        }
-        if (ch?.userData?.type !== 'sceneDrawingsRoot') continue;
-        for (const drawingGroup of ch.children ?? []) {
-          if (drawingGroup?._msBusSavedVisible === undefined) continue;
-          drawingGroup.visible = drawingGroup._msBusSavedVisible;
-          drawingGroup._msBusSavedVisible = undefined;
-        }
+  
+      // Restore only the scene children we actually touched.
+      for (const { ch, savedVisible } of touchedSceneChildren) {
+        ch.visible = savedVisible;
       }
     }
   }

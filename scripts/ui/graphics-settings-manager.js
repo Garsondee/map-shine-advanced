@@ -12,6 +12,13 @@
 import { createLogger } from '../core/log.js';
 import { GraphicsSettingsDialog } from './graphics-settings-dialog.js';
 import { isStylisticEffectId } from '../effects/resolve-effect-enabled.js';
+import { resolveMaxDrawingBufferMp } from '../streaming/texture-budget-policy.js';
+import {
+  buildCompositorResolutionSnapshot,
+  getCompositorResolutionSnapshot,
+  resolveDisplayPixelRatioFromPreset,
+  resolveInternalPixelRatio,
+} from '../core/compositor-resolution.js';
 import {
   GPU_VRAM_PRESET_IDS,
   SYSTEM_RAM_PRESET_IDS,
@@ -26,6 +33,9 @@ import {
   resolveAutoBudgetMBFromRam,
   resolveGpuVramBaseBudgetMB,
   applyStreamingMemorySideEffects,
+  getClientGpuVramPreset,
+  getClientRenderResolutionPreset,
+  readPersistedGraphicsOverrides,
 } from '../streaming/memory-settings.js';
 
 const log = createLogger('GraphicsSettings');
@@ -418,8 +428,35 @@ export class GraphicsSettingsManager {
    */
   bootstrapForLoad() {
     this.loadState();
+    this._applyClientMemoryDefaults();
     this.applyRenderPerformanceSettings();
     this.applyParticleSpawnScale();
+  }
+
+  /**
+   * Merge Foundry client defaults when persisted overrides leave memory/render on Auto.
+   * Client settings are editable from Configure Settings before any scene loads.
+   * @private
+   */
+  _applyClientMemoryDefaults() {
+    try {
+      if (this.getGpuVramPreset() === 'auto') {
+        const clientGpu = getClientGpuVramPreset();
+        if (clientGpu !== 'auto') {
+          this.state.gpuVramPreset = this._coerceGpuVramPreset(clientGpu);
+        }
+      }
+
+      const persisted = readPersistedGraphicsOverrides(canvas?.scene?.id ?? null);
+      const hadRenderOverride = typeof persisted.renderResolutionPreset === 'string';
+      if (!hadRenderOverride && (this.state.renderResolutionPreset === 'native' || !this.state.renderResolutionPreset)) {
+        const clientRender = getClientRenderResolutionPreset();
+        if (clientRender && clientRender !== 'native') {
+          this.state.renderResolutionPreset = clientRender;
+        }
+      }
+    } catch (_) {
+    }
   }
 
   async initialize() {
@@ -503,13 +540,75 @@ export class GraphicsSettingsManager {
   }
 
   /**
+   * Display pixel ratio from render preset only (no VRAM cap).
+   * Drives canvas backing-store size and late overlay sharpness.
+   *
+   * @param {number} viewportWidthCss
+   * @param {number} viewportHeightCss
+   * @param {number} basePixelRatio
+   * @returns {number}
+   */
+  computeDisplayPixelRatio(viewportWidthCss, viewportHeightCss, basePixelRatio) {
+    return resolveDisplayPixelRatioFromPreset(
+      viewportWidthCss,
+      viewportHeightCss,
+      basePixelRatio,
+      this.getRenderResolutionPreset(),
+    );
+  }
+
+  /**
+   * Internal compositor pixel ratio after load + VRAM caps.
+   * @param {number} viewportWidthCss
+   * @param {number} viewportHeightCss
+   * @param {number} displayPixelRatio
+   * @returns {number}
+   */
+  computeInternalPixelRatio(viewportWidthCss, viewportHeightCss, displayPixelRatio) {
+    return resolveInternalPixelRatio(
+      displayPixelRatio,
+      viewportWidthCss,
+      viewportHeightCss,
+      {
+        applyLoadCap: (pr) => this._applyLoadPixelRatioCap(pr),
+        applyVramCap: (pr, w, h) => this._applyVramPixelRatioCap(pr, w, h),
+      },
+    );
+  }
+
+  /**
+   * Resolve display + internal compositor dimensions and cache for diagnostics.
+   * @param {number} viewportWidthCss
+   * @param {number} viewportHeightCss
+   * @param {number} [basePixelRatio]
+   * @returns {import('../core/compositor-resolution.js').CompositorResolutionSnapshot}
+   */
+  resolveCompositorDimensions(viewportWidthCss, viewportHeightCss, basePixelRatio) {
+    const base = Math.max(0.1, Number(basePixelRatio) || globalThis.devicePixelRatio || 1);
+    const displayPR = this.computeDisplayPixelRatio(viewportWidthCss, viewportHeightCss, base);
+    const internalPR = this.computeInternalPixelRatio(viewportWidthCss, viewportHeightCss, displayPR);
+    const snapshot = buildCompositorResolutionSnapshot(
+      viewportWidthCss,
+      viewportHeightCss,
+      displayPR,
+      internalPR,
+    );
+    this._lastCompositorResolution = snapshot;
+    return snapshot;
+  }
+
+  /**
+   * @returns {import('../core/compositor-resolution.js').CompositorResolutionSnapshot|null}
+   */
+  getCompositorResolutionSnapshot() {
+    return this._lastCompositorResolution ?? getCompositorResolutionSnapshot();
+  }
+
+  /**
    * Compute effective renderer pixel ratio based on a familiar resolution preset.
    *
-   * Notes:
-   * - The canvas remains full-screen in CSS.
-   * - We lower the drawing-buffer resolution by lowering renderer pixelRatio.
-   * - If the viewport aspect ratio differs from the preset, we fit the preset inside
-   *   the viewport while preserving the viewport aspect (pixelRatio is uniform).
+   * @deprecated Use {@link computeDisplayPixelRatio} for canvas size and
+   * {@link computeInternalPixelRatio} for compositor RTs. Kept for callers not yet migrated.
    *
    * @param {number} viewportWidthCss
    * @param {number} viewportHeightCss
@@ -517,28 +616,61 @@ export class GraphicsSettingsManager {
    * @returns {number}
    */
   computeEffectivePixelRatio(viewportWidthCss, viewportHeightCss, basePixelRatio) {
-    const preset = this.getRenderResolutionPreset();
-    const base = Math.max(0.1, Number(basePixelRatio) || 1);
+    const displayPR = this.computeDisplayPixelRatio(viewportWidthCss, viewportHeightCss, basePixelRatio);
+    return this.computeInternalPixelRatio(viewportWidthCss, viewportHeightCss, displayPR);
+  }
 
-    if (!viewportWidthCss || !viewportHeightCss) return base;
-    if (!preset || preset === 'native') return base;
+  /**
+   * During scene load on constrained (<=8 GB) GPUs, cap internal render scale to
+   * 1x CSS pixels. Effect render-target stacks scale with internal pixels.
+   * @param {number} pr
+   * @returns {number}
+   * @private
+   */
+  _applyLoadPixelRatioCap(pr) {
+    try {
+      const loading = window.MapShine?.__msaSceneLoading === true;
+      if (!loading) return pr;
+      const vram = resolveEffectiveGpuVramGB();
+      if (vram <= 8) return Math.min(pr, 1.0);
+    } catch (_) {}
+    return pr;
+  }
 
-    const match = String(preset).match(/^(\d+)x(\d+)$/i);
-    if (!match) return base;
+  /**
+   * Persistent VRAM budget cap on **internal** compositor resolution (not display).
+   *
+   * @param {number} pr Internal pixel ratio candidate (usually <= display PR).
+   * @param {number} viewportWidthCss
+   * @param {number} viewportHeightCss
+   * @returns {number}
+   * @private
+   */
+  _applyVramPixelRatioCap(pr, viewportWidthCss, viewportHeightCss) {
+    try {
+      const cssW = Number(viewportWidthCss) || Number(globalThis.innerWidth) || 0;
+      const cssH = Number(viewportHeightCss) || Number(globalThis.innerHeight) || 0;
+      if (!(cssW > 0 && cssH > 0)) return pr;
 
-    const targetW = Math.max(1, Number(match[1]) || 1);
-    const targetH = Math.max(1, Number(match[2]) || 1);
+      const maxMp = resolveMaxDrawingBufferMp();
+      if (!Number.isFinite(maxMp) || maxMp <= 0) return pr;
 
-    // Pixel ratio is relative to CSS pixels, so ratio = targetPixels / cssPixels.
-    const prFromW = targetW / viewportWidthCss;
-    const prFromH = targetH / viewportHeightCss;
-    const desired = Math.min(prFromW, prFromH);
+      const cssMp = (cssW * cssH) / 1_000_000;
+      if (!(cssMp > 0)) return pr;
 
-    // Never upscale above base DPR.
-    const capped = Math.min(base, desired);
-
-    // Clamp to a sane minimum to avoid creating tiny render targets.
-    return Math.max(0.1, capped);
+      // area scales with pr^2, so the pr that hits the MP budget is sqrt(maxMp/cssMp).
+      const maxPr = Math.sqrt(maxMp / cssMp);
+      // Never force below 0.5x (keeps a readable image on tiny budgets); the load
+      // cap and preset handle further reduction when genuinely required.
+      const capped = Math.min(pr, Math.max(0.5, maxPr));
+      this._lastVramPixelRatioCap = { maxMp, cssMp, maxPr, applied: capped < pr };
+      if (this._lastCompositorResolution) {
+        this._lastCompositorResolution.vramCapApplied = capped < pr;
+      }
+      return capped;
+    } catch (_) {
+      return pr;
+    }
   }
 
   /**

@@ -10,6 +10,7 @@ import * as rendererStrategy from './renderer-strategy.js';
 import * as errors from './errors.js';
 import { installConsoleHelpers } from '../utils/console-helpers.js';
 import { GameSystemManager } from './game-system.js';
+import { probeGpu } from './gpu-probe.js';
 
 const logger = log.createLogger('Bootstrap');
 
@@ -96,6 +97,16 @@ export async function bootstrap(options = {}) {
 
     state.renderer = renderer;
     state.rendererType = rendererType;
+
+    // Identify the real GPU now that we have a live context, so the "auto" VRAM
+    // budget reflects the actual card rather than system RAM. This arms the
+    // crash guardrails (load-slim, streaming caps, budget caps) correctly.
+    try {
+      const gl = renderer?.getContext?.() ?? null;
+      probeGpu(gl);
+    } catch (probeErr) {
+      logger.warn('GPU probe failed (auto VRAM budget will use conservative default)', probeErr);
+    }
 
     // Step 4.5: Initialize Game System Manager (non-fatal -- rendering works without it)
     try {

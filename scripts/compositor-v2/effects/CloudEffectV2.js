@@ -12,6 +12,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { writeCompositorInternalSize } from '../../core/compositor-resolution.js';
 import { loadCloudSpriteTextures } from './cloud-sprites/cloud-asset-loader.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { advanceCloudWindAdvection } from './cloud-wind-advection.js';
@@ -1039,7 +1040,7 @@ export class CloudEffectV2 {
     this._bindPerfRecorder();
     const _legacyToken = this._beginLegacyAggregateSpan('cloud', 'render');
     let _perfToken = this._beginPerfSpan('ensureTargets', 'render', { cpuOnly: true });
-    renderer.getDrawingBufferSize(this._tempSize);
+    writeCompositorInternalSize(renderer, this._tempSize);
     const fullW = Math.max(1, this._tempSize.x);
     const fullH = Math.max(1, this._tempSize.y);
     this._ensureRenderTargets(fullW, fullH);

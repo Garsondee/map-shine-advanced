@@ -88,6 +88,8 @@ import {
   MAP_POINT_RENDER_LAYER_BELOW,
 } from '../../scene/map-points-manager.js';
 import { TWILIGHT_AMBIENT_DEFAULTS, resolveTwilightDarkness01 } from './ambient-compose-cpu.js';
+import { resolveEffectiveGpuVramGB } from '../../streaming/memory-settings.js';
+import { writeCompositorInternalSize } from '../../core/compositor-resolution.js';
 
 const log = createLogger('LightingEffectV2');
 const MODULE_ID = 'map-shine-advanced';
@@ -821,8 +823,8 @@ export class LightingEffectV2 {
     wle.setFullEmitDrawCacheEnabled?.(this.params.windowEmitCacheEnabled !== false);
     if (renderer) {
       wle._syncEmitDrawingBufferFromRenderer?.(renderer);
-      if (this._sizeVec && typeof renderer.getDrawingBufferSize === 'function') {
-        renderer.getDrawingBufferSize(this._sizeVec);
+      if (this._sizeVec) {
+        writeCompositorInternalSize(renderer, this._sizeVec);
         const bw = Math.floor(this._sizeVec.x);
         const bh = Math.floor(this._sizeVec.h);
         if (bw >= 8 && bh >= 8) {
@@ -852,6 +854,36 @@ export class LightingEffectV2 {
   }
 
   /**
+   * Effective light-RT resolution scale, capped to 0.5 on GPUs with ≤8 GB of
+   * VRAM. The light accumulation RT is the single largest HalfFloat stack in
+   * the compositor; on constrained VRAM the saving (~200-600 MB depending on
+   * drawing-buffer size) is worth the minimal visual quality reduction.
+   * The Tweakpane slider still shows the user's requested value; this cap is
+   * applied silently so the render never exceeds what the hardware can hold.
+   * @returns {number}
+   * @private
+   */
+  _resolveEffectiveLightScale() {
+    const requested = this._sanitizeResolutionScale(this.params.internalLightResolutionScale);
+    const vram = resolveEffectiveGpuVramGB();
+    if (vram > 0 && vram <= 8) return Math.min(requested, 0.5);
+    return requested;
+  }
+
+  /**
+   * Effective darkness-RT resolution scale, capped to 0.5 on GPUs with ≤8 GB
+   * for the same reason as the light scale cap.
+   * @returns {number}
+   * @private
+   */
+  _resolveEffectiveDarknessScale() {
+    const requested = this._sanitizeResolutionScale(this.params.internalDarknessResolutionScale);
+    const vram = resolveEffectiveGpuVramGB();
+    if (vram > 0 && vram <= 8) return Math.min(requested, 0.5);
+    return requested;
+  }
+
+  /**
    * @private
    * @param {number} baseW
    * @param {number} baseH
@@ -871,9 +903,9 @@ export class LightingEffectV2 {
   /** @private */
   _syncRenderTargetSizes(w, h) {
     const state = this._lastRtSizeState;
-    const lightScale = this._sanitizeResolutionScale(this.params.internalLightResolutionScale);
+    const lightScale = this._resolveEffectiveLightScale();
     const windowScale = this._sanitizeResolutionScale(this.params.internalWindowResolutionScale);
-    const darknessScale = this._sanitizeResolutionScale(this.params.internalDarknessResolutionScale);
+    const darknessScale = this._resolveEffectiveDarknessScale();
     if (
       state.w === w && state.h === h
       && state.lightScale === lightScale
@@ -2936,9 +2968,9 @@ export class LightingEffectV2 {
       stencilBuffer: false,
     };
     // OPTIMIZATION: Mutates pre-allocated objects instead of creating new ones
-    this._calcScaledSize(w, h, this.params.internalLightResolutionScale, this._lightSize);
+    this._calcScaledSize(w, h, this._resolveEffectiveLightScale(), this._lightSize);
     this._calcScaledSize(w, h, this.params.internalWindowResolutionScale, this._windowSize);
-    this._calcScaledSize(w, h, this.params.internalDarknessResolutionScale, this._darknessSize);
+    this._calcScaledSize(w, h, this._resolveEffectiveDarknessScale(), this._darknessSize);
     this._lightRT = new THREE.WebGLRenderTarget(this._lightSize.w, this._lightSize.h, rtOpts);
     // Linear storage: light accumulation is max-blended in linear space.
     this._lightRT.texture.colorSpace = THREE.LinearSRGBColorSpace;
@@ -5150,7 +5182,7 @@ export class LightingEffectV2 {
       this.syncAllLights();
     }
 
-    renderer.getDrawingBufferSize(this._sizeVec);
+    writeCompositorInternalSize(renderer, this._sizeVec);
     const w = Math.max(1, this._sizeVec.x);
     const h = Math.max(1, this._sizeVec.y);
     this._syncRenderTargetSizes(w, h);
@@ -5315,7 +5347,7 @@ export class LightingEffectV2 {
 
     _perfToken = this._beginPerfSpan('syncRtSizes', 'render', { cpuOnly: true });
     // Ensure RTs match drawing buffer size
-    renderer.getDrawingBufferSize(this._sizeVec);
+    writeCompositorInternalSize(renderer, this._sizeVec);
     const w = Math.max(1, this._sizeVec.x);
     const h = Math.max(1, this._sizeVec.y);
 

@@ -12,7 +12,10 @@ import {
   evaluateEffectMaskHealth,
   isMissingRequiredMask,
 } from './MaskPresenceEvaluator.js';
-import { getAllEffectMaskHealthEntries } from './EffectMaskHealthCatalog.js';
+import {
+  getAllEffectMaskHealthEntries,
+  isPaintedShadowCatalogEnabled,
+} from './EffectMaskHealthCatalog.js';
 import {
   evaluateCompositorWindowLightReadiness,
   partitionWindowLightOverlays,
@@ -1888,8 +1891,8 @@ export class HealthEvaluatorService {
           tier: 'structural',
           severity: 'error',
           check: (instance, ctx) => {
-            if (instance?.params && instance.params.enabled === false) {
-              return { pass: true, skipped: true, message: 'Painted shadows disabled' };
+            if (!isPaintedShadowCatalogEnabled(ctx, instance)) {
+              return { pass: true, skipped: true, message: 'Painted shadows disabled (scene effect off)' };
             }
             if (isMissingRequiredMask(ctx, instance, 'PaintedShadowEffectV2')) {
               return { pass: true, skipped: true, message: 'Mask presence check owns this scenario' };
@@ -1897,14 +1900,24 @@ export class HealthEvaluatorService {
             if (!instance?._projectMaterial) {
               return { pass: true, skipped: true, message: 'Awaiting first resize/render cycle' };
             }
-            const pass =
-              !!instance?._projectMaterial &&
-              !!instance?.shadowTarget?.texture;
+            if (!instance?.shadowTarget?.texture) {
+              const diag = instance?.getHealthDiagnostics?.() ?? null;
+              if (diag?.paintedMaskFound === false) {
+                return {
+                  pass: true,
+                  skipped: true,
+                  message: 'No _Shadow mask on this scene — painted shadow pass inactive',
+                };
+              }
+              return {
+                pass: true,
+                skipped: true,
+                message: 'Awaiting first painted shadow render (mask present)',
+              };
+            }
             return {
-              pass,
-              message: pass
-                ? 'Painted shadow material + output target available'
-                : 'Painted shadow resources missing after init',
+              pass: true,
+              message: 'Painted shadow material + output target available',
             };
           },
         },

@@ -6,10 +6,9 @@
  *   (GPU, renderer stats, memory, scene, load phase, tab visibility).
  * - Show a crash dialog that explains what happened, lists the most likely
  *   causes and lets the user copy a diagnostic report or rebuild the scene.
- * - Apply a one-shot "safe mode" render-resolution downgrade when a crash
- *   happens, then restore the previous resolution automatically on the next
- *   scene load. Safe mode is not re-applied on every subsequent load unless
- *   the user crashes again in that session.
+ * - Apply a one-shot "safe mode" downgrade (render resolution + GPU VRAM preset)
+ *   when a crash happens, then restore the previous values only after a load
+ *   completes successfully. Failed loads no longer bounce back to native resolution.
  * - Watchdog: if the browser never restores the context, trigger an automatic
  *   scene rebuild (fresh canvas + fresh WebGL context) once per session.
  *
@@ -26,6 +25,21 @@ import { getAdaptiveBudgetController } from '../streaming/adaptive-budget-contro
 import { getGpuWorkScheduler } from '../streaming/gpu-work-scheduler.js';
 import { getTextureLeakProbeReport } from './texture-leak-probe.js';
 import { collectTextureAudit, formatTextureAuditLine } from './texture-diagnostics.js';
+import {
+  getClientGpuVramPreset,
+  getGraphicsMemoryPresets,
+  resolveEffectiveGpuVramGB,
+} from '../streaming/memory-settings.js';
+import { shouldUseLoadSlimCompositorInit } from '../compositor-v2/load-slim-compositor.js';
+import { getProbedGpuInfo } from './gpu-probe.js';
+import {
+  getGpuLoadPressure,
+  estimateDrawingBufferMP,
+  estimateCompositorRtVramMB,
+  estimateRtMbPerDrawingBufferMp,
+  resolveCompositorRtBudgetMB,
+  resolveMaxDrawingBufferMp,
+} from '../streaming/texture-budget-policy.js';
 
 const log = createLogger('WebGLCrashRecovery');
 
@@ -35,6 +49,7 @@ const MODULE_MANIFEST_VERSION = '0.5.3.10';
 const HISTORY_KEY = 'map-shine-advanced.webglCrashLog';
 const SAFE_MODE_KEY = 'map-shine-advanced.webglSafeMode';
 const SAFE_MODE_PRESET = '1280x720';
+const SAFE_MODE_PRESET_FLOOR = '800x450';
 const HISTORY_MAX = 20;
 /** Crashes within this window count toward "repeated" crash messaging only. */
 const REPEAT_CRASH_WINDOW_MS = 30 * 60 * 1000;
@@ -44,6 +59,15 @@ const REPEAT_CRASH_THRESHOLD = 3;
 const RESTORE_WATCHDOG_MS = 12000;
 /** Delay before the crash dialog appears (lets the restore race settle first). */
 const CRASH_DIALOG_DELAY_MS = 1500;
+/** Recent load-crash count on a scene before we shed all effects ("bare mode"). */
+const BARE_MODE_CRASH_THRESHOLD = 4;
+/** Recent load-crash count before bypassing Map Shine entirely (Native Foundry PIXI). */
+const NATIVE_FALLBACK_CRASH_THRESHOLD = 7;
+/** localStorage: GPU renderer strings that have shown repeated load instability. */
+const KNOWN_WEAK_GPU_KEY = 'map-shine-advanced.knownWeakGpus';
+/** Foundry client setting key that bypasses Map Shine's Three.js renderer. */
+const NATIVE_FOUNDRY_RENDERING_SETTING = 'useNativeFoundryRendering';
+const MODULE_ID = 'map-shine-advanced';
 
 const SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -60,8 +84,9 @@ let _lossEpoch = 0;
 let _restoreWatchdogId = null;
 /** @type {object|null} */
 let _lastCrashRecord = null;
-/** @type {{ type: 'restored'|'staying-reduced', preset?: string }|null} */
+/** @type {{ type: 'restored'|'staying-reduced'|'bare-mode'|'native-fallback', preset?: string }|null} */
 let _pendingLoadNotice = null;
+let _nativeFallbackTriggered = false;
 
 // ---------------------------------------------------------------------------
 // Storage helpers
@@ -98,13 +123,132 @@ function _removeKey(key) {
  * persisted graphics overrides even when no manager instance exists yet.
  * @returns {string}
  */
-function _buildGraphicsStorageKey() {
+function _buildGraphicsStorageKey(scene = null) {
   try {
-    const sceneId = canvas?.scene?.id || 'no-scene';
+    const sceneId = scene?.id ?? canvas?.scene?.id ?? 'no-scene';
     const userId = game?.user?.id || 'no-user';
     return `map-shine-advanced.graphicsOverrides.${sceneId}.${userId}`;
   } catch (_) {
     return 'map-shine-advanced.graphicsOverrides';
+  }
+}
+
+/** @param {string} sceneId @returns {string} */
+function _storageKeyForScene(sceneId) {
+  const userId = game?.user?.id || 'no-user';
+  return `map-shine-advanced.graphicsOverrides.${sceneId || 'no-scene'}.${userId}`;
+}
+
+// ---------------------------------------------------------------------------
+// Known-weak GPU hint (persists across scenes so a demonstrably unstable card
+// starts conservative even on scenes that have not crashed yet)
+// ---------------------------------------------------------------------------
+
+/** @returns {string|null} A short, stable key for the current GPU. */
+function _currentGpuKey() {
+  try {
+    const r = window.MapShine?.gpuProbe?.renderer ?? null;
+    return r ? String(r).slice(0, 120) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/** @returns {object|null} Guarded snapshot of the probed GPU for the crash report. */
+function _safeGpuProbeSnapshot() {
+  try {
+    const p = getProbedGpuInfo();
+    if (!p) return null;
+    return {
+      renderer: p.renderer ?? null,
+      vendor: p.vendor ?? null,
+      estimatedVramGB: p.estimatedVramGB ?? null,
+      confident: p.confident === true,
+      source: p.source ?? null,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+/** @returns {object|null} Guarded snapshot of the effective GPU load pressure. */
+function _safeGpuLoadPressure() {
+  try {
+    return getGpuLoadPressure();
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Guarded snapshot of the estimated compositor render-target VRAM vs its budget.
+ * This is the memory that scales with render resolution and is not tracked by the
+ * texture budget — the true cause of `webglcontextlost` at high resolution.
+ * @returns {object|null}
+ */
+function _safeRtVramEstimate() {
+  try {
+    const drawingBufferMp = estimateDrawingBufferMP();
+    const perMp = estimateRtMbPerDrawingBufferMp();
+    const estMB = estimateCompositorRtVramMB(drawingBufferMp);
+    const budgetMB = resolveCompositorRtBudgetMB(resolveEffectiveGpuVramGB());
+    const maxMp = resolveMaxDrawingBufferMp();
+    return {
+      drawingBufferMp: Number(drawingBufferMp.toFixed(2)),
+      mbPerMp: Math.round(perMp),
+      estMB: Math.round(estMB),
+      budgetMB: Number.isFinite(budgetMB) ? Math.round(budgetMB) : null,
+      maxDrawingBufferMp: Number.isFinite(maxMp) ? Number(maxMp.toFixed(2)) : null,
+      overBudget: Number.isFinite(budgetMB) ? estMB > budgetMB : false,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+/** @returns {boolean} True when this GPU has previously shown repeated load instability. */
+function _isGpuKnownWeak() {
+  const key = _currentGpuKey();
+  if (!key) return false;
+  const map = _readJson(KNOWN_WEAK_GPU_KEY);
+  return !!(map && map[key]);
+}
+
+/** Record the current GPU as known-weak so future loads start conservative. */
+function _markGpuKnownWeak() {
+  const key = _currentGpuKey();
+  if (!key) return;
+  const map = _readJson(KNOWN_WEAK_GPU_KEY) ?? {};
+  if (!map[key]) {
+    map[key] = { at: Date.now() };
+    _writeJson(KNOWN_WEAK_GPU_KEY, map);
+    log.warn(`GPU "${key}" marked known-weak — future scene loads will start conservative`);
+  }
+}
+
+/**
+ * Terminal fallback: after repeated unrecoverable load crashes even in bare
+ * mode, bypass Map Shine's Three.js renderer entirely and use Foundry's native
+ * PIXI canvas. Guarantees the user can see and use the map. Requires a reload.
+ */
+async function _enableNativeFoundryRenderingFallback() {
+  if (_nativeFallbackTriggered) return;
+  _nativeFallbackTriggered = true;
+  try {
+    const already = globalThis.game?.settings?.get?.(MODULE_ID, NATIVE_FOUNDRY_RENDERING_SETTING) === true;
+    if (already) return;
+    await globalThis.game?.settings?.set?.(MODULE_ID, NATIVE_FOUNDRY_RENDERING_SETTING, true);
+    _markGpuKnownWeak();
+    globalThis.ui?.notifications?.error?.(
+      'Map Shine: repeated WebGL crashes on this scene — switched this browser to '
+      + 'Native Foundry Rendering (no Map Shine effects) so the map remains usable. '
+      + 'Reload the page to apply. Re-enable Map Shine in Configure Settings once your '
+      + 'GPU driver / VRAM situation is resolved.',
+      { permanent: true },
+    );
+    log.warn('Native Foundry Rendering fallback enabled after repeated load crashes');
+  } catch (e) {
+    log.warn('Failed to enable Native Foundry Rendering fallback', e);
   }
 }
 
@@ -219,9 +363,13 @@ export function collectDiagnostics(extra = {}) {
   };
 
   try {
+    // The loaded module version (from Foundry) is authoritative. The on-disk
+    // manifest constant is hand-maintained and intentionally lags, so comparing
+    // against it produced false "module outdated" noise — do not flag a mismatch.
     const runtimeVersion = game?.modules?.get?.('map-shine-advanced')?.version ?? null;
     record.module.runtimeVersion = runtimeVersion;
-    record.module.versionMismatch = runtimeVersion != null && runtimeVersion !== MODULE_MANIFEST_VERSION;
+    if (runtimeVersion) record.module.version = runtimeVersion;
+    record.module.versionMismatch = false;
   } catch (_) {}
 
   try {
@@ -249,6 +397,22 @@ export function collectDiagnostics(extra = {}) {
   try {
     const scene = canvas?.scene ?? null;
     if (scene) {
+      // Ground-truth floor/Levels count. Distinct from `tiles` (scene.tiles.size,
+      // includes wall art / map points / decorations) and from
+      // `populate.busTileCount` (FloorRenderBus mesh count, NOT floors) — do not
+      // use either of those as a floor count in diagnosis text. See
+      // Docs/planning/Forward+.md §1.1 for why "N floors" claims here were
+      // previously conflated with tile/mesh counts and produced misleading
+      // multifloor diagnoses.
+      let levelsCount = null;
+      let visibleFloorsCount = null;
+      try {
+        const floorStack = window.MapShine?.floorStack ?? null;
+        levelsCount = Array.isArray(floorStack?.getFloors?.()) ? floorStack.getFloors().length : null;
+        visibleFloorsCount = Array.isArray(floorStack?.getVisibleFloors?.())
+          ? floorStack.getVisibleFloors().length
+          : null;
+      } catch (_) {}
       record.scene = {
         id: scene.id ?? null,
         name: scene.name ?? null,
@@ -258,6 +422,8 @@ export function collectDiagnostics(extra = {}) {
         tokens: scene.tokens?.size ?? null,
         lights: scene.lights?.size ?? null,
         walls: scene.walls?.size ?? null,
+        levelsCount,
+        visibleFloorsCount,
       };
     }
   } catch (_) {}
@@ -308,6 +474,31 @@ export function collectDiagnostics(extra = {}) {
       viewport: (typeof window !== 'undefined')
         ? { width: window.innerWidth ?? null, height: window.innerHeight ?? null }
         : null,
+      gpuVramPreset: getGraphicsMemoryPresets().gpuVramPreset ?? null,
+      clientGpuVramPreset: getClientGpuVramPreset() ?? null,
+      effectiveGpuVramGB: resolveEffectiveGpuVramGB(),
+      // Actual GPU (renderer string) + estimated dedicated VRAM. This is the
+      // signal the corrected auto budget uses instead of inferring from RAM.
+      gpuProbe: _safeGpuProbeSnapshot(),
+      gpuLoadPressure: _safeGpuLoadPressure(),
+      globalDisableAll: gs?.state?.globalDisableAll === true,
+      knownWeakGpu: _isGpuKnownWeak(),
+      drawingBuffer: {
+        width: renderer?.domElement?.width ?? null,
+        height: renderer?.domElement?.height ?? null,
+      },
+      outdoorsMaskBakeEstimate: _estimateOutdoorsMaskBakeSize(),
+      // True total-VRAM accounting: the compositor render-target stack is the
+      // dominant *uncounted* consumer (the texture budget only tracks masks/tiles).
+      // These fields make the real budget adherence visible in the report.
+      rtVramEstimate: _safeRtVramEstimate(),
+      loadSlimCompositorActive: ms.__msaLoadSlimCompositor === true
+        || ms.floorCompositorV2?._loadSlimInitActive === true,
+      loadSlimPolicyWouldApply: shouldUseLoadSlimCompositorInit(),
+      loadSlimDeferredCount: Array.isArray(ms.floorCompositorV2?._loadSlimDeferredSteps)
+        ? ms.floorCompositorV2._loadSlimDeferredSteps.length
+        : null,
+      loadSlimPendingEffects: ms.floorCompositorV2?._loadSlimPendingEffects?.size ?? null,
     };
   } catch (_) {}
 
@@ -342,6 +533,11 @@ export function collectDiagnostics(extra = {}) {
   try {
     const errs = (typeof window !== 'undefined') ? window.__msaRecentErrors : null;
     if (Array.isArray(errs)) record.recentErrors = errs.slice(-10);
+  } catch (_) {}
+
+  try {
+    const shaderErrs = globalThis.__msaRecentShaderErrors;
+    if (Array.isArray(shaderErrs)) record.shaderErrors = shaderErrs.slice(-8);
   } catch (_) {}
 
   try {
@@ -417,6 +613,28 @@ export function diagnoseCrash(record) {
     const dpr = record.graphics?.devicePixelRatio ?? 1;
     const preset = record.graphics?.renderResolutionPreset ?? 'native';
     const stream = record.tileStreaming ?? null;
+
+    // Primary modern cause: compositor render-target VRAM (scales with render
+    // resolution, NOT counted by the texture budget). Surface it first.
+    const rt = record.graphics?.rtVramEstimate ?? null;
+    if (rt && rt.estMB > 0) {
+      const budgetTxt = rt.budgetMB != null ? `${rt.budgetMB} MB budget` : 'uncapped';
+      if (rt.overBudget) {
+        causes.push(
+          `Compositor render targets are estimated at ~${rt.estMB} MB at the current render `
+          + `resolution (${rt.drawingBufferMp} MP drawing buffer × ~${rt.mbPerMp} MB/MP), which EXCEEDS the `
+          + `${budgetTxt} for this GPU. These full-screen targets (lighting, bloom, overhead, shadows, `
+          + `per-floor buffers) are NOT part of the texture budget and are the dominant VRAM consumer at `
+          + `high resolution — the render resolution is now auto-capped to ~${rt.maxDrawingBufferMp} MP so they fit. `
+          + `Lower the Render Resolution preset for extra headroom if crashes persist.`,
+        );
+      } else {
+        causes.push(
+          `Compositor render targets estimated at ~${rt.estMB} MB (${rt.drawingBufferMp} MP × ~${rt.mbPerMp} MB/MP), `
+          + `within the ${budgetTxt}. These are uncounted by the texture budget but bounded by the render-resolution cap.`,
+        );
+      }
+    }
     const populate = record.populate ?? stream?.populate ?? null;
 
     if (loading && populate?.populateComplete !== true) {
@@ -431,6 +649,111 @@ export function diagnoseCrash(record) {
         'Large-scene tile streaming was not registered at crash time — background pyramid mount '
         + 'likely still in flight or populate had not reached the background loader yet.',
       );
+    }
+
+    if (Array.isArray(record.shaderErrors) && record.shaderErrors.length > 0) {
+      const last = record.shaderErrors[record.shaderErrors.length - 1]?.msg ?? 'Shader Error';
+      causes.push(
+        `Recent WebGL shader validation failure(s) (${record.shaderErrors.length}) — `
+        + `${last.slice(0, 140)}. This often happens when GPU mask baking runs on a context that was `
+        + 'just lost/restored (RawShaderMaterial in GpuSceneMaskCompositor).',
+      );
+    }
+
+    const maskEst = record.graphics?.outdoorsMaskBakeEstimate;
+    const realFloorCount = record.scene?.visibleFloorsCount ?? record.scene?.levelsCount ?? null;
+    if (loading && maskEst?.estMb >= 16 && (populate?.busTileCount ?? 0) >= 2) {
+      // NOTE: `_Outdoors` is only ONE of ~15 authored per-floor masks MSA bakes
+      // (_Specular, _Water, _Fire, _Tree, _Bush, _Normal, _Roughness, etc. are
+      // comparably sized). This estimate is a floor, not the total mask VRAM —
+      // do not treat "_Outdoors mask" as the sole or primary suspect. See
+      // Docs/planning/Forward+.md §2.1/§4.1.
+      const floorTxt = Number.isFinite(realFloorCount)
+        ? `${realFloorCount} floor(s) visible`
+        : `${populate?.busTileCount ?? '?'} tile mesh(es) queued on the render bus (NOT a floor count)`;
+      causes.push(
+        `Per-floor mask baking (_Outdoors alone estimated at ~${maskEst.estMb} MB per floor; `
+        + `${maskEst.outW}×${maskEst.outH} from ${maskEst.sceneW}×${maskEst.sceneH} scene) — MSA bakes up to 15 `
+        + `comparably-sized authored masks per floor (_Specular, _Water, _Fire, _Tree, _Bush, etc.), so real `
+        + `per-floor mask VRAM is likely several times this figure. ${floorTxt} during load can spike VRAM `
+        + 'before streaming mounts.',
+      );
+    }
+
+    const phase = String(record.load?.phase ?? '');
+    if (loading && phase.includes('cinematicCamera')) {
+      causes.push(
+        'Crash during camera-follower init: FloorCompositor may run outdoors mask repair for every '
+        + 'visible floor band. On 144 MP multifloor scenes this is a common second crash after compositor init.',
+      );
+    }
+
+    if (loading && record.graphics?.loadSlimPolicyWouldApply && !record.graphics?.loadSlimCompositorActive) {
+      causes.push(
+        'Load-slim compositor policy applies to this scene but was not active at crash time — '
+        + 'Bloom/OverheadStamp/BuildingShadows RTs may have allocated during init. Hard-refresh (Ctrl+F5) '
+        + 'after deploying the latest module build.',
+      );
+    } else if (loading && (record.graphics?.loadSlimPendingEffects ?? 0) > 0) {
+      causes.push(
+        `Load-slim had ${record.graphics.loadSlimPendingEffects} effect(s) still pending GPU init — `
+        + 'FloorCompositor.onResize may have allocated their RT stacks early (OverheadStamp / BuildingShadows). '
+        + 'Deploy the onResize guard fix if this persists.',
+      );
+    } else if (loading && record.graphics?.loadSlimCompositorActive) {
+      const deferred = record.graphics?.loadSlimDeferredCount;
+      causes.push(
+        `Load-slim compositor was active${Number.isFinite(deferred) ? ` (${deferred} effect(s) deferred)` : ''} — `
+        + 'if this still crashed, the remaining core RT stack or mask uploads exceeded GPU headroom.',
+      );
+    }
+
+    if (phase.includes('fadeIn') && (record.rendererStats?.textures ?? 0) >= 128) {
+      causes.push(
+        `Crash during scene reveal with ${record.rendererStats.textures} live renderer textures — `
+        + 'streaming pyramid mount likely burst-uploaded too many cells at once on 8 GB VRAM.',
+      );
+    }
+
+    const probe = record.graphics?.gpuProbe ?? null;
+    if (record.graphics?.gpuVramPreset === 'auto' && record.graphics?.effectiveGpuVramGB >= 16) {
+      causes.push(
+        'GPU VRAM preset is Auto and the effective budget resolved to 16 GB. If your GPU has less VRAM '
+        + `${probe?.renderer ? `(detected "${probe.renderer}")` : ''}, pin the matching size under `
+        + 'Configure Settings → Map Shine.',
+      );
+    }
+    if (probe?.renderer && probe.estimatedVramGB != null && probe.estimatedVramGB <= 8) {
+      causes.push(
+        `GPU identified as "${probe.renderer}" (~${probe.estimatedVramGB} GB VRAM). The auto budget and load `
+        + 'guardrails are now sized to this card; if crashes persist the base map should still load in bare mode.',
+      );
+    } else if (!probe?.renderer) {
+      causes.push(
+        'GPU could not be identified from the WebGL renderer string, so the auto VRAM budget was capped '
+        + 'conservatively at 8 GB. Pin your actual VRAM under Configure Settings → Map Shine for best quality.',
+      );
+    }
+
+    // Attribute the VRAM: if one subsystem dominates the budget, name it. Scene
+    // masks and streaming tiles are the usual suspects on constrained GPUs.
+    const sourceBytesMB = stream?.budget?.sourceBytesMB ?? null;
+    if (sourceBytesMB && typeof sourceBytesMB === 'object') {
+      const rows = Object.entries(sourceBytesMB).sort((a, b) => b[1] - a[1]);
+      const total = rows.reduce((s, [, mb]) => s + Number(mb || 0), 0);
+      if (rows.length && total > 0) {
+        const [topSrc, topMb] = rows[0];
+        const pct = Math.round((topMb / total) * 100);
+        if (pct >= 45) {
+          const maskScale = stream.budget.stableMaskResolutionScale ?? stream.budget.maskResolutionScale;
+          const maskHint = (topSrc === 'sceneMask' || topSrc === 'tileMask')
+            ? ` Scene-space masks scale with the map size; the mask resolution is now VRAM-capped (scale ${maskScale ?? '?'}).`
+            : '';
+          causes.push(
+            `VRAM is dominated by "${topSrc}" (${topMb} MB, ${pct}% of ${Math.round(total)} MB tracked).${maskHint}`,
+          );
+        }
+      }
     }
 
     if (stream?.budget?.overBudget) {
@@ -494,13 +817,9 @@ export function diagnoseCrash(record) {
         + 'the most pressure on the GPU. This is typically GPU memory pressure or a driver watchdog timeout.'
       );
     }
-    if (record.module?.versionMismatch === true) {
-      causes.push(
-        `Foundry is still running module runtime ${record.module.runtimeVersion ?? '?'} while `
-        + `files on disk are ${record.module.version ?? '?'}. Hard-refresh (Ctrl+F5) or reload Foundry `
-        + 'before testing leak fixes — otherwise streaming/disposal patches may not be active.',
-      );
-    }
+    // NOTE: intentionally no "module outdated / hard refresh" diagnosis — the
+    // on-disk manifest version is hand-maintained and lags the runtime, so it is
+    // not a reliable staleness signal and only produced misleading noise.
 
     if (audit?.likelyStreamingLeak) {
       const leakId = audit.primaryLeakId ?? 'streaming_lod_texture_leak';
@@ -627,6 +946,124 @@ function _presetAtOrBelow(a, b) {
 }
 
 /**
+ * Next safe-mode render preset below the current one.
+ * @param {string|null|undefined} currentPreset
+ * @returns {string|null}
+ */
+function _resolveSafeModeTargetPreset(currentPreset) {
+  const cur = currentPreset || 'native';
+  if (!_presetAtOrBelow(cur, SAFE_MODE_PRESET)) return SAFE_MODE_PRESET;
+  if (!_presetAtOrBelow(cur, SAFE_MODE_PRESET_FLOOR)) return SAFE_MODE_PRESET_FLOOR;
+  return null;
+}
+
+/**
+ * Capture Three.js shader validation warnings for crash reports.
+ */
+export function installWebGLShaderDiagnostics() {
+  try {
+    if (globalThis.__msaShaderDiagInstalled === true) return;
+    globalThis.__msaShaderDiagInstalled = true;
+    globalThis.__msaRecentShaderErrors = [];
+    const origWarn = console.warn;
+    console.warn = function msaPatchedConsoleWarn(...args) {
+      try {
+        const msg = args.map((a) => String(a ?? '')).join(' ');
+        if (msg.includes('WebGLProgram') && msg.includes('Shader Error')) {
+          globalThis.__msaRecentShaderErrors.push({
+            msg: msg.slice(0, 600),
+            at: Date.now(),
+          });
+          if (globalThis.__msaRecentShaderErrors.length > 12) {
+            globalThis.__msaRecentShaderErrors.shift();
+          }
+        }
+      } catch (_) {
+      }
+      return origWarn.apply(this, args);
+    };
+  } catch (_) {
+  }
+}
+
+/** Authored per-floor mask suffixes MSA bakes in world space (mask-catalog.js), used
+ *  only to caveat the single-mask estimate below — kept as a literal count here
+ *  rather than importing the catalog, since this module must survive a lost/broken
+ *  render context. Update if MASK_CATALOG's authored suffix count changes. */
+const APPROX_AUTHORED_MASK_COUNT = 15;
+
+/**
+ * Estimate outdoors mask bake RT size for crash diagnostics.
+ *
+ * IMPORTANT: `_Outdoors` is only ONE of ~{@link APPROX_AUTHORED_MASK_COUNT} authored
+ * per-floor masks MSA bakes (see `scripts/masks/mask-catalog.js` MASK_CATALOG —
+ * _Specular, _Water, _Fire, _Windows, _Tree, _Bush, _Normal, _Roughness, etc. are
+ * comparably sized). Do not treat this single-mask estimate as the total per-floor
+ * mask VRAM cost, and do not treat "_Outdoors mask" as the sole suspect when
+ * diagnosing mask-driven VRAM pressure — it is a representative sample, not the
+ * whole picture. See Docs/planning/Forward+.md §2.1/§4.1 for the full mask
+ * inventory and why this was historically undercounted in crash diagnosis.
+ *
+ * @returns {{ sceneW: number, sceneH: number, outW: number, outH: number, estMb: number, note: string }|null}
+ */
+function _estimateOutdoorsMaskBakeSize() {
+  try {
+    const sr = globalThis.canvas?.dimensions?.sceneRect;
+    const sceneW = Number(sr?.width) || 0;
+    const sceneH = Number(sr?.height) || 0;
+    if (!(sceneW > 0 && sceneH > 0)) return null;
+    const tracker = getTextureBudgetTracker();
+    const scale = Math.max(0.18, Number(tracker.getStableMaskResolutionScale?.()) || 0.3);
+    const hdMax = Math.max(256, Math.round(8192 * scale));
+    const maxTex = window.MapShine?.renderer?.capabilities?.maxTextureSize ?? 8192;
+    const fit = Math.min(
+      1.0,
+      hdMax / sceneW,
+      hdMax / sceneH,
+      maxTex / sceneW,
+      maxTex / sceneH,
+    );
+    const outW = Math.max(1, Math.round(sceneW * fit));
+    const outH = Math.max(1, Math.round(sceneH * fit));
+    const estMb = Math.round((outW * outH * 4) / (1024 * 1024));
+    return {
+      sceneW, sceneH, outW, outH, estMb,
+      note: `This is 1 of up to ${APPROX_AUTHORED_MASK_COUNT} comparably-sized authored per-floor masks `
+        + '(_Specular, _Water, _Fire, _Tree, _Bush, etc. — see mask-catalog.js). Real per-floor mask VRAM '
+        + 'is likely several times this single-mask figure, NOT this figure alone.',
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function _applySafeModeMemoryDowngrade(ctx, storageKey, stored) {
+  const gs = ctx?.graphicsSettings ?? null;
+  const currentGpu = gs?.getGpuVramPreset?.()
+    ?? stored?.gpuVramPreset
+    ?? 'auto';
+
+  let targetGpu = null;
+  if (currentGpu === 'auto') {
+    // Auto infers VRAM from system RAM (16 GB RAM → 16 GB VRAM). Pin 8 GB on crash.
+    targetGpu = '8';
+  } else if (Number(currentGpu) > 8 && Number.isFinite(Number(currentGpu))) {
+    targetGpu = '8';
+  }
+  if (!targetGpu) return null;
+
+  if (gs && typeof gs.setGpuVramPreset === 'function') {
+    gs.setGpuVramPreset(targetGpu);
+    gs.saveState?.();
+  } else {
+    const next = stored ?? _readJson(storageKey) ?? {};
+    next.gpuVramPreset = targetGpu;
+    _writeJson(storageKey, next);
+  }
+  return currentGpu;
+}
+
+/**
  * Drop render resolution to the safe-mode preset and remember how to undo it.
  * Works through the live GraphicsSettingsManager when available, otherwise by
  * rewriting the persisted overrides JSON directly.
@@ -638,33 +1075,97 @@ function _applySafeModeDowngrade(ctx) {
   try {
     const gs = ctx?.graphicsSettings ?? null;
     const storageKey = gs?._storageKey ?? _buildGraphicsStorageKey();
+    const stored = _readJson(storageKey) ?? {};
     const currentPreset = gs?.getRenderResolutionPreset?.()
-      ?? _readJson(storageKey)?.renderResolutionPreset
+      ?? stored.renderResolutionPreset
       ?? 'native';
+    const currentGpu = gs?.getGpuVramPreset?.()
+      ?? stored.gpuVramPreset
+      ?? 'auto';
 
-    // Already at/below the safety floor (possibly user-chosen): leave it alone.
-    if (_presetAtOrBelow(currentPreset, SAFE_MODE_PRESET)) return false;
+    const targetPreset = _resolveSafeModeTargetPreset(currentPreset);
+    const resolutionChanged = targetPreset != null && targetPreset !== currentPreset;
+    const previousGpuVramPreset = _applySafeModeMemoryDowngrade(ctx, storageKey, stored);
 
-    if (gs && typeof gs.setRenderResolutionPreset === 'function') {
-      gs.setRenderResolutionPreset(SAFE_MODE_PRESET);
-      gs.saveState?.();
-    } else {
-      const stored = _readJson(storageKey) ?? {};
-      stored.renderResolutionPreset = SAFE_MODE_PRESET;
-      _writeJson(storageKey, stored);
+    if (!resolutionChanged && previousGpuVramPreset == null) return false;
+
+    if (resolutionChanged) {
+      if (gs && typeof gs.setRenderResolutionPreset === 'function') {
+        gs.setRenderResolutionPreset(targetPreset);
+        gs.saveState?.();
+      } else {
+        stored.renderResolutionPreset = targetPreset;
+        _writeJson(storageKey, stored);
+      }
     }
 
     _writeJson(SAFE_MODE_KEY, {
       active: true,
       previousPreset: currentPreset,
+      previousGpuVramPreset: previousGpuVramPreset ?? currentGpu,
       storageKey,
       at: Date.now(),
       sessionId: SESSION_ID,
     });
-    log.warn(`Safe mode: render resolution reduced to ${SAFE_MODE_PRESET} (was ${currentPreset})`);
+    log.warn(
+      `Safe mode: render resolution ${resolutionChanged ? `reduced to ${targetPreset} (was ${currentPreset})` : 'unchanged'}`
+      + `${previousGpuVramPreset != null ? `; GPU VRAM preset pinned to 8 GB (was ${previousGpuVramPreset})` : ''}`,
+    );
     return true;
   } catch (e) {
     log.warn('Safe mode downgrade failed', e);
+    return false;
+  }
+}
+
+/**
+ * After a successful scene load, restore pre-crash graphics overrides for the
+ * *next* load when safe mode was a one-off recovery (not a repeated failure).
+ *
+ * @returns {boolean}
+ */
+function _restoreGraphicsAfterSuccessfulLoad() {
+  try {
+    const marker = _readJson(SAFE_MODE_KEY);
+    if (!marker?.active) return false;
+
+    const sceneId = canvas?.scene?.id ?? null;
+    const recentLoadCrashes = getCrashHistory().filter((c) =>
+      c.sceneId === sceneId
+      && c.loading === true
+      && (Date.now() - (c.atMs ?? 0)) < REPEAT_CRASH_WINDOW_MS,
+    );
+
+    if (recentLoadCrashes.length >= 2) {
+      _removeKey(SAFE_MODE_KEY);
+      _pendingLoadNotice = { type: 'staying-reduced' };
+      log.info('Skipping graphics restore — repeated WebGL load crashes on this scene');
+      return false;
+    }
+
+    const storageKey = marker.storageKey ?? _buildGraphicsStorageKey();
+    const stored = _readJson(storageKey) ?? {};
+
+    if (marker.previousPreset) {
+      stored.renderResolutionPreset = marker.previousPreset;
+    }
+    if (marker.previousGpuVramPreset != null) {
+      stored.gpuVramPreset = marker.previousGpuVramPreset;
+    }
+    _writeJson(storageKey, stored);
+    _removeKey(SAFE_MODE_KEY);
+
+    const activeKey = window.MapShine?.graphicsSettings?._storageKey ?? _buildGraphicsStorageKey();
+    if (marker.storageKey === activeKey) {
+      _pendingLoadNotice = { type: 'restored', preset: marker.previousPreset || 'native' };
+    }
+    log.info(
+      `Safe mode cleared after successful load; next load will use `
+      + `"${marker.previousPreset || 'native'}" render resolution`,
+    );
+    return true;
+  } catch (e) {
+    log.warn('_restoreGraphicsAfterSuccessfulLoad failed', e);
     return false;
   }
 }
@@ -680,47 +1181,98 @@ function _countRecentCrashes(nowMs = Date.now()) {
 }
 
 /**
- * Previously re-applied safe mode on every load after any recent crash.
- * Safe mode is now one-shot per context loss; restore happens on the next load
- * via maybeRestoreResolutionBeforeLoad().
+ * Pin conservative render resolution + GPU VRAM before compositor init when this
+ * scene recently crashed during loading (breaks the native-resolution crash loop).
  *
  * @param {{ id?: string|null }|null} [scene]
- * @returns {boolean}
+ * @returns {boolean} True when persisted overrides were updated.
  */
 export function ensureConservativeGraphicsForLoad(scene = null) {
-  void scene;
-  return false;
+  try {
+    const sceneId = scene?.id ?? canvas?.scene?.id ?? null;
+    if (!sceneId) return false;
+
+    const now = Date.now();
+    const recentLoadCrashes = getCrashHistory().filter((c) =>
+      c.sceneId === sceneId
+      && c.loading === true
+      && (now - (c.atMs ?? 0)) < REPEAT_CRASH_WINDOW_MS,
+    );
+    const crashes = recentLoadCrashes.length;
+    const gpuWeak = _isGpuKnownWeak();
+
+    // Nothing crashed here and the card has no track record → leave quality high.
+    if (crashes < 1 && !gpuWeak) return false;
+
+    const storageKey = _storageKeyForScene(sceneId);
+    const stored = _readJson(storageKey) ?? {};
+    let changed = false;
+
+    // Tier 0 (any recent crash OR known-weak GPU): pin GPU VRAM to 8 GB so the
+    // budget/guardrails size to a discrete 8 GB card rather than system RAM.
+    const gpu = stored.gpuVramPreset ?? 'auto';
+    if (gpu === 'auto' || (Number(gpu) > 8 && Number.isFinite(Number(gpu)))) {
+      stored.gpuVramPreset = '8';
+      changed = true;
+    }
+
+    // Tier 1 (>=1 recent load crash on this scene): drop the render resolution.
+    if (crashes >= 1) {
+      const targetPreset = _resolveSafeModeTargetPreset(stored.renderResolutionPreset ?? 'native');
+      if (targetPreset && stored.renderResolutionPreset !== targetPreset) {
+        stored.renderResolutionPreset = targetPreset;
+        changed = true;
+      }
+    }
+
+    // Tier 2 ("bare mode"): resolution cuts alone have not helped — shed the
+    // entire effect stack (the compositor RTs that survive resolution drops) and
+    // pin the resolution floor. Base map + tokens still render.
+    let escalatedToBareMode = false;
+    if (crashes >= BARE_MODE_CRASH_THRESHOLD && stored.globalDisableAll !== true) {
+      stored.globalDisableAll = true;
+      stored.renderResolutionPreset = SAFE_MODE_PRESET_FLOOR;
+      changed = true;
+      escalatedToBareMode = true;
+      _markGpuKnownWeak();
+    }
+
+    // Tier 3 (terminal): still crashing even with no effects → bypass Map Shine.
+    if (crashes >= NATIVE_FALLBACK_CRASH_THRESHOLD && stored.globalDisableAll === true) {
+      void _enableNativeFoundryRenderingFallback();
+      _pendingLoadNotice = { type: 'native-fallback' };
+    }
+
+    if (crashes >= 2) _markGpuKnownWeak();
+
+    if (!changed) return false;
+
+    _writeJson(storageKey, stored);
+    if (escalatedToBareMode) {
+      _pendingLoadNotice = { type: 'bare-mode' };
+    } else if (_pendingLoadNotice?.type !== 'native-fallback') {
+      _pendingLoadNotice = { type: 'staying-reduced' };
+    }
+    log.warn(
+      `Conservative graphics pinned for scene ${sceneId} after ${crashes} recent load `
+      + `crash(es)${gpuWeak ? ' (GPU flagged known-weak)' : ''}`
+      + `${escalatedToBareMode ? ' — bare mode (all effects disabled)' : ''}`,
+    );
+    return true;
+  } catch (e) {
+    log.warn('ensureConservativeGraphicsForLoad failed', e);
+    return false;
+  }
 }
 
 /**
  * Called at the start of every scene load (before graphics settings are read).
  *
- * If a previous session crashed and auto-downgraded the resolution, restore the
- * original preset so the user gets full quality back without manual action —
- * unless any WebGL crash is still fresh, in which case safe mode stays and the
- * user is told why (after the load succeeds).
+ * Resolution/memory restore was moved to {@link onLoadSucceeded} so failed loads
+ * stay at the safe-mode preset instead of bouncing back to native and crashing again.
  */
 export function maybeRestoreResolutionBeforeLoad() {
-  try {
-    const marker = _readJson(SAFE_MODE_KEY);
-    if (!marker?.active) return;
-
-    const previousPreset = marker.previousPreset || 'native';
-    const stored = _readJson(marker.storageKey);
-    if (stored && typeof stored === 'object') {
-      stored.renderResolutionPreset = previousPreset;
-      _writeJson(marker.storageKey, stored);
-    }
-    _removeKey(SAFE_MODE_KEY);
-
-    const activeKey = window.MapShine?.graphicsSettings?._storageKey ?? _buildGraphicsStorageKey();
-    if (marker.storageKey === activeKey) {
-      _pendingLoadNotice = { type: 'restored', preset: previousPreset };
-    }
-    log.info(`Safe mode cleared: render resolution restored to "${previousPreset}"`);
-  } catch (e) {
-    log.warn('maybeRestoreResolutionBeforeLoad failed', e);
-  }
+  // Intentionally no-op — see onLoadSucceeded().
 }
 
 /**
@@ -729,6 +1281,8 @@ export function maybeRestoreResolutionBeforeLoad() {
  */
 export function onLoadSucceeded() {
   try {
+    _restoreGraphicsAfterSuccessfulLoad();
+
     const notice = _pendingLoadNotice;
     _pendingLoadNotice = null;
     if (!notice) return;
@@ -739,8 +1293,18 @@ export function onLoadSucceeded() {
       );
     } else if (notice.type === 'staying-reduced') {
       globalThis.ui?.notifications?.warn?.(
-        'Map Shine: Running at reduced render resolution because WebGL crashed repeatedly on this device. '
-        + 'You can raise it under Performance & Graphics → Render quality.'
+        'Map Shine: Running at reduced render quality because WebGL crashed while loading this scene. '
+        + 'Set GPU VRAM under Configure Settings → Map Shine → Performance & Graphics (no scene load required), '
+        + 'or raise quality after a successful load via Performance & Graphics → Render quality.'
+      );
+    } else if (notice.type === 'bare-mode') {
+      globalThis.ui?.notifications?.warn?.(
+        'Map Shine: Effects were disabled ("bare mode") because WebGL kept crashing while loading this scene. '
+        + 'The base map still renders. Re-enable effects via Performance & Graphics once your GPU driver / VRAM situation is resolved.'
+      );
+    } else if (notice.type === 'native-fallback') {
+      globalThis.ui?.notifications?.error?.(
+        'Map Shine: Switched to Native Foundry Rendering after repeated WebGL crashes. Reload the page to apply.'
       );
     }
   } catch (_) {
@@ -784,6 +1348,14 @@ export function onContextLost(ctx = {}) {
   // Escalates on each crash and relaxes gradually once the session is stable
   // (handled by AdaptiveBudgetController.sample()).
   try { getAdaptiveBudgetController().noteCrash(); } catch (_) {}
+
+  // Flag the GPU as known-weak after repeated load crashes so *other* scenes
+  // also start conservative (pin 8 GB) rather than re-learning per scene.
+  try {
+    if (record.load?.sceneLoading && (record.crashHistorySummary?.withinLast30Min ?? 0) >= 2) {
+      _markGpuKnownWeak();
+    }
+  } catch (_) {}
 
   // One-shot per session: drop render resolution so a reload doesn't
   // immediately hit the same GPU wall.
@@ -987,15 +1559,36 @@ function _buildDialogContent(record) {
     ? `The graphics context recovered automatically${typeof record.restoredAfterMs === 'number' ? ` after ${(record.restoredAfterMs / 1000).toFixed(1)}s` : ''}.`
     : 'The graphics context has not recovered yet — Map Shine will rebuild the scene automatically if it does not come back.';
   const safeModeLine = record.safeModeDowngradeApplied
-    ? `Render resolution was temporarily reduced to ${SAFE_MODE_PRESET} to stabilize this session. `
-      + 'Full resolution is restored automatically on your next load (or now via Performance &amp; Graphics → Render quality).'
+    ? `Render resolution was reduced to ${SAFE_MODE_PRESET} and GPU VRAM was pinned to 8 GB (when Auto) to stabilize loading. `
+      + 'These stay in effect until this scene loads successfully. '
+      + 'You can also set GPU VRAM beforehand via Configure Settings → Map Shine → Performance &amp; Graphics.'
     : null;
+
+  const probe = record.graphics?.gpuProbe ?? null;
+  const gpuName = record.gpu?.renderer ?? probe?.renderer ?? 'unknown';
+  const gpuVramLine = probe?.estimatedVramGB != null
+    ? `~${probe.estimatedVramGB} GB${probe.confident ? '' : '?'} est.`
+    : null;
+  const effVram = record.graphics?.effectiveGpuVramGB;
+  const gpuValue = [
+    gpuName,
+    gpuVramLine,
+    effVram != null ? `budget tier ${effVram} GB` : null,
+    record.graphics?.knownWeakGpu ? 'flagged known-weak' : null,
+  ].filter(Boolean).join(' · ');
+
+  const guardrailValue = [
+    record.graphics?.loadSlimCompositorActive ? 'load-slim ON' : (record.graphics?.loadSlimPolicyWouldApply ? 'load-slim would apply' : 'load-slim off'),
+    record.graphics?.globalDisableAll ? 'bare mode (effects off)' : null,
+    record.graphics?.gpuLoadPressure?.highLoad ? 'high load' : null,
+  ].filter(Boolean).join('; ');
 
   const detailRows = [
     ['Scene', record.scene?.name ?? 'unknown'],
     ['During', record.load?.sceneLoading ? `scene loading (step: ${record.load?.phase ?? 'unknown'})` : 'normal play'],
     ['Tab visible', record.visibility?.hidden === true ? 'No (background tab)' : 'Yes'],
-    ['GPU', record.gpu?.renderer ?? 'unknown'],
+    ['GPU', gpuValue || 'unknown'],
+    ['Guardrails', guardrailValue || 'none engaged'],
     ['GPU textures', _formatTextureAuditLine(record)],
     ['JS heap', (record.memory?.usedJSHeapMB != null && record.memory?.jsHeapLimitMB != null)
       ? `${record.memory.usedJSHeapMB} / ${record.memory.jsHeapLimitMB} MB`
@@ -1006,6 +1599,29 @@ function _buildDialogContent(record) {
   const streamSummary = _streamingDialogSummary(record.tileStreaming);
   if (streamSummary) {
     detailRows.push(['Tile streaming', streamSummary]);
+  }
+
+  const rt = record.graphics?.rtVramEstimate ?? null;
+  if (rt && rt.estMB > 0) {
+    const budgetTxt = rt.budgetMB != null ? `/ ${rt.budgetMB} MB budget` : '(uncapped)';
+    detailRows.push([
+      'Compositor RT VRAM',
+      `~${rt.estMB} MB ${budgetTxt} @ ${rt.drawingBufferMp} MP${rt.overBudget ? ' — OVER (resolution capped)' : ''}`,
+    ]);
+  }
+
+  const srcBytes = record.tileStreaming?.budget?.sourceBytesMB ?? null;
+  if (srcBytes && typeof srcBytes === 'object') {
+    const rows = Object.entries(srcBytes).filter(([, mb]) => Number(mb) > 0).slice(0, 4);
+    if (rows.length) {
+      const maskScale = record.tileStreaming?.budget?.stableMaskResolutionScale
+        ?? record.tileStreaming?.budget?.maskResolutionScale;
+      const breakdown = rows.map(([src, mb]) => `${src} ${mb} MB`).join(', ');
+      detailRows.push([
+        'VRAM by source',
+        maskScale != null ? `${breakdown} (mask scale ${maskScale})` : breakdown,
+      ]);
+    }
   }
 
   const populate = record.populate ?? record.tileStreaming?.populate ?? null;
@@ -1143,6 +1759,7 @@ export function getLastCrashRecord() {
 
 export const webglCrashRecovery = {
   configure,
+  installWebGLShaderDiagnostics,
   onContextLost,
   onContextRestored,
   maybeRestoreResolutionBeforeLoad,

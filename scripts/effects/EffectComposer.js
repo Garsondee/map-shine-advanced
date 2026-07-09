@@ -16,7 +16,7 @@ import * as sceneSettings from '../settings/scene-settings.js';
 import {
   resolveStylisticEnabled,
   STYLISTIC_EFFECT_FC_KEYS,
-  syncStylisticEffectGate,
+  syncRuntimeEffectGates,
 } from './resolve-effect-enabled.js';
 import {
   BLOOM_HOTSPOT_LAYER,
@@ -999,7 +999,7 @@ export class EffectComposer {
         // Stylistic `enabled`: mapMaker / gm scene flags only (strict `=== true`),
         // then sync Tweakpane folder state so UI matches runtime.
         try {
-          syncStylisticEffectGate(this._floorCompositorV2, globalThis.canvas?.scene ?? null);
+          syncRuntimeEffectGates(this._floorCompositorV2, globalThis.canvas?.scene ?? null);
         } catch (err) {
           log.warn('FloorCompositor V2: stylistic effect gate failed:', err);
         }
@@ -1043,7 +1043,7 @@ export class EffectComposer {
    */
   _applyStylisticEffectGate(_timeInfo = null) {
     try {
-      syncStylisticEffectGate(this._floorCompositorV2, globalThis.canvas?.scene ?? null);
+      syncRuntimeEffectGates(this._floorCompositorV2, globalThis.canvas?.scene ?? null);
       if (window.MapShine?.__v2FrameTraceEnabled === true) {
         const _fc = this._floorCompositorV2;
         const _scene = globalThis.canvas?.scene;
@@ -1241,24 +1241,10 @@ export class EffectComposer {
    * @param {number} height - New height
    */
   resize(width, height) {
-    // IMPORTANT:
-    // The canvas has a CSS size (width/height) but the renderer has an internal drawing
-    // buffer size which is affected by renderer pixelRatio.
-    // All render targets and resolution uniforms MUST track drawing-buffer pixels.
-    let renderW = Math.max(1, Math.floor(width || 1));
-    let renderH = Math.max(1, Math.floor(height || 1));
-
-    try {
-      if (this.renderer?.getDrawingBufferSize) {
-        if (!this._sizeVec2) this._sizeVec2 = new window.THREE.Vector2();
-        const size = this._sizeVec2;
-        this.renderer.getDrawingBufferSize(size);
-        renderW = Math.max(1, Math.floor(size.width || size.x || renderW));
-        renderH = Math.max(1, Math.floor(size.height || size.y || renderH));
-      }
-    } catch (e) {
-      // Fall back to provided values.
-    }
+    // Caller supplies internal compositor render pixels (DRS). Display resolution
+    // is set separately via renderer.setPixelRatio in the resize handler.
+    const renderW = Math.max(1, Math.floor(width || 1));
+    const renderH = Math.max(1, Math.floor(height || 1));
 
     // Resize Compositor V2 render targets
     if (this._floorCompositorV2) {

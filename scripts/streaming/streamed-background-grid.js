@@ -21,7 +21,8 @@ import { isHugeImageSource } from './probe-image-dimensions.js';
 import { loadImageTexture } from '../assets/image-texture-loader.js';
 import { getTextureBudgetTracker, estimateTextureBytes } from '../assets/TextureBudgetTracker.js';
 import { getCameraGroundCenter, getSceneRegionFromFoundryData } from './view-projection-service.js';
-import { estimateSceneMegapixels } from './texture-budget-policy.js';
+import { estimateSceneMegapixels, getGpuLoadPressure } from './texture-budget-policy.js';
+import { resolveEffectiveGpuVramGB } from './memory-settings.js';
 import { getGpuWorkScheduler, GPU_WORK_PRIORITY } from './gpu-work-scheduler.js';
 
 const log = createLogger('StreamedBackgroundGrid');
@@ -53,6 +54,34 @@ const FOCAL_SHARPEN_RING_MAX = 2;
 const FOCAL_SHARPEN_MAX_USED = 0.88;
 /** View must be settled (no pan / zoom / required-set change) this long to sharpen. */
 const FOCAL_SHARPEN_IDLE_MS = 120;
+
+/**
+ * How long after scene load completes to keep streaming uploads at a trickle.
+ * The `fadeIn` burst (pyramid cells + effect RTs materialising together) is the
+ * highest-VRAM moment of the whole load and is where the field crashes happen.
+ */
+const POST_LOAD_SETTLE_MS = 4000;
+let _sgPrevLoading = false;
+let _sgLoadEndedAtMs = 0;
+
+/**
+ * True during the first {@link POST_LOAD_SETTLE_MS} after `__msaSceneLoading`
+ * clears. Detects the loading->idle transition lazily so no clear site needs
+ * instrumenting.
+ * @returns {boolean}
+ * @private
+ */
+function _isPostLoadSettleWindowActive() {
+  const loadingNow = window.MapShine?.__msaSceneLoading === true;
+  const now = (typeof performance !== 'undefined') ? performance.now() : Date.now();
+  if (_sgPrevLoading && !loadingNow) {
+    _sgLoadEndedAtMs = now;
+  }
+  _sgPrevLoading = loadingNow;
+  if (loadingNow) return false;
+  if (_sgLoadEndedAtMs <= 0) return false;
+  return (now - _sgLoadEndedAtMs) < POST_LOAD_SETTLE_MS;
+}
 
 /**
  * Integer renderOrder for streamed cells — fallbacks draw beneath resident tiles.
@@ -369,17 +398,45 @@ export class StreamedBackgroundGrid {
 
   /** @private */
   _maxInflightLoads() {
+    const pressure = getGpuLoadPressure();
+    const vram = pressure.vram;
+    const mp = pressure.sceneMp;
+    // Any scene that is heavy for this card is "constrained" — not just >=90 MP.
+    // This catches native-4K-on-8 GB, which is the field crash case.
+    const constrained = pressure.highLoad || (vram <= 8 && mp >= 90);
+    const burstCap = constrained ? 3 : GRID_INFLIGHT_HARD_CAP;
+
     if (window.MapShine?.__msaSceneLoading === true) {
-      return Math.min(2, this._maxConcurrent);
+      return constrained ? 1 : Math.min(2, this._maxConcurrent);
+    }
+    // Just-loaded settle window: the fadeIn burst (streaming pyramid + effect RTs
+    // materializing together) is the highest-VRAM moment of the whole load. Hold
+    // the inflight cap low for a short window after the loading flag clears so the
+    // uploads drain over several frames instead of spiking the GPU at once.
+    if (constrained && _isPostLoadSettleWindowActive()) {
+      return 1;
     }
     const budget = getTextureBudgetTracker();
     const used = budget.getUsedFraction();
-    if (used > 0.92) return Math.max(this._maxConcurrent, 3);
+    // Hard ceiling: never pile new uploads onto an already-full software budget.
+    // At/over 100% the resident set already matches the card's usable VRAM, so
+    // force an eviction pass and hold uploads to a single trickle. This is where
+    // streamVramPct overshot 100% and the WebGL context was lost.
+    if (used >= 1.0) {
+      try { budget.enforceBudget(); } catch (_) {}
+      return 1;
+    }
+    // Approaching the ceiling: ramp uploads down. (This branch previously *raised*
+    // inflight to >=3, which is exactly what pushed the budget past 100%.)
+    if (used > 0.92) {
+      try { budget.enforceBudget(); } catch (_) {}
+      return constrained ? 1 : 2;
+    }
     if (!this._isPanning && this._budgetHasHeadroom()) {
-      return Math.min(GRID_INFLIGHT_HARD_CAP, Math.max(this._maxConcurrent, 8));
+      return Math.min(burstCap, Math.max(this._maxConcurrent, constrained ? 3 : 8));
     }
     if (this._budgetHasHeadroom()) {
-      return Math.min(GRID_INFLIGHT_HARD_CAP, Math.max(this._maxConcurrent, 5));
+      return Math.min(burstCap, Math.max(this._maxConcurrent, constrained ? 3 : 5));
     }
     return this._maxConcurrent;
   }

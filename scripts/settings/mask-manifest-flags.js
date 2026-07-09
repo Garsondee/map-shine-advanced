@@ -168,7 +168,8 @@ export function collectEnabledMaskIds(scene) {
   const isEnabled = (effectId) => !!enabledEffects?.[effectId]?.enabled;
   // Outdoors is required for BuildingShadows / specular / sky gating — not optional
   // like tree/bush; always allow manifest + bundle resolution alongside specular.
-  const ids = new Set(['specular', 'outdoors', 'handPaintedShadow']);
+  const ids = new Set(['specular', 'outdoors']);
+  if (isEnabled('painted-shadows')) ids.add('handPaintedShadow');
 
   if (isEnabled('specular')) {
     ids.add('normal');

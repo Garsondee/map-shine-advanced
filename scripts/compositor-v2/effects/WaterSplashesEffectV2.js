@@ -32,6 +32,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { writeCompositorInternalSize } from '../../core/compositor-resolution.js';
 import { tagQuarkSystem } from '../../core/quark-diagnostics.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { LightingDirector } from '../../core/LightingDirector.js';
@@ -1345,14 +1346,15 @@ export class WaterSplashesEffectV2 {
     }
     if (!this._tempVec2) this._tempVec2 = new window.THREE.Vector2();
     const size = this._tempVec2;
-    if (typeof renderer.getDrawingBufferSize === 'function') {
-      renderer.getDrawingBufferSize(size);
-    } else if (typeof renderer.getSize === 'function') {
-      renderer.getSize(size);
-      const dpr = typeof renderer.getPixelRatio === 'function'
-        ? renderer.getPixelRatio()
-        : (window.devicePixelRatio || 1);
-      size.multiplyScalar(dpr);
+    writeCompositorInternalSize(renderer, size);
+    if ((size.x || 0) <= 0 || (size.y || 0) <= 0) {
+      if (typeof renderer.getSize === 'function') {
+        renderer.getSize(size);
+        const dpr = typeof renderer.getPixelRatio === 'function'
+          ? renderer.getPixelRatio()
+          : (window.devicePixelRatio || 1);
+        size.multiplyScalar(dpr);
+      }
     }
     this._drawingBufferW = size.x || 1;
     this._drawingBufferH = size.y || 1;

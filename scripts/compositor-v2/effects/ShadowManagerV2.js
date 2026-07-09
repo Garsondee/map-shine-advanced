@@ -8,6 +8,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { writeCompositorInternalSize } from '../../core/compositor-resolution.js';
 import {
   applySceneViewProjectionToUniforms,
   createSceneViewProjectionCache,
@@ -637,7 +638,7 @@ export class ShadowManagerV2 {
   render(renderer, camera = null) {
     if (!this._initialized || !this.enabled || !renderer) return false;
     if (!this._combinedRT || !this._combinedRawRT) {
-      renderer.getDrawingBufferSize(this._sizeVec);
+      writeCompositorInternalSize(renderer, this._sizeVec);
       this.onResize(this._sizeVec.x, this._sizeVec.y);
     }
     this._syncSceneRectUniforms();

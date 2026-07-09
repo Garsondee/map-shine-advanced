@@ -100,6 +100,7 @@ import { PhysicsRopeManager } from '../scene/physics-rope-manager.js';
 import { DropHandler } from './drop-handler.js';
 import { sceneDebug } from '../utils/scene-debug.js';
 import { warmupBundleTextures, getCacheStats } from '../assets/loader.js';
+import { shouldSkipGpuTextureWarmupForLoad } from '../compositor-v2/load-slim-compositor.js';
 import * as assetLoader from '../assets/loader.js';
 import { globalLoadingProfiler } from '../core/loading-profiler.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
@@ -1374,10 +1375,20 @@ function _applyRenderResolutionToRenderer(viewportWidthCss, viewportHeightCss) {
 
   safeCall(() => {
     const baseDpr = window.devicePixelRatio || 1;
-    const effective = graphicsSettings?.computeEffectivePixelRatio
-      ? graphicsSettings.computeEffectivePixelRatio(viewportWidthCss, viewportHeightCss, baseDpr)
-      : baseDpr;
-    renderer.setPixelRatio(effective);
+    if (graphicsSettings?.resolveCompositorDimensions) {
+      const dims = graphicsSettings.resolveCompositorDimensions(
+        viewportWidthCss,
+        viewportHeightCss,
+        baseDpr,
+      );
+      renderer.setPixelRatio(dims.display.pixelRatio);
+    } else if (graphicsSettings?.computeDisplayPixelRatio) {
+      renderer.setPixelRatio(
+        graphicsSettings.computeDisplayPixelRatio(viewportWidthCss, viewportHeightCss, baseDpr),
+      );
+    } else {
+      renderer.setPixelRatio(baseDpr);
+    }
   }, 'applyRenderResolution', Severity.DEGRADED);
 }
 
@@ -2487,6 +2498,7 @@ export function initialize() {
   // it for diagnostics (e.g. MapShine.webglCrashRecovery.showLastCrashDialog()).
   safeCall(() => {
     webglCrashRecovery.configure({ requestRebuild: _attemptWebglRecoveryRebuild });
+    webglCrashRecovery.installWebGLShaderDiagnostics?.();
     if (!window.MapShine) window.MapShine = {};
     window.MapShine.webglCrashRecovery = webglCrashRecovery;
   }, 'webglCrashRecovery.configure', Severity.COSMETIC);
@@ -7354,11 +7366,10 @@ async function createThreeCanvas(scene, createOptions = {}) {
   } catch (_) {
   }
 
-  // If a previous session crashed and auto-reduced the render resolution,
-  // restore the user's original preset now (before GraphicsSettingsManager
-  // reads localStorage) — unless crashes have been repeating recently.
-  safeCall(() => webglCrashRecovery.maybeRestoreResolutionBeforeLoad(), 'webglCrashRecovery.restoreResolution', Severity.COSMETIC);
+  // If a previous session crashed during load, pin conservative graphics before
+  // reading localStorage so compositor init does not bounce back to native resolution.
   safeCall(() => webglCrashRecovery.ensureConservativeGraphicsForLoad(scene), 'webglCrashRecovery.loadGraphicsGuard', Severity.COSMETIC);
+  safeCall(() => webglCrashRecovery.maybeRestoreResolutionBeforeLoad(), 'webglCrashRecovery.restoreResolution', Severity.COSMETIC);
 
   safeCall(() => {
     _ensureLoadVisibilityLifecycleHooks();
@@ -8112,25 +8123,33 @@ async function createThreeCanvas(scene, createOptions = {}) {
     // Eagerly upload all mask textures to the GPU during loading.
     // Without this, Three.js defers gl.texImage2D to the first render frame,
     // causing a massive stall (potentially hundreds of ms for 10+ large masks).
+    // On huge scenes with ≤8 GB VRAM, skip warmup — compositor init is already
+    // VRAM-critical and uploads can happen lazily after load-slim completes.
     _sectionStart('gpu.textureWarmup');
     if (isDebugLoad) dlp.begin('gpu.textureWarmup', 'texture');
     _setCreateThreeCanvasProgress('gpu.textureWarmup');
     stepLog(' -> Step: gpu.textureWarmup');
-    safeCall(() => {
-      loadingOverlay.setStage('assets.gpu', 0.0, undefined, { immediate: true, keepAuto: true });
-      const warmupResult = warmupBundleTextures(renderer, bundle, (uploaded, total) => {
-        safeCall(() => {
-          const denom = total > 0 ? total : 1;
-          const progress = Math.max(0, Math.min(1, uploaded / denom));
-          loadingOverlay.setStage('assets.gpu', progress, formatGpuUploadMessage(uploaded, total), { keepAuto: true });
-        }, 'overlay.gpuWarmup', Severity.COSMETIC);
-      });
-      if (warmupResult.totalMs > 50) {
-        log.info(`GPU texture warmup took ${warmupResult.totalMs.toFixed(0)}ms for ${warmupResult.uploaded} textures`);
-      }
-    }, 'gpu.textureWarmup', Severity.DEGRADED);
-    if (isDebugLoad) dlp.end('gpu.textureWarmup');
-    stepLog(' -> Step: gpu.textureWarmup DONE');
+    if (shouldSkipGpuTextureWarmupForLoad()) {
+      log.warn('GPU texture warmup skipped (load-slim: huge scene on constrained VRAM)');
+      if (isDebugLoad) dlp.end('gpu.textureWarmup');
+      stepLog(' -> Step: gpu.textureWarmup SKIPPED (load-slim)');
+    } else {
+      safeCall(() => {
+        loadingOverlay.setStage('assets.gpu', 0.0, undefined, { immediate: true, keepAuto: true });
+        const warmupResult = warmupBundleTextures(renderer, bundle, (uploaded, total) => {
+          safeCall(() => {
+            const denom = total > 0 ? total : 1;
+            const progress = Math.max(0, Math.min(1, uploaded / denom));
+            loadingOverlay.setStage('assets.gpu', progress, formatGpuUploadMessage(uploaded, total), { keepAuto: true });
+          }, 'overlay.gpuWarmup', Severity.COSMETIC);
+        });
+        if (warmupResult.totalMs > 50) {
+          log.info(`GPU texture warmup took ${warmupResult.totalMs.toFixed(0)}ms for ${warmupResult.uploaded} textures`);
+        }
+      }, 'gpu.textureWarmup', Severity.DEGRADED);
+      if (isDebugLoad) dlp.end('gpu.textureWarmup');
+      stepLog(' -> Step: gpu.textureWarmup DONE');
+    }
     _sectionEnd('gpu.textureWarmup');
 
     // CRITICAL: Expose sceneComposer early so effects can access groundZ during initialization
@@ -8221,6 +8240,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
 
       if (isDebugLoad) dlp.begin('v2.floorCompositor.warmup', 'setup');
       log.info('[loading] V2 FloorCompositor warmup START');
+      _setCreateThreeCanvasProgress('scene.managers.compositor.init');
       
       // Yield before creating the compositor so the loading screen can paint.
       await new Promise(resolve => setTimeout(resolve, 50));
@@ -10218,6 +10238,13 @@ async function createThreeCanvas(scene, createOptions = {}) {
     }, 'v2.refreshMaskStatusRowsPostPopulate', Severity.COSMETIC);
     safeCall(() => loadingOverlay.setStage('scene.prepare', 0.55, undefined, { immediate: true }), 'overlay.prewarm.done', Severity.COSMETIC);
 
+    // Materialize deferred compositor effects before the render loop starts so
+    // onResize during UI init cannot allocate their RT stacks prematurely.
+    await safeCallAsync(async () => {
+      const fc = window.MapShine?.effectComposer?._floorCompositorV2;
+      await fc?.finishLoadSlimEffectInit?.();
+    }, 'floorCompositor.finishLoadSlimEffectInit', Severity.COSMETIC);
+
     // Now that `_populateComplete` is true (or fc missing / no-op), start RAF so
     // `FloorCompositor.render` never paints the slim populate path to a live loop.
     if (renderLoop && !renderLoop.running()) {
@@ -10713,8 +10740,42 @@ async function createThreeCanvas(scene, createOptions = {}) {
     }, 'wallClockTimer', Severity.COSMETIC);
 
     // Surface any pending crash-recovery messaging (e.g. "resolution restored
-    // to full") now that the load demonstrably succeeded.
+    // to full") only after load demonstrably succeeded.
+    safeCall(async () => {
+      const fc = window.MapShine?.floorCompositorV2 ?? effectComposer?._floorCompositorV2 ?? null;
+      await fc?.finishLoadSlimEffectInit?.();
+    }, 'floorCompositor.finishLoadSlimEffectInit', Severity.COSMETIC);
+
+    // Post-load GPU work must run after the scene-loading guard clears.
+    try {
+      if (window.MapShine) window.MapShine.__msaSceneLoading = false;
+    } catch (_) {}
+
+    safeCall(() => {
+      const fc = window.MapShine?.floorCompositorV2 ?? effectComposer?._floorCompositorV2 ?? null;
+      fc?.flushDeferredBandOutdoorsRepair?.();
+    }, 'floorCompositor.flushDeferredOutdoorsRepair', Severity.COSMETIC);
+    safeCall(() => {
+      cameraFollower?.flushDeferredLevelContextEmit?.();
+    }, 'cameraFollower.flushDeferredLevelContext', Severity.COSMETIC);
     safeCall(() => webglCrashRecovery.onLoadSucceeded(), 'webglCrashRecovery.onLoadSucceeded', Severity.COSMETIC);
+
+    // Constrained (<=8 GB) GPUs render at 1x CSS pixels during load
+    // (GraphicsSettingsManager._applyLoadPixelRatioCap). That cap lifts once the
+    // loading flag clears; re-apply render resolution after the post-load
+    // streaming burst has drained so steady-state quality returns without
+    // re-spiking VRAM during fadeIn.
+    safeCall(() => {
+      setTimeout(() => {
+        safeCall(() => {
+          if (!threeCanvas) return;
+          const rect = threeCanvas.getBoundingClientRect();
+          const rw = Number(rect?.width) || 0;
+          const rh = Number(rect?.height) || 0;
+          if (rw >= 1 && rh >= 1) resize(rw, rh);
+        }, 'postLoad.liftPixelRatioCap', Severity.COSMETIC);
+      }, 4500);
+    }, 'schedulePostLoadResolutionLift', Severity.COSMETIC);
 
   } catch (error) {
     _createThreeCanvasFailed = true;

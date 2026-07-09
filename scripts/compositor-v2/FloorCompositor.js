@@ -54,6 +54,13 @@ import { suppressFloorPreloadAfterLevelChange } from './floor-sim-decimation.js'
 import { isCameraNavigationActive } from '../foundry/camera-navigation-state.js';
 import { yieldToMain } from '../core/yield-to-main.js';
 import {
+  LOAD_SLIM_DEFER_HEAVY_RT_EFFECTS,
+  shouldUseLoadSlimCompositorInit,
+} from './load-slim-compositor.js';
+import { estimateSceneMegapixels } from '../streaming/texture-budget-policy.js';
+import { resolveEffectiveGpuVramGB } from '../streaming/memory-settings.js';
+import { getGpuWorkScheduler, GPU_WORK_PRIORITY } from '../streaming/gpu-work-scheduler.js';
+import {
   OVERLAY_THREE_LAYER,
   VEGETATION_ABOVE_WATER_LAYER,
   WATER_SPLASH_ABOVE_WATER_LAYER,
@@ -131,13 +138,14 @@ import { MaskDebugOverlayPass } from './MaskDebugOverlayPass.js';
 import { LevelRenderTargetPool } from './LevelRenderTargetPool.js';
 import { LevelCompositePass } from './LevelCompositePass.js';
 import { LevelAlphaRebindPass } from './LevelAlphaRebindPass.js';
+import { getCompositorInternalSize, writeCompositorInternalSize } from '../core/compositor-resolution.js';
 import { ShadowDriverState } from './shadow-system/ShadowDriverState.js';
 import { UpperFloorAlphaCompositor } from './shadow-system/UpperFloorAlphaCompositor.js';
 import { SkyOcclusionPrimitive } from './shadow-system/SkyOcclusionPrimitive.js';
 import { VegetationBillboardShadowPass } from './shadow-system/VegetationBillboardShadowPass.js';
 import { TreeCanopyOcclusionPass } from './shadow-system/TreeCanopyOcclusionPass.js';
 import { resolveEffectShadowSun2D } from './shadow-system/ShadowSunDirection.js';
-import { resolveEffectEnabled, resolveOverlayEffectActive, resolveFloorEffectActive, syncStylisticEffectGate, isStylisticEffectFcKey } from '../effects/resolve-effect-enabled.js';
+import { resolveEffectEnabled, resolveOverlayEffectActive, resolveFloorEffectActive, syncRuntimeEffectGates, isAuthoritativeSceneEnabledFcKey } from '../effects/resolve-effect-enabled.js';
 
 const log = createLogger('FloorCompositor');
 
@@ -854,6 +862,15 @@ export class FloorCompositor {
     this._blitMaterial = null;
     /** @type {THREE.Mesh|null} Fullscreen quad for blit */
     this._blitQuad = null;
+
+    /** Internal compositor render resolution (DRS). */
+    this._internalW = 1;
+    this._internalH = 1;
+    /** Display drawing-buffer resolution. */
+    this._displayW = 1;
+    this._displayH = 1;
+    /** @type {PresentationUpscalePass} */
+    this._presentationPass = new PresentationUpscalePass();
     /** @type {THREE.WebGLRenderTarget|null} Half-res scratch for vegetation ground shadows */
     this._vegetationShadowHalfRT = null;
     /** @type {THREE.WebGLRenderTarget|null} Half-res HDR scratch for zoomed-out canopy draws */
@@ -924,6 +941,8 @@ export class FloorCompositor {
     this._splashUpperOccTexCache = null;
     /** @type {string} Signature for cached same-floor splash overhead mask */
     this._sameFloorSplashOccSig = '';
+    /** @type {string} Signature for cached water-source bus overhead mask */
+    this._busOverheadMaskSig = '';
 
     // PERFORMANCE: Pre-allocated objects to eliminate GC pressure in the render loop
     this._tempColor = null;
@@ -948,6 +967,18 @@ export class FloorCompositor {
     this._stackedOutdoorsCacheTex = null;
     /** @type {Promise<void>|null} */
     this._bandOutdoorsRepairInFlight = null;
+    /** @type {boolean} Outdoors mask repair deferred until scene load completes. */
+    this._bandOutdoorsRepairDeferredUntilLoad = false;
+    /** @type {boolean} Heavy effect RT inits deferred until after scene load. */
+    this._loadSlimInitActive = false;
+    /** @type {Array<{label: string, fn: Function}>|null} */
+    this._loadSlimDeferredSteps = null;
+    /** @type {Set<string>|null} Effect labels whose GPU RTs are not ready yet. */
+    this._loadSlimPendingEffects = null;
+    /** @type {{ w: number, h: number }|null} Latest viewport size to apply after deferred inits. */
+    this._loadSlimPendingResize = null;
+    /** @type {boolean} */
+    this._loadSlimFinishComplete = false;
     this._bandOutdoorsInitialRepairDone = false;
     this._stackedSkyReachCacheTex = null;
     /** @type {object|null} Last stacked outdoors build diagnostics for Camera Grade. */
@@ -1224,11 +1255,16 @@ export class FloorCompositor {
    */
   _sceneHasOverlayLayerContent(root, overlayBit) {
     if (!root) return false;
-    const stack = [root];
+    const stack = this._overlayLayerScanStack ?? (this._overlayLayerScanStack = []);
+    stack.length = 0;
+    stack.push(root);
     while (stack.length > 0) {
       const obj = stack.pop();
-      if (obj?.layers && (obj.layers.mask & overlayBit)) return true;
-      const children = obj.children;
+      if (obj?.layers && (obj.layers.mask & overlayBit)) {
+        stack.length = 0;
+        return true;
+      }
+      const children = obj?.children;
       if (children) {
         for (let i = 0, len = children.length; i < len; i++) {
           stack.push(children[i]);
@@ -1318,10 +1354,17 @@ export class FloorCompositor {
    * @private
    */
   _getVegetationOverlayLabeledRoots() {
-    const out = [];
     const maxFloor = Number.isFinite(Number(this._renderBus?._visibleMaxFloorIndex))
       ? Number(this._renderBus._visibleMaxFloorIndex)
       : 0;
+    const bushSize = this._bushEffect?._overlays?.size ?? 0;
+    const treeSize = this._treeEffect?._overlays?.size ?? 0;
+    const cacheKey = `${maxFloor}:${bushSize}:${treeSize}`;
+    if (cacheKey === this._vegOverlayLabeledRootsCacheKey && this._vegOverlayLabeledRootsCache) {
+      return this._vegOverlayLabeledRootsCache;
+    }
+
+    const out = [];
     const collect = (effect, kind) => {
       const overlays = effect?._overlays;
       if (!overlays?.values) return;
@@ -1334,6 +1377,9 @@ export class FloorCompositor {
     };
     collect(this._bushEffect, 'bush');
     collect(this._treeEffect, 'tree');
+
+    this._vegOverlayLabeledRootsCacheKey = cacheKey;
+    this._vegOverlayLabeledRootsCache = out;
     return out;
   }
 
@@ -1352,13 +1398,13 @@ export class FloorCompositor {
       const [kind, part] = String(label).split('.');
       if (byKind[kind] && part) byKind[kind][part] = (byKind[kind][part] || 0) + 1;
     }
-    const db = this.renderer?.getDrawingBufferSize?.(new THREE.Vector2()) ?? null;
+    const internal = this._resolveCompositorRenderSize();
     return {
       splashesActive: !!resolveFloorEffectActive(this._waterSplashesEffect),
       vegetationActive: !!resolveOverlayEffectActive(this._bushEffect) || !!resolveOverlayEffectActive(this._treeEffect),
       vegetationRootCount: labeled.length,
       byKind,
-      drawingBuffer: db ? { w: db.x, h: db.y } : null,
+      drawingBuffer: { w: internal.w, h: internal.h },
     };
   }
 
@@ -1493,21 +1539,38 @@ export class FloorCompositor {
       return false;
     }
     const labeled = this._getVegetationOverlayLabeledRoots();
-    /** @type {Map<string, import('three').Object3D[]>} */
-    const groupMap = new Map();
-    for (const { root, label } of labeled) {
-      const list = groupMap.get(label) ?? [];
+    if (!labeled.length) return false;
+
+    const groupMap = this._vegGroupMap ?? (this._vegGroupMap = new Map());
+    groupMap.clear();
+    for (let i = 0; i < labeled.length; i++) {
+      const { root, label } = labeled[i];
+      let list = groupMap.get(label);
+      if (!list) {
+        list = [];
+        groupMap.set(label, list);
+      }
       list.push(root);
-      groupMap.set(label, list);
     }
+
     const shadowLabelOrder = ['bush.shadow', 'tree.shadow'];
     const canopyLabelOrder = ['bush.canopy', 'tree.canopy'];
-    const shadowDrawGroups = shadowLabelOrder
-      .filter((label) => groupMap.has(label))
-      .map((label) => ({ label, roots: groupMap.get(label) }));
-    const canopyDrawGroups = canopyLabelOrder
-      .filter((label) => groupMap.has(label))
-      .map((label) => ({ label, roots: groupMap.get(label) }));
+
+    const shadowDrawGroups = this._vegShadowDrawGroups ?? (this._vegShadowDrawGroups = []);
+    shadowDrawGroups.length = 0;
+    for (let i = 0; i < shadowLabelOrder.length; i++) {
+      const label = shadowLabelOrder[i];
+      const roots = groupMap.get(label);
+      if (roots) shadowDrawGroups.push({ label, roots });
+    }
+
+    const canopyDrawGroups = this._vegCanopyDrawGroups ?? (this._vegCanopyDrawGroups = []);
+    canopyDrawGroups.length = 0;
+    for (let i = 0; i < canopyLabelOrder.length; i++) {
+      const label = canopyLabelOrder[i];
+      const roots = groupMap.get(label);
+      if (roots) canopyDrawGroups.push({ label, roots });
+    }
 
     let drew = false;
 
@@ -1634,7 +1697,8 @@ export class FloorCompositor {
     const THREE = window.THREE;
     if (!THREE || !renderer) return null;
     const v = this._drawingBufferSizeTmp || (this._drawingBufferSizeTmp = new THREE.Vector2());
-    renderer.getDrawingBufferSize(v);
+    const { w: iw, h: ih } = this._resolveCompositorRenderSize();
+    v.set(iw, ih);
     const w = Math.max(2, Math.floor(Number(v.x) / 2) || 2);
     const h = Math.max(2, Math.floor(Number(v.y) / 2) || 2);
     if (!this._vegetationCanopyHalfRT) {
@@ -1664,7 +1728,8 @@ export class FloorCompositor {
     const THREE = window.THREE;
     if (!THREE || !renderer) return null;
     const v = this._drawingBufferSizeTmp || (this._drawingBufferSizeTmp = new THREE.Vector2());
-    renderer.getDrawingBufferSize(v);
+    const { w: iw, h: ih } = this._resolveCompositorRenderSize();
+    v.set(iw, ih);
     const w = Math.max(2, Math.floor(Number(v.x) / 2) || 2);
     const h = Math.max(2, Math.floor(Number(v.y) / 2) || 2);
     if (!this._vegetationShadowHalfRT) {
@@ -1849,7 +1914,8 @@ export class FloorCompositor {
       return;
     }
     const v = this._drawingBufferSizeTmp || (this._drawingBufferSizeTmp = new window.THREE.Vector2());
-    this.renderer.getDrawingBufferSize(v);
+    const { w: iw, h: ih } = this._resolveCompositorRenderSize();
+    v.set(iw, ih);
     const bw = Math.max(2, Math.floor(Number(v.x) || 2));
     const bh = Math.max(2, Math.floor(Number(v.y) || 2));
     try {
@@ -1973,9 +2039,15 @@ export class FloorCompositor {
     }
 
     this._sizeVec = new THREE.Vector2();
+    const internal = getCompositorInternalSize(this.renderer);
+    const w = Math.max(1, internal.w);
+    const h = Math.max(1, internal.h);
+    this._internalW = w;
+    this._internalH = h;
     this.renderer.getDrawingBufferSize(this._sizeVec);
-    const w = Math.max(1, this._sizeVec.x);
-    const h = Math.max(1, this._sizeVec.y);
+    this._displayW = Math.max(1, Math.floor(this._sizeVec.x));
+    this._displayH = Math.max(1, Math.floor(this._sizeVec.y));
+    this._presentationPass.setSizes(w, h, this._displayW, this._displayH);
 
     // ── Render targets ────────────────────────────────────────────────
     // Prefer HalfFloat for HDR headroom (additive specular/window light can exceed 1.0),
@@ -2000,13 +2072,36 @@ export class FloorCompositor {
     });
 
     let preferredType = THREE.HalfFloatType;
-    // Quick capability probe: if we can't create a half-float RT, fall back.
-    try {
-      const probe = new THREE.WebGLRenderTarget(4, 4, makeRt(THREE.HalfFloatType, false));
-      probe.dispose();
-    } catch (e) {
+    const loadSlim = shouldUseLoadSlimCompositorInit();
+    this._loadSlimInitActive = loadSlim;
+    this._loadSlimDeferredSteps = loadSlim ? [] : null;
+    this._loadSlimPendingEffects = loadSlim ? new Set() : null;
+    this._loadSlimPendingResize = null;
+    this._loadSlimFinishComplete = false;
+    if (loadSlim) {
       preferredType = THREE.UnsignedByteType;
-      log.warn('FloorCompositor.initialize: HalfFloat RT unsupported; falling back to UnsignedByte RTs', e);
+      try {
+        if (window.MapShine) window.MapShine.__msaLoadSlimCompositor = true;
+      } catch (_) {}
+      const probe = window.MapShine?.gpuProbe ?? null;
+      const gpuLabel = probe?.renderer
+        ? `${probe.renderer} (~${probe.estimatedVramGB ?? '?'} GB)`
+        : 'unidentified GPU';
+      log.warn(
+        `FloorCompositor: load-slim GPU init (~${Math.round(estimateSceneMegapixels())} MP, `
+        + `${resolveEffectiveGpuVramGB()} GB VRAM tier, ${gpuLabel}) — `
+        + 'deferring heavy effect RTs until load completes',
+      );
+    }
+    // Quick capability probe: if we can't create a half-float RT, fall back.
+    if (!loadSlim) {
+      try {
+        const probe = new THREE.WebGLRenderTarget(4, 4, makeRt(THREE.HalfFloatType, false));
+        probe.dispose();
+      } catch (e) {
+        preferredType = THREE.UnsignedByteType;
+        log.warn('FloorCompositor.initialize: HalfFloat RT unsupported; falling back to UnsignedByte RTs', e);
+      }
     }
 
     const rtOpts = makeRt(preferredType, true);
@@ -2042,6 +2137,16 @@ export class FloorCompositor {
     });
     /** Dedicated RT for post-merge splash same-floor overhead clip (not deck/scratch). */
     this._splashSameFloorOverheadRT = new THREE.WebGLRenderTarget(w, h, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      depthBuffer: false,
+      stencilBuffer: false,
+      colorSpace: THREE.NoColorSpace,
+    });
+    /** Dedicated RT for water-source bus overhead mask (not bg-product ping-pong scratch). */
+    this._waterSourceBusOverheadMaskRT = new THREE.WebGLRenderTarget(w, h, {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       format: THREE.RGBAFormat,
@@ -2622,6 +2727,17 @@ export class FloorCompositor {
       await yieldToMain();
     };
 
+    const runOrDeferHeavyInit = async (label, fn) => {
+      if (loadSlim && LOAD_SLIM_DEFER_HEAVY_RT_EFFECTS.has(label)) {
+        this._loadSlimDeferredSteps.push({ label, fn });
+        this._loadSlimPendingEffects?.add(label);
+        _reportProgress();
+        await yieldToMain();
+        return;
+      }
+      await initEffect(label, fn);
+    };
+
     // Initialize floor depth blur with the same RT type as the rest of the pipeline.
     await initEffect('FloorDepthBlurEffect', () =>
       this._floorDepthBlurEffect.initialize(this.renderer, w, h, preferredType));
@@ -2657,8 +2773,8 @@ export class FloorCompositor {
     }
     _reportProgress('CloudEffectV2');
     await yieldToMain();
-    await initEffect('ShadowManagerV2', () => this._shadowManagerEffect.initialize(this.renderer, w, h));
-    await initEffect(
+    await runOrDeferHeavyInit('ShadowManagerV2', () => this._shadowManagerEffect.initialize(this.renderer, w, h));
+    await runOrDeferHeavyInit(
       'VegetationBillboardShadowPasses',
       () => {
         this._treeVegetationBillboardPass.initialize();
@@ -2671,8 +2787,8 @@ export class FloorCompositor {
         this._vegetationDistortionMaskPass.onResize(w, h);
       },
     );
-    await initEffect('UpperFloorAlphaCompositor', () => this._upperFloorAlphaCompositor.initialize(this.renderer, w, h));
-    await initEffect('SkyOcclusionPrimitive', () => this._skyOcclusionPrimitive.initialize(this.renderer, w, h));
+    await runOrDeferHeavyInit('UpperFloorAlphaCompositor', () => this._upperFloorAlphaCompositor.initialize(this.renderer, w, h));
+    await runOrDeferHeavyInit('SkyOcclusionPrimitive', () => this._skyOcclusionPrimitive.initialize(this.renderer, w, h));
     // Water splashes: own BatchedRenderer added via addEffectOverlay.
     try { this._waterSplashesEffect?.initialize?.(); } catch (err) {
       log.warn('FloorCompositor: WaterSplashesEffectV2 initialize failed:', err);
@@ -2737,7 +2853,7 @@ export class FloorCompositor {
     // We set both the legacy single-texture path (setOutdoorsMask, which is the one
     // Outdoors mask subscribers now wired via EffectMaskRegistry in initialize()
 
-    await initEffect('LightingEffectV2', () => this._lightingEffect.initialize(w, h));
+    await runOrDeferHeavyInit('LightingEffectV2', () => this._lightingEffect.initialize(w, h));
     await initEffect('SkyColorEffectV2', () => this._skyColorEffect.initialize());
     await initEffect('ColorCorrectionEffectV2', () => {
       this._colorCorrectionEffect.initialize();
@@ -2746,19 +2862,17 @@ export class FloorCompositor {
       } catch (_) {}
     });
     await initEffect('FilterEffectV2', () => this._filterEffect.initialize());
-    await initEffect('AtmosphericFogEffectV2', () => this._atmosphericFogEffect.initialize(this.renderer, this._renderBus._scene, this.camera));
-    await initEffect('FogOfWarEffectV2', () => this._fogEffect.initialize(this.renderer, this.scene, this.camera));
-    try {
+    await runOrDeferHeavyInit('AtmosphericFogEffectV2', () => this._atmosphericFogEffect.initialize(this.renderer, this._renderBus._scene, this.camera));
+    await runOrDeferHeavyInit('FogOfWarEffectV2', () => {
+      this._fogEffect.initialize(this.renderer, this.scene, this.camera);
       const fogPlane = this._fogEffect.fogPlane ?? null;
       if (fogPlane) {
         // In V2, the main scene is not drawn. Move fog plane to dedicated overlay scene.
         fogPlane.removeFromParent();
         this._fogOverlayScene?.add(fogPlane);
       }
-    } catch (err) {
-      log.warn('FloorCompositor: FogOfWarEffectV2 overlay setup failed:', err);
-    }
-    await initEffect('BloomEffectV2', () => this._bloomEffect.initialize(w, h));
+    });
+    await runOrDeferHeavyInit('BloomEffectV2', () => this._bloomEffect.initialize(w, h));
     await initEffect('SharpenEffectV2', () => this._sharpenEffect.initialize());
     if (this._waterEffect) {
       await initEffect('WaterEffectV2', () => this._waterEffect.initialize());
@@ -2766,35 +2880,18 @@ export class FloorCompositor {
       _reportProgress('WaterEffectV2');
       await yieldToMain();
     }
-    // OverheadShadowsEffectV2 initialization
-    try { 
+    await runOrDeferHeavyInit('OverheadShadowsEffectV2', () => {
       this._overheadShadowEffect?.initialize?.(this.renderer, this._renderBus._scene, this.camera, null);
-    } catch (err) {
-      log.warn('FloorCompositor: OverheadShadowsEffectV2 initialize failed:', err);
-    }
-    _reportProgress('OverheadShadowsEffectV2');
-    await yieldToMain();
-    try {
+    });
+    await runOrDeferHeavyInit('BuildingShadowsEffectV2', () => {
       this._buildingShadowEffect?.initialize?.(this.renderer, this.camera);
-    } catch (err) {
-      log.warn('FloorCompositor: BuildingShadowsEffectV2 initialize failed:', err);
-    }
-    _reportProgress('BuildingShadowsEffectV2');
-    await yieldToMain();
-    try {
+    });
+    await runOrDeferHeavyInit('SkyReachShadowsEffectV2', () => {
       this._skyReachShadowEffect?.initialize?.(this.renderer, this.camera);
-    } catch (err) {
-      log.warn('FloorCompositor: SkyReachShadowsEffectV2 initialize failed:', err);
-    }
-    _reportProgress('SkyReachShadowsEffectV2');
-    await yieldToMain();
-    try {
+    });
+    await runOrDeferHeavyInit('PaintedShadowEffectV2', () => {
       this._paintedShadowEffect?.initialize?.(this.renderer);
-    } catch (err) {
-      log.warn('FloorCompositor: PaintedShadowEffectV2 initialize failed:', err);
-    }
-    _reportProgress('PaintedShadowEffectV2');
-    await yieldToMain();
+    });
 
     // Artistic post-processing effects (disabled by default)
     try { this._dotScreenEffect?.initialize?.(); } catch (err) {
@@ -2837,7 +2934,7 @@ export class FloorCompositor {
     }
     _reportProgress('LensEffectV2');
     await yieldToMain();
-    await initEffect('DistortionManagerV2', () => this._distortionEffect.initialize(this.renderer, this._renderBus._scene, this.camera));
+    await runOrDeferHeavyInit('DistortionManagerV2', () => this._distortionEffect.initialize(this.renderer, this._renderBus._scene, this.camera));
 
     try {
       if (window.MapShine) window.MapShine.distortionManager = this._distortionEffect;
@@ -2862,7 +2959,186 @@ export class FloorCompositor {
     try { this._clearGlobalRTsToBlack(); } catch (err) {
       log.warn('FloorCompositor: initial _clearGlobalRTsToBlack failed:', err);
     }
-    log.info(`FloorCompositor initialized (${w}x${h}, RT: HalfFloat)`);
+    log.info(
+      `FloorCompositor initialized (${w}x${h}, RT: ${preferredType === THREE.HalfFloatType ? 'HalfFloat' : 'UnsignedByte'}`
+      + `${loadSlim ? ', load-slim deferred RTs' : ''})`,
+    );
+  }
+
+  /**
+   * Run effect inits that were deferred during load-slim compositor startup.
+   * @returns {Promise<void>}
+   */
+  async finishLoadSlimEffectInit() {
+    if (this._loadSlimFinishComplete) return;
+    const steps = this._loadSlimDeferredSteps;
+    if (!steps?.length) {
+      this._loadSlimFinishComplete = true;
+      this._loadSlimInitActive = false;
+      this._loadSlimPendingEffects = null;
+      return;
+    }
+    this._loadSlimDeferredSteps = [];
+    this._loadSlimInitActive = false;
+    try {
+      if (window.MapShine) window.MapShine.__msaLoadSlimCompositor = false;
+    } catch (_) {}
+
+    const { w, h } = this._resolveCompositorRenderSize();
+    log.info(
+      `FloorCompositor: initializing ${steps.length} deferred effect(s) after load `
+      + `via GPU work governor (${w}x${h})`,
+    );
+
+    // Route each deferred effect's heavy RT allocation through the frame-paced
+    // GPU work governor (EFFECT priority) so they materialise a few per frame
+    // and interleave with streaming coverage instead of allocating the entire
+    // stack in one context-losing spike. This method also runs *before*
+    // renderLoop.start(), so nothing else is ticking the governor yet — we drive
+    // one controlled tick per animation frame until the queue drains.
+    const scheduler = getGpuWorkScheduler();
+    const perStepMb = Math.max(8, Math.round((w * h * 4) / (1024 * 1024)));
+    /** @type {Set<string>} */
+    const pending = new Set();
+    for (const step of steps) {
+      const id = `loadSlimEffect:${step.label}`;
+      pending.add(id);
+      scheduler.enqueue({
+        id,
+        priority: GPU_WORK_PRIORITY.EFFECT,
+        costMb: perStepMb,
+        commit: () => {
+          try {
+            step.fn?.();
+            this._loadSlimPendingEffects?.delete(step.label);
+            this._resizeLoadSlimEffect(step.label, w, h);
+          } catch (err) {
+            log.warn(`FloorCompositor: deferred ${step.label} initialize failed:`, err);
+          } finally {
+            pending.delete(id);
+          }
+        },
+        onDrop: () => { pending.delete(id); },
+      });
+    }
+
+    const startMs = (typeof performance !== 'undefined') ? performance.now() : Date.now();
+    while (pending.size > 0) {
+      await yieldToMain();
+      // Progress every animation frame when visible, but never wait longer than
+      // ~100ms so a backgrounded tab (rAF throttled/paused) still drains steadily
+      // instead of stalling until the safety flush.
+      await new Promise((resolve) => {
+        let settled = false;
+        const finish = () => { if (!settled) { settled = true; resolve(); } };
+        try { requestAnimationFrame(finish); } catch (_) {}
+        setTimeout(finish, 100);
+      });
+      // The render loop ticks the governor once running; before that we own it.
+      const renderLoopRunning = window.MapShine?.renderLoop?.running?.() === true;
+      if (!renderLoopRunning) {
+        try { scheduler.tick(); } catch (_) {}
+      }
+      const nowMs = (typeof performance !== 'undefined') ? performance.now() : Date.now();
+      if (nowMs - startMs > 20000) {
+        // Safety valve: never hang the load. Flush whatever is left in one go.
+        log.warn('FloorCompositor: deferred effect init exceeded 20s — flushing remainder');
+        try { scheduler.requestFlush(); scheduler.tick(); } catch (_) {}
+        break;
+      }
+    }
+
+    this._loadSlimPendingEffects?.clear();
+    this._loadSlimPendingEffects = null;
+    this._loadSlimPendingResize = null;
+    this._loadSlimFinishComplete = true;
+    try { this._clearGlobalRTsToBlack(); } catch (_) {}
+  }
+
+  /**
+   * @returns {{ w: number, h: number }}
+   * @private
+   */
+  _resolveCompositorRenderSize() {
+    if (this._internalW > 0 && this._internalH > 0) {
+      return { w: this._internalW, h: this._internalH };
+    }
+    const internal = getCompositorInternalSize(this.renderer);
+    return { w: Math.max(1, internal.w), h: Math.max(1, internal.h) };
+  }
+
+  /**
+   * @param {string} label
+   * @returns {boolean}
+   * @private
+   */
+  _isLoadSlimEffectPending(label) {
+    return this._loadSlimPendingEffects?.has(label) ?? false;
+  }
+
+  /**
+   * @param {string} label
+   * @param {number} w
+   * @param {number} h
+   * @private
+   */
+  _resizeLoadSlimEffect(label, w, h) {
+    switch (label) {
+      case 'ShadowManagerV2':
+        this._shadowManagerEffect?.onResize?.(w, h);
+        break;
+      case 'VegetationBillboardShadowPasses':
+        this._treeVegetationBillboardPass?.onResize?.(w, h);
+        this._bushVegetationBillboardPass?.onResize?.(w, h);
+        this._treeCanopyOcclusionPass?.onResize?.(w, h);
+        this._vegetationDistortionMaskPass?.onResize?.(w, h);
+        break;
+      case 'UpperFloorAlphaCompositor':
+        this._upperFloorAlphaCompositor?.onResize?.(w, h);
+        break;
+      case 'SkyOcclusionPrimitive':
+        this._skyOcclusionPrimitive?.onResize?.(w, h);
+        break;
+      case 'LightingEffectV2':
+        this._lightingEffect?.onResize?.(w, h);
+        break;
+      case 'BloomEffectV2':
+        this._bloomEffect?.onResize?.(w, h);
+        break;
+      case 'OverheadShadowsEffectV2':
+        this._overheadShadowEffect?.onResize?.(w, h);
+        break;
+      case 'BuildingShadowsEffectV2':
+        this._buildingShadowEffect?.onResize?.(w, h);
+        break;
+      case 'SkyReachShadowsEffectV2':
+        this._skyReachShadowEffect?.onResize?.(w, h);
+        break;
+      case 'PaintedShadowEffectV2':
+        this._paintedShadowEffect?.onResize?.(w, h);
+        break;
+      case 'AtmosphericFogEffectV2':
+        this._atmosphericFogEffect?.onResize?.(w, h);
+        break;
+      case 'FogOfWarEffectV2':
+        this._fogEffect?.onResize?.(w, h);
+        break;
+      case 'DistortionManagerV2':
+        this._distortionEffect?.onResize?.(w, h);
+        break;
+      default:
+        break;
+    }
+  }
+
+  /**
+   * @param {string} label
+   * @param {() => void} fn
+   * @private
+   */
+  _resizeEffectIfReady(label, fn) {
+    if (this._isLoadSlimEffectPending(label)) return;
+    try { fn?.(); } catch (_) {}
   }
 
   /**
@@ -2884,6 +3160,7 @@ export class FloorCompositor {
       this._waterOccluderRT,
       this._waterOccluderScratchRT,
       this._splashSameFloorOverheadRT,
+      this._waterSourceBusOverheadMaskRT,
       this._waterBgProductRT,
       this._waterBgProductScratchRT,
     ].filter((rt) => rt);
@@ -3009,84 +3286,83 @@ export class FloorCompositor {
   wantsContinuousRender() {
     try {
       let reason = 'none';
-      // Shader overlay effects (bush, tree, fluid, iridescence, prism) advance uTime on
-      // presented frames only — presentation pacing owns their steady-state rate.
-      if (this._weatherNeedsContinuousRender()) {
-        reason = this._weatherParticles?.getContinuousRenderReason?.()
-          ?? 'weather:precip-or-ash';
-        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
-        return true;
-      }
-      if (this._ashDisturbanceNeedsContinuousRender()) {
-        reason = 'ashDisturbance:active';
-        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
-        return true;
-      }
-      if (
-        this._shaderWarmupGateOpen
-        && !this._populateSlimRenderActive()
-        && this._treeEffect?.isHoverFadeInProgress?.()
-      ) {
-        reason = 'tree:hover-fade';
-        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
-        return true;
-      }
+
       const fire = this._fireEffect;
       if (resolveFloorEffectActive(fire)) {
         reason = 'fire:active-floors';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
-      const dust = this._dustEffect;
-      if (resolveFloorEffectActive(dust)) {
-        reason = 'dust:active-floors';
-        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
-        return true;
-      }
+
       const water = this._waterEffect;
-      const waterActive = !!(
-        resolveEffectEnabled(water)
-        && (
+      if (resolveEffectEnabled(water)) {
+        const waterActive = !!(
           (typeof water?.hasRenderableWater === 'function' ? water.hasRenderableWater() : false)
           || ((Number(water?._composeMaterial?.uniforms?.uHasWaterData?.value) || 0) > 0)
           || ((Number(water?._composeMaterial?.uniforms?.uHasWaterRawMask?.value) || 0) > 0)
-        )
-      );
-      if (waterActive) {
-        reason = 'water:active-data';
-        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
-        return true;
+        );
+        if (waterActive) {
+          reason = 'water:active-data';
+          if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+          return true;
+        }
       }
+
       const splash = this._waterSplashesEffect;
       if (resolveFloorEffectActive(splash)) {
         reason = 'splashes:active-floors';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
-      const flies = this._smellyFliesEffect;
-      if (resolveEffectEnabled(flies) && (flies?.flySystems?.size ?? 0) > 0) {
-        reason = 'flies:systems';
+
+      const dust = this._dustEffect;
+      if (resolveFloorEffectActive(dust)) {
+        reason = 'dust:active-floors';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
-      const lightning = this._lightningEffect;
-      if (resolveEffectEnabled(lightning) && lightning?.wantsContinuousRender?.()) {
-        reason = 'lightning:wants-continuous';
+
+      if (this._weatherNeedsContinuousRender()) {
+        reason = this._weatherParticles?.getContinuousRenderReason?.()
+          ?? 'weather:precip-or-ash';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
-      const landscapeLightning = this._weatherLightningEffect;
-      if (resolveEffectEnabled(landscapeLightning) && landscapeLightning?.wantsContinuousRender?.()) {
-        reason = 'landscapeLightning:wants-continuous';
+
+      if (this._ashDisturbanceNeedsContinuousRender()) {
+        reason = 'ashDisturbance:active';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
+
       const candles = this._candleFlamesEffect;
       if (resolveEffectEnabled(candles) && ((candles?._sourceFlameCount ?? 0) > 0 || (candles?._glowBuckets?.size ?? 0) > 0)) {
         reason = 'candles:active-sources';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
+
+      const lightning = this._lightningEffect;
+      if (resolveEffectEnabled(lightning) && lightning?.wantsContinuousRender?.()) {
+        reason = 'lightning:wants-continuous';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
+
+      const landscapeLightning = this._weatherLightningEffect;
+      if (resolveEffectEnabled(landscapeLightning) && landscapeLightning?.wantsContinuousRender?.()) {
+        reason = 'landscapeLightning:wants-continuous';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
+
+      const flies = this._smellyFliesEffect;
+      if (resolveEffectEnabled(flies) && (flies?.flySystems?.size ?? 0) > 0) {
+        reason = 'flies:systems';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
+
       const playerLight = this._playerLightEffect;
       const playerLightActive = !!(
         playerLight?.enabled
@@ -3105,21 +3381,33 @@ export class FloorCompositor {
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
+
+      if (
+        this._shaderWarmupGateOpen
+        && !this._populateSlimRenderActive()
+        && this._treeEffect?.isHoverFadeInProgress?.()
+      ) {
+        reason = 'tree:hover-fade';
+        if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
+        return true;
+      }
+
       const lens = this._lensEffect;
       if (lens?.enabled && ((Number(lens?.params?.grainAmount) || 0) > 0) && ((Number(lens?.params?.grainSpeed) || 0) > 0)) {
         reason = 'lens:grain';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
+
       if (window.MapShine?.externalEffects?.requiresContinuousRender?.()) {
         reason = 'external-effects';
         if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
         return true;
       }
+
       if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = reason;
       return false;
     } catch (_) {
-      // Fail safe: if anything about the probe throws, treat as active.
       if (window.MapShine) window.MapShine.__v2ContinuousRenderReason = 'probe-error';
       return true;
     }
@@ -3457,11 +3745,9 @@ export class FloorCompositor {
     const rt = this._sceneRT;
     if (rt?.width > 0 && rt?.height > 0) {
       pass.setBusRenderTargetSize(rt.width, rt.height);
-    } else if (this.renderer && typeof this.renderer.getDrawingBufferSize === 'function') {
-      const THREE = window.THREE;
-      if (!this._sizeVec) this._sizeVec = new THREE.Vector2();
-      this.renderer.getDrawingBufferSize(this._sizeVec);
-      pass.setBusRenderTargetSize(this._sizeVec.x, this._sizeVec.y);
+    } else if (this.renderer) {
+      const { w, h } = this._resolveCompositorRenderSize();
+      pass.setBusRenderTargetSize(w, h);
     }
     try {
       pass.update(this.renderer, this.camera);
@@ -4296,7 +4582,8 @@ export class FloorCompositor {
     }
 
     const v = this._drawingBufferSizeTmp || (this._drawingBufferSizeTmp = new THREE.Vector2());
-    this.renderer.getDrawingBufferSize(v);
+    const { w: iw, h: ih } = this._resolveCompositorRenderSize();
+    v.set(iw, ih);
     const bw = Math.max(2, Math.floor(Number(v.x) || 2));
     const bh = Math.max(2, Math.floor(Number(v.y) || 2));
     try {
@@ -4380,7 +4667,8 @@ export class FloorCompositor {
     }
 
     const v = this._drawingBufferSizeTmp || (this._drawingBufferSizeTmp = new window.THREE.Vector2());
-    this.renderer.getDrawingBufferSize(v);
+    const { w: iw, h: ih } = this._resolveCompositorRenderSize();
+    v.set(iw, ih);
     const bw = Math.max(2, Math.floor(Number(v.x) || 2));
     const bh = Math.max(2, Math.floor(Number(v.y) || 2));
     try {
@@ -5617,8 +5905,8 @@ export class FloorCompositor {
     } catch (e) {
       log.warn('FloorCompositor: mask debug overlay failed:', e);
     }
-    this._blitToScreen(blitSource);
-    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: blitToScreen DONE'); } catch (_) {} }
+    this._presentToScreen(blitSource);
+    if (_dbgStages) { try { log.info('[V2 Frame] ✔ Stage: presentToScreen DONE'); } catch (_) {} }
 
     // Late UI/world overlay pass (layer 31) rendered after all post-FX.
     // This keeps interactive world controls (e.g. Three door icons) above
@@ -5968,6 +6256,92 @@ export class FloorCompositor {
     return wrote ? outputRT : null;
   }
 
+  /**
+   * Present composited frame to the display drawing buffer.
+   * Uses FSR-1 EASU when internal resolution is below display (DRS).
+   * @param {THREE.WebGLRenderTarget} sourceRT
+   * @private
+   */
+  _presentToScreen(sourceRT) {
+    if (!sourceRT) return;
+    const renderer = this.renderer;
+    try {
+      const THREE = window.THREE;
+      if (renderer?.getDrawingBufferSize && THREE) {
+        const d = new THREE.Vector2();
+        renderer.getDrawingBufferSize(d);
+        this._displayW = Math.max(1, Math.floor(d.x));
+        this._displayH = Math.max(1, Math.floor(d.y));
+      }
+    } catch (_) {}
+    this._presentationPass.setSizes(
+      this._internalW,
+      this._internalH,
+      this._displayW,
+      this._displayH,
+    );
+
+    const prepareViewport = (r) => {
+      if (typeof r.setScissorTest === 'function') {
+        r.setScissorTest(false);
+      }
+      if (typeof r.setViewport === 'function') {
+        const size = this._sizeVec ?? new THREE.Vector2();
+        r.getSize(size);
+        r.setViewport(0, 0, Math.max(1, size.x), Math.max(1, size.y));
+      }
+      if (typeof r.setClearColor === 'function') {
+        r.setClearColor(0x000000, 1);
+      }
+      if (typeof r.setClearAlpha === 'function') {
+        r.setClearAlpha(1);
+      }
+      if (typeof r.clear === 'function') {
+        r.clear(true, true, true);
+      }
+    };
+
+    if (this._presentationPass.needsUpscale()) {
+      const prevTarget = renderer.getRenderTarget();
+      const prevAutoClear = renderer.autoClear;
+      const prevScissorTest = (typeof renderer.getScissorTest === 'function')
+        ? renderer.getScissorTest()
+        : null;
+      const THREE = window.THREE;
+      if (!this._tempColor && THREE) this._tempColor = new THREE.Color();
+      if (!this._tempVec4 && THREE) this._tempVec4 = new THREE.Vector4();
+      const prevClearColor = (THREE && typeof renderer.getClearColor === 'function')
+        ? renderer.getClearColor(this._tempColor)
+        : null;
+      const prevViewport = (THREE && typeof renderer.getViewport === 'function')
+        ? renderer.getViewport(this._tempVec4)
+        : null;
+      try {
+        this._presentationPass.render(renderer, sourceRT.texture, { prepareViewport });
+      } finally {
+        if (prevClearColor && typeof renderer.setClearColor === 'function') {
+          try { renderer.setClearColor(prevClearColor, 1); } catch (_) {}
+        }
+        if (typeof renderer.setClearAlpha === 'function') {
+          try { renderer.setClearAlpha(1); } catch (_) {}
+        }
+        if (typeof renderer.setScissorTest === 'function' && prevScissorTest !== null) {
+          try { renderer.setScissorTest(prevScissorTest); } catch (_) {}
+        }
+        if (prevViewport && typeof renderer.setViewport === 'function') {
+          try {
+            renderer.setViewport(prevViewport.x, prevViewport.y, prevViewport.z, prevViewport.w);
+          } catch (_) {}
+        }
+        renderer.autoClear = prevAutoClear;
+        renderer.setRenderTarget(prevTarget);
+      }
+      return;
+    }
+
+    this._blitToScreen(sourceRT);
+  }
+
   _blitToScreen(sourceRT) {
     if (!this._blitMaterial || !sourceRT) return;
     const renderer = this.renderer;
@@ -6237,18 +6611,17 @@ export class FloorCompositor {
     if (!snapshot || !(snapshot instanceof Map) || snapshot.size === 0) return;
     for (const [effectKey, entry] of snapshot.entries()) {
       if (!entry || !entry.params || typeof entry.params !== 'object') continue;
-      // Stylistic enabled is scene-flag authoritative — repopulate snapshots must
-      // not resurrect stale enabled:true and blacken the post-merge chain.
-      if (!isStylisticEffectFcKey(effectKey) && typeof entry.enabled === 'boolean') {
+      // Scene-flag authoritative enabled — repopulate snapshots must not resurrect stale values.
+      if (!isAuthoritativeSceneEnabledFcKey(effectKey) && typeof entry.enabled === 'boolean') {
         this.applyParam(effectKey, 'enabled', entry.enabled);
       }
       for (const [paramId, value] of Object.entries(entry.params)) {
-        if (isStylisticEffectFcKey(effectKey) && paramId === 'enabled') continue;
+        if (isAuthoritativeSceneEnabledFcKey(effectKey) && paramId === 'enabled') continue;
         this.applyParam(effectKey, paramId, this._cloneEffectParamValue(value));
       }
     }
     try {
-      syncStylisticEffectGate(this, globalThis.canvas?.scene ?? null, { syncUi: false });
+      syncRuntimeEffectGates(this, globalThis.canvas?.scene ?? null, { syncUi: false });
     } catch (_) {}
   }
 
@@ -6517,9 +6890,13 @@ export class FloorCompositor {
    * @param {object|null} scene
    * @private
    */
-  _repairVisibleBandOutdoorsFilesAsync(compositor, scene = null) {
+  _repairVisibleBandOutdoorsFilesAsync(compositor, scene = null, options = {}) {
     if (!compositor || typeof compositor._promoteBandBackgroundOutdoorsFile !== 'function') return;
     if (this._bandOutdoorsRepairInFlight) return;
+    if (window.MapShine?.__msaSceneLoading === true && options.force !== true) {
+      this._bandOutdoorsRepairDeferredUntilLoad = true;
+      return;
+    }
 
     const sc = scene ?? canvas?.scene ?? null;
     const floors = window.MapShine?.floorStack?.getVisibleFloors?.() ?? [];
@@ -6549,6 +6926,17 @@ export class FloorCompositor {
         this._bandOutdoorsRepairInFlight = null;
       }
     })();
+  }
+
+  /**
+   * Run outdoors mask repair that was deferred during scene loading.
+   * @returns {void}
+   */
+  flushDeferredBandOutdoorsRepair() {
+    if (!this._bandOutdoorsRepairDeferredUntilLoad) return;
+    this._bandOutdoorsRepairDeferredUntilLoad = false;
+    const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
+    this._repairVisibleBandOutdoorsFilesAsync(compositor, canvas?.scene ?? null, { force: true });
   }
 
   /**
@@ -6766,18 +7154,18 @@ export class FloorCompositor {
         waterOutdoorsRoute = 'neutral';
       }
 
-      // Resolve per-floor cloud outdoors masks and the floor-id texture up-front
-      // so their identities participate in the binding signature below. This
-      // ensures e.g. async promotion of a newly composed upper-floor outdoors
-      // mask triggers a full resync even when the main texture identity
-      // didn't change.
       let cloudPerFloor = [null, null, null, null];
       let cloudFloorIdTex = null;
       let cloudFloorIdSupported = true;
       let cloudAnyPerFloorMask = false;
+      let cacheVersion = 0;
       try {
-        const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
-        if (compositor) {
+        cacheVersion = Number(compositor?.getFloorCacheVersion?.() ?? 0);
+      } catch (_) {}
+
+      const prevCacheVersion = this._outdoorsStateCache.cacheVersion;
+      if (compositor && (force || cacheVersion !== prevCacheVersion || !this._cloudPerFloorCache)) {
+        try {
           const { textures, floorIdTex } = collectBandOutdoorsByFloorIndex(
             compositor,
             4,
@@ -6793,29 +7181,17 @@ export class FloorCompositor {
               cloudFloorIdSupported = false;
             }
           }
-        }
-      } catch (_) {}
+          this._cloudPerFloorCache = { cloudPerFloor, cloudFloorIdTex, cloudFloorIdSupported, cloudAnyPerFloorMask };
+        } catch (_) {}
+      } else if (this._cloudPerFloorCache) {
+        ({ cloudPerFloor, cloudFloorIdTex, cloudFloorIdSupported, cloudAnyPerFloorMask } = this._cloudPerFloorCache);
+      }
 
-      // Build a comprehensive binding signature. Any change to any consumer's
-      // input (main/water/sky/clouds/floorId) triggers a full resync. We still
-      // honour `force: true` from callers (e.g. floor-change path) which
-      // bypasses the signature entirely.
       const _ctx = context ?? null;
       const _b = Number(_ctx?.bottom);
       const _t = Number(_ctx?.top);
       const contextKey = Number.isFinite(_b) ? `${_b}:${Number.isFinite(_t) ? _t : 'inf'}` : 'single';
-      const texId = (tex) => (tex?.uuid ? tex.uuid : (tex ? 'anon' : 'null'));
-      // Include the compositor's floor-cache version. When composeFloor
-      // completes asynchronously and a new RT becomes available for any
-      // floor/mask combination, this version bumps so the signature changes
-      // even if the texture identity alias would otherwise cause a false
-      // early-return (e.g. a previously-fallback route promoting to a
-      // direct compositor texture that reuses a pooled texture uuid).
       const isMulti = cloudFloorIdSupported && cloudAnyPerFloorMask;
-      let cacheVersion = 0;
-      try {
-        cacheVersion = Number(window?.MapShine?.sceneComposer?._sceneMaskCompositor?.getFloorCacheVersion?.() ?? 0);
-      } catch (_) {}
 
       // Zero-GC Signature Verification
       const cache = this._outdoorsStateCache;
@@ -7054,6 +7430,17 @@ export class FloorCompositor {
       log.info(`FloorCompositor: active floor index = ${maxFloorIndex}`);
     }
     this._activeFloorIndex = maxFloorIndex;
+
+    // During scene load, bind floor visibility only — defer outdoors GPU bakes and
+    // full consumer sync until load completes (prevents second WebGL crash on 144 MP).
+    if (window.MapShine?.__msaSceneLoading === true) {
+      try { this._renderBus.setVisibleFloors(maxFloorIndex); } catch (_) {}
+      try { this._fireEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
+      try { this._waterEffect?.onFloorChange?.(maxFloorIndex); } catch (_) {}
+      this._bandOutdoorsRepairDeferredUntilLoad = true;
+      log.info(`FloorCompositor: load-slim floor visibility only (floors 0–${maxFloorIndex})`);
+      return;
+    }
 
     try {
       const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
@@ -7613,6 +8000,21 @@ export class FloorCompositor {
   onResize(width, height) {
     const w = Math.max(1, width);
     const h = Math.max(1, height);
+    this._internalW = w;
+    this._internalH = h;
+    try {
+      const THREE = window.THREE;
+      if (this.renderer?.getDrawingBufferSize && THREE) {
+        const d = new THREE.Vector2();
+        this.renderer.getDrawingBufferSize(d);
+        this._displayW = Math.max(1, Math.floor(d.x));
+        this._displayH = Math.max(1, Math.floor(d.y));
+      }
+    } catch (_) {}
+    this._presentationPass.setSizes(w, h, this._displayW, this._displayH);
+    if (this._loadSlimPendingEffects?.size) {
+      this._loadSlimPendingResize = { w, h };
+    }
     this._invalidateStackedLevelLitSnapshots('resize');
     this._disposeStackedLevelLitSnapshots();
     if (this._sceneRT) this._sceneRT.setSize(w, h);
@@ -7633,6 +8035,8 @@ export class FloorCompositor {
     if (this._waterOccluderRT) this._waterOccluderRT.setSize(w, h);
     if (this._waterOccluderScratchRT) this._waterOccluderScratchRT.setSize(w, h);
     if (this._splashSameFloorOverheadRT) this._splashSameFloorOverheadRT.setSize(w, h);
+    if (this._waterSourceBusOverheadMaskRT) this._waterSourceBusOverheadMaskRT.setSize(w, h);
+    this._busOverheadMaskSig = '';
     if (this._waterFootholdMaskRT) this._waterFootholdMaskRT.setSize(w, h);
     if (this._waterBgProductRT) this._waterBgProductRT.setSize(w, h);
     if (this._waterBgProductScratchRT) this._waterBgProductScratchRT.setSize(w, h);
@@ -7640,25 +8044,25 @@ export class FloorCompositor {
     // Re-clear global ping-pong RTs so the outer-rect area has a known
     // value after the resize-driven re-allocation.
     try { this._clearGlobalRTsToBlack(); } catch (_) {}
-    try { this._shadowManagerEffect?.onResize?.(w, h); } catch (_) {}
-    try {
+    this._resizeEffectIfReady('ShadowManagerV2', () => this._shadowManagerEffect?.onResize?.(w, h));
+    this._resizeEffectIfReady('VegetationBillboardShadowPasses', () => {
       this._treeVegetationBillboardPass?.onResize?.(w, h);
       this._bushVegetationBillboardPass?.onResize?.(w, h);
       this._treeCanopyOcclusionPass?.onResize?.(w, h);
       this._vegetationDistortionMaskPass?.onResize?.(w, h);
-    } catch (_) {}
-    try { this._skyOcclusionPrimitive?.onResize?.(w, h); } catch (_) {}
+    });
+    this._resizeEffectIfReady('SkyOcclusionPrimitive', () => this._skyOcclusionPrimitive?.onResize?.(w, h));
     try { this._bushEffect?.onResize?.(w, h); } catch (_) {}
     try { this._treeEffect?.onResize?.(w, h); } catch (_) {}
     this._cloudEffect.onResize(w, h);
-    this._lightingEffect.onResize(w, h);
-    this._bloomEffect.onResize(w, h);
-    try { this._overheadShadowEffect?.onResize?.(w, h); } catch (_) {}
-    try { this._buildingShadowEffect?.onResize?.(w, h); } catch (_) {}
-    try { this._skyReachShadowEffect?.onResize?.(w, h); } catch (_) {}
+    this._resizeEffectIfReady('LightingEffectV2', () => this._lightingEffect.onResize(w, h));
+    this._resizeEffectIfReady('BloomEffectV2', () => this._bloomEffect.onResize(w, h));
+    this._resizeEffectIfReady('OverheadShadowsEffectV2', () => this._overheadShadowEffect?.onResize?.(w, h));
+    this._resizeEffectIfReady('BuildingShadowsEffectV2', () => this._buildingShadowEffect?.onResize?.(w, h));
+    this._resizeEffectIfReady('SkyReachShadowsEffectV2', () => this._skyReachShadowEffect?.onResize?.(w, h));
     try { this._weatherParticles?.onResize?.(w, h); } catch (_) {}
     try { this._lightningEffect?.onResize?.(w, h); } catch (_) {}
-    try { this._atmosphericFogEffect?.onResize?.(w, h); } catch (_) {}
+    this._resizeEffectIfReady('AtmosphericFogEffectV2', () => this._atmosphericFogEffect?.onResize?.(w, h));
     try { this._dotScreenEffect?.onResize?.(w, h); } catch (_) {}
     try { this._halftoneEffect?.onResize?.(w, h); } catch (_) {}
     try { this._asciiEffect?.onResize?.(w, h); } catch (_) {}
@@ -7668,7 +8072,7 @@ export class FloorCompositor {
     try { this._sepiaEffect?.onResize?.(w, h); } catch (_) {}
     try { this._lensEffect?.onResize?.(w, h); } catch (_) {}
     try { this._playerLightEffect?.onResize?.(w, h); } catch (_) {}
-    try { this._distortionEffect?.onResize?.(w, h); } catch (_) {}
+    this._resizeEffectIfReady('DistortionManagerV2', () => this._distortionEffect?.onResize?.(w, h));
     try { this._floorDepthBlurEffect?.onResize?.(w, h); } catch (_) {}
     try { this._waterSplashesEffect?.syncDrawingBufferSize?.(); } catch (_) {}
     log.debug(`FloorCompositor.onResize: RTs resized to ${w}x${h}`);
@@ -7789,16 +8193,49 @@ export class FloorCompositor {
   }
 
   /**
-   * Bus overhead-band alpha on the water-source floor (fallback when roofBlock stamp misses).
+   * Signature for cached water-source bus overhead mask (world-space tile alpha; not camera-bound).
    * @param {number} floorIndex
-   * @param {import('three').WebGLRenderTarget} target
+   * @returns {string}
+   * @private
+   */
+  _waterSourceBusOverheadMaskSig(floorIndex) {
+    const fi = Number(floorIndex);
+    const maxFloor = Number.isFinite(Number(this._renderBus?._visibleMaxFloorIndex))
+      ? Number(this._renderBus._visibleMaxFloorIndex)
+      : Infinity;
+    const hasTiles = this._renderBus?.hasOverheadTilesForFloor?.(fi) === true;
+    const contentKey = this._renderBus?.getWaterOverheadMaskContentKey?.(fi) ?? '0/0';
+    const waterIds = this._getWaterTileIdsForFloor(fi);
+    const excludeKey = waterIds.size ? [...waterIds].sort().join(',') : '';
+    const rt = this._waterSourceBusOverheadMaskRT;
+    const sizeKey = rt ? `${rt.width}x${rt.height}` : '0x0';
+    return `busOverhead:${fi}|${maxFloor}|${hasTiles ? 1 : 0}|${contentKey}|${excludeKey}|${sizeKey}`;
+  }
+
+  /**
+   * Bus overhead-band alpha on the water-source floor (fallback when roofBlock stamp misses).
+   * Cached across frames — overhead tile footprints are world-stable; only tile/floor changes
+   * or streaming decode completion invalidate (see {@link FloorRenderBus.getWaterOverheadMaskContentKey}).
+   * @param {number} floorIndex
    * @returns {import('three').WebGLRenderTarget|null}
    * @private
    */
-  _buildWaterSourceOverheadBusMaskRT(floorIndex, target) {
+  _buildWaterSourceOverheadBusMaskRT(floorIndex) {
     const fi = Number(floorIndex);
+    const target = this._waterSourceBusOverheadMaskRT;
     if (!Number.isFinite(fi) || fi < 0 || !target) return null;
     if (!this._renderBus || !this.renderer || !this.camera) return null;
+
+    const occSig = this._waterSourceBusOverheadMaskSig(fi);
+    const hasTiles = this._renderBus.hasOverheadTilesForFloor?.(fi) === true;
+    if (!hasTiles) {
+      this._busOverheadMaskSig = occSig;
+      return null;
+    }
+    if (occSig === this._busOverheadMaskSig && target.texture) {
+      return target;
+    }
+
     try {
       this._renderBus.renderFloorMaskTo(this.renderer, this.camera, fi, target, {
         maxFloorIndex: fi,
@@ -7807,8 +8244,10 @@ export class FloorCompositor {
         forceRevealForFloorIndex: fi,
         excludeTileIds: this._getWaterTileIdsForFloor(fi),
       });
+      this._busOverheadMaskSig = occSig;
       return target;
     } catch (_) {
+      this._busOverheadMaskSig = '';
       return null;
     }
   }
@@ -7899,9 +8338,7 @@ export class FloorCompositor {
     try {
       this._prepareVegetationDistortionMaskPass();
       const deckRT = this._buildWaterSourceDeckMaskRT(dataFloor, this._waterOccluderScratchRT);
-      const busOverheadRT = this._waterBgProductScratchRT
-        ? this._buildWaterSourceOverheadBusMaskRT(dataFloor, this._waterBgProductScratchRT)
-        : null;
+      const busOverheadRT = this._buildWaterSourceOverheadBusMaskRT(dataFloor);
       const overheadRoofTex = this._overheadShadowEffect?.roofBlockTexture ?? null;
       let merged = this._mergeWaterFootholdMaskRT(
         deckRT?.texture ?? null,
@@ -8707,11 +9144,9 @@ export class FloorCompositor {
     let windowLightBufW = 1;
     let windowLightBufH = 1;
     try {
-      if (this.renderer && this._sizeVec && typeof this.renderer.getDrawingBufferSize === 'function') {
-        this.renderer.getDrawingBufferSize(this._sizeVec);
-        windowLightBufW = Math.max(1, Math.floor(this._sizeVec.x));
-        windowLightBufH = Math.max(1, Math.floor(this._sizeVec.y));
-      }
+      const internal = this._resolveCompositorRenderSize();
+      windowLightBufW = internal.w;
+      windowLightBufH = internal.h;
     } catch (_) {}
 
     try {
@@ -8761,18 +9196,14 @@ export class FloorCompositor {
 
         let outdoorsForLightingTex = null;
         try {
-          const floorCount = (floorStack?.getFloors?.() ?? []).length;
-          const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
-          const floor = floorsByIndex.get(levelIndex) ?? null;
-          const floorKey = floor?.compositorKey ?? null;
           // Per-level lighting follows each slice's authored _Outdoors (not the
           // pinned water-shelter mask used only by WaterEffectV2 wave damping).
           outdoorsForLightingTex = resolveOutdoorsForLevelLighting(levelIndex);
-          if (!outdoorsForLightingTex && floorCount <= 1) {
+          if (!outdoorsForLightingTex && sceneFloorCount <= 1) {
             const lightingCtx = window.MapShine?.activeLevelContext ?? null;
             outdoorsForLightingTex = this._resolveOutdoorsMask(lightingCtx, { allowWeatherRoofMap: false }).texture ?? null;
           }
-          if (!outdoorsForLightingTex && floorCount > 1) {
+          if (!outdoorsForLightingTex && sceneFloorCount > 1) {
             outdoorsForLightingTex = this._getNeutralOutdoorsTexture();
           }
 
@@ -9485,6 +9916,7 @@ export class FloorCompositor {
     try { this._waterOccluderRT?.dispose(); } catch (_) {}
     try { this._waterOccluderScratchRT?.dispose(); } catch (_) {}
     try { this._splashSameFloorOverheadRT?.dispose(); } catch (_) {}
+    try { this._waterSourceBusOverheadMaskRT?.dispose(); } catch (_) {}
     try { this._waterFootholdMaskRT?.dispose(); } catch (_) {}
     try { this._waterBgProductRT?.dispose(); } catch (_) {}
     try { this._waterBgProductScratchRT?.dispose(); } catch (_) {}
@@ -9498,6 +9930,8 @@ export class FloorCompositor {
     this._waterOccluderRT = null;
     this._waterOccluderScratchRT = null;
     this._splashSameFloorOverheadRT = null;
+    this._waterSourceBusOverheadMaskRT = null;
+    this._busOverheadMaskSig = '';
     this._waterFootholdMaskRT = null;
     this._waterBgProductRT = null;
     this._waterBgProductScratchRT = null;

@@ -13,6 +13,7 @@
  */
 
 import { createLogger } from '../../core/log.js';
+import { writeCompositorInternalSize } from '../../core/compositor-resolution.js';
 import { DepthShaderChunks } from '../../effects/DepthShaderChunks.js';
 
 const log = createLogger('DistortionManager');
@@ -500,7 +501,7 @@ export class DistortionManager {
     this._tempNdc = new THREE.Vector3();
     this._tempWorld = new THREE.Vector3();
     this._tempDir = new THREE.Vector3();
-    renderer.getDrawingBufferSize(this._tempSize);
+    writeCompositorInternalSize(renderer, this._tempSize);
     const width = this._tempSize.x;
     const height = this._tempSize.y;
     

@@ -395,6 +395,15 @@ The crash/diagnostic reports produced by [webgl-crash-recovery.js](../../scripts
 
 **Not yet audited (flag for a future pass, lower priority):** the ~1,720-line file has sections this pass didn't fully read (offset 1199–1726) — worth a follow-up sweep for similar proxy-count-as-ground-truth patterns, and for whether the PIXI content bridge (§11) is correctly *absent* from crash attribution (it should be, per §11.1's correction — the bridge is throttled and not the crash driver; confirmed no PIXI/extract.canvas references exist in this file's diagnosis logic, which is correct and should stay that way).
 
+### 13.1 The clean-run finding (2026-07-09) — the crash is invisible to MSA-side diagnostics
+
+After the `PresentationUpscalePass` fix, a zero-console-error Mansion load on the 8 GB laptop **still lost the context at `initializeUI`** — with **9 Three.js textures, 0.8 MB tracked VRAM, 248 MB JS heap, 800×450, load-slim active (13 deferred)**. Every MSA-side number was near-zero; every guardrail was on. Conclusions:
+
+1. **The earlier ~2 GB heap spike did not reproduce** on the clean run (248 MB) — it was the error-spam run. Heap is deprioritized as a crash suspect.
+2. **The crash cause is outside everything the reports could see.** Leading hypotheses: (a) **Foundry/PIXI-side texture memory** — Foundry's own renderer holds full-resolution source images (12000² background ≈ 576 MB; tiles similar) in the same GPU memory, and *no MSA budget, probe, or report ever counted it*; the `_tryLoadFromFoundryPixi` load paths confirm those PIXI textures exist by design, meaning large images may be resident **twice** (PIXI full-res + MSA's capped copy). (b) **Driver watchdog (TDR)** during `binding_effects` shader compilation — resets the device regardless of VRAM.
+3. **Instrumented (same day):** `webgl-crash-recovery.js` now reports `pixiTextures` (managed-texture count, estimated MB, top-10 by size), adds a diagnosis cause when PIXI-side ≥ 512 MB, and — attribution honesty — explicitly states when MSA-side allocations were near-zero so nobody tunes MSA texture budgets off a crash the numbers don't support. Also fixed the "scene is GPU-heavy" heuristic firing on a 9-texture run.
+4. **Plan impact if PIXI-side is confirmed dominant:** VRAM relief work extends beyond Phase 2 (MSA masks) to *Foundry-side texture policy* — e.g. releasing/downscaling Foundry's full-res source textures once MSA has its own copies. That would be a new Stage A/B item; await the next crash report's `pixiTextures` numbers before scoping.
+
 ---
 
 ## 14. Architecture review — the target state and its principles *(added 2026-07-09)*

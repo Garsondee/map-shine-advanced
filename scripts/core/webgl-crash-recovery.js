@@ -206,6 +206,55 @@ function _safeRtVramEstimate() {
   }
 }
 
+/**
+ * Guarded snapshot of Foundry/PIXI-side GPU texture memory.
+ *
+ * MSA's budgets and probes only see the Three.js side. Foundry's own PIXI
+ * renderer holds full-resolution source images (scene background, tiles) in
+ * the SAME GPU memory — a 12000x12000 background alone is ~576 MB — and this
+ * was a complete blind spot in crash reports: a 2026-07-09 Mansion crash
+ * showed only 9 Three.js textures / 0.8 MB tracked while the context was
+ * still lost. This section makes the PIXI half visible so "MSA-side is tiny
+ * but we crashed anyway" runs can be attributed correctly.
+ *
+ * @returns {object|null}
+ */
+function _safePixiTextureStats() {
+  try {
+    const pixiRenderer = globalThis.canvas?.app?.renderer ?? null;
+    const managed = pixiRenderer?.texture?.managedTextures;
+    if (!Array.isArray(managed)) return null;
+    let totalBytes = 0;
+    let counted = 0;
+    const entries = [];
+    for (const bt of managed) {
+      const w = Number(bt?.realWidth ?? bt?.width) || 0;
+      const h = Number(bt?.realHeight ?? bt?.height) || 0;
+      if (!(w > 0 && h > 0)) continue;
+      // RGBA8 estimate; +33% when mipmaps are enabled.
+      let bytes = w * h * 4;
+      if (bt?.mipmap != null && Number(bt.mipmap) > 0) bytes = Math.round(bytes * 1.33);
+      totalBytes += bytes;
+      counted++;
+      entries.push({
+        mb: Math.round(bytes / 1048576),
+        w,
+        h,
+        src: typeof bt?.resource?.src === 'string' ? bt.resource.src.slice(-96) : null,
+      });
+    }
+    entries.sort((a, b) => b.mb - a.mb);
+    return {
+      managedCount: managed.length,
+      sizedCount: counted,
+      estTotalMB: Math.round(totalBytes / 1048576),
+      top: entries.slice(0, 10),
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
 /** @returns {boolean} True when this GPU has previously shown repeated load instability. */
 function _isGpuKnownWeak() {
   const key = _currentGpuKey();
@@ -294,6 +343,8 @@ function _compactRecord(record) {
     streamBgGrids: record.tileStreaming?.manager?.backgroundGridCount ?? null,
     streamRegionGrids: record.tileStreaming?.manager?.regionGridCount ?? null,
     textures: record.rendererStats?.textures ?? null,
+    pixiTexCount: record.pixiTextures?.managedCount ?? null,
+    pixiTexMB: record.pixiTextures?.estTotalMB ?? null,
     orphanEstimate: record.textureAudit?.orphanEstimate ?? null,
     untrackedEstimate: record.textureAudit?.untrackedEstimate ?? null,
     gapVsAccounted: record.textureAudit?.gapVsAccounted ?? null,
@@ -464,6 +515,14 @@ export function collectDiagnostics(extra = {}) {
     }
     try { record.rendererStats.pixelRatio = renderer?.getPixelRatio?.() ?? null; } catch (_) {}
   } catch (_) {}
+
+  // Foundry/PIXI-side texture memory — shares the GPU with the Three renderer
+  // but is invisible to every MSA budget/probe (see _safePixiTextureStats).
+  try {
+    record.pixiTextures = _safePixiTextureStats();
+  } catch (_) {
+    record.pixiTextures = null;
+  }
 
   try {
     const gs = ms.graphicsSettings ?? null;
@@ -896,7 +955,7 @@ export function diagnoseCrash(record) {
         + `${audit.sceneGraphTextures ?? '?'} in scanned scene graphs, `
         + `~${audit.gapVsAccounted} not explained by budget + pyramid cache.`,
       );
-    } else if (textures > 200 || sceneMegapixels > 64) {
+    } else if (textures > 200 || (sceneMegapixels > 64 && textures >= 32)) {
       const sceneTex = audit?.sceneGraphTextures;
       const counterNote = Number.isFinite(sceneTex)
         ? ` (${textures} Three.js counter, ~${sceneTex} in scene graph)`
@@ -904,6 +963,36 @@ export function diagnoseCrash(record) {
       causes.push(
         `This scene is GPU-heavy${counterNote}, ~${sceneMegapixels.toFixed(0)} MP map). `
         + 'GPU memory exhaustion is a likely contributor — a lower render resolution preset helps.',
+      );
+    }
+
+    // PIXI-side VRAM: shares the GPU but is invisible to MSA's budgets. Surface
+    // it whenever it is a large absolute consumer.
+    const pixi = record.pixiTextures ?? null;
+    if (pixi && pixi.estTotalMB >= 512) {
+      const top = pixi.top?.[0];
+      causes.push(
+        `Foundry/PIXI-side textures estimated at ~${pixi.estTotalMB} MB across ${pixi.sizedCount} textures `
+        + `(largest: ${top ? `${top.mb} MB ${top.w}x${top.h}${top.src ? ` ${top.src}` : ''}` : 'n/a'}). `
+        + 'This memory shares the GPU with Map Shine but is NOT counted by any MSA budget — full-resolution '
+        + 'source images held by Foundry\'s own renderer are a major hidden VRAM consumer on large maps.',
+      );
+    }
+
+    // Attribution honesty: when MSA-side allocations were near-zero at crash
+    // time, say so explicitly instead of letting size-based heuristics imply
+    // an MSA texture cause that the numbers do not support.
+    const msaSideTinyAtCrash = (textures < 32)
+      && ((stream?.budget?.usedPct ?? 0) < 5)
+      && !(audit?.likelyStreamingLeak || audit?.likelyUntrackedLeak);
+    if (msaSideTinyAtCrash) {
+      causes.push(
+        `MSA-side GPU allocations were near-zero at crash time (${textures} Three.js textures, `
+        + `${stream?.budget?.usedMB ?? '?'} MB tracked). The context loss likely originated OUTSIDE Map Shine's `
+        + 'tracked allocations: Foundry/PIXI-side texture memory (see pixiTextures in this report'
+        + `${pixi ? `: ~${pixi.estTotalMB} MB` : ''}), another GPU-heavy tab/application, or a GPU driver `
+        + 'reset/watchdog timeout (TDR) during shader compilation. Do NOT tune MSA texture budgets based on '
+        + 'this crash — the tracked numbers do not support an MSA-texture cause.',
       );
     }
     if (heapLimit > 0 && heapUsed / heapLimit > 0.85) {

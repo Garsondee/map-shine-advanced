@@ -44,6 +44,7 @@ import {
   PlayerLightEffectV2,
 } from './effect-wiring.js';
 import { RenderLoop } from '../core/render-loop.js';
+import { startLoadDemotionSweep } from './pixi-texture-demotion.js';
 import { normalizeEffectRgbParam } from '../ui/parameter-validator.js';
 import { ControlPanelManager } from '../ui/control-panel-manager.js';
 import { syncAtmosphericFogEffectFromControlState } from '../ui/atmospheric-fog-bridge.js';
@@ -7365,6 +7366,11 @@ async function createThreeCanvas(scene, createOptions = {}) {
     if (window.MapShine) window.MapShine.__msaSceneLoading = true;
   } catch (_) {
   }
+
+  // Stage A9 (Forward+ S13.2): free Foundry/PIXI-side GPU copies of huge
+  // source images (12000^2 background/overhead ~= 1.46 GB on the Mansion)
+  // throughout the load window. Sweep self-terminates when loading ends.
+  safeCall(() => startLoadDemotionSweep(), 'pixiTextureDemotion.startSweep', Severity.COSMETIC);
 
   // If a previous session crashed during load, pin conservative graphics before
   // reading localStorage so compositor init does not bounce back to native resolution.

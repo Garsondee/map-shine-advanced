@@ -21,6 +21,7 @@ import { createLogger } from '../core/log.js';
 import { shouldBuildParticleChannelPack } from '../core/texture-overhaul-flags.js';
 import * as assetLoader from '../assets/loader.js';
 import { getEffectMaskRegistry } from '../assets/loader.js';
+import { loadImageTexture, MASK_MAX_SIZE } from '../assets/image-texture-loader.js';
 import { getTextureBudgetTracker, estimateTextureBytes } from '../assets/TextureBudgetTracker.js';
 import { PACKED_MASK_CHANNELS } from '../streaming/mask-channel-pack.js';
 import { SceneMaskCompositor } from './scene-mask-compositor.js';
@@ -1256,7 +1257,16 @@ export class GpuSceneMaskCompositor {
               const probed = await assetLoader.probeMaskFile(fallbackPath, '_Outdoors', { suppressProbeErrors: true });
               const outdoorsPath = probed?.path ?? null;
               if (outdoorsPath) {
-                const outdoorsTex = await assetLoader.loadTexture(outdoorsPath, { suppressProbeErrors: true });
+                // Size-capped mask load (MASK_MAX_SIZE), same role as bundle-
+                // loaded outdoors. The previous assetLoader.loadTexture path had
+                // NO cap and uploaded 12000^2 sources (~549 MB each) to the GPU
+                // mid-load — a transient VRAM/TDR spike invisible to post-crash
+                // snapshots (Forward+ S13.1).
+                const outdoorsTex = await loadImageTexture(outdoorsPath, {
+                  role: 'DATA_MASK',
+                  maxSize: MASK_MAX_SIZE,
+                  markOwned: true,
+                });
                 if (outdoorsTex) {
                   const outdoorsMask = {
                     id: 'outdoors',
@@ -2443,7 +2453,13 @@ export class GpuSceneMaskCompositor {
       const probed = await assetLoader.probeMaskFile(bgPath, '_Outdoors', { suppressProbeErrors: true });
       outdoorsPath = probed?.path ?? null;
       if (outdoorsPath) {
-        outdoorsTex = await assetLoader.loadTexture(outdoorsPath, { suppressProbeErrors: true });
+        // Size-capped mask load — see the matching comment at the composeFloor
+        // recovery site. Was assetLoader.loadTexture (uncapped, full 12000^2).
+        outdoorsTex = await loadImageTexture(outdoorsPath, {
+          role: 'DATA_MASK',
+          maxSize: MASK_MAX_SIZE,
+          markOwned: true,
+        });
       }
     } catch (e) {
       log.debug('_promoteBandBackgroundOutdoorsFile: probe/load failed', { floorKey: key, bgPath, err: e });

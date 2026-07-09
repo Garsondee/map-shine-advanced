@@ -9408,6 +9408,17 @@ export class FloorCompositor {
 
     // Release pool entries for levels no longer visible.
     this._levelRTPool.releaseStale(activeLevels);
+    // Same lifecycle for lighting's per-floor snapshot RTs (Forward+ §7:
+    // previously only disposed at teardown, growing per visited floor).
+    try { this._lightingEffect?.evictStaleFloorSnapshots?.(activeLevels); } catch (_) {}
+    // And for our own stacked lit-snapshot cache (previously disposed only on
+    // resize/teardown — same growth pattern as the lighting snapshots).
+    for (const [idx, entry] of this._stackedLevelLitSnapshots) {
+      if (!activeLevels.has(idx)) {
+        try { entry?.rt?.dispose?.(); } catch (_) {}
+        this._stackedLevelLitSnapshots.delete(idx);
+      }
+    }
 
     if (!levelFinalRTs.length) return null;
 

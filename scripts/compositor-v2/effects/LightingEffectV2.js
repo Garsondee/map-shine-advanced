@@ -1673,6 +1673,32 @@ export class LightingEffectV2 {
     // Keep _perFloorLightSnapshotRts entries alive across frames — they are reused
     // by _snapshotLightRtForFloor(). Clearing without dispose() was leaking one
     // WebGLRenderTarget per frame (~570/session in crash reports).
+    // Floor-set-change eviction is handled by evictStaleFloorSnapshots().
+  }
+
+  /**
+   * Dispose per-floor light snapshot RTs for floors no longer in the visible
+   * set. Mirrors LevelRenderTargetPool.releaseStale() — without this the reuse
+   * maps grow monotonically as floors are visited (one HalfFloat full-screen
+   * RT per map per visited floor, only freed at teardown; Forward+ §7).
+   * Safe: snapshot consumers only read the active floor's entry, which is
+   * always in the visible set.
+   * @param {Set<number>} activeLevels - visible floor indices to keep
+   */
+  evictStaleFloorSnapshots(activeLevels) {
+    if (!activeLevels?.has) return;
+    for (const [fi, rt] of this._perFloorLightSnapshotRts) {
+      if (!activeLevels.has(fi)) {
+        try { rt?.dispose?.(); } catch (_) {}
+        this._perFloorLightSnapshotRts.delete(fi);
+      }
+    }
+    for (const [fi, rt] of this._perFloorGameplayLightSnapshotRts) {
+      if (!activeLevels.has(fi)) {
+        try { rt?.dispose?.(); } catch (_) {}
+        this._perFloorGameplayLightSnapshotRts.delete(fi);
+      }
+    }
   }
 
   /**

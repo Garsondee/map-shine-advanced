@@ -621,6 +621,10 @@ export function collectDiagnostics(extra = {}) {
     const secs = globalThis.__msaSlowSections;
     if (Array.isArray(secs)) record.slowSections = secs.slice(-16);
   } catch (_) {}
+  try {
+    const trail = globalThis.__msaSectionTrail;
+    if (Array.isArray(trail)) record.sectionTrail = trail.slice(-20);
+  } catch (_) {}
 
   try {
     record.populate = buildCompositorPopulateSnapshot();
@@ -1098,11 +1102,22 @@ export function diagnoseCrash(record) {
       if (worst && worst.durMs >= 2000) {
         const endMs = (worst.startMs ?? 0) + (worst.durMs ?? 0);
         const gap = Number.isFinite(crashMs) ? Math.round(crashMs - endMs) : null;
+        // Which labelled sections were running when the stall began? The last
+        // section started at-or-before startMs is the strongest suspect.
+        let culprit = '';
+        try {
+          const trail = Array.isArray(record.sectionTrail) ? record.sectionTrail : [];
+          const before = trail.filter((t) => (t.startMs ?? 0) <= (worst.startMs ?? 0));
+          const last = before[before.length - 1];
+          if (last) {
+            culprit = ` Last labelled section started before the stall: "${last.context}" @${last.startMs} ms.`;
+          }
+        } catch (_) {}
         causes.push(
           `Longest main-thread stall was ${worst.durMs} ms (ending ~${endMs} ms)`
-          + `${gap != null ? `, and the context was lost ~${gap} ms after it ended` : ''}. `
+          + `${gap != null ? `, and the context was lost ~${gap} ms after it ended` : ''}.${culprit} `
           + 'A synchronous block of this length during loading is consistent with a GPU driver watchdog '
-          + 'reset (TDR), not memory exhaustion. See slowGlOps for the responsible GL call.',
+          + 'reset (TDR), not memory exhaustion. Cross-reference sectionTrail / slowSections / slowGlOps.',
         );
       }
     } catch (_) {}
@@ -1272,9 +1287,22 @@ function _installSlowGlOpDiagnostics() {
       }));
       timeWrap(p, 'linkProgram');
       timeWrap(p, 'getProgramParameter');
-      timeWrap(p, 'texImage2D', (args) => ({ w: args?.[3] ?? null, h: args?.[4] ?? null }));
-      timeWrap(p, 'texSubImage2D');
-      timeWrap(p, 'generateMipmap');
+      // Capture the caller for large uploads: a 6408x5121 texImage2D appeared
+      // in reports with no obvious owner (it is NOT the tile path — tile
+      // textures are created ~15 s later). Naming the site beats guessing.
+      const captureSite = () => {
+        try {
+          return String(new Error().stack ?? '')
+            .split('\n').slice(3, 7).map((s) => s.trim()).join(' <- ').slice(0, 260);
+        } catch (_) { return null; }
+      };
+      timeWrap(p, 'texImage2D', (args) => ({
+        w: args?.[3] ?? null,
+        h: args?.[4] ?? null,
+        site: captureSite(),
+      }));
+      timeWrap(p, 'texSubImage2D', () => ({ site: captureSite() }));
+      timeWrap(p, 'generateMipmap', () => ({ site: captureSite() }));
       timeWrap(p, 'readPixels', (args) => ({ w: args?.[2] ?? null, h: args?.[3] ?? null }));
       timeWrap(p, 'finish');
     }

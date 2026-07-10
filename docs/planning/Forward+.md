@@ -455,6 +455,18 @@ The GL-timing instrument produced its first named defect, and simultaneously nar
 
 **Standing conclusion unchanged and strengthened:** the Mansion crash is a **GPU driver watchdog reset (TDR)** provoked by multi-second synchronous blocking, *not* memory exhaustion. Every memory hypothesis is eliminated (§13.3–13.5). The eventual fix is to **chunk/yield the offending CPU work** and stagger GPU submissions — Stage A10 — and it remains orthogonal to the Phase 1–5 refactor.
 
+### 13.7 Two instrument defects found by their own output (2026-07-10)
+
+The `slowSections` run exposed flaws in **my own instrumentation and my own fix** — worth recording, because both are the same failure mode this document keeps warning about (assuming instead of verifying).
+
+**Defect A — the tile cap did not take effect, and the uploads probably aren't tiles.** `slowGlOps` still shows `texImage2D 6408×5121`. The new file *is* deployed (the leak probe's `tile-manager.js:5746` moved to `:5764`, exactly the +18 lines my edit added). But the timing acquits the tile path: those uploads occur at **11–13 s** while tile textures are only *created* at ~28 s. So §13.6's attribution of the 6408×5121 uploads to `TileManager` was **an assumption, not a finding** — the cap itself is still correct and worth keeping (the full-res clone was a genuine defect), but it is probably not what produces these uploads. **Instrumented:** `slowGlOps` now captures a **stack trace** for `texImage2D`/`texSubImage2D`/`generateMipmap`, so the 131 MB uploader names itself.
+
+**Defect B — `slowSections` was structurally blind to the fatal stall.** The 4,617 ms stall produced no `slowSections` entry. Reason: nearly every load step is `await safeCallAsync(async () => …)`, and **`safeCallAsync` was never instrumented at all** — only `safeCall` was, and only its synchronous span (which for an async callback is ~0 ms). The instrument could not, even in principle, have caught the thing it was built to catch. **Fixed:** `safeCallAsync` now times its **synchronous prologue** (the body up to the first `await` — which *is* a main-thread block), entries carry a `kind` field (`sync` / `sync-prologue` / `marked`), and a new exported `markSection(label, fn)` helper lets any suspicious block be timed directly.
+
+**Also added — `sectionTrail`.** A block that never finishes leaves no completion record, so completion-based timing can always miss the fatal case. Both `safeCall` and `safeCallAsync` now push a breadcrumb (`context`, `startMs`) on **entry** into a 32-deep ring. The crash report includes the last 20, and the long-stall diagnosis rule now names *"the last labelled section started before the stall began"* — attribution that survives a mid-block context loss.
+
+**Open:** the 4.6 s stall remains unattributed. Candidates (pure-CPU, plausible at 12000², 1002 walls, during `binding_effects`): `VisionPolygonComputer` occlusion polygons (constructed by `FireEffectV2`, and fire initialises even in bare mode), vegetation clump-field generation, map-point wall clustering, nav-mesh build. **Do not fix any of these until `sectionTrail`/`slowSections` names one.**
+
 ---
 
 ## 14. Architecture review — the target state and its principles *(added 2026-07-09)*

@@ -64,13 +64,14 @@ export const Severity = Object.freeze({
  * @param {string} context
  * @param {number} durMs
  */
-function _recordSlowSection(context, durMs) {
+function _recordSlowSection(context, durMs, kind = 'sync') {
   if (durMs < 250) return;
   try {
     const g = globalThis;
     g.__msaSlowSections = g.__msaSlowSections || [];
     g.__msaSlowSections.push({
       context: String(context ?? 'unknown').slice(0, 80),
+      kind,
       durMs: Math.round(durMs),
       atMs: Math.round(performance.now() - durMs),
     });
@@ -78,8 +79,45 @@ function _recordSlowSection(context, durMs) {
   } catch (_) {}
 }
 
+/**
+ * Breadcrumb: remember that a labelled section *started*, even if it never
+ * finishes (a context loss mid-block leaves no completion record). The crash
+ * report's `sectionTrail` then shows what was running when a stall began.
+ * @param {string} context
+ */
+function _markSectionStart(context) {
+  try {
+    const g = globalThis;
+    g.__msaSectionTrail = g.__msaSectionTrail || [];
+    g.__msaSectionTrail.push({
+      context: String(context ?? 'unknown').slice(0, 80),
+      startMs: Math.round(performance.now()),
+    });
+    if (g.__msaSectionTrail.length > 32) g.__msaSectionTrail.shift();
+  } catch (_) {}
+}
+
+/**
+ * Time an arbitrary synchronous block and record it if slow. Use to attribute
+ * multi-second stalls that do not sit inside a labelled safeCall (§13.7).
+ *
+ * @template T
+ * @param {string} label
+ * @param {() => T} fn
+ * @returns {T}
+ */
+export function markSection(label, fn) {
+  const t0 = performance.now();
+  try {
+    return fn();
+  } finally {
+    _recordSlowSection(label, performance.now() - t0, 'marked');
+  }
+}
+
 export function safeCall(fn, context, severity = Severity.DEGRADED, options = {}) {
   const _t0 = performance.now();
+  _markSectionStart(context);
   try {
     const result = fn();
 
@@ -111,9 +149,18 @@ export function safeCall(fn, context, severity = Severity.DEGRADED, options = {}
  * @returns {Promise<*>} The return value of fn, or options.fallback on error.
  */
 export async function safeCallAsync(fn, context, severity = Severity.DEGRADED, options = {}) {
+  const _t0 = performance.now();
+  _markSectionStart(context);
   try {
-    return await fn();
+    // Calling fn() runs its body synchronously up to the first `await`. That
+    // prologue IS a main-thread block and is exactly what the earlier
+    // instrument missed (safeCallAsync was not timed at all, so the 4.6 s
+    // stall had no matching slowSections entry — Forward+ §13.7).
+    const promise = fn();
+    _recordSlowSection(context, performance.now() - _t0, 'sync-prologue');
+    return await promise;
   } catch (error) {
+    _recordSlowSection(context, performance.now() - _t0, 'sync-prologue');
     return _handleError(error, context, severity, options);
   }
 }

@@ -609,6 +609,10 @@ export function collectDiagnostics(extra = {}) {
     const lt = globalThis.__msaLongTasks;
     if (Array.isArray(lt)) record.longTasks = lt.slice(-12);
   } catch (_) {}
+  try {
+    const ops = globalThis.__msaBigCanvasOps;
+    if (Array.isArray(ops)) record.bigCanvasOps = ops.slice(-12);
+  } catch (_) {}
 
   try {
     record.populate = buildCompositorPopulateSnapshot();
@@ -1026,6 +1030,24 @@ export function diagnoseCrash(record) {
       }
     } catch (_) {}
 
+    // Big CPU-side canvas readbacks: each is a huge heap allocation AND a
+    // GPU-raster stall. Name the sites directly when present.
+    try {
+      const ops = Array.isArray(record.bigCanvasOps) ? record.bigCanvasOps : [];
+      const heavy = ops.filter((o) => (o?.mb ?? 0) >= 128 || (o?.durMs ?? 0) >= 500);
+      if (heavy.length) {
+        const top = heavy.slice(-3).map((o) =>
+          `${o.w}x${o.h} (~${o.mb} MB, ${o.durMs} ms) at ${o.site ?? 'unknown site'}`,
+        ).join('; ');
+        causes.push(
+          `${heavy.length} large canvas getImageData readback(s) recorded this load: ${top}. `
+          + 'World-resolution CPU mask sampling allocates GB-scale heap and stalls the GPU raster process — '
+          + 'compare atMs values with longTasks and the crash time. These sites should sample at capped/mask '
+          + 'resolution, not source resolution (Forward+ S13.4).',
+        );
+      }
+    } catch (_) {}
+
     if (heapLimit > 0 && heapUsed / heapLimit > 0.85) {
       causes.push(`JavaScript memory is nearly exhausted (${heapUsed} / ${heapLimit} MB) — the browser may be under general memory pressure.`);
     }
@@ -1105,6 +1127,56 @@ export function installWebGLShaderDiagnostics() {
   } catch (_) {
   }
   _installLongTaskDiagnostics();
+  _installBigCanvasOpDiagnostics();
+}
+
+/**
+ * Record large getImageData calls (>=16.7 MP) with measured duration and
+ * caller site. CPU-side mask sampling of world-resolution canvases allocates
+ * GB-scale heap (a 12000^2 readback is a ~549 MB array) and stalls both the
+ * main thread AND Chrome's GPU raster process (2D canvas is GPU-accelerated) —
+ * the 2026-07-10 instrumented run showed 1.3-5.8 s longTasks + 1.9 GB heap
+ * during binding_effects with ~22 getImageData sites in the codebase. This
+ * wrapper names the exact site/size/duration in the crash report.
+ */
+function _installBigCanvasOpDiagnostics() {
+  try {
+    if (globalThis.__msaCanvasOpDiagInstalled === true) return;
+    globalThis.__msaCanvasOpDiagInstalled = true;
+    globalThis.__msaBigCanvasOps = [];
+    const AREA_GATE = 16777216; // 4096x4096 px; ops below this are untouched
+    const wrap = (proto, label) => {
+      const orig = proto?.getImageData;
+      if (typeof orig !== 'function') return;
+      proto.getImageData = function msaWrappedGetImageData(sx, sy, sw, sh, ...rest) {
+        const area = Math.abs(Number(sw) * Number(sh)) || 0;
+        if (area < AREA_GATE) return orig.call(this, sx, sy, sw, sh, ...rest);
+        const t0 = performance.now();
+        const result = orig.call(this, sx, sy, sw, sh, ...rest);
+        try {
+          let site = null;
+          try {
+            site = String(new Error().stack ?? '')
+              .split('\n').slice(2, 5).map((s) => s.trim()).join(' <- ').slice(0, 220);
+          } catch (_) {}
+          globalThis.__msaBigCanvasOps.push({
+            op: `${label}.getImageData`,
+            w: Math.round(Number(sw)),
+            h: Math.round(Number(sh)),
+            mb: Math.round((area * 4) / 1048576),
+            durMs: Math.round(performance.now() - t0),
+            atMs: Math.round(t0),
+            site,
+          });
+          if (globalThis.__msaBigCanvasOps.length > 16) globalThis.__msaBigCanvasOps.shift();
+        } catch (_) {}
+        return result;
+      };
+    };
+    wrap(globalThis.CanvasRenderingContext2D?.prototype, 'canvas2d');
+    wrap(globalThis.OffscreenCanvasRenderingContext2D?.prototype, 'offscreen2d');
+  } catch (_) {
+  }
 }
 
 /**

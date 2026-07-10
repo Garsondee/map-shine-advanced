@@ -422,6 +422,14 @@ Next instrumented run (bare mode, A9 demotion live):
 - **Report upgrades (same day):** `recentTextureLoads` ring buffer (URL tail, src/out dims, decoded MB, timestamp) + `longTasks` (main-thread stalls ≥200 ms) now included in crash reports, with a diagnosis rule that names huge sources and flags any "NOT downscaled" load. If the next crash still happens, the report will show exactly what loaded/stalled in the seconds before death.
 - **PIXI-render-off question (user):** possible (skip Foundry's board render on the ticker), but PIXI is now exonerated for this crash — 272 MB resident, crash timing identical. Deprioritized; revisit only if evidence returns to PIXI.
 
+### 13.4 The instrumented run (2026-07-10): CPU-side canvas readbacks are the new prime suspect
+
+First run with `recentTextureLoads` + `longTasks` live:
+- **Mask caps held:** every logged load was a 2048² cloud sprite; nothing huge, nothing "NOT downscaled". One intermediate run reached **fadeIn with 195 textures and streaming active** — the furthest a Mansion load has ever gotten. The layers are peeling.
+- **The old ~2 GB heap signature returned on a clean run** (1910 MB) alongside the decisive new data: `longTasks` recorded repeated **1.3–2.5 s main-thread stalls** through `binding_effects` and one **5.8 s stall** at 32.7 s; crash at 40.9 s. Multi-second *synchronous* work allocating GB-scale heap.
+- **Hypothesis (fits every signal):** CPU-side mask/pixel sampling via `getImageData` on world-resolution canvases — a 12000² readback is a ~549 MB heap array AND a GPU-raster stall (2D canvas is GPU-accelerated in Chrome, so this loads the same GPU process that then loses the context). The codebase has **~22 `getImageData` sites** (fire/candle emission sampling, vegetation clumps, water splash spawn maps, outdoors classification, dust/ash). Fire is provably initialized even in bare mode (`effects.fire.particleSystems: 2` with `globalDisableAll: true` — **bare mode is not actually bare**, itself a finding).
+- **Instrumented (same day):** global `getImageData` wrapper (≥16.7 MP gate) records dimensions, **measured duration**, timestamp, and the calling site into `bigCanvasOps` in crash reports, with a diagnosis rule naming heavy readbacks. The next crash names the exact site — no more grepping 22 candidates.
+
 ---
 
 ## 14. Architecture review — the target state and its principles *(added 2026-07-09)*

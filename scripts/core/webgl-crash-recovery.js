@@ -599,6 +599,17 @@ export function collectDiagnostics(extra = {}) {
     if (Array.isArray(shaderErrs)) record.shaderErrors = shaderErrs.slice(-8);
   } catch (_) {}
 
+  // What loaded, at what size, and when — correlate loadMs against the crash
+  // time and longTasks to attribute deterministic load-phase context losses.
+  try {
+    const loads = globalThis.__msaRecentTextureLoads;
+    if (Array.isArray(loads)) record.recentTextureLoads = loads.slice(-16);
+  } catch (_) {}
+  try {
+    const lt = globalThis.__msaLongTasks;
+    if (Array.isArray(lt)) record.longTasks = lt.slice(-12);
+  } catch (_) {}
+
   try {
     record.populate = buildCompositorPopulateSnapshot();
   } catch (e) {
@@ -995,6 +1006,26 @@ export function diagnoseCrash(record) {
         + 'this crash — the tracked numbers do not support an MSA-texture cause.',
       );
     }
+    // Huge source decodes immediately before the crash: decoded bitmaps live
+    // in the browser's image/GPU-transfer memory — counted by NEITHER the JS
+    // heap NOR GL texture counters. Name them explicitly.
+    try {
+      const loads = Array.isArray(record.recentTextureLoads) ? record.recentTextureLoads : [];
+      const crashPerfMs = Number(record.load?.msSinceLoadStart);
+      const huge = loads.filter((l) => Math.max(l?.srcW ?? 0, l?.srcH ?? 0) >= 8192);
+      if (huge.length) {
+        const tail = huge.slice(-3).map((l) =>
+          `${l.srcW}x${l.srcH} (~${l.srcMB} MB decoded${l.outW < l.srcW ? `, downscaled to ${l.outW}x${l.outH}` : ', NOT downscaled'}) ${l.url}`,
+        ).join('; ');
+        causes.push(
+          `${huge.length} texture load(s) with huge sources in the recent-load log: ${tail}. `
+          + 'Full-resolution decodes occupy browser image/transfer memory invisible to all other counters '
+          + `here${Number.isFinite(crashPerfMs) ? ` — compare loadMs values against the crash at ~${crashPerfMs} ms` : ''}. `
+          + 'Sources marked NOT downscaled indicate an uncapped load path (see Forward+ S13.3).',
+        );
+      }
+    } catch (_) {}
+
     if (heapLimit > 0 && heapUsed / heapLimit > 0.85) {
       causes.push(`JavaScript memory is nearly exhausted (${heapUsed} / ${heapLimit} MB) — the browser may be under general memory pressure.`);
     }
@@ -1071,6 +1102,37 @@ export function installWebGLShaderDiagnostics() {
       }
       return origWarn.apply(this, args);
     };
+  } catch (_) {
+  }
+  _installLongTaskDiagnostics();
+}
+
+/**
+ * Record main-thread long tasks (>=200 ms) in a ring buffer for crash reports.
+ * A synchronous decode/upload of a huge image (e.g. drawImage of a 12000^2
+ * source, or texImage2D of the result) blocks the main thread for seconds —
+ * correlating longTasks timestamps with recentTextureLoads timestamps and the
+ * crash time exposes exactly which operation preceded a context loss / TDR.
+ */
+function _installLongTaskDiagnostics() {
+  try {
+    if (globalThis.__msaLongTaskDiagInstalled === true) return;
+    globalThis.__msaLongTaskDiagInstalled = true;
+    globalThis.__msaLongTasks = [];
+    if (typeof PerformanceObserver === 'undefined') return;
+    const obs = new PerformanceObserver((list) => {
+      try {
+        for (const entry of list.getEntries()) {
+          if (entry.duration < 200) continue;
+          globalThis.__msaLongTasks.push({
+            startMs: Math.round(entry.startTime),
+            durMs: Math.round(entry.duration),
+          });
+          if (globalThis.__msaLongTasks.length > 16) globalThis.__msaLongTasks.shift();
+        }
+      } catch (_) {}
+    });
+    obs.observe({ entryTypes: ['longtask'] });
   } catch (_) {
   }
 }

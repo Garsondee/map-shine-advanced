@@ -1328,12 +1328,27 @@ async function loadTextureAsync(path, suppressProbeErrors = false, policyRole = 
         const w = Number(texSource?.naturalWidth ?? texSource?.videoWidth ?? texSource?.width ?? 0);
         const h = Number(texSource?.naturalHeight ?? texSource?.videoHeight ?? texSource?.height ?? 0);
         if (w > 0 && h > 0) {
+          // Cap mask sources at the same policy limits the bundle path uses
+          // (loadMaskTextureDirect: MASK_MAX_SIZE data / VISUAL_MASK_MAX_SIZE
+          // color). Effect-private loads (PaintedShadow / WindowLight /
+          // SkyReach import loadTexture directly) previously cloned at FULL
+          // source resolution — a 12000^2 authored mask became a ~549 MB
+          // decoded bitmap + full-res THREE texture, ~10 of them during
+          // binding_effects, invisible to both the JS heap and GL texture
+          // counters. Prime suspect for the deterministic ~36 s Mansion
+          // context loss (Forward+ S13.3).
+          const isVisualMask = ['_Windows.', '_Structural.', '_Iridescence.', '_Prism.']
+            .some((s) => absolutePath.includes(s));
+          const cap = isVisualMask ? VISUAL_MASK_MAX_SIZE : MASK_MAX_SIZE;
+          const scale = Math.min(1, cap / Math.max(w, h));
+          const outW = Math.max(1, Math.round(w * scale));
+          const outH = Math.max(1, Math.round(h * scale));
           const canvasEl = document.createElement('canvas');
-          canvasEl.width = w;
-          canvasEl.height = h;
+          canvasEl.width = outW;
+          canvasEl.height = outH;
           const ctx = canvasEl.getContext('2d');
           if (ctx) {
-            ctx.drawImage(texSource, 0, 0, w, h);
+            ctx.drawImage(texSource, 0, 0, outW, outH);
             texSource = canvasEl;
           }
         }
@@ -1347,9 +1362,32 @@ async function loadTextureAsync(path, suppressProbeErrors = false, policyRole = 
     } catch (e) {
     }
 
+    // Recent-load ring buffer for crash diagnostics: records what loaded, at
+    // what source/output size, and when — so "N textures finished right before
+    // the context loss" is attributable to exact URLs/sizes in the report.
+    try {
+      const g = globalThis;
+      g.__msaRecentTextureLoads = g.__msaRecentTextureLoads || [];
+      const srcEl = resource.source;
+      const srcW = Number(srcEl?.naturalWidth ?? srcEl?.width ?? 0);
+      const srcH = Number(srcEl?.naturalHeight ?? srcEl?.height ?? 0);
+      const outW = Number(texSource?.width ?? srcW);
+      const outH = Number(texSource?.height ?? srcH);
+      g.__msaRecentTextureLoads.push({
+        url: absolutePath.slice(-96),
+        srcW,
+        srcH,
+        outW,
+        outH,
+        srcMB: Math.round((srcW * srcH * 4) / 1048576),
+        loadMs: Math.round(performance.now()),
+      });
+      if (g.__msaRecentTextureLoads.length > 24) g.__msaRecentTextureLoads.shift();
+    } catch (_) {}
+
     const threeTexture = new THREE.Texture(texSource);
     threeTexture.needsUpdate = true;
-    
+
     threeTexture.wrapS = THREE.ClampToEdgeWrapping;
     threeTexture.wrapT = THREE.ClampToEdgeWrapping;
     applyTexturePolicy(threeTexture, policyRole);

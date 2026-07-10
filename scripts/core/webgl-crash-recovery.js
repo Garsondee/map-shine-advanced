@@ -617,6 +617,10 @@ export function collectDiagnostics(extra = {}) {
     const gl = globalThis.__msaSlowGlOps;
     if (Array.isArray(gl)) record.slowGlOps = gl.slice(-16);
   } catch (_) {}
+  try {
+    const secs = globalThis.__msaSlowSections;
+    if (Array.isArray(secs)) record.slowSections = secs.slice(-16);
+  } catch (_) {}
 
   try {
     record.populate = buildCompositorPopulateSnapshot();
@@ -1066,6 +1070,21 @@ export function diagnoseCrash(record) {
           + `${worst.w ? ` (${worst.w}x${worst.h})` : ''}. `
           + 'Multi-second GL calls block the main thread AND starve the GPU process — the classic driver '
           + 'watchdog (TDR) reset path. Compare atMs against longTasks and the crash time.',
+        );
+      }
+    } catch (_) {}
+
+    // Named load sections that blocked the main thread. When a multi-second
+    // stall contains no slow GL op, the block is CPU-side JS — this names it.
+    try {
+      const secs = Array.isArray(record.slowSections) ? record.slowSections : [];
+      if (secs.length) {
+        const worst = secs.slice().sort((a, b) => (b.durMs ?? 0) - (a.durMs ?? 0)).slice(0, 3);
+        causes.push(
+          `${secs.length} labelled load section(s) blocked the main thread ≥250 ms. Worst: `
+          + worst.map((s) => `"${s.context}" ${s.durMs} ms @${s.atMs} ms`).join('; ')
+          + '. Cross-reference atMs with longTasks: a multi-second section with no matching slowGlOps '
+          + 'entry is CPU-side work that must be chunked/yielded to avoid a GPU watchdog reset.',
         );
       }
     } catch (_) {}

@@ -51,17 +51,49 @@ export const Severity = Object.freeze({
  * @param {Function} [options.onError] - Optional callback invoked with the error before handling.
  * @returns {*} The return value of fn, or options.fallback on error.
  */
+/**
+ * Record a labelled section that blocked the main thread for a long time.
+ *
+ * Crash reports show multi-second synchronous stalls during `binding_effects`
+ * that contain no single slow GL call (Forward+ §13.6) — i.e. the block is
+ * CPU-side JS. Because nearly every load step already runs inside a labelled
+ * `safeCall`/`safeCallAsync`, timing them attributes the stall to a named
+ * section for free. Only the *synchronous* span is measured (async work that
+ * yields is not a main-thread block).
+ *
+ * @param {string} context
+ * @param {number} durMs
+ */
+function _recordSlowSection(context, durMs) {
+  if (durMs < 250) return;
+  try {
+    const g = globalThis;
+    g.__msaSlowSections = g.__msaSlowSections || [];
+    g.__msaSlowSections.push({
+      context: String(context ?? 'unknown').slice(0, 80),
+      durMs: Math.round(durMs),
+      atMs: Math.round(performance.now() - durMs),
+    });
+    if (g.__msaSlowSections.length > 24) g.__msaSlowSections.shift();
+  } catch (_) {}
+}
+
 export function safeCall(fn, context, severity = Severity.DEGRADED, options = {}) {
+  const _t0 = performance.now();
   try {
     const result = fn();
 
     // Handle async functions: wrap the promise with the same error handling
     if (result && typeof result.then === 'function') {
+      // Only the synchronous portion counts as a main-thread block.
+      _recordSlowSection(context, performance.now() - _t0);
       return result.catch((error) => _handleError(error, context, severity, options));
     }
 
+    _recordSlowSection(context, performance.now() - _t0);
     return result;
   } catch (error) {
+    _recordSlowSection(context, performance.now() - _t0);
     return _handleError(error, context, severity, options);
   }
 }

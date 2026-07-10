@@ -16,7 +16,7 @@ import { tileHasLevelsRange, isLevelsEnabledForScene, readTileLevelsFlags, hasV1
 import { applyTileLevelDefaults } from '../foundry/levels-create-defaults.js';
 import { getEffectMaskRegistry, probeMaskFile } from '../assets/loader.js';
 import { getMaxTextureAnisotropy } from '../assets/texture-policies.js';
-import { getTextureBudgetTracker, estimateTextureBytes } from '../assets/TextureBudgetTracker.js';
+import { getTextureBudgetTracker, estimateTextureBytes, resolveTileAlbedoMaxSize } from '../assets/TextureBudgetTracker.js';
 import { TileEffectBindingManager } from './TileEffectBindingManager.js';
 
 const log = createLogger('TileManager');
@@ -5733,12 +5733,30 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
               const w = Number(texSource?.naturalWidth ?? texSource?.width ?? 0);
               const h = Number(texSource?.naturalHeight ?? texSource?.height ?? 0);
               if (w > 0 && h > 0) {
+                // Downscale to the tile-albedo policy cap while cloning. This
+                // path previously uploaded tile sources at FULL resolution:
+                // crash instrumentation (Forward+ §13.6) recorded four
+                // texImage2D calls of 6408x5121 (~131 MB each) taking
+                // 200-435 ms apiece — GPU stalls that neither the texture
+                // budget (which only saw ~0.8 MB of busTile) nor any other
+                // counter reflected. FloorRenderBus's tile path already caps
+                // via loadImageTexture(TILE_ALBEDO); this one did not.
+                let outW = w;
+                let outH = h;
+                try {
+                  const cap = resolveTileAlbedoMaxSize();
+                  if (Number.isFinite(cap) && cap > 0 && Math.max(w, h) > cap) {
+                    const scale = cap / Math.max(w, h);
+                    outW = Math.max(1, Math.round(w * scale));
+                    outH = Math.max(1, Math.round(h * scale));
+                  }
+                } catch (_) {}
                 const canvasEl = document.createElement('canvas');
-                canvasEl.width = w;
-                canvasEl.height = h;
+                canvasEl.width = outW;
+                canvasEl.height = outH;
                 const ctx = canvasEl.getContext('2d', { willReadFrequently: false });
                 if (ctx) {
-                  ctx.drawImage(texSource, 0, 0, w, h);
+                  ctx.drawImage(texSource, 0, 0, outW, outH);
                   texSource = canvasEl;
                 }
               }

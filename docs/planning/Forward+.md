@@ -443,6 +443,18 @@ The `bigCanvasOps` run came back decisive — and negative, which is progress:
 
 **If confirmed, the fix is not memory work at all** — it's making shader compilation non-blocking / incremental: use `KHR_parallel_shader_compile` (poll `COMPLETION_STATUS_KHR` instead of blocking on `LINK_STATUS`), stagger effect program creation across frames (the load-slim deferral already exists — extend it to *program* creation, not just RT allocation), and shrink/split the largest effect shaders. This would be a **new Stage A item (A10)** and is orthogonal to the entire Phase 1–5 refactor.
 
+### 13.6 `slowGlOps` fires: uncapped 131 MB tile uploads — and the fatal stall is CPU-side (2026-07-10)
+
+The GL-timing instrument produced its first named defect, and simultaneously narrowed the crash to a *second, distinct* problem. Both are real; only one is fatal.
+
+**Finding 1 — uncapped tile uploads (fixed same day).** `slowGlOps` recorded four `texImage2D` calls of **6408×5121 (~131 MB each, ~525 MB total)** taking **435 / 280 / 207 / 202 ms** — plus `getProgramParameter` at 447 ms and 209 ms. Cause: `TileManager`'s PIXI-cache fast-path clones the tile source to canvas at **full resolution** and uploads it — it never consulted `resolveTileAlbedoMaxSize()` (grep for `maxSize` in `tile-manager.js` → zero hits), even though `FloorRenderBus`'s tile path caps correctly via `loadImageTexture(TILE_ALBEDO)`. The texture budget never saw this (it reported `busTile: 0.8 MB`). **Fixed:** the clone now downscales to the tile-albedo cap. This is the same legacy-divergence class as §13.2/§13.3 — a second loader path that skipped the policy.
+
+**Finding 2 — the fatal stall is NOT a GL call.** The killer stall (**5,504 ms**, 26.5 s → 32.0 s, context lost **416 ms** after it ended) contains **no `slowGlOps` entry at all** — every recorded GL op sits at 10–13 s. So the multi-second block during `binding_effects` is **CPU-side JavaScript** (or a swarm of sub-100 ms GL calls), not shader compilation and not a texture upload. My §13.5 prediction (`getProgramParameter(LINK_STATUS)` blocking for seconds) is **not supported**: it appeared, but at 447 ms — significant, not fatal.
+
+**Instrumented (same day) — `slowSections`.** Rather than guess again, exploit the fact that nearly every load step already runs inside a labelled `safeCall`/`safeCallAsync`. Both now time their **synchronous span** and record any section ≥250 ms (label, duration, timestamp) into `slowSections`, with a diagnosis rule that names the worst three and instructs cross-referencing `atMs` against `longTasks`/`slowGlOps`. The next crash should attribute the 5.5 s block to a **named load section** (e.g. `v2.prewarm.beforeUI`, an effect init, or a mask bake).
+
+**Standing conclusion unchanged and strengthened:** the Mansion crash is a **GPU driver watchdog reset (TDR)** provoked by multi-second synchronous blocking, *not* memory exhaustion. Every memory hypothesis is eliminated (§13.3–13.5). The eventual fix is to **chunk/yield the offending CPU work** and stagger GPU submissions — Stage A10 — and it remains orthogonal to the Phase 1–5 refactor.
+
 ---
 
 ## 14. Architecture review — the target state and its principles *(added 2026-07-09)*

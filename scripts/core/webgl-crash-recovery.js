@@ -613,6 +613,10 @@ export function collectDiagnostics(extra = {}) {
     const ops = globalThis.__msaBigCanvasOps;
     if (Array.isArray(ops)) record.bigCanvasOps = ops.slice(-12);
   } catch (_) {}
+  try {
+    const gl = globalThis.__msaSlowGlOps;
+    if (Array.isArray(gl)) record.slowGlOps = gl.slice(-16);
+  } catch (_) {}
 
   try {
     record.populate = buildCompositorPopulateSnapshot();
@@ -1048,6 +1052,42 @@ export function diagnoseCrash(record) {
       }
     } catch (_) {}
 
+    // Slow synchronous GL ops: a multi-second block starves Chrome's GPU
+    // channel and is a classic watchdog-reset (TDR) trigger.
+    try {
+      const glOps = Array.isArray(record.slowGlOps) ? record.slowGlOps : [];
+      if (glOps.length) {
+        const worst = glOps.slice().sort((a, b) => (b.durMs ?? 0) - (a.durMs ?? 0))[0];
+        const total = glOps.reduce((s, o) => s + (o.durMs ?? 0), 0);
+        causes.push(
+          `${glOps.length} slow synchronous WebGL op(s) recorded, totalling ~${total} ms. `
+          + `Worst: ${worst.op} took ${worst.durMs} ms`
+          + `${worst.srcLen ? ` (shader source ${worst.srcLen} chars: ${String(worst.srcHead ?? '').slice(0, 60)})` : ''}`
+          + `${worst.w ? ` (${worst.w}x${worst.h})` : ''}. `
+          + 'Multi-second GL calls block the main thread AND starve the GPU process — the classic driver '
+          + 'watchdog (TDR) reset path. Compare atMs against longTasks and the crash time.',
+        );
+      }
+    } catch (_) {}
+
+    // Long main-thread stalls immediately preceding the crash are themselves a
+    // strong TDR signal even when no single GL op is named.
+    try {
+      const lts = Array.isArray(record.longTasks) ? record.longTasks : [];
+      const crashMs = Number(record.load?.msSinceLoadStart);
+      const worst = lts.slice().sort((a, b) => (b.durMs ?? 0) - (a.durMs ?? 0))[0];
+      if (worst && worst.durMs >= 2000) {
+        const endMs = (worst.startMs ?? 0) + (worst.durMs ?? 0);
+        const gap = Number.isFinite(crashMs) ? Math.round(crashMs - endMs) : null;
+        causes.push(
+          `Longest main-thread stall was ${worst.durMs} ms (ending ~${endMs} ms)`
+          + `${gap != null ? `, and the context was lost ~${gap} ms after it ended` : ''}. `
+          + 'A synchronous block of this length during loading is consistent with a GPU driver watchdog '
+          + 'reset (TDR), not memory exhaustion. See slowGlOps for the responsible GL call.',
+        );
+      }
+    } catch (_) {}
+
     if (heapLimit > 0 && heapUsed / heapLimit > 0.85) {
       causes.push(`JavaScript memory is nearly exhausted (${heapUsed} / ${heapLimit} MB) — the browser may be under general memory pressure.`);
     }
@@ -1128,6 +1168,99 @@ export function installWebGLShaderDiagnostics() {
   }
   _installLongTaskDiagnostics();
   _installBigCanvasOpDiagnostics();
+  _installSlowGlOpDiagnostics();
+}
+
+/**
+ * Time synchronous WebGL operations that can block the main thread for seconds
+ * and starve Chrome's GPU channel into a watchdog reset.
+ *
+ * The 2026-07-10 run refuted both earlier suspects (bigCanvasOps was empty;
+ * heap was normal at 224 MB) yet the context died **111 ms after the end of a
+ * 6,618 ms long task** (a 3,824 ms one preceded it). Something synchronous
+ * blocks for seconds during `binding_effects`. The prime candidates are all
+ * GL-side:
+ *  - `getProgramParameter(LINK_STATUS)` / `getShaderParameter(COMPILE_STATUS)`:
+ *    force a blocking wait for the driver to finish compiling. On ANGLE/D3D11 a
+ *    large shader can take seconds, and MSA has ~48 effects with big shaders.
+ *  - `texImage2D` / `generateMipmap`: large uploads stall the driver.
+ *  - `readPixels` / `finish`: full pipeline flushes.
+ *
+ * Ops slower than 100 ms are recorded (op, duration, timestamp, and for shader
+ * ops the source length + a marker snippet) into `slowGlOps` in crash reports.
+ * Fast ops take one comparison of overhead.
+ */
+function _installSlowGlOpDiagnostics() {
+  try {
+    if (globalThis.__msaGlOpDiagInstalled === true) return;
+    globalThis.__msaGlOpDiagInstalled = true;
+    globalThis.__msaSlowGlOps = [];
+    const SLOW_MS = 100;
+
+    const record = (op, durMs, extra) => {
+      try {
+        globalThis.__msaSlowGlOps.push({
+          op,
+          durMs: Math.round(durMs),
+          atMs: Math.round(performance.now() - durMs),
+          ...extra,
+        });
+        if (globalThis.__msaSlowGlOps.length > 24) globalThis.__msaSlowGlOps.shift();
+      } catch (_) {}
+    };
+
+    const timeWrap = (proto, name, describe) => {
+      const orig = proto?.[name];
+      if (typeof orig !== 'function') return;
+      proto[name] = function msaTimedGlOp(...args) {
+        const t0 = performance.now();
+        const out = orig.apply(this, args);
+        const dur = performance.now() - t0;
+        if (dur >= SLOW_MS) {
+          let extra = {};
+          try { extra = describe ? describe.call(this, args, out) : {}; } catch (_) {}
+          record(name, dur, extra);
+        }
+        return out;
+      };
+    };
+
+    for (const ctor of [globalThis.WebGL2RenderingContext, globalThis.WebGLRenderingContext]) {
+      const p = ctor?.prototype;
+      if (!p) continue;
+
+      // Stash shader sources so slow compiles/links can be attributed.
+      const origShaderSource = p.shaderSource;
+      if (typeof origShaderSource === 'function') {
+        p.shaderSource = function msaShaderSource(shader, src) {
+          try {
+            if (shader) shader.__msaSrcLen = String(src ?? '').length;
+            if (shader) shader.__msaSrcHead = String(src ?? '').slice(0, 120);
+          } catch (_) {}
+          return origShaderSource.call(this, shader, src);
+        };
+      }
+
+      timeWrap(p, 'compileShader', (args) => ({
+        srcLen: args?.[0]?.__msaSrcLen ?? null,
+        srcHead: args?.[0]?.__msaSrcHead ?? null,
+      }));
+      // The real blocking wait usually lands on the *status query*, not the
+      // compile/link call itself (drivers compile asynchronously until asked).
+      timeWrap(p, 'getShaderParameter', (args) => ({
+        srcLen: args?.[0]?.__msaSrcLen ?? null,
+        srcHead: args?.[0]?.__msaSrcHead ?? null,
+      }));
+      timeWrap(p, 'linkProgram');
+      timeWrap(p, 'getProgramParameter');
+      timeWrap(p, 'texImage2D', (args) => ({ w: args?.[3] ?? null, h: args?.[4] ?? null }));
+      timeWrap(p, 'texSubImage2D');
+      timeWrap(p, 'generateMipmap');
+      timeWrap(p, 'readPixels', (args) => ({ w: args?.[2] ?? null, h: args?.[3] ?? null }));
+      timeWrap(p, 'finish');
+    }
+  } catch (_) {
+  }
 }
 
 /**

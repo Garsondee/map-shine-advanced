@@ -430,6 +430,19 @@ First run with `recentTextureLoads` + `longTasks` live:
 - **Hypothesis (fits every signal):** CPU-side mask/pixel sampling via `getImageData` on world-resolution canvases — a 12000² readback is a ~549 MB heap array AND a GPU-raster stall (2D canvas is GPU-accelerated in Chrome, so this loads the same GPU process that then loses the context). The codebase has **~22 `getImageData` sites** (fire/candle emission sampling, vegetation clumps, water splash spawn maps, outdoors classification, dust/ash). Fire is provably initialized even in bare mode (`effects.fire.particleSystems: 2` with `globalDisableAll: true` — **bare mode is not actually bare**, itself a finding).
 - **Instrumented (same day):** global `getImageData` wrapper (≥16.7 MP gate) records dimensions, **measured duration**, timestamp, and the calling site into `bigCanvasOps` in crash reports, with a diagnosis rule naming heavy readbacks. The next crash names the exact site — no more grepping 22 candidates.
 
+### 13.5 Both suspects REFUTED; the crash is a driver watchdog (TDR), not memory (2026-07-10)
+
+The `bigCanvasOps` run came back decisive — and negative, which is progress:
+- **`bigCanvasOps: []`** — zero ≥16.7 MP `getImageData` calls. **The CPU-readback hypothesis (§13.4) is refuted.**
+- **`usedJSHeapMB: 224`** (vs 1910 the run before) — heap was *normal* and it **still crashed**. **The 2 GB heap is refuted as a cause**; it was a symptom of some runs, not the mechanism.
+- **What the instruments did show — the sharpest signal in the whole investigation:** `longTasks` recorded a **6,618 ms** main-thread stall starting at 41.19 s (preceded by a 3,824 ms one), and the **context was lost 111 ms after that stall ended** (crash at 47.92 s). Two cloud textures finished loading 16 ms before the stall began — but cloud loads are sequential `await`s and may merely *resolve between* other synchronous work, so **correlation is not causation here** (the §13.4 lesson: do not guess again).
+
+**Current diagnosis (evidence-ranked):** every memory hypothesis is now eliminated — resident VRAM (§13.3, <500 MB accounted), PIXI-side (demoted to ~316 MB), JS heap (normal), decoded-bitmap memory (all loads capped). What remains is a **multi-second synchronous block** that starves Chrome's GPU channel into a **driver watchdog reset (TDR)** — Windows' default TDR timeout is ~2 s, and we are blocking for 3.8 s and 6.6 s. The crash *immediately follows* the block. Consistent with `binding_effects` being the phase (48 effects, large shaders) and with `programs: 0`/`renderCalls: 0` (nothing ever rendered).
+
+**Instrumented (same day):** `slowGlOps` — timing wrappers on `compileShader`, `getShaderParameter`, `linkProgram`, `getProgramParameter`, `texImage2D`, `texSubImage2D`, `generateMipmap`, `readPixels`, `finish` (≥100 ms gate, installed at module `initialize()` before any GL work). Shader sources are stashed on the shader object so a slow compile/link names its source length + head. **`getProgramParameter(LINK_STATUS)` is the prime candidate**: drivers compile asynchronously until the status query forces a blocking wait, so a seconds-long ANGLE/D3D11 shader link shows up there, not in `linkProgram`. Two new diagnosis rules: one names the worst GL op, one states the longest stall and the gap between its end and the context loss.
+
+**If confirmed, the fix is not memory work at all** — it's making shader compilation non-blocking / incremental: use `KHR_parallel_shader_compile` (poll `COMPLETION_STATUS_KHR` instead of blocking on `LINK_STATUS`), stagger effect program creation across frames (the load-slim deferral already exists — extend it to *program* creation, not just RT allocation), and shrink/split the largest effect shaders. This would be a **new Stage A item (A10)** and is orthogonal to the entire Phase 1–5 refactor.
+
 ---
 
 ## 14. Architecture review — the target state and its principles *(added 2026-07-09)*

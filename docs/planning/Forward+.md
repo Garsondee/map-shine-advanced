@@ -467,6 +467,27 @@ The `slowSections` run exposed flaws in **my own instrumentation and my own fix*
 
 **Open:** the 4.6 s stall remains unattributed. Candidates (pure-CPU, plausible at 12000², 1002 walls, during `binding_effects`): `VisionPolygonComputer` occlusion polygons (constructed by `FireEffectV2`, and fire initialises even in bare mode), vegetation clump-field generation, map-point wall clustering, nav-mesh build. **Do not fix any of these until `sectionTrail`/`slowSections` names one.**
 
+### 13.8 The 131 MB uploads are **Foundry's PIXI**, not MSA (2026-07-10)
+
+The stack-capture instrument answered §13.7's Defect A immediately:
+
+```
+texImage2D 6408×5121  →  at Le.upload (pixi.min.js) ← at Le.PIXIUPLOAD
+```
+
+**Foundry's own PIXI renderer uploads the 6408×5121 tile image (~131 MB), four times, 191–351 ms each.** MSA never touched them. This vindicates the §13.7 correction (attributing them to `TileManager` was an assumption) and adds a fourth entry to the running theme: *the expensive things are usually not where the module's own accounting looks.* Note A9's demotion sweep only disposes textures ≥8192 px, so 6408 px tile images slip under it.
+
+**User observation, and it corroborates the stack.** The loading overlay reads **"Setting up tokens…"** when the context dies. That stage (`scene.tokens`, [loading-stages.js:19](../../scripts/ui/loading-stages.js)) is set with `keepAuto: true` at [canvas-replacement.js:8360](../../scripts/foundry/canvas-replacement.js) and then **`TileManager` construct/initialize/`syncAllTiles()` run underneath it** — the label is stale, and the work actually happening is *tiles*. The visible label and the PIXI tile-upload stack point at the same region of the load.
+
+**Also caught:** `readPixels 3000×3000` blocking **508 ms** — a 36 MB synchronous GPU→CPU sync point, previously unattributed because I only added stack capture to `texImage2D`/`texSubImage2D`/`generateMipmap`.
+
+**Instrument defects fixed (third round):**
+- `readPixels` and `finish` now capture caller stacks.
+- **`sectionTrail` was structurally useless at 32 entries** — the burst of `safeCall`s *after* a stall flushed every pre-stall entry, so the report showed only post-stall labels. Ring raised to **160** (report emits last 48). `longTasks` ring raised 16→40 (emits 24).
+- `TileManager` construct / initialize / `syncAllTiles` are **not inside any labelled `safeCall`**, so no instrument could ever have attributed a stall there. Now wrapped in `markSection(...)`.
+
+**Standing conclusion (unchanged):** TDR from multi-second synchronous blocking. Still **not** memory. Still **do not fix anything** until an instrument names the 4.6–5.5 s block.
+
 ---
 
 ## 14. Architecture review — the target state and its principles *(added 2026-07-09)*

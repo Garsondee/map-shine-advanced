@@ -7,7 +7,7 @@ import { isGmLike, isUserGM } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import { shouldUseIncrementalTileResyncOnLevelRedraw } from '../core/texture-overhaul-flags.js';
-import { safeCall, safeCallAsync, safeDispose, Severity } from '../core/safe-call.js';
+import { safeCall, safeCallAsync, safeDispose, markSection, Severity } from '../core/safe-call.js';
 import { webglCrashRecovery } from '../core/webgl-crash-recovery.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 import { wipeMapShineAdvancedFlagsFireAndForget } from '../settings/scene-msa-flag-wipe.js';
@@ -8372,13 +8372,17 @@ async function createThreeCanvas(scene, createOptions = {}) {
     _setCreateThreeCanvasProgress('scene.managers.tiles.init');
     console.log(' -> Manager: TileManager');
     console.log('   -> TileManager: constructor...');
-    tileManager = new TileManager(threeScene);
+    // These three run under the "Setting up tokens…" overlay label (set above
+    // with keepAuto), which is what users see on screen when the context is
+    // lost. They are NOT inside a labelled safeCall, so timing them explicitly
+    // is the only way the crash report can attribute a stall here (§13.8).
+    tileManager = markSection('tileManager.construct', () => new TileManager(threeScene));
     console.log('   -> TileManager: constructor DONE');
     console.log('   -> TileManager: initialize...');
-    tileManager.initialize();
+    markSection('tileManager.initialize', () => tileManager.initialize());
     console.log('   -> TileManager: initialize DONE');
     console.log('   -> TileManager: syncAllTiles...');
-    tileManager.syncAllTiles();
+    markSection('tileManager.syncAllTiles', () => tileManager.syncAllTiles());
     console.log('   -> TileManager: syncAllTiles DONE');
     effectComposer.addUpdatable(tileManager); // Register for occlusion updates
     if (isDebugLoad) dlp.end('manager.TileManager.syncAll');

@@ -93,7 +93,9 @@ function _markSectionStart(context) {
       context: String(context ?? 'unknown').slice(0, 80),
       startMs: Math.round(performance.now()),
     });
-    if (g.__msaSectionTrail.length > 32) g.__msaSectionTrail.shift();
+    // Deep enough to survive the burst of safeCalls that follows a long stall
+    // (a 32-deep ring was fully flushed before the report was taken, §13.8).
+    if (g.__msaSectionTrail.length > 160) g.__msaSectionTrail.shift();
   } catch (_) {}
 }
 

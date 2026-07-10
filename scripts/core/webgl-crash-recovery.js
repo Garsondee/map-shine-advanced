@@ -607,7 +607,7 @@ export function collectDiagnostics(extra = {}) {
   } catch (_) {}
   try {
     const lt = globalThis.__msaLongTasks;
-    if (Array.isArray(lt)) record.longTasks = lt.slice(-12);
+    if (Array.isArray(lt)) record.longTasks = lt.slice(-24);
   } catch (_) {}
   try {
     const ops = globalThis.__msaBigCanvasOps;
@@ -623,7 +623,7 @@ export function collectDiagnostics(extra = {}) {
   } catch (_) {}
   try {
     const trail = globalThis.__msaSectionTrail;
-    if (Array.isArray(trail)) record.sectionTrail = trail.slice(-20);
+    if (Array.isArray(trail)) record.sectionTrail = trail.slice(-48);
   } catch (_) {}
 
   try {
@@ -1303,8 +1303,14 @@ function _installSlowGlOpDiagnostics() {
       }));
       timeWrap(p, 'texSubImage2D', () => ({ site: captureSite() }));
       timeWrap(p, 'generateMipmap', () => ({ site: captureSite() }));
-      timeWrap(p, 'readPixels', (args) => ({ w: args?.[2] ?? null, h: args?.[3] ?? null }));
-      timeWrap(p, 'finish');
+      // readPixels is a hard GPU->CPU sync point: a 3000x3000 readback measured
+      // 508 ms in the 2026-07-10 report with no attribution. Capture its caller.
+      timeWrap(p, 'readPixels', (args) => ({
+        w: args?.[2] ?? null,
+        h: args?.[3] ?? null,
+        site: captureSite(),
+      }));
+      timeWrap(p, 'finish', () => ({ site: captureSite() }));
     }
   } catch (_) {
   }
@@ -1380,7 +1386,7 @@ function _installLongTaskDiagnostics() {
             startMs: Math.round(entry.startTime),
             durMs: Math.round(entry.duration),
           });
-          if (globalThis.__msaLongTasks.length > 16) globalThis.__msaLongTasks.shift();
+          if (globalThis.__msaLongTasks.length > 40) globalThis.__msaLongTasks.shift();
         }
       } catch (_) {}
     });

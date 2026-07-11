@@ -25,6 +25,8 @@ The "Mansion - Multifloor" 144 MP scene (the crash case this whole investigation
 
 **Stage A scorecard:** A1 ✅ A2 ✅* A3 ✅ A4 ✅ A5 ✅ A7f ✅ A9 ✅(v1) — A6, A7 (remainder), A8 not started — **A10 (open, active)**, **A11 (new, located, open)**. Full table in §15.
 
+**Stage B started (2026-07-10):** the B0 design specs are **drafted, pending author review** — [B0-1 floor-attribute buffer](v3/B0-1-floor-attribute-buffer.md), [B0-2 frame graph + pass list](v3/B0-2-frame-graph.md), [B0-3 transparency strategy](v3/B0-3-transparency.md), [golden-scene expectations](v3/B0-golden-scene-expectations.md). All claims in them re-verified against source that day (notable finds: a world-space `floorIdTarget` precedent for §14.3 already exists in `GpuSceneMaskCompositor` with a LinearFilter-on-IDs defect; presence-scene layers 23/24 collide with cloud-blocker layers in a fallback path; WebGL2's shared-blend-state constraint shapes the MRT write rule). B0's exit still needs: author review of the three specs + the A2 scene-name/baseline fill-in.
+
 ---
 
 ## 1. The problem, in one sentence
@@ -604,6 +606,7 @@ Two stages plus a parallel track. Stage A makes today's module *safer and measur
 ### Stage B — The big refactor (V3 unified forward pipeline, behind a flag)
 
 **B0 — Design docs first (no code).** Three short specs, validated against §12's classification: (1) the floor-attribute buffer (§14.3) including the water/transparent-deck edge cases; (2) the V3 frame graph pass list (§14.4) — every §12.2 phase mapped to a named pass; (3) the Class B transparency strategy (recommendation: painter's-order *within* floor bands + depth test *between* bands first; OIT only if that visibly fails). Exit: specs reviewed, golden-scene expectations written down.
+> **Status (2026-07-10): drafted.** [B0-1](v3/B0-1-floor-attribute-buffer.md) · [B0-2](v3/B0-2-frame-graph.md) · [B0-3](v3/B0-3-transparency.md) · [expectations](v3/B0-golden-scene-expectations.md). Exit pending: author review; A2 scene names + baselines (blocking B1's exit, not B0's drafting). Decisions the specs pre-commit that review should confirm or veto: full-res RGBA8 attribute buffer (vs half-res); `Z_PER_FLOOR` widening at B1 (B0-3 §2); vegetation/splashes keep their post-merge composite position until B5 (B0-3 sequencing constraint); OIT held behind named triggers O1/O2 only.
 
 **B1 — Frame graph + unified albedo (M).** V3 flag renders albedo-only unified pass (already Z-sorted, §12.1) + attribute buffer through the frame graph. Exit: golden scenes' *geometry* matches V2 with lighting off; attribute buffer visualizable in a debug overlay.
 

@@ -27,6 +27,8 @@ import {
 } from '../core/render-layers.js';
 import { FloorCompositor } from '../compositor-v2/FloorCompositor.js';
 import { flushLandscapeLightningWhenCompositorReady } from '../ui/landscape-lightning-bridge.js';
+import { isV3PipelineEnabled, exposeV3FlagsApi } from '../compositor-v3/v3-flags.js';
+import { getV3Pipeline } from '../compositor-v3/V3Pipeline.js';
 
 const log = createLogger('EffectComposer');
 
@@ -797,15 +799,51 @@ export class EffectComposer {
     // Gate after lazy compositor creation so scene-flag enablement cannot lose
     // to stale Tweakpane/graphics-settings writes on the first frame.
     this._applyStylisticEffectGate(timeInfo);
-    _compositorV2.render({
-      // floorStack can be transiently null during early Foundry boot or
-      // recovery init paths. V2 must still be the sole renderer in that
-      // case; FloorCompositor will treat missing floor info as floor 0.
-      floorStack: _floorStackEarly,
-      timeInfo,
-      doProfile,
-      profiler,
-    });
+
+    // Expose the V3 console API once so users can discover/flip the flag before
+    // it is on. Cheap + idempotent; safe every frame but guarded to run once.
+    if (!this._v3ApiExposed) {
+      this._v3ApiExposed = true;
+      try { exposeV3FlagsApi(); } catch (_) {}
+    }
+
+    // ── V3 unified pipeline is the DEFAULT renderer (Forward+ Stage B) ───────
+    // V3 owns the frame whenever it is enabled (the default) and initialized.
+    // V3 errors are logged loudly and NOT masked by rendering V2 — we are
+    // replacing V2, not maintaining it as a per-frame fallback, so defects must
+    // surface. V2 renders only when V3 is explicitly disabled (debug opt-out:
+    // MapShine.v3.pipeline(false) or ?msaV3=0) or has not initialized yet.
+    //
+    // Note: FloorCompositor V2 is still constructed above because V3 currently
+    // reuses its FloorRenderBus (the Z-unified floor geometry). That dependency
+    // migrates into V3 as scene-building is ported; it is not a render fallback.
+    let _v3OwnsFrame = false;
+    if (isV3PipelineEnabled()) {
+      const v3 = getV3Pipeline({
+        renderer: this.renderer,
+        scene: this.scene,
+        camera: this.camera,
+      });
+      if (v3 && v3.isReady()) {
+        _v3OwnsFrame = true; // V3 owns the frame even if a pass errors (it logs).
+        v3.render({
+          floorStack: _floorStackEarly,
+          timeInfo,
+          renderBus: _compositorV2?._renderBus ?? null,
+          camera: this.camera,
+        });
+      }
+    }
+
+    if (!_v3OwnsFrame) {
+      // V3 disabled (debug) or not yet initialized → V2 renders this frame.
+      _compositorV2.render({
+        floorStack: _floorStackEarly,
+        timeInfo,
+        doProfile,
+        profiler,
+      });
+    }
     if (doProfile) profiler.endFrame();
     this._updateDecimationState(performance.now() - _frameStartMs);
     if (recording) {

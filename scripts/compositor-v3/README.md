@@ -31,7 +31,32 @@ FloorRenderBus (that dependency migrates into V3 as scene-building is ported).
 ## Current state — how to test
 
 Upload and reload; V3 renders by default. Graph: `unifiedGeometry` (albedo, all
-floors) → `lighting` (ambient + Foundry lights) → `present` (linear→sRGB).
+floors) → `lighting` (ambient + Foundry lights) → `effects` (vegetation) →
+`post` (V2 colour grade) → `present` (encode).
+
+## Colour grade (CC / post) — running V2's grade on V3
+
+`V3PostBridge.js` runs V2's post-merge **ColorCorrection** (which hosts the
+Contextual Scene Grade — the time-of-day timeline + indoor/outdoor packs) on the
+V3 lit buffer, so the module's signature look is present for judging V3's lighting
+fundamentals. It reaches the live `_colorCorrectionEffect` +
+`_contextualSceneGradeManager` off `window.MapShine.floorCompositorV2`, ticks
+them (V2.render, which normally does, is skipped under V3), and calls the same
+`ColorCorrectionEffectV2.render(renderer, litRT, gradedRT)` seam FloorCompositor
+uses post-merge.
+
+- **Colour space:** CC consumes linear HDR and writes linear (its own ACES when
+  its `toneMapping` param is on; no sRGB encode). The present pass does the
+  linear→sRGB encode and **skips the highlight rolloff when CC tone-mapped** (a
+  second compression would crush highlights); otherwise it keeps the rolloff.
+- **Default ON.** `MapShine.v3.post(false)` / `?msaV3Post=0` shows raw V3 physical
+  lighting (with the rolloff) for A/B. Any CC failure passes the lit buffer
+  through untouched — never a broken frame.
+- **MVP scope:** ColorCorrection only. Bloom, atmospheric fog, and the stylizer
+  chain are follow-ups on the same `render(in, out)` contract.
+- **Depends on the `_Outdoors` mask** for the indoor/outdoor grade (same resolve
+  as V3 lighting). If interior/exterior don't differentiate, that mask isn't
+  resolving under V3 yet — the shared open item.
 
 **Lighting now models Foundry v14** (see `ForwardLightingPass.js` header for the
 exact math traced from `foundryvttsourcecode_v14`): illumination is **MAX-blended**

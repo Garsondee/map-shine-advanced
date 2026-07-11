@@ -30,7 +30,8 @@ import { ThreeAllocator } from './ThreeAllocator.js';
 import { FullscreenPresent } from './FullscreenPresent.js';
 import { ForwardLightingPass } from './ForwardLightingPass.js';
 import { V3EffectsBridge } from './V3EffectsBridge.js';
-import { isV3TonemapEnabled, getV3HdrKnee } from './v3-flags.js';
+import { V3PostBridge } from './V3PostBridge.js';
+import { isV3TonemapEnabled, getV3HdrKnee, isV3PostEnabled } from './v3-flags.js';
 
 const log = createLogger('V3Pipeline');
 
@@ -69,6 +70,9 @@ export class V3Pipeline {
     this._present = new FullscreenPresent({ THREE: this._THREE });
     this._lighting = new ForwardLightingPass({ THREE: this._THREE });
     this._effects = new V3EffectsBridge();
+    this._post = new V3PostBridge({ THREE: this._THREE });
+    /** @type {boolean} whether the last frame's post pass applied CC (drives present tone-map). */
+    this._postAppliedCC = false;
     this._initialized = false;
     /** @type {Record<string, boolean>} live copy so tests can flip caps. */
     this._impl = { ...PASS_IMPLEMENTED };
@@ -138,6 +142,16 @@ export class V3Pipeline {
     // Lit HDR output (albedo × illumination + screen coloration). Same linear
     // HDR format; no depth (a fullscreen composite, not geometry).
     this._graph.declareResource('scene.lit', {
+      size: 'screen',
+      type: THREE.HalfFloatType,
+      format: THREE.RGBAFormat,
+      colorSpace: THREE.LinearSRGBColorSpace,
+    });
+    // Graded output = the V2 colour grade (ColorCorrection + contextual) applied
+    // to scene.lit. Still linear HDR (CC writes no sRGB OETF); the present pass
+    // encodes. When post is off/unavailable this holds a straight copy of
+    // scene.lit, so present always has a valid buffer to read.
+    this._graph.declareResource('scene.graded', {
       size: 'screen',
       type: THREE.HalfFloatType,
       format: THREE.RGBAFormat,
@@ -223,16 +237,49 @@ export class V3Pipeline {
       },
     });
 
-    // ── Present: ACES tone map + linear→sRGB, scene.lit → framebuffer ─────────
+    // ── Post: V2 colour grade (ColorCorrection + contextual) scene.lit→graded ──
+    // Restores the module's signature ToD / indoor-outdoor look on top of V3's
+    // physical lighting, so the lighting can be judged against the familiar grade.
+    // Always writes scene.graded (grade result, or a straight copy of scene.lit
+    // when post is off/unavailable) so present has a valid buffer either way.
+    this._graph.addPass({
+      name: 'post',
+      reads: ['scene.lit'],
+      writes: ['scene.graded'],
+      execute: (ctx) => {
+        const litRT = ctx.get('scene.lit');
+        const gradedRT = ctx.target('scene.graded');
+        const renderer = ctx.renderer ?? this.renderer;
+        const camera = ctx.camera ?? this.camera;
+        this._postAppliedCC = false;
+        if (!renderer || !litRT || !gradedRT) return;
+        if (isV3PostEnabled() && this._post.isColorCorrectionAvailable()) {
+          const ok = this._post.renderColorGrade(
+            renderer, camera, litRT, gradedRT, ctx.frame?.timeInfo ?? null,
+          );
+          if (ok) { this._postAppliedCC = true; return; }
+        }
+        // Grade off / unavailable / errored → passthrough so scene.graded is valid.
+        this._post.copy(renderer, litRT.texture, gradedRT);
+      },
+    });
+
+    // ── Present: linear→sRGB (+ highlight rolloff), scene.graded → framebuffer ─
     this._graph.addPass({
       name: 'present',
-      reads: ['scene.lit'],
+      reads: ['scene.graded'],
       writes: [],
       execute: (ctx) => {
-        const rt = ctx.get('scene.lit');
+        const rt = ctx.get('scene.graded');
         const renderer = ctx.renderer ?? this.renderer;
         const tex = rt?.texture ?? null;
-        if (renderer && tex) this._present.present(renderer, tex, { tonemap: isV3TonemapEnabled(), knee: getV3HdrKnee() });
+        if (!renderer || !tex) return;
+        // If CC ran AND tone-mapped, it owns the HDR→display roll — skip the
+        // present rolloff (a second compression would crush highlights). Otherwise
+        // (post off, or CC with tone-mapping disabled) keep the rolloff.
+        const ccOwnsToneMap = this._postAppliedCC && this._post.ccToneMappingActive();
+        const tonemap = ccOwnsToneMap ? false : isV3TonemapEnabled();
+        this._present.present(renderer, tex, { tonemap, knee: getV3HdrKnee() });
       },
     });
   }
@@ -371,6 +418,7 @@ export class V3Pipeline {
     try { this._graph.dispose(); } catch (_) {}
     try { this._present.dispose(); } catch (_) {}
     try { this._lighting.dispose(); } catch (_) {}
+    try { this._post.dispose(); } catch (_) {}
     this._initialized = false;
   }
 }

@@ -43,6 +43,8 @@ let _runtimeV3Tonemap = null;
 let _runtimeV3IndoorOutdoor = null;
 /** @type {number|null} HDR highlight-rolloff knee for the present pass (default 0.9). */
 let _runtimeV3HdrKnee = null;
+/** @type {boolean|null} Run V2's colour grade (ColorCorrection + contextual) on V3 (default on). */
+let _runtimeV3Post = null;
 
 /**
  * Tri-state URL flag: `?param=1/true/on` → true, `?param=0/false/off` → false,
@@ -207,6 +209,33 @@ export function setV3HdrKnee(knee) {
 }
 
 /**
+ * Whether V3 runs V2's post-merge colour grade (ColorCorrection + the Contextual
+ * Scene Grade it hosts — ToD timeline, indoor/outdoor packs) on the lit buffer.
+ * Default ON: restores the module's signature look so V3's lighting can be judged
+ * against it. Toggle off to see V3's raw physical lighting (with the HDR rolloff).
+ * @returns {boolean}
+ */
+export function isV3PostEnabled() {
+  if (_runtimeV3Post !== null) return _runtimeV3Post;
+  try {
+    if (window?.MapShine?.__v3Post === false) return false;
+    if (window?.MapShine?.__v3Post === true) return true;
+  } catch (_) {}
+  const url = _urlFlag('msaV3Post');
+  if (url !== null) return url;
+  return true; // default ON
+}
+
+/**
+ * @param {boolean|null} on Pass `null` to clear the override.
+ * @returns {ReturnType<typeof getV3Status>}
+ */
+export function setV3Post(on) {
+  _runtimeV3Post = on === null ? null : !!on;
+  return getV3Status();
+}
+
+/**
  * Runtime override for the V3 pipeline (live A/B, does not persist unless asked).
  * @param {boolean|null} on Pass `null` to clear the override.
  * @param {{ persist?: boolean }} [opts]
@@ -242,6 +271,7 @@ export function getV3Status() {
     floorFastPath: isV3FloorFastPathEnabled(),
     tonemap: isV3TonemapEnabled(),
     hdrKnee: getV3HdrKnee(),
+    post: isV3PostEnabled(),
     indoorOutdoor: isV3IndoorOutdoorEnabled(),
     source: {
       pipeline: _runtimeV3Pipeline !== null ? 'runtime'
@@ -271,6 +301,7 @@ export function exposeV3FlagsApi() {
       floorFastPath: (on, opts) => setV3FloorFastPath(on, opts),
       tonemap: (on) => setV3Tonemap(on),
       hdrKnee: (x) => setV3HdrKnee(x),
+      post: (on) => setV3Post(on),
       indoorOutdoor: (on) => setV3IndoorOutdoor(on),
       help: () => {
         console.info(
@@ -283,6 +314,7 @@ export function exposeV3FlagsApi() {
           + '  .tonemap(false)                  — disable the HDR highlight rolloff (hard clip)\n'
           + '  .hdrKnee(0.95)                   — raise the rolloff knee (0..1; 0.9 default; higher = only the hottest cores roll off)\n'
           + '  .hdrKnee(null)                   — clear override → default (0.9)\n'
+          + '  .post(false)                     — disable V2 colour grade on V3 (see raw V3 lighting)\n'
           + '  .indoorOutdoor(false)            — disable indoor darkening (uniform sky ambient)\n'
           + '  URL: ?msaV3=0 forces V2 for a reload  ·  ?msaV3=1 forces V3',
         );

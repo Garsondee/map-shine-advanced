@@ -295,6 +295,13 @@ export class V3Pipeline {
   render(frameCtx = {}) {
     if (!this._initialized) return null;
 
+    // Refresh the canonical day/night/sun state once per frame. V3 bypasses the
+    // V2 render path where FloorCompositor calls this, so without it the lighting
+    // pass would see only Foundry's raw darknessLevel — not MSA's merged
+    // masterDarkness (calendar time-of-day + weather + priority policy). B2 GAP-A.
+    // Runtime handle (not a static import) — see LightingDirector.js exposure note.
+    try { globalThis.window?.MapShine?.lightingDirector?.update?.(); } catch (_) {}
+
     const size = this._resolveDrawingBufferSize();
 
     // Re-import per-frame external resources (mask products, sim RTs, vision).

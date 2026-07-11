@@ -376,4 +376,16 @@ const _singleton = new LightingDirectorImpl();
  */
 export const LightingDirector = _singleton;
 
+// Expose the singleton as a runtime handle so consumers that must avoid a static
+// import can reach it off `window.MapShine`. The V3 pipeline needs this: a static
+// import would pull this module's WeatherController → wind-profile dependency
+// chain (which has a load-order circular dep) into V3's Node-verified test bundle
+// and break it. Browser-only; a no-op under Node/tests.
+try {
+  if (typeof window !== 'undefined') {
+    const ms = window.MapShine || (window.MapShine = {});
+    ms.lightingDirector = _singleton;
+  }
+} catch (_) {}
+
 export default LightingDirector;

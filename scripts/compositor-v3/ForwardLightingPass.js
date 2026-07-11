@@ -253,7 +253,17 @@ export class ForwardLightingPass {
     let darkness = 0, daylight = [1, 1, 1], darknessColor = [0, 0, 0], brightest = [1, 1, 1], wBright = 1, wDim = 0.5;
     try {
       const env = globalThis.canvas?.environment; const cols = globalThis.canvas?.colors;
-      if (Number.isFinite(Number(env?.darknessLevel))) darkness = Math.max(0, Math.min(1, Number(env.darknessLevel)));
+      // Prefer LightingDirector's merged masterDarkness (Foundry slider + calendar
+      // time-of-day + weather, resolved by the darknessPriority policy) over the raw
+      // Foundry darknessLevel. Fall back to the raw value before the director has
+      // produced state (frameId 0 = neutral, never updated). B2 GAP-A.
+      let darknessResolved = null;
+      try {
+        const ds = globalThis.window?.MapShine?.lightingDirector?.get?.();
+        if (ds && ds.frameId > 0 && Number.isFinite(Number(ds.masterDarkness))) darknessResolved = Number(ds.masterDarkness);
+      } catch (_) {}
+      if (darknessResolved == null && Number.isFinite(Number(env?.darknessLevel))) darknessResolved = Number(env.darknessLevel);
+      if (Number.isFinite(Number(darknessResolved))) darkness = Math.max(0, Math.min(1, Number(darknessResolved)));
       daylight = rgb(cols?.ambientDaylight, daylight);
       darknessColor = rgb(cols?.ambientDarkness, darknessColor);
       brightest = rgb(cols?.ambientBrightest, brightest);

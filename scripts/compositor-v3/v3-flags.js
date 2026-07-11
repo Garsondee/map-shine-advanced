@@ -41,6 +41,8 @@ let _runtimeV3FloorFastPath = null;
 let _runtimeV3Tonemap = null;
 /** @type {boolean|null} Indoor/outdoor ambient via the _Outdoors mask (default on). */
 let _runtimeV3IndoorOutdoor = null;
+/** @type {number|null} HDR highlight-rolloff knee for the present pass (default 0.9). */
+let _runtimeV3HdrKnee = null;
 
 /**
  * Tri-state URL flag: `?param=1/true/on` → true, `?param=0/false/off` → false,
@@ -171,6 +173,40 @@ export function setV3IndoorOutdoor(on) {
 }
 
 /**
+ * The HDR highlight-rolloff knee for the present pass: peak luminance below which
+ * the frame is left pixel-identical to what lighting produced (Foundry-matched);
+ * above it, only the brightest filament is compressed toward white. Default 0.9.
+ * Lower → more of the highlights roll off; higher (→1.0) → only the very hottest
+ * cores are touched. Live-tunable to dial the look per scene.
+ * @returns {number} knee clamped to [0,1]
+ */
+export function isV3HdrKnee() { return getV3HdrKnee(); }
+
+/** @returns {number} the resolved knee (runtime override → global → URL → 0.9). */
+export function getV3HdrKnee() {
+  if (_runtimeV3HdrKnee !== null) return _runtimeV3HdrKnee;
+  try {
+    const g = Number(window?.MapShine?.__v3HdrKnee);
+    if (Number.isFinite(g)) return Math.max(0, Math.min(1, g));
+  } catch (_) {}
+  try {
+    const v = new URLSearchParams(window.location.search).get('msaV3Knee');
+    if (v != null && Number.isFinite(Number(v))) return Math.max(0, Math.min(1, Number(v)));
+  } catch (_) {}
+  return 0.9;
+}
+
+/**
+ * @param {number|null} knee Pass `null` to clear the override (back to default 0.9).
+ * @returns {ReturnType<typeof getV3Status>}
+ */
+export function setV3HdrKnee(knee) {
+  _runtimeV3HdrKnee = (knee === null || !Number.isFinite(Number(knee)))
+    ? null : Math.max(0, Math.min(1, Number(knee)));
+  return getV3Status();
+}
+
+/**
  * Runtime override for the V3 pipeline (live A/B, does not persist unless asked).
  * @param {boolean|null} on Pass `null` to clear the override.
  * @param {{ persist?: boolean }} [opts]
@@ -205,6 +241,7 @@ export function getV3Status() {
     pipeline: isV3PipelineEnabled(),
     floorFastPath: isV3FloorFastPathEnabled(),
     tonemap: isV3TonemapEnabled(),
+    hdrKnee: getV3HdrKnee(),
     indoorOutdoor: isV3IndoorOutdoorEnabled(),
     source: {
       pipeline: _runtimeV3Pipeline !== null ? 'runtime'
@@ -233,6 +270,7 @@ export function exposeV3FlagsApi() {
       pipeline: (on, opts) => setV3Pipeline(on, opts),
       floorFastPath: (on, opts) => setV3FloorFastPath(on, opts),
       tonemap: (on) => setV3Tonemap(on),
+      hdrKnee: (x) => setV3HdrKnee(x),
       indoorOutdoor: (on) => setV3IndoorOutdoor(on),
       help: () => {
         console.info(
@@ -242,6 +280,10 @@ export function exposeV3FlagsApi() {
           + '  .pipeline(null)                  — clear override → default (V3 on)\n'
           + '  .pipeline(false, {persist:true}) — persist V2 for this client\n'
           + '  .floorFastPath(false)            — force curtain on floor changes\n'
+          + '  .tonemap(false)                  — disable the HDR highlight rolloff (hard clip)\n'
+          + '  .hdrKnee(0.95)                   — raise the rolloff knee (0..1; 0.9 default; higher = only the hottest cores roll off)\n'
+          + '  .hdrKnee(null)                   — clear override → default (0.9)\n'
+          + '  .indoorOutdoor(false)            — disable indoor darkening (uniform sky ambient)\n'
           + '  URL: ?msaV3=0 forces V2 for a reload  ·  ?msaV3=1 forces V3',
         );
       },

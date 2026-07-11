@@ -30,7 +30,7 @@ import { ThreeAllocator } from './ThreeAllocator.js';
 import { FullscreenPresent } from './FullscreenPresent.js';
 import { ForwardLightingPass } from './ForwardLightingPass.js';
 import { V3EffectsBridge } from './V3EffectsBridge.js';
-import { isV3TonemapEnabled } from './v3-flags.js';
+import { isV3TonemapEnabled, getV3HdrKnee } from './v3-flags.js';
 
 const log = createLogger('V3Pipeline');
 
@@ -232,7 +232,7 @@ export class V3Pipeline {
         const rt = ctx.get('scene.lit');
         const renderer = ctx.renderer ?? this.renderer;
         const tex = rt?.texture ?? null;
-        if (renderer && tex) this._present.present(renderer, tex, { tonemap: isV3TonemapEnabled() });
+        if (renderer && tex) this._present.present(renderer, tex, { tonemap: isV3TonemapEnabled(), knee: getV3HdrKnee() });
       },
     });
   }

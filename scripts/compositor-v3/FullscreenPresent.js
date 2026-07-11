@@ -11,8 +11,16 @@
  *
  * Uses the same defensive renderer-state reset as V2 `_blitToScreen` (scissor
  * off, viewport to logical size, opaque clear) to avoid stale-underlay /
- * transparent-canvas artifacts. No tone mapping yet — albedo is in [0,1]; a tone
- * map arrives with the lighting/grade stage that can push values above 1.
+ * transparent-canvas artifacts.
+ *
+ * **HDR handling — a hue-preserving highlight rolloff, NOT global ACES.** The lit
+ * buffer is HDR (candle glow / bright light cores exceed 1.0). A global ACES
+ * curve desaturates the whole image and bleaches saturated light cores toward
+ * white. Instead, this pass leaves everything below a knee (`uKnee`, default 0.9)
+ * pixel-identical to the linear input — so Foundry-matched midtones and light
+ * bodies are untouched — and compresses only the over-knee "filament" toward 1.0,
+ * scaling RGB uniformly so the hot core keeps its color. Only the brightest part
+ * of a light is affected; the rest of the frame is exactly what lighting produced.
  *
  * @module compositor-v3/FullscreenPresent
  */
@@ -42,7 +50,7 @@ export class FullscreenPresent {
     this._camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     this._sizeVec = new THREE.Vector2();
     this._material = new THREE.ShaderMaterial({
-      uniforms: { tDiffuse: { value: null }, uToneMap: { value: 1 } },
+      uniforms: { tDiffuse: { value: null }, uToneMap: { value: 1 }, uKnee: { value: 0.9 } },
       vertexShader: /* glsl */`
         varying vec2 vUv;
         void main() {
@@ -53,7 +61,8 @@ export class FullscreenPresent {
       fragmentShader: /* glsl */`
         precision highp float;
         uniform sampler2D tDiffuse;
-        uniform float uToneMap;   // 1 = ACES filmic, 0 = passthrough
+        uniform float uToneMap;   // 1 = highlight rolloff, 0 = passthrough (hard clip)
+        uniform float uKnee;      // peak luminance below which color is untouched
         varying vec2 vUv;
         // Standard sRGB OETF (linear → gamma-encoded display).
         vec3 linearToSRGB(vec3 c) {
@@ -61,15 +70,23 @@ export class FullscreenPresent {
           vec3 hi = 1.055 * pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055;
           return mix(lo, hi, step(vec3(0.0031308), c));
         }
-        // ACES filmic tone mapping (Narkowicz approximation — the operator V2's
-        // ColorCorrection uses). Rolls linear HDR into [0,1] so V3's HDR (candle
-        // glow, bright lights) does not hard-clip to white.
-        vec3 acesFilmic(vec3 x) {
-          return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+        // Hue-preserving highlight rolloff. Below the knee: identity (the frame is
+        // exactly what lighting produced — Foundry-matched). Above the knee: the
+        // PEAK channel is compressed toward display white with slope 1 at the knee
+        // (no visible kink) and asymptote 1.0, and all channels are scaled by the
+        // same factor so the hot core keeps its hue/saturation instead of bleaching
+        // to white (the ACES failure mode). Only the brightest filament is touched.
+        vec3 highlightRolloff(vec3 c, float knee) {
+          float L = max(c.r, max(c.g, c.b));
+          if (L <= knee) return c;
+          float h = max(1.0 - knee, 1e-3);   // headroom from knee to display white
+          float x = L - knee;                // HDR excess over the knee
+          float Lc = knee + h * x / (h + x); // f'(knee)=1, f(∞)→1.0 (smooth shoulder)
+          return c * (Lc / max(L, 1e-5));    // uniform scale → hue/saturation preserved
         }
         void main() {
           vec3 lin = max(texture2D(tDiffuse, vUv).rgb, vec3(0.0));
-          if (uToneMap > 0.5) lin = acesFilmic(lin);
+          if (uToneMap > 0.5) lin = highlightRolloff(lin, uKnee);
           gl_FragColor = vec4(linearToSRGB(lin), 1.0);
         }
       `,
@@ -89,7 +106,10 @@ export class FullscreenPresent {
    * Blit `texture` to the screen framebuffer (null render target).
    * @param {THREE.WebGLRenderer} renderer
    * @param {THREE.Texture} texture
-   * @param {{tonemap?: boolean}} [opts] - apply ACES tone mapping (default true).
+   * @param {{tonemap?: boolean, knee?: number}} [opts] - `tonemap` applies the
+   *   highlight rolloff (default true); `knee` overrides the rolloff knee
+   *   (default 0.9 — lower compresses more of the highlights, higher affects only
+   *   the very brightest filament).
    * @returns {boolean} whether a blit happened
    */
   present(renderer, texture, opts = null) {
@@ -105,6 +125,9 @@ export class FullscreenPresent {
 
     this._material.uniforms.tDiffuse.value = texture;
     this._material.uniforms.uToneMap.value = (opts?.tonemap === false) ? 0 : 1;
+    if (opts && Number.isFinite(opts.knee)) {
+      this._material.uniforms.uKnee.value = Math.max(0.0, Math.min(1.0, opts.knee));
+    }
     try {
       renderer.setRenderTarget(null);
       renderer.autoClear = false;

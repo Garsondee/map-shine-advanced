@@ -106,9 +106,13 @@ darkening is added. **If indoor/outdoor looks inverted or shifted, toggle it off
 and tell me** (the mask UV/flip is the one thing I couldn't verify without the
 scene).
 
-**ACES tone mapping** — the present pass rolls HDR (candle glow, bright lights)
-into range instead of clipping to white. Default on; `MapShine.v3.tonemap(false)`
-to compare.
+**HDR highlight rolloff** (replaced the earlier global ACES) — the present pass
+leaves everything below a knee (`MapShine.v3.hdrKnee`, default 0.9) identical to
+what lighting produced (Foundry-matched), and compresses only the over-knee hot
+"filament" toward white while preserving its hue/saturation (global ACES bleached
+saturated cores — that was the regression). Default on; `MapShine.v3.tonemap(false)`
+hard-clips for comparison, `MapShine.v3.hdrKnee(0.95)` narrows the rolloff to only
+the very brightest cores.
 
 **Worth checking:** candles now *illuminate* the map around them (not just a
 glow halo)? Foundry-light lighting still looks the same as before (it should be

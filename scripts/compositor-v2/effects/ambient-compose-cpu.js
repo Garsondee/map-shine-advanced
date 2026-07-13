@@ -108,27 +108,30 @@ export function resolveTwilightDarkness01(lightingEffect = null) {
 }
 
 /**
- * Simplified outdoor ambient illumination (no point lights, darkness meshes, or shadow combine).
- * Matches the core day/night ambient mix in LightingEffectV2 compose.
+ * Simplified ambient illumination (no point lights, darkness meshes, or shadow
+ * combine) for one context — matches the core day/night ambient mix in
+ * LightingEffectV2 compose. The **indoor** and **outdoor** contexts differ only
+ * in which ambient-scale + twilight params they read; the math is identical.
  *
+ * @param {'outdoor'|'indoor'} kind
  * @param {object} [options]
  * @param {import('./LightingEffectV2.js').LightingEffectV2|null} [options.lightingEffect]
  * @param {import('../../core/LightingDirector.js').LightingDirectorState|null} [options.directorState]
  * @returns {[number, number, number]}
  */
-export function computeOutdoorAmbientIllumRgb({
+export function computeAmbientIllumRgb(kind, {
   lightingEffect = null,
   directorState = null,
 } = {}) {
+  const indoor = kind === 'indoor';
   const state = directorState ?? LightingDirector.get();
   const twilight = resolveTwilightAmbientParams(lightingEffect);
   const darkness = clamp01(state.masterDarkness);
   const daylightHours = clamp01(state.calendarDaylightHours ?? 0);
   const sunStrength = clamp01(state.calendarSunStrength ?? state.calendarDayWeight ?? 0);
-  const dayAmbientMul = Math.max(
-    sunStrength,
-    twilight.dayFloorOutdoor * daylightHours,
-  );
+  const dayFloor = indoor ? twilight.dayFloorIndoor : twilight.dayFloorOutdoor;
+  const minLightKeep = indoor ? twilight.minLightKeepIndoor : twilight.minLightKeepOutdoor;
+  const dayAmbientMul = Math.max(sunStrength, dayFloor * daylightHours);
 
   const u = lightingEffect?._composeMaterial?.uniforms;
   const brightest = u?.uAmbientBrightest?.value
@@ -141,8 +144,14 @@ export function computeOutdoorAmbientIllumRgb({
   const eff = lightingEffect?.resolveEffectiveAmbientScales?.()
     ?? lightingEffect?._resolveEffectiveAmbientScalesForCompose?.()
     ?? null;
-  const dayScale = Math.max(0, Number(eff?.dayOutdoor ?? u?.uAmbientDayScaleOutdoor?.value) || 0);
-  const nightScale = Math.max(0, Number(eff?.nightOutdoor ?? u?.uAmbientNightScaleOutdoor?.value) || 0);
+  const dayScale = Math.max(0, Number(
+    (indoor ? eff?.dayIndoor : eff?.dayOutdoor)
+    ?? (indoor ? u?.uAmbientDayScaleIndoor?.value : u?.uAmbientDayScaleOutdoor?.value),
+  ) || 0);
+  const nightScale = Math.max(0, Number(
+    (indoor ? eff?.nightIndoor : eff?.nightOutdoor)
+    ?? (indoor ? u?.uAmbientNightScaleIndoor?.value : u?.uAmbientNightScaleOutdoor?.value),
+  ) || 0);
   const minIllum = Math.max(0, Number(eff?.minIllum ?? u?.uMinIlluminationScale?.value) || 0);
 
   const ambientDay = brightest.map((c) => c * dayScale * dayAmbientMul);
@@ -151,7 +160,42 @@ export function computeOutdoorAmbientIllumRgb({
 
   const minIllumMixed = lerp3(ambientDay, ambientNight, darkness).map((c) => c * 0.1 * minIllum);
   const dayMinKeep = daylightHours * (1.0 - darkness);
-  const minFloorScale = Math.max(0.18, dayMinKeep * twilight.minLightKeepOutdoor);
+  const minFloorScale = Math.max(0.18, dayMinKeep * minLightKeep);
 
   return ambient.map((c, i) => Math.max(c, minIllumMixed[i] * minFloorScale));
 }
+
+/**
+ * Outdoor ambient illumination (linear HDR). Thin wrapper over
+ * {@link computeAmbientIllumRgb} — kept for existing callers.
+ * @param {object} [options]
+ * @returns {[number, number, number]}
+ */
+export function computeOutdoorAmbientIllumRgb(options = {}) {
+  return computeAmbientIllumRgb('outdoor', options);
+}
+
+/**
+ * Indoor ambient illumination (linear HDR) — the "no sky" base indoor pixels get,
+ * driven by the Day/Night ambient **indoor** sliders.
+ * @param {object} [options]
+ * @returns {[number, number, number]}
+ */
+export function computeIndoorAmbientIllumRgb(options = {}) {
+  return computeAmbientIllumRgb('indoor', options);
+}
+
+// Runtime handle so consumers that must avoid a static import can reach these off
+// `window.MapShine` — the V3 lighting pass needs them but importing this module
+// pulls the LightingDirector → WeatherController → wind-profile load-order
+// circular dep into V3's Node test bundle and breaks it. Browser-only; no-op
+// under Node/tests.
+try {
+  if (typeof window !== 'undefined') {
+    const ms = window.MapShine || (window.MapShine = {});
+    ms.__ambientCompose = {
+      outdoor: computeOutdoorAmbientIllumRgb,
+      indoor: computeIndoorAmbientIllumRgb,
+    };
+  }
+} catch (_) {}

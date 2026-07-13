@@ -296,12 +296,38 @@ export class ForwardLightingPass {
     } catch (_) {}
     const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
     const maxc = (a, b) => [Math.max(a[0], b[0]), Math.max(a[1], b[1]), Math.max(a[2], b[2])];
-    const bg = mix(daylight, darknessColor, darkness);
-    let bright = mix(bg, brightest, wBright);
-    let dim = mix(bg, bright, wDim);
-    // `indoorBg` = the base darkness with no sky contribution: indoor areas get
-    // this (dark, lit only by local lights); outdoor areas get `bg`.
-    return { bg, indoorBg: darknessColor, dim: maxc(dim, bg), bright: maxc(bright, bg) };
+    // Light LEVELS (what a light's core/ring fade TO) stay on the Foundry
+    // brightness model.
+    const foundryBase = mix(daylight, darknessColor, darkness);
+    let bright = mix(foundryBase, brightest, wBright);
+    let dim = mix(foundryBase, bright, wDim);
+
+    // Ambient ENDPOINTS (the no-light base; what lights fade FROM) come from V2's
+    // ambient model so the "Ambient light (linear HDR)" control — the Day/Night ×
+    // indoor/outdoor sliders on LightingEffectV2 — actually drives V3, and V3
+    // reproduces the V2 ambient look. Reached via a runtime handle
+    // (window.MapShine.__ambientCompose) rather than a static import, to keep the
+    // LightingDirector→WeatherController circular dep out of V3's Node test bundle.
+    // Falls back to the Foundry day/night mix (outdoor) / darkness (indoor) when
+    // the V2 lighting effect isn't available, so it can't regress.
+    let outdoorBg = foundryBase;
+    let indoorBg = darknessColor;
+    try {
+      const compose = globalThis.window?.MapShine?.__ambientCompose;
+      if (compose) {
+        const le = globalThis.window?.MapShine?.floorCompositorV2?._lightingEffect ?? null;
+        const o = compose.outdoor?.({ lightingEffect: le });
+        const i = compose.indoor?.({ lightingEffect: le });
+        const ok = (v) => Array.isArray(v) && v.length === 3 && v.every((n) => Number.isFinite(n));
+        if (ok(o)) outdoorBg = o;
+        if (ok(i)) indoorBg = i;
+      }
+    } catch (_) {}
+
+    // `indoorBg` = the no-sky indoor base (indoor areas get this, lit by local
+    // lights); `bg` = the outdoor/sky base. Light levels are floored at the
+    // outdoor base so a light never reads darker than ambient.
+    return { bg: outdoorBg, indoorBg, dim: maxc(dim, outdoorBg), bright: maxc(bright, outdoorBg) };
   }
 
   /**

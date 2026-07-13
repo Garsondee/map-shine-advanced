@@ -122,6 +122,13 @@ export function updateSceneViewProjectionFromCamera(camera, groundZ, cache, temp
 
   if (!cameraChanged) return true;
 
+  // Ensure the camera's world matrix reflects its current position/orientation
+  // before we unproject. This runs before the renderer's own matrix refresh, and
+  // some camera movers (e.g. composer.js pan) update position without calling
+  // updateMatrixWorld — a stale matrix here caches a wrong view rect that sticks
+  // until the next change (the indoor/outdoor-breaks-on-pan bug). Idempotent.
+  if (!isOrtho && typeof camera.updateMatrixWorld === 'function') camera.updateMatrixWorld();
+
   let vMinX = 0;
   let vMinY = 0;
   let vMaxX = 1;

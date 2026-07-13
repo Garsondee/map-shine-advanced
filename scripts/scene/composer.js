@@ -1265,7 +1265,14 @@ export class SceneComposer {
     this.camera.position.x = newX;
     this.camera.position.y = newY;
     // Z stays at cameraHeight - never changes
-    
+
+    // Refresh the world matrix now. Consumers that read the camera before the
+    // renderer's own update (notably the view-projection raycast that feeds the
+    // _Outdoors screen→world mapping for lighting + CC) would otherwise unproject
+    // with a stale matrix and cache a wrong view rect that persists until the
+    // next zoom — the "indoor/outdoor breaks on pan" bug.
+    this.camera.updateMatrixWorld(true);
+
     log.debug(`Camera pan to (${this.camera.position.x.toFixed(1)}, ${this.camera.position.y.toFixed(1)})`);
   }
 

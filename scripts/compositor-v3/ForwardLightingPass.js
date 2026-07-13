@@ -377,16 +377,45 @@ export class ForwardLightingPass {
       sb.x = sr?.x ?? 0; sb.y = sr?.y ?? 0; sb.w = sr?.width ?? 1; sb.h = sr?.height ?? 1;
     } catch (_) {}
     au.uSceneBounds.value.set(sb.x, sb.y, sb.w, sb.h);
-    if (camera?.isOrthographicCamera) {
+
+    // World-space view rectangle for the fullscreen ambient pass. Compute it by
+    // UNPROJECTING the screen corners — robust even though the passed camera
+    // reports isOrthographicCamera=false (which had left the bounds at their
+    // (0,0)-(1,1) initializers, putting every pixel outside the scene rect → the
+    // all-outdoor/all-green bug). vUv(0,0) is screen bottom-left = NDC(-1,-1);
+    // vUv(1,1) is top-right = NDC(1,1). Ortho left/right/zoom formula is the fallback.
+    let viewOk = false;
+    const THREE = this._THREE ?? (typeof window !== 'undefined' ? window.THREE : null);
+    try {
+      if (THREE && camera && typeof camera.unproject === 'function') {
+        if (typeof camera.updateMatrixWorld === 'function') camera.updateMatrixWorld();
+        const bl = new THREE.Vector3(-1, -1, 0).unproject(camera);
+        const tr = new THREE.Vector3(1, 1, 0).unproject(camera);
+        if (Number.isFinite(bl.x) && Number.isFinite(bl.y)
+          && Number.isFinite(tr.x) && Number.isFinite(tr.y)
+          && Math.abs(tr.x - bl.x) > 1e-3 && Math.abs(tr.y - bl.y) > 1e-3) {
+          au.uViewMin.value.set(bl.x, bl.y);
+          au.uViewMax.value.set(tr.x, tr.y);
+          viewOk = true;
+        }
+      }
+    } catch (_) {}
+    if (!viewOk && camera?.isOrthographicCamera) {
       const p = camera.position; const z = camera.zoom || 1;
       au.uViewMin.value.set(p.x + camera.left / z, p.y + camera.bottom / z);
       au.uViewMax.value.set(p.x + camera.right / z, p.y + camera.top / z);
+      viewOk = true;
     }
+
     au.uOutdoorsMask.value = tex;
     au.uOutdoorsFlipY.value = tex.flipY ? 1 : 0;
     au.uHasOutdoors.value = 1;
     // Share with the per-light illumination shaders (set in _syncLights).
-    this._outdoorsState = { tex, flipY: !!tex.flipY, sb, route, floorKey };
+    this._outdoorsState = {
+      tex, flipY: !!tex.flipY, sb, route, floorKey, viewOk,
+      viewMin: [au.uViewMin.value.x, au.uViewMin.value.y],
+      viewMax: [au.uViewMax.value.x, au.uViewMax.value.y],
+    };
   }
 
   /** @param {any} THREE @returns {{illumMesh:any, illumMat:any, coloMesh:any, coloMat:any, geo:any, shapeRef:any}} @private */
@@ -764,7 +793,11 @@ export class ForwardLightingPass {
       // What the last rendered frame actually bound (null = ambient was uniform).
       const s = this._outdoorsState;
       report.lastFrame = s
-        ? { bound: true, route: s.route, floorKey: s.floorKey, flipY: s.flipY, sceneBounds: { ...s.sb } }
+        ? {
+          bound: true, route: s.route, floorKey: s.floorKey, flipY: s.flipY,
+          sceneBounds: { ...s.sb }, viewOk: s.viewOk ?? null,
+          viewMin: s.viewMin ?? null, viewMax: s.viewMax ?? null,
+        }
         : { bound: false };
       const au = this._ambientMat?.uniforms;
       if (au) {

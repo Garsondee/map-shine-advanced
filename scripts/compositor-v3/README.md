@@ -1,22 +1,27 @@
 # compositor-v3 — the V3 unified-forward pipeline
 
-Parallel rendering path for Forward+ Stage B, built behind a flag (default OFF).
-The shipping V2 compositor is untouched while this matures. Design specs live in
-[docs/planning/v3/](../../docs/planning/v3/); this README is the code-side
-orientation and the living design note for the floor-change fast path.
+Parallel rendering path for Forward+ Stage B, and the **default renderer**
+(flag `MapShine.v3.pipeline(false)` / `?msaV3=0` opts back into V2 for
+debugging/A-B). The shipping V2 compositor is kept alive and reused for parts
+V3 hasn't ported yet (see "Still missing" below); it is not otherwise touched.
+Design specs live in [docs/planning/v3/](../../docs/planning/v3/); this README
+is the code-side orientation and status doc — **more current than
+[Forward+.md](../../docs/planning/Forward+.md) §15**, which lags it.
 
-## What's here now (B1 in progress)
+## What's here now
 
 | File | Role | Status |
 |------|------|--------|
 | `FrameGraph.js` | Declarative pass scheduler (B0-2 §2): topo-order, validation, pooled RTs, per-pass timing. THREE-free core, Node-verified. | ✅ built + verified |
-| `v3-flags.js` | `isV3PipelineEnabled()` / `isV3FloorFastPathEnabled()`; console API `MapShine.v3.help()`. | ✅ built |
-| _(next)_ `ThreeAllocator.js` | Frame-graph allocator backed by `THREE.WebGLRenderTarget` (incl. `count:2` MRT for the attribute buffer). | ⏳ |
-| `V3Pipeline.js` | Orchestrator: FrameGraph + ThreeAllocator + FullscreenPresent. First-plunge passes are **real**: `unifiedGeometry` → `present`. Fail-safe `isReady()` gate. | ✅ renders albedo |
-| `ThreeAllocator.js` | Frame-graph allocator over `THREE.WebGLRenderTarget` incl. `count:2` MRT for the attribute buffer. | ✅ built + verified |
-| `FullscreenPresent.js` | Raw passthrough blit of a texture → screen, mirroring V2 `_blitToScreen` state handling. | ✅ built |
-| `__tests__/` | Node verification for the core modules (62 assertions). | ✅ green |
-| _(next)_ lighting / attribute-buffer / post passes | Insert between geometry and present as they land (each with its own capability flag). | ⏳ |
+| `ThreeAllocator.js` | Frame-graph allocator over `THREE.WebGLRenderTarget`. | ✅ built + verified |
+| `v3-flags.js` | Every `MapShine.v3.*` runtime flag + console API (`MapShine.v3.help()`). | ✅ built |
+| `V3Pipeline.js` | Orchestrator: FrameGraph + ThreeAllocator + FullscreenPresent. Pass graph: `unifiedGeometry → lighting → effects → post → present`. Fail-safe `isReady()` gate. | ✅ live |
+| `ForwardLightingPass.js` | Interim (non-clustered) per-light-mesh forward lighting: Foundry v14 illumination model, wall-clipped lights, day/night + indoor/outdoor ambient. | ✅ live |
+| `V3EffectsBridge.js` | Ticks/composites reused V2 effect instances (candle flames, bush/tree) under V3. | ✅ first cut |
+| `V3PostBridge.js` | Runs V2's `BloomEffectV2` + `ColorCorrectionEffectV2` (ToD + contextual indoor/outdoor grade) on the V3 lit buffer. | ✅ live |
+| `FullscreenPresent.js` | Linear→sRGB encode + hue-preserving HDR highlight rolloff. | ✅ built |
+| `__tests__/` | Node verification for the core modules (65 assertions). | ✅ green |
+| _(not started)_ attribute buffer, clustered lighting, shadows, water, atmo fog, floor-change fast path | See Forward+.md §15 B2–B5 / the "Still missing" list below. | ⏳ |
 
 **V3 is the DEFAULT renderer.** At the single V2 seam (`EffectComposer.js`, where
 `_compositorV2.render(...)` was called) V3 owns the frame whenever it is enabled
@@ -85,11 +90,10 @@ level/elevation gating. **If any light vanished vs the previous build, it wasn't
 an active Foundry light either** (wrong elevation, disabled, or on a non-viewed
 level).
 
-**Still NOT matched (follow-ups):**
-- **Indoor/outdoor darkness** — the `_Outdoors` mask isn't sampled yet, so
-  indoors gets the same ambient as outdoors. Next lighting step.
-- Darkness/negative lights, non-default coloration techniques, light animation,
-  soft wall edges (currently a hard wall boundary).
+**Still NOT matched (follow-ups):** darkness/negative lights, non-default
+coloration techniques, light animation, soft wall edges (currently a hard wall
+boundary), clustered/per-fragment lighting (still one mesh per light — see B2).
+Indoor/outdoor darkness IS matched now — see "Indoor/outdoor ambient" below.
 
 **Worth checking:** light **stops at walls** now (the headline change);
 overlapping lights don't over-brighten; a torch shows a bright center fading to a
@@ -123,15 +127,23 @@ candle glow into its light buffer.
 sync); it's lit by the ambient day/night term. Local lights still don't reach it
 (it composites after the light pass) — a follow-up.
 
-**Indoor/outdoor ambient** — the lighting ambient now samples the scene's
-`_Outdoors` mask: indoor areas get only the base darkness (lit by local lights),
-outdoor areas get the sky ambient. The view→world→scene-UV reconstruction and
-flip replicate `ColorCorrectionEffectV2` exactly. Default on; toggle with
-`MapShine.v3.indoorOutdoor(false)` / `?msaV3Indoor=0`. Safe fallback: no mask →
-uniform sky ambient (prior behavior), so it can't regress — only aligned indoor
-darkening is added. **If indoor/outdoor looks inverted or shifted, toggle it off
-and tell me** (the mask UV/flip is the one thing I couldn't verify without the
-scene).
+**Indoor/outdoor ambient** — the lighting ambient samples the scene's `_Outdoors`
+mask: indoor areas get only the base darkness (lit by local lights), outdoor
+areas get the sky ambient. The mask decode matches the authoritative convention
+shared by `ColorCorrectionEffectV2`/`LightingEffectV2`/water (`max(r,g,b)` with
+a soft 0.18–0.82 band, alpha-gated validity) — a naive `.r` read was tried first
+and was wrong. **Confirmed working 2026-07-13** after fixing the real bug: the
+scene camera is a `PerspectiveCamera` (`composer.js:1156`), so any
+`isOrthographicCamera`-gated view-bounds formula (and a naive unproject)
+silently left the mask's screen→world reconstruction at degenerate
+`(0,0)-(1,1)` bounds — every sample fell outside the scene rect and defaulted
+to "outdoor" everywhere. Fixed by sourcing the view rectangle from
+`view-projection-service.getVisibleWorldRect()` (the same ground-plane raycast
+tile streaming already relies on) instead of any camera-type-specific formula —
+**the rule for every future V3/CC consumer that needs screen→world bounds.**
+Default on; toggle with `MapShine.v3.indoorOutdoor(false)` / `?msaV3Indoor=0`.
+Diagnostics: `MapShine.v3.outdoors()` (full resolve trace + mask pixel
+readback), `MapShine.v3.outdoorsDebug(true)` (red=indoor/green=outdoor tint).
 
 **HDR highlight rolloff** (replaced the earlier global ACES) — the present pass
 leaves everything below a knee (`MapShine.v3.hdrKnee`, default 0.9) identical to

@@ -46,7 +46,11 @@
  */
 
 import { createLogger } from '../core/log.js';
-import { resolveGroundZ } from '../streaming/view-projection-service.js';
+import {
+  resolveGroundZ,
+  getVisibleWorldRect,
+  getStableViewRectForMinimap,
+} from '../streaming/view-projection-service.js';
 import {
   resolveViewedBandOutdoorsMask,
   collectCompositorFloorCandidateKeys,
@@ -378,33 +382,36 @@ export class ForwardLightingPass {
     } catch (_) {}
     au.uSceneBounds.value.set(sb.x, sb.y, sb.w, sb.h);
 
-    // World-space view rectangle for the fullscreen ambient pass. Compute it by
-    // UNPROJECTING the screen corners — robust even though the passed camera
-    // reports isOrthographicCamera=false (which had left the bounds at their
-    // (0,0)-(1,1) initializers, putting every pixel outside the scene rect → the
-    // all-outdoor/all-green bug). vUv(0,0) is screen bottom-left = NDC(-1,-1);
-    // vUv(1,1) is top-right = NDC(1,1). Ortho left/right/zoom formula is the fallback.
+    // World-space view rectangle for the fullscreen ambient pass. Source it from
+    // the shared view-projection service — the SAME per-frame camera→world
+    // projection tile streaming uses (EffectComposer ticks it before V3 renders,
+    // via a raycast that works regardless of camera type). This is the fix for the
+    // all-green bug: the earlier camera-based paths left the bounds at their
+    // (0,0)-(1,1) initializers because the camera reference reaching this pass
+    // reports isOrthographicCamera=false and gave no usable projection.
+    // `getVisibleWorldRect` is Three world Y-up: minX/minY = screen bottom-left =
+    // vUv(0,0), maxX/maxY = top-right = vUv(1,1) (matches the shader's mix()).
     let viewOk = false;
-    const THREE = this._THREE ?? (typeof window !== 'undefined' ? window.THREE : null);
+    let viewSource = 'none';
     try {
-      if (THREE && camera && typeof camera.unproject === 'function') {
-        if (typeof camera.updateMatrixWorld === 'function') camera.updateMatrixWorld();
-        const bl = new THREE.Vector3(-1, -1, 0).unproject(camera);
-        const tr = new THREE.Vector3(1, 1, 0).unproject(camera);
-        if (Number.isFinite(bl.x) && Number.isFinite(bl.y)
-          && Number.isFinite(tr.x) && Number.isFinite(tr.y)
-          && Math.abs(tr.x - bl.x) > 1e-3 && Math.abs(tr.y - bl.y) > 1e-3) {
-          au.uViewMin.value.set(bl.x, bl.y);
-          au.uViewMax.value.set(tr.x, tr.y);
-          viewOk = true;
-        }
+      const rect = getVisibleWorldRect(0) ?? getStableViewRectForMinimap();
+      if (rect
+        && Number.isFinite(rect.minX) && Number.isFinite(rect.minY)
+        && Number.isFinite(rect.maxX) && Number.isFinite(rect.maxY)
+        && Math.abs(rect.maxX - rect.minX) > 1e-3 && Math.abs(rect.maxY - rect.minY) > 1e-3) {
+        au.uViewMin.value.set(rect.minX, rect.minY);
+        au.uViewMax.value.set(rect.maxX, rect.maxY);
+        viewOk = true;
+        viewSource = 'service';
       }
     } catch (_) {}
+    // Last-ditch fallback: ortho left/right/zoom formula off the passed camera.
     if (!viewOk && camera?.isOrthographicCamera) {
       const p = camera.position; const z = camera.zoom || 1;
       au.uViewMin.value.set(p.x + camera.left / z, p.y + camera.bottom / z);
       au.uViewMax.value.set(p.x + camera.right / z, p.y + camera.top / z);
       viewOk = true;
+      viewSource = 'ortho-camera';
     }
 
     au.uOutdoorsMask.value = tex;
@@ -412,7 +419,7 @@ export class ForwardLightingPass {
     au.uHasOutdoors.value = 1;
     // Share with the per-light illumination shaders (set in _syncLights).
     this._outdoorsState = {
-      tex, flipY: !!tex.flipY, sb, route, floorKey, viewOk,
+      tex, flipY: !!tex.flipY, sb, route, floorKey, viewOk, viewSource,
       viewMin: [au.uViewMin.value.x, au.uViewMin.value.y],
       viewMax: [au.uViewMax.value.x, au.uViewMax.value.y],
     };
@@ -795,7 +802,7 @@ export class ForwardLightingPass {
       report.lastFrame = s
         ? {
           bound: true, route: s.route, floorKey: s.floorKey, flipY: s.flipY,
-          sceneBounds: { ...s.sb }, viewOk: s.viewOk ?? null,
+          sceneBounds: { ...s.sb }, viewOk: s.viewOk ?? null, viewSource: s.viewSource ?? null,
           viewMin: s.viewMin ?? null, viewMax: s.viewMax ?? null,
         }
         : { bound: false };

@@ -66,18 +66,22 @@ export class V3PostBridge {
   }
 
   /**
-   * Resolve the viewed-floor `_Outdoors` mask for CC's indoor/outdoor grade — the
-   * same resolve V3's lighting uses. Null when unavailable (CC then grades
-   * everything as outdoor, its neutral fallback).
+   * Resolve the `_Outdoors` mask for CC's indoor/outdoor grade the way V2's
+   * post-merge CC does: the **effective stack** across visible floors (V2 feeds
+   * CC `stackedOutdoorsForPostMerge`, not the single viewed band). On multi-floor
+   * scenes the single-band resolve returns the wrong/no mask, which is why the
+   * Camera Grade read as not-indoor/outdoor-aware under V3. Needs the renderer to
+   * build the stack. Null when unavailable → CC grades everything outdoor (neutral).
+   * @param {THREE.WebGLRenderer} renderer
    * @returns {{outdoors: any|null}}
    * @private
    */
-  _resolveOutdoors() {
+  _resolveOutdoors(renderer) {
     try {
       const comp = window.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
       if (!comp) return { outdoors: null };
       const ctx = window.MapShine?.activeLevelContext ?? null;
-      const res = resolveViewedBandOutdoorsMask(comp, ctx, { preferEffectiveStack: false });
+      const res = resolveViewedBandOutdoorsMask(comp, ctx, { preferEffectiveStack: true, renderer });
       return { outdoors: res?.texture ?? null };
     } catch (_) {
       return { outdoors: null };
@@ -106,7 +110,7 @@ export class V3PostBridge {
     try { fc._contextualSceneGradeManager?.update?.(timeInfo); } catch (err) { log.debug('ctx grade update failed', err); }
     try { cc.update?.(timeInfo); } catch (err) { log.debug('cc update failed', err); }
 
-    const { outdoors } = this._resolveOutdoors();
+    const { outdoors } = this._resolveOutdoors(renderer);
     try {
       cc.setOutdoorsMask?.(outdoors ?? null);
       cc.setSkyReachMask?.(null);

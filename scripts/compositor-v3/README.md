@@ -52,8 +52,10 @@ uses post-merge.
 - **Default ON.** `MapShine.v3.post(false)` / `?msaV3Post=0` shows raw V3 physical
   lighting (with the rolloff) for A/B. Any CC failure passes the lit buffer
   through untouched — never a broken frame.
-- **MVP scope:** ColorCorrection only. Bloom, atmospheric fog, and the stylizer
-  chain are follow-ups on the same `render(in, out)` contract.
+- **Chain:** bloom (HDR, before the grade) → ColorCorrection. `MapShine.v3.bloom(false)`
+  toggles bloom within the post chain (`post` is the master switch). Atmospheric
+  fog and the stylizer chain are the remaining follow-ups on the same
+  `render(in, out)` contract.
 - **Depends on the `_Outdoors` mask** for the indoor/outdoor grade (same resolve
   as V3 lighting). If interior/exterior don't differentiate, that mask isn't
   resolving under V3 yet — the shared open item.

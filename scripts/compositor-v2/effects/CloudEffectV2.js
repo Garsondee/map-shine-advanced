@@ -13,7 +13,17 @@
 
 import { createLogger } from '../../core/log.js';
 import { writeCompositorInternalSize } from '../../core/compositor-resolution.js';
-import { loadCloudSpriteTextures } from './cloud-sprites/cloud-asset-loader.js';
+import { loadCloudSpriteTexturesPaced } from './cloud-sprites/cloud-asset-loader.js';
+
+/**
+ * Deferred cloud-load pacing. Cloud sprite PNGs are heavy (2048², ~16 MB each);
+ * loading them during the scene-load storm is a confirmed TDR contributor. Instead
+ * we wait for the scene to settle, then load ONE at a time with a gap between each.
+ * Overridable at runtime via `window.MapShine.__cloudSettleMs` / `__cloudStaggerMs`.
+ */
+const CLOUD_DEFERRED_SETTLE_MS = 6000;   // wait this long after load completes
+const CLOUD_LOAD_STAGGER_MS = 4000;      // gap between individual cloud loads
+const CLOUD_SETTLE_MAX_WAIT_MS = 120000; // safety cap waiting for load to finish
 import { weatherController } from '../../core/WeatherController.js';
 import { advanceCloudWindAdvection } from './cloud-wind-advection.js';
 import {
@@ -168,6 +178,12 @@ export class CloudEffectV2 {
 
     this._sparseTextures = [];
     this._fullTextures = [];
+    /** @type {boolean} deferred paced cloud load scheduled (once per effect). */
+    this._cloudLoadScheduled = false;
+    /** @type {boolean} sprite pool stood up (on the first deferred texture). */
+    this._spritePoolBuilt = false;
+    /** @type {boolean} set on dispose so the paced load loop stops promptly. */
+    this._disposed = false;
 
     this._fallbackWhite = null;
     this._windOffset = null;
@@ -370,15 +386,7 @@ export class CloudEffectV2 {
     this._initialized = true;
     log.info('CloudEffectV2 initialized');
 
-    this._loadCloudTextures()
-      .then(() => {
-        this._assetsLoaded = true;
-        this._buildSpritePool();
-        log.info(`CloudEffectV2 loaded ${this._sparseTextures.length} sparse + ${this._fullTextures.length} full textures`);
-      })
-      .catch((err) => {
-        log.error('CloudEffectV2 asset load failed:', err);
-      });
+    this._scheduleDeferredCloudLoad();
   }
 
   /** Re-sync sun direction after ShadowDriverState.publish (eliminates 1-frame lag). */
@@ -476,11 +484,88 @@ export class CloudEffectV2 {
     this._fallbackWhite.magFilter = THREE.NearestFilter;
   }
 
-  /** @private */
-  async _loadCloudTextures() {
-    const { sparse, full } = await loadCloudSpriteTextures();
-    this._sparseTextures = sparse;
-    this._fullTextures = full;
+  /** @private @param {*} v @param {number} fb @returns {number} */
+  _numGlobal(v, fb) {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? n : fb;
+  }
+
+  /**
+   * Schedule the lazy, paced cloud-texture load: wait for the scene to settle,
+   * then load sprite PNGs one at a time with a gap between each, delivering each
+   * as it arrives so clouds trickle in without a heavy upload burst. Fire-and-
+   * forget; idempotent. Replaces the old eager parallel load that ran during the
+   * scene-load storm.
+   * @private
+   */
+  _scheduleDeferredCloudLoad() {
+    if (this._cloudLoadScheduled) return;
+    this._cloudLoadScheduled = true;
+    const run = async () => {
+      await this._awaitSceneSettled();
+      if (this._disposed || !this._initialized) return;
+      await loadCloudSpriteTexturesPaced({
+        staggerMs: this._numGlobal(window.MapShine?.__cloudStaggerMs, CLOUD_LOAD_STAGGER_MS),
+        shouldContinue: () => !this._disposed && this._initialized,
+        onTexture: (kind, tex) => this._onCloudTextureLoaded(kind, tex),
+      });
+      if (!this._disposed) {
+        this._assetsLoaded = true;
+        log.info(`CloudEffectV2 lazily loaded ${this._sparseTextures.length} sparse + ${this._fullTextures.length} full textures`);
+      }
+    };
+    run().catch((err) => log.error('CloudEffectV2 deferred asset load failed:', err));
+  }
+
+  /**
+   * Resolve once the scene has finished loading (curtain revealed) plus a settle
+   * delay, so cloud uploads never compete with the load storm.
+   * @private
+   */
+  async _awaitSceneSettled() {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+    const start = performance.now();
+    // Wait for the scene load to complete (__msaSceneLoading cleared on reveal).
+    while (!this._disposed) {
+      let loading = false;
+      try { loading = window.MapShine?.__msaSceneLoading === true; } catch (_) {}
+      if (!loading) break;
+      if (performance.now() - start > CLOUD_SETTLE_MAX_WAIT_MS) break;
+      await sleep(500);
+    }
+    if (this._disposed) return;
+    // Let the freshly-revealed scene settle before adding any GPU work.
+    await sleep(this._numGlobal(window.MapShine?.__cloudSettleMs, CLOUD_DEFERRED_SETTLE_MS));
+  }
+
+  /**
+   * Receive one lazily-loaded cloud texture: append it and make it usable. The
+   * first texture stands up the sprite pool (so clouds start appearing); each
+   * later one refreshes the picker rotation (mirrors the `sparseWeight` path).
+   * @param {'sparse'|'full'} kind
+   * @param {import('three').Texture} tex
+   * @private
+   */
+  _onCloudTextureLoaded(kind, tex) {
+    if (this._disposed || !this._initialized || !tex) {
+      try { tex?.dispose?.(); } catch (_) {}
+      return;
+    }
+    (kind === 'sparse' ? this._sparseTextures : this._fullTextures).push(tex);
+    const THREE = window.THREE;
+    if (!THREE) return;
+    if (!this._spritePoolBuilt) {
+      this._spritePoolBuilt = true;
+      this._assetsLoaded = true;
+      this._buildSpritePool(); // picker tolerates a partial texture set (has fallbacks)
+    } else {
+      try {
+        this._texturePicker = new CloudTexturePicker(this._sparseTextures, this._fullTextures, this.params);
+        this._resetVisibleSprites(this._getWeatherState().cloudCover);
+      } catch (err) {
+        log.debug('CloudEffectV2 picker refresh after lazy load failed', err);
+      }
+    }
   }
 
   /** @private */
@@ -2571,6 +2656,7 @@ export class CloudEffectV2 {
   }
 
   dispose() {
+    this._disposed = true; // stop any in-flight paced cloud load promptly
     for (const sprite of this._cloudSprites) {
       try { this._cloudLayerGroups[sprite.layerIndex]?.remove(sprite.mesh); } catch (_) {}
       sprite.dispose();

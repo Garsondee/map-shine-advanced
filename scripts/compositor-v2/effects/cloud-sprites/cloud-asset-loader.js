@@ -43,3 +43,66 @@ export async function loadCloudSpriteTextures() {
   ]);
   return { sparse, full };
 }
+
+/**
+ * Load cloud sprite textures **lazily and one at a time**, with a deliberate gap
+ * between each, delivering each texture as it arrives. This keeps the heavy 2048²
+ * cloud uploads off the load path and out of any single burst — the eager
+ * {@link loadCloudSpriteTextures} path put ~16 × 16 MB uploads into the scene-load
+ * storm, a confirmed driver-watchdog (TDR) contributor on 8 GB GPUs.
+ *
+ * Sparse/full files are interleaved so both kinds become usable early. The caller
+ * decides when to start (after the scene settles) and supplies `shouldContinue`
+ * so the loop stops promptly on dispose / scene change.
+ *
+ * @param {object} options
+ * @param {(kind: 'sparse'|'full', tex: import('three').Texture) => void} options.onTexture
+ *   Called for each loaded, configured texture, in load order.
+ * @param {number} [options.staggerMs=4000] Delay between consecutive loads.
+ * @param {() => boolean} [options.shouldContinue] Return false to stop early.
+ * @returns {Promise<void>}
+ */
+export async function loadCloudSpriteTexturesPaced({
+  onTexture,
+  staggerMs = 4000,
+  shouldContinue = () => true,
+} = {}) {
+  const THREE = window.THREE;
+  if (!THREE || typeof onTexture !== 'function') return;
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+
+  const configure = (tex) => {
+    tex.generateMipmaps = false;
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+  };
+
+  // Interleave sparse/full so both kinds are available after the first couple loads.
+  /** @type {Array<['sparse'|'full', string]>} */
+  const queue = [];
+  const maxLen = Math.max(SPARSE_CLOUD_FILES.length, FULL_CLOUD_FILES.length);
+  for (let i = 0; i < maxLen; i++) {
+    if (i < SPARSE_CLOUD_FILES.length) queue.push(['sparse', SPARSE_CLOUD_FILES[i]]);
+    if (i < FULL_CLOUD_FILES.length) queue.push(['full', FULL_CLOUD_FILES[i]]);
+  }
+
+  for (let idx = 0; idx < queue.length; idx++) {
+    if (!shouldContinue()) return;
+    const [kind, file] = queue[idx];
+    const url = `${CLOUD_ASSET_BASE}/${kind}/${file}`;
+    try {
+      const tex = await loadTexture(url, { role: 'MASK_COLOR', suppressProbeErrors: true });
+      if (tex && shouldContinue()) {
+        configure(tex);
+        onTexture(kind, tex);
+      } else if (tex) {
+        try { tex.dispose?.(); } catch (_) {}
+      }
+    } catch (err) {
+      log.warn(`loadCloudSpriteTexturesPaced: failed to load ${url}`, err);
+    }
+    if (idx < queue.length - 1) await sleep(staggerMs);
+  }
+}

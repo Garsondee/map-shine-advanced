@@ -253,13 +253,14 @@ export class V3Pipeline {
         const camera = ctx.camera ?? this.camera;
         this._postAppliedCC = false;
         if (!renderer || !litRT || !gradedRT) return;
-        if (isV3PostEnabled() && this._post.isColorCorrectionAvailable()) {
-          const ok = this._post.renderColorGrade(
-            renderer, camera, litRT, gradedRT, ctx.frame?.timeInfo ?? null,
-          );
-          if (ok) { this._postAppliedCC = true; return; }
+        if (isV3PostEnabled()) {
+          // renderPost runs bloom → colour grade and always writes gradedRT
+          // (falling back to a passthrough of the bloomed/lit buffer internally).
+          const res = this._post.renderPost(renderer, camera, litRT, gradedRT, ctx.frame?.timeInfo ?? null);
+          this._postAppliedCC = !!(res && res.appliedCC);
+          return;
         }
-        // Grade off / unavailable / errored → passthrough so scene.graded is valid.
+        // Post chain off (debug) → passthrough raw lit so scene.graded is valid.
         this._post.copy(renderer, litRT.texture, gradedRT);
       },
     });

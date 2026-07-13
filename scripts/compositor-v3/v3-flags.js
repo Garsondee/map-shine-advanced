@@ -47,6 +47,8 @@ let _runtimeV3OutdoorsDebug = null;
 let _runtimeV3HdrKnee = null;
 /** @type {boolean|null} Run V2's colour grade (ColorCorrection + contextual) on V3 (default on). */
 let _runtimeV3Post = null;
+/** @type {boolean|null} Run V2's bloom in the V3 post chain (default on; needs post on). */
+let _runtimeV3Bloom = null;
 
 /**
  * Tri-state URL flag: `?param=1/true/on` → true, `?param=0/false/off` → false,
@@ -264,6 +266,32 @@ export function setV3Post(on) {
 }
 
 /**
+ * Whether V3 runs V2's bloom in the post chain (HDR, before ColorCorrection).
+ * Default ON, but only meaningful when {@link isV3PostEnabled} is on (bloom lives
+ * inside the post chain). Toggle off to compare without bloom.
+ * @returns {boolean}
+ */
+export function isV3BloomEnabled() {
+  if (_runtimeV3Bloom !== null) return _runtimeV3Bloom;
+  try {
+    if (window?.MapShine?.__v3Bloom === false) return false;
+    if (window?.MapShine?.__v3Bloom === true) return true;
+  } catch (_) {}
+  const url = _urlFlag('msaV3Bloom');
+  if (url !== null) return url;
+  return true; // default ON
+}
+
+/**
+ * @param {boolean|null} on Pass `null` to clear the override.
+ * @returns {ReturnType<typeof getV3Status>}
+ */
+export function setV3Bloom(on) {
+  _runtimeV3Bloom = on === null ? null : !!on;
+  return getV3Status();
+}
+
+/**
  * Runtime override for the V3 pipeline (live A/B, does not persist unless asked).
  * @param {boolean|null} on Pass `null` to clear the override.
  * @param {{ persist?: boolean }} [opts]
@@ -300,6 +328,7 @@ export function getV3Status() {
     tonemap: isV3TonemapEnabled(),
     hdrKnee: getV3HdrKnee(),
     post: isV3PostEnabled(),
+    bloom: isV3BloomEnabled(),
     indoorOutdoor: isV3IndoorOutdoorEnabled(),
     outdoorsDebug: isV3OutdoorsDebugEnabled(),
     source: {
@@ -331,6 +360,7 @@ export function exposeV3FlagsApi() {
       tonemap: (on) => setV3Tonemap(on),
       hdrKnee: (x) => setV3HdrKnee(x),
       post: (on) => setV3Post(on),
+      bloom: (on) => setV3Bloom(on),
       indoorOutdoor: (on) => setV3IndoorOutdoor(on),
       outdoorsDebug: (on) => setV3OutdoorsDebug(on),
       outdoors: () => {
@@ -352,7 +382,8 @@ export function exposeV3FlagsApi() {
           + '  .tonemap(false)                  — disable the HDR highlight rolloff (hard clip)\n'
           + '  .hdrKnee(0.95)                   — raise the rolloff knee (0..1; 0.9 default; higher = only the hottest cores roll off)\n'
           + '  .hdrKnee(null)                   — clear override → default (0.9)\n'
-          + '  .post(false)                     — disable V2 colour grade on V3 (see raw V3 lighting)\n'
+          + '  .post(false)                     — disable the whole V2 post chain on V3 (raw lighting)\n'
+          + '  .bloom(false)                    — disable bloom within the post chain\n'
           + '  .indoorOutdoor(false)            — disable indoor darkening (uniform sky ambient)\n'
           + '  .outdoorsDebug(true)             — tint ambient red(indoor)/green(outdoor) to see the mask\n'
           + '  .outdoors()                      — diagnose the _Outdoors resolve (mask handle → cache → resolve → frame)\n'

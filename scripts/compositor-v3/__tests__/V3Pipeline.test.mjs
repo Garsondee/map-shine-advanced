@@ -40,14 +40,14 @@ function stubLighting(p) {
   return rec;
 }
 // Stub the post bridge so the test doesn't need the V2 compositor / full THREE.
-// Default: CC unavailable → the pass passthrough-copies scene.lit → scene.graded.
-function stubPost(p, { available = false } = {}) {
-  const rec = { gradeCalls: 0, copyCalls: 0, lastCopyDst: null };
+// Default: post enabled → renderPost runs (bloom+grade) and writes scene.graded.
+function stubPost(p, { appliedCC = false } = {}) {
+  const rec = { postCalls: 0, copyCalls: 0, lastGradedRT: null };
   p._post = {
-    isColorCorrectionAvailable: () => available,
+    isColorCorrectionAvailable: () => false,
     ccToneMappingActive: () => false,
-    renderColorGrade: () => { rec.gradeCalls++; return false; },
-    copy: (r, srcTex, dstRT) => { rec.copyCalls++; rec.lastCopyDst = dstRT; return true; },
+    renderPost: (r, cam, lit, graded) => { rec.postCalls++; rec.lastGradedRT = graded; return { appliedCC }; },
+    copy: (r, srcTex, dstRT) => { rec.copyCalls++; rec.lastGradedRT = dstRT; return true; },
     dispose() {},
   };
   return rec;
@@ -105,9 +105,9 @@ export function run(t) {
     ok('bus streaming synced', bus.rec.syncStreamingCalls === 1);
     ok('lighting got the albedo (scene.color) texture', lighting.calls === 1 && lighting.albedoTex === bus.rec.lastTarget.texture);
     ok('lighting got distinct illum + lit RTs', lighting.illumRT && lighting.litRT && lighting.illumRT !== lighting.litRT && lighting.litRT !== bus.rec.lastTarget);
-    // Post: CC unavailable in the mock → passthrough-copy scene.lit → scene.graded.
-    ok('post passthrough-copied once', post.copyCalls === 1 && post.gradeCalls === 0);
-    ok('present got the scene.graded texture', present.calls === 1 && post.lastCopyDst && present.lastTexture === post.lastCopyDst.texture);
+    // Post: enabled by default → renderPost runs once and writes scene.graded.
+    ok('post ran once', post.postCalls === 1);
+    ok('present got the scene.graded texture', present.calls === 1 && post.lastGradedRT && present.lastTexture === post.lastGradedRT.texture);
     const diag = p.getDiagnostics();
     ok('pooled 4 targets (color + illum + lit + graded)', diag.stats.pooled === 4);
     ok('5 pass timings', diag.timings.length === 5);

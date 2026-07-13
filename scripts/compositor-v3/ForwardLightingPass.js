@@ -81,8 +81,19 @@ const OUTDOORS_HELPERS = /* glsl */`
     );
     float inScene = step(0.0, sUv.x) * step(sUv.x, 1.0) * step(0.0, sUv.y) * step(sUv.y, 1.0);
     if (uOutdoorsFlipY > 0.5) sUv.y = 1.0 - sUv.y;
-    float od = texture2D(uOutdoorsMask, clamp(sUv, vec2(0.0), vec2(1.0))).r;
-    return mix(1.0, od, inScene); // outside the scene rect → treat as outdoor
+    // Authoritative _Outdoors decode — matches ColorCorrectionEffectV2 /
+    // LightingEffectV2 / water (waterTimelineIndoorWeight). Outdoor value is
+    // max(rgb) with a soft 0.18..0.82 band and hard <=0.10 / >=0.90 stops; the
+    // ALPHA channel gates validity — where alpha < 0.5 the pixel is unauthored
+    // and defaults to outdoor. (A naive .r read reports outdoor everywhere when
+    // the signal lives in g/b or the alpha-validity channel — the all-green bug.)
+    vec4 od = texture2D(uOutdoorsMask, clamp(sUv, vec2(0.0), vec2(1.0)));
+    float raw = clamp(max(od.r, max(od.g, od.b)), 0.0, 1.0);
+    float mid = smoothstep(0.18, 0.82, raw);
+    float outdoorClass = (raw <= 0.10) ? 0.0 : ((raw >= 0.90) ? 1.0 : mid);
+    float alphaValid = step(0.5, clamp(od.a, 0.0, 1.0));
+    float outdoors = mix(1.0, outdoorClass, alphaValid);
+    return mix(1.0, outdoors, inScene); // outside the scene rect → treat as outdoor
   }
   vec3 msaAmbientBase(vec2 worldXY) {
     return mix(uIndoorBg, uOutdoorBg, msaOutdoors(worldXY));
@@ -699,6 +710,56 @@ export class ForwardLightingPass {
             h: res?.texture?.image?.height ?? null,
           };
         } catch (err) { report.resolve = { error: String(err?.message ?? err) }; }
+
+        // Read back a grid of mask pixels to distinguish the remaining causes:
+        // uniform-white content (bake bug) vs. real structure (→ suspect UV) vs.
+        // value living in a channel other than .r. One-shot; safe for a manual call.
+        try {
+          const renderer = globalThis.window?.MapShine?.floorCompositorV2?.renderer
+            ?? globalThis.window?.MapShine?.renderer ?? null;
+          const fk = report.resolve?.floorKey;
+          const rt = (fk && comp?._floorCache?.get?.(fk)?.get?.('outdoors')) || null;
+          if (renderer && rt && typeof renderer.readRenderTargetPixels === 'function'
+            && Number(rt.width) > 0 && Number(rt.height) > 0) {
+            const N = 6;
+            const buf = new Uint8Array(4);
+            const chan = { r: [255, 0, 0], g: [255, 0, 0], b: [255, 0, 0], a: [255, 0, 0] }; // [min,max,sum]
+            const grid = [];
+            let n = 0;
+            for (let gy = 0; gy < N; gy++) {
+              const rowR = [];
+              for (let gx = 0; gx < N; gx++) {
+                const px = Math.min(rt.width - 1, Math.round((gx + 0.5) / N * rt.width));
+                const py = Math.min(rt.height - 1, Math.round((gy + 0.5) / N * rt.height));
+                try {
+                  renderer.readRenderTargetPixels(rt, px, py, 1, 1, buf);
+                  const vals = { r: buf[0], g: buf[1], b: buf[2], a: buf[3] };
+                  for (const c of ['r', 'g', 'b', 'a']) {
+                    chan[c][0] = Math.min(chan[c][0], vals[c]);
+                    chan[c][1] = Math.max(chan[c][1], vals[c]);
+                    chan[c][2] += vals[c];
+                  }
+                  rowR.push(vals.r);
+                  n++;
+                } catch (_) { rowR.push(-1); }
+              }
+              grid.push(rowR.join(','));
+            }
+            const stat = (c) => ({ min: chan[c][0], max: chan[c][1], mean: n ? Math.round(chan[c][2] / n) : null });
+            const r = stat('r');
+            report.maskContent = {
+              width: rt.width, height: rt.height, samples: n,
+              r, g: stat('g'), b: stat('b'), a: stat('a'),
+              verdict: (r.max - r.min) <= 6
+                ? (r.min > 250 ? 'R UNIFORM WHITE → mask baked all-outdoor, or outdoors value is not in .r'
+                  : r.min < 6 ? 'R UNIFORM BLACK → all-indoor' : 'R UNIFORM MID')
+                : 'R HAS STRUCTURE → mask content is fine; suspect UV/sampling in the shader',
+              grid6x6Red: grid,
+            };
+          } else {
+            report.maskContent = { skipped: 'no renderer/RT for readback', haveRenderer: !!renderer, haveRt: !!rt };
+          }
+        } catch (err) { report.maskContent = { error: String(err?.message ?? err) }; }
       }
       // What the last rendered frame actually bound (null = ambient was uniform).
       const s = this._outdoorsState;

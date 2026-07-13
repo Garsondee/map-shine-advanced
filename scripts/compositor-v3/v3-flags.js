@@ -41,6 +41,8 @@ let _runtimeV3FloorFastPath = null;
 let _runtimeV3Tonemap = null;
 /** @type {boolean|null} Indoor/outdoor ambient via the _Outdoors mask (default on). */
 let _runtimeV3IndoorOutdoor = null;
+/** @type {boolean|null} Tint the ambient red(indoor)/green(outdoor) to debug the mask (default off). */
+let _runtimeV3OutdoorsDebug = null;
 /** @type {number|null} HDR highlight-rolloff knee for the present pass (default 0.9). */
 let _runtimeV3HdrKnee = null;
 /** @type {boolean|null} Run V2's colour grade (ColorCorrection + contextual) on V3 (default on). */
@@ -175,6 +177,32 @@ export function setV3IndoorOutdoor(on) {
 }
 
 /**
+ * Whether the lighting pass tints its ambient base red (indoor) / green (outdoor)
+ * so the resolved `_Outdoors` mask and its alignment are visible at a glance.
+ * Default OFF — a diagnostic, not a look. Lights still render on top.
+ * @returns {boolean}
+ */
+export function isV3OutdoorsDebugEnabled() {
+  if (_runtimeV3OutdoorsDebug !== null) return _runtimeV3OutdoorsDebug;
+  try {
+    if (window?.MapShine?.__v3OutdoorsDebug === true) return true;
+    if (window?.MapShine?.__v3OutdoorsDebug === false) return false;
+  } catch (_) {}
+  const url = _urlFlag('msaV3OutdoorsDebug');
+  if (url !== null) return url;
+  return false; // default OFF
+}
+
+/**
+ * @param {boolean|null} on Pass `null` to clear the override.
+ * @returns {ReturnType<typeof getV3Status>}
+ */
+export function setV3OutdoorsDebug(on) {
+  _runtimeV3OutdoorsDebug = on === null ? null : !!on;
+  return getV3Status();
+}
+
+/**
  * The HDR highlight-rolloff knee for the present pass: peak luminance below which
  * the frame is left pixel-identical to what lighting produced (Foundry-matched);
  * above it, only the brightest filament is compressed toward white. Default 0.9.
@@ -273,6 +301,7 @@ export function getV3Status() {
     hdrKnee: getV3HdrKnee(),
     post: isV3PostEnabled(),
     indoorOutdoor: isV3IndoorOutdoorEnabled(),
+    outdoorsDebug: isV3OutdoorsDebugEnabled(),
     source: {
       pipeline: _runtimeV3Pipeline !== null ? 'runtime'
         : (() => {
@@ -303,6 +332,15 @@ export function exposeV3FlagsApi() {
       hdrKnee: (x) => setV3HdrKnee(x),
       post: (on) => setV3Post(on),
       indoorOutdoor: (on) => setV3IndoorOutdoor(on),
+      outdoorsDebug: (on) => setV3OutdoorsDebug(on),
+      outdoors: () => {
+        try {
+          return window?.MapShine?.__v3PipelineInstance?.debugOutdoors?.()
+            ?? { error: 'V3 pipeline not initialized yet (load a scene first)' };
+        } catch (err) {
+          return { error: String(err?.message ?? err) };
+        }
+      },
       help: () => {
         console.info(
           'MapShine.v3 — V3 unified-forward pipeline (DEFAULT renderer)\n'
@@ -316,6 +354,8 @@ export function exposeV3FlagsApi() {
           + '  .hdrKnee(null)                   — clear override → default (0.9)\n'
           + '  .post(false)                     — disable V2 colour grade on V3 (see raw V3 lighting)\n'
           + '  .indoorOutdoor(false)            — disable indoor darkening (uniform sky ambient)\n'
+          + '  .outdoorsDebug(true)             — tint ambient red(indoor)/green(outdoor) to see the mask\n'
+          + '  .outdoors()                      — diagnose the _Outdoors resolve (mask handle → cache → resolve → frame)\n'
           + '  URL: ?msaV3=0 forces V2 for a reload  ·  ?msaV3=1 forces V3',
         );
       },

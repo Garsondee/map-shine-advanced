@@ -47,8 +47,11 @@
 
 import { createLogger } from '../core/log.js';
 import { resolveGroundZ } from '../streaming/view-projection-service.js';
-import { resolveViewedBandOutdoorsMask } from '../masks/indoor-outdoor-mask-api.js';
-import { isV3IndoorOutdoorEnabled } from './v3-flags.js';
+import {
+  resolveViewedBandOutdoorsMask,
+  collectCompositorFloorCandidateKeys,
+} from '../masks/indoor-outdoor-mask-api.js';
+import { isV3IndoorOutdoorEnabled, isV3OutdoorsDebugEnabled } from './v3-flags.js';
 
 const log = createLogger('V3ForwardLighting');
 
@@ -56,38 +59,47 @@ const QUAD_VERT = /* glsl */`
   varying vec2 vUv;
   void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }
 `;
-// Illumination base: the ambient background, written into the illumination
-// buffer (NOT multiplied by albedo — the composite step does albedo × illum).
-//
-// Indoor/outdoor: sample the scene's _Outdoors mask so indoor areas (no sky)
-// get only the base darkness ambient while outdoor areas get the sky ambient.
-// The view→world→sceneUv reconstruction + flip replicate ColorCorrectionEffectV2
-// exactly (the proven scene-UV outdoors sampling convention).
-const AMBIENT_FRAG = /* glsl */`
-  precision highp float;
-  uniform vec3 uOutdoorBg;   // sky ambient (mix daylight/darkness by darkness)
-  uniform vec3 uIndoorBg;    // base darkness (no sky contribution)
+
+// Shared indoor/outdoor sampling — used by the ambient base AND every light's
+// illumination shader, so both agree on the per-pixel ambient. The scene-UV
+// reconstruction + flip replicate ColorCorrectionEffectV2 exactly (the proven
+// convention). `msaAmbientBase` = the ambient this pixel would have with no
+// lights: indoor darkness where the _Outdoors mask says indoor, sky ambient
+// where it says outdoor (or everywhere when no mask is bound).
+const OUTDOORS_HELPERS = /* glsl */`
   uniform sampler2D uOutdoorsMask;
   uniform float uHasOutdoors;
-  uniform vec2 uViewMin;
-  uniform vec2 uViewMax;
   uniform vec4 uSceneBounds;  // x, y, width, height (world space)
   uniform float uOutdoorsFlipY;
+  uniform vec3 uOutdoorBg;   // sky ambient (mix daylight/darkness by darkness)
+  uniform vec3 uIndoorBg;    // base darkness (no sky contribution)
+  float msaOutdoors(vec2 worldXY) {
+    if (uHasOutdoors < 0.5) return 1.0;
+    vec2 sUv = vec2(
+      (worldXY.x - uSceneBounds.x) / max(1e-5, uSceneBounds.z),
+      1.0 - ((worldXY.y - uSceneBounds.y) / max(1e-5, uSceneBounds.w))
+    );
+    float inScene = step(0.0, sUv.x) * step(sUv.x, 1.0) * step(0.0, sUv.y) * step(sUv.y, 1.0);
+    if (uOutdoorsFlipY > 0.5) sUv.y = 1.0 - sUv.y;
+    float od = texture2D(uOutdoorsMask, clamp(sUv, vec2(0.0), vec2(1.0))).r;
+    return mix(1.0, od, inScene); // outside the scene rect → treat as outdoor
+  }
+  vec3 msaAmbientBase(vec2 worldXY) {
+    return mix(uIndoorBg, uOutdoorBg, msaOutdoors(worldXY));
+  }
+`;
+
+// Illumination base: the ambient background, written into the illumination
+// buffer (NOT multiplied by albedo — the composite step does albedo × illum).
+const AMBIENT_FRAG = /* glsl */`
+  precision highp float;
+  ${OUTDOORS_HELPERS}
+  uniform vec2 uViewMin;
+  uniform vec2 uViewMax;
   varying vec2 vUv;
   void main() {
-    float outdoors = 1.0;
-    if (uHasOutdoors > 0.5) {
-      vec2 worldXY = mix(uViewMin, uViewMax, vUv);
-      vec2 sUv = vec2(
-        (worldXY.x - uSceneBounds.x) / max(1e-5, uSceneBounds.z),
-        1.0 - ((worldXY.y - uSceneBounds.y) / max(1e-5, uSceneBounds.w))
-      );
-      float inScene = step(0.0, sUv.x) * step(sUv.x, 1.0) * step(0.0, sUv.y) * step(sUv.y, 1.0);
-      if (uOutdoorsFlipY > 0.5) sUv.y = 1.0 - sUv.y;
-      float od = texture2D(uOutdoorsMask, clamp(sUv, vec2(0.0), vec2(1.0))).r;
-      outdoors = mix(1.0, od, inScene); // outside the scene rect → treat as outdoor
-    }
-    gl_FragColor = vec4(mix(uIndoorBg, uOutdoorBg, outdoors), 1.0);
+    vec2 worldXY = mix(uViewMin, uViewMax, vUv);
+    gl_FragColor = vec4(msaAmbientBase(worldXY), 1.0);
   }
 `;
 
@@ -134,11 +146,17 @@ const LIGHT_HELPERS = /* glsl */`
 
 // Foundry-light illumination (MAX-blended into the illum buffer): the
 // brightness levels, NOT multiplied by albedo (composite does that).
+//
+// The falloff blends from the PER-PIXEL ambient base (indoor or outdoor, same
+// _Outdoors sample as the ambient pass), not a global outdoor floor. With MAX
+// blending, a global outdoor floor here would erase indoor darkening inside
+// every light's polygon — MAX(indoorDark, outdoorBg) = outdoorBg — which made
+// indoor/outdoor invisible on light-dense interiors (the Mansion bug).
 const ILLUM_FRAG = /* glsl */`
   precision highp float;
   ${LIGHT_HELPERS}
+  ${OUTDOORS_HELPERS}
   varying vec2 vWorldXY;
-  uniform vec3 uAmbientBg;
   uniform vec3 uDimColor;
   uniform vec3 uBrightColor;
   uniform float uExposure;
@@ -153,7 +171,7 @@ const ILLUM_FRAG = /* glsl */`
       levels *= (1.0 + fe);
     }
     float fall = msaFalloff(dist);
-    gl_FragColor = vec4(mix(uAmbientBg, levels, fall), 1.0);
+    gl_FragColor = vec4(mix(msaAmbientBase(vWorldXY), levels, fall), 1.0);
   }
 `;
 
@@ -197,6 +215,12 @@ export class ForwardLightingPass {
     this._coloScene = null;
     /** @type {Map<any, {illumMesh:any, illumMat:any, coloMesh:any, coloMat:any, geo:any, shapeRef:any}>} keyed by light source. */
     this._lights = new Map();
+    /**
+     * Resolved _Outdoors state for this frame, shared by the ambient pass and
+     * every light's illumination shader (and read by {@link debugOutdoorsResolve}).
+     * @type {{tex: any, flipY: boolean, sb: {x:number,y:number,w:number,h:number}, route: string|null, floorKey: string|null}|null}
+     */
+    this._outdoorsState = null;
     this._built = false;
   }
 
@@ -292,23 +316,30 @@ export class ForwardLightingPass {
   _syncOutdoorsUniforms(camera) {
     const au = this._ambientMat.uniforms;
     au.uHasOutdoors.value = 0;
+    this._outdoorsState = null;
     if (!isV3IndoorOutdoorEnabled()) return;
 
     let tex = null;
+    let route = null;
+    let floorKey = null;
     try {
       const comp = globalThis.window?.MapShine?.sceneComposer?._sceneMaskCompositor ?? null;
       if (comp) {
         const ctx = globalThis.window?.MapShine?.activeLevelContext ?? null;
         const res = resolveViewedBandOutdoorsMask(comp, ctx, { preferEffectiveStack: false });
         tex = res?.texture ?? null;
+        route = res?.route ?? null;
+        floorKey = res?.floorKey ?? null;
       }
     } catch (_) {}
     if (!tex) return;
 
+    const sb = { x: 0, y: 0, w: 1, h: 1 };
     try {
       const sr = globalThis.canvas?.dimensions?.sceneRect;
-      au.uSceneBounds.value.set(sr?.x ?? 0, sr?.y ?? 0, sr?.width ?? 1, sr?.height ?? 1);
+      sb.x = sr?.x ?? 0; sb.y = sr?.y ?? 0; sb.w = sr?.width ?? 1; sb.h = sr?.height ?? 1;
     } catch (_) {}
+    au.uSceneBounds.value.set(sb.x, sb.y, sb.w, sb.h);
     if (camera?.isOrthographicCamera) {
       const p = camera.position; const z = camera.zoom || 1;
       au.uViewMin.value.set(p.x + camera.left / z, p.y + camera.bottom / z);
@@ -317,6 +348,8 @@ export class ForwardLightingPass {
     au.uOutdoorsMask.value = tex;
     au.uOutdoorsFlipY.value = tex.flipY ? 1 : 0;
     au.uHasOutdoors.value = 1;
+    // Share with the per-light illumination shaders (set in _syncLights).
+    this._outdoorsState = { tex, flipY: !!tex.flipY, sb, route, floorKey };
   }
 
   /** @param {any} THREE @returns {{illumMesh:any, illumMat:any, coloMesh:any, coloMat:any, geo:any, shapeRef:any}} @private */
@@ -330,7 +363,20 @@ export class ForwardLightingPass {
       uAttenuation: { value: 0.5 },
     });
     const illumMat = new THREE.ShaderMaterial({
-      uniforms: { ...base(), uAmbientBg: { value: new THREE.Vector3(0, 0, 0) }, uDimColor: { value: new THREE.Vector3(1, 1, 1) }, uBrightColor: { value: new THREE.Vector3(1, 1, 1) }, uExposure: { value: 0 } },
+      uniforms: {
+        ...base(),
+        uDimColor: { value: new THREE.Vector3(1, 1, 1) },
+        uBrightColor: { value: new THREE.Vector3(1, 1, 1) },
+        uExposure: { value: 0 },
+        // OUTDOORS_HELPERS — per-pixel ambient base (indoor/outdoor) the light
+        // falloff blends from; synced from _outdoorsState each frame.
+        uOutdoorsMask: { value: null },
+        uHasOutdoors: { value: 0 },
+        uSceneBounds: { value: new THREE.Vector4(0, 0, 1, 1) },
+        uOutdoorsFlipY: { value: 0 },
+        uOutdoorBg: { value: new THREE.Vector3(1, 1, 1) },
+        uIndoorBg: { value: new THREE.Vector3(0, 0, 0) },
+      },
       vertexShader: POLY_VERT, fragmentShader: ILLUM_FRAG,
       depthTest: false, depthWrite: false, transparent: true,
       blending: THREE.CustomBlending, blendEquation: THREE.MaxEquation, blendSrc: THREE.OneFactor, blendDst: THREE.OneFactor,
@@ -371,10 +417,15 @@ export class ForwardLightingPass {
   /**
    * Sync per-light polygon meshes from `canvas.effects.lightSources`.
    * @param {any} THREE @param {{bg:number[], dim:number[], bright:number[]}} env
+   * @param {{out:number[], indoor:number[]}} baseEndpoints - debug-aware ambient
+   *   endpoints the light falloff blends from (match the ambient pass exactly).
    * @returns {number} live light count
    * @private
    */
-  _syncLights(THREE, env) {
+  _syncLights(THREE, env, baseEndpoints) {
+    const ods = this._outdoorsState;
+    const bOut = baseEndpoints?.out ?? env.bg;
+    const bIn = baseEndpoints?.indoor ?? env.indoorBg;
     const sources = globalThis.canvas?.effects?.lightSources;
     if (!sources) { this._pruneAll(); return 0; }
     let h = 0;
@@ -432,7 +483,15 @@ export class ForwardLightingPass {
         const iu = entry.illumMat.uniforms;
         iu.uCenter.value.set(worldCx, worldCy); iu.uRadiusPx.value = radiusPx;
         iu.uRatio.value = ratio; iu.uAttenuation.value = attenuation; iu.uExposure.value = exposure;
-        iu.uAmbientBg.value.set(env.bg[0], env.bg[1], env.bg[2]);
+        // Per-pixel ambient base (indoor/outdoor) — same state as the ambient pass.
+        iu.uOutdoorsMask.value = ods?.tex ?? null;
+        iu.uHasOutdoors.value = ods?.tex ? 1 : 0;
+        if (ods) {
+          iu.uSceneBounds.value.set(ods.sb.x, ods.sb.y, ods.sb.w, ods.sb.h);
+          iu.uOutdoorsFlipY.value = ods.flipY ? 1 : 0;
+        }
+        iu.uOutdoorBg.value.set(bOut[0], bOut[1], bOut[2]);
+        iu.uIndoorBg.value.set(bIn[0], bIn[1], bIn[2]);
         iu.uDimColor.value.set(env.dim[0], env.dim[1], env.dim[2]);
         iu.uBrightColor.value.set(env.bright[0], env.bright[1], env.bright[2]);
         const cu = entry.coloMat.uniforms;
@@ -485,13 +544,21 @@ export class ForwardLightingPass {
     const height = Math.max(1, Number(size?.height) || 1);
 
     const env = this._environment();
+    // Debug tint (MapShine.v3.outdoorsDebug(true)): paint the ambient endpoints
+    // red (indoor) / green (outdoor) so mask resolve + alignment are visible at a
+    // glance. Lights still render on top (they blend from the tinted base).
+    const dbg = isV3OutdoorsDebugEnabled();
+    const baseEndpoints = {
+      out: dbg ? [0.05, 0.85, 0.05] : env.bg,
+      indoor: dbg ? [0.85, 0.05, 0.05] : env.indoorBg,
+    };
     const au = this._ambientMat.uniforms;
-    au.uOutdoorBg.value.set(env.bg[0], env.bg[1], env.bg[2]);
-    au.uIndoorBg.value.set(env.indoorBg[0], env.indoorBg[1], env.indoorBg[2]);
+    au.uOutdoorBg.value.set(baseEndpoints.out[0], baseEndpoints.out[1], baseEndpoints.out[2]);
+    au.uIndoorBg.value.set(baseEndpoints.indoor[0], baseEndpoints.indoor[1], baseEndpoints.indoor[2]);
     this._syncOutdoorsUniforms(camera);
 
     let live = 0;
-    try { live = this._syncLights(THREE, env); } catch (err) { log.warn('light sync failed; ambient only', err); }
+    try { live = this._syncLights(THREE, env, baseEndpoints); } catch (err) { log.warn('light sync failed; ambient only', err); }
     for (const [, entry] of this._lights) {
       if (!entry.coloMesh.visible) continue;
       entry.coloMat.uniforms.tAlbedo.value = albedoTexture;
@@ -540,6 +607,93 @@ export class ForwardLightingPass {
       try { renderer.setRenderTarget(prevTarget ?? null); } catch (_) {}
     }
     return true;
+  }
+
+  /**
+   * One-call diagnostic for the indoor/outdoor path (console:
+   * `MapShine.v3.outdoors()`). Reports every step of the exact resolve the
+   * lighting pass performs, so a "nothing changes" report can be pinpointed to
+   * a missing handle, an empty floor cache, a failed resolve, or (if all of
+   * those pass) the shader/UV side — without another guess-and-reupload cycle.
+   * @returns {object}
+   */
+  debugOutdoorsResolve() {
+    const report = {
+      indoorOutdoorFlag: isV3IndoorOutdoorEnabled(),
+      outdoorsDebugTint: isV3OutdoorsDebugEnabled(),
+      sceneLoading: globalThis.window?.MapShine?.__msaSceneLoading === true,
+      maskCompositor: false,
+      activeLevelContext: null,
+      activeFloor: null,
+      candidateKeys: [],
+      floorCacheOutdoors: [],
+      resolve: null,
+      lastFrame: null,
+      ambientUniforms: null,
+    };
+    try {
+      const ms = globalThis.window?.MapShine ?? {};
+      const comp = ms.sceneComposer?._sceneMaskCompositor ?? null;
+      report.maskCompositor = !!comp;
+      const ctx = ms.activeLevelContext ?? null;
+      report.activeLevelContext = ctx ? { bottom: ctx.bottom ?? null, top: ctx.top ?? null } : null;
+      const af = ms.floorStack?.getActiveFloor?.() ?? null;
+      report.activeFloor = af
+        ? { index: af.index ?? null, compositorKey: af.compositorKey != null ? String(af.compositorKey) : null }
+        : null;
+      if (comp) {
+        try {
+          report.candidateKeys = collectCompositorFloorCandidateKeys(comp, ctx).uniqueKeys;
+        } catch (err) { report.candidateKeys = [`<error: ${err?.message ?? err}>`]; }
+        try {
+          const rows = [];
+          const cache = comp._floorCache;
+          if (cache && typeof cache.entries === 'function') {
+            for (const [k, m] of cache.entries()) {
+              const od = m?.get?.('outdoors')?.texture ?? null;
+              rows.push({
+                key: String(k),
+                hasOutdoors: !!od,
+                w: od?.image?.width ?? null,
+                h: od?.image?.height ?? null,
+                bundleBake: !!od?.userData?.msaBundleBake,
+              });
+            }
+          }
+          report.floorCacheOutdoors = rows;
+        } catch (err) { report.floorCacheOutdoors = [`<error: ${err?.message ?? err}>`]; }
+        try {
+          const res = resolveViewedBandOutdoorsMask(comp, ctx, { preferEffectiveStack: false });
+          report.resolve = {
+            hasTexture: !!res?.texture,
+            route: res?.route ?? null,
+            floorKey: res?.floorKey ?? null,
+            flipY: res?.texture ? !!res.texture.flipY : null,
+            w: res?.texture?.image?.width ?? null,
+            h: res?.texture?.image?.height ?? null,
+          };
+        } catch (err) { report.resolve = { error: String(err?.message ?? err) }; }
+      }
+      // What the last rendered frame actually bound (null = ambient was uniform).
+      const s = this._outdoorsState;
+      report.lastFrame = s
+        ? { bound: true, route: s.route, floorKey: s.floorKey, flipY: s.flipY, sceneBounds: { ...s.sb } }
+        : { bound: false };
+      const au = this._ambientMat?.uniforms;
+      if (au) {
+        report.ambientUniforms = {
+          uHasOutdoors: au.uHasOutdoors?.value ?? null,
+          viewMin: au.uViewMin?.value ? [au.uViewMin.value.x, au.uViewMin.value.y] : null,
+          viewMax: au.uViewMax?.value ? [au.uViewMax.value.x, au.uViewMax.value.y] : null,
+          sceneBounds: au.uSceneBounds?.value
+            ? [au.uSceneBounds.value.x, au.uSceneBounds.value.y, au.uSceneBounds.value.z, au.uSceneBounds.value.w]
+            : null,
+        };
+      }
+    } catch (err) {
+      report.error = String(err?.message ?? err);
+    }
+    return report;
   }
 
   dispose() {

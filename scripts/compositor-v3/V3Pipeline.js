@@ -414,6 +414,19 @@ export class V3Pipeline {
     };
   }
 
+  /**
+   * Indoor/outdoor resolve diagnostic (console: `MapShine.v3.outdoors()`).
+   * Delegates to the lighting pass, which performs the exact resolve.
+   * @returns {object}
+   */
+  debugOutdoors() {
+    try {
+      return this._lighting?.debugOutdoorsResolve?.() ?? { error: 'lighting pass not built' };
+    } catch (err) {
+      return { error: String(err?.message ?? err) };
+    }
+  }
+
   dispose() {
     try { this._graph.dispose(); } catch (_) {}
     try { this._present.dispose(); } catch (_) {}
@@ -451,6 +464,13 @@ export function getV3Pipeline(options) {
     }
     _instance.initialize();
   }
+  // Expose the live instance so the console diagnostics (MapShine.v3.outdoors())
+  // can reach it without a static import cycle from v3-flags.
+  try {
+    if (typeof window !== 'undefined') {
+      (window.MapShine || (window.MapShine = {})).__v3PipelineInstance = _instance;
+    }
+  } catch (_) {}
   return _instance;
 }
 

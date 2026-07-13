@@ -25,6 +25,7 @@ import { LightingDirector } from '../../core/LightingDirector.js';
 import { migrateAtmosphereParams } from '../SkyEnvironmentModel.js';
 import { createMaskStatusSchemaGroup, refreshEffectMaskStatusUi } from '../../ui/effect-mask-status.js';
 import { GLSL_DECODE_OUTDOOR_CLASS } from '../../masks/outdoors-mask-decode.js';
+import { getVisibleWorldRect } from '../../streaming/view-projection-service.js';
 import { GLSL_DEFRINGE_HELPERS } from '../../masks/shaders/defringe-gLSL.js';
 import { applyDefringeToCcMaterial, getIndoorOutdoorDefringeParams } from '../../masks/indoor-outdoor-defringe.js';
 
@@ -1885,26 +1886,49 @@ export class ColorCorrectionEffectV2 {
     let vMaxX = sceneW;
     let vMaxY = sceneH;
     const cam = sc?.camera;
+    let resolved = false;
 
-    if (cam) {
-      if (cam.isOrthographicCamera) {
-        const camPos = cam.position;
-        vMinX = camPos.x + cam.left / cam.zoom;
-        vMinY = camPos.y + cam.bottom / cam.zoom;
-        vMaxX = camPos.x + cam.right / cam.zoom;
-        vMaxY = camPos.y + cam.top / cam.zoom;
-      } else {
-        const groundZ = sc?.groundZ ?? 0;
-        const dist = Math.max(1e-3, Math.abs((cam.position?.z ?? 0) - groundZ));
-        const fovRad = (Number(cam.fov) || 60) * Math.PI / 180;
-        const halfH = dist * Math.tan(fovRad * 0.5);
-        const aspect = Number(cam.aspect) || ((sc?.baseViewportWidth || 1) / Math.max(1, (sc?.baseViewportHeight || 1)));
-        const halfW = halfH * aspect;
-        vMinX = cam.position.x - halfW;
-        vMaxX = cam.position.x + halfW;
-        vMinY = cam.position.y - halfH;
-        vMaxY = cam.position.y + halfH;
-      }
+    if (cam?.isOrthographicCamera) {
+      const camPos = cam.position;
+      vMinX = camPos.x + cam.left / cam.zoom;
+      vMinY = camPos.y + cam.bottom / cam.zoom;
+      vMaxX = camPos.x + cam.right / cam.zoom;
+      vMaxY = camPos.y + cam.top / cam.zoom;
+      resolved = true;
+    }
+
+    // Under V3 the scene camera reference reports isOrthographicCamera=false and
+    // gives no usable projection, so the ortho branch above is skipped and the
+    // old perspective/default fallback produced a wrong view rect — which made
+    // the interior ToD grade sample the _Outdoors mask everywhere as outdoor
+    // (interior exposure did nothing). Source the rect from the shared
+    // view-projection service — the same per-frame camera→world projection tile
+    // streaming uses (valid under both V2 and V3). Ortho path above stays primary
+    // so V2 is unchanged.
+    if (!resolved) {
+      try {
+        const rect = getVisibleWorldRect(0);
+        if (rect
+          && Number.isFinite(rect.minX) && Number.isFinite(rect.minY)
+          && Number.isFinite(rect.maxX) && Number.isFinite(rect.maxY)
+          && Math.abs(rect.maxX - rect.minX) > 1e-3 && Math.abs(rect.maxY - rect.minY) > 1e-3) {
+          vMinX = rect.minX; vMinY = rect.minY; vMaxX = rect.maxX; vMaxY = rect.maxY;
+          resolved = true;
+        }
+      } catch (_) {}
+    }
+
+    if (!resolved && cam) {
+      const groundZ = sc?.groundZ ?? 0;
+      const dist = Math.max(1e-3, Math.abs((cam.position?.z ?? 0) - groundZ));
+      const fovRad = (Number(cam.fov) || 60) * Math.PI / 180;
+      const halfH = dist * Math.tan(fovRad * 0.5);
+      const aspect = Number(cam.aspect) || ((sc?.baseViewportWidth || 1) / Math.max(1, (sc?.baseViewportHeight || 1)));
+      const halfW = halfH * aspect;
+      vMinX = cam.position.x - halfW;
+      vMaxX = cam.position.x + halfW;
+      vMinY = cam.position.y - halfH;
+      vMaxY = cam.position.y + halfH;
     }
 
     u.uViewBoundsMin.value.set(vMinX, vMinY);

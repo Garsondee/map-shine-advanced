@@ -277,6 +277,35 @@ function _scheduleDeferredFloorPreload(sceneDoc, preloadOpts) {
       if (!compositor || !sceneDoc || typeof compositor.preloadAllFloors !== 'function') return;
       log.info('V2: background preloadAllFloors (remaining level bands)');
       await compositor.preloadAllFloors(sceneDoc, preloadOpts);
+
+      // Complete the FULL outdoors stack (floorAlpha + skyReach, not just the
+      // outdoors mask) for every floor band, so a later floor switch is a
+      // genuine cache hit — isBandWarmForOutdoorsStack() returns true and the
+      // switch skips the cold composeFloor bake. That bake is ~20s of GPU work
+      // that exhausted the 8GB card on a floor change (the pre-warm-all-floors
+      // decision, 2026-07-14). Runs in the background after reveal, paced by
+      // preloadAllFloors' internal yields + composeFloor's per-phase yields, so
+      // it does not block the main thread; a floor whose warm has not finished
+      // when the user switches simply falls back to the (now yield-chunked)
+      // on-switch compose.
+      try {
+        const bandKeys = (window.MapShine?.floorStack?.getFloors?.() ?? [])
+          .map((f) => (f?.compositorKey != null ? String(f.compositorKey) : ''))
+          .filter((k) => k.length > 0);
+        const renderer = window.MapShine?.renderer ?? null;
+        const coldKeys = bandKeys.filter((k) => !compositor.isBandWarmForOutdoorsStack?.(k, sceneDoc));
+        if (renderer && coldKeys.length && typeof compositor.warmVisibleFloorsForOutdoorsStack === 'function') {
+          for (const k of coldKeys) { try { compositor.primeFloorForRecompose?.(k); } catch (_) {} }
+          await compositor.warmVisibleFloorsForOutdoorsStack(sceneDoc, coldKeys);
+          try { compositor.prepareVisibleFloorsForOutdoorsStack?.(renderer, bandKeys, sceneDoc); } catch (_) {}
+          const stillCold = bandKeys.filter((k) => !compositor.isBandWarmForOutdoorsStack?.(k, sceneDoc));
+          log.info(`Floor pre-warm: ${bandKeys.length - stillCold.length}/${bandKeys.length} floors warm for instant switching`
+            + (stillCold.length ? ` (still cold: ${stillCold.join(', ')})` : ''));
+        }
+      } catch (warmErr) {
+        log.debug('Floor pre-warm: outdoors-stack completion failed', warmErr);
+      }
+
       try {
         const maxFi = window.MapShine?.floorStack?.getActiveFloor?.()?.index;
         window.MapShine?.fireEffectV2?.scheduleMissingFloorCompositorRebuild?.(maxFi);

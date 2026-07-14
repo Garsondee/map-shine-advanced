@@ -28,6 +28,14 @@ const log = createLogger('TileManager');
 // Currently FALSE so tiles behave normally while we profile other systems.
 const DISABLE_TILE_UPDATES = false;
 
+// Tiles created per macrotask during the chunked initial sync (Forward+ §16 P3
+// load-pacing). On the 144MP Mansion, a single tile's synchronous create cost
+// (Foundry-PIXI-cache clone + upload) approaches ~0.8s, so batching more than
+// one risks a single task crossing the ~2s GPU-driver-watchdog (TDR) threshold.
+// Deliberately conservative: cheap-tile scenes spread over a few extra frames
+// (hidden behind the loading curtain), heavy-tile scenes never TDR on this loop.
+const TILE_SYNC_CREATE_CHUNK = 1;
+
 // Debug flag for tile creation logging - set to true only when debugging load issues
 const TILE_DEBUG = false;
 
@@ -783,6 +791,14 @@ export class TileManager {
     // macrotask so no single task can approach the ~2s TDR threshold.
     this._tileReadyQueue = [];
     this._tileReadyPumpActive = false;
+
+    // Chunked initial-sync state (Forward+ §16 P3): syncAllTiles counts every
+    // tile up front, then creates the sprites a few per macrotask so the create
+    // loop cannot collapse into one multi-second TDR-tripping task. The
+    // generation counter aborts an in-flight pump when a newer sync (or
+    // teardown) supersedes it.
+    this._tileCreateQueue = [];
+    this._tileSyncGeneration = 0;
 
     this._tileWaterMaskCache = new Map();
     this._tileWaterMaskPromises = new Map();
@@ -3187,12 +3203,24 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       this.dispose(false); // false = don't clear cache
     }
 
+    // A newer sync supersedes any in-flight chunked create pump (rapid reload).
+    const generation = ++this._tileSyncGeneration;
+
     this._initialLoad.active = true;
     this._initialLoad.pendingAll = 0;
     this._initialLoad.pendingOverhead = 0;
     this._initialLoad.trackedIds = new Set();
 
+    // Phase 1 (synchronous, cheap): count + track EVERY tile up front so
+    // `pendingAll` reflects the true total before any sprite is created. This is
+    // the correctness key for the chunked create phase below: a cache-hot tile
+    // can finish loading (decrementing pendingAll) before later tiles are even
+    // created, so if we incremented per-create instead, pendingAll could
+    // transiently hit 0 and fire a premature "all tiles loaded" — revealing a
+    // half-built scene. Counting all N first means pendingAll can only reach 0
+    // after all N have been created AND finished.
     let _syncIdx = 0;
+    const toCreate = [];
     for (const tileDoc of tiles) {
       const tileId = tileDoc?.id;
       const _texSrc = tileDoc?.texture?.src ?? 'no-texture';
@@ -3203,14 +3231,58 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
         this._initialLoad.pendingAll++;
         if (isTileOverhead(tileDoc)) this._initialLoad.pendingOverhead++;
       }
-      this.createTileSprite(tileDoc);
+      toCreate.push(tileDoc);
     }
 
-    this._notifyInitialLoadWaiters();
+    // Phase 2 (chunked across macrotasks): create sprites a few per task so no
+    // single synchronous task approaches the ~2s GPU-driver-watchdog (TDR)
+    // threshold. On the 144MP Mansion this loop alone was a ~5s block that
+    // tripped the watchdog mid-load (Forward+ A10 / §16 P3). The load path waits
+    // for completion via waitForInitialTiles() (pendingAll → 0), so spreading
+    // creation across frames is transparent to callers; the post-create
+    // visibility refresh runs after the last chunk.
+    this._tileCreateQueue = toCreate;
+    this._pumpTileCreateQueue(generation);
+  }
 
-    // Run elevation visibility refresh after initial sync to set correct
-    // background visibility and weather suppression state for the loaded scene.
-    this._refreshAllTileElevationVisibility();
+  /**
+   * Drain {@link _tileCreateQueue} in {@link TILE_SYNC_CREATE_CHUNK}-sized
+   * batches, one batch per macrotask, so tile creation cannot collapse into one
+   * multi-second TDR-tripping task. When the queue empties it runs the
+   * post-create steps the old synchronous loop ran inline
+   * (`_notifyInitialLoadWaiters` + `_refreshAllTileElevationVisibility`). Aborts
+   * if a newer `syncAllTiles` (generation bump) or a teardown supersedes it.
+   * @param {number} generation - The sync generation this pump belongs to.
+   * @private
+   */
+  _pumpTileCreateQueue(generation) {
+    const step = () => {
+      // Superseded by a newer sync or teardown → stop; that path owns the state.
+      if (generation !== this._tileSyncGeneration) return;
+
+      const queue = this._tileCreateQueue;
+      if (!queue || !queue.length) {
+        this._notifyInitialLoadWaiters();
+        // Elevation visibility / weather suppression for the loaded scene.
+        this._refreshAllTileElevationVisibility();
+        return;
+      }
+
+      const batch = Math.min(TILE_SYNC_CREATE_CHUNK, queue.length);
+      markSection('tile.create.batch', () => {
+        for (let i = 0; i < batch; i++) {
+          const tileDoc = queue.shift();
+          try {
+            this.createTileSprite(tileDoc);
+          } catch (err) {
+            log.error('createTileSprite failed during chunked sync', err);
+          }
+        }
+      });
+
+      setTimeout(step, 0);
+    };
+    step();
   }
 
   /**
@@ -6171,6 +6243,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     // (if mid-drain) will simply see an empty queue on its next step and stop;
     // this only prevents stale closures from running against removed sprites.
     this._tileReadyQueue.length = 0;
+    // Likewise drop any pending chunked-create work. On a full teardown
+    // (clearCache=true) bump the generation so an in-flight create pump aborts
+    // on its next step; a syncAllTiles re-sync (clearCache=false) bumps the
+    // generation itself, so only guard the full-teardown case here.
+    this._tileCreateQueue.length = 0;
+    if (clearCache) this._tileSyncGeneration++;
 
     // Only unregister Foundry hooks on full dispose (clearCache=true).
     // When called with clearCache=false (e.g., from syncAllTiles to clear

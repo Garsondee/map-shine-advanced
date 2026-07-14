@@ -59,6 +59,13 @@ const REPEAT_CRASH_THRESHOLD = 3;
 const RESTORE_WATCHDOG_MS = 12000;
 /** Delay before the crash dialog appears (lets the restore race settle first). */
 const CRASH_DIALOG_DELAY_MS = 1500;
+/**
+ * After the browser restores a context that was lost DURING LOAD, wait this long
+ * before rebuilding — lets the interrupted in-flight `createThreeCanvas` hit its
+ * own abort path first (it fails on the dead context), so the rebuild does not
+ * race a second scene build.
+ */
+const MIDLOAD_REBUILD_SETTLE_MS = 1500;
 /** Recent load-crash count on a scene before we shed all effects ("bare mode"). */
 const BARE_MODE_CRASH_THRESHOLD = 4;
 /** Recent load-crash count before bypassing Map Shine entirely (Native Foundry PIXI). */
@@ -2077,6 +2084,16 @@ export function onContextLost(ctx = {}) {
 
 /**
  * Handle webglcontextrestored: cancel the rebuild watchdog and update the record.
+ *
+ * A steady-state crash (scene fully built) recovers by simply resuming on the
+ * restored context — unchanged. But a context loss **during load** is NOT
+ * recoverable by resuming: the interrupted scene build allocated GPU resources
+ * (textures, programs, buffers) on the now-dead context, so the "restored"
+ * context carries a half-built, broken scene. That is the "context restored but
+ * the scene still never appeared" report — the browser healed the GL context,
+ * MSA cancelled its rebuild watchdog, and then resumed a scene that can never
+ * finish. For that case we rebuild ONCE (guarded, after a short settle so the
+ * aborting in-flight load unwinds first) instead of resuming.
  */
 export function onContextRestored() {
   try {
@@ -2085,11 +2102,40 @@ export function onContextRestored() {
       _restoreWatchdogId = null;
     }
     const record = _lastCrashRecord;
+    const wasMidLoad = record?.load?.sceneLoading === true;
     if (record && record.restored !== true) {
       record.restored = true;
       record.restoredAfterMs = Math.max(0, Date.now() - record.atMs);
       _updateLastHistoryEntry(record);
       log.info(`WebGL context restored after ${record.restoredAfterMs}ms`);
+    }
+
+    if (wasMidLoad && !_autoRebuildAttempted && typeof _requestRebuild === 'function') {
+      // Mutually exclusive with the never-restored watchdog rebuild via the
+      // shared `_autoRebuildAttempted` guard → at most one auto-rebuild/session.
+      _autoRebuildAttempted = true;
+      const epoch = _lossEpoch;
+      _restoreWatchdogId = setTimeout(async () => {
+        _restoreWatchdogId = null;
+        if (epoch !== _lossEpoch) return; // a newer loss superseded this one
+        log.warn('Context restored mid-load — the interrupted scene build is unrecoverable; rebuilding once for a clean load');
+        try {
+          globalThis.ui?.notifications?.warn?.('Map Shine: recovering the interrupted scene load...');
+        } catch (_) {}
+        let ok = false;
+        try {
+          ok = await _requestRebuild('context-restored-midload');
+        } catch (e) {
+          log.error('Mid-load rebuild after context restore failed', e);
+        }
+        if (!ok) {
+          try {
+            globalThis.ui?.notifications?.error?.(
+              'Map Shine: Automatic recovery failed. Please refresh the browser (F5).'
+            );
+          } catch (_) {}
+        }
+      }, MIDLOAD_REBUILD_SETTLE_MS);
     }
   } catch (_) {
   }

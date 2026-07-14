@@ -11,6 +11,7 @@ import { createLogger } from '../core/log.js';
 import { weatherController } from '../core/WeatherController.js';
 import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../core/render-layers.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
+import { markSection } from '../core/safe-call.js';
 import { isTileVisibleForPerspective, isBackgroundVisibleForPerspective, isWeatherVisibleForPerspective } from '../foundry/elevation-context.js';
 import { tileHasLevelsRange, isLevelsEnabledForScene, readTileLevelsFlags, hasV14NativeLevels, getCanvasForegroundElevationSplit } from '../foundry/levels-scene-flags.js';
 import { applyTileLevelDefaults } from '../foundry/levels-create-defaults.js';
@@ -766,6 +767,21 @@ export class TileManager {
       inFlight: 0,
       queue: []
     };
+
+    // Tile-ready callback pacing queue (Forward+ A10). When tile texture loads
+    // resolve from cache — a reload, or any cache-hot load — every tile's
+    // .then() callback fires in the same microtask checkpoint. The heavy part
+    // of that callback (per-tile effect binding fan-out + occluder/presence
+    // mesh construction) used to run inline, so N tiles' heavy work collapsed
+    // into ONE synchronous main-thread task; on the Mansion scene that measured
+    // 9-11.5s and reliably tripped the GPU driver's TDR watchdog (confirmed by
+    // three independent crash reports 2026-07-14 — see Forward+.md A10). The
+    // cheap part of the callback (texture assignment, transform, visibility)
+    // stays inline in .then() so the sprite renders correctly as soon as its
+    // texture is ready; the heavy part is queued here and drained one tile per
+    // macrotask so no single task can approach the ~2s TDR threshold.
+    this._tileReadyQueue = [];
+    this._tileReadyPumpActive = false;
 
     this._tileWaterMaskCache = new Map();
     this._tileWaterMaskPromises = new Map();
@@ -4454,6 +4470,48 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
   }
 
   /**
+   * Queue a tile's heavy tile-ready work (effect binding fan-out + occluder/
+   * presence mesh construction) instead of running it inline in the texture
+   * load's .then() callback. See the `_tileReadyQueue` field comment (Forward+
+   * A10) for why: on a cache-hot load every tile's callback fires in the same
+   * microtask checkpoint, and running this work inline let N tiles' worth of
+   * it collapse into one multi-second synchronous task that trips the GPU
+   * driver's TDR watchdog.
+   * @param {() => void} fn - Synchronous work for one tile.
+   * @private
+   */
+  _scheduleTileReadyWork(fn) {
+    this._tileReadyQueue.push(fn);
+    this._pumpTileReadyQueue();
+  }
+
+  /**
+   * Drain `_tileReadyQueue` one tile per macrotask (a real event-loop yield,
+   * not just a microtask boundary) so no single task can approach the ~2s TDR
+   * threshold, however many tiles resolve from cache at once. Re-entrant-safe:
+   * multiple calls while a pump is already running are no-ops.
+   * @private
+   */
+  _pumpTileReadyQueue() {
+    if (this._tileReadyPumpActive) return;
+    this._tileReadyPumpActive = true;
+    const step = () => {
+      const fn = this._tileReadyQueue.shift();
+      if (!fn) {
+        this._tileReadyPumpActive = false;
+        return;
+      }
+      try {
+        fn();
+      } catch (err) {
+        log.error('Tile-ready queued work failed', err);
+      }
+      setTimeout(step, 0);
+    };
+    step();
+  }
+
+  /**
    * Create a THREE.js sprite for a Foundry tile
    * @param {TileDocument} tileDoc - Foundry tile document
    * @private
@@ -4532,6 +4590,9 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
     if (_dlp.debugMode) _dlp.begin(_tileDbgId, 'tile', { overhead: isOverheadForLoad, cached: _tileCached });
     const _tileLoadStartMs = performance.now();
     this.loadTileTexture(texturePath, { role }).then(texture => {
+      // Cheap part stays inline: the sprite must render correctly as soon as
+      // its texture is ready, and none of this scales with tile count enough
+      // to matter (property sets + one transform recompute).
       material.map = texture;
       material.needsUpdate = true;
 
@@ -4549,57 +4610,69 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
       // registerTile() from this callback would use the broken _spriteFloorMap
       // (always returns 0) and move upper-floor tiles back to floor 0.
 
-      // Route tile-ready event through the binding manager.
-      // The manager fans out to all registered TileBindableEffects (SpecularEffect,
-      // FluidEffect, and any future per-tile overlay effects). Each effect's
-      // loadTileMask() method handles its own async mask loading.
-      try {
-        this.tileBindingManager.onTileReady(tileDoc, sprite);
-      } catch (_) {
-      }
+      // Heavy part is queued and drained one tile per macrotask (Forward+ A10):
+      // on a cache-hot load every tile's .then() fires in the same microtask
+      // checkpoint, so running this inline let N tiles' worth of it collapse
+      // into one multi-second synchronous task that tripped the GPU driver's
+      // TDR watchdog (confirmed by three crash reports 2026-07-14). See
+      // `_scheduleTileReadyWork`/`_pumpTileReadyQueue` for the pacing mechanism.
+      this._scheduleTileReadyWork(() => {
+        // Route tile-ready event through the binding manager.
+        // The manager fans out to all registered TileBindableEffects (SpecularEffect,
+        // FluidEffect, and any future per-tile overlay effects). Each effect's
+        // loadTileMask() method handles its own async mask loading.
+        // markSection: these inner labels name the real sub-operation and expose
+        // its per-tile cost for crash-report attribution (Forward+ A10).
+        try {
+          markSection('tile.ready.onTileReady', () => this.tileBindingManager.onTileReady(tileDoc, sprite));
+        } catch (_) {
+        }
 
-      const spriteData = this.tileSprites.get(tileDoc.id);
-      if (spriteData) {
-        this._ensureWaterOccluderMesh(spriteData, tileDoc);
-        this._updateWaterOccluderMeshTransform(sprite, tileDoc);
-        this._ensureAboveFloorBlockerMesh(spriteData, tileDoc);
-        this._updateAboveFloorBlockerMeshTransform(sprite, tileDoc);
-        this._ensureFloorPresenceMesh(spriteData, tileDoc);
-        this._updateFloorPresenceMeshTransform(sprite, tileDoc);
-        this._ensureBelowFloorPresenceMesh(spriteData, tileDoc);
-        this._updateBelowFloorPresenceMeshTransform(sprite, tileDoc);
+        const spriteData = this.tileSprites.get(tileDoc.id);
+        if (spriteData) {
+          markSection('tile.ready.ensureMeshes', () => {
+            this._ensureWaterOccluderMesh(spriteData, tileDoc);
+            this._updateWaterOccluderMeshTransform(sprite, tileDoc);
+            this._ensureAboveFloorBlockerMesh(spriteData, tileDoc);
+            this._updateAboveFloorBlockerMeshTransform(sprite, tileDoc);
+            this._ensureFloorPresenceMesh(spriteData, tileDoc);
+            this._updateFloorPresenceMeshTransform(sprite, tileDoc);
+            this._ensureBelowFloorPresenceMesh(spriteData, tileDoc);
+            this._updateBelowFloorPresenceMeshTransform(sprite, tileDoc);
+          });
 
-        // If the occluder mesh already exists (it may have been created while
-        // the tile texture was still loading), update its tile texture uniforms
-        // and visibility now that the sprite is ready.
-        const occ = sprite.userData?.waterOccluderMesh;
-        if (occ?.material?.uniforms?.tTile) {
-          occ.material.uniforms.tTile.value = texture;
-          if (occ.material.uniforms.uHasTile) {
-            occ.material.uniforms.uHasTile.value = texture ? 1.0 : 0.0;
+          // If the occluder mesh already exists (it may have been created while
+          // the tile texture was still loading), update its tile texture uniforms
+          // and visibility now that the sprite is ready.
+          const occ = sprite.userData?.waterOccluderMesh;
+          if (occ?.material?.uniforms?.tTile) {
+            occ.material.uniforms.tTile.value = texture;
+            if (occ.material.uniforms.uHasTile) {
+              occ.material.uniforms.uHasTile.value = texture ? 1.0 : 0.0;
+            }
+          }
+          if (occ) {
+            occ.visible = !!sprite.visible;
           }
         }
-        if (occ) {
-          occ.visible = !!sprite.visible;
+
+        try {
+          window.MapShine?.cloudEffectV2?.requestBlockerUpdate?.(2);
+        } catch (_) {
         }
-      }
 
-      try {
-        window.MapShine?.cloudEffectV2?.requestBlockerUpdate?.(2);
-      } catch (_) {
-      }
-
-      if (_dlp.debugMode && _dlp._openEntries?.has(_tileDbgId)) {
-        const w = texture?.image?.width ?? '?';
-        const h = texture?.image?.height ?? '?';
-        _dlp.end(_tileDbgId, { dims: `${w}x${h}`, ms: (performance.now() - _tileLoadStartMs).toFixed(0) });
-      } else if (_dlp.debugMode) {
-        const w = texture?.image?.width ?? '?';
-        const h = texture?.image?.height ?? '?';
-        const ms = (performance.now() - _tileLoadStartMs).toFixed(0);
-        _dlp.event(`tile.LATE SUCCESS: ${_tileFileName} (${w}x${h}, ${ms}ms after load start)`);
-      }
-      this._markInitialTileLoaded(tileDoc?.id, isOverheadForLoad);
+        if (_dlp.debugMode && _dlp._openEntries?.has(_tileDbgId)) {
+          const w = texture?.image?.width ?? '?';
+          const h = texture?.image?.height ?? '?';
+          _dlp.end(_tileDbgId, { dims: `${w}x${h}`, ms: (performance.now() - _tileLoadStartMs).toFixed(0) });
+        } else if (_dlp.debugMode) {
+          const w = texture?.image?.width ?? '?';
+          const h = texture?.image?.height ?? '?';
+          const ms = (performance.now() - _tileLoadStartMs).toFixed(0);
+          _dlp.event(`tile.LATE SUCCESS: ${_tileFileName} (${w}x${h}, ${ms}ms after load start)`);
+        }
+        this._markInitialTileLoaded(tileDoc?.id, isOverheadForLoad);
+      });
     }).catch(error => {
       const msg = String(error?.message ?? '');
       const name = String(error?.name ?? '');
@@ -6079,6 +6152,12 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
    */
   dispose(clearCache = true) {
     log.info(`Disposing TileManager with ${this.tileSprites.size} tiles`);
+
+    // Drop any pending tile-ready work for sprites this dispose is about to
+    // remove (or has already removed, e.g. a syncAllTiles re-sync). The pump
+    // (if mid-drain) will simply see an empty queue on its next step and stop;
+    // this only prevents stale closures from running against removed sprites.
+    this._tileReadyQueue.length = 0;
 
     // Only unregister Foundry hooks on full dispose (clearCache=true).
     // When called with clearCache=false (e.g., from syncAllTiles to clear

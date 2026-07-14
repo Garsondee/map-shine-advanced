@@ -75,27 +75,93 @@ function _recordSlowSection(context, durMs, kind = 'sync') {
       durMs: Math.round(durMs),
       atMs: Math.round(performance.now() - durMs),
     });
-    if (g.__msaSlowSections.length > 24) g.__msaSlowSections.shift();
+    if (g.__msaSlowSections.length > 32) g.__msaSlowSections.shift();
+  } catch (_) {}
+}
+
+// Entry-breadcrumb ring depth. Raised well beyond the count of safeCalls that
+// fire in the recovery/teardown burst *after* a stall — otherwise that burst
+// flushes the pre-stall breadcrumb (the culprit) before the crash report reads
+// the ring. This was the direct cause of A10 staying unattributed on 2026-07-14
+// (Forward+ §"Open issues board"): the ring emitted only post-stall labels.
+const SECTION_TRAIL_MAX = 512;
+
+// Gap-witness thresholds. A gap between two consecutive section *starts* longer
+// than this means the previous section's body held the main thread (or an
+// untracked block ran) across that gap. We capture generously (idle awaits also
+// produce gaps); the crash-report diagnosis separates real stalls from idle
+// awaits by cross-referencing each witness against the `longTasks` ring.
+const STALL_WITNESS_MIN_GAP_MS = 700;
+const STALL_WITNESS_MAX = 48;
+
+let _sectionSeq = 0;
+
+/**
+ * Preserve a section that was executing when a long main-thread gap elapsed.
+ *
+ * This is the load-bearing fix for A10 attribution. Unlike the entry-breadcrumb
+ * ring — which the post-stall burst of safeCalls can overwrite — a witness is
+ * captured the instant the gap is *detected* (the first section-start after the
+ * stall ends), copied into a small dedicated list, and retained by *largest
+ * gap* rather than FIFO. So the ~8.8 s TDR stall's witness cannot be evicted by
+ * a flood of sub-second entries that follow it.
+ * @param {{context: string, startMs: number, kind?: string, seq?: number}} mark
+ * @param {number} gapMs
+ * @param {number} observedAtMs
+ */
+function _recordStallWitness(mark, gapMs, observedAtMs) {
+  try {
+    const g = globalThis;
+    g.__msaStallWitnesses = g.__msaStallWitnesses || [];
+    g.__msaStallWitnesses.push({
+      context: mark.context,
+      kind: mark.kind ?? 'sync',
+      startMs: Math.round(mark.startMs),
+      gapMs: Math.round(gapMs),
+      observedAtMs: Math.round(observedAtMs),
+      seq: mark.seq ?? null,
+    });
+    if (g.__msaStallWitnesses.length > STALL_WITNESS_MAX) {
+      // Evict the smallest gap so the multi-second stalls always survive.
+      let minIdx = 0;
+      for (let i = 1; i < g.__msaStallWitnesses.length; i++) {
+        if ((g.__msaStallWitnesses[i].gapMs ?? 0) < (g.__msaStallWitnesses[minIdx].gapMs ?? 0)) minIdx = i;
+      }
+      g.__msaStallWitnesses.splice(minIdx, 1);
+    }
   } catch (_) {}
 }
 
 /**
  * Breadcrumb: remember that a labelled section *started*, even if it never
  * finishes (a context loss mid-block leaves no completion record). The crash
- * report's `sectionTrail` then shows what was running when a stall began.
+ * report's `sectionTrail` shows what was running when a stall began, and the
+ * gap-witness (below) preserves the specific section a long stall ran inside.
  * @param {string} context
+ * @param {string} [kind='sync'] one of sync | async | marked | marked-async
  */
-function _markSectionStart(context) {
+function _markSectionStart(context, kind = 'sync') {
   try {
     const g = globalThis;
+    const now = performance.now();
+    const ctx = String(context ?? 'unknown').slice(0, 80);
+    const seq = ++_sectionSeq;
+
+    // Gap-witness: was the *previous* section still the last thing that started
+    // when a long gap elapsed? If so it (very likely) ran across that gap —
+    // capture it before the post-stall burst can bury it. Ground-truth "was this
+    // a real main-thread block vs an idle await?" is left to the report, which
+    // intersects the witness window with the longTasks ring.
+    const prev = g.__msaLastSectionMark;
+    if (prev) {
+      const gapMs = now - prev.startMs;
+      if (gapMs >= STALL_WITNESS_MIN_GAP_MS) _recordStallWitness(prev, gapMs, now);
+    }
+    g.__msaLastSectionMark = { context: ctx, startMs: now, kind, seq };
+
     g.__msaSectionTrail = g.__msaSectionTrail || [];
-    g.__msaSectionTrail.push({
-      context: String(context ?? 'unknown').slice(0, 80),
-      startMs: Math.round(performance.now()),
-    });
-    // Deep enough to survive the burst of safeCalls that follows a long stall
-    // (a 32-deep ring was fully flushed before the report was taken, §13.8).
-    if (g.__msaSectionTrail.length > 160) g.__msaSectionTrail.shift();
+    g.__msaSectionTrail.push({ context: ctx, startMs: Math.round(now), kind, seq });
+    if (g.__msaSectionTrail.length > SECTION_TRAIL_MAX) g.__msaSectionTrail.shift();
   } catch (_) {}
 }
 
@@ -110,6 +176,7 @@ function _markSectionStart(context) {
  */
 export function markSection(label, fn) {
   const t0 = performance.now();
+  _markSectionStart(label, 'marked');
   try {
     return fn();
   } finally {
@@ -117,9 +184,34 @@ export function markSection(label, fn) {
   }
 }
 
+/**
+ * Async variant of {@link markSection}. Drops a breadcrumb immediately before
+ * the call (so the gap-witness resolves a mid-call TDR stall to THIS label) and
+ * times the synchronous prologue (the body up to the first `await`, which is a
+ * real main-thread block). A stall in a post-`await` continuation is attributed
+ * by the gap-witness, not by prologue timing — do not switch this to total-await
+ * timing, which would falsely flag idle I/O awaits as stalls.
+ *
+ * Use to wrap the heavy, currently-unlabelled load-path init calls
+ * (`graphicsSettings.initialize()`, `uiManager.initialize()`, …) so the
+ * reload/settings TDR stall (Forward+ A10) names the exact call next time.
+ *
+ * @template T
+ * @param {string} label
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+export async function markSectionAsync(label, fn) {
+  const t0 = performance.now();
+  _markSectionStart(label, 'marked-async');
+  const promise = fn();
+  _recordSlowSection(label, performance.now() - t0, 'marked-async-prologue');
+  return await promise;
+}
+
 export function safeCall(fn, context, severity = Severity.DEGRADED, options = {}) {
   const _t0 = performance.now();
-  _markSectionStart(context);
+  _markSectionStart(context, 'sync');
   try {
     const result = fn();
 
@@ -152,7 +244,7 @@ export function safeCall(fn, context, severity = Severity.DEGRADED, options = {}
  */
 export async function safeCallAsync(fn, context, severity = Severity.DEGRADED, options = {}) {
   const _t0 = performance.now();
-  _markSectionStart(context);
+  _markSectionStart(context, 'async');
   try {
     // Calling fn() runs its body synchronously up to the first `await`. That
     // prologue IS a main-thread block and is exactly what the earlier

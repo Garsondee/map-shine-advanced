@@ -7,7 +7,7 @@ import { isGmLike, isUserGM } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import { shouldUseIncrementalTileResyncOnLevelRedraw } from '../core/texture-overhaul-flags.js';
-import { safeCall, safeCallAsync, safeDispose, markSection, Severity } from '../core/safe-call.js';
+import { safeCall, safeCallAsync, safeDispose, markSection, markSectionAsync, Severity } from '../core/safe-call.js';
 import { webglCrashRecovery } from '../core/webgl-crash-recovery.js';
 import * as sceneSettings from '../settings/scene-settings.js';
 import { wipeMapShineAdvancedFlagsFireAndForget } from '../settings/scene-msa-flag-wipe.js';
@@ -7441,6 +7441,13 @@ async function createThreeCanvas(scene, createOptions = {}) {
 
   // Section timing for performance diagnosis
   const _sectionTimings = {};
+  // Expose the LIVE object immediately (not only at _logSectionTimings, which
+  // runs at load end). A crash mid-load must read THIS load's in-progress
+  // timers — a section with a start and no end is the one running at crash time,
+  // which the crash report uses to attribute the A10 reload TDR stall. Without
+  // this early assignment the report would read the previous load's finished
+  // timers and see nothing running.
+  if (window.MapShine) window.MapShine._sectionTimings = _sectionTimings;
   const _sectionStart = (name) => { _sectionTimings[name] = { start: performance.now() }; };
   const _sectionEnd = (name) => {
     if (_sectionTimings[name]) {
@@ -8168,8 +8175,10 @@ async function createThreeCanvas(scene, createOptions = {}) {
     if (!_transitionOrBail(CoordinatorState.INITIALIZING_COMPOSITOR, 'effectComposer + FloorCompositor', 'initializing_compositor')) return;
     stepLog(' -> Step: effectComposer.initialize');
     if (isDebugLoad) dlp.begin('effectComposer.initialize', 'setup');
-    effectComposer = new EffectComposer(renderer, threeScene, camera);
-    effectComposer.initialize(mapShine.capabilities);
+    // markSection so a mid-init TDR stall (Forward+ A10) names THIS call in the
+    // crash report's stall-witness rather than a neighbouring cosmetic label.
+    effectComposer = markSection('effectComposer.construct', () => new EffectComposer(renderer, threeScene, camera));
+    markSection('effectComposer.initialize', () => effectComposer.initialize(mapShine.capabilities));
     if (isDebugLoad) dlp.end('effectComposer.initialize');
     stepLog(' -> Step: effectComposer.initialize DONE');
 
@@ -9127,7 +9136,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
         resizeHandler.setGraphicsSettings(graphicsSettings);
       }
       
-      await graphicsSettings.initialize();
+      await markSectionAsync('graphicsSettings.initialize', () => graphicsSettings.initialize());
       safeCall(() => loadingOverlay.setStage('ui.bootstrap', 1.0, undefined, { keepAuto: false }), 'overlay.uiInit.graphicsReady', Severity.COSMETIC);
       await new Promise(r => setTimeout(r, 0)); // yield so browser paints progress
       if (tokenManager && typeof tokenManager.setDepthInteraction === 'function') {
@@ -9160,7 +9169,7 @@ async function createThreeCanvas(scene, createOptions = {}) {
 
         if (!uiManager) {
           uiManager = new (await loadTweakpaneManagerClass())();
-          await uiManager.initialize();
+          await markSectionAsync('uiManager.initialize', () => uiManager.initialize());
           safeCall(() => loadingOverlay.setStage('ui.panels', 0.35, undefined, { keepAuto: false }), 'overlay.uiInit.uiManagerReady', Severity.COSMETIC);
           await new Promise(r => setTimeout(r, 0)); // yield
           if (window.MapShine) window.MapShine.uiManager = uiManager;

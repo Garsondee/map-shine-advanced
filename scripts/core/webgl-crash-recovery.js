@@ -384,6 +384,62 @@ function _updateLastHistoryEntry(record) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Select the section-trail breadcrumbs most relevant to a load-phase stall.
+ *
+ * The plain tail (`slice(-48)`) failed on 2026-07-14: after an ~8.8 s stall the
+ * recovery/teardown burst of safeCalls pushed enough breadcrumbs to fill the
+ * emit window with post-stall labels, hiding the breadcrumb that STARTED the
+ * stall. This centres the window on the longest recorded longTask so the
+ * pre-stall breadcrumbs (the culprit) are always included, then appends the
+ * most-recent tail for post-stall context. Entries are deduped by `seq` and
+ * returned in ascending start order.
+ *
+ * @param {Array<{context:string,startMs:number,seq?:number}>} trail
+ * @param {Array<{startMs:number,durMs:number}>|null} longTasks
+ * @returns {Array}
+ */
+function _windowSectionTrail(trail, longTasks) {
+  if (!Array.isArray(trail) || trail.length === 0) return [];
+  const TAIL = 24;      // always keep this many most-recent entries
+  const PRE_MS = 3000;  // context before a stall began
+  const POST_MS = 750;  // just after (captures the breadcrumb that started it)
+  const CAP = 128;
+
+  // Anchor windows on the most relevant stalls: the LONGEST overall (usually a
+  // load stall) AND the LATEST >=2s stall (nearest a steady-state crash — whose
+  // trigger is at the end, not the longest). Both get breadcrumb context.
+  const anchors = [];
+  if (Array.isArray(longTasks) && longTasks.length) {
+    let longest = null, latestBig = null;
+    for (const t of longTasks) {
+      if (!t) continue;
+      if (!longest || (t.durMs ?? 0) > (longest.durMs ?? 0)) longest = t;
+      if ((t.durMs ?? 0) >= 2000 && (!latestBig || (t.startMs ?? 0) > (latestBig.startMs ?? 0))) latestBig = t;
+    }
+    if (longest && (longest.durMs ?? 0) >= 1000) anchors.push(longest.startMs ?? 0);
+    if (latestBig && latestBig !== longest) anchors.push(latestBig.startMs ?? 0);
+  }
+
+  const picked = new Map(); // dedupe by seq, else by index
+  const keyOf = (e, i) => (e && e.seq != null) ? `s${e.seq}` : `i${i}`;
+
+  for (const a of anchors) {
+    const lo = a - PRE_MS, hi = a + POST_MS;
+    for (let i = 0; i < trail.length; i++) {
+      const s = trail[i]?.startMs ?? 0;
+      if (s >= lo && s <= hi) picked.set(keyOf(trail[i], i), trail[i]);
+    }
+  }
+  for (let i = Math.max(0, trail.length - TAIL); i < trail.length; i++) {
+    picked.set(keyOf(trail[i], i), trail[i]);
+  }
+
+  let out = Array.from(picked.values()).sort((a, b) => (a.startMs ?? 0) - (b.startMs ?? 0));
+  if (out.length > CAP) out = out.slice(out.length - CAP);
+  return out;
+}
+
+/**
  * Gather a full system-state snapshot for diagnosis. Every section is
  * individually guarded — a lost context must never prevent report collection.
  *
@@ -396,6 +452,11 @@ export function collectDiagnostics(extra = {}) {
   const record = {
     at: new Date().toISOString(),
     atMs: Date.now(),
+    // Absolute performance.now() at report time. longTasks / sectionTrail /
+    // stallWitnesses are all in this domain, so gap-to-crash math must use THIS,
+    // not load.msSinceLoadStart (elapsed-since-load — a different origin that is
+    // badly wrong on a reload, where the load timer restarts mid-session).
+    collectedAtPerfMs: (typeof performance !== 'undefined') ? Math.round(performance.now()) : null,
     sessionId: SESSION_ID,
     trigger: extra.trigger ?? 'manual',
     module: { id: 'map-shine-advanced', version: MODULE_MANIFEST_VERSION, runtimeVersion: null, versionMismatch: false },
@@ -605,9 +666,13 @@ export function collectDiagnostics(extra = {}) {
     const loads = globalThis.__msaRecentTextureLoads;
     if (Array.isArray(loads)) record.recentTextureLoads = loads.slice(-16);
   } catch (_) {}
+  let _longTasksForWindow = null;
   try {
     const lt = globalThis.__msaLongTasks;
-    if (Array.isArray(lt)) record.longTasks = lt.slice(-24);
+    if (Array.isArray(lt)) {
+      record.longTasks = lt.slice(-40);
+      _longTasksForWindow = record.longTasks;
+    }
   } catch (_) {}
   try {
     const ops = globalThis.__msaBigCanvasOps;
@@ -619,11 +684,58 @@ export function collectDiagnostics(extra = {}) {
   } catch (_) {}
   try {
     const secs = globalThis.__msaSlowSections;
-    if (Array.isArray(secs)) record.slowSections = secs.slice(-16);
+    if (Array.isArray(secs)) record.slowSections = secs.slice(-24);
   } catch (_) {}
+  // Sections that were executing across a long main-thread gap. This is the
+  // A10-attribution primitive: captured the instant a stall's gap is detected
+  // and retained by largest-gap, so the post-stall burst of safeCalls cannot
+  // bury the culprit the way it buried the plain sectionTrail on 2026-07-14.
+  try {
+    const w = globalThis.__msaStallWitnesses;
+    if (Array.isArray(w)) {
+      record.stallWitnesses = w.slice().sort((a, b) => (b.gapMs ?? 0) - (a.gapMs ?? 0)).slice(0, 12);
+    }
+  } catch (_) {}
+  // Section trail: emit a window *around the longest longTask* rather than a
+  // blind tail. The last-48-tail was all post-stall labels on 2026-07-14 (the
+  // recovery burst overwrote the pre-stall entries within the emit window);
+  // windowing guarantees the breadcrumb that started the stall is included.
   try {
     const trail = globalThis.__msaSectionTrail;
-    if (Array.isArray(trail)) record.sectionTrail = trail.slice(-48);
+    if (Array.isArray(trail)) record.sectionTrail = _windowSectionTrail(trail, _longTasksForWindow);
+  } catch (_) {
+    try {
+      const trail = globalThis.__msaSectionTrail;
+      if (Array.isArray(trail)) record.sectionTrail = trail.slice(-64);
+    } catch (_) {}
+  }
+  // Coarse createThreeCanvas section timers (window.MapShine._sectionTimings).
+  // A section with a `start` and no `end` was still executing at crash time —
+  // a burst-immune "what was running" signal that brackets the major load
+  // phases (cleanup / effectInit / fin.initializeUI / fin.shaderCompile / …).
+  try {
+    const st = (typeof window !== 'undefined') ? window.MapShine?._sectionTimings : null;
+    if (st && typeof st === 'object') {
+      const nowMs = performance.now();
+      const running = [];
+      const finished = [];
+      for (const [name, v] of Object.entries(st)) {
+        if (!v || typeof v.start !== 'number') continue;
+        if (typeof v.end !== 'number') {
+          running.push({ name, startMs: Math.round(v.start), openForMs: Math.round(nowMs - v.start) });
+        } else if (typeof v.durationMs === 'number') {
+          finished.push({ name, durationMs: Math.round(v.durationMs) });
+        }
+      }
+      record.sectionTimings = {
+        // Innermost (most-recently-started) first: `total` opens at load start
+        // and stays open the whole load, so ordering by openForMs would bury the
+        // specific phase (fin.initializeUI, fin.shaderCompile) under it. The
+        // diagnosis takes running[0] as the most-specific still-open phase.
+        running: running.sort((a, b) => b.startMs - a.startMs),
+        finishedTop: finished.sort((a, b) => b.durationMs - a.durationMs).slice(0, 8),
+      };
+    }
   } catch (_) {}
 
   try {
@@ -1027,7 +1139,9 @@ export function diagnoseCrash(record) {
     // heap NOR GL texture counters. Name them explicitly.
     try {
       const loads = Array.isArray(record.recentTextureLoads) ? record.recentTextureLoads : [];
-      const crashPerfMs = Number(record.load?.msSinceLoadStart);
+      // recentTextureLoads.loadMs is absolute performance.now() (loader.js), so
+      // compare against the absolute report time, not the load-relative one.
+      const crashPerfMs = Number(record.collectedAtPerfMs);
       const huge = loads.filter((l) => Math.max(l?.srcW ?? 0, l?.srcH ?? 0) >= 8192);
       if (huge.length) {
         const tail = huge.slice(-3).map((l) =>
@@ -1093,31 +1207,129 @@ export function diagnoseCrash(record) {
       }
     } catch (_) {}
 
-    // Long main-thread stalls immediately preceding the crash are themselves a
-    // strong TDR signal even when no single GL op is named.
+    // Attribute a main-thread stall to the crash ONLY when it is temporally
+    // near the context loss. A TDR reset follows its triggering block within
+    // ~seconds; a stall that ended tens of seconds earlier (typically during
+    // load) is NOT the cause of a later steady-state crash. Picking the
+    // global-worst stall regardless misattributed a native steady-state VRAM
+    // crash to a load-phase tile stall that had ended 122 s before the context
+    // loss (report 2026-07-14 12:58) — this window guard fixes that.
     try {
       const lts = Array.isArray(record.longTasks) ? record.longTasks : [];
-      const crashMs = Number(record.load?.msSinceLoadStart);
-      const worst = lts.slice().sort((a, b) => (b.durMs ?? 0) - (a.durMs ?? 0))[0];
-      if (worst && worst.durMs >= 2000) {
-        const endMs = (worst.startMs ?? 0) + (worst.durMs ?? 0);
+      const crashMs = Number(record.collectedAtPerfMs);
+      const RECENT_MS = 12000; // a stall ending within this window before the crash may be its trigger
+      const endOf = (t) => (t?.startMs ?? 0) + (t?.durMs ?? 0);
+
+      let recent = null;
+      if (Number.isFinite(crashMs)) {
+        for (const t of lts) {
+          if (!t || (t.durMs ?? 0) < 2000) continue;
+          const e = endOf(t);
+          if (e <= crashMs + 250 && (crashMs - e) <= RECENT_MS) {
+            if (!recent || (t.durMs ?? 0) > (recent.durMs ?? 0)) recent = t;
+          }
+        }
+      }
+
+      if (recent) {
+        const stallStart = recent.startMs ?? 0;
+        const endMs = endOf(recent);
         const gap = Number.isFinite(crashMs) ? Math.round(crashMs - endMs) : null;
-        // Which labelled sections were running when the stall began? The last
-        // section started at-or-before startMs is the strongest suspect.
-        let culprit = '';
+
+        const attributions = [];
+        // (0) Labelled sections whose synchronous span executed *within* the
+        // stall window — the most direct attribution. Catches sub-operations
+        // that ran as microtasks INSIDE the blocking task (e.g. per-tile ready
+        // callbacks draining at an await), which the gap-witness can only
+        // attribute to the preceding label.
         try {
-          const trail = Array.isArray(record.sectionTrail) ? record.sectionTrail : [];
-          const before = trail.filter((t) => (t.startMs ?? 0) <= (worst.startMs ?? 0));
-          const last = before[before.length - 1];
-          if (last) {
-            culprit = ` Last labelled section started before the stall: "${last.context}" @${last.startMs} ms.`;
+          const secs = Array.isArray(record.slowSections) ? record.slowSections : [];
+          const within = secs
+            .filter((s) => (s.atMs ?? -1) >= stallStart - 50 && (s.atMs ?? -1) <= endMs)
+            .sort((a, b) => (b.durMs ?? 0) - (a.durMs ?? 0));
+          if (within.length) {
+            const top = within.slice(0, 4).map((s) => `"${s.context}" ${s.durMs} ms`).join(', ');
+            attributions.push(`labelled section(s) that ran DURING the stall window: ${top}`);
           }
         } catch (_) {}
+        // (1) Stall-witness overlapping the stall window — the definitive naming.
+        try {
+          const wits = Array.isArray(record.stallWitnesses) ? record.stallWitnesses : [];
+          const overlapping = wits
+            .filter((w) => {
+              const ws = w?.startMs ?? 0;
+              const we = ws + (w?.gapMs ?? 0);
+              return we >= stallStart && ws <= endMs; // windows intersect
+            })
+            .sort((a, b) => (b.gapMs ?? 0) - (a.gapMs ?? 0));
+          if (overlapping.length) {
+            const w = overlapping[0];
+            attributions.push(
+              `stall-witness: section "${w.context}" (${w.kind ?? 'sync'}) started @${w.startMs} ms and the next `
+              + `section did not start for ${w.gapMs} ms — it held the main thread across the stall`,
+            );
+          }
+        } catch (_) {}
+        // (2) Coarse createThreeCanvas section still open at crash (load only).
+        try {
+          const running = record.sectionTimings?.running;
+          if (Array.isArray(running) && running.length) {
+            const r = running[0];
+            attributions.push(`open load section at crash: "${r.name}" (running ${r.openForMs} ms)`);
+          }
+        } catch (_) {}
+        // (3) Last labelled breadcrumb that started just before the stall — only
+        // if it is actually near it. The trail is windowed on the LONGEST
+        // longTask, which for a steady-state crash is an earlier (load) stall, so
+        // its last pre-stall entry can be tens of seconds stale for this stall.
+        try {
+          const trail = Array.isArray(record.sectionTrail) ? record.sectionTrail : [];
+          const before = trail.filter((t) => (t.startMs ?? 0) <= stallStart);
+          const last = before[before.length - 1];
+          if (last && (stallStart - (last.startMs ?? 0)) <= 5000) {
+            attributions.push(`last breadcrumb before the stall: "${last.context}" @${last.startMs} ms`);
+          }
+        } catch (_) {}
+
+        const attrib = attributions.length
+          ? ` Likely culprit — ${attributions.join('; ')}.`
+          : ' No labelled section covered the stall — wrap the running work in markSection/markSectionAsync so the next report names it.';
         causes.push(
-          `Longest main-thread stall was ${worst.durMs} ms (ending ~${endMs} ms)`
-          + `${gap != null ? `, and the context was lost ~${gap} ms after it ended` : ''}.${culprit} `
-          + 'A synchronous block of this length during loading is consistent with a GPU driver watchdog '
-          + 'reset (TDR), not memory exhaustion. Cross-reference sectionTrail / slowSections / slowGlOps.',
+          `A ${recent.durMs} ms main-thread stall ended ~${gap} ms before the context was lost (stall ~${stallStart}–${endMs} ms).`
+          + `${attrib} A synchronous block of this length immediately before a context loss is the classic GPU driver `
+          + 'watchdog (TDR) signature, not memory exhaustion. Cross-reference stallWitnesses / sectionTimings / sectionTrail / slowGlOps.',
+        );
+      } else {
+        // No stall near the crash. If a big stall exists earlier, say plainly it
+        // is NOT the trigger, so it is not chased; this crash was not a CPU-block TDR.
+        const globalWorst = lts.slice().sort((a, b) => (b.durMs ?? 0) - (a.durMs ?? 0))[0];
+        if (globalWorst && (globalWorst.durMs ?? 0) >= 2000 && Number.isFinite(crashMs)) {
+          const agoS = Math.round((crashMs - endOf(globalWorst)) / 1000);
+          causes.push(
+            `The longest recorded main-thread stall (${globalWorst.durMs} ms at ~${globalWorst.startMs} ms) ended ~${agoS} s `
+            + 'BEFORE the context was lost — it is an earlier (usually load-phase) stall, NOT this crash\'s trigger. This crash '
+            + 'was not immediately preceded by a main-thread block, so it is unlikely to be a TDR-from-CPU-stall; weigh the '
+            + 'VRAM / compositor-RT and GPU signals above (e.g. render-target VRAM over budget at high resolution) instead.',
+          );
+        }
+      }
+    } catch (_) {}
+
+    // Stall-witnesses without a corroborating longTask (ring flushed, or the
+    // longtask API unavailable). Lower confidence — a big gap can be an idle
+    // await — but a multi-second gap during load near a context loss is the A10
+    // TDR signature and must not be silently dropped when longTasks is empty.
+    try {
+      const wits = Array.isArray(record.stallWitnesses) ? record.stallWitnesses : [];
+      const big = wits.filter((w) => (w?.gapMs ?? 0) >= 2000).sort((a, b) => (b.gapMs ?? 0) - (a.gapMs ?? 0));
+      const haveLongStall = (Array.isArray(record.longTasks) ? record.longTasks : []).some((t) => (t?.durMs ?? 0) >= 2000);
+      if (big.length && !haveLongStall) {
+        const w = big[0];
+        causes.push(
+          `A labelled section left a ${w.gapMs} ms gap before the next section started: "${w.context}" `
+          + `(${w.kind ?? 'sync'}) @${w.startMs} ms, with no longTask entry to corroborate it (the ring may have `
+          + 'been flushed by the post-stall burst). Lower confidence, but a multi-second gap during load near a '
+          + 'context loss is the A10 TDR signature — verify against sectionTimings and the crash time.',
         );
       }
     } catch (_) {}

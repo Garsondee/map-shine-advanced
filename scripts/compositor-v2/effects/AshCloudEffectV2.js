@@ -9,8 +9,16 @@
 
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
-import { loadCloudSpriteTextures } from './cloud-sprites/cloud-asset-loader.js';
+import { loadCloudSpriteTexturesPaced } from './cloud-sprites/cloud-asset-loader.js';
 import { CloudTexturePicker } from './cloud-sprites/CloudSprite.js';
+
+// Deferred cloud-load pacing (mirrors CloudEffectV2). Ash reuses the same heavy
+// 2048² cloud PNGs, and loading them eagerly during scene-load `binding_effects`
+// was still happening here after CloudEffectV2 was fixed — a confirmed TDR
+// contributor. Defer until the scene settles, then load one at a time.
+const ASHCLOUD_DEFERRED_SETTLE_MS = 6500;
+const ASHCLOUD_LOAD_STAGGER_MS = 4500;
+const ASHCLOUD_SETTLE_MAX_WAIT_MS = 120000;
 import { resolveEffectWindWorld } from './resolve-effect-wind.js';
 import { advanceCloudWindAdvection } from './cloud-wind-advection.js';
 import { GROUND_Z, effectUnderOverheadOrder } from '../LayerOrderPolicy.js';
@@ -88,6 +96,12 @@ export class AshCloudEffectV2 {
     this._sparseTextures = [];
     this._fullTextures = [];
     this._texturePicker = null;
+    /** @type {boolean} deferred paced cloud load scheduled (once per effect). */
+    this._cloudLoadScheduled = false;
+    /** @type {boolean} sprite pool stood up (on the first deferred texture). */
+    this._spritePoolBuilt = false;
+    /** @type {boolean} set on dispose so the paced load loop stops promptly. */
+    this._disposed = false;
 
     this._outdoorsMask = null;
     this._outdoorsMasks = [null, null, null, null];
@@ -153,13 +167,7 @@ export class AshCloudEffectV2 {
     busScene.add(this._ashAnchor);
 
     this._initialized = true;
-    this._loadTextures().then(() => {
-      this._assetsLoaded = true;
-      this._buildSpritePool();
-      this._syncFloorPlacement();
-    }).catch((err) => {
-      log.warn('AshCloudEffectV2: texture load failed', err);
-    });
+    this._scheduleDeferredCloudLoad();
   }
 
   /** @param {string} paramId @param {*} value */
@@ -302,6 +310,7 @@ export class AshCloudEffectV2 {
   }
 
   dispose() {
+    this._disposed = true; // stop any in-flight paced cloud load promptly
     for (const sprite of this._ashSprites) {
       try { this._ashAnchor?.remove(sprite.mesh); } catch (_) {}
       sprite.dispose();
@@ -319,15 +328,79 @@ export class AshCloudEffectV2 {
 
   // ── Private ───────────────────────────────────────────────────────────────
 
-  /** @private */
-  async _loadTextures() {
-    const { sparse, full } = await loadCloudSpriteTextures();
-    this._sparseTextures = sparse;
-    this._fullTextures = full;
-    if (sparse.length + full.length === 0) {
-      log.warn('AshCloudEffectV2: no cloud PNG textures loaded — ash clouds will not render');
+  /** @private @param {*} v @param {number} fb @returns {number} */
+  _numGlobal(v, fb) {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? n : fb;
+  }
+
+  /**
+   * Schedule the lazy, paced cloud-texture load: wait for the scene to settle,
+   * then load sprite PNGs one at a time with a gap between each, so we never add
+   * a heavy upload burst to the scene-load storm. Fire-and-forget; idempotent.
+   * @private
+   */
+  _scheduleDeferredCloudLoad() {
+    if (this._cloudLoadScheduled) return;
+    this._cloudLoadScheduled = true;
+    const run = async () => {
+      await this._awaitSceneSettled();
+      if (this._disposed || !this._initialized) return;
+      await loadCloudSpriteTexturesPaced({
+        staggerMs: this._numGlobal(window.MapShine?.__cloudStaggerMs, ASHCLOUD_LOAD_STAGGER_MS),
+        shouldContinue: () => !this._disposed && this._initialized,
+        onTexture: (kind, tex) => this._onCloudTextureLoaded(kind, tex),
+      });
+      if (!this._disposed) this._assetsLoaded = true;
+    };
+    run().catch((err) => log.warn('AshCloudEffectV2: deferred texture load failed', err));
+  }
+
+  /**
+   * Resolve once the scene has finished loading (curtain revealed) plus a settle
+   * delay, so cloud uploads never compete with the load storm.
+   * @private
+   */
+  async _awaitSceneSettled() {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+    const start = performance.now();
+    while (!this._disposed) {
+      let loading = false;
+      try { loading = window.MapShine?.__msaSceneLoading === true; } catch (_) {}
+      if (!loading) break;
+      if (performance.now() - start > ASHCLOUD_SETTLE_MAX_WAIT_MS) break;
+      await sleep(500);
     }
-    this._texturePicker = new CloudTexturePicker(this._sparseTextures, this._fullTextures, this.params);
+    if (this._disposed) return;
+    await sleep(this._numGlobal(window.MapShine?.__cloudSettleMs, ASHCLOUD_DEFERRED_SETTLE_MS));
+  }
+
+  /**
+   * Receive one lazily-loaded cloud texture: append it and make it usable. The
+   * first texture stands up the sprite pool; each later one refreshes the picker.
+   * @param {'sparse'|'full'} kind
+   * @param {import('three').Texture} tex
+   * @private
+   */
+  _onCloudTextureLoaded(kind, tex) {
+    if (this._disposed || !this._initialized || !tex) {
+      try { tex?.dispose?.(); } catch (_) {}
+      return;
+    }
+    (kind === 'sparse' ? this._sparseTextures : this._fullTextures).push(tex);
+    if (!this._spritePoolBuilt) {
+      this._spritePoolBuilt = true;
+      this._assetsLoaded = true;
+      this._texturePicker = new CloudTexturePicker(this._sparseTextures, this._fullTextures, this.params);
+      this._buildSpritePool();
+      this._syncFloorPlacement();
+    } else {
+      try {
+        this._texturePicker = new CloudTexturePicker(this._sparseTextures, this._fullTextures, this.params);
+      } catch (err) {
+        log.debug('AshCloudEffectV2 picker refresh after lazy load failed', err);
+      }
+    }
   }
 
   /** @private */

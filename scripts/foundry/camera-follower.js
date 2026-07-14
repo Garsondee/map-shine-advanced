@@ -798,17 +798,21 @@ export class CameraFollower {
    * independently guarded so a Foundry API shift degrades (stale until the next
    * full draw) rather than throwing.
    *
-   * Note: `canvas.level` itself only commits on a real draw, so viewed-level
-   * resolution that prefers it may lag until the next full draw — an accepted
-   * tradeoff of skipping canvas.draw (reliability over Foundry-native per-level
-   * token/vision precision). Mask compose reads the band from the emitted
-   * context, not `canvas.level`, so it is unaffected.
+   * Foundry-native token select / place / control all read `canvas.level` (the
+   * private `#level`, committed only inside canvas.draw). We install a getter
+   * override on `canvas.level` (see {@link _ensureCanvasLevelOverride}) so it
+   * tracks `scene._view` — which we set below — even though canvas.draw never
+   * ran. That is what makes tokens on the switched-to floor selectable/placeable
+   * without the full-res background hold that canvas.draw would incur.
    *
    * @param {object} level - the target `_levels[]` entry.
    * @private
    */
   _applyFoundryViewedLevel(level) {
     const levelId = level?.levelId ?? null;
+    // Install the canvas.level override BEFORE writing scene._view so the first
+    // read after the switch already resolves to the new level.
+    this._ensureCanvasLevelOverride();
     try { if (globalThis.game?.user) game.user.viewedLevel = levelId; } catch (_) {}
     try {
       const scene = canvas?.scene;
@@ -831,6 +835,62 @@ export class CameraFollower {
         refreshSounds: true,
       }, true);
     } catch (_) {}
+  }
+
+  /**
+   * Make `canvas.level` track the viewed level under a V3 floor-resident switch.
+   *
+   * Foundry's `Canvas#level` is a getter returning the private `#level`, which
+   * is assigned ONLY inside `canvas.draw` (board.mjs). We deliberately skip
+   * canvas.draw on a floor change (it loads + holds each floor's full-resolution
+   * background — the VRAM/upload spike that crashed the switch), but token
+   * select / place / control read `canvas.level.id` (token.mjs), so with a stale
+   * `#level` the switched-to floor is non-interactive.
+   *
+   * Override the instance getter to return `scene.levels.get(scene._view)` (which
+   * we keep current) whenever it diverges from the drawn `#level`. It falls back
+   * to the original `#level` when `scene._view` is unset or already matches — so
+   * a real canvas.draw (initial load, scene change) is never interfered with; the
+   * override only diverges while a floor-resident switch is ahead of the last
+   * draw. Idempotent per canvas instance (survives canvas teardown/recreate by
+   * re-installing on the next switch).
+   * @private
+   */
+  _ensureCanvasLevelOverride() {
+    try {
+      const cv = globalThis.canvas;
+      if (!cv || cv.__msaLevelGetterPatched === true) return;
+
+      // Find the original `level` getter on the prototype chain.
+      let proto = cv;
+      let desc = null;
+      while (proto && !desc) {
+        desc = Object.getOwnPropertyDescriptor(proto, 'level');
+        if (!desc) proto = Object.getPrototypeOf(proto);
+      }
+      const origGet = desc?.get;
+      if (typeof origGet !== 'function') return;
+
+      Object.defineProperty(cv, 'level', {
+        configurable: true,
+        enumerable: desc.enumerable ?? false,
+        get() {
+          const orig = origGet.call(this);
+          try {
+            const viewId = this.scene?._view;
+            if (viewId && orig?.id !== viewId) {
+              const target = this.scene?.levels?.get?.(viewId);
+              if (target) return target;
+            }
+          } catch (_) {}
+          return orig;
+        },
+      });
+      cv.__msaLevelGetterPatched = true;
+      log.info('Installed canvas.level override — tracks viewed level for V3 floor-resident switches (token select/place/control)');
+    } catch (err) {
+      log.debug('canvas.level override install failed', err);
+    }
   }
 
   stepLevel(delta = 1, options = {}) {

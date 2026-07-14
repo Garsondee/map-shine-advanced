@@ -116,6 +116,31 @@ export class BreakerBoxDialog {
     const actions = document.createElement('div');
     actions.className = 'mapshine-breaker-actions';
 
+    // Monitor on/off toggle. The health monitor is OFF by default (its periodic
+    // per-effect evaluation is diagnostic overhead the running module never
+    // needs); this switch turns it on when the user wants live diagnostics, and
+    // the choice persists across reloads. When off, the panel still opens and
+    // shows the effect graph structure — it just isn't being live-evaluated.
+    const monitorBtn = document.createElement('button');
+    monitorBtn.className = 'mapshine-breaker-monitor-toggle';
+    const syncMonitorBtn = () => {
+      const on = this.healthEvaluator?.isEnabled?.() === true;
+      monitorBtn.textContent = on ? '● Monitor ON' : '○ Monitor OFF';
+      monitorBtn.title = on
+        ? 'Live health monitoring is running. Click to turn it off (recommended for normal play).'
+        : 'Health monitoring is off (no runtime overhead). Click to turn it on for live diagnostics.';
+      monitorBtn.dataset.on = on ? '1' : '0';
+    };
+    monitorBtn.addEventListener('click', () => {
+      const now = this.healthEvaluator?.isEnabled?.() === true;
+      try { this.healthEvaluator?.setEnabled?.(!now); } catch (_) {}
+      syncMonitorBtn();
+      try { ui?.notifications?.info?.(`Breaker Box monitor ${this.healthEvaluator?.isEnabled?.() ? 'ON' : 'OFF'}`); } catch (_) {}
+    });
+    this._syncMonitorBtn = syncMonitorBtn;
+    syncMonitorBtn();
+    actions.appendChild(monitorBtn);
+
     const copyBtn = document.createElement('button');
     copyBtn.textContent = 'Copy Full JSON';
     copyBtn.addEventListener('click', async () => {
@@ -300,6 +325,8 @@ export class BreakerBoxDialog {
 .mapshine-breaker-header{display:flex;justify-content:space-between;align-items:center;gap:8px;}
 .mapshine-breaker-header strong{cursor:move;user-select:none;}
 .mapshine-breaker-actions{display:flex;gap:6px;flex-wrap:wrap;}
+.mapshine-breaker-monitor-toggle[data-on="1"]{color:#8ff0a4;border-color:rgba(143,240,164,0.5);}
+.mapshine-breaker-monitor-toggle[data-on="0"]{color:#9aa0ac;}
 .mapshine-breaker-zoom-label{display:inline-flex;align-items:center;opacity:.85;min-width:44px;justify-content:center;}
 .mapshine-breaker-subhead{display:flex;justify-content:space-between;align-items:center;margin-top:6px;color:#b8bdc8;}
 .mapshine-breaker-graph-wrap{

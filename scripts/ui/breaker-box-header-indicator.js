@@ -56,19 +56,35 @@ export class BreakerBoxHeaderIndicator {
     this.button = btn;
 
     this._unsubscribe = this.healthEvaluator?.subscribe?.((snapshot) => {
-      this._applyStatus(headlineHealthStatus(snapshot), snapshot);
+      this._refresh(snapshot);
     }) || null;
-    this._applyStatus(
-      headlineHealthStatus(this.healthEvaluator?.getSnapshot?.()),
-      this.healthEvaluator?.getSnapshot?.()
-    );
+    this._refresh(this.healthEvaluator?.getSnapshot?.());
+  }
+
+  /**
+   * Render either the live health status, or — when the monitor is off (the
+   * default) — a neutral "off" dot, so the light stays present and clickable
+   * without implying a health verdict the monitor isn't actually computing.
+   * @param {object|null} snapshot
+   * @private
+   */
+  _refresh(snapshot = null) {
+    if (this.healthEvaluator && this.healthEvaluator.isEnabled?.() === false) {
+      this._applyStatus('off', null);
+      return;
+    }
+    this._applyStatus(headlineHealthStatus(snapshot), snapshot);
   }
 
   _applyStatus(status, snapshot = null) {
     if (!this.button) return;
-    const color = colorForStatus(status);
+    const off = status === 'off';
+    const color = off ? '#6b7280' : colorForStatus(status);
     this.button.style.color = color;
-    this.button.title = headlineTooltip(snapshot);
+    this.button.style.opacity = off ? '0.7' : '1';
+    this.button.title = off
+      ? 'Health monitor is off — click to open the Breaker Box (turn it on there for live diagnostics)'
+      : headlineTooltip(snapshot);
     this.button.style.animation = 'none';
     const dot = this.button.querySelector('.mapshine-breaker-dot');
     if (dot) {

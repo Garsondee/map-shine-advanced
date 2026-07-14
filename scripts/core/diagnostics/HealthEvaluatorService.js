@@ -79,18 +79,91 @@ export class HealthEvaluatorService {
     this._timers = [];
     /** @type {number} Round-robin cursor for the budgeted full sweep. */
     this._evalCursor = 0;
+    /** @type {boolean} whether periodic monitoring is running (opt-in). */
+    this._enabled = false;
     this._initialized = false;
   }
 
   initialize() {
     if (this._initialized) return;
+    // Contracts + edges are cheap metadata and describe the effect graph the
+    // Breaker Box lists even when the monitor is off — always register them.
     this._registerBuiltInContracts();
     this._registerBuiltInEdges();
+    this._initialized = true;
+
+    // The MONITORING (per-effect method instrumentation + the periodic
+    // evaluation sweep) is OPT-IN and OFF BY DEFAULT: it re-evaluates every
+    // contract × visible-floor × rule on a timer and on floor changes, which is
+    // pure diagnostic overhead for normal play (and was a floor-change TDR
+    // before it was budgeted). It only runs when the user turns the Breaker Box
+    // monitor on; the choice persists across reloads (localStorage).
+    this._enabled = false;
+    if (this._readEnabledSetting()) {
+      this._activateMonitoring();
+    } else {
+      log.info('Health monitor initialized (monitoring OFF — enable in the Breaker Box)');
+    }
+  }
+
+  /** @returns {boolean} whether periodic health monitoring is running. */
+  isEnabled() { return this._enabled === true; }
+
+  /**
+   * Turn periodic health monitoring on/off. Persists across reloads.
+   * @param {boolean} on
+   * @param {{ persist?: boolean }} [opts]
+   * @returns {boolean} the new enabled state
+   */
+  setEnabled(on, { persist = true } = {}) {
+    const want = !!on;
+    if (persist) this._writeEnabledSetting(want);
+    if (want === this._enabled) return this._enabled;
+    if (want) this._activateMonitoring();
+    else this._deactivateMonitoring();
+    return this._enabled;
+  }
+
+  /**
+   * Install instrumentation + the shader monitor + the periodic scheduler.
+   * Idempotent. @private
+   */
+  _activateMonitoring() {
+    if (this._enabled) return;
     this._installInstrumentation();
     this._installShaderMonitor();
     this._startScheduler();
-    this._initialized = true;
-    log.info('Health evaluator initialized');
+    this._enabled = true;
+    log.info('Health monitor ON');
+  }
+
+  /**
+   * Stop the scheduler and unwrap all instrumented effect methods, so the
+   * monitor imposes zero per-frame/per-call overhead while off. @private
+   */
+  _deactivateMonitoring() {
+    for (const t of this._timers) { try { clearInterval(t); } catch (_) {} }
+    this._timers.length = 0;
+    for (const w of this._wrappedMethods) {
+      try { if (w.instance && w.name && w.original) w.instance[w.name] = w.original; } catch (_) {}
+    }
+    this._wrappedMethods.length = 0;
+    this._records.clear();
+    this._enabled = false;
+    this._emitSnapshot();
+    log.info('Health monitor OFF');
+  }
+
+  /** @returns {boolean} persisted enabled flag (default false). @private */
+  _readEnabledSetting() {
+    try {
+      return globalThis.localStorage?.getItem('map-shine-advanced.healthMonitorEnabled') === 'true';
+    } catch (_) { return false; }
+  }
+
+  /** @param {boolean} on @private */
+  _writeEnabledSetting(on) {
+    try { globalThis.localStorage?.setItem('map-shine-advanced.healthMonitorEnabled', on ? 'true' : 'false'); } catch (_) {}
   }
 
   /**
@@ -286,6 +359,7 @@ export class HealthEvaluatorService {
   handleFloorChange(maxFloorIndex, context = null) {
     void maxFloorIndex;
     void context;
+    if (!this._enabled) return; // monitoring off → no floor-change overhead
     this._evaluateContracts({ tiers: ['structural', 'behavioral'] });
     this._applyDependencyPropagation();
     this._emitSnapshot();

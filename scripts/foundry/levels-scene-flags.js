@@ -351,6 +351,59 @@ export function getViewedLevelForegroundSrc(scene) {
 }
 
 /**
+ * Resolve a V14 level's OWN background src directly by `levelId`, bypassing
+ * `canvas.level` (and its `_resolveViewedV14LevelDoc` canvas.level-first
+ * fallback) entirely.
+ *
+ * `canvas.level` is Foundry's "level the canvas is actually rendering"
+ * pointer — it is only committed by `canvas.draw()`. Under the V3
+ * floor-resident switch (camera-follower.js), a floor change deliberately
+ * never runs `canvas.draw`, so `canvas.level` stays pointed at the PREVIOUS
+ * floor. `getViewedLevelBackgroundSrc`/`_resolveViewedV14LevelDoc` both try
+ * `canvas.level.id` FIRST — which is a *stale but valid* id, so the fallback
+ * chain resolves immediately and never reaches `scene._view` (which the
+ * floor-resident switch does set correctly). The result: the background art
+ * swap silently resolves the OLD floor's src.
+ *
+ * This function looks up the target level directly from the Scene's
+ * `levels` collection via an explicit `levelId` (sourced from the emitted
+ * level-context payload, which is authoritative regardless of path), so it
+ * can never be poisoned by canvas.level staleness.
+ *
+ * @param {Scene|null|undefined} scene
+ * @param {string|null|undefined} levelId
+ * @returns {string|null}
+ */
+export function getLevelBackgroundSrcById(scene, levelId) {
+  if (!scene?.levels?.size || !levelId) return null;
+  try {
+    const level = scene.levels.get(String(levelId));
+    const src = level?.background?.src;
+    if (typeof src === 'string' && src.trim()) return src.trim();
+  } catch (_) {}
+  return null;
+}
+
+/**
+ * Foreground counterpart of {@link getLevelBackgroundSrcById}. See that
+ * function's doc for why a direct-by-id lookup is needed under the V3
+ * floor-resident switch.
+ *
+ * @param {Scene|null|undefined} scene
+ * @param {string|null|undefined} levelId
+ * @returns {string|null}
+ */
+export function getLevelForegroundSrcById(scene, levelId) {
+  if (!scene?.levels?.size || !levelId) return null;
+  try {
+    const level = scene.levels.get(String(levelId));
+    const src = level?.foreground?.src;
+    if (typeof src === 'string' && src.trim()) return src.trim();
+  } catch (_) {}
+  return null;
+}
+
+/**
  * Map a foreground image URL to the FloorStack band index whose V14 level owns
  * that `foreground.src`.
  *

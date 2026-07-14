@@ -7,6 +7,7 @@
  */
 
 import { hasV14NativeLevels } from './levels-scene-flags.js';
+import { isV3ViewOnlyFloorsEnabled } from '../compositor-v3/v3-flags.js';
 
 function _isMissing(value) {
   return value === undefined || value === null;
@@ -73,8 +74,23 @@ export function applyTokenV14LevelDefaults(data, options = {}) {
   if (!data || typeof data !== 'object') return data;
   const scene = options.scene ?? globalThis.canvas?.scene;
   if (!hasV14NativeLevels(scene)) return data;
-  if (data.level) return data;
   const levelId = _getViewedV14LevelId();
+  if (data.level) {
+    // Under the V3 floor-resident switch, canvas.draw never runs on a floor
+    // change, so Foundry's `canvas.level` stays pointed at the PREVIOUS floor.
+    // Foundry's own drop handler (Token._getDropActorPosition) stamps
+    // `position.level = canvas.level.id` into the create data BEFORE this hook
+    // ever runs, so `data.level` being present does NOT mean it is correct in
+    // this mode — a token dropped while viewing the resident-switched floor
+    // would otherwise be silently filed under the OLD floor and become
+    // invisible/unselectable (its `.viewed` getter reads scene._view, which we
+    // do keep correct). Override to the reliable viewed-level id when they
+    // disagree; leave alone otherwise (e.g. legitimate cross-floor placement).
+    if (isV3ViewOnlyFloorsEnabled() && levelId && data.level !== levelId) {
+      data.level = levelId;
+    }
+    return data;
+  }
   if (!levelId) return data;
   data.level = levelId;
   return data;

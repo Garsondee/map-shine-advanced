@@ -145,6 +145,8 @@ import {
   hasV14NativeLevels,
   getViewedLevelBackgroundSrc,
   getViewedLevelForegroundSrc,
+  getLevelBackgroundSrcById,
+  getLevelForegroundSrcById,
   isLevelsEnabledForScene,
   resolveV14LevelIdToFloorStackIndex,
   readV14SceneLevels,
@@ -3562,16 +3564,19 @@ export function initialize() {
         // bake and the effect forceRepopulate — do only the cheap active-band
         // sync + consumer refresh so V3 lighting points at the new floor's mask.
         const viewOnly = payload?.viewOnly === true;
-        // Under V3 floor-resident mode every visible floor's background /
-        // foreground art is already resident in the bus (loaded for all visible
-        // levels at populate — see FloorRenderBus._loadVisibleBackgroundStack), so
-        // a floor change must NOT run Foundry's per-level background swap. That
-        // path resolves art from `canvas.level`, which is deliberately left
-        // un-drawn here (canvas.scene.view is skipped to avoid the full-res
-        // background hold that crashed the switch), so it would swap in STALE art.
-        // Compose + repopulate below still run for cold bands; only the Foundry
-        // art swap is skipped. Applies to both warm (viewOnly) and cold resident
-        // switches.
+        // Under V3 floor-resident mode the background/foreground art swap below
+        // MUST still run — a floor's own art is only guaranteed resident from
+        // initial populate when it was in the visible-from-the-first-viewed-level
+        // set (FloorRenderBus._loadVisibleBackgroundStack); a floor pre-warmed
+        // later (391a2f2) gets its MASKS baked but never gets its own art swapped
+        // into the bus. What must NOT happen is resolving that art via
+        // `canvas.level` — canvas.draw is deliberately skipped here (that's the
+        // whole point: avoid the full-res background hold that crashed the
+        // switch), so canvas.level stays pointed at the PREVIOUS floor. Below,
+        // `v3FloorResident` selects a levelId-based art lookup
+        // (getLevelBackgroundSrcById/getLevelForegroundSrcById) that bypasses
+        // canvas.level entirely instead of the canvas.level-first
+        // getViewedLevelBackgroundSrc/getViewedLevelForegroundSrc.
         const v3FloorResident = isV3ViewOnlyFloorsEnabled();
 
         try {
@@ -3613,16 +3618,27 @@ export function initialize() {
 
         let warmBandRevisit = false;
 
-        if (hasV14NativeLevels(canvas?.scene) && sc && bus && fd && !v3FloorResident) {
-          const viewedBgSrc = getViewedLevelBackgroundSrc(canvas.scene);
-          const currentBasePath = sc._lastMaskBasePath ?? sc.extractBasePath?.(
-            canvas.scene?.background?.src ?? ''
-          ) ?? '';
-          const newBasePath = viewedBgSrc ? sc.extractBasePath?.(viewedBgSrc) ?? '' : '';
+        if (hasV14NativeLevels(canvas?.scene) && sc && bus && fd) {
           const levelId = payload?.context?.levelId
             ?? canvas?.level?.id
             ?? canvas?.scene?._view
             ?? null;
+          // Under the V3 floor-resident switch canvas.draw never runs, so
+          // canvas.level stays pointed at the PREVIOUS floor — a stale but
+          // VALID id, so getViewedLevelBackgroundSrc's canvas.level-first
+          // fallback resolves immediately and never reaches scene._view
+          // (which the switch does set correctly). Resolve directly from the
+          // Scene's levels collection via the reliable `levelId` above instead
+          // — this is what fixed "tile shows but the floor's own background
+          // art doesn't" on a resident switch (masks/lighting were already
+          // correct because compose reads ctx.bottom/top, not canvas.level).
+          const viewedBgSrc = v3FloorResident
+            ? (getLevelBackgroundSrcById(canvas.scene, levelId) || getViewedLevelBackgroundSrc(canvas.scene))
+            : getViewedLevelBackgroundSrc(canvas.scene);
+          const currentBasePath = sc._lastMaskBasePath ?? sc.extractBasePath?.(
+            canvas.scene?.background?.src ?? ''
+          ) ?? '';
+          const newBasePath = viewedBgSrc ? sc.extractBasePath?.(viewedBgSrc) ?? '' : '';
           pathChanged = !!(viewedBgSrc && newBasePath && newBasePath !== currentBasePath);
           const levelChanged = !!(levelId && levelId !== sc._lastV14BusBgLevelId);
           warmBandRevisit = !!(
@@ -3659,7 +3675,9 @@ export function initialize() {
               fd,
               Number.isFinite(swapLevelIndex) ? { viewedLevelIndex: swapLevelIndex } : {},
             );
-            const viewedFgSrc = getViewedLevelForegroundSrc(canvas.scene);
+            const viewedFgSrc = v3FloorResident
+              ? (getLevelForegroundSrcById(canvas.scene, levelId) || getViewedLevelForegroundSrc(canvas.scene))
+              : getViewedLevelForegroundSrc(canvas.scene);
             bus.swapForegroundImage?.(
               viewedFgSrc,
               fd,
@@ -3696,7 +3714,9 @@ export function initialize() {
               bus.syncForegroundStackFromScene?.(
                 fd,
                 Number.isFinite(swapLevelIndex) ? { viewedLevelIndex: swapLevelIndex } : {},
-                getViewedLevelForegroundSrc(canvas.scene),
+                v3FloorResident
+                  ? (getLevelForegroundSrcById(canvas.scene, levelId) || getViewedLevelForegroundSrc(canvas.scene))
+                  : getViewedLevelForegroundSrc(canvas.scene),
               );
             } catch (_) {}
           }

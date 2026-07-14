@@ -827,6 +827,19 @@ export class CameraFollower {
     try {
       if (canvas?._viewOptions && levelId) canvas._viewOptions.level = levelId;
     } catch (_) {}
+    // The canvas.level override (above) fixes VALUES consumers read
+    // (elevation math, drop position/level tagging, occlusion) — but a
+    // PlaceableObject's very existence is gated by a SEPARATE, one-shot lazy
+    // getter (`CanvasDocument#object`, checks `.viewed` — itself driven by
+    // `scene._view`, not `canvas.level` — but only creates the object the
+    // FIRST time it's accessed, then caches it forever). A token whose
+    // `.viewed` was false at scene load (e.g. it lives on the OTHER floor)
+    // never got its `.object` created, so nothing is selectable on it even
+    // once `scene._view` correctly points here. Foundry only re-syncs this via
+    // PlaceablesLayer#_draw's create/destroy loop, which runs solely inside
+    // canvas.draw. Replicate just that loop, without the surrounding full
+    // layer teardown canvas.draw exists to amortize.
+    this._refreshPlaceablesLayerForResidentSwitch(canvas?.tokens);
     try {
       canvas?.perception?.update?.({
         refreshVision: true,
@@ -835,6 +848,63 @@ export class CameraFollower {
         refreshSounds: true,
       }, true);
     } catch (_) {}
+  }
+
+  /**
+   * Create PlaceableObjects for documents newly `.viewed` on this layer and
+   * destroy those for documents no longer viewed — the same per-document
+   * create/destroy loop `PlaceablesLayer#_draw`/`#_tearDown` run as part of a
+   * full `canvas.draw()`, replicated here WITHOUT the surrounding teardown
+   * (quadtree/history/preview untouched) so it stays cheap enough to run on
+   * every V3 floor-resident switch.
+   *
+   * Scoped to `canvas.tokens` for now (the reported case: token select/place
+   * on the switched-to floor). Other PlaceablesLayers (tiles, lights, sounds,
+   * notes, templates, drawings, regions) share this exact API
+   * (`documentCollection`/`viewedDocuments()`/`createObject()`/`objects`) so
+   * extending to them is a low-risk follow-up if one is reported broken too —
+   * not done pre-emptively to keep this switch's blast radius small.
+   *
+   * @param {import('@client/canvas/layers/base/placeables-layer.mjs').default|null|undefined} layer
+   * @private
+   */
+  _refreshPlaceablesLayerForResidentSwitch(layer) {
+    if (!layer?.objects || typeof layer.viewedDocuments !== 'function') return;
+    const stillViewed = new Set();
+    try {
+      for (const doc of layer.viewedDocuments()) {
+        stillViewed.add(doc.id);
+        const existing = doc._object;
+        if (existing && existing.destroyed !== true) continue;
+        try {
+          const obj = layer.createObject(doc);
+          layer.objects.addChild(obj);
+          Promise.resolve(obj.draw()).catch((err) => {
+            log.warn(`Resident switch: draw() failed for ${layer.constructor?.name ?? 'layer'} object ${doc?.id}`, err);
+          });
+        } catch (err) {
+          log.warn(`Resident switch: failed to create ${layer.constructor?.name ?? 'layer'} object for ${doc?.id}`, err);
+        }
+      }
+    } catch (err) {
+      log.warn('Resident switch: viewedDocuments() failed', err);
+    }
+    try {
+      for (const doc of layer.documentCollection ?? []) {
+        if (stillViewed.has(doc.id)) continue;
+        const obj = doc._object;
+        if (!obj || obj.destroyed === true) continue;
+        try {
+          layer.objects.removeChild(obj);
+          obj.destroy({ children: true });
+        } catch (err) {
+          log.warn(`Resident switch: failed to tear down ${layer.constructor?.name ?? 'layer'} object for ${doc?.id}`, err);
+        }
+        doc._object = null;
+      }
+    } catch (err) {
+      log.warn('Resident switch: documentCollection sweep failed', err);
+    }
   }
 
   /**

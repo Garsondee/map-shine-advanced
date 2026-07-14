@@ -39,6 +39,32 @@ Also fixed the global-ACES-bleaching regression (replaced with a hue-preserving 
 
 ---
 
+## Open issues board — start here (handoff 2026-07-14)
+
+**Fresh session: read this section first.** These are the live, author-flagged items in priority order. Everything is against the "Mansion - Multifloor" scene on an RTX 3070 Laptop (8 GB) at "High" preset (~2560×1080). B0-1 (the attribute buffer, §15 B1) remains the strategic architectural priority, but the crash below blocks validating it, so the crash is the practical blocker.
+
+### 🔴 HIGH — must fix before B0-1 is really workable
+
+- **A10 — reload/settings TDR crash (the top blocker).** Changing certain Tweakpane settings at High — anything that forces a resolution/resize → a scene *reload* — crashes WebGL. Latest crash report (2026-07-14) is definitive about the shape: **not VRAM** (`rtVramEstimate` 1051 MB < 1200 budget; MSA textures near-zero), **not V3 render** (crash is during load `binding_effects`, before V3 draws a frame). It is a **driver watchdog reset (TDR) from an ~8,853 ms main-thread stall** during the reload. **The stall is still UNATTRIBUTED** — `slowSections`/`slowGlOps` recorded nothing in the 44.5–53.4 s window, and `sectionTrail`'s pre-stall breadcrumbs were flushed by the burst of `safeCall`s *after* the stall (the ring emits only the last ~48, all timestamped after the stall). **Next action: improve the stall instrumentation so the next reload NAMES the culprit** — widen/timestamp-window the `sectionTrail` emission around the longest `longTask`, and wrap the currently-unlabelled binding_effects/effect-init CPU work in `markSection`. Then capture one reload crash and read it. Do NOT guess a fix. (Contributor already removed 2026-07-14: both `CloudEffectV2` and `AshCloudEffectV2` were loading ~16×16 MB cloud PNGs eagerly during `binding_effects`; both now defer + pace after settle — commits `ffb683f`, `076def9`. Helps load pressure but is NOT the 8.8 s stall.)
+
+- **Camera reset after crash-recovery (HIGH — makes crashes non-graceful).** After a context-loss recovery the **camera is left at a garbage world position** — `MapShine.v3.outdoors()` post-recovery showed `viewMin/viewMax` at ~(430000, −191000), ~36 scene-widths from the scene at (3000–15000), so the whole view falls outside the scene rect and indoor/outdoor reads "outdoor" everywhere. **The `_Outdoors` mask itself is fine after recovery** (readback shows real structure, alpha 255) — this is purely a mispositioned camera, almost certainly a camera-follower re-sync issue on the recovery/reload path. Fix so a recovery restores the camera to the correct scene position (and re-ticks the view-projection). Downstream of A10, but worth fixing independently so recoveries degrade gracefully.
+
+### 🟡 MEDIUM — visible look gaps (do not need the crash solved; author expects these are easy)
+
+- **Bloom renders as a square, should be circular.** Long-standing V2 bloom artifact, now visible under V3 (bloom is in the V3 post chain, `V3PostBridge`). `BloomEffectV2` is a 5-mip gaussian pyramid (`SURFACE_MIP_KERNEL_TAPS`, `BLOOM_MIP_FACTORS`). Likely a mip RT wrap/filter (`ClampToEdge` edge bleed) or blocky downsample producing box-shaped falloff. **A screenshot of one isolated bright light would pin the exact cause fast** — author thinks this should be an easy fix.
+
+- **Sepia stylizer not applied under V3.** Author uses the Sepia CC to unify scene colours; without it the look is off. Sepia (and the rest of the stylizer chain: sharpen/vignette/dotscreen/halftone/etc.) is *not* yet in the V3 post pass. Add `SepiaEffectV2` to `V3PostBridge` after CC, the same `render(in,out)` pattern bloom uses. Straightforward — but mind the extra RT at High (see A10 VRAM headroom).
+
+### 🟢 Recently FIXED (verify on next load, don't re-investigate)
+
+- Indoor/outdoor lighting AND CC interior grade — root cause was the scene camera being a `PerspectiveCamera` (`composer.js:1156`), which broke every `isOrthographicCamera`-gated view-bounds formula; both now source bounds from `view-projection-service.getVisibleWorldRect()`. **Rule: any V3/CC consumer needing screen→world bounds uses `getVisibleWorldRect()`, never an ortho formula or naive unproject.**
+- Indoor/outdoor breaking on camera *pan* (`51fd1f2`) — `composer.js pan()` now calls `updateMatrixWorld()`; the shared raycast refreshes the matrix defensively.
+- HDR bleaching (global ACES → hue-preserving rolloff, `MapShine.v3.hdrKnee`).
+
+**Diagnostics available:** `MapShine.v3.status()`, `MapShine.v3.outdoors()` (mask resolve trace + pixel readback + view bounds), `MapShine.v3.outdoorsDebug(true)` (red=indoor/green=outdoor tint), and the crash-report JSON from `webgl-crash-recovery.js`.
+
+---
+
 ## 1. The problem, in one sentence
 
 Map Shine Advanced (MSA) bounds GPU/CPU memory to **world size × per-floor mask count**, where a modern real-time engine bounds it to **screen resolution**. The mismatch isn't raw scene complexity — it's that MSA's cost model scales with the size and authored-mask density of the *world*, not the size of the *view*.

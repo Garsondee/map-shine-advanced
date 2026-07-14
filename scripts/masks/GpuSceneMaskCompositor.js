@@ -18,6 +18,7 @@
 import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
+import { yieldToMain } from '../core/yield-to-main.js';
 import { shouldBuildParticleChannelPack } from '../core/texture-overhaul-flags.js';
 import * as assetLoader from '../assets/loader.js';
 import { getEffectMaskRegistry } from '../assets/loader.js';
@@ -1322,6 +1323,15 @@ export class GpuSceneMaskCompositor {
     } catch (e) {
       log.debug('composeFloor: promote band background outdoors failed', { floorKey, err: e });
     }
+
+    // Yield between the async mask-load/promote phase and the synchronous GPU
+    // derive phase below. On a cold-floor level change these ran back-to-back as
+    // one ~8s main-thread block that tripped the GPU driver watchdog (TDR) — the
+    // floor-change crash (Forward+ §16 P3, load-pacing applied to the level-
+    // change mask bake). A yield lets the driver flush and the browser breathe
+    // between phases; composeFloor is already async and its callers serialize on
+    // it, so this changes nothing about the composed masks.
+    await yieldToMain();
 
     // Normalize flipY to match base plane convention.
     for (const m of newMasks) {

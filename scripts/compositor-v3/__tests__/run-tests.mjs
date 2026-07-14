@@ -17,6 +17,7 @@ import { run as runFrameGraph } from './FrameGraph.test.mjs';
 import { run as runAllocator } from './ThreeAllocator.test.mjs';
 import { run as runPipeline } from './V3Pipeline.test.mjs';
 import { run as runPerf } from './v3-perf.test.mjs';
+import { run as runCapabilities } from './capabilities.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -44,11 +45,14 @@ const suites = [
   ['ThreeAllocator', runAllocator],
   ['V3Pipeline', runPipeline],
   ['v3-perf', runPerf],
+  ['capabilities', runCapabilities], // async suite (mocks document + awaits retries)
 ];
 
+// Suites may be sync or async (return a Promise); await each so async
+// assertions land before the summary prints.
 for (const [name, fn] of suites) {
   const before = failed;
-  fn(t);
+  await fn(t);
   console.log(`  ${name}: ${failed === before ? 'ok' : `${failed - before} FAILED`}`);
 }
 

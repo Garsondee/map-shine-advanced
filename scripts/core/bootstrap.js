@@ -78,9 +78,32 @@ export async function bootstrap(options = {}) {
     if (window?.MapShine) {
       window.MapShine.__requestedPixiSharedWebGLContext = !!requestedSharedContext;
     }
-    const { renderer, rendererType } = await rendererStrategy.create(THREE, state.capabilities, {
-      sharedContext: requestedSharedContext,
-    });
+    // Retry renderer creation on transient failure — same root cause as the
+    // capability-probe retry (capabilities.detect): right after a GPU driver
+    // watchdog reset (TDR), the automatic scene rebuild calls this while the
+    // driver is still settling, so `new THREE.WebGLRenderer(...)` can throw
+    // "Error creating WebGL context" once and then succeed moments later. The
+    // old one-shot path aborted the rebuild and forced an F5 on a healthy card.
+    // Success path is unchanged: the first attempt succeeds → no delay.
+    let renderer = null;
+    let rendererType = null;
+    const RENDERER_CREATE_RETRIES = 3;
+    for (let attempt = 0; attempt <= RENDERER_CREATE_RETRIES; attempt++) {
+      const res = await rendererStrategy.create(THREE, state.capabilities, {
+        sharedContext: requestedSharedContext,
+      });
+      if (res.renderer) {
+        renderer = res.renderer;
+        rendererType = res.rendererType;
+        if (attempt > 0) logger.info(`Renderer created on retry ${attempt} (transient failure, likely post-TDR settling)`);
+        break;
+      }
+      if (attempt < RENDERER_CREATE_RETRIES) {
+        const delay = 250 * (attempt + 1);
+        logger.warn(`Renderer creation failed (attempt ${attempt + 1}/${RENDERER_CREATE_RETRIES + 1}); retrying in ${delay}ms`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
 
     if (!renderer) {
       state.error = 'Renderer initialization failed';

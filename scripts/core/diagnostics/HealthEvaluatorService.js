@@ -39,6 +39,23 @@ const SEVERITY_TO_STATUS = {
   critical: 'critical',
 };
 
+/**
+ * Per-call wall-clock budget for a FULL health sweep (Forward+ §16 P3). The old
+ * unbudgeted sweep evaluated every contract × level × rule synchronously; on a
+ * multi-floor scene that was a ~7.5s main-thread block that tripped the GPU
+ * driver watchdog (TDR) during a floor change — a diagnostic crashing the
+ * renderer. The sweep now processes contracts round-robin until this budget is
+ * spent, resuming next tick, so a full cycle completes over several ticks under
+ * load and no single call can block. Kept small so it never shows up in a frame.
+ */
+const HEALTH_EVAL_BUDGET_MS = 3;
+
+const _perfNow = () => (
+  (typeof performance !== 'undefined' && typeof performance.now === 'function')
+    ? performance.now()
+    : Date.now()
+);
+
 export class HealthEvaluatorService {
   constructor(options = {}) {
     this.floorCompositor = options.floorCompositor || null;
@@ -60,6 +77,8 @@ export class HealthEvaluatorService {
     this._waterFloorSignatureCache = new Map();
     this._wrappedMethods = [];
     this._timers = [];
+    /** @type {number} Round-robin cursor for the budgeted full sweep. */
+    this._evalCursor = 0;
     this._initialized = false;
   }
 
@@ -817,25 +836,60 @@ export class HealthEvaluatorService {
 
   _evaluateContracts({ tiers = ['structural', 'behavioral'], effectId = null, levelKey = null } = {}) {
     const contracts = this.registry.getAll();
-    for (const contract of contracts) {
-      if (effectId && contract.effectId !== effectId) continue;
-      const instance = safeCall(
-        () => contract.getInstance?.(this),
-        `health.eval.getInstance.${contract.effectId}`,
-        Severity.COSMETIC,
-        { fallback: null }
-      );
-      const levelKeys = safeCall(
-        () => contract.getLevelKeys?.(instance, this),
-        `health.eval.getLevelKeys.${contract.effectId}`,
-        Severity.COSMETIC,
-        { fallback: [] }
-      ) || [];
+    const n = contracts.length;
+    if (n === 0) return;
 
-      const scopedLevels = levelKey ? levelKeys.filter((k) => k === levelKey) : levelKeys;
-      for (const lk of scopedLevels) {
-        this._evaluateContractLevel(contract, instance, lk, tiers);
+    // Targeted single-effect eval (Breaker Box detail pane / runHealthCheck on
+    // one effect): one contract, cheap — run it fully and immediately.
+    if (effectId) {
+      for (const contract of contracts) {
+        if (contract.effectId !== effectId) continue;
+        this._evaluateOneContract(contract, tiers, levelKey);
       }
+      return;
+    }
+
+    // Full sweep: TIME-BUDGETED round-robin (Forward+ §16 P3 — see
+    // HEALTH_EVAL_BUDGET_MS). Process contracts from a persistent cursor until
+    // the budget is spent (or one full cycle completes), resuming next tick, so
+    // this diagnostic can never block the main thread into a GPU-watchdog reset
+    // — which is exactly what a multi-floor floor-change sweep used to do.
+    const startMs = _perfNow();
+    let processed = 0;
+    while (processed < n) {
+      const contract = contracts[this._evalCursor % n];
+      this._evalCursor = (this._evalCursor + 1) % n;
+      processed++;
+      this._evaluateOneContract(contract, tiers, null);
+      if ((_perfNow() - startMs) >= HEALTH_EVAL_BUDGET_MS) break;
+    }
+  }
+
+  /**
+   * Evaluate one contract across its level keys (optionally scoped to a single
+   * level). Shared by the targeted and round-robin full-sweep paths.
+   * @param {object} contract
+   * @param {string[]} tiers
+   * @param {string|null} levelKey
+   * @private
+   */
+  _evaluateOneContract(contract, tiers, levelKey) {
+    const instance = safeCall(
+      () => contract.getInstance?.(this),
+      `health.eval.getInstance.${contract.effectId}`,
+      Severity.COSMETIC,
+      { fallback: null }
+    );
+    const levelKeys = safeCall(
+      () => contract.getLevelKeys?.(instance, this),
+      `health.eval.getLevelKeys.${contract.effectId}`,
+      Severity.COSMETIC,
+      { fallback: [] }
+    ) || [];
+
+    const scopedLevels = levelKey ? levelKeys.filter((k) => k === levelKey) : levelKeys;
+    for (const lk of scopedLevels) {
+      this._evaluateContractLevel(contract, instance, lk, tiers);
     }
   }
 

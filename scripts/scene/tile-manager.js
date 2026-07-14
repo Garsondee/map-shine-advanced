@@ -12,6 +12,7 @@ import { weatherController } from '../core/WeatherController.js';
 import { OVERLAY_THREE_LAYER, TILE_FEATURE_LAYERS } from '../core/render-layers.js';
 import { debugLoadingProfiler } from '../core/debug-loading-profiler.js';
 import { markSection } from '../core/safe-call.js';
+import { isV3LegacyTileMeshesEnabled } from '../compositor-v3/v3-flags.js';
 import { isTileVisibleForPerspective, isBackgroundVisibleForPerspective, isWeatherVisibleForPerspective } from '../foundry/elevation-context.js';
 import { tileHasLevelsRange, isLevelsEnabledForScene, readTileLevelsFlags, hasV14NativeLevels, getCanvasForegroundElevationSplit } from '../foundry/levels-scene-flags.js';
 import { applyTileLevelDefaults } from '../foundry/levels-create-defaults.js';
@@ -2549,6 +2550,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
   _ensureAboveFloorBlockerMesh(spriteData, tileDoc) {
     const THREE = window.THREE;
     if (!THREE) return;
+    // V3 renders no water/distortion that consumes this blocker; building a
+    // fresh ShaderMaterial per tile during load is the A10 shader-compile TDR.
+    // Skipped under V3 (flag-reversible — see isV3LegacyTileMeshesEnabled).
+    if (!isV3LegacyTileMeshesEnabled()) return;
 
     const sprite = spriteData?.sprite;
     if (!sprite) return;
@@ -2744,6 +2749,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
   _ensureBelowFloorPresenceMesh(spriteData, tileDoc) {
     const THREE = window.THREE;
     if (!THREE) return;
+    // V2-only presence primitive (layers 23/24); no V3 consumer today. Building
+    // it per tile during load is part of the A10 shader-compile TDR. Skipped
+    // under V3 (flag-reversible — see isV3LegacyTileMeshesEnabled).
+    if (!isV3LegacyTileMeshesEnabled()) return;
 
     const sprite = spriteData?.sprite;
     if (!sprite) return;
@@ -2808,6 +2817,10 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
   _ensureFloorPresenceMesh(spriteData, tileDoc) {
     const THREE = window.THREE;
     if (!THREE) return;
+    // V2-only presence primitive (layers 23/24); no V3 consumer today. Building
+    // it per tile during load is part of the A10 shader-compile TDR. Skipped
+    // under V3 (flag-reversible — see isV3LegacyTileMeshesEnabled).
+    if (!isV3LegacyTileMeshesEnabled()) return;
 
     const sprite = spriteData?.sprite;
     if (!sprite) return;

@@ -54,6 +54,8 @@ let _runtimeV3Bloom = null;
 let _runtimeV3RenderScale = null;
 /** @type {boolean|null} Dither the present pass's 8-bit encode (default on — kills banding on dark scenes). */
 let _runtimeV3Dither = null;
+/** @type {boolean|null} Build V2-only per-tile occluder/presence meshes (default OFF under V3). */
+let _runtimeV3LegacyTileMeshes = null;
 
 /**
  * Tri-state URL flag: `?param=1/true/on` → true, `?param=0/false/off` → false,
@@ -361,6 +363,45 @@ export function setV3Dither(on) {
 }
 
 /**
+ * Whether TileManager builds its per-tile V2 occluder/presence meshes
+ * (`_ensureAboveFloorBlockerMesh` / `_ensureFloorPresenceMesh` /
+ * `_ensureBelowFloorPresenceMesh`). These feed **V2-only** consumers — water
+ * occlusion, DistortionManager heat-shimmer, and the specular shader's
+ * floor gating — none of which the V3 pipeline renders. Building them for every
+ * tile during scene load creates a shader-compile storm on the first frame that
+ * touches them (each is a fresh `ShaderMaterial`), which on ANGLE/D3D11 is the
+ * multi-second synchronous block that trips the GPU driver watchdog (the A10 TDR
+ * load crash — crash report 2026-07-14 named `tile.ready.ensureMeshes` at
+ * ~2.3 s/tile).
+ *
+ * Default: **OFF when V3 owns rendering** (`isV3PipelineEnabled()` true), ON
+ * otherwise (V2 needs them). Force ON for A/B or if a V3 consumer of the
+ * floor-presence primitive turns out to need them (e.g. candle floor-gating):
+ * `MapShine.v3.legacyTileMeshes(true)` / `?msaV3LegacyTileMeshes=1`.
+ * @returns {boolean}
+ */
+export function isV3LegacyTileMeshesEnabled() {
+  if (_runtimeV3LegacyTileMeshes !== null) return _runtimeV3LegacyTileMeshes;
+  try {
+    if (window?.MapShine?.__v3LegacyTileMeshes === true) return true;
+    if (window?.MapShine?.__v3LegacyTileMeshes === false) return false;
+  } catch (_) {}
+  const url = _urlFlag('msaV3LegacyTileMeshes');
+  if (url !== null) return url;
+  // Default: build them only when V3 is NOT the renderer (V2 needs them).
+  return !isV3PipelineEnabled();
+}
+
+/**
+ * @param {boolean|null} on Pass `null` to clear the override (→ default: off under V3).
+ * @returns {ReturnType<typeof getV3Status>}
+ */
+export function setV3LegacyTileMeshes(on) {
+  _runtimeV3LegacyTileMeshes = on === null ? null : !!on;
+  return getV3Status();
+}
+
+/**
  * Runtime override for the V3 pipeline (live A/B, does not persist unless asked).
  * @param {boolean|null} on Pass `null` to clear the override.
  * @param {{ persist?: boolean }} [opts]
@@ -402,6 +443,7 @@ export function getV3Status() {
     outdoorsDebug: isV3OutdoorsDebugEnabled(),
     renderScale: getV3RenderScaleSetting(),
     dither: isV3DitherEnabled(),
+    legacyTileMeshes: isV3LegacyTileMeshesEnabled(),
     source: {
       pipeline: _runtimeV3Pipeline !== null ? 'runtime'
         : (() => {
@@ -444,6 +486,7 @@ export function exposeV3FlagsApi() {
       },
       renderScale: (v) => setV3RenderScale(v),
       dither: (on) => setV3Dither(on),
+      legacyTileMeshes: (on) => setV3LegacyTileMeshes(on),
       perf: () => {
         try {
           const pipe = window?.MapShine?.__v3PipelineInstance;
@@ -488,6 +531,7 @@ export function exposeV3FlagsApi() {
           + '  .renderScale(0.75)               — pin the internal render scale (0.5..1)\n'
           + "  .renderScale('auto')             — governor-driven dynamic resolution (default)\n"
           + '  .dither(false)                   — disable the present-pass encode dither (A/B banding)\n'
+          + '  .legacyTileMeshes(true)          — force-build V2 per-tile occluder meshes under V3 (default off — they cause the load-time shader-compile stall)\n'
           + '  URL: ?msaV3=0 forces V2 for a reload  ·  ?msaV3=1 forces V3  ·  ?msaV3Scale=0.75|auto',
         );
       },

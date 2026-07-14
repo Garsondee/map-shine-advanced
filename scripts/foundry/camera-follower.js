@@ -20,6 +20,7 @@ import { isGmLike } from '../core/gm-parity.js';
 
 
 import { createLogger } from '../core/log.js';
+import { isV3ViewOnlyFloorsEnabled } from '../compositor-v3/v3-flags.js';
 import { scheduleHudAlign } from './hud-align-scheduler.js';
 import { moveTrace } from '../core/movement-trace-log.js';
 import {
@@ -448,6 +449,24 @@ export class CameraFollower {
 
     const isVisibleChange = clamped !== this._activeLevelIndex && this._levels.length > 1;
     const isReactiveReason = SKIP_CURTAIN_REASONS.has(reason);
+
+    // ── V3 floor-resident fast path (view-only switch) ───────────────────────
+    // Under V3 every floor stays resident in the unified pass, so a deliberate
+    // floor change is a VIEW change, not a content rebuild: skip Foundry's
+    // canvas.scene.view({level}) (which forces a full canvas.draw teardown +
+    // redraw + streaming remount — the ~20s of GPU work that crashed the switch
+    // on constrained VRAM) and skip the mask rebuild (masks are pre-warmed
+    // resident). Just update the viewed-floor state, refresh Foundry's level +
+    // perception lightly, and request a V3 render.
+    //
+    // Reliability first: only take this path when the target floor's masks are
+    // proven resident; otherwise fall through to the curtain rebuild so an
+    // un-warmed floor is composed behind the curtain rather than shown broken.
+    if (emit && isVisibleChange && !isReactiveReason && isV3ViewOnlyFloorsEnabled()
+        && this._isFloorResidentForViewOnly(level)) {
+      return this._applyViewOnlyLevelSwitch(clamped, level, reason);
+    }
+
     const curtain = window.MapShine?.levelTransitionCurtain ?? null;
     const curtainAvailable = !!(
       curtain
@@ -559,7 +578,7 @@ export class CameraFollower {
    * @private
    */
   _applyActiveLevelByIndex(index, options = {}) {
-    const { emit = true, reason = 'set-active-level' } = options;
+    const { emit = true, reason = 'set-active-level', viewOnly = false } = options;
     if (!this._levels.length) return null;
 
     const clamped = Math.max(0, Math.min(this._levels.length - 1, Number(index) || 0));
@@ -589,10 +608,96 @@ export class CameraFollower {
       previous.lockMode !== this._activeLevelContext.lockMode ||
       previous.center !== this._activeLevelContext.center;
     if (changed) {
-      this._emitLevelContextChanged(reason);
+      this._emitLevelContextChanged(reason, { viewOnly });
     }
 
     return this._activeLevelContext;
+  }
+
+  /**
+   * Whether the target level's masks are resident so a view-only switch will
+   * render correctly without a rebuild. Requires the mask compositor to report
+   * the band's outdoors stack warm (pre-warmed at load, or a previous visit).
+   * @param {object} level - a `_levels[]` entry ({levelId, bottom, top, ...}).
+   * @returns {boolean}
+   * @private
+   */
+  _isFloorResidentForViewOnly(level) {
+    try {
+      if (!level || level.source !== 'v14-native') return false;
+      const compositor = window.MapShine?.sceneComposer?._sceneMaskCompositor;
+      if (!compositor || typeof compositor.isBandWarmForOutdoorsStack !== 'function') return false;
+      const bottom = Number(level.bottom);
+      const top = Number(level.top);
+      if (!Number.isFinite(bottom) || !Number.isFinite(top)) return false;
+      return compositor.isBandWarmForOutdoorsStack(`${bottom}:${top}`, canvas?.scene ?? null) === true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /**
+   * V3 floor-resident view-only floor switch: update the viewed-floor state and
+   * Foundry's level/perception WITHOUT Foundry's `canvas.scene.view({level})`
+   * (which forces a full `canvas.draw()` teardown + redraw). V3 already holds
+   * every floor resident and renders the frame itself, so only the *view* must
+   * change — no content rebuild, no streaming remount, no mask bake.
+   *
+   * Foundry-side (best-effort, guarded): set `game.user.viewedLevel` and the
+   * scene's `_view`/`_viewPosition.level`, then a perception refresh so vision /
+   * occlusion / lighting re-evaluate for the new level. This is the experimental
+   * lighter replacement for `canvas.draw`'s level handling; if a consumer needs
+   * more of Foundry's per-level draw, it degrades (stale until the next full
+   * draw), never crashes.
+   *
+   * @param {number} clamped - target level index.
+   * @param {object} level - the target `_levels[]` entry.
+   * @param {string} reason
+   * @returns {object|null} the active level context.
+   * @private
+   */
+  _applyViewOnlyLevelSwitch(clamped, level, reason) {
+    log.info(`V3 view-only floor switch → ${level.label ?? level.levelId} (resident; no canvas.draw)`);
+    try {
+      if (window.MapShine) window.MapShine.__v3ViewOnlyFloorSwitchInFlight = true;
+    } catch (_) {}
+
+    // 1. MSA state + emit (viewOnly) — drives FloorStack active index, per-floor
+    //    visibility, and a view-only levelMaskRebuild that skips composeFloor +
+    //    forceRepopulate.
+    const ctx = this._applyActiveLevelByIndex(clamped, { emit: true, reason, viewOnly: true });
+
+    // 2. Foundry-side level state — best-effort, each piece independently
+    //    guarded so a Foundry API shift degrades rather than throws.
+    try { if (globalThis.game?.user) game.user.viewedLevel = level.levelId ?? null; } catch (_) {}
+    try {
+      const scene = canvas?.scene;
+      if (scene) {
+        scene._view = level.levelId ?? scene._view;
+        if (scene._viewPosition) scene._viewPosition.level = level.levelId ?? scene._viewPosition.level;
+      }
+    } catch (_) {}
+    // 3. Refresh perception (vision/occlusion/lighting) for the new level
+    //    without redrawing placeables.
+    try {
+      canvas?.perception?.update?.({
+        refreshVision: true,
+        refreshOcclusion: true,
+        refreshLighting: true,
+        refreshSounds: true,
+      }, true);
+    } catch (_) {}
+
+    // 4. Request a V3 render of the new view.
+    try {
+      window.MapShine?.renderLoop?.requestRender?.();
+      window.MapShine?.renderLoop?.requestContinuousRender?.(300);
+    } catch (_) {}
+
+    try {
+      if (window.MapShine) window.MapShine.__v3ViewOnlyFloorSwitchInFlight = false;
+    } catch (_) {}
+    return ctx;
   }
 
   stepLevel(delta = 1, options = {}) {
@@ -843,13 +948,17 @@ export class CameraFollower {
     return true;
   }
 
-  _emitLevelContextChanged(reason = 'unknown') {
+  _emitLevelContextChanged(reason = 'unknown', opts = {}) {
     const payload = {
       context: this.getActiveLevelContext(),
       levels: this.getAvailableLevels(),
       diagnostics: this.getLevelDiagnostics(),
       reason,
       lockMode: this._lockMode,
+      // V3 floor-resident view-only switch: the mask rebuild handler skips the
+      // cold composeFloor + forceRepopulate (masks resident, effects resident)
+      // and does only the cheap state/visibility update.
+      viewOnly: opts.viewOnly === true,
     };
 
     // IMPORTANT: Update globals BEFORE firing the hook so that all hook

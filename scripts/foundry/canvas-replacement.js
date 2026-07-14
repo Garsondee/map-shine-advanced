@@ -3556,6 +3556,11 @@ export function initialize() {
       const levelMaskRebuildPromise = safeCallAsync(async () => {
         const ms = window.MapShine;
         if (!sceneSettings.isMapShineRenderingActive(canvas?.scene)) return;
+        // V3 floor-resident view-only switch: masks are resident (pre-warmed)
+        // and effects are resident in the bus, so skip the cold composeFloor
+        // bake and the effect forceRepopulate — do only the cheap active-band
+        // sync + consumer refresh so V3 lighting points at the new floor's mask.
+        const viewOnly = payload?.viewOnly === true;
 
         try {
           if (ms) ms.__levelMaskRebuildContext = null;
@@ -3717,10 +3722,10 @@ export function initialize() {
         ) {
           const bandKey = activeBandKey;
           try {
-            if (warmBandRevisit && !pathChanged) {
+            if ((warmBandRevisit && !pathChanged) || viewOnly) {
               try { compositor.syncActiveFloorFromFloorStack?.(); } catch (_) {}
               masksRecomposed = false;
-              log.debug(`Level change: active band ${bandKey} already warm — skipping compose`);
+              log.debug(`Level change: active band ${bandKey} ${viewOnly ? 'view-only (resident)' : 'already warm'} — skipping compose`);
             } else {
               if (typeof compositor.primeFloorForRecompose === 'function') {
                 compositor.primeFloorForRecompose(bandKey);
@@ -3793,7 +3798,7 @@ export function initialize() {
         // the effect graph when masks or art actually changed. On revisits
         // (composeFloor cache hit, same mask bundle), `_applyCurrentFloorVisibility`
         // and `_syncOutdoorsMaskConsumers` are enough — skip the full populate queue.
-        const needsEffectRepopulate = pathChanged || masksRecomposed;
+        const needsEffectRepopulate = !viewOnly && (pathChanged || masksRecomposed);
         const floorCompositor = ms?.floorCompositorV2 ?? null;
         if (didV14Resync || (compositor && hasLevels)) {
           if (

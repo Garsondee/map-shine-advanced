@@ -56,6 +56,8 @@ let _runtimeV3RenderScale = null;
 let _runtimeV3Dither = null;
 /** @type {boolean|null} Build V2-only per-tile occluder/presence meshes (default OFF under V3). */
 let _runtimeV3LegacyTileMeshes = null;
+/** @type {boolean|null} View-only floor switches (skip Foundry canvas.draw); default OFF (experimental). */
+let _runtimeV3ViewOnlyFloors = null;
 
 /**
  * Tri-state URL flag: `?param=1/true/on` → true, `?param=0/false/off` → false,
@@ -402,6 +404,45 @@ export function setV3LegacyTileMeshes(on) {
 }
 
 /**
+ * Whether a floor switch takes the V3 **view-only** fast path: skip Foundry's
+ * `canvas.scene.view({level})` (which forces a full `canvas.draw()` teardown +
+ * redraw + streaming remount) and the mask rebuild, and instead just update the
+ * viewed-floor state + Foundry's level/perception and request a V3 render. V3
+ * keeps every floor resident in the unified pass, so a floor change is a *view*
+ * change, not a content rebuild — the floor-resident architecture.
+ *
+ * Only engaged when {@link isV3PipelineEnabled} and {@link isV3FloorFastPathEnabled}
+ * are on AND the target floor's masks are already resident (pre-warmed); an
+ * un-resident floor falls back to the full curtain rebuild (reliability first).
+ *
+ * **Default OFF (experimental)** — it bypasses Foundry's per-level canvas draw,
+ * so vision/token-control for the new level are updated by a lighter perception
+ * refresh instead. Opt in to test: `MapShine.v3.viewOnlyFloors(true)` /
+ * `?msaV3ViewOnlyFloors=1`.
+ * @returns {boolean}
+ */
+export function isV3ViewOnlyFloorsEnabled() {
+  if (!isV3PipelineEnabled() || !isV3FloorFastPathEnabled()) return false;
+  if (_runtimeV3ViewOnlyFloors !== null) return _runtimeV3ViewOnlyFloors;
+  try {
+    if (window?.MapShine?.__v3ViewOnlyFloors === true) return true;
+    if (window?.MapShine?.__v3ViewOnlyFloors === false) return false;
+  } catch (_) {}
+  const url = _urlFlag('msaV3ViewOnlyFloors');
+  if (url !== null) return url;
+  return false; // default OFF (experimental)
+}
+
+/**
+ * @param {boolean|null} on Pass `null` to clear the override.
+ * @returns {ReturnType<typeof getV3Status>}
+ */
+export function setV3ViewOnlyFloors(on) {
+  _runtimeV3ViewOnlyFloors = on === null ? null : !!on;
+  return getV3Status();
+}
+
+/**
  * Runtime override for the V3 pipeline (live A/B, does not persist unless asked).
  * @param {boolean|null} on Pass `null` to clear the override.
  * @param {{ persist?: boolean }} [opts]
@@ -444,6 +485,7 @@ export function getV3Status() {
     renderScale: getV3RenderScaleSetting(),
     dither: isV3DitherEnabled(),
     legacyTileMeshes: isV3LegacyTileMeshesEnabled(),
+    viewOnlyFloors: isV3ViewOnlyFloorsEnabled(),
     source: {
       pipeline: _runtimeV3Pipeline !== null ? 'runtime'
         : (() => {
@@ -487,6 +529,7 @@ export function exposeV3FlagsApi() {
       renderScale: (v) => setV3RenderScale(v),
       dither: (on) => setV3Dither(on),
       legacyTileMeshes: (on) => setV3LegacyTileMeshes(on),
+      viewOnlyFloors: (on) => setV3ViewOnlyFloors(on),
       perf: () => {
         try {
           const pipe = window?.MapShine?.__v3PipelineInstance;
@@ -532,6 +575,7 @@ export function exposeV3FlagsApi() {
           + "  .renderScale('auto')             — governor-driven dynamic resolution (default)\n"
           + '  .dither(false)                   — disable the present-pass encode dither (A/B banding)\n'
           + '  .legacyTileMeshes(true)          — force-build V2 per-tile occluder meshes under V3 (default off — they cause the load-time shader-compile stall)\n'
+          + '  .viewOnlyFloors(true)            — EXPERIMENTAL floor-resident fast path: floor switch skips Foundry canvas.draw + mask rebuild (instant, no crash), needs floors pre-warmed\n'
           + '  URL: ?msaV3=0 forces V2 for a reload  ·  ?msaV3=1 forces V3  ·  ?msaV3Scale=0.75|auto',
         );
       },

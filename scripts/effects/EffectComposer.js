@@ -835,6 +835,15 @@ export class EffectComposer {
       }
     }
 
+    // Authoritative "who rendered this frame" signal — consumed by the
+    // scene-transition curtain's readiness gate (which must not wait on
+    // V2-only signals when V3 owns the frame) and by diagnostics.
+    try {
+      if (typeof window !== 'undefined' && window.MapShine) {
+        window.MapShine.__v3OwnsFrame = _v3OwnsFrame;
+      }
+    } catch (_) {}
+
     if (!_v3OwnsFrame) {
       // V3 disabled (debug) or not yet initialized → V2 renders this frame.
       _compositorV2.render({

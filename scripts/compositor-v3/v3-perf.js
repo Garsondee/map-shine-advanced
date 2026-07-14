@@ -39,6 +39,8 @@ export const FRAME_BUDGET_MS = 16.6;
  * @type {Record<string, number>}
  */
 export const PASS_BUDGETS_MS = {
+  sims: 1.0,
+  streaming: 1.5,
   unifiedGeometry: 3.5,
   lighting: 3.0,
   effects: 2.0,
@@ -166,6 +168,20 @@ export class V3PerfMonitor {
     return Math.max(cpu, gpu);
   }
 
+  /**
+   * The cost split the governor's up-predictor needs (Forward+ §16.3 P2, revised
+   * against 2026-07-14 hardware data): GPU cost scales ≈ with pixel count, but
+   * main-thread CPU cost is ~resolution-independent (measured identical at 0.7
+   * and 0.5 scale), so predicting a rung-up must scale only the GPU share.
+   * @returns {{cpuMs: number, gpuMs: number|null}}
+   */
+  costComponents() {
+    return {
+      cpuMs: this._cpuTotalEma ?? 0,
+      gpuMs: this._gpuTotalEma, // null until the GPU timer delivers
+    };
+  }
+
   /** @param {string} name @returns {number} the pass's budget in ms. */
   budgetFor(name) {
     const b = this._budgets[name];
@@ -207,12 +223,20 @@ export class V3PerfMonitor {
  * feed it a cost estimate once per rendered frame; read `scale`.
  *
  * Behavior contract (the tests encode this):
- *  - No changes during the first `warmupFrames` frames (load-storm immunity).
+ *  - While {@link RenderScaleGovernor#setHold held} (scene loading): no changes,
+ *    no streak accumulation; releasing the hold imposes a settle cooldown so the
+ *    load's tail frames can't trigger a step. This is the primary load-storm
+ *    guard (the warmup window only covers cold starts without a load signal —
+ *    2026-07-14 hardware run showed real loads outlast any fixed warmup).
+ *  - No changes during the first `warmupFrames` frames (cold-start immunity).
  *  - Step DOWN one rung after `downFrames` consecutive frames with
  *    `cost > budget × highWater`, then hold for `cooldownFrames`.
  *  - Step UP one rung after `upFrames` consecutive frames where the *predicted*
- *    cost at the higher rung (`cost × (upScale/curScale)²`) stays under
- *    `budget × lowWater`, then hold for `cooldownFrames`.
+ *    cost at the higher rung stays under `budget × lowWater`, then hold for
+ *    `cooldownFrames`. Prediction: GPU cost scales with pixels (× r²); CPU cost
+ *    does not (measured resolution-independent on hardware) — so with GPU
+ *    timings the predictor is `max(cpu, gpu × r²)`, and only without them does
+ *    it fall back to scaling the whole cost (conservative).
  *  - Never leaves [minScale, maxScale] ∩ ladder.
  */
 export class RenderScaleGovernor {
@@ -226,6 +250,8 @@ export class RenderScaleGovernor {
    * @param {number} [options.upFrames=180]
    * @param {number} [options.cooldownFrames=90]
    * @param {number} [options.warmupFrames=60]
+   * @param {number} [options.postHoldSettleFrames=60] - Cooldown imposed when a
+   *   hold releases (a load's last frames are not steady-state evidence).
    * @param {number} [options.minScale=0.5]
    * @param {number} [options.maxScale=1.0]
    */
@@ -245,27 +271,78 @@ export class RenderScaleGovernor {
     this._upFrames = Number.isFinite(options.upFrames) ? options.upFrames : 180;
     this._cooldownFrames = Number.isFinite(options.cooldownFrames) ? options.cooldownFrames : 90;
     this._warmupFrames = Number.isFinite(options.warmupFrames) ? options.warmupFrames : 60;
+    this._postHoldSettleFrames = Number.isFinite(options.postHoldSettleFrames)
+      ? options.postHoldSettleFrames : 60;
 
     this._rung = 0;           // index into _ladder (0 = highest scale)
     this._frames = 0;
     this._cooldown = 0;
+    /** @type {number} post-hold settle frames remaining. Distinct from
+     * `_cooldown`: cooldown only spaces steps (streaks keep accumulating so a
+     * sustained condition steps the moment spacing allows), while settle
+     * DISCARDS evidence entirely — the load's tail frames must not feed
+     * streaks at all. */
+    this._settle = 0;
     this._overStreak = 0;
     this._underStreak = 0;
     this._lastChange = null;  // {frame, from, to, reason}
+    this._holdActive = false;
+    this._holdReason = null;
+    this._lastPredictedUpMs = null;
   }
 
   /** @returns {number} the current render scale (a ladder rung). */
   get scale() { return this._ladder[this._rung]; }
 
   /**
+   * Suspend/resume the control loop. While held the scale is frozen and no
+   * streak evidence accumulates (load-time frames are not steady-state
+   * evidence). Releasing imposes a settle cooldown. Idempotent per state.
+   * @param {boolean} active
+   * @param {string|null} [reason]
+   */
+  setHold(active, reason = null) {
+    const on = !!active;
+    if (on === this._holdActive) {
+      if (on && reason) this._holdReason = reason;
+      return;
+    }
+    this._holdActive = on;
+    this._holdReason = on ? (reason ?? 'held') : null;
+    this._overStreak = 0;
+    this._underStreak = 0;
+    if (!on) {
+      this._settle = Math.max(this._settle, this._postHoldSettleFrames);
+    }
+  }
+
+  /**
    * Feed one rendered frame's cost estimate.
    * @param {number} costMs - e.g. {@link V3PerfMonitor#costEstimateMs}.
+   * @param {{cpuMs?: number, gpuMs?: number|null}} [components] - Optional cost
+   *   split (see {@link V3PerfMonitor#costComponents}) for the resolution-aware
+   *   up-predictor; omitted → the whole cost is assumed to scale with pixels.
    * @returns {{changed: boolean, scale: number}}
    */
-  update(costMs) {
+  update(costMs, components = null) {
     this._frames += 1;
     if (this._cooldown > 0) this._cooldown -= 1;
     const cost = Number.isFinite(costMs) ? costMs : 0;
+
+    if (this._holdActive) {
+      this._overStreak = 0;
+      this._underStreak = 0;
+      return { changed: false, scale: this.scale };
+    }
+
+    // Post-hold settle: discard this frame's evidence entirely (see the
+    // `_settle` field comment for how this differs from `_cooldown`).
+    if (this._settle > 0) {
+      this._settle -= 1;
+      this._overStreak = 0;
+      this._underStreak = 0;
+      return { changed: false, scale: this.scale };
+    }
 
     if (this._frames <= this._warmupFrames) {
       return { changed: false, scale: this.scale };
@@ -277,16 +354,27 @@ export class RenderScaleGovernor {
       this._underStreak = 0;
     } else {
       this._overStreak = 0;
-      // Upscale headroom: predicted cost at the next rung UP stays comfortably
-      // under budget (cost scales ≈ with pixel count = scale²).
+      // Upscale headroom: predicted cost at the next rung UP must stay
+      // comfortably under budget. GPU cost scales ≈ with pixel count (× r²);
+      // CPU submission cost does not (measured identical across scales on
+      // hardware, 2026-07-14) — so with a known split, only the GPU share is
+      // scaled and CPU acts as a floor. Without GPU timings, conservatively
+      // scale the whole cost.
       if (this._rung > 0) {
         const cur = this.scale;
         const up = this._ladder[this._rung - 1];
-        const predicted = cost * ((up * up) / (cur * cur));
+        const r2 = (up * up) / (cur * cur);
+        const gpu = Number.isFinite(components?.gpuMs) ? components.gpuMs : null;
+        const cpu = Number.isFinite(components?.cpuMs) ? components.cpuMs : null;
+        const predicted = (gpu != null)
+          ? Math.max(cpu ?? 0, gpu * r2)
+          : cost * r2;
+        this._lastPredictedUpMs = predicted;
         if (predicted < this._budget * this._lowWater) this._underStreak += 1;
         else this._underStreak = 0;
       } else {
         this._underStreak = 0;
+        this._lastPredictedUpMs = null;
       }
     }
 
@@ -321,6 +409,7 @@ export class RenderScaleGovernor {
   reset() {
     this._frames = 0;
     this._cooldown = 0;
+    this._settle = 0;
     this._overStreak = 0;
     this._underStreak = 0;
   }
@@ -333,9 +422,14 @@ export class RenderScaleGovernor {
       frames: this._frames,
       warmupRemaining: Math.max(0, this._warmupFrames - this._frames),
       cooldownRemaining: this._cooldown,
+      settleRemaining: this._settle,
       overStreak: this._overStreak,
       underStreak: this._underStreak,
       frameBudgetMs: this._budget,
+      holdActive: this._holdActive,
+      holdReason: this._holdReason,
+      predictedUpMs: this._lastPredictedUpMs == null ? null : round2(this._lastPredictedUpMs),
+      upThresholdMs: round2(this._budget * this._lowWater),
       lastChange: this._lastChange ? { ...this._lastChange } : null,
     };
   }

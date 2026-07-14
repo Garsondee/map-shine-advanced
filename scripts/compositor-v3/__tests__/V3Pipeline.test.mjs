@@ -63,7 +63,7 @@ function makeBus() {
   };
 }
 
-const EXPECTED_ORDER = ['unifiedGeometry', 'lighting', 'effects', 'post', 'present'];
+const EXPECTED_ORDER = ['sims', 'streaming', 'unifiedGeometry', 'lighting', 'effects', 'post', 'present'];
 
 export function run(t) {
   const { ok } = t;
@@ -110,7 +110,8 @@ export function run(t) {
     ok('present got the scene.graded texture', present.calls === 1 && post.lastGradedRT && present.lastTexture === post.lastGradedRT.texture);
     const diag = p.getDiagnostics();
     ok('pooled 4 targets (color + illum + lit + graded)', diag.stats.pooled === 4);
-    ok('5 pass timings', diag.timings.length === 5);
+    ok('7 pass timings', diag.timings.length === 7);
+    ok('content frame counted', diag.frames.frames === 1 && diag.frames.contentFrames === 1);
   }
 
   // Bus missing → geometry clears to black, later passes still run (no throw).
@@ -122,8 +123,10 @@ export function run(t) {
     stubLighting(p);
     stubPost(p);
     const res = p.render({ renderBus: null, camera: { id: 'c' } });
-    ok('renders without a bus', res && res.order.length === 5);
+    ok('renders without a bus', res && res.order.length === 7);
     ok('cleared scene.color when bus missing', renderer.calls.clear >= 1);
+    const counters = p.getFrameCounters();
+    ok('bus-less frame is not a content frame', counters.frames === 1 && counters.contentFrames === 0);
   }
 
   // Deferred init when THREE missing.
@@ -158,7 +161,7 @@ export function run(t) {
     globalThis.window.MapShine = { __v3RenderScale: 0.5 };
     try {
       const res = p.render({ renderBus: bus, camera: { id: 'c' } });
-      ok('scaled render runs all passes', res && res.order.length === 5);
+      ok('scaled render runs all passes', res && res.order.length === 7);
       ok('scene.color allocated at render scale',
          bus.rec.lastTarget.width === 800 && bus.rec.lastTarget.height === 450);
       ok('present still blitted', present.calls === 1);
@@ -166,10 +169,30 @@ export function run(t) {
       ok('perf reports fixed scale', perf.renderScale.mode === 'fixed' && perf.renderScale.scale === 0.5);
       ok('perf carries both sizes',
          perf.presentSize.width === 1600 && perf.renderSize.width === 800 && perf.renderSize.height === 450);
-      ok('monitor folded the frame', perf.monitor.frames === 1 && perf.monitor.passes.length === 5);
+      ok('monitor folded the frame', perf.monitor.frames === 1 && perf.monitor.passes.length === 7);
       const diag = p.getDiagnostics();
       ok('diagnostics carry perf + gpuTimings fields',
          diag.perf && diag.perf.renderScale.scale === 0.5 && Array.isArray(diag.gpuTimings));
+    } finally {
+      globalThis.window.MapShine = prevMapShine;
+    }
+  }
+
+  // Scene-loading flag holds the governor (load storms are not evidence).
+  {
+    const T = makeTHREE();
+    const renderer = makeRenderer(400, 200);
+    const p = new V3Pipeline({ renderer, THREE: T }).initialize();
+    stubPresent(p); stubLighting(p); stubPost(p);
+    const prevMapShine = globalThis.window.MapShine;
+    globalThis.window.MapShine = { __msaSceneLoading: true };
+    try {
+      p.render({ renderBus: makeBus(), camera: { id: 'c' } });
+      const gov = p.getPerfReport().renderScale.governor;
+      ok('governor held while scene loading', gov.holdActive === true && gov.holdReason === 'scene-loading');
+      globalThis.window.MapShine = { __msaSceneLoading: false };
+      p.render({ renderBus: makeBus(), camera: { id: 'c' } });
+      ok('governor released after load', p.getPerfReport().renderScale.governor.holdActive === false);
     } finally {
       globalThis.window.MapShine = prevMapShine;
     }

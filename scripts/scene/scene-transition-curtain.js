@@ -18,6 +18,7 @@ import { createLogger } from '../core/log.js';
 import { getShaderCompileMonitor } from '../core/diagnostics/ShaderCompileMonitor.js';
 import { loadingScreenService as loadingOverlay } from '../ui/loading-screen/loading-screen-service.js';
 import { getTileStreamingManager } from '../streaming/tile-streaming-manager.js';
+import { isV3PipelineEnabled } from '../compositor-v3/v3-flags.js';
 
 const log = createLogger('SceneTransitionCurtain');
 
@@ -381,6 +382,22 @@ export class SceneTransitionCurtain {
     const renderer = window.MapShine?.renderer ?? null;
     const canValidate = fc && typeof fc._validateFrameInputs === 'function';
 
+    // V3 readiness (Forward+ §16): when the V3 pipeline owns the frame,
+    // the V2-shaped conditions below (full V2 render path, V2 frame-input
+    // validation) can NEVER become true — V2.render() is skipped — so waiting
+    // on them burned the full SCENE_READY_TIMEOUT_MS on every V3 load before
+    // "revealing anyway" (hardware-confirmed 2026-07-14: the Native "won't
+    // load" stall). Under V3, readiness = the graph producing real content
+    // frames, plus the same path-agnostic renderer-level program/draw checks.
+    const v3 = window.MapShine?.__v3PipelineInstance ?? null;
+    const v3OwnsFrame = () => {
+      try {
+        if (window.MapShine?.__v3OwnsFrame === true) return true;
+        // Fallback until the render seam has stamped the signal this session.
+        return !!(v3 && typeof v3.isReady === 'function' && v3.isReady() && isV3PipelineEnabled());
+      } catch (_) { return false; }
+    };
+
     // Release the load-slim render gate so full compositor frames can run
     // behind the black curtain before we fade clear.
     try {
@@ -394,6 +411,11 @@ export class SceneTransitionCurtain {
     let programsReadyTotal = -1;
     let renderCallsStable = 0;
     let lastInputReason = null;
+    let v3Owns = false;
+    let v3NewContentFrames = 0;
+    let v3LastContentFrames = (() => {
+      try { return v3?.getFrameCounters?.()?.contentFrames ?? 0; } catch (_) { return 0; }
+    })();
     const startRenderFrame = renderer?.info?.render?.frame;
     const startRenderCalls = renderer?.info?.render?.calls;
 
@@ -401,19 +423,32 @@ export class SceneTransitionCurtain {
       this._keepRendering(4000);
       await this._pumpCompositorFrames(1);
 
+      v3Owns = v3OwnsFrame();
+
       if (fc?._populateComplete === true) {
         populateStable += 1;
       } else {
         populateStable = 0;
       }
 
-      if (this._isFullCompositorFrameReady(fc)) {
+      // Cumulative NEW content frames since the wait began (not consecutive
+      // polls — frame pacing under load-tail stalls is legitimately slower
+      // than the poll interval; the evidence we need is "V3 produced ≥N real
+      // scene frames", not "one per poll").
+      if (v3Owns && v3) {
+        let cf = v3LastContentFrames;
+        try { cf = v3.getFrameCounters?.()?.contentFrames ?? cf; } catch (_) {}
+        if (cf > v3LastContentFrames) v3NewContentFrames += (cf - v3LastContentFrames);
+        v3LastContentFrames = cf;
+      }
+
+      if (!v3Owns && this._isFullCompositorFrameReady(fc)) {
         fullPathStable += 1;
       } else {
         fullPathStable = 0;
       }
 
-      if (canValidate && fullPathStable >= 2) {
+      if (!v3Owns && canValidate && fullPathStable >= 2) {
         let valid = false;
         let reason = null;
         try {
@@ -473,18 +508,30 @@ export class SceneTransitionCurtain {
         renderCallsStable = 0;
       }
 
-      const ready = !fc
-        ? (renderCallsStable >= 3)
-        : (
-          populateStable >= 2
-          && fullPathStable >= 2
-          && (!canValidate || inputsStable >= SCENE_READY_STABLE_POLLS)
+      const ready = v3Owns
+        ? (
+          // V3 branch: bus populate done (when the V2 compositor object exists —
+          // V3 still reuses its FloorRenderBus), ≥3 real V3 content frames, and
+          // the path-agnostic program/draw stability.
+          (!fc || populateStable >= 2)
+          && v3NewContentFrames >= 3
           && programsStable >= SCENE_COMPILED_PROGRAMS_STABLE_POLLS
           && renderCallsStable >= 2
-        );
+        )
+        : (!fc
+          ? (renderCallsStable >= 3)
+          : (
+            populateStable >= 2
+            && fullPathStable >= 2
+            && (!canValidate || inputsStable >= SCENE_READY_STABLE_POLLS)
+            && programsStable >= SCENE_COMPILED_PROGRAMS_STABLE_POLLS
+            && renderCallsStable >= 2
+          ));
 
       if (ready) {
         log.debug('Scene ready for curtain reveal', {
+          v3Owns,
+          v3NewContentFrames,
           populateStable,
           fullPathStable,
           inputsStable,
@@ -499,6 +546,8 @@ export class SceneTransitionCurtain {
 
     if (performance.now() >= deadline) {
       log.warn('Scene-ready wait timed out before full compositor frames — revealing anyway', {
+        v3Owns,
+        v3NewContentFrames,
         populateComplete: fc?._populateComplete === true,
         renderPath: window.MapShine?.__v2CompositorRenderPath ?? null,
         lastInputReason,

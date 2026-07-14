@@ -100,6 +100,11 @@ export class V3Pipeline {
     this._renderScale = 1;
     /** @type {'auto'|'fixed'} last frame's scale mode. */
     this._renderScaleMode = 'auto';
+    /** @type {number} successful graph executions (any content). */
+    this._framesRendered = 0;
+    /** @type {number} successful executions WITH a render bus (real scene frames) —
+     * the curtain's V3 readiness signal (scene-transition-curtain). */
+    this._contentFramesRendered = 0;
   }
 
   /**
@@ -189,6 +194,38 @@ export class V3Pipeline {
    * @private
    */
   _registerPasses() {
+    // ── Sims: advance effect simulations (candle flames animate in the bus
+    // scene; vegetation sims advance for the effects pass). A first-class pass —
+    // not folded into unifiedGeometry — so per-pass timings attribute
+    // main-thread cost precisely (§16.3 P1; the 2026-07-14 hardware run showed
+    // ~8 ms of resolution-independent CPU hiding inside the old combined pass).
+    // No reads/writes: ordering before unifiedGeometry comes from the graph's
+    // documented registration-order tie-break.
+    this._graph.addPass({
+      name: 'sims',
+      reads: [],
+      writes: [],
+      execute: (ctx) => {
+        const bus = ctx.frame?.renderBus ?? null;
+        if (!bus) return;
+        try { this._effects.tickSims(ctx.frame?.timeInfo ?? null, bus._scene ?? null); } catch (_) {}
+      },
+    });
+
+    // ── Streaming: keep streamed tile textures fresh (V2.render used to drive
+    // this). Separate pass for the same attribution reason — its GPU-timer
+    // bracket also captures streamed texture *uploads*, which the combined pass
+    // hid inside "geometry".
+    this._graph.addPass({
+      name: 'streaming',
+      reads: [],
+      writes: [],
+      execute: (ctx) => {
+        const bus = ctx.frame?.renderBus ?? null;
+        try { bus?.syncStreaming?.(); } catch (_) {}
+      },
+    });
+
     // ── Unified geometry: all floors at real Z (FloorRenderBus.renderTo) ──────
     this._graph.addPass({
       name: 'unifiedGeometry',
@@ -206,11 +243,6 @@ export class V3Pipeline {
           this._clear(ctx, rt);
           return;
         }
-        // Tick effect sims (candle flames attach to the bus scene and render in
-        // this pass once ticked; vegetation sims advance for the effects pass).
-        try { this._effects.tickSims(ctx.frame?.timeInfo ?? null, bus._scene ?? null); } catch (_) {}
-        // Keep streamed tile textures fresh even though V2.render() is skipped.
-        try { bus.syncStreaming?.(); } catch (_) {}
         // renderTo handles its own clear + camera-layer + state save/restore.
         bus.renderTo(renderer, camera, rt);
       },
@@ -377,6 +409,17 @@ export class V3Pipeline {
 
     this._ensureGpuTimer();
 
+    // Hold the governor while the scene is loading: load-storm frames are not
+    // steady-state evidence, and stepping resolution down mid-load both hides
+    // behind the curtain and then sticks (found on hardware 2026-07-14 — the
+    // governor dropped at frame 165 of a load and never recovered). The curtain
+    // clears __msaSceneLoading when it starts its reveal wait; the governor then
+    // observes the post-load settle before acting.
+    try {
+      const loading = globalThis.window?.MapShine?.__msaSceneLoading === true;
+      this._governor.setHold(loading, 'scene-loading');
+    } catch (_) {}
+
     // ── Render/present split (Forward+ §16.3 P2) ─────────────────────────────
     // Every 'screen' graph resource allocates at present × renderScale; the
     // present pass blits (bilinear-upsamples) to the real drawing buffer. The
@@ -416,14 +459,23 @@ export class V3Pipeline {
       return null;
     }
 
+    // Frame counters — the curtain's V3 readiness signal reads these.
+    if (result) {
+      this._framesRendered += 1;
+      if (frameCtx.renderBus) this._contentFramesRendered += 1;
+    }
+
     // ── Close the measurement loop (Forward+ §16.3 P1 → P2) ──────────────────
     // Fold this frame's timings into the rolling stats; in 'auto' mode let the
-    // governor act on the cost estimate. Guarded: perf machinery must never be
-    // able to take a frame down.
+    // governor act on the cost estimate + split (GPU scales with pixels, CPU
+    // does not). Guarded: perf machinery must never be able to take a frame down.
     try {
       this._perfMonitor.update(this._graph.getLastTimings(), this._graph.getGpuTimings());
       if (this._renderScaleMode === 'auto') {
-        const g = this._governor.update(this._perfMonitor.costEstimateMs());
+        const g = this._governor.update(
+          this._perfMonitor.costEstimateMs(),
+          this._perfMonitor.costComponents(),
+        );
         if (g.changed) {
           const st = this._governor.state();
           log.info(
@@ -436,6 +488,16 @@ export class V3Pipeline {
     } catch (_) {}
 
     return result;
+  }
+
+  /**
+   * Frame counters for load/reveal gating (scene-transition-curtain's V3
+   * readiness branch): `contentFrames` counts only frames rendered with a real
+   * render bus — i.e. actual scene content, not early clear-to-black frames.
+   * @returns {{frames: number, contentFrames: number}}
+   */
+  getFrameCounters() {
+    return { frames: this._framesRendered, contentFrames: this._contentFramesRendered };
   }
 
   /**
@@ -495,6 +557,7 @@ export class V3Pipeline {
     return {
       ready: this.isReady(),
       order,
+      frames: this.getFrameCounters(),
       timings: Array.from(this._graph.getLastTimings().entries()),
       gpuTimings: Array.from(this._graph.getGpuTimings().entries()),
       stats: this._graph.getStats(),

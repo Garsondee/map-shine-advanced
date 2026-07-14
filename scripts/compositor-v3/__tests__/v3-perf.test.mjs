@@ -102,4 +102,53 @@ export function run(t) {
     gov.update(100); gov.update(100); gov.update(1); gov.update(100); gov.update(100);
     ok('interrupted streak does not step', gov.scale === 1.0);
   }
+
+  // Hold (scene loading): frozen while held; settle cooldown after release.
+  {
+    const gov = new RenderScaleGovernor({
+      frameBudgetMs: 10, warmupFrames: 0, downFrames: 2, cooldownFrames: 0,
+      postHoldSettleFrames: 3,
+    });
+    gov.setHold(true, 'scene-loading');
+    for (let i = 0; i < 10; i++) gov.update(100);
+    ok('held: over-budget load frames change nothing', gov.scale === 1.0);
+    ok('held: state names the reason', gov.state().holdActive === true && gov.state().holdReason === 'scene-loading');
+    gov.setHold(false);
+    // Post-hold settle: 3 frames of cooldown block stepping, streaks accumulate after.
+    gov.update(100); gov.update(100); gov.update(100);
+    ok('post-hold settle blocks immediate step', gov.scale === 1.0);
+    gov.update(100); gov.update(100);
+    ok('steps down once settle + streak satisfied', gov.scale === 0.85);
+  }
+
+  // Split-cost up-predictor: CPU is a floor (resolution-independent), GPU scales.
+  {
+    const mk = () => {
+      const g = new RenderScaleGovernor({
+        frameBudgetMs: 16.6, warmupFrames: 0, downFrames: 1, cooldownFrames: 0,
+        upFrames: 2, lowWater: 0.7,
+      });
+      g.update(100); // step down to 0.85
+      return g;
+    };
+    // cpu 10 (fixed) + gpu 6 (scales ×1.384 → 8.3): predicted max(10, 8.3) = 10
+    // < 11.62 threshold → climbs. The OLD whole-cost model predicted
+    // 10 × 1.384 = 13.84 → blocked; this case is the 2026-07-14 hardware shape.
+    const g1 = mk();
+    ok('down rung reached', g1.scale === 0.85);
+    g1.update(10, { cpuMs: 10, gpuMs: 6 });
+    const r = g1.update(10, { cpuMs: 10, gpuMs: 6 });
+    ok('cpu-heavy frame climbs (gpu-only scaling)', r.changed && r.scale === 1.0);
+
+    // gpu-heavy: predicted max(4, 12×1.384=16.6) > 11.62 → never climbs.
+    const g2 = mk();
+    for (let i = 0; i < 10; i++) g2.update(12, { cpuMs: 4, gpuMs: 12 });
+    ok('gpu-heavy frame stays down', g2.scale === 0.85);
+    ok('predictedUpMs surfaced', g2.state().predictedUpMs > 11.62 && g2.state().upThresholdMs === 11.62);
+
+    // No components → conservative whole-cost scaling (old behavior).
+    const g3 = mk();
+    for (let i = 0; i < 10; i++) g3.update(10);
+    ok('componentless prediction stays conservative', g3.scale === 0.85);
+  }
 }

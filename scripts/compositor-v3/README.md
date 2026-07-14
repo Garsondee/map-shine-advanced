@@ -17,7 +17,7 @@ is the code-side orientation and status doc — **more current than
 | `GpuPassTimer.js` | Per-pass GPU ms via `EXT_disjoint_timer_query_webgl2` (Forward+ §16.3 P1). Async results, disjoint-safe, skips when another query owns the target (PerformanceRecorder), self-disables on errors. | ✅ built |
 | `v3-perf.js` | The performance contract (§16.3 P1/P2): frame + per-pass budgets, `V3PerfMonitor` rolling stats, `RenderScaleGovernor` (DRS ladder w/ warmup, streaks, cooldown), `computeRenderSize`. Pure logic, Node-verified. | ✅ built + verified |
 | `v3-flags.js` | Every `MapShine.v3.*` runtime flag + console API (`MapShine.v3.help()`), incl. `perf()`, `renderScale()`, `dither()`. | ✅ built |
-| `V3Pipeline.js` | Orchestrator: FrameGraph + ThreeAllocator + FullscreenPresent. Pass graph: `unifiedGeometry → lighting → effects → post → present`. Fail-safe `isReady()` gate. **Render/present split:** all `'screen'` RTs allocate at `drawingBuffer × renderScale`; present upsamples. Governor closes the loop in `'auto'` mode. | ✅ live |
+| `V3Pipeline.js` | Orchestrator: FrameGraph + ThreeAllocator + FullscreenPresent. Pass graph: `sims → streaming → unifiedGeometry → lighting → effects → post → present` (sims/streaming split out so per-pass timings attribute main-thread cost — the 2026-07-14 hardware run showed ~8 ms resolution-independent CPU hiding in the combined pass). Fail-safe `isReady()` gate; frame counters feed the scene curtain's V3 readiness branch. **Render/present split:** all `'screen'` RTs allocate at `drawingBuffer × renderScale`; present upsamples. Governor closes the loop in `'auto'` mode. | ✅ live |
 | `ForwardLightingPass.js` | Interim (non-clustered) per-light-mesh forward lighting: Foundry v14 illumination model, wall-clipped lights, day/night + indoor/outdoor ambient. | ✅ live |
 | `V3EffectsBridge.js` | Ticks/composites reused V2 effect instances (candle flames, bush/tree) under V3. | ✅ first cut |
 | `V3PostBridge.js` | Runs V2's `BloomEffectV2` + `ColorCorrectionEffectV2` (ToD + contextual indoor/outdoor grade) on the V3 lit buffer. Follows render-scale size changes. | ✅ live |
@@ -39,11 +39,27 @@ is the code-side orientation and status doc — **more current than
 - **Dynamic resolution (DRS):** default `renderScale` mode is `'auto'` — the
   governor walks the ladder 1.0 → 0.85 → 0.7 → 0.6 → 0.5 on sustained
   over-budget cost (graph CPU/GPU cost, never RAF wall time — idle throttling
-  must not read as "over budget"), with a 60-frame warmup (load-storm immunity),
-  15-frame down-streaks, 180-frame up-streaks, and a 90-frame cooldown between
-  steps. Scale changes are logged. Pin with `MapShine.v3.renderScale(0.75)`,
-  restore with `.renderScale('auto')`, URL `?msaV3Scale=`. At scale 1.0 the
-  present blit is pixel-exact (no resampling).
+  must not read as "over budget"), with 15-frame down-streaks, 180-frame
+  up-streaks, and a 90-frame cooldown between steps. **The governor is HELD
+  while a scene is loading** (`__msaSceneLoading`) and discards a settle
+  window of evidence after release — load storms are not steady-state
+  evidence (hardware run 2026-07-14: it stepped down at frame 165 of a load
+  and stuck). **Up-prediction scales only the GPU share** of the cost
+  (`max(cpu, gpu × r²)`): CPU submission cost is resolution-independent
+  (measured identical at 0.7 and 0.5), so the old whole-cost model could
+  never climb back on CPU-heavy frames. `perf()` prints the predicted
+  next-rung-up cost and the threshold it must clear. Scale changes are
+  logged. Pin with `MapShine.v3.renderScale(0.75)`, restore with
+  `.renderScale('auto')`, URL `?msaV3Scale=`. At scale 1.0 the present blit
+  is pixel-exact (no resampling).
+- **Scene-curtain readiness (V3 branch):** `scene-transition-curtain`'s reveal
+  gate previously waited on V2-only signals (`__v2CompositorRenderPath ===
+  'full'`, V2 frame-input validation) that never become true under V3 — every
+  V3 load burned the full 20 s timeout before "revealing anyway" (the Native
+  "won't load" stall, 2026-07-14). Under V3 the gate now requires: bus populate
+  complete + ≥3 real V3 content frames (`V3Pipeline.getFrameCounters()`) + the
+  same path-agnostic program/draw stability. The render seam stamps
+  `window.MapShine.__v3OwnsFrame` each frame as the authoritative signal.
 - **Dither:** the present pass adds ±0.5 LSB interleaved-gradient noise post-OETF
   (kills dark-scene banding). `MapShine.v3.dither(false)` / `?msaV3Dither=0` to A/B.
 - **WebGPU telemetry (W0):** crash reports record `navigator.gpu` presence +

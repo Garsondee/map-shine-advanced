@@ -450,12 +450,17 @@ export function exposeV3FlagsApi() {
           const report = pipe?.getPerfReport?.();
           if (!report) return { error: 'V3 pipeline not initialized yet (load a scene first)' };
           const rs = report.renderScale;
+          const gov = rs.governor ?? {};
           console.info(
             `V3 perf — render ${report.renderSize.width}×${report.renderSize.height}`
             + ` → present ${report.presentSize.width}×${report.presentSize.height}`
             + ` (scale ${rs.scale}${rs.mode === 'auto' ? ', auto' : ', fixed'})`
             + ` · frame budget ${report.monitor.frameBudgetMs} ms`
-            + ` · GPU timer ${report.gpuTimerSupported ? 'on' : 'unavailable'}`,
+            + ` · GPU timer ${report.gpuTimerSupported ? 'on' : 'unavailable'}`
+            + (gov.holdActive ? ` · governor HELD (${gov.holdReason})` : '')
+            + (Number.isFinite(gov.predictedUpMs)
+              ? ` · est. cost at next rung up ${gov.predictedUpMs} ms (needs < ${gov.upThresholdMs} ms to climb)`
+              : ''),
           );
           console.table(buildPerfRows(report.monitor));
           return report;

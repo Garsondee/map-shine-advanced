@@ -31,7 +31,12 @@ import { FullscreenPresent } from './FullscreenPresent.js';
 import { ForwardLightingPass } from './ForwardLightingPass.js';
 import { V3EffectsBridge } from './V3EffectsBridge.js';
 import { V3PostBridge } from './V3PostBridge.js';
-import { isV3TonemapEnabled, getV3HdrKnee, isV3PostEnabled } from './v3-flags.js';
+import { GpuPassTimer } from './GpuPassTimer.js';
+import { V3PerfMonitor, RenderScaleGovernor, computeRenderSize } from './v3-perf.js';
+import {
+  isV3TonemapEnabled, getV3HdrKnee, isV3PostEnabled, isV3DitherEnabled,
+  getV3RenderScaleSetting,
+} from './v3-flags.js';
 
 const log = createLogger('V3Pipeline');
 
@@ -77,6 +82,24 @@ export class V3Pipeline {
     /** @type {Record<string, boolean>} live copy so tests can flip caps. */
     this._impl = { ...PASS_IMPLEMENTED };
     this._lastError = null;
+
+    // ── Performance contract (Forward+ §16.3 P1/P2) ──────────────────────────
+    /** @type {V3PerfMonitor} rolling per-pass CPU/GPU stats vs budgets. */
+    this._perfMonitor = new V3PerfMonitor();
+    /** @type {RenderScaleGovernor} dynamic-resolution control loop ('auto' mode). */
+    this._governor = new RenderScaleGovernor({ frameBudgetMs: this._perfMonitor.frameBudgetMs });
+    /** @type {GpuPassTimer|null|undefined} undefined = not yet attempted for this renderer. */
+    this._gpuTimer = undefined;
+    /** @type {any} the renderer the GPU timer was created against (recreate on change). */
+    this._gpuTimerRenderer = null;
+    /** @type {{width: number, height: number}} last frame's present (drawing-buffer) size. */
+    this._presentSize = { width: 1, height: 1 };
+    /** @type {{width: number, height: number}} last frame's internal render size. */
+    this._renderSize = { width: 1, height: 1 };
+    /** @type {number} last frame's effective render scale. */
+    this._renderScale = 1;
+    /** @type {'auto'|'fixed'} last frame's scale mode. */
+    this._renderScaleMode = 'auto';
   }
 
   /**
@@ -280,7 +303,9 @@ export class V3Pipeline {
         // (post off, or CC with tone-mapping disabled) keep the rolloff.
         const ccOwnsToneMap = this._postAppliedCC && this._post.ccToneMappingActive();
         const tonemap = ccOwnsToneMap ? false : isV3TonemapEnabled();
-        this._present.present(renderer, tex, { tonemap, knee: getV3HdrKnee() });
+        this._present.present(renderer, tex, {
+          tonemap, knee: getV3HdrKnee(), dither: isV3DitherEnabled(),
+        });
       },
     });
   }
@@ -350,7 +375,19 @@ export class V3Pipeline {
     // Runtime handle (not a static import) — see LightingDirector.js exposure note.
     try { globalThis.window?.MapShine?.lightingDirector?.update?.(); } catch (_) {}
 
-    const size = this._resolveDrawingBufferSize();
+    this._ensureGpuTimer();
+
+    // ── Render/present split (Forward+ §16.3 P2) ─────────────────────────────
+    // Every 'screen' graph resource allocates at present × renderScale; the
+    // present pass blits (bilinear-upsamples) to the real drawing buffer. The
+    // scale comes from the flag ('auto' → the governor's rung, number → pinned).
+    const present = this._resolveDrawingBufferSize();
+    const scaleSetting = getV3RenderScaleSetting();
+    this._renderScaleMode = scaleSetting === 'auto' ? 'auto' : 'fixed';
+    this._renderScale = scaleSetting === 'auto' ? this._governor.scale : scaleSetting;
+    const size = computeRenderSize(present.width, present.height, this._renderScale);
+    this._presentSize = present;
+    this._renderSize = size;
 
     // Re-import per-frame external resources (mask products, sim RTs, vision).
     // clearImports() invalidates the compiled order; re-importing the same names
@@ -362,8 +399,9 @@ export class V3Pipeline {
       }
     }
 
+    let result = null;
     try {
-      return this._graph.execute({
+      result = this._graph.execute({
         renderer: this.renderer,
         camera: frameCtx.camera ?? this.camera,
         width: size.width,
@@ -377,6 +415,53 @@ export class V3Pipeline {
       log.warn('V3 frame execute threw', err);
       return null;
     }
+
+    // ── Close the measurement loop (Forward+ §16.3 P1 → P2) ──────────────────
+    // Fold this frame's timings into the rolling stats; in 'auto' mode let the
+    // governor act on the cost estimate. Guarded: perf machinery must never be
+    // able to take a frame down.
+    try {
+      this._perfMonitor.update(this._graph.getLastTimings(), this._graph.getGpuTimings());
+      if (this._renderScaleMode === 'auto') {
+        const g = this._governor.update(this._perfMonitor.costEstimateMs());
+        if (g.changed) {
+          const st = this._governor.state();
+          log.info(
+            `render scale → ${g.scale} (${st.lastChange?.reason ?? 'governor'}); `
+            + `cost ~${Math.round(this._perfMonitor.costEstimateMs() * 10) / 10} ms `
+            + `vs ${this._perfMonitor.frameBudgetMs} ms budget`,
+          );
+        }
+      }
+    } catch (_) {}
+
+    return result;
+  }
+
+  /**
+   * Create (or drop) the GPU pass timer for the current renderer. Lazy because
+   * the renderer may not exist at construction; renderer changes (context
+   * recovery rebuilds) recreate the timer against the new GL context. Mock
+   * renderers without getContext() simply run without GPU timings.
+   * @private
+   */
+  _ensureGpuTimer() {
+    if (this._gpuTimer !== undefined && this._gpuTimerRenderer === this.renderer) return;
+    try { this._gpuTimer?.dispose?.(); } catch (_) {}
+    this._gpuTimer = null;
+    this._gpuTimerRenderer = this.renderer;
+    try {
+      const gl = this.renderer?.getContext?.();
+      if (gl && typeof gl.createQuery === 'function') {
+        const timer = new GpuPassTimer({ gl });
+        if (timer.isSupported()) {
+          this._gpuTimer = timer;
+          this._graph.setGpuTimer(timer);
+          return;
+        }
+      }
+    } catch (_) {}
+    this._graph.setGpuTimer(null);
   }
 
   /**
@@ -400,18 +485,43 @@ export class V3Pipeline {
 
   /**
    * Diagnostics for the crash/perf reports (Forward+ §14.1 principle 6).
-   * @returns {{ ready: boolean, order: string[], timings: Array<[string, number]>, stats: object, impl: object, lastError: string|null }}
+   * @returns {{ ready: boolean, order: string[], timings: Array<[string, number]>, gpuTimings: Array<[string, number]>, stats: object, impl: object, perf: object, lastError: string|null }}
    */
   getDiagnostics() {
     let order = [];
     try { order = this._graph.getExecutionOrder(); } catch (_) {}
+    let perf = null;
+    try { perf = this.getPerfReport(); } catch (_) {}
     return {
       ready: this.isReady(),
       order,
       timings: Array.from(this._graph.getLastTimings().entries()),
+      gpuTimings: Array.from(this._graph.getGpuTimings().entries()),
       stats: this._graph.getStats(),
       impl: { ...this._impl },
+      perf,
       lastError: this._lastError ? String(this._lastError.message ?? this._lastError) : null,
+    };
+  }
+
+  /**
+   * The performance-contract snapshot (Forward+ §16.3 P1): rolling per-pass
+   * CPU/GPU stats vs budgets, plus the render/present split and governor state.
+   * Consumed by `MapShine.v3.perf()` and included in crash diagnostics.
+   * @returns {object}
+   */
+  getPerfReport() {
+    return {
+      monitor: this._perfMonitor.getReport(),
+      renderScale: {
+        mode: this._renderScaleMode,
+        scale: this._renderScale,
+        setting: (() => { try { return getV3RenderScaleSetting(); } catch (_) { return null; } })(),
+        governor: this._governor.state(),
+      },
+      presentSize: { ...this._presentSize },
+      renderSize: { ...this._renderSize },
+      gpuTimerSupported: !!(this._gpuTimer && this._gpuTimer.isSupported?.()),
     };
   }
 
@@ -433,6 +543,9 @@ export class V3Pipeline {
     try { this._present.dispose(); } catch (_) {}
     try { this._lighting.dispose(); } catch (_) {}
     try { this._post.dispose(); } catch (_) {}
+    try { if (this._gpuTimer) this._gpuTimer.dispose?.(); } catch (_) {}
+    this._gpuTimer = undefined;
+    this._gpuTimerRenderer = null;
     this._initialized = false;
   }
 }

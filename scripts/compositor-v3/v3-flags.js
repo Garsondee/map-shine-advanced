@@ -25,6 +25,7 @@
  */
 
 import { createLogger } from '../core/log.js';
+import { buildPerfRows } from './v3-perf.js';
 
 const log = createLogger('V3Flags');
 
@@ -49,6 +50,10 @@ let _runtimeV3HdrKnee = null;
 let _runtimeV3Post = null;
 /** @type {boolean|null} Run V2's bloom in the V3 post chain (default on; needs post on). */
 let _runtimeV3Bloom = null;
+/** @type {'auto'|number|null} Render-scale setting: 'auto' = governor-driven DRS, number = fixed (default 'auto'). */
+let _runtimeV3RenderScale = null;
+/** @type {boolean|null} Dither the present pass's 8-bit encode (default on — kills banding on dark scenes). */
+let _runtimeV3Dither = null;
 
 /**
  * Tri-state URL flag: `?param=1/true/on` → true, `?param=0/false/off` → false,
@@ -292,6 +297,70 @@ export function setV3Bloom(on) {
 }
 
 /**
+ * The render-scale SETTING for the internal render/present split (Forward+
+ * §16.3 P2): `'auto'` hands control to the frame-time governor (DRS); a number
+ * in [0.5, 1] pins the internal render scale. This is the *setting* — the live
+ * effective scale (what the governor chose) is in `MapShine.v3.perf()`.
+ *
+ * Resolution: runtime override → `window.MapShine.__v3RenderScale` → URL
+ * `?msaV3Scale=0.75|auto` → default `'auto'`.
+ * @returns {'auto'|number}
+ */
+export function getV3RenderScaleSetting() {
+  const clamp = (n) => Math.max(0.5, Math.min(1, n));
+  if (_runtimeV3RenderScale !== null) return _runtimeV3RenderScale;
+  try {
+    const g = window?.MapShine?.__v3RenderScale;
+    if (g === 'auto') return 'auto';
+    if (Number.isFinite(Number(g)) && g !== null && g !== undefined && g !== '') return clamp(Number(g));
+  } catch (_) {}
+  try {
+    const v = new URLSearchParams(window.location.search).get('msaV3Scale');
+    if (v === 'auto') return 'auto';
+    if (v != null && Number.isFinite(Number(v))) return clamp(Number(v));
+  } catch (_) {}
+  return 'auto';
+}
+
+/**
+ * @param {'auto'|number|null} v `'auto'` for governor-driven DRS, a number in
+ *   [0.5, 1] to pin the scale, `null` to clear the override (back to 'auto').
+ * @returns {ReturnType<typeof getV3Status>}
+ */
+export function setV3RenderScale(v) {
+  if (v === null || v === undefined) _runtimeV3RenderScale = null;
+  else if (v === 'auto') _runtimeV3RenderScale = 'auto';
+  else if (Number.isFinite(Number(v))) _runtimeV3RenderScale = Math.max(0.5, Math.min(1, Number(v)));
+  return getV3Status();
+}
+
+/**
+ * Whether the present pass dithers its linear→sRGB 8-bit encode (Forward+ §16.3
+ * P7). Default ON — ~1 LSB of spatial noise is invisible as noise but kills the
+ * banding that dark VTT scenes otherwise show. Toggle off for A/B.
+ * @returns {boolean}
+ */
+export function isV3DitherEnabled() {
+  if (_runtimeV3Dither !== null) return _runtimeV3Dither;
+  try {
+    if (window?.MapShine?.__v3Dither === false) return false;
+    if (window?.MapShine?.__v3Dither === true) return true;
+  } catch (_) {}
+  const url = _urlFlag('msaV3Dither');
+  if (url !== null) return url;
+  return true; // default ON
+}
+
+/**
+ * @param {boolean|null} on Pass `null` to clear the override.
+ * @returns {ReturnType<typeof getV3Status>}
+ */
+export function setV3Dither(on) {
+  _runtimeV3Dither = on === null ? null : !!on;
+  return getV3Status();
+}
+
+/**
  * Runtime override for the V3 pipeline (live A/B, does not persist unless asked).
  * @param {boolean|null} on Pass `null` to clear the override.
  * @param {{ persist?: boolean }} [opts]
@@ -331,6 +400,8 @@ export function getV3Status() {
     bloom: isV3BloomEnabled(),
     indoorOutdoor: isV3IndoorOutdoorEnabled(),
     outdoorsDebug: isV3OutdoorsDebugEnabled(),
+    renderScale: getV3RenderScaleSetting(),
+    dither: isV3DitherEnabled(),
     source: {
       pipeline: _runtimeV3Pipeline !== null ? 'runtime'
         : (() => {
@@ -371,6 +442,27 @@ export function exposeV3FlagsApi() {
           return { error: String(err?.message ?? err) };
         }
       },
+      renderScale: (v) => setV3RenderScale(v),
+      dither: (on) => setV3Dither(on),
+      perf: () => {
+        try {
+          const pipe = window?.MapShine?.__v3PipelineInstance;
+          const report = pipe?.getPerfReport?.();
+          if (!report) return { error: 'V3 pipeline not initialized yet (load a scene first)' };
+          const rs = report.renderScale;
+          console.info(
+            `V3 perf — render ${report.renderSize.width}×${report.renderSize.height}`
+            + ` → present ${report.presentSize.width}×${report.presentSize.height}`
+            + ` (scale ${rs.scale}${rs.mode === 'auto' ? ', auto' : ', fixed'})`
+            + ` · frame budget ${report.monitor.frameBudgetMs} ms`
+            + ` · GPU timer ${report.gpuTimerSupported ? 'on' : 'unavailable'}`,
+          );
+          console.table(buildPerfRows(report.monitor));
+          return report;
+        } catch (err) {
+          return { error: String(err?.message ?? err) };
+        }
+      },
       help: () => {
         console.info(
           'MapShine.v3 — V3 unified-forward pipeline (DEFAULT renderer)\n'
@@ -387,7 +479,11 @@ export function exposeV3FlagsApi() {
           + '  .indoorOutdoor(false)            — disable indoor darkening (uniform sky ambient)\n'
           + '  .outdoorsDebug(true)             — tint ambient red(indoor)/green(outdoor) to see the mask\n'
           + '  .outdoors()                      — diagnose the _Outdoors resolve (mask handle → cache → resolve → frame)\n'
-          + '  URL: ?msaV3=0 forces V2 for a reload  ·  ?msaV3=1 forces V3',
+          + '  .perf()                          — per-pass CPU/GPU ms vs budgets, render/present sizes, scale state\n'
+          + '  .renderScale(0.75)               — pin the internal render scale (0.5..1)\n'
+          + "  .renderScale('auto')             — governor-driven dynamic resolution (default)\n"
+          + '  .dither(false)                   — disable the present-pass encode dither (A/B banding)\n'
+          + '  URL: ?msaV3=0 forces V2 for a reload  ·  ?msaV3=1 forces V3  ·  ?msaV3Scale=0.75|auto',
         );
       },
     };

@@ -12,16 +12,43 @@ is the code-side orientation and status doc — **more current than
 
 | File | Role | Status |
 |------|------|--------|
-| `FrameGraph.js` | Declarative pass scheduler (B0-2 §2): topo-order, validation, pooled RTs, per-pass timing. THREE-free core, Node-verified. | ✅ built + verified |
+| `FrameGraph.js` | Declarative pass scheduler (B0-2 §2): topo-order, validation, pooled RTs, per-pass CPU timing + injected per-pass GPU timing. THREE-free core, Node-verified. | ✅ built + verified |
 | `ThreeAllocator.js` | Frame-graph allocator over `THREE.WebGLRenderTarget`. | ✅ built + verified |
-| `v3-flags.js` | Every `MapShine.v3.*` runtime flag + console API (`MapShine.v3.help()`). | ✅ built |
-| `V3Pipeline.js` | Orchestrator: FrameGraph + ThreeAllocator + FullscreenPresent. Pass graph: `unifiedGeometry → lighting → effects → post → present`. Fail-safe `isReady()` gate. | ✅ live |
+| `GpuPassTimer.js` | Per-pass GPU ms via `EXT_disjoint_timer_query_webgl2` (Forward+ §16.3 P1). Async results, disjoint-safe, skips when another query owns the target (PerformanceRecorder), self-disables on errors. | ✅ built |
+| `v3-perf.js` | The performance contract (§16.3 P1/P2): frame + per-pass budgets, `V3PerfMonitor` rolling stats, `RenderScaleGovernor` (DRS ladder w/ warmup, streaks, cooldown), `computeRenderSize`. Pure logic, Node-verified. | ✅ built + verified |
+| `v3-flags.js` | Every `MapShine.v3.*` runtime flag + console API (`MapShine.v3.help()`), incl. `perf()`, `renderScale()`, `dither()`. | ✅ built |
+| `V3Pipeline.js` | Orchestrator: FrameGraph + ThreeAllocator + FullscreenPresent. Pass graph: `unifiedGeometry → lighting → effects → post → present`. Fail-safe `isReady()` gate. **Render/present split:** all `'screen'` RTs allocate at `drawingBuffer × renderScale`; present upsamples. Governor closes the loop in `'auto'` mode. | ✅ live |
 | `ForwardLightingPass.js` | Interim (non-clustered) per-light-mesh forward lighting: Foundry v14 illumination model, wall-clipped lights, day/night + indoor/outdoor ambient. | ✅ live |
 | `V3EffectsBridge.js` | Ticks/composites reused V2 effect instances (candle flames, bush/tree) under V3. | ✅ first cut |
-| `V3PostBridge.js` | Runs V2's `BloomEffectV2` + `ColorCorrectionEffectV2` (ToD + contextual indoor/outdoor grade) on the V3 lit buffer. | ✅ live |
-| `FullscreenPresent.js` | Linear→sRGB encode + hue-preserving HDR highlight rolloff. | ✅ built |
-| `__tests__/` | Node verification for the core modules (65 assertions). | ✅ green |
+| `V3PostBridge.js` | Runs V2's `BloomEffectV2` + `ColorCorrectionEffectV2` (ToD + contextual indoor/outdoor grade) on the V3 lit buffer. Follows render-scale size changes. | ✅ live |
+| `FullscreenPresent.js` | Linear→sRGB encode + hue-preserving HDR highlight rolloff + ±0.5 LSB encode dither (banding kill, §16.3 P7). Doubles as the DRS upsample (bilinear). | ✅ built |
+| `__tests__/` | Node verification for the core modules (112 assertions). | ✅ green |
 | _(not started)_ attribute buffer, clustered lighting, shadows, water, atmo fog, floor-change fast path | See Forward+.md §15 B2–B5 / the "Still missing" list below. | ⏳ |
+
+## Performance contract (Forward+ §16 P-track) — live in V3
+
+- **Budgets:** 16.6 ms/frame reference; provisional per-pass budgets in
+  `v3-perf.js` (`PASS_BUDGETS_MS`). `MapShine.v3.perf()` prints per-pass CPU
+  (last/avg/worst) + GPU (recent) vs budget, the render→present sizes, and the
+  governor state. The same snapshot rides in every crash report (`record.v3`).
+- **GPU timings:** per-pass via `EXT_disjoint_timer_query_webgl2` when the
+  driver offers it (results lag 1–3 frames; treat as "recent"). CPU timings
+  always. If the diagnostics `PerformanceRecorder` is actively measuring, V3
+  yields the query target and skips those passes' GPU numbers rather than
+  corrupting either measurement.
+- **Dynamic resolution (DRS):** default `renderScale` mode is `'auto'` — the
+  governor walks the ladder 1.0 → 0.85 → 0.7 → 0.6 → 0.5 on sustained
+  over-budget cost (graph CPU/GPU cost, never RAF wall time — idle throttling
+  must not read as "over budget"), with a 60-frame warmup (load-storm immunity),
+  15-frame down-streaks, 180-frame up-streaks, and a 90-frame cooldown between
+  steps. Scale changes are logged. Pin with `MapShine.v3.renderScale(0.75)`,
+  restore with `.renderScale('auto')`, URL `?msaV3Scale=`. At scale 1.0 the
+  present blit is pixel-exact (no resampling).
+- **Dither:** the present pass adds ±0.5 LSB interleaved-gradient noise post-OETF
+  (kills dark-scene banding). `MapShine.v3.dither(false)` / `?msaV3Dither=0` to A/B.
+- **WebGPU telemetry (W0):** crash reports record `navigator.gpu` presence +
+  adapter info (`record.webgpu`) so the W1 backend decision is made on real
+  user-base numbers. Informational only — rendering stays WebGL2.
 
 **V3 is the DEFAULT renderer.** At the single V2 seam (`EffectComposer.js`, where
 `_compositorV2.render(...)` was called) V3 owns the frame whenever it is enabled

@@ -129,11 +129,28 @@ export class FrameGraph {
     this._timings = new Map();
     /** @type {{width: number, height: number}} */
     this._lastFrameSize = { width: 0, height: 0 };
+    /**
+     * Optional GPU timer (duck-typed so this module stays THREE/WebGL-free —
+     * see GpuPassTimer for the real one, tests inject a fake):
+     * `{ frameBegin(), begin(name) → boolean, end(), getResults() → Map }`.
+     * @type {{frameBegin?: () => void, begin: (name: string) => boolean, end: () => void, getResults: () => Map<string, number>}|null}
+     */
+    this._gpuTimer = null;
   }
 
   /** @param {FrameGraphAllocator} allocator */
   setAllocator(allocator) {
     this._allocator = allocator ?? null;
+  }
+
+  /**
+   * Inject a per-pass GPU timer (see the `_gpuTimer` field for the interface).
+   * Pass `null` to remove. GPU timings are a diagnostic luxury: every call is
+   * guarded so a broken timer can never take a frame down.
+   * @param {object|null} timer
+   */
+  setGpuTimer(timer) {
+    this._gpuTimer = timer ?? null;
   }
 
   /**
@@ -356,6 +373,13 @@ export class FrameGraph {
     const ranNames = [];
     const skippedNames = [];
 
+    // Resolve any completed GPU queries from earlier frames before this frame
+    // opens new ones. Guarded: the timer must never be able to break a frame.
+    const gpuTimer = this._gpuTimer;
+    if (gpuTimer) {
+      try { gpuTimer.frameBegin?.(); } catch (_) { /* timer self-manages errors */ }
+    }
+
     // A resource is "available" to a pass's get() once it has been produced this
     // frame (written by an earlier executed pass) or imported. Writes register
     // availability the moment target() is first requested for them.
@@ -369,6 +393,10 @@ export class FrameGraph {
       }
 
       const ctx = this._makePassContext(pass, frameCtx, width, height, producedThisFrame);
+      let gpuTimed = false;
+      if (gpuTimer) {
+        try { gpuTimed = gpuTimer.begin(pass.name) === true; } catch (_) {}
+      }
       const t0 = this._now();
       try {
         pass.execute(ctx);
@@ -378,6 +406,10 @@ export class FrameGraph {
         // fail their own get() loudly, which localizes the blame.
         if (this._logWarn) this._logWarn(`FrameGraph: pass "${pass.name}" threw`, err);
         else throw err;
+      } finally {
+        if (gpuTimed) {
+          try { gpuTimer.end(); } catch (_) {}
+        }
       }
       this._timings.set(pass.name, this._now() - t0);
       for (const w of pass.writes) producedThisFrame.add(w);
@@ -494,6 +526,23 @@ export class FrameGraph {
   /** @returns {Map<string, number>} last-frame per-pass CPU ms (copy). */
   getLastTimings() {
     return new Map(this._timings);
+  }
+
+  /**
+   * Latest completed per-pass GPU ms from the injected timer (empty map when no
+   * timer / unsupported). Values are the most recent *resolved* measurements —
+   * GPU query results arrive 1–3 frames after submission, so treat them as
+   * "recent", not "this frame".
+   * @returns {Map<string, number>} (copy)
+   */
+  getGpuTimings() {
+    if (!this._gpuTimer) return new Map();
+    try {
+      const m = this._gpuTimer.getResults?.();
+      return m instanceof Map ? new Map(m) : new Map();
+    } catch (_) {
+      return new Map();
+    }
   }
 
   /** @returns {string[]} declared execution order (compiling if needed). */

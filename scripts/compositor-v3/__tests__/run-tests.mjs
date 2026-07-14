@@ -16,6 +16,7 @@ import './setup-globals.mjs'; // MUST be first — shims window/etc for import-t
 import { run as runFrameGraph } from './FrameGraph.test.mjs';
 import { run as runAllocator } from './ThreeAllocator.test.mjs';
 import { run as runPipeline } from './V3Pipeline.test.mjs';
+import { run as runPerf } from './v3-perf.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -42,6 +43,7 @@ const suites = [
   ['FrameGraph', runFrameGraph],
   ['ThreeAllocator', runAllocator],
   ['V3Pipeline', runPipeline],
+  ['v3-perf', runPerf],
 ];
 
 for (const [name, fn] of suites) {

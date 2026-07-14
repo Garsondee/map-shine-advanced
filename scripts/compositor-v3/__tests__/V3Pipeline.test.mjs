@@ -133,4 +133,66 @@ export function run(t) {
     ok('deferred not ready', p.isReady() === false);
     ok('render null when uninit', p.render() === null);
   }
+
+  // Render/present split (Forward+ §16.3 P2): default is 'auto' at full scale.
+  {
+    const T = makeTHREE();
+    const renderer = makeRenderer(100, 50);
+    const p = new V3Pipeline({ renderer, THREE: T }).initialize();
+    stubPresent(p); stubLighting(p); stubPost(p);
+    p.render({ renderBus: makeBus(), camera: { id: 'c' } });
+    const rs = p.getPerfReport().renderScale;
+    ok('default scale mode auto @ 1.0', rs.mode === 'auto' && rs.scale === 1.0);
+  }
+
+  // Render/present split: a pinned scale allocates every screen RT at the
+  // internal render size while present size stays the drawing buffer.
+  {
+    const T = makeTHREE();
+    const renderer = makeRenderer(1600, 900);
+    const p = new V3Pipeline({ renderer, THREE: T }).initialize();
+    const present = stubPresent(p);
+    stubLighting(p); stubPost(p);
+    const bus = makeBus();
+    const prevMapShine = globalThis.window.MapShine;
+    globalThis.window.MapShine = { __v3RenderScale: 0.5 };
+    try {
+      const res = p.render({ renderBus: bus, camera: { id: 'c' } });
+      ok('scaled render runs all passes', res && res.order.length === 5);
+      ok('scene.color allocated at render scale',
+         bus.rec.lastTarget.width === 800 && bus.rec.lastTarget.height === 450);
+      ok('present still blitted', present.calls === 1);
+      const perf = p.getPerfReport();
+      ok('perf reports fixed scale', perf.renderScale.mode === 'fixed' && perf.renderScale.scale === 0.5);
+      ok('perf carries both sizes',
+         perf.presentSize.width === 1600 && perf.renderSize.width === 800 && perf.renderSize.height === 450);
+      ok('monitor folded the frame', perf.monitor.frames === 1 && perf.monitor.passes.length === 5);
+      const diag = p.getDiagnostics();
+      ok('diagnostics carry perf + gpuTimings fields',
+         diag.perf && diag.perf.renderScale.scale === 0.5 && Array.isArray(diag.gpuTimings));
+    } finally {
+      globalThis.window.MapShine = prevMapShine;
+    }
+  }
+
+  // Scale change across frames RESIZES pooled RTs (graph pool follows size).
+  {
+    const T = makeTHREE();
+    const renderer = makeRenderer(1000, 500);
+    const p = new V3Pipeline({ renderer, THREE: T }).initialize();
+    stubPresent(p); stubLighting(p); stubPost(p);
+    const bus = makeBus();
+    const prevMapShine = globalThis.window.MapShine;
+    try {
+      globalThis.window.MapShine = { __v3RenderScale: 1 };
+      p.render({ renderBus: bus, camera: { id: 'c' } });
+      ok('full-scale first frame', bus.rec.lastTarget.width === 1000);
+      globalThis.window.MapShine = { __v3RenderScale: 0.6 };
+      p.render({ renderBus: bus, camera: { id: 'c' } });
+      ok('downscaled second frame', bus.rec.lastTarget.width === 600 && bus.rec.lastTarget.height === 300);
+      ok('same pooled RT resized, not a new one', p.getDiagnostics().stats.pooled === 4);
+    } finally {
+      globalThis.window.MapShine = prevMapShine;
+    }
+  }
 }

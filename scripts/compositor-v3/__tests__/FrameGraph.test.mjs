@@ -166,4 +166,53 @@ export function run(t) {
     ok('diamond: branches between',
        order.indexOf('left') > 0 && order.indexOf('right') > 0 && order.indexOf('left') < 3 && order.indexOf('right') < 3);
   }
+
+  // 14. GPU timer plumbing (injected duck-typed timer — see GpuPassTimer).
+  {
+    const events = [];
+    const results = new Map([['b', 2.5]]);
+    const timer = {
+      frameBegin: () => events.push(['frameBegin']),
+      // Refuse 'reject' (simulates the timer skipping when another query owns
+      // the GL target) — end() must then NOT be called for that pass.
+      begin: (name) => { events.push(['begin', name]); return name !== 'reject'; },
+      end: () => events.push(['end']),
+      getResults: () => results,
+    };
+    const g = new FrameGraph({ allocator: fakeAllocator() });
+    g.setGpuTimer(timer);
+    g.declareResource('a', { size: 'screen' });
+    g.declareResource('b', { size: 'screen' });
+    g.addPass({ name: 'reject', writes: ['a'], execute: (c) => c.target('a') });
+    g.addPass({ name: 'b', reads: ['a'], writes: ['b'], execute: (c) => { c.get('a'); c.target('b'); } });
+    g.addPass({ name: 'gated', when: () => false, execute: () => {} });
+    g.execute({ width: 8, height: 8 });
+    ok('gpu: frameBegin once per execute', events.filter((e) => e[0] === 'frameBegin').length === 1);
+    ok('gpu: begin per EXECUTED pass only (gated pass untimed)',
+       JSON.stringify(events.filter((e) => e[0] === 'begin').map((e) => e[1])) === JSON.stringify(['reject', 'b']));
+    ok('gpu: end only when begin accepted', events.filter((e) => e[0] === 'end').length === 1);
+    ok('gpu: results exposed via getGpuTimings', g.getGpuTimings().get('b') === 2.5);
+    ok('gpu: copy, not the live map', g.getGpuTimings() !== results);
+    ok('gpu: no timer → empty map', new FrameGraph({ allocator: fakeAllocator() }).getGpuTimings().size === 0);
+  }
+
+  // 15. GPU timer hardening: end() still pairs when a pass throws; a throwing
+  // timer can never break the frame (guarded at every call site).
+  {
+    const events = [];
+    const timer = {
+      frameBegin: () => { throw new Error('timer boom'); },
+      begin: (n) => { events.push(['begin', n]); return true; },
+      end: () => events.push(['end']),
+      getResults: () => { throw new Error('timer boom'); },
+    };
+    const g = new FrameGraph({ allocator: fakeAllocator(), logWarn: () => {} });
+    g.setGpuTimer(timer);
+    g.declareResource('a', { size: 'screen' });
+    g.addPass({ name: 'thrower', writes: ['a'], execute: () => { throw new Error('pass err'); } });
+    const res = g.execute({ width: 4, height: 4 });
+    ok('gpu: frame survives throwing timer + throwing pass', res.order.length === 1);
+    ok('gpu: end pairs with begin despite pass throw', events.filter((e) => e[0] === 'end').length === 1);
+    ok('gpu: throwing getResults → empty map', g.getGpuTimings().size === 0);
+  }
 }

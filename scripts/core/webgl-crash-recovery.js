@@ -72,6 +72,43 @@ const MODULE_ID = 'map-shine-advanced';
 const SESSION_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
 // ---------------------------------------------------------------------------
+// WebGPU capability telemetry (Forward+ §16.5 W0)
+// ---------------------------------------------------------------------------
+// Records whether this client COULD run a WebGPU backend, so the W1 decision
+// (post-B7) is made on known user-base numbers instead of guesses. Probed once,
+// fire-and-forget, at module load — adapter details are async, so probing at
+// crash time would be too late for that report. Zero rendering impact:
+// requestAdapter() creates no device and holds no resources.
+/** @type {{available: boolean, adapter: object|null, probed: boolean}} */
+const _webGpuCaps = { available: false, adapter: null, probed: false };
+(function _probeWebGpuOnce() {
+  try {
+    const gpu = (typeof navigator !== 'undefined') ? navigator.gpu : null;
+    _webGpuCaps.available = !!gpu;
+    if (!gpu || typeof gpu.requestAdapter !== 'function') { _webGpuCaps.probed = true; return; }
+    gpu.requestAdapter().then((adapter) => {
+      try {
+        if (adapter) {
+          // GPUAdapterInfo (adapter.info) is the current API; requestAdapterInfo()
+          // is the deprecated older form — accept either, guarded.
+          const info = adapter.info ?? null;
+          _webGpuCaps.adapter = {
+            vendor: info?.vendor ?? null,
+            architecture: info?.architecture ?? null,
+            device: info?.device ?? null,
+            description: info?.description ?? null,
+            isFallbackAdapter: adapter.isFallbackAdapter === true,
+          };
+        }
+      } catch (_) {}
+      _webGpuCaps.probed = true;
+    }).catch(() => { _webGpuCaps.probed = true; });
+  } catch (_) {
+    _webGpuCaps.probed = true;
+  }
+})();
+
+// ---------------------------------------------------------------------------
 // Internal session state
 // ---------------------------------------------------------------------------
 
@@ -583,6 +620,27 @@ export function collectDiagnostics(extra = {}) {
     record.pixiTextures = _safePixiTextureStats();
   } catch (_) {
     record.pixiTextures = null;
+  }
+
+  // WebGPU capability telemetry (Forward+ §16.5 W0) — informational only; this
+  // client renders on WebGL2 regardless.
+  try {
+    record.webgpu = {
+      available: _webGpuCaps.available,
+      probed: _webGpuCaps.probed,
+      adapter: _webGpuCaps.adapter,
+    };
+  } catch (_) {
+    record.webgpu = null;
+  }
+
+  // V3 pipeline state — pass order, last-frame CPU/GPU pass timings, perf/
+  // budget report, render-scale governor state (Forward+ §16.3 P1/P2). Null
+  // when V3 hasn't initialized (V2 rendering, or crash before first frame).
+  try {
+    record.v3 = ms.__v3PipelineInstance?.getDiagnostics?.() ?? null;
+  } catch (_) {
+    record.v3 = null;
   }
 
   try {

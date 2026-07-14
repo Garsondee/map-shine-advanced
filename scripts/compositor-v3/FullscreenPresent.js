@@ -50,7 +50,10 @@ export class FullscreenPresent {
     this._camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     this._sizeVec = new THREE.Vector2();
     this._material = new THREE.ShaderMaterial({
-      uniforms: { tDiffuse: { value: null }, uToneMap: { value: 1 }, uKnee: { value: 0.9 } },
+      uniforms: {
+        tDiffuse: { value: null }, uToneMap: { value: 1 }, uKnee: { value: 0.9 },
+        uDither: { value: 1 },
+      },
       vertexShader: /* glsl */`
         varying vec2 vUv;
         void main() {
@@ -63,6 +66,7 @@ export class FullscreenPresent {
         uniform sampler2D tDiffuse;
         uniform float uToneMap;   // 1 = highlight rolloff, 0 = passthrough (hard clip)
         uniform float uKnee;      // peak luminance below which color is untouched
+        uniform float uDither;    // 1 = ±0.5 LSB encode dither, 0 = off
         varying vec2 vUv;
         // Standard sRGB OETF (linear → gamma-encoded display).
         vec3 linearToSRGB(vec3 c) {
@@ -87,7 +91,16 @@ export class FullscreenPresent {
         void main() {
           vec3 lin = max(texture2D(tDiffuse, vUv).rgb, vec3(0.0));
           if (uToneMap > 0.5) lin = highlightRolloff(lin, uKnee);
-          gl_FragColor = vec4(linearToSRGB(lin), 1.0);
+          vec3 srgb = linearToSRGB(lin);
+          // Encode dither (Forward+ §16.3 P7): the framebuffer quantizes the
+          // ENCODED value to 8 bits, so the noise is added post-OETF. ±0.5 LSB of
+          // interleaved gradient noise (Jimenez) — invisible as noise, but breaks
+          // up the banding that smooth dark gradients (night scenes, light
+          // falloff) otherwise show. Spatial only (no temporal term): a static
+          // pattern cannot shimmer.
+          float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+          srgb += (ign - 0.5) * (uDither / 255.0);
+          gl_FragColor = vec4(srgb, 1.0);
         }
       `,
       depthTest: false,
@@ -106,10 +119,11 @@ export class FullscreenPresent {
    * Blit `texture` to the screen framebuffer (null render target).
    * @param {THREE.WebGLRenderer} renderer
    * @param {THREE.Texture} texture
-   * @param {{tonemap?: boolean, knee?: number}} [opts] - `tonemap` applies the
-   *   highlight rolloff (default true); `knee` overrides the rolloff knee
-   *   (default 0.9 — lower compresses more of the highlights, higher affects only
-   *   the very brightest filament).
+   * @param {{tonemap?: boolean, knee?: number, dither?: boolean}} [opts] -
+   *   `tonemap` applies the highlight rolloff (default true); `knee` overrides
+   *   the rolloff knee (default 0.9 — lower compresses more of the highlights,
+   *   higher affects only the very brightest filament); `dither` toggles the
+   *   ±0.5 LSB encode dither (default true).
    * @returns {boolean} whether a blit happened
    */
   present(renderer, texture, opts = null) {
@@ -125,6 +139,7 @@ export class FullscreenPresent {
 
     this._material.uniforms.tDiffuse.value = texture;
     this._material.uniforms.uToneMap.value = (opts?.tonemap === false) ? 0 : 1;
+    this._material.uniforms.uDither.value = (opts?.dither === false) ? 0 : 1;
     if (opts && Number.isFinite(opts.knee)) {
       this._material.uniforms.uKnee.value = Math.max(0.0, Math.min(1.0, opts.knee));
     }

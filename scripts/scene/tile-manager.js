@@ -792,6 +792,26 @@ export class TileManager {
     this._tileReadyQueue = [];
     this._tileReadyPumpActive = false;
 
+    // Tile-texture downscale pacing queue. `loadTileTexture`'s PIXI-cache
+    // fast-path (a tile texture Foundry already decoded into its own PIXI
+    // cache) reads that decoded source and downscales it into a stable
+    // `<canvas>` via a SYNCHRONOUS `ctx.drawImage(...)` call, sized down to
+    // the tile-albedo policy cap before ever becoming a THREE.Texture — see
+    // the comment at that call site for why (avoids uploading a full-res
+    // 6408x5121 source to the GPU). That downscale bypasses
+    // `_acquireTileTextureLoadSlot` entirely (that limiter only guards the
+    // slow network fetch/decode fallback below it), so when several tiles'
+    // fast-path resolves land in the same microtask checkpoint (the common
+    // case: Foundry's own canvas.draw already decoded every tile into PIXI's
+    // cache before MSA ever asks), their drawImage downscales run back-to-back
+    // with no real event-loop yield between them — the exact "N tiles' worth
+    // of work collapses into one multi-second task" TDR pattern the
+    // `_tileReadyQueue` pacing above was built to prevent, just one step
+    // earlier in the pipeline. Route each tile's downscale through this
+    // one-per-macrotask queue instead so a real yield always separates them.
+    this._tileDownscaleQueue = [];
+    this._tileDownscalePumpActive = false;
+
     // Chunked initial-sync state (Forward+ §16 P3): syncAllTiles counts every
     // tile up front, then creates the sprites a few per macrotask so the create
     // loop cannot collapse into one multi-second TDR-tripping task. The
@@ -4597,6 +4617,47 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
   }
 
   /**
+   * Queue a tile texture's synchronous canvas-downscale step (see the
+   * `_tileDownscaleQueue` field comment) and start draining if not already
+   * running. `fn` must call its own resolution (it wraps a Promise executor
+   * in the caller) — this only guarantees `fn` runs on its own macrotask.
+   * @param {() => void} fn - Synchronous downscale work for one tile.
+   * @private
+   */
+  _scheduleTileDownscale(fn) {
+    this._tileDownscaleQueue.push(fn);
+    this._pumpTileDownscaleQueue();
+  }
+
+  /**
+   * Drain `_tileDownscaleQueue` one tile per macrotask (a real event-loop
+   * yield) so multiple tiles' PIXI-cache-fast-path downscales — which would
+   * otherwise all resolve in the same microtask checkpoint on a cache-hot
+   * load — can never collapse into one multi-second synchronous task.
+   * Re-entrant-safe: multiple calls while a pump is already running are
+   * no-ops.
+   * @private
+   */
+  _pumpTileDownscaleQueue() {
+    if (this._tileDownscalePumpActive) return;
+    this._tileDownscalePumpActive = true;
+    const step = () => {
+      const fn = this._tileDownscaleQueue.shift();
+      if (!fn) {
+        this._tileDownscalePumpActive = false;
+        return;
+      }
+      try {
+        fn();
+      } catch (err) {
+        log.error('Tile-downscale queued work failed', err);
+      }
+      setTimeout(step, 0);
+    };
+    step();
+  }
+
+  /**
    * Create a THREE.js sprite for a Foundry tile
    * @param {TileDocument} tileDoc - Foundry tile document
    * @private
@@ -5914,7 +5975,26 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
                 canvasEl.height = outH;
                 const ctx = canvasEl.getContext('2d', { willReadFrequently: false });
                 if (ctx) {
-                  ctx.drawImage(texSource, 0, 0, outW, outH);
+                  // Paced (Forward+ A10 follow-up): this fast-path bypasses
+                  // _acquireTileTextureLoadSlot below (that limiter only guards
+                  // the slow network fetch fallback), so when Foundry's PIXI
+                  // cache already holds every tile's decoded image — the common
+                  // case, since canvas.draw preloads them all before MSA ever
+                  // asks — every tile's drawImage downscale would otherwise
+                  // resolve in the same microtask checkpoint with no yield
+                  // between them, collapsing into one multi-second task
+                  // (confirmed by a crash report: a longTask spanning exactly
+                  // this window, right before a TDR context loss). Route
+                  // through the one-per-macrotask queue instead.
+                  await new Promise((resolve) => {
+                    this._scheduleTileDownscale(() => {
+                      try {
+                        ctx.drawImage(texSource, 0, 0, outW, outH);
+                      } finally {
+                        resolve();
+                      }
+                    });
+                  });
                   texSource = canvasEl;
                 }
               }

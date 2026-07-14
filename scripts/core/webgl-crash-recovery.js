@@ -2110,6 +2110,17 @@ export function onContextRestored() {
       log.info(`WebGL context restored after ${record.restoredAfterMs}ms`);
     }
 
+    // Free Foundry's full-res PIXI floor textures as the scene re-renders on the
+    // restored context. When the loss was VRAM exhaustion (the multi-floor
+    // Mansion holds three 12000² ~731 MB backgrounds), the restored context
+    // re-uploads them and immediately re-crashes — the "restored but keeps
+    // crashing" loop. The demotion sweep runs spaced passes to catch them once
+    // re-uploaded. Via the exposed global to avoid coupling this module to the
+    // demotion module.
+    try {
+      globalThis.window?.MapShine?.pixiTextureDemotion?.startFloorChangeSweep?.();
+    } catch (_) {}
+
     if (wasMidLoad && !_autoRebuildAttempted && typeof _requestRebuild === 'function') {
       // Mutually exclusive with the never-restored watchdog rebuild via the
       // shared `_autoRebuildAttempted` guard → at most one auto-rebuild/session.

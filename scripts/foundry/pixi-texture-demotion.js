@@ -40,6 +40,8 @@ const SWEEP_INTERVAL_MS = 2000;
 const MAX_DISPOSES_PER_TEXTURE = 3;
 
 let _sweepId = null;
+/** @type {number|null} floor-change sweep timer */
+let _floorSweepId = null;
 /** @type {Map<string, number>} dispose count per resource URL (this load) */
 const _disposeCounts = new Map();
 
@@ -113,6 +115,50 @@ export function stopLoadDemotionSweep() {
   }
 }
 
+/**
+ * Demote after a FLOOR CHANGE. A multi-floor view makes Foundry's PIXI renderer
+ * load and hold the newly-viewed floor's full-resolution background (via
+ * `canvas.scene.view({ level })`) — e.g. on the Mansion, three 12000² textures
+ * (~731 MB each) resident at once, which exhausted the 8 GB card and lost the
+ * context at fadeIn (a floor-change crash the load-time sweep never covered
+ * because it self-terminates once `__msaSceneLoading` clears). V3 renders from
+ * the bus/streaming copies, not Foundry's full-res source, so these are pure
+ * waste.
+ *
+ * Foundry uploads the texture asynchronously during its redraw, so this runs a
+ * few spaced passes to catch it once it lands, then stops. The per-URL dispose
+ * counter (reset here for a fresh floor-change budget) still bounds churn if
+ * something keeps re-binding.
+ *
+ * @param {{ passes?: number, intervalMs?: number }} [opts]
+ */
+export function startFloorChangeDemotionSweep({ passes = 5, intervalMs = 1200 } = {}) {
+  stopFloorChangeDemotionSweep();
+  // Fresh anti-churn budget: we WANT to dispose the just-loaded floor texture,
+  // even if a previous load/floor-change already spent its budget on that URL.
+  _disposeCounts.clear();
+  let remaining = Math.max(1, passes | 0);
+  const tick = () => {
+    _floorSweepId = null;
+    try {
+      const { count, freedMB } = disposeLargePixiFileTextures();
+      if (count) log.info(`Floor-change demotion freed ~${freedMB} MB (${count} texture(s))`);
+    } catch (_) {}
+    remaining -= 1;
+    if (remaining <= 0) return;
+    _floorSweepId = setTimeout(tick, Math.max(200, intervalMs | 0));
+  };
+  tick();
+}
+
+/** Stop the floor-change sweep (idempotent). */
+export function stopFloorChangeDemotionSweep() {
+  if (_floorSweepId != null) {
+    clearTimeout(_floorSweepId);
+    _floorSweepId = null;
+  }
+}
+
 // Console/manual access for testing: MapShine.pixiTextureDemotion.dispose()
 try {
   if (typeof window !== 'undefined') {
@@ -121,6 +167,8 @@ try {
       dispose: disposeLargePixiFileTextures,
       startSweep: startLoadDemotionSweep,
       stopSweep: stopLoadDemotionSweep,
+      startFloorChangeSweep: startFloorChangeDemotionSweep,
+      stopFloorChangeSweep: stopFloorChangeDemotionSweep,
     };
   }
 } catch (_) {}

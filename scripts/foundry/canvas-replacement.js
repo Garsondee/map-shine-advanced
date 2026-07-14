@@ -44,7 +44,7 @@ import {
   PlayerLightEffectV2,
 } from './effect-wiring.js';
 import { RenderLoop } from '../core/render-loop.js';
-import { startLoadDemotionSweep } from './pixi-texture-demotion.js';
+import { startLoadDemotionSweep, startFloorChangeDemotionSweep } from './pixi-texture-demotion.js';
 import { normalizeEffectRgbParam } from '../ui/parameter-validator.js';
 import { ControlPanelManager } from '../ui/control-panel-manager.js';
 import { syncAtmosphericFogEffectFromControlState } from '../ui/atmospheric-fog-bridge.js';
@@ -3460,6 +3460,21 @@ export function initialize() {
     // The `masksChanged` flag avoids expensive effect rebuilds (fire particle
     // regeneration, water SDF, rain flow map) when re-selecting the same floor.
     Hooks.on('mapShineLevelContextChanged', (payload) => {
+
+      // A floor change makes Foundry's PIXI renderer load and HOLD the newly
+      // viewed floor's full-resolution background (canvas.scene.view({ level })).
+      // On the 144MP Mansion that is three 12000² textures (~731 MB each)
+      // resident at once — VRAM exhaustion that lost the WebGL context at fadeIn
+      // and blocked auto-recovery (the freed context immediately re-crashed on
+      // the still-resident textures). V3 renders from the bus/streaming copies,
+      // never Foundry's full-res source, so demote them a few seconds after the
+      // switch, once Foundry has finished its async upload (Forward+ A9 extended
+      // to floor changes).
+      safeCall(
+        () => startFloorChangeDemotionSweep(),
+        'levelMaskRebuild.pixiDemotion',
+        Severity.COSMETIC,
+      );
 
       // Update FloorStack from the same merged bands as level navigation (scene
       // background / foreground + sceneLevels). Using levelsSnapshot.sceneLevels

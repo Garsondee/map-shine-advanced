@@ -450,21 +450,33 @@ export class CameraFollower {
     const isVisibleChange = clamped !== this._activeLevelIndex && this._levels.length > 1;
     const isReactiveReason = SKIP_CURTAIN_REASONS.has(reason);
 
-    // ── V3 floor-resident fast path (view-only switch) ───────────────────────
-    // Under V3 every floor stays resident in the unified pass, so a deliberate
-    // floor change is a VIEW change, not a content rebuild: skip Foundry's
-    // canvas.scene.view({level}) (which forces a full canvas.draw teardown +
-    // redraw + streaming remount — the ~20s of GPU work that crashed the switch
-    // on constrained VRAM) and skip the mask rebuild (masks are pre-warmed
-    // resident). Just update the viewed-floor state, refresh Foundry's level +
-    // perception lightly, and request a V3 render.
+    // ── V3 floor-resident switch (never runs Foundry's canvas.draw) ──────────
+    // Under V3 every floor stays resident in the unified pass: all visible
+    // floors' bus backgrounds and effects are loaded at populate, and — once
+    // warmed — their masks are on the GPU too. So a floor change is a VIEW
+    // change, not a content rebuild.
     //
-    // Reliability first: only take this path when the target floor's masks are
-    // proven resident; otherwise fall through to the curtain rebuild so an
-    // un-warmed floor is composed behind the curtain rather than shown broken.
+    // Foundry's canvas.scene.view({level}) forces a full canvas.draw that loads
+    // and HOLDS each viewed floor's full-resolution background (~731 MB each on
+    // the 144 MP Mansion — see the levelMaskRebuild hook note in
+    // canvas-replacement.js). That untracked VRAM/upload spike is what lost the
+    // WebGL context on floor changes. We never call it here — the resident bus
+    // already holds the art, so we only change which floor is active:
+    //
+    //   • Warm target (masks resident)      → instant view-only switch.
+    //   • Cold target (masks not warm yet)  → compose masks + repopulate effects
+    //     BEHIND the curtain, art from the resident bus — still no canvas.draw.
+    //
+    // Either branch skips canvas.draw, so the full-res background hold that
+    // crashed the switch never happens. Native V14 levels only (the legacy path
+    // already never calls canvas.scene.view for non-native levels); falls through
+    // to the legacy canvas.scene.view path when the flag is off.
     if (emit && isVisibleChange && !isReactiveReason && isV3ViewOnlyFloorsEnabled()
-        && this._isFloorResidentForViewOnly(level)) {
-      return this._applyViewOnlyLevelSwitch(clamped, level, reason);
+        && level?.source === 'v14-native') {
+      if (this._isFloorResidentForViewOnly(level)) {
+        return this._applyViewOnlyLevelSwitch(clamped, level, reason);
+      }
+      return this._applyResidentColdLevelSwitch(clamped, level, reason);
     }
 
     const curtain = window.MapShine?.levelTransitionCurtain ?? null;
@@ -664,31 +676,13 @@ export class CameraFollower {
 
     // 1. MSA state + emit (viewOnly) — drives FloorStack active index, per-floor
     //    visibility, and a view-only levelMaskRebuild that skips composeFloor +
-    //    forceRepopulate.
+    //    forceRepopulate (masks + effects resident).
     const ctx = this._applyActiveLevelByIndex(clamped, { emit: true, reason, viewOnly: true });
 
-    // 2. Foundry-side level state — best-effort, each piece independently
-    //    guarded so a Foundry API shift degrades rather than throws.
-    try { if (globalThis.game?.user) game.user.viewedLevel = level.levelId ?? null; } catch (_) {}
-    try {
-      const scene = canvas?.scene;
-      if (scene) {
-        scene._view = level.levelId ?? scene._view;
-        if (scene._viewPosition) scene._viewPosition.level = level.levelId ?? scene._viewPosition.level;
-      }
-    } catch (_) {}
-    // 3. Refresh perception (vision/occlusion/lighting) for the new level
-    //    without redrawing placeables.
-    try {
-      canvas?.perception?.update?.({
-        refreshVision: true,
-        refreshOcclusion: true,
-        refreshLighting: true,
-        refreshSounds: true,
-      }, true);
-    } catch (_) {}
+    // 2. Foundry-side viewed-level state + perception refresh (no canvas.draw).
+    this._applyFoundryViewedLevel(level);
 
-    // 4. Request a V3 render of the new view.
+    // 3. Request a V3 render of the new view.
     try {
       window.MapShine?.renderLoop?.requestRender?.();
       window.MapShine?.renderLoop?.requestContinuousRender?.(300);
@@ -698,6 +692,145 @@ export class CameraFollower {
       if (window.MapShine) window.MapShine.__v3ViewOnlyFloorSwitchInFlight = false;
     } catch (_) {}
     return ctx;
+  }
+
+  /**
+   * Cold-target V3 floor switch: the target floor's masks are not warm yet, so
+   * compose them (and repopulate effects against them) BEHIND the level-
+   * transition curtain, then reveal — all WITHOUT Foundry's
+   * canvas.scene.view({level}). The resident bus already holds every visible
+   * floor's background art, so no Foundry art swap / full-res background hold is
+   * needed; only MSA's own (paced, GPU-budget-bounded) mask compose +
+   * forceRepopulate run, which the curtain awaits before lifting. Rapid floor
+   * clicks are coalesced by the curtain (control-thrash protection).
+   *
+   * If the curtain is unavailable it falls back to performing the switch inline
+   * (no fade). Either way canvas.draw is never invoked.
+   *
+   * @param {number} clamped - target level index.
+   * @param {object} level - the target `_levels[]` entry.
+   * @param {string} reason
+   * @returns {object|null} the active level context.
+   * @private
+   */
+  _applyResidentColdLevelSwitch(clamped, level, reason) {
+    const curtain = window.MapShine?.levelTransitionCurtain ?? null;
+    const curtainAvailable = !!(
+      curtain
+        && typeof curtain.runLevelSwitch === 'function'
+        && (typeof curtain._shouldBypass !== 'function' || !curtain._shouldBypass())
+    );
+
+    // Update internal state synchronously so the dropdown UI and any caller
+    // inspecting getActiveLevelContext() sees the new target immediately (the
+    // matching emit fires inside performSwitch, below).
+    const previous = this._activeLevelContext;
+    const fromLabel =
+      String(previous?.label || '').trim()
+        || (Number.isFinite(Number(previous?.index)) ? `Level ${Number(previous.index) + 1}` : 'Current level');
+    const toLabel = String(level.label || '').trim() || `Level ${clamped + 1}`;
+
+    this._activeLevelIndex = clamped;
+    this._activeLevelContext = {
+      levelId: level.levelId,
+      label: level.label,
+      bottom: level.bottom,
+      top: level.top,
+      center: level.center,
+      source: level.source,
+      lockMode: this._lockMode,
+      transitionMs: 180,
+      index: clamped,
+      count: this._levels.length,
+    };
+
+    const performSwitch = () => {
+      log.info(`V3 floor switch (cold; compose behind curtain, no canvas.draw) → ${level.label ?? level.levelId}`);
+      try {
+        if (window.MapShine) window.MapShine.__v3ViewOnlyFloorSwitchInFlight = true;
+      } catch (_) {}
+      // Foundry-side viewed-level state first (so downstream reads the new band),
+      // then emit WITHOUT viewOnly so the mask handler composes the cold band and
+      // repopulates effects. Art still comes from the resident bus — the handler
+      // skips Foundry's background swap under floor-resident mode.
+      this._applyFoundryViewedLevel(level);
+      this._emitLevelContextChanged(reason);
+      try {
+        if (window.MapShine) window.MapShine.__v3ViewOnlyFloorSwitchInFlight = false;
+      } catch (_) {}
+    };
+
+    if (!curtainAvailable) {
+      performSwitch();
+      return this._activeLevelContext;
+    }
+
+    try {
+      curtain.armCoverSync({
+        message: 'Changing floor…',
+        subtitle: `Changing from ${fromLabel} to ${toLabel}`,
+        instant: true,
+      });
+    } catch (_) {}
+
+    try {
+      void curtain.runLevelSwitch({
+        targetLevelId: level.levelId,
+        fromLabel,
+        toLabel,
+        reason,
+        perform: performSwitch,
+      });
+    } catch (err) {
+      log.warn('curtain.runLevelSwitch threw synchronously; performing cold switch directly', err);
+      try { performSwitch(); } catch (_) {}
+    }
+
+    return this._activeLevelContext;
+  }
+
+  /**
+   * Update Foundry's viewed-level state WITHOUT a canvas.draw: set
+   * `game.user.viewedLevel`, the scene's `_view` / `_viewPosition.level` and the
+   * pending `canvas._viewOptions.level`, then a perception refresh so vision /
+   * occlusion / lighting re-evaluate for the new level. This is the lightweight
+   * replacement for the level handling inside canvas.draw; each write is
+   * independently guarded so a Foundry API shift degrades (stale until the next
+   * full draw) rather than throwing.
+   *
+   * Note: `canvas.level` itself only commits on a real draw, so viewed-level
+   * resolution that prefers it may lag until the next full draw — an accepted
+   * tradeoff of skipping canvas.draw (reliability over Foundry-native per-level
+   * token/vision precision). Mask compose reads the band from the emitted
+   * context, not `canvas.level`, so it is unaffected.
+   *
+   * @param {object} level - the target `_levels[]` entry.
+   * @private
+   */
+  _applyFoundryViewedLevel(level) {
+    const levelId = level?.levelId ?? null;
+    try { if (globalThis.game?.user) game.user.viewedLevel = levelId; } catch (_) {}
+    try {
+      const scene = canvas?.scene;
+      if (scene) {
+        scene._view = levelId ?? scene._view;
+        if (scene._viewPosition) scene._viewPosition.level = levelId ?? scene._viewPosition.level;
+      }
+    } catch (_) {}
+    // Pending same-scene redraw target Foundry consults during transitions; only
+    // written when `_viewOptions` already exists so we never clobber sibling
+    // options by creating the object ourselves.
+    try {
+      if (canvas?._viewOptions && levelId) canvas._viewOptions.level = levelId;
+    } catch (_) {}
+    try {
+      canvas?.perception?.update?.({
+        refreshVision: true,
+        refreshOcclusion: true,
+        refreshLighting: true,
+        refreshSounds: true,
+      }, true);
+    } catch (_) {}
   }
 
   stepLevel(delta = 1, options = {}) {

@@ -404,21 +404,30 @@ export function setV3LegacyTileMeshes(on) {
 }
 
 /**
- * Whether a floor switch takes the V3 **view-only** fast path: skip Foundry's
- * `canvas.scene.view({level})` (which forces a full `canvas.draw()` teardown +
- * redraw + streaming remount) and the mask rebuild, and instead just update the
- * viewed-floor state + Foundry's level/perception and request a V3 render. V3
- * keeps every floor resident in the unified pass, so a floor change is a *view*
- * change, not a content rebuild — the floor-resident architecture.
+ * Whether a floor switch takes the V3 **floor-resident** path, which NEVER runs
+ * Foundry's `canvas.scene.view({level})`. That call forces a full `canvas.draw()`
+ * that loads and HOLDS each viewed floor's full-resolution background (~731 MB
+ * each on the 144 MP Mansion) — the untracked VRAM/upload spike that lost the
+ * WebGL context on floor changes. V3 keeps every floor resident in the unified
+ * pass (all visible floors' bus backgrounds + effects are loaded at populate),
+ * so a floor change is a *view* change, not a content rebuild.
+ *
+ * Two branches, both skipping canvas.draw:
+ *   • Warm target (masks resident) → instant view-only switch (skip compose +
+ *     art swap + forceRepopulate).
+ *   • Cold target (masks not warm) → compose masks + repopulate effects BEHIND
+ *     the level-transition curtain, art from the resident bus.
  *
  * Only engaged when {@link isV3PipelineEnabled} and {@link isV3FloorFastPathEnabled}
- * are on AND the target floor's masks are already resident (pre-warmed); an
- * un-resident floor falls back to the full curtain rebuild (reliability first).
+ * are on (both default ON once V3 is on).
  *
- * **Default OFF (experimental)** — it bypasses Foundry's per-level canvas draw,
- * so vision/token-control for the new level are updated by a lighter perception
- * refresh instead. Opt in to test: `MapShine.v3.viewOnlyFloors(true)` /
- * `?msaV3ViewOnlyFloors=1`.
+ * **Default ON.** It is the concrete "canvas.draw isn't needed" floor-resident
+ * architecture and the reliable path on constrained VRAM — the legacy
+ * canvas.scene.view path reliably crashes multi-floor scenes. Tradeoff: Foundry's
+ * private `canvas.level` only commits on a real draw, so vision/token-control for
+ * the new level are updated by a lighter perception refresh and may lag Foundry's
+ * native per-level precision. Opt out with `MapShine.v3.viewOnlyFloors(false)` /
+ * `?msaV3ViewOnlyFloors=0` to restore the legacy canvas.draw floor switch.
  * @returns {boolean}
  */
 export function isV3ViewOnlyFloorsEnabled() {
@@ -430,7 +439,7 @@ export function isV3ViewOnlyFloorsEnabled() {
   } catch (_) {}
   const url = _urlFlag('msaV3ViewOnlyFloors');
   if (url !== null) return url;
-  return false; // default OFF (experimental)
+  return true; // default ON — floor-resident switch (no canvas.draw)
 }
 
 /**
@@ -575,7 +584,7 @@ export function exposeV3FlagsApi() {
           + "  .renderScale('auto')             — governor-driven dynamic resolution (default)\n"
           + '  .dither(false)                   — disable the present-pass encode dither (A/B banding)\n'
           + '  .legacyTileMeshes(true)          — force-build V2 per-tile occluder meshes under V3 (default off — they cause the load-time shader-compile stall)\n'
-          + '  .viewOnlyFloors(true)            — EXPERIMENTAL floor-resident fast path: floor switch skips Foundry canvas.draw + mask rebuild (instant, no crash), needs floors pre-warmed\n'
+          + '  .viewOnlyFloors(false)           — restore the legacy canvas.draw floor switch (default ON = floor-resident: switch never runs canvas.draw, so no full-res background hold / crash; warm=instant, cold=compose behind curtain)\n'
           + '  URL: ?msaV3=0 forces V2 for a reload  ·  ?msaV3=1 forces V3  ·  ?msaV3Scale=0.75|auto',
         );
       },

@@ -7,6 +7,7 @@ import { isGmLike, isUserGM } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import { shouldUseIncrementalTileResyncOnLevelRedraw } from '../core/texture-overhaul-flags.js';
+import { isV3ViewOnlyFloorsEnabled } from '../compositor-v3/v3-flags.js';
 import { safeCall, safeCallAsync, safeDispose, markSection, markSectionAsync, Severity } from '../core/safe-call.js';
 import { webglCrashRecovery } from '../core/webgl-crash-recovery.js';
 import * as sceneSettings from '../settings/scene-settings.js';
@@ -3561,6 +3562,17 @@ export function initialize() {
         // bake and the effect forceRepopulate — do only the cheap active-band
         // sync + consumer refresh so V3 lighting points at the new floor's mask.
         const viewOnly = payload?.viewOnly === true;
+        // Under V3 floor-resident mode every visible floor's background /
+        // foreground art is already resident in the bus (loaded for all visible
+        // levels at populate — see FloorRenderBus._loadVisibleBackgroundStack), so
+        // a floor change must NOT run Foundry's per-level background swap. That
+        // path resolves art from `canvas.level`, which is deliberately left
+        // un-drawn here (canvas.scene.view is skipped to avoid the full-res
+        // background hold that crashed the switch), so it would swap in STALE art.
+        // Compose + repopulate below still run for cold bands; only the Foundry
+        // art swap is skipped. Applies to both warm (viewOnly) and cold resident
+        // switches.
+        const v3FloorResident = isV3ViewOnlyFloorsEnabled();
 
         try {
           if (ms) ms.__levelMaskRebuildContext = null;
@@ -3601,7 +3613,7 @@ export function initialize() {
 
         let warmBandRevisit = false;
 
-        if (hasV14NativeLevels(canvas?.scene) && sc && bus && fd) {
+        if (hasV14NativeLevels(canvas?.scene) && sc && bus && fd && !v3FloorResident) {
           const viewedBgSrc = getViewedLevelBackgroundSrc(canvas.scene);
           const currentBasePath = sc._lastMaskBasePath ?? sc.extractBasePath?.(
             canvas.scene?.background?.src ?? ''

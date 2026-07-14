@@ -3618,7 +3618,19 @@ export function initialize() {
 
         let warmBandRevisit = false;
 
-        if (hasV14NativeLevels(canvas?.scene) && sc && bus && fd) {
+        // The cold-scene-load emit ('initialize', camera-follower.js) already
+        // gets its initially-viewed floor's art from FloorRenderBus.populate's
+        // own _loadVisibleBackgroundStack — this block exists for LEVEL
+        // CHANGES after that point. Under floor-resident mode, skip it
+        // specifically for that first emit: the last configuration verified
+        // crash-free at Native resolution had this block disabled for EVERY
+        // invocation (including load), and re-enabling it unconditionally
+        // reintroduces async mask/art work (_loadMasksOnlyForBasePath,
+        // swapBackgroundImage/swapForegroundImage) into the load's GPU/timing
+        // budget that wasn't running in that tested configuration. Genuine
+        // floor-switch emits (any other reason) still get the fix.
+        const skipForFloorResidentInitialLoad = v3FloorResident && payload?.reason === 'initialize';
+        if (hasV14NativeLevels(canvas?.scene) && sc && bus && fd && !skipForFloorResidentInitialLoad) {
           const levelId = payload?.context?.levelId
             ?? canvas?.level?.id
             ?? canvas?.scene?._view

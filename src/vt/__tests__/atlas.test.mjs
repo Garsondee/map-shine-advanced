@@ -76,7 +76,15 @@ export function run(t) {
     const layout = computeAtlasLayout({ budgetBytes: 512 * 1024 * 1024 });
     const atlas = new PageAtlas({ THREE: T, layout });
     ok('PageAtlas: texture matches layout dims', atlas.texture.image.width === 4096 && atlas.texture.image.height === 4096 && atlas.texture.image.depth === 8);
-    ok('PageAtlas: allocated with null data (never a world-sized upload)', atlas.texture.image.data === null);
+    // MUST be real (non-null) data -- confirmed live 2026-07-15: THREE's
+    // uploadTexture() unconditionally calls texSubImage3D(..., image.data) on
+    // first use, and `null` there produced real GL errors ("no bound
+    // PIXEL_UNPACK_BUFFER"), leaving the atlas never properly established.
+    const data = atlas.texture.image.data;
+    ok('PageAtlas: allocated with a REAL zeroed buffer, not null', data instanceof Uint8Array && data.length > 0);
+    ok('PageAtlas: initial buffer is exactly the atlas\'s own fixed size (never world-scaling)',
+      data.length === 4096 * 4096 * 8 * 4);
+    ok('PageAtlas: initial buffer is zeroed (a clean initial-clear state)', data.every((b) => b === 0));
   }
 
   // --- PageAtlas: uploadPage computes the right dstPosition + calls the ----

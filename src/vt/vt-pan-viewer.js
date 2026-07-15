@@ -35,7 +35,21 @@ import { createInitialViewState, applyKey, viewToWorldRect } from './view-state.
 import { computeVisiblePages, diffResidency } from './residency.js';
 import { stopVtSmokeTest } from './vt-smoke-test.js'; // the two share screen space; starting one stops the other
 
-const CANVAS_PX = 600;
+/**
+ * The canvas fills nearly the whole viewport (not a "tiny window" — flagged
+ * live 2026-07-15) while staying SQUARE: the view-state/world-rect math uses
+ * one halfSpanPx for both axes (view-state.js), so a non-square canvas would
+ * visibly STRETCH the render — a new bug class this session doesn't need on
+ * top of the three coordinate bugs already chased down. Sized to the smaller
+ * of (viewport width minus room for the debug panel, viewport height minus margin).
+ */
+function computeCanvasSizePx() {
+  const margin = 24;
+  const debugPanelReserve = 360; // keeps the corner debug panel/heartbeat box clickable
+  const maxW = window.innerWidth - margin * 2 - debugPanelReserve;
+  const maxH = window.innerHeight - margin * 2;
+  return Math.max(320, Math.min(maxW, maxH));
+}
 
 let _active = null;
 
@@ -72,12 +86,13 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
     const layout = computeAtlasLayout({ budgetBytes: 512 * 1024 * 1024 }); // Keyhole Q2 default
     const cache = new PageCache({ budgetBytes: 512 * 1024 * 1024 });
 
+    const canvasPx = computeCanvasSizePx();
     const canvas = document.createElement('canvas');
     canvas.id = 'msa-vt-pan-viewer-canvas';
-    canvas.width = CANVAS_PX;
-    canvas.height = CANVAS_PX;
+    canvas.width = canvasPx;
+    canvas.height = canvasPx;
     Object.assign(canvas.style, {
-      position: 'fixed', left: '12px', bottom: '12px', width: `${CANVAS_PX}px`, height: `${CANVAS_PX}px`,
+      position: 'fixed', left: '24px', top: '24px', width: `${canvasPx}px`, height: `${canvasPx}px`,
       zIndex: '89', borderRadius: '8px', border: '1px solid rgba(143,214,255,0.35)',
       boxShadow: '0 6px 24px rgba(0,0,0,0.5)', background: '#000', cursor: 'crosshair',
     });
@@ -85,7 +100,7 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
 
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: false });
     renderer.setPixelRatio(1);
-    renderer.setSize(CANVAS_PX, CANVAS_PX, false);
+    renderer.setSize(canvasPx, canvasPx, false);
 
     const atlas = new PageAtlas({ THREE, layout, renderer });
     const floors = new Map(); // floorIndex -> { table, sourceBitmap, indirectionTexture, buf, n, residentViewKeys }
@@ -269,6 +284,7 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
         return {
           view,
           layout,
+          canvasSizePx: canvasPx,
           cacheStats: cache.stats(),
           floorsLoaded: Array.from(floors.keys()),
           currentFloorResidentCount: floors.get(view.floorIndex)?.residentViewKeys.size ?? 0,

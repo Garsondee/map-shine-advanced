@@ -99,10 +99,20 @@ export class PageAtlas {
     this._renderer = renderer;
 
     const { atlasSizePx, layers } = layout;
-    // One-time allocation. `data: null` — pages are written page-by-page via
-    // uploadPage(), never as one world-sized upload (that would BE a
-    // world-resolution allocation, exactly what the law forbids).
-    this.texture = new THREE.DataArrayTexture(null, atlasSizePx, atlasSizePx, layers);
+    // MUST be a real (non-null) buffer, not `null` — confirmed live 2026-07-15
+    // by tracing the actual GL errors against the vendored r170 source
+    // (three.module.js's uploadTexture(), ~line 25291): the texture's FIRST
+    // real use always calls texSubImage3D(..., image.data) unconditionally,
+    // and `null` there is exactly what produced "no bound PIXEL_UNPACK_BUFFER"
+    // / "no texture bound to target" — the atlas was never properly
+    // established, so every subsequent per-page upload failed too. A zeroed
+    // buffer at the atlas's own FIXED size is NOT a law violation (the law
+    // forbids WORLD-resolution allocations — this is the atlas's
+    // already-budgeted size, identical to what's already committed on the
+    // GPU side; individual pages still arrive one at a time via uploadPage(),
+    // this only supplies the required one-time initial-clear buffer).
+    const initialData = new Uint8Array(atlasSizePx * atlasSizePx * layers * BYTES_PER_TEXEL_RGBA8);
+    this.texture = new THREE.DataArrayTexture(initialData, atlasSizePx, atlasSizePx, layers);
     this.texture.name = 'vt:pageAtlas';
     this.texture.needsUpdate = true;
   }

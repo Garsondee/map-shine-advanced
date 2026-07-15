@@ -110,7 +110,16 @@ vec4 vtSample(vec2 worldUV) {
   float payloadPx = uPageSizePx - uBorderPx * 2.0;
   vec2 worldPx = worldUV * uWorldSizePx;
   vec2 cellF = worldPx / payloadPx;
-  ivec2 texel = clamp(ivec2(floor(cellF)), ivec2(0), ivec2(uPagesPerAxis - 1));
+  // Clamp bound MUST be the INDIRECTION texture's own real dimensions
+  // (queried directly — e.g. 49x49 for the torture fixture), NOT
+  // uPagesPerAxis (that uniform is the ATLAS's slot grid — e.g. 4x4 for a
+  // small test atlas — a completely different number used only in
+  // vtSlotToAtlas below). Conflating the two was a second, worse bug
+  // introduced by the first fix: it clamped every texel lookup down into
+  // [0, atlasPagesPerAxis-1], which is nowhere near where real pages are
+  // indexed (23-25 on this fixture) — every sample missed, all magenta.
+  ivec2 tableSize = textureSize(uPageTable, 0);
+  ivec2 texel = clamp(ivec2(floor(cellF)), ivec2(0), tableSize - ivec2(1));
 
   VTPage page = vtDecodeIndirection(texel);
   if (!page.resident) {

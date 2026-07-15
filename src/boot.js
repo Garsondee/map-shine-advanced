@@ -14,19 +14,30 @@
  *   3. Nothing is ever allocated at world resolution (enforced later in the allocator).
  *   4. The hard case ships first (the torture scene is Stage 0's fixture).
  *
- * STAGE 0 job (Keyhole §8): prove the new tree is wired and the new Three boots —
- * render a colored triangle. Real rendering (the page cache, unified geometry,
- * lighting) returns in Stage 1–2. Until then the module intentionally shows this
- * boot heartbeat instead of maps. That is the plan working, not breaking.
+ * STAGE 0 (Keyhole §8) proved the new tree is wired and the new Three boots —
+ * a colored triangle. STAGE 1 ("the law, running") is now underway: the
+ * allocator's world-res law, the page-cache/table/residency core, and the
+ * physical GPU atlas are built and Node/mock-verified (src/graph/, src/vt/) —
+ * but nothing is wired into a real render pass yet, so the boot heartbeat
+ * below is still the only thing on screen. Real map rendering returns once
+ * Stage 1's geometry pass lands. That is the plan working, not breaking.
+ *
+ * This file also hosts the temporary Keyhole DEBUG PANEL (src/diag/debug-panel.js)
+ * in the same corner box as the heartbeat — a growing set of one-click reports
+ * for the author to copy/paste back during development. Every future stage can
+ * register its own report via `MapShine.debug.registerReport(...)`.
  */
 
 import * as THREE from './vendor/three/three.module.js';
 import { installSoak } from './diag/soak.js';
+import { installDebugPanel } from './diag/debug-panel.js';
+import { runVtSelfTest } from './vt/vt-selftest-report.js';
+import { runVtLiveDecodeTest } from './vt/vt-live-decode-report.js';
 
 const MODULE_ID = 'map-shine-advanced';
 const VERSION = '0.6.0-dev.0';
 const CODENAME = 'Keyhole';
-const STAGE = 'Stage 0 · fixture & rig';
+const STAGE = 'Stage 1 · the law, running';
 
 const TAG = `[MSA ${VERSION} ${CODENAME}]`;
 
@@ -38,6 +49,7 @@ const TAG = `[MSA ${VERSION} ${CODENAME}]`;
 const MapShine = (globalThis.MapShine = globalThis.MapShine || {});
 MapShine.version = VERSION;
 MapShine.codename = CODENAME;
+MapShine.__stage = STAGE;
 MapShine.THREE = THREE; // single Three instance for the whole V3 tree
 
 /** Guard against double-boot (Foundry hot-reload, duplicate module load). */
@@ -50,6 +62,17 @@ if (MapShine.__keyholeBooted) {
 
 function install() {
   installSoak(MapShine); // exposes MapShine.soak(n) — the stage-gate soak harness
+  installDebugPanel(MapShine); // starts console capture NOW, as early as possible
+  MapShine.debug.registerReport('vt-selftest', 'VT Self-Test', () => ({
+    report: 'vt-selftest',
+    generatedAt: new Date().toISOString(),
+    ...runVtSelfTest(),
+  }));
+  MapShine.debug.registerReport('vt-live-decode', 'VT Live Decode Test', async () => ({
+    report: 'vt-live-decode',
+    generatedAt: new Date().toISOString(),
+    ...(await runVtLiveDecodeTest(`modules/${MODULE_ID}/assets/torture/torture_floor0.png`)),
+  }));
   console.log(
     `%c${TAG}%c ${STAGE} — new tree live, legacy quarantined. Three r${THREE.REVISION} / WebGL2.` +
       ` Soak harness ready: MapShine.soak(n).`,
@@ -156,6 +179,7 @@ function bootHeartbeat() {
 
     MapShine.__heartbeat = { host, renderer, scene, camera, triangle };
     MapShine.__soakWatch?.(canvas); // count any WebGL context loss on the boot canvas
+    MapShine.debug?.attachPanel(host); // the debug panel lives in the same corner box
     console.log(`${TAG} boot heartbeat rendering. Gate "boot renders" ✔`);
   } catch (err) {
     // Doctrine #1: fail LOUD, never silently. No V2 fallback exists to hide behind.

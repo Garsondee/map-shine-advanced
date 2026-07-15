@@ -9,6 +9,7 @@
  */
 import { run as runVtCore } from './vt-core.test.mjs';
 import { run as runAtlas } from './atlas.test.mjs';
+import { run as runDecodePool } from './decode-pool.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -31,7 +32,7 @@ const t = {
   },
 };
 
-const suites = [['vt-core', runVtCore], ['atlas', runAtlas]];
+const suites = [['vt-core', runVtCore], ['atlas', runAtlas], ['decode-pool', runDecodePool]];
 
 for (const [name, fn] of suites) {
   const before = failed;

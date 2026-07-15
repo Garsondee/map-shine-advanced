@@ -160,7 +160,18 @@ export async function runVtSmokeTest({ THREE, imageUrl }) {
     const uvAttr = quadGeometry.getAttribute('uv');
     for (let i = 0; i < uvAttr.count; i++) {
       const u = uvAttr.getX(i), v = uvAttr.getY(i);
-      uvAttr.setXY(i, uvMin + u * (uvMax - uvMin), uvMin + v * (uvMax - uvMin));
+      // V IS INVERTED HERE ON PURPOSE — confirmed live 2026-07-15 (rendered
+      // upside-down without this). PlaneGeometry's v=1 is local +Y, and the
+      // vertex shader below passes position.xy straight to gl_Position, so
+      // local +Y lands at NDC +Y == the TOP of the viewport. World-Y here is
+      // plain image-pixel space (increases DOWNWARD — decodePage() crops
+      // straight off worldRect.minY as an image row, no flip anywhere in the
+      // atlas/indirection upload path either: verified DataArrayTexture
+      // defaults flipY:false and copyTextureToTexture reads the DESTINATION's
+      // flipY, not the source's, so nothing flips during upload). Screen-top
+      // must therefore show the SMALLER world-Y (the top of the source
+      // image) — i.e. v=1 -> uvMin, not uvMax.
+      uvAttr.setXY(i, uvMin + u * (uvMax - uvMin), uvMax - v * (uvMax - uvMin));
     }
     uvAttr.needsUpdate = true;
 

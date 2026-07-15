@@ -9242,7 +9242,24 @@ async function createThreeCanvas(scene, createOptions = {}) {
       
       await markSectionAsync('graphicsSettings.initialize', () => graphicsSettings.initialize());
       safeCall(() => loadingOverlay.setStage('ui.bootstrap', 1.0, undefined, { keepAuto: false }), 'overlay.uiInit.graphicsReady', Severity.COSMETIC);
-      await new Promise(r => setTimeout(r, 0)); // yield so browser paints progress
+      // Diagnostic (temporary): a load crash report showed a ~6.4s main-thread
+      // stall landing in THIS yield (between graphicsSettings.initialize and the
+      // token-depth setup) with ZERO MSA sections and no wrapped GL op firing
+      // inside it — i.e. a single EXTERNAL macrotask (browser/GPU driver
+      // flushing the high-res RT-allocation + texture-upload burst, or Foundry
+      // effect-binding continuation) held the thread across the TDR threshold.
+      // Measure the yield directly so the next report confirms/quantifies it
+      // instead of leaving an unattributed gap.
+      {
+        const _yieldStartMs = performance.now();
+        await new Promise(r => setTimeout(r, 0)); // yield so browser paints progress
+        const _yieldMs = performance.now() - _yieldStartMs;
+        if (_yieldMs > 500) {
+          log.warn(`[load-stall] initializeUI post-graphicsSettings yield took ${Math.round(_yieldMs)}ms `
+            + '— an external (non-MSA) macrotask blocked the main thread here (GPU flush of the high-res '
+            + 'allocation burst is the leading suspect; reduce the render-resolution preset to shrink it).');
+        }
+      }
       if (tokenManager && typeof tokenManager.setDepthInteraction === 'function') {
         graphicsSettings._onTokenDepthInteractionChanged = (enabled) => {
           safeCall(() => tokenManager.setDepthInteraction(enabled), 'graphicsSettings.tokenDepthInteraction', Severity.COSMETIC);

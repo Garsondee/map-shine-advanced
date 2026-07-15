@@ -4102,16 +4102,23 @@ export class FloorCompositor {
       //     (nothing ever calls registerEffect for them) → never rendered.
       //   • Water/WaterSplashes — no V3 water pass yet (Forward+ B5).
       //   • Ash/Dust — particle effects not in any V3 bridge.
-      // KEPT under V3: Bush/Tree (V3EffectsBridge renders them), Fire (kept
-      // conservatively — its meshes live in the bus scene and may render even
-      // without an explicit bridge), WindowLight (its masks are structural).
+      //   • Fire — FireEffectV2 is in NO V3 module (V3EffectsBridge drives only
+      //     candle/bush/tree). Its populate() is ALSO by far the heaviest single
+      //     job on this scene: [POPULATE DONE] logs measured FireEffectV2.populate
+      //     at 4838ms on the 'loading' pass AND 11960ms on the 'cold-load-bg-resync'
+      //     pass (it runs twice), vs 1-18ms for every other effect — i.e. THE
+      //     load-time TDR trigger. Skipping it removes ~5-12s of un-chunkable
+      //     synchronous work from each load populate.
+      // KEPT under V3: Bush/Tree (V3EffectsBridge renders them, ~17ms each),
+      // WindowLight (masks are structural, ~5ms).
       // A hard SKIP (not defer) is correct: V3 genuinely never renders these, so
       // there is nothing to defer TO; re-enable per-effect when V3 gains that
-      // pass. Reversible via `MapShine.v3.pipeline(false)`.
+      // pass (and, for fire, chunk its pathologically-slow populate first).
+      // Reversible via `MapShine.v3.pipeline(false)`.
       const v3SkipPopulateKeys = isV3PipelineEnabled()
         ? new Set([
           '_specularEffect', '_fluidEffect', '_iridescenceEffect', '_prismEffect',
-          '_ashDisturbanceEffect', '_dustEffect',
+          '_ashDisturbanceEffect', '_dustEffect', '_fireEffect',
         ])
         : null;
 
@@ -4137,7 +4144,7 @@ export class FloorCompositor {
       }
       if (v3SkipPopulateKeys) {
         log.info(`[POPULATE LOAD] V3: skipping populate() for ${populateJobs.length < maskJobDefs.length ? 'non-V3-rendered effects' : 'none'} `
-          + `(specular/fluid/iridescence/prism/ash/dust/water) — ${populateJobs.length} job(s) will run.`);
+          + `(specular/fluid/iridescence/prism/ash/dust/water/fire) — ${populateJobs.length} job(s) will run.`);
       }
       log.warn(
         `[POPULATE LOAD] effect queue ready | source=${source} | jobs=${populateJobs.length} | maskHintPruneActive=${hintPruneMasks} | perJobTimeoutMs=${POPULATE_JOB_TIMEOUT_MS}`,

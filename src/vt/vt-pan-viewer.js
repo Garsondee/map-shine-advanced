@@ -244,17 +244,17 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
         }
       }
       if (decodedForUpload.length > 0) {
-        // Belt-and-suspenders on top of the batching above: PAUSE the render
-        // loop for the brief duration of the actual GL upload calls, so it is
-        // categorically impossible for a render() to land between two
-        // uploadPage() calls, regardless of how many pages there are or how
-        // long any single decode took. A single JS function call can't be
-        // interrupted mid-execution (JS is run-to-completion) — the risk is
-        // ONLY between separate calls — but after 4 live-test rounds on this
-        // exact bug class, a guaranteed-correct fix beats a strong theory.
-        // Cost: one skipped/frozen frame per residency update, imperceptible
-        // for a debug tool where uploads take low-single-digit milliseconds.
+        // Pausing the render loop during the upload batch (kept — cheap,
+        // harmless, and avoids wasting a render on a half-updated state) was
+        // NOT the actual fix for "no texture bound to target": that error
+        // persisted even with rendering provably paused (a synchronous JS
+        // block genuinely cannot be interleaved), which disproved the
+        // interleaving theory outright. The REAL cause and fix are in
+        // atlas.js's prepareForUploadBatch() — THREE's own texture-unit
+        // binding CACHE (not a timing race) goes stale after a render() call,
+        // and copyTextureToTexture's fast path trusts it anyway.
         renderer.setAnimationLoop(null);
+        atlas.prepareForUploadBatch();
         for (const { slot, decoded } of decodedForUpload) {
           const srcTex = new THREE.Texture(decoded);
           srcTex.flipY = false;

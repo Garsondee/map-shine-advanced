@@ -121,6 +121,39 @@ export class PageAtlas {
   setRenderer(renderer) { this._renderer = renderer; }
 
   /**
+   * Call ONCE before a batch of `uploadPage()` calls (not once per page —
+   * this is real, if modest, GL state-setting work).
+   *
+   * WHY THIS EXISTS (root-caused live 2026-07-15 after several wrong
+   * theories — interleaving, render-loop pausing — that didn't fix it):
+   * `renderer.copyTextureToTexture()` binds the atlas via THREE's internal
+   * `WebGLState` texture-unit CACHE (`currentTextureSlot` / `currentBoundTextures`,
+   * verified directly in the vendored r170 source, `state.bindTexture()`) at a
+   * HARDCODED unit (0). Normal material rendering (`renderer.render()`) ALSO
+   * uses that exact cache for the shader's OWN sampler uniforms (`uPageAtlas`/
+   * `uPageTable`), via THREE's own `allocateTextureUnit()` counter — a
+   * COMPLETELY SEPARATE allocation scheme from `copyTextureToTexture`'s
+   * hardcoded 0. After at least one render() has run, the cache's belief
+   * about what's bound to unit 0 can end up inconsistent with what
+   * `copyTextureToTexture` needs next, and its "already bound, skip the real
+   * GL call" fast path goes stale — producing `texSubImage3D: no texture
+   * bound to target`, reliably, on every upload after the first render.
+   *
+   * `renderer.resetState()` is THREE's own sanctioned fix for exactly this
+   * class of problem (manual/external WebGL calls need to invalidate the
+   * renderer's cached assumptions) — confirmed via source
+   * (`WebGLState.reset()`) that it clears `currentTextureSlot`/
+   * `currentBoundTextures` and otherwise resets to plain default GL state
+   * (blend/depth-test/cull all OFF) — which is everything a simple, unblended
+   * fullscreen-quad material like this project's VT viewers already assume,
+   * so nothing needs restoring afterward. Safe and cheap to call once per
+   * residency update.
+   */
+  prepareForUploadBatch() {
+    this._renderer?.resetState?.();
+  }
+
+  /**
    * Upload one decoded page's pixels into its assigned slot.
    *
    * @param {number} slot - the PageCache-assigned slot index.

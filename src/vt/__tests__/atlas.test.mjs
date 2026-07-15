@@ -21,10 +21,12 @@ function makeAtlasTHREE() {
     }
     dispose() { this._disposed = true; }
   };
+  calls.resetState = 0;
   const renderer = {
     copyTextureToTexture(src, dst, srcRegion, dstPosition, level) {
       calls.copyTextureToTexture.push({ src, dst, srcRegion, dstPosition, level });
     },
+    resetState() { calls.resetState++; },
   };
   return { T, renderer, calls };
 }
@@ -106,6 +108,21 @@ export function run(t) {
       const atlas2 = new PageAtlas({ THREE: T, layout });
       atlas2.uploadPage(0, fakeSrc);
     });
+  }
+
+  // --- PageAtlas: prepareForUploadBatch calls renderer.resetState() --------
+  // (fixes "texSubImage3D: no texture bound to target" after a render() call
+  // touches THREE's texture-unit cache -- confirmed live 2026-07-15)
+  {
+    const { T, renderer, calls } = makeAtlasTHREE();
+    const layout = computeAtlasLayout({ budgetBytes: 512 * 1024 * 1024 });
+    const atlas = new PageAtlas({ THREE: T, layout, renderer });
+    atlas.prepareForUploadBatch();
+    ok('prepareForUploadBatch: calls renderer.resetState() exactly once', calls.resetState === 1);
+
+    const atlasNoRenderer = new PageAtlas({ THREE: T, layout }); // never had setRenderer() called
+    atlasNoRenderer.prepareForUploadBatch(); // must not throw even with no renderer set
+    ok('prepareForUploadBatch: safe no-op when no renderer is set (optional chaining, not required)', true);
   }
 
   // --- consistency: PageAtlas layout capacity math matches BYTES_PER_TEXEL --

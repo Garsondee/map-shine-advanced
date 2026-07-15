@@ -5,7 +5,7 @@
  */
 import { PageCache } from '../page-cache.js';
 import { PageTable, DEFAULT_PAGE_PAYLOAD_PX } from '../page-table.js';
-import { computeVisiblePages, chooseMip, planResidency, coarsePinSet } from '../residency.js';
+import { computeVisiblePages, chooseMip, planResidency, coarsePinSet, diffResidency } from '../residency.js';
 
 export function run(t) {
   const { ok, throws } = t;
@@ -146,5 +146,24 @@ export function run(t) {
     const n = table.pagesPerAxis(table.maxMip);
     ok('residency: coarsePinSet size == topMip pages^2', pins.length === n * n);
     ok('residency: coarsePinSet really is "tens of pages", not hundreds', pins.length < 100);
+  }
+
+  // --- residency: diffResidency (the pan-viewer's per-frame update) --------
+  {
+    const prev = new Set(['a', 'b', 'c']);
+    const next = [{ key: 'b' }, { key: 'c' }, { key: 'd' }, { key: 'd' }]; // 'd' duplicated on purpose
+    const diff = diffResidency(prev, next);
+    ok('diffResidency: newly-needed pages are requested', diff.toRequest.length === 1 && diff.toRequest[0].key === 'd');
+    ok('diffResidency: de-dupes the requested list', diff.toRequest.length === 1); // not 2, despite 'd' appearing twice
+    ok('diffResidency: no-longer-needed pages are unpinned', diff.toUnpin.length === 1 && diff.toUnpin[0] === 'a');
+    ok('diffResidency: still-needed pages are neither requested nor unpinned', !diff.toRequest.some((p) => p.key === 'b' || p.key === 'c') && !diff.toUnpin.includes('b') && !diff.toUnpin.includes('c'));
+    ok('diffResidency: nextKeys matches the new set exactly', diff.nextKeys.size === 3 && diff.nextKeys.has('b') && diff.nextKeys.has('c') && diff.nextKeys.has('d'));
+  }
+
+  // --- residency: diffResidency on an empty transition (no churn) ----------
+  {
+    const prev = new Set(['x', 'y']);
+    const diff = diffResidency(prev, [{ key: 'x' }, { key: 'y' }]);
+    ok('diffResidency: identical prev/next produces zero churn', diff.toRequest.length === 0 && diff.toUnpin.length === 0);
   }
 }

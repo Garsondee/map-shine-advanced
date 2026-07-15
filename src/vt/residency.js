@@ -119,3 +119,31 @@ export function coarsePinSet(table) {
       out.push({ mip, px, py, key: table.pageKey(mip, px, py) });
   return out;
 }
+
+/**
+ * Diff a previous "currently view-pinned" key set against a freshly computed
+ * needed-page list (e.g. from `planResidency().fine`) — the per-frame update
+ * a pan/zoom viewer runs. Pages newly needed must be requested (decoded +
+ * uploaded if not already resident from a prior visit); pages no longer
+ * needed are UNPINNED, never evicted directly here — `PageCache` itself
+ * decides eviction via LRU under real pressure, so a brief pan-and-back stays
+ * free (Keyhole.md §4.1's "two pin classes" design, `page-cache.js`'s own
+ * `unpin()` doc comment).
+ *
+ * @param {Set<string>} prevKeys - the key set that was pinned 'view' last frame.
+ * @param {Array<{key:string}>} nextPages - this frame's needed pages (with duplicates fine).
+ * @returns {{toRequest: Array<{key:string}>, toUnpin: string[], nextKeys: Set<string>}}
+ */
+export function diffResidency(prevKeys, nextPages) {
+  const nextKeys = new Set(nextPages.map((p) => p.key));
+  const toRequest = [];
+  const seen = new Set();
+  for (const page of nextPages) {
+    if (seen.has(page.key)) continue; // de-dupe (fine+prefetch sets can overlap)
+    seen.add(page.key);
+    if (!prevKeys.has(page.key)) toRequest.push(page);
+  }
+  const toUnpin = [];
+  for (const key of prevKeys) if (!nextKeys.has(key)) toUnpin.push(key);
+  return { toRequest, toUnpin, nextKeys };
+}

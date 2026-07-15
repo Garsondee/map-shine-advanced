@@ -34,6 +34,7 @@ import { installDebugPanel } from './diag/debug-panel.js';
 import { runVtSelfTest } from './vt/vt-selftest-report.js';
 import { runVtLiveDecodeTest } from './vt/vt-live-decode-report.js';
 import { runVtSmokeTest, stopVtSmokeTest } from './vt/vt-smoke-test.js';
+import { startVtPanViewer, stopVtPanViewer, getVtPanViewerDiagnostics, soakPanStep, soakSwitchFloorStep } from './vt/vt-pan-viewer.js';
 
 const MODULE_ID = 'map-shine-advanced';
 const VERSION = '0.6.0-dev.0';
@@ -84,6 +85,38 @@ function install() {
     generatedAt: new Date().toISOString(),
     ...stopVtSmokeTest(),
   }));
+
+  const TORTURE_FLOOR_COUNT = 3;
+  const tortureImageUrl = (floorIndex) => `modules/${MODULE_ID}/assets/torture/torture_floor${floorIndex}.png`;
+
+  MapShine.debug.registerReport('vt-pan-viewer-start', 'VT Pan Viewer: Start (bottom-left canvas)', async () => ({
+    report: 'vt-pan-viewer-start',
+    generatedAt: new Date().toISOString(),
+    ...(await startVtPanViewer({ THREE, imageUrlForFloor: tortureImageUrl, floorCount: TORTURE_FLOOR_COUNT })),
+  }));
+  MapShine.debug.registerReport('vt-pan-viewer-diagnostics', 'VT Pan Viewer: Diagnostics', () => ({
+    report: 'vt-pan-viewer-diagnostics',
+    generatedAt: new Date().toISOString(),
+    ...getVtPanViewerDiagnostics(),
+  }));
+  MapShine.debug.registerReport('vt-pan-viewer-stop', 'VT Pan Viewer: Stop/Clear', () => ({
+    report: 'vt-pan-viewer-stop',
+    generatedAt: new Date().toISOString(),
+    ...stopVtPanViewer(),
+  }));
+
+  // MapShine.soak(n) now drives something real (Stage 1 part 4b) instead of
+  // reporting stub drivers — load ensures the pan viewer is running, pan/
+  // switchFloor go through the EXACT same applyKeyAndUpdate() path a real
+  // keypress uses.
+  MapShine.soakHooks.load = async () => {
+    if (!getVtPanViewerDiagnostics().active) {
+      await startVtPanViewer({ THREE, imageUrlForFloor: tortureImageUrl, floorCount: TORTURE_FLOOR_COUNT });
+    }
+  };
+  MapShine.soakHooks.pan = (i) => soakPanStep(i);
+  MapShine.soakHooks.switchFloor = (i) => soakSwitchFloorStep(i);
+
   console.log(
     `%c${TAG}%c ${STAGE} — new tree live, legacy quarantined. Three r${THREE.REVISION} / WebGL2.` +
       ` Soak harness ready: MapShine.soak(n).`,

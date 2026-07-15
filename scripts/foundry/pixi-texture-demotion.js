@@ -42,17 +42,28 @@ const MAX_DISPOSES_PER_TEXTURE = 3;
 let _sweepId = null;
 /** @type {number|null} floor-change sweep timer */
 let _floorSweepId = null;
-/** @type {Map<string, number>} dispose count per resource URL (this load) */
+/** @type {Map<string, number>} dispose count per resource URL — load-time + floor-change sweeps share this budget. */
 const _disposeCounts = new Map();
+/**
+ * @type {Map<string, number>} SEPARATE dispose-count budget for pressure-triggered
+ * (crash-prevention) demotion calls — see the long comment on
+ * {@link disposeLargePixiFileTexturesUnderPressure} for why this must not share
+ * `_disposeCounts` with the load/floor-change sweeps.
+ */
+const _pressureDisposeCounts = new Map();
 
 /**
  * Dispose the GL side of large file-backed PIXI BaseTextures.
  * Safe to call at any time; returns what it freed.
  *
  * @param {number} [minDim=DEFAULT_MIN_DIM]
+ * @param {Map<string, number>} [disposeCounts] Anti-churn budget to read/write.
+ *   Defaults to the shared load/floor-change budget for the two original call
+ *   sites' behavior. Pass a private Map to give a caller its own independent
+ *   budget — see {@link disposeLargePixiFileTexturesUnderPressure}.
  * @returns {{ count: number, freedMB: number }}
  */
-export function disposeLargePixiFileTextures(minDim = DEFAULT_MIN_DIM) {
+export function disposeLargePixiFileTextures(minDim = DEFAULT_MIN_DIM, disposeCounts = _disposeCounts) {
   let freedMB = 0;
   let count = 0;
   try {
@@ -65,9 +76,9 @@ export function disposeLargePixiFileTextures(minDim = DEFAULT_MIN_DIM) {
         const h = Number(bt?.realHeight ?? bt?.height) || 0;
         const src = bt?.resource?.src;
         if (typeof src !== 'string' || Math.max(w, h) < minDim) continue;
-        const n = _disposeCounts.get(src) ?? 0;
+        const n = disposeCounts.get(src) ?? 0;
         if (n >= MAX_DISPOSES_PER_TEXTURE) continue;
-        _disposeCounts.set(src, n + 1);
+        disposeCounts.set(src, n + 1);
         bt.dispose();
         freedMB += Math.round((w * h * 4) / 1048576);
         count++;
@@ -83,6 +94,33 @@ export function disposeLargePixiFileTextures(minDim = DEFAULT_MIN_DIM) {
     log.info(`Demoted ${count} large PIXI texture(s), ~${freedMB} MB GPU freed`);
   }
   return { count, freedMB };
+}
+
+/**
+ * Pressure-triggered demotion entry point (VRAM ledger — `AdaptiveBudgetController`,
+ * called whenever aggregate residency crosses the danger threshold).
+ *
+ * Uses its OWN anti-churn budget (`_pressureDisposeCounts`), independent of the
+ * load-time and floor-change sweeps' shared `_disposeCounts`. Field data (2026-07-15,
+ * Church of the Light, floor-change crash): `startFloorChangeDemotionSweep` fires on
+ * every floor change and shares `_disposeCounts` with the ORIGINAL
+ * `disposeLargePixiFileTextures()` call — if that sweep burns through the shared
+ * 3-dispose budget on a texture Foundry keeps re-binding (plausible for a floor's own
+ * light-cover/background asset touched every redraw), a pressure-triggered call
+ * arriving moments later would see the cap already hit and silently no-op for the
+ * REST OF THE SESSION, with no way to distinguish "already handled" from "gave up."
+ * The two purposes have different tolerances anyway: the load/floor sweeps are
+ * optimizing for "don't waste bandwidth re-uploading during a known transient
+ * window" (a reasonable throttle); pressure-triggered demotion exists purely to
+ * avert a context-loss crash, where repeated wasted disposal is a fully acceptable
+ * cost next to the alternative. Giving it an independent budget means an unrelated
+ * sweep can never disable emergency demotion for the rest of the session.
+ *
+ * @param {number} [minDim=DEFAULT_MIN_DIM]
+ * @returns {{ count: number, freedMB: number }}
+ */
+export function disposeLargePixiFileTexturesUnderPressure(minDim = DEFAULT_MIN_DIM) {
+  return disposeLargePixiFileTextures(minDim, _pressureDisposeCounts);
 }
 
 /**
@@ -165,6 +203,7 @@ try {
     window.MapShine = window.MapShine || {};
     window.MapShine.pixiTextureDemotion = {
       dispose: disposeLargePixiFileTextures,
+      disposeUnderPressure: disposeLargePixiFileTexturesUnderPressure,
       startSweep: startLoadDemotionSweep,
       stopSweep: stopLoadDemotionSweep,
       startFloorChangeSweep: startFloorChangeDemotionSweep,

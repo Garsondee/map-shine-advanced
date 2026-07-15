@@ -60,12 +60,21 @@ export async function loadCloudSpriteTextures() {
  *   Called for each loaded, configured texture, in load order.
  * @param {number} [options.staggerMs=4000] Delay between consecutive loads.
  * @param {() => boolean} [options.shouldContinue] Return false to stop early.
+ * @param {() => Promise<boolean|void>} [options.awaitClearance] Awaited before each
+ *   upload; the caller blocks here while a large GPU allocation is unsafe (VRAM near
+ *   the ceiling, a floor-switch mask rebuild in flight). Keeps 33 MP cloud atlases
+ *   from uploading into a danger window. Return value matters: explicit `false`
+ *   means clearance was never granted (gave up after a bound) — that ONE candidate
+ *   is skipped (clouds are decorative, an acceptable degrade) rather than forced
+ *   through, which would defeat the gate on a scene whose pressure never clears.
+ *   `true` or `undefined` (the default no-op) proceeds normally. Defaults to a no-op.
  * @returns {Promise<void>}
  */
 export async function loadCloudSpriteTexturesPaced({
   onTexture,
   staggerMs = 4000,
   shouldContinue = () => true,
+  awaitClearance = () => Promise.resolve(),
 } = {}) {
   const THREE = window.THREE;
   if (!THREE || typeof onTexture !== 'function') return;
@@ -90,6 +99,20 @@ export async function loadCloudSpriteTexturesPaced({
 
   for (let idx = 0; idx < queue.length; idx++) {
     if (!shouldContinue()) return;
+    // Pause here while a large GPU upload is unsafe (VRAM near the ceiling or a
+    // floor switch in flight) — this is exactly the window a cloud-atlas upload
+    // tipped the card in the field.
+    let cleared = true;
+    try { cleared = await awaitClearance(); } catch (_) { cleared = true; }
+    if (!shouldContinue()) return;
+    if (cleared === false) {
+      // Clearance never granted for this candidate (chronic pressure, not a
+      // transient window) — skip it rather than forcing the upload through, which
+      // would silently defeat the whole point of the gate. The next candidate gets
+      // its own fresh clearance check after the stagger delay.
+      if (idx < queue.length - 1) await sleep(staggerMs);
+      continue;
+    }
     const [kind, file] = queue[idx];
     const url = `${CLOUD_ASSET_BASE}/${kind}/${file}`;
     try {

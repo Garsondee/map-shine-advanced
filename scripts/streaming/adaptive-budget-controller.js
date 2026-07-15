@@ -25,6 +25,8 @@ import {
 import { exposeTextureOverhaulFlagsApi } from '../core/texture-overhaul-flags.js';
 import { getGpuWorkScheduler } from './gpu-work-scheduler.js';
 import { resolveEffectiveGpuVramGB } from './memory-settings.js';
+import { exposeVramLedgerApi, sampleVramLedger, resolveMaxInternalMpDynamic } from './vram-ledger.js';
+import { disposeLargePixiFileTexturesUnderPressure } from '../foundry/pixi-texture-demotion.js';
 
 const log = createLogger('AdaptiveBudgetController');
 
@@ -47,6 +49,20 @@ const RAISE_MIN_USED_FRACTION = 0.7;
 /** LOD-0 cooldown applied per degradation level (ms). */
 const LEVEL_LOD0_COOLDOWN_MS = Object.freeze([0, 4000, 8000, 15000]);
 
+/**
+ * Aggregate VRAM pressure (resident / usable ceiling, across masks + PIXI +
+ * compositor RTs) at which to re-apply the render-resolution cap. Residency climbs
+ * AFTER the resolution was last set — masks/PIXI that weren't resident at initial
+ * set now are — so the ledger's now-tighter dynamic RT budget must be re-applied to
+ * pull internal resolution down before the context is lost. The count-based growth
+ * signal above is blind to PIXI and compositor RTs; this byte-based one is not.
+ */
+const LEDGER_PRESSURE_REAPPLY = 0.9;
+/** At/over the ceiling: also escalate degradation (throttle GPU uploads). */
+const LEDGER_PRESSURE_DEGRADE = 1.0;
+/** Minimum spacing between ledger-driven re-applies — let one take effect first (ms). */
+const LEDGER_REAPPLY_COOLDOWN_MS = 3000;
+
 export class AdaptiveBudgetController {
   constructor() {
     this._lastSampleMs = 0;
@@ -66,6 +82,10 @@ export class AdaptiveBudgetController {
     this._lastGrowthDiagnosis = null;
     /** Throttle repeated growth-alert info logs. */
     this._lastGrowthInfoLogMs = 0;
+    /** @type {number} performance.now() of the last ledger-driven resolution re-apply. */
+    this._lastLedgerReapplyMs = 0;
+    /** @type {number} Last sampled aggregate VRAM pressure (resident / ceiling). */
+    this._lastLedgerPressure = 0;
   }
 
   /**
@@ -123,7 +143,101 @@ export class AdaptiveBudgetController {
       log.info(`Stable — relaxed degradation to level ${this._degradationLevel}`);
     }
 
+    this._sampleVramLedgerPressure(now);
     this._updateBudgetBonus(now);
+  }
+
+  /**
+   * Byte-based aggregate pressure check (VRAM ledger). Where the count-based growth
+   * signal above is blind to PIXI and compositor RTs, this sees the whole card. When
+   * residency crosses into the danger zone, pull TWO independent levers:
+   *
+   *  1. Re-apply the render-resolution cap — shrinks the RT slice. Self-limiting
+   *     (lower res → lower RT cost → lower pressure → converges).
+   *  2. Demote large file-backed PIXI textures
+   *     (`disposeLargePixiFileTexturesUnderPressure`) — shrinks the PIXI slice,
+   *     which resolution CANNOT touch (Foundry holds full-res source images
+   *     independent of MSA's render resolution). Field data (2026-07-15, Church of
+   *     the Light) showed masks+PIXI alone at 1193 MB of a 1600 MB ceiling — 75%
+   *     consumed before a single RT existed — so lever 1 alone shrank internal
+   *     resolution to its floor (~0.7 MP) and STILL crashed ~35 MB over. Demotion
+   *     is safe to call anytime (the module's own doc: "worst case is the
+   *     pre-demotion status quo, never breakage" — PIXI just re-uploads
+   *     transparently if the sprite renders again) and was previously only wired
+   *     to load-time and floor-change sweeps, never steady-state pressure. Uses its
+   *     OWN anti-churn budget (not the load/floor-change sweeps' shared one) — see
+   *     the long comment on `disposeLargePixiFileTexturesUnderPressure` for why
+   *     sharing it let a floor-change sweep silently exhaust this lever's budget.
+   *
+   * @param {number} now
+   * @private
+   */
+  _sampleVramLedgerPressure(now) {
+    let led = null;
+    try {
+      led = sampleVramLedger();
+    } catch (_) {
+      return;
+    }
+    if (!led || !Number.isFinite(led.ceilingMB)) return;
+    this._lastLedgerPressure = led.pressure;
+    if (led.pressure < LEDGER_PRESSURE_REAPPLY) return;
+
+    // Do NOT respond during a floor-switch / scene-load transient. Those are heavy,
+    // self-resolving windows, and a render-resolution re-apply during one is an
+    // own-goal: it reallocates the ENTIRE compositor RT stack (a multi-second
+    // main-thread stall AND a transient VRAM spike as the old + new RTs briefly
+    // coexist), and because the switch's own mask bake is still growing residency
+    // it chases a moving target and RE-FIRES every cooldown. Field data
+    // (2026-07-15, Church of the Light) showed exactly this — a `graphicsSettings.
+    // resize` storm across a cold floor switch, ending in a TDR context loss.
+    // Return WITHOUT consuming the cooldown so ONE clean re-apply fires promptly
+    // once the transient clears and residency is stable. The floor-change path has
+    // its own PIXI demotion sweep (`startFloorChangeDemotionSweep`), so skipping the
+    // pressure-demotion here during the transient leaves no coverage gap.
+    if (window.MapShine?.__msaSceneLoading === true
+        || window.MapShine?.__v3ViewOnlyFloorSwitchInFlight === true) {
+      return;
+    }
+
+    if (now - this._lastLedgerReapplyMs < LEDGER_REAPPLY_COOLDOWN_MS) return;
+
+    // A render-resolution re-apply only helps if it will MEANINGFULLY shrink the RT
+    // stack. If the current internal resolution already fits the dynamic budget (or
+    // is within ~5% of it), a resize pays the full RT-realloc cost — the exact stall
+    // above — for no VRAM gain. In that case the overage is masks/PIXI, not RTs, so
+    // demote PIXI (cheap: dispose only, no realloc) and skip the resize.
+    let targetMaxMp = Infinity;
+    try { targetMaxMp = resolveMaxInternalMpDynamic(); } catch (_) {}
+    const currentMp = Number(led.internalMp) || 0;
+    const resizeWouldHelp = !(Number.isFinite(targetMaxMp) && currentMp > 0 && currentMp <= targetMaxMp * 1.05);
+
+    this._lastLedgerReapplyMs = now;
+
+    if (resizeWouldHelp) {
+      try {
+        window.MapShine?.graphicsSettings?.reapplyRenderResolution?.();
+      } catch (_) {}
+    }
+
+    let demoted = { count: 0, freedMB: 0 };
+    try {
+      demoted = disposeLargePixiFileTexturesUnderPressure() ?? demoted;
+    } catch (_) {}
+
+    // At/over the ceiling, also throttle GPU uploads so a floor-switch mask rebuild
+    // or a cloud-atlas upload spike can't push it further over the edge.
+    if (led.pressure >= LEDGER_PRESSURE_DEGRADE && this._degradationLevel < 2) {
+      this._setDegradation(Math.min(2, this._degradationLevel + 1));
+    }
+
+    log.warn(
+      `VRAM aggregate ${Math.round(led.residentMB)}/${Math.round(led.ceilingMB)} MB `
+      + `(${Math.round(led.pressure * 100)}%: masks ${Math.round(led.masksMB)} + pixi ${Math.round(led.pixiMB)} `
+      + `+ rt ${Math.round(led.compositorRtMB)}) — `
+      + (resizeWouldHelp ? 're-applied render-resolution cap' : 'internal res already at budget, no resize')
+      + (demoted.count ? ` + demoted ${demoted.count} PIXI texture(s) (~${demoted.freedMB} MB)` : ''),
+    );
   }
 
   /**
@@ -242,6 +356,7 @@ export class AdaptiveBudgetController {
       growthAlertStreak: this._growthAlertStreak,
       growthDiagnosis: this._lastGrowthDiagnosis,
       adaptiveBonusMB: this._bonusMB,
+      ledgerPressure: Number(this._lastLedgerPressure.toFixed(3)),
     };
   }
 }
@@ -294,6 +409,7 @@ export function getAdaptiveBudgetController() {
         window.MapShine.streamingTuning = getStreamingTuningApi();
         exposeTextureDiagnosticsApi();
         exposeTextureOverhaulFlagsApi();
+        exposeVramLedgerApi();
       }
     } catch (_) {}
   }

@@ -40,11 +40,33 @@ import {
   resolveCompositorRtBudgetMB,
   resolveMaxDrawingBufferMp,
 } from '../streaming/texture-budget-policy.js';
+import { samplePixiTextureStats } from '../streaming/pixi-vram-probe.js';
+import { getVramLedgerReport } from '../streaming/vram-ledger.js';
 
 const log = createLogger('WebGLCrashRecovery');
 
-/** Must match module.json — Foundry's game.modules version can lag until a hard refresh. */
+/**
+ * Fallback only — used when `game.modules.get(id).version` is unreachable. Hand-
+ * maintained and expected to drift; see the big warning at `record.module` below
+ * for why NEITHER this NOR the live `game.modules` value can be trusted as "what
+ * code produced this crash."
+ */
 const MODULE_MANIFEST_VERSION = '0.5.3.10';
+
+/**
+ * Fixed, always-first diagnosis line explaining why `record.module.version` cannot
+ * be used to judge whether a fix has landed. See the long comment at the `module`
+ * field assembly (below) for the full mechanism — this is the human/LLM-facing
+ * summary of it, placed first so it survives truncated pastes.
+ */
+const VERSION_FIELD_WARNING =
+  '⚠️ VERSION FIELD IS UNRELIABLE, DO NOT USE IT TO JUDGE WHETHER A FIX HAS LANDED. '
+  + "Foundry's server reads module.json's version at server boot / module-list scan — NOT on every "
+  + 'browser refresh. A dev loop of "edit source, refresh browser" (no Foundry server restart) runs the '
+  + 'NEW code immediately but this field can still show an OLD version string, arbitrarily many commits '
+  + 'behind. An out-of-date-looking version number here is NOT evidence the crash is from stale/already-'
+  + 'fixed code — it may be the exact latest code. To judge whether a fix is present, read the current '
+  + 'source at the referenced file/line, never this field.';
 
 const HISTORY_KEY = 'map-shine-advanced.webglCrashLog';
 const SAFE_MODE_KEY = 'map-shine-advanced.webglSafeMode';
@@ -264,36 +286,10 @@ function _safeRtVramEstimate() {
  * @returns {object|null}
  */
 function _safePixiTextureStats() {
+  // Delegates to the shared probe (streaming/pixi-vram-probe.js) so the live VRAM
+  // ledger and this crash-report section measure PIXI-side memory identically.
   try {
-    const pixiRenderer = globalThis.canvas?.app?.renderer ?? null;
-    const managed = pixiRenderer?.texture?.managedTextures;
-    if (!Array.isArray(managed)) return null;
-    let totalBytes = 0;
-    let counted = 0;
-    const entries = [];
-    for (const bt of managed) {
-      const w = Number(bt?.realWidth ?? bt?.width) || 0;
-      const h = Number(bt?.realHeight ?? bt?.height) || 0;
-      if (!(w > 0 && h > 0)) continue;
-      // RGBA8 estimate; +33% when mipmaps are enabled.
-      let bytes = w * h * 4;
-      if (bt?.mipmap != null && Number(bt.mipmap) > 0) bytes = Math.round(bytes * 1.33);
-      totalBytes += bytes;
-      counted++;
-      entries.push({
-        mb: Math.round(bytes / 1048576),
-        w,
-        h,
-        src: typeof bt?.resource?.src === 'string' ? bt.resource.src.slice(-96) : null,
-      });
-    }
-    entries.sort((a, b) => b.mb - a.mb);
-    return {
-      managedCount: managed.length,
-      sizedCount: counted,
-      estTotalMB: Math.round(totalBytes / 1048576),
-      top: entries.slice(0, 10),
-    };
+    return samplePixiTextureStats();
   } catch (_) {
     return null;
   }
@@ -503,7 +499,12 @@ export function collectDiagnostics(extra = {}) {
     collectedAtPerfMs: (typeof performance !== 'undefined') ? Math.round(performance.now()) : null,
     sessionId: SESSION_ID,
     trigger: extra.trigger ?? 'manual',
-    module: { id: 'map-shine-advanced', version: MODULE_MANIFEST_VERSION, runtimeVersion: null, versionMismatch: false },
+    module: {
+      id: 'map-shine-advanced',
+      version: MODULE_MANIFEST_VERSION,
+      runtimeVersion: null,
+      versionWarning: VERSION_FIELD_WARNING,
+    },
     load: {},
     visibility: {},
     scene: {},
@@ -519,13 +520,22 @@ export function collectDiagnostics(extra = {}) {
   };
 
   try {
-    // The loaded module version (from Foundry) is authoritative. The on-disk
-    // manifest constant is hand-maintained and intentionally lags, so comparing
-    // against it produced false "module outdated" noise — do not flag a mismatch.
+    // `game.modules.get(id).version` is Foundry's own record, sourced from a
+    // server-side module.json scan that happens at Foundry server BOOT or when the
+    // Setup/module-management screen forces a rescan — it is NOT re-read on every
+    // browser refresh of an already-running world. The .js files themselves ARE
+    // served fresh from disk on every request, so a dev loop of "edit source, hard-
+    // refresh browser" runs the latest code while this version string can still
+    // report whatever Foundry's server process last cached, arbitrarily many
+    // commits behind. There is no reliable way to stamp the ACTUAL executing code's
+    // version from inside the browser — do not attempt to "fix" this by comparing
+    // against MODULE_MANIFEST_VERSION or flagging a mismatch; both were tried and
+    // both produced false "module outdated" noise for exactly this reason. The
+    // `versionWarning` field is the honest answer: treat this number as unreliable,
+    // full stop, and judge fixes by reading source.
     const runtimeVersion = game?.modules?.get?.('map-shine-advanced')?.version ?? null;
     record.module.runtimeVersion = runtimeVersion;
     if (runtimeVersion) record.module.version = runtimeVersion;
-    record.module.versionMismatch = false;
   } catch (_) {}
 
   try {
@@ -686,6 +696,16 @@ export function collectDiagnostics(extra = {}) {
       loadSlimPendingEffects: ms.floorCompositorV2?._loadSlimPendingEffects?.size ?? null,
     };
   } catch (_) {}
+
+  // Unified VRAM ledger: the single aggregate accountant (masks + PIXI + compositor
+  // RTs vs one calibrated ceiling). Where rtVramEstimate/streamVramPct each show one
+  // silo, this shows whether the SUM crossed the card's real usable ceiling — the
+  // actual failure mode for an `overBudget:false`-on-every-meter context loss.
+  try {
+    record.vramLedger = getVramLedgerReport();
+  } catch (_) {
+    record.vramLedger = null;
+  }
 
   try {
     const perfMem = (typeof performance !== 'undefined') ? performance.memory : null;
@@ -864,6 +884,15 @@ export function collectDiagnostics(extra = {}) {
  */
 export function diagnoseCrash(record) {
   const causes = [];
+  // Always first, unconditional: the version field's unreliability is a property of
+  // HOW Foundry reports it (see the long comment at collectDiagnostics' `module`
+  // assembly), not of any particular crash, so it belongs at the top of every report
+  // rather than gated behind a check. Placed first so it survives a truncated paste.
+  causes.push(
+    `${record?.module?.versionWarning ?? VERSION_FIELD_WARNING} (This report shows `
+    + `module.version="${record?.module?.version ?? '?'}" — do not treat that as confirming or ruling out `
+    + 'any particular fix.)',
+  );
   try {
     const repeated = (record.crashHistorySummary?.withinLast30Min ?? 0) >= 3;
     const hidden = record.visibility?.hidden === true;
@@ -898,6 +927,30 @@ export function diagnoseCrash(record) {
         );
       }
     }
+
+    // Aggregate ledger verdict — the sum across ALL consumers vs the card's real
+    // usable ceiling. This catches the failure mode every per-silo meter misses:
+    // each budget within limits, the SUM over the card.
+    const ledger = record.vramLedger ?? null;
+    if (ledger && Number.isFinite(ledger.ceilingMB)) {
+      const b = ledger.breakdown ?? {};
+      if (ledger.overCeiling) {
+        causes.push(
+          `AGGREGATE VRAM OVER the card's usable ceiling: ~${ledger.residentMB} MB resident vs ~${ledger.ceilingMB} MB `
+          + `(${ledger.pressurePct}%) = masks ~${b.masksMB} MB + PIXI ~${b.pixiMB} MB + compositor RTs ~${b.compositorRtMB} MB. `
+          + `No single per-consumer budget need be exceeded for this — the SUM is what lost the context. The ledger's dynamic `
+          + `render-resolution cap allows ~${ledger.maxInternalMp} MP internal at this residency; if the crash was at a higher `
+          + `internal resolution the cap had not been re-applied since masks/PIXI became resident (see the re-apply trigger).`,
+        );
+      } else if ((ledger.pressurePct ?? 0) >= 85) {
+        causes.push(
+          `Aggregate VRAM near the ceiling: ~${ledger.residentMB} MB / ~${ledger.ceilingMB} MB (${ledger.pressurePct}%) = `
+          + `masks ~${b.masksMB} + PIXI ~${b.pixiMB} + RTs ~${b.compositorRtMB} MB. Little headroom for a floor-switch mask `
+          + `rebuild or a cloud-atlas upload spike — the classic tip-over window.`,
+        );
+      }
+    }
+
     const populate = record.populate ?? stream?.populate ?? null;
 
     if (loading && populate?.populateComplete !== true) {

@@ -10,6 +10,7 @@
 import { createLogger } from '../../core/log.js';
 import { weatherController } from '../../core/WeatherController.js';
 import { loadCloudSpriteTexturesPaced } from './cloud-sprites/cloud-asset-loader.js';
+import { shouldDeferHeavyAlloc } from '../../streaming/vram-ledger.js';
 import { CloudTexturePicker } from './cloud-sprites/CloudSprite.js';
 
 // Deferred cloud-load pacing (mirrors CloudEffectV2). Ash reuses the same heavy
@@ -349,6 +350,7 @@ export class AshCloudEffectV2 {
       await loadCloudSpriteTexturesPaced({
         staggerMs: this._numGlobal(window.MapShine?.__cloudStaggerMs, ASHCLOUD_LOAD_STAGGER_MS),
         shouldContinue: () => !this._disposed && this._initialized,
+        awaitClearance: () => this._awaitAllocClearance(),
         onTexture: (kind, tex) => this._onCloudTextureLoaded(kind, tex),
       });
       if (!this._disposed) this._assetsLoaded = true;
@@ -373,6 +375,31 @@ export class AshCloudEffectV2 {
     }
     if (this._disposed) return;
     await sleep(this._numGlobal(window.MapShine?.__cloudSettleMs, ASHCLOUD_DEFERRED_SETTLE_MS));
+  }
+
+  /**
+   * Block while a large GPU upload is unsafe (VRAM ledger {@link shouldDeferHeavyAlloc}:
+   * aggregate near the ceiling, scene loading, or a floor-switch mask rebuild in
+   * flight). Bounded, but on timeout returns `false` (not `true`) — on a scene whose
+   * pressure is chronically high, not just transiently, forcing the upload through
+   * after the bound would silently defeat the gate. `false` tells the loader to skip
+   * that one candidate instead. Mirrors CloudEffectV2.
+   * @returns {Promise<boolean>} true once clearance is granted, false if the bound
+   *   elapsed with pressure still high (caller should skip, not proceed).
+   * @private
+   */
+  async _awaitAllocClearance() {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+    const start = performance.now();
+    const MAX_WAIT_MS = 20000;
+    while (!this._disposed) {
+      let defer = false;
+      try { defer = shouldDeferHeavyAlloc(); } catch (_) {}
+      if (!defer) return true;
+      if (performance.now() - start > MAX_WAIT_MS) return false;
+      await sleep(500);
+    }
+    return false;
   }
 
   /**

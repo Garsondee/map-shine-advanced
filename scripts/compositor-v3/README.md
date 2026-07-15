@@ -23,7 +23,8 @@ is the code-side orientation and status doc — **more current than
 | `V3PostBridge.js` | Runs V2's `BloomEffectV2` + `ColorCorrectionEffectV2` (ToD + contextual indoor/outdoor grade) on the V3 lit buffer. Follows render-scale size changes. | ✅ live |
 | `FullscreenPresent.js` | Linear→sRGB encode + hue-preserving HDR highlight rolloff + ±0.5 LSB encode dither (banding kill, §16.3 P7). Doubles as the DRS upsample (bilinear). | ✅ built |
 | `__tests__/` | Node verification for the core modules (112 assertions). | ✅ green |
-| _(not started)_ attribute buffer, clustered lighting, shadows, water, atmo fog, floor-change fast path | See Forward+.md §15 B2–B5 / the "Still missing" list below. | ⏳ |
+| _(not started)_ attribute buffer, clustered lighting, shadows, water, atmo fog | See Forward+.md §15 B2–B5 / the "Still missing" list below. | ⏳ |
+| Floor-change fast path (B1-floor-a/b below) | `camera-follower.js`'s `_isFloorResidentForViewOnly` / `_applyViewOnlyLevelSwitch` (warm) / `_applyResidentColdLevelSwitch` (cold, still no `canvas.draw`) + `canvas-replacement.js`'s `mapShineLevelContextChanged` handler honoring `payload.viewOnly` to skip `composeFloor`/`forceRepopulate`. **Corrected 2026-07-15 — this table previously said "not started"; it was stale relative to code.** B1-floor-c (Foundry-side `scene.view` avoidance) remains the only unbuilt stage — see below. | ✅ built |
 
 ## Performance contract (Forward+ §16 P-track) — live in V3
 
@@ -277,13 +278,15 @@ to a **view-only update**.
 
 ### Staging (do not do it all at once)
 
-1. **B1-floor-a — gate the rebuild.** In the `levelMaskRebuild` handler, when the
+**Status as of 2026-07-15: a and b are DONE (see the table above); only c remains.**
+
+1. **B1-floor-a — gate the rebuild.** ✅ DONE. In the `levelMaskRebuild` handler, when the
    fast path is on AND V3 owns rendering AND the target floor's masks are already
    resident, early-return after the cheap state update (skip mask load +
    `forceRepopulate`). Fall back to the full rebuild whenever residency is not
    proven — **reliability first**: an un-resident floor must still rebuild (behind
    the curtain) rather than show a broken frame.
-2. **B1-floor-b — bypass the curtain.** Route the switch through the direct branch
+2. **B1-floor-b — bypass the curtain.** ✅ DONE. Route the switch through the direct branch
    under the fast-path flag; write the viewed-floor uniform; `requestRender`.
    Keep a short (~1 frame) cross-fade *in the compositor* (not a full-screen black
    curtain) if a hard cut reads poorly — cosmetic, decided against the S2 scene.
@@ -297,6 +300,22 @@ Reliability ordering throughout: a floor the fast path cannot safely serve
 (masks not resident, vision not ready) **falls back to the curtain**, never to a
 broken or half-built frame. The fast path is an optimization gated on proof, not
 an assumption.
+
+**Found + fixed 2026-07-15: a residency-proof race.** Commit `391a2f2`'s background
+"pre-warm all floors at load" sweep (`_scheduleDeferredFloorPreload`,
+canvas-replacement.js) calls the SAME `composeFloor`/`warmVisibleFloorsForOutdoorsStack`
+GPU-mask-bake path this fast path's residency check (`isBandWarmForOutdoorsStack`)
+depends on — uncoordinated with a user's own interactive switch. A switch shortly
+after load (normal; the sweep itself only starts at load-complete) could land its
+own compose concurrently with the sweep's, doubling GPU mask-bake load right when
+the switch needed headroom (field crash, 2026-07-15). Fixed: both phases of the
+sweep now check the existing `isFloorPreloadSuppressedAfterLevelChange()` flag
+(already set by every level change, previously only consulted by
+`BuildingShadowsEffectV2`'s unrelated per-frame preload) at their natural
+per-iteration yield point, and stop — leaving remaining bands cold rather than
+racing the interactive switch for GPU time. `SkyReachShadowsEffectV2` has an
+analogous throttled preload that still does NOT check this flag — smaller,
+same-shaped gap, not yet fixed.
 
 ## The load path (module boot → first frame) — hardening targets
 

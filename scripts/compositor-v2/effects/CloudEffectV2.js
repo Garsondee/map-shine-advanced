@@ -14,6 +14,7 @@
 import { createLogger } from '../../core/log.js';
 import { writeCompositorInternalSize } from '../../core/compositor-resolution.js';
 import { loadCloudSpriteTexturesPaced } from './cloud-sprites/cloud-asset-loader.js';
+import { shouldDeferHeavyAlloc } from '../../streaming/vram-ledger.js';
 
 /**
  * Deferred cloud-load pacing. Cloud sprite PNGs are heavy (2048², ~16 MB each);
@@ -507,6 +508,7 @@ export class CloudEffectV2 {
       await loadCloudSpriteTexturesPaced({
         staggerMs: this._numGlobal(window.MapShine?.__cloudStaggerMs, CLOUD_LOAD_STAGGER_MS),
         shouldContinue: () => !this._disposed && this._initialized,
+        awaitClearance: () => this._awaitAllocClearance(),
         onTexture: (kind, tex) => this._onCloudTextureLoaded(kind, tex),
       });
       if (!this._disposed) {
@@ -536,6 +538,36 @@ export class CloudEffectV2 {
     if (this._disposed) return;
     // Let the freshly-revealed scene settle before adding any GPU work.
     await sleep(this._numGlobal(window.MapShine?.__cloudSettleMs, CLOUD_DEFERRED_SETTLE_MS));
+  }
+
+  /**
+   * Block while a large GPU upload is unsafe: VRAM aggregate near the ceiling, the
+   * scene still loading, or a floor-switch mask rebuild in flight (the VRAM ledger's
+   * {@link shouldDeferHeavyAlloc}). Bounded — 20s covers a genuinely transient danger
+   * window (a load, a floor switch) with room to spare. On a scene whose aggregate
+   * pressure is CHRONICALLY near the ceiling (field data, 2026-07-15: masks+PIXI
+   * alone at 75% of budget), the wait will time out every call — returning `true`
+   * here (as an earlier version implicitly did, by just proceeding after the bound)
+   * would force every cloud texture through anyway and silently defeat the gate. So
+   * on timeout this returns `false`: the loader skips that ONE candidate (clouds are
+   * decorative, an acceptable degrade) instead of uploading into a card that's still
+   * over budget. The next candidate gets its own fresh check after the stagger delay.
+   * @returns {Promise<boolean>} true once clearance is granted, false if the bound
+   *   elapsed with pressure still high (caller should skip, not proceed).
+   * @private
+   */
+  async _awaitAllocClearance() {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+    const start = performance.now();
+    const MAX_WAIT_MS = 20000;
+    while (!this._disposed) {
+      let defer = false;
+      try { defer = shouldDeferHeavyAlloc(); } catch (_) {}
+      if (!defer) return true;
+      if (performance.now() - start > MAX_WAIT_MS) return false;
+      await sleep(500);
+    }
+    return false;
   }
 
   /**

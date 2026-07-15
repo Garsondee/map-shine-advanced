@@ -12,7 +12,7 @@
 import { createLogger } from '../core/log.js';
 import { GraphicsSettingsDialog } from './graphics-settings-dialog.js';
 import { isStylisticEffectId } from '../effects/resolve-effect-enabled.js';
-import { resolveMaxDrawingBufferMp } from '../streaming/texture-budget-policy.js';
+import { resolveMaxInternalMpDynamic } from '../streaming/vram-ledger.js';
 import {
   buildCompositorResolutionSnapshot,
   getCompositorResolutionSnapshot,
@@ -652,7 +652,11 @@ export class GraphicsSettingsManager {
       const cssH = Number(viewportHeightCss) || Number(globalThis.innerHeight) || 0;
       if (!(cssW > 0 && cssH > 0)) return pr;
 
-      const maxMp = resolveMaxDrawingBufferMp();
+      // Aggregate-aware cap (VRAM ledger): the RT budget is `ceiling − masks − pixi`,
+      // not a fixed per-tier figure, so native render resolution yields to whatever
+      // consumer is heavy on this scene. Clamped to the static policy max inside the
+      // ledger, so this can only tighten vs. the old behaviour, never loosen it.
+      const maxMp = resolveMaxInternalMpDynamic();
       if (!Number.isFinite(maxMp) || maxMp <= 0) return pr;
 
       const cssMp = (cssW * cssH) / 1_000_000;
@@ -710,6 +714,21 @@ export class GraphicsSettingsManager {
   setVegetationHalfResEnabled(enabled) {
     this.state.vegetationHalfResEnabled = enabled === true;
     this.saveState();
+  }
+
+  /**
+   * Re-run the render-resolution apply path (recomputes display + internal pixel
+   * ratio and resizes the compositor) WITHOUT changing the user's preset. The VRAM
+   * ledger calls this when aggregate residency climbs after the resolution was last
+   * set — masks/PIXI that were not resident at initial set now are, so the dynamic
+   * RT budget is tighter and internal resolution must drop before the context is lost.
+   */
+  reapplyRenderResolution() {
+    try {
+      this._onApplyRenderResolution?.();
+    } catch (e) {
+      log.warn('Failed to re-apply render resolution', e);
+    }
   }
 
   /**

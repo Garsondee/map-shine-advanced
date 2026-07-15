@@ -19,6 +19,7 @@ import { isGmLike } from '../core/gm-parity.js';
 
 import { createLogger } from '../core/log.js';
 import { yieldToMain } from '../core/yield-to-main.js';
+import { isFloorPreloadSuppressedAfterLevelChange } from '../compositor-v2/floor-sim-decimation.js';
 import { shouldBuildParticleChannelPack } from '../core/texture-overhaul-flags.js';
 import * as assetLoader from '../assets/loader.js';
 import { getEffectMaskRegistry } from '../assets/loader.js';
@@ -1627,6 +1628,19 @@ export class GpuSceneMaskCompositor {
       for (const bandKey of sortedBandKeys) {
         if (onlyBandSet && !onlyBandSet.has(bandKey)) continue;
         await _yieldIfNeeded();
+
+        // Yield the GPU mask-bake budget to a real, interactive floor switch — this
+        // is the FIRST phase of the same background "pre-warm all floors" sweep
+        // (Forward+ 391a2f2) that `warmVisibleFloorsForOutdoorsStack` (below) also
+        // now checks; see that function's comment for the full race this closes
+        // (field data, 2026-07-15: a floor-change crash during this exact post-load
+        // window). Remaining bands stay cold and are composed on-demand by the
+        // switch itself instead.
+        if (isFloorPreloadSuppressedAfterLevelChange()) {
+          log.debug('preloadAllFloors: stopping — yielding to an interactive floor switch', { remaining: sortedBandKeys.length });
+          break;
+        }
+
         const [bottom, top] = bandKey.split(':').map(Number);
 
         // Stale-cache detection MUST run before the _floorMeta skip guard.
@@ -3452,6 +3466,33 @@ export class GpuSceneMaskCompositor {
       try {
         for (const floorKey of floorKeysBottomToTop) {
           if (!floorKey) continue;
+
+          // Yield the GPU mask-bake budget to a real, interactive floor switch.
+          // This background sweep (the "pre-warm all floors at load" path, Forward+
+          // 391a2f2) and a user-driven cold floor switch (canvas-replacement.js's
+          // `mapShineLevelContextChanged` handler) both call `composeFloor` on this
+          // SAME compositor, uncoordinated — a user switching floors shortly after
+          // load (completely normal; this sweep itself only starts at load-complete)
+          // can land while the sweep is mid-flight, doubling GPU mask-bake load on a
+          // card already near its VRAM ceiling right when the switch needs headroom
+          // (field data, 2026-07-15: a floor-change crash with a chronically-over-
+          // ceiling ledger and a TDR-shaped stall in this exact post-load window).
+          // `suppressFloorPreloadAfterLevelChange` is already called by that handler
+          // on every level change; stopping here — rather than fighting it for the
+          // rest of this pass — gives the interactive switch priority. Remaining
+          // bands are left cold; a later switch to one of them still correctly takes
+          // the (already yield-chunked) on-switch compose path rather than wrongly
+          // reporting itself warm.
+          if (isFloorPreloadSuppressedAfterLevelChange()) {
+            for (const remaining of floorKeysBottomToTop) {
+              const remainingKey = remaining ? String(remaining) : null;
+              if (!remainingKey || preparedKeys.includes(remainingKey) || skippedKeys.includes(remainingKey)) continue;
+              skippedKeys.push(remainingKey);
+              reasons[remainingKey] = 'user-switch-priority';
+            }
+            break;
+          }
+
           const key = String(floorKey);
           const parts = key.split(':').map(Number);
           const bottom = parts[0];

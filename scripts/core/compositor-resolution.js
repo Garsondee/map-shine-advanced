@@ -8,7 +8,7 @@
  * @module core/compositor-resolution
  */
 
-import { resolveMaxDrawingBufferMp } from '../streaming/texture-budget-policy.js';
+import { resolveMaxInternalMpDynamic } from '../streaming/vram-ledger.js';
 
 /**
  * @typedef {object} CompositorSizeInfo
@@ -193,5 +193,5 @@ export function writeCompositorInternalSize(renderer, target) {
  * @returns {number}
  */
 export function getInternalRenderBudgetMp() {
-  return resolveMaxDrawingBufferMp();
+  return resolveMaxInternalMpDynamic();
 }

@@ -6,6 +6,32 @@
 
 ---
 
+## 📍 CURRENT STATUS (updated 2026-07-15, end of a long build day — read this before §8's stage narrative)
+
+**Stage 0 and Stage 1: DONE, gates met with live evidence. Stage 2: core mechanism proven live, formal gate metrics not yet fully captured.** Branch `keyhole`. Detailed breakdown, honesty rule applied (never marked done without the evidence §8 specifies):
+
+- **Stage 0 (Fixture & rig): ✅ DONE.** Quarantine executed (`git mv scripts legacy`), torture fixture generator built + confirmed importing into Foundry, soak harness built, `src/boot.js` renders.
+- **Stage 1 (The law, running): ✅ DONE, gate met.** Page cache/table/residency/atlas built and Node-tested (295 assertions across `src/vt`, `src/graph`, `src/foundry`, all green). Multi-mip coarse-fallback ("not loaded yet means soft, not wrong") built and LIVE-CONFIRMED. `MapShine.soak(20)` on the torture fixture: **0 context losses, 0 restores, 20 cycles in 209 ms.** `ThreeAllocator` throws on a planted world-res allocation (negative test, Node-verified). All four Stage 1 gate criteria met with real evidence.
+- **Stage 2 (Real art + proxy severance): 🔶 core mechanism proven live; formal gate not yet fully closed.**
+  - ✅ Visual severance — the VT view fills the scene area and occludes PIXI, live-confirmed. Two real bugs found live and fixed: an out-of-world edge smear (unclamped view rect sampling past the world boundary) and a boundary-page stretch (pages whose nominal span isn't an exact multiple of the world size were naively stretched instead of clamp-extended).
+  - ✅ Real scene art streams through the VT pipeline — live-confirmed on a real **12,000×12,000px** two-floor scene (`Mansion - Multifloor`), not the synthetic fixture. Only one real scene tested so far, not "Church, Mansion" as originally scoped in this section's own gate.
+  - ✅ Multi-floor rendering via Foundry's **NATIVE v14 `scene.levels` schema** (author directive, 2026-07-15: build around core Levels going forward, not the long-established third-party Levels module — its vendored copy was deleted from `othermodules/`; see §6's note on a related, still-open fixture mismatch). Cross-floor Z-compositing with real alpha-hole reveal, matching Foundry's own `visibility.levels`-driven algorithm exactly (`_configureLevelTextures`/`Level#isVisible`, verified from source, not approximated) — live-confirmed after diagnosing and fixing a floor-switch/view-desync bug and the repeated-GPU-reallocation crash it caused (one root cause: a full viewer restart was firing on every floor switch instead of a cheap same-scene sync).
+  - ✅ **Foundry proxy-texture interception is LIVE AND WORKING — the actual crash-class kill, this plan's headline promise.** `PIXI.Assets.cache` pre-seeded with ≤1024px proxies at Foundry's own `canvasInit` hook (fires strictly before Foundry loads scene textures, confirmed from source), so PIXI never decodes the real file. Confirmed via a live residency report: both floors of the real 12,000×12,000 mansion scene resident in PIXI at exactly **1024×1024**, not 12,000×12,000. Default-on (author correction: this is core product behavior, not an optional debug toggle) — wired entirely to `canvasInit`/`canvasReady`, zero manual clicks required to get real-scene VT rendering + VRAM severance on every load.
+  - ⬜ **Not yet done, tracked:** Tile document proxying (Level backgrounds only so far — this section's own other named target). Full PIXI residency measurement across everything (tokens, walls, tiles — not just the now-proxied Level backgrounds), `texImage2D` timing, and interactive-load-time are the remaining Stage 2 gate metrics, not yet captured. Only one real scene tested.
+  - ⬜ **Known, deliberately deferred correctness gaps** (documented loudly in code, never silently dropped): non-square world images throw rather than mis-render (rectangular-world support isn't built); per-floor world-size reconciliation if two composited floors' art differs in native resolution (console-warns, doesn't reconcile); `tools/make-torture-world.mjs`'s own floor-generation macro still uses the old third-party Levels tile-flag convention, not the native schema this project now actually builds around — a real, tracked mismatch (see §6).
+  - **Stages 3–7: not started.**
+
+**Standing directives from this session, now part of the plan, not just a private note:**
+- Multi-floor work targets Foundry's **native v14 `scene.levels`** schema exclusively — never the third-party Levels module.
+- New capabilities that are part of what V3 actually does when someone plays (rendering, severance, anything gameplay-visible) ship **default-on**, wired to real Foundry lifecycle hooks — never gated behind a manual debug-panel toggle. Diagnostic/dev-only tools (torture fixture, soak harness, residency reports) correctly stay manual. See §4.3's long-term tiered-fallback note for the one sanctioned kind of off-switch.
+- The long-term tiered reliability fallback (WebGPU → WebGL2 → native PIXI, §4.3, §9 risk 6) is a recorded direction, explicitly deferred — do not build it unprompted.
+
+**Commit trail** (branch `keyhole`, oldest→newest since the Stage 0 quarantine): `445736f` quarantine, `1bded9d`/`bea9bd8` torture fixture + soak harness, `5d1851c`→`0fb3ecb` Stage 1 parts 1–4 (allocator law, page atlas, decode path, first pixels), nine live-debugging rounds `a3b9a83`→`6f451ac` (Y-flip → coordinate-space → clamp-bound → GL-interleaving → texture-unit-cache → diagnostic-bug → the real UV-compounding bug), `70f2fb5` lint/format tooling, `1e6a96f` Three r170→r185, `f0be6ea` coarse-mip fallback, `60245e3`/`cea299e` visual severance + edge-smear fix, `832643b`/`116c03a`/`9db9d68`/`2e14ea4` real scene art + native multi-floor + hole-compositing + boundary-stretch fixes, `cc04f55` VRAM severance first cut + reliability-fallback direction, `433494f`/`c835b3c` default-on wiring + the floor-sync/crash fix. `git log --oneline` on `keyhole` for the full trail with full messages (each one cites the source verification or live evidence behind it).
+
+**Next real steps, in likely order:** (a) capture the remaining Stage 2 gate metrics (full PIXI residency, load time, `texImage2D` timing) to formally close Stage 2; (b) extend proxy interception to Tile documents; (c) test on a second real scene; (d) begin Stage 3 (unified geometry + attribute buffer + lighting) once Stage 2's gate is honestly closed — or address the deferred gaps above first, author's call.
+
+---
+
 ## 0. Read this first
 
 **The name:** you view a 144-megapixel world through a ~3-megapixel screen. You are always looking through a **keyhole**. A renderer that holds only what the keyhole shows cannot run out of memory, no matter how large the world grows. A renderer that holds the world always will. MSA has always held the world. That is the entire crisis, and this plan ends it.
@@ -271,10 +297,14 @@ Walls/templates/drawings/notes native; interaction parity sweep (select, drag, H
 
 ## 10. Session-zero protocol (for the next session — start here)
 
+**Superseded by the CURRENT STATUS section right after §0's audience line — read that first.** Q1–Q5 are already answered (§9), Stage 0 is done, the quarantine already happened. This numbered list is kept as the ORIGINAL first-session protocol, for history and in case the project ever needs to be re-derived from scratch:
+
 1. Read this file top to bottom. Then skim: `compositor-v3/README.md`, `docs/planning/v3/B0-1-floor-attribute-buffer.md`, `docs/planning/v3/B0-2-frame-graph.md`, Forward+ §4 (the three hard constraints: painted masks, water-under-floor, Foundry-owns-gameplay).
 2. Confirm Q1–Q5 with the author (one message, defaults pre-filled).
 3. Execute Stage 0 exactly as written (§8). Quarantine commit first — it is the point of no return and the point of the plan.
 4. Update project memory: Keyhole is the vector; sessions report progress against stage gates, not against crash reports.
 5. Doctrine reminder for every future turn: **no legacy imports, no world-res allocations, no fallback paths, hard case first.** When in doubt, the law wins.
+
+**For a CONTINUING session:** read the CURRENT STATUS section, then pick up at "Next real steps." The doctrine reminder in point 5 above still applies to every turn, always.
 
 *V2 is dead. Long live the V3.*

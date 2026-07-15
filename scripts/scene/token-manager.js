@@ -9,7 +9,7 @@ import { isGmLike } from '../core/gm-parity.js';
 import { createLogger } from '../core/log.js';
 import { OVERLAY_THREE_LAYER } from '../core/render-layers.js';
 import { getCanvasForegroundElevationSplit, hasV14NativeLevels, resolveV14NativeDocFloorIndexMin } from '../foundry/levels-scene-flags.js';
-import { applyTokenLevelDefaults } from '../foundry/levels-create-defaults.js';
+import { applyTokenLevelDefaults, applyTokenV14LevelDefaultsOnMove } from '../foundry/levels-create-defaults.js';
 import { getPerspectiveElevation } from '../foundry/elevation-context.js';
 import { getTokenRenderingMode, TOKEN_RENDERING_MODES } from '../settings/scene-settings.js';
 import { moveTrace, moveTraceConstrainSnapshot } from '../core/movement-trace-log.js';
@@ -1022,6 +1022,19 @@ vec3 ms_applySceneLighting(vec3 color) {
       }
     })]);
 
+    // Re-stamp a token's floor `level` on a genuine drag (see
+    // applyTokenV14LevelDefaultsOnMove doc comment): a token created before
+    // its true floor existed, or otherwise stuck with a stale `level`, never
+    // self-corrects otherwise — the create-time default only runs once, at
+    // creation. Dragging it while viewing its true floor now fixes it.
+    this._hookIds.push(['preUpdateToken', Hooks.on('preUpdateToken', (doc, changes, options, userId) => {
+      try {
+        if (userId && game?.user?.id && userId !== game.user.id) return;
+        applyTokenV14LevelDefaultsOnMove(doc, changes, { scene: doc?.parent ?? canvas?.scene });
+      } catch (_) {
+      }
+    })]);
+
     // Initial load when canvas is ready
     this._hookIds.push(['canvasReady', Hooks.on('canvasReady', () => {
       log.debug('Canvas ready, syncing all tokens');
@@ -1399,8 +1412,10 @@ vec3 ms_applySceneLighting(vec3 color) {
       });
     }
 
-    // Compositor V2: reassign token to correct floor layer when elevation changes.
-    if ('elevation' in changes) {
+    // Compositor V2: reassign token to correct floor layer when elevation or
+    // its native V14 `level` field changes (the latter is set by
+    // applyTokenV14LevelDefaultsOnMove's move-time floor re-stamp).
+    if ('elevation' in changes || 'level' in changes) {
       const floorLayerMgr = window.MapShine?.floorLayerManager;
       if (floorLayerMgr) {
         floorLayerMgr.assignTokenToFloor(sprite, tokenDoc);

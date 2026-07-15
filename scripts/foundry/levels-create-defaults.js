@@ -97,6 +97,50 @@ export function applyTokenV14LevelDefaults(data, options = {}) {
 }
 
 /**
+ * Re-stamp a token's V14 native `level` field on a genuine position move.
+ *
+ * {@link applyTokenV14LevelDefaults} only runs from `preCreateToken` — a token
+ * placed BEFORE this scene had its current floor split (or dragged from
+ * elsewhere before that hook existed) keeps whatever stale/placeholder
+ * `level` it was created with forever, since nothing ever re-evaluates it.
+ * Under floor-resident rendering, `renderOrder` is banded per floor
+ * (floorIndex * 10000 + role) with depth-test off (painter's order) — a
+ * token mis-tagged to floor 0 gets buried under the true current floor's
+ * own art (all >= 10000) when that floor is viewed. It LOOKS invisible but
+ * is fully rendered, just underneath everything.
+ *
+ * Mirrors the create-time correction, on a real drag instead: only fires on
+ * an explicit x/y change (never as a side effect of unrelated edits like HP,
+ * so a token that legitimately lives on a different floor is never silently
+ * reassigned by an unrelated update), never overrides an explicit `level`
+ * change already present in this same update, and only applies under V3
+ * floor-resident mode. Drag a stuck token and it self-heals.
+ *
+ * @param {TokenDocument} tokenDoc
+ * @param {object} changes - the pending update diff (mutated in place)
+ * @param {{scene?: Scene|null|undefined}} [options]
+ * @returns {object} the mutated changes
+ */
+export function applyTokenV14LevelDefaultsOnMove(tokenDoc, changes, options = {}) {
+  if (!changes || typeof changes !== 'object') return changes;
+  if (!isV3ViewOnlyFloorsEnabled()) return changes;
+  if (!('x' in changes) && !('y' in changes)) return changes;
+  if ('level' in changes) return changes;
+
+  const scene = options.scene ?? tokenDoc?.parent ?? globalThis.canvas?.scene;
+  if (!hasV14NativeLevels(scene)) return changes;
+
+  const viewedLevelId = _getViewedV14LevelId();
+  if (!viewedLevelId) return changes;
+
+  const currentLevel = tokenDoc?.level ?? tokenDoc?._source?.level ?? null;
+  if (currentLevel === viewedLevelId) return changes;
+
+  changes.level = viewedLevelId;
+  return changes;
+}
+
+/**
  * Read a finite active level band from runtime context.
  * @returns {{bottom:number, top:number, center:number}|null}
  */

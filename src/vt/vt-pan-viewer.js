@@ -168,6 +168,28 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
     async function ensureFloorLoaded(floorIndex) {
       if (floors.has(floorIndex)) return floors.get(floorIndex);
       const sourceBitmap = await getSourceBitmap(imageUrlForFloor(floorIndex));
+
+      // NON-SQUARE WORLDS AREN'T SUPPORTED YET — fail loud, never silently
+      // mis-render (Keyhole doctrine #1). PageTable takes ONE worldSizePx (the
+      // page grid is square by construction, see page-table.js); passing a
+      // rectangular image's width here would silently ignore its real height,
+      // corrupting every page crop along that axis rather than erroring. The
+      // torture fixture is square by construction so this never trips on it;
+      // it exists for real scene art (Stage 2B — src/foundry/active-scene-source.js),
+      // where Foundry's own default scene dimensions (4000x3000,
+      // common/documents/scene.mjs) are the norm, not the exception. Rectangular
+      // world support is real, scoped follow-up work (page-table.js/residency.js/
+      // the shader's uWorldSizePx/uMipPagesPerAxis all currently assume square),
+      // not silently dropped — tracked, not built here.
+      if (sourceBitmap.width !== sourceBitmap.height) {
+        throw new Error(
+          `vt-pan-viewer: non-square world images aren't supported yet (floor ${floorIndex}'s image is ` +
+            `${sourceBitmap.width}x${sourceBitmap.height}, not square) — PageTable's page grid assumes a ` +
+            `square world. A square asset (e.g. 12000x12000) works today; rectangular scenes need the ` +
+            `page-table/residency/shader rectangular-world support this increment deliberately deferred.`
+        );
+      }
+
       const table = new PageTable({ id: `panviewer:floor${floorIndex}`, worldSizePx: sourceBitmap.width });
 
       // The indirection is a flattened mip pyramid (all mips in one small

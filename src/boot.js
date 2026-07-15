@@ -41,6 +41,7 @@ import {
   soakPanStep,
   soakSwitchFloorStep,
 } from './vt/vt-pan-viewer.js';
+import { getActiveSceneBackground } from './foundry/active-scene-source.js';
 
 const MODULE_ID = 'map-shine-advanced';
 const VERSION = '0.6.0-dev.0';
@@ -110,6 +111,33 @@ function install() {
     generatedAt: new Date().toISOString(),
     ...stopVtPanViewer(),
   }));
+
+  // Stage 2B: point the SAME viewer at the currently-displayed scene's real
+  // background art instead of the torture fixture — floor 0 / base background
+  // only for this increment (src/foundry/active-scene-source.js's header has
+  // the full scope note: multi-floor Levels-tile detection and non-square
+  // worlds are real, tracked follow-ups, not built here). `canvas` is a
+  // Foundry global; guarded the same defensive way as `Hooks` below in case
+  // this ever loads outside a live Foundry client.
+  MapShine.debug.registerReport('vt-pan-viewer-start-real-scene', 'VT Pan Viewer: Start (ACTIVE SCENE)', async () => {
+    const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
+    const bg = getActiveSceneBackground(sceneDoc);
+    if (!bg.ok) {
+      return {
+        report: 'vt-pan-viewer-start-real-scene',
+        generatedAt: new Date().toISOString(),
+        ok: false,
+        error: bg.error,
+      };
+    }
+    return {
+      report: 'vt-pan-viewer-start-real-scene',
+      generatedAt: new Date().toISOString(),
+      sceneName: bg.name,
+      sourceUrl: bg.url,
+      ...(await startVtPanViewer({ THREE, imageUrlForFloor: () => bg.url, floorCount: 1 })),
+    };
+  });
 
   // MapShine.soak(n) now drives something real (Stage 1 part 4b) instead of
   // reporting stub drivers — load ensures the pan viewer is running, pan/

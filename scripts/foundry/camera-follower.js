@@ -679,8 +679,14 @@ export class CameraFollower {
     //    forceRepopulate (masks + effects resident).
     const ctx = this._applyActiveLevelByIndex(clamped, { emit: true, reason, viewOnly: true });
 
-    // 2. Foundry-side viewed-level state + perception refresh (no canvas.draw).
-    this._applyFoundryViewedLevel(level);
+    // 2. Foundry-side viewed-level state + object lifecycle + perception refresh
+    //    (no canvas.draw). Async — NOT awaited here so ctx still returns
+    //    synchronously (instant switch feel preserved) — see the method doc for
+    //    why its internal sequencing (await object draws before perception
+    //    refresh) matters.
+    void this._applyFoundryViewedLevel(level).catch((err) => {
+      log.warn('_applyFoundryViewedLevel failed', err);
+    });
 
     // 3. Request a V3 render of the new view.
     try {
@@ -744,16 +750,19 @@ export class CameraFollower {
       count: this._levels.length,
     };
 
-    const performSwitch = () => {
+    const performSwitch = async () => {
       log.info(`V3 floor switch (cold; compose behind curtain, no canvas.draw) → ${level.label ?? level.levelId}`);
       try {
         if (window.MapShine) window.MapShine.__v3ViewOnlyFloorSwitchInFlight = true;
       } catch (_) {}
       // Foundry-side viewed-level state first (so downstream reads the new band),
-      // then emit WITHOUT viewOnly so the mask handler composes the cold band and
-      // repopulates effects. Art still comes from the resident bus — the handler
-      // skips Foundry's background swap under floor-resident mode.
-      this._applyFoundryViewedLevel(level);
+      // awaited so newly-created PlaceableObjects finish drawing (vision sources
+      // etc.) before the mask-rebuild emit and the curtain reveal — see
+      // _applyFoundryViewedLevel's doc for why. Then emit WITHOUT viewOnly so the
+      // mask handler composes the cold band and repopulates effects. Art still
+      // comes from the resident bus — the handler skips Foundry's background
+      // swap under floor-resident mode.
+      await this._applyFoundryViewedLevel(level);
       this._emitLevelContextChanged(reason);
       try {
         if (window.MapShine) window.MapShine.__v3ViewOnlyFloorSwitchInFlight = false;
@@ -805,10 +814,23 @@ export class CameraFollower {
    * ran. That is what makes tokens on the switched-to floor selectable/placeable
    * without the full-res background hold that canvas.draw would incur.
    *
+   * IMPORTANT — async, and callers should await it before anything that reads
+   * Foundry-computed visibility (e.g. relying on `sightRefresh`/
+   * VisibilityController). Foundry's own `canvas.draw()` always AWAITS every
+   * PlaceableObject's `draw()` (which sets up its vision source, mesh, etc.)
+   * before the scene is considered ready. If the perception refresh below ran
+   * before a newly-created token's `draw()` finished, its vision source
+   * wasn't registered yet — `VisibilityController`'s `sightRefresh` handler
+   * (Token#isVisible / canvas.tokens.placeables) then either couldn't find it
+   * yet or read stale/uninitialized state, so the token was selectable
+   * (creation alone is synchronous) but never rendered visible. See
+   * {@link _refreshPlaceablesLayerForResidentSwitch}.
+   *
    * @param {object} level - the target `_levels[]` entry.
+   * @returns {Promise<void>}
    * @private
    */
-  _applyFoundryViewedLevel(level) {
+  async _applyFoundryViewedLevel(level) {
     const levelId = level?.levelId ?? null;
     // Install the canvas.level override BEFORE writing scene._view so the first
     // read after the switch already resolves to the new level.
@@ -838,8 +860,10 @@ export class CameraFollower {
     // once `scene._view` correctly points here. Foundry only re-syncs this via
     // PlaceablesLayer#_draw's create/destroy loop, which runs solely inside
     // canvas.draw. Replicate just that loop, without the surrounding full
-    // layer teardown canvas.draw exists to amortize.
-    this._refreshPlaceablesLayerForResidentSwitch(canvas?.tokens);
+    // layer teardown canvas.draw exists to amortize. Awaited — see method doc.
+    try {
+      await this._refreshPlaceablesLayerForResidentSwitch(canvas?.tokens);
+    } catch (_) {}
     try {
       canvas?.perception?.update?.({
         refreshVision: true,
@@ -865,12 +889,20 @@ export class CameraFollower {
    * extending to them is a low-risk follow-up if one is reported broken too —
    * not done pre-emptively to keep this switch's blast radius small.
    *
+   * Awaits every newly-created object's `draw()` before returning — mirrors
+   * `PlaceablesLayer#_draw`'s own `await Promise.allSettled(promises)`. This
+   * matters: `draw()` sets up the object's vision source among other things,
+   * and callers here go on to trigger a perception refresh that depends on
+   * that being ready (see {@link _applyFoundryViewedLevel}).
+   *
    * @param {import('@client/canvas/layers/base/placeables-layer.mjs').default|null|undefined} layer
+   * @returns {Promise<void>}
    * @private
    */
-  _refreshPlaceablesLayerForResidentSwitch(layer) {
+  async _refreshPlaceablesLayerForResidentSwitch(layer) {
     if (!layer?.objects || typeof layer.viewedDocuments !== 'function') return;
     const stillViewed = new Set();
+    const drawPromises = [];
     try {
       for (const doc of layer.viewedDocuments()) {
         stillViewed.add(doc.id);
@@ -879,9 +911,11 @@ export class CameraFollower {
         try {
           const obj = layer.createObject(doc);
           layer.objects.addChild(obj);
-          Promise.resolve(obj.draw()).catch((err) => {
-            log.warn(`Resident switch: draw() failed for ${layer.constructor?.name ?? 'layer'} object ${doc?.id}`, err);
-          });
+          drawPromises.push(
+            Promise.resolve(obj.draw()).catch((err) => {
+              log.warn(`Resident switch: draw() failed for ${layer.constructor?.name ?? 'layer'} object ${doc?.id}`, err);
+            }),
+          );
         } catch (err) {
           log.warn(`Resident switch: failed to create ${layer.constructor?.name ?? 'layer'} object for ${doc?.id}`, err);
         }
@@ -904,6 +938,9 @@ export class CameraFollower {
       }
     } catch (err) {
       log.warn('Resident switch: documentCollection sweep failed', err);
+    }
+    if (drawPromises.length) {
+      await Promise.allSettled(drawPromises);
     }
   }
 

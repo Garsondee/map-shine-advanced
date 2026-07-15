@@ -219,10 +219,28 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
       if (frameTimes.length > 120) frameTimes.shift();
     }
 
+    // Captured ONCE, before any reframe — the TRUE base UV (PlaneGeometry's
+    // original 0/1 corners), never touched again. THE ACTUAL BUG (found live
+    // 2026-07-15, after resetState()/preserveDrawingBuffer turned out to be
+    // real but insufficient fixes): reframeQuad() used to read the geometry's
+    // CURRENT (already-remapped) uv attribute as its "base" and remap THAT —
+    // so every call compounded onto the PREVIOUS call's already-narrow range
+    // instead of the fixed original span. Two calls (initial load, then one
+    // pan) was enough to collapse the whole quad's UV range by ~17x toward a
+    // single point — exactly matching the symptom: correct on first load,
+    // solid-color after the very first pan, regardless of direction. The
+    // smoke test never hit this because it only ever reframed once.
+    const baseUV = (() => {
+      const uvAttr = quadGeometry.getAttribute('uv');
+      const out = [];
+      for (let i = 0; i < uvAttr.count; i++) out.push([uvAttr.getX(i), uvAttr.getY(i)]);
+      return out;
+    })();
+
     function reframeQuad(uvMin, uvMax) {
       const uvAttr = quadGeometry.getAttribute('uv');
       for (let i = 0; i < uvAttr.count; i++) {
-        const u = uvAttr.getX(i), v = uvAttr.getY(i);
+        const [u, v] = baseUV[i]; // ALWAYS the true original corner, never the live buffer
         // Same v-flip as the smoke test (live-verified 2026-07-15): v=1 (local
         // +Y, NDC top) must map to the SMALLER world-Y (the top of the source
         // image), so uvMax - v*(uvMax-uvMin), never uvMin + v*(...).

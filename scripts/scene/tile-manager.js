@@ -5988,11 +5988,17 @@ vec3 ms_applyOverheadColorCorrection(vec3 color) {
                   // through the one-per-macrotask queue instead.
                   await new Promise((resolve) => {
                     this._scheduleTileDownscale(() => {
-                      try {
-                        ctx.drawImage(texSource, 0, 0, outW, outH);
-                      } finally {
-                        resolve();
-                      }
+                      // Marked (not just paced): a crash report showed a
+                      // 10.8s longTask with zero markSection coverage in this
+                      // exact window (load, tile-texture path) — attribute it
+                      // precisely instead of leaving a diagnostic blind spot.
+                      markSection('tile.downscale', () => {
+                        try {
+                          ctx.drawImage(texSource, 0, 0, outW, outH);
+                        } finally {
+                          resolve();
+                        }
+                      });
                     });
                   });
                   texSource = canvasEl;

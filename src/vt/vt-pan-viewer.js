@@ -28,6 +28,26 @@
  * toward the actual Stage 1 gate (torture scene pans at 60fps, 20-cycle soak,
  * zero context loss on the 3070).
  *
+ * MULTI-FLOOR COMPOSITING (author-reported live bug, 2026-07-15: a real
+ * multi-level scene's upper floor showed solid BLACK where a hole in its art
+ * should reveal the floor below). Verified against the real Foundry source
+ * before building anything: floors are NOT swapped on floor-switch in real
+ * Foundry — `client/documents/scene.mjs#_configureLevelTextures` draws the
+ * viewed floor PLUS every other floor listed in ITS OWN `visibility.levels`
+ * set, simultaneously, elevation-sorted, alpha-composited (see
+ * `foundry/active-scene-source.js`'s `computeVisibleFloorIndices()`, which
+ * replicates that exact rule). This module now renders one quad PER
+ * currently-visible floor (not one quad total, rebound per switch): each
+ * floor gets its own persistent `{geometry,material,mesh}` layer, created
+ * once and toggled `visible` per residency update; materials are
+ * alpha-blended (`transparent:true`) and depth-test disabled with explicit
+ * `renderOrder = floorIndex` (== elevation-ascending, since
+ * `getActiveSceneFloors` already sorts that way) standing in for real depth —
+ * a flat 2D layered composite is exactly what a top-down multi-floor stack
+ * is, so no actual Z-buffer is needed. The torture-fixture button's default
+ * `visibleFloorIndices` (`(i) => [i]`) preserves the exact old single-floor
+ * behavior — this is purely additive for callers that don't opt in.
+ *
  * @module vt/vt-pan-viewer
  */
 
@@ -86,12 +106,14 @@ function disposeActive() {
   try {
     _active.atlas.dispose();
   } catch (_) {}
-  try {
-    _active.quadMaterial.dispose();
-  } catch (_) {}
-  try {
-    _active.quadGeometry.dispose();
-  } catch (_) {}
+  for (const layer of _active.layers.values()) {
+    try {
+      layer.material.dispose();
+    } catch (_) {}
+    try {
+      layer.geometry.dispose();
+    } catch (_) {}
+  }
   for (const entry of _active.floors.values()) {
     try {
       entry.indirectionTexture.dispose();
@@ -113,9 +135,18 @@ export function stopVtPanViewer() {
  * @param {any} options.THREE
  * @param {(floorIndex:number) => string} options.imageUrlForFloor
  * @param {number} options.floorCount
+ * @param {(viewedFloorIndex:number) => number[]} [options.visibleFloorIndices] -
+ *   given the currently-viewed floor index, which floor indices should be
+ *   rendered (composited) this frame. Default `(i) => [i]` — single-floor-only,
+ *   the exact pre-existing behavior (used by the torture-fixture button, which
+ *   has no real Levels-visibility data to draw from). Real-scene callers pass
+ *   `foundry/active-scene-source.js`'s `computeVisibleFloorIndices` bound to
+ *   the scene's actual floor list, replicating Foundry's own multi-floor
+ *   compositing rule.
  * @returns {Promise<object>} initial diagnostics (see getDiagnostics() for the shape).
  */
-export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) {
+export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount, visibleFloorIndices }) {
+  visibleFloorIndices ??= (i) => [i];
   disposeActive();
   stopVtSmokeTest(); // avoid two renderers fighting over the same corner of the screen
 
@@ -242,55 +273,99 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
       return entry;
     }
 
-    // The quad + shader: IDENTICAL pattern to the proven smoke test (same
-    // vertex shader, same uniform names, same v-flip in the UV remap) — see
-    // that file's comments for why each piece is shaped the way it is.
-    const quadGeometry = new THREE.PlaneGeometry(2, 2);
-    const quadMaterial = new THREE.ShaderMaterial({
-      uniforms: {
-        uPageAtlas: { value: atlas.texture },
-        uPageTable: { value: null }, // set per-floor in updateResidency()
-        uPagesPerAxis: { value: layout.pagesPerAxis },
-        uPagesPerLayer: { value: layout.pagesPerLayer },
-        uPageSizePx: { value: layout.pageSizePx },
-        uBorderPx: { value: 4 },
-        uAtlasSizePx: { value: layout.atlasSizePx },
-        uWorldSizePx: { value: 0 }, // set per-floor in updateResidency()
-        // Multi-mip: the finest mip to TRY (analytic, per view) + the coarsest,
-        // and the flattened-pyramid per-mip layout the shader walks. uMipOrigin
-        // is a flat Int32Array (ivec2[VT_MAX_MIPS] == 2 ints/level) — THREE
-        // uploads it via gl.uniform2iv directly; uMipPagesPerAxis via uniform1iv.
-        // Both are replaced with the current floor's arrays on floor bind.
-        uRequestedMip: { value: 0 },
-        uMaxMip: { value: 0 },
-        uMipOrigin: { value: new Int32Array(VT_MAX_MIPS * 2) },
-        uMipPagesPerAxis: { value: new Int32Array(VT_MAX_MIPS) },
-      },
-      vertexShader: /* glsl */ `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = vec4(position.xy, 0.0, 1.0);
-        }
-      `,
-      fragmentShader: /* glsl */ `
-        precision highp float;
-        precision highp sampler2DArray;
-        varying vec2 vUv;
-        ${VT_SAMPLE_GLSL}
-        void main() {
-          gl_FragColor = vtSample(vUv);
-        }
-      `,
-    });
     const scene = new THREE.Scene();
-    scene.add(new THREE.Mesh(quadGeometry, quadMaterial));
     const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1); // matches fullscreen-present.js's convention
+    const layers = new Map(); // floorIndex -> {geometry, material, mesh, baseUV} — one persistent layer per LOADED floor
+
+    /**
+     * Create (once) the quad+shader layer for one floor. IDENTICAL shader
+     * pattern to the proven smoke test (same vertex shader, same uniform
+     * names, same v-flip in the UV remap) — see that file's comments for why
+     * each piece is shaped the way it is. `transparent:true` +
+     * `depthTest/depthWrite:false` + explicit `renderOrder` (set to
+     * `floorIndex` in updateResidency — ascending == elevation-ascending,
+     * since getActiveSceneFloors already sorts that way) is what makes
+     * multi-floor compositing work: a real ALPHA HOLE in an upper floor's art
+     * (resident atlas texel with a<1) now correctly blends against whatever a
+     * LOWER floor's already-painted layer put there, instead of the single
+     * fully-opaque quad this viewer used before — which is exactly the "black
+     * where a hole should reveal the floor below" bug reported live 2026-07-15.
+     * Added to `scene` immediately with `visible:false`; updateResidency()
+     * toggles visibility per-floor every update rather than repeatedly
+     * creating/destroying layers.
+     */
+    function ensureLayer(floorIndex) {
+      let layer = layers.get(floorIndex);
+      if (layer) return layer;
+
+      const geometry = new THREE.PlaneGeometry(2, 2);
+      const material = new THREE.ShaderMaterial({
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        uniforms: {
+          uPageAtlas: { value: atlas.texture },
+          uPageTable: { value: null }, // set per-floor in updateResidency()
+          uPagesPerAxis: { value: layout.pagesPerAxis },
+          uPagesPerLayer: { value: layout.pagesPerLayer },
+          uPageSizePx: { value: layout.pageSizePx },
+          uBorderPx: { value: 4 },
+          uAtlasSizePx: { value: layout.atlasSizePx },
+          uWorldSizePx: { value: 0 }, // set per-floor in updateResidency()
+          // Multi-mip: the finest mip to TRY (analytic, per view) + the coarsest,
+          // and the flattened-pyramid per-mip layout the shader walks. uMipOrigin
+          // is a flat Int32Array (ivec2[VT_MAX_MIPS] == 2 ints/level) — THREE
+          // uploads it via gl.uniform2iv directly; uMipPagesPerAxis via uniform1iv.
+          uRequestedMip: { value: 0 },
+          uMaxMip: { value: 0 },
+          uMipOrigin: { value: new Int32Array(VT_MAX_MIPS * 2) },
+          uMipPagesPerAxis: { value: new Int32Array(VT_MAX_MIPS) },
+        },
+        vertexShader: /* glsl */ `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = vec4(position.xy, 0.0, 1.0);
+          }
+        `,
+        fragmentShader: /* glsl */ `
+          precision highp float;
+          precision highp sampler2DArray;
+          varying vec2 vUv;
+          ${VT_SAMPLE_GLSL}
+          void main() {
+            gl_FragColor = vtSample(vUv);
+          }
+        `,
+      });
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.visible = false;
+      scene.add(mesh);
+
+      // Captured ONCE per layer, before any reframe — the TRUE base UV
+      // (PlaneGeometry's original 0/1 corners), never touched again. THE
+      // ACTUAL BUG (found live 2026-07-15, after resetState()/
+      // preserveDrawingBuffer turned out to be real but insufficient fixes):
+      // reframeQuad() used to read the geometry's CURRENT (already-remapped)
+      // uv attribute as its "base" and remap THAT — so every call compounded
+      // onto the PREVIOUS call's already-narrow range instead of the fixed
+      // original span. Two calls (initial load, then one pan) was enough to
+      // collapse the whole quad's UV range by ~17x toward a single point —
+      // exactly matching the symptom: correct on first load, solid-color
+      // after the very first pan, regardless of direction.
+      const uvAttr = geometry.getAttribute('uv');
+      const baseUV = [];
+      for (let i = 0; i < uvAttr.count; i++) baseUV.push([uvAttr.getX(i), uvAttr.getY(i)]);
+
+      layer = { geometry, material, mesh, baseUV };
+      layers.set(floorIndex, layer);
+      return layer;
+    }
 
     let view = null; // set once the first floor is loaded (needs its worldSizePx)
     const frameTimes = [];
     let lastError = null;
-    let lastFramedUV = null; // set by reframeQuad(), exposed in diagnostics for ground-truth debugging
+    let lastFramedUV = null; // set by reframeLayer(), exposed in diagnostics for ground-truth debugging
 
     /** Ground truth, not theory: actual rendered canvas pixels + actual indirection buffer contents. */
     function sampleDiagnostics(entry) {
@@ -338,28 +413,10 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
       if (frameTimes.length > 120) frameTimes.shift();
     }
 
-    // Captured ONCE, before any reframe — the TRUE base UV (PlaneGeometry's
-    // original 0/1 corners), never touched again. THE ACTUAL BUG (found live
-    // 2026-07-15, after resetState()/preserveDrawingBuffer turned out to be
-    // real but insufficient fixes): reframeQuad() used to read the geometry's
-    // CURRENT (already-remapped) uv attribute as its "base" and remap THAT —
-    // so every call compounded onto the PREVIOUS call's already-narrow range
-    // instead of the fixed original span. Two calls (initial load, then one
-    // pan) was enough to collapse the whole quad's UV range by ~17x toward a
-    // single point — exactly matching the symptom: correct on first load,
-    // solid-color after the very first pan, regardless of direction. The
-    // smoke test never hit this because it only ever reframed once.
-    const baseUV = (() => {
-      const uvAttr = quadGeometry.getAttribute('uv');
-      const out = [];
-      for (let i = 0; i < uvAttr.count; i++) out.push([uvAttr.getX(i), uvAttr.getY(i)]);
-      return out;
-    })();
-
-    function reframeQuad(uvMin, uvMax) {
-      const uvAttr = quadGeometry.getAttribute('uv');
+    function reframeLayer(layer, uvMin, uvMax) {
+      const uvAttr = layer.geometry.getAttribute('uv');
       for (let i = 0; i < uvAttr.count; i++) {
-        const [u, v] = baseUV[i]; // ALWAYS the true original corner, never the live buffer
+        const [u, v] = layer.baseUV[i]; // ALWAYS the true original corner, never the live buffer
         // Same v-flip as the smoke test (live-verified 2026-07-15): v=1 (local
         // +Y, NDC top) must map to the SMALLER world-Y (the top of the source
         // image), so uvMax - v*(uvMax-uvMin), never uvMin + v*(...).
@@ -431,72 +488,117 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
       entry.buf[i + 3] = 255;
     }
 
-    let lastFloorIndex = null;
+    let lastVisibleFloors = new Set(); // floor indices composited after the PREVIOUS update
+    let lastCompositedFloors = []; // exposed in diagnostics — see getDiagnostics()
+    let worldSizeMismatchWarned = false; // one console.warn per distinct mismatch, not one per frame
 
     async function updateResidency() {
-      if (lastFloorIndex !== null && lastFloorIndex !== view.floorIndex) {
-        // Leaving a floor: unpin its VIEW pages only (never its coarse pins —
-        // those stay resident for every floor so a switch back renders
-        // instantly, §4.1/§4.5). Unpin never evicts directly — PageCache's LRU
-        // decides that under real pressure — so a quick switch-and-back is free.
-        const prevEntry = floors.get(lastFloorIndex);
+      const visibleIndices = visibleFloorIndices(view.floorIndex);
+      const visibleSet = new Set(visibleIndices);
+
+      // Floors that dropped OUT of the composited set (not just "no longer
+      // the current one" — a floor can stay composited across a switch if
+      // it's visible-from BOTH the old and new viewed floor): unpin their
+      // VIEW pages (never coarse pins — those stay resident for every floor
+      // always, §4.1/§4.5) and hide their layer. Unpin never evicts directly
+      // — PageCache's LRU decides that under real pressure — so a quick
+      // switch-and-back is free.
+      for (const idx of lastVisibleFloors) {
+        if (visibleSet.has(idx)) continue;
+        const prevEntry = floors.get(idx);
         if (prevEntry) {
           for (const key of prevEntry.residentViewKeys) cache.unpin(key);
           prevEntry.residentViewKeys = new Set();
         }
+        const prevLayer = layers.get(idx);
+        if (prevLayer) prevLayer.mesh.visible = false;
       }
-      lastFloorIndex = view.floorIndex;
+      lastVisibleFloors = visibleSet;
+      lastCompositedFloors = visibleIndices;
 
-      const entry = await ensureFloorLoaded(view.floorIndex);
-      if (quadMaterial.uniforms.uPageTable.value !== entry.indirectionTexture) {
-        // Floor bind: point every per-floor uniform at THIS floor's data.
-        // Assigning fresh array references (per entry) guarantees THREE
-        // re-uploads them; within a floor they're constant.
-        quadMaterial.uniforms.uPageTable.value = entry.indirectionTexture;
-        quadMaterial.uniforms.uWorldSizePx.value = entry.table.worldSizePx;
-        quadMaterial.uniforms.uMaxMip.value = entry.table.maxMip;
-        quadMaterial.uniforms.uMipOrigin.value = entry.mipOriginArr;
-        quadMaterial.uniforms.uMipPagesPerAxis.value = entry.mipPagesArr;
-      }
-
-      // Aspect-correct framing: the canvas now fills the (non-square) scene
-      // area, so the world rect must match the canvas aspect or the map
-      // stretches (view-state.js's aspect param). halfSpanPx is the vertical
-      // zoom; horizontal widens by width/height.
+      // Aspect-correct framing: the canvas fills the (non-square) scene area,
+      // so the world rect must match the canvas aspect or the map stretches
+      // (view-state.js's aspect param). halfSpanPx is the vertical zoom;
+      // horizontal widens by width/height. Shared across every composited
+      // floor — they all represent the same on-screen view.
       const aspect = canvasW / canvasH;
       const worldRect = viewToWorldRect(view, aspect);
-      // Analytic mip selection (§4.1 — top-down camera, no GPU feedback): pick
-      // the finest mip that resolves for this zoom, plus a coarser prefetch set.
-      // Use the LARGER canvas axis for a conservative (sharper) mip choice.
-      const plan = planResidency(entry.table, worldRect, Math.max(canvasW, canvasH), { guardPages: 1 });
-      quadMaterial.uniforms.uRequestedMip.value = plan.mip;
 
-      // The view's needed pages = fine + coarser prefetch, EXCLUDING any page
-      // already held by this floor's permanent coarse pins (never downgrade a
-      // 'coarse' pin to 'view' — that would let a floor switch unpin it).
-      const neededViewPages = [...plan.fine, ...plan.prefetchCoarser].filter((p) => !entry.coarseKeySet.has(p.key));
-      const diff = diffResidency(entry.residentViewKeys, neededViewPages);
+      let refWorldSizePx = null;
 
-      await requestDecodeUpload(entry, diff.toRequest, 'view');
-      for (const key of diff.toUnpin) cache.unpin(key);
-      entry.residentViewKeys = diff.nextKeys;
+      for (const floorIndex of visibleIndices) {
+        const entry = await ensureFloorLoaded(floorIndex);
 
-      // Rebuild the indirection buffer FRESH from the cache's own current slot
-      // mapping every time (never a separately-tracked copy) — this is what
-      // keeps it correct across evictions: an evicted-and-reassigned page must
-      // never leave a stale pointer. Both the always-resident coarse pins AND
-      // the current view pages are written, so the shader's coarse-fallback
-      // walk always finds SOMETHING resident (blur, never magenta).
-      entry.buf.fill(0);
-      for (const page of entry.coarsePages) writeIndirection(entry, page);
-      for (const page of neededViewPages) writeIndirection(entry, page);
-      entry.indirectionTexture.needsUpdate = true;
+        // Composited floors are assumed to share the same worldSizePx (all
+        // Levels in one Foundry scene cover the same physical footprint) —
+        // warn, don't crash, if a real scene's art disagrees (see this file's
+        // header note: per-floor world-size reconciliation isn't built yet).
+        if (refWorldSizePx === null) refWorldSizePx = entry.table.worldSizePx;
+        else if (entry.table.worldSizePx !== refWorldSizePx && !worldSizeMismatchWarned) {
+          worldSizeMismatchWarned = true;
+          console.warn(
+            `[vt-pan-viewer] floor ${floorIndex}'s worldSizePx (${entry.table.worldSizePx}) differs from another ` +
+              `composited floor's (${refWorldSizePx}) — the multi-floor overlay may visually misalign.`
+          );
+        }
 
-      const worldSizePx = entry.table.worldSizePx;
-      reframeQuad(
-        { x: worldRect.minX / worldSizePx, y: worldRect.minY / worldSizePx },
-        { x: worldRect.maxX / worldSizePx, y: worldRect.maxY / worldSizePx }
-      );
+        const layer = ensureLayer(floorIndex);
+        if (layer.material.uniforms.uPageTable.value !== entry.indirectionTexture) {
+          // Floor bind: point every per-floor uniform at THIS floor's data.
+          // Assigning fresh array references (per entry) guarantees THREE
+          // re-uploads them; within a floor they're constant.
+          layer.material.uniforms.uPageTable.value = entry.indirectionTexture;
+          layer.material.uniforms.uWorldSizePx.value = entry.table.worldSizePx;
+          layer.material.uniforms.uMaxMip.value = entry.table.maxMip;
+          layer.material.uniforms.uMipOrigin.value = entry.mipOriginArr;
+          layer.material.uniforms.uMipPagesPerAxis.value = entry.mipPagesArr;
+        }
+
+        // Analytic mip selection (§4.1 — top-down camera, no GPU feedback):
+        // pick the finest mip that resolves for this zoom, plus a coarser
+        // prefetch set. Use the LARGER canvas axis for a conservative
+        // (sharper) mip choice.
+        const plan = planResidency(entry.table, worldRect, Math.max(canvasW, canvasH), { guardPages: 1 });
+        layer.material.uniforms.uRequestedMip.value = plan.mip;
+
+        // The view's needed pages = fine + coarser prefetch, EXCLUDING any
+        // page already held by this floor's permanent coarse pins (never
+        // downgrade a 'coarse' pin to 'view' — that would let a floor switch
+        // unpin it).
+        const neededViewPages = [...plan.fine, ...plan.prefetchCoarser].filter((p) => !entry.coarseKeySet.has(p.key));
+        const diff = diffResidency(entry.residentViewKeys, neededViewPages);
+
+        await requestDecodeUpload(entry, diff.toRequest, 'view');
+        for (const key of diff.toUnpin) cache.unpin(key);
+        entry.residentViewKeys = diff.nextKeys;
+
+        // Rebuild the indirection buffer FRESH from the cache's own current
+        // slot mapping every time (never a separately-tracked copy) — this
+        // is what keeps it correct across evictions: an evicted-and-
+        // reassigned page must never leave a stale pointer. Both the
+        // always-resident coarse pins AND the current view pages are
+        // written, so the shader's coarse-fallback walk always finds
+        // SOMETHING resident (blur, never magenta).
+        entry.buf.fill(0);
+        for (const page of entry.coarsePages) writeIndirection(entry, page);
+        for (const page of neededViewPages) writeIndirection(entry, page);
+        entry.indirectionTexture.needsUpdate = true;
+
+        const worldSizePx = entry.table.worldSizePx;
+        reframeLayer(
+          layer,
+          { x: worldRect.minX / worldSizePx, y: worldRect.minY / worldSizePx },
+          { x: worldRect.maxX / worldSizePx, y: worldRect.maxY / worldSizePx }
+        );
+
+        layer.mesh.visible = true;
+        // Ascending floorIndex == ascending elevation (getActiveSceneFloors
+        // already sorts its output that way), so painting lower indices
+        // first (Three.js: lower renderOrder draws first) puts the physically
+        // LOWER floor beneath the higher one — exactly the paint order real
+        // Foundry's own elevation-sorted `_configureLevelTextures` produces.
+        layer.mesh.renderOrder = floorIndex;
+      }
     }
 
     // Shared by the real keydown handler AND the soak harness (MapShine.soakHooks.pan)
@@ -594,8 +696,7 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
       atlas,
       canvas,
       onResize,
-      quadMaterial,
-      quadGeometry,
+      layers,
       floors,
       cache,
       layout,
@@ -606,6 +707,7 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
       getDiagnostics() {
         const avgMs = frameTimes.length ? frameTimes.reduce((a, b) => a + b, 0) / frameTimes.length : 0;
         const entry = floors.get(view.floorIndex);
+        const layer = layers.get(view.floorIndex);
         return {
           view,
           layout,
@@ -613,13 +715,19 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
           mountedInBoard: mount.fill && mount.host !== document.body,
           cacheStats: cache.stats(),
           floorsLoaded: Array.from(floors.keys()),
+          // Multi-floor compositing (§ header note): which OTHER floors are
+          // ALSO being rendered alongside the current one this update, per
+          // getActiveSceneFloors' visibility.levels-derived rule (or just
+          // [view.floorIndex] for the default/torture-fixture single-floor
+          // behavior).
+          compositedFloors: lastCompositedFloors,
           currentFloorResidentCount: entry?.residentViewKeys.size ?? 0,
           // Multi-mip state (coarse-fallback gate evidence): the finest mip
           // being tried this view, the floor's top-level, its coarse-pin depth
           // + page count, and the packed-pyramid indirection dimensions.
           mip: {
-            requested: quadMaterial.uniforms.uRequestedMip.value,
-            max: quadMaterial.uniforms.uMaxMip.value,
+            requested: layer?.material.uniforms.uRequestedMip.value ?? null,
+            max: layer?.material.uniforms.uMaxMip.value ?? null,
             coarseTopMips: entry?.coarseTopMips ?? null,
             coarsePinnedPages: entry?.coarsePages.length ?? null,
             indirectionPyramid: entry ? `${entry.width}x${entry.height}` : null,

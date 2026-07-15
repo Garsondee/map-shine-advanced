@@ -4,7 +4,13 @@
  * parameter rather than reaching into `canvas` itself, so it's testable with
  * plain mock objects, no DOM/Foundry globals required.
  */
-import { isImageUrl, resolveAssetUrl, getActiveSceneBackground, getActiveSceneFloors } from '../active-scene-source.js';
+import {
+  isImageUrl,
+  resolveAssetUrl,
+  getActiveSceneBackground,
+  getActiveSceneFloors,
+  computeVisibleFloorIndices,
+} from '../active-scene-source.js';
 
 export function run(t) {
   const { ok } = t;
@@ -108,6 +114,39 @@ export function run(t) {
     ok('getActiveSceneFloors: nothing skipped in the clean case', res.skipped.length === 0);
   }
 
+  // --- getActiveSceneFloors: carries id + visibilityLevelIds (the raw
+  // material computeVisibleFloorIndices needs) --------------------------------
+  {
+    const sceneDoc = {
+      name: 'Visibility Test',
+      levels: [
+        {
+          _id: 'ground-id',
+          id: 'ground-id',
+          name: 'Ground',
+          elevation: { bottom: 0 },
+          background: { src: 'x/ground.webp' },
+          visibility: { levels: new Set(['basement-id']) },
+        },
+        {
+          _id: 'basement-id',
+          id: 'basement-id',
+          name: 'Basement',
+          elevation: { bottom: -10 },
+          background: { src: 'x/basement.webp' },
+          visibility: { levels: new Set() },
+        },
+      ],
+    };
+    const res = getActiveSceneFloors(sceneDoc);
+    const ground = res.floors.find((f) => f.name === 'Ground');
+    ok('getActiveSceneFloors: id is passed through from the Level document', ground.id === 'ground-id');
+    ok(
+      "getActiveSceneFloors: visibilityLevelIds is a plain array from the Level's visibility.levels Set",
+      Array.isArray(ground.visibilityLevelIds) && ground.visibilityLevelIds.includes('basement-id')
+    );
+  }
+
   // --- getActiveSceneFloors: tolerates a real Foundry EmbeddedCollection shape
   // (a Map-like with .values(), not a plain array) -----------------------------
   {
@@ -179,5 +218,85 @@ export function run(t) {
     const res = getActiveSceneFloors({ name: 'Totally Empty Scene', levels: [], background: { src: null } });
     ok('getActiveSceneFloors: no art anywhere is {ok:false}', res.ok === false);
     ok('getActiveSceneFloors: error names the scene', res.error.includes('Totally Empty Scene'));
+  }
+
+  // --- computeVisibleFloorIndices: replicates Foundry's REAL algorithm -------
+  // (client/documents/scene.mjs#_configureLevelTextures + level.mjs#isVisible)
+
+  // No visibility.levels configured at all -> ONLY the viewed floor shows.
+  // This is the author-reported bug's exact scenario if a GM never set up
+  // visibility (real Foundry shows just the one floor too -- NOT "always show
+  // the floor below" by default).
+  {
+    const floors = [
+      { index: 0, id: 'a', visibilityLevelIds: [] },
+      { index: 1, id: 'b', visibilityLevelIds: [] },
+    ];
+    ok(
+      'computeVisibleFloorIndices: no visibility configured -> only the viewed floor',
+      JSON.stringify(computeVisibleFloorIndices(floors, 1)) === JSON.stringify([1])
+    );
+  }
+
+  // The setting the user pointed at: floor 1 explicitly lists floor 0 as
+  // visible -> both render when floor 1 is viewed (the hole-revealing case).
+  {
+    const floors = [
+      { index: 0, id: 'basement', visibilityLevelIds: [] },
+      { index: 1, id: 'ground', visibilityLevelIds: ['basement'] },
+      { index: 2, id: 'attic', visibilityLevelIds: [] },
+    ];
+    ok(
+      'computeVisibleFloorIndices: viewed floor + the one it lists as visible',
+      JSON.stringify(computeVisibleFloorIndices(floors, 1)) === JSON.stringify([0, 1])
+    );
+    ok(
+      'computeVisibleFloorIndices: attic is NOT included (ground did not list it)',
+      !computeVisibleFloorIndices(floors, 1).includes(2)
+    );
+  }
+
+  // NOT symmetric: basement listing ground as visible does NOT mean ground
+  // shows basement -- matches Level#isVisible's one-directional .has() check
+  // exactly (viewedLevel.visibility.levels.has(this.id), never the reverse).
+  {
+    const floors = [
+      { index: 0, id: 'basement', visibilityLevelIds: ['ground'] }, // basement -> ground, one-way
+      { index: 1, id: 'ground', visibilityLevelIds: [] },
+    ];
+    ok(
+      'computeVisibleFloorIndices: visibility is NOT symmetric (viewing ground does not pull in basement)',
+      JSON.stringify(computeVisibleFloorIndices(floors, 1)) === JSON.stringify([1])
+    );
+    ok(
+      'computeVisibleFloorIndices: but viewing basement DOES pull in ground (the one-way direction that was set)',
+      JSON.stringify(computeVisibleFloorIndices(floors, 0)) === JSON.stringify([0, 1])
+    );
+  }
+
+  // Result is always sorted ascending (== elevation order, since
+  // getActiveSceneFloors already sorts by elevation.bottom before assigning
+  // index) regardless of visibilityLevelIds' own order or floors' array order.
+  {
+    const floors = [
+      { index: 2, id: 'top', visibilityLevelIds: ['bottom', 'mid'] },
+      { index: 0, id: 'bottom', visibilityLevelIds: [] },
+      { index: 1, id: 'mid', visibilityLevelIds: [] },
+    ];
+    ok(
+      'computeVisibleFloorIndices: result is sorted ascending regardless of input order',
+      JSON.stringify(computeVisibleFloorIndices(floors, 2)) === JSON.stringify([0, 1, 2])
+    );
+  }
+
+  // A viewedIndex that doesn't exist in floors[] returns an empty list rather
+  // than throwing (defensive -- the viewer should never call this with a bad
+  // index, but a clean empty result is safer than a crash if it ever does).
+  {
+    const floors = [{ index: 0, id: 'a', visibilityLevelIds: [] }];
+    ok(
+      'computeVisibleFloorIndices: unknown viewedIndex is a clean empty array, not a throw',
+      computeVisibleFloorIndices(floors, 99).length === 0
+    );
   }
 }

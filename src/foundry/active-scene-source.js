@@ -37,12 +37,35 @@
  * `scene.createEmbeddedDocuments("Level", [...])`, matching level.mjs's own
  * JSDoc example) so the fixture matches what's actually being built now.
  *
+ * MULTI-FLOOR COMPOSITING (added same day, author-reported live: a real
+ * multi-level scene showed solid BLACK where a hole in the upper floor's art
+ * should have revealed the floor below). Verified in source before writing
+ * anything (per the standing rule) — the real Foundry algorithm is NOT
+ * "swap floor images on floor-switch," it's simultaneous elevation-sorted
+ * alpha-composited layers: `client/documents/scene.mjs#_configureLevelTextures`
+ * draws a texture mesh for the viewed Level PLUS every OTHER Level whose id is
+ * a member of the VIEWED Level's own `visibility.levels` set
+ * (`client/documents/level.mjs#isVisible`: `id===view || viewedLevel
+ * .visibility.levels.has(id)` — NOT symmetric, and NOT "always show the floor
+ * directly below"; it's exactly the per-floor author-configured setting the
+ * user pointed at). `computeVisibleFloorIndices()` below replicates this
+ * exact rule so `vt-pan-viewer.js` can render the same set of floors,
+ * Z-ordered by elevation and alpha-blended, that real Foundry would.
+ *
  * STILL DELIBERATELY NOT BUILT (tracked, not silently dropped):
  * - Non-square worlds. `page-table.js`'s `PageTable` takes a single
  *   `worldSizePx` (the page grid is square by construction) — see
  *   `vt-pan-viewer.js`'s loud guard against a non-square decoded image. Each
  *   floor is checked independently, so one non-square Level failing doesn't
  *   block floors that ARE square.
+ * - Per-floor world-size reconciliation. Real Level art can legitimately be
+ *   uploaded at different native pixel resolutions while representing the
+ *   SAME in-game footprint (Foundry scales via `Level#textures.fit/scaleX/Y`);
+ *   this project derives `worldSizePx` purely from each floor's OWN decoded
+ *   image (matching the existing single-floor assumption, not new to this
+ *   increment). Composited floors with genuinely mismatched `worldSizePx`
+ *   will visually misalign — `vt-pan-viewer.js` warns (console) rather than
+ *   silently misaligning, but doesn't yet reconcile/rescale.
  *
  * @module foundry/active-scene-source
  */
@@ -155,9 +178,16 @@ function levelDocsOf(sceneDoc) {
  * reported in `skipped[]` (not silently dropped — Doctrine #1) rather than
  * failing the whole scene, since the other floors may still be perfectly usable.
  *
+ * Each floor descriptor also carries `id` (the raw Level document id) and
+ * `visibilityLevelIds` (that Level's OWN `visibility.levels` set, as a plain
+ * string array) — the raw material `computeVisibleFloorIndices()` needs to
+ * replicate Foundry's real cross-floor visibility rule. The legacy single-
+ * floor fallback synthesizes `id:'legacy'`/`visibilityLevelIds:[]` (there's
+ * only ever one floor in that case, so visibility-set membership is moot).
+ *
  * @param {object|null} sceneDoc - see `getActiveSceneBackground`'s param doc.
  * @param {(path:string)=>string} [getRouteFn] - forwarded to resolveAssetUrl (testability).
- * @returns {{ok:true, floors:Array<{index:number,url:string,name:string,elevationBottom:number|null}>, skipped:Array<{name:string,reason:string}>}
+ * @returns {{ok:true, floors:Array<{index:number,id:string,url:string,name:string,elevationBottom:number|null,visibilityLevelIds:string[]}>, skipped:Array<{name:string,reason:string}>}
  *          |{ok:false, error:string}}
  */
 export function getActiveSceneFloors(sceneDoc, getRouteFn) {
@@ -186,9 +216,11 @@ export function getActiveSceneFloors(sceneDoc, getRouteFn) {
       ok: true,
       floors: withImages.map((lvl, index) => ({
         index,
+        id: lvl.id,
         url: resolveAssetUrl(lvl.background.src, getRouteFn),
         name: lvl.name || `Level ${index}`,
         elevationBottom: lvl.elevation?.bottom ?? null,
+        visibilityLevelIds: Array.from(lvl.visibility?.levels ?? []),
       })),
       skipped,
     };
@@ -198,7 +230,16 @@ export function getActiveSceneFloors(sceneDoc, getRouteFn) {
   if (legacyBg.ok) {
     return {
       ok: true,
-      floors: [{ index: 0, url: legacyBg.url, name: legacyBg.name, elevationBottom: null }],
+      floors: [
+        {
+          index: 0,
+          id: 'legacy',
+          url: legacyBg.url,
+          name: legacyBg.name,
+          elevationBottom: null,
+          visibilityLevelIds: [],
+        },
+      ],
       skipped,
     };
   }
@@ -208,4 +249,32 @@ export function getActiveSceneFloors(sceneDoc, getRouteFn) {
       `scene "${sceneDoc.name}" has no usable floor art (0 Level backgrounds usable` +
       `${skipped.length ? `, ${skipped.length} skipped (video)` : ''}, and no legacy scene background either)`,
   };
+}
+
+/**
+ * Replicates Foundry's REAL cross-floor visibility algorithm (see this file's
+ * header — verified against `_configureLevelTextures`/`Level#isVisible` in
+ * source, not guessed): given `getActiveSceneFloors()`'s `floors` array and
+ * which one is currently being viewed, returns every floor index that should
+ * be rendered alongside it — the viewed floor itself, PLUS any floor whose id
+ * appears in the VIEWED floor's own `visibilityLevelIds`. Deliberately NOT
+ * symmetric (floor A listing floor B as visible does not imply the reverse —
+ * matches Foundry's own one-directional `has()` check) and NOT "always show
+ * the floor below" (an author who never configured `visibility.levels` sees
+ * ONLY the viewed floor, exactly like real Foundry).
+ *
+ * @param {ReturnType<typeof getActiveSceneFloors>['floors']} floors
+ * @param {number} viewedIndex
+ * @returns {number[]} floor indices to render, always including viewedIndex
+ *   (if it exists), sorted ascending — which is also elevation-ascending,
+ *   since `getActiveSceneFloors` already sorts its output that way.
+ */
+export function computeVisibleFloorIndices(floors, viewedIndex) {
+  const viewed = floors.find((f) => f.index === viewedIndex);
+  if (!viewed) return [];
+  const visibleIds = new Set(viewed.visibilityLevelIds || []);
+  return floors
+    .filter((f) => f.index === viewedIndex || visibleIds.has(f.id))
+    .map((f) => f.index)
+    .sort((a, b) => a - b);
 }

@@ -41,7 +41,7 @@ import {
   soakPanStep,
   soakSwitchFloorStep,
 } from './vt/vt-pan-viewer.js';
-import { getActiveSceneFloors } from './foundry/active-scene-source.js';
+import { getActiveSceneFloors, computeVisibleFloorIndices } from './foundry/active-scene-source.js';
 
 const MODULE_ID = 'map-shine-advanced';
 const VERSION = '0.6.0-dev.0';
@@ -123,6 +123,12 @@ function install() {
   // a separate button per case). `canvas` is a Foundry global; guarded the
   // same defensive way as `Hooks` below in case this ever loads outside a
   // live Foundry client.
+  //
+  // visibleFloorIndices wires computeVisibleFloorIndices (Foundry's REAL
+  // cross-floor visibility rule — a floor's own visibility.levels set, NOT
+  // "always show the floor below") to the viewer's multi-floor compositor, so
+  // holes in an upper floor's art reveal whichever lower floor(s) the scene's
+  // author actually configured, matching real Foundry rather than a guess.
   MapShine.debug.registerReport('vt-pan-viewer-start-real-scene', 'VT Pan Viewer: Start (ACTIVE SCENE)', async () => {
     const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
     const floorsResult = getActiveSceneFloors(sceneDoc);
@@ -145,6 +151,7 @@ function install() {
         THREE,
         imageUrlForFloor: (i) => floors[i]?.url,
         floorCount: floors.length,
+        visibleFloorIndices: (viewedIndex) => computeVisibleFloorIndices(floors, viewedIndex),
       })),
     };
   });

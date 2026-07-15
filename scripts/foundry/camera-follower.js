@@ -987,6 +987,18 @@ export class CameraFollower {
         if (foundryToken) {
           try { foundryIsVisible = foundryToken.isVisible; } catch (e) { foundryIsVisible = `threw: ${e?.message ?? e}`; }
         }
+        const tokenDoc = foundryToken?.document ?? spriteData?.tokenDoc ?? null;
+        // WHY floor resolution matters: token renderOrder is banded by floor
+        // (floorIndex * 10000 + role). A token mis-resolved to floor 0 gets a
+        // renderOrder ~4600, which — with depthTest off — paints UNDER the
+        // whole upper floor's art (>=10000) when the upper floor is viewed, so
+        // it's buried, not missing. These fields say WHY the floor resolves.
+        let tokenLevelField = null;
+        try { tokenLevelField = tokenDoc?.level ?? tokenDoc?._source?.level ?? null; } catch (_) {}
+        let tokenElevation = null;
+        try { tokenElevation = tokenDoc?.elevation ?? null; } catch (_) {}
+        let resolvedFloorIndex = null;
+        try { resolvedFloorIndex = tm?._resolveTokenFloorIndex?.(tokenDoc); } catch (e) { resolvedFloorIndex = `threw: ${e?.message ?? e}`; }
         const sprite = spriteData?.sprite ?? null;
         let position = null;
         try { position = sprite?.position ? [sprite.position.x, sprite.position.y, sprite.position.z] : null; } catch (_) {}
@@ -1009,6 +1021,9 @@ export class CameraFollower {
           tokenId,
           name: spriteData?.tokenDoc?.name ?? foundryToken?.document?.name ?? null,
           inFoundryPlaceables: placeableIds.has(tokenId),
+          tokenLevelField,
+          tokenElevation,
+          resolvedFloorIndex,
           foundryIsVisible,
           spriteVisible: sprite?.visible ?? null,
           spriteOpacity: sprite?.material?.opacity ?? null,
@@ -1026,8 +1041,16 @@ export class CameraFollower {
       }
       let activeVisionSourceCount = null;
       try { activeVisionSourceCount = Array.from(canvas?.effects?.visionSources ?? []).filter((s) => s.active).length; } catch (_) {}
+      // The floor bands as this CameraFollower knows them, so we can see whether
+      // a token's `level` field matches a real band and which index the VIEWED
+      // level maps to (a token on the viewed floor whose renderOrder band is
+      // below the viewed index is the buried-token bug).
+      let bands = null;
+      try { bands = (this._levels ?? []).map((l, i) => ({ i, levelId: l?.levelId ?? null, label: l?.label ?? null })); } catch (_) {}
+      let viewedFloorIndex = null;
+      try { viewedFloorIndex = (this._levels ?? []).findIndex((l) => l?.levelId === level?.levelId); } catch (_) {}
       log.info('[floor-resident token-visibility] post-switch state', {
-        levelId: level?.levelId ?? null, activeVisionSourceCount, cameraInfo, busSceneChildCount: busScene?.children?.length ?? null, rows,
+        levelId: level?.levelId ?? null, viewedFloorIndex, bands, activeVisionSourceCount, cameraInfo, busSceneChildCount: busScene?.children?.length ?? null, rows,
       });
     } catch (err) {
       log.warn('[floor-resident token-visibility] diagnostic block itself threw', err);

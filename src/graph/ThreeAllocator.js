@@ -22,6 +22,41 @@ import { createLogger } from '../core/log.js';
 const log = createLogger('V3ThreeAllocator');
 
 /**
+ * THE LAW (Keyhole.md §0, §4.6): nothing is ever allocated at world resolution.
+ * Not a budget we police — an architectural impossibility, enforced here. Any
+ * FrameGraph-declared RT wider or taller than this throws at the call site,
+ * with a stack, in dev — not a context loss in the field three weeks later.
+ *
+ * The virtual-texture page atlas itself never goes through this allocator (it's
+ * a THREE.DataArrayTexture allocated once, directly, by vt/page-cache.js — not
+ * a per-frame graph resource), so it needs no exemption. The only legitimate
+ * exceptions are named in the plan: fog exploration (capped ≤ 2048² anyway) and
+ * the present chain's native-resolution upscale target. Both must opt in
+ * explicitly per-descriptor — there is no name-string whitelist to silently
+ * extend.
+ */
+export const LAW_MAX_WORLD_RES_DIM = 2048;
+
+/**
+ * @param {string} name
+ * @param {number} width
+ * @param {number} height
+ * @param {import('./FrameGraph.js').ResolvedDescriptor} desc
+ */
+function enforceKeyholeLaw(name, width, height, desc) {
+  if (desc && desc.allowWorldScale === true) return; // explicit, rare, opt-in only
+  if (width > LAW_MAX_WORLD_RES_DIM || height > LAW_MAX_WORLD_RES_DIM) {
+    throw new Error(
+      `[Keyhole law] ThreeAllocator.create("${name}"): ${width}x${height} exceeds the ` +
+      `${LAW_MAX_WORLD_RES_DIM}px world-resolution cap (Keyhole.md §4.6). Nothing is ever ` +
+      `allocated at world resolution. If this target is a genuine exception (fog ` +
+      `exploration, present-chain upscale), pass { allowWorldScale: true } explicitly ` +
+      `on the descriptor — never widen this cap globally.`
+    );
+  }
+}
+
+/**
  * Resolve a THREE enum from either a THREE namespace value or a passthrough
  * number. Descriptors may carry symbolic strings (`'nearest'`) or raw THREE
  * constants; this keeps the descriptor authorable without importing three.
@@ -104,6 +139,7 @@ export class ThreeAllocator {
       throw new Error(`ThreeAllocator.create("${name}"): window.THREE unavailable`);
     }
     const { width, height, options, attachments } = ThreeAllocator.describe(THREE, desc);
+    enforceKeyholeLaw(name, width, height, desc);
     const rt = new THREE.WebGLRenderTarget(width, height, options);
     rt.name = `v3:${name}`;
 
@@ -132,10 +168,16 @@ export class ThreeAllocator {
    * @param {THREE.WebGLRenderTarget} handle
    * @param {number} w
    * @param {number} h
+   * @param {import('./FrameGraph.js').ResolvedDescriptor} [desc] - pass the
+   *   owning descriptor so a resize storm can't smuggle a world-res target
+   *   past the law that `create()` already enforced.
    */
-  resize(handle, w, h) {
+  resize(handle, w, h, desc) {
     if (!handle || typeof handle.setSize !== 'function') return;
-    handle.setSize(Math.max(1, w | 0), Math.max(1, h | 0));
+    const width = Math.max(1, w | 0);
+    const height = Math.max(1, h | 0);
+    enforceKeyholeLaw(handle.name || '(resize)', width, height, desc);
+    handle.setSize(width, height);
   }
 
   /** @param {THREE.WebGLRenderTarget} handle */

@@ -7,10 +7,10 @@
 import {
   createSceneViewProjectionCache,
   updateSceneViewProjectionFromCamera,
-} from '../compositor-v2/scene-view-projection.js';
+} from './scene-view-projection.js';
 import { intersectRects } from './streaming-grid.js';
 
-/** @type {import('../compositor-v2/scene-view-projection.js').SceneViewProjectionCache} */
+/** @type {import('./scene-view-projection.js').SceneViewProjectionCache} */
 let _cache = createSceneViewProjectionCache();
 
 /** Reusable Three.js temps for perspective raycast (lazy-init). */
@@ -58,7 +58,7 @@ export function tickViewProjection(camera = null, groundZ = resolveGroundZ()) {
 }
 
 /**
- * @returns {import('../compositor-v2/scene-view-projection.js').SceneViewProjectionCache}
+ * @returns {import('./scene-view-projection.js').SceneViewProjectionCache}
  */
 export function getViewProjectionCache() {
   return _cache;

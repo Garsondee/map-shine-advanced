@@ -114,38 +114,31 @@ function install() {
     ...stopVtPanViewer(),
   }));
 
-  // Stage 2B: point the SAME viewer at the currently-displayed scene's REAL
-  // floor art instead of the torture fixture — multi-floor via Foundry's
-  // native v14 scene.levels schema (author directive 2026-07-15: build around
-  // core Levels, not the third-party module; see active-scene-source.js's
-  // header for the full reasoning + the deprecation finding that confirmed
-  // it). One button now covers both single- and multi-floor scenes — a scene
-  // with no native Levels gracefully falls back to its one legacy background
-  // (getActiveSceneFloors handles this internally; one path per behavior, not
-  // a separate button per case). `canvas` is a Foundry global; guarded the
-  // same defensive way as `Hooks` below in case this ever loads outside a
-  // live Foundry client.
+  // ---------------------------------------------------------------------------
+  // DEFAULT-ON REAL-SCENE RENDERING (author correction, 2026-07-15: "this V3
+  // renderer is the main rendering system and this isn't an optional feature
+  // we're adding... don't make me have to press buttons"). Both the visual
+  // severance (VT viewer occluding PIXI) and the VRAM severance (PIXI proxy
+  // textures) were built gated behind manual debug-panel toggles — matching
+  // the pattern every OTHER new capability used this session, but WRONG for
+  // these two specifically, which are the actual product, not diagnostics.
+  // Corrected: both now activate automatically from Foundry's own canvas
+  // lifecycle hooks, no click required. See [[feedback_default_on_new_features]]
+  // in project memory — this is the established rule (ship default-on, toggle
+  // only when explicitly requested), applied here after initially missing it.
   //
-  // visibleFloorIndices wires computeVisibleFloorIndices (Foundry's REAL
-  // cross-floor visibility rule — a floor's own visibility.levels set, NOT
-  // "always show the floor below") to the viewer's multi-floor compositor, so
-  // holes in an upper floor's art reveal whichever lower floor(s) the scene's
-  // author actually configured, matching real Foundry rather than a guess.
-  MapShine.debug.registerReport('vt-pan-viewer-start-real-scene', 'VT Pan Viewer: Start (ACTIVE SCENE)', async () => {
+  // startRealSceneViewer() is the ONE function both the automatic hook and the
+  // manual debug-panel button (kept as a manual retry/force-refresh, not the
+  // primary activation path anymore) call — one path per behavior.
+  // ---------------------------------------------------------------------------
+  async function startRealSceneViewer() {
     const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
     const floorsResult = getActiveSceneFloors(sceneDoc);
     if (!floorsResult.ok) {
-      return {
-        report: 'vt-pan-viewer-start-real-scene',
-        generatedAt: new Date().toISOString(),
-        ok: false,
-        error: floorsResult.error,
-      };
+      return { ok: false, error: floorsResult.error };
     }
     const { floors, skipped } = floorsResult;
     return {
-      report: 'vt-pan-viewer-start-real-scene',
-      generatedAt: new Date().toISOString(),
       sceneName: sceneDoc?.name,
       floors: floors.map((f) => ({ index: f.index, name: f.name, elevationBottom: f.elevationBottom, url: f.url })),
       skippedLevels: skipped,
@@ -153,37 +146,42 @@ function install() {
         THREE,
         imageUrlForFloor: (i) => floors[i]?.url,
         floorCount: floors.length,
+        // computeVisibleFloorIndices replicates Foundry's REAL cross-floor
+        // visibility rule (a floor's own visibility.levels set, NOT "always
+        // show the floor below") — see active-scene-source.js's header.
         visibleFloorIndices: (viewedIndex) => computeVisibleFloorIndices(floors, viewedIndex),
       })),
     };
-  });
+  }
 
-  // ---------------------------------------------------------------------------
-  // Stage 2C: VRAM severance (Keyhole.md §4.3's "single biggest instant win").
-  // OFF BY DEFAULT — the first code in this project that reaches into
-  // Foundry's OWN rendering pipeline (PIXI.Assets.cache) rather than adding an
-  // isolated new path, so it's armed only by explicit debug-panel toggle, same
-  // as every other new capability here. Arming does NOT affect the CURRENTLY
-  // drawn scene (canvasInit already fired for it) — it takes effect on the
-  // NEXT scene load or scene switch, which is when Foundry's own
-  // TextureLoader.loadSceneTextures() next runs. See pixi-proxy-textures.js's
-  // header for the full source-verified mechanism + the one assumption that
-  // can only be confirmed live (PIXI.Assets.load()'s own cache-respecting
-  // behavior) — getPixiResidencyReport() below is what actually confirms it.
-  // ---------------------------------------------------------------------------
-  let vramSeveranceArmed = false;
-
-  MapShine.debug.registerReport('vram-severance-toggle', 'VRAM Severance: Arm/Disarm PIXI Proxy', () => {
-    vramSeveranceArmed = !vramSeveranceArmed;
-    return {
-      report: 'vram-severance-toggle',
+  MapShine.debug.registerReport(
+    'vt-pan-viewer-start-real-scene',
+    'VT Pan Viewer: Force Restart (ACTIVE SCENE)',
+    async () => ({
+      report: 'vt-pan-viewer-start-real-scene',
       generatedAt: new Date().toISOString(),
-      armed: vramSeveranceArmed,
-      note: vramSeveranceArmed
-        ? 'ARMED — takes effect on the NEXT scene load/switch (canvasInit already fired for the currently-open scene, if any). Reload the scene or switch to another and back, then run "PIXI Residency Report" to confirm.'
-        : 'disarmed — canvasInit will no longer register proxies.',
-    };
-  });
+      ...(await startRealSceneViewer()),
+    })
+  );
+
+  // VRAM severance (Keyhole.md §4.3's "single biggest instant win") — the PIXI
+  // proxy registration itself. LIVE-CONFIRMED 2026-07-15 (author's residency
+  // report: both floors of a real 12000x12000 scene resident at exactly
+  // 1024x1024) — the one assumption pixi-proxy-textures.js's header flagged
+  // as unverifiable from source alone (does PIXI.Assets.load() itself respect
+  // a pre-seeded Assets.cache entry) is now confirmed true, not just reasoned.
+  // registerFloorProxies() is called from canvasInit below (unconditional,
+  // no toggle — see the default-on note above) and is idempotent per src
+  // (registerPixiProxy itself no-ops if that src is already cached).
+  async function registerFloorProxies(sceneDoc) {
+    const floorsResult = getActiveSceneFloors(sceneDoc);
+    if (!floorsResult.ok) return;
+    for (const floor of floorsResult.floors) {
+      const bitmap = await getSourceBitmap(floor.url);
+      const result = await registerPixiProxy(floor.url, bitmap);
+      console.log(`${TAG} VRAM severance — floor ${floor.index} (${floor.name}):`, result);
+    }
+  }
 
   MapShine.debug.registerReport('pixi-residency-report', 'VRAM Severance: PIXI Residency Report', () => {
     const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
@@ -192,40 +190,54 @@ function install() {
     return {
       report: 'pixi-residency-report',
       generatedAt: new Date().toISOString(),
-      armed: vramSeveranceArmed,
       sceneName: sceneDoc?.name ?? null,
       floorsChecked: srcs,
       ...getPixiResidencyReport(srcs),
       interpretation:
         'width/height at or near 1024 (or below) on a real Level background = the proxy took effect. ' +
-        'The original real dimensions (e.g. 12000x12000) resident instead = PIXI.Assets.load() bypassed the ' +
-        "seeded cache and fetched the real file anyway — the one assumption pixi-proxy-textures.js's header " +
-        'flags as unverifiable from source alone.',
+        'The original real dimensions (e.g. 12000x12000) resident instead = something regressed — flag it.',
     };
   });
 
   if (typeof Hooks !== 'undefined') {
+    // canvasInit fires strictly BEFORE Foundry loads scene textures (verified
+    // in source, client/canvas/board.mjs) — must register proxies here, not
+    // later, or Foundry's own load wins the race.
     Hooks.on('canvasInit', async (canvasRef) => {
-      if (!vramSeveranceArmed) return;
       try {
-        const sceneDoc = canvasRef?.scene ?? null;
-        const floorsResult = getActiveSceneFloors(sceneDoc);
-        if (!floorsResult.ok) return;
-        for (const floor of floorsResult.floors) {
-          const bitmap = await getSourceBitmap(floor.url);
-          const result = await registerPixiProxy(floor.url, bitmap);
-          console.log(`${TAG} VRAM severance — floor ${floor.index} (${floor.name}):`, result);
-        }
+        await registerFloorProxies(canvasRef?.scene ?? null);
       } catch (err) {
         console.error(`${TAG} VRAM severance — canvasInit proxy registration failed:`, err);
       }
     });
+
+    // canvasReady fires once the scene is actually drawn — verified in source
+    // (client/documents/scene.mjs's Scene#view(): canvas.draw() runs on
+    // EITHER a full scene change OR a floor/level switch within the same
+    // scene, both of which reach canvasReady) — so this single hook keeps the
+    // VT viewer synced to whatever Foundry itself currently considers the
+    // viewed scene+floor, automatically, without a separate floor-switch path.
+    Hooks.on('canvasReady', async () => {
+      try {
+        const result = await startRealSceneViewer();
+        if (result.ok === false) console.warn(`${TAG} real-scene VT viewer did not start:`, result.error);
+        else console.log(`${TAG} real-scene VT viewer active for "${result.sceneName}".`);
+      } catch (err) {
+        console.error(`${TAG} real-scene VT viewer auto-start failed:`, err);
+      }
+    });
   }
 
-  // MapShine.soak(n) now drives something real (Stage 1 part 4b) instead of
-  // reporting stub drivers — load ensures the pan viewer is running, pan/
-  // switchFloor go through the EXACT same applyKeyAndUpdate() path a real
-  // keypress uses.
+  // MapShine.soak(n) drives the TORTURE FIXTURE specifically (Keyhole's own
+  // Stage-1-gate harness — a controlled, known-content soak, not whatever
+  // scene happens to be open). NOTE: inside a real running Foundry world, the
+  // canvasReady hook above will usually have already started the REAL-scene
+  // viewer before soak(n) runs, so `load`'s own "only if not already active"
+  // guard means soak(n) run live now typically exercises the SAME already-
+  // running real-scene instance, not the synthetic fixture — a real, worth-
+  // flagging change in what "MapShine.soak(n)" measures inside a live world.
+  // The Stage-1-gate soak run was captured before this session's default-on
+  // change (see keyhole-stage-status memory) and remains valid.
   MapShine.soakHooks.load = async () => {
     if (!getVtPanViewerDiagnostics().active) {
       await startVtPanViewer({ THREE, imageUrlForFloor: tortureImageUrl, floorCount: TORTURE_FLOOR_COUNT });

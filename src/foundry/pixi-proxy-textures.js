@@ -25,33 +25,28 @@
  *   the REAL src key (this module's approach) is therefore a legitimate use of
  *   PIXI's own public surface, not a monkey-patch of any Foundry method.
  *
- * THE ONE ASSUMPTION THIS MODULE CANNOT VERIFY FROM SOURCE ALONE (PixiJS's own
- * source isn't vendored in this checkout): whether `PIXI.Assets.load(src)` —
- * what `loadSceneTextures()`'s bulk loader actually calls — checks
- * `Assets.cache` and skips a real fetch when a valid entry already exists
- * under that key, the same way `getTexture()`/`getCache()` demonstrably do
- * (PixiJS's Assets system's whole documented purpose is exactly this kind of
- * de-duplication, and Foundry's own code is visibly built assuming it works —
- * but "the whole system's documented purpose" is reasoned confidence, not a
- * read of the actual implementation). This is why the first live test (via
- * `getPixiResidencyReport()`, below) is load-bearing, not a formality — it
- * gives a ground-truth yes/no on the ONE fact that can't be confirmed
- * statically, exactly the discipline this codebase already uses for its own
- * Three/WebGL fixes (see atlas.js's uploadTexture()/resetState() history).
+ * THE ONE ASSUMPTION THIS MODULE COULDN'T VERIFY FROM SOURCE ALONE (PixiJS's
+ * own source isn't vendored in this checkout) — **LIVE-CONFIRMED TRUE,
+ * 2026-07-15**: whether `PIXI.Assets.load(src)` — what `loadSceneTextures()`'s
+ * bulk loader actually calls — checks `Assets.cache` and skips a real fetch
+ * when a valid entry already exists under that key, the same way
+ * `getTexture()`/`getCache()` demonstrably do. Author's own residency report
+ * on a real 12000×12000 two-floor scene: both floors resident at EXACTLY
+ * 1024×1024 after arming and a scene switch. It works.
  *
  * SCOPE FOR THIS INCREMENT: Level backgrounds only (the highest-VRAM target,
  * and what `getActiveSceneFloors()` already enumerates). Tile documents are
  * Keyhole.md §4.3's other named target — the SAME `registerPixiProxy()`
  * mechanism applies to them mechanically; not wired in yet, a real, tracked
- * follow-up once the core mechanism is live-confirmed on the highest-value
- * target first.
+ * follow-up now that the core mechanism is live-confirmed.
  *
- * OFF BY DEFAULT. This is the first code in the project that reaches into
- * Foundry's own rendering pipeline rather than adding an isolated new code
- * path — armed only via an explicit debug-panel toggle (src/boot.js), exactly
- * like every other new capability this project has shipped. Registering a
- * proxy for a scene that's ALREADY drawn (canvasInit already fired) does
- * nothing retroactively — it arms for the NEXT scene load/switch.
+ * DEFAULT ON (author correction, 2026-07-15: "this V3 renderer is the main
+ * rendering system and this isn't an optional feature... make it default
+ * always on"). `src/boot.js` registers `registerFloorProxies()` unconditionally
+ * from Foundry's own `canvasInit` hook — no toggle, no button. Registering a
+ * proxy for a scene that's ALREADY drawn does nothing retroactively for that
+ * scene; it takes effect from the NEXT scene load/switch onward, which in
+ * practice means every scene after the module boots.
  *
  * @module foundry/pixi-proxy-textures
  */

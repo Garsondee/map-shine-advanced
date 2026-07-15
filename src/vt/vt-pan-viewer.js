@@ -162,6 +162,46 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
     let view = null; // set once the first floor is loaded (needs its worldSizePx)
     let frameTimes = [];
     let lastError = null;
+    let lastFramedUV = null; // set by reframeQuad(), exposed in diagnostics for ground-truth debugging
+
+    /** Ground truth, not theory: actual rendered canvas pixels + actual indirection buffer contents. */
+    function sampleDiagnostics(entry) {
+      const out = {};
+      try {
+        const gl = renderer.getContext();
+        const px = new Uint8Array(4);
+        const points = {
+          center: [Math.floor(canvasPx / 2), Math.floor(canvasPx / 2)],
+          topLeft: [4, canvasPx - 4], // GL readPixels Y is bottom-up; this is visual top-left
+          bottomRight: [canvasPx - 4, 4],
+        };
+        out.renderedPixels = {};
+        for (const [label, [x, y]] of Object.entries(points)) {
+          gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+          out.renderedPixels[label] = [px[0], px[1], px[2], px[3]];
+        }
+      } catch (err) {
+        out.renderedPixelsError = String(err?.message || err);
+      }
+      if (entry) {
+        let nonZeroTexels = 0;
+        const distinctSlots = new Set();
+        for (let i = 0; i < entry.buf.length; i += 4) {
+          if (entry.buf[i + 3] > 0) {
+            nonZeroTexels++;
+            distinctSlots.add(entry.buf[i] | (entry.buf[i + 1] << 8));
+          }
+        }
+        out.indirectionBuffer = {
+          totalTexels: entry.buf.length / 4,
+          residentTexels: nonZeroTexels,
+          distinctSlotCount: distinctSlots.size,
+          distinctSlotsSample: Array.from(distinctSlots).slice(0, 10),
+        };
+      }
+      out.framedWorldUV = lastFramedUV;
+      return out;
+    }
 
     function renderFrame(t) {
       const t0 = performance.now();
@@ -180,6 +220,7 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
         uvAttr.setXY(i, uvMin.x + u * (uvMax.x - uvMin.x), uvMax.y - v * (uvMax.y - uvMin.y));
       }
       uvAttr.needsUpdate = true;
+      lastFramedUV = { uvMin, uvMax };
     }
 
     let lastFloorIndex = null;
@@ -353,6 +394,7 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
           currentFloorResidentCount: floors.get(view.floorIndex)?.residentViewKeys.size ?? 0,
           renderMsAvgLast120: Math.round(avgMs * 100) / 100,
           lastError,
+          ...sampleDiagnostics(floors.get(view.floorIndex)),
           controls: 'Arrow keys/WASD pan, +/- zoom, 0-2 or Tab floor-switch (click the canvas first).',
         };
       },

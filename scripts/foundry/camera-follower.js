@@ -945,28 +945,50 @@ export class CameraFollower {
     // guess — whether the Foundry object exists in canvas.tokens.placeables,
     // Foundry's own isVisible verdict, and the resulting Three.js sprite
     // state (visible/opacity) that VisibilityController just computed.
+    //
+    // IMPORTANT: every step below is independently guarded and the log ALWAYS
+    // fires (even on partial failure) — a previous version wrapped the WHOLE
+    // block in one bare try/catch, so a single throw anywhere inside (e.g. a
+    // token's own `isVisible` getter) silently ate the entire diagnostic with
+    // zero output. That is worse than no diagnostic at all: it looks like the
+    // code never ran. Never do that again — always surface what broke.
     try {
       const tm = window.MapShine?.tokenManager;
-      const placeables = canvas?.tokens?.placeables ?? [];
+      let placeables = [];
+      try { placeables = Array.from(canvas?.tokens?.placeables ?? []); } catch (e) {
+        log.warn('[floor-resident token-visibility] reading canvas.tokens.placeables threw', e);
+      }
       const placeableIds = new Set(placeables.map((t) => t.document?.id).filter(Boolean));
       const rows = [];
-      for (const [tokenId, spriteData] of tm?.tokenSprites ?? []) {
-        const foundryToken = placeables.find((t) => t.document?.id === tokenId) ?? null;
+      let tokenSpritesEntries = [];
+      try { tokenSpritesEntries = Array.from(tm?.tokenSprites ?? []); } catch (e) {
+        log.warn('[floor-resident token-visibility] reading tokenManager.tokenSprites threw', e);
+      }
+      for (const [tokenId, spriteData] of tokenSpritesEntries) {
+        let foundryToken = null;
+        try { foundryToken = placeables.find((t) => t.document?.id === tokenId) ?? null; } catch (_) {}
+        let foundryIsVisible = null;
+        if (foundryToken) {
+          try { foundryIsVisible = foundryToken.isVisible; } catch (e) { foundryIsVisible = `threw: ${e?.message ?? e}`; }
+        }
         rows.push({
           tokenId,
           name: spriteData?.tokenDoc?.name ?? foundryToken?.document?.name ?? null,
           inFoundryPlaceables: placeableIds.has(tokenId),
-          foundryIsVisible: foundryToken ? (() => { try { return foundryToken.isVisible; } catch (e) { return `threw: ${e?.message}`; } })() : null,
+          foundryIsVisible,
           spriteVisible: spriteData?.sprite?.visible ?? null,
           spriteOpacity: spriteData?.sprite?.material?.opacity ?? null,
           hasTextureMap: !!spriteData?.sprite?.material?.map,
         });
       }
+      let activeVisionSourceCount = null;
+      try { activeVisionSourceCount = Array.from(canvas?.effects?.visionSources ?? []).filter((s) => s.active).length; } catch (_) {}
       log.info('[floor-resident token-visibility] post-switch state', {
-        levelId, activeVisionSourceCount: canvas?.effects?.visionSources?.filter?.((s) => s.active)?.length ?? null,
-        rows,
+        levelId, activeVisionSourceCount, rows,
       });
-    } catch (_) {}
+    } catch (err) {
+      log.warn('[floor-resident token-visibility] diagnostic block itself threw', err);
+    }
   }
 
   /**

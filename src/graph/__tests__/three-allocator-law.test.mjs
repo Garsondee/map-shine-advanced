@@ -3,8 +3,8 @@
  * nothing is ever allocated at world resolution. This is the Stage 1 gate's
  * "allocator throws on a deliberately-planted world-res alloc (negative test)".
  */
-import { ThreeAllocator, LAW_MAX_WORLD_RES_DIM } from '../ThreeAllocator.js';
-import { makeTHREE } from './ThreeAllocator.test.mjs';
+import { ThreeAllocator, LAW_MAX_WORLD_RES_DIM } from '../three-allocator.js';
+import { makeTHREE } from './three-allocator.test.mjs';
 
 export function run(t) {
   const { ok, throws } = t;
@@ -28,8 +28,11 @@ export function run(t) {
     const T = makeTHREE();
     const alloc = new ThreeAllocator({ THREE: T });
     let threw = false;
-    try { alloc.create('atCap', { resolvedW: LAW_MAX_WORLD_RES_DIM, resolvedH: LAW_MAX_WORLD_RES_DIM }); }
-    catch (_) { threw = true; }
+    try {
+      alloc.create('atCap', { resolvedW: LAW_MAX_WORLD_RES_DIM, resolvedH: LAW_MAX_WORLD_RES_DIM });
+    } catch (_) {
+      threw = true;
+    }
     ok('law: exactly at cap does not throw', threw === false);
   }
 
@@ -37,10 +40,16 @@ export function run(t) {
   {
     const T = makeTHREE();
     const alloc = new ThreeAllocator({ THREE: T });
-    throws('law: one px over width throws', () =>
-      alloc.create('overW', { resolvedW: LAW_MAX_WORLD_RES_DIM + 1, resolvedH: 512 }), 'Keyhole law');
-    throws('law: one px over height throws', () =>
-      alloc.create('overH', { resolvedW: 512, resolvedH: LAW_MAX_WORLD_RES_DIM + 1 }), 'Keyhole law');
+    throws(
+      'law: one px over width throws',
+      () => alloc.create('overW', { resolvedW: LAW_MAX_WORLD_RES_DIM + 1, resolvedH: 512 }),
+      'Keyhole law'
+    );
+    throws(
+      'law: one px over height throws',
+      () => alloc.create('overH', { resolvedW: 512, resolvedH: LAW_MAX_WORLD_RES_DIM + 1 }),
+      'Keyhole law'
+    );
   }
 
   // The explicit, rare opt-in (present-chain native upscale / fog exploration)
@@ -51,7 +60,9 @@ export function run(t) {
     let threw = false;
     try {
       alloc.create('present', { resolvedW: 3840, resolvedH: 2160, allowWorldScale: true });
-    } catch (_) { threw = true; }
+    } catch (_) {
+      threw = true;
+    }
     ok('law: allowWorldScale:true is honored for a real 4K present target', threw === false);
 
     throws(
@@ -67,14 +78,13 @@ export function run(t) {
     const T = makeTHREE();
     const alloc = new ThreeAllocator({ THREE: T });
     const rt = alloc.create('resizable', { resolvedW: 512, resolvedH: 512 });
-    throws(
-      'law: resize() to world-res throws too',
-      () => alloc.resize(rt, 9000, 9000),
-      'Keyhole law'
+    throws('law: resize() to world-res throws too', () => alloc.resize(rt, 9000, 9000), 'Keyhole law');
+    ok(
+      'law: resize() to a legit small size still works',
+      (() => {
+        alloc.resize(rt, 1024, 768);
+        return rt.width === 1024 && rt.height === 768;
+      })()
     );
-    ok('law: resize() to a legit small size still works', (() => {
-      alloc.resize(rt, 1024, 768);
-      return rt.width === 1024 && rt.height === 768;
-    })());
   }
 }

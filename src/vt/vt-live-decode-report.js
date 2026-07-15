@@ -35,8 +35,18 @@ export async function runVtLiveDecodeTest(url) {
   const table = new PageTable({ id: 'live:decodeTest', worldSizePx: sourceBitmap.width });
   const samplePages = [
     { label: 'corner (0,0) — world-edge clamping exercised', mip: 0, px: 0, py: 0 },
-    { label: 'middle page', mip: 0, px: Math.floor(table.pagesPerAxis(0) / 2), py: Math.floor(table.pagesPerAxis(0) / 2) },
-    { label: 'far corner — the other world-edge clamp', mip: 0, px: table.pagesPerAxis(0) - 1, py: table.pagesPerAxis(0) - 1 },
+    {
+      label: 'middle page',
+      mip: 0,
+      px: Math.floor(table.pagesPerAxis(0) / 2),
+      py: Math.floor(table.pagesPerAxis(0) / 2),
+    },
+    {
+      label: 'far corner — the other world-edge clamp',
+      mip: 0,
+      px: table.pagesPerAxis(0) - 1,
+      py: table.pagesPerAxis(0) - 1,
+    },
   ];
 
   const pageResults = [];

@@ -19,22 +19,40 @@ const fails = [];
 
 const t = {
   ok(name, cond) {
-    if (cond) { passed++; } else { failed++; fails.push(name); console.error('  FAIL:', name); }
+    if (cond) {
+      passed++;
+    } else {
+      failed++;
+      fails.push(name);
+      console.error('  FAIL:', name);
+    }
   },
   throws(name, fn, matchSubstr) {
     try {
       fn();
-      failed++; fails.push(name); console.error('  FAIL (no throw):', name);
+      failed++;
+      fails.push(name);
+      console.error('  FAIL (no throw):', name);
     } catch (e) {
       const msg = String((e && e.message) || e);
       if (matchSubstr && !msg.includes(matchSubstr)) {
-        failed++; fails.push(name); console.error('  FAIL (wrong msg):', name, '->', msg);
-      } else { passed++; }
+        failed++;
+        fails.push(name);
+        console.error('  FAIL (wrong msg):', name, '->', msg);
+      } else {
+        passed++;
+      }
     }
   },
 };
 
-const suites = [['vt-core', runVtCore], ['atlas', runAtlas], ['decode-pool', runDecodePool], ['vt-smoke-test', runSmokeTestPure], ['view-state', runViewState]];
+const suites = [
+  ['vt-core', runVtCore],
+  ['atlas', runAtlas],
+  ['decode-pool', runDecodePool],
+  ['vt-smoke-test', runSmokeTestPure],
+  ['view-state', runViewState],
+];
 
 for (const [name, fn] of suites) {
   const before = failed;
@@ -43,5 +61,8 @@ for (const [name, fn] of suites) {
 }
 
 console.log(`\nsrc/vt verification: ${passed} passed, ${failed} failed`);
-if (failed) { console.error('Failures:', fails); process.exit(1); }
+if (failed) {
+  console.error('Failures:', fails);
+  process.exit(1);
+}
 console.log('ALL GREEN');

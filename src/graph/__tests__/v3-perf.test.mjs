@@ -3,9 +3,7 @@
  * the render-scale governor (P2). Pure logic; no mocks needed beyond numbers.
  * Run via ./run-tests.mjs.
  */
-import {
-  computeRenderSize, V3PerfMonitor, RenderScaleGovernor, buildPerfRows,
-} from '../v3-perf.js';
+import { computeRenderSize, V3PerfMonitor, RenderScaleGovernor, buildPerfRows } from '../v3-perf.js';
 
 export function run(t) {
   const { ok } = t;
@@ -26,9 +24,21 @@ export function run(t) {
   // V3PerfMonitor — folding, latching GPU results, budgets, cost estimate.
   {
     const m = new V3PerfMonitor({ emaAlpha: 0.5 });
-    m.update(new Map([['a', 4], ['b', 2]]), new Map([['a', 8]]));
+    m.update(
+      new Map([
+        ['a', 4],
+        ['b', 2],
+      ]),
+      new Map([['a', 8]])
+    );
     ok('cost = max(cpuTotal, gpuTotal)', m.costEstimateMs() === 8);
-    m.update(new Map([['a', 4], ['b', 2]]), null);
+    m.update(
+      new Map([
+        ['a', 4],
+        ['b', 2],
+      ]),
+      null
+    );
     const rep = m.getReport();
     ok('frames counted', rep.frames === 2);
     ok('cpu total last', rep.cpuTotal.lastMs === 6);
@@ -41,14 +51,25 @@ export function run(t) {
     ok('known pass budget honored', new V3PerfMonitor().budgetFor('lighting') === 3.0);
     const rows = buildPerfRows(rep);
     ok('perf rows include TOTAL', rows.length === 3 && rows[rows.length - 1].pass === 'TOTAL');
-    ok('monitor tolerates bad input', (() => { m.update(null); return m.getReport().frames === 2; })());
+    ok(
+      'monitor tolerates bad input',
+      (() => {
+        m.update(null);
+        return m.getReport().frames === 2;
+      })()
+    );
   }
 
   // RenderScaleGovernor — warmup immunity, down-step, cooldown spacing, recovery.
   {
     const gov = new RenderScaleGovernor({
-      frameBudgetMs: 10, warmupFrames: 5, downFrames: 3, upFrames: 4,
-      cooldownFrames: 6, highWater: 1.2, lowWater: 0.7,
+      frameBudgetMs: 10,
+      warmupFrames: 5,
+      downFrames: 3,
+      upFrames: 4,
+      cooldownFrames: 6,
+      highWater: 1.2,
+      lowWater: 0.7,
     });
     ok('starts at full scale', gov.scale === 1.0);
 
@@ -56,17 +77,22 @@ export function run(t) {
     for (let i = 0; i < 5; i++) changedDuringWarmup = gov.update(100).changed || changedDuringWarmup;
     ok('warmup immune to over-budget', !changedDuringWarmup && gov.scale === 1.0);
 
-    gov.update(100); gov.update(100);
+    gov.update(100);
+    gov.update(100);
     ok('needs the full down-streak', gov.scale === 1.0);
     const down = gov.update(100);
     ok('steps down one rung after streak', down.changed && down.scale === 0.85);
 
     // Cooldown spaces changes: sustained over-budget keeps stepping, but only
     // once per cooldown window.
-    let stepAt = -1; let stepScale = 0;
+    let stepAt = -1;
+    let stepScale = 0;
     for (let i = 0; i < 6; i++) {
       const r = gov.update(100);
-      if (r.changed) { stepAt = i; stepScale = r.scale; }
+      if (r.changed) {
+        stepAt = i;
+        stepScale = r.scale;
+      }
     }
     ok('cooldown spaces consecutive steps', stepAt === 5 && stepScale === 0.7);
 
@@ -84,11 +110,18 @@ export function run(t) {
   // Governor clamping + floor behavior.
   {
     const gov = new RenderScaleGovernor({
-      frameBudgetMs: 1, warmupFrames: 0, downFrames: 1, cooldownFrames: 0, minScale: 0.7,
+      frameBudgetMs: 1,
+      warmupFrames: 0,
+      downFrames: 1,
+      cooldownFrames: 0,
+      minScale: 0.7,
     });
     for (let i = 0; i < 50; i++) gov.update(100);
     ok('never leaves the min-scale rung', gov.scale === 0.7);
-    ok('ladder respected minScale', gov.state().ladder.every((s) => s >= 0.7));
+    ok(
+      'ladder respected minScale',
+      gov.state().ladder.every((s) => s >= 0.7)
+    );
 
     const fixed = new RenderScaleGovernor({ ladder: [0.3], minScale: 0.5, maxScale: 1 });
     ok('empty filtered ladder falls back sanely', fixed.scale >= 0.5 && fixed.scale <= 1);
@@ -97,16 +130,26 @@ export function run(t) {
   // Governor ignores a single spike (streak resets).
   {
     const gov = new RenderScaleGovernor({
-      frameBudgetMs: 10, warmupFrames: 0, downFrames: 3, cooldownFrames: 0,
+      frameBudgetMs: 10,
+      warmupFrames: 0,
+      downFrames: 3,
+      cooldownFrames: 0,
     });
-    gov.update(100); gov.update(100); gov.update(1); gov.update(100); gov.update(100);
+    gov.update(100);
+    gov.update(100);
+    gov.update(1);
+    gov.update(100);
+    gov.update(100);
     ok('interrupted streak does not step', gov.scale === 1.0);
   }
 
   // Hold (scene loading): frozen while held; settle cooldown after release.
   {
     const gov = new RenderScaleGovernor({
-      frameBudgetMs: 10, warmupFrames: 0, downFrames: 2, cooldownFrames: 0,
+      frameBudgetMs: 10,
+      warmupFrames: 0,
+      downFrames: 2,
+      cooldownFrames: 0,
       postHoldSettleFrames: 3,
     });
     gov.setHold(true, 'scene-loading');
@@ -115,9 +158,12 @@ export function run(t) {
     ok('held: state names the reason', gov.state().holdActive === true && gov.state().holdReason === 'scene-loading');
     gov.setHold(false);
     // Post-hold settle: 3 frames of cooldown block stepping, streaks accumulate after.
-    gov.update(100); gov.update(100); gov.update(100);
+    gov.update(100);
+    gov.update(100);
+    gov.update(100);
     ok('post-hold settle blocks immediate step', gov.scale === 1.0);
-    gov.update(100); gov.update(100);
+    gov.update(100);
+    gov.update(100);
     ok('steps down once settle + streak satisfied', gov.scale === 0.85);
   }
 
@@ -125,8 +171,12 @@ export function run(t) {
   {
     const mk = () => {
       const g = new RenderScaleGovernor({
-        frameBudgetMs: 16.6, warmupFrames: 0, downFrames: 1, cooldownFrames: 0,
-        upFrames: 2, lowWater: 0.7,
+        frameBudgetMs: 16.6,
+        warmupFrames: 0,
+        downFrames: 1,
+        cooldownFrames: 0,
+        upFrames: 2,
+        lowWater: 0.7,
       });
       g.update(100); // step down to 0.85
       return g;

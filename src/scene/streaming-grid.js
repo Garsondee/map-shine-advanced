@@ -232,7 +232,7 @@ export function selectLodFromZoom(zoom, maxLod = 4, sceneMegapixels = 0) {
  */
 export function lodPixelSize(cellSize, lod) {
   const shift = Math.max(0, Math.min(6, Math.floor(lod)));
-  return Math.max(64, Math.floor(cellSize / (2 ** shift)));
+  return Math.max(64, Math.floor(cellSize / 2 ** shift));
 }
 
 /**

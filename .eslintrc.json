@@ -1,0 +1,81 @@
+{
+  "root": true,
+  "env": {
+    "browser": true,
+    "es2022": true
+  },
+  "parserOptions": {
+    "ecmaVersion": 2022,
+    "sourceType": "module"
+  },
+  "extends": ["eslint:recommended"],
+  "plugins": ["unicorn"],
+  "globals": {
+    "Hooks": "readonly",
+    "game": "readonly",
+    "canvas": "readonly",
+    "ui": "readonly",
+    "CONFIG": "readonly",
+    "CONST": "readonly",
+    "foundry": "readonly",
+    "Scene": "readonly",
+    "ChatMessage": "readonly",
+    "renderTemplate": "readonly",
+    "fromUuid": "readonly",
+    "fromUuidSync": "readonly"
+  },
+  "ignorePatterns": [
+    "legacy/",
+    "src/vendor/",
+    "foundryvttsourcecode_v14/",
+    "gamesystemsourcecode/",
+    "othermodules/",
+    "dist/",
+    "module-staging/",
+    "node_modules/",
+    "assets/",
+    "data/",
+    "languages/"
+  ],
+  "rules": {
+    "eqeqeq": ["error", "smart"],
+    "no-var": "error",
+    "prefer-const": "warn",
+    "no-empty": ["error", { "allowEmptyCatch": true }],
+    "no-inner-declarations": "off",
+    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
+    "no-restricted-imports": [
+      "error",
+      {
+        "patterns": [
+          {
+            "group": ["**/legacy/**", "*/legacy/*", "legacy/*"],
+            "message": "src/ may not import from legacy/ (Keyhole doctrine -- see docs/planning/Keyhole.md §4.6 and src/CONVENTIONS.md). Harvest via `git mv` + fix imports instead."
+          }
+        ]
+      }
+    ],
+    "unicorn/filename-case": [
+      "error",
+      {
+        "case": "kebabCase",
+        "ignore": ["^three\\.module\\.js$"]
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": ["**/__tests__/**/*.mjs", "tools/**/*.mjs"],
+      "env": {
+        "node": true,
+        "browser": false
+      }
+    },
+    {
+      "files": ["src/boot.js"],
+      "rules": {
+        "no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_|^t$" }]
+      }
+    }
+  ]
+}

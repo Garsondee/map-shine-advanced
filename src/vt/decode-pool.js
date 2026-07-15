@@ -7,7 +7,7 @@
  * coupling into src/ before anything needs it. This module owes nothing to
  * that system.
  *
- * Split the same way `atlas.js`/`ThreeAllocator.js` split pure math from
+ * Split the same way `atlas.js`/`three-allocator.js` split pure math from
  * browser-only execution: `pageWorldRect()` is pure and Node-tested;
  * `getSourceBitmap()`/`decodePage()` use `fetch`/`createImageBitmap`, which
  * don't exist under Node, so they're verified live via the debug panel's
@@ -94,7 +94,10 @@ export function getSourceBitmap(url) {
 
 /** Evict a cached source bitmap (e.g. a scene's background image changed). @param {string} url */
 export function releaseSourceBitmap(url) {
-  _sourceCache.get(url)?.then((bmp) => bmp.close?.()).catch(() => {});
+  _sourceCache
+    .get(url)
+    ?.then((bmp) => bmp.close?.())
+    .catch(() => {});
   _sourceCache.delete(url);
 }
 

@@ -56,7 +56,7 @@
  * The shared include. Concatenate this once per shader program that needs VT
  * sampling; call `vtSample(worldUV)` from the fragment shader.
  */
-export const VT_SAMPLE_GLSL = /* glsl */`
+export const VT_SAMPLE_GLSL = /* glsl */ `
 // ---- vt-sample.glsl (generated include, see src/vt/vt-sample.glsl.js) -----
 uniform sampler2DArray uPageAtlas;
 uniform sampler2D uPageTable;

@@ -4,10 +4,7 @@
  * @module streaming/view-projection-service
  */
 
-import {
-  createSceneViewProjectionCache,
-  updateSceneViewProjectionFromCamera,
-} from './scene-view-projection.js';
+import { createSceneViewProjectionCache, updateSceneViewProjectionFromCamera } from './scene-view-projection.js';
 import { intersectRects } from './streaming-grid.js';
 
 /** @type {import('./scene-view-projection.js').SceneViewProjectionCache} */
@@ -89,9 +86,7 @@ export function getVisibleWorldRect(padding = 0) {
  * @returns {{ minX: number, minY: number, maxX: number, maxY: number }|null}
  */
 export function getStableViewRectForMinimap() {
-  const camera = window.MapShine?.sceneComposer?.camera
-    ?? window.MapShine?.floorCompositorV2?.camera
-    ?? null;
+  const camera = window.MapShine?.sceneComposer?.camera ?? window.MapShine?.floorCompositorV2?.camera ?? null;
   const pos = camera?.position;
   if (!camera || !pos) return getVisibleWorldRect(0);
 
@@ -159,10 +154,7 @@ export function normalizeStreamingViewPadding(padding = 0) {
  * @returns {{ minX: number, minY: number, maxX: number, maxY: number }|null}
  */
 export function resolveStreamingViewRect(padding = 0) {
-  tickViewProjection(
-    window.MapShine?.sceneComposer?.camera ?? null,
-    resolveGroundZ(),
-  );
+  tickViewProjection(window.MapShine?.sceneComposer?.camera ?? null, resolveGroundZ());
   const pad = normalizeStreamingViewPadding(padding);
   const expand = (r) => ({
     minX: r.minX - pad.minX,
@@ -303,10 +295,7 @@ export function getVisibleSceneUvRect(padding = 0) {
  */
 export function getCameraGroundCenter() {
   if (!_cache?.isValid) {
-    tickViewProjection(
-      window.MapShine?.sceneComposer?.camera ?? null,
-      resolveGroundZ(),
-    );
+    tickViewProjection(window.MapShine?.sceneComposer?.camera ?? null, resolveGroundZ());
   }
   if (!_cache?.isValid) return null;
   return { x: _cache.px, y: _cache.py };

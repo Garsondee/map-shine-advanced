@@ -13,7 +13,7 @@ const LogLevel = {
   DEBUG: 0,
   INFO: 1,
   WARN: 2,
-  ERROR: 3
+  ERROR: 3,
 };
 
 let currentLogLevel = LogLevel.INFO;
@@ -83,7 +83,7 @@ export function error(message, ...args) {
  */
 export function createLogger(subsystem) {
   const scopedPrefix = `${PREFIX} | ${subsystem}`;
-  
+
   return {
     debug: (message, ...args) => {
       if (currentLogLevel <= LogLevel.DEBUG) {
@@ -104,7 +104,7 @@ export function createLogger(subsystem) {
       if (currentLogLevel <= LogLevel.ERROR) {
         console.error(`${scopedPrefix} | ${message}`, ...args);
       }
-    }
+    },
   };
 }
 

@@ -91,8 +91,7 @@ export class V3PerfMonitor {
     this._alpha = Number.isFinite(options.emaAlpha) ? options.emaAlpha : 0.1;
     this._windowSize = Number.isFinite(options.windowSize) ? options.windowSize : 120;
     this._budgets = { ...PASS_BUDGETS_MS, ...(options.budgets ?? {}) };
-    this._frameBudgetMs = Number.isFinite(options.frameBudgetMs)
-      ? options.frameBudgetMs : FRAME_BUDGET_MS;
+    this._frameBudgetMs = Number.isFinite(options.frameBudgetMs) ? options.frameBudgetMs : FRAME_BUDGET_MS;
 
     /** @type {Map<string, {cpuLast: number, cpuEma: number, cpuWorst: number, gpuLast: number|null, gpuEma: number|null}>} */
     this._passes = new Map();
@@ -105,7 +104,9 @@ export class V3PerfMonitor {
   }
 
   /** @returns {number} the frame budget in ms. */
-  get frameBudgetMs() { return this._frameBudgetMs; }
+  get frameBudgetMs() {
+    return this._frameBudgetMs;
+  }
 
   /**
    * Fold one rendered frame's timings in.
@@ -147,12 +148,12 @@ export class V3PerfMonitor {
     }
 
     this._cpuTotalLast = cpuTotal;
-    this._cpuTotalEma = this._cpuTotalEma == null
-      ? cpuTotal : this._cpuTotalEma + this._alpha * (cpuTotal - this._cpuTotalEma);
+    this._cpuTotalEma =
+      this._cpuTotalEma == null ? cpuTotal : this._cpuTotalEma + this._alpha * (cpuTotal - this._cpuTotalEma);
     if (gpuTotal != null) {
       this._gpuTotalLast = gpuTotal;
-      this._gpuTotalEma = this._gpuTotalEma == null
-        ? gpuTotal : this._gpuTotalEma + this._alpha * (gpuTotal - this._gpuTotalEma);
+      this._gpuTotalEma =
+        this._gpuTotalEma == null ? gpuTotal : this._gpuTotalEma + this._alpha * (gpuTotal - this._gpuTotalEma);
     }
   }
 
@@ -211,8 +212,10 @@ export class V3PerfMonitor {
       frames: this._frames,
       frameBudgetMs: this._frameBudgetMs,
       cpuTotal: { lastMs: round2(this._cpuTotalLast), avgMs: round2(this._cpuTotalEma ?? 0) },
-      gpuTotal: this._gpuTotalEma == null ? null
-        : { lastMs: round2(this._gpuTotalLast ?? 0), avgMs: round2(this._gpuTotalEma) },
+      gpuTotal:
+        this._gpuTotalEma == null
+          ? null
+          : { lastMs: round2(this._gpuTotalLast ?? 0), avgMs: round2(this._gpuTotalEma) },
       passes,
     };
   }
@@ -256,8 +259,9 @@ export class RenderScaleGovernor {
    * @param {number} [options.maxScale=1.0]
    */
   constructor(options = {}) {
-    const ladder = (Array.isArray(options.ladder) && options.ladder.length
-      ? options.ladder.slice() : SCALE_LADDER.slice()).sort((a, b) => b - a);
+    const ladder = (
+      Array.isArray(options.ladder) && options.ladder.length ? options.ladder.slice() : SCALE_LADDER.slice()
+    ).sort((a, b) => b - a);
     const minScale = Number.isFinite(options.minScale) ? options.minScale : 0.5;
     const maxScale = Number.isFinite(options.maxScale) ? options.maxScale : 1.0;
     /** @type {number[]} descending, clamped to [minScale, maxScale]. */
@@ -271,10 +275,9 @@ export class RenderScaleGovernor {
     this._upFrames = Number.isFinite(options.upFrames) ? options.upFrames : 180;
     this._cooldownFrames = Number.isFinite(options.cooldownFrames) ? options.cooldownFrames : 90;
     this._warmupFrames = Number.isFinite(options.warmupFrames) ? options.warmupFrames : 60;
-    this._postHoldSettleFrames = Number.isFinite(options.postHoldSettleFrames)
-      ? options.postHoldSettleFrames : 60;
+    this._postHoldSettleFrames = Number.isFinite(options.postHoldSettleFrames) ? options.postHoldSettleFrames : 60;
 
-    this._rung = 0;           // index into _ladder (0 = highest scale)
+    this._rung = 0; // index into _ladder (0 = highest scale)
     this._frames = 0;
     this._cooldown = 0;
     /** @type {number} post-hold settle frames remaining. Distinct from
@@ -285,14 +288,16 @@ export class RenderScaleGovernor {
     this._settle = 0;
     this._overStreak = 0;
     this._underStreak = 0;
-    this._lastChange = null;  // {frame, from, to, reason}
+    this._lastChange = null; // {frame, from, to, reason}
     this._holdActive = false;
     this._holdReason = null;
     this._lastPredictedUpMs = null;
   }
 
   /** @returns {number} the current render scale (a ladder rung). */
-  get scale() { return this._ladder[this._rung]; }
+  get scale() {
+    return this._ladder[this._rung];
+  }
 
   /**
    * Suspend/resume the control loop. While held the scale is frozen and no
@@ -366,9 +371,7 @@ export class RenderScaleGovernor {
         const r2 = (up * up) / (cur * cur);
         const gpu = Number.isFinite(components?.gpuMs) ? components.gpuMs : null;
         const cpu = Number.isFinite(components?.cpuMs) ? components.cpuMs : null;
-        const predicted = (gpu != null)
-          ? Math.max(cpu ?? 0, gpu * r2)
-          : cost * r2;
+        const predicted = gpu != null ? Math.max(cpu ?? 0, gpu * r2) : cost * r2;
         this._lastPredictedUpMs = predicted;
         if (predicted < this._budget * this._lowWater) this._underStreak += 1;
         else this._underStreak = 0;
@@ -466,4 +469,6 @@ export function buildPerfRows(report) {
 }
 
 /** @param {number} v @returns {number} */
-function round2(v) { return Math.round(v * 100) / 100; }
+function round2(v) {
+  return Math.round(v * 100) / 100;
+}

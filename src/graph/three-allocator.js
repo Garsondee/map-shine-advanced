@@ -41,17 +41,17 @@ export const LAW_MAX_WORLD_RES_DIM = 2048;
  * @param {string} name
  * @param {number} width
  * @param {number} height
- * @param {import('./FrameGraph.js').ResolvedDescriptor} desc
+ * @param {import('./frame-graph.js').ResolvedDescriptor} desc
  */
 function enforceKeyholeLaw(name, width, height, desc) {
   if (desc && desc.allowWorldScale === true) return; // explicit, rare, opt-in only
   if (width > LAW_MAX_WORLD_RES_DIM || height > LAW_MAX_WORLD_RES_DIM) {
     throw new Error(
       `[Keyhole law] ThreeAllocator.create("${name}"): ${width}x${height} exceeds the ` +
-      `${LAW_MAX_WORLD_RES_DIM}px world-resolution cap (Keyhole.md §4.6). Nothing is ever ` +
-      `allocated at world resolution. If this target is a genuine exception (fog ` +
-      `exploration, present-chain upscale), pass { allowWorldScale: true } explicitly ` +
-      `on the descriptor — never widen this cap globally.`
+        `${LAW_MAX_WORLD_RES_DIM}px world-resolution cap (Keyhole.md §4.6). Nothing is ever ` +
+        `allocated at world resolution. If this target is a genuine exception (fog ` +
+        `exploration, present-chain upscale), pass { allowWorldScale: true } explicitly ` +
+        `on the descriptor — never widen this cap globally.`
     );
   }
 }
@@ -82,14 +82,16 @@ export class ThreeAllocator {
   }
 
   /** @param {any} THREE */
-  setTHREE(THREE) { this._THREE = THREE; }
+  setTHREE(THREE) {
+    this._THREE = THREE;
+  }
 
   /**
    * Pure mapping: resolved descriptor → the option object + per-attachment plan.
    * No THREE calls beyond enum lookups; separated so it is testable.
    *
    * @param {any} THREE
-   * @param {import('./FrameGraph.js').ResolvedDescriptor} desc
+   * @param {import('./frame-graph.js').ResolvedDescriptor} desc
    * @returns {{ width: number, height: number, options: object, attachments: Array<object> }}
    */
   static describe(THREE, desc) {
@@ -115,7 +117,10 @@ export class ThreeAllocator {
     const src = Array.isArray(desc.attachments) ? desc.attachments : [];
     for (let i = 0; i < count; i++) {
       const a = src[i] ?? null;
-      if (!a) { attachments.push(null); continue; }
+      if (!a) {
+        attachments.push(null);
+        continue;
+      }
       const plan = {};
       if (a.filter != null) {
         plan.minFilter = resolveFilter(THREE, a.filter);
@@ -130,7 +135,7 @@ export class ThreeAllocator {
 
   /**
    * @param {string} name
-   * @param {import('./FrameGraph.js').ResolvedDescriptor} desc
+   * @param {import('./frame-graph.js').ResolvedDescriptor} desc
    * @returns {THREE.WebGLRenderTarget}
    */
   create(name, desc) {
@@ -158,7 +163,9 @@ export class ThreeAllocator {
     }
 
     if (this._onCreate) {
-      try { this._onCreate(rt); } catch (_) {}
+      try {
+        this._onCreate(rt);
+      } catch (_) {}
     }
     log.debug(`allocated ${rt.name} ${width}x${height}${options.count ? ` mrt=${options.count}` : ''}`);
     return rt;
@@ -168,7 +175,7 @@ export class ThreeAllocator {
    * @param {THREE.WebGLRenderTarget} handle
    * @param {number} w
    * @param {number} h
-   * @param {import('./FrameGraph.js').ResolvedDescriptor} [desc] - pass the
+   * @param {import('./frame-graph.js').ResolvedDescriptor} [desc] - pass the
    *   owning descriptor so a resize storm can't smuggle a world-res target
    *   past the law that `create()` already enforced.
    */
@@ -182,6 +189,8 @@ export class ThreeAllocator {
 
   /** @param {THREE.WebGLRenderTarget} handle */
   dispose(handle) {
-    try { handle?.dispose?.(); } catch (_) {}
+    try {
+      handle?.dispose?.();
+    } catch (_) {}
   }
 }

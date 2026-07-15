@@ -3,7 +3,7 @@
  * allocated once, holding every resident page for every layer-pack of every
  * floor (Keyhole.md §4.1).
  *
- * Split the same way `graph/ThreeAllocator.js` splits `describe()` (pure) from
+ * Split the same way `graph/three-allocator.js` splits `describe()` (pure) from
  * `create()` (THREE-touching): `computeAtlasLayout()` and `slotToAtlasPosition()`
  * are plain arithmetic, Node-testable without WebGL; `PageAtlas` is the thin
  * wrapper that actually owns the GPU resource and performs uploads via
@@ -42,7 +42,9 @@ export const BYTES_PER_TEXEL_RGBA8 = 4;
 export function computeAtlasLayout({ budgetBytes, pageSizePx = 256, atlasSizePx = 4096 }) {
   if (!(budgetBytes > 0)) throw new Error('computeAtlasLayout: budgetBytes must be > 0');
   if (atlasSizePx % pageSizePx !== 0) {
-    throw new Error(`computeAtlasLayout: atlasSizePx (${atlasSizePx}) must be a multiple of pageSizePx (${pageSizePx})`);
+    throw new Error(
+      `computeAtlasLayout: atlasSizePx (${atlasSizePx}) must be a multiple of pageSizePx (${pageSizePx})`
+    );
   }
   const pagesPerAxis = atlasSizePx / pageSizePx;
   const pagesPerLayer = pagesPerAxis * pagesPerAxis;
@@ -51,8 +53,14 @@ export function computeAtlasLayout({ budgetBytes, pageSizePx = 256, atlasSizePx 
   const layers = Math.max(1, Math.floor(budgetBytes / layerBytes));
   const capacityPages = layers * pagesPerLayer;
   return {
-    pageSizePx, atlasSizePx, pagesPerAxis, pagesPerLayer,
-    layerBytes, layers, capacityPages, totalBytes: layers * layerBytes,
+    pageSizePx,
+    atlasSizePx,
+    pagesPerAxis,
+    pagesPerLayer,
+    layerBytes,
+    layers,
+    capacityPages,
+    totalBytes: layers * layerBytes,
   };
 }
 
@@ -118,7 +126,9 @@ export class PageAtlas {
   }
 
   /** @param {any} renderer */
-  setRenderer(renderer) { this._renderer = renderer; }
+  setRenderer(renderer) {
+    this._renderer = renderer;
+  }
 
   /**
    * Call ONCE before a batch of `uploadPage()` calls (not once per page —
@@ -171,6 +181,8 @@ export class PageAtlas {
   }
 
   dispose() {
-    try { this.texture?.dispose?.(); } catch (_) {}
+    try {
+      this.texture?.dispose?.();
+    } catch (_) {}
   }
 }

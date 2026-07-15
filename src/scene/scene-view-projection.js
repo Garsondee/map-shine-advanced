@@ -18,7 +18,7 @@ const _NDC_CORNERS = [
  * Canonical _Outdoors decode (matches SpecularEffectV2 / decodeOutdoorsMaskSample).
  * White/outdoor → 1.0, black/indoor → 0.0, cleared texel (0,0,0,0) → 1.0 (outdoor default).
  */
-export const GLSL_DECODE_OUTDOORS_MASK = /* glsl */`
+export const GLSL_DECODE_OUTDOORS_MASK = /* glsl */ `
 float msDecodeOutdoorsMaskSample(vec4 s) {
   float lum = max(s.r, max(s.g, s.b));
   if (lum < 1e-5 && s.a < 1e-5) return 1.0;
@@ -27,7 +27,7 @@ float msDecodeOutdoorsMaskSample(vec4 s) {
 `;
 
 /** Bilinear view-corner ground projection + Foundry scene UV (LightingEffectV2 compose). */
-export const GLSL_SCREEN_TO_SCENE_UV = /* glsl */`
+export const GLSL_SCREEN_TO_SCENE_UV = /* glsl */ `
 vec2 msBilinearViewCornerToWorld(vec2 screenUv,
   vec2 c00, vec2 c10, vec2 c01, vec2 c11) {
   vec2 w0 = mix(c00, c10, screenUv.x);
@@ -109,16 +109,26 @@ export function updateSceneViewProjectionFromCamera(camera, groundZ, cache, temp
 
   const q = camera.quaternion;
   const isOrtho = camera.isOrthographicCamera === true;
-  const cameraChanged = !cache.isValid
-    || cache.isOrtho !== isOrtho
-    || cache.px !== camera.position.x || cache.py !== camera.position.y || cache.pz !== camera.position.z
-    || cache.qx !== (q?.x ?? 0) || cache.qy !== (q?.y ?? 0) || cache.qz !== (q?.z ?? 0) || cache.qw !== (q?.w ?? 1)
-    || cache.zoom !== camera.zoom
-    || cache.left !== (camera.left ?? 0) || cache.right !== (camera.right ?? 0)
-    || cache.top !== (camera.top ?? 0) || cache.bottom !== (camera.bottom ?? 0)
-    || cache.fov !== (camera.fov ?? 0) || cache.aspect !== (camera.aspect ?? 0)
-    || cache.near !== (camera.near ?? 0) || cache.far !== (camera.far ?? 0)
-    || cache.groundZ !== groundZ;
+  const cameraChanged =
+    !cache.isValid ||
+    cache.isOrtho !== isOrtho ||
+    cache.px !== camera.position.x ||
+    cache.py !== camera.position.y ||
+    cache.pz !== camera.position.z ||
+    cache.qx !== (q?.x ?? 0) ||
+    cache.qy !== (q?.y ?? 0) ||
+    cache.qz !== (q?.z ?? 0) ||
+    cache.qw !== (q?.w ?? 1) ||
+    cache.zoom !== camera.zoom ||
+    cache.left !== (camera.left ?? 0) ||
+    cache.right !== (camera.right ?? 0) ||
+    cache.top !== (camera.top ?? 0) ||
+    cache.bottom !== (camera.bottom ?? 0) ||
+    cache.fov !== (camera.fov ?? 0) ||
+    cache.aspect !== (camera.aspect ?? 0) ||
+    cache.near !== (camera.near ?? 0) ||
+    cache.far !== (camera.far ?? 0) ||
+    cache.groundZ !== groundZ;
 
   if (!cameraChanged) return true;
 
@@ -148,10 +158,14 @@ export function updateSceneViewProjectionFromCamera(camera, groundZ, cache, temp
     vMaxX = camera.position.x + camera.right / camera.zoom;
     vMaxY = camera.position.y + camera.top / camera.zoom;
 
-    c00x = vMinX; c00y = vMinY;
-    c10x = vMaxX; c10y = vMinY;
-    c01x = vMinX; c01y = vMaxY;
-    c11x = vMaxX; c11y = vMaxY;
+    c00x = vMinX;
+    c00y = vMinY;
+    c10x = vMaxX;
+    c10y = vMinY;
+    c01x = vMinX;
+    c01y = vMaxY;
+    c11x = vMaxX;
+    c11y = vMaxY;
   } else {
     const THREE = window.THREE;
     const ndc = temps?.ndc;
@@ -187,10 +201,19 @@ export function updateSceneViewProjectionFromCamera(camera, groundZ, cache, temp
         if (iy > maxY) maxY = iy;
         validCornerCount += 1;
 
-        if (i === 0) { c00x = ix; c00y = iy; }
-        else if (i === 1) { c10x = ix; c10y = iy; }
-        else if (i === 2) { c01x = ix; c01y = iy; }
-        else if (i === 3) { c11x = ix; c11y = iy; }
+        if (i === 0) {
+          c00x = ix;
+          c00y = iy;
+        } else if (i === 1) {
+          c10x = ix;
+          c10y = iy;
+        } else if (i === 2) {
+          c01x = ix;
+          c01y = iy;
+        } else if (i === 3) {
+          c11x = ix;
+          c11y = iy;
+        }
       }
 
       if (minX !== Infinity) {
@@ -203,10 +226,14 @@ export function updateSceneViewProjectionFromCamera(camera, groundZ, cache, temp
         return false;
       }
       if (validCornerCount < 4 && minX !== Infinity) {
-        c00x = minX; c00y = minY;
-        c10x = maxX; c10y = minY;
-        c01x = minX; c01y = maxY;
-        c11x = maxX; c11y = maxY;
+        c00x = minX;
+        c00y = minY;
+        c10x = maxX;
+        c10y = minY;
+        c01x = minX;
+        c01y = maxY;
+        c11x = maxX;
+        c11y = maxY;
       }
     }
   }
@@ -292,9 +319,7 @@ export function applySceneViewProjectionToUniforms(cache, uniforms) {
  * @returns {{ u: number, v: number, inBounds: boolean }|null}
  */
 export function screenUvToLightingSceneUv(screenU, screenV, uniforms = null) {
-  const u = uniforms
-    ?? globalThis.MapShine?.floorCompositorV2?._lightingEffect?._composeMaterial?.uniforms
-    ?? null;
+  const u = uniforms ?? globalThis.MapShine?.floorCompositorV2?._lightingEffect?._composeMaterial?.uniforms ?? null;
   if (!u?.uBldViewCorner00?.value || !u.uBldSceneOrigin?.value || !u.uBldSceneSize?.value) {
     return null;
   }

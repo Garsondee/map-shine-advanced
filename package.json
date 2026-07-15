@@ -3,6 +3,11 @@
   "version": "1.0.0",
   "description": "Foundry VTT module with Three.js WebGPU",
   "scripts": {
+    "lint": "eslint src tools",
+    "lint:fix": "eslint src tools --fix",
+    "format": "prettier --write \"src/**/*.{js,mjs}\" \"tools/**/*.mjs\"",
+    "format:check": "prettier --check \"src/**/*.{js,mjs}\" \"tools/**/*.mjs\"",
+    "verify": "npm run lint && npm run format:check",
     "make:torture": "node tools/make-torture-world.mjs",
     "build:tsl": "node scripts/build/build.js",
     "release": "node scripts/release/release.js",
@@ -22,7 +27,10 @@
   "devDependencies": {
     "@playwright/test": "^1.47.2",
     "esbuild": "^0.24.0",
+    "eslint": "8.57.1",
+    "eslint-plugin-unicorn": "50.0.1",
     "knip": "^5.88.1",
-    "pngjs": "^7.0.0"
+    "pngjs": "^7.0.0",
+    "prettier": "3.3.3"
   }
 }

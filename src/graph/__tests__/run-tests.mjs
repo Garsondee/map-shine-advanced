@@ -10,9 +10,9 @@
  *     --bundle --format=esm --platform=node --outfile=<tmp>.mjs && node <tmp>.mjs
  */
 import './setup-globals.mjs'; // MUST be first — shims window/etc for import-time global access
-import { run as runFrameGraph } from './FrameGraph.test.mjs';
-import { run as runAllocator } from './ThreeAllocator.test.mjs';
-import { run as runAllocatorLaw } from './ThreeAllocatorLaw.test.mjs';
+import { run as runFrameGraph } from './frame-graph.test.mjs';
+import { run as runAllocator } from './three-allocator.test.mjs';
+import { run as runAllocatorLaw } from './three-allocator-law.test.mjs';
 import { run as runPerf } from './v3-perf.test.mjs';
 
 let passed = 0;
@@ -21,17 +21,29 @@ const fails = [];
 
 const t = {
   ok(name, cond) {
-    if (cond) { passed++; } else { failed++; fails.push(name); console.error('  FAIL:', name); }
+    if (cond) {
+      passed++;
+    } else {
+      failed++;
+      fails.push(name);
+      console.error('  FAIL:', name);
+    }
   },
   throws(name, fn, matchSubstr) {
     try {
       fn();
-      failed++; fails.push(name); console.error('  FAIL (no throw):', name);
+      failed++;
+      fails.push(name);
+      console.error('  FAIL (no throw):', name);
     } catch (e) {
       const msg = String((e && e.message) || e);
       if (matchSubstr && !msg.includes(matchSubstr)) {
-        failed++; fails.push(name); console.error('  FAIL (wrong msg):', name, '->', msg);
-      } else { passed++; }
+        failed++;
+        fails.push(name);
+        console.error('  FAIL (wrong msg):', name, '->', msg);
+      } else {
+        passed++;
+      }
     }
   },
 };
@@ -50,5 +62,8 @@ for (const [name, fn] of suites) {
 }
 
 console.log(`\nsrc/graph verification: ${passed} passed, ${failed} failed`);
-if (failed) { console.error('Failures:', fails); process.exit(1); }
+if (failed) {
+  console.error('Failures:', fails);
+  process.exit(1);
+}
 console.log('ALL GREEN');

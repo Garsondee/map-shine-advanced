@@ -1,9 +1,9 @@
 /**
- * Node verification for FrameGraph.js. Run via ../run-tests.mjs (esbuild bundle
+ * Node verification for frame-graph.js. Run via ../run-tests.mjs (esbuild bundle
  * → node). Pure-logic coverage: ordering, cycles, read-before-write, gating,
  * allocator lifecycle, timing. No THREE, no browser.
  */
-import { FrameGraph } from '../FrameGraph.js';
+import { FrameGraph } from '../frame-graph.js';
 
 export function run(t) {
   const { ok, throws } = t;
@@ -12,9 +12,18 @@ export function run(t) {
     const log = [];
     return {
       log,
-      create: (name, desc) => { log.push(['create', name, desc.resolvedW, desc.resolvedH, desc.mrtCount]); return { name, w: desc.resolvedW, h: desc.resolvedH }; },
-      resize: (h, w, hh) => { log.push(['resize', h.name, w, hh]); h.w = w; h.h = hh; },
-      dispose: (h) => { log.push(['dispose', h.name]); },
+      create: (name, desc) => {
+        log.push(['create', name, desc.resolvedW, desc.resolvedH, desc.mrtCount]);
+        return { name, w: desc.resolvedW, h: desc.resolvedH };
+      },
+      resize: (h, w, hh) => {
+        log.push(['resize', h.name, w, hh]);
+        h.w = w;
+        h.h = hh;
+      },
+      dispose: (h) => {
+        log.push(['dispose', h.name]);
+      },
     };
   }
 
@@ -26,9 +35,36 @@ export function run(t) {
     g.declareResource('graded', { size: 'screen' });
     g.importResource('masks', { fake: true });
     const ran = [];
-    g.addPass({ name: 'geometry', reads: ['masks'], writes: ['albedo'], execute: (c) => { ran.push('geometry'); c.target('albedo'); c.get('masks'); } });
-    g.addPass({ name: 'lighting', reads: ['albedo'], writes: ['hdr'], execute: (c) => { ran.push('lighting'); c.get('albedo'); c.target('hdr'); } });
-    g.addPass({ name: 'grade', reads: ['hdr'], writes: ['graded'], execute: (c) => { ran.push('grade'); c.get('hdr'); c.target('graded'); } });
+    g.addPass({
+      name: 'geometry',
+      reads: ['masks'],
+      writes: ['albedo'],
+      execute: (c) => {
+        ran.push('geometry');
+        c.target('albedo');
+        c.get('masks');
+      },
+    });
+    g.addPass({
+      name: 'lighting',
+      reads: ['albedo'],
+      writes: ['hdr'],
+      execute: (c) => {
+        ran.push('lighting');
+        c.get('albedo');
+        c.target('hdr');
+      },
+    });
+    g.addPass({
+      name: 'grade',
+      reads: ['hdr'],
+      writes: ['graded'],
+      execute: (c) => {
+        ran.push('grade');
+        c.get('hdr');
+        c.target('graded');
+      },
+    });
     ok('linear order', JSON.stringify(g.getExecutionOrder()) === JSON.stringify(['geometry', 'lighting', 'grade']));
     const res = g.execute({ width: 1920, height: 1080 });
     ok('linear ran all', JSON.stringify(res.order) === JSON.stringify(['geometry', 'lighting', 'grade']));
@@ -40,25 +76,48 @@ export function run(t) {
     const g = new FrameGraph({ allocator: fakeAllocator() });
     g.declareResource('a', { size: 'screen' });
     g.declareResource('b', { size: 'screen' });
-    g.addPass({ name: 'consumer', reads: ['a'], writes: ['b'], execute: (c) => { c.get('a'); c.target('b'); } });
-    g.addPass({ name: 'producer', writes: ['a'], execute: (c) => { c.target('a'); } });
-    ok('derived reorder puts producer first', JSON.stringify(g.getExecutionOrder()) === JSON.stringify(['producer', 'consumer']));
+    g.addPass({
+      name: 'consumer',
+      reads: ['a'],
+      writes: ['b'],
+      execute: (c) => {
+        c.get('a');
+        c.target('b');
+      },
+    });
+    g.addPass({
+      name: 'producer',
+      writes: ['a'],
+      execute: (c) => {
+        c.target('a');
+      },
+    });
+    ok(
+      'derived reorder puts producer first',
+      JSON.stringify(g.getExecutionOrder()) === JSON.stringify(['producer', 'consumer'])
+    );
   }
 
   // 3. Stable tie-break.
   {
     const g = new FrameGraph({ allocator: fakeAllocator() });
-    g.declareResource('x', { size: 'screen' }); g.declareResource('y', { size: 'screen' }); g.declareResource('z', { size: 'screen' });
+    g.declareResource('x', { size: 'screen' });
+    g.declareResource('y', { size: 'screen' });
+    g.declareResource('z', { size: 'screen' });
     g.addPass({ name: 'p1', writes: ['x'], execute: (c) => c.target('x') });
     g.addPass({ name: 'p2', writes: ['y'], execute: (c) => c.target('y') });
     g.addPass({ name: 'p3', writes: ['z'], execute: (c) => c.target('z') });
-    ok('independent passes keep reg order', JSON.stringify(g.getExecutionOrder()) === JSON.stringify(['p1', 'p2', 'p3']));
+    ok(
+      'independent passes keep reg order',
+      JSON.stringify(g.getExecutionOrder()) === JSON.stringify(['p1', 'p2', 'p3'])
+    );
   }
 
   // 4. Cycle.
   {
     const g = new FrameGraph({ allocator: fakeAllocator() });
-    g.declareResource('r1', { size: 'screen' }); g.declareResource('r2', { size: 'screen' });
+    g.declareResource('r1', { size: 'screen' });
+    g.declareResource('r2', { size: 'screen' });
     g.addPass({ name: 'A', reads: ['r2'], writes: ['r1'], execute: () => {} });
     g.addPass({ name: 'B', reads: ['r1'], writes: ['r2'], execute: () => {} });
     throws('cycle throws', () => g.compile(), 'cycle');
@@ -76,7 +135,11 @@ export function run(t) {
   {
     const g = new FrameGraph({ allocator: fakeAllocator() });
     g.declareResource('rt', { size: 'screen' });
-    throws('feedback loop throws', () => g.addPass({ name: 'bad', reads: ['rt'], writes: ['rt'], execute: () => {} }), 'feedback loop');
+    throws(
+      'feedback loop throws',
+      () => g.addPass({ name: 'bad', reads: ['rt'], writes: ['rt'], execute: () => {} }),
+      'feedback loop'
+    );
   }
 
   // 7. Write to imported.
@@ -97,10 +160,20 @@ export function run(t) {
   // 9. when() gating.
   {
     const g = new FrameGraph({ allocator: fakeAllocator() });
-    g.declareResource('a', { size: 'screen' }); g.declareResource('b', { size: 'screen' });
+    g.declareResource('a', { size: 'screen' });
+    g.declareResource('b', { size: 'screen' });
     let on = false;
     g.addPass({ name: 'geo', writes: ['a'], execute: (c) => c.target('a') });
-    g.addPass({ name: 'light', reads: ['a'], writes: ['b'], when: () => on, execute: (c) => { c.get('a'); c.target('b'); } });
+    g.addPass({
+      name: 'light',
+      reads: ['a'],
+      writes: ['b'],
+      when: () => on,
+      execute: (c) => {
+        c.get('a');
+        c.target('b');
+      },
+    });
     let res = g.execute({ width: 100, height: 100 });
     ok('gated pass skipped', res.skipped.includes('light') && !res.order.includes('light'));
     on = true;
@@ -112,9 +185,19 @@ export function run(t) {
   {
     const g = new FrameGraph({ allocator: fakeAllocator() });
     g.declareResource('a', { size: 'screen' });
-    g.addPass({ name: 'r', writes: ['a'], execute: (c) => { c.get('nonsense'); } });
+    g.addPass({
+      name: 'r',
+      writes: ['a'],
+      execute: (c) => {
+        c.get('nonsense');
+      },
+    });
     let threw = false;
-    try { g.execute({ width: 10, height: 10 }); } catch (_) { threw = true; }
+    try {
+      g.execute({ width: 10, height: 10 });
+    } catch (_) {
+      threw = true;
+    }
     ok('illegal get throws through execute', threw);
   }
 
@@ -125,7 +208,15 @@ export function run(t) {
     g.declareResource('full', { size: 'screen' });
     g.declareResource('half', { size: 'screen', scale: 0.5 });
     g.declareResource('fixed', { size: [256, 256] });
-    g.addPass({ name: 'p', writes: ['full', 'half', 'fixed'], execute: (c) => { c.target('full'); c.target('half'); c.target('fixed'); } });
+    g.addPass({
+      name: 'p',
+      writes: ['full', 'half', 'fixed'],
+      execute: (c) => {
+        c.target('full');
+        c.target('half');
+        c.target('fixed');
+      },
+    });
     g.execute({ width: 1000, height: 800 });
     const creates = alloc.log.filter((e) => e[0] === 'create');
     ok('created 3 targets', creates.length === 3);
@@ -137,7 +228,10 @@ export function run(t) {
     ok('no realloc on same size', alloc.log.length === before);
     g.execute({ width: 1200, height: 900 });
     const resizes = alloc.log.filter((e) => e[0] === 'resize');
-    ok('full resized', resizes.some((e) => e[1] === 'full' && e[2] === 1200));
+    ok(
+      'full resized',
+      resizes.some((e) => e[1] === 'full' && e[2] === 1200)
+    );
     ok('fixed not resized', !resizes.some((e) => e[1] === 'fixed'));
   }
 
@@ -154,17 +248,46 @@ export function run(t) {
   // 13. Diamond.
   {
     const g = new FrameGraph({ allocator: fakeAllocator() });
-    g.declareResource('base', { size: 'screen' }); g.declareResource('l', { size: 'screen' });
-    g.declareResource('r', { size: 'screen' }); g.declareResource('merge', { size: 'screen' });
+    g.declareResource('base', { size: 'screen' });
+    g.declareResource('l', { size: 'screen' });
+    g.declareResource('r', { size: 'screen' });
+    g.declareResource('merge', { size: 'screen' });
     g.addPass({ name: 'base', writes: ['base'], execute: (c) => c.target('base') });
-    g.addPass({ name: 'left', reads: ['base'], writes: ['l'], execute: (c) => { c.get('base'); c.target('l'); } });
-    g.addPass({ name: 'right', reads: ['base'], writes: ['r'], execute: (c) => { c.get('base'); c.target('r'); } });
-    g.addPass({ name: 'merge', reads: ['l', 'r'], writes: ['merge'], execute: (c) => { c.get('l'); c.get('r'); c.target('merge'); } });
+    g.addPass({
+      name: 'left',
+      reads: ['base'],
+      writes: ['l'],
+      execute: (c) => {
+        c.get('base');
+        c.target('l');
+      },
+    });
+    g.addPass({
+      name: 'right',
+      reads: ['base'],
+      writes: ['r'],
+      execute: (c) => {
+        c.get('base');
+        c.target('r');
+      },
+    });
+    g.addPass({
+      name: 'merge',
+      reads: ['l', 'r'],
+      writes: ['merge'],
+      execute: (c) => {
+        c.get('l');
+        c.get('r');
+        c.target('merge');
+      },
+    });
     const order = g.getExecutionOrder();
     ok('diamond: base first', order.indexOf('base') === 0);
     ok('diamond: merge last', order.indexOf('merge') === 3);
-    ok('diamond: branches between',
-       order.indexOf('left') > 0 && order.indexOf('right') > 0 && order.indexOf('left') < 3 && order.indexOf('right') < 3);
+    ok(
+      'diamond: branches between',
+      order.indexOf('left') > 0 && order.indexOf('right') > 0 && order.indexOf('left') < 3 && order.indexOf('right') < 3
+    );
   }
 
   // 14. GPU timer plumbing (injected duck-typed timer — see GpuPassTimer).
@@ -175,7 +298,10 @@ export function run(t) {
       frameBegin: () => events.push(['frameBegin']),
       // Refuse 'reject' (simulates the timer skipping when another query owns
       // the GL target) — end() must then NOT be called for that pass.
-      begin: (name) => { events.push(['begin', name]); return name !== 'reject'; },
+      begin: (name) => {
+        events.push(['begin', name]);
+        return name !== 'reject';
+      },
       end: () => events.push(['end']),
       getResults: () => results,
     };
@@ -184,12 +310,22 @@ export function run(t) {
     g.declareResource('a', { size: 'screen' });
     g.declareResource('b', { size: 'screen' });
     g.addPass({ name: 'reject', writes: ['a'], execute: (c) => c.target('a') });
-    g.addPass({ name: 'b', reads: ['a'], writes: ['b'], execute: (c) => { c.get('a'); c.target('b'); } });
+    g.addPass({
+      name: 'b',
+      reads: ['a'],
+      writes: ['b'],
+      execute: (c) => {
+        c.get('a');
+        c.target('b');
+      },
+    });
     g.addPass({ name: 'gated', when: () => false, execute: () => {} });
     g.execute({ width: 8, height: 8 });
     ok('gpu: frameBegin once per execute', events.filter((e) => e[0] === 'frameBegin').length === 1);
-    ok('gpu: begin per EXECUTED pass only (gated pass untimed)',
-       JSON.stringify(events.filter((e) => e[0] === 'begin').map((e) => e[1])) === JSON.stringify(['reject', 'b']));
+    ok(
+      'gpu: begin per EXECUTED pass only (gated pass untimed)',
+      JSON.stringify(events.filter((e) => e[0] === 'begin').map((e) => e[1])) === JSON.stringify(['reject', 'b'])
+    );
     ok('gpu: end only when begin accepted', events.filter((e) => e[0] === 'end').length === 1);
     ok('gpu: results exposed via getGpuTimings', g.getGpuTimings().get('b') === 2.5);
     ok('gpu: copy, not the live map', g.getGpuTimings() !== results);
@@ -201,15 +337,28 @@ export function run(t) {
   {
     const events = [];
     const timer = {
-      frameBegin: () => { throw new Error('timer boom'); },
-      begin: (n) => { events.push(['begin', n]); return true; },
+      frameBegin: () => {
+        throw new Error('timer boom');
+      },
+      begin: (n) => {
+        events.push(['begin', n]);
+        return true;
+      },
       end: () => events.push(['end']),
-      getResults: () => { throw new Error('timer boom'); },
+      getResults: () => {
+        throw new Error('timer boom');
+      },
     };
     const g = new FrameGraph({ allocator: fakeAllocator(), logWarn: () => {} });
     g.setGpuTimer(timer);
     g.declareResource('a', { size: 'screen' });
-    g.addPass({ name: 'thrower', writes: ['a'], execute: () => { throw new Error('pass err'); } });
+    g.addPass({
+      name: 'thrower',
+      writes: ['a'],
+      execute: () => {
+        throw new Error('pass err');
+      },
+    });
     const res = g.execute({ width: 4, height: 4 });
     ok('gpu: frame survives throwing timer + throwing pass', res.order.length === 1);
     ok('gpu: end pairs with begin despite pass throw', events.filter((e) => e[0] === 'end').length === 1);

@@ -34,7 +34,13 @@ import { installDebugPanel } from './diag/debug-panel.js';
 import { runVtSelfTest } from './vt/vt-selftest-report.js';
 import { runVtLiveDecodeTest } from './vt/vt-live-decode-report.js';
 import { runVtSmokeTest, stopVtSmokeTest } from './vt/vt-smoke-test.js';
-import { startVtPanViewer, stopVtPanViewer, getVtPanViewerDiagnostics, soakPanStep, soakSwitchFloorStep } from './vt/vt-pan-viewer.js';
+import {
+  startVtPanViewer,
+  stopVtPanViewer,
+  getVtPanViewerDiagnostics,
+  soakPanStep,
+  soakSwitchFloorStep,
+} from './vt/vt-pan-viewer.js';
 
 const MODULE_ID = 'map-shine-advanced';
 const VERSION = '0.6.0-dev.0';
@@ -208,10 +214,7 @@ function bootHeartbeat() {
       'position',
       new THREE.Float32BufferAttribute([0, 1.1, 0, -1.05, -0.85, 0, 1.05, -0.85, 0], 3)
     );
-    geometry.setAttribute(
-      'color',
-      new THREE.Float32BufferAttribute([1, 0.25, 0.25, 0.25, 1, 0.4, 0.35, 0.55, 1], 3)
-    );
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute([1, 0.25, 0.25, 0.25, 1, 0.4, 0.35, 0.55, 1], 3));
     const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
     const triangle = new THREE.Mesh(geometry, material);
     scene.add(triangle);

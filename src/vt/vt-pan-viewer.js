@@ -57,13 +57,29 @@ function disposeActive() {
   if (!_active) return;
   // { capture: true } MUST match the addEventListener call exactly — the two
   // are treated as distinct registrations otherwise, and removal silently no-ops.
-  try { window.removeEventListener('keydown', _active.onKeyDown, { capture: true }); } catch (_) {}
-  try { _active.renderer.setAnimationLoop(null); } catch (_) {}
-  try { _active.atlas.dispose(); } catch (_) {}
-  try { _active.quadMaterial.dispose(); } catch (_) {}
-  try { _active.quadGeometry.dispose(); } catch (_) {}
-  for (const entry of _active.floors.values()) { try { entry.indirectionTexture.dispose(); } catch (_) {} }
-  try { _active.canvas.remove(); } catch (_) {}
+  try {
+    window.removeEventListener('keydown', _active.onKeyDown, { capture: true });
+  } catch (_) {}
+  try {
+    _active.renderer.setAnimationLoop(null);
+  } catch (_) {}
+  try {
+    _active.atlas.dispose();
+  } catch (_) {}
+  try {
+    _active.quadMaterial.dispose();
+  } catch (_) {}
+  try {
+    _active.quadGeometry.dispose();
+  } catch (_) {}
+  for (const entry of _active.floors.values()) {
+    try {
+      entry.indirectionTexture.dispose();
+    } catch (_) {}
+  }
+  try {
+    _active.canvas.remove();
+  } catch (_) {}
   _active = null;
 }
 
@@ -94,9 +110,17 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
     canvas.width = canvasPx;
     canvas.height = canvasPx;
     Object.assign(canvas.style, {
-      position: 'fixed', left: '24px', top: '24px', width: `${canvasPx}px`, height: `${canvasPx}px`,
-      zIndex: '89', borderRadius: '8px', border: '1px solid rgba(143,214,255,0.35)',
-      boxShadow: '0 6px 24px rgba(0,0,0,0.5)', background: '#000', cursor: 'crosshair',
+      position: 'fixed',
+      left: '24px',
+      top: '24px',
+      width: `${canvasPx}px`,
+      height: `${canvasPx}px`,
+      zIndex: '89',
+      borderRadius: '8px',
+      border: '1px solid rgba(143,214,255,0.35)',
+      boxShadow: '0 6px 24px rgba(0,0,0,0.5)',
+      background: '#000',
+      cursor: 'crosshair',
     });
     document.body.appendChild(canvas);
 
@@ -147,14 +171,14 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
         uAtlasSizePx: { value: layout.atlasSizePx },
         uWorldSizePx: { value: 0 }, // set per-floor in render()
       },
-      vertexShader: /* glsl */`
+      vertexShader: /* glsl */ `
         varying vec2 vUv;
         void main() {
           vUv = uv;
           gl_Position = vec4(position.xy, 0.0, 1.0);
         }
       `,
-      fragmentShader: /* glsl */`
+      fragmentShader: /* glsl */ `
         precision highp float;
         precision highp sampler2DArray;
         varying vec2 vUv;
@@ -166,10 +190,10 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
     });
     const scene = new THREE.Scene();
     scene.add(new THREE.Mesh(quadGeometry, quadMaterial));
-    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1); // matches FullscreenPresent.js's convention
+    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1); // matches fullscreen-present.js's convention
 
     let view = null; // set once the first floor is loaded (needs its worldSizePx)
-    let frameTimes = [];
+    const frameTimes = [];
     let lastError = null;
     let lastFramedUV = null; // set by reframeQuad(), exposed in diagnostics for ground-truth debugging
 
@@ -212,7 +236,7 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
       return out;
     }
 
-    function renderFrame(t) {
+    function renderFrame() {
       const t0 = performance.now();
       renderer.render(scene, camera);
       frameTimes.push(performance.now() - t0);
@@ -346,7 +370,10 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
         const slot = cache.slotOf(page.key);
         if (slot === null) continue;
         const i = (page.py * entry.n + page.px) * 4;
-        entry.buf[i] = slot & 0xff; entry.buf[i + 1] = (slot >> 8) & 0xff; entry.buf[i + 2] = 0; entry.buf[i + 3] = 255;
+        entry.buf[i] = slot & 0xff;
+        entry.buf[i + 1] = (slot >> 8) & 0xff;
+        entry.buf[i + 2] = 0;
+        entry.buf[i + 3] = 255;
       }
       entry.indirectionTexture.needsUpdate = true;
 
@@ -371,7 +398,8 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
     }
 
     function onKeyDown(e) {
-      if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable)) return;
+      if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable))
+        return;
       // Decide SYNCHRONOUSLY whether this key does anything (applyKey itself is
       // pure/sync) so preventDefault() fires before the event finishes — calling
       // it after the async residency update below would be too late for the
@@ -407,7 +435,17 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
     window.addEventListener('keydown', onKeyDown, { capture: true });
 
     _active = {
-      THREE, renderer, atlas, canvas, quadMaterial, quadGeometry, floors, cache, layout, onKeyDown, floorCount,
+      THREE,
+      renderer,
+      atlas,
+      canvas,
+      quadMaterial,
+      quadGeometry,
+      floors,
+      cache,
+      layout,
+      onKeyDown,
+      floorCount,
       getView: () => view,
       applyKeyAndUpdate, // exposed so MapShine.soakHooks.pan drives the EXACT same path a real keypress does
       getDiagnostics() {
@@ -427,7 +465,9 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
       },
     };
 
-    console.log('[vt-pan-viewer] started — click the canvas, then arrow keys/WASD pan, +/- zoom, 0-2/Tab floor-switch.');
+    console.log(
+      '[vt-pan-viewer] started — click the canvas, then arrow keys/WASD pan, +/- zoom, 0-2/Tab floor-switch.'
+    );
     return { ok: true, ..._active.getDiagnostics() };
   } catch (err) {
     diag0.ok = false;

@@ -53,7 +53,7 @@ const ELEV_STEP = 10; // Levels elevation band height per floor
 // --- deterministic PRNG (seedable; no Math.random so fixtures are stable) ----
 function lcg(seed) {
   let s = seed >>> 0;
-  return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+  return () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296;
 }
 
 // --- 5x7 bitmap font: digits, 'F', ',', space — enough for "F0 12,7" labels --
@@ -84,7 +84,10 @@ const FLOOR_TINT = [
 function px(d, size, x, y, r, g, b, a = 255) {
   if (x < 0 || y < 0 || x >= size || y >= size) return;
   const i = (y * size + x) * 4;
-  d[i] = r; d[i + 1] = g; d[i + 2] = b; d[i + 3] = a;
+  d[i] = r;
+  d[i + 1] = g;
+  d[i + 2] = b;
+  d[i + 3] = a;
 }
 
 function drawText(d, size, x, y, str, scale, rgb) {
@@ -130,9 +133,18 @@ function buildAlbedo(f) {
     for (let x = 0; x < SIZE; x++) {
       const cx = (x / CELL) | 0;
       const i = (y * SIZE + x) * 4;
-      if (!isSolid(f, cx, cy)) { d[i + 3] = 0; continue; } // hole → transparent
+      if (!isSolid(f, cx, cy)) {
+        d[i + 3] = 0;
+        continue;
+      } // hole → transparent
       const grid = inGridY || x % CELL < 3;
-      if (grid) { d[i] = 210; d[i + 1] = 210; d[i + 2] = 230; d[i + 3] = 255; continue; }
+      if (grid) {
+        d[i] = 210;
+        d[i + 1] = 210;
+        d[i + 2] = 230;
+        d[i + 3] = 255;
+        continue;
+      }
       // per-cell position-encoding tint over the floor base — region errors show as hue jumps
       d[i] = (tint[0] + ((cx * 17) % 60)) & 255;
       d[i + 1] = (tint[1] + ((cy * 17) % 60)) & 255;
@@ -144,7 +156,8 @@ function buildAlbedo(f) {
   for (let cy = 0; cy < cellsX; cy++)
     for (let cx = 0; cx < cellsX; cx++)
       if (isSolid(f, cx, cy)) {
-        const ox = cx * CELL + 8, oy = cy * CELL + 8;
+        const ox = cx * CELL + 8,
+          oy = cy * CELL + 8;
         drawText(d, SIZE, ox, oy, `F${f}`, labelScale, [255, 255, 120]);
         drawText(d, SIZE, ox, oy + 9 * labelScale, `${cx},${cy}`, labelScale, [230, 230, 230]);
       }
@@ -164,7 +177,10 @@ function buildOutdoors(f) {
       const band = (((x + y + f * SIZE) / (SIZE / 3)) | 0) % 2 === 0;
       const outdoor = margin || band;
       const v = outdoor ? 255 : 0;
-      d[i] = v; d[i + 1] = v; d[i + 2] = v; d[i + 3] = 255;
+      d[i] = v;
+      d[i + 1] = v;
+      d[i + 2] = v;
+      d[i + 3] = 255;
     }
   return png;
 }
@@ -177,8 +193,11 @@ function buildSpecular(f) {
   for (let y = 0; y < SIZE; y++)
     for (let x = 0; x < SIZE; x++) {
       const i = (y * SIZE + x) * 4;
-      const s = ((x + y + f * 70) % period) < 40 ? 255 : 20;
-      d[i] = s; d[i + 1] = s; d[i + 2] = s; d[i + 3] = 255;
+      const s = (x + y + f * 70) % period < 40 ? 255 : 20;
+      d[i] = s;
+      d[i + 1] = s;
+      d[i + 2] = s;
+      d[i + 3] = 255;
     }
   return png;
 }
@@ -209,7 +228,8 @@ function buildFoliage(f, seed, count, radius, color) {
   const d = png.data; // all zero → fully transparent background
   const rnd = lcg(seed + f * 131);
   for (let n = 0; n < count; n++) {
-    const cxp = rnd() * SIZE, cyp = rnd() * SIZE;
+    const cxp = rnd() * SIZE,
+      cyp = rnd() * SIZE;
     const R = radius * (0.6 + rnd() * 0.8);
     for (let dy = -R; dy <= R; dy++)
       for (let dx = -R; dx <= R; dx++) {
@@ -224,9 +244,7 @@ function buildFoliage(f, seed, count, radius, color) {
 
 async function writePNG(png, file) {
   const p = path.join(OUT_DIR, file);
-  await new Promise((res, rej) =>
-    png.pack().pipe(fs.createWriteStream(p)).on('finish', res).on('error', rej)
-  );
+  await new Promise((res, rej) => png.pack().pipe(fs.createWriteStream(p)).on('finish', res).on('error', rej));
   return +(fs.statSync(p).size / 1048576).toFixed(2);
 }
 
@@ -311,4 +329,7 @@ async function main() {
   console.log(`  3. The "Keyhole Torture" scene appears — that's the Stage 0 fixture gate.`);
 }
 
-main().catch((e) => { console.error('[torture] FAILED:', e); process.exit(1); });
+main().catch((e) => {
+  console.error('[torture] FAILED:', e);
+  process.exit(1);
+});

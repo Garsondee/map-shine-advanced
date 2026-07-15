@@ -51,17 +51,19 @@ export class FullscreenPresent {
     this._sizeVec = new THREE.Vector2();
     this._material = new THREE.ShaderMaterial({
       uniforms: {
-        tDiffuse: { value: null }, uToneMap: { value: 1 }, uKnee: { value: 0.9 },
+        tDiffuse: { value: null },
+        uToneMap: { value: 1 },
+        uKnee: { value: 0.9 },
         uDither: { value: 1 },
       },
-      vertexShader: /* glsl */`
+      vertexShader: /* glsl */ `
         varying vec2 vUv;
         void main() {
           vUv = uv;
           gl_Position = vec4(position.xy, 0.0, 1.0);
         }
       `,
-      fragmentShader: /* glsl */`
+      fragmentShader: /* glsl */ `
         precision highp float;
         uniform sampler2D tDiffuse;
         uniform float uToneMap;   // 1 = highlight rolloff, 0 = passthrough (hard clip)
@@ -134,12 +136,11 @@ export class FullscreenPresent {
 
     const prevTarget = renderer.getRenderTarget?.();
     const prevAutoClear = renderer.autoClear;
-    const prevScissorTest = (typeof renderer.getScissorTest === 'function')
-      ? renderer.getScissorTest() : null;
+    const prevScissorTest = typeof renderer.getScissorTest === 'function' ? renderer.getScissorTest() : null;
 
     this._material.uniforms.tDiffuse.value = texture;
-    this._material.uniforms.uToneMap.value = (opts?.tonemap === false) ? 0 : 1;
-    this._material.uniforms.uDither.value = (opts?.dither === false) ? 0 : 1;
+    this._material.uniforms.uToneMap.value = opts?.tonemap === false ? 0 : 1;
+    this._material.uniforms.uDither.value = opts?.dither === false ? 0 : 1;
     if (opts && Number.isFinite(opts.knee)) {
       this._material.uniforms.uKnee.value = Math.max(0.0, Math.min(1.0, opts.knee));
     }
@@ -163,18 +164,29 @@ export class FullscreenPresent {
     } finally {
       renderer.autoClear = prevAutoClear;
       if (prevScissorTest !== null && typeof renderer.setScissorTest === 'function') {
-        try { renderer.setScissorTest(prevScissorTest); } catch (_) {}
+        try {
+          renderer.setScissorTest(prevScissorTest);
+        } catch (_) {}
       }
       // Intentionally do NOT restore a transparent clearAlpha (V2 note): leaving
       // clearAlpha=0 ends the frame transparent and reveals stale content.
-      try { renderer.setRenderTarget(prevTarget ?? null); } catch (_) {}
+      try {
+        renderer.setRenderTarget(prevTarget ?? null);
+      } catch (_) {}
     }
     return true;
   }
 
   dispose() {
-    try { this._quad?.geometry?.dispose?.(); } catch (_) {}
-    try { this._material?.dispose?.(); } catch (_) {}
-    this._scene = null; this._camera = null; this._material = null; this._quad = null;
+    try {
+      this._quad?.geometry?.dispose?.();
+    } catch (_) {}
+    try {
+      this._material?.dispose?.();
+    } catch (_) {}
+    this._scene = null;
+    this._camera = null;
+    this._material = null;
+    this._quad = null;
   }
 }

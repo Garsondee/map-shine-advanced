@@ -3,7 +3,12 @@
  * floor-switch state. No DOM, no THREE.
  */
 import {
-  createInitialViewState, applyPanKey, applyZoomKey, applyFloorSwitchKey, applyKey, viewToWorldRect,
+  createInitialViewState,
+  applyPanKey,
+  applyZoomKey,
+  applyFloorSwitchKey,
+  applyKey,
+  viewToWorldRect,
 } from '../view-state.js';
 
 export function run(t) {
@@ -89,6 +94,9 @@ export function run(t) {
   {
     const v = { centerXPx: 6000, centerYPx: 6000, halfSpanPx: 500, floorIndex: 0 };
     const r = viewToWorldRect(v);
-    ok('viewToWorldRect: correct rect from center+halfSpan', r.minX === 5500 && r.maxX === 6500 && r.minY === 5500 && r.maxY === 6500);
+    ok(
+      'viewToWorldRect: correct rect from center+halfSpan',
+      r.minX === 5500 && r.maxX === 6500 && r.minY === 5500 && r.maxY === 6500
+    );
   }
 }

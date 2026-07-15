@@ -36,11 +36,9 @@ export function runVtSelfTest() {
 
   // PageTable against the torture scene's actual world size.
   const table = new PageTable({ id: 'selftest:floor0', worldSizePx: 12000 });
-  check(
-    '12000px world -> 49x49 pages at mip0 (Keyhole.md §4.1 exact figure)',
-    table.pagesPerAxis(0) === 49,
-    { pagesPerAxis0: table.pagesPerAxis(0) }
-  );
+  check('12000px world -> 49x49 pages at mip0 (Keyhole.md §4.1 exact figure)', table.pagesPerAxis(0) === 49, {
+    pagesPerAxis0: table.pagesPerAxis(0),
+  });
 
   // Residency against a plausible mid-zoom view rect.
   const rect = { minX: 4000, minY: 4000, maxX: 8000, maxY: 8000 };
@@ -53,7 +51,9 @@ export function runVtSelfTest() {
   );
 
   const pins = coarsePinSet(table);
-  check('coarse pin set is "tens of pages" (Keyhole.md §4.1)', pins.length > 0 && pins.length < 100, { coarsePinCount: pins.length });
+  check('coarse pin set is "tens of pages" (Keyhole.md §4.1)', pins.length > 0 && pins.length < 100, {
+    coarsePinCount: pins.length,
+  });
 
   // PageCache: fixed capacity holds under real pressure.
   const cache = new PageCache({ budgetBytes: 32 * 256 * 1024 }); // 32-page budget, fast in-browser

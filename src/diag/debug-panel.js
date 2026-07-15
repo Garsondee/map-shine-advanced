@@ -39,7 +39,11 @@ export function installDebugPanel(MapShine) {
 
   function safeStringify(v) {
     if (typeof v === 'string') return v;
-    try { return JSON.stringify(v); } catch (_) { return String(v); }
+    try {
+      return JSON.stringify(v);
+    } catch (_) {
+      return String(v);
+    }
   }
 
   function envelope(id, payload) {
@@ -73,7 +77,12 @@ export function installDebugPanel(MapShine) {
 
   async function copyToClipboard(text) {
     if (navigator.clipboard?.writeText) {
-      try { await navigator.clipboard.writeText(text); return true; } catch (_) { /* fall through */ }
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (_) {
+        /* fall through */
+      }
     }
     // Fallback for contexts where the async Clipboard API is unavailable.
     try {
@@ -116,8 +125,12 @@ export function installDebugPanel(MapShine) {
 
     const header = document.createElement('div');
     Object.assign(header.style, {
-      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-      cursor: 'pointer', fontWeight: 'bold', marginBottom: '4px',
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      cursor: 'pointer',
+      fontWeight: 'bold',
+      marginBottom: '4px',
     });
     header.innerHTML = `<span>🗝️ Keyhole Debug Panel</span><span id="msa-debug-toggle">▾</span>`;
     header.addEventListener('click', () => {
@@ -157,8 +170,12 @@ export function installDebugPanel(MapShine) {
         padding: '4px 6px',
         cursor: 'pointer',
       });
-      btn.addEventListener('mouseenter', () => { btn.style.background = 'rgba(143,214,255,0.28)'; });
-      btn.addEventListener('mouseleave', () => { btn.style.background = 'rgba(143,214,255,0.12)'; });
+      btn.addEventListener('mouseenter', () => {
+        btn.style.background = 'rgba(143,214,255,0.28)';
+      });
+      btn.addEventListener('mouseleave', () => {
+        btn.style.background = 'rgba(143,214,255,0.12)';
+      });
       btn.addEventListener('click', async () => {
         statusEl.textContent = `Running "${id}"…`;
         try {
@@ -187,20 +204,26 @@ export function installDebugPanel(MapShine) {
   }
 
   // ---- baseline reports every stage benefits from --------------------------
-  registerReport('boot', 'Boot', () => envelope('boot', {
-    stage: MapShine.__stage || 'unknown',
-    threeRevision: MapShine.THREE?.REVISION,
-    heartbeatRendering: !!MapShine.__heartbeat,
-    hasFoundryHooks: typeof Hooks !== 'undefined',
-    hasGame: typeof game !== 'undefined',
-    userAgent: navigator.userAgent,
-    url: location.href,
-  }));
+  registerReport('boot', 'Boot', () =>
+    envelope('boot', {
+      stage: MapShine.__stage || 'unknown',
+      threeRevision: MapShine.THREE?.REVISION,
+      heartbeatRendering: !!MapShine.__heartbeat,
+      hasFoundryHooks: typeof Hooks !== 'undefined',
+      hasGame: typeof game !== 'undefined',
+      userAgent: navigator.userAgent,
+      url: location.href,
+    })
+  );
 
   registerReport('environment', 'Environment/GPU', () => {
     const canvas = MapShine.__heartbeat?.renderer?.domElement || document.createElement('canvas');
     const gl = canvas.getContext('webgl2') || MapShine.__heartbeat?.renderer?.getContext?.();
-    let vendor = null, renderer = null, maxTextureSize = null, maxArrayLayers = null, extensions = [];
+    let vendor = null,
+      renderer = null,
+      maxTextureSize = null,
+      maxArrayLayers = null,
+      extensions = [];
     if (gl) {
       const dbg = gl.getExtension('WEBGL_debug_renderer_info');
       vendor = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
@@ -211,21 +234,29 @@ export function installDebugPanel(MapShine) {
     }
     return envelope('environment', {
       webgl2: !!gl,
-      vendor, renderer, maxTextureSize, maxArrayLayers,
+      vendor,
+      renderer,
+      maxTextureSize,
+      maxArrayLayers,
       hasTimerQuery: extensions.includes('EXT_disjoint_timer_query_webgl2'),
       devicePixelRatio: window.devicePixelRatio,
       screen: { width: screen.width, height: screen.height },
       viewport: { width: window.innerWidth, height: window.innerHeight },
       memory: performance.memory
-        ? { usedJSHeapMB: Math.round(performance.memory.usedJSHeapSize / 1048576), limitJSHeapMB: Math.round(performance.memory.jsHeapSizeLimit / 1048576) }
+        ? {
+            usedJSHeapMB: Math.round(performance.memory.usedJSHeapSize / 1048576),
+            limitJSHeapMB: Math.round(performance.memory.jsHeapSizeLimit / 1048576),
+          }
         : null,
     });
   });
 
-  registerReport('console', 'Console (warn/error log)', () => envelope('console', {
-    entryCount: consoleBuffer.length,
-    entries: consoleBuffer.slice(-100), // most recent 100
-  }));
+  registerReport('console', 'Console (warn/error log)', () =>
+    envelope('console', {
+      entryCount: consoleBuffer.length,
+      entries: consoleBuffer.slice(-100), // most recent 100
+    })
+  );
 
   if (typeof MapShine.soak === 'function') {
     registerReport('soak', 'Soak (3 cycles)', async () => {
@@ -234,6 +265,14 @@ export function installDebugPanel(MapShine) {
     });
   }
 
-  MapShine.debug = { registerReport, runReport, copyToClipboard, attachPanel, get reports() { return reports; } };
+  MapShine.debug = {
+    registerReport,
+    runReport,
+    copyToClipboard,
+    attachPanel,
+    get reports() {
+      return reports;
+    },
+  };
   return MapShine.debug;
 }

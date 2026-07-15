@@ -10,7 +10,13 @@ import { computeAtlasLayout, slotToAtlasPosition, PageAtlas, BYTES_PER_TEXEL_RGB
 function makeAtlasTHREE() {
   const calls = { copyTextureToTexture: [] };
   const T = {};
-  T.Vector3 = class { constructor(x = 0, y = 0, z = 0) { this.x = x; this.y = y; this.z = z; } };
+  T.Vector3 = class {
+    constructor(x = 0, y = 0, z = 0) {
+      this.x = x;
+      this.y = y;
+      this.z = z;
+    }
+  };
   T.DataArrayTexture = class {
     constructor(data, width, height, depth) {
       this.isDataArrayTexture = true;
@@ -19,14 +25,18 @@ function makeAtlasTHREE() {
       this.needsUpdate = false;
       this._disposed = false;
     }
-    dispose() { this._disposed = true; }
+    dispose() {
+      this._disposed = true;
+    }
   };
   calls.resetState = 0;
   const renderer = {
     copyTextureToTexture(src, dst, srcRegion, dstPosition, level) {
       calls.copyTextureToTexture.push({ src, dst, srcRegion, dstPosition, level });
     },
-    resetState() { calls.resetState++; },
+    resetState() {
+      calls.resetState++;
+    },
   };
   return { T, renderer, calls };
 }
@@ -39,7 +49,10 @@ export function run(t) {
     const layout = computeAtlasLayout({ budgetBytes: 512 * 1024 * 1024 }); // Keyhole Q2 default
     ok('layout: 4096px atlas (default)', layout.atlasSizePx === 4096);
     ok('layout: 256px pages (default)', layout.pageSizePx === 256);
-    ok('layout: 16x16=256 pages/layer, matching Keyhole.md §4.1 exactly', layout.pagesPerAxis === 16 && layout.pagesPerLayer === 256);
+    ok(
+      'layout: 16x16=256 pages/layer, matching Keyhole.md §4.1 exactly',
+      layout.pagesPerAxis === 16 && layout.pagesPerLayer === 256
+    );
     ok('layout: 64 MB/layer, matching Keyhole.md §4.1 exactly', layout.layerBytes === 64 * 1024 * 1024);
     ok('layout: 8 layers at the 512 MB / 8 GB-tier default, matching Keyhole.md §4.1 exactly', layout.layers === 8);
     ok('layout: 2048 total pages, matching Keyhole.md §4.1 exactly', layout.capacityPages === 2048);
@@ -58,17 +71,33 @@ export function run(t) {
   {
     throws('layout: rejects non-positive budget', () => computeAtlasLayout({ budgetBytes: 0 }));
     throws('layout: rejects atlasSizePx not a multiple of pageSizePx', () =>
-      computeAtlasLayout({ budgetBytes: 512 * 1024 * 1024, pageSizePx: 256, atlasSizePx: 4000 }));
+      computeAtlasLayout({ budgetBytes: 512 * 1024 * 1024, pageSizePx: 256, atlasSizePx: 4000 })
+    );
   }
 
   // --- slotToAtlasPosition: fills layer 0 row-major before layer 1 --------
   {
     const layout = computeAtlasLayout({ budgetBytes: 512 * 1024 * 1024 });
-    ok('slot 0 -> (0,0) layer 0', JSON.stringify(slotToAtlasPosition(0, layout)) === JSON.stringify({ x: 0, y: 0, layer: 0 }));
-    ok('slot 1 -> (256,0) layer 0 (next tile in the row)', JSON.stringify(slotToAtlasPosition(1, layout)) === JSON.stringify({ x: 256, y: 0, layer: 0 }));
-    ok('slot 16 -> (0,256) layer 0 (wraps to next row, 16 tiles/row)', JSON.stringify(slotToAtlasPosition(16, layout)) === JSON.stringify({ x: 0, y: 256, layer: 0 }));
-    ok('slot 256 -> (0,0) layer 1 (first slot of the next layer)', JSON.stringify(slotToAtlasPosition(256, layout)) === JSON.stringify({ x: 0, y: 0, layer: 1 }));
-    ok('slot 2047 (last of 2048) -> last tile of layer 7', JSON.stringify(slotToAtlasPosition(2047, layout)) === JSON.stringify({ x: 15 * 256, y: 15 * 256, layer: 7 }));
+    ok(
+      'slot 0 -> (0,0) layer 0',
+      JSON.stringify(slotToAtlasPosition(0, layout)) === JSON.stringify({ x: 0, y: 0, layer: 0 })
+    );
+    ok(
+      'slot 1 -> (256,0) layer 0 (next tile in the row)',
+      JSON.stringify(slotToAtlasPosition(1, layout)) === JSON.stringify({ x: 256, y: 0, layer: 0 })
+    );
+    ok(
+      'slot 16 -> (0,256) layer 0 (wraps to next row, 16 tiles/row)',
+      JSON.stringify(slotToAtlasPosition(16, layout)) === JSON.stringify({ x: 0, y: 256, layer: 0 })
+    );
+    ok(
+      'slot 256 -> (0,0) layer 1 (first slot of the next layer)',
+      JSON.stringify(slotToAtlasPosition(256, layout)) === JSON.stringify({ x: 0, y: 0, layer: 1 })
+    );
+    ok(
+      'slot 2047 (last of 2048) -> last tile of layer 7',
+      JSON.stringify(slotToAtlasPosition(2047, layout)) === JSON.stringify({ x: 15 * 256, y: 15 * 256, layer: 7 })
+    );
     throws('slotToAtlasPosition rejects negative slots', () => slotToAtlasPosition(-1, layout));
   }
 
@@ -77,16 +106,24 @@ export function run(t) {
     const { T } = makeAtlasTHREE();
     const layout = computeAtlasLayout({ budgetBytes: 512 * 1024 * 1024 });
     const atlas = new PageAtlas({ THREE: T, layout });
-    ok('PageAtlas: texture matches layout dims', atlas.texture.image.width === 4096 && atlas.texture.image.height === 4096 && atlas.texture.image.depth === 8);
+    ok(
+      'PageAtlas: texture matches layout dims',
+      atlas.texture.image.width === 4096 && atlas.texture.image.height === 4096 && atlas.texture.image.depth === 8
+    );
     // MUST be real (non-null) data -- confirmed live 2026-07-15: THREE's
     // uploadTexture() unconditionally calls texSubImage3D(..., image.data) on
     // first use, and `null` there produced real GL errors ("no bound
     // PIXEL_UNPACK_BUFFER"), leaving the atlas never properly established.
     const data = atlas.texture.image.data;
     ok('PageAtlas: allocated with a REAL zeroed buffer, not null', data instanceof Uint8Array && data.length > 0);
-    ok('PageAtlas: initial buffer is exactly the atlas\'s own fixed size (never world-scaling)',
-      data.length === 4096 * 4096 * 8 * 4);
-    ok('PageAtlas: initial buffer is zeroed (a clean initial-clear state)', data.every((b) => b === 0));
+    ok(
+      "PageAtlas: initial buffer is exactly the atlas's own fixed size (never world-scaling)",
+      data.length === 4096 * 4096 * 8 * 4
+    );
+    ok(
+      'PageAtlas: initial buffer is zeroed (a clean initial-clear state)',
+      data.every((b) => b === 0)
+    );
   }
 
   // --- PageAtlas: uploadPage computes the right dstPosition + calls the ----
@@ -100,7 +137,10 @@ export function run(t) {
     ok('uploadPage: called copyTextureToTexture exactly once', calls.copyTextureToTexture.length === 1);
     const call = calls.copyTextureToTexture[0];
     ok('uploadPage: srcRegion is null (whole page)', call.srcRegion === null);
-    ok('uploadPage: dstPosition is the correct slot pixel offset', call.dstPosition.x === 256 && call.dstPosition.y === 256 && call.dstPosition.z === 0);
+    ok(
+      'uploadPage: dstPosition is the correct slot pixel offset',
+      call.dstPosition.x === 256 && call.dstPosition.y === 256 && call.dstPosition.z === 0
+    );
     ok('uploadPage: dst is the atlas texture itself', call.dst === atlas.texture);
     ok('uploadPage: src is the passed-in decoded page texture', call.src === fakeSrc);
 
@@ -129,6 +169,9 @@ export function run(t) {
   {
     const layout = computeAtlasLayout({ budgetBytes: 512 * 1024 * 1024 });
     const expectedPageBytes = layout.pageSizePx * layout.pageSizePx * BYTES_PER_TEXEL_RGBA8;
-    ok('layout math is internally consistent with BYTES_PER_TEXEL_RGBA8', layout.layerBytes === layout.pagesPerLayer * expectedPageBytes);
+    ok(
+      'layout math is internally consistent with BYTES_PER_TEXEL_RGBA8',
+      layout.layerBytes === layout.pagesPerLayer * expectedPageBytes
+    );
   }
 }

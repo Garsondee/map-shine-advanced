@@ -36,13 +36,29 @@ let _active = null; // singleton — one smoke test at a time, so repeated click
 
 function disposeActive() {
   if (!_active) return;
-  try { _active.renderer.setAnimationLoop(null); } catch (_) {}
-  try { _active.atlas.dispose(); } catch (_) {}
-  try { _active.quadMaterial.dispose(); } catch (_) {}
-  try { _active.quadGeometry.dispose(); } catch (_) {}
-  try { _active.indirectionTexture.dispose(); } catch (_) {}
-  for (const t of _active.pageTextures) { try { t.dispose(); } catch (_) {} }
-  try { _active.canvas.remove(); } catch (_) {}
+  try {
+    _active.renderer.setAnimationLoop(null);
+  } catch (_) {}
+  try {
+    _active.atlas.dispose();
+  } catch (_) {}
+  try {
+    _active.quadMaterial.dispose();
+  } catch (_) {}
+  try {
+    _active.quadGeometry.dispose();
+  } catch (_) {}
+  try {
+    _active.indirectionTexture.dispose();
+  } catch (_) {}
+  for (const t of _active.pageTextures) {
+    try {
+      t.dispose();
+    } catch (_) {}
+  }
+  try {
+    _active.canvas.remove();
+  } catch (_) {}
   _active = null;
 }
 
@@ -82,9 +98,16 @@ export async function runVtSmokeTest({ THREE, imageUrl }) {
     canvas.width = 480;
     canvas.height = 480;
     Object.assign(canvas.style, {
-      position: 'fixed', left: '12px', bottom: '12px', width: '480px', height: '480px',
-      zIndex: '89', borderRadius: '8px', border: '1px solid rgba(143,214,255,0.35)',
-      boxShadow: '0 6px 24px rgba(0,0,0,0.5)', background: '#000',
+      position: 'fixed',
+      left: '12px',
+      bottom: '12px',
+      width: '480px',
+      height: '480px',
+      zIndex: '89',
+      borderRadius: '8px',
+      border: '1px solid rgba(143,214,255,0.35)',
+      boxShadow: '0 6px 24px rgba(0,0,0,0.5)',
+      background: '#000',
     });
     document.body.appendChild(canvas);
 
@@ -120,7 +143,10 @@ export async function runVtSmokeTest({ THREE, imageUrl }) {
       pageTextures.push(srcTex);
 
       const { resident, slot } = cache.request(key, { pin: 'view' });
-      if (!resident) { diag.errors.push(`cache miss for ${key} — budget too small for the 9-page block`); continue; }
+      if (!resident) {
+        diag.errors.push(`cache miss for ${key} — budget too small for the 9-page block`);
+        continue;
+      }
       atlas.uploadPage(slot, srcTex);
       table.setSlot(0, px, py, slot);
       residentPages.push({ px, py, slot, worldRect });
@@ -137,7 +163,10 @@ export async function runVtSmokeTest({ THREE, imageUrl }) {
     for (const { px, py, slot } of residentPages) {
       const [r, g, b, a] = encodeIndirectionTexel(slot, true);
       const i = (py * n + px) * 4;
-      buf[i] = r; buf[i + 1] = g; buf[i + 2] = b; buf[i + 3] = a;
+      buf[i] = r;
+      buf[i + 1] = g;
+      buf[i + 2] = b;
+      buf[i + 3] = a;
     }
     const indirectionTexture = new THREE.DataTexture(buf, n, n, THREE.RGBAFormat);
     indirectionTexture.flipY = false;
@@ -159,7 +188,8 @@ export async function runVtSmokeTest({ THREE, imageUrl }) {
     // Remap the plane's default 0..1 UV to the framed world-UV range.
     const uvAttr = quadGeometry.getAttribute('uv');
     for (let i = 0; i < uvAttr.count; i++) {
-      const u = uvAttr.getX(i), v = uvAttr.getY(i);
+      const u = uvAttr.getX(i),
+        v = uvAttr.getY(i);
       // V IS INVERTED HERE ON PURPOSE — confirmed live 2026-07-15 (rendered
       // upside-down without this). PlaneGeometry's v=1 is local +Y, and the
       // vertex shader below passes position.xy straight to gl_Position, so
@@ -186,14 +216,14 @@ export async function runVtSmokeTest({ THREE, imageUrl }) {
         uAtlasSizePx: { value: layout.atlasSizePx },
         uWorldSizePx: { value: table.worldSizePx },
       },
-      vertexShader: /* glsl */`
+      vertexShader: /* glsl */ `
         varying vec2 vUv;
         void main() {
           vUv = uv;
           gl_Position = vec4(position.xy, 0.0, 1.0);
         }
       `,
-      fragmentShader: /* glsl */`
+      fragmentShader: /* glsl */ `
         precision highp float;
         precision highp sampler2DArray;
         varying vec2 vUv;
@@ -218,7 +248,7 @@ export async function runVtSmokeTest({ THREE, imageUrl }) {
     const quad = new THREE.Mesh(quadGeometry, quadMaterial);
     scene.add(quad);
     // Matches the established fullscreen-quad convention already in this
-    // codebase (src/graph/FullscreenPresent.js) rather than inventing a new one.
+    // codebase (src/graph/fullscreen-present.js) rather than inventing a new one.
     const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
     renderer.render(scene, camera);

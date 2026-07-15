@@ -1,0 +1,24 @@
+# Keyhole doctrine: legacy/ is frozen and quarantined -- never touch it, not
+# even to reformat. It doesn't run; there is nothing to fix.
+legacy/
+
+# Third-party vendored code -- not ours to reformat (would create meaningless
+# diffs against upstream and make future re-vendoring harder to diff).
+src/vendor/
+
+# Reference-only source trees, not part of this project.
+foundryvttsourcecode_v14/
+gamesystemsourcecode/
+othermodules/
+
+# Build output / generated / regenerable / dependencies.
+dist/
+module-staging/
+node_modules/
+assets/torture/
+package-lock.json
+*.min.js
+
+# Data/content files with their own conventions, not code.
+data/
+languages/

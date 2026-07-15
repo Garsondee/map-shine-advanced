@@ -222,8 +222,8 @@ export class FrameGraph {
     for (const r of reads) {
       if (writes.includes(r)) {
         throw new Error(
-          `FrameGraph.addPass: pass "${pass.name}" both reads and writes "${r}" `
-          + '(feedback loop). Declare separate input/output resources.',
+          `FrameGraph.addPass: pass "${pass.name}" both reads and writes "${r}" ` +
+            '(feedback loop). Declare separate input/output resources.'
         );
       }
     }
@@ -252,21 +252,18 @@ export class FrameGraph {
     if (this._order) return this._order;
 
     const n = this._passes.length;
-    const writersOf = new Map();   // resource → [passIdx...] in registration order
-    const readersOf = new Map();   // resource → [passIdx...]
+    const writersOf = new Map(); // resource → [passIdx...] in registration order
+    const readersOf = new Map(); // resource → [passIdx...]
 
     for (let i = 0; i < n; i++) {
       const p = this._passes[i];
       for (const w of p.writes) {
         if (this._imports.has(w)) {
-          throw new Error(
-            `FrameGraph.compile: pass "${p.name}" writes imported (read-only) resource "${w}"`,
-          );
+          throw new Error(`FrameGraph.compile: pass "${p.name}" writes imported (read-only) resource "${w}"`);
         }
         if (!this._declared.has(w)) {
           throw new Error(
-            `FrameGraph.compile: pass "${p.name}" writes undeclared resource "${w}" `
-            + '(call declareResource first)',
+            `FrameGraph.compile: pass "${p.name}" writes undeclared resource "${w}" ` + '(call declareResource first)'
           );
         }
         if (!writersOf.has(w)) writersOf.set(w, []);
@@ -286,9 +283,7 @@ export class FrameGraph {
       if (this._imports.has(res)) continue;
       if (!writersOf.has(res)) {
         const first = this._passes[readers[0]];
-        throw new Error(
-          `FrameGraph.compile: pass "${first.name}" reads "${res}" but nothing writes or imports it`,
-        );
+        throw new Error(`FrameGraph.compile: pass "${first.name}" reads "${res}" but nothing writes or imports it`);
       }
     }
 
@@ -331,10 +326,12 @@ export class FrameGraph {
         indeg[m] -= 1;
         if (indeg[m] === 0) {
           // Insert keeping `ready` sorted by registration index.
-          let lo = 0; let hi = ready.length;
+          let lo = 0;
+          let hi = ready.length;
           while (lo < hi) {
             const mid = (lo + hi) >> 1;
-            if (ready[mid] < m) lo = mid + 1; else hi = mid;
+            if (ready[mid] < m) lo = mid + 1;
+            else hi = mid;
           }
           ready.splice(lo, 0, m);
         }
@@ -345,9 +342,7 @@ export class FrameGraph {
       const scheduled = new Set(order);
       const stuck = [];
       for (let i = 0; i < n; i++) if (!scheduled.has(i)) stuck.push(this._passes[i].name);
-      throw new Error(
-        `FrameGraph.compile: dependency cycle among passes [${stuck.join(', ')}]`,
-      );
+      throw new Error(`FrameGraph.compile: dependency cycle among passes [${stuck.join(', ')}]`);
     }
 
     this._order = order;
@@ -377,7 +372,11 @@ export class FrameGraph {
     // opens new ones. Guarded: the timer must never be able to break a frame.
     const gpuTimer = this._gpuTimer;
     if (gpuTimer) {
-      try { gpuTimer.frameBegin?.(); } catch (_) { /* timer self-manages errors */ }
+      try {
+        gpuTimer.frameBegin?.();
+      } catch (_) {
+        /* timer self-manages errors */
+      }
     }
 
     // A resource is "available" to a pass's get() once it has been produced this
@@ -395,7 +394,9 @@ export class FrameGraph {
       const ctx = this._makePassContext(pass, frameCtx, width, height, producedThisFrame);
       let gpuTimed = false;
       if (gpuTimer) {
-        try { gpuTimed = gpuTimer.begin(pass.name) === true; } catch (_) {}
+        try {
+          gpuTimed = gpuTimer.begin(pass.name) === true;
+        } catch (_) {}
       }
       const t0 = this._now();
       try {
@@ -408,7 +409,9 @@ export class FrameGraph {
         else throw err;
       } finally {
         if (gpuTimed) {
-          try { gpuTimer.end(); } catch (_) {}
+          try {
+            gpuTimer.end();
+          } catch (_) {}
         }
       }
       this._timings.set(pass.name, this._now() - t0);
@@ -440,16 +443,12 @@ export class FrameGraph {
       frame: frameCtx,
       get: (name) => {
         if (!readable.has(name)) {
-          throw new Error(
-            `FrameGraph: pass "${pass.name}" get("${name}") — not in its reads/writes`,
-          );
+          throw new Error(`FrameGraph: pass "${pass.name}" get("${name}") — not in its reads/writes`);
         }
         if (this._imports.has(name)) return this._imports.get(name);
         if (this._declared.has(name)) {
           if (!writable.has(name) && !producedThisFrame.has(name)) {
-            throw new Error(
-              `FrameGraph: pass "${pass.name}" reads "${name}" before it was produced this frame`,
-            );
+            throw new Error(`FrameGraph: pass "${pass.name}" reads "${name}" before it was produced this frame`);
           }
           return this._acquire(name, width, height).handle;
         }
@@ -457,9 +456,7 @@ export class FrameGraph {
       },
       target: (name) => {
         if (!writable.has(name)) {
-          throw new Error(
-            `FrameGraph: pass "${pass.name}" target("${name}") — not in its writes`,
-          );
+          throw new Error(`FrameGraph: pass "${pass.name}" target("${name}") — not in its writes`);
         }
         const entry = this._acquire(name, width, height);
         producedThisFrame.add(name);
@@ -582,7 +579,9 @@ export class FrameGraph {
   dispose() {
     if (this._allocator && typeof this._allocator.dispose === 'function') {
       for (const entry of this._pool.values()) {
-        try { this._allocator.dispose(entry.handle); } catch (_) {}
+        try {
+          this._allocator.dispose(entry.handle);
+        } catch (_) {}
       }
     }
     this._pool.clear();

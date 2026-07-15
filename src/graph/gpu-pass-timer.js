@@ -82,7 +82,9 @@ export class GpuPassTimer {
   }
 
   /** @returns {boolean} whether GPU timings can ever be produced. */
-  isSupported() { return this._supported && !this._dead; }
+  isSupported() {
+    return this._supported && !this._dead;
+  }
 
   /**
    * Poll pending queries and fold completed results into the results map.
@@ -158,7 +160,9 @@ export class GpuPassTimer {
   }
 
   /** @returns {Map<string, number>} pass name → latest completed GPU ms (live map, do not mutate). */
-  getResults() { return this._results; }
+  getResults() {
+    return this._results;
+  }
 
   /**
    * @param {string} where
@@ -177,11 +181,18 @@ export class GpuPassTimer {
   dispose() {
     const gl = this._gl;
     try {
-      if (this._active) { this._free.push(this._active.query); this._active = null; }
+      if (this._active) {
+        this._free.push(this._active.query);
+        this._active = null;
+      }
       for (const p of this._pending) this._free.push(p.query);
       this._pending.length = 0;
       if (gl && typeof gl.deleteQuery === 'function') {
-        for (const q of this._free) { try { gl.deleteQuery(q); } catch (_) {} }
+        for (const q of this._free) {
+          try {
+            gl.deleteQuery(q);
+          } catch (_) {}
+        }
       }
     } catch (_) {}
     this._free.length = 0;

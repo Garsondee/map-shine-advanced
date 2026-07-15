@@ -46,8 +46,11 @@ export class PageTable {
     const mip0 = Math.ceil(worldSizePx / payloadPx);
     this._pagesPerAxisByMip = [mip0];
     let n = mip0;
-    while (n > 1) { n = Math.ceil(n / 2); this._pagesPerAxisByMip.push(n); }
-    this.maxMip = maxMip ?? (this._pagesPerAxisByMip.length - 1);
+    while (n > 1) {
+      n = Math.ceil(n / 2);
+      this._pagesPerAxisByMip.push(n);
+    }
+    this.maxMip = maxMip ?? this._pagesPerAxisByMip.length - 1;
 
     /** @type {Map<string, {slot: number|null}>} "mip:px:py" -> entry */
     this._entries = new Map();
@@ -65,7 +68,9 @@ export class PageTable {
    * across virtual textures because it's prefixed with `this.id`.
    * @param {number} mip @param {number} px @param {number} py @returns {string}
    */
-  pageKey(mip, px, py) { return `${this.id}|m${mip}|${px},${py}`; }
+  pageKey(mip, px, py) {
+    return `${this.id}|m${mip}|${px},${py}`;
+  }
 
   /**
    * Clamp a page coordinate into this mip's valid grid range — residency
@@ -85,7 +90,10 @@ export class PageTable {
    */
   setSlot(mip, px, py, slot) {
     const key = `${mip}:${px}:${py}`;
-    if (slot === null) { this._entries.delete(key); return; }
+    if (slot === null) {
+      this._entries.delete(key);
+      return;
+    }
     this._entries.set(key, { slot });
   }
 

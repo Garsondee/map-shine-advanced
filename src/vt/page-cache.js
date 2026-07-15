@@ -63,7 +63,9 @@ export class PageCache {
   }
 
   /** Advance the frame counter the LRU clock reads. Call once per frame. */
-  tick() { this._frame++; }
+  tick() {
+    this._frame++;
+  }
 
   /**
    * Request residency for a page. If already resident, refreshes its LRU
@@ -120,10 +122,14 @@ export class PageCache {
   }
 
   /** @param {string} key @returns {boolean} */
-  isResident(key) { return this._keyToSlot.has(key); }
+  isResident(key) {
+    return this._keyToSlot.has(key);
+  }
 
   /** @param {string} key @returns {number|null} */
-  slotOf(key) { return this._keyToSlot.has(key) ? this._keyToSlot.get(key) : null; }
+  slotOf(key) {
+    return this._keyToSlot.has(key) ? this._keyToSlot.get(key) : null;
+  }
 
   /** @returns {number} slot index of the LRU-evictable victim, or -1 if none (all pinned). */
   _findLRUEvictable() {
@@ -133,14 +139,19 @@ export class PageCache {
       if (this._pin[s]) continue; // pinned classes are never evicted
       const key = this._slotToKey[s];
       if (key === null) continue; // shouldn't happen (would be in _free), defensive
-      if (this._lastUsed[s] < bestFrame) { bestFrame = this._lastUsed[s]; best = s; }
+      if (this._lastUsed[s] < bestFrame) {
+        bestFrame = this._lastUsed[s];
+        best = s;
+      }
     }
     return best;
   }
 
   /** @returns {{capacityPages:number, residentPages:number, pinnedCoarse:number, pinnedView:number, freePages:number, evictions:number, misses:number}} */
   stats() {
-    let pinnedCoarse = 0, pinnedView = 0, resident = 0;
+    let pinnedCoarse = 0,
+      pinnedView = 0,
+      resident = 0;
     for (let s = 0; s < this.capacityPages; s++) {
       if (this._slotToKey[s] !== null) resident++;
       if (this._pin[s] === 'coarse') pinnedCoarse++;

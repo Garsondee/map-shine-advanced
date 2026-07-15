@@ -44,7 +44,10 @@ export function chooseMip(table, worldRect, viewportPx) {
   // screen pixel actually needs.
   let mip = 0;
   let coverage = 1; // world-texels per page-texel at mip 0
-  while (coverage * 2 <= texelsPerScreenPx && mip < table.maxMip) { coverage *= 2; mip++; }
+  while (coverage * 2 <= texelsPerScreenPx && mip < table.maxMip) {
+    coverage *= 2;
+    mip++;
+  }
   return mip;
 }
 
@@ -97,9 +100,8 @@ export function planResidency(table, worldRect, viewportPx, opts = {}) {
   const mip = chooseMip(table, worldRect, viewportPx);
   const fine = computeVisiblePages(table, worldRect, { mip, guardPages: opts.guardPages });
   const coarserMip = Math.min(table.maxMip, mip + 1);
-  const prefetchCoarser = coarserMip > mip
-    ? computeVisiblePages(table, worldRect, { mip: coarserMip, guardPages: opts.guardPages })
-    : [];
+  const prefetchCoarser =
+    coarserMip > mip ? computeVisiblePages(table, worldRect, { mip: coarserMip, guardPages: opts.guardPages }) : [];
   return { mip, fine, prefetchCoarser };
 }
 
@@ -115,8 +117,7 @@ export function coarsePinSet(table) {
   const n = table.pagesPerAxis(mip);
   const out = [];
   for (let py = 0; py < n; py++)
-    for (let px = 0; px < n; px++)
-      out.push({ mip, px, py, key: table.pageKey(mip, px, py) });
+    for (let px = 0; px < n; px++) out.push({ mip, px, py, key: table.pageKey(mip, px, py) });
   return out;
 }
 

@@ -959,6 +959,22 @@ export class CameraFollower {
         log.warn('[floor-resident token-visibility] reading canvas.tokens.placeables threw', e);
       }
       const placeableIds = new Set(placeables.map((t) => t.document?.id).filter(Boolean));
+
+      const camera = window.MapShine?.camera ?? null;
+      const busScene = window.MapShine?.effectComposer?._floorCompositorV2?._renderBus?._scene ?? null;
+      let cameraInfo = null;
+      try {
+        if (camera) {
+          cameraInfo = {
+            position: camera.position ? [camera.position.x, camera.position.y, camera.position.z] : null,
+            zoom: camera.zoom ?? null,
+            layersMask: camera.layers?.mask ?? null,
+            near: camera.near ?? null,
+            far: camera.far ?? null,
+          };
+        }
+      } catch (e) { log.warn('[floor-resident token-visibility] reading camera threw', e); }
+
       const rows = [];
       let tokenSpritesEntries = [];
       try { tokenSpritesEntries = Array.from(tm?.tokenSprites ?? []); } catch (e) {
@@ -971,20 +987,47 @@ export class CameraFollower {
         if (foundryToken) {
           try { foundryIsVisible = foundryToken.isVisible; } catch (e) { foundryIsVisible = `threw: ${e?.message ?? e}`; }
         }
+        const sprite = spriteData?.sprite ?? null;
+        let position = null;
+        try { position = sprite?.position ? [sprite.position.x, sprite.position.y, sprite.position.z] : null; } catch (_) {}
+        let scale = null;
+        try { scale = sprite?.scale ? [sprite.scale.x, sprite.scale.y, sprite.scale.z] : null; } catch (_) {}
+        let layersMask = null;
+        try { layersMask = sprite?.layers?.mask ?? null; } catch (_) {}
+        let parentIsBusScene = null;
+        try { parentIsBusScene = busScene ? (sprite?.parent === busScene) : null; } catch (_) {}
+        let ndc = null;
+        try {
+          const THREE = window.THREE;
+          if (THREE && camera && sprite?.position) {
+            const v = new THREE.Vector3(sprite.position.x, sprite.position.y, sprite.position.z);
+            v.project(camera);
+            ndc = [v.x, v.y, v.z];
+          }
+        } catch (e) { ndc = `threw: ${e?.message ?? e}`; }
         rows.push({
           tokenId,
           name: spriteData?.tokenDoc?.name ?? foundryToken?.document?.name ?? null,
           inFoundryPlaceables: placeableIds.has(tokenId),
           foundryIsVisible,
-          spriteVisible: spriteData?.sprite?.visible ?? null,
-          spriteOpacity: spriteData?.sprite?.material?.opacity ?? null,
-          hasTextureMap: !!spriteData?.sprite?.material?.map,
+          spriteVisible: sprite?.visible ?? null,
+          spriteOpacity: sprite?.material?.opacity ?? null,
+          hasTextureMap: !!sprite?.material?.map,
+          position,
+          scale,
+          layersMask,
+          parentIsBusScene,
+          renderOrder: sprite?.renderOrder ?? null,
+          depthTest: sprite?.material?.depthTest ?? null,
+          depthWrite: sprite?.material?.depthWrite ?? null,
+          frustumCulled: sprite?.frustumCulled ?? null,
+          ndc,
         });
       }
       let activeVisionSourceCount = null;
       try { activeVisionSourceCount = Array.from(canvas?.effects?.visionSources ?? []).filter((s) => s.active).length; } catch (_) {}
       log.info('[floor-resident token-visibility] post-switch state', {
-        levelId: level?.levelId ?? null, activeVisionSourceCount, rows,
+        levelId: level?.levelId ?? null, activeVisionSourceCount, cameraInfo, busSceneChildCount: busScene?.children?.length ?? null, rows,
       });
     } catch (err) {
       log.warn('[floor-resident token-visibility] diagnostic block itself threw', err);

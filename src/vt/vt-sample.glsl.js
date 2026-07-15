@@ -140,6 +140,26 @@ vec4 vtSample(vec2 worldUV) {
   float payloadPx = uPageSizePx - uBorderPx * 2.0;
   vec2 worldPx = worldUV * uWorldSizePx;
 
+  // OUT-OF-WORLD GUARD (found live 2026-07-15 — "the very edge of the map
+  // causes a stretched blurred copy of the texture to appear... on all
+  // edges"): viewToWorldRect() is DELIBERATELY unclamped (view-state.js's own
+  // doc comment — lets computeVisiblePages naturally shrink the page COUNT
+  // near a world edge instead of silently re-centering the view). That means
+  // worldUV legitimately goes outside [0,1] whenever the framed rect extends
+  // past the world boundary — panning near an edge, or just a screen wider
+  // than the remaining world at the current zoom. Without this guard, the
+  // per-mip texel lookup below clamps its ivec2 index into [0, ppa-1] to stay
+  // in-bounds for the INDIRECTION array read (a real, still-needed safety
+  // clamp against a garbage array index) — but that silently makes every
+  // out-of-world UV re-sample the EDGE page over and over, which is exactly a
+  // stretched/smeared copy of that page's content. The fix is a distinct
+  // early-out BEFORE the mip walk: outside the world is its own case (matte
+  // black, like the empty space outside a level in any tile-based renderer),
+  // never resolved through the paging system at all.
+  if (worldPx.x < 0.0 || worldPx.y < 0.0 || worldPx.x >= uWorldSizePx || worldPx.y >= uWorldSizePx) {
+    return vec4(0.0, 0.0, 0.0, 1.0); // outside the world — matte black, not magenta (that's reserved for "broken pin invariant") and not a smear
+  }
+
   // No early return inside the loop (some weak drivers — the exact target
   // class — mis-optimize loop-body returns): accumulate into result + break.
   vec4 result = vec4(1.0, 0.0, 1.0, 1.0); // magenta tripwire (see doc above)

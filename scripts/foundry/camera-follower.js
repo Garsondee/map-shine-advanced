@@ -674,16 +674,28 @@ export class CameraFollower {
       if (window.MapShine) window.MapShine.__v3ViewOnlyFloorSwitchInFlight = true;
     } catch (_) {}
 
-    // 1. MSA state + emit (viewOnly) — drives FloorStack active index, per-floor
+    // 1. Foundry-side viewed-level state (scene._view, canvas.level override)
+    //    FIRST — synchronous, MUST precede the emit below. Foundry's own
+    //    Scene#_configureLevelTextures() (consulted by
+    //    FloorRenderBus#swapBackgroundImage via getVisibleLevelBackgroundLayers,
+    //    triggered by the emit) reads scene._view; emitting before this ran
+    //    left it resolving background art against the OLD floor and silently
+    //    discarding the correct src — see _applyFoundryViewedLevelSync's doc.
+    this._applyFoundryViewedLevelSync(level);
+
+    // 2. MSA state + emit (viewOnly) — drives FloorStack active index, per-floor
     //    visibility, and a view-only levelMaskRebuild that skips composeFloor +
     //    forceRepopulate (masks + effects resident).
     const ctx = this._applyActiveLevelByIndex(clamped, { emit: true, reason, viewOnly: true });
 
-    // 2. Foundry-side viewed-level state + object lifecycle + perception refresh
-    //    (no canvas.draw). Async — NOT awaited here so ctx still returns
-    //    synchronously (instant switch feel preserved) — see the method doc for
-    //    why its internal sequencing (await object draws before perception
-    //    refresh) matters.
+    // 3. Foundry-side object lifecycle + perception refresh (no canvas.draw).
+    //    Async — NOT awaited here so ctx still returns synchronously (instant
+    //    switch feel preserved) — see _applyFoundryViewedLevel's doc for why
+    //    its internal sequencing (await object draws before perception
+    //    refresh) matters. This re-runs step 1's sync writes too (idempotent,
+    //    cheap — a handful of property assignments) rather than splitting
+    //    further; what matters is they ran BEFORE the emit above, not that
+    //    they run exactly once.
     void this._applyFoundryViewedLevel(level).catch((err) => {
       log.warn('_applyFoundryViewedLevel failed', err);
     });
@@ -799,38 +811,35 @@ export class CameraFollower {
   }
 
   /**
-   * Update Foundry's viewed-level state WITHOUT a canvas.draw: set
+   * Synchronous half of {@link _applyFoundryViewedLevel}: set
    * `game.user.viewedLevel`, the scene's `_view` / `_viewPosition.level` and the
-   * pending `canvas._viewOptions.level`, then a perception refresh so vision /
-   * occlusion / lighting re-evaluate for the new level. This is the lightweight
-   * replacement for the level handling inside canvas.draw; each write is
-   * independently guarded so a Foundry API shift degrades (stale until the next
-   * full draw) rather than throwing.
+   * pending `canvas._viewOptions.level`. This is the lightweight replacement
+   * for the level handling inside canvas.draw; each write is independently
+   * guarded so a Foundry API shift degrades (stale until the next full draw)
+   * rather than throwing.
    *
    * Foundry-native token select / place / control all read `canvas.level` (the
    * private `#level`, committed only inside canvas.draw). We install a getter
    * override on `canvas.level` (see {@link _ensureCanvasLevelOverride}) so it
    * tracks `scene._view` — which we set below — even though canvas.draw never
-   * ran. That is what makes tokens on the switched-to floor selectable/placeable
-   * without the full-res background hold that canvas.draw would incur.
+   * ran.
    *
-   * IMPORTANT — async, and callers should await it before anything that reads
-   * Foundry-computed visibility (e.g. relying on `sightRefresh`/
-   * VisibilityController). Foundry's own `canvas.draw()` always AWAITS every
-   * PlaceableObject's `draw()` (which sets up its vision source, mesh, etc.)
-   * before the scene is considered ready. If the perception refresh below ran
-   * before a newly-created token's `draw()` finished, its vision source
-   * wasn't registered yet — `VisibilityController`'s `sightRefresh` handler
-   * (Token#isVisible / canvas.tokens.placeables) then either couldn't find it
-   * yet or read stale/uninitialized state, so the token was selectable
-   * (creation alone is synchronous) but never rendered visible. See
-   * {@link _refreshPlaceablesLayerForResidentSwitch}.
+   * MUST run BEFORE the `mapShineLevelContextChanged` emit, not just before
+   * the async tail. `scene._view` is also read by FOUNDRY'S OWN
+   * `Scene#_configureLevelTextures()` (via `getVisibleLevelBackgroundLayers`,
+   * consulted by `FloorRenderBus#swapBackgroundImage`) — if the emit fired
+   * with `scene._view` still on the OLD floor, that Foundry method silently
+   * discarded the correctly-resolved background src the levelMaskRebuild
+   * handler had already computed and re-derived the WRONG one from stale
+   * state, matching the exact "background doesn't update, tile does" bug
+   * report. `_applyViewOnlyLevelSwitch` previously called this only AFTER
+   * emitting (fire-and-forget) — that ordering was the actual bug.
    *
    * @param {object} level - the target `_levels[]` entry.
-   * @returns {Promise<void>}
+   * @returns {string|null} the resolved levelId.
    * @private
    */
-  async _applyFoundryViewedLevel(level) {
+  _applyFoundryViewedLevelSync(level) {
     const levelId = level?.levelId ?? null;
     // Install the canvas.level override BEFORE writing scene._view so the first
     // read after the switch already resolves to the new level.
@@ -849,6 +858,33 @@ export class CameraFollower {
     try {
       if (canvas?._viewOptions && levelId) canvas._viewOptions.level = levelId;
     } catch (_) {}
+    return levelId;
+  }
+
+  /**
+   * Async remainder of the Foundry-side floor-resident switch: PlaceableObject
+   * lifecycle sync + perception refresh. Call {@link _applyFoundryViewedLevelSync}
+   * FIRST (and before any `mapShineLevelContextChanged` emit — see that
+   * method's doc), then this.
+   *
+   * IMPORTANT — async, and callers should await it before anything that reads
+   * Foundry-computed visibility (e.g. relying on `sightRefresh`/
+   * VisibilityController). Foundry's own `canvas.draw()` always AWAITS every
+   * PlaceableObject's `draw()` (which sets up its vision source, mesh, etc.)
+   * before the scene is considered ready. If the perception refresh below ran
+   * before a newly-created token's `draw()` finished, its vision source
+   * wasn't registered yet — `VisibilityController`'s `sightRefresh` handler
+   * (Token#isVisible / canvas.tokens.placeables) then either couldn't find it
+   * yet or read stale/uninitialized state, so the token was selectable
+   * (creation alone is synchronous) but never rendered visible. See
+   * {@link _refreshPlaceablesLayerForResidentSwitch}.
+   *
+   * @param {object} level - the target `_levels[]` entry.
+   * @returns {Promise<void>}
+   * @private
+   */
+  async _applyFoundryViewedLevel(level) {
+    this._applyFoundryViewedLevelSync(level);
     // The canvas.level override (above) fixes VALUES consumers read
     // (elevation math, drop position/level tagging, occlusion) — but a
     // PlaceableObject's very existence is gated by a SEPARATE, one-shot lazy

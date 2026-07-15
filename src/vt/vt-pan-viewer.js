@@ -143,9 +143,28 @@ export function stopVtPanViewer() {
  *   `foundry/active-scene-source.js`'s `computeVisibleFloorIndices` bound to
  *   the scene's actual floor list, replicating Foundry's own multi-floor
  *   compositing rule.
+ * @param {number} [options.initialFloorIndex] - which floor the view opens on
+ *   (default 0). MUST match whatever Foundry itself is currently viewing when
+ *   called from an automatic re-sync (boot.js's `canvasReady` handler) — this
+ *   was the root cause of a real live bug (2026-07-15): every call used to
+ *   hardcode floor 0 regardless of caller intent, so switching floors via
+ *   Foundry's own UI (which re-fires `canvasReady` and re-invoked this
+ *   function wholesale) silently snapped the view back to floor 0 every time,
+ *   AND repeatedly reallocating the full 512MB atlas + page cache on every
+ *   ordinary floor switch (this function's own full teardown+rebuild, meant
+ *   for a genuine scene change, not a same-scene floor toggle) caused a real
+ *   crash after a few toggles. See boot.js's `canvasReady` handler — it now
+ *   only calls this for an ACTUAL scene change; a same-scene floor switch
+ *   uses the far cheaper `setVtPanViewerFloor()` below instead.
  * @returns {Promise<object>} initial diagnostics (see getDiagnostics() for the shape).
  */
-export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount, visibleFloorIndices }) {
+export async function startVtPanViewer({
+  THREE,
+  imageUrlForFloor,
+  floorCount,
+  visibleFloorIndices,
+  initialFloorIndex = 0,
+}) {
   visibleFloorIndices ??= (i) => [i];
   disposeActive();
   stopVtSmokeTest(); // avoid two renderers fighting over the same corner of the screen
@@ -614,6 +633,29 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount, vi
       return true;
     }
 
+    /**
+     * Set the floor index DIRECTLY (not via a synthetic keypress) and run
+     * exactly one residency update — the SAME cheap path `applyKeyAndUpdate`
+     * uses for an ordinary floor-switch keypress, deliberately NOT a call to
+     * `startVtPanViewer` (a full teardown + fresh 512MB atlas + fresh page
+     * cache). This is the fix for a real live bug (2026-07-15): the boot.js
+     * `canvasReady` handler used to call `startVtPanViewer` on every floor
+     * switch (since Foundry's own `Scene#view()` re-fires `canvasReady` on a
+     * same-scene level change, confirmed in source) — which both reset the
+     * view to floor 0 every time (silently ignoring the switch) AND, worse,
+     * repeatedly reallocated the full GPU atlas on ordinary floor toggles,
+     * which crashed after a few switches. A same-scene floor sync should cost
+     * what a keypress costs, nothing more.
+     * @param {number} floorIndex
+     * @returns {Promise<boolean>} true if the floor actually changed.
+     */
+    async function setFloorIndex(floorIndex) {
+      if (!view || view.floorIndex === floorIndex) return false;
+      view = { ...view, floorIndex };
+      await updateResidency();
+      return true;
+    }
+
     function onKeyDown(e) {
       if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable))
         return;
@@ -660,15 +702,19 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount, vi
       });
     }
 
-    // First floor load determines the initial view's world size. Frame a
-    // generous chunk of the world initially (quarter-world half-span → ~half the
-    // map vertically) so it immediately reads as "the map fills the display,"
-    // not a tiny zoomed-in patch — this view is served largely by coarse pins,
-    // so it's instant. '-'/'+' zoom and arrows/WASD pan from there.
-    const firstEntry = await ensureFloorLoaded(0);
+    // First floor load determines the initial view's world size. Opens on
+    // `initialFloorIndex` (defaults to 0, but a real-scene auto-start passes
+    // whatever Foundry itself is currently viewing — see this function's own
+    // param doc for why that match matters). Frame a generous chunk of the
+    // world initially (quarter-world half-span → ~half the map vertically) so
+    // it immediately reads as "the map fills the display," not a tiny
+    // zoomed-in patch — this view is served largely by coarse pins, so it's
+    // instant. '-'/'+' zoom and arrows/WASD pan from there.
+    const clampedInitialFloor = Math.max(0, Math.min(floorCount - 1, initialFloorIndex));
+    const firstEntry = await ensureFloorLoaded(clampedInitialFloor);
     view = createInitialViewState({
       worldSizePx: firstEntry.table.worldSizePx,
-      floorIndex: 0,
+      floorIndex: clampedInitialFloor,
       halfSpanPx: firstEntry.table.worldSizePx * 0.25,
     });
     view.__lastWorldSizePx = firstEntry.table.worldSizePx;
@@ -679,9 +725,12 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount, vi
 
     // Background prewarm (non-blocking, best-effort): stream every OTHER floor's
     // coarse pins so a floor switch is instant (§4.5 — coarse pins for every
-    // floor always resident). Fire-and-forget so it never delays floor 0's
-    // first paint; a fetch failure on one floor can't take the viewer down.
-    for (let f = 1; f < floorCount; f++) {
+    // floor always resident). Fire-and-forget so it never delays the initial
+    // floor's first paint; a fetch failure on one floor can't take the viewer
+    // down. Skips whichever floor was just loaded above as initial, not
+    // hardcoded to skip floor 0 — the initial floor can be any index now.
+    for (let f = 0; f < floorCount; f++) {
+      if (f === clampedInitialFloor) continue;
       ensureFloorLoaded(f).catch((err) => console.warn(`[vt-pan-viewer] prewarm floor ${f} failed:`, err));
     }
 
@@ -704,6 +753,7 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount, vi
       floorCount,
       getView: () => view,
       applyKeyAndUpdate, // exposed so MapShine.soakHooks.pan drives the EXACT same path a real keypress does
+      setFloorIndex, // exposed so an external (Foundry-driven) floor sync is as cheap as a keypress, never a full restart
       getDiagnostics() {
         const avgMs = frameTimes.length ? frameTimes.reduce((a, b) => a + b, 0) / frameTimes.length : 0;
         const entry = floors.get(view.floorIndex);
@@ -756,6 +806,22 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount, vi
 export function getVtPanViewerDiagnostics() {
   if (!_active) return { active: false };
   return { active: true, ..._active.getDiagnostics() };
+}
+
+/**
+ * Sync the already-running viewer to a specific floor index — CHEAP (one
+ * residency update, no atlas/page-cache reallocation), the fix for the real
+ * live crash described in `startVtPanViewer`'s `initialFloorIndex` doc.
+ * boot.js's `canvasReady` handler calls this for a same-scene floor switch
+ * instead of `startVtPanViewer`. No-op `{skipped:true}` if nothing is running
+ * — the caller (boot.js) is expected to call `startVtPanViewer` first in that
+ * case, this never silently starts a viewer on its own.
+ * @param {number} floorIndex
+ */
+export async function setVtPanViewerFloor(floorIndex) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  const changed = await _active.setFloorIndex(floorIndex);
+  return { changed, ..._active.getDiagnostics() };
 }
 
 const SOAK_PAN_KEYS = ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'];

@@ -38,6 +38,7 @@ import {
   startVtPanViewer,
   stopVtPanViewer,
   getVtPanViewerDiagnostics,
+  setVtPanViewerFloor,
   soakPanStep,
   soakSwitchFloorStep,
 } from './vt/vt-pan-viewer.js';
@@ -129,9 +130,27 @@ function install() {
   //
   // startRealSceneViewer() is the ONE function both the automatic hook and the
   // manual debug-panel button (kept as a manual retry/force-refresh, not the
-  // primary activation path anymore) call — one path per behavior.
+  // primary activation path anymore) call — one path per behavior. Accepts
+  // `initialFloorIndex` so a caller can open on whatever floor Foundry is
+  // ALREADY viewing (see startVtPanViewer's own doc for why a hardcoded 0
+  // here was a real live bug: it silently discarded Foundry-side floor
+  // switches AND crashed after a few of them from repeated full GPU
+  // reallocation — this function is now reserved for genuine (re)starts, a
+  // same-scene floor sync uses the cheap `setVtPanViewerFloor` path instead,
+  // see the canvasReady handler below).
   // ---------------------------------------------------------------------------
-  async function startRealSceneViewer() {
+  function resolveFloorDescriptor(sceneDoc, floors) {
+    // canvas.level is Foundry's own PUBLIC getter for "the currently
+    // displayed Level document" (verified in source, client/canvas/board.mjs)
+    // — matched against our floor list by Level document id. Falls back to
+    // floor 0 if canvas.level isn't available yet or matches nothing (e.g.
+    // the legacy single-floor fallback, whose synthetic id is 'legacy').
+    const viewedLevelId = typeof canvas !== 'undefined' ? (canvas.level?.id ?? null) : null;
+    const idx = viewedLevelId ? floors.findIndex((f) => f.id === viewedLevelId) : -1;
+    return idx >= 0 ? idx : 0;
+  }
+
+  async function startRealSceneViewer(initialFloorIndex = 0) {
     const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
     const floorsResult = getActiveSceneFloors(sceneDoc);
     if (!floorsResult.ok) {
@@ -150,6 +169,7 @@ function install() {
         // visibility rule (a floor's own visibility.levels set, NOT "always
         // show the floor below") — see active-scene-source.js's header.
         visibleFloorIndices: (viewedIndex) => computeVisibleFloorIndices(floors, viewedIndex),
+        initialFloorIndex,
       })),
     };
   }
@@ -157,11 +177,16 @@ function install() {
   MapShine.debug.registerReport(
     'vt-pan-viewer-start-real-scene',
     'VT Pan Viewer: Force Restart (ACTIVE SCENE)',
-    async () => ({
-      report: 'vt-pan-viewer-start-real-scene',
-      generatedAt: new Date().toISOString(),
-      ...(await startRealSceneViewer()),
-    })
+    async () => {
+      const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
+      const floorsResult = getActiveSceneFloors(sceneDoc);
+      const initialFloorIndex = floorsResult.ok ? resolveFloorDescriptor(sceneDoc, floorsResult.floors) : 0;
+      return {
+        report: 'vt-pan-viewer-start-real-scene',
+        generatedAt: new Date().toISOString(),
+        ...(await startRealSceneViewer(initialFloorIndex)),
+      };
+    }
   );
 
   // VRAM severance (Keyhole.md §4.3's "single biggest instant win") — the PIXI
@@ -217,13 +242,41 @@ function install() {
     // scene, both of which reach canvasReady) — so this single hook keeps the
     // VT viewer synced to whatever Foundry itself currently considers the
     // viewed scene+floor, automatically, without a separate floor-switch path.
-    Hooks.on('canvasReady', async () => {
+    //
+    // TWO DIFFERENT COSTS for two different events, deliberately NOT the same
+    // path (this is the fix for a real live bug, 2026-07-15 — see
+    // startVtPanViewer's `initialFloorIndex` doc for the full symptom/root-
+    // cause trace): a genuine SCENE change needs a full (re)start
+    // (startRealSceneViewer — new atlas, new page cache, the works). A
+    // same-scene FLOOR switch — which also reaches this handler, per the
+    // source citation above — only needs `setVtPanViewerFloor`, the same cost
+    // as a keyboard floor-switch keypress. Calling the expensive path for the
+    // cheap event was the actual crash: repeated full 512MB-atlas
+    // reallocation on ordinary floor toggles.
+    let lastRealSceneId = null;
+    Hooks.on('canvasReady', async (canvasRef) => {
       try {
-        const result = await startRealSceneViewer();
+        const sceneDoc = canvasRef?.scene ?? null;
+        if (!sceneDoc) return;
+        const floorsResult = getActiveSceneFloors(sceneDoc);
+        if (!floorsResult.ok) {
+          console.warn(`${TAG} real-scene VT viewer: ${floorsResult.error}`);
+          return;
+        }
+        const targetFloorIndex = resolveFloorDescriptor(sceneDoc, floorsResult.floors);
+
+        if (lastRealSceneId === sceneDoc.id && getVtPanViewerDiagnostics().active) {
+          const result = await setVtPanViewerFloor(targetFloorIndex);
+          console.log(`${TAG} real-scene VT viewer synced to floor ${targetFloorIndex} (same scene).`, result);
+          return;
+        }
+
+        lastRealSceneId = sceneDoc.id;
+        const result = await startRealSceneViewer(targetFloorIndex);
         if (result.ok === false) console.warn(`${TAG} real-scene VT viewer did not start:`, result.error);
-        else console.log(`${TAG} real-scene VT viewer active for "${result.sceneName}".`);
+        else console.log(`${TAG} real-scene VT viewer active for "${result.sceneName}" at floor ${targetFloorIndex}.`);
       } catch (err) {
-        console.error(`${TAG} real-scene VT viewer auto-start failed:`, err);
+        console.error(`${TAG} real-scene VT viewer auto-sync failed:`, err);
       }
     });
   }

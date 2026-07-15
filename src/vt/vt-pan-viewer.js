@@ -55,7 +55,9 @@ let _active = null;
 
 function disposeActive() {
   if (!_active) return;
-  try { window.removeEventListener('keydown', _active.onKeyDown); } catch (_) {}
+  // { capture: true } MUST match the addEventListener call exactly — the two
+  // are treated as distinct registrations otherwise, and removal silently no-ops.
+  try { window.removeEventListener('keydown', _active.onKeyDown, { capture: true }); } catch (_) {}
   try { _active.renderer.setAnimationLoop(null); } catch (_) {}
   try { _active.atlas.dispose(); } catch (_) {}
   try { _active.quadMaterial.dispose(); } catch (_) {}
@@ -173,7 +175,24 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
       uvAttr.needsUpdate = true;
     }
 
+    let lastFloorIndex = null;
+
     async function updateResidency() {
+      if (lastFloorIndex !== null && lastFloorIndex !== view.floorIndex) {
+        // Leaving a floor: its pages are no longer being viewed. Unpin them
+        // all (never evict directly — PageCache's own LRU decides that under
+        // real pressure, so switching back shortly is still cheap: still
+        // resident, just re-pinned, no re-decode). Without this, every
+        // floor's pages stayed pinned FOREVER, undetected until enough floor
+        // switches finally exhausted the cache.
+        const prevEntry = floors.get(lastFloorIndex);
+        if (prevEntry) {
+          for (const key of prevEntry.residentViewKeys) cache.unpin(key);
+          prevEntry.residentViewKeys = new Set();
+        }
+      }
+      lastFloorIndex = view.floorIndex;
+
       const entry = await ensureFloorLoaded(view.floorIndex);
       if (quadMaterial.uniforms.uPageTable.value !== entry.indirectionTexture) {
         quadMaterial.uniforms.uPageTable.value = entry.indirectionTexture;
@@ -256,6 +275,18 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
       // browser to actually suppress e.g. arrow-key page scroll.
       const ctx = { worldSizePx: view.__lastWorldSizePx || 12000, floorCount };
       if (applyKey(view, e.key, ctx) === view) return; // no-op key, let the browser handle it normally
+      // Foundry's own KeyboardManager binds arrow keys to core.panUp/Left/Down/Right
+      // (repeat:true, always active — confirmed live 2026-07-15 by tracing
+      // foundryvttsourcecode_v14/.../client-keybindings.mjs) and digit keys can
+      // trigger hotbar slots — both listen on `window` in the bubble phase, same
+      // as this handler was. Registered in the CAPTURE phase (below) so this
+      // handler ALWAYS runs first regardless of registration order, and
+      // stopImmediatePropagation() here stops Foundry's own handler (and
+      // anyone else's) from also acting on a key this viewer has claimed —
+      // without this, arrow-key presses were panning Foundry's own canvas
+      // instead of (or as well as) this viewer's view, and the view state
+      // never actually changed.
+      e.stopImmediatePropagation();
       e.preventDefault();
       applyKeyAndUpdate(e.key).catch((err) => console.error('[vt-pan-viewer] updateResidency failed:', err));
     }
@@ -273,7 +304,9 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
       if (frameTimes.length > 120) frameTimes.shift();
     });
 
-    window.addEventListener('keydown', onKeyDown);
+    // capture:true — see onKeyDown's comment. Must run before Foundry's own
+    // window-level keydown listener (registered at Foundry boot, bubble phase).
+    window.addEventListener('keydown', onKeyDown, { capture: true });
 
     _active = {
       THREE, renderer, atlas, canvas, quadMaterial, quadGeometry, floors, cache, layout, onKeyDown, floorCount,

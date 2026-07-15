@@ -4,11 +4,29 @@
  */
 
 import { buildClumpCoordTexture } from './vegetation-clump-field.js';
+import { createLogger } from '../../core/log.js';
+
+const log = createLogger('VegetationMaskLoad');
 
 /** Max dimension for Tree hover opacity CPU cache. */
 export const VEGETATION_ALPHA_SAMPLE_MAX_DIM = 512;
 /** Max dimension for vegetation mask CPU readback (matches clump bake cap). */
 export const VEGETATION_MASK_READ_MAX_DIM = 1024;
+/**
+ * Hard cap on the resolution of the vegetation mask GPU texture (Tree/Bush).
+ *
+ * Authored masks ship at full scene resolution (e.g. 12000×12000 = 144 MP =
+ * ~576 MB as an RGBA GPU texture). A vegetation coverage/placement mask is a
+ * SOFT spatial field, UV-sampled by the shader — it gains nothing from that
+ * resolution but costs enormous VRAM AND forces every CPU readback
+ * ({@link readMaskImageData}, the clump bake, alpha sampling) to decode/downscale
+ * from the full 144 MP source on the main thread, a multi-second synchronous
+ * stall that trips the GPU driver watchdog (TDR) during load. Capping the mask
+ * ONCE, at load, means the GPU upload and every downstream read work from a
+ * small copy. 2048 keeps coverage edges crisp on-screen while cutting a 12000²
+ * source 36× (144 MP → ~4 MP). Applies to Tree and Bush (shared loader).
+ */
+export const VEGETATION_MASK_MAX_TEXTURE_DIM = 2048;
 
 /** Max stream-cell overlays created per sync (avoids load spikes). */
 export const VEGETATION_STREAM_OVERLAY_CREATE_BUDGET = 2;
@@ -87,6 +105,54 @@ export function configureVegetationMaskTexture(tex) {
 }
 
 /**
+ * Cap a freshly-loaded vegetation mask texture to {@link VEGETATION_MASK_MAX_TEXTURE_DIM}
+ * by replacing its `.image` with a downscaled canvas, so the GPU upload and every
+ * later CPU readback work from the small copy instead of the full-res source.
+ *
+ * The one-time downscale `drawImage` is a native (GPU/native) resample of the
+ * already-decoded source — cheap — and happens at most once per unique mask URL
+ * (the caller caches by URL). Fails open: on any error the original texture is
+ * returned unchanged, so a bad cap can never break mask loading.
+ *
+ * @param {import('three').Texture} tex
+ * @param {number} maxDim
+ * @returns {import('three').Texture}
+ */
+function capVegetationMaskTexture(tex, maxDim) {
+  try {
+    const img = tex?.image;
+    if (!img) return tex;
+    const w = Number(img.naturalWidth || img.videoWidth || img.width || 0);
+    const h = Number(img.naturalHeight || img.videoHeight || img.height || 0);
+    if (!(w > 0 && h > 0)) return tex;
+    const longest = Math.max(w, h);
+    if (longest <= maxDim) return tex;
+
+    const scale = maxDim / longest;
+    const outW = Math.max(1, Math.round(w * scale));
+    const outH = Math.max(1, Math.round(h * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = outW;
+    canvas.height = outH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return tex;
+    ctx.drawImage(img, 0, 0, outW, outH);
+
+    tex.image = canvas;
+    tex.needsUpdate = true;
+    // Release the full-res decoded bitmap where the platform allows it.
+    try { if (typeof img.close === 'function') img.close(); } catch (_) {}
+
+    log.info(`Vegetation mask capped ${w}×${h} → ${outW}×${outH} (${((w * h) / 1e6).toFixed(0)} MP → ${((outW * outH) / 1e6).toFixed(1)} MP)`);
+    return tex;
+  } catch (err) {
+    log.warn('Vegetation mask cap failed; using full-res source', err);
+    return tex;
+  }
+}
+
+/**
  * Load or reuse one GPU mask texture per URL (stream cells share the same full-scene mask).
  * @param {import('three').TextureLoader} loader
  * @param {string} url
@@ -116,9 +182,10 @@ export function acquireVegetationMaskTexture(loader, url) {
       key,
       (tex) => {
         configureVegetationMaskTexture(tex);
-        slot.tex = tex;
+        const capped = capVegetationMaskTexture(tex, VEGETATION_MASK_MAX_TEXTURE_DIM);
+        slot.tex = capped;
         slot.loading = null;
-        resolve(tex);
+        resolve(capped);
       },
       undefined,
       (err) => {

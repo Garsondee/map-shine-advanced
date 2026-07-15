@@ -100,7 +100,16 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
     });
     document.body.appendChild(canvas);
 
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: false });
+    // preserveDrawingBuffer:true -- WITHOUT this, the browser is free to clear
+    // the drawing buffer immediately after each frame composites, so
+    // gl.readPixels() called later from a button click (not from inside the
+    // render callback itself) can legitimately read back (0,0,0,0) regardless
+    // of what was actually drawn -- confirmed live 2026-07-15: the
+    // 'renderedPixels' diagnostic read all-zero even though the indirection
+    // buffer (plain JS state, unaffected by this) showed correct, non-degenerate
+    // data. A real WebGL behavior, not a rendering bug -- but it made the
+    // diagnostic itself unreliable. Trivial perf cost for a debug canvas this size.
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, preserveDrawingBuffer: true });
     renderer.setPixelRatio(1);
     renderer.setSize(canvasPx, canvasPx, false);
 

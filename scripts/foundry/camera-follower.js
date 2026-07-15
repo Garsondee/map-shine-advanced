@@ -924,6 +924,49 @@ export class CameraFollower {
         refreshOcclusion: true,
       });
     } catch (_) {}
+    // The perception.update() call above only QUEUES Foundry render flags —
+    // canvas.visibility.refresh() (which fires the "sightRefresh" hook
+    // VisibilityController listens to) only runs later, whenever Foundry's own
+    // PerceptionManager.applyRenderFlags() next ticks. That indirection chain
+    // has too many unverified links under a floor-resident switch (does
+    // Foundry's own render-flag tick actually run promptly under V3? does it
+    // catch tokens created moments ago?) to trust for a symptom this visible:
+    // MSA's own Three.js token sprites start at material.opacity=0 on creation
+    // and are ONLY ever raised to 1.0 by VisibilityController — if its refresh
+    // never lands (or lands before this token existed), the sprite stays
+    // permanently transparent despite sprite.visible being correct. Call
+    // VisibilityController's refresh directly and synchronously instead of
+    // waiting on Foundry's hook chain to (maybe) get to it.
+    try {
+      window.MapShine?.visibilityController?._refreshAllVisibility?.();
+    } catch (_) {}
+    // Diagnostic (temporary): if tokens on the switched-to floor still don't
+    // render, this gives the concrete per-token state instead of another
+    // guess — whether the Foundry object exists in canvas.tokens.placeables,
+    // Foundry's own isVisible verdict, and the resulting Three.js sprite
+    // state (visible/opacity) that VisibilityController just computed.
+    try {
+      const tm = window.MapShine?.tokenManager;
+      const placeables = canvas?.tokens?.placeables ?? [];
+      const placeableIds = new Set(placeables.map((t) => t.document?.id).filter(Boolean));
+      const rows = [];
+      for (const [tokenId, spriteData] of tm?.tokenSprites ?? []) {
+        const foundryToken = placeables.find((t) => t.document?.id === tokenId) ?? null;
+        rows.push({
+          tokenId,
+          name: spriteData?.tokenDoc?.name ?? foundryToken?.document?.name ?? null,
+          inFoundryPlaceables: placeableIds.has(tokenId),
+          foundryIsVisible: foundryToken ? (() => { try { return foundryToken.isVisible; } catch (e) { return `threw: ${e?.message}`; } })() : null,
+          spriteVisible: spriteData?.sprite?.visible ?? null,
+          spriteOpacity: spriteData?.sprite?.material?.opacity ?? null,
+          hasTextureMap: !!spriteData?.sprite?.material?.map,
+        });
+      }
+      log.info('[floor-resident token-visibility] post-switch state', {
+        levelId, activeVisionSourceCount: canvas?.effects?.visionSources?.filter?.((s) => s.active)?.length ?? null,
+        rows,
+      });
+    } catch (_) {}
   }
 
   /**

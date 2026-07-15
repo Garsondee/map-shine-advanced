@@ -8,6 +8,7 @@
  *     --bundle --format=esm --platform=node --outfile=<tmp>.mjs && node <tmp>.mjs
  */
 import { run as runActiveSceneSource } from './active-scene-source.test.mjs';
+import { run as runPixiProxyTextures } from './pixi-proxy-textures.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -42,7 +43,10 @@ const t = {
   },
 };
 
-const suites = [['active-scene-source', runActiveSceneSource]];
+const suites = [
+  ['active-scene-source', runActiveSceneSource],
+  ['pixi-proxy-textures', runPixiProxyTextures],
+];
 
 for (const [name, fn] of suites) {
   const before = failed;

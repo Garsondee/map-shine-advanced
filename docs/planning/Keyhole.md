@@ -140,6 +140,12 @@ Harvest V3's FrameGraph/ThreeAllocator/GpuPassTimer/v3-perf/FullscreenPresent ne
 
 **The one legitimate switch:** the existing `useNativeFoundryRendering` world/client setting = MSA fully off (pure Foundry, no proxies, no keyhole). That is an off-switch, not a fallback path, and it stays.
 
+**LONG-TERM DIRECTION (author decision 2026-07-15, explicitly not near-term work — recorded here so it isn't lost, not scheduled): a TIERED reliability fallback, not just a binary switch.** The target end-state is WebGPU → WebGL2 → native Foundry PIXI rendering, attempted in that order, so a player whose hardware can't sustain Keyhole's best effort is never the reason a session stalls or a browser crashes mid-game. Two concrete mechanisms, both future work:
+1. **Automatic capability detection at boot** — try WebGPU, fall to WebGL2, fall to the `useNativeFoundryRendering` off-switch, without requiring the player to know anything is wrong.
+2. **GM-enforceable, mid-session** — a GM option to force any player (or the whole table) onto a lower tier if problems start happening live, not just a boot-time preference.
+
+This is a deliberate, explicit, WHOLE-RENDERER safety valve — the same *kind* of thing as the off-switch above, just evolved from a static manual toggle into an intelligent tiered ladder. It does **not** relax §0's doctrine #1 ("no fallback that routes through legacy code") or #3 ("degradation happens inside the new system's own knobs... never by switching architectures"): those forbid silently patching a missing V3 *feature* with legacy code mid-build. This is the opposite shape — a conscious, top-level, whole-system mode change, off by default, that never quietly substitutes for unbuilt Keyhole capability. Author's own framing: *"This isn't scope creep, this is about keeping the reliability/safety of running the module paramount over the visuals."* The natural landing spot is alongside §16's W-track WebGPU-convergence work (Q3 below) — build it when that work is underway, not before.
+
 ### 4.4 Effects: ~48 classes collapse into ~10 passes + shader ports (`src/effects/`)
 
 The V2 effect *look* is the product — the shaders and their tuned parameters are harvested per effect out of `legacy/`; the *machinery* (per-effect world-res RTs, populate pipelines, binding managers) is not. Mapping:
@@ -252,6 +258,7 @@ Walls/templates/drawings/notes native; interaction parity sweep (select, drag, H
 3. **Page-seam filtering artifacts** at extreme zoom — 4-texel borders + mip clamp are the standard cure; torture fixture's labeled grid makes seams instantly visible in Stage 1, not in the field.
 4. **Water cross-floor correctness** — highest-risk port; scheduled first in Stage 6 with its own design note; attribute buffer supplies the occluders that were V2's hardest plumbing.
 5. **Relapse into band-aids** — the doctrine (§0), the allocator throw, and the import fence exist precisely to make relapse *harder than doing it right*.
+6. **A player's hardware can't sustain Keyhole's best effort, mid-session** — the long-term mitigation is a tiered fallback (WebGPU → WebGL2 → native Foundry PIXI, auto-detected and GM-enforceable), decided in direction but explicitly deferred; see §4.3's "long-term direction" note. Not scheduled to a stage yet — natural fit alongside §16's W-track WebGPU work.
 
 **Open questions (author decides at session zero; recommendations inline):**
 - **Q1** Page size 128 vs **256 (rec)**.

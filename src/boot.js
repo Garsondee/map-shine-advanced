@@ -42,6 +42,8 @@ import {
   soakSwitchFloorStep,
 } from './vt/vt-pan-viewer.js';
 import { getActiveSceneFloors, computeVisibleFloorIndices } from './foundry/active-scene-source.js';
+import { getSourceBitmap } from './vt/decode-pool.js';
+import { registerPixiProxy, getPixiResidencyReport } from './foundry/pixi-proxy-textures.js';
 
 const MODULE_ID = 'map-shine-advanced';
 const VERSION = '0.6.0-dev.0';
@@ -155,6 +157,70 @@ function install() {
       })),
     };
   });
+
+  // ---------------------------------------------------------------------------
+  // Stage 2C: VRAM severance (Keyhole.md §4.3's "single biggest instant win").
+  // OFF BY DEFAULT — the first code in this project that reaches into
+  // Foundry's OWN rendering pipeline (PIXI.Assets.cache) rather than adding an
+  // isolated new path, so it's armed only by explicit debug-panel toggle, same
+  // as every other new capability here. Arming does NOT affect the CURRENTLY
+  // drawn scene (canvasInit already fired for it) — it takes effect on the
+  // NEXT scene load or scene switch, which is when Foundry's own
+  // TextureLoader.loadSceneTextures() next runs. See pixi-proxy-textures.js's
+  // header for the full source-verified mechanism + the one assumption that
+  // can only be confirmed live (PIXI.Assets.load()'s own cache-respecting
+  // behavior) — getPixiResidencyReport() below is what actually confirms it.
+  // ---------------------------------------------------------------------------
+  let vramSeveranceArmed = false;
+
+  MapShine.debug.registerReport('vram-severance-toggle', 'VRAM Severance: Arm/Disarm PIXI Proxy', () => {
+    vramSeveranceArmed = !vramSeveranceArmed;
+    return {
+      report: 'vram-severance-toggle',
+      generatedAt: new Date().toISOString(),
+      armed: vramSeveranceArmed,
+      note: vramSeveranceArmed
+        ? 'ARMED — takes effect on the NEXT scene load/switch (canvasInit already fired for the currently-open scene, if any). Reload the scene or switch to another and back, then run "PIXI Residency Report" to confirm.'
+        : 'disarmed — canvasInit will no longer register proxies.',
+    };
+  });
+
+  MapShine.debug.registerReport('pixi-residency-report', 'VRAM Severance: PIXI Residency Report', () => {
+    const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
+    const floorsResult = getActiveSceneFloors(sceneDoc);
+    const srcs = floorsResult.ok ? floorsResult.floors.map((f) => f.url) : [];
+    return {
+      report: 'pixi-residency-report',
+      generatedAt: new Date().toISOString(),
+      armed: vramSeveranceArmed,
+      sceneName: sceneDoc?.name ?? null,
+      floorsChecked: srcs,
+      ...getPixiResidencyReport(srcs),
+      interpretation:
+        'width/height at or near 1024 (or below) on a real Level background = the proxy took effect. ' +
+        'The original real dimensions (e.g. 12000x12000) resident instead = PIXI.Assets.load() bypassed the ' +
+        "seeded cache and fetched the real file anyway — the one assumption pixi-proxy-textures.js's header " +
+        'flags as unverifiable from source alone.',
+    };
+  });
+
+  if (typeof Hooks !== 'undefined') {
+    Hooks.on('canvasInit', async (canvasRef) => {
+      if (!vramSeveranceArmed) return;
+      try {
+        const sceneDoc = canvasRef?.scene ?? null;
+        const floorsResult = getActiveSceneFloors(sceneDoc);
+        if (!floorsResult.ok) return;
+        for (const floor of floorsResult.floors) {
+          const bitmap = await getSourceBitmap(floor.url);
+          const result = await registerPixiProxy(floor.url, bitmap);
+          console.log(`${TAG} VRAM severance — floor ${floor.index} (${floor.name}):`, result);
+        }
+      } catch (err) {
+        console.error(`${TAG} VRAM severance — canvasInit proxy registration failed:`, err);
+      }
+    });
+  }
 
   // MapShine.soak(n) now drives something real (Stage 1 part 4b) instead of
   // reporting stub drivers — load ensures the pan viewer is running, pan/

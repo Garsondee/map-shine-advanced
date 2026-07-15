@@ -3,36 +3,36 @@
  * (Keyhole.md §4.1): "Every consumer — geometry, masks, effects — samples
  * through this include and nothing else."
  *
- * FIRST CUT, not yet wired into a real pass or visually verified — that
- * happens in Stage 1 part 3, against the torture fixture's labeled grid
- * (which exists specifically to make a sampling/streaming bug "visually
- * obvious", per Keyhole.md §8 Stage 0). GLSL can't be Node-tested (no WebGL
- * under Node); this is checked against the spec and the JS-side atlas.js/
- * page-table.js conventions it must stay consistent with, not against a
- * running GPU yet.
+ * CURRENT CUT — single mip, no coarse fallback. Stage 1 part 4's smoke test
+ * (vt/vt-smoke-test.js) proves atlas + indirection + this shader render real
+ * pixels correctly for one fully-resident page block; it deliberately never
+ * exercises a miss, so there was nothing to verify a fallback walk against
+ * yet. Building that walk against an untested GPU mip-chain API would have
+ * been speculative — building it against a passing smoke test is not. THE
+ * DEFERRED TARGET (write it down so "ship the minimal version" doesn't quietly
+ * become "the rest never gets built" — same discipline as the Stage 6 effects
+ * methodology): once residency.js's real mip selection is wired (part 4b+),
+ * add back `uRequestedMip`/`uMaxMip` and either (a) a real GPU mip chain on
+ * `uPageTable` sampled via `texelFetch(sampler, texel, level)`, or (b) an
+ * explicit per-mip uniform array with an UNROLLED (not dynamically-indexed)
+ * lookup — GLSL ES 3.00 dynamic sampler-array indexing has inconsistent
+ * driver support, which matters a lot on the exact class of weak/aging GPU
+ * this project's whole crash campaign was about; unrolling is slightly
+ * uglier but portable. A miss (not-resident texel) still returns loud magenta
+ * (never black) as the placeholder for that future fallback.
  *
- * THE UNIFORM CONTRACT every consumer binds, per (floor x layer-pack) virtual
- * texture it samples:
+ * THE UNIFORM CONTRACT for this cut:
  *   uniform sampler2DArray uPageAtlas;   // the ONE physical cache (shared by
  *                                        // every virtual texture — see atlas.js)
- *   uniform sampler2D      uPageTable;   // THIS virtual texture's indirection,
- *                                        // real GPU mip chain, each level
- *                                        // written by the CPU (see below) —
- *                                        // NEVER hardware-mip-generated, an
- *                                        // averaged slot ID is a corrupt ID.
- *   uniform int   uRequestedMip;         // CPU-computed per frame by
- *                                        // vt/residency.js's chooseMip() —
- *                                        // mip selection is an analytic CPU
- *                                        // decision here (Keyhole.md §4.1:
- *                                        // "gives exactly the needed page
- *                                        // range and mip ... on the CPU"),
- *                                        // NOT a per-pixel GPU derivative LOD.
- *   uniform int   uMaxMip;               // this virtual texture's PageTable.maxMip
+ *   uniform sampler2D      uPageTable;   // THIS virtual texture's indirection
+ *                                        // at ONE mip level (mip 0 today).
+ *                                        // Plain 2D texture, NearestFilter,
+ *                                        // no mipmaps generated.
  *   uniform int   uPagesPerAxis;         // atlas.js computeAtlasLayout().pagesPerAxis
  *   uniform int   uPagesPerLayer;        // computeAtlasLayout().pagesPerLayer
  *   uniform float uPageSizePx;           // computeAtlasLayout().pageSizePx (256)
  *   uniform float uBorderPx;             // (pageSizePx - payloadPx) / 2 (== 4)
- *   uniform float uAtlasSizePx;          // computeAtlasLayout().atlasSizePx (4096)
+ *   uniform float uAtlasSizePx;          // computeAtlasLayout().atlasSizePx
  *
  * uPageTable texel encoding (RGBA8, written by the CPU when a page's
  * residency changes — see page-table.js's setSlot()):
@@ -55,8 +55,6 @@ export const VT_SAMPLE_GLSL = /* glsl */`
 // ---- vt-sample.glsl (generated include, see src/vt/vt-sample.glsl.js) -----
 uniform sampler2DArray uPageAtlas;
 uniform sampler2D uPageTable;
-uniform int uRequestedMip;
-uniform int uMaxMip;
 uniform int uPagesPerAxis;
 uniform int uPagesPerLayer;
 uniform float uPageSizePx;
@@ -68,8 +66,8 @@ uniform float uAtlasSizePx;
 // (B0-1's rule for ID attachments applies identically here).
 struct VTPage { bool resident; int slot; };
 
-VTPage vtDecodeIndirection(ivec2 texel, int mip) {
-  vec4 t = texelFetch(uPageTable, texel, mip);
+VTPage vtDecodeIndirection(ivec2 texel) {
+  vec4 t = texelFetch(uPageTable, texel, 0);
   VTPage p;
   p.resident = t.a > 0.5;
   p.slot = int(t.r * 255.0 + 0.5) + int(t.g * 255.0 + 0.5) * 256;
@@ -88,44 +86,32 @@ void vtSlotToAtlas(int slot, out int tileX, out int tileY, out int layer) {
 /**
  * Sample the virtual texture at world-normalized UV (0..1 across THIS
  * virtual texture's world extent — the caller maps its own world-space
- * position into this range before calling).
- *
- * Automatic coarse fallback: starts at uRequestedMip and walks toward
- * uMaxMip until it finds a resident page. Worst case is a blurrier sample
- * from a coarser (always-resident, coarse-pinned) mip — never a hole, never
- * a crash (Keyhole.md §4.1's "worst case is blur, never black, never loss").
+ * position into this range before calling). Single-mip cut (see header) —
+ * a miss returns loud magenta, never black, as the not-yet-built fallback's
+ * placeholder.
  */
 vec4 vtSample(vec2 worldUV) {
-  for (int mip = 0; mip <= 16; mip++) {
-    if (mip < uRequestedMip) continue;   // GLSL loop bound is compile-time; skip below the start
-    if (mip > uMaxMip) break;
-
-    ivec2 tableSize = textureSize(uPageTable, mip);
-    ivec2 texel = clamp(ivec2(worldUV * vec2(tableSize)), ivec2(0), tableSize - ivec2(1));
-    VTPage page = vtDecodeIndirection(texel, mip);
-    if (!page.resident) continue;
-
-    int tileX, tileY, layer;
-    vtSlotToAtlas(page.slot, tileX, tileY, layer);
-
-    // Fractional position within THIS mip's page cell, border-safe: map into
-    // the payload region only (uBorderPx in from each edge), never sampling
-    // across into a neighboring page's border texels.
-    vec2 cellUV = fract(worldUV * vec2(tableSize));
-    float payloadPx = uPageSizePx - uBorderPx * 2.0;
-    vec2 pagePx = vec2(tileX, tileY) * uPageSizePx + uBorderPx + cellUV * payloadPx;
-    vec2 atlasUV = pagePx / uAtlasSizePx;
-
-    return texture(uPageAtlas, vec3(atlasUV, float(layer))); // bilinear (default sampler filter)
+  ivec2 tableSize = textureSize(uPageTable, 0);
+  ivec2 texel = clamp(ivec2(worldUV * vec2(tableSize)), ivec2(0), tableSize - ivec2(1));
+  VTPage page = vtDecodeIndirection(texel);
+  if (!page.resident) {
+    return vec4(1.0, 0.0, 1.0, 1.0); // magenta — matches FrameGraph's own
+                                      // "clear aliased RTs to magenta" debug
+                                      // convention (docs/planning/v3/B0-2-frame-graph.md §5.3)
   }
-  // Nothing resident anywhere up to maxMip — should be structurally
-  // impossible (the coarse pin set covers the whole top mip, always). If this
-  // ever fires it's a bug in the residency/pin system, not a valid steady
-  // state; return a loud, obviously-wrong color rather than black (which
-  // would silently look like "correctly dark").
-  return vec4(1.0, 0.0, 1.0, 1.0); // magenta — matches FrameGraph's own
-                                    // "clear aliased RTs to magenta" debug
-                                    // convention (docs/planning/v3/B0-2-frame-graph.md §5.3)
+
+  int tileX, tileY, layer;
+  vtSlotToAtlas(page.slot, tileX, tileY, layer);
+
+  // Fractional position within this page cell, border-safe: map into the
+  // payload region only (uBorderPx in from each edge), never sampling across
+  // into a neighboring page's border texels.
+  vec2 cellUV = fract(worldUV * vec2(tableSize));
+  float payloadPx = uPageSizePx - uBorderPx * 2.0;
+  vec2 pagePx = vec2(tileX, tileY) * uPageSizePx + uBorderPx + cellUV * payloadPx;
+  vec2 atlasUV = pagePx / uAtlasSizePx;
+
+  return texture(uPageAtlas, vec3(atlasUV, float(layer))); // bilinear (default sampler filter)
 }
 // ---- end vt-sample.glsl -----------------------------------------------
 `;

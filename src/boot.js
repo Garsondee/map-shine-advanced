@@ -33,6 +33,7 @@ import { installSoak } from './diag/soak.js';
 import { installDebugPanel } from './diag/debug-panel.js';
 import { runVtSelfTest } from './vt/vt-selftest-report.js';
 import { runVtLiveDecodeTest } from './vt/vt-live-decode-report.js';
+import { runVtSmokeTest, stopVtSmokeTest } from './vt/vt-smoke-test.js';
 
 const MODULE_ID = 'map-shine-advanced';
 const VERSION = '0.6.0-dev.0';
@@ -72,6 +73,16 @@ function install() {
     report: 'vt-live-decode',
     generatedAt: new Date().toISOString(),
     ...(await runVtLiveDecodeTest(`modules/${MODULE_ID}/assets/torture/torture_floor0.png`)),
+  }));
+  MapShine.debug.registerReport('vt-smoke-test', 'VT Smoke Test: Render (bottom-left canvas)', async () => ({
+    report: 'vt-smoke-test',
+    generatedAt: new Date().toISOString(),
+    ...(await runVtSmokeTest({ THREE, imageUrl: `modules/${MODULE_ID}/assets/torture/torture_floor0.png` })),
+  }));
+  MapShine.debug.registerReport('vt-smoke-test-stop', 'VT Smoke Test: Stop/Clear', () => ({
+    report: 'vt-smoke-test-stop',
+    generatedAt: new Date().toISOString(),
+    ...stopVtSmokeTest(),
   }));
   console.log(
     `%c${TAG}%c ${STAGE} — new tree live, legacy quarantined. Three r${THREE.REVISION} / WebGL2.` +

@@ -184,6 +184,7 @@ export async function runVtSmokeTest({ THREE, imageUrl }) {
         uPageSizePx: { value: layout.pageSizePx },
         uBorderPx: { value: 4 },
         uAtlasSizePx: { value: layout.atlasSizePx },
+        uWorldSizePx: { value: table.worldSizePx },
       },
       vertexShader: /* glsl */`
         varying vec2 vUv;

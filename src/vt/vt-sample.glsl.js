@@ -33,6 +33,11 @@
  *   uniform float uPageSizePx;           // computeAtlasLayout().pageSizePx (256)
  *   uniform float uBorderPx;             // (pageSizePx - payloadPx) / 2 (== 4)
  *   uniform float uAtlasSizePx;          // computeAtlasLayout().atlasSizePx
+ *   uniform float uWorldSizePx;          // THIS virtual texture's PageTable.worldSizePx —
+ *                                        // MUST be the real world size, never derived from
+ *                                        // uPagesPerAxis*payloadPx (that "nominal" grid is
+ *                                        // rounded UP by ceil() and does not equal it —
+ *                                        // confirmed live 2026-07-15, see vtSample()'s comment).
  *
  * uPageTable texel encoding (RGBA8, written by the CPU when a page's
  * residency changes — see page-table.js's setSlot()):
@@ -60,6 +65,7 @@ uniform int uPagesPerLayer;
 uniform float uPageSizePx;
 uniform float uBorderPx;
 uniform float uAtlasSizePx;
+uniform float uWorldSizePx;
 
 // Decode one indirection texel. Returns resident (a>0.5) + the slot index.
 // NEAREST/texelFetch only — an indirection texel is an ID, never filtered
@@ -91,8 +97,21 @@ void vtSlotToAtlas(int slot, out int tileX, out int tileY, out int layer) {
  * placeholder.
  */
 vec4 vtSample(vec2 worldUV) {
-  ivec2 tableSize = textureSize(uPageTable, 0);
-  ivec2 texel = clamp(ivec2(worldUV * vec2(tableSize)), ivec2(0), tableSize - ivec2(1));
+  // THE FIX (confirmed live 2026-07-15): texel index MUST be derived via
+  // actual world pixels / a FIXED payloadPx — NEVER via worldUV * pagesPerAxis.
+  // pagesPerAxis*payloadPx (the "nominal" padded grid, e.g. 49*248=12152)
+  // does NOT equal worldSizePx (e.g. 12000 — ceil() rounding leaves the grid
+  // slightly larger than the world). Scaling worldUV (normalized against the
+  // REAL worldSizePx) by pagesPerAxis silently assumes those two denominators
+  // are equal — they're off by ~1.3% on the torture fixture, which drifts by
+  // a whole texel over ~25 pages and showed up as a magenta strip exactly on
+  // the far edge of a resident block. Must match page-table.js/decode-pool.js's
+  // own convention exactly: pageIndex = floor(worldPixelX / payloadPx).
+  float payloadPx = uPageSizePx - uBorderPx * 2.0;
+  vec2 worldPx = worldUV * uWorldSizePx;
+  vec2 cellF = worldPx / payloadPx;
+  ivec2 texel = clamp(ivec2(floor(cellF)), ivec2(0), ivec2(uPagesPerAxis - 1));
+
   VTPage page = vtDecodeIndirection(texel);
   if (!page.resident) {
     return vec4(1.0, 0.0, 1.0, 1.0); // magenta — matches FrameGraph's own
@@ -105,9 +124,9 @@ vec4 vtSample(vec2 worldUV) {
 
   // Fractional position within this page cell, border-safe: map into the
   // payload region only (uBorderPx in from each edge), never sampling across
-  // into a neighboring page's border texels.
-  vec2 cellUV = fract(worldUV * vec2(tableSize));
-  float payloadPx = uPageSizePx - uBorderPx * 2.0;
+  // into a neighboring page's border texels. Same cellF as the texel lookup
+  // above — one consistent coordinate space throughout, not two.
+  vec2 cellUV = fract(cellF);
   vec2 pagePx = vec2(tileX, tileY) * uPageSizePx + uBorderPx + cellUV * payloadPx;
   vec2 atlasUV = pagePx / uAtlasSizePx;
 

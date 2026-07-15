@@ -3665,6 +3665,17 @@ export function initialize() {
           // `__bg_image__*` entry and reloading the full visible stack leaves the
           // curtain stuck in "Warming up" while `_populateComplete` still reads true.
           const needsBgSwap = pathChanged || (levelChanged && !warmBandRevisit);
+          if (v3FloorResident) {
+            // Diagnostic (temporary — floor-resident bg-swap decision has been
+            // reported wrong on the warm-switch path with no direct evidence
+            // yet of WHY; this makes the next report conclusive instead of
+            // another guess).
+            log.info('[floor-resident bg-swap] decision', {
+              levelId, activeBandKey, viewedBgSrc, currentBasePath, newBasePath,
+              pathChanged, levelChanged, warmBandRevisit, needsBgSwap,
+              lastV14BusBgLevelId: sc._lastV14BusBgLevelId,
+            });
+          }
           if (viewedBgSrc && newBasePath && needsBgSwap) {
             if (pathChanged) {
               log.info(`Level background changed: ${currentBasePath} → ${newBasePath}`);

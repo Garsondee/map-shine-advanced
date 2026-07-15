@@ -864,13 +864,29 @@ export class CameraFollower {
     try {
       await this._refreshPlaceablesLayerForResidentSwitch(canvas?.tokens);
     } catch (_) {}
+    // `PerceptionManager#update(flags)` only QUEUES render flags (Foundry
+    // source: `this.renderFlags.set(flags)`, nothing else — the second
+    // argument we used to pass has no effect, it isn't part of this method's
+    // signature) — actual work happens later via applyRenderFlags() on
+    // Foundry's own per-frame render-flag tick, not synchronously here. More
+    // importantly: `refreshVision`/`refreshLighting`/`refreshSounds` only
+    // REFRESH sources that already exist in canvas.effects.visionSources —
+    // they do NOT (re)register a brand-new token's vision source in the first
+    // place. That needs `initializeVision`/`initializeLighting`/
+    // `initializeSounds`, exactly what Foundry's own `PerceptionManager
+    // .initialize()` uses (its own doc: "immediate initialization plus
+    // incremental refresh" — called after every real canvas.draw). Tokens
+    // freshly created by the refresh above never had their vision source
+    // initialized, so the refresh-only flags left VisibilityController
+    // reading a token with no active vision source — selectable, never
+    // visible.
     try {
       canvas?.perception?.update?.({
-        refreshVision: true,
+        initializeVision: true,
+        initializeLighting: true,
+        initializeSounds: true,
         refreshOcclusion: true,
-        refreshLighting: true,
-        refreshSounds: true,
-      }, true);
+      });
     } catch (_) {}
   }
 

@@ -163,6 +163,13 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
     let frameTimes = [];
     let lastError = null;
 
+    function renderFrame(t) {
+      const t0 = performance.now();
+      renderer.render(scene, camera);
+      frameTimes.push(performance.now() - t0);
+      if (frameTimes.length > 120) frameTimes.shift();
+    }
+
     function reframeQuad(uvMin, uvMax) {
       const uvAttr = quadGeometry.getAttribute('uv');
       for (let i = 0; i < uvAttr.count; i++) {
@@ -206,6 +213,21 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
       const neededPages = computeVisiblePages(entry.table, worldRect, { mip: 0, guardPages: 1 });
       const diff = diffResidency(entry.residentViewKeys, neededPages);
 
+      // TWO PASSES ON PURPOSE (confirmed live 2026-07-15 — the actual cause of
+      // "no texture bound to target" errors on every pan/zoom): unlike the
+      // smoke test (which rendered ONCE, only after all uploads finished),
+      // this viewer's renderer.setAnimationLoop() runs CONTINUOUSLY — a
+      // render() call can land in the middle of an `await`-interleaved
+      // decode-then-upload loop and disturb the WebGLRenderer's internal
+      // texture-unit binding state that copyTextureToTexture()/
+      // setTexture2DArray() depend on, corrupting the atlas's binding for
+      // every upload after the first interleaved frame. Pass 1 does all the
+      // (genuinely async, GL-free) decoding — the render loop MAY interleave
+      // here, harmlessly, since no GL upload is in flight yet. Pass 2 uploads
+      // everything already-decoded in one tight SYNCHRONOUS loop — no
+      // `await` between GL calls, so the render loop cannot interleave
+      // mid-sequence.
+      const decodedForUpload = [];
       for (const page of diff.toRequest) {
         const alreadyInCache = cache.isResident(page.key);
         const { resident, slot } = cache.request(page.key, { pin: 'view' });
@@ -214,22 +236,35 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
           try {
             const worldRectPage = pageWorldRect(entry.table, 0, page.px, page.py);
             const decoded = await decodePage(entry.sourceBitmap, worldRectPage);
-            const srcTex = new THREE.Texture(decoded);
-            srcTex.flipY = false;
-            srcTex.generateMipmaps = false;
-            srcTex.needsUpdate = true;
-            atlas.uploadPage(slot, srcTex);
-            // Safe to release immediately: copyTextureToTexture's GL upload
-            // consumes the source synchronously (the driver has already read
-            // the pixels by the time the call returns) — no need to keep
-            // these around like the (bounded, 9-page) smoke test did.
-            srcTex.dispose();
-            decoded.close?.();
+            decodedForUpload.push({ slot, decoded });
           } catch (err) {
-            lastError = `decode/upload failed for ${page.key}: ${err?.message || err}`;
+            lastError = `decode failed for ${page.key}: ${err?.message || err}`;
             console.error('[vt-pan-viewer]', lastError);
           }
         }
+      }
+      if (decodedForUpload.length > 0) {
+        // Belt-and-suspenders on top of the batching above: PAUSE the render
+        // loop for the brief duration of the actual GL upload calls, so it is
+        // categorically impossible for a render() to land between two
+        // uploadPage() calls, regardless of how many pages there are or how
+        // long any single decode took. A single JS function call can't be
+        // interrupted mid-execution (JS is run-to-completion) — the risk is
+        // ONLY between separate calls — but after 4 live-test rounds on this
+        // exact bug class, a guaranteed-correct fix beats a strong theory.
+        // Cost: one skipped/frozen frame per residency update, imperceptible
+        // for a debug tool where uploads take low-single-digit milliseconds.
+        renderer.setAnimationLoop(null);
+        for (const { slot, decoded } of decodedForUpload) {
+          const srcTex = new THREE.Texture(decoded);
+          srcTex.flipY = false;
+          srcTex.generateMipmaps = false;
+          srcTex.needsUpdate = true;
+          atlas.uploadPage(slot, srcTex);
+          srcTex.dispose();
+          decoded.close?.();
+        }
+        renderer.setAnimationLoop(renderFrame);
       }
       for (const key of diff.toUnpin) cache.unpin(key);
       entry.residentViewKeys = diff.nextKeys;
@@ -297,12 +332,7 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
     view.__lastWorldSizePx = firstEntry.table.worldSizePx;
     await updateResidency();
 
-    renderer.setAnimationLoop((t) => {
-      const t0 = performance.now();
-      renderer.render(scene, camera);
-      frameTimes.push(performance.now() - t0);
-      if (frameTimes.length > 120) frameTimes.shift();
-    });
+    renderer.setAnimationLoop(renderFrame);
 
     // capture:true — see onKeyDown's comment. Must run before Foundry's own
     // window-level keydown listener (registered at Foundry boot, bubble phase).

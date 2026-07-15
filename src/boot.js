@@ -95,7 +95,7 @@ function install() {
   const TORTURE_FLOOR_COUNT = 3;
   const tortureImageUrl = (floorIndex) => `modules/${MODULE_ID}/assets/torture/torture_floor${floorIndex}.png`;
 
-  MapShine.debug.registerReport('vt-pan-viewer-start', 'VT Pan Viewer: Start (bottom-left canvas)', async () => ({
+  MapShine.debug.registerReport('vt-pan-viewer-start', 'VT Pan Viewer: Start (fills scene view)', async () => ({
     report: 'vt-pan-viewer-start',
     generatedAt: new Date().toISOString(),
     ...(await startVtPanViewer({ THREE, imageUrlForFloor: tortureImageUrl, floorCount: TORTURE_FLOOR_COUNT })),

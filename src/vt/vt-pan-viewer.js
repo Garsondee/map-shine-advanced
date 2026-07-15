@@ -41,19 +41,31 @@ import { planResidency, coarsePinSet, coarseTopMipsForCap, diffResidency } from 
 import { stopVtSmokeTest } from './vt-smoke-test.js'; // the two share screen space; starting one stops the other
 
 /**
- * The canvas fills nearly the whole viewport (not a "tiny window" — flagged
- * live 2026-07-15) while staying SQUARE: the view-state/world-rect math uses
- * one halfSpanPx for both axes (view-state.js), so a non-square canvas would
- * visibly STRETCH the render — a new bug class this session doesn't need on
- * top of the three coordinate bugs already chased down. Sized to the smaller
- * of (viewport width minus room for the debug panel, viewport height minus margin).
+ * Where to mount the VT canvas so it BECOMES the scene display (author request,
+ * 2026-07-15: "make this the only display... fill the scene viewing space so we
+ * don't have PIXI and threejs alongside each other"). We mount into Foundry's
+ * own `canvas#board` container and sit at a z-index ABOVE the board
+ * (`--z-index-canvas: 0`, verified in foundry2.css) but BELOW Foundry's UI
+ * (`--z-index-ui: 60`) — so the VT view opaquely OCCLUDES the PIXI canvas while
+ * every Foundry UI panel (and the debug panel at z-index 90) stays clickable on
+ * top. This is the VISUAL half of Stage 2's severance; the VRAM half (stopping
+ * Foundry from decoding full-res duplicates into PIXI at all) is the separate
+ * proxy-texture-interception step. Falls back to a full-window overlay on
+ * document.body if the board isn't in the DOM yet (e.g. no scene active).
+ *
+ * @returns {{host: HTMLElement, fill: boolean}}
  */
-function computeCanvasSizePx() {
-  const margin = 24;
-  const debugPanelReserve = 360; // keeps the corner debug panel/heartbeat box clickable
-  const maxW = window.innerWidth - margin * 2 - debugPanelReserve;
-  const maxH = window.innerHeight - margin * 2;
-  return Math.max(320, Math.min(maxW, maxH));
+function resolveMountHost() {
+  const board = document.getElementById('board');
+  if (board?.parentElement) return { host: board.parentElement, fill: true };
+  return { host: document.body, fill: true };
+}
+
+/** The scene-area size to render at, from the mount host's live client box. */
+function measureHost(host) {
+  const w = Math.max(1, host.clientWidth || window.innerWidth);
+  const h = Math.max(1, host.clientHeight || window.innerHeight);
+  return { width: w, height: h };
 }
 
 let _active = null;
@@ -64,6 +76,9 @@ function disposeActive() {
   // are treated as distinct registrations otherwise, and removal silently no-ops.
   try {
     window.removeEventListener('keydown', _active.onKeyDown, { capture: true });
+  } catch (_) {}
+  try {
+    if (_active.onResize) window.removeEventListener('resize', _active.onResize);
   } catch (_) {}
   try {
     _active.renderer.setAnimationLoop(null);
@@ -109,25 +124,29 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
     const layout = computeAtlasLayout({ budgetBytes: 512 * 1024 * 1024 }); // Keyhole Q2 default
     const cache = new PageCache({ budgetBytes: 512 * 1024 * 1024 });
 
-    const canvasPx = computeCanvasSizePx();
+    const mount = resolveMountHost();
+    let canvasW = measureHost(mount.host).width;
+    let canvasH = measureHost(mount.host).height;
     const canvas = document.createElement('canvas');
     canvas.id = 'msa-vt-pan-viewer-canvas';
-    canvas.width = canvasPx;
-    canvas.height = canvasPx;
+    canvas.width = canvasW;
+    canvas.height = canvasH;
     Object.assign(canvas.style, {
-      position: 'fixed',
-      left: '24px',
-      top: '24px',
-      width: `${canvasPx}px`,
-      height: `${canvasPx}px`,
-      zIndex: '89',
-      borderRadius: '8px',
-      border: '1px solid rgba(143,214,255,0.35)',
-      boxShadow: '0 6px 24px rgba(0,0,0,0.5)',
+      // Fill the mount host (the board container) exactly, occluding the PIXI
+      // canvas beneath. z-index 5: above board (0) + hud (1), below Foundry UI
+      // (60) and the debug panel (90). pointer-events:auto so the view is a
+      // solid display (clicks don't secretly drive the hidden Foundry canvas);
+      // Foundry UI still gets its clicks because it paints above this.
+      position: 'absolute',
+      inset: '0',
+      width: '100%',
+      height: '100%',
+      zIndex: '5',
+      display: 'block',
       background: '#000',
-      cursor: 'crosshair',
+      pointerEvents: 'auto',
     });
-    document.body.appendChild(canvas);
+    mount.host.appendChild(canvas);
 
     // preserveDrawingBuffer:true -- WITHOUT this, the browser is free to clear
     // the drawing buffer immediately after each frame composites, so
@@ -137,10 +156,10 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
     // 'renderedPixels' diagnostic read all-zero even though the indirection
     // buffer (plain JS state, unaffected by this) showed correct, non-degenerate
     // data. A real WebGL behavior, not a rendering bug -- but it made the
-    // diagnostic itself unreliable. Trivial perf cost for a debug canvas this size.
+    // diagnostic itself unreliable. Kept for the diagnostics to stay trustworthy.
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, preserveDrawingBuffer: true });
     renderer.setPixelRatio(1);
-    renderer.setSize(canvasPx, canvasPx, false);
+    renderer.setSize(canvasW, canvasH, false);
 
     const atlas = new PageAtlas({ THREE, layout, renderer });
     const floors = new Map(); // floorIndex -> floor entry (see ensureFloorLoaded)
@@ -258,9 +277,9 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
         const gl = renderer.getContext();
         const px = new Uint8Array(4);
         const points = {
-          center: [Math.floor(canvasPx / 2), Math.floor(canvasPx / 2)],
-          topLeft: [4, canvasPx - 4], // GL readPixels Y is bottom-up; this is visual top-left
-          bottomRight: [canvasPx - 4, 4],
+          center: [Math.floor(canvasW / 2), Math.floor(canvasH / 2)],
+          topLeft: [4, canvasH - 4], // GL readPixels Y is bottom-up; this is visual top-left
+          bottomRight: [canvasW - 4, 4],
         };
         out.renderedPixels = {};
         for (const [label, [x, y]] of Object.entries(points)) {
@@ -418,10 +437,16 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
         quadMaterial.uniforms.uMipPagesPerAxis.value = entry.mipPagesArr;
       }
 
-      const worldRect = viewToWorldRect(view);
+      // Aspect-correct framing: the canvas now fills the (non-square) scene
+      // area, so the world rect must match the canvas aspect or the map
+      // stretches (view-state.js's aspect param). halfSpanPx is the vertical
+      // zoom; horizontal widens by width/height.
+      const aspect = canvasW / canvasH;
+      const worldRect = viewToWorldRect(view, aspect);
       // Analytic mip selection (§4.1 — top-down camera, no GPU feedback): pick
       // the finest mip that resolves for this zoom, plus a coarser prefetch set.
-      const plan = planResidency(entry.table, worldRect, canvasPx, { guardPages: 1 });
+      // Use the LARGER canvas axis for a conservative (sharper) mip choice.
+      const plan = planResidency(entry.table, worldRect, Math.max(canvasW, canvasH), { guardPages: 1 });
       quadMaterial.uniforms.uRequestedMip.value = plan.mip;
 
       // The view's needed pages = fine + coarser prefetch, EXCLUDING any page
@@ -490,9 +515,38 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
       applyKeyAndUpdate(e.key).catch((err) => console.error('[vt-pan-viewer] updateResidency failed:', err));
     }
 
-    // First floor load determines the initial view's world size.
+    // The scene area resizes (window resize, sidebar collapse, Foundry
+    // relayout). Re-measure the host, resize the drawing buffer to match, and
+    // recompute residency at the new aspect so the map never stretches. Debounced
+    // to a rAF-ish microtask via a simple in-flight guard is overkill here — the
+    // handler is cheap and resize events are coarse.
+    let resizePending = false;
+    function onResize() {
+      if (resizePending || !_active) return;
+      resizePending = true;
+      queueMicrotask(async () => {
+        resizePending = false;
+        if (!_active) return;
+        const { width, height } = measureHost(mount.host);
+        if (width === canvasW && height === canvasH) return;
+        canvasW = width;
+        canvasH = height;
+        renderer.setSize(canvasW, canvasH, false);
+        await updateResidency().catch((err) => console.error('[vt-pan-viewer] resize residency failed:', err));
+      });
+    }
+
+    // First floor load determines the initial view's world size. Frame a
+    // generous chunk of the world initially (quarter-world half-span → ~half the
+    // map vertically) so it immediately reads as "the map fills the display,"
+    // not a tiny zoomed-in patch — this view is served largely by coarse pins,
+    // so it's instant. '-'/'+' zoom and arrows/WASD pan from there.
     const firstEntry = await ensureFloorLoaded(0);
-    view = createInitialViewState({ worldSizePx: firstEntry.table.worldSizePx, floorIndex: 0 });
+    view = createInitialViewState({
+      worldSizePx: firstEntry.table.worldSizePx,
+      floorIndex: 0,
+      halfSpanPx: firstEntry.table.worldSizePx * 0.25,
+    });
     view.__lastWorldSizePx = firstEntry.table.worldSizePx;
     await updateResidency();
 
@@ -510,12 +564,14 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
     // capture:true — see onKeyDown's comment. Must run before Foundry's own
     // window-level keydown listener (registered at Foundry boot, bubble phase).
     window.addEventListener('keydown', onKeyDown, { capture: true });
+    window.addEventListener('resize', onResize);
 
     _active = {
       THREE,
       renderer,
       atlas,
       canvas,
+      onResize,
       quadMaterial,
       quadGeometry,
       floors,
@@ -531,7 +587,8 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
         return {
           view,
           layout,
-          canvasSizePx: canvasPx,
+          canvasSizePx: { width: canvasW, height: canvasH },
+          mountedInBoard: mount.fill && mount.host !== document.body,
           cacheStats: cache.stats(),
           floorsLoaded: Array.from(floors.keys()),
           currentFloorResidentCount: entry?.residentViewKeys.size ?? 0,
@@ -548,13 +605,13 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
           renderMsAvgLast120: Math.round(avgMs * 100) / 100,
           lastError,
           ...sampleDiagnostics(entry),
-          controls: 'Arrow keys/WASD pan, +/- zoom, 0-2 or Tab floor-switch (click the canvas first).',
+          controls: 'Arrow keys/WASD pan, +/- zoom, 0-2 or Tab floor-switch (keys work anywhere, not in a text field).',
         };
       },
     };
 
     console.log(
-      '[vt-pan-viewer] started — click the canvas, then arrow keys/WASD pan, +/- zoom, 0-2/Tab floor-switch.'
+      '[vt-pan-viewer] started — filling the scene area (PIXI occluded). Arrow keys/WASD pan, +/- zoom, 0-2/Tab floor-switch.'
     );
     return { ok: true, ..._active.getDiagnostics() };
   } catch (err) {

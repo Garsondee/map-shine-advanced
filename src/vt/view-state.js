@@ -104,17 +104,25 @@ export function applyKey(view, key, ctx) {
 
 /**
  * @param {ViewState} view
+ * @param {number} [aspect] - viewport width / height. `halfSpanPx` is the
+ *   half-VERTICAL span (the canonical zoom); the horizontal span widens by
+ *   `aspect` so a non-square viewport frames a rect of the SAME aspect and the
+ *   world renders undistorted (the viewer draws a fullscreen quad, so
+ *   worldRect-aspect must equal canvas-aspect or the map stretches). Default 1
+ *   == square (preserves the original behavior + tests).
  * @returns {{minX:number,minY:number,maxX:number,maxY:number}} the world rect
  *   this view currently frames (NOT clamped to world bounds — residency.js's
  *   own computeVisiblePages already clamps page coordinates; an unclamped
  *   rect here correctly shrinks the visible page COUNT near an edge instead
  *   of silently re-centering).
  */
-export function viewToWorldRect(view) {
+export function viewToWorldRect(view, aspect = 1) {
+  const halfX = view.halfSpanPx * aspect;
+  const halfY = view.halfSpanPx;
   return {
-    minX: view.centerXPx - view.halfSpanPx,
-    minY: view.centerYPx - view.halfSpanPx,
-    maxX: view.centerXPx + view.halfSpanPx,
-    maxY: view.centerYPx + view.halfSpanPx,
+    minX: view.centerXPx - halfX,
+    minY: view.centerYPx - halfY,
+    maxX: view.centerXPx + halfX,
+    maxY: view.centerYPx + halfY,
   };
 }

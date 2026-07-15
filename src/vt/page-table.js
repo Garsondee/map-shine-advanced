@@ -120,3 +120,39 @@ export class PageTable {
     return null;
   }
 }
+
+/**
+ * Pure geometry: how to pack EVERY mip level's page grid into ONE small RGBA8
+ * indirection texture (the "flattened pyramid" `vtSample()` samples). Mip
+ * grids are stacked vertically — mip 0 (the largest) at the top, each coarser
+ * mip's square grid directly below the previous. Width is mip 0's page count;
+ * height is the sum of all mips' page counts.
+ *
+ * WHY A FLATTENED PYRAMID (not a per-mip sampler array): GLSL ES 3.00 forbids
+ * indexing a `sampler2D[]` by anything but a constant/dynamically-uniform
+ * expression, and driver support for even the unrolled form is inconsistent on
+ * exactly the weak/aging GPU class this project's whole crash campaign was
+ * about (vt-sample.glsl.js's own deferred-target note flags this). A single
+ * indirection texture indexed by plain `ivec2`/`int` uniform ARRAYS (fully
+ * portable, no sampler-array indexing anywhere) sidesteps that entirely — and
+ * the whole pyramid is tiny (for the 12000px torture world: 49 wide × 101 tall
+ * = ~4949 texels ≈ 20 KB), so packing cost is negligible.
+ *
+ * The per-mip `{x, y, pagesPerAxis}` origins go to the shader as uniform arrays
+ * so a fragment can address any mip's grid: `texel = origin[m] + (px, py)`.
+ *
+ * @param {PageTable} table
+ * @returns {{width:number, height:number, mipCount:number,
+ *   origins: Array<{x:number, y:number, pagesPerAxis:number}>}}
+ */
+export function computeIndirectionAtlasLayout(table) {
+  const width = table.pagesPerAxis(0);
+  const origins = [];
+  let y = 0;
+  for (let mip = 0; mip <= table.maxMip; mip++) {
+    const pagesPerAxis = table.pagesPerAxis(mip);
+    origins.push({ x: 0, y, pagesPerAxis });
+    y += pagesPerAxis;
+  }
+  return { width, height: y, mipCount: table.maxMip + 1, origins };
+}

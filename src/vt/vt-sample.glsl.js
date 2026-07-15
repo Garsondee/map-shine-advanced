@@ -3,30 +3,33 @@
  * (Keyhole.md §4.1): "Every consumer — geometry, masks, effects — samples
  * through this include and nothing else."
  *
- * CURRENT CUT — single mip, no coarse fallback. Stage 1 part 4's smoke test
- * (vt/vt-smoke-test.js) proves atlas + indirection + this shader render real
- * pixels correctly for one fully-resident page block; it deliberately never
- * exercises a miss, so there was nothing to verify a fallback walk against
- * yet. Building that walk against an untested GPU mip-chain API would have
- * been speculative — building it against a passing smoke test is not. THE
- * DEFERRED TARGET (write it down so "ship the minimal version" doesn't quietly
- * become "the rest never gets built" — same discipline as the Stage 6 effects
- * methodology): once residency.js's real mip selection is wired (part 4b+),
- * add back `uRequestedMip`/`uMaxMip` and either (a) a real GPU mip chain on
- * `uPageTable` sampled via `texelFetch(sampler, texel, level)`, or (b) an
- * explicit per-mip uniform array with an UNROLLED (not dynamically-indexed)
- * lookup — GLSL ES 3.00 dynamic sampler-array indexing has inconsistent
- * driver support, which matters a lot on the exact class of weak/aging GPU
- * this project's whole crash campaign was about; unrolling is slightly
- * uglier but portable. A miss (not-resident texel) still returns loud magenta
- * (never black) as the placeholder for that future fallback.
+ * MULTI-MIP with automatic coarse fallback (§4.1's core "not loaded yet means
+ * SOFT, not wrong" guarantee). The single-mip cut that shipped through Stage 1
+ * part 4b is gone: `vtSample()` now walks from the CPU-chosen requested mip
+ * (analytic, from residency.js's chooseMip — top-down camera, no GPU feedback
+ * pass) toward the coarsest, and samples the FINEST-RESIDENT level it finds.
+ * A texel that isn't resident at the requested mip transparently resolves
+ * through the next-coarser level, and ultimately through the always-resident
+ * coarse pins (residency.coarsePinSet) — so the worst case a viewer can ever
+ * show is BLUR, never black, never a miss. Magenta is retained purely as a
+ * structural-bug tripwire: with coarse pins pinned it should be UNREACHABLE,
+ * so seeing it means the pin invariant broke, not "still streaming".
  *
- * THE UNIFORM CONTRACT for this cut:
+ * THE INDIRECTION IS A FLATTENED MIP PYRAMID (page-table.js's
+ * computeIndirectionAtlasLayout): all mip levels' page grids packed into ONE
+ * small RGBA8 texture, addressed per-mip via plain `ivec2`/`int` uniform
+ * ARRAYS. This deliberately avoids a `sampler2D[]` per mip — GLSL ES 3.00
+ * sampler-array indexing has inconsistent driver support on exactly the
+ * weak/aging GPU class this project's crash campaign was about (the prior
+ * deferred-target note flagged both options; the flattened-pyramid route needs
+ * no sampler-array indexing anywhere, so it's the portable one).
+ *
+ * THE UNIFORM CONTRACT:
  *   uniform sampler2DArray uPageAtlas;   // the ONE physical cache (shared by
  *                                        // every virtual texture — see atlas.js)
- *   uniform sampler2D      uPageTable;   // THIS virtual texture's indirection
- *                                        // at ONE mip level (mip 0 today).
- *                                        // Plain 2D texture, NearestFilter,
+ *   uniform sampler2D      uPageTable;   // THIS virtual texture's flattened-
+ *                                        // pyramid indirection (all mips, one
+ *                                        // texture). Plain 2D, NearestFilter,
  *                                        // no mipmaps generated.
  *   uniform int   uPagesPerAxis;         // atlas.js computeAtlasLayout().pagesPerAxis
  *   uniform int   uPagesPerLayer;        // computeAtlasLayout().pagesPerLayer
@@ -38,6 +41,11 @@
  *                                        // uPagesPerAxis*payloadPx (that "nominal" grid is
  *                                        // rounded UP by ceil() and does not equal it —
  *                                        // confirmed live 2026-07-15, see vtSample()'s comment).
+ *   uniform int   uRequestedMip;         // residency.chooseMip() — the finest mip to TRY.
+ *   uniform int   uMaxMip;               // PageTable.maxMip — the coarsest (top) level.
+ *   uniform ivec2 uMipOrigin[VT_MAX_MIPS];      // per-mip texel origin in uPageTable
+ *                                        //   (computeIndirectionAtlasLayout().origins[m].{x,y})
+ *   uniform int   uMipPagesPerAxis[VT_MAX_MIPS];// per-mip page grid size (origins[m].pagesPerAxis)
  *
  * uPageTable texel encoding (RGBA8, written by the CPU when a page's
  * residency changes — see page-table.js's setSlot()):
@@ -53,11 +61,22 @@
  */
 
 /**
+ * Compile-time upper bound on mip levels the flattened-pyramid uniform arrays
+ * carry. A 16K world is 8 mips (67,34,17,9,5,3,2,1); 16 is generous headroom
+ * for any world size this design targets, and the fragment loop only ever
+ * touches [uRequestedMip, uMaxMip] ⊆ [0, mipCount-1] — higher slots are skipped.
+ * MUST match the JS-side array length in vt-pan-viewer.js.
+ */
+export const VT_MAX_MIPS = 16;
+
+/**
  * The shared include. Concatenate this once per shader program that needs VT
  * sampling; call `vtSample(worldUV)` from the fragment shader.
  */
 export const VT_SAMPLE_GLSL = /* glsl */ `
 // ---- vt-sample.glsl (generated include, see src/vt/vt-sample.glsl.js) -----
+#define VT_MAX_MIPS ${VT_MAX_MIPS}
+
 uniform sampler2DArray uPageAtlas;
 uniform sampler2D uPageTable;
 uniform int uPagesPerAxis;
@@ -66,6 +85,10 @@ uniform float uPageSizePx;
 uniform float uBorderPx;
 uniform float uAtlasSizePx;
 uniform float uWorldSizePx;
+uniform int uRequestedMip;
+uniform int uMaxMip;
+uniform ivec2 uMipOrigin[VT_MAX_MIPS];
+uniform int uMipPagesPerAxis[VT_MAX_MIPS];
 
 // Decode one indirection texel. Returns resident (a>0.5) + the slot index.
 // NEAREST/texelFetch only — an indirection texel is an ID, never filtered
@@ -89,57 +112,58 @@ void vtSlotToAtlas(int slot, out int tileX, out int tileY, out int layer) {
   tileY = withinLayer / uPagesPerAxis;
 }
 
-/**
- * Sample the virtual texture at world-normalized UV (0..1 across THIS
- * virtual texture's world extent — the caller maps its own world-space
- * position into this range before calling). Single-mip cut (see header) —
- * a miss returns loud magenta, never black, as the not-yet-built fallback's
- * placeholder.
- */
-vec4 vtSample(vec2 worldUV) {
-  // THE FIX (confirmed live 2026-07-15): texel index MUST be derived via
-  // actual world pixels / a FIXED payloadPx — NEVER via worldUV * pagesPerAxis.
-  // pagesPerAxis*payloadPx (the "nominal" padded grid, e.g. 49*248=12152)
-  // does NOT equal worldSizePx (e.g. 12000 — ceil() rounding leaves the grid
-  // slightly larger than the world). Scaling worldUV (normalized against the
-  // REAL worldSizePx) by pagesPerAxis silently assumes those two denominators
-  // are equal — they're off by ~1.3% on the torture fixture, which drifts by
-  // a whole texel over ~25 pages and showed up as a magenta strip exactly on
-  // the far edge of a resident block. Must match page-table.js/decode-pool.js's
-  // own convention exactly: pageIndex = floor(worldPixelX / payloadPx).
+// Sample the atlas at a resident page's slot, given the fractional position
+// within that page's payload. Border-safe: maps into the payload region only
+// (uBorderPx in from each edge), never sampling a neighbor's border texels.
+vec4 vtSampleAtlasSlot(int slot, vec2 cellUV) {
   float payloadPx = uPageSizePx - uBorderPx * 2.0;
-  vec2 worldPx = worldUV * uWorldSizePx;
-  vec2 cellF = worldPx / payloadPx;
-  // Clamp bound MUST be the INDIRECTION texture's own real dimensions
-  // (queried directly — e.g. 49x49 for the torture fixture), NOT
-  // uPagesPerAxis (that uniform is the ATLAS's slot grid — e.g. 4x4 for a
-  // small test atlas — a completely different number used only in
-  // vtSlotToAtlas below). Conflating the two was a second, worse bug
-  // introduced by the first fix: it clamped every texel lookup down into
-  // [0, atlasPagesPerAxis-1], which is nowhere near where real pages are
-  // indexed (23-25 on this fixture) — every sample missed, all magenta.
-  ivec2 tableSize = textureSize(uPageTable, 0);
-  ivec2 texel = clamp(ivec2(floor(cellF)), ivec2(0), tableSize - ivec2(1));
-
-  VTPage page = vtDecodeIndirection(texel);
-  if (!page.resident) {
-    return vec4(1.0, 0.0, 1.0, 1.0); // magenta — matches FrameGraph's own
-                                      // "clear aliased RTs to magenta" debug
-                                      // convention (docs/planning/v3/B0-2-frame-graph.md §5.3)
-  }
-
   int tileX, tileY, layer;
-  vtSlotToAtlas(page.slot, tileX, tileY, layer);
-
-  // Fractional position within this page cell, border-safe: map into the
-  // payload region only (uBorderPx in from each edge), never sampling across
-  // into a neighboring page's border texels. Same cellF as the texel lookup
-  // above — one consistent coordinate space throughout, not two.
-  vec2 cellUV = fract(cellF);
+  vtSlotToAtlas(slot, tileX, tileY, layer);
   vec2 pagePx = vec2(tileX, tileY) * uPageSizePx + uBorderPx + cellUV * payloadPx;
   vec2 atlasUV = pagePx / uAtlasSizePx;
-
   return texture(uPageAtlas, vec3(atlasUV, float(layer))); // bilinear (default sampler filter)
+}
+
+/**
+ * Sample the virtual texture at world-normalized UV (0..1 across THIS virtual
+ * texture's world extent — the caller maps its own world-space position into
+ * this range). Walks uRequestedMip -> uMaxMip and returns the finest-resident
+ * level's texel (automatic coarse fallback). With coarse pins pinned this
+ * never returns magenta; magenta means a broken pin invariant, not "streaming".
+ */
+vec4 vtSample(vec2 worldUV) {
+  // Texel index MUST be derived via actual world pixels / a FIXED payloadPx —
+  // NEVER via worldUV * pagesPerAxis (confirmed live 2026-07-15). At mip m one
+  // page covers payloadPx * 2^m world texels; cellF's integer part is the page
+  // index at that mip, its fract() is the position within the page. See
+  // page-table.js/decode-pool.js's own convention: floor(worldPixelX / payloadSpan).
+  float payloadPx = uPageSizePx - uBorderPx * 2.0;
+  vec2 worldPx = worldUV * uWorldSizePx;
+
+  // No early return inside the loop (some weak drivers — the exact target
+  // class — mis-optimize loop-body returns): accumulate into result + break.
+  vec4 result = vec4(1.0, 0.0, 1.0, 1.0); // magenta tripwire (see doc above)
+  bool found = false;
+  // Constant bounds (0..VT_MAX_MIPS) so the compiler can unroll; the per-
+  // iteration guards skip anything outside [uRequestedMip, uMaxMip]. All array
+  // indices here are non-sampler (ivec2/int) — dynamic indexing is fully legal.
+  for (int m = 0; m < VT_MAX_MIPS; ++m) {
+    if (found) continue;
+    if (m < uRequestedMip || m > uMaxMip) continue;
+
+    float payloadSpan = payloadPx * float(1 << m); // world texels per page at mip m
+    vec2 cellF = worldPx / payloadSpan;
+    int ppa = uMipPagesPerAxis[m];
+    ivec2 texel = clamp(ivec2(floor(cellF)), ivec2(0), ivec2(ppa - 1));
+    ivec2 phys = uMipOrigin[m] + texel; // into the flattened-pyramid indirection
+
+    VTPage page = vtDecodeIndirection(phys);
+    if (page.resident) {
+      result = vtSampleAtlasSlot(page.slot, fract(cellF));
+      found = true;
+    }
+  }
+  return result;
 }
 // ---- end vt-sample.glsl -----------------------------------------------
 `;

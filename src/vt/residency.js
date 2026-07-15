@@ -106,19 +106,64 @@ export function planResidency(table, worldRect, viewportPx, opts = {}) {
 }
 
 /**
- * Every page of the top mip (mip === table.maxMip) — the "coarse pin" set for
- * one virtual texture (Keyhole.md §4.1: "tens of pages total" across the
- * whole world). Callers pin these once at load and never evict them.
+ * The "coarse pin" set for one virtual texture (Keyhole.md §4.1): every page of
+ * the top `topMips` mip levels. Callers pin these once at load and NEVER evict
+ * them — this is what guarantees the whole world always renders, just soft
+ * (worst case is blur, never black, never a "not resident → crash" state).
+ *
+ * §4.1 says "the top MIPS" (plural) precisely because pinning only the single
+ * 1×1 top page would force every miss to fall all the way to a world-blurred-
+ * to-one-page floor. Pinning the top few levels gives a far sharper soft floor
+ * for a still-tiny page count. Default `topMips:1` preserves the original
+ * single-top-mip behavior; the pan viewer passes the count from
+ * `coarseTopMipsForCap()`.
+ *
  * @param {import('./page-table.js').PageTable} table
+ * @param {object} [opts] @param {number} [opts.topMips] - how many of the
+ *   coarsest mip levels to include (default 1 == just the top page).
  * @returns {Array<{mip:number, px:number, py:number, key:string}>}
  */
-export function coarsePinSet(table) {
-  const mip = table.maxMip;
-  const n = table.pagesPerAxis(mip);
+export function coarsePinSet(table, opts = {}) {
+  const topMips = Math.max(1, opts.topMips ?? 1);
+  const startMip = Math.max(0, table.maxMip - (topMips - 1));
   const out = [];
-  for (let py = 0; py < n; py++)
-    for (let px = 0; px < n; px++) out.push({ mip, px, py, key: table.pageKey(mip, px, py) });
+  for (let mip = startMip; mip <= table.maxMip; mip++) {
+    const n = table.pagesPerAxis(mip);
+    for (let py = 0; py < n; py++)
+      for (let px = 0; px < n; px++) out.push({ mip, px, py, key: table.pageKey(mip, px, py) });
+  }
   return out;
+}
+
+/**
+ * Choose how many of the coarsest mip levels to pin so the total coarse page
+ * count stays within `maxPages` ("tens of pages", §4.1) — walking from the top
+ * (1 page) downward, adding each finer level until the next one would overflow
+ * the cap. Always returns at least 1 (the top page is non-negotiable — it is
+ * the guaranteed floor). A larger cap buys a sharper soft floor at more pinned
+ * pages; the default keeps the whole-world floor in the low tens.
+ *
+ * For the 12000px torture world (mip page counts 1,4,16,49,169,… from the top)
+ * the default cap of 96 pins the top 4 mips (1+4+16+49 = 70 pages), giving a
+ * ~7×7-page soft floor — recognizable, never black — for ~70 permanently
+ * resident pages out of 2048.
+ *
+ * @param {import('./page-table.js').PageTable} table
+ * @param {object} [opts] @param {number} [opts.maxPages] - page-count cap (default 96).
+ * @returns {number} number of top mip levels to pin (>= 1).
+ */
+export function coarseTopMipsForCap(table, opts = {}) {
+  const maxPages = opts.maxPages ?? 96;
+  let count = 0;
+  let total = 0;
+  for (let mip = table.maxMip; mip >= 0; mip--) {
+    const n = table.pagesPerAxis(mip);
+    const add = n * n;
+    if (count >= 1 && total + add > maxPages) break;
+    total += add;
+    count++;
+  }
+  return count;
 }
 
 /**

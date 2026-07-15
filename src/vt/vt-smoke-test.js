@@ -21,7 +21,7 @@ import { PageCache } from './page-cache.js';
 import { PageTable } from './page-table.js';
 import { computeAtlasLayout, PageAtlas } from './atlas.js';
 import { getSourceBitmap, decodePage, pageWorldRect } from './decode-pool.js';
-import { VT_SAMPLE_GLSL } from './vt-sample.glsl.js';
+import { VT_SAMPLE_GLSL, VT_MAX_MIPS } from './vt-sample.glsl.js';
 
 /**
  * @param {number} slot @param {boolean} resident
@@ -205,6 +205,16 @@ export async function runVtSmokeTest({ THREE, imageUrl }) {
     }
     uvAttr.needsUpdate = true;
 
+    // The smoke test is single-mip by construction (one mip-0 indirection
+    // texture, n×n) — i.e. the DEGENERATE case of vt-sample.glsl.js's multi-mip
+    // walk: uMaxMip=0 so the loop only ever visits mip 0, uMipOrigin[0]=(0,0)
+    // (its indirection texture IS the mip-0 grid at the origin), and
+    // uMipPagesPerAxis[0]=n. This exercises the exact same shader the pan viewer
+    // uses, with the coarse-fallback loop collapsing to one iteration.
+    const smokeMipOrigin = new Int32Array(VT_MAX_MIPS * 2); // all zero == mip 0 at (0,0)
+    const smokeMipPages = new Int32Array(VT_MAX_MIPS);
+    smokeMipPages[0] = table.pagesPerAxis(0);
+
     const quadMaterial = new THREE.ShaderMaterial({
       uniforms: {
         uPageAtlas: { value: atlas.texture },
@@ -215,6 +225,10 @@ export async function runVtSmokeTest({ THREE, imageUrl }) {
         uBorderPx: { value: 4 },
         uAtlasSizePx: { value: layout.atlasSizePx },
         uWorldSizePx: { value: table.worldSizePx },
+        uRequestedMip: { value: 0 },
+        uMaxMip: { value: 0 },
+        uMipOrigin: { value: smokeMipOrigin },
+        uMipPagesPerAxis: { value: smokeMipPages },
       },
       vertexShader: /* glsl */ `
         varying vec2 vUv;

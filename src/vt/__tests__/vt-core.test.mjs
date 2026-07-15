@@ -4,8 +4,15 @@
  * residency (analytic visible-page computation). No WebGL, no Foundry.
  */
 import { PageCache } from '../page-cache.js';
-import { PageTable, DEFAULT_PAGE_PAYLOAD_PX } from '../page-table.js';
-import { computeVisiblePages, chooseMip, planResidency, coarsePinSet, diffResidency } from '../residency.js';
+import { PageTable, DEFAULT_PAGE_PAYLOAD_PX, computeIndirectionAtlasLayout } from '../page-table.js';
+import {
+  computeVisiblePages,
+  chooseMip,
+  planResidency,
+  coarsePinSet,
+  coarseTopMipsForCap,
+  diffResidency,
+} from '../residency.js';
 
 export function run(t) {
   const { ok, throws } = t;
@@ -173,8 +180,71 @@ export function run(t) {
     const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 });
     const pins = coarsePinSet(table);
     const n = table.pagesPerAxis(table.maxMip);
-    ok('residency: coarsePinSet size == topMip pages^2', pins.length === n * n);
+    ok('residency: coarsePinSet default (topMips:1) size == topMip pages^2', pins.length === n * n && n === 1);
     ok('residency: coarsePinSet really is "tens of pages", not hundreds', pins.length < 100);
+  }
+
+  // --- residency: coarsePinSet with topMips pins the coarsest N levels -----
+  {
+    const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 });
+    // mip page counts from the top: mip6=1, mip5=4, mip4=16, mip3=49
+    const pins3 = coarsePinSet(table, { topMips: 3 });
+    ok('residency: coarsePinSet topMips:3 covers mips maxMip..maxMip-2 (1+4+16=21)', pins3.length === 1 + 4 + 16);
+    const mips = new Set(pins3.map((p) => p.mip));
+    ok(
+      'residency: topMips:3 spans exactly the three coarsest mip levels',
+      mips.size === 3 && mips.has(table.maxMip) && mips.has(table.maxMip - 2) && !mips.has(table.maxMip - 3)
+    );
+    ok(
+      'residency: coarse pages carry mip + key (so the viewer can pin + index them)',
+      pins3.every((p) => typeof p.mip === 'number' && typeof p.key === 'string')
+    );
+    // Every coarse page has a DISTINCT key (no accidental collisions across mips).
+    ok('residency: all coarse-pin keys are distinct', new Set(pins3.map((p) => p.key)).size === pins3.length);
+  }
+
+  // --- residency: coarseTopMipsForCap keeps the pinned set within the cap --
+  {
+    const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 });
+    // Cap 96: 1+4+16=21 (<=96), +49=70 (<=96), +169=239 (>96) -> stop at 4 levels.
+    const n4 = coarseTopMipsForCap(table, { maxPages: 96 });
+    ok('residency: coarseTopMipsForCap(96) pins 4 levels (1+4+16+49=70 <= 96)', n4 === 4);
+    const total = coarsePinSet(table, { topMips: n4 }).length;
+    ok('residency: the chosen depth actually fits under the cap', total <= 96 && total === 70);
+    // A tiny cap still returns at least 1 (the top page is non-negotiable).
+    ok(
+      'residency: coarseTopMipsForCap always pins at least the top page',
+      coarseTopMipsForCap(table, { maxPages: 0 }) >= 1
+    );
+    // A huge cap pins every mip level.
+    ok(
+      'residency: a cap larger than the whole pyramid pins all levels',
+      coarseTopMipsForCap(table, { maxPages: 1e9 }) === table.maxMip + 1
+    );
+  }
+
+  // --- page-table: flattened-pyramid indirection layout -------------------
+  {
+    const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 });
+    const lay = computeIndirectionAtlasLayout(table);
+    // pagesPerAxis chain 49,25,13,7,4,2,1 -> width 49, height 49+25+13+7+4+2+1=101
+    ok('indirection: width == mip0 pagesPerAxis (49)', lay.width === 49);
+    ok('indirection: height == sum of all mips pagesPerAxis (101)', lay.height === 101);
+    ok('indirection: mipCount == maxMip+1', lay.mipCount === table.maxMip + 1);
+    ok(
+      'indirection: mip0 origin is (0,0), pagesPerAxis 49',
+      lay.origins[0].x === 0 && lay.origins[0].y === 0 && lay.origins[0].pagesPerAxis === 49
+    );
+    ok(
+      'indirection: mip1 origin stacks directly below mip0 (y=49), pagesPerAxis 25',
+      lay.origins[1].x === 0 && lay.origins[1].y === 49 && lay.origins[1].pagesPerAxis === 25
+    );
+    ok('indirection: top mip is a single page at the bottom row', lay.origins[table.maxMip].pagesPerAxis === 1);
+    // Every mip's grid fits inside the packed texture bounds (no overflow).
+    ok(
+      'indirection: every mip grid fits within width x height',
+      lay.origins.every((o) => o.x + o.pagesPerAxis <= lay.width && o.y + o.pagesPerAxis <= lay.height)
+    );
   }
 
   // --- residency: diffResidency (the pan-viewer's per-frame update) --------

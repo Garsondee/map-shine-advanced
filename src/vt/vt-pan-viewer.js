@@ -11,12 +11,17 @@
  * set every time the view changes, diff against what's currently resident,
  * decode+upload only what's newly needed, and unpin what fell out of view.
  *
- * SINGLE-MIP CUT (same limitation as vt-sample.glsl.js, inherited on purpose):
- * only mip 0 is ever requested/served. Zooming out asks for more mip-0 pages
- * (not a coarser mip — that machinery doesn't exist yet), which is honest
- * about the current limitation (documented, not hidden) rather than silently
- * wrong. A real coarse-mip fallback is Stage 1's next real increment after
- * this is confirmed working.
+ * MULTI-MIP (the single-mip cut is gone — this is Stage 1's coarse-fallback
+ * increment). On floor load, every floor pins its COARSE set (the top few mip
+ * levels, residency.coarseTopMipsForCap) as 'coarse' — permanently resident,
+ * so the whole world always renders soft and floor switches are instant. Each
+ * residency update chooses a mip analytically (residency.planResidency /
+ * chooseMip — top-down camera, no GPU feedback), requests the fine set + a
+ * coarser prefetch set at THEIR real mips, and the shader (vt-sample.glsl.js)
+ * walks requested→coarsest and samples the finest-resident level. Zooming out
+ * now serves coarser mips (bounded working set) instead of piling up mip-0
+ * pages; a still-streaming texel resolves through the coarse pins as blur,
+ * never black, never magenta.
  *
  * Uses the REAL Keyhole Q2 default atlas (512 MB, 2048-page capacity) — the
  * smoke test's small test atlas already proved the concept; this is the step
@@ -27,12 +32,12 @@
  */
 
 import { PageCache } from './page-cache.js';
-import { PageTable } from './page-table.js';
+import { PageTable, computeIndirectionAtlasLayout } from './page-table.js';
 import { computeAtlasLayout, PageAtlas } from './atlas.js';
 import { getSourceBitmap, decodePage, pageWorldRect } from './decode-pool.js';
-import { VT_SAMPLE_GLSL } from './vt-sample.glsl.js';
+import { VT_SAMPLE_GLSL, VT_MAX_MIPS } from './vt-sample.glsl.js';
 import { createInitialViewState, applyKey, viewToWorldRect } from './view-state.js';
-import { computeVisiblePages, diffResidency } from './residency.js';
+import { planResidency, coarsePinSet, coarseTopMipsForCap, diffResidency } from './residency.js';
 import { stopVtSmokeTest } from './vt-smoke-test.js'; // the two share screen space; starting one stops the other
 
 /**
@@ -138,21 +143,61 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
     renderer.setSize(canvasPx, canvasPx, false);
 
     const atlas = new PageAtlas({ THREE, layout, renderer });
-    const floors = new Map(); // floorIndex -> { table, sourceBitmap, indirectionTexture, buf, n, residentViewKeys }
+    const floors = new Map(); // floorIndex -> floor entry (see ensureFloorLoaded)
+    let loopActive = false; // tracks whether the render loop is running (batch uploads pause/restore it)
 
     async function ensureFloorLoaded(floorIndex) {
       if (floors.has(floorIndex)) return floors.get(floorIndex);
       const sourceBitmap = await getSourceBitmap(imageUrlForFloor(floorIndex));
       const table = new PageTable({ id: `panviewer:floor${floorIndex}`, worldSizePx: sourceBitmap.width });
-      const n = table.pagesPerAxis(0);
-      const buf = new Uint8Array(n * n * 4); // all-zero = not resident everywhere, initially
-      const indirectionTexture = new THREE.DataTexture(buf, n, n, THREE.RGBAFormat);
+
+      // The indirection is a flattened mip pyramid (all mips in one small
+      // texture) — see page-table.js's computeIndirectionAtlasLayout + the
+      // shader header. buf/texture are sized to the packed pyramid, not just mip 0.
+      const indirectionLayout = computeIndirectionAtlasLayout(table);
+      const { width, height } = indirectionLayout;
+      const buf = new Uint8Array(width * height * 4); // all-zero = not resident everywhere, initially
+      const indirectionTexture = new THREE.DataTexture(buf, width, height, THREE.RGBAFormat);
       indirectionTexture.flipY = false;
       indirectionTexture.generateMipmaps = false;
       indirectionTexture.minFilter = THREE.NearestFilter;
       indirectionTexture.magFilter = THREE.NearestFilter;
-      const entry = { table, sourceBitmap, indirectionTexture, buf, n, residentViewKeys: new Set() };
+
+      // Per-mip uniform arrays (flat, fixed VT_MAX_MIPS length; unused tail
+      // stays 0 and is never indexed — the shader only touches [reqMip,maxMip]).
+      const mipOriginArr = new Int32Array(VT_MAX_MIPS * 2);
+      const mipPagesArr = new Int32Array(VT_MAX_MIPS);
+      for (let m = 0; m < indirectionLayout.origins.length; m++) {
+        mipOriginArr[m * 2] = indirectionLayout.origins[m].x;
+        mipOriginArr[m * 2 + 1] = indirectionLayout.origins[m].y;
+        mipPagesArr[m] = indirectionLayout.origins[m].pagesPerAxis;
+      }
+
+      // COARSE PINS (§4.1): the top few mip levels of THIS floor, pinned
+      // permanently so the whole floor always renders (soft) and floor switches
+      // are instant. Decode + upload + pin them once, now.
+      const topMips = coarseTopMipsForCap(table);
+      const coarsePages = coarsePinSet(table, { topMips });
+      const coarseKeySet = new Set(coarsePages.map((p) => p.key));
+
+      const entry = {
+        table,
+        sourceBitmap,
+        indirectionTexture,
+        buf,
+        width,
+        height,
+        indirectionLayout,
+        mipOriginArr,
+        mipPagesArr,
+        coarsePages,
+        coarseKeySet,
+        coarseTopMips: topMips,
+        residentViewKeys: new Set(),
+      };
       floors.set(floorIndex, entry);
+
+      await requestDecodeUpload(entry, coarsePages, 'coarse');
       return entry;
     }
 
@@ -163,13 +208,22 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
     const quadMaterial = new THREE.ShaderMaterial({
       uniforms: {
         uPageAtlas: { value: atlas.texture },
-        uPageTable: { value: null }, // set per-floor in render()
+        uPageTable: { value: null }, // set per-floor in updateResidency()
         uPagesPerAxis: { value: layout.pagesPerAxis },
         uPagesPerLayer: { value: layout.pagesPerLayer },
         uPageSizePx: { value: layout.pageSizePx },
         uBorderPx: { value: 4 },
         uAtlasSizePx: { value: layout.atlasSizePx },
-        uWorldSizePx: { value: 0 }, // set per-floor in render()
+        uWorldSizePx: { value: 0 }, // set per-floor in updateResidency()
+        // Multi-mip: the finest mip to TRY (analytic, per view) + the coarsest,
+        // and the flattened-pyramid per-mip layout the shader walks. uMipOrigin
+        // is a flat Int32Array (ivec2[VT_MAX_MIPS] == 2 ints/level) — THREE
+        // uploads it via gl.uniform2iv directly; uMipPagesPerAxis via uniform1iv.
+        // Both are replaced with the current floor's arrays on floor bind.
+        uRequestedMip: { value: 0 },
+        uMaxMip: { value: 0 },
+        uMipOrigin: { value: new Int32Array(VT_MAX_MIPS * 2) },
+        uMipPagesPerAxis: { value: new Int32Array(VT_MAX_MIPS) },
       },
       vertexShader: /* glsl */ `
         varying vec2 vUv;
@@ -274,59 +328,29 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
       lastFramedUV = { uvMin, uvMax };
     }
 
-    let lastFloorIndex = null;
-
-    async function updateResidency() {
-      if (lastFloorIndex !== null && lastFloorIndex !== view.floorIndex) {
-        // Leaving a floor: its pages are no longer being viewed. Unpin them
-        // all (never evict directly — PageCache's own LRU decides that under
-        // real pressure, so switching back shortly is still cheap: still
-        // resident, just re-pinned, no re-decode). Without this, every
-        // floor's pages stayed pinned FOREVER, undetected until enough floor
-        // switches finally exhausted the cache.
-        const prevEntry = floors.get(lastFloorIndex);
-        if (prevEntry) {
-          for (const key of prevEntry.residentViewKeys) cache.unpin(key);
-          prevEntry.residentViewKeys = new Set();
-        }
-      }
-      lastFloorIndex = view.floorIndex;
-
-      const entry = await ensureFloorLoaded(view.floorIndex);
-      if (quadMaterial.uniforms.uPageTable.value !== entry.indirectionTexture) {
-        quadMaterial.uniforms.uPageTable.value = entry.indirectionTexture;
-        quadMaterial.uniforms.uWorldSizePx.value = entry.table.worldSizePx;
-      }
-
-      const worldRect = viewToWorldRect(view);
-      // Single-mip cut (see file header): always mip 0, never a coarser
-      // fallback yet — zooming out means more mip-0 pages requested, not a
-      // coarser mip served.
-      const neededPages = computeVisiblePages(entry.table, worldRect, { mip: 0, guardPages: 1 });
-      const diff = diffResidency(entry.residentViewKeys, neededPages);
-
-      // TWO PASSES ON PURPOSE (confirmed live 2026-07-15 — the actual cause of
-      // "no texture bound to target" errors on every pan/zoom): unlike the
-      // smoke test (which rendered ONCE, only after all uploads finished),
-      // this viewer's renderer.setAnimationLoop() runs CONTINUOUSLY — a
-      // render() call can land in the middle of an `await`-interleaved
-      // decode-then-upload loop and disturb the WebGLRenderer's internal
-      // texture-unit binding state that copyTextureToTexture()/
-      // setTexture2DArray() depend on, corrupting the atlas's binding for
-      // every upload after the first interleaved frame. Pass 1 does all the
-      // (genuinely async, GL-free) decoding — the render loop MAY interleave
-      // here, harmlessly, since no GL upload is in flight yet. Pass 2 uploads
-      // everything already-decoded in one tight SYNCHRONOUS loop — no
-      // `await` between GL calls, so the render loop cannot interleave
-      // mid-sequence.
+    /**
+     * Decode + upload a set of pages (at each page's OWN mip) and pin them with
+     * `pinClass`. Shared by the coarse-pin load and the per-view residency
+     * update so there is exactly ONE decode/upload path.
+     *
+     * TWO PASSES ON PURPOSE (confirmed live 2026-07-15 — the actual cause of
+     * "no texture bound to target" on every pan/zoom): the render loop runs
+     * CONTINUOUSLY, so a render() can land between two separate upload calls
+     * and desync THREE's texture-unit binding cache. Pass 1 does all the
+     * (async, GL-free) decoding — safe to interleave. Pass 2 uploads
+     * everything already-decoded in one tight SYNCHRONOUS loop (no `await`
+     * between GL calls), with the loop paused and atlas.prepareForUploadBatch()
+     * resetting the stale binding cache first (see atlas.js for the full root cause).
+     */
+    async function requestDecodeUpload(entry, pages, pinClass) {
       const decodedForUpload = [];
-      for (const page of diff.toRequest) {
+      for (const page of pages) {
         const alreadyInCache = cache.isResident(page.key);
-        const { resident, slot } = cache.request(page.key, { pin: 'view' });
-        if (!resident) continue; // cache full — a structural miss, not a crash; stays magenta
+        const { resident, slot } = cache.request(page.key, { pin: pinClass });
+        if (!resident) continue; // cache full — a structural miss, not a crash; coarse fallback covers it
         if (!alreadyInCache) {
           try {
-            const worldRectPage = pageWorldRect(entry.table, 0, page.px, page.py);
+            const worldRectPage = pageWorldRect(entry.table, page.mip, page.px, page.py);
             const decoded = await decodePage(entry.sourceBitmap, worldRectPage);
             decodedForUpload.push({ slot, decoded });
           } catch (err) {
@@ -336,15 +360,7 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
         }
       }
       if (decodedForUpload.length > 0) {
-        // Pausing the render loop during the upload batch (kept — cheap,
-        // harmless, and avoids wasting a render on a half-updated state) was
-        // NOT the actual fix for "no texture bound to target": that error
-        // persisted even with rendering provably paused (a synchronous JS
-        // block genuinely cannot be interleaved), which disproved the
-        // interleaving theory outright. The REAL cause and fix are in
-        // atlas.js's prepareForUploadBatch() — THREE's own texture-unit
-        // binding CACHE (not a timing race) goes stale after a render() call,
-        // and copyTextureToTexture's fast path trusts it anyway.
+        const wasActive = loopActive;
         renderer.setAnimationLoop(null);
         atlas.prepareForUploadBatch();
         for (const { slot, decoded } of decodedForUpload) {
@@ -356,25 +372,77 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
           srcTex.dispose();
           decoded.close?.();
         }
-        renderer.setAnimationLoop(renderFrame);
+        if (wasActive) renderer.setAnimationLoop(renderFrame); // restore (never start prematurely at first load)
       }
+    }
+
+    /** Write one page's current cache slot into the flattened-pyramid indirection buffer. */
+    function writeIndirection(entry, page) {
+      const slot = cache.slotOf(page.key);
+      if (slot === null) return;
+      const o = entry.indirectionLayout.origins[page.mip];
+      const x = o.x + page.px;
+      const y = o.y + page.py;
+      const i = (y * entry.width + x) * 4;
+      entry.buf[i] = slot & 0xff;
+      entry.buf[i + 1] = (slot >> 8) & 0xff;
+      entry.buf[i + 2] = 0;
+      entry.buf[i + 3] = 255;
+    }
+
+    let lastFloorIndex = null;
+
+    async function updateResidency() {
+      if (lastFloorIndex !== null && lastFloorIndex !== view.floorIndex) {
+        // Leaving a floor: unpin its VIEW pages only (never its coarse pins —
+        // those stay resident for every floor so a switch back renders
+        // instantly, §4.1/§4.5). Unpin never evicts directly — PageCache's LRU
+        // decides that under real pressure — so a quick switch-and-back is free.
+        const prevEntry = floors.get(lastFloorIndex);
+        if (prevEntry) {
+          for (const key of prevEntry.residentViewKeys) cache.unpin(key);
+          prevEntry.residentViewKeys = new Set();
+        }
+      }
+      lastFloorIndex = view.floorIndex;
+
+      const entry = await ensureFloorLoaded(view.floorIndex);
+      if (quadMaterial.uniforms.uPageTable.value !== entry.indirectionTexture) {
+        // Floor bind: point every per-floor uniform at THIS floor's data.
+        // Assigning fresh array references (per entry) guarantees THREE
+        // re-uploads them; within a floor they're constant.
+        quadMaterial.uniforms.uPageTable.value = entry.indirectionTexture;
+        quadMaterial.uniforms.uWorldSizePx.value = entry.table.worldSizePx;
+        quadMaterial.uniforms.uMaxMip.value = entry.table.maxMip;
+        quadMaterial.uniforms.uMipOrigin.value = entry.mipOriginArr;
+        quadMaterial.uniforms.uMipPagesPerAxis.value = entry.mipPagesArr;
+      }
+
+      const worldRect = viewToWorldRect(view);
+      // Analytic mip selection (§4.1 — top-down camera, no GPU feedback): pick
+      // the finest mip that resolves for this zoom, plus a coarser prefetch set.
+      const plan = planResidency(entry.table, worldRect, canvasPx, { guardPages: 1 });
+      quadMaterial.uniforms.uRequestedMip.value = plan.mip;
+
+      // The view's needed pages = fine + coarser prefetch, EXCLUDING any page
+      // already held by this floor's permanent coarse pins (never downgrade a
+      // 'coarse' pin to 'view' — that would let a floor switch unpin it).
+      const neededViewPages = [...plan.fine, ...plan.prefetchCoarser].filter((p) => !entry.coarseKeySet.has(p.key));
+      const diff = diffResidency(entry.residentViewKeys, neededViewPages);
+
+      await requestDecodeUpload(entry, diff.toRequest, 'view');
       for (const key of diff.toUnpin) cache.unpin(key);
       entry.residentViewKeys = diff.nextKeys;
 
-      // Rebuild the indirection buffer FRESH from the cache's own current
-      // slot mapping (never from a separately-tracked copy) — this is what
-      // keeps it correct across evictions: a page that got evicted and
-      // reassigned to someone else must never leave a stale pointer behind.
+      // Rebuild the indirection buffer FRESH from the cache's own current slot
+      // mapping every time (never a separately-tracked copy) — this is what
+      // keeps it correct across evictions: an evicted-and-reassigned page must
+      // never leave a stale pointer. Both the always-resident coarse pins AND
+      // the current view pages are written, so the shader's coarse-fallback
+      // walk always finds SOMETHING resident (blur, never magenta).
       entry.buf.fill(0);
-      for (const page of neededPages) {
-        const slot = cache.slotOf(page.key);
-        if (slot === null) continue;
-        const i = (page.py * entry.n + page.px) * 4;
-        entry.buf[i] = slot & 0xff;
-        entry.buf[i + 1] = (slot >> 8) & 0xff;
-        entry.buf[i + 2] = 0;
-        entry.buf[i + 3] = 255;
-      }
+      for (const page of entry.coarsePages) writeIndirection(entry, page);
+      for (const page of neededViewPages) writeIndirection(entry, page);
       entry.indirectionTexture.needsUpdate = true;
 
       const worldSizePx = entry.table.worldSizePx;
@@ -428,7 +496,16 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
     view.__lastWorldSizePx = firstEntry.table.worldSizePx;
     await updateResidency();
 
+    loopActive = true;
     renderer.setAnimationLoop(renderFrame);
+
+    // Background prewarm (non-blocking, best-effort): stream every OTHER floor's
+    // coarse pins so a floor switch is instant (§4.5 — coarse pins for every
+    // floor always resident). Fire-and-forget so it never delays floor 0's
+    // first paint; a fetch failure on one floor can't take the viewer down.
+    for (let f = 1; f < floorCount; f++) {
+      ensureFloorLoaded(f).catch((err) => console.warn(`[vt-pan-viewer] prewarm floor ${f} failed:`, err));
+    }
 
     // capture:true — see onKeyDown's comment. Must run before Foundry's own
     // window-level keydown listener (registered at Foundry boot, bubble phase).
@@ -450,16 +527,27 @@ export async function startVtPanViewer({ THREE, imageUrlForFloor, floorCount }) 
       applyKeyAndUpdate, // exposed so MapShine.soakHooks.pan drives the EXACT same path a real keypress does
       getDiagnostics() {
         const avgMs = frameTimes.length ? frameTimes.reduce((a, b) => a + b, 0) / frameTimes.length : 0;
+        const entry = floors.get(view.floorIndex);
         return {
           view,
           layout,
           canvasSizePx: canvasPx,
           cacheStats: cache.stats(),
           floorsLoaded: Array.from(floors.keys()),
-          currentFloorResidentCount: floors.get(view.floorIndex)?.residentViewKeys.size ?? 0,
+          currentFloorResidentCount: entry?.residentViewKeys.size ?? 0,
+          // Multi-mip state (coarse-fallback gate evidence): the finest mip
+          // being tried this view, the floor's top-level, its coarse-pin depth
+          // + page count, and the packed-pyramid indirection dimensions.
+          mip: {
+            requested: quadMaterial.uniforms.uRequestedMip.value,
+            max: quadMaterial.uniforms.uMaxMip.value,
+            coarseTopMips: entry?.coarseTopMips ?? null,
+            coarsePinnedPages: entry?.coarsePages.length ?? null,
+            indirectionPyramid: entry ? `${entry.width}x${entry.height}` : null,
+          },
           renderMsAvgLast120: Math.round(avgMs * 100) / 100,
           lastError,
-          ...sampleDiagnostics(floors.get(view.floorIndex)),
+          ...sampleDiagnostics(entry),
           controls: 'Arrow keys/WASD pan, +/- zoom, 0-2 or Tab floor-switch (click the canvas first).',
         };
       },

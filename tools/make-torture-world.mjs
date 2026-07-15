@@ -242,7 +242,7 @@ function buildMacro() {
 
   const scene = await Scene.create({
     name: "Keyhole Torture (${SIZE}² ×${FLOORS})",
-    width: SIZE, height: SIZE, padding: 0, backgroundColor: "#0a0d14",
+    width: SIZE, height: SIZE, padding: 0, background: { color: "#0a0d14" },
     grid: { type: 1, size: ${CELL}, distance: 5, units: "ft" },
     flags: { levels: { sceneLevels: Array.from({length: FLOORS}, (_,f) => [f*ELEV, f*ELEV+ELEV, "F"+f]) } }
   });
@@ -256,14 +256,16 @@ function buildMacro() {
 
   const lights = Array.from({length: ${LIGHTS}}, (_, i) => {
     const f = i % FLOORS;
-    return { x: rnd()*SIZE, y: rnd()*SIZE, elevation: f*ELEV+ELEV/2,
+    // x/y are integer fields in Foundry v14 (common/documents/ambient-light.mjs) → round.
+    return { x: Math.round(rnd()*SIZE), y: Math.round(rnd()*SIZE), elevation: f*ELEV+ELEV/2,
       config: { dim: 400+rnd()*600, bright: 150+rnd()*300,
         color: ["#ffd9a0","#a0c8ff","#ffa0a0","#ffffff"][i%4], alpha: 0.5, luminosity: 0.5 } };
   });
   await scene.createEmbeddedDocuments("AmbientLight", lights);
 
   const walls = Array.from({length: ${WALLS}}, () => {
-    const x = rnd()*SIZE, y = rnd()*SIZE, len = 200+rnd()*1200, horiz = rnd()<0.5;
+    // Wall.c is a length-4 array of INTEGER coords in v14 (common/documents/wall.mjs) → round.
+    const x = Math.round(rnd()*SIZE), y = Math.round(rnd()*SIZE), len = Math.round(200+rnd()*1200), horiz = rnd()<0.5;
     const c = horiz ? [x, y, Math.min(SIZE, x+len), y] : [x, y, x, Math.min(SIZE, y+len)];
     return { c };
   });
@@ -281,7 +283,8 @@ async function main() {
   console.log(`[torture] ${SIZE}² × ${FLOORS} floors → ${OUT_REL}/  (cell ${CELL}px)`);
   const t0 = performance.now();
   let totalMB = 0;
-  for (let f = 0; f < FLOORS; f++) {
+  const macroOnly = !!args['macro-only']; // rewrite the scene macro without re-imaging
+  for (let f = 0; macroOnly ? false : f < FLOORS; f++) {
     const jobs = [
       [`torture_floor${f}.png`, () => buildAlbedo(f)],
       [`torture_floor${f}_Outdoors.png`, () => buildOutdoors(f)],

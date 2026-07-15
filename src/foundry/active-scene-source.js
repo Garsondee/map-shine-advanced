@@ -1,32 +1,48 @@
 /**
  * @fileoverview foundry/active-scene-source.js — reads the CURRENTLY DISPLAYED
- * scene's base background image (Keyhole Stage 2B: point the VT viewer at
- * real art instead of the torture fixture). First file in `src/foundry/` —
- * the ONE Foundry adapter (Keyhole.md §3, CONVENTIONS.md §1).
+ * scene's floor art (Keyhole Stage 2B: point the VT viewer at real art instead
+ * of the torture fixture). First file in `src/foundry/` — the ONE Foundry
+ * adapter (Keyhole.md §3, CONVENTIONS.md §1).
  *
- * SCOPE FOR THIS INCREMENT, deliberately minimal (the same "ship a minimal
- * slice, record the deferred target" discipline as decode-pool.js's Worker-pool
- * deferral and vt-sample.glsl.js's old single-mip note): FLOOR 0 ONLY, the
- * scene's base `background.src` (common/documents/scene.mjs's
- * `_LEVELS_PROPERTY_MAP` confirms this exact field — verified against the
- * vendored v14 source, not assumed).
+ * MULTI-FLOOR VIA NATIVE `scene.levels` — a directive, not just a finding.
+ * Author decision 2026-07-15: build around Foundry's own core Levels schema;
+ * the long-established THIRD-PARTY Levels module is treated as legacy/
+ * redundant going forward (its vendored copy under `othermodules/` was
+ * deleted the same session). `getActiveSceneFloors()` is therefore the
+ * PRIMARY entry point: it reads `scene.levels` (`common/documents/level.mjs`,
+ * schemaVersion "14.359") — an `EmbeddedCollectionField` of Level documents,
+ * each with its own `background.src` + `elevation.{bottom,top}` — sorts by
+ * `elevation.bottom` ascending (the semantically correct floor order; NOT
+ * `scene.firstLevel`, whose own doc comment warns it's creation order, "not…
+ * first by sort order" in a multi-level scene), and maps each to a floor.
  *
- * DELIBERATELY NOT YET BUILT (tracked, not silently dropped):
- * - Multi-floor art. v14 core now ships a NATIVE `scene.levels` embedded
- *   collection (common/documents/level.mjs, schemaVersion "14.359") where each
- *   Level document carries its OWN background.src — a real, very recent core
- *   feature, confirmed in source. BUT this project's own torture-fixture
- *   generator (tools/make-torture-world.mjs) and legacy V2's harvest-manifest
- *   entry ("foundry/levels-scene-flags.js", Keyhole.md §6) both target the
- *   older, long-established THIRD-PARTY Levels module convention instead:
- *   floor-background TILES carrying `flags.levels.rangeBottom`/`rangeTop`.
- *   Real author worlds are far more likely to already use the third-party
- *   convention (it predates the core feature by years). Detecting either (or
- *   both) is real, scoped follow-up work — not built here, so this increment
- *   stays small and reviewable.
+ * THE DEPRECATION THAT CONFIRMED THIS DIRECTION: `client/documents/scene.mjs`
+ * (line ~1707) — `Scene#background` is `@deprecated since v14, until 16`,
+ * delegating to `this.firstLevel?.background` and logging a compatibility
+ * warning on every access. Stage 2B's first cut (`getActiveSceneBackground`,
+ * kept below) was unknowingly exercising this deprecated shim the whole time
+ * — it worked (confirmed live: the author's 12000² mansion scene loaded
+ * through it), but v14 itself is telling us `scene.levels` is the real,
+ * current, non-deprecated source of truth. `getActiveSceneBackground` now
+ * serves as `getActiveSceneFloors`'s own last-resort fallback (a scene with
+ * zero usable Level backgrounds — e.g. not yet migrated to the core schema)
+ * rather than the primary path — one path per behavior, not two competing ones.
+ *
+ * NOTE, for the record (not this increment's problem): the project's own
+ * torture-fixture generator (`tools/make-torture-world.mjs`) and legacy V2's
+ * harvest-manifest entry (`foundry/levels-scene-flags.js`, Keyhole.md §6)
+ * both still target the third-party module's TILE-flag convention
+ * (`flags.levels.rangeBottom`/`rangeTop`) for their synthetic multi-floor
+ * test world — a real, separate follow-up (regenerate the fixture via
+ * `scene.createEmbeddedDocuments("Level", [...])`, matching level.mjs's own
+ * JSDoc example) so the fixture matches what's actually being built now.
+ *
+ * STILL DELIBERATELY NOT BUILT (tracked, not silently dropped):
  * - Non-square worlds. `page-table.js`'s `PageTable` takes a single
  *   `worldSizePx` (the page grid is square by construction) — see
- *   `vt-pan-viewer.js`'s loud guard against a non-square decoded image.
+ *   `vt-pan-viewer.js`'s loud guard against a non-square decoded image. Each
+ *   floor is checked independently, so one non-square Level failing doesn't
+ *   block floors that ARE square.
  *
  * @module foundry/active-scene-source
  */
@@ -74,6 +90,14 @@ export function resolveAssetUrl(src, getRouteFn) {
 }
 
 /**
+ * The FALLBACK path — reads the scene's own (deprecated-since-v14, see this
+ * file's header) `background.src` getter, which itself delegates to
+ * `firstLevel`. Used internally by `getActiveSceneFloors()` when a scene has
+ * no `levels` with usable image art at all (e.g. not yet migrated to the core
+ * Level schema). Kept exported + independently tested because it's still a
+ * real, correct, minimal way to answer "does this scene have ANY displayable
+ * background," not because it's the primary entry point anymore.
+ *
  * @param {object|null} sceneDoc - a Foundry Scene document. Callers pass
  *   `canvas.scene` (the CURRENTLY DISPLAYED scene) — verified via
  *   client/canvas/board.mjs's `Canvas#scene` getter, whose own doc comment is
@@ -100,4 +124,88 @@ export function getActiveSceneBackground(sceneDoc, getRouteFn) {
     };
   }
   return { ok: true, url: resolveAssetUrl(src, getRouteFn), name: sceneDoc.name };
+}
+
+/**
+ * Read a Scene document's `levels` embedded collection into a plain array,
+ * tolerant of either the real Foundry `EmbeddedCollection` (a Map subclass —
+ * exposes `.values()`) or a plain array/iterable (test mocks). Pure, no
+ * Foundry globals touched.
+ * @param {object|null} sceneDoc
+ * @returns {any[]}
+ */
+function levelDocsOf(sceneDoc) {
+  const levels = sceneDoc?.levels;
+  if (!levels) return [];
+  if (typeof levels.values === 'function') return Array.from(levels.values());
+  return Array.from(levels);
+}
+
+/**
+ * THE PRIMARY entry point (see this file's header for why): every usable
+ * floor of the currently-displayed scene, sorted bottom-to-top by
+ * `elevation.bottom`, read from Foundry's native `scene.levels` collection.
+ * Falls back to `getActiveSceneBackground()` (a single floor 0) when no Level
+ * has usable image art — e.g. a scene that predates the core Levels schema
+ * migration, or one with zero Levels defined at all.
+ *
+ * A Level with NO background set is silently skipped (not an error — a Level
+ * can legitimately exist purely for lighting/region config, with visuals
+ * coming from tiles instead). A Level with a VIDEO background is skipped but
+ * reported in `skipped[]` (not silently dropped — Doctrine #1) rather than
+ * failing the whole scene, since the other floors may still be perfectly usable.
+ *
+ * @param {object|null} sceneDoc - see `getActiveSceneBackground`'s param doc.
+ * @param {(path:string)=>string} [getRouteFn] - forwarded to resolveAssetUrl (testability).
+ * @returns {{ok:true, floors:Array<{index:number,url:string,name:string,elevationBottom:number|null}>, skipped:Array<{name:string,reason:string}>}
+ *          |{ok:false, error:string}}
+ */
+export function getActiveSceneFloors(sceneDoc, getRouteFn) {
+  if (!sceneDoc) {
+    return { ok: false, error: 'no active scene (canvas.scene is null) — open a scene in Foundry first' };
+  }
+
+  const skipped = [];
+  const withImages = [];
+  for (const lvl of levelDocsOf(sceneDoc)) {
+    const src = lvl?.background?.src;
+    if (!src) continue; // no background set on this Level — legitimate, not an error
+    if (!isImageUrl(src)) {
+      skipped.push({
+        name: lvl.name || '(unnamed level)',
+        reason: `background ("${src}") is a video, not a still image`,
+      });
+      continue;
+    }
+    withImages.push(lvl);
+  }
+  withImages.sort((a, b) => (a.elevation?.bottom ?? 0) - (b.elevation?.bottom ?? 0));
+
+  if (withImages.length > 0) {
+    return {
+      ok: true,
+      floors: withImages.map((lvl, index) => ({
+        index,
+        url: resolveAssetUrl(lvl.background.src, getRouteFn),
+        name: lvl.name || `Level ${index}`,
+        elevationBottom: lvl.elevation?.bottom ?? null,
+      })),
+      skipped,
+    };
+  }
+
+  const legacyBg = getActiveSceneBackground(sceneDoc, getRouteFn);
+  if (legacyBg.ok) {
+    return {
+      ok: true,
+      floors: [{ index: 0, url: legacyBg.url, name: legacyBg.name, elevationBottom: null }],
+      skipped,
+    };
+  }
+  return {
+    ok: false,
+    error:
+      `scene "${sceneDoc.name}" has no usable floor art (0 Level backgrounds usable` +
+      `${skipped.length ? `, ${skipped.length} skipped (video)` : ''}, and no legacy scene background either)`,
+  };
 }

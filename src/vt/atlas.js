@@ -7,12 +7,29 @@
  * `create()` (THREE-touching): `computeAtlasLayout()` and `slotToAtlasPosition()`
  * are plain arithmetic, Node-testable without WebGL; `PageAtlas` is the thin
  * wrapper that actually owns the GPU resource and performs uploads via
- * `renderer.copyTextureToTexture()` — verified against the vendored Three r170
- * source (src/vendor/three/three.module.js:31429) rather than assumed: the
- * older `copyTextureToTexture3D` is deprecated there in favor of the unified
- * `copyTextureToTexture(src, dst, srcRegion, dstPosition, level)`, which
- * dispatches on `dst.isDataArrayTexture` and uses `dstPosition.z` as the array
- * layer — exactly the shape this module is built around.
+ * `renderer.copyTextureToTexture()` — verified against the vendored Three
+ * source rather than assumed: the older `copyTextureToTexture3D` is
+ * deprecated in favor of the unified `copyTextureToTexture(src, dst,
+ * srcRegion, dstPosition, ...level)`, which dispatches on `dst.isDataArrayTexture`
+ * and uses `dstPosition.z` as the array layer — exactly the shape this module
+ * is built around.
+ *
+ * RE-VERIFIED 2026-07-15 on upgrade r170→r185 (author confirmed r185 is
+ * current stable; re-checked rather than assumed compatibility): the
+ * `copyTextureToTexture` signature grew a second level param
+ * (`srcLevel, dstLevel` replacing one shared `level`) and gained a new
+ * routing condition (`properties.has(srcTexture)`) that sends ALREADY-TOUCHED
+ * source textures through a framebuffer-blit path instead of the direct
+ * texSubImage path — traced: `properties` auto-populates a WeakMap entry on
+ * first `.get()`, and nothing before that check ever calls `.get()` on a
+ * fresh, never-rendered `THREE.Texture` (exactly what `uploadPage()`'s
+ * `srcTexture` always is — one built fresh, uploaded, disposed, never
+ * reused), so this project's call shape should still take the same direct
+ * path as before. Reasoned from source, not yet re-confirmed live at r185 —
+ * treat as the first thing to check if uploads regress after this upgrade.
+ * The `uploadTexture()`/`resetState()`/`bindTexture()` mechanics the rest of
+ * this file's fixes depend on are byte-for-byte unchanged between r170
+ * and r185.
  *
  * @module vt/atlas
  */

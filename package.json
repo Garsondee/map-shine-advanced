@@ -22,7 +22,7 @@
     "knip:files": "knip --include files"
   },
   "dependencies": {
-    "three": "^0.170.0"
+    "three": "0.185.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.47.2",

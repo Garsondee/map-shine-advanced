@@ -9,3 +9,6 @@ dist
 othermodules
 # Local AI/editor tooling config
 .continue/
+
+# Keyhole torture fixture — regenerable via `node tools/make-torture-world.mjs`
+assets/torture/

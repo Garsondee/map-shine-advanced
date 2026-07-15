@@ -21,6 +21,7 @@
  */
 
 import * as THREE from './vendor/three/three.module.js';
+import { installSoak } from './diag/soak.js';
 
 const MODULE_ID = 'map-shine-advanced';
 const VERSION = '0.6.0-dev.0';
@@ -48,8 +49,10 @@ if (MapShine.__keyholeBooted) {
 }
 
 function install() {
+  installSoak(MapShine); // exposes MapShine.soak(n) — the stage-gate soak harness
   console.log(
-    `%c${TAG}%c ${STAGE} — new tree live, legacy quarantined. Three r${THREE.REVISION} / WebGL2.`,
+    `%c${TAG}%c ${STAGE} — new tree live, legacy quarantined. Three r${THREE.REVISION} / WebGL2.` +
+      ` Soak harness ready: MapShine.soak(n).`,
     'color:#8fd6ff;font-weight:bold',
     'color:inherit'
   );
@@ -152,6 +155,7 @@ function bootHeartbeat() {
     });
 
     MapShine.__heartbeat = { host, renderer, scene, camera, triangle };
+    MapShine.__soakWatch?.(canvas); // count any WebGL context loss on the boot canvas
     console.log(`${TAG} boot heartbeat rendering. Gate "boot renders" ✔`);
   } catch (err) {
     // Doctrine #1: fail LOUD, never silently. No V2 fallback exists to hide behind.

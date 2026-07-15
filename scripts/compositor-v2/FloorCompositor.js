@@ -140,6 +140,7 @@ import { LevelCompositePass } from './LevelCompositePass.js';
 import { LevelAlphaRebindPass } from './LevelAlphaRebindPass.js';
 import { PresentationUpscalePass } from './presentation/PresentationUpscalePass.js';
 import { getCompositorInternalSize, writeCompositorInternalSize } from '../core/compositor-resolution.js';
+import { isV3PipelineEnabled } from '../compositor-v3/v3-flags.js';
 import { ShadowDriverState } from './shadow-system/ShadowDriverState.js';
 import { UpperFloorAlphaCompositor } from './shadow-system/UpperFloorAlphaCompositor.js';
 import { SkyOcclusionPrimitive } from './shadow-system/SkyOcclusionPrimitive.js';
@@ -4088,9 +4089,36 @@ export class FloorCompositor {
         ['WindowLightEffectV2', '_windowLightEffect', () => this._windowLightEffect.populate(sc.foundrySceneData)],
       ];
 
+      // Under V3, skip the load-time populate() of effects V3 does NOT render.
+      // These populate() calls are pure waste under V3 (their per-effect masks /
+      // overlays are never consumed) and several are among the heaviest single
+      // synchronous blocks in the whole load — SpecularEffectV2.populate() alone
+      // does a sequential `await probeMaskFile()` for the background AND every
+      // tile (see the per-job TIMEOUT hint below), and Ash/Dust rebuild Quarks
+      // particle fields. On the constrained-GPU Mansion these land inside the
+      // `binding_effects` window and are a recurring load-time TDR-stall source.
+      //   • Specular/Fluid/Iridescence/Prism — per-tile effects bound via
+      //     TileEffectBindingManager, which has NO registered effects under V3
+      //     (nothing ever calls registerEffect for them) → never rendered.
+      //   • Water/WaterSplashes — no V3 water pass yet (Forward+ B5).
+      //   • Ash/Dust — particle effects not in any V3 bridge.
+      // KEPT under V3: Bush/Tree (V3EffectsBridge renders them), Fire (kept
+      // conservatively — its meshes live in the bus scene and may render even
+      // without an explicit bridge), WindowLight (its masks are structural).
+      // A hard SKIP (not defer) is correct: V3 genuinely never renders these, so
+      // there is nothing to defer TO; re-enable per-effect when V3 gains that
+      // pass. Reversible via `MapShine.v3.pipeline(false)`.
+      const v3SkipPopulateKeys = isV3PipelineEnabled()
+        ? new Set([
+          '_specularEffect', '_fluidEffect', '_iridescenceEffect', '_prismEffect',
+          '_ashDisturbanceEffect', '_dustEffect',
+        ])
+        : null;
+
       const populateJobs = [];
       for (const row of maskJobDefs) {
         const [label, effectKey, fn] = row;
+        if (v3SkipPopulateKeys?.has(effectKey)) continue;
         // Window masks must always be discovered — hint pruning skips populate when
         // effectHints omit windows/structural, leaving zero overlays forever.
         if (!hintPruneMasks || effectKey === '_windowLightEffect' || this._shouldWarmupEffectKey(effectKey)) {
@@ -4099,12 +4127,17 @@ export class FloorCompositor {
       }
       // Water / splashes must always run populate when present: `_shouldWarmupEffectKey`
       // uses `hasRenderableWater()`, which is only true *after* populate — gating here
-      // would skip discovery entirely (water never appears, no error).
-      if (this._waterEffect) {
+      // would skip discovery entirely (water never appears, no error). Skipped under
+      // V3 (no V3 water pass yet — see the v3SkipPopulateKeys note above).
+      if (this._waterEffect && !isV3PipelineEnabled()) {
         populateJobs.push(['WaterEffectV2', () => this._waterEffect.populate(sc.foundrySceneData)]);
       }
-      if (this._waterSplashesEffect) {
+      if (this._waterSplashesEffect && !isV3PipelineEnabled()) {
         populateJobs.push(['WaterSplashesEffectV2', () => this._waterSplashesEffect.populate(sc.foundrySceneData)]);
+      }
+      if (v3SkipPopulateKeys) {
+        log.info(`[POPULATE LOAD] V3: skipping populate() for ${populateJobs.length < maskJobDefs.length ? 'non-V3-rendered effects' : 'none'} `
+          + `(specular/fluid/iridescence/prism/ash/dust/water) — ${populateJobs.length} job(s) will run.`);
       }
       log.warn(
         `[POPULATE LOAD] effect queue ready | source=${source} | jobs=${populateJobs.length} | maskHintPruneActive=${hintPruneMasks} | perJobTimeoutMs=${POPULATE_JOB_TIMEOUT_MS}`,

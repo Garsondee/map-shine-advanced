@@ -984,7 +984,7 @@ export class CameraFollower {
       let activeVisionSourceCount = null;
       try { activeVisionSourceCount = Array.from(canvas?.effects?.visionSources ?? []).filter((s) => s.active).length; } catch (_) {}
       log.info('[floor-resident token-visibility] post-switch state', {
-        levelId, activeVisionSourceCount, rows,
+        levelId: level?.levelId ?? null, activeVisionSourceCount, rows,
       });
     } catch (err) {
       log.warn('[floor-resident token-visibility] diagnostic block itself threw', err);

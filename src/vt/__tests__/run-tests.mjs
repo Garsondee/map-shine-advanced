@@ -8,6 +8,7 @@
  *     --bundle --format=esm --platform=node --outfile=<tmp>.mjs && node <tmp>.mjs
  */
 import { run as runVtCore } from './vt-core.test.mjs';
+import { run as runAtlas } from './atlas.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -30,7 +31,7 @@ const t = {
   },
 };
 
-const suites = [['vt-core', runVtCore]];
+const suites = [['vt-core', runVtCore], ['atlas', runAtlas]];
 
 for (const [name, fn] of suites) {
   const before = failed;

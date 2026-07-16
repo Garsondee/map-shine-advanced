@@ -41,48 +41,70 @@ Every drawable — level art, tiles, tokens, drawings, weather, and every future
 
 ---
 
-## 📍 CURRENT STATUS (updated 2026-07-16 late — read this before §8's stage narrative)
+## 📍 CURRENT STATUS (updated 2026-07-17 — read this before §8's stage narrative)
 
-**Branch `keyhole`. Stage 0 ✅, Stage 1 ✅, Stage 2 🔶 (core proven, formal metrics not captured). Two things landed since the last update that were NOT on the stage ladder at all, both author-directed, both live-confirmed: the TSL/WebGPU port (§9 Q3) and TOKENS + the input model (§4.7, new).**
+**Branch `keyhole`. Stage 0 ✅, Stage 1 ✅, Stage 2 🔶 (core proven live, formal gate metrics not yet captured).** Everything below §"THE FRAMEWORK" happened on a **second axis that runs alongside the stage ladder, not on it** — a full audit of `legacy/` (V2) plus a load-bearing skeleton built from what the audit found. Read `keyhole-stage-status.md` (project memory) for the rolling blow-by-blow; this section is the map.
 
-### ✅ THE TSL/WebGPU PORT IS DONE AND LIVE-CONFIRMED
+### ✅ RENDERING: TSL/WebGPU port + tokens — LIVE, author-confirmed
 
-Q3's overturn (§9) is executed, not just decided. `WebGPURenderer` (reports `backend: "webgpu"`), `NodeMaterial`, the VT sampler as a TSL `Fn` — **the GLSL is deleted, not kept alongside.** Author-confirmed on a real 3-floor 16050×7650 scene: *"The real shader is working and not washed out. All floors work, layering is correct."* ~0.36 ms/frame, 0 misses, 0 evictions at rest. `three.webgpu.js` vendored via `npm run build:three-webgpu`.
+`WebGPURenderer` + `NodeMaterial` + the VT sampler as TSL, GLSL fully deleted. Real 3-floor 16050×7650 scene: *"The real shader is working and not washed out. All floors work, layering is correct."* Tokens render, placed and hit-tested correctly; **Foundry owns ALL input** (§4.7) — MSA's canvas is `pointer-events:none` and mirrors `canvas.stage` rather than owning a camera. The safety slide (§4.3) passed its first real unprompted test. Full story, including the TSL `.mix()` trap that cost a session (three simultaneous bugs from one wrong method form): `reference_tsl_method_chaining_trap` in memory, and the "Still open" list just below.
 
-**The safety slide (§4.3) got its first REAL test and passed** — unprompted. A renderer exception during startup made MSA stand down, announce itself, and hand the author a working Foundry session. It also now auto-dismisses after 20 s (author: the banner *"linger[ed] on the screen forever"*; it had done its job once read, after which it was a red bar bolted over the map — the state still lives in `getRenderMode()` and the diagnostics forever, only the pixels expire).
+**🐞 The one confirmed open correctness bug:** `src/vt/page-cache.js` evicts a slot and reuses it without clearing the previous owner's indirection texel (`onEvict`/`clearIndirection`: zero hits in `src/vt/`). Repro: dropping a token (a new pack, at a full cache) flashes rectangular garbage. Fix: the cache must own an evict callback; no slot is reusable until every texel pointing at it is cleared. Not yet fixed.
 
-**The whole port cost one session to ONE bug, and it is worth reading before writing any TSL:** `reference_tsl_method_chaining_trap` in project memory. TSL's `.mix()` METHOD takes its receiver as the **interpolant** — three.js defines `mixElement = (t, e1, e2) => mix(e1, e2, t)`, so `a.mix(b, t)` compiles to `mix(b, t, a)`, silently, with no type error. `uUnoccludedAlpha.mix(uOccludedAlpha, occ)` reads as `mix(1, 0, 0) == 1` (an identity) and compiled to `mix(0, occ, 1) == 0` — **alpha × 0, the entire map black**, while every uniform printed correct. ONE root cause, THREE bugs: the black screen, the washed-out map (the sRGB decode never ran despite `srgbDecode: 1` binding correctly), and the mip cross-fade. **Rule: always the FUNCTION form, `mix(a, b, t)`. Never the method.** (`.smoothstep()` is the same trap.)
+**Still open, unchanged from last check:** pan/zoom feel worth re-measuring now the camera is correct; token selection may not need building at all (Foundry hit-tests); `vt-pan-viewer.js` wants a rename to `scene-renderer.js`; Stage 2's formal gate metrics (PIXI residency/load-time/texImage2D) uncaptured; only one real scene tested.
 
-**Also learned, and it generalises past TSL:** colour space is a property of the DATA, not the texture. ONE atlas holds both albedo pages and mask pages, so `texture.colorSpace = SRGBColorSpace` would have fixed the map and silently corrupted every mask. The decode is per-pack, in-shader, driven by `pack.name`.
+---
 
-### ✅ TOKENS RENDER, AND FOUNDRY OWNS ALL INPUT (§4.7 — new, and it changes §4.3)
+## 🏗️🏗️🏗️ THE FRAMEWORK — a full V2 audit + a skeleton built from it (2026-07-16/17)
 
-Author-confirmed: *"Tokens now land exactly where they should be and the mouse changes to a pointer in the exact correct places. Pan and zoom seems perfectly aligned with tokens."* Y-flip survived a brand-new world→screen mapping. See §4.7 for the decision and its rationale.
+**Author directive that started this:** *"Take every horrible thing you learned about V2... burn it into your memory... we must avoid the problems of the original module at all costs."* Followed by: *"Is there a way we can make a non-functional skeleton... a rigid but correct shape... in a way that future LLMs cannot fail but act inside of?"* Then: *"I would rather this project was too fussy about following rules than too lenient."*
 
-### 🐞 THE ONE CONFIRMED OPEN BUG — dangling indirection texels on eviction
+**Read `v2-postmortem-the-failure-modes.md` (memory) FIRST, always, before any architectural decision.** It is the single most important memory file in the project and everything below derives from it.
 
-**Verified by grep, not theorised.** `src/vt/page-cache.js` evicts a page's slot and reuses it, and **nothing clears the previous owner's indirection texel** — `onEvict` / `evictCallback` / `clearIndirection` return **zero hits** across `src/vt/`. The old pack's page table still says "my page is in slot N" while slot N now holds another pack's pixels, so it samples the wrong content until residency happens to rewrite the texel.
+### The one-sentence finding, proven three times independently
+**V2's good abstractions existed and LOST, because following them was optional.** `EffectComposer`'s correct layer model: 5 importers vs the god-object's 92. The Foundry adapter: 21 of 128 files complied. The params `getControlSchema()`: referenced by its own effect's write path **zero times, in the same file**. Eight bypasses total, all measured, all in the postmortem. **A comment cannot fail a build — so the fix is never "write it down better."**
 
-**Repro (author): dropping a token onto the board flashes rectangular texture garbage, then it resolves.** Trigger is precisely **a new pack arriving at a full cache** — a token IS a new pack. The zoom-time "misplaced tiles" was the same defect; it stopped appearing only because the camera fight stopped thrashing residency, which was *masking the trigger, not fixing the bug*. The cache exhaustion reported alongside it (`2048/2048`, `freePages: 0`, ~1700 evictions, multi-second frame gaps) was a symptom of that same fight.
+**And the velocity finding that explains WHY, not just that:** V2 was built in **under six months, ~2,000 lines/day, solo** (git-verified; author corrected my earlier "years" assumption — this INVERTS the reading, nothing rotted slowly, it was laid down at speed). At that pace there is no afternoon in which the correct-but-harder path is affordable. **So every wall in this project must be FRICTIONLESS — the right path has to be the fast path — or it loses exactly the same way.**
 
-**The invariant to restore:** a slot must not be reusable until every indirection texel pointing at it is cleared. Same CLASS as `7baca4a` (release → measure → request), which fixed double-pinning on *transitions* but never covered eviction. Prefer making the cache own an evict callback over sprinkling clears at call sites.
+### The full audit — one doc per subsystem, each with measured evidence + a Keyhole design
+| Doc | Finding in one line |
+|---|---|
+| `docs/planning/Effects-API.md` | The effect contract — `reads`/`writes`/`params`/`tiers`, enforced by absence (no `ctx.system`) |
+| `docs/planning/Effects.md` | The tier ladder — tier 0 is the coarse pin, ordered by COST CLASS not prettiness |
+| `docs/planning/Engine-Postmortem.md` | ROOT BLUNDER: two renderers, both authoritative — 1,838 lines of sync that still failed |
+| `docs/planning/Water.md` | The look was 19% of 14,850 lines; the cross-floor rule is 15 clean lines, not the risk |
+| `docs/planning/Particles.md` | Five particle architectures because the good one (quarks) was optional. Quarks itself is unusable under our renderer (`NodeMaterial:0`) — TSL compute replaces it |
+| `docs/planning/Environment.md` | Time lived INSIDE weather (`this.timeOfDay` on WeatherController); 8 suns; darkness round-tripped through Foundry as a feedback bus |
+| `docs/planning/Light-and-Shadow.md` | ONE wrong noun: shadow modeled as paint, not as "absence of a specific light" — hence `tCombinedShadow` + an entire module un-darkening shadows near lights |
+| `docs/planning/UI.md` | Tweakpane was never the problem (266 calls in 58,603 lines); the 48 `getControlSchema()`s were simply never used |
+| `docs/planning/Params.md` | The 8th bypass: colour space smuggled as a shape, `readonly` status readouts posing as params (→ explains why diagnostics wrote product state) |
+| `docs/planning/Health.md` | The Breaker Box idea was excellent; its 4,092-line implementation was a hand-drawn copy of an undeclared system — now derived in 141 |
+| `docs/planning/Skeleton.md` | The doctrine itself: media ladder (absence > throwing seams > tripwires > schemas > comments), the frictionless law, the covenant |
 
-### Still open, in likely order
+### ✅ WHAT IS ACTUALLY BUILT (not just designed) — all Node-tested, all in `npm run verify`
 
-1. **The eviction bug above** — it is the only confirmed correctness defect.
-2. **Pan/zoom is "better, not smooth like before"** — probably residency work per camera change. RE-MEASURE now the view is correct; do not guess.
-3. **Selection is NOT built** — and per §4.7 Foundry does the hit-testing, so `pickTokenAt`/`tokenContainsPoint` in `scene-tokens.js` are likely unnecessary. Check before building anything on them.
-4. **The occlusion mask producer** — the last piece of the tiles directive, now testable.
-5. Stage 2's formal gate metrics (full PIXI residency, load time, `texImage2D` timing); Tile-document proxying; a second real scene.
-6. `vt-pan-viewer.js` belongs at `src/scene/scene-renderer.js` — a mechanical rename, still not done.
+- **`tools/verify-structure.mjs` — 16 walls.** Each cites its V2 corpse + the fix, on failure. 7 are ratcheted (existing debt frozen, shrink-only); the other 9 — including `params/one-owner`, `shadow/no-lift-no-combine`, `env/one-sun`, `env/one-darkness`, `zones/one-door` — sit at **zero**, walled before the code that would exploit them exists.
+- **`tools/verify-structure.test.mjs` — 94 assertions** feeding REAL lines from `legacy/` to the rules and proving each is rejected. Adversarially verified: gutting a rule's regex turns the suite red and names the corpse that would slip through.
+- **`tools/structure-exceptions.json` — the debt ledger**, the sanctioned outlet for "make it work NOW" (author pre-authorized this against their own future pressure — see `feedback_now_pressure_protocol` in memory). Loud while active, **build-fails at expiry**, `approvedBy` required.
+- **`src/graph/passes.js` — the renderer's node graph as data.** 12 passes, 3 `live` / 9 `seam` (locked doors, all real) / 1 `future`. `validatePassGraph()` makes V2's Lighting↔Fire knot **unwritable** (proven in tests, not just described).
+- **`src/graph/pass-seams.js`** — every seam-status pass has a registered door; status is a **checked fact**, not a claim (caught my own drift live: two passes claimed `seam` with no door existing).
+- **`src/graph/pass-health.js` — derived health.** 4,092 V2 lines → 141, because it reads `passes.js` instead of hand-modelling the system. Answers questions V2 could not (`STARVED`, `unbuilt ≠ broken`).
+- **`src/world/{sun,environment}.js` + `src/core/frame-clock.js`** — the call-sheet's pure core (`frame.snapshot`'s content, not yet wired into the render loop). One clock, one sun (Node-pinned at dawn/noon/dusk), one darkness derivation (`max(night, GM)`).
+- **`src/core/params-schema.js`** — the params contract. 9 canonical types, validation AT THE WRITE (the check V2's `applyParamChange` never had), colour space required explicit, status readouts rejected outright.
+- **`src/effects/particles/*` + `src/scene/occlusion-mask.js` + `src/effects/{lighting,grade,water,surface-response}*`** — every named seam's locked door.
+- **`src/{world,effects,scene}/index.js`** — the first zone doors (one public entrance per zone).
 
-### 🔬 THE METHODOLOGY LESSON OF THIS SESSION — read `feedback_instruments_must_not_lie`
+**Test count:** vt 229 · scene 148 · foundry 256 · ui 51 · graph 194 · world 47 · core 59 — all green, plus the 94-case regression proof.
 
-**Six wrong theories on the black screen; the bisect ladder found it in four clicks.** What actually worked, every time, was rendering ONE layer of the graph at a time and letting the author's eyes report. What failed, every time, was reading the code and reasoning. **When printed values say a bug is impossible but the screen disagrees, suspect the OPERATION, not the values** — printing the occlusion uniforms proved the weights were clean zeros, which is what forced the search onto `mix` itself.
+### Not built yet (the honest gap)
+The params **service** (get/set/subscribe) and the **generated renderers** (Tweakpane + `ApplicationV2`) — `Params.md`/`UI.md` design them but nothing consumes `params-schema.js` yet. `frame.snapshot` is the last pass still `future`: its core exists and is tested, but nothing calls it from the render loop. The 48 real `getControlSchema()` bodies are not yet converted into real declarations (safe to do now — the contract has been tested against their exact field vocabulary in `Params.md` §3.6).
 
-**FIVE self-deceiving instruments in one session**, each costing a full round-trip: a pixel readback using deprecated `renderAsync` that read all-zero off a **visibly red** frame; a page-table probe reading mip 0 while the view sat at mip 2; a greyscale `occ` display that made "not occluded" and "the draw failed" the same colour; forced-alpha bisect stages that hid the layers beneath; and a bare `continue` that binned three tokens while the report said `skipped: []`. **"I could not measure this" must never look like "the thing is broken." Every skip reports its reason.** An instrument's output is what decisions are made from, so it deserves MORE scepticism than the code under test, not less.
-
-**And twice the author out-reasoned me from the diagnostics I had sent them** — *"Could it be a problem with adding tokens to the scene and not with rendering them?"* (it was) and *"what would make it so that only the first token was rendered?"* (nothing could — which is what proved the skip was silent). Both times the datum was already in a report I had written.
+### Recommended next steps, in order
+1. **Wire `frame.snapshot` into the render loop** — makes the last `future` pass live, gives `pass-health.js` a real frame to evaluate.
+2. **Harvest the 48 schemas into real `params-schema.js` declarations** — mechanical, safe now, preserves the author's tuned defaults + help text permanently.
+3. **The eviction bug** (dangling indirection texels) — the one open correctness defect, unrelated to the framework.
+4. **Ratchet paydown** — 19 one-door, 35 catches, 41 clocks, 12 Foundry reaches, 7 global-bus. Shrink-only, satisfying, no design needed.
+5. Name and build out `masks.occlusion` (the last piece of the original tiles ask, now unblocked since tokens render) or `light.visibility`/`light.accumulate` (the light-linking model) — whichever the author wants to see rendering first.
 
 ---
 

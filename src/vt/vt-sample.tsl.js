@@ -327,6 +327,36 @@ export function createVtSampler(
       // sampler's ALPHA is the culprit. Black in both => its RGB is.
       return vec4(sample(worldUV).rgb, 1);
     }
+    if (stage === 'guard') {
+      // The out-of-world guard, MADE VISIBLE instead of inferred: RED where it says
+      // "off the map" (and therefore paints black), GREEN where it says "on the map".
+      // An all-red screen means the guard is firing on every pixel and IS the black.
+      //
+      // Painting black is literally this test's job, which is what makes it the prime
+      // suspect for a black screen -- the one component whose correct behaviour and
+      // the bug are the same pixel.
+      const worldPx = worldUV.mul(uniforms.worldSizePx);
+      const outside = worldPx.lessThan(vec2(0, 0)).any().or(worldPx.greaterThanEqual(uniforms.worldSizePx).any());
+      return select(outside, vec4(1, 0, 0, 1), vec4(0, 1, 0, 1));
+    }
+    if (stage === 'mip-hi') {
+      // The walk at the mip the cross-fade blends TOWARDS. 'walk' proves mip 2 is
+      // found; this proves (or disproves) mip 3. If this is black, the cross-fade is
+      // mixing a good picture with a black one and the guard is innocent.
+      return vec4(
+        sampleFromMip(uniforms.requestedMip.add(int(1)).min(uniforms.maxMip), worldUV.mul(uniforms.worldSizePx)).rgb,
+        1
+      );
+    }
+    if (stage === 'no-guard') {
+      // The mip cross-fade WITHOUT the guard. Draws here but black in 'sample' =>
+      // the guard. Black here too => the cross-fade.
+      const worldPx = worldUV.mul(uniforms.worldSizePx);
+      const mipLo = uniforms.requestedMip;
+      const mipHi = mipLo.add(int(1)).min(uniforms.maxMip);
+      const t = select(mipHi.greaterThan(mipLo), uniforms.requestedMipFrac.sub(mipLo.toFloat()).clamp(0, 1), float(0));
+      return vec4(sampleFromMip(mipLo, worldPx).mix(sampleFromMip(mipHi, worldPx), t).rgb, 1);
+    }
     if (stage === 'walk') {
       const worldPx = worldUV.mul(uniforms.worldSizePx);
       return vec4(sampleFromMip(uniforms.requestedMip, worldPx).rgb, 1);

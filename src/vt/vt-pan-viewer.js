@@ -1963,6 +1963,8 @@ export async function startVtPanViewer({
           // for the DISPLAYED pack).
           mip: {
             requested: sampleState?.vt?.uniforms.requestedMip.value ?? null,
+            // 1 = the sRGB decode is live. Still-washed-out + 0 here = the fix never bound.
+            srgbDecode: sampleState?.vt?.uniforms.srgbDecode.value ?? null,
             // Smooth mip blending (2026-07-16): the fractional companion to
             // `requested` — its integer part MUST equal `requested`; its
             // fractional part is the blend weight toward `requested+1`. If

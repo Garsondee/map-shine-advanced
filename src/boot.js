@@ -231,6 +231,9 @@ function install() {
     ['sample', 'VT BISECT 7: the FULL sampler (walk + mip blend + world guard)'],
     ['sample-opaque', 'VT BISECT 8: the full sampler, alpha forced opaque'],
     ['no-occlusion', 'VT BISECT 9: the real chain MINUS occlusion'],
+    ['guard', 'VT BISECT 10: the world GUARD made visible (red=off-map, green=on-map)'],
+    ['mip-hi', 'VT BISECT 11: the walk at the mip the cross-fade blends TOWARDS'],
+    ['no-guard', 'VT BISECT 12: the mip cross-fade WITHOUT the guard'],
     [null, 'VT BISECT off: back to the real shader'],
   ]) {
     MapShine.debug.registerReport(`vt-bisect-${stage ?? 'off'}`, `${label} — then Force Restart`, () => ({

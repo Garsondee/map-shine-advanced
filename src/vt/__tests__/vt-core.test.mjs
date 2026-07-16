@@ -556,6 +556,49 @@ export function run(t) {
     ok('oblong: maxMip is driven by the long axis (6)', table.maxMip === 6);
   }
 
+  // --- THE CLOSED FORM the TSL sampler relies on ---------------------------
+  {
+    // vt-sample.tsl.js computes each mip's page grid IN THE SHADER as
+    // ceil(pages0 / 2^m), instead of receiving a 16-element uniform array per
+    // axis. That is only legitimate if the closed form is EXACTLY the iterative
+    // halving PageTable actually does — otherwise the shader reads a different
+    // grid than residency streams, and the mismatch surfaces as magenta.
+    //
+    // It holds because ceil(ceil(a/b)/2) === ceil(a/2b) for positive integers,
+    // but "it holds because of an identity I remembered" is not evidence, so:
+    let mismatches = 0;
+    const sizes = [12000, 4000, 3000, 16050, 7650, 256, 8000, 1, 249, 248, 247];
+    for (const w of sizes) {
+      for (const h of sizes) {
+        const table = new PageTable({ id: `cf:${w}x${h}`, worldWidthPx: w, worldHeightPx: h });
+        for (let m = 0; m <= table.maxMip; m++) {
+          const closedX = Math.ceil(table.pagesX(0) / 2 ** m);
+          const closedY = Math.ceil(table.pagesY(0) / 2 ** m);
+          if (closedX !== table.pagesX(m) || closedY !== table.pagesY(m)) mismatches++;
+        }
+      }
+    }
+    ok('TSL closed form: ceil(pages0/2^m) === PageTable iterative chain, for 121 size pairs', mismatches === 0);
+
+    // The other thing the shader computes rather than receives: each mip's Y
+    // origin in the flattened pyramid, accumulated as the walk descends. x is
+    // ALWAYS 0 (computeIndirectionAtlasLayout stacks vertically), which is what
+    // lets the origin be one running total instead of an array.
+    const table = new PageTable({ id: 'cf:origins', worldWidthPx: 12000, worldHeightPx: 12000 });
+    const lay = computeIndirectionAtlasLayout(table);
+    ok(
+      'TSL closed form: every mip origin has x === 0 (the pyramid stacks vertically)',
+      lay.origins.every((o) => o.x === 0)
+    );
+    let accY = 0;
+    let originMismatches = 0;
+    for (let m = 0; m <= table.maxMip; m++) {
+      if (accY !== lay.origins[m].y) originMismatches++;
+      accY += Math.ceil(table.pagesY(0) / 2 ** m);
+    }
+    ok('TSL closed form: a running sum of ceil(pagesY0/2^m) reproduces every mip origin', originMismatches === 0);
+  }
+
   // --- page-table: a square table is just a rectangle -----------------------
   {
     const table = new PageTable({ id: 'sq', worldWidthPx: 12000, worldHeightPx: 12000 });

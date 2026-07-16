@@ -28,12 +28,13 @@
  * register its own report via `MapShine.debug.registerReport(...)`.
  */
 
-import * as THREE from './vendor/three/three.module.js';
+// THE NODE BUILD (docs/planning/Shaders.md). It does NOT export WebGLRenderer —
+// which is why the TSL port was all-or-nothing: one import, and every renderer
+// moves at once. WebGPURenderer picks WebGPU or WebGL2 itself.
+import * as THREE from './vendor/three/three.webgpu.js';
 import { installSoak } from './diag/soak.js';
 import { installDebugPanel } from './diag/debug-panel.js';
-import { runVtSelfTest } from './vt/vt-selftest-report.js';
 import { runVtLiveDecodeTest } from './vt/vt-live-decode-report.js';
-import { runVtSmokeTest, stopVtSmokeTest } from './vt/vt-smoke-test.js';
 import {
   startVtPanViewer,
   stopVtPanViewer,
@@ -98,27 +99,11 @@ if (MapShine.__keyholeBooted) {
 function install() {
   installSoak(MapShine); // exposes MapShine.soak(n) — the stage-gate soak harness
   installDebugPanel(MapShine); // starts console capture NOW, as early as possible
-  MapShine.debug.registerReport('vt-selftest', 'VT Self-Test', () => ({
-    report: 'vt-selftest',
-    generatedAt: new Date().toISOString(),
-    ...runVtSelfTest(),
-  }));
   MapShine.debug.registerReport('vt-live-decode', 'VT Live Decode Test', async () => ({
     report: 'vt-live-decode',
     generatedAt: new Date().toISOString(),
     ...(await runVtLiveDecodeTest(`modules/${MODULE_ID}/assets/torture/torture_floor0.png`)),
   }));
-  MapShine.debug.registerReport('vt-smoke-test', 'VT Smoke Test: Render (bottom-left canvas)', async () => ({
-    report: 'vt-smoke-test',
-    generatedAt: new Date().toISOString(),
-    ...(await runVtSmokeTest({ THREE, imageUrl: `modules/${MODULE_ID}/assets/torture/torture_floor0.png` })),
-  }));
-  MapShine.debug.registerReport('vt-smoke-test-stop', 'VT Smoke Test: Stop/Clear', () => ({
-    report: 'vt-smoke-test-stop',
-    generatedAt: new Date().toISOString(),
-    ...stopVtSmokeTest(),
-  }));
-
   const TORTURE_FLOOR_COUNT = 3;
   const tortureImageUrl = (floorIndex) => `modules/${MODULE_ID}/assets/torture/torture_floor${floorIndex}.png`;
 
@@ -496,11 +481,6 @@ function install() {
   // THE TSL SPIKE (docs/planning/Shaders.md §7.5). Loads the node build LAZILY —
   // a 2.8MB vendor bundle must not be on the boot path for a decision we have not
   // taken. Touches nothing that works; renders into its own offscreen canvas.
-  MapShine.debug.registerReport('tsl-spike', 'TSL Spike: can TSL run our sampler? (both backends)', async () => {
-    const { runTslSpike } = await import('./diag/tsl-spike.js');
-    return runTslSpike();
-  });
-
   MapShine.debug.registerReport('loading-screen-state', 'Loading Screen: State + Last Load', () => ({
     report: 'loading-screen-state',
     generatedAt: new Date().toISOString(),
@@ -764,10 +744,14 @@ function bootHeartbeat() {
     host.appendChild(caption);
     document.body.appendChild(host);
 
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    const renderer = new THREE.WebGPURenderer({ canvas, antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 2));
     renderer.setSize(HEARTBEAT_W, HEARTBEAT_H, false);
     renderer.setClearColor(0x000000, 0); // transparent → CSS background shows
+    // The node renderer must init() before it will draw. Fire-and-forget: the
+    // heartbeat is a liveness indicator, and a heartbeat that blocks boot to
+    // report that boot is alive would be a poor sort of heartbeat.
+    renderer.init().catch((err) => console.error(`${TAG} heartbeat renderer init failed:`, err));
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(45, HEARTBEAT_W / HEARTBEAT_H, 0.1, 100);
@@ -781,7 +765,9 @@ function bootHeartbeat() {
       new THREE.Float32BufferAttribute([0, 1.1, 0, -1.05, -0.85, 0, 1.05, -0.85, 0], 3)
     );
     geometry.setAttribute('color', new THREE.Float32BufferAttribute([1, 0.25, 0.25, 0.25, 1, 0.4, 0.35, 0.55, 1], 3));
-    const material = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+    // NodeMaterial: the node renderer's own material. MeshBasicMaterial still
+    // exists but NodeMaterial is what this project speaks now.
+    const material = new THREE.MeshBasicNodeMaterial({ vertexColors: true, side: THREE.DoubleSide });
     const triangle = new THREE.Mesh(geometry, material);
     scene.add(triangle);
 

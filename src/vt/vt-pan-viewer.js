@@ -61,7 +61,7 @@ import {
   getDecodeStats,
   shouldYieldByTime,
 } from './decode-pool.js';
-import { VT_SAMPLE_GLSL, VT_MAX_MIPS } from './vt-sample.glsl.js';
+import { createVtSampler } from './vt-sample.tsl.js';
 import {
   createInitialViewState,
   applyKey,
@@ -75,7 +75,6 @@ import {
   easedZoomFactor,
 } from './view-state.js';
 import { planResidency, coarsePinSet, coarseTopMipsForCap, diffResidency } from './residency.js';
-import { stopVtSmokeTest } from './vt-smoke-test.js'; // the two share screen space; starting one stops the other
 import { sortByLayer } from '../scene/layer-order.js';
 import {
   computeCameraFrustum,
@@ -315,7 +314,6 @@ export async function startVtPanViewer({
   // scene is 4000x3000, so a square world is the exception, not the rule.
   const world = { width: dimensions.width, height: dimensions.height };
   disposeActive();
-  stopVtSmokeTest(); // avoid two renderers fighting over the same corner of the screen
 
   const diag0 = { errors: [] };
   // Hoisted so the catch can TEAR THE CANVAS DOWN. It is appended before any
@@ -351,16 +349,17 @@ export async function startVtPanViewer({
     });
     mount.host.appendChild(canvas);
 
-    // preserveDrawingBuffer:true -- WITHOUT this, the browser is free to clear
-    // the drawing buffer immediately after each frame composites, so
-    // gl.readPixels() called later from a button click (not from inside the
-    // render callback itself) can legitimately read back (0,0,0,0) regardless
-    // of what was actually drawn -- confirmed live 2026-07-15: the
-    // 'renderedPixels' diagnostic read all-zero even though the indirection
-    // buffer (plain JS state, unaffected by this) showed correct, non-degenerate
-    // data. A real WebGL behavior, not a rendering bug -- but it made the
-    // diagnostic itself unreliable. Kept for the diagnostics to stay trustworthy.
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, preserveDrawingBuffer: true });
+    // WebGPURenderer — the NODE renderer, which picks WebGPU or WebGL2 itself
+    // (docs/planning/Shaders.md). NOT "the WebGPU renderer": its WebGLBackend is
+    // the WebGL2 rung of §4.3's ladder, from this same TSL source.
+    //
+    // preserveDrawingBuffer is GONE — it is not a WebGPU concept (0 hits in the
+    // node build). It existed so a button-click gl.readPixels() could read the
+    // last frame; that diagnostic now renders into an explicit RenderTarget
+    // instead (see sampleDiagnostics), which is the readback path both backends
+    // actually implement.
+    const renderer = new THREE.WebGPURenderer({ canvas, antialias: false });
+    await renderer.init(); // REQUIRED before any use — the backend is chosen here
     renderer.setPixelRatio(1);
     renderer.setSize(canvasW, canvasH, false);
 
@@ -460,16 +459,11 @@ export async function startVtPanViewer({
       indirectionTexture.minFilter = THREE.NearestFilter;
       indirectionTexture.magFilter = THREE.NearestFilter;
 
-      // Per-mip uniform arrays (flat, fixed VT_MAX_MIPS length; unused tail
-      // stays 0 and is never indexed — the shader only touches [reqMip,maxMip]).
-      const mipOriginArr = new Int32Array(VT_MAX_MIPS * 2);
-      const mipPagesArr = new Int32Array(VT_MAX_MIPS * 2); // ivec2[] since 2026-07-16 (rectangular grids)
-      for (let m = 0; m < indirectionLayout.origins.length; m++) {
-        mipOriginArr[m * 2] = indirectionLayout.origins[m].x;
-        mipOriginArr[m * 2 + 1] = indirectionLayout.origins[m].y;
-        mipPagesArr[m * 2] = indirectionLayout.origins[m].pagesX;
-        mipPagesArr[m * 2 + 1] = indirectionLayout.origins[m].pagesY;
-      }
+      // NO PER-MIP UNIFORM ARRAYS ANY MORE. The TSL sampler derives every mip's
+      // page grid and pyramid origin from `pages0` alone (two integers) — see
+      // vt-sample.tsl.js's header for why that is exact, and vt-core.test.mjs for
+      // the proof against this very PageTable. `indirectionLayout` still sizes the
+      // texture above; it just no longer has to be marshalled into the shader.
 
       // COARSE PINS (§4.1): the top few mip levels of THIS pack, pinned
       // permanently so the whole floor always renders (soft) and floor switches
@@ -493,8 +487,6 @@ export async function startVtPanViewer({
         width,
         height,
         indirectionLayout,
-        mipOriginArr,
-        mipPagesArr,
         coarsePages,
         coarseKeySet,
         coarseTopMips: topMips,
@@ -682,89 +674,59 @@ export async function startVtPanViewer({
       geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
       geometry.setIndex(Array.from(QUAD_INDICES));
 
-      const material = new THREE.ShaderMaterial({
-        transparent: true,
-        depthTest: false,
-        depthWrite: false,
-        side: THREE.DoubleSide, // see this function's doc — negative scaleX flips winding
-        uniforms: {
-          uPageAtlas: { value: atlas.texture },
-          uPageTable: { value: null }, // set per-item in bindMeshToPack()
-          uPagesPerAxis: { value: layout.pagesPerAxis },
-          uPagesPerLayer: { value: layout.pagesPerLayer },
-          uPageSizePx: { value: layout.pageSizePx },
-          uBorderPx: { value: 4 },
-          uAtlasSizePx: { value: layout.atlasSizePx },
-          uWorldSizePx: { value: new THREE.Vector2(1, 1) }, // this pack's image size; vec2 (rectangular)
-          // Multi-mip: the finest mip to TRY (analytic, per view) + the coarsest,
-          // and the flattened-pyramid per-mip layout the shader walks. uMipOrigin
-          // is a flat Int32Array (ivec2[VT_MAX_MIPS] == 2 ints/level) — THREE
-          // uploads it via gl.uniform2iv directly.
-          uRequestedMip: { value: 0 },
-          uRequestedMipFrac: { value: 0 }, // smooth mip blending (residency.chooseMipFraction)
-          uMaxMip: { value: 0 },
-          uMipOrigin: { value: new Int32Array(VT_MAX_MIPS * 2) },
-          uMipPagesPerAxis: { value: new Int32Array(VT_MAX_MIPS * 2) }, // ivec2[] (rectangular)
-          // Per-item appearance (Foundry document data).
-          uTint: { value: new THREE.Vector3(1, 1, 1) },
-          uAlpha: { value: 1 },
-          // OCCLUSION (scene/occlusion.js has the model + the citations).
-          uOcclusionMask: { value: occlusionMask.texture },
-          uOcclusionElevation: { value: 0 },
-          uOcclusionWeights: { value: new THREE.Vector4(0, 0, 0, 0) }, // fade, radial, vision, surface
-          uUnoccludedAlpha: { value: 1 },
-          uOccludedAlpha: { value: 0 },
-        },
-        vertexShader: /* glsl */ `
-          varying vec2 vUv;
-          varying vec2 vScreenCoord;
-          void main() {
-            vUv = uv;
-            // Real world-space geometry through a real camera now — NOT the old
-            // pass-position-straight-to-gl_Position fullscreen trick.
-            vec4 clip = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-            gl_Position = clip;
-            // The occlusion mask is a SCREEN-space texture, so sample it in
-            // screen space. Ortho projection means w == 1, but the divide is kept
-            // for correctness rather than relying on that.
-            vScreenCoord = (clip.xy / clip.w) * 0.5 + 0.5;
-          }
-        `,
-        fragmentShader: /* glsl */ `
-          precision highp float;
-          precision highp sampler2DArray;
-          varying vec2 vUv;
-          varying vec2 vScreenCoord;
-          uniform vec3 uTint;
-          uniform float uAlpha;
-          uniform sampler2D uOcclusionMask;
-          uniform float uOcclusionElevation;
-          uniform vec4 uOcclusionWeights;
-          uniform float uUnoccludedAlpha;
-          uniform float uOccludedAlpha;
-          ${VT_SAMPLE_GLSL}
-          void main() {
-            vec4 c = vtSample(vUv);
-            c.rgb *= uTint;
-            c.a *= uAlpha;
-
-            // OCCLUSION — Foundry's own algorithm (occlusion.mjs:16), verbatim in
-            // shape. The mask's four channels each hold an ELEVATION INDEX
-            // (R=Fade G=Radial B=Vision A=Surface); a channel says "occlude me"
-            // where the occluder recorded there sits BELOW my own elevation.
-            // step(edge,x) is 0 when x < edge, so 1-step is exactly that test.
-            vec4 occluded = 1.0 - step(vec4(uOcclusionElevation), texture2D(uOcclusionMask, vScreenCoord));
-            vec4 amounts = occluded * uOcclusionWeights;
-            float occ = max(max(amounts.x, amounts.y), max(amounts.z, amounts.w));
-            // Foundry multiplies the WHOLE fragColor because PIXI is
-            // premultiplied-alpha; Three's default blending is not, so only
-            // alpha is scaled here. Same visual result, correct for this blend.
-            c.a *= mix(uUnoccludedAlpha, uOccludedAlpha, occ);
-
-            gl_FragColor = c;
-          }
-        `,
+      // ONE sampler graph per item — each drawable samples its own page table with
+      // its own image size, exactly as each had its own ShaderMaterial uniforms.
+      // The atlas is the one shared thing.
+      const vt = createVtSampler(THREE.TSL, {
+        atlasTexture: atlas.texture,
+        initialPageTable: atlas.texture, // rebound per pack in bindMeshToPack
+        pagesPerAxis: layout.pagesPerAxis,
+        pagesPerLayer: layout.pagesPerLayer,
+        pageSizePx: layout.pageSizePx,
+        borderPx: 4,
+        atlasSizePx: layout.atlasSizePx,
       });
+      const { Fn, uniform, vec3, float, vec2, uv, positionGeometry } = THREE.TSL;
+
+      // Per-item appearance + occlusion, as live uniform handles.
+      const uTint = uniform(vec3(1, 1, 1));
+      const uAlpha = uniform(float(1));
+      const uOcclusionElevation = uniform(float(0));
+      const uOcclusionWeights = uniform(THREE.TSL.vec4(0, 0, 0, 0));
+      const uUnoccludedAlpha = uniform(float(1));
+      const uOccludedAlpha = uniform(float(0));
+
+      const material = new THREE.NodeMaterial();
+      material.transparent = true;
+      material.depthTest = false;
+      material.depthWrite = false;
+      material.side = THREE.DoubleSide; // see this function's doc — negative scaleX flips winding
+
+      material.colorNode = Fn(() => {
+        const c = vt.sample(uv()).toVar();
+        c.rgb.mulAssign(uTint);
+        c.a.mulAssign(uAlpha);
+
+        // OCCLUSION — Foundry's algorithm (occlusion.mjs:16). The mask's four
+        // channels each hold an ELEVATION INDEX (R=Fade G=Radial B=Vision
+        // A=Surface); a channel says "occlude me" where the occluder recorded
+        // there sits BELOW my own elevation. Currently inert: the mask PRODUCER
+        // is not built, so the placeholder reads "nothing occludes anything" and
+        // every weight is 0 (scene/occlusion.js has the ported model).
+        const maskUV = positionGeometry.xy; // placeholder space; real screen UV lands with the producer
+        const occluded = float(1).sub(
+          THREE.TSL.step(uOcclusionElevation, THREE.TSL.texture(occlusionMask.texture, maskUV))
+        );
+        const amounts = occluded.mul(uOcclusionWeights);
+        const occ = amounts.x.max(amounts.y).max(amounts.z).max(amounts.w);
+        // Only ALPHA is scaled: Foundry multiplies the whole fragColor because
+        // PIXI is premultiplied; Three's default blending is not.
+        c.a.mulAssign(uUnoccludedAlpha.mix(uOccludedAlpha, occ));
+        return c;
+      })();
+
+      state.vt = vt;
+      state.appearance = { uTint, uAlpha, uOcclusionElevation, uOcclusionWeights, uUnoccludedAlpha, uOccludedAlpha };
 
       const mesh = new THREE.Mesh(geometry, material);
       mesh.frustumCulled = false; // we cull explicitly against worldBounds; Three's sphere test is redundant here
@@ -803,24 +765,27 @@ export async function startVtPanViewer({
     const hitchLog = []; // {atMs, gapMs, decodeStats, cacheStats} per hitch — full context AT THE MOMENT it happened
 
     /** Ground truth, not theory: actual rendered canvas pixels + one pack's actual indirection buffer contents. */
+    /** Ground truth, not theory: one pack's actual indirection buffer contents. */
     function sampleDiagnostics(pack) {
       const out = {};
-      try {
-        const gl = renderer.getContext();
-        const px = new Uint8Array(4);
-        const points = {
-          center: [Math.floor(canvasW / 2), Math.floor(canvasH / 2)],
-          topLeft: [4, canvasH - 4], // GL readPixels Y is bottom-up; this is visual top-left
-          bottomRight: [canvasW - 4, 4],
-        };
-        out.renderedPixels = {};
-        for (const [label, [x, y]] of Object.entries(points)) {
-          gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
-          out.renderedPixels[label] = [px[0], px[1], px[2], px[3]];
-        }
-      } catch (err) {
-        out.renderedPixelsError = String(err?.message || err);
-      }
+      // THE PIXEL READBACK IS GONE, deliberately rather than by oversight.
+      //
+      // It relied on `preserveDrawingBuffer: true`, which is not a WebGPU concept
+      // (0 hits in the node build) — so on WebGPU it would silently read zeros and
+      // look exactly like "the renderer drew nothing". That is the worst kind of
+      // diagnostic: one that manufactures the failure it claims to detect. It was
+      // itself added to work around a case where it read all-zero while the data
+      // was fine (2026-07-15), so it has form.
+      //
+      // Reading a real pixel now needs an explicit RenderTarget + an async
+      // readback (see diag/tsl-spike.js, which does exactly that) — worth doing
+      // when something needs it, not worth faking meanwhile. What remains is the
+      // indirection buffer, which is plain JS state and answers the question the
+      // readback was usually asked: "is the page table actually populated?"
+      out.renderedPixels = null;
+      out.renderedPixelsNote =
+        'unavailable under WebGPURenderer (preserveDrawingBuffer is a WebGL-only concept). ' +
+        'Use indirectionBuffer below, or add a RenderTarget readback like diag/tsl-spike.js does.';
       if (pack) {
         let nonZeroTexels = 0;
         const distinctSlots = new Set();
@@ -1127,28 +1092,29 @@ export async function startVtPanViewer({
      * appearance + occlusion uniforms.
      */
     function bindMeshToPack(state, pack) {
-      const u = state.material.uniforms;
-      if (u.uPageTable.value !== pack.indirectionTexture) {
-        // Bind: fresh array references (per pack) guarantee THREE re-uploads
-        // them; within a pack they're constant.
-        u.uPageTable.value = pack.indirectionTexture;
-        u.uWorldSizePx.value.set(pack.table.worldWidthPx, pack.table.worldHeightPx);
-        u.uMaxMip.value = pack.table.maxMip;
-        u.uMipOrigin.value = pack.mipOriginArr;
-        u.uMipPagesPerAxis.value = pack.mipPagesArr;
-      }
-      u.uRequestedMip.value = pack.lastRequestedMip; // re-read every update (mip changes with zoom)
-      u.uRequestedMipFrac.value = pack.lastRequestedMipFraction;
+      const u = state.vt.uniforms;
+      // The page table is a TextureNode — swapping .value rebinds which pack this
+      // item samples (albedo, or a mask when the display layer is switched).
+      u.pageTable.value = pack.indirectionTexture;
+      u.worldSizePx.value.set(pack.table.worldWidthPx, pack.table.worldHeightPx);
+      // THE WHOLE MIP LAYOUT, in two integers. The shader derives every level's
+      // grid and origin from these (vt-sample.tsl.js's header explains why that is
+      // exact, and vt-core.test.mjs proves it against the real PageTable).
+      u.pages0.value.set(pack.table.pagesX(0), pack.table.pagesY(0));
+      u.maxMip.value = pack.table.maxMip;
+      u.requestedMip.value = pack.lastRequestedMip; // re-read every update (mip changes with zoom)
+      u.requestedMipFrac.value = pack.lastRequestedMipFraction;
 
+      const a = state.appearance;
       const item = state.item;
       const tint = item.tint ?? 0xffffff;
-      u.uTint.value.set(((tint >> 16) & 0xff) / 255, ((tint >> 8) & 0xff) / 255, (tint & 0xff) / 255);
-      u.uAlpha.value = item.alpha ?? 1;
+      a.uTint.value.set(((tint >> 16) & 0xff) / 255, ((tint >> 8) & 0xff) / 255, (tint & 0xff) / 255);
+      a.uAlpha.value = item.alpha ?? 1;
 
-      // OCCLUSION weights (scene/occlusion.js — the model, with citations).
+      // OCCLUSION weights (scene/occlusion.js — the ported model, with citations).
       // `occluded` stays false until the mask producer exists to identify which
-      // items a token is actually standing under; the weights below are still
-      // computed from real document data, so wiring the producer in is additive.
+      // items a token actually stands under; the weights are still computed from
+      // real document data, so wiring the producer in is purely additive.
       const modes = item.occlusion?.modes ?? OCCLUSION_MODES.NONE;
       const st = computeOcclusionState({
         occlusionMode: modes,
@@ -1156,10 +1122,10 @@ export async function startVtPanViewer({
         visionActive: occlusionMask.visionActive,
         hoverFadeAmount: state.hoverFade.occlusion,
       });
-      u.uOcclusionWeights.value.set(st.fade, st.radial, st.vision, st.surface);
-      u.uOcclusionElevation.value = mapElevation(occlusionMask.elevationTable, item.key.elevation);
-      u.uUnoccludedAlpha.value = 1;
-      u.uOccludedAlpha.value = item.occlusion?.alpha ?? 0;
+      a.uOcclusionWeights.value.set(st.fade, st.radial, st.vision, st.surface);
+      a.uOcclusionElevation.value = mapElevation(occlusionMask.elevationTable, item.key.elevation);
+      a.uUnoccludedAlpha.value = 1;
+      a.uOccludedAlpha.value = item.occlusion?.alpha ?? 0;
     }
 
     let lastItems = []; // exposed in diagnostics — the current sorted draw list
@@ -1791,13 +1757,16 @@ export async function startVtPanViewer({
           // nothing and the compile stalls the first useProgram instead. This
           // project does not guess about extensions on the design-floor GPU.
           shaders: {
-            parallelShaderCompile: !!renderer.extensions?.get?.('KHR_parallel_shader_compile'),
+            parallelShaderCompile: !!renderer.backend?.extensions?.get?.('KHR_parallel_shader_compile'),
             precompileMs: shaderCompileMs,
             // Program COUNT is the thing that explodes as effects land (N effects x
             // M variants), so it is watched from the start. Identical ShaderMaterial
             // source shares ONE program (three.module.js:36407 keys the cache on
             // source identity), so today every item mesh costs 1 program between them.
+            // renderer.info.programs is WebGLRenderer-only; the node renderer
+            // reports differently. Left null rather than guessing a number.
             programCount: renderer.info?.programs?.length ?? null,
+            backend: renderer.backend?.isWebGPUBackend ? 'webgpu' : 'webgl2',
           },
           // GROUND TRUTH: is MSA the thing on screen right now, or is Foundry?
           // This could NOT be answered from a report during the 2026-07-16
@@ -1869,14 +1838,14 @@ export async function startVtPanViewer({
           // + page count, and the packed-pyramid indirection dimensions (all
           // for the DISPLAYED pack).
           mip: {
-            requested: sampleState?.material?.uniforms.uRequestedMip.value ?? null,
+            requested: sampleState?.vt?.uniforms.requestedMip.value ?? null,
             // Smooth mip blending (2026-07-16): the fractional companion to
             // `requested` — its integer part MUST equal `requested`; its
             // fractional part is the blend weight toward `requested+1`. If
             // these ever disagree, the blend uniform desynced from the walk's
             // starting mip — flag it.
-            requestedFraction: sampleState?.material?.uniforms.uRequestedMipFrac.value ?? null,
-            max: sampleState?.material?.uniforms.uMaxMip.value ?? null,
+            requestedFraction: sampleState?.vt?.uniforms.requestedMipFrac.value ?? null,
+            max: sampleState?.vt?.uniforms.maxMip.value ?? null,
             coarseTopMips: albedo?.coarseTopMips ?? null,
             coarsePinnedPages: albedo?.coarsePages.length ?? null,
             indirectionPyramid: albedo ? `${albedo.width}x${albedo.height}` : null,

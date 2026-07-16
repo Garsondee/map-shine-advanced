@@ -8,6 +8,7 @@ import { PageTable, DEFAULT_PAGE_PAYLOAD_PX, computeIndirectionAtlasLayout } fro
 import {
   computeVisiblePages,
   chooseMip,
+  chooseMipFraction,
   planResidency,
   coarsePinSet,
   coarseTopMipsForCap,
@@ -77,6 +78,151 @@ export function run(t) {
     ok('cache: "a" survived (it was touched)', cache.isResident('a'));
     ok('cache: "c" survived (newer than b)', cache.isResident('c'));
     ok('cache: "d" is now resident', cache.isResident('d'));
+  }
+
+  // --- PageCache: 'coarse' and 'view' pins are equally protected (real live
+  // bug, 2026-07-16: a whole-screen MAGENTA render under the multi-floor
+  // "castle courtyard" test — 3 floors' worth of coarse pins + view pins all
+  // competing for one shared cache). Root cause: coarse and view pins are
+  // BOTH permanently protected from LRU eviction (page-cache.js's own
+  // _findLRUEvictable skips ANY pinned slot, no priority between classes) —
+  // so if group A's view-tier request (large, numerous) runs BEFORE group B's
+  // coarse-pin request (small, but meant to be GUARANTEED), group A's pins can
+  // fill the cache and leave group B's coarse-pin request with nothing to
+  // evict. A coarse pin whose whole job is "always something resident, worst
+  // case blur" then simply FAILS for group B — the exact mechanism the
+  // magenta screen exposed. This test proves the FIX'S invariant at the
+  // PageCache level (independent of vt-pan-viewer.js's browser-only ordering
+  // fix): if EVERY group's coarse pins are requested BEFORE any group's view
+  // pins, all coarse pins survive regardless of how oversubscribed the
+  // view-tier requests are afterward. -----------------------------------
+  {
+    const GROUPS = 3;
+    const COARSE_PER_GROUP = 20;
+    const VIEW_PER_GROUP = 500; // deliberately oversubscribed — 3*500=1500 >> remaining capacity
+    const cache = new PageCache({ budgetBytes: 100 * 256 * 1024 }); // 100 pages
+    cache.tick();
+
+    // Phase 1 (the fix): coarse pins for EVERY group, before ANY view request.
+    for (let g = 0; g < GROUPS; g++) {
+      for (let i = 0; i < COARSE_PER_GROUP; i++) cache.request(`g${g}:coarse:${i}`, { pin: 'coarse' });
+    }
+    const coarseResidentAfterPhase1 = Array.from({ length: GROUPS * COARSE_PER_GROUP }, (_, i) =>
+      cache.isResident(`g${Math.floor(i / COARSE_PER_GROUP)}:coarse:${i % COARSE_PER_GROUP}`)
+    ).every(Boolean);
+    ok("phase1: every group's coarse pins land while the cache still has room", coarseResidentAfterPhase1);
+
+    // Phase 2: now oversubscribe view-tier requests across all groups (the
+    // real castle-scenario shape — far more view pages requested than remain).
+    for (let g = 0; g < GROUPS; g++) {
+      for (let i = 0; i < VIEW_PER_GROUP; i++) cache.request(`g${g}:view:${i}`, { pin: 'view' });
+    }
+
+    let coarseSurvived = 0;
+    for (let g = 0; g < GROUPS; g++)
+      for (let i = 0; i < COARSE_PER_GROUP; i++) if (cache.isResident(`g${g}:coarse:${i}`)) coarseSurvived++;
+    ok(
+      'phase-1-then-phase-2 ordering: EVERY coarse pin survives massive view-tier oversubscription afterward',
+      coarseSurvived === GROUPS * COARSE_PER_GROUP
+    );
+    ok(
+      'view-tier oversubscription genuinely caused misses (proves the test scenario is real pressure)',
+      cache.stats().misses > 0
+    );
+  }
+
+  // --- PageCache: the BROKEN ordering (coarse mixed AFTER an earlier group's
+  // view pins) CAN starve a later group's coarse pins — proves the bug was
+  // real, not hypothetical, at the PageCache level (the layer BOTH the old
+  // buggy code and the new fixed code share).
+  {
+    const cache = new PageCache({ budgetBytes: 100 * 256 * 1024 }); // 100 pages
+    cache.tick();
+    // Group A: coarse (20) then view (500, oversubscribed) — the OLD per-group order.
+    for (let i = 0; i < 20; i++) cache.request(`a:coarse:${i}`, { pin: 'coarse' });
+    for (let i = 0; i < 500; i++) cache.request(`a:view:${i}`, { pin: 'view' }); // fills the remaining 80 slots, all protected
+    // Group B's coarse pins now have NOTHING evictable to claim a slot from.
+    let bCoarseSucceeded = 0;
+    for (let i = 0; i < 20; i++) {
+      const { resident } = cache.request(`b:coarse:${i}`, { pin: 'coarse' });
+      if (resident) bCoarseSucceeded++;
+    }
+    ok(
+      "the OLD per-group order CAN starve a later group's coarse pins (confirms the bug mechanism was real)",
+      bCoarseSucceeded < 20
+    );
+  }
+
+  // --- PageCache + diffResidency: the "stuck view-miss" bug (real live find,
+  // 2026-07-16 — a residency report showed layerResidencyTotals.viewResidentPages
+  // (tracked) far exceeding cacheStats.pinnedView (ground truth): 2604 vs 1161).
+  // Root cause in vt-pan-viewer.js's streamPackResidency: it used to assign
+  // `pack.residentViewKeys = diff.nextKeys` unconditionally — the FULL
+  // requested set — regardless of whether each `cache.request()` call actually
+  // succeeded. A page that missed (cache full) got recorded as "resident"
+  // anyway, so on every LATER update `diffResidency(prevKeys, nextPages)` saw
+  // it as already-handled (present in prevKeys) and never re-added it to
+  // toRequest — permanently stuck on coarse-fallback blur for as long as the
+  // camera kept needing it, even after pressure relieved. Rendering itself was
+  // never wrong (writeIndirection independently checks real cache residency),
+  // just unnecessarily and permanently blurry. This test reproduces the exact
+  // pattern with PageCache + diffResidency directly (the pure pieces
+  // streamPackResidency composes) — proves the OLD tracking gets stuck and the
+  // FIX (filter by cache.isResident before storing) self-heals once room frees up.
+  {
+    const cache = new PageCache({ budgetBytes: 5 * 256 * 1024 }); // 5 pages
+    cache.tick();
+    // A permanent blocker occupies 3 of the 5 slots, simulating other floors'
+    // protected pins competing for the same shared cache.
+    for (let i = 0; i < 3; i++) cache.request(`blocker:${i}`, { pin: 'coarse' });
+
+    const needed = Array.from({ length: 4 }, (_, i) => ({ key: `p:${i}` })); // 4 wanted, only 2 slots free
+
+    // --- OLD (buggy) tracking: residentViewKeys = the full requested set ----
+    let oldPrevKeys = new Set();
+    {
+      const cacheOld = new PageCache({ budgetBytes: 5 * 256 * 1024 });
+      cacheOld.tick();
+      for (let i = 0; i < 3; i++) cacheOld.request(`blocker:${i}`, { pin: 'coarse' });
+      const diff = diffResidency(oldPrevKeys, needed);
+      for (const page of diff.toRequest) cacheOld.request(page.key, { pin: 'view' });
+      oldPrevKeys = diff.nextKeys; // THE BUG: unconditional, ignores which requests actually missed
+      // Update 2: blocker frees up (room now exists), needed set UNCHANGED.
+      for (let i = 0; i < 3; i++) cacheOld.unpin(`blocker:${i}`);
+      cacheOld.request(`filler:0`); // force an eviction cycle to actually reclaim the freed slots
+      cacheOld.request(`filler:1`);
+      cacheOld.request(`filler:2`);
+      const diff2 = diffResidency(oldPrevKeys, needed);
+      ok(
+        'OLD tracking: a page that missed once is NEVER retried, even after room frees up (the bug, reproduced)',
+        diff2.toRequest.length === 0
+      );
+    }
+
+    // --- NEW (fixed) tracking: residentViewKeys = ONLY what's actually resident ----
+    {
+      let newPrevKeys = new Set();
+      const diff = diffResidency(newPrevKeys, needed);
+      for (const page of diff.toRequest) cache.request(page.key, { pin: 'view' });
+      newPrevKeys = new Set([...diff.nextKeys].filter((key) => cache.isResident(key)));
+      const missedFirstRound = needed.filter((p) => !newPrevKeys.has(p.key));
+      ok(
+        'NEW tracking: exactly the pages that missed are excluded from residentViewKeys',
+        missedFirstRound.length === 2
+      );
+
+      // Update 2: room frees up, needed set unchanged — the fix should retry the missed pages.
+      for (let i = 0; i < 3; i++) cache.unpin(`blocker:${i}`);
+      const diff2 = diffResidency(newPrevKeys, needed);
+      ok(
+        'NEW tracking: previously-missed pages ARE retried once room frees up (the fix)',
+        diff2.toRequest.length === missedFirstRound.length &&
+          missedFirstRound.every((p) => diff2.toRequest.some((r) => r.key === p.key))
+      );
+      for (const page of diff2.toRequest) cache.request(page.key, { pin: 'view' });
+      const allResidentNow = needed.every((p) => cache.isResident(p.key));
+      ok('NEW tracking: after the retry, all 4 originally-needed pages are resident', allResidentNow);
+    }
   }
 
   // --- PageCache: pin classes are never evicted while pinned --------------
@@ -160,19 +306,125 @@ export function run(t) {
     ok('residency: zoomed-in-tight-enough-for-1:1 picks mip 0', tightMip === 0);
   }
 
+  // --- residency: chooseMipFraction — THE smooth-mip-blend invariant (real
+  // author complaint, 2026-07-16: "zooming in and out produces very ugly zoom
+  // levels" — the hard integer-mip pop). floor(chooseMipFraction(...)) MUST
+  // equal chooseMip(...) for the SAME inputs, always — this is what lets the
+  // shader blend between the two bracketing mips WITHOUT any residency/
+  // streaming change: planResidency already fetches mip M (fine) and mip M+1
+  // (prefetchCoarser), so as long as this invariant holds, those are exactly
+  // the two mips a blend needs. Swept across a wide, deliberately-adversarial
+  // range including exact power-of-2 boundaries (the classic float/int
+  // rounding edge case) and the two clamp ends (mip 0 and table.maxMip).
+  {
+    const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 });
+    const viewportPx = 1920;
+    // worldSpan values chosen to land texelsPerScreenPx exactly ON several
+    // power-of-2 boundaries (1,2,4,8,...), plus values just above/below each,
+    // plus extreme zoom-in/out. This is the exact class of value where a
+    // float log2 vs. an integer doubling-loop could disagree if the two
+    // formulas weren't truly equivalent.
+    const worldSpans = [1, 100, 500, 960, 1919, 1920, 1921, 3840, 3841, 7680, 15360, 30720, 61440, 120000, 500000];
+    let allMatch = true;
+    for (const worldSpan of worldSpans) {
+      const rect = { minX: 0, minY: 0, maxX: worldSpan, maxY: worldSpan };
+      const discrete = chooseMip(table, rect, viewportPx);
+      const fraction = chooseMipFraction(table, rect, viewportPx);
+      if (Math.floor(fraction) !== discrete) allMatch = false;
+    }
+    ok('chooseMipFraction: floor(fraction) === chooseMip() across power-of-2 boundaries + extremes', allMatch);
+    ok(
+      'chooseMipFraction: always within [0, table.maxMip]',
+      worldSpans.every((worldSpan) => {
+        const f = chooseMipFraction(table, { minX: 0, minY: 0, maxX: worldSpan, maxY: worldSpan }, viewportPx);
+        return f >= 0 && f <= table.maxMip;
+      })
+    );
+    // The whole POINT: two zoom levels close together but straddling an
+    // integer-mip threshold must produce a SMALL fractional change, not a
+    // jump — this is the actual "ugly pop" the fraction exists to smooth over.
+    const justBelow = chooseMipFraction(table, { minX: 0, minY: 0, maxX: 1919, maxY: 1919 }, viewportPx);
+    const justAbove = chooseMipFraction(table, { minX: 0, minY: 0, maxX: 1921, maxY: 1921 }, viewportPx);
+    ok(
+      'chooseMipFraction: a tiny zoom change near a mip threshold produces a tiny fractional change (the actual fix)',
+      Math.abs(justAbove - justBelow) < 0.01
+    );
+  }
+
   // --- residency: planResidency bundles fine + coarser prefetch -----------
   {
     const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 });
     const rect = { minX: 0, minY: 0, maxX: 12000, maxY: 12000 };
     const plan = planResidency(table, rect, 1920, { guardPages: 1 });
     ok(
-      'residency: planResidency returns a mip + fine set + coarser prefetch set',
-      typeof plan.mip === 'number' && Array.isArray(plan.fine) && Array.isArray(plan.prefetchCoarser)
+      'residency: planResidency returns a mip + mipFraction + fine set + coarser prefetch set',
+      typeof plan.mip === 'number' &&
+        typeof plan.mipFraction === 'number' &&
+        Array.isArray(plan.fine) &&
+        Array.isArray(plan.prefetchCoarser)
     );
     ok(
       'residency: prefetch set uses a coarser (>=) mip than fine',
       plan.prefetchCoarser.length === 0 || plan.prefetchCoarser[0].mip > plan.fine[0].mip
     );
+    ok(
+      'residency: planResidency.mipFraction matches chooseMipFraction directly',
+      plan.mipFraction === chooseMipFraction(table, rect, 1920)
+    );
+    ok(
+      'residency: floor(planResidency.mipFraction) === planResidency.mip (the blend invariant, end to end)',
+      Math.floor(plan.mipFraction) === plan.mip
+    );
+  }
+
+  // --- residency: planResidency's prefetchFiner — the zoom-IN hitch fix
+  // (real author-reported bug, 2026-07-16: "zoom in or out can hitch, stops
+  // happening if I repeat" — a cold-cache-on-first-visit decode stall).
+  // prefetchCoarser existed alone before this; prefetchFiner is its symmetric
+  // counterpart so BOTH zoom directions have an already-warm neighbor mip. ---
+  {
+    const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 }); // maxMip = 6
+    // A mid-zoom rect (not fully zoomed in, not fully out) so plan.mip lands
+    // strictly between 0 and table.maxMip — the case where BOTH neighbors
+    // exist. texelsPerScreenPx = 2000/200 = 10 -> mip 3 (hand-verified: the
+    // coverage-doubling loop crosses 1,2,4,8 before 8*2=16 exceeds 10).
+    const midRect = { minX: 0, minY: 0, maxX: 2000, maxY: 2000 };
+    const plan = planResidency(table, midRect, 200, { guardPages: 1 });
+    ok('residency: planResidency returns a prefetchFiner array', Array.isArray(plan.prefetchFiner));
+    // Anchor: fail LOUDLY if this ever lands outside (0, maxMip) — the
+    // conditional checks below would otherwise silently stop exercising
+    // (exactly how the FIRST version of this test accidentally passed with
+    // its branches never actually running — computed to mip 0, hand-fixed).
+    ok(
+      'residency: mid-zoom rect anchor really does land strictly between mip 0 and maxMip',
+      plan.mip > 0 && plan.mip < table.maxMip
+    );
+    if (plan.mip > 0) {
+      ok(
+        'residency: prefetchFiner uses a FINER (<) mip than fine, when a finer mip exists',
+        plan.prefetchFiner.length > 0 && plan.prefetchFiner[0].mip < plan.mip
+      );
+      ok('residency: prefetchFiner is exactly one mip level finer', plan.prefetchFiner[0].mip === plan.mip - 1);
+    }
+
+    // At mip 0 (fully zoomed in — no finer mip exists), prefetchFiner must be
+    // empty, never negative-mip garbage.
+    const tightRect = { minX: 0, minY: 0, maxX: 10, maxY: 10 };
+    const tightPlan = planResidency(table, tightRect, 1920, { guardPages: 1 });
+    ok(
+      'residency: at mip 0, prefetchFiner is empty (no finer mip exists, never negative)',
+      tightPlan.mip === 0 && tightPlan.prefetchFiner.length === 0
+    );
+
+    // Symmetric coverage check: BOTH prefetch directions present for a true
+    // mid-zoom (this is the actual fix — the shader/user experience is only
+    // solved when both exist together, not just one).
+    if (plan.mip > 0 && plan.mip < table.maxMip) {
+      ok(
+        'residency: mid-zoom has BOTH prefetchCoarser AND prefetchFiner non-empty (symmetric insurance)',
+        plan.prefetchCoarser.length > 0 && plan.prefetchFiner.length > 0
+      );
+    }
   }
 
   // --- residency: coarsePinSet covers the WHOLE top mip, "tens of pages" ---

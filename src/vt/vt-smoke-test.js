@@ -226,6 +226,14 @@ export async function runVtSmokeTest({ THREE, imageUrl }) {
         uAtlasSizePx: { value: layout.atlasSizePx },
         uWorldSizePx: { value: table.worldSizePx },
         uRequestedMip: { value: 0 },
+        // Smooth mip blending (2026-07-16, see vt-sample.glsl.js): supplied
+        // explicitly rather than relying on an unset-uniform defaulting to 0
+        // on every driver — this project's whole crash campaign was about
+        // exactly the weak/aging GPU class where that kind of assumption
+        // isn't safe. uMaxMip:0 below means mipHi==mipLo in the shader (the
+        // degenerate top-of-pyramid case), so this value is never actually
+        // read by the blend math here — supplied anyway for explicitness.
+        uRequestedMipFrac: { value: 0 },
         uMaxMip: { value: 0 },
         uMipOrigin: { value: smokeMipOrigin },
         uMipPagesPerAxis: { value: smokeMipPages },

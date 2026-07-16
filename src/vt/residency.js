@@ -52,6 +52,37 @@ export function chooseMip(table, worldRect, viewportPx) {
 }
 
 /**
+ * The CONTINUOUS (fractional) analogue of chooseMip() — same texelsPerScreenPx
+ * math, but returns `log2(texelsPerScreenPx)` (clamped to `[0, table.maxMip]`)
+ * instead of rounding down to an integer. This is what makes smooth mip
+ * blending possible (2026-07-16, author-reported: "zooming in and out
+ * produces very ugly zoom levels" — the hard integer-mip pop): the shader can
+ * sample the two BRACKETING integer mips (`floor`/`ceil` of this value) and
+ * cross-fade between them by the fractional part, instead of hard-switching
+ * exactly at chooseMip()'s threshold.
+ *
+ * INVARIANT (verified by this module's own tests): `Math.floor(chooseMipFraction(...))`
+ * always equals `chooseMip(...)` for the same inputs — same underlying
+ * quantity, just not rounded down early. This is WHY no residency/streaming
+ * change was needed to support blending: `planResidency()` already requests
+ * mip M (`fine`) AND mip M+1 (`prefetchCoarser`, clamped to maxMip) — exactly
+ * the two mips a blend needs, for a reason that had nothing to do with
+ * blending (insurance against a fine-mip miss) but happens to supply it for
+ * free.
+ *
+ * @param {import('./page-table.js').PageTable} table
+ * @param {WorldRect} worldRect
+ * @param {number} viewportPx
+ * @returns {number} fractional mip level, in `[0, table.maxMip]`.
+ */
+export function chooseMipFraction(table, worldRect, viewportPx) {
+  const worldSpan = Math.max(1, Math.max(worldRect.maxX - worldRect.minX, worldRect.maxY - worldRect.minY));
+  const texelsPerScreenPx = worldSpan / Math.max(1, viewportPx);
+  const raw = Math.log2(Math.max(1e-6, texelsPerScreenPx)); // mip 0 == 1 world-texel/screen-px
+  return Math.max(0, Math.min(table.maxMip, raw));
+}
+
+/**
  * The core residency query: every page (plus guard ring) needed to cover
  * `worldRect` at `mip` for one virtual texture.
  *
@@ -85,24 +116,42 @@ export function computeVisiblePages(table, worldRect, opts = {}) {
 
 /**
  * Convenience: the full residency plan for one virtual texture at a given
- * view — the fine mip's visible+guard set (to request/pin as 'view') PLUS the
- * next-coarser mip's covering set (to request/pin as 'view' too, cheap
- * insurance so a fine-mip miss still has an immediate, correct fallback one
- * step up rather than falling all the way to the coarse world-pin).
+ * view — the fine mip's visible+guard set (to request/pin as 'view') PLUS
+ * BOTH neighboring mips' covering sets (to request/pin as 'view' too, cheap
+ * insurance so a mip-level change during a zoom gesture — either direction —
+ * still has an immediate, already-warm level to land on instead of a fresh
+ * decode).
+ *
+ * `prefetchFiner` (2026-07-16, author-reported: "zoom in or out can hitch,
+ * stops happening if I repeat" — the exact signature of a cold-cache-on-
+ * first-visit decode stall) is the FINER counterpart to `prefetchCoarser`,
+ * which existed alone until now — a real, asymmetric gap: zooming OUT was
+ * already covered (each step's "coarser" prefetch becomes the next step's
+ * "fine" set, so a steady zoom-out stays one step ahead), but zooming IN had
+ * ZERO equivalent insurance — the finer mip was always a cold decode the
+ * first time any given level was visited at a given pan position, exactly
+ * matching "stops happening if I repeat" (the second visit finds it already
+ * decoded+persisted). `guardPages:0` for the finer set specifically (tighter
+ * than `fine`/`prefetchCoarser`'s own margin) — a finer mip has ~4x more
+ * pages per unit area than its parent, so this keeps the extra insurance
+ * bounded rather than compounding the guard ring's cost too.
  *
  * @param {import('./page-table.js').PageTable} table
  * @param {WorldRect} worldRect
  * @param {number} viewportPx
  * @param {object} [opts] @param {number} [opts.guardPages]
- * @returns {{mip:number, fine: Array, prefetchCoarser: Array}}
+ * @returns {{mip:number, mipFraction:number, fine: Array, prefetchCoarser: Array, prefetchFiner: Array}}
  */
 export function planResidency(table, worldRect, viewportPx, opts = {}) {
   const mip = chooseMip(table, worldRect, viewportPx);
+  const mipFraction = chooseMipFraction(table, worldRect, viewportPx);
   const fine = computeVisiblePages(table, worldRect, { mip, guardPages: opts.guardPages });
   const coarserMip = Math.min(table.maxMip, mip + 1);
   const prefetchCoarser =
     coarserMip > mip ? computeVisiblePages(table, worldRect, { mip: coarserMip, guardPages: opts.guardPages }) : [];
-  return { mip, fine, prefetchCoarser };
+  const finerMip = Math.max(0, mip - 1);
+  const prefetchFiner = finerMip < mip ? computeVisiblePages(table, worldRect, { mip: finerMip, guardPages: 0 }) : [];
+  return { mip, mipFraction, fine, prefetchCoarser, prefetchFiner };
 }
 
 /**

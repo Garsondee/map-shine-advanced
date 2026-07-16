@@ -4,12 +4,111 @@
  * verified live via the debug panel's "VT Live Decode Test" report instead.
  */
 import { PageTable } from '../page-table.js';
-import { pageWorldRect, DEFAULT_BORDER_PX, computePagePlacement } from '../decode-pool.js';
+import {
+  pageWorldRect,
+  DEFAULT_BORDER_PX,
+  computePagePlacement,
+  __createSemaphore,
+  shouldYieldByTime,
+} from '../decode-pool.js';
 
-export function run(t) {
+export async function run(t) {
   const { ok } = t;
 
   ok('DEFAULT_BORDER_PX is 4 (256px page - 248 payload, split both sides)', DEFAULT_BORDER_PX === 4);
+
+  // --- slice-source semaphore: the decode-memory bound -----------------------
+  // The concurrency cap on held full source bitmaps is what keeps peak decode
+  // memory O(ring), not O(layers×floors). Verify it NEVER lets more than `max`
+  // run at once even under a burst of concurrent acquirers.
+  {
+    const MAX = 3;
+    const sem = __createSemaphore(MAX);
+    let active = 0;
+    let peak = 0;
+    const tick = () => new Promise((r) => setTimeout(r, 1));
+    const task = async () => {
+      await sem.acquire();
+      active++;
+      peak = Math.max(peak, active);
+      await tick(); // hold the slot across an async boundary (like a real decode)
+      active--;
+      sem.release();
+    };
+    await Promise.all(Array.from({ length: 12 }, () => task()));
+    ok('semaphore: peak concurrency never exceeds max (the decode-memory bound)', peak <= MAX && peak > 0);
+    ok(
+      'semaphore: all acquirers drain to zero active + zero waiting',
+      sem.stats().active === 0 && sem.stats().waiting === 0
+    );
+  }
+
+  // --- shouldYieldByTime: the decode-burst cooperative-yield budget (real
+  // live bug, 2026-07-16 — a zoom-thrash-test report showed the FIRST fix (a
+  // fixed page-count cadence) still let a real ~358ms freeze through: a
+  // handful of COARSE-mip pages, each individually expensive — a large
+  // single-step downsample crop — blew straight through a "yield every 6
+  // pages" budget, since 6 EXPENSIVE pages can still take far longer than 6
+  // cheap ones. Time-based yielding caps the worst case regardless of what
+  // makes any individual page slow, without needlessly penalizing bulk-
+  // loading many CHEAP fine-mip pages (the original per-count design's
+  // rejected alternative — yield every single page — would have done exactly
+  // that: real yield overhead on pages that were never the problem). -------
+  {
+    const BUDGET = 10;
+    ok('shouldYieldByTime: does not yield before the budget elapses', shouldYieldByTime(5, BUDGET) === false);
+    ok('shouldYieldByTime: yields exactly AT the budget', shouldYieldByTime(10, BUDGET) === true);
+    ok('shouldYieldByTime: yields well past the budget too', shouldYieldByTime(358, BUDGET) === true);
+    ok('shouldYieldByTime: zero elapsed never yields', shouldYieldByTime(0, BUDGET) === false);
+
+    // THE actual bug this replaces: simulate "6 pages, each costing 80ms" (a
+    // realistic coarse-mip decode cost, per the live thrash-test report's
+    // ~358ms/13-page incident) under the OLD fixed-count design vs the NEW
+    // time-based one — the old design would let all 6 pages (480ms) run
+    // before ever checking anything past "is this the 6th item"; the new one
+    // must yield far sooner, well before accumulating anywhere near that.
+    {
+      const EXPENSIVE_PAGE_MS = 80;
+      let elapsedSinceYield = 0;
+      let yieldCount = 0;
+      let maxUninterruptedMs = 0;
+      for (let page = 0; page < 6; page++) {
+        elapsedSinceYield += EXPENSIVE_PAGE_MS;
+        maxUninterruptedMs = Math.max(maxUninterruptedMs, elapsedSinceYield);
+        if (shouldYieldByTime(elapsedSinceYield, BUDGET)) {
+          yieldCount++;
+          elapsedSinceYield = 0;
+        }
+      }
+      ok(
+        'shouldYieldByTime: 6 EXPENSIVE pages yield after almost every one (caps the worst case) — the actual fix',
+        yieldCount >= 5
+      );
+      ok(
+        'shouldYieldByTime: max uninterrupted stretch stays close to ONE expensive page, never accumulates to 6x',
+        maxUninterruptedMs < EXPENSIVE_PAGE_MS * 2
+      );
+    }
+
+    // The other half of the fix's justification: many CHEAP pages should NOT
+    // yield constantly (avoiding needless overhead during bulk coarse-pin loading).
+    {
+      const CHEAP_PAGE_MS = 1;
+      let elapsedSinceYield = 0;
+      let yieldCount = 0;
+      for (let page = 0; page < 40; page++) {
+        elapsedSinceYield += CHEAP_PAGE_MS;
+        if (shouldYieldByTime(elapsedSinceYield, BUDGET)) {
+          yieldCount++;
+          elapsedSinceYield = 0;
+        }
+      }
+      ok(
+        'shouldYieldByTime: 40 CHEAP pages yield only a handful of times, not on every page',
+        yieldCount > 0 && yieldCount < 10
+      );
+    }
+  }
 
   // --- torture-scene world (12000px, payload 248, 49x49 @ mip0) -----------
   const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 });

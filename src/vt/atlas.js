@@ -139,6 +139,36 @@ export class PageAtlas {
     const initialData = new Uint8Array(atlasSizePx * atlasSizePx * layers * BYTES_PER_TEXEL_RGBA8);
     this.texture = new THREE.DataArrayTexture(initialData, atlasSizePx, atlasSizePx, layers);
     this.texture.name = 'vt:pageAtlas';
+
+    // NO GPU MIPMAPPING ON THE ATLAS — a real, textbook virtual-texturing
+    // requirement, not an oversight (found live 2026-07-16, author-reported
+    // "zooming out makes the texture pixelated and ugly", first suspected as
+    // "needs anisotropic filtering" — WRONG diagnosis; the camera is straight-
+    // down orthographic, and vt-sample.glsl.js's own header already correctly
+    // notes anisotropy isn't needed here). THREE.Texture defaults to
+    // `minFilter: LinearMipmapLinearFilter` + `generateMipmaps: true`
+    // (verified against the vendored source) — meaning, until this fix, the
+    // atlas asked the GPU to pick its OWN mip level per fragment from screen-
+    // space UV derivatives. That is meaningless for a page atlas: a page's
+    // slot position is essentially arbitrary bookkeeping (LRU-assigned), so
+    // neighboring on-screen pixels can jump to unrelated atlas locations at
+    // every page boundary — the GPU's automatic LOD math sees huge, bogus
+    // derivative jumps there, worse the more pages are visible at once
+    // (== zoomed out, matching the exact reported symptom). It was ALSO
+    // selecting among atlas mip levels that are essentially never rebuilt
+    // (real page content streams in via copyTextureToTexture, which does not
+    // regenerate the mip chain — only the ONE-TIME initial all-zero upload
+    // above ever did). The correct, standard fix (used by every real virtual-
+    // texture system, e.g. id Tech's MegaTexture): the atlas has NO mip chain
+    // at all, and every sample explicitly requests level 0 (see vtSample-
+    // AtlasSlot's textureLod call) — the CPU already decided which VIRTUAL
+    // mip's page to use (uRequestedMip); the GPU has no business making a
+    // second, uncoordinated decision about the PHYSICAL atlas on top of that.
+    // Within-page bilinear smoothing (LinearFilter) is unaffected — this only
+    // removes the (bogus) ACROSS-page mip selection.
+    this.texture.generateMipmaps = false;
+    this.texture.minFilter = THREE.LinearFilter;
+    this.texture.magFilter = THREE.LinearFilter;
     this.texture.needsUpdate = true;
   }
 

@@ -30,11 +30,88 @@
  * the pipeline. Both are real, tracked follow-ups (see keyhole-stage-status
  * memory), not forgotten scope.
  *
+ * SLICE-ONCE / PERSIST / RELEASE (added 2026-07-15 — the multi-layer decode-
+ * memory fix). The original path held every source's FULL decoded bitmap
+ * forever (~576 MB per 12000² image) to crop pages on demand. Fine for one
+ * albedo × a few floors; fatal at 8 layers × 3 floors ≈ 22 held bitmaps ≈ 13 GB
+ * — the browser refused new decodes (observed live: mask decode failures during
+ * prewarm). The fix (§4.1): crop a page ONCE, persist the 256² page blob to
+ * IndexedDB (`pyramid-store.js`), and RELEASE the full bitmap. Every later
+ * request for that page comes from IndexedDB — a tiny blob — never from a
+ * re-held 576 MB source. A bounded semaphore caps how many full source bitmaps
+ * exist AT ONCE (`SLICE_MAX_CONCURRENT_SOURCES`), so peak decode memory is
+ * `O(ring)`, independent of how many layers × floors the scene has. That is
+ * what makes "many 12K layers on many floors" not explode.
+ *
  * @module vt/decode-pool
  */
 
+import { pageStoreKey, getPageBlob, putPageBlob } from './pyramid-store.js';
+
 /** Default border width in texels (Keyhole Q1: 256px page - 248 payload = 4px/side). */
 export const DEFAULT_BORDER_PX = 4;
+
+/**
+ * Cooperative yield so a BURST of page decodes can't block the main thread
+ * long enough to visibly freeze the render loop (2026-07-16, author-reported:
+ * rapidly zooming the FULL range in or out can "temporarily stop" — a real
+ * frame-rate stall, not just soft/blurry content, which means something WAS
+ * blocking synchronously rather than gracefully falling behind). A rapid
+ * full-range zoom can legitimately need many new pages across several mip
+ * levels, for every mask layer of every floor, all within one residency
+ * update's decode burst — the decode loops below used to run every one of
+ * those back-to-back with no yield point at all.
+ *
+ * Waits for the next animation frame — the SAME clock the render loop itself
+ * runs on (both are plain browser `requestAnimationFrame` callbacks, queued
+ * and run in registration order), so this reliably lets at least one real
+ * frame paint before a long decode burst continues, turning "one long freeze"
+ * into "the frame rate dips while catching up" — the graceful-degradation
+ * shape this whole project is built around, applied to CPU decode bursts the
+ * same way the page cache already applies it to GPU memory pressure.
+ */
+function yieldToMain() {
+  return new Promise((resolve) => requestAnimationFrame(resolve));
+}
+
+/**
+ * Pure: has enough wall-clock time elapsed since the last yield that we
+ * should yield again NOW? TIME-based, not a fixed page count (2026-07-16
+ * refinement — the original per-6-pages count still let a real ~358ms freeze
+ * through, confirmed live via the zoom-thrash-test tool: a handful of COARSE-
+ * mip pages — each requiring a large single-step downsample crop, inherently
+ * much more expensive than an ordinary fine-mip page's near-1:1 resize — can
+ * each individually cost tens of ms, so even 6 of them back-to-back still
+ * exceeded a user-perceptible stall). A FIXED page count can't distinguish
+ * "6 cheap pages" from "6 expensive pages"; a time budget caps the worst case
+ * regardless of what makes any individual page slow, AND doesn't penalize
+ * bulk-loading many cheap fine-mip pages with needless yield overhead (a real
+ * regression risk considered and rejected — yielding every single page
+ * regardless of cost would slow ordinary coarse-pin loading, which decodes
+ * many pages at once, for no benefit on the pages that are already fast).
+ * @param {number} elapsedMsSinceLastYield @param {number} maxMsPerChunk
+ * @returns {boolean}
+ */
+export function shouldYieldByTime(elapsedMsSinceLastYield, maxMsPerChunk) {
+  return elapsedMsSinceLastYield >= maxMsPerChunk;
+}
+
+/** Wall-clock budget per decode chunk before yielding once — comfortably
+ * under one 60fps frame (16.7ms), leaving headroom for the render() call and
+ * per-frame input handling that frame. Caught early by yielding after
+ * WHICHEVER page pushes elapsed time past this, rather than waiting for a
+ * fixed page count that a run of unusually expensive (coarse-mip) pages
+ * could blow straight through. */
+const MAX_MS_PER_DECODE_CHUNK = 10;
+
+/**
+ * How many FULL source bitmaps may be decoded/held at once for page slicing.
+ * Each 12000² source is ~576 MB decoded, so this is the hard bound on peak
+ * slice-decode memory (3 → ~1.7 GB worst case), independent of total layers ×
+ * floors. Raise on a memory-rich machine for faster first-load slicing; the
+ * correctness/bound doesn't depend on the value.
+ */
+export const SLICE_MAX_CONCURRENT_SOURCES = 3;
 
 /**
  * Pure: the world-space rect (in this virtual texture's mip-0 world units) a
@@ -189,25 +266,41 @@ export function releaseSourceBitmap(url) {
  * @returns {Promise<ImageBitmap>}
  */
 export function decodePage(sourceBitmap, worldRect, pageSizePx = 256) {
+  return createImageBitmap(decodePageToCanvas(sourceBitmap, worldRect, pageSizePx));
+}
+
+/**
+ * The crop itself, rendered into an `OffscreenCanvas` (both interior and
+ * edge/corner pages). Split out from `decodePage` so ONE crop can feed BOTH the
+ * GPU upload (`createImageBitmap(canvas)`) AND the IndexedDB persist
+ * (`canvas.convertToBlob()`) — a canvas owns its pixels independently of any
+ * derived bitmap, so there's no bitmap-lifetime race between "upload it" and
+ * "persist it". Same two-case logic as `decodePage` had (see `computePagePlacement`).
+ *
+ * @param {ImageBitmap} source
+ * @param {{minX:number,minY:number,maxX:number,maxY:number,unclamped:{minX:number,minY:number,maxX:number,maxY:number}}} worldRect
+ * @param {number} [pageSizePx]
+ * @returns {OffscreenCanvas}
+ */
+export function decodePageToCanvas(source, worldRect, pageSizePx = 256) {
   const sx = Math.round(worldRect.minX);
   const sy = Math.round(worldRect.minY);
   const sw = Math.max(1, Math.round(worldRect.maxX - worldRect.minX));
   const sh = Math.max(1, Math.round(worldRect.maxY - worldRect.minY));
 
+  const canvas = new OffscreenCanvas(pageSizePx, pageSizePx);
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
   const placement = computePagePlacement(worldRect, worldRect.unclamped, pageSizePx);
   if (!placement.needsPadding) {
-    return createImageBitmap(sourceBitmap, sx, sy, sw, sh, {
-      resizeWidth: pageSizePx,
-      resizeHeight: pageSizePx,
-      resizeQuality: 'high',
-    });
+    ctx.drawImage(source, sx, sy, sw, sh, 0, 0, pageSizePx, pageSizePx);
+    return canvas;
   }
 
   const { dx, dy, dw, dh } = placement;
-  const canvas = new OffscreenCanvas(pageSizePx, pageSizePx);
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(sourceBitmap, sx, sy, sw, sh, dx, dy, dw, dh);
-
+  ctx.drawImage(source, sx, sy, sw, sh, dx, dy, dw, dh);
   if (dx > 0) ctx.drawImage(canvas, dx, dy, 1, dh, 0, dy, dx, dh); // pad left: repeat leftmost real column
   if (dx + dw < pageSizePx) {
     ctx.drawImage(canvas, dx + dw - 1, dy, 1, dh, dx + dw, dy, pageSizePx - (dx + dw), dh); // pad right
@@ -216,6 +309,601 @@ export function decodePage(sourceBitmap, worldRect, pageSizePx = 256) {
   if (dy + dh < pageSizePx) {
     ctx.drawImage(canvas, 0, dy + dh - 1, pageSizePx, 1, 0, dy + dh, pageSizePx, pageSizePx - (dy + dh)); // pad bottom
   }
-
-  return createImageBitmap(canvas);
+  return canvas;
 }
+
+// ---------------------------------------------------------------------------
+// Bounded slice-source management + IndexedDB-backed page acquisition.
+// This is the decode-memory fix: never hold more than
+// SLICE_MAX_CONCURRENT_SOURCES full bitmaps at once, and serve already-sliced
+// pages from IndexedDB so a source need never be re-held once its pages exist.
+// ---------------------------------------------------------------------------
+
+/**
+ * A minimal counting semaphore. `acquire()` resolves when a slot is free;
+ * `release()` frees one and wakes the next waiter. Correct FIFO ordering (a
+ * pushed resolver is only invoked when a slot is actually available).
+ * @param {number} max
+ */
+function createSemaphore(max) {
+  let active = 0;
+  const queue = [];
+  const pump = () => {
+    while (active < max && queue.length > 0) {
+      active++;
+      queue.shift()();
+    }
+  };
+  return {
+    acquire() {
+      return new Promise((resolve) => {
+        queue.push(resolve);
+        pump();
+      });
+    },
+    release() {
+      active = Math.max(0, active - 1);
+      pump();
+    },
+    stats() {
+      return { active, waiting: queue.length, max };
+    },
+  };
+}
+
+const _sliceSem = createSemaphore(SLICE_MAX_CONCURRENT_SOURCES);
+/** @type {Map<string, {bitmap: ImageBitmap, refs: number}>} url -> currently-held source for slicing */
+const _sliceHeld = new Map();
+/** @type {Map<string, Promise<ImageBitmap>>} url -> in-flight decode (dedupe concurrent acquires) */
+const _sliceInflight = new Map();
+const _decodeStats = {
+  sourcesDecoded: 0,
+  idbHits: 0,
+  idbSlices: 0,
+  idbPersists: 0,
+  // SUB-STEP TIMING (2026-07-16 — the zoom-thrash-test showed a 775ms freeze
+  // whose snapshot had sourcesDecoded 0→1 + heldSources 1 + only 4 slices,
+  // meaning the time was in acquiring/first-touching the FULL source image,
+  // NOT the per-page slice loop the time-budget yield already tames. These
+  // pinpoint EXACTLY which un-chunkable main-thread operation is the cost, so
+  // the real fix targets the right thing — see getDecodeStats' report shape.)
+  maxSourceAcquireMs: 0, // wait for fetch + createImageBitmap(blob) of a full source
+  lastSourceAcquireMs: 0,
+  maxSinglePageMs: 0, // one page's decodePageToCanvas + createImageBitmap(canvas) — catches the
+  // first-drawImage realization of a freshly-decoded 144MP source (a synchronous main-thread cost)
+  lastSinglePageMs: 0,
+  // PATH ATTRIBUTION (2026-07-16 — a SECOND live hitch, after the worker
+  // shipped, had sourcesDecoded incrementing with almost no page-slicing done
+  // yet: NOT the page-slice path (already off-thread) — traced to
+  // getSourceDimensions()'s OWN separate fallback, called once per pack at
+  // floor-load time (including from background floor-prewarm, fire-and-
+  // forget, so it can fire mid-thrash with zero warning), which called
+  // acquireSliceSource() DIRECTLY on the main thread. These two counters make
+  // "did a source decode actually stay off the main thread" a durable,
+  // permanent, always-visible fact in every report — not something that has
+  // to be re-derived by correlating timestamps by hand, which is how the
+  // first of these two path-specific bugs almost hid. workerSourceDecodes
+  // should track sourcesDecoded 1:1 once every path is worker-ized;
+  // mainThreadFallbackSourceDecodes > 0 is now an unambiguous, permanent
+  // tripwire for "something is still touching the main thread with a giant
+  // image" — exactly the class of regression that becomes far harder to spot
+  // once real effects add more decode-triggering consumers.
+  workerSourceDecodes: 0,
+  mainThreadFallbackSourceDecodes: 0,
+  // How many times the "cheap" ranged-fetch dimension probe did NOT get a
+  // genuine partial (206) response — i.e. the asset server ignored the Range
+  // header and returned the whole file, or the request failed outright. A
+  // nonzero value here answers "does this server honor Range requests" with
+  // a number instead of an assumption.
+  rangedFetchMisses: 0,
+};
+
+/** Fetch + decode a full source bitmap (NOT cached — the ring owns its lifetime). @param {string} url @returns {Promise<ImageBitmap>} */
+function fetchAndDecode(url) {
+  return fetch(url)
+    .then((res) => {
+      if (!res.ok) throw new Error(`decode-pool: ${url} -> HTTP ${res.status}`);
+      return res.blob();
+    })
+    .then((blob) => createImageBitmap(blob));
+}
+
+/**
+ * Acquire a full source bitmap for slicing, bounded by the semaphore so at most
+ * SLICE_MAX_CONCURRENT_SOURCES exist at once. Reuses a pinned proxy bitmap
+ * (`getSourceBitmap`'s `_sourceCache`) for free when present (avoids
+ * double-decoding albedo). Returns the bitmap plus a `done()` the caller MUST
+ * invoke when its slice batch is finished — the bitmap is closed + its
+ * semaphore slot freed once the last user releases it.
+ * @param {string} url @returns {Promise<{source: ImageBitmap, done: () => void}>}
+ */
+async function acquireSliceSource(url) {
+  const pinned = _sourceCache.get(url);
+  if (pinned) return { source: await pinned, done: () => {} }; // pinned proxy bitmap — never ring-managed/closed
+
+  const held = _sliceHeld.get(url);
+  if (held) {
+    held.refs++;
+    return { source: held.bitmap, done: () => releaseSliceSource(url) };
+  }
+
+  await _sliceSem.acquire();
+  // Re-check after the await — a concurrent acquire may have created it while we waited.
+  const held2 = _sliceHeld.get(url);
+  if (held2) {
+    _sliceSem.release(); // we won't create one; give the slot back
+    held2.refs++;
+    return { source: held2.bitmap, done: () => releaseSliceSource(url) };
+  }
+
+  let bitmap;
+  const acquireStartMs = performance.now();
+  try {
+    let p = _sliceInflight.get(url);
+    if (!p) {
+      p = fetchAndDecode(url);
+      _sliceInflight.set(url, p);
+    }
+    bitmap = await p;
+  } catch (err) {
+    _sliceSem.release();
+    _sliceInflight.delete(url);
+    throw err;
+  }
+  const acquireMs = performance.now() - acquireStartMs;
+  _decodeStats.lastSourceAcquireMs = Math.round(acquireMs);
+  _decodeStats.maxSourceAcquireMs = Math.max(_decodeStats.maxSourceAcquireMs, Math.round(acquireMs));
+  _sliceInflight.delete(url);
+  _decodeStats.sourcesDecoded++;
+  // This function ONLY ever runs on the main thread (it's the fallback path,
+  // never called from the worker) — every call here is, by definition, a
+  // giant-image decode the render loop could feel. See _decodeStats' own doc
+  // for why this counter is a permanent tripwire, not a one-off debugging aid.
+  _decodeStats.mainThreadFallbackSourceDecodes++;
+  _sliceHeld.set(url, { bitmap, refs: 1 });
+  return { source: bitmap, done: () => releaseSliceSource(url) };
+}
+
+/** Time one page's synchronous decode (drawImage crop + createImageBitmap) — records the max/last
+ * single-page cost so a giant first-drawImage realization of a fresh 144MP source is visible in stats. */
+async function timedDecodePage(source, rect, pageSizePx) {
+  const t0 = performance.now();
+  const canvas = decodePageToCanvas(source, rect, pageSizePx);
+  const bitmap = await createImageBitmap(canvas);
+  const ms = performance.now() - t0;
+  _decodeStats.lastSinglePageMs = Math.round(ms);
+  _decodeStats.maxSinglePageMs = Math.max(_decodeStats.maxSinglePageMs, Math.round(ms));
+  return { canvas, bitmap };
+}
+
+// ---------------------------------------------------------------------------
+// OFF-MAIN-THREAD DECODE (2026-07-16). Routes the expensive source-decode +
+// slice through decode-pool.worker.js so the main thread never touches the
+// 144MP source (the ~398ms decode + ~601ms first-draw freeze the zoom-thrash-
+// test pinned down). A robust fallback keeps the ORIGINAL main-thread path as
+// a safety net: if the worker can't be constructed (module-worker unsupported,
+// URL blocked, etc.) or a request errors, acquirePages/acquirePackedPages
+// silently fall back to slicing on the main thread — the behavior that already
+// worked (just with the freeze). Nothing this adds can BREAK decoding; worst
+// case it doesn't help.
+// ---------------------------------------------------------------------------
+let _decodeWorker = null;
+let _decodeWorkerUnavailable = false; // set once if construction/loading ever fails — never retried (avoids thrash)
+let _decodeWorkerUnavailableReason = null; // the ACTUAL error, surfaced in getDecodeStats — never require a console check to see why
+const _workerPending = new Map(); // reqId -> { resolve, reject }
+let _nextWorkerReqId = 1;
+
+function ensureDecodeWorker() {
+  if (_decodeWorker || _decodeWorkerUnavailable) return _decodeWorker;
+  try {
+    _decodeWorker = new Worker(new URL('./decode-pool.worker.js', import.meta.url), { type: 'module' });
+    _decodeWorker.onmessage = (e) => {
+      const { id, ok, results, dimensions, stats, error } = e.data;
+      const pending = _workerPending.get(id);
+      if (!pending) return;
+      _workerPending.delete(id);
+      if (ok) pending.resolve({ results, dimensions, stats });
+      else pending.reject(new Error(error));
+    };
+    _decodeWorker.onerror = (e) => {
+      // Worker crashed or failed to load — permanently fall back to main thread.
+      _decodeWorkerUnavailable = true;
+      _decodeWorkerUnavailableReason = String(e?.message || e || 'unknown worker error');
+      for (const p of _workerPending.values()) p.reject(new Error(`decode worker error: ${e?.message || 'unknown'}`));
+      _workerPending.clear();
+      try {
+        _decodeWorker?.terminate?.();
+      } catch (_) {}
+      _decodeWorker = null;
+      console.error('[decode-pool] decode worker failed — falling back to main-thread decode.', e?.message || e);
+    };
+  } catch (err) {
+    _decodeWorkerUnavailable = true;
+    _decodeWorkerUnavailableReason = String(err?.message || err);
+    _decodeWorker = null;
+    console.warn('[decode-pool] could not create decode worker — using main-thread decode.', err?.message || err);
+  }
+  return _decodeWorker;
+}
+
+/**
+ * Send a slice request to the worker; resolve with `{results, dimensions, stats}`
+ * or return null if the worker is unavailable (caller must fall back). A
+ * request-level error also resolves to null — a single failed worker request
+ * must never take down decoding; the main-thread path covers it.
+ * @param {object} msg
+ * @returns {Promise<{results?: Array<{key:string, bitmap:ImageBitmap}>, dimensions?: {width:number,height:number}, stats:object}|null>}
+ */
+async function tryWorkerSlice(msg) {
+  const w = ensureDecodeWorker();
+  if (!w) return null;
+  const id = _nextWorkerReqId++;
+  const promise = new Promise((resolve, reject) => _workerPending.set(id, { resolve, reject }));
+  try {
+    w.postMessage({ ...msg, id });
+  } catch (err) {
+    _workerPending.delete(id);
+    return null; // e.g. message not cloneable — fall back
+  }
+  try {
+    return await promise;
+  } catch (_) {
+    return null; // this request errored in the worker — fall back for it
+  }
+}
+
+/**
+ * Ask the worker to decode a source purely to read its width/height — the
+ * off-thread counterpart to `getSourceDimensions()`'s ranged-fetch fallback
+ * (2026-07-16, see decode-pool.worker.js's `handleDimensions` doc for the
+ * real live bug this closes). Returns null (caller falls back to main-thread
+ * `acquireSliceSource`) if the worker is unavailable or the request errors.
+ * @param {string} url
+ * @returns {Promise<{width:number, height:number}|null>}
+ */
+async function tryWorkerDimensions(url) {
+  const worker = await tryWorkerSlice({ kind: 'dimensions', url });
+  if (!worker || !worker.dimensions) return null;
+  _decodeStats.workerSourceDecodes++;
+  if (typeof worker.stats?.sourceAcquireMs === 'number') {
+    _decodeStats.lastSourceAcquireMs = Math.round(worker.stats.sourceAcquireMs);
+    _decodeStats.maxSourceAcquireMs = Math.max(
+      _decodeStats.maxSourceAcquireMs,
+      Math.round(worker.stats.sourceAcquireMs)
+    );
+  }
+  return worker.dimensions;
+}
+
+/** Fold a worker slice response's timing/counters into the shared _decodeStats + return the paged results. */
+function foldWorkerResults(worker, pages, sourcesDecodedDelta) {
+  _decodeStats.workerSourceDecodes += sourcesDecodedDelta;
+  const pageByKey = new Map(pages.map((p) => [p.key, p]));
+  const out = [];
+  for (const { key, bitmap } of worker.results) {
+    const page = pageByKey.get(key);
+    if (page) out.push({ page, bitmap });
+  }
+  const s = worker.stats || {};
+  _decodeStats.idbSlices += s.sliced ?? worker.results.length;
+  _decodeStats.sourcesDecoded += sourcesDecodedDelta;
+  if (typeof s.sourceAcquireMs === 'number') {
+    _decodeStats.lastSourceAcquireMs = Math.round(s.sourceAcquireMs);
+    _decodeStats.maxSourceAcquireMs = Math.max(_decodeStats.maxSourceAcquireMs, Math.round(s.sourceAcquireMs));
+  }
+  if (typeof s.maxSinglePageMs === 'number') {
+    _decodeStats.maxSinglePageMs = Math.max(_decodeStats.maxSinglePageMs, Math.round(s.maxSinglePageMs));
+  }
+  return out;
+}
+
+/** Minimal cloneable page list for a worker message (strip to just what the worker reads). */
+function pagesForWorker(pages) {
+  return pages.map((p) => ({ mip: p.mip, px: p.px, py: p.py, key: p.key }));
+}
+
+function releaseSliceSource(url) {
+  const held = _sliceHeld.get(url);
+  if (!held) return;
+  held.refs--;
+  if (held.refs <= 0) {
+    try {
+      held.bitmap.close?.();
+    } catch (_) {}
+    _sliceHeld.delete(url);
+    _sliceSem.release(); // free the slot for the next NEW source
+  }
+}
+
+/** Persist one sliced page's pixels (fire-and-forget; failure is non-fatal). @param {string} key @param {OffscreenCanvas} canvas */
+function persistPage(key, canvas) {
+  try {
+    canvas
+      .convertToBlob({ type: 'image/png' })
+      .then((blob) => putPageBlob(key, blob))
+      .then((ok) => {
+        if (ok) _decodeStats.idbPersists++;
+      })
+      .catch(() => {});
+  } catch (_) {}
+}
+
+/**
+ * Read a source image's dimensions WITHOUT a full decode. PNG carries width/
+ * height in its IHDR chunk (bytes 16-24, big-endian) — a tiny ranged fetch gets
+ * them without paying a 576 MB decode just to learn the world size.
+ *
+ * FALLBACK IS OFF-MAIN-THREAD FIRST (2026-07-16 — a real live bug: this
+ * fallback used to call `acquireSliceSource()` directly on the main thread —
+ * a full source decode NEVER routed through decode-pool.worker.js, since it's
+ * a completely separate code path from page slicing. Called once per PACK at
+ * floor-load time, INCLUDING from the background floor-prewarm
+ * (`vt-pan-viewer.js`, fire-and-forget) — so it could fire mid-pan/mid-zoom
+ * with zero warning if the asset server doesn't honor Range requests. A live
+ * zoom-thrash-test report's hitch, whose snapshot showed `sourcesDecoded`
+ * incrementing with almost no page-slicing done yet, is exactly this
+ * function's signature, not the (already off-thread) page-slice path.
+ * `_decodeStats.rangedFetchMisses` answers "does this server honor Range
+ * requests" directly, as a number, rather than an assumption).
+ * @param {string} url @returns {Promise<{width:number, height:number}>}
+ */
+export async function getSourceDimensions(url) {
+  try {
+    const res = await fetch(url, { headers: { Range: 'bytes=0-33' } });
+    if (res.ok || res.status === 206) {
+      const buf = new DataView(await res.arrayBuffer());
+      // PNG signature 0x89504E47 at byte 0; IHDR width@16, height@20 (big-endian).
+      if (buf.byteLength >= 24 && buf.getUint32(0) === 0x89504e47) {
+        if (res.status !== 206) _decodeStats.rangedFetchMisses++; // got a full 200, not a genuine partial response
+        return { width: buf.getUint32(16), height: buf.getUint32(20) };
+      }
+    }
+  } catch (_) {}
+
+  _decodeStats.rangedFetchMisses++;
+  const worker = await tryWorkerDimensions(url);
+  if (worker) return worker;
+
+  const { source, done } = await acquireSliceSource(url);
+  try {
+    return { width: source.width, height: source.height };
+  } finally {
+    done();
+  }
+}
+
+/**
+ * Acquire the decoded page bitmaps for a set of pages of one source — the
+ * memory-bounded replacement for "hold the whole source and crop on demand".
+ * For each page: try IndexedDB first (a tiny persisted blob → `createImageBitmap`,
+ * no source decode). Only pages NOT yet persisted trigger a bounded acquire of
+ * the full source; each is sliced, uploaded-caller-side, AND persisted so it's
+ * an IndexedDB hit next time. The full source is released the instant the batch
+ * ends, so it never lingers.
+ *
+ * @param {string} url - the source image URL (identity for the page store + ring).
+ * @param {import('./page-table.js').PageTable} table
+ * @param {Array<{mip:number, px:number, py:number}>} pages
+ * @param {object} [opts] @param {number} [opts.borderPx] @param {number} [opts.pageSizePx]
+ * @returns {Promise<Array<{page:{mip:number,px:number,py:number}, bitmap: ImageBitmap}>>}
+ */
+export async function acquirePages(url, table, pages, opts = {}) {
+  const borderPx = opts.borderPx ?? DEFAULT_BORDER_PX;
+  const pageSizePx = opts.pageSizePx ?? 256;
+  const results = [];
+  const misses = [];
+
+  for (const page of pages) {
+    const key = pageStoreKey(url, page.mip, page.px, page.py);
+    let blob = null;
+    try {
+      blob = await getPageBlob(key);
+    } catch (_) {
+      blob = null;
+    }
+    if (blob) {
+      try {
+        results.push({ page, bitmap: await createImageBitmap(blob) });
+        _decodeStats.idbHits++;
+        continue;
+      } catch (_) {
+        // Corrupt persisted blob — fall through and re-slice from source.
+      }
+    }
+    misses.push(page);
+  }
+
+  if (misses.length > 0) {
+    // OFF-MAIN-THREAD FIRST: hand the source-decode + slice to the worker so
+    // the giant-source touch never blocks the render loop. Returns null (and
+    // we fall through to the main-thread path below) if the worker is
+    // unavailable or this request errored.
+    const worker = await tryWorkerSlice({
+      kind: 'slice',
+      url,
+      pages: pagesForWorker(misses),
+      worldSizePx: table.worldSizePx,
+      payloadPx: table.payloadPx,
+      borderPx,
+      pageSizePx,
+    });
+    if (worker) {
+      results.push(...foldWorkerResults(worker, misses, 1)); // one source decoded
+    } else {
+      // FALLBACK — the original main-thread slice path (still correct, just
+      // with the giant-source freeze the worker exists to remove).
+      const { source, done } = await acquireSliceSource(url);
+      let lastYieldMs = performance.now();
+      try {
+        for (const page of misses) {
+          const rect = pageWorldRect(table, page.mip, page.px, page.py, { borderPx });
+          const { canvas, bitmap } = await timedDecodePage(source, rect, pageSizePx);
+          results.push({ page, bitmap });
+          _decodeStats.idbSlices++;
+          persistPage(pageStoreKey(url, page.mip, page.px, page.py), canvas);
+          const now = performance.now();
+          if (shouldYieldByTime(now - lastYieldMs, MAX_MS_PER_DECODE_CHUNK)) {
+            await yieldToMain();
+            lastYieldMs = performance.now();
+          }
+        }
+      } finally {
+        done();
+      }
+    }
+  }
+  return results;
+}
+
+/**
+ * CHANNEL-PACKING (Keyhole §4.1, 2026-07-16 — author-confirmed mask taxonomy:
+ * single-channel masks — `_Shadow`/`_Outdoors`/`_Fire` — are the only ones that
+ * pack; coloured masks (`_Specular`/`_Window`) and RGBA masks (`_Tree`/`_Bush`)
+ * each need their own texture). The 3 single-channel masks' source PNGs stay
+ * SEPARATE files on disk (each authored/painted independently) — packing
+ * happens HERE, at decode time: one composited RGBA page (R/G/B = the three
+ * masks' grayscale intensity, A = the SHARED structural-hole alpha, author-
+ * confirmed 2026-07-16 to be identical across all masks of one floor) replaces
+ * what would otherwise be 3 separate page-tables/indirection-textures/coarse-
+ * pin sets. This is what turns "7 masks" into "4 packs" (§4.1's real math,
+ * corrected from the plan's original optimistic "13→6" estimate) — the direct
+ * lever on the GPU page-cache pressure every live report this session showed
+ * (thousands of evictions/misses at 24 unpacked packs × 3 floors).
+ *
+ * Acquires each of the 3 channel sources ONCE per batch (not once per page) —
+ * for a batch of N missed pages, this is 3 bounded slice-source acquisitions
+ * total, not 3×N — keeping it as decode-memory-cheap as the unpacked path.
+ * `getImageData`/`putImageData` operate on a single 256² page canvas, not the
+ * 12000² source — the exact CPU-extraction discipline Keyhole.md §4.1
+ * mandates ("per-page CPU extraction... kills the getImageData class" refers
+ * to full-source scans; a 256² page is the sanctioned unit).
+ *
+ * @param {string} packId - a stable synthetic identity for the PACKED result
+ *   (e.g. `packed://floor2/shadowOutdoorsFire`) — used as the IndexedDB
+ *   persistence key prefix so a packed page, once composited, is never
+ *   re-composited. Distinct from any of the 3 channel source URLs.
+ * @param {{r:string, g:string, b:string}} channelUrls - the 3 single-channel
+ *   mask source URLs. Alpha is read from the `r` source (guaranteed identical
+ *   across all 3 by the shared-hole-alpha invariant — see
+ *   `tools/make-torture-world.mjs`'s `fillHoleAlpha`).
+ * @param {import('./page-table.js').PageTable} table
+ * @param {Array<{mip:number, px:number, py:number}>} pages
+ * @param {object} [opts] @param {number} [opts.borderPx] @param {number} [opts.pageSizePx]
+ * @returns {Promise<Array<{page:{mip:number,px:number,py:number}, bitmap: ImageBitmap}>>}
+ */
+export async function acquirePackedPages(packId, channelUrls, table, pages, opts = {}) {
+  const borderPx = opts.borderPx ?? DEFAULT_BORDER_PX;
+  const pageSizePx = opts.pageSizePx ?? 256;
+  const results = [];
+  const misses = [];
+
+  for (const page of pages) {
+    const key = pageStoreKey(packId, page.mip, page.px, page.py);
+    let blob = null;
+    try {
+      blob = await getPageBlob(key);
+    } catch (_) {
+      blob = null;
+    }
+    if (blob) {
+      try {
+        results.push({ page, bitmap: await createImageBitmap(blob) });
+        _decodeStats.idbHits++;
+        continue;
+      } catch (_) {
+        // Corrupt persisted blob — fall through and re-composite from sources.
+      }
+    }
+    misses.push(page);
+  }
+
+  if (misses.length > 0) {
+    // OFF-MAIN-THREAD FIRST (same fallback discipline as acquirePages) — the
+    // worker decodes all 3 channel sources + composites, off the render loop.
+    const worker = await tryWorkerSlice({
+      kind: 'slicePacked',
+      packId,
+      channelUrls,
+      pages: pagesForWorker(misses),
+      worldSizePx: table.worldSizePx,
+      payloadPx: table.payloadPx,
+      borderPx,
+      pageSizePx,
+    });
+    if (worker) {
+      results.push(...foldWorkerResults(worker, misses, 3)); // 3 channel sources decoded
+    } else {
+      // FALLBACK — the original main-thread packed compositing path.
+      // Slice each channel source ONCE for the whole miss batch, extracting
+      // the raw RGBA ImageData per missed page (R=G=B for these grayscale
+      // masks, so reading the red byte is the mask's intensity; alpha is only
+      // kept from 'r').
+      const channelPixels = {}; // 'r'|'g'|'b' -> Map<pageKey, Uint8ClampedArray>
+      for (const ch of /** @type {const} */ (['r', 'g', 'b'])) {
+        const { source, done } = await acquireSliceSource(channelUrls[ch]);
+        let lastYieldMs = performance.now();
+        try {
+          const perPage = new Map();
+          for (const page of misses) {
+            const rect = pageWorldRect(table, page.mip, page.px, page.py, { borderPx });
+            const canvas = decodePageToCanvas(source, rect, pageSizePx);
+            perPage.set(page.key, canvas.getContext('2d').getImageData(0, 0, pageSizePx, pageSizePx).data);
+            const now = performance.now();
+            if (shouldYieldByTime(now - lastYieldMs, MAX_MS_PER_DECODE_CHUNK)) {
+              await yieldToMain();
+              lastYieldMs = performance.now();
+            }
+          }
+          channelPixels[ch] = perPage;
+        } finally {
+          done();
+        }
+      }
+
+      let lastYieldMs = performance.now();
+      for (const page of misses) {
+        const canvas = new OffscreenCanvas(pageSizePx, pageSizePx);
+        const ctx = canvas.getContext('2d');
+        const out = ctx.createImageData(pageSizePx, pageSizePx);
+        const rPix = channelPixels.r.get(page.key);
+        const gPix = channelPixels.g.get(page.key);
+        const bPix = channelPixels.b.get(page.key);
+        for (let j = 0; j < out.data.length; j += 4) {
+          out.data[j] = rPix[j]; // _Shadow's intensity (its red byte; grayscale source)
+          out.data[j + 1] = gPix[j]; // _Outdoors' intensity
+          out.data[j + 2] = bPix[j]; // _Fire's intensity
+          out.data[j + 3] = rPix[j + 3]; // shared structural-hole alpha (identical across all 3 by design)
+        }
+        ctx.putImageData(out, 0, 0);
+        results.push({ page, bitmap: await createImageBitmap(canvas) });
+        _decodeStats.idbSlices++;
+        persistPage(pageStoreKey(packId, page.mip, page.px, page.py), canvas);
+        const now = performance.now();
+        if (shouldYieldByTime(now - lastYieldMs, MAX_MS_PER_DECODE_CHUNK)) {
+          await yieldToMain();
+          lastYieldMs = performance.now();
+        }
+      }
+    }
+  }
+  return results;
+}
+
+/** Decode/persistence telemetry for the debug panel (see boot.js). */
+export function getDecodeStats() {
+  return {
+    ..._decodeStats,
+    heldSources: _sliceHeld.size,
+    semaphore: _sliceSem.stats(),
+    // Worker health, always visible without a console check (this project's
+    // established debug-panel protocol): 'active' once successfully created,
+    // 'unavailable' + the ACTUAL error if construction/loading ever failed
+    // (permanent — never retried), 'not-yet-created' if nothing has asked
+    // for it yet this session.
+    workerStatus: _decodeWorker ? 'active' : _decodeWorkerUnavailable ? 'unavailable' : 'not-yet-created',
+    workerUnavailableReason: _decodeWorkerUnavailableReason,
+  };
+}
+
+/** Test seam: the pure semaphore, exported for Node verification. @private */
+export const __createSemaphore = createSemaphore;

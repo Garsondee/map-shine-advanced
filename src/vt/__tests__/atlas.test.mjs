@@ -10,6 +10,7 @@ import { computeAtlasLayout, slotToAtlasPosition, PageAtlas, BYTES_PER_TEXEL_RGB
 function makeAtlasTHREE() {
   const calls = { copyTextureToTexture: [] };
   const T = {};
+  T.LinearFilter = 'LinearFilter'; // sentinel value — real THREE's is a numeric constant, identity is all that matters here
   T.Vector3 = class {
     constructor(x = 0, y = 0, z = 0) {
       this.x = x;
@@ -124,6 +125,29 @@ export function run(t) {
       'PageAtlas: initial buffer is zeroed (a clean initial-clear state)',
       data.every((b) => b === 0)
     );
+  }
+
+  // --- PageAtlas: NO GPU mipmapping on the atlas (real live bug, 2026-07-16:
+  // "zooming out looks pixelated/ugly" — first suspected as missing
+  // anisotropic filtering, WRONG diagnosis for a top-down orthographic camera;
+  // the real cause was THREE's default minFilter/generateMipmaps letting the
+  // GPU pick its OWN mip level of the atlas from meaningless per-page-
+  // discontinuous UV derivatives). This is invisible to normal code review
+  // (the shader/atlas code LOOKS correct — it's the UNSET properties, silently
+  // defaulting to the wrong thing, that were the bug) and invisible to GPU-
+  // level rendering tests (Node can't render), so this is the one guardrail
+  // that CAN catch a regression here: assert the texture object's own
+  // properties directly. ---------------------------------------------------
+  {
+    const { T } = makeAtlasTHREE();
+    const layout = computeAtlasLayout({ budgetBytes: 512 * 1024 * 1024 });
+    const atlas = new PageAtlas({ THREE: T, layout });
+    ok('PageAtlas: generateMipmaps explicitly disabled on the atlas texture', atlas.texture.generateMipmaps === false);
+    ok(
+      "PageAtlas: minFilter explicitly set to LinearFilter (never LinearMipmapLinearFilter, THREE's default)",
+      atlas.texture.minFilter === T.LinearFilter
+    );
+    ok('PageAtlas: magFilter explicitly set to LinearFilter', atlas.texture.magFilter === T.LinearFilter);
   }
 
   // --- PageAtlas: uploadPage computes the right dstPosition + calls the ----

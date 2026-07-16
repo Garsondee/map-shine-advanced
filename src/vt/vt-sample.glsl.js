@@ -42,6 +42,13 @@
  *                                        // rounded UP by ceil() and does not equal it —
  *                                        // confirmed live 2026-07-15, see vtSample()'s comment).
  *   uniform int   uRequestedMip;         // residency.chooseMip() — the finest mip to TRY.
+ *   uniform float uRequestedMipFrac;     // residency.chooseMipFraction() — SAME quantity as
+ *                                        // uRequestedMip, not rounded down (2026-07-16, smooth
+ *                                        // mip blending — see vtSample()'s own comment). Always
+ *                                        // satisfies floor(uRequestedMipFrac) == uRequestedMip
+ *                                        // (Node-verified in residency.test — this is what lets
+ *                                        // the two values stay in lockstep without a shader-side
+ *                                        // consistency check).
  *   uniform int   uMaxMip;               // PageTable.maxMip — the coarsest (top) level.
  *   uniform ivec2 uMipOrigin[VT_MAX_MIPS];      // per-mip texel origin in uPageTable
  *                                        //   (computeIndirectionAtlasLayout().origins[m].{x,y})
@@ -56,6 +63,27 @@
  *   A = 255 if resident, 0 if not (the clear value is (0,0,0,0) == not
  *       resident, matching B0-1's "clear value is the not-present state"
  *       convention for ID-style attachments)
+ *
+ * SMOOTH MIP BLENDING (added 2026-07-16, author-reported: "zooming in and out
+ * produces very ugly zoom levels" — the hard integer-mip pop at chooseMip()'s
+ * threshold). `vtSample()` now samples the TWO mip levels bracketing the
+ * continuous `uRequestedMipFrac` (its floor and ceil) and cross-fades between
+ * them by the fractional part — the standard trilinear-filtering shape,
+ * applied here across VIRTUAL-texture mips instead of a hardware mip chain.
+ * NO residency/streaming change was needed: `planResidency()` already
+ * requests mip M ('fine') and mip M+1 ('prefetchCoarser', clamped to
+ * uMaxMip) as insurance against a fine-mip miss — those happen to be exactly
+ * the two mips a blend needs. The single-mip WALK itself (requestedMip up to
+ * uMaxMip, finest-resident-wins, coarse-pin-guaranteed termination) is
+ * UNCHANGED — factored into `vtSampleFromMip()` below and called twice
+ * (once per bracket) rather than rewritten, specifically so the nine
+ * live-debugged bugs that walk logic survived (Y-flip, coordinate-space,
+ * clamp-bound, texture-unit-cache, the UV-compounding bug — see
+ * vt-pan-viewer.js's header) are not put at risk by this change. Magenta
+ * stays a valid tripwire under blending: EVERY call to `vtSampleFromMip()`
+ * terminates at `uMaxMip` (the coarse pin, always resident), so magenta is
+ * exactly as unreachable in either bracket sample as it was in the original
+ * single walk — no new fallback semantics were introduced.
  *
  * @module vt/vt-sample.glsl
  */
@@ -86,6 +114,7 @@ uniform float uBorderPx;
 uniform float uAtlasSizePx;
 uniform float uWorldSizePx;
 uniform int uRequestedMip;
+uniform float uRequestedMipFrac;
 uniform int uMaxMip;
 uniform ivec2 uMipOrigin[VT_MAX_MIPS];
 uniform int uMipPagesPerAxis[VT_MAX_MIPS];
@@ -115,21 +144,72 @@ void vtSlotToAtlas(int slot, out int tileX, out int tileY, out int layer) {
 // Sample the atlas at a resident page's slot, given the fractional position
 // within that page's payload. Border-safe: maps into the payload region only
 // (uBorderPx in from each edge), never sampling a neighbor's border texels.
+//
+// textureLod(...,0.0) — NOT texture() — is deliberate (found live 2026-07-16,
+// "zooming out looks pixelated/ugly"; see atlas.js's matching comment for the
+// full mechanism). A page's atlas slot is essentially arbitrary bookkeeping,
+// so neighboring screen pixels can land on unrelated atlas locations at every
+// page boundary; automatic (derivative-based) LOD selection reads those jumps
+// as "zoom out further," picking a coarser atlas mip that was never even
+// rebuilt as pages streamed in — worse the more pages are on screen, exactly
+// matching the reported symptom. Forcing level 0 explicitly makes this
+// structurally impossible regardless of any texture's filter settings, not
+// just reliant on them being configured correctly elsewhere (atlas.js also
+// disables the atlas's mip chain — this is the belt to that suspenders).
+// Still bilinear WITHIN level 0 (LinearFilter) — only the (bogus) ACROSS-page
+// mip selection is removed, not ordinary in-page texel smoothing.
 vec4 vtSampleAtlasSlot(int slot, vec2 cellUV) {
   float payloadPx = uPageSizePx - uBorderPx * 2.0;
   int tileX, tileY, layer;
   vtSlotToAtlas(slot, tileX, tileY, layer);
   vec2 pagePx = vec2(tileX, tileY) * uPageSizePx + uBorderPx + cellUV * payloadPx;
   vec2 atlasUV = pagePx / uAtlasSizePx;
-  return texture(uPageAtlas, vec3(atlasUV, float(layer))); // bilinear (default sampler filter)
+  return textureLod(uPageAtlas, vec3(atlasUV, float(layer)), 0.0);
+}
+
+/**
+ * THE single-mip walk (UNCHANGED behavior from the pre-blend version — only
+ * extracted into its own function so vtSample() can call it twice, once per
+ * bracket mip): walks from startMip up to uMaxMip and returns the finest-
+ * resident level's texel (automatic coarse fallback). With coarse pins
+ * pinned this never returns magenta; magenta means a broken pin invariant,
+ * not "streaming". worldPx/payloadPx are the caller's already-computed
+ * values (both brackets share them -- no need to recompute per call).
+ */
+vec4 vtSampleFromMip(int startMip, vec2 worldPx, float payloadPx) {
+  // No early return inside the loop (some weak drivers — the exact target
+  // class — mis-optimize loop-body returns): accumulate into result + break.
+  vec4 result = vec4(1.0, 0.0, 1.0, 1.0); // magenta tripwire (see vtSample()'s doc)
+  bool found = false;
+  // Constant bounds (0..VT_MAX_MIPS) so the compiler can unroll; the per-
+  // iteration guards skip anything outside [startMip, uMaxMip]. All array
+  // indices here are non-sampler (ivec2/int) — dynamic indexing is fully legal.
+  for (int m = 0; m < VT_MAX_MIPS; ++m) {
+    if (found) continue;
+    if (m < startMip || m > uMaxMip) continue;
+
+    float payloadSpan = payloadPx * float(1 << m); // world texels per page at mip m
+    vec2 cellF = worldPx / payloadSpan;
+    int ppa = uMipPagesPerAxis[m];
+    ivec2 texel = clamp(ivec2(floor(cellF)), ivec2(0), ivec2(ppa - 1));
+    ivec2 phys = uMipOrigin[m] + texel; // into the flattened-pyramid indirection
+
+    VTPage page = vtDecodeIndirection(phys);
+    if (page.resident) {
+      result = vtSampleAtlasSlot(page.slot, fract(cellF));
+      found = true;
+    }
+  }
+  return result;
 }
 
 /**
  * Sample the virtual texture at world-normalized UV (0..1 across THIS virtual
  * texture's world extent — the caller maps its own world-space position into
- * this range). Walks uRequestedMip -> uMaxMip and returns the finest-resident
- * level's texel (automatic coarse fallback). With coarse pins pinned this
- * never returns magenta; magenta means a broken pin invariant, not "streaming".
+ * this range). Cross-fades between the two mip levels bracketing
+ * uRequestedMipFrac (its floor and ceil, each walked to finest-resident via
+ * vtSampleFromMip — see this file's header for why blending needed no
+ * residency change and doesn't put the walk's own proven correctness at risk).
  */
 vec4 vtSample(vec2 worldUV) {
   // Texel index MUST be derived via actual world pixels / a FIXED payloadPx —
@@ -160,30 +240,24 @@ vec4 vtSample(vec2 worldUV) {
     return vec4(0.0, 0.0, 0.0, 1.0); // outside the world — matte black, not magenta (that's reserved for "broken pin invariant") and not a smear
   }
 
-  // No early return inside the loop (some weak drivers — the exact target
-  // class — mis-optimize loop-body returns): accumulate into result + break.
-  vec4 result = vec4(1.0, 0.0, 1.0, 1.0); // magenta tripwire (see doc above)
-  bool found = false;
-  // Constant bounds (0..VT_MAX_MIPS) so the compiler can unroll; the per-
-  // iteration guards skip anything outside [uRequestedMip, uMaxMip]. All array
-  // indices here are non-sampler (ivec2/int) — dynamic indexing is fully legal.
-  for (int m = 0; m < VT_MAX_MIPS; ++m) {
-    if (found) continue;
-    if (m < uRequestedMip || m > uMaxMip) continue;
+  // uRequestedMip (int) and uRequestedMipFrac (float) are set from the SAME
+  // CPU computation every residency update (residency.chooseMip /
+  // chooseMipFraction — Node-verified floor(frac)==int, always) — mipLo is
+  // read from the already-clamped-and-rounded int uniform rather than
+  // re-flooring the float here, so a shader-side rounding quirk on any driver
+  // can never desync mipLo from what the residency/prefetch system actually
+  // requested pages for.
+  int mipLo = uRequestedMip;
+  int mipHi = min(mipLo + 1, uMaxMip);
 
-    float payloadSpan = payloadPx * float(1 << m); // world texels per page at mip m
-    vec2 cellF = worldPx / payloadSpan;
-    int ppa = uMipPagesPerAxis[m];
-    ivec2 texel = clamp(ivec2(floor(cellF)), ivec2(0), ivec2(ppa - 1));
-    ivec2 phys = uMipOrigin[m] + texel; // into the flattened-pyramid indirection
-
-    VTPage page = vtDecodeIndirection(phys);
-    if (page.resident) {
-      result = vtSampleAtlasSlot(page.slot, fract(cellF));
-      found = true;
-    }
+  vec4 colorLo = vtSampleFromMip(mipLo, worldPx, payloadPx);
+  if (mipHi <= mipLo) {
+    return colorLo; // top-of-pyramid degenerate case (no coarser mip exists) — no second sample needed
   }
-  return result;
+
+  vec4 colorHi = vtSampleFromMip(mipHi, worldPx, payloadPx);
+  float t = clamp(uRequestedMipFrac - float(mipLo), 0.0, 1.0); // fractional position between the two brackets
+  return mix(colorLo, colorHi, t);
 }
 // ---- end vt-sample.glsl -----------------------------------------------
 `;

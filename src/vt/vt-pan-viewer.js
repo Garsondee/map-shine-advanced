@@ -88,7 +88,7 @@ import {
 } from '../scene/world-quad.js';
 import { computeQuadCorners, computeQuadBounds } from '../foundry/scene-geometry.js';
 import { computeItemPlacement } from '../foundry/scene-layers.js';
-import { showFailureSurface, clearFailureSurface, describeOcclusionOfPixi } from '../diag/failure-surface.js';
+import { engageFoundryFallback, clearFoundryFallback, describeRenderMode } from '../diag/render-fallback.js';
 import { OCCLUSION_MODES, computeOcclusionState, createHoverFadeState, mapElevation } from '../scene/occlusion.js';
 
 /** Wall-clock budget per GPU-upload chunk before yielding a real frame — see
@@ -303,6 +303,11 @@ export async function startVtPanViewer({
   stopVtSmokeTest(); // avoid two renderers fighting over the same corner of the screen
 
   const diag0 = { errors: [] };
+  // Hoisted so the catch can TEAR THE CANVAS DOWN. It is appended before any
+  // risky work and is opaque (background:#000), so a failure that leaves it in
+  // place puts a black rectangle over a perfectly healthy Foundry canvas — which
+  // is what used to block the safety slide (diag/render-fallback.js).
+  let canvas = null;
   try {
     const layout = computeAtlasLayout({ budgetBytes: 512 * 1024 * 1024 }); // Keyhole Q2 default
     const cache = new PageCache({ budgetBytes: 512 * 1024 * 1024 });
@@ -310,7 +315,7 @@ export async function startVtPanViewer({
     const mount = resolveMountHost();
     let canvasW = measureHost(mount.host).width;
     let canvasH = measureHost(mount.host).height;
-    const canvas = document.createElement('canvas');
+    canvas = document.createElement('canvas');
     canvas.id = 'msa-vt-pan-viewer-canvas';
     canvas.width = canvasW;
     canvas.height = canvasH;
@@ -1665,12 +1670,12 @@ export async function startVtPanViewer({
         return {
           view,
           layout,
-          // GROUND TRUTH: is the VT actually the thing on screen right now, or is
-          // Foundry's own canvas? This could NOT be answered from a report during
-          // the 2026-07-16 non-square incident — the diagnostics described the
-          // VT's internals in detail while saying nothing about whether any of it
-          // reached the display. Read from the DOM, not from intent.
-          ...describeOcclusionOfPixi({ canvas, loopActive }),
+          // GROUND TRUTH: is MSA the thing on screen right now, or is Foundry?
+          // This could NOT be answered from a report during the 2026-07-16
+          // non-square incident — the diagnostics described MSA's internals in
+          // detail while saying nothing about whether any of it reached the
+          // display. Read from the DOM, not from intent.
+          ...describeRenderMode({ canvas, loopActive }),
           // Non-zero = at least one pack could not afford its speculative tier this
           // update. A few is healthy self-limiting; ALL of them, every update,
           // means the required working set itself is at the budget.
@@ -1785,8 +1790,8 @@ export async function startVtPanViewer({
       },
     };
 
-    // A previous failure's surface must not outlive the failure.
-    clearFailureSurface();
+    // MSA is rendering again — a previous fallback notice must not outlive it.
+    clearFoundryFallback();
     console.log(
       '[vt-pan-viewer] started — filling the scene area (PIXI occluded). Drag to pan, wheel to zoom; ' +
         'Arrow keys/WASD pan, +/- zoom, 0-2/Tab floor-switch.'
@@ -1796,14 +1801,15 @@ export async function startVtPanViewer({
     diag0.ok = false;
     diag0.fatalError = `${err?.message || err}\n${err?.stack || ''}`;
     console.error('[vt-pan-viewer] fatal error:', err);
-    // FAIL LOUDLY AND LEGIBLY (doctrine #1). Without this, a failure here leaves
-    // the already-appended canvas showing its black CSS background — which does
-    // occlude PIXI, but is indistinguishable from "still loading" / "empty
-    // scene" / "dark map art". Black is loud; it is not informative.
-    showFailureSurface({
-      title:
-        "The virtual-texture renderer threw while starting up. Foundry itself is fine — only MSA's rendering is down.",
+    // THE SAFETY SLIDE (Keyhole.md §4.3): hand rendering back to Foundry so the
+    // player keeps a working session, and say so unmissably. Reliability outranks
+    // the visuals — an MSA that cannot draw must never be the reason a session is
+    // unusable. Removing the canvas is the load-bearing part: left in place, it is
+    // an opaque black rectangle sitting over a perfectly healthy Foundry canvas.
+    engageFoundryFallback({
+      reason: 'Its renderer threw while starting up.',
       detail: diag0.fatalError,
+      canvas,
     });
     return diag0;
   }

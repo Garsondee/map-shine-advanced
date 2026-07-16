@@ -46,7 +46,7 @@ import {
 } from './vt/vt-pan-viewer.js';
 import { getActiveSceneFloors, computeVisibleFloorIndices } from './foundry/active-scene-source.js';
 import { collectSceneLayers } from './foundry/scene-layers.js';
-import { showFailureSurface } from './diag/failure-surface.js';
+import { engageFoundryFallback } from './diag/render-fallback.js';
 import { computeSceneDimensions } from './foundry/scene-geometry.js';
 import { SORT_LAYERS, makeLayerKey } from './scene/layer-order.js';
 import { getSourceBitmap } from './vt/decode-pool.js';
@@ -346,15 +346,13 @@ function install() {
     const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
     const floorsResult = getActiveSceneFloors(sceneDoc);
     if (!floorsResult.ok) {
-      // THE ONE GENUINELY SILENT PATH. Every other failure at least leaves the
-      // VT canvas mounted showing black (it is appended before any risky work),
-      // so PIXI stays occluded. This one returns BEFORE startVtPanViewer, so no
-      // canvas is ever created, Foundry's own canvas renders the scene, and the
-      // failure is invisible — MSA quietly absent while appearing to work, which
-      // is precisely what doctrine #1 forbids.
-      showFailureSurface({
-        title: `Map Shine Advanced cannot render this scene: ${floorsResult.error}`,
-        hint: 'MSA has not rendered anything here — what you would otherwise be seeing is Foundry\'s own canvas. Fix the scene\'s Level background art, or disable MSA via the "useNativeFoundryRendering" setting if you want plain Foundry rendering on purpose.',
+      // This path already lands on Foundry's own rendering by construction — it
+      // returns BEFORE startVtPanViewer, so no canvas is ever created. That is
+      // the CORRECT outcome (the player gets a working session); what was wrong
+      // is that it was SILENT, i.e. indistinguishable from MSA working. No
+      // canvas to tear down here, so this is purely the announcement.
+      engageFoundryFallback({
+        reason: `This scene has no art MSA can render (${floorsResult.error}).`,
       });
       return { ok: false, error: floorsResult.error };
     }

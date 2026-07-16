@@ -9,6 +9,7 @@
  */
 import { run as runLayerOrder } from './layer-order.test.mjs';
 import { run as runOcclusion } from './occlusion.test.mjs';
+import { run as runWorldQuad } from './world-quad.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -46,6 +47,7 @@ const t = {
 const suites = [
   ['layer-order', runLayerOrder],
   ['occlusion', runOcclusion],
+  ['world-quad', runWorldQuad],
 ];
 
 for (const [name, fn] of suites) {

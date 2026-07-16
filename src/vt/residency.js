@@ -104,10 +104,11 @@ export function computeVisiblePages(table, worldRect, opts = {}) {
   const px1 = Math.floor(worldRect.maxX / pageWorldSpan) + guard;
   const py1 = Math.floor(worldRect.maxY / pageWorldSpan) + guard;
 
-  const n = table.pagesPerAxis(mip);
+  const nx = table.pagesX(mip);
+  const ny = table.pagesY(mip);
   const out = [];
-  for (let py = Math.max(0, py0); py <= Math.min(n - 1, py1); py++) {
-    for (let px = Math.max(0, px0); px <= Math.min(n - 1, px1); px++) {
+  for (let py = Math.max(0, py0); py <= Math.min(ny - 1, py1); py++) {
+    for (let px = Math.max(0, px0); px <= Math.min(nx - 1, px1); px++) {
       out.push({ mip, px, py, key: table.pageKey(mip, px, py) });
     }
   }
@@ -177,9 +178,10 @@ export function coarsePinSet(table, opts = {}) {
   const startMip = Math.max(0, table.maxMip - (topMips - 1));
   const out = [];
   for (let mip = startMip; mip <= table.maxMip; mip++) {
-    const n = table.pagesPerAxis(mip);
-    for (let py = 0; py < n; py++)
-      for (let px = 0; px < n; px++) out.push({ mip, px, py, key: table.pageKey(mip, px, py) });
+    const nx = table.pagesX(mip);
+    const ny = table.pagesY(mip);
+    for (let py = 0; py < ny; py++)
+      for (let px = 0; px < nx; px++) out.push({ mip, px, py, key: table.pageKey(mip, px, py) });
   }
   return out;
 }
@@ -206,8 +208,7 @@ export function coarseTopMipsForCap(table, opts = {}) {
   let count = 0;
   let total = 0;
   for (let mip = table.maxMip; mip >= 0; mip--) {
-    const n = table.pagesPerAxis(mip);
-    const add = n * n;
+    const add = table.pagesX(mip) * table.pagesY(mip);
     if (count >= 1 && total + add > maxPages) break;
     total += add;
     count++;

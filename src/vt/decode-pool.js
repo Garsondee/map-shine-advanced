@@ -138,8 +138,11 @@ export function pageWorldRect(table, mip, px, py, opts = {}) {
   return {
     minX: Math.max(0, x0),
     minY: Math.max(0, y0),
-    maxX: Math.min(table.worldSizePx, x1),
-    maxY: Math.min(table.worldSizePx, y1),
+    // Per-axis clamp (rectangular sources, 2026-07-16) — a tile's texture or a
+    // non-square scene background has independent extents, so a single
+    // world-size bound would let one axis read past the source image.
+    maxX: Math.min(table.worldWidthPx, x1),
+    maxY: Math.min(table.worldHeightPx, y1),
     unclamped: { minX: x0, minY: y0, maxX: x1, maxY: y1 },
   };
 }
@@ -722,7 +725,8 @@ export async function acquirePages(url, table, pages, opts = {}) {
       kind: 'slice',
       url,
       pages: pagesForWorker(misses),
-      worldSizePx: table.worldSizePx,
+      worldWidthPx: table.worldWidthPx,
+      worldHeightPx: table.worldHeightPx,
       payloadPx: table.payloadPx,
       borderPx,
       pageSizePx,
@@ -825,7 +829,8 @@ export async function acquirePackedPages(packId, channelUrls, table, pages, opts
       packId,
       channelUrls,
       pages: pagesForWorker(misses),
-      worldSizePx: table.worldSizePx,
+      worldWidthPx: table.worldWidthPx,
+      worldHeightPx: table.worldHeightPx,
       payloadPx: table.payloadPx,
       borderPx,
       pageSizePx,

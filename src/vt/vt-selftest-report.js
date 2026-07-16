@@ -35,10 +35,14 @@ export function runVtSelfTest() {
   check('last slot -> last layer', posLast.layer === layout.layers - 1, posLast);
 
   // PageTable against the torture scene's actual world size.
-  const table = new PageTable({ id: 'selftest:floor0', worldSizePx: 12000 });
-  check('12000px world -> 49x49 pages at mip0 (Keyhole.md §4.1 exact figure)', table.pagesPerAxis(0) === 49, {
-    pagesPerAxis0: table.pagesPerAxis(0),
-  });
+  const table = new PageTable({ id: 'selftest:floor0', worldWidthPx: 12000, worldHeightPx: 12000 });
+  check(
+    '12000px world -> 49x49 pages at mip0 (Keyhole.md §4.1 exact figure)',
+    table.pagesX(0) === 49 && table.pagesY(0) === 49,
+    {
+      pagesAtMip0: { x: table.pagesX(0), y: table.pagesY(0) },
+    }
+  );
 
   // Residency against a plausible mid-zoom view rect.
   const rect = { minX: 4000, minY: 4000, maxX: 8000, maxY: 8000 };
@@ -46,7 +50,7 @@ export function runVtSelfTest() {
   const pages = computeVisiblePages(table, rect, { mip, guardPages: 1 });
   check(
     'residency query returns a sane, bounded page set',
-    pages.length > 0 && pages.length < table.pagesPerAxis(0) ** 2,
+    pages.length > 0 && pages.length < table.pagesX(0) * table.pagesY(0),
     { mip, pageCount: pages.length }
   );
 

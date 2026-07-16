@@ -88,8 +88,12 @@ export async function runVtSmokeTest({ THREE, imageUrl }) {
     const sourceBitmap = await getSourceBitmap(imageUrl);
     diag.sourceImageDimensions = { width: sourceBitmap.width, height: sourceBitmap.height };
 
-    const table = new PageTable({ id: 'smoke:floor0', worldSizePx: sourceBitmap.width });
-    diag.pagesPerAxisAtMip0 = table.pagesPerAxis(0);
+    const table = new PageTable({
+      id: 'smoke:floor0',
+      worldWidthPx: sourceBitmap.width,
+      worldHeightPx: sourceBitmap.height,
+    });
+    diag.pagesAtMip0 = { x: table.pagesX(0), y: table.pagesY(0) };
 
     // Canvas — a fresh overlay, separate from the boot heartbeat box (that
     // one stays the control panel; this one is the actual render preview).
@@ -120,12 +124,13 @@ export async function runVtSmokeTest({ THREE, imageUrl }) {
     // The 3x3 block, centered — clamped so it never walks off the world edge
     // on a smaller test image, though the torture fixture (49x49 at mip0)
     // has huge margin around the center.
-    const centerAxis = Math.floor(table.pagesPerAxis(0) / 2);
+    const centerX = Math.floor(table.pagesX(0) / 2);
+    const centerY = Math.floor(table.pagesY(0) / 2);
     const blockPages = [];
     for (let dy = -1; dy <= 1; dy++) {
       for (let dx = -1; dx <= 1; dx++) {
-        const px = Math.min(table.pagesPerAxis(0) - 1, Math.max(0, centerAxis + dx));
-        const py = Math.min(table.pagesPerAxis(0) - 1, Math.max(0, centerAxis + dy));
+        const px = Math.min(table.pagesX(0) - 1, Math.max(0, centerX + dx));
+        const py = Math.min(table.pagesY(0) - 1, Math.max(0, centerY + dy));
         blockPages.push({ px, py });
       }
     }
@@ -158,17 +163,18 @@ export async function runVtSmokeTest({ THREE, imageUrl }) {
     // (49x49 for the torture fixture) even though only 9 texels are set —
     // matches what the real system will do (one texture per virtual texture,
     // not per visible block).
-    const n = table.pagesPerAxis(0);
-    const buf = new Uint8Array(n * n * 4); // defaults to all-zero = not resident everywhere
+    const nx = table.pagesX(0);
+    const ny = table.pagesY(0);
+    const buf = new Uint8Array(nx * ny * 4); // defaults to all-zero = not resident everywhere
     for (const { px, py, slot } of residentPages) {
       const [r, g, b, a] = encodeIndirectionTexel(slot, true);
-      const i = (py * n + px) * 4;
+      const i = (py * nx + px) * 4;
       buf[i] = r;
       buf[i + 1] = g;
       buf[i + 2] = b;
       buf[i + 3] = a;
     }
-    const indirectionTexture = new THREE.DataTexture(buf, n, n, THREE.RGBAFormat);
+    const indirectionTexture = new THREE.DataTexture(buf, nx, ny, THREE.RGBAFormat);
     indirectionTexture.flipY = false;
     indirectionTexture.generateMipmaps = false;
     indirectionTexture.minFilter = THREE.NearestFilter;
@@ -178,10 +184,14 @@ export async function runVtSmokeTest({ THREE, imageUrl }) {
     // The quad: an orthographic camera framing EXACTLY the 3x3 block's world
     // rect, so what's on screen is precisely what vtSample resolves for that
     // rect — no extra transform to reason about when checking correctness.
-    const blockWorldMinPx = (centerAxis - 1) * table.payloadPx;
-    const blockWorldMaxPx = (centerAxis + 2) * table.payloadPx;
-    const uvMin = blockWorldMinPx / table.worldSizePx;
-    const uvMax = blockWorldMaxPx / table.worldSizePx;
+    const uvMin = {
+      x: ((centerX - 1) * table.payloadPx) / table.worldWidthPx,
+      y: ((centerY - 1) * table.payloadPx) / table.worldHeightPx,
+    };
+    const uvMax = {
+      x: ((centerX + 2) * table.payloadPx) / table.worldWidthPx,
+      y: ((centerY + 2) * table.payloadPx) / table.worldHeightPx,
+    };
     diag.framedWorldUV = { uvMin, uvMax };
 
     const quadGeometry = new THREE.PlaneGeometry(2, 2);
@@ -200,8 +210,12 @@ export async function runVtSmokeTest({ THREE, imageUrl }) {
       // defaults flipY:false and copyTextureToTexture reads the DESTINATION's
       // flipY, not the source's, so nothing flips during upload). Screen-top
       // must therefore show the SMALLER world-Y (the top of the source
-      // image) — i.e. v=1 -> uvMin, not uvMax.
-      uvAttr.setXY(i, uvMin + u * (uvMax - uvMin), uvMax - v * (uvMax - uvMin));
+      // image) — i.e. v=1 -> uvMin.y, not uvMax.y.
+      //
+      // uvMin/uvMax are per-axis ({x,y}) since 2026-07-16 (rectangular sources):
+      // a non-square image's framed block spans a different UV fraction on each
+      // axis, so one scalar range can no longer describe both.
+      uvAttr.setXY(i, uvMin.x + u * (uvMax.x - uvMin.x), uvMax.y - v * (uvMax.y - uvMin.y));
     }
     uvAttr.needsUpdate = true;
 
@@ -212,8 +226,9 @@ export async function runVtSmokeTest({ THREE, imageUrl }) {
     // uMipPagesPerAxis[0]=n. This exercises the exact same shader the pan viewer
     // uses, with the coarse-fallback loop collapsing to one iteration.
     const smokeMipOrigin = new Int32Array(VT_MAX_MIPS * 2); // all zero == mip 0 at (0,0)
-    const smokeMipPages = new Int32Array(VT_MAX_MIPS);
-    smokeMipPages[0] = table.pagesPerAxis(0);
+    const smokeMipPages = new Int32Array(VT_MAX_MIPS * 2); // ivec2[] since 2026-07-16 (rectangular)
+    smokeMipPages[0] = table.pagesX(0);
+    smokeMipPages[1] = table.pagesY(0);
 
     const quadMaterial = new THREE.ShaderMaterial({
       uniforms: {
@@ -224,7 +239,7 @@ export async function runVtSmokeTest({ THREE, imageUrl }) {
         uPageSizePx: { value: layout.pageSizePx },
         uBorderPx: { value: 4 },
         uAtlasSizePx: { value: layout.atlasSizePx },
-        uWorldSizePx: { value: table.worldSizePx },
+        uWorldSizePx: { value: new THREE.Vector2(table.worldWidthPx, table.worldHeightPx) },
         uRequestedMip: { value: 0 },
         // Smooth mip blending (2026-07-16, see vt-sample.glsl.js): supplied
         // explicitly rather than relying on an unset-uniform defaulting to 0

@@ -36,9 +36,11 @@
  *   uniform float uPageSizePx;           // computeAtlasLayout().pageSizePx (256)
  *   uniform float uBorderPx;             // (pageSizePx - payloadPx) / 2 (== 4)
  *   uniform float uAtlasSizePx;          // computeAtlasLayout().atlasSizePx
- *   uniform float uWorldSizePx;          // THIS virtual texture's PageTable.worldSizePx —
- *                                        // MUST be the real world size, never derived from
- *                                        // uPagesPerAxis*payloadPx (that "nominal" grid is
+ *   uniform vec2  uWorldSizePx;          // THIS virtual texture's (PageTable.worldWidthPx,
+ *                                        // worldHeightPx) — vec2 since 2026-07-16 (rectangular
+ *                                        // sources: tile art and non-square scene backgrounds).
+ *                                        // MUST be the real size, never derived from
+ *                                        // uMipPagesPerAxis*payloadPx (that "nominal" grid is
  *                                        // rounded UP by ceil() and does not equal it —
  *                                        // confirmed live 2026-07-15, see vtSample()'s comment).
  *   uniform int   uRequestedMip;         // residency.chooseMip() — the finest mip to TRY.
@@ -52,7 +54,9 @@
  *   uniform int   uMaxMip;               // PageTable.maxMip — the coarsest (top) level.
  *   uniform ivec2 uMipOrigin[VT_MAX_MIPS];      // per-mip texel origin in uPageTable
  *                                        //   (computeIndirectionAtlasLayout().origins[m].{x,y})
- *   uniform int   uMipPagesPerAxis[VT_MAX_MIPS];// per-mip page grid size (origins[m].pagesPerAxis)
+ *   uniform ivec2 uMipPagesPerAxis[VT_MAX_MIPS];// per-mip page grid size
+ *                                        //   (origins[m].{pagesX,pagesY}) — ivec2 since
+ *                                        //   2026-07-16 (rectangular sources).
  *
  * uPageTable texel encoding (RGBA8, written by the CPU when a page's
  * residency changes — see page-table.js's setSlot()):
@@ -112,12 +116,12 @@ uniform int uPagesPerLayer;
 uniform float uPageSizePx;
 uniform float uBorderPx;
 uniform float uAtlasSizePx;
-uniform float uWorldSizePx;
+uniform vec2 uWorldSizePx;
 uniform int uRequestedMip;
 uniform float uRequestedMipFrac;
 uniform int uMaxMip;
 uniform ivec2 uMipOrigin[VT_MAX_MIPS];
-uniform int uMipPagesPerAxis[VT_MAX_MIPS];
+uniform ivec2 uMipPagesPerAxis[VT_MAX_MIPS];
 
 // Decode one indirection texel. Returns resident (a>0.5) + the slot index.
 // NEAREST/texelFetch only — an indirection texel is an ID, never filtered
@@ -188,10 +192,13 @@ vec4 vtSampleFromMip(int startMip, vec2 worldPx, float payloadPx) {
     if (found) continue;
     if (m < startMip || m > uMaxMip) continue;
 
+    // payloadSpan is a SCALAR on purpose: a mip halves both axes together, so
+    // one page always covers a SQUARE payloadPx * 2^m region of the source, even
+    // when the source itself is rectangular. Only the page GRID is rectangular.
     float payloadSpan = payloadPx * float(1 << m); // world texels per page at mip m
     vec2 cellF = worldPx / payloadSpan;
-    int ppa = uMipPagesPerAxis[m];
-    ivec2 texel = clamp(ivec2(floor(cellF)), ivec2(0), ivec2(ppa - 1));
+    ivec2 ppa = uMipPagesPerAxis[m];
+    ivec2 texel = clamp(ivec2(floor(cellF)), ivec2(0), ppa - ivec2(1));
     ivec2 phys = uMipOrigin[m] + texel; // into the flattened-pyramid indirection
 
     VTPage page = vtDecodeIndirection(phys);
@@ -218,7 +225,7 @@ vec4 vtSample(vec2 worldUV) {
   // index at that mip, its fract() is the position within the page. See
   // page-table.js/decode-pool.js's own convention: floor(worldPixelX / payloadSpan).
   float payloadPx = uPageSizePx - uBorderPx * 2.0;
-  vec2 worldPx = worldUV * uWorldSizePx;
+  vec2 worldPx = worldUV * uWorldSizePx; // vec2 * vec2 — per-axis, rectangular-safe
 
   // OUT-OF-WORLD GUARD (found live 2026-07-15 — "the very edge of the map
   // causes a stretched blurred copy of the texture to appear... on all
@@ -236,7 +243,7 @@ vec4 vtSample(vec2 worldUV) {
   // early-out BEFORE the mip walk: outside the world is its own case (matte
   // black, like the empty space outside a level in any tile-based renderer),
   // never resolved through the paging system at all.
-  if (worldPx.x < 0.0 || worldPx.y < 0.0 || worldPx.x >= uWorldSizePx || worldPx.y >= uWorldSizePx) {
+  if (any(lessThan(worldPx, vec2(0.0))) || any(greaterThanEqual(worldPx, uWorldSizePx))) {
     return vec4(0.0, 0.0, 0.0, 1.0); // outside the world — matte black, not magenta (that's reserved for "broken pin invariant") and not a smear
   }
 

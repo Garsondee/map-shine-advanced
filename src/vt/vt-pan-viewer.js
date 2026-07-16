@@ -318,23 +318,17 @@ export async function startVtPanViewer({
       const dimUrl = isPacked ? source.channelUrls.r : source.url;
       const { width: srcWidth, height: srcHeight } = await getSourceDimensions(dimUrl);
 
-      // NON-SQUARE WORLDS AREN'T SUPPORTED YET — fail loud (doctrine #1).
-      // PageTable takes ONE worldSizePx (square grid by construction, see
-      // page-table.js); a rectangular image would silently corrupt every crop
-      // along the ignored axis. Applies per-pack: albedo AND every mask must be
-      // square. Packs are assumed to share the floor's world size (the fixture's
-      // masks are all SIZE² by construction; updateResidency warns, never
-      // crashes, on a real mismatch). Rectangular-world support is deliberately
-      // deferred (page-table/residency/shader all assume square) — tracked, not
-      // silently dropped.
-      if (srcWidth !== srcHeight) {
-        throw new Error(
-          `vt-pan-viewer: non-square layer image isn't supported yet (floor ${floorIndex} layer "${name}" is ` +
-            `${srcWidth}x${srcHeight}, not square) — PageTable's page grid assumes a square world.`
-        );
-      }
-
-      const table = new PageTable({ id: `panviewer:floor${floorIndex}:${name}`, worldSizePx: srcWidth });
+      // RECTANGULAR SOURCES ARE SUPPORTED as of 2026-07-16 — the loud
+      // non-square throw that used to stand here is gone, along with the
+      // limitation behind it. `PageTable` now takes independent
+      // worldWidthPx/worldHeightPx (see its header for why this was overdue:
+      // square scene art is the exception, so most real scenes could not render
+      // at all, and tiles — essentially never square — were blocked outright).
+      const table = new PageTable({
+        id: `panviewer:floor${floorIndex}:${name}`,
+        worldWidthPx: srcWidth,
+        worldHeightPx: srcHeight,
+      });
 
       // The indirection is a flattened mip pyramid (all mips in one small
       // texture) — see page-table.js's computeIndirectionAtlasLayout + the
@@ -351,11 +345,12 @@ export async function startVtPanViewer({
       // Per-mip uniform arrays (flat, fixed VT_MAX_MIPS length; unused tail
       // stays 0 and is never indexed — the shader only touches [reqMip,maxMip]).
       const mipOriginArr = new Int32Array(VT_MAX_MIPS * 2);
-      const mipPagesArr = new Int32Array(VT_MAX_MIPS);
+      const mipPagesArr = new Int32Array(VT_MAX_MIPS * 2); // ivec2[] since 2026-07-16 (rectangular grids)
       for (let m = 0; m < indirectionLayout.origins.length; m++) {
         mipOriginArr[m * 2] = indirectionLayout.origins[m].x;
         mipOriginArr[m * 2 + 1] = indirectionLayout.origins[m].y;
-        mipPagesArr[m] = indirectionLayout.origins[m].pagesPerAxis;
+        mipPagesArr[m * 2] = indirectionLayout.origins[m].pagesX;
+        mipPagesArr[m * 2 + 1] = indirectionLayout.origins[m].pagesY;
       }
 
       // COARSE PINS (§4.1): the top few mip levels of THIS pack, pinned
@@ -483,7 +478,7 @@ export async function startVtPanViewer({
           uPageSizePx: { value: layout.pageSizePx },
           uBorderPx: { value: 4 },
           uAtlasSizePx: { value: layout.atlasSizePx },
-          uWorldSizePx: { value: 0 }, // set per-floor in updateResidency()
+          uWorldSizePx: { value: new THREE.Vector2(1, 1) }, // set per-floor in updateResidency(); vec2 (rectangular)
           // Multi-mip: the finest mip to TRY (analytic, per view) + the coarsest,
           // and the flattened-pyramid per-mip layout the shader walks. uMipOrigin
           // is a flat Int32Array (ivec2[VT_MAX_MIPS] == 2 ints/level) — THREE
@@ -492,7 +487,7 @@ export async function startVtPanViewer({
           uRequestedMipFrac: { value: 0 }, // smooth mip blending (residency.chooseMipFraction) — see vt-sample.glsl.js
           uMaxMip: { value: 0 },
           uMipOrigin: { value: new Int32Array(VT_MAX_MIPS * 2) },
-          uMipPagesPerAxis: { value: new Int32Array(VT_MAX_MIPS) },
+          uMipPagesPerAxis: { value: new Int32Array(VT_MAX_MIPS * 2) }, // ivec2[] (rectangular)
         },
         vertexShader: /* glsl */ `
           varying vec2 vUv;
@@ -838,7 +833,7 @@ export async function startVtPanViewer({
         // Bind: fresh array references (per pack) guarantee THREE re-uploads
         // them; within a pack they're constant.
         u.uPageTable.value = pack.indirectionTexture;
-        u.uWorldSizePx.value = pack.table.worldSizePx;
+        u.uWorldSizePx.value = new THREE.Vector2(pack.table.worldWidthPx, pack.table.worldHeightPx);
         u.uMaxMip.value = pack.table.maxMip;
         u.uMipOrigin.value = pack.mipOriginArr;
         u.uMipPagesPerAxis.value = pack.mipPagesArr;
@@ -915,15 +910,16 @@ export async function startVtPanViewer({
       for (const [floorIndex, entry] of entries) {
         const displayPack = entry.packs.get(displayLayerName) ?? entry.albedoPack;
 
-        // Composited floors are assumed to share the same worldSizePx (all
-        // Levels in one Foundry scene cover the same physical footprint) —
-        // warn, don't crash, if a real scene's art disagrees (see this file's
-        // header note: per-floor world-size reconciliation isn't built yet).
-        if (refWorldSizePx === null) refWorldSizePx = displayPack.table.worldSizePx;
-        else if (displayPack.table.worldSizePx !== refWorldSizePx && !worldSizeMismatchWarned) {
+        // Composited floors are assumed to cover the same footprint (all Levels
+        // in one Foundry scene do) — warn, don't crash, if a real scene's art
+        // disagrees (see this file's header note: per-floor world-size
+        // reconciliation isn't built yet).
+        const packSize = `${displayPack.table.worldWidthPx}x${displayPack.table.worldHeightPx}`;
+        if (refWorldSizePx === null) refWorldSizePx = packSize;
+        else if (packSize !== refWorldSizePx && !worldSizeMismatchWarned) {
           worldSizeMismatchWarned = true;
           console.warn(
-            `[vt-pan-viewer] floor ${floorIndex}'s worldSizePx (${displayPack.table.worldSizePx}) differs from ` +
+            `[vt-pan-viewer] floor ${floorIndex}'s source size (${packSize}) differs from ` +
               `another composited floor's (${refWorldSizePx}) — the multi-floor overlay may visually misalign.`
           );
         }
@@ -939,11 +935,12 @@ export async function startVtPanViewer({
         const layer = ensureLayer(floorIndex);
         bindLayerToPack(layer, displayPack);
 
-        const worldSizePx = displayPack.table.worldSizePx;
+        const wpx = displayPack.table.worldWidthPx;
+        const hpx = displayPack.table.worldHeightPx;
         reframeLayer(
           layer,
-          { x: worldRect.minX / worldSizePx, y: worldRect.minY / worldSizePx },
-          { x: worldRect.maxX / worldSizePx, y: worldRect.maxY / worldSizePx }
+          { x: worldRect.minX / wpx, y: worldRect.minY / hpx },
+          { x: worldRect.maxX / wpx, y: worldRect.maxY / hpx }
         );
 
         layer.mesh.visible = true;
@@ -986,11 +983,12 @@ export async function startVtPanViewer({
         // Match the DISPLAYED pack updateResidency bound to this layer (its
         // worldSizePx is what the UV normalization must use).
         const displayPack = entry.packs.get(displayLayerName) ?? entry.albedoPack;
-        const ws = displayPack.table.worldSizePx;
+        const wpx = displayPack.table.worldWidthPx;
+        const hpx = displayPack.table.worldHeightPx;
         reframeLayer(
           layer,
-          { x: worldRect.minX / ws, y: worldRect.minY / ws },
-          { x: worldRect.maxX / ws, y: worldRect.maxY / ws }
+          { x: worldRect.minX / wpx, y: worldRect.minY / hpx },
+          { x: worldRect.maxX / wpx, y: worldRect.maxY / hpx }
         );
       }
     }
@@ -1303,7 +1301,10 @@ export async function startVtPanViewer({
     // instant. '-'/'+' zoom and arrows/WASD pan from there.
     const clampedInitialFloor = Math.max(0, Math.min(floorCount - 1, initialFloorIndex));
     const firstEntry = await ensureFloorLoaded(clampedInitialFloor);
-    const firstWorldSizePx = firstEntry.albedoPack.table.worldSizePx;
+    // view-state is still single-axis (its own square assumption — the camera
+    // rework that fixes it is a separate, tracked step); the WIDTH is the
+    // reference axis, matching what viewToWorldRect's aspect handling expects.
+    const firstWorldSizePx = firstEntry.albedoPack.table.worldWidthPx;
     view = createInitialViewState({
       worldSizePx: firstWorldSizePx,
       floorIndex: clampedInitialFloor,

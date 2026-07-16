@@ -20,20 +20,20 @@ export function run(t) {
 
   // --- PageTable: anchor against Keyhole.md's own stated number -----------
   {
-    const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 });
-    ok('table: 12000/248 world = 49x49 pages at mip0 (Keyhole.md §4.1 exact figure)', table.pagesPerAxis(0) === 49);
+    const table = new PageTable({ id: 'floor0:albedo', worldWidthPx: 12000, worldHeightPx: 12000 });
+    ok('table: 12000/248 world = 49x49 pages at mip0 (Keyhole.md §4.1 exact figure)', table.pagesX(0) === 49);
     ok(
       'table: payload defaults to 248 (256px page - 4px border x2)',
       table.payloadPx === DEFAULT_PAGE_PAYLOAD_PX && DEFAULT_PAGE_PAYLOAD_PX === 248
     );
     // mip chain: 49 -> 25 -> 13 -> 7 -> 4 -> 2 -> 1 (each step ceil(n/2))
-    ok('table: mip chain shrinks to a single top page', table.pagesPerAxis(table.maxMip) === 1);
-    ok('table: mip1 halves (ceil(49/2)=25)', table.pagesPerAxis(1) === 25);
+    ok('table: mip chain shrinks to a single top page', table.pagesX(table.maxMip) === 1);
+    ok('table: mip1 halves (ceil(49/2)=25)', table.pagesX(1) === 25);
   }
 
   // --- PageTable: key identity + clamping + coarse fallback ---------------
   {
-    const table = new PageTable({ id: 'floor1:surfaceResponse', worldSizePx: 12000 });
+    const table = new PageTable({ id: 'floor1:surfaceResponse', worldWidthPx: 12000, worldHeightPx: 12000 });
     ok('table: pageKey is stable + prefixed by id', table.pageKey(0, 3, 4) === 'floor1:surfaceResponse|m0|3,4');
     const [cx, cy] = table.clampPage(0, 999, -5);
     ok('table: clampPage clamps into [0, n-1]', cx === 48 && cy === 0);
@@ -261,7 +261,7 @@ export function run(t) {
 
   // --- residency: computeVisiblePages basic range + guard ring ------------
   {
-    const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 }); // payload 248, 49x49 @ mip0
+    const table = new PageTable({ id: 'floor0:albedo', worldWidthPx: 12000, worldHeightPx: 12000 }); // payload 248, 49x49 @ mip0
     // A rect covering exactly page (10,10)'s world span, page-aligned.
     const span = table.payloadPx;
     const rect = { minX: 10 * span, minY: 10 * span, maxX: 10 * span + 1, maxY: 10 * span + 1 };
@@ -277,7 +277,7 @@ export function run(t) {
 
   // --- residency: clamps to grid bounds at world edges (no negative/OOB) ---
   {
-    const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 });
+    const table = new PageTable({ id: 'floor0:albedo', worldWidthPx: 12000, worldHeightPx: 12000 });
     const cornerRect = { minX: -500, minY: -500, maxX: 10, maxY: 10 };
     const pages = computeVisiblePages(table, cornerRect, { mip: 0, guardPages: 2 });
     ok(
@@ -287,7 +287,7 @@ export function run(t) {
 
     const farCornerRect = { minX: 11999990, minY: 11999990, maxX: 12000000, maxY: 12000000 };
     const pages2 = computeVisiblePages(table, farCornerRect, { mip: 0, guardPages: 2 });
-    const n = table.pagesPerAxis(0);
+    const n = table.pagesX(0);
     ok(
       'residency: far-edge rect clamps to px/py <= n-1 (no OOB page coords)',
       pages2.every((p) => p.px <= n - 1 && p.py <= n - 1)
@@ -296,7 +296,7 @@ export function run(t) {
 
   // --- residency: chooseMip picks finer detail for a tighter zoom ---------
   {
-    const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 });
+    const table = new PageTable({ id: 'floor0:albedo', worldWidthPx: 12000, worldHeightPx: 12000 });
     const wideRect = { minX: 0, minY: 0, maxX: 12000, maxY: 12000 }; // whole world visible
     const tightRect = { minX: 0, minY: 0, maxX: 500, maxY: 500 }; // zoomed way in
     const viewportPx = 1920;
@@ -317,7 +317,7 @@ export function run(t) {
   // range including exact power-of-2 boundaries (the classic float/int
   // rounding edge case) and the two clamp ends (mip 0 and table.maxMip).
   {
-    const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 });
+    const table = new PageTable({ id: 'floor0:albedo', worldWidthPx: 12000, worldHeightPx: 12000 });
     const viewportPx = 1920;
     // worldSpan values chosen to land texelsPerScreenPx exactly ON several
     // power-of-2 boundaries (1,2,4,8,...), plus values just above/below each,
@@ -353,7 +353,7 @@ export function run(t) {
 
   // --- residency: planResidency bundles fine + coarser prefetch -----------
   {
-    const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 });
+    const table = new PageTable({ id: 'floor0:albedo', worldWidthPx: 12000, worldHeightPx: 12000 });
     const rect = { minX: 0, minY: 0, maxX: 12000, maxY: 12000 };
     const plan = planResidency(table, rect, 1920, { guardPages: 1 });
     ok(
@@ -383,7 +383,7 @@ export function run(t) {
   // prefetchCoarser existed alone before this; prefetchFiner is its symmetric
   // counterpart so BOTH zoom directions have an already-warm neighbor mip. ---
   {
-    const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 }); // maxMip = 6
+    const table = new PageTable({ id: 'floor0:albedo', worldWidthPx: 12000, worldHeightPx: 12000 }); // maxMip = 6
     // A mid-zoom rect (not fully zoomed in, not fully out) so plan.mip lands
     // strictly between 0 and table.maxMip — the case where BOTH neighbors
     // exist. texelsPerScreenPx = 2000/200 = 10 -> mip 3 (hand-verified: the
@@ -429,16 +429,16 @@ export function run(t) {
 
   // --- residency: coarsePinSet covers the WHOLE top mip, "tens of pages" ---
   {
-    const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 });
+    const table = new PageTable({ id: 'floor0:albedo', worldWidthPx: 12000, worldHeightPx: 12000 });
     const pins = coarsePinSet(table);
-    const n = table.pagesPerAxis(table.maxMip);
+    const n = table.pagesX(table.maxMip);
     ok('residency: coarsePinSet default (topMips:1) size == topMip pages^2', pins.length === n * n && n === 1);
     ok('residency: coarsePinSet really is "tens of pages", not hundreds', pins.length < 100);
   }
 
   // --- residency: coarsePinSet with topMips pins the coarsest N levels -----
   {
-    const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 });
+    const table = new PageTable({ id: 'floor0:albedo', worldWidthPx: 12000, worldHeightPx: 12000 });
     // mip page counts from the top: mip6=1, mip5=4, mip4=16, mip3=49
     const pins3 = coarsePinSet(table, { topMips: 3 });
     ok('residency: coarsePinSet topMips:3 covers mips maxMip..maxMip-2 (1+4+16=21)', pins3.length === 1 + 4 + 16);
@@ -457,7 +457,7 @@ export function run(t) {
 
   // --- residency: coarseTopMipsForCap keeps the pinned set within the cap --
   {
-    const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 });
+    const table = new PageTable({ id: 'floor0:albedo', worldWidthPx: 12000, worldHeightPx: 12000 });
     // Cap 96: 1+4+16=21 (<=96), +49=70 (<=96), +169=239 (>96) -> stop at 4 levels.
     const n4 = coarseTopMipsForCap(table, { maxPages: 96 });
     ok('residency: coarseTopMipsForCap(96) pins 4 levels (1+4+16+49=70 <= 96)', n4 === 4);
@@ -477,25 +477,91 @@ export function run(t) {
 
   // --- page-table: flattened-pyramid indirection layout -------------------
   {
-    const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 });
+    const table = new PageTable({ id: 'floor0:albedo', worldWidthPx: 12000, worldHeightPx: 12000 });
     const lay = computeIndirectionAtlasLayout(table);
-    // pagesPerAxis chain 49,25,13,7,4,2,1 -> width 49, height 49+25+13+7+4+2+1=101
-    ok('indirection: width == mip0 pagesPerAxis (49)', lay.width === 49);
-    ok('indirection: height == sum of all mips pagesPerAxis (101)', lay.height === 101);
+    // page chain 49,25,13,7,4,2,1 -> width 49, height 49+25+13+7+4+2+1=101
+    ok('indirection: width == mip0 pagesX (49)', lay.width === 49);
+    ok('indirection: height == sum of all mips pagesY (101)', lay.height === 101);
     ok('indirection: mipCount == maxMip+1', lay.mipCount === table.maxMip + 1);
     ok(
-      'indirection: mip0 origin is (0,0), pagesPerAxis 49',
-      lay.origins[0].x === 0 && lay.origins[0].y === 0 && lay.origins[0].pagesPerAxis === 49
+      'indirection: mip0 origin is (0,0), 49x49 pages',
+      lay.origins[0].x === 0 && lay.origins[0].y === 0 && lay.origins[0].pagesX === 49 && lay.origins[0].pagesY === 49
     );
     ok(
-      'indirection: mip1 origin stacks directly below mip0 (y=49), pagesPerAxis 25',
-      lay.origins[1].x === 0 && lay.origins[1].y === 49 && lay.origins[1].pagesPerAxis === 25
+      'indirection: mip1 origin stacks directly below mip0 (y=49), 25x25 pages',
+      lay.origins[1].x === 0 && lay.origins[1].y === 49 && lay.origins[1].pagesX === 25 && lay.origins[1].pagesY === 25
     );
-    ok('indirection: top mip is a single page at the bottom row', lay.origins[table.maxMip].pagesPerAxis === 1);
+    ok(
+      'indirection: top mip is a single page at the bottom row',
+      lay.origins[table.maxMip].pagesX === 1 && lay.origins[table.maxMip].pagesY === 1
+    );
     // Every mip's grid fits inside the packed texture bounds (no overflow).
     ok(
       'indirection: every mip grid fits within width x height',
-      lay.origins.every((o) => o.x + o.pagesPerAxis <= lay.width && o.y + o.pagesPerAxis <= lay.height)
+      lay.origins.every((o) => o.x + o.pagesX <= lay.width && o.y + o.pagesY <= lay.height)
+    );
+  }
+
+  // --- page-table: RECTANGULAR sources (2026-07-16) ------------------------
+  {
+    // The case that used to throw at the caller and blocked BOTH tiles and every
+    // non-square scene. A 4000x3000 image: independent page counts per axis.
+    const table = new PageTable({ id: 'level0:bg', worldWidthPx: 4000, worldHeightPx: 3000 });
+    ok('rect: pagesX = ceil(4000/248) = 17', table.pagesX(0) === 17);
+    ok('rect: pagesY = ceil(3000/248) = 13', table.pagesY(0) === 13);
+    ok('rect: axes halve independently at mip1 (9x7)', table.pagesX(1) === 9 && table.pagesY(1) === 7);
+    ok(
+      'rect: chain bottoms out at a single page on BOTH axes',
+      table.pagesX(table.maxMip) === 1 && table.pagesY(table.maxMip) === 1
+    );
+    const lay = computeIndirectionAtlasLayout(table);
+    ok('rect: indirection width is mip0 pagesX (17)', lay.width === 17);
+    // The mip chain runs until BOTH axes reach 1, so the SHORTER axis bottoms
+    // out early and is then PADDED with 1s while the longer axis keeps halving:
+    //   X: 17, 9, 5, 3, 2, 1   (6 levels — X is longer, so it sets maxMip = 5)
+    //   Y: 13, 7, 4, 2, 1, 1   (6 levels — the trailing 1 is padding, not a bug)
+    // Height therefore sums SIX Y entries (28), not the five the Y chain would
+    // have on its own. Worth an explicit test: the padded tail is exactly the
+    // sort of off-by-one that would silently overflow the indirection texture.
+    ok('rect: indirection height sums the padded Y chain (13+7+4+2+1+1=28)', lay.height === 28);
+    ok('rect: both mip chains are the same length', table.maxMip === 5 && lay.origins.length === 6);
+    ok('rect: the short axis is padded with 1s, not truncated', table.pagesY(5) === 1 && table.pagesX(5) === 1);
+    ok(
+      'rect: every mip grid still fits the packed texture',
+      lay.origins.every((o) => o.x + o.pagesX <= lay.width && o.y + o.pagesY <= lay.height)
+    );
+  }
+
+  // --- page-table: EXTREMELY oblong source (the long-axis tail) ------------
+  {
+    // A banner-shaped tile: the short axis bottoms out at 1 page long before the
+    // long axis does. The mip chain must keep halving the long axis rather than
+    // stopping as soon as EITHER axis reaches 1 — otherwise the top mip is not a
+    // single page and the coarse-pin "whole image always resident" guarantee
+    // (the thing that makes a miss mean blur instead of magenta) quietly breaks.
+    const table = new PageTable({ id: 'tile:banner', worldWidthPx: 8000, worldHeightPx: 256 });
+    ok(
+      'oblong: pagesX = ceil(8000/248) = 33, pagesY = ceil(256/248) = 2',
+      table.pagesX(0) === 33 && table.pagesY(0) === 2
+    );
+    ok(
+      'oblong: top mip IS a single page on both axes',
+      table.pagesX(table.maxMip) === 1 && table.pagesY(table.maxMip) === 1
+    );
+    ok(
+      'oblong: short axis pins at 1 and stays there while the long axis keeps halving',
+      table.pagesY(2) === 1 && table.pagesX(2) === 9
+    );
+    // maxMip is driven by the LONG axis: 33,17,9,5,3,2,1 -> 6
+    ok('oblong: maxMip is driven by the long axis (6)', table.maxMip === 6);
+  }
+
+  // --- page-table: a square table is just a rectangle -----------------------
+  {
+    const table = new PageTable({ id: 'sq', worldWidthPx: 12000, worldHeightPx: 12000 });
+    ok(
+      'square: pagesX === pagesY at every mip',
+      Array.from({ length: table.maxMip + 1 }, (_, m) => m).every((m) => table.pagesX(m) === table.pagesY(m))
     );
   }
 

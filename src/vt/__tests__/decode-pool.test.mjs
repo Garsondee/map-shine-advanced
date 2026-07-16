@@ -111,7 +111,7 @@ export async function run(t) {
   }
 
   // --- torture-scene world (12000px, payload 248, 49x49 @ mip0) -----------
-  const table = new PageTable({ id: 'floor0:albedo', worldSizePx: 12000 });
+  const table = new PageTable({ id: 'floor0:albedo', worldWidthPx: 12000, worldHeightPx: 12000 });
 
   // First page: unclamped would start at -4 (border overshoots world origin)
   // -> clamped to 0. This is exactly the "seam at the world edge" case.

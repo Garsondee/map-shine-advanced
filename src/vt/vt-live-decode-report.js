@@ -32,20 +32,24 @@ export async function runVtLiveDecodeTest(url) {
   }
   const decodeMs = Math.round(performance.now() - t0);
 
-  const table = new PageTable({ id: 'live:decodeTest', worldSizePx: sourceBitmap.width });
+  const table = new PageTable({
+    id: 'live:decodeTest',
+    worldWidthPx: sourceBitmap.width,
+    worldHeightPx: sourceBitmap.height,
+  });
   const samplePages = [
     { label: 'corner (0,0) — world-edge clamping exercised', mip: 0, px: 0, py: 0 },
     {
       label: 'middle page',
       mip: 0,
-      px: Math.floor(table.pagesPerAxis(0) / 2),
-      py: Math.floor(table.pagesPerAxis(0) / 2),
+      px: Math.floor(table.pagesX(0) / 2),
+      py: Math.floor(table.pagesY(0) / 2),
     },
     {
       label: 'far corner — the other world-edge clamp',
       mip: 0,
-      px: table.pagesPerAxis(0) - 1,
-      py: table.pagesPerAxis(0) - 1,
+      px: table.pagesX(0) - 1,
+      py: table.pagesY(0) - 1,
     },
   ];
 
@@ -74,7 +78,7 @@ export async function runVtLiveDecodeTest(url) {
     ok: true,
     sourceImageDimensions: { width: sourceBitmap.width, height: sourceBitmap.height },
     sourceDecodeMs: decodeMs,
-    pagesPerAxisAtMip0: table.pagesPerAxis(0),
+    pagesAtMip0: { x: table.pagesX(0), y: table.pagesY(0) },
     allSamplePagesCorrectSize: allPagesOk,
     pageResults,
     note: allPagesOk

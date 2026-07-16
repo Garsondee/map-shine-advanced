@@ -72,9 +72,9 @@ function persist(key, canvas) {
  * message, so worker memory stays bounded to one source at a time.
  */
 async function handleSlice(msg) {
-  const { url, pages, worldSizePx, payloadPx, pageSizePx } = msg;
+  const { url, pages, worldWidthPx, worldHeightPx, payloadPx, pageSizePx } = msg;
   const borderPx = msg.borderPx ?? DEFAULT_BORDER_PX;
-  const table = { payloadPx, worldSizePx };
+  const table = { payloadPx, worldWidthPx, worldHeightPx };
 
   const t0 = performance.now();
   const source = await fetchAndDecode(url);
@@ -104,9 +104,9 @@ async function handleSlice(msg) {
  * Same shape as decode-pool.js's main-thread `acquirePackedPages`, off-thread.
  */
 async function handleSlicePacked(msg) {
-  const { packId, channelUrls, pages, worldSizePx, payloadPx, pageSizePx } = msg;
+  const { packId, channelUrls, pages, worldWidthPx, worldHeightPx, payloadPx, pageSizePx } = msg;
   const borderPx = msg.borderPx ?? DEFAULT_BORDER_PX;
-  const table = { payloadPx, worldSizePx };
+  const table = { payloadPx, worldWidthPx, worldHeightPx };
 
   // ONE channel source held at a time (decode → extract all pages' pixels →
   // close → next channel), NOT all 3 at once — matches the main-thread path's

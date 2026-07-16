@@ -47,6 +47,15 @@ import {
 import { getActiveSceneFloors, computeVisibleFloorIndices } from './foundry/active-scene-source.js';
 import { collectSceneLayers } from './foundry/scene-layers.js';
 import { engageFoundryFallback } from './diag/render-fallback.js';
+import {
+  beginSceneLoad,
+  beginSceneLoadPhase,
+  reportSceneLoadProgress,
+  endSceneLoad,
+  getLoadingScreenState,
+  resetLoadingSceneMemory,
+} from './ui/loading-screen.js';
+import { LOAD_PHASES } from './ui/load-progress.js';
 import { computeSceneDimensions } from './foundry/scene-geometry.js';
 import { SORT_LAYERS, makeLayerKey } from './scene/layer-order.js';
 import { getSourceBitmap } from './vt/decode-pool.js';
@@ -377,6 +386,7 @@ function install() {
 
   async function startRealSceneViewer(initialFloorIndex = 0) {
     const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
+    beginSceneLoadPhase(LOAD_PHASES.SCENE); // no-op unless a curtain is up
     const floorsResult = getActiveSceneFloors(sceneDoc);
     if (!floorsResult.ok) {
       // This path already lands on Foundry's own rendering by construction — it
@@ -387,6 +397,10 @@ function install() {
       engageFoundryFallback({
         reason: `This scene has no art MSA can render (${floorsResult.error}).`,
       });
+      // The curtain must never outlive the load it describes — least of all on a
+      // path that has just handed rendering back to Foundry, where leaving it up
+      // would hide the working session it just rescued.
+      endSceneLoad({ error: floorsResult.error });
       return { ok: false, error: floorsResult.error };
     }
     const { floors, skipped } = floorsResult;
@@ -436,6 +450,11 @@ function install() {
         dimensions,
         floorCount: floors.length,
         initialFloorIndex,
+        // Feeds the curtain, when there is one. A floor switch never reaches this
+        // function at all (see the canvasReady handler), and these calls no-op
+        // when nothing is loading — so the reporting path needs no knowledge of
+        // whether a curtain is up.
+        onLoadProgress: ({ done, total, detail }) => reportSceneLoadProgress(LOAD_PHASES.ART, { done, total, detail }),
       })),
     };
   }
@@ -474,6 +493,30 @@ function install() {
     }
   }
 
+  MapShine.debug.registerReport('loading-screen-state', 'Loading Screen: State + Last Load', () => ({
+    report: 'loading-screen-state',
+    generatedAt: new Date().toISOString(),
+    ...getLoadingScreenState(),
+    note:
+      'lastLoad.worstStallMs is the headline: a load that completes but froze the main thread for seconds is a ' +
+      "bug with a receipt, not a success. lastStartedSceneId is the floor-switch guard's memory — a floor switch " +
+      'is suppressed precisely because it matches.',
+  }));
+
+  // The curtain correctly refuses to reappear for the same scene, which makes it
+  // impossible to look at again without switching scenes back and forth. This
+  // forgets that memory so the next redraw is treated as a cold load.
+  MapShine.debug.registerReport(
+    'loading-screen-arm',
+    'Loading Screen: Arm for next redraw (then switch floor/scene)',
+    () => ({
+      report: 'loading-screen-arm',
+      generatedAt: new Date().toISOString(),
+      ...resetLoadingSceneMemory(),
+      note: 'The next canvasInit will now be treated as a cold load and raise the curtain, even for the scene you are already on.',
+    })
+  );
+
   MapShine.debug.registerReport('pixi-residency-report', 'VRAM Severance: PIXI Residency Report', () => {
     const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
     const floorsResult = getActiveSceneFloors(sceneDoc);
@@ -494,6 +537,28 @@ function install() {
     // canvasInit fires strictly BEFORE Foundry loads scene textures (verified
     // in source, client/canvas/board.mjs) — must register proxies here, not
     // later, or Foundry's own load wins the race.
+    // THE CURTAIN GOES UP HERE — at canvasInit, the earliest moment we know a
+    // scene is being drawn, so there is no window where Foundry looks frozen with
+    // nothing on screen explaining why.
+    //
+    // BUT canvasInit fires for a FLOOR SWITCH too: Scene#view (scene.mjs:280) calls
+    // canvas.draw() on `sceneChanged || levelChanged`, and draw() fires canvasInit
+    // (board.mjs:1119) and canvasReady (1192) either way. The hook cannot tell them
+    // apart — only the scene id can, and it IS available here (board.mjs sets
+    // this.#scene and logs its name immediately before firing canvasInit).
+    // beginSceneLoad does that comparison and shows nothing on a floor switch,
+    // which is §4.5's headline promise and §7's dead level-transition curtain.
+    Hooks.on('canvasInit', (canvasRef) => {
+      try {
+        const sceneDoc = canvasRef?.scene ?? null;
+        const verdict = beginSceneLoad({ sceneId: sceneDoc?.id ?? null, sceneName: sceneDoc?.name });
+        if (!verdict.shown) console.log(`${TAG} loading screen suppressed — ${verdict.reason}`);
+      } catch (err) {
+        // A broken curtain must never block a scene load.
+        console.error(`${TAG} loading screen failed to start:`, err);
+      }
+    });
+
     Hooks.on('canvasInit', async (canvasRef) => {
       try {
         await registerFloorProxies(canvasRef?.scene ?? null);
@@ -532,6 +597,9 @@ function install() {
         const targetFloorIndex = resolveFloorDescriptor(sceneDoc, floorsResult.floors);
 
         if (lastRealSceneId === sceneDoc.id && getVtPanViewerDiagnostics().active) {
+          // A floor switch. No curtain was raised for it and none is lifted —
+          // beginSceneLoad already declined, so there is nothing here to undo.
+          // "Floor changes without loading screens" is this branch existing.
           const result = await setVtPanViewerFloor(targetFloorIndex);
           console.log(`${TAG} real-scene VT viewer synced to floor ${targetFloorIndex} (same scene).`, result);
           return;
@@ -539,10 +607,32 @@ function install() {
 
         lastRealSceneId = sceneDoc.id;
         const result = await startRealSceneViewer(targetFloorIndex);
-        if (result.ok === false) console.warn(`${TAG} real-scene VT viewer did not start:`, result.error);
-        else console.log(`${TAG} real-scene VT viewer active for "${result.sceneName}" at floor ${targetFloorIndex}.`);
+        if (result.ok === false) {
+          console.warn(`${TAG} real-scene VT viewer did not start:`, result.error);
+          endSceneLoad({ error: result.error });
+          return;
+        }
+        console.log(`${TAG} real-scene VT viewer active for "${result.sceneName}" at floor ${targetFloorIndex}.`);
+
+        // LIFT ONLY WHEN THERE IS SOMETHING TO SEE. startVtPanViewer has resolved,
+        // so every coarse pin is resident and the render loop is armed — but no
+        // frame has PAINTED yet. Waiting one frame is the difference between
+        // "Ready" being true and being the §7 "Ready!" lie under a new name.
+        beginSceneLoadPhase(LOAD_PHASES.FIRST_FRAME);
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const summary = endSceneLoad();
+        if (summary) {
+          // worstStallMs is surfaced, not swallowed: a load that completes but
+          // froze the main thread for seconds is a bug with a receipt.
+          console.log(
+            `${TAG} scene load complete in ${summary.totalMs}ms` +
+              (summary.worstStallMs > 0 ? ` (worst main-thread stall: ${summary.worstStallMs}ms)` : ''),
+            summary
+          );
+        }
       } catch (err) {
         console.error(`${TAG} real-scene VT viewer auto-sync failed:`, err);
+        endSceneLoad({ error: String(err?.message || err) });
       }
     });
   }

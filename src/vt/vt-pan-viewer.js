@@ -273,6 +273,11 @@ export function stopVtPanViewer() {
  *   against the fixture's known patterns). Default `() => []`: real scenes store
  *   masks as scene flags rather than URLs, so their mask streaming is a later
  *   step; the fixture emits real mask PNGs on disk, so it is proven there first.
+ * @param {(p:{done:number, total:number, detail:string|null}) => void} [options.onLoadProgress] -
+ *   called once per item during the INITIAL load only (never per frame), so a
+ *   loading screen can show honest counts. The item TOTAL is known immediately
+ *   from buildItems; page totals are not known until each item's header is read,
+ *   which is why progress is reported per item rather than per page.
  * @param {() => {occluders:Array<object>, visionActive:boolean}} [options.getOcclusionInputs] -
  *   the occluder set for the occlusion mask. Currently unused: the mask PRODUCER
  *   isn't built (see `diag/render-fallback.js`'s sibling note and
@@ -288,6 +293,7 @@ export async function startVtPanViewer({
   initialFloorIndex = 0,
   extraLayersForItem,
   getOcclusionInputs,
+  onLoadProgress,
 }) {
   extraLayersForItem ??= () => [];
   getOcclusionInputs ??= () => ({ occluders: [], visionActive: false });
@@ -1576,6 +1582,33 @@ export async function startVtPanViewer({
       halfSpanPx: Math.max(world.width, world.height) * 0.25,
     });
     targetHalfSpanPx = view.halfSpanPx; // eased-zoom target starts equal to the actual value — no zoom-on-load
+
+    // THE INITIAL LOAD, walked explicitly so it can be REPORTED.
+    //
+    // updateResidency() would load these items anyway (its phase-1 loop calls the
+    // same idempotent ensureItemLoaded), but it runs on every residency update and
+    // has no business knowing about a loading screen. Doing the first pass here
+    // keeps the progress feed out of the per-frame path entirely, and gives honest
+    // per-item counts (§4.5's "pages resident / pages needed", at the granularity
+    // we actually know before anything is decoded: the item count is known
+    // immediately from buildItems, the page totals are not).
+    //
+    // ensureItemLoaded is idempotent, so updateResidency's own loop below is then
+    // a no-op for these — one path, walked twice, not two paths.
+    const initialItems = buildItems(view.floorIndex);
+    onLoadProgress?.({ done: 0, total: initialItems.length, detail: null });
+    for (let i = 0; i < initialItems.length; i++) {
+      const item = initialItems[i];
+      try {
+        await ensureItemLoaded(item);
+      } catch (err) {
+        // A single broken item must not take the scene down — updateResidency
+        // records it properly below; here we only keep the count honest.
+        console.error(`[vt-pan-viewer] initial load: item "${item.id}" failed:`, err);
+      }
+      onLoadProgress?.({ done: i + 1, total: initialItems.length, detail: item.kind });
+    }
+
     await updateResidency();
 
     loopActive = true;

@@ -12,6 +12,8 @@ import {
   tokenContainsPoint,
   pickTokenAt,
   tokenOnLevel,
+  resolveTokenLevel,
+  DEFAULT_LEVEL_ID,
   DEFAULT_TOKEN_ICON,
 } from '../scene-tokens.js';
 import { collectTiles } from '../scene-layers.js';
@@ -159,6 +161,64 @@ export function run(t) {
       gridSize: 100,
     });
     t.ok('an explicit gridSize overrides the scene', override.items[0].footprint.width === 200);
+  }
+
+  // ---- the defaultLevel0000 trap (found LIVE, not in review) --------------
+  {
+    // Foundry initialises token.level to the literal 'defaultLevel0000'. A scene
+    // authored with its own levels has none by that id — so a strict equality
+    // test drops the token from EVERY floor. That is exactly what happened live:
+    // a token dragged onto a real 3-level scene never appeared and never reached
+    // the draw list.
+    t.ok('the default id is the real one from the v14 source', DEFAULT_LEVEL_ID === 'defaultLevel0000');
+    t.ok(
+      'a level the scene actually has is authoritative',
+      resolveTokenLevel({ level: 'ground' }, ['ground', 'upper'], 'upper') === 'ground'
+    );
+    // A token that exists must be visible SOMEWHERE. Dropping a document because
+    // its floor is unassigned fails invisibly and reads as a broken renderer.
+    t.ok(
+      'an unassigned token falls back to the viewed level rather than vanishing',
+      resolveTokenLevel({ level: DEFAULT_LEVEL_ID }, ['ground', 'upper'], 'upper') === 'upper'
+    );
+    // Without the full level list there is no way to tell "unassigned" from "on a
+    // hidden floor", so the fallback must NOT fire. Guessing here would drag an
+    // upstairs token down onto the viewed floor.
+    t.ok(
+      'with no known level list, nothing is guessed',
+      resolveTokenLevel({ level: DEFAULT_LEVEL_ID }, undefined, 'upper') === DEFAULT_LEVEL_ID
+    );
+    t.ok(
+      'a token on a DELETED level also falls back rather than vanishing',
+      resolveTokenLevel({ level: 'gone' }, ['ground'], 'ground') === 'ground'
+    );
+    t.ok('a token with no level at all falls back', resolveTokenLevel({}, ['ground'], 'ground') === 'ground');
+
+    // End to end: the live repro. Real scene levels, token carrying the default.
+    const scene = mkScene([mkToken('dropped', { level: DEFAULT_LEVEL_ID })]);
+    const before = collectTokens(scene, { visibleLevelIds: ['cFSJ3W4gsqvGbb2A'] });
+    t.ok('THE LIVE BUG reproduced: strict matching drops the dragged token entirely', before.items.length === 0);
+    const after = collectTokens(scene, {
+      visibleLevelIds: ['cFSJ3W4gsqvGbb2A'],
+      knownLevelIds: ['cFSJ3W4gsqvGbb2A', 'WKlcCgaTb1lZZqVy'],
+      viewedLevelId: 'cFSJ3W4gsqvGbb2A',
+    });
+    t.ok("with the scene's real levels known, the dropped token appears on the viewed floor", after.items.length === 1);
+    t.ok(
+      'and is recorded on the level it resolved to, not the bogus default',
+      after.items[0].levelId === 'cFSJ3W4gsqvGbb2A'
+    );
+
+    // knownLevelIds must be the FULL list, not just the visible ones: a token on
+    // a real but currently-hidden floor is assigned, and must NOT be dragged onto
+    // the viewed floor as if it were unassigned.
+    const upstairs = mkScene([mkToken('upstairs', { level: 'upper' })]);
+    const kept = collectTokens(upstairs, {
+      visibleLevelIds: ['ground'],
+      knownLevelIds: ['ground', 'upper'],
+      viewedLevelId: 'ground',
+    });
+    t.ok('a token on a real but hidden floor stays there, not pulled to the viewed one', kept.items.length === 0);
   }
 
   // ---- THE BRIDGE: a token under a roof, through the real sort law --------

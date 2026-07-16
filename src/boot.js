@@ -44,6 +44,7 @@ import {
   runZoomThrashTest,
   soakPanStep,
   soakSwitchFloorStep,
+  refreshVtPanViewerItems,
 } from './vt/vt-pan-viewer.js';
 import { getActiveSceneFloors, computeVisibleFloorIndices } from './foundry/active-scene-source.js';
 import { collectSceneLayers } from './foundry/scene-layers.js';
@@ -395,6 +396,9 @@ function install() {
      * mapped back to Level ids because that is what the document-level rules
      * (`isVisible`, `includedInLevel`) actually key on.
      */
+    // EVERY level id in the scene, visible or not — see the use in buildItems.
+    const allLevelIds = floors.map((f) => f.id).filter(Boolean);
+
     const buildItems = (viewedFloorIndex) => {
       const visibleIndices = computeVisibleFloorIndices(floors, viewedFloorIndex);
       const visibleLevelIds = visibleIndices.map((i) => floors[i]?.id).filter(Boolean);
@@ -405,7 +409,11 @@ function install() {
       // law being one flat list: nothing downstream learns the word "token".
       return [
         ...collectSceneLayers(sceneDoc, { viewedLevelId, visibleLevelIds, isGM }).items,
-        ...collectTokens(sceneDoc, { visibleLevelIds, isGM }).items,
+        // knownLevelIds is EVERY floor, not the visible ones: it is what lets
+        // collectTokens tell "unassigned" (defaultLevel0000 — what a freshly
+        // dragged token carries) from "on a floor you cannot currently see". Pass
+        // only the visible ids and an upstairs token gets dragged down here.
+        ...collectTokens(sceneDoc, { visibleLevelIds, knownLevelIds: allLevelIds, viewedLevelId, isGM }).items,
       ];
     };
 
@@ -417,7 +425,12 @@ function install() {
       visibleLevelIds: initialVisibleLevelIds,
       isGM,
     });
-    const tokens = collectTokens(sceneDoc, { visibleLevelIds: initialVisibleLevelIds, isGM });
+    const tokens = collectTokens(sceneDoc, {
+      visibleLevelIds: initialVisibleLevelIds,
+      knownLevelIds: allLevelIds,
+      viewedLevelId: floors[initialFloorIndex]?.id,
+      isGM,
+    });
     // The report must describe what will actually DRAW, tokens included — a report
     // that quietly omits a whole class of drawable is worse than none.
     const collected = {
@@ -577,6 +590,22 @@ function install() {
     // cheap event was the actual crash: repeated full 512MB-atlas
     // reallocation on ordinary floor toggles.
     let lastRealSceneId = null;
+    // TOKEN CRUD -> redraw. The draw list is derived from live Foundry documents,
+    // but nothing was watching them: updateResidency only re-asks buildItems when
+    // the VIEW changes, so a token created while the camera sat still never
+    // appeared (author-reported 2026-07-16). Foundry's own hook names are the
+    // authority here — see common/documents/token.mjs's metadata.events.
+    //
+    // updateToken matters as much as createToken: moving a token between floors
+    // changes token.level, which changes which floors draw it.
+    for (const hook of ['createToken', 'updateToken', 'deleteToken']) {
+      Hooks.on(hook, () => {
+        // Fire-and-forget: a redraw must never make a document update await GPU
+        // work, and a failed redraw must not break Foundry's own bookkeeping.
+        refreshVtPanViewerItems().catch((err) => console.error(`${TAG} ${hook} redraw failed:`, err));
+      });
+    }
+
     Hooks.on('canvasReady', async (canvasRef) => {
       try {
         const sceneDoc = canvasRef?.scene ?? null;

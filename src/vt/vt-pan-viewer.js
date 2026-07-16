@@ -1714,6 +1714,13 @@ export async function startVtPanViewer({
       getView: () => view,
       applyKeyAndUpdate, // exposed so MapShine.soakHooks.pan drives the EXACT same path a real keypress does
       setFloorIndex, // exposed so an external (Foundry-driven) floor sync is as cheap as a keypress, never a full restart
+      // Re-ask buildItems and reconcile. The draw list is derived from live
+      // Foundry documents, but NOTHING here watches them — updateResidency only
+      // runs when the VIEW changes, so creating a token while the camera sits
+      // still changed the document and never reached the screen (author-reported
+      // 2026-07-16: "I drag a token into the scene area but nothing appears").
+      // boot.js drives this from the token CRUD hooks.
+      refreshItems: updateResidency,
       setDisplayLayer, // exposed so the debug panel can bind a mask for visual verification
       // --- runZoomThrashTest support (2026-07-16) ---------------------------
       /** Wipe frame-gap/hitch history for a clean measurement window. */
@@ -1996,6 +2003,19 @@ export function getVtPanViewerDiagnostics() {
  * case, this never silently starts a viewer on its own.
  * @param {number} floorIndex
  */
+/**
+ * Re-read the scene's documents and reconcile the draw list.
+ *
+ * Cheap and idempotent: the same reconcile updateResidency already does on every
+ * view change, so an unchanged scene costs one buildItems call and no GPU work.
+ * No-op `{skipped:true}` if nothing is running.
+ */
+export async function refreshVtPanViewerItems() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  await _active.refreshItems();
+  return { refreshed: true };
+}
+
 export async function setVtPanViewerFloor(floorIndex) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   const changed = await _active.setFloorIndex(floorIndex);

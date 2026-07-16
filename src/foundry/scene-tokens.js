@@ -58,6 +58,52 @@ export function tokenOnLevel(token, levelId) {
 }
 
 /**
+ * Foundry's own default level id — a LITERAL, from
+ * `BaseScene.metadata.defaultLevelId` in the v14 source. Not a placeholder of
+ * ours; this exact string is what an unassigned token carries.
+ */
+export const DEFAULT_LEVEL_ID = 'defaultLevel0000';
+
+/**
+ * Which level is this token ACTUALLY on?
+ *
+ * `token.level` initialises to `defaultLevel0000` (above). A scene authored with
+ * its own levels has ids like `cFSJ3W4gsqvGbb2A` and **no `defaultLevel0000`
+ * among them** — so a token carrying the default matches no level, and a strict
+ * `token.level === levelId` test drops it from every floor. That is exactly what
+ * happened live (2026-07-16): a token dragged onto a real 3-level scene never
+ * appeared, and the draw list had no `token:` entry at all.
+ *
+ * So: an id the scene actually HAS is authoritative. An id it does not have
+ * (the default, or a level since deleted) is not a reason to make the token
+ * vanish — it falls back to the viewed level, where the user can see it and fix
+ * it. **A token that exists must be visible somewhere**; silently dropping a
+ * document because its floor is unassigned is the worst of the options, since
+ * the failure is invisible and looks like the renderer is broken.
+ *
+ * WITHOUT `knownLevelIds` this does NOTHING — deliberately. The fallback needs
+ * to distinguish "this id is not a level at all" from "this id is a real level
+ * that just is not currently visible", and only the scene's FULL level list can
+ * tell those apart. Given only the visible ids, an upstairs token looks exactly
+ * like an unassigned one, and falling back would drag it down onto the viewed
+ * floor. The test caught precisely that. When the information needed to decide
+ * is absent, do not guess — leave the value alone.
+ *
+ * @param {object} token
+ * @param {Array<string>|Set<string>} [knownLevelIds] - the scene's REAL level
+ *   ids, ALL of them. Omit and no fallback is applied.
+ * @param {string} [fallbackLevelId] - the viewed level.
+ * @returns {string}
+ */
+export function resolveTokenLevel(token, knownLevelIds, fallbackLevelId) {
+  const level = token?.level ?? '';
+  if (!knownLevelIds) return level; // cannot tell unassigned from hidden — see above
+  const known = knownLevelIds instanceof Set ? knownLevelIds : new Set(knownLevelIds);
+  if (known.has(level)) return level;
+  return fallbackLevelId ?? '';
+}
+
+/**
  * @param {object} sceneDoc
  * @returns {Array<object>}
  */
@@ -139,7 +185,15 @@ export function pickTokenAt(tokenItems, point, gridSize) {
  * @param {boolean} [options.isGM] - a GM sees hidden tokens, dimmed.
  * @returns {{items: Array<object>, skipped: Array<{name: string, reason: string}>}}
  */
-export function collectTokens(sceneDoc, { visibleLevelIds = [], gridSize, getRouteFn, isGM = true } = {}) {
+export function collectTokens(
+  sceneDoc,
+  { visibleLevelIds = [], knownLevelIds, viewedLevelId, gridSize, getRouteFn, isGM = true } = {}
+) {
+  // No knownLevelIds => strict matching, no fallback. See resolveTokenLevel: with
+  // only the VISIBLE ids, a token on a real-but-hidden floor is indistinguishable
+  // from an unassigned one, and falling back would drag it onto the viewed floor.
+  const known = knownLevelIds ? new Set(knownLevelIds) : null;
+  const fallback = viewedLevelId ?? visibleLevelIds[0] ?? '';
   const size = gridSize ?? sceneDoc?.grid?.size ?? 100;
   const items = [];
   const skipped = [];
@@ -148,8 +202,10 @@ export function collectTokens(sceneDoc, { visibleLevelIds = [], gridSize, getRou
     if (token?.hidden && !isGM) continue;
 
     // `token.level` is a native level ID (see this module's header) — singular,
-    // so this is tokenOnLevel, NOT the tile helper. See its doc.
-    const on = visibleLevelIds.filter((levelId) => tokenOnLevel(token, levelId));
+    // so this is tokenOnLevel, NOT the tile helper. Resolved first, because the
+    // raw field may hold defaultLevel0000, which no authored scene has.
+    const level = resolveTokenLevel(token, known, fallback);
+    const on = visibleLevelIds.filter((levelId) => level === levelId);
     if (on.length === 0) continue;
 
     const src = token?.texture?.src || DEFAULT_TOKEN_ICON;
@@ -172,7 +228,7 @@ export function collectTokens(sceneDoc, { visibleLevelIds = [], gridSize, getRou
         zIndex: 0,
       }),
       src: getRouteFn ? getRouteFn(src) : src,
-      levelId: token.level ?? '',
+      levelId: level,
       visibleOnLevelIds: on,
       // Foundry dims a hidden token to 0.5 for the GM, exactly as it does a tile.
       alpha: (token.alpha ?? 1) * (token.hidden ? 0.5 : 1),

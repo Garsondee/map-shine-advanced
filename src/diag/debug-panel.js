@@ -107,8 +107,84 @@ export function installDebugPanel(MapShine) {
   let listEl = null;
   let collapsed = false;
 
+  /** Pointer travel (px) below which a pointerdown→up counts as a CLICK, not a drag. */
+  const DRAG_CLICK_SLOP_PX = 4;
+
+  /**
+   * Make `handle` drag whatever `getHost()` returns.
+   *
+   * Two details that matter more than the dragging itself:
+   *
+   * 1. **Anchor swap.** The host is positioned with `right`/`bottom`. Writing
+   *    `left`/`top` while those are still set pins BOTH edges, which stretches the
+   *    element instead of moving it. On the first drag we read the live rect and
+   *    switch to `left`/`top` anchoring, so the box moves rather than resizes.
+   * 2. **Clamped to the viewport.** A panel dragged off-screen cannot be dragged
+   *    back — the handle goes with it. Clamping keeps a grabbable strip on screen
+   *    always, so this can't become an unrecoverable state.
+   *
+   * @param {HTMLElement} handle
+   * @param {() => HTMLElement|null|undefined} getHost
+   * @returns {() => number} total pointer travel of the last gesture (for the
+   *   click-vs-drag test).
+   */
+  function makeDraggable(handle, getHost) {
+    let dragging = false;
+    let grabOffsetX = 0;
+    let grabOffsetY = 0;
+    let moved = 0;
+
+    handle.addEventListener('pointerdown', (e) => {
+      const host = getHost();
+      if (!host) return;
+      const r = host.getBoundingClientRect();
+      // Anchor swap — see this function's doc, point 1.
+      host.style.left = `${r.left}px`;
+      host.style.top = `${r.top}px`;
+      host.style.right = 'auto';
+      host.style.bottom = 'auto';
+      grabOffsetX = e.clientX - r.left;
+      grabOffsetY = e.clientY - r.top;
+      dragging = true;
+      moved = 0;
+      handle.style.cursor = 'grabbing';
+      try {
+        handle.setPointerCapture(e.pointerId); // keep the drag alive off-handle
+      } catch (_) {}
+      e.preventDefault();
+    });
+
+    handle.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const host = getHost();
+      if (!host) return;
+      moved += Math.abs(e.movementX) + Math.abs(e.movementY);
+      const r = host.getBoundingClientRect();
+      // Clamp — see this function's doc, point 2. A strip stays reachable.
+      const maxX = Math.max(0, window.innerWidth - 60);
+      const maxY = Math.max(0, window.innerHeight - 24);
+      host.style.left = `${Math.max(0, Math.min(maxX, e.clientX - grabOffsetX))}px`;
+      host.style.top = `${Math.max(0, Math.min(maxY, e.clientY - grabOffsetY))}px`;
+      void r;
+    });
+
+    const end = (e) => {
+      if (!dragging) return;
+      dragging = false;
+      handle.style.cursor = 'grab';
+      try {
+        handle.releasePointerCapture(e.pointerId);
+      } catch (_) {}
+    };
+    handle.addEventListener('pointerup', end);
+    handle.addEventListener('pointercancel', end);
+
+    return () => moved;
+  }
+
   function buildUI() {
     const panel = document.createElement('div');
+    panelEl = panel;
     panel.id = 'msa-debug-panel';
     Object.assign(panel.style, {
       pointerEvents: 'auto',
@@ -128,12 +204,28 @@ export function installDebugPanel(MapShine) {
       display: 'flex',
       justifyContent: 'space-between',
       alignItems: 'center',
-      cursor: 'pointer',
+      cursor: 'grab',
       fontWeight: 'bold',
       marginBottom: '4px',
+      touchAction: 'none', // let pointermove reach us instead of becoming a scroll gesture
     });
     header.innerHTML = `<span>🗝️ Keyhole Debug Panel</span><span id="msa-debug-toggle">▾</span>`;
+
+    // DRAGGABLE (author-reported, 2026-07-16: the panel sits under Foundry's
+    // right-hand sidebar). The default position now clears the sidebar, but "the
+    // right default" is a guess about someone else's screen — dragging is the
+    // thing that actually solves it, for any layout, at any resolution.
+    //
+    // The whole HOST moves, not just this panel: the heartbeat triangle and the
+    // panel are one unit (the panel is a child of the host), and dragging half of
+    // a visually-joined widget away from the other half would be daft.
+    const dragMoved = makeDraggable(header, () => panelEl?.parentElement);
+
     header.addEventListener('click', () => {
+      // Only collapse on a genuine CLICK. Without this, every drag that ends over
+      // the header also toggles — so you could never reposition the panel without
+      // also folding it up.
+      if (dragMoved() > DRAG_CLICK_SLOP_PX) return;
       collapsed = !collapsed;
       listEl.style.display = collapsed ? 'none' : '';
       statusEl.style.display = collapsed ? 'none' : '';

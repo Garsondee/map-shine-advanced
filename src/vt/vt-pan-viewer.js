@@ -222,53 +222,62 @@ export function stopVtPanViewer() {
 }
 
 /**
+ * Start the renderer.
+ *
  * @param {object} options
  * @param {any} options.THREE
- * @param {(floorIndex:number) => string} options.imageUrlForFloor
- * @param {number} options.floorCount
- * @param {(viewedFloorIndex:number) => number[]} [options.visibleFloorIndices] -
- *   given the currently-viewed floor index, which floor indices should be
- *   rendered (composited) this frame. Default `(i) => [i]` — single-floor-only,
- *   the exact pre-existing behavior (used by the torture-fixture button, which
- *   has no real Levels-visibility data to draw from). Real-scene callers pass
- *   `foundry/active-scene-source.js`'s `computeVisibleFloorIndices` bound to
- *   the scene's actual floor list, replicating Foundry's own multi-floor
- *   compositing rule.
+ * @param {(viewedFloorIndex:number) => Array<object>} options.buildItems - THE DRAW
+ *   LIST for a given viewed floor: every drawable, as a `SceneLayerItem`
+ *   (`foundry/scene-layers.js`) carrying a `key` for the sort law, an `id`, a
+ *   `src`, and a `_placement`. Called fresh on every residency update, so the
+ *   list follows the scene rather than being captured once.
+ *
+ *   Two callers, ONE path (doctrine #1): real scenes pass a closure over
+ *   `collectSceneLayers(canvas.scene, …)` — Level backgrounds AND foregrounds
+ *   (roof art) AND tiles; the torture fixture FABRICATES the same shapes, since
+ *   it has no Foundry documents. Neither gets its own renderer.
+ * @param {{width:number, height:number, sceneRect:object}} options.dimensions - the
+ *   scene's canvas-space dimensions (`foundry/scene-geometry.js#computeSceneDimensions`).
+ *   THE WORLD, in the coordinate sense: Foundry's padded canvas rect, +Y down.
+ *   Art no longer defines the world — art is PLACED into it — which is why the
+ *   view can be framed before any decode finishes.
+ * @param {number} options.floorCount - how many floors the floor-switch keys cycle.
  * @param {number} [options.initialFloorIndex] - which floor the view opens on
  *   (default 0). MUST match whatever Foundry itself is currently viewing when
  *   called from an automatic re-sync (boot.js's `canvasReady` handler) — this
  *   was the root cause of a real live bug (2026-07-15): every call used to
  *   hardcode floor 0 regardless of caller intent, so switching floors via
- *   Foundry's own UI (which re-fires `canvasReady` and re-invoked this
- *   function wholesale) silently snapped the view back to floor 0 every time,
- *   AND repeatedly reallocating the full 512MB atlas + page cache on every
- *   ordinary floor switch (this function's own full teardown+rebuild, meant
- *   for a genuine scene change, not a same-scene floor toggle) caused a real
- *   crash after a few toggles. See boot.js's `canvasReady` handler — it now
- *   only calls this for an ACTUAL scene change; a same-scene floor switch
- *   uses the far cheaper `setVtPanViewerFloor()` below instead.
- * @param {(floorIndex:number) => Array<{name:string, url:string}|{name:string, channelUrls:{r:string,g:string,b:string}}>} [options.extraLayerUrlsForFloor] -
- *   MULTI-LAYER (Keyhole §4.1, the mask pile-up killer): the ADDITIONAL layer-
- *   packs beyond albedo that this floor streams — every painted mask (_Outdoors,
- *   _Fire, _Specular, _Tree, _Bush …). Each entry is either `{name, url}` (a
- *   single-file mask — the normal case) or `{name, channelUrls:{r,g,b}}`
- *   (CHANNEL-PACKING: 3 single-channel mask files composited into ONE RGBA
- *   virtual texture at decode time, per §4.1 and decode-pool.js's
- *   `acquirePackedPages` — the fix for the real GPU page-cache pressure the
- *   unpacked castle-scenario test showed live, 2026-07-16). Either shape
- *   becomes its OWN virtual texture (own PageTable → own namespaced page keys
- *   → own indirection texture), streamed through the SAME fixed atlas + page
- *   cache as albedo. This is what proves V2's actual cause of death —
- *   `O(world × floors × masks)` textures all held at world resolution at once
- *   — is architecturally impossible here: the masks page through the keyhole
- *   exactly like albedo, so the working set stays `O(screen)` no matter how
- *   many mask layers exist. Only albedo is DISPLAYED by default (masks are
- *   inputs, not pixels, until an effect consumes them — `setDisplayLayer` can
- *   bind a mask for visual verification against the fixture's known
- *   patterns). Default `() => []` — albedo-only, the exact pre-existing
- *   behavior (real scenes store masks as scene flags, not URLs, so their mask
- *   streaming is a later step; the torture fixture emits real mask PNGs on
- *   disk, so it's proven there first — hard case first).
+ *   Foundry's own UI (which re-fires `canvasReady` and re-invoked this function
+ *   wholesale) silently snapped the view back to floor 0 every time, AND
+ *   repeatedly reallocating the full 512MB atlas + page cache on every ordinary
+ *   floor switch caused a real crash after a few toggles. boot.js's
+ *   `canvasReady` handler now only calls this for an ACTUAL scene change; a
+ *   same-scene floor switch uses the far cheaper `setVtPanViewerFloor()`.
+ * @param {(item:object) => Array<{name:string, url:string}|{name:string, channelUrls:{r:string,g:string,b:string}}>} [options.extraLayersForItem] -
+ *   MULTI-LAYER (Keyhole §4.1, the mask pile-up killer): the ADDITIONAL layer-packs
+ *   beyond albedo that an item streams — every painted mask (_Outdoors, _Fire,
+ *   _Specular, _Tree, _Bush …). Each entry is either `{name, url}` (a single-file
+ *   mask — the normal case) or `{name, channelUrls:{r,g,b}}` (CHANNEL-PACKING: 3
+ *   single-channel mask files composited into ONE RGBA virtual texture at decode
+ *   time, per decode-pool.js's `acquirePackedPages`).
+ *
+ *   Either shape becomes its OWN virtual texture (own PageTable → own namespaced
+ *   page keys → own indirection texture), streamed through the SAME fixed atlas +
+ *   page cache as albedo. That is what makes V2's actual cause of death —
+ *   `O(world × floors × masks)` textures all held at world resolution at once —
+ *   architecturally impossible: masks page through the keyhole exactly like
+ *   albedo, so the working set stays `O(screen)` however many layers exist.
+ *
+ *   Only albedo is DISPLAYED (masks are inputs, not pixels, until an effect
+ *   consumes them — `setDisplayLayer` can bind one for visual verification
+ *   against the fixture's known patterns). Default `() => []`: real scenes store
+ *   masks as scene flags rather than URLs, so their mask streaming is a later
+ *   step; the fixture emits real mask PNGs on disk, so it is proven there first.
+ * @param {() => {occluders:Array<object>, visionActive:boolean}} [options.getOcclusionInputs] -
+ *   the occluder set for the occlusion mask. Currently unused: the mask PRODUCER
+ *   isn't built (see `diag/render-fallback.js`'s sibling note and
+ *   `scene/occlusion.js`) — the shader path is real, but its mask is an inert
+ *   placeholder, so every item renders unoccluded.
  * @returns {Promise<object>} initial diagnostics (see getDiagnostics() for the shape).
  */
 export async function startVtPanViewer({

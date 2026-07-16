@@ -53,6 +53,14 @@ import { getSourceBitmap } from './vt/decode-pool.js';
 import { registerPixiProxy, getPixiResidencyReport } from './foundry/pixi-proxy-textures.js';
 
 const MODULE_ID = 'map-shine-advanced';
+
+/** Boot-heartbeat panel size. Shrunk from 320x200 (author, 2026-07-16: the
+ * spinning triangle is genuinely useful for spotting frame-rate trouble, but it
+ * does not need to be that big) — the space it gives up now carries the live perf
+ * readout, which is the thing you actually read once the triangle has told you
+ * something is wrong. */
+const HEARTBEAT_W = 210;
+const HEARTBEAT_H = 90;
 const VERSION = '0.6.0-dev.0';
 const CODENAME = 'Keyhole';
 const STAGE = 'Stage 1 · the law, running';
@@ -287,25 +295,50 @@ function install() {
   // between fully-in and fully-out every animation frame for ~4 seconds, and
   // reports frame-gap/hitch evidence — see runZoomThrashTest's own header
   // for the full mechanism. Takes a few seconds to run (click once, wait).
+  // TWO thrash buttons, because they answer DIFFERENT questions (author request,
+  // 2026-07-16) — and because the single button that existed was broken: it still
+  // passed the pre-item-renderer startup shape (imageUrlForFloor/floorCount/
+  // visibleFloorIndices, no `dimensions`), so it died on `dimensions.width` before
+  // rendering a frame. It was missed when boot.js was rewired because it hands its
+  // params to runZoomThrashTest rather than calling startVtPanViewer directly.
+  //
+  //   TORTURE  — a controlled blank slate: 3 floors x 5 packs of synthetic 12000²
+  //              art, always the same, always a cold cache. The right tool for
+  //              "is the ENGINE hitching", isolated from whatever scene is open.
+  //   ACTIVE   — thrashes whatever is on screen right now, with its real art, real
+  //              floor count, real tiles and a warm cache. The right tool for "is
+  //              MY map hitching", and the only one that can verify a fix against
+  //              the conditions that produced a real report.
   MapShine.debug.registerReport(
-    'vt-pan-viewer-zoom-thrash-test',
-    'VT Zoom Thrash Test: Diagnose Hitches (blank slate, ~4s)',
+    'vt-zoom-thrash-torture',
+    'VT Zoom Thrash: TORTURE fixture (blank slate, ~4s)',
     async () => ({
-      report: 'vt-pan-viewer-zoom-thrash-test',
+      report: 'vt-zoom-thrash-torture',
       generatedAt: new Date().toISOString(),
+      subject: 'torture fixture (synthetic 12000² x3 floors + masks)',
       // Explicit startupParams — self-contained, works even if nothing is
-      // currently active (doesn't require pressing "VT Pan Viewer: Start" first).
+      // currently active (doesn't require pressing "Start" first).
       ...(await runZoomThrashTest({
         startupParams: {
           THREE,
-          imageUrlForFloor: tortureImageUrl,
+          buildItems: buildTortureItems,
+          dimensions: tortureDimensions,
           floorCount: TORTURE_FLOOR_COUNT,
-          extraLayerUrlsForFloor: tortureLayerUrls,
-          visibleFloorIndices: tortureVisibleFloorIndices,
+          extraLayersForItem: tortureExtraLayers,
         },
       })),
     })
   );
+
+  MapShine.debug.registerReport('vt-zoom-thrash-active', 'VT Zoom Thrash: ACTIVE scene (real art, ~4s)', async () => ({
+    report: 'vt-zoom-thrash-active',
+    generatedAt: new Date().toISOString(),
+    subject: typeof canvas !== 'undefined' ? (canvas.scene?.name ?? '(no active scene)') : '(no canvas)',
+    // No startupParams — runZoomThrashTest reuses the LIVE viewer's own captured
+    // params, so this restarts the scene you are actually looking at rather than
+    // swapping it for the fixture.
+    ...(await runZoomThrashTest({})),
+  }));
 
   // ---------------------------------------------------------------------------
   // DEFAULT-ON REAL-SCENE RENDERING (author correction, 2026-07-15: "this V3
@@ -573,11 +606,15 @@ function bootHeartbeat() {
   try {
     const host = document.createElement('div');
     host.id = 'msa-keyhole-boot';
+    // Sits clear of Foundry's right-hand sidebar (author-reported overlap,
+    // 2026-07-16 — the sidebar is ~300px and this used to land on top of the
+    // scene directory). `right: 320px` parks it just left of the sidebar rather
+    // than under it.
     Object.assign(host.style, {
       position: 'fixed',
-      right: '12px',
+      right: '320px',
       bottom: '12px',
-      width: '320px',
+      width: `${HEARTBEAT_W}px`,
       zIndex: '90', // above Foundry board, below its notifications
       pointerEvents: 'none',
       fontFamily: 'Signika, sans-serif',
@@ -589,37 +626,53 @@ function bootHeartbeat() {
     const canvas = document.createElement('canvas');
     Object.assign(canvas.style, {
       display: 'block',
-      width: '320px',
-      height: '200px',
+      width: `${HEARTBEAT_W}px`,
+      height: `${HEARTBEAT_H}px`,
       borderRadius: '8px',
       border: '1px solid rgba(143,214,255,0.35)',
       boxShadow: '0 6px 24px rgba(0,0,0,0.5)',
       background: 'rgba(6,10,18,0.72)',
     });
 
-    const caption = document.createElement('div');
-    Object.assign(caption.style, {
+    // THE PERF READOUT. The author's own observation (2026-07-16): the spinning
+    // triangle is genuinely useful for spotting frame-rate trouble, because it is
+    // an INDEPENDENT renderer — if it stutters, the main thread is blocked, and no
+    // amount of internal instrumentation can hide that from your eyes. So it stays,
+    // just smaller, and the space it frees carries the numbers that explain it.
+    const perf = document.createElement('div');
+    Object.assign(perf.style, {
       marginTop: '6px',
       fontSize: '11px',
-      lineHeight: '1.35',
+      lineHeight: '1.4',
+      fontFamily: 'ui-monospace, Consolas, monospace',
+      letterSpacing: '0.02em',
+    });
+
+    const caption = document.createElement('div');
+    Object.assign(caption.style, {
+      marginTop: '4px',
+      fontSize: '10px',
+      lineHeight: '1.3',
       textAlign: 'center',
+      opacity: '0.75',
       letterSpacing: '0.02em',
     });
     caption.innerHTML =
       `<strong>Map Shine Advanced ${VERSION}</strong> &middot; ${CODENAME}<br>` +
-      `${STAGE} &mdash; new Three r${THREE.REVISION} / WebGL2`;
+      `${STAGE} &mdash; Three r${THREE.REVISION} / WebGL2`;
 
     host.appendChild(canvas);
+    host.appendChild(perf);
     host.appendChild(caption);
     document.body.appendChild(host);
 
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 2));
-    renderer.setSize(320, 200, false);
+    renderer.setSize(HEARTBEAT_W, HEARTBEAT_H, false);
     renderer.setClearColor(0x000000, 0); // transparent → CSS background shows
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(45, 320 / 200, 0.1, 100);
+    const camera = new THREE.PerspectiveCamera(45, HEARTBEAT_W / HEARTBEAT_H, 0.1, 100);
     camera.position.set(0, 0, 3.2);
 
     // A single triangle with red/green/blue vertex colors — the canonical
@@ -634,9 +687,50 @@ function bootHeartbeat() {
     const triangle = new THREE.Mesh(geometry, material);
     scene.add(triangle);
 
+    // Frame-gap sampling on the HEARTBEAT's own loop. Deliberately independent of
+    // the VT viewer's instrumentation: this loop keeps running even when the VT is
+    // stopped, has failed, or was never started, so it reports the health of the
+    // MAIN THREAD rather than of any one subsystem. A stall here is a stall
+    // everywhere, whoever caused it.
+    const gaps = [];
+    let lastT = null;
+    let worstGapMs = 0;
     renderer.setAnimationLoop((t) => {
       triangle.rotation.y = t * 0.0009; // gentle spin — proves the loop is alive
       renderer.render(scene, camera);
+
+      if (lastT !== null) {
+        const gap = t - lastT;
+        gaps.push(gap);
+        if (gaps.length > 120) gaps.shift();
+        if (gap > worstGapMs) worstGapMs = gap;
+      }
+      lastT = t;
+
+      // Repaint the numbers ~4x/sec — often enough to read, rare enough that the
+      // monitor never becomes the thing worth monitoring.
+      if (gaps.length && Math.floor(t / 250) !== perf.__lastTick) {
+        perf.__lastTick = Math.floor(t / 250);
+        const avg = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+        const fps = avg > 0 ? 1000 / avg : 0;
+        const recentWorst = Math.max(...gaps);
+        const vt = getVtPanViewerDiagnostics();
+        const warn = recentWorst > 50 ? '#ffb4b4' : '#cfe8ff';
+        const rows = [
+          `<span style="color:${warn}">${fps.toFixed(0)} fps</span>  ·  gap ${avg.toFixed(1)}ms (worst ${recentWorst.toFixed(0)})`,
+          `all-time worst gap: ${worstGapMs.toFixed(0)}ms`,
+        ];
+        if (vt?.active) {
+          const c = vt.cacheStats;
+          rows.push(
+            `VT ${vt.renderMode} · ${vt.itemsLoaded} items · mip ${vt.mip?.requested ?? '?'}`,
+            `pages ${c.residentPages}/${c.capacityPages} · miss ${c.misses} · evict ${c.evictions}`
+          );
+        } else {
+          rows.push('VT: not running');
+        }
+        perf.innerHTML = rows.join('<br>');
+      }
     });
 
     MapShine.__heartbeat = { host, renderer, scene, camera, triangle };

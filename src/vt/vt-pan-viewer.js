@@ -791,36 +791,45 @@ export async function startVtPanViewer({
       const maskUV = () => positionGeometry.xy; // placeholder space; real screen UV lands with the producer
       const sampleMask = () => THREE.TSL.texture(occlusionMask.texture, maskUV());
 
-      const realChain = (maskSample, { skipOcclusion = false } = {}) =>
+      const realChain = (maskSample, { skipOcclusion = false, factorOverride = null } = {}) =>
         Fn(() => {
           const c = vt.sample(uv()).toVar();
           c.rgb.mulAssign(uTint);
           c.a.mulAssign(uAlpha);
-          if (!skipOcclusion) c.a.mulAssign(occlusionAlphaFactor(maskSample()).factor);
+          if (factorOverride) c.a.mulAssign(factorOverride());
+          else if (!skipOcclusion) c.a.mulAssign(occlusionAlphaFactor(maskSample()).factor);
           return c;
         })();
 
-      const debugNode =
-        debugStageName === 'solid'
-          ? THREE.TSL.vec4(1, 0, 0, 1) // bypasses the ENTIRE graph
-          : debugStageName === 'no-occlusion'
-            ? realChain(null, { skipOcclusion: true })
-            : debugStageName === 'occ-const'
-              ? // THE DECISIVE ONE: identical occlusion maths, but the mask texture read
-                // is replaced by the exact constant it returns. Draws => the arithmetic
-                // is innocent and merely BINDING the mask texture kills the draw. Black
-                // => the arithmetic is guilty after all, despite the printed uniforms.
-                realChain(MASK_CLEAR)
-              : debugStageName === 'occ-value'
-                ? // `occ` itself as greyscale, with the real texture. White = the shader
-                  // computes "fully occluded" from weights the diagnostics say are 0.
-                  Fn(() => {
-                    const { occ } = occlusionAlphaFactor(sampleMask());
-                    return THREE.TSL.vec4(occ, occ, occ, 1);
-                  })()
-                : debugStageName
-                  ? vt.debugStage(debugStageName, uv())
-                  : null;
+      // A LOOKUP, not a nine-deep ternary. The ternary was unreadable enough that I
+      // corrupted it while editing; a table of stage -> node is the same thing and
+      // cannot nest wrong.
+      const debugStages = {
+        solid: () => THREE.TSL.vec4(1, 0, 0, 1), // bypasses the ENTIRE graph
+        'no-occlusion': () => realChain(null, { skipOcclusion: true }),
+        // Identical occlusion maths, but the mask texture read is replaced by the
+        // exact constant it returns. PROVEN BLACK (2026-07-16) => the texture binding
+        // is innocent and the arithmetic is guilty, on uniforms that print as zeros.
+        'occ-const': () => realChain(MASK_CLEAR),
+        // The real chain with the occlusion factor replaced by a LITERAL 1.
+        // Mathematically an exact no-op, structurally identical (a second mulAssign on
+        // c.a). Black => the arithmetic is innocent after all and the SHAPE of the
+        // expression is the bug: TSL mis-compiling two chained mulAssign calls on the
+        // same swizzle. Draws => the factor really does evaluate to something other
+        // than 1, despite every printed uniform saying that is impossible.
+        'occ-one': () => realChain(null, { factorOverride: () => float(1) }),
+        // `occ` as RED=occluded / GREEN=not. Greyscale was a BAD instrument: black
+        // meant EITHER occ==0 OR the draw never happened -- opposite conclusions
+        // wearing the same colour. Three outcomes now have three distinct colours.
+        'occ-value': () =>
+          Fn(() => {
+            const { occ } = occlusionAlphaFactor(sampleMask());
+            return THREE.TSL.vec4(occ, float(1).sub(occ), 0, 1);
+          })(),
+      };
+      const debugNode = debugStageName
+        ? (debugStages[debugStageName]?.() ?? vt.debugStage(debugStageName, uv()))
+        : null;
 
       material.colorNode = debugNode ?? realChain(sampleMask);
 

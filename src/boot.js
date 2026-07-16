@@ -241,7 +241,8 @@ function install() {
       { value: 'sample-opaque', label: 'sample — full sampler, alpha forced' },
       { value: 'no-occlusion', label: 'no-occlusion — the real chain minus occlusion' },
       { value: 'occ-const', label: 'occ-const — occlusion maths, mask texture NOT bound' },
-      { value: 'occ-value', label: 'occ-value — occ as greyscale (white = occluded)' },
+      { value: 'occ-value', label: 'occ-value — red=occluded, green=not, black=no draw' },
+      { value: 'occ-one', label: 'occ-one — the chain, occlusion factor forced to 1' },
     ],
     () => getVtDebugStage() ?? '',
     async (value) => {

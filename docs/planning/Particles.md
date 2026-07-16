@@ -61,7 +61,30 @@
 - **Spawn sources are decode-time extractors** (`vt:` pack + extractor id) — fire points, water splashes, drip edges, dust zones: one mechanism.
 - **Tiers per `Effects.md`** — particles are the ladder's C7/C8 rungs *by definition*, so every system is coverage- and zoom-gated (Law 7): rain that is sub-pixel does not simulate. Tier 0 for a particle system is legitimately **absent** (unlike surface effects) — but its *tier-0 stand-in* is the cheap non-particle cue where one exists (wet tint, snow albedo shift) declared by the owning surface effect, so weather never vanishes entirely on weak machines.
 - **Inputs are declared reads**: wind field, weather state, time — never reached for.
-- **Open question (Stage 6 spike):** keep `three.quarks` under the node renderer, or subsume into TSL-native instanced particles? Quarks' WebGL-era internals vs one-source-TSL doctrine — decide by spike, not preference; its *behavior-graph shape* survives either way.
+- **✅ RESOLVED (2026-07-16), was "Stage 6 spike": TSL-NATIVE GPU PARTICLES. `three.quarks` the LIBRARY cannot be used; `three.quarks` the DESIGN is harvested wholesale.**
+
+  **Why quarks cannot be used — verified in source, at HEAD (0.17.1, freshly downloaded), not inferred:** it has `NodeMaterial: 0`, `TSL: 0`, `WebGPU: 0`, `wgsl: 0` — and `ShaderMaterial: 4`, `gl_FragColor: 5`, `onBeforeCompile: 10`. It builds raw-GLSL `ShaderMaterial`s patched via `onBeforeCompile`, **a hook the node renderer never calls** (4 hits in our build: a stub, two comments, a cache key). The exact failure path is in `three.webgpu.js`:
+  ```js
+  let nodeMaterial = renderer.library.fromMaterial(material);   // ShaderMaterial => not in the registry => null
+  if (nodeMaterial === null) {
+    error(`NodeBuilder: Material "${material.type}" is not compatible.`);
+    nodeMaterial = new NodeMaterial();                          // => blank material
+  }
+  ```
+  **This is NOT a cost of the TSL decision.** Quarks is incompatible with *modern three.js's material system*, which any current three.js path requires. Upstream's own roadmap lists WebGPU support as unchecked/planned. The only way to run quarks would be a second WebGLRenderer — i.e. `Engine-Postmortem.md` §1's ROOT BLUNDER (two renderers), knowingly re-committed. Never.
+
+  **Why TSL is an UPGRADE, not a consolation — verified in our vendored build:** it exports `TSL.compute`, `TSL.storage`, `TSL.instanceIndex`, and **`TSL.instancedArray`** (three.js's purpose-built GPGPU particle helper), plus `StorageInstancedBufferAttribute`, `atomicAdd`, `workgroupBarrier`. **And compute runs on BOTH backends:** `WebGLBackend.compute()` is a real implementation that emulates compute via **transform feedback** (`RASTERIZER_DISCARD` + `beginTransformFeedback(POINTS)` + `drawArraysInstanced` + ping-pong `switchBuffers()`). So ONE TSL source gives GPU-simulated particles on WebGPU *and* WebGL2 — exactly `keyhole-webgpu-tsl-decision`'s promise, and the safety slide is intact.
+
+  | | three.quarks | TSL-native |
+  |---|---|---|
+  | Simulation | **CPU**, per-particle JS objects | **GPU** compute / transform feedback |
+  | Backends under our renderer | **none** (blank material) | WebGPU **and** WebGL2 |
+  | Per-particle CPU cost | yes | **zero** |
+  | Keyhole doctrine | violates one-source-TSL; needs a 2nd renderer | native |
+
+  Quarks' CPU sim was *also* the disease `Effects.md` and `Engine-Postmortem.md` name: per-particle JS objects (11 files did this). **TSL particles delete V2's actual particle bottleneck**, not just port around it.
+
+  **What IS harvested — the design, which was always the good part:** `quarks.core` is **renderer-agnostic** (verified: `ShaderMaterial: 0`, `gl_FragColor: 0`, `onBeforeCompile: 0`) and its export list *is* the vocabulary to reimplement: emitters (`ConeEmitter`, `GridEmitter`, `DonutEmitter`, `CircleEmitter`, `HemisphereEmitter`, `PointEmitter`), behaviors (`ApplyForce`, `ApplyCollision`, `ColorOverLife`, `SizeOverLife`, `ForceOverLife`, `OrbitOverLife`, `LimitSpeedOverLife`, `ColorBySpeed`, `TurbulenceField`, `CurlNoiseField`), generators (`IntervalValue`, `ConstantValue`, `PiecewiseBezier`, `Bezier`, `ColorRange`, `Gradient`), and `*FromJSON` deserializers — **proving the author's "weather as data" model was already quarks' own model.** Take the vocabulary, the JSON shape, and every tuned curve/rate value from `WeatherParticles`; implement the behaviors as TSL compute functions. `quarks.core` may even be usable as a *reference implementation* to diff against.
 
 ## 8. Declaration sketch
 

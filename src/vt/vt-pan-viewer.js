@@ -346,6 +346,10 @@ export async function startVtPanViewer({
       display: 'block',
       background: '#000',
       pointerEvents: 'auto',
+      // NOT 'grab'. The cursor was permanently a hand, which promises a drag
+      // that is not always what a click does (author-reported). It becomes
+      // 'grabbing' only for the duration of an actual pan, then reverts.
+      cursor: 'default',
     });
     mount.host.appendChild(canvas);
 
@@ -765,27 +769,67 @@ export async function startVtPanViewer({
     const hitchLog = []; // {atMs, gapMs, decodeStats, cacheStats} per hitch — full context AT THE MOMENT it happened
 
     /** Ground truth, not theory: actual rendered canvas pixels + one pack's actual indirection buffer contents. */
-    /** Ground truth, not theory: one pack's actual indirection buffer contents. */
+    /**
+     * GROUND TRUTH. Reads REAL pixels back, on either backend.
+     *
+     * The previous version used `gl.readPixels` + `preserveDrawingBuffer`, which is
+     * WebGL-only — so the TSL port disabled it, and did so in the SAME commit that
+     * made the pixels suspect. The renderer then came up black and there was no way
+     * to tell "the shader output black" from "nothing drew at all" from "it drew and
+     * the readback lied". Removing the instrument that would have answered that,
+     * while changing the thing it measures, was the wrong call.
+     *
+     * A RenderTarget + readRenderTargetPixelsAsync is the readback path BOTH
+     * backends implement (proven by the TSL spike, which used exactly this).
+     * Re-rendering the live scene into a small target costs one extra frame's work,
+     * on a button press, and is worth it: this answers questions nothing else can.
+     */
+    async function readGroundTruthPixels() {
+      const out = {};
+      let rt = null;
+      try {
+        rt = new THREE.RenderTarget(canvasW, canvasH);
+        renderer.setRenderTarget(rt);
+        await renderer.renderAsync(scene, camera);
+        renderer.setRenderTarget(null);
+
+        const points = {
+          center: [Math.floor(canvasW / 2), Math.floor(canvasH / 2)],
+          topLeft: [4, 4],
+          bottomRight: [canvasW - 4, canvasH - 4],
+        };
+        out.renderedPixels = {};
+        for (const [label, [x, y]] of Object.entries(points)) {
+          const px = await renderer.readRenderTargetPixelsAsync(rt, x, y, 1, 1);
+          out.renderedPixels[label] = px ? [px[0], px[1], px[2], px[3]] : null;
+        }
+        // The three answers this exists to separate. Alpha is the tell: a fully
+        // transparent pixel means the shader RAN and produced nothing visible,
+        // which is a completely different bug from an opaque black one.
+        const c = out.renderedPixels.center;
+        out.pixelVerdict = !c
+          ? 'readback returned nothing — the instrument failed, NOT evidence about the renderer'
+          : c[3] === 0
+            ? 'TRANSPARENT — the shader ran but produced alpha 0. Suspect the alpha chain (uAlpha / the occlusion mix), not the sampler.'
+            : c[0] === 0 && c[1] === 0 && c[2] === 0
+              ? 'OPAQUE BLACK — the sampler returned vec4(0,0,0,1). That is EXACTLY the out-of-world early-out, so suspect worldSizePx/uv rather than the atlas.'
+              : c[0] > 200 && c[2] > 200 && c[1] < 60
+                ? 'MAGENTA — the mip walk found nothing resident at any level: the coarse-pin invariant is broken, or the closed-form mip layout disagrees with residency.'
+                : 'real colour — the sampler is working; if the screen still looks wrong the problem is downstream (camera, geometry, blending).';
+      } catch (err) {
+        out.renderedPixels = null;
+        out.pixelReadbackError = String(err?.message || err);
+      } finally {
+        try {
+          rt?.dispose();
+        } catch (_) {}
+      }
+      return out;
+    }
+
+    /** The cheap, synchronous half: one pack's indirection buffer (plain JS state). */
     function sampleDiagnostics(pack) {
       const out = {};
-      // THE PIXEL READBACK IS GONE, deliberately rather than by oversight.
-      //
-      // It relied on `preserveDrawingBuffer: true`, which is not a WebGPU concept
-      // (0 hits in the node build) — so on WebGPU it would silently read zeros and
-      // look exactly like "the renderer drew nothing". That is the worst kind of
-      // diagnostic: one that manufactures the failure it claims to detect. It was
-      // itself added to work around a case where it read all-zero while the data
-      // was fine (2026-07-15), so it has form.
-      //
-      // Reading a real pixel now needs an explicit RenderTarget + an async
-      // readback (see diag/tsl-spike.js, which does exactly that) — worth doing
-      // when something needs it, not worth faking meanwhile. What remains is the
-      // indirection buffer, which is plain JS state and answers the question the
-      // readback was usually asked: "is the page table actually populated?"
-      out.renderedPixels = null;
-      out.renderedPixelsNote =
-        'unavailable under WebGPURenderer (preserveDrawingBuffer is a WebGL-only concept). ' +
-        'Use indirectionBuffer below, or add a RenderTarget readback like diag/tsl-spike.js does.';
       if (pack) {
         let nonZeroTexels = 0;
         const distinctSlots = new Set();
@@ -1272,7 +1316,13 @@ export async function startVtPanViewer({
     let lastPointerY = 0;
 
     function onPointerDown(e) {
-      if (e.button !== 0 && e.button !== 1) return; // left or middle button only
+      // RIGHT-DRAG PANS — verified in the vendored source, not remembered
+      // (author caught this): Canvas#_onDragRightMove (board.mjs:2278) is literally
+      // `this.pan(...)`, and mouse-handler.mjs:462 routes `button === 2` to the
+      // right-drag handler. LEFT-drag in Foundry is the SELECT box, so panning on
+      // it would fight every placeable layer the moment tokens land.
+      // Middle (1) is kept as a common convenience that collides with nothing.
+      if (e.button !== 2 && e.button !== 1) return;
       dragging = true;
       dragPointerId = e.pointerId;
       lastPointerX = e.clientX;
@@ -1305,7 +1355,7 @@ export async function startVtPanViewer({
       try {
         if (e) canvas.releasePointerCapture(e.pointerId);
       } catch (_) {}
-      canvas.style.cursor = 'grab';
+      canvas.style.cursor = 'default';
     }
 
     // --- CAMERA SMOOTHING (2026-07-16 — see view-state.js's own header for the
@@ -1643,8 +1693,10 @@ export async function startVtPanViewer({
     // area, so events land here, not on the occluded PIXI canvas beneath). They
     // die automatically when the canvas is removed in disposeActive(). `wheel`
     // must be passive:false so preventDefault() can suppress page scroll.
-    canvas.style.cursor = 'grab';
+    canvas.style.cursor = 'default';
     canvas.addEventListener('pointerdown', onPointerDown);
+    // Right-drag pans, so the browser context menu must not fire on release.
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     canvas.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerup', endDrag);
     canvas.addEventListener('pointercancel', endDrag);
@@ -1701,6 +1753,7 @@ export async function startVtPanViewer({
        * would be reporting hitches it caused itself.
        */
       getZoomState: () => ({ halfSpanPx: view?.halfSpanPx ?? 0, targetHalfSpanPx }),
+      readGroundTruthPixels, // async — its own report, since it re-renders a frame
       getDiagnostics() {
         const avgMs = frameTimes.length ? frameTimes.reduce((a, b) => a + b, 0) / frameTimes.length : 0;
         // The viewed floor's first item, as the sample subject for the
@@ -1911,6 +1964,20 @@ export async function startVtPanViewer({
     });
     return diag0;
   }
+}
+
+/**
+ * GROUND TRUTH: what colour is actually on screen right now?
+ *
+ * Separate from getVtPanViewerDiagnostics because it is ASYNC and re-renders a
+ * frame — the honest cost of a real answer on a backend with no synchronous
+ * readback. `pixelVerdict` separates the failures that look identical from the
+ * outside: opaque black (the sampler's out-of-world early-out), transparent (the
+ * alpha chain), magenta (a broken pin invariant), or a real colour.
+ */
+export async function readVtPanViewerPixels() {
+  if (!_active) return { active: false };
+  return { active: true, ...(await _active.readGroundTruthPixels()) };
 }
 
 /** For the debug panel: current diagnostics without restarting anything. */

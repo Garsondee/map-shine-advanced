@@ -39,6 +39,7 @@ import {
   startVtPanViewer,
   stopVtPanViewer,
   getVtPanViewerDiagnostics,
+  readVtPanViewerPixels,
   setVtPanViewerFloor,
   setVtPanViewerDisplayLayer,
   runZoomThrashTest,
@@ -214,6 +215,13 @@ function install() {
     generatedAt: new Date().toISOString(),
     ...getVtPanViewerDiagnostics(),
   }));
+  MapShine.debug.registerReport('vt-pixels', 'VT: What colour is ACTUALLY on screen? (ground truth)', async () => ({
+    report: 'vt-pixels',
+    generatedAt: new Date().toISOString(),
+    ...(await readVtPanViewerPixels()),
+    note: 'Read pixelVerdict first — it separates failures that look identical on screen: OPAQUE BLACK (the sampler hit its out-of-world early-out), TRANSPARENT (the alpha chain zeroed it), MAGENTA (nothing resident at any mip), or a real colour (the sampler is fine and the problem is downstream).',
+  }));
+
   MapShine.debug.registerReport('vt-pan-viewer-stop', 'VT Pan Viewer: Stop/Clear', () => ({
     report: 'vt-pan-viewer-stop',
     generatedAt: new Date().toISOString(),

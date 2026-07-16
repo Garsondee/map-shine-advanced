@@ -1,5 +1,31 @@
 # Shader compilation, TSL, and the ground to prepare
 
+---
+
+## ⚡ DECISION (author, 2026-07-16): **WebGPU + TSL is the direction.** This note's §5 recommendation is superseded.
+
+**Author's call, verbatim intent:** *"we have to work on the basis that WebGPU is the way to go... the improvements that TSL offers us are extremely hard to turn down... WebGPU is the future and TSL should be able to do everything that WebGL2 can do and a lot more, better memory management... it seems like a bad idea to build the entire module on a slightly outdated technology."* Plus: **every effect gets a tiered arrangement, with the most basic tier deliberately lightweight.**
+
+**This overrules §5's "don't port now", and the evidence now supports the author rather than my caution:**
+
+1. **The first spike run's "FAILURE" was MY INSTRUMENT, not TSL.** WebGL2 returned `[0,165,255]` against an expected `[0,96,255]` — red and blue exact, and 96→165 is precisely **sRGB encoding of linear 96**. The pointer→layer lookup was *perfectly correct*; the renderer applied its default output colour conversion and my comparison didn't know. **WebGL2 passed all three hard parts.** WebGPU returned `[0,0,0,0]` — including **zero alpha**, i.e. "nothing was read", not "wrong colour drawn": it compiled cleanly in 406ms, and my readback fell back to `backend.gl`, which does not exist on `WebGPUBackend`. Both fixed; re-run required.
+2. **The strongest argument is one I under-weighted: memory.** WebGPU has an *explicit* resource model — you create, you `destroy()`, you know what exists. WebGL's is implicit and driver-managed. This project's entire crisis was VRAM it could not see or control (§1: "102–103% of ceiling", masks+PIXI at 75% before one RT existed). Keyhole's thesis is a **fixed, explicit budget**; WebGPU's model *is* that thesis, and WebGL's fights it. That alignment matters more than the porting cost.
+3. **Reach:** WebGPU shipped in Chrome 113 (May 2023) and Chrome auto-updates; the author's read is that the vast majority of Foundry users have it and skew to decent hardware.
+4. **Compounding cost:** every GLSL shader written from here is written twice later. At one shader, that debt is zero. It only grows.
+
+**What stands from the original analysis (unchanged by the decision):**
+- **TSL is not "the WebGPU language" — it runs on BOTH backends** (`three.webgpu.js` has `WebGLBackend` *and* `WebGPUBackend`). So there is **ONE source per effect**, never a hand-written WebGL2 twin. The tiers below are variants *within* it.
+- **TIERS ARE DRIVEN BY MEASURED PERFORMANCE, NOT BY BACKEND.** Having WebGPU means the *browser* is recent, not that the *machine* is fast. A 2017 laptop on current Chrome has WebGPU; handing it the expensive tier is the exact crash Keyhole exists to prevent. The DRS governor and explicit user settings choose the tier; backend selection is a separate, automatic thing.
+- **Workers still cannot compile shaders** (§2) — structurally, on either backend.
+- **The design floor still exists.** "Most users have good hardware" is a reason to make WebGPU primary; it is not a reason to stop having a cheap tier. §4.3's PIXI rung remains the last resort.
+
+**Confirmed live on the author's 3070 (2026-07-16):** `parallelShaderCompile: true`, `precompileMs: 13`, `programCount: 1` — the KHR extension IS present, so §3's good case is the real one, and the precompile added in `3cafa1e` genuinely parallelises.
+
+**Sequencing (unchanged in spirit by the decision):** re-run the fixed spike first. It is now ~10 minutes of the author's time to convert "WebGPU works here" from a belief into a pixel. Only then port the core, once, and delete the GLSL — never maintain both.
+
+---
+
+
 **Status:** DESIGN NOTE (authored 2026-07-16, at the author's request: *"give some serious thought to shader compilation for both webGL2 and TSL — what can we do to prepare the ground for these things? Organisation is key. Web workers might be appropriate but might not be."*)
 **Scope:** thinking and decisions, not a build plan. Nothing here is scheduled. It exists so the decisions are made **while the cost of being wrong is still one shader**.
 **Relationship to Keyhole.md:** subordinate. Q3 (*"WebGL2 now — do not block the rebirth on it"*) and §4.3's deferred tiered fallback are unchanged by this note; it explains what those decisions cost and what makes them cheap to revisit.

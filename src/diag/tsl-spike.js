@@ -137,6 +137,13 @@ async function runBackend(THREE, forceWebGL) {
     canvas.width = 8;
     canvas.height = 8;
     renderer = new THREE.WebGPURenderer({ canvas, antialias: false, forceWebGL });
+    // NO OUTPUT COLOUR CONVERSION. The first run of this spike reported a false
+    // FAILURE because of exactly this: the atlas holds raw bytes, the renderer
+    // defaults to sRGB output, and linear 96 came back as 165. The lookup had been
+    // perfectly correct. This test is about whether the POINTER->LAYER lookup
+    // resolves, not about colour management, so the conversion is turned off and
+    // the comparison is made in the space the data was written in.
+    renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
     await renderer.init();
 
     out.actualBackend = renderer.backend?.isWebGPUBackend ? 'WebGPUBackend' : 'WebGLBackend';
@@ -156,26 +163,52 @@ async function runBackend(THREE, forceWebGL) {
     await renderer.compileAsync(scene, camera);
     out.compileMs = Math.round(performance.now() - tCompile0);
 
+    // Render into an explicit RenderTarget rather than the canvas. The first run
+    // reported WebGPU as [0,0,0,0] -- INCLUDING zero alpha, i.e. "nothing was
+    // read", not "the wrong colour was drawn". The old readback fell back to
+    // `backend.gl`, which does not exist on WebGPUBackend, so the buffer was
+    // simply never written. readRenderTargetPixelsAsync on a real target is the
+    // one path both backends actually implement.
+    const rt = new THREE.RenderTarget(8, 8, { colorSpace: THREE.LinearSRGBColorSpace });
+    renderer.setRenderTarget(rt);
     await renderer.renderAsync(scene, camera);
+    renderer.setRenderTarget(null);
 
     // GROUND TRUTH: read the pixel. Not throwing is not the standard.
     const buf = new Uint8Array(4);
-    await renderer.readRenderTargetPixelsAsync(null, 4, 4, 1, 1, buf).catch(async () => {
-      const gl = renderer.backend?.gl;
-      if (gl) gl.readPixels(4, 4, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, buf);
-    });
+    try {
+      const px = await renderer.readRenderTargetPixelsAsync(rt, 4, 4, 1, 1);
+      if (px && px.length >= 4) buf.set(px.subarray(0, 4));
+      else await renderer.readRenderTargetPixelsAsync(rt, 4, 4, 1, 1, buf);
+    } catch (readErr) {
+      out.readbackError = String(readErr?.message || readErr);
+    }
+    try {
+      rt.dispose();
+    } catch (_) {}
     out.pixel = [buf[0], buf[1], buf[2], buf[3]];
+    // A zero ALPHA means nothing was read at all -- a broken instrument, not a
+    // broken renderer. Said out loud so the two can never be confused again.
+    out.readbackWorked = buf[3] > 0;
 
     const want = LAYER_COLOURS[TARGET_LAYER];
-    const near = (a, b) => Math.abs(a - b) <= 8; // sRGB/rounding slack, not a free pass
+    const near = (a, b) => Math.abs(a - b) <= 8; // rounding slack, not a free pass
     out.expectedPixel = want;
     out.pixelCorrect = near(buf[0], want[0]) && near(buf[1], want[1]) && near(buf[2], want[2]);
-    out.ok = out.pixelCorrect;
-    if (!out.pixelCorrect) {
+    out.ok = out.pixelCorrect && out.readbackWorked;
+    if (!out.readbackWorked) {
+      out.diagnosis =
+        'NOTHING WAS READ BACK (alpha 0) — the spike could not measure this backend. This is a broken instrument, NOT evidence against the backend.';
+    } else if (!out.pixelCorrect) {
+      // Distinguish the three failures rather than lumping them together — the
+      // first run mislabelled a colour-space difference as a lookup failure.
+      const wrongLayer = LAYER_COLOURS.findIndex((c) => near(buf[0], c[0]) && near(buf[1], c[1]) && near(buf[2], c[2]));
       out.diagnosis =
         buf[0] > 200 && buf[2] > 200 && buf[1] < 60
           ? 'MAGENTA — the dynamic Loop never resolved (hard part 3 failed)'
-          : 'wrong colour — the indirection→array-layer lookup resolved to the wrong layer (hard part 1 or 2 failed)';
+          : wrongLayer >= 0
+            ? `resolved to layer ${wrongLayer} instead of ${TARGET_LAYER} — the indirection→array-layer lookup is genuinely wrong (hard part 1 or 2)`
+            : 'a colour matching NO layer — most likely a colour-space/encoding difference rather than a lookup failure. Compare the channels: if only the mid-tones differ, the lookup is fine.';
     }
   } catch (err) {
     out.error = `${err?.message || err}`;

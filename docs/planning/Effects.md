@@ -2,6 +2,7 @@
 
 **Status:** DESIGN SPEC, authored 2026-07-16. Not yet implemented — no effect has been ported to Keyhole yet. This is the shape they must take when they are (Keyhole §8 Stage 6).
 **Scope:** performance, and nothing else. Not the look, not the art direction, not the parameter schemas. How an effect is *laid out* so that it costs what the machine can afford.
+**Companion:** `Effects-API.md` — the CONTRACT spec (what an effect may touch, audited out of V2's 97k lines). This doc answers *"how expensive?"*; that one answers *"what may it touch?"*. They are independent and both required.
 **Prerequisite reading:** `Keyhole.md` §0 (the law + doctrine), §4.1 (the VT sampler), §4.2 (the attribute buffer), §9 Q3 (why TSL). Project memory: `keyhole-webgpu-tsl-decision`, `keyhole-stage6-effects-approach`, `reference_tsl_method_chaining_trap`.
 
 ---

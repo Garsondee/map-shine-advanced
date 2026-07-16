@@ -3,6 +3,7 @@
 **Status:** RESEARCH, authored 2026-07-16 from a direct audit of `legacy/` at the author's direction (*"find the most critical focal points of the previous module and go through them looking for high level architecture blunders when building a rendering engine"*).
 **Companion:** `Effects-API.md` audits the **effects** layer (the contract). **This** audits the **engine** layer — the render loop, the renderer, the Foundry bridge, resource lifetime. Memory: `v2-postmortem-the-failure-modes` carries the distilled version.
 **Scale:** `legacy/` is **376,355 lines** of non-vendor JavaScript across 435 files.
+**⏱️ AND IT WAS BUILT IN UNDER SIX MONTHS** (author, 2026-07-16; git: first commit `2025-11-17`) — **~2,000 lines/day, sustained, solo.** This is the single most important number in the document and it inverts the reading: nothing here *rotted*. It was laid down at extraordinary speed. **The good abstractions did not lose over years; they lost in MONTHS.** Structure does not lose to laziness — it loses to VELOCITY, because at 2,000 lines/day there is no afternoon in which the correct-but-harder path is affordable. Read every finding below as the signature of speed, not neglect.
 
 ---
 

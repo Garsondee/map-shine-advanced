@@ -1221,11 +1221,13 @@ export async function startVtPanViewer({
       view.centerXPx = cx;
       view.centerYPx = cy;
       view.halfSpanPx = halfSpan;
-      // MSA's easing is for MSA's own input. Foundry has already eased this pan;
-      // easing an eased value would lag behind the real camera, and a camera that
-      // lags is a camera that disagrees — the exact thing this model exists to
-      // prevent.
-      view.targetHalfSpanPx = halfSpan;
+      // NOTE there is deliberately no eased-target assignment here. `view` has no
+      // targetHalfSpanPx — the eased target is a CLOSURE variable of that name
+      // (see renderFrame), and setting the field on `view` created a property
+      // nothing reads while the real target sat untouched at its load-time value.
+      // The whole easing path is skipped when following Foundry anyway: Foundry
+      // has already eased this pan, and easing an eased value lags the real
+      // camera. A camera that lags is a camera that disagrees.
       return changed;
     }
 
@@ -1442,30 +1444,42 @@ export async function startVtPanViewer({
 
       let dirty = false;
 
-      // Continuous keyboard pan: ease velocity toward what the held keys
-      // imply, then integrate position — replaces the old discrete per-
-      // keydown jump with a smooth glide whose speed scales with the CURRENT
-      // zoom (screenfuls/sec, matching the old step's own feel).
-      const targetVelocity = computeTargetPanVelocity(heldPanKeys, view.halfSpanPx * PAN_SPEED_SCREENFULS_PER_SEC);
-      panVelocity = easeVelocityTowardTarget(panVelocity, targetVelocity, dtSec, PAN_RAMP_HALF_LIFE_SEC);
-      if (Math.abs(panVelocity.x) > 0.01 || Math.abs(panVelocity.y) > 0.01) {
-        const nextView = integratePan(view, panVelocity, dtSec, world);
-        if (nextView !== view) {
-          view = nextView;
-          dirty = true;
-        }
-      }
-
-      // Smoothed zoom: ease halfSpanPx toward the last input's target,
-      // re-anchored around the SAME screen point every frame via the
-      // existing, already-tested applyZoomAtPixel — never a new formula.
-      if (targetHalfSpanPx !== null) {
-        const factor = easedZoomFactor(view.halfSpanPx, targetHalfSpanPx, dtSec, ZOOM_EASE_HALF_LIFE_SEC);
-        if (factor !== 1) {
-          const nextView = applyZoomAtPixel(view, factor, zoomAnchorSx, zoomAnchorSy, canvasW, canvasH, world);
+      // MSA'S OWN CAMERA INTEGRATION — skipped entirely when following Foundry.
+      //
+      // Gating the input LISTENERS was not enough (author-reported live: "it keeps
+      // trying to push the camera back to the same position and zoom every
+      // frame"). This block runs per-frame regardless of input: it eases
+      // view.halfSpanPx toward targetHalfSpanPx — still holding the value captured
+      // at load — and REPLACES `view` wholesale via integratePan/applyZoomAtPixel.
+      // So every frame it overwrote whatever syncFoundryCamera had just adopted and
+      // dragged the view back to the load-time camera. Two cameras fighting: the
+      // precise failure this model exists to prevent, reproduced by my own loop.
+      if (!followFoundryCamera) {
+        // Continuous keyboard pan: ease velocity toward what the held keys
+        // imply, then integrate position — replaces the old discrete per-
+        // keydown jump with a smooth glide whose speed scales with the CURRENT
+        // zoom (screenfuls/sec, matching the old step's own feel).
+        const targetVelocity = computeTargetPanVelocity(heldPanKeys, view.halfSpanPx * PAN_SPEED_SCREENFULS_PER_SEC);
+        panVelocity = easeVelocityTowardTarget(panVelocity, targetVelocity, dtSec, PAN_RAMP_HALF_LIFE_SEC);
+        if (Math.abs(panVelocity.x) > 0.01 || Math.abs(panVelocity.y) > 0.01) {
+          const nextView = integratePan(view, panVelocity, dtSec, world);
           if (nextView !== view) {
             view = nextView;
             dirty = true;
+          }
+        }
+
+        // Smoothed zoom: ease halfSpanPx toward the last input's target,
+        // re-anchored around the SAME screen point every frame via the
+        // existing, already-tested applyZoomAtPixel — never a new formula.
+        if (targetHalfSpanPx !== null) {
+          const factor = easedZoomFactor(view.halfSpanPx, targetHalfSpanPx, dtSec, ZOOM_EASE_HALF_LIFE_SEC);
+          if (factor !== 1) {
+            const nextView = applyZoomAtPixel(view, factor, zoomAnchorSx, zoomAnchorSy, canvasW, canvasH, world);
+            if (nextView !== view) {
+              view = nextView;
+              dirty = true;
+            }
           }
         }
       }
@@ -1721,8 +1735,13 @@ export async function startVtPanViewer({
 
     // capture:true — see onKeyDown's comment. Must run before Foundry's own
     // window-level keydown listener (registered at Foundry boot, bubble phase).
-    window.addEventListener('keydown', onKeyDown, { capture: true });
-    window.addEventListener('keyup', onKeyUp, { capture: true });
+    // Keyboard camera controls are MSA's own, so they go with the rest of them
+    // when Foundry owns input — and these are on WINDOW, so pointer-events:none
+    // could never have stopped them stealing WASD from Foundry.
+    if (!followFoundryCamera) {
+      window.addEventListener('keydown', onKeyDown, { capture: true });
+      window.addEventListener('keyup', onKeyUp, { capture: true });
+    }
     // Stuck-key safety (see clearHeldKeys' own doc) — a keyup missed while
     // this window/tab wasn't focused would otherwise leave the camera panning
     // forever once focus returns.

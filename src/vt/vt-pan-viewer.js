@@ -1209,6 +1209,9 @@ export async function startVtPanViewer({
       // displayed pack now requires rebuilding the material; setDisplayLayer is a
       // debug-only mask view, so it is a tracked gap rather than a hot path.
       u.worldSizePx.value.set(pack.table.worldWidthPx, pack.table.worldHeightPx);
+      // Only the albedo pack is a PICTURE; every other pack is a mask, i.e. data that
+      // must reach the shader byte-exact. See the sampler's srgbDecode.
+      u.srgbDecode.value = pack.name === 'albedo' ? 1 : 0;
       // THE WHOLE MIP LAYOUT, in two integers. The shader derives every level's
       // grid and origin from these (vt-sample.tsl.js's header explains why that is
       // exact, and vt-core.test.mjs proves it against the real PageTable).

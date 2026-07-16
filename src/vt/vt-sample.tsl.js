@@ -95,7 +95,7 @@ export function createVtSampler(
   TSL,
   { atlasTexture, initialPageTable, pagesPerAxis, pagesPerLayer, pageSizePx, borderPx, atlasSizePx }
 ) {
-  const { Fn, If, Loop, uniform, texture, textureLoad, vec2, vec4, ivec2, int, float, select } = TSL;
+  const { Fn, If, Loop, uniform, texture, textureLoad, vec2, vec4, ivec2, int, float, select, sRGBTransferEOTF } = TSL;
 
   // THE PAGE TABLE IS THE RAW TEXTURE, not a TextureNode.
   //
@@ -117,6 +117,15 @@ export function createVtSampler(
     pageTableTexture: initialPageTable,
     worldSizePx: uniform(vec2(1, 1)),
     pages0: uniform(ivec2(1, 1)), // pagesX(0), pagesY(0) — the whole mip layout, see header
+    // 0 = these pages are DATA, sample them raw. 1 = these pages are COLOUR, decode
+    // sRGB->linear on fetch.
+    //
+    // This cannot be a property of the atlas texture, which is where it would
+    // normally live: ONE atlas holds both the map's colour pages and mask pages, so
+    // texture.colorSpace = SRGBColorSpace would correctly fix the map and silently
+    // corrupt every mask. Colour space belongs to the DATA, and this texture carries
+    // two kinds of it -- so the decode is per-pack, here, driven by pack.name.
+    srgbDecode: uniform(float(0)),
     requestedMip: uniform(int(0)),
     requestedMipFrac: uniform(float(0)),
     maxMip: uniform(int(0)),
@@ -155,7 +164,17 @@ export function createVtSampler(
     // no mip levels, and it returned (0,0,0,0) — a black, fully transparent screen
     // with no error anywhere (found live 2026-07-16; it was the ONE thing this
     // differed by from the TSL spike that rendered a correct pixel).
-    return texture(atlasTexture, pagePx.div(float(atlasSizePx))).depth(layer);
+    const texel = texture(atlasTexture, pagePx.div(float(atlasSizePx))).depth(layer);
+    // WHY this is needed at all: the node renderer's outputColorSpace defaults to
+    // SRGBColorSpace (verified in the vendored build), so it encodes linear->sRGB on
+    // the way out. The old raw-GLSL path converted at NEITHER end and happened to
+    // balance. Feed sRGB bytes in tagged as linear and they get encoded a SECOND
+    // time -- which reads as WASHED OUT, exactly as reported live 2026-07-16. Same
+    // phenomenon that faked out the TSL spike (linear 96 arriving as 165); it has
+    // now cost me twice, hence the essay.
+    //
+    // Alpha is deliberately untouched: alpha is linear in every colour space.
+    return vec4(texel.rgb.mix(sRGBTransferEOTF(texel.rgb), uniforms.srgbDecode), texel.a);
   });
 
   /**

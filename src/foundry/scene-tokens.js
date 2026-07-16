@@ -185,7 +185,7 @@ export function collectTokens(sceneDoc, { visibleLevelIds = [], gridSize, getRou
       // 0 means this token contributes no disc.
       occludableRadius: token.occludable?.radius ?? 0,
       footprint: f,
-      _placement: { kind: 'token', tokenDoc: token, gridSize: size },
+      _placement: { kind: 'token', tokenDoc: token, gridSize: size, footprint: f },
     });
   }
 

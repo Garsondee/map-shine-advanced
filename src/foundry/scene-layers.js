@@ -18,7 +18,12 @@
 
 import { SORT_LAYERS, makeLayerKey } from '../scene/layer-order.js';
 import { packOcclusionModes } from '../scene/occlusion.js';
-import { computeSceneDimensions, computeLevelTexturePlacement, computeTilePlacement } from './scene-geometry.js';
+import {
+  computeSceneDimensions,
+  computeLevelTexturePlacement,
+  computeTilePlacement,
+  computeTokenPlacement,
+} from './scene-geometry.js';
 import { isImageUrl, resolveAssetUrl } from './active-scene-source.js';
 
 /**
@@ -373,6 +378,11 @@ export function collectSceneLayers(sceneDoc, options = {}) {
 export function computeItemPlacement(item, textureSize, dimensions) {
   if (item._placement.kind === 'tile') {
     return computeTilePlacement(textureSize, item._placement.tileDoc);
+  }
+  // A token carries its footprint already converted to pixels — see
+  // scene-tokens.js, which owns the grid-units conversion.
+  if (item._placement.kind === 'token') {
+    return computeTokenPlacement(textureSize, item._placement.tokenDoc, item._placement.footprint);
   }
   return computeLevelTexturePlacement(textureSize, dimensions, item._placement.texturesConfig);
 }

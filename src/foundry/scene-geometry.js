@@ -329,3 +329,46 @@ export function computeTilePlacement(textureSize, tileDoc) {
     scaleY: fitted.scaleY,
   };
 }
+
+/**
+ * Where a token's ART goes, in canvas pixels.
+ *
+ * Same return shape as {@link computeTilePlacement} on purpose — the renderer
+ * then treats a token like any other quad, and no drawing code learns the word
+ * "token". The differences from a tile are entirely in the inputs:
+ *
+ * - **The footprint is passed in, already in PIXELS.** A token's `width`/`height`
+ *   are GRID UNITS (see scene-tokens.js#tokenFootprint), unlike a tile's, which
+ *   are pixels. Taking the footprint as an argument rather than the grid size
+ *   keeps that conversion in exactly one place and keeps this module free of any
+ *   token schema knowledge.
+ * - **`fit` defaults to "contain", not "fill"** — the v14 schema's own default
+ *   (`TextureData({}, {initial: {..., fit: "contain"}})`). Art is fitted inside
+ *   the footprint preserving aspect, never stretched to it.
+ * - **`lockRotation` pins rotation to 0**, whatever angle is stored.
+ *
+ * @param {{width: number, height: number}} textureSize
+ * @param {object} tokenDoc
+ * @param {{x: number, y: number, width: number, height: number}} footprint - PIXELS.
+ * @returns {object} the same placement shape a tile produces.
+ */
+export function computeTokenPlacement(textureSize, tokenDoc, footprint) {
+  const texture = tokenDoc?.texture ?? {};
+  const { anchorX = 0.5, anchorY = 0.5, fit = 'contain', scaleX = 1, scaleY = 1 } = texture;
+  const fitted = computeTextureFit(
+    textureSize,
+    { width: footprint.width, height: footprint.height },
+    { fit, scaleX, scaleY }
+  );
+  return {
+    x: footprint.x,
+    y: footprint.y,
+    width: fitted.width,
+    height: fitted.height,
+    anchorX,
+    anchorY,
+    rotation: tokenDoc?.lockRotation ? 0 : (tokenDoc?.rotation ?? 0),
+    scaleX: fitted.scaleX,
+    scaleY: fitted.scaleY,
+  };
+}

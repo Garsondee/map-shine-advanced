@@ -47,6 +47,7 @@ import {
 } from './vt/vt-pan-viewer.js';
 import { getActiveSceneFloors, computeVisibleFloorIndices } from './foundry/active-scene-source.js';
 import { collectSceneLayers } from './foundry/scene-layers.js';
+import { collectTokens } from './foundry/scene-tokens.js';
 import { engageFoundryFallback } from './diag/render-fallback.js';
 import {
   beginSceneLoad,
@@ -398,16 +399,31 @@ function install() {
       const visibleIndices = computeVisibleFloorIndices(floors, viewedFloorIndex);
       const visibleLevelIds = visibleIndices.map((i) => floors[i]?.id).filter(Boolean);
       const viewedLevelId = floors[viewedFloorIndex]?.id;
-      return collectSceneLayers(sceneDoc, { viewedLevelId, visibleLevelIds, isGM }).items;
+      // Tokens join the SAME flat list as level art and tiles, and are sorted by
+      // the same law (scene/layer-order.js) — they are drawables with a different
+      // sortLayer (TOKENS 700), not a separate pass. That is the whole point of the
+      // law being one flat list: nothing downstream learns the word "token".
+      return [
+        ...collectSceneLayers(sceneDoc, { viewedLevelId, visibleLevelIds, isGM }).items,
+        ...collectTokens(sceneDoc, { visibleLevelIds, isGM }).items,
+      ];
     };
 
-    const collected = collectSceneLayers(sceneDoc, {
+    const initialVisibleLevelIds = computeVisibleFloorIndices(floors, initialFloorIndex)
+      .map((i) => floors[i]?.id)
+      .filter(Boolean);
+    const layers = collectSceneLayers(sceneDoc, {
       viewedLevelId: floors[initialFloorIndex]?.id,
-      visibleLevelIds: computeVisibleFloorIndices(floors, initialFloorIndex)
-        .map((i) => floors[i]?.id)
-        .filter(Boolean),
+      visibleLevelIds: initialVisibleLevelIds,
       isGM,
     });
+    const tokens = collectTokens(sceneDoc, { visibleLevelIds: initialVisibleLevelIds, isGM });
+    // The report must describe what will actually DRAW, tokens included — a report
+    // that quietly omits a whole class of drawable is worse than none.
+    const collected = {
+      items: [...layers.items, ...tokens.items],
+      skipped: [...(layers.skipped ?? []), ...tokens.skipped],
+    };
 
     return {
       sceneName: sceneDoc?.name,

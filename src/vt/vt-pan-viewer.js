@@ -184,17 +184,18 @@ let _active = null;
  * (case B). If it stays black, nothing is drawing and the graph is innocent
  * (case A) — and I have been debugging the wrong file entirely.
  */
-let debugSolidColor = false;
+let debugStageName = null; // null = the real shader; see setVtDebugStage
 
 /**
  * Swap every item's shader for a solid colour. Requires a restart to take effect
  * (materials are built once per item).
  * @param {boolean} on
  */
-export function setVtDebugSolidColor(on) {
-  debugSolidColor = !!on;
+export function setVtDebugStage(stage) {
+  debugStageName = stage || null;
   return {
-    debugSolidColor,
+    debugStage: debugStageName,
+    stages: ['solid', 'uv', 'atlas', 'indirection', 'walk', null],
     next: 'now click "VT Pan Viewer: Force Restart (ACTIVE SCENE)" — materials are built once per item, so this only applies to newly-built ones.',
   };
 }
@@ -752,8 +753,14 @@ export async function startVtPanViewer({
       // THE BISECT — see setVtDebugSolidColor. A constant that bypasses the ENTIRE
       // node graph: sampler, tint, alpha, occlusion. If this does not appear, the
       // graph was never the problem.
-      material.colorNode = debugSolidColor
-        ? THREE.TSL.vec4(1, 0, 0, 1)
+      const debugNode =
+        debugStageName === 'solid'
+          ? THREE.TSL.vec4(1, 0, 0, 1)
+          : debugStageName
+            ? vt.debugStage(debugStageName, uv())
+            : null;
+      material.colorNode = debugNode
+        ? debugNode
         : Fn(() => {
             const c = vt.sample(uv()).toVar();
             c.rgb.mulAssign(uTint);
@@ -838,7 +845,7 @@ export async function startVtPanViewer({
       try {
         rt = new THREE.RenderTarget(canvasW, canvasH);
         renderer.setRenderTarget(rt);
-        await renderer.renderAsync(scene, camera);
+        renderer.render(scene, camera); // renderAsync is deprecated once init() is awaited
         renderer.setRenderTarget(null);
 
         const points = {

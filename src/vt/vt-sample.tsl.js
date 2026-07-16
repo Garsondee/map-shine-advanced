@@ -232,5 +232,52 @@ export function createVtSampler(
     return select(outside, vec4(0, 0, 0, 1), blended);
   });
 
-  return { uniforms, sample };
+  /**
+   * THE IN-GRAPH BISECT. Four guesses at a black screen were four too many; each was
+   * a real bug and none put a pixel on screen. So the graph reports on ITSELF, one
+   * stage at a time, and every stage eliminates half of what remains:
+   *
+   *   'uv'          -> the uv attribute as colour. Black here = the vertex data or
+   *                    the attribute name is wrong and NOTHING downstream matters.
+   *   'atlas'       -> the atlas sampled directly at layer 0, ignoring the page
+   *                    table entirely. Black here = the atlas texture is empty or
+   *                    unbound, i.e. copyTextureToTexture is not landing on WebGPU.
+   *   'indirection' -> the page table's raw texel as colour. Black here = textureLoad
+   *                    or the page-table binding is broken; a visible pattern means
+   *                    the pointers are arriving.
+   *   'walk'        -> the full mip walk, but NOTHING after it: no tint, no alpha
+   *                    chain, no occlusion, no out-of-world guard. Black here with
+   *                    'atlas' and 'indirection' both working = the walk is wrong.
+   *                    NOT black here = the bug is downstream, in the item material.
+   *
+   * Each returns opaque alpha deliberately: alpha is the very thing under suspicion,
+   * so no stage may depend on it to be visible.
+   *
+   * @param {string} stage
+   * @param {any} worldUV
+   * @returns {any} a vec4 node
+   */
+  const debugStage = (stage, worldUV) => {
+    if (stage === 'uv') return vec4(worldUV.x, worldUV.y, 0, 1);
+    if (stage === 'atlas') {
+      // Straight at the atlas, layer 0, no indirection. Isolates "is there content
+      // in the atlas at all" from "can we find it".
+      return vec4(texture(atlasTexture, worldUV).depth(int(0)).rgb, 1);
+    }
+    if (stage === 'indirection') {
+      // The page table's texels ARE pointers, so this is deliberately not a
+      // meaningful picture — it is a PATTERN. Uniform black means nothing is
+      // arriving; anything structured means the pointers are.
+      const px = worldUV.mul(uniforms.worldSizePx).div(float(payloadPx)).floor();
+      const t = textureLoad(uniforms.pageTableTexture, ivec2(px));
+      return vec4(t.r, t.g, t.a, 1);
+    }
+    if (stage === 'walk') {
+      const worldPx = worldUV.mul(uniforms.worldSizePx);
+      return vec4(sampleFromMip(uniforms.requestedMip, worldPx).rgb, 1);
+    }
+    return null;
+  };
+
+  return { uniforms, sample, debugStage };
 }

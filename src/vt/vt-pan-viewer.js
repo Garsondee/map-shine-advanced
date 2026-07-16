@@ -1032,27 +1032,58 @@ export async function startVtPanViewer({
       pack.lastRequestedMip = plan.mip;
       pack.lastRequestedMipFraction = plan.mipFraction; // drives the shader's smooth mip blend
 
-      // ADMISSION CONTROL for the speculative tiers (see
-      // PREFETCH_MIN_HEADROOM_FRACTION for the live evidence). `plan.fine` is
-      // what the CURRENT view needs and is always admitted; the prefetch tiers
-      // are insurance against a future zoom and are admitted only while the
-      // cache can afford to pin them. Headroom counts slots that are not already
-      // protected — PageCache never evicts a pinned slot of either class, so
-      // pinned pages are the real budget, not `residentPages`.
+      // RELEASE → MEASURE → REQUEST. The order is the whole point.
+      //
+      // THE BUG THIS FIXES (live evidence, 2026-07-16, real 2-floor scene, 7 packs):
+      // this used to request (and therefore PIN) the new page set and only THEN
+      // unpin the pages it no longer wanted. In a static view that is harmless —
+      // both sets are identical. But any view change that shifts the page set (a
+      // pan, or a zoom that crosses a mip boundary) pinned the OLD set and the NEW
+      // set SIMULTANEOUSLY: peak ≈ 2x steady state per pack, ≈3000 pages against a
+      // 2048 capacity. And because PageCache never evicts a PINNED slot, nothing
+      // could be reclaimed to satisfy the shortfall — so the requests missed, and
+      // the (correct) "stuck view-miss" retry re-asked for them on every single
+      // update. That is the 215426-misses report: 67s of panning. The report taken
+      // at a static default view showed misses: 0 with the identical pin counts
+      // (574 coarse + 1320 view = 1894, comfortably inside 2048) — the steady
+      // state was never oversubscribed at all, only the TRANSITIONS were.
+      //
+      // `cache.unpin()` merely clears the pin flag; it does NOT evict (page-cache.js
+      // :119). So releasing first is strictly safe — the pages stay resident and
+      // merely become LRU-eligible — and it caps peak pinned at max(old, new)
+      // instead of old + new.
+      const candidates = [...plan.fine, ...plan.prefetchCoarser, ...plan.prefetchFiner].filter(
+        (pg) => !pack.coarseKeySet.has(pg.key)
+      );
+      const candidateKeys = new Set(candidates.map((pg) => pg.key));
+      for (const key of pack.residentViewKeys) if (!candidateKeys.has(key)) cache.unpin(key);
+
+      // ADMISSION CONTROL for the speculative tiers. `plan.fine` is what the
+      // CURRENT view needs and is always admitted; the prefetch tiers are
+      // insurance against a future zoom and are admitted only while the cache can
+      // afford to pin them (see PREFETCH_MIN_HEADROOM_FRACTION). Measured AFTER
+      // the release above, so pages this pack is already dropping cannot count
+      // against its own budget. Headroom counts unprotected slots — PageCache
+      // never evicts a pinned slot of either class, so PINNED pages are the real
+      // budget, not `residentPages`.
       const cacheStats = cache.stats();
       const headroomPages = cache.capacityPages - (cacheStats.pinnedCoarse + cacheStats.pinnedView);
       const admitPrefetch = headroomPages > cache.capacityPages * PREFETCH_MIN_HEADROOM_FRACTION;
       if (!admitPrefetch) prefetchSkippedPacks++;
 
-      // Needed = fine + (afforded) prefetch, EXCLUDING pages already held by this
-      // pack's permanent coarse pins (never downgrade a 'coarse' pin to 'view').
-      const neededViewPages = (
-        admitPrefetch ? [...plan.fine, ...plan.prefetchCoarser, ...plan.prefetchFiner] : [...plan.fine]
-      ).filter((pg) => !pack.coarseKeySet.has(pg.key));
-      const diff = diffResidency(pack.residentViewKeys, neededViewPages);
+      const neededViewPages = admitPrefetch ? candidates : plan.fine.filter((pg) => !pack.coarseKeySet.has(pg.key));
+      if (!admitPrefetch) {
+        // Declining prefetch also means releasing any speculative pages still held
+        // from a previous update — otherwise "declined" would only apply to new
+        // ones and the pack would keep hoarding what it can no longer justify.
+        const keep = new Set(neededViewPages.map((pg) => pg.key));
+        for (const key of pack.residentViewKeys) if (!keep.has(key)) cache.unpin(key);
+      }
 
+      // `diff.toUnpin` is deliberately unused: the release above already covers it
+      // (prevKeys not in the final needed set), and doing it here would be too late.
+      const diff = diffResidency(pack.residentViewKeys, neededViewPages);
       await requestDecodeUpload(pack, diff.toRequest, 'view');
-      for (const key of diff.toUnpin) cache.unpin(key);
       // GROUND TRUTH, not intent (the "stuck view-miss" bug, 2026-07-16): a page
       // whose request MISSED (cache full, nothing evictable — a normal outcome
       // under pressure) must stay eligible for retry, so only keys that are

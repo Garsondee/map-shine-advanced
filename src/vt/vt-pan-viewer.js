@@ -95,6 +95,50 @@ import { OCCLUSION_MODES, computeOcclusionState, createHoverFadeState, mapElevat
 const MAX_MS_PER_UPLOAD_CHUNK = 10;
 
 /**
+ * How much of the page cache must remain unprotected before a pack is allowed to
+ * pin its SPECULATIVE (prefetch) tier. Below this, prefetch is dropped and only
+ * the pages the current view actually needs are pinned.
+ *
+ * THE BUG THIS FIXES (measured live, 2026-07-16, real 2-floor non-square scene —
+ * 3 Level backgrounds + 2 foregrounds + 2 roof tiles = 7 packs):
+ *
+ *     cacheStats: { capacityPages: 2048, residentPages: 2048, freePages: 0,
+ *                   pinnedCoarse: 574, pinnedView: 1320, misses: 215426 }
+ *
+ * Every pack reported `viewResident: 220` — which is EXACTLY its mip-1 grid
+ * (22x10). With `mip.requested: 2` and `coarseTopMips: 5`, the coarse pins
+ * already covered mips 2-6, so `plan.fine` (mip 2) and `plan.prefetchCoarser`
+ * (mip 3) contributed ZERO new pages: **100% of the pinned view tier was
+ * `prefetchFiner`** — insurance for a zoom-in that might never happen. Demand
+ * was 7 x (82 + 220) = 2114 pages against a 2048 capacity, so the cache could
+ * not satisfy it even in principle.
+ *
+ * It then never recovered, because of an interaction with the (correct) fix for
+ * the "stuck view-miss" bug: a page whose request misses is deliberately NOT
+ * recorded as resident, so it is retried on every residency update. Permanent
+ * oversubscription therefore became permanent retry churn — the 215k misses.
+ *
+ * The principle that was violated: speculation was pinned at the same protection
+ * level as necessity. `PageCache` never evicts ANY pinned slot ('coarse' and
+ * 'view' are equally protected — page-cache.js's `_findLRUEvictable`), so a pack
+ * pinning 220 speculative pages permanently denies those slots to pages some
+ * other pack actually needs to render.
+ *
+ * Why admission control rather than simply leaving prefetch UNPINNED (which LRU
+ * would then reclaim naturally, and was the first idea): an unpinned page can be
+ * evicted by a LATER pack's request *within the same residency update*, after
+ * this pack has already written its atlas slot into the indirection texture. The
+ * indirection would then point at a slot holding a different page's pixels —
+ * wrong content, not blur. Pinning is what makes the indirection trustworthy, so
+ * the fix has to be "don't ask for what won't fit", not "ask and let it go".
+ *
+ * The check is per-pack and evaluated in draw order, so it self-limits: early
+ * packs prefetch while there is room, later ones skip it. Order-dependent, but
+ * BOUNDED and correct — and the fine tier is never the thing that loses.
+ */
+const PREFETCH_MIN_HEADROOM_FRACTION = 0.15;
+
+/**
  * Where to mount the VT canvas so it BECOMES the scene display (author request,
  * 2026-07-15: "make this the only display... fill the scene viewing space so we
  * don't have PIXI and threejs alongside each other"). We mount into Foundry's
@@ -982,12 +1026,23 @@ export async function startVtPanViewer({
       pack.lastRequestedMip = plan.mip;
       pack.lastRequestedMipFraction = plan.mipFraction; // drives the shader's smooth mip blend
 
-      // Needed = fine + both-direction prefetch, EXCLUDING pages already held
-      // by this pack's permanent coarse pins (never downgrade a 'coarse' pin
-      // to 'view').
-      const neededViewPages = [...plan.fine, ...plan.prefetchCoarser, ...plan.prefetchFiner].filter(
-        (pg) => !pack.coarseKeySet.has(pg.key)
-      );
+      // ADMISSION CONTROL for the speculative tiers (see
+      // PREFETCH_MIN_HEADROOM_FRACTION for the live evidence). `plan.fine` is
+      // what the CURRENT view needs and is always admitted; the prefetch tiers
+      // are insurance against a future zoom and are admitted only while the
+      // cache can afford to pin them. Headroom counts slots that are not already
+      // protected — PageCache never evicts a pinned slot of either class, so
+      // pinned pages are the real budget, not `residentPages`.
+      const cacheStats = cache.stats();
+      const headroomPages = cache.capacityPages - (cacheStats.pinnedCoarse + cacheStats.pinnedView);
+      const admitPrefetch = headroomPages > cache.capacityPages * PREFETCH_MIN_HEADROOM_FRACTION;
+      if (!admitPrefetch) prefetchSkippedPacks++;
+
+      // Needed = fine + (afforded) prefetch, EXCLUDING pages already held by this
+      // pack's permanent coarse pins (never downgrade a 'coarse' pin to 'view').
+      const neededViewPages = (
+        admitPrefetch ? [...plan.fine, ...plan.prefetchCoarser, ...plan.prefetchFiner] : [...plan.fine]
+      ).filter((pg) => !pack.coarseKeySet.has(pg.key));
       const diff = diffResidency(pack.residentViewKeys, neededViewPages);
 
       await requestDecodeUpload(pack, diff.toRequest, 'view');
@@ -1054,6 +1109,11 @@ export async function startVtPanViewer({
     }
 
     let lastItems = []; // exposed in diagnostics — the current sorted draw list
+    // How many packs had their speculative tier declined this update (see
+    // PREFETCH_MIN_HEADROOM_FRACTION). Persistently non-zero means the scene's
+    // REQUIRED working set is close to the cache budget — the honest signal that
+    // the cache is genuinely full, as opposed to full of speculation.
+    let prefetchSkippedPacks = 0;
 
     /**
      * THE FRAME'S WORK: resolve the draw list, stream what it needs, order it.
@@ -1070,6 +1130,7 @@ export async function startVtPanViewer({
       // itself changes with the viewed floor.
       const items = sortByLayer(buildItems(view.floorIndex));
       const wantedIds = new Set(items.map((i) => i.id));
+      prefetchSkippedPacks = 0;
 
       // Items that dropped OUT of the draw list: release their VIEW pages (never
       // their coarse pins — those stay resident always, §4.1/§4.5) and hide the
@@ -1603,6 +1664,10 @@ export async function startVtPanViewer({
         return {
           view,
           layout,
+          // Non-zero = at least one pack could not afford its speculative tier this
+          // update. A few is healthy self-limiting; ALL of them, every update,
+          // means the required working set itself is at the budget.
+          prefetchSkippedPacks,
           canvasSizePx: { width: canvasW, height: canvasH },
           mountedInBoard: mount.fill && mount.host !== document.body,
           cacheStats: cache.stats(),

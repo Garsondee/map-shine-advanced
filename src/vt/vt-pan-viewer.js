@@ -1185,9 +1185,11 @@ export async function startVtPanViewer({
      */
     function bindMeshToPack(state, pack) {
       const u = state.vt.uniforms;
-      // The page table is a TextureNode — swapping .value rebinds which pack this
-      // item samples (albedo, or a mask when the display layer is switched).
-      u.pageTable.value = pack.indirectionTexture;
+      // NO page-table swap. The texture is baked into the node graph at build time
+      // (see vt-sample.tsl.js) — a TextureNode is not a uniform handle, which is
+      // the mistake that produced the 2026-07-16 black screen. Switching the
+      // displayed pack now requires rebuilding the material; setDisplayLayer is a
+      // debug-only mask view, so it is a tracked gap rather than a hot path.
       u.worldSizePx.value.set(pack.table.worldWidthPx, pack.table.worldHeightPx);
       // THE WHOLE MIP LAYOUT, in two integers. The shader derives every level's
       // grid and origin from these (vt-sample.tsl.js's header explains why that is

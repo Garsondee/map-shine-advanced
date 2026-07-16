@@ -309,38 +309,57 @@ export function installDebugPanel(MapShine) {
   );
 
   registerReport('environment', 'Environment/GPU', () => {
-    const canvas = MapShine.__heartbeat?.renderer?.domElement || document.createElement('canvas');
-    const gl = canvas.getContext('webgl2') || MapShine.__heartbeat?.renderer?.getContext?.();
-    let vendor = null,
-      renderer = null,
-      maxTextureSize = null,
-      maxArrayLayers = null,
-      extensions = [];
-    if (gl) {
-      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
-      vendor = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
-      renderer = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
-      maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
-      maxArrayLayers = gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS);
-      extensions = gl.getSupportedExtensions() || [];
-    }
-    return envelope('environment', {
-      webgl2: !!gl,
-      vendor,
-      renderer,
-      maxTextureSize,
-      maxArrayLayers,
-      hasTimerQuery: extensions.includes('EXT_disjoint_timer_query_webgl2'),
-      devicePixelRatio: window.devicePixelRatio,
-      screen: { width: screen.width, height: screen.height },
-      viewport: { width: window.innerWidth, height: window.innerHeight },
-      memory: performance.memory
+    // WEBGPU-AWARE since the TSL port. This used to do
+    // `canvas.getContext('webgl2') || renderer.getContext()` and then call
+    // `gl.getExtension(...)` — which threw "gl.getExtension is not a function" the
+    // moment the heartbeat became a WebGPURenderer, because getContext() then
+    // returns a GPUCanvasContext. A WebGL assumption that outlived WebGL.
+    const r = MapShine.__heartbeat?.renderer;
+    const backend = r?.backend?.isWebGPUBackend ? 'webgpu' : r?.backend ? 'webgl2' : 'unknown';
+    const out = { rendererBackend: backend, webgpuAvailable: !!navigator.gpu };
+
+    if (backend === 'webgpu') {
+      // WebGPU exposes far less about the GPU than WEBGL_debug_renderer_info did —
+      // deliberately, for fingerprinting reasons. Report what it DOES give rather
+      // than pretending the old fields exist.
+      const dev = r?.backend?.device;
+      out.adapterInfo = r?.backend?.adapter?.info
         ? {
-            usedJSHeapMB: Math.round(performance.memory.usedJSHeapSize / 1048576),
-            limitJSHeapMB: Math.round(performance.memory.jsHeapSizeLimit / 1048576),
+            vendor: r.backend.adapter.info.vendor ?? null,
+            architecture: r.backend.adapter.info.architecture ?? null,
+            device: r.backend.adapter.info.device ?? null,
+            description: r.backend.adapter.info.description ?? null,
           }
-        : null,
-    });
+        : null;
+      out.limits = dev?.limits
+        ? {
+            maxTextureDimension2D: dev.limits.maxTextureDimension2D,
+            maxTextureArrayLayers: dev.limits.maxTextureArrayLayers,
+            maxBufferSize: dev.limits.maxBufferSize,
+            maxBindGroups: dev.limits.maxBindGroups,
+          }
+        : null;
+      out.features = dev?.features ? Array.from(dev.features) : [];
+      out.note =
+        'WebGPU intentionally exposes less GPU detail than WEBGL_debug_renderer_info did. ' +
+        'maxTextureArrayLayers is the one to watch: the page atlas is a layered texture.';
+      return out;
+    }
+
+    // WebGL2 path — still real when the backend falls back.
+    const canvas = r?.domElement || document.createElement('canvas');
+    const gl = canvas.getContext('webgl2');
+    if (!gl || typeof gl.getExtension !== 'function') {
+      out.note = 'no WebGL2 context available to interrogate';
+      return out;
+    }
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    out.vendor = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
+    out.renderer = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+    out.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    out.maxArrayLayers = gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS);
+    out.extensions = gl.getSupportedExtensions?.() ?? [];
+    return out;
   });
 
   registerReport('console', 'Console (warn/error log)', () =>

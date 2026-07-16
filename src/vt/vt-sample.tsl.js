@@ -97,11 +97,24 @@ export function createVtSampler(
 ) {
   const { Fn, If, Loop, uniform, texture, textureLoad, vec2, vec4, ivec2, int, float, select } = TSL;
 
-  // Live handles the viewer mutates per frame (`.value = …`) — the same update
-  // pattern the GLSL material's uniforms had, so calling code barely changes.
-  const pageTable = texture(initialPageTable);
+  // THE PAGE TABLE IS THE RAW TEXTURE, not a TextureNode.
+  //
+  // `textureLoad` is literally `(...params) => texture(...params).setSampler(false)`
+  // (three.webgpu.js:37562) — it BUILDS a node from a texture. Handing it a node
+  // that was already built wraps a node inside a node, and the binding silently
+  // dies: black, alpha 0, no error. That is the same mistake as seeding the page
+  // table with the atlas, one layer down — treating a node graph like a uniform
+  // block, twice.
+  //
+  // The TSL spike that rendered a correct pixel passed the RAW texture. This now
+  // does exactly what the proven thing did.
+  //
+  // Consequence, accepted deliberately: the texture is baked into the graph, so
+  // switching the DISPLAYED pack (the debug-only mask view) needs the material
+  // rebuilt rather than a `.value` swap. `setDisplayLayer` is a diagnostic; making
+  // the hot path correct beats making the diagnostic convenient.
   const uniforms = {
-    pageTable,
+    pageTableTexture: initialPageTable,
     worldSizePx: uniform(vec2(1, 1)),
     pages0: uniform(ivec2(1, 1)), // pagesX(0), pagesY(0) — the whole mip layout, see header
     requestedMip: uniform(int(0)),
@@ -176,7 +189,7 @@ export function createVtSampler(
         // One indirection texel: RGBA8, R|G<<8 = the atlas slot, A>0.5 = resident.
         // textureLoad, never filtered — an indirection texel is an ID, and
         // interpolating an ID is meaningless.
-        const t = textureLoad(pageTable, phys);
+        const t = textureLoad(uniforms.pageTableTexture, phys);
         If(t.a.greaterThan(float(0.5)), () => {
           const slot = t.r
             .mul(255)

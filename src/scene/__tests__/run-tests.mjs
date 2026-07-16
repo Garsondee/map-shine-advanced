@@ -8,6 +8,7 @@
  *     --bundle --format=esm --platform=node --outfile=<tmp>.mjs && node <tmp>.mjs
  */
 import { run as runLayerOrder } from './layer-order.test.mjs';
+import { run as runOcclusion } from './occlusion.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -42,7 +43,10 @@ const t = {
   },
 };
 
-const suites = [['layer-order', runLayerOrder]];
+const suites = [
+  ['layer-order', runLayerOrder],
+  ['occlusion', runOcclusion],
+];
 
 for (const [name, fn] of suites) {
   const before = failed;

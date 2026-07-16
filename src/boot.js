@@ -45,7 +45,6 @@ import {
   soakPanStep,
   soakSwitchFloorStep,
   refreshVtPanViewerItems,
-  syncVtPanViewerCamera,
 } from './vt/vt-pan-viewer.js';
 import { getActiveSceneFloors, computeVisibleFloorIndices } from './foundry/active-scene-source.js';
 import { collectSceneLayers } from './foundry/scene-layers.js';
@@ -636,13 +635,6 @@ function install() {
     //
     // updateToken matters as much as createToken: moving a token between floors
     // changes token.level, which changes which floors draw it.
-    // Foundry's camera is the ONE source of truth for the view. canvasPan fires on
-    // every pan/zoom (board.mjs:1715), so MSA adopts it rather than tracking its
-    // own — a second camera is a second source of truth.
-    Hooks.on('canvasPan', () => {
-      syncVtPanViewerCamera().catch((err) => console.error(`${TAG} camera sync failed:`, err));
-    });
-
     for (const hook of ['createToken', 'updateToken', 'deleteToken']) {
       Hooks.on(hook, () => {
         // Fire-and-forget: a redraw must never make a document update await GPU

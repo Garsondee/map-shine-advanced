@@ -14,6 +14,7 @@ import {
   computeQuadBounds,
   computeLevelTexturePlacement,
   computeTilePlacement,
+  computeTokenPlacement,
 } from '../scene-geometry.js';
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
@@ -305,5 +306,38 @@ export function run(t) {
     ok('tile: missing x,y defaults to 0', p.x === 0 && p.y === 0);
     ok('tile: missing texture config defaults to fill/0.5/0.5', p.anchorX === 0.5 && near(p.scaleX, 1));
     ok('tile: missing rotation defaults to 0', p.rotation === 0);
+  }
+
+  // ---- token placement: the anchor trap (found LIVE) ---------------------
+  {
+    // computeQuadCorners takes x/y as the ANCHOR POINT, and a token anchors at
+    // 0.5/0.5. Hand it the footprint's top-left and the art centres on the corner,
+    // half a token up and left of where Foundry's hit box is. That is exactly what
+    // the author saw: the cursor changed over the token but the art was offset.
+    const tok = { x: 1000, y: 2000, width: 2, height: 2, texture: { src: 'a.webp' } };
+    const footprint = { x: 1000, y: 2000, width: 300, height: 300 };
+    const p = computeTokenPlacement({ width: 300, height: 300 }, tok, footprint);
+    t.ok('placement x/y is the footprint CENTRE, not its top-left', p.x === 1150 && p.y === 2150);
+
+    // The real proof: the drawn quad must cover the footprint Foundry hit-tests.
+    const corners = computeQuadCorners(p);
+    const xs = corners.map((c) => c.x);
+    const ys = corners.map((c) => c.y);
+    t.ok('the quad spans the footprint exactly', Math.min(...xs) === 1000 && Math.max(...xs) === 1300);
+    t.ok('vertically too', Math.min(...ys) === 2000 && Math.max(...ys) === 2300);
+  }
+  {
+    // fit "contain" is the v14 default: art is fitted INSIDE the footprint
+    // preserving aspect, never stretched. A wide image in a square footprint stays
+    // centred on it.
+    const tok = { x: 0, y: 0, width: 1, height: 1, texture: { src: 'a.webp' } };
+    const p = computeTokenPlacement({ width: 200, height: 100 }, tok, { x: 0, y: 0, width: 100, height: 100 });
+    t.ok('contain fits the wide axis', p.width === 100 && p.height === 50);
+    t.ok('and stays centred on the footprint', p.x === 50 && p.y === 50);
+  }
+  {
+    const tok = { x: 0, y: 0, width: 1, height: 1, rotation: 90, lockRotation: true, texture: { src: 'a.webp' } };
+    const p = computeTokenPlacement({ width: 100, height: 100 }, tok, { x: 0, y: 0, width: 100, height: 100 });
+    t.ok('lockRotation pins rotation to 0', p.rotation === 0);
   }
 }

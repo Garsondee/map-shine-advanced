@@ -1444,6 +1444,18 @@ export async function startVtPanViewer({
 
       let dirty = false;
 
+      // FOLLOW FOUNDRY'S CAMERA, per frame. Reading canvas.stage is a couple of
+      // property reads, so doing it every frame is cheaper than the alternative and
+      // cannot drift: there is no event to miss and no ordering to get wrong.
+      //
+      // It was driven off the canvasPan hook, which AWAITED a full residency
+      // rebuild — sort the draw list, re-request pages — on every event of a drag.
+      // That is what made pan/zoom "a bit laggy and awkward, not smooth any more"
+      // (author-reported). The camera must move at frame rate; residency is
+      // debounced behind scheduleResidencyUpdate, which already exists for exactly
+      // this and is what MSA's own input used.
+      if (followFoundryCamera && syncFoundryCamera()) dirty = true;
+
       // MSA'S OWN CAMERA INTEGRATION — skipped entirely when following Foundry.
       //
       // Gating the input LISTENERS was not enough (author-reported live: "it keeps
@@ -1786,7 +1798,6 @@ export async function startVtPanViewer({
       getView: () => view,
       applyKeyAndUpdate, // exposed so MapShine.soakHooks.pan drives the EXACT same path a real keypress does
       setFloorIndex, // exposed so an external (Foundry-driven) floor sync is as cheap as a keypress, never a full restart
-      syncFoundryCamera,
       // Re-ask buildItems and reconcile. The draw list is derived from live
       // Foundry documents, but NOTHING here watches them — updateResidency only
       // runs when the VIEW changes, so creating a token while the camera sits
@@ -2083,17 +2094,6 @@ export function getVtPanViewerDiagnostics() {
  * view change, so an unchanged scene costs one buildItems call and no GPU work.
  * No-op `{skipped:true}` if nothing is running.
  */
-/**
- * Adopt Foundry's camera, then reconcile residency. Driven by the `canvasPan`
- * hook. No-op `{skipped:true}` if nothing is running.
- */
-export async function syncVtPanViewerCamera() {
-  if (!_active) return { skipped: true, reason: 'viewer not started' };
-  const changed = _active.syncFoundryCamera();
-  if (changed) await _active.refreshItems();
-  return { changed };
-}
-
 export async function refreshVtPanViewerItems() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   await _active.refreshItems();

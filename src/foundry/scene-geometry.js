@@ -361,8 +361,18 @@ export function computeTokenPlacement(textureSize, tokenDoc, footprint) {
     { fit, scaleX, scaleY }
   );
   return {
-    x: footprint.x,
-    y: footprint.y,
+    // THE FOOTPRINT'S CENTRE, not its top-left. computeQuadCorners treats x/y as
+    // the ANCHOR POINT (`lx = (u - anchorX) * width; return x + lx`), and a token's
+    // anchor is 0.5/0.5 — so passing the top-left centres the art ON the corner and
+    // offsets every token half its size up and left. Author-reported live
+    // (2026-07-16): "Tokens don't seem to align with their bounding boxes for
+    // selection purposes... I assume that threejs and PIXI might disagree on their
+    // position" — exactly right; Foundry's hit box was correct and the art was not.
+    //
+    // `token.x`/`y` ARE the footprint's top-left (v14 schema), so the conversion
+    // belongs here, once, rather than at every call site.
+    x: footprint.x + footprint.width / 2,
+    y: footprint.y + footprint.height / 2,
     width: fitted.width,
     height: fitted.height,
     anchorX,

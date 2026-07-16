@@ -252,6 +252,16 @@ The V2 effect *look* is the product — the shaders and their tuned parameters a
 
 **Fog exploration is the one sanctioned world-space persistent buffer:** capped ≤2048² per floor (≈16 MB × floors), explicitly whitelisted in the allocator. Revisit as read-write VT pages later if it ever matters; at the cap, it can't.
 
+### 4.4b Effect LAYOUT — see `docs/planning/Effects.md` (spec authored 2026-07-16)
+
+§4.4 says WHICH effects exist and where they land. **`Effects.md` says how each one is LAID OUT so it costs what the machine can afford** — the author's tiering directive (*"the most basic tier being deliberately lightweight"*, §9 Q3) taken to a spec. Read it before porting any effect.
+
+Its thesis is this plan's own, moved from the memory axis to the time axis: **tier 0 is the effect's coarse pin** — always compiled, always drawn, cheap enough for the floor card, never gated. Worst case is flat, never absent. *Water is always blue.* And it resolves `keyhole-stage6-effects-approach`'s standing tension (design the full feature set, ship a minimal slice, don't let the deferred list rot) by making the ladder and the deferred list **the same artifact**: tier 0 IS the MVP, tiers 1..N ARE the recorded feature set, ordered and costed, and a rung nobody's hardware reaches is visible rather than forgotten.
+
+The two laws most likely to be violated by accident, both learned here the hard way:
+- **Gating by uniform is NOT gating.** A `uniform(0)` multiply executes every pixel and pays for its bindings — exactly what the occlusion block did at `weights [0,0,0,0]` while being arithmetically an identity. Tier selection is a **JS `if` at graph-build time** so the nodes are never constructed. If turning a feature off does not shrink the compiled shader, it is not off.
+- **Order the ladder by COST CLASS, not by prettiness** (constant → ALU → resident read → graph read → VT read → dependent read → extra RT → per-frame sim → geometry). Sorted that way, the cheap rungs cluster at the bottom — and the cheap rungs carry nearly all the perceptual return, because vision cares more about colour, contrast and motion than about correct refraction.
+
 ### 4.5 Loading & floor switching — reliability > smooth > quick, made structural
 
 - **Initial load:** mount page tables → stream **coarse pins** (tiny — the whole world soft-focus in well under a second of decode) → reveal behind the existing curtain with *honest* progress (pages resident / pages needed) → sharpen progressively under the upload governor. No 45-second all-or-nothing storm; no un-chunkable populate loop; no fake "Ready!". Interactive target on the torture scene: **≤ 10 s** on the 3070.

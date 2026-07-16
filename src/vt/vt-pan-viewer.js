@@ -778,6 +778,8 @@ export async function startVtPanViewer({
     }
 
     let view = null; // set once the first item is loaded
+    /** Wall-clock cost of the pre-first-draw shader precompile; null if it failed. */
+    let shaderCompileMs = null;
     const frameTimes = [];
     let lastError = null;
 
@@ -1611,6 +1613,37 @@ export async function startVtPanViewer({
 
     await updateResidency();
 
+    // PRECOMPILE BEFORE THE FIRST DRAW. Until now every program compiled lazily
+    // inside the first render() — an unbounded synchronous stall in the one frame
+    // the user is already waiting on, and invisible because it hid inside the
+    // load. See docs/planning/Shaders.md for the full reasoning; the short version:
+    //
+    //   * compileAsync's NAME IS MISLEADING. `this.compile()` inside it is
+    //     SYNCHRONOUS (three.module.js:42011) — createShader/compileShader/
+    //     linkProgram all run now, on this thread. Only the WAIT is a promise.
+    //   * What makes that wait worth anything is KHR_parallel_shader_compile: the
+    //     DRIVER compiles on its own threads and linkProgram returns immediately.
+    //     WITHOUT the extension, `programReady` is initialised to TRUE
+    //     (three.module.js:36061), isReady() lies at once, this resolves instantly
+    //     — and the compile still blocks, just later, at first useProgram.
+    //
+    // So this is not "make compilation async". It is: do the compile HERE, where
+    // the loading screen is watching and its worstStallMs will report the cost,
+    // rather than in the first frame where it is invisible. On a GPU with the
+    // extension it is genuinely parallel; on one without, it is at least MEASURED.
+    // A worker cannot help with either — GL programs belong to the context that
+    // made them, so a worker's program is unusable here (Shaders.md §2).
+    try {
+      const t0 = performance.now();
+      await renderer.compileAsync(scene, camera);
+      shaderCompileMs = Math.round(performance.now() - t0);
+    } catch (err) {
+      // Precompiling is an optimisation; failing to precompile must never cost a
+      // scene. The programs will compile lazily on first draw exactly as before.
+      console.warn('[vt-pan-viewer] shader precompile failed — falling back to lazy compile:', err);
+      shaderCompileMs = null;
+    }
+
     loopActive = true;
     renderer.setAnimationLoop(renderFrame);
 
@@ -1752,6 +1785,20 @@ export async function startVtPanViewer({
         return {
           view,
           layout,
+          // SHADERS (docs/planning/Shaders.md).  is the fork
+          // in the road, not a detail: WITH it, compileAsync hands work to driver
+          // threads; WITHOUT it, compileAsync resolves instantly having done
+          // nothing and the compile stalls the first useProgram instead. This
+          // project does not guess about extensions on the design-floor GPU.
+          shaders: {
+            parallelShaderCompile: !!renderer.extensions?.get?.('KHR_parallel_shader_compile'),
+            precompileMs: shaderCompileMs,
+            // Program COUNT is the thing that explodes as effects land (N effects x
+            // M variants), so it is watched from the start. Identical ShaderMaterial
+            // source shares ONE program (three.module.js:36407 keys the cache on
+            // source identity), so today every item mesh costs 1 program between them.
+            programCount: renderer.info?.programs?.length ?? null,
+          },
           // GROUND TRUTH: is MSA the thing on screen right now, or is Foundry?
           // This could NOT be answered from a report during the 2026-07-16
           // non-square incident — the diagnostics described MSA's internals in

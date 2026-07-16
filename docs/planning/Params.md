@@ -103,6 +103,18 @@ Store **only values that differ from their declared default**, keyed by effect. 
 ### 3.5 Tiers absorb most of the count
 `UI.md` §3: *"hundreds of controls" is a symptom.* A large share of the 938 exist because performance was a manual knob-hunt. Under `Effects.md`, per-effect perf knobs collapse into one `tier` the governor drives. **Do not port 938 params. Port the ones that are still knobs after tiering** — expect the count to fall hard.
 
+## 3.6 ⚗️ HARVEST FINDINGS — what the real 48 schemas taught the contract (2026-07-17)
+
+The contract in §3 was designed from a sample of ONE (SpecularEffectV2). Before building the service, it was tested against the **real field vocabulary of all 48 schemas**. Three gaps, all now fixed and Node-tested — this is *why* declaration-first means "declare against real data, not an imagined shape":
+
+**1. Colour space was being smuggled in as a storage shape.** 39 colour params exist in TWO shapes: 30 hex strings and 9 carrying `colorType: 'float'` (i.e. `{r,g,b}` linear). **The shape was silently encoding the colour SPACE** — `'float'` meant *"already linear, do not decode"*. That is the same class of bug as the washed-out map (an implied colour space, discovered live at the cost of a session). **Fix:** ONE storage shape (`#rrggbb`) and an explicit, required `space: 'srgb' | 'linear'`. `colorType` is now forbidden outright. A colour that does not name its space fails validation.
+
+**2. `readonly: true` marked things that were never params.** 11 of them: `statusSubject`, `statusProbeAge`, `statusOutdoorsSample`, `statusDayPhase`… **Status READOUTS, rendered through the params system because it was the only display channel available.** This retroactively explains the ugliest number in `Effects-API.md` §4.1 — *why HealthEvaluatorService (diagnostics) was writing product params*. **It was not malice; it was a missing concept.** Diagnostics had status to show and only one surface to show it on. **Fix:** `readonly` in a params declaration is a validation error naming the real concept — a readout is a computed OUTPUT the renderer derives, never a stored, persisted, writable value. The renderer needs a derived-display concept; the params system must not be it.
+
+**3. `type: 'string'` was three different things.** All 17 uses split cleanly: **11** were the readouts above; **4** were `*Selection` params carrying an `options` array — *an enum wearing a string costume*; **1** (`audioStrikePath`, a file path) was a genuine free-text value. So `string` was never a type — it was an enum, a readout, or a path. **Fix:** `text` added for the single legitimate case; `enum` already covered the four; `string` remains absent. Exactly one of seventeen needed a string type.
+
+**And one false lead worth recording** (the instruments lesson, again): an initial grep reported `format` as a schema field with 47 uses. It was `THREE.RGBAFormat` on render targets — the pattern was too loose. Measured properly, the real vocabulary is: `type`, `label`, `tooltip`, `default`, `step`, `min`, `max`, `expanded`, `advanced`, `throttle`, `options`, `colorType`, `readonly`. **A sloppy measurement nearly added a field to the contract that never existed.**
+
 ## 4. What is harvested (and it is a lot)
 
 - **The 48 `getControlSchema()` bodies** — types, ranges, steps and, above all, the `help`/`summary`/`glossary` text **in the author's own voice** ("*World scale: how large world-space shimmer patterns are — higher = bigger, calmer glint clusters*"). Irreplaceable; becomes free tooltips in every surface.

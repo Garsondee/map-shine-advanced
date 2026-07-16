@@ -5,6 +5,7 @@
  */
 import {
   PARAM_TYPES,
+  COLOR_SPACES,
   validateParamsSchema,
   validateParamValue,
   serializeParams,
@@ -22,7 +23,13 @@ const SPECULAR = () => ({
     label: 'Intensity',
     help: 'Master strength of the additive specular pass.',
   },
-  lightColor: { type: 'color', default: '#ffffff', label: 'Specular tint', help: 'Tint multiplied into highlights.' },
+  lightColor: {
+    type: 'color',
+    space: 'srgb',
+    default: '#ffffff',
+    label: 'Specular tint',
+    help: 'Tint multiplied into highlights.',
+  },
   stripeEnabled: { type: 'bool', default: true, label: 'Shimmer' },
   blendMode: { type: 'enum', values: ['add', 'screen'], default: 'add', label: 'Blend mode' },
 });
@@ -105,6 +112,67 @@ export function run(t) {
         return r.ok && r.value === 0.5 && !r.clamped;
       })()
     );
+  }
+
+  // ---- 4b. HARVEST FINDINGS: gaps the real 48 schemas exposed ------------
+  // Designing from a sample of ONE missed both of these. Contact with real data
+  // is why the harvest went first.
+  {
+    t.ok('COLOR_SPACES is frozen vocabulary', Object.isFrozen(COLOR_SPACES) && COLOR_SPACES.length === 2);
+
+    // V2 had 39 colour params in TWO shapes -- 30 hex, 9 `colorType:'float'`
+    // {r,g,b} -- where the SHAPE silently carried the colour SPACE. Space is now
+    // named, and the old implied form is forbidden outright.
+    const noSpace = { c: { type: 'color', default: '#ffffff', label: 'Tint' } };
+    const r = validateParamsSchema(noSpace);
+    t.ok('REJECTS a colour that does not declare its space', !r.ok);
+    t.ok(
+      '...and explains srgb-vs-linear',
+      r.errors.some((e) => /srgb.*linear|linear.*srgb/is.test(e))
+    );
+
+    t.ok(
+      "ACCEPTS space:'srgb' (an author-picked tint)",
+      validateParamsSchema({ c: { type: 'color', space: 'srgb', default: '#ffffff', label: 'Tint' } }).ok
+    );
+    t.ok(
+      "ACCEPTS space:'linear' (fed straight to a shader)",
+      validateParamsSchema({ c: { type: 'color', space: 'linear', default: '#808080', label: 'Mul' } }).ok
+    );
+    t.ok(
+      'REJECTS a bogus space',
+      !validateParamsSchema({ c: { type: 'color', space: 'cmyk', default: '#ffffff', label: 'Tint' } }).ok
+    );
+    t.ok(
+      "REJECTS V2's implied form (colorType)",
+      !validateParamsSchema({
+        c: { type: 'color', space: 'srgb', colorType: 'float', default: '#ffffff', label: 'Tint' },
+      }).ok
+    );
+
+    // V2 had 12 `readonly: true` string "params" -- statusSubject, statusProbeAge,
+    // statusOutdoorsSample... Diagnostics rendered THROUGH params because that was
+    // the only display channel. THAT is why HealthEvaluatorService wrote params:
+    // a missing concept, not malice.
+    const readout = { statusProbeAge: { type: 'text', default: '—', label: 'Last probe age', readonly: true } };
+    const rr = validateParamsSchema(readout);
+    t.ok('REJECTS a status READOUT posing as a param', !rr.ok);
+    t.ok(
+      '...and names the real concept (a computed output, not a knob)',
+      rr.errors.some((e) => /readout|computed output/i.test(e))
+    );
+
+    // The third harvest finding: V2's 17 `type:'string'` params were 11 readouts,
+    // 4 enums-in-disguise (`string` + `options`), and exactly ONE real free-text
+    // value (audioStrikePath, a file path). So `text` earns its place -- barely.
+    t.ok("'text' is a type (one real V2 param needed it: a file path)", PARAM_TYPES.includes('text'));
+    t.ok(
+      "a real free-text param validates (V2's audioStrikePath)",
+      validateParamsSchema({ audioStrikePath: { type: 'text', default: '', label: 'Strike sound path' } }).ok
+    );
+    t.ok('text rejects a non-string', !validateParamValue({ type: 'text' }, 42).ok);
+    // `string` was never a type -- it was an enum, a readout, or a path.
+    t.ok("'string' is NOT a type", !PARAM_TYPES.includes('string'));
   }
 
   // ---- 5. per-type checks (the sanitizer's job, done at the front door) ----

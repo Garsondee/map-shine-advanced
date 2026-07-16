@@ -45,11 +45,40 @@
  * `slider` (1,513 uses) is a WIDGET, not a type — precisely the conflation this
  * split exists to end. A float is a float; whether it gets a slider is the
  * renderer's decision, made once in a type→widget table.
+ *
+ * HARVEST FINDING (2026-07-17) — V2's 17 `type: 'string'` params split cleanly
+ * into three groups, and the split validates this vocabulary:
+ *   - 11 were `status*` with `readonly: true` — STATUS READOUTS, not params at
+ *     all (see validateParamsSchema; this is why diagnostics wrote params).
+ *   - 4 were `*Selection` with an `options` array — an ENUM wearing a string
+ *     costume. `string + options` IS `enum`.
+ *   - 1 (`audioStrikePath`, a file path) was a genuine free-text value → `text`.
+ * So exactly one of the seventeen needed a string type, and it is a path.
  */
-export const PARAM_TYPES = Object.freeze(['float', 'int', 'bool', 'color', 'enum', 'vec2', 'vec3', 'curve', 'action']);
+export const PARAM_TYPES = Object.freeze([
+  'float',
+  'int',
+  'bool',
+  'color',
+  'enum',
+  'text',
+  'vec2',
+  'vec3',
+  'curve',
+  'action',
+]);
+
+/**
+ * Colour spaces a `color` param may declare. REQUIRED on every colour, because
+ * V2 implied it through two storage shapes (30 hex vs 9 `colorType:'float'`)
+ * and an implied colour space is a bug waiting for a shader.
+ *  - 'srgb'   an author-picked tint, as seen in a colour picker. Decode before use.
+ *  - 'linear' a value fed straight to shader maths. Never decode.
+ */
+export const COLOR_SPACES = Object.freeze(['srgb', 'linear']);
 
 /** Fields that are the RENDERER's or the USER's, never the contract's. */
-const FORBIDDEN_IN_CONTRACT = Object.freeze(['throttle', 'expanded', 'advanced', 'folder', 'widget']);
+const FORBIDDEN_IN_CONTRACT = Object.freeze(['throttle', 'expanded', 'advanced', 'folder', 'widget', 'colorType']);
 
 /** @typedef {{type: string, default?: unknown, min?: number, max?: number, step?: number, values?: string[], label?: string, help?: string}} ParamDecl */
 
@@ -98,6 +127,35 @@ export function validateParamsSchema(schema) {
     // strongly wanted — it becomes free tooltips in every surface.
     if (typeof d.label !== 'string' || d.label.length === 0) {
       fail(`${key}: needs a human label (the UI is GENERATED — there is no hand-written folder to name it)`);
+    }
+
+    // A COLOUR MUST DECLARE ITS SPACE. Harvest finding (2026-07-17): V2 had 39
+    // colour params in two shapes — 30 hex strings and 9 `colorType: 'float'`
+    // {r,g,b} objects — where the shape was silently carrying the colour SPACE
+    // ('float' meant "already linear, do not decode"). That is the same class of
+    // bug as the washed-out map: colour space is a property of the DATA and must
+    // be named, never inferred from a container.
+    if (d.type === 'color' && d.space !== 'srgb' && d.space !== 'linear') {
+      fail(
+        `${key}: a colour must declare its space — { space: 'srgb' } for author-picked tints, ` +
+          "{ space: 'linear' } for values fed straight to a shader. V2 implied this via two storage " +
+          'shapes and the implication is exactly how colour-space bugs are born.'
+      );
+    }
+
+    // STATUS READOUTS ARE NOT PARAMS. Harvest finding: V2 had 12 `readonly: true`
+    // string "params" (statusSubject, statusProbeAge, statusOutdoorsSample...) —
+    // diagnostics rendered THROUGH the params system because it was the only
+    // display channel available. That is why HealthEvaluatorService wrote params
+    // at all: not malice, a missing concept. A readout is a computed OUTPUT, not
+    // a knob; it belongs to the renderer as a derived display, and it must never
+    // be storable, persistable, or writable.
+    if ('readonly' in d) {
+      fail(
+        `${key}: 'readonly' means this is a STATUS READOUT, not a param. A readout is a computed ` +
+          'output the renderer derives and displays — never a stored value. (Params.md §2: this is ' +
+          'why diagnostics ended up mutating product state in V2.)'
+      );
     }
 
     if (d.type === 'action') continue; // a button: no value, no range, no default
@@ -178,12 +236,24 @@ export function validateParamValue(decl, value) {
     case 'bool':
       if (typeof value !== 'boolean') return { ok: false, error: `expected a boolean, got ${JSON.stringify(value)}` };
       return { ok: true, value };
+    case 'text':
+      if (typeof value !== 'string') return { ok: false, error: `expected a string, got ${JSON.stringify(value)}` };
+      if (decl.maxLength && value.length > decl.maxLength) {
+        return { ok: false, error: `longer than maxLength ${decl.maxLength}` };
+      }
+      return { ok: true, value };
     case 'enum':
       if (!decl.values?.includes(value)) {
         return { ok: false, error: `expected one of [${decl.values?.join(', ')}], got ${JSON.stringify(value)}` };
       }
       return { ok: true, value };
     case 'color':
+      // ONE storage shape (#rrggbb) — the SPACE is declared, never implied by
+      // the shape. See the `space` note on PARAM_TYPES: V2 smuggled colour space
+      // in as `colorType: 'float'` (9 of 39 colours), i.e. two shapes carrying a
+      // meaning neither of them names. Colour-space confusion has already cost
+      // this project a full session (reference_tsl_method_chaining_trap's sibling
+      // finding: the washed-out map). It gets a name here.
       if (typeof value !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(value)) {
         return { ok: false, error: `expected a #rrggbb colour, got ${JSON.stringify(value)}` };
       }

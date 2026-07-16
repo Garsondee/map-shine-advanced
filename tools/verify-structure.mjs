@@ -326,7 +326,8 @@ export const RULES = [
   // ===================================================================
   {
     id: 'shadow/no-lift-no-combine',
-    pattern: /shadowLift|ShadowLift|tCombinedShadow|uDynamicLightShadowOverride|ShadowOverrideStrength/,
+    // (?!\(DELETED allows passes.js to name the dead module in its obituary line.
+    pattern: /shadowLift|ShadowLift(?!\(DELETED)|tCombinedShadow|uDynamicLightShadowOverride|ShadowOverrideStrength/,
     allow: [],
     why:
       'V2 modeled shadow as a THING (dark paint composited onto the scene). Shadow is the ABSENCE OF ' +
@@ -362,6 +363,62 @@ export const RULES = [
   },
 
   // ===================================================================
+  // ONE DOOR PER ZONE — deep cross-zone imports are the module-scale version
+  // of reaching into another object's privates. V2: 27 reaches into
+  // sceneComposer._sceneMaskCompositor alone; nothing was unimportable, so
+  // everything got imported. (Skeleton.md §2.1)
+  // ===================================================================
+  {
+    id: 'zones/one-door',
+    pattern: /__never__/, // file-level rule; see `scan`
+    scan: (rel, lines) => {
+      // Which zones require a door. core/ and diag/ are exempt AS TARGETS:
+      // core is the standard library (its files are individually public) and
+      // diag is tooling. Tests are exempt entirely (scanner skips __tests__).
+      const DOOR_ZONES = ['vt', 'graph', 'scene', 'foundry', 'gameplay', 'effects', 'world', 'ui'];
+      const norm = rel.replace(/\\/g, '/');
+      const srcDir = norm.split('/').slice(0, -1).join('/');
+      const zoneOf = (p) => {
+        const m = p.match(/^src\/([^/]+)\//);
+        return m ? m[1] : 'root';
+      };
+      const sourceZone = zoneOf(norm + (norm.endsWith('.js') && !norm.includes('/', 4) ? '/' : ''));
+      const out = [];
+      lines.forEach((text, i) => {
+        const t = text.trim();
+        if (t.startsWith('*') || t.startsWith('//')) return;
+        const m = text.match(/from\s+['"](\.[^'"]+)['"]/) || text.match(/import\(\s*['"](\.[^'"]+)['"]/);
+        if (!m) return;
+        // resolve the relative specifier against the importing file's dir
+        const parts = (srcDir + '/' + m[1]).split('/');
+        const stack = [];
+        for (const seg of parts) {
+          if (seg === '' || seg === '.') continue;
+          if (seg === '..') stack.pop();
+          else stack.push(seg);
+        }
+        const target = stack.join('/');
+        const targetZone = zoneOf(target + '/');
+        if (targetZone === sourceZone || !DOOR_ZONES.includes(targetZone)) return;
+        if (target === `src/${targetZone}/index.js`) return; // through the door: fine
+        out.push({ line: i + 1, text: t.slice(0, 100) });
+      });
+      return out;
+    },
+    allow: [],
+    why:
+      'Reaching past a zone boundary into its internals is how V2 effects consumed ' +
+      "sceneComposer._sceneMaskCompositor (x27) and each other's private fields. Nothing was " +
+      'unimportable, so under deadline pressure everything got imported. One public door per zone ' +
+      '(its index.js) makes reach-into-privates UNIMPORTABLE at module scale.',
+    instead:
+      "Import the zone's index.js (its ONE door). If what you need is not exported there, that is a " +
+      "conversation about the zone's public API — have it in the open, in the door file, not by " +
+      'reaching around it.',
+    ratchet: true,
+  },
+
+  // ===================================================================
   // THE QUARANTINE — src/ never imports legacy/. (Keyhole.md §5)
   // ===================================================================
   {
@@ -376,6 +433,80 @@ export const RULES = [
 ];
 
 // ---------------------------------------------------------------------------
+
+/**
+ * THE DEBT LEDGER — the sanctioned outlet for "make it work NOW".
+ *
+ * The author named the threat themselves: *"drift that might be caused by me
+ * shouting about an effect needing to work now as opposed to working
+ * correctly."* A session under that pressure, with no sanctioned outlet, will
+ * route around a wall QUIETLY — that is how all seven V2 bypasses happened.
+ *
+ * So the shortcut gets a legal form instead: an entry in
+ * `tools/structure-exceptions.json` —
+ *
+ *   { "rule": "zones/one-door", "pathIncludes": "effects/fire",
+ *     "reason": "author needs fire visible for Saturday's session",
+ *     "approvedBy": "author", "expires": "2026-08-01" }
+ *
+ * Properties of the mechanism, each deliberate:
+ *  - LOUD while active: every verify prints the debt (never invisible).
+ *  - BOUNDED: on expiry the build FAILS until the shortcut is fixed properly
+ *    or consciously renewed (renewal = editing the ledger = visible in diff).
+ *  - OWNED: `approvedBy` is required — pressure has a name attached.
+ *  - It cannot become permanent by forgetting. Forgetting is what expiry is for.
+ *
+ * @param {Array<object>} exceptions
+ * @param {number} nowMs
+ * @returns {{ok: boolean, errors: string[]}}
+ */
+export function validateExceptions(exceptions, nowMs) {
+  const errors = [];
+  if (!Array.isArray(exceptions)) return { ok: false, errors: ['exceptions file must be an array'] };
+  exceptions.forEach((e, i) => {
+    for (const field of ['rule', 'pathIncludes', 'reason', 'approvedBy', 'expires']) {
+      if (!e?.[field] || typeof e[field] !== 'string') errors.push(`exception[${i}]: missing/invalid '${field}'`);
+    }
+    if (e?.expires) {
+      const t = Date.parse(e.expires);
+      if (!Number.isFinite(t)) errors.push(`exception[${i}]: expires '${e.expires}' is not a date`);
+      else if (t < nowMs) {
+        errors.push(
+          `exception[${i}] EXPIRED ${e.expires}: "${e.reason}" (rule ${e.rule}, ${e.pathIncludes}). ` +
+            'Fix it properly, or consciously renew it with the author — it does not get to become permanent by forgetting.'
+        );
+      }
+    }
+  });
+  return { ok: errors.length === 0, errors };
+}
+
+/**
+ * Filter rule violations through the ACTIVE exceptions. Returns what remains,
+ * plus what was excepted (so the debt can be printed loudly every run).
+ * @param {string} ruleId
+ * @param {{file: string, line: number, text: string}[]} found
+ * @param {Array<object>} exceptions
+ * @returns {{remaining: typeof found, excepted: typeof found}}
+ */
+export function applyExceptions(ruleId, found, exceptions) {
+  const active = (exceptions ?? []).filter((e) => e.rule === ruleId);
+  const remaining = [];
+  const excepted = [];
+  for (const hit of found) {
+    const covered = active.some((e) => hit.file.replace(/\\/g, '/').includes(e.pathIncludes));
+    (covered ? excepted : remaining).push(hit);
+  }
+  return { remaining, excepted };
+}
+
+function loadExceptions() {
+  try {
+    return JSON.parse(readFileSync(join(ROOT, 'tools', 'structure-exceptions.json'), 'utf8'));
+  } catch {
+    return [];
+  }
+}
 
 function loadRatchets() {
   try {
@@ -397,6 +528,10 @@ function scan() {
     const lines = readFileSync(file, 'utf8').split('\n');
     for (const rule of RULES) {
       if (rule.allow.some((a) => file.includes(a))) continue;
+      if (rule.scan) {
+        for (const v of rule.scan(rel, lines)) hits.get(rule.id).push({ file: rel, line: v.line, text: v.text });
+        continue;
+      }
       lines.forEach((text, i) => {
         const t = text.trim();
         // Skip comment lines, AND strip inline `// ...` and `/* ... */` before
@@ -420,12 +555,23 @@ function scan() {
 function main() {
   const updating = process.argv.includes('--update-ratchets');
   const ratchets = loadRatchets();
+  const exceptions = loadExceptions();
+  const exv = validateExceptions(exceptions, Date.now());
+  if (!exv.ok) {
+    for (const e of exv.errors) console.error(`\n⏰ ${e}`);
+    process.exit(1);
+  }
   const hits = scan();
   let failed = false;
+  let debtShown = 0;
   const newRatchets = {};
 
   for (const rule of RULES) {
-    const found = hits.get(rule.id);
+    const { remaining: found, excepted } = applyExceptions(rule.id, hits.get(rule.id), exceptions);
+    for (const ex of excepted) {
+      debtShown++;
+      console.log(`⏳ excepted (${rule.id}): ${ex.file}:${ex.line} — see tools/structure-exceptions.json`);
+    }
     const count = found.length;
     const bound = ratchets[rule.id] ?? 0;
 
@@ -477,7 +623,9 @@ function main() {
   }
 
   const tightened = Object.keys(newRatchets).length;
-  console.log(`✅ structure: ${RULES.length} rules pass${tightened ? ` (${tightened} ratcheted)` : ''}`);
+  console.log(
+    `✅ structure: ${RULES.length} rules pass${tightened ? ` (${tightened} ratcheted)` : ''}${debtShown ? ` — ⏳ ${debtShown} declared debt(s) active` : ''}`
+  );
 }
 
 // Only run when invoked directly -- verify-structure.test.mjs imports RULES to

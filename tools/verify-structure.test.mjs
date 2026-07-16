@@ -25,7 +25,7 @@
  * @module tools/verify-structure.test
  */
 
-import { RULES } from './verify-structure.mjs';
+import { RULES, validateExceptions, applyExceptions } from './verify-structure.mjs';
 
 /**
  * Real V2 code, verbatim, with its source. Each MUST be rejected by `rule`.
@@ -213,10 +213,72 @@ export function run(t) {
     t.ok(`rule '${r.id}' says what to do INSTEAD`, typeof r.instead === 'string' && r.instead.length > 20);
   }
 
+  // ---- the one-door rule: file-level scan, proven both ways ----------------
+  {
+    const rule = RULES.find((r) => r.id === 'zones/one-door');
+    t.ok("'zones/one-door' exists and is a scan rule", !!rule && typeof rule.scan === 'function');
+    if (rule) {
+      const deep = rule.scan('src/effects/water/water-pass.js', [
+        "import { PageCache } from '../../vt/page-cache.js';",
+      ]);
+      t.ok('REJECTS a deep cross-zone import (effects reaching into vt internals)', deep.length === 1);
+      const door = rule.scan('src/effects/water/water-pass.js', ["import { vtSample } from '../../vt/index.js';"]);
+      t.ok('ALLOWS crossing through the door (vt/index.js)', door.length === 0);
+      const inside = rule.scan('src/vt/page-cache.js', ["import { PageTable } from './page-table.js';"]);
+      t.ok('ALLOWS imports inside a zone', inside.length === 0);
+      const stdlib = rule.scan('src/effects/water/water-pass.js', [
+        "import { NotBuiltError } from '../../core/not-built.js';",
+      ]);
+      t.ok('ALLOWS core/ (the standard library is individually public)', stdlib.length === 0);
+    }
+  }
+
+  // ---- the debt ledger: the sanctioned outlet for "make it work NOW" -------
+  {
+    const NOW = Date.parse('2026-07-16');
+    const good = [
+      {
+        rule: 'zones/one-door',
+        pathIncludes: 'effects/fire',
+        reason: 'author needs fire visible for Saturday',
+        approvedBy: 'author',
+        expires: '2026-08-01',
+      },
+    ];
+    t.ok('a complete, future-dated exception validates', validateExceptions(good, NOW).ok);
+
+    const expired = [{ ...good[0], expires: '2026-07-01' }];
+    const r = validateExceptions(expired, NOW);
+    t.ok('an EXPIRED exception fails the build', !r.ok);
+    t.ok(
+      '...and the error says fix-or-renew, never quietly-keep',
+      r.errors.some((e) => /renew/.test(e))
+    );
+
+    const anonymous = [{ ...good[0], approvedBy: '' }];
+    t.ok('pressure must have a NAME attached (approvedBy required)', !validateExceptions(anonymous, NOW).ok);
+    const unreasoned = [{ ...good[0], reason: '' }];
+    t.ok('and a reason (no blank-cheque debt)', !validateExceptions(unreasoned, NOW).ok);
+
+    const hits = [
+      { file: 'src/effects/fire/fire-pass.js', line: 10, text: 'deep import' },
+      { file: 'src/effects/water/water-pass.js', line: 5, text: 'deep import' },
+    ];
+    const { remaining, excepted } = applyExceptions('zones/one-door', hits, good);
+    t.ok('an active exception covers ONLY its declared path', excepted.length === 1 && remaining.length === 1);
+    t.ok('...the covered one is the declared one', excepted[0].file.includes('fire'));
+    const other = applyExceptions('no-silent-catch', hits, good);
+    t.ok('an exception never bleeds across rules', other.excepted.length === 0);
+  }
+
   // Every corpse in the list must map to a real rule (no orphan citations).
   const covered = new Set(V2_CORPSES.map((c) => c.rule));
+  // File-level `scan` rules cannot be fed a bare corpse line — they carry their
+  // own dedicated proof section above (and this assertion keeps THAT honest:
+  // a scan rule with no bespoke proof shows up here as uncovered).
+  const scanRulesProven = new Set(['zones/one-door']);
   t.ok(
-    `every rule has at least one proof case (${covered.size}/${RULES.length})`,
-    RULES.every((r) => covered.has(r.id))
+    `every rule has at least one proof case (${covered.size + scanRulesProven.size}/${RULES.length})`,
+    RULES.every((r) => covered.has(r.id) || (typeof r.scan === 'function' && scanRulesProven.has(r.id)))
   );
 }

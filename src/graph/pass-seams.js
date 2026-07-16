@@ -18,12 +18,18 @@
  * @module graph/pass-seams
  */
 
-import { registerParticleSystem } from '../effects/particles/particle-engine.js';
-import { buildOcclusionMaskPass } from '../scene/occlusion-mask.js';
-import { buildLightVisibilityPass, buildLightAccumulatePass } from '../effects/lighting/lighting-pass.js';
-import { buildGradePass } from '../effects/grade/grade-pass.js';
-import { buildWaterPass, buildFluidSimPass } from '../effects/water/water-pass.js';
-import { buildSurfaceResponsePass } from '../effects/surface-response.js';
+// Through the DOORS, exemplifying zones/one-door: the wiring registry imports
+// each zone's index.js, never its internals.
+import {
+  registerParticleSystem,
+  buildLightVisibilityPass,
+  buildLightAccumulatePass,
+  buildGradePass,
+  buildWaterPass,
+  buildFluidSimPass,
+  buildSurfaceResponsePass,
+} from '../effects/index.js';
+import { buildOcclusionMaskPass } from '../scene/index.js';
 
 /**
  * Every 'seam'-status pass MUST appear here; every entry here MUST be a

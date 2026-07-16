@@ -165,6 +165,19 @@ The audit must be honest or it is just contempt, and two results genuinely surpr
 
 ---
 
+## 7B. ROUND FOUR — the bridge, the mask baker, the input fork (completing the accounting)
+
+### canvas-replacement.js (12,573 lines) — the adapter that imports the product
+- **A layering INVERSION:** the Foundry bridge imports concrete effect classes (`SpecularEffectV2`, `CandleFlamesEffectV2`, `LightningEffectV2`, …). The lowest-level integration file knows the highest-level product features by name. Arrows point every direction; there is no "down".
+- **249 empty catches in this ONE file** (~10% of the module's 2,670), **60 setTimeouts**, and only **2 version-gating checks** in 12.5k lines of Foundry integration — the drift bomb, unguarded at its epicentre.
+- **Suppression by per-object flag-fiddling:** Foundry's rendering is suppressed by manually flipping `renderable`/`visible` on individual drawings, shapes, text and frames — each of which must later be perfectly restored. "Who owns visibility?" answered with *everyone* — the no-owner disease again, applied to Foundry's scene graph.
+
+### GpuSceneMaskCompositor.js (4,959 lines) — the crash, in miniature, self-described
+Its own docstring is the whole indictment: *"One WebGLRenderTarget per mask type… Per-floor render target cache with LRU eviction (max 8 floors)… CPU readback via getCpuPixels() for particle spawn point scanning… Falls back to the CPU SceneMaskCompositor"*. That is: **world-res × mask-types × 8 floors of cached RTs, a synchronous readback API as a *feature*, and a complete second CPU implementation of the same thing** (two paths for one behaviour — doctrine #1's origin story). 127 cache/prewarm/sweep mentions: cache management as a lifestyle. **Under Keyhole this entire machine, its CPU twin, its floor cache and its readback are replaced by `vtSample()`** — the cleanest illustration in the codebase of "fix the cost model, delete the machine." Its real product knowledge (per-mask blend modes, the lighten/`max(r,g,b)` convention, `MASK_MAX_SIZE` history) is extracted at Stage 4 per the harvest manifest.
+
+### interaction-manager.js (8,955 lines) — the price tag of the fork not taken
+*"Replaces Foundry's canvas interaction layer for THREE.js."* Nine thousand lines re-implementing selection, dragging and deletion — importing an effect class to draw its selection box. **This file is what the input-model decision (`keyhole-input-model-decision`: Foundry owns ALL input) saved us from writing again.** The decision was made from a bug; this is its cost-benefit validated by corpse.
+
 ## 8. THE SYNTHESIS — what actually killed it
 
 Every blunder above is **downstream of two decisions**, and neither was crazy at the time:

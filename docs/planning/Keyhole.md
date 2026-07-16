@@ -351,7 +351,7 @@ Walls/templates/drawings/notes native; interaction parity sweep (select, drag, H
 **Open questions (author decides at session zero; recommendations inline):**
 - **Q1** Page size 128 vs **256 (rec)**.
 - **Q2** Cache budget default **512 MB @ 8 GB tier (rec)**, scaled per tier.
-- **Q3** **WebGL2 now (rec)** — §16 W-track conventions keep the WebGPU port mechanical later; do not block the rebirth on it.
+- **Q3** ~~WebGL2 now~~ → **OVERTURNED 2026-07-16: WebGPU + TSL is the direction** (author decision; full reasoning in `docs/planning/Shaders.md`'s ⚡ DECISION block, recorded in project memory as `keyhole-webgpu-tsl-decision`). **Proven, not assumed:** `src/diag/tsl-spike.js` rendered the exact expected pixel on BOTH backends on the author's 3070 — testing the three things `vt-sample.glsl.js` does that a node port could break (`textureLoad` indirection, `DataArrayTexture` layer sampling, a dynamic mip `Loop`), not a spinning triangle. **The decisive argument is memory, not futureproofing:** WebGPU's EXPLICIT resource model (create/`destroy()`/know what exists) *is* §0's fixed-budget law; WebGL's implicit driver-managed one is what made §1's ceiling invisible. Key rules that survive: TSL runs on BOTH backends (`three.webgpu.js` has `WebGLBackend` + `WebGPUBackend`), so **ONE source per effect, never a WebGL2 twin**; and **tiers follow MEASURED performance, never the backend** — WebGPU-availability tracks browser recency, not GPU power, so coupling "fancy" to it would hand a 2017 laptop the expensive path, i.e. the exact crash this plan exists to prevent.
 - **Q4** Offline pre-slicer tool: **after Stage 4 (rec)**.
 - **Q5** Keep `useNativeFoundryRendering` off-switch: **yes (rec)**.
 

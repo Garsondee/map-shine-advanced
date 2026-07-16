@@ -6,6 +6,30 @@
  */
 import { evaluatePassHealth, breakerCircuits } from '../pass-health.js';
 
+/**
+ * A function's source with COMMENTS STRIPPED. The meta-assertions below assert
+ * about what the code DOES; prose that merely names a V2 corpse is not a
+ * violation — citing the corpse is this repo's house style, and a check that
+ * punishes it would push the citations out of the code that needs them.
+ *
+ * WHY THIS EXISTS (found 2026-07-17, and it is the reason the suites are now in
+ * `npm run verify`): these assertions ran through esbuild, which STRIPS
+ * comments — so `String(fn)` returned the BUNDLE's text, not the source's. The
+ * `addEdge` check passed while pass-health.js's own body carried the word
+ * `addEdge` in a comment three lines up. The instrument was inspecting an
+ * artifact of the test harness rather than the thing under test, and reported
+ * green for it. The first honest (unbundled) run turned it red.
+ * (memory: feedback_instruments_must_not_lie)
+ *
+ * Not a tokenizer: a `//` inside a string literal would over-strip. That errs
+ * toward a false NEGATIVE here, which is the wrong direction for a wall — so
+ * this helper is only for these three meta-checks, never for a structure rule.
+ */
+const codeOf = (fn) =>
+  String(fn)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/.*$/gm, '');
+
 /** A fake frame: a set of resource ids that exist right now. */
 const frameOf = (...ids) => ({ has: (id) => ids.includes(id) });
 
@@ -128,9 +152,13 @@ export function run(t) {
 
   // ---- the meta-assertion: no model, no drift ------------------------------
   {
-    const src = String(evaluatePassHealth);
+    const src = codeOf(evaluatePassHealth);
     t.ok('health hardcodes NO effect names (V2 hardcoded 17)', !/EffectV2/.test(src));
     t.ok('health reads NO private fields (V2 checked instance._composeMaterial)', !/\._[a-z]/i.test(src));
     t.ok('health hand-writes NO dependency edges (V2 called addEdge)', !/addEdge/.test(src));
+    // Guard the guard: if codeOf() ever stops stripping, these three checks go
+    // back to reading prose and silently pass on anything. A meta-assertion
+    // that cannot fail is exactly the instrument this block exists to forbid.
+    t.ok('codeOf() actually strips comments (else the 3 checks above are theatre)', !/STARVED —/.test(src));
   }
 }

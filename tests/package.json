@@ -1,0 +1,4 @@
+{
+  "//": "The V2-era Playwright perf harness is genuine CommonJS (require/module.exports) and its specs require() each other WITHOUT extensions, which .cjs renames would break. The root package.json now declares the truth -- src/ and tools/ are ES modules -- so this file declares the truth for THIS subtree instead of renaming six dead-runtime files. See tools/run-tests.mjs for why the root type:module mattered.",
+  "type": "commonjs"
+}

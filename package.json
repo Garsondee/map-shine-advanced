@@ -2,12 +2,14 @@
   "name": "map-shine-advanced",
   "version": "1.0.0",
   "description": "Foundry VTT module with Three.js WebGPU",
+  "//": "type:module states a FACT — module.json loads src/boot.js as `esmodules`, so every .js under src/ IS an ES module. Its absence made Node parse them as CommonJS, so `import {X} from '../thing.js'` threw 'Named export not found' — which is the ONLY reason the test suites were bundled through esbuild to run. That ceremony cost 8 hand-typed commands, so 911 of 1,005 assertions sat outside `npm run verify` (Skeleton.md §0 law 2: the correct path must be the FAST path). tests/ declares itself commonjs; that harness really is CJS.",
+  "type": "module",
   "scripts": {
     "lint": "eslint src tools",
     "lint:fix": "eslint src tools --fix",
     "format": "prettier --write \"src/**/*.{js,mjs}\" \"tools/**/*.mjs\"",
     "format:check": "prettier --check \"src/**/*.{js,mjs}\" \"tools/**/*.mjs\"",
-    "verify": "npm run lint && npm run format:check && npm run verify:structure && npm run test:tools",
+    "verify": "npm run lint && npm run format:check && npm run verify:structure && npm test",
     "make:torture": "node tools/make-torture-world.mjs",
     "build:tsl": "node scripts/build/build.js",
     "release": "node scripts/release/release.js",
@@ -23,7 +25,7 @@
     "build:three-webgpu": "node tools/build-three-webgpu.mjs",
     "verify:structure": "node tools/verify-structure.mjs",
     "ratchets:update": "node tools/verify-structure.mjs --update-ratchets",
-    "test:tools": "node tools/run-tests.mjs"
+    "test": "node tools/run-tests.mjs"
   },
   "dependencies": {
     "three": "0.185.1"

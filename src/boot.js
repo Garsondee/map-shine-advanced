@@ -227,6 +227,10 @@ function install() {
     ['atlas', 'VT BISECT 3: the ATLAS direct, layer 0 (no page table)'],
     ['indirection', 'VT BISECT 4: the PAGE TABLE texels as a pattern'],
     ['walk', 'VT BISECT 5: the mip WALK only (no tint/alpha/occlusion)'],
+    ['walk-alpha', 'VT BISECT 6: the walk with its REAL alpha'],
+    ['sample', 'VT BISECT 7: the FULL sampler (walk + mip blend + world guard)'],
+    ['sample-opaque', 'VT BISECT 8: the full sampler, alpha forced opaque'],
+    ['no-occlusion', 'VT BISECT 9: the real chain MINUS occlusion'],
     [null, 'VT BISECT off: back to the real shader'],
   ]) {
     MapShine.debug.registerReport(`vt-bisect-${stage ?? 'off'}`, `${label} — then Force Restart`, () => ({

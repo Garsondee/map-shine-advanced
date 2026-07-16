@@ -265,12 +265,48 @@ export function createVtSampler(
       return vec4(texture(atlasTexture, worldUV).depth(int(0)).rgb, 1);
     }
     if (stage === 'indirection') {
-      // The page table's texels ARE pointers, so this is deliberately not a
-      // meaningful picture — it is a PATTERN. Uniform black means nothing is
-      // arriving; anything structured means the pointers are.
-      const px = worldUV.mul(uniforms.worldSizePx).div(float(payloadPx)).floor();
-      const t = textureLoad(uniforms.pageTableTexture, ivec2(px));
-      return vec4(t.r, t.g, t.a, 1);
+      // Reads the CURRENT mip's rows, not mip 0's. The first cut of this read mip 0
+      // unconditionally and drew black while the view sat at mip 2 -- whose rows are
+      // legitimately empty. It contradicted 'walk', which needs the same table and
+      // draws a correct map. An instrument that disagrees with a working system is
+      // reporting on itself.
+      //
+      // The texels are POINTERS, so this is a PATTERN, not a picture: any structure
+      // is a pass, uniform black is the fail.
+      const worldPx = worldUV.mul(uniforms.worldSizePx);
+      const originY = int(0).toVar();
+      const out = vec4(0, 0, 0, 1).toVar();
+      Loop({ start: int(0), end: int(VT_MAX_MIPS), type: 'int', condition: '<' }, ({ i }) => {
+        const scale = float(2).pow(i.toFloat());
+        const pagesXm = float(uniforms.pages0.x).div(scale).ceil().toInt().max(int(1));
+        const pagesYm = float(uniforms.pages0.y).div(scale).ceil().toInt().max(int(1));
+        If(i.equal(uniforms.requestedMip), () => {
+          const cellF = worldPx.div(float(payloadPx).mul(scale));
+          const texel = ivec2(cellF.floor()).clamp(ivec2(0, 0), ivec2(pagesXm.sub(int(1)), pagesYm.sub(int(1))));
+          const t = textureLoad(uniforms.pageTableTexture, ivec2(texel.x, texel.y.add(originY)));
+          out.assign(vec4(t.r, t.g, t.a, 1));
+        });
+        originY.addAssign(pagesYm);
+      });
+      return out;
+    }
+    if (stage === 'walk-alpha') {
+      // 'walk' forces alpha to 1; this keeps the walk's REAL alpha. Splits "the walk
+      // returns a black colour" from "the walk returns a transparent one" -- over a
+      // black page those look identical to the eye, and the pixel readback is not
+      // trusted (it read all-zero against a visibly red frame).
+      return sampleFromMip(uniforms.requestedMip, worldUV.mul(uniforms.worldSizePx));
+    }
+    if (stage === 'sample') {
+      // The FULL sampler: the walk plus the two things layered on top of it inside
+      // this file -- the mip cross-fade, and the out-of-world guard. Nothing from the
+      // item material. 'walk' draws and this does not => the bug is one of those two.
+      return sample(worldUV);
+    }
+    if (stage === 'sample-opaque') {
+      // As 'sample', alpha forced opaque. Draws here but black in 'sample' => the
+      // sampler's ALPHA is the culprit. Black in both => its RGB is.
+      return vec4(sample(worldUV).rgb, 1);
     }
     if (stage === 'walk') {
       const worldPx = worldUV.mul(uniforms.worldSizePx);

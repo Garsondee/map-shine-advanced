@@ -753,12 +753,23 @@ export async function startVtPanViewer({
       // THE BISECT — see setVtDebugSolidColor. A constant that bypasses the ENTIRE
       // node graph: sampler, tint, alpha, occlusion. If this does not appear, the
       // graph was never the problem.
+      // 'no-occlusion' is the ONLY stage that lives here rather than in the sampler:
+      // it is the real chain minus the occlusion block, so it isolates the occlusion
+      // maths (whose mask is still an inert 1x1 placeholder, and whose maskUV is fed
+      // world coordinates) from tint and alpha.
       const debugNode =
         debugStageName === 'solid'
           ? THREE.TSL.vec4(1, 0, 0, 1)
-          : debugStageName
-            ? vt.debugStage(debugStageName, uv())
-            : null;
+          : debugStageName === 'no-occlusion'
+            ? Fn(() => {
+                const c = vt.sample(uv()).toVar();
+                c.rgb.mulAssign(uTint);
+                c.a.mulAssign(uAlpha);
+                return c;
+              })()
+            : debugStageName
+              ? vt.debugStage(debugStageName, uv())
+              : null;
       material.colorNode = debugNode
         ? debugNode
         : Fn(() => {

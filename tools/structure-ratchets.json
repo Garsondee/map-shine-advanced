@@ -1,0 +1,5 @@
+{
+  "no-global-bus": 7,
+  "renderer-state/graph-only": 0,
+  "no-silent-catch": 35
+}

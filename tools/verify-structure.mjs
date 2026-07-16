@@ -1,0 +1,361 @@
+/**
+ * THE TRIPWIRE SUITE — architecture rules that FAIL THE BUILD.
+ *
+ * ============================================================================
+ * WHY THIS FILE IS THE MOST IMPORTANT FILE IN THE REPO
+ * ============================================================================
+ *
+ * The previous module died of ONE mechanism, observed independently at three
+ * different layers (memory: `v2-postmortem-the-failure-modes`):
+ *
+ *   1. `EffectComposer.js` had the RIGHT effect-layering design, documented.
+ *      → 5 importers. The god-object it lost to: 92.
+ *   2. `legacy/foundry/` was the designated Foundry adapter.
+ *      → 21 of 128 files complied. 16% coverage of its own job.
+ *   3. `resolve-effect-enabled.js` says "every render pass gate MUST call this"
+ *      → bypassed anyway.
+ *
+ * Three correct designs. Three losses. **Not because anyone was careless — the
+ * author tried hard, and it is visible everywhere in that code. They lost
+ * because they were OPTIONAL.** Bypassing structure is always cheaper *today*,
+ * and "today" is when every line gets written.
+ *
+ * > **A comment cannot fail a build. This file can.**
+ *
+ * Author's standing directive (2026-07-16): *"I would rather this project was
+ * too fussy about following rules than too lenient."* When in doubt, this file
+ * says no.
+ *
+ * ---------------------------------------------------------------------------
+ * HOW TO ADD A RULE (covenant rule 4, Skeleton.md §3)
+ * When you fix a bug CLASS, add its tripwire here. That is the mechanism by
+ * which "burn the failure into memory" becomes enforcement rather than
+ * remembrance — memory informs a session that reads it; this stops one that
+ * doesn't.
+ *
+ * HOW TO WEAKEN A RULE
+ * Don't, casually. If a rule is genuinely wrong, say so in the commit with
+ * `[structure-change]` and update the governing doc. Loud, never quiet — every
+ * disaster in the autopsy was quiet.
+ *
+ * RATCHETS
+ * Some rules the current tree already violates (boot.js wires Foundry hooks
+ * directly; vt-pan-viewer.js is really the scene renderer). Those are ratcheted:
+ * the current count is frozen in `tools/structure-ratchets.json`, an INCREASE
+ * fails, and a DECREASE auto-tightens the bound. This suite never claims virtue
+ * it does not have — it guarantees monotonic improvement, which is the honest
+ * version of "rigid".
+ *
+ * Usage: `npm run verify` (or `node tools/verify-structure.mjs`)
+ *        `node tools/verify-structure.mjs --update-ratchets` after a real cleanup.
+ *
+ * @module tools/verify-structure
+ */
+
+import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// fileURLToPath, not URL.pathname — the repo path contains spaces, which pathname
+// percent-encodes into %20 and fs then cannot find. Found on this file's first run.
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+const SRC = join(ROOT, 'src');
+const RATCHET_FILE = join(ROOT, 'tools', 'structure-ratchets.json');
+
+/** Vendored third-party code is never ours to police. */
+const IGNORED = [`${sep}vendor${sep}`, `${sep}__tests__${sep}`];
+
+/** @returns {string[]} every .js/.mjs file under src/, excluding vendor + tests */
+function sourceFiles(dir = SRC, out = []) {
+  for (const name of readdirSync(dir)) {
+    const full = join(dir, name);
+    if (statSync(full).isDirectory()) {
+      sourceFiles(full, out);
+    } else if (/\.(js|mjs)$/.test(full) && !IGNORED.some((i) => full.includes(i))) {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
+/**
+ * A rule. `pattern` is searched per line; a hit outside `allow` is a violation.
+ *
+ * @typedef {object} Rule
+ * @property {string} id
+ * @property {RegExp} pattern
+ * @property {string[]} allow - path fragments where this IS permitted (the one door).
+ * @property {string} why - the V2 corpse this defends against. Printed on failure.
+ * @property {string} instead - what to do. Printed on failure.
+ * @property {boolean} [ratchet] - if true, existing violations are tolerated but may not grow.
+ */
+
+/** @type {Rule[]} */
+const RULES = [
+  // ===================================================================
+  // PARTICLES — the author's ask, 2026-07-16. The single biggest sprawl
+  // in V2: FIVE particle architectures, because the good one was optional.
+  // ===================================================================
+  {
+    id: 'particles/one-engine',
+    pattern: /\b(?:THREE\.)?(?:Sprite|Points)\s*\(|InstancedMesh|three\.quarks|BatchedRenderer/,
+    allow: [`${sep}effects${sep}particles${sep}`],
+    why:
+      'V2 had FIVE particle architectures at once (quarks / Points / InstancedMesh / a Sprite PER ' +
+      'PARTICLE in 8 files / per-particle JS callbacks in 11). Not because nobody built a good ' +
+      'engine — somebody did — but because using it was optional. Sprite-per-particle means N ' +
+      'particles = N scene objects = N draw calls.',
+    instead:
+      'Particles come from src/effects/particles/ and nowhere else. Declare a system with ' +
+      'validateParticleSystem() (a declaration is data — it works today, months before the engine ' +
+      'does). See docs/planning/Particles.md §7.',
+  },
+
+  // ===================================================================
+  // THE GLOBAL BUS — 479 window.MapShine reaches from V2's effects, which is
+  // how Lighting ended up reading Fire's private _glowBucketsByFloor.
+  // ===================================================================
+  {
+    id: 'no-global-bus',
+    // MapShine.debug is the sanctioned shop window (the debug panel). Never a hallway.
+    pattern: /window\.MapShine(?!\.debug)|globalThis\.MapShine(?!\.debug)/,
+    allow: [`${sep}boot.js`, `${sep}diag${sep}`],
+    why:
+      'V2 effects reached into window.MapShine 479 times — up into private fields ' +
+      '(sceneComposer._sceneMaskCompositor, x27) and SIDEWAYS into other effects, which closed a ' +
+      "CYCLE: Lighting read Fire's private _glowBucketsByFloor; Fire read Lighting's params. " +
+      'Neither could be built, tested or ported without the other.',
+    instead:
+      'Declare what you need as a `reads` entry and receive it. If it is not declared you cannot ' +
+      'touch it — there is nothing to reach with (Effects-API.md §5).',
+    ratchet: true,
+  },
+
+  // ===================================================================
+  // RENDERER STATE — 452 setRenderTarget calls across 60 FILES in V2.
+  // Renderer state had sixty owners, i.e. none.
+  // ===================================================================
+  {
+    id: 'renderer-state/graph-only',
+    pattern: /\.setRenderTarget\s*\(|\.autoClear\s*=|\.setScissor\s*\(|\.setViewport\s*\(/,
+    allow: [`${sep}graph${sep}`, `${sep}vt${sep}`, `${sep}diag${sep}`],
+    why:
+      'V2: 452 setRenderTarget sites across 60 files, 262 autoClear touches of a GLOBAL mutable ' +
+      'boolean. Every module had to save/restore; any that forgot leaked into the next pass. This ' +
+      'is the bug class that produces "it works unless you enable bloom, then shadows break" — ' +
+      'unfixable at the call site, because the call site is not wrong.',
+    instead:
+      'The frame graph is the ONLY thing that touches the renderer. A pass declares reads/writes ' +
+      'and is HANDED a target — enforcement by absence (Engine-Postmortem.md §3).',
+    ratchet: true,
+  },
+
+  // ===================================================================
+  // GPU READBACKS — the GPU is a write-only pipe, not a data structure.
+  // ===================================================================
+  {
+    id: 'no-gpu-readback',
+    pattern: /readRenderTargetPixels|\.readPixels\s*\(|gl\.finish\s*\(|\.getImageData\s*\(/,
+    // vt/ is the DECODE path: its getImageData runs in the worker at decode time on
+    // 256px pages — which is exactly what this rule PRESCRIBES as the fix, not the
+    // runtime GPU stall it forbids. diag/ reads back for instruments, deliberately.
+    allow: [`${sep}diag${sep}`, `${sep}vt${sep}`],
+    why:
+      'V2: 46 getImageData, 41 readRenderTargetPixels, 8 readPixels, 7 gl.finish() — each a full ' +
+      'pipeline stall. The defining example reached through a global to read back ONE PIXEL. The ' +
+      '8250x8250 getImageData cost 260MB of heap and a 550-850ms stall per load.',
+    instead:
+      'Per-page CPU extraction at DECODE time, in the worker (Keyhole.md §4.1) — the data is on ' +
+      'the CPU before anyone asks. The GPU is deep-pipelined; asking it anything costs the pipeline.',
+  },
+
+  // ===================================================================
+  // TSL's .mix() TRAP — cost a full session and produced 3 simultaneous bugs.
+  // ===================================================================
+  {
+    id: 'tsl/no-mix-method',
+    // Method form only. mix(...) and TSL.mix(...) are the correct FUNCTION forms
+    // and must NOT trip. A custom test captures the receiver of each `.mix(`/
+    // `.smoothstep(` and exempts one ending in TSL. (Regex lookbehind was fragile
+    // for the dotted `THREE.TSL.mix` case; an explicit capture is unambiguous.)
+    pattern: /\.\s*(?:mix|smoothstep)\s*\(/,
+    test: (code) => {
+      const re = /([\w.]*)\.\s*(?:mix|smoothstep)\s*\(/g;
+      let m;
+      while ((m = re.exec(code)) !== null) {
+        if (!/(?:^|\.)TSL$/.test(m[1])) return true;
+      }
+      return false;
+    },
+    allow: [],
+    why:
+      "TSL's .mix() METHOD takes its RECEIVER as the interpolant: three.js defines " +
+      '`mixElement = (t, e1, e2) => mix(e1, e2, t)`, so `a.mix(b, t)` compiles to `mix(b, t, a)` — ' +
+      'silently, no type error. This blacked out the entire map for a session ' +
+      '(uUnoccludedAlpha.mix(uOccludedAlpha, occ) reads as mix(1,0,0)==1 and compiled to ' +
+      'mix(0,occ,1)==0, so alpha was multiplied by ZERO) while every printed uniform looked correct.',
+    instead:
+      'ALWAYS the function form: mix(a, b, t). It reads the way it behaves. ' +
+      '(memory: reference_tsl_method_chaining_trap)',
+  },
+
+  // ===================================================================
+  // UNIFORM GATING — "off" that still costs. V2 did this 117 times.
+  // ===================================================================
+  {
+    id: 'tsl/no-uniform-gates',
+    pattern:
+      /\buniform\s*\(\s*(?:float\s*\(\s*)?[01]\s*\)?\s*\)?\s*[,;]?\s*\/\/\s*(?:enable|toggle)|u(?:Enable|Use|Has)[A-Z]\w*/,
+    allow: [],
+    why:
+      'V2 had 117 distinct uniform-gated shader branches (uEnable*/uUse*/uHas*). A uniform set to ' +
+      'zero does NOT remove work — it executes every pixel and pays for its bindings. The shader ' +
+      'compiles for its maximal self and every machine pays forever.',
+    instead:
+      'Tier selection is a JS `if` at graph-build time — the nodes are never constructed. TSL If()/' +
+      'Loop() are RUNTIME branches, only for per-pixel data-dependent decisions. The test: if ' +
+      'turning it off does not SHRINK the compiled shader, it is not off (Effects.md Law 4).',
+  },
+
+  // ===================================================================
+  // SILENT FAILURE — 2,670 empty catch blocks. One per ~140 lines.
+  // The worst number in the entire autopsy.
+  // ===================================================================
+  {
+    id: 'no-silent-catch',
+    pattern: /catch\s*(?:\([^)]*\))?\s*\{\s*\}/,
+    allow: [],
+    why:
+      'V2 had 2,670 EMPTY CATCH BLOCKS — one silent error-swallow per ~140 lines. It did not merely ' +
+      'fail to report; it INDUSTRIALISED not-knowing. That is why the rot stayed invisible until it ' +
+      'crashed. (I hit this personally: a whole diagnostic eaten by one bare catch, which looked ' +
+      'exactly like code that never ran.)',
+    instead:
+      'Handle it, or report it with a reason. Every skip/drop/early-return states WHY and WHICH. ' +
+      '`skipped: []` must mean "nothing was skipped", never "I did not look". ' +
+      '(memory: feedback_instruments_must_not_lie)',
+    // Ratcheted: 35 pre-existing empties in harvested vt/graph code + early boot/diag.
+    // Frozen here so NEW ones fail the build; the backlog is a separate cleanup task.
+    ratchet: true,
+  },
+
+  // ===================================================================
+  // THE QUARANTINE — src/ never imports legacy/. (Keyhole.md §5)
+  // ===================================================================
+  {
+    id: 'quarantine/no-legacy-imports',
+    pattern: /from\s+['"][^'"]*legacy\/|import\s*\(\s*['"][^'"]*legacy\//,
+    allow: [],
+    why:
+      'legacy/ is frozen and quarantined. It is a reference library and a parts donor, not a ' +
+      'runtime. One import across that boundary and V2 is alive again inside V3.',
+    instead: 'Harvest by `git mv` into src/ + fix imports, in one commit. Never a cross-boundary import.',
+  },
+];
+
+// ---------------------------------------------------------------------------
+
+function loadRatchets() {
+  try {
+    return JSON.parse(readFileSync(RATCHET_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function scan() {
+  const files = sourceFiles();
+  /** @type {Map<string, {file: string, line: number, text: string}[]>} */
+  const hits = new Map();
+
+  for (const rule of RULES) hits.set(rule.id, []);
+
+  for (const file of files) {
+    const rel = relative(ROOT, file);
+    const lines = readFileSync(file, 'utf8').split('\n');
+    for (const rule of RULES) {
+      if (rule.allow.some((a) => file.includes(a))) continue;
+      lines.forEach((text, i) => {
+        const t = text.trim();
+        // Skip comment lines, AND strip inline `// ...` and `/* ... */` before
+        // testing — otherwise a rule trips on its own explanatory comment. (Found
+        // exactly that: the .mix() rule matched a comment WARNING about .mix().)
+        // Not a full tokenizer; it does not handle `//` inside a string literal,
+        // which is rare in this codebase and errs toward a false POSITIVE (loud),
+        // never a false negative (silent) — the safe direction for a wall.
+        if (t.startsWith('*') || t.startsWith('//')) return;
+        const code = text.replace(/\/\*.*?\*\//g, '').replace(/\/\/.*$/, '');
+        const matched = rule.test ? rule.test(code) : rule.pattern.test(code);
+        if (matched) {
+          hits.get(rule.id).push({ file: rel, line: i + 1, text: code.trim().slice(0, 100) });
+        }
+      });
+    }
+  }
+  return hits;
+}
+
+function main() {
+  const updating = process.argv.includes('--update-ratchets');
+  const ratchets = loadRatchets();
+  const hits = scan();
+  let failed = false;
+  const newRatchets = {};
+
+  for (const rule of RULES) {
+    const found = hits.get(rule.id);
+    const count = found.length;
+    const bound = ratchets[rule.id] ?? 0;
+
+    if (rule.ratchet) {
+      newRatchets[rule.id] = Math.min(count, bound || count);
+      if (count > bound) {
+        failed = true;
+        console.error(`\n❌ ${rule.id} — RATCHET BROKEN: ${count} violations, bound is ${bound}`);
+      } else if (count < bound) {
+        console.log(`✅ ${rule.id} — ratchet tightened: ${bound} → ${count}`);
+      }
+      if (count <= bound) continue;
+    } else if (count === 0) {
+      continue;
+    } else {
+      failed = true;
+      console.error(`\n❌ ${rule.id} — ${count} violation(s)`);
+    }
+
+    console.error(`\n   WHY THIS RULE EXISTS:\n   ${rule.why.replace(/\s+/g, ' ')}`);
+    console.error(`\n   DO THIS INSTEAD:\n   ${rule.instead.replace(/\s+/g, ' ')}`);
+    console.error('\n   Violations:');
+    for (const h of found.slice(0, 10)) console.error(`     ${h.file}:${h.line}  ${h.text}`);
+    if (found.length > 10) console.error(`     ... and ${found.length - 10} more`);
+  }
+
+  if (updating) {
+    for (const rule of RULES) {
+      if (rule.ratchet) newRatchets[rule.id] = hits.get(rule.id).length;
+    }
+    writeFileSync(RATCHET_FILE, JSON.stringify(newRatchets, null, 2) + '\n');
+    console.log(`\n📌 Ratchets written to ${relative(ROOT, RATCHET_FILE)}`);
+    return;
+  }
+
+  if (failed) {
+    console.error(
+      '\n────────────────────────────────────────────────────────────\n' +
+        'STRUCTURE CHECK FAILED.\n\n' +
+        'This is not bureaucracy. Each rule above is a corpse from the previous\n' +
+        'module (memory: v2-postmortem-the-failure-modes; docs/planning/Engine-Postmortem.md).\n' +
+        'V2 had the right designs written down THREE times and lost anyway, because\n' +
+        'following them was optional. This file is what "not optional" looks like.\n\n' +
+        'The wall is right until the author says otherwise. If it is genuinely wrong,\n' +
+        'change it LOUDLY: [structure-change] in the commit + update the governing doc.\n' +
+        '────────────────────────────────────────────────────────────'
+    );
+    process.exit(1);
+  }
+
+  const tightened = Object.keys(newRatchets).length;
+  console.log(`✅ structure: ${RULES.length} rules pass${tightened ? ` (${tightened} ratcheted)` : ''}`);
+}
+
+main();

@@ -14,6 +14,7 @@ import { run as runFrameGraph } from './frame-graph.test.mjs';
 import { run as runAllocator } from './three-allocator.test.mjs';
 import { run as runAllocatorLaw } from './three-allocator-law.test.mjs';
 import { run as runPerf } from './v3-perf.test.mjs';
+import { run as runPasses } from './pass-declarations.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -53,6 +54,7 @@ const suites = [
   ['ThreeAllocator', runAllocator],
   ['ThreeAllocatorLaw', runAllocatorLaw],
   ['v3-perf', runPerf],
+  ['pass-declarations', runPasses],
 ];
 
 for (const [name, fn] of suites) {

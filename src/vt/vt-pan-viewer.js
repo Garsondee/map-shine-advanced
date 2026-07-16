@@ -303,6 +303,7 @@ export function stopVtPanViewer() {
  */
 export async function startVtPanViewer({
   THREE,
+  followFoundryCamera = false,
   buildItems,
   dimensions,
   floorCount,
@@ -352,9 +353,7 @@ export async function startVtPanViewer({
     Object.assign(canvas.style, {
       // Fill the mount host (the board container) exactly, occluding the PIXI
       // canvas beneath. z-index 5: above board (0) + hud (1), below Foundry UI
-      // (60) and the debug panel (90). pointer-events:auto so the view is a
-      // solid display (clicks don't secretly drive the hidden Foundry canvas);
-      // Foundry UI still gets its clicks because it paints above this.
+      // (60) and the debug panel (90).
       position: 'absolute',
       inset: '0',
       width: '100%',
@@ -362,7 +361,14 @@ export async function startVtPanViewer({
       zIndex: '5',
       display: 'block',
       background: '#000',
-      pointerEvents: 'auto',
+      // FOUNDRY OWNS ALL INPUT when following its camera (author decision
+      // 2026-07-16). pointer-events:none is not cosmetic -- with 'auto' this
+      // canvas SWALLOWED every click, drag and drop aimed at Foundry's board.
+      // Dropping tokens onto the scene silently created no documents at all
+      // (diagnoseTokens: tokenDocsFound: 1 on a scene the author had dropped
+      // many tokens onto), and marquee select did nothing. It looked for hours
+      // like a rendering bug and was an input bug.
+      pointerEvents: followFoundryCamera ? 'none' : 'auto',
       // NOT 'grab'. The cursor was permanently a hand, which promises a drag
       // that is not always what a click does (author-reported). It becomes
       // 'grabbing' only for the duration of an actual pan, then reverts.
@@ -1182,6 +1188,47 @@ export async function startVtPanViewer({
      * ABOVE the tokens on its floor and BELOW the floor above it. A per-floor
      * model has nowhere to put that.
      */
+    /**
+     * Adopt Foundry's camera. Foundry's stage is the ONE source of truth for the
+     * view — MSA does not have a camera on a real scene, it reads this one
+     * (keyhole-input-model-decision).
+     *
+     * Read from the v14 source rather than assumed (board.mjs:1703-1715):
+     *   this.stage.pivot.set(constrained.x, constrained.y);   // world CENTRE
+     *   this.stage.scale.set(constrained.scale, constrained.scale);  // uniform
+     *   Hooks.callAll("canvasPan", this, constrained);
+     *
+     * `scale` is screen-px per world-px, so half the viewport in WORLD px is
+     * (canvasWidth / 2) / scale — which is exactly what halfSpanPx means here.
+     * Scale is uniform in Foundry, so the horizontal span defines the view and
+     * the vertical follows from the aspect, as it already does for MSA's own.
+     *
+     * @returns {boolean} did the view actually change?
+     */
+    function syncFoundryCamera() {
+      const stage = globalThis.canvas?.stage;
+      if (!stage) return false;
+      const scale = stage.scale?.x;
+      // Guard the degenerate cases explicitly: a zero/NaN scale would make
+      // halfSpanPx Infinity/NaN and silently take the whole view with it.
+      if (!Number.isFinite(scale) || scale <= 0) return false;
+      const cx = stage.pivot?.x;
+      const cy = stage.pivot?.y;
+      if (!Number.isFinite(cx) || !Number.isFinite(cy)) return false;
+
+      const halfSpan = canvasW / 2 / scale;
+      const changed = view.centerXPx !== cx || view.centerYPx !== cy || view.halfSpanPx !== halfSpan;
+      view.centerXPx = cx;
+      view.centerYPx = cy;
+      view.halfSpanPx = halfSpan;
+      // MSA's easing is for MSA's own input. Foundry has already eased this pan;
+      // easing an eased value would lag behind the real camera, and a camera that
+      // lags is a camera that disagrees — the exact thing this model exists to
+      // prevent.
+      view.targetHalfSpanPx = halfSpan;
+      return changed;
+    }
+
     async function updateResidency() {
       // sortByLayer stamps `renderOrder` on each item — THE law
       // (scene/layer-order.js). Rebuilt every update because the draw list
@@ -1688,13 +1735,19 @@ export async function startVtPanViewer({
     // die automatically when the canvas is removed in disposeActive(). `wheel`
     // must be passive:false so preventDefault() can suppress page scroll.
     canvas.style.cursor = 'default';
-    canvas.addEventListener('pointerdown', onPointerDown);
-    // Right-drag pans, so the browser context menu must not fire on release.
-    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-    canvas.addEventListener('pointermove', onPointerMove);
-    canvas.addEventListener('pointerup', endDrag);
-    canvas.addEventListener('pointercancel', endDrag);
-    canvas.addEventListener('wheel', onWheel, { passive: false });
+    // MSA's OWN camera controls exist only for the standalone torture-fixture
+    // viewer, which has no Foundry scene to follow. On a real scene they must not
+    // exist at all: a second camera is a second source of truth, and the moment it
+    // disagrees with Foundry's stage every drop lands at the wrong world point.
+    if (!followFoundryCamera) {
+      canvas.addEventListener('pointerdown', onPointerDown);
+      // Right-drag pans, so the browser context menu must not fire on release.
+      canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+      canvas.addEventListener('pointermove', onPointerMove);
+      canvas.addEventListener('pointerup', endDrag);
+      canvas.addEventListener('pointercancel', endDrag);
+      canvas.addEventListener('wheel', onWheel, { passive: false });
+    }
 
     _active = {
       THREE,
@@ -1714,6 +1767,7 @@ export async function startVtPanViewer({
       getView: () => view,
       applyKeyAndUpdate, // exposed so MapShine.soakHooks.pan drives the EXACT same path a real keypress does
       setFloorIndex, // exposed so an external (Foundry-driven) floor sync is as cheap as a keypress, never a full restart
+      syncFoundryCamera,
       // Re-ask buildItems and reconcile. The draw list is derived from live
       // Foundry documents, but NOTHING here watches them — updateResidency only
       // runs when the VIEW changes, so creating a token while the camera sits
@@ -2010,6 +2064,17 @@ export function getVtPanViewerDiagnostics() {
  * view change, so an unchanged scene costs one buildItems call and no GPU work.
  * No-op `{skipped:true}` if nothing is running.
  */
+/**
+ * Adopt Foundry's camera, then reconcile residency. Driven by the `canvasPan`
+ * hook. No-op `{skipped:true}` if nothing is running.
+ */
+export async function syncVtPanViewerCamera() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  const changed = _active.syncFoundryCamera();
+  if (changed) await _active.refreshItems();
+  return { changed };
+}
+
 export async function refreshVtPanViewerItems() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   await _active.refreshItems();

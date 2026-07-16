@@ -95,7 +95,17 @@ export function createVtSampler(
   TSL,
   { atlasTexture, initialPageTable, pagesPerAxis, pagesPerLayer, pageSizePx, borderPx, atlasSizePx }
 ) {
-  const { Fn, If, Loop, uniform, texture, textureLoad, vec2, vec4, ivec2, int, float, select, sRGBTransferEOTF } = TSL;
+  const { Fn, If, Loop, uniform, texture, textureLoad, vec2, vec4, ivec2, int, float, select, sRGBTransferEOTF, mix } =
+    TSL;
+
+  // NEVER use TSL's .mix() METHOD. Its receiver is the INTERPOLANT, not the first
+  // value: three.js defines `mixElement = (t, e1, e2) => mix(e1, e2, t)`, so
+  // `a.mix(b, t)` compiles to `mix(b, t, a)` -- silently, with no type error. That
+  // cost a full session: it made `uUnoccludedAlpha.mix(uOccludedAlpha, occ)` into
+  // mix(0, occ, 1) == 0, so alpha was multiplied by zero and the whole map went
+  // black while every printed uniform was correct. Always the FUNCTION form,
+  // mix(a, b, t), which reads the way it behaves. (.smoothstep() is the same trap:
+  // `smoothstepElement = (x, low, high) => smoothstep(low, high, x)`.)
 
   // THE PAGE TABLE IS THE RAW TEXTURE, not a TextureNode.
   //
@@ -174,7 +184,7 @@ export function createVtSampler(
     // now cost me twice, hence the essay.
     //
     // Alpha is deliberately untouched: alpha is linear in every colour space.
-    return vec4(texel.rgb.mix(sRGBTransferEOTF(texel.rgb), uniforms.srgbDecode), texel.a);
+    return vec4(mix(texel.rgb, sRGBTransferEOTF(texel.rgb), uniforms.srgbDecode), texel.a);
   });
 
   /**
@@ -243,7 +253,7 @@ export function createVtSampler(
     // colorLo passes through — the GLSL's early-return, expressed as data (a node
     // graph has no control flow to return from).
     const t = select(mipHi.greaterThan(mipLo), uniforms.requestedMipFrac.sub(mipLo.toFloat()).clamp(0, 1), float(0));
-    const blended = colorLo.mix(colorHi, t);
+    const blended = mix(colorLo, colorHi, t);
 
     // OUT OF WORLD: its own case, matte black. Not magenta (reserved for a broken
     // pin invariant) and not a smear (what resolving it through the pager gives).
@@ -355,7 +365,7 @@ export function createVtSampler(
       const mipLo = uniforms.requestedMip;
       const mipHi = mipLo.add(int(1)).min(uniforms.maxMip);
       const t = select(mipHi.greaterThan(mipLo), uniforms.requestedMipFrac.sub(mipLo.toFloat()).clamp(0, 1), float(0));
-      return vec4(sampleFromMip(mipLo, worldPx).mix(sampleFromMip(mipHi, worldPx), t).rgb, 1);
+      return vec4(mix(sampleFromMip(mipLo, worldPx), sampleFromMip(mipHi, worldPx), t).rgb, 1);
     }
     if (stage === 'walk') {
       const worldPx = worldUV.mul(uniforms.worldSizePx);

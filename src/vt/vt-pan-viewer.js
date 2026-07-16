@@ -783,7 +783,11 @@ export async function startVtPanViewer({
         const occluded = float(1).sub(THREE.TSL.step(uOcclusionElevation, maskSample));
         const amounts = occluded.mul(uOcclusionWeights);
         const occ = amounts.x.max(amounts.y).max(amounts.z).max(amounts.w);
-        return { occ, factor: uUnoccludedAlpha.mix(uOccludedAlpha, occ) };
+        // mix(a, b, t) -- the FUNCTION form. See the warning in vt-sample.tsl.js: the
+        // .mix() METHOD takes its receiver as the INTERPOLANT, and this exact line,
+        // written as uUnoccludedAlpha.mix(uOccludedAlpha, occ), compiled to
+        // mix(0, occ, 1) == 0 and blacked out the entire map for a whole session.
+        return { occ, factor: THREE.TSL.mix(uUnoccludedAlpha, uOccludedAlpha, occ) };
       };
       // The placeholder's own clear value, as a compile-time constant: Foundry's
       // `CanvasOcclusionMask#clearColor = [0,1,1,1]` == "nothing occludes anything".
@@ -821,6 +825,16 @@ export async function startVtPanViewer({
         // `occ` as RED=occluded / GREEN=not. Greyscale was a BAD instrument: black
         // meant EITHER occ==0 OR the draw never happened -- opposite conclusions
         // wearing the same colour. Three outcomes now have three distinct colours.
+        // THE FACTOR ITSELF: green = 1 (identity, the map should draw), red = 0 (it
+        // kills alpha). occ-one proves substituting a literal 1 here draws; occ-value
+        // proves occ is 0, so mix(1, 0, 0) must BE 1. If this is red, the mix call
+        // computes something other than the 1 its inputs demand -- the last line left
+        // standing, and the only one never directly observed.
+        'occ-factor': () =>
+          Fn(() => {
+            const { factor } = occlusionAlphaFactor(sampleMask());
+            return THREE.TSL.vec4(float(1).sub(factor), factor, 0, 1);
+          })(),
         'occ-value': () =>
           Fn(() => {
             const { occ } = occlusionAlphaFactor(sampleMask());

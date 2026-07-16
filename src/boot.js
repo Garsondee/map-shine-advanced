@@ -243,6 +243,7 @@ function install() {
       { value: 'occ-const', label: 'occ-const — occlusion maths, mask texture NOT bound' },
       { value: 'occ-value', label: 'occ-value — red=occluded, green=not, black=no draw' },
       { value: 'occ-one', label: 'occ-one — the chain, occlusion factor forced to 1' },
+      { value: 'occ-factor', label: 'occ-factor — the mix() result (green=1 good, red=0 bad)' },
     ],
     () => getVtDebugStage() ?? '',
     async (value) => {

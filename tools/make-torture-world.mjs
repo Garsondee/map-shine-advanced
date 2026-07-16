@@ -5,13 +5,27 @@
  * gate: a 12,000² × 3-floor world with labeled grids + per-floor tint (so a
  * mis-streamed page is instantly visible), alpha holes in the upper floors (so
  * lower floors show through — the water-under-floor / alphaTest-hole case), and
- * synthetic _Outdoors/_Specular/_Fire/_Tree/_Bush masks with known patterns.
+ * synthetic masks matching the REAL author mask taxonomy (confirmed 2026-07-15,
+ * corrects the earlier grayscale-everything approximation) so channel-packing
+ * can be proven on representative data:
+ *   SINGLE-CHANNEL (channel-packable into R/G/B of one RGBA + shared hole alpha):
+ *     _Shadow  black=shadowed / white=lit
+ *     _Outdoors white=outdoor / black=indoor
+ *     _Fire    white=fire-spawn / black=none
+ *   COLOURED / RGBA (NOT packable — each its own texture):
+ *     _Specular COLOURED metallic shine (per-floor metal tint)
+ *     _Window  COLOURED light (coloured window rectangles; legacy _Structural)
+ *     _Tree/_Bush RGBA colour + coverage alpha
+ * Every mask carries the SAME structural-hole alpha on upper floors (the hole is
+ * a floor property, shared across masks — the invariant channel-packing relies on).
  *
  * Outputs (into --out, default assets/torture/, gitignored — regenerable):
  *   torture_floor{N}.png              albedo (labeled grid + tint; upper floors holed)
- *   torture_floor{N}_Outdoors.png     indoor/outdoor area mask (max(r,g,b) convention)
- *   torture_floor{N}_Specular.png     specular highlight pattern
- *   torture_floor{N}_Fire.png         sparse known fire-spawn points (per-page extract test)
+ *   torture_floor{N}_Shadow.png       single-channel shadow (+ hole alpha)
+ *   torture_floor{N}_Outdoors.png     single-channel indoor/outdoor (+ hole alpha)
+ *   torture_floor{N}_Fire.png         single-channel known fire-spawn points (+ hole alpha)
+ *   torture_floor{N}_Specular.png     COLOURED metallic highlight (+ hole alpha)
+ *   torture_floor{N}_Window.png       COLOURED light windows (+ hole alpha)
  *   torture_floor{N}_Tree.png         RGBA canopy blobs (transparent)
  *   torture_floor{N}_Bush.png         RGBA bush blobs (transparent)
  *   torture-scene.macro.js            paste into a Foundry Script macro + execute → builds the Scene
@@ -164,8 +178,25 @@ function buildAlbedo(f) {
   return png;
 }
 
-// _Outdoors: large known regions. Outer 1/6 margin ring = outdoor (white), a
-// diagonal band per floor toggles, center = indoor (black). max(r,g,b) decode.
+// Structural-hole alpha, shared by EVERY mask (author-confirmed invariant,
+// 2026-07-15: the transparent hole in an upper floor is a property of the FLOOR
+// — identical across _Shadow/_Outdoors/_Fire/_Window/_Specular — NOT per-mask).
+// Overwrites the alpha channel: opaque (255) where this floor is solid,
+// transparent (0) where it has a courtyard hole — the SAME isSolid pattern the
+// albedo punches, so masks and albedo hole in lockstep. This shared alpha is
+// exactly what lets the three single-channel masks (_Shadow/_Outdoors/_Fire)
+// channel-pack into ONE RGBA texture with a single shared alpha (Keyhole §4.1).
+// Call once, AFTER a mask's RGB is painted.
+function fillHoleAlpha(d, f) {
+  for (let y = 0; y < SIZE; y++) {
+    const cy = (y / CELL) | 0;
+    for (let x = 0; x < SIZE; x++) d[(y * SIZE + x) * 4 + 3] = isSolid(f, (x / CELL) | 0, cy) ? 255 : 0;
+  }
+}
+
+// _Outdoors: SINGLE-CHANNEL — white outdoors, black indoors (author). Outer 1/6
+// margin ring = outdoor, a diagonal band per floor toggles, center = indoor.
+// max(r,g,b) decode. Packs into R/G/B with _Shadow/_Fire.
 function buildOutdoors(f) {
   const png = newPNG();
   const d = png.data;
@@ -175,39 +206,100 @@ function buildOutdoors(f) {
       const i = (y * SIZE + x) * 4;
       const margin = x < m || y < m || x >= SIZE - m || y >= SIZE - m;
       const band = (((x + y + f * SIZE) / (SIZE / 3)) | 0) % 2 === 0;
-      const outdoor = margin || band;
-      const v = outdoor ? 255 : 0;
-      d[i] = v;
-      d[i + 1] = v;
-      d[i + 2] = v;
+      const v = margin || band ? 255 : 0;
+      d[i] = d[i + 1] = d[i + 2] = v;
       d[i + 3] = 255;
     }
+  fillHoleAlpha(d, f);
   return png;
 }
 
-// _Specular: diagonal stripe highlights, phase-shifted per floor.
+// _Shadow: SINGLE-CHANNEL — white where lit, BLACK where shadowed (author:
+// "black where the darkness should be, white where it isn't"). A per-floor grid
+// of LARGE dark blobs on a lit field — deliberately distinct from _Fire's small
+// bright points so a channel-pack mixup is instantly visible. Packs into R/G/B
+// with _Outdoors/_Fire.
+function buildShadow(f) {
+  const png = newPNG();
+  const d = png.data;
+  for (let i = 0; i < d.length; i += 4) d[i] = d[i + 1] = d[i + 2] = 255; // lit field
+  const rnd = lcg(0x5ade + f);
+  const step = SIZE / 5;
+  const R = Math.max(20, (SIZE / 22) | 0);
+  for (let gy = 0; gy < 5; gy++)
+    for (let gx = 0; gx < 5; gx++) {
+      const cx0 = (gx + 0.5) * step + (rnd() - 0.5) * step * 0.4;
+      const cy0 = (gy + 0.5) * step + (rnd() - 0.5) * step * 0.4;
+      for (let dy = -R; dy <= R; dy++)
+        for (let dx = -R; dx <= R; dx++)
+          if (dx * dx + dy * dy <= R * R) px(d, SIZE, (cx0 + dx) | 0, (cy0 + dy) | 0, 0, 0, 0, 255);
+    }
+  fillHoleAlpha(d, f);
+  return png;
+}
+
+// _Specular: COLOURED metallic shine (author: "coloured metallic shines", NOT
+// grayscale). Diagonal stripes tinted a per-floor metal (gold / copper / steel),
+// near-black between. RGB carries the colour → needs a full RGB channel, so it
+// does NOT channel-pack — its own RGBA pack, like _Window/_Tree/_Bush.
+const METAL_TINT = [
+  [255, 210, 120],
+  [200, 130, 90],
+  [150, 190, 230],
+  [220, 220, 235],
+];
 function buildSpecular(f) {
   const png = newPNG();
   const d = png.data;
+  const tint = METAL_TINT[f % METAL_TINT.length];
   const period = 220;
   for (let y = 0; y < SIZE; y++)
     for (let x = 0; x < SIZE; x++) {
       const i = (y * SIZE + x) * 4;
-      const s = (x + y + f * 70) % period < 40 ? 255 : 20;
-      d[i] = s;
-      d[i + 1] = s;
-      d[i + 2] = s;
+      const shine = (x + y + f * 70) % period < 40;
+      d[i] = shine ? tint[0] : 15;
+      d[i + 1] = shine ? tint[1] : 15;
+      d[i + 2] = shine ? tint[2] : 20;
       d[i + 3] = 255;
     }
+  fillHoleAlpha(d, f);
   return png;
 }
 
-// _Fire: sparse KNOWN bright spawn points (a deterministic grid, jittered per
-// floor). The per-page CPU extractor (Stage 4) must find exactly these.
+// _Window (legacy _Structural): COLOURED light (author: "coloured light").
+// Coloured rectangular "windows" emitting a per-window tint, black elsewhere.
+// RGB carries the colour → its own RGBA pack, does NOT channel-pack.
+const WINDOW_TINT = [
+  [255, 200, 120],
+  [140, 190, 255],
+  [255, 150, 150],
+  [180, 255, 200],
+];
+function buildWindow(f) {
+  const png = newPNG();
+  const d = png.data; // all-zero (black)
+  const rnd = lcg(0x1d0e + f);
+  for (let k = 0; k < 14; k++) {
+    const w = (SIZE / 30) * (0.6 + rnd());
+    const h = (SIZE / 30) * (0.6 + rnd());
+    const x0 = rnd() * (SIZE - w);
+    const y0 = rnd() * (SIZE - h);
+    const t = WINDOW_TINT[(k + f) % WINDOW_TINT.length];
+    for (let y = y0 | 0; y < ((y0 + h) | 0); y++)
+      for (let x = x0 | 0; x < ((x0 + w) | 0); x++) px(d, SIZE, x, y, t[0], t[1], t[2], 255);
+  }
+  fillHoleAlpha(d, f);
+  return png;
+}
+
+// _Fire: SINGLE-CHANNEL — WHITE where fire should spawn, black elsewhere
+// (author: "white where the fire needs to be so it's just a single channel").
+// Sparse KNOWN points (a deterministic grid, jittered per floor) — the per-page
+// CPU extractor (Stage 4) must find exactly these. Packs into R/G/B with
+// _Shadow/_Outdoors.
 function buildFire(f) {
   const png = newPNG();
-  const d = png.data; // starts all-zero (black, alpha 0) → set opaque black then dots
-  for (let i = 3; i < d.length; i += 4) d[i] = 255; // opaque
+  const d = png.data; // all-zero (black)
   const rnd = lcg(0xf17e + f);
   const step = SIZE / 8;
   const R = Math.max(6, (SIZE / 400) | 0);
@@ -217,8 +309,9 @@ function buildFire(f) {
       const py0 = (gy + 0.5) * step + (rnd() - 0.5) * step * 0.5;
       for (let dy = -R; dy <= R; dy++)
         for (let dx = -R; dx <= R; dx++)
-          if (dx * dx + dy * dy <= R * R) px(d, SIZE, (px0 + dx) | 0, (py0 + dy) | 0, 255, 180, 40, 255);
+          if (dx * dx + dy * dy <= R * R) px(d, SIZE, (px0 + dx) | 0, (py0 + dy) | 0, 255, 255, 255, 255);
     }
+  fillHoleAlpha(d, f);
   return png;
 }
 
@@ -305,9 +398,13 @@ async function main() {
   for (let f = 0; macroOnly ? false : f < FLOORS; f++) {
     const jobs = [
       [`torture_floor${f}.png`, () => buildAlbedo(f)],
+      // Single-channel (channel-packable — R/G/B of one RGBA + shared hole alpha):
+      [`torture_floor${f}_Shadow.png`, () => buildShadow(f)],
       [`torture_floor${f}_Outdoors.png`, () => buildOutdoors(f)],
-      [`torture_floor${f}_Specular.png`, () => buildSpecular(f)],
       [`torture_floor${f}_Fire.png`, () => buildFire(f)],
+      // Coloured / RGBA (their own packs — NOT channel-packable):
+      [`torture_floor${f}_Specular.png`, () => buildSpecular(f)],
+      [`torture_floor${f}_Window.png`, () => buildWindow(f)],
       [`torture_floor${f}_Tree.png`, () => buildFoliage(f, 0x77ee, 120, SIZE / 60, [40, 120, 45])],
       [`torture_floor${f}_Bush.png`, () => buildFoliage(f, 0xb05b, 260, SIZE / 130, [70, 150, 60])],
     ];
@@ -321,7 +418,7 @@ async function main() {
   fs.writeFileSync(macroPath, buildMacro());
   console.log(`  ✔ torture-scene.macro.js`);
   console.log(
-    `[torture] done: ${FLOORS * 6} images, ${totalMB.toFixed(1)} MB, ${((performance.now() - t0) / 1000).toFixed(1)}s`
+    `[torture] done: ${FLOORS * 8} images, ${totalMB.toFixed(1)} MB, ${((performance.now() - t0) / 1000).toFixed(1)}s`
   );
   console.log(`\nNext:`);
   console.log(`  1. Sync ${OUT_REL}/ to the Foundry VM (it's under a synced path).`);

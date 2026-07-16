@@ -39,6 +39,8 @@ import {
   stopVtPanViewer,
   getVtPanViewerDiagnostics,
   setVtPanViewerFloor,
+  setVtPanViewerDisplayLayer,
+  runZoomThrashTest,
   soakPanStep,
   soakSwitchFloorStep,
 } from './vt/vt-pan-viewer.js';
@@ -99,10 +101,65 @@ function install() {
   const TORTURE_FLOOR_COUNT = 3;
   const tortureImageUrl = (floorIndex) => `modules/${MODULE_ID}/assets/torture/torture_floor${floorIndex}.png`;
 
+  // MULTI-LAYER (Keyhole §4.1, the mask pile-up killer): the torture fixture
+  // emits real mask PNGs on disk (tools/make-torture-world.mjs), so it's where
+  // we PROVE the masks page through the same fixed cache as albedo — V2 died of
+  // _Fire/_Outdoors/_Specular/_Tree/_Bush all held at world resolution at once,
+  // and this streams every one through the keyhole instead. Only albedo
+  // displays until a mask is selected (VT Layers: Cycle Displayed Layer).
+  //
+  // CHANNEL-PACKING (author-confirmed mask taxonomy, 2026-07-16): only the 3
+  // SINGLE-CHANNEL masks (_Shadow black=dark/white=lit, _Outdoors white=out/
+  // black=in, _Fire white=fire-spawn) pack — into R/G/B of one RGBA texture +
+  // a shared structural-hole alpha (the hole is a FLOOR property, identical
+  // across masks — author-confirmed, see tools/make-torture-world.mjs's
+  // fillHoleAlpha). The COLOURED masks (_Specular metallic tint, _Window
+  // light colour) and RGBA masks (_Tree/_Bush colour+coverage) each need a
+  // full texture and stay unpacked. Real math: 7 masks → 4 packs (not the
+  // plan's original optimistic 13→6) — directly answers the GPU page-cache
+  // pressure every live castle-scenario report showed (thousands of
+  // evictions/misses at 24 unpacked packs × 3 floors).
+  const TORTURE_UNPACKED_MASK_NAMES = ['Specular', 'Window', 'Tree', 'Bush'];
+  const tortureMaskUrl = (floorIndex, name) =>
+    `modules/${MODULE_ID}/assets/torture/torture_floor${floorIndex}_${name}.png`;
+  const tortureLayerUrls = (floorIndex) => [
+    {
+      name: 'ShadowOutdoorsFire', // the packed single-channel trio
+      channelUrls: {
+        r: tortureMaskUrl(floorIndex, 'Shadow'),
+        g: tortureMaskUrl(floorIndex, 'Outdoors'),
+        b: tortureMaskUrl(floorIndex, 'Fire'),
+      },
+    },
+    ...TORTURE_UNPACKED_MASK_NAMES.map((name) => ({ name, url: tortureMaskUrl(floorIndex, name) })),
+  ];
+
+  // THE CASTLE-COURTYARD TEST (author, 2026-07-16: "on a castle on floor three
+  // looking down into the courtyard... fires/trees/lighting on all three
+  // floors, all mutually visible"). Until now this button's `visibleFloorIndices`
+  // was left at startVtPanViewer's default `(i) => [i]` — SINGLE FLOOR ONLY —
+  // because the torture fixture's scene macro has no real `visibility.levels`
+  // data to drive `computeVisibleFloorIndices` (§6's known mismatch). That
+  // default silently meant: no floor ever composited beneath another, so an
+  // albedo hole showed the canvas's own black backdrop, not a lower floor —
+  // and, more importantly, the multi-layer mask streaming this session built
+  // was NEVER exercised for more than one floor's fine (view-tier) pages at
+  // once, only its always-resident coarse pins. ALWAYS composite all 3 torture
+  // floors — the worst case (every floor's every layer streaming fine detail
+  // simultaneously) and the direct proof of the castle scenario, not an
+  // approximation of it.
+  const tortureVisibleFloorIndices = () => Array.from({ length: TORTURE_FLOOR_COUNT }, (_, i) => i);
+
   MapShine.debug.registerReport('vt-pan-viewer-start', 'VT Pan Viewer: Start (fills scene view)', async () => ({
     report: 'vt-pan-viewer-start',
     generatedAt: new Date().toISOString(),
-    ...(await startVtPanViewer({ THREE, imageUrlForFloor: tortureImageUrl, floorCount: TORTURE_FLOOR_COUNT })),
+    ...(await startVtPanViewer({
+      THREE,
+      imageUrlForFloor: tortureImageUrl,
+      floorCount: TORTURE_FLOOR_COUNT,
+      extraLayerUrlsForFloor: tortureLayerUrls,
+      visibleFloorIndices: tortureVisibleFloorIndices,
+    })),
   }));
   MapShine.debug.registerReport('vt-pan-viewer-diagnostics', 'VT Pan Viewer: Diagnostics', () => ({
     report: 'vt-pan-viewer-diagnostics',
@@ -114,6 +171,95 @@ function install() {
     generatedAt: new Date().toISOString(),
     ...stopVtPanViewer(),
   }));
+
+  // THE MASK-PILE-UP PROOF (Keyhole §4.1). Lists every (floor × layer) pair —
+  // albedo AND every mask — with its resident page counts, alongside the fixed
+  // cache's own stats. The whole layer stack is resident, yet residentPages
+  // stays a small fraction of capacityPages: V2's `O(world × floors × masks)`
+  // world-resolution textures replaced by `O(screen)` pages.
+  MapShine.debug.registerReport('vt-pan-viewer-layers', 'VT Layers: Residency (mask pile-up proof)', () => {
+    const d = getVtPanViewerDiagnostics();
+    return {
+      report: 'vt-pan-viewer-layers',
+      generatedAt: new Date().toISOString(),
+      active: d.active,
+      displayLayer: d.displayLayer,
+      currentFloorLayers: d.currentFloorLayers,
+      layerResidency: d.layerResidency,
+      layerLoadErrors: d.layerLoadErrors,
+      layerResidencyTotals: d.layerResidencyTotals,
+      cacheStats: d.cacheStats,
+      decodeStats: d.decodeStats,
+      interpretation:
+        'GPU side: every (floor × layer) pair appears in layerResidency, and residentPages/evictions/' +
+        'misses show the bounded page cache degrading to blur (never crash) under pressure — the mask ' +
+        'pile-up killed. layerResidencyTotals.coarsePinShortfall MUST BE 0 — anything else means a ' +
+        'coarse pin (the "always something resident, worst case blur" guarantee) failed to land, which ' +
+        'is what a magenta screen means (a page with no resident data at any mip). coarsePinnedPages is ' +
+        'ground truth (actually resident); coarseIntendedPages is what was asked for — they should match. ' +
+        'DECODE-MEMORY side (the Bush-failure fix): decodeStats.heldSources is the peak number of full ' +
+        '576MB source bitmaps alive at once — it must stay small (≈ SLICE_MAX_CONCURRENT_SOURCES), NOT ' +
+        'grow with layers×floors. idbHits vs idbSlices shows pages served from IndexedDB without re-' +
+        'decoding a source. Empty layerLoadErrors = no decode-memory failures. OFF-MAIN-THREAD DECODE: ' +
+        'decodeStats.workerStatus should read "active" (if "unavailable", workerUnavailableReason says ' +
+        'why, and everything silently fell back to the main thread — slower under pressure but still ' +
+        'correct). workerSourceDecodes vs mainThreadFallbackSourceDecodes is the permanent tripwire for ' +
+        '"is a giant image still touching the render thread anywhere" — mainThreadFallbackSourceDecodes ' +
+        'should stay at or near 0; if it climbs, rangedFetchMisses shows whether the asset server is ' +
+        "honoring Range requests (a nonzero value there means every pack's dimension probe is paying " +
+        'for a full download just to read a PNG header).',
+    };
+  });
+
+  // Visual verification: cycle the DISPLAYED layer (albedo → each mask → back).
+  // The masks stream regardless; this just binds one to the shader so its known
+  // fixture pattern (e.g. _Outdoors' margin ring, _Fire's sparse points) can be
+  // eyeballed for correctness. Real scenes have no masks, so this stays albedo.
+  const TORTURE_DISPLAY_CYCLE = ['albedo', 'ShadowOutdoorsFire', ...TORTURE_UNPACKED_MASK_NAMES];
+  let tortureDisplayLayerIndex = 0;
+  MapShine.debug.registerReport(
+    'vt-pan-viewer-cycle-layer',
+    'VT Layers: Cycle Displayed Layer (albedo ↔ masks)',
+    async () => {
+      tortureDisplayLayerIndex = (tortureDisplayLayerIndex + 1) % TORTURE_DISPLAY_CYCLE.length;
+      const name = TORTURE_DISPLAY_CYCLE[tortureDisplayLayerIndex];
+      return {
+        report: 'vt-pan-viewer-cycle-layer',
+        generatedAt: new Date().toISOString(),
+        requestedLayer: name,
+        ...(await setVtPanViewerDisplayLayer(name)),
+      };
+    }
+  );
+
+  // VT ZOOM THRASH TEST (author-requested, 2026-07-16: "force the camera to
+  // flush the caches, start with a blank slate, start zoomed out and thrash
+  // it in and out whilst tracking things" — a deterministic, instrumented
+  // reproduction of the reported "rapid full-range zoom can temporarily
+  // stop" hitch). Restarts the torture-fixture viewer FRESH (its own
+  // startupParams, captured on every start), thrashes the zoom target
+  // between fully-in and fully-out every animation frame for ~4 seconds, and
+  // reports frame-gap/hitch evidence — see runZoomThrashTest's own header
+  // for the full mechanism. Takes a few seconds to run (click once, wait).
+  MapShine.debug.registerReport(
+    'vt-pan-viewer-zoom-thrash-test',
+    'VT Zoom Thrash Test: Diagnose Hitches (blank slate, ~4s)',
+    async () => ({
+      report: 'vt-pan-viewer-zoom-thrash-test',
+      generatedAt: new Date().toISOString(),
+      // Explicit startupParams — self-contained, works even if nothing is
+      // currently active (doesn't require pressing "VT Pan Viewer: Start" first).
+      ...(await runZoomThrashTest({
+        startupParams: {
+          THREE,
+          imageUrlForFloor: tortureImageUrl,
+          floorCount: TORTURE_FLOOR_COUNT,
+          extraLayerUrlsForFloor: tortureLayerUrls,
+          visibleFloorIndices: tortureVisibleFloorIndices,
+        },
+      })),
+    })
+  );
 
   // ---------------------------------------------------------------------------
   // DEFAULT-ON REAL-SCENE RENDERING (author correction, 2026-07-15: "this V3
@@ -293,7 +439,13 @@ function install() {
   // change (see keyhole-stage-status memory) and remains valid.
   MapShine.soakHooks.load = async () => {
     if (!getVtPanViewerDiagnostics().active) {
-      await startVtPanViewer({ THREE, imageUrlForFloor: tortureImageUrl, floorCount: TORTURE_FLOOR_COUNT });
+      await startVtPanViewer({
+        THREE,
+        imageUrlForFloor: tortureImageUrl,
+        floorCount: TORTURE_FLOOR_COUNT,
+        extraLayerUrlsForFloor: tortureLayerUrls, // soak the FULL layer stack (albedo + masks), not albedo alone
+        visibleFloorIndices: tortureVisibleFloorIndices, // soak the castle-courtyard worst case, all 3 floors composited
+      });
     }
   };
   MapShine.soakHooks.pan = (i) => soakPanStep(i);

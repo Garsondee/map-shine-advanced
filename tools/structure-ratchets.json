@@ -1,5 +1,7 @@
 {
   "no-global-bus": 7,
   "renderer-state/graph-only": 0,
-  "no-silent-catch": 35
+  "no-silent-catch": 35,
+  "foundry/adapter-only": 12,
+  "time/one-clock": 41
 }

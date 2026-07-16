@@ -94,6 +94,16 @@ Each zone's `index.js` opens with five lines: what the zone owns, what it may to
 
 ---
 
+## 2.6 ✅ BUILT AND PROVEN (2026-07-16) — the forcing function is no longer a plan
+
+Author: *"How do we force the new version to not commit those same mistakes?"* Three parts, all now real:
+
+**1. THE BAD PATH FAILS.** `tools/verify-structure.mjs` — **14 rules**, in `npm run verify`. Each carries the V2 corpse it defends against and the fix, printed on failure. Coverage of the seven documented bypasses is now 6/7 walled (the god-object itself needs the effect-registry to exist first). Five are **ratcheted** at current debt (global-bus 7, silent-catch 35, foundry-reach 12, private-clocks 41, renderer-state 0): an increase fails, a decrease auto-tightens. **Four are FREE WALLS built before the rooms** — `darknessLevel`, `sunDirection`, `shadowLift`/`tCombinedShadow`, and hand-written controls all sit at ZERO, so the code that would violate them can never be written in the first place. That is the cheapest moment to build a wall and it will never come again.
+
+**2. THE WALLS CANNOT ROT.** `tools/verify-structure.test.mjs` — **73 assertions** feeding *real lines from the real `legacy/` source* to the rules and asserting each is rejected: Lighting reading Fire's private `_glowBucketsByFloor`; the one-pixel `readRenderTargetPixels`; the `.mix()` line that blacked out the map; `uDynamicLightShadowOverrideStrength = 0.7`; `addFolder({title:'Sun'})`. **Adversarially verified:** gutting a rule's regex — exactly what a future session does to unblock itself — turns the suite red and *names the corpse that would slip through*. It also asserts every rule carries a `why` and an `instead`, and that legitimate code (`TSL.mix`, `MapShine.debug`, a catch that reports) is never rejected. A wall that cries wolf gets muted; this stops that too.
+
+**3. THE GOOD PATH MUST BE FASTER** (law 2, §0) — the only part not yet mechanical, and the one that decides everything. All seven bypasses happened because at ~2,000 lines/day the correct path cost more *that afternoon*. So: **generate, never hand-write.** UI from the params schema; a particle system from a declaration; an effect's plumbing from its manifest. When declaring is quicker than hand-rolling, the wall stops being an obstacle and becomes a rail. **Every unbuilt piece of this skeleton must be judged against that test, not against elegance.**
+
 ## 3. The covenant — rules a future session acts inside
 
 0. **Read `v2-postmortem-the-failure-modes` before touching architecture.** (It is at the top of memory.)

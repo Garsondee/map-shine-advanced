@@ -7,7 +7,7 @@
     "lint:fix": "eslint src tools --fix",
     "format": "prettier --write \"src/**/*.{js,mjs}\" \"tools/**/*.mjs\"",
     "format:check": "prettier --check \"src/**/*.{js,mjs}\" \"tools/**/*.mjs\"",
-    "verify": "npm run lint && npm run format:check && npm run verify:structure",
+    "verify": "npm run lint && npm run format:check && npm run verify:structure && npm run test:tools",
     "make:torture": "node tools/make-torture-world.mjs",
     "build:tsl": "node scripts/build/build.js",
     "release": "node scripts/release/release.js",
@@ -22,7 +22,8 @@
     "knip:files": "knip --include files",
     "build:three-webgpu": "node tools/build-three-webgpu.mjs",
     "verify:structure": "node tools/verify-structure.mjs",
-    "ratchets:update": "node tools/verify-structure.mjs --update-ratchets"
+    "ratchets:update": "node tools/verify-structure.mjs --update-ratchets",
+    "test:tools": "node tools/run-tests.mjs"
   },
   "dependencies": {
     "three": "0.185.1"

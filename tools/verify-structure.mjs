@@ -91,7 +91,7 @@ function sourceFiles(dir = SRC, out = []) {
  */
 
 /** @type {Rule[]} */
-const RULES = [
+export const RULES = [
   // ===================================================================
   // PARTICLES — the author's ask, 2026-07-16. The single biggest sprawl
   // in V2: FIVE particle architectures, because the good one was optional.
@@ -240,6 +240,128 @@ const RULES = [
   },
 
   // ===================================================================
+  // THE FOUNDRY ADAPTER — V2's adapter covered 16% of its own job.
+  // 128 files touched Foundry; 21 were in legacy/foundry/.
+  // ===================================================================
+  {
+    id: 'foundry/adapter-only',
+    pattern:
+      /\bcanvas\.(?:scene|stage|app|dimensions|environment|tokens|tiles|walls|lighting|perception)\b|\bgame\.(?:user|settings|scenes|system|socket)\b|\bHooks\.(?:on|once|call)/,
+    allow: [`${sep}foundry${sep}`, `${sep}diag${sep}`],
+    why:
+      'V2 designated legacy/foundry/ as THE Foundry adapter -- exactly as Keyhole 9.1 does -- and 107 ' +
+      'of 128 files that touch Foundry globals reached around it (16% coverage). Plus 98 direct ' +
+      '.prototype.x = monkey-patches vs 2 libWrapper registrations: a drift bomb at call sites nobody ' +
+      'remembers writing. The adapter existed and LOST -- the second independent proof that optional ' +
+      'structure loses.',
+    instead:
+      'All Foundry access goes through src/foundry/. It is a LEAF: version-gated, fail-loud, and it ' +
+      'imports nothing above itself (V2 inverted this -- canvas-replacement.js imported concrete ' +
+      'effect classes by name).',
+    ratchet: true,
+  },
+
+  // ===================================================================
+  // ONE CLOCK — time.js declared itself the single source of truth
+  // ("ALL EFFECTS MUST USE THIS") and Water alone sampled time 8 times.
+  // ===================================================================
+  {
+    id: 'time/one-clock',
+    pattern: /performance\.now\s*\(|\bDate\.now\s*\(/,
+    allow: [`${sep}diag${sep}`, `${sep}core${sep}frame-clock.js`],
+    why:
+      'V2 core/time.js declared itself "the single source of truth for time" and said in its own ' +
+      'docstring: "CRITICAL: ALL EFFECTS MUST USE THIS TIME SYSTEM. Never use performance.now() or ' +
+      'Date.now() directly in effects." Comment-MUST #4 of 7. WaterEffectV2 sampled time 8 ' +
+      'independent times anyway. Independent clocks desync animations that must agree.',
+    instead:
+      'Time is an INPUT: the frame snapshot (env.time / dt), handed to you. Never sampled privately. ' +
+      '(docs/planning/Environment.md)',
+    ratchet: true,
+  },
+
+  // ===================================================================
+  // ONE DARKNESS — V2 round-tripped it THROUGH Foundry's scene document:
+  // MSA computed it, pushed it in, and 28 files read it back out. A
+  // feedback bus. Two months of dated scars over one float.
+  // Currently ZERO occurrences in src/ -- a free wall, built before the room.
+  // ===================================================================
+  {
+    id: 'env/one-darkness',
+    pattern: /darknessLevel/,
+    allow: [`${sep}foundry${sep}`, `${sep}world${sep}environment.js`],
+    why:
+      'V2 computed darkness from time+weather, pushed it into canvas.environment, and 28 files -- ' +
+      'including 8 effects -- READ IT BACK. Subsystems talking to each other through the game ' +
+      'document, a bus Foundry, the GM slider and other modules also write. msa-v2-darkness.js reads ' +
+      'like tombstones: grey canvas (2026-03, three stacking writers), the V14 getter trap (2026-05, ' +
+      'silent-fail assignment made night SNAP to day), darkness-gated lights (2026-05).',
+    instead:
+      'Darkness gets ONE direction of authority: an input we read, OR a value we own and never read ' +
+      'back. A read-back of your own write through a shared document is a feedback bus. ' +
+      '(docs/planning/Environment.md 2.2)',
+  },
+
+  // ===================================================================
+  // ONE SUN — V2 computed sun-from-time in 8+ places, so shadows and
+  // specular could disagree about the sky BY CONSTRUCTION.
+  // ===================================================================
+  {
+    id: 'env/one-sun',
+    pattern: /\b(?:sunAzimuth|sunElevation|sunDirection|solarAngle|computeSunAngle)\b/,
+    allow: [`${sep}world${sep}environment.js`, `${sep}world${sep}sun.js`],
+    why:
+      'V2 derived sun-from-time in at least 8 places (the shadow system had its own SunDirection.js; ' +
+      'time.js, ThreeLightSource, inline effect math), and 15 files held sun state. Shadows pointing ' +
+      'one way while specular answers to a different sky is then a CONSTRUCTION, not a bug. Derived ' +
+      'N times = N-1 needless chances to disagree (feedback_probed_constants_vs_derived, mild form).',
+    instead:
+      'One pure sun function with Node tests asserting dawn/noon/dusk. Consumers read env.sun. ' +
+      '(docs/planning/Environment.md 2.1)',
+  },
+
+  // ===================================================================
+  // SHADOW IS NOT PAINT — the one wrong noun that caused the whole
+  // light/shadow war. These identifiers are its fossils.
+  // ===================================================================
+  {
+    id: 'shadow/no-lift-no-combine',
+    pattern: /shadowLift|ShadowLift|tCombinedShadow|uDynamicLightShadowOverride|ShadowOverrideStrength/,
+    allow: [],
+    why:
+      'V2 modeled shadow as a THING (dark paint composited onto the scene). Shadow is the ABSENCE OF ' +
+      'A SPECIFIC LIGHT. That one wrong noun forced tCombinedShadow (ONE factor for ALL lights) and ' +
+      'then DynamicLightShadowLift.js -- an entire module for un-darkening shadows near lights by a ' +
+      'global hand-tuned 0.7, so a candle and a floodlight punch through identically. The lift is the ' +
+      'exact cost of the wrong noun: because shadow darkened everything, an inverse system had to ' +
+      'exist to protect lights from it.',
+    instead:
+      'illum = skyAmbient*skyVis + SUM(light_i * visibility_i). Every light carries its OWN ' +
+      'visibility term; shadow modulates its own light and nothing else. Then no lift can be needed. ' +
+      '(docs/planning/Light-and-Shadow.md)',
+  },
+
+  // ===================================================================
+  // THE UI IS GENERATED — getControlSchema() existed in 48 effects and
+  // tweakpane-manager referenced it ZERO times, hand-writing 11,157 lines.
+  // ===================================================================
+  {
+    id: 'ui/no-handwritten-controls',
+    pattern: /\.addBinding\s*\(|\.addInput\s*\(|\.addFolder\s*\(|\.addBlade\s*\(|new Tweakpane|from ['"]tweakpane/,
+    allow: [`${sep}ui${sep}renderers${sep}`],
+    why:
+      'V2 had a GOOD declarative control system -- static getControlSchema() in 48 effect files, ' +
+      "carrying params AND help text AND a per-control glossary in the author's own voice. " +
+      'tweakpane-manager.js referenced it ZERO times and hand-wrote every folder for 11,157 lines. ' +
+      'Bypass #7 of 7. Result: 58,603 lines of UI around 266 Tweakpane calls (~220 lines of plumbing ' +
+      'PER CONTROL) across 3 surfaces held together by ~140 hand-written sync functions.',
+    instead:
+      'The UI is GENERATED from the params schema. Declare params on the effect; ui/renderers/ renders ' +
+      'them (Tweakpane for the dev pane, ApplicationV2 for player settings). Two renderers, one ' +
+      'schema, zero mirrors -- and a new effect gets a UI for free. (docs/planning/UI.md)',
+  },
+
+  // ===================================================================
   // THE QUARANTINE — src/ never imports legacy/. (Keyhole.md §5)
   // ===================================================================
   {
@@ -358,4 +480,6 @@ function main() {
   console.log(`✅ structure: ${RULES.length} rules pass${tightened ? ` (${tightened} ratcheted)` : ''}`);
 }
 
-main();
+// Only run when invoked directly -- verify-structure.test.mjs imports RULES to
+// prove each wall rejects its real V2 corpse, and must not trigger a full scan.
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main();

@@ -1,0 +1,222 @@
+/**
+ * THE V2 REGRESSION TEST — proof the walls reject the actual historical mistakes.
+ *
+ * ============================================================================
+ * WHY THIS EXISTS
+ * ============================================================================
+ *
+ * `verify-structure.mjs` claims to prevent V2's failure modes. A claim is not
+ * evidence. This test takes **real lines from the real `legacy/` source** — the
+ * exact code that killed the previous module — feeds them to the rules, and
+ * asserts each one is rejected.
+ *
+ * So the walls are not trusted, they are TESTED, on every `npm run verify`. And
+ * the test doubles as an executable history: every case below is a citation,
+ * with the file it came from.
+ *
+ * If a wall ever stops catching its corpse, this goes red. That is the point:
+ * a rule can rot (a regex loosened, an allow-list widened for convenience) and
+ * nothing else would notice. This notices.
+ *
+ * ADDING A CASE: when you fix a bug CLASS and add its tripwire (covenant rule 4,
+ * Skeleton.md §3), add the real offending line here too. The rule and its proof
+ * ship together.
+ *
+ * @module tools/verify-structure.test
+ */
+
+import { RULES } from './verify-structure.mjs';
+
+/**
+ * Real V2 code, verbatim, with its source. Each MUST be rejected by `rule`.
+ * @type {{rule: string, from: string, code: string, note: string}[]}
+ */
+const V2_CORPSES = [
+  // --- the particle sprawl: five architectures because the good one was optional
+  {
+    rule: 'particles/one-engine',
+    from: '8 files did Sprite-per-particle; N particles = N scene objects = N draw calls',
+    code: 'const sprite = new THREE.Sprite(this._material);',
+    note: 'the worst of V2 five particle architectures',
+  },
+  {
+    rule: 'particles/one-engine',
+    from: 'legacy/particles/WeatherParticles.js',
+    code: "import { BatchedRenderer } from '../libs/three.quarks.module.js';",
+    note: 'quarks cannot render under the node renderer at all (keyhole-particles-tsl-decision)',
+  },
+
+  // --- the global bus: 479 reaches, and the Lighting<->Fire cycle it enabled
+  {
+    rule: 'no-global-bus',
+    from: 'legacy/compositor-v2/effects/LightingEffectV2.js:4209',
+    code: 'const fire = window.MapShine?.fireEffectV2?._glowBucketsByFloor;',
+    note: 'Lighting reads Fire PRIVATE field, through a global. Half of the cycle.',
+  },
+  {
+    rule: 'no-global-bus',
+    from: 'legacy/compositor-v2/effects/FireEffectV2.js:4799',
+    code: 'const pad = window.MapShine?.lightingEffect?.params?.wallPaddingPx;',
+    note: 'Fire reads Lighting params -- for a CONSTANT. The other half. The knot was fake.',
+  },
+
+  // --- renderer state with 60 owners
+  {
+    rule: 'renderer-state/graph-only',
+    from: '452 setRenderTarget sites across 60 files',
+    code: 'renderer.setRenderTarget(this._compositeTarget);',
+    note: 'the "it works unless you enable bloom" generator',
+  },
+  {
+    rule: 'renderer-state/graph-only',
+    from: '262 autoClear touches of a global mutable boolean',
+    code: 'renderer.autoClear = false;',
+    note: '60 modules flipping one global flag and hoping about ordering',
+  },
+
+  // --- the GPU as a data structure
+  {
+    rule: 'no-gpu-readback',
+    from: 'legacy/scene/physics-rope-manager.js:657',
+    code: 'renderer.readRenderTargetPixels(rt, px, py, 1, 1, buf);',
+    note: 'a FULL pipeline stall to fetch ONE PIXEL -- four bytes',
+  },
+  {
+    rule: 'no-gpu-readback',
+    from: 'legacy/compositor-v2/effects/fire-behaviors.js (readImageRgba)',
+    code: 'const data = ctx.getImageData(0, 0, 8250, 8250).data;',
+    note: '260MB of heap + a 550-850ms stall, per load',
+  },
+
+  // --- the TSL trap that blacked out the map for a session
+  {
+    rule: 'tsl/no-mix-method',
+    from: 'src/vt/vt-pan-viewer.js, as originally written (2026-07-16)',
+    code: 'c.a.mulAssign(uUnoccludedAlpha.mix(uOccludedAlpha, occ));',
+    note: 'reads as mix(1,0,0)==1; COMPILED to mix(0,occ,1)==0. alpha *= ZERO. Whole map black.',
+  },
+
+  // --- "off" that still costs, 117 times
+  {
+    rule: 'tsl/no-uniform-gates',
+    from: 'legacy: 117 distinct uniform-gated branches',
+    code: 'uniforms.uHasBelowWaterMask = { value: 0.0 };',
+    note: 'a zero uniform does not remove work -- it executes every pixel and binds its textures',
+  },
+
+  // --- 2,670 silent swallows: one per ~140 lines
+  {
+    rule: 'no-silent-catch',
+    from: 'legacy/compositor-v2/effects/WaterEffectV2.js (_setCrossSliceWaterDataUniform)',
+    code: '  } catch (_) {}',
+    note: 'the swallow disease reached even the healthiest two-line function in the file',
+  },
+
+  // --- the quarantine
+  {
+    rule: 'quarantine/no-legacy-imports',
+    from: 'the boundary Keyhole 5 exists to hold',
+    code: "import { FloorCompositor } from '../legacy/compositor-v2/FloorCompositor.js';",
+    note: 'one import and V2 is alive again inside V3',
+  },
+
+  // --- the adapter that covered 16% of its own job
+  {
+    rule: 'foundry/adapter-only',
+    from: '107 of 128 files reached around legacy/foundry/',
+    code: 'const sceneDoc = canvas.scene;',
+    note: 'the adapter existed and LOST -- proof #2 that optional structure loses',
+  },
+  {
+    rule: 'foundry/adapter-only',
+    from: 'legacy: 224 Hooks sites across 79 distinct hooks',
+    code: "Hooks.on('updateToken', this._onUpdateToken.bind(this));",
+    note: 'Foundry coupling sprayed across 128 files instead of isolated in the adapter',
+  },
+
+  // --- one clock: time.js MUST, ignored 8 times by Water alone
+  {
+    rule: 'time/one-clock',
+    from: 'legacy/compositor-v2/effects/WaterEffectV2.js (8 independent samples)',
+    code: 'const t = performance.now() * 0.001;',
+    note: 'time.js: "ALL EFFECTS MUST USE THIS TIME SYSTEM". Comment-MUST #4 of 7.',
+  },
+
+  // --- one darkness: the feedback bus that cost two months
+  {
+    rule: 'env/one-darkness',
+    from: 'legacy: 28 files read back the darkness MSA itself pushed into Foundry',
+    code: 'const dark = canvas.environment.darknessLevel;',
+    note: 'subsystems talking to each other THROUGH the game document',
+  },
+
+  // --- one sun: 8 independent derivations
+  {
+    rule: 'env/one-sun',
+    from: 'legacy/compositor-v2/shadow-system/SunDirection.js + 7 others',
+    code: 'const sunDirection = computeSunAngle(timeOfDay);',
+    note: 'shadows and specular could disagree about the sky BY CONSTRUCTION',
+  },
+
+  // --- shadow is not paint: the fossils of the wrong noun
+  {
+    rule: 'shadow/no-lift-no-combine',
+    from: 'legacy/compositor-v2/shadow-system/DynamicLightShadowLift.js',
+    code: 'uniforms.uDynamicLightShadowOverrideStrength.value = 0.7;',
+    note: 'ONE global scalar: a candle and a floodlight punch through a shadow identically',
+  },
+  {
+    rule: 'shadow/no-lift-no-combine',
+    from: 'legacy/compositor-v2/effects/ShadowManagerV2.js',
+    code: 'material.uniforms.tCombinedShadow.value = this._compositeTarget.texture;',
+    note: 'ONE shadow factor for ALL lights -- the wrong noun, in code',
+  },
+
+  // --- the UI: a good schema system, referenced zero times
+  {
+    rule: 'ui/no-handwritten-controls',
+    from: 'legacy/ui/tweakpane-manager.js (11,157 lines, 0 uses of getControlSchema)',
+    code: "const sunFolder = parent.addFolder({ title: 'Sun', expanded: true });",
+    note: 'bypass #7: 48 declarative schemas sat unused while folders were hand-written',
+  },
+];
+
+/** Lines that must NOT trip a rule (guards against a wall crying wolf). */
+const MUST_PASS = [
+  { code: 'return { occ, factor: THREE.TSL.mix(a, b, t) };', note: 'TSL.mix FUNCTION form is correct' },
+  { code: 'const blended = mix(colorLo, colorHi, t);', note: 'bare mix() function form is correct' },
+  { code: 'MapShine.debug.registerReport("boot", "Boot", fn);', note: 'MapShine.debug is the sanctioned shop window' },
+  { code: '} catch (err) { log.warn("decode failed", err); }', note: 'a catch that REPORTS is fine' },
+];
+
+export function run(t) {
+  const byId = new Map(RULES.map((r) => [r.id, r]));
+  const matches = (rule, code) => (rule.test ? rule.test(code) : rule.pattern.test(code));
+
+  // Every corpse must be rejected by its rule.
+  for (const c of V2_CORPSES) {
+    const rule = byId.get(c.rule);
+    t.ok(`rule '${c.rule}' exists`, !!rule);
+    if (!rule) continue;
+    t.ok(`REJECTS [${c.rule}] ${c.note}`, matches(rule, c.code));
+  }
+
+  // No rule may reject legitimate code.
+  for (const g of MUST_PASS) {
+    const tripped = RULES.filter((r) => matches(r, g.code)).map((r) => r.id);
+    t.ok(`ALLOWS: ${g.note}${tripped.length ? ` (tripped: ${tripped})` : ''}`, tripped.length === 0);
+  }
+
+  // Every rule must carry its evidence — a wall with no sign is a wall people resent.
+  for (const r of RULES) {
+    t.ok(`rule '${r.id}' explains WHY (cites a V2 corpse)`, typeof r.why === 'string' && r.why.length > 80);
+    t.ok(`rule '${r.id}' says what to do INSTEAD`, typeof r.instead === 'string' && r.instead.length > 20);
+  }
+
+  // Every corpse in the list must map to a real rule (no orphan citations).
+  const covered = new Set(V2_CORPSES.map((c) => c.rule));
+  t.ok(
+    `every rule has at least one proof case (${covered.size}/${RULES.length})`,
+    RULES.every((r) => covered.has(r.id))
+  );
+}

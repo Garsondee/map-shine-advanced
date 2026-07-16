@@ -172,6 +172,20 @@ const V2_CORPSES = [
     note: 'ONE shadow factor for ALL lights -- the wrong noun, in code',
   },
 
+  // --- params: the write path that never read its own schema
+  {
+    rule: 'params/one-owner',
+    from: 'legacy/compositor-v2/effects/SpecularEffectV2.js (applyParamChange) — inches below its own getControlSchema()',
+    code: '    this.params[paramId] = value;',
+    note: 'no type check, no clamp, silent return on unknown key -- the disease control-state-sanitize.js exists to mop up',
+  },
+  {
+    rule: 'params/one-owner',
+    from: 'legacy: 119 param writes from OUTSIDE effects/, incl. HealthEvaluatorService (diagnostics mutating product state)',
+    code: 'effect.params.contextBrightness = computed;',
+    note: '938 keys, six writing subsystems, no owner',
+  },
+
   // --- the UI: a good schema system, referenced zero times
   {
     rule: 'ui/no-handwritten-controls',

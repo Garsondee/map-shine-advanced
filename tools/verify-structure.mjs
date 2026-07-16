@@ -419,6 +419,31 @@ export const RULES = [
   },
 
   // ===================================================================
+  // PARAMS HAVE ONE OWNER — the LAST named V2 disease to get a wall, and the
+  // only one that stayed unwalled purely because "correct" was undesigned.
+  // ===================================================================
+  {
+    id: 'params/one-owner',
+    // Assignment to a params member. Reads are fine and expected; the WRITE is
+    // the disease. `paramsSchema`/`PARAMS` declarations are not writes.
+    pattern: /\.params\.[a-zA-Z_]\w*\s*=[^=]|\.params\[[^\]]+\]\s*=[^=]/,
+    allow: [`${sep}core${sep}params-schema.js`, `${sep}core${sep}params-service.js`],
+    why:
+      'V2 had 938 param keys written from 119 sites OUTSIDE effects/ by six subsystems — including ' +
+      "HealthEvaluatorService, i.e. DIAGNOSTICS mutating product state. Worse, the effect's own write " +
+      'path (applyParamChange) sat INCHES BELOW its own getControlSchema() in the same file and never ' +
+      'read it: `this.params[id] = value` with no type check and no clamp, and a SILENT return on an ' +
+      'unknown key. That is why control-state-sanitize.js exists — 333 lines repairing values at the ' +
+      'DISK boundary, hand-writing constraints a third time because it never read the schema either.',
+    instead:
+      'Params flow through ONE owner. Declare them (core/params-schema.js: validateParamsSchema), and ' +
+      'let the service validate at the WRITE — validateParamValue rejects wrong types, clamps out-of-range ' +
+      'VISIBLY, and errors on unknown keys. Then nothing invalid can be stored, so nothing needs ' +
+      'repairing on load. (docs/planning/Params.md)',
+    ratchet: true,
+  },
+
+  // ===================================================================
   // THE QUARANTINE — src/ never imports legacy/. (Keyhole.md §5)
   // ===================================================================
   {

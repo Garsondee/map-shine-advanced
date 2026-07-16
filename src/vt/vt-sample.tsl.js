@@ -77,8 +77,13 @@ export const VT_MAX_MIPS = 16;
  * @param {object} TSL - the node build's TSL namespace (`THREE.TSL`).
  * @param {object} args
  * @param {any} args.atlasTexture - the shared `DataArrayTexture` page atlas.
- * @param {any} args.initialPageTable - any valid texture; rebound per pack via
- *   `uniforms.pageTable.value`.
+ * @param {any} args.initialPageTable - MUST be a real 2D indirection texture of the
+ *   right KIND (not the atlas, not a placeholder of another type). A TextureNode
+ *   bakes its type into the graph at build time, so this decides what sampling code
+ *   is emitted; `.value` can later be swapped only for another texture of the SAME
+ *   kind (albedo's page table <-> a mask's page table, both 2D). Seeding it with the
+ *   DataArrayTexture atlas compiled array-texture sampling, made every binding
+ *   invalid, and WebGPU silently skipped the draw — the 2026-07-16 black screen.
  * @param {number} args.pagesPerAxis - atlas tiles per axis (`computeAtlasLayout`).
  * @param {number} args.pagesPerLayer - atlas tiles per array layer.
  * @param {number} args.pageSizePx - 256.

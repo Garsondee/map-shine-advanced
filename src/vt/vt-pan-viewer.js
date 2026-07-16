@@ -714,7 +714,19 @@ export async function startVtPanViewer({
       // The atlas is the one shared thing.
       const vt = createVtSampler(THREE.TSL, {
         atlasTexture: atlas.texture,
-        initialPageTable: atlas.texture, // rebound per pack in bindMeshToPack
+        // THE PAGE TABLE'S REAL TEXTURE, not a placeholder — and this line was the
+        // black screen (2026-07-16). It used to pass `atlas.texture` "to be rebound
+        // later", which is wrong in a way GLSL uniforms are not: a TextureNode bakes
+        // its TYPE into the graph at build time. Seeded with the atlas (a
+        // DataArrayTexture) it compiles array-texture sampling; swapping `.value` to
+        // a 2D DataTexture afterwards cannot change the emitted shader, so the
+        // binding is invalid and WebGPU silently SKIPS THE DRAW. Hence: black,
+        // alpha 0, no error, a healthy cache — and a solid-colour test that drew
+        // perfectly, because it bound no textures at all.
+        //
+        // A node graph is not a uniform block. What a uniform lets you swap freely,
+        // a node bakes.
+        initialPageTable: state.albedoPack.indirectionTexture,
         pagesPerAxis: layout.pagesPerAxis,
         pagesPerLayer: layout.pagesPerLayer,
         pageSizePx: layout.pageSizePx,

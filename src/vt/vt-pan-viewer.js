@@ -184,7 +184,22 @@ let _active = null;
  * (case B). If it stays black, nothing is drawing and the graph is innocent
  * (case A) — and I have been debugging the wrong file entirely.
  */
-let debugStageName = null; // null = the real shader; see setVtDebugStage
+// PERSISTED so a browser refresh keeps the stage: the author's workflow is "I just
+// refresh the browser and tell you what I see", and a debug mode that resets on every
+// reload would fight that workflow rather than serve it.
+const VT_DEBUG_STAGE_KEY = 'msa.vt.debugStage';
+let debugStageName = (() => {
+  try {
+    return localStorage.getItem(VT_DEBUG_STAGE_KEY) || null;
+  } catch {
+    return null; // private mode / storage disabled — the real shader is the right default
+  }
+})();
+
+/** The active bisect stage, or null for the real shader. */
+export function getVtDebugStage() {
+  return debugStageName;
+}
 
 /**
  * Swap every item's shader for a solid colour. Requires a restart to take effect
@@ -193,11 +208,13 @@ let debugStageName = null; // null = the real shader; see setVtDebugStage
  */
 export function setVtDebugStage(stage) {
   debugStageName = stage || null;
-  return {
-    debugStage: debugStageName,
-    stages: ['solid', 'uv', 'atlas', 'indirection', 'walk', null],
-    next: 'now click "VT Pan Viewer: Force Restart (ACTIVE SCENE)" — materials are built once per item, so this only applies to newly-built ones.',
-  };
+  try {
+    if (debugStageName) localStorage.setItem(VT_DEBUG_STAGE_KEY, debugStageName);
+    else localStorage.removeItem(VT_DEBUG_STAGE_KEY);
+  } catch {
+    /* not worth failing a debug mode over; it just won't survive the next reload */
+  }
+  return debugStageName;
 }
 
 function disposeActive() {
@@ -835,64 +852,6 @@ export async function startVtPanViewer({
     const hitchLog = []; // {atMs, gapMs, decodeStats, cacheStats} per hitch — full context AT THE MOMENT it happened
 
     /** Ground truth, not theory: actual rendered canvas pixels + one pack's actual indirection buffer contents. */
-    /**
-     * GROUND TRUTH. Reads REAL pixels back, on either backend.
-     *
-     * The previous version used `gl.readPixels` + `preserveDrawingBuffer`, which is
-     * WebGL-only — so the TSL port disabled it, and did so in the SAME commit that
-     * made the pixels suspect. The renderer then came up black and there was no way
-     * to tell "the shader output black" from "nothing drew at all" from "it drew and
-     * the readback lied". Removing the instrument that would have answered that,
-     * while changing the thing it measures, was the wrong call.
-     *
-     * A RenderTarget + readRenderTargetPixelsAsync is the readback path BOTH
-     * backends implement (proven by the TSL spike, which used exactly this).
-     * Re-rendering the live scene into a small target costs one extra frame's work,
-     * on a button press, and is worth it: this answers questions nothing else can.
-     */
-    async function readGroundTruthPixels() {
-      const out = {};
-      let rt = null;
-      try {
-        rt = new THREE.RenderTarget(canvasW, canvasH);
-        renderer.setRenderTarget(rt);
-        renderer.render(scene, camera); // renderAsync is deprecated once init() is awaited
-        renderer.setRenderTarget(null);
-
-        const points = {
-          center: [Math.floor(canvasW / 2), Math.floor(canvasH / 2)],
-          topLeft: [4, 4],
-          bottomRight: [canvasW - 4, canvasH - 4],
-        };
-        out.renderedPixels = {};
-        for (const [label, [x, y]] of Object.entries(points)) {
-          const px = await renderer.readRenderTargetPixelsAsync(rt, x, y, 1, 1);
-          out.renderedPixels[label] = px ? [px[0], px[1], px[2], px[3]] : null;
-        }
-        // The three answers this exists to separate. Alpha is the tell: a fully
-        // transparent pixel means the shader RAN and produced nothing visible,
-        // which is a completely different bug from an opaque black one.
-        const c = out.renderedPixels.center;
-        out.pixelVerdict = !c
-          ? 'readback returned nothing — the instrument failed, NOT evidence about the renderer'
-          : c[3] === 0
-            ? 'TRANSPARENT at CENTRE — alpha 0 where the scene art should be. NOTE: topLeft/bottomRight are ALSO expected to be 0 (they sit in the scene padding, outside every quad), so judge on CENTRE alone. Alpha here comes straight from the atlas sample, so suspect the atlas fetch itself before the alpha chain.'
-            : c[0] === 0 && c[1] === 0 && c[2] === 0
-              ? 'OPAQUE BLACK — the sampler returned vec4(0,0,0,1). That is EXACTLY the out-of-world early-out, so suspect worldSizePx/uv rather than the atlas.'
-              : c[0] > 200 && c[2] > 200 && c[1] < 60
-                ? 'MAGENTA — the mip walk found nothing resident at any level: the coarse-pin invariant is broken, or the closed-form mip layout disagrees with residency.'
-                : 'real colour — the sampler is working; if the screen still looks wrong the problem is downstream (camera, geometry, blending).';
-      } catch (err) {
-        out.renderedPixels = null;
-        out.pixelReadbackError = String(err?.message || err);
-      } finally {
-        try {
-          rt?.dispose();
-        } catch (_) {}
-      }
-      return out;
-    }
-
     /** The cheap, synchronous half: one pack's indirection buffer (plain JS state). */
     function sampleDiagnostics(pack) {
       const out = {};
@@ -1824,7 +1783,6 @@ export async function startVtPanViewer({
        * would be reporting hitches it caused itself.
        */
       getZoomState: () => ({ halfSpanPx: view?.halfSpanPx ?? 0, targetHalfSpanPx }),
-      readGroundTruthPixels, // async — its own report, since it re-renders a frame
       getDiagnostics() {
         const avgMs = frameTimes.length ? frameTimes.reduce((a, b) => a + b, 0) / frameTimes.length : 0;
         // The viewed floor's first item, as the sample subject for the
@@ -2037,20 +1995,6 @@ export async function startVtPanViewer({
     });
     return diag0;
   }
-}
-
-/**
- * GROUND TRUTH: what colour is actually on screen right now?
- *
- * Separate from getVtPanViewerDiagnostics because it is ASYNC and re-renders a
- * frame — the honest cost of a real answer on a backend with no synchronous
- * readback. `pixelVerdict` separates the failures that look identical from the
- * outside: opaque black (the sampler's out-of-world early-out), transparent (the
- * alpha chain), magenta (a broken pin invariant), or a real colour.
- */
-export async function readVtPanViewerPixels() {
-  if (!_active) return { active: false };
-  return { active: true, ...(await _active.readGroundTruthPixels()) };
 }
 
 /** For the debug panel: current diagnostics without restarting anything. */

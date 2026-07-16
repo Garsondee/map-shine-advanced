@@ -20,6 +20,7 @@ export function installDebugPanel(MapShine) {
   if (MapShine.debug) return MapShine.debug; // idempotent
 
   const reports = new Map(); // id -> { label, fn }
+  const controls = new Map(); // id -> { label, options, getValue, onChange } — live controls, rendered first
   const consoleBuffer = [];
 
   // Capture console.warn/error from install time onward (can't retroactively
@@ -62,6 +63,28 @@ export function installDebugPanel(MapShine) {
    * @param {() => (object|string|Promise<object|string>)} fn - report body.
    *   Return an object (auto-JSON-formatted) or a preformatted string.
    */
+  /**
+   * A LIVE CONTROL, not a report: a labelled dropdown that DOES the thing on change.
+   *
+   * Exists because the bisect ladder grew into twelve buttons that each needed a
+   * SECOND button pressed afterwards, which the author rightly called out: "There's
+   * no good reason to press two buttons if the next action would automatically and
+   * always be to press another button, that's not good design." If an action always
+   * follows, it is part of the action -- so onChange performs it.
+   *
+   * @param {string} id
+   * @param {string} label
+   * @param {Array<{value: string, label: string}>} options
+   * @param {() => string} getValue - the current value, so the control reflects REAL
+   *   state (including state restored from a previous page load) rather than assuming
+   *   it starts at the first option.
+   * @param {(value: string) => any} onChange
+   */
+  function registerSelect(id, label, options, getValue, onChange) {
+    controls.set(id, { label, options, getValue, onChange });
+    if (listEl) renderButtons();
+  }
+
   function registerReport(id, label, fn) {
     reports.set(id, { label, fn });
     if (panelEl) renderButtons();
@@ -195,7 +218,8 @@ export function installDebugPanel(MapShine) {
       padding: '6px',
       font: '11px/1.3 Signika, sans-serif',
       color: '#cfe8ff',
-      maxHeight: '260px',
+      width: '420px',
+      maxHeight: '340px',
       overflowY: 'auto',
     });
 
@@ -249,6 +273,52 @@ export function installDebugPanel(MapShine) {
 
   function renderButtons() {
     listEl.innerHTML = '';
+    for (const [id, { label, options, getValue, onChange }] of controls) {
+      const wrap = document.createElement('label');
+      Object.assign(wrap.style, {
+        pointerEvents: 'auto',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '5px',
+        flexBasis: '100%',
+        font: '10px/1.2 Signika, sans-serif',
+      });
+      wrap.append(label);
+      const sel = document.createElement('select');
+      Object.assign(sel.style, {
+        pointerEvents: 'auto',
+        flex: '1',
+        background: 'rgba(10,14,22,0.9)',
+        border: '1px solid rgba(143,214,255,0.4)',
+        borderRadius: '4px',
+        color: '#cfe8ff',
+        font: '10px/1.2 Signika, sans-serif',
+        padding: '3px',
+      });
+      for (const o of options) {
+        const opt = document.createElement('option');
+        opt.value = o.value;
+        opt.textContent = o.label;
+        sel.append(opt);
+      }
+      try {
+        sel.value = getValue() ?? '';
+      } catch {
+        /* a control that cannot read its own state still renders; it just starts blank */
+      }
+      sel.addEventListener('change', async () => {
+        statusEl.textContent = `${label}: ${sel.value || 'off'}…`;
+        try {
+          await onChange(sel.value);
+          statusEl.textContent = `${label}: ${sel.value || 'off'} ✓`;
+        } catch (err) {
+          statusEl.textContent = `${label} failed: ${err?.message ?? err}`;
+          console.error(`[debug-panel] control "${id}" failed:`, err);
+        }
+      });
+      wrap.append(sel);
+      listEl.append(wrap);
+    }
     for (const [id, { label }] of reports) {
       const btn = document.createElement('button');
       btn.textContent = label;
@@ -378,6 +448,7 @@ export function installDebugPanel(MapShine) {
 
   MapShine.debug = {
     registerReport,
+    registerSelect,
     runReport,
     copyToClipboard,
     attachPanel,

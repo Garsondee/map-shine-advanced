@@ -39,8 +39,8 @@ import {
   startVtPanViewer,
   stopVtPanViewer,
   getVtPanViewerDiagnostics,
-  readVtPanViewerPixels,
   setVtDebugStage,
+  getVtDebugStage,
   setVtPanViewerFloor,
   setVtPanViewerDisplayLayer,
   runZoomThrashTest,
@@ -101,7 +101,7 @@ if (MapShine.__keyholeBooted) {
 function install() {
   installSoak(MapShine); // exposes MapShine.soak(n) — the stage-gate soak harness
   installDebugPanel(MapShine); // starts console capture NOW, as early as possible
-  MapShine.debug.registerReport('vt-live-decode', 'VT Live Decode Test', async () => ({
+  MapShine.debug.registerReport('vt-live-decode', 'Live decode test', async () => ({
     report: 'vt-live-decode',
     generatedAt: new Date().toISOString(),
     ...(await runVtLiveDecodeTest(`modules/${MODULE_ID}/assets/torture/torture_floor0.png`)),
@@ -200,7 +200,7 @@ function install() {
 
   const tortureExtraLayers = (item) => tortureLayerUrls(item.__floorIndex ?? 0);
 
-  MapShine.debug.registerReport('vt-pan-viewer-start', 'VT Pan Viewer: Start (fills scene view)', async () => ({
+  MapShine.debug.registerReport('vt-pan-viewer-start', 'Start: torture fixture', async () => ({
     report: 'vt-pan-viewer-start',
     generatedAt: new Date().toISOString(),
     ...(await startVtPanViewer({
@@ -211,46 +211,44 @@ function install() {
       extraLayersForItem: tortureExtraLayers,
     })),
   }));
-  MapShine.debug.registerReport('vt-pan-viewer-diagnostics', 'VT Pan Viewer: Diagnostics', () => ({
+  MapShine.debug.registerReport('vt-pan-viewer-diagnostics', 'Diagnostics', () => ({
     report: 'vt-pan-viewer-diagnostics',
     generatedAt: new Date().toISOString(),
     ...getVtPanViewerDiagnostics(),
   }));
-  // THE IN-GRAPH BISECT (see vt-sample.tsl.js#debugStage). Four guesses at the black
-  // screen were four too many; each was a real bug and none put a pixel on screen.
-  // Each stage below eliminates HALF of what is left, for one click + Force Restart.
-  // Work DOWN the list: the first that DRAWS says the bug is below it; the first
-  // that stays BLACK says the bug is at that step.
-  for (const [stage, label] of [
-    ['solid', 'VT BISECT 1: solid RED (no graph at all)'],
-    ['uv', 'VT BISECT 2: the uv attribute as colour'],
-    ['atlas', 'VT BISECT 3: the ATLAS direct, layer 0 (no page table)'],
-    ['indirection', 'VT BISECT 4: the PAGE TABLE texels as a pattern'],
-    ['walk', 'VT BISECT 5: the mip WALK only (no tint/alpha/occlusion)'],
-    ['walk-alpha', 'VT BISECT 6: the walk with its REAL alpha'],
-    ['sample', 'VT BISECT 7: the FULL sampler (walk + mip blend + world guard)'],
-    ['sample-opaque', 'VT BISECT 8: the full sampler, alpha forced opaque'],
-    ['no-occlusion', 'VT BISECT 9: the real chain MINUS occlusion'],
-    ['guard', 'VT BISECT 10: the world GUARD made visible (red=off-map, green=on-map)'],
-    ['mip-hi', 'VT BISECT 11: the walk at the mip the cross-fade blends TOWARDS'],
-    ['no-guard', 'VT BISECT 12: the mip cross-fade WITHOUT the guard'],
-    [null, 'VT BISECT off: back to the real shader'],
-  ]) {
-    MapShine.debug.registerReport(`vt-bisect-${stage ?? 'off'}`, `${label} — then Force Restart`, () => ({
-      report: `vt-bisect-${stage ?? 'off'}`,
-      generatedAt: new Date().toISOString(),
-      ...setVtDebugStage(stage),
-    }));
-  }
+  // THE IN-GRAPH BISECT (see vt-sample.tsl.js#debugStage). ONE control, because the
+  // stage change and the restart are ONE action: materials are built per item at
+  // startup, so a stage that did not restart would do nothing at all. Persisted, so
+  // a browser refresh keeps it -- refresh-and-look is the actual workflow.
+  //
+  // Work DOWN the list: the first stage that DRAWS puts the bug below it; the first
+  // that stays BLACK puts the bug at that step.
+  MapShine.debug.registerSelect(
+    'vt-bisect',
+    'Shader bisect',
+    [
+      { value: '', label: 'off — the real shader' },
+      { value: 'solid', label: 'solid red — no graph at all' },
+      { value: 'uv', label: 'uv — the attribute as colour' },
+      { value: 'atlas', label: 'atlas — direct, layer 0, no page table' },
+      { value: 'indirection', label: 'page table — texels as a pattern' },
+      { value: 'walk', label: 'walk — the mip walk, alpha forced' },
+      { value: 'walk-alpha', label: 'walk+alpha — the walk with its real alpha' },
+      { value: 'guard', label: 'guard — red=off-map, green=on-map' },
+      { value: 'mip-hi', label: 'mip-hi — the mip the cross-fade blends toward' },
+      { value: 'no-guard', label: 'cross-fade — without the guard' },
+      { value: 'sample', label: 'sample — the full sampler' },
+      { value: 'sample-opaque', label: 'sample — full sampler, alpha forced' },
+      { value: 'no-occlusion', label: 'no-occlusion — the real chain minus occlusion' },
+    ],
+    () => getVtDebugStage() ?? '',
+    async (value) => {
+      setVtDebugStage(value);
+      return MapShine.debug.runReport('vt-pan-viewer-start-real-scene');
+    }
+  );
 
-  MapShine.debug.registerReport('vt-pixels', 'VT: What colour is ACTUALLY on screen? (ground truth)', async () => ({
-    report: 'vt-pixels',
-    generatedAt: new Date().toISOString(),
-    ...(await readVtPanViewerPixels()),
-    note: 'Read pixelVerdict first — it separates failures that look identical on screen: OPAQUE BLACK (the sampler hit its out-of-world early-out), TRANSPARENT (the alpha chain zeroed it), MAGENTA (nothing resident at any mip), or a real colour (the sampler is fine and the problem is downstream).',
-  }));
-
-  MapShine.debug.registerReport('vt-pan-viewer-stop', 'VT Pan Viewer: Stop/Clear', () => ({
+  MapShine.debug.registerReport('vt-pan-viewer-stop', 'Stop / clear', () => ({
     report: 'vt-pan-viewer-stop',
     generatedAt: new Date().toISOString(),
     ...stopVtPanViewer(),
@@ -261,7 +259,7 @@ function install() {
   // cache's own stats. The whole layer stack is resident, yet residentPages
   // stays a small fraction of capacityPages: V2's `O(world × floors × masks)`
   // world-resolution textures replaced by `O(screen)` pages.
-  MapShine.debug.registerReport('vt-pan-viewer-layers', 'VT Layers: Residency (mask pile-up proof)', () => {
+  MapShine.debug.registerReport('vt-pan-viewer-layers', 'Layer residency', () => {
     const d = getVtPanViewerDiagnostics();
     return {
       report: 'vt-pan-viewer-layers',
@@ -301,20 +299,16 @@ function install() {
   // eyeballed for correctness. Real scenes have no masks, so this stays albedo.
   const TORTURE_DISPLAY_CYCLE = ['albedo', 'ShadowOutdoorsFire', ...TORTURE_UNPACKED_MASK_NAMES];
   let tortureDisplayLayerIndex = 0;
-  MapShine.debug.registerReport(
-    'vt-pan-viewer-cycle-layer',
-    'VT Layers: Cycle Displayed Layer (albedo ↔ masks)',
-    async () => {
-      tortureDisplayLayerIndex = (tortureDisplayLayerIndex + 1) % TORTURE_DISPLAY_CYCLE.length;
-      const name = TORTURE_DISPLAY_CYCLE[tortureDisplayLayerIndex];
-      return {
-        report: 'vt-pan-viewer-cycle-layer',
-        generatedAt: new Date().toISOString(),
-        requestedLayer: name,
-        ...(await setVtPanViewerDisplayLayer(name)),
-      };
-    }
-  );
+  MapShine.debug.registerReport('vt-pan-viewer-cycle-layer', 'Cycle displayed layer', async () => {
+    tortureDisplayLayerIndex = (tortureDisplayLayerIndex + 1) % TORTURE_DISPLAY_CYCLE.length;
+    const name = TORTURE_DISPLAY_CYCLE[tortureDisplayLayerIndex];
+    return {
+      report: 'vt-pan-viewer-cycle-layer',
+      generatedAt: new Date().toISOString(),
+      requestedLayer: name,
+      ...(await setVtPanViewerDisplayLayer(name)),
+    };
+  });
 
   // VT ZOOM THRASH TEST (author-requested, 2026-07-16: "force the camera to
   // flush the caches, start with a blank slate, start zoomed out and thrash
@@ -339,28 +333,24 @@ function install() {
   //              floor count, real tiles and a warm cache. The right tool for "is
   //              MY map hitching", and the only one that can verify a fix against
   //              the conditions that produced a real report.
-  MapShine.debug.registerReport(
-    'vt-zoom-thrash-torture',
-    'VT Zoom Thrash: TORTURE fixture (blank slate, ~8s)',
-    async () => ({
-      report: 'vt-zoom-thrash-torture',
-      generatedAt: new Date().toISOString(),
-      subject: 'torture fixture (synthetic 12000² x3 floors + masks)',
-      // Explicit startupParams — self-contained, works even if nothing is
-      // currently active (doesn't require pressing "Start" first).
-      ...(await runZoomThrashTest({
-        startupParams: {
-          THREE,
-          buildItems: buildTortureItems,
-          dimensions: tortureDimensions,
-          floorCount: TORTURE_FLOOR_COUNT,
-          extraLayersForItem: tortureExtraLayers,
-        },
-      })),
-    })
-  );
+  MapShine.debug.registerReport('vt-zoom-thrash-torture', 'Zoom thrash: torture fixture', async () => ({
+    report: 'vt-zoom-thrash-torture',
+    generatedAt: new Date().toISOString(),
+    subject: 'torture fixture (synthetic 12000² x3 floors + masks)',
+    // Explicit startupParams — self-contained, works even if nothing is
+    // currently active (doesn't require pressing "Start" first).
+    ...(await runZoomThrashTest({
+      startupParams: {
+        THREE,
+        buildItems: buildTortureItems,
+        dimensions: tortureDimensions,
+        floorCount: TORTURE_FLOOR_COUNT,
+        extraLayersForItem: tortureExtraLayers,
+      },
+    })),
+  }));
 
-  MapShine.debug.registerReport('vt-zoom-thrash-active', 'VT Zoom Thrash: ACTIVE scene (real art, ~8s)', async () => ({
+  MapShine.debug.registerReport('vt-zoom-thrash-active', 'Zoom thrash: active scene', async () => ({
     report: 'vt-zoom-thrash-active',
     generatedAt: new Date().toISOString(),
     subject: typeof canvas !== 'undefined' ? (canvas.scene?.name ?? '(no active scene)') : '(no canvas)',
@@ -480,20 +470,16 @@ function install() {
     };
   }
 
-  MapShine.debug.registerReport(
-    'vt-pan-viewer-start-real-scene',
-    'VT Pan Viewer: Force Restart (ACTIVE SCENE)',
-    async () => {
-      const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
-      const floorsResult = getActiveSceneFloors(sceneDoc);
-      const initialFloorIndex = floorsResult.ok ? resolveFloorDescriptor(sceneDoc, floorsResult.floors) : 0;
-      return {
-        report: 'vt-pan-viewer-start-real-scene',
-        generatedAt: new Date().toISOString(),
-        ...(await startRealSceneViewer(initialFloorIndex)),
-      };
-    }
-  );
+  MapShine.debug.registerReport('vt-pan-viewer-start-real-scene', 'Restart: active scene', async () => {
+    const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
+    const floorsResult = getActiveSceneFloors(sceneDoc);
+    const initialFloorIndex = floorsResult.ok ? resolveFloorDescriptor(sceneDoc, floorsResult.floors) : 0;
+    return {
+      report: 'vt-pan-viewer-start-real-scene',
+      generatedAt: new Date().toISOString(),
+      ...(await startRealSceneViewer(initialFloorIndex)),
+    };
+  });
 
   // VRAM severance (Keyhole.md §4.3's "single biggest instant win") — the PIXI
   // proxy registration itself. LIVE-CONFIRMED 2026-07-15 (author's residency
@@ -517,7 +503,7 @@ function install() {
   // THE TSL SPIKE (docs/planning/Shaders.md §7.5). Loads the node build LAZILY —
   // a 2.8MB vendor bundle must not be on the boot path for a decision we have not
   // taken. Touches nothing that works; renders into its own offscreen canvas.
-  MapShine.debug.registerReport('loading-screen-state', 'Loading Screen: State + Last Load', () => ({
+  MapShine.debug.registerReport('loading-screen-state', 'Loading screen state', () => ({
     report: 'loading-screen-state',
     generatedAt: new Date().toISOString(),
     ...getLoadingScreenState(),
@@ -541,7 +527,7 @@ function install() {
     })
   );
 
-  MapShine.debug.registerReport('pixi-residency-report', 'VRAM Severance: PIXI Residency Report', () => {
+  MapShine.debug.registerReport('pixi-residency-report', 'PIXI residency', () => {
     const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
     const floorsResult = getActiveSceneFloors(sceneDoc);
     const srcs = floorsResult.ok ? floorsResult.floors.map((f) => f.url) : [];

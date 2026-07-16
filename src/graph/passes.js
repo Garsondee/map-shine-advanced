@@ -91,7 +91,8 @@ export const PASSES = [
     note:
       'ONE per-frame read-only snapshot: time, sun (computed ONCE), weather, wind, darkness, camera, ' +
       'scene docs — the call sheet every later pass reads. Kills the eight suns, the twenty clocks, ' +
-      'and the darkness feedback bus.',
+      'and the darkness feedback bus. PURE CORE BUILT + Node-tested (world/environment.js, world/sun.js, ' +
+      'core/frame-clock.js); status stays future until the pass is wired into the frame loop.',
   },
   {
     id: 'vt.residency',
@@ -132,7 +133,7 @@ export const PASSES = [
     id: 'sims.fluids',
     stage: 'sims',
     kind: 'gpu',
-    status: 'future',
+    status: 'seam',
     owns: 'docs/planning/Water.md §5 (tiers 7+) + Keyhole §4.4 (water is the honest hard case)',
     creates: ['res:fluidSim'],
     reads: ['res:env', 'res:view', 'vt:masks'],
@@ -185,7 +186,7 @@ export const PASSES = [
     id: 'light.visibility',
     stage: 'lighting',
     kind: 'gpu',
-    status: 'future',
+    status: 'seam',
     owns: 'docs/planning/Light-and-Shadow.md §4 (shadow = absence of a SPECIFIC light)',
     creates: ['res:vis'],
     reads: ['res:env', 'res:scene', 'vt:masks', 'buf:scene.attr'],
@@ -232,7 +233,7 @@ export const PASSES = [
     id: 'surface.response',
     stage: 'surface',
     kind: 'gpu',
-    status: 'future',
+    status: 'seam',
     owns: 'Effects-API.md §5 (the worked SPECULAR declaration) + Effects.md (the ladder)',
     creates: [],
     reads: ['vt:masks', 'buf:scene.illum', 'buf:scene.attr', 'res:env'],
@@ -246,7 +247,7 @@ export const PASSES = [
     id: 'surface.water',
     stage: 'surface',
     kind: 'gpu',
-    status: 'future',
+    status: 'seam',
     owns: 'docs/planning/Water.md (the full audit + ladder + cross-floor rule)',
     creates: [],
     reads: ['vt:masks', 'buf:scene.illum', 'buf:scene.attr', 'res:env', 'res:fluidSim'],
@@ -281,7 +282,7 @@ export const PASSES = [
     id: 'post.grade',
     stage: 'post',
     kind: 'gpu',
-    status: 'future',
+    status: 'seam',
     owns: 'docs/planning/Environment.md §2.3 (the grade stack with a DEFINED order)',
     creates: ['buf:final'],
     reads: ['buf:scene.color', 'buf:scene.attr', 'buf:scene.depth', 'res:env'],

@@ -10,6 +10,8 @@
  *      by the validator — the mess is not merely discouraged, it is unwritable.
  */
 import { PASSES, STAGES, validatePassGraph } from '../passes.js';
+import { PASS_SEAMS } from '../pass-seams.js';
+import { NotBuiltError } from '../../core/not-built.js';
 
 export function run(t) {
   // ---- 1. the real graph validates -----------------------------------------
@@ -210,5 +212,32 @@ export function run(t) {
       },
     ];
     t.ok('UN-NAMESPACED RESOURCES ARE UNWRITABLE (no global-bus ghosts)', !validatePassGraph(ghost).ok);
+  }
+
+  // ---- 5. STATUS IS A CHECKED FACT, NOT A CLAIM -----------------------------
+  // Found the hard way: two passes were marked 'seam' while no door existed —
+  // an honest-looking lie no test could see. Now: every seam-status pass must
+  // have a registered door that THROWS NotBuiltError citing its design doc,
+  // and every registered door must belong to a seam-status pass.
+  {
+    const seamIds = PASSES.filter((p) => p.status === 'seam').map((p) => p.id);
+    for (const id of seamIds) {
+      const door = PASS_SEAMS[id];
+      t.ok(`seam '${id}' HAS a door in the registry`, typeof door === 'function');
+      if (typeof door !== 'function') continue;
+      let err = null;
+      try {
+        door({});
+      } catch (e) {
+        err = e;
+      }
+      t.ok(`seam '${id}' door throws NotBuiltError`, err instanceof NotBuiltError);
+      t.ok(`seam '${id}' error carries the map (owns)`, err && /Design lives in/.test(err.message));
+    }
+    for (const key of Object.keys(PASS_SEAMS)) {
+      const pass = PASSES.find((p) => p.id === key);
+      t.ok(`registry key '${key}' is a real pass`, !!pass);
+      t.ok(`registry key '${key}' has seam status (doors belong to seams)`, pass && pass.status === 'seam');
+    }
   }
 }

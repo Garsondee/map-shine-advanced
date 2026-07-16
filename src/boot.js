@@ -48,7 +48,7 @@ import {
 } from './vt/vt-pan-viewer.js';
 import { getActiveSceneFloors, computeVisibleFloorIndices } from './foundry/active-scene-source.js';
 import { collectSceneLayers } from './foundry/scene-layers.js';
-import { collectTokens } from './foundry/scene-tokens.js';
+import { collectTokens, diagnoseTokens } from './foundry/scene-tokens.js';
 import { engageFoundryFallback } from './diag/render-fallback.js';
 import {
   beginSceneLoad,
@@ -216,6 +216,38 @@ function install() {
     generatedAt: new Date().toISOString(),
     ...getVtPanViewerDiagnostics(),
   }));
+  // WHY IS MY TOKEN NOT THERE? Reads the live scene documents directly — it does
+  // not ask the viewer, so it answers even when the viewer is not running and
+  // stays trustworthy if collection itself is the thing that is wrong.
+  MapShine.debug.registerReport('tokens', 'Tokens: why is mine not showing?', () => {
+    const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
+    const floorsResult = getActiveSceneFloors(sceneDoc);
+    if (!floorsResult.ok) return { report: 'tokens', ok: false, reason: floorsResult.reason };
+    const floors = floorsResult.floors;
+    const viewedFloorIndex = resolveFloorDescriptor(sceneDoc, floors);
+    const visibleLevelIds = computeVisibleFloorIndices(floors, viewedFloorIndex)
+      .map((i) => floors[i]?.id)
+      .filter(Boolean);
+    const opts = {
+      visibleLevelIds,
+      knownLevelIds: floors.map((f) => f.id).filter(Boolean),
+      viewedLevelId: floors[viewedFloorIndex]?.id,
+      isGM: !!game?.user?.isGM,
+    };
+    const { items, skipped } = collectTokens(sceneDoc, opts);
+    return {
+      report: 'tokens',
+      generatedAt: new Date().toISOString(),
+      sceneName: sceneDoc?.name,
+      floors: floors.map((f) => ({ index: f.index, id: f.id, name: f.name, elevationBottom: f.elevationBottom })),
+      collectedTokenIds: items.map((i) => i.id),
+      // Every drop, with its reason. The absence of this is what let three tokens
+      // vanish while the report claimed skippedItems: [].
+      skipped,
+      ...diagnoseTokens(sceneDoc, opts),
+    };
+  });
+
   MapShine.debug.registerReport('vt-pan-viewer-stop', 'Stop / clear', () => ({
     report: 'vt-pan-viewer-stop',
     generatedAt: new Date().toISOString(),

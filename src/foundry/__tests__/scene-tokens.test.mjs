@@ -14,6 +14,7 @@ import {
   tokenOnLevel,
   resolveTokenLevel,
   DEFAULT_LEVEL_ID,
+  diagnoseTokens,
   DEFAULT_TOKEN_ICON,
 } from '../scene-tokens.js';
 import { collectTiles } from '../scene-layers.js';
@@ -219,6 +220,74 @@ export function run(t) {
       viewedLevelId: 'ground',
     });
     t.ok('a token on a real but hidden floor stays there, not pulled to the viewed one', kept.items.length === 0);
+  }
+
+  // ---- NO SILENT SKIPS (the bug behind the bug) --------------------------
+  {
+    // Three tokens vanished while the report said skippedItems: [] -- a bare
+    // `continue` dropped them without a word, so collection looked clean while it
+    // binned them. A silent skip is worse than a crash: it manufactures the
+    // impression that nothing went wrong.
+    const scene = mkScene([mkToken('here', { level: 'ground' }), mkToken('upstairs', { level: 'upper' })]);
+    const { items, skipped } = collectTokens(scene, {
+      visibleLevelIds: ['ground'],
+      knownLevelIds: ['ground', 'upper'],
+      viewedLevelId: 'ground',
+    });
+    t.ok('the visible token is collected', items.length === 1);
+    t.ok('THE DROPPED TOKEN IS REPORTED, not silently binned', skipped.length === 1);
+    t.ok('and the reason names the level it is on', /upper/.test(skipped[0].reason));
+    t.ok('and names the visible levels it was tested against', /ground/.test(skipped[0].reason));
+    t.ok('and carries the id, so it can be found in Foundry', skipped[0].id === 'upstairs');
+
+    const hidden = collectTokens(mkScene([mkToken('h', { hidden: true })]), {
+      visibleLevelIds: ['ground'],
+      isGM: false,
+    });
+    t.ok(
+      'a hidden token is reported too, not silently dropped',
+      hidden.skipped.length === 1 && /GM/.test(hidden.skipped[0].reason)
+    );
+  }
+
+  // ---- diagnoseTokens: raw vs resolved vs real ---------------------------
+  {
+    // The three ids that must be visible side by side: what the token SAYS, what
+    // we RESOLVED it to, and what the scene actually HAS. The whole bug class is
+    // those disagreeing, and all of them look identical from outside (the token
+    // is simply absent) and like a broken renderer.
+    const scene = mkScene([
+      mkToken('assigned', { level: 'ground' }),
+      mkToken('unassigned', { level: DEFAULT_LEVEL_ID }),
+      mkToken('upstairs', { level: 'upper' }),
+    ]);
+    const d = diagnoseTokens(scene, {
+      visibleLevelIds: ['ground'],
+      knownLevelIds: ['ground', 'upper'],
+      viewedLevelId: 'ground',
+    });
+    t.ok(
+      'every token document is reported, including the dropped ones',
+      d.tokenDocsFound === 3 && d.tokens.length === 3
+    );
+    const byId = Object.fromEntries(d.tokens.map((x) => [x.id, x]));
+    t.ok('an assigned token reads as real and renders', byId.assigned.levelIsReal && byId.assigned.wouldRender);
+    t.ok(
+      "Foundry's default id is flagged as such, not as a real level",
+      byId.unassigned.levelIsFoundryDefault && !byId.unassigned.levelIsReal
+    );
+    t.ok(
+      'and it resolves onto the viewed floor',
+      byId.unassigned.resolvedLevel === 'ground' && byId.unassigned.wouldRender
+    );
+    t.ok(
+      'an upstairs token reads as real but does NOT render here',
+      byId.upstairs.levelIsReal && !byId.upstairs.wouldRender
+    );
+    t.ok(
+      'raw and resolved are both reported so a mismatch is visible',
+      byId.upstairs.rawLevel === 'upper' && byId.upstairs.resolvedLevel === 'upper'
+    );
   }
 
   // ---- THE BRIDGE: a token under a roof, through the real sort law --------

@@ -199,22 +199,36 @@ export function collectTokens(
   const skipped = [];
 
   for (const token of tokenDocsOf(sceneDoc)) {
-    if (token?.hidden && !isGM) continue;
+    // EVERY drop is reported with its reason. A bare `continue` here is what made
+    // three tokens vanish while the report said skippedItems: [] -- confidently
+    // claiming nothing was skipped while quietly binning them (author-reported
+    // 2026-07-16, "only one token renders"). A silent skip is worse than a crash:
+    // it manufactures the impression that collection ran cleanly.
+    const drop = (reason) =>
+      skipped.push({ name: token?.name || token?.id || '(unnamed token)', id: token?.id, reason });
+
+    if (token?.hidden && !isGM) {
+      drop('hidden, and this client is not a GM');
+      continue;
+    }
 
     // `token.level` is a native level ID (see this module's header) — singular,
     // so this is tokenOnLevel, NOT the tile helper. Resolved first, because the
     // raw field may hold defaultLevel0000, which no authored scene has.
     const level = resolveTokenLevel(token, known, fallback);
     const on = visibleLevelIds.filter((levelId) => level === levelId);
-    if (on.length === 0) continue;
+    if (on.length === 0) {
+      drop(
+        `on level "${level}"${level === (token?.level ?? '') ? '' : ` (resolved from "${token?.level ?? ''}")`}, ` +
+          `which is not among the visible levels [${visibleLevelIds.join(', ')}]`
+      );
+      continue;
+    }
 
     const src = token?.texture?.src || DEFAULT_TOKEN_ICON;
     const f = tokenFootprint(token, size);
     if (!(f.width > 0 && f.height > 0)) {
-      skipped.push({
-        name: token?.name || token?.id || '(unnamed token)',
-        reason: `degenerate footprint ${f.width}x${f.height}px (width/height are GRID units; grid size ${size})`,
-      });
+      drop(`degenerate footprint ${f.width}x${f.height}px (width/height are GRID units; grid size ${size})`);
       continue;
     }
 
@@ -246,4 +260,60 @@ export function collectTokens(
   }
 
   return { items, skipped };
+}
+
+/**
+ * EVERY token document, and what collection decided about it — the instrument
+ * that should have existed before the level matching did.
+ *
+ * Reports the RAW `token.level`, the RESOLVED level, and the scene's real level
+ * ids side by side, because the whole class of bug here is those three
+ * disagreeing: a token carrying `defaultLevel0000` that no authored scene has, a
+ * token on a level since deleted, a token on a real floor you cannot currently
+ * see. All three look identical from the outside — the token is simply absent —
+ * and none of them are distinguishable from "the renderer is broken" without
+ * this.
+ *
+ * Pure, and independent of collection: it re-derives rather than instrumenting
+ * collectTokens from the inside, so it can still be trusted if collectTokens is
+ * the thing that is wrong.
+ *
+ * @param {object} sceneDoc
+ * @param {object} [options] - the same options collectTokens was called with.
+ * @returns {object}
+ */
+export function diagnoseTokens(sceneDoc, { visibleLevelIds = [], knownLevelIds, viewedLevelId, gridSize } = {}) {
+  const size = gridSize ?? sceneDoc?.grid?.size ?? 100;
+  const known = knownLevelIds ? new Set(knownLevelIds) : null;
+  const fallback = viewedLevelId ?? visibleLevelIds[0] ?? '';
+  const docs = tokenDocsOf(sceneDoc);
+  return {
+    tokenDocsFound: docs.length,
+    gridSize: size,
+    visibleLevelIds,
+    knownLevelIds: knownLevelIds ?? null,
+    viewedLevelId: viewedLevelId ?? null,
+    fallbackLevelId: fallback,
+    defaultLevelId: DEFAULT_LEVEL_ID,
+    tokens: docs.map((token) => {
+      const rawLevel = token?.level ?? '';
+      const resolved = resolveTokenLevel(token, known, fallback);
+      const f = tokenFootprint(token, size);
+      return {
+        id: token?.id,
+        name: token?.name,
+        rawLevel,
+        resolvedLevel: resolved,
+        levelIsReal: known ? known.has(rawLevel) : null,
+        levelIsFoundryDefault: rawLevel === DEFAULT_LEVEL_ID,
+        wouldRender: visibleLevelIds.includes(resolved),
+        elevation: token?.elevation ?? 0,
+        hidden: !!token?.hidden,
+        gridWidth: token?.width,
+        gridHeight: token?.height,
+        footprintPx: { x: f.x, y: f.y, width: f.width, height: f.height },
+        src: token?.texture?.src ?? null,
+      };
+    }),
+  };
 }

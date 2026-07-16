@@ -88,6 +88,7 @@ import {
 } from '../scene/world-quad.js';
 import { computeQuadCorners, computeQuadBounds } from '../foundry/scene-geometry.js';
 import { computeItemPlacement } from '../foundry/scene-layers.js';
+import { showFailureSurface, clearFailureSurface, describeOcclusionOfPixi } from '../diag/failure-surface.js';
 import { OCCLUSION_MODES, computeOcclusionState, createHoverFadeState, mapElevation } from '../scene/occlusion.js';
 
 /** Wall-clock budget per GPU-upload chunk before yielding a real frame — see
@@ -1664,6 +1665,12 @@ export async function startVtPanViewer({
         return {
           view,
           layout,
+          // GROUND TRUTH: is the VT actually the thing on screen right now, or is
+          // Foundry's own canvas? This could NOT be answered from a report during
+          // the 2026-07-16 non-square incident — the diagnostics described the
+          // VT's internals in detail while saying nothing about whether any of it
+          // reached the display. Read from the DOM, not from intent.
+          ...describeOcclusionOfPixi({ canvas, loopActive }),
           // Non-zero = at least one pack could not afford its speculative tier this
           // update. A few is healthy self-limiting; ALL of them, every update,
           // means the required working set itself is at the budget.
@@ -1778,6 +1785,8 @@ export async function startVtPanViewer({
       },
     };
 
+    // A previous failure's surface must not outlive the failure.
+    clearFailureSurface();
     console.log(
       '[vt-pan-viewer] started — filling the scene area (PIXI occluded). Drag to pan, wheel to zoom; ' +
         'Arrow keys/WASD pan, +/- zoom, 0-2/Tab floor-switch.'
@@ -1787,6 +1796,15 @@ export async function startVtPanViewer({
     diag0.ok = false;
     diag0.fatalError = `${err?.message || err}\n${err?.stack || ''}`;
     console.error('[vt-pan-viewer] fatal error:', err);
+    // FAIL LOUDLY AND LEGIBLY (doctrine #1). Without this, a failure here leaves
+    // the already-appended canvas showing its black CSS background — which does
+    // occlude PIXI, but is indistinguishable from "still loading" / "empty
+    // scene" / "dark map art". Black is loud; it is not informative.
+    showFailureSurface({
+      title:
+        "The virtual-texture renderer threw while starting up. Foundry itself is fine — only MSA's rendering is down.",
+      detail: diag0.fatalError,
+    });
     return diag0;
   }
 }

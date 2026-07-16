@@ -46,6 +46,7 @@ import {
 } from './vt/vt-pan-viewer.js';
 import { getActiveSceneFloors, computeVisibleFloorIndices } from './foundry/active-scene-source.js';
 import { collectSceneLayers } from './foundry/scene-layers.js';
+import { showFailureSurface } from './diag/failure-surface.js';
 import { computeSceneDimensions } from './foundry/scene-geometry.js';
 import { SORT_LAYERS, makeLayerKey } from './scene/layer-order.js';
 import { getSourceBitmap } from './vt/decode-pool.js';
@@ -345,6 +346,16 @@ function install() {
     const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
     const floorsResult = getActiveSceneFloors(sceneDoc);
     if (!floorsResult.ok) {
+      // THE ONE GENUINELY SILENT PATH. Every other failure at least leaves the
+      // VT canvas mounted showing black (it is appended before any risky work),
+      // so PIXI stays occluded. This one returns BEFORE startVtPanViewer, so no
+      // canvas is ever created, Foundry's own canvas renders the scene, and the
+      // failure is invisible — MSA quietly absent while appearing to work, which
+      // is precisely what doctrine #1 forbids.
+      showFailureSurface({
+        title: `Map Shine Advanced cannot render this scene: ${floorsResult.error}`,
+        hint: 'MSA has not rendered anything here — what you would otherwise be seeing is Foundry\'s own canvas. Fix the scene\'s Level background art, or disable MSA via the "useNativeFoundryRendering" setting if you want plain Foundry rendering on purpose.',
+      });
       return { ok: false, error: floorsResult.error };
     }
     const { floors, skipped } = floorsResult;

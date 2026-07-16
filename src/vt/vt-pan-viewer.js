@@ -184,38 +184,6 @@ let _active = null;
  * (case B). If it stays black, nothing is drawing and the graph is innocent
  * (case A) — and I have been debugging the wrong file entirely.
  */
-// PERSISTED so a browser refresh keeps the stage: the author's workflow is "I just
-// refresh the browser and tell you what I see", and a debug mode that resets on every
-// reload would fight that workflow rather than serve it.
-const VT_DEBUG_STAGE_KEY = 'msa.vt.debugStage';
-let debugStageName = (() => {
-  try {
-    return localStorage.getItem(VT_DEBUG_STAGE_KEY) || null;
-  } catch {
-    return null; // private mode / storage disabled — the real shader is the right default
-  }
-})();
-
-/** The active bisect stage, or null for the real shader. */
-export function getVtDebugStage() {
-  return debugStageName;
-}
-
-/**
- * Swap every item's shader for a solid colour. Requires a restart to take effect
- * (materials are built once per item).
- * @param {boolean} on
- */
-export function setVtDebugStage(stage) {
-  debugStageName = stage || null;
-  try {
-    if (debugStageName) localStorage.setItem(VT_DEBUG_STAGE_KEY, debugStageName);
-    else localStorage.removeItem(VT_DEBUG_STAGE_KEY);
-  } catch {
-    /* not worth failing a debug mode over; it just won't survive the next reload */
-  }
-  return debugStageName;
-}
 
 function disposeActive() {
   if (!_active) return;
@@ -789,63 +757,19 @@ export async function startVtPanViewer({
         // mix(0, occ, 1) == 0 and blacked out the entire map for a whole session.
         return { occ, factor: THREE.TSL.mix(uUnoccludedAlpha, uOccludedAlpha, occ) };
       };
-      // The placeholder's own clear value, as a compile-time constant: Foundry's
-      // `CanvasOcclusionMask#clearColor = [0,1,1,1]` == "nothing occludes anything".
-      const MASK_CLEAR = () => THREE.TSL.vec4(0, 1, 1, 1);
       const maskUV = () => positionGeometry.xy; // placeholder space; real screen UV lands with the producer
       const sampleMask = () => THREE.TSL.texture(occlusionMask.texture, maskUV());
 
-      const realChain = (maskSample, { skipOcclusion = false, factorOverride = null } = {}) =>
+      const realChain = (maskSample) =>
         Fn(() => {
           const c = vt.sample(uv()).toVar();
           c.rgb.mulAssign(uTint);
           c.a.mulAssign(uAlpha);
-          if (factorOverride) c.a.mulAssign(factorOverride());
-          else if (!skipOcclusion) c.a.mulAssign(occlusionAlphaFactor(maskSample()).factor);
+          c.a.mulAssign(occlusionAlphaFactor(maskSample()).factor);
           return c;
         })();
 
-      // A LOOKUP, not a nine-deep ternary. The ternary was unreadable enough that I
-      // corrupted it while editing; a table of stage -> node is the same thing and
-      // cannot nest wrong.
-      const debugStages = {
-        solid: () => THREE.TSL.vec4(1, 0, 0, 1), // bypasses the ENTIRE graph
-        'no-occlusion': () => realChain(null, { skipOcclusion: true }),
-        // Identical occlusion maths, but the mask texture read is replaced by the
-        // exact constant it returns. PROVEN BLACK (2026-07-16) => the texture binding
-        // is innocent and the arithmetic is guilty, on uniforms that print as zeros.
-        'occ-const': () => realChain(MASK_CLEAR),
-        // The real chain with the occlusion factor replaced by a LITERAL 1.
-        // Mathematically an exact no-op, structurally identical (a second mulAssign on
-        // c.a). Black => the arithmetic is innocent after all and the SHAPE of the
-        // expression is the bug: TSL mis-compiling two chained mulAssign calls on the
-        // same swizzle. Draws => the factor really does evaluate to something other
-        // than 1, despite every printed uniform saying that is impossible.
-        'occ-one': () => realChain(null, { factorOverride: () => float(1) }),
-        // `occ` as RED=occluded / GREEN=not. Greyscale was a BAD instrument: black
-        // meant EITHER occ==0 OR the draw never happened -- opposite conclusions
-        // wearing the same colour. Three outcomes now have three distinct colours.
-        // THE FACTOR ITSELF: green = 1 (identity, the map should draw), red = 0 (it
-        // kills alpha). occ-one proves substituting a literal 1 here draws; occ-value
-        // proves occ is 0, so mix(1, 0, 0) must BE 1. If this is red, the mix call
-        // computes something other than the 1 its inputs demand -- the last line left
-        // standing, and the only one never directly observed.
-        'occ-factor': () =>
-          Fn(() => {
-            const { factor } = occlusionAlphaFactor(sampleMask());
-            return THREE.TSL.vec4(float(1).sub(factor), factor, 0, 1);
-          })(),
-        'occ-value': () =>
-          Fn(() => {
-            const { occ } = occlusionAlphaFactor(sampleMask());
-            return THREE.TSL.vec4(occ, float(1).sub(occ), 0, 1);
-          })(),
-      };
-      const debugNode = debugStageName
-        ? (debugStages[debugStageName]?.() ?? vt.debugStage(debugStageName, uv()))
-        : null;
-
-      material.colorNode = debugNode ?? realChain(sampleMask);
+      material.colorNode = realChain(sampleMask);
 
       // Stash the live uniform handles on the item state: bindMeshToPack writes
       // through these every update, and getDiagnostics reads them back. Losing these
@@ -1917,15 +1841,12 @@ export async function startVtPanViewer({
             zIndex: i.key.zIndex,
             visible: itemStates.get(i.id)?.mesh?.visible ?? false,
             occlusionModes: i.occlusion?.modes ?? 0,
-            // THE ACTUAL UNIFORM VALUES the shader is running on, read straight off
-            // the JS side -- exact, and involving no shader at all. The bisect proved
-            // occlusion blacks out the map; reading the shader says it cannot (weights
-            // are 0 for a level, and 0 multiplies everything to 0). One of those is
-            // wrong, and printing the numbers settles it without a seventh theory.
-            //
-            // NaN is the thing to look for: in IEEE, NaN * 0 is NaN, not 0 -- so a
-            // single NaN weight would defeat the "weights are zero so it is inert"
-            // reasoning entirely and drive alpha to NaN.
+            // THE ACTUAL UNIFORM VALUES the shader is running on, read straight off the
+            // JS side -- exact, and involving no shader at all. Kept after the bisect
+            // scaffolding was stripped because it earned it: printing these is what
+            // proved the occlusion weights were clean zeros, which is what forced the
+            // search onto the OPERATION rather than the values and found the .mix()
+            // trap (reference_tsl_method_chaining_trap).
             uniforms: (() => {
               const a = itemStates.get(i.id)?.appearance;
               if (!a) return null;

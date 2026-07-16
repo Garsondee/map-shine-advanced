@@ -39,8 +39,6 @@ import {
   startVtPanViewer,
   stopVtPanViewer,
   getVtPanViewerDiagnostics,
-  setVtDebugStage,
-  getVtDebugStage,
   setVtPanViewerFloor,
   setVtPanViewerDisplayLayer,
   runZoomThrashTest,
@@ -216,42 +214,6 @@ function install() {
     generatedAt: new Date().toISOString(),
     ...getVtPanViewerDiagnostics(),
   }));
-  // THE IN-GRAPH BISECT (see vt-sample.tsl.js#debugStage). ONE control, because the
-  // stage change and the restart are ONE action: materials are built per item at
-  // startup, so a stage that did not restart would do nothing at all. Persisted, so
-  // a browser refresh keeps it -- refresh-and-look is the actual workflow.
-  //
-  // Work DOWN the list: the first stage that DRAWS puts the bug below it; the first
-  // that stays BLACK puts the bug at that step.
-  MapShine.debug.registerSelect(
-    'vt-bisect',
-    'Shader bisect',
-    [
-      { value: '', label: 'off — the real shader' },
-      { value: 'solid', label: 'solid red — no graph at all' },
-      { value: 'uv', label: 'uv — the attribute as colour' },
-      { value: 'atlas', label: 'atlas — direct, layer 0, no page table' },
-      { value: 'indirection', label: 'page table — texels as a pattern' },
-      { value: 'walk', label: 'walk — the mip walk, alpha forced' },
-      { value: 'walk-alpha', label: 'walk+alpha — the walk with its real alpha' },
-      { value: 'guard', label: 'guard — red=off-map, green=on-map' },
-      { value: 'mip-hi', label: 'mip-hi — the mip the cross-fade blends toward' },
-      { value: 'no-guard', label: 'cross-fade — without the guard' },
-      { value: 'sample', label: 'sample — the full sampler' },
-      { value: 'sample-opaque', label: 'sample — full sampler, alpha forced' },
-      { value: 'no-occlusion', label: 'no-occlusion — the real chain minus occlusion' },
-      { value: 'occ-const', label: 'occ-const — occlusion maths, mask texture NOT bound' },
-      { value: 'occ-value', label: 'occ-value — red=occluded, green=not, black=no draw' },
-      { value: 'occ-one', label: 'occ-one — the chain, occlusion factor forced to 1' },
-      { value: 'occ-factor', label: 'occ-factor — the mix() result (green=1 good, red=0 bad)' },
-    ],
-    () => getVtDebugStage() ?? '',
-    async (value) => {
-      setVtDebugStage(value);
-      return MapShine.debug.runReport('vt-pan-viewer-start-real-scene');
-    }
-  );
-
   MapShine.debug.registerReport('vt-pan-viewer-stop', 'Stop / clear', () => ({
     report: 'vt-pan-viewer-stop',
     generatedAt: new Date().toISOString(),

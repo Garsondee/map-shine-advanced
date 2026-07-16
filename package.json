@@ -19,7 +19,8 @@
     "preset:insight": "node scripts/tools/preset-insight.mjs",
     "audit:controls": "node scripts/tools/audit-control-wiring.mjs",
     "knip": "knip",
-    "knip:files": "knip --include files"
+    "knip:files": "knip --include files",
+    "build:three-webgpu": "node tools/build-three-webgpu.mjs"
   },
   "dependencies": {
     "three": "0.185.1"

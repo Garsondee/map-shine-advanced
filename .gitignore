@@ -12,3 +12,6 @@ othermodules
 
 # Keyhole torture fixture — regenerable via `node tools/make-torture-world.mjs`
 assets/torture/
+
+# TSL spike build output — regenerate with: npm run build:three-webgpu
+src/vendor/three/.webgpu-entry.js

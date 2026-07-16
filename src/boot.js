@@ -493,6 +493,14 @@ function install() {
     }
   }
 
+  // THE TSL SPIKE (docs/planning/Shaders.md §7.5). Loads the node build LAZILY —
+  // a 2.8MB vendor bundle must not be on the boot path for a decision we have not
+  // taken. Touches nothing that works; renders into its own offscreen canvas.
+  MapShine.debug.registerReport('tsl-spike', 'TSL Spike: can TSL run our sampler? (both backends)', async () => {
+    const { runTslSpike } = await import('./diag/tsl-spike.js');
+    return runTslSpike();
+  });
+
   MapShine.debug.registerReport('loading-screen-state', 'Loading Screen: State + Last Load', () => ({
     report: 'loading-screen-state',
     generatedAt: new Date().toISOString(),

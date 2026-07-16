@@ -240,6 +240,8 @@ function install() {
       { value: 'sample', label: 'sample — the full sampler' },
       { value: 'sample-opaque', label: 'sample — full sampler, alpha forced' },
       { value: 'no-occlusion', label: 'no-occlusion — the real chain minus occlusion' },
+      { value: 'occ-const', label: 'occ-const — occlusion maths, mask texture NOT bound' },
+      { value: 'occ-value', label: 'occ-value — occ as greyscale (white = occluded)' },
     ],
     () => getVtDebugStage() ?? '',
     async (value) => {

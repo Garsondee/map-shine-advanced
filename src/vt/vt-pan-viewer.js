@@ -767,53 +767,62 @@ export async function startVtPanViewer({
       material.depthWrite = false;
       material.side = THREE.DoubleSide; // see this function's doc — negative scaleX flips winding
 
-      // THE BISECT — see setVtDebugSolidColor. A constant that bypasses the ENTIRE
-      // node graph: sampler, tint, alpha, occlusion. If this does not appear, the
-      // graph was never the problem.
-      // 'no-occlusion' is the ONLY stage that lives here rather than in the sampler:
-      // it is the real chain minus the occlusion block, so it isolates the occlusion
-      // maths (whose mask is still an inert 1x1 placeholder, and whose maskUV is fed
-      // world coordinates) from tint and alpha.
+      // THE OCCLUSION CHAIN, factored out so a debug stage can feed it a CONSTANT
+      // mask instead of the texture. That is the whole experiment: the diagnostics
+      // print occlusionWeights [0,0,0,0], occlusionElevation 1, unoccludedAlpha 1,
+      // occludedAlpha 0 -- with those numbers this block provably multiplies alpha by
+      // exactly 1 and does nothing. Yet removing it un-blacks the screen. So it was
+      // never the arithmetic, and the only non-arithmetic thing here is the TEXTURE
+      // BINDING itself.
+      //
+      // @param {any} maskSample - vec4 node: the mask's four elevation indices.
+      const occlusionAlphaFactor = (maskSample) => {
+        // Foundry's algorithm (occlusion.mjs:16): each channel holds an ELEVATION
+        // INDEX (R=Fade G=Radial B=Vision A=Surface), and a channel says "occlude me"
+        // where the occluder recorded there sits BELOW my own elevation.
+        const occluded = float(1).sub(THREE.TSL.step(uOcclusionElevation, maskSample));
+        const amounts = occluded.mul(uOcclusionWeights);
+        const occ = amounts.x.max(amounts.y).max(amounts.z).max(amounts.w);
+        return { occ, factor: uUnoccludedAlpha.mix(uOccludedAlpha, occ) };
+      };
+      // The placeholder's own clear value, as a compile-time constant: Foundry's
+      // `CanvasOcclusionMask#clearColor = [0,1,1,1]` == "nothing occludes anything".
+      const MASK_CLEAR = () => THREE.TSL.vec4(0, 1, 1, 1);
+      const maskUV = () => positionGeometry.xy; // placeholder space; real screen UV lands with the producer
+      const sampleMask = () => THREE.TSL.texture(occlusionMask.texture, maskUV());
+
+      const realChain = (maskSample, { skipOcclusion = false } = {}) =>
+        Fn(() => {
+          const c = vt.sample(uv()).toVar();
+          c.rgb.mulAssign(uTint);
+          c.a.mulAssign(uAlpha);
+          if (!skipOcclusion) c.a.mulAssign(occlusionAlphaFactor(maskSample()).factor);
+          return c;
+        })();
+
       const debugNode =
         debugStageName === 'solid'
-          ? THREE.TSL.vec4(1, 0, 0, 1)
+          ? THREE.TSL.vec4(1, 0, 0, 1) // bypasses the ENTIRE graph
           : debugStageName === 'no-occlusion'
-            ? Fn(() => {
-                const c = vt.sample(uv()).toVar();
-                c.rgb.mulAssign(uTint);
-                c.a.mulAssign(uAlpha);
-                return c;
-              })()
-            : debugStageName
-              ? vt.debugStage(debugStageName, uv())
-              : null;
-      material.colorNode = debugNode
-        ? debugNode
-        : Fn(() => {
-            const c = vt.sample(uv()).toVar();
-            c.rgb.mulAssign(uTint);
-            c.a.mulAssign(uAlpha);
+            ? realChain(null, { skipOcclusion: true })
+            : debugStageName === 'occ-const'
+              ? // THE DECISIVE ONE: identical occlusion maths, but the mask texture read
+                // is replaced by the exact constant it returns. Draws => the arithmetic
+                // is innocent and merely BINDING the mask texture kills the draw. Black
+                // => the arithmetic is guilty after all, despite the printed uniforms.
+                realChain(MASK_CLEAR)
+              : debugStageName === 'occ-value'
+                ? // `occ` itself as greyscale, with the real texture. White = the shader
+                  // computes "fully occluded" from weights the diagnostics say are 0.
+                  Fn(() => {
+                    const { occ } = occlusionAlphaFactor(sampleMask());
+                    return THREE.TSL.vec4(occ, occ, occ, 1);
+                  })()
+                : debugStageName
+                  ? vt.debugStage(debugStageName, uv())
+                  : null;
 
-            // OCCLUSION — Foundry's algorithm (occlusion.mjs:16). The mask's four
-            // channels each hold an ELEVATION INDEX (R=Fade G=Radial B=Vision
-            // A=Surface); a channel says "occlude me" where the occluder recorded
-            // there sits BELOW my own elevation. Currently inert: the mask PRODUCER
-            // is not built, so the placeholder reads "nothing occludes anything" and
-            // every weight is 0 (scene/occlusion.js has the ported model).
-            const maskUV = positionGeometry.xy; // placeholder space; real screen UV lands with the producer
-            const occluded = float(1).sub(
-              THREE.TSL.step(uOcclusionElevation, THREE.TSL.texture(occlusionMask.texture, maskUV))
-            );
-            const amounts = occluded.mul(uOcclusionWeights);
-            const occ = amounts.x.max(amounts.y).max(amounts.z).max(amounts.w);
-            // Only ALPHA is scaled: Foundry multiplies the whole fragColor because
-            // PIXI is premultiplied; Three's default blending is not.
-            c.a.mulAssign(uUnoccludedAlpha.mix(uOccludedAlpha, occ));
-            return c;
-          })();
-
-      state.vt = vt;
-      state.appearance = { uTint, uAlpha, uOcclusionElevation, uOcclusionWeights, uUnoccludedAlpha, uOccludedAlpha };
+      material.colorNode = debugNode ?? realChain(sampleMask);
 
       const mesh = new THREE.Mesh(geometry, material);
       mesh.frustumCulled = false; // we cull explicitly against worldBounds; Three's sphere test is redundant here

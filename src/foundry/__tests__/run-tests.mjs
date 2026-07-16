@@ -11,6 +11,7 @@ import { run as runActiveSceneSource } from './active-scene-source.test.mjs';
 import { run as runPixiProxyTextures } from './pixi-proxy-textures.test.mjs';
 import { run as runSceneGeometry } from './scene-geometry.test.mjs';
 import { run as runSceneLayers } from './scene-layers.test.mjs';
+import { run as runSceneTokens } from './scene-tokens.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -50,6 +51,7 @@ const suites = [
   ['pixi-proxy-textures', runPixiProxyTextures],
   ['scene-geometry', runSceneGeometry],
   ['scene-layers', runSceneLayers],
+  ['scene-tokens', runSceneTokens],
 ];
 
 for (const [name, fn] of suites) {

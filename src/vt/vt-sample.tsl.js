@@ -29,11 +29,13 @@
  * - **Texel index from world PIXELS / a fixed payload**, never `worldUV *
  *   pagesPerAxis`. The nominal grid is `ceil()`-rounded and does NOT equal the real
  *   world size — confirmed live.
- * - **`.level(0)` on the atlas fetch** (the GLSL's `textureLod(...,0.0)`). Page
- *   slots are arbitrary bookkeeping, so neighbouring screen pixels land on
- *   unrelated atlas locations at page boundaries; derivative LOD reads those jumps
- *   as "zoomed out" and picks an atlas mip that was never rebuilt as pages
- *   streamed in. Level 0 makes that impossible rather than merely configured-against.
+ * - **NOT `.level(0)`** — the one GLSL behaviour deliberately dropped, because it
+ *   cost the entire render (black + transparent, no error). The GLSL's
+ *   `textureLod(...,0.0)` guarded against derivative LOD picking a coarser atlas
+ *   mip; `atlas.js` already makes that impossible (`generateMipmaps:false` +
+ *   `LinearFilter`), so the guard was redundant, and on WebGPU it samples an
+ *   explicit level of a texture declared with no mip levels → (0,0,0,0). See
+ *   `sampleAtlasSlot`.
  * - **One walk function, called twice** (once per bracket mip) — never forked.
  * - **No mid-loop return.** Weak drivers mis-optimise them, and weak drivers are
  *   this project's design floor. The `Loop` keeps the accumulate-then-guard shape.
@@ -121,9 +123,21 @@ export function createVtSampler(
       .mul(float(pageSizePx))
       .add(float(borderPx))
       .add(cellUV.mul(float(payloadPx)));
-    return texture(atlasTexture, pagePx.div(float(atlasSizePx)))
-      .depth(layer)
-      .level(0); // level(0): see header
+    // NO .level(0) HERE — and its absence is deliberate, not an omission.
+    //
+    // The GLSL used textureLod(...,0.0) as belt-and-braces against derivative-based
+    // LOD picking a coarser atlas mip that was never rebuilt as pages streamed in.
+    // But atlas.js ALREADY makes that impossible (generateMipmaps:false +
+    // LinearFilter, atlas.js:169-171 — its own comment calls the textureLod "the
+    // belt to that suspenders"). The atlas has exactly ONE level, so automatic LOD
+    // cannot select a coarser one: there isn't one.
+    //
+    // Keeping the belt cost the whole render. `.level(0)` on an array texture emits
+    // a sample-at-explicit-level against a texture the WebGPU backend declares with
+    // no mip levels, and it returned (0,0,0,0) — a black, fully transparent screen
+    // with no error anywhere (found live 2026-07-16; it was the ONE thing this
+    // differed by from the TSL spike that rendered a correct pixel).
+    return texture(atlasTexture, pagePx.div(float(atlasSizePx))).depth(layer);
   });
 
   /**

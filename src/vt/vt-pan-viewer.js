@@ -810,7 +810,7 @@ export async function startVtPanViewer({
         out.pixelVerdict = !c
           ? 'readback returned nothing — the instrument failed, NOT evidence about the renderer'
           : c[3] === 0
-            ? 'TRANSPARENT — the shader ran but produced alpha 0. Suspect the alpha chain (uAlpha / the occlusion mix), not the sampler.'
+            ? 'TRANSPARENT at CENTRE — alpha 0 where the scene art should be. NOTE: topLeft/bottomRight are ALSO expected to be 0 (they sit in the scene padding, outside every quad), so judge on CENTRE alone. Alpha here comes straight from the atlas sample, so suspect the atlas fetch itself before the alpha chain.'
             : c[0] === 0 && c[1] === 0 && c[2] === 0
               ? 'OPAQUE BLACK — the sampler returned vec4(0,0,0,1). That is EXACTLY the out-of-world early-out, so suspect worldSizePx/uv rather than the atlas.'
               : c[0] > 200 && c[2] > 200 && c[1] < 60

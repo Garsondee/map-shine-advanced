@@ -1199,9 +1199,16 @@ export async function startVtPanViewer({
      *   Hooks.callAll("canvasPan", this, constrained);
      *
      * `scale` is screen-px per world-px, so half the viewport in WORLD px is
-     * (canvasWidth / 2) / scale — which is exactly what halfSpanPx means here.
-     * Scale is uniform in Foundry, so the horizontal span defines the view and
-     * the vertical follows from the aspect, as it already does for MSA's own.
+     * (viewportPx / 2) / scale. The axis matters and cost a live round-trip:
+     * **halfSpanPx is the half-VERTICAL span**, not the horizontal one --
+     * viewToWorldRect derives `halfX = halfSpanPx * aspect` from it and says so in
+     * its own doc, which I did not read. Computing it from canvasW over-spanned by
+     * the aspect ratio (2239/1271 ≈ 1.76x), so MSA rendered ~1.76x more zoomed out
+     * than Foundry believed. Everything downstream inherited that: a token dropped
+     * at the top-right landed short and toward the centre, because Foundry mapped
+     * the click with ITS scale and MSA drew the result with a wider view. Foundry's
+     * hit boxes were right the whole time; the picture the author was aiming at was
+     * the thing that lied.
      *
      * @returns {boolean} did the view actually change?
      */
@@ -1216,7 +1223,7 @@ export async function startVtPanViewer({
       const cy = stage.pivot?.y;
       if (!Number.isFinite(cx) || !Number.isFinite(cy)) return false;
 
-      const halfSpan = canvasW / 2 / scale;
+      const halfSpan = canvasH / 2 / scale; // VERTICAL — see above; canvasW here was the bug
       const changed = view.centerXPx !== cx || view.centerYPx !== cy || view.halfSpanPx !== halfSpan;
       view.centerXPx = cx;
       view.centerYPx = cy;

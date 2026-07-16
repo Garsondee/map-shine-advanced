@@ -1877,6 +1877,28 @@ export async function startVtPanViewer({
             zIndex: i.key.zIndex,
             visible: itemStates.get(i.id)?.mesh?.visible ?? false,
             occlusionModes: i.occlusion?.modes ?? 0,
+            // THE ACTUAL UNIFORM VALUES the shader is running on, read straight off
+            // the JS side -- exact, and involving no shader at all. The bisect proved
+            // occlusion blacks out the map; reading the shader says it cannot (weights
+            // are 0 for a level, and 0 multiplies everything to 0). One of those is
+            // wrong, and printing the numbers settles it without a seventh theory.
+            //
+            // NaN is the thing to look for: in IEEE, NaN * 0 is NaN, not 0 -- so a
+            // single NaN weight would defeat the "weights are zero so it is inert"
+            // reasoning entirely and drive alpha to NaN.
+            uniforms: (() => {
+              const a = itemStates.get(i.id)?.appearance;
+              if (!a) return null;
+              return {
+                occlusionWeights: a.uOcclusionWeights.value.toArray(),
+                occlusionElevation: a.uOcclusionElevation.value,
+                alpha: a.uAlpha.value,
+                unoccludedAlpha: a.uUnoccludedAlpha.value,
+                occludedAlpha: a.uOccludedAlpha.value,
+                tint: a.uTint.value.toArray(),
+                srgbDecode: itemStates.get(i.id)?.vt?.uniforms.srgbDecode.value ?? null,
+              };
+            })(),
           })),
           itemsLoaded: itemStates.size,
           world,

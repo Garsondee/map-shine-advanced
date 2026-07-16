@@ -40,6 +40,7 @@ import {
   stopVtPanViewer,
   getVtPanViewerDiagnostics,
   readVtPanViewerPixels,
+  setVtDebugSolidColor,
   setVtPanViewerFloor,
   setVtPanViewerDisplayLayer,
   runZoomThrashTest,
@@ -215,6 +216,27 @@ function install() {
     generatedAt: new Date().toISOString(),
     ...getVtPanViewerDiagnostics(),
   }));
+  MapShine.debug.registerReport(
+    'vt-debug-solid-on',
+    'VT DEBUG: solid RED instead of the shader (then Force Restart)',
+    () => ({
+      report: 'vt-debug-solid-on',
+      generatedAt: new Date().toISOString(),
+      ...setVtDebugSolidColor(true),
+      why:
+        'THE BISECT. The sampler cannot produce alpha 0 — every path returns alpha 1 (a real texel, the magenta ' +
+        'tripwire, or the out-of-world guard). Yet centre reads alpha 0. So either nothing is drawing at all, or ' +
+        'something after the sampler zeroes it. A constant answers that in one click: RED = the geometry/camera/' +
+        'material pipeline is fine and the bug is inside the node graph. STILL BLACK = nothing draws, and the ' +
+        'shader was never the problem.',
+    })
+  );
+  MapShine.debug.registerReport('vt-debug-solid-off', 'VT DEBUG: back to the real shader (then Force Restart)', () => ({
+    report: 'vt-debug-solid-off',
+    generatedAt: new Date().toISOString(),
+    ...setVtDebugSolidColor(false),
+  }));
+
   MapShine.debug.registerReport('vt-pixels', 'VT: What colour is ACTUALLY on screen? (ground truth)', async () => ({
     report: 'vt-pixels',
     generatedAt: new Date().toISOString(),

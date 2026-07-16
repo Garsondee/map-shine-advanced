@@ -168,6 +168,37 @@ function measureHost(host) {
 
 let _active = null;
 
+/**
+ * THE BISECT (2026-07-16). Three guesses into a black screen, stop guessing.
+ *
+ * My sampler CANNOT return alpha 0: every path yields alpha 1 — a real texel, the
+ * magenta tripwire, or the out-of-world guard's opaque black. Yet the readback says
+ * alpha 0 at centre. So exactly one of these is true, and they need opposite fixes:
+ *
+ *   A. the fragment shader NEVER RUNS (geometry / camera / material never draws)
+ *      and we are reading the render target's transparent clear, or
+ *   B. it runs and something AFTER the sampler zeroes the alpha.
+ *
+ * A hardcoded constant separates them in one click: if solid red appears, the
+ * geometry+camera+material pipeline is fine and the bug is inside my node graph
+ * (case B). If it stays black, nothing is drawing and the graph is innocent
+ * (case A) — and I have been debugging the wrong file entirely.
+ */
+let debugSolidColor = false;
+
+/**
+ * Swap every item's shader for a solid colour. Requires a restart to take effect
+ * (materials are built once per item).
+ * @param {boolean} on
+ */
+export function setVtDebugSolidColor(on) {
+  debugSolidColor = !!on;
+  return {
+    debugSolidColor,
+    next: 'now click "VT Pan Viewer: Force Restart (ACTIVE SCENE)" — materials are built once per item, so this only applies to newly-built ones.',
+  };
+}
+
 function disposeActive() {
   if (!_active) return;
   // { capture: true } MUST match the addEventListener call exactly — the two
@@ -706,28 +737,33 @@ export async function startVtPanViewer({
       material.depthWrite = false;
       material.side = THREE.DoubleSide; // see this function's doc — negative scaleX flips winding
 
-      material.colorNode = Fn(() => {
-        const c = vt.sample(uv()).toVar();
-        c.rgb.mulAssign(uTint);
-        c.a.mulAssign(uAlpha);
+      // THE BISECT — see setVtDebugSolidColor. A constant that bypasses the ENTIRE
+      // node graph: sampler, tint, alpha, occlusion. If this does not appear, the
+      // graph was never the problem.
+      material.colorNode = debugSolidColor
+        ? THREE.TSL.vec4(1, 0, 0, 1)
+        : Fn(() => {
+            const c = vt.sample(uv()).toVar();
+            c.rgb.mulAssign(uTint);
+            c.a.mulAssign(uAlpha);
 
-        // OCCLUSION — Foundry's algorithm (occlusion.mjs:16). The mask's four
-        // channels each hold an ELEVATION INDEX (R=Fade G=Radial B=Vision
-        // A=Surface); a channel says "occlude me" where the occluder recorded
-        // there sits BELOW my own elevation. Currently inert: the mask PRODUCER
-        // is not built, so the placeholder reads "nothing occludes anything" and
-        // every weight is 0 (scene/occlusion.js has the ported model).
-        const maskUV = positionGeometry.xy; // placeholder space; real screen UV lands with the producer
-        const occluded = float(1).sub(
-          THREE.TSL.step(uOcclusionElevation, THREE.TSL.texture(occlusionMask.texture, maskUV))
-        );
-        const amounts = occluded.mul(uOcclusionWeights);
-        const occ = amounts.x.max(amounts.y).max(amounts.z).max(amounts.w);
-        // Only ALPHA is scaled: Foundry multiplies the whole fragColor because
-        // PIXI is premultiplied; Three's default blending is not.
-        c.a.mulAssign(uUnoccludedAlpha.mix(uOccludedAlpha, occ));
-        return c;
-      })();
+            // OCCLUSION — Foundry's algorithm (occlusion.mjs:16). The mask's four
+            // channels each hold an ELEVATION INDEX (R=Fade G=Radial B=Vision
+            // A=Surface); a channel says "occlude me" where the occluder recorded
+            // there sits BELOW my own elevation. Currently inert: the mask PRODUCER
+            // is not built, so the placeholder reads "nothing occludes anything" and
+            // every weight is 0 (scene/occlusion.js has the ported model).
+            const maskUV = positionGeometry.xy; // placeholder space; real screen UV lands with the producer
+            const occluded = float(1).sub(
+              THREE.TSL.step(uOcclusionElevation, THREE.TSL.texture(occlusionMask.texture, maskUV))
+            );
+            const amounts = occluded.mul(uOcclusionWeights);
+            const occ = amounts.x.max(amounts.y).max(amounts.z).max(amounts.w);
+            // Only ALPHA is scaled: Foundry multiplies the whole fragColor because
+            // PIXI is premultiplied; Three's default blending is not.
+            c.a.mulAssign(uUnoccludedAlpha.mix(uOccludedAlpha, occ));
+            return c;
+          })();
 
       state.vt = vt;
       state.appearance = { uTint, uAlpha, uOcclusionElevation, uOcclusionWeights, uUnoccludedAlpha, uOccludedAlpha };

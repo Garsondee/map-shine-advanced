@@ -47,6 +47,13 @@
  * @module diag/render-fallback
  */
 
+/**
+ * How long the fallback banner stays on screen. Long enough to read and register
+ * without hunting for it; short enough that it does not become permanent furniture
+ * over the map. The failure itself is still reported by getRenderMode() and the
+ * diagnostics forever — only the pixels expire.
+ */
+const NOTICE_LINGER_MS = 20_000;
 const NOTICE_ID = 'msa-render-fallback-notice';
 
 /** @type {{active: boolean, reason: string|null, detail: string|null, at: string|null}} */
@@ -91,7 +98,7 @@ export function engageFoundryFallback({ reason, detail, canvas }) {
   state.at = new Date().toISOString();
   console.error(`[msa] renderer unavailable — falling back to Foundry's own rendering: ${reason}`, detail ?? '');
 
-  // 2. Say so, permanently and unmissably, without being able to interfere.
+  // 2. Say so unmissably, without being able to interfere.
   try {
     document.getElementById(NOTICE_ID)?.remove();
     const el = document.createElement('div');
@@ -112,15 +119,21 @@ export function engageFoundryFallback({ reason, detail, canvas }) {
     });
     el.textContent = `⚠ Map Shine Advanced is NOT rendering — Foundry's own renderer is drawing this scene. ${reason}`;
     resolveHost().appendChild(el);
+    // AUTO-DISMISS. It used to persist forever, which the author called out: the
+    // message has done its job once it has been read, and a banner nailed across the
+    // top of the screen for the rest of the session stops being information and
+    // becomes clutter obscuring the map. The state survives in getRenderMode()/the
+    // diagnostics either way, so nothing is lost by the pixels going away.
+    setTimeout(() => el.remove(), NOTICE_LINGER_MS);
   } catch (_) {
     // A missing notice must not also cost the player their session.
   }
 
-  // 3. The notification draws the eye; the banner is what persists.
+  // 3. The notification draws the eye; the banner carries the detail. NOT permanent:
+  // Foundry's own notification would otherwise sit in the log until dismissed by hand.
   try {
     globalThis.ui?.notifications?.error?.(
-      `Map Shine Advanced could not start its renderer and has fallen back to Foundry's own rendering. ${reason}`,
-      { permanent: true }
+      `Map Shine Advanced could not start its renderer and has fallen back to Foundry's own rendering. ${reason}`
     );
   } catch (_) {}
 

@@ -824,6 +824,14 @@ export async function startVtPanViewer({
 
       material.colorNode = debugNode ?? realChain(sampleMask);
 
+      // Stash the live uniform handles on the item state: bindMeshToPack writes
+      // through these every update, and getDiagnostics reads them back. Losing these
+      // two lines is what threw "Cannot read properties of undefined (reading
+      // 'uniforms')" and tripped the fallback (2026-07-16) -- a factoring edit ate
+      // them along with the code they sat next to.
+      state.vt = vt;
+      state.appearance = { uTint, uAlpha, uOcclusionElevation, uOcclusionWeights, uUnoccludedAlpha, uOccludedAlpha };
+
       const mesh = new THREE.Mesh(geometry, material);
       mesh.frustumCulled = false; // we cull explicitly against worldBounds; Three's sphere test is redundant here
       mesh.visible = false;

@@ -13,18 +13,41 @@
 /** @typedef {{ centerXPx:number, centerYPx:number, halfSpanPx:number, floorIndex:number }} ViewState */
 
 /**
+ * @typedef {{width:number, height:number}} WorldSize - the world's extent in
+ *   world px. RECTANGULAR since 2026-07-16: this used to be a single
+ *   `worldSizePx`, which silently assumed a square world. World space is now
+ *   Foundry's canvas space (`foundry/scene-geometry.js#computeSceneDimensions`),
+ *   and that is rectangular in essentially every real scene — `Scene#padding`
+ *   defaults to 0.25 and the default scene is 4000x3000, so a square world is
+ *   the exception rather than the rule.
+ */
+
+/** Clamp a world X coordinate into the world's bounds. @param {number} v @param {WorldSize} world */
+function clampX(v, world) {
+  return Math.max(0, Math.min(world.width, v));
+}
+
+/** Clamp a world Y coordinate into the world's bounds. @param {number} v @param {WorldSize} world */
+function clampY(v, world) {
+  return Math.max(0, Math.min(world.height, v));
+}
+
+/**
  * @param {object} opts
- * @param {number} opts.worldSizePx
+ * @param {WorldSize} opts.world
  * @param {number} [opts.floorIndex]
- * @param {number} [opts.halfSpanPx] - half the world-space width/height framed
- *   on screen (default: a few pages' worth — matches the smoke test's proven 3x3 framing).
+ * @param {number} [opts.halfSpanPx] - half the world-space HEIGHT framed on
+ *   screen (the vertical half-span; X widens by the canvas aspect — see
+ *   viewToWorldRect).
  * @returns {ViewState}
  */
-export function createInitialViewState({ worldSizePx, floorIndex = 0, halfSpanPx }) {
+export function createInitialViewState({ world, floorIndex = 0, halfSpanPx }) {
   return {
-    centerXPx: worldSizePx / 2,
-    centerYPx: worldSizePx / 2,
-    halfSpanPx: halfSpanPx ?? worldSizePx * 0.03, // ~3% of the world framed initially
+    centerXPx: world.width / 2,
+    centerYPx: world.height / 2,
+    // ~3% of the LARGER axis framed initially, so the default framing is a
+    // comparable fraction of the map whatever its shape.
+    halfSpanPx: halfSpanPx ?? Math.max(world.width, world.height) * 0.03,
     floorIndex,
   };
 }
@@ -43,18 +66,17 @@ const PAN_KEYS = {
 /**
  * @param {ViewState} view
  * @param {string} key - a KeyboardEvent.key value.
- * @param {number} worldSizePx - clamps pan so the view center can't leave the world.
+ * @param {WorldSize} world - clamps pan so the view center can't leave the world.
  * @returns {ViewState} a NEW state (never mutates the input).
  */
-export function applyPanKey(view, key, worldSizePx) {
+export function applyPanKey(view, key, world) {
   const dir = PAN_KEYS[key];
   if (!dir) return view;
   const step = view.halfSpanPx * 0.5; // half a screenful per keypress — responsive, not jumpy
-  const clamp = (v) => Math.max(0, Math.min(worldSizePx, v));
   return {
     ...view,
-    centerXPx: clamp(view.centerXPx + dir[0] * step),
-    centerYPx: clamp(view.centerYPx + dir[1] * step),
+    centerXPx: clampX(view.centerXPx + dir[0] * step, world),
+    centerYPx: clampY(view.centerYPx + dir[1] * step, world),
   };
 }
 
@@ -81,17 +103,16 @@ const MAX_HALF_SPAN_ZOOM_OUT_FACTOR = 0.5; // never zoom out past half the world
  * @param {number} dxPixels - cursor movement since last event, screen px (right +).
  * @param {number} dyPixels - cursor movement since last event, screen px (down +).
  * @param {number} canvasHeightPx - the drawing-buffer height the view fills.
- * @param {number} worldSizePx - clamps the center to the world bounds.
+ * @param {WorldSize} world - clamps the center to the world bounds.
  * @returns {ViewState} a NEW state (never mutates the input).
  */
-export function applyPanByPixels(view, dxPixels, dyPixels, canvasHeightPx, worldSizePx) {
+export function applyPanByPixels(view, dxPixels, dyPixels, canvasHeightPx, world) {
   if (dxPixels === 0 && dyPixels === 0) return view;
   const worldPerPixel = (2 * view.halfSpanPx) / canvasHeightPx;
-  const clamp = (v) => Math.max(0, Math.min(worldSizePx, v));
   return {
     ...view,
-    centerXPx: clamp(view.centerXPx - dxPixels * worldPerPixel),
-    centerYPx: clamp(view.centerYPx - dyPixels * worldPerPixel),
+    centerXPx: clampX(view.centerXPx - dxPixels * worldPerPixel, world),
+    centerYPx: clampY(view.centerYPx - dyPixels * worldPerPixel, world),
   };
 }
 
@@ -107,29 +128,29 @@ export function applyPanByPixels(view, dxPixels, dyPixels, canvasHeightPx, world
  * @param {number} sy - cursor Y in canvas pixels (0 = top edge).
  * @param {number} canvasWidthPx
  * @param {number} canvasHeightPx
- * @param {number} worldSizePx
+ * @param {WorldSize} world
  * @returns {ViewState} a NEW state (never mutates the input).
  */
-export function applyZoomAtPixel(view, factor, sx, sy, canvasWidthPx, canvasHeightPx, worldSizePx) {
+export function applyZoomAtPixel(view, factor, sx, sy, canvasWidthPx, canvasHeightPx, world) {
   const aspect = canvasWidthPx / canvasHeightPx;
   const rect = viewToWorldRect(view, aspect);
   // World point currently under the cursor (this is what must stay put).
   const wx = rect.minX + (sx / canvasWidthPx) * (rect.maxX - rect.minX);
   const wy = rect.minY + (sy / canvasHeightPx) * (rect.maxY - rect.minY);
 
-  const maxHalfSpan = worldSizePx * MAX_HALF_SPAN_ZOOM_OUT_FACTOR;
-  const halfSpanPx = Math.max(MIN_HALF_SPAN_PX, Math.min(maxHalfSpan, view.halfSpanPx * factor));
+  // Routed through clampHalfSpan so the keyboard, wheel and eased-zoom paths
+  // share ONE clamp rather than three copies that can drift apart.
+  const halfSpanPx = clampHalfSpan(view.halfSpanPx * factor, world);
   if (halfSpanPx === view.halfSpanPx) return view; // already at a clamp — nothing moves
 
   // Re-solve the center so (wx,wy) lands back under (sx,sy) at the new zoom.
   const halfX = halfSpanPx * aspect;
   const halfY = halfSpanPx;
-  const clamp = (v) => Math.max(0, Math.min(worldSizePx, v));
   return {
     ...view,
     halfSpanPx,
-    centerXPx: clamp(wx - (sx / canvasWidthPx - 0.5) * 2 * halfX),
-    centerYPx: clamp(wy - (sy / canvasHeightPx - 0.5) * 2 * halfY),
+    centerXPx: clampX(wx - (sx / canvasWidthPx - 0.5) * 2 * halfX, world),
+    centerYPx: clampY(wy - (sy / canvasHeightPx - 0.5) * 2 * halfY, world),
   };
 }
 
@@ -241,14 +262,13 @@ export function easeVelocityTowardTarget(current, target, dtSec, rampHalfLifeSec
  * reference) at zero velocity so a caller can skip downstream reframe/
  * residency work when nothing actually moved.
  * @param {ViewState} view @param {{x:number,y:number}} velocity
- * @param {number} dtSec @param {number} worldSizePx
+ * @param {number} dtSec @param {WorldSize} world
  * @returns {ViewState}
  */
-export function integratePan(view, velocity, dtSec, worldSizePx) {
+export function integratePan(view, velocity, dtSec, world) {
   if (velocity.x === 0 && velocity.y === 0) return view;
-  const clamp = (v) => Math.max(0, Math.min(worldSizePx, v));
-  const centerXPx = clamp(view.centerXPx + velocity.x * dtSec);
-  const centerYPx = clamp(view.centerYPx + velocity.y * dtSec);
+  const centerXPx = clampX(view.centerXPx + velocity.x * dtSec, world);
+  const centerYPx = clampY(view.centerYPx + velocity.y * dtSec, world);
   if (centerXPx === view.centerXPx && centerYPx === view.centerYPx) return view; // fully clamped at an edge — no-op
   return { ...view, centerXPx, centerYPx };
 }
@@ -277,23 +297,26 @@ export function easedZoomFactor(currentHalfSpanPx, targetHalfSpanPx, dtSec, half
  * The min/max half-span clamp, extracted so both the discrete keyboard/wheel
  * path AND the eased-zoom-target path (2026-07-16, camera smoothing) apply
  * the EXACT same limits — one law, not two copies that could drift apart.
- * @param {number} halfSpanPx @param {number} worldSizePx @returns {number}
+ * `maxHalfSpan` keys off the LARGER world axis, not one dimension: the point of
+ * the zoom-out clamp is "you can always frame the whole map", and on an oblong
+ * world the smaller axis would stop you well short of seeing the longer one.
+ * @param {number} halfSpanPx @param {WorldSize} world @returns {number}
  */
-export function clampHalfSpan(halfSpanPx, worldSizePx) {
-  const maxHalfSpan = worldSizePx * MAX_HALF_SPAN_ZOOM_OUT_FACTOR;
+export function clampHalfSpan(halfSpanPx, world) {
+  const maxHalfSpan = Math.max(world.width, world.height) * MAX_HALF_SPAN_ZOOM_OUT_FACTOR;
   return Math.max(MIN_HALF_SPAN_PX, Math.min(maxHalfSpan, halfSpanPx));
 }
 
 /**
- * @param {ViewState} view @param {string} key @param {number} worldSizePx
+ * @param {ViewState} view @param {string} key @param {WorldSize} world
  * @returns {ViewState}
  */
-export function applyZoomKey(view, key, worldSizePx) {
+export function applyZoomKey(view, key, world) {
   let factor = null;
   if (key === '+' || key === '=' || key === 'PageUp') factor = 0.8; // zoom in
   if (key === '-' || key === '_' || key === 'PageDown') factor = 1.25; // zoom out
   if (factor === null) return view;
-  const halfSpanPx = clampHalfSpan(view.halfSpanPx * factor, worldSizePx);
+  const halfSpanPx = clampHalfSpan(view.halfSpanPx * factor, world);
   return { ...view, halfSpanPx };
 }
 
@@ -313,13 +336,13 @@ export function applyFloorSwitchKey(view, key, floorCount) {
  * floor-switch, returning the first one that actually changed something (or
  * the original view, unchanged, if the key means nothing to this system).
  * @param {ViewState} view @param {string} key
- * @param {{worldSizePx:number, floorCount:number}} ctx
+ * @param {{world:WorldSize, floorCount:number}} ctx
  * @returns {ViewState}
  */
 export function applyKey(view, key, ctx) {
-  const afterPan = applyPanKey(view, key, ctx.worldSizePx);
+  const afterPan = applyPanKey(view, key, ctx.world);
   if (afterPan !== view) return afterPan;
-  const afterZoom = applyZoomKey(view, key, ctx.worldSizePx);
+  const afterZoom = applyZoomKey(view, key, ctx.world);
   if (afterZoom !== view) return afterZoom;
   return applyFloorSwitchKey(view, key, ctx.floorCount);
 }

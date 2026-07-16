@@ -76,6 +76,19 @@ import {
 } from './view-state.js';
 import { planResidency, coarsePinSet, coarseTopMipsForCap, diffResidency } from './residency.js';
 import { stopVtSmokeTest } from './vt-smoke-test.js'; // the two share screen space; starting one stops the other
+import { sortByLayer } from '../scene/layer-order.js';
+import {
+  computeCameraFrustum,
+  buildQuadPositions,
+  QUAD_UVS,
+  QUAD_INDICES,
+  viewRectToImageRect,
+  computeItemViewportPx,
+  rectsOverlap,
+} from '../scene/world-quad.js';
+import { computeQuadCorners, computeQuadBounds } from '../foundry/scene-geometry.js';
+import { computeItemPlacement } from '../foundry/scene-layers.js';
+import { OCCLUSION_MODES, computeOcclusionState, createHoverFadeState, mapElevation } from '../scene/occlusion.js';
 
 /** Wall-clock budget per GPU-upload chunk before yielding a real frame — see
  * requestDecodeUpload's Pass 3 for the live-hitch evidence this fixes. */
@@ -136,21 +149,22 @@ function disposeActive() {
   try {
     _active.atlas.dispose();
   } catch (_) {}
-  for (const layer of _active.layers.values()) {
+  for (const state of _active.itemStates.values()) {
     try {
-      layer.material.dispose();
+      state.material?.dispose();
     } catch (_) {}
     try {
-      layer.geometry.dispose();
+      state.geometry?.dispose();
     } catch (_) {}
-  }
-  for (const entry of _active.floors.values()) {
-    for (const pack of entry.packs.values()) {
+    for (const pack of state.packs.values()) {
       try {
         pack.indirectionTexture.dispose();
       } catch (_) {}
     }
   }
+  try {
+    _active.occlusionMask.texture.dispose();
+  } catch (_) {}
   try {
     _active.canvas.remove();
   } catch (_) {}
@@ -214,26 +228,32 @@ export function stopVtPanViewer() {
  */
 export async function startVtPanViewer({
   THREE,
-  imageUrlForFloor,
+  buildItems,
+  dimensions,
   floorCount,
-  visibleFloorIndices,
   initialFloorIndex = 0,
-  extraLayerUrlsForFloor,
+  extraLayersForItem,
+  getOcclusionInputs,
 }) {
-  visibleFloorIndices ??= (i) => [i];
-  extraLayerUrlsForFloor ??= () => [];
+  extraLayersForItem ??= () => [];
+  getOcclusionInputs ??= () => ({ occluders: [], visionActive: false });
   // Captured for runZoomThrashTest's "blank slate" restart (2026-07-16) —
   // the SAME fully-resolved params this call itself used, so a later restart
   // reproduces an identical fresh viewer without the caller needing to
   // remember/re-supply them.
   const startupParams = {
     THREE,
-    imageUrlForFloor,
+    buildItems,
+    dimensions,
     floorCount,
-    visibleFloorIndices,
     initialFloorIndex,
-    extraLayerUrlsForFloor,
+    extraLayersForItem,
+    getOcclusionInputs,
   };
+  // World space IS Foundry canvas space (foundry/scene-geometry.js) — the padded
+  // rect, +Y down. RECTANGULAR: `Scene#padding` defaults to 0.25 and the default
+  // scene is 4000x3000, so a square world is the exception, not the rule.
+  const world = { width: dimensions.width, height: dimensions.height };
   disposeActive();
   stopVtSmokeTest(); // avoid two renderers fighting over the same corner of the screen
 
@@ -280,7 +300,40 @@ export async function startVtPanViewer({
     renderer.setSize(canvasW, canvasH, false);
 
     const atlas = new PageAtlas({ THREE, layout, renderer });
-    const floors = new Map(); // floorIndex -> floor entry (see ensureFloorLoaded)
+
+    // THE OCCLUSION MASK — currently an INERT 1x1 placeholder, deliberately.
+    //
+    // scene/occlusion.js has the full model ported and Node-tested, and the
+    // shader in ensureItemMesh() implements Foundry's algorithm for real. What
+    // is NOT built yet is the mask PRODUCER: rendering each occludable token's
+    // vision polygon and radial disc into a screen-space RGBA target with MIN
+    // blending, every time perception changes.
+    //
+    // The clear value is Foundry's own (`CanvasOcclusionMask#clearColor =
+    // [0,1,1,1]`), which is exactly "nothing occludes anything":
+    //   R = 0 -> Fade says "occlude everywhere", but the per-object fade WEIGHT
+    //            is what gates it, and that stays 0 with no occluding token.
+    //   G/B/A = 1 -> above every possible elevation index, so step() -> not occluded.
+    // So every item renders unoccluded until the producer exists, and turning it
+    // on is purely additive: build the producer, point this uniform at its
+    // render texture, and feed real weights in updateResidency().
+    const occlusionMask = (() => {
+      const data = new Uint8Array([0, 255, 255, 255]);
+      const texture = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat);
+      texture.needsUpdate = true;
+      texture.minFilter = THREE.NearestFilter;
+      texture.magFilter = THREE.NearestFilter;
+      texture.generateMipmaps = false;
+      return { texture, visionActive: false, elevationTable: [-Infinity] };
+    })();
+    // itemId -> item state (see ensureItemLoaded). ONE entry per DRAWABLE, not
+    // per floor: a floor's background, its foreground (roof) art and every tile
+    // are all just items, each with its own virtual texture, each placed in
+    // world space by its own quad. That is what lets a roof and a rug sit at
+    // different elevations on the same floor — the thing a per-floor model
+    // structurally cannot express.
+    const itemStates = new Map();
+    const itemLoadErrors = [];
     let loopActive = false; // tracks whether the render loop is running (batch uploads pause/restore it)
 
     /**
@@ -307,7 +360,7 @@ export async function startVtPanViewer({
      * touching a single line of atlas/cache/table code: a packed page is just
      * another 256² RGBA page as far as everything downstream is concerned).
      */
-    async function buildPack(floorIndex, name, source, { coarsePinMaxPages } = {}) {
+    async function buildPack(ownerId, name, source, { coarsePinMaxPages } = {}) {
       const isPacked = !!source.channelUrls;
       // Read dimensions WITHOUT holding a full 576 MB bitmap (getSourceDimensions
       // parses the PNG header) — the pack keeps only the URL(s); pages are
@@ -325,7 +378,7 @@ export async function startVtPanViewer({
       // square scene art is the exception, so most real scenes could not render
       // at all, and tiles — essentially never square — were blocked outright).
       const table = new PageTable({
-        id: `panviewer:floor${floorIndex}:${name}`,
+        id: `panviewer:${ownerId}:${name}`,
         worldWidthPx: srcWidth,
         worldHeightPx: srcHeight,
       });
@@ -368,7 +421,7 @@ export async function startVtPanViewer({
         // synthetic IndexedDB identity for a packed pack's COMPOSITED result
         // (distinct from any individual channel source URL).
         source: isPacked
-          ? { kind: 'packed', channelUrls: source.channelUrls, packId: `packed://floor${floorIndex}/${name}` }
+          ? { kind: 'packed', channelUrls: source.channelUrls, packId: `packed://${ownerId}/${name}` }
           : { kind: 'single', url: source.url },
         indirectionTexture,
         buf,
@@ -396,11 +449,26 @@ export async function startVtPanViewer({
     // camera actually looks.
     const MASK_COARSE_PIN_MAX_PAGES = 24;
 
-    async function ensureFloorLoaded(floorIndex) {
-      if (floors.has(floorIndex)) return floors.get(floorIndex);
+    /**
+     * Load ONE drawable: its albedo virtual texture, any extra layer-packs
+     * (masks) that ride along with it, and its world placement.
+     *
+     * The placement is what makes this different from the old per-floor loader:
+     * an item is NOT the whole world any more. `computeItemPlacement` resolves
+     * where this specific image lands in canvas space (a Level's art centred on
+     * the padded `sceneRect`; a tile at its own x/y/rotation/anchor), and that
+     * needs the texture's NATIVE size — which is why it happens here, after
+     * buildPack has read the header, rather than in the pure collection step.
+     */
+    async function ensureItemLoaded(item) {
+      const existing = itemStates.get(item.id);
+      if (existing) {
+        existing.item = item; // refresh (renderOrder/key change per update)
+        return existing;
+      }
 
       const packs = new Map();
-      const albedoPack = await buildPack(floorIndex, 'albedo', { url: imageUrlForFloor(floorIndex) });
+      const albedoPack = await buildPack(item.id, 'albedo', { url: item.src });
       packs.set('albedo', albedoPack);
 
       // Per-pack load failures are collected here AND surfaced in diagnostics
@@ -410,7 +478,7 @@ export async function startVtPanViewer({
       // 404 / not synced to the server) looks identical to "masks unsupported"
       // in the residency report; this makes the actual reason legible there.
       const layerErrors = [];
-      for (const layerDesc of extraLayerUrlsForFloor(floorIndex)) {
+      for (const layerDesc of extraLayersForItem(item)) {
         const { name } = layerDesc;
         // CHANNEL-PACKING: a layer descriptor is either { name, url } (single
         // source — the normal case) or { name, channelUrls: {r,g,b} } (packed
@@ -420,120 +488,233 @@ export async function startVtPanViewer({
           ? `r:${layerDesc.channelUrls.r} g:${layerDesc.channelUrls.g} b:${layerDesc.channelUrls.b}`
           : layerDesc.url;
         if (packs.has(name)) {
-          console.warn(`[vt-pan-viewer] floor ${floorIndex}: duplicate layer name "${name}" ignored.`);
+          console.warn(`[vt-pan-viewer] ${item.id}: duplicate layer name "${name}" ignored.`);
           continue;
         }
         try {
-          packs.set(name, await buildPack(floorIndex, name, source, { coarsePinMaxPages: MASK_COARSE_PIN_MAX_PAGES }));
+          packs.set(name, await buildPack(item.id, name, source, { coarsePinMaxPages: MASK_COARSE_PIN_MAX_PAGES }));
         } catch (err) {
-          // A missing/broken mask must not take the whole floor (or albedo)
+          // A missing/broken mask must not take the whole item (or its albedo)
           // down — record it and carry on with the packs that did load. A
           // single absent mask is a data gap, not an architecture failure.
           const message = String(err?.message || err);
-          layerErrors.push({ layer: name, url: errorUrl, error: message });
-          console.error(`[vt-pan-viewer] floor ${floorIndex}: layer "${name}" failed to load (${errorUrl}):`, err);
+          layerErrors.push({ item: item.id, layer: name, url: errorUrl, error: message });
+          console.error(`[vt-pan-viewer] ${item.id}: layer "${name}" failed to load (${errorUrl}):`, err);
         }
       }
 
-      const entry = { packs, albedoPack, layerErrors };
-      floors.set(floorIndex, entry);
-      return entry;
+      const imageSize = { width: albedoPack.table.worldWidthPx, height: albedoPack.table.worldHeightPx };
+      const state = {
+        item,
+        packs,
+        albedoPack,
+        layerErrors,
+        imageSize,
+        placement: null,
+        placementKey: null,
+        worldBounds: null,
+        geometry: null,
+        material: null,
+        mesh: null,
+        hoverFade: createHoverFadeState(),
+        occluded: false,
+      };
+      refreshItemPlacement(state, item);
+      itemStates.set(item.id, state);
+      return state;
+    }
+
+    /**
+     * (Re)resolve an item's world placement, rebuilding its quad only when the
+     * placement actually changed.
+     *
+     * Recomputed every residency pass rather than cached at load, so a tile the
+     * GM drags, rotates or resizes follows its document instead of freezing
+     * where it first appeared. The `placementKey` compare keeps that cheap: the
+     * common case is "nothing moved", which costs one string build and no GPU work.
+     */
+    function refreshItemPlacement(state, item) {
+      const placement = computeItemPlacement(item, state.imageSize, dimensions);
+      const key = `${placement.x},${placement.y},${placement.width},${placement.height},${placement.anchorX},${placement.anchorY},${placement.rotation}`;
+      if (key === state.placementKey) return false;
+      state.placement = placement;
+      state.placementKey = key;
+      state.worldBounds = computeQuadBounds(placement);
+      if (state.geometry) {
+        const pos = state.geometry.getAttribute('position');
+        const corners = computeQuadCorners(placement);
+        const buf = buildQuadPositions(corners);
+        for (let i = 0; i < buf.length; i++) pos.array[i] = buf[i];
+        pos.needsUpdate = true;
+        state.geometry.computeBoundingSphere();
+      }
+      return true;
     }
 
     const scene = new THREE.Scene();
-    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1); // matches fullscreen-present.js's convention
-    const layers = new Map(); // floorIndex -> {geometry, material, mesh, baseUV} — one persistent layer per LOADED floor
+
+    // THE WORLD-SPACE CAMERA. Frustum values are set per frame by updateCamera()
+    // from the live view rect; the placeholder args just construct it.
+    //
+    // This replaces the old fullscreen-quad-with-remapped-UVs model, in which
+    // the quad WAS the screen and its UV WAS the world position. That only
+    // worked because those two spaces were conflated, which stops being true the
+    // moment anything has to sit at a specific spot in a padded canvas.
+    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
 
     /**
-     * Create (once) the quad+shader layer for one floor. IDENTICAL shader
-     * pattern to the proven smoke test (same vertex shader, same uniform
-     * names, same v-flip in the UV remap) — see that file's comments for why
-     * each piece is shaped the way it is. `transparent:true` +
-     * `depthTest/depthWrite:false` + explicit `renderOrder` (set to
-     * `floorIndex` in updateResidency — ascending == elevation-ascending,
-     * since getActiveSceneFloors already sorts that way) is what makes
-     * multi-floor compositing work: a real ALPHA HOLE in an upper floor's art
-     * (resident atlas texel with a<1) now correctly blends against whatever a
-     * LOWER floor's already-painted layer put there, instead of the single
-     * fully-opaque quad this viewer used before — which is exactly the "black
-     * where a hole should reveal the floor below" bug reported live 2026-07-15.
-     * Added to `scene` immediately with `visible:false`; updateResidency()
-     * toggles visibility per-floor every update rather than repeatedly
-     * creating/destroying layers.
+     * Point the camera at the current view rect.
+     *
+     * THE Y-FLIP LIVES HERE AND NOWHERE ELSE (scene/world-quad.js explains why,
+     * and Node-tests the orientation chain end to end): computeCameraFrustum
+     * returns `top = minY`, INVERTED from the usual Y-up convention, so Three
+     * maps the smallest world Y to NDC +1 = the top of the screen. That is what
+     * lets every quad use raw Foundry coordinates with no conversion.
+     *
+     * Called every frame from renderFrame(), so a mouse drag tracks the cursor
+     * at display rate without waiting on any streaming work — the job
+     * reframeVisibleLayers() used to do by rewriting UVs, now done by moving the
+     * camera, which is both cheaper and impossible to compound (the exact bug
+     * class the deleted reframe path produced live on 2026-07-15).
      */
-    function ensureLayer(floorIndex) {
-      let layer = layers.get(floorIndex);
-      if (layer) return layer;
+    function updateCamera() {
+      if (!view) return;
+      const rect = viewToWorldRect(view, canvasW / canvasH);
+      const f = computeCameraFrustum(rect);
+      camera.left = f.left;
+      camera.right = f.right;
+      camera.top = f.top;
+      camera.bottom = f.bottom;
+      camera.updateProjectionMatrix();
+    }
 
-      const geometry = new THREE.PlaneGeometry(2, 2);
+    /**
+     * Create (once) the world-space quad + shader for ONE draw item.
+     *
+     * Geometry is the item's four REAL world corners (computeQuadCorners →
+     * buildQuadPositions), with static 0..1 UVs — no per-frame UV rewriting.
+     *
+     * `side: DoubleSide` is load-bearing, not defensive: Foundry flips a tile
+     * horizontally with a NEGATIVE texture.scaleX (see scene-geometry.js
+     * #computeTextureFit, which deliberately preserves the sign), and a mirrored
+     * quad has reversed winding. Back-face culling would make every flipped tile
+     * silently vanish.
+     *
+     * `transparent:true` + `depthTest/depthWrite:false` + explicit `renderOrder`
+     * (from sortByLayer — THE law, scene/layer-order.js) is what makes the whole
+     * composite work: a real ALPHA HOLE in an upper floor's art blends against
+     * whatever a lower floor already painted, and a roof paints over the tokens
+     * beneath it purely because its elevation sorts later.
+     */
+    function ensureItemMesh(state) {
+      if (state.mesh) return state;
+
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute(
+        'position',
+        new THREE.BufferAttribute(buildQuadPositions(computeQuadCorners(state.placement)), 3)
+      );
+      geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
+      geometry.setIndex(Array.from(QUAD_INDICES));
+
       const material = new THREE.ShaderMaterial({
         transparent: true,
         depthTest: false,
         depthWrite: false,
+        side: THREE.DoubleSide, // see this function's doc — negative scaleX flips winding
         uniforms: {
           uPageAtlas: { value: atlas.texture },
-          uPageTable: { value: null }, // set per-floor in updateResidency()
+          uPageTable: { value: null }, // set per-item in bindMeshToPack()
           uPagesPerAxis: { value: layout.pagesPerAxis },
           uPagesPerLayer: { value: layout.pagesPerLayer },
           uPageSizePx: { value: layout.pageSizePx },
           uBorderPx: { value: 4 },
           uAtlasSizePx: { value: layout.atlasSizePx },
-          uWorldSizePx: { value: new THREE.Vector2(1, 1) }, // set per-floor in updateResidency(); vec2 (rectangular)
+          uWorldSizePx: { value: new THREE.Vector2(1, 1) }, // this pack's image size; vec2 (rectangular)
           // Multi-mip: the finest mip to TRY (analytic, per view) + the coarsest,
           // and the flattened-pyramid per-mip layout the shader walks. uMipOrigin
           // is a flat Int32Array (ivec2[VT_MAX_MIPS] == 2 ints/level) — THREE
-          // uploads it via gl.uniform2iv directly; uMipPagesPerAxis via uniform1iv.
+          // uploads it via gl.uniform2iv directly.
           uRequestedMip: { value: 0 },
-          uRequestedMipFrac: { value: 0 }, // smooth mip blending (residency.chooseMipFraction) — see vt-sample.glsl.js
+          uRequestedMipFrac: { value: 0 }, // smooth mip blending (residency.chooseMipFraction)
           uMaxMip: { value: 0 },
           uMipOrigin: { value: new Int32Array(VT_MAX_MIPS * 2) },
           uMipPagesPerAxis: { value: new Int32Array(VT_MAX_MIPS * 2) }, // ivec2[] (rectangular)
+          // Per-item appearance (Foundry document data).
+          uTint: { value: new THREE.Vector3(1, 1, 1) },
+          uAlpha: { value: 1 },
+          // OCCLUSION (scene/occlusion.js has the model + the citations).
+          uOcclusionMask: { value: occlusionMask.texture },
+          uOcclusionElevation: { value: 0 },
+          uOcclusionWeights: { value: new THREE.Vector4(0, 0, 0, 0) }, // fade, radial, vision, surface
+          uUnoccludedAlpha: { value: 1 },
+          uOccludedAlpha: { value: 0 },
         },
         vertexShader: /* glsl */ `
           varying vec2 vUv;
+          varying vec2 vScreenCoord;
           void main() {
             vUv = uv;
-            gl_Position = vec4(position.xy, 0.0, 1.0);
+            // Real world-space geometry through a real camera now — NOT the old
+            // pass-position-straight-to-gl_Position fullscreen trick.
+            vec4 clip = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            gl_Position = clip;
+            // The occlusion mask is a SCREEN-space texture, so sample it in
+            // screen space. Ortho projection means w == 1, but the divide is kept
+            // for correctness rather than relying on that.
+            vScreenCoord = (clip.xy / clip.w) * 0.5 + 0.5;
           }
         `,
         fragmentShader: /* glsl */ `
           precision highp float;
           precision highp sampler2DArray;
           varying vec2 vUv;
+          varying vec2 vScreenCoord;
+          uniform vec3 uTint;
+          uniform float uAlpha;
+          uniform sampler2D uOcclusionMask;
+          uniform float uOcclusionElevation;
+          uniform vec4 uOcclusionWeights;
+          uniform float uUnoccludedAlpha;
+          uniform float uOccludedAlpha;
           ${VT_SAMPLE_GLSL}
           void main() {
-            gl_FragColor = vtSample(vUv);
+            vec4 c = vtSample(vUv);
+            c.rgb *= uTint;
+            c.a *= uAlpha;
+
+            // OCCLUSION — Foundry's own algorithm (occlusion.mjs:16), verbatim in
+            // shape. The mask's four channels each hold an ELEVATION INDEX
+            // (R=Fade G=Radial B=Vision A=Surface); a channel says "occlude me"
+            // where the occluder recorded there sits BELOW my own elevation.
+            // step(edge,x) is 0 when x < edge, so 1-step is exactly that test.
+            vec4 occluded = 1.0 - step(vec4(uOcclusionElevation), texture2D(uOcclusionMask, vScreenCoord));
+            vec4 amounts = occluded * uOcclusionWeights;
+            float occ = max(max(amounts.x, amounts.y), max(amounts.z, amounts.w));
+            // Foundry multiplies the WHOLE fragColor because PIXI is
+            // premultiplied-alpha; Three's default blending is not, so only
+            // alpha is scaled here. Same visual result, correct for this blend.
+            c.a *= mix(uUnoccludedAlpha, uOccludedAlpha, occ);
+
+            gl_FragColor = c;
           }
         `,
       });
+
       const mesh = new THREE.Mesh(geometry, material);
+      mesh.frustumCulled = false; // we cull explicitly against worldBounds; Three's sphere test is redundant here
       mesh.visible = false;
       scene.add(mesh);
 
-      // Captured ONCE per layer, before any reframe — the TRUE base UV
-      // (PlaneGeometry's original 0/1 corners), never touched again. THE
-      // ACTUAL BUG (found live 2026-07-15, after resetState()/
-      // preserveDrawingBuffer turned out to be real but insufficient fixes):
-      // reframeQuad() used to read the geometry's CURRENT (already-remapped)
-      // uv attribute as its "base" and remap THAT — so every call compounded
-      // onto the PREVIOUS call's already-narrow range instead of the fixed
-      // original span. Two calls (initial load, then one pan) was enough to
-      // collapse the whole quad's UV range by ~17x toward a single point —
-      // exactly matching the symptom: correct on first load, solid-color
-      // after the very first pan, regardless of direction.
-      const uvAttr = geometry.getAttribute('uv');
-      const baseUV = [];
-      for (let i = 0; i < uvAttr.count; i++) baseUV.push([uvAttr.getX(i), uvAttr.getY(i)]);
-
-      layer = { geometry, material, mesh, baseUV };
-      layers.set(floorIndex, layer);
-      return layer;
+      state.geometry = geometry;
+      state.material = material;
+      state.mesh = mesh;
+      return state;
     }
 
-    let view = null; // set once the first floor is loaded (needs its worldSizePx)
+    let view = null; // set once the first item is loaded
     const frameTimes = [];
     let lastError = null;
-    let lastFramedUV = null; // set by reframeLayer(), exposed in diagnostics for ground-truth debugging
 
     // --- HITCH INSTRUMENTATION (2026-07-16, author-reported: rapid full-range
     // zoom can "temporarily stop" — the fix for the confirmed no-yield-points
@@ -589,7 +770,6 @@ export async function startVtPanViewer({
           distinctSlotsSample: Array.from(distinctSlots).slice(0, 10),
         };
       }
-      out.framedWorldUV = lastFramedUV;
       return out;
     }
 
@@ -624,22 +804,13 @@ export async function startVtPanViewer({
       // (needed as-is for the Stage 1 gate's "60fps" evidence).
       updateContinuousInputs(now);
       const t0 = performance.now();
+      // Re-derive the camera from the live view EVERY frame: this is what makes
+      // a drag track the cursor at display rate without waiting on streaming,
+      // and it is the single place the Y-flip is applied (see updateCamera).
+      updateCamera();
       renderer.render(scene, camera);
       frameTimes.push(performance.now() - t0);
       if (frameTimes.length > 120) frameTimes.shift();
-    }
-
-    function reframeLayer(layer, uvMin, uvMax) {
-      const uvAttr = layer.geometry.getAttribute('uv');
-      for (let i = 0; i < uvAttr.count; i++) {
-        const [u, v] = layer.baseUV[i]; // ALWAYS the true original corner, never the live buffer
-        // Same v-flip as the smoke test (live-verified 2026-07-15): v=1 (local
-        // +Y, NDC top) must map to the SMALLER world-Y (the top of the source
-        // image), so uvMax - v*(uvMax-uvMin), never uvMin + v*(...).
-        uvAttr.setXY(i, uvMin.x + u * (uvMax.x - uvMin.x), uvMax.y - v * (uvMax.y - uvMin.y));
-      }
-      uvAttr.needsUpdate = true;
-      lastFramedUV = { uvMin, uvMax };
     }
 
     /**
@@ -753,10 +924,6 @@ export async function startVtPanViewer({
       pack.buf[i + 3] = 255;
     }
 
-    let lastVisibleFloors = new Set(); // floor indices composited after the PREVIOUS update
-    let lastCompositedFloors = []; // exposed in diagnostics — see getDiagnostics()
-    let worldSizeMismatchWarned = false; // one console.warn per distinct mismatch, not one per frame
-
     // Which layer-pack is DISPLAYED (albedo by default). Every pack STREAMS
     // regardless — this only changes which one is bound to the shader, so a mask
     // can be eyeballed against the fixture's known patterns for correctness.
@@ -773,14 +940,45 @@ export async function startVtPanViewer({
      * share worldSizePx (see buildPack's note), so the same rect plans every
      * pack correctly.
      */
-    async function streamPackResidency(pack, worldRect) {
+    /**
+     * Plan + stream ONE pack's view residency, then rebuild its indirection
+     * buffer fresh from the cache's own slot mapping.
+     *
+     * THE CHANGE THAT MATTERS: residency is planned in this pack's OWN IMAGE
+     * space, not in world space. Those used to be the same thing (a floor's art
+     * WAS the world), and they are not any more — a tile's texture covers a
+     * small patch of canvas, and a Level's art is inset inside the padded rect.
+     * `viewRectToImageRect` does the conversion (exactly inverting the item's
+     * placement, so it stays correct for a rotated tile).
+     *
+     * `computeItemViewportPx` supplies the mip selector's screen extent. Passing
+     * the canvas size here — the obvious-looking thing — would tell the planner
+     * that a 1024px tile drawn 100px wide needs mip 0, i.e. every small tile
+     * streams its full resolution: O(tiles) instead of O(screen), which is the
+     * exact cost model this whole architecture exists to destroy.
+     */
+    async function streamPackResidency(pack, state, worldRect) {
+      const imageSize = { width: pack.table.worldWidthPx, height: pack.table.worldHeightPx };
+      const imageRect = viewRectToImageRect(worldRect, state.placement, imageSize);
+      if (!imageRect) {
+        // The view doesn't touch this item at all — release its view tier and
+        // leave it on coarse pins (which are never evicted, so it stays instantly
+        // available, soft, if the camera comes back).
+        for (const key of pack.residentViewKeys) cache.unpin(key);
+        pack.residentViewKeys = new Set();
+        return;
+      }
+
+      const quadWorldSize = {
+        width: state.worldBounds.maxX - state.worldBounds.minX,
+        height: state.worldBounds.maxY - state.worldBounds.minY,
+      };
+      const viewportPx = computeItemViewportPx(worldRect, { width: canvasW, height: canvasH }, quadWorldSize);
+
       // Analytic mip selection (§4.1 — top-down camera, no GPU feedback): the
-      // finest mip that resolves for this zoom, plus BOTH neighbor mips as a
-      // prefetch — coarser (zoom-out insurance) AND finer (zoom-in insurance,
-      // 2026-07-16, the fix for a real reported hitch — see planResidency's
-      // own doc for the full mechanism). Larger canvas axis → conservative
-      // (sharper) choice.
-      const plan = planResidency(pack.table, worldRect, Math.max(canvasW, canvasH), { guardPages: 1 });
+      // finest mip that resolves at this size, plus BOTH neighbour mips as a
+      // prefetch — coarser (zoom-out insurance) AND finer (zoom-in insurance).
+      const plan = planResidency(pack.table, imageRect, viewportPx, { guardPages: 1 });
       pack.lastRequestedMip = plan.mip;
       pack.lastRequestedMipFraction = plan.mipFraction; // drives the shader's smooth mip blend
 
@@ -788,30 +986,18 @@ export async function startVtPanViewer({
       // by this pack's permanent coarse pins (never downgrade a 'coarse' pin
       // to 'view').
       const neededViewPages = [...plan.fine, ...plan.prefetchCoarser, ...plan.prefetchFiner].filter(
-        (p) => !pack.coarseKeySet.has(p.key)
+        (pg) => !pack.coarseKeySet.has(pg.key)
       );
       const diff = diffResidency(pack.residentViewKeys, neededViewPages);
 
       await requestDecodeUpload(pack, diff.toRequest, 'view');
       for (const key of diff.toUnpin) cache.unpin(key);
-      // GROUND TRUTH, not intent (same disease as the coarse-pin diagnostic
-      // bug fixed 2026-07-16, found by comparing THIS field's own summed total
-      // against cacheStats.pinnedView in a live report — a real, if quieter,
-      // discrepancy). `diff.nextKeys` is every page WE ASKED FOR; under
-      // pressure, `cache.request()` inside requestDecodeUpload can genuinely
-      // miss (cache full, nothing evictable) — a normal, expected outcome
-      // (coarse fallback covers it, see the indirection-write note below).
-      // The bug was tracking the ASK, not the OUTCOME: a page whose request
-      // missed still got recorded as "resident" in `residentViewKeys` — so on
-      // every LATER residency update, `diffResidency` saw it as "already
-      // handled" (present in prevKeys) and never re-added it to `toRequest`.
-      // That page then stays permanently stuck on its coarse-fallback blur —
-      // even once pressure relieves and a slot becomes free — for as long as
-      // the camera keeps needing it without ever panning away (panning away
-      // and back would coincidentally self-heal it, which is why this hid).
-      // Fix: only keep keys that are ACTUALLY resident right now, so a missed
-      // page stays eligible for a retry on every subsequent update — cheap
-      // (a miss is O(1), no decode happens) and self-correcting.
+      // GROUND TRUTH, not intent (the "stuck view-miss" bug, 2026-07-16): a page
+      // whose request MISSED (cache full, nothing evictable — a normal outcome
+      // under pressure) must stay eligible for retry, so only keys that are
+      // ACTUALLY resident are recorded. Tracking the ASK instead left a missed
+      // page permanently stuck on its coarse-fallback blur even after pressure
+      // relieved, self-healing only if you happened to pan away and back.
       pack.residentViewKeys = new Set([...diff.nextKeys].filter((key) => cache.isResident(key)));
 
       // Rebuild the indirection buffer FRESH from the cache's own current slot
@@ -826,138 +1012,138 @@ export async function startVtPanViewer({
       pack.indirectionTexture.needsUpdate = true;
     }
 
-    /** Point the display layer's shader uniforms at a specific pack (albedo or a mask). */
-    function bindLayerToPack(layer, pack) {
-      const u = layer.material.uniforms;
+    /**
+     * Point one item's shader at a specific pack (its albedo, or a mask when the
+     * display layer is switched for visual verification), and push its per-item
+     * appearance + occlusion uniforms.
+     */
+    function bindMeshToPack(state, pack) {
+      const u = state.material.uniforms;
       if (u.uPageTable.value !== pack.indirectionTexture) {
         // Bind: fresh array references (per pack) guarantee THREE re-uploads
         // them; within a pack they're constant.
         u.uPageTable.value = pack.indirectionTexture;
-        u.uWorldSizePx.value = new THREE.Vector2(pack.table.worldWidthPx, pack.table.worldHeightPx);
+        u.uWorldSizePx.value.set(pack.table.worldWidthPx, pack.table.worldHeightPx);
         u.uMaxMip.value = pack.table.maxMip;
         u.uMipOrigin.value = pack.mipOriginArr;
         u.uMipPagesPerAxis.value = pack.mipPagesArr;
       }
       u.uRequestedMip.value = pack.lastRequestedMip; // re-read every update (mip changes with zoom)
-      u.uRequestedMipFrac.value = pack.lastRequestedMipFraction; // smooth mip blend companion (see vt-sample.glsl.js)
+      u.uRequestedMipFrac.value = pack.lastRequestedMipFraction;
+
+      const item = state.item;
+      const tint = item.tint ?? 0xffffff;
+      u.uTint.value.set(((tint >> 16) & 0xff) / 255, ((tint >> 8) & 0xff) / 255, (tint & 0xff) / 255);
+      u.uAlpha.value = item.alpha ?? 1;
+
+      // OCCLUSION weights (scene/occlusion.js — the model, with citations).
+      // `occluded` stays false until the mask producer exists to identify which
+      // items a token is actually standing under; the weights below are still
+      // computed from real document data, so wiring the producer in is additive.
+      const modes = item.occlusion?.modes ?? OCCLUSION_MODES.NONE;
+      const st = computeOcclusionState({
+        occlusionMode: modes,
+        occluded: state.occluded,
+        visionActive: occlusionMask.visionActive,
+        hoverFadeAmount: state.hoverFade.occlusion,
+      });
+      u.uOcclusionWeights.value.set(st.fade, st.radial, st.vision, st.surface);
+      u.uOcclusionElevation.value = mapElevation(occlusionMask.elevationTable, item.key.elevation);
+      u.uUnoccludedAlpha.value = 1;
+      u.uOccludedAlpha.value = item.occlusion?.alpha ?? 0;
     }
 
-    async function updateResidency() {
-      const visibleIndices = visibleFloorIndices(view.floorIndex);
-      const visibleSet = new Set(visibleIndices);
+    let lastItems = []; // exposed in diagnostics — the current sorted draw list
 
-      // Floors that dropped OUT of the composited set (not just "no longer
-      // the current one" — a floor can stay composited across a switch if
-      // it's visible-from BOTH the old and new viewed floor): unpin EVERY
-      // pack's VIEW pages (never coarse pins — those stay resident for every
-      // floor always, §4.1/§4.5) and hide their layer. Unpin never evicts
-      // directly — PageCache's LRU decides that under real pressure — so a
-      // quick switch-and-back is free.
-      for (const idx of lastVisibleFloors) {
-        if (visibleSet.has(idx)) continue;
-        const prevEntry = floors.get(idx);
-        if (prevEntry) {
-          for (const pack of prevEntry.packs.values()) {
+    /**
+     * THE FRAME'S WORK: resolve the draw list, stream what it needs, order it.
+     *
+     * Item-based, not floor-based. A floor's background, its foreground (roof)
+     * art and every tile on it are peers here — each with its own virtual
+     * texture and its own world quad — which is precisely what lets a roof sit
+     * ABOVE the tokens on its floor and BELOW the floor above it. A per-floor
+     * model has nowhere to put that.
+     */
+    async function updateResidency() {
+      // sortByLayer stamps `renderOrder` on each item — THE law
+      // (scene/layer-order.js). Rebuilt every update because the draw list
+      // itself changes with the viewed floor.
+      const items = sortByLayer(buildItems(view.floorIndex));
+      const wantedIds = new Set(items.map((i) => i.id));
+
+      // Items that dropped OUT of the draw list: release their VIEW pages (never
+      // their coarse pins — those stay resident always, §4.1/§4.5) and hide the
+      // mesh. Unpin never evicts directly — PageCache's LRU decides that under
+      // real pressure — so a quick switch-and-back is free.
+      for (const [id, state] of itemStates) {
+        if (wantedIds.has(id)) continue;
+        for (const pack of state.packs.values()) {
+          for (const key of pack.residentViewKeys) cache.unpin(key);
+          pack.residentViewKeys = new Set();
+        }
+        if (state.mesh) state.mesh.visible = false;
+      }
+
+      const worldRect = viewToWorldRect(view, canvasW / canvasH);
+
+      // PHASE 1 — lock in EVERY item's COARSE pins before ANY item's view-tier
+      // streaming (real live bug, 2026-07-16: whole-screen MAGENTA under the
+      // castle-courtyard test). PageCache protects 'coarse' and 'view' pins
+      // identically, so an earlier item's large view-tier request could saturate
+      // the cache before a later item's small coarse-pin request even ran — and a
+      // coarse-pin request that finds nothing evictable simply FAILS, for pages
+      // whose entire job is to GUARANTEE something is always resident. Front-
+      // loading every coarse pin makes that structurally impossible.
+      const states = [];
+      for (const item of items) {
+        try {
+          states.push([item, await ensureItemLoaded(item)]);
+        } catch (err) {
+          // One broken item (404 art, undecodable file) must not take the scene
+          // down. Recorded rather than thrown — the debug panel surfaces this,
+          // since the author debugs by pasting reports, not reading the console.
+          const message = String(err?.message || err);
+          if (!itemLoadErrors.some((e) => e.id === item.id)) {
+            itemLoadErrors.push({ id: item.id, src: item.src, error: message });
+            console.error(`[vt-pan-viewer] item "${item.id}" failed to load (${item.src}):`, err);
+          }
+        }
+      }
+
+      // PHASE 2 — view-tier streaming + mesh update, now that every coarse pin
+      // is locked in and can't be starved.
+      for (const [item, state] of states) {
+        refreshItemPlacement(state, item); // follow document moves/rotations/resizes
+        const onScreen = rectsOverlap(state.worldBounds, worldRect);
+
+        // Stream EVERY pack — albedo AND every mask — through the ONE shared
+        // cache. This is the mask-pile-up proof: all of an item's layers are
+        // resident at once, yet each costs only its visible pages, never a
+        // world-resolution texture.
+        for (const pack of state.packs.values()) {
+          if (onScreen) {
+            await streamPackResidency(pack, state, worldRect);
+          } else {
             for (const key of pack.residentViewKeys) cache.unpin(key);
             pack.residentViewKeys = new Set();
           }
         }
-        const prevLayer = layers.get(idx);
-        if (prevLayer) prevLayer.mesh.visible = false;
-      }
-      lastVisibleFloors = visibleSet;
-      lastCompositedFloors = visibleIndices;
 
-      // Aspect-correct framing: the canvas fills the (non-square) scene area,
-      // so the world rect must match the canvas aspect or the map stretches
-      // (view-state.js's aspect param). halfSpanPx is the vertical zoom;
-      // horizontal widens by width/height. Shared across every composited
-      // floor — they all represent the same on-screen view.
-      const aspect = canvasW / canvasH;
-      const worldRect = viewToWorldRect(view, aspect);
-
-      let refWorldSizePx = null;
-
-      // PHASE 1 — lock in every composited floor's COARSE pins FIRST, before
-      // ANY floor's view-tier streaming begins (real live bug, 2026-07-16: the
-      // whole screen went magenta under the castle-courtyard test — 3 floors ×
-      // 8 packs composited at once). Root cause: the old single-pass loop did
-      // coarse-load THEN view-stream PER FLOOR, in visibleIndices order. Since
-      // PageCache treats 'coarse' and 'view' pins identically for eviction
-      // (page-cache.js:_findLRUEvictable — neither is ever evicted), an EARLIER
-      // floor's much-larger view-tier request (~1270 pages) could fill the
-      // cache before a LATER floor's coarse-pin request (217 pages) even ran —
-      // and a coarse-pin request that finds the cache already saturated with
-      // protected pins simply FAILS (no valid eviction target), for pages
-      // whose entire job is to GUARANTEE something is always resident. A page
-      // with zero resident data at ANY mip has nothing to fall back to —
-      // exactly the "broken pin invariant" magenta is reserved for. Fix:
-      // ensureFloorLoaded (which requests only coarse pins) for every visible
-      // floor FIRST — total coarse pages for the worst case (3 floors × 8
-      // unpacked packs = 651) comfortably fits the 2048-page budget on its
-      // own, so front-loading it guarantees every floor's soft-fallback floor
-      // is real BEFORE the much larger, evictable view tier starts competing
-      // for the remaining space.
-      const entries = [];
-      for (const floorIndex of visibleIndices) {
-        entries.push([floorIndex, await ensureFloorLoaded(floorIndex)]);
+        ensureItemMesh(state);
+        const displayPack = state.packs.get(displayLayerName) ?? state.albedoPack;
+        bindMeshToPack(state, displayPack);
+        state.mesh.visible = onScreen;
+        state.mesh.renderOrder = item.renderOrder; // from sortByLayer — THE law
       }
 
-      // PHASE 2 — now stream view-tier detail for every floor. Coarse pins for
-      // all of them are already locked in, so view-tier pressure (which DOES
-      // evict, via the LRU pool of unpinned/previously-unpinned slots) can
-      // never starve a coarse pin that hasn't been requested yet.
-      for (const [floorIndex, entry] of entries) {
-        const displayPack = entry.packs.get(displayLayerName) ?? entry.albedoPack;
-
-        // Composited floors are assumed to cover the same footprint (all Levels
-        // in one Foundry scene do) — warn, don't crash, if a real scene's art
-        // disagrees (see this file's header note: per-floor world-size
-        // reconciliation isn't built yet).
-        const packSize = `${displayPack.table.worldWidthPx}x${displayPack.table.worldHeightPx}`;
-        if (refWorldSizePx === null) refWorldSizePx = packSize;
-        else if (packSize !== refWorldSizePx && !worldSizeMismatchWarned) {
-          worldSizeMismatchWarned = true;
-          console.warn(
-            `[vt-pan-viewer] floor ${floorIndex}'s source size (${packSize}) differs from ` +
-              `another composited floor's (${refWorldSizePx}) — the multi-floor overlay may visually misalign.`
-          );
-        }
-
-        // Stream EVERY pack — albedo AND every mask — through the one shared
-        // cache. THIS is the mask-pile-up proof: all of a floor's layers are
-        // resident at once, yet each costs only its visible pages, never a
-        // world-resolution texture. Only the display pack is bound below.
-        for (const pack of entry.packs.values()) {
-          await streamPackResidency(pack, worldRect);
-        }
-
-        const layer = ensureLayer(floorIndex);
-        bindLayerToPack(layer, displayPack);
-
-        const wpx = displayPack.table.worldWidthPx;
-        const hpx = displayPack.table.worldHeightPx;
-        reframeLayer(
-          layer,
-          { x: worldRect.minX / wpx, y: worldRect.minY / hpx },
-          { x: worldRect.maxX / wpx, y: worldRect.maxY / hpx }
-        );
-
-        layer.mesh.visible = true;
-        // Ascending floorIndex == ascending elevation (getActiveSceneFloors
-        // already sorts its output that way), so painting lower indices
-        // first (Three.js: lower renderOrder draws first) puts the physically
-        // LOWER floor beneath the higher one — exactly the paint order real
-        // Foundry's own elevation-sorted `_configureLevelTextures` produces.
-        layer.mesh.renderOrder = floorIndex;
-      }
+      lastItems = items;
     }
 
     /**
      * Swap the DISPLAYED layer-pack (e.g. 'albedo' → 'Outdoors') — visual
      * verification that a mask actually streamed correctly, against the
-     * fixture's known patterns. No-op re-stream: the pack is already resident,
-     * this just rebinds + reframes on the next residency pass.
+     * fixture's known patterns. The pack is already resident; this just rebinds
+     * on the next residency pass.
      * @param {string} name
      */
     async function setDisplayLayer(name) {
@@ -967,31 +1153,11 @@ export async function startVtPanViewer({
     }
 
     // --- Mouse pan/zoom (native-Foundry feel) --------------------------------
-    // Re-frame every currently-composited layer to the LATEST view state
-    // synchronously — a cheap CPU-side UV rewrite, no GL upload — so a mouse
-    // drag tracks the cursor at display rate. The heavier decode/upload of
-    // newly-exposed pages is coalesced separately (scheduleResidencyUpdate);
-    // coarse pins guarantee everything still renders (soft) until fresh pages
-    // land, so the visual pan is never blocked on streaming.
-    function reframeVisibleLayers() {
-      const aspect = canvasW / canvasH;
-      const worldRect = viewToWorldRect(view, aspect);
-      for (const floorIndex of lastCompositedFloors) {
-        const entry = floors.get(floorIndex);
-        const layer = layers.get(floorIndex);
-        if (!entry || !layer || !layer.mesh.visible) continue;
-        // Match the DISPLAYED pack updateResidency bound to this layer (its
-        // worldSizePx is what the UV normalization must use).
-        const displayPack = entry.packs.get(displayLayerName) ?? entry.albedoPack;
-        const wpx = displayPack.table.worldWidthPx;
-        const hpx = displayPack.table.worldHeightPx;
-        reframeLayer(
-          layer,
-          { x: worldRect.minX / wpx, y: worldRect.minY / hpx },
-          { x: worldRect.maxX / wpx, y: worldRect.maxY / hpx }
-        );
-      }
-    }
+    // The camera is re-derived from the live view state every frame
+    // (updateCamera, called from renderFrame), so a drag tracks the cursor at
+    // display rate for free. This replaces reframeVisibleLayers(), which used to
+    // rewrite every quad's UVs per pointermove — cheaper, and structurally immune
+    // to the UV-compounding bug that path produced live on 2026-07-15.
 
     // Coalesced residency: a fast drag fires far more pointermove events than a
     // decode/upload cycle can service, so overlapping updateResidency() runs
@@ -1044,10 +1210,9 @@ export async function startVtPanViewer({
       if (dx === 0 && dy === 0) return;
       lastPointerX = e.clientX;
       lastPointerY = e.clientY;
-      const next = applyPanByPixels(view, dx, dy, canvasH, view.__lastWorldSizePx || 12000);
+      const next = applyPanByPixels(view, dx, dy, canvasH, world);
       if (next === view) return;
       view = next;
-      reframeVisibleLayers(); // instant visual tracking; streaming catches up async
       scheduleResidencyUpdate().catch((err) => console.error('[vt-pan-viewer] pan residency failed:', err));
       e.preventDefault();
     }
@@ -1081,8 +1246,7 @@ export async function startVtPanViewer({
 
     /** Set a new eased-zoom TARGET (does not move the view itself — see updateContinuousInputs). */
     function setZoomTarget(factor, sx, sy) {
-      const worldSizePx = view.__lastWorldSizePx || 12000;
-      targetHalfSpanPx = clampHalfSpan((targetHalfSpanPx ?? view.halfSpanPx) * factor, worldSizePx);
+      targetHalfSpanPx = clampHalfSpan((targetHalfSpanPx ?? view.halfSpanPx) * factor, world);
       zoomAnchorSx = sx;
       zoomAnchorSy = sy;
     }
@@ -1105,7 +1269,6 @@ export async function startVtPanViewer({
       if (dtSec <= 0 || !view) return;
 
       let dirty = false;
-      const worldSizePx = view.__lastWorldSizePx || 12000;
 
       // Continuous keyboard pan: ease velocity toward what the held keys
       // imply, then integrate position — replaces the old discrete per-
@@ -1114,7 +1277,7 @@ export async function startVtPanViewer({
       const targetVelocity = computeTargetPanVelocity(heldPanKeys, view.halfSpanPx * PAN_SPEED_SCREENFULS_PER_SEC);
       panVelocity = easeVelocityTowardTarget(panVelocity, targetVelocity, dtSec, PAN_RAMP_HALF_LIFE_SEC);
       if (Math.abs(panVelocity.x) > 0.01 || Math.abs(panVelocity.y) > 0.01) {
-        const nextView = integratePan(view, panVelocity, dtSec, worldSizePx);
+        const nextView = integratePan(view, panVelocity, dtSec, world);
         if (nextView !== view) {
           view = nextView;
           dirty = true;
@@ -1127,7 +1290,7 @@ export async function startVtPanViewer({
       if (targetHalfSpanPx !== null) {
         const factor = easedZoomFactor(view.halfSpanPx, targetHalfSpanPx, dtSec, ZOOM_EASE_HALF_LIFE_SEC);
         if (factor !== 1) {
-          const nextView = applyZoomAtPixel(view, factor, zoomAnchorSx, zoomAnchorSy, canvasW, canvasH, worldSizePx);
+          const nextView = applyZoomAtPixel(view, factor, zoomAnchorSx, zoomAnchorSy, canvasW, canvasH, world);
           if (nextView !== view) {
             view = nextView;
             dirty = true;
@@ -1136,7 +1299,6 @@ export async function startVtPanViewer({
       }
 
       if (dirty) {
-        reframeVisibleLayers();
         scheduleResidencyUpdate().catch((err) =>
           console.error('[vt-pan-viewer] continuous-input residency failed:', err)
         );
@@ -1178,11 +1340,10 @@ export async function startVtPanViewer({
     // — one code path applies a key, so a soak run exercises exactly what a real
     // user's keypress would, not a separate simulated approximation of it.
     async function applyKeyAndUpdate(key) {
-      const ctx = { worldSizePx: view.__lastWorldSizePx || 12000, floorCount };
+      const ctx = { world, floorCount };
       const next = applyKey(view, key, ctx);
       if (next === view) return false;
       view = next;
-      view.__lastWorldSizePx = ctx.worldSizePx;
       await updateResidency();
       return true;
     }
@@ -1220,7 +1381,7 @@ export async function startVtPanViewer({
       // pure/sync) so preventDefault() fires before the event finishes — calling
       // it after any async work below would be too late for the browser to
       // actually suppress e.g. arrow-key page scroll.
-      const ctx = { worldSizePx: view.__lastWorldSizePx || 12000, floorCount };
+      const ctx = { world, floorCount };
       if (applyKey(view, e.key, ctx) === view) return; // no-op key, let the browser handle it normally
       // Foundry's own KeyboardManager binds arrow keys to core.panUp/Left/Down/Right
       // (repeat:true, always active — confirmed live 2026-07-15 by tracing
@@ -1291,26 +1452,22 @@ export async function startVtPanViewer({
       });
     }
 
-    // First floor load determines the initial view's world size. Opens on
-    // `initialFloorIndex` (defaults to 0, but a real-scene auto-start passes
-    // whatever Foundry itself is currently viewing — see this function's own
-    // param doc for why that match matters). Frame a generous chunk of the
-    // world initially (quarter-world half-span → ~half the map vertically) so
-    // it immediately reads as "the map fills the display," not a tiny
-    // zoomed-in patch — this view is served largely by coarse pins, so it's
-    // instant. '-'/'+' zoom and arrows/WASD pan from there.
+    // The initial view. Opens on `initialFloorIndex` (defaults to 0, but a
+    // real-scene auto-start passes whatever Foundry itself is currently viewing
+    // — see this function's own param doc for why that match matters). Frames a
+    // generous chunk of the world so it immediately reads as "the map fills the
+    // display" rather than a tiny zoomed-in patch — that view is served largely
+    // by coarse pins, so it's instant.
+    //
+    // The world is the SCENE's canvas rect now, not the first floor image's
+    // size: art no longer defines the world (it's placed INTO it), so the view
+    // no longer has to wait on a decode to know where it is.
     const clampedInitialFloor = Math.max(0, Math.min(floorCount - 1, initialFloorIndex));
-    const firstEntry = await ensureFloorLoaded(clampedInitialFloor);
-    // view-state is still single-axis (its own square assumption — the camera
-    // rework that fixes it is a separate, tracked step); the WIDTH is the
-    // reference axis, matching what viewToWorldRect's aspect handling expects.
-    const firstWorldSizePx = firstEntry.albedoPack.table.worldWidthPx;
     view = createInitialViewState({
-      worldSizePx: firstWorldSizePx,
+      world,
       floorIndex: clampedInitialFloor,
-      halfSpanPx: firstWorldSizePx * 0.25,
+      halfSpanPx: Math.max(world.width, world.height) * 0.25,
     });
-    view.__lastWorldSizePx = firstWorldSizePx;
     targetHalfSpanPx = view.halfSpanPx; // eased-zoom target starts equal to the actual value — no zoom-on-load
     await updateResidency();
 
@@ -1318,14 +1475,18 @@ export async function startVtPanViewer({
     renderer.setAnimationLoop(renderFrame);
 
     // Background prewarm (non-blocking, best-effort): stream every OTHER floor's
-    // coarse pins so a floor switch is instant (§4.5 — coarse pins for every
-    // floor always resident). Fire-and-forget so it never delays the initial
-    // floor's first paint; a fetch failure on one floor can't take the viewer
-    // down. Skips whichever floor was just loaded above as initial, not
-    // hardcoded to skip floor 0 — the initial floor can be any index now.
+    // items' coarse pins so a floor switch is instant (§4.5 — coarse pins for
+    // every floor always resident). Fire-and-forget so it never delays the
+    // initial floor's first paint; a failure on one item can't take the viewer
+    // down. Items are per-floor now, so this asks buildItems for each floor's
+    // draw list rather than loading "a floor".
     for (let f = 0; f < floorCount; f++) {
       if (f === clampedInitialFloor) continue;
-      ensureFloorLoaded(f).catch((err) => console.warn(`[vt-pan-viewer] prewarm floor ${f} failed:`, err));
+      Promise.resolve()
+        .then(async () => {
+          for (const item of buildItems(f)) await ensureItemLoaded(item);
+        })
+        .catch((err) => console.warn(`[vt-pan-viewer] prewarm floor ${f} failed:`, err));
     }
 
     // capture:true — see onKeyDown's comment. Must run before Foundry's own
@@ -1356,8 +1517,8 @@ export async function startVtPanViewer({
       atlas,
       canvas,
       onResize,
-      layers,
-      floors,
+      itemStates,
+      occlusionMask,
       cache,
       layout,
       onKeyDown,
@@ -1388,31 +1549,23 @@ export async function startVtPanViewer({
        * @param {'in'|'out'} direction
        */
       forceZoomTarget(direction) {
-        const worldSizePx = view?.__lastWorldSizePx || 12000;
-        targetHalfSpanPx = clampHalfSpan(direction === 'in' ? 0 : Infinity, worldSizePx);
+        targetHalfSpanPx = clampHalfSpan(direction === 'in' ? 0 : Infinity, world);
         zoomAnchorSx = canvasW / 2;
         zoomAnchorSy = canvasH / 2;
       },
       getDiagnostics() {
         const avgMs = frameTimes.length ? frameTimes.reduce((a, b) => a + b, 0) / frameTimes.length : 0;
-        const entry = floors.get(view.floorIndex);
-        const albedo = entry?.albedoPack;
-        const layer = layers.get(view.floorIndex);
-
-        // THE MASK-PILE-UP PROOF, made legible: every loaded pack of every
-        // loaded floor, with its permanently-pinned coarse pages and its live
-        // view-resident pages. The whole stack (albedo + N masks × M floors)
-        // shows here, yet cacheStats.residentPages stays a small fraction of
-        // capacityPages — V2's `O(world × floors × masks)` textures replaced by
-        // `O(screen)` pages. If any mask pack is missing from this list, its
-        // source failed to load (see the console error ensureFloorLoaded logs).
+        // The viewed floor's first item, as the sample subject for the
+        // pixel/indirection ground-truth probe below.
+        const sampleState = lastItems.length ? itemStates.get(lastItems[0].id) : undefined;
+        const albedo = sampleState?.albedoPack;
         const layerResidency = [];
         const layerLoadErrors = [];
         let totalViewResident = 0;
         let totalCoarsePinned = 0;
         let totalCoarseIntended = 0;
-        for (const [fIdx, fEntry] of floors) {
-          for (const pack of fEntry.packs.values()) {
+        for (const [itemId, state] of itemStates) {
+          for (const pack of state.packs.values()) {
             // GROUND TRUTH, not intent (real bug, 2026-07-16: this used to
             // report `pack.coarsePages.length` — the SET SIZE ASKED for —
             // which stayed the same whether or not those pages actually landed
@@ -1430,15 +1583,17 @@ export async function startVtPanViewer({
             totalCoarseIntended += coarseIntended;
             totalViewResident += viewN;
             layerResidency.push({
-              floor: fIdx,
+              item: itemId,
+              kind: state.item.kind,
               layer: pack.name,
               coarsePinned: coarseResident,
               coarseIntended,
               viewResident: viewN,
             });
           }
-          for (const e of fEntry.layerErrors ?? []) layerLoadErrors.push({ floor: fIdx, ...e });
+          for (const e of state.layerErrors ?? []) layerLoadErrors.push({ item: itemId, ...e });
         }
+        for (const e of itemLoadErrors) layerLoadErrors.push(e);
         // Non-zero here means the "coarse pins are the guaranteed floor"
         // invariant is currently VIOLATED for at least one pack — a page with
         // no resident data at any mip renders magenta, not blur. Should always
@@ -1451,13 +1606,29 @@ export async function startVtPanViewer({
           canvasSizePx: { width: canvasW, height: canvasH },
           mountedInBoard: mount.fill && mount.host !== document.body,
           cacheStats: cache.stats(),
-          floorsLoaded: Array.from(floors.keys()),
+          // THE DRAW LIST, in paint order — the direct answer to "why is this
+          // on top of that". Each entry's renderOrder came from sortByLayer
+          // (scene/layer-order.js) over its (elevation, sortLayer, sort, zIndex)
+          // key, so this table IS the layering, not a summary of it.
+          drawList: lastItems.map((i) => ({
+            renderOrder: i.renderOrder,
+            id: i.id,
+            kind: i.kind,
+            elevation: i.key.elevation,
+            sortLayer: i.key.sortLayer,
+            sort: i.key.sort,
+            zIndex: i.key.zIndex,
+            visible: itemStates.get(i.id)?.mesh?.visible ?? false,
+            occlusionModes: i.occlusion?.modes ?? 0,
+          })),
+          itemsLoaded: itemStates.size,
+          world,
           // Multi-LAYER (Keyhole §4.1, the mask pile-up killer): which layer is
           // currently displayed, the packs loaded on the viewed floor, and the
           // per-(floor×pack) residency breakdown + its totals — the evidence
           // that every mask coexists with albedo inside the ONE fixed cache.
           displayLayer: displayLayerName,
-          currentFloorLayers: entry ? Array.from(entry.packs.keys()) : [],
+          sampleItemLayers: sampleState ? Array.from(sampleState.packs.keys()) : [],
           layerResidency,
           // Why any mask is missing from layerResidency — 404 (not synced to the
           // Foundry server) vs a decode/other error. Empty = every layer loaded.
@@ -1481,25 +1652,25 @@ export async function startVtPanViewer({
           // pages are being served from IndexedDB (no source re-decode).
           decodeStats: getDecodeStats(),
           // Multi-floor compositing (§ header note): which OTHER floors are
-          // ALSO being rendered alongside the current one this update, per
-          // getActiveSceneFloors' visibility.levels-derived rule (or just
-          // [view.floorIndex] for the default/torture-fixture single-floor
-          // behavior).
-          compositedFloors: lastCompositedFloors,
+          // ALSO being rendered alongside the current one this update. Derived
+          // from the draw list rather than tracked separately: an item knows
+          // which levels it is visible on, so the composited set is a fact about
+          // the list, not a second piece of state that can disagree with it.
+          compositedLevelIds: Array.from(new Set(lastItems.flatMap((i) => i.visibleOnLevelIds ?? []))),
           currentFloorResidentCount: albedo?.residentViewKeys.size ?? 0,
           // Multi-mip state (coarse-fallback gate evidence): the finest mip
           // being tried this view, the floor's top-level, its coarse-pin depth
           // + page count, and the packed-pyramid indirection dimensions (all
           // for the DISPLAYED pack).
           mip: {
-            requested: layer?.material.uniforms.uRequestedMip.value ?? null,
+            requested: sampleState?.material?.uniforms.uRequestedMip.value ?? null,
             // Smooth mip blending (2026-07-16): the fractional companion to
             // `requested` — its integer part MUST equal `requested`; its
             // fractional part is the blend weight toward `requested+1`. If
             // these ever disagree, the blend uniform desynced from the walk's
             // starting mip — flag it.
-            requestedFraction: layer?.material.uniforms.uRequestedMipFrac.value ?? null,
-            max: layer?.material.uniforms.uMaxMip.value ?? null,
+            requestedFraction: sampleState?.material?.uniforms.uRequestedMipFrac.value ?? null,
+            max: sampleState?.material?.uniforms.uMaxMip.value ?? null,
             coarseTopMips: albedo?.coarseTopMips ?? null,
             coarsePinnedPages: albedo?.coarsePages.length ?? null,
             indirectionPyramid: albedo ? `${albedo.width}x${albedo.height}` : null,
@@ -1523,7 +1694,7 @@ export async function startVtPanViewer({
             recentHitches: hitchLog.slice(-10),
           },
           lastError,
-          ...sampleDiagnostics(entry?.packs.get(displayLayerName) ?? albedo),
+          ...sampleDiagnostics(sampleState?.packs.get(displayLayerName) ?? albedo),
           // Camera smoothing (2026-07-16): live state of the held-key pan /
           // eased-zoom system — the first thing to check if panning ever
           // seems stuck (heldPanKeys non-empty with no key actually held is

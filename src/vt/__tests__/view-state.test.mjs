@@ -21,23 +21,28 @@ import {
 
 export function run(t) {
   const { ok } = t;
-  const WORLD = 12000;
+  // Square world, kept so every pre-existing assertion keeps its exact meaning
+  // through the rectangular conversion (a square world is just a rectangle whose
+  // sides match). A dedicated rectangular block at the bottom covers what the
+  // square case structurally cannot see.
+  const WORLD_PX = 12000;
+  const WORLD = { width: WORLD_PX, height: WORLD_PX };
 
   // --- initial state --------------------------------------------------------
   {
-    const v = createInitialViewState({ worldSizePx: WORLD });
-    ok('initial: centered on the world', v.centerXPx === WORLD / 2 && v.centerYPx === WORLD / 2);
+    const v = createInitialViewState({ world: WORLD });
+    ok('initial: centered on the world', v.centerXPx === WORLD_PX / 2 && v.centerYPx === WORLD_PX / 2);
     ok('initial: floor 0 by default', v.floorIndex === 0);
-    ok('initial: halfSpanPx is positive and sane', v.halfSpanPx > 0 && v.halfSpanPx < WORLD);
+    ok('initial: halfSpanPx is positive and sane', v.halfSpanPx > 0 && v.halfSpanPx < WORLD_PX);
   }
 
   // --- pan ------------------------------------------------------------------
   {
-    const v0 = createInitialViewState({ worldSizePx: WORLD });
+    const v0 = createInitialViewState({ world: WORLD });
     const v1 = applyPanKey(v0, 'ArrowRight', WORLD);
     ok('pan right: centerX increases', v1.centerXPx > v0.centerXPx);
     ok('pan right: centerY unchanged', v1.centerYPx === v0.centerYPx);
-    ok('pan: original state never mutated', v0.centerXPx === WORLD / 2);
+    ok('pan: original state never mutated', v0.centerXPx === WORLD_PX / 2);
 
     const v2 = applyPanKey(v0, 'ArrowDown', WORLD);
     ok('pan down: centerY increases (image-space, Y grows downward)', v2.centerYPx > v0.centerYPx);
@@ -48,18 +53,18 @@ export function run(t) {
 
   // --- pan clamping at world edges -------------------------------------------
   {
-    const edge = { ...createInitialViewState({ worldSizePx: WORLD }), centerXPx: 5 };
+    const edge = { ...createInitialViewState({ world: WORLD }), centerXPx: 5 };
     const afterMany = Array.from({ length: 50 }).reduce((v) => applyPanKey(v, 'ArrowLeft', WORLD), edge);
     ok('pan: clamps at 0, never goes negative', afterMany.centerXPx === 0);
 
-    const edgeMax = { ...createInitialViewState({ worldSizePx: WORLD }), centerXPx: WORLD - 5 };
+    const edgeMax = { ...createInitialViewState({ world: WORLD }), centerXPx: WORLD_PX - 5 };
     const afterManyMax = Array.from({ length: 50 }).reduce((v) => applyPanKey(v, 'ArrowRight', WORLD), edgeMax);
-    ok('pan: clamps at worldSizePx, never exceeds it', afterManyMax.centerXPx === WORLD);
+    ok('pan: clamps at the world width, never exceeds it', afterManyMax.centerXPx === WORLD_PX);
   }
 
   // --- zoom -------------------------------------------------------------------
   {
-    const v0 = createInitialViewState({ worldSizePx: WORLD });
+    const v0 = createInitialViewState({ world: WORLD });
     const zoomedIn = applyZoomKey(v0, '+', WORLD);
     ok('zoom in: halfSpanPx shrinks', zoomedIn.halfSpanPx < v0.halfSpanPx);
     const zoomedOut = applyZoomKey(v0, '-', WORLD);
@@ -69,18 +74,18 @@ export function run(t) {
 
   // --- zoom clamping ----------------------------------------------------------
   {
-    let v = { ...createInitialViewState({ worldSizePx: WORLD }), halfSpanPx: 60 };
+    let v = { ...createInitialViewState({ world: WORLD }), halfSpanPx: 60 };
     for (let i = 0; i < 30; i++) v = applyZoomKey(v, '+', WORLD);
     ok('zoom in: never goes below the min half-span', v.halfSpanPx >= 50 && v.halfSpanPx < 60);
 
-    let v2 = { ...createInitialViewState({ worldSizePx: WORLD }), halfSpanPx: 1000 };
+    let v2 = { ...createInitialViewState({ world: WORLD }), halfSpanPx: 1000 };
     for (let i = 0; i < 30; i++) v2 = applyZoomKey(v2, '-', WORLD);
-    ok('zoom out: never exceeds half the world', v2.halfSpanPx <= WORLD * 0.5);
+    ok('zoom out: never exceeds half the world', v2.halfSpanPx <= WORLD_PX * 0.5);
   }
 
   // --- floor switch ------------------------------------------------------------
   {
-    const v0 = createInitialViewState({ worldSizePx: WORLD, floorIndex: 0 });
+    const v0 = createInitialViewState({ world: WORLD, floorIndex: 0 });
     ok('floor switch: numeric key selects that floor', applyFloorSwitchKey(v0, '2', 3).floorIndex === 2);
     ok('floor switch: out-of-range numeric key is a no-op', applyFloorSwitchKey(v0, '9', 3) === v0);
     const afterTab = applyFloorSwitchKey(v0, 'Tab', 3);
@@ -90,8 +95,8 @@ export function run(t) {
 
   // --- unified applyKey dispatch ----------------------------------------------
   {
-    const v0 = createInitialViewState({ worldSizePx: WORLD, floorIndex: 0 });
-    const ctx = { worldSizePx: WORLD, floorCount: 3 };
+    const v0 = createInitialViewState({ world: WORLD, floorIndex: 0 });
+    const ctx = { world: WORLD, floorCount: 3 };
     ok('applyKey: routes a pan key to pan', applyKey(v0, 'ArrowRight', ctx).centerXPx > v0.centerXPx);
     ok('applyKey: routes a zoom key to zoom', applyKey(v0, '+', ctx).halfSpanPx < v0.halfSpanPx);
     ok('applyKey: routes a floor key to floor switch', applyKey(v0, '1', ctx).floorIndex === 1);
@@ -129,7 +134,7 @@ export function run(t) {
 
     // A huge drag clamps the center to the world, never past it.
     const clamped = applyPanByPixels(v0, 100000, 100000, 1000, WORLD);
-    ok('drag-pan: clamps center to [0, worldSizePx]', clamped.centerXPx === 0 && clamped.centerYPx === 0);
+    ok('drag-pan: clamps center to the world bounds', clamped.centerXPx === 0 && clamped.centerYPx === 0);
   }
 
   // --- mouse wheel zoom (applyZoomAtPixel) ------------------------------------
@@ -165,7 +170,7 @@ export function run(t) {
     ok('wheel-zoom: original state never mutated', v0.halfSpanPx === 600);
 
     // At the zoom-out clamp, halfSpan can't grow further → no-op (same reference).
-    const atCap = { ...v0, halfSpanPx: WORLD * 0.5 };
+    const atCap = { ...v0, halfSpanPx: WORLD_PX * 0.5 };
     ok('wheel-zoom: no-op at the zoom-out clamp', applyZoomAtPixel(atCap, 1.25, sx, sy, W, H, WORLD) === atCap);
   }
 
@@ -173,8 +178,47 @@ export function run(t) {
   // wheel/eased-zoom can never drift apart) ------------------------------
   {
     ok('clampHalfSpan: never below MIN (50)', clampHalfSpan(1, WORLD) === 50);
-    ok('clampHalfSpan: never above half the world', clampHalfSpan(WORLD * 10, WORLD) === WORLD * 0.5);
+    ok('clampHalfSpan: never above half the world', clampHalfSpan(WORLD_PX * 10, WORLD) === WORLD_PX * 0.5);
     ok('clampHalfSpan: passes through an in-range value unchanged', clampHalfSpan(1000, WORLD) === 1000);
+  }
+
+  // --- RECTANGULAR WORLDS (2026-07-16) ------------------------------------
+  // Everything above uses a square world, which cannot distinguish the two axes
+  // even in principle. World space is now Foundry's canvas space — rectangular
+  // in essentially every real scene (padding defaults to 0.25; the default scene
+  // is 4000x3000) — so the axes get their own block.
+  {
+    const WIDE = { width: 8000, height: 2000 };
+
+    // Centre must be the centre of EACH axis, not one shared number.
+    const v = createInitialViewState({ world: WIDE });
+    ok('rect: initial centre is per-axis', v.centerXPx === 4000 && v.centerYPx === 1000);
+
+    // Pan clamps must use the correct axis. A square clamp would let Y run to
+    // 8000 here — four times outside the world, and silently.
+    const farY = integratePan({ ...v, halfSpanPx: 100 }, { x: 0, y: 1e9 }, 1, WIDE);
+    ok('rect: Y clamps to the HEIGHT (2000), not the width', farY.centerYPx === 2000);
+    const farX = integratePan({ ...v, halfSpanPx: 100 }, { x: 1e9, y: 0 }, 1, WIDE);
+    ok('rect: X clamps to the WIDTH (8000)', farX.centerXPx === 8000);
+    // ...and the short axis must not be clamped by the long one.
+    const panDown = applyPanKey({ ...v, centerYPx: 1990, halfSpanPx: 100 }, 'ArrowDown', WIDE);
+    ok('rect: panning past the bottom stops at the height', panDown.centerYPx === 2000);
+
+    // The zoom-out clamp keys off the LARGER axis, so the whole map stays
+    // reachable. Keying off the smaller axis would cap halfSpan at 1000 and make
+    // the 8000-wide map impossible to frame.
+    ok('rect: zoom-out clamp allows framing the LONGER axis', clampHalfSpan(1e9, WIDE) === 4000);
+
+    // Drag-pan clamps per-axis too.
+    const dragged = applyPanByPixels({ ...v, halfSpanPx: 500 }, -1e6, -1e6, 1000, WIDE);
+    ok('rect: drag-pan clamps each axis to its own bound', dragged.centerXPx === 8000 && dragged.centerYPx === 2000);
+
+    // A tall world is the same story with the axes swapped — proving the code
+    // isn't just accidentally right for wide worlds.
+    const TALL = { width: 2000, height: 8000 };
+    const tv = createInitialViewState({ world: TALL });
+    ok('rect: a TALL world centres correctly too', tv.centerXPx === 1000 && tv.centerYPx === 4000);
+    ok('rect: a TALL world can still frame its longer axis', clampHalfSpan(1e9, TALL) === 4000);
   }
 
   // --- CAMERA SMOOTHING (2026-07-16) --------------------------------------
@@ -316,7 +360,7 @@ export function run(t) {
     const clampedPartial = integratePan(v0, { x: 100000000, y: 0 }, 1, WORLD);
     ok(
       'integratePan: huge velocity clamps the position to the world bound, never overshoots',
-      clampedPartial.centerXPx === WORLD
+      clampedPartial.centerXPx === WORLD_PX
     );
   }
 

@@ -45,6 +45,9 @@ import {
   soakSwitchFloorStep,
 } from './vt/vt-pan-viewer.js';
 import { getActiveSceneFloors, computeVisibleFloorIndices } from './foundry/active-scene-source.js';
+import { collectSceneLayers } from './foundry/scene-layers.js';
+import { computeSceneDimensions } from './foundry/scene-geometry.js';
+import { SORT_LAYERS, makeLayerKey } from './scene/layer-order.js';
 import { getSourceBitmap } from './vt/decode-pool.js';
 import { registerPixiProxy, getPixiResidencyReport } from './foundry/pixi-proxy-textures.js';
 
@@ -150,15 +153,57 @@ function install() {
   // approximation of it.
   const tortureVisibleFloorIndices = () => Array.from({ length: TORTURE_FLOOR_COUNT }, (_, i) => i);
 
+  // The fixture's synthetic world. It has no Foundry Scene documents to read, so
+  // it fabricates the same shapes `collectSceneLayers` produces for a real scene
+  // — deliberately, so the fixture and real scenes drive ONE renderer down ONE
+  // path rather than forking a second (doctrine #1). The fixture's art IS its
+  // world: 12000² per floor, no padding, so sceneRect == the canvas rect.
+  const TORTURE_WORLD_PX = 12000;
+  const tortureDimensions = computeSceneDimensions({
+    width: TORTURE_WORLD_PX,
+    height: TORTURE_WORLD_PX,
+    padding: 0,
+    grid: { size: 100 },
+  });
+
+  /**
+   * The fixture's draw list: one background item per floor, stacked in an
+   * elevation band per floor (bottom = i*10) so the real sort law orders them
+   * exactly as it orders a real scene's Levels. All 3 floors always composite —
+   * the castle-courtyard worst case (every floor's every layer streaming fine
+   * detail at once), which is the whole point of the fixture.
+   */
+  const buildTortureItems = () =>
+    tortureVisibleFloorIndices().map((i) => ({
+      id: `torture:floor${i}`,
+      kind: 'levelBackground',
+      key: makeLayerKey({ elevation: i * 10, sortLayer: SORT_LAYERS.SCENE, sort: i, zIndex: 0 }),
+      src: tortureImageUrl(i),
+      levelId: `torture${i}`,
+      visibleOnLevelIds: [`torture${i}`],
+      alpha: 1,
+      tint: 0xffffff,
+      alphaThreshold: 0.75,
+      occlusion: { modes: 0, alpha: 0 },
+      restrictsLight: true,
+      restrictsWeather: true,
+      isUpper: false,
+      hidden: false,
+      _placement: { kind: 'level', texturesConfig: {} },
+      __floorIndex: i, // so extraLayersForItem can find this item's mask set
+    }));
+
+  const tortureExtraLayers = (item) => tortureLayerUrls(item.__floorIndex ?? 0);
+
   MapShine.debug.registerReport('vt-pan-viewer-start', 'VT Pan Viewer: Start (fills scene view)', async () => ({
     report: 'vt-pan-viewer-start',
     generatedAt: new Date().toISOString(),
     ...(await startVtPanViewer({
       THREE,
-      imageUrlForFloor: tortureImageUrl,
+      buildItems: buildTortureItems,
+      dimensions: tortureDimensions,
       floorCount: TORTURE_FLOOR_COUNT,
-      extraLayerUrlsForFloor: tortureLayerUrls,
-      visibleFloorIndices: tortureVisibleFloorIndices,
+      extraLayersForItem: tortureExtraLayers,
     })),
   }));
   MapShine.debug.registerReport('vt-pan-viewer-diagnostics', 'VT Pan Viewer: Diagnostics', () => ({
@@ -303,18 +348,51 @@ function install() {
       return { ok: false, error: floorsResult.error };
     }
     const { floors, skipped } = floorsResult;
+    const dimensions = computeSceneDimensions(sceneDoc);
+    const isGM = typeof game !== 'undefined' ? !!game.user?.isGM : true;
+
+    /**
+     * The real draw list: every visible Level's background AND foreground (roof)
+     * art, plus every tile on any visible floor — all keyed for the ONE sort law.
+     *
+     * `computeVisibleFloorIndices` replicates Foundry's REAL cross-floor
+     * visibility rule (a floor's own `visibility.levels` set, NOT "always show
+     * the floor below") — see active-scene-source.js's header. Those indices are
+     * mapped back to Level ids because that is what the document-level rules
+     * (`isVisible`, `includedInLevel`) actually key on.
+     */
+    const buildItems = (viewedFloorIndex) => {
+      const visibleIndices = computeVisibleFloorIndices(floors, viewedFloorIndex);
+      const visibleLevelIds = visibleIndices.map((i) => floors[i]?.id).filter(Boolean);
+      const viewedLevelId = floors[viewedFloorIndex]?.id;
+      return collectSceneLayers(sceneDoc, { viewedLevelId, visibleLevelIds, isGM }).items;
+    };
+
+    const collected = collectSceneLayers(sceneDoc, {
+      viewedLevelId: floors[initialFloorIndex]?.id,
+      visibleLevelIds: computeVisibleFloorIndices(floors, initialFloorIndex)
+        .map((i) => floors[i]?.id)
+        .filter(Boolean),
+      isGM,
+    });
+
     return {
       sceneName: sceneDoc?.name,
       floors: floors.map((f) => ({ index: f.index, name: f.name, elevationBottom: f.elevationBottom, url: f.url })),
       skippedLevels: skipped,
+      // What the scene model actually found — the first thing to check if a tile
+      // or a roof isn't showing up.
+      sceneDimensions: {
+        canvas: { width: dimensions.width, height: dimensions.height },
+        sceneRect: dimensions.sceneRect,
+      },
+      collectedItems: collected.items.map((i) => ({ id: i.id, kind: i.kind, elevation: i.key.elevation })),
+      skippedItems: collected.skipped,
       ...(await startVtPanViewer({
         THREE,
-        imageUrlForFloor: (i) => floors[i]?.url,
+        buildItems,
+        dimensions,
         floorCount: floors.length,
-        // computeVisibleFloorIndices replicates Foundry's REAL cross-floor
-        // visibility rule (a floor's own visibility.levels set, NOT "always
-        // show the floor below") — see active-scene-source.js's header.
-        visibleFloorIndices: (viewedIndex) => computeVisibleFloorIndices(floors, viewedIndex),
         initialFloorIndex,
       })),
     };
@@ -441,10 +519,10 @@ function install() {
     if (!getVtPanViewerDiagnostics().active) {
       await startVtPanViewer({
         THREE,
-        imageUrlForFloor: tortureImageUrl,
+        buildItems: buildTortureItems, // soak the castle-courtyard worst case: all 3 floors composited
+        dimensions: tortureDimensions,
         floorCount: TORTURE_FLOOR_COUNT,
-        extraLayerUrlsForFloor: tortureLayerUrls, // soak the FULL layer stack (albedo + masks), not albedo alone
-        visibleFloorIndices: tortureVisibleFloorIndices, // soak the castle-courtyard worst case, all 3 floors composited
+        extraLayersForItem: tortureExtraLayers, // soak the FULL layer stack (albedo + masks), not albedo alone
       });
     }
   };

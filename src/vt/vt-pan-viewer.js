@@ -1660,6 +1660,15 @@ export async function startVtPanViewer({
         zoomAnchorSx = canvasW / 2;
         zoomAnchorSy = canvasH / 2;
       },
+      /**
+       * A CHEAP zoom read, for the thrash test's per-frame loop.
+       *
+       * Deliberately not `getDiagnostics()`: that does a `gl.readPixels`, scans the
+       * whole indirection buffer and walks every cache slot. Polling it once per
+       * frame would make the measuring instrument the dominant cost — the test
+       * would be reporting hitches it caused itself.
+       */
+      getZoomState: () => ({ halfSpanPx: view?.halfSpanPx ?? 0, targetHalfSpanPx }),
       getDiagnostics() {
         const avgMs = frameTimes.length ? frameTimes.reduce((a, b) => a + b, 0) / frameTimes.length : 0;
         // The viewed floor's first item, as the sample subject for the
@@ -1950,8 +1959,11 @@ export async function runZoomThrashTest(opts = {}) {
     };
   }
 
-  const cycles = opts.cycles ?? 240;
+  const maxFrames = opts.maxFrames ?? 480;
   const settleFrames = opts.settleFrames ?? 30;
+  // A leg that hasn't arrived by now is stuck (or the ease was retuned) — flip
+  // anyway rather than spend the whole budget on one leg.
+  const maxFramesPerLeg = opts.maxFramesPerLeg ?? 150;
 
   // BLANK SLATE — a genuine restart (fresh atlas + fresh page cache), not
   // merely clearing residency state. startVtPanViewer's own disposeActive()
@@ -1959,38 +1971,98 @@ export async function runZoomThrashTest(opts = {}) {
   await startVtPanViewer(startupParams);
   if (!_active) return { ok: false, error: 'restart failed — see console for the fatal error' };
 
+  // THE TOP FLOOR by default (author, 2026-07-16). The highest floor is the one
+  // most likely to composite every floor beneath it through its own
+  // `visibility.levels` — the castle-courtyard case — so it carries the most
+  // simultaneous textures and is the honest worst case. Overridable.
+  const floorCount = startupParams.floorCount ?? 1;
+  const floorIndex = opts.floorIndex ?? Math.max(0, floorCount - 1);
+  await _active.setFloorIndex(floorIndex);
+
   _active.resetHitchTracking();
   _active.forceZoomTarget('out'); // start fully zoomed out, per the author's own request
-  for (let i = 0; i < 10; i++) await nextAnimationFrame(); // let the starting zoom settle before measuring
+  for (let i = 0; i < 40 && _active; i++) await nextAnimationFrame(); // let the starting zoom ARRIVE before measuring
 
   const beforeDiag = _active.getDiagnostics();
 
-  let cyclesActuallyRun = 0;
-  for (let i = 0; i < cycles; i++) {
+  // LET THE ZOOM ACTUALLY TRAVEL — flip direction only once it has ARRIVED.
+  //
+  // THE BUG THIS FIXES (found from the author's own 2026-07-16 report, which came
+  // back suspiciously perfect: hitchCount 0, frameGapMaxMs 16.6, and — the tell —
+  // `pinnedView: 0` both before AND after, meaning not one view page was ever
+  // pinned): the loop used to flip the zoom TARGET every single frame, described
+  // in its own comment as "the most aggressive thrash". It is the opposite. Zoom
+  // is EASED (~120ms half-life), so one frame closes only ~9% of the gap; flipping
+  // the target every frame moves it 9% in, then 9% out, forever. The zoom never
+  // went anywhere. It sat at the fully-zoomed-out extreme — where every page is
+  // coarse-pinned, hence pinnedView: 0 — so no mip ever changed, no page set ever
+  // changed, and the test could not possibly have exercised a residency transition,
+  // which is the only thing it exists to stress.
+  //
+  // Flipping on ARRIVAL instead makes each leg a real full-range sweep across every
+  // mip level, which is what actually churns the page set.
+  let direction = 'in';
+  _active.forceZoomTarget(direction);
+  let framesRun = 0;
+  let framesThisLeg = 0;
+  let legsCompleted = 0;
+  let minHalfSpanSeen = Infinity;
+  let maxHalfSpanSeen = -Infinity;
+
+  for (let i = 0; i < maxFrames; i++) {
     if (!_active) break; // stopped mid-run (e.g. "Stop/Clear" clicked) — bail cleanly, don't throw
-    _active.forceZoomTarget(i % 2 === 0 ? 'in' : 'out'); // flip EVERY frame — the most aggressive thrash
     await nextAnimationFrame();
-    cyclesActuallyRun++;
+    framesRun++;
+    framesThisLeg++;
+
+    const z = _active.getZoomState(); // cheap on purpose — see getZoomState's doc
+    if (z.halfSpanPx < minHalfSpanSeen) minHalfSpanSeen = z.halfSpanPx;
+    if (z.halfSpanPx > maxHalfSpanSeen) maxHalfSpanSeen = z.halfSpanPx;
+
+    // "Arrived" within 2% — the ease is asymptotic, so waiting for exact equality
+    // would spend most of the budget crawling the last fraction of a pixel.
+    const tolerance = Math.max(1, z.targetHalfSpanPx * 0.02);
+    if (Math.abs(z.halfSpanPx - z.targetHalfSpanPx) <= tolerance || framesThisLeg >= maxFramesPerLeg) {
+      direction = direction === 'in' ? 'out' : 'in';
+      _active.forceZoomTarget(direction);
+      legsCompleted++;
+      framesThisLeg = 0;
+    }
   }
 
   for (let i = 0; i < settleFrames && _active; i++) await nextAnimationFrame(); // let residency catch up before the final read
 
-  if (!_active) return { ok: false, error: 'viewer was stopped mid-run', cyclesActuallyRun };
+  if (!_active) return { ok: false, error: 'viewer was stopped mid-run', framesRun };
 
   const afterDiag = _active.getDiagnostics();
   return {
-    cyclesRun: cyclesActuallyRun,
-    stoppedEarly: cyclesActuallyRun < cycles,
+    floorThrashed: floorIndex,
+    floorCount,
+    framesRun,
+    // THE PROOF THE TEST DID ANYTHING. legsCompleted 0, or a halfSpan range that
+    // barely moves, means the zoom never swept and the run is worthless — exactly
+    // the failure that made the previous version look like a clean pass.
+    legsCompleted,
+    halfSpanTraversed: {
+      min: Math.round(minHalfSpanSeen),
+      max: Math.round(maxHalfSpanSeen),
+      ratio: minHalfSpanSeen > 0 ? Math.round((maxHalfSpanSeen / minHalfSpanSeen) * 10) / 10 : null,
+    },
     settleFramesRun: settleFrames,
     beforeThrash: { decodeStats: beforeDiag.decodeStats, cacheStats: beforeDiag.cacheStats },
     afterThrash: { decodeStats: afterDiag.decodeStats, cacheStats: afterDiag.cacheStats },
     hitchStats: afterDiag.hitchStats,
     interpretation:
-      'hitchStats.hitchCount > 0 with real gapMs values in recentHitches is DIRECT evidence of an actual main-' +
-      "thread freeze (not renderMsAvgLast120, which cannot see this). Each hitch entry's decodeStats/cacheStats " +
-      'is a snapshot from THAT EXACT moment — compare sourcesDecoded/idbSlices across consecutive hitches to see ' +
-      'whether a fresh decode was in flight when the freeze happened. hitchCount=0 after this deliberately-extreme ' +
-      'thrash would mean the reported hitch needs an even more aggressive or differently-shaped repro.',
+      'READ legsCompleted AND halfSpanTraversed FIRST — they say whether this run tested anything at all. ' +
+      'legsCompleted 0, or a halfSpanTraversed.ratio near 1, means the zoom never swept the range and every other ' +
+      'number below is meaningless (that exact false pass is why this loop was rewritten: it used to flip the ' +
+      'eased zoom target every frame, which cancels itself out and parks the view at one extreme — the tell was ' +
+      'pinnedView: 0). A real run shows a large ratio and several legs. THEN: afterThrash.cacheStats.misses is the ' +
+      'headline — a residency transition that cannot fit its pages misses, and misses mean visible blur. ' +
+      'hitchStats.hitchCount > 0 with real gapMs values in recentHitches is DIRECT evidence of a main-thread ' +
+      "freeze (renderMsAvgLast120 cannot see this). Each hitch entry's decodeStats/cacheStats is a snapshot from " +
+      'THAT EXACT moment — compare sourcesDecoded/idbSlices across consecutive hitches to see whether a fresh ' +
+      'decode was in flight when the freeze happened.',
   };
 }
 

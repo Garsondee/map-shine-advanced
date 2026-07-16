@@ -311,7 +311,7 @@ function install() {
   //              the conditions that produced a real report.
   MapShine.debug.registerReport(
     'vt-zoom-thrash-torture',
-    'VT Zoom Thrash: TORTURE fixture (blank slate, ~4s)',
+    'VT Zoom Thrash: TORTURE fixture (blank slate, ~8s)',
     async () => ({
       report: 'vt-zoom-thrash-torture',
       generatedAt: new Date().toISOString(),
@@ -330,7 +330,7 @@ function install() {
     })
   );
 
-  MapShine.debug.registerReport('vt-zoom-thrash-active', 'VT Zoom Thrash: ACTIVE scene (real art, ~4s)', async () => ({
+  MapShine.debug.registerReport('vt-zoom-thrash-active', 'VT Zoom Thrash: ACTIVE scene (real art, ~8s)', async () => ({
     report: 'vt-zoom-thrash-active',
     generatedAt: new Date().toISOString(),
     subject: typeof canvas !== 'undefined' ? (canvas.scene?.name ?? '(no active scene)') : '(no canvas)',

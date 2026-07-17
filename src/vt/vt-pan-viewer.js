@@ -87,7 +87,7 @@ import {
   computeItemViewportPx,
   rectsOverlap,
 } from '../scene/world-quad.js';
-import { computeQuadCorners, computeQuadBounds, computeItemPlacement } from '../foundry/index.js';
+import { computeQuadCorners, computeQuadBounds, computeItemPlacement, tokenFootprint } from '../foundry/index.js';
 import { engageFoundryFallback, clearFoundryFallback, describeRenderMode } from '../diag/render-fallback.js';
 import { OCCLUSION_MODES, computeOcclusionState, createHoverFadeState, mapElevation } from '../scene/occlusion.js';
 
@@ -2380,6 +2380,80 @@ export async function startVtPanViewer({
         // be 0 after the phase-1/phase-2 ordering fix; kept as a tripwire.
         const coarsePinShortfall = totalCoarseIntended - totalCoarsePinned;
 
+        // THE DRAW LIST, in paint order — the direct answer to "why is this
+        // on top of that". Each entry's renderOrder came from sortByLayer
+        // (scene/layer-order.js) over its (elevation, sortLayer, sort, zIndex)
+        // key, so this table IS the layering, not a summary of it.
+        const drawList = lastItems.map((i) => ({
+          renderOrder: i.renderOrder,
+          id: i.id,
+          kind: i.kind,
+          elevation: i.key.elevation,
+          sortLayer: i.key.sortLayer,
+          sort: i.key.sort,
+          zIndex: i.key.zIndex,
+          visible: itemStates.get(i.id)?.mesh?.visible ?? false,
+          occlusionModes: i.occlusion?.modes ?? 0,
+          // GROUND TRUTH vs RENDERED, for tokens only (2026-07-17 — "stops
+          // slightly short" after the moveToken fix). `state.placement` is
+          // what refreshItemPlacement last actually wrote to the mesh — a
+          // SNAPSHOT from whenever the last residency pass ran. `i._placement
+          // .tokenDoc` is the SAME live document reference `lastItems` was
+          // built from, re-read HERE, at report-generation time, which can be
+          // LATER than the last pass. Re-deriving the footprint fresh from it
+          // (not trusting any cached footprint) answers the only question that
+          // matters: is MSA's rendered position CURRENTLY behind Foundry's
+          // live document, or does it already match right now?
+          //   liveVsRendered: null  -> not a token, or not placed yet.
+          //   deltaPx ~0            -> MSA matches Foundry AT REPORT TIME. The
+          //                            "short" stop was transient (report taken
+          //                            mid-movement) or is a rendering/geometry
+          //                            issue, not a sync gap.
+          //   deltaPx > 0, and a SECOND report taken later still shows the SAME
+          //   nonzero delta -> MSA is genuinely stuck behind the live document.
+          liveVsRendered: (() => {
+            if (i.kind !== 'token' || !i._placement?.tokenDoc) return null;
+            const state = itemStates.get(i.id);
+            if (!state?.placement) return null;
+            const live = tokenFootprint(i._placement.tokenDoc, i._placement.gridSize);
+            const dx = live.centerX - state.placement.x;
+            const dy = live.centerY - state.placement.y;
+            return {
+              liveX: live.centerX,
+              liveY: live.centerY,
+              renderedX: state.placement.x,
+              renderedY: state.placement.y,
+              deltaPx: Math.round(Math.hypot(dx, dy) * 10) / 10,
+            };
+          })(),
+          // THE ACTUAL UNIFORM VALUES the shader is running on, read straight off the
+          // JS side -- exact, and involving no shader at all. Kept after the bisect
+          // scaffolding was stripped because it earned it: printing these is what
+          // proved the occlusion weights were clean zeros, which is what forced the
+          // search onto the OPERATION rather than the values and found the .mix()
+          // trap (reference_tsl_method_chaining_trap).
+          uniforms: (() => {
+            const a = itemStates.get(i.id)?.appearance;
+            if (!a) return null;
+            return {
+              occlusionWeights: a.uOcclusionWeights.value.toArray(),
+              occlusionElevation: a.uOcclusionElevation.value,
+              alpha: a.uAlpha.value,
+              unoccludedAlpha: a.uUnoccludedAlpha.value,
+              occludedAlpha: a.uOccludedAlpha.value,
+              tint: a.uTint.value.toArray(),
+              srgbDecode: itemStates.get(i.id)?.vt?.uniforms.srgbDecode.value ?? null,
+            };
+          })(),
+        }));
+
+        // A scan of drawList so a token desync doesn't require reading the
+        // whole (potentially long) table by eye. Empty array = every token
+        // currently matches its live document — the good state.
+        const tokenSyncSummary = drawList
+          .filter((e) => e.liveVsRendered && e.liveVsRendered.deltaPx > 1)
+          .map((e) => ({ id: e.id, deltaPx: e.liveVsRendered.deltaPx }));
+
         return {
           view,
           layout,
@@ -2435,40 +2509,11 @@ export async function startVtPanViewer({
           canvasSizePx: { width: canvasW, height: canvasH },
           mountedInBoard: mount.fill && mount.host !== document.body,
           cacheStats: cache.stats(),
-          // THE DRAW LIST, in paint order — the direct answer to "why is this
-          // on top of that". Each entry's renderOrder came from sortByLayer
-          // (scene/layer-order.js) over its (elevation, sortLayer, sort, zIndex)
-          // key, so this table IS the layering, not a summary of it.
-          drawList: lastItems.map((i) => ({
-            renderOrder: i.renderOrder,
-            id: i.id,
-            kind: i.kind,
-            elevation: i.key.elevation,
-            sortLayer: i.key.sortLayer,
-            sort: i.key.sort,
-            zIndex: i.key.zIndex,
-            visible: itemStates.get(i.id)?.mesh?.visible ?? false,
-            occlusionModes: i.occlusion?.modes ?? 0,
-            // THE ACTUAL UNIFORM VALUES the shader is running on, read straight off the
-            // JS side -- exact, and involving no shader at all. Kept after the bisect
-            // scaffolding was stripped because it earned it: printing these is what
-            // proved the occlusion weights were clean zeros, which is what forced the
-            // search onto the OPERATION rather than the values and found the .mix()
-            // trap (reference_tsl_method_chaining_trap).
-            uniforms: (() => {
-              const a = itemStates.get(i.id)?.appearance;
-              if (!a) return null;
-              return {
-                occlusionWeights: a.uOcclusionWeights.value.toArray(),
-                occlusionElevation: a.uOcclusionElevation.value,
-                alpha: a.uAlpha.value,
-                unoccludedAlpha: a.uUnoccludedAlpha.value,
-                occludedAlpha: a.uOccludedAlpha.value,
-                tint: a.uTint.value.toArray(),
-                srgbDecode: itemStates.get(i.id)?.vt?.uniforms.srgbDecode.value ?? null,
-              };
-            })(),
-          })),
+          drawList,
+          // Empty = every token matches its live document right now (the good
+          // state). Non-empty names exactly which tokens are behind and by how
+          // much, without reading the full (potentially long) drawList by eye.
+          tokenSyncSummary,
           itemsLoaded: itemStates.size,
           world,
           // Multi-LAYER (Keyhole §4.1, the mask pile-up killer): which layer is

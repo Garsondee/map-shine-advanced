@@ -56,7 +56,7 @@ export {
 export { collectSceneLayers, computeItemPlacement, SCENE_LAYER_DOCUMENTS } from './scene-layers.js';
 
 // Token documents -> drawables.
-export { collectTokens, diagnoseTokens, TOKEN_DOCUMENTS } from './scene-tokens.js';
+export { collectTokens, diagnoseTokens, TOKEN_DOCUMENTS, tokenFootprint } from './scene-tokens.js';
 
 // VRAM severance — feed PIXI <=1024px proxies so Foundry never decodes the real file.
 export { registerPixiProxy, getPixiResidencyReport } from './pixi-proxy-textures.js';

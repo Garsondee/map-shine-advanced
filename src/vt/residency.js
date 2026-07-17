@@ -222,6 +222,60 @@ export function coarseTopMipsForCap(table, opts = {}) {
   return count;
 }
 
+/** The share of total cache capacity ALL coarse pins together may ever claim. */
+export const DEFAULT_COARSE_BUDGET_FRACTION = 0.25;
+
+/**
+ * How many pages ONE pack's coarse pin may claim, given how many independent
+ * virtual textures (packs) share the scene right now.
+ *
+ * ============================================================================
+ * WHY THIS EXISTS (found 2026-07-17, item 1b) — §4.1 says "the top mips of
+ * every layer of every floor... ~TENS OF PAGES TOTAL". That sentence was
+ * written when one VT meant the whole world. The renderer now gives each
+ * DRAWABLE — every Level's background AND foreground, every tile, every
+ * token — its OWN virtual texture, and until this function existed, each one
+ * independently called `coarseTopMipsForCap(table, {})` and got up to ~96
+ * pages with NOTHING coordinating the total. A real 3-floor scene measured
+ * `coarseIntendedPages: 808` against a shortfall of 246 — three packs got
+ * ZERO coarse pins purely by cache-fill ORDER, `freePages: 0`, and a 2.6
+ * SECOND frame freeze. "Tens of pages total" had become 808 on one ordinary
+ * map, silently, because nothing was dividing the promise by the pack count.
+ * ============================================================================
+ *
+ * The fix is not a bigger fixed cap — item count is unbounded (Stage 4's
+ * masks multiply every item again). It is dividing a FIXED, BOUNDED total
+ * budget by however many packs actually exist, so "tens of pages total"
+ * stays true as the SUM across every pack, not a per-pack allowance nobody
+ * is adding up. Every pack still gets AT LEAST its single top mip page
+ * regardless of the result here (`coarseTopMipsForCap`'s own floor,
+ * `count >= 1` unconditionally) — this can only make the coarse floor
+ * blurrier under real pressure, never wrong, never absent, matching §0's law.
+ *
+ * Deliberately NOT split by priority (active floor vs. background prewarm):
+ * an equal share for every pack, always, means a background-prewarmed floor
+ * can no longer be silently starved to ZERO by load order — which is exactly
+ * what happened to 3 of 13 packs in the measured scene. A pack that would
+ * have gotten more (a big Level background) gets less; a pack that never
+ * would have gotten anything gets a fair share instead. Simpler than a
+ * tiered/priority allocator, and it directly fixes the observed failure mode.
+ *
+ * @param {number} capacityPages - the page cache's total capacity (Q2: tier-scaled, 2048 @ 8GB).
+ * @param {number} totalPackCount - how many independent VT packs exist across
+ *   the WHOLE scene (every floor, deduplicated by item id — a token visible
+ *   from two floors is ONE pack, not two).
+ * @param {object} [opts]
+ * @param {number} [opts.coarseBudgetFraction] - default {@link DEFAULT_COARSE_BUDGET_FRACTION}.
+ * @returns {{totalBudgetPages: number, perPackMaxPages: number, packCount: number}}
+ */
+export function computeCoarsePinBudget(capacityPages, totalPackCount, opts = {}) {
+  const fraction = opts.coarseBudgetFraction ?? DEFAULT_COARSE_BUDGET_FRACTION;
+  const totalBudgetPages = Math.max(0, Math.floor(capacityPages * fraction));
+  const packCount = Math.max(1, Math.floor(totalPackCount));
+  const perPackMaxPages = Math.max(1, Math.floor(totalBudgetPages / packCount));
+  return { totalBudgetPages, perPackMaxPages, packCount };
+}
+
 /**
  * Diff a previous "currently view-pinned" key set against a freshly computed
  * needed-page list (e.g. from `planResidency().fine`) — the per-frame update

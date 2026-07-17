@@ -74,7 +74,13 @@ import {
   integratePan,
   easedZoomFactor,
 } from './view-state.js';
-import { planResidency, coarsePinSet, coarseTopMipsForCap, diffResidency } from './residency.js';
+import {
+  planResidency,
+  coarsePinSet,
+  coarseTopMipsForCap,
+  diffResidency,
+  computeCoarsePinBudget,
+} from './residency.js';
 import { ThreeAllocator } from '../graph/index.js';
 import { PROBE_CORNERS, classifyPixel, diagnoseOrientation } from '../diag/orientation-probe.js';
 import { sortByLayer } from '../scene/layer-order.js';
@@ -589,6 +595,46 @@ export async function startVtPanViewer({
     // structurally cannot express.
     const itemStates = new Map();
     const itemLoadErrors = [];
+
+    /**
+     * THE SHARED COARSE-PIN BUDGET (item 1b, 2026-07-17) — see
+     * `residency.js#computeCoarsePinBudget`'s header for the full finding and
+     * why an equal per-pack share, not a priority tier, is the fix. Read by
+     * `ensureItemLoaded`/`buildPack` every time a NEW pack is created (an
+     * already-loaded pack's coarse pin, once granted, is never re-evaluated —
+     * this only governs pack CREATION, matching how the budget itself only
+     * needs to be a reasonable bound, not perfectly live).
+     *
+     * Initialized to a conservative non-zero default (matches the mask cap
+     * this replaces) rather than 0/uncapped — if `refreshCoarsePinBudget()`
+     * were ever somehow skipped, falling back to UNCAPPED would silently
+     * reopen exactly the bug this exists to close. There is no code path that
+     * skips it (see its two call sites below), but the safe direction on an
+     * uncomputed value is always the bounded one, not the dangerous one.
+     */
+    let currentCoarseBudget = { totalBudgetPages: 0, perPackMaxPages: 24, packCount: 1 };
+
+    /**
+     * Recompute the shared budget from the WHOLE scene's current pack count —
+     * every floor, not just the viewed one (a background-prewarmed floor's
+     * packs compete for the SAME budget). Deduplicated by item id: a token
+     * visible from two floors is ONE pack (loaded once, `itemStates` keyed by
+     * id), not two — counting it twice would UNDER-allocate everyone else for
+     * no reason.
+     *
+     * Recomputed fresh on every call rather than cached — a cached pack count
+     * is exactly the staleness class that just cost a session on token
+     * placement (a snapshot outliving the thing it snapshotted). This is
+     * comparatively cheap (pure document reads via `buildItems`, no I/O, no
+     * GPU) and only runs on hook-driven passes, never per frame.
+     */
+    function refreshCoarsePinBudget() {
+      const seen = new Set();
+      for (let f = 0; f < floorCount; f++) {
+        for (const item of buildItems(f)) seen.add(item.id);
+      }
+      currentCoarseBudget = computeCoarsePinBudget(cache.stats().capacityPages, seen.size);
+    }
     let loopActive = false; // tracks whether the render loop is running (batch uploads pause/restore it)
 
     /**
@@ -689,13 +735,16 @@ export async function startVtPanViewer({
       return pack;
     }
 
-    // Mask packs get a lighter permanent soft-floor than the displayed albedo
-    // (see buildPack). 24 pages ≈ the top 3 mips (1+4+16) for the 12000px world,
-    // vs albedo's ~70 (top 4). With N mask packs × M floors all pinned at once,
-    // this keeps the permanently-resident page count well clear of capacity
-    // while the active-view ring still streams every pack sharply where the
-    // camera actually looks.
-    const MASK_COARSE_PIN_MAX_PAGES = 24;
+    // Mask packs get a lighter permanent soft-floor than the displayed albedo —
+    // a mask is an input, not the hero image. HALF of the item's own dynamic
+    // share (`currentCoarseBudget.perPackMaxPages`, item 1b), capped at 24 —
+    // the ORIGINAL fixed value, kept as an upper ceiling because it was
+    // empirically fine for masks; the new part is that it can now go LOWER
+    // than 24 too, when the scene's total pack count demands it, instead of
+    // being a flat number blind to how many packs exist.
+    function maskCoarsePinMaxPages() {
+      return Math.max(1, Math.min(24, Math.floor(currentCoarseBudget.perPackMaxPages / 2)));
+    }
 
     /**
      * Load ONE drawable: its albedo virtual texture, any extra layer-packs
@@ -716,7 +765,15 @@ export async function startVtPanViewer({
       }
 
       const packs = new Map();
-      const albedoPack = await buildPack(item.id, 'albedo', { url: item.src });
+      // The item's fair share of the SCENE-WIDE coarse budget (item 1b) — was
+      // uncapped (up to ~96 pages) before this, with nothing coordinating the
+      // total across however many packs the scene actually has.
+      const albedoPack = await buildPack(
+        item.id,
+        'albedo',
+        { url: item.src },
+        { coarsePinMaxPages: currentCoarseBudget.perPackMaxPages }
+      );
       packs.set('albedo', albedoPack);
 
       // Per-pack load failures are collected here AND surfaced in diagnostics
@@ -740,7 +797,7 @@ export async function startVtPanViewer({
           continue;
         }
         try {
-          packs.set(name, await buildPack(item.id, name, source, { coarsePinMaxPages: MASK_COARSE_PIN_MAX_PAGES }));
+          packs.set(name, await buildPack(item.id, name, source, { coarsePinMaxPages: maskCoarsePinMaxPages() }));
         } catch (err) {
           // A missing/broken mask must not take the whole item (or its albedo)
           // down — record it and carry on with the packs that did load. A
@@ -1467,6 +1524,13 @@ export async function startVtPanViewer({
     }
 
     async function updateResidency() {
+      // Refreshed every pass, not cached — the scene's total pack count
+      // changes as documents are created/deleted, and a NEW item created since
+      // the last pass must see the CURRENT count when it first requests its
+      // coarse pin a few lines below (item 1b). See refreshCoarsePinBudget's
+      // own header for why staleness here is the exact bug class this exists
+      // to prevent.
+      refreshCoarsePinBudget();
       // sortByLayer stamps `renderOrder` on each item — THE law
       // (scene/layer-order.js). Rebuilt every update because the draw list
       // itself changes with the viewed floor.
@@ -2033,6 +2097,12 @@ export async function startVtPanViewer({
     //
     // ensureItemLoaded is idempotent, so updateResidency's own loop below is then
     // a no-op for these — one path, walked twice, not two paths.
+    //
+    // THE COARSE-PIN BUDGET, computed BEFORE the first ensureItemLoaded call of
+    // the session — this loop (and prewarm, started further below) is where
+    // NEW packs first request their coarse pin, and that request reads
+    // `currentCoarseBudget` (item 1b). Must happen before either.
+    refreshCoarsePinBudget();
     const initialItems = buildItems(view.floorIndex);
     onLoadProgress?.({ done: 0, total: initialItems.length, detail: null });
     for (let i = 0; i < initialItems.length; i++) {
@@ -2636,6 +2706,26 @@ export async function startVtPanViewer({
             viewResidentPages: totalViewResident,
             residentPages: cache.stats().residentPages,
             capacityPages: cache.stats().capacityPages,
+          },
+          // THE SCENE-WIDE COARSE BUDGET (item 1b, 2026-07-17) — what every
+          // pack's coarse-pin request is capped against, and why. Fixes a
+          // real 3-floor scene that measured coarseIntendedPages:808 against a
+          // 246-page shortfall, freePages:0, and a 2.6s frame freeze — nothing
+          // was dividing "~tens of pages total" (§4.1) by how many packs the
+          // scene actually had.
+          coarsePinBudget: {
+            ...currentCoarseBudget,
+            interpretation:
+              `Every new pack's coarse pin is capped at perPackMaxPages (currently ` +
+              `${currentCoarseBudget.perPackMaxPages}), so the SUM across all ${currentCoarseBudget.packCount} ` +
+              `packs in the scene stays at or under totalBudgetPages (${currentCoarseBudget.totalBudgetPages}) — ` +
+              `a fixed fraction of capacityPages, not a per-pack allowance nobody was adding up. ` +
+              'coarsePinShortfall (above) should now read 0 on any scene: every pack gets its fair share ' +
+              'instead of some packs getting the old ~96-page default while others got starved to zero by ' +
+              'cache-fill order. The tradeoff: a pack that WOULD have gotten more (a big Level background, ' +
+              'previously ~82 pages) now gets less when many packs share the scene — its coarse/blurred ' +
+              'fallback is a bit softer during heavy streaming. Tune coarseBudgetFraction ' +
+              '(residency.js, default 0.25) if that tradeoff feels wrong.',
           },
           // Decode-memory proof (the Bush-failure fix): heldSources is the peak
           // number of full 576MB source bitmaps alive at once — bounded by the

@@ -13,6 +13,8 @@ import {
   coarsePinSet,
   coarseTopMipsForCap,
   diffResidency,
+  computeCoarsePinBudget,
+  DEFAULT_COARSE_BUDGET_FRACTION,
 } from '../residency.js';
 
 export function run(t) {
@@ -472,6 +474,93 @@ export function run(t) {
     ok(
       'residency: a cap larger than the whole pyramid pins all levels',
       coarseTopMipsForCap(table, { maxPages: 1e9 }) === table.maxMip + 1
+    );
+  }
+
+  // --- residency: computeCoarsePinBudget — item 1b, the scene-wide fix -----
+  {
+    // THE REGRESSION FIXTURE. A real 3-floor scene, pasted verbatim from a
+    // live diagnostics report (2026-07-17): 13 packs, capacityPages 2048.
+    // Under the OLD scheme (each pack independently asking coarseTopMipsForCap
+    // with no cap, i.e. up to 96 pages) this measured coarseIntendedPages:808,
+    // a 246-page shortfall (3 packs got ZERO), freePages:0, and a 2.6s freeze.
+    const REAL_SCENE_CAPACITY = 2048;
+    const REAL_SCENE_PACK_COUNT = 13;
+
+    const budget = computeCoarsePinBudget(REAL_SCENE_CAPACITY, REAL_SCENE_PACK_COUNT);
+    ok(
+      'computeCoarsePinBudget: total budget is a bounded fraction of capacity, not unbounded',
+      budget.totalBudgetPages === Math.floor(REAL_SCENE_CAPACITY * DEFAULT_COARSE_BUDGET_FRACTION)
+    );
+    ok('computeCoarsePinBudget: 25% of 2048 is 512', budget.totalBudgetPages === 512);
+    ok('computeCoarsePinBudget: 512 / 13 packs floors to 39', budget.perPackMaxPages === 39);
+
+    // THE ACTUAL FIX, proven arithmetically: the OLD per-pack demand (808 pages,
+    // measured live) vastly exceeds the NEW total budget (512) — that gap IS
+    // the shortfall that starved 3 packs to zero. Under the new scheme, the
+    // WORST CASE total (every pack claiming its full per-pack cap) can never
+    // exceed the budget, by construction.
+    const OLD_MEASURED_DEMAND = 808;
+    ok(
+      'computeCoarsePinBudget: the old uncoordinated demand exceeded the new total budget ' +
+        '(this IS why 3 packs got starved to zero — nothing was capping the sum)',
+      OLD_MEASURED_DEMAND > budget.totalBudgetPages
+    );
+    const worstCaseNewTotal = budget.perPackMaxPages * REAL_SCENE_PACK_COUNT;
+    ok(
+      'computeCoarsePinBudget: the new worst-case total NEVER exceeds the budget, by construction',
+      worstCaseNewTotal <= budget.totalBudgetPages
+    );
+
+    // FAIRNESS: no pack can be silently starved to zero by fill order any
+    // more — every pack gets the SAME share, always (item 1b: 3 of 13 packs
+    // got exactly 0 under the old first-come-first-served scheme).
+    ok('computeCoarsePinBudget: every pack gets a real, positive share', budget.perPackMaxPages > 0);
+
+    // Feed the computed cap into the REAL coarseTopMipsForCap/coarsePinSet
+    // pipeline (not just checking the arithmetic in isolation) — this is what
+    // ensureItemLoaded actually does with the number.
+    const worldSizedTable = new PageTable({ id: 'level:bg', worldWidthPx: 16050, worldHeightPx: 7650 });
+    const n = coarseTopMipsForCap(worldSizedTable, { maxPages: budget.perPackMaxPages });
+    const actualPages = coarsePinSet(worldSizedTable, { topMips: n }).length;
+    ok(
+      'computeCoarsePinBudget: a REAL world-sized pack, capped at the computed budget, actually fits under it',
+      actualPages <= budget.perPackMaxPages
+    );
+    ok(
+      'computeCoarsePinBudget: and still gets a real, non-degenerate coarse floor (more than just the 1 top page)',
+      actualPages > 1
+    );
+  }
+
+  // --- residency: computeCoarsePinBudget — edges ----------------------------
+  {
+    {
+      const b = computeCoarsePinBudget(2048, 0);
+      ok(
+        'computeCoarsePinBudget: zero packs treated as at least 1 (no divide-by-zero)',
+        b.packCount === 1 && Number.isFinite(b.perPackMaxPages)
+      );
+    }
+    ok(
+      'computeCoarsePinBudget: fractional pack counts are floored to a whole pack',
+      computeCoarsePinBudget(2048, 3.7).packCount === 3
+    );
+    // EXTREME oversubscription (far more packs than the fixture above) still
+    // returns a POSITIVE cap, never zero or negative — coarseTopMipsForCap's
+    // own floor (>=1 top page) is what makes even a tiny per-pack share safe,
+    // but the allocator itself must never hand out something nonsensical.
+    ok(
+      'computeCoarsePinBudget: extreme pack counts (1000) still yield a positive per-pack cap',
+      computeCoarsePinBudget(2048, 1000).perPackMaxPages >= 1
+    );
+    ok(
+      'computeCoarsePinBudget: a custom fraction is honored',
+      computeCoarsePinBudget(2048, 13, { coarseBudgetFraction: 0.5 }).totalBudgetPages === 1024
+    );
+    ok(
+      'computeCoarsePinBudget: more packs -> smaller (or equal) per-pack share, monotonically',
+      computeCoarsePinBudget(2048, 13).perPackMaxPages >= computeCoarsePinBudget(2048, 26).perPackMaxPages
     );
   }
 

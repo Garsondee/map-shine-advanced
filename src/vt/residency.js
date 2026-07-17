@@ -3,10 +3,16 @@
  * §4.1).
  *
  * No GPU feedback pass. MSA's camera is top-down, so the visible world rect
- * (from `scene/view-projection-service.getVisibleWorldRect()`) plus zoom gives
- * exactly the needed page range and mip, on the CPU, in microseconds — the
- * simplification that makes this "less exotic than it sounds" versus
- * id-Tech-style SVT feedback rendering.
+ * (from `vt/view-state.js`'s `viewToWorldRect()`) plus zoom gives exactly the
+ * needed page range and mip, on the CPU, in microseconds — the simplification
+ * that makes this "less exotic than it sounds" versus id-Tech-style SVT
+ * feedback rendering.
+ *
+ * (This line used to credit `scene/view-projection-service.getVisibleWorldRect()`,
+ * which Keyhole.md §4.1 named as the residency driver — but that harvested
+ * module was superseded by the world camera + `view-state.js` and never
+ * actually ran. Deleted 2026-07-17; the real caller has always been
+ * `viewToWorldRect`.)
  *
  * Pure functions only: given a world rect and a `PageTable`, return the exact
  * set of page coordinates that must be resident to cover it, plus a guard

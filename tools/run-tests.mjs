@@ -67,6 +67,7 @@ import { spawnSync } from 'node:child_process';
 import { run as runStructure } from './verify-structure.test.mjs';
 import { run as runGateSelfTest } from './run-tests.test.mjs';
 import { run as runReachability } from './reachability.test.mjs';
+import { run as runHarvestParams } from './harvest-params.test.mjs';
 
 // fileURLToPath, not URL.pathname — the repo path contains spaces, which
 // pathname percent-encodes into %20 and fs then cannot find.
@@ -130,6 +131,7 @@ function main() {
     runInProcess('tools/verify-structure.test.mjs', runStructure),
     runInProcess('tools/run-tests.test.mjs (the gate testing itself)', runGateSelfTest),
     runInProcess('tools/reachability.test.mjs', runReachability),
+    runInProcess('tools/harvest-params.test.mjs', runHarvestParams),
   ];
 
   const suites = discoverSuites();

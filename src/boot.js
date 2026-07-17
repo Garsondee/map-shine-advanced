@@ -48,6 +48,7 @@ import {
   getSourceBitmap,
 } from './vt/index.js';
 import { PASSES, validatePassGraph, PASS_SEAMS, PASS_IMPLS } from './graph/index.js';
+import { checkParamsHarvest } from './effects/index.js';
 import { NotBuiltError } from './core/not-built.js';
 import { getActiveSceneFloors, computeVisibleFloorIndices } from './foundry/active-scene-source.js';
 import { collectSceneLayers } from './foundry/scene-layers.js';
@@ -171,6 +172,18 @@ function install() {
       liveChecks,
     };
   });
+
+  // THE PARAMS HARVEST, RE-CHECKED LIVE (2026-07-17). 45 V2 getControlSchema()
+  // bodies (2,226 params, tools/harvest-params.mjs) generated once, but a
+  // generator that runs once and is then trusted forever is exactly the
+  // disease this whole session has been about — so this re-validates every
+  // harvested schema against the REAL params-schema.js contract on demand,
+  // the same discipline as pass-graph-health above.
+  MapShine.debug.registerReport('params-harvest-health', 'Params harvest health', () => ({
+    report: 'params-harvest-health',
+    generatedAt: new Date().toISOString(),
+    ...checkParamsHarvest(),
+  }));
 
   MapShine.debug.registerReport('vt-live-decode', 'Live decode test', async () => ({
     report: 'vt-live-decode',

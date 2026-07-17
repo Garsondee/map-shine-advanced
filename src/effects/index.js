@@ -8,3 +8,4 @@ export { buildLightVisibilityPass, buildLightAccumulatePass } from './lighting/l
 export { buildGradePass } from './grade/grade-pass.js';
 export { buildWaterPass, buildFluidSimPass } from './water/water-pass.js';
 export { buildSurfaceResponsePass } from './surface-response.js';
+export { checkParamsHarvest } from './params-harvest-health.js';

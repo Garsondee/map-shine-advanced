@@ -1429,6 +1429,8 @@ export async function startVtPanViewer({
       prefetchSkippedPacks = 0;
       lastUpdate.placementChanges = 0;
       lastUpdate.itemCount = items.length;
+      passSeq++;
+      const thisPass = passSeq;
 
       // Items that dropped OUT of the draw list: release their VIEW pages (never
       // their coarse pins — those stay resident always, §4.1/§4.5) and hide the
@@ -1475,9 +1477,20 @@ export async function startVtPanViewer({
         // Counted, not just done. A document-driven refresh that runs and moves
         // NOTHING is indistinguishable from a hook that never fired — and those
         // two need opposite fixes. See `lastUpdate`'s declaration.
-        if (refreshItemPlacement(state, item)) {
+        const changed = refreshItemPlacement(state, item);
+        if (changed) {
           lastUpdate.placementChanges++;
           lastUpdate.placementChangesTotal++;
+        }
+        if (item.kind === 'token') {
+          tokenPassLog.push({
+            pass: thisPass,
+            id: item.id,
+            x: state.placement.x,
+            y: state.placement.y,
+            changed,
+          });
+          if (tokenPassLog.length > TOKEN_PASS_LOG_MAX) tokenPassLog.shift();
         }
         const onScreen = rectsOverlap(state.worldBounds, worldRect);
 
@@ -1590,6 +1603,35 @@ export async function startVtPanViewer({
       docRefreshes: 0,
       byHook: {},
     };
+
+    /**
+     * ROUND 3 — the same author move, a DIFFERENT symptom: liveVsRendered showed
+     * a REAL 807.8px gap, docRefreshes:4 (2 updateToken + 2 moveToken, matching
+     * two movement segments) but placementChangesTotal:1. That is one report;
+     * it does not say whether the gap is STRUCTURAL (a hook genuinely missed) or
+     * TRANSIENT (the async residency pass legitimately had not caught up yet —
+     * plausible given item 1b's finding, the SAME scene's cache is already at
+     * `freePages:0` with 246 coarse pins short, so streaming a token's freshly-
+     * moved-to pages can be slow). Those need OPPOSITE next actions — more hook
+     * plumbing vs the cache-budget work already tracked as 1b — so guessing is
+     * exactly the six-rounds trap this project already paid for once.
+     *
+     * `passLog`: one entry per token item per REAL updateResidency() PASS (not
+     * per hook — hooks that fire synchronously back-to-back coalesce into ONE
+     * pass via `scheduleResidencyUpdate`'s do-while, so `docRefreshes` and
+     * "actual passes" are NOT the same count; conflating them is how the last
+     * report read stranger than it was). `pass` is a plain incrementing
+     * counter, not a timestamp — `time/one-clock` again.
+     *
+     * A second report, taken a few seconds after the FIRST without touching
+     * anything, is what actually distinguishes the two causes: if `passLog`
+     * shows a LATER pass converging on the live position, it was transient; if
+     * `totalPasses` stops advancing for that item while `liveVsRendered` still
+     * disagrees, no further pass is even being attempted and the hook is the gap.
+     */
+    let passSeq = 0;
+    const TOKEN_PASS_LOG_MAX = 24;
+    const tokenPassLog = [];
 
     let residencyInFlight = false;
     let residencyDirty = false;
@@ -2494,17 +2536,27 @@ export async function startVtPanViewer({
           // do NOT pan, then read this.
           documentSync: {
             ...lastUpdate,
+            totalPasses: passSeq,
+            // Newest last. `docRefreshes` counts HOOK FIRINGS; `totalPasses`
+            // counts REAL updateResidency() executions — hooks firing back-to-
+            // back synchronously (exactly what two movement segments' paired
+            // updateToken+moveToken do) coalesce into fewer passes via
+            // scheduleResidencyUpdate's do-while. The two numbers disagreeing is
+            // NORMAL, not a bug on its own.
+            passLog: tokenPassLog,
             interpretation:
-              'Move a token WITHOUT panning, then read these. `byHook` is the one that matters: ' +
-              'it names WHICH hooks drove a refresh, which the previous cut could not answer. ' +
-              'byHook has no updateToken/moveToken entry = Foundry never told us the token moved ' +
-              '(the hook set in boot.js is wrong for v14 movement). ' +
-              'byHook HAS updateToken/moveToken but placementChangesTotal did not rise = we ran ' +
-              'and re-read the SAME position (the hook fires before the position lands). ' +
-              'placementChangesTotal rose but the screen disagrees = geometry moved and the GPU ' +
-              'never saw it (BufferAttribute upload under WebGPU). ' +
-              'Use placementChangesTotal (cumulative), NOT placementChanges (last pass only — a ' +
-              'later no-op pass resets it to 0 and erases the evidence).',
+              'Move a token WITHOUT panning, then read these. `byHook` names WHICH hooks drove a ' +
+              'refresh. `passLog` is the decisive one for a REMAINING mismatch: it is one row per ' +
+              'token per REAL pass (not per hook — see totalPasses vs docRefreshes above). Find the ' +
+              "moved token's id in passLog: if its LAST row already equals liveVsRendered.live{X,Y} " +
+              'for that item in drawList, MSA is caught up and any on-screen lag is the render not ' +
+              'having painted a new frame yet, not a stale read. If its last row does NOT match, and ' +
+              'a SECOND report (taken a few seconds later, nothing else touched) shows no NEW row for ' +
+              'that id, no further pass is even being attempted — Foundry is not telling us. If a ' +
+              'later report DOES add a new, correct row, this is TRANSIENT lag under cache pressure ' +
+              '(cross-reference cacheStats.freePages and layerResidencyTotals.coarsePinShortfall — ' +
+              'both nonzero means the cache is already oversubscribed and streaming the moved-to ' +
+              'position can legitimately take a beat).',
           },
           canvasSizePx: { width: canvasW, height: canvasH },
           mountedInBoard: mount.fill && mount.host !== document.body,

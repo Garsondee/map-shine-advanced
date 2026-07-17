@@ -191,10 +191,16 @@ export function createVtSampler(
    * THE walk: from `startMip` up to `maxMip`, return the finest RESIDENT level's
    * texel — the automatic coarse fallback that makes "not loaded yet" mean SOFT
    * rather than WRONG.
+   *
+   * `foundMipOut` receives the mip the walk ACTUALLY landed on, which is not
+   * always `startMip` — that difference is the whole point, and ignoring it was
+   * the ghost bug (see `sample`). Stays `startMip.sub(1)`-style sentinel `-1`
+   * when nothing was resident at any level (the magenta case).
    */
-  const sampleFromMip = Fn(([startMip, worldPx]) => {
+  const sampleFromMip = Fn(([startMip, worldPx, foundMipOut]) => {
     const result = vec4(1, 0, 1, 1).toVar(); // magenta tripwire — see header
     const found = int(0).toVar();
+    foundMipOut.assign(int(-1));
     // The running Y origin into the flattened pyramid. Accumulates over EVERY
     // iteration including skipped ones — that is what makes it correct without an
     // array (origins[m].x is always 0; see header).
@@ -228,6 +234,7 @@ export function createVtSampler(
             .add(t.g.mul(255).add(0.5).floor().toInt().mul(int(256)));
           result.assign(sampleAtlasSlot(slot, cellF.fract()));
           found.assign(int(1));
+          foundMipOut.assign(i);
         });
       });
 
@@ -247,12 +254,52 @@ export function createVtSampler(
 
     const mipLo = uniforms.requestedMip;
     const mipHi = mipLo.add(int(1)).min(uniforms.maxMip);
-    const colorLo = sampleFromMip(mipLo, worldPx);
-    const colorHi = sampleFromMip(mipHi, worldPx);
+    const foundLo = int(-1).toVar();
+    const foundHi = int(-1).toVar();
+    const colorLo = sampleFromMip(mipLo, worldPx, foundLo);
+    const colorHi = sampleFromMip(mipHi, worldPx, foundHi);
+
+    // ONLY CROSS-FADE TWO LEVELS THAT BOTH RESOLVED WHERE THEY WERE ASKED TO.
+    //
+    // THE GHOST (author-reported 2026-07-17, after a thrash test: "a partially
+    // transparent version of a section of the map appearing very large and in
+    // the wrong position... fully zooming in doesn't cause it to get evicted").
+    // Every one of those four words is this blend, and the author's own report
+    // carried all three numbers that prove it:
+    //
+    //   prefetchSkippedPacks: 7 (of 11) — under pressure, streamPackResidency
+    //     DECLINES the speculative tiers, so `plan.prefetchCoarser` (mip 2)
+    //     never streams while `plan.fine` (mip 1) always does.
+    //   requestedMip: 1, requestedMipFrac: 1.494 — so t = 0.494.
+    //   coarseTopMips: 4 — mips 3..6 are coarse-PINNED, never evictable.
+    //
+    // So `colorLo`'s walk finds mip 1 (sharp) and `colorHi`'s walk finds NOT
+    // mip 2 (declined) but mip 3 — the coarse pin. The blend then cross-fades
+    // the sharp image with a FOUR-TIMES-COARSER one at 49.4%: partially
+    // transparent (literally the mix weight), very large (4x coarser features),
+    // and permanent, because mip 3 is pinned and mip 2 is never coming.
+    //
+    // The fallback was never the bug — "not loaded yet means SOFT, not WRONG"
+    // (§4.1) is exactly right. The bug is BLENDING a fallback against a
+    // non-fallback, which produces something WRONG out of two things that are
+    // each individually correct. When the brackets disagree, `colorLo` is by
+    // construction the finest resident level, so passing it through alone is
+    // both the sharpest and the honest answer.
+    //
+    // Note the asymmetric case is already harmless and stays supported: if
+    // `colorLo` ITSELF fell back (foundLo > mipLo), then its walk and
+    // `colorHi`'s converge on the same level, so foundLo === foundHi and the
+    // two colours are identical — blending them is a no-op either way. This
+    // guard only ever suppresses the mismatched pair.
+    const bracketsResolvedAsAsked = foundLo.equal(mipLo).and(foundHi.equal(mipHi));
     // At the pyramid's top mipHi === mipLo, so the blend weight is forced to 0 and
     // colorLo passes through — the GLSL's early-return, expressed as data (a node
     // graph has no control flow to return from).
-    const t = select(mipHi.greaterThan(mipLo), uniforms.requestedMipFrac.sub(mipLo.toFloat()).clamp(0, 1), float(0));
+    const t = select(
+      mipHi.greaterThan(mipLo).and(bracketsResolvedAsAsked),
+      uniforms.requestedMipFrac.sub(mipLo.toFloat()).clamp(0, 1),
+      float(0)
+    );
     const blended = mix(colorLo, colorHi, t);
 
     // OUT OF WORLD: its own case, matte black. Not magenta (reserved for a broken

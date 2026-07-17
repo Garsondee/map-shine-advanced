@@ -650,6 +650,17 @@ export async function startVtPanViewer({
     // structurally cannot express.
     const itemStates = new Map();
     const itemLoadErrors = [];
+    /**
+     * Items whose source is permanently broken (404, undecodable) — never
+     * re-attempted. See the skip in updateResidency's phase 1 for the full
+     * finding and the deliberate trade-off. Kept beside `itemLoadErrors`
+     * because they are two halves of one thing: that array is what the author
+     * SEES, this set is what the loader DOES, and letting them drift apart is
+     * how "the report says one broken item" coexisted with "we re-fetch it
+     * seventy-seven times".
+     * @type {Set<string>}
+     */
+    const failedItemIds = new Set();
 
     /**
      * THE SHARED COARSE-PIN BUDGET (item 1b, 2026-07-17) — see
@@ -1646,6 +1657,27 @@ export async function startVtPanViewer({
       // loading every coarse pin makes that structurally impossible.
       const states = [];
       for (const item of items) {
+        // A PERMANENTLY-BROKEN ITEM IS NOT RETRIED (item 1d, 2026-07-17). Found
+        // in the author's own thrash report: ten identical `HTTP 404` entries
+        // for one token image, and `mainThreadFallbackSourceDecodes: 12`.
+        // `ensureItemLoaded` throws for a broken source, so `itemStates` never
+        // gets an entry, so it was re-attempted on EVERY residency pass —
+        // seventy-seven of them in that session — each paying a ranged fetch, a
+        // worker dimensions round-trip, AND a main-thread fallback decode
+        // attempt (the last of which is the operation this file elsewhere calls
+        // "a giant-image decode the render loop could feel"). `itemLoadErrors`
+        // deduped the REPORT; nothing deduped the WORK, so the report looked
+        // tidy while the cost repeated forever.
+        //
+        // The trade, stated because it IS a real one: a source that starts
+        // working later (a server hiccup, an asset uploaded mid-session) now
+        // needs a reload rather than fixing itself on the next pass. That is
+        // the right way round — an asset that 404s is overwhelmingly gone, not
+        // late, and paying an unbounded per-frame cost forever on the chance it
+        // returns is exactly the "reactive mechanism" shape Keyhole exists to
+        // delete. The failure stays LOUD either way: it is in `layerLoadErrors`
+        // in every report, permanently, not silently skipped.
+        if (failedItemIds.has(item.id)) continue;
         try {
           states.push([item, await ensureItemLoaded(item)]);
         } catch (err) {
@@ -1653,6 +1685,7 @@ export async function startVtPanViewer({
           // down. Recorded rather than thrown — the debug panel surfaces this,
           // since the author debugs by pasting reports, not reading the console.
           const message = String(err?.message || err);
+          failedItemIds.add(item.id);
           if (!itemLoadErrors.some((e) => e.id === item.id)) {
             itemLoadErrors.push({ id: item.id, src: item.src, error: message });
             console.error(`[vt-pan-viewer] item "${item.id}" failed to load (${item.src}):`, err);

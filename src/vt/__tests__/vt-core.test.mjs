@@ -261,6 +261,114 @@ export function run(t) {
     throws('cache: rejects zero/negative budget', () => new PageCache({ budgetBytes: 0 }));
   }
 
+  // --- PageCache: coarseReservePages — item 1b's reservation half ----------
+  // (2026-07-17). The FIRST cut (residency.js#computeCoarsePinBudget) capped
+  // what each pack ASKS for. It did nothing about ROOM: 'coarse' and 'view'
+  // competed for the same slots on equal footing, so a busy viewport could
+  // pin the WHOLE cache before a background pack's coarse request got a turn
+  // — measured live: pinnedCoarse:342 + pinnedView:1706 = 2048 (100% pinned),
+  // 3 packs' coarse requests missed, PERMANENTLY (buildPack asks once).
+  {
+    // 10-page cache, reserve 4 for coarse -> view may claim at most 6.
+    const cache = new PageCache({ budgetBytes: 10 * 256 * 1024 });
+    cache.coarseReservePages = 4;
+    ok('cache: coarseReservePages getter reflects what was set', cache.coarseReservePages === 4);
+
+    // Fill the view tier right up to ITS cap (6 pages) — every one must succeed.
+    for (let i = 0; i < 6; i++) {
+      const res = cache.request(`view${i}`, { pin: 'view' });
+      ok(`cache: view request ${i} (within the view cap) succeeds`, res.resident === true);
+    }
+    ok('cache: view tier is now exactly at its cap', cache.stats().pinnedView === 6);
+
+    // A 7th VIEW request must be REFUSED — not because the cache is full (4
+    // slots remain physically free), but because granting it would eat into
+    // the coarse reserve. This is the whole mechanism, in one assertion.
+    const refused = cache.request('view6', { pin: 'view' });
+    ok(
+      'cache: a 7th view request is refused — the reserve, not physical capacity, is what blocks it',
+      refused.resident === false && cache.stats().freePages === 4
+    );
+
+    // And a COARSE request, RIGHT NOW, while view sits at its cap and 4 slots
+    // are still free — must succeed. This is the entire point: the reserve
+    // guarantees the coarse request that comes AFTER a busy viewport still
+    // has somewhere to go.
+    for (let i = 0; i < 4; i++) {
+      const res = cache.request(`coarse${i}`, { pin: 'coarse' });
+      ok(`cache: coarse request ${i} succeeds even with view at its cap`, res.resident === true);
+    }
+    ok('cache: coarseReserveMisses stayed 0 — the reserve held', cache.stats().coarseReserveMisses === 0);
+    ok('cache: the cache is now genuinely full', cache.stats().freePages === 0);
+
+    // ONE MORE coarse request, now that coarse itself has fully consumed its
+    // OWN reserve — THIS should miss (asking for more than the scene's own
+    // budgeted total, the invariant computeCoarsePinBudget's per-pack cap is
+    // supposed to prevent from ever happening in practice) — and it must be
+    // visible via the dedicated counter, not silently blended into the
+    // ordinary 'view' miss rate.
+    const coarseOverflow = cache.request('coarseOverflow', { pin: 'coarse' });
+    ok('cache: a coarse request beyond the reserve itself still misses cleanly', coarseOverflow.resident === false);
+    ok(
+      'cache: ...and it is counted SEPARATELY as coarseReserveMisses, not just misses',
+      cache.stats().coarseReserveMisses === 1
+    );
+  }
+
+  // --- PageCache: coarse is NEVER downgraded to view ------------------------
+  {
+    const cache = new PageCache({ budgetBytes: 4 * 256 * 1024 });
+    cache.coarseReservePages = 2;
+    cache.request('a', { pin: 'coarse' });
+    ok('cache: page starts coarse-pinned', cache.stats().pinnedCoarse === 1 && cache.stats().pinnedView === 0);
+
+    // The SAME page, requested again as 'view' — this is routine: the current
+    // mip being streamed can legitimately coincide with an already-coarse-
+    // pinned page (extreme zoom-out). Must NOT weaken the guarantee.
+    const res = cache.request('a', { pin: 'view' });
+    ok('cache: re-requesting an already-coarse page as view still reports resident', res.resident === true);
+    ok(
+      'cache: ...but the pin stays coarse — never silently downgraded to the weaker class',
+      cache.stats().pinnedCoarse === 1 && cache.stats().pinnedView === 0
+    );
+
+    // The reverse direction (view -> coarse) is a legitimate UPGRADE and must work.
+    cache.request('b', { pin: 'view' });
+    cache.request('b', { pin: 'coarse' });
+    ok(
+      'cache: view -> coarse IS allowed (strictly increases the guarantee)',
+      cache.stats().pinnedCoarse === 2 && cache.stats().pinnedView === 0
+    );
+  }
+
+  // --- PageCache: coarseReservePages is clamped, always ---------------------
+  {
+    const cache = new PageCache({ budgetBytes: 10 * 256 * 1024 }); // 10 pages
+    cache.coarseReservePages = -5;
+    ok('cache: a negative reserve clamps to 0', cache.coarseReservePages === 0);
+    cache.coarseReservePages = 999;
+    ok('cache: a reserve larger than capacity clamps to capacityPages', cache.coarseReservePages === 10);
+    cache.coarseReservePages = 3.9;
+    ok('cache: a fractional reserve floors to a whole page count', cache.coarseReservePages === 3);
+    cache.coarseReservePages = NaN;
+    ok('cache: NaN clamps to 0, not NaN propagating into admission checks', cache.coarseReservePages === 0);
+  }
+
+  // --- PageCache: default reserve is 0 — EXISTING callers unaffected -------
+  {
+    // Anyone who never sets coarseReservePages (today: the torture-fixture
+    // viewer, and every OTHER test in this file) gets today's exact prior
+    // behavior — 'view' can claim the whole cache, same as before this fix.
+    const cache = new PageCache({ budgetBytes: 3 * 256 * 1024 });
+    ok('cache: default coarseReservePages is 0', cache.coarseReservePages === 0);
+    for (let i = 0; i < 3; i++) {
+      ok(
+        `cache: with no reserve set, view request ${i} claims the whole cache`,
+        cache.request(`v${i}`, { pin: 'view' }).resident
+      );
+    }
+  }
+
   // --- residency: computeVisiblePages basic range + guard ring ------------
   {
     const table = new PageTable({ id: 'floor0:albedo', worldWidthPx: 12000, worldHeightPx: 12000 }); // payload 248, 49x49 @ mip0

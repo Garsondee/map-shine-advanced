@@ -633,7 +633,18 @@ export async function startVtPanViewer({
       for (let f = 0; f < floorCount; f++) {
         for (const item of buildItems(f)) seen.add(item.id);
       }
-      currentCoarseBudget = computeCoarsePinBudget(cache.stats().capacityPages, seen.size);
+      // cache.capacityPages, not cache.stats() — a plain constant field, no
+      // reason to pay for stats()'s full diagnostic scan just to read it.
+      currentCoarseBudget = computeCoarsePinBudget(cache.capacityPages, seen.size);
+      // THE RESERVE (item 1b, reservation half, 2026-07-17) — kept in lockstep
+      // with the SAME totalBudgetPages the per-pack cap is computed from, so
+      // "how big is the coarse budget" has exactly one source of truth. See
+      // page-cache.js's header for why capping the ASK alone (the first cut)
+      // wasn't enough: 'view' and 'coarse' competed for the same slots on
+      // equal footing, so a busy viewport could pin the WHOLE cache before a
+      // background-prewarmed floor's coarse request ever got a turn — and
+      // that request is made exactly once, at pack creation, never retried.
+      cache.coarseReservePages = currentCoarseBudget.totalBudgetPages;
     }
     let loopActive = false; // tracks whether the render loop is running (batch uploads pause/restore it)
 
@@ -1190,7 +1201,14 @@ export async function startVtPanViewer({
       for (const page of pages) {
         const alreadyInCache = cache.isResident(page.key);
         const { resident, slot } = cache.request(page.key, { pin: pinClass });
-        if (!resident) continue; // cache full — a structural miss, not a crash; coarse fallback covers it
+        // A miss here for pinClass:'view' is ordinary pressure — the coarse
+        // fallback covers it, never a crash. A miss for pinClass:'coarse'
+        // (item 1b) is DIFFERENT: there is no fallback BELOW the coarse pin
+        // itself — it IS the fallback. `cache.coarseReservePages` (page-
+        // cache.js) exists specifically to make this branch structurally
+        // unreachable for 'coarse'; `cacheStats.coarseReserveMisses` in
+        // diagnostics is the tripwire if that guarantee is ever wrong.
+        if (!resident) continue;
         if (!alreadyInCache) toDecode.push({ page, slot });
       }
       if (toDecode.length === 0) return;
@@ -2715,17 +2733,36 @@ export async function startVtPanViewer({
           // scene actually had.
           coarsePinBudget: {
             ...currentCoarseBudget,
+            // GROUND TRUTH for whether the reserve is actually holding —
+            // check THESE two, not the interpretation text below. The first
+            // cut (capping what each pack ASKS for) landed alone and still
+            // measured a real 81-page shortfall on the author's scene: it
+            // capped the ask but never reserved the ROOM, so a busy viewport
+            // could still pin the whole cache with 'view' pages before a
+            // background pack's coarse request got a turn. cacheStats below
+            // is where that second half (page-cache.js's coarseReservePages)
+            // actually lives.
+            cacheReserveCheck: {
+              coarseReservePages: cache.stats().coarseReservePages,
+              coarseReserveMisses: cache.stats().coarseReserveMisses,
+              interpretation:
+                'coarseReserveMisses should read 0 — the reserve is specifically what makes a coarse-pin ' +
+                'miss structurally impossible (page-cache.js). If nonzero, the reserve itself is undersized ' +
+                'or was not set before some pack requested its coarse pin — a real bug, not routine pressure.',
+            },
             interpretation:
               `Every new pack's coarse pin is capped at perPackMaxPages (currently ` +
               `${currentCoarseBudget.perPackMaxPages}), so the SUM across all ${currentCoarseBudget.packCount} ` +
               `packs in the scene stays at or under totalBudgetPages (${currentCoarseBudget.totalBudgetPages}) — ` +
-              `a fixed fraction of capacityPages, not a per-pack allowance nobody was adding up. ` +
-              'coarsePinShortfall (above) should now read 0 on any scene: every pack gets its fair share ' +
-              'instead of some packs getting the old ~96-page default while others got starved to zero by ' +
-              'cache-fill order. The tradeoff: a pack that WOULD have gotten more (a big Level background, ' +
-              'previously ~82 pages) now gets less when many packs share the scene — its coarse/blurred ' +
-              'fallback is a bit softer during heavy streaming. Tune coarseBudgetFraction ' +
-              '(residency.js, default 0.25) if that tradeoff feels wrong.',
+              `a fixed fraction of capacityPages, not a per-pack allowance nobody was adding up. That caps the ` +
+              'ASK; cacheReserveCheck (above) covers the ROOM — page-cache.js reserves totalBudgetPages worth ' +
+              "of slots that 'view' requests may never claim, so a busy viewport can't fill the whole cache " +
+              "before a background pack's coarse request gets a turn. The tradeoff: a pack that would have " +
+              'gotten more (a big Level background, previously ~82 pages) now gets less when many packs share ' +
+              'the scene, AND the view tier itself now has less room at its OWN peak (it can no longer ever ' +
+              'claim the pages reserved for coarse) — both a softer coarse/blurred fallback and slightly less ' +
+              'peak view-tier sharpness under heavy pan/zoom, traded for the shortfall/freeze going away. Tune ' +
+              'coarseBudgetFraction (residency.js, default 0.25) if that tradeoff feels wrong.',
           },
           // Decode-memory proof (the Bush-failure fix): heldSources is the peak
           // number of full 576MB source bitmaps alive at once — bounded by the

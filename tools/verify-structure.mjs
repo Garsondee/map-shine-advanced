@@ -680,6 +680,36 @@ export const RULES = [
       'runtime. One import across that boundary and V2 is alive again inside V3.',
     instead: 'Harvest by `git mv` into src/ + fix imports, in one commit. Never a cross-boundary import.',
   },
+
+  // ===================================================================
+  // MASKS HAVE ONE AUTHORITY — suffix/file-convention knowledge lives in
+  // scene/mask-catalog.js and NOWHERE else. (Built 2026-07-17 with the mask
+  // authority; the wall and the room land in the same commit, at zero.)
+  // ===================================================================
+  {
+    id: 'masks/authority-only',
+    // A mask file suffix appearing in CODE (comments are stripped by the
+    // scanner): quoted, template-interpolated, or inside a longer filename
+    // literal alike. The trailing (?![a-zA-Z]) keeps identifier substrings out
+    // (`_Firebase`) while still catching V2's own `_Outdoors_0` per-level hack.
+    // The list deliberately RESERVES the not-yet-declared V2 suffixes too
+    // (Roughness/Normal/…): the day an effect needs one, its declaration goes
+    // in the catalog — one line — or this wall stops the build.
+    pattern:
+      /_(?:Outdoors|Shadow|Fire|Specular|Window|Windows|Structural|Tree|Bush|Water|Roughness|Normal|Iridescence|Prism|Fluid|Dust|Ash)(?![a-zA-Z])/,
+    allow: [`${sep}scene${sep}mask-catalog.js`],
+    why:
+      'V2 held the mask-suffix convention in THREE independent copies — assets/loader.js EFFECT_MASKS ' +
+      "(with a hardcoded '_Outdoors_0'/'_1' per-level hack), masks/mask-catalog.js (synced to the " +
+      'loader BY COMMENT), and per-effect literals — then fanned results out through 12 hand-listed ' +
+      '?.setOutdoorsMask?.() pushes, with TWO mask services running in parallel "during rollout", ' +
+      'forever (module-loading-investigation.md). Copyable knowledge drifted; the drift needed a ' +
+      '4,092-line compositor to reconcile.',
+    instead:
+      'Import MASK_KINDS / maskKindById / assembleLayerDescriptors from scene/index.js (the catalog ' +
+      'is the one legal home of suffix knowledge), and serve/consume masks through the mask ' +
+      'authority (scene/mask-authority.js). Adding a mask kind is ONE catalog entry.',
+  },
 ];
 
 // ---------------------------------------------------------------------------

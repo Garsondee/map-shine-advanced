@@ -25,7 +25,8 @@
  * @module tools/verify-structure.test
  */
 
-import { sep } from 'node:path';
+import { existsSync } from 'node:fs';
+import { sep, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { RULES, validateExceptions, applyExceptions } from './verify-structure.mjs';
@@ -297,6 +298,32 @@ const V2_CORPSES = [
     code: 'console.table(rows);',
     note: 'table/group are how the door gets propped open; a diagnostic that never reaches the export is the one nobody can read back',
   },
+
+  // --- the mask-suffix sprawl: three independent copies of the file convention
+  {
+    rule: 'masks/authority-only',
+    from: 'legacy/assets/loader.js:56 (EFFECT_MASKS — copy #1 of the convention)',
+    code: "outdoors: { suffix: '_Outdoors', required: false, description: 'Indoor/outdoor area mask' },",
+    note: 'the loader’s own suffix registry, one of three that drifted apart',
+  },
+  {
+    rule: 'masks/authority-only',
+    from: 'legacy/assets/loader.js:58 (the hardcoded per-level hack)',
+    code: "outdoors0: { suffix: '_Outdoors_0', required: false, description: 'Outdoors mask for level 0' },",
+    note: 'the _Outdoors_0 per-level variant — the boundary regex must still catch a trailing _N',
+  },
+  {
+    rule: 'masks/authority-only',
+    from: 'legacy/masks/GpuSceneMaskCompositor.js:1259',
+    code: "const probed = await assetLoader.probeMaskFile(fallbackPath, '_Outdoors', { suppressProbeErrors: true });",
+    note: 'a THIRD holder of the suffix, deep inside the 4,092-line compositor, complete with probe-error suppression',
+  },
+  {
+    rule: 'masks/authority-only',
+    from: 'legacy/assets/loader.js:63 (the alias the window kind now absorbs)',
+    code: "windows: { suffix: '_Windows', required: false, description: 'Window lighting mask' },",
+    note: 'V2 alias suffixes are reserved too — they resolve through the catalog, never re-hardcode',
+  },
 ];
 
 /** Lines that must NOT trip a rule (guards against a wall crying wolf). */
@@ -334,6 +361,14 @@ const MUST_PASS = [
     note: 'a big world-space plane is still not a fullscreen quad',
   },
   { code: 'const quad = new THREE.QuadMesh(material);', note: "three's OWN fullscreen quad is the prescribed fix" },
+  // The mask wall must bite on SUFFIX literals, never on identifiers that
+  // merely start the same way, and never on catalog KIND ids (no underscore).
+  {
+    code: 'const value = state._Normalized ?? 0;',
+    note: 'an identifier substring is not a mask suffix (_Normal + letter)',
+  },
+  { code: 'this._FireballCache = new Map();', note: 'an identifier substring is not a mask suffix (_Fire + letter)' },
+  { code: "const kind = maskKindById('outdoors');", note: 'catalog kind ids are the sanctioned vocabulary' },
 ];
 
 export function run(t) {
@@ -358,6 +393,26 @@ export function run(t) {
   for (const r of RULES) {
     t.ok(`rule '${r.id}' explains WHY (cites a V2 corpse)`, typeof r.why === 'string' && r.why.length > 80);
     t.ok(`rule '${r.id}' says what to do INSTEAD`, typeof r.instead === 'string' && r.instead.length > 20);
+  }
+
+  // ---- the mask wall's ONE DOOR must be open (and be a real file) ----------
+  // Same lesson as the THREE-law doors below: a wall whose sanctioned path is
+  // welded shut (allow-list typo, file moved) teaches everyone to route around
+  // it. The catalog is where suffix literals are LEGAL — prove the allow-list
+  // actually matches the real file, and that the wall still bites elsewhere.
+  {
+    const rule = byId.get('masks/authority-only');
+    t.ok("'masks/authority-only' exists", !!rule);
+    if (rule) {
+      const catalogRel = `src${sep}scene${sep}mask-catalog.js`;
+      t.ok(
+        'the catalog door is OPEN (allow-list matches its real path)',
+        rule.allow.some((a) => catalogRel.includes(a))
+      );
+      t.ok('the catalog file exists on disk', existsSync(join(ROOT, 'src', 'scene', 'mask-catalog.js')));
+      t.ok('the wall bites a bare suffix concat', matches(rule, "const s = base + '_Outdoors.webp';"));
+      t.ok('the wall bites template interpolation', matches(rule, 'const u = `${dir}/${base}_Specular.${ext}`;'));
+    }
   }
 
   // ---- THE LAW's two walls: the ONE DOOR each must actually be open --------

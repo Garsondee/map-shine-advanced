@@ -27,4 +27,6 @@ export {
   soakZoomStep,
 } from './vt-pan-viewer.js';
 export { runVtLiveDecodeTest } from './vt-live-decode-report.js';
-export { getSourceBitmap } from './decode-pool.js';
+// readPageBitmapPixels: the mask authority's injected page-pixel reader —
+// per-page CPU extraction is decode machinery, so it lives with the decoder.
+export { getSourceBitmap, readPageBitmapPixels } from './decode-pool.js';

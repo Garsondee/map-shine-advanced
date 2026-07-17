@@ -10,6 +10,7 @@
 import { run as runActiveSceneSource } from './active-scene-source.test.mjs';
 import { run as runCanvasCompositing } from './canvas-compositing.test.mjs';
 import { run as runDrawListDocuments } from './draw-list-documents.test.mjs';
+import { run as runMaskDiscovery } from './mask-discovery.test.mjs';
 import { run as runPixiProxyTextures } from './pixi-proxy-textures.test.mjs';
 import { run as runSceneGeometry } from './scene-geometry.test.mjs';
 import { run as runSceneLayers } from './scene-layers.test.mjs';
@@ -52,6 +53,7 @@ const suites = [
   ['active-scene-source', runActiveSceneSource],
   ['canvas-compositing', runCanvasCompositing],
   ['draw-list-documents', runDrawListDocuments],
+  ['mask-discovery', runMaskDiscovery],
   ['pixi-proxy-textures', runPixiProxyTextures],
   ['scene-geometry', runSceneGeometry],
   ['scene-layers', runSceneLayers],

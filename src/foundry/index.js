@@ -53,7 +53,11 @@ export {
 // They are exported because boot.js derives its CRUD-hook list from them rather
 // than remembering one — a document type read but not watched renders once and
 // then ignores every later change (2026-07-17: that was Tile).
-export { collectSceneLayers, computeItemPlacement, SCENE_LAYER_DOCUMENTS } from './scene-layers.js';
+export { collectSceneLayers, computeItemPlacement, SCENE_LAYER_DOCUMENTS, floorCeilings } from './scene-layers.js';
+
+// Authored-mask file discovery (listing-first, probe fallback) — feeds the
+// mask authority (scene/mask-authority.js#setDiscovery); nothing else reads it.
+export { discoverAuthoredMasks } from './mask-discovery.js';
 
 // Token documents -> drawables.
 export { collectTokens, diagnoseTokens, TOKEN_DOCUMENTS, tokenFootprint } from './scene-tokens.js';

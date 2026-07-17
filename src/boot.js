@@ -53,6 +53,7 @@ import {
   refreshVtPanViewerItems,
   runOrientationSelfTest,
   getSourceBitmap,
+  readPageBitmapPixels,
 } from './vt/index.js';
 import { PASSES, validatePassGraph, PASS_SEAMS, PASS_IMPLS } from './graph/index.js';
 import { NotBuiltError } from './core/not-built.js';
@@ -65,6 +66,9 @@ import {
   SCENE_LAYER_DOCUMENTS,
   TOKEN_DOCUMENTS,
   computeSceneDimensions,
+  computeItemPlacement,
+  floorCeilings,
+  discoverAuthoredMasks,
   registerPixiProxy,
   getPixiResidencyReport,
   registerCanvasCompositing,
@@ -81,7 +85,13 @@ import {
   resetLoadingSceneMemory,
 } from './ui/loading-screen.js';
 import { LOAD_PHASES } from './ui/load-progress.js';
-import { SORT_LAYERS, makeLayerKey } from './scene/index.js';
+import {
+  SORT_LAYERS,
+  makeLayerKey,
+  createMaskAuthority,
+  maskKindById,
+  assembleLayerDescriptors,
+} from './scene/index.js';
 
 const MODULE_ID = 'map-shine-advanced';
 
@@ -222,6 +232,31 @@ function install() {
     generatedAt: new Date().toISOString(),
     ...(await runVtLiveDecodeTest(`modules/${MODULE_ID}/assets/torture/torture_floor0.png`)),
   }));
+  // ---------------------------------------------------------------------------
+  // THE MASK AUTHORITY — the single source of truth for authored + derived
+  // content masks (scene/mask-authority.js's header is the map; the
+  // `masks/authority-only` tripwire is the wall). Boot is the composition
+  // root: the authority never imports the renderer and the renderer never
+  // imports the authority — they meet HERE, as two injected closures
+  // (extraLayersForItem = what to stream, onPageDecoded = what streamed).
+  // Deliberately NOT exposed on the MapShine namespace: consumers import
+  // through scene/index.js, and the debug report below is the author's
+  // window. A `MapShine.masks` would be V2's global bus growing back.
+  // ---------------------------------------------------------------------------
+  const maskAuthority = createMaskAuthority({
+    // Bounded pixel access for ingest: ≤256² pages, a handful per pack, once
+    // per scene load — never the render loop, never a giant source. The reader
+    // itself lives in vt/decode-pool.js (per-page CPU extraction is decode
+    // machinery; `no-gpu-readback` correctly refused to host it here).
+    readPageImageData: readPageBitmapPixels,
+    log: createLogger('masks'),
+  });
+  MapShine.debug.registerReport('mask-authority', 'Mask authority (authored + derived masks)', () => ({
+    report: 'mask-authority',
+    generatedAt: new Date().toISOString(),
+    ...maskAuthority.getReport(),
+  }));
+
   const TORTURE_FLOOR_COUNT = 3;
   const tortureImageUrl = (floorIndex) => `modules/${MODULE_ID}/assets/torture/torture_floor${floorIndex}.png`;
 
@@ -233,30 +268,27 @@ function install() {
   // displays until a mask is selected (VT Layers: Cycle Displayed Layer).
   //
   // CHANNEL-PACKING (author-confirmed mask taxonomy, 2026-07-16): only the 3
-  // SINGLE-CHANNEL masks (_Shadow black=dark/white=lit, _Outdoors white=out/
-  // black=in, _Fire white=fire-spawn) pack — into R/G/B of one RGBA texture +
-  // a shared structural-hole alpha (the hole is a FLOOR property, identical
-  // across masks — author-confirmed, see tools/make-torture-world.mjs's
-  // fillHoleAlpha). The COLOURED masks (_Specular metallic tint, _Window
-  // light colour) and RGBA masks (_Tree/_Bush colour+coverage) each need a
-  // full texture and stay unpacked. Real math: 7 masks → 4 packs (not the
-  // plan's original optimistic 13→6) — directly answers the GPU page-cache
-  // pressure every live castle-scenario report showed (thousands of
-  // evictions/misses at 24 unpacked packs × 3 floors).
-  const TORTURE_UNPACKED_MASK_NAMES = ['Specular', 'Window', 'Tree', 'Bush'];
-  const tortureMaskUrl = (floorIndex, name) =>
-    `modules/${MODULE_ID}/assets/torture/torture_floor${floorIndex}_${name}.png`;
-  const tortureLayerUrls = (floorIndex) => [
-    {
-      name: 'ShadowOutdoorsFire', // the packed single-channel trio
-      channelUrls: {
-        r: tortureMaskUrl(floorIndex, 'Shadow'),
-        g: tortureMaskUrl(floorIndex, 'Outdoors'),
-        b: tortureMaskUrl(floorIndex, 'Fire'),
-      },
-    },
-    ...TORTURE_UNPACKED_MASK_NAMES.map((name) => ({ name, url: tortureMaskUrl(floorIndex, name) })),
-  ];
+  // SINGLE-CHANNEL masks pack — into R/G/B of one RGBA texture + a shared
+  // structural-hole alpha (the hole is a FLOOR property, identical across
+  // masks — author-confirmed, see tools/make-torture-world.mjs's
+  // fillHoleAlpha). COLOURED and RGBA masks each need a full texture and stay
+  // unpacked. Real math: 7 masks → 4 packs (not the plan's original
+  // optimistic 13→6) — directly answers the GPU page-cache pressure every
+  // live castle-scenario report showed. WHICH kinds exist, their suffixes and
+  // the packing rule all live in scene/mask-catalog.js now — this file only
+  // knows the fixture's URL pattern and which kinds the fixture generator
+  // emits (everything but water). `assembleLayerDescriptors` is the SAME
+  // assembly the real-scene discovery path goes through: one policy, two
+  // data sources, per the mask authority's whole point.
+  const FIXTURE_MASK_KIND_IDS = ['shadow', 'outdoors', 'fire', 'specular', 'window', 'tree', 'bush'];
+  const tortureMaskUrlsByKind = (floorIndex) =>
+    new Map(
+      FIXTURE_MASK_KIND_IDS.map((id) => [
+        id,
+        `modules/${MODULE_ID}/assets/torture/torture_floor${floorIndex}${maskKindById(id).suffixes[0]}.png`,
+      ])
+    );
+  const tortureLayerUrls = (floorIndex) => assembleLayerDescriptors(tortureMaskUrlsByKind(floorIndex));
 
   // THE CASTLE-COURTYARD TEST (author, 2026-07-16: "on a castle on floor three
   // looking down into the courtyard... fires/trees/lighting on all three
@@ -316,17 +348,52 @@ function install() {
 
   const tortureExtraLayers = (item) => tortureLayerUrls(item.__floorIndex ?? 0);
 
-  MapShine.debug.registerAction('vt-pan-viewer-start', 'Start: torture fixture', async () => ({
-    report: 'vt-pan-viewer-start',
-    generatedAt: new Date().toISOString(),
-    ...(await startVtPanViewer({
-      THREE,
-      buildItems: buildTortureItems,
+  /**
+   * Point the mask authority at the fixture (hard case first — doctrine #4):
+   * fabricated floors with real elevation bands (bottom i*10, ceiling
+   * (i+1)*10) and the same discovery shape a real scene produces, so
+   * skyReach/coverAbove derive from the fixture's actual hole-alpha'd art +
+   * authored _Outdoors trio. The soak/thrash restarts reuse the PURE
+   * descriptor list above without re-pointing the authority — streaming stays
+   * identical; ingest simply keeps feeding whatever scene the authority is on.
+   */
+  const pointMaskAuthorityAtFixture = () => {
+    const fixtureFloors = tortureVisibleFloorIndices().map((i) => ({
+      index: i,
+      id: `torture${i}`,
+      name: `Torture floor ${i}`,
+      ceilingElevation: (i + 1) * 10,
+    }));
+    maskAuthority.reset({
+      sceneKey: 'torture-fixture',
       dimensions: tortureDimensions,
-      floorCount: TORTURE_FLOOR_COUNT,
-      extraLayersForItem: tortureExtraLayers,
-    })),
-  }));
+      floors: fixtureFloors,
+      items: buildTortureItems(),
+      resolvePlacement: (item, size) => computeItemPlacement(item, size, tortureDimensions),
+    });
+    maskAuthority.setDiscovery({
+      byLevelId: new Map(fixtureFloors.map((f) => [f.id, tortureMaskUrlsByKind(f.index)])),
+      method: 'fixture',
+      failures: [],
+      probesAttempted: 0,
+    });
+  };
+
+  MapShine.debug.registerAction('vt-pan-viewer-start', 'Start: torture fixture', async () => {
+    pointMaskAuthorityAtFixture();
+    return {
+      report: 'vt-pan-viewer-start',
+      generatedAt: new Date().toISOString(),
+      ...(await startVtPanViewer({
+        THREE,
+        buildItems: buildTortureItems,
+        dimensions: tortureDimensions,
+        floorCount: TORTURE_FLOOR_COUNT,
+        extraLayersForItem: tortureExtraLayers,
+        onPageDecoded: (info) => maskAuthority.ingestDecodedPage(info),
+      })),
+    };
+  });
   MapShine.debug.registerReport('vt-pan-viewer-diagnostics', 'Diagnostics', () => ({
     report: 'vt-pan-viewer-diagnostics',
     generatedAt: new Date().toISOString(),
@@ -411,9 +478,12 @@ function install() {
 
   // Visual verification: cycle the DISPLAYED layer (albedo → each mask → back).
   // The masks stream regardless; this just binds one to the shader so its known
-  // fixture pattern (e.g. _Outdoors' margin ring, _Fire's sparse points) can be
-  // eyeballed for correctness. Real scenes have no masks, so this stays albedo.
-  const TORTURE_DISPLAY_CYCLE = ['albedo', 'ShadowOutdoorsFire', ...TORTURE_UNPACKED_MASK_NAMES];
+  // fixture pattern (the outdoors margin ring, fire's sparse points) can be
+  // eyeballed for correctness. The cycle is DERIVED from the same catalog
+  // assembly that names the packs — a hand-kept name list here is exactly the
+  // drift the mask catalog exists to end. Real scenes with discovered masks
+  // cycle their own pack names identically (pack names match descriptors).
+  const TORTURE_DISPLAY_CYCLE = ['albedo', ...tortureLayerUrls(0).map((d) => d.name)];
   let tortureDisplayLayerIndex = 0;
   MapShine.debug.registerAction('vt-pan-viewer-cycle-layer', 'Cycle displayed layer', async () => {
     tortureDisplayLayerIndex = (tortureDisplayLayerIndex + 1) % TORTURE_DISPLAY_CYCLE.length;
@@ -631,6 +701,44 @@ function install() {
       skipped: [...(layers.skipped ?? []), ...tokens.skipped],
     };
 
+    // MASK DISCOVERY + AUTHORITY RESET — before the viewer starts, so
+    // `layersForItem` is a sync manifest lookup by the time packs build.
+    // Discovery is one directory listing per unique art directory (bounded
+    // probes only as the announced fallback — see foundry/mask-discovery.js);
+    // a total failure serves absence defaults and says so, never blocks the
+    // scene (the safety-slide stance: masks degrade, sessions don't).
+    let maskDiscovery = null;
+    try {
+      maskDiscovery = await discoverAuthoredMasks({ floors });
+    } catch (err) {
+      log.error('mask discovery failed outright — this scene serves absence defaults:', err);
+    }
+    // The authority's item set is UNFILTERED (every level visible, GM view):
+    // cover physics must not depend on what the current user happens to be
+    // viewing. Hidden tiles are collected WITH their flag — the authority
+    // excludes them from cover itself and reports them, which beats silently
+    // never collecting them.
+    maskAuthority.reset({
+      sceneKey: String(sceneDoc?.id ?? sceneDoc?.name ?? 'unknown-scene'),
+      dimensions,
+      floors: (() => {
+        const ceilings = floorCeilings(sceneDoc, floors);
+        return floors.map((f) => ({
+          index: f.index,
+          id: f.id,
+          name: f.name,
+          ceilingElevation: ceilings.get(f.id) ?? Infinity,
+        }));
+      })(),
+      items: collectSceneLayers(sceneDoc, {
+        viewedLevelId: floors[initialFloorIndex]?.id,
+        visibleLevelIds: allLevelIds,
+        isGM: true,
+      }).items,
+      resolvePlacement: (item, size) => computeItemPlacement(item, size, dimensions),
+    });
+    if (maskDiscovery) maskAuthority.setDiscovery(maskDiscovery);
+
     return {
       sceneName: sceneDoc?.name,
       floors: floors.map((f) => ({ index: f.index, name: f.name, elevationBottom: f.elevationBottom, url: f.url })),
@@ -643,6 +751,16 @@ function install() {
       },
       collectedItems: collected.items.map((i) => ({ id: i.id, kind: i.kind, elevation: i.key.elevation })),
       skippedItems: collected.skipped,
+      // What discovery concluded, in the same report the author already reads
+      // after a scene start — the full story lives in the mask-authority report.
+      maskDiscovery: maskDiscovery
+        ? {
+            method: maskDiscovery.method,
+            floorsWithMasks: maskDiscovery.byLevelId.size,
+            probesAttempted: maskDiscovery.probesAttempted,
+            failures: maskDiscovery.failures,
+          }
+        : 'FAILED — see log; absence defaults are being served',
       ...(await startVtPanViewer({
         THREE,
         buildItems,
@@ -654,6 +772,11 @@ function install() {
         dimensions,
         floorCount: floors.length,
         initialFloorIndex,
+        // THE MASK AUTHORITY'S two seams (see its header): what to stream per
+        // item, and what streamed. Real scenes now pull mask layers from
+        // discovery instead of streaming albedo alone.
+        extraLayersForItem: (item) => maskAuthority.layersForItem(item),
+        onPageDecoded: (info) => maskAuthority.ingestDecodedPage(info),
         // Feeds the curtain, when there is one. A floor switch never reaches this
         // function at all (see the canvasReady handler), and these calls no-op
         // when nothing is loading — so the reporting path needs no knowledge of
@@ -1047,13 +1170,44 @@ function install() {
     // where type is the documentName — verified in the v14 source at
     // client/data/client-backend.mjs:159/327/451 (create/update/delete).
     const DRAW_LIST_DOCUMENTS = [...SCENE_LAYER_DOCUMENTS, ...TOKEN_DOCUMENTS];
+
+    // THE MASK AUTHORITY'S item set follows the scene-layer half of the same
+    // declared document list (tokens never participate in cover, and
+    // re-collecting on every token move would be pure waste). It PIGGYBACKS on
+    // redrawOn's existing hook registration rather than registering its own —
+    // deliberately: a separate Hooks.on + a `canvas.scene` read here was two
+    // new foundry/adapter-only violations, and the wall (correctly) refused
+    // the ratchet. The hook handler already RECEIVES the changed document, and
+    // an embedded document's `.parent` IS its Scene — no global needed.
+    const MASK_AUTHORITY_HOOKS = new Set(
+      SCENE_LAYER_DOCUMENTS.flatMap((doc) => ['create', 'update', 'delete'].map((verb) => `${verb}${doc}`))
+    );
+    const refreshMaskAuthorityItems = (hook, sceneDoc) => {
+      try {
+        if (!sceneDoc) return;
+        const floorsResult = getActiveSceneFloors(sceneDoc);
+        if (!floorsResult.ok) return;
+        const levelIds = floorsResult.floors.map((f) => f.id).filter(Boolean);
+        maskAuthority.setItems(
+          collectSceneLayers(sceneDoc, {
+            viewedLevelId: levelIds[0],
+            visibleLevelIds: levelIds,
+            isGM: true,
+          }).items
+        );
+      } catch (err) {
+        log.error(`mask-authority item refresh failed on ${hook}:`, err);
+      }
+    };
+
     const redrawOn = (hook) => {
-      Hooks.on(hook, () => {
+      Hooks.on(hook, (doc) => {
         // Fire-and-forget: a redraw must never make a document update await GPU
         // work, and a failed redraw must not break Foundry's own bookkeeping.
         // The hook NAME is passed through: diagnostics' documentSync.byHook is
         // how "which hook actually fired" gets answered from a report.
         refreshVtPanViewerItems(hook).catch((err) => log.error(`${hook} redraw failed:`, err));
+        if (MASK_AUTHORITY_HOOKS.has(hook)) refreshMaskAuthorityItems(hook, doc?.parent ?? null);
       });
     };
     for (const doc of DRAW_LIST_DOCUMENTS) {

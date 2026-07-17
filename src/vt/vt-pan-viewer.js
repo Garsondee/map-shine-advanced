@@ -60,7 +60,14 @@ import {
   getSourceDimensions,
   getDecodeStats,
   shouldYieldByTime,
+  pageWorldRect,
+  computePagePlacement,
 } from './decode-pool.js';
+import { createLogger } from '../core/log.js';
+
+/** Log door for the onPageDecoded ingest seam's containment guard — the one
+ * place this file reports a CONSUMER's failure rather than its own. */
+const ingestLog = createLogger('vt-ingest');
 import { createVtSampler } from './vt-sample.tsl.js';
 import {
   createInitialViewState,
@@ -315,6 +322,17 @@ export function stopVtPanViewer() {
  *   isn't built (see `diag/render-fallback.js`'s sibling note and
  *   `scene/occlusion.js`) — the shader path is real, but its mask is an inert
  *   placeholder, so every item renders unoccluded.
+ * @param {(info:{ownerId:string, layerName:string, table:object, page:{mip:number,px:number,py:number},
+ *   contentWindow:{dx:number,dy:number,dw:number,dh:number}, bitmap:ImageBitmap}) => void} [options.onPageDecoded] -
+ *   THE INGEST SEAM (scene/mask-authority.js's input): called SYNCHRONOUSLY for
+ *   each decoded COARSEST-mip page (`page.mip === table.maxMip` — one page, the
+ *   whole item) right after decode, before upload. The bitmap is closed after
+ *   the upload loop — do not retain it; read pixels during the call. boot.js
+ *   wires this to the mask authority so derived masks (skyReach/coverAbove)
+ *   distill from the pager's own traffic: no second fetch, no second decode, no
+ *   GPU readback, no cache pressure. Injected exactly like extraLayersForItem —
+ *   the viewer stays authority-ignorant. A throwing callback is contained and
+ *   loudly logged; it can never break streaming.
  * @returns {Promise<object>} initial diagnostics (see getDiagnostics() for the shape).
  */
 export async function startVtPanViewer({
@@ -327,9 +345,11 @@ export async function startVtPanViewer({
   extraLayersForItem,
   getOcclusionInputs,
   onLoadProgress,
+  onPageDecoded,
 }) {
   extraLayersForItem ??= () => [];
   getOcclusionInputs ??= () => ({ occluders: [], visionActive: false });
+  onPageDecoded ??= () => {};
   // Captured for runZoomThrashTest's "blank slate" restart (2026-07-16) —
   // the SAME fully-resolved params this call itself used, so a later restart
   // reproduces an identical fresh viewer without the caller needing to
@@ -342,6 +362,7 @@ export async function startVtPanViewer({
     initialFloorIndex,
     extraLayersForItem,
     getOcclusionInputs,
+    onPageDecoded,
   };
   // World space IS Foundry canvas space (foundry/scene-geometry.js) — the padded
   // rect, +Y down. RECTANGULAR: `Scene#padding` defaults to 0.25 and the default
@@ -713,6 +734,7 @@ export async function startVtPanViewer({
       cache.coarseReservePages = currentCoarseBudget.totalBudgetPages;
     }
     let loopActive = false; // tracks whether the render loop is running (batch uploads pause/restore it)
+    let onPageDecodedFailures = 0; // ingest-seam containment counter (first 3 logged, all counted)
 
     /**
      * Build ONE layer-pack — one virtual texture = one floor × one layer
@@ -788,6 +810,7 @@ export async function startVtPanViewer({
 
       const pack = {
         name,
+        ownerId, // the owning item — carried so the onPageDecoded ingest seam can attribute pages
         table,
         // Pages are sliced/composited on demand via acquirePages/acquirePackedPages;
         // no full bitmap is ever held on the pack itself. `packId` is the
@@ -1298,6 +1321,40 @@ export async function startVtPanViewer({
         decodedForUpload = acquired
           .map((a) => ({ slot: slotByKey.get(a.page.key), decoded: a.bitmap }))
           .filter((x) => x.slot !== undefined);
+
+        // THE INGEST SEAM (see startVtPanViewer's onPageDecoded doc): offer
+        // each COARSEST-mip page — one page, the whole item — to the injected
+        // consumer while its bitmap is still alive (Pass 3 closes them).
+        // Fine-mip pages never reach the callback, so the pan/zoom hot path
+        // pays one integer compare per decoded page and nothing else. Own
+        // guard, deliberately NOT the enclosing catch: a consumer bug must
+        // read as "ingest failed", never as "decode failed" (which would
+        // poison lastError and look like a streaming defect).
+        for (const a of acquired) {
+          if (a.page.mip !== pack.table.maxMip) continue;
+          try {
+            const rect = pageWorldRect(pack.table, a.page.mip, a.page.px, a.page.py, {});
+            onPageDecoded({
+              ownerId: pack.ownerId,
+              layerName: pack.name,
+              table: pack.table,
+              page: a.page,
+              // bitmap.width IS this page's pageSizePx (the acquire calls above
+              // use the same default) — deriving it from the bitmap itself
+              // means the two can never drift.
+              contentWindow: computePagePlacement(rect, rect.unclamped, a.bitmap.width),
+              bitmap: a.bitmap,
+            });
+          } catch (err) {
+            onPageDecodedFailures++;
+            if (onPageDecodedFailures <= 3) {
+              ingestLog.error(
+                `onPageDecoded consumer threw for ${pack.ownerId}/${pack.name} (failure ${onPageDecodedFailures}):`,
+                err
+              );
+            }
+          }
+        }
       } catch (err) {
         lastError = `decode failed for pack "${pack.name}": ${err?.message || err}`;
         console.error('[vt-pan-viewer]', lastError);

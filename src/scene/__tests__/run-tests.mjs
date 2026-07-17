@@ -10,6 +10,9 @@
 import { run as runLayerOrder } from './layer-order.test.mjs';
 import { run as runOcclusion } from './occlusion.test.mjs';
 import { run as runWorldQuad } from './world-quad.test.mjs';
+import { run as runMaskCatalog } from './mask-catalog.test.mjs';
+import { run as runMaskDerive } from './mask-derive.test.mjs';
+import { run as runMaskAuthority } from './mask-authority.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -48,6 +51,9 @@ const suites = [
   ['layer-order', runLayerOrder],
   ['occlusion', runOcclusion],
   ['world-quad', runWorldQuad],
+  ['mask-catalog', runMaskCatalog],
+  ['mask-derive', runMaskDerive],
+  ['mask-authority', runMaskAuthority],
 ];
 
 for (const [name, fn] of suites) {

@@ -151,6 +151,35 @@ export function includedInLevel(doc, levelId) {
 }
 
 /**
+ * Each floor's CEILING elevation — the threshold above which art counts as
+ * "over your head" for the mask authority's coverAbove/skyReach derivation
+ * (scene/mask-derive.js). This is `level.elevation.top`, which is not an
+ * arbitrary choice: v14's own Levels migration maps the classic scene
+ * `foregroundElevation` ("overhead starts here") onto exactly this field
+ * (`common/documents/scene.mjs:195`, `_LEVELS_PROPERTY_MAP`), and
+ * `collectLevelTextures` above places each Level's roof art AT it. A null top
+ * normalizes to +Infinity per Foundry's own `Level#prepareBaseData` — meaning
+ * "no ceiling declared, nothing is above you", which is also what the
+ * synthetic `'legacy'` single-floor fallback (no Level documents at all)
+ * gets. The authority REPORTS the ceiling per floor, so an author whose
+ * roof tiles aren't counting can see the +Infinity and set a band instead of
+ * chasing a silent wrong answer.
+ *
+ * @param {object|null} sceneDoc
+ * @param {Array<{id:string}>} floors - `getActiveSceneFloors().floors`.
+ * @returns {Map<string, number>} level id -> ceiling elevation.
+ */
+export function floorCeilings(sceneDoc, floors) {
+  const levels = levelDocsOf(sceneDoc);
+  const byId = new Map();
+  for (const f of floors ?? []) {
+    const level = levels.find((l) => l?.id === f.id);
+    byId.set(f.id, level ? levelElevation(level).top : Infinity);
+  }
+  return byId;
+}
+
+/**
  * @typedef {object} SceneLayerItem
  * @property {string} id - stable identity; also the VT page-key prefix, so it must
  *   be unique per streamable image and stable across residency updates.

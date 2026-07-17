@@ -32,7 +32,10 @@ export function buildLightVisibilityPass(ctx) {
   void ctx;
   throw new NotBuiltError('light.visibility', {
     owns: 'docs/planning/Light-and-Shadow.md §4 + graph/passes.js',
-    gate: "needs env.sun (world/environment.js — BUILT) and the frame-graph wiring. Tier 0 = authored _Shadow alone modulating the sun: the author's proven hand-built fallback.",
+    gate:
+      'needs env.sun (world/environment.js — BUILT) and the frame-graph wiring. Tier 0 = the authored ' +
+      "shadow mask (scene/mask-catalog.js, kind 'shadow') alone modulating the sun: the author's " +
+      'proven hand-built fallback.',
     instead:
       'The sun direction comes from env.sun and NOWHERE else (env/one-sun tripwire). Producers combine by ' +
       'min() because they share one semantic — sun visibility — so there are no opacity knobs to fight over.',

@@ -203,9 +203,9 @@ export const PASSES = [
     ],
     note:
       "Per-light visibility terms. The sun's term min-combines producers that all MEAN the same " +
-      'thing: authored _Shadow (the paintbrush, promoted to canon) ∧ building ∧ sky-reach ∧ cloud. ' +
-      'Dynamic lights use Foundry wall-clipped LOS. NO combined-shadow, NO lift — those words fail ' +
-      'the build.',
+      'thing: the authored shadow mask (the paintbrush, promoted to canon — scene/mask-catalog.js) ' +
+      '∧ building ∧ sky-reach ∧ cloud. Dynamic lights use Foundry wall-clipped LOS. NO ' +
+      'combined-shadow, NO lift — those words fail the build.',
   },
   {
     id: 'light.accumulate',

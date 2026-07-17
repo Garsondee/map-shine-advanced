@@ -192,6 +192,26 @@ export function computePagePlacement(clamped, unclamped, pageSizePx) {
   return { dx, dy, dw, dh, needsPadding };
 }
 
+/**
+ * Read a decoded PAGE bitmap's pixels (≤ pageSizePx² — the sanctioned
+ * per-page CPU-extraction unit, Keyhole §4.1). This is the mask authority's
+ * injected `readPageImageData` (boot.js wires it in): ingest happens on the
+ * pager's own already-decoded pages, so derived masks never trigger a second
+ * fetch, a second source decode, or a GPU readback. Lives HERE, beside the
+ * decode paths that produce those bitmaps, because page-pixel access is
+ * decode machinery — `no-gpu-readback` correctly refused to let it sit in
+ * boot.js.
+ *
+ * @param {ImageBitmap} bitmap
+ * @returns {ImageData}
+ */
+export function readPageBitmapPixels(bitmap) {
+  const pageCanvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const ctx = pageCanvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(bitmap, 0, 0);
+  return ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+}
+
 /** @type {Map<string, Promise<ImageBitmap>>} URL -> in-flight/decoded full-image bitmap. */
 const _sourceCache = new Map();
 

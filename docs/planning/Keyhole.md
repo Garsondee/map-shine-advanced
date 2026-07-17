@@ -144,12 +144,25 @@ The params **service** (get/set/subscribe) and the **generated renderers** (Twea
 
 ### Recommended next steps, in order (updated 2026-07-17)
 
-1. **Harvest the 48 schemas into real `params-schema.js` declarations** — mechanical, safe now, preserves the author's tuned defaults + help text permanently before Stage 7 deletes `legacy/`.
+1. **Harvest the 48 schemas into real `params-schema.js` declarations** — mechanical, safe now, preserves the author's tuned defaults + help text permanently before Stage 7 deletes `legacy/`. Real scope, measured (2026-07-17): 47 `getControlSchema()` definitions, 11,922 lines of source (avg 265 lines each) — comparably sized to this entire session. Going in as a Node extraction script (parse + safely evaluate each schema literal, transform through the 3 documented rules in §3.6, validate every one), not manual transcription.
 2. **The eviction bug** (dangling indirection texels) — the one open correctness defect, unrelated to the framework.
 3. **The two missing zone doors** (`foundry/`, `ui/`) — `vt/` and `graph/` are built; this pays the rest of `zones/one-door`'s 15 down toward payable.
 4. **Ratchet paydown** — 15 one-door, 33 catches, 41 clocks, 12 Foundry reaches, 7 global-bus, 14 unreachable. Shrink-only, satisfying, no design needed.
-5. **Separating `geometry.world` from `present.composite`, live-verified** — the honest remaining piece of the pass runner. Needs the author's browser, not another blind refactor.
-6. Name and build out `masks.occlusion` (the last piece of the original tiles ask, now unblocked since tokens render) or `light.visibility`/`light.accumulate` — whichever the author wants to see rendering first.
+5. Name and build out `masks.occlusion` (the last piece of the original tiles ask, now unblocked since tokens render) or `light.visibility`/`light.accumulate` — whichever the author wants to see rendering first.
+
+### 🎯 THE `geometry.world`/`present.composite` SPLIT — scoped, not attempted (2026-07-17)
+
+Asked for as a follow-on to the pass runner; measured and deliberately **deferred rather than half-done**, because it is a different *kind* of task than everything else in this section — not a refactor of existing code, a piece of **unbuilt architecture**.
+
+**Why it isn't a refactor.** `startVtPanViewer`'s `renderFrame` does exactly ONE `renderer.render(scene, camera)` call, straight to the canvas backbuffer. There is no intermediate render target, no `buf:scene.color`, no separate composite/tonemap step — §4.2's whole RT inventory (`scene.color`, `scene.attr`, `scene.depth`, `scene.illum`, `lit`, post ping/pong) is **Stage 3**, not yet built. "Splitting" `geometry.world` from `present.composite` for real means:
+1. Allocate a `scene.color` (+ later `scene.attr`) render target through `graph/three-allocator.js` (which itself has zero callers today — this would be its FIRST real caller).
+2. Point `renderFrame`'s draw call at that target instead of the backbuffer.
+3. Add a genuinely separate present pass — harvested `graph/fullscreen-present.js` (also zero callers today), reading `scene.color` and blitting to the backbuffer.
+4. Update `graph/pass-impls.js`: `geometry.world` → the draw-to-RT step, `present.composite` → the blit step, `fusedWith` removed from both because the claim would finally be true.
+
+**Why it wasn't attempted this session:** it is real, live-render-affecting surgery on the one file with a 9-round live-debugging history (Y-flip, GL texture-unit-cache staleness, UV-compounding, clamp-bound conflation — all found only by loading it in a real browser). This environment cannot run Foundry, so there is no way to verify step 2 didn't reintroduce one of those. Attempting it blind and reporting success would be the exact instrument-must-not-lie failure this whole session was about, one level up.
+
+**How to actually do it, when picked up:** small steps, each one the author loads and confirms in Foundry before the next — the same round-trip loop that got `startVtPanViewer` working over Rounds 1–9 in the first place (`keyhole-stage-status` memory). Step 1 (allocate the RT, don't wire it to anything yet) is genuinely low-risk and Node-testable in isolation; step 2 (repointing the real draw call) is where live verification becomes mandatory.
 
 **Also broken, found in passing (2026-07-17, still unaddressed):** the release workflow (`.github/workflows/main.yml`) zips `scripts/` — **deleted at Stage 0** — and never zips `src/`. It would ship a `module.json` pointing at `src/boot.js` inside an archive containing no `src/`. It only fires on release-publish and runs no tests at all.
 

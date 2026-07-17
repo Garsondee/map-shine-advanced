@@ -76,6 +76,7 @@ import {
 } from './view-state.js';
 import { planResidency, coarsePinSet, coarseTopMipsForCap, diffResidency } from './residency.js';
 import { ThreeAllocator } from '../graph/index.js';
+import { PROBE_CORNERS, classifyPixel, diagnoseOrientation } from '../diag/orientation-probe.js';
 import { sortByLayer } from '../scene/layer-order.js';
 import {
   computeCameraFrustum,
@@ -476,16 +477,44 @@ export async function startVtPanViewer({
     //    the over-knee "filament" compresses toward 1.0, scaling RGB uniformly
     //    so a hot core keeps its colour. Rebuild that in TSL at that point;
     //    do not reach for a stock tone-mapping node.
-    const presentScene = new THREE.Scene();
-    const presentCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    // 3. ⚠️ Y-FLIP — USE THREE'S OWN QuadMesh, NEVER A HAND-ROLLED ONE.
+    //    The first cut of this pass used `new THREE.Mesh(new THREE.PlaneGeometry(2,2))`
+    //    and the whole map came out upside down (author-caught, 2026-07-17).
+    //    Read from the vendored source rather than guessed, so it stays true:
+    //
+    //      three.webgpu.js:56350  NodeBuilder.isFlipY() { return false }  ← WebGPU
+    //      three.webgpu.js:64344  NodeBuilder.isFlipY() { return true  }  ← WebGL
+    //
+    //    Three inserts a compensating flip into `texture()` ONLY when isFlipY()
+    //    is true, normalising BOTH backends to one rule: **v=0 is the TOP of a
+    //    render-target texture.** Its own fullscreen geometry agrees —
+    //    `QuadGeometry` (three.webgpu.js:49443) is a fullscreen TRIANGLE whose
+    //    uvs `[0,-1, 0,1, 2,1]` put **v=0 at the screen TOP**:
+    //
+    //      PlaneGeometry:  v=0 at the screen BOTTOM   ← what I used. Inverted.
+    //      QuadGeometry:   v=0 at the screen TOP      ← matches the RT rule.
+    //
+    //    So a PlaneGeometry fullscreen quad samples the image's top at the
+    //    screen's bottom. Exactly upside down, and BACKEND-DEPENDENT — the one
+    //    thing `keyhole-webgpu-tsl-decision` says must never happen ("ONE source
+    //    per effect, never a WebGL2 twin").
+    //
+    //    THE FIX IS NOT A COMPENSATING FLIP. Two flips that cancel is how you
+    //    end up with four (feedback_y_flip_recurring_risk). `QuadMesh` bundles
+    //    three's geometry AND its camera, so the vendor owns the convention on
+    //    both backends — and they must get it right, because every three user
+    //    would notice if they didn't. `zones/no-handrolled-fullscreen-quad` in
+    //    tools/verify-structure.mjs now fails the build on the mistake I made.
     const presentMaterial = new THREE.NodeMaterial();
     presentMaterial.depthTest = false;
     presentMaterial.depthWrite = false;
-    const presentTexNode = THREE.TSL.texture(sceneColor.texture, THREE.TSL.uv());
+    // No uv argument: `texture()` defaults to the mesh's own uv attribute,
+    // which on a QuadMesh is QuadGeometry's — the one three guarantees against
+    // its own render-target convention. Passing `uv()` explicitly would be the
+    // same thing; passing anything else re-opens the bug.
+    const presentTexNode = THREE.TSL.texture(sceneColor.texture);
     presentMaterial.fragmentNode = presentTexNode;
-    const presentQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), presentMaterial);
-    presentQuad.frustumCulled = false;
-    presentScene.add(presentQuad);
+    const presentQuad = new THREE.QuadMesh(presentMaterial);
 
     /** Re-point the present material at a freshly-allocated target (resize). */
     function rebindPresent() {
@@ -999,7 +1028,7 @@ export async function startVtPanViewer({
       renderer.setRenderTarget(sceneColor);
       renderer.render(scene, camera);
       renderer.setRenderTarget(null);
-      renderer.render(presentScene, presentCamera);
+      presentQuad.render(renderer); // three's own fullscreen path — carries its own camera
 
       frameTimes.push(performance.now() - t0);
       if (frameTimes.length > 120) frameTimes.shift();
@@ -1928,8 +1957,90 @@ export async function startVtPanViewer({
       disposeSceneColor() {
         allocator.dispose(sceneColor);
         presentMaterial.dispose();
-        presentQuad.geometry.dispose();
+        // NOT presentQuad.geometry — QuadMesh shares ONE module-level
+        // QuadGeometry across every QuadMesh in the process
+        // (three.webgpu.js:49456, `var _geometry2 = new QuadGeometry()`).
+        // Disposing it would break every other fullscreen pass three runs.
       },
+      /**
+       * ORIENTATION SELF-TEST — real pixels, through the real chain.
+       *
+       * Renders diag/orientation-probe's asymmetric four-corner pattern into
+       * the SAME buf:scene.color the map uses, presents it through the SAME
+       * QuadMesh, then reads the actual pixels back off the target and asks
+       * `diagnoseOrientation` what it sees. Not "does it look right to you" —
+       * a named expectation and a measured value.
+       *
+       * Reads back from the RT rather than the canvas on purpose: a canvas
+       * readback needs `preserveDrawingBuffer` and can legitimately return all
+       * zero when called from a click handler (that exact false alarm cost a
+       * debugging round on 2026-07-15). The RT is stable and readable on both
+       * backends — which is why §"the readback path both backends implement".
+       */
+      async runOrientationSelfTest() {
+        const probeMat = new THREE.NodeMaterial();
+        probeMat.depthTest = false;
+        probeMat.depthWrite = false;
+        // Build the pattern in TSL from the SAME PROBE_CORNERS the diagnosis
+        // reads, so the pattern and its expectations can never disagree.
+        const { uv: uvNode, vec4, float, select } = THREE.TSL;
+        const st = uvNode();
+        let colour = vec4(0, 0, 0, 1);
+        for (const c of PROBE_CORNERS) {
+          const inX = c.u < 0.5 ? st.x.lessThan(float(0.5)) : st.x.greaterThanEqual(float(0.5));
+          const inY = c.v < 0.5 ? st.y.lessThan(float(0.5)) : st.y.greaterThanEqual(float(0.5));
+          colour = select(inX.and(inY), vec4(c.rgb[0] / 255, c.rgb[1] / 255, c.rgb[2] / 255, 1), colour);
+        }
+        probeMat.fragmentNode = colour;
+        const probeQuad = new THREE.QuadMesh(probeMat);
+
+        // 1. Draw the pattern into buf:scene.color — the geometry.world slot.
+        renderer.setRenderTarget(sceneColor);
+        probeQuad.render(renderer);
+        renderer.setRenderTarget(null);
+
+        // 2. Read the REAL pixels back out of it.
+        const w = sceneColor.width;
+        const h = sceneColor.height;
+        const found = {};
+        const measured = {};
+        for (const c of PROBE_CORNERS) {
+          // PROBE_CORNERS' v is stated in the TEXTURE convention three
+          // normalises to: v=0 is the TOP. readRenderTargetPixels' y is the
+          // BUFFER's, origin bottom-left — so this ONE conversion is the only
+          // place the two conventions meet, and it is written once, here.
+          const px = Math.round(c.u * (w - 1));
+          const py = Math.round((1 - c.v) * (h - 1));
+          const buf = new Float32Array(4); // RGBA16F reads back as float
+          await renderer.readRenderTargetPixelsAsync(sceneColor, px, py, 1, 1, 0, 0, buf);
+          const r8 = Math.round(Math.min(1, Math.max(0, buf[0])) * 255);
+          const g8 = Math.round(Math.min(1, Math.max(0, buf[1])) * 255);
+          const b8 = Math.round(Math.min(1, Math.max(0, buf[2])) * 255);
+          measured[c.name] = { rgb: [r8, g8, b8], readAt: { x: px, y: py } };
+          found[c.name] = classifyPixel(r8, g8, b8);
+        }
+
+        probeMat.dispose(); // NOT probeQuad.geometry — QuadMesh shares one module-level geometry
+        const verdict = diagnoseOrientation(found);
+
+        // 3. Put the map back. The probe scribbled over buf:scene.color; the
+        // next renderFrame redraws it, but do not leave the screen showing a
+        // test pattern if the loop happens to be paused.
+        renderer.setRenderTarget(sceneColor);
+        renderer.render(scene, camera);
+        renderer.setRenderTarget(null);
+        presentQuad.render(renderer);
+
+        return {
+          ok: verdict.ok,
+          diagnosis: verdict.diagnosis,
+          expected: Object.fromEntries(PROBE_CORNERS.map((c) => [c.name, c.label])),
+          found,
+          measured,
+          note: 'Rendered through the REAL buf:scene.color + the REAL present QuadMesh. If this says ok, the geometry.world -> present.composite chain is upright.',
+        };
+      },
+
       /** buf:scene.color's live shape — for the diagnostics report. */
       getSceneColorInfo: () => ({
         allocated: !!sceneColor,
@@ -2255,6 +2366,18 @@ export async function refreshVtPanViewerItems() {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   await _active.refreshItems();
   return { refreshed: true };
+}
+
+/**
+ * ORIENTATION SELF-TEST — is the geometry.world -> present.composite chain
+ * upright? Real pixels, real chain, named expectations. See
+ * diag/orientation-probe.js for why this exists rather than "look at it".
+ *
+ * Run it after ANY new screen-space or world->texture mapping lands.
+ */
+export async function runOrientationSelfTest() {
+  if (!_active) return { skipped: true, reason: 'viewer not started — start it, then run this' };
+  return _active.runOrientationSelfTest();
 }
 
 export async function setVtPanViewerFloor(floorIndex) {

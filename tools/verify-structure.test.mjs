@@ -196,6 +196,20 @@ const V2_CORPSES = [
     note: '938 keys, six writing subsystems, no owner',
   },
 
+  // --- the Y-flip: V3's own, caught live by the author 2026-07-17
+  {
+    rule: 'gpu/no-handrolled-fullscreen-quad',
+    from: 'src/vt/vt-pan-viewer.js, the present pass as first written (2026-07-17)',
+    code: 'const presentQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), presentMaterial);',
+    note: 'the whole map rendered UPSIDE DOWN. PlaneGeometry v=0 is screen-BOTTOM; three RT textures are v=0 TOP.',
+  },
+  {
+    rule: 'gpu/no-handrolled-fullscreen-quad',
+    from: 'the same mistake without the THREE. prefix (destructured import)',
+    code: 'const geo = new PlaneGeometry(2, 2);',
+    note: 'the wall must not be dodgeable by an import style',
+  },
+
   // --- the UI: a good schema system, referenced zero times
   {
     rule: 'ui/no-handwritten-controls',
@@ -260,6 +274,18 @@ const MUST_PASS = [
   { code: 'if (tex.isDataArrayTexture) return tex.image.depth;', note: 'a type CHECK is not an allocation' },
   { code: 'const loader = new THREE.TextureLoader();', note: 'TextureLoader is not a texture' },
   { code: 'const proxy = new PIXI.Texture(baseTexture);', note: 'PIXI proxies are the §4.3 FIX, not the disease' },
+  // The fullscreen-quad wall must bite ONLY on a screen-filling quad. A
+  // world-space plane is the renderer's bread and butter (every tile is one)
+  // and tripping on those would get the rule muted within a day.
+  {
+    code: 'const geo = new THREE.PlaneGeometry(tileW, tileH);',
+    note: 'a world-space tile plane is not a fullscreen quad',
+  },
+  {
+    code: 'const geo = new THREE.PlaneGeometry(2048, 2048);',
+    note: 'a big world-space plane is still not a fullscreen quad',
+  },
+  { code: 'const quad = new THREE.QuadMesh(material);', note: "three's OWN fullscreen quad is the prescribed fix" },
 ];
 
 export function run(t) {

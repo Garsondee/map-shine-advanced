@@ -17,6 +17,7 @@ export {
   setVtPanViewerFloor,
   setVtPanViewerDisplayLayer,
   refreshVtPanViewerItems,
+  runOrientationSelfTest,
   runZoomThrashTest,
   soakPanStep,
   soakSwitchFloorStep,

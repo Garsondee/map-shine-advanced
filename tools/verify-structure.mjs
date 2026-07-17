@@ -223,6 +223,39 @@ export const RULES = [
   },
 
   // ===================================================================
+  // Y-FLIP — this project's oldest recurring bug class (V1, V2, and V3
+  // again on 2026-07-17). Built at ZERO the same hour it bit.
+  // ===================================================================
+  {
+    id: 'gpu/no-handrolled-fullscreen-quad',
+    // A fullscreen quad is a PlaneGeometry whose extents are 2 (NDC-sized) —
+    // `PlaneGeometry(2, 2)`. A normal world-space plane (a tile, a billboard)
+    // is sized in world units and must NOT trip; `PlaneGeometry(2, 2)` is only
+    // ever an attempt at a screen-filling surface.
+    pattern: /new\s+(?:THREE\.)?PlaneGeometry\s*\(\s*2\s*,\s*2\s*[,)]/,
+    allow: [],
+    why:
+      "Y-flips are this project's oldest recurring bug (memory: feedback_y_flip_recurring_risk — V1 " +
+      'fought them constantly, V2 occasionally, V3 hit one on 2026-07-17). The cause is always the ' +
+      'same: a hand-rolled mapping between two spaces that disagree about which way is up. THE ' +
+      'SPECIFIC CORPSE: the present pass was written as `new Mesh(new PlaneGeometry(2,2))` and the ' +
+      'entire map rendered upside down. PlaneGeometry puts v=0 at the screen BOTTOM; three ' +
+      "normalises BOTH backends to 'v=0 is the TOP of a render-target texture' (isFlipY() is false " +
+      'on WebGPU, true on WebGL — three.webgpu.js:56350/64344) and its OWN fullscreen geometry, ' +
+      'QuadGeometry (three.webgpu.js:49443), puts v=0 at the TOP to match. A PlaneGeometry ' +
+      'fullscreen quad is therefore exactly inverted — and BACKEND-DEPENDENTLY so, which is the one ' +
+      'thing keyhole-webgpu-tsl-decision forbids ("ONE source per effect, never a WebGL2 twin").',
+    instead:
+      "Use `new THREE.QuadMesh(material)` and `quad.render(renderer)`. It bundles three's own " +
+      'QuadGeometry AND its own camera, so the VENDOR owns the orientation convention on both ' +
+      'backends — and they must get it right, because every three.js user would notice if they did ' +
+      'not. Never add a compensating flip to make a hand-rolled quad look right: two flips that ' +
+      'cancel is how you end up with four, and the next person cannot tell which one is load-bearing. ' +
+      'Verify with the debug panel\'s "Orientation self-test", which reads REAL pixels through the ' +
+      'REAL chain rather than trusting the eye on symmetric content.',
+  },
+
+  // ===================================================================
   // GPU READBACKS — the GPU is a write-only pipe, not a data structure.
   // ===================================================================
   {

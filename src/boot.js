@@ -45,6 +45,7 @@ import {
   soakPanStep,
   soakSwitchFloorStep,
   refreshVtPanViewerItems,
+  runOrientationSelfTest,
   getSourceBitmap,
 } from './vt/index.js';
 import { PASSES, validatePassGraph, PASS_SEAMS, PASS_IMPLS } from './graph/index.js';
@@ -171,6 +172,19 @@ function install() {
       liveChecks,
     };
   });
+
+  // ORIENTATION SELF-TEST — the standing answer to "how do we stop fighting
+  // Y-flips?" (author, 2026-07-17, on an upside-down map). Renders an
+  // asymmetric four-corner pattern through the REAL buf:scene.color and the
+  // REAL present pass, reads the actual pixels back, and NAMES what it sees:
+  // "Y-FLIPPED", "X-FLIPPED", "ROTATED 180°", or ok. One click, after any new
+  // screen-space or world→texture mapping — instead of eyeballing content that
+  // might be symmetric enough to hide the bug (which is how Y-flips survive).
+  MapShine.debug.registerReport('orientation-self-test', 'Orientation self-test', async () => ({
+    report: 'orientation-self-test',
+    generatedAt: new Date().toISOString(),
+    ...(await runOrientationSelfTest()),
+  }));
 
   MapShine.debug.registerReport('vt-live-decode', 'Live decode test', async () => ({
     report: 'vt-live-decode',

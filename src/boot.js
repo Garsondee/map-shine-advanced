@@ -765,16 +765,42 @@ function install() {
     // where type is the documentName — verified in the v14 source at
     // client/data/client-backend.mjs:159/327/451 (create/update/delete).
     const DRAW_LIST_DOCUMENTS = [...SCENE_LAYER_DOCUMENTS, ...TOKEN_DOCUMENTS];
+    const redrawOn = (hook) => {
+      Hooks.on(hook, () => {
+        // Fire-and-forget: a redraw must never make a document update await GPU
+        // work, and a failed redraw must not break Foundry's own bookkeeping.
+        // The hook NAME is passed through: diagnostics' documentSync.byHook is
+        // how "which hook actually fired" gets answered from a report.
+        refreshVtPanViewerItems(hook).catch((err) => console.error(`${TAG} ${hook} redraw failed:`, err));
+      });
+    };
     for (const doc of DRAW_LIST_DOCUMENTS) {
-      for (const verb of ['create', 'update', 'delete']) {
-        const hook = `${verb}${doc}`;
-        Hooks.on(hook, () => {
-          // Fire-and-forget: a redraw must never make a document update await GPU
-          // work, and a failed redraw must not break Foundry's own bookkeeping.
-          refreshVtPanViewerItems().catch((err) => console.error(`${TAG} ${hook} redraw failed:`, err));
-        });
-      }
+      for (const verb of ['create', 'update', 'delete']) redrawOn(`${verb}${doc}`);
     }
+
+    // MOVEMENT IS NOT AN ORDINARY UPDATE IN v14 — it has its own hook family,
+    // and CRUD alone does not cover it (author-reported 2026-07-17: "when I move
+    // a token it clearly moves in the document but it only updates... once I pan
+    // the camera or zoom"). The instrument said a hook fired and the position
+    // was unchanged, so the position lands somewhere other than where we looked.
+    //
+    // v14 fires these from `TokenDocument.#onUpdateOperationMovement`
+    // (client/documents/token.mjs:2880/2883), reached via the static
+    // `_onUpdateOperation` — which client-backend.mjs runs at line 339, AFTER
+    // the per-document `updateToken` callbacks at line 333. So these fire
+    // strictly LATER in the same operation, once the movement is applied and
+    // frozen. That ordering is the whole reason they can catch what updateToken
+    // apparently could not.
+    //
+    //   moveToken  - a movement with passed waypoints was applied
+    //   stopToken  - movement was constrained/halted partway (final rest position)
+    //   pauseToken - movement paused (token.mjs:868)
+    //
+    // A redundant refresh is FREE — refreshItemPlacement compares a placementKey
+    // and returns false when nothing moved, so catching the same move twice
+    // costs one string build and no GPU work. Cheap enough that covering the
+    // whole family beats guessing which single one is authoritative.
+    for (const hook of ['moveToken', 'stopToken', 'pauseToken']) redrawOn(hook);
 
     Hooks.on('canvasReady', async (canvasRef) => {
       try {

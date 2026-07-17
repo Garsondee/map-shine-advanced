@@ -1475,7 +1475,10 @@ export async function startVtPanViewer({
         // Counted, not just done. A document-driven refresh that runs and moves
         // NOTHING is indistinguishable from a hook that never fired — and those
         // two need opposite fixes. See `lastUpdate`'s declaration.
-        if (refreshItemPlacement(state, item)) lastUpdate.placementChanges++;
+        if (refreshItemPlacement(state, item)) {
+          lastUpdate.placementChanges++;
+          lastUpdate.placementChangesTotal++;
+        }
         const onScreen = rectsOverlap(state.worldBounds, worldRect);
 
         // Stream EVERY pack — albedo AND every mask — through the ONE shared
@@ -1561,11 +1564,31 @@ export async function startVtPanViewer({
      * counters discriminate all three causes on their own; the timestamps were
      * decoration that would have added two private clock reads to a codebase
      * whose predecessor died partly of 41 of them.
+     *
+     * ROUND 2 (2026-07-17) — the first cut of this ANSWERED ONE QUESTION AND
+     * NOT THE ONE THAT MATTERED, which is worth recording because it is this
+     * project's most expensive recurring mistake in miniature:
+     *
+     *   documentSync: { docRefreshes: 1, placementChanges: 0 }
+     *
+     * That says *a* hook fired. It does NOT say WHICH — and "did `updateToken`
+     * fire at all?" was the entire open question. `docRefreshes: 1` is equally
+     * consistent with "updateToken fired and the read was stale" and with
+     * "updateToken never fired and this 1 came from some other document" — two
+     * causes needing opposite fixes, collapsed onto one number. Hence
+     * `byHook`: the count keyed by the hook NAME that drove it.
+     *
+     * `placementChangesTotal` is cumulative for the same reason: `placementChanges`
+     * describes only the LAST pass, so any later no-op pass silently erases the
+     * evidence of the one that mattered. A number that a later event can reset
+     * to a value meaning "nothing happened" is not a measurement.
      */
     const lastUpdate = {
       itemCount: 0,
       placementChanges: 0,
+      placementChangesTotal: 0,
       docRefreshes: 0,
+      byHook: {},
     };
 
     let residencyInFlight = false;
@@ -2272,8 +2295,9 @@ export async function startVtPanViewer({
       // half-updated shared state. The guard already handles this correctly —
       // it sets residencyDirty and the in-flight run loops again, so a refresh
       // is never dropped, only merged. Nothing was gained by going around it.
-      refreshItems: () => {
+      refreshItems: (hookName = '(unnamed)') => {
         lastUpdate.docRefreshes++;
+        lastUpdate.byHook[hookName] = (lastUpdate.byHook[hookName] ?? 0) + 1;
         return scheduleResidencyUpdate();
       },
       setDisplayLayer, // exposed so the debug panel can bind a mask for visual verification
@@ -2397,14 +2421,16 @@ export async function startVtPanViewer({
           documentSync: {
             ...lastUpdate,
             interpretation:
-              'Move a token WITHOUT panning, then read these. ' +
-              'docRefreshes:0 = the CRUD hook never reached the viewer (boot.js wiring). ' +
-              'docRefreshes>0 + placementChanges:0 = we ran and re-read the SAME position ' +
-              '(stale/mis-timed document read — the hook fires before the change lands). ' +
-              'docRefreshes>0 + placementChanges>0 but the screen disagrees = we moved the ' +
-              'geometry and the GPU never saw it (BufferAttribute upload under WebGPU). ' +
-              'placementChanges counts items whose placementKey ACTUALLY changed, so 0 means ' +
-              '"nothing moved" and never "I did not look".',
+              'Move a token WITHOUT panning, then read these. `byHook` is the one that matters: ' +
+              'it names WHICH hooks drove a refresh, which the previous cut could not answer. ' +
+              'byHook has no updateToken/moveToken entry = Foundry never told us the token moved ' +
+              '(the hook set in boot.js is wrong for v14 movement). ' +
+              'byHook HAS updateToken/moveToken but placementChangesTotal did not rise = we ran ' +
+              'and re-read the SAME position (the hook fires before the position lands). ' +
+              'placementChangesTotal rose but the screen disagrees = geometry moved and the GPU ' +
+              'never saw it (BufferAttribute upload under WebGPU). ' +
+              'Use placementChangesTotal (cumulative), NOT placementChanges (last pass only — a ' +
+              'later no-op pass resets it to 0 and erases the evidence).',
           },
           canvasSizePx: { width: canvasW, height: canvasH },
           mountedInBoard: mount.fill && mount.host !== document.body,
@@ -2585,9 +2611,16 @@ export function getVtPanViewerDiagnostics() {
  * view change, so an unchanged scene costs one buildItems call and no GPU work.
  * No-op `{skipped:true}` if nothing is running.
  */
-export async function refreshVtPanViewerItems() {
+/**
+ * Re-read the live Foundry documents and reconcile the draw list.
+ *
+ * @param {string} [hookName] - the hook that drove this, recorded in
+ *   diagnostics' `documentSync.byHook`. Not decoration: "which hook fired" was
+ *   the open question a refresh COUNT could not answer (2026-07-17).
+ */
+export async function refreshVtPanViewerItems(hookName) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
-  await _active.refreshItems();
+  await _active.refreshItems(hookName);
   return { refreshed: true };
 }
 

@@ -10,6 +10,7 @@ import {
   computePagePlacement,
   __createSemaphore,
   shouldYieldByTime,
+  __readLeadingBytes,
 } from '../decode-pool.js';
 
 export async function run(t) {
@@ -215,5 +216,119 @@ export async function run(t) {
     ok('placement: dx+dw never exceeds pageSizePx', p.dx + p.dw <= 256);
     ok('placement: dy+dh never exceeds pageSizePx', p.dy + p.dh <= 256);
     ok('placement: dw/dh are always at least 1 (never zero/negative)', p.dw >= 1 && p.dh >= 1);
+  }
+
+  // --- readLeadingBytes: avoid a full-file download for a 24-byte PNG header
+  // (found 2026-07-17, the freeze investigation). If the asset server ignores
+  // our Range request and answers 200 with the WHOLE file, the old code
+  // (`res.arrayBuffer()`) buffered the entire response before reading even
+  // one byte — for this project's own scale (a Level background can be
+  // hundreds of MB), that is a real, serious cost, not a theory. This reads
+  // ONLY what's needed and CANCELS the rest of the stream. A fake
+  // Response-shaped object is enough here — no real `fetch` needed, which is
+  // what makes this pure math genuinely Node-testable despite living in an
+  // otherwise browser-only file. -------------------------------------------
+  {
+    /** A fake streaming Response body: yields the given chunks, then done. Tracks whether cancel() was called. */
+    function makeStreamingResponse(chunks) {
+      let i = 0;
+      let cancelled = false;
+      return {
+        cancelled: () => cancelled,
+        body: {
+          getReader() {
+            return {
+              async read() {
+                if (i >= chunks.length) return { done: true, value: undefined };
+                return { done: false, value: chunks[i++] };
+              },
+              async cancel() {
+                cancelled = true;
+              },
+            };
+          },
+        },
+      };
+    }
+
+    // Exactly enough, in ONE chunk.
+    {
+      const res = makeStreamingResponse([new Uint8Array([1, 2, 3, 4, 5])]);
+      const out = await __readLeadingBytes(res, 5);
+      ok('readLeadingBytes: single chunk, exact length', out.length === 5 && out[0] === 1 && out[4] === 5);
+    }
+
+    // Split across MULTIPLE chunks, boundary falling mid-chunk — the case
+    // most likely to hide an off-by-one in the assembly loop.
+    {
+      const res = makeStreamingResponse([
+        new Uint8Array([10, 20, 30]),
+        new Uint8Array([40, 50, 60, 70]),
+        new Uint8Array([80, 90]),
+      ]);
+      const out = await __readLeadingBytes(res, 5);
+      ok(
+        'readLeadingBytes: assembles across a chunk boundary correctly, in order',
+        out.length === 5 && Array.from(out).join(',') === '10,20,30,40,50'
+      );
+    }
+
+    // MORE bytes available than requested — must truncate, not over-read.
+    {
+      const res = makeStreamingResponse([new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])]);
+      const out = await __readLeadingBytes(res, 3);
+      ok('readLeadingBytes: truncates to exactly n, even when more is available', out.length === 3);
+    }
+
+    // FEWER bytes available than requested (a genuinely tiny/truncated file)
+    // — must return what exists, never throw, never pad with garbage.
+    {
+      const res = makeStreamingResponse([new Uint8Array([1, 2])]);
+      const out = await __readLeadingBytes(res, 24);
+      ok(
+        'readLeadingBytes: fewer bytes available than requested returns exactly what exists, no throw',
+        out.length === 2 && out[0] === 1 && out[1] === 2
+      );
+    }
+
+    // THE POINT OF THE WHOLE FIX: the stream is CANCELLED once enough bytes
+    // are read, not drained to completion — proven by a chunk that would only
+    // be consumed if reading continued past what was needed.
+    {
+      let readCallsAfterSatisfied = 0;
+      const chunks = [new Uint8Array([1, 2, 3, 4, 5]), new Uint8Array([6, 7, 8])];
+      let i = 0;
+      let cancelled = false;
+      const res = {
+        body: {
+          getReader() {
+            return {
+              async read() {
+                if (i >= chunks.length) {
+                  readCallsAfterSatisfied++; // would only happen if the loop kept pulling
+                  return { done: true, value: undefined };
+                }
+                return { done: false, value: chunks[i++] };
+              },
+              async cancel() {
+                cancelled = true;
+              },
+            };
+          },
+        },
+      };
+      await __readLeadingBytes(res, 5); // exactly satisfied by the FIRST chunk
+      ok('readLeadingBytes: stops reading as soon as n bytes are available (does not pull the second chunk)', i === 1);
+      ok('readLeadingBytes: cancels the stream rather than draining it — this IS the fix', cancelled === true);
+      ok('readLeadingBytes: never called read() again after being satisfied', readCallsAfterSatisfied === 0);
+    }
+
+    // Environments with no streaming body (rare) fall back to a full read —
+    // must still work, must still truncate to n.
+    {
+      const res = { body: null, arrayBuffer: async () => new Uint8Array([9, 8, 7, 6, 5]).buffer };
+      const out = await __readLeadingBytes(res, 3);
+      ok('readLeadingBytes: falls back to arrayBuffer() when no streaming body exists', out.length === 3);
+    }
   }
 }

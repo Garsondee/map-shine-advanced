@@ -530,10 +530,31 @@ function ensureDecodeWorker() {
 }
 
 /**
+ * PER-REQUEST WORKER FAILURES (2026-07-17 — the freeze investigation). Every
+ * failure here used to be swallowed silently (`catch(_){ return null; }`) —
+ * `tryWorkerSlice` returning null is the ONLY thing separating a fast
+ * off-thread decode from a main-thread one big enough to freeze the frame
+ * (measured live: a 2.5s stall), and until now there was NO way to see which
+ * requests fell that way, or why. `mainThreadFallbackSourceDecodes` said HOW
+ * MANY; nothing said WHICH SOURCE or WHAT ERROR. Bounded ring buffer — this
+ * is diagnostics, not a growing log.
+ * @type {Array<{kind:string, url:string, reason:string}>}
+ */
+const _workerRequestFailures = [];
+const WORKER_REQUEST_FAILURE_LOG_MAX = 10;
+
+/** @param {string} kind @param {string} url @param {string} reason */
+function recordWorkerRequestFailure(kind, url, reason) {
+  _workerRequestFailures.push({ kind, url: String(url).slice(-80), reason });
+  if (_workerRequestFailures.length > WORKER_REQUEST_FAILURE_LOG_MAX) _workerRequestFailures.shift();
+}
+
+/**
  * Send a slice request to the worker; resolve with `{results, dimensions, stats}`
  * or return null if the worker is unavailable (caller must fall back). A
  * request-level error also resolves to null — a single failed worker request
- * must never take down decoding; the main-thread path covers it.
+ * must never take down decoding; the main-thread path covers it. The FAILURE
+ * ITSELF is no longer discarded — see `recordWorkerRequestFailure` above.
  * @param {object} msg
  * @returns {Promise<{results?: Array<{key:string, bitmap:ImageBitmap}>, dimensions?: {width:number,height:number}, stats:object}|null>}
  */
@@ -546,12 +567,14 @@ async function tryWorkerSlice(msg) {
     w.postMessage({ ...msg, id });
   } catch (err) {
     _workerPending.delete(id);
-    return null; // e.g. message not cloneable — fall back
+    recordWorkerRequestFailure(msg.kind, msg.url, `postMessage threw: ${err?.message || err}`); // e.g. not cloneable
+    return null;
   }
   try {
     return await promise;
-  } catch (_) {
-    return null; // this request errored in the worker — fall back for it
+  } catch (err) {
+    recordWorkerRequestFailure(msg.kind, msg.url, err?.message || String(err)); // the worker reported ok:false
+    return null;
   }
 }
 
@@ -654,11 +677,25 @@ export async function getSourceDimensions(url) {
   try {
     const res = await fetch(url, { headers: { Range: 'bytes=0-33' } });
     if (res.ok || res.status === 206) {
-      const buf = new DataView(await res.arrayBuffer());
+      // STREAMED, NOT res.arrayBuffer() (found 2026-07-17, the freeze
+      // investigation — a REAL, separate waste from the two fallbacks below,
+      // not just a theory): if the server IGNORES the Range header and
+      // answers 200 with the FULL FILE, `res.arrayBuffer()` buffers the
+      // ENTIRE response before this function can read even one byte of it —
+      // for this project's own scale (a Level background can be hundreds of
+      // MB), that is exactly the "one line looks entirely reasonable and IS
+      // the crisis" trap §0's law exists to catch, just on the network/memory
+      // axis instead of the GPU one. `readLeadingBytes` reads only what the
+      // PNG header needs and CANCELS the rest of the stream — cheap whether
+      // or not Range was honored, which is the whole point of asking for it.
+      const header = await readLeadingBytes(res, 24);
       // PNG signature 0x89504E47 at byte 0; IHDR width@16, height@20 (big-endian).
-      if (buf.byteLength >= 24 && buf.getUint32(0) === 0x89504e47) {
-        if (res.status !== 206) _decodeStats.rangedFetchMisses++; // got a full 200, not a genuine partial response
-        return { width: buf.getUint32(16), height: buf.getUint32(20) };
+      if (header.byteLength >= 24) {
+        const buf = new DataView(header.buffer, header.byteOffset, header.byteLength);
+        if (buf.getUint32(0) === 0x89504e47) {
+          if (res.status !== 206) _decodeStats.rangedFetchMisses++; // got a full 200, not a genuine partial response
+          return { width: buf.getUint32(16), height: buf.getUint32(20) };
+        }
       }
     }
   } catch (_) {}
@@ -673,6 +710,45 @@ export async function getSourceDimensions(url) {
   } finally {
     done();
   }
+}
+
+/**
+ * Read only the first `n` bytes of a Response's body via its stream, then
+ * cancel the rest — the point being to never pay for what a full
+ * `res.arrayBuffer()` would cost when the server ignored our Range header and
+ * sent the whole file. Environments without a streaming body (rare; every
+ * real browser target has one) fall back to a full read, bounded reasoning
+ * unchanged: this only ever needs the leading bytes either way.
+ * @param {Response} res @param {number} n @returns {Promise<Uint8Array>}
+ */
+async function readLeadingBytes(res, n) {
+  if (!res.body?.getReader) return new Uint8Array(await res.arrayBuffer()).subarray(0, n);
+  const reader = res.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (total < n) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.byteLength;
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch (_) {
+      /* the connection may already be closed — cancelling it is a courtesy, not a requirement */
+    }
+  }
+  const out = new Uint8Array(Math.min(total, n));
+  let offset = 0;
+  for (const chunk of chunks) {
+    const take = Math.min(chunk.byteLength, out.byteLength - offset);
+    out.set(chunk.subarray(0, take), offset);
+    offset += take;
+    if (offset >= out.byteLength) break;
+  }
+  return out;
 }
 
 /**
@@ -907,8 +983,26 @@ export function getDecodeStats() {
     // for it yet this session.
     workerStatus: _decodeWorker ? 'active' : _decodeWorkerUnavailable ? 'unavailable' : 'not-yet-created',
     workerUnavailableReason: _decodeWorkerUnavailableReason,
+    // PER-REQUEST failures — the worker can be 'active' (the WHOLE worker is
+    // healthy) while INDIVIDUAL requests still fail and fall back to the main
+    // thread (mainThreadFallbackSourceDecodes counts how many; THIS is why —
+    // 2026-07-17, the freeze investigation). Empty means every worker request
+    // this session succeeded; workerStatus:'active' + a nonzero
+    // mainThreadFallbackSourceDecodes + an EMPTY log here would mean some
+    // OTHER, still-unaccounted-for path is reaching acquireSliceSource — a
+    // real gap this log would make visible rather than hide.
+    workerRequestFailures: [..._workerRequestFailures],
   };
 }
 
 /** Test seam: the pure semaphore, exported for Node verification. @private */
 export const __createSemaphore = createSemaphore;
+
+/**
+ * Test seam: `readLeadingBytes` needs only a Response-shaped object with a
+ * `.body.getReader()` (or none, for the fallback branch) — no real `fetch`
+ * required — so its byte-assembly math (the part most likely to hide an
+ * off-by-one) is genuinely Node-testable, unlike the rest of this file.
+ * @private
+ */
+export const __readLeadingBytes = readLeadingBytes;

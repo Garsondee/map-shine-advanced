@@ -2011,11 +2011,28 @@ export async function startVtPanViewer({
           // place the two conventions meet, and it is written once, here.
           const px = Math.round(c.u * (w - 1));
           const py = Math.round((1 - c.v) * (h - 1));
-          const buf = new Float32Array(4); // RGBA16F reads back as float
-          await renderer.readRenderTargetPixelsAsync(sceneColor, px, py, 1, 1, 0, 0, buf);
-          const r8 = Math.round(Math.min(1, Math.max(0, buf[0])) * 255);
-          const g8 = Math.round(Math.min(1, Math.max(0, buf[1])) * 255);
-          const b8 = Math.round(Math.min(1, Math.max(0, buf[2])) * 255);
+          // ⚠️ readRenderTargetPixelsAsync RETURNS the pixel data — it does NOT
+          // write into a passed-in buffer. Verified against source after this
+          // first read every corner as black (three.webgpu.js:62303, and its
+          // real WebGPU-path implementation at 70950: `return new
+          // typedArrayType(buffer3)`). The first cut of this probe passed an
+          // 8th `buf` argument that the signature does not have — silently
+          // ignored — then read that never-written buffer back as the result.
+          // The render was correct the whole time; only the readback was blind.
+          const raw = await renderer.readRenderTargetPixelsAsync(sceneColor, px, py, 1, 1, 0, 0);
+          // ⚠️ AND: an RGBA16F target's real bytes are raw half-float bit
+          // patterns, returned as a Uint16Array (WebGPUTextureUtils.
+          // _getTypedArrayType: `RGBA16Float -> Uint16Array`) — not something a
+          // 0..1 read can use directly. Decoded with THREE.DataUtils.
+          // fromHalfFloat rather than a hand-rolled bit-twiddle: three already
+          // has this exact, tested function; writing a second one is how a
+          // decode bug becomes two decode bugs that disagree.
+          const r = THREE.DataUtils.fromHalfFloat(raw[0]);
+          const g = THREE.DataUtils.fromHalfFloat(raw[1]);
+          const b = THREE.DataUtils.fromHalfFloat(raw[2]);
+          const r8 = Math.round(Math.min(1, Math.max(0, r)) * 255);
+          const g8 = Math.round(Math.min(1, Math.max(0, g)) * 255);
+          const b8 = Math.round(Math.min(1, Math.max(0, b)) * 255);
           measured[c.name] = { rgb: [r8, g8, b8], readAt: { x: px, y: py } };
           found[c.name] = classifyPixel(r8, g8, b8);
         }

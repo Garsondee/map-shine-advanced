@@ -336,6 +336,27 @@ export function collectTiles(sceneDoc, { visibleLevelIds = [], getRouteFn, isGM 
 }
 
 /**
+ * The Foundry document types `collectSceneLayers` READS. Declared HERE, beside
+ * the collector, because whoever changes what this reads is the only person who
+ * can know this changed — and a list kept somewhere else is a list that drifts.
+ *
+ * The renderer redraws on these documents' create/update/delete hooks. A type
+ * this collector reads but does not declare renders once and then silently
+ * ignores every later change to it. **`Tile` is here because that is not
+ * hypothetical**: it was read by this function, watched by nobody, and a moved
+ * tile kept its MSA art at the old position while Foundry's own interface
+ * chrome moved correctly (author-reported 2026-07-17 — "it leaves a version of
+ * the tile behind"). `Level` because each Level contributes background AND
+ * foreground art, and its elevation is a sort key.
+ *
+ * If you add a document type to this collector — Drawing, Wall, whatever — add
+ * it here in the SAME edit, or the renderer will not notice it changing.
+ *
+ * @type {ReadonlyArray<string>}
+ */
+export const SCENE_LAYER_DOCUMENTS = Object.freeze(['Level', 'Tile']);
+
+/**
  * The whole draw list for a scene: level art + tiles, unsorted.
  *
  * Sorting is the caller's step (`scene/layer-order.js#sortByLayer`) so the

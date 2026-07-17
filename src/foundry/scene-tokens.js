@@ -175,6 +175,21 @@ export function pickTokenAt(tokenItems, point, gridSize) {
 }
 
 /**
+ * The Foundry document types `collectTokens` READS. Declared HERE, beside the
+ * collector, because whoever changes what this reads is the only person who can
+ * know this changed — and a list kept somewhere else is a list that drifts.
+ *
+ * The renderer redraws on these documents' create/update/delete hooks. A type
+ * this collector reads but does not declare renders once and then silently
+ * ignores every later change to it (author-reported 2026-07-17 — that is
+ * exactly what happened to Tile: read by `collectSceneLayers`, watched by
+ * nobody, so a moved tile left its art behind).
+ *
+ * @type {ReadonlyArray<string>}
+ */
+export const TOKEN_DOCUMENTS = Object.freeze(['Token']);
+
+/**
  * Collect every visible token on the visible levels as a drawable.
  *
  * @param {object} sceneDoc

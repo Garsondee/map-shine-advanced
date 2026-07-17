@@ -47,10 +47,16 @@ export {
 } from './scene-geometry.js';
 
 // Scene documents -> keyed draw items (the layering law's input).
-export { collectSceneLayers, computeItemPlacement } from './scene-layers.js';
+//
+// SCENE_LAYER_DOCUMENTS / TOKEN_DOCUMENTS declare which Foundry document types
+// each collector READS, so the renderer can watch exactly those and no others.
+// They are exported because boot.js derives its CRUD-hook list from them rather
+// than remembering one — a document type read but not watched renders once and
+// then ignores every later change (2026-07-17: that was Tile).
+export { collectSceneLayers, computeItemPlacement, SCENE_LAYER_DOCUMENTS } from './scene-layers.js';
 
 // Token documents -> drawables.
-export { collectTokens, diagnoseTokens } from './scene-tokens.js';
+export { collectTokens, diagnoseTokens, TOKEN_DOCUMENTS } from './scene-tokens.js';
 
 // VRAM severance — feed PIXI <=1024px proxies so Foundry never decodes the real file.
 export { registerPixiProxy, getPixiResidencyReport } from './pixi-proxy-textures.js';

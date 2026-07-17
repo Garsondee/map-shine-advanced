@@ -1427,6 +1427,8 @@ export async function startVtPanViewer({
       const items = sortByLayer(buildItems(view.floorIndex));
       const wantedIds = new Set(items.map((i) => i.id));
       prefetchSkippedPacks = 0;
+      lastUpdate.placementChanges = 0;
+      lastUpdate.itemCount = items.length;
 
       // Items that dropped OUT of the draw list: release their VIEW pages (never
       // their coarse pins — those stay resident always, §4.1/§4.5) and hide the
@@ -1470,7 +1472,10 @@ export async function startVtPanViewer({
       // PHASE 2 — view-tier streaming + mesh update, now that every coarse pin
       // is locked in and can't be starved.
       for (const [item, state] of states) {
-        refreshItemPlacement(state, item); // follow document moves/rotations/resizes
+        // Counted, not just done. A document-driven refresh that runs and moves
+        // NOTHING is indistinguishable from a hook that never fired — and those
+        // two need opposite fixes. See `lastUpdate`'s declaration.
+        if (refreshItemPlacement(state, item)) lastUpdate.placementChanges++;
         const onScreen = rectsOverlap(state.worldBounds, worldRect);
 
         // Stream EVERY pack — albedo AND every mask — through the ONE shared
@@ -1521,6 +1526,48 @@ export async function startVtPanViewer({
     // would stack up and thrash the atlas. Run at most one at a time; if the
     // view moved again meanwhile, run exactly once more. updateResidency() reads
     // the live `view` each run, so the final run always reflects the latest view.
+    /**
+     * THE DOCUMENT-REFRESH DISCRIMINATOR (2026-07-17, author-reported: "when I
+     * move a token it clearly moves in the document but it only updates the
+     * token's new position in threejs once I pan the camera or zoom").
+     *
+     * The whole read path — the `updateToken` hook, refreshVtPanViewerItems,
+     * updateResidency, buildItems' live document reads, refreshItemPlacement's
+     * geometry rewrite — was re-read line by line and is CORRECT. Which is
+     * exactly the point at which this project stops guessing: six rounds of
+     * theory→live-test cost a session in 2026-07-15, and the thing that ended it
+     * was instrumentation, not a seventh theory.
+     *
+     * These three counters make the three candidate causes DISTINGUISHABLE in
+     * one report, which is the only property that matters here:
+     *
+     *   docRefreshes === 0        -> the hook never reached us. Fix boot.js.
+     *   docRefreshes > 0 but
+     *     placementChanges === 0  -> we ran and read the SAME position. The doc
+     *                                read is stale/mis-timed. Fix the source.
+     *   docRefreshes > 0 and
+     *     placementChanges > 0    -> we ran AND moved the geometry, and the
+     *                                screen still disagrees. Fix the upload
+     *                                (BufferAttribute -> GPU under WebGPU).
+     *
+     * `placementChanges` counts items whose placementKey ACTUALLY changed, so a
+     * zero here means "nothing moved", never "I did not look" — every pass
+     * writes all three fields (doctrine #5, feedback_instruments_must_not_lie).
+     *
+     * COUNTERS, NOT TIMESTAMPS, and that was the `time/one-clock` wall's doing:
+     * the first cut stamped `performance.now()` on each field and the wall
+     * (correctly) failed the build. It asked the right question — does a
+     * diagnostic need its own private clock? — and the answer was no. The three
+     * counters discriminate all three causes on their own; the timestamps were
+     * decoration that would have added two private clock reads to a codebase
+     * whose predecessor died partly of 41 of them.
+     */
+    const lastUpdate = {
+      itemCount: 0,
+      placementChanges: 0,
+      docRefreshes: 0,
+    };
+
     let residencyInFlight = false;
     let residencyDirty = false;
     async function scheduleResidencyUpdate() {
@@ -2213,8 +2260,22 @@ export async function startVtPanViewer({
       // runs when the VIEW changes, so creating a token while the camera sits
       // still changed the document and never reached the screen (author-reported
       // 2026-07-16: "I drag a token into the scene area but nothing appears").
-      // boot.js drives this from the token CRUD hooks.
-      refreshItems: updateResidency,
+      // boot.js drives this from the document CRUD hooks.
+      //
+      // THROUGH scheduleResidencyUpdate, NOT updateResidency DIRECTLY (fixed
+      // 2026-07-17). It used to call updateResidency() straight, which BYPASSES
+      // the residencyInFlight guard — so a document change landing mid-update
+      // started a SECOND concurrent updateResidency over the same itemStates,
+      // cache and atlas. That is the interleaving class this file already lost
+      // Rounds 4 and 5 to (see prepareForUploadBatch's history): every `await`
+      // in updateResidency is a yield point where the other run can act on
+      // half-updated shared state. The guard already handles this correctly —
+      // it sets residencyDirty and the in-flight run loops again, so a refresh
+      // is never dropped, only merged. Nothing was gained by going around it.
+      refreshItems: () => {
+        lastUpdate.docRefreshes++;
+        return scheduleResidencyUpdate();
+      },
       setDisplayLayer, // exposed so the debug panel can bind a mask for visual verification
       // --- runZoomThrashTest support (2026-07-16) ---------------------------
       /** Wipe frame-gap/hitch history for a clean measurement window. */
@@ -2329,6 +2390,22 @@ export async function startVtPanViewer({
           // update. A few is healthy self-limiting; ALL of them, every update,
           // means the required working set itself is at the budget.
           prefetchSkippedPacks,
+          // DOES A DOCUMENT CHANGE REACH THE SCREEN? Three counters that make
+          // the three candidate causes distinguishable in ONE report — see
+          // `lastUpdate`'s declaration for the decision table. Move a token,
+          // do NOT pan, then read this.
+          documentSync: {
+            ...lastUpdate,
+            interpretation:
+              'Move a token WITHOUT panning, then read these. ' +
+              'docRefreshes:0 = the CRUD hook never reached the viewer (boot.js wiring). ' +
+              'docRefreshes>0 + placementChanges:0 = we ran and re-read the SAME position ' +
+              '(stale/mis-timed document read — the hook fires before the change lands). ' +
+              'docRefreshes>0 + placementChanges>0 but the screen disagrees = we moved the ' +
+              'geometry and the GPU never saw it (BufferAttribute upload under WebGPU). ' +
+              'placementChanges counts items whose placementKey ACTUALLY changed, so 0 means ' +
+              '"nothing moved" and never "I did not look".',
+          },
           canvasSizePx: { width: canvasW, height: canvasH },
           mountedInBoard: mount.fill && mount.host !== document.body,
           cacheStats: cache.stats(),

@@ -56,6 +56,8 @@ import {
   collectSceneLayers,
   collectTokens,
   diagnoseTokens,
+  SCENE_LAYER_DOCUMENTS,
+  TOKEN_DOCUMENTS,
   computeSceneDimensions,
   registerPixiProxy,
   getPixiResidencyReport,
@@ -735,20 +737,43 @@ function install() {
     // cheap event was the actual crash: repeated full 512MB-atlas
     // reallocation on ordinary floor toggles.
     let lastRealSceneId = null;
-    // TOKEN CRUD -> redraw. The draw list is derived from live Foundry documents,
-    // but nothing was watching them: updateResidency only re-asks buildItems when
-    // the VIEW changes, so a token created while the camera sat still never
-    // appeared (author-reported 2026-07-16). Foundry's own hook names are the
-    // authority here — see common/documents/token.mjs's metadata.events.
+    // DOCUMENT CRUD -> redraw. The draw list is derived from live Foundry
+    // documents, but nothing was watching them: updateResidency only re-asks
+    // buildItems when the VIEW changes, so a token created while the camera sat
+    // still never appeared (author-reported 2026-07-16).
     //
-    // updateToken matters as much as createToken: moving a token between floors
-    // changes token.level, which changes which floors draw it.
-    for (const hook of ['createToken', 'updateToken', 'deleteToken']) {
-      Hooks.on(hook, () => {
-        // Fire-and-forget: a redraw must never make a document update await GPU
-        // work, and a failed redraw must not break Foundry's own bookkeeping.
-        refreshVtPanViewerItems().catch((err) => console.error(`${TAG} ${hook} redraw failed:`, err));
-      });
+    // THE LIST MUST MATCH buildItems, AND IT DID NOT (author-reported
+    // 2026-07-17: "I can move a tile and it's clearly moving the document but
+    // it's not currently updating the tile's position when I release it... it
+    // only updates when I pan or zoom and it leaves a version of the tile
+    // behind"). buildItems is `collectSceneLayers(...)` + `collectTokens(...)`,
+    // i.e. Level art AND Tiles AND Tokens — but only Token was watched. So a
+    // moved tile kept its MSA art at the old spot while Foundry's interface
+    // chrome (its frame and handles, which PIXI still draws) sat at the new
+    // one: the "version left behind" is our stale art beside Foundry's
+    // correctly-moved selection frame. Nothing was wrong with the renderer; it
+    // was simply never told.
+    //
+    // DERIVED FROM THE COLLECTORS' OWN DECLARATIONS, not a list remembered here
+    // — `buildItems` is exactly `collectSceneLayers` + `collectTokens`, and each
+    // declares the document types it reads right beside itself. A list kept in
+    // boot.js is a list that drifts away from the thing it describes, which is
+    // the whole mechanism of this bug (and the reason `tools/run-tests.mjs`
+    // discovers suites off disk rather than reading a hand-kept array).
+    //
+    // Foundry's own hook names are the authority: `Hooks.callAll(`update${type}`)`
+    // where type is the documentName — verified in the v14 source at
+    // client/data/client-backend.mjs:159/327/451 (create/update/delete).
+    const DRAW_LIST_DOCUMENTS = [...SCENE_LAYER_DOCUMENTS, ...TOKEN_DOCUMENTS];
+    for (const doc of DRAW_LIST_DOCUMENTS) {
+      for (const verb of ['create', 'update', 'delete']) {
+        const hook = `${verb}${doc}`;
+        Hooks.on(hook, () => {
+          // Fire-and-forget: a redraw must never make a document update await GPU
+          // work, and a failed redraw must not break Foundry's own bookkeeping.
+          refreshVtPanViewerItems().catch((err) => console.error(`${TAG} ${hook} redraw failed:`, err));
+        });
+      }
     }
 
     Hooks.on('canvasReady', async (canvasRef) => {

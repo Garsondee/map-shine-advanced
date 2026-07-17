@@ -1,0 +1,317 @@
+# Fire
+
+**V2 class:** `FireEffectV2` · **Source:** `legacy/compositor-v2/effects/FireEffectV2.js`
+
+**Rebuilt in V3 as:** `sims.fluids (sim)`, `surface.particles (glow draw)`
+
+> **Reference only — do not port these values.** Every effect is being rebuilt from scratch in TSL; the numbers below were tuned against V2's GLSL math, which is being deleted, so the same settings would not give the same result. What survives the rewrite is the INTENT: which knobs existed, what they were for, and what they were called. That is what this page is for.
+
+## What it did, in the author's words
+
+Flames, embers, and smoke spawn from authored _Fire masks on tiles and level backgrounds.
+
+A procedural coal or wood bed shader draws on the tile surface under the flame particles.
+
+Mask pickup scans bright pixels per floor; optional gameplay glow pools light nearby tokens.
+
+Requires matching _Fire files beside each albedo you want to burn.
+
+## Controls, grouped as the author grouped them
+
+### Flames
+
+| Control | id | Type | Range | Default | Notes |
+|---|---|---|---|---|---|
+| Global Intensity | `globalFireRate` | slider | 0 … 20 | 2.6 |  |
+| Height | `fireHeight` | slider | 1 … 600 | 600 |  |
+| Temperature | `fireTemperature` | slider | 0 … 1 | 0.85 |  |
+| Peak Opacity | `flamePeakOpacity` | slider | 0 … 1 | 0.19 |  |
+| Core Emission (HDR) | `coreEmission` | slider | 0.5 … 12 | 1.4 |  |
+| | | | | | _Linear HDR flame energy. Raised for the unclamped lighting pipeline — push higher if night fires look pale._ |
+| Updraft | `fireUpdraft` | slider | 0 … 12 | 1 |  |
+| Curl Strength | `fireCurlStrength` | slider | 0 … 12 | 0.5 |  |
+| Anchored Flames | `flameStationaryFraction` | slider | 0 … 1 | 0.95 |  |
+| | | | | | _Fraction of flame particles that skip updraft, turbulence, and wind so they stay on the burning surface._ |
+
+### Embers & Smoke
+
+| Control | id | Type | Range | Default | Notes |
+|---|---|---|---|---|---|
+| Enable smoke | `smokeEnabled` | checkbox |  | true |  |
+| Emission Density | `smokeRatio` | slider | 0 … 3 | 2 |  |
+| Peak Opacity | `smokeOpacity` | slider | 0 … 1 | 0.19 |  |
+| Density | `emberRate` | slider | 0 … 5 | 2.3 |  |
+| Emission (HDR) | `emberEmission` | slider | 0.5 … 12 | 12 |  |
+| | | | | | _Linear HDR ember energy (vertex RGB, not alpha)._ |
+| Updraft | `emberUpdraft` | slider | 0 … 12 | 0.2 |  |
+| Curl Strength | `emberCurlStrength` | slider | 0 … 12 | 1.25 |  |
+
+### Coal Bed
+
+| Control | id | Type | Range | Default | Notes |
+|---|---|---|---|---|---|
+| Enable coal bed | `coalBedEnabled` | checkbox |  | true |  |
+| | | | | | _Procedural coal or wood substrate drawn on the tile surface under flame particles._ |
+| Intensity | `coalBedIntensity` | slider | 0 … 2 | 0.24 |  |
+| | | | | | _Master brightness for smolder tint and HDR sparks._ |
+| Opacity | `coalBedOpacity` | slider | 0 … 1 | 0.53 |  |
+| | | | | | _Coal stain strength (premultiplied). Also gently scales spark brightness._ |
+
+### Fire Glow
+
+| Control | id | Type | Range | Default | Notes |
+|---|---|---|---|---|---|
+| Enable glow | `fireGlowEnabled` | checkbox |  | true |  |
+| Follow HDR Brightness Slider | `fireGlowFollowLightIntensity` | checkbox |  | true |  |
+| | | | | | _Multiply cancel strength by Environment → HDR Brightness (day/night blend)._ |
+| Day scale | `fireGlowDayIntensityScale` | slider | 0 … 2 | 0.29 |  |
+| | | | | | _Gameplay-light pool strength at full daylight (master darkness ≈ 0). Fires always emit; night adds darkness-cancel on top._ |
+| Night scale | `fireGlowNightIntensityScale` | slider | 0 … 3 | 0.45 |  |
+| | | | | | _Brightness multiplier at full night (master darkness ≈ 1). Does not change glow hue._ |
+| Night Cancel Boost | `fireGlowDarknessNightBoost` | slider | 1 … 5 | 1 |  |
+| | | | | | _Extra darkness-cancel strength at full scene night._ |
+
+### Mask Pickup _(advanced)_
+
+| Control | id | Type | Range | Default | Notes |
+|---|---|---|---|---|---|
+| Min Mask White | `fireMaskMinBrightness` | slider | 0 … 1 | 0.6 |  |
+| | | | | | _Require this much peak RGB brightness in the _Fire mask (0–1). Raise to ignore grey fringe and keep only strong white texels._ |
+| Min Mask Alpha | `fireMaskMinAlpha` | slider | 0 … 1 | 0.8 |  |
+| | | | | | _Reject _Fire texels below this alpha. Raise to drop semi-transparent anti-alias edges (try 0.85–0.95 for WebP holes)._ |
+| Min Combined Strength | `fireMaskPremulThreshold` | slider | 0 … 1 | 0.2 |  |
+| | | | | | _Minimum premultiplied strength (mask white × mask alpha). Higher = fewer, stronger pickup points._ |
+| Min Tile Alpha | `fireAlbedoMinAlpha` | slider | 0 … 1 | 0.65 |  |
+| | | | | | _Ground floor only: require the colour texture to be this opaque at the same UV. Suppresses fire on transparent map holes. Upper floors use the raw _Fire mask (matches compositor / heat haze)._ |
+| Min Neighbour Distance (px) | `fireMaskIsolationPx` | slider | 0 … 64 | 0 |  |
+| | | | | | _Drop isolated _Fire specks with no neighbour within this distance in mask pixels. 0 = off; try 8–16 to cull single-pixel noise._ |
+
+### Heat Distortion _(advanced)_
+
+| Control | id | Type | Range | Default | Notes |
+|---|---|---|---|---|---|
+| Enable Heat Haze | `heatDistortionEnabled` | checkbox |  | true |  |
+| Intensity | `heatDistortionIntensity` | slider | 0 … 0.05 | 0.001 |  |
+| Frequency | `heatDistortionFrequency` | slider | 1 … 20 | 20 |  |
+| Speed | `heatDistortionSpeed` | slider | 0.1 … 3 | 3 |  |
+| Edge Softness | `heatDistortionEdgeSoftness` | slider | 0.4 … 3 | 0.5 |  |
+
+### Environment _(advanced)_
+
+| Control | id | Type | Range | Default | Notes |
+|---|---|---|---|---|---|
+| Visual Speed | `fireVisualSpeed` | slider | 0.25 … 4 | 1.5 |  |
+| | | | | | _Master multiplier for flame, ember, smoke, and coal-bed visual animation. Independent of Time Scale and Simulation Rate._ |
+| Time Scale | `timeScale` | slider | 0.1 … 3 | 3 |  |
+| | | | | | _Shortens particle lifespan and speeds emission churn. Does not change sprite flipbook flicker — use Visual Speed or per-layer Animation Speed for that._ |
+| HDR Brightness (Day) | `lightIntensity` | slider | 0 … 5 | 1.4 |  |
+| | | | | | _Linear HDR output at full daylight. Blends toward Night HDR Brightness as scene darkness increases._ |
+| Night HDR Brightness | `nightHdrBrightness` | slider | 0 … 12 | 2.4 |  |
+| | | | | | _Linear HDR output at full night. Raise if flames, embers, and smoke emission look too dim after Color Correction._ |
+| Indoor Life Scale | `indoorLifeScale` | slider | 0.05 … 1 | 0.7 |  |
+| Indoor Time Scale | `indoorTimeScale` | slider | 0.05 … 1 | 0.4 |  |
+| Rain Kill Strength | `weatherPrecipKill` | slider | 0 … 5 | 5 |  |
+| | | | | | _How strongly rain shortens outdoor flame life and suppresses outdoor updraft._ |
+
+### Performance _(advanced)_
+
+| Control | id | Type | Range | Default | Notes |
+|---|---|---|---|---|---|
+| Simulation Rate (Hz) | `fireSimHz` | slider | 8 … 60 | 30 |  |
+| | | | | | _CPU physics step rate. Set to 60+ for buttery smooth movement, or lower to save CPU._ |
+| Max Spatial Buckets / Floor | `fireMaxSpatialBuckets` | slider | 4 … 96 | 16 |  |
+| | | | | | _Caps particle emitter count per floor. Larger fire maps auto-coarsen buckets when this limit is exceeded._ |
+| Max Particle Systems / Floor | `fireMaxSystemsPerFloor` | slider | 8 … 120 | 36 |  |
+| | | | | | _Hard cap on fire + ember + smoke emitters. Excess mask area is merged into fewer buckets._ |
+| Outdoor Split Max Buckets | `fireOutdoorSplitMaxBuckets` | slider | 2 … 32 | 10 |  |
+| | | | | | _Indoor/outdoor ember+smoke split only applies when spatial bucket count is at or below this value._ |
+| View Streaming (Cull Off-Screen) | `fireViewStreaming` | checkbox |  | true |  |
+| | | | | | _Only create and simulate fire clusters inside the camera view. Off-screen buckets are torn down to save CPU._ |
+| Max Flame Particles / Bucket | `fireMaxParticles` | slider | 200 … 10000 | 2000 |  |
+| | | | | | _Hard per-bucket cap (scaled by mask area). Emission auto-limits to stay within this budget — reload after changing._ |
+| Max Ember Particles / Bucket | `fireEmberMaxParticles` | slider | 100 … 4000 | 700 |  |
+| | | | | | _Hard cap per ember system; emission scales down to match lifespan._ |
+| Max Smoke Particles / Bucket | `fireSmokeMaxParticles` | slider | 100 … 6000 | 900 |  |
+| | | | | | _Hard cap per smoke system. Long smoke lifetimes make this the main steady-state CPU driver._ |
+
+### Ungrouped
+
+| Control | id | Type | Range | Default | Notes |
+|---|---|---|---|---|---|
+| Fire Enabled | `enabled` | checkbox |  | true |  |
+| Brightness floor | `flameBrightnessFloor` | slider | 0 … 1.5 | 0 |  |
+| Size Min | `fireSizeMin` | slider | 1 … 150 | 150 |  |
+| Size Max | `fireSizeMax` | slider | 1 … 200 | 195 |  |
+| Life Min (s) | `fireLifeMin` | slider | 0.1 … 6 | 2.9 |  |
+| Life Max (s) | `fireLifeMax` | slider | 0.1 … 6 | 5 |  |
+| Flipbook Cycles | `flameFlipbookCycles` | slider | 0.5 … 6 | 4 |  |
+| | | | | | _How many full sprite flipbook loops each flame completes over its lifetime. Higher = faster flicker without changing fade or size._ |
+| Animation Speed | `flameAnimSpeed` | slider | 0.25 … 4 | 1 |  |
+| | | | | | _Sprite flicker and colour envelope rate for flames. Stacks with Flipbook Cycles and Environment → Visual Speed. Does not change particle lifespan or motion._ |
+| Spin Enabled | `fireSpinEnabled` | checkbox |  | true | hidden |
+| Spin Speed Min | `fireSpinSpeedMin` | slider | 0 … 50 | 0 | hidden |
+| Spin Speed Max | `fireSpinSpeedMax` | slider | 0 … 50 | 0.3 | hidden |
+| Opacity | `flameTextureOpacity` | slider | 0 … 1 | 1 |  |
+| Brightness | `flameTextureBrightness` | slider | 0 … 3 | 1.85 |  |
+| Scale X | `flameTextureScaleX` | slider | 0.05 … 4 | 1 |  |
+| | | | | | _Applies to the ember sprite. Flame flipbook atlas orientation is fixed._ |
+| Scale Y | `flameTextureScaleY` | slider | 0.05 … 4 | 1 |  |
+| | | | | | _Applies to the ember sprite. Flame flipbook atlas orientation is fixed._ |
+| Offset X | `flameTextureOffsetX` | slider | -1 … 1 | 0 |  |
+| Offset Y | `flameTextureOffsetY` | slider | -1 … 1 | 0 |  |
+| Rotation (rad) | `flameTextureRotation` | slider | -3.14 … 3.14 | 0 |  |
+| Flip X | `flameTextureFlipX` | checkbox |  | true |  |
+| | | | | | _Ember sprite only._ |
+| Flip Y | `flameTextureFlipY` | checkbox |  | true |  |
+| | | | | | _Ember sprite only._ |
+| Peak Opacity | `emberPeakOpacity` | slider | 0 … 1 | 1 |  |
+| Size Min | `emberSizeMin` | slider | 1 … 40 | 7 |  |
+| Size Max | `emberSizeMax` | slider | 1 … 60 | 26 |  |
+| Life Min (s) | `emberLifeMin` | slider | 0.1 … 8 | 1.1 |  |
+| Life Max (s) | `emberLifeMax` | slider | 0.1 … 12 | 11.3 |  |
+| Animation Speed | `emberAnimSpeed` | slider | 0.25 … 4 | 1 |  |
+| | | | | | _How fast ember colour and brightness evolve over each particle life. Does not change lifespan or drift._ |
+| Indoor Life Scale | `indoorEmberLifeScale` | slider | 0.05 … 1 | 0.05 |  |
+| | | | | | _Shortens ember lifespan under roof mask (stacks with Environment → Indoor Life Scale)._ |
+| Indoor Density Suppression | `indoorEmberSuppression` | slider | 0 … 1 | 0.2 |  |
+| | | | | | _Scales indoor ember brightness/opacity by roof coverage (0 = none; 1 = fully suppressed under roof). Updates live._ |
+| Outdoor Smoke & Embers Above Trees | `smokeOutdoorAboveCanopy` | checkbox |  | true |  |
+| | | | | | _Outdoor smoke and embers (uncovered by roof mask) render above tree and bush canopies. Indoor particles stay under overhead tiles._ |
+| Indoor Smoke Suppression | `indoorSmokeSuppression` | slider | 0 … 1 | 1 |  |
+| | | | | | _Scales indoor smoke opacity by roof coverage (0 = none; 1 = fully suppressed under roof). Updates live._ |
+| Color Warmth | `smokeColorWarmth` | slider | 0 … 1 | 0.53 |  |
+| Brightness | `smokeColorBrightness` | slider | 0.05 … 2 | 0.82 |  |
+| Darkness Response | `smokeDarknessResponse` | slider | 0 … 1 | 1 |  |
+| Colour Over Life | `smokeColorGradient` | gradient |  | (4 points) |  |
+| Emission tint over life | `smokeEmissionGradient` | gradient |  | (3 points) |  |
+| Size Min | `smokeSizeMin` | slider | 1 … 200 | 151 |  |
+| Size Max | `smokeSizeMax` | slider | 1 … 400 | 400 |  |
+| Size Growth (Legacy) | `smokeSizeGrowth` | slider | 1 … 10 | 10 | hidden |
+| Size Over Life | `smokeSizeOverLife` | slider | 1 … 10 | 10 |  |
+| Life Min (s) | `smokeLifeMin` | slider | 0.1 … 10 | 3.1 |  |
+| Life Max (s) | `smokeLifeMax` | slider | 0.1 … 15 | 12.3 |  |
+| Flipbook Cycles | `smokeFlipbookCycles` | slider | 0 … 2 | 0 |  |
+| | | | | | _Optional atlas loops per puff (requires multi-frame atlas). 0 = static silhouette — recommended._ |
+| Animation Speed | `smokeAnimSpeed` | slider | 0.25 … 4 | 1 |  |
+| | | | | | _Smoke colour, opacity, and size envelope rate. Does not change rise speed or lifespan._ |
+| Opacity ramp from (life %) | `smokeAlphaStart` | slider | 0 … 1 | 0.16 |  |
+| | | | | | _Life % when opacity begins rising from zero. Must be ≤ Peak opacity at._ |
+| Peak opacity at (life %) | `smokeAlphaPeak` | slider | 0 … 1 | 0.9 |  |
+| | | | | | _Life % at full opacity. If below “ramp from”, treated as same point (hold, then fade)._ |
+| Updraft | `smokeUpdraft` | slider | 0 … 20 | 0.8 |  |
+| Turbulence | `smokeTurbulence` | slider | 0 … 5 | 0.05 |  |
+| Wind Influence | `smokeWindInfluence` | slider | 0 … 10 | 4.5 |  |
+| Opacity reaches zero at (life %) | `smokeAlphaEnd` | slider | 0 … 1 | 1 |  |
+| Warmth | `fireGlowWarmth` | slider | 0 … 1 | 0 |  |
+| | | | | | _Daylight pool hue at full day. Blends toward Night pool at darkness._ |
+| Intensity | `fireGlowIntensity` | slider | 0 … 3 | 1.12 |  |
+| | | | | | _Day flicker/intensity at full daylight._ |
+| Darkness cancel (HDR) | `fireGlowDarknessCancel` | slider | 0 … 20 | 20 |  |
+| | | | | | _Day HDR punch into the light buffer. Night value is in Night pool._ |
+| Indoor intensity | `fireGlowIndoorIntensityScale` | slider | 0 … 4 | 0.05 |  |
+| | | | | | _Multiplies day/night pool intensity under roof. Outdoor fires use outdoor balance scales._ |
+| Indoor cancel | `fireGlowIndoorCancelScale` | slider | 0 … 4 | 0.1 |  |
+| | | | | | _HDR darkness-cancel multiplier for indoor pools (after day/night cancel blend)._ |
+| Indoor radius | `fireGlowIndoorRadiusScale` | slider | 0.25 … 3 | 1.16 |  |
+| | | | | | _Indoor pool reach multiplier (after day/night radius blend)._ |
+| Indoor night boost | `fireGlowIndoorNightBoost` | slider | 0 … 4 | 0.54 |  |
+| | | | | | _Extra indoor glow at full darkness. Usually lower than outdoor — interior CC already lifts local light._ |
+| Outdoor intensity | `fireGlowOutdoorIntensityScale` | slider | 0 … 4 | 0.09 |  |
+| | | | | | _Multiplies day/night pool intensity in open air. Push high for campfires vs midnight ToD._ |
+| Outdoor cancel | `fireGlowOutdoorCancelScale` | slider | 0 … 4 | 0.35 |  |
+| | | | | | _HDR darkness-cancel multiplier for outdoor pools. Primary control for bright outdoor fire rings._ |
+| Outdoor radius | `fireGlowOutdoorRadiusScale` | slider | 0.25 … 3 | 0.82 |  |
+| | | | | | _Outdoor pool reach multiplier — wider lit area under open sky._ |
+| Outdoor night boost | `fireGlowOutdoorNightBoost` | slider | 0 … 4 | 1.45 |  |
+| | | | | | _Extra outdoor glow at full darkness, on top of intensity/cancel scales._ |
+| Warmth | `fireGlowNightWarmth` | slider | 0 … 1 | 0.38 |  |
+| | | | | | _Night-only pool hue. Blends toward this at full darkness; day warmth is in Day pool._ |
+| Intensity | `fireGlowNightIntensity` | slider | 0 … 3 | 3 |  |
+| | | | | | _Night flicker/intensity scale at full darkness._ |
+| Darkness cancel (HDR) | `fireGlowNightDarknessCancel` | slider | 0 … 20 | 9.2 |  |
+| | | | | | _Night HDR punch into the light buffer. Usually higher than the day value for midnight scenes._ |
+| Flicker Strength | `fireGlowNightFlickerStrength` | slider | 0 … 12 | 0.05 |  |
+| Flicker Speed | `fireGlowNightFlickerSpeed` | slider | 0 … 25 | 9.5 |  |
+| Flicker Strength Jitter | `fireGlowNightFlickerStrengthJitter` | slider | 0 … 1 | 0.85 |  |
+| Flicker Speed Jitter | `fireGlowNightFlickerSpeedJitter` | slider | 0 … 1 | 1 |  |
+| Radius (px) | `fireGlowNightRadiusPx` | slider | 32 … 2000 | 916 |  |
+| | | | | | _Night pool reach at full darkness. Blends from day radius as scene darkens._ |
+| Hot Core Scale | `fireGlowNightInnerRadiusScale` | slider | 0.05 … 1 | 0.27 |  |
+| Falloff Exponent | `fireGlowNightFalloffExponent` | slider | 0.5 … 2.5 | 1.1 |  |
+| | | | | | _Night core tightness. Lower = wider soft midnight pool._ |
+| Edge softness | `fireGlowNightEdgeSoftness` | slider | 0 … 1 | 1 |  |
+| | | | | | _Night rim feather in the HDR light buffer._ |
+| Flicker Strength | `fireGlowFlickerStrength` | slider | 0 … 12 | 0.25 |  |
+| Flicker Speed | `fireGlowFlickerSpeed` | slider | 0 … 25 | 17.8 |  |
+| Flicker Strength Jitter | `fireGlowFlickerStrengthJitter` | slider | 0 … 1 | 0.82 |  |
+| Flicker Speed Jitter | `fireGlowFlickerSpeedJitter` | slider | 0 … 1 | 0.72 |  |
+| Radius (px) | `fireGlowRadiusPx` | slider | 32 … 2000 | 720 |  |
+| Hot Core Scale | `fireGlowInnerRadiusScale` | slider | 0.05 … 1 | 0.22 |  |
+| Falloff Exponent | `fireGlowFalloffExponent` | slider | 0.5 … 2.5 | 1.15 |  |
+| | | | | | _Core tightness for unified radial falloff. Lower = wider soft pool; higher ≈ inverse-square hot core._ |
+| Edge softness | `fireGlowEdgeSoftness` | slider | 0 … 1 | 0.88 |  |
+| | | | | | _Feathers the glow rim in the HDR light buffer. Drives shader attenuation + rim geometry (higher = wider, softer pool)._ |
+| Cluster bucket (px) | `fireGlowBucketSizePx` | slider | 128 … 2048 | 512 |  |
+| | | | | | _Spatial cluster size for glow pools. Lower values keep separate wall-clipped pools per fire group; very large buckets merge distant fires and weaken wall clipping._ |
+| Max pools | `fireGlowMaxBuckets` | slider | 1 … 256 | 128 |  |
+| Wall clip | `fireGlowWallClipEnabled` | checkbox |  | true |  |
+| Wall clip radius | `fireGlowWallClipRadiusScale` | slider | 0.25 … 2 | 1 |  |
+| Wind Influence | `windInfluence` | slider | 0 … 5 | 0.7 | hidden |
+| Wind Kill Strength | `weatherWindKill` | slider | 0 … 5 | 0.9 | hidden |
+| Preset | `coalBedPreset` | select | Coal Bed / Burning Wood / Charcoal | coal |  |
+| Smolder Block (px) | `coalBedChunkScale` | slider | 8 … 96 | 36 |  |
+| | | | | | _Slow coal-bed blocks in overlay pixels. Larger = broader smolder patches._ |
+| Smolder Sharpness | `coalBedChunkContrast` | slider | 0.5 … 6 | 0.5 |  |
+| | | | | | _How crisp smolder blocks are vs charcoal grit._ |
+| Smolder Aspect | `coalBedChunkAspect` | slider | 0.5 … 4 | 3 |  |
+| | | | | | _Stretches smolder blocks along the grain angle._ |
+| Ember Size (px) | `coalBedGrainScale` | slider | 3 … 24 | 6 |  |
+| | | | | | _Feature size of the continuous ember glow field in overlay pixels. Lower = finer glows; higher = broader soft patches._ |
+| Smolder Angle (rad) | `coalBedGrainAngle` | slider | -3.14 … 3.14 | 1.7 |  |
+| | | | | | _Rotates smolder noise grid (embers stay axis-aligned)._ |
+| Char / Unburnt | `coalBedColorChar` | color |  | #1a100c |  |
+| Flare Hot | `coalBedColorHot` | color |  | #ffffff |  |
+| Ember Warm | `coalBedColorWarm` | color |  | #ff4400 |  |
+| Smolder | `coalBedColorAshWarm` | color |  | #aa5030 |  |
+| Dead Ash | `coalBedColorAshCool` | color |  | #524840 |  |
+| Saturation | `coalBedSaturation` | slider | 0 … 2.5 | 0.95 |  |
+| Saturation Boost | `coalBedContrast` | slider | 0.5 … 2 | 1.22 |  |
+| | | | | | _Mild color punch — does not crush to black._ |
+| Parallax Depth | `coalBedRimStrength` | slider | 0 … 1 | 0.04 |  |
+| | | | | | _Shifts cold ash UVs so char/cracks appear recessed — cheap fake volume on the flat bed._ |
+| Emissive Gain (HDR) | `coalBedEmissiveGain` | slider | 0 … 16 | 8 |  |
+| | | | | | _Linear HDR multiplier on ember glow (bloom picks this up)._ |
+| Ember Coverage | `coalBedFlareDensity` | slider | 0.2 … 0.98 | 0.45 |  |
+| | | | | | _How much of the bed shows active ember glow. Higher = more simultaneous hot spots._ |
+| Ash → Char | `coalBedBandCharEnd` | slider | 0.05 … 0.95 | 0.05 |  |
+| | | | | | _Normalized smolder heat where dead ash gives way to char. Lower = more ash, higher = more char._ |
+| Char → Smolder | `coalBedBandHotEnd` | slider | 0.05 … 0.95 | 0.3 |  |
+| | | | | | _Heat threshold for char → smolder (ash-warm) transition._ |
+| Smolder → Warm | `coalBedBandWarmEnd` | slider | 0.05 … 0.95 | 0.41 |  |
+| | | | | | _Heat threshold for smolder → warm ember tones._ |
+| Warm → Hot | `coalBedBandAshWarmEnd` | slider | 0.05 … 0.95 | 0.95 |  |
+| | | | | | _Heat threshold for warm → hot core colour on the brightest smolder cells._ |
+| Scroll (unused) | `coalBedScrollSpeed` | slider | 0 … 0.2 | 0 | hidden |
+| Scroll Angle (unused) | `coalBedScrollAngle` | slider | -3.14 … 3.14 | 0 | hidden |
+| Smolder Drift Speed | `coalBedEvolveSpeed` | slider | 0 … 2 | 2 |  |
+| | | | | | _Slow per-block smolder breathing — does not flash the whole mask._ |
+| Ember Flicker Rate | `coalBedPulseSpeed` | slider | 0.2 … 8 | 1.8 |  |
+| | | | | | _How fast ember glows breathe and flicker. Higher = faster pulsing._ |
+| Animation Speed | `coalBedAnimSpeed` | slider | 0.25 … 4 | 1 |  |
+| | | | | | _Scales smolder drift and ember flicker on the coal bed. Stacks with Environment → Visual Speed._ |
+| Crack / Organic Warp | `coalBedTurbulence` | slider | 0 … 2 | 0.13 |  |
+| | | | | | _Distorts smolder cells and drives glowing crack vein strength. Also modulates wind-breath ripples._ |
+| Heat Levels | `coalBedHeatLevels` | slider | 2 … 16 | 12 |  |
+| | | | | | _Quantize smolder base heat bands. Only visible at low Softness and low values — HDR embers stay smooth._ |
+| Splat Rate (unused) | `coalBedSplatRate` | slider | 0 … 5 | 0 | hidden |
+| Floating Ember Drift | `coalBedFlareChaos` | slider | 0 … 2 | 0.85 |  |
+| | | | | | _Upward drift on fine ember layer — glowing bits rising toward flames._ |
+| Mask Threshold | `coalBedMaskLo` | slider | 0 … 0.8 | 0.8 |  |
+| | | | | | _Stochastic cutoff after noisy expand — not a soft alpha edge._ |
+| Mask Expand (texels) | `coalBedMaskExpand` | slider | 0 … 4 | 0 |  |
+| | | | | | _Dilate _Fire mask before thresholding — dissolves hard authored edges._ |
+| Mask Edge Noise | `coalBedMaskDither` | slider | 0 … 0.5 | 0.5 |  |
+| | | | | | _Noisy soften on mask boundary — irregular pixel dissolve, not a dark ring._ |
+| Mask Ceiling (unused) | `coalBedMaskHi` | slider | 0.5 … 1 | 1 | hidden |
+| Softness (px) | `coalBedEdgeSoftness` | slider | 0 … 32 | 10 |  |
+| | | | | | _Blurs smolder heat, ember glow, and mask edges. Higher = smoother organic look; lower = sharper detail._ |

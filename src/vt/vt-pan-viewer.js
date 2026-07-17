@@ -2654,68 +2654,102 @@ export async function startVtPanViewer({
         // on top of that". Each entry's renderOrder came from sortByLayer
         // (scene/layer-order.js) over its (elevation, sortLayer, sort, zIndex)
         // key, so this table IS the layering, not a summary of it.
-        const drawList = lastItems.map((i) => ({
-          renderOrder: i.renderOrder,
-          id: i.id,
-          kind: i.kind,
-          elevation: i.key.elevation,
-          sortLayer: i.key.sortLayer,
-          sort: i.key.sort,
-          zIndex: i.key.zIndex,
-          visible: itemStates.get(i.id)?.mesh?.visible ?? false,
-          occlusionModes: i.occlusion?.modes ?? 0,
-          // GROUND TRUTH vs RENDERED, for tokens only (2026-07-17 — "stops
-          // slightly short" after the moveToken fix). `state.placement` is
-          // what refreshItemPlacement last actually wrote to the mesh — a
-          // SNAPSHOT from whenever the last residency pass ran. `i._placement
-          // .tokenDoc` is the SAME live document reference `lastItems` was
-          // built from, re-read HERE, at report-generation time, which can be
-          // LATER than the last pass. Re-deriving the footprint fresh from it
-          // (not trusting any cached footprint) answers the only question that
-          // matters: is MSA's rendered position CURRENTLY behind Foundry's
-          // live document, or does it already match right now?
-          //   liveVsRendered: null  -> not a token, or not placed yet.
-          //   deltaPx ~0            -> MSA matches Foundry AT REPORT TIME. The
-          //                            "short" stop was transient (report taken
-          //                            mid-movement) or is a rendering/geometry
-          //                            issue, not a sync gap.
-          //   deltaPx > 0, and a SECOND report taken later still shows the SAME
-          //   nonzero delta -> MSA is genuinely stuck behind the live document.
-          liveVsRendered: (() => {
-            if (i.kind !== 'token' || !i._placement?.tokenDoc) return null;
-            const state = itemStates.get(i.id);
-            if (!state?.placement) return null;
-            const live = tokenFootprint(i._placement.tokenDoc, i._placement.gridSize);
-            const dx = live.centerX - state.placement.x;
-            const dy = live.centerY - state.placement.y;
-            return {
-              liveX: live.centerX,
-              liveY: live.centerY,
-              renderedX: state.placement.x,
-              renderedY: state.placement.y,
-              deltaPx: Math.round(Math.hypot(dx, dy) * 10) / 10,
-            };
-          })(),
-          // THE ACTUAL UNIFORM VALUES the shader is running on, read straight off the
-          // JS side -- exact, and involving no shader at all. Kept after the bisect
-          // scaffolding was stripped because it earned it: printing these is what
-          // proved the occlusion weights were clean zeros, which is what forced the
-          // search onto the OPERATION rather than the values and found the .mix()
-          // trap (reference_tsl_method_chaining_trap).
-          uniforms: (() => {
-            const a = itemStates.get(i.id)?.appearance;
-            if (!a) return null;
-            return {
-              occlusionWeights: a.uOcclusionWeights.value.toArray(),
-              occlusionElevation: a.uOcclusionElevation.value,
-              alpha: a.uAlpha.value,
-              unoccludedAlpha: a.uUnoccludedAlpha.value,
-              occludedAlpha: a.uOccludedAlpha.value,
-              tint: a.uTint.value.toArray(),
-              srgbDecode: itemStates.get(i.id)?.vt?.uniforms.srgbDecode.value ?? null,
-            };
-          })(),
-        }));
+        const drawList = lastItems.map((i) => {
+          const state = itemStates.get(i.id);
+          return {
+            renderOrder: i.renderOrder,
+            id: i.id,
+            kind: i.kind,
+            elevation: i.key.elevation,
+            sortLayer: i.key.sortLayer,
+            sort: i.key.sort,
+            zIndex: i.key.zIndex,
+            visible: state?.mesh?.visible ?? false,
+            occlusionModes: i.occlusion?.modes ?? 0,
+            // GROUND TRUTH vs RENDERED, for tokens only (2026-07-17 — "stops
+            // slightly short" after the moveToken fix). `state.placement` is
+            // what refreshItemPlacement last actually wrote to the mesh — a
+            // SNAPSHOT from whenever the last residency pass ran. `i._placement
+            // .tokenDoc` is the SAME live document reference `lastItems` was
+            // built from, re-read HERE, at report-generation time, which can be
+            // LATER than the last pass. Re-deriving the footprint fresh from it
+            // (not trusting any cached footprint) answers the only question that
+            // matters: is MSA's rendered position CURRENTLY behind Foundry's
+            // live document, or does it already match right now?
+            //   liveVsRendered: null  -> not a token, or not placed yet.
+            //   deltaPx ~0            -> MSA matches Foundry AT REPORT TIME. The
+            //                            "short" stop was transient (report taken
+            //                            mid-movement) or is a rendering/geometry
+            //                            issue, not a sync gap.
+            //   deltaPx > 0, and a SECOND report taken later still shows the SAME
+            //   nonzero delta -> MSA is genuinely stuck behind the live document.
+            // WHERE THIS QUAD ACTUALLY IS, and what its page grid was built from
+            // (2026-07-17 — the "very large, wrong position, partially
+            // transparent, never evicted" ghost). Those four properties together
+            // do NOT describe a virtual-texture fault: the sampler's two failure
+            // colours are both OPAQUE (magenta = broken pin invariant, black =
+            // out-of-world), and a page-level lie would still be confined to that
+            // page's own world area rather than appearing "very large". A
+            // MISPLACED/MIS-SIZED QUAD explains all four at once — including
+            // "never evicted", because a mesh is not a page and zooming can never
+            // reclaim it. These two fields tell those apart from ONE report,
+            // instead of a fourth round of theory.
+            //
+            //   placementPx wildly larger than the scene, or origin far outside
+            //   world{} -> the quad is wrong: computeItemPlacement / imageSizePx.
+            //   placementPx sane, artefact still on screen -> genuinely the
+            //   sampler, and the pyramid/mip math is next.
+            //
+            // imageSizePx is included because it is placement's hidden INPUT
+            // (`state.imageSize`, read once from getSourceDimensions at load) and
+            // a wrong value there silently mis-sizes the quad forever after —
+            // exactly the "never evicted" signature. It is also the field that
+            // would expose a regression in readLeadingBytes' PNG-header parse.
+            placementPx: state?.placement
+              ? {
+                  x: Math.round(state.placement.x),
+                  y: Math.round(state.placement.y),
+                  width: Math.round(state.placement.width),
+                  height: Math.round(state.placement.height),
+                  rotation: state.placement.rotation ?? 0,
+                }
+              : null,
+            imageSizePx: state?.imageSize ?? null,
+            liveVsRendered: (() => {
+              if (i.kind !== 'token' || !i._placement?.tokenDoc) return null;
+              if (!state?.placement) return null;
+              const live = tokenFootprint(i._placement.tokenDoc, i._placement.gridSize);
+              const dx = live.centerX - state.placement.x;
+              const dy = live.centerY - state.placement.y;
+              return {
+                liveX: live.centerX,
+                liveY: live.centerY,
+                renderedX: state.placement.x,
+                renderedY: state.placement.y,
+                deltaPx: Math.round(Math.hypot(dx, dy) * 10) / 10,
+              };
+            })(),
+            // THE ACTUAL UNIFORM VALUES the shader is running on, read straight off the
+            // JS side -- exact, and involving no shader at all. Kept after the bisect
+            // scaffolding was stripped because it earned it: printing these is what
+            // proved the occlusion weights were clean zeros, which is what forced the
+            // search onto the OPERATION rather than the values and found the .mix()
+            // trap (reference_tsl_method_chaining_trap).
+            uniforms: (() => {
+              const a = state?.appearance;
+              if (!a) return null;
+              return {
+                occlusionWeights: a.uOcclusionWeights.value.toArray(),
+                occlusionElevation: a.uOcclusionElevation.value,
+                alpha: a.uAlpha.value,
+                unoccludedAlpha: a.uUnoccludedAlpha.value,
+                occludedAlpha: a.uOccludedAlpha.value,
+                tint: a.uTint.value.toArray(),
+                srgbDecode: state?.vt?.uniforms.srgbDecode.value ?? null,
+              };
+            })(),
+          };
+        });
 
         // A scan of drawList so a token desync doesn't require reading the
         // whole (potentially long) table by eye. Empty array = every token

@@ -117,10 +117,27 @@ The contract in §3 was designed from a sample of ONE (SpecularEffectV2). Before
 
 ## 4. What is harvested (and it is a lot)
 
-- **The 48 `getControlSchema()` bodies** — types, ranges, steps and, above all, the `help`/`summary`/`glossary` text **in the author's own voice** ("*World scale: how large world-space shimmer patterns are — higher = bigger, calmer glint clusters*"). Irreplaceable; becomes free tooltips in every surface.
-- **Every tuned default.** `intensity: 1.23` is not a number, it is taste. The values are the product.
-- **The grouping intent** (Look / Shimmer / Layer 1…) — good IA, re-expressed as presentation.
+### ⚠️ CORRECTED 2026-07-17 — one line of this was WRONG, and it cost a rebuild
+
+> ~~**Every tuned default.** `intensity: 1.23` is not a number, it is taste. **The values are the product.**~~
+
+**The values are NOT the product. They are taste expressed *through a specific shader that is being deleted*.** Author, 2026-07-17:
+
+> *"Given that every single effect is going to be rewritten from scratch I think the parameters and things that I've built up are only really useful as a reference to the sort of features I'd like to see eventually. We're going to be building the effects in modern TSL so it's very likely that even using the exact same settings wouldn't give us the result we want."*
+
+Correct, and it invalidates the struck line. `intensity: 1.23` was tuned against V2's GLSL math, its tone mapping, its colour handling — none of which survive the TSL rebuild. Port the number and you get a different picture. **The number is not portable; the INTENT is.**
+
+**This mattered practically, not academically.** Read literally, this section produced a harvest that emitted a `params-schema.js`-conformant `.js` tree into `src/` — 601K of V2 schemas imported by `boot.js`, shipped to and parsed by every player, for data no V3 code read — **while silently dropping the `help`/`glossary` prose this very section calls irreplaceable.** Exactly inverted: the worthless half preserved as product code, the priceless half binned. Rebuilt as `docs/reference/v2-effect-params/` (commit `8ca0ea0`); `tools/harvest-params.mjs`'s header carries the full account.
+
+**What actually survives a rewrite** — and is therefore what the harvest is FOR:
+
+- **The `help`/`summary`/`glossary` text in the author's own voice** ("*World scale: how large world-space shimmer patterns are — higher = bigger, calmer glint clusters*"). This section already called it *"above all… irreplaceable"* and was right: it describes INTENT, which is shader-independent. **25 of the 45 schemas carry it.**
+- **Which knobs existed at all** — a feature wishlist. *"I wanted to control shimmer world-scale"* survives; *"at 1.23"* does not.
+- **The grouping intent** (Look / Shimmer / Layer 1…) — good IA, and a record of which knobs the author thought belonged together.
+- **The vocabulary** — what the author *called* things.
 - The **"Cinematic Plausibility"** doctrine that shaped which knobs exist at all.
+
+**✅ THE HARVEST IS DONE** (2026-07-17): **45 effects, 2,240 controls**, each cross-referenced to the V3 pass that replaces it via `passes.js`'s `absorbs` — so the index answers *"I'm building `post.grade`; what did the 13 effects it replaces do?"*. It also surfaces **5 effects no V3 pass claims** (`SceneWindField` has 35 controls and `frame.snapshot`'s own note says it covers wind — a real gap in the 48→~12 accounting, worth closing before Stage 7). It is a **reference for authoring**, read by a human designing a V3 effect — never imported, never shipped, never a schema.
 
 ## 5. Tripwires (the last gap in the wall)
 

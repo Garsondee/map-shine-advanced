@@ -1978,25 +1978,97 @@ export async function startVtPanViewer({
        * backends — which is why §"the readback path both backends implement".
        */
       async runOrientationSelfTest() {
-        const probeMat = new THREE.NodeMaterial();
-        probeMat.depthTest = false;
-        probeMat.depthWrite = false;
-        // Build the pattern in TSL from the SAME PROBE_CORNERS the diagnosis
-        // reads, so the pattern and its expectations can never disagree.
-        const { uv: uvNode, vec4, float, select } = THREE.TSL;
-        const st = uvNode();
-        let colour = vec4(0, 0, 0, 1);
+        // ⚠️ ROUND 2 REDESIGN (2026-07-17) — read this before touching the
+        // pattern-generation code below.
+        //
+        // Round 1 built the pattern as ONE fullscreen quad with a branching
+        // TSL shader (nested `select()`/`.and()`/`.lessThan()` picking a
+        // colour per screen quadrant). The result: one corner read an EXACT,
+        // fully-saturated hit — but the WRONG colour, not a clean permutation
+        // — and the other three read faint, muddy values matching none of the
+        // four defined colours. That shape (one clean hit + mush, not a clean
+        // swap) does not fit a single coordinate bug; it is consistent with
+        // TWO things going wrong at once, and blind shader-branching is
+        // exactly the code this project's own standing warning
+        // (memory: reference_tsl_method_chaining_trap — the `.mix()` bug that
+        // cost a session) says to distrust until checked against source.
+        // `select()`'s argument order and `.and()`'s semantics WERE checked
+        // (three.webgpu.js:35276 ConditionalNode, :34860/34899 `and`) and
+        // both are correct — so that specific trap is ruled out, but a
+        // branching shader is still more moving parts than this diagnostic
+        // needs, and "more moving parts than needed" is itself the risk.
+        //
+        // Redesigned to remove everything not load-bearing: FOUR SEPARATE
+        // quads, one flat, unbranched colour each, positioned by explicit NDC
+        // vertex coordinates under the SAME orthographic camera convention
+        // QuadMesh itself uses (-1,1,1,-1,0,1 — NDC y=+1 is top BY
+        // DEFINITION of that camera, not by interpretation of a shared
+        // geometry's uv scheme). A flat `fragmentNode = vec4(r,g,b,1)` is
+        // about as low-risk as GPU code gets: one node, no chaining, no
+        // per-pixel branching to get subtly backwards.
+        //
+        // ALSO ADDED: the defensive renderer-state reset the deleted
+        // graph/fullscreen-present.js's own header called out as necessary
+        // ("scissor off, viewport to logical size, opaque clear... to avoid
+        // stale-underlay artifacts") and which this file's fresh TSL present
+        // pass never carried over. Cheap, safe, and exactly the kind of stale
+        // GL/GPU state this project has been bitten by before (the
+        // texture-unit-cache staleness bug from the original VT viewer
+        // build — see keyhole-stage-status memory, Round 5).
+        renderer.setScissorTest(false);
+        renderer.setViewport(0, 0, sceneColor.width, sceneColor.height);
+
+        const probeCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        const probeScene = new THREE.Scene();
+        const probeMats = [];
         for (const c of PROBE_CORNERS) {
-          const inX = c.u < 0.5 ? st.x.lessThan(float(0.5)) : st.x.greaterThanEqual(float(0.5));
-          const inY = c.v < 0.5 ? st.y.lessThan(float(0.5)) : st.y.greaterThanEqual(float(0.5));
-          colour = select(inX.and(inY), vec4(c.rgb[0] / 255, c.rgb[1] / 255, c.rgb[2] / 255, 1), colour);
+          const mat = new THREE.NodeMaterial();
+          mat.depthTest = false;
+          mat.depthWrite = false;
+          mat.fragmentNode = THREE.TSL.vec4(c.rgb[0] / 255, c.rgb[1] / 255, c.rgb[2] / 255, 1);
+          probeMats.push(mat);
+          // NDC mapping, stated so it can be checked: NDC y=+1 is the TOP of
+          // this camera's frustum by definition (top param = 1). v=0 (this
+          // corner's OWN stated "top" convention) must therefore map to
+          // ndcY=+1, and v=1 to ndcY=-1 — i.e. ndcY = 1 - v*2.
+          const ndcX = c.u * 2 - 1;
+          const ndcY = 1 - c.v * 2;
+          const half = 0.18; // a visible box, comfortably clear of every other corner's box
+          const geo = new THREE.BufferGeometry();
+          geo.setAttribute(
+            'position',
+            new THREE.Float32BufferAttribute(
+              [
+                ndcX - half,
+                ndcY + half,
+                0,
+                ndcX - half,
+                ndcY - half,
+                0,
+                ndcX + half,
+                ndcY - half,
+                0,
+                ndcX - half,
+                ndcY + half,
+                0,
+                ndcX + half,
+                ndcY - half,
+                0,
+                ndcX + half,
+                ndcY + half,
+                0,
+              ],
+              3
+            )
+          );
+          probeScene.add(new THREE.Mesh(geo, mat));
         }
-        probeMat.fragmentNode = colour;
-        const probeQuad = new THREE.QuadMesh(probeMat);
 
         // 1. Draw the pattern into buf:scene.color — the geometry.world slot.
         renderer.setRenderTarget(sceneColor);
-        probeQuad.render(renderer);
+        renderer.setClearColor(0x000000, 1);
+        renderer.clear(true, true, true);
+        renderer.render(probeScene, probeCamera);
         renderer.setRenderTarget(null);
 
         // 2. Read the REAL pixels back out of it.
@@ -2005,12 +2077,31 @@ export async function startVtPanViewer({
         const found = {};
         const measured = {};
         for (const c of PROBE_CORNERS) {
-          // PROBE_CORNERS' v is stated in the TEXTURE convention three
-          // normalises to: v=0 is the TOP. readRenderTargetPixels' y is the
-          // BUFFER's, origin bottom-left — so this ONE conversion is the only
-          // place the two conventions meet, and it is written once, here.
+          // ⚠️ ROUND 2 CORRECTION. This used to be `(1 - c.v) * (h-1)`,
+          // reasoning "readRenderTargetPixels' buffer is bottom-left-origin
+          // like classic OpenGL". Round 1's live result contradicted that: one
+          // corner read an EXACT hit at the diagonally-opposite-in-Y position.
+          //
+          // `readRenderTargetPixelsAsync` is NOT one of three's own
+          // texture-SAMPLING calls (those go through the `isFlipY()`
+          // mechanism this file already cites) — it is a raw GPU memory copy
+          // (`encoder.copyTextureToBuffer`, three.webgpu.js:70950-71012).
+          // WebGPU's copy origin follows the SAME top-left fragment-coordinate
+          // convention as Vulkan/D3D12/Metal (its own backends): row 0 is the
+          // TOP of the rendered image, not the bottom. That is the OPPOSITE of
+          // classic OpenGL, which is what the original comment assumed.
+          //
+          // Confidence note, stated honestly rather than presented as another
+          // certainty: this is documented WebGPU/Vulkan/D3D12 API behaviour,
+          // not a single line grep'd from this vendored bundle the way the
+          // isFlipY()/QuadGeometry findings were — but it is corroborated by
+          // the actual Round 1 failure pattern, which is exactly what
+          // inverting this ONE line predicts. If this is STILL wrong, the
+          // improved probe (four solid, well-separated boxes, no shader
+          // branching) will now say so as a CLEAN Y-flip rather than mush —
+          // the diagnosis logic already knows how to name that.
           const px = Math.round(c.u * (w - 1));
-          const py = Math.round((1 - c.v) * (h - 1));
+          const py = Math.round(c.v * (h - 1));
           // ⚠️ readRenderTargetPixelsAsync RETURNS the pixel data — it does NOT
           // write into a passed-in buffer. Verified against source after this
           // first read every corner as black (three.webgpu.js:62303, and its
@@ -2037,7 +2128,13 @@ export async function startVtPanViewer({
           found[c.name] = classifyPixel(r8, g8, b8);
         }
 
-        probeMat.dispose(); // NOT probeQuad.geometry — QuadMesh shares one module-level geometry
+        // Each corner built its OWN geometry (unlike the QuadMesh present
+        // pass, these are NOT three's shared module-level QuadGeometry — safe
+        // to dispose every one of them).
+        for (const obj of probeScene.children) {
+          obj.geometry?.dispose();
+        }
+        for (const mat of probeMats) mat.dispose();
         const verdict = diagnoseOrientation(found);
 
         // 3. Put the map back. The probe scribbled over buf:scene.color; the

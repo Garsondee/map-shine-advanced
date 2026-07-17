@@ -64,6 +64,52 @@
  * for any caller — tests, the torture-fixture viewer — that never sets it.
  * ============================================================================
  *
+ * ============================================================================
+ * `onEvict` — THE DANGLING-INDIRECTION FIX (author-reported 2026-07-17: "lots
+ * of weird tile artefacts... tiles of textures at the wrong scale and in the
+ * wrong place appearing across the scene", under a zoom/floor thrash test).
+ *
+ * A slot's identity CHANGES the instant it is evicted. Anything still pointing
+ * at that slot — specifically `vt-pan-viewer.js`'s per-pack indirection buffer,
+ * whose whole job is `(mip, px, py) -> slot` — is now pointing at a DIFFERENT
+ * page's pixels: a different mip (wrong scale), a different position (wrong
+ * place), or another pack's texture entirely. It does not render as blur or
+ * magenta; it renders as confident, plausible garbage.
+ *
+ * THE RACE THIS CLOSES, precisely (`streamPackResidency`):
+ *   1. release: `cache.unpin(key)` for pages the new view no longer wants —
+ *      they stay RESIDENT and are now LRU-evictable. **The pack's indirection
+ *      still references them at this point.**
+ *   2. `await requestDecodeUpload(...)` — yields. The render loop draws frames
+ *      across this await, and evictions (this pack's own new requests, or any
+ *      other pack's) reassign those very slots.
+ *   3. rebuild: the indirection is finally rewritten, correct again.
+ * Between 1 and 3, every drawn frame samples through pointers that may already
+ * be lying. Under a thrash test — 11,608 evictions in one session — that window
+ * is hit constantly.
+ *
+ * The release-first order is NOT the bug and must not be "fixed" by reverting
+ * it: it exists to cap peak pinned pages at max(old,new) rather than old+new,
+ * and reverting it reintroduces the 215k-miss bug (see streamPackResidency's
+ * own comment). Two individually-correct pieces of reasoning — "unpinning is
+ * safe because the page stays resident" (true, about PIN COUNT) and "the
+ * indirection is rebuilt fresh every pass" (true, about the END of the pass) —
+ * with an unexamined interaction between them. Neither comment was wrong; the
+ * gap was that nobody asked what the indirection referenced BETWEEN them.
+ *
+ * So the invariant is enforced where the slot's identity actually changes,
+ * rather than by reasoning about which windows are safe: **no slot is reusable
+ * until every texel pointing at it has been cleared.** A cleared texel reads
+ * "not resident", which the sampler's coarse-mip fallback already handles
+ * correctly — blur, never another page's pixels. That is the §4.1 guarantee
+ * ("not loaded yet means SOFT, not WRONG") applied to the one case that was
+ * silently violating it.
+ *
+ * The callback fires from inside `request()`, before the slot is rebound. It
+ * MUST NOT re-enter `request()`/`unpin()` — clearing a buffer texel is exactly
+ * the shape of work it is for.
+ * ============================================================================
+ *
  * @module vt/page-cache
  */
 
@@ -78,9 +124,17 @@ export class PageCache {
    * @param {number} [options.pageBytes] - bytes per page (Keyhole Q1: 256x256
    *   RGBA8 = 256 KB/page default).
    */
-  constructor({ budgetBytes, pageBytes = 256 * 1024, coarseReservePages = 0 }) {
+  constructor({ budgetBytes, pageBytes = 256 * 1024, coarseReservePages = 0, onEvict = null }) {
     if (!(budgetBytes > 0)) throw new Error('PageCache: budgetBytes must be > 0');
     if (!(pageBytes > 0)) throw new Error('PageCache: pageBytes must be > 0');
+
+    /**
+     * Called with a page key the instant its slot stops backing that page and
+     * becomes reusable — see this module's header (`onEvict`) for why this is a
+     * correctness requirement and not a notification convenience.
+     * @type {((key: string) => void)|null}
+     */
+    this._onEvict = onEvict;
 
     /** @readonly */
     this.pageBytes = pageBytes;
@@ -195,6 +249,11 @@ export class PageCache {
       this._keyToSlot.delete(evictedKey);
       this._evictions++;
       slot = victim;
+      // THE INVARIANT: this slot's identity is about to change. Nothing may
+      // still be pointing at it as `evictedKey`. Fired BEFORE the rebind below,
+      // so a callback that reads cache state sees the page as already gone
+      // rather than half-reassigned. See this module's header (`onEvict`).
+      this._onEvict?.(evictedKey);
     }
 
     this._slotToKey[slot] = key;

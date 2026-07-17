@@ -354,6 +354,107 @@ export function run(t) {
     ok('cache: NaN clamps to 0, not NaN propagating into admission checks', cache.coarseReservePages === 0);
   }
 
+  // --- PageCache: onEvict — the dangling-indirection fix -------------------
+  // (author-reported 2026-07-17, zoom/floor thrash test: "tiles of textures at
+  // the wrong scale and in the wrong place"). An evicted slot's identity
+  // changes; anything still pointing at it now resolves to a DIFFERENT page's
+  // pixels. onEvict is what lets the owner clear its pointer at the exact
+  // moment that becomes true.
+  {
+    const evicted = [];
+    const cache = new PageCache({ budgetBytes: 2 * 256 * 1024, onEvict: (key) => evicted.push(key) });
+    cache.tick();
+    cache.request('a');
+    cache.tick();
+    cache.request('b');
+    cache.tick();
+    // Cache full, both unpinned -> 'a' (LRU) is evicted for 'c'.
+    const res = cache.request('c');
+    ok('onEvict: fires with the evicted key', evicted.length === 1 && evicted[0] === 'a');
+    ok('onEvict: the eviction still happened normally', res.resident === true && res.evictedKey === 'a');
+
+    // It must NOT fire when nothing is actually evicted — a free slot, or a
+    // re-request of an already-resident page. A callback that fires
+    // spuriously would have the owner clearing LIVE pointers.
+    evicted.length = 0;
+    cache.request('c'); // already resident
+    ok('onEvict: does NOT fire for an already-resident re-request', evicted.length === 0);
+  }
+  {
+    // Never fires for a MISS — nothing was evicted, so nothing's identity
+    // changed. Firing here would clear a pointer to a page that is still
+    // perfectly valid.
+    const evicted = [];
+    const cache = new PageCache({ budgetBytes: 1 * 256 * 1024, onEvict: (key) => evicted.push(key) });
+    cache.request('pinned', { pin: 'coarse' });
+    const miss = cache.request('other', { pin: 'view' });
+    ok('onEvict: a miss evicts nothing, so onEvict must not fire', miss.resident === false && evicted.length === 0);
+  }
+  {
+    // No callback supplied (every existing caller, and the torture fixture) —
+    // must behave exactly as before.
+    const cache = new PageCache({ budgetBytes: 2 * 256 * 1024 });
+    cache.tick();
+    cache.request('a');
+    cache.tick();
+    cache.request('b');
+    cache.tick();
+    const res = cache.request('c');
+    ok('onEvict: omitting the callback still evicts normally (no throw)', res.resident === true);
+  }
+  {
+    // THE ACTUAL RACE, modelled — this is the assertion that matters. A
+    // simplified indirection: `texel[key] = slot`. The sequence is
+    // streamPackResidency's: unpin the old pages (still referenced by the
+    // indirection!), then request new ones (which evict those very slots),
+    // and only rebuild at the end. WITHOUT onEvict, the indirection points at
+    // reassigned slots for the whole window — and the render loop draws
+    // across it.
+    const texels = new Map(); // key -> slot it believes backs it
+    const cache = new PageCache({
+      budgetBytes: 4 * 256 * 1024, // 4 pages
+      onEvict: (key) => texels.delete(key), // the fix, in miniature
+    });
+
+    // Pass 1: pack pins 4 view pages and writes all 4 texels.
+    const oldPages = ['p0', 'p1', 'p2', 'p3'];
+    for (const k of oldPages) {
+      const { slot } = cache.request(k, { pin: 'view' });
+      texels.set(k, slot);
+    }
+    ok('race: all 4 old pages are written into the indirection', texels.size === 4);
+
+    // Pass 2, step 1 — RELEASE. The view moved; unpin the old set. Note the
+    // texels still reference them: this is exactly the live code's state at
+    // the moment it hits its `await`.
+    cache.tick();
+    for (const k of oldPages) cache.unpin(k);
+
+    // Pass 2, step 2 — REQUEST the new set. These evict the just-unpinned
+    // slots. In the live code this is behind an `await`, with frames drawing.
+    const newPages = ['q0', 'q1', 'q2', 'q3'];
+    for (const k of newPages) {
+      const { slot } = cache.request(k, { pin: 'view' });
+      texels.set(k, slot);
+    }
+
+    // THE ASSERTION: no texel may still claim a slot that no longer backs it.
+    // Every remaining entry must agree with the cache's own current mapping.
+    let liars = 0;
+    for (const [key, believedSlot] of texels) {
+      if (cache.slotOf(key) !== believedSlot) liars++;
+    }
+    ok('race: NO indirection texel points at a slot that no longer backs it', liars === 0);
+    ok(
+      'race: the old pages are gone from the indirection entirely',
+      oldPages.every((k) => !texels.has(k))
+    );
+    ok(
+      'race: the new pages are correctly mapped',
+      newPages.every((k) => cache.slotOf(k) === texels.get(k))
+    );
+  }
+
   // --- PageCache: default reserve is 0 — EXISTING callers unaffected -------
   {
     // Anyone who never sets coarseReservePages (today: the torture-fixture

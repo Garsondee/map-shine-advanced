@@ -357,7 +357,62 @@ export async function startVtPanViewer({
   let canvas = null;
   try {
     const layout = computeAtlasLayout({ budgetBytes: 512 * 1024 * 1024 }); // Keyhole Q2 default
-    const cache = new PageCache({ budgetBytes: 512 * 1024 * 1024 });
+
+    /**
+     * THE DANGLING-INDIRECTION FIX (author-reported 2026-07-17, under a
+     * zoom/floor thrash test: "tiles of textures at the wrong scale and in the
+     * wrong place appearing across the scene"). Full mechanism in
+     * page-cache.js's `onEvict` header — the short version: an evicted slot's
+     * identity changes, and any indirection texel still pointing at it now
+     * resolves to a DIFFERENT page's pixels (wrong mip = wrong scale, wrong
+     * coords = wrong place, or another pack's texture entirely). It renders as
+     * confident garbage, never as blur.
+     *
+     * `pageOwners` is what makes an evicted KEY resolvable back to the exact
+     * texel that references it. Bounded by construction: an entry is added only
+     * when a texel is actually written (writeIndirection, which itself only
+     * runs for a verifiably-resident page) and removed the instant that page is
+     * evicted — so it can never hold more than the cache's own resident set.
+     * @type {Map<string, {pack: object, page: {mip:number, px:number, py:number}}>}
+     */
+    const pageOwners = new Map();
+
+    /**
+     * Zero the one indirection texel that points at `key`, if any still does.
+     *
+     * SAFE EVEN FOR A STALE ENTRY, and this is the load-bearing reason it can
+     * be this simple: within one pack, texel address and page key are a
+     * BIJECTION — `pageKey(mip,px,py)` encodes exactly the `(mip, px, py)` this
+     * texel's address is derived from, so no key other than `key` can ever
+     * write this texel. A `pageOwners` entry left behind by a `buf.fill(0)`
+     * rebuild therefore cannot clear someone else's live pointer; the worst it
+     * can do is re-clear an already-clear texel, which the alpha guard below
+     * skips outright.
+     */
+    function clearIndirectionForKey(key) {
+      const owner = pageOwners.get(key);
+      if (!owner) return; // never written to any indirection, or already cleared
+      pageOwners.delete(key);
+      const { pack, page } = owner;
+      const o = pack.indirectionLayout.origins[page.mip];
+      const i = ((o.y + page.py) * pack.width + (o.x + page.px)) * 4;
+      if (pack.buf[i + 3] === 0) return; // already reads "not resident" — nothing to clear
+      // All-zero reads as "not resident" to the sampler, which then walks up to
+      // the coarse pin — blur, the §4.1 guarantee, instead of another page's
+      // pixels. Alpha included: writeIndirection sets it to 255 to mean
+      // resident, so leaving it set would keep the texel "live" while its RG
+      // slot bits read 0 — i.e. confidently pointing at slot 0.
+      pack.buf[i] = 0;
+      pack.buf[i + 1] = 0;
+      pack.buf[i + 2] = 0;
+      pack.buf[i + 3] = 0;
+      pack.indirectionTexture.needsUpdate = true;
+    }
+
+    const cache = new PageCache({
+      budgetBytes: 512 * 1024 * 1024,
+      onEvict: clearIndirectionForKey,
+    });
 
     const mount = resolveMountHost();
     let canvasW = measureHost(mount.host).width;
@@ -1296,6 +1351,12 @@ export async function startVtPanViewer({
       pack.buf[i + 1] = (slot >> 8) & 0xff;
       pack.buf[i + 2] = 0;
       pack.buf[i + 3] = 255;
+      // This texel now points at `page.key`'s slot. Record it so the cache's
+      // onEvict can find and clear THIS texel the instant that slot is
+      // reassigned — see clearIndirectionForKey. Registering HERE (rather than
+      // at request time) is what keeps the map honest: it maps exactly the
+      // texels that actually exist, never the ones we merely asked for.
+      pageOwners.set(page.key, { pack, page });
     }
 
     // Which layer-pack is DISPLAYED (albedo by default). Every pack STREAMS

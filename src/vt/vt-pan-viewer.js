@@ -87,8 +87,7 @@ import {
   computeItemViewportPx,
   rectsOverlap,
 } from '../scene/world-quad.js';
-import { computeQuadCorners, computeQuadBounds } from '../foundry/scene-geometry.js';
-import { computeItemPlacement } from '../foundry/scene-layers.js';
+import { computeQuadCorners, computeQuadBounds, computeItemPlacement } from '../foundry/index.js';
 import { engageFoundryFallback, clearFoundryFallback, describeRenderMode } from '../diag/render-fallback.js';
 import { OCCLUSION_MODES, computeOcclusionState, createHoverFadeState, mapElevation } from '../scene/occlusion.js';
 
@@ -361,31 +360,64 @@ export async function startVtPanViewer({
     canvas.id = 'msa-vt-pan-viewer-canvas';
     canvas.width = canvasW;
     canvas.height = canvasH;
+    // THE INTERFACE SEAM (2026-07-17) — on a real scene MSA now sits UNDERNEATH
+    // Foundry's PIXI canvas, not on top of it. See foundry/canvas-compositing.js
+    // for the full finding; the short version:
+    //
+    // Foundry's `interface` group holds EVERY interactive layer (tokens, tiles,
+    // walls, grid, controls, notes, drawings, templates — CONFIG.Canvas.layers)
+    // and draws all the chrome: selection borders, control icons, rulers,
+    // target reticles, drag previews. It renders into `canvas#board`. MSA used
+    // to mount at z-index 5 with an OPAQUE background, which meant input worked
+    // (pointer-events:none let clicks through) while every one of those was
+    // invisible behind us. Selection worked; you just could not see it.
+    //
+    // So: MSA draws the ART underneath, Foundry's PIXI canvas goes transparent
+    // and draws only its CHROME on top. They render DISJOINT sets — which is
+    // what keeps this from being V2's two-authoritative-renderers blunder
+    // (Engine-Postmortem.md §1). There is no shared picture, so there is
+    // nothing to synchronise.
+    const boardEl = followFoundryCamera ? document.getElementById('board') : null;
+    const stackUnderBoard = !!boardEl && boardEl.parentElement === mount.host;
     Object.assign(canvas.style, {
-      // Fill the mount host (the board container) exactly, occluding the PIXI
-      // canvas beneath. z-index 5: above board (0) + hud (1), below Foundry UI
-      // (60) and the debug panel (90).
       position: 'absolute',
       inset: '0',
       width: '100%',
       height: '100%',
-      zIndex: '5',
+      // z-index 0 and inserted BEFORE #board in tree order (see below), which
+      // is what actually puts us under it. Deliberately NOT z-index:-1 — a
+      // negative z-index paints behind the stacking context's background, and
+      // our mount host is <body> (canvas#board's parent, game.hbs:31). Equal
+      // z-index + tree order is well-defined CSS; negative z-index depends on
+      // who forms the stacking context.
+      //
+      // The torture fixture (followFoundryCamera:false) has NO Foundry scene
+      // and owns its own camera and input, so it stays on top at 5: above board
+      // (0) + hud (1), below Foundry UI (60) and the debug panel (90).
+      zIndex: stackUnderBoard ? '0' : '5',
       display: 'block',
+      // Stays OPAQUE, and now that is correct rather than destructive: we are
+      // the bottom of the stack, so this is the "nothing here" backdrop.
       background: '#000',
       // FOUNDRY OWNS ALL INPUT when following its camera (author decision
-      // 2026-07-16). pointer-events:none is not cosmetic -- with 'auto' this
-      // canvas SWALLOWED every click, drag and drop aimed at Foundry's board.
-      // Dropping tokens onto the scene silently created no documents at all
-      // (diagnoseTokens: tokenDocsFound: 1 on a scene the author had dropped
-      // many tokens onto), and marquee select did nothing. It looked for hours
-      // like a rendering bug and was an input bug.
+      // 2026-07-16). This is now BELT AND BRACES rather than the load-bearing
+      // fix — a canvas underneath #board cannot swallow a click anyway. It is
+      // kept precisely because it WAS load-bearing: with 'auto' on top, this
+      // canvas swallowed every click, drag and drop aimed at Foundry's board.
+      // Dropping tokens silently created no documents at all (diagnoseTokens:
+      // tokenDocsFound: 1 on a scene the author had dropped many tokens onto)
+      // and marquee select did nothing. It looked for hours like a rendering
+      // bug and was an input bug. If the stacking ever regresses, this keeps
+      // that catastrophe from coming back with it.
       pointerEvents: followFoundryCamera ? 'none' : 'auto',
       // NOT 'grab'. The cursor was permanently a hand, which promises a drag
       // that is not always what a click does (author-reported). It becomes
       // 'grabbing' only for the duration of an actual pan, then reverts.
       cursor: 'default',
     });
-    mount.host.appendChild(canvas);
+    // Tree order IS the stacking order at equal z-index: earlier paints lower.
+    if (stackUnderBoard) mount.host.insertBefore(canvas, boardEl);
+    else mount.host.appendChild(canvas);
 
     // WebGPURenderer — the NODE renderer, which picks WebGPU or WebGL2 itself
     // (docs/planning/Shaders.md). NOT "the WebGPU renderer": its WebGLBackend is

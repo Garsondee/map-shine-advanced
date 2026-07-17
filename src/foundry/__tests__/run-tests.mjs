@@ -8,6 +8,7 @@
  *     --bundle --format=esm --platform=node --outfile=<tmp>.mjs && node <tmp>.mjs
  */
 import { run as runActiveSceneSource } from './active-scene-source.test.mjs';
+import { run as runCanvasCompositing } from './canvas-compositing.test.mjs';
 import { run as runPixiProxyTextures } from './pixi-proxy-textures.test.mjs';
 import { run as runSceneGeometry } from './scene-geometry.test.mjs';
 import { run as runSceneLayers } from './scene-layers.test.mjs';
@@ -48,6 +49,7 @@ const t = {
 
 const suites = [
   ['active-scene-source', runActiveSceneSource],
+  ['canvas-compositing', runCanvasCompositing],
   ['pixi-proxy-textures', runPixiProxyTextures],
   ['scene-geometry', runSceneGeometry],
   ['scene-layers', runSceneLayers],

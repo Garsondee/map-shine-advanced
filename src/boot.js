@@ -50,9 +50,19 @@ import {
 } from './vt/index.js';
 import { PASSES, validatePassGraph, PASS_SEAMS, PASS_IMPLS } from './graph/index.js';
 import { NotBuiltError } from './core/not-built.js';
-import { getActiveSceneFloors, computeVisibleFloorIndices } from './foundry/active-scene-source.js';
-import { collectSceneLayers } from './foundry/scene-layers.js';
-import { collectTokens, diagnoseTokens } from './foundry/scene-tokens.js';
+import {
+  getActiveSceneFloors,
+  computeVisibleFloorIndices,
+  collectSceneLayers,
+  collectTokens,
+  diagnoseTokens,
+  computeSceneDimensions,
+  registerPixiProxy,
+  getPixiResidencyReport,
+  registerCanvasCompositing,
+  applyArtSuppression,
+  getCanvasCompositingReport,
+} from './foundry/index.js';
 import { engageFoundryFallback } from './diag/render-fallback.js';
 import {
   beginSceneLoad,
@@ -63,9 +73,7 @@ import {
   resetLoadingSceneMemory,
 } from './ui/loading-screen.js';
 import { LOAD_PHASES } from './ui/load-progress.js';
-import { computeSceneDimensions } from './foundry/scene-geometry.js';
 import { SORT_LAYERS, makeLayerKey } from './scene/index.js';
-import { registerPixiProxy, getPixiResidencyReport } from './foundry/pixi-proxy-textures.js';
 
 const MODULE_ID = 'map-shine-advanced';
 
@@ -644,6 +652,8 @@ function install() {
     })
   );
 
+  MapShine.debug.registerReport('interface-seam', 'Interface seam (art vs chrome)', () => getCanvasCompositingReport());
+
   MapShine.debug.registerReport('pixi-residency-report', 'PIXI residency', () => {
     const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
     const floorsResult = getActiveSceneFloors(sceneDoc);
@@ -659,6 +669,19 @@ function install() {
         'The original real dimensions (e.g. 12000x12000) resident instead = something regressed — flag it.',
     };
   });
+
+  // THE INTERFACE SEAM — MSA owns the ART, Foundry's PIXI keeps the CHROME.
+  // Registered HERE, at module load, and that is not stylistic: `canvasConfig`
+  // fires inside Canvas#initialize, which runs between the "setup" and "ready"
+  // hooks (game.mjs:740/763/779), and it is the ONLY chance to make the PIXI
+  // canvas transparent — PIXI derives the GL context's immutable `alpha`
+  // attribute from backgroundAlpha at context-creation time. Miss it and the
+  // canvas is opaque for the whole session. install() runs at esmodule load,
+  // long before setup. Full reasoning in foundry/canvas-compositing.js.
+  {
+    const seam = registerCanvasCompositing();
+    if (!seam.registered) console.warn(`${TAG} interface seam not registered — ${seam.reason}`);
+  }
 
   if (typeof Hooks !== 'undefined') {
     // canvasInit fires strictly BEFORE Foundry loads scene textures (verified
@@ -745,6 +768,7 @@ function install() {
           // "Floor changes without loading screens" is this branch existing.
           const result = await setVtPanViewerFloor(targetFloorIndex);
           console.log(`${TAG} real-scene VT viewer synced to floor ${targetFloorIndex} (same scene).`, result);
+          syncInterfaceSeam('floor switch');
           return;
         }
 
@@ -763,6 +787,16 @@ function install() {
         // "Ready" being true and being the §7 "Ready!" lie under a new name.
         beginSceneLoadPhase(LOAD_PHASES.FIRST_FRAME);
         await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+        // ONLY NOW hand the art over. MSA has painted a real frame, so
+        // suppressing Foundry's `primary`/`effects` swaps one picture for
+        // another instead of leaving a hole. Suppressing earlier — or while the
+        // PIXI canvas is still opaque — is the one state worse than doing
+        // nothing at all: no art from EITHER renderer, with selection borders
+        // floating over a void. applyArtSuppression refuses on its own if the
+        // canvas is not verifiably transparent; this is just the right MOMENT.
+        syncInterfaceSeam('scene load');
+
         const summary = endSceneLoad();
         if (summary) {
           // worstStallMs is surfaced, not swallowed: a load that completes but
@@ -834,6 +868,28 @@ function install() {
  * the adapter's job (src/foundry/), which lands in Stage 2+. Stage 0 only proves
  * the renderer boots.
  */
+/**
+ * Hand Foundry's art over to MSA, once MSA is confirmed to be painting.
+ * Idempotent — `canvasReady` fires for both a scene change and a floor switch,
+ * and Foundry's own group teardown/redraw could plausibly reset `renderable`,
+ * so this re-asserts on every one rather than trusting a remembered state.
+ *
+ * Refusal is NOT failure: applyArtSuppression defaults to leaving Foundry
+ * rendering whenever it cannot verify the PIXI canvas is transparent, and says
+ * so loudly. That is the safety slide, and a table that can play beats a pretty
+ * renderer that cannot.
+ */
+function syncInterfaceSeam(context) {
+  const seam = applyArtSuppression();
+  if (seam.applied) {
+    console.log(
+      `${TAG} interface seam active (${context}) — MSA owns primary+effects (the art); ` +
+        `Foundry's PIXI keeps interface (selection, grid, walls, controls) on top.`
+    );
+  }
+  return seam;
+}
+
 function bootHeartbeat() {
   if (MapShine.__heartbeat) return; // idempotent
   try {

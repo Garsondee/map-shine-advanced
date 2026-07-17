@@ -51,7 +51,32 @@ Every drawable — level art, tiles, tokens, drawings, weather, and every future
 
 **🐞 The one confirmed open correctness bug:** `src/vt/page-cache.js` evicts a slot and reuses it without clearing the previous owner's indirection texel (`onEvict`/`clearIndirection`: zero hits in `src/vt/`). Repro: dropping a token (a new pack, at a full cache) flashes rectangular garbage. Fix: the cache must own an evict callback; no slot is reusable until every texel pointing at it is cleared. Not yet fixed.
 
-**Still open, unchanged from last check:** pan/zoom feel worth re-measuring now the camera is correct; token selection may not need building at all (Foundry hit-tests); `vt-pan-viewer.js` wants a rename to `scene-renderer.js`; Stage 2's formal gate metrics (PIXI residency/load-time/texImage2D) uncaptured; only one real scene tested.
+**Still open:** pan/zoom feel worth re-measuring now the camera is correct; `vt-pan-viewer.js` wants a rename to `scene-renderer.js`; Stage 2's formal gate metrics (PIXI residency/load-time/texImage2D) uncaptured; only one real scene tested.
+
+### 🪟 THE INTERFACE SEAM — MSA owns the ART, PIXI keeps the CHROME (2026-07-17, commit `206320a`)
+
+**This section's own line used to read *"token selection may not need building at all (Foundry hit-tests)."* That was true and exactly half the question — it answers where the CLICK goes and never asks where the BORDER gets drawn.** Selection worked; it was invisible. MSA's canvas was `zIndex:5` + `background:#000` (opaque) over `canvas#board` (z-index 0), and Foundry's `interface` group — which holds **every** interactive layer (`CONFIG.Canvas.layers:703`: tokens, tiles, walls, grid, controls, notes, drawings, templates, regions, sounds) — renders into that occluded canvas. Every selection border, control icon, ruler, target reticle and drag preview drew behind us.
+
+**Foundry already draws the line MSA needs.** `Token#_draw` (`placeables/token.mjs:1211`) splits one object down it:
+
+```js
+this.mesh = canvas.primary.addToken(this);           // ART   -> primary group
+this.border ||= this.addChild(new PIXI.Graphics());  // CHROME -> interface group
+```
+
+So: **MSA takes `primary` + `effects`; `interface` stays PIXI, on top, untouched.** Not a trick — Foundry's own architecture. `src/foundry/canvas-compositing.js` is the whole seam; read its header before touching any of this.
+
+**And it is NOT §1's blunder.** The root blunder was never "PIXI and Three coexist" — it was **two renderers both authoritative for the same picture** (1,838 lines of sync that still failed, `Engine-Postmortem.md` §1). These draw **disjoint sets**: no shared picture, nothing to reconcile, no sync code. `interaction-manager.js`'s 8,955 lines stay dead. **If you ever write code to make MSA and PIXI agree about a pixel, stop — you are re-growing `frame-coordinator.js`.**
+
+Two source-verified traps, both of which would have been vicious to diagnose live:
+1. **`canvasConfig` (`board.mjs:723`) is the only chance, ever.** PIXI 7.4.3's `ContextSystem.init` (`dist/pixi.js:5535`) derives the GL context's `alpha` attribute from `renderer.background.alpha < 1` **at context creation**, and context attributes are immutable. Set `backgroundAlpha` later and the canvas is opaque for the session, unrecoverably. (Foundry's own `transparent:false` on `board.mjs:717` is **vestigial** — PIXI v7 removed it; `BackgroundSystem` reads only `backgroundAlpha`. Do not "fix" it.)
+2. **Foundry CLOBBERS the alpha.** `environment.mjs:179` sets `renderer.background.color` on every environment colour change; PIXI's `normalize()` (`dist/pixi.js:1695-1711`) forces `a=1`. Transparency would work at boot and **die silently the first time darkness changed**. `initializeCanvasEnvironment` (`environment.mjs:201`) fires as the last statement of that same method — the exact public re-assert point.
+
+**The coupling rule:** suppressing Foundry's art while its canvas is still opaque is the ONE state worse than doing nothing (no art from either renderer, borders floating over a void). So suppression is decided from **measured** facts and **defaults to refuse**, announcing every refusal with a code and a reason — the safety slide (§4.3). Sabotage-tested before being trusted; the default-deny property fuzz (40 combinations, exactly 1 may suppress) caught the planted bug independently of the targeted test.
+
+**Deliberately NOT done, recorded rather than pretended away:**
+- **`canvas.visibility` (fog/vision) stays with PIXI.** Author direction 2026-07-17: MSA takes fog+vision **eventually** — reproduce Foundry's logic, render it with Three's strengths (**smooth fog** specifically). It is a sibling group under `rendered`, so that day is the same lever (`renderable=false`) on one more group. Keep suppression per-group and reversible. `Forward+.md` §11 already banked the research: consume `canvas.effects.visionSources`' `.los` polygons (**do not recompute** — V2 got that part right), `VisionSDF` existed for fog edges, and Phase 6's per-floor wall SDF via Jump-Flooding is the ambitious version. The throttled `FogExploration` persistence readback is a legitimate `no-gpu-readback` exception — ledger it, never widen the wall.
+- **The drag preview's art.** A preview Token is a real Token, so its `_draw` also pushes a mesh into `primary` — suppressed with everything else. MSA draws from **documents**, and a preview is not one; it lives at `canvas.tokens.preview.children`. Expect to drag an outline with no picture until that is wired.
 
 ---
 
@@ -159,18 +184,31 @@ The extraction engine survives and is the genuinely valuable part: five real bug
 **It also found a real gap:** 5 effects are claimed by **no V3 pass** — `GridRenderer`, `InvertEffectV2`, `SceneWindField`, `SharpenEffectV2`, `VisionModeEffectV2`. `SceneWindField` has 35 controls and `frame.snapshot`'s own note says it covers wind. Either deliberate drops or holes in the 48→~12 `absorbs` accounting; worth closing before Stage 7.
 
 ### Not built yet (the honest gap)
-The params **service** (get/set/subscribe) and the **generated renderers** (Tweakpane + `ApplicationV2`) — `Params.md`/`UI.md` design them but nothing consumes `params-schema.js`'s validation at a live write path yet; the harvest gives the service real data to serve, the moment it exists. `frame.snapshot` is the last pass still `future`. `geometry.world`/`present.composite` staying fused inside `startVtPanViewer` — and eventually inverting control so a real frame runner DRIVES the draw step instead of the reverse — needs the author's live verification the same as every other change to that file has (Round 1 through 9); scoped as real Stage 3 work above, not attempted blind.
+The params **service** (get/set/subscribe) and the **generated renderers** (Tweakpane + `ApplicationV2`) — `Params.md`/`UI.md` design them but nothing consumes `params-schema.js`'s validation at a live write path yet; the harvest gives the service real data to serve, the moment it exists. `frame.snapshot` is the last pass still `future`. **And the big one: nothing walks `PASSES` to execute it** — `geometry.world`/`present.composite` are genuinely split now (`964820a`), but the ORDER is still hardcoded in `renderFrame`. Inverting control so a real frame runner drives the draw step is unbuilt architecture, and it needs the author's live verification the same as every other change to that file has (Rounds 1–9).
 
-### Recommended next steps, in order (updated 2026-07-17)
+### Recommended next steps, in order (updated 2026-07-17, after the interface seam)
 
+0. **⬜ LIVE-VERIFY THE INTERFACE SEAM** (`206320a`) — nothing else here matters if the module cannot be interacted with. Load a scene, click a token, check the debug panel's **"Interface seam (art vs chrome)"** report. HEALTHY = `contextAlpha:true, clearAlpha:0, environmentRenderable:false`. Then set the sun / change darkness and re-check `clearAlpha` is **still 0** — that is trap #2, and it is the one that would fail silently later rather than now.
 1. **The eviction bug** (dangling indirection texels) — the one open correctness defect, unrelated to the framework.
-2. **The two missing zone doors** (`foundry/`, `ui/`) — `vt/` and `graph/` are built; this pays the rest of `zones/one-door`'s 15 down toward payable.
-3. **Ratchet paydown** — 15 one-door, 33 catches, 41 clocks, 12 Foundry reaches, 7 global-bus, 14 unreachable. Shrink-only, satisfying, no design needed.
+2. **The pass runner** — see "what actually blocks effects" above. This is the real gate for Stage 6, and every session that adds an effect before it makes it harder.
+3. **Ratchet paydown** — **8** one-door (was 15; `foundry/index.js` paid 7), 33 catches, 41 clocks, 12 Foundry reaches, 7 global-bus, 14 unreachable. `ui/` is the last missing zone door. Shrink-only, satisfying, no design needed.
 4. **Close the absorb gap** — 5 V2 effects are claimed by no V3 pass (see the harvest section above). Cheap, and `passes.js`'s own test asserts the 48→~12 collapse "cannot silently drop an effect family" — which is exactly what 5 unclaimed effects look like.
 5. **The params service** (get/set/subscribe) — `Params.md` §6 build order item 3. Note it has **no data waiting for it**: the harvest is a reference, not a schema, so the first real params arrive when the first V3 effect declares its own (informed by, never copied from, `docs/reference/v2-effect-params/`).
 6. Name and build out `masks.occlusion` (the last piece of the original tiles ask, now unblocked since tokens render) or `light.visibility`/`light.accumulate` — whichever the author wants to see rendering first.
 
-### 🎯 THE `geometry.world`/`present.composite` SPLIT — scoped, not attempted (2026-07-17)
+### ✅ …AND THEN IT WAS DONE (`964820a`) — read this before the section below
+
+**The section below is kept as the SCOPING that produced the work, but its verdict is stale.** `buf:scene.color` landed: a real screen-sized RGBA16F target allocated through `ThreeAllocator` — **the law's first real caller** — with `present.composite` a genuine second `renderer.render()` reading it. `fusedWith` was **dropped from both passes** because the split is now literally true (`pass-impls.js:78` records the drop and keeps the honesty rule that produced it). Colour space is pinned explicitly (`NoColorSpace` on the RT, one sRGB OETF at the canvas) rather than left implied. **Effects now have a surface to render into; that blocker is gone.**
+
+**What actually blocks effects now, in dependency order:**
+1. **There is no pass runner.** `PASSES` is imported by `boot.js` (to validate) and `pass-health.js` — **nothing walks it to execute**. The render order is hardcoded inside `renderFrame`. The first effect either goes through a runner that reads `passes.js`, or it gets hardcoded into a 2,700-line file — and if it is hardcoded, **`passes.js` becomes a comment** and this is `EffectComposer` losing to `FloorCompositor` in real time, in our own repo, with the museum already built. This is the gate.
+2. **`frame.snapshot` is still `future`** — time, sun, darkness, wind. `world/{sun,environment}.js` + `core/frame-clock.js` are built, pure and tested, and unreachable from boot. Effects need their inputs.
+3. **No params service.** Nothing consumes `params-schema.js` at a live write path. The harvest is a REFERENCE, not data — the first real params arrive with the first effect that declares its own.
+4. **`buf:scene.attr` does not exist.** Only `scene.color`. Water and surface-response need the attribute buffer (§4.2's MRT).
+5. **The eviction bug** (below) — worsens as pack count grows.
+6. **`masks.occlusion`** — still an inert 1×1.
+
+### 🎯 THE `geometry.world`/`present.composite` SPLIT — scoped, not attempted (2026-07-17) [SUPERSEDED — see above]
 
 Asked for as a follow-on to the pass runner; measured and deliberately **deferred rather than half-done**, because it is a different *kind* of task than everything else in this section — not a refactor of existing code, a piece of **unbuilt architecture**.
 

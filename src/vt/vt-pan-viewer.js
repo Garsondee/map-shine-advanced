@@ -1376,6 +1376,28 @@ export async function startVtPanViewer({
     let displayLayerName = 'albedo';
 
     /**
+     * ISOLATE ONE DRAW ITEM — `''` shows the whole draw list (normal).
+     *
+     * WHY THIS EXISTS (2026-07-17): the ghost artefact has now had FIVE
+     * diagnoses from me. Every one found a real bug — an impossible one I had
+     * recorded in the plan doc, a genuine release/await race, a scene-wide
+     * coarse-pin starvation, a six-caller pin leak, a fallback-vs-non-fallback
+     * mip blend — and none of them was the ghost. Each cost the author a
+     * round-trip to disprove.
+     *
+     * The asymmetry is the point: the author can SEE the artefact and I cannot.
+     * Reasoning from aggregate counters about a visual bug is what produced
+     * five plausible-and-wrong answers. This turns "which of the 11 items is
+     * the ghost?" into eleven clicks the author can do in half a minute, and
+     * the answer is a FACT rather than my sixth theory.
+     *
+     * Deliberately gates VISIBILITY only, at the very end of the pass —
+     * residency, streaming and placement all run exactly as normal, so
+     * isolating cannot itself change what the pager does and mask the bug.
+     */
+    let isolateItemId = '';
+
+    /**
      * Plan + stream one pack's view residency for the current worldRect, then
      * rebuild its indirection buffer fresh from the cache's own slot mapping.
      * This is the per-pack half of the old updateResidency, run for EVERY pack
@@ -1587,6 +1609,14 @@ export async function startVtPanViewer({
      *
      * @returns {boolean} did the view actually change?
      */
+    /**
+     * The view as of the last residency update — the baseline the sub-pixel
+     * threshold below measures against, so a slow drift cannot creep past it
+     * one under-threshold step at a time. See syncFoundryCamera.
+     * @type {{cx:number, cy:number, halfSpan:number}|null}
+     */
+    let lastResidencyView = null;
+
     function syncFoundryCamera() {
       const stage = globalThis.canvas?.stage;
       if (!stage) return false;
@@ -1599,10 +1629,43 @@ export async function startVtPanViewer({
       if (!Number.isFinite(cx) || !Number.isFinite(cy)) return false;
 
       const halfSpan = canvasH / 2 / scale; // VERTICAL — see above; canvasW here was the bug
-      const changed = view.centerXPx !== cx || view.centerYPx !== cy || view.halfSpanPx !== halfSpan;
+
+      // THE CAMERA ALWAYS TRACKS EXACTLY. Never debounce this half: a camera
+      // that lags is a camera that disagrees, which is the whole reason this
+      // reads canvas.stage per frame in the first place.
       view.centerXPx = cx;
       view.centerYPx = cy;
       view.halfSpanPx = halfSpan;
+
+      // RESIDENCY IS A DIFFERENT QUESTION, AND IT USED TO BE ASKED WITH `!==`.
+      //
+      // Exact float equality against FOUNDRY'S OWN EASED camera: it asymptotes
+      // toward its target, so for seconds after the user stops it is still
+      // moving by thousandths of a pixel — and every one of those reported
+      // `changed`, which scheduled a FULL residency pass (11 packs replanned,
+      // released, re-requested). Caught in the author's own report, 2026-07-17,
+      // on a view they had stopped touching: panVelocity {0,0}, halfSpanPx
+      // IDENTICAL across five consecutive hitches, and yet 236 passes with
+      // `misses` climbing 662 -> 1908 and `evictions` 4448 -> 5897 across half
+      // a pixel of residual zoom. With the cache at its cap that is ~25
+      // evictions per pass, forever, for a view that is not moving.
+      //
+      // The threshold is ONE SCREEN PIXEL of world distance, which is the
+      // honest bound: a camera move too small to change any rendered pixel
+      // cannot change which pages are needed, so a pass over it is pure churn.
+      // Measured against the view at the LAST RESIDENCY UPDATE, not the last
+      // frame — comparing to the last frame would let a slow drift accumulate
+      // forever, each step under the bar, and never re-stream at all.
+      const worldPerScreenPx = (2 * halfSpan) / Math.max(1, canvasH);
+      if (!lastResidencyView) {
+        lastResidencyView = { cx, cy, halfSpan };
+        return true;
+      }
+      const changed =
+        Math.abs(lastResidencyView.cx - cx) >= worldPerScreenPx ||
+        Math.abs(lastResidencyView.cy - cy) >= worldPerScreenPx ||
+        Math.abs(lastResidencyView.halfSpan - halfSpan) >= worldPerScreenPx;
+      if (changed) lastResidencyView = { cx, cy, halfSpan };
       // NOTE there is deliberately no eased-target assignment here. `view` has no
       // targetHalfSpanPx — the eased target is a CLOSURE variable of that name
       // (see renderFrame), and setting the field on `view` created a property
@@ -1764,7 +1827,10 @@ export async function startVtPanViewer({
         ensureItemMesh(state);
         const displayPack = state.packs.get(displayLayerName) ?? state.albedoPack;
         bindMeshToPack(state, displayPack);
-        state.mesh.visible = onScreen;
+        // Isolation is applied HERE, after every streaming decision above, so a
+        // hidden item still pages exactly as it would normally — see
+        // isolateItemId. `''` is the normal case and costs one string compare.
+        state.mesh.visible = onScreen && (isolateItemId === '' || item.id === isolateItemId);
         state.mesh.renderOrder = item.renderOrder; // from sortByLayer — THE law
       }
 
@@ -1782,6 +1848,21 @@ export async function startVtPanViewer({
       displayLayerName = name;
       await scheduleResidencyUpdate();
       return { displayLayer: displayLayerName };
+    }
+
+    /**
+     * Show ONLY one draw item (`''` = show all). See isolateItemId's header for
+     * why this exists rather than a sixth theory.
+     * @param {string} id
+     */
+    async function setIsolateItem(id) {
+      isolateItemId = id ?? '';
+      await scheduleResidencyUpdate();
+      return {
+        isolateItemId,
+        showing: isolateItemId === '' ? 'ALL items (normal)' : isolateItemId,
+        drawListIds: lastItems.map((i) => i.id),
+      };
     }
 
     // --- Mouse pan/zoom (native-Foundry feel) --------------------------------
@@ -2112,6 +2193,25 @@ export async function startVtPanViewer({
       view = next;
       await scheduleResidencyUpdate();
       return true;
+    }
+
+    /**
+     * ONE realistic zoom step — exposed for `MapShine.soakHooks.zoom`
+     * (2026-07-17, author-directed: the burst-mode thrash test reaches states a
+     * real user genuinely cannot produce — confirmed live, the author could not
+     * reproduce its ghost artefact through deliberate aggressive manual
+     * scroll-zooming for 15-20s). SAME factor and anchor as a real keyboard
+     * zoom key (`ZOOM_IN_KEYS`/`ZOOM_OUT_KEYS` above, and `onWheel`'s own
+     * magnitude-1 case) — NOT a new formula, and NOT the thrash's
+     * `clampHalfSpan(0/Infinity, world)` full-range jump. `setZoomTarget` only
+     * moves the EASED target; the glide itself happens in
+     * `updateContinuousInputs` on subsequent real animation frames, exactly as
+     * it does for a real keypress or wheel notch — this function does not
+     * shortcut that.
+     * @param {'in'|'out'} direction
+     */
+    function zoomStep(direction) {
+      setZoomTarget(direction === 'in' ? 0.8 : 1.25, canvasW / 2, canvasH / 2);
     }
 
     /**
@@ -2594,6 +2694,7 @@ export async function startVtPanViewer({
       startupParams, // exposed so runZoomThrashTest can restart an identical fresh viewer ("blank slate")
       getView: () => view,
       applyKeyAndUpdate, // exposed so MapShine.soakHooks.pan drives the EXACT same path a real keypress does
+      zoomStep, // exposed so MapShine.soakHooks.zoom drives one real, bounded, eased zoom step (see its own doc)
       setFloorIndex, // exposed so an external (Foundry-driven) floor sync is as cheap as a keypress, never a full restart
       // Re-ask buildItems and reconcile. The draw list is derived from live
       // Foundry documents, but NOTHING here watches them — updateResidency only
@@ -2618,6 +2719,9 @@ export async function startVtPanViewer({
         return scheduleResidencyUpdate();
       },
       setDisplayLayer, // exposed so the debug panel can bind a mask for visual verification
+      setIsolateItem, // "show only this draw item" — see isolateItemId's header
+      getIsolateItemId: () => isolateItemId,
+      getDrawListIds: () => lastItems.map((i) => ({ id: i.id, kind: i.kind, renderOrder: i.renderOrder })),
       // --- runZoomThrashTest support (2026-07-16) ---------------------------
       /** Wipe frame-gap/hitch history for a clean measurement window. */
       resetHitchTracking() {
@@ -3100,6 +3204,28 @@ export async function setVtPanViewerDisplayLayer(name) {
   return { ...result, ..._active.getDiagnostics() };
 }
 
+/**
+ * Show ONLY one draw item (`''` = all). The ghost-hunting tool: see
+ * `isolateItemId`'s header inside startVtPanViewer for why it exists.
+ * @param {string} id
+ */
+export async function setVtPanViewerIsolateItem(id) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.setIsolateItem(id);
+}
+
+/** The current draw list's ids — what the isolate dropdown is built from. */
+export function getVtPanViewerDrawListIds() {
+  if (!_active) return [];
+  return _active.getDrawListIds();
+}
+
+/** @returns {string} the isolated item id, or `''` when showing everything. */
+export function getVtPanViewerIsolateItemId() {
+  if (!_active) return '';
+  return _active.getIsolateItemId();
+}
+
 /** Await one real animation frame — used to drive the thrash test over the ACTUAL render loop, not a synchronous fake. */
 function nextAnimationFrame() {
   return new Promise((resolve) => requestAnimationFrame(resolve));
@@ -3254,6 +3380,15 @@ export async function runZoomThrashTest(opts = {}) {
     afterThrash: { decodeStats: afterDiag.decodeStats, cacheStats: afterDiag.cacheStats },
     hitchStats: afterDiag.hitchStats,
     interpretation:
+      'ADVERSARIAL MAX-STRESS, NOT A PLAY PROXY (confirmed 2026-07-17): this legs the zoom back and forth at ' +
+      'maximum programmatic rate with zero settle time between direction flips — several full-range sweeps in ' +
+      'the time it takes to read this sentence. The RANGE it reaches is real (the same clampHalfSpan() bounds a ' +
+      "real scroll wheel or +/- key hits), but the RATE is not: the author could not reproduce this run's own " +
+      'ghost-artefact finding through 15-20s of deliberate, aggressive manual scroll-zooming. Anything this run ' +
+      'finds is a REAL bug in the system (worth understanding — an hours-long real session eventually produces ' +
+      'bursts too), but treat it as "found under adversarial load," not "will happen to a GM." For "does this ' +
+      'survive a realistic extended session," use MapShine.soak(n) instead — its zoom driver (soakZoomStep) ' +
+      'takes one bounded, eased step per cycle through the SAME code path a real zoom key uses. ' +
       'READ legsCompleted AND halfSpanTraversed FIRST — they say whether this run tested anything at all. ' +
       'legsCompleted 0, or a halfSpanTraversed.ratio near 1, means the zoom never swept the range and every other ' +
       'number below is meaningless (that exact false pass is why this loop was rewritten: it used to flip the ' +
@@ -3289,4 +3424,39 @@ export async function soakSwitchFloorStep(i) {
   const floorIndex = i % _active.floorCount;
   await _active.applyKeyAndUpdate(String(floorIndex));
   return { floorIndex, ..._active.getDiagnostics() };
+}
+
+/** One real animation frame's worth of settle, in the same units the eased
+ * zoom actually uses: `ZOOM_EASE_HALF_LIFE_SEC` (0.12s) is roughly 7-8 frames
+ * at 60fps. Waiting a couple of half-lives per soak step is enough for the
+ * glide to make real, visible progress (and for `updateContinuousInputs` to
+ * fire `scheduleResidencyUpdate` at least once) without ballooning an n-cycle
+ * soak into a multi-second wait per step — a real user's NEXT wheel notch
+ * during continuous scrolling usually lands before the previous one fully
+ * settles anyway. */
+const SOAK_ZOOM_SETTLE_FRAMES = 12;
+/** A real zoom gesture is several notches in one direction, not a flip every
+ * notch (the exact mistake `runZoomThrashTest`'s own header describes fixing
+ * for its OWN legs — "flipping the target every frame... never went
+ * anywhere"). A short leg here for the same reason, at soak scale. */
+const SOAK_ZOOM_LEG_STEPS = 4;
+
+/**
+ * MapShine.soakHooks.zoom driver (2026-07-17) — ONE bounded, eased zoom step
+ * per cycle via `zoomStep()`, the exact factor/anchor a real keyboard zoom
+ * key uses (see `zoomStep`'s own doc). Alternates direction every
+ * `SOAK_ZOOM_LEG_STEPS` cycles rather than every cycle, so a soak run
+ * exercises a real zoom-in-then-zoom-out GESTURE, not an instant full-range
+ * jump — the thing `runZoomThrashTest` does that the author could not
+ * reproduce by hand. No-op (not an error) if the viewer was never started.
+ * @param {number} i - the soak cycle index.
+ */
+export async function soakZoomStep(i) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  const leg = Math.floor(i / SOAK_ZOOM_LEG_STEPS) % 2;
+  const direction = leg === 0 ? 'in' : 'out';
+  _active.zoomStep(direction);
+  for (let f = 0; f < SOAK_ZOOM_SETTLE_FRAMES && _active; f++) await nextAnimationFrame();
+  if (!_active) return { skipped: true, reason: 'viewer stopped mid-step' };
+  return { direction, ..._active.getDiagnostics() };
 }

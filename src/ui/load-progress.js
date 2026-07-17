@@ -48,8 +48,21 @@
 
 /**
  * A frame gap above this means the main thread was blocked long enough for a
- * person to notice — the same threshold the renderer's own hitch log uses, so the
- * two agree about what "a stall" means.
+ * person to think the app has died.
+ *
+ * **This is NOT the renderer's hitch threshold, and this comment used to claim it
+ * was** ("the same threshold the renderer's own hitch log uses, so the two agree
+ * about what 'a stall' means"). They never agreed: `vt-pan-viewer.js` and
+ * `diag/flight-recorder.js` both use **50ms** ("~3 frames at 60fps" — a visible
+ * stutter), and this is **250ms** — five times larger, and a different question.
+ * Both numbers are correct for their own job; neither substitutes for the other.
+ *
+ * Corrected 2026-07-17 rather than "fixed" by dragging one number to the other:
+ * a stutter and an is-it-dead freeze are genuinely different measurements, and
+ * collapsing them would lose information to make a comment true. What was wrong
+ * was the CLAIM, not the value. (memory: `feedback_probed_constants_vs_derived`
+ * — a constant voted on independently in two places, with prose asserting they
+ * agree, is a fiction with tenure.)
  */
 export const STALL_THRESHOLD_MS = 250;
 
@@ -84,6 +97,30 @@ const PHASE_LABELS = Object.freeze({
  * @property {number|null} lastTickMs - last liveness tick.
  * @property {number} worstStallMs - the longest gap between ticks this load.
  * @property {number} lastStallMs - the most recent stall, for the "that took Xms" note.
+ * @property {PhaseSpan[]} phases - every phase entered, with its duration. See
+ *   {@link beginPhase}.
+ */
+
+/**
+ * One phase's stopwatch reading.
+ *
+ * **Why this lives in the pure model rather than in the flight recorder.** The
+ * author's ask was *"how long different parts of loading took"*. The recorder
+ * could have opened a span at each of `boot.js`'s three `beginSceneLoadPhase`
+ * call sites — but that is a hand-kept list, and a fourth phase added later
+ * would silently go unmeasured while the report still looked complete. The phase
+ * transitions are already modelled HERE, and this module already receives the
+ * clock as an input, so timing them here means a new phase is measured by
+ * construction. It also rides into the export for free: `getLoadingScreenState()`
+ * is already a registered read-only report, so the bundle picks this up with no
+ * new wiring and no new coupling between `ui/` and `diag/`.
+ *
+ * @typedef {object} PhaseSpan
+ * @property {string} phase
+ * @property {number|null} startMs - relative to the load's start.
+ * @property {number|null} endMs - null while the phase is still running.
+ * @property {number|null} durMs - null if still running, or if no clock was given.
+ * @property {string} [note] - set only when something is worth saying out loud.
  */
 
 /**
@@ -105,32 +142,67 @@ export function createLoadState({ sceneId, sceneName, nowMs }) {
     lastTickMs: null,
     worstStallMs: 0,
     lastStallMs: 0,
+    phases: [],
   };
+}
+
+/**
+ * Close whichever phase span is still open. Idempotent: with nothing open, or no
+ * clock, it does nothing rather than inventing a number.
+ * @param {LoadState} state @param {number|undefined} nowMs
+ */
+function closeOpenPhase(state, nowMs) {
+  const open = state.phases.find((p) => p.endMs === null);
+  if (!open) return;
+  if (!Number.isFinite(nowMs)) {
+    open.note = 'duration not measured — no clock was supplied to the call that ended this phase';
+    return;
+  }
+  open.endMs = round2(nowMs - state.startedAtMs);
+  open.durMs = open.startMs === null ? null : round2(open.endMs - open.startMs);
 }
 
 /**
  * Enter a phase. `total` is optional precisely because it is often genuinely
  * unknown at entry — pass it when it becomes known via {@link reportProgress}.
+ *
+ * Pass `nowMs` to get a phase duration out the other end. It is not defaulted to
+ * a private clock reading because this module is pure by law (`time/one-clock`):
+ * time is an INPUT here, handed in, never sampled. Omitting it still transitions
+ * correctly — the span just says its duration is unmeasured rather than
+ * reporting a confident NaN.
+ *
  * @param {LoadState} state @param {string} phaseId
- * @param {{total?:number|null, detail?:string|null}} [opts]
+ * @param {{total?:number|null, detail?:string|null, nowMs?:number}} [opts]
  * @returns {LoadState} the same object (mutated — this is polled per frame).
  */
-export function beginPhase(state, phaseId, { total = null, detail = null } = {}) {
+export function beginPhase(state, phaseId, { total = null, detail = null, nowMs } = {}) {
+  closeOpenPhase(state, nowMs);
   state.phase = phaseId;
   state.done = 0;
   state.total = total;
   state.detail = detail;
+  state.phases.push({
+    phase: phaseId,
+    startMs: Number.isFinite(nowMs) ? round2(nowMs - state.startedAtMs) : null,
+    endMs: null,
+    durMs: null,
+    ...(Number.isFinite(nowMs) ? {} : { note: 'start not measured — no clock was supplied to beginPhase' }),
+  });
   return state;
 }
 
 /**
  * Report progress within the active phase.
  * @param {LoadState} state @param {string} phaseId
- * @param {{done?:number, total?:number|null, detail?:string|null}} opts
+ * @param {{done?:number, total?:number|null, detail?:string|null, nowMs?:number}} opts
  * @returns {LoadState}
  */
-export function reportProgress(state, phaseId, { done, total, detail } = {}) {
-  if (state.phase !== phaseId) beginPhase(state, phaseId);
+export function reportProgress(state, phaseId, { done, total, detail, nowMs } = {}) {
+  // A progress report for a phase we are not in IS a phase transition — and it
+  // must be timed like one, or a phase entered only this way would be the one
+  // phase with no duration.
+  if (state.phase !== phaseId) beginPhase(state, phaseId, { nowMs });
   if (typeof done === 'number') state.done = done;
   if (total !== undefined) state.total = total;
   if (detail !== undefined) state.detail = detail;
@@ -143,6 +215,7 @@ export function reportProgress(state, phaseId, { done, total, detail } = {}) {
  * @param {LoadState} state @param {number} nowMs @returns {LoadState}
  */
 export function completeLoad(state, nowMs) {
+  closeOpenPhase(state, nowMs);
   state.complete = true;
   state.phase = null;
   state.detail = null;
@@ -156,6 +229,10 @@ export function completeLoad(state, nowMs) {
  * @param {LoadState} state @param {string} error @param {number} nowMs @returns {LoadState}
  */
 export function failLoad(state, error, nowMs) {
+  // The phase that was running when it broke is the most interesting span in the
+  // whole load — closing it here is what makes "it died 8s into streaming art"
+  // readable instead of leaving the span dangling.
+  closeOpenPhase(state, nowMs);
   state.error = error;
   state.complete = false;
   state.finishedAtMs = nowMs;
@@ -275,4 +352,9 @@ export function shouldShowForScene(lastSceneId, nextSceneId) {
     return { show: false, reason: 'same scene — this is a floor switch or a redraw, not a scene load' };
   }
   return { show: true, reason: lastSceneId ? 'scene changed' : 'cold load' };
+}
+
+/** @param {number} v @returns {number} */
+function round2(v) {
+  return Math.round(v * 100) / 100;
 }

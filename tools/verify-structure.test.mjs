@@ -259,6 +259,44 @@ const V2_CORPSES = [
     code: 'const threeTexture = new THREE.Texture(texSource);',
     note: 'and again in the other loader — two paths, because nothing forbade either',
   },
+
+  // --- the log door: the only corpse here that is OURS, not V2's.
+  //
+  // Every other case in this file is a citation from `legacy/` — a mistake the
+  // previous module already died of. These four came out of `src/` on
+  // 2026-07-17, live, while `core/log.js` sat there exporting a perfectly good
+  // scoped logger to 3 importers. 61 direct console calls against it, 22 in
+  // boot.js alone.
+  //
+  // That is worth keeping visible: the failure mode is not something that
+  // happened to someone else in the past. It reproduced inside the rebuilt tree,
+  // under the doctrine, with the postmortem written down, in under six months —
+  // which is exactly the claim `v2-postmortem-the-failure-modes` makes about WHY
+  // V2 died. Not carelessness. Optionality.
+  {
+    rule: 'log/one-door',
+    from: 'src/boot.js:1085 (V3, pre-migration)',
+    code: 'console.log(`${TAG} boot heartbeat rendering. Gate "boot renders" ✔`);',
+    note: 'OUR code, not V2 — the logger existed and boot.js bypassed it 22 times',
+  },
+  {
+    rule: 'log/one-door',
+    from: 'src/boot.js:1088 (V3, pre-migration)',
+    code: 'console.error(`${TAG} boot heartbeat FAILED — the new renderer did not come up:`, err);',
+    note: 'the single most important line in the file, and it could not be exported',
+  },
+  {
+    rule: 'log/one-door',
+    from: 'src/diag/soak.js:32',
+    code: "console.warn('[soak] webglcontextlost');",
+    note: 'a hand-rolled [soak] prefix — reinventing the scoped logger it did not import',
+  },
+  {
+    rule: 'log/one-door',
+    from: 'the "just this once, it is only a diagnostic" bypass',
+    code: 'console.table(rows);',
+    note: 'table/group are how the door gets propped open; a diagnostic that never reaches the export is the one nobody can read back',
+  },
 ];
 
 /** Lines that must NOT trip a rule (guards against a wall crying wolf). */
@@ -270,6 +308,16 @@ const MUST_PASS = [
   // The two law walls must bite on ALLOCATION, never on reading or testing. A
   // wall that trips on `handle.renderTarget` gets muted, and a muted wall is
   // worse than none — it teaches that the suite cries wolf.
+  // The log door must bite on `console.*` and NOTHING else. If it tripped on the
+  // sanctioned path, the fix would be to mute the wall — and a muted wall is
+  // worse than no wall, because it teaches that the suite cries wolf.
+  { code: "const log = createLogger('boot');", note: 'creating a scoped logger is the prescribed fix, not a bypass' },
+  { code: 'log.info(`scene load complete in ${summary.totalMs}ms`, summary);', note: 'the sanctioned path itself' },
+  { code: "log.error('real-scene VT viewer auto-sync failed:', err);", note: 'logger.error is not console.error' },
+  {
+    code: "import { setLogSink, isLoggerPrinting } from '../core/log.js';",
+    note: "importing the logger's own seams is not talking to the console",
+  },
   { code: 'const target = frame.renderTarget;', note: 'READING a renderTarget is not allocating one' },
   { code: 'if (tex.isDataArrayTexture) return tex.image.depth;', note: 'a type CHECK is not an allocation' },
   { code: 'const loader = new THREE.TextureLoader();', note: 'TextureLoader is not a texture' },

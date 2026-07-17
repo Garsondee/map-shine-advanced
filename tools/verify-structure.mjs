@@ -367,6 +367,46 @@ export const RULES = [
   },
 
   // ===================================================================
+  // ONE LOG DOOR — core/log.js had 3 importers and 61 direct console.*
+  // calls standing against it (2026-07-17). The fourth independent proof
+  // that a good abstraction loses when following it is optional.
+  // ===================================================================
+  {
+    id: 'log/one-door',
+    // `console.table`/`group` etc. are included deliberately: they are how a
+    // "just this once, it's only a diagnostic" bypass gets its foot in the door,
+    // and a diagnostic that never reaches the flight recorder is precisely the
+    // one nobody can read back after the bug.
+    pattern: /\bconsole\.(?:log|warn|error|info|debug|trace|table|dir|group|groupEnd|groupCollapsed|assert)\s*\(/,
+    // Two doors, and only two. `core/log.js` IS the logger. `flight-recorder.js`
+    // PATCHES console to catch foreign traffic, so it cannot be forbidden from
+    // naming it. Nothing else in src/ — including the rest of diag/ — has a
+    // reason to talk to the console directly instead of through the logger that
+    // records what it says.
+    allow: [`${sep}core${sep}log.js`, `${sep}diag${sep}flight-recorder.js`],
+    why:
+      'core/log.js shipped a clean scoped-logger API and won 3 importers. Against it: 61 direct ' +
+      'console.* calls, 22 in boot.js alone. That is EffectComposer (5 vs 92), legacy/foundry/ (16% ' +
+      'of its own job) and resolve-effect-enabled.js ("every gate MUST call this") for the FOURTH ' +
+      'time — the same mechanism, not carelessness: bypassing is cheaper today, and today is when ' +
+      'every line gets written. The cost is not tidiness. Console output cannot be exported, so ' +
+      'every bypassed line is a line missing from the flight recorder bundle the author presses ONE ' +
+      'BUTTON to get — i.e. missing from the story of the bug being reported.',
+    instead:
+      "Use core/log.js: `import { createLogger } from '../core/log.js'` then `const log = " +
+      "createLogger('my-subsystem')`. It prints to the console exactly as before AND records to the " +
+      'flight recorder as structure (level, subsystem, data). The print level and the record level ' +
+      'are different dials, so log.debug() is free to be verbose: it stays out of the console and ' +
+      'still lands in the export.',
+    // Ratcheted: vt-pan-viewer.js (14 — the 2,318-line file a standing decision
+    // says not to touch), foundry/canvas-compositing.js, diag/soak.js,
+    // diag/debug-panel.js, vt/decode-pool.js, diag/render-fallback.js. Frozen so
+    // NEW ones fail the build; the backlog shrinks when those files are next
+    // opened for real reasons.
+    ratchet: true,
+  },
+
+  // ===================================================================
   // ONE CLOCK — time.js declared itself the single source of truth
   // ("ALL EFFECTS MUST USE THIS") and Water alone sampled time 8 times.
   // ===================================================================

@@ -34,6 +34,8 @@
 import * as THREE from './vendor/three/three.webgpu.js';
 import { installSoak } from './diag/soak.js';
 import { installDebugPanel } from './diag/debug-panel.js';
+import { installFlightRecorder } from './diag/flight-recorder.js';
+import { createLogger } from './core/log.js';
 import {
   runVtLiveDecodeTest,
   startVtPanViewer,
@@ -41,9 +43,13 @@ import {
   getVtPanViewerDiagnostics,
   setVtPanViewerFloor,
   setVtPanViewerDisplayLayer,
+  setVtPanViewerIsolateItem,
+  getVtPanViewerDrawListIds,
+  getVtPanViewerIsolateItemId,
   runZoomThrashTest,
   soakPanStep,
   soakSwitchFloorStep,
+  soakZoomStep,
   refreshVtPanViewerItems,
   runOrientationSelfTest,
   getSourceBitmap,
@@ -103,17 +109,32 @@ MapShine.codename = CODENAME;
 MapShine.__stage = STAGE;
 MapShine.THREE = THREE; // single Three instance for the whole V3 tree
 
+/**
+ * Boot's own logger. Everything this file says goes through `core/log.js`, which
+ * forwards it to the flight recorder as STRUCTURE (level, subsystem, data) — not
+ * as a console string a regex has to guess at later. `TAG` survives only where a
+ * message is genuinely about the version/codename; the prefix itself is the
+ * logger's job now.
+ */
+const log = createLogger('boot');
+
 /** Guard against double-boot (Foundry hot-reload, duplicate module load). */
 if (MapShine.__keyholeBooted) {
-  console.warn(`${TAG} already booted; skipping re-entry.`);
+  log.warn(`already booted; skipping re-entry.`);
 } else {
   MapShine.__keyholeBooted = true;
   install();
 }
 
 function install() {
+  // THE BLACK BOX GOES FIRST — before the panel, before the soak, before the
+  // pass-graph check below. Every line after this point is captured; anything
+  // before it is gone forever, and the earliest failures are the ones nobody can
+  // reproduce on request. (The panel used to open a warn/error-only buffer here;
+  // the recorder supersedes it and catches every level from every source.)
+  installFlightRecorder(MapShine);
   installSoak(MapShine); // exposes MapShine.soak(n) — the stage-gate soak harness
-  installDebugPanel(MapShine); // starts console capture NOW, as early as possible
+  installDebugPanel(MapShine);
 
   // THE PASS GRAPH, VALIDATED AT BOOT (Keyhole §"THE FRAMEWORK" — 2026-07-17).
   // Node tests already prove PASSES validates (194+ assertions); this is the
@@ -128,8 +149,8 @@ function install() {
   // problem warrants).
   const graphCheck = validatePassGraph(PASSES);
   if (!graphCheck.ok) {
-    console.error(`${TAG} PASS GRAPH INVALID — this is a real bug in graph/passes.js, not a render fault:`);
-    for (const e of graphCheck.errors) console.error(`${TAG}   - ${e}`);
+    log.error(`PASS GRAPH INVALID — this is a real bug in graph/passes.js, not a render fault:`);
+    for (const e of graphCheck.errors) log.error(`  - ${e}`);
   }
 
   // The same graph, seam-door, and live-impl checks Node already runs (194+
@@ -190,13 +211,13 @@ function install() {
   // "Y-FLIPPED", "X-FLIPPED", "ROTATED 180°", or ok. One click, after any new
   // screen-space or world→texture mapping — instead of eyeballing content that
   // might be symmetric enough to hide the bug (which is how Y-flips survive).
-  MapShine.debug.registerReport('orientation-self-test', 'Orientation self-test', async () => ({
+  MapShine.debug.registerAction('orientation-self-test', 'Orientation self-test', async () => ({
     report: 'orientation-self-test',
     generatedAt: new Date().toISOString(),
     ...(await runOrientationSelfTest()),
   }));
 
-  MapShine.debug.registerReport('vt-live-decode', 'Live decode test', async () => ({
+  MapShine.debug.registerAction('vt-live-decode', 'Live decode test', async () => ({
     report: 'vt-live-decode',
     generatedAt: new Date().toISOString(),
     ...(await runVtLiveDecodeTest(`modules/${MODULE_ID}/assets/torture/torture_floor0.png`)),
@@ -295,7 +316,7 @@ function install() {
 
   const tortureExtraLayers = (item) => tortureLayerUrls(item.__floorIndex ?? 0);
 
-  MapShine.debug.registerReport('vt-pan-viewer-start', 'Start: torture fixture', async () => ({
+  MapShine.debug.registerAction('vt-pan-viewer-start', 'Start: torture fixture', async () => ({
     report: 'vt-pan-viewer-start',
     generatedAt: new Date().toISOString(),
     ...(await startVtPanViewer({
@@ -343,7 +364,7 @@ function install() {
     };
   });
 
-  MapShine.debug.registerReport('vt-pan-viewer-stop', 'Stop / clear', () => ({
+  MapShine.debug.registerAction('vt-pan-viewer-stop', 'Stop / clear', () => ({
     report: 'vt-pan-viewer-stop',
     generatedAt: new Date().toISOString(),
     ...stopVtPanViewer(),
@@ -394,7 +415,7 @@ function install() {
   // eyeballed for correctness. Real scenes have no masks, so this stays albedo.
   const TORTURE_DISPLAY_CYCLE = ['albedo', 'ShadowOutdoorsFire', ...TORTURE_UNPACKED_MASK_NAMES];
   let tortureDisplayLayerIndex = 0;
-  MapShine.debug.registerReport('vt-pan-viewer-cycle-layer', 'Cycle displayed layer', async () => {
+  MapShine.debug.registerAction('vt-pan-viewer-cycle-layer', 'Cycle displayed layer', async () => {
     tortureDisplayLayerIndex = (tortureDisplayLayerIndex + 1) % TORTURE_DISPLAY_CYCLE.length;
     const name = TORTURE_DISPLAY_CYCLE[tortureDisplayLayerIndex];
     return {
@@ -404,6 +425,36 @@ function install() {
       ...(await setVtPanViewerDisplayLayer(name)),
     };
   });
+
+  // ISOLATE ONE DRAW ITEM — the ghost-hunting control (2026-07-17).
+  //
+  // The ghost ("tiles of textures at the wrong scale and in the wrong place")
+  // has survived five diagnoses from me. Each one found a REAL bug and none of
+  // them was the ghost, because I was reasoning about a VISUAL artefact from
+  // aggregate counters — I can't see it, the author can. This inverts that:
+  // pick items one at a time until the stripes appear, and the ghost's identity
+  // stops being my theory and starts being a fact. Which item it is says a lot
+  // on its own — a Tile means placement/packing, a Level means floor
+  // compositing, a Token means the live-sync path.
+  //
+  // A dropdown, not a "next item" button: the choices are mutually exclusive
+  // and the author should be able to jump straight back to a suspect
+  // (feedback_debug_ui_one_action_one_control).
+  MapShine.debug.registerSelect(
+    'vt-isolate-item',
+    'Isolate draw item',
+    // A thunk: the draw list doesn't exist at install() and changes with every
+    // scene, floor and token update. A snapshot here would be empty forever.
+    () => [
+      { value: '', label: 'All items (normal)' },
+      ...getVtPanViewerDrawListIds().map(({ id, kind, renderOrder }) => ({
+        value: id,
+        label: `${renderOrder}. ${kind}: ${id}`,
+      })),
+    ],
+    () => getVtPanViewerIsolateItemId(),
+    async (id) => setVtPanViewerIsolateItem(id)
+  );
 
   // VT ZOOM THRASH TEST (author-requested, 2026-07-16: "force the camera to
   // flush the caches, start with a blank slate, start zoomed out and thrash
@@ -428,7 +479,22 @@ function install() {
   //              floor count, real tiles and a warm cache. The right tool for "is
   //              MY map hitching", and the only one that can verify a fix against
   //              the conditions that produced a real report.
-  MapShine.debug.registerReport('vt-zoom-thrash-torture', 'Zoom thrash: torture fixture', async () => ({
+  //
+  // ADVERSARIAL MAX-STRESS, NOT A PLAY PROXY (relabeled 2026-07-17, live-
+  // confirmed): a multi-round ghost-artefact hunt this session traced the
+  // ghost to this test's OWN burst-rate zoom — several full-range sweeps in
+  // ~8 seconds, zero settle between direction flips — and the author could
+  // not reproduce it through 15-20s of deliberate, aggressive manual
+  // scroll-zooming afterward. The RANGE this test reaches is real (same
+  // clampHalfSpan() bounds a real scroll wheel); the RATE is not. Good for
+  // finding races fast (it already has: the coarse-pin budget shortfall, the
+  // freeze, the pin leak, a mip-blend mismatch — all real, all confirmed).
+  // Bad for "would a GM ever see this" — that question is `MapShine.soak(n)`'s
+  // job now, via its `zoom` driver (soakZoomStep: one bounded, eased step per
+  // cycle, the same code path a real zoom key uses). See
+  // runZoomThrashTest's own returned `interpretation` for the same caveat on
+  // every run.
+  MapShine.debug.registerAction('vt-zoom-thrash-torture', 'Zoom thrash (max-stress): torture fixture', async () => ({
     report: 'vt-zoom-thrash-torture',
     generatedAt: new Date().toISOString(),
     subject: 'torture fixture (synthetic 12000² x3 floors + masks)',
@@ -445,7 +511,7 @@ function install() {
     })),
   }));
 
-  MapShine.debug.registerReport('vt-zoom-thrash-active', 'Zoom thrash: active scene', async () => ({
+  MapShine.debug.registerAction('vt-zoom-thrash-active', 'Zoom thrash (max-stress): active scene', async () => ({
     report: 'vt-zoom-thrash-active',
     generatedAt: new Date().toISOString(),
     subject: typeof canvas !== 'undefined' ? (canvas.scene?.name ?? '(no active scene)') : '(no canvas)',
@@ -597,7 +663,7 @@ function install() {
     };
   }
 
-  MapShine.debug.registerReport('vt-pan-viewer-start-real-scene', 'Restart: active scene', async () => {
+  MapShine.debug.registerAction('vt-pan-viewer-start-real-scene', 'Restart: active scene', async () => {
     const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
     const floorsResult = getActiveSceneFloors(sceneDoc);
     const initialFloorIndex = floorsResult.ok ? resolveFloorDescriptor(sceneDoc, floorsResult.floors) : 0;
@@ -623,7 +689,7 @@ function install() {
     for (const floor of floorsResult.floors) {
       const bitmap = await getSourceBitmap(floor.url);
       const result = await registerPixiProxy(floor.url, bitmap);
-      console.log(`${TAG} VRAM severance — floor ${floor.index} (${floor.name}):`, result);
+      log.info(`VRAM severance — floor ${floor.index} (${floor.name}):`, result);
     }
   }
 
@@ -643,7 +709,7 @@ function install() {
   // The curtain correctly refuses to reappear for the same scene, which makes it
   // impossible to look at again without switching scenes back and forth. This
   // forgets that memory so the next redraw is treated as a cold load.
-  MapShine.debug.registerReport(
+  MapShine.debug.registerAction(
     'loading-screen-arm',
     'Loading Screen: Arm for next redraw (then switch floor/scene)',
     () => ({
@@ -655,6 +721,222 @@ function install() {
   );
 
   MapShine.debug.registerReport('interface-seam', 'Interface seam (art vs chrome)', () => getCanvasCompositingReport());
+
+  // THE THIRD GROUP (2026-07-17, ghost-hunting round 3). Five theories dead by
+  // direct evidence tonight, in order: environmentRenderable:false (not
+  // Foundry's suppressed art), renderer.autoClear defaults true and nothing
+  // overrides it — verified against three.webgpu.js — (not a stale
+  // sceneColor buffer), totalStuckChildren:0 (not a stuck drag preview),
+  // msaCanvasCount:1 (not an orphaned second viewer), and — provably, by
+  // reading the code rather than guessing — NOT an MSA mesh at all: every
+  // itemStates entry gets `.visible` set by exactly one of two gates on every
+  // residency pass (vt-pan-viewer.js:1740 or :1833, the isolation-aware one),
+  // with no third writer (`refreshItemPlacement`, called every frame by
+  // `syncTokenPlacements`, touches only geometry — never `.visible`, read
+  // directly). `scene.add()` is called in exactly one place in the whole
+  // file. So whatever draws the ghost is not in this Three.js scene, period.
+  //
+  // `canvas.environment` and `canvas.interface` are two of THREE siblings
+  // under `rendered` (config.mjs: primary/effects → environment; every
+  // placeable layer → interface; `visibility` → the THIRD, Foundry's fog of
+  // war). `applyArtSuppression` was only ever told about the first two.
+  // `CanvasVisibility#visible` (visibility.mjs:499) is
+  // `canvas.effects.visionSources.some(s => s.active) || !game.user.isGM` —
+  // true the instant a vision source is active, which this session's own
+  // early testing ("I tried making the scene dark and adding a light and the
+  // token's vision was only present where the light was") means it plausibly
+  // has been. Its `explored` container holds `canvas.fog.sprite`
+  // (fog.mjs:118) — a real SpriteMesh with a real texture, drawn through
+  // FOUNDRY'S OWN camera, which the thrash test never touches. A hypothesis,
+  // not a diagnosis (feedback_plausible_diagnosis_rots) — this is the one
+  // machine-checked fact that confirms or kills it.
+  MapShine.debug.registerReport('fog-of-war-census', 'Fog of war (third PIXI group)', () => {
+    const vis = typeof canvas !== 'undefined' ? (canvas?.visibility ?? null) : null;
+    if (!vis) {
+      return {
+        report: 'fog-of-war-census',
+        generatedAt: new Date().toISOString(),
+        present: false,
+        interpretation: 'canvas.visibility is not reachable — not running inside a loaded Foundry scene.',
+      };
+    }
+    const sprite = canvas?.fog?.sprite ?? null;
+    const spriteRect = sprite?.getBounds ? sprite.getBounds() : null;
+    const visionSources = Array.from(canvas?.effects?.visionSources ?? []);
+    return {
+      report: 'fog-of-war-census',
+      generatedAt: new Date().toISOString(),
+      present: true,
+      visibilityGroupVisible: vis.visible,
+      visibilityGroupRenderable: vis.renderable,
+      exploredContainerVisible: vis.explored?.visible ?? null,
+      exploredContainerChildCount: vis.explored?.children?.length ?? null,
+      isGM: typeof game !== 'undefined' ? (game?.user?.isGM ?? null) : null,
+      activeVisionSourceCount: visionSources.filter((s) => s?.active).length,
+      totalVisionSourceCount: visionSources.length,
+      fogSprite: sprite
+        ? {
+            visible: sprite.visible,
+            alpha: sprite.alpha,
+            width: sprite.width,
+            height: sprite.height,
+            x: sprite.x,
+            y: sprite.y,
+            bounds: spriteRect
+              ? {
+                  x: Math.round(spriteRect.x),
+                  y: Math.round(spriteRect.y),
+                  w: Math.round(spriteRect.width),
+                  h: Math.round(spriteRect.height),
+                }
+              : null,
+          }
+        : null,
+      interpretation:
+        'visibilityGroupVisible:false means fog is entirely off this frame — rule this theory out. ' +
+        'visibilityGroupVisible:true means canvas.visibility (a SIBLING of the suppressed environment ' +
+        'group, never touched by applyArtSuppression) is genuinely drawing, and fogSprite.bounds is a ' +
+        "REAL rectangle in FOUNDRY's own screen space — compare it against where the ghost visually " +
+        "sits. It is drawn through Foundry's own camera, which the VT thrash test never moves, so once " +
+        "MSA's independently-thrashed camera diverges from Foundry's, this sprite would appear at the " +
+        'wrong scale and place relative to MSA content, immune to MSA eviction, and outside every ' +
+        'MSA draw item — matching everything reported so far.',
+    };
+  });
+
+  // THE OTHER HALF OF THE SEAM (2026-07-17, ghost-hunting). applyArtSuppression
+  // only ever touches `canvas.environment` (`primary` + `effects` per
+  // MSA_OWNED_GROUPS) — verified against config.mjs, that is where `primary` and
+  // `effects` both declare `parent: "environment"`. Every PLACEABLE layer
+  // (tiles, tokens, walls, notes, templates, drawings, regions, sounds,
+  // lighting) is declared `group: "interface"`, a SIBLING of `environment`
+  // under `rendered` — `environmentRenderable:false` says nothing about it,
+  // by design (keyhole-interface-seam: "PIXI keeps the CHROME").
+  //
+  // Each of those layers is a `PlaceablesLayer`, and EVERY `PlaceablesLayer`
+  // owns a `.preview` PIXI.Container (placeables-layer.mjs:348) used to draw a
+  // LIVE placeable — actual art, not a read-only overlay — during a drag or
+  // creation gesture. It is supposed to empty via `clearPreviewContainer()` on
+  // drop/cancel (placeables-layer.mjs:427/1185/1194) — but every one of those
+  // call sites is reachable through Foundry's OWN pointer handling, which this
+  // session's early bug reports ("it leaves a version of the tile behind")
+  // describe going wrong under MSA. A stuck preview would be real PIXI content,
+  // entirely outside `canvas.environment` AND outside every MSA draw item — so
+  // it would render regardless of `environmentRenderable` and regardless of
+  // the isolate-draw-item selection. That is a hypothesis, not a diagnosis
+  // (feedback_plausible_diagnosis_rots) — this report is the one machine-
+  // checked fact that confirms or kills it: a genuinely empty preview on every
+  // layer means look elsewhere entirely.
+  // CANVAS CENSUS (2026-07-17, ghost-hunting round 2). Three theories are now
+  // DEAD by live evidence: Foundry's own art is off (environmentRenderable:
+  // false), MSA's sceneColor target clears unconditionally every frame
+  // (renderer.autoClear defaults true in three.webgpu.js and nothing in this
+  // file touches it — verified against the vendored source, not assumed), and
+  // every PlaceablesLayer.preview is empty (totalStuckChildren:0). Isolating
+  // any single MSA draw item still shows the ghost.
+  //
+  // The remaining candidate: not WHAT draws, but HOW MANY THINGS draw.
+  // `disposeActive()` (vt-pan-viewer.js:195) removes the old canvas via
+  // `_active.canvas.remove()` wrapped in an empty `catch(_){}` — standard
+  // practice everywhere else in that function for a teardown step that must
+  // not crash the NEXT viewer's startup, but it means a removal that silently
+  // failed would leave a canvas element attached forever, frozen at whatever
+  // camera state it had the instant its `setAnimationLoop(null)` killed it:
+  // static, wrong scale (a stale zoom), wrong place (a stale pan), and
+  // genuinely un-evictable (its renderer is dead, not merely off-screen).
+  // That matches everything reported so far. This is a hypothesis, not a
+  // diagnosis (feedback_plausible_diagnosis_rots) — the census below is the
+  // one machine-checked fact that confirms or kills it.
+  MapShine.debug.registerReport('vt-canvas-census', 'VT canvas census (orphaned viewer?)', () => {
+    const byId = document.querySelectorAll('#msa-vt-pan-viewer-canvas');
+    const allCanvases = Array.from(document.querySelectorAll('canvas'));
+    return {
+      report: 'vt-canvas-census',
+      generatedAt: new Date().toISOString(),
+      msaCanvasCount: byId.length,
+      totalCanvasCount: allCanvases.length,
+      msaCanvases: Array.from(byId).map((c) => {
+        const r = c.getBoundingClientRect();
+        const cs = window.getComputedStyle(c);
+        return {
+          width: c.width,
+          height: c.height,
+          rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+          zIndex: cs.zIndex,
+          display: cs.display,
+          opacity: cs.opacity,
+          isConnected: c.isConnected,
+        };
+      }),
+      allCanvases: allCanvases.map((c) => ({
+        id: c.id || '(no id)',
+        width: c.width,
+        height: c.height,
+        parentId: c.parentElement?.id || '(no id)',
+      })),
+      interpretation:
+        'msaCanvasCount SHOULD be exactly 1 while a viewer is running (0 if stopped). If it is 2+, ' +
+        'disposeActive() failed to remove a previous canvas and an ORPHANED, FROZEN viewer instance ' +
+        "is sitting in the DOM — that instance's last rendered frame IS the ghost: static, at whatever " +
+        'zoom/pan it had when its render loop was killed, invisible to isolate-draw-item and immune to ' +
+        'eviction because it belongs to a dead renderer, not the live one. Compare each msaCanvases ' +
+        "entry's rect against where the ghost visually sits on screen.",
+    };
+  });
+
+  MapShine.debug.registerReport('interface-preview-leak', 'Interface previews (stuck drag ghosts?)', () => {
+    const PREVIEW_LAYER_NAMES = [
+      'tiles',
+      'tokens',
+      'walls',
+      'notes',
+      'templates',
+      'drawings',
+      'regions',
+      'sounds',
+      'lighting',
+    ];
+    const layers = {};
+    let totalStuckChildren = 0;
+    for (const name of PREVIEW_LAYER_NAMES) {
+      const layer = typeof canvas !== 'undefined' ? (canvas?.[name] ?? null) : null;
+      const preview = layer?.preview ?? null;
+      if (!preview) {
+        layers[name] = { present: false };
+        continue;
+      }
+      const children = Array.isArray(preview.children) ? preview.children : [];
+      totalStuckChildren += children.length;
+      layers[name] = {
+        present: true,
+        childCount: children.length,
+        children: children.map((c) => ({
+          constructorName: c?.constructor?.name ?? '(unknown)',
+          documentId: c?.document?.id ?? null,
+          x: c?.x ?? null,
+          y: c?.y ?? null,
+          width: c?.width ?? null,
+          height: c?.height ?? null,
+          visible: c?.visible ?? null,
+          alpha: c?.alpha ?? null,
+          destroyed: c?._destroyed ?? null,
+        })),
+      };
+    }
+    return {
+      report: 'interface-preview-leak',
+      generatedAt: new Date().toISOString(),
+      totalStuckChildren,
+      layers,
+      interpretation:
+        'totalStuckChildren:0 across every layer means every PlaceablesLayer.preview is genuinely ' +
+        'empty — the ghost is NOT a stuck Foundry drag/creation preview, rule this theory out entirely. ' +
+        "Any nonzero childCount is real PIXI content sitting in canvas.interface, drawn at FOUNDRY'S " +
+        "own (un-thrashed) screen coordinates, untouched by MSA's cache, its residency, and its " +
+        'isolate-draw-item control alike — because it is not an MSA mesh. x/y/width/height are in ' +
+        "that layer's local space; compare against where the ghost visually sits on screen.",
+    };
+  });
 
   MapShine.debug.registerReport('pixi-residency-report', 'PIXI residency', () => {
     const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
@@ -682,7 +964,7 @@ function install() {
   // long before setup. Full reasoning in foundry/canvas-compositing.js.
   {
     const seam = registerCanvasCompositing();
-    if (!seam.registered) console.warn(`${TAG} interface seam not registered — ${seam.reason}`);
+    if (!seam.registered) log.warn(`interface seam not registered — ${seam.reason}`);
   }
 
   if (typeof Hooks !== 'undefined') {
@@ -704,10 +986,10 @@ function install() {
       try {
         const sceneDoc = canvasRef?.scene ?? null;
         const verdict = beginSceneLoad({ sceneId: sceneDoc?.id ?? null, sceneName: sceneDoc?.name });
-        if (!verdict.shown) console.log(`${TAG} loading screen suppressed — ${verdict.reason}`);
+        if (!verdict.shown) log.info(`loading screen suppressed — ${verdict.reason}`);
       } catch (err) {
         // A broken curtain must never block a scene load.
-        console.error(`${TAG} loading screen failed to start:`, err);
+        log.error(`loading screen failed to start:`, err);
       }
     });
 
@@ -715,7 +997,7 @@ function install() {
       try {
         await registerFloorProxies(canvasRef?.scene ?? null);
       } catch (err) {
-        console.error(`${TAG} VRAM severance — canvasInit proxy registration failed:`, err);
+        log.error(`VRAM severance — canvasInit proxy registration failed:`, err);
       }
     });
 
@@ -771,7 +1053,7 @@ function install() {
         // work, and a failed redraw must not break Foundry's own bookkeeping.
         // The hook NAME is passed through: diagnostics' documentSync.byHook is
         // how "which hook actually fired" gets answered from a report.
-        refreshVtPanViewerItems(hook).catch((err) => console.error(`${TAG} ${hook} redraw failed:`, err));
+        refreshVtPanViewerItems(hook).catch((err) => log.error(`${hook} redraw failed:`, err));
       });
     };
     for (const doc of DRAW_LIST_DOCUMENTS) {
@@ -808,7 +1090,7 @@ function install() {
         if (!sceneDoc) return;
         const floorsResult = getActiveSceneFloors(sceneDoc);
         if (!floorsResult.ok) {
-          console.warn(`${TAG} real-scene VT viewer: ${floorsResult.error}`);
+          log.warn(`real-scene VT viewer: ${floorsResult.error}`);
           return;
         }
         const targetFloorIndex = resolveFloorDescriptor(sceneDoc, floorsResult.floors);
@@ -818,7 +1100,7 @@ function install() {
           // beginSceneLoad already declined, so there is nothing here to undo.
           // "Floor changes without loading screens" is this branch existing.
           const result = await setVtPanViewerFloor(targetFloorIndex);
-          console.log(`${TAG} real-scene VT viewer synced to floor ${targetFloorIndex} (same scene).`, result);
+          log.info(`real-scene VT viewer synced to floor ${targetFloorIndex} (same scene).`, result);
           syncInterfaceSeam('floor switch');
           return;
         }
@@ -826,11 +1108,11 @@ function install() {
         lastRealSceneId = sceneDoc.id;
         const result = await startRealSceneViewer(targetFloorIndex);
         if (result.ok === false) {
-          console.warn(`${TAG} real-scene VT viewer did not start:`, result.error);
+          log.warn(`real-scene VT viewer did not start:`, result.error);
           endSceneLoad({ error: result.error });
           return;
         }
-        console.log(`${TAG} real-scene VT viewer active for "${result.sceneName}" at floor ${targetFloorIndex}.`);
+        log.info(`real-scene VT viewer active for "${result.sceneName}" at floor ${targetFloorIndex}.`);
 
         // LIFT ONLY WHEN THERE IS SOMETHING TO SEE. startVtPanViewer has resolved,
         // so every coarse pin is resident and the render loop is armed — but no
@@ -852,14 +1134,14 @@ function install() {
         if (summary) {
           // worstStallMs is surfaced, not swallowed: a load that completes but
           // froze the main thread for seconds is a bug with a receipt.
-          console.log(
-            `${TAG} scene load complete in ${summary.totalMs}ms` +
+          log.info(
+            `scene load complete in ${summary.totalMs}ms` +
               (summary.worstStallMs > 0 ? ` (worst main-thread stall: ${summary.worstStallMs}ms)` : ''),
             summary
           );
         }
       } catch (err) {
-        console.error(`${TAG} real-scene VT viewer auto-sync failed:`, err);
+        log.error(`real-scene VT viewer auto-sync failed:`, err);
         endSceneLoad({ error: String(err?.message || err) });
       }
     });
@@ -888,8 +1170,9 @@ function install() {
   };
   MapShine.soakHooks.pan = (i) => soakPanStep(i);
   MapShine.soakHooks.switchFloor = (i) => soakSwitchFloorStep(i);
+  MapShine.soakHooks.zoom = (i) => soakZoomStep(i);
 
-  console.log(
+  log.info(
     `%c${TAG}%c ${STAGE} — new tree live, legacy quarantined. Three r${THREE.REVISION} / WebGL2.` +
       ` Soak harness ready: MapShine.soak(n).`,
     'color:#8fd6ff;font-weight:bold',
@@ -900,10 +1183,10 @@ function install() {
   // available here. If we are somehow loaded outside Foundry, fall back to the
   // window load event so the boot proof still renders.
   if (typeof Hooks !== 'undefined') {
-    Hooks.once('init', () => console.log(`${TAG} init — ${MODULE_ID}`));
+    Hooks.once('init', () => log.info(`init — ${MODULE_ID}`));
     Hooks.once('ready', () => bootHeartbeat());
   } else {
-    console.warn(`${TAG} no Foundry Hooks found; booting on window load.`);
+    log.warn(`no Foundry Hooks found; booting on window load.`);
     if (document.readyState === 'complete') bootHeartbeat();
     else window.addEventListener('load', () => bootHeartbeat(), { once: true });
   }
@@ -933,8 +1216,8 @@ function install() {
 function syncInterfaceSeam(context) {
   const seam = applyArtSuppression();
   if (seam.applied) {
-    console.log(
-      `${TAG} interface seam active (${context}) — MSA owns primary+effects (the art); ` +
+    log.info(
+      `interface seam active (${context}) — MSA owns primary+effects (the art); ` +
         `Foundry's PIXI keeps interface (selection, grid, walls, controls) on top.`
     );
   }
@@ -1013,7 +1296,7 @@ function bootHeartbeat() {
     // The node renderer must init() before it will draw. Fire-and-forget: the
     // heartbeat is a liveness indicator, and a heartbeat that blocks boot to
     // report that boot is alive would be a poor sort of heartbeat.
-    renderer.init().catch((err) => console.error(`${TAG} heartbeat renderer init failed:`, err));
+    renderer.init().catch((err) => log.error(`heartbeat renderer init failed:`, err));
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(45, HEARTBEAT_W / HEARTBEAT_H, 0.1, 100);
@@ -1044,6 +1327,16 @@ function bootHeartbeat() {
     renderer.setAnimationLoop((t) => {
       triangle.rotation.y = t * 0.0009; // gentle spin — proves the loop is alive
       renderer.render(scene, camera);
+
+      // THE BLACK BOX'S FRAME FEED. Same loop, same `t`, for the same reason the
+      // readout below uses it: this is the MAIN THREAD's cadence, and it keeps
+      // reporting when the VT is stopped, failed, or never started. The recorder
+      // keeps three views of it — a histogram over every frame, a 1-in-N
+      // timeline, and every hitch — so the export can answer "what was the frame
+      // rate like" without either storing 200k frames or sampling the hitches
+      // away. The panel's live readout stays as it is: it answers "right now",
+      // which is a different question from "what happened".
+      MapShine.flight?.recordFrame(t);
 
       if (lastT !== null) {
         const gap = t - lastT;
@@ -1082,10 +1375,10 @@ function bootHeartbeat() {
     MapShine.__heartbeat = { host, renderer, scene, camera, triangle };
     MapShine.__soakWatch?.(canvas); // count any WebGL context loss on the boot canvas
     MapShine.debug?.attachPanel(host); // the debug panel lives in the same corner box
-    console.log(`${TAG} boot heartbeat rendering. Gate "boot renders" ✔`);
+    log.info(`boot heartbeat rendering. Gate "boot renders" ✔`);
   } catch (err) {
     // Doctrine #1: fail LOUD, never silently. No V2 fallback exists to hide behind.
-    console.error(`${TAG} boot heartbeat FAILED — the new renderer did not come up:`, err);
+    log.error(`boot heartbeat FAILED — the new renderer did not come up:`, err);
     const banner = document.createElement('div');
     Object.assign(banner.style, {
       position: 'fixed',

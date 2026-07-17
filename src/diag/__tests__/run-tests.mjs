@@ -5,6 +5,7 @@
  * Run: `node src/diag/__tests__/run-tests.mjs`
  */
 import { run as runOrientationProbe } from './orientation-probe.test.mjs';
+import { run as runFlightRecorder } from './flight-recorder.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -22,7 +23,10 @@ const t = {
   },
 };
 
-const suites = [['orientation-probe', runOrientationProbe]];
+const suites = [
+  ['orientation-probe', runOrientationProbe],
+  ['flight-recorder', runFlightRecorder],
+];
 
 for (const [name, fn] of suites) {
   const before = failed;

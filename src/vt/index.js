@@ -16,11 +16,15 @@ export {
   getVtPanViewerDiagnostics,
   setVtPanViewerFloor,
   setVtPanViewerDisplayLayer,
+  setVtPanViewerIsolateItem,
+  getVtPanViewerDrawListIds,
+  getVtPanViewerIsolateItemId,
   refreshVtPanViewerItems,
   runOrientationSelfTest,
   runZoomThrashTest,
   soakPanStep,
   soakSwitchFloorStep,
+  soakZoomStep,
 } from './vt-pan-viewer.js';
 export { runVtLiveDecodeTest } from './vt-live-decode-report.js';
 export { getSourceBitmap } from './decode-pool.js';

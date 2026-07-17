@@ -195,4 +195,68 @@ export function run(t) {
     ok('4. complete, and only now', describeLoad(s, 800).complete === true);
     ok('4. total elapsed is real', describeLoad(s, 800).elapsedMs === 700);
   }
+
+  // --- PHASE TIMINGS: "how long did each part of loading take?" -------------
+  //
+  // The author's ask (2026-07-17). The load model already knew the phase
+  // transitions and already received the clock, so the stopwatch lives here
+  // rather than in the flight recorder — a recorder timing this from boot.js's
+  // three call sites would be a hand-kept list, and a fourth phase added later
+  // would go silently unmeasured while the export still looked complete.
+  {
+    const s = mk(0);
+    beginPhase(s, LOAD_PHASES.SCENE, { nowMs: 0 });
+    beginPhase(s, LOAD_PHASES.ART, { nowMs: 12 });
+    beginPhase(s, LOAD_PHASES.FIRST_FRAME, { nowMs: 2412 });
+    completeLoad(s, 2592);
+
+    ok('every phase entered is recorded', s.phases.length === 3);
+    ok('phase 1 (reading the scene) is timed', s.phases[0].phase === LOAD_PHASES.SCENE && s.phases[0].durMs === 12);
+    ok('phase 2 (streaming art — THE load) is timed', s.phases[1].durMs === 2400);
+    ok('phase 3 (first frame) is timed', s.phases[2].durMs === 180);
+    ok('entering a phase closes the previous one', s.phases[0].endMs === 12);
+    ok('completeLoad closes the last phase', s.phases[2].endMs === 2592);
+    ok('phase durations sum to the total', s.phases.reduce((a, p) => a + p.durMs, 0) === 2592);
+    ok('spans are relative to the load start, not the epoch', s.phases[0].startMs === 0);
+  }
+  {
+    // The phase that was running when it broke is the most interesting span in
+    // the whole load. A dangling span would lose "it died 8s into streaming art".
+    const s = mk(0);
+    beginPhase(s, LOAD_PHASES.SCENE, { nowMs: 0 });
+    beginPhase(s, LOAD_PHASES.ART, { nowMs: 10 });
+    failLoad(s, 'decode failed', 8010);
+    ok('failLoad closes the phase that was running', s.phases[1].endMs === 8010);
+    ok('...with its real duration', s.phases[1].durMs === 8000);
+    ok('...and the failure is still a failure, not a completion', s.error === 'decode failed' && s.complete === false);
+  }
+  {
+    // A progress report for a phase we are not in IS a transition — and must be
+    // timed like one, or the phase entered only this way is the one phase with
+    // no duration.
+    const s = mk(0);
+    beginPhase(s, LOAD_PHASES.SCENE, { nowMs: 0 });
+    reportProgress(s, LOAD_PHASES.ART, { done: 1, total: 7, nowMs: 40 });
+    ok('an implicit transition via reportProgress opens a span', s.phases.length === 2);
+    ok('...and closes the previous one at the right time', s.phases[0].durMs === 40);
+    ok('...and the new span starts when it started', s.phases[1].startMs === 40);
+    reportProgress(s, LOAD_PHASES.ART, { done: 2, nowMs: 60 });
+    ok('progress WITHIN a phase does not open a second span', s.phases.length === 2);
+  }
+  {
+    // An unmeasured duration must read as unmeasured, never as a confident NaN.
+    // (`feedback_instruments_must_not_lie`: "could not measure" must never look
+    // like a real number.)
+    const s = mk(0);
+    beginPhase(s, LOAD_PHASES.SCENE);
+    ok('a phase entered with no clock still transitions', s.phase === LOAD_PHASES.SCENE);
+    ok('...but reports its start as unknown, not NaN', s.phases[0].startMs === null);
+    ok('...and says WHY in the span itself', /no clock was supplied/.test(s.phases[0].note));
+    completeLoad(s, 100);
+    ok('...and its duration stays null rather than becoming a fiction', s.phases[0].durMs === null);
+  }
+  {
+    const s = mk(0);
+    ok('a load with no phases has an empty list, not a fabricated one', s.phases.length === 0);
+  }
 }

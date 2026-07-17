@@ -1,20 +1,29 @@
 /**
  * src/diag/soak.js — the Stage 0 soak harness (Keyhole §8, §10).
  *
- * `MapShine.soak(n)`: run n× load/switch/pan cycles and report context losses +
- * ledger peaks. This is the harness the stage gates lean on — e.g. Stage 1's
- * "ledger flat within budget through 20-cycle soak; zero context loss".
+ * `MapShine.soak(n)`: run n× load/switch/pan/zoom cycles and report context
+ * losses + ledger peaks. This is the harness the stage gates lean on — e.g.
+ * Stage 1's "ledger flat within budget through 20-cycle soak; zero context loss".
  *
- * Stage 0 honesty: there is nothing to load/switch/pan yet but the boot triangle,
- * so those three DRIVERS are stubs. Later stages register real drivers into
- * `MapShine.soakHooks` (the page cache registers `load`/`pan`, the floor model
- * registers `switchFloor`), and soak() picks them up automatically. What is REAL
- * right now: the cycle loop, WebGL context-loss accounting on the live canvas,
- * and an honest report that names which drivers are still stubs. It never claims
- * a clean soak it didn't actually run.
+ * Stage 0 honesty: at Stage 0 there was nothing to load/switch/pan yet but the
+ * boot triangle, so DRIVERS started as stubs. Later stages register real
+ * drivers into `MapShine.soakHooks` (the VT viewer registers `load`/`pan`/
+ * `zoom`, the floor model registers `switchFloor`), and soak() picks them up
+ * automatically. `zoom` (2026-07-17) drives ONE bounded, eased zoom step per
+ * cycle through the SAME code path a real keyboard zoom key/wheel notch
+ * uses — deliberately NOT `runZoomThrashTest`'s instant full-range jump,
+ * which reaches states a real user cannot reproduce (confirmed live: the
+ * author could not trigger its ghost artefact through 15-20s of deliberate
+ * aggressive manual scroll-zooming). soak() is what tells you whether a bug
+ * survives REALISTIC extended play; the thrash test is a separate, adversarial
+ * max-stress tool for finding races fast — the two answer different questions
+ * and neither substitutes for the other. What is REAL right now: the cycle
+ * loop, WebGL context-loss accounting on the live canvas, and an honest report
+ * that names which drivers are still stubs. It never claims a clean soak it
+ * didn't actually run.
  */
 
-const DRIVERS = ['load', 'switchFloor', 'pan'];
+const DRIVERS = ['load', 'switchFloor', 'pan', 'zoom'];
 
 export function installSoak(MapShine) {
   // Later stages assign real functions here: { load(i), switchFloor(i), pan(i) }.

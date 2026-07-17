@@ -62,6 +62,26 @@ import {
 
 const OVERLAY_ID = 'msa-loading-screen';
 
+/**
+ * THIS FILE'S ONE CLOCK READ.
+ *
+ * `time/one-clock` fired here when phase timings were added (2026-07-17), and
+ * the honest answer was not to bump the ratchet. This module is the BOUNDARY
+ * between the browser (which has a clock) and `load-progress.js` (which is pure
+ * by law and must be HANDED the time), so it genuinely needs wall-clock access —
+ * but it was sampling it from six separate places, which is the file-scale
+ * version of the exact thing the rule exists to stop.
+ *
+ * Six sample sites became one. That is not full compliance and this comment will
+ * not pretend it is: a private clock is still a private clock, and the real fix
+ * is for a load to be timed by the frame snapshot once one exists to hand out.
+ * What it does buy is that every timestamp in a load now comes from one line, so
+ * no two readings here can disagree about when "now" is.
+ *
+ * @returns {number}
+ */
+const now = () => performance.now();
+
 /** The scene whose load was last STARTED — the floor-switch guard's memory. */
 let lastStartedSceneId = null;
 /** @type {ReturnType<typeof createLoadState>|null} */
@@ -217,10 +237,14 @@ export function beginSceneLoad({ sceneId, sceneName }) {
   lastStartedSceneId = sceneId;
 
   endSceneLoad({ silent: true }); // never stack two curtains
-  state = createLoadState({ sceneId, sceneName: sceneName ?? '', nowMs: performance.now() });
-  beginPhase(state, LOAD_PHASES.SCENE);
+  // ONE clock reading for the load's start AND its first phase: sampling twice
+  // would make the SCENE phase appear to start a fraction of a millisecond after
+  // the load it opens, which is a small lie but a lie with a receipt in the export.
+  const startNow = now();
+  state = createLoadState({ sceneId, sceneName: sceneName ?? '', nowMs: startNow });
+  beginPhase(state, LOAD_PHASES.SCENE, { nowMs: startNow });
   els = buildOverlay();
-  paint(performance.now());
+  paint(now());
   rafHandle = requestAnimationFrame(tick);
   return { shown: true, reason: verdict.reason };
 }
@@ -232,13 +256,17 @@ export function beginSceneLoad({ sceneId, sceneName }) {
  */
 export function reportSceneLoadProgress(phaseId, opts) {
   if (!state) return;
-  reportProgress(state, phaseId, opts);
+  // The clock is supplied HERE rather than by callers: this is the boundary
+  // between the browser (which has a clock) and the pure model (which is
+  // forbidden one). A caller that had to remember `nowMs` would eventually
+  // forget, and the phase it forgot would be the one with no duration.
+  reportProgress(state, phaseId, { ...opts, nowMs: now() });
 }
 
 /** @param {string} phaseId @param {{total?:number|null}} [opts] */
 export function beginSceneLoadPhase(phaseId, opts) {
   if (!state) return;
-  beginPhase(state, phaseId, opts);
+  beginPhase(state, phaseId, { ...opts, nowMs: now() });
 }
 
 /**
@@ -258,14 +286,23 @@ export function endSceneLoad({ error = null, silent = false } = {}) {
   }
   let summary = null;
   if (state) {
-    const now = performance.now();
-    if (error) failLoad(state, error, now);
-    else completeLoad(state, now);
+    // `endedAt`, not `now` — a local named `now` would shadow this module's one
+    // clock helper, and the next person to add a timestamp in here would get a
+    // number frozen at whenever the load ended without anything saying so.
+    const endedAt = now();
+    if (error) failLoad(state, error, endedAt);
+    else completeLoad(state, endedAt);
     summary = {
       sceneId: state.sceneId,
       sceneName: state.sceneName,
-      totalMs: Math.round((state.finishedAtMs ?? now) - state.startedAtMs),
+      totalMs: Math.round((state.finishedAtMs ?? endedAt) - state.startedAtMs),
       worstStallMs: Math.round(state.worstStallMs),
+      // THE LOAD STORY, per phase — "reading the scene took 12ms, streaming art
+      // took 2.4s, the first frame took 180ms" instead of one undifferentiated
+      // total. Rides into the flight recorder's export for free: this summary is
+      // already returned by getLoadingScreenState(), which is already a
+      // registered read-only report.
+      phases: state.phases.map((p) => ({ ...p })),
       error: state.error,
     };
     if (!silent) lastSummary = summary;
@@ -285,7 +322,12 @@ export function getLoadingScreenState() {
   return {
     showing: !!state,
     lastStartedSceneId,
-    current: state ? describeLoad(state, performance.now()) : null,
+    current: state ? describeLoad(state, now()) : null,
+    // Phases of the IN-FLIGHT load, if any. Without this, exporting while a load
+    // is stuck — which is exactly when someone reaches for the export button —
+    // would show the previous load's timings and nothing about the one that is
+    // actually hanging. The still-open phase names itself by `endMs: null`.
+    currentPhases: state ? state.phases.map((p) => ({ ...p })) : null,
     lastLoad: lastSummary,
   };
 }

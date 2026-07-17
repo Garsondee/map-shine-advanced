@@ -34,8 +34,8 @@
 import * as THREE from './vendor/three/three.webgpu.js';
 import { installSoak } from './diag/soak.js';
 import { installDebugPanel } from './diag/debug-panel.js';
-import { runVtLiveDecodeTest } from './vt/vt-live-decode-report.js';
 import {
+  runVtLiveDecodeTest,
   startVtPanViewer,
   stopVtPanViewer,
   getVtPanViewerDiagnostics,
@@ -45,7 +45,10 @@ import {
   soakPanStep,
   soakSwitchFloorStep,
   refreshVtPanViewerItems,
-} from './vt/vt-pan-viewer.js';
+  getSourceBitmap,
+} from './vt/index.js';
+import { PASSES, validatePassGraph, PASS_SEAMS, PASS_IMPLS } from './graph/index.js';
+import { NotBuiltError } from './core/not-built.js';
 import { getActiveSceneFloors, computeVisibleFloorIndices } from './foundry/active-scene-source.js';
 import { collectSceneLayers } from './foundry/scene-layers.js';
 import { collectTokens, diagnoseTokens } from './foundry/scene-tokens.js';
@@ -60,8 +63,7 @@ import {
 } from './ui/loading-screen.js';
 import { LOAD_PHASES } from './ui/load-progress.js';
 import { computeSceneDimensions } from './foundry/scene-geometry.js';
-import { SORT_LAYERS, makeLayerKey } from './scene/layer-order.js';
-import { getSourceBitmap } from './vt/decode-pool.js';
+import { SORT_LAYERS, makeLayerKey } from './scene/index.js';
 import { registerPixiProxy, getPixiResidencyReport } from './foundry/pixi-proxy-textures.js';
 
 const MODULE_ID = 'map-shine-advanced';
@@ -101,6 +103,75 @@ if (MapShine.__keyholeBooted) {
 function install() {
   installSoak(MapShine); // exposes MapShine.soak(n) — the stage-gate soak harness
   installDebugPanel(MapShine); // starts console capture NOW, as early as possible
+
+  // THE PASS GRAPH, VALIDATED AT BOOT (Keyhole §"THE FRAMEWORK" — 2026-07-17).
+  // Node tests already prove PASSES validates (194+ assertions); this is the
+  // SAME check running against the REAL declared graph every real session
+  // boots with, not just at `npm test` time — the gap between "the committed
+  // file validates" and "the graph a player's session actually runs under
+  // validates" is exactly the kind of gap this project's whole second half has
+  // been about closing. Loud, never fatal: a malformed pass DECLARATION is a
+  // bookkeeping bug, not a reason to take live map rendering down for a table
+  // mid-session (the same reasoning as diag/render-fallback.js's safety slide
+  // — announce, never silently break, and never break MORE than the actual
+  // problem warrants).
+  const graphCheck = validatePassGraph(PASSES);
+  if (!graphCheck.ok) {
+    console.error(`${TAG} PASS GRAPH INVALID — this is a real bug in graph/passes.js, not a render fault:`);
+    for (const e of graphCheck.errors) console.error(`${TAG}   - ${e}`);
+  }
+
+  // The same graph, seam-door, and live-impl checks Node already runs (194+
+  // assertions across pass-declarations.test.mjs + pass-impls.test.mjs) —
+  // exercised here against the REAL running session instead of the committed
+  // file, one click, no console-log copy/paste (keyhole-debug-panel protocol).
+  // `live` checks confirm each entry is a REAL function reference (never a
+  // string path — see graph/pass-impls.js's header for why), and surface
+  // `fusedWith` honestly: geometry.world/present.composite currently share ONE
+  // real implementation, and this report says so rather than implying three
+  // independent passes exist.
+  MapShine.debug.registerReport('pass-graph-health', 'Pass graph health', () => {
+    const graph = validatePassGraph(PASSES);
+    const seamChecks = PASSES.filter((p) => p.status === 'seam').map((p) => {
+      const door = PASS_SEAMS[p.id];
+      if (typeof door !== 'function') return { id: p.id, status: 'MISSING DOOR' };
+      try {
+        door({});
+        return { id: p.id, status: 'UNEXPECTED — door did NOT throw (secretly built? update its status)' };
+      } catch (err) {
+        return {
+          id: p.id,
+          status:
+            err instanceof NotBuiltError ? 'correctly locked' : `UNEXPECTED ERROR TYPE: ${err?.constructor?.name}`,
+        };
+      }
+    });
+    const liveChecks = PASSES.filter((p) => p.status === 'live').map((p) => {
+      const impl = PASS_IMPLS[p.id];
+      if (!impl) return { id: p.id, status: 'MISSING — live pass has no PASS_IMPLS entry' };
+      return {
+        id: p.id,
+        status: typeof impl.fn === 'function' ? 'real function confirmed' : 'BROKEN — fn is not a function',
+        export: impl.export,
+        fusedWith: impl.fusedWith ?? null,
+      };
+    });
+    return {
+      report: 'pass-graph-health',
+      generatedAt: new Date().toISOString(),
+      graphValid: graph.ok,
+      graphErrors: graph.errors,
+      passCounts: {
+        total: PASSES.length,
+        live: PASSES.filter((p) => p.status === 'live').length,
+        seam: PASSES.filter((p) => p.status === 'seam').length,
+        future: PASSES.filter((p) => p.status === 'future').length,
+      },
+      seamChecks,
+      liveChecks,
+    };
+  });
+
   MapShine.debug.registerReport('vt-live-decode', 'Live decode test', async () => ({
     report: 'vt-live-decode',
     generatedAt: new Date().toISOString(),

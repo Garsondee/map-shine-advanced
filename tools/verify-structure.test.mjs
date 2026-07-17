@@ -26,8 +26,16 @@
  */
 
 import { sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { RULES, validateExceptions, applyExceptions } from './verify-structure.mjs';
+import { computeReachability } from './reachability.mjs';
+
+// Same derivation tools/verify-structure.mjs itself uses — replicated here
+// (rather than exported) because this file proves the RULE's behavior, and a
+// rule that silently depended on a test-only ROOT would not be proving the
+// real thing.
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 /**
  * Real V2 code, verbatim, with its source. Each MUST be rejected by `rule`.
@@ -311,6 +319,44 @@ export function run(t) {
     t.ok('foundry/ may NOT create a THREE texture', !covers(texVt, `src${sep}foundry${sep}scene-layers.js`));
   }
 
+  // ---- reachability: the wall built to catch the museum this session found -
+  {
+    const rule = RULES.find((r) => r.id === 'graph/reachable-from-boot');
+    t.ok(
+      "'graph/reachable-from-boot' exists and is a whole-graph scan rule",
+      !!rule && typeof rule.scan === 'function'
+    );
+    if (rule) {
+      // Real data, not synthetic — matches this file's house style. These are
+      // load-bearing facts as of 2026-07-17, not incidental: graph/index.js
+      // and graph/pass-impls.js are the SPECIFIC files this session built to
+      // fix the museum finding, so their reachability is the direct proof the
+      // fix landed, not just that the rule's mechanism works in the abstract.
+      t.ok('boot.js itself is NEVER flagged (it is the root)', rule.scan('src/boot.js').length === 0);
+      t.ok('a REAL file this session wired IS now reachable', rule.scan('src/graph/index.js').length === 0);
+      t.ok(
+        'the live-registry this session added IS reachable through the door',
+        rule.scan('src/graph/pass-impls.js').length === 0
+      );
+      // Proves the wall still BITES, not just that it stays quiet — using a
+      // REAL currently-unreachable file rather than a fabricated path. A
+      // fabricated path can never appear in `unreachableFromBoot()`'s Set (it
+      // is computed only over files that exist on disk), so asserting against
+      // one proves nothing; it would silently pass even if the rule's `has()`
+      // check were deleted entirely. Picked dynamically, not hardcoded, so
+      // this assertion keeps working as today's honest debt (frozen in
+      // structure-ratchets.json) gets paid down over future sessions.
+      const { unreachable } = computeReachability(ROOT);
+      t.ok('there IS current debt to prove the wall against (else this proof is vacuous)', unreachable.length > 0);
+      if (unreachable.length > 0) {
+        t.ok(
+          `a REAL unreachable file (${unreachable[0]}) is correctly flagged`,
+          rule.scan(unreachable[0]).length === 1
+        );
+      }
+    }
+  }
+
   // ---- the one-door rule: file-level scan, proven both ways ----------------
   {
     const rule = RULES.find((r) => r.id === 'zones/one-door');
@@ -374,7 +420,7 @@ export function run(t) {
   // File-level `scan` rules cannot be fed a bare corpse line — they carry their
   // own dedicated proof section above (and this assertion keeps THAT honest:
   // a scan rule with no bespoke proof shows up here as uncovered).
-  const scanRulesProven = new Set(['zones/one-door']);
+  const scanRulesProven = new Set(['zones/one-door', 'graph/reachable-from-boot']);
   t.ok(
     `every rule has at least one proof case (${covered.size + scanRulesProven.size}/${RULES.length})`,
     RULES.every((r) => covered.has(r.id) || (typeof r.scan === 'function' && scanRulesProven.has(r.id)))

@@ -56,11 +56,25 @@ import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { computeReachability } from './reachability.mjs';
+
 // fileURLToPath, not URL.pathname — the repo path contains spaces, which pathname
 // percent-encodes into %20 and fs then cannot find. Found on this file's first run.
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SRC = join(ROOT, 'src');
 const RATCHET_FILE = join(ROOT, 'tools', 'structure-ratchets.json');
+
+/**
+ * The whole-graph reachability walk runs ONCE per `npm run verify`, memoized
+ * here — `graph/reachable-from-boot`'s `scan` is called once PER FILE by the
+ * main loop below, and re-walking the entire import graph 55+ times would be
+ * needless work for an answer that does not change mid-scan.
+ */
+let _unreachableCache = null;
+function unreachableFromBoot() {
+  if (!_unreachableCache) _unreachableCache = new Set(computeReachability(ROOT).unreachable);
+  return _unreachableCache;
+}
 
 /** Vendored third-party code is never ours to police. */
 const IGNORED = [`${sep}vendor${sep}`, `${sep}__tests__${sep}`];
@@ -473,6 +487,44 @@ export const RULES = [
       "Import the zone's index.js (its ONE door). If what you need is not exported there, that is a " +
       "conversation about the zone's public API — have it in the open, in the door file, not by " +
       'reaching around it.',
+    ratchet: true,
+  },
+
+  // ===================================================================
+  // REACHABILITY FROM boot.js — built + built AGAIN and STILL walled by
+  // nothing, discovered 2026-07-17 the same session the wall itself got fixed.
+  // Every other rule here asks "is this line ALLOWED here". None of them ask
+  // "does anything ACTUALLY GET HERE" — and that gap let 28 of 52 src/ files
+  // (4,778 lines), including the entire graph/ zone and Keyhole's own >2048px
+  // LAW, sit fully wired, fully tested, and fully disconnected at once.
+  // ===================================================================
+  {
+    id: 'graph/reachable-from-boot',
+    pattern: /__never__/, // whole-graph rule; see `scan`
+    scan: (rel) => {
+      const norm = rel.replace(/\\/g, '/');
+      if (norm === 'src/boot.js') return []; // the root itself is trivially reachable
+      return unreachableFromBoot().has(norm)
+        ? [{ line: 1, text: '(unreachable — nothing under src/boot.js imports this file, even transitively)' }]
+        : [];
+    },
+    allow: [],
+    why:
+      "V2's EffectComposer had the right layer model, documented, and 5 importers — the god-object " +
+      'it lost to had 92. Here in 2026-07-17: src/graph/ (2,225 lines, 195 assertions, "npm run ' +
+      'verify" green throughout) had ZERO real importers, including ThreeAllocator — the module ' +
+      'Keyhole is NAMED for (Keyhole.md 4.6, "nothing is ever allocated at world resolution"). A ' +
+      "wall built before the room it governs exists is correct strategy (this repo's own doctrine); " +
+      'a wall left unconnected indefinitely, with every test staying green regardless, is the exact ' +
+      'failure this repo exists to prevent, one level up. This rule is the missing question: not ' +
+      '"is this code ALLOWED to exist here" but "is anything ACTUALLY USING it".',
+    instead:
+      'Wire the file into something boot.js reaches — through its zone door (zones/one-door), same ' +
+      'session as the code lands, never left for later. If it is deliberately not ready yet, that is ' +
+      "what 'seam'/'future' status in graph/passes.js is FOR (memory: " +
+      'feedback_walls_must_be_passable_and_wired) — a declared, honest gap, not a silent one. This ' +
+      "ratchet freezes today's real debt (shrink-only, same mechanism as the 7 ratchets above it) — " +
+      'it does not demand zero, it demands the gap never grows without someone noticing.',
     ratchet: true,
   },
 

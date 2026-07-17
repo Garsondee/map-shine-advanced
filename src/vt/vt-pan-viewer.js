@@ -75,6 +75,7 @@ import {
   easedZoomFactor,
 } from './view-state.js';
 import { planResidency, coarsePinSet, coarseTopMipsForCap, diffResidency } from './residency.js';
+import { ThreeAllocator } from '../graph/index.js';
 import { sortByLayer } from '../scene/layer-order.js';
 import {
   computeCameraFrustum,
@@ -226,6 +227,15 @@ function disposeActive() {
   try {
     _active.occlusionMask.texture.dispose();
   } catch (_) {}
+  // buf:scene.color — a screen-sized RGBA16F target. Leaking one per
+  // Stop/Restart cycle is exactly the VRAM bleed this project exists to end,
+  // and the debug panel's Stop/Start buttons make that cycle one click.
+  // `allocator.dispose()` reports rather than swallows (see its own note).
+  try {
+    _active.disposeSceneColor?.();
+  } catch (err) {
+    console.error('[vt-pan-viewer] scene.color dispose failed — VRAM may be leaked:', err);
+  }
   try {
     _active.canvas.remove();
   } catch (_) {}
@@ -389,6 +399,99 @@ export async function startVtPanViewer({
     await renderer.init(); // REQUIRED before any use — the backend is chosen here
     renderer.setPixelRatio(1);
     renderer.setSize(canvasW, canvasH, false);
+
+    // ========================================================================
+    // buf:scene.color — THE FIRST REAL RENDER TARGET (2026-07-17)
+    // ========================================================================
+    //
+    // Until now `renderFrame` drew straight to the canvas backbuffer, so there
+    // was NOWHERE for an effect to draw: `graph/passes.js` declares nine effect
+    // seams that all `modifies: ['buf:scene.color']`, and the buffer they all
+    // name did not exist. This is that buffer. It is the unblocking step for
+    // every effect (Keyhole.md §4.2's RT inventory starts here).
+    //
+    // It is ALSO the first real caller of `ThreeAllocator` — Keyhole's own law
+    // (§0, §4.6: "nothing is ever allocated at world resolution, ever"), which
+    // until this line was a unit-tested function nothing called. It is not
+    // optional: `gpu/allocator-only` fails the build on `new *RenderTarget(`
+    // anywhere but the allocator, so this is the only door and it is now open.
+    //
+    // ⚠️ COLOUR SPACE — the one thing most likely to make this look wrong, and
+    // this project has already lost a session to exactly this class of bug (the
+    // washed-out map). The chain, stated so it can be checked rather than hoped:
+    //   scene → RT   : RT texture is NoColorSpace, so three applies NO transfer
+    //                  function. Linear values land in the buffer untouched.
+    //   RT → canvas  : the present material samples it (no decode — the node
+    //                  system only decodes an SRGBColorSpace texture), and the
+    //                  renderer applies the sRGB OETF once, at the canvas,
+    //                  exactly as it does today for the direct draw.
+    // Net: ONE OETF, same as before. Set NoColorSpace EXPLICITLY rather than
+    // relying on a default — an implied colour space is how these bugs are born
+    // (Params.md §3.6 finding #1, same disease).
+    //
+    // RGBA16F per §4.2 ("scene.color (RGBA16F)"): effects need HDR headroom
+    // (bloom has nothing to bloom from in 8-bit). Costs 2 bytes/channel, and
+    // §4.2's whole inventory is budgeted on that.
+    const allocator = new ThreeAllocator({ THREE });
+    const describeSceneColor = () => ({
+      resolvedW: canvasW,
+      resolvedH: canvasH,
+      // O(screen), not O(world) — sized from the drawing buffer, so it scales
+      // with the player's monitor and never with the map. See the allocator's
+      // own note on why this is NOT `allowWorldScale`.
+      screenSized: true,
+      type: THREE.HalfFloatType,
+      colorSpace: THREE.NoColorSpace,
+      filter: 'linear',
+      depth: false, // the draw list is already depth-sorted by the layering law
+    });
+    let sceneColor = allocator.create('scene.color', describeSceneColor());
+
+    // ------------------------------------------------------------------
+    // present.composite — buf:scene.color → the canvas.
+    // ------------------------------------------------------------------
+    //
+    // Written fresh in TSL, NOT harvested from graph/fullscreen-present.js:
+    // that module is GLSL (ShaderMaterial + gl_Position), was the last GLSL in
+    // src/, and cannot run under WebGPURenderer at all. Two things from it are
+    // worth carrying forward, and are recorded here because the file itself is
+    // now deleted:
+    //
+    // 1. IT HAND-APPLIED THE sRGB OETF, and we must NOT. It did that because a
+    //    raw ShaderMaterial bypasses three's colour management. A NodeMaterial
+    //    does not — the node system applies output colour space at the canvas.
+    //    Hand-applying it here would DOUBLE the gamma. That is the trap.
+    //
+    // 2. ⬜ ITS HDR TONE-MAP IS A REAL DESIGN DECISION, DEFERRED, NOT DROPPED.
+    //    `passes.js` gives present.composite "tonemap + present" as its job.
+    //    There is no tone map here yet — correct, because nothing is HDR-lit
+    //    yet (light.accumulate is still a seam; the scene is albedo only, all
+    //    ≤1.0, so any curve would be a no-op that only costs ALU). When
+    //    lighting lands, the decision to restore is V3's, and it was
+    //    deliberate: a HUE-PRESERVING HIGHLIGHT ROLLOFF, **not global ACES**.
+    //    A global ACES curve desaturates the whole image and bleaches
+    //    saturated light cores toward white. Instead: everything below a knee
+    //    (default 0.9) stays pixel-identical to the linear input — so
+    //    Foundry-matched midtones and light bodies are untouched — and only
+    //    the over-knee "filament" compresses toward 1.0, scaling RGB uniformly
+    //    so a hot core keeps its colour. Rebuild that in TSL at that point;
+    //    do not reach for a stock tone-mapping node.
+    const presentScene = new THREE.Scene();
+    const presentCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    const presentMaterial = new THREE.NodeMaterial();
+    presentMaterial.depthTest = false;
+    presentMaterial.depthWrite = false;
+    const presentTexNode = THREE.TSL.texture(sceneColor.texture, THREE.TSL.uv());
+    presentMaterial.fragmentNode = presentTexNode;
+    const presentQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), presentMaterial);
+    presentQuad.frustumCulled = false;
+    presentScene.add(presentQuad);
+
+    /** Re-point the present material at a freshly-allocated target (resize). */
+    function rebindPresent() {
+      presentTexNode.value = sceneColor.texture;
+      presentMaterial.needsUpdate = true;
+    }
 
     const atlas = new PageAtlas({ THREE, layout, renderer });
 
@@ -879,7 +982,25 @@ export async function startVtPanViewer({
       // a drag track the cursor at display rate without waiting on streaming,
       // and it is the single place the Y-flip is applied (see updateCamera).
       updateCamera();
+
+      // TWO PASSES, FOR REAL (2026-07-17). `graph/passes.js` has always declared
+      // these as separate nodes — `geometry.world` creates buf:scene.color,
+      // `present.composite` reads buf:final — and until now BOTH resolved to
+      // this one function, honestly recorded as `fusedWith` in pass-impls.js
+      // because a single renderer.render() straight to the canvas is not two
+      // passes however you label it.
+      //
+      //   geometry.world    : the whole sorted draw list → buf:scene.color
+      //   present.composite : buf:scene.color → the canvas
+      //
+      // The gap between them is where every effect goes. Nine seams in
+      // passes.js declare `modifies: ['buf:scene.color']`; this is the first
+      // frame in which that buffer is a real thing they could modify.
+      renderer.setRenderTarget(sceneColor);
       renderer.render(scene, camera);
+      renderer.setRenderTarget(null);
+      renderer.render(presentScene, presentCamera);
+
       frameTimes.push(performance.now() - t0);
       if (frameTimes.length > 120) frameTimes.shift();
     }
@@ -1653,6 +1774,12 @@ export async function startVtPanViewer({
         canvasW = width;
         canvasH = height;
         renderer.setSize(canvasW, canvasH, false);
+        // buf:scene.color tracks the drawing buffer — that IS what screenSized
+        // means. `allocator.resize()` re-enforces the law on the new size
+        // (its own doc: "a resize storm can't smuggle a world-res target past
+        // the law that create() already enforced").
+        allocator.resize(sceneColor, canvasW, canvasH, describeSceneColor());
+        rebindPresent();
         await updateResidency().catch((err) => console.error('[vt-pan-viewer] resize residency failed:', err));
       });
     }
@@ -1797,6 +1924,25 @@ export async function startVtPanViewer({
       occlusionMask,
       cache,
       layout,
+      /** Tear down buf:scene.color + the present chain (see disposeActive). */
+      disposeSceneColor() {
+        allocator.dispose(sceneColor);
+        presentMaterial.dispose();
+        presentQuad.geometry.dispose();
+      },
+      /** buf:scene.color's live shape — for the diagnostics report. */
+      getSceneColorInfo: () => ({
+        allocated: !!sceneColor,
+        name: sceneColor?.name ?? null,
+        width: sceneColor?.width ?? 0,
+        height: sceneColor?.height ?? 0,
+        // Proof the law is genuinely in the path, not just imported.
+        throughAllocator: true,
+        screenSized: true,
+        megapixels: sceneColor ? +((sceneColor.width * sceneColor.height) / 1e6).toFixed(2) : 0,
+        // RGBA16F = 8 bytes/texel. §4.2 budgets ~24MB at 3MP; this is the real number.
+        estMB: sceneColor ? +((sceneColor.width * sceneColor.height * 8) / 1048576).toFixed(1) : 0,
+      }),
       onKeyDown,
       onKeyUp,
       clearHeldKeys,
@@ -1895,6 +2041,10 @@ export async function startVtPanViewer({
         return {
           view,
           layout,
+          // buf:scene.color — the first real render target, and the proof that
+          // Keyhole's law is IN THE PATH rather than merely imported. If
+          // `throughAllocator` is ever false, the law has been routed around.
+          sceneColor: _active?.getSceneColorInfo?.() ?? { allocated: false },
           // SHADERS (docs/planning/Shaders.md).  is the fork
           // in the road, not a detail: WITH it, compileAsync hands work to driver
           // threads; WITHOUT it, compileAsync resolves instantly having done

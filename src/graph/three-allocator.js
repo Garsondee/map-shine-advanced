@@ -72,6 +72,14 @@ const log = createLogger('V3ThreeAllocator');
 export const LAW_MAX_WORLD_RES_DIM = 2048;
 
 /**
+ * An absolute sanity ceiling for a `screenSized` target. No real drawing buffer
+ * is this large (an 8K display is 7680 wide); a `screenSized` request above it
+ * means a WORLD dimension reached this call by mistake — which is the exact
+ * thing the law exists to catch, so it still throws.
+ */
+export const LAW_MAX_SCREEN_DIM = 8192;
+
+/**
  * @param {string} name
  * @param {number} width
  * @param {number} height
@@ -79,13 +87,57 @@ export const LAW_MAX_WORLD_RES_DIM = 2048;
  */
 function enforceKeyholeLaw(name, width, height, desc) {
   if (desc && desc.allowWorldScale === true) return; // explicit, rare, opt-in only
+
+  // SCREEN-SIZED IS NOT A VIOLATION — it is the GOAL (added 2026-07-17, the
+  // first time the law met its first real caller).
+  //
+  // §0's law is "nothing is ever allocated at WORLD resolution": the cost model
+  // must be O(screen), never O(world × floors × masks). A flat 2048 cap is a
+  // PROXY for that, and the proxy is wrong in one direction — it reads "big" as
+  // "world-res". A 2239×1271 scene buffer on an ordinary monitor is O(screen).
+  // It is not a violation of the law; it is the law being obeyed.
+  //
+  // Left unfixed, the very first honest caller (`scene.color`, so effects have
+  // somewhere to draw) would have been rejected by the law it satisfies — and
+  // the only escape hatch on offer was `allowWorldScale: true`, which would have
+  // been a LIE about what a screen buffer is, and would have taught every later
+  // session that world-scale allocations are a formality to wave through. §4.6's
+  // own text already names "the present chain's native-resolution upscale
+  // target" as legitimate; this makes that sanctioned path say what it means.
+  //
+  // The distinction the two flags draw, and it is the whole point:
+  //   screenSized     — sized FROM THE DRAWING BUFFER. Cost scales with the
+  //                     player's monitor, never with the map. Always allowed
+  //                     (up to LAW_MAX_SCREEN_DIM, which catches a typo'd world
+  //                     dimension). This is the normal case for frame-graph RTs.
+  //   allowWorldScale — sized from the WORLD, and knowingly so. Rare, and each
+  //                     one is a named exception in the plan (fog exploration,
+  //                     capped ≤2048² anyway). Adding one is a design decision,
+  //                     not a build fix.
+  // A descriptor that is neither may not exceed 2048px in any dimension.
+  if (desc && desc.screenSized === true) {
+    if (width > LAW_MAX_SCREEN_DIM || height > LAW_MAX_SCREEN_DIM) {
+      throw new Error(
+        `[Keyhole law] ThreeAllocator.create("${name}"): ${width}x${height} is declared ` +
+          `{ screenSized: true } but exceeds ${LAW_MAX_SCREEN_DIM}px — no real drawing buffer is ` +
+          `that large, so this is a WORLD dimension that reached a screen-sized allocation by ` +
+          `mistake. That is exactly what the law is for (Keyhole.md §0, §4.6).`
+      );
+    }
+    return;
+  }
+
   if (width > LAW_MAX_WORLD_RES_DIM || height > LAW_MAX_WORLD_RES_DIM) {
     throw new Error(
       `[Keyhole law] ThreeAllocator.create("${name}"): ${width}x${height} exceeds the ` +
         `${LAW_MAX_WORLD_RES_DIM}px world-resolution cap (Keyhole.md §4.6). Nothing is ever ` +
-        `allocated at world resolution. If this target is a genuine exception (fog ` +
-        `exploration, present-chain upscale), pass { allowWorldScale: true } explicitly ` +
-        `on the descriptor — never widen this cap globally.`
+        `allocated at world resolution.\n` +
+        `  • Is this sized from the DRAWING BUFFER (a frame-graph RT, the present chain)? ` +
+        `Pass { screenSized: true } — that is O(screen) and always allowed.\n` +
+        `  • Is it genuinely sized from the WORLD (fog exploration)? Pass ` +
+        `{ allowWorldScale: true } — rare, named in the plan, a design decision.\n` +
+        `  • Neither? Then this is the crash class Keyhole exists to end: 470–580 MB per ` +
+        `drawing-buffer megapixel against a ~1.6 GB ceiling (§1). Never widen the cap globally.`
     );
   }
 }
@@ -182,8 +234,13 @@ export class ThreeAllocator {
    */
   create(name, desc) {
     const THREE = this._THREE;
-    if (!THREE || typeof THREE.WebGLRenderTarget !== 'function') {
-      throw new Error(`ThreeAllocator.create("${name}"): window.THREE unavailable`);
+    if (typeof THREE.WebGLRenderTarget !== 'function') {
+      throw new Error(
+        `ThreeAllocator.create("${name}"): the THREE namespace handed to this allocator has no ` +
+          'WebGLRenderTarget. (Under the WebGPU build it is still there and still correct — ' +
+          '`WebGLRenderTarget extends RenderTarget`, adding only an `isWebGLRenderTarget` flag; ' +
+          'verified against src/vendor/three/three.webgpu.js:5003 before this was wired.)'
+      );
     }
     const { width, height, options, attachments } = ThreeAllocator.describe(THREE, desc);
     enforceKeyholeLaw(name, width, height, desc);

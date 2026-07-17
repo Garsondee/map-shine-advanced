@@ -28,42 +28,42 @@
  * and that live-status coverage is exact in both directions, exactly like
  * `pass-seams.js`'s door check.
  *
- * What this registry does NOT yet claim, and must not be allowed to drift into
- * silently claiming: `geometry.world` and `present.composite` are NOT
- * independently invocable passes today. Both point at the SAME entry point
- * (`startVtPanViewer`, via the `vt/` door) because the real code is FUSED —
- * camera, residency-triggered streaming, mesh binding, occlusion state, and
- * the actual draw call all live inside one 1,778-line function
- * (`src/vt/vt-pan-viewer.js`, lines 304–2082), with the draw step itself
- * (`renderFrame`) driven internally by `renderer.setAnimationLoop` and never
- * exposed for external invocation.
+ * ============================================================================
+ * THE FUSION IS GONE (2026-07-17) — but the honesty rule that named it stays
+ * ============================================================================
  *
- * That fusion is NOT rebuilt here on purpose. `startVtPanViewer` took NINE
- * rounds of live, in-browser debugging to get right (Y-flip, a GL
- * texture-unit-cache staleness bug, a UV-compounding bug, a clamp-bound
- * conflation regression — see `keyhole-stage-status` memory, 2026-07-15/16
- * session). There is no way to run Foundry from this environment to verify a
- * restructuring of that function did not reintroduce one of those. Per this
- * project's own standing instruction ("if you can't test the UI, say so
- * explicitly rather than claiming success") and doctrine 5 (instruments must
- * not lie), the honest move is to register the TRUE, FUSED shape — with
- * `fusedWith` naming the passes that share it — rather than invent a fake
- * standalone wrapper that LOOKS separated but changes nothing real. A wall
- * that lies about being open is worse than an honestly-locked one.
+ * `geometry.world` and `present.composite` used to point at the SAME function
+ * with `fusedWith` naming the overlap, because a single `renderer.render()`
+ * straight to the canvas is not two passes however you label it. That was the
+ * truth, recorded rather than papered over.
  *
- * `vt.residency` is different: its real entry point already exists and is
- * already externally invoked — `refreshVtPanViewerItems()` is exported from
- * `vt-pan-viewer.js` and called by `boot.js`'s token-CRUD hooks today (see
- * `_active.refreshItems` in that file). No extraction was needed; it was
- * already a real, separate, reachable function. This registry just makes that
- * fact CHECKED instead of assumed.
+ * It is no longer the truth. `renderFrame` now does:
+ *   geometry.world    : the sorted draw list → `buf:scene.color`
+ *                       (a real RenderTarget, allocated through the law)
+ *   present.composite : `buf:scene.color` → the canvas (a TSL fullscreen pass)
+ * Two `renderer.render()` calls against two targets. So `fusedWith` is dropped
+ * from both — the claim would now be false, and a stale honesty-marker is just
+ * a lie with good manners.
  *
- * THE NEXT REAL STEP (tracked, not done here): separating `geometry.world`
- * from `present.composite` — and eventually inverting control so a real
- * `graph/run-frame.js` DRIVES `startVtPanViewer`'s draw step instead of the
- * reverse — requires touching `renderFrame`/`setAnimationLoop` and needs the
- * author's live verification, the same as every other change to this file has
- * (`keyhole-stage-status` memory, Round 1 through 9).
+ * What is STILL true, and must not drift into being over-claimed: both entries
+ * point at `startVtPanViewer` because the frame loop is still driven from
+ * inside it (`renderer.setAnimationLoop(renderFrame)`), not by a graph runner
+ * calling passes. The passes are now genuinely SEPARATE; they are not yet
+ * separately INVOCABLE. Inverting that control — a real `graph/run-frame.js`
+ * that drives the draw step rather than the reverse — is the next step, and
+ * every entry's `separatelyInvocable` field says so in a form a test checks,
+ * rather than leaving it implied in prose.
+ *
+ * `vt.residency` is different again: its real entry point already exists and
+ * is already externally invoked — `refreshVtPanViewerItems()` is exported and
+ * called by `boot.js`'s token-CRUD hooks today. No extraction was needed; this
+ * registry just makes that fact CHECKED instead of assumed.
+ *
+ * The standing rule that produced `fusedWith` in the first place: when the code
+ * does not match what the declaration claims, record the mismatch in a field a
+ * TEST can check — never a comment, and never a wrapper that LOOKS separated
+ * while changing nothing real. A wall that lies about being open is worse than
+ * an honestly-locked one.
  *
  * @module graph/pass-impls
  */
@@ -75,7 +75,8 @@ import { startVtPanViewer, refreshVtPanViewerItems } from '../vt/index.js';
  * @property {Function} fn - the REAL function this pass's `live` claim points at.
  * @property {string} module - the door-relative specifier `fn` was imported through (informational; the import above is the enforced one).
  * @property {string} export - the real export name, so a rename is greppable.
- * @property {string[]} [fusedWith] - other pass ids whose `live` claim currently resolves to this SAME `fn` — the honest debt this registry exists to name.
+ * @property {string[]} [fusedWith] - other pass ids whose `live` claim resolves to this SAME `fn` AND is not separable in the code. Dropped 2026-07-17 when geometry.world/present.composite genuinely split; kept in the contract because the honesty rule that produced it is permanent.
+ * @property {boolean} [separatelyInvocable] - can a caller run JUST this pass? False = the pass is real and separate in the frame, but the loop is still driven from inside `fn`. An honest middle state, checked by a test rather than described in prose.
  * @property {string} note
  */
 
@@ -85,6 +86,7 @@ export const PASS_IMPLS = Object.freeze({
     fn: refreshVtPanViewerItems,
     module: 'vt/index.js',
     export: 'refreshVtPanViewerItems',
+    separatelyInvocable: true,
     note:
       'The real, ALREADY-SEPARATE entry point — boot.js already drives this from Foundry token-CRUD ' +
       'hooks (createToken/updateToken/deleteToken). No extraction needed; this makes the fact checked.',
@@ -93,16 +95,22 @@ export const PASS_IMPLS = Object.freeze({
     fn: startVtPanViewer,
     module: 'vt/index.js',
     export: 'startVtPanViewer',
-    fusedWith: ['present.composite'],
+    separatelyInvocable: false,
     note:
-      'FUSED with present.composite inside renderFrame() (vt-pan-viewer.js), driven by ' +
-      'renderer.setAnimationLoop — not yet independently invocable. Honest debt, not a fake separation.',
+      'REAL as of 2026-07-17: renderFrame draws the sorted list into buf:scene.color (a RenderTarget ' +
+      "allocated through ThreeAllocator — the law's first caller). No longer fused with " +
+      'present.composite. Not separately invocable: setAnimationLoop still drives the loop from ' +
+      'inside startVtPanViewer, rather than a graph runner calling this pass.',
   },
   'present.composite': {
     fn: startVtPanViewer,
     module: 'vt/index.js',
     export: 'startVtPanViewer',
-    fusedWith: ['geometry.world'],
-    note: "Same fusion as geometry.world, same reason — see that entry and this file's header.",
+    separatelyInvocable: false,
+    note:
+      'REAL as of 2026-07-17: a TSL fullscreen pass reading buf:scene.color → the canvas, its own ' +
+      'renderer.render() against its own target. Written fresh, NOT harvested from ' +
+      'graph/fullscreen-present.js (GLSL, unusable under WebGPURenderer). Same invocability caveat ' +
+      'as geometry.world.',
   },
 });

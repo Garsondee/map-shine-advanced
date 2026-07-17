@@ -1,10 +1,10 @@
 {
   "no-global-bus": 0,
   "renderer-state/graph-only": 0,
-  "no-silent-catch": 33,
+  "no-silent-catch": 29,
   "foundry/adapter-only": 12,
   "time/one-clock": 41,
   "zones/one-door": 15,
-  "graph/reachable-from-boot": 11,
+  "graph/reachable-from-boot": 8,
   "params/one-owner": 0
 }

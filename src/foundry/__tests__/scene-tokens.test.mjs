@@ -17,7 +17,7 @@ import {
   diagnoseTokens,
   DEFAULT_TOKEN_ICON,
 } from '../scene-tokens.js';
-import { collectTiles } from '../scene-layers.js';
+import { collectTiles, computeItemPlacement } from '../scene-layers.js';
 import { sortByLayer, SORT_LAYERS } from '../../scene/layer-order.js';
 
 /** A Token shaped like the real v14 document. width/height are GRID UNITS. */
@@ -66,6 +66,47 @@ export function run(t) {
       'a token missing every field defaults to one grid square at the origin',
       f.width === 100 && f.height === 100 && f.x === 0
     );
+  }
+
+  // ---- computeItemPlacement TRACKS THE LIVE DOCUMENT, never a snapshot ----
+  // (2026-07-17 — "the token stops just short of the final position"). The
+  // real bug: `_placement` used to CACHE a footprint computed once at
+  // collection time, and `computeItemPlacement` trusted it — so a token's
+  // rendered position could go stale the moment the document moved again
+  // without a fresh `collectTokens()` call, exactly as it did live (caught by
+  // `documentSync.passLog`: four consecutive real passes reading an identical
+  // position while the live document had already moved on). This proves the
+  // fix structurally: mutate the SAME document object AFTER collection —
+  // exactly what a document-hook race looks like — and confirm placement
+  // still reflects the CURRENT value, not whatever was true when the item was
+  // built.
+  {
+    const tok = mkToken('a', { x: 100, y: 100, width: 1, height: 1 });
+    const scene = mkScene([tok]);
+    const { items } = collectTokens(scene, { visibleLevelIds: ['ground'], viewedLevelId: 'ground' });
+    const item = items[0];
+    const textureSize = { width: 100, height: 100 };
+
+    const before = computeItemPlacement(item, textureSize, {});
+    t.ok('placement initially matches the document at collection time', before.x === 150 && before.y === 150);
+
+    // THE DOCUMENT MOVES. No re-collection, no new item — the exact shape of
+    // a document-hook race: the item object is unchanged, only the live
+    // document it references has moved on.
+    tok.x = 900;
+    tok.y = 900;
+
+    const after = computeItemPlacement(item, textureSize, {});
+    t.ok(
+      "a SECOND call, same item object, reflects the document's CURRENT position (900,900 centre 950,950)",
+      after.x === 950 && after.y === 950
+    );
+    t.ok('the two calls actually differ — a test that cannot fail this proves nothing', before.x !== after.x);
+
+    // The item carries NO cached footprint to go stale — this is the
+    // structural guarantee, not just today's observed behaviour.
+    t.ok('_placement carries no footprint field to cache', !('footprint' in item._placement));
+    t.ok('_placement.gridSize is what survives — the input, not a derived snapshot', item._placement.gridSize === 100);
   }
 
   // ---- hit testing --------------------------------------------------------

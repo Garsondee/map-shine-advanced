@@ -331,6 +331,35 @@ export function computeTilePlacement(textureSize, tileDoc) {
 }
 
 /**
+ * A token's footprint in canvas pixels.
+ *
+ * `x`/`y` are the top-left of the footprint in pixels; `width`/`height` are in
+ * GRID UNITS and must be scaled by the grid size. Getting this wrong is silent —
+ * a 1x1 token would render one pixel wide and simply look absent.
+ *
+ * Lives HERE, not in scene-tokens.js (moved 2026-07-17) — it is pure geometry
+ * (this module's whole job, per its own header: "where does this quad go, in
+ * world space"), and `computeItemPlacement` (scene-layers.js) needs to call it
+ * FRESH on every placement resolution, not just at collection time. Keeping it
+ * in scene-tokens.js would have forced scene-layers.js to import from
+ * scene-tokens.js — which already imports FROM scene-layers.js
+ * (`normalizeTint`) — a real import cycle. This module has zero dependencies,
+ * so both can reach it without one. `scene-tokens.js` re-exports it so every
+ * existing import site (including its own internal callers) is unchanged.
+ *
+ * @param {object} token - a Token document (or a plain object shaped like one).
+ * @param {number} gridSize - `scene.grid.size`, in pixels.
+ * @returns {{x: number, y: number, width: number, height: number, centerX: number, centerY: number}}
+ */
+export function tokenFootprint(token, gridSize) {
+  const width = (token?.width ?? 1) * gridSize;
+  const height = (token?.height ?? 1) * gridSize;
+  const x = token?.x ?? 0;
+  const y = token?.y ?? 0;
+  return { x, y, width, height, centerX: x + width / 2, centerY: y + height / 2 };
+}
+
+/**
  * Where a token's ART goes, in canvas pixels.
  *
  * Same return shape as {@link computeTilePlacement} on purpose — the renderer

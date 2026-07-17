@@ -33,6 +33,7 @@
 
 import { SORT_LAYERS, makeLayerKey } from '../scene/layer-order.js';
 import { normalizeTint } from './scene-layers.js';
+import { tokenFootprint } from './scene-geometry.js';
 
 /** Foundry's own fallback art when a token has no texture (`Token.DEFAULT_ICON`). */
 export const DEFAULT_TOKEN_ICON = 'icons/svg/mystery-man.svg';
@@ -113,24 +114,12 @@ function tokenDocsOf(sceneDoc) {
   return typeof tokens.contents !== 'undefined' ? tokens.contents : Array.from(tokens);
 }
 
-/**
- * A token's footprint in canvas pixels.
- *
- * `x`/`y` are the top-left of the footprint in pixels; `width`/`height` are in
- * GRID UNITS and must be scaled by the grid size. Getting this wrong is silent —
- * a 1x1 token would render one pixel wide and simply look absent.
- *
- * @param {object} token - a Token document (or a plain object shaped like one).
- * @param {number} gridSize - `scene.grid.size`, in pixels.
- * @returns {{x: number, y: number, width: number, height: number, centerX: number, centerY: number}}
- */
-export function tokenFootprint(token, gridSize) {
-  const width = (token?.width ?? 1) * gridSize;
-  const height = (token?.height ?? 1) * gridSize;
-  const x = token?.x ?? 0;
-  const y = token?.y ?? 0;
-  return { x, y, width, height, centerX: x + width / 2, centerY: y + height / 2 };
-}
+// tokenFootprint MOVED to scene-geometry.js (2026-07-17) — pure geometry, and
+// scene-layers.js needs it without importing scene-tokens.js (which already
+// imports FROM scene-layers.js — that would be a cycle). Imported above,
+// re-exported here so every existing import site, including this file's own
+// internal callers below, is unchanged.
+export { tokenFootprint };
 
 /**
  * Is `point` (canvas pixels) inside this token's footprint?
@@ -269,8 +258,16 @@ export function collectTokens(
       // data (`occludable.radius`), carried now so the producer is purely additive.
       // 0 means this token contributes no disc.
       occludableRadius: token.occludable?.radius ?? 0,
+      // `footprint` (top-level) is a SNAPSHOT for hit-testing utilities
+      // (`pickTokenAt`/`tokenContainsPoint`) that don't need live-tracking. It
+      // is NOT what the renderer places art from — `_placement` intentionally
+      // carries `gridSize`, not a cached footprint, so `computeItemPlacement`
+      // re-derives position fresh from `tokenDoc` every time (scene-layers.js,
+      // 2026-07-17 — a stale cached footprint here is exactly what caused a
+      // moved token's art to stop short of its true document position while
+      // reporting no error, since every consumer looked correct in isolation).
       footprint: f,
-      _placement: { kind: 'token', tokenDoc: token, gridSize: size, footprint: f },
+      _placement: { kind: 'token', tokenDoc: token, gridSize: size },
     });
   }
 

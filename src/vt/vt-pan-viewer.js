@@ -799,6 +799,47 @@ export async function startVtPanViewer({
       return true;
     }
 
+    /**
+     * TOKEN PLACEMENT: TRACKED EVERY FRAME, NOT ONLY ON A DOCUMENT HOOK
+     * (2026-07-17 — "the token stops just short of the final position").
+     *
+     * The root cause was two-layered, and neither layer alone would have been
+     * enough to fix live: (1) `computeItemPlacement` was trusting a footprint
+     * CACHED at collection time instead of re-deriving it (fixed above, in
+     * `foundry/scene-layers.js`) — but (2) even a perfectly fresh derivation
+     * only runs when something calls `refreshItemPlacement`, and until now that
+     * was EXCLUSIVELY a document-hook-triggered `updateResidency()` pass.
+     *
+     * The live evidence for why hooks alone are not enough: `documentSync
+     * .passLog` showed FOUR CONSECUTIVE real passes reading the exact same
+     * (stale) token position, no new pass triggered after, while a fresh read
+     * of the SAME live document — moments later — had already moved on by
+     * 670px. Something in Foundry keeps `TokenDocument#x/y` settling toward its
+     * final value without firing another `updateToken`/`moveToken` we can hook
+     * — real-time-paced waypoint commits, client-side prediction, or something
+     * this environment cannot single-step to confirm. Rather than keep
+     * chasing which exact hook is missing (this is the third round on this
+     * exact bug), this makes the RENDERER converge regardless of hook
+     * completeness — the same way Foundry's OWN Token placeable stays in sync:
+     * by sampling the live document continuously, every tick, not by reacting
+     * to discrete write events that may not describe a continuously-settling
+     * field.
+     *
+     * Deliberately NOT routed through `updateResidency()` — that pass does
+     * real GPU/streaming work (this scene's cache is already oversubscribed,
+     * see item 1b) and must stay event-driven, not run every frame. This
+     * touches ONLY pure JS geometry: `refreshItemPlacement` compares a
+     * placementKey and returns early when nothing moved, so the steady-state
+     * cost is one string build and a `!==` per token, every frame. Visibility
+     * and streaming are untouched here — still owned by `updateResidency()`.
+     */
+    function syncTokenPlacements() {
+      for (const state of itemStates.values()) {
+        if (state.item?._placement?.kind !== 'token') continue;
+        refreshItemPlacement(state, state.item);
+      }
+    }
+
     const scene = new THREE.Scene();
 
     // THE WORLD-SPACE CAMERA. Frustum values are set per frame by updateCamera()
@@ -1038,6 +1079,11 @@ export async function startVtPanViewer({
       // of pure GPU-render cost, exactly as it was before this existed
       // (needed as-is for the Stage 1 gate's "60fps" evidence).
       updateContinuousInputs(now);
+      // Also a small, per-frame CPU-only cost — kept OUT of the `t0` GPU-render
+      // timing window below for the same reason updateContinuousInputs is, per
+      // the comment above it. See syncTokenPlacements' own header for why this
+      // runs every frame rather than only on a document hook.
+      syncTokenPlacements();
       const t0 = performance.now();
       // Re-derive the camera from the live view EVERY frame: this is what makes
       // a drag track the cursor at display rate without waiting on streaming,

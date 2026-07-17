@@ -23,6 +23,7 @@ import {
   computeLevelTexturePlacement,
   computeTilePlacement,
   computeTokenPlacement,
+  tokenFootprint,
 } from './scene-geometry.js';
 import { isImageUrl, resolveAssetUrl } from './active-scene-source.js';
 
@@ -400,10 +401,27 @@ export function computeItemPlacement(item, textureSize, dimensions) {
   if (item._placement.kind === 'tile') {
     return computeTilePlacement(textureSize, item._placement.tileDoc);
   }
-  // A token carries its footprint already converted to pixels — see
-  // scene-tokens.js, which owns the grid-units conversion.
   if (item._placement.kind === 'token') {
-    return computeTokenPlacement(textureSize, item._placement.tokenDoc, item._placement.footprint);
+    // RE-DERIVED FRESH, every call — NOT `item._placement.footprint` (found +
+    // fixed 2026-07-17, the "token stops short" bug). That footprint was
+    // computed ONCE, when `collectTokens` last ran (i.e. only as of the last
+    // document-hook-triggered pass), and cached onto the item. A token's own
+    // instrument (`vt-pan-viewer.js`'s `documentSync.passLog`) caught this
+    // live: FOUR consecutive real passes read the identical (stale) position
+    // while a fresh read of the SAME live document, moments later, disagreed
+    // by 670px — meaning Foundry's `x`/`y` kept settling with no further hook
+    // firing to trigger a new pass, and every one of those passes had been
+    // trusting a snapshot instead of asking the document again.
+    //
+    // `tokenFootprint` is four arithmetic ops — there is no reason to cache
+    // it, and caching it is what let a pass and reality quietly diverge.
+    // `computeItemPlacement` is called every time a placement is resolved
+    // (including, after this fix, every render FRAME for tokens — see
+    // `vt-pan-viewer.js`'s `syncTokenPlacements`), so this now genuinely
+    // tracks wherever the live document currently is, with no dependency on
+    // which hook fired or when.
+    const footprint = tokenFootprint(item._placement.tokenDoc, item._placement.gridSize);
+    return computeTokenPlacement(textureSize, item._placement.tokenDoc, footprint);
   }
   return computeLevelTexturePlacement(textureSize, dimensions, item._placement.texturesConfig);
 }

@@ -81,30 +81,63 @@ Every drawable — level art, tiles, tokens, drawings, weather, and every future
 | `docs/planning/Health.md` | The Breaker Box idea was excellent; its 4,092-line implementation was a hand-drawn copy of an undeclared system — now derived in 141 |
 | `docs/planning/Skeleton.md` | The doctrine itself: media ladder (absence > throwing seams > tripwires > schemas > comments), the frictionless law, the covenant |
 
-### ✅ WHAT IS ACTUALLY BUILT (not just designed) — all Node-tested, all in `npm run verify`
+### ⚠️ CORRECTION (2026-07-17) — this section said three things that were NOT TRUE. Read this first.
 
-- **`tools/verify-structure.mjs` — 16 walls.** Each cites its V2 corpse + the fix, on failure. 7 are ratcheted (existing debt frozen, shrink-only); the other 9 — including `params/one-owner`, `shadow/no-lift-no-combine`, `env/one-sun`, `env/one-darkness`, `zones/one-door` — sit at **zero**, walled before the code that would exploit them exists.
-- **`tools/verify-structure.test.mjs` — 94 assertions** feeding REAL lines from `legacy/` to the rules and proving each is rejected. Adversarially verified: gutting a rule's regex turns the suite red and names the corpse that would slip through.
+A plan document that lies about its own enforcement is the same bug class as a green light over an unrun test, one level up. All three claims below were written in good faith and were false on disk; the corrections are load-bearing, not pedantry:
+
+1. **"the other 9 — including `zones/one-door` — sit at zero, walled before the code that would exploit them exists."** `zones/one-door` was **ratcheted at 19**, not zero. And 4 of the 8 zones it governs (`vt/`, `graph/`, `foundry/`, `ui/`) **had no `index.js` to comply with** — 11 of the 19 violations are `boot.js`, which *could not* obey a rule whose door did not exist. That is not indiscipline; Skeleton.md §0 called this exact shot: *"a defect in the skeleton, not in the person who routed around it."*
+2. **"all in `npm run verify`."** They were not. `verify` ran **94 of 1,005 assertions** and printed `ALL GREEN` — see the commit `367cfd5` and the header of `tools/run-tests.mjs`. Fixed; now 1,151 across 10 suites, one command.
+3. **The test tally below (984) and "12 passes"** were both hand-counted and both wrong (`effects/particles`' 21 assertions were missing; `PASSES` has 13 entries). Hand-maintained counts drift — the runner now discovers suites off disk so a new one is picked up for free.
+
+**The finding that matters most, and it is a measurement, not an opinion: 28 of 52 files in `src/` — 4,778 lines — are UNREACHABLE from `boot.js`.** All of `graph/` (2,225 lines, incl. **the law**), all of `world/`, all of `effects/`, `core/params-schema.js`, `core/not-built.js` — and `scene/index.js`, meaning **the one zone door that exists carries zero traffic** while `vt-pan-viewer.js` imports `../scene/layer-order.js` around it. `passes.js` has exactly one importer (`pass-health.js`), which has none: a sealed loop with no exit to the renderer.
+
+Much of that is legitimately "the rooms aren't built yet" — a seam door *should* be unreachable. But the shape is exactly V2's: **`EffectComposer` had 5 importers and the god-object had 92.** Here the skeleton is not wrong, it is **detached** — a scale model beside the building, while the building (`vt-pan-viewer.js`: 2,318 lines, one **1,778-line function** spanning lines 304–2082) grows past it. The next wall this project needs is probably a **reachability ratchet**: an unreachable module must be accounted for by a `seam`/`future` declaration, or it fails the build. That is the check that would have caught 5-vs-92 in V2 during the week it happened.
+
+### ✅ WHAT IS ACTUALLY BUILT (not just designed) — all Node-tested, all in `npm run verify` (true as of 2026-07-17)
+
+- **`tools/verify-structure.mjs` — 18 walls.** Each cites its V2 corpse + the fix, on failure. **7 are ratcheted** (existing debt frozen, shrink-only): `no-global-bus` 7, `no-silent-catch` 33, `foundry/adapter-only` 12, `time/one-clock` 41, `zones/one-door` 19, `renderer-state/graph-only` 0, `params/one-owner` 0. The other 11 sit at **zero** — walled before the code that would exploit them exists.
+- **`gpu/allocator-only` + `gpu/textures-in-vt-only` (NEW 2026-07-17, both at zero)** — see "THE LAW WAS NOT INSTALLED" below. The first was designed in `Skeleton.md` §2.3 and never built.
+- **`tools/verify-structure.test.mjs` — 105 assertions** feeding REAL lines from `legacy/` to the rules and proving each is rejected. Adversarially verified: gutting a rule's regex turns the suite red and names the corpse that would slip through. **Now also proves each wall's DOOR IS OPEN**, not merely that the wall bites — an allow-list typo welds a door shut, and a wall you cannot legally pass is a wall you route around.
+- **`tools/run-tests.mjs` — the gate (rewritten 2026-07-17)** + `tools/run-tests.test.mjs` (16 assertions; the gate does not get to be trusted on its own say-so). Three rules: **discovery never a list**, **silence is failure** (no parseable report = FAIL, even on exit 0), **zero suites is failure**.
 - **`tools/structure-exceptions.json` — the debt ledger**, the sanctioned outlet for "make it work NOW" (author pre-authorized this against their own future pressure — see `feedback_now_pressure_protocol` in memory). Loud while active, **build-fails at expiry**, `approvedBy` required.
-- **`src/graph/passes.js` — the renderer's node graph as data.** 12 passes, 3 `live` / 9 `seam` (locked doors, all real) / 1 `future`. `validatePassGraph()` makes V2's Lighting↔Fire knot **unwritable** (proven in tests, not just described).
-- **`src/graph/pass-seams.js`** — every seam-status pass has a registered door; status is a **checked fact**, not a claim (caught my own drift live: two passes claimed `seam` with no door existing).
+- **`src/graph/passes.js` — the renderer's node graph as data.** **13** passes, 3 `live` / 9 `seam` (locked doors, all real) / 1 `future`. `validatePassGraph()` makes V2's Lighting↔Fire knot **unwritable** (proven in tests, not just described). ⚠️ **Nothing in the render path imports it** — see the correction above.
+- **`src/graph/pass-seams.js`** — every seam-status pass has a registered door; status is a **checked fact**, not a claim (caught my own drift live: two passes claimed `seam` with no door existing). ⚠️ **But only `seam` is checked. `live` is a pure CLAIM** — nothing verifies that a `live` pass corresponds to any code, and all three (`vt.residency`, `geometry.world`, `present.composite`) are behaviour that happens *inside `startVtPanViewer`*, not passes that exist. `geometry.world`'s own note admits it "becomes this pass by rename." It is not a rename. **The status that asserts code exists is the one nothing checks** — the mirror-image of the `seam` drift that was caught, still open.
 - **`src/graph/pass-health.js` — derived health.** 4,092 V2 lines → 141, because it reads `passes.js` instead of hand-modelling the system. Answers questions V2 could not (`STARVED`, `unbuilt ≠ broken`).
 - **`src/world/{sun,environment}.js` + `src/core/frame-clock.js`** — the call-sheet's pure core (`frame.snapshot`'s content, not yet wired into the render loop). One clock, one sun (Node-pinned at dawn/noon/dusk), one darkness derivation (`max(night, GM)`).
 - **`src/core/params-schema.js`** — the params contract. 9 canonical types, validation AT THE WRITE (the check V2's `applyParamChange` never had), colour space required explicit, status readouts rejected outright.
 - **`src/effects/particles/*` + `src/scene/occlusion-mask.js` + `src/effects/{lighting,grade,water,surface-response}*`** — every named seam's locked door.
-- **`src/{world,effects,scene}/index.js`** — the first zone doors (one public entrance per zone).
+- **`src/{world,effects,scene}/index.js`** — the first zone doors (one public entrance per zone). ⚠️ **`vt/`, `graph/`, `foundry/` and `ui/` have NO door**, which is why `zones/one-door` sits at 19 rather than zero: `boot.js` cannot comply with a rule whose door does not exist.
 
-**Test count:** vt 229 · scene 148 · foundry 256 · ui 51 · graph 194 · world 47 · core 59 — all green, plus the 94-case regression proof.
+**Test count (discovered, not hand-counted): 10 suites · 1,151 assertions · one command (`npm test`).** vt 229 · foundry 256 · graph 201 · scene 148 · core 59 · ui 51 · world 47 · effects/particles 21 · the 105-case wall regression proof · the gate's own 16.
+
+### 🔒 THE LAW WAS NOT INSTALLED (found + fixed 2026-07-17, commit `5776a11`)
+
+Keyhole is **named** for one law — §0's *"Nothing is ever allocated at world resolution. Ever."* — made physical by `ThreeAllocator`'s >2048px throw (§4.6). It had **zero callers**, which alone is only "the rooms aren't built" (no pass allocates a target yet, so there was nothing to route). The real defect was worse:
+
+> **The law was BROKEN AT FIRST TOUCH.** `new ThreeAllocator()` defaulted its THREE namespace to **`window.THREE` — a global this codebase never sets** (boot imports THREE as an ES module). The first session ever to reach for the law would get `"window.THREE unavailable"`: an error about a global that doesn't exist and never should. Under deadline they write `new THREE.RenderTarget(...)` instead, and the law is optional forever. **Every test was green — because every test injects a mock `{ THREE: T }` and none ever exercised the default.** A green suite around an unreachable front door.
+
+Fixed by **enforcement by absence**: THREE is a required constructor argument; there is no global left to go stale. The refusal names the fix and cites §4.6. Six assertions now pin the *door*, not just the room. **The generalisable lesson: test the way IN, not only the behaviour inside.** Every wall in this repo was proven to bite; none was proven to be passable.
+
+And the two walls that make calling it non-optional, **both at zero**, because a law nobody must obey is a law that loses:
+- **`gpu/allocator-only`** — `new *RenderTarget(` only in the allocator. Defends V2's **126 render-target allocations across 35 files** (`BuildingShadowsEffectV2` alone opened four private ones).
+- **`gpu/textures-in-vt-only`** — because the single biggest measured offender was never a render target, it was **one texture**: the 8250² `LightCovers.webp` at **345 MB**, part of PIXI's ~719 MB (§1). `new THREE.Texture(sourceBitmap)` on a 12K map is one line, looks entirely reasonable, and *is* the crisis. `vt/` is the sanctioned door.
+
+Zero is the cheapest moment to build a wall and it does not come twice — **Stage 6 brings V2's 70 private RTs.**
 
 ### Not built yet (the honest gap)
-The params **service** (get/set/subscribe) and the **generated renderers** (Tweakpane + `ApplicationV2`) — `Params.md`/`UI.md` design them but nothing consumes `params-schema.js` yet. `frame.snapshot` is the last pass still `future`: its core exists and is tested, but nothing calls it from the render loop. The 48 real `getControlSchema()` bodies are not yet converted into real declarations (safe to do now — the contract has been tested against their exact field vocabulary in `Params.md` §3.6).
+The params **service** (get/set/subscribe) and the **generated renderers** (Tweakpane + `ApplicationV2`) — `Params.md`/`UI.md` design them but nothing consumes `params-schema.js` yet. `frame.snapshot` is the last pass still `future`. The 48 real `getControlSchema()` bodies are not yet converted into real declarations (safe to do now — the contract has been tested against their exact field vocabulary in `Params.md` §3.6). **And the big one: the graph does not run.** See the correction above.
 
-### Recommended next steps, in order
-1. **Wire `frame.snapshot` into the render loop** — makes the last `future` pass live, gives `pass-health.js` a real frame to evaluate.
-2. **Harvest the 48 schemas into real `params-schema.js` declarations** — mechanical, safe now, preserves the author's tuned defaults + help text permanently.
-3. **The eviction bug** (dangling indirection texels) — the one open correctness defect, unrelated to the framework.
-4. **Ratchet paydown** — 19 one-door, 35 catches, 41 clocks, 12 Foundry reaches, 7 global-bus. Shrink-only, satisfying, no design needed.
-5. Name and build out `masks.occlusion` (the last piece of the original tiles ask, now unblocked since tokens render) or `light.visibility`/`light.accumulate` (the light-linking model) — whichever the author wants to see rendering first.
+### Recommended next steps, in order (REVISED 2026-07-17 — the old #1 could not be done as written)
+
+0. **The pass runner** — *the old #1 was "wire `frame.snapshot` into the render loop", and there is no pass-shaped render loop to wire it into.* Doing it literally means adding a call inside the 1,778-line function and making it 1,790. The runner is the honest version: `runFrame(PASSES, impls, resources)` hands each pass **exactly its declared reads** (L0 — absence), and its targets come from the allocator, which is what finally makes `live` mean something and installs the law by construction. **Do not build it unwired** — an unwired `run-frame.js` is exhibit #9 in the museum and repeats the very disease it exists to cure.
+1. **A reachability ratchet** — 28/52 files unreachable from `boot.js`. Freeze it, shrink only; require an unreachable module to be claimed by a `seam`/`future` declaration. This is the wall that catches "detached skeleton" while it is still cheap.
+2. **The four missing zone doors** (`vt/`, `graph/`, `foundry/`, `ui/`) — makes `zones/one-door`'s 19 *payable* instead of impossible.
+3. **Harvest the 48 schemas into real `params-schema.js` declarations** — mechanical, safe now, preserves the author's tuned defaults + help text permanently before Stage 7 deletes `legacy/`.
+4. **The eviction bug** (dangling indirection texels) — the one open correctness defect, unrelated to the framework.
+5. **Ratchet paydown** — 19 one-door, 33 catches, 41 clocks, 12 Foundry reaches, 7 global-bus. Shrink-only, satisfying, no design needed.
+6. Name and build out `masks.occlusion` (the last piece of the original tiles ask, now unblocked since tokens render) or `light.visibility`/`light.accumulate` — whichever the author wants to see rendering first.
+
+**Also broken, found in passing:** the release workflow (`.github/workflows/main.yml`) zips `scripts/` — **deleted at Stage 0** — and never zips `src/`. It would ship a `module.json` pointing at `src/boot.js` inside an archive containing no `src/`. It only fires on release-publish and runs no tests at all.
 
 ---
 

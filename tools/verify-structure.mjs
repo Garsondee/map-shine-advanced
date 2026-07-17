@@ -468,6 +468,48 @@ export const RULES = [
   },
 
   // ===================================================================
+  // ONE RESIDENCY WRITER — the same disease as every rule in this file, at
+  // function scope. `scheduleResidencyUpdate()` existed, was correct, and was
+  // OPTIONAL: six call sites invoked `updateResidency()` directly and bypassed
+  // its in-flight guard. That function mutates shared per-pack state across
+  // awaits, so two concurrent runs interleave on `pack.residentViewKeys` and
+  // whichever assigns last orphans every page the other pinned — pinned
+  // forever, tracked by nobody. Proven live, not theorised: the author's own
+  // thrash report showed pinnedView 1536 (the exact cap) at halfSpan 6705,
+  // fully zoomed OUT, where the view tier should be near empty.
+  // ===================================================================
+  {
+    id: 'vt/residency-one-writer',
+    pattern: /__never__/, // file-level rule; see `scan`
+    scan: (rel, lines) => {
+      const norm = rel.replace(/\\/g, '/');
+      if (!norm.endsWith('src/vt/vt-pan-viewer.js')) return [];
+      const calls = [];
+      lines.forEach((text, i) => {
+        const t = text.trim();
+        if (t.startsWith('*') || t.startsWith('//')) return;
+        if (!/updateResidencyUnguarded\s*\(/.test(text)) return;
+        if (/function\s+updateResidencyUnguarded\s*\(/.test(text)) return; // the declaration itself
+        calls.push({ line: i + 1, text: t.slice(0, 100) });
+      });
+      // Exactly one legal call site: scheduleResidencyUpdate's own do-while.
+      // A second is, by construction, a caller going around the guard.
+      return calls.length <= 1 ? [] : calls;
+    },
+    allow: [],
+    why:
+      'scheduleResidencyUpdate() was correct and OPTIONAL, so six call sites went around it — the ' +
+      'exact shape of every V2 bypass in this file, one scope down. updateResidencyUnguarded mutates ' +
+      "shared per-pack state ACROSS AWAITS; two concurrent runs orphan each other's view pins (live " +
+      'evidence: pinnedView pegged at its 1536 cap while fully zoomed OUT, where it should be ~empty).',
+    instead:
+      'Call scheduleResidencyUpdate(). It coalesces rather than drops — a request arriving mid-pass ' +
+      'sets residencyDirty and the in-flight run loops again, so the LAST state always wins and exactly ' +
+      'one pass touches shared state at a time. If you need the pass to have COMPLETED, note it already ' +
+      'runs inline (and the await resolves after it) whenever no pass is in flight.',
+  },
+
+  // ===================================================================
   // ONE DOOR PER ZONE — deep cross-zone imports are the module-scale version
   // of reaching into another object's privates. V2: 27 reaches into
   // sceneComposer._sceneMaskCompositor alone; nothing was unimportable, so

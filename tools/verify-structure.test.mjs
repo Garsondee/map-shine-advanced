@@ -446,7 +446,7 @@ export function run(t) {
   // File-level `scan` rules cannot be fed a bare corpse line — they carry their
   // own dedicated proof section above (and this assertion keeps THAT honest:
   // a scan rule with no bespoke proof shows up here as uncovered).
-  const scanRulesProven = new Set(['zones/one-door', 'graph/reachable-from-boot']);
+  const scanRulesProven = new Set(['zones/one-door', 'graph/reachable-from-boot', 'vt/residency-one-writer']);
   t.ok(
     `every rule has at least one proof case (${covered.size + scanRulesProven.size}/${RULES.length})`,
     RULES.every((r) => covered.has(r.id) || (typeof r.scan === 'function' && scanRulesProven.has(r.id)))

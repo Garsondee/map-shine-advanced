@@ -1613,7 +1613,39 @@ export async function startVtPanViewer({
       return changed;
     }
 
-    async function updateResidency() {
+    /**
+     * ONE RESIDENCY PASS. **Never call this directly — call
+     * `scheduleResidencyUpdate()`.** It is named `unguarded` so a direct call
+     * reads as the mistake it is (`zones/one-door`'s logic, at function scope:
+     * if the safe path is not the obvious one, the unsafe one gets used).
+     *
+     * THE PIN LEAK THIS ISOLATION FIXES (found 2026-07-17 in the author's own
+     * thrash report, not by reasoning): SIX call sites invoked this directly,
+     * bypassing `scheduleResidencyUpdate`'s in-flight guard — `setFloorIndex`,
+     * `applyKeyAndUpdate`, `setDisplayLayer`, resize, the initial load. The
+     * thrash test does BOTH at once: eased zoom schedules a guarded pass every
+     * frame while `setFloorIndex` fires an unguarded one. Two concurrent runs.
+     *
+     * This function mutates shared per-pack state ACROSS AWAITS, so two runs
+     * interleave on `pack.residentViewKeys`:
+     *
+     *   run A: unpin (keys not in A's candidates) -> await -> residentViewKeys = A's set
+     *   run B: unpin (keys not in B's candidates) -> await -> residentViewKeys = B's set
+     *
+     * Whichever assigns last WINS, and every page the loser pinned is now
+     * ORPHANED: still pinned, tracked by nobody, so no future pass can ever
+     * unpin it. The view tier fills with pins for pages nothing is looking at.
+     *
+     * THE DATA THAT PROVED IT, from the author's report — `pinnedView` against
+     * `halfSpanPx` in the hitch log:
+     *   halfSpan 6705 (fully zoomed OUT) -> pinnedView 1536  <- the exact cap
+     *   halfSpan   86 (fully zoomed IN)  -> pinnedView 1097
+     * At full zoom-out the coarse pins cover the world and the view tier should
+     * be near EMPTY. 1536 is not pressure; it is leakage. Those orphans then
+     * jam the cache (`misses: 1062`) so real requests get refused — which is
+     * blur at best, and starves everything else at worst.
+     */
+    async function updateResidencyUnguarded() {
       // Refreshed every pass, not cached — the scene's total pack count
       // changes as documents are created/deleted, and a NEW item created since
       // the last pass must see the CURRENT count when it first requests its
@@ -1748,7 +1780,7 @@ export async function startVtPanViewer({
      */
     async function setDisplayLayer(name) {
       displayLayerName = name;
-      await updateResidency();
+      await scheduleResidencyUpdate();
       return { displayLayer: displayLayerName };
     }
 
@@ -1857,6 +1889,19 @@ export async function startVtPanViewer({
 
     let residencyInFlight = false;
     let residencyDirty = false;
+    /**
+     * THE ONLY WAY TO RUN A RESIDENCY PASS. The sole caller of
+     * `updateResidencyUnguarded` — see its header for the pin leak that six
+     * direct callers caused, and the live numbers that proved it.
+     *
+     * Nothing is dropped: a request arriving mid-pass sets `residencyDirty` and
+     * the in-flight run loops again, so the LAST state always wins and exactly
+     * one pass touches shared per-pack state at a time. Callers that used to
+     * `await updateResidency()` for its completion still get it whenever no
+     * pass is running (the common case — startup, a lone floor switch): the
+     * do-while runs inline and this await resolves after it. When a pass IS
+     * running, returning early is the point.
+     */
     async function scheduleResidencyUpdate() {
       if (residencyInFlight) {
         residencyDirty = true;
@@ -1866,7 +1911,7 @@ export async function startVtPanViewer({
       try {
         do {
           residencyDirty = false;
-          await updateResidency();
+          await updateResidencyUnguarded();
         } while (residencyDirty);
       } finally {
         residencyInFlight = false;
@@ -2065,7 +2110,7 @@ export async function startVtPanViewer({
       const next = applyKey(view, key, ctx);
       if (next === view) return false;
       view = next;
-      await updateResidency();
+      await scheduleResidencyUpdate();
       return true;
     }
 
@@ -2088,7 +2133,7 @@ export async function startVtPanViewer({
     async function setFloorIndex(floorIndex) {
       if (!view || view.floorIndex === floorIndex) return false;
       view = { ...view, floorIndex };
-      await updateResidency();
+      await scheduleResidencyUpdate();
       return true;
     }
 
@@ -2175,7 +2220,7 @@ export async function startVtPanViewer({
         // the law that create() already enforced").
         allocator.resize(sceneColor, canvasW, canvasH, describeSceneColor());
         rebindPresent();
-        await updateResidency().catch((err) => console.error('[vt-pan-viewer] resize residency failed:', err));
+        await scheduleResidencyUpdate().catch((err) => console.error('[vt-pan-viewer] resize residency failed:', err));
       });
     }
 
@@ -2229,7 +2274,9 @@ export async function startVtPanViewer({
       onLoadProgress?.({ done: i + 1, total: initialItems.length, detail: item.kind });
     }
 
-    await updateResidency();
+    // Through the guard like every other caller (nothing else is running yet,
+    // so this executes inline and the await genuinely resolves after it).
+    await scheduleResidencyUpdate();
 
     // PRECOMPILE BEFORE THE FIRST DRAW. Until now every program compiled lazily
     // inside the first render() — an unbounded synchronous stall in the one frame

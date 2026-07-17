@@ -25,6 +25,8 @@
  * @module tools/verify-structure.test
  */
 
+import { sep } from 'node:path';
+
 import { RULES, validateExceptions, applyExceptions } from './verify-structure.mjs';
 
 /**
@@ -193,6 +195,48 @@ const V2_CORPSES = [
     code: "const sunFolder = parent.addFolder({ title: 'Sun', expanded: true });",
     note: 'bypass #7: 48 declarative schemas sat unused while folders were hand-written',
   },
+
+  // --- THE LAW: 126 render-target allocations across 35 files, 70 of them
+  // private and world-res. This is Keyhole.md §1's crash class, line by line.
+  {
+    rule: 'gpu/allocator-only',
+    from: 'legacy/compositor-v2/effects/BuildingShadowsEffectV2.js:935',
+    code: 'this._strengthTarget = new THREE.WebGLRenderTarget(rtWidth, rtHeight, {',
+    note: 'ONE effect opened FOUR private targets (_strength/_shadow/_blur/_sharpHold)',
+  },
+  {
+    rule: 'gpu/allocator-only',
+    from: 'legacy/compositor-v2/effects/DistortionManager.js:544',
+    code: 'this.distortionTarget = new THREE.WebGLRenderTarget(width, height, rtOptions);',
+    note: 'a private target sized from a `width` nobody could see the law applying to',
+  },
+  {
+    rule: 'gpu/allocator-only',
+    from: 'legacy/compositor-v2/effects/FogOfWarEffectV2.js:1287',
+    code: 'this.visionRenderTarget = new THREE.WebGLRenderTarget(rtWidth, rtHeight, {',
+    note: 'fog is the ONE sanctioned world-space buffer — and it still must come from the allocator, capped',
+  },
+  {
+    rule: 'gpu/allocator-only',
+    from: 'the r170 MRT class V2 used before it was removed',
+    code: 'this._targets = new THREE.WebGLMultipleRenderTargets(w, h, 2);',
+    note: 'the plural spelling must not be a hole in the wall',
+  },
+
+  // --- THE LAW'S OTHER HALF: the single biggest measured offender was ONE
+  // texture (8250² LightCovers.webp = 345 MB), not a render target.
+  {
+    rule: 'gpu/textures-in-vt-only',
+    from: 'legacy/assets/image-texture-loader.js:288',
+    code: 'const texture = new THREE.Texture(texSource);',
+    note: 'the whole crisis in one reasonable-looking line: a world-res bitmap straight onto the GPU',
+  },
+  {
+    rule: 'gpu/textures-in-vt-only',
+    from: 'legacy/assets/loader.js:1388',
+    code: 'const threeTexture = new THREE.Texture(texSource);',
+    note: 'and again in the other loader — two paths, because nothing forbade either',
+  },
 ];
 
 /** Lines that must NOT trip a rule (guards against a wall crying wolf). */
@@ -201,6 +245,13 @@ const MUST_PASS = [
   { code: 'const blended = mix(colorLo, colorHi, t);', note: 'bare mix() function form is correct' },
   { code: 'MapShine.debug.registerReport("boot", "Boot", fn);', note: 'MapShine.debug is the sanctioned shop window' },
   { code: '} catch (err) { log.warn("decode failed", err); }', note: 'a catch that REPORTS is fine' },
+  // The two law walls must bite on ALLOCATION, never on reading or testing. A
+  // wall that trips on `handle.renderTarget` gets muted, and a muted wall is
+  // worse than none — it teaches that the suite cries wolf.
+  { code: 'const target = frame.renderTarget;', note: 'READING a renderTarget is not allocating one' },
+  { code: 'if (tex.isDataArrayTexture) return tex.image.depth;', note: 'a type CHECK is not an allocation' },
+  { code: 'const loader = new THREE.TextureLoader();', note: 'TextureLoader is not a texture' },
+  { code: 'const proxy = new PIXI.Texture(baseTexture);', note: 'PIXI proxies are the §4.3 FIX, not the disease' },
 ];
 
 export function run(t) {
@@ -225,6 +276,39 @@ export function run(t) {
   for (const r of RULES) {
     t.ok(`rule '${r.id}' explains WHY (cites a V2 corpse)`, typeof r.why === 'string' && r.why.length > 80);
     t.ok(`rule '${r.id}' says what to do INSTEAD`, typeof r.instead === 'string' && r.instead.length > 20);
+  }
+
+  // ---- THE LAW's two walls: the ONE DOOR each must actually be open --------
+  // The corpse cases above prove these walls BITE. They do not prove the
+  // sanctioned path is reachable — and a wall whose door is welded shut is the
+  // failure mode this whole session was about: ThreeAllocator was unreachable
+  // through its own front door (`window.THREE unavailable`) for its entire life,
+  // with every test green, because nothing checked the way IN.
+  {
+    const allocOnly = RULES.find((r) => r.id === 'gpu/allocator-only');
+    const texVt = RULES.find((r) => r.id === 'gpu/textures-in-vt-only');
+    t.ok("'gpu/allocator-only' exists (Skeleton.md §2.3, unbuilt until 2026-07-17)", !!allocOnly);
+    t.ok("'gpu/textures-in-vt-only' exists", !!texVt);
+
+    // `allow` is a path-fragment list; the scanner skips a file whose path
+    // contains one. Assert the REAL owner paths are covered — a typo here (or a
+    // future file move) silently welds the door shut and the next session routes
+    // around the law rather than through it.
+    const covers = (rule, path) => rule.allow.some((a) => path.includes(a));
+    t.ok(
+      'the allocator itself may allocate render targets',
+      covers(allocOnly, `src${sep}graph${sep}three-allocator.js`)
+    );
+    t.ok('nothing ELSE in graph/ may', !covers(allocOnly, `src${sep}graph${sep}frame-graph.js`));
+    t.ok(
+      'an effect may NOT allocate a render target',
+      !covers(allocOnly, `src${sep}effects${sep}water${sep}water-pass.js`)
+    );
+
+    t.ok('vt/ may create textures — it IS the paging system', covers(texVt, `src${sep}vt${sep}atlas.js`));
+    t.ok('...including the renderer inside vt/', covers(texVt, `src${sep}vt${sep}vt-pan-viewer.js`));
+    t.ok('an effect may NOT create a texture', !covers(texVt, `src${sep}effects${sep}water${sep}water-pass.js`));
+    t.ok('foundry/ may NOT create a THREE texture', !covers(texVt, `src${sep}foundry${sep}scene-layers.js`));
   }
 
   // ---- the one-door rule: file-level scan, proven both ways ----------------

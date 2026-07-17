@@ -11,6 +11,39 @@ export function run(t) {
 
   ok('law: cap is 2048 per Keyhole.md §4.6', LAW_MAX_WORLD_RES_DIM === 2048);
 
+  // --- THE LAW MUST BE REACHABLE ------------------------------------------
+  // Added 2026-07-17 after finding the law was BROKEN AT FIRST TOUCH for its
+  // entire life, with every test below green. The allocator defaulted its THREE
+  // namespace to `window.THREE` — a global this codebase never sets — so the
+  // first session ever to call the law would have got "window.THREE
+  // unavailable". Nothing caught it because EVERY test injects { THREE: T } and
+  // no test ever exercised the default. A green suite around an unreachable
+  // front door is exactly `feedback_instruments_must_not_lie`.
+  //
+  // The fix is enforcement by absence (Skeleton.md §1, L0): THREE is required,
+  // there is no global to go stale. These assert the door is honest — it must
+  // refuse LOUDLY and say what to do, because a wall that fails confusingly is a
+  // wall that gets routed around (Skeleton.md §0 law 2).
+  {
+    throws(
+      'law: refuses to construct without THREE (no stale global fallback)',
+      () => new ThreeAllocator(),
+      'required'
+    );
+    throws('law: an empty options object is not enough either', () => new ThreeAllocator({}), 'required');
+
+    let msg = '';
+    try {
+      new ThreeAllocator();
+    } catch (err) {
+      msg = String(err.message);
+    }
+    ok('law: the refusal names the FIX (hand in the namespace), not just the problem', /import \* as THREE/.test(msg));
+    ok('law: ...and says why there is no fallback (a global can go stale)', /stale/.test(msg));
+    ok('law: ...and cites the doc that owns it', /Keyhole\.md §4\.6/.test(msg));
+    ok('law: the dead global is named so a search for it lands here', /window\.THREE/.test(msg));
+  }
+
   // The negative test: a deliberately-planted world-res allocation (an 8250px
   // mask bake, exactly the crash-report evidence size from Forward+.md §13).
   {

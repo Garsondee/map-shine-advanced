@@ -151,6 +151,64 @@ export const RULES = [
   },
 
   // ===================================================================
+  // THE LAW, MADE NON-OPTIONAL — designed in Skeleton.md §2.3 and never
+  // built. Keyhole is NAMED for this law and it was enforced by nothing:
+  // ThreeAllocator had ZERO callers and would have thrown on its first
+  // (`window.THREE unavailable`) if anyone had tried. Built at ZERO on
+  // 2026-07-17 — the cheapest moment, which does not come twice.
+  // ===================================================================
+  {
+    id: 'gpu/allocator-only',
+    // `new X(Multiple)RenderTarget(s)(` in any form. A local named `renderTarget`
+    // is a read, not an allocation, and must not trip — hence the `new`.
+    pattern: /new\s+(?:THREE\.)?\w*RenderTargets?\s*\(/,
+    allow: [`${sep}graph${sep}three-allocator.js`],
+    why:
+      'V2 allocated render targets at 126 sites across 35 FILES — 70 of them private, per-effect, ' +
+      'and WORLD-RES. BuildingShadowsEffectV2 alone opened four (_strengthTarget, shadowTarget, ' +
+      '_blurTarget, _sharpHoldTarget). That is the entire crash class measured in Keyhole.md §1: the ' +
+      'compositor cost 470-580 MB per drawing-buffer megapixel and the card has ~1.6 GB. No budget ' +
+      'policing survives a cost model of O(world x floors x masks); only making the allocation ' +
+      'IMPOSSIBLE does. The allocator that enforces the >2048px cap existed, tested, with ZERO ' +
+      "callers — the law was optional, and this repo's one-sentence finding is that an optional " +
+      'law loses.',
+    instead:
+      'Render targets come from graph/three-allocator.js and nowhere else. It throws on any ' +
+      'dimension > 2048px unless the descriptor explicitly says { allowWorldScale: true } — a crash ' +
+      "in dev at YOUR call site with a stack, not a context loss in a player's session three weeks " +
+      'later. The frame graph hands a pass its targets; a pass never allocates. (Keyhole.md §4.6)',
+  },
+
+  // ===================================================================
+  // THE LAW'S OTHER HALF — a raw texture is how the world gets resident.
+  // Also at ZERO outside vt/ on 2026-07-17.
+  // ===================================================================
+  {
+    id: 'gpu/textures-in-vt-only',
+    // Any `new <Something>Texture(`: Data/DataArray/Canvas/Video/Compressed and
+    // plain Texture. `new THREE.TextureLoader()` must NOT trip (it is not an
+    // allocation) — it does not, because `Texture` must be followed by `(`.
+    // PIXI textures are deliberately out of scope: foundry/pixi-proxy-textures.js
+    // exists precisely to hand PIXI a ≤1024px proxy, and that IS the fix (§4.3).
+    pattern: /new\s+(?:THREE\.)?\w*Texture\s*\(/,
+    // vt/ IS the paging system — creating textures is its whole job, and the
+    // atlas is the ONE fixed >2048 allocation the plan sanctions (§4.1).
+    allow: [`${sep}vt${sep}`],
+    why:
+      "Keyhole's one law is that nothing is ever allocated at world resolution — and the single " +
+      "biggest measured offender was never a render target: it was ONE texture. Foundry's PIXI held " +
+      '~719 MB of duplicate art including an 8250² LightCovers.webp costing 345 MB, plus a continuous ' +
+      '6408x5121 texImage2D re-upload storm at 100-300 ms each (Keyhole.md §1, every crash report). ' +
+      '`new THREE.Texture(sourceBitmap)` on a 12K map is one line, looks completely reasonable, and ' +
+      'is the whole crisis.',
+    instead:
+      'World-sized image data pages through vt/ — it is the fixed-size cache the plan is named for ' +
+      '(§4.1). Sample it via the shared vtSample() and nothing else. If you need pixels on the GPU ' +
+      'and vt/ cannot give them to you, that is a conversation about vt/, not a texture at the call ' +
+      'site. Screen-sized buffers are render targets: use the allocator (gpu/allocator-only).',
+  },
+
+  // ===================================================================
   // GPU READBACKS — the GPU is a write-only pipe, not a data structure.
   // ===================================================================
   {

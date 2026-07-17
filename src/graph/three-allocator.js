@@ -28,12 +28,46 @@ const log = createLogger('V3ThreeAllocator');
  * with a stack, in dev — not a context loss in the field three weeks later.
  *
  * The virtual-texture page atlas itself never goes through this allocator (it's
- * a THREE.DataArrayTexture allocated once, directly, by vt/page-cache.js — not
- * a per-frame graph resource), so it needs no exemption. The only legitimate
+ * a THREE.DataArrayTexture allocated once, directly, by vt/atlas.js — not a
+ * per-frame graph resource), so it needs no exemption. The only legitimate
  * exceptions are named in the plan: fog exploration (capped ≤ 2048² anyway) and
  * the present chain's native-resolution upscale target. Both must opt in
  * explicitly per-descriptor — there is no name-string whitelist to silently
  * extend.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS FILE WAS AUDITED 2026-07-17 — the law was NOT installed
+ *
+ * This module had **zero callers**. Keyhole is *named* for the law it enforces,
+ * and the law was a unit-tested function nobody called. That alone is only
+ * "the rooms aren't built yet" — no pass allocates a target, so there was
+ * genuinely nothing to route. The real defect was worse, and it is the reason
+ * this comment exists:
+ *
+ *   **The law was BROKEN AT FIRST TOUCH.** `new ThreeAllocator()` defaulted its
+ *   THREE namespace to `window.THREE` — a global this codebase never sets (boot
+ *   imports THREE as an ES module from src/vendor/). So the first session ever
+ *   to reach for the law would get `"window.THREE unavailable"`, an error about
+ *   a global that does not exist and was never supposed to, on a module whose
+ *   tests were all green — because the tests inject a MOCK THREE and never
+ *   exercised the default.
+ *
+ * That is exactly how `EffectComposer` lost (memory:
+ * v2-postmortem-the-failure-modes). Not by being wrong — by being *harder than
+ * the alternative on the afternoon someone needed it*. A session under pressure
+ * hits a broken wall, writes `new THREE.RenderTarget(...)` instead, and the law
+ * is optional forever after. Skeleton.md §0 law 2: **the wall must be
+ * frictionless, or it loses.** A wall that is broken when you reach it is not a
+ * wall, it is a dare.
+ *
+ * Fixed by ENFORCEMENT BY ABSENCE (Skeleton.md §1, L0): there is no global
+ * fallback to be stale. THREE is a required constructor argument. You cannot
+ * build an allocator that cannot allocate.
+ *
+ * The wall that makes calling this NON-OPTIONAL is `gpu/allocator-only` in
+ * tools/verify-structure.mjs — `new *RenderTarget(` outside this file fails the
+ * build. It was designed in Skeleton.md §2.3 and never built; it sits at ZERO
+ * today, which is the cheapest moment to build a wall and does not come twice.
  */
 export const LAW_MAX_WORLD_RES_DIM = 2048;
 
@@ -70,20 +104,28 @@ function resolveFilter(THREE, filter) {
 
 export class ThreeAllocator {
   /**
-   * @param {object} [options]
-   * @param {any} [options.THREE] - THREE namespace (defaults to `window.THREE`,
-   *   matching the codebase convention of a global rather than an ESM import).
+   * @param {object} options
+   * @param {any} options.THREE - **REQUIRED.** The THREE namespace, handed in.
+   *   There is deliberately NO `window.THREE` fallback: this used to default to
+   *   a global the codebase never sets, so the law's first-ever caller would
+   *   have hit `"window.THREE unavailable"` and routed around it. A wall that is
+   *   broken when you reach it is a dare, not a wall (see the header). Handing
+   *   it in is one argument at the one construction site; a stale global is a
+   *   silent failure at every call site forever.
    * @param {(handle: any) => void} [options.onCreate] - Optional hook for
    *   diagnostics/budget accounting when a target is allocated.
    */
   constructor(options = {}) {
-    this._THREE = options.THREE ?? (typeof window !== 'undefined' ? window.THREE : null);
+    if (!options.THREE) {
+      throw new Error(
+        'ThreeAllocator: options.THREE is required. Hand in the THREE namespace ' +
+          "(`import * as THREE from '../vendor/three/three.webgpu.js'`). There is no " +
+          'window.THREE in this codebase and no fallback to one — a global that can go ' +
+          'stale is how the law would silently stop being enforced (Keyhole.md §4.6).'
+      );
+    }
+    this._THREE = options.THREE;
     this._onCreate = typeof options.onCreate === 'function' ? options.onCreate : null;
-  }
-
-  /** @param {any} THREE */
-  setTHREE(THREE) {
-    this._THREE = THREE;
   }
 
   /**
@@ -163,9 +205,15 @@ export class ThreeAllocator {
     }
 
     if (this._onCreate) {
+      // Reported, never swallowed: a broken accounting hook must not take down a
+      // real allocation, but it must not be invisible either. V2 had 2,670 empty
+      // catches — one silent swallow per ~140 lines — which is how the rot stayed
+      // invisible until it crashed (memory: feedback_instruments_must_not_lie).
       try {
         this._onCreate(rt);
-      } catch (_) {}
+      } catch (err) {
+        log.error(`onCreate hook threw for ${rt.name} — allocation kept, accounting lost`, err);
+      }
     }
     log.debug(`allocated ${rt.name} ${width}x${height}${options.count ? ` mrt=${options.count}` : ''}`);
     return rt;
@@ -191,6 +239,10 @@ export class ThreeAllocator {
   dispose(handle) {
     try {
       handle?.dispose?.();
-    } catch (_) {}
+    } catch (err) {
+      // A dispose that throws is a VRAM leak, which is this project's entire
+      // crash class (§1: ~1.6GB ceiling). Never silent.
+      log.error(`dispose threw for ${handle?.name ?? '(unnamed)'} — GPU memory may be leaked`, err);
+    }
   }
 }

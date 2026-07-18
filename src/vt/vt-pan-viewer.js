@@ -54,6 +54,16 @@
 import { PageCache } from './page-cache.js';
 import { PageTable, computeIndirectionAtlasLayout } from './page-table.js';
 import { computeAtlasLayout, PageAtlas } from './atlas.js';
+import { resolveRendererRequiredLimits, planImageTiles, WEBGPU_SPEC_MIN_TEXTURE_DIM } from './texture-limits.js';
+// bc1ByteLength / bc7ByteLength: exact GPU-resident sizes for the honest VRAM
+// accounting below (the BC-compression fix for the ~2.5GB WebGPU memory wall).
+// The encoder core is block-compress.js (Node-tested). Intra-zone (vt/), no door.
+import { bc1ByteLength, bc7ByteLength } from './block-compress.js';
+// The BC-compression client (worker + IndexedDB cache). Opaque whole images come
+// back as BC1 blocks (8× smaller), alpha images as BC7 (4×, carries the alpha) —
+// the WebGPU-memory-ceiling fix; any failure returns null and the loader keeps
+// the raw texture. Intra-zone.
+import { requestCompressedTexture, getCompressedTextureStats } from './compressed-textures.js';
 import {
   acquirePages,
   acquirePackedPages,
@@ -68,6 +78,9 @@ import { createLogger } from '../core/log.js';
 /** Log door for the onPageDecoded ingest seam's containment guard — the one
  * place this file reports a CONSUMER's failure rather than its own. */
 const ingestLog = createLogger('vt-ingest');
+/** Log door for new call sites in this file — the rest still calls
+ * console.* directly (ratcheted debt, not this fix's job to migrate). */
+const log = createLogger('vt-pan-viewer');
 import { createVtSampler } from './vt-sample.tsl.js';
 import {
   createInitialViewState,
@@ -96,6 +109,7 @@ import {
   buildQuadPositions,
   QUAD_UVS,
   QUAD_INDICES,
+  computeTileSubPlacement,
   viewRectToImageRect,
   computeItemViewportPx,
   rectsOverlap,
@@ -107,6 +121,80 @@ import { OCCLUSION_MODES, computeOcclusionState, createHoverFadeState, mapElevat
 /** Wall-clock budget per GPU-upload chunk before yielding a real frame — see
  * requestDecodeUpload's Pass 3 for the live-hitch evidence this fixes. */
 const MAX_MS_PER_UPLOAD_CHUNK = 10;
+
+/**
+ * GPU-COMPLETION BACKPRESSURE — bound how many page uploads can be in flight on
+ * the GPU queue before the CPU waits for them to finish (2026-07-17, the THIRD
+ * WebGPU device loss on the 12000² mansion). The prior throttle
+ * (`MAX_MS_PER_UPLOAD_CHUNK`) bounds only main-thread TIME: in 10ms the loop can
+ * enqueue HUNDREDS of `queue.copyExternalImageToTexture` calls without ever
+ * waiting for one to complete, so under a full/thrashing cache the GPU queue
+ * grows unbounded until Chrome's TDR watchdog kills the device ("A valid
+ * external Instance reference no longer exists"). The device-lost snapshot's own
+ * guide pointed straight here: `residentPages == capacityPages`, `pinnedView`
+ * near cap, `heldSources: 0`, `mainThreadFallbackSourceDecodes: 0` = a pure
+ * upload-burst TDR, not a leak or a main-thread decode. After every this-many
+ * uploads we `await device.queue.onSubmittedWorkDone()` — draining the queue to
+ * a bounded depth. When the GPU is healthy this returns in well under a
+ * millisecond (48 pages ≈ 12 MB of copies); when the queue is backing up the
+ * wait BALLOONS, which is exactly the signal `_uploadDrain` records for the next
+ * crash report — so this is a principled fix AND a decisive instrument. WebGPU
+ * backend only (WebGL2 has no equivalent per-page queue-submit cost — see
+ * atlas.js). Tune down if a slower card still backs up; tune up if streaming
+ * feels needlessly throttled. */
+const UPLOAD_PAGES_PER_DRAIN = 48;
+
+/** Whole-image mode: the largest tile dimension we will EVER upload as one
+ * texture, INDEPENDENT of the hardware's `maxTextureDimension2D`. A 12000² floor
+ * is a single 549MB texture at the 16384 cap, and allocating that in one shot on
+ * top of ~1.65GB already resident stalled the driver ~2.2s → Windows TDR →
+ * device lost on a floor switch (2026-07-18 flight recorder: died with
+ * `estTextureVramMB:2190` while floor 1's first image was still `loading`).
+ * Capping tile size forces such an image into a grid of smaller tiles (12000² →
+ * 2×2 of 6000² ≈ 137MB each), each uploaded + GPU-drained on its own — no single
+ * giant allocation for the driver to choke on. `Math.min(textureLimit, this)`
+ * also subsumes the weak-hardware quarter-split (a lower HW limit still wins).
+ * Reuses planImageTiles + computeTileSubPlacement, both already tested for the
+ * multi-tile case. */
+const MAX_WHOLE_TILE_DIM = 8192;
+
+/** Resolution cap for the RAW fallback ONLY — the path taken when the compressed
+ * worker is unavailable (CSP-blocked / crashed) and we can't get BC1/BC7 blocks.
+ * The compressed path is the real memory fix; but if it's gone, uploading a full
+ * 12000² layer raw is 549 MB, and both floors raw is ~2.75 GB — a guaranteed
+ * device loss every time the worker can't run. Capping the fallback's uploaded
+ * resolution (longest side ≤ this) keeps even an all-raw scene well under the
+ * WebGPU ceiling: softer art, but the device lives. The device-lost slide to
+ * Foundry is the LAST resort; this keeps us from needing it on every floor switch
+ * in a worker-less environment (safety slide: degrade, never detonate). */
+const MAX_RAW_FALLBACK_DIM = 4096;
+
+/** Worst GPU-queue drain wait seen this session + how many drains ran — read in
+ * the device-lost snapshot to tell an upload-burst TDR (maxMs balloons) apart
+ * from something else (maxMs stays tiny). Reset when a viewer starts. */
+let _uploadDrain = { maxMs: 0, count: 0 };
+
+/**
+ * WHOLE-IMAGE RENDER MODE (2026-07-17 — the "load images like PIXI" path the
+ * author chose after the tile-streaming architecture kept losing the WebGPU
+ * device to upload churn). When ON, each item's art is loaded WHOLE (one
+ * texture when it fits the raised 16384 cap — the mansion's 12000² case; or the
+ * smallest tile grid that fits, `planImageTiles`, on weaker hardware) and drawn
+ * as plain quad(s), with the atlas/page-streaming SKIPPED entirely. The whole
+ * streaming apparatus (atlas, cache, residency, decode worker, backpressure)
+ * stays intact as the OFF path — the escape hatch if this is broken:
+ * `MapShine.setWholeImageMode(false)` reverts to it live without a reload.
+ *
+ * Default ON (the author is testing it) — but the device-lost safety slide is
+ * still underneath, and `getDiagnostics().wholeImage` reports exactly what each
+ * item did (mode, tiles, decode status/errors, VRAM) so a breakage is visible
+ * in a flight recorder, not a mystery.
+ */
+let _wholeImageEnabled = true;
+/** @param {boolean} on */
+export function setWholeImageMode(on) {
+  _wholeImageEnabled = !!on;
+}
 
 /**
  * How much of the page cache must remain unprotected before a pack is allowed to
@@ -222,7 +310,7 @@ function disposeActive() {
     _active.renderer.setAnimationLoop(null);
   } catch (_) {}
   try {
-    _active.atlas.dispose();
+    _active.atlas?.dispose(); // null in whole-image mode — the atlas is never allocated
   } catch (_) {}
   for (const state of _active.itemStates.values()) {
     try {
@@ -231,6 +319,20 @@ function disposeActive() {
     try {
       state.geometry?.dispose();
     } catch (_) {}
+    // Whole-image mode's per-tile GPU resources (geometry/material/texture).
+    // renderer.dispose() below frees the backend, but dispose these too so a
+    // Stop/Restart doesn't leak the JS-side handles (parallels state.geometry).
+    for (const t of state.wholeImage?.tiles ?? []) {
+      try {
+        t.geometry?.dispose();
+        t.material?.dispose();
+        t.tex?.dispose();
+      } catch (_) {
+        // A handle already freed (or a texture that never finished uploading)
+        // can throw on dispose; renderer.dispose() below frees the backend
+        // regardless, so this is best-effort cleanup of the JS-side wrappers.
+      }
+    }
     for (const pack of state.packs.values()) {
       try {
         pack.indirectionTexture.dispose();
@@ -248,6 +350,24 @@ function disposeActive() {
     _active.disposeSceneColor?.();
   } catch (err) {
     console.error('[vt-pan-viewer] scene.color dispose failed — VRAM may be leaked:', err);
+  }
+  // THE RENDERER ITSELF (found in audit, 2026-07-17: teardown freed every
+  // texture/material/geometry it OWNED but never the renderer's own backend —
+  // Renderer.dispose() (three.webgpu.js) is what actually frees the GPU
+  // device/context, every compiled pipeline, bind groups and query pools.
+  // Every scene switch builds a brand-new WebGPURenderer (startVtPanViewer)
+  // without this, so every switch — and every debug-panel Stop/Start, every
+  // zoom-thrash restart, every safety-slide restart after a fatal error —
+  // abandoned a live GPU context. Browsers cap how many of those can exist at
+  // once and force-lose the OLDEST to make room, which can corrupt whatever
+  // context is left live — a far better explanation for "tokens land in the
+  // wrong place after a scene switch" than anything in the placement math
+  // (which reads straight from the live document, unaffected by this). LAST,
+  // after every resource the backend owns has already been told to let go.
+  try {
+    _active.renderer.dispose();
+  } catch (err) {
+    log.error('renderer dispose failed — GPU context may be leaked:', err);
   }
   try {
     _active.canvas.remove();
@@ -333,6 +453,12 @@ export function stopVtPanViewer() {
  *   GPU readback, no cache pressure. Injected exactly like extraLayersForItem —
  *   the viewer stays authority-ignorant. A throwing callback is contained and
  *   loudly logged; it can never break streaming.
+ * @param {(info:object) => void} [options.onDeviceLost] - THE SAFETY SLIDE'S
+ *   seam-restore hook. Called when the GPU device is lost UNEXPECTEDLY (never on
+ *   our own teardown — that is filtered by reason:"destroyed"). The viewer has
+ *   already removed its dead canvas and announced the fallback by the time this
+ *   runs; boot.js wires this to restoreFoundryArt() so Foundry's suppressed art
+ *   comes back on. Injected so vt/ never reaches into the interface seam itself.
  * @returns {Promise<object>} initial diagnostics (see getDiagnostics() for the shape).
  */
 export async function startVtPanViewer({
@@ -346,10 +472,18 @@ export async function startVtPanViewer({
   getOcclusionInputs,
   onLoadProgress,
   onPageDecoded,
+  onDeviceLost,
 }) {
   extraLayersForItem ??= () => [];
   getOcclusionInputs ??= () => ({ occluders: [], visionActive: false });
   onPageDecoded ??= () => {};
+  _uploadDrain = { maxMs: 0, count: 0 }; // fresh GPU-backpressure stats per viewer session
+  // THE SAFETY SLIDE'S seam-restore hook (see the renderer.onDeviceLost handler
+  // below). Injected exactly like the others so vt/ stays ignorant of the
+  // interface seam: the composition root (boot.js) wires this to
+  // restoreFoundryArt(), because un-suppressing canvas.environment is a Foundry-
+  // adapter concern this file must not reach into directly.
+  onDeviceLost ??= () => {};
   // Captured for runZoomThrashTest's "blank slate" restart (2026-07-16) —
   // the SAME fully-resolved params this call itself used, so a later restart
   // reproduces an identical fresh viewer without the caller needing to
@@ -363,6 +497,7 @@ export async function startVtPanViewer({
     extraLayersForItem,
     getOcclusionInputs,
     onPageDecoded,
+    onDeviceLost,
   };
   // World space IS Foundry canvas space (foundry/scene-geometry.js) — the padded
   // rect, +Y down. RECTANGULAR: `Scene#padding` defaults to 0.25 and the default
@@ -510,10 +645,176 @@ export async function startVtPanViewer({
     // last frame; that diagnostic now renders into an explicit RenderTarget
     // instead (see sampleDiagnostics), which is the readback path both backends
     // actually implement.
-    const renderer = new THREE.WebGPURenderer({ canvas, antialias: false });
+    // RAISE THE WEBGPU TEXTURE CAP (2026-07-17, the PIXI-parity direction —
+    // see texture-limits.js). WebGPU's default maxTextureDimension2D is 8192,
+    // but the author's Level art is 12000² — which is the whole reason a floor
+    // had to be sliced into thousands of streamed pages (the upload churn that
+    // killed the device). Ask the adapter for its real limit and request up to
+    // 16384 (never more than it supports, never below the 8192 floor), so a
+    // whole floor can live in ONE texture, PIXI-style. `requiredLimits` is
+    // forwarded straight to adapter.requestDevice by three's WebGPURenderer.
+    // On WebGL2 or when there's no adapter, this stays undefined and three
+    // picks its defaults; a device that genuinely can't be created still trips
+    // the safety slide below.
+    const requiredLimits = await resolveRendererRequiredLimits();
+    const renderer = new THREE.WebGPURenderer({ canvas, antialias: false, requiredLimits });
     await renderer.init(); // REQUIRED before any use — the backend is chosen here
     renderer.setPixelRatio(1);
     renderer.setSize(canvasW, canvasH, false);
+
+    // The texture cap the device ACTUALLY granted (see resolveRendererRequiredLimits
+    // above + texture-limits.js). Whole-image mode plans each image into tiles
+    // under min(this, MAX_WHOLE_TILE_DIM) — the memory cap wins, so a 12000²
+    // floor loads as a 2×2 grid, never one device-killing 549MB allocation.
+    const textureLimit = renderer.backend?.device?.limits?.maxTextureDimension2D ?? WEBGPU_SPEC_MIN_TEXTURE_DIM;
+
+    // THE DEVICE-LOST SAFETY SLIDE (author flight-recorder, 2026-07-17: a real
+    // "WebGPU Device Lost: A valid external Instance reference no longer exists"
+    // after three scene loads on the 12000² mansion, taking BOTH MSA's and
+    // Foundry's contexts down at once). A lost device is a fact of GPU life —
+    // driver reset, TDR under load, sleep/resume, an iGPU/dGPU switch, or (the
+    // cause this session's renderer-dispose fix addresses) leaked contexts from
+    // scene swaps that never disposed. Three's DEFAULT onDeviceLost only logs
+    // and freezes; with no handler here, MSA's canvas went dead-black WHILE
+    // still occluding Foundry's suppressed art (environmentRenderable:false) —
+    // a black screen with no way out but reload, the exact opposite of the
+    // safety slide the whole project ranks above the visuals
+    // ([[feedback_safety_slide_outranks_doctrine]]).
+    //
+    // `device.lost` with reason "destroyed" is filtered out by the backend
+    // (three.webgpu.js) — so our own renderer.dispose() during teardown does
+    // NOT reach here. This fires only for a genuine, unexpected loss.
+    const defaultOnDeviceLost = renderer.onDeviceLost.bind(renderer);
+    let deviceLostSlid = false;
+    renderer.onDeviceLost = (info) => {
+      // Three's default FIRST: it sets the renderer's own `_isDeviceLost` guard,
+      // which makes every internal render() a no-op — the belt to our braces of
+      // stopping the loop, so an in-flight upload chunk that resumes the loop
+      // (requestDecodeUpload) can never paint on a dead device.
+      try {
+        defaultOnDeviceLost(info);
+      } catch (_) {
+        // Three's own logger threw — irrelevant next to the slide below, which
+        // is the part that keeps the session usable. Never let it block us.
+      }
+      if (deviceLostSlid) return; // device.lost resolves once, but stay idempotent
+      deviceLostSlid = true;
+      const detail = `${info?.message || 'unknown'}${info?.reason ? ` (reason: ${info.reason})` : ''}`;
+      // THE RACE GUARD: if a newer viewer has already taken over (`_active` is
+      // not us), this renderer is a corpse the new viewer's own disposeActive
+      // already dealt with — sliding now would call disposeActive() on the LIVE
+      // viewer and tear IT down. Our own intentional teardown is filtered
+      // upstream (reason:"destroyed"), so this only guards an unexpected loss
+      // that races a scene switch. Still freeze this renderer (above), just
+      // don't touch the module-level state that no longer belongs to us.
+      if (_active?.renderer !== renderer) {
+        log.warn(`WebGPU device lost on a viewer that is no longer active — frozen, not sliding: ${detail}`);
+        return;
+      }
+      log.error(`WebGPU device lost — sliding to Foundry's own renderer: ${detail}`);
+      // THE DEATH-STATE SNAPSHOT (author flight-recorder, 2026-07-17, SECOND
+      // loss): the last diagnostic in the recorder was from the floor switch
+      // ~23s earlier, so we were blind about the GPU/cache/decode state at the
+      // instant it died — and "heavy load / TDR" had been GUESSED twice with no
+      // proof (exactly the [[feedback_plausible_diagnosis_rots]] trap). These
+      // are all plain-JS counters — no GPU access, safe on a dead device —
+      // logged so they ride the flight-recorder export. What to read next time:
+      //   • cacheStats.residentPages == capacityPages with pinnedView near cap
+      //     -> the atlas/cache is SATURATED: a VRAM-pressure death. Shrink the
+      //        512MB atlas (computeAtlasLayout budgetBytes) or the view tier.
+      //   • decodeStats.heldSources > 0, or mainThreadFallbackSourceDecodes
+      //     climbing -> a full ~576MB source bitmap was mid-decode on the main
+      //     thread when it died (the mask-404 retry path feeds this) -> a
+      //     transient-memory death; fix the 404s + cap concurrent held sources.
+      //   • neither -> a pure GPU-time TDR on the upload burst; cut
+      //     MAX_MS_PER_UPLOAD_CHUNK / pages-per-pass.
+      try {
+        log.error('device-lost state snapshot (read this to stop guessing the cause):', {
+          view: view ? { halfSpanPx: view.halfSpanPx, floorIndex: view.floorIndex } : null,
+          cacheStats: cache.stats(),
+          decodeStats: getDecodeStats(),
+          atlasBytes: atlas ? layout.totalBytes : 0, // 0 in whole-image mode — atlas not allocated
+          sceneColorBytes: sceneColor ? sceneColor.width * sceneColor.height * 8 : null,
+          // WHOLE-IMAGE VRAM AT DEATH — the number this hunt kept missing. Sum of
+          // every uploaded whole-image texture (w·h·4). Read estTextureVramMB
+          // (this + atlas + sceneColor) against a plausible WebGPU budget: if it
+          // is multiple GB AND the frame-gap hitches spike right before this, it
+          // is a VRAM-ceiling death and the fix is to hold FEWER full-res layers
+          // (free the atlas; drop off-floor occlusion layers) — not to sequence
+          // uploads harder. loading > 0 means it died mid floor-load, so peak was
+          // even higher than the tally shows.
+          wholeImage: (() => {
+            let bytes = 0;
+            let ready = 0;
+            let loading = 0;
+            const items = [];
+            for (const [id, s] of itemStates) {
+              const wi = s.wholeImage;
+              if (!wi) continue;
+              // HONEST per-format bytes — the same accounting the floor-switch
+              // report uses. Before this, every whole tile was counted as raw
+              // sw·sh·4, so a 68 MB BC1 floor read as 549 MB here: the snapshot
+              // meant to END the memory guessing was itself lying about the very
+              // number in question (memory: feedback_instruments_must_not_lie).
+              const isBc7 = wi.compressed && wi.compressed.startsWith('bc7');
+              const isBc1 = wi.compressed && wi.compressed.startsWith('bc1');
+              const rs = wi.rawScale || 1;
+              let b = 0;
+              for (const t of wi.tiles) {
+                if (isBc7) b += bc7ByteLength(t.tile.sw, t.tile.sh);
+                else if (isBc1) b += bc1ByteLength(t.tile.sw, t.tile.sh);
+                else b += Math.round(t.tile.sw * rs) * Math.round(t.tile.sh * rs) * 4;
+              }
+              bytes += b;
+              if (wi.status === 'ready') ready++;
+              else if (wi.status === 'loading') loading++;
+              items.push({ id, status: wi.status, mb: +(b / (1024 * 1024)).toFixed(1), compressed: wi.compressed });
+            }
+            const otherBytes =
+              (atlas ? layout.totalBytes : 0) + (sceneColor ? sceneColor.width * sceneColor.height * 8 : 0);
+            return {
+              totalMB: +(bytes / (1024 * 1024)).toFixed(1),
+              estTextureVramMB: +((bytes + otherBytes) / (1024 * 1024)).toFixed(1),
+              ready,
+              loading,
+              items,
+            };
+          })(),
+          // GPU-queue backpressure (UPLOAD_PAGES_PER_DRAIN): maxMs BALLOONING (tens+
+          // of ms) confirms an upload-burst TDR — the queue could not drain. maxMs
+          // staying tiny (sub-ms) with count > 0 RULES OUT queue backup and points
+          // the next investigation elsewhere (a leak we haven't found, a driver bug).
+          uploadDrain: { ..._uploadDrain },
+        });
+      } catch (err) {
+        log.error('device-lost snapshot failed (the slide below still runs):', err);
+      }
+      loopActive = false;
+      try {
+        renderer.setAnimationLoop(null);
+      } catch (_) {
+        // Stopping the loop on a lost device can throw; disposeActive() below
+        // stops it again anyway. The loopActive=false above is the real guard.
+      }
+      // Un-suppress Foundry's art (injected — see the param doc). MUST happen or
+      // removing our dead canvas below just reveals a still-suppressed (blank)
+      // Foundry scene.
+      try {
+        onDeviceLost(info);
+      } catch (err) {
+        log.error('onDeviceLost seam-restore callback threw:', err);
+      }
+      // Stop occluding Foundry + announce, unmissably (diag/render-fallback.js).
+      engageFoundryFallback({
+        reason: "Its GPU device was lost — Foundry's own renderer is drawing this scene. Reload to retry MSA.",
+        detail,
+        canvas,
+      });
+      // Free what we still can and drop the dead viewer, so the next scene load
+      // starts clean rather than short-circuiting on a corpse. Every step is
+      // best-effort/try-caught inside disposeActive — safe on a lost device.
+      disposeActive();
+    };
 
     // ========================================================================
     // buf:scene.color — THE FIRST REAL RENDER TARGET (2026-07-17)
@@ -636,7 +937,12 @@ export async function startVtPanViewer({
       presentMaterial.needsUpdate = true;
     }
 
-    const atlas = new PageAtlas({ THREE, layout, renderer });
+    // PIXI PARITY: in whole-image mode we draw whole textures and NEVER sample
+    // the page atlas, so allocating its 512MB DataArrayTexture is pure dead
+    // weight — and it was sitting in exactly the VRAM headroom a floor switch
+    // needed, so we hit Chrome's WebGPU memory wall ~512MB sooner than Foundry's
+    // PIXI does (2026-07-18). Skip it entirely; carry only what PIXI carries.
+    const atlas = _wholeImageEnabled ? null : new PageAtlas({ THREE, layout, renderer });
 
     // THE OCCLUSION MASK — currently an INERT 1x1 placeholder, deliberately.
     //
@@ -862,6 +1168,36 @@ export async function startVtPanViewer({
       if (existing) {
         existing.item = item; // refresh (renderOrder/key change per update)
         return existing;
+      }
+
+      // PIXI PARITY (whole-image mode): no packs, no atlas, no page streaming —
+      // build NONE of the streaming apparatus. All we need is the source's real
+      // dimensions (for placement + tile planning); ensureWholeImageMeshes does
+      // the actual decode/upload. `getSourceDimensions` reads only the image
+      // header (~30 bytes), not the 144-megapixel body. This is what makes our
+      // GPU footprint match Foundry's PIXI: only the floor textures, nothing
+      // else. `buildPack`'s coarse-pin decode+upload (and the 512MB atlas it
+      // fills) is skipped entirely.
+      if (_wholeImageEnabled) {
+        const dims = await getSourceDimensions(item.src);
+        const state = {
+          item,
+          packs: new Map(), // nothing streams
+          albedoPack: null,
+          layerErrors: [],
+          imageSize: { width: dims.width, height: dims.height },
+          placement: null,
+          placementKey: null,
+          worldBounds: null,
+          geometry: null,
+          material: null,
+          mesh: null,
+          hoverFade: createHoverFadeState(),
+          occluded: false,
+        };
+        refreshItemPlacement(state, item);
+        itemStates.set(item.id, state);
+        return state;
       }
 
       const packs = new Map();
@@ -1158,6 +1494,316 @@ export async function startVtPanViewer({
       return state;
     }
 
+    // ======================================================================
+    // WHOLE-IMAGE MODE (see the _wholeImageEnabled flag's doc). Loads an item's
+    // art WHOLE — one texture per tile of planImageTiles, drawn as plain quad(s)
+    // — instead of streaming 256px pages through the atlas. No atlas, no cache,
+    // no residency, no upload churn: the fix for the WebGPU device loss.
+    // ======================================================================
+
+    /** A NodeMaterial that samples ONE whole texture with the same tint/alpha the
+     * streaming path uses (occlusion is a no-op there today — weights are 0 — so
+     * the multifloor composite rides on the art's own alpha holes + renderOrder,
+     * which this preserves). uTint/uAlpha are live handles for future wiring. */
+    // uvScale defaults to [1,1] (raw path: texture IS the image). The BC1 path
+    // passes [w/padW, h/padH] < 1: a block-compressed texture's dimensions MUST
+    // be a multiple of 4 (WebGPU rejects e.g. 1050×1050 as BC1 — the device-loss
+    // trigger this replaced), so it is uploaded at the padded size and the mesh
+    // samples only the logical [0..w/padW, 0..h/padH] sub-rect. The padding lives
+    // at the bottom/right (v→1, u→1) as edge-clamped replication (see gatherBlock),
+    // so clamping the UV max there hides it with no image squash or shift.
+    function buildWholeImageMaterial(tex, uvScale = [1, 1]) {
+      const { Fn, uniform, vec2, vec3, float, uv, texture } = THREE.TSL;
+      const uTint = uniform(vec3(1, 1, 1));
+      const uAlpha = uniform(float(1));
+      const uUvScale = uniform(vec2(uvScale[0], uvScale[1]));
+      const material = new THREE.NodeMaterial();
+      material.transparent = true;
+      material.depthTest = false;
+      material.depthWrite = false;
+      material.side = THREE.DoubleSide; // negative scaleX flips winding — see world-quad.js
+      material.colorNode = Fn(() => {
+        const c = texture(tex, uv().mul(uUvScale)).toVar();
+        c.rgb.mulAssign(uTint);
+        c.a.mulAssign(uAlpha);
+        return c;
+      })();
+      return { material, appearance: { uTint, uAlpha } };
+    }
+
+    /** Rebuild a tile mesh's world quad from the item's CURRENT placement (called
+     * on load and on any placement change). Geometry only — texture is untouched. */
+    function setTileGeometry(t, placement, imageW, imageH) {
+      t.sub = computeTileSubPlacement(placement, imageW, imageH, t.tile);
+      const positions = buildQuadPositions(computeQuadCorners(t.sub));
+      if (t.geometry.getAttribute('position')) {
+        t.geometry.getAttribute('position').array.set(positions);
+        t.geometry.getAttribute('position').needsUpdate = true;
+      } else {
+        t.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        t.geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(QUAD_UVS), 2));
+        t.geometry.setIndex(Array.from(QUAD_INDICES));
+      }
+    }
+
+    // Serialize whole-image loads so only ONE giant image is ever in flight
+    // (fetch → decode → upload → GPU-drain → close). Two 12000² floor-1 images
+    // loading at once meant two ~576 MB source bitmaps alive AND two ~549 MB GPU
+    // uploads submitted back-to-back — the memory-plus-queue spike that lost the
+    // device on a floor switch (2026-07-18). One at a time trades a slightly
+    // slower reveal for a bounded peak.
+    let wholeImageLoadChain = Promise.resolve();
+
+    /** Build (once) the whole-image drawable for an item: plan → async decode
+     * each tile's source rect → texture → quad mesh. Idempotent; the async load
+     * fills in `state.wholeImage.tiles` as bitmaps arrive. Every failure is
+     * captured on `state.wholeImage.error`, never thrown — a broken item must
+     * not take the scene down, and the diagnostics must be able to name it. */
+    function ensureWholeImageMeshes(state, item) {
+      if (state.wholeImage) return state.wholeImage;
+      const imageW = state.imageSize.width;
+      const imageH = state.imageSize.height;
+      // Cap tile size for MEMORY safety, not just the HW limit: a single 12000²
+      // upload TDR'd the device on a floor switch. See MAX_WHOLE_TILE_DIM.
+      const plan = planImageTiles(imageW, imageH, Math.min(textureLimit, MAX_WHOLE_TILE_DIM));
+      const wi = {
+        status: 'loading',
+        error: null,
+        imageSize: { width: imageW, height: imageH },
+        limit: textureLimit,
+        plan: { cols: plan.cols, rows: plan.rows, whole: plan.whole, tiles: plan.tiles.length },
+        tiles: [], // filled as each tile decodes: {tile, sub, tex, geometry, material, mesh, appearance}
+        src: item.src,
+        renderOrder: item.renderOrder,
+        bitmapsFreed: 0, // decoded CPU bitmaps closed after GPU upload (memory reclaimed)
+        bitmapsRetained: 0, // bitmaps left un-closed (upload could not be forced) — should stay 0
+        compressed: null, // null | 'bc1'|'bc7' (+ '(cached)') | 'error:fellback'
+        rawScale: 1, // <1 only on the capped RAW fallback (worker unavailable) — see MAX_RAW_FALLBACK_DIM
+        // SOURCE alpha, as the decoder actually handed it to the worker, BEFORE
+        // any BC7 encoding touches it (2026-07-18 diagnostic: "background renders
+        // totally black in isolation, but a same-format/same-dimension overhead
+        // tile on the same floor looks correct"). min/max/mean over every alpha
+        // byte in the real decode. If this already reads near-zero, the bug is
+        // upstream of the encoder (decode/premultiply); if it reads sane
+        // (mostly-255-with-real-holes) yet the item still renders black, the bug
+        // is downstream (encode/pack/GPU-upload) — this field is what tells the
+        // two apart instead of guessing a third time.
+        alphaStats: null,
+      };
+      state.wholeImage = wi;
+
+      // wi.loadPromise: the async body below ALWAYS resolves (every error path
+      // sets wi.status='error' + wi.error and does not re-throw — see the catch
+      // block), so this is safe for a caller to await without a try/catch of its
+      // own. Fire-and-forget callers (the normal per-frame refresh path) ignore
+      // it exactly as before; startVtPanViewer's startup sequence uses it to
+      // actually WAIT for the viewed floor's compression before dropping the
+      // loading curtain (2026-07-18 — "encoding during loading" fix: this
+      // promise used to be thrown away entirely, so the curtain could drop
+      // claiming "Ready" while the floor you were looking at still had
+      // invisible art compressing in the background — exactly the "0%/98%
+      // gate" class of lie load-progress.js's header exists to forbid, just
+      // relocated from the progress bar to the floor switch).
+      wi.loadPromise = (async () => {
+        // Take our place in the serialized load queue: only one giant image is
+        // ever in flight at a time (see wholeImageLoadChain).
+        const priorLoad = wholeImageLoadChain;
+        let releaseLoad;
+        wholeImageLoadChain = new Promise((res) => {
+          releaseLoad = res;
+        });
+        // WebGPU-only handle: wait for the GPU to FINISH each upload before the
+        // next starts, bounding queue depth so a burst of giant copies can't
+        // back up into a TDR (the guard the streaming path uses too).
+        const gpuQueue = renderer.backend?.isWebGPUBackend ? renderer.backend.device?.queue : null;
+        try {
+          // Our chain promise is only ever RESOLVED (releaseLoad in finally),
+          // never rejected, so a plain await cannot propagate a prior failure.
+          await priorLoad;
+          // Backend must be up before we can force-upload a tile (initTexture
+          // throws otherwise). init() is idempotent and resolves instantly once
+          // the device exists, so awaiting it here just removes a startup race.
+          await renderer.init();
+
+          // COMPRESSED PATH — the WebGPU-memory-ceiling fix. Both floors of raw
+          // 12000² art exceed Chrome's ~2.5 GB device-loss wall; compressed they
+          // fit far under it. The worker returns BC1 for OPAQUE images (8×, e.g. a
+          // floor background 549→72 MB) and BC7 for ALPHA images (4×, carries the
+          // overhead/roof overlays' alpha holes the multifloor composite needs —
+          // those used to stay raw at 549 MB each and lost the device on a floor
+          // switch). Any worker failure/unavailability returns null and we FALL
+          // THROUGH to the proven raw path — compression must never break
+          // rendering (the safety slide).
+          try {
+            const c = await requestCompressedTexture(item.src);
+            if (c && (c.format === 'bc1' || c.format === 'bc7') && c.blocks) {
+              // A block-compressed texture's dimensions MUST be a multiple of 4
+              // (the 4×4 block). The worker encodes ceil(w/4)×ceil(h/4) blocks with
+              // edge-clamped padding, so the block buffer IS a valid encoding of the
+              // padded size — upload at padW×padH (WebGPU rejects the raw 1050×1050
+              // etc. that lost the device) and let the material's uvScale sample
+              // only the logical w×h sub-rect. The block count (hence byte length)
+              // already matches the padded size, so only the width/height and the
+              // format enum change between BC1 and BC7.
+              const threeFormat = c.format === 'bc7' ? THREE.RGBA_BPTC_Format : THREE.RGBA_S3TC_DXT1_Format;
+              const padW = Math.ceil(c.width / 4) * 4;
+              const padH = Math.ceil(c.height / 4) * 4;
+              const tex = new THREE.CompressedTexture(
+                [{ data: c.blocks, width: padW, height: padH }],
+                padW,
+                padH,
+                threeFormat
+              );
+              // Block rows are top-first (getImageData order), same as the raw
+              // bitmap path — so v=0 = top, matching the world-quad convention.
+              // Y-FLIP is a recurring bug class (memory: y_flip_recurring_risk):
+              // if a compressed floor renders upside-down, this is the line.
+              tex.flipY = false;
+              tex.colorSpace = THREE.SRGBColorSpace;
+              tex.generateMipmaps = false;
+              tex.minFilter = THREE.LinearFilter;
+              tex.magFilter = THREE.LinearFilter;
+              tex.needsUpdate = true;
+              try {
+                renderer.initTexture(tex);
+              } catch (_) {
+                // Backend not up yet — Three uploads the CompressedTexture lazily
+                // on first render. Correct, just not forced.
+              }
+              const wholeTile = { sx: 0, sy: 0, sw: c.width, sh: c.height, col: 0, row: 0 };
+              const { material, appearance } = buildWholeImageMaterial(tex, [c.width / padW, c.height / padH]);
+              const geometry = new THREE.BufferGeometry();
+              const t = { tile: wholeTile, sub: null, tex, geometry, material, appearance, mesh: null };
+              setTileGeometry(t, state.placement, imageW, imageH);
+              const mesh = new THREE.Mesh(geometry, material);
+              mesh.frustumCulled = false;
+              mesh.visible = false; // the refresh loop decides visibility + renderOrder
+              mesh.renderOrder = wi.renderOrder;
+              t.mesh = mesh;
+              scene.add(mesh);
+              wi.tiles.push(t);
+              wi.compressed = c.cached ? `${c.format}(cached)` : c.format;
+              wi.alphaStats = c.alphaStats ?? null;
+              wi.status = 'ready';
+              scheduleResidencyUpdate().catch(() => {
+                // Non-fatal: the next real input refreshes visibility anyway.
+              });
+              return; // compressed → done (releaseLoad still runs in the finally below)
+            }
+          } catch (err) {
+            // The compressed attempt must never sink the item — fall through to raw.
+            wi.compressed = 'error:fellback';
+            log.warn(`BC1 path failed for "${item.id}", using raw:`, err);
+          }
+
+          // RAW PATH (fallback). Reached only when the compressed worker gave us
+          // nothing (unavailable/failed). Main thread resolves a data-relative src
+          // fine; createImageBitmap decodes OFF the main thread, and its crop args
+          // slice each tile's source rect directly — no full-image hold.
+          // SAFETY-SLIDE CAP: without compression, a full-res upload is the 549 MB
+          // device-killer this whole change exists to prevent. Downscale the
+          // fallback so even an all-raw scene stays under the WebGPU ceiling
+          // (softer art, live device). rawScale=1 when the image already fits.
+          const rawScale = Math.min(1, MAX_RAW_FALLBACK_DIM / Math.max(imageW, imageH));
+          wi.rawScale = rawScale;
+          if (rawScale < 1) wi.compressed = 'raw:capped';
+          const res = await fetch(item.src);
+          if (!res.ok) throw new Error(`HTTP ${res.status} for ${item.src}`);
+          const blob = await res.blob();
+          for (const tile of plan.tiles) {
+            const rw = Math.max(1, Math.round(tile.sw * rawScale));
+            const rh = Math.max(1, Math.round(tile.sh * rawScale));
+            const bitmap =
+              rawScale < 1
+                ? await createImageBitmap(blob, tile.sx, tile.sy, tile.sw, tile.sh, {
+                    resizeWidth: rw,
+                    resizeHeight: rh,
+                    resizeQuality: 'high',
+                  })
+                : await createImageBitmap(blob, tile.sx, tile.sy, tile.sw, tile.sh);
+            const tex = new THREE.Texture(bitmap);
+            tex.flipY = false; // v=0 = image top row — the world-quad convention
+            tex.colorSpace = THREE.SRGBColorSpace; // art is sRGB; sample decodes to linear
+            tex.generateMipmaps = false;
+            tex.minFilter = THREE.LinearFilter;
+            tex.magFilter = THREE.LinearFilter;
+            tex.needsUpdate = true;
+            // Force the GPU upload NOW, then free the decoded CPU-side bitmap.
+            // Three otherwise retains the ImageBitmap forever via `tex.image`
+            // (w·h·4 bytes — ~576 MB for one 12000² tile), redundant with the
+            // GPU copy. On a multi-floor scene those retained bitmaps stack and
+            // pushed the device past its memory ceiling on floor switch
+            // (2026-07-18). initTexture runs copyExternalImageToTexture
+            // synchronously (verified against the vendored WebGPU backend), so
+            // the pixels are on the GPU before we close.
+            try {
+              renderer.initTexture(tex);
+              if (typeof bitmap.close === 'function') bitmap.close();
+              wi.bitmapsFreed++;
+            } catch (_) {
+              // Upload could not be forced (should not happen — init() awaited
+              // above). Leave the bitmap so Three uploads it lazily on first
+              // render; closing before upload would blank the tile.
+              wi.bitmapsRetained++;
+            }
+            // Wait for the GPU to FINISH this ~549 MB copy before the next giant
+            // upload, so a floor switch's two big copies can't queue up unbounded
+            // into a TDR. Healthy: returns in well under a ms.
+            if (gpuQueue) {
+              try {
+                await gpuQueue.onSubmittedWorkDone();
+              } catch (_) {
+                // A lost/dying device rejects this; the device-lost handler owns
+                // recovery, so there is nothing to do here but stop waiting.
+              }
+            }
+            const { material, appearance } = buildWholeImageMaterial(tex);
+            const geometry = new THREE.BufferGeometry();
+            const t = { tile, sub: null, tex, geometry, material, appearance, mesh: null };
+            setTileGeometry(t, state.placement, imageW, imageH);
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.frustumCulled = false;
+            mesh.visible = false; // the refresh loop decides visibility + renderOrder
+            mesh.renderOrder = wi.renderOrder;
+            t.mesh = mesh;
+            scene.add(mesh);
+            wi.tiles.push(t);
+          }
+          wi.status = 'ready';
+          // The meshes were added mid-load with visible:false, and nothing else
+          // sets their visibility until the NEXT input event — which is why the
+          // big textures stayed BLACK until the user panned. Re-run the refresh
+          // now so they appear the instant they finish loading.
+          scheduleResidencyUpdate().catch(() => {
+            // Non-fatal: the next real input refreshes visibility anyway.
+          });
+        } catch (err) {
+          wi.status = 'error';
+          wi.error = String(err?.message || err);
+          log.error(`whole-image load failed for "${item.id}" (${item.src}):`, err);
+        } finally {
+          // Release the next queued load regardless of outcome, or one broken
+          // image would stall every subsequent whole-image load forever.
+          releaseLoad();
+        }
+      })();
+
+      return wi;
+    }
+
+    /** Update a whole-image item each refresh: reposition on placement change,
+     * set visibility + renderOrder. Cheap; the textures never re-upload. */
+    function refreshWholeImageItem(state, item, show, placementChanged) {
+      const wi = state.wholeImage;
+      if (!wi) return;
+      wi.renderOrder = item.renderOrder;
+      for (const t of wi.tiles) {
+        if (placementChanged) setTileGeometry(t, state.placement, wi.imageSize.width, wi.imageSize.height);
+        t.mesh.visible = show;
+        t.mesh.renderOrder = item.renderOrder;
+      }
+    }
+
     let view = null; // set once the first item is loaded
     /** Wall-clock cost of the pre-first-draw shader precompile; null if it failed. */
     let shaderCompileMs = null;
@@ -1383,6 +2029,9 @@ export async function startVtPanViewer({
       if (decodedForUpload.length > 0) {
         const wasActive = loopActive;
         let lastYieldMs = performance.now();
+        // GPU-completion backpressure handle (WebGPU only) — see UPLOAD_PAGES_PER_DRAIN.
+        const gpuQueue = renderer.backend?.isWebGPUBackend ? renderer.backend.device?.queue : null;
+        let uploadsSinceDrain = 0;
         renderer.setAnimationLoop(null);
         atlas.prepareForUploadBatch();
         for (const { slot, decoded } of decodedForUpload) {
@@ -1394,7 +2043,34 @@ export async function startVtPanViewer({
           srcTex.dispose();
           decoded.close?.();
 
+          // Bound the GPU queue depth: after UPLOAD_PAGES_PER_DRAIN uploads, wait
+          // for the GPU to actually finish them before enqueuing more (this is the
+          // REAL backpressure — the time budget below bounds only MAIN-THREAD time,
+          // never queue depth). `drained` defers the timing to the existing `now`
+          // read below so this takes NO new wall-clock sample (time/one-clock wall).
+          let drained = false;
+          if (gpuQueue && ++uploadsSinceDrain >= UPLOAD_PAGES_PER_DRAIN) {
+            uploadsSinceDrain = 0;
+            try {
+              await gpuQueue.onSubmittedWorkDone();
+            } catch (_) {
+              // A lost/dying device can reject this; the device-lost handler owns
+              // the slide. Never let backpressure itself throw out of the loop.
+            }
+            drained = true;
+          }
+
           const now = performance.now();
+          if (drained) {
+            // now - lastYieldMs ≈ the drain wait (enqueuing ≤48 pages is ~free CPU),
+            // so a BALLOONING value is the GPU failing to keep up — the upload-burst
+            // TDR signal the device-lost snapshot reads. Reset the yield clock too:
+            // the drain already handed the main thread its breather.
+            const drainMs = now - lastYieldMs;
+            _uploadDrain.count++;
+            if (drainMs > _uploadDrain.maxMs) _uploadDrain.maxMs = drainMs;
+            lastYieldMs = now;
+          }
           if (shouldYieldByTime(now - lastYieldMs, MAX_MS_PER_UPLOAD_CHUNK)) {
             if (wasActive) renderer.setAnimationLoop(renderFrame); // let a REAL frame paint between chunks
             await nextAnimationFrame();
@@ -1795,6 +2471,21 @@ export async function startVtPanViewer({
           pack.residentViewKeys = new Set();
         }
         if (state.mesh) state.mesh.visible = false;
+        // WHOLE-IMAGE items draw through state.wholeImage.tiles[].mesh, NOT
+        // state.mesh — so hiding state.mesh above does nothing for them. Without
+        // this, an item that LEAVES the draw list on a floor switch (e.g. the
+        // upper floor's roof/overhead when you drop to the ground floor, which
+        // Foundry's cross-floor rule excludes from the ground's draw list) kept
+        // its meshes visible: the ceiling of the floor above hung over the floor
+        // below, and never cleared. Latent since the whole-image path landed —
+        // only observable now that the floor switch stopped losing the device
+        // first. (memory: y_flip-class "verify at every NEW seam" — visibility is
+        // that seam here.)
+        if (state.wholeImage) {
+          for (const t of state.wholeImage.tiles) {
+            if (t.mesh) t.mesh.visible = false;
+          }
+        }
       }
 
       const worldRect = viewToWorldRect(view, canvasW / canvasH);
@@ -1867,28 +2558,38 @@ export async function startVtPanViewer({
           if (tokenPassLog.length > TOKEN_PASS_LOG_MAX) tokenPassLog.shift();
         }
         const onScreen = rectsOverlap(state.worldBounds, worldRect);
+        const show = onScreen && (isolateItemId === '' || item.id === isolateItemId);
 
-        // Stream EVERY pack — albedo AND every mask — through the ONE shared
-        // cache. This is the mask-pile-up proof: all of an item's layers are
-        // resident at once, yet each costs only its visible pages, never a
-        // world-resolution texture.
-        for (const pack of state.packs.values()) {
-          if (onScreen) {
-            await streamPackResidency(pack, state, worldRect);
-          } else {
-            for (const key of pack.residentViewKeys) cache.unpin(key);
-            pack.residentViewKeys = new Set();
+        if (_wholeImageEnabled) {
+          // WHOLE-IMAGE PATH: load the art whole and draw it — NO page streaming
+          // at all (skipping the pack loop is the entire point: it is the upload
+          // churn that lost the device). displayLayer switching is a streaming-
+          // path debug feature; whole-image draws the albedo (item.src).
+          ensureWholeImageMeshes(state, item);
+          refreshWholeImageItem(state, item, show, changed);
+        } else {
+          // STREAMING PATH (the OFF fallback — MapShine.setWholeImageMode(false)).
+          // Stream EVERY pack — albedo AND every mask — through the ONE shared
+          // cache: all of an item's layers resident at once, each costing only
+          // its visible pages, never a world-resolution texture.
+          for (const pack of state.packs.values()) {
+            if (onScreen) {
+              await streamPackResidency(pack, state, worldRect);
+            } else {
+              for (const key of pack.residentViewKeys) cache.unpin(key);
+              pack.residentViewKeys = new Set();
+            }
           }
-        }
 
-        ensureItemMesh(state);
-        const displayPack = state.packs.get(displayLayerName) ?? state.albedoPack;
-        bindMeshToPack(state, displayPack);
-        // Isolation is applied HERE, after every streaming decision above, so a
-        // hidden item still pages exactly as it would normally — see
-        // isolateItemId. `''` is the normal case and costs one string compare.
-        state.mesh.visible = onScreen && (isolateItemId === '' || item.id === isolateItemId);
-        state.mesh.renderOrder = item.renderOrder; // from sortByLayer — THE law
+          ensureItemMesh(state);
+          const displayPack = state.packs.get(displayLayerName) ?? state.albedoPack;
+          bindMeshToPack(state, displayPack);
+          // Isolation is applied HERE, after every streaming decision above, so a
+          // hidden item still pages exactly as it would normally — see
+          // isolateItemId. `''` is the normal case and costs one string compare.
+          state.mesh.visible = show;
+          state.mesh.renderOrder = item.renderOrder; // from sortByLayer — THE law
+        }
       }
 
       lastItems = items;
@@ -2435,6 +3136,38 @@ export async function startVtPanViewer({
     // so this executes inline and the await genuinely resolves after it).
     await scheduleResidencyUpdate();
 
+    // WAIT FOR THE VIEWED FLOOR'S TEXTURE COMPRESSION (2026-07-18 — "encoding
+    // during loading", author-requested after watching the upper floor's
+    // background/overhead sit invisible for a minute-plus after a floor
+    // switch with zero on-screen explanation). scheduleResidencyUpdate() just
+    // KICKED OFF each item's BC1/BC7 encode via ensureWholeImageMeshes — it
+    // does not wait for any of them (they run in the background, serialized
+    // through wholeImageLoadChain). Without this, the loading curtain drops
+    // the instant the ITEM LIST is built, while the actual pixels for the
+    // floor the author is looking at are still cooking — the "0%/98% two-gate
+    // 'Ready!' lie" load-progress.js's header puts on the kill list, just
+    // relocated to right after the curtain instead of inside it.
+    //
+    // Deliberately scoped to the VIEWED floor only: waiting for every floor in
+    // the scene here would make a heavy multi-floor scene's FIRST load take
+    // as long as visiting every floor once, even for an author who only ever
+    // opens floor 0 this session. Other floors are prewarmed in the
+    // background further below (non-blocking) so a later floor switch is
+    // fast without holding up THIS floor's curtain.
+    if (_wholeImageEnabled) {
+      const compressing = initialItems
+        .map((item) => ({ item, wi: itemStates.get(item.id)?.wholeImage }))
+        .filter(({ wi }) => wi?.loadPromise);
+      if (compressing.length) {
+        onLoadProgress?.({ done: 0, total: compressing.length, detail: 'Compressing textures' });
+        for (let i = 0; i < compressing.length; i++) {
+          const { item, wi } = compressing[i];
+          await wi.loadPromise; // always resolves — see wi.loadPromise's own doc
+          onLoadProgress?.({ done: i + 1, total: compressing.length, detail: item.kind });
+        }
+      }
+    }
+
     // PRECOMPILE BEFORE THE FIRST DRAW. Until now every program compiled lazily
     // inside the first render() — an unbounded synchronous stall in the one frame
     // the user is already waiting on, and invisible because it hid inside the
@@ -2475,11 +3208,40 @@ export async function startVtPanViewer({
     // initial floor's first paint; a failure on one item can't take the viewer
     // down. Items are per-floor now, so this asks buildItems for each floor's
     // draw list rather than loading "a floor".
+    //
+    // WHOLE-IMAGE MODE (2026-07-18 — companion to the "wait for the viewed
+    // floor" fix above): ensureItemLoaded alone only probes each item's source
+    // DIMENSIONS in this mode — it does NOT start BC1/BC7 compression (that is
+    // ensureWholeImageMeshes' job, normally triggered only when a floor enters
+    // the draw list). Before this, that meant this loop's own doc comment was
+    // aspirational, not real: OTHER floors' art never actually started
+    // compressing until the author switched to them, so "so a floor switch is
+    // instant" was true for streaming-mode coarse pins but false for the
+    // whole-image path every real scene now uses.
+    //
+    // DELIBERATELY BOUNDED TO ADJACENT FLOORS (±1), not every floor in the
+    // scene — unlike a coarse pin (a small, fixed-size preview the page cache
+    // can always evict), a compressed whole-image texture has NO eviction: once
+    // built it stays GPU-resident for the rest of the session. Eagerly
+    // compressing every floor of a scene with many floors would grow peak VRAM
+    // without bound — reintroducing, via a different door, the exact ceiling
+    // this entire session was spent fixing. Adjacent-floor prewarm covers the
+    // overwhelmingly common "step up/down one floor" navigation for free; a
+    // multi-floor jump still compresses lazily on arrival, same as before this
+    // change. Calling ensureWholeImageMeshes here queues its compression onto
+    // the SAME serialized wholeImageLoadChain the viewed floor's items used
+    // above — since those were DISPATCHED first, they keep priority. Still
+    // fire-and-forget: no onLoadProgress call, because the curtain is already
+    // down and a background prewarm succeeding or failing must not reopen it.
     for (let f = 0; f < floorCount; f++) {
       if (f === clampedInitialFloor) continue;
+      const adjacent = Math.abs(f - clampedInitialFloor) === 1;
       Promise.resolve()
         .then(async () => {
-          for (const item of buildItems(f)) await ensureItemLoaded(item);
+          for (const item of buildItems(f)) {
+            const state = await ensureItemLoaded(item);
+            if (_wholeImageEnabled && adjacent) ensureWholeImageMeshes(state, item);
+          }
         })
         .catch((err) => console.warn(`[vt-pan-viewer] prewarm floor ${f} failed:`, err));
     }
@@ -2872,7 +3634,9 @@ export async function startVtPanViewer({
             sortLayer: i.key.sortLayer,
             sort: i.key.sort,
             zIndex: i.key.zIndex,
-            visible: state?.mesh?.visible ?? false,
+            visible:
+              state?.mesh?.visible ??
+              (state?.wholeImage ? state.wholeImage.tiles.some((tt) => tt.mesh?.visible) : false),
             occlusionModes: i.occlusion?.modes ?? 0,
             // GROUND TRUTH vs RENDERED, for tokens only (2026-07-17 — "stops
             // slightly short" after the moveToken fix). `state.placement` is
@@ -3031,6 +3795,117 @@ export async function startVtPanViewer({
           canvasSizePx: { width: canvasW, height: canvasH },
           mountedInBoard: mount.fill && mount.host !== document.body,
           cacheStats: cache.stats(),
+          // WHOLE-IMAGE MODE STATE — the primary instrument for the "load images
+          // like PIXI" path (2026-07-17). Read this FIRST when the new path
+          // misbehaves: it names, per item, exactly what happened.
+          wholeImage: (() => {
+            const perItem = [];
+            let totalBytes = 0;
+            let totalBc1Bytes = 0;
+            let ready = 0;
+            let errors = 0;
+            let freed = 0;
+            let retained = 0;
+            let appliedCount = 0;
+            for (const [id, s] of itemStates) {
+              const wi = s.wholeImage;
+              if (!wi) continue;
+              // HONEST bytes: count what the GPU actually holds for THIS item —
+              // BC1 (8×) or BC7 (2× vs BC1) when compressed, raw RGBA8 otherwise.
+              // (Before BC7 landed this always counted raw and over-reported the
+              // compressed floors ~8× — memory: feedback_instruments_must_not_lie.)
+              const isBc7 = wi.compressed && wi.compressed.startsWith('bc7');
+              const isBc1 = wi.compressed && wi.compressed.startsWith('bc1');
+              const rs = wi.rawScale || 1; // <1 only on the capped raw fallback
+              let bytes = 0;
+              for (const tt of wi.tiles) {
+                totalBc1Bytes += bc1ByteLength(tt.tile.sw, tt.tile.sh); // BC1 reference size (projection column)
+                if (isBc7) bytes += bc7ByteLength(tt.tile.sw, tt.tile.sh);
+                else if (isBc1) bytes += bc1ByteLength(tt.tile.sw, tt.tile.sh);
+                // raw RGBA8 at the ACTUALLY uploaded size (the fallback cap shrinks it)
+                else bytes += Math.round(tt.tile.sw * rs) * Math.round(tt.tile.sh * rs) * 4;
+              }
+              totalBytes += bytes;
+              freed += wi.bitmapsFreed;
+              retained += wi.bitmapsRetained;
+              if (isBc1 || isBc7) appliedCount++;
+              if (wi.status === 'ready') ready++;
+              if (wi.status === 'error') errors++;
+              perItem.push({
+                id,
+                src: wi.src,
+                status: wi.status, // loading | ready | error
+                error: wi.error,
+                grid: wi.plan ? `${wi.plan.cols}×${wi.plan.rows}${wi.plan.whole ? ' (whole)' : ''}` : null,
+                imageSize: wi.imageSize,
+                tilesDecoded: wi.tiles.length,
+                tilesPlanned: wi.plan?.tiles ?? null,
+                approxVramMB: +(bytes / (1024 * 1024)).toFixed(1),
+                visible: wi.tiles.some((tt) => tt.mesh?.visible),
+                renderOrder: wi.renderOrder,
+                bitmapsFreed: wi.bitmapsFreed,
+                bitmapsRetained: wi.bitmapsRetained,
+                compressed: wi.compressed, // null | bc1|bc7 (+ (cached)) | error:fellback
+                alphaStats: wi.alphaStats, // {min,max,mean} of the DECODED source alpha, pre-encode, or null
+              });
+            }
+            return {
+              enabled: _wholeImageEnabled,
+              textureLimit,
+              itemCount: perItem.length,
+              ready,
+              errors,
+              approxVramMB: +(totalBytes / (1024 * 1024)).toFixed(1),
+              bitmapsFreed: freed,
+              bitmapsRetained: retained,
+              atlasStillAllocatedMB: atlas ? +(layout.totalBytes / (1024 * 1024)).toFixed(1) : 0,
+              estTextureVramMB: +((totalBytes + (atlas ? layout.totalBytes : 0)) / (1024 * 1024)).toFixed(1),
+              // PROJECTION (not yet applied): what these exact floors would occupy
+              // as GPU-compressed textures. The device dies ~2.5GB uncompressed
+              // (estTextureVramMB); compressed, both floors fit well under 1GB —
+              // the fight-for-WebGPU fix. Encoder is landed + Node-tested
+              // (block-compress.js); encode→IndexedDB-cache→CompressedTexture is next.
+              compressed: {
+                // REFERENCE projections (hypothetical whole-scene costs), NOT the
+                // live bill — that is estTextureVramMB above, now honest per-format.
+                bc1IfAllMB: +(totalBc1Bytes / (1024 * 1024)).toFixed(1), // 0.5 B/px, 8× smaller
+                bc7IfAllMB: +((totalBc1Bytes * 2) / (1024 * 1024)).toFixed(1), // 1 B/px, 4×, carries alpha
+                applied: appliedCount > 0, // are any items ACTUALLY compressed now?
+                appliedItems: appliedCount,
+                worker: getCompressedTextureStats(), // requests/bc1/bc7/failed/cached
+              },
+              interpretation:
+                'Whole-image mode draws each item as plain texture(s) with NO page streaming — the fix ' +
+                'for the upload-churn device loss. Per item, status is loading|ready|error (error names ' +
+                'the failed src). grid "1×1 (whole)" = one texture (a 12000² floor at the 16384 cap); ' +
+                '"2×2" = the quarter-split fallback on a smaller texture limit. tilesDecoded < ' +
+                'tilesPlanned mid-load is normal; staying below it, or status:error, is a LOAD failure ' +
+                '(check src/error). enabled:false = reverted to streaming via ' +
+                'MapShine.setWholeImageMode(false). CRUCIAL: if the screen is BLACK yet every item is ' +
+                'status:ready + visible:true, it is NOT a load failure — the quads are drawing wrong ' +
+                '(offscreen placement, a Y-flip, or a colorSpace/sample bug); that is a geometry/shader ' +
+                'issue, not a decode one. errors>0 with the streaming path idle means those items show ' +
+                'nothing at all. MEMORY (the floor-switch device-loss hunt, 2026-07-18): bitmapsFreed ' +
+                'is decoded CPU bitmaps closed right after GPU upload; bitmapsRetained MUST stay 0 — a ' +
+                'nonzero value means a ~w·h·4 bitmap (576 MB for a 12000² tile) is still held alongside ' +
+                'its GPU copy, the exact doubling that blew the memory ceiling. estTextureVramMB is the ' +
+                'honest texture bill: whole-image textures PLUS atlasStillAllocatedMB. As of 2026-07-18 ' +
+                'the 512MB streaming atlas is NO LONGER allocated in whole-image mode (atlasStillAllocatedMB ' +
+                'should read 0) — we now carry ONLY the floor textures, matching Foundry PIXI. estTextureVramMB ' +
+                'is now honest PER FORMAT: opaque items are BC1 (8× smaller), alpha items BC7 (4×), raw only ' +
+                'if compression was unavailable. Uncompressed, both floors full-res is ~2.75 GB (the old ' +
+                'device-loss trigger); with BC1+BC7 the same scene is ~0.5 GB — the `compressed` block shows ' +
+                'the reference projections. If estTextureVramMB still climbs toward ~2.5 GB, compression is ' +
+                'NOT being applied (check compressed.applied / per-item compressed) — Chrome WebGPU TDRs the ' +
+                'device on a big allocation under pressure where its WebGL would not. Per-item alphaStats ' +
+                '{min,max,mean} (2026-07-18) is the SOURCE alpha the decoder handed the worker, BEFORE BC7 ' +
+                'touches it — added because a BC7 item can be status:ready+visible:true+compressed:"bc7" ' +
+                '(every OTHER instrument says success) and still render solid black. min/max near 255 means ' +
+                'the decode is fine and the bug is downstream (encode/pack/GPU-upload); min/max near 0 means ' +
+                'it was ALREADY wrong before BC7 ever ran (decode/premultiply). null = raw path or pre-fix cache.',
+              items: perItem,
+            };
+          })(),
           drawList,
           // Empty = every token matches its live document right now (the good
           // state). Non-empty names exactly which tokens are behind and by how

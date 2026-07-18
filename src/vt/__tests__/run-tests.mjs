@@ -11,6 +11,8 @@ import { run as runVtCore } from './vt-core.test.mjs';
 import { run as runAtlas } from './atlas.test.mjs';
 import { run as runDecodePool } from './decode-pool.test.mjs';
 import { run as runViewState } from './view-state.test.mjs';
+import { run as runTextureLimits } from './texture-limits.test.mjs';
+import { run as runBlockCompress } from './block-compress.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -50,6 +52,8 @@ const suites = [
   ['atlas', runAtlas],
   ['decode-pool', runDecodePool],
   ['view-state', runViewState],
+  ['texture-limits', runTextureLimits],
+  ['block-compress', runBlockCompress],
 ];
 
 for (const [name, fn] of suites) {

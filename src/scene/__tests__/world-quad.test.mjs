@@ -18,11 +18,13 @@ import {
   QUAD_INDICES,
   buildQuadPositions,
   worldToQuadUv,
+  computeTileSubPlacement,
   viewRectToImageRect,
   computeItemViewportPx,
   rectsOverlap,
 } from '../world-quad.js';
 import { computeQuadCorners, computeTilePlacement } from '../../foundry/scene-geometry.js';
+import { planImageTiles } from '../../vt/texture-limits.js';
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps;
 
@@ -248,5 +250,71 @@ export function run(t) {
     ok("end-to-end: NDC width matches the tile's share of the view", near(ndc[1].x - ndc[0].x, 0.4));
     // ...and 100/400 of the height -> 0.5 of the 2-unit span.
     ok("end-to-end: NDC height matches the tile's share of the view", near(ndc[0].y - ndc[3].y, 0.5));
+  }
+
+  // --- computeTileSubPlacement: a SPLIT image draws exactly like a whole one -
+  // Verified against the REAL computeQuadCorners, so the split path inherits the
+  // whole-item path's orientation (no fresh Y-flip — the point of this file).
+  {
+    const cornersMatch = (a, b) => a.every((c, i) => near(c.x, b[i].x, 1e-6) && near(c.y, b[i].y, 1e-6));
+    const aabb = (cs) => ({
+      minX: Math.min(...cs.map((c) => c.x)),
+      minY: Math.min(...cs.map((c) => c.y)),
+      maxX: Math.max(...cs.map((c) => c.x)),
+      maxY: Math.max(...cs.map((c) => c.y)),
+    });
+
+    // 1×1 whole-image tile reproduces the item's OWN quad, corner-for-corner.
+    {
+      const placement = { x: 9000, y: 9000, width: 12000, height: 12000, anchorX: 0.5, anchorY: 0.5, rotation: 0 };
+      const sub = computeTileSubPlacement(placement, 12000, 12000, { sx: 0, sy: 0, sw: 12000, sh: 12000 });
+      ok(
+        'tileSubPlacement: a 1×1 whole tile reproduces the item quad corner-for-corner',
+        cornersMatch(computeQuadCorners(sub), computeQuadCorners(placement))
+      );
+    }
+
+    // A real 2×2 split (planImageTiles @ 8192) PARTITIONS the item quad: the four
+    // tile quads union to exactly the item quad, with no gap and no overshoot.
+    {
+      const placement = { x: 9000, y: 9000, width: 12000, height: 12000, anchorX: 0.5, anchorY: 0.5, rotation: 0 };
+      const plan = planImageTiles(12000, 12000, 8192); // 2×2 of 6000² source tiles
+      const subs = plan.tiles.map((tile) => computeTileSubPlacement(placement, 12000, 12000, tile));
+      const itemBox = aabb(computeQuadCorners(placement));
+      const union = aabb(subs.flatMap((s) => computeQuadCorners(s)));
+      ok(
+        'tileSubPlacement: 2×2 tiles union to exactly the item quad (no gap/overshoot)',
+        near(union.minX, itemBox.minX, 1e-6) &&
+          near(union.minY, itemBox.minY, 1e-6) &&
+          near(union.maxX, itemBox.maxX, 1e-6) &&
+          near(union.maxY, itemBox.maxY, 1e-6)
+      );
+      ok(
+        'tileSubPlacement: each of the 4 tiles is 6000×6000 world px',
+        subs.every((s) => near(s.width, 6000) && near(s.height, 6000))
+      );
+      // Source (0,0) is the image's TOP-LEFT; under Y-down world it must centre in
+      // the item's top-left quadrant (smaller X AND smaller Y). This is the flip
+      // link, asserted for the split path too.
+      ok(
+        'tileSubPlacement: source (0,0) tile centres top-left (Y-down inherited)',
+        near(subs[0].x, 6000) && near(subs[0].y, 6000)
+      );
+    }
+
+    // Rotated / off-anchor items: the whole-image tile STILL reproduces the item
+    // quad — the sub-placement rides the same anchor + rotation, so a split of a
+    // rotated tile stays glued to it.
+    for (const placement of [
+      { x: 500, y: 400, width: 300, height: 200, anchorX: 0.5, anchorY: 0.5, rotation: 37 },
+      { x: 500, y: 400, width: 300, height: 200, anchorX: 0, anchorY: 0, rotation: 0 },
+      { x: 500, y: 400, width: 300, height: 200, anchorX: 0.2, anchorY: 0.8, rotation: 90 },
+    ]) {
+      const sub = computeTileSubPlacement(placement, 300, 200, { sx: 0, sy: 0, sw: 300, sh: 200 });
+      ok(
+        `tileSubPlacement: whole tile reproduces the item quad (rot ${placement.rotation}, anchor ${placement.anchorX})`,
+        cornersMatch(computeQuadCorners(sub), computeQuadCorners(placement))
+      );
+    }
   }
 }

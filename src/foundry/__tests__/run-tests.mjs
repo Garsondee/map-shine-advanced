@@ -9,6 +9,7 @@
  */
 import { run as runActiveSceneSource } from './active-scene-source.test.mjs';
 import { run as runCanvasCompositing } from './canvas-compositing.test.mjs';
+import { run as runCanvasLifecycle } from './canvas-lifecycle.test.mjs';
 import { run as runDrawListDocuments } from './draw-list-documents.test.mjs';
 import { run as runMaskDiscovery } from './mask-discovery.test.mjs';
 import { run as runPixiProxyTextures } from './pixi-proxy-textures.test.mjs';
@@ -52,6 +53,7 @@ const t = {
 const suites = [
   ['active-scene-source', runActiveSceneSource],
   ['canvas-compositing', runCanvasCompositing],
+  ['canvas-lifecycle', runCanvasLifecycle],
   ['draw-list-documents', runDrawListDocuments],
   ['mask-discovery', runMaskDiscovery],
   ['pixi-proxy-textures', runPixiProxyTextures],

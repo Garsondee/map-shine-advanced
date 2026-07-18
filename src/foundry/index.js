@@ -74,3 +74,8 @@ export {
   decideArtSuppression,
   MSA_OWNED_GROUPS,
 } from './canvas-compositing.js';
+
+// THE BLANK-CANVAS WATCHDOG — detects a canvasTearDown that nothing follows
+// (Scene#unview(), the active scene being deleted), which canvasInit/
+// canvasReady alone can never see.
+export { registerCanvasTearDownWatchdog, isOrphanedTeardown } from './canvas-lifecycle.js';

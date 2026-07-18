@@ -148,6 +148,60 @@ export function worldToQuadUv(point, placement) {
 }
 
 /**
+ * A tile's own placement — so a SPLIT image draws exactly like a whole one.
+ *
+ * The "load whole images like PIXI" path (2026-07-17) uploads an image whole
+ * when it fits the GPU texture limit, or as the smallest grid of sub-tiles when
+ * it doesn't (`vt/texture-limits.js#planImageTiles` — the author's quarter-split
+ * generalized). Each sub-tile is its OWN texture holding one source rect, and it
+ * needs to sit at exactly its slice of the item's world quad. Rather than invent
+ * a parallel placement path (a fresh Y-flip waiting to happen — see this
+ * module's header), this re-expresses the tile as a normal centred placement:
+ * feed the result to the SAME `computeQuadCorners` + `QUAD_UVS` the whole-item
+ * path already uses, with the tile's whole texture sampled 0..1.
+ *
+ * It is the exact FORWARD of {@link worldToQuadUv}: the tile's centre in the
+ * item's 0..1 UV space (proportional to the source rect) mapped back to world,
+ * honouring the item's anchor and rotation — so a rotated or off-anchor item's
+ * tiles stay aligned. For a 1×1 (whole-image) plan it reproduces the item's own
+ * quad exactly. Source rects are top-left origin with sy DOWN, matching UV v-down
+ * (this module's convention), so no flip is introduced here.
+ *
+ * @param {{x:number,y:number,width:number,height:number,anchorX?:number,anchorY?:number,rotation?:number}} placement
+ *   the whole item's placement (from `computeTilePlacement`/`computeLevelTexturePlacement`).
+ * @param {number} sourceW @param {number} sourceH - the item's native image pixels.
+ * @param {{sx:number,sy:number,sw:number,sh:number}} tile - one entry of a `planImageTiles` result.
+ * @returns {{x:number,y:number,width:number,height:number,anchorX:number,anchorY:number,rotation:number}}
+ *   a centred (anchor 0.5) placement for the tile, ready for `computeQuadCorners`.
+ */
+export function computeTileSubPlacement(placement, sourceW, sourceH, tile) {
+  const { x, y, width, height, anchorX = 0.5, anchorY = 0.5, rotation = 0 } = placement;
+  const { sx, sy, sw, sh } = tile;
+  // The tile's centre in the item's own 0..1 UV space.
+  const u = (sx + sw / 2) / sourceW;
+  const v = (sy + sh / 2) / sourceH;
+  // Forward map (invert worldToQuadUv): local from UV, then rotate+translate.
+  // worldToQuadUv builds [lx;ly] = R(a)[dx;dy] with a = -rotation, so the
+  // inverse is [dx;dy] = R(a)^T [lx;ly].
+  const lx = (u - anchorX) * width;
+  const ly = (v - anchorY) * height;
+  const a = (-rotation * Math.PI) / 180;
+  const cos = Math.cos(a);
+  const sin = Math.sin(a);
+  const dx = cos * lx + sin * ly;
+  const dy = -sin * lx + cos * ly;
+  return {
+    x: x + dx,
+    y: y + dy,
+    width: (sw / sourceW) * width,
+    height: (sh / sourceH) * height,
+    anchorX: 0.5,
+    anchorY: 0.5,
+    rotation,
+  };
+}
+
+/**
  * Which part of an item's IMAGE does the current view actually need?
  *
  * The residency planner works in one virtual texture's own image pixels, but the

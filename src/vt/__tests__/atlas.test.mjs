@@ -42,6 +42,45 @@ function makeAtlasTHREE() {
   return { T, renderer, calls };
 }
 
+/**
+ * A WebGPU-backend-shaped fake, for the native upload path (atlas.js's own
+ * header has the full trace of why this path exists — no throwaway texture,
+ * no command encoder, one direct `copyExternalImageToTexture` call). Kept
+ * separate from `makeAtlasTHREE()` above (the WebGL2 fallback fake) rather
+ * than one fake trying to be both — the two paths' renderer shapes barely
+ * overlap (`backend.device.queue.*` vs `renderer.copyTextureToTexture`).
+ */
+function makeAtlasTHREEWebGPU() {
+  const { T } = makeAtlasTHREE();
+  const calls = { copyExternalImageToTexture: [], initTexture: [], copyTextureToTexture: [] };
+  // Only one texture is ever in play in this test (the atlas's own) — no
+  // need to distinguish which texture `backend.get()` was asked about.
+  const FAKE_GPU_TEXTURE = { label: 'FAKE_GPU_TEXTURE' };
+  const renderer = {
+    backend: {
+      isWebGPUBackend: true,
+      device: {
+        queue: {
+          copyExternalImageToTexture(source, destination, copySize) {
+            calls.copyExternalImageToTexture.push({ source, destination, copySize });
+          },
+        },
+      },
+      get() {
+        return { texture: FAKE_GPU_TEXTURE };
+      },
+    },
+    initTexture(texture3) {
+      calls.initTexture.push(texture3);
+    },
+    // Must NOT be called on the WebGPU path — asserted directly in the test.
+    copyTextureToTexture(...args) {
+      calls.copyTextureToTexture.push(args);
+    },
+  };
+  return { T, renderer, calls, FAKE_GPU_TEXTURE };
+}
+
 export function run(t) {
   const { ok, throws } = t;
 
@@ -172,6 +211,64 @@ export function run(t) {
       const atlas2 = new PageAtlas({ THREE: T, layout });
       atlas2.uploadPage(0, fakeSrc);
     });
+  }
+
+  // --- PageAtlas: on the WebGPU backend, uploadPage calls the NATIVE queue
+  // --- write directly — no throwaway texture, no command encoder, no
+  // --- `renderer.copyTextureToTexture` at all (see atlas.js's header for the
+  // --- full trace: THAT path is what backed up the GPU queue into a real
+  // --- device-lost on the 12000² mansion, 2026-07-17) ----------------------
+  {
+    const { T, renderer, calls, FAKE_GPU_TEXTURE } = makeAtlasTHREEWebGPU();
+    const layout = computeAtlasLayout({ budgetBytes: 512 * 1024 * 1024 });
+    const atlas = new PageAtlas({ THREE: T, layout, renderer });
+    const fakeBitmap = { width: 256, height: 256 };
+    const fakeSrc = { isTexture: true, image: fakeBitmap, flipY: false, premultiplyAlpha: false };
+
+    atlas.uploadPage(17, fakeSrc); // slot 17 -> tile (1,1) in layer 0, same slot as the WebGL2 test above
+
+    ok(
+      'uploadPage (WebGPU): never falls through to renderer.copyTextureToTexture',
+      calls.copyTextureToTexture.length === 0
+    );
+    ok(
+      'uploadPage (WebGPU): force-creates the atlas texture via the public initTexture API',
+      calls.initTexture.length === 1
+    );
+    ok(
+      'uploadPage (WebGPU): initTexture was called with the atlas texture itself',
+      calls.initTexture[0] === atlas.texture
+    );
+    ok(
+      'uploadPage (WebGPU): calls copyExternalImageToTexture exactly once',
+      calls.copyExternalImageToTexture.length === 1
+    );
+    const call = calls.copyExternalImageToTexture[0];
+    ok(
+      'uploadPage (WebGPU): source is the decoded bitmap itself (srcTexture.image), not the wrapper',
+      call.source.source === fakeBitmap
+    );
+    ok('uploadPage (WebGPU): source.flipY mirrors the wrapper (never hardcoded)', call.source.flipY === false);
+    ok(
+      "uploadPage (WebGPU): destination targets the atlas's REAL GPUTexture handle",
+      call.destination.texture === FAKE_GPU_TEXTURE
+    );
+    ok(
+      'uploadPage (WebGPU): destination.mipLevel is always 0 (the atlas has no mip chain)',
+      call.destination.mipLevel === 0
+    );
+    ok(
+      'uploadPage (WebGPU): destination.origin is the correct slot pixel offset + array layer',
+      call.destination.origin.x === 256 && call.destination.origin.y === 256 && call.destination.origin.z === 0
+    );
+    ok(
+      'uploadPage (WebGPU): destination.premultipliedAlpha mirrors the wrapper (never hardcoded)',
+      call.destination.premultipliedAlpha === false
+    );
+    ok(
+      "uploadPage (WebGPU): copySize matches the bitmap's own dimensions, not a hardcoded page size",
+      call.copySize.width === 256 && call.copySize.height === 256 && call.copySize.depthOrArrayLayers === 1
+    );
   }
 
   // --- PageAtlas: prepareForUploadBatch calls renderer.resetState() --------

@@ -11,6 +11,8 @@ import {
   __createSemaphore,
   shouldYieldByTime,
   __readLeadingBytes,
+  parseImageDimensions,
+  toRootAbsoluteAssetUrl,
 } from '../decode-pool.js';
 
 export async function run(t) {
@@ -330,5 +332,185 @@ export async function run(t) {
       const out = await __readLeadingBytes(res, 3);
       ok('readLeadingBytes: falls back to arrayBuffer() when no streaming body exists', out.length === 3);
     }
+  }
+
+  // --- parseImageDimensions: read {w,h} from header bytes, NO decode (found
+  // 2026-07-17, the 12000² mansion device-loss hunt). The original code knew
+  // ONLY PNG, so every WebP asset in these scenes failed the cheap header read
+  // and fell through to a full 144-megapixel decode JUST to learn width/height
+  // — clogging the serial decode worker and spilling page-slices onto the main
+  // thread (the 749ms stalls before device loss). It also made
+  // `rangedFetchMisses` lie (counting every WebP as "server ignored Range").
+  // These build REAL headers for each format and prove round-trip w/h, using
+  // ASYMMETRIC dimensions (12000×8000) so any width/height swap is caught. ---
+  {
+    // PNG: sig 0x89504E47 @0; IHDR width@16 / height@20, big-endian.
+    function makePng(width, height) {
+      const b = new Uint8Array(24);
+      const dv = new DataView(b.buffer);
+      dv.setUint32(0, 0x89504e47);
+      dv.setUint32(16, width); // big-endian by default
+      dv.setUint32(20, height);
+      return b;
+    }
+    // Shared WebP container prefix: 'RIFF'@0, 'WEBP'@8, chunk fourCC@12.
+    function makeWebpBase(fourCC, len) {
+      const b = new Uint8Array(len);
+      const dv = new DataView(b.buffer);
+      dv.setUint32(0, 0x52494646); // 'RIFF'
+      dv.setUint32(8, 0x57454250); // 'WEBP'
+      dv.setUint32(12, fourCC);
+      return { b, dv };
+    }
+    function makeVp8Lossy(width, height) {
+      const { b, dv } = makeWebpBase(0x56503820, 30); // 'VP8 '
+      dv.setUint16(26, width & 0x3fff, true); // 14-bit LE
+      dv.setUint16(28, height & 0x3fff, true);
+      return b;
+    }
+    function makeVp8Lossless(width, height) {
+      const { b, dv } = makeWebpBase(0x5650384c, 25); // 'VP8L'
+      dv.setUint8(20, 0x2f); // required VP8L signature byte
+      const packed = (((width - 1) & 0x3fff) | (((height - 1) & 0x3fff) << 14)) >>> 0;
+      dv.setUint32(21, packed, true);
+      return b;
+    }
+    function makeVp8x(width, height) {
+      const { b, dv } = makeWebpBase(0x56503858, 30); // 'VP8X'
+      const w = width - 1;
+      const h = height - 1;
+      dv.setUint8(24, w & 0xff);
+      dv.setUint8(25, (w >>> 8) & 0xff);
+      dv.setUint8(26, (w >>> 16) & 0xff);
+      dv.setUint8(27, h & 0xff);
+      dv.setUint8(28, (h >>> 8) & 0xff);
+      dv.setUint8(29, (h >>> 16) & 0xff);
+      return b;
+    }
+
+    const W = 12000;
+    const H = 8000;
+
+    {
+      const d = parseImageDimensions(makePng(W, H));
+      ok('parseImageDimensions: PNG reads width/height from IHDR (big-endian)', d && d.width === W && d.height === H);
+    }
+    {
+      const d = parseImageDimensions(makeVp8Lossy(W, H));
+      ok('parseImageDimensions: WebP VP8 (lossy) reads 14-bit LE width/height', d && d.width === W && d.height === H);
+    }
+    {
+      const d = parseImageDimensions(makeVp8Lossless(W, H));
+      ok(
+        'parseImageDimensions: WebP VP8L (lossless) unpacks width-1/height-1 from the bitstream',
+        d && d.width === W && d.height === H
+      );
+    }
+    {
+      const d = parseImageDimensions(makeVp8x(W, H));
+      ok(
+        'parseImageDimensions: WebP VP8X (extended) reads 24-bit LE canvas width-1/height-1',
+        d && d.width === W && d.height === H
+      );
+    }
+
+    // Rejection cases — every one MUST fall back to a real decode (return null),
+    // never guess. A silent wrong-size here would corrupt page math worldwide.
+    {
+      ok('parseImageDimensions: null/too-short input returns null', parseImageDimensions(null) === null);
+      ok(
+        'parseImageDimensions: fewer than 24 bytes returns null (never reads past the buffer)',
+        parseImageDimensions(new Uint8Array(10)) === null
+      );
+      ok(
+        'parseImageDimensions: unknown signature (all zero) returns null',
+        parseImageDimensions(new Uint8Array(30)) === null
+      );
+      // 'RIFF'/'WEBP' present but only 24 bytes — a VP8 header needs 30. Must
+      // NOT read past the buffer and MUST return null (fall back to decode).
+      {
+        const truncated = makeVp8Lossy(W, H).slice(0, 24);
+        ok(
+          'parseImageDimensions: truncated WebP VP8 header (24 of 30 bytes) returns null',
+          parseImageDimensions(truncated) === null
+        );
+      }
+      // 'RIFF'/'WEBP' with an unrecognized chunk fourCC — return null, not junk.
+      {
+        const { b } = makeWebpBase(0x41414141, 30); // 'AAAA'
+        ok('parseImageDimensions: WebP with unknown chunk fourCC returns null', parseImageDimensions(b) === null);
+      }
+    }
+
+    // A small asymmetric case for each format, guarding the +1 / mask math at
+    // the low end (where an off-by-one is easiest to miss).
+    {
+      ok(
+        'parseImageDimensions: VP8L small case 3×7 round-trips (width-1/height-1 +1 math)',
+        (() => {
+          const d = parseImageDimensions(makeVp8Lossless(3, 7));
+          return d && d.width === 3 && d.height === 7;
+        })()
+      );
+      ok(
+        'parseImageDimensions: VP8X small case 3×7 round-trips',
+        (() => {
+          const d = parseImageDimensions(makeVp8x(3, 7));
+          return d && d.width === 3 && d.height === 7;
+        })()
+      );
+    }
+  }
+
+  // --- toRootAbsoluteAssetUrl: the mansion mask 404 (2026-07-17). FilePicker
+  // .browse() lists data-relative paths ("modules/…") that fetch fine on the
+  // main thread but 404 inside the decode WORKER (whose base is
+  // /modules/map-shine-advanced/src/vt/), forcing the giant mask decode back
+  // onto the main thread. A leading slash resolves against the ORIGIN in both
+  // contexts. Pure string transform, so it is applied before BOTH the fetch and
+  // the page-store key (no IndexedDB desync) — these lock that contract in. ---
+  {
+    ok(
+      'toRootAbsoluteAssetUrl: bare data-relative mask path gains a leading slash (THE bug)',
+      toRootAbsoluteAssetUrl('modules/mythica-machina-mansion/assets/ground_floor_150_Outdoors.webp') ===
+        '/modules/mythica-machina-mansion/assets/ground_floor_150_Outdoors.webp'
+    );
+    ok(
+      'toRootAbsoluteAssetUrl: already-root-absolute albedo path is unchanged (no cache invalidation)',
+      toRootAbsoluteAssetUrl('/modules/mythica-machina-mansion/assets/ground_floor_150.webp') ===
+        '/modules/mythica-machina-mansion/assets/ground_floor_150.webp'
+    );
+    ok(
+      'toRootAbsoluteAssetUrl: is idempotent (applying twice equals applying once — safe at every entry point)',
+      toRootAbsoluteAssetUrl(toRootAbsoluteAssetUrl('modules/a/b.webp')) === toRootAbsoluteAssetUrl('modules/a/b.webp')
+    );
+    ok(
+      'toRootAbsoluteAssetUrl: preserves a query string while still prefixing',
+      toRootAbsoluteAssetUrl('modules/a/b.webp?v=2') === '/modules/a/b.webp?v=2'
+    );
+    // Already-absolute forms MUST pass through untouched (Forge CDN, S3, inline).
+    ok(
+      'toRootAbsoluteAssetUrl: https:// URL passes through untouched',
+      toRootAbsoluteAssetUrl('https://cdn.example.com/x_Outdoors.webp') === 'https://cdn.example.com/x_Outdoors.webp'
+    );
+    ok(
+      'toRootAbsoluteAssetUrl: http:// URL passes through untouched',
+      toRootAbsoluteAssetUrl('http://cdn.example.com/x.webp') === 'http://cdn.example.com/x.webp'
+    );
+    ok(
+      'toRootAbsoluteAssetUrl: protocol-relative //host URL passes through untouched',
+      toRootAbsoluteAssetUrl('//cdn.example.com/x.webp') === '//cdn.example.com/x.webp'
+    );
+    ok(
+      'toRootAbsoluteAssetUrl: data: URL passes through untouched',
+      toRootAbsoluteAssetUrl('data:image/png;base64,iVBORw0KGgo=') === 'data:image/png;base64,iVBORw0KGgo='
+    );
+    ok(
+      'toRootAbsoluteAssetUrl: blob: URL passes through untouched',
+      toRootAbsoluteAssetUrl('blob:https://mythicamachina.com/abc-123') === 'blob:https://mythicamachina.com/abc-123'
+    );
+    // Degenerate inputs must never throw (a decode request must survive them).
+    ok('toRootAbsoluteAssetUrl: empty string returns empty string', toRootAbsoluteAssetUrl('') === '');
+    ok('toRootAbsoluteAssetUrl: null returns null (no throw)', toRootAbsoluteAssetUrl(null) === null);
   }
 }

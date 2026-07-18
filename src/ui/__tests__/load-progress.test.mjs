@@ -259,4 +259,37 @@ export function run(t) {
     const s = mk(0);
     ok('a load with no phases has an empty list, not a fabricated one', s.phases.length === 0);
   }
+
+  // --- LOAD_PHASES.MASKS (2026-07-17, the mask-discovery loading-screen seam) —
+  // the machinery above is fully generic (already proven against 3 phases), so
+  // this only needs to confirm the 4th phase is real vocabulary: it labels
+  // itself, reports honest per-floor progress, and slots into the pipeline
+  // between SCENE and ART without requiring any change to beginPhase/reportProgress.
+  {
+    const s = mk();
+    beginPhase(s, LOAD_PHASES.MASKS);
+    ok('MASKS names itself, not a generic fallback', describeLoad(s, 1000).title === 'Finding masks');
+
+    reportProgress(s, LOAD_PHASES.MASKS, { done: 0, total: 3, detail: 'Ground Floor' });
+    ok('MASKS starts at a real 0, not null, once the floor count is known', describeLoad(s, 1000).fraction === 0);
+
+    reportProgress(s, LOAD_PHASES.MASKS, { done: 2, detail: 'Roof' });
+    const mid = describeLoad(s, 1000);
+    ok('MASKS progress is honest per-floor counting', Math.abs(mid.fraction - 2 / 3) < 1e-9);
+    ok('MASKS detail matches the ART phase convention ("N of M · name")', mid.detail === '2 of 3 · Roof');
+  }
+  {
+    // The realistic pipeline: SCENE (unknown total) → MASKS (per-floor) → ART
+    // (per-item) → FIRST_FRAME (unknown again). Each transition closes the
+    // previous span — no special-casing needed for the new phase.
+    const s = createLoadState({ sceneId: 'sceneA', sceneName: 'Town River Bridge', nowMs: 0 });
+    beginPhase(s, LOAD_PHASES.SCENE, { nowMs: 0 });
+    beginPhase(s, LOAD_PHASES.MASKS, { total: 3, nowMs: 5 });
+    for (let i = 1; i <= 3; i++) reportProgress(s, LOAD_PHASES.MASKS, { done: i, nowMs: 5 + i });
+    beginPhase(s, LOAD_PHASES.ART, { total: 7, nowMs: 20 });
+    ok('MASKS sits between SCENE and ART, each with its own closed span', s.phases.length === 3);
+    ok('MASKS phase is timed like any other', s.phases[1].phase === LOAD_PHASES.MASKS && s.phases[1].durMs === 15);
+    ok('MASKS closed exactly when ART opened', s.phases[1].endMs === 20);
+    ok('the active phase is now ART, reporting ITS own title', describeLoad(s, 20).title === 'Streaming map art');
+  }
 }

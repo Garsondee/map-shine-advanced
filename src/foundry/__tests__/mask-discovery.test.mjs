@@ -167,4 +167,51 @@ export async function run(t) {
     probeUrl: async (url) => url.endsWith('upper_Outdoors.webp'),
   });
   t.ok('mixed listing+probe runs say so', resultMixed.method === 'mixed');
+
+  // --- onProgress: the loading-screen seam (LOAD_PHASES.MASKS) -------------
+  {
+    const ticks = [];
+    await discoverAuthoredMasks({
+      floors: [
+        { index: 0, id: 'L0', name: 'Ground Floor', url: 'maps/base.webp' },
+        { index: 1, id: 'L1', name: 'Middle Floor', url: 'maps/upper.webp' },
+      ],
+      listDirectory: async () => ['maps/base_Outdoors.webp'],
+      probeUrl: async () => false,
+      onProgress: (p) => ticks.push(p),
+    });
+    t.ok('onProgress fires once PER FLOOR, not per directory/candidate', ticks.length === 2);
+    t.ok('done counts up monotonically to total', ticks[0].done === 1 && ticks[1].done === 2);
+    t.ok('total is the floor count, stable across ticks', ticks[0].total === 2 && ticks[1].total === 2);
+    t.ok(
+      'detail prefers the floor NAME over its raw id',
+      ticks[0].detail === 'Ground Floor' && ticks[1].detail === 'Middle Floor'
+    );
+  }
+  {
+    // The early-continue (unparseable URL) branch is a real floor too — a
+    // caller counting "3 of 5" must not stall at "2 of 5" forever because one
+    // floor took the exceptional path.
+    const ticks = [];
+    await discoverAuthoredMasks({
+      floors: [
+        { index: 0, id: 'L0', url: 'no-extension' },
+        { index: 1, id: 'L1', name: 'Roof', url: 'maps/roof.webp' },
+      ],
+      listDirectory: async () => [],
+      probeUrl: async () => false,
+      onProgress: (p) => ticks.push(p),
+    });
+    t.ok('the parse-failure branch still advances progress', ticks.length === 2);
+    t.ok('detail falls back to the levelId when no name was given', ticks[0].detail === 'L0');
+  }
+  {
+    // onProgress is optional — omitting it must never throw.
+    const result = await discoverAuthoredMasks({
+      floors: [{ index: 0, id: 'L0', url: 'maps/base.webp' }],
+      listDirectory: async () => [],
+      probeUrl: async () => false,
+    });
+    t.ok('onProgress is optional; its absence does not break discovery', result.perFloor.length === 1);
+  }
 }

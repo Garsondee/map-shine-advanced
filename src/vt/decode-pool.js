@@ -675,9 +675,102 @@ function persistPage(key, canvas) {
 }
 
 /**
- * Read a source image's dimensions WITHOUT a full decode. PNG carries width/
- * height in its IHDR chunk (bytes 16-24, big-endian) — a tiny ranged fetch gets
- * them without paying a 576 MB decode just to learn the world size.
+ * Read {width,height} from the LEADING HEADER BYTES of a PNG or WebP file —
+ * pure, no decode, Node-testable. Both formats carry their dimensions at fixed
+ * offsets near the start, so a ~30-byte read is all it takes. Returns null when
+ * the bytes are not a recognized/complete header (caller must fall back to an
+ * actual decode).
+ *
+ * WHY WEBP IS NOT OPTIONAL (2026-07-17, device-loss investigation on the
+ * 12000² mansion): the original code understood ONLY PNG (`0x89504E47` +
+ * IHDR). Every real Level/mask asset in these scenes is WebP, so the cheap
+ * header path failed 100% of the time and fell through to `getSourceDimensions`'s
+ * decode fallback — a FULL 144-megapixel source decode JUST to learn a
+ * width/height. Off-thread when it could route to the worker, but that worker
+ * is SERIAL (one job at a time) and each such decode ran ~2.2s
+ * (`maxSourceAcquireMs`), so a floor's worth of packs backed the worker up for
+ * seconds and forced actual page-slices onto the MAIN THREAD (the 749ms
+ * `maxSinglePageMs` stalls in the live report). It also made
+ * `rangedFetchMisses` a LIAR — it counted every WebP as "the server didn't
+ * honor Range" when the real cause was "the parser only knew PNG"
+ * ([[feedback_instruments_must_not_lie]]).
+ *
+ * WebP layout: 'RIFF'(0-3) <size>(4-7) 'WEBP'(8-11) then one of three chunks —
+ * 'VP8 ' lossy (14-bit w@26/h@28 LE, low 14 bits), 'VP8L' lossless (0x2f sig
+ * @20 then 14-bit w-1/h-1 packed LE @21), 'VP8X' extended (24-bit canvas w-1
+ * @24 / h-1 @27 LE). See the WebP container spec.
+ *
+ * @param {Uint8Array} bytes - at least the first ~30 bytes of the file.
+ * @returns {{width:number, height:number}|null}
+ */
+export function parseImageDimensions(bytes) {
+  if (!bytes || bytes.byteLength < 24) return null;
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  // PNG: signature 0x89504E47 at 0; IHDR width@16 / height@20 (big-endian).
+  if (dv.getUint32(0) === 0x89504e47) {
+    return { width: dv.getUint32(16), height: dv.getUint32(20) };
+  }
+  // WebP: 'RIFF' at 0, 'WEBP' at 8, then a VP8/VP8L/VP8X chunk fourCC at 12.
+  if (dv.getUint32(0) === 0x52494646 && dv.getUint32(8) === 0x57454250) {
+    const fourCC = dv.getUint32(12);
+    if (fourCC === 0x56503820 /* 'VP8 ' lossy */) {
+      if (bytes.byteLength < 30) return null;
+      return { width: dv.getUint16(26, true) & 0x3fff, height: dv.getUint16(28, true) & 0x3fff };
+    }
+    if (fourCC === 0x5650384c /* 'VP8L' lossless */) {
+      if (bytes.byteLength < 25 || dv.getUint8(20) !== 0x2f) return null;
+      const packed = dv.getUint32(21, true);
+      return { width: (packed & 0x3fff) + 1, height: ((packed >>> 14) & 0x3fff) + 1 };
+    }
+    if (fourCC === 0x56503858 /* 'VP8X' extended */) {
+      if (bytes.byteLength < 30) return null;
+      const w = dv.getUint8(24) | (dv.getUint8(25) << 8) | (dv.getUint8(26) << 16);
+      const h = dv.getUint8(27) | (dv.getUint8(28) << 8) | (dv.getUint8(29) << 16);
+      return { width: w + 1, height: h + 1 };
+    }
+  }
+  return null;
+}
+
+/**
+ * Normalize an asset URL to the ROOT-ABSOLUTE form ("/modules/…") the rest of
+ * MSA already uses for Level art. Pure, idempotent, Node-testable.
+ *
+ * WHY (2026-07-17, the 12000² mansion device-loss hunt — a DIRECT cause of the
+ * main-thread giant decodes, not just cosmetic): `FilePicker.browse()` (the
+ * mask discovery lister) returns data-relative paths with NO leading slash
+ * ("modules/mythica-machina-mansion/assets/…_Outdoors.webp"). The main thread
+ * resolves those against the document at /game and they fetch fine — but the
+ * decode WORKER's own script URL is /modules/map-shine-advanced/src/vt/…, so a
+ * bare "modules/…" there resolves to
+ * /modules/map-shine-advanced/src/vt/modules/… → HTTP 404. The worker slice
+ * then fails, `acquirePages` falls back to `acquireSliceSource` ON THE MAIN
+ * THREAD, where the same relative URL DOES resolve → a full 144-megapixel mask
+ * decode lands on the render thread (the ~2.9s `maxSourceAcquireMs` stall).
+ * A leading slash makes the path resolve against the ORIGIN in BOTH contexts,
+ * matching the albedo's own "/modules/…" form (which is why the albedo never
+ * hit this). It is a PURE STRING transform applied at each decode entry point
+ * BEFORE both the fetch AND the page-store key, so the worker and main thread
+ * never disagree on a key — no IndexedDB cache desync. Already-absolute URLs
+ * (http(s)://, protocol-relative //, data:, blob:) pass through untouched, as
+ * do paths that already lead with "/".
+ *
+ * NOTE: this deliberately mirrors the albedo's existing "/modules/…"
+ * convention rather than resolving a Foundry route prefix — a routed install
+ * (`/foundry/game`) would need the SAME systemic treatment for the albedo too,
+ * which is a separate change; this scene, like the albedo, is at the origin root.
+ * @param {string} url @returns {string}
+ */
+export function toRootAbsoluteAssetUrl(url) {
+  if (typeof url !== 'string' || url === '') return url;
+  if (/^([a-z][a-z0-9+.-]*:)?\/\//i.test(url) || /^(data|blob):/i.test(url)) return url;
+  return url.startsWith('/') ? url : `/${url}`;
+}
+
+/**
+ * Read a source image's dimensions WITHOUT a full decode, via a tiny ranged
+ * fetch of just its header (see `parseImageDimensions` for the formats and the
+ * WebP bug that made this path the device-loss investigation's smoking gun).
  *
  * FALLBACK IS OFF-MAIN-THREAD FIRST (2026-07-16 — a real live bug: this
  * fallback used to call `acquireSliceSource()` directly on the main thread —
@@ -685,37 +778,35 @@ function persistPage(key, canvas) {
  * a completely separate code path from page slicing. Called once per PACK at
  * floor-load time, INCLUDING from the background floor-prewarm
  * (`vt-pan-viewer.js`, fire-and-forget) — so it could fire mid-pan/mid-zoom
- * with zero warning if the asset server doesn't honor Range requests. A live
- * zoom-thrash-test report's hitch, whose snapshot showed `sourcesDecoded`
- * incrementing with almost no page-slicing done yet, is exactly this
- * function's signature, not the (already off-thread) page-slice path.
- * `_decodeStats.rangedFetchMisses` answers "does this server honor Range
- * requests" directly, as a number, rather than an assumption).
+ * with zero warning). Now that the header path handles WebP too, this decode
+ * fallback is genuinely rare (a truncated/corrupt/unknown header), not the
+ * every-single-source cost it silently was.
  * @param {string} url @returns {Promise<{width:number, height:number}>}
  */
 export async function getSourceDimensions(url) {
+  url = toRootAbsoluteAssetUrl(url); // worker-fetchable + key-consistent (see toRootAbsoluteAssetUrl)
   try {
     const res = await fetch(url, { headers: { Range: 'bytes=0-33' } });
     if (res.ok || res.status === 206) {
       // STREAMED, NOT res.arrayBuffer() (found 2026-07-17, the freeze
-      // investigation — a REAL, separate waste from the two fallbacks below,
-      // not just a theory): if the server IGNORES the Range header and
-      // answers 200 with the FULL FILE, `res.arrayBuffer()` buffers the
-      // ENTIRE response before this function can read even one byte of it —
-      // for this project's own scale (a Level background can be hundreds of
-      // MB), that is exactly the "one line looks entirely reasonable and IS
-      // the crisis" trap §0's law exists to catch, just on the network/memory
-      // axis instead of the GPU one. `readLeadingBytes` reads only what the
-      // PNG header needs and CANCELS the rest of the stream — cheap whether
-      // or not Range was honored, which is the whole point of asking for it.
-      const header = await readLeadingBytes(res, 24);
-      // PNG signature 0x89504E47 at byte 0; IHDR width@16, height@20 (big-endian).
-      if (header.byteLength >= 24) {
-        const buf = new DataView(header.buffer, header.byteOffset, header.byteLength);
-        if (buf.getUint32(0) === 0x89504e47) {
-          if (res.status !== 206) _decodeStats.rangedFetchMisses++; // got a full 200, not a genuine partial response
-          return { width: buf.getUint32(16), height: buf.getUint32(20) };
-        }
+      // investigation — a REAL, separate waste, not just a theory): if the
+      // server IGNORES the Range header and answers 200 with the FULL FILE,
+      // `res.arrayBuffer()` buffers the ENTIRE response before this function
+      // can read even one byte of it — for this project's own scale (a Level
+      // background is hundreds of MB) that is exactly the "one line looks
+      // entirely reasonable and IS the crisis" trap §0's law exists to catch,
+      // just on the network/memory axis. `readLeadingBytes` reads only what the
+      // header needs and CANCELS the rest — cheap whether or not Range was
+      // honored. 30 bytes: enough for a WebP VP8X/VP8X canvas header (PNG needs 24).
+      const header = await readLeadingBytes(res, 30);
+      const dims = parseImageDimensions(header);
+      if (dims) {
+        // A genuine 206 means Range was honored; a 200 means the server sent the
+        // whole file and only `readLeadingBytes`'s stream-cancel saved us — THAT
+        // is the real "range miss", and now that WebP parses it's an honest
+        // signal again instead of firing on every valid WebP.
+        if (res.status !== 206) _decodeStats.rangedFetchMisses++;
+        return dims;
       }
     }
   } catch (_) {}
@@ -787,6 +878,7 @@ async function readLeadingBytes(res, n) {
  * @returns {Promise<Array<{page:{mip:number,px:number,py:number}, bitmap: ImageBitmap}>>}
  */
 export async function acquirePages(url, table, pages, opts = {}) {
+  url = toRootAbsoluteAssetUrl(url); // fetch + page-store key both use this form (see toRootAbsoluteAssetUrl)
   const borderPx = opts.borderPx ?? DEFAULT_BORDER_PX;
   const pageSizePx = opts.pageSizePx ?? 256;
   const results = [];
@@ -892,6 +984,13 @@ export async function acquirePages(url, table, pages, opts = {}) {
  * @returns {Promise<Array<{page:{mip:number,px:number,py:number}, bitmap: ImageBitmap}>>}
  */
 export async function acquirePackedPages(packId, channelUrls, table, pages, opts = {}) {
+  // Channel URLs must be worker-fetchable (see toRootAbsoluteAssetUrl); the
+  // page-store key is `packId`, so normalizing the channels can't desync it.
+  channelUrls = {
+    r: toRootAbsoluteAssetUrl(channelUrls.r),
+    g: toRootAbsoluteAssetUrl(channelUrls.g),
+    b: toRootAbsoluteAssetUrl(channelUrls.b),
+  };
   const borderPx = opts.borderPx ?? DEFAULT_BORDER_PX;
   const pageSizePx = opts.pageSizePx ?? 256;
   const results = [];

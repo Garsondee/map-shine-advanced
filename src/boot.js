@@ -54,6 +54,8 @@ import {
   runOrientationSelfTest,
   getSourceBitmap,
   readPageBitmapPixels,
+  resolveRendererRequiredLimits,
+  setWholeImageMode,
 } from './vt/index.js';
 import { PASSES, validatePassGraph, PASS_SEAMS, PASS_IMPLS } from './graph/index.js';
 import { NotBuiltError } from './core/not-built.js';
@@ -73,7 +75,9 @@ import {
   getPixiResidencyReport,
   registerCanvasCompositing,
   applyArtSuppression,
+  restoreFoundryArt,
   getCanvasCompositingReport,
+  registerCanvasTearDownWatchdog,
 } from './foundry/index.js';
 import { engageFoundryFallback } from './diag/render-fallback.js';
 import {
@@ -118,6 +122,12 @@ MapShine.version = VERSION;
 MapShine.codename = CODENAME;
 MapShine.__stage = STAGE;
 MapShine.THREE = THREE; // single Three instance for the whole V3 tree
+// Escape hatch for the whole-image render path (2026-07-17): MapShine
+// .setWholeImageMode(false) reverts to page-streaming live (takes effect on the
+// next residency refresh — pan or switch floor). Streaming still device-loses on
+// huge maps, so this is a debug lever, not a working fallback; the real
+// reliability floor is the device-lost safety slide.
+MapShine.setWholeImageMode = setWholeImageMode;
 
 /**
  * Boot's own logger. Everything this file says goes through `core/log.js`, which
@@ -707,9 +717,20 @@ function install() {
     // probes only as the announced fallback — see foundry/mask-discovery.js);
     // a total failure serves absence defaults and says so, never blocks the
     // scene (the safety-slide stance: masks degrade, sessions don't).
+    //
+    // OWN LOADING-SCREEN PHASE (2026-07-17): this await used to sit silently
+    // inside LOAD_PHASES.SCENE — invisible on the listing happy path, but the
+    // probe fallback is a real bounded sequence of network round trips that
+    // must never sit unlabeled behind an earlier phase's title (exactly the
+    // "silent stall" shape Keyhole.md §7's kill list forbids). `total` is
+    // `floors.length`, known here; `onProgress` advances it per floor.
+    beginSceneLoadPhase(LOAD_PHASES.MASKS, { total: floors.length });
     let maskDiscovery = null;
     try {
-      maskDiscovery = await discoverAuthoredMasks({ floors });
+      maskDiscovery = await discoverAuthoredMasks({
+        floors,
+        onProgress: ({ done, total, detail }) => reportSceneLoadProgress(LOAD_PHASES.MASKS, { done, total, detail }),
+      });
     } catch (err) {
       log.error('mask discovery failed outright — this scene serves absence defaults:', err);
     }
@@ -782,6 +803,16 @@ function install() {
         // when nothing is loading — so the reporting path needs no knowledge of
         // whether a curtain is up.
         onLoadProgress: ({ done, total, detail }) => reportSceneLoadProgress(LOAD_PHASES.ART, { done, total, detail }),
+        // THE DEVICE-LOST SAFETY SLIDE'S seam half (see startVtPanViewer's
+        // onDeviceLost handler): when the GPU device is lost, the viewer removes
+        // its own dead canvas and announces — but only boot.js, the composition
+        // root that suppressed Foundry's art, can un-suppress it. Restoring the
+        // seam here is what turns "MSA's dead black canvas over hidden Foundry
+        // art" back into "Foundry drawing the scene normally".
+        onDeviceLost: () => {
+          const seam = restoreFoundryArt();
+          log.info(`device lost — restored Foundry's own art (seam un-suppressed: ${seam}).`);
+        },
       })),
     };
   }
@@ -1105,7 +1136,28 @@ function install() {
     // this.#scene and logs its name immediately before firing canvasInit).
     // beginSceneLoad does that comparison and shows nothing on a floor switch,
     // which is §4.5's headline promise and §7's dead level-transition curtain.
+    // THE BLANK-CANVAS GAP (audit, 2026-07-17): canvasInit/canvasReady are
+    // BOTH skipped entirely when Foundry draws a BLANK canvas (`Scene
+    // #unview()`, or the active scene being deleted) — see
+    // foundry/canvas-lifecycle.js's header for the full mechanism and why a
+    // plain canvasTearDown listener can't just dispose unconditionally
+    // (it would defeat the cheap same-scene floor-switch path below). The
+    // `Hooks.on` call itself lives in foundry/ (the wall's adapter-only
+    // ratchet is already at its bound); `markCovered()` here is a plain
+    // function call, not a new Foundry-global touch.
+    const tearDownWatchdog = registerCanvasTearDownWatchdog({
+      isViewerActive: () => getVtPanViewerDiagnostics().active,
+      onOrphaned: () => {
+        stopVtPanViewer();
+        lastRealSceneId = null;
+        endSceneLoad({ error: 'canvas is blank (scene unviewed or deleted)' });
+      },
+      logInfo: (msg) => log.info(msg),
+    });
+    if (!tearDownWatchdog.registered) log.warn(`blank-canvas watchdog not registered — ${tearDownWatchdog.reason}`);
+
     Hooks.on('canvasInit', (canvasRef) => {
+      tearDownWatchdog.markCovered(); // this draw is real — see foundry/canvas-lifecycle.js
       try {
         const sceneDoc = canvasRef?.scene ?? null;
         const verdict = beginSceneLoad({ sceneId: sceneDoc?.id ?? null, sceneName: sceneDoc?.name });
@@ -1245,6 +1297,21 @@ function install() {
         const floorsResult = getActiveSceneFloors(sceneDoc);
         if (!floorsResult.ok) {
           log.warn(`real-scene VT viewer: ${floorsResult.error}`);
+          // THE ZOMBIE-VIEWER GAP (audit, 2026-07-17): this branch used to just
+          // warn and return, leaving whatever viewer was already running — built
+          // for the PREVIOUS scene — rendering on, now slaved to THIS scene's
+          // camera (followFoundryCamera reads canvas.stage every frame
+          // regardless of which scene it was built for), with the loading
+          // curtain (if beginSceneLoad's canvasInit handler raised one for this
+          // draw) stuck up forever, since nothing here ever called
+          // endSceneLoad(). "This scene has no art MSA can render" is ALWAYS a
+          // genuine scene change — getActiveSceneFloors doesn't depend on the
+          // viewed floor, so a same-scene floor switch can never land here —
+          // which means stopping unconditionally is always correct and can
+          // never defeat the cheap floor-switch path below.
+          stopVtPanViewer();
+          lastRealSceneId = null;
+          endSceneLoad({ error: floorsResult.error });
           return;
         }
         const targetFloorIndex = resolveFloorDescriptor(sceneDoc, floorsResult.floors);
@@ -1338,7 +1405,9 @@ function install() {
   // window load event so the boot proof still renders.
   if (typeof Hooks !== 'undefined') {
     Hooks.once('init', () => log.info(`init — ${MODULE_ID}`));
-    Hooks.once('ready', () => bootHeartbeat());
+    Hooks.once('ready', () => {
+      bootHeartbeat().catch((err) => log.error('bootHeartbeat failed:', err));
+    });
   } else {
     log.warn(`no Foundry Hooks found; booting on window load.`);
     if (document.readyState === 'complete') bootHeartbeat();
@@ -1378,7 +1447,7 @@ function syncInterfaceSeam(context) {
   return seam;
 }
 
-function bootHeartbeat() {
+async function bootHeartbeat() {
   if (MapShine.__heartbeat) return; // idempotent
   try {
     const host = document.createElement('div');
@@ -1443,7 +1512,12 @@ function bootHeartbeat() {
     host.appendChild(caption);
     document.body.appendChild(host);
 
-    const renderer = new THREE.WebGPURenderer({ canvas, antialias: true, alpha: true });
+    // Same raised WebGPU texture cap as the VT viewer (vt/texture-limits.js) —
+    // so this renderer's device, which the flight recorder reports, agrees with
+    // the one that draws the map. Awaited before construction; the heartbeat is
+    // fire-and-forget so the one adapter round-trip costs nothing that matters.
+    const requiredLimits = await resolveRendererRequiredLimits();
+    const renderer = new THREE.WebGPURenderer({ canvas, antialias: true, alpha: true, requiredLimits });
     renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 2));
     renderer.setSize(HEARTBEAT_W, HEARTBEAT_H, false);
     renderer.setClearColor(0x000000, 0); // transparent → CSS background shows

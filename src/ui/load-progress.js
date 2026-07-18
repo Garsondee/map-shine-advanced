@@ -70,6 +70,13 @@ export const STALL_THRESHOLD_MS = 250;
 export const LOAD_PHASES = Object.freeze({
   /** Reading Scene documents into a draw list. Effectively instant. */
   SCENE: 'scene',
+  /** Finding which authored mask files exist per floor (foundry/mask-discovery.js).
+   * Usually near-instant (one directory listing) — but the probe fallback (listing
+   * denied, or an absolute CDN URL FilePicker cannot browse) is a bounded but real
+   * sequence of network round trips, added 2026-07-17 specifically so that path
+   * never sits silently inside SCENE's phase (exactly the unlabeled-wait shape
+   * §7's kill list exists to forbid). */
+  MASKS: 'masks',
   /** Streaming each item's coarse pins — the whole world, soft. THE load. */
   ART: 'art',
   /** Waiting for the first real frame to paint. */
@@ -78,6 +85,7 @@ export const LOAD_PHASES = Object.freeze({
 
 const PHASE_LABELS = Object.freeze({
   [LOAD_PHASES.SCENE]: 'Reading the scene',
+  [LOAD_PHASES.MASKS]: 'Finding masks',
   [LOAD_PHASES.ART]: 'Streaming map art',
   [LOAD_PHASES.FIRST_FRAME]: 'Drawing the first frame',
 });

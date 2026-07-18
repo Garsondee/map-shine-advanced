@@ -25,8 +25,14 @@ export {
   soakPanStep,
   soakSwitchFloorStep,
   soakZoomStep,
+  setWholeImageMode,
 } from './vt-pan-viewer.js';
 export { runVtLiveDecodeTest } from './vt-live-decode-report.js';
 // readPageBitmapPixels: the mask authority's injected page-pixel reader —
 // per-page CPU extraction is decode machinery, so it lives with the decoder.
 export { getSourceBitmap, readPageBitmapPixels } from './decode-pool.js';
+// resolveRendererRequiredLimits: the boot heartbeat renderer (boot.js) needs
+// the SAME raised WebGPU texture cap as the VT viewer, or the flight recorder
+// (which reads the heartbeat's device) misreports the limit. Cross-zone, so it
+// goes through this door.
+export { resolveRendererRequiredLimits } from './texture-limits.js';

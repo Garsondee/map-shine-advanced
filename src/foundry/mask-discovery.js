@@ -179,16 +179,24 @@ async function defaultProbeUrl(url) {
  * Discover authored masks for every floor of a scene.
  *
  * @param {object} args
- * @param {Array<{index:number, id:string, url:string}>} args.floors -
+ * @param {Array<{index:number, id:string, url:string, name?:string}>} args.floors -
  *   `getActiveSceneFloors().floors` (the RESOLVED background art URLs).
  * @param {(dir:string) => Promise<string[]|null>} [args.listDirectory] - injected for tests.
  * @param {(url:string) => Promise<boolean>} [args.probeUrl] - injected for tests.
+ * @param {(p:{done:number, total:number, detail:string}) => void} [args.onProgress] -
+ *   called once PER FLOOR, after that floor's discovery (listing or probe fallback)
+ *   settles — never per-directory or per-candidate, since "3 of 5 floors" is the
+ *   honest unit a player can read (ui/load-progress.js's LOAD_PHASES.MASKS). The
+ *   listing path is near-instant; this exists for the probe fallback, which is a
+ *   real bounded sequence of network round trips that must never sit silently
+ *   inside an earlier phase (Keyhole.md §7's kill list).
  * @returns {Promise<MaskDiscoveryResult>}
  */
 export async function discoverAuthoredMasks({
   floors,
   listDirectory = defaultListDirectory,
   probeUrl = defaultProbeUrl,
+  onProgress,
 }) {
   const byLevelId = new Map();
   const perFloor = [];
@@ -196,12 +204,19 @@ export async function discoverAuthoredMasks({
   let probesAttempted = 0;
   const listingCache = new Map(); // dir -> string[]|null (one browse per directory per run)
   const probeMemo = new Map(); // url -> boolean (a run never probes one URL twice)
+  const floorList = floors ?? [];
 
-  for (const floor of floors ?? []) {
+  /** One floor's discovery settled — advance the shared counter + tell the caller. */
+  const advance = (entry, floor) => {
+    perFloor.push(entry);
+    onProgress?.({ done: perFloor.length, total: floorList.length, detail: floor.name ?? floor.id });
+  };
+
+  for (const floor of floorList) {
     const art = splitArtUrl(floor.url);
     if (!art) {
       failures.push({ levelId: floor.id, stage: 'parse', detail: `unparseable art URL "${floor.url}"` });
-      perFloor.push({ levelId: floor.id, method: 'none', found: 0, aliasesUsed: [] });
+      advance({ levelId: floor.id, method: 'none', found: 0, aliasesUsed: [] }, floor);
       continue;
     }
 
@@ -258,7 +273,7 @@ export async function discoverAuthoredMasks({
     }
 
     if (found.size > 0) byLevelId.set(floor.id, found);
-    perFloor.push({ levelId: floor.id, method, found: found.size, aliasesUsed });
+    advance({ levelId: floor.id, method, found: found.size, aliasesUsed }, floor);
   }
 
   const methods = new Set(perFloor.map((f) => f.method).filter((m) => m !== 'none'));

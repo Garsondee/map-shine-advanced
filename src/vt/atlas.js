@@ -31,6 +31,48 @@
  * this file's fixes depend on are byte-for-byte unchanged between r170
  * and r185.
  *
+ * THE WEBGPU-NATIVE UPLOAD PATH (2026-07-17, device-loss investigation on the
+ * 12000² multifloor mansion — "WebGPU Device Lost: A valid external Instance
+ * reference no longer exists" after ~16s of escalating frame-gap stalls
+ * during a floor-zoom refine). Traced through the vendored r185 source: on
+ * the WebGPU backend, `renderer.copyTextureToTexture(srcTexture, ...)` does
+ * FOUR real GPU operations per page — `this._textures.updateTexture
+ * (srcTexture)` allocates a BRAND-NEW `GPUTexture` for the throwaway
+ * `srcTexture` (`WebGPUTextureUtils.createTexture` → `device.createTexture`)
+ * and uploads the bitmap into it (`copyExternalImageToTexture`, cheap,
+ * queue-level); then `WebGPUBackend.copyTextureToTexture` creates its OWN
+ * `GPUCommandEncoder`, records a GPU-to-GPU `encoder.copyTextureToTexture`
+ * blit from that throwaway texture into the atlas, and calls
+ * `device.queue.submit()` explicitly — PER PAGE; then `srcTexture.dispose()`
+ * destroys the throwaway texture. Every residency pass that streams
+ * hundreds of pages was therefore issuing hundreds of
+ * create-texture/upload/create-encoder/blit/submit/destroy cycles — exactly
+ * the shape that backs up a GPU command queue faster than even a strong
+ * card (the live case was an RTX 3070) can drain it, until Chrome's TDR
+ * watchdog declares the device lost. None of this is a WebGL2 problem —
+ * `WebGLBackend.copyTextureToTexture`'s blitFramebuffer path (see below) has
+ * no equivalent per-call encoder/submit overhead, so it keeps its original
+ * path unchanged.
+ *
+ * The fix (`_uploadPageWebGPUNative`, WebGPU backend only): skip THREE's
+ * `copyTextureToTexture` wrapper entirely and call the underlying, PUBLIC,
+ * spec'd `device.queue.copyExternalImageToTexture()` directly against the
+ * atlas's OWN existing `GPUTexture` (reached via `renderer.backend.get
+ * (this.texture).texture`), targeting the page's exact sub-region
+ * (`origin.x/y`, `origin.z` = array layer). This is a QUEUE-level operation —
+ * no command encoder, no manual submit, no throwaway texture, no
+ * create/destroy pair. Verified the atlas texture's GPU usage flags include
+ * `RENDER_ATTACHMENT` (required by `copyExternalImageToTexture`;
+ * `WebGPUTextureUtils.createTexture` sets it unconditionally for any
+ * non-compressed, non-RGB9E5 format — `DataArrayTexture`'s default
+ * `RGBAFormat`/`UnsignedByteType` qualifies), so no destination-texture
+ * change is needed, only the upload call site. `renderer.backend` /
+ * `renderer.backend.get()` / `renderer.backend.device` are the SAME
+ * internal surface THREE's own `copyTextureToTexture` reaches through
+ * (verified above, not a new assumption) — this is not a new class of
+ * fragility, just calling one layer closer to the metal for the one path
+ * that turned out to matter.
+ *
  * @module vt/atlas
  */
 
@@ -213,6 +255,15 @@ export class PageAtlas {
   /**
    * Upload one decoded page's pixels into its assigned slot.
    *
+   * Callers are UNCHANGED by the WebGPU-native path below (see this file's
+   * header): `srcTexture` is still the same throwaway `THREE.Texture`
+   * wrapper every caller already constructs — a plain JS object, essentially
+   * free. The backend branch decides whether that wrapper's GPU resource is
+   * ever actually created: on WebGPU it never is (this method reads
+   * `srcTexture.image`/`.flipY`/`.premultiplyAlpha` and writes straight to
+   * the atlas); on WebGL2 it's handed to `renderer.copyTextureToTexture`
+   * exactly as before.
+   *
    * @param {number} slot - the PageCache-assigned slot index.
    * @param {any} srcTexture - a THREE.Texture (e.g. a DataTexture or
    *   CanvasTexture) holding exactly one decoded page's pixels
@@ -223,8 +274,50 @@ export class PageAtlas {
   uploadPage(slot, srcTexture) {
     if (!this._renderer) throw new Error('PageAtlas.uploadPage: no renderer set — call setRenderer() first');
     const { x, y, layer } = slotToAtlasPosition(slot, this.layout);
+    if (this._renderer.backend?.isWebGPUBackend === true) {
+      this._uploadPageWebGPUNative(srcTexture, x, y, layer);
+      return;
+    }
     const dstPosition = new this._THREE.Vector3(x, y, layer);
     this._renderer.copyTextureToTexture(srcTexture, this.texture, null, dstPosition, 0);
+  }
+
+  /**
+   * THE FIX (see this file's header for the full trace). One direct,
+   * queue-level `copyExternalImageToTexture` call into the atlas's own
+   * `GPUTexture`, at the page's exact sub-region — no throwaway texture, no
+   * command encoder, no manual submit.
+   *
+   * `renderer.initTexture()` is THREE's own PUBLIC API for "make sure this
+   * texture's GPU resource exists" (used elsewhere in THREE for pre-warming
+   * textures before first render) — called every page rather than tracked
+   * with a local flag: `Textures.updateTexture()` already gates on
+   * `texture.version` internally (verified in source), so after the atlas's
+   * one real creation + one-time zero-fill this is a single WeakMap lookup
+   * and two comparisons — negligible next to the GPU work it replaces, and
+   * it means a future device-lost recovery (a NEW GPUDevice, texture
+   * recreated) can never leave this path silently writing into a stale or
+   * nonexistent handle.
+   *
+   * @param {any} srcTexture - the same throwaway wrapper `uploadPage` received.
+   * @param {number} x @param {number} y @param {number} layer - the page's
+   *   pixel offset and array layer, from `slotToAtlasPosition`.
+   */
+  _uploadPageWebGPUNative(srcTexture, x, y, layer) {
+    this._renderer.initTexture(this.texture);
+    const backend = this._renderer.backend;
+    const textureGPU = backend.get(this.texture).texture;
+    const bitmap = srcTexture.image;
+    backend.device.queue.copyExternalImageToTexture(
+      { source: bitmap, flipY: !!srcTexture.flipY },
+      {
+        texture: textureGPU,
+        mipLevel: 0,
+        origin: { x, y, z: layer },
+        premultipliedAlpha: !!srcTexture.premultiplyAlpha,
+      },
+      { width: bitmap.width, height: bitmap.height, depthOrArrayLayers: 1 }
+    );
   }
 
   dispose() {

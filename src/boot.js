@@ -94,6 +94,7 @@ import {
   resetLoadingSceneMemory,
 } from './ui/loading-screen.js';
 import { LOAD_PHASES } from './ui/load-progress.js';
+import { installPainter } from './ui/index.js';
 import {
   SORT_LAYERS,
   makeLayerKey,
@@ -198,6 +199,10 @@ function install() {
   installFlightRecorder(MapShine);
   installSoak(MapShine); // exposes MapShine.soak(n) — the stage-gate soak harness
   installDebugPanel(MapShine);
+  // The in-app painter (tier 0): registers its "🖌️ Paint _Fire" action on the
+  // debug panel and returns a hydrate hook the canvasReady handler calls to pull
+  // any saved paint for the newly-loaded scene (docs/planning/Authoring-and-Distribution.md).
+  MapShine.__painter = installPainter(MapShine);
 
   // THE PASS GRAPH, VALIDATED AT BOOT (Keyhole §"THE FRAMEWORK" — 2026-07-17).
   // Node tests already prove PASSES validates (194+ assertions); this is the
@@ -1526,6 +1531,7 @@ function install() {
       try {
         const sceneDoc = canvasRef?.scene ?? null;
         if (!sceneDoc) return;
+        MapShine.__painter?.hydrateFromScene(); // pull any painted masks saved on this scene
         const floorsResult = getActiveSceneFloors(sceneDoc);
         if (!floorsResult.ok) {
           log.warn(`real-scene VT viewer: ${floorsResult.error}`);

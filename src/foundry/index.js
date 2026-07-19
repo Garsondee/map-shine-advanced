@@ -109,6 +109,7 @@ export {
 // own "Adjust Darkness Level" behavior) is read. `readSuppressWeatherStub` is
 // a deliberate, documented no-op — see scene-regions.js's own header.
 export { readActiveDarknessRegions, deriveRegionDarknessAdjuster, readSuppressWeatherStub } from './scene-regions.js';
+export { readPaintContext, savePaintedMasks, loadPaintedMasks } from './paint-adapter.js';
 
 // GRID-GEOMETRY READERS — feeds the masks.occlusion producer's RADIAL channel
 // (distancePixels) and the point-light soft-edge margin (gridSizePixels); the

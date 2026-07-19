@@ -12,7 +12,7 @@ Before any list: **most of V2 is not a parity target, and saying so is the singl
 
 | V2 subsystem | Lines (approx) | Why it is NOT a parity target |
 |---|---|---|
-| `token-movement-manager.js` (pathfinding, click-to-move, navmesh) | 12,771 | Foundry owns input **and** movement now (`keyhole-input-model-decision`). MSA renders a token following its document; it does not move it. |
+| `token-movement-manager.js` — the **sync/echo-defence machinery** (33 echo-flags, 104 "sync" mentions) | ~12,771 | The *machinery* is not a target — render position derives from the document as `f(doc, time)`, one authority, no echo-defence. **BUT its embedded navmesh/pathfinding engine + walk-style registry ARE product** (the postmortem flags them so) — they graduate to a real target: see **Animation & movement** in §2. |
 | `interaction-manager.js` (selection/drag/delete) | 8,955 | Foundry hit-tests. The interface seam keeps all interaction chrome in PIXI (`keyhole-interface-seam`). |
 | `pixi-content-layer-bridge.js` (compositing PIXI world into Three) | 4,574 | Drawings, templates, notes, sounds stay in PIXI's `interface` group, drawn on top. Nothing to composite. |
 | `frame-coordinator` + `render-loop` + `frame-state` (two-renderer sync) | 1,838 | Two renderers drawing **disjoint sets** — no shared picture, no sync code (`Engine-Postmortem.md` §1). |
@@ -67,6 +67,18 @@ This is the roadmap proper: each remaining pass, in **dependency order** (a pass
 | **The three-tier settings** (Map-Maker / GM / Player) | The distribution model V2 had — baselines ship with the map; GMs tweak; players cap their own perf. | `Params.md` §3.4 + `Effects-UI.md` | Rides the params service; persistence-as-diff already built. |
 | **Per-pass GPU timing** (WebGPU timestamps) | "Effect X is slow" becomes a measured claim, not a mood. | `Keyhole.md` menu item 6 | Rides the pass runner. |
 | **The tiered ladder** (WebGPU → WebGL2 auto-detect) | The reliability half — the rung above the safety slide's last rung. | `Keyhole.md` §4.3 | Mostly boot wiring; TSL already compiles both backends. |
+| **Animation & movement** ⭐ | Token move animation (render pos = `f(document, time)`), pathfinding / click-to-move, walk-styles, tile motion, doors — the quality-of-life layer V2 had. **Harvest the navmesh/pathfinding engine + walk-style registry** from `legacy/scene/token-movement-manager.js` (genuine product buried in the machinery). | (own doc when picked up) | geometry.world (live); the floor system; the input model — MSA renders the animation, Foundry stays the movement authority |
+
+### ⭐ The wishlist north-star: cross-floor 3D movement
+
+Author's vision (2026-07-19), recorded because it is an excellent one: **select a token on a lower floor, cycle up through floors with no loading screens and snappy response, right-click a grid space on an upper floor, and watch the token walk there — across floors, in 3D.** Today moving a token between floors is clumsy; this would be a standout feature no other VTT renderer offers.
+
+Why it fits the architecture instead of fighting it:
+- **"No loading screens, snappy floor switching" is already most of the way built.** The VT page cache + BC compression + adjacent-floor prewarm (`Keyhole.md` compression section) exist precisely so floors stay resident and switching is instant. The wishlist cashes in that investment.
+- **Cross-floor pathfinding** extends a single-floor navmesh to a multi-floor graph — and V2 already had `MultiFloorGraph` + `PortalDetector` (stairs/elevators) to harvest. The path is computed CPU-side, written to the token document (the one authority), and MSA renders the token animating along it.
+- **The principle that keeps it clean:** MSA never becomes a second source of truth for the token's position — that was V2's 12k-line mistake. It computes a path and writes waypoints to the document; Foundry authorises; MSA renders the walk as `f(document + movement state, time)`. One authority, no echo-defence.
+
+**Wishlist, not scheduled** — but it earns the top of the animation line because it is exactly the kind of thing MSA's architecture makes newly possible.
 
 ---
 

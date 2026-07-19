@@ -11,6 +11,7 @@
 - **[`Roadmap-to-Parity.md`](planning/Roadmap-to-Parity.md)** — the backlog from today's basic parity to V2's full look, as 13 declared passes (`src/graph/passes.js`); the sequence, the reframe (parity = V2's *look*, not its machinery), and the gate.
 - **[`Parity-and-Compatibility.md`](planning/Parity-and-Compatibility.md)** — Foundry parity, the UX-regression catalog, the cross-module compatibility doctrine, the testing regime + QA benchline.
 - **[`Effects-UI.md`](planning/Effects-UI.md)** — the effects config UI: front of house (approachable dials) & rear of house (expert, generated, categorised), and the structural cure for V2's dead-slider minefield.
+- **[`Authoring-and-Distribution.md`](planning/Authoring-and-Distribution.md)** — the Map Points successor: paint effect masks onto the map with live preview, and the persistence/distribution model that makes MSA maps sellable in adventures.
 - `Engine-Postmortem.md`, `Effects-API.md`, `Effects.md`, `Environment.md`, `Light-and-Shadow.md`, `Light-Parity.md`, `Light-MSA-Ideas.md`, `Params.md`, `Particles.md`, `Water.md`, `UI.md`, `Health.md`, `Shaders.md` — one design doc per subsystem, each grounded in the V2 audit.
 - `Forward+.md` — the diagnosis archive Keyhole builds on (still a live companion).
 - `v3/` — the B0/B2 build specs and golden-scene expectations.

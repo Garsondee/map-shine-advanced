@@ -63,6 +63,7 @@ This is the roadmap proper: each remaining pass, in **dependency order** (a pass
 | Work | The win | Owning doc | Note |
 |---|---|---|---|
 | **The effects config UI** (front of house / rear of house) | The authoring surface for *every* effect above. Without it, effects are tuned by editing code. | **`Effects-UI.md`** (new) | A prerequisite for productively building 5–9; see that doc for the plan. |
+| **Authoring: paint the map** (Map Points successor) | Paint effect masks (`_Fire`, `_Water`, …) with live preview; place discrete anchors; save to the scene; ship in sellable adventures. Replaces V2's 7,480-line Map Points. | **`Authoring-and-Distribution.md`** (new) | Before the effect families — you paint the mask an effect consumes. Reuses the mask authority + params persistence. |
 | **External-effect bridges** (Dice So Nice, Sequencer/JB2A) | Ecosystem parity — spell video in the scene, dice graded by the scene. | `Parity-and-Compatibility.md` §4 | V2-proven, V3-unbuilt. Stage 6. |
 | **The three-tier settings** (Map-Maker / GM / Player) | The distribution model V2 had — baselines ship with the map; GMs tweak; players cap their own perf. | `Params.md` §3.4 + `Effects-UI.md` | Rides the params service; persistence-as-diff already built. |
 | **Per-pass GPU timing** (WebGPU timestamps) | "Effect X is slow" becomes a measured claim, not a mood. | `Keyhole.md` menu item 6 | Rides the pass runner. |
@@ -88,7 +89,7 @@ Not a rigid schedule — a dependency-respecting order that lands **visible wins
 
 1. **`frame.snapshot` + `buf:scene.attr`** (the spine). Almost everything downstream reads them. Low visible payoff alone, but every later item is cheaper once they exist. Pair with the **stage-gate baseline** run first (`Keyhole.md` menu item 5) — never operate on an unmeasured engine.
 2. **`light.visibility`** → then **`light.accumulate`'s remaining rungs**. This closes the lighting/shadow story from ~90% to parity — the most-noticed visual gap, and the subsystem V2 fought hardest (`Light-and-Shadow.md`).
-3. **The config UI** (`Effects-UI.md`). Do this *before* the effect-family ports (5–9), because it is the surface you tune them through. Building water or particles without it means hand-editing constants — exactly the friction that loses.
+3. **The authoring layer** — the config UI (`Effects-UI.md`) *and* the paint/persistence system (`Authoring-and-Distribution.md`). Both come *before* the effect-family ports (5–9): you tune an effect through the config UI, and you paint the mask it consumes. Building water or particles without them means hand-editing constants and masks — exactly the friction that loses. (The paint system also unlocks *selling* — settings + masks that travel with a scene into an adventure.)
 4. **`surface.response`** → **`surface.water`** → **particles** → **`sims.fluids`**. The material and environmental families, tier 0 first each time (correctness never rides the ladder).
 5. **`post.grade`** — the finisher that makes everything above read as one graded image.
 6. **`masks.occlusion` SURFACE**, external-effect bridges, the tiered ladder — the remaining parity items, slotted as their prerequisites land.

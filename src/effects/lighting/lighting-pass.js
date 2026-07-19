@@ -1,6 +1,8 @@
 /**
- * SEAMS: `light.visibility` + `light.accumulate` — the lighting model where the
- * light/shadow war cannot happen.
+ * SEAM: `light.visibility` — the shadow half of the lighting model, where the
+ * light/shadow war cannot happen. (`light.accumulate` is no longer a seam: it
+ * went live 2026-07-18, AMBIENT/EXTERIOR only — see the note where its door used
+ * to be, below, and effects/lighting/environmental-light.js.)
  *
  * THE ONE SENTENCE (docs/planning/Light-and-Shadow.md): shadow is not a thing —
  * it is the ABSENCE OF A SPECIFIC LIGHT. Every light carries its OWN visibility
@@ -42,21 +44,11 @@ export function buildLightVisibilityPass(ctx) {
   });
 }
 
-/**
- * Accumulate illumination and composite. Once real: reads res:vis + env + attr,
- * creates `buf:scene.illum`, modifies `buf:scene.color` (the ONE declared
- * modify — see graph/passes.js).
- * @param {object} ctx
- * @returns {never}
- * @throws {NotBuiltError}
+/*
+ * `buildLightAccumulatePass` (the throwing door) is GONE as of 2026-07-18:
+ * light.accumulate flipped to 'live' (AMBIENT/EXTERIOR only). Its real producer
+ * runs in vt-pan-viewer.js#runLightAccumulatePass; the TSL is in
+ * effects/lighting/environmental-light.js. graph/pass-seams.js no longer lists
+ * it; graph/pass-impls.js does. Point lights / coloration / darkness sources are
+ * later rungs that grow the SAME pass (Light-Parity.md §5), not new seams.
  */
-export function buildLightAccumulatePass(ctx) {
-  void ctx;
-  throw new NotBuiltError('light.accumulate', {
-    owns: 'docs/planning/Light-and-Shadow.md §1 + Keyhole.md §4.2 (harvested ForwardLightingPass semantics)',
-    gate: 'needs light.visibility (res:vis) and the frame graph. Foundry-v14 model: MAX-blend illum + SCREEN coloration, per-light additive.',
-    instead:
-      'A torch does not "override" a shadow — it is a separate light whose contribution ADDS. If a shadow ' +
-      'ever seems to need weakening near a light, the model is being violated, not tuned.',
-  });
-}

@@ -56,6 +56,11 @@ import {
   readPageBitmapPixels,
   resolveRendererRequiredLimits,
   setWholeImageMode,
+  setDarknessRealism,
+  getDarknessRealism,
+  sampleVtPanViewerIllumPixel,
+  probeVtPanViewerPixels,
+  runInteractiveVtPanViewerPixelProbe,
 } from './vt/index.js';
 import { PASSES, validatePassGraph, PASS_SEAMS, PASS_IMPLS } from './graph/index.js';
 import { NotBuiltError } from './core/not-built.js';
@@ -128,6 +133,44 @@ MapShine.THREE = THREE; // single Three instance for the whole V3 tree
 // huge maps, so this is a debug lever, not a working fallback; the real
 // reliability floor is the device-lost safety slide.
 MapShine.setWholeImageMode = setWholeImageMode;
+// THE DARKNESS-REALISM LEVER (2026-07-19, author-requested): MapShine
+// .setDarknessRealism(v), v in [0,1]. 0 = Foundry parity (DEFAULT — the unlit
+// floor at scene darkness 1 stays at Foundry's readable ~19% darkness colour,
+// never pitch black); 1 = "realistic" (darkness 1 crushes the unlit map to
+// true black). Takes effect on the next rendered frame (no reload). Also
+// available as a dropdown in the debug panel ("Darkness at max"). See
+// vt-pan-viewer.js#setDarknessRealism / environmental-light.js.
+MapShine.setDarknessRealism = setDarknessRealism;
+MapShine.getDarknessRealism = getDarknessRealism;
+// THE PIXEL-READBACK DIAGNOSTIC (2026-07-19, the region-darkness rendering
+// audit): `await MapShine.sampleIllumPixel(worldX, worldY)` reads the ACTUAL
+// GPU-rendered value of buf:scene.illum at one world position — the ONLY
+// instrument in this project that answers "did this actually reach the
+// screen" rather than "what does the CPU say it should be" (getRegionDarknessInfo's
+// own job). See vt-pan-viewer.js#sampleIllumPixel for the full reasoning.
+MapShine.sampleIllumPixel = sampleVtPanViewerIllumPixel;
+// THE PIXEL PROBE (2026-07-19, author-requested, buffed same day once the
+// author flagged it as THE tool that cracked the region-darkness bug):
+// `await MapShine.probePixels([{x,y}, {x,y}, {x,y}])` — up to 3 world
+// positions, reading ALL FIVE screen-sized compositor buffers (illum/lit/
+// albedo/coloration/occlusion, the last via a byte-not-half-float decode
+// path — see diag/pixel-probe.js), PLUS a numbered on-screen marker (thin
+// crosshair + thin circle + a chunkier badge) per point for 30s, so a
+// screenshot taken right after the call lines up with the JSON report,
+// point-for-point. Point 2+ also carries `deltaFromPrev` — an automatic
+// diff against the previous point, biggest jump called out, the same
+// by-hand "point A vs point B" comparison that found the region-darkness
+// discard() bug and the region-aware-ambient seam, now computed for free.
+// See vt-pan-viewer.js#probePixels / diag/pixel-probe.js.
+MapShine.probePixels = probeVtPanViewerPixels;
+// THE INTERACTIVE PIXEL PROBE (2026-07-19, author-requested: "I want to
+// click on the screen and set the points"). MapShine.armPixelProbe() also
+// exists for console use; the debug-panel "Pixel Probe" button (registered
+// below, once MapShine.debug exists) is the primary way to reach it — click
+// the button, then click up to 3 spots on the map. See vt-pan-viewer.js
+// #armInteractivePixelProbe for the full "why this never steals a click
+// from Foundry" reasoning.
+MapShine.armPixelProbe = runInteractiveVtPanViewerPixelProbe;
 
 /**
  * Boot's own logger. Everything this file says goes through `core/log.js`, which
@@ -876,6 +919,91 @@ function install() {
 
   MapShine.debug.registerReport('interface-seam', 'Interface seam (art vs chrome)', () => getCanvasCompositingReport());
 
+  // RENDERER A/B TOGGLE (2026-07-18, author request: "a button that lets me
+  // toggle back to the native PIXI render and back again to threejs, for
+  // proper A/B visual testing of the lights").
+  //
+  // NOT a new mechanism — the interface seam already has a fully reversible
+  // lever for exactly this (canvas-compositing.js): `canvas.environment
+  // .renderable`. false = Foundry's own primary+effects art is suppressed and
+  // MSA (stacked underneath, verified z-index 0 vs Foundry's own canvas —
+  // vt-pan-viewer.js's stackUnderBoard) shows through. true = Foundry draws
+  // its own art again, on top, occluding MSA. MSA's render loop keeps running
+  // in EITHER mode (wasted GPU work while hidden, never a correctness issue —
+  // pausing it is a possible follow-up, not needed for A/B comparison).
+  //
+  // A dropdown, not a plain button (feedback_debug_ui_one_action_one_control:
+  // mutually-exclusive modes are a dropdown), reading its value from the SAME
+  // live fact the interface-seam report already exposes — one source of
+  // truth, not a second one invented for this control.
+  //
+  // Switching TO Foundry is unconditional (`restoreFoundryArt` — showing
+  // Foundry's own art is never unsafe). Switching TO MSA reuses
+  // `applyArtSuppression`'s existing safety check (decideArtSuppression) and
+  // can REFUSE (e.g. the PIXI context is opaque) — a refusal is thrown, not
+  // silently swallowed, so the status line reads "failed: <reason>" rather
+  // than a false "✓" (feedback_instruments_must_not_lie).
+  MapShine.debug.registerSelect(
+    'render-compare',
+    'Renderer',
+    [
+      { value: 'msa', label: 'MSA' },
+      { value: 'foundry', label: 'Foundry' },
+    ],
+    () => (getCanvasCompositingReport().environmentRenderable ? 'foundry' : 'msa'),
+    async (mode) => {
+      if (mode === 'foundry') {
+        if (!restoreFoundryArt())
+          throw new Error("restoreFoundryArt() could not restore Foundry's own art — see console.");
+        return;
+      }
+      const result = applyArtSuppression();
+      if (!result.applied) throw new Error(`refused (${result.code}): ${result.reason}`);
+    }
+  );
+
+  // THE DARKNESS-REALISM LEVER (2026-07-19, author-requested) — how dark the
+  // UNLIT scene gets at maximum scene darkness. "Foundry" (default) floors at
+  // Foundry's own readable darkness colour (~19%, never black — parity); the
+  // "realistic" end drives that floor to true black. Presets rather than a
+  // continuous slider because the debug panel's lever primitive is a select
+  // (feedback_debug_ui_one_action_one_control) — three points span the range.
+  MapShine.debug.registerSelect(
+    'darkness-realism',
+    'Darkness at max',
+    [
+      { value: '0', label: 'Foundry (readable)' },
+      { value: '0.5', label: 'Halfway' },
+      { value: '1', label: 'Realistic (black)' },
+    ],
+    () => {
+      // Snap the live value to the nearest preset for display (the API accepts
+      // any 0..1; the dropdown only offers these three).
+      const v = getDarknessRealism();
+      if (v <= 0.25) return '0';
+      if (v >= 0.75) return '1';
+      return '0.5';
+    },
+    (value) => {
+      setDarknessRealism(Number(value));
+    }
+  );
+
+  // THE INTERACTIVE PIXEL PROBE (2026-07-19, author-requested: "I need a
+  // button to activate pixel probe and the ability to click on the screen
+  // to set the three points"). An ACTION, not a report — it arms a click
+  // listener and does not resolve until the author has clicked up to 3
+  // points (or 90s elapse), so it must never be swept up by the flight
+  // recorder's "run every report" export. Its return value (the same
+  // 5-buffer readback + deltaFromPrev `MapShine.probePixels` gives) is
+  // copied to the clipboard automatically by the SAME mechanism every other action
+  // uses — click, then click up to 3 map points, then paste.
+  MapShine.debug.registerAction('pixel-probe', 'Pixel Probe (click 3 pts)', async () => ({
+    report: 'pixel-probe',
+    generatedAt: new Date().toISOString(),
+    points: await MapShine.armPixelProbe(3),
+  }));
+
   // THE THIRD GROUP (2026-07-17, ghost-hunting round 3). Five theories dead by
   // direct evidence tonight, in order: environmentRenderable:false (not
   // Foundry's suppressed art), renderer.autoClear defaults true and nothing
@@ -1092,8 +1220,16 @@ function install() {
     };
   });
 
+  // Shared by pixi-residency-report and stage-gate-baseline below — both need
+  // the active scene doc, and boot.js already has this exact `canvas.scene`
+  // ternary repeated as ratcheted debt at several other call sites in this
+  // file. Routing both through ONE helper, instead of each report inlining
+  // its own copy, keeps `foundry/adapter-only`'s ratchet at its current bound
+  // rather than growing it by one violation per new report that needs a scene.
+  const getActiveSceneDoc = () => (typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null);
+
   MapShine.debug.registerReport('pixi-residency-report', 'PIXI residency', () => {
-    const sceneDoc = typeof canvas !== 'undefined' ? (canvas.scene ?? null) : null;
+    const sceneDoc = getActiveSceneDoc();
     const floorsResult = getActiveSceneFloors(sceneDoc);
     const srcs = floorsResult.ok ? floorsResult.floors.map((f) => f.url) : [];
     return {
@@ -1105,6 +1241,102 @@ function install() {
       interpretation:
         'width/height at or near 1024 (or below) on a real Level background = the proxy took effect. ' +
         'The original real dimensions (e.g. 12000x12000) resident instead = something regressed — flag it.',
+    };
+  });
+
+  // ---------------------------------------------------------------------------
+  // THE STAGE-GATE BASELINE (2026-07-18) — Keyhole.md's infrastructure menu,
+  // Track 2 item 5 ("the performance baseline + regression harness") + item 7
+  // ("the multi-scene validation matrix"). ONE report serves both: run it once
+  // per scene (the torture fixture, Church, Mansion, one non-square multi-floor
+  // scene — Keyhole.md §8's own gate scenes) and each run is a row in the
+  // matrix; run it on the SAME scene across sessions and it's the regression
+  // diff. Nothing here was previously aggregated in one place — this is
+  // read-only (calls existing reports/accessors, changes no render behavior),
+  // built specifically so the very first session back at a browser can verify
+  // everything built blind this session (the pass runner, frame.snapshot,
+  // masks.occlusion) in one click instead of ad hoc clicking around.
+  //
+  // Every gate below is quoted from Keyhole.md §1/§8 directly rather than
+  // reinvented — a threshold I misremembered would be worse than no threshold.
+  // Anything NOT instrumented reports `available:false` with a reason, never a
+  // guessed or zeroed number (doctrine #5, instruments must not lie) — this
+  // project's own crash campaign was killed by exactly this kind of honesty.
+  MapShine.debug.registerReport('stage-gate-baseline', 'Stage gate baseline (run once per scene)', () => {
+    const sceneDoc = getActiveSceneDoc();
+    const floorsResult = getActiveSceneFloors(sceneDoc);
+    const srcs = floorsResult.ok ? floorsResult.floors.map((f) => f.url) : [];
+    const pixi = getPixiResidencyReport(srcs);
+    const pixiTotalMB = pixi.available
+      ? Math.round((pixi.entries.reduce((sum, e) => sum + (e.approxBytes ?? 0), 0) / (1024 * 1024)) * 10) / 10
+      : null;
+    const vt = getVtPanViewerDiagnostics();
+    const loading = getLoadingScreenState();
+    const wholeImageErrors = (vt.wholeImage?.items ?? [])
+      .filter((i) => i.error)
+      .map((i) => ({ id: i.id, error: i.error }));
+
+    return {
+      report: 'stage-gate-baseline',
+      generatedAt: new Date().toISOString(),
+      sceneName: sceneDoc?.name ?? null,
+      sceneId: sceneDoc?.id ?? null,
+      floorCount: floorsResult.ok ? floorsResult.floors.length : null,
+      viewerActive: vt.active,
+      gates: {
+        // Stage 2's gate (Keyhole.md §8): "PIXI ≤ 60 MB".
+        pixiResidencyMB: { value: pixiTotalMB, gateMaxMB: 60, pass: pixiTotalMB === null ? null : pixiTotalMB <= 60 },
+        // Stage 1's gate (Keyhole.md §8): "interactive ≤ 10 s" — reads the
+        // last COMPLETED load's total, per load-progress.js's own receipt.
+        // null = no load has completed yet this session (reload the scene
+        // before running this report, not a bug).
+        loadTimeMs: {
+          value: loading.lastLoad?.totalMs ?? null,
+          gateMaxMs: 10000,
+          pass: loading.lastLoad?.totalMs == null ? null : loading.lastLoad.totalMs <= 10000,
+          // A load that completes but froze the main thread for seconds is a
+          // bug with a receipt, not a pass — check this even if totalMs is fine.
+          worstStallMs: loading.lastLoad?.worstStallMs ?? null,
+        },
+        // Stage 1's gate (Keyhole.md §8): "torture scene pans at 60 fps
+        // target / 30 floor". Reported as frame-GAP percentiles in ms
+        // (what's actually tracked) rather than converted to fps, so the
+        // raw measurement is never silently reinterpreted: 16.7ms ≈ 60fps,
+        // 33.3ms ≈ the 30fps floor. Pan/zoom/floor-switch BEFORE running
+        // this report — it reads a 300-frame rolling window, not a live sample.
+        frameGapMs: vt.hitchStats ?? { available: false, reason: 'viewer not active' },
+        // NOT INSTRUMENTED — the original Stage 2 gate ("zero texImage2D >
+        // 32ms") was a WebGL-call-level metric from the V2 crash campaign
+        // (Forward+.md §13's slowGlOps). V3's upload path is architecturally
+        // different (page-atlas uploads via atlas.js, or whole-image via
+        // renderer.initTexture — see Keyhole.md's compression section) and
+        // has no equivalent per-call timer. Reported honestly absent rather
+        // than mapped onto a metric that no longer means the same thing.
+        texImage2DOver32ms: {
+          available: false,
+          reason: 'no V3 equivalent of this V2 WebGL-call-level metric exists yet',
+        },
+      },
+      vramFacts: {
+        estTextureVramMB: vt.wholeImage?.estTextureVramMB ?? null,
+        packs: vt.layerResidencyTotals?.packs ?? null,
+        // Both should read 0 — see their own field-level interpretation
+        // text in the Diagnostics report if either is nonzero.
+        coarsePinShortfall: vt.layerResidencyTotals?.coarsePinShortfall ?? null,
+        coarseReserveMisses: vt.coarsePinBudget?.cacheReserveCheck?.coarseReserveMisses ?? null,
+      },
+      errors: {
+        layerLoadErrors: vt.layerLoadErrors ?? [],
+        wholeImageErrors,
+      },
+      interpretation:
+        'Run once per scene (torture fixture, Church, Mansion, one non-square multi-floor scene), ' +
+        'copy the JSON, paste it back — that becomes one row of the multi-scene validation matrix ' +
+        '(Keyhole.md Track 2 item 7) or, run again later on the SAME scene, the regression diff ' +
+        '(item 5). A `pass:null` means "not measured yet" (e.g. reload the scene so loadTimeMs has a ' +
+        'completed load to read) — never read null as a failure. `frameGapMs` needs real pan/zoom/' +
+        'floor-switch input before this report captures anything meaningful; a scene sitting idle ' +
+        'will show a thin or empty sample.',
     };
   });
 
@@ -1444,6 +1676,15 @@ function syncInterfaceSeam(context) {
         `Foundry's PIXI keeps interface (selection, grid, walls, controls) on top.`
     );
   }
+  // Re-sync the "Renderer" dropdown (and any other control) against reality
+  // NOW — this is the exact moment environmentRenderable can flip. Without
+  // this the debug panel's FIRST paint (registered during boot, before any
+  // scene has loaded) shows whatever was true at that early instant, and
+  // nothing ever repaints it (see refreshControls' own doc). Called
+  // unconditionally, not just on seam.applied — a REFUSED suppression is
+  // also a real state change the dropdown must reflect (Foundry's art is
+  // genuinely still showing then).
+  MapShine.debug?.refreshControls?.();
   return seam;
 }
 

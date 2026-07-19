@@ -65,8 +65,17 @@ export function run(t) {
       PASSES.filter((p) => p.creates.includes('buf:scene.color')).length === 1
     );
     t.ok(
-      'light accumulation READS res:vis — light-linking is wired, not implied',
-      byId.get('light.accumulate').reads.includes('res:vis')
+      'light accumulation READS res:env — the ambient/exterior rung is wired, not implied',
+      byId.get('light.accumulate').reads.includes('res:env')
+    );
+    // res:vis (light-linking) is intentionally NOT read yet: light.accumulate is
+    // AMBIENT-ONLY as of 2026-07-18, and light.visibility is still a seam that
+    // produces nothing — declaring the read while live would be a pass-health
+    // STARVED error. It returns to `reads` the same commit light.visibility
+    // goes live. Guarding its ABSENCE keeps that honesty checked, not assumed.
+    t.ok(
+      'light accumulation does NOT read res:vis while shadows are unbuilt (no starved read)',
+      !byId.get('light.accumulate').reads.includes('res:vis')
     );
     t.ok(
       'the visibility pass never touches the composed image (shadow modulates LIGHT, never color)',

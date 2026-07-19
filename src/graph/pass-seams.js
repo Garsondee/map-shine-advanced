@@ -23,25 +23,31 @@
 import {
   registerParticleSystem,
   buildLightVisibilityPass,
-  buildLightAccumulatePass,
   buildGradePass,
   buildWaterPass,
   buildFluidSimPass,
   buildSurfaceResponsePass,
 } from '../effects/index.js';
-import { buildOcclusionMaskPass } from '../scene/index.js';
 
 /**
  * Every 'seam'-status pass MUST appear here; every entry here MUST be a
  * seam-status pass. (Both directions are asserted in pass-declarations.test.)
+ *
+ * 'masks.occlusion' is NOT here (2026-07-18): it flipped to 'live' — see
+ * graph/pass-impls.js. scene/occlusion-mask.js's throwing door is deleted;
+ * a real (RADIAL-only) producer replaced it in vt-pan-viewer.js.
+ *
+ * 'light.accumulate' is NOT here either (2026-07-18): it flipped to 'live'
+ * (AMBIENT/EXTERIOR only) — see graph/pass-impls.js. Its throwing door
+ * (`buildLightAccumulatePass`) is deleted from effects/lighting/lighting-pass.js;
+ * a real producer runs in vt-pan-viewer.js (effects/lighting/environmental-
+ * light.js does the TSL). 'light.visibility' STAYS a seam — shadows aren't built.
  * @type {Record<string, (ctx: object) => never>}
  */
 export const PASS_SEAMS = Object.freeze({
   'sims.particles': registerParticleSystem,
   'sims.fluids': buildFluidSimPass,
-  'masks.occlusion': buildOcclusionMaskPass,
   'light.visibility': buildLightVisibilityPass,
-  'light.accumulate': buildLightAccumulatePass,
   'surface.response': buildSurfaceResponsePass,
   'surface.water': buildWaterPass,
   'surface.particles': registerParticleSystem, // draw half shares the engine door

@@ -91,6 +91,19 @@ export const PASS_IMPLS = Object.freeze({
       'The real, ALREADY-SEPARATE entry point — boot.js already drives this from Foundry token-CRUD ' +
       'hooks (createToken/updateToken/deleteToken). No extraction needed; this makes the fact checked.',
   },
+  'masks.occlusion': {
+    fn: startVtPanViewer,
+    module: 'vt/index.js',
+    export: 'startVtPanViewer',
+    separatelyInvocable: false,
+    note:
+      'REAL as of 2026-07-18, RADIAL-only: runMaskOcclusionPass (a private closure inside ' +
+      'startVtPanViewer) renders token discs into a real screen-sized render target every frame, MIN-' +
+      "blended, and refreshes every drawn item's uOcclusionElevation uniform. FADE/VISION/SURFACE " +
+      "stay inert — see graph/passes.js's own note for the honest scope. Same invocability caveat as " +
+      'geometry.world/present.composite: the loop lives inside startVtPanViewer, driven by the SAME ' +
+      'local passImpls/framePlan graph/run-frame.js walks, not yet externally callable alone.',
+  },
   'geometry.world': {
     fn: startVtPanViewer,
     module: 'vt/index.js',
@@ -101,6 +114,18 @@ export const PASS_IMPLS = Object.freeze({
       "allocated through ThreeAllocator — the law's first caller). No longer fused with " +
       'present.composite. Not separately invocable: setAnimationLoop still drives the loop from ' +
       'inside startVtPanViewer, rather than a graph runner calling this pass.',
+  },
+  'light.accumulate': {
+    fn: startVtPanViewer,
+    module: 'vt/index.js',
+    export: 'startVtPanViewer',
+    separatelyInvocable: false,
+    note:
+      'REAL as of 2026-07-18 (AMBIENT/EXTERIOR only): runLightAccumulatePass fills buf:scene.illum with ' +
+      "Foundry's ambient background and composites scene.color × illum → scene.lit (which present then " +
+      'reads). TSL lives in effects/lighting/environmental-light.js; the RTs + draws are driven from ' +
+      'renderFrame. Point lights/coloration/darkness are later rungs (passes.js note). Same invocability ' +
+      'caveat as geometry.world — the loop still drives it from inside startVtPanViewer.',
   },
   'present.composite': {
     fn: startVtPanViewer,

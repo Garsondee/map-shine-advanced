@@ -30,3 +30,4 @@ export { PASS_SEAMS } from './pass-seams.js';
 export { PASS_IMPLS } from './pass-impls.js';
 export { evaluatePassHealth, breakerCircuits } from './pass-health.js';
 export { ThreeAllocator, LAW_MAX_WORLD_RES_DIM, LAW_MAX_SCREEN_DIM } from './three-allocator.js';
+export { planFrame, runPassPlan } from './run-frame.js';

@@ -2,7 +2,7 @@
 
 **V2 class:** `SharpenEffectV2` · **Source:** `legacy/compositor-v2/effects/SharpenEffectV2.js`
 
-**Rebuilt in V3 as:** **no V3 pass claims this** — either a deliberate drop, or a gap in `passes.js`’s `absorbs` accounting
+**Rebuilt in V3 as:** `post.grade`
 
 > **Reference only — do not port these values.** Every effect is being rebuilt from scratch in TSL; the numbers below were tuned against V2's GLSL math, which is being deleted, so the same settings would not give the same result. What survives the rewrite is the INTENT: which knobs existed, what they were for, and what they were called. That is what this page is for.
 

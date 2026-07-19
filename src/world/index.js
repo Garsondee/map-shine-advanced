@@ -4,4 +4,4 @@
  * exported here, other zones cannot reach it — by build failure, not by ask.
  */
 export { computeSun, normalizeHour, DEFAULT_SUN_CONFIG } from './sun.js';
-export { buildEnvSnapshot, DEFAULT_WEATHER, DEFAULT_WIND } from './environment.js';
+export { buildEnvSnapshot, DEFAULT_WEATHER, DEFAULT_WIND, DEFAULT_AMBIENT } from './environment.js';

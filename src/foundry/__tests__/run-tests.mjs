@@ -13,6 +13,10 @@ import { run as runCanvasLifecycle } from './canvas-lifecycle.test.mjs';
 import { run as runDrawListDocuments } from './draw-list-documents.test.mjs';
 import { run as runMaskDiscovery } from './mask-discovery.test.mjs';
 import { run as runPixiProxyTextures } from './pixi-proxy-textures.test.mjs';
+import { run as runSceneEnvironment } from './scene-environment.test.mjs';
+import { run as runSceneLights } from './scene-lights.test.mjs';
+import { run as runSceneRegions } from './scene-regions.test.mjs';
+import { run as runSceneOcclusionSources } from './scene-occlusion-sources.test.mjs';
 import { run as runSceneGeometry } from './scene-geometry.test.mjs';
 import { run as runSceneLayers } from './scene-layers.test.mjs';
 import { run as runSceneTokens } from './scene-tokens.test.mjs';
@@ -57,6 +61,10 @@ const suites = [
   ['draw-list-documents', runDrawListDocuments],
   ['mask-discovery', runMaskDiscovery],
   ['pixi-proxy-textures', runPixiProxyTextures],
+  ['scene-environment', runSceneEnvironment],
+  ['scene-lights', runSceneLights],
+  ['scene-regions', runSceneRegions],
+  ['scene-occlusion-sources', runSceneOcclusionSources],
   ['scene-geometry', runSceneGeometry],
   ['scene-layers', runSceneLayers],
   ['scene-tokens', runSceneTokens],

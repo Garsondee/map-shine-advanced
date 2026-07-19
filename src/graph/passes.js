@@ -87,6 +87,11 @@ export const PASSES = [
       'ShadowDriverState',
       'frame-state.js',
       'foundry-time-phases',
+      // Closes the absorb-gap audit (2026-07-18, docs/reference/v2-effect-
+      // params/README.md's "no V3 pass claims this" list): 35 controls, all
+      // direction/speed/gustiness — exactly world/environment.js's DEFAULT_WIND
+      // shape (directionDeg/speed01/gustiness01), which this pass already owns.
+      'SceneWindField',
     ],
     note:
       'ONE per-frame read-only snapshot: time, sun (computed ONCE), weather, wind, darkness, camera, ' +
@@ -147,16 +152,19 @@ export const PASSES = [
     id: 'masks.occlusion',
     stage: 'masks',
     kind: 'gpu',
-    status: 'seam',
-    owns: 'Keyhole.md §"THE REMAINING PIECE" + scene/occlusion.js (the ported, tested model)',
+    status: 'live',
+    owns: 'Keyhole.md (the occlusionMask block in vt-pan-viewer.js) + scene/occlusion.js (the ported, tested model)',
     creates: ['buf:occlusion'],
     reads: ['res:scene', 'res:view'],
     modifies: [],
-    absorbs: ['CanvasOcclusionMask(re-impl)', 'OverheadStampEffectV2(token-fade half)'],
+    absorbs: ['CanvasOcclusionMask(re-impl, RADIAL channel only)', 'OverheadStampEffectV2(token-fade half)'],
     note:
-      "Foundry's RGBA occlusion mask (R=Fade G=Radial B=Vision A=Surface, elevation-indexed, MIN " +
-      'blend) — tokens fading roofs. Unblocked since tokens render; the last piece of the original ' +
-      'tiles directive.',
+      'RADIAL ONLY as of 2026-07-18 (G channel: token discs, MIN-blended, real elevation-indexed). ' +
+      'R (FADE) and B (VISION) stay inert — neither is wired; A (SURFACE) — the default mode for ' +
+      "level/roof art and this feature's headline case — needs Foundry's separate Region/Surfaces " +
+      'system (Scene#getSurfaces/polygonTree), not built at all. `live` here means the RADIAL ' +
+      'channel genuinely runs every frame against real document data, not that the pass is complete — ' +
+      'same honesty bar geometry.world already sets for its own partial buf:scene.attr claim.',
   },
   {
     id: 'geometry.world',
@@ -211,10 +219,19 @@ export const PASSES = [
     id: 'light.accumulate',
     stage: 'lighting',
     kind: 'gpu',
-    status: 'seam',
-    owns: 'docs/planning/Light-and-Shadow.md §1 + Keyhole §4.2 (harvested ForwardLightingPass semantics)',
+    status: 'live',
+    owns: 'docs/planning/Light-and-Shadow.md §1 + Keyhole §4.2 (harvested ForwardLightingPass semantics) + docs/planning/Light-Parity.md',
     creates: ['buf:scene.illum'],
-    reads: ['res:env', 'res:vis', 'res:scene', 'buf:scene.attr', 'vt:masks'],
+    // `reads` stays narrowed to res:env even now that point lights are live
+    // (2026-07-18): light DATA comes from a direct foundry/scene-lights.js
+    // adapter read (canvas.effects.lightSources), the same shortcut
+    // geometry.world already takes for its own res:view/res:scene reads —
+    // not a formally-produced graph resource yet. res:vis / buf:scene.attr /
+    // vt:masks return to this list as the shadow (light.visibility) and
+    // indoor/outdoor (_Outdoors) rungs land — declaring an unproduced read
+    // while live is a pass-health ERROR, so a read appears here only when a
+    // producer for it does (pass-health.js STARVED).
+    reads: ['res:env'],
     modifies: ['buf:scene.color'],
     absorbs: [
       'LightingEffectV2',
@@ -224,10 +241,43 @@ export const PASSES = [
       'WeatherLightningEffectV2',
       'SkyColorEffectV2',
       'ThreeLightSource',
+      // Closes the absorb-gap audit (2026-07-18): a 1-control tint on how
+      // darkvision/etc. read the lit scene — SUPERSEDED, not ported. Fog/
+      // vision stay with Foundry's own PIXI rendering (keyhole-vision-fog-
+      // direction, memory) — MSA does not own vision mode until that day.
+      'VisionModeEffectV2(SUPERSEDED — stays with Foundry, not MSA-rendered)',
     ],
     note:
-      'illum = skyAmbient×skyVis + Σ(light×its OWN visibility). The sun is a light. Lightning is a ' +
-      'light. A torch is a light. Then color ×= illum. The five-step pile-up has no combatants here.',
+      'AMBIENT/EXTERIOR + POINT-LIGHT ILLUMINATION + COLORATION + GLOBAL ILLUMINATION + REGION-DRIVEN ' +
+      "DARKNESS as of 2026-07-19: buf:scene.illum = Foundry's ambient background mix(daylight, " +
+      "darkness, DL) (DL the scene darkness), raised to the scene's Global Illumination floor when " +
+      'enabled + within its own darkness window (foundry/scene-lights.js#deriveGlobalLightConfig — ' +
+      'verified against source that the global light needs its OWN handling, not the circular point-' +
+      'light mesh pipeline: GlobalLightSource skips PointEffectSourceMixin entirely); darkness-' +
+      'adjusting Regions ("Adjust Darkness Level" behavior — foundry/scene-regions.js + effects/' +
+      'lighting/region-darkness.js) then OVERWRITE their own footprint with a per-fragment analytic ' +
+      'shape test (rectangle/ellipse/polygon, discard-outside — no render-to-texture pipeline built ' +
+      'for this), re-mixed by their OWN mode/modifier (OVERRIDE/BRIGHTEN/DARKEN, verbatim formulas); ' +
+      "MAX-blended with every active AmbientLight source's default-technique illumination (ratio/" +
+      'switchColor/attenuation falloff + a soft analytic-SDF edge + luminosity-driven exposure — ' +
+      'effects/lighting/point-light-illumination.js), each gated by its OWN darkness activation window ' +
+      '(LightData.darkness {min,max}, default {0,1} — a GM can set a torch to "dusk only"); then ' +
+      'scene.color ×= illum (in gamma space — effects/lighting/environmental-light.js). SEPARATELY, ' +
+      "buf:scene.coloration accumulates each light's OWN colour (default coloration technique only — " +
+      '"Adaptive Luminance", finalColor = color × colorationAlpha × perceivedBrightness(mapColour), ' +
+      'sampled via screenUV off buf:scene.color — effects/lighting/point-light-coloration.js), MAX-' +
+      "blended across lights (a documented approximation of Foundry's own SCREEN-per-mesh combine — " +
+      'identical wherever at most one light reaches a pixel) and ADDED onto scene.lit afterward (audit ' +
+      '§6\'s own "SCREEN per-mesh, ADD onto scene", the ADD half exact). Point-light shape is ' +
+      "Foundry's OWN wall-clipped polygon (source.shape.points, fan-triangulated) — walls are already " +
+      'free here; no separate visibility work needed for point lights, only for the SUN. `live` means ' +
+      'these terms run every frame against real Foundry data, NOT that the pass is complete — the ' +
+      'other 12 coloration techniques, contrast/saturation/shadow adjustments, darkness sources, and ' +
+      "animations are later rungs (Light-Parity.md §5); elevation occlusion, the region system's own " +
+      "Clipper-CSG/elevation gate, the global light's OWN (currently colourless) coloration, and the " +
+      "interaction between Global Illumination's floor and a region's own overwrite (region-darkness." +
+      "js's own header names this last one precisely) are documented, accepted simplifications, not " +
+      'silent gaps. Same honesty bar geometry.world/masks.occlusion set for their own partial claims.',
   },
   {
     id: 'surface.response',
@@ -301,6 +351,16 @@ export const PASSES = [
       'SepiaEffectV2',
       'DazzleOverlayEffectV2',
       'FilterEffectV2',
+      // Closes the absorb-gap audit (2026-07-18): both are plain stylizer-
+      // chain nodes, the same shape as Ascii/Halftone/DotScreen/Sepia above.
+      'InvertEffectV2',
+      'SharpenEffectV2',
+      // GridRenderer's STYLE layer (dashed/dotted lines, ghost adjacent-floor
+      // grids, floor tinting) is a stylizer-chain overlay; Foundry's own grid
+      // line rendering itself stays with PIXI's interface group regardless
+      // (keyhole-interface-seam — MSA never draws it), so this claims only
+      // the cosmetic embellishment V2 added on top, not baseline grid drawing.
+      'GridRenderer',
     ],
     note:
       'THE GRADE STACK, in fixed node order: base → ToD (8-anchor timeline) → weather → context ' +

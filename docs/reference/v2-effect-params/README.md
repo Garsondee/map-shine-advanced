@@ -10,6 +10,7 @@ Cross-referenced against `src/graph/passes.js`'s `absorbs` declarations.
 
 ### `frame.snapshot`
 
+- [SceneWindField](scene-wind-field.md) — `SceneWindField`, 35 controls
 - [WeatherController](weather-controller.md) — `WeatherController`, 122 controls
 
 ### `geometry.world`
@@ -23,6 +24,7 @@ Cross-referenced against `src/graph/passes.js`'s `absorbs` declarations.
 - [LightningEffectV2](lightning-effect.md) — `LightningEffectV2`, 65 controls
 - [PlayerLightEffectV2](player-light-effect.md) — `PlayerLightEffectV2`, 160 controls
 - [Sky Environment (exports)](sky-color-effect.md) — `SkyColorEffectV2`, 3 controls
+- [VisionModeEffectV2](vision-mode-effect.md) — `VisionModeEffectV2`, 1 controls
 - [WeatherLightningEffectV2](weather-lightning-effect.md) — `WeatherLightningEffectV2`, 43 controls
 - [Window Light](window-light-effect.md) — `WindowLightEffectV2`, 99 controls
 
@@ -50,9 +52,12 @@ Cross-referenced against `src/graph/passes.js`'s `absorbs` declarations.
 - [Dot screen (halftone)](dot-screen-effect.md) — `DotScreenEffectV2`, 6 controls
 - [Filter (multiply / ink AO)](filter-effect.md) — `FilterEffectV2`, 18 controls
 - [Floor depth blur](floor-depth-blur-effect.md) — `FloorDepthBlurEffect`, 4 controls
+- [GridRenderer](grid-renderer.md) — `GridRenderer`, 11 controls
 - [Halftone (print)](halftone-effect.md) — `HalftoneEffectV2`, 7 controls
+- [Color invert](invert-effect.md) — `InvertEffectV2`, 2 controls
 - [LensEffectV2](lens-effect.md) — `LensEffectV2`, 97 controls
 - [Sepia tone](sepia-effect.md) — `SepiaEffectV2`, 2 controls
+- [Sharpen (unsharp mask)](sharpen-effect.md) — `SharpenEffectV2`, 4 controls
 
 ### `present.composite`
 
@@ -86,13 +91,3 @@ Cross-referenced against `src/graph/passes.js`'s `absorbs` declarations.
 ### `surface.water`
 
 - [WaterEffectV2](water-effect.md) — `WaterEffectV2`, 277 controls
-
-### Claimed by no V3 pass
-
-Either a deliberate drop, or a gap in `passes.js`'s absorb accounting — worth a look before Stage 7.
-
-- [GridRenderer](grid-renderer.md) — `GridRenderer`, 11 controls
-- [Color invert](invert-effect.md) — `InvertEffectV2`, 2 controls
-- [SceneWindField](scene-wind-field.md) — `SceneWindField`, 35 controls
-- [Sharpen (unsharp mask)](sharpen-effect.md) — `SharpenEffectV2`, 4 controls
-- [VisionModeEffectV2](vision-mode-effect.md) — `VisionModeEffectV2`, 1 controls

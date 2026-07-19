@@ -101,11 +101,16 @@ import {
   diffResidency,
   computeCoarsePinBudget,
 } from './residency.js';
-import { ThreeAllocator } from '../graph/index.js';
+import { ThreeAllocator, PASSES, planFrame, runPassPlan } from '../graph/index.js';
 import { PROBE_CORNERS, classifyPixel, diagnoseOrientation } from '../diag/orientation-probe.js';
+import { decodeHalfFloatRgba, decodeByteRgba, diffProbeBuffers } from '../diag/pixel-probe.js';
 import { sortByLayer } from '../scene/layer-order.js';
 import {
   computeCameraFrustum,
+  worldToNdc,
+  ndcToWorld,
+  clientToNdc,
+  ndcToPixel,
   buildQuadPositions,
   QUAD_UVS,
   QUAD_INDICES,
@@ -114,9 +119,98 @@ import {
   computeItemViewportPx,
   rectsOverlap,
 } from '../scene/world-quad.js';
-import { computeQuadCorners, computeQuadBounds, computeItemPlacement, tokenFootprint } from '../foundry/index.js';
+import {
+  computeQuadCorners,
+  computeQuadBounds,
+  computeItemPlacement,
+  tokenFootprint,
+  readSceneDarkness,
+  readSceneAmbient,
+  readActiveLightSources,
+  readGlobalLightConfig,
+  readActiveDarknessRegions,
+  readGridDistancePixels,
+  readGridSizePixels,
+  computeTokenOcclusionRadiusPx,
+  getActiveSceneFloors,
+} from '../foundry/index.js';
 import { engageFoundryFallback, clearFoundryFallback, describeRenderMode } from '../diag/render-fallback.js';
-import { OCCLUSION_MODES, computeOcclusionState, createHoverFadeState, mapElevation } from '../scene/occlusion.js';
+import {
+  OCCLUSION_MODES,
+  computeOcclusionState,
+  createHoverFadeState,
+  mapElevation,
+  buildElevationTable,
+} from '../scene/occlusion.js';
+import { buildEnvSnapshot } from '../world/index.js';
+import {
+  buildEnvironmentalLightMaterials,
+  computeAmbientColors,
+  computeGlobalLightFloor,
+  maxRgb,
+  mixRgb,
+  buildPointLightIlluminationMaterial,
+  easeAttenuation,
+  computeExposure,
+  buildPointLightColorationMaterial,
+  computeColorationAlpha,
+  triangulateLightFan,
+  writeLightEdgePoints,
+  computeEdgeSoftMarginNormalized,
+  computeShapeMeshBounds,
+  writeRegionPolygonPoints,
+  applyDarknessAdjustment,
+  computeRegionAdjustedDarkness,
+  regionOverlapsElevationBand,
+  DARKNESS_ADJUST_MODES,
+  buildRegionRectangleMaterial,
+  buildRegionEllipseMaterial,
+  buildRegionPolygonMaterial,
+  buildRegionConeMaterial,
+  buildRegionRingMaterial,
+  buildRegionLineMaterial,
+  buildRegionEmanationRectangleMaterial,
+  buildRegionEmanationPolygonMaterial,
+} from '../effects/index.js';
+import { makeFrameClock } from '../core/frame-clock.js';
+
+/**
+ * Which TSL material builder handles each region-shape "kind" (the SAME
+ * kind string `updateRegionDarknessMeshes` computes per shape) — a plain
+ * lookup rather than a long ternary/switch chain, given there are now 9
+ * cases (2026-07-19, the cone/ring/line/emanation shape-support build).
+ * `emanation-ellipse` deliberately maps to the SAME builder as `ellipse` —
+ * see `updateRegionDarknessMeshes`'s own `kind==='emanation-ellipse'`
+ * comment for why that reuse is exact (or a documented approximation) for a
+ * circle/ellipse-based emanation, not a new material at all.
+ */
+const REGION_MATERIAL_BUILDERS = {
+  rectangle: buildRegionRectangleMaterial,
+  ellipse: buildRegionEllipseMaterial,
+  polygon: buildRegionPolygonMaterial,
+  cone: buildRegionConeMaterial,
+  ring: buildRegionRingMaterial,
+  line: buildRegionLineMaterial,
+  'emanation-ellipse': buildRegionEllipseMaterial,
+  'emanation-rectangle': buildRegionEmanationRectangleMaterial,
+  'emanation-polygon': buildRegionEmanationPolygonMaterial,
+};
+
+/**
+ * Nearest-rank percentile of a small sample array, rounded to 0.1ms. Pure,
+ * no clock, no allocation-sensitive hot-path concern — this is only ever
+ * called from a manually-triggered diagnostics report, never per frame.
+ * `null` on an empty array (no lying: "no samples yet" must never read as 0ms).
+ * @param {number[]} samples
+ * @param {number} p - 0..1
+ * @returns {number|null}
+ */
+function percentileMs(samples, p) {
+  if (!samples || samples.length === 0) return null;
+  const sorted = [...samples].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1));
+  return Math.round(sorted[idx] * 10) / 10;
+}
 
 /** Wall-clock budget per GPU-upload chunk before yielding a real frame — see
  * requestDecodeUpload's Pass 3 for the live-hitch evidence this fixes. */
@@ -194,6 +288,29 @@ let _wholeImageEnabled = true;
 /** @param {boolean} on */
 export function setWholeImageMode(on) {
   _wholeImageEnabled = !!on;
+}
+
+/**
+ * THE DARKNESS-REALISM LEVER (2026-07-19, author-requested). 0 = Foundry
+ * parity (DEFAULT): at scene darkness 1 the unlit floor stays at Foundry's own
+ * `ambientDarkness` colour (~19% for the mansion), never pitch black, so it
+ * stays readable — matching how Foundry itself renders (`environment.mjs#
+ * configureColors`, verified). 1 = "realistic": the darkness endpoint is true
+ * black, so darkness 1 crushes the unlit map to nothing. Any value between
+ * interpolates. Only affects the DARKNESS end of the ambient mix — noon is
+ * identical at every value; only `background`/`dim` darken, `bright` (light
+ * cores) never does. See effects/lighting/environmental-light.js#compute
+ * AmbientBackground for the math, and MapShine.setDarknessRealism (boot.js).
+ * Default 0 keeps every existing scene's look unchanged.
+ */
+let _darknessRealism01 = 0;
+/** @param {number} v - 0 (Foundry parity) .. 1 (true dark). Non-finite → 0. */
+export function setDarknessRealism(v) {
+  _darknessRealism01 = Math.min(1, Math.max(0, Number.isFinite(v) ? v : 0));
+}
+/** @returns {number} the current darkness-realism lever value (0..1). */
+export function getDarknessRealism() {
+  return _darknessRealism01;
 }
 
 /**
@@ -340,8 +457,10 @@ function disposeActive() {
     }
   }
   try {
-    _active.occlusionMask.texture.dispose();
-  } catch (_) {}
+    _active.disposeOcclusionMask?.();
+  } catch (err) {
+    log.error('occlusion mask dispose failed — VRAM may be leaked:', err);
+  }
   // buf:scene.color — a screen-sized RGBA16F target. Leaking one per
   // Stop/Restart cycle is exactly the VRAM bleed this project exists to end,
   // and the debug panel's Stop/Start buttons make that cycle one click.
@@ -350,6 +469,28 @@ function disposeActive() {
     _active.disposeSceneColor?.();
   } catch (err) {
     console.error('[vt-pan-viewer] scene.color dispose failed — VRAM may be leaked:', err);
+  }
+  // light.accumulate's scene.illum + scene.lit — same per-cycle VRAM-leak
+  // reasoning as scene.color above. Uses the scoped logger (log/one-door), so
+  // a leak here lands in the flight-recorder bundle, like the occlusion one.
+  try {
+    _active.disposeLighting?.();
+  } catch (err) {
+    log.error('lighting dispose failed — VRAM may be leaked:', err);
+  }
+  // Every point-light mesh/material/geometry — same per-cycle VRAM-leak
+  // reasoning, a separate call mirroring disposeOcclusionMask's own split
+  // (one dispose function per resource-owning subsystem, not a grab-bag).
+  try {
+    _active.disposePointLights?.();
+  } catch (err) {
+    log.error('point-light dispose failed — VRAM may be leaked:', err);
+  }
+  // Every region-darkness mesh's own material + the shared quad geometry.
+  try {
+    _active.disposeRegionDarknessMeshes?.();
+  } catch (err) {
+    log.error('region-darkness dispose failed — VRAM may be leaked:', err);
   }
   // THE RENDERER ITSELF (found in audit, 2026-07-17: teardown freed every
   // texture/material/geometry it OWNED but never the renderer's own backend —
@@ -861,7 +1002,645 @@ export async function startVtPanViewer({
       filter: 'linear',
       depth: false, // the draw list is already depth-sorted by the layering law
     });
-    let sceneColor = allocator.create('scene.color', describeSceneColor());
+    const sceneColor = allocator.create('scene.color', describeSceneColor());
+
+    // ========================================================================
+    // light.accumulate — buf:scene.illum + the lit composite (2026-07-18).
+    // ========================================================================
+    //
+    // Tier 0 of Type-A parity (docs/planning/Light-Parity.md): the whole map
+    // multiplied by Foundry's ambient background (day/night) — the FLOOR every
+    // later light (point lights, coloration, darkness) sits on. Two more
+    // screen targets, both through the allocator law, same RGBA16F/linear/
+    // NoColorSpace shape as scene.color (reuse describeSceneColor):
+    //   scene.illum : the ambient illumination, sRGB (Foundry's own space —
+    //                 see effects/lighting/environmental-light.js's colour
+    //                 essay for why this multiply lives in gamma, not linear).
+    //   scene.lit   : albedo × illum, the post-light colour the present pass
+    //                 reads. This IS "modifies buf:scene.color" (graph/passes.js)
+    //                 ping-ponged for the ONE modifier that exists today; when
+    //                 surface/water land they extend it into a general swap.
+    const sceneIllum = allocator.create('scene.illum', describeSceneColor());
+    const sceneLit = allocator.create('scene.lit', describeSceneColor());
+    // buf:scene.coloration (2026-07-19, increment 3) — the point-lights'
+    // coloration channel accumulates HERE (MAX-blended across lights, see
+    // point-light-coloration.js's own header), separately from illum, then is
+    // ADDED onto the lit scene INSIDE the composite, in GAMMA space (audit §6's
+    // "ADD onto scene", done the Foundry-correct way — see environmental-
+    // light.js's composite essay for why a linear-space add washed the scene
+    // to a single hue and gamma-space fixes it).
+    const sceneColoration = allocator.create('scene.coloration', describeSceneColor());
+    const envLight = buildEnvironmentalLightMaterials({
+      THREE,
+      albedoTexture: sceneColor.texture,
+      illumTexture: sceneIllum.texture,
+      colorationTexture: sceneColoration.texture,
+    });
+    // QuadMesh (never a hand-rolled quad — same Y-flip law the present pass
+    // documents at length below): the vendor owns v=0-at-top on both backends.
+    const illumQuad = new THREE.QuadMesh(envLight.illumMaterial);
+    const compositeQuad = new THREE.QuadMesh(envLight.compositeMaterial);
+    /** Re-assert the light pass's samplers after a resize. Belt-and-braces:
+     * RenderTarget#setSize mutates textures IN PLACE (see rebindPresent /
+     * onResize), so the nodes already point at the right objects; this only
+     * flags needsUpdate, matching how rebindPresent behaves. */
+    function rebindLighting() {
+      envLight.albedoTexNode.value = sceneColor.texture;
+      envLight.illumTexNode.value = sceneIllum.texture;
+      envLight.colorationTexNode.value = sceneColoration.texture;
+      envLight.illumMaterial.needsUpdate = true;
+      envLight.compositeMaterial.needsUpdate = true;
+    }
+
+    // ========================================================================
+    // light.accumulate — POINT LIGHTS, illumination only (increment 2a,
+    // 2026-07-18). See effects/lighting/point-light-illumination.js's own
+    // header for the full model (switchColor/falloff/MAX-blend) and its
+    // documented tier-0 gaps (no soft edge, no elevation occlusion, no
+    // coloration/darkness/animations/global-light-window).
+    // ========================================================================
+
+    /** A tiny dedicated Scene for point-light meshes — kept separate from
+     * the main `scene`, same reasoning as occlusionScene below. */
+    const lightScene = new THREE.Scene();
+
+    /** A SEPARATE dedicated Scene for point-light COLORATION meshes
+     * (increment 3, 2026-07-19) — rendered into buf:scene.coloration, kept
+     * apart from lightScene/illumination for the same "one scene per
+     * render-target destination" reasoning as everywhere else in this file. */
+    const colorationScene = new THREE.Scene();
+
+    /** Starting capacity, in FAN VERTICES (not polygon vertices — see
+     * triangulateLightFan: a polygon of V vertices fans out to 3V mesh
+     * vertices), for a light's reusable scratch vertex buffer. Generous for
+     * a typical wall-clipped light shape; grows automatically (rare, not
+     * per-frame) the one time an actual light polygon exceeds it — see
+     * updatePointLightMeshes. */
+    const INITIAL_LIGHT_FAN_VERTICES = 192;
+
+    // ------------------------------------------------------------------
+    // Region-driven darkness ("Adjust Darkness Level" behavior, 2026-07-19)
+    // ------------------------------------------------------------------
+    //
+    // See effects/lighting/region-darkness.js's own header for the mechanism
+    // (a per-shape bounding quad + an analytic per-fragment containment test
+    // against positionWorld, discard()ing outside it), its named scope
+    // limitations (union-not-CSG, missing cone/ring/line/emanation shapes —
+    // both real, one-click Foundry authoring features, not edge cases), and
+    // the 2026-07-19 corrections (elevation-band gated, min-composite
+    // overlap resolution) implemented in updateRegionDarknessMeshes below.
+
+    /** A tiny dedicated Scene for region-darkness meshes — rendered AFTER the
+     * ambient fill, BEFORE point lights, so a region's own mode/modifier can
+     * OVERWRITE the ambient floor within its footprint (point lights then
+     * MAX-blend on top of the RESULT, same as always). */
+    const regionScene = new THREE.Scene();
+
+    /** ONE shared unit quad — every region mesh (rectangle/ellipse/polygon
+     * alike) tests containment analytically against `positionWorld` in its
+     * OWN fragment shader, so the mesh's local geometry never needs to
+     * match the true shape; a single reusable `PlaneGeometry(1,1)`, scaled/
+     * positioned per shape, is exactly enough — unlike lightMeshes below,
+     * NO per-instance geometry, so none of that pool's BufferAttribute-
+     * churn concern applies here at all. */
+    const regionQuadGeometry = new THREE.PlaneGeometry(1, 1);
+
+    /** The RAW ambient endpoints (NOT the pre-mixed background) every region
+     * material re-mixes by its OWN per-fragment adjusted darkness — shared,
+     * updated once per frame. (Point lights used to share an analogous
+     * uLightBackgroundColor/uDim/uBright trio; those are now PER-LIGHT, not
+     * shared — see `updatePointLightMeshes`'s own header, 2026-07-19.) */
+    const uRegionDaylightColor = THREE.TSL.uniform(THREE.TSL.vec3(0.93, 0.93, 0.93));
+    const uRegionDarknessColor = THREE.TSL.uniform(THREE.TSL.vec3(0.14, 0.14, 0.28));
+
+    /** `${regionId}:${shapeIndex}` -> { mesh, material, kind, uMode,
+     * uModifier, uBaseDarkness01, ...kind-specific uniforms }. Reconciled
+     * every frame in updateRegionDarknessMeshes; same hide-not-dispose
+     * lifecycle gap lightMeshes documents (a region genuinely deleted is
+     * only hidden, full cleanup needs a deleteRegion hook — not built this
+     * cut, bounded leak: grows with distinct darkness-regions ever seen). */
+    const regionMeshes = new Map();
+
+    /**
+     * Reconcile the region-darkness mesh pool against this frame's live
+     * darkness-adjusting regions.
+     *
+     * OVERLAP RESOLUTION — CORRECTED (2026-07-19). `renderOrder` used to be a
+     * bare incrementing counter in `readActiveDarknessRegions`' own iteration
+     * order, on the (checked-and-found-WRONG) assumption that Foundry
+     * resolves overlaps by "last one wins". Verified against source instead:
+     * `illumination-effects.mjs#invalidateDarknessLevelContainer` sorts
+     * region meshes by their OWN adjusted darkness level, DESCENDING, so the
+     * region computing the LOWEST (brightest) value draws LAST and wins via
+     * a plain opaque overwrite — "the final darkness level at a point is the
+     * minimum of the adjusted darkness levels" (that file's own comment).
+     * This function reproduces that exactly: compute each active region's
+     * own adjusted-darkness value once (mode/modifier are per-region, and
+     * `darkness01` is the same base for all of them — see
+     * `computeRegionAdjustedDarkness`'s own doc for why this is safe to
+     * evaluate independently, not chained), sort descending, THEN assign
+     * `renderOrder` in that sorted order — never leaving it to THREE's own
+     * incidental draw order for `depthTest:false` objects, since order
+     * genuinely determines the result here (unlike the point-lights' own
+     * MAX-blend, which is commutative and order-independent).
+     *
+     * ELEVATION GATING (2026-07-19, the multi-floor darkness fix). Real
+     * Foundry gates this whole behavior by the region's own `elevation.
+     * {bottom,top}` against a per-pixel depth mask (`adjust-darkness-
+     * level.mjs`'s shader `_preRender`, verified against source) — MSA
+     * ignored this entirely before now, so a region authored for one floor
+     * darkened every floor. Filters to regions whose elevation range
+     * overlaps the CURRENTLY VIEWED floor's own band (read live each frame,
+     * matching this function's existing "read live Foundry state every
+     * frame" posture) — a per-FLOOR approximation of Foundry's per-PIXEL
+     * test, architecturally honest for a floor-based viewer. An unrestricted
+     * region (elevation left untouched — the common case) passes this for
+     * every floor, so ordinary regions are completely unaffected.
+     */
+    /**
+     * Read + elevation-filter this frame's darkness-adjusting regions ONCE —
+     * shared by `updateRegionDarknessMeshes` (draws them) AND
+     * `updatePointLightMeshes` (2026-07-19: a light needs to know the SAME
+     * active-region set to compute its own LOCAL region-adjusted ambient
+     * floor — see that function's own header for why). Extracted rather
+     * than each caller re-reading/re-filtering independently, so the two
+     * can never see a different active-region set within the same frame.
+     * @returns {object[]} elevation-filtered active regions.
+     */
+    function readElevationFilteredDarknessRegions() {
+      const { regions } = readActiveDarknessRegions();
+
+      // getActiveSceneFloors was designed for boot.js's own scene-load/
+      // floor-switch call sites, not a per-frame hot path — wrapped here
+      // (unlike its other callers) because a throw reaching this function
+      // would crash light.accumulate for the WHOLE frame, not just this one
+      // reader. Falls back to "no floor identified" (unrestricted band, every
+      // region stays active) on any failure — fail open, never a black frame.
+      let currentFloor = null;
+      try {
+        const sceneDoc = typeof canvas !== 'undefined' ? (canvas?.scene ?? null) : null;
+        const floorsResult = getActiveSceneFloors(sceneDoc);
+        currentFloor = floorsResult.ok ? floorsResult.floors.find((f) => f.index === view.floorIndex) : null;
+      } catch (err) {
+        log.error('region-darkness elevation lookup (getActiveSceneFloors) failed — treating as unrestricted:', err);
+      }
+      // A floor we couldn't identify (no active scene, or the index isn't in
+      // this frame's floor list) reads as unrestricted — fail OPEN (every
+      // region still active), never silently darkness-mute the whole scene
+      // because a floor lookup came up empty this one frame.
+      const floorBottom = currentFloor?.elevationBottom ?? null;
+      const floorTop = currentFloor?.elevationTop ?? null;
+      return regions.filter((region) =>
+        regionOverlapsElevationBand(region.elevationBottom, region.elevationTop, floorBottom, floorTop)
+      );
+    }
+
+    function updateRegionDarknessMeshes(darkness01, activeRegions) {
+      const sortedByBrightestLast = activeRegions
+        .map((region) => ({ region, adjusted: applyDarknessAdjustment(darkness01, region.mode, region.modifier) }))
+        .sort((a, b) => b.adjusted - a.adjusted);
+
+      const seen = new Set();
+      let renderOrder = 0;
+
+      /**
+       * Reconcile/update ONE shape's mesh. Shared by both passes below — a
+       * hole shape uses the exact same kind-dispatch/mesh-pooling machinery
+       * as an ordinary shape, just with `uMode`/`uModifier` overridden by
+       * the caller (see the hole pass' own comment for why that override is
+       * an exact identity, not an approximation).
+       */
+      function renderRegionShape(region, shape, shapeIndex, uMode, uModifier) {
+        const bounds = computeShapeMeshBounds(shape);
+        if (!bounds) return; // unsupported/degenerate shape — never a mesh, matches pointInRegionShapes' own skip.
+        // A circle reuses the ellipse material (radiusX=radiusY=radius).
+        // An emanation reuses whichever material matches its OWN base
+        // shape's type — computeShapeMeshBounds already guaranteed the
+        // base is one of these 4 supported types, or `bounds` would be
+        // null and this shape would already have been skipped above.
+        const kind =
+          shape.type === 'circle'
+            ? 'ellipse'
+            : shape.type === 'emanation'
+              ? shape.base.type === 'rectangle'
+                ? 'emanation-rectangle'
+                : shape.base.type === 'polygon'
+                  ? 'emanation-polygon'
+                  : 'emanation-ellipse' // circle or ellipse base
+              : shape.type;
+        const key = `${region.regionId}:${shapeIndex}`;
+        seen.add(key);
+        let entry = regionMeshes.get(key);
+        if (!entry || entry.kind !== kind) {
+          // A shape's TYPE changing under the same id/index is not a real
+          // Foundry event (shapes are not retyped in place), handled
+          // anyway — same defensive posture as lightMeshes' own reconcile.
+          if (entry) {
+            entry.mesh.removeFromParent();
+            entry.material.dispose();
+          }
+          const commonArgs = { THREE, uDaylightColor: uRegionDaylightColor, uDarknessColor: uRegionDarknessColor };
+          const buildMaterial = REGION_MATERIAL_BUILDERS[kind];
+          const built = buildMaterial(commonArgs);
+          const mesh = new THREE.Mesh(regionQuadGeometry, built.material);
+          mesh.frustumCulled = false;
+          regionScene.add(mesh);
+          entry = { mesh, kind, ...built };
+          regionMeshes.set(key, entry);
+        }
+        entry.mesh.position.set(bounds.cx, bounds.cy, 0);
+        entry.mesh.scale.set(bounds.halfWidth * 2, bounds.halfHeight * 2, 1);
+        entry.mesh.visible = true;
+        entry.mesh.renderOrder = renderOrder++;
+        entry.uMode.value = uMode;
+        entry.uModifier.value = uModifier;
+        entry.uBaseDarkness01.value = darkness01;
+        if (kind === 'rectangle') {
+          entry.uOrigin.value.set(shape.x ?? 0, shape.y ?? 0);
+          entry.uSize.value.set(shape.width ?? 0, shape.height ?? 0);
+          entry.uAnchor.value.set(shape.anchorX ?? 0, shape.anchorY ?? 0);
+          entry.uRotationRad.value = ((shape.rotation ?? 0) * Math.PI) / 180;
+        } else if (kind === 'ellipse') {
+          entry.uOrigin.value.set(shape.x ?? 0, shape.y ?? 0);
+          const radiusX = shape.type === 'circle' ? shape.radius : shape.radiusX;
+          const radiusY = shape.type === 'circle' ? shape.radius : shape.radiusY;
+          entry.uRadii.value.set(radiusX ?? 0, radiusY ?? 0);
+          entry.uRotationRad.value = ((shape.rotation ?? 0) * Math.PI) / 180;
+        } else if (kind === 'polygon') {
+          entry.uPointCount.value = writeRegionPolygonPoints(shape.points, entry.points);
+        } else if (kind === 'cone') {
+          entry.uOrigin.value.set(shape.x ?? 0, shape.y ?? 0);
+          entry.uRadius.value = shape.radius ?? 0;
+          const angleDeg = shape.angle ?? 0;
+          entry.uFullCircle.value = angleDeg >= 360;
+          // half-angle in radians — clamped to [0,360] before halving so a
+          // malformed >360 authored value can't overshoot; harmless either
+          // way since uFullCircle already short-circuits the angle test at
+          // >=360, this just keeps the uniform itself a sane number.
+          entry.uHalfAngleRad.value = (Math.min(Math.max(angleDeg, 0), 360) * Math.PI) / 360;
+          entry.uRotationRad.value = ((shape.rotation ?? 0) * Math.PI) / 180;
+        } else if (kind === 'ring') {
+          entry.uOrigin.value.set(shape.x ?? 0, shape.y ?? 0);
+          const radius = shape.radius ?? 0;
+          entry.uInnerRadius.value = Math.max(0, radius - (shape.innerWidth ?? 0));
+          entry.uOuterRadius.value = radius + (shape.outerWidth ?? 0);
+        } else if (kind === 'line') {
+          entry.uOrigin.value.set(shape.x ?? 0, shape.y ?? 0);
+          entry.uLength.value = shape.length ?? 0;
+          entry.uWidth.value = shape.width ?? 0;
+          entry.uRotationRad.value = ((shape.rotation ?? 0) * Math.PI) / 180;
+        } else if (kind === 'emanation-ellipse') {
+          // Reuses buildRegionEllipseMaterial's own uOrigin/uRadii/
+          // uRotationRad — the SAME uniform names, just fed the BASE
+          // shape's own radii pre-grown by the emanation's radius (a
+          // circle/ellipse's true Minkowski sum with a disk IS exactly a
+          // bigger circle/ellipse for a circular base, and this file's own
+          // documented approximation for an ellipse base — see
+          // pointInEmanation's own doc for the exactness caveat).
+          const base = shape.base;
+          const growRadius = Math.max(0, shape.radius ?? 0);
+          entry.uOrigin.value.set(base.x ?? 0, base.y ?? 0);
+          const baseRadiusX = base.type === 'circle' ? base.radius : base.radiusX;
+          const baseRadiusY = base.type === 'circle' ? base.radius : base.radiusY;
+          entry.uRadii.value.set((baseRadiusX ?? 0) + growRadius, (baseRadiusY ?? 0) + growRadius);
+          entry.uRotationRad.value = ((base.rotation ?? 0) * Math.PI) / 180;
+        } else if (kind === 'emanation-rectangle') {
+          const base = shape.base;
+          entry.uOrigin.value.set(base.x ?? 0, base.y ?? 0);
+          entry.uSize.value.set(base.width ?? 0, base.height ?? 0);
+          entry.uAnchor.value.set(base.anchorX ?? 0, base.anchorY ?? 0);
+          entry.uRotationRad.value = ((base.rotation ?? 0) * Math.PI) / 180;
+          entry.uGrowRadius.value = Math.max(0, shape.radius ?? 0);
+        } else if (kind === 'emanation-polygon') {
+          const base = shape.base;
+          entry.uPointCount.value = writeRegionPolygonPoints(base.points, entry.points);
+          entry.uGrowRadius.value = Math.max(0, shape.radius ?? 0);
+        }
+      }
+
+      // Pass 1: every NON-hole shape, in brightest-region-first order — same
+      // behaviour as before this shape gained hole support at all.
+      for (const { region } of sortedByBrightestLast) {
+        const shapes = Array.isArray(region.shapes) ? region.shapes : [];
+        for (let shapeIndex = 0; shapeIndex < shapes.length; shapeIndex++) {
+          const shape = shapes[shapeIndex];
+          if (shape?.hole) continue; // holes render in pass 2, below.
+          renderRegionShape(region, shape, shapeIndex, region.mode, region.modifier);
+        }
+      }
+      // Pass 2: every hole shape, drawn AFTER every non-hole shape across
+      // EVERY region (renderOrder keeps counting up from wherever pass 1
+      // left off) — so a hole always wins the overlap and reveals the raw
+      // ambient floor, regardless of which region authored it or how the
+      // regions themselves were sorted by brightness above. This sidesteps
+      // real Foundry's exact ClipperLib per-region hole/non-hole run
+      // ordering (`client/documents/region.mjs#_createClipperPolyTree`) in
+      // favour of a simpler global rule — see region-darkness.js's own
+      // module header for the documented trade-off.
+      //
+      // Reuses the SAME mesh-pooling/kind-dispatch machinery as an ordinary
+      // shape — a hole needs no new shader material at all. Overriding
+      // uMode=BRIGHTEN, uModifier=0 makes computeRegionColor's own formula
+      // collapse to an EXACT identity (`applyDarknessAdjustment`'s own
+      // BRIGHTEN case is `base*(1-0) = base`), so the hole mesh paints the
+      // scene's raw ambient colour back over whatever the non-hole pass
+      // drew underneath it.
+      for (const { region } of sortedByBrightestLast) {
+        const shapes = Array.isArray(region.shapes) ? region.shapes : [];
+        for (let shapeIndex = 0; shapeIndex < shapes.length; shapeIndex++) {
+          const shape = shapes[shapeIndex];
+          if (!shape?.hole) continue;
+          renderRegionShape(region, shape, shapeIndex, DARKNESS_ADJUST_MODES.BRIGHTEN, 0);
+        }
+      }
+
+      for (const [key, entry] of regionMeshes) {
+        if (!seen.has(key)) entry.mesh.visible = false;
+      }
+    }
+
+    /** sourceId -> { mesh, material, geometry, positionAttribute,
+     * scratchArray, uRatio, uAttenuationEased }. Reconciled every frame in
+     * updatePointLightMeshes, mirroring occlusionDiscs' own add/remove/
+     * update shape and its documented lifecycle gap: an entry for a light
+     * that's genuinely DELETED is only hidden (mesh.visible:false), never
+     * removed — full cleanup needs a deleteAmbientLight hook wired from
+     * boot.js; not built this cut.
+     *
+     * UNLIKE occlusionDiscs (one shared geometry, scaled per instance), each
+     * light gets its OWN geometry — shapes differ per light and change
+     * frame to frame (walls/radius/position).
+     *
+     * ⚠️ THE DEVICE-LOST BUG THIS FIXES (2026-07-18, live-crashed within
+     * ~30s of point lights first rendering — flight recorder: "WebGPU
+     * Device Lost: A valid external Instance reference no longer exists").
+     * The first cut of this pool created a BRAND NEW `Float32Array` +
+     * `THREE.BufferAttribute` EVERY FRAME for EVERY active light (this
+     * comment used to claim that was "cheap CPU work with no GPU stall" —
+     * WRONG, and left uncorrected until this crash proved it). Verified
+     * against the vendored three.webgpu.js source: `BufferAttribute` has NO
+     * `dispose()` method at all, and `BufferGeometry#setAttribute` is a bare
+     * `this.attributes[name] = attribute` — nothing frees the OLD
+     * attribute's backend GPU buffer when it's replaced. Every active
+     * light, every frame, leaked one native GPU buffer, unbounded, until
+     * WebGPU's own device-loss watchdog killed the context — the same
+     * disease this file's own upload-backpressure/tile-size-cap fixes
+     * already named for OTHER unbounded-small-allocation causes (see
+     * UPLOAD_PAGES_PER_DRAIN / MAX_WHOLE_TILE_DIM above), this time from
+     * per-frame vertex-buffer churn instead of texture uploads.
+     *
+     * THE FIX: allocate the scratch array + BufferAttribute ONCE per light
+     * (on first appearance) and REUSE them every frame — mutate the SAME
+     * array's contents, flag `.needsUpdate = true` (the idiomatic three.js
+     * "the data changed, re-upload the SAME buffer" signal), and use
+     * `geometry.setDrawRange` to tell the renderer how many of the
+     * (possibly stale, possibly oversized) vertices are valid THIS frame.
+     * `triangulateLightFan`'s `outArray` parameter exists specifically to
+     * make this reuse possible; only grows (a new, bigger array/attribute)
+     * on the rare frame a light's polygon exceeds its previous high-water
+     * mark — an occasional reallocation, not a chronic per-frame one. */
+    const lightMeshes = new Map();
+
+    /** The last-applied ambient colours (background/dim/bright) — tracked
+     * for getPointLightsInfo() so the diagnostic reports what was ACTUALLY
+     * used, not a recomputed guess (feedback_instruments_must_not_lie). */
+    let lastAmbientColors = null;
+    /** The last-computed global-illumination floor (null = not active this
+     * frame) — same "report what was actually used" reasoning. */
+    let lastGlobalLightFloor = null;
+    /** The last-read grid size (px/square) — tracked for the SAME reason as
+     * lastAmbientColors, specifically to let getPointLightsInfo() report the
+     * ACTUAL number feeding computeEdgeSoftMarginNormalized, not a guess. */
+    let lastGridSizePixels = null;
+
+    /**
+     * Reconcile the point-light mesh pool against this frame's live Foundry
+     * light sources: add new, refresh every survivor's geometry/uniforms,
+     * hide stale (see lightMeshes' own doc for why "hide" not "dispose").
+     *
+     * PER-LIGHT REGION-AWARE AMBIENT (2026-07-19 — THE REAL "hard edge on a
+     * soft, attenuation:1 light" bug, found live via the pixel probe: a
+     * point just outside a light's mesh but INSIDE a darkening region read
+     * the region's correctly-darkened floor; a point just inside the SAME
+     * light's mesh read the GLOBAL, un-adjusted background — a step
+     * discontinuity at the light's own boundary, independent of how soft
+     * the light's OWN attenuation-driven corona is, because the corona
+     * blends toward the WRONG floor). Every light's illumination formula
+     * (`point-light-illumination.js`) is `mix(uBackgroundColor,
+     * finalColorExposed, falloff)` — `uBackgroundColor` used to be one
+     * SHARED, scene-wide uniform, identical for every light, with zero
+     * awareness of a region it might be sitting inside. Under MAX-blend
+     * (region draws first, opaque; light draws after, MAX) a light's own
+     * floor (always >= the raw scene background) can never lose to a
+     * DARKENED region's lower value — so the region's darkening was erased
+     * everywhere the light's mesh reached, with a hard seam exactly at the
+     * mesh boundary.
+     *
+     * Real Foundry avoids this because every light samples the SAME
+     * per-pixel `darknessLevelTexture` regions paint into (this file's own
+     * header cites the mechanism). MSA has no such texture yet — this is
+     * the CPU-side approximation: EACH light now gets its OWN
+     * `uBackgroundColor`/`uDimColor`/`uBrightColor` uniforms (not shared),
+     * recomputed every frame from `computeRegionAdjustedDarkness(light.x,
+     * light.y, darkness01, activeRegions)` — the SAME pure function/formula
+     * `updateRegionDarknessMeshes` uses, just evaluated at the light's own
+     * ORIGIN rather than per-fragment. Exact for a light entirely inside
+     * (or entirely outside) one region; an approximation — one uniform
+     * value for the WHOLE light — for a light whose radius straddles a
+     * region boundary, same class of tradeoff as this file's other
+     * per-floor-not-per-pixel approximations, not a new one.
+     *
+     * @param {number} darkness01
+     * @param {object[]} activeRegions - THIS frame's elevation-filtered
+     *   active darkness regions (`readElevationFilteredDarknessRegions()`),
+     *   passed in so this function and `updateRegionDarknessMeshes` always
+     *   agree on which regions are active.
+     * @param {object} env - this frame's env snapshot (for `ambient.*`).
+     * @param {number} darknessRealism01 - the darkness-realism lever, same
+     *   value `computeAmbientColors` already takes elsewhere this frame.
+     */
+    function updatePointLightMeshes(darkness01, activeRegions, env, darknessRealism01) {
+      // darkness01 gates each light's OWN activation window (LightData.darkness
+      // {min,max}, default {0,1} — "always on"; see foundry/scene-lights.js's
+      // header for why this lives in the reader, not here).
+      const { lights } = readActiveLightSources(darkness01);
+      // Read ONCE per frame, same precedent as runMaskOcclusionPass's own
+      // readGridDistancePixels call — a scene's grid size does not change
+      // light-to-light, only scene-to-scene.
+      const gridSizePixels = readGridSizePixels().gridSizePixels;
+      lastGridSizePixels = gridSizePixels;
+      const seen = new Set();
+      for (const light of lights) {
+        seen.add(light.sourceId);
+        let entry = lightMeshes.get(light.sourceId);
+        if (!entry) {
+          const geometry = new THREE.BufferGeometry();
+          // Pre-allocate ONCE, sized generously — see INITIAL_LIGHT_FAN_VERTICES
+          // and lightMeshes' own doc for why this exists (the device-lost fix).
+          const scratchArray = new Float32Array(INITIAL_LIGHT_FAN_VERTICES * 3);
+          const positionAttribute = new THREE.BufferAttribute(scratchArray, 3);
+          positionAttribute.setUsage(THREE.DynamicDrawUsage); // hints the backend: this buffer's DATA changes often
+          geometry.setAttribute('position', positionAttribute);
+          // PER-LIGHT (not shared) ambient uniforms — see this function's
+          // own header for why. Defaults match the pre-fix shared uniforms'
+          // own starting values; overwritten every frame below regardless.
+          const uBackgroundColor = THREE.TSL.uniform(THREE.TSL.vec3(0.93, 0.93, 0.93));
+          const uDimColor = THREE.TSL.uniform(THREE.TSL.vec3(0.93, 0.93, 0.93));
+          const uBrightColor = THREE.TSL.uniform(THREE.TSL.vec3(1, 1, 1));
+          const { material, uRatio, uAttenuationEased, uExposure, uEdgeCount, uEdgeSoftMargin, edgePoints } =
+            buildPointLightIlluminationMaterial({
+              THREE,
+              uBackgroundColor,
+              uDimColor,
+              uBrightColor,
+            });
+          const mesh = new THREE.Mesh(geometry, material);
+          mesh.frustumCulled = false;
+          lightScene.add(mesh);
+          // COLORATION (increment 3, 2026-07-19) — a SECOND Mesh SHARING this
+          // SAME geometry object (no duplicate triangulation/BufferAttribute
+          // — see point-light-coloration.js's own header), added to the
+          // SEPARATE colorationScene.
+          const colorationBuilt = buildPointLightColorationMaterial({ THREE, albedoTexture: sceneColor.texture });
+          const colorationMesh = new THREE.Mesh(geometry, colorationBuilt.material);
+          colorationMesh.frustumCulled = false;
+          colorationScene.add(colorationMesh);
+          entry = {
+            mesh,
+            material,
+            geometry,
+            positionAttribute,
+            scratchArray,
+            uRatio,
+            uAttenuationEased,
+            uExposure,
+            uEdgeCount,
+            uEdgeSoftMargin,
+            edgePoints,
+            uBackgroundColor,
+            uDimColor,
+            uBrightColor,
+            colorationMesh,
+            colorationMaterial: colorationBuilt.material,
+            uColorationAttenuationEased: colorationBuilt.uAttenuationEased,
+            uColorationAlpha: colorationBuilt.uColorationAlpha,
+            uLightColor: colorationBuilt.uLightColor,
+          };
+          lightMeshes.set(light.sourceId, entry);
+        }
+        // REUSE, not reallocate (see lightMeshes' own doc — this is the
+        // device-lost fix, not an optimisation): triangulateLightFan writes
+        // into entry.scratchArray when it already has room. It returns a
+        // DIFFERENT array only on the rare frame this light's polygon
+        // outgrows its previous high-water mark, in which case (and ONLY
+        // then) a new BufferAttribute replaces the old one — an occasional
+        // reallocation, not a chronic per-frame one.
+        const { array, vertexCount } = triangulateLightFan(
+          light.shapePoints,
+          light.x,
+          light.y,
+          light.radius,
+          entry.scratchArray
+        );
+        if (array !== entry.scratchArray) {
+          entry.scratchArray = array;
+          entry.positionAttribute = new THREE.BufferAttribute(array, 3);
+          entry.positionAttribute.setUsage(THREE.DynamicDrawUsage);
+          entry.geometry.setAttribute('position', entry.positionAttribute);
+        } else {
+          entry.positionAttribute.needsUpdate = true; // same buffer, new contents — re-upload, don't reallocate
+        }
+        // Only the first `vertexCount` vertices are valid THIS frame — the
+        // rest of a larger-than-needed scratch buffer is stale data from a
+        // previous, bigger frame (triangulateLightFan's own contract).
+        entry.geometry.setDrawRange(0, vertexCount);
+        // Mirrors Foundry's OWN mesh placement exactly (audit §2): geometry is
+        // normalized to local unit-radius space by triangulateLightFan, then
+        // positioned/scaled back out to world space here — the same
+        // position-then-scale composition PointEffectSourceMixin uses.
+        entry.mesh.position.set(light.x, light.y, 0);
+        entry.mesh.scale.set(light.radius, light.radius, 1);
+        entry.mesh.visible = true;
+        // PER-LIGHT REGION-AWARE AMBIENT — see this function's own header
+        // for the full "hard edge on a soft light" bug this fixes. Same
+        // formula computeAmbientColors already uses elsewhere this frame,
+        // just fed THIS light's own local (region-adjusted) darkness
+        // instead of the raw scene darkness01.
+        const localDarkness01 = computeRegionAdjustedDarkness(light.x, light.y, darkness01, activeRegions);
+        const localAmbient = computeAmbientColors({ ...env, darkness01: localDarkness01 }, darknessRealism01);
+        entry.uBackgroundColor.value.set(...localAmbient.background);
+        entry.uDimColor.value.set(...localAmbient.dim);
+        entry.uBrightColor.value.set(...localAmbient.bright);
+        entry.uRatio.value = light.ratio;
+        // NOT floored (2026-07-19, reversed same day — see
+        // keyhole-attenuation-floor-reverted memory). A same-day fix
+        // here (computeMinAttenuationFloor) forced every light's corona to a
+        // MINIMUM softness, on the theory that a hard edge was always a bug.
+        // A direct side-by-side against real Foundry (base-lighting.mjs's
+        // own switchColor/FALLOFF, verified in the vendored source) proved
+        // that theory wrong: Foundry renders a genuinely HARD edge for a
+        // light authored with LOW attenuation and only softens toward
+        // attenuation=1 — that contrast IS the parity target, not a defect.
+        // easeAttenuation is used unmodified, exactly like Foundry's own
+        // `attenuation` uniform.
+        const attenuationEased = easeAttenuation(light.attenuation01);
+        entry.uAttenuationEased.value = attenuationEased;
+        entry.uExposure.value = computeExposure(light.luminosity01);
+        // SOFT EDGE (point-light-illumination.js's own header): the SAME
+        // reuse discipline as scratchArray above, via TRUNCATION rather than
+        // growth — writeLightEdgePoints mutates entry.edgePoints' existing
+        // Vector2 instances IN PLACE, never replacing them (a uniformArray's
+        // size is fixed forever after its first setup() call).
+        entry.uEdgeCount.value = writeLightEdgePoints(
+          light.shapePoints,
+          light.x,
+          light.y,
+          light.radius,
+          entry.edgePoints
+        );
+        entry.uEdgeSoftMargin.value = computeEdgeSoftMarginNormalized(gridSizePixels, light.radius);
+        // COLORATION — the SAME transform as the illumination mesh (shares
+        // geometry, but is a SEPARATE Object3D with its own transform).
+        // hasColor GATE, NOW SAFE + CORRECT (2026-07-19) — the earlier
+        // full-black scares from this gate had a ROOT CAUSE, now fixed
+        // upstream: foundry/scene-lights.js was reading every light's colour
+        // as `undefined` (`source.data.color?.rgb` on a value that is a bare
+        // integer, not a Color), so EVERY light looked colourless and the
+        // gate zeroed ALL 79 lights' coloration → dim illumination alone →
+        // black. With the colour read corrected to `source.colorRGB`, the
+        // coloured torches (the vast majority in a normal scene) now report
+        // hasColor:true and keep their coloration; ONLY genuinely colourless
+        // lights are gated — exactly Foundry's own `isRequired`/`hasColor`
+        // rule (coloration-lighting.mjs), and no longer load-bearing for the
+        // scene's overall brightness. Applied via the uniform (`uColoration
+        // Alpha=0`), NOT a mesh-visibility toggle — a plain per-frame uniform
+        // write, the same safe mechanism every other per-light value uses.
+        entry.colorationMesh.position.set(light.x, light.y, 0);
+        entry.colorationMesh.scale.set(light.radius, light.radius, 1);
+        entry.colorationMesh.visible = true;
+        // SAME unfloored value as the illumination mesh above — coloration's
+        // falloff uses the identical formula (both real Foundry source and
+        // this project's own), so both channels harden/soften together at
+        // the light's own authored attenuation, matching Foundry exactly.
+        entry.uColorationAttenuationEased.value = attenuationEased;
+        // A colourless light contributes ZERO coloration (Foundry parity —
+        // see the block comment above); a coloured light gets its normal
+        // technique-1 alpha and its REAL (now correctly-read) hue below.
+        entry.uColorationAlpha.value = light.hasColor ? computeColorationAlpha(light.alpha01, 1) : 0;
+        entry.uLightColor.value.set(light.color[0], light.color[1], light.color[2]);
+        // DIAGNOSTIC ONLY — not read by any shader. Lets getPointLightsInfo
+        // report the true coloured/colourless split (colorationSummary), the
+        // number that proves the colour-read fix is working: it should now be
+        // mostly `coloured`, where before the fix EVERY light was colourless.
+        entry.lastHasColor = light.hasColor;
+      }
+      for (const [id, entry] of lightMeshes) {
+        if (!seen.has(id)) {
+          entry.mesh.visible = false;
+          entry.colorationMesh.visible = false;
+        }
+      }
+    }
 
     // ------------------------------------------------------------------
     // present.composite — buf:scene.color → the canvas.
@@ -880,10 +1659,12 @@ export async function startVtPanViewer({
     //
     // 2. ⬜ ITS HDR TONE-MAP IS A REAL DESIGN DECISION, DEFERRED, NOT DROPPED.
     //    `passes.js` gives present.composite "tonemap + present" as its job.
-    //    There is no tone map here yet — correct, because nothing is HDR-lit
-    //    yet (light.accumulate is still a seam; the scene is albedo only, all
-    //    ≤1.0, so any curve would be a no-op that only costs ALU). When
-    //    lighting lands, the decision to restore is V3's, and it was
+    //    There is no tone map here yet — still correct as of 2026-07-18:
+    //    light.accumulate is now LIVE but ambient-ONLY (the map multiplied by
+    //    an ambient colour ≤1.0, so the lit result stays ≤1.0 — no HDR yet).
+    //    Point lights (increment 2) are the first thing that can push a pixel
+    //    over 1.0; the rolloff gets restored then, not before. When that
+    //    happens, the decision to restore is V3's, and it was
     //    deliberate: a HUE-PRESERVING HIGHLIGHT ROLLOFF, **not global ACES**.
     //    A global ACES curve desaturates the whole image and bleaches
     //    saturated light cores toward white. Instead: everything below a knee
@@ -927,14 +1708,255 @@ export async function startVtPanViewer({
     // which on a QuadMesh is QuadGeometry's — the one three guarantees against
     // its own render-target convention. Passing `uv()` explicitly would be the
     // same thing; passing anything else re-opens the bug.
-    const presentTexNode = THREE.TSL.texture(sceneColor.texture);
+    // Reads scene.lit — the map AFTER light.accumulate multiplies in the
+    // ambient (2026-07-18). Before lighting landed this read scene.color
+    // directly; now the lit buffer is what reaches the canvas.
+    const presentTexNode = THREE.TSL.texture(sceneLit.texture);
     presentMaterial.fragmentNode = presentTexNode;
     const presentQuad = new THREE.QuadMesh(presentMaterial);
 
     /** Re-point the present material at a freshly-allocated target (resize). */
     function rebindPresent() {
-      presentTexNode.value = sceneColor.texture;
+      presentTexNode.value = sceneLit.texture;
       presentMaterial.needsUpdate = true;
+    }
+
+    // ========================================================================
+    // THE PASS RUNNER, WIRED (2026-07-18) — graph/passes.js stops being a
+    // comment for this stage range.
+    // ========================================================================
+    //
+    // Before this, `renderFrame` below just wrote the two draw calls inline.
+    // That was accurate (geometry.world and present.composite really are two
+    // separate `renderer.render()` calls against two targets, since the
+    // 2026-07-17 split) but HARDCODED — passes.js's own order was decoration,
+    // not a dependency. Keyhole.md named this the #1 gate blocking every
+    // future effect: "if it is hardcoded, passes.js becomes a comment."
+    //
+    // The fix is deliberately the SMALLEST thing that makes the claim false.
+    // `runGeometryWorldPass`/`runPresentCompositePass` are the SAME two GPU
+    // calls, byte-for-byte, just named and looked up through a plan instead of
+    // written inline. `framePlan` is computed ONCE here (passes.js doesn't
+    // change mid-session) via `planFrame`, which is real code that walks the
+    // REAL `PASSES` array — not a private duplicate of its order.
+    //
+    // What this buys, concretely: when `masks.occlusion` (the next item on
+    // the infrastructure menu) flips from 'seam' to 'live', wiring it in is
+    // "add one line to `passImpls`, widen `fromStage` to 'masks'" — this
+    // function's control flow does not change again. That is the whole point
+    // of a graph the render loop actually reads instead of merely validates.
+    //
+    // NOT separately invocable from outside this closure (same honest caveat
+    // graph/pass-impls.js already records for these two ids) — these remain
+    // private to the active viewer instance, called only from `renderFrame`
+    // below via `passImpls`. `PASS_IMPLS` in graph/pass-impls.js is unchanged:
+    // it still honestly names `startVtPanViewer` as the reachable entry point,
+    // because externally that is still the only door in.
+    function runGeometryWorldPass() {
+      renderer.setRenderTarget(sceneColor);
+      renderer.render(scene, camera);
+      renderer.setRenderTarget(null);
+    }
+    function runPresentCompositePass() {
+      presentQuad.render(renderer); // three's own fullscreen path — carries its own camera
+    }
+    // light.accumulate — ambient/exterior light PLUS point-light illumination
+    // as of 2026-07-18 (coloration, darkness sources, animations, the global
+    // light's darkness-window gate are later rungs of docs/planning/Light-
+    // Parity.md §5). Runs AFTER geometry.world (which fills sceneColor) and
+    // before present.composite (which reads sceneLit): the env snapshot is
+    // already refreshed for this frame by updateEnvSnapshot() up in renderFrame.
+    function runLightAccumulatePass() {
+      const env = lastEnvSnapshot?.env ?? {};
+      const darkness01 = env.darkness01 ?? 0;
+      // The darkness-realism lever (see setDarknessRealism): 0 = Foundry parity
+      // (default), 1 = true dark. Read once per frame, applied to the ambient
+      // floor here and to the region-darkness endpoint below (same endpoint,
+      // so a region that darkens to full also respects realistic mode).
+      const darknessRealism01 = _darknessRealism01;
+      lastAmbientColors = computeAmbientColors(env, darknessRealism01);
+      // dim/bright no longer read here directly — point lights now compute
+      // their OWN local (region-aware) dim/bright per light, every frame,
+      // inside updatePointLightMeshes (2026-07-19) — see that function's
+      // own header. `background` is still the scene-wide floor
+      // envLight/regions read.
+      const { background } = lastAmbientColors;
+
+      // GLOBAL ILLUMINATION ("the sun") — 2026-07-19, the "global light fix".
+      // Raises the illum FLOOR only, not the dim/bright ladder point lights
+      // read for their own switchColor (see environmental-light.js#compute
+      // GlobalLightFloor's header for why it isn't a mesh). Safe under MAX-
+      // blend order (illumQuad fills first, point-light meshes draw after):
+      // a point light's own un-raised edge value can only ever be <= the
+      // already-raised fill, so MAX-ing it in is a no-op there, never a
+      // darkening.
+      const globalLight = readGlobalLightConfig(darkness01);
+      lastGlobalLightFloor = computeGlobalLightFloor(globalLight.config, lastAmbientColors);
+      const raisedBackground = maxRgb(background, lastGlobalLightFloor);
+
+      envLight.setAmbient(raisedBackground);
+
+      // REGION-DRIVEN DARKNESS ("Adjust Darkness Level", 2026-07-19) — the
+      // RAW ambient endpoints (not the pre-mixed background: each region
+      // re-mixes by its OWN per-fragment adjusted darkness). The darkness
+      // endpoint is pulled toward black by the SAME realism lever as the
+      // ambient floor (mix(darkness, black, realism) = darkness × (1-realism)),
+      // so a region that darkens an area also honours realistic mode rather
+      // than flooring at Foundry's darkness colour there.
+      const rawDaylight = env?.ambient?.daylight ?? [0.93, 0.93, 0.93];
+      const rawDarkness = env?.ambient?.darkness ?? [0.14, 0.14, 0.28];
+      const realismScale = 1 - darknessRealism01;
+      uRegionDaylightColor.value.set(rawDaylight[0], rawDaylight[1], rawDaylight[2]);
+      uRegionDarknessColor.value.set(
+        rawDarkness[0] * realismScale,
+        rawDarkness[1] * realismScale,
+        rawDarkness[2] * realismScale
+      );
+      // Read ONCE, shared by both — see readElevationFilteredDarknessRegions'
+      // own header for why a light needs the SAME active-region set a
+      // region-mesh draw uses (2026-07-19, the per-light-region-aware-
+      // ambient fix).
+      const activeRegions = readElevationFilteredDarknessRegions();
+      updateRegionDarknessMeshes(darkness01, activeRegions);
+
+      updatePointLightMeshes(darkness01, activeRegions, env, darknessRealism01);
+
+      // THE "BLACK OUTSIDE THE LIGHT RADIUS" FIX (2026-07-19). buf:scene.illum
+      // is built from THREE sequential render() calls to the SAME target
+      // (illumQuad, then regionScene, then lightScene) — a prior version of
+      // this comment claimed "later render() calls to the SAME bound target
+      // do not [clear]", stated confidently and NEVER actually verified: read
+      // against the vendored three.webgpu.js (Background#update:
+      // `renderContext.clearColor = renderer.autoClearColor === true`,
+      // evaluated on EVERY render() call, gated only by `renderer.autoClear`
+      // — which this project's own "ghost-hunting round 2/3" notes (above,
+      // this file's history) already confirmed defaults `true` and is
+      // NEVER overridden anywhere) — the claim is FALSE. Every one of these
+      // three render() calls clears the colour buffer first by default. So
+      // regionScene's call wiped illumQuad's ambient fill down to (0,0,0,0)
+      // everywhere except inside a region's own footprint, and lightScene's
+      // call then wiped THAT down to (0,0,0,0) everywhere except inside a
+      // light's own mesh (a light's own switchColor/falloff math needs no
+      // texture read, so MAX-blending it against a freshly-zeroed buffer
+      // still shows correctly — which is exactly why every light looked
+      // right while everything between and beyond them read as pure black).
+      // This has been true since point lights first landed (increment 2a,
+      // TWO calls — illumQuad, lightScene — already exhibited a 2-step
+      // version); it went unnoticed because every test view stayed inside
+      // overlapping light coverage until this session's zoomed-out tests.
+      //
+      // FIX: disable colour-clearing for the DURATION of this multi-call
+      // sequence (the exact idiom the vendored three.webgpu.js uses
+      // internally in several places for the identical situation — save the
+      // flag, set false, do the multi-draw, restore). Safe here specifically
+      // because illumQuad's OWN draw is a fullscreen, opaque, unconditional
+      // overwrite (fills 100% of the target regardless of prior content), so
+      // skipping the hardware clear before it changes nothing — the ONLY
+      // effect of this flag is preventing regionScene/lightScene's later
+      // calls from wiping what illumQuad (and each other) already drew.
+      // `sceneIllum` has no depth/stencil buffer (describeSceneColor's own
+      // `depth:false`), so autoClearColor alone is the complete, correct fix
+      // — no depth/stencil clearing is being silently skipped alongside it.
+      const previousAutoClearColor = renderer.autoClearColor;
+      renderer.autoClearColor = false;
+      renderer.setRenderTarget(sceneIllum);
+      illumQuad.render(renderer); // buf:scene.illum = ambient background (sRGB), raised by global illumination if active
+      // Darkness-region meshes OVERWRITE (discard outside their own shape,
+      // no blending) the ambient fill within their own footprint — BEFORE
+      // point lights, so a light sitting inside a darkened/brightened region
+      // MAX-blends against the REGION-ADJUSTED floor, not the base one.
+      renderer.render(regionScene, camera);
+      // MAX-blends every active point light on top of the (possibly region-
+      // adjusted) ambient fill — same target, same camera as geometry.world/
+      // occlusion (world-space).
+      renderer.render(lightScene, camera);
+      renderer.autoClearColor = previousAutoClearColor;
+      // COLORATION (increment 3, 2026-07-19) — its OWN target, a SINGLE
+      // render() call (autoClearColor restored above), so the ordinary
+      // "first render() after setRenderTarget clears" behaviour is correct
+      // and wanted here: an area with no lights nearby should stay exactly
+      // black/zero (no ambient floor to pre-fill, unlike illum's), and a
+      // fresh per-frame clear is exactly what makes that true rather than
+      // accumulating stale coloration from a previous frame.
+      renderer.setRenderTarget(sceneColoration);
+      renderer.render(colorationScene, camera);
+      // scene.lit = EOTF(OETF(albedo) × illum + coloration) — the coloration
+      // is ADDED inside the composite now, in GAMMA space (Foundry parity;
+      // the old separate additive quad blended in LINEAR space and washed the
+      // scene to one hue — see environmental-light.js's composite essay). The
+      // coloration target above is fully rendered before this reads it.
+      renderer.setRenderTarget(sceneLit);
+      compositeQuad.render(renderer);
+      renderer.setRenderTarget(null);
+    }
+    // 'masks.occlusion'/'light.accumulate': the "add one line, widen fromStage"
+    // the comment above predicted, done twice now. Both are hoisted function
+    // declarations, so referencing them here (defined later / above in this
+    // closure) is valid. See each pass's own definition for its scope note.
+    const passImpls = {
+      'masks.occlusion': runMaskOcclusionPass,
+      'geometry.world': runGeometryWorldPass,
+      'light.accumulate': runLightAccumulatePass,
+      'present.composite': runPresentCompositePass,
+    };
+    // Today this resolves to exactly ['masks.occlusion', 'geometry.world',
+    // 'present.composite'] — asserted against the real PASSES in
+    // graph/__tests__/run-frame.test.mjs, so a future live pass added to this
+    // stage range without a `passImpls` entry fails a Node test instead of
+    // silently never running.
+    const framePlan = planFrame(PASSES, { fromStage: 'masks', toStage: 'present' });
+    /** What `runPassPlan` actually ran on the most recent frame — for `getFramePlanInfo`. */
+    let lastFramePlanRan = [];
+
+    // ========================================================================
+    // frame.snapshot — THE res:env THIRD, WIRED (2026-07-18). Status STAYS
+    // 'future' in graph/passes.js on purpose — read this before "finishing" it.
+    // ========================================================================
+    //
+    // graph/passes.js declares frame.snapshot as creating THREE resources:
+    // res:env (time/sun/weather/wind/darkness), res:view (camera/viewport),
+    // res:scene (scene docs). Only res:env has a real, fully-designed shape
+    // today (world/environment.js#buildEnvSnapshot, built + Node-tested this
+    // session's predecessor). res:view/res:scene do not yet have a real
+    // consumer to define their shape against — inventing one now would be
+    // designing for a hypothetical, exactly what this project's own doctrine
+    // warns against. So: build the real third, wire it in for real every
+    // frame, and leave the pass's status honestly 'future' until all three
+    // exist. Flipping to 'live' with only one of three declared outputs real
+    // would be a MISSING finding waiting to happen the moment anything reads
+    // res:view/res:scene from a live-status pass (pass-health.js's own job).
+    //
+    // NOT routed through runPassPlan/framePlan above: planFrame correctly
+    // SKIPS a 'future'-status pass (that is what 'future' means), so this is
+    // called directly, the same way updateCamera()/syncTokenPlacements()
+    // already are — genuinely-not-ready work stays hand-wired until the
+    // moment it can honestly claim 'live', never faked into the graph early.
+    const frameClock = makeFrameClock();
+    /** The env snapshot from the most recent frame, plus where darkness came
+     * from — for getEnvSnapshotInfo() / the Diagnostics debug report. */
+    let lastEnvSnapshot = null;
+    function updateEnvSnapshot() {
+      const time = frameClock.tick();
+      const darkness = readSceneDarkness();
+      // The ambient palette Foundry itself renders from (canvas.colors) — read
+      // through the ONE adapter so the light pass reproduces Foundry's ladder
+      // rather than re-reading a global. `readSceneAmbient` never throws and
+      // reports source/reason exactly like `readSceneDarkness`.
+      const ambient = readSceneAmbient();
+      // todHour has NO real source yet — no calendar, no author-facing
+      // control exists in this session's scope. `world/sun.js#normalizeHour`
+      // already treats a non-finite hour as noon ("a broken input reads as
+      // noon, LOUDLY neutral — never NaN downstream"); this makes that choice
+      // EXPLICIT rather than an implicit fallthrough, so it reads as an
+      // acknowledged gap, not a bug, in getEnvSnapshotInfo() below.
+      const env = buildEnvSnapshot({
+        time,
+        todHour: 12,
+        darknessInput: darkness.darkness01,
+        ambientInput: { daylight: ambient.daylight, darkness: ambient.darkness, brightest: ambient.brightest },
+      });
+      lastEnvSnapshot = { env, darkness, ambient, todHourSource: 'default:no-calendar-input-yet' };
+      return env;
     }
 
     // PIXI PARITY: in whole-image mode we draw whole textures and NEVER sample
@@ -944,31 +1966,218 @@ export async function startVtPanViewer({
     // PIXI does (2026-07-18). Skip it entirely; carry only what PIXI carries.
     const atlas = _wholeImageEnabled ? null : new PageAtlas({ THREE, layout, renderer });
 
-    // THE OCCLUSION MASK — currently an INERT 1x1 placeholder, deliberately.
+    // THE OCCLUSION MASK — a REAL render target as of 2026-07-18, RADIAL-only.
     //
     // scene/occlusion.js has the full model ported and Node-tested, and the
-    // shader in ensureItemMesh() implements Foundry's algorithm for real. What
-    // is NOT built yet is the mask PRODUCER: rendering each occludable token's
-    // vision polygon and radial disc into a screen-space RGBA target with MIN
-    // blending, every time perception changes.
+    // shader in ensureItemMesh()/buildWholeImageMaterial() implements
+    // Foundry's algorithm for real. This is the PRODUCER: runMaskOcclusionPass()
+    // below renders each occludable token's RADIAL disc into this screen-space
+    // RGBA target with MIN blending, every frame (tokens already sync position
+    // every frame via syncTokenPlacements — this rides the same cadence).
+    //
+    // ⚠️ SCOPE — read before assuming this is Foundry-complete. The REAL
+    // Foundry producer (client/canvas/layers/masks/occlusion.mjs) has TWO
+    // independent halves: tokens (vision polygons + radial discs — what THIS
+    // builds) and SURFACES, driven entirely by Region documents
+    // (Scene#getSurfaces(), region.polygonTree) — a system this
+    // project has not touched at all. Level/roof art defaults to SURFACE mode
+    // (foundry/scene-layers.js:273), so THE HEADLINE "see the token under the
+    // roof" case is NOT affected by this increment — it needs the Regions
+    // half, a separate, materially larger piece of work. What this DOES make
+    // real: any author-authored tile with RADIAL occlusion.modes set.
+    // VISION (token sight-based reveal) is also not built this cut — see
+    // runMaskOcclusionPass's own header.
     //
     // The clear value is Foundry's own (`CanvasOcclusionMask#clearColor =
     // [0,1,1,1]`), which is exactly "nothing occludes anything":
     //   R = 0 -> Fade says "occlude everywhere", but the per-object fade WEIGHT
-    //            is what gates it, and that stays 0 with no occluding token.
-    //   G/B/A = 1 -> above every possible elevation index, so step() -> not occluded.
-    // So every item renders unoccluded until the producer exists, and turning it
-    // on is purely additive: build the producer, point this uniform at its
-    // render texture, and feed real weights in updateResidency().
-    const occlusionMask = (() => {
-      const data = new Uint8Array([0, 255, 255, 255]);
-      const texture = new THREE.DataTexture(data, 1, 1, THREE.RGBAFormat);
-      texture.needsUpdate = true;
-      texture.minFilter = THREE.NearestFilter;
-      texture.magFilter = THREE.NearestFilter;
-      texture.generateMipmaps = false;
-      return { texture, visionActive: false, elevationTable: [-Infinity] };
-    })();
+    //            is what gates it, and that stays 0 — FADE is not wired this
+    //            cut either (it needs testTokenOcclusion's spatial hit-test,
+    //            not just RADIAL's radius-only shape; a documented future step).
+    //   G = written per-frame by real token discs.
+    //   B/A = 1 always (VISION/SURFACE not built) -> step() -> never occluded.
+    const describeOcclusionMask = () => ({
+      resolvedW: canvasW,
+      resolvedH: canvasH,
+      screenSized: true,
+      type: THREE.UnsignedByteType,
+      colorSpace: THREE.NoColorSpace,
+      // NEAREST, not linear: a mask texel is an ELEVATION INDEX, not a colour
+      // — interpolating one is meaningless (matches Foundry's own
+      // `textureConfiguration.scaleMode: PIXI.SCALE_MODES.NEAREST`).
+      filter: 'nearest',
+      depth: false,
+    });
+    const occlusionMaskRT = allocator.create('occlusion.mask', describeOcclusionMask());
+    const occlusionMask = {
+      rt: occlusionMaskRT,
+      texture: occlusionMaskRT.texture,
+      visionActive: false, // stays false — vision half not built this cut
+      elevationTable: [-Infinity],
+    };
+
+    // ========================================================================
+    // masks.occlusion — THE PRODUCER, RADIAL-ONLY (2026-07-18). See the
+    // occlusionMask block above for the full scope note (SURFACE/Regions and
+    // VISION are NOT built this cut).
+    // ========================================================================
+
+    /** Reused across every renderer.setClearColor()/getClearColor() this pass
+     * does, every frame — a fresh THREE.Color per frame would be exactly the
+     * kind of small per-frame allocation this project's own hot-path
+     * discipline avoids elsewhere (see frame-clock.js, itemStates pooling). */
+    const _clearColorScratch = new THREE.Color();
+
+    /** A tiny dedicated Scene for occlusion discs — kept separate from the
+     * main `scene` so this pass's draw list is exactly the discs, nothing
+     * else, with no risk of interacting with the main geometry pass. */
+    const occlusionScene = new THREE.Scene();
+
+    /** ONE shared unit-radius circle (24 segments), reused via per-mesh scale
+     * — avoids rebuilding geometry per token per frame. Real Foundry draws a
+     * genuine circle (PIXI.Graphics#drawCircle); CircleGeometry is the
+     * equivalent primitive here, chosen over a quad+SDF specifically to avoid
+     * needing a TSL discard node this cut. */
+    const occlusionDiscGeometry = new THREE.CircleGeometry(1, 24);
+
+    /** tokenItemId -> { mesh, material, uElevation } — reconciled each pass,
+     * mirroring itemStates' own add/remove/update shape. Materials are
+     * REUSED across frames (never rebuilt) so a token's shader compiles
+     * exactly once, on first appearance. KNOWN GAP, bounded and documented
+     * rather than silently ignored: an entry is never removed for a token
+     * that is genuinely DELETED (only hidden — mesh.visible:false — when it
+     * drops out of the current draw list), so this grows with the count of
+     * distinct tokens ever seen in the session, not per frame. Full lifecycle
+     * cleanup needs a deleteToken hook wired from boot.js; not built this cut. */
+    const occlusionDiscs = new Map();
+
+    /**
+     * Build (once, on first appearance) one token's disc mesh — a flat green-
+     * channel-only writer, MIN-blended into occlusionMask.
+     *
+     * MIN BLENDING (THREE.CustomBlending + MinEquation + OneFactor/OneFactor,
+     * both RGB and alpha): the lowest occluder elevation wins at any pixel —
+     * Foundry's own composite rule (occlusion.mjs's `PIXI.BLEND_MODES.MIN_ALL`).
+     * R/B/A are written as their OWN channel's clear value (0/1/1) — a
+     * deliberate no-op under MIN, so this disc affects ONLY the green
+     * (RADIAL) channel, exactly like Foundry's own bit-packed padding trick
+     * (`0xFF0000 | (occlusionElevation << 8) | ...`), expressed here as plain
+     * floats instead of hex-OR'd bytes — TSL has no 8-bit-packing constraint
+     * to work around.
+     */
+    function buildOcclusionDisc() {
+      const { uniform, float, vec4 } = THREE.TSL;
+      const uElevation = uniform(float(1));
+      const material = new THREE.NodeMaterial();
+      material.transparent = false;
+      material.depthTest = false;
+      material.depthWrite = false;
+      material.blending = THREE.CustomBlending;
+      material.blendEquation = THREE.MinEquation;
+      material.blendSrc = THREE.OneFactor;
+      material.blendDst = THREE.OneFactor;
+      material.blendEquationAlpha = THREE.MinEquation;
+      material.blendSrcAlpha = THREE.OneFactor;
+      material.blendDstAlpha = THREE.OneFactor;
+      material.fragmentNode = vec4(float(0), uElevation, float(1), float(1));
+      const mesh = new THREE.Mesh(occlusionDiscGeometry, material);
+      mesh.frustumCulled = false;
+      occlusionScene.add(mesh);
+      return { mesh, material, uElevation };
+    }
+
+    /**
+     * Render this frame's occlusion mask: gather occludable tokens from the
+     * CURRENT draw list, build the real elevation table, reconcile the disc
+     * pool, draw with MIN blending, then refresh every drawn item's
+     * uOcclusionElevation uniform against the fresh table.
+     *
+     * RADIAL-ONLY — see the occlusionMask block's header for the full scope
+     * note. Token filter: real document data (`occludableRadius > 0`,
+     * `!hidden`) — NOT Foundry's own `_getOccludableTokens` (which branches
+     * on a world SETTING plus PIXI Token object state like `.controlled`/
+     * `.interactive` this project's documents-only adapter doesn't read;
+     * Keyhole.md §4.3 draws from documents, never placeables). A documented
+     * simplification, not a bug: every visible token with a nonzero
+     * occludable radius contributes a disc, always.
+     */
+    function runMaskOcclusionPass() {
+      const distancePixels = readGridDistancePixels().distancePixels;
+      const occluders = [];
+      for (const it of lastItems) {
+        if (it.kind !== 'token') continue;
+        if (it.hidden) continue; // dimmed-for-GM tokens still occlude in real Foundry; hidden ones do not
+        const radiusPx = computeTokenOcclusionRadiusPx({
+          footprint: it.footprint,
+          occludableRadius: it.occludableRadius ?? 0,
+          distancePixels,
+        });
+        if (radiusPx <= 0) continue;
+        occluders.push({
+          id: it.id,
+          elevation: it.key.elevation,
+          centerX: it.footprint.centerX,
+          centerY: it.footprint.centerY,
+          radiusPx,
+        });
+      }
+
+      occlusionMask.elevationTable = buildElevationTable(occluders.map((o) => o.elevation));
+
+      // Reconcile the disc pool: add new, update every survivor, hide stale
+      // (see occlusionDiscs' own doc for why "hide" not "dispose").
+      const seen = new Set();
+      for (const o of occluders) {
+        seen.add(o.id);
+        let entry = occlusionDiscs.get(o.id);
+        if (!entry) {
+          entry = buildOcclusionDisc();
+          occlusionDiscs.set(o.id, entry);
+        }
+        entry.mesh.position.set(o.centerX, o.centerY, 0);
+        entry.mesh.scale.set(o.radiusPx, o.radiusPx, 1);
+        entry.mesh.visible = true;
+        entry.uElevation.value = mapElevation(occlusionMask.elevationTable, o.elevation);
+      }
+      for (const [id, entry] of occlusionDiscs) {
+        if (!seen.has(id)) entry.mesh.visible = false;
+      }
+
+      // Render into occlusionMask.rt — same symmetric save/restore pattern as
+      // every other renderer-global-state touch in this file (rebindPresent,
+      // the orientation self-test). Global clear colour is renderer state;
+      // leaving it set to Foundry's cyan would corrupt the NEXT render call
+      // (sceneColor's own clear) if not restored.
+      const prevClearColor = renderer.getClearColor(_clearColorScratch); // writes into + returns the scratch object
+      const prevClearAlpha = renderer.getClearAlpha();
+      renderer.setRenderTarget(occlusionMask.rt);
+      renderer.setClearColor(0x00ffff, 1); // Foundry's own CanvasOcclusionMask#clearColor = [0,1,1,1]
+      renderer.clear(true, false, false);
+      // SAME camera as geometry.world — see the streaming/whole-image
+      // maskUV fixes' own notes: this is what makes screenUV line up between
+      // this pass's output and the fragment that samples it, without hand-
+      // deriving a new world->screen transform.
+      renderer.render(occlusionScene, camera);
+      renderer.setRenderTarget(null);
+      renderer.setClearColor(prevClearColor, prevClearAlpha);
+
+      // uOcclusionElevation refresh — every drawn item, every frame (cheap: a
+      // per-item float set, no shader rebuild). uOcclusionWeights is NOT
+      // touched here — it is static for an item's lifetime this cut (see
+      // ensureItemMesh's/buildWholeImageMaterial's own notes on why).
+      for (const state of itemStates.values()) {
+        const elevation = state.item?.key?.elevation;
+        if (elevation === undefined) continue;
+        const value = mapElevation(occlusionMask.elevationTable, elevation);
+        if (state.appearance) state.appearance.uOcclusionElevation.value = value;
+        if (state.wholeImage) {
+          for (const t of state.wholeImage.tiles) {
+            if (t.appearance) t.appearance.uOcclusionElevation.value = value;
+          }
+        }
+      }
+    }
+
     // itemId -> item state (see ensureItemLoaded). ONE entry per DRAWABLE, not
     // per floor: a floor's background, its foreground (roof) art and every tile
     // are all just items, each with its own virtual texture, each placed in
@@ -1423,7 +2632,7 @@ export async function startVtPanViewer({
         borderPx: 4,
         atlasSizePx: layout.atlasSizePx,
       });
-      const { Fn, uniform, vec3, float, vec2, uv, positionGeometry } = THREE.TSL;
+      const { Fn, uniform, vec3, float, vec2, uv } = THREE.TSL;
 
       // Per-item appearance + occlusion, as live uniform handles.
       const uTint = uniform(vec3(1, 1, 1));
@@ -1461,7 +2670,16 @@ export async function startVtPanViewer({
         // mix(0, occ, 1) == 0 and blacked out the entire map for a whole session.
         return { occ, factor: THREE.TSL.mix(uUnoccludedAlpha, uOccludedAlpha, occ) };
       };
-      const maskUV = () => positionGeometry.xy; // placeholder space; real screen UV lands with the producer
+      // SCREEN-space UV (2026-07-18) — the ONE-LINE bug Keyhole.md's "THE
+      // REMAINING PIECE" named: this used to be positionGeometry.xy (WORLD
+      // coords), sampling the mask at the wrong space entirely. The mask
+      // target is screen-sized and drawn by runMaskOcclusionPass() through
+      // the SAME `camera` this material's own quad is drawn with — so
+      // screenUV (THREE's own backend-normalized fragment-position node,
+      // three.webgpu.js:37914; matches the v=0-is-top convention already
+      // proven by the orientation self-test) lines up by construction,
+      // without hand-deriving a new world→screen transform.
+      const maskUV = () => THREE.TSL.screenUV;
       const sampleMask = () => THREE.TSL.texture(occlusionMask.texture, maskUV());
 
       const realChain = (maskSample) =>
@@ -1501,10 +2719,22 @@ export async function startVtPanViewer({
     // no residency, no upload churn: the fix for the WebGPU device loss.
     // ======================================================================
 
-    /** A NodeMaterial that samples ONE whole texture with the same tint/alpha the
-     * streaming path uses (occlusion is a no-op there today — weights are 0 — so
-     * the multifloor composite rides on the art's own alpha holes + renderOrder,
-     * which this preserves). uTint/uAlpha are live handles for future wiring. */
+    /** A NodeMaterial that samples ONE whole texture with the same tint/alpha/
+     * occlusion chain the streaming path uses. uTint/uAlpha/occlusion are live
+     * uniform handles.
+     *
+     * OCCLUSION HERE IS NEW (2026-07-18) — whole-image mode is the DEFAULT
+     * active path for real scenes (see `_wholeImageEnabled`'s own doc), so
+     * wiring occlusion into ONLY the streaming material (ensureItemMesh)
+     * would make masks.occlusion real but INVISIBLE on every deployed scene.
+     * Written fresh rather than sharing a helper with the streaming path's
+     * `occlusionAlphaFactor`/`realChain` closures on purpose: that is
+     * proven, live-render-affecting code (Rounds 1-9's history), and
+     * touching it to extract a shared abstraction is a strictly bigger risk
+     * than the small duplication below. Math is IDENTICAL by inspection —
+     * both are the direct expression of scene/occlusion.js's
+     * `computeOcclusionAlpha`, and if they ever need to change, they change
+     * together, on purpose, not by accident of a shared function. */
     // uvScale defaults to [1,1] (raw path: texture IS the image). The BC1 path
     // passes [w/padW, h/padH] < 1: a block-compressed texture's dimensions MUST
     // be a multiple of 4 (WebGPU rejects e.g. 1050×1050 as BC1 — the device-loss
@@ -1512,11 +2742,32 @@ export async function startVtPanViewer({
     // samples only the logical [0..w/padW, 0..h/padH] sub-rect. The padding lives
     // at the bottom/right (v→1, u→1) as edge-clamped replication (see gatherBlock),
     // so clamping the UV max there hides it with no image squash or shift.
-    function buildWholeImageMaterial(tex, uvScale = [1, 1]) {
-      const { Fn, uniform, vec2, vec3, float, uv, texture } = THREE.TSL;
+    function buildWholeImageMaterial(tex, item, uvScale = [1, 1]) {
+      const { Fn, uniform, vec2, vec3, vec4, float, uv, texture, screenUV, step, mix } = THREE.TSL;
       const uTint = uniform(vec3(1, 1, 1));
       const uAlpha = uniform(float(1));
       const uUvScale = uniform(vec2(uvScale[0], uvScale[1]));
+
+      // Occlusion uniforms — see this function's own header. uOcclusionWeights/
+      // uUnoccludedAlpha/uOccludedAlpha are STATIC for this item's lifetime
+      // (item.occlusion.modes never changes at runtime, and state.occluded/
+      // hoverFade are not wired this cut — see runMaskOcclusionPass's header
+      // for the RADIAL-only scope), computed ONCE here. uOcclusionElevation is
+      // a live uniform, refreshed every frame by refreshItemOcclusionElevation().
+      const uOcclusionElevation = uniform(float(1)); // 1 = "above every real elevation" — inert until refreshed
+      const uOcclusionWeights = uniform(vec4(0, 0, 0, 0));
+      const uUnoccludedAlpha = uniform(float(1));
+      const uOccludedAlpha = uniform(float(0));
+      const modes = item?.occlusion?.modes ?? OCCLUSION_MODES.NONE;
+      const st = computeOcclusionState({
+        occlusionMode: modes,
+        occluded: false,
+        visionActive: false,
+        hoverFadeAmount: 0,
+      });
+      uOcclusionWeights.value.set(st.fade, st.radial, st.vision, st.surface);
+      uOccludedAlpha.value = item?.occlusion?.alpha ?? 0;
+
       const material = new THREE.NodeMaterial();
       material.transparent = true;
       material.depthTest = false;
@@ -1526,9 +2777,26 @@ export async function startVtPanViewer({
         const c = texture(tex, uv().mul(uUvScale)).toVar();
         c.rgb.mulAssign(uTint);
         c.a.mulAssign(uAlpha);
+        // Same shape as scene/occlusion.js#computeOcclusionAlpha (and the
+        // streaming path's occlusionAlphaFactor): step(edge,x) is 0 when
+        // x<edge; 1-step therefore means "the occluder recorded here sits
+        // BELOW me". screenUV — see the streaming path's maskUV fix for why
+        // this is the correct space (same camera, same target size).
+        const maskSample = texture(occlusionMask.texture, screenUV);
+        const occ = float(1).sub(step(uOcclusionElevation, maskSample));
+        const amounts = occ.mul(uOcclusionWeights);
+        const amount = amounts.x.max(amounts.y).max(amounts.z).max(amounts.w);
+        // FUNCTION form only — see vt-sample.tsl.js's header: the .mix()
+        // METHOD takes its receiver as the interpolant, not the first value,
+        // and cost a whole session the one time this project used it by
+        // mistake (reference_tsl_method_chaining_trap).
+        c.a.mulAssign(mix(uUnoccludedAlpha, uOccludedAlpha, amount));
         return c;
       })();
-      return { material, appearance: { uTint, uAlpha } };
+      return {
+        material,
+        appearance: { uTint, uAlpha, uOcclusionElevation, uOcclusionWeights, uUnoccludedAlpha, uOccludedAlpha },
+      };
     }
 
     /** Rebuild a tile mesh's world quad from the item's CURRENT placement (called
@@ -1671,7 +2939,7 @@ export async function startVtPanViewer({
                 // on first render. Correct, just not forced.
               }
               const wholeTile = { sx: 0, sy: 0, sw: c.width, sh: c.height, col: 0, row: 0 };
-              const { material, appearance } = buildWholeImageMaterial(tex, [c.width / padW, c.height / padH]);
+              const { material, appearance } = buildWholeImageMaterial(tex, item, [c.width / padW, c.height / padH]);
               const geometry = new THREE.BufferGeometry();
               const t = { tile: wholeTile, sub: null, tex, geometry, material, appearance, mesh: null };
               setTileGeometry(t, state.placement, imageW, imageH);
@@ -1757,7 +3025,7 @@ export async function startVtPanViewer({
                 // recovery, so there is nothing to do here but stop waiting.
               }
             }
-            const { material, appearance } = buildWholeImageMaterial(tex);
+            const { material, appearance } = buildWholeImageMaterial(tex, item);
             const geometry = new THREE.BufferGeometry();
             const t = { tile, sub: null, tex, geometry, material, appearance, mesh: null };
             setTileGeometry(t, state.placement, imageW, imageH);
@@ -1887,29 +3155,33 @@ export async function startVtPanViewer({
       // the comment above it. See syncTokenPlacements' own header for why this
       // runs every frame rather than only on a document hook.
       syncTokenPlacements();
+      // frame.snapshot's res:env third — see its own header above. Also a
+      // small per-frame CPU-only cost, kept OUT of the t0 GPU-render window
+      // for the same reason as updateContinuousInputs/syncTokenPlacements.
+      updateEnvSnapshot();
       const t0 = performance.now();
       // Re-derive the camera from the live view EVERY frame: this is what makes
       // a drag track the cursor at display rate without waiting on streaming,
       // and it is the single place the Y-flip is applied (see updateCamera).
       updateCamera();
 
-      // TWO PASSES, FOR REAL (2026-07-17). `graph/passes.js` has always declared
-      // these as separate nodes — `geometry.world` creates buf:scene.color,
-      // `present.composite` reads buf:final — and until now BOTH resolved to
-      // this one function, honestly recorded as `fusedWith` in pass-impls.js
-      // because a single renderer.render() straight to the canvas is not two
-      // passes however you label it.
+      // TWO PASSES, FOR REAL (2026-07-17), NOW GRAPH-DRIVEN (2026-07-18).
+      // `graph/passes.js` has always declared these as separate nodes —
+      // `geometry.world` creates buf:scene.color, `present.composite` reads
+      // it — and since 2026-07-17 they really are two separate
+      // `renderer.render()` calls against two targets. Until now THIS
+      // function still hardcoded their order; now it asks `framePlan`
+      // (computed once above, from the real `PASSES`) which passes are live
+      // in this stage range and runs exactly those, via `passImpls`. Same two
+      // GPU calls, same order, same targets — now looked up instead of
+      // written inline, so the next pass to go live here (masks.occlusion —
+      // see the infrastructure menu in Keyhole.md) plugs into `passImpls`
+      // without this function's control flow changing again.
       //
-      //   geometry.world    : the whole sorted draw list → buf:scene.color
-      //   present.composite : buf:scene.color → the canvas
-      //
-      // The gap between them is where every effect goes. Nine seams in
-      // passes.js declare `modifies: ['buf:scene.color']`; this is the first
-      // frame in which that buffer is a real thing they could modify.
-      renderer.setRenderTarget(sceneColor);
-      renderer.render(scene, camera);
-      renderer.setRenderTarget(null);
-      presentQuad.render(renderer); // three's own fullscreen path — carries its own camera
+      // The gap between geometry.world and present.composite is where every
+      // effect goes. Nine seams in passes.js declare `modifies:
+      // ['buf:scene.color']` — that buffer is a real thing they could modify.
+      lastFramePlanRan = runPassPlan(framePlan.ids, passImpls, {});
 
       frameTimes.push(performance.now() - t0);
       if (frameTimes.length > 120) frameTimes.shift();
@@ -3077,7 +4349,21 @@ export async function startVtPanViewer({
         // (its own doc: "a resize storm can't smuggle a world-res target past
         // the law that create() already enforced").
         allocator.resize(sceneColor, canvasW, canvasH, describeSceneColor());
+        // light.accumulate's targets track the drawing buffer too (same
+        // screenSized law). setSize mutates textures in place, so the samplers
+        // stay valid; rebind* only flag needsUpdate.
+        allocator.resize(sceneIllum, canvasW, canvasH, describeSceneColor());
+        allocator.resize(sceneLit, canvasW, canvasH, describeSceneColor());
+        allocator.resize(sceneColoration, canvasW, canvasH, describeSceneColor());
         rebindPresent();
+        rebindLighting();
+        // buf:occlusion tracks the drawing buffer too — same reasoning. No
+        // rebind needed afterward: RenderTarget#setSize (three.webgpu.js:4934)
+        // mutates the SAME texture object's .image dimensions in place rather
+        // than replacing it, so every material's already-baked `texture(
+        // occlusionMask.texture, screenUV)` node keeps pointing at the right
+        // object — verified against the vendored source before relying on it.
+        allocator.resize(occlusionMask.rt, canvasW, canvasH, describeOcclusionMask());
         await scheduleResidencyUpdate().catch((err) => console.error('[vt-pan-viewer] resize residency failed:', err));
       });
     }
@@ -3281,6 +4567,253 @@ export async function startVtPanViewer({
       canvas.addEventListener('wheel', onWheel, { passive: false });
     }
 
+    /**
+     * Shared core of `sampleIllumPixel`/`probePixels` — one world-position
+     * readback across every screen-sized render target the compositor
+     * carries: illum/lit/albedo/coloration (all `HalfFloatType`, decoded via
+     * `decodeHalfFloatRgba`) plus occlusion (`UnsignedByteType`, a different
+     * GPU format, decoded via `decodeByteRgba` — see that function's own
+     * header for why a byte target needs its own decode path). See
+     * `sampleIllumPixel`'s own header (below, on the returned API object)
+     * for the full reasoning; factored out here so probing 1 point and
+     * probing up to 3 run the EXACT same math, never two slightly-diverging
+     * copies of it.
+     *
+     * @param {number} worldX @param {number} worldY
+     * @returns {Promise<{worldX:number, worldY:number, pixel:{x:number,y:number}|null,
+     *   buffers: object|null, onScreen: boolean}>}
+     */
+    async function sampleOnePixel(worldX, worldY) {
+      if (!view) return { worldX, worldY, pixel: null, buffers: null, onScreen: false };
+      const worldRect = viewToWorldRect(view, canvasW / canvasH);
+      const ndc = worldToNdc({ x: worldX, y: worldY }, worldRect);
+      const onScreen = ndc.x >= -1 && ndc.x <= 1 && ndc.y >= -1 && ndc.y <= 1;
+      const pixel = ndcToPixel(ndc, canvasW, canvasH);
+      const readOne = async (target, decode) => {
+        const raw = await renderer.readRenderTargetPixelsAsync(target, pixel.x, pixel.y, 1, 1);
+        return { raw: raw ? Array.from(raw) : null, rgba: decode(raw) };
+      };
+      const [illum, lit, albedo, coloration, occlusion] = await Promise.all([
+        readOne(sceneIllum, decodeHalfFloatRgba),
+        readOne(sceneLit, decodeHalfFloatRgba),
+        readOne(sceneColor, decodeHalfFloatRgba),
+        readOne(sceneColoration, decodeHalfFloatRgba),
+        readOne(occlusionMaskRT, decodeByteRgba),
+      ]);
+      return { worldX, worldY, pixel, onScreen, buffers: { illum, lit, albedo, coloration, occlusion } };
+    }
+
+    /** One distinct, high-contrast colour per probe point — index 1..3, wraps if ever called with more. */
+    const PROBE_MARKER_COLORS = ['#ff3b30', '#34c759', '#0a84ff'];
+
+    /**
+     * Draw numbered probe markers over the canvas for 30s — thin crosshair +
+     * thin circle (author's own requirement: "must be thin and minimal, you
+     * need to be able to see what I'm pointing at accurately") + a
+     * deliberately CHUNKIER numbered badge offset to the side (so it never
+     * covers the exact probed pixel). Lets a screenshot taken right after a
+     * `probePixels` call be matched, point-for-point, against the JSON
+     * report it returned.
+     *
+     * DOM-only, appended as a sibling of `canvas` inside the SAME `mount.
+     * host`, positioned by PERCENTAGE of the canvas's own box — safe
+     * because `canvas.style` (this function's own module, above) already
+     * sizes the canvas to `width:100%;height:100%` of `mount.host` with
+     * `position:absolute;inset:0`; mirroring that exact recipe for this
+     * overlay means percentage coordinates line up with the canvas with NO
+     * devicePixelRatio or `getBoundingClientRect()` math needed (both
+     * already ruled out as bug sources for the render itself, so avoided
+     * here too, on principle). `pointer-events:none` throughout — a debug
+     * overlay must never steal a click from Foundry (same discipline
+     * `canvas.style` itself already documents for the real canvas).
+     * Self-removing via `setTimeout`; never throws if `document` is absent
+     * (Node/test contexts).
+     *
+     * @param {Array<{index:number, xPercent:number, yPercent:number}>} points
+     */
+    function drawProbeMarkers(points) {
+      if (typeof document === 'undefined' || !mount?.host || !points.length) return;
+      const container = document.createElement('div');
+      container.dataset.msaProbeOverlay = 'true';
+      Object.assign(container.style, { position: 'absolute', inset: '0', zIndex: '15', pointerEvents: 'none' });
+      for (const p of points) {
+        const color = PROBE_MARKER_COLORS[(p.index - 1) % PROBE_MARKER_COLORS.length];
+        const wrap = document.createElement('div');
+        Object.assign(wrap.style, { position: 'absolute', left: `${p.xPercent}%`, top: `${p.yPercent}%` });
+
+        const circle = document.createElement('div');
+        Object.assign(circle.style, {
+          position: 'absolute',
+          left: '-11px',
+          top: '-11px',
+          width: '22px',
+          height: '22px',
+          borderRadius: '50%',
+          border: `1px solid ${color}`,
+          boxSizing: 'border-box',
+        });
+
+        const hLine = document.createElement('div');
+        Object.assign(hLine.style, {
+          position: 'absolute',
+          left: '-8px',
+          top: '-0.5px',
+          width: '16px',
+          height: '1px',
+          background: color,
+        });
+
+        const vLine = document.createElement('div');
+        Object.assign(vLine.style, {
+          position: 'absolute',
+          left: '-0.5px',
+          top: '-8px',
+          width: '1px',
+          height: '16px',
+          background: color,
+        });
+
+        // The chunkier numbered badge — the ONE deliberately non-minimal
+        // element, offset up-and-right so it labels the point without ever
+        // sitting on top of the exact probed pixel.
+        const badge = document.createElement('div');
+        badge.textContent = String(p.index);
+        Object.assign(badge.style, {
+          position: 'absolute',
+          left: '14px',
+          top: '-22px',
+          minWidth: '18px',
+          height: '18px',
+          lineHeight: '18px',
+          padding: '0 4px',
+          borderRadius: '9px',
+          background: color,
+          color: '#fff',
+          fontWeight: '700',
+          fontSize: '12px',
+          fontFamily: 'system-ui, sans-serif',
+          textAlign: 'center',
+          boxShadow: '0 0 0 1px rgba(0,0,0,0.6)',
+        });
+
+        wrap.appendChild(circle);
+        wrap.appendChild(hLine);
+        wrap.appendChild(vLine);
+        wrap.appendChild(badge);
+        container.appendChild(wrap);
+      }
+      mount.host.appendChild(container);
+      setTimeout(() => container.remove(), 30000);
+    }
+
+    /**
+     * Shared core of `probePixels`/`runInteractivePixelProbe`: sample up to
+     * `PROBE_MARKER_COLORS.length` world points and draw their markers in
+     * one batch. Factored out so the console-driven and click-driven probe
+     * flows run the EXACT same sampling/marking logic, never two
+     * slightly-diverging copies of it.
+     *
+     * Each point after the first also gets `deltaFromPrev` (see
+     * `diffProbeBuffers`'s own header) — an automatic point-N-vs-point-(N-1)
+     * diff across every buffer/channel, with the single biggest jump called
+     * out. This is the exact by-hand comparison that found
+     * `keyhole-region-discard-noop-bug` and the region-aware-ambient seam,
+     * now computed for free on every multi-point probe instead of requiring
+     * a human to line up two JSON blobs and subtract. Whether a flagged jump
+     * is a BUG or an intentional edge (a light's own falloff boundary, a
+     * region's authored edge) is for the investigator to judge from where
+     * the points were placed — this only surfaces the number.
+     * @param {Array<{x:number, y:number}>} points
+     */
+    async function runProbeOnPoints(points) {
+      const list = (Array.isArray(points) ? points : []).slice(0, PROBE_MARKER_COLORS.length);
+      const results = [];
+      const markers = [];
+      for (let i = 0; i < list.length; i++) {
+        const p = list[i] ?? {};
+        const sample = await sampleOnePixel(p.x, p.y);
+        const index = i + 1;
+        const prev = results[results.length - 1] ?? null;
+        const deltaFromPrev = prev ? diffProbeBuffers(prev.buffers, sample.buffers) : null;
+        results.push({ index, ...sample, deltaFromPrev });
+        if (sample.onScreen && sample.pixel) {
+          markers.push({
+            index,
+            xPercent: (sample.pixel.x / canvasW) * 100,
+            yPercent: (sample.pixel.y / canvasH) * 100,
+          });
+        }
+      }
+      drawProbeMarkers(markers);
+      return results;
+    }
+
+    /**
+     * THE INTERACTIVE PIXEL PROBE (2026-07-19, author-requested: "I want to
+     * click on the screen and set the points... a button to activate pixel
+     * probe and the ability to click on the screen to set the three
+     * points"). Arms a WINDOW-level, CAPTURE-phase `pointerdown` listener
+     * for up to `maxPoints` clicks, converting each click's viewport
+     * position to a world position via `clientToNdc`/`ndcToWorld`
+     * (scene/world-quad.js — both Node-tested, the exact algebraic inverse
+     * of the world→pixel chain the readback itself already uses), drawing
+     * an IMMEDIATE numbered marker per click so a click registering is
+     * never a silent, uncertain thing.
+     *
+     * DELIBERATELY does NOT call `preventDefault()`/`stopPropagation()` and
+     * NEVER touches `canvas.style.pointerEvents` — "Foundry owns all input"
+     * is a LOCKED decision (keyhole-input-model-decision), and this stays
+     * inside it: it OBSERVES a click without consuming it, so Foundry's own
+     * handling of that same click (selecting whatever is under the cursor,
+     * etc.) still happens exactly as it would if this tool did not exist —
+     * a real, expected side effect of probing while armed (a developer
+     * using a debug tool, not a player mid-game), not a bug.
+     *
+     * Times out 90s after arming (not per-click) so an abandoned probe
+     * cannot leave a listener attached forever; resolves with however many
+     * points WERE collected, never rejects — a partial probe (1 or 2
+     * points) is still useful, not an error.
+     *
+     * @param {number} [maxPoints=3]
+     * @returns {Promise<Array<{x:number, y:number}>>}
+     */
+    function armInteractivePixelProbe(maxPoints = 3) {
+      return new Promise((resolve) => {
+        const points = [];
+        let settled = false;
+        let timeoutId = null;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          window.removeEventListener('pointerdown', onPointerDown, true);
+          if (timeoutId) clearTimeout(timeoutId);
+          resolve(points);
+        };
+        const onPointerDown = (e) => {
+          const rect = canvas.getBoundingClientRect();
+          const worldRect = viewToWorldRect(view, canvasW / canvasH);
+          const ndc = clientToNdc(e.clientX, e.clientY, rect);
+          const world = ndcToWorld(ndc, worldRect);
+          const index = points.length + 1;
+          points.push(world);
+          // Immediate per-click feedback, keyed to THIS click's own screen
+          // position (not re-derived from the world position later) so it
+          // lands exactly under the cursor regardless of any camera motion
+          // between now and when the final readback recomputes pixel coords.
+          drawProbeMarkers([
+            {
+              index,
+              xPercent: ((e.clientX - rect.left) / Math.max(1, rect.width)) * 100,
+              yPercent: ((e.clientY - rect.top) / Math.max(1, rect.height)) * 100,
+            },
+          ]);
+          if (points.length >= maxPoints) finish();
+        };
+        window.addEventListener('pointerdown', onPointerDown, true);
+        timeoutId = setTimeout(finish, 90000);
+      });
+    }
+
     _active = {
       THREE,
       renderer,
@@ -3299,6 +4832,71 @@ export async function startVtPanViewer({
         // QuadGeometry across every QuadMesh in the process
         // (three.webgpu.js:49456, `var _geometry2 = new QuadGeometry()`).
         // Disposing it would break every other fullscreen pass three runs.
+      },
+      /** Tear down light.accumulate's targets + materials (see disposeActive).
+       * Geometry is the shared QuadGeometry — never disposed, same as present. */
+      disposeLighting() {
+        allocator.dispose(sceneIllum);
+        allocator.dispose(sceneLit);
+        allocator.dispose(sceneColoration);
+        envLight.illumMaterial.dispose();
+        envLight.compositeMaterial.dispose();
+      },
+      /** Tear down every point-light mesh/material/geometry (see
+       * disposeActive). Each light owns its OWN geometry (unlike occlusion
+       * discs' shared circle), so geometry disposal happens here too. The
+       * three shared ambient-colour uniforms need no disposal — plain JS
+       * objects, not GPU resources. */
+      disposePointLights() {
+        for (const [id, entry] of lightMeshes) {
+          try {
+            entry.material.dispose();
+          } catch (err) {
+            log.error(`point-light material dispose failed for '${id}' — VRAM may be leaked:`, err);
+          }
+          try {
+            entry.colorationMaterial.dispose();
+          } catch (err) {
+            log.error(`point-light coloration material dispose failed for '${id}' — VRAM may be leaked:`, err);
+          }
+          try {
+            entry.geometry.dispose();
+          } catch (err) {
+            log.error(`point-light geometry dispose failed for '${id}' — VRAM may be leaked:`, err);
+          }
+        }
+        lightMeshes.clear();
+      },
+      /** Tear down every region-darkness mesh's OWN material (see
+       * disposeActive). Unlike point lights, every region mesh SHARES
+       * `regionQuadGeometry` (one static unit quad, no per-instance vertex
+       * data — see updateRegionDarknessMeshes' own header) — disposed ONCE,
+       * not per-entry. */
+      disposeRegionDarknessMeshes() {
+        for (const [key, entry] of regionMeshes) {
+          try {
+            entry.material.dispose();
+          } catch (err) {
+            log.error(`region-darkness material dispose failed for '${key}' — VRAM may be leaked:`, err);
+          }
+        }
+        regionMeshes.clear();
+        try {
+          regionQuadGeometry.dispose();
+        } catch (err) {
+          log.error('region-darkness shared geometry dispose failed — VRAM may be leaked:', err);
+        }
+      },
+      /** Tear down buf:occlusion + every disc mesh/material (see disposeActive). */
+      disposeOcclusionMask() {
+        allocator.dispose(occlusionMask.rt);
+        for (const entry of occlusionDiscs.values()) {
+          try {
+            entry.material.dispose();
+          } catch (_) {}
+        }
+        occlusionDiscs.clear();
+        occlusionDiscGeometry.dispose();
       },
       /**
        * ORIENTATION SELF-TEST — real pixels, through the real chain.
@@ -3506,6 +5104,332 @@ export async function startVtPanViewer({
         // RGBA16F = 8 bytes/texel. §4.2 budgets ~24MB at 3MP; this is the real number.
         estMB: sceneColor ? +((sceneColor.width * sceneColor.height * 8) / 1048576).toFixed(1) : 0,
       }),
+
+      /** graph/run-frame.js's plan for this viewer's geometry..present stage
+       * range, and what it actually ran last frame — the pass runner's own
+       * proof-of-life for the diagnostics report. */
+      getFramePlanInfo: () => ({
+        available: true,
+        range: { fromStage: 'masks', toStage: 'present' },
+        planned: framePlan.ids,
+        skipped: framePlan.skipped,
+        ranLastFrame: lastFramePlanRan,
+      }),
+
+      /** frame.snapshot's real res:env third, live — for the Diagnostics
+       * report. `status:'future'` here mirrors graph/passes.js's own status
+       * for this pass: res:view/res:scene are not built, so the pass as
+       * declared is not fully live even though this piece genuinely is. */
+      getEnvSnapshotInfo: () => {
+        if (!lastEnvSnapshot) return { available: false, status: 'future' };
+        return {
+          available: true,
+          status: 'future', // graph/passes.js's frame.snapshot — see this file's own header note
+          env: lastEnvSnapshot.env,
+          darknessSource: lastEnvSnapshot.darkness.source,
+          darknessReason: lastEnvSnapshot.darkness.reason,
+          ambientSource: lastEnvSnapshot.ambient?.source ?? null,
+          ambientReason: lastEnvSnapshot.ambient?.reason ?? null,
+          todHourSource: lastEnvSnapshot.todHourSource,
+          notYetBuilt: ['res:view', 'res:scene'],
+        };
+      },
+
+      /** masks.occlusion's real (RADIAL-only) producer state — for the
+       * Diagnostics report. `activeDiscs` counting LESS than `poolSize` is
+       * normal (hidden, not disposed — see occlusionDiscs' own doc); the two
+       * numbers only diverging AT ALL confirms the pool is genuinely being
+       * reconciled, not just growing. */
+      getOcclusionMaskInfo: () => ({
+        available: true,
+        scope: 'RADIAL only — FADE/VISION inert, SURFACE (the roof-over-token default) needs Regions, not built',
+        elevationTable: occlusionMask.elevationTable,
+        visionActive: occlusionMask.visionActive,
+        rt: { width: occlusionMask.rt.width, height: occlusionMask.rt.height },
+        poolSize: occlusionDiscs.size,
+        activeDiscs: [...occlusionDiscs.values()].filter((e) => e.mesh.visible).length,
+      }),
+      /** light.accumulate's point-light (tier-0) producer state — for the
+       * Diagnostics report. `activeLights` counting LESS than `poolSize` is
+       * normal (hidden, not disposed — see lightMeshes' own doc); the two
+       * numbers only diverging AT ALL confirms the pool is genuinely being
+       * reconciled, not just growing. `ambientColors`/`globalLightFloor` are
+       * the LAST-APPLIED values (tracked in runLightAccumulatePass), not a
+       * recomputed guess. `globalLightFloor: null` distinguishes "not active
+       * this frame" (disabled, or outside its darkness window) from "active
+       * but computed to black" (luminosity 0 — a real, if unhelpful, Foundry
+       * default) — collapsing those two would be exactly the lying-instrument
+       * class this project has already paid for once. */
+      getPointLightsInfo: () => {
+        // ONE real, visible light's ACTUAL current uniform values — added
+        // 2026-07-19 to chase the "lights read monochrome" report down to a
+        // measured number instead of a guess (feedback_instruments_must_not_
+        // lie / feedback_plausible_diagnosis_rots). `edgeSoftMarginFraction`
+        // is what actually reaches the shader as uEdgeSoftMargin — if this
+        // is NOT a small fraction of 1 (it should be roughly 0.01-0.25 for
+        // ordinary lights), the soft-edge term is starving the light's own
+        // bright/dim colour almost everywhere, not just at its true edge.
+        let sampleLight = null;
+        // AGGREGATE across every active light (2026-07-19, chasing a report
+        // that removing coloration for colourless lights — tried two ways,
+        // neither touching anything else — took a live scene from "visible,
+        // desaturated" to "fully black"). ONE sampled light can't show
+        // whether that's "most of this scene's lights are colourless" (i.e.
+        // coloration's white wash was carrying real, load-bearing brightness
+        // the illumination channel alone doesn't provide for this scene's
+        // darkness/attenuation settings) or something narrower. `hasColor`
+        // is read off `entry.lastHasColor` (set every frame in
+        // updatePointLightMeshes, diagnostic-only) rather than inferred from
+        // uColorationAlpha, which is unconditional again right now — see
+        // that assignment's own comment for the current (reverted) state.
+        let activeCount = 0;
+        let colorlessCount = 0; // hasColor === false
+        let coloredCount = 0;
+        let colorationAlphaSum = 0;
+        for (const [id, entry] of lightMeshes) {
+          if (!entry.mesh.visible) continue;
+          activeCount++;
+          if (entry.lastHasColor) coloredCount++;
+          else colorlessCount++;
+          colorationAlphaSum += entry.uColorationAlpha.value;
+          if (!sampleLight) {
+            sampleLight = {
+              sourceId: id,
+              radiusPx: entry.mesh.scale.x,
+              uRatio: entry.uRatio.value,
+              uAttenuationEased: entry.uAttenuationEased.value,
+              uExposure: entry.uExposure.value,
+              uEdgeCount: entry.uEdgeCount.value,
+              edgeSoftMarginFraction: entry.uEdgeSoftMargin.value,
+              uColorationAlpha: entry.uColorationAlpha.value,
+              uLightColor: [entry.uLightColor.value.x, entry.uLightColor.value.y, entry.uLightColor.value.z],
+              hasColor: entry.lastHasColor,
+              // PER-LIGHT region-aware ambient (2026-07-19) — what THIS
+              // light's own uBackgroundColor/uDim/uBright ACTUALLY read this
+              // frame, not a recomputed guess. If a light sits inside a
+              // DARKEN region, uBackgroundColor should read noticeably below
+              // the scene-wide ambientColors.background reported alongside
+              // this — if it doesn't, the per-light region lookup isn't
+              // reaching this light (feedback_instruments_must_not_lie).
+              uBackgroundColor: [
+                entry.uBackgroundColor.value.x,
+                entry.uBackgroundColor.value.y,
+                entry.uBackgroundColor.value.z,
+              ],
+              uDimColor: [entry.uDimColor.value.x, entry.uDimColor.value.y, entry.uDimColor.value.z],
+              uBrightColor: [entry.uBrightColor.value.x, entry.uBrightColor.value.y, entry.uBrightColor.value.z],
+            };
+          }
+        }
+        const colorationSummary = {
+          activeCount,
+          coloredCount,
+          colorlessCount,
+          colorlessFraction: activeCount > 0 ? colorlessCount / activeCount : null,
+          meanColorationAlpha: activeCount > 0 ? colorationAlphaSum / activeCount : null,
+        };
+        return {
+          available: true,
+          scope:
+            'Illumination + exposure + per-light/global darkness windows + region-driven per-pixel darkness + ' +
+            'coloration (default "Adaptive Luminance" technique only, MAX-blended not screen-blended). Each ' +
+            "light's REAL colour is now read from source.colorRGB (was misread as undefined→white for every " +
+            'light — the "black and white" root cause, fixed 2026-07-19). A colourless light contributes zero ' +
+            "coloration (uColorationAlpha=0), matching Foundry's isRequired/hasColor gate. colorationSummary " +
+            'below should now show mostly `coloured`; a high colorlessFraction would mean the colour read is ' +
+            'still not landing. No other 12 coloration techniques, no contrast/saturation/shadow adjustments, ' +
+            'no darkness sources, no animations, no elevation occlusion (docs/planning/Light-Parity.md §5)',
+          poolSize: lightMeshes.size,
+          activeLights: [...lightMeshes.values()].filter((e) => e.mesh.visible).length,
+          ambientColors: lastAmbientColors,
+          globalLightFloor: lastGlobalLightFloor,
+          gridSizePixels: lastGridSizePixels,
+          // The darkness-realism lever (MapShine.setDarknessRealism): 0 =
+          // Foundry parity (floor at the scene's darkness colour), 1 = true
+          // dark (floor at black). `ambientColors.background` above already
+          // reflects it — at realism 1 with darkness01 1 it reads ~[0,0,0].
+          darknessRealism01: _darknessRealism01,
+          sampleLight,
+          colorationSummary,
+        };
+      },
+      /** region-darkness's own pool state — for the Diagnostics report.
+       * `activeRegions` should be > 0 whenever the scene has a visible,
+       * non-hidden, elevation-band-matching region with an active "Adjust
+       * Darkness Level" behavior in view (elevation gating landed 2026-07-19
+       * — a region scoped to a different floor no longer appears here at
+       * all, which is correct, not a bug, if you're expecting to see it and
+       * don't: check which floor is currently viewed). `scope` names the
+       * SAME simplifications region-darkness.js's own header documents
+       * (union-not-CSG/no holes, missing cone/ring/line/emanation shapes) —
+       * not a recomputed claim. Overlap resolution and elevation gating are
+       * BOTH fixed as of 2026-07-19 (min-composite; per-floor band filter). */
+      getRegionDarknessInfo: () => {
+        // Added 2026-07-19 while chasing "everything outside the light
+        // radius is perfect pixel black" (the real cause turned out to be
+        // an autoClear bug in light.accumulate's own render sequence, NOT
+        // regions — see runLightAccumulatePass's own header). Kept: this
+        // instrument was genuinely useful for the SEPARATE regions audit
+        // that followed once that bug was fixed and regions could finally
+        // be evaluated for real (elevation gating + overlap resolution,
+        // both corrected the same day — see this function's own scope
+        // string). Reports what EACH active region ACTUALLY computes, using
+        // the SAME applyDarknessAdjustment + mix the shader runs, so a
+        // wrong result shows up as a measured value instead of a guess.
+        //
+        // `geometry` (added 2026-07-19, round 2 of the same chase — the
+        // "one specific room isn't darkening" report): `meshCenter`/
+        // `meshScale` alone were NOT enough to answer "does this region
+        // actually cover world position (x,y)?" — for a rectangle,
+        // `computeShapeMeshBounds` centers the MESH on the shape's own
+        // ORIGIN CORNER (not its true center) and sizes it to the full
+        // diagonal in every direction (a deliberately generous, conservative
+        // bound for POSITIONING the quad, never the true footprint) — reading
+        // `meshCenter` as "the middle of the shape" undersells how far off
+        // that reasoning can be without the real width/height/anchor/rotation
+        // too. `geometry` reports the ACTUAL live uniform values driving the
+        // shader's own containment test THIS frame (whichever ones this
+        // shape's kind has — a rectangle has uOrigin/uSize/uAnchor/
+        // uRotationRad, a ring has uInnerRadius/uOuterRadius, etc.) — reading
+        // straight off the uniforms themselves, not a separately-tracked
+        // shape copy, so it can never drift from what the GPU is really doing.
+        const uDaylight = [uRegionDaylightColor.value.x, uRegionDaylightColor.value.y, uRegionDaylightColor.value.z];
+        const uDarkness = [uRegionDarknessColor.value.x, uRegionDarknessColor.value.y, uRegionDarknessColor.value.z];
+        const regions = [];
+        for (const [key, entry] of regionMeshes) {
+          if (!entry.mesh.visible) continue;
+          const mode = entry.uMode.value;
+          const modifier = entry.uModifier.value;
+          const baseDarkness01 = entry.uBaseDarkness01.value;
+          const adjusted = applyDarknessAdjustment(baseDarkness01, mode, modifier);
+          const resultColor = mixRgb(uDaylight, uDarkness, adjusted);
+          const geometry = {};
+          for (const [uniformName, uniformNode] of Object.entries(entry)) {
+            if (!uniformName.startsWith('u') || uniformName === uniformName.toLowerCase()) continue;
+            if (['uMode', 'uModifier', 'uBaseDarkness01', 'uDaylightColor', 'uDarknessColor'].includes(uniformName))
+              continue;
+            const v = uniformNode?.value;
+            if (v == null) continue;
+            geometry[uniformName] = typeof v === 'object' && 'x' in v && 'y' in v ? [v.x, v.y] : v;
+          }
+          regions.push({
+            key,
+            kind: entry.kind,
+            mode,
+            modifier,
+            baseDarkness01,
+            adjustedDarkness01: adjusted,
+            resultColor,
+            meshCenter: [entry.mesh.position.x, entry.mesh.position.y],
+            meshScale: [entry.mesh.scale.x, entry.mesh.scale.y],
+            geometry,
+          });
+        }
+        return {
+          available: true,
+          scope:
+            'rectangle/ellipse/circle/polygon/cone/ring/line/emanation shapes, hole (subtraction) support — ' +
+            'all built 2026-07-19 (see keyhole-region-shapes-and-holes-build memory). Elevation-band-gated ' +
+            'against the currently viewed floor, and overlaps resolved by MIN (brightest) adjusted value. ' +
+            "NONE of the shape/hole GPU work has been live-verified in a browser before this session's own " +
+            "live checks — region-darkness.js's own header has the full citations.",
+          poolSize: regionMeshes.size,
+          activeRegions: regions.length,
+          // The shared uniforms EVERY region's material actually reads —
+          // if either of these is near [0,0,0], that alone is the bug
+          // (a region overwrites its footprint with mix(daylight,darkness,
+          // adjusted); a zeroed daylight or darkness endpoint reaches black
+          // regardless of `adjusted`'s own value).
+          uDaylight,
+          uDarkness,
+          // Per-region breakdown — look for resultColor near [0,0,0] on a
+          // region whose meshScale is large (a big/generous bound covering
+          // much of the visible frame, per computeShapeMeshBounds' own
+          // "diagonal, not half-diagonal" generous-bound design) — that
+          // combination is what would read as "everything outside the
+          // light radius is black". Use `geometry` (see this function's own
+          // header) to check whether a SPECIFIC world position is actually
+          // inside a shape, not just near its mesh's bounding quad.
+          regions,
+        };
+      },
+      /**
+       * PIXEL-READBACK DIAGNOSTIC (2026-07-19, the region-darkness rendering
+       * audit) — reads the ACTUAL rendered value of EVERY screen-sized
+       * compositor buffer (illum/lit/albedo/coloration/occlusion) at ONE
+       * world position, straight off the GPU, bypassing every CPU-side
+       * computation `getRegionDarknessInfo` reports. Built because that
+       * function proved a region's MATH is correct (right shape, right
+       * coverage, right resultColor) but could NOT answer whether that value
+       * actually reached the screen — two DIFFERENT questions, and
+       * conflating them is exactly the lying-instrument class this project
+       * has paid for before (feedback_instruments_must_not_lie). Async —
+       * WebGPU pixel readback has no synchronous path.
+       *
+       * World→pixel uses `worldToNdc`/`ndcToPixel` (scene/world-quad.js),
+       * BOTH Node-tested there before this call trusts them — a NEW
+       * world→texel mapping is exactly this project's own recurring Y-flip
+       * bug class, so the pure math was verified in isolation first rather
+       * than assumed correct here. Single-point, no on-screen marker — see
+       * `probePixels` for the multi-point, marker-drawing version.
+       *
+       * `buffers.{illum,lit,albedo,coloration}` are `HalfFloatType` targets
+       * decoded via `decodeHalfFloatRgba`; `buffers.occlusion` is the ONE
+       * `UnsignedByteType` target and is decoded via `decodeByteRgba` instead
+       * (see that function's own header — same 0..1-ish shape either way, so
+       * every buffer in the report reads uniformly regardless of its
+       * underlying GPU format).
+       *
+       * @param {number} worldX @param {number} worldY
+       * @returns {Promise<{worldX:number, worldY:number, pixel:{x:number,y:number}|null,
+       *   buffers: {illum:object, lit:object, albedo:object, coloration:object,
+       *   occlusion:object}|null, onScreen: boolean}>}
+       */
+      sampleIllumPixel: async (worldX, worldY) => sampleOnePixel(worldX, worldY),
+      /**
+       * PROBE UP TO 3 WORLD POSITIONS AT ONCE (2026-07-19, author-requested)
+       * — runs the SAME illum/lit/albedo/coloration/occlusion readback as
+       * `sampleIllumPixel` for each point, numbered 1..N in call order, AND
+       * draws a thin crosshair + thin circle + a chunkier numbered badge on
+       * screen for every ON-SCREEN point, for 30 seconds — so a screenshot
+       * taken right after this call can be matched, point-for-point, against
+       * the returned report ("point 1" in the JSON is the "1" badge in the
+       * screenshot). See `drawProbeMarkers`'s own header for the marker
+       * styling rationale (thin/minimal so the underlying map stays legible
+       * under them; the number alone is deliberately chunkier/solid).
+       *
+       * Point 2+ also carries `deltaFromPrev` (see `diffProbeBuffers`'s own
+       * header) — an automatic diff against the PREVIOUS point in the list,
+       * every buffer/channel, with the single biggest jump called out. Place
+       * points straddling a suspected seam (just outside / just inside a
+       * light, a region edge, an occlusion boundary) and read `deltaFromPrev`
+       * first before eyeballing the full buffer dump.
+       *
+       * @param {Array<{x:number, y:number}>} points - 1..3 world positions;
+       *   a 4th+ point is silently dropped (3 is the deliberate cap, matching
+       *   the marker colour palette — see `PROBE_MARKER_COLORS`).
+       * @returns {Promise<Array<{index:number, worldX:number, worldY:number,
+       *   pixel:{x:number,y:number}|null, onScreen:boolean, buffers:object|null,
+       *   deltaFromPrev:{perBuffer:object, biggestJump:object}|null}>>}
+       */
+      probePixels: async (points) => runProbeOnPoints(points),
+      /**
+       * THE INTERACTIVE FLOW: arm (see `armInteractivePixelProbe`'s own
+       * header for the full input-model reasoning), collect up to
+       * `maxPoints` clicks, then run the SAME 5-buffer readback + delta +
+       * marker draw `probePixels` does for each collected point. This is
+       * what the debug-panel "Pixel Probe" action button calls — click the
+       * button, then click up to 3 spots on the map.
+       * @param {number} [maxPoints=3]
+       * @returns {Promise<Array<{index:number, worldX:number, worldY:number,
+       *   pixel:{x:number,y:number}|null, onScreen:boolean, buffers:object|null,
+       *   deltaFromPrev:{perBuffer:object, biggestJump:object}|null}>>}
+       */
+      runInteractivePixelProbe: async (maxPoints = 3) => {
+        const points = await armInteractivePixelProbe(maxPoints);
+        if (!points.length) return [];
+        return runProbeOnPoints(points);
+      },
       onKeyDown,
       onKeyUp,
       clearHeldKeys,
@@ -3737,6 +5661,32 @@ export async function startVtPanViewer({
           // Keyhole's law is IN THE PATH rather than merely imported. If
           // `throughAllocator` is ever false, the law has been routed around.
           sceneColor: _active?.getSceneColorInfo?.() ?? { allocated: false },
+          // THE PASS RUNNER (2026-07-18) — proof `renderFrame` is graph-driven,
+          // not hardcoded. `ranThisFrame` is what `runPassPlan` actually
+          // invoked on the most recent frame; `skipped` names every pass in
+          // range that is NOT live yet (seam/future), with its status, so a
+          // pass that should have started running (a status flip in
+          // passes.js with no code behind it) shows up here as a thrown error
+          // instead of silently staying in `skipped`.
+          framePlan: _active?.getFramePlanInfo?.() ?? { available: false },
+          // frame.snapshot's res:env third, live every frame — time/sun/
+          // darkness as measured facts. `status:'future'` is honest: res:view/
+          // res:scene are not built, so the DECLARED pass is not fully live
+          // even though this reading genuinely is.
+          envSnapshot: _active?.getEnvSnapshotInfo?.() ?? { available: false },
+          // masks.occlusion (2026-07-18) — see graph/passes.js's own note for
+          // the RADIAL-only scope. `elevationTable` should read something
+          // other than [-Infinity] whenever an occludable token is on screen.
+          occlusion: _active?.getOcclusionMaskInfo?.() ?? { available: false },
+          // light.accumulate's point-light rung (2026-07-18) — see
+          // graph/passes.js's own note for the illumination-only scope.
+          // `activeLights` should be > 0 whenever the scene has torches/
+          // lamps within the current view.
+          pointLights: _active?.getPointLightsInfo?.() ?? { available: false },
+          // region-driven darkness (2026-07-19) — see graph/passes.js's own
+          // note. `activeRegions` should be > 0 whenever a darkness-
+          // adjusting region is on screen.
+          regionDarkness: _active?.getRegionDarknessInfo?.() ?? { available: false },
           // SHADERS (docs/planning/Shaders.md).  is the fork
           // in the road, not a detail: WITH it, compileAsync hands work to driver
           // threads; WITHOUT it, compileAsync resolves instantly having done
@@ -4020,6 +5970,17 @@ export async function startVtPanViewer({
                 ? Math.round((frameGapTimes.reduce((a, b) => a + b, 0) / frameGapTimes.length) * 10) / 10
                 : null,
             frameGapMaxMs: frameGapTimes.length > 0 ? Math.round(Math.max(...frameGapTimes) * 10) / 10 : null,
+            // PERCENTILES (2026-07-18) — added for the infrastructure menu's
+            // baseline-capture report (Track 2, item 5): avg/max alone hide
+            // whether a session was smooth-with-one-spike or consistently
+            // choppy. Computed from a SORTED COPY of the same rolling window
+            // avg/max already read — no new sampling, no new clock (this
+            // report only runs on demand, not per frame, so sorting ≤300
+            // numbers here is free).
+            frameGapP50Ms: percentileMs(frameGapTimes, 0.5),
+            frameGapP95Ms: percentileMs(frameGapTimes, 0.95),
+            frameGapP99Ms: percentileMs(frameGapTimes, 0.99),
+            frameGapSampleCount: frameGapTimes.length,
             hitchThresholdMs: HITCH_THRESHOLD_MS,
             hitchCount: hitchLog.length,
             recentHitches: hitchLog.slice(-10),
@@ -4144,6 +6105,41 @@ export async function setVtPanViewerDisplayLayer(name) {
 export async function setVtPanViewerIsolateItem(id) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.setIsolateItem(id);
+}
+
+/**
+ * Console-callable wrapper for `_active.sampleIllumPixel` — see that
+ * function's own header for what it does and why (the region-darkness
+ * rendering audit, 2026-07-19). Call from the browser console as
+ * `await MapShine.sampleIllumPixel(worldX, worldY)`.
+ * @param {number} worldX @param {number} worldY
+ */
+export async function sampleVtPanViewerIllumPixel(worldX, worldY) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.sampleIllumPixel(worldX, worldY);
+}
+
+/**
+ * Console-callable wrapper for `_active.probePixels` — see that function's
+ * own header for the full reasoning. Call as
+ * `await MapShine.probePixels([{x, y}, {x, y}, {x, y}])`.
+ * @param {Array<{x:number, y:number}>} points - 1..3 world positions.
+ */
+export async function probeVtPanViewerPixels(points) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.probePixels(points);
+}
+
+/**
+ * Console/debug-panel-callable wrapper for `_active.runInteractivePixelProbe`
+ * — see that function's own header (and `armInteractivePixelProbe`'s) for
+ * the full reasoning. Arms click-to-set-point mode and resolves once up to
+ * `maxPoints` clicks have landed (or after a 90s timeout).
+ * @param {number} [maxPoints=3]
+ */
+export async function runInteractiveVtPanViewerPixelProbe(maxPoints = 3) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.runInteractivePixelProbe(maxPoints);
 }
 
 /** The current draw list's ids — what the isolate dropdown is built from. */

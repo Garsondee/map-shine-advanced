@@ -6,6 +6,7 @@
  */
 import { run as runOrientationProbe } from './orientation-probe.test.mjs';
 import { run as runFlightRecorder } from './flight-recorder.test.mjs';
+import { run as runPixelProbe } from './pixel-probe.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -26,6 +27,7 @@ const t = {
 const suites = [
   ['orientation-probe', runOrientationProbe],
   ['flight-recorder', runFlightRecorder],
+  ['pixel-probe', runPixelProbe],
 ];
 
 for (const [name, fn] of suites) {

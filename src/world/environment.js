@@ -56,6 +56,23 @@ export const DEFAULT_WIND = Object.freeze({
 });
 
 /**
+ * Neutral ambient palette — a light-grey day, a cool-dark night, a white
+ * brightest. The LIVE path always supplies Foundry's real palette
+ * (`foundry/scene-environment.js#readSceneAmbient`), so this default only
+ * governs a snapshot built with no ambient input (tests, a pre-scene frame).
+ * It intentionally resembles Foundry's own fallback so a snapshot built
+ * without a scene still reads plausibly, but the Foundry values are NOT
+ * duplicated as authority — they enter as an input, per the one-way rule.
+ * Endpoints are sRGB 0..1 (the space `canvas.colors` stores; the light pass
+ * converts as needed).
+ */
+export const DEFAULT_AMBIENT = Object.freeze({
+  daylight: Object.freeze([0.93, 0.93, 0.93]),
+  darkness: Object.freeze([0.14, 0.14, 0.28]),
+  brightest: Object.freeze([1, 1, 1]),
+});
+
+/**
  * Build the frame's environment snapshot. Pure: same inputs → same value.
  * Everything is normalised, clamped and DEEP-FROZEN — a consumer cannot
  * scribble on the call sheet (V2's params blackboard, 938 keys, 119 external
@@ -67,10 +84,21 @@ export const DEFAULT_WIND = Object.freeze({
  * @param {object} [inputs.weather] - weather owner's state (shape of DEFAULT_WEATHER).
  * @param {object} [inputs.wind] - wind owner's state (shape of DEFAULT_WIND).
  * @param {number} [inputs.darknessInput] - Foundry's darknessLevel, 0..1, read via the adapter.
+ * @param {{daylight:number[], darkness:number[], brightest:number[]}} [inputs.ambientInput] -
+ *   Foundry's ambient palette endpoints (sRGB 0..1), read via the adapter. The
+ *   light pass mixes `background = mix(daylight, darkness, darknessLevel)` from these.
  * @param {import('./sun.js').SunConfig} [inputs.sunConfig]
  * @returns {Readonly<object>} the env snapshot.
  */
-export function buildEnvSnapshot({ time, todHour, weather, wind, darknessInput = 0, sunConfig = DEFAULT_SUN_CONFIG }) {
+export function buildEnvSnapshot({
+  time,
+  todHour,
+  weather,
+  wind,
+  darknessInput = 0,
+  ambientInput = DEFAULT_AMBIENT,
+  sunConfig = DEFAULT_SUN_CONFIG,
+}) {
   if (!time || !Number.isFinite(time.tMs)) {
     // Loud, not silent: an env without a clock is a programming error upstream,
     // and 2,670 swallowed errors is how V2 kept problems invisible.
@@ -89,9 +117,18 @@ export function buildEnvSnapshot({ time, todHour, weather, wind, darknessInput =
   const nightDarkness = 1 - sun.dayFactor01;
   const darkness01 = clamp01(Math.max(nightDarkness, clamp01(darknessInput)));
 
+  const amb = ambientInput ?? DEFAULT_AMBIENT;
+
   return deepFreeze({
     time: { frame: time.frame, tMs: time.tMs, dtSec: time.dtSec, todHour: hour },
     sun,
+    // Foundry's ambient endpoints (sRGB 0..1). Carried through so the light
+    // pass reproduces Foundry's own ladder rather than re-reading a global.
+    ambient: {
+      daylight: clampRgb(amb.daylight, DEFAULT_AMBIENT.daylight),
+      darkness: clampRgb(amb.darkness, DEFAULT_AMBIENT.darkness),
+      brightest: clampRgb(amb.brightest, DEFAULT_AMBIENT.brightest),
+    },
     weather: {
       preset: String(w.preset),
       precip01: clamp01(w.precip01),
@@ -111,6 +148,17 @@ export function buildEnvSnapshot({ time, todHour, weather, wind, darknessInput =
 function clamp01(x) {
   const n = Number(x);
   return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
+}
+
+/**
+ * Clamp an rgb triple into [0,1]³, falling back to `fallback` if it is not a
+ * usable triple. The adapter already validates the live path; this is the
+ * snapshot's own belt so a malformed input can never reach a shader uniform.
+ * @param {number[]} rgb @param {readonly number[]} fallback @returns {[number,number,number]}
+ */
+function clampRgb(rgb, fallback) {
+  if (!Array.isArray(rgb) || rgb.length < 3) return [fallback[0], fallback[1], fallback[2]];
+  return [clamp01(rgb[0]), clamp01(rgb[1]), clamp01(rgb[2])];
 }
 
 /** Freeze an object tree so the call sheet is genuinely read-only. */

@@ -94,6 +94,30 @@ export function installDebugPanel(MapShine) {
   }
 
   /**
+   * Re-sync every registered select's DISPLAYED value against its live
+   * `getValue()`, without waiting for the author to open the dropdown.
+   *
+   * WHY THIS EXISTS (2026-07-19, author-reported): a select's `fill()` (the
+   * closure that reads `getValue()` and paints it) only ran at REGISTRATION
+   * time and again on `mousedown` (see renderButtons' own comment: "re-read
+   * on open"). Most controls — including "Renderer", whose `getValue()`
+   * reads `environmentRenderable`, a scene-load-dependent fact — are
+   * registered during boot, BEFORE the interface seam / art suppression has
+   * actually settled. So the panel's FIRST paint showed whatever was true at
+   * that early instant (often "Foundry", since MSA hadn't suppressed PIXI's
+   * art yet), and nothing ever repainted it — the label went stale the
+   * moment reality changed underneath it, exactly the "instrument that lies"
+   * class this project treats as a real bug (feedback_instruments_must_not_
+   * lie), not a cosmetic one. Call this after any event that could change a
+   * control's underlying state (scene load, floor switch, a lever toggled
+   * via console) — `syncInterfaceSeam` in boot.js calls it after every
+   * `applyArtSuppression()`/`restoreFoundryArt()` attempt, seam settled or not.
+   */
+  function refreshControls() {
+    if (listEl) renderButtons();
+  }
+
+  /**
    * A PURE READOUT. Reads state, returns data, **changes nothing**.
    *
    * ⚠ THE CONTRACT, and it is load-bearing: the flight recorder runs EVERY
@@ -583,6 +607,7 @@ export function installDebugPanel(MapShine) {
     registerReport,
     registerAction,
     registerSelect,
+    refreshControls,
     runReport,
     copyToClipboard,
     attachPanel,

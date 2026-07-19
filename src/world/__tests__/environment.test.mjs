@@ -3,7 +3,7 @@
  * it is FROZEN (nobody scribbles on it), time flows one way into it, and
  * darkness has exactly one derivation with the max(night, GM) authority rule.
  */
-import { buildEnvSnapshot, DEFAULT_WEATHER, DEFAULT_WIND } from '../environment.js';
+import { buildEnvSnapshot, DEFAULT_WEATHER, DEFAULT_WIND, DEFAULT_AMBIENT } from '../environment.js';
 
 const time = (over = {}) => ({ frame: 1, tMs: 1000, dtSec: 0.016, ...over });
 
@@ -12,13 +12,16 @@ export function run(t) {
   {
     const env = buildEnvSnapshot({ time: time(), todHour: 12 });
     t.ok(
-      'env carries time/sun/weather/wind/darkness',
-      ['time', 'sun', 'weather', 'wind', 'darkness01'].every((k) => k in env)
+      'env carries time/sun/weather/wind/darkness/ambient',
+      ['time', 'sun', 'weather', 'wind', 'darkness01', 'ambient'].every((k) => k in env)
     );
     t.ok('env is frozen', Object.isFrozen(env));
     t.ok(
-      '...deeply (weather too)',
-      Object.isFrozen(env.weather) && Object.isFrozen(env.sun) && Object.isFrozen(env.wind)
+      '...deeply (weather + ambient too)',
+      Object.isFrozen(env.weather) &&
+        Object.isFrozen(env.sun) &&
+        Object.isFrozen(env.wind) &&
+        Object.isFrozen(env.ambient)
     );
     t.ok('defaults are clear windless noon', env.weather.preset === 'clear' && env.wind.speed01 === 0);
     t.ok('time.todHour rides the snapshot', env.time.todHour === 12);
@@ -44,6 +47,40 @@ export function run(t) {
 
     const both = buildEnvSnapshot({ time: time(), todHour: 0, darknessInput: 0.3 });
     t.ok('the darker authority wins (max, never dilution)', both.darkness01 === 1);
+  }
+
+  // ---- ambient palette: passed through, defaulted, and clamped ---------------
+  {
+    const noAmb = buildEnvSnapshot({ time: time(), todHour: 12 });
+    t.ok(
+      'no ambient input => DEFAULT_AMBIENT endpoints',
+      noAmb.ambient.daylight[0] === DEFAULT_AMBIENT.daylight[0] &&
+        noAmb.ambient.darkness[2] === DEFAULT_AMBIENT.darkness[2]
+    );
+
+    const amb = buildEnvSnapshot({
+      time: time(),
+      todHour: 12,
+      ambientInput: { daylight: [0.8, 0.7, 0.6], darkness: [0.1, 0.1, 0.2], brightest: [1, 1, 1] },
+    });
+    t.ok('ambient endpoints pass through', amb.ambient.daylight[1] === 0.7 && amb.ambient.darkness[0] === 0.1);
+
+    const clamped = buildEnvSnapshot({
+      time: time(),
+      todHour: 12,
+      ambientInput: { daylight: [2, -1, 0.5], darkness: [0.1, 0.1, 0.2], brightest: [1, 1, 1] },
+    });
+    t.ok(
+      'out-of-range ambient channels clamp to [0,1]',
+      clamped.ambient.daylight[0] === 1 && clamped.ambient.daylight[1] === 0
+    );
+
+    const malformed = buildEnvSnapshot({ time: time(), todHour: 12, ambientInput: { daylight: [1], darkness: null } });
+    t.ok(
+      'a malformed endpoint falls back to DEFAULT_AMBIENT, never NaN into a uniform',
+      malformed.ambient.daylight[0] === DEFAULT_AMBIENT.daylight[0] &&
+        malformed.ambient.darkness[0] === DEFAULT_AMBIENT.darkness[0]
+    );
   }
 
   // ---- input hygiene: clamped, normalised, loud on programmer error -----------
@@ -77,4 +114,5 @@ export function run(t) {
   // the exported defaults are themselves frozen vocabulary
   t.ok('DEFAULT_WEATHER frozen', Object.isFrozen(DEFAULT_WEATHER));
   t.ok('DEFAULT_WIND frozen', Object.isFrozen(DEFAULT_WIND));
+  t.ok('DEFAULT_AMBIENT frozen', Object.isFrozen(DEFAULT_AMBIENT) && Object.isFrozen(DEFAULT_AMBIENT.daylight));
 }

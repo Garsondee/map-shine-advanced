@@ -73,6 +73,24 @@ jobs:
         uses: actions/checkout@v3
 
 
+      # THE RELEASE GATE (added 2026-07-18 — Keyhole.md's infrastructure menu,
+      # item 10). Found 2026-07-17: this workflow ran zero tests and would
+      # happily package a broken build. `npm run verify` is the exact command
+      # every session already runs before calling anything done (lint, format,
+      # structure walls, the full Node suite) — running it here means a
+      # release can never ship something the project's own gate would reject.
+      - name: Set Up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Verification Suite
+        run: npm run verify
+
+
       # Extract version embedded in the tag.
       # This step expects the tag to be one of the following formats:
       #   - "v<major>.<minor>.<patch>" (e.g., "v1.2.3")
@@ -106,6 +124,16 @@ jobs:
       # Create a "module.zip" archive containing all the module's required files.
       # If you have other directories or files that will need to be added to
       # your packaged module, add them here.
+      #
+      # `scripts/` -> `src/` (2026-07-18): Keyhole Stage 0 (docs/planning/
+      # Keyhole.md §5) renamed the old runtime root `scripts/` to `legacy/` and
+      # made `src/` (esmodules: ["src/boot.js"] in module.json) the real,
+      # shipping source tree. This workflow was never updated when that
+      # happened, so every release since Stage 0 packaged a module.zip with NO
+      # runtime code at all — module.json pointing at a file the archive
+      # doesn't contain. `legacy/` is deliberately NOT zipped: it is quarantine
+      # (Keyhole.md §5), never imported by src/, and would roughly double the
+      # archive for code that cannot run.
       - name: Create Module Archive
         run: |
           # Note that `zip` will only emit warnings when a file or directory
@@ -120,9 +148,8 @@ jobs:
             README.md                            \
             LICENSE                              \
             templates                            \
-            scripts/                             \
+            src/                                 \
             styles/                              \
-            packs/                               \
             languages/                            \
             assets/                              \
             data/

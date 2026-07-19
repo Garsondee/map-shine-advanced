@@ -187,7 +187,7 @@ function levelDocsOf(sceneDoc) {
  *
  * @param {object|null} sceneDoc - see `getActiveSceneBackground`'s param doc.
  * @param {(path:string)=>string} [getRouteFn] - forwarded to resolveAssetUrl (testability).
- * @returns {{ok:true, floors:Array<{index:number,id:string,url:string,name:string,elevationBottom:number|null,visibilityLevelIds:string[]}>, skipped:Array<{name:string,reason:string}>}
+ * @returns {{ok:true, floors:Array<{index:number,id:string,url:string,name:string,elevationBottom:number|null,elevationTop:number|null,visibilityLevelIds:string[]}>, skipped:Array<{name:string,reason:string}>}
  *          |{ok:false, error:string}}
  */
 export function getActiveSceneFloors(sceneDoc, getRouteFn) {
@@ -220,6 +220,13 @@ export function getActiveSceneFloors(sceneDoc, getRouteFn) {
         url: resolveAssetUrl(lvl.background.src, getRouteFn),
         name: lvl.name || `Level ${index}`,
         elevationBottom: lvl.elevation?.bottom ?? null,
+        // elevationTop (2026-07-19, added for region-darkness elevation
+        // gating): `Level.elevation.top` is a real, separate field —
+        // schema default 20, `common/documents/level.mjs` — not inferred
+        // from an adjacent floor's own bottom. `null` reads as Foundry's
+        // own "+Infinity" convention (that field's doc comment, same file),
+        // matching how `elevationBottom` already treats a missing value.
+        elevationTop: lvl.elevation?.top ?? null,
         visibilityLevelIds: Array.from(lvl.visibility?.levels ?? []),
       })),
       skipped,
@@ -237,6 +244,7 @@ export function getActiveSceneFloors(sceneDoc, getRouteFn) {
           url: legacyBg.url,
           name: legacyBg.name,
           elevationBottom: null,
+          elevationTop: null, // unrestricted — the single-floor fallback, no Level document to read a band from
           visibilityLevelIds: [],
         },
       ],

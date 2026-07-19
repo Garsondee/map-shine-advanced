@@ -79,3 +79,44 @@ export {
 // (Scene#unview(), the active scene being deleted), which canvasInit/
 // canvasReady alone can never see.
 export { registerCanvasTearDownWatchdog, isOrphanedTeardown } from './canvas-lifecycle.js';
+
+// THE SCENE-ENVIRONMENT READER — feeds world/environment.js#buildEnvSnapshot's
+// `darknessInput` + `ambientInput`; the one place canvas.scene.environment
+// .darknessLevel and the canvas.colors ambient palette are read.
+export {
+  readSceneDarkness,
+  deriveDarkness,
+  readSceneAmbient,
+  deriveAmbient,
+  FOUNDRY_FALLBACK_AMBIENT,
+} from './scene-environment.js';
+
+// THE LIGHT-SOURCE READER — feeds light.accumulate's point-light illumination
+// rung; the one place canvas.effects.lightSources is read. Also the scene's
+// own Global Illumination config (canvas.scene.environment.globalLight) —
+// verified against source to need separate handling from a point light (no
+// wall-clipped circular geometry), so it raises the ambient FLOOR instead of
+// joining the mesh pool — see scene-lights.js's own header.
+export {
+  readActiveLightSources,
+  deriveLightSnapshot,
+  readGlobalLightConfig,
+  deriveGlobalLightConfig,
+} from './scene-lights.js';
+
+// THE REGION READER — feeds effects/lighting/region-darkness.js's per-point
+// darkness adjustment; the one place canvas.scene.regions (+ each region's
+// own "Adjust Darkness Level" behavior) is read. `readSuppressWeatherStub` is
+// a deliberate, documented no-op — see scene-regions.js's own header.
+export { readActiveDarknessRegions, deriveRegionDarknessAdjuster, readSuppressWeatherStub } from './scene-regions.js';
+
+// GRID-GEOMETRY READERS — feeds the masks.occlusion producer's RADIAL channel
+// (distancePixels) and the point-light soft-edge margin (gridSizePixels); the
+// one place canvas.dimensions.distancePixels / canvas.grid.size are read.
+export {
+  readGridDistancePixels,
+  deriveDistancePixels,
+  readGridSizePixels,
+  deriveGridSizePixels,
+  computeTokenOcclusionRadiusPx,
+} from './scene-occlusion-sources.js';

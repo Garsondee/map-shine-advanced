@@ -111,7 +111,21 @@ export function run(t) {
       res.floors[0].index === 0 && res.floors[1].index === 1 && res.floors[2].index === 2
     );
     ok('getActiveSceneFloors: elevationBottom is passed through', res.floors[0].elevationBottom === -10);
+    ok(
+      'getActiveSceneFloors: missing elevation.top reads as null (Foundry\'s own "+Infinity" convention)',
+      res.floors[0].elevationTop === null
+    );
     ok('getActiveSceneFloors: nothing skipped in the clean case', res.skipped.length === 0);
+  }
+
+  // --- getActiveSceneFloors: elevationTop passes through when authored -------
+  {
+    const sceneDoc = {
+      name: 'Banded Manor',
+      levels: [{ name: 'Downstairs', elevation: { bottom: 0, top: 10 }, background: { src: 'x/down.webp' } }],
+    };
+    const res = getActiveSceneFloors(sceneDoc);
+    ok('getActiveSceneFloors: elevationTop is passed through when set', res.floors[0].elevationTop === 10);
   }
 
   // --- getActiveSceneFloors: carries id + visibilityLevelIds (the raw

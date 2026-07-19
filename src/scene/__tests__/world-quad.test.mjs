@@ -14,6 +14,9 @@
 import {
   computeCameraFrustum,
   worldToNdc,
+  ndcToWorld,
+  clientToNdc,
+  ndcToPixel,
   QUAD_UVS,
   QUAD_INDICES,
   buildQuadPositions,
@@ -80,6 +83,129 @@ export function run(t) {
     const topEdgeNdc = worldToNdc(c0, { minX: 0, minY: 0, maxX: 200, maxY: 200 });
     const bottomEdgeNdc = worldToNdc(corners[3], { minX: 0, minY: 0, maxX: 200, maxY: 200 });
     ok('chain: the v=0 edge lands ABOVE the v=1 edge on screen (NOT upside-down)', topEdgeNdc.y > bottomEdgeNdc.y);
+  }
+
+  // --- ndcToPixel: the pixel-readback diagnostic's own world→texel mapping,
+  // same orientation discipline as the chain above (row 0 = screen top) -----
+  {
+    ok(
+      'ndc (-1,+1) [top-left] -> pixel (0,0)',
+      (() => {
+        const p = ndcToPixel({ x: -1, y: 1 }, 200, 100);
+        return p.x === 0 && p.y === 0;
+      })()
+    );
+    ok(
+      'ndc (+1,-1) [bottom-right] -> pixel (width-1,height-1)',
+      (() => {
+        const p = ndcToPixel({ x: 1, y: -1 }, 200, 100);
+        return p.x === 199 && p.y === 99;
+      })()
+    );
+    ok(
+      'ndc (0,0) [centre] -> pixel (width/2,height/2)',
+      (() => {
+        const p = ndcToPixel({ x: 0, y: 0 }, 200, 100);
+        return p.x === 100 && p.y === 50;
+      })()
+    );
+    ok(
+      'increasing NDC y (moving toward screen top) DECREASES pixel y (row 0 is the top row)',
+      ndcToPixel({ x: 0, y: 0.8 }, 200, 100).y < ndcToPixel({ x: 0, y: -0.8 }, 200, 100).y
+    );
+    ok(
+      'an off-screen NDC clamps into the target instead of going negative/overflowing',
+      (() => {
+        const p = ndcToPixel({ x: -3, y: 5 }, 200, 100);
+        return p.x === 0 && p.y === 0;
+      })()
+    );
+    ok(
+      'an off-screen NDC clamps at the high end too',
+      (() => {
+        const p = ndcToPixel({ x: 3, y: -5 }, 200, 100);
+        return p.x === 199 && p.y === 99;
+      })()
+    );
+  }
+
+  // --- ndcToWorld: the exact inverse of worldToNdc — the interactive pixel
+  // probe's click→world chain, second half (clientToNdc is the first) -------
+  {
+    const rect = { minX: 100, minY: 200, maxX: 1100, maxY: 700 };
+    // Round-trip: every corner and the centre must come back byte-identical
+    // (within fp epsilon) after worldToNdc -> ndcToWorld. The cleanest
+    // possible check for an algebraic inverse — no independent re-derivation
+    // to get wrong.
+    const points = [
+      { x: 100, y: 200 },
+      { x: 1100, y: 200 },
+      { x: 1100, y: 700 },
+      { x: 100, y: 700 },
+      { x: 600, y: 450 },
+      { x: 350, y: 625 },
+    ];
+    let mismatches = 0;
+    for (const p of points) {
+      const back = ndcToWorld(worldToNdc(p, rect), rect);
+      if (!near(back.x, p.x) || !near(back.y, p.y)) mismatches++;
+    }
+    ok('ndcToWorld exactly inverts worldToNdc for every corner + interior point', mismatches === 0);
+    ok(
+      'ndcToWorld(-1,+1) [top-left NDC] -> the worldRect minX,minY corner',
+      (() => {
+        const p = ndcToWorld({ x: -1, y: 1 }, rect);
+        return near(p.x, 100) && near(p.y, 200);
+      })()
+    );
+    ok(
+      'ndcToWorld(+1,-1) [bottom-right NDC] -> the worldRect maxX,maxY corner',
+      (() => {
+        const p = ndcToWorld({ x: 1, y: -1 }, rect);
+        return near(p.x, 1100) && near(p.y, 700);
+      })()
+    );
+  }
+
+  // --- clientToNdc: viewport click coordinates -> NDC -----------------------
+  {
+    const rect = { left: 50, top: 20, width: 800, height: 500 };
+    ok(
+      'a click on the canvas top-left corner -> NDC (-1,+1)',
+      (() => {
+        const ndc = clientToNdc(50, 20, rect);
+        return near(ndc.x, -1) && near(ndc.y, 1);
+      })()
+    );
+    ok(
+      'a click on the canvas bottom-right corner -> NDC (+1,-1)',
+      (() => {
+        const ndc = clientToNdc(850, 520, rect);
+        return near(ndc.x, 1) && near(ndc.y, -1);
+      })()
+    );
+    ok(
+      'a click at the canvas centre -> NDC (0,0)',
+      (() => {
+        const ndc = clientToNdc(450, 270, rect);
+        return near(ndc.x, 0) && near(ndc.y, 0);
+      })()
+    );
+    ok(
+      'a zero-size rect never divides by zero (reads as NDC 0,0 top-left-ish, never NaN)',
+      (() => {
+        const ndc = clientToNdc(10, 10, { left: 0, top: 0, width: 0, height: 0 });
+        return Number.isFinite(ndc.x) && Number.isFinite(ndc.y);
+      })()
+    );
+    // Full chain: a click through clientToNdc + ndcToWorld must land on the
+    // SAME world point worldToNdc + the forward canvas math would place it —
+    // i.e. clicking the canvas centre lands at the worldRect's own centre.
+    {
+      const worldRect = { minX: 5000, minY: 8000, maxX: 6000, maxY: 9000 };
+      const world = ndcToWorld(clientToNdc(450, 270, rect), worldRect);
+      ok('full click chain: canvas centre -> worldRect centre', near(world.x, 5500) && near(world.y, 8500));
+    }
   }
 
   // --- quad buffers --------------------------------------------------------

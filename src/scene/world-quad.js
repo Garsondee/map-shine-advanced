@@ -82,12 +82,80 @@ export function worldToNdc(point, worldRect) {
 }
 
 /**
+ * The EXACT algebraic inverse of {@link worldToNdc} — NDC → world point.
+ * Built for the interactive pixel probe (2026-07-19, author: "I want to
+ * click on the screen and set the points"): a click needs to go the
+ * OPPOSITE direction every other mapping in this module goes. Node-tested
+ * as a round-trip against `worldToNdc` itself — the cleanest possible check
+ * for an inverse function, and this module's own doctrine (Y-flip is a
+ * recurring bug class here) says prove it before a browser is involved.
+ *
+ * @param {{x:number, y:number}} ndc
+ * @param {{minX:number, minY:number, maxX:number, maxY:number}} worldRect
+ * @returns {{x:number, y:number}}
+ */
+export function ndcToWorld(ndc, worldRect) {
+  const f = computeCameraFrustum(worldRect);
+  return {
+    x: f.left + ((ndc.x + 1) / 2) * (f.right - f.left),
+    // The exact inverse of worldToNdc's own negation — see that function's
+    // comment for the forward direction this undoes.
+    y: f.top + ((1 - ndc.y) / 2) * (f.bottom - f.top),
+  };
+}
+
+/**
+ * A mouse/pointer event's CLIENT (viewport) coordinates → NDC, given the
+ * canvas element's own `getBoundingClientRect()` — the first half of the
+ * interactive pixel probe's click→world chain (`ndcToWorld` above is the
+ * second half). Pure (`rect` is a plain `{left,top,width,height}`, not a
+ * live DOMRect) so the click math is Node-tested before it ever meets a
+ * real click.
+ *
+ * @param {number} clientX @param {number} clientY
+ * @param {{left:number, top:number, width:number, height:number}} rect
+ * @returns {{x:number, y:number}} NDC — off-screen (outside the canvas
+ *   rect) values pass through un-clamped, same convention as `worldToNdc`.
+ */
+export function clientToNdc(clientX, clientY, rect) {
+  const xFrac = rect.width > 0 ? (clientX - rect.left) / rect.width : 0;
+  const yFrac = rect.height > 0 ? (clientY - rect.top) / rect.height : 0;
+  return { x: xFrac * 2 - 1, y: 1 - yFrac * 2 };
+}
+
+/**
  * UVs for a quad, matching {@link computeQuadCorners}'s (0,0),(1,0),(1,1),(0,1)
  * corner order. `uv=(0,0)` pairs with the corner at the texture's own top-left,
  * and v=0 is the image's top row — so an unrotated quad's minY corner samples the
  * image's top row, which is what "not upside-down" means here.
  */
 export const QUAD_UVS = Object.freeze([0, 0, 1, 0, 1, 1, 0, 1]);
+
+/**
+ * NDC → integer pixel coordinates in a TOP-LEFT-origin render target — the
+ * SAME origin `describeSceneColor`'s buffers use and this module's own "row 0
+ * = screen top" rule (`worldToNdc`'s own doc: NDC +1 IS the screen top).
+ * Built for a live pixel-readback diagnostic (region-darkness rendering
+ * audit, 2026-07-19: "is a region ACTUALLY painting this exact world pixel,
+ * or only computing the right value on the CPU?") — Node-tested here, before
+ * trusting it against a live `readRenderTargetPixelsAsync` call, per this
+ * module's own "Y-flip is a recurring bug class, verify before a browser is
+ * involved" doctrine.
+ *
+ * @param {{x:number, y:number}} ndc - each in [-1,1] when on screen (off-screen values pass through unclamped until the final clamp).
+ * @param {number} width @param {number} height
+ * @returns {{x:number, y:number}} integer pixel coords, clamped into
+ *   [0,width-1]/[0,height-1] so an off-screen query still returns something
+ *   sample-able rather than an out-of-bounds index.
+ */
+export function ndcToPixel(ndc, width, height) {
+  const px = Math.round(((ndc.x + 1) / 2) * width);
+  const py = Math.round(((1 - ndc.y) / 2) * height);
+  return {
+    x: Math.min(Math.max(px, 0), Math.max(0, width - 1)),
+    y: Math.min(Math.max(py, 0), Math.max(0, height - 1)),
+  };
+}
 
 /**
  * Triangle indices for the same corner order: (0,1,2) and (0,2,3).

@@ -88,8 +88,8 @@ export function installDebugPanel(MapShine) {
    *   it starts at the first option.
    * @param {(value: string) => any} onChange
    */
-  function registerSelect(id, label, options, getValue, onChange) {
-    controls.set(id, { label, options, getValue, onChange });
+  function registerSelect(id, label, options, getValue, onChange, opts = {}) {
+    controls.set(id, { label, options, getValue, onChange, group: opts.group });
     if (listEl) renderButtons();
   }
 
@@ -134,8 +134,8 @@ export function installDebugPanel(MapShine) {
    * @param {() => (object|string|Promise<object|string>)} fn - report body.
    *   Return an object (auto-JSON-formatted) or a preformatted string.
    */
-  function registerReport(id, label, fn) {
-    reports.set(id, { label, fn });
+  function registerReport(id, label, fn, opts = {}) {
+    reports.set(id, { label, fn, group: opts.group, primary: opts.primary });
     if (panelEl) renderButtons();
   }
 
@@ -149,8 +149,8 @@ export function installDebugPanel(MapShine) {
    * @param {string} label
    * @param {() => (object|string|Promise<object|string>)} fn
    */
-  function registerAction(id, label, fn) {
-    actions.set(id, { label, fn });
+  function registerAction(id, label, fn, opts = {}) {
+    actions.set(id, { label, fn, group: opts.group, primary: opts.primary });
     if (panelEl) renderButtons();
   }
 
@@ -197,7 +197,61 @@ export function installDebugPanel(MapShine) {
   let panelEl = null;
   let statusEl = null;
   let listEl = null;
+  let footerEl = null;
   let collapsed = false;
+
+  // Accordion layout — PRESENTATION ONLY (media ladder L4, cosmetic). A
+  // mis-grouped button still works; it just lands visibly in "More". Nothing
+  // load-bearing rides this map, so it is deliberately NOT the health-wiring
+  // anti-pattern the postmortem warns about (a hand-maintained id->behaviour
+  // table that fails SILENTLY). A registration MAY self-declare `{ group }` /
+  // `{ primary }` to override these defaults; unlisted ids fall into "More",
+  // never a wrong folder. Array order here IS the on-screen folder order.
+  const PRIMARY = new Set(['pixel-probe']); // quick-reach; "Export everything" is primary by construction
+  const FOLDERS = [
+    { id: 'levers', title: 'Levers', icon: '🎚️', ids: [] }, // live selects default here
+    {
+      id: 'health',
+      title: 'Health & baseline',
+      icon: '📊',
+      ids: ['stage-gate-baseline', 'pass-graph-health', 'environment', 'boot', 'console', 'loading-screen-state'],
+    },
+    {
+      id: 'scene',
+      title: 'Scene & masks',
+      icon: '🎨',
+      ids: [
+        'vt-pan-viewer-diagnostics',
+        'vt-pan-viewer-layers',
+        'vt-canvas-census',
+        'mask-authority',
+        'pixi-residency-report',
+      ],
+    },
+    {
+      id: 'foundry',
+      title: 'Foundry parity',
+      icon: '🪟',
+      ids: ['interface-seam', 'interface-preview-leak', 'fog-of-war-census', 'tokens'],
+    },
+    {
+      id: 'run',
+      title: 'Run & stress',
+      icon: '▶️',
+      ids: [
+        'vt-pan-viewer-start',
+        'vt-pan-viewer-start-real-scene',
+        'vt-pan-viewer-stop',
+        'vt-pan-viewer-cycle-layer',
+        'vt-zoom-thrash-active',
+        'vt-zoom-thrash-torture',
+        'vt-live-decode',
+        'orientation-self-test',
+        'soak',
+      ],
+    },
+  ];
+  const openFolders = new Set(); // folder ids the author has expanded; preserved across re-renders
 
   /** Pointer travel (px) below which a pointerdown→up counts as a CLICK, not a drag. */
   const DRAG_CLICK_SLOP_PX = 4;
@@ -274,75 +328,192 @@ export function installDebugPanel(MapShine) {
     return () => moved;
   }
 
+  /** Inject the panel's stylesheet once — the pseudo-element bits inline styles can't reach. */
+  function ensurePanelStyle() {
+    if (document.getElementById('msa-debug-panel-style')) return;
+    const s = document.createElement('style');
+    s.id = 'msa-debug-panel-style';
+    s.textContent =
+      '#msa-debug-panel summary::-webkit-details-marker{display:none}' +
+      '#msa-debug-panel summary:hover{background:rgba(143,214,255,0.09)}' +
+      '#msa-debug-panel .msa-chev{display:inline-block;transition:transform .12s ease;opacity:.55}' +
+      '#msa-debug-panel details[open] .msa-chev{transform:rotate(90deg)}' +
+      '#msa-debug-panel button:active{transform:translateY(1px)}';
+    document.head.appendChild(s);
+  }
+
+  /** The vanity footer — bug report + Patreon, carried over from V2's config menu. */
+  function buildFooter() {
+    const foot = document.createElement('div');
+    Object.assign(foot.style, {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '12px',
+      flexWrap: 'wrap',
+      marginTop: '8px',
+      paddingTop: '6px',
+      borderTop: '1px solid rgba(143,214,255,0.16)',
+      fontSize: '10px',
+    });
+    const link = (href, text, color) => {
+      const a = document.createElement('a');
+      a.href = href;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      a.textContent = text;
+      Object.assign(a.style, { color, textDecoration: 'none', pointerEvents: 'auto', fontWeight: '600' });
+      a.addEventListener('mouseenter', () => (a.style.textDecoration = 'underline'));
+      a.addEventListener('mouseleave', () => (a.style.textDecoration = 'none'));
+      return a;
+    };
+    foot.appendChild(link('https://www.patreon.com/c/MythicaMachina', '❤ Patreon', '#ff6b74'));
+    foot.appendChild(link('https://github.com/Garsondee/map-shine-advanced/issues', '🐛 Report a bug', '#8fd6ff'));
+    const cred = document.createElement('span');
+    cred.textContent = MapShine.codename ? `“${MapShine.codename}”` : 'Mythica Machina';
+    Object.assign(cred.style, { marginLeft: 'auto', opacity: '0.4' });
+    foot.appendChild(cred);
+    return foot;
+  }
+
   function buildUI() {
+    ensurePanelStyle();
     const panel = document.createElement('div');
     panelEl = panel;
     panel.id = 'msa-debug-panel';
     Object.assign(panel.style, {
       pointerEvents: 'auto',
       marginTop: '6px',
-      background: 'rgba(10,14,22,0.88)',
-      border: '1px solid rgba(143,214,255,0.35)',
-      borderRadius: '8px',
-      padding: '6px',
-      font: '11px/1.3 Signika, sans-serif',
-      color: '#cfe8ff',
-      width: '420px',
-      maxHeight: '340px',
+      background: 'rgba(12,16,26,0.93)',
+      border: '1px solid rgba(143,214,255,0.28)',
+      borderRadius: '10px',
+      padding: '8px 8px 6px',
+      font: '11px/1.35 Signika, sans-serif',
+      color: '#dcecff',
+      width: '440px',
+      maxHeight: '72vh',
       overflowY: 'auto',
+      boxShadow: '0 10px 30px rgba(0,0,0,0.45)',
+      backdropFilter: 'blur(7px)',
     });
 
+    // Brand header — in V3 this panel becomes the home of MSA, so its first
+    // layer reads as a product surface (friendly, branded), not a raw dev
+    // readout. It is still the drag handle and the collapse toggle.
     const header = document.createElement('div');
     Object.assign(header.style, {
       display: 'flex',
       justifyContent: 'space-between',
       alignItems: 'center',
       cursor: 'grab',
-      fontWeight: 'bold',
-      marginBottom: '4px',
+      marginBottom: '7px',
+      paddingBottom: '6px',
+      borderBottom: '1px solid rgba(143,214,255,0.16)',
       touchAction: 'none', // let pointermove reach us instead of becoming a scroll gesture
     });
-    header.innerHTML = `<span>🗝️ Keyhole Debug Panel</span><span id="msa-debug-toggle">▾</span>`;
+    const ver = MapShine.version ? ` v${MapShine.version}` : '';
+    header.innerHTML =
+      '<span style="display:flex;align-items:center;gap:8px">' +
+      '<span style="font-size:15px">🗝️</span>' +
+      '<span><span style="font-weight:700;letter-spacing:.2px">Map Shine Advanced</span>' +
+      `<span style="opacity:.5;font-size:9px;display:block;margin-top:-1px">dev console${ver}</span></span>` +
+      '</span><span id="msa-debug-toggle" style="opacity:.7;font-size:13px">▾</span>';
 
     // DRAGGABLE (author-reported, 2026-07-16: the panel sits under Foundry's
-    // right-hand sidebar). The default position now clears the sidebar, but "the
-    // right default" is a guess about someone else's screen — dragging is the
-    // thing that actually solves it, for any layout, at any resolution.
-    //
-    // The whole HOST moves, not just this panel: the heartbeat triangle and the
-    // panel are one unit (the panel is a child of the host), and dragging half of
-    // a visually-joined widget away from the other half would be daft.
+    // right-hand sidebar). Dragging solves "the right default" for any layout at
+    // any resolution. The whole HOST moves — heartbeat + panel are one unit.
     const dragMoved = makeDraggable(header, () => panelEl?.parentElement);
 
     header.addEventListener('click', () => {
-      // Only collapse on a genuine CLICK. Without this, every drag that ends over
-      // the header also toggles — so you could never reposition the panel without
-      // also folding it up.
+      // Only collapse on a genuine CLICK, so a drag that ends over the header
+      // does not also fold the panel up.
       if (dragMoved() > DRAG_CLICK_SLOP_PX) return;
       collapsed = !collapsed;
-      listEl.style.display = collapsed ? 'none' : '';
-      statusEl.style.display = collapsed ? 'none' : '';
+      const d = collapsed ? 'none' : '';
+      listEl.style.display = d;
+      statusEl.style.display = d;
+      if (footerEl) footerEl.style.display = d;
       header.querySelector('#msa-debug-toggle').textContent = collapsed ? '▸' : '▾';
     });
 
     listEl = document.createElement('div');
-    listEl.style.display = 'flex';
-    listEl.style.flexWrap = 'wrap';
-    listEl.style.gap = '4px';
+    Object.assign(listEl.style, { display: 'flex', flexDirection: 'column', gap: '6px' });
 
     statusEl = document.createElement('div');
-    Object.assign(statusEl.style, { marginTop: '5px', color: '#9fd', minHeight: '14px', wordBreak: 'break-word' });
-    statusEl.textContent = 'Click a report to copy it to the clipboard.';
+    Object.assign(statusEl.style, {
+      marginTop: '7px',
+      color: '#9fdcc0',
+      minHeight: '14px',
+      fontSize: '10px',
+      wordBreak: 'break-word',
+    });
+    statusEl.textContent = 'Pick a tool — its output copies to your clipboard, ready to paste back.';
+
+    footerEl = buildFooter();
 
     panel.appendChild(header);
     panel.appendChild(listEl);
     panel.appendChild(statusEl);
+    panel.appendChild(footerEl);
     return panel;
   }
 
   function renderButtons() {
     listEl.innerHTML = '';
-    for (const [id, { label, options, getValue, onChange }] of controls) {
+
+    /**
+     * @param {string} label @param {{rgb: string, flexBasis?: string, weight?: string}} skin
+     * @returns {HTMLButtonElement}
+     */
+    const makeButton = (label, skin) => {
+      const btn = document.createElement('button');
+      btn.textContent = label;
+      const idle = `rgba(${skin.rgb},0.14)`;
+      const hover = `rgba(${skin.rgb},0.30)`;
+      Object.assign(btn.style, {
+        pointerEvents: 'auto',
+        background: idle,
+        border: `1px solid rgba(${skin.rgb},0.42)`,
+        borderRadius: '6px',
+        color: '#eaf4ff',
+        font: '10px/1.2 Signika, sans-serif',
+        fontWeight: skin.weight ?? 'normal',
+        padding: '5px 8px',
+        cursor: 'pointer',
+        transition: 'background .1s ease',
+        ...(skin.flexBasis ? { flexBasis: skin.flexBasis } : {}),
+      });
+      btn.addEventListener('mouseenter', () => {
+        btn.style.background = hover;
+      });
+      btn.addEventListener('mouseleave', () => {
+        btn.style.background = idle;
+      });
+      return btn;
+    };
+
+    // A report/action button: click → run → copy to clipboard → report status.
+    const makeRunnable = (id, label, skin) => {
+      const btn = makeButton(label, skin);
+      btn.addEventListener('click', async () => {
+        statusEl.textContent = `Running "${id}"…`;
+        try {
+          const text = await runReport(id);
+          const copied = await copyToClipboard(text);
+          statusEl.textContent = copied
+            ? `✔ Copied "${id}" (${text.length.toLocaleString()} chars, ${new Date().toLocaleTimeString()}).`
+            : `⚠ "${id}" generated but clipboard copy failed — check console (also logged).`;
+          if (!copied) console.log(`[debug-panel] ${id}:\n${text}`);
+        } catch (e) {
+          statusEl.textContent = `✘ "${id}" threw: ${e?.message || e}`;
+          console.error(`[debug-panel] report "${id}" failed:`, e);
+        }
+      });
+      return btn;
+    };
+
+    // A live select control (renderer switch, darkness lever, …). Fill logic is
+    // unchanged: re-read on open so a thunk-options menu can't show stale choices.
+    const makeControl = (id, { label, options, getValue, onChange }) => {
       const wrap = document.createElement('label');
       Object.assign(wrap.style, {
         pointerEvents: 'auto',
@@ -359,14 +530,11 @@ export function installDebugPanel(MapShine) {
         flex: '1',
         background: 'rgba(10,14,22,0.9)',
         border: '1px solid rgba(143,214,255,0.4)',
-        borderRadius: '4px',
+        borderRadius: '5px',
         color: '#cfe8ff',
         font: '10px/1.2 Signika, sans-serif',
         padding: '3px',
       });
-      // Fill from the CURRENT choices and the CURRENT value. Called again on every
-      // open, so a thunk-options control (see registerSelect) can never show a menu
-      // built from state that has since moved on.
       const fill = () => {
         let list;
         try {
@@ -389,9 +557,7 @@ export function installDebugPanel(MapShine) {
         }
       };
       fill();
-      // Re-read on open: `mousedown` lands before the menu paints, so the list the
-      // author sees is the list as of the click, not as of page load.
-      sel.addEventListener('mousedown', fill);
+      sel.addEventListener('mousedown', fill); // re-read on open — menu reflects the click, not page load
       sel.addEventListener('change', async () => {
         statusEl.textContent = `${label}: ${sel.value || 'off'}…`;
         try {
@@ -403,47 +569,31 @@ export function installDebugPanel(MapShine) {
         }
       });
       wrap.append(sel);
-      listEl.append(wrap);
-    }
-    /**
-     * @param {string} label @param {{rgb: string, flexBasis?: string, weight?: string}} skin
-     * @returns {HTMLButtonElement}
-     */
-    const makeButton = (label, skin) => {
-      const btn = document.createElement('button');
-      btn.textContent = label;
-      const idle = `rgba(${skin.rgb},0.12)`;
-      const hover = `rgba(${skin.rgb},0.28)`;
-      Object.assign(btn.style, {
-        pointerEvents: 'auto',
-        background: idle,
-        border: `1px solid rgba(${skin.rgb},0.4)`,
-        borderRadius: '4px',
-        color: '#cfe8ff',
-        font: `10px/1.2 Signika, sans-serif`,
-        fontWeight: skin.weight ?? 'normal',
-        padding: '4px 6px',
-        cursor: 'pointer',
-        ...(skin.flexBasis ? { flexBasis: skin.flexBasis } : {}),
-      });
-      btn.addEventListener('mouseenter', () => {
-        btn.style.background = hover;
-      });
-      btn.addEventListener('mouseleave', () => {
-        btn.style.background = idle;
-      });
-      return btn;
+      return wrap;
     };
 
-    // THE ONE BUTTON, first and full-width — the author's ask: "press a single
-    // button to export all MSA logs and all supporting information". Everything
-    // below it is the by-hand version of what this does in one click.
+    // Readouts in blue, actions in amber — the colour is not decoration: a button
+    // that restarts your scene must not look identical to one that reads a counter.
+    const REPORT_SKIN = { rgb: '143,214,255' };
+    const ACTION_SKIN = { rgb: '255,196,120' };
+
+    // Which folder an entry belongs to. A declared `{ group }`/`{ primary }`
+    // wins; else the FOLDERS membership map; else "More" (visible, never a
+    // guessed wrong folder).
+    const folderOf = (id, entry) => {
+      if (entry.primary || PRIMARY.has(id)) return '__primary__';
+      if (entry.group) return entry.group;
+      for (const f of FOLDERS) if (f.ids.includes(id)) return f.id;
+      return '__more__';
+    };
+
+    // ---- 1. Quick-reach zone (always visible) ------------------------------
+    const quick = document.createElement('div');
+    Object.assign(quick.style, { display: 'flex', flexWrap: 'wrap', gap: '5px' });
+
+    // THE ONE BUTTON — the author's ask: one click to export every log + report.
     if (typeof MapShine.flight?.export === 'function') {
-      const exportBtn = makeButton('⬇ Export everything (flight recorder)', {
-        rgb: '167,255,196',
-        flexBasis: '100%',
-        weight: 'bold',
-      });
+      const exportBtn = makeButton('⬇  Export everything', { rgb: '167,255,196', flexBasis: '100%', weight: '700' });
       exportBtn.addEventListener('click', async () => {
         statusEl.textContent = 'Building the bundle — running every read-only report…';
         exportBtn.disabled = true;
@@ -456,43 +606,89 @@ export function installDebugPanel(MapShine) {
         } catch (e) {
           statusEl.textContent = `✘ Export threw: ${e?.message || e}`;
         } finally {
-          // finally: an export that fails must not leave the button dead — that
-          // would make the recovery path "reload Foundry", which is the one thing
-          // a person reaching for this button cannot afford to do (it wipes the
-          // very session they are trying to report).
+          // An export that fails must not leave the button dead — the recovery
+          // path would be "reload Foundry", which wipes the very session being
+          // reported.
           exportBtn.disabled = false;
         }
       });
-      listEl.appendChild(exportBtn);
+      quick.appendChild(exportBtn);
     }
 
-    /** @param {Map<string, {label: string}>} map @param {{rgb: string}} skin */
-    const renderRunnables = (map, skin) => {
-      for (const [id, { label }] of map) {
-        const btn = makeButton(label, skin);
-        btn.addEventListener('click', async () => {
-          statusEl.textContent = `Running "${id}"…`;
-          try {
-            const text = await runReport(id);
-            const copied = await copyToClipboard(text);
-            statusEl.textContent = copied
-              ? `✔ Copied "${id}" to clipboard (${text.length.toLocaleString()} chars, ${new Date().toLocaleTimeString()}).`
-              : `⚠ "${id}" generated but clipboard copy failed — check console for the text (also logged).`;
-            if (!copied) console.log(`[debug-panel] ${id}:\n${text}`);
-          } catch (e) {
-            statusEl.textContent = `✘ "${id}" threw: ${e?.message || e}`;
-            console.error(`[debug-panel] report "${id}" failed:`, e);
-          }
-        });
-        listEl.appendChild(btn);
+    // ---- 2. Bucket every registered entry by folder ------------------------
+    const buckets = new Map();
+    const push = (fid, el) => {
+      if (!buckets.has(fid)) buckets.set(fid, []);
+      buckets.get(fid).push(el);
+    };
+    const place = (id, entry, skin) => {
+      const fid = folderOf(id, entry);
+      const btn = makeRunnable(id, entry.label, skin);
+      if (fid === '__primary__') {
+        // Vital tools (Pixel Probe) sit in the quick-reach row; one grows to
+        // fill, two share the row.
+        btn.style.flexGrow = '1';
+        btn.style.flexBasis = 'calc(50% - 3px)';
+        quick.appendChild(btn);
+      } else {
+        push(fid, btn);
       }
     };
+    for (const [id, entry] of reports) place(id, entry, REPORT_SKIN);
+    for (const [id, entry] of actions) place(id, entry, ACTION_SKIN);
+    for (const [id, entry] of controls) push(entry.group ?? 'levers', makeControl(id, entry));
 
-    // Readouts in blue, actions in amber. The colour is not decoration: a button
-    // that restarts your scene should not look identical to one that reads a
-    // counter, and until today they did.
-    renderRunnables(reports, { rgb: '143,214,255' });
-    renderRunnables(actions, { rgb: '255,196,120' });
+    listEl.appendChild(quick);
+
+    // ---- 3. Accordion folders, collapsed unless the author opened them -----
+    const order = FOLDERS.map((f) => f.id);
+    for (const fid of buckets.keys()) if (!order.includes(fid) && fid !== '__more__') order.push(fid);
+    order.push('__more__');
+    const metaOf = (fid) =>
+      FOLDERS.find((f) => f.id === fid) ??
+      (fid === '__more__' ? { title: 'More', icon: '🗂️' } : { title: fid, icon: '📁' });
+
+    for (const fid of order) {
+      const items = buckets.get(fid);
+      if (!items || !items.length) continue;
+      const { title, icon } = metaOf(fid);
+
+      const details = document.createElement('details');
+      details.open = openFolders.has(fid);
+      Object.assign(details.style, {
+        border: '1px solid rgba(143,214,255,0.14)',
+        borderRadius: '8px',
+        background: 'rgba(143,214,255,0.04)',
+      });
+
+      const summary = document.createElement('summary');
+      Object.assign(summary.style, {
+        cursor: 'pointer',
+        listStyle: 'none',
+        padding: '6px 9px',
+        fontWeight: '600',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '7px',
+        userSelect: 'none',
+      });
+      summary.innerHTML =
+        '<span class="msa-chev">▸</span>' +
+        `<span>${icon}</span><span>${title}</span>` +
+        `<span style="margin-left:auto;opacity:.4;font-weight:400">${items.length}</span>`;
+
+      const body = document.createElement('div');
+      Object.assign(body.style, { display: 'flex', flexWrap: 'wrap', gap: '4px', padding: '0 9px 9px' });
+      for (const el of items) body.appendChild(el);
+
+      details.addEventListener('toggle', () => {
+        if (details.open) openFolders.add(fid);
+        else openFolders.delete(fid);
+      });
+      details.appendChild(summary);
+      details.appendChild(body);
+      listEl.appendChild(details);
+    }
   }
 
   /** Call once the boot heartbeat box exists in the DOM. Idempotent. */

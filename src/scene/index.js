@@ -40,3 +40,14 @@ export {
 } from './mask-catalog.js';
 export { createMaskAuthority } from './mask-authority.js';
 export { MASK_GRID_MAX_DIM, computeMaskGridSpec, sampleMaskGridWorld, maskGridMean } from './mask-derive.js';
+export {
+  createPaintLayer,
+  stampBrushWorld,
+  isPaintLayerEmpty,
+  encodePaintLayer,
+  decodePaintLayer,
+  encodedByteEstimate,
+  serializePaintedMasks,
+  hydratePaintedMasks,
+  PAINT_EMBED_BYTE_BUDGET,
+} from './paint-mask.js';

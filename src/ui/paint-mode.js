@@ -805,8 +805,13 @@ export function installPainter(MapShine) {
     if (w > 0 && h > 0) {
       cctx.imageSmoothingEnabled = true;
       const ak = activeKey();
-      // Painted kinds under the map, active one brightest, others dimmed.
+      const floorSuffix = `::${state.floor}`;
+      // Painted kinds under the map, active one brightest, others dimmed —
+      // but ONLY this floor. Masks are per-floor (Floor stepper), so another
+      // floor's layers must be invisible here, not just dimmed, or switching
+      // floors looks like a no-op (the old floor's paint barely fades).
       for (const key of Object.keys(state.layers)) {
+        if (!key.endsWith(floorSuffix)) continue;
         const g = state.gridCanvases[key];
         if (!g) continue;
         cctx.globalAlpha = key === ak ? 0.8 : 0.32;

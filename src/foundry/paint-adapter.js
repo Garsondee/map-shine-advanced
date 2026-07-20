@@ -36,7 +36,6 @@ export function readPaintContext() {
   const PIXI = globalThis.PIXI;
   const r = c.dimensions.sceneRect;
   const view = c.app?.view;
-  const res = c.app?.renderer?.resolution || 1;
 
   const clientToGlobal = (clientX, clientY) => {
     const p = new PIXI.Point();
@@ -44,9 +43,11 @@ export function readPaintContext() {
     if (events && typeof events.mapPositionToPoint === 'function') {
       events.mapPositionToPoint(p, clientX, clientY);
     } else {
-      // Fallback: normalise into the view's own pixel space (pre-events-API path).
+      // Fallback (pre-events-API): logical px relative to the canvas, matching
+      // what mapPositionToPoint returns above — the stage transform is in logical
+      // px, so this must NOT scale by resolution.
       const b = view.getBoundingClientRect();
-      p.set(((clientX - b.left) / b.width) * view.width, ((clientY - b.top) / b.height) * view.height);
+      p.set(clientX - b.left, clientY - b.top);
     }
     return p;
   };
@@ -59,9 +60,12 @@ export function readPaintContext() {
       return { x: w.x, y: w.y };
     },
     worldToClient: (wx, wy) => {
-      const g = c.stage.toGlobal(new PIXI.Point(wx, wy)); // renderer px
+      // toGlobal returns LOGICAL (CSS) px — the same space toLocal consumes and
+      // mapPositionToPoint produces, NOT renderer px. Dividing by resolution here
+      // (the original bug) halved the preview toward the top-left on a 2× display.
+      const g = c.stage.toGlobal(new PIXI.Point(wx, wy));
       const b = view.getBoundingClientRect();
-      return { x: b.left + g.x / res, y: b.top + g.y / res }; // renderer px → css px, placed on the page
+      return { x: b.left + g.x, y: b.top + g.y };
     },
   };
 }

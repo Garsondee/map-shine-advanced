@@ -20,6 +20,16 @@
  * this is authoring, and it un-suppresses on exit). The right button and its
  * context menu are never touched — Foundry owns its own pan/menu handling.
  *
+ * UI PASS-THROUGH (2026-07-20 fix): a stroke starts ONLY when the press
+ * target is Foundry's own board canvas (`ctx.boardElement`, foundry/paint-
+ * adapter.js) — a positive match against the one element that IS the map.
+ * The bug this replaces: the window-capture listener checked only the mouse
+ * button, so a left-click on the TOOLBAR (or the debug panel, or Foundry's
+ * own sidebar/hotbar) still resolved a screen position and painted through
+ * it. A hand-excluded list of "not the toolbar" would have fixed the report
+ * but kept missing every other panel; checking FOR the board is the one
+ * check that can never miss the next one.
+ *
  * Pure model/brush/codec/persistence: scene/paint-mask.js (Node-tested).
  * All Foundry/PIXI access: foundry/paint-adapter.js. This file is DOM glue,
  * verified live.
@@ -76,6 +86,7 @@ export function installPainter(MapShine) {
     painting: false,
     lastWorld: null,
     mouseClient: null,
+    hoverOnBoard: false, // is the CURRENT hover over Foundry's board (not a UI panel)? gates the ring
     brush: { radius: 90, strength: 180, hardness: 0.55, mode: 'add' }, // mode: paint | add | erase
     undo: [],
     handlers: null,
@@ -152,6 +163,7 @@ export function installPainter(MapShine) {
     };
     const onDown = (e) => {
       if (e.button !== 0) return; // left button only; right/middle fall through to Foundry (pan)
+      if (e.target !== state.ctx.boardElement) return; // not the map -> let the UI (ours or Foundry's) have it
       state.painting = true;
       state.lastWorld = null;
       pushUndo();
@@ -161,6 +173,11 @@ export function installPainter(MapShine) {
     };
     const onMove = (e) => {
       state.mouseClient = { x: e.clientX, y: e.clientY };
+      // Tracked on every move (not just while painting) so the brush ring hides
+      // over UI. Once a stroke is underway, painting deliberately continues even
+      // if the drag crosses a panel (matches ordinary paint-tool drag behaviour)
+      // — this flag only affects the RING and starting a NEW stroke (onDown).
+      state.hoverOnBoard = e.target === state.ctx.boardElement;
       if (!state.painting) return; // not painting → Foundry keeps the move (hover, native drag)
       const w = state.ctx.screenToWorld(e.clientX, e.clientY);
       paintTo(w.x, w.y);
@@ -437,7 +454,7 @@ export function installPainter(MapShine) {
 
   function drawBrushRing(cctx) {
     const m = state.mouseClient;
-    if (!m) return;
+    if (!m || !state.hoverOnBoard) return; // don't float a paint-radius circle over the toolbar
     const w0 = state.ctx.screenToWorld(m.x, m.y);
     const a = state.ctx.worldToClient(w0.x, w0.y);
     const b = state.ctx.worldToClient(w0.x + state.brush.radius, w0.y);

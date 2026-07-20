@@ -24,9 +24,22 @@ function activeCanvas() {
 }
 
 /**
- * Live paint context: the scene rect (world = Foundry canvas space) and the
- * two transforms, or `{ ready: false }` when no scene is up.
+ * Live paint context: the scene rect (world = Foundry canvas space), the two
+ * transforms, and `boardElement` — Foundry's OWN `<canvas>` (`c.app.view`,
+ * DOM id `board`) — or `{ ready: false }` when no scene is up.
+ *
+ * `boardElement` exists so a caller can tell "the pointer is over the map"
+ * from "the pointer is over some UI panel" with ONE positive check
+ * (`event.target === ctx.boardElement`) instead of a hand-maintained list of
+ * panels to exclude (toolbar, debug panel, Foundry's own sidebar/hotbar…) —
+ * exactly the disease `masks/authority-only` and friends exist to prevent
+ * elsewhere in this project: an allowlist of the one true thing beats a
+ * denylist that silently misses the next panel. `event.target` is computed by
+ * REAL hit-testing at dispatch time regardless of which phase intercepts it,
+ * so this check is reliable even from a window-level capture-phase listener.
+ *
  * @returns {{ready:false}|{ready:true, sceneRect:{x:number,y:number,width:number,height:number},
+ *   boardElement: (Element|null),
  *   screenToWorld:(cx:number,cy:number)=>{x:number,y:number},
  *   worldToClient:(wx:number,wy:number)=>{x:number,y:number}}}
  */
@@ -55,6 +68,7 @@ export function readPaintContext() {
   return {
     ready: true,
     sceneRect: { x: r.x, y: r.y, width: r.width, height: r.height },
+    boardElement: view ?? null,
     screenToWorld: (clientX, clientY) => {
       const w = c.stage.toLocal(clientToGlobal(clientX, clientY));
       return { x: w.x, y: w.y };

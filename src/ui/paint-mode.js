@@ -4,16 +4,21 @@
  * A modal AUTHORING surface (map-maker, opt-in). The overlay is VISUAL ONLY
  * (`pointer-events: none`); input is captured at the window in the capture
  * phase so that:
- *   - RIGHT-drag  → paints (captured; Foundry never sees it)
- *   - LEFT-drag   → Foundry pans NATIVELY (we don't touch it)
+ *   - LEFT-drag   → paints (captured; Foundry never sees it)
+ *   - RIGHT-drag  → Foundry pans NATIVELY (we don't touch it — confirmed
+ *                   against source: board.mjs's `_onDragRightStart` is
+ *                   Foundry's OWN canvas-pan handler, distinct from
+ *                   `_onDragLeftStart` used for placeable/selection input)
  *   - WHEEL       → Foundry zooms NATIVELY (we don't touch it)
- * This keeps Foundry's own smooth navigation while painting — the fix for the
- * "can't pan/zoom while painting" report, and the reason painting is on the
- * right button (author's suggestion, 2026-07-20).
+ * LEFT paints because that is the primary-action button in every paint tool
+ * (and in Foundry itself); RIGHT was tried first (2026-07-20) and reported
+ * broken navigation — it was capturing Foundry's actual pan gesture, not a
+ * free button. Swapped the same day.
  *
- * Never touches the gameplay input path beyond suppressing the right button +
- * its context menu while active (keyhole-input-model-decision: Foundry owns
- * gameplay input; this is authoring, and it un-suppresses on exit).
+ * Never touches the gameplay input path beyond suppressing the LEFT button
+ * while active (keyhole-input-model-decision: Foundry owns gameplay input;
+ * this is authoring, and it un-suppresses on exit). The right button and its
+ * context menu are never touched — Foundry owns its own pan/menu handling.
  *
  * Pure model/brush/codec/persistence: scene/paint-mask.js (Node-tested).
  * All Foundry/PIXI access: foundry/paint-adapter.js. This file is DOM glue,
@@ -146,7 +151,7 @@ export function installPainter(MapShine) {
       e.stopPropagation();
     };
     const onDown = (e) => {
-      if (e.button !== 2) return; // right button only; left/middle fall through to Foundry
+      if (e.button !== 0) return; // left button only; right/middle fall through to Foundry (pan)
       state.painting = true;
       state.lastWorld = null;
       pushUndo();
@@ -167,7 +172,6 @@ export function installPainter(MapShine) {
       state.lastWorld = null;
       suppress(e);
     };
-    const onContext = (e) => e.preventDefault(); // no right-click menu while painting
     const onKey = (e) => {
       if (e.key === 'Escape') return exit();
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
@@ -181,15 +185,14 @@ export function installPainter(MapShine) {
       else return;
       state.refreshToolbar?.();
     };
-    // Capture phase so a right-button event is intercepted BEFORE it descends to
-    // Foundry's canvas listeners; left/wheel are never touched, so they reach
-    // Foundry and pan/zoom natively.
+    // Capture phase so a left-button event is intercepted BEFORE it descends to
+    // Foundry's canvas listeners; right-button/wheel are never touched, so they
+    // reach Foundry and pan/zoom natively.
     window.addEventListener('pointerdown', onDown, true);
     window.addEventListener('pointermove', onMove, true);
     window.addEventListener('pointerup', onUp, true);
-    window.addEventListener('contextmenu', onContext, true);
     window.addEventListener('keydown', onKey, true);
-    state.handlers = { onDown, onMove, onUp, onContext, onKey };
+    state.handlers = { onDown, onMove, onUp, onKey };
   }
 
   function removeHandlers() {
@@ -198,7 +201,6 @@ export function installPainter(MapShine) {
     window.removeEventListener('pointerdown', h.onDown, true);
     window.removeEventListener('pointermove', h.onMove, true);
     window.removeEventListener('pointerup', h.onUp, true);
-    window.removeEventListener('contextmenu', h.onContext, true);
     window.removeEventListener('keydown', h.onKey, true);
     state.handlers = null;
   }
@@ -334,11 +336,24 @@ export function installPainter(MapShine) {
       button('Exit', exit, '143,214,255')
     );
 
-    const hint = document.createElement('div');
-    hint.textContent = 'Right-drag paints · Left-drag pans · Wheel zooms · [ ] size · E erase · Ctrl+Z undo · Esc exit';
-    Object.assign(hint.style, { opacity: '0.5', fontSize: '9.5px' });
+    const legendRow = row();
+    Object.assign(legendRow.style, {
+      gap: '6px',
+      paddingTop: '5px',
+      marginTop: '2px',
+      borderTop: '1px solid rgba(143,214,255,0.14)',
+    });
+    legendRow.append(
+      legendItem('LMB', 'paint'),
+      legendItem('RMB', 'pan'),
+      legendItem('Wheel', 'zoom'),
+      legendItem('[ ]', 'size'),
+      legendItem('E', 'erase'),
+      legendItem('Ctrl+Z', 'undo'),
+      legendItem('Esc', 'exit')
+    );
 
-    bar.append(top, mid, bottom, hint);
+    bar.append(top, mid, bottom, legendRow);
     state.refreshToolbar = () => {
       sizeR.sync();
       strengthR.sync();
@@ -489,6 +504,37 @@ function label(text) {
   s.textContent = text;
   s.style.opacity = '0.7';
   return s;
+}
+
+/** A keyboard/mouse-button "key" chip — the visible-shortcuts legend's unit. */
+function keycap(text) {
+  const s = document.createElement('span');
+  s.textContent = text;
+  Object.assign(s.style, {
+    display: 'inline-block',
+    fontFamily: "'Courier New', monospace",
+    fontSize: '9.5px',
+    fontWeight: '700',
+    lineHeight: '1',
+    padding: '3px 6px',
+    borderRadius: '4px',
+    border: '1px solid rgba(143,214,255,0.45)',
+    background: 'rgba(143,214,255,0.1)',
+    color: '#eaf4ff',
+  });
+  return s;
+}
+
+/** One "KEY does X" pair for the legend row. */
+function legendItem(keyText, desc) {
+  const wrap = document.createElement('span');
+  Object.assign(wrap.style, { display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '10px' });
+  wrap.append(keycap(keyText));
+  const d = document.createElement('span');
+  d.textContent = desc;
+  d.style.opacity = '0.7';
+  wrap.append(d);
+  return wrap;
 }
 
 function button(text, onClick, accent) {

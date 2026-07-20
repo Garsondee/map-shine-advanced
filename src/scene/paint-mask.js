@@ -101,8 +101,27 @@ export function createPaintLayer(sceneRect, maxDim = PAINT_GRID_MAX_DIM) {
  */
 export function stampBrushWorld(layer, wx, wy, radiusWorld, { hardness = 0.5, value = 255, mode = 'paint' } = {}) {
   const { spec, data } = layer;
-  const rTexX = Math.max(1e-6, radiusWorld / spec.texelW);
-  const rTexY = Math.max(1e-6, radiusWorld / spec.texelH);
+  // THE COVERAGE FLOOR — author-reported bug (2026-07-20): a thin dragged
+  // line broke into dots, and the smallest brush sometimes painted nothing
+  // at all. Root cause, derived exactly, not guessed: a texel's centre sits
+  // at grid-coordinate k+0.5 for integer index k, so the worst-case offset
+  // from a stamp's continuous centre to its NEAREST texel centre is 0.5 grid
+  // units per axis (the stamp lands exactly on a texel boundary) — 0.5 in
+  // BOTH axes at once (a grid corner) gives a worst-case normalized distance
+  // of sqrt(0.5^2+0.5^2) = 1/sqrt(2) = Math.SQRT1_2 (~0.7071) once divided by
+  // a brush radius of exactly that many texels. Below that radius, there
+  // exist real sub-texel alignments where EVERY candidate texel fails the
+  // `d < 1` test below — the stamp is a silent no-op — and that alignment
+  // shifts continuously as the mouse moves, which is exactly what a dotted
+  // line under a smooth drag looks like. Clamping the TEXEL-SPACE radius
+  // (never the requested world radius, which stays whatever the author
+  // asked for) to just above that exact threshold guarantees the nearest
+  // texel is always included, on every alignment. Below this floor, "Size"
+  // reliably paints one texel — the grid resolution (PAINT_GRID_MAX_DIM) IS
+  // the real floor of paintable detail; it should never be a coin-flip.
+  const MIN_STAMP_RADIUS_TEXELS = 0.75; // > Math.SQRT1_2 (~0.7071), margin for the exact-corner edge case
+  const rTexX = Math.max(radiusWorld / spec.texelW, MIN_STAMP_RADIUS_TEXELS);
+  const rTexY = Math.max(radiusWorld / spec.texelH, MIN_STAMP_RADIUS_TEXELS);
   const cgx = (wx - spec.x) / spec.texelW; // fractional centre cell
   const cgy = (wy - spec.y) / spec.texelH;
   const gx0 = Math.max(0, Math.floor(cgx - rTexX));

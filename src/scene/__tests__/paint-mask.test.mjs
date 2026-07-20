@@ -161,7 +161,32 @@ export function run(t) {
     const layer = createPaintLayer(RECT);
     stampBrushWorld(layer, 5, 5, 30, { value: 255 }); // near the corner — clamps, does not throw
     t.ok('stamp: near-edge brush clamps without throwing', !isPaintLayerEmpty(layer));
-    stampBrushWorld(layer, CENTER.x, CENTER.y, 0, { value: 255 }); // zero radius — must not divide by zero
-    t.ok('stamp: zero-radius brush is a no-op, not a crash', sampleMaskGridWorld(layer, CENTER.x, CENTER.y) === 0);
+    // Behaviour CHANGED by the coverage-floor fix below: a zero radius used
+    // to be a true no-op (safe, but also the exact bug — see the next block).
+    // It must still never crash, and must now RELIABLY paint the nearest
+    // texel instead of silently doing nothing.
+    stampBrushWorld(layer, CENTER.x, CENTER.y, 0, { value: 255 });
+    t.ok(
+      'stamp: a zero/tiny radius does not crash AND reliably paints the nearest texel',
+      sampleMaskGridWorld(layer, CENTER.x, CENTER.y) > 0
+    );
+  }
+
+  // --- THE COVERAGE-FLOOR BUG (2026-07-20): below ~0.71 texels of radius, a
+  //     stamp's success used to depend on a coin-flip of sub-texel alignment
+  //     — the exact mechanism behind "a dragged line breaks into dots" and
+  //     "the smallest brush sometimes does nothing". Test several
+  //     deliberately AWKWARD sub-texel offsets (not just one lucky centred
+  //     alignment), on a real scene scale, and prove every one now paints. -
+  {
+    const bigRect = { x: 0, y: 0, width: 12000, height: 8000 }; // the real scene scale the bug was reported on
+    const texelW = createPaintLayer(bigRect).spec.texelW; // ~5.86
+    const tinyRadius = texelW * 0.3; // well under the old ~0.71-texel failure threshold
+    for (const frac of [0, 0.25, 0.5, 0.75, 0.9]) {
+      const layer = createPaintLayer(bigRect);
+      const px = 6000 + frac * texelW; // deliberately NOT texel-centre-aligned
+      stampBrushWorld(layer, px, 4000, tinyRadius, { value: 255, hardness: 1 });
+      t.ok(`stamp: a tiny brush paints reliably at sub-texel offset ${frac}`, !isPaintLayerEmpty(layer));
+    }
   }
 }

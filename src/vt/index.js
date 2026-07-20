@@ -31,6 +31,8 @@ export {
   setWholeImageMode,
   setDarknessRealism,
   getDarknessRealism,
+  setUiShadow,
+  getUiShadow,
 } from './vt-pan-viewer.js';
 export { runVtLiveDecodeTest } from './vt-live-decode-report.js';
 // readPageBitmapPixels: the mask authority's injected page-pixel reader —

@@ -15,6 +15,8 @@ import {
   decodeBC7,
   bc7ByteLength,
   encodeStriped,
+  computeMipChainDims,
+  mipChainByteLength,
 } from '../block-compress.js';
 
 /** Build a width×height RGBA8 image from a per-pixel fn(x,y) → [r,g,b,a]. */
@@ -320,4 +322,93 @@ export function run(t) {
     () => encodeStriped(() => new Uint8Array(3), 4, 4, 'bc1', 4),
     'readStrip'
   );
+
+  // ======================================================================
+  // MIP CHAIN DIMENSIONS — the "MSA noisier than PIXI when zoomed out" fix.
+  // computeMipChainDims is the pure geometry a real GPU mip chain must match;
+  // these prove the level sizes AND the load-bearing claim that iterating
+  // "halve the previous level" lands on exactly `base >> i` at every step
+  // (verified independently below, not just asserted by the implementation).
+  // ======================================================================
+
+  {
+    const levels = computeMipChainDims(8, 8);
+    ok('8x8 chain has 4 levels (8,4,2,1)', levels.length === 4);
+    ok('8x8 level0 is the base, unpadded change', levels[0].width === 8 && levels[0].height === 8);
+    ok('8x8 level1 logical 4x4, padded 4x4', levels[1].logicalWidth === 4 && levels[1].width === 4);
+    ok('8x8 level2 logical 2x2, padded UP to 4x4', levels[2].logicalWidth === 2 && levels[2].width === 4);
+    ok('8x8 level3 (last) logical 1x1, padded 4x4', levels[3].logicalWidth === 1 && levels[3].width === 4);
+  }
+
+  {
+    // A base size that is NOT a clean power of 2 (the realistic case: level 0
+    // is padded UP to a multiple of 4, not to a power of 2). 1056 = 4 * 264.
+    const levels = computeMipChainDims(1056, 1056);
+    const logicalWidths = levels.map((l) => l.logicalWidth);
+    ok(
+      '1056 chain: logical widths halve exactly to 1',
+      logicalWidths.join(',') === [1056, 528, 264, 132, 66, 33, 16, 8, 4, 2, 1].join(',')
+    );
+    // The load-bearing claim: iterating "halve the previous logical size" must
+    // equal computing `padW0 >> i` directly (what a GPU implicitly allocates
+    // per level) — proven here independently of computeMipChainDims' own loop.
+    let allMatchDirectShift = true;
+    for (let i = 0; i < levels.length; i++) {
+      if (levels[i].logicalWidth !== Math.max(1, 1056 >> i)) allMatchDirectShift = false;
+    }
+    ok('1056 chain: every level equals base >> i directly (composed right-shift)', allMatchDirectShift);
+    // Level 4 (logical 66) is NOT a multiple of 4, so its padded size must
+    // round UP, not just copy the logical value — the exact case that would
+    // silently under-allocate a GPU upload if padding were skipped.
+    ok(
+      '1056 level4: logical 66 pads up to 68 (not left at 66)',
+      levels[4].logicalWidth === 66 && levels[4].width === 68
+    );
+  }
+
+  {
+    // Extreme aspect ratio: one axis reaches 1 long before the other. The loop
+    // must keep halving the LIVE axis while holding the settled one at 1, not
+    // stop early (which would leave the wide axis without a full chain).
+    const levels = computeMipChainDims(1024, 4);
+    const last = levels[levels.length - 1];
+    ok('1024x4 chain ends at logical 1x1', last.logicalWidth === 1 && last.logicalHeight === 1);
+    ok(
+      '1024x4 chain: height clamps to 1 and stays (never 0)',
+      levels.every((l) => l.logicalHeight >= 1)
+    );
+    ok(
+      '1024x4 chain: width strictly decreases until 1',
+      levels[1].logicalWidth === 512 && levels[2].logicalWidth === 256
+    );
+  }
+
+  throws('computeMipChainDims rejects a zero size', () => computeMipChainDims(0, 8), 'size');
+  throws('computeMipChainDims rejects a negative size', () => computeMipChainDims(8, -4), 'size');
+
+  // ---- mipChainByteLength: the honest whole-chain VRAM number --------------
+  {
+    // 8x8 BC1: level0 (8x8→2x2 blocks×8B=32) + level1 (4x4→1 block×8=8) +
+    // level2 (2x2 padded to 4x4→1 block×8=8) + level3 (1x1 padded to 4x4→8).
+    const total = mipChainByteLength('bc1', 8, 8);
+    ok('mipChainByteLength(bc1,8,8) sums every level, not just level 0', total === 32 + 8 + 8 + 8);
+    ok('mipChainByteLength(bc1,8,8) exceeds the level-0-only size', total > bc1ByteLength(8, 8));
+  }
+  {
+    // Same shape, BC7 (16B/block instead of 8) — format must change per-level size.
+    const total = mipChainByteLength('bc7', 8, 8);
+    ok('mipChainByteLength(bc7,8,8) uses 16B blocks at every level', total === 64 + 16 + 16 + 16);
+  }
+  {
+    // A non-power-of-2, non-multiple-of-4 base (the realistic case) must still
+    // sum to strictly more than the level-0-only figure, by roughly the
+    // chain's 4/3 geometric-series overhead (loosely, since padding rounds
+    // each small level up).
+    const w = 1050,
+      h = 1050;
+    const total = mipChainByteLength('bc1', w, h);
+    const level0Only = bc1ByteLength(w, h);
+    ok('mipChainByteLength(1050x1050) > level-0-only', total > level0Only);
+    ok('mipChainByteLength(1050x1050) stays within the ~4/3 chain-overhead ballpark', total < level0Only * 1.5);
+  }
 }

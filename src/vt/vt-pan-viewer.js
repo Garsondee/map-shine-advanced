@@ -55,10 +55,12 @@ import { PageCache } from './page-cache.js';
 import { PageTable, computeIndirectionAtlasLayout } from './page-table.js';
 import { computeAtlasLayout, PageAtlas } from './atlas.js';
 import { resolveRendererRequiredLimits, planImageTiles, WEBGPU_SPEC_MIN_TEXTURE_DIM } from './texture-limits.js';
-// bc1ByteLength / bc7ByteLength: exact GPU-resident sizes for the honest VRAM
-// accounting below (the BC-compression fix for the ~2.5GB WebGPU memory wall).
-// The encoder core is block-compress.js (Node-tested). Intra-zone (vt/), no door.
-import { bc1ByteLength, bc7ByteLength } from './block-compress.js';
+// mipChainByteLength: exact GPU-resident sizes (level 0 + the full mip chain)
+// for the honest VRAM accounting below (the BC-compression fix for the
+// ~2.5GB WebGPU memory wall; the mip chain itself is the "MSA noisier than
+// PIXI zoomed out" fix). The encoder core is block-compress.js (Node-tested).
+// Intra-zone (vt/), no door.
+import { mipChainByteLength } from './block-compress.js';
 // The BC-compression client (worker + IndexedDB cache). Opaque whole images come
 // back as BC1 blocks (8× smaller), alpha images as BC7 (4×, carries the alpha) —
 // the WebGPU-memory-ceiling fix; any failure returns null and the loader keeps
@@ -171,6 +173,10 @@ import {
   buildRegionLineMaterial,
   buildRegionEmanationRectangleMaterial,
   buildRegionEmanationPolygonMaterial,
+  buildUiShadowVisibility,
+  mapWindowRectToStamp,
+  MAX_UI_SHADOW_STAMPS,
+  DEFAULT_WORKSPACE_LIGHT,
 } from '../effects/index.js';
 import { makeFrameClock } from '../core/frame-clock.js';
 
@@ -311,6 +317,86 @@ export function setDarknessRealism(v) {
 /** @returns {number} the current darkness-realism lever value (0..1). */
 export function getDarknessRealism() {
   return _darknessRealism01;
+}
+
+/**
+ * UI-SHADOW state (2026-07-20) — open Foundry windows cast a soft offset shadow
+ * on the map. A screen-space visibility producer folded into light.accumulate,
+ * sibling to region-darkness: it MULTIPLY-darkens buf:scene.illum where a window
+ * floats, AFTER the point lights (v2, author feedback) — so a light inside a
+ * window's shadow keeps its own soft attenuation (just dimmer), instead of the
+ * hard MAX crease a before-lights multiply produced. DEFAULT ON (feedback_default_on_new_
+ * features); a no-op whenever no windows are open (every stamp strength 0 → the
+ * multiply is × 1). Tuned via MapShine.setUiShadow(...); toggled in the debug
+ * panel. `light` is DEFAULT_WORKSPACE_LIGHT — a fixed decorative key, NOT
+ * env.sun (UI chrome shadows should not swing with in-world time of day; see
+ * effects/lighting/light-visibility.js). `flipY` is the one Y-flip knob
+ * (feedback_y_flip_recurring_risk) — DEFAULT FALSE, corrected 2026-07-20 v3
+ * (author-reported live: dragging a window UP moved its shadow DOWN, the
+ * exact inverted-drag signature of a bad flip). `screenUV.y=0` is ALREADY at
+ * the top on this backend — vt-pan-viewer.js's own occlusion-mask comment
+ * proves it ("matches the v=0-is-top convention already proven by the
+ * orientation self-test"), the SAME top-down convention
+ * mapWindowRectToStamp's DOM rects use — so flipping was actively wrong, not
+ * merely untested. Kept as a knob (not deleted) only in case a future
+ * WebGPU/WebGL2 backend split ever disagrees with itself again — flip it if a
+ * window's shadow ever again moves opposite its drag. `lastWindowCount`/
+ * `lastStampCount` are written by the frame loop so the debug report can
+ * prove the reader is finding windows rather than silently doing nothing
+ * (feedback_instruments_must_not_lie).
+ */
+const _uiShadowState = {
+  enabled: true,
+  azimuthDeg: DEFAULT_WORKSPACE_LIGHT.azimuthDeg,
+  elevationDeg: DEFAULT_WORKSPACE_LIGHT.elevationDeg,
+  heightPx: DEFAULT_WORKSPACE_LIGHT.heightPx,
+  strength01: DEFAULT_WORKSPACE_LIGHT.strength01,
+  baseSoftnessPx: 10,
+  maxOffsetPx: 400,
+  // Cosmetic offset-length multiplier (author-requested 2026-07-20 v4: "make
+  // the shadow offset x5"). Deliberately independent of heightPx, which alone
+  // still drives the penumbra — see DEFAULT_WORKSPACE_LIGHT's own comment.
+  offsetScale: DEFAULT_WORKSPACE_LIGHT.offsetScale,
+  // How many frames between DOM window-rect re-scans (2026-07-20 v5, author-
+  // measured perf fix: 120fps → 78fps at scanEveryNFrames:1). See
+  // updateUiShadowStamps' own header for why the DOM read — not the shader —
+  // is the cost. 6 ≈ a scan every ~50ms at 120fps; window drag still reads as
+  // smooth. Raise it for more headroom, or set to 1 to restore per-frame
+  // precision (e.g. while diagnosing a positioning bug).
+  scanEveryNFrames: 6,
+  flipY: false,
+  lastWindowCount: 0,
+  lastStampCount: 0,
+};
+
+/**
+ * Tune / toggle the UI-cast window shadows. Merges the given fields; unknown or
+ * non-finite numbers are ignored (never NaN into a uniform). Returns the merged
+ * state so a console caller can read back what took.
+ * @param {Partial<{enabled:boolean, azimuthDeg:number, elevationDeg:number, heightPx:number, strength01:number, baseSoftnessPx:number, maxOffsetPx:number, offsetScale:number, scanEveryNFrames:number, flipY:boolean}>} [partial]
+ * @returns {object} a copy of the live state.
+ */
+export function setUiShadow(partial = {}) {
+  const p = partial ?? {};
+  if (typeof p.enabled === 'boolean') _uiShadowState.enabled = p.enabled;
+  if (typeof p.flipY === 'boolean') _uiShadowState.flipY = p.flipY;
+  const num = (k, lo, hi) => {
+    if (Number.isFinite(p[k])) _uiShadowState[k] = Math.min(hi, Math.max(lo, p[k]));
+  };
+  num('azimuthDeg', -3600, 3600);
+  num('elevationDeg', 0.5, 90);
+  num('heightPx', 0, 4000);
+  num('strength01', 0, 1);
+  num('offsetScale', 0.1, 20);
+  num('baseSoftnessPx', 0, 400);
+  num('maxOffsetPx', 0, 4000);
+  num('scanEveryNFrames', 1, 60);
+  return { ..._uiShadowState };
+}
+
+/** @returns {object} a copy of the live UI-shadow state (incl. last detected counts). */
+export function getUiShadow() {
+  return { ..._uiShadowState };
 }
 
 /**
@@ -800,8 +886,75 @@ export async function startVtPanViewer({
     const requiredLimits = await resolveRendererRequiredLimits();
     const renderer = new THREE.WebGPURenderer({ canvas, antialias: false, requiredLimits });
     await renderer.init(); // REQUIRED before any use — the backend is chosen here
-    renderer.setPixelRatio(1);
+
+    // PIXEL-RATIO PARITY (2026-07-19 — "MSA mushes the artwork's pen outlines
+    // away when zoomed out; PIXI keeps them crisp"). This used to hard-code
+    // setPixelRatio(1) regardless of the display's real density, while
+    // Foundry's OWN canvas renders at window.devicePixelRatio by default
+    // (client setting "pixelRatioResolutionScaling", initial:true — verified
+    // against client/canvas/board.mjs: `resolution: ... ? window.
+    // devicePixelRatio : 1`). On any display with devicePixelRatio > 1 (the
+    // common case — 125%/150%/200% Windows scaling, Retina), PIXI's canvas
+    // therefore has MORE actual pixels than MSA's for the identical
+    // on-screen view, so PIXI samples the map texture at a FINER (less
+    // minified) level for what looks like the same zoom — exactly why its
+    // thin dark outlines survive while MSA's, covering the same view with
+    // fewer samples, fall a mip level (or more) further into the chain. The
+    // mip chain built earlier this session is real and correct; it was never
+    // going to close a gap caused by rendering at a coarser backing
+    // resolution than Foundry in the first place.
+    //
+    // THE FIX mirrors Foundry's OWN resolved value rather than re-deriving
+    // the policy: `canvas.app.renderer` is the live PIXI Renderer (read the
+    // same way foundry/canvas-compositing.js already reads
+    // `canvas.app.renderer.background`), and `.resolution` is its
+    // post-setting number (verified against the vendored @pixi/core
+    // Renderer class). Reading Foundry's actual value — instead of
+    // `window.devicePixelRatio` directly — stays correct even if the player
+    // has Foundry's own "Disable Resolution Scaling" setting off. Defensive
+    // like every other live canvas.* read in this file (syncFoundryCamera):
+    // missing/invalid falls back to the OLD behaviour, never worse than
+    // before this fix. Capped at 4 as a sanity bound against a garbage
+    // read turning into a device-killing allocation (Keyhole.md §0) — not a
+    // policy choice; no real display exceeds this today.
+    //
+    // COST, stated plainly: this is a real fill-rate trade. A 2x-resolution
+    // display now shades 4x the pixels through MSA's full effects pipeline
+    // (region darkness, point lights, illumination); 3x is 9x. That is the
+    // SAME cost PIXI already pays at ITS default setting, not a new one MSA
+    // introduces — but if frame rate suffers, Foundry's own "Disable
+    // Resolution Scaling" client setting is the lever, exactly as it would
+    // be for Foundry's own canvas.
+    const foundryResolution = globalThis.canvas?.app?.renderer?.resolution;
+    const pixelRatio = Number.isFinite(foundryResolution) && foundryResolution > 0 ? Math.min(foundryResolution, 4) : 1;
+    renderer.setPixelRatio(pixelRatio);
     renderer.setSize(canvasW, canvasH, false);
+
+    // THE DRAWING BUFFER, in actual device pixels — NOT canvasW/canvasH, which
+    // stay in CSS pixels for every camera/layout computation in this file
+    // (syncFoundryCamera's halfSpan math, measureHost, etc. — those must NOT
+    // change, since Foundry's own camera framing is itself CSS-pixel/stage-
+    // scale based). `renderer.getDrawingBufferSize()` is three's own
+    // canonical width*pixelRatio/height*pixelRatio (verified against the
+    // vendored source, Renderer.getDrawingBufferSize -> canvasTarget's, same
+    // floor() three uses internally) — reading it back rather than
+    // recomputing canvasW*pixelRatio by hand avoids a second place that could
+    // round differently from what three actually allocated.
+    //
+    // WHY THIS EXISTS: describeSceneColor/describeOcclusionMask below feed
+    // this into every screenSized render target (scene.color, scene.illum,
+    // scene.lit, scene.coloration, occlusion.mask) — the buffers the world
+    // quad (map art) actually gets drawn INTO. Before this, those buffers
+    // were sized off canvasW/canvasH directly (CSS pixels) — accidentally
+    // correct only because pixelRatio was hard-coded to 1. Fixing pixelRatio
+    // alone, without this, would have changed nothing but the canvas's own
+    // backing-buffer size: the map would still have been RENDERED (and its
+    // texture SAMPLED/minified) at the old, coarser CSS-pixel resolution,
+    // then upscaled onto a bigger canvas — the actual sharpness bug
+    // untouched. This is the half that makes the pixel-ratio fix real.
+    const drawBufSize = renderer.getDrawingBufferSize(new THREE.Vector2());
+    let drawBufW = drawBufSize.width;
+    let drawBufH = drawBufSize.height;
 
     // The texture cap the device ACTUALLY granted (see resolveRendererRequiredLimits
     // above + texture-limits.js). Whole-image mode plans each image into tiles
@@ -902,9 +1055,16 @@ export async function startVtPanViewer({
               const rs = wi.rawScale || 1;
               let b = 0;
               for (const t of wi.tiles) {
-                if (isBc7) b += bc7ByteLength(t.tile.sw, t.tile.sh);
-                else if (isBc1) b += bc1ByteLength(t.tile.sw, t.tile.sh);
-                else b += Math.round(t.tile.sw * rs) * Math.round(t.tile.sh * rs) * 4;
+                // mipChainByteLength: the FULL chain's bytes, not just level 0
+                // (the mip-chain fix — see block-compress.js). The raw branch's
+                // *4/3 matches three.webgpu.js's OWN mip-overhead accounting
+                // (`size * 1.333` for a generateMipmaps:true texture) — an
+                // approximation there because the GPU's auto-generated chain
+                // isn't bytes this codebase computes itself, unlike the
+                // hand-built BC chain, which is exact.
+                if (isBc7) b += mipChainByteLength('bc7', t.tile.sw, t.tile.sh);
+                else if (isBc1) b += mipChainByteLength('bc1', t.tile.sw, t.tile.sh);
+                else b += Math.round(t.tile.sw * rs) * Math.round(t.tile.sh * rs) * 4 * (4 / 3);
               }
               bytes += b;
               if (wi.status === 'ready') ready++;
@@ -991,8 +1151,11 @@ export async function startVtPanViewer({
     // §4.2's whole inventory is budgeted on that.
     const allocator = new ThreeAllocator({ THREE });
     const describeSceneColor = () => ({
-      resolvedW: canvasW,
-      resolvedH: canvasH,
+      // Device pixels (drawBufW/H), NOT CSS pixels (canvasW/H) — see this
+      // function's siting, right after where drawBufW/H is computed, for why
+      // the distinction is load-bearing (the pixel-ratio-parity fix).
+      resolvedW: drawBufW,
+      resolvedH: drawBufH,
       // O(screen), not O(world) — sized from the drawing buffer, so it scales
       // with the player's monitor and never with the map. See the allocator's
       // own note on why this is NOT `allowWorldScale`.
@@ -1030,16 +1193,130 @@ export async function startVtPanViewer({
     // light.js's composite essay for why a linear-space add washed the scene
     // to a single hue and gamma-space fixes it).
     const sceneColoration = allocator.create('scene.coloration', describeSceneColor());
+
+    // ========================================================================
+    // UI-SHADOW — open Foundry windows cast a soft offset shadow (2026-07-20).
+    // ========================================================================
+    // Built BEFORE envLight (below) because its `visNode` is composed directly
+    // into the composite shader — NO separate quad/material/render() call (v6,
+    // author-measured PERFORMANCE FIX: the v5 DOM-read throttle barely moved
+    // the FPS, proving the extra `render()` CALL itself — not the DOM read —
+    // was the dominant cost; folding the box-SDF math into the ALREADY-
+    // running composite pass removes that call entirely). TSL lives in
+    // effects/lighting/light-visibility.js (browser-only); the geometry
+    // mapper is Node-tested there. Reads open windows from the DOM read-only
+    // — never touches their input (canvas is pointer-events:none; keyhole-
+    // interface-seam + keyhole-input-model-decision hold). See
+    // _uiShadowState / setUiShadow.
+    const uiShadow = buildUiShadowVisibility({ THREE });
+
     const envLight = buildEnvironmentalLightMaterials({
       THREE,
       albedoTexture: sceneColor.texture,
       illumTexture: sceneIllum.texture,
       colorationTexture: sceneColoration.texture,
+      uiShadowVisNode: uiShadow.visNode,
     });
     // QuadMesh (never a hand-rolled quad — same Y-flip law the present pass
     // documents at length below): the vendor owns v=0-at-top on both backends.
     const illumQuad = new THREE.QuadMesh(envLight.illumMaterial);
     const compositeQuad = new THREE.QuadMesh(envLight.compositeMaterial);
+
+    // THROTTLE (2026-07-20 v5; kept as a SECONDARY optimization after v6
+    // removed the dominant cost — the extra render() call, see uiShadow's own
+    // construction comment above and buildUiShadowVisibility's header). The
+    // DOM read itself is still real, non-zero main-thread work: it is
+    // `canvas.getBoundingClientRect()` +
+    // `document.querySelectorAll` + one `getBoundingClientRect()` per open
+    // window, all on the MAIN thread, every single frame. `getBoundingClient
+    // Rect()` forces the browser to flush any pending layout (a synchronous
+    // reflow) — in a live Foundry session (chat, combat tracker, animations
+    // constantly touching the DOM) that flush is real, repeated work, and
+    // Foundry v14's ApplicationV2 core chrome (sidebar/hotbar/players list)
+    // ALSO carries the `.application` class the query matches, widening the
+    // scan. A frame-count throttle (not a time-based one — `time/one-clock`
+    // in tools/verify-structure.mjs reserves `performance.now()`/`Date.now()`
+    // to core/frame-clock.js + diag/, and this file is already at its
+    // grandfathered ratchet limit) skips the DOM read on most frames and
+    // reuses the PREVIOUS scan's uniforms/count in between — window drag
+    // motion still reads as smooth (the shadow catches up within a handful
+    // of frames, imperceptible), while the reflow only happens 1/Nth as
+    // often. Tunable via MapShine.setUiShadow({ scanEveryNFrames }).
+    let _uiShadowFrameCounter = 0;
+
+    /**
+     * Read this frame's open, framed Foundry windows (ApplicationV2 `.application`
+     * and legacy `.app.window-app`, both identified by a direct-child
+     * `.window-header` — which excludes docked UI like the sidebar), map each to
+     * a shadow stamp, and push them into `uiShadow`'s uniforms (consumed every
+     * frame by the composite shader's `visNode` multiply — v6: there is no
+     * longer a separate draw to skip, so correctness now depends on this
+     * function actively clearing the uniforms when disabled, not merely on the
+     * caller declining to render). Records detected/active counts on
+     * `_uiShadowState` so the debug report can prove it is finding windows
+     * (never a silent no-op). On a throttled (skipped) frame, the uniforms are
+     * left untouched — the composite keeps using the most recent known window
+     * positions rather than flickering off.
+     * @returns {number}
+     */
+    function updateUiShadowStamps() {
+      if (!_uiShadowState.enabled || !canvas) {
+        _uiShadowState.lastWindowCount = 0;
+        _uiShadowState.lastStampCount = 0;
+        _uiShadowFrameCounter = 0;
+        // MUST clear explicitly now (v6): visNode is always evaluated by the
+        // composite shader, so stale non-zero uniforms from before a disable
+        // would keep casting a shadow forever — there's no draw-skip to hide it.
+        uiShadow.setStamps([]);
+        return 0;
+      }
+      _uiShadowFrameCounter++;
+      const interval = Math.max(1, Math.round(_uiShadowState.scanEveryNFrames));
+      // -1 so the FIRST call (counter becomes 1) always scans immediately —
+      // no delay when the feature is freshly enabled or a window just opened.
+      if ((_uiShadowFrameCounter - 1) % interval !== 0) {
+        return _uiShadowState.lastStampCount;
+      }
+      const canvasRect = canvas.getBoundingClientRect();
+      uiShadow.setResolution(canvasRect.width, canvasRect.height);
+      uiShadow.setFlipY(_uiShadowState.flipY);
+      const light = {
+        azimuthDeg: _uiShadowState.azimuthDeg,
+        elevationDeg: _uiShadowState.elevationDeg,
+        heightPx: _uiShadowState.heightPx,
+      };
+      const opts = {
+        strength01: _uiShadowState.strength01,
+        baseSoftnessPx: _uiShadowState.baseSoftnessPx,
+        maxOffsetPx: _uiShadowState.maxOffsetPx,
+        offsetScale: _uiShadowState.offsetScale,
+      };
+      const stamps = [];
+      let detected = 0;
+      const els = document.querySelectorAll('.application, .app.window-app');
+      for (const el of els) {
+        // Only floating, framed windows (a title bar to grab) — not docked apps.
+        if (!el.querySelector(':scope > .window-header')) continue;
+        if (el.classList.contains('minimized')) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 1 || r.height < 1) continue;
+        detected++;
+        if (stamps.length >= MAX_UI_SHADOW_STAMPS) continue; // count all, cast the first N
+        stamps.push(
+          mapWindowRectToStamp(
+            { left: r.left, top: r.top, width: r.width, height: r.height },
+            { left: canvasRect.left, top: canvasRect.top, width: canvasRect.width, height: canvasRect.height },
+            light,
+            opts
+          )
+        );
+      }
+      uiShadow.setStamps(stamps);
+      _uiShadowState.lastWindowCount = detected;
+      _uiShadowState.lastStampCount = stamps.length;
+      return stamps.length;
+    }
+
     /** Re-assert the light pass's samplers after a resize. Belt-and-braces:
      * RenderTarget#setSize mutates textures IN PLACE (see rebindPresent /
      * onResize), so the nodes already point at the right objects; this only
@@ -1857,6 +2134,15 @@ export async function startVtPanViewer({
       // `sceneIllum` has no depth/stencil buffer (describeSceneColor's own
       // `depth:false`), so autoClearColor alone is the complete, correct fix
       // — no depth/stencil clearing is being silently skipped alongside it.
+      // UI-SHADOW (2026-07-20 v6): read open windows, project their stamps,
+      // push uniforms into `uiShadow` — consumed by the COMPOSITE shader below
+      // (envLight.compositeMaterial, built with uiShadow.visNode), NOT drawn
+      // here. No separate render() call for this feature at all (the v6 perf
+      // fix: an extra render pass was the dominant per-frame cost, not the DOM
+      // read — see buildUiShadowVisibility's header). With no windows open,
+      // updateUiShadowStamps clears every uniform, visNode evaluates to a
+      // uniform 1, and the composite's multiply is a provable no-op.
+      updateUiShadowStamps();
       const previousAutoClearColor = renderer.autoClearColor;
       renderer.autoClearColor = false;
       renderer.setRenderTarget(sceneIllum);
@@ -1997,8 +2283,9 @@ export async function startVtPanViewer({
     //   G = written per-frame by real token discs.
     //   B/A = 1 always (VISION/SURFACE not built) -> step() -> never occluded.
     const describeOcclusionMask = () => ({
-      resolvedW: canvasW,
-      resolvedH: canvasH,
+      // Device pixels — see describeSceneColor's note (same pixel-ratio-parity fix).
+      resolvedW: drawBufW,
+      resolvedH: drawBufH,
       screenSized: true,
       type: THREE.UnsignedByteType,
       colorSpace: THREE.NoColorSpace,
@@ -2904,32 +3191,41 @@ export async function startVtPanViewer({
           // rendering (the safety slide).
           try {
             const c = await requestCompressedTexture(item.src);
-            if (c && (c.format === 'bc1' || c.format === 'bc7') && c.blocks) {
+            if (c && (c.format === 'bc1' || c.format === 'bc7') && c.levels?.length) {
               // A block-compressed texture's dimensions MUST be a multiple of 4
               // (the 4×4 block). The worker encodes ceil(w/4)×ceil(h/4) blocks with
-              // edge-clamped padding, so the block buffer IS a valid encoding of the
-              // padded size — upload at padW×padH (WebGPU rejects the raw 1050×1050
-              // etc. that lost the device) and let the material's uvScale sample
-              // only the logical w×h sub-rect. The block count (hence byte length)
-              // already matches the padded size, so only the width/height and the
-              // format enum change between BC1 and BC7.
+              // edge-clamped padding, so each level's block buffer IS a valid
+              // encoding of ITS OWN padded size (already applied by the worker —
+              // see bc-compress.worker.js) — upload at padW×padH (WebGPU rejects
+              // the raw 1050×1050 etc. that lost the device) and let the
+              // material's uvScale sample only the logical w×h sub-rect. The
+              // block count (hence byte length) already matches the padded size,
+              // so only the width/height and the format enum change between
+              // BC1 and BC7.
+              //
+              // THE MIP CHAIN (2026-07-19 — "MSA looks noisier than PIXI zoomed
+              // out"): levels[0] is the full-resolution level exactly as
+              // before; levels[1..] are the pre-encoded mip chain
+              // (bc-compress.worker.js — a block-compressed texture cannot have
+              // its mips GPU-auto-generated, so a real chain must be supplied).
+              // Handing THREE the full array is all multi-level upload needs
+              // (verified against three.webgpu.js: `_copyCompressedBufferToTexture`
+              // reads each `mipmaps[i].width/height` independently, and
+              // `getMipLevels` uses `mipmaps.length` directly as the level
+              // count) — no other call here changes.
               const threeFormat = c.format === 'bc7' ? THREE.RGBA_BPTC_Format : THREE.RGBA_S3TC_DXT1_Format;
-              const padW = Math.ceil(c.width / 4) * 4;
-              const padH = Math.ceil(c.height / 4) * 4;
-              const tex = new THREE.CompressedTexture(
-                [{ data: c.blocks, width: padW, height: padH }],
-                padW,
-                padH,
-                threeFormat
-              );
+              const mipmaps = c.levels.map((lvl) => ({ data: lvl.blocks, width: lvl.width, height: lvl.height }));
+              const padW = mipmaps[0].width;
+              const padH = mipmaps[0].height;
+              const tex = new THREE.CompressedTexture(mipmaps, padW, padH, threeFormat);
               // Block rows are top-first (getImageData order), same as the raw
               // bitmap path — so v=0 = top, matching the world-quad convention.
               // Y-FLIP is a recurring bug class (memory: y_flip_recurring_risk):
               // if a compressed floor renders upside-down, this is the line.
               tex.flipY = false;
               tex.colorSpace = THREE.SRGBColorSpace;
-              tex.generateMipmaps = false;
-              tex.minFilter = THREE.LinearFilter;
+              tex.generateMipmaps = false; // already forced by isCompressedTexture; explicit for clarity — mips are hand-supplied above
+              tex.minFilter = THREE.LinearMipmapLinearFilter; // real trilinear across the supplied chain
               tex.magFilter = THREE.LinearFilter;
               tex.needsUpdate = true;
               try {
@@ -2992,8 +3288,18 @@ export async function startVtPanViewer({
             const tex = new THREE.Texture(bitmap);
             tex.flipY = false; // v=0 = image top row — the world-quad convention
             tex.colorSpace = THREE.SRGBColorSpace; // art is sRGB; sample decodes to linear
-            tex.generateMipmaps = false;
-            tex.minFilter = THREE.LinearFilter;
+            // Real mips (2026-07-19 — "MSA noisier than PIXI zoomed out"): this
+            // used to force generateMipmaps:false + LinearFilter, copied from
+            // atlas.js's page atlas where that pairing is correct for a DIFFERENT
+            // reason (an atlas slot's neighbours are arbitrary bookkeeping — see
+            // atlas.js's header). This is one ordinary whole image; minifying it
+            // with no mip chain is plain aliasing. THREE.Texture defaults to
+            // generateMipmaps:true — an uncompressed texture CAN have its chain
+            // GPU-auto-generated (unlike the BC1/BC7 path above, which cannot and
+            // gets a hand-built chain instead), so this now just stops overriding
+            // that default.
+            tex.generateMipmaps = true;
+            tex.minFilter = THREE.LinearMipmapLinearFilter;
             tex.magFilter = THREE.LinearFilter;
             tex.needsUpdate = true;
             // Force the GPU upload NOW, then free the decoded CPU-side bitmap.
@@ -3446,7 +3752,12 @@ export async function startVtPanViewer({
         width: state.worldBounds.maxX - state.worldBounds.minX,
         height: state.worldBounds.maxY - state.worldBounds.minY,
       };
-      const viewportPx = computeItemViewportPx(worldRect, { width: canvasW, height: canvasH }, quadWorldSize);
+      // Device pixels, not canvasW/H — mip selection should target the actual
+      // rendered pixel density (the pixel-ratio-parity fix), same reasoning
+      // as describeSceneColor's resolvedW/H, so the streaming path (OFF by
+      // default) doesn't quietly stay CSS-pixel-scoped after the default
+      // whole-image path was corrected.
+      const viewportPx = computeItemViewportPx(worldRect, { width: drawBufW, height: drawBufH }, quadWorldSize);
 
       // Analytic mip selection (§4.1 — top-down camera, no GPU feedback): the
       // finest mip that resolves at this size, plus BOTH neighbour mips as a
@@ -4344,17 +4655,24 @@ export async function startVtPanViewer({
         canvasW = width;
         canvasH = height;
         renderer.setSize(canvasW, canvasH, false);
+        // Re-read the drawing buffer, not canvasW*pixelRatio by hand — same
+        // reasoning as the initial setup above (avoids a second place that
+        // could round differently from what three actually allocated).
+        const resized = renderer.getDrawingBufferSize(new THREE.Vector2());
+        drawBufW = resized.width;
+        drawBufH = resized.height;
         // buf:scene.color tracks the drawing buffer — that IS what screenSized
         // means. `allocator.resize()` re-enforces the law on the new size
         // (its own doc: "a resize storm can't smuggle a world-res target past
-        // the law that create() already enforced").
-        allocator.resize(sceneColor, canvasW, canvasH, describeSceneColor());
+        // the law that create() already enforced"). Device pixels (drawBufW/H),
+        // matching describeSceneColor's own resolvedW/H — see its note.
+        allocator.resize(sceneColor, drawBufW, drawBufH, describeSceneColor());
         // light.accumulate's targets track the drawing buffer too (same
         // screenSized law). setSize mutates textures in place, so the samplers
         // stay valid; rebind* only flag needsUpdate.
-        allocator.resize(sceneIllum, canvasW, canvasH, describeSceneColor());
-        allocator.resize(sceneLit, canvasW, canvasH, describeSceneColor());
-        allocator.resize(sceneColoration, canvasW, canvasH, describeSceneColor());
+        allocator.resize(sceneIllum, drawBufW, drawBufH, describeSceneColor());
+        allocator.resize(sceneLit, drawBufW, drawBufH, describeSceneColor());
+        allocator.resize(sceneColoration, drawBufW, drawBufH, describeSceneColor());
         rebindPresent();
         rebindLighting();
         // buf:occlusion tracks the drawing buffer too — same reasoning. No
@@ -4363,7 +4681,7 @@ export async function startVtPanViewer({
         // than replacing it, so every material's already-baked `texture(
         // occlusionMask.texture, screenUV)` node keeps pointing at the right
         // object — verified against the vendored source before relying on it.
-        allocator.resize(occlusionMask.rt, canvasW, canvasH, describeOcclusionMask());
+        allocator.resize(occlusionMask.rt, drawBufW, drawBufH, describeOcclusionMask());
         await scheduleResidencyUpdate().catch((err) => console.error('[vt-pan-viewer] resize residency failed:', err));
       });
     }
@@ -4588,7 +4906,10 @@ export async function startVtPanViewer({
       const worldRect = viewToWorldRect(view, canvasW / canvasH);
       const ndc = worldToNdc({ x: worldX, y: worldY }, worldRect);
       const onScreen = ndc.x >= -1 && ndc.x <= 1 && ndc.y >= -1 && ndc.y <= 1;
-      const pixel = ndcToPixel(ndc, canvasW, canvasH);
+      // Device pixels, not canvasW/H — these buffers are now sized in DEVICE
+      // pixels (the pixel-ratio-parity fix), and readRenderTargetPixelsAsync
+      // indexes into the buffer's own pixel grid, not CSS pixels.
+      const pixel = ndcToPixel(ndc, drawBufW, drawBufH);
       const readOne = async (target, decode) => {
         const raw = await renderer.readRenderTargetPixelsAsync(target, pixel.x, pixel.y, 1, 1);
         return { raw: raw ? Array.from(raw) : null, rgba: decode(raw) };
@@ -4739,8 +5060,10 @@ export async function startVtPanViewer({
         if (sample.onScreen && sample.pixel) {
           markers.push({
             index,
-            xPercent: (sample.pixel.x / canvasW) * 100,
-            yPercent: (sample.pixel.y / canvasH) * 100,
+            // sample.pixel is in device pixels (see sampleOnePixel) — divide
+            // by the same unit so the percent lands at the right on-screen spot.
+            xPercent: (sample.pixel.x / drawBufW) * 100,
+            yPercent: (sample.pixel.y / drawBufH) * 100,
           });
         }
       }
@@ -5743,6 +6066,12 @@ export async function startVtPanViewer({
               'position can legitimately take a beat).',
           },
           canvasSizePx: { width: canvasW, height: canvasH },
+          // The pixel-ratio-parity fix (2026-07-19): drawBufSizePx is what the
+          // world quad actually renders/samples at; it now legitimately
+          // differs from canvasSizePx whenever pixelRatio > 1. If they ever
+          // look wrong together, this is the first thing to check.
+          drawBufSizePx: { width: drawBufW, height: drawBufH },
+          pixelRatio,
           mountedInBoard: mount.fill && mount.host !== document.body,
           cacheStats: cache.stats(),
           // WHOLE-IMAGE MODE STATE — the primary instrument for the "load images
@@ -5769,11 +6098,16 @@ export async function startVtPanViewer({
               const rs = wi.rawScale || 1; // <1 only on the capped raw fallback
               let bytes = 0;
               for (const tt of wi.tiles) {
-                totalBc1Bytes += bc1ByteLength(tt.tile.sw, tt.tile.sh); // BC1 reference size (projection column)
-                if (isBc7) bytes += bc7ByteLength(tt.tile.sw, tt.tile.sh);
-                else if (isBc1) bytes += bc1ByteLength(tt.tile.sw, tt.tile.sh);
-                // raw RGBA8 at the ACTUALLY uploaded size (the fallback cap shrinks it)
-                else bytes += Math.round(tt.tile.sw * rs) * Math.round(tt.tile.sh * rs) * 4;
+                // BC1 reference size (projection column) — the FULL chain's
+                // bytes, matching what real BC1 usage now costs (mip-chain fix).
+                totalBc1Bytes += mipChainByteLength('bc1', tt.tile.sw, tt.tile.sh);
+                if (isBc7) bytes += mipChainByteLength('bc7', tt.tile.sw, tt.tile.sh);
+                else if (isBc1) bytes += mipChainByteLength('bc1', tt.tile.sw, tt.tile.sh);
+                // raw RGBA8 at the ACTUALLY uploaded size (the fallback cap shrinks
+                // it), *4/3 for its own now-real mip chain — see the other
+                // wholeImage snapshot above for why this one stays an
+                // approximation instead of an exact per-level sum.
+                else bytes += Math.round(tt.tile.sw * rs) * Math.round(tt.tile.sh * rs) * 4 * (4 / 3);
               }
               totalBytes += bytes;
               freed += wi.bitmapsFreed;

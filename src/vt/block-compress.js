@@ -473,6 +473,95 @@ export function bc7ByteLength(width, height) {
 }
 
 // ===========================================================================
+// MIP CHAIN DIMENSIONS — the "MSA looks noisier than PIXI when zoomed out" fix
+// (2026-07-19, author screenshot comparison at matched zoom levels).
+//
+// THE CAUSE: every whole-image texture (compressed AND raw fallback) was built
+// with generateMipmaps:false + LinearFilter. That pairing was copied from
+// atlas.js's page atlas, where it is CORRECT (an atlas slot's neighbours are
+// arbitrary bookkeeping, so automatic mip selection across a page boundary is
+// meaningless — see atlas.js's own header). A whole-image texture is not an
+// atlas: it is one ordinary image, and minifying it with no mip chain is
+// textbook aliasing — exactly what PIXI's own mipmapped textures don't show.
+// The fix restores real prefiltering; it does not touch the atlas or the
+// indirection texture, where the no-mipmap rule still applies.
+//
+// A block-compressed format (BC1/BC7) cannot have its mip chain
+// GPU-auto-generated — `generateMipmaps` only drives the WebGPU/WebGL
+// backend's own box-filter pass, which does not run on block-compressed data
+// (verified: three.webgpu.js's `getMipLevels`/`needsMipmaps` key off
+// `texture.mipmaps.length`, not the boolean, for exactly this reason — see
+// bc-compress.worker.js's header for the encode-side half of this fix). So a
+// REAL chain must be supplied, one BC-encoded level per mip, precomputed here.
+//
+// THIS FUNCTION is the pure geometry: given a level-0 size already padded to
+// the 4×4 block grid, what size is every subsequent level? Verified against
+// three.webgpu.js's `_copyCompressedBufferToTexture` (`bytesPerRow`/
+// `textureWidth` are derived from `mipmap.width` ALONE, per level — there is
+// no cross-level dependency at upload time), so the only thing that must
+// match is what `device.createTexture` implicitly allocates per level, which
+// is the standard GPU rule `max(1, base >> level)`. Iterating "halve the
+// previous level" is PROVABLY identical to computing `base >> i` directly,
+// because integer right-shift composes exactly: `(a >> 1) >> 1 === a >> 2`.
+// That equivalence is what makes a level-by-level loop (needed anyway, since
+// each level is independently re-downsampled from the source — see the
+// worker) land on exactly the sizes a real GPU mip chain expects, with no
+// separate "recompute from the top" step required.
+// ===========================================================================
+
+/**
+ * The full GPU mip-chain size sequence for a block-compressed texture whose
+ * level 0 is already padded to the 4×4 block grid (`Math.ceil(_/4)*4`). Pure;
+ * no encoding happens here — this only says how big each level is.
+ *
+ * @param {number} padW0 - level 0 width, already a multiple of 4.
+ * @param {number} padH0 - level 0 height, already a multiple of 4.
+ * @returns {Array<{logicalWidth:number, logicalHeight:number, width:number, height:number}>}
+ *   one entry per mip level, level 0 first, ending at a 1×1 (or 1×N/N×1 for an
+ *   extreme aspect ratio) level. `logicalWidth/logicalHeight` is the exact
+ *   resolution to render/encode this level AT (what the worker downsamples
+ *   the source image to); `width/height` is that, re-padded to the block grid
+ *   — the value to declare as the mipmap's own width/height (matches level 0's
+ *   own convention of storing the padded size directly).
+ */
+export function computeMipChainDims(padW0, padH0) {
+  if (!(padW0 > 0) || !(padH0 > 0)) {
+    throw new Error(`computeMipChainDims: bad base size ${padW0}x${padH0}`);
+  }
+  const levels = [{ logicalWidth: padW0, logicalHeight: padH0, width: padW0, height: padH0 }];
+  let w = padW0;
+  let h = padH0;
+  while (w > 1 || h > 1) {
+    w = Math.max(1, w >> 1);
+    h = Math.max(1, h >> 1);
+    levels.push({ logicalWidth: w, logicalHeight: h, width: Math.ceil(w / 4) * 4, height: Math.ceil(h / 4) * 4 });
+  }
+  return levels;
+}
+
+/**
+ * TOTAL GPU-resident bytes for a block-compressed texture's FULL mip chain —
+ * the honest VRAM number now that whole-image BC1/BC7 textures carry a real
+ * chain (see this file's mip-chain header). A single-level `bc1ByteLength`/
+ * `bc7ByteLength` call under-reports by ~33% (the chain's own geometric-series
+ * overhead, 1 + 1/4 + 1/16 + ... → 4/3) — exactly the class of drift
+ * memory:feedback_instruments_must_not_lie exists to catch, so this sums the
+ * SAME per-level padded sizes the worker actually encodes and uploads
+ * (`computeMipChainDims`), not an approximation of them.
+ * @param {'bc1'|'bc7'} format @param {number} width @param {number} height -
+ *   the LOGICAL (pre-padding) level-0 size, e.g. a tile's own `sw`/`sh`.
+ * @returns {number} total bytes across every level.
+ */
+export function mipChainByteLength(format, width, height) {
+  const perLevel = format === 'bc7' ? bc7ByteLength : bc1ByteLength;
+  const padW0 = Math.ceil(width / 4) * 4;
+  const padH0 = Math.ceil(height / 4) * 4;
+  let total = 0;
+  for (const lvl of computeMipChainDims(padW0, padH0)) total += perLevel(lvl.width, lvl.height);
+  return total;
+}
+
+// ===========================================================================
 // STRIP DRIVER — encode without ever holding the whole image in memory.
 //
 // WHY (2026-07-18, measured): the worker used to `getImageData(0,0,w,h)` the

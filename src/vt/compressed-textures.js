@@ -29,7 +29,7 @@ function ensureWorker() {
   try {
     _worker = new Worker(new URL('./bc-compress.worker.js', import.meta.url), { type: 'module' });
     _worker.onmessage = (e) => {
-      const { id, ok, format, blocks, width, height, cached, alphaStats } = e.data || {};
+      const { id, ok, format, levels, width, height, cached, alphaStats } = e.data || {};
       const p = _pending.get(id);
       if (!p) return;
       _pending.delete(id);
@@ -43,7 +43,9 @@ function ensureWorker() {
       else _stats.bc1++;
       p.resolve({
         format,
-        blocks: new Uint8Array(blocks),
+        // levels[0] is the full-resolution level; the rest are the mip chain
+        // (the "MSA noisier than PIXI zoomed out" fix — see bc-compress.worker.js).
+        levels: levels.map((lvl) => ({ width: lvl.width, height: lvl.height, blocks: new Uint8Array(lvl.blocks) })),
         width,
         height,
         cached: !!cached,
@@ -69,7 +71,8 @@ function ensureWorker() {
  * opaque, BC7 if it has alpha. The caller picks the matching THREE format.
  * @param {string} src root-absolute asset URL (same string the raw path fetches)
  * @returns {Promise<
- *   | { format: 'bc1'|'bc7', blocks: Uint8Array, width: number, height: number, cached: boolean,
+ *   | { format: 'bc1'|'bc7', levels: Array<{width:number,height:number,blocks:Uint8Array}>,
+ *       width: number, height: number, cached: boolean,
  *       alphaStats: {min:number,max:number,mean:number}|null }
  *   | null                              // worker unavailable/failed — caller uses a raw texture
  * >}

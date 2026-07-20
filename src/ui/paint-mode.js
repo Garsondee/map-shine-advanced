@@ -47,6 +47,8 @@ import {
   stampBrushWorld,
   serializePaintedMasks,
   hydratePaintedMasks,
+  encodedByteEstimate,
+  PAINT_EMBED_BYTE_BUDGET,
   MASK_KINDS,
 } from '../scene/index.js';
 import { readPaintContext, savePaintedMasks, loadPaintedMasks } from '../foundry/index.js';
@@ -78,6 +80,7 @@ export function installPainter(MapShine) {
     kind: PAINTABLE_KINDS[0]?.id ?? 'fire',
     layers: {}, // `${kind}::${FLOOR}` -> MaskGrid
     gridCanvases: {}, // key -> offscreen canvas
+    gridImageData: {}, // key -> cached ImageData for that canvas (reused, not reallocated, per frame)
     dirty: new Set(), // keys whose gridCanvas needs re-rendering
     overlay: null,
     canvas: null,
@@ -382,15 +385,37 @@ export function installPainter(MapShine) {
 
   async function save() {
     const payload = serializePaintedMasks(state.layers);
+    // PAINT_EMBED_BYTE_BUDGET existed but was never actually checked anywhere
+    // live — an "unwired museum" piece. The resolution bump (512 -> 2048) makes
+    // it meaningfully more likely a detailed mask actually crosses it, so this
+    // is the moment to surface the signal instead of leaving it unused.
+    const heavy = Object.entries(payload)
+      .map(([key, enc]) => ({ key, bytes: encodedByteEstimate(enc) }))
+      .filter((x) => x.bytes > PAINT_EMBED_BYTE_BUDGET);
     const r = await savePaintedMasks(payload);
     const n = Object.keys(payload).length;
-    notify(
-      r.ok ? `Map Shine: saved ${n} painted mask(s) to the scene.` : `Map Shine: save failed — ${r.reason}`,
-      r.ok ? 'info' : 'error'
-    );
+    if (!r.ok) {
+      notify(`Map Shine: save failed — ${r.reason}`, 'error');
+      return;
+    }
+    let msg = `Map Shine: saved ${n} painted mask(s) to the scene.`;
+    if (heavy.length) {
+      const names = heavy.map((h) => h.key.split('::')[0]).join(', ');
+      msg += ` ⚠ ${names} ${heavy.length === 1 ? 'is' : 'are'} getting detailed (${heavy
+        .map((h) => Math.round(h.bytes / 1024))
+        .join(
+          '/'
+        )} KB) — saved fine, but very fine painted detail will eventually want file-based storage (not yet built).`;
+    }
+    notify(msg, heavy.length ? 'warn' : 'info');
   }
 
   // ---- preview loop ------------------------------------------------------
+  // PAINT_GRID_MAX_DIM (2026-07-20: 512 -> 2048, so the smallest brush can
+  // actually resolve — see that constant's comment) makes this run against
+  // up to 16x more texels than before, so two things that didn't matter at
+  // 512 now do: reallocating an ImageData every dirty frame, and writing
+  // four separate bytes per texel instead of one.
   function renderGrid(key) {
     const layer = state.layers[key];
     if (!layer) return;
@@ -399,18 +424,19 @@ export function installPainter(MapShine) {
     const { spec, data } = layer;
     let g = state.gridCanvases[key];
     if (!g) g = state.gridCanvases[key] = document.createElement('canvas');
-    if (g.width !== spec.w || g.height !== spec.h) {
+    const gctx = g.getContext('2d');
+    let img = state.gridImageData[key];
+    if (g.width !== spec.w || g.height !== spec.h || !img) {
       g.width = spec.w;
       g.height = spec.h;
+      img = state.gridImageData[key] = gctx.createImageData(spec.w, spec.h); // allocate ONCE, reuse every frame
     }
-    const gctx = g.getContext('2d');
-    const img = gctx.createImageData(spec.w, spec.h);
-    for (let i = 0; i < data.length; i++) {
-      img.data[i * 4] = cr;
-      img.data[i * 4 + 1] = cg;
-      img.data[i * 4 + 2] = cb;
-      img.data[i * 4 + 3] = data[i];
-    }
+    // One 32-bit write per texel (packed little-endian RGBA — standard for
+    // fast canvas pixel fills) instead of four byte writes; R/G/B are
+    // constant per mask, so only the alpha nibble actually varies per texel.
+    const packed = new Uint32Array(img.data.buffer);
+    const rgbBase = cr | (cg << 8) | (cb << 16);
+    for (let i = 0; i < data.length; i++) packed[i] = rgbBase | (data[i] << 24);
     gctx.putImageData(img, 0, 0);
   }
 

@@ -50,4 +50,5 @@ export {
   serializePaintedMasks,
   hydratePaintedMasks,
   PAINT_EMBED_BYTE_BUDGET,
+  PAINT_GRID_MAX_DIM,
 } from './paint-mask.js';

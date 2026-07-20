@@ -14,6 +14,7 @@ import {
   hydratePaintedMasks,
   sampleMaskGridWorld,
   PAINT_EMBED_BYTE_BUDGET,
+  PAINT_GRID_MAX_DIM,
 } from '../paint-mask.js';
 
 const RECT = { x: 0, y: 0, width: 1000, height: 800 };
@@ -25,8 +26,11 @@ export function run(t) {
   // --- model -------------------------------------------------------------
   {
     const layer = createPaintLayer(RECT);
-    t.ok('createPaintLayer: 512 on the long side', layer.spec.w === 512);
-    t.ok('createPaintLayer: shorter side scaled by aspect', layer.spec.h === Math.round((800 * 512) / 1000));
+    t.ok('createPaintLayer: PAINT_GRID_MAX_DIM on the long side', layer.spec.w === PAINT_GRID_MAX_DIM);
+    t.ok(
+      'createPaintLayer: shorter side scaled by aspect',
+      layer.spec.h === Math.round((800 * PAINT_GRID_MAX_DIM) / 1000)
+    );
     t.ok('createPaintLayer: starts empty', isPaintLayerEmpty(layer));
   }
 
@@ -91,16 +95,49 @@ export function run(t) {
     const { layer: back, dimensionsMatch } = decodePaintLayer(encoded, RECT);
     t.ok('codec: round-trips byte-for-byte', dataEqual(layer.data, back.data));
     t.ok('codec: dimensions match the same scene rect', dimensionsMatch === true);
+  }
+
+  // --- a genuinely SPARSE mask (a small brush on a REAL-scale scene, not a
+  //     big brush on a tiny test rect) stays well under the embed budget ---
+  {
+    // 12,000-wide is the real scene scale used elsewhere in this project. A
+    // radius-130 stroke on it is a small, localized dab (~2% of grid width at
+    // PAINT_GRID_MAX_DIM) -- the actual "sparse" case PAINT_EMBED_BYTE_BUDGET
+    // exists to distinguish from a mask detailed enough to want Mode B.
+    const bigRect = { x: 0, y: 0, width: 12000, height: 8000 };
+    const layer = createPaintLayer(bigRect);
+    stampBrushWorld(layer, 6000, 4000, 130, { value: 200, hardness: 0.4 });
+    stampBrushWorld(layer, 2000, 2000, 60, { value: 255, hardness: 0.7 });
+    const encoded = encodePaintLayer(layer);
     t.ok('codec: a sparse mask is well under the embed budget', encodedByteEstimate(encoded) < PAINT_EMBED_BYTE_BUDGET);
   }
 
   // --- a resized scene is REPORTED, not silently stretched ----------------
   {
-    const layer = createPaintLayer(RECT); // 512 x 410
+    const layer = createPaintLayer(RECT); // PAINT_GRID_MAX_DIM x (aspect-scaled)
     stampBrushWorld(layer, CENTER.x, CENTER.y, 80, { value: 255 });
     const encoded = encodePaintLayer(layer);
-    const { dimensionsMatch } = decodePaintLayer(encoded, { x: 0, y: 0, width: 800, height: 800 }); // -> 512 x 512
+    // A genuinely different aspect ratio -> a different h at the SAME maxDim.
+    const { dimensionsMatch } = decodePaintLayer(encoded, { x: 0, y: 0, width: 800, height: 800 });
     t.ok('codec: a resolution change is reported as a mismatch', dimensionsMatch === false);
+  }
+
+  // --- maxDim is honoured, and MUST be threaded consistently through decode
+  //     (the real bug fixed 2026-07-20: decodePaintLayer used to ignore its
+  //     caller's maxDim entirely and always compare against mask-derive's
+  //     unrelated 512 default, so bumping PAINT_GRID_MAX_DIM alone would have
+  //     made EVERY ordinary reload report a false "scene resized") ----------
+  {
+    const layer = createPaintLayer(RECT, 256);
+    t.ok('createPaintLayer: an explicit maxDim overrides the default', layer.spec.w === 256);
+    const encoded = encodePaintLayer(layer);
+    const matching = decodePaintLayer(encoded, RECT, 256);
+    t.ok('decodePaintLayer: the SAME maxDim as encoding reports a match', matching.dimensionsMatch === true);
+    const defaulted = decodePaintLayer(encoded, RECT); // maxDim defaults to PAINT_GRID_MAX_DIM, NOT 256
+    t.ok(
+      'decodePaintLayer: a DIFFERENT maxDim than encoding correctly reports a mismatch (not silently wrong)',
+      defaulted.dimensionsMatch === false
+    );
   }
 
   // --- persistence: only-painted-stored, round-trip -----------------------

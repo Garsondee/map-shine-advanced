@@ -6,12 +6,14 @@
  * ============================================================================
  *
  * A painted mask is a `MaskGrid` (scene/mask-derive.js) sized over the scene
- * rect: the SAME fixed ≤512² Uint8 grid the mask authority already uses for
- * its derived products. So a mask the user PAINTS in MSA and a `_Fire` mask the
- * author makes in PHOTOSHOP and drops beside the map are the same shape of
- * thing — peers, not two systems. That is the author's "belts and braces": some
- * effects driven by a bundled `_Suffix` file, some painted in-app, both valid,
- * both travelling with the scene (docs/planning/Authoring-and-Distribution.md).
+ * rect — the SAME grid TYPE the mask authority uses for its derived products,
+ * just at a HIGHER resolution (`PAINT_GRID_MAX_DIM`, not mask-derive's coarse
+ * `MASK_GRID_MAX_DIM` — see that constant's own comment for why the two must
+ * differ). So a mask the user PAINTS in MSA and a `_Fire` mask the author makes
+ * in PHOTOSHOP and drops beside the map are the same shape of thing — peers,
+ * not two systems. That is the author's "belts and braces": some effects
+ * driven by a bundled `_Suffix` file, some painted in-app, both valid, both
+ * travelling with the scene (docs/planning/Authoring-and-Distribution.md).
  *
  * This module is the PURE half — model, brush, codec, persistence — Node-tested
  * in isolation. The browser half (the overlay canvas, pointer capture, live
@@ -42,13 +44,41 @@ import { computeMaskGridSpec, createMaskGrid, sampleMaskGridWorld } from './mask
 export const PAINT_EMBED_BYTE_BUDGET = 96 * 1024;
 
 /**
+ * Longest grid side for a PAINTED layer. Deliberately its OWN constant,
+ * separate from mask-derive's `MASK_GRID_MAX_DIM` (512) — that one is tuned
+ * for cheap, coarse DERIVED coverage products (building footprints are
+ * hundreds of pixels; ~31 world-units/texel on a 16K scene is already "an
+ * order of magnitude finer than any footprint", mask-derive.js's own words).
+ * A PAINTED mask is authored DETAIL — a flame lick, a thin water line — and
+ * the smallest brush is only as fine as the grid: at 512 on a 12,000-wide
+ * scene (a real scene size used elsewhere in this project), one texel is
+ * ~23 world units, so no brush radius under that paints anything visibly
+ * finer than a blob (author-reported, 2026-07-20: "the smallest paint/spray
+ * size doesn't really work").
+ *
+ * 2048 (4x) brings that down to ~6 world units/texel on the same scene —
+ * close to what a mouse-drawn brush can usefully resolve — while staying
+ * cheap: worst case ~4MB of in-memory `Uint8Array` (irrelevant), and RLE on
+ * a modest painted area (flat regions compress to ~2 numbers regardless of
+ * resolution; only the painted EDGE gets costlier) stays well inside
+ * `PAINT_EMBED_BYTE_BUDGET` for ordinary use — a mask detailed enough to
+ * blow that budget is exactly the case Mode B (bake-to-file) exists for.
+ * A chosen, documented number — not probed at runtime
+ * (feedback_probed_constants_vs_derived).
+ */
+export const PAINT_GRID_MAX_DIM = 2048;
+
+/**
  * A fresh, empty painted layer sized over the scene rect — a MaskGrid, so it
  * samples and composites through the exact same code as authored/derived masks.
  * @param {{x:number, y:number, width:number, height:number}} sceneRect
+ * @param {number} [maxDim] - defaults to `PAINT_GRID_MAX_DIM`; pass the SAME
+ *   value to `decodePaintLayer`/`hydratePaintedMasks` when decoding, or a
+ *   real resolution change will be misreported as one (see those functions).
  * @returns {import('./mask-derive.js').MaskGrid}
  */
-export function createPaintLayer(sceneRect) {
-  return createMaskGrid(computeMaskGridSpec(sceneRect));
+export function createPaintLayer(sceneRect, maxDim = PAINT_GRID_MAX_DIM) {
+  return createMaskGrid(computeMaskGridSpec(sceneRect, maxDim));
 }
 
 /**
@@ -140,9 +170,16 @@ export function encodePaintLayer(layer) {
  * silently stretched.
  * @param {{w:number, h:number, rle:number[]}} encoded
  * @param {{x:number, y:number, width:number, height:number}} [sceneRect]
+ * @param {number} [maxDim] - MUST match what `createPaintLayer` used to
+ *   encode this payload (defaults to `PAINT_GRID_MAX_DIM`, same as
+ *   `createPaintLayer`'s default) — a mismatched maxDim here would rebuild
+ *   the comparison spec at the WRONG resolution and report every ordinary
+ *   load as a false "scene resized" (a real bug this project shipped once:
+ *   this parameter used to be silently absent and always compared against
+ *   mask-derive's unrelated 512 default).
  * @returns {{layer: import('./mask-derive.js').MaskGrid, dimensionsMatch: boolean}}
  */
-export function decodePaintLayer(encoded, sceneRect) {
+export function decodePaintLayer(encoded, sceneRect, maxDim = PAINT_GRID_MAX_DIM) {
   const { w, h, rle } = encoded;
   const data = new Uint8Array(w * h);
   let di = 0;
@@ -154,7 +191,7 @@ export function decodePaintLayer(encoded, sceneRect) {
   let spec;
   let dimensionsMatch = true;
   if (sceneRect) {
-    spec = computeMaskGridSpec(sceneRect);
+    spec = computeMaskGridSpec(sceneRect, maxDim);
     dimensionsMatch = spec.w === w && spec.h === h;
     if (!dimensionsMatch)
       spec = {
@@ -201,13 +238,14 @@ export function serializePaintedMasks(layersByKey) {
  * since it was painted) rather than silently rescaling.
  * @param {Record<string, {w:number, h:number, rle:number[]}>} payload
  * @param {{x:number, y:number, width:number, height:number}} sceneRect
+ * @param {number} [maxDim] - see `decodePaintLayer`'s note; defaults consistently.
  * @returns {{layers: Record<string, import('./mask-derive.js').MaskGrid>, mismatched: string[]}}
  */
-export function hydratePaintedMasks(payload, sceneRect) {
+export function hydratePaintedMasks(payload, sceneRect, maxDim = PAINT_GRID_MAX_DIM) {
   const layers = {};
   const mismatched = [];
   for (const [key, enc] of Object.entries(payload || {})) {
-    const { layer, dimensionsMatch } = decodePaintLayer(enc, sceneRect);
+    const { layer, dimensionsMatch } = decodePaintLayer(enc, sceneRect, maxDim);
     layers[key] = layer;
     if (!dimensionsMatch) mismatched.push(key);
   }

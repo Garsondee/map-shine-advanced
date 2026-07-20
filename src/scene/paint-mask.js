@@ -64,7 +64,9 @@ export function createPaintLayer(sceneRect) {
  * @param {object} [opts]
  * @param {number} [opts.hardness=0.5] - 0 = fully soft, 1 = hard edge.
  * @param {number} [opts.value=255] - painted strength 0..255.
- * @param {'paint'|'erase'} [opts.mode='paint']
+ * @param {'paint'|'add'|'erase'} [opts.mode='paint'] - paint = max-composite (a
+ *   single dab never exceeds `value`); add = airbrush build-up (dabs accumulate,
+ *   clamped at 255); erase = subtract.
  * @returns {import('./mask-derive.js').MaskGrid} the same layer, mutated.
  */
 export function stampBrushWorld(layer, wx, wy, radiusWorld, { hardness = 0.5, value = 255, mode = 'paint' } = {}) {
@@ -94,7 +96,9 @@ export function stampBrushWorld(layer, wx, wy, radiusWorld, { hardness = 0.5, va
       const applied = Math.round(value * f);
       const i = gy * spec.w + gx;
       if (mode === 'erase') data[i] = Math.max(0, data[i] - applied);
-      else data[i] = Math.max(data[i], applied); // max-composite: a single stroke never exceeds `value`
+      else if (mode === 'add')
+        data[i] = Math.min(255, data[i] + applied); // airbrush build-up
+      else data[i] = Math.max(data[i], applied); // 'paint': max-composite, a dab never exceeds `value`
     }
   }
   return layer;

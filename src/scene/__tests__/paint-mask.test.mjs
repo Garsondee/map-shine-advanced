@@ -70,6 +70,18 @@ export function run(t) {
     t.ok('erase: removes what was painted', sampleMaskGridWorld(layer, CENTER.x, CENTER.y) === 0);
   }
 
+  // --- add (airbrush) builds up and clamps --------------------------------
+  {
+    const layer = createPaintLayer(RECT);
+    stampBrushWorld(layer, CENTER.x, CENTER.y, 100, { value: 90, hardness: 1, mode: 'add' });
+    const once = sampleMaskGridWorld(layer, CENTER.x, CENTER.y);
+    stampBrushWorld(layer, CENTER.x, CENTER.y, 100, { value: 90, hardness: 1, mode: 'add' });
+    t.ok('add: a second dab builds up past the first', sampleMaskGridWorld(layer, CENTER.x, CENTER.y) > once);
+    for (let k = 0; k < 6; k++)
+      stampBrushWorld(layer, CENTER.x, CENTER.y, 100, { value: 90, hardness: 1, mode: 'add' });
+    t.ok('add: build-up clamps at 255', sampleMaskGridWorld(layer, CENTER.x, CENTER.y) === 255);
+  }
+
   // --- codec round-trip ---------------------------------------------------
   {
     const layer = createPaintLayer(RECT);

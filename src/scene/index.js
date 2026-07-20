@@ -43,6 +43,8 @@ export { MASK_GRID_MAX_DIM, computeMaskGridSpec, sampleMaskGridWorld, maskGridMe
 export {
   createPaintLayer,
   stampBrushWorld,
+  rasterizePolygon,
+  rasterizeStrokedLine,
   isPaintLayerEmpty,
   encodePaintLayer,
   decodePaintLayer,

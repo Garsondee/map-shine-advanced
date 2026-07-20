@@ -153,6 +153,109 @@ export function stampBrushWorld(layer, wx, wy, radiusWorld, { hardness = 0.5, va
   return layer;
 }
 
+/**
+ * Rasterize a FILLED polygon (with optional holes) into a layer — the vector
+ * equivalent of a brush fill, into the SAME MaskGrid, so a drawn polygon and a
+ * painted region are one mask (Shapes-and-Regions.md §2). Even-odd scanline
+ * fill: hole rings are just more loops in the crossing count, so a point inside
+ * a hole comes out correctly OUTSIDE the fill with no special-casing. Vertices
+ * are WORLD coords, mapped to cells with the identical formula the brush and
+ * `sampleMaskGridWorld` use (the anti-Y-flip cross-check the suite pins).
+ *
+ * @param {import('./mask-derive.js').MaskGrid} layer
+ * @param {Array<{x:number,y:number}>} vertices - outer ring, WORLD coords (≥3).
+ * @param {object} [opts]
+ * @param {number} [opts.value=255]
+ * @param {'paint'|'add'|'erase'} [opts.mode='paint']
+ * @param {Array<Array<{x:number,y:number}>>} [opts.holes] - hole rings, WORLD coords.
+ * @returns {import('./mask-derive.js').MaskGrid} the same layer, mutated.
+ */
+export function rasterizePolygon(layer, vertices, { value = 255, mode = 'paint', holes = [] } = {}) {
+  if (!Array.isArray(vertices) || vertices.length < 3) return layer;
+  const { spec, data } = layer;
+  const toCell = (p) => ({ gx: (p.x - spec.x) / spec.texelW, gy: (p.y - spec.y) / spec.texelH });
+  const loops = [vertices, ...holes].map((loop) => loop.map(toCell));
+
+  let minGy = Infinity;
+  let maxGy = -Infinity;
+  for (const loop of loops)
+    for (const p of loop) {
+      if (p.gy < minGy) minGy = p.gy;
+      if (p.gy > maxGy) maxGy = p.gy;
+    }
+  const gy0 = Math.max(0, Math.floor(minGy));
+  const gy1 = Math.min(spec.h - 1, Math.ceil(maxGy));
+
+  const apply = (i) => {
+    if (mode === 'erase') data[i] = Math.max(0, data[i] - value);
+    else if (mode === 'add') data[i] = Math.min(255, data[i] + value);
+    else data[i] = Math.max(data[i], value);
+  };
+
+  const xs = [];
+  for (let gy = gy0; gy <= gy1; gy++) {
+    const sy = gy + 0.5; // sample at the row's texel centre
+    xs.length = 0;
+    for (const loop of loops) {
+      for (let i = 0; i < loop.length; i++) {
+        const a = loop[i];
+        const b = loop[(i + 1) % loop.length];
+        // Half-open crossing test: each edge counted once, vertices never double-counted.
+        if ((a.gy <= sy && b.gy > sy) || (b.gy <= sy && a.gy > sy)) {
+          xs.push(a.gx + ((sy - a.gy) / (b.gy - a.gy)) * (b.gx - a.gx));
+        }
+      }
+    }
+    if (xs.length < 2) continue;
+    xs.sort((p, q) => p - q);
+    for (let k = 0; k + 1 < xs.length; k += 2) {
+      // A cell gx is inside iff its centre (gx+0.5) lies within the span.
+      const xStart = Math.max(0, Math.ceil(xs[k] - 0.5));
+      const xEnd = Math.min(spec.w - 1, Math.floor(xs[k + 1] - 0.5));
+      const rowBase = gy * spec.w;
+      for (let gx = xStart; gx <= xEnd; gx++) apply(rowBase + gx);
+    }
+  }
+  return layer;
+}
+
+/**
+ * Rasterize a STROKED polyline (a line of a given world width) into a layer —
+ * "draw a line of fire OR paint a line of fire, either way fire across the
+ * whole thing" (author, 2026-07-20). Implemented by walking the segments and
+ * stamping the round brush along them, so it reuses `stampBrushWorld` verbatim
+ * (including its sub-texel coverage floor — a thin line never breaks into dots).
+ *
+ * @param {import('./mask-derive.js').MaskGrid} layer
+ * @param {Array<{x:number,y:number}>} vertices - WORLD coords (≥1).
+ * @param {number} widthWorld - stroke width in world units.
+ * @param {object} [opts]
+ * @param {number} [opts.value=255]
+ * @param {'paint'|'add'|'erase'} [opts.mode='paint']
+ * @param {number} [opts.hardness=1] - 1 = a crisp solid stroke (the default for a line).
+ * @returns {import('./mask-derive.js').MaskGrid} the same layer, mutated.
+ */
+export function rasterizeStrokedLine(layer, vertices, widthWorld, { value = 255, mode = 'paint', hardness = 1 } = {}) {
+  if (!Array.isArray(vertices) || vertices.length < 1) return layer;
+  const radius = Math.max(1e-6, widthWorld / 2);
+  const stamp = (x, y) => stampBrushWorld(layer, x, y, radius, { value, mode, hardness });
+  stamp(vertices[0].x, vertices[0].y);
+  for (let i = 1; i < vertices.length; i++) {
+    const a = vertices[i - 1];
+    const b = vertices[i];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dist = Math.hypot(dx, dy);
+    const spacing = Math.max(radius * 0.4, 1e-3); // fine enough that dabs overlap into a solid stroke
+    const steps = Math.max(1, Math.ceil(dist / spacing));
+    for (let s = 1; s <= steps; s++) {
+      const t = s / steps;
+      stamp(a.x + dx * t, a.y + dy * t);
+    }
+  }
+  return layer;
+}
+
 /** True if any texel is painted — used to skip storing an untouched layer. */
 export function isPaintLayerEmpty(layer) {
   const d = layer.data;

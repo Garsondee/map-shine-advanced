@@ -6,6 +6,8 @@
 import {
   createPaintLayer,
   stampBrushWorld,
+  rasterizePolygon,
+  rasterizeStrokedLine,
   isPaintLayerEmpty,
   encodePaintLayer,
   decodePaintLayer,
@@ -84,6 +86,88 @@ export function run(t) {
     for (let k = 0; k < 6; k++)
       stampBrushWorld(layer, CENTER.x, CENTER.y, 100, { value: 90, hardness: 1, mode: 'add' });
     t.ok('add: build-up clamps at 255', sampleMaskGridWorld(layer, CENTER.x, CENTER.y) === 255);
+  }
+
+  // --- polygon fill: the vector == mask unification -----------------------
+  {
+    const layer = createPaintLayer(RECT);
+    rasterizePolygon(
+      layer,
+      [
+        { x: 400, y: 300 },
+        { x: 600, y: 300 },
+        { x: 600, y: 500 },
+        { x: 400, y: 500 },
+      ],
+      { value: 255 }
+    );
+    t.ok('polygon: interior fills, read through the authority sampler', sampleMaskGridWorld(layer, 500, 400) === 255);
+    t.ok('polygon: exterior is clean', sampleMaskGridWorld(layer, 200, 200) === 0);
+  }
+
+  // --- polygon with a hole (even-odd; a hole needs no special-casing) ------
+  {
+    const layer = createPaintLayer(RECT);
+    const outer = [
+      { x: 300, y: 200 },
+      { x: 700, y: 200 },
+      { x: 700, y: 600 },
+      { x: 300, y: 600 },
+    ];
+    const hole = [
+      { x: 450, y: 350 },
+      { x: 550, y: 350 },
+      { x: 550, y: 450 },
+      { x: 450, y: 450 },
+    ];
+    rasterizePolygon(layer, outer, { value: 255, holes: [hole] });
+    t.ok('polygon hole: the ring is filled', sampleMaskGridWorld(layer, 350, 250) === 255);
+    t.ok('polygon hole: inside the hole is NOT filled', sampleMaskGridWorld(layer, 500, 400) === 0);
+  }
+
+  // --- polygon erase punches a hole into a fill ---------------------------
+  {
+    const layer = createPaintLayer(RECT);
+    rasterizePolygon(
+      layer,
+      [
+        { x: 300, y: 300 },
+        { x: 700, y: 300 },
+        { x: 700, y: 500 },
+        { x: 300, y: 500 },
+      ],
+      { value: 255 }
+    );
+    rasterizePolygon(
+      layer,
+      [
+        { x: 450, y: 350 },
+        { x: 550, y: 350 },
+        { x: 550, y: 450 },
+        { x: 450, y: 450 },
+      ],
+      { value: 255, mode: 'erase' }
+    );
+    t.ok('polygon erase: the erased sub-region is clear', sampleMaskGridWorld(layer, 500, 400) === 0);
+    t.ok('polygon erase: the rest of the fill survives', sampleMaskGridWorld(layer, 350, 400) === 255);
+  }
+
+  // --- stroked line: "draw a line == paint a line" ------------------------
+  {
+    const layer = createPaintLayer(RECT);
+    rasterizeStrokedLine(
+      layer,
+      [
+        { x: 200, y: 400 },
+        { x: 800, y: 400 },
+      ],
+      40, // width -> radius 20
+      { value: 255 }
+    );
+    t.ok('line: the stroke centre is painted', sampleMaskGridWorld(layer, 500, 400) === 255);
+    t.ok('line: within the width is painted', sampleMaskGridWorld(layer, 500, 415) > 0);
+    t.ok('line: beyond the width is clean', sampleMaskGridWorld(layer, 500, 480) === 0);
+    t.ok('line: the endpoint is painted (round cap)', sampleMaskGridWorld(layer, 800, 400) === 255);
   }
 
   // --- codec round-trip ---------------------------------------------------

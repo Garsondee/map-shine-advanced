@@ -43,18 +43,18 @@ The painter handles *areas you fill*. It does not handle a single candle, a rope
 
 Every shape is a list of vertices in **precise world coordinates** (Foundry canvas space, +Y down — the painter's exact coordinate model, so screen→world is already solved and snap-free).
 
-| Primitive | Is | Drives (examples) | Becomes |
+| Primitive | Is | Drives (examples) | Rasterizes to |
 |---|---|---|---|
-| **Point** | one vertex | a candle flame, a single lightning strike, one emitter | a **placement** (discrete anchor) |
-| **Line** | ≥2 vertices, open | a rope, a wall of flame, a stream, a light strip | a **placement path** (emitter along it) OR a stroked mask (a thick line rasterized) |
-| **Polygon** | ≥3 vertices, closed (+ optional holes) | a pond, a fire zone, a fog pocket, a greenhouse | a **filled mask** (rasterized into the grid) |
+| **Point** | one vertex | a fire spot, a candle flame, a lightning strike | a **dab** in the mask — or its raw position, for a placement effect |
+| **Line** | ≥2 vertices, open, with a **width** | a wall of fire across a corridor, a stream, a light strip, a rope | a **stroked mask** (rasterized at its width — identical to painting that line) — or its raw path, for a placement/physics effect |
+| **Polygon** | ≥3 vertices, closed (+ optional holes) | a pond, a fire zone, a fog pocket, a greenhouse | a **filled mask** — or its raw outline, for a placement effect |
 
-### The unification that makes this cheap: a polygon IS a painted mask
+### The unification (author-confirmed 2026-07-20): draw it or paint it — same mask
 
-**A filled polygon rasterizes into the SAME `MaskGrid` a brush paints** (`scene/paint-mask.js`) — so a precise polygon edge and a brushstroke are two ways to author *the same mask*, served by the same **mask authority** (`Authoring-and-Distribution.md` — one authority for areas). You can rough-in a fire zone with the polygon tool and soften its edge with the spray brush, on one layer, because they are the same data underneath. This is the payoff of building the painter first.
+**Every shape rasterizes into the SAME `MaskGrid` a brush paints** (`scene/paint-mask.js`), served by the same **mask authority**. The author's own worked test: to block a corridor with fire you can **draw a line across it OR paint a line across it — either way you get fire across the whole thing**, because both just land in the `_Fire` mask. A polygon is a filled region; a line is a stroked region carrying a width (exactly like a brush); a point is a dab. Vectors and paint are two ways to author one mask — you can block in a fire zone with the polygon tool and soften its edge with the spray brush, on one layer, because underneath they are the same data. This is the payoff of having built the painter first.
 
-- **Areas (polygons, stroked lines)** → rasterize into the mask authority. One authority.
-- **Discrete (points, emitter-path lines)** → a **placements registry** (scene flags) — the honest successor to V2's map points, for things that are genuinely not masks.
+- **Coverage is the default and the common case** (fire, water, fog, dust, outdoors): the effect reads/emits wherever the mask is set, so *how* it got set — brush, line, or polygon — is invisible to it. There is **no separate "emitter path" concept**; a line of fire is just fire-mask along a stroke.
+- **The raw vector geometry is ALSO retained** in the shape's scene-flag record, for the minority of effects that want a discrete *placement* rather than coverage — a candle billboard at a point, a rope's physics along a line, a lightning arc between two vertices. Those read the shape's vertices, not the mask. **One shape store; two ways to consume it** — no separate placements registry to keep in sync.
 
 ---
 
@@ -96,7 +96,8 @@ Switching tools never leaves the map. The brush and the polygon feed the same ma
 ### 4.3 Precision-first — snapping is OPTIONAL and off by default
 The explicit ask: *finely pick the exact pixels… without it snapping to grid points.* So:
 - **Default: no snapping.** A vertex lands exactly where the cursor is (we already map screen→world precisely for the brush).
-- **Opt-in snaps**, as toggles + live modifiers: snap-to-grid, snap-to-vertex (this shape's or a neighbour's), snap-to-wall-endpoint, and **angle-lock** (hold Shift → constrain the segment to 15° steps). Each is a choice, never a default that fights you.
+- **Snap-to-grid, when ON, snaps to a 4×4 SUB-grid** (author decision, 2026-07-20): each grid square is subdivided into a 4×4 lattice — **quarter-cell spacing, 16 snap points per cell** — so snap mode keeps edges aligned while still giving fine freedom, instead of the blunt whole-intersection snap that makes Foundry's own region tool feel imprecise. Quarter-cell is the shipped subdivision (a chosen number, not derived from anything).
+- **Additional opt-in snaps**, as toggles + live modifiers: snap-to-vertex (this shape's or a neighbour's), snap-to-wall-endpoint, and **angle-lock** (hold Shift → constrain the segment to fixed angle steps). Each is a choice, never a default that fights you.
 
 ### 4.4 Live preview
 The shape draws as you place it; a filled polygon shows its **rasterized mask** (in the mask's preview tint, reusing the painter's preview) as it closes; when the bound effect exists, the effect itself previews. You see the result, not an abstraction.
@@ -120,7 +121,12 @@ A shape (or a whole Map Group) is bound to an effect via a small panel that reus
 MapGroup {
   id, name,
   members: [                         // shapes from EITHER channel
-    { source: 'native', shape: { type:'polygon'|'line'|'point', vertices:[...], holes?:[...], fill:'area'|'stroke'|'path' } }
+    { source: 'native', shape: {
+        type: 'polygon'|'line'|'point',
+        vertices: [...],             // exact world coords — no snap baked in, straight segments only
+        holes?: [...],               // polygon only
+        width?: number,              // line only — its stroked thickness (like a brush size)
+    } }
     { source: 'region', regionId }   // a Foundry Region tagged with the MSA behavior
   ],
   effect: { id, params },            // what this group drives (Effects-UI binding)
@@ -161,17 +167,20 @@ Sits in the **authoring layer** (`Roadmap-to-Parity.md` §3 step 3 — before/wi
 
 - **Tier 0 — the polygon, because it proves the unification.** The polygon tool → rasterize into the mask authority → save → reload. Draw a *precise* fire zone, watch it become the same mask a brush paints, persisted. One tool, end-to-end, and it validates the whole "areas are one authority" claim on real geometry.
 - **Then:** points + lines → the placements registry; Channel A (the `Map Group` RegionBehaviorType + reader); the effect-binding panel; snapping options; the `Map Group` abstraction spanning both sources.
-- **Later polish:** bezier/smooth segments; boolean ops on polygons (union/subtract — holes are already in the model); shape libraries/stamps.
+- **Later polish:** boolean ops on polygons (union/subtract — holes are already in the model); shape libraries/stamps. **Curves are deliberately NOT planned** — a curve is authored as a fine polygon with snapping off (§8), so there is no bezier machinery to build.
 
 ---
 
-## 8. OPEN QUESTIONS — decisions for the author
+## 8. DECISIONS — resolved, and still open
 
-1. **Lines:** a line as an *emitter path* (fire runs along it) vs a *stroked mask* (a thick painted line) — support both via a per-line `fill` mode, or pick one for tier 0?
-2. **Map Group scope:** does a group bind ONE effect (simpler) or can it drive several? V2 was one-per-group.
-3. **Snapping defaults:** confirmed off — but which snaps ship first (grid, vertex, wall-endpoint, angle-lock), and which key toggles each?
-4. **Region ↔ native precedence:** if a Map Group has both a native polygon and a Foundry region for the same area, do they union, or is that just author error to warn on?
-5. **Curves:** straight segments only for tier 0, or bezier handles from the start? (Straight-first is the cheaper, testable path.)
+**Resolved by the author (2026-07-20):**
+1. **Lines = stroked masks.** A line carries a width and rasterizes into the mask exactly like a painted line — *"draw a line of fire OR paint a line of fire, either way fire across the whole thing."* No separate emitter-path type; the raw path stays retained for the rare placement/physics effect (rope). (§2)
+2. **Snap-to-grid = a 4×4 sub-grid** (quarter-cell, 16 points/cell), off by default. (§4.3)
+3. **Straight segments only.** No bezier/curves — a curve is authored as a fine polygon with snapping off. (§7)
+
+**Still open (decide when we build the effect binding, not before):**
+4. **Map Group scope:** does a group bind ONE effect (simpler; V2 was one-per-group) or several? Leaning one-per-group.
+5. **Region ↔ native precedence:** if a Map Group has both a native polygon and a Foundry region over the same area, do they union (likely — both just add mask coverage) or is overlap an author-error to warn on?
 
 ---
 

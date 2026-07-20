@@ -232,6 +232,24 @@ export function maxRgb(rgb, floor) {
  * vt-pan-viewer, matching how `runMaskOcclusionPass`/present are wired); this
  * module owns only the TSL, so the shader logic lives in `effects/lighting/`.
  *
+ * ─────────────────────────────────────────────────────────────────────────
+ * UI-SHADOW MULTIPLIES HERE, NOT IN A SEPARATE PASS (2026-07-20 v6, author-
+ * measured PERFORMANCE FIX: throttling the DOM read barely moved the FPS,
+ * proving the earlier separate `uiShadowQuad.render()` call — not the DOM
+ * read — was the dominant per-frame cost; a whole extra render pass carries
+ * real fixed overhead even for trivial GPU math). `uiShadowVisNode`
+ * (effects/lighting/light-visibility.js#buildUiShadowVisibility, optional) is
+ * `1` (lit) everywhere except inside a window's projected shadow footprint,
+ * where it eases toward `0`. Folding its multiply into `illumTexNode.rgb`
+ * HERE is mathematically IDENTICAL to writing it back into `buf:scene.illum`
+ * via a separate pass (this composite already samples illum AFTER the ambient
+ * fill + regions + point lights have all accumulated into it, same as the
+ * separate pass would have read) — zero extra draw calls, and it now matches
+ * the EXISTING precedent exactly: coloration is likewise added only inside
+ * this composite, never written back upstream. Omitting `uiShadowVisNode`
+ * (undefined) uses `illumTexNode.rgb` unmultiplied — a no-op, so every OTHER
+ * caller of this function is unaffected.
+ *
  * @param {object} args
  * @param {*} args.THREE - the renderer namespace (carries `.TSL`).
  * @param {*} args.albedoTexture - `buf:scene.color`'s texture (linear map).
@@ -239,13 +257,22 @@ export function maxRgb(rgb, floor) {
  * @param {*} args.colorationTexture - `buf:scene.coloration`'s texture (the
  *   accumulated point-light coloration, sRGB-magnitude, 0 where no light
  *   tints). Added in gamma space inside the composite — see the essay above.
+ * @param {*} [args.uiShadowVisNode] - optional scalar TSL node, 1..0, the
+ *   UI-window-shadow visibility term (see essay above). Multiplies the illum
+ *   sample before it combines with albedo; omitted = untouched (no-op).
  * @returns {{
  *   illumMaterial: *, compositeMaterial: *,
  *   uBackgroundSrgb: *, albedoTexNode: *, illumTexNode: *, colorationTexNode: *,
  *   setAmbient: (bgSrgb: number[]) => void,
  * }}
  */
-export function buildEnvironmentalLightMaterials({ THREE, albedoTexture, illumTexture, colorationTexture }) {
+export function buildEnvironmentalLightMaterials({
+  THREE,
+  albedoTexture,
+  illumTexture,
+  colorationTexture,
+  uiShadowVisNode,
+}) {
   const { uniform, texture, vec3, vec4, float, sRGBTransferEOTF, sRGBTransferOETF } = THREE.TSL;
 
   // --- illum pass: constant ambient fill (per-pixel in 1b) -----------------
@@ -255,12 +282,13 @@ export function buildEnvironmentalLightMaterials({ THREE, albedoTexture, illumTe
   illumMaterial.depthWrite = false;
   illumMaterial.fragmentNode = vec4(uBackgroundSrgb, float(1));
 
-  // --- composite pass: lit = EOTF( OETF(albedo) × illum + coloration ) ------
+  // --- composite pass: lit = EOTF( OETF(albedo) × illum × uiShadowVis + coloration ) ------
   const albedoTexNode = texture(albedoTexture);
   const illumTexNode = texture(illumTexture);
   const colorationTexNode = texture(colorationTexture);
   const mapSrgb = sRGBTransferOETF(albedoTexNode.rgb);
-  const litSrgb = mapSrgb.mul(illumTexNode.rgb);
+  const illumWithUiShadow = uiShadowVisNode ? illumTexNode.rgb.mul(uiShadowVisNode) : illumTexNode.rgb;
+  const litSrgb = mapSrgb.mul(illumWithUiShadow);
   const finalSrgb = litSrgb.add(colorationTexNode.rgb); // gamma-space ADD, Foundry parity (see essay above)
   const litLinear = sRGBTransferEOTF(finalSrgb);
   const compositeMaterial = new THREE.NodeMaterial();

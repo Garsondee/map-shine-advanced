@@ -121,3 +121,8 @@ export {
   deriveGridSizePixels,
   computeTokenOcclusionRadiusPx,
 } from './scene-occlusion-sources.js';
+
+// THE SETTINGS ADAPTER — the one place game.settings is touched (foundry/
+// adapter-only). Registers/reads/writes the descriptors effects/effect-
+// settings.js derives; knows nothing about effects itself.
+export { registerSettings, readSetting, writeSetting } from './settings-adapter.js';

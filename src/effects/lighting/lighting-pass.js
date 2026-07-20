@@ -25,7 +25,19 @@ import { NotBuiltError } from '../../core/not-built.js';
 
 /**
  * Build the per-light visibility terms. Once real: reads env/scene/masks/attr,
- * creates `res:vis`. NEVER touches scene colour — shadow modulates LIGHT.
+ * creates `buf:scene.vis` (a screen buffer — a per-pixel visibility term is an
+ * AOV, so this producer graduates `res:vis` to the `buf:` namespace when it
+ * lands). NEVER touches scene colour — shadow modulates LIGHT.
+ *
+ * PURE CORE BUILT + Node-tested (2026-07-20), like `frame.snapshot`'s: the
+ * visibility MODEL (min-combine, `_Shadow` semantics, the compose-with-MAX
+ * invariant that proves no lift is needed) and the offset-projection geometry
+ * for screen-space occluders (the "UI casts a shadow on the world" producer)
+ * live in effects/lighting/light-visibility.js. This door stays a SEAM because
+ * the GPU producer that fills the buffer, and the frame-loop multiply, must be
+ * verified LIVE with the pixel probe — a world→screen mask sample is the Y-flip
+ * class (memory: feedback_y_flip_recurring_risk), not a Node-assertable fact.
+ *
  * @param {object} ctx
  * @returns {never}
  * @throws {NotBuiltError}
@@ -33,14 +45,18 @@ import { NotBuiltError } from '../../core/not-built.js';
 export function buildLightVisibilityPass(ctx) {
   void ctx;
   throw new NotBuiltError('light.visibility', {
-    owns: 'docs/planning/Light-and-Shadow.md §4 + graph/passes.js',
+    owns: 'docs/planning/Light-and-Shadow.md §4–5 + effects/lighting/light-visibility.js (pure core) + graph/passes.js',
     gate:
-      'needs env.sun (world/environment.js — BUILT) and the frame-graph wiring. Tier 0 = the authored ' +
-      "shadow mask (scene/mask-catalog.js, kind 'shadow') alone modulating the sun: the author's " +
-      'proven hand-built fallback.',
+      'env.sun (world/environment.js) and the pure core (effects/lighting/light-visibility.js) are BUILT. ' +
+      'What remains: the TSL producer that fills buf:scene.vis, the runLightAccumulatePass multiply (ambient ' +
+      '× visibility, BEFORE point lights MAX in — vt-pan-viewer.js), and LIVE pixel-probe verification. ' +
+      "Tier 0 = the authored shadow mask (scene/mask-catalog.js, kind 'shadow') alone modulating the sun.",
     instead:
-      'The sun direction comes from env.sun and NOWHERE else (env/one-sun tripwire). Producers combine by ' +
-      'min() because they share one semantic — sun visibility — so there are no opacity knobs to fight over.',
+      'Import combineVisibility/composeSunTermWithMaxLight/projectOccluderShadow from effects/index.js — the ' +
+      'model is decided and tested. The sun direction comes from env.sun and NOWHERE else (env/one-sun). ' +
+      'Producers combine by min() (one semantic → no opacity knobs); the UI-shadow is a PRODUCER into ' +
+      'visibility, never a darken over composed scene colour (the combined-shadow-for-all-lights fossil the ' +
+      'shadow/no-lift-no-combine wall forbids as a live string).',
   });
 }
 

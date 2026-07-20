@@ -58,11 +58,21 @@ import {
   setWholeImageMode,
   setDarknessRealism,
   getDarknessRealism,
+  setUiShadow,
+  getUiShadow,
   sampleVtPanViewerIllumPixel,
   probeVtPanViewerPixels,
   runInteractiveVtPanViewerPixelProbe,
 } from './vt/index.js';
 import { PASSES, validatePassGraph, PASS_SEAMS, PASS_IMPLS } from './graph/index.js';
+import {
+  createEffectRegistry,
+  UI_WINDOW_SHADOW,
+  UI_SHADOW_PARAMS,
+  describeEffectSettings,
+  deriveEffectLayers,
+  effectEnableKey,
+} from './effects/index.js';
 import { NotBuiltError } from './core/not-built.js';
 import {
   getActiveSceneFloors,
@@ -83,6 +93,9 @@ import {
   restoreFoundryArt,
   getCanvasCompositingReport,
   registerCanvasTearDownWatchdog,
+  registerSettings,
+  readSetting,
+  writeSetting,
 } from './foundry/index.js';
 import { engageFoundryFallback } from './diag/render-fallback.js';
 import {
@@ -143,6 +156,81 @@ MapShine.setWholeImageMode = setWholeImageMode;
 // vt-pan-viewer.js#setDarknessRealism / environmental-light.js.
 MapShine.setDarknessRealism = setDarknessRealism;
 MapShine.getDarknessRealism = getDarknessRealism;
+// UI-CAST WINDOW SHADOWS (2026-07-20): open character sheets / journals / context
+// menus cast a soft, offset shadow onto the map. As of Stage A it is MSA's first
+// REGISTERED effect — declared as data (effects/ui-window-shadow.js), driven
+// through the registry + the settings cascade (below), and DEFAULT OFF (gated to
+// the Extreme performance profile — expensive, ≈50fps; opt-in for now). Turn it
+// on in Foundry Settings ("UI window shadows: my setting" → On, or the profile →
+// Extreme), or `MapShine.setUiShadow({ enabled: true })`. Live tuning is unchanged:
+// `MapShine.setUiShadow({ strength01, offsetScale, azimuthDeg, elevationDeg,
+// heightPx, baseSoftnessPx, maxOffsetPx, scanEveryNFrames, flipY })`. The knob
+// meanings live in effects/ui-window-shadow.js's schema (the generated-UI source).
+// THE EFFECT REGISTRY (2026-07-20, Stage A of docs/planning/Effect-Registration.md) —
+// MSA's first effect declared as data and driven through the ONE door. boot.js
+// is the composition root: the registry (effects/, pure) is paired here with the
+// runtime `apply` (the low-level vt/#setUiShadow), so the effects zone never
+// imports the renderer and the renderer never imports the registry. The
+// cascade-resolved { enabled, params } flows registry.apply → setUiShadow →
+// _uiShadowState; the frame loop reads only that, so it can never see a settings
+// store or UI state (the V2 `resolve-effect-enabled` race is unreachable). After
+// this rewire the low-level setUiShadow has exactly ONE caller — this apply.
+const effectRegistry = createEffectRegistry();
+effectRegistry.register(UI_WINDOW_SHADOW, (resolved) => {
+  setUiShadow({ enabled: resolved.enabled, ...resolved.params });
+});
+
+// Transient, in-memory param tuning (MapShine.setUiShadow / the debug panel).
+// Stage A has no per-scene/-client PARAM persistence yet (Stage B), so live look
+// tweaks ride as the highest-precedence param layer rather than being stored —
+// still flowing THROUGH the registry, keeping the one door.
+const uiShadowLiveOverride = {};
+const UI_SHADOW_PARAM_KEYS = Object.keys(UI_SHADOW_PARAMS);
+
+/**
+ * Re-resolve UI-shadow's whole cascade from the live settings + the transient
+ * override and apply it. Reads settings through the foundry adapter ONLY. Callers
+ * guard + ANNOUNCE (never swallow — feedback_instruments_must_not_lie), because
+ * a read before the `init` registration would throw (a wiring bug, not silence).
+ */
+function reapplyUiShadow() {
+  const layers = deriveEffectLayers('uiWindowShadow', (key) => readSetting(MODULE_ID, key));
+  layers.paramLayers = [uiShadowLiveOverride];
+  effectRegistry.resolveAndApply('uiWindowShadow', layers);
+}
+
+// MapShine.setUiShadow — the console/API control, now routed THROUGH the cascade
+// instead of mutating render state directly. `enabled` writes the PLAYER's client
+// setting (persisted; its onChange re-resolves); look/technical params ride the
+// transient override and re-resolve at once. To turn the effect on after the
+// default-off flip: `MapShine.setUiShadow({ enabled: true })`, or set "UI window
+// shadows: my setting" to On (or the performance profile to Extreme) in Foundry's
+// Settings. Tuning is unchanged: `MapShine.setUiShadow({ strength01, offsetScale,
+// azimuthDeg, elevationDeg, heightPx, flipY, ... })`.
+MapShine.setUiShadow = (partial = {}) => {
+  const p = partial ?? {};
+  if (typeof p.enabled === 'boolean') {
+    Promise.resolve(
+      writeSetting(MODULE_ID, effectEnableKey('uiWindowShadow', 'player'), p.enabled ? 'on' : 'off')
+    ).catch((err) => log.error('ui-shadow enable write failed:', err));
+  }
+  let changedParam = false;
+  for (const k of UI_SHADOW_PARAM_KEYS) {
+    if (k in p) {
+      uiShadowLiveOverride[k] = p[k];
+      changedParam = true;
+    }
+  }
+  if (changedParam) {
+    try {
+      reapplyUiShadow();
+    } catch (err) {
+      log.error('ui-shadow reapply failed:', err);
+    }
+  }
+  return getUiShadow();
+};
+MapShine.getUiShadow = getUiShadow;
 // THE PIXEL-READBACK DIAGNOSTIC (2026-07-19, the region-darkness rendering
 // audit): `await MapShine.sampleIllumPixel(worldX, worldY)` reads the ACTUAL
 // GPU-rendered value of buf:scene.illum at one world position — the ONLY
@@ -994,6 +1082,32 @@ function install() {
     }
   );
 
+  // UI-CAST WINDOW SHADOWS (2026-07-20, author wishlist) — On/Off. Default ON;
+  // a no-op when no windows are open. On/Off is a select for the same reason as
+  // the lever above: the panel's control primitive is a dropdown
+  // (feedback_debug_ui_one_action_one_control). Fine tuning is the console API
+  // MapShine.setUiShadow({...}).
+  MapShine.debug.registerSelect(
+    'ui-shadow',
+    'Window shadows',
+    [
+      { value: 'on', label: 'On' },
+      { value: 'off', label: 'Off' },
+    ],
+    () => (getUiShadow().enabled ? 'on' : 'off'),
+    (value) => {
+      // Route through the cascade (writes the player's client enable setting),
+      // NOT the low-level setUiShadow — the registry stays the one door.
+      MapShine.setUiShadow({ enabled: value === 'on' });
+    }
+  );
+  // A PASSIVE READOUT proving the reader is finding windows rather than silently
+  // doing nothing (feedback_instruments_must_not_lie): how many framed windows
+  // were detected last frame, how many are actually casting (capped at the
+  // shader's slot count), and the current light/tuning. Pure — safe for the
+  // flight recorder to run on every export.
+  MapShine.debug.registerReport('ui-shadow-status', 'UI window shadows', () => getUiShadow());
+
   // THE INTERACTIVE PIXEL PROBE (2026-07-19, author-requested: "I need a
   // button to activate pixel probe and the ability to click on the screen
   // to set the three points"). An ACTION, not a report — it arms a click
@@ -1642,9 +1756,41 @@ function install() {
   // available here. If we are somehow loaded outside Foundry, fall back to the
   // window load event so the boot proof still renders.
   if (typeof Hooks !== 'undefined') {
-    Hooks.once('init', () => log.info(`init — ${MODULE_ID}`));
+    Hooks.once('init', () => {
+      log.info(`init — ${MODULE_ID}`);
+      // Register every effect's cascade settings (client profile + a11y, and a
+      // GM-default + player-override enable per effect), DERIVED from the registry
+      // so a new effect gets its settings for free (the velocity test). game.
+      // settings is touched only inside the foundry adapter. Any settings change
+      // re-resolves the cascade — the render state follows the settings, never a
+      // hand-written mirror (the ~140 sync functions V2 needed cease to exist).
+      try {
+        registerSettings(MODULE_ID, describeEffectSettings(effectRegistry.list()), {
+          onChange: () => {
+            try {
+              reapplyUiShadow();
+            } catch (err) {
+              log.error('ui-shadow reapply (settings change) failed:', err);
+            }
+          },
+        });
+      } catch (err) {
+        log.error('MSA settings registration failed:', err);
+      }
+    });
     Hooks.once('ready', () => {
       bootHeartbeat().catch((err) => log.error('bootHeartbeat failed:', err));
+      // Resolve the first effect through the FULL cascade from the now-readable
+      // settings (Stage A increment 2). With the profile at its Standard default
+      // and the effect gated to Extreme, this resolves OFF — the intended, author-
+      // directed default-off flip. The try/catch announces a genuine wiring error
+      // (never swallows — feedback_instruments_must_not_lie); the resolver itself
+      // is total and cannot throw on data.
+      try {
+        reapplyUiShadow();
+      } catch (err) {
+        log.error('ui-shadow initial apply failed:', err);
+      }
     });
   } else {
     log.warn(`no Foundry Hooks found; booting on window load.`);

@@ -14,6 +14,8 @@
  * @module foundry/paint-adapter
  */
 
+import { getActiveSceneFloors } from './active-scene-source.js';
+
 const MODULE_ID = 'map-shine-advanced';
 const PAINT_FLAG = 'paintedMasks';
 
@@ -38,8 +40,14 @@ function activeCanvas() {
  * REAL hit-testing at dispatch time regardless of which phase intercepts it,
  * so this check is reliable even from a window-level capture-phase listener.
  *
+ * `floorCount`/`viewedFloorIndex` come from the SAME reader `boot.js` uses to
+ * start the 3D viewer (`getActiveSceneFloors` + Foundry's own public
+ * `canvas.level` getter) — so the painter's Floor stepper can clamp to the
+ * scene's REAL floor count instead of a guessed range, and can open already
+ * on whatever floor is currently being viewed.
+ *
  * @returns {{ready:false}|{ready:true, sceneRect:{x:number,y:number,width:number,height:number},
- *   boardElement: (Element|null),
+ *   boardElement: (Element|null), floorCount:number, viewedFloorIndex:number,
  *   screenToWorld:(cx:number,cy:number)=>{x:number,y:number},
  *   worldToClient:(wx:number,wy:number)=>{x:number,y:number},
  *   snapWorld:(wx:number,wy:number)=>{x:number,y:number}}}
@@ -50,6 +58,16 @@ export function readPaintContext() {
   const PIXI = globalThis.PIXI;
   const r = c.dimensions.sceneRect;
   const view = c.app?.view;
+
+  // Mirrors boot.js's resolveFloorDescriptor exactly (same "no floors ->
+  // floor 0" and "unmatched level id -> floor 0" fallbacks) — one scene, one
+  // floor-resolution rule, read twice rather than reinvented.
+  const floorsResult = getActiveSceneFloors(c.scene ?? null);
+  const floors = floorsResult.ok ? floorsResult.floors : [];
+  const floorCount = Math.max(1, floors.length);
+  const viewedLevelId = c.level?.id ?? null;
+  const viewedIdx = viewedLevelId ? floors.findIndex((f) => f.id === viewedLevelId) : -1;
+  const viewedFloorIndex = viewedIdx >= 0 ? viewedIdx : 0;
 
   const clientToGlobal = (clientX, clientY) => {
     const p = new PIXI.Point();
@@ -70,6 +88,8 @@ export function readPaintContext() {
     ready: true,
     sceneRect: { x: r.x, y: r.y, width: r.width, height: r.height },
     boardElement: view ?? null,
+    floorCount,
+    viewedFloorIndex,
     screenToWorld: (clientX, clientY) => {
       const w = c.stage.toLocal(clientToGlobal(clientX, clientY));
       return { x: w.x, y: w.y };

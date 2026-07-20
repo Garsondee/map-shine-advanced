@@ -35,14 +35,17 @@
  * verified live.
  *
  * SCOPE: any authored mask kind (dropdown), PER-FLOOR masks (a Floor stepper —
- * paint on floor N only ever touches floor N), a 4096² grid with a dirty-rect
- * preview (re-packs only what changed), embed persistence with an unsaved-changes
- * guard (on close + on effect switch), a spray/paint/erase brush, AND the
- * Author-Mode vector tools — point / line (stroked) / polygon (filled) — all
- * rasterizing into the SAME mask the brush writes (Shapes-and-Regions.md), with
- * an optional 4×4 sub-grid snap, shared undo, and a live draft preview. Deferred:
- * retained/editable vector shapes + a Select tool, bake-to-file (Mode B),
- * auto-following the viewed floor, the package gate.
+ * paint on floor N only ever touches floor N, AND drives the live 3D view to
+ * floor N via vt/'s own `setVtPanViewerFloor` — the same cheap residency-only
+ * path Foundry's native floor navigation already uses, not a fresh reinvention;
+ * mask editing itself never depends on that call succeeding), a 4096² grid with
+ * a dirty-rect preview (re-packs only what changed), embed persistence with an
+ * unsaved-changes guard (on close + on effect switch), a spray/paint/erase
+ * brush, AND the Author-Mode vector tools — point / line (stroked) / polygon
+ * (filled) — all rasterizing into the SAME mask the brush writes
+ * (Shapes-and-Regions.md), with an optional 4×4 sub-grid snap, shared undo,
+ * and a live draft preview. Deferred: retained/editable vector shapes + a
+ * Select tool, bake-to-file (Mode B), the package gate.
  *
  * @module ui/paint-mode
  */
@@ -59,6 +62,7 @@ import {
   MASK_KINDS,
 } from '../scene/index.js';
 import { readPaintContext, savePaintedMasks, loadPaintedMasks } from '../foundry/index.js';
+import { setVtPanViewerFloor } from '../vt/index.js';
 
 const UNDO_LIMIT = 10; // at PAINT_GRID_MAX_DIM=4096 each undo snapshot is ~16MB — keep the stack bounded
 
@@ -86,6 +90,7 @@ export function installPainter(MapShine) {
     kind: PAINTABLE_KINDS[0]?.id ?? 'fire',
     layers: {}, // `${kind}::${floor}` -> MaskGrid
     floor: 0, // which floor these strokes apply to — masks are PER-FLOOR (the Floor stepper picks it)
+    floorSwitching: false, // a live setVtPanViewerFloor call is in flight — buttons disable so rapid clicks can't retrigger the flagged rapid-floor-switch residency bug
     gridCanvases: {}, // key -> offscreen canvas
     gridImageData: {}, // key -> cached ImageData for that canvas (reused, not reallocated, per frame)
     dirty: new Set(), // keys whose gridCanvas needs re-rendering
@@ -181,11 +186,36 @@ export function installPainter(MapShine) {
   // Masks are per-floor: keying by `state.floor` means paint on floor N only
   // ever touches the floor-N mask, and each floor's masks persist + travel
   // independently (Shapes-and-Regions.md / Authoring-and-Distribution.md).
-  function changeFloor(delta) {
-    const next = Math.max(0, Math.min(20, state.floor + delta));
+  //
+  // This ALSO drives the live 3D view to floor N (author ask: the stepper must
+  // actually swap floors, not just retarget painting) via vt/'s own
+  // `setVtPanViewerFloor` — the same cheap, no-restart path Foundry's native
+  // floor navigation already uses (boot.js's canvasReady handler), not a new
+  // one. That call is best-effort: mask editing is authoritative regardless of
+  // whether the live view can follow (feedback_safety_slide_outranks_doctrine
+  // — painting must not depend on the renderer being up), so a failed/absent
+  // viewer still lets you paint floor N's mask, just without the live picture.
+  // One switch in flight at a time — rapid clicking floors is a KNOWN trigger
+  // for a still-open residency bug (keyhole-device-loss-large-map.md).
+  async function changeFloor(delta) {
+    if (state.floorSwitching) return;
+    const max = Math.max(0, (state.ctx?.floorCount ?? 21) - 1);
+    const next = Math.max(0, Math.min(max, state.floor + delta));
     if (next === state.floor) return;
-    state.floor = next;
     cancelDraft(); // an in-progress shape belonged to the old floor
+    state.floorSwitching = true;
+    state.refreshToolbar?.();
+    try {
+      await setVtPanViewerFloor(next);
+    } catch (err) {
+      notify(
+        `Map Shine: live view couldn't follow to floor ${next} (${err?.message || err}) — painting it anyway.`,
+        'warn'
+      );
+    } finally {
+      state.floorSwitching = false;
+    }
+    state.floor = next;
     layerFor(state.kind); // ensure the new floor's layer exists
     markFull(activeKey());
     state.refreshToolbar?.();
@@ -423,6 +453,10 @@ export function installPainter(MapShine) {
       return;
     }
     state.ctx = ctx;
+    // Open on whatever floor Foundry is ALREADY showing, not always floor 0 —
+    // the auto-follow this project deferred earlier, unlocked for free once
+    // the context carries the live viewed-floor index.
+    state.floor = Math.max(0, Math.min(Math.max(0, ctx.floorCount - 1), ctx.viewedFloorIndex ?? 0));
     layerFor(state.kind);
     buildOverlay();
     installHandlers();
@@ -575,17 +609,17 @@ export function installPainter(MapShine) {
     snapCb.checked = state.snap;
     snapCb.addEventListener('change', () => (state.snap = snapCb.checked));
     snapWrap.append(snapCb, document.createTextNode('Snap ¼-grid'));
-    // floor stepper — masks are per-floor; this picks which floor you paint
+    // floor stepper — masks are per-floor AND this drives the live 3D view to
+    // match (changeFloor), so the label doubles as a busy indicator while that
+    // switch is in flight and the buttons disable to block rapid re-clicks.
     const floorLabelEl = document.createElement('span');
-    Object.assign(floorLabelEl.style, { minWidth: '54px', textAlign: 'center', opacity: '0.9' });
+    Object.assign(floorLabelEl.style, { minWidth: '60px', textAlign: 'center', opacity: '0.9' });
     floorLabelEl.textContent = `Floor ${state.floor}`;
+    const floorPrevBtn = button('◀', () => changeFloor(-1), '143,214,255');
+    const floorNextBtn = button('▶', () => changeFloor(1), '143,214,255');
     const floorWrap = document.createElement('div');
     Object.assign(floorWrap.style, { display: 'flex', alignItems: 'center', gap: '3px' });
-    floorWrap.append(
-      button('◀', () => changeFloor(-1), '143,214,255'),
-      floorLabelEl,
-      button('▶', () => changeFloor(1), '143,214,255')
-    );
+    floorWrap.append(floorPrevBtn, floorLabelEl, floorNextBtn);
 
     const toolRow = row();
     toolRow.append(label('Tool'), toolSeg.el, snapWrap, label('Floor'), floorWrap);
@@ -702,7 +736,11 @@ export function installPainter(MapShine) {
       modeSeg.sync();
       snapCb.checked = state.snap;
       kindSel.value = state.kind;
-      floorLabelEl.textContent = `Floor ${state.floor}`;
+      floorLabelEl.textContent = state.floorSwitching ? `Floor ${state.floor} ⏳` : `Floor ${state.floor}`;
+      floorPrevBtn.disabled = state.floorSwitching;
+      floorNextBtn.disabled = state.floorSwitching;
+      floorPrevBtn.style.opacity = state.floorSwitching ? '0.4' : '1';
+      floorNextBtn.style.opacity = state.floorSwitching ? '0.4' : '1';
       saveBtn.textContent = state.dirtySinceSave ? '💾 Save •' : '💾 Saved';
       saveBtn.style.opacity = state.dirtySinceSave ? '1' : '0.55';
     };

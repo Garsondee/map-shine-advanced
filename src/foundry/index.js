@@ -104,6 +104,15 @@ export {
   deriveGlobalLightConfig,
 } from './scene-lights.js';
 
+// WALL-CLIPPED POLYGON FOR NON-DOCUMENT POINTS — the one place
+// `CONFIG.Canvas.polygonBackends`/`canvas.scene.levels` are read to compute
+// a wall-aware shape for a point that isn't a real Foundry document (candle
+// lights, effects/candle-flame-render.js). Reuses Foundry's own
+// ClockwiseSweepPolygon rather than a second hand-rolled wall-clipping
+// algorithm — see scene-wall-clip.js's own header for the `level`
+// requirement (a real Level document, never `canvas.level`).
+export { buildCandleWallClipConfig, computeCandleWallClippedShape } from './scene-wall-clip.js';
+
 // THE REGION READER — feeds effects/lighting/region-darkness.js's per-point
 // darkness adjustment; the one place canvas.scene.regions (+ each region's
 // own "Adjust Darkness Level" behavior) is read. `readSuppressWeatherStub` is
@@ -126,3 +135,9 @@ export {
 // adapter-only). Registers/reads/writes the descriptors effects/effect-
 // settings.js derives; knows nothing about effects itself.
 export { registerSettings, readSetting, writeSetting } from './settings-adapter.js';
+
+// V2 → V3 ANCHOR IMPORT — reads a scene's legacy `mapPointGroups` flags and
+// produces V3 anchor candidates (the Map Points successor). Boot hands them to
+// scene/anchor-authority.js. A leaf: it knows no anchor kinds — boot injects the
+// V2 effectTarget → kind mapping (dependency inversion, like the mask authority).
+export { importV2Anchors, detectV2MapPoints, V2_IMPORT_SENTINEL } from './v2-anchor-import.js';

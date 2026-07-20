@@ -40,6 +40,25 @@ export {
   MAX_LIGHT_EDGES,
 } from './lighting/point-light-illumination.js';
 export { buildPointLightColorationMaterial, computeColorationAlpha } from './lighting/point-light-coloration.js';
+// ── ANIMATED LIGHTS (docs/planning/Light-Parity.md §5's last item;
+// docs/reference/foundry-v14-light-animations-audit.md) ─────────────────────
+export { LIGHT_ANIMATIONS, KNOWN_DEFERRED_ANIMATIONS, resolveLightAnimation } from './lighting/animations/registry.js';
+export {
+  computeAnimationTime,
+  SmoothNoise,
+  computeFlickerUniforms,
+  computePulseUniforms,
+} from './lighting/animations/light-animation-clock.js';
+export {
+  fbmFloat,
+  fbmVec3,
+  voronoiFloat,
+  voronoiVec3,
+  simplexFloat,
+  hsb2rgb,
+  pie,
+  rotate2d,
+} from './lighting/animations/tsl-noise-toolkit.js';
 export {
   pointInRectangle,
   pointInEllipse,
@@ -84,6 +103,19 @@ export {
   ENABLE_OVERRIDES,
 } from './effect-cascade.js';
 export { UI_WINDOW_SHADOW, UI_SHADOW_PARAMS } from './ui-window-shadow.js';
+export { CANDLE_FLAME, CANDLE_FLAME_PARAMS } from './candle-flame.js';
+// The candle RUNTIME (candle-flame-render.js's header explains why a candle is
+// a billboard + a light, not a particle): pure geometry/colour/light-source math
+// + the TSL flame material. The viewer imports these through this door exactly
+// as it imports the lighting builders.
+export {
+  buildCandleFlameMaterial,
+  buildCandleFlameGeometry,
+  buildCandleLightSources,
+  computeCandleFlameArrays,
+  candleCirclePolygon,
+  hexToRgb01,
+} from './candle-flame-render.js';
 export {
   describeEffectSettings,
   deriveEffectLayers,

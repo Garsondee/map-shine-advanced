@@ -276,6 +276,80 @@ export function run(t) {
     ) !== null
   );
 
+  // ---- animation snapshot (docs/planning/Light-Parity.md §5's last item) --
+  {
+    const snap = deriveLightSnapshot({
+      sourceId: 'a',
+      x: 0,
+      y: 0,
+      radius: 1,
+      shapePoints: TRIANGLE,
+      animation: { type: 'torch', speed: 8, intensity: 3, reverse: true, seed: 12345 },
+    });
+    ok('animation.type passes through', snap.animation.type === 'torch');
+    ok('animation.speedRaw passes through', snap.animation.speedRaw === 8);
+    ok('animation.intensityRaw passes through', snap.animation.intensityRaw === 3);
+    ok('animation.reverse passes through', snap.animation.reverse === true);
+    ok("animation.seed passes through (Foundry's own live value, never re-randomized)", snap.animation.seed === 12345);
+  }
+  {
+    const snap = deriveLightSnapshot({ sourceId: 'a', x: 0, y: 0, radius: 1, shapePoints: TRIANGLE });
+    ok('missing animation reads as no-animation (type null)', snap.animation.type === null);
+    ok("missing animation.speed reads as LightData's own default (5)", snap.animation.speedRaw === 5);
+    ok("missing animation.intensity reads as LightData's own default (5)", snap.animation.intensityRaw === 5);
+    ok('missing animation.reverse reads as false', snap.animation.reverse === false);
+    ok('missing animation.seed reads as 0, never NaN', snap.animation.seed === 0);
+  }
+  {
+    const emptyType = deriveLightSnapshot({
+      sourceId: 'a',
+      x: 0,
+      y: 0,
+      radius: 1,
+      shapePoints: TRIANGLE,
+      animation: { type: '' },
+    });
+    ok(
+      'empty-string animation.type reads as no-animation (null), never an empty-string registry lookup',
+      emptyType.animation.type === null
+    );
+    const numericType = deriveLightSnapshot({
+      sourceId: 'a',
+      x: 0,
+      y: 0,
+      radius: 1,
+      shapePoints: TRIANGLE,
+      animation: { type: 42 },
+    });
+    ok(
+      'a non-string animation.type reads as no-animation (null), never propagated',
+      numericType.animation.type === null
+    );
+  }
+  {
+    const outOfRange = deriveLightSnapshot({
+      sourceId: 'a',
+      x: 0,
+      y: 0,
+      radius: 1,
+      shapePoints: TRIANGLE,
+      animation: { type: 'pulse', speed: 99, intensity: -5 },
+    });
+    ok('animation.speedRaw clamps to the schema max (10)', outOfRange.animation.speedRaw === 10);
+    ok('animation.intensityRaw clamps to the schema min (1)', outOfRange.animation.intensityRaw === 1);
+  }
+  ok(
+    'NaN animation.seed falls back to 0, never NaN',
+    deriveLightSnapshot({
+      sourceId: 'a',
+      x: 0,
+      y: 0,
+      radius: 1,
+      shapePoints: TRIANGLE,
+      animation: { type: 'torch', seed: NaN },
+    }).animation.seed === 0
+  );
+
   // ---- deriveGlobalLightConfig — the scene's Global Illumination gate.
   // Same "return null to skip" convention as deriveLightSnapshot. ----------
   ok('disabled reads as null (no floor to raise)', deriveGlobalLightConfig({ enabled: false }, 0.5) === null);

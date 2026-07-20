@@ -344,15 +344,42 @@ function makeSdPolygonEdgeDistance(TSL) {
  * as methods, matching this file's own already-proven-safe `.max()` usage
  * elsewhere in vt-pan-viewer.js.
  *
+ * ANIMATION SEED INJECTION (2026-07-20, docs/planning/Light-Parity.md §5's
+ * last item) — the optional `args.animation` param is the ONLY seam an
+ * animated light uses. Verified against Foundry source (docs/reference/
+ * foundry-v14-light-animations-audit.md): every animation shader is the
+ * SAME scaffold (FRAGMENT_BEGIN → …→ FALLOFF → FRAGMENT_END) with exactly
+ * one line swapped — the seed `finalColor` expression, normally
+ * `switchColor(bright,dim,dist)` (the `t`/`mix(uBrightColor,uDimColor,t)`
+ * below). Everything downstream — EXPOSURE, FALLOFF, the soft-edge SDF, the
+ * background mix, the MAX-blend material setup — is genuinely identical for
+ * every animation and for no animation at all, so it stays exactly ONE
+ * implementation, reused, never duplicated per-animation. When
+ * `args.animation` is absent this function's output is BYTE-IDENTICAL to
+ * before this param existed (regression safety net for every light that
+ * isn't animated, i.e. most lights).
+ *
  * @param {object} args
  * @param {*} args.THREE
  * @param {*} args.uBackgroundColor - shared vec3 uniform (sRGB), env's `background`.
  * @param {*} args.uDimColor - shared vec3 uniform (sRGB), env's `dim`.
  * @param {*} args.uBrightColor - shared vec3 uniform (sRGB), env's `bright`.
+ * @param {{buildIlluminationSeed: (function(object): {finalColor: *, uniforms: object, skipExposure: (boolean|undefined)})}} [args.animation] -
+ *   from effects/lighting/animations/registry.js's matched entry. When its
+ *   `buildIlluminationSeed` is present it's called with `{THREE, uBrightColor,
+ *   uDimColor, uRatio, dist, defaultSeed}` (`defaultSeed` is the un-animated
+ *   `switchColor` result, offered in case an animation wants to blend with
+ *   it rather than fully replace it) and must return `{finalColor, uniforms,
+ *   skipExposure}` — `finalColor` replaces the seed; `uniforms` (a plain
+ *   `{name: uniformNode}` map, e.g. `{uBrightnessPulse}`) is merged into this
+ *   function's own returned uniforms so the caller can write into it every
+ *   frame, same as `uRatio`/`uAttenuationEased` already are; `skipExposure`
+ *   (rare — currently only Pulse, docs/reference/foundry-v14-light-
+ *   animations-audit.md §4) omits the EXPOSURE stage entirely when true.
  * @returns {{material: *, uRatio: *, uAttenuationEased: *, uExposure: *,
- *   uEdgeCount: *, uEdgeSoftMargin: *, edgePoints: object[]}}
+ *   uEdgeCount: *, uEdgeSoftMargin: *, edgePoints: object[], animationUniforms: object}}
  */
-export function buildPointLightIlluminationMaterial({ THREE, uBackgroundColor, uDimColor, uBrightColor }) {
+export function buildPointLightIlluminationMaterial({ THREE, uBackgroundColor, uDimColor, uBrightColor, animation }) {
   const { uniform, uniformArray, float, int, vec2, vec4, mix, clamp, smoothstep, length, positionLocal, select } =
     THREE.TSL;
 
@@ -380,7 +407,28 @@ export function buildPointLightIlluminationMaterial({ THREE, uBackgroundColor, u
   const lowerEdge = uRatio.mul(float(0.99).sub(attenuationStrength));
   const upperEdge = clamp(uRatio.mul(float(1.01).add(attenuationStrength)), float(0.0001), float(1.0));
   const t = smoothstep(lowerEdge, upperEdge, dist);
-  const finalColor = mix(uBrightColor, uDimColor, t);
+  const defaultSeed = mix(uBrightColor, uDimColor, t);
+
+  // ANIMATION SEED INJECTION — see this function's own header. Absent
+  // `animation`/`buildIlluminationSeed` (the overwhelming common case, and
+  // every call site before this param existed): finalColor === defaultSeed,
+  // animationUniforms === {}, output is unchanged. `skipExposure` is a
+  // second, rarer escape hatch: docs/reference/foundry-v14-light-animations-
+  // audit.md's own §4 `pulse` entry is the ONE Foundry animation (of 27)
+  // whose illumination channel skips `${ADJUSTMENTS}` (== EXPOSURE here)
+  // entirely, verified against source — a JS-time decision (which nodes get
+  // BUILT), not a runtime one, per the `tsl/no-uniform-gates` wall ("tier
+  // selection is a JS `if` at graph-build time — the nodes are never
+  // constructed"; a runtime toggle would still pay for the compiled branch).
+  const animationUniforms = {};
+  let finalColor = defaultSeed;
+  let skipExposure = false;
+  if (animation?.buildIlluminationSeed) {
+    const seeded = animation.buildIlluminationSeed({ THREE, uBrightColor, uDimColor, uRatio, dist, defaultSeed });
+    finalColor = seeded.finalColor;
+    skipExposure = seeded.skipExposure === true;
+    Object.assign(animationUniforms, seeded.uniforms ?? {});
+  }
 
   // EXPOSURE, audit §8/§18 (`AdaptiveIlluminationShader.EXPOSURE`) — a
   // luminosity-driven multiplier on the switchColor result, BEFORE falloff.
@@ -395,19 +443,24 @@ export function buildPointLightIlluminationMaterial({ THREE, uBackgroundColor, u
   // Foundry's `if (exposure>0) {...} else if (exposure!=0) {...}` — the
   // "else" (exposure exactly 0) branch is folded into the same `<=0` arm
   // below since `1+exposure` at exposure=0 is already the identity.
-  const attenuationStrengthExp = uAttenuationEased.mul(float(0.25));
-  const lowerEdgeExp = uRatio.mul(float(0.98).sub(attenuationStrengthExp));
-  const upperEdgeExp = clamp(uRatio.mul(float(1.02).add(attenuationStrengthExp)), float(0.0001), float(1.0));
-  const quartExposure = uExposure.mul(float(0.25));
-  const finalExposurePositive = quartExposure
-    .mul(float(1).sub(smoothstep(lowerEdgeExp, upperEdgeExp, dist)))
-    .add(quartExposure);
-  const exposureFactor = select(
-    uExposure.greaterThan(float(0)),
-    float(1).add(finalExposurePositive),
-    float(1).add(uExposure)
-  );
-  const finalColorExposed = finalColor.mul(exposureFactor);
+  let finalColorExposed;
+  if (skipExposure) {
+    finalColorExposed = finalColor;
+  } else {
+    const attenuationStrengthExp = uAttenuationEased.mul(float(0.25));
+    const lowerEdgeExp = uRatio.mul(float(0.98).sub(attenuationStrengthExp));
+    const upperEdgeExp = clamp(uRatio.mul(float(1.02).add(attenuationStrengthExp)), float(0.0001), float(1.0));
+    const quartExposure = uExposure.mul(float(0.25));
+    const finalExposurePositive = quartExposure
+      .mul(float(1).sub(smoothstep(lowerEdgeExp, upperEdgeExp, dist)))
+      .add(quartExposure);
+    const exposureFactor = select(
+      uExposure.greaterThan(float(0)),
+      float(1).add(finalExposurePositive),
+      float(1).add(uExposure)
+    );
+    finalColorExposed = finalColor.mul(exposureFactor);
+  }
 
   // FALLOFF, audit §7 — the AUTHORED attenuation slider's own radial corona,
   // epsilon-guarded: Foundry branches `if (attenuation != 0.0)` to skip a
@@ -465,5 +518,5 @@ export function buildPointLightIlluminationMaterial({ THREE, uBackgroundColor, u
   material.blendDstAlpha = THREE.OneFactor;
   material.fragmentNode = vec4(outputColor, float(1));
 
-  return { material, uRatio, uAttenuationEased, uExposure, uEdgeCount, uEdgeSoftMargin, edgePoints };
+  return { material, uRatio, uAttenuationEased, uExposure, uEdgeCount, uEdgeSoftMargin, edgePoints, animationUniforms };
 }

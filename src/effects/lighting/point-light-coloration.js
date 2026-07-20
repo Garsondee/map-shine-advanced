@@ -109,12 +109,29 @@ export function computeColorationAlpha(alpha01, technique) {
  * a world-space-camera mesh sampling a same-camera fullscreen target (the
  * masks.occlusion producer's own `maskUV` fix uses the identical primitive).
  *
+ * ANIMATION SEED INJECTION (2026-07-20) — mirrors point-light-illumination.js's
+ * own seam, and its own header explains the general shape; the coloration-
+ * specific wrinkle (verified against Foundry source, docs/reference/foundry-
+ * v14-light-animations-audit.md) is that an animation's seed replaces ONLY
+ * `color * colorationAlpha` (the `uLightColor.mul(uColorationAlpha)` below)
+ * — the technique-1 `reflection` multiply (this file's own `finalColor`,
+ * unchanged) STILL applies AFTER it, unconditionally, exactly like a
+ * non-animated light. Foundry's own animated coloration shaders confirm
+ * this: `${COLORATION_TECHNIQUES}` runs immediately after every animation's
+ * seed line, never bypassed by it.
+ *
  * @param {object} args
  * @param {*} args.THREE
  * @param {*} args.albedoTexture - `buf:scene.color`'s texture.
- * @returns {{material: *, uAttenuationEased: *, uColorationAlpha: *, uLightColor: *}}
+ * @param {{buildColorationSeed: (function(object): {finalColor: *, uniforms: object})}} [args.animation] -
+ *   from effects/lighting/animations/registry.js's matched entry. When its
+ *   `buildColorationSeed` is present it's called with `{THREE, uLightColor,
+ *   uColorationAlpha, dist, defaultSeed}` (`defaultSeed` is the un-animated
+ *   `uLightColor * uColorationAlpha` seed) and must return `{finalColor,
+ *   uniforms}` — same contract as the illumination seam.
+ * @returns {{material: *, uAttenuationEased: *, uColorationAlpha: *, uLightColor: *, animationUniforms: object}}
  */
-export function buildPointLightColorationMaterial({ THREE, albedoTexture }) {
+export function buildPointLightColorationMaterial({ THREE, albedoTexture, animation }) {
   const {
     uniform,
     vec3,
@@ -160,7 +177,19 @@ export function buildPointLightColorationMaterial({ THREE, albedoTexture }) {
   const BT709 = vec3(0.2126, 0.7152, 0.0722);
   const reflection = sqrt(dot(BT709, mapColor.mul(mapColor)));
 
-  const finalColor = uLightColor.mul(uColorationAlpha).mul(reflection);
+  // ANIMATION SEED INJECTION — see this function's own header. Absent
+  // `animation`/`buildColorationSeed`: seedColor === defaultSeed, output is
+  // unchanged from before this param existed.
+  const defaultSeed = uLightColor.mul(uColorationAlpha);
+  const animationUniforms = {};
+  let seedColor = defaultSeed;
+  if (animation?.buildColorationSeed) {
+    const seeded = animation.buildColorationSeed({ THREE, uLightColor, uColorationAlpha, dist, defaultSeed });
+    seedColor = seeded.finalColor;
+    Object.assign(animationUniforms, seeded.uniforms ?? {});
+  }
+
+  const finalColor = seedColor.mul(reflection);
   const outputColor = finalColor.mul(falloff);
 
   const material = new THREE.NodeMaterial();
@@ -177,9 +206,25 @@ export function buildPointLightColorationMaterial({ THREE, albedoTexture }) {
   material.blendEquationAlpha = THREE.MaxEquation;
   material.blendSrcAlpha = THREE.OneFactor;
   material.blendDstAlpha = THREE.OneFactor;
-  material.fragmentNode = vec4(outputColor, float(1));
+  // ALPHA = falloff, NOT a hardcoded 1 (fixed 2026-07-20 — docs/reference/
+  // foundry-v14-light-animations-audit.md §3.2, found while researching
+  // animated lights, unrelated to that feature itself). Real Foundry's
+  // coloration FRAGMENT_END is `vec4(finalColor,1.0) * depth` — i.e. alpha
+  // IS depth-after-falloff, fading to 0 at the light's edge exactly like the
+  // RGB channels do, not a constant. Illumination's alpha (point-light-
+  // illumination.js) is CORRECTLY hardcoded to 1 — that channel's own
+  // FRAGMENT_END really is `vec4(mix(...), 1.0)`, verified against the same
+  // source; the two channels are NOT symmetric here, don't "fix" both.
+  // CONFIRMED INERT TODAY, fixed anyway: traced every reader of buf:scene.
+  // coloration in this codebase (grep across src/) — the only consumer,
+  // environmental-light.js's composite (`finalSrgb = litSrgb.add(
+  // colorationTexNode.rgb)`), samples `.rgb` only, never `.a`/`.w`. So this
+  // was real, stored, spec-wrong data with zero current visible effect —
+  // worth correcting before a future alpha-aware consumer (a debug view, a
+  // masking step) silently inherits the wrong contract.
+  material.fragmentNode = vec4(outputColor, falloff);
 
-  return { material, uAttenuationEased, uColorationAlpha, uLightColor };
+  return { material, uAttenuationEased, uColorationAlpha, uLightColor, animationUniforms };
 }
 
 /*

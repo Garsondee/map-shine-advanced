@@ -1,14 +1,12 @@
 /**
- * src/effects/ verification — the effect-registration core (params schema,
- * manifest validator, cascade resolver, registry). Pure logic; the Foundry
- * settings adapter and the live render wiring are browser-only.
+ * src/effects/lighting/animations/ verification — the pure CPU animation
+ * drivers and the registry's own shape. TSL material builds are browser-only.
  *
  * Discovered and run by tools/run-tests.mjs (glob of __tests__/run-tests.mjs);
  * `npm test` / `npm run verify` picks it up for free.
  */
-import { run as runEffectRegistration } from './effect-registration.test.mjs';
-import { run as runCandleFlame } from './candle-flame.test.mjs';
-import { run as runCandleFlameRender } from './candle-flame-render.test.mjs';
+import { run as runLightAnimationClock } from './light-animation-clock.test.mjs';
+import { run as runRegistry } from './registry.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -31,16 +29,15 @@ const t = {
       if (!sub || String(e.message).includes(sub)) passed++;
       else {
         failed++;
-        fails.push(name + ` (wrong message: ${e.message})`);
+        fails.push(name + ' (wrong message)');
       }
     }
   },
 };
 
 const suites = [
-  ['effect-registration', runEffectRegistration],
-  ['candle-flame', runCandleFlame],
-  ['candle-flame-render', runCandleFlameRender],
+  ['light-animation-clock', runLightAnimationClock],
+  ['registry', runRegistry],
 ];
 for (const [name, fn] of suites) {
   const before = failed;
@@ -48,7 +45,7 @@ for (const [name, fn] of suites) {
   console.log(`  ${name}: ${failed === before ? 'ok' : 'FAILED'}`);
 }
 
-console.log(`\nsrc/effects verification: ${passed} passed, ${failed} failed`);
+console.log(`\nsrc/effects/lighting/animations verification: ${passed} passed, ${failed} failed`);
 if (failed) {
   console.error('Failures:', fails);
   process.exit(1);

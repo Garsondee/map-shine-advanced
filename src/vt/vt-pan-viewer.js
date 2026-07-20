@@ -106,6 +106,7 @@ import {
 import { ThreeAllocator, PASSES, planFrame, runPassPlan } from '../graph/index.js';
 import { PROBE_CORNERS, classifyPixel, diagnoseOrientation } from '../diag/orientation-probe.js';
 import { decodeHalfFloatRgba, decodeByteRgba, diffProbeBuffers } from '../diag/pixel-probe.js';
+import { createGpuProbe } from '../diag/gpu-probe.js';
 import { sortByLayer } from '../scene/layer-order.js';
 import {
   computeCameraFrustum,
@@ -135,6 +136,7 @@ import {
   readGridSizePixels,
   computeTokenOcclusionRadiusPx,
   getActiveSceneFloors,
+  computeCandleWallClippedShape,
 } from '../foundry/index.js';
 import { engageFoundryFallback, clearFoundryFallback, describeRenderMode } from '../diag/render-fallback.js';
 import {
@@ -177,6 +179,16 @@ import {
   mapWindowRectToStamp,
   MAX_UI_SHADOW_STAMPS,
   DEFAULT_WORKSPACE_LIGHT,
+  buildCandleFlameMaterial,
+  buildCandleFlameGeometry,
+  buildCandleLightSources,
+  hexToRgb01,
+  resolveLightAnimation,
+  KNOWN_DEFERRED_ANIMATIONS,
+  computeAnimationTime,
+  SmoothNoise,
+  computeFlickerUniforms,
+  computePulseUniforms,
 } from '../effects/index.js';
 import { makeFrameClock } from '../core/frame-clock.js';
 
@@ -512,6 +524,14 @@ function disposeActive() {
   try {
     _active.renderer.setAnimationLoop(null);
   } catch (_) {}
+  // The live marker overlay is its OWN requestAnimationFrame loop, independent
+  // of the renderer's — it must be cancelled here too, or a Stop/Restart (or a
+  // real scene switch) leaks a rAF loop pointing at a torn-down `mount.host`.
+  try {
+    _active.stopLiveMarkers?.();
+  } catch (err) {
+    log.error('live marker overlay stop failed — a stray rAF loop may leak:', err);
+  }
   try {
     _active.atlas?.dispose(); // null in whole-image mode — the atlas is never allocated
   } catch (_) {}
@@ -563,6 +583,13 @@ function disposeActive() {
     _active.disposeLighting?.();
   } catch (err) {
     log.error('lighting dispose failed — VRAM may be leaked:', err);
+  }
+  // The candle flame billboard's own mesh/geometry/material (its lights are in
+  // the shared pool, freed by disposePointLights below).
+  try {
+    _active.disposeCandleFlame?.();
+  } catch (err) {
+    log.error('candle flame dispose failed — VRAM may be leaked:', err);
   }
   // Every point-light mesh/material/geometry — same per-cycle VRAM-leak
   // reasoning, a separate call mirroring disposeOcclusionMask's own split
@@ -700,10 +727,18 @@ export async function startVtPanViewer({
   onLoadProgress,
   onPageDecoded,
   onDeviceLost,
+  getCandleRenderState,
 }) {
   extraLayersForItem ??= () => [];
   getOcclusionInputs ??= () => ({ occluders: [], visionActive: false });
   onPageDecoded ??= () => {};
+  // THE CANDLE EFFECT's data seam (effects/candle-flame-render.js): boot injects
+  // `{ enabled, params: {sizePx, color, lightRadiusPx}, anchors: [{id,x,y}] }` for
+  // the active floor. vt/ owns the GPU lifecycle (the flame billboard mesh + the
+  // candle lights merged into the light pool) but knows nothing about the anchor
+  // authority or the settings cascade — same injection discipline as the mask
+  // authority's closures. Default = the effect off, so an un-wired caller is inert.
+  getCandleRenderState ??= () => ({ enabled: false, params: {}, anchors: [] });
   _uploadDrain = { maxMs: 0, count: 0 }; // fresh GPU-backpressure stats per viewer session
   // THE SAFETY SLIDE'S seam-restore hook (see the renderer.onDeviceLost handler
   // below). Injected exactly like the others so vt/ stays ignorant of the
@@ -1442,7 +1477,15 @@ export async function startVtPanViewer({
      * floor — see that function's own header for why). Extracted rather
      * than each caller re-reading/re-filtering independently, so the two
      * can never see a different active-region set within the same frame.
-     * @returns {object[]} elevation-filtered active regions.
+     * @returns {{regions: object[], currentFloor: object|null}} elevation-
+     *   filtered active regions, PLUS the same `currentFloor` descriptor this
+     *   function already derives internally — 2026-07-20, widened (was
+     *   `regions` alone) so `updatePointLightMeshes` can reuse the IDENTICAL
+     *   floor lookup for candle wall-clipping (see that function's own
+     *   `currentFloor.id`-consuming code) rather than a second, potentially
+     *   drifting `getActiveSceneFloors` call — same "read once, shared by
+     *   both" reasoning as this function's own header already states for
+     *   `activeRegions`.
      */
     function readElevationFilteredDarknessRegions() {
       const { regions } = readActiveDarknessRegions();
@@ -1467,9 +1510,10 @@ export async function startVtPanViewer({
       // because a floor lookup came up empty this one frame.
       const floorBottom = currentFloor?.elevationBottom ?? null;
       const floorTop = currentFloor?.elevationTop ?? null;
-      return regions.filter((region) =>
+      const filtered = regions.filter((region) =>
         regionOverlapsElevationBand(region.elevationBottom, region.elevationTop, floorBottom, floorTop)
       );
+      return { regions: filtered, currentFloor };
     }
 
     function updateRegionDarknessMeshes(darkness01, activeRegions) {
@@ -1678,6 +1722,21 @@ export async function startVtPanViewer({
      * mark — an occasional reallocation, not a chronic per-frame one. */
     const lightMeshes = new Map();
 
+    /** sourceId -> {floorId, radius, points, source, reason} — per-candle
+     * WALL-CLIPPED shape cache (2026-07-20, the "candle light bleeds through
+     * walls" fix — foundry/scene-wall-clip.js's own header has the full
+     * mechanism/why). Candles are static per anchor and Foundry's own
+     * ClockwiseSweepPolygon computation is unmeasured-but-presumed-nontrivial
+     * (no benchmark data exists anywhere, verified) — so this is recomputed
+     * ONLY when a candle's floor or radius actually changes (author retunes
+     * via MapShine.setCandle, or a floor switch), never every frame, mirroring
+     * lightMeshes' own "create once, reuse" discipline just above. A failed
+     * sweep (`points: null` — legacy scene, level not yet resolved, anything)
+     * caches the FAILURE too (so it doesn't retry every single frame) and the
+     * caller falls back to the light's own already-naive-circle shapePoints —
+     * never a crash, never a vanished light. */
+    const candleWallClipCache = new Map();
+
     /** The last-applied ambient colours (background/dim/bright) — tracked
      * for getPointLightsInfo() so the diagnostic reports what was ACTUALLY
      * used, not a recomputed guess (feedback_instruments_must_not_lie). */
@@ -1736,11 +1795,53 @@ export async function startVtPanViewer({
      * @param {number} darknessRealism01 - the darkness-realism lever, same
      *   value `computeAmbientColors` already takes elsewhere this frame.
      */
-    function updatePointLightMeshes(darkness01, activeRegions, env, darknessRealism01) {
+    function updatePointLightMeshes(darkness01, activeRegions, env, darknessRealism01, currentFloor) {
       // darkness01 gates each light's OWN activation window (LightData.darkness
       // {min,max}, default {0,1} — "always on"; see foundry/scene-lights.js's
       // header for why this lives in the reader, not here).
-      const { lights } = readActiveLightSources(darkness01);
+      const { lights: foundryLights } = readActiveLightSources(darkness01);
+      // CANDLE LIGHTS (effects/candle-flame-render.js) — authored by us from the
+      // anchor authority, shaped EXACTLY like a Foundry light source so they flow
+      // through this SAME pool: region-aware ambient, the soft edge, coloration
+      // and MAX-blending, all for free. This is the "point light we control": its
+      // radius/colour come from the candle effect's params, not a Foundry doc.
+      const candleLightState = getCandleRenderState();
+      const candleLights = candleLightState.enabled
+        ? buildCandleLightSources(candleLightState.anchors, {
+            lightRadiusPx: candleLightState.params?.lightRadiusPx,
+            colorHex: candleLightState.params?.color,
+          })
+        : [];
+      // WALL-CLIPPING candle lights (2026-07-20) — candleLights' own shapePoints
+      // (candleCirclePolygon) is a naive circle with ZERO wall awareness; this
+      // replaces it with Foundry's own ClockwiseSweepPolygon result wherever one
+      // is available, falling back to the naive circle otherwise (never a crash,
+      // never a light that vanishes — see foundry/scene-wall-clip.js's own
+      // header and candleWallClipCache's own doc just above `lightMeshes`).
+      // `currentFloor` is the SAME value region-darkness elevation-filtering
+      // already computed this frame (readElevationFilteredDarknessRegions, via
+      // runLightAccumulatePass) — reused, never re-derived, so a candle's wall-
+      // clip and the region-darkness pass can never disagree about which floor
+      // is active.
+      const currentFloorId = currentFloor?.id ?? null;
+      for (const candle of candleLights) {
+        let cached = candleWallClipCache.get(candle.sourceId);
+        if (!cached || cached.floorId !== currentFloorId || cached.radius !== candle.radius) {
+          const result = computeCandleWallClippedShape({
+            x: candle.x,
+            y: candle.y,
+            radius: candle.radius,
+            levelId: currentFloorId,
+          });
+          cached = { floorId: currentFloorId, radius: candle.radius, ...result };
+          candleWallClipCache.set(candle.sourceId, cached);
+        }
+        if (cached.points) candle.shapePoints = cached.points;
+        // cached.points === null: candle KEEPS buildCandleLightSources' own
+        // naive-circle shapePoints untouched — the pre-fix behaviour, not a gap
+        // this change introduces.
+      }
+      const lights = candleLights.length ? [...foundryLights, ...candleLights] : foundryLights;
       // Read ONCE per frame, same precedent as runMaskOcclusionPass's own
       // readGridDistancePixels call — a scene's grid size does not change
       // light-to-light, only scene-to-scene.
@@ -1750,6 +1851,28 @@ export async function startVtPanViewer({
       for (const light of lights) {
         seen.add(light.sourceId);
         let entry = lightMeshes.get(light.sourceId);
+        // ANIMATED LIGHTS — REBUILD ON LIVE CHANGE (2026-07-20, docs/planning/
+        // Light-Parity.md §5's last item). A light's materials are built ONCE
+        // per animation TYPE, baked into the node graph at construction time
+        // (mirrors Foundry's own _configureShaders shader-class swap) — if a
+        // GM edits the light's Animation tab mid-session, this pool entry's
+        // animationType goes stale. Rare event (a live config edit, not a
+        // per-frame cost), so the simplest correct fix is to tear this entry
+        // down and let the "entry doesn't exist" path below recreate it
+        // fresh, rather than a second, parallel in-place-patch code path.
+        // Dispose what THREE actually HAS a real dispose() for (geometry,
+        // both materials) — unlike the BufferAttribute leak this pool's own
+        // header documents (reference_bufferattribute_no_dispose_trap
+        // memory), NodeMaterial/BufferGeometry genuinely free GPU state here.
+        if (entry && entry.animationType !== light.animation.type) {
+          lightScene.remove(entry.mesh);
+          colorationScene.remove(entry.colorationMesh);
+          entry.material.dispose();
+          entry.colorationMaterial.dispose();
+          entry.geometry.dispose();
+          lightMeshes.delete(light.sourceId);
+          entry = null;
+        }
         if (!entry) {
           const geometry = new THREE.BufferGeometry();
           // Pre-allocate ONCE, sized generously — see INITIAL_LIGHT_FAN_VERTICES
@@ -1764,13 +1887,29 @@ export async function startVtPanViewer({
           const uBackgroundColor = THREE.TSL.uniform(THREE.TSL.vec3(0.93, 0.93, 0.93));
           const uDimColor = THREE.TSL.uniform(THREE.TSL.vec3(0.93, 0.93, 0.93));
           const uBrightColor = THREE.TSL.uniform(THREE.TSL.vec3(1, 1, 1));
-          const { material, uRatio, uAttenuationEased, uExposure, uEdgeCount, uEdgeSoftMargin, edgePoints } =
-            buildPointLightIlluminationMaterial({
-              THREE,
-              uBackgroundColor,
-              uDimColor,
-              uBrightColor,
-            });
+          // ANIMATED LIGHTS — resolved ONCE at material-build time (not
+          // per-frame): the matched registry entry (or null for no/unbuilt
+          // animation) is baked into the node graph via the seed-injection
+          // seam (point-light-illumination.js's / point-light-coloration.js's
+          // own headers) — mirrors Foundry's own "swap the shader class at
+          // source init" approach exactly.
+          const animationEntry = resolveLightAnimation(light.animation.type);
+          const {
+            material,
+            uRatio,
+            uAttenuationEased,
+            uExposure,
+            uEdgeCount,
+            uEdgeSoftMargin,
+            edgePoints,
+            animationUniforms: animIllumUniforms,
+          } = buildPointLightIlluminationMaterial({
+            THREE,
+            uBackgroundColor,
+            uDimColor,
+            uBrightColor,
+            animation: animationEntry,
+          });
           const mesh = new THREE.Mesh(geometry, material);
           mesh.frustumCulled = false;
           lightScene.add(mesh);
@@ -1778,7 +1917,11 @@ export async function startVtPanViewer({
           // SAME geometry object (no duplicate triangulation/BufferAttribute
           // — see point-light-coloration.js's own header), added to the
           // SEPARATE colorationScene.
-          const colorationBuilt = buildPointLightColorationMaterial({ THREE, albedoTexture: sceneColor.texture });
+          const colorationBuilt = buildPointLightColorationMaterial({
+            THREE,
+            albedoTexture: sceneColor.texture,
+            animation: animationEntry,
+          });
           const colorationMesh = new THREE.Mesh(geometry, colorationBuilt.material);
           colorationMesh.frustumCulled = false;
           colorationScene.add(colorationMesh);
@@ -1802,6 +1945,15 @@ export async function startVtPanViewer({
             uColorationAttenuationEased: colorationBuilt.uAttenuationEased,
             uColorationAlpha: colorationBuilt.uColorationAlpha,
             uLightColor: colorationBuilt.uLightColor,
+            // ANIMATED LIGHTS — see this block's own comments above.
+            animationType: light.animation.type,
+            animationEntry,
+            animIllumUniforms,
+            animColorUniforms: colorationBuilt.animationUniforms,
+            // Lazily created in the per-frame update below (only flicker-
+            // driven animations need it) — see light-animation-clock.js's
+            // own header for why it must be cached, never rebuilt per-frame.
+            smoothNoise: null,
           };
           lightMeshes.set(light.sourceId, entry);
         }
@@ -1848,7 +2000,68 @@ export async function startVtPanViewer({
         entry.uBackgroundColor.value.set(...localAmbient.background);
         entry.uDimColor.value.set(...localAmbient.dim);
         entry.uBrightColor.value.set(...localAmbient.bright);
-        entry.uRatio.value = light.ratio;
+        // ANIMATED LIGHTS — per-frame CPU driver (effects/lighting/
+        // animations/light-animation-clock.js). Every function there is
+        // pure; env.time.tMs is the ONE clock (time/one-clock wall) — no new
+        // performance.now() anywhere in this pass. `animatedRatio` overrides
+        // `light.ratio` ONLY for flicker/pulse-driven lights — the shader
+        // never needs to know it's animated, it just reads uRatio like any
+        // other light (see light-animation-clock.js's own header for why).
+        let animatedRatio = light.ratio;
+        if (entry.animationEntry) {
+          const animTime = computeAnimationTime({
+            speedRaw: light.animation.speedRaw,
+            reverse: light.animation.reverse,
+            tMs: env.time.tMs,
+            seed: light.animation.seed,
+          });
+          let driverResult = null;
+          if (entry.animationEntry.cpuDriver === 'flicker') {
+            // Foundry's own torch constants (base-light-source.mjs's
+            // animateFlickering: scale:3, maxReferences:2048) — created ONCE
+            // per light and cached; a fresh table every frame would turn
+            // "smooth flicker" into white noise (SmoothNoise's own header).
+            if (!entry.smoothNoise)
+              entry.smoothNoise = new SmoothNoise({ amplitude: 1, scale: 3, maxReferences: 2048 });
+            driverResult = computeFlickerUniforms({
+              time: animTime,
+              // Per-animation formula (torch/siren: intensity/5; flame: fixed
+              // 1) — see registry.js's own `flickerAmplification` field doc.
+              amplification: entry.animationEntry.flickerAmplification?.(light.animation.intensityRaw) ?? 1,
+              ratio: light.ratio,
+              noise: entry.smoothNoise,
+            });
+          } else if (entry.animationEntry.cpuDriver === 'pulse') {
+            driverResult = computePulseUniforms({
+              time: animTime,
+              intensityRaw: light.animation.intensityRaw,
+              ratio: light.ratio,
+            });
+          }
+          if (driverResult) animatedRatio = driverResult.ratio;
+          // The well-known animation-uniform vocabulary (registry.js's own
+          // header) — a generic write so this file never needs to learn a
+          // new animation's specific uniform names as more are ported.
+          // `uRatio` here is a SEPARATE uniform from the scaffold's own
+          // illumination uRatio (set just below, unconditionally) — only
+          // present when an animation's OWN coloration seed needs ratio
+          // directly (e.g. flame's `scale(vUvs, 10*ratio)` — coloration has
+          // no ratio concept by default, see point-light-coloration.js's own
+          // header), and always gets the SAME jittered value.
+          for (const animUniforms of [entry.animIllumUniforms, entry.animColorUniforms]) {
+            if (!animUniforms) continue;
+            if (animUniforms.uTime) animUniforms.uTime.value = animTime;
+            if (animUniforms.uIntensityRaw) animUniforms.uIntensityRaw.value = light.animation.intensityRaw;
+            if (animUniforms.uRatio) animUniforms.uRatio.value = animatedRatio;
+            if (driverResult && 'brightnessPulse' in driverResult && animUniforms.uBrightnessPulse) {
+              animUniforms.uBrightnessPulse.value = driverResult.brightnessPulse;
+            }
+            if (driverResult && 'pulse' in driverResult && animUniforms.uPulse) {
+              animUniforms.uPulse.value = driverResult.pulse;
+            }
+          }
+        }
+        entry.uRatio.value = animatedRatio;
         // NOT floored (2026-07-19, reversed same day — see
         // keyhole-attenuation-floor-reverted memory). A same-day fix
         // here (computeMinAttenuationFloor) forced every light's corona to a
@@ -1903,7 +2116,16 @@ export async function startVtPanViewer({
         // A colourless light contributes ZERO coloration (Foundry parity —
         // see the block comment above); a coloured light gets its normal
         // technique-1 alpha and its REAL (now correctly-read) hue below.
-        entry.uColorationAlpha.value = light.hasColor ? computeColorationAlpha(light.alpha01, 1) : 0;
+        // FORCE-DEFAULT-COLOR (2026-07-20, docs/reference/foundry-v14-light-
+        // animations-audit.md's own roster): 13 of 22 coloration animations
+        // set Foundry's `forceDefaultColor` true, meaning their coloration
+        // mesh draws even on a colourless light because the ANIMATION
+        // supplies its own colour (e.g. chroma's hue cycle needs no authored
+        // `color` at all) — this is Foundry's `isRequired` gate, verified
+        // against source, not a guess.
+        const forceDefaultColor = entry.animationEntry?.forceDefaultColor === true;
+        entry.uColorationAlpha.value =
+          light.hasColor || forceDefaultColor ? computeColorationAlpha(light.alpha01, 1) : 0;
         entry.uLightColor.value.set(light.color[0], light.color[1], light.color[2]);
         // DIAGNOSTIC ONLY — not read by any shader. Lets getPointLightsInfo
         // report the true coloured/colourless split (colorationSummary), the
@@ -1917,6 +2139,73 @@ export async function startVtPanViewer({
           entry.colorationMesh.visible = false;
         }
       }
+    }
+
+    // ------------------------------------------------------------------
+    // THE CANDLE FLAME BILLBOARD (effects/candle-flame-render.js). ONE batched
+    // world-quad mesh holding every candle on the active floor (one geometry,
+    // one draw call — the batched outcome the particles/one-engine wall wants,
+    // reached WITHOUT InstancedMesh/Sprite, so the wall never fires). Drawn
+    // additively over the fully-lit scene so it GLOWS regardless of scene
+    // darkness — a flame emits light, it is not lit by it — while the candle's
+    // own LIGHT (merged into the pool above) illuminates the floor around it.
+    // Geometry is rebuilt ONLY when the anchor set or size changes (a cheap
+    // integer checksum), never per frame; the colour/intensity uniforms update
+    // every frame (cheap). World-space quads, so the camera owns the one Y-flip.
+    // ------------------------------------------------------------------
+    const candleFlameScene = new THREE.Scene();
+    let candleFlameMesh = null;
+    let candleFlameMat = null; // { material, uColor, uIntensity }
+    let candleFlameKey = null; // checksum of the geometry currently on the GPU
+
+    /** Cheap change-detector over the anchor positions + size, so the geometry
+     * is rebuilt only on a real change (scene load, floor switch, size tweak). */
+    function candleFlameSignature(anchors, sizePx) {
+      let h = (anchors.length * 1000003 + Math.round((sizePx || 0) * 100)) | 0;
+      for (const a of anchors) h = (h * 31 + Math.round(a.x) + Math.round(a.y) * 7) | 0;
+      return h;
+    }
+
+    function updateCandleFlame() {
+      const state = getCandleRenderState();
+      const anchors = state.enabled ? (Array.isArray(state.anchors) ? state.anchors : []) : [];
+      if (!anchors.length) {
+        if (candleFlameMesh) candleFlameMesh.visible = false;
+        return;
+      }
+      const sizePx = Number(state.params?.sizePx) > 0 ? Number(state.params.sizePx) : 1;
+      if (!candleFlameMat) {
+        candleFlameMat = buildCandleFlameMaterial({ THREE });
+        candleFlameMesh = new THREE.Mesh(new THREE.BufferGeometry(), candleFlameMat.material);
+        candleFlameMesh.frustumCulled = false; // world-space, camera bounds vary per frame
+        candleFlameScene.add(candleFlameMesh);
+      }
+      const sig = candleFlameSignature(anchors, sizePx);
+      if (sig !== candleFlameKey || !candleFlameMesh.geometry.getAttribute('position')) {
+        const old = candleFlameMesh.geometry;
+        const { geometry } = buildCandleFlameGeometry(THREE, anchors, { sizePx });
+        candleFlameMesh.geometry = geometry;
+        if (old) old.dispose(); // free the previous frame's GPU buffers, not per-frame (only on change)
+        candleFlameKey = sig;
+      }
+      const [r, g, b] = hexToRgb01(state.params?.color);
+      candleFlameMat.uColor.value.set(r, g, b);
+      candleFlameMat.uIntensity.value = 1;
+      candleFlameMesh.visible = true;
+    }
+
+    /** Free the flame's own GPU resources (its lights live in the shared pool,
+     * disposed by disposePointLights). Safe whether or not anything was built. */
+    function disposeCandleFlame() {
+      try {
+        candleFlameMesh?.geometry?.dispose();
+        candleFlameMat?.material?.dispose();
+      } catch (err) {
+        log.error('candle flame dispose failed — GPU buffers may leak until renderer.dispose():', err);
+      }
+      candleFlameMesh = null;
+      candleFlameMat = null;
+      candleFlameKey = null;
     }
 
     // ------------------------------------------------------------------
@@ -2092,11 +2381,15 @@ export async function startVtPanViewer({
       // Read ONCE, shared by both — see readElevationFilteredDarknessRegions'
       // own header for why a light needs the SAME active-region set a
       // region-mesh draw uses (2026-07-19, the per-light-region-aware-
-      // ambient fix).
-      const activeRegions = readElevationFilteredDarknessRegions();
+      // ambient fix), and (2026-07-20) the SAME currentFloor for candle
+      // wall-clipping — never a second, potentially-drifting floor lookup.
+      const { regions: activeRegions, currentFloor } = readElevationFilteredDarknessRegions();
       updateRegionDarknessMeshes(darkness01, activeRegions);
 
-      updatePointLightMeshes(darkness01, activeRegions, env, darknessRealism01);
+      updatePointLightMeshes(darkness01, activeRegions, env, darknessRealism01, currentFloor);
+      // Reconcile the flame billboard from the same candle render state the
+      // light merge above just read (drawn below, into scene.lit).
+      updateCandleFlame();
 
       // THE "BLACK OUTSIDE THE LIGHT RADIUS" FIX (2026-07-19). buf:scene.illum
       // is built from THREE sequential render() calls to the SAME target
@@ -2173,6 +2466,16 @@ export async function startVtPanViewer({
       // coloration target above is fully rendered before this reads it.
       renderer.setRenderTarget(sceneLit);
       compositeQuad.render(renderer);
+      // CANDLE FLAMES — an additive glow on top of the fully-composited lit
+      // scene. compositeQuad already filled sceneLit; an ordinary render() here
+      // would WIPE it first (autoClearColor defaults true — the exact trap the
+      // illum sequence above documents), so guard the clear for this one draw.
+      if (candleFlameMesh && candleFlameMesh.visible) {
+        const prevFlameAutoClear = renderer.autoClearColor;
+        renderer.autoClearColor = false;
+        renderer.render(candleFlameScene, camera);
+        renderer.autoClearColor = prevFlameAutoClear;
+      }
       renderer.setRenderTarget(null);
     }
     // 'masks.occlusion'/'light.accumulate': the "add one line, widen fromStage"
@@ -3403,6 +3706,14 @@ export async function startVtPanViewer({
     const HITCH_LOG_MAX = 200; // capped so a long thrash run can't grow this unboundedly
     const hitchLog = []; // {atMs, gapMs, decodeStats, cacheStats} per hitch — full context AT THE MOMENT it happened
 
+    // GPU PROBE (2026-07-20) — the Performance Lab's measurement engine, gated OFF
+    // in normal play. See diag/gpu-probe.js: it times real GPU work via
+    // `device.queue.onSubmittedWorkDone()` (robust where the earlier three
+    // `trackTimestamp` timer reported `supported:false`). The viewer only drives it
+    // (beginFrame/endFrame in renderFrame) and reports its stats; the perf lab flips
+    // it on for a sweep via setVtPanViewerGpuProbe().
+    const gpuProbe = createGpuProbe();
+
     /** Ground truth, not theory: actual rendered canvas pixels + one pack's actual indirection buffer contents. */
     /** The cheap, synchronous half: one pack's indirection buffer (plain JS state). */
     function sampleDiagnostics(pack) {
@@ -3427,6 +3738,21 @@ export async function startVtPanViewer({
     }
 
     function renderFrame(nowMs) {
+      // GPU PROBE THROTTLE (2026-07-21) — while a sample is awaiting GPU
+      // completion, submit NOTHING new this tick: no camera update, no pass
+      // plan, no present. This is what makes the probe measure ONE frame's
+      // true GPU execution time instead of pipeline queue depth (see
+      // diag/gpu-probe.js's isMeasuring() doc) — the render loop would
+      // otherwise keep submitting new frames every ~8ms regardless of the
+      // probe's state, so by the time one onSubmittedWorkDone() resolved it
+      // had waited through several OTHER frames' pipelined work too. First
+      // live evidence: a reading of "41.9ms GPU cost" alongside an unbroken
+      // 8.4ms felt cadence — physically impossible for one frame's real
+      // execution time, only possible for queue depth. Skipped ticks record
+      // no hitch/gap either (see resetFrameStats, called before each sweep
+      // config's felt phase specifically to keep this throttling from
+      // smearing into felt readings).
+      if (gpuProbe.isActive() && gpuProbe.isMeasuring()) return;
       const now = nowMs ?? performance.now();
 
       // HITCH DETECTION — see this file's own header note on frameGapTimes
@@ -3466,6 +3792,9 @@ export async function startVtPanViewer({
       // for the same reason as updateContinuousInputs/syncTokenPlacements.
       updateEnvSnapshot();
       const t0 = performance.now();
+      // GPU probe (perf lab only; inert otherwise) — mark the render start so
+      // endFrame below can time to GPU completion. See diag/gpu-probe.js.
+      gpuProbe.beginFrame();
       // Re-derive the camera from the live view EVERY frame: this is what makes
       // a drag track the cursor at display rate without waiting on streaming,
       // and it is the single place the Y-flip is applied (see updateCamera).
@@ -3491,6 +3820,10 @@ export async function startVtPanViewer({
 
       frameTimes.push(performance.now() - t0);
       if (frameTimes.length > 120) frameTimes.shift();
+
+      // GPU probe (perf lab only; inert otherwise) — the frame's passes are now
+      // submitted, so await GPU completion to time the real work. See diag/gpu-probe.js.
+      gpuProbe.endFrame(renderer.backend?.device?.queue);
     }
 
     /**
@@ -5028,6 +5361,190 @@ export async function startVtPanViewer({
     }
 
     /**
+     * Project a world position to a percentage-of-canvas screen coordinate —
+     * the same NDC/pixel math `sampleOnePixel` uses, minus the GPU readback
+     * (placement verification needs a position, not a pixel VALUE, so there
+     * is no render-target sample to wait on). Pure geometry against the
+     * CURRENT view; a caller wanting live tracking through a pan/zoom must
+     * re-call this, which `drawWorldMarkers` deliberately does NOT do itself
+     * (see that function's header for why).
+     * @param {number} worldX @param {number} worldY
+     * @returns {{onScreen:boolean, xPercent:number, yPercent:number}}
+     */
+    function worldToScreenPercent(worldX, worldY) {
+      if (!view) return { onScreen: false, xPercent: 0, yPercent: 0 };
+      const worldRect = viewToWorldRect(view, canvasW / canvasH);
+      const ndc = worldToNdc({ x: worldX, y: worldY }, worldRect);
+      const onScreen = ndc.x >= -1 && ndc.x <= 1 && ndc.y >= -1 && ndc.y <= 1;
+      const pixel = ndcToPixel(ndc, drawBufW, drawBufH);
+      return { onScreen, xPercent: (pixel.x / drawBufW) * 100, yPercent: (pixel.y / drawBufH) * 100 };
+    }
+
+    /**
+     * Draw a ONE-SHOT teardrop marker at each given world position — the Tier-0
+     * candle-placement proof (author, 2026-07-20: "see if the new renderer will
+     * correctly pick up old scene candle placement first"). A pure CSS teardrop
+     * (a circle with one corner square, rotated 45°) at each point; every marker
+     * shares `drawProbeMarkers`'s exact recipe (DOM sibling of `canvas` inside
+     * `mount.host`, percentage-positioned, `pointer-events:none`, self-removing).
+     *
+     * DELIBERATELY STATIC, not per-frame-tracked: this file's animation loop
+     * (`renderer.setAnimationLoop(renderFrame)`) is the most-incident-prone code
+     * in the project (device-loss history, the floor-switch redraw collision —
+     * memory keyhole-floor-switch-canvas-redraw-collision) and a placement PROOF
+     * does not need to survive a pan — take the screenshot, compare to the
+     * anchors report (same positions, so they line up point-for-point), done.
+     * A live-tracking overlay is a real, larger feature (a per-frame DOM
+     * reposition loop) deferred to when the candle's actual draw lands.
+     *
+     * Silently caps at 2000 markers (a DOM-flood guard, not a real limit — no
+     * scene has anywhere near that many candles) and no-ops without `document`
+     * (Node/test contexts), exactly like `drawProbeMarkers`.
+     *
+     * @param {Array<{x:number, y:number}>} points - world positions.
+     * @param {{color?:string, sizePx?:number, ttlMs?:number}} [opts]
+     * @returns {{drawn:number, offScreen:number}}
+     */
+    function drawWorldMarkers(points, opts = {}) {
+      const { color = '#ffaa00', sizePx = 7, ttlMs = 30000 } = opts;
+      if (typeof document === 'undefined' || !mount?.host) return { drawn: 0, offScreen: 0 };
+      const list = (Array.isArray(points) ? points : []).slice(0, 2000);
+      const container = document.createElement('div');
+      container.dataset.msaWorldMarkerOverlay = 'true';
+      Object.assign(container.style, { position: 'absolute', inset: '0', zIndex: '15', pointerEvents: 'none' });
+      let drawn = 0;
+      let offScreen = 0;
+      for (const p of list) {
+        const proj = worldToScreenPercent(p.x, p.y);
+        if (!proj.onScreen) {
+          offScreen++;
+          continue;
+        }
+        const drop = document.createElement('div');
+        Object.assign(drop.style, {
+          position: 'absolute',
+          left: `${proj.xPercent}%`,
+          top: `${proj.yPercent}%`,
+          width: `${sizePx}px`,
+          height: `${sizePx}px`,
+          marginLeft: `${-sizePx / 2}px`,
+          marginTop: `${-sizePx}px`, // the flame's round base sits AT the candle; it tapers UP to a point
+          background: color,
+          // CSS teardrop: a square with one sharp corner (bottom-left) + three
+          // rounded. rotate(135deg) turns the sharp corner UP, so the flame
+          // points up (round base down, at the wick) and reads as a flame.
+          borderRadius: '50% 50% 50% 0',
+          transform: 'rotate(135deg)',
+          boxShadow: '0 0 0 1px rgba(0,0,0,0.6)',
+        });
+        container.appendChild(drop);
+        drawn++;
+      }
+      mount.host.appendChild(container);
+      setTimeout(() => container.remove(), ttlMs);
+      return { drawn, offScreen };
+    }
+
+    // ---------------------------------------------------------------------
+    // THE LIVE MARKER OVERLAY (2026-07-20, author: "a diagnostic UI would
+    // actually be very useful for this module... generically useful for all
+    // effects"). Upgrades the one-shot `drawWorldMarkers` proof into a
+    // continuously-tracked overlay: a `requestAnimationFrame` loop, entirely
+    // INDEPENDENT of `renderer.setAnimationLoop`/`renderFrame` (it touches no
+    // render target, no pass, no THREE object — pure DOM position writes), so
+    // this file's actual render pipeline is untouched. `getPoints` is injected
+    // by the caller (boot wires it to diag/marker-overlay.js's registry) —
+    // this file knows nothing about anchors, effects, or candles; it only
+    // knows how to project a world position and keep a DOM node pinned to it.
+    // ---------------------------------------------------------------------
+    let liveMarkerRafId = null;
+    let liveMarkerContainer = null;
+    let liveMarkerGetPoints = null;
+
+    function tickLiveMarkers() {
+      if (!liveMarkerGetPoints) return; // stopped mid-flight (a stray queued frame)
+      let points;
+      try {
+        points = liveMarkerGetPoints() ?? [];
+      } catch (err) {
+        log.error('live marker overlay: getPoints threw — pausing this tick, not the loop:', err);
+        points = [];
+      }
+      const wraps = liveMarkerContainer.children;
+      // Rebuild only when the count changes (a floor switch, an effect
+      // toggling off) — otherwise just move the existing nodes. A per-frame
+      // full DOM rebuild for a few hundred points would be needless churn.
+      if (wraps.length !== points.length) {
+        liveMarkerContainer.replaceChildren();
+        for (const p of points) {
+          const drop = document.createElement('div');
+          Object.assign(drop.style, {
+            position: 'absolute',
+            width: '7px',
+            height: '7px',
+            marginLeft: '-3.5px',
+            marginTop: '-7px',
+            background: p.color ?? '#ffaa00',
+            // See drawWorldMarkers: rotate(135deg) = sharp corner up = flame
+            // points up, round base at the wick (the world position).
+            borderRadius: '50% 50% 50% 0',
+            transform: 'rotate(135deg)',
+            boxShadow: '0 0 0 1px rgba(0,0,0,0.6)',
+            display: 'none', // shown below once positioned, avoiding a frame at (0,0)
+          });
+          liveMarkerContainer.appendChild(drop);
+        }
+      }
+      for (let i = 0; i < points.length; i++) {
+        const proj = worldToScreenPercent(points[i].x, points[i].y);
+        const drop = liveMarkerContainer.children[i];
+        drop.style.display = proj.onScreen ? '' : 'none';
+        if (proj.onScreen) {
+          drop.style.left = `${proj.xPercent}%`;
+          drop.style.top = `${proj.yPercent}%`;
+        }
+      }
+      liveMarkerRafId = requestAnimationFrame(tickLiveMarkers);
+    }
+
+    /**
+     * Arm the live overlay: `getPoints` is called every animation frame and
+     * must be CHEAP (a wrapper over an already-served list, per diag/marker-
+     * overlay.js's contract) — never a fresh computation, since this runs at
+     * display refresh rate for as long as the overlay is armed. Replaces any
+     * previously-armed overlay (idempotent re-arm, not a leak).
+     * @param {() => Array<{x:number, y:number, color?:string}>} getPoints
+     */
+    function startLiveMarkers(getPoints) {
+      stopLiveMarkers();
+      if (typeof document === 'undefined' || typeof requestAnimationFrame === 'undefined' || !mount?.host) return;
+      liveMarkerGetPoints = getPoints;
+      liveMarkerContainer = document.createElement('div');
+      liveMarkerContainer.dataset.msaLiveMarkerOverlay = 'true';
+      Object.assign(liveMarkerContainer.style, {
+        position: 'absolute',
+        inset: '0',
+        zIndex: '15',
+        pointerEvents: 'none',
+      });
+      mount.host.appendChild(liveMarkerContainer);
+      liveMarkerRafId = requestAnimationFrame(tickLiveMarkers);
+    }
+
+    /** Disarm the live overlay — safe to call whether or not one is armed. */
+    function stopLiveMarkers() {
+      if (liveMarkerRafId != null && typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(liveMarkerRafId);
+      liveMarkerRafId = null;
+      liveMarkerGetPoints = null;
+      try {
+        liveMarkerContainer?.remove();
+      } catch (err) {
+        log.error('live marker overlay container removal failed — a stray DOM node may leak:', err);
+      }
+      liveMarkerContainer = null;
+    }
+
+    /**
      * Shared core of `probePixels`/`runInteractivePixelProbe`: sample up to
      * `PROBE_MARKER_COLORS.length` world points and draw their markers in
      * one batch. Factored out so the console-driven and click-driven probe
@@ -5147,6 +5664,24 @@ export async function startVtPanViewer({
       occlusionMask,
       cache,
       layout,
+      /** Perf lab: arm/disarm the gated GPU-completion probe (diag/gpu-probe.js). */
+      setGpuProbe(on) {
+        gpuProbe.setActive(on);
+      },
+      /** Perf lab: clear the FELT rolling windows (frameGapTimes/hitchLog). These
+       * are a single shared window across the whole session, not per-config — a
+       * sweep that read them without clearing would smear one config's felt
+       * numbers with whatever came before (an earlier config, or the GPU probe's
+       * own throttled skip-ticks, which would otherwise show up as fake
+       * multi-second "hitches"). Does NOT touch frameTimes (CPU-encode) or the
+       * GPU probe's own samples (gpuProbe.setActive already clears those on its
+       * own OFF→ON edge). `lastFrameStartMs = null` so the very next tick after
+       * a reset doesn't compute a gap spanning the reset itself. */
+      resetFrameStats() {
+        frameGapTimes.length = 0;
+        hitchLog.length = 0;
+        lastFrameStartMs = null;
+      },
       /** Tear down buf:scene.color + the present chain (see disposeActive). */
       disposeSceneColor() {
         allocator.dispose(sceneColor);
@@ -5165,6 +5700,9 @@ export async function startVtPanViewer({
         envLight.illumMaterial.dispose();
         envLight.compositeMaterial.dispose();
       },
+      /** Tear down the candle flame billboard's own mesh/material/geometry (its
+       * lights live in the shared pool, freed by disposePointLights). */
+      disposeCandleFlame,
       /** Tear down every point-light mesh/material/geometry (see
        * disposeActive). Each light owns its OWN geometry (unlike occlusion
        * discs' shared circle), so geometry disposal happens here too. The
@@ -5509,12 +6047,32 @@ export async function startVtPanViewer({
         let colorlessCount = 0; // hasColor === false
         let coloredCount = 0;
         let colorationAlphaSum = 0;
+        // ANIMATED LIGHTS (2026-07-20) — per-type counts, tallied in the SAME
+        // pass (no second walk of lightMeshes). `builtByType` counts active
+        // lights whose animation resolved to a real registry entry;
+        // `deferredByType` counts ones that matched KNOWN_DEFERRED_ANIMATIONS
+        // (a real Foundry animation this project hasn't ported yet, for a
+        // documented reason); `unrecognizedTypes` is anything else non-null —
+        // a genuinely unknown string, worth surfacing rather than
+        // silently folding into "no animation" (feedback_instruments_must_
+        // not_lie: `skipped` must mean "nothing was skipped", never "I did
+        // not look").
+        const builtByType = {};
+        const deferredByType = {};
+        const unrecognizedTypes = {};
         for (const [id, entry] of lightMeshes) {
           if (!entry.mesh.visible) continue;
           activeCount++;
           if (entry.lastHasColor) coloredCount++;
           else colorlessCount++;
           colorationAlphaSum += entry.uColorationAlpha.value;
+          const animType = entry.animationType ?? null;
+          if (animType) {
+            if (entry.animationEntry) builtByType[animType] = (builtByType[animType] ?? 0) + 1;
+            else if (animType in KNOWN_DEFERRED_ANIMATIONS)
+              deferredByType[animType] = (deferredByType[animType] ?? 0) + 1;
+            else unrecognizedTypes[animType] = (unrecognizedTypes[animType] ?? 0) + 1;
+          }
           if (!sampleLight) {
             sampleLight = {
               sourceId: id,
@@ -5541,6 +6099,23 @@ export async function startVtPanViewer({
               ],
               uDimColor: [entry.uDimColor.value.x, entry.uDimColor.value.y, entry.uDimColor.value.z],
               uBrightColor: [entry.uBrightColor.value.x, entry.uBrightColor.value.y, entry.uBrightColor.value.z],
+              // ANIMATED LIGHTS — null for a non-animated (or not-yet-built)
+              // sample light, real numbers whenever this sample happens to
+              // be an animated one. Not a guaranteed-animated sample (this
+              // is still just "the first active light this pass"), so a
+              // caller checking a SPECIFIC animation should read
+              // animationSummary.builtByType below instead.
+              animation:
+                entry.animationType && entry.animationEntry
+                  ? {
+                      type: entry.animationType,
+                      cpuDriver: entry.animationEntry.cpuDriver,
+                      forceDefaultColor: entry.animationEntry.forceDefaultColor,
+                      uTime: entry.animIllumUniforms?.uTime?.value ?? entry.animColorUniforms?.uTime?.value ?? null,
+                      uBrightnessPulse: entry.animIllumUniforms?.uBrightnessPulse?.value ?? null,
+                      uPulse: entry.animColorUniforms?.uPulse?.value ?? null,
+                    }
+                  : null,
             };
           }
         }
@@ -5550,6 +6125,53 @@ export async function startVtPanViewer({
           colorlessCount,
           colorlessFraction: activeCount > 0 ? colorlessCount / activeCount : null,
           meanColorationAlpha: activeCount > 0 ? colorationAlphaSum / activeCount : null,
+        };
+        const animationSummary = { builtByType, deferredByType, unrecognizedTypes };
+        // CANDLE LIGHT BREAKDOWN (2026-07-20, chasing "perf didn't improve after
+        // clustering" down to a measured number instead of a guess — the SAME
+        // discipline as sampleLight/colorationSummary above). Candle-authored
+        // lights carry a `candle:` sourceId prefix (effects/candle-flame-
+        // render.js#buildCandleLightSources); everything else in this SAME pool
+        // is a real Foundry light — they share one reconcile, so this is the
+        // only way to see the split. `foundryCount` matters because clustering
+        // only merges candle lights WITH EACH OTHER — if the map's original
+        // author ALSO placed real Foundry AmbientLight documents at the same
+        // candle positions (common in commercial map packs), those are
+        // UNAFFECTED by clustering and would explain "no perf change" on their
+        // own, independent of anything candle-side.
+        let candleLightCount = 0;
+        let foundryLightCount = 0;
+        for (const id of lightMeshes.keys()) {
+          if (id.startsWith('candle:')) candleLightCount++;
+          else foundryLightCount++;
+        }
+        // CANDLE WALL-CLIP DIAGNOSTIC (2026-07-20, the "candle light bleeds
+        // through walls" fix — foundry/scene-wall-clip.js's own header).
+        // Reports what ACTUALLY happened per candle (feedback_instruments_
+        // must_not_lie), not "it should be working": `sweepCount` = candles
+        // successfully wall-clipped via Foundry's own ClockwiseSweepPolygon;
+        // `fallbackCount` = candles still on the old naive circle (the exact
+        // bug this fix targets, if this is ever nonzero); `sampleReason` is
+        // ONE cache entry's own `reason` string (why it fell back, or which
+        // level-resolution path a successful clip used) so a live report can
+        // show the true cause instead of a guess.
+        let candleWallClipSweepCount = 0;
+        let candleWallClipFallbackCount = 0;
+        let candleWallClipSampleReason = null;
+        for (const cached of candleWallClipCache.values()) {
+          if (cached.source === 'sweep') candleWallClipSweepCount++;
+          else candleWallClipFallbackCount++;
+          if (candleWallClipSampleReason === null) candleWallClipSampleReason = cached.reason;
+        }
+        const candleLightBreakdown = {
+          candleLightCount,
+          foundryLightCount,
+          totalPoolSize: lightMeshes.size,
+          wallClip: {
+            sweepCount: candleWallClipSweepCount,
+            fallbackCount: candleWallClipFallbackCount,
+            sampleReason: candleWallClipSampleReason,
+          },
         };
         return {
           available: true,
@@ -5561,7 +6183,9 @@ export async function startVtPanViewer({
             "coloration (uColorationAlpha=0), matching Foundry's isRequired/hasColor gate. colorationSummary " +
             'below should now show mostly `coloured`; a high colorlessFraction would mean the colour read is ' +
             'still not landing. No other 12 coloration techniques, no contrast/saturation/shadow adjustments, ' +
-            'no darkness sources, no animations, no elevation occlusion (docs/planning/Light-Parity.md §5)',
+            'no darkness sources, no elevation occlusion (docs/planning/Light-Parity.md §5). Animated lights: ' +
+            'see animationSummary below for what is ACTUALLY registered right now (live, not a hardcoded ' +
+            'claim here) — effects/lighting/animations/registry.js is the source of truth.',
           poolSize: lightMeshes.size,
           activeLights: [...lightMeshes.values()].filter((e) => e.mesh.visible).length,
           ambientColors: lastAmbientColors,
@@ -5574,6 +6198,13 @@ export async function startVtPanViewer({
           darknessRealism01: _darknessRealism01,
           sampleLight,
           colorationSummary,
+          candleLightBreakdown,
+          // ANIMATED LIGHTS (2026-07-20) — builtByType/deferredByType/
+          // unrecognizedTypes are per-animation-type counts among ACTIVE
+          // lights this frame; deferredKnownReasons is KNOWN_DEFERRED_
+          // ANIMATIONS itself (why each deferred type isn't built yet), so
+          // this report is self-explaining without cross-referencing source.
+          animationSummary: { ...animationSummary, deferredKnownReasons: KNOWN_DEFERRED_ANIMATIONS },
         };
       },
       /** region-darkness's own pool state — for the Diagnostics report.
@@ -5753,6 +6384,24 @@ export async function startVtPanViewer({
         if (!points.length) return [];
         return runProbeOnPoints(points);
       },
+      /**
+       * THE CANDLE-PLACEMENT PROOF (Tier 0, 2026-07-20): draw a one-shot
+       * teardrop at each given world position, against the CURRENT view. See
+       * `drawWorldMarkers`'s own header for why this is deliberately static
+       * (no per-frame pan tracking) rather than a live overlay.
+       * @param {Array<{x:number, y:number}>} points
+       * @param {{color?:string, sizePx?:number, ttlMs?:number}} [opts]
+       * @returns {{drawn:number, offScreen:number}}
+       */
+      drawWorldMarkers: (points, opts) => drawWorldMarkers(points, opts),
+      /**
+       * THE LIVE MARKER OVERLAY — see `startLiveMarkers`'s own header. Armed
+       * by the debug panel's "Live marker overlay" toggle; `getPoints` is
+       * boot's closure over diag/marker-overlay.js's registry.
+       * @param {() => Array<{x:number, y:number, color?:string}>} getPoints
+       */
+      startLiveMarkers: (getPoints) => startLiveMarkers(getPoints),
+      stopLiveMarkers: () => stopLiveMarkers(),
       onKeyDown,
       onKeyUp,
       clearHeldKeys,
@@ -6291,6 +6940,12 @@ export async function startVtPanViewer({
             indirectionPyramid: albedo ? `${albedo.width}x${albedo.height}` : null,
           },
           renderMsAvgLast120: Math.round(avgMs * 100) / 100,
+          // GPU PROBE (2026-07-20) — real GPU execution ms per frame, the number
+          // renderMsAvgLast120 (CPU command-encode only) is structurally blind to.
+          // `active:false` when idle (the perf lab flips it on for a sweep); a null
+          // median with active:true means "measuring, no completed sample yet" — it
+          // never reads as 0ms (instruments must not lie). See diag/gpu-probe.js.
+          gpuProbe: gpuProbe.getStats(),
           // HITCH STATS (2026-07-16) — the true "did we freeze" signal,
           // distinct from renderMsAvgLast120 above (which only measures
           // render()'s own duration, never a stall elsewhere on the single JS
@@ -6419,6 +7074,33 @@ export async function setVtPanViewerFloor(floorIndex) {
 }
 
 /**
+ * Arm/disarm the GPU-completion probe (diag/gpu-probe.js) — the Performance Lab's
+ * measurement engine. ON only during a sweep: while armed, renderFrame THROTTLES
+ * to one frame in flight at a time (submit → wait for GPU completion → submit
+ * next), so each sample is a genuine single frame's GPU execution time rather
+ * than pipeline queue depth. That throttling visibly drops the displayed
+ * framerate for the duration — expected, and why this must never be left on in
+ * normal play. No-op `{skipped:true}` if nothing is running.
+ * @param {boolean} on
+ */
+export function setVtPanViewerGpuProbe(on) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  _active.setGpuProbe(on);
+  return { gpuProbe: getVtPanViewerDiagnostics().gpuProbe };
+}
+
+/**
+ * Clear the FELT rolling windows (frameGapTimes/hitchLog) — see `_active.resetFrameStats`
+ * for why a sweep must call this before each config's felt-sampling phase. No-op
+ * `{skipped:true}` if nothing is running.
+ */
+export function resetVtPanViewerFrameStats() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  _active.resetFrameStats();
+  return { reset: true };
+}
+
+/**
  * Bind a different layer-pack to the display (e.g. 'Outdoors', 'Fire', or back
  * to 'albedo') — visual verification that a mask actually streamed, against the
  * fixture's known patterns. The masks stream regardless of what's displayed;
@@ -6474,6 +7156,39 @@ export async function probeVtPanViewerPixels(points) {
 export async function runInteractiveVtPanViewerPixelProbe(maxPoints = 3) {
   if (!_active) return { skipped: true, reason: 'viewer not started' };
   return _active.runInteractivePixelProbe(maxPoints);
+}
+
+/**
+ * Console/debug-panel-callable wrapper for `_active.drawWorldMarkers` — the
+ * Tier-0 candle-placement proof (see that function's own header). Call as
+ * `await MapShine.drawWorldMarkers([{x, y}, ...], { color, sizePx, ttlMs })`.
+ * @param {Array<{x:number, y:number}>} points
+ * @param {{color?:string, sizePx?:number, ttlMs?:number}} [opts]
+ */
+export async function drawVtPanViewerWorldMarkers(points, opts) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  return _active.drawWorldMarkers(points, opts);
+}
+
+/**
+ * Arm the live, continuously-tracked marker overlay (the generic diagnostic
+ * upgrade, 2026-07-20 — see `startLiveMarkers`'s own header in
+ * startVtPanViewer). Call as `MapShine.startLiveMarkers(() =>
+ * getAllMarkerPoints())`, wiring `getPoints` to diag/marker-overlay.js's
+ * registry so every registered effect's points are drawn, not just one.
+ * @param {() => Array<{x:number, y:number, color?:string}>} getPoints
+ */
+export function startVtPanViewerLiveMarkers(getPoints) {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  _active.startLiveMarkers(getPoints);
+  return { started: true };
+}
+
+/** Disarm the live marker overlay. Safe to call whether or not one is armed. */
+export function stopVtPanViewerLiveMarkers() {
+  if (!_active) return { skipped: true, reason: 'viewer not started' };
+  _active.stopLiveMarkers();
+  return { stopped: true };
 }
 
 /** The current draw list's ids — what the isolate dropdown is built from. */

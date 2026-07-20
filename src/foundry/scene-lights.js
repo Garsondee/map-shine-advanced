@@ -3,7 +3,10 @@
  * point-light illumination rung of `light.accumulate` (docs/planning/
  * Light-Parity.md §5 increment 2; docs/reference/foundry-v14-lighting-
  * audit.md §1-§2 for the mechanism this mirrors), PLUS the scene's own
- * Global Illumination config (added 2026-07-19, the "global light fix").
+ * Global Illumination config (added 2026-07-19, the "global light fix"),
+ * PLUS (2026-07-20) each light's `animation` config — the last item in
+ * Light-Parity.md §5's build order, see effects/lighting/animations/
+ * registry.js for where `animation.type` gets consumed.
  *
  * Foundry has ALREADY resolved grid units to PIXELS and computed the
  * wall-clipped visibility polygon by the time a source is live in this
@@ -67,6 +70,7 @@ function clamp01(v) {
  * @returns {{sourceId: string, x: number, y: number, radius: number,
  *   ratio: number, attenuation01: number, luminosity01: number,
  *   alpha01: number, color: [number,number,number], hasColor: boolean,
+ *   animation: ReturnType<typeof deriveAnimationSnapshot>,
  *   shapePoints: number[]}|null}
  */
 export function deriveLightSnapshot(raw, darkness01) {
@@ -134,6 +138,7 @@ export function deriveLightSnapshot(raw, darkness01) {
     // onto the scene, unconditionally.
     color: colorRgb ?? [1, 1, 1],
     hasColor: colorRgb !== null,
+    animation: deriveAnimationSnapshot(raw.animation),
     shapePoints: points,
   };
 }
@@ -148,6 +153,46 @@ function validRgb(c) {
     out[i] = Math.min(1, Math.max(0, n));
   }
   return out;
+}
+
+/** @param {*} v @param {number} min @param {number} max @param {number} fallback @returns {number} */
+function clampRange(v, min, max, fallback) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+}
+
+/**
+ * `LightData.animation` (`common/data/data.mjs`, per docs/reference/foundry-v14-
+ * lighting-audit.md §1) — read for the animated-lights rung (docs/planning/
+ * Light-Parity.md §5's last build-order item; docs/reference/foundry-v14-light-
+ * animations-audit.md is the per-animation implementation reference). `seed` is
+ * NOT nested under LightData — it lives on `RenderedEffectSource`'s own data and
+ * gets merged INTO `source.animation` at source init (`rendered-effect-source.mjs`:
+ * `this.animation = this.data.animation = {seed, ...this.data.animation}`), so a
+ * live source's `.animation.seed` is already the exact value Foundry itself
+ * renders with — read it directly rather than having MSA invent its own random
+ * seed (that would desync MSA's animation phase from a live A/B against Foundry
+ * for no reason). `type: null`/unrecognized is the "no animation" case — the
+ * animation registry (effects/lighting/animations/registry.js) simply has no
+ * entry for it, and the light safety-slides to today's default look.
+ *
+ * @param {*} raw - `{type, speed, intensity, reverse, seed}`, already plucked
+ *   from a live source's `.animation` (or `undefined` for a source with none).
+ * @returns {{type: string|null, speedRaw: number, intensityRaw: number,
+ *   reverse: boolean, seed: number}}
+ */
+function deriveAnimationSnapshot(raw) {
+  return {
+    type: typeof raw?.type === 'string' && raw.type.length > 0 ? raw.type : null,
+    // LightData.animation.speed/.intensity defaults (audit §1): 5/5, ranges 0-10/1-10.
+    speedRaw: clampRange(raw?.speed, 0, 10, 5),
+    intensityRaw: clampRange(raw?.intensity, 1, 10, 5),
+    reverse: !!raw?.reverse,
+    // 0 is a safe fallback (worst case: same-seeded lights start in phase with
+    // each other, a cosmetic desync miss, never a crash) — matches this file's
+    // own "an unreadable value floors to a harmless default" convention.
+    seed: Number.isFinite(raw?.seed) ? raw.seed : 0,
+  };
 }
 
 /**
@@ -210,6 +255,9 @@ export function readActiveLightSources(darkness01) {
           color: source.colorRGB,
           darknessMin: source.data?.darkness?.min,
           darknessMax: source.data?.darkness?.max,
+          // See deriveAnimationSnapshot's own header for why `source.animation`
+          // (not `source.data.animation`) is the correct read — seed lives here.
+          animation: source.animation,
           shapePoints: source.shape?.points,
         },
         darkness01

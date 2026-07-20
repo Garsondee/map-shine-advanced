@@ -56,17 +56,23 @@ export const PAINT_EMBED_BYTE_BUDGET = 96 * 1024;
  * finer than a blob (author-reported, 2026-07-20: "the smallest paint/spray
  * size doesn't really work").
  *
- * 2048 (4x) brings that down to ~6 world units/texel on the same scene —
- * close to what a mouse-drawn brush can usefully resolve — while staying
- * cheap: worst case ~4MB of in-memory `Uint8Array` (irrelevant), and RLE on
- * a modest painted area (flat regions compress to ~2 numbers regardless of
- * resolution; only the painted EDGE gets costlier) stays well inside
- * `PAINT_EMBED_BYTE_BUDGET` for ordinary use — a mask detailed enough to
- * blow that budget is exactly the case Mode B (bake-to-file) exists for.
+ * 4096 gives ~2.9 world units/texel on that 12,000-wide scene (the author's
+ * LARGEST map — 2048 was still reported "very very low" there). This is the
+ * safe ceiling for the current preview architecture, and the reason it is a
+ * ceiling is worth writing down: ui/paint-mode.js keeps a per-mask offscreen
+ * `<canvas>` at grid resolution for the preview, so its backing store is
+ * `dim²×4` bytes — 64MB at 4096, but 256MB at 8192, PER painted mask. Grid
+ * `Uint8Array` (16MB) and undo snapshots are affordable at 4096; the preview
+ * canvas is what caps it. Going higher (toward pixel-parity on a 12K map)
+ * needs a preview canvas capped at display resolution + region-based undo —
+ * a real refactor, deliberately deferred until 4096 is proven insufficient.
+ * Note: the per-frame preview cost is O(changed area), NOT O(grid), because
+ * paint-mode.js re-packs only the dirty rectangle — so this bump does not
+ * make painting jankier; only the one-time canvas memory scales.
  * A chosen, documented number — not probed at runtime
  * (feedback_probed_constants_vs_derived).
  */
-export const PAINT_GRID_MAX_DIM = 2048;
+export const PAINT_GRID_MAX_DIM = 4096;
 
 /**
  * A fresh, empty painted layer sized over the scene rect — a MaskGrid, so it

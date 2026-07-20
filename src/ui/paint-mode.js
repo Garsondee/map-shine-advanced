@@ -34,12 +34,15 @@
  * All Foundry/PIXI access: foundry/paint-adapter.js. This file is DOM glue,
  * verified live.
  *
- * SCOPE: any authored mask kind (dropdown), floor 0, embed persistence, a
- * spray/paint/erase brush, AND the Author-Mode vector tools — point / line
- * (stroked) / polygon (filled) — all rasterizing into the SAME mask the brush
- * writes (Shapes-and-Regions.md), with an optional 4×4 sub-grid snap, shared
- * undo, and a live draft preview. Deferred: retained/editable vector shapes +
- * a Select tool, bake-to-file (Mode B), per-floor binding, the package gate.
+ * SCOPE: any authored mask kind (dropdown), PER-FLOOR masks (a Floor stepper —
+ * paint on floor N only ever touches floor N), a 4096² grid with a dirty-rect
+ * preview (re-packs only what changed), embed persistence with an unsaved-changes
+ * guard (on close + on effect switch), a spray/paint/erase brush, AND the
+ * Author-Mode vector tools — point / line (stroked) / polygon (filled) — all
+ * rasterizing into the SAME mask the brush writes (Shapes-and-Regions.md), with
+ * an optional 4×4 sub-grid snap, shared undo, and a live draft preview. Deferred:
+ * retained/editable vector shapes + a Select tool, bake-to-file (Mode B),
+ * auto-following the viewed floor, the package gate.
  *
  * @module ui/paint-mode
  */
@@ -57,8 +60,7 @@ import {
 } from '../scene/index.js';
 import { readPaintContext, savePaintedMasks, loadPaintedMasks } from '../foundry/index.js';
 
-const FLOOR = 0;
-const UNDO_LIMIT = 16;
+const UNDO_LIMIT = 10; // at PAINT_GRID_MAX_DIM=4096 each undo snapshot is ~16MB — keep the stack bounded
 
 /** Preview tints per mask kind (kind IDs, not suffixes — the catalog owns suffixes). */
 const KIND_COLORS = {
@@ -82,10 +84,14 @@ export function installPainter(MapShine) {
     active: false,
     ctx: null,
     kind: PAINTABLE_KINDS[0]?.id ?? 'fire',
-    layers: {}, // `${kind}::${FLOOR}` -> MaskGrid
+    layers: {}, // `${kind}::${floor}` -> MaskGrid
+    floor: 0, // which floor these strokes apply to — masks are PER-FLOOR (the Floor stepper picks it)
     gridCanvases: {}, // key -> offscreen canvas
     gridImageData: {}, // key -> cached ImageData for that canvas (reused, not reallocated, per frame)
     dirty: new Set(), // keys whose gridCanvas needs re-rendering
+    previewRect: {}, // key -> {x0,y0,x1,y1} cell bounds changed since last render, or `true` for the whole grid
+    dirtySinceSave: false, // any unsaved edits? drives the Save indicator + the close/switch guards
+    modalOpen: false, // a confirm dialog is up — paint input pauses while it is
     overlay: null,
     canvas: null,
     toolbar: null,
@@ -105,13 +111,84 @@ export function installPainter(MapShine) {
   };
 
   const notify = (msg, type = 'info') => globalThis.ui?.notifications?.[type]?.(msg);
-  const keyOf = (kind) => `${kind}::${FLOOR}`;
+  const keyOf = (kind) => `${kind}::${state.floor}`;
   const activeKey = () => keyOf(state.kind);
 
   function layerFor(kind) {
     const key = keyOf(kind);
     if (!state.layers[key]) state.layers[key] = createPaintLayer(state.ctx.sceneRect);
     return state.layers[key];
+  }
+
+  // ---- dirty tracking ----------------------------------------------------
+  // Which cells changed since the last render, so the preview re-packs ONLY
+  // that rectangle (O(changed), not O(grid)) — the whole reason a 4096² grid
+  // can stay smooth. `true` means the whole grid changed (undo/clear/switch).
+  function markCells(key, x0, y0, x1, y1) {
+    const spec = state.layers[key]?.spec;
+    if (!spec) return;
+    x0 = Math.max(0, Math.floor(x0));
+    y0 = Math.max(0, Math.floor(y0));
+    x1 = Math.min(spec.w - 1, Math.ceil(x1));
+    y1 = Math.min(spec.h - 1, Math.ceil(y1));
+    if (x1 < x0 || y1 < y0) return;
+    state.dirty.add(key);
+    const cur = state.previewRect[key];
+    if (cur === true) return;
+    if (!cur) state.previewRect[key] = { x0, y0, x1, y1 };
+    else {
+      cur.x0 = Math.min(cur.x0, x0);
+      cur.y0 = Math.min(cur.y0, y0);
+      cur.x1 = Math.max(cur.x1, x1);
+      cur.y1 = Math.max(cur.y1, y1);
+    }
+  }
+  function markFull(key) {
+    state.dirty.add(key);
+    state.previewRect[key] = true;
+  }
+  function markWorldDisc(key, wx, wy, r) {
+    const spec = state.layers[key]?.spec;
+    if (!spec) return;
+    markCells(
+      key,
+      (wx - r - spec.x) / spec.texelW,
+      (wy - r - spec.y) / spec.texelH,
+      (wx + r - spec.x) / spec.texelW,
+      (wy + r - spec.y) / spec.texelH
+    );
+  }
+  function markWorldRect(key, minX, minY, maxX, maxY, pad = 0) {
+    const spec = state.layers[key]?.spec;
+    if (!spec) return;
+    markCells(
+      key,
+      (minX - pad - spec.x) / spec.texelW,
+      (minY - pad - spec.y) / spec.texelH,
+      (maxX + pad - spec.x) / spec.texelW,
+      (maxY + pad - spec.y) / spec.texelH
+    );
+  }
+
+  // Flip the unsaved flag on the first edit of a save-cycle (and refresh the
+  // toolbar once on that transition — cheap, not per-stamp).
+  function markEdited() {
+    if (state.dirtySinceSave) return;
+    state.dirtySinceSave = true;
+    state.refreshToolbar?.();
+  }
+
+  // Masks are per-floor: keying by `state.floor` means paint on floor N only
+  // ever touches the floor-N mask, and each floor's masks persist + travel
+  // independently (Shapes-and-Regions.md / Authoring-and-Distribution.md).
+  function changeFloor(delta) {
+    const next = Math.max(0, Math.min(20, state.floor + delta));
+    if (next === state.floor) return;
+    state.floor = next;
+    cancelDraft(); // an in-progress shape belonged to the old floor
+    layerFor(state.kind); // ensure the new floor's layer exists
+    markFull(activeKey());
+    state.refreshToolbar?.();
   }
 
   // ---- painting ----------------------------------------------------------
@@ -127,7 +204,8 @@ export function installPainter(MapShine) {
     const snap = state.undo.pop();
     if (!snap || !state.layers[snap.key]) return;
     state.layers[snap.key].data.set(snap.data);
-    state.dirty.add(snap.key);
+    markFull(snap.key); // undo can change anywhere -> the whole grid re-packs
+    markEdited();
   }
 
   function stampWorld(wx, wy) {
@@ -136,7 +214,8 @@ export function installPainter(MapShine) {
       hardness: state.brush.hardness,
       mode: state.brush.mode,
     });
-    state.dirty.add(activeKey());
+    markWorldDisc(activeKey(), wx, wy, state.brush.radius);
+    markEdited();
   }
 
   // Interpolate along the stroke so fast drags don't leave gaps (a real brush,
@@ -163,7 +242,8 @@ export function installPainter(MapShine) {
     if (!layer) return;
     pushUndo();
     layer.data.fill(0);
-    state.dirty.add(activeKey());
+    markFull(activeKey());
+    markEdited();
   }
 
   // ---- vector tools (point / line / polygon) -----------------------------
@@ -187,14 +267,19 @@ export function installPainter(MapShine) {
     if (!d) return;
     const layer = layerFor(state.kind);
     const opts = { value: state.brush.strength, mode: state.brush.mode };
+    const xs = d.vertices.map((v) => v.x);
+    const ys = d.vertices.map((v) => v.y);
+    const bbox = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
     if (d.type === 'polygon' && d.vertices.length >= 3) {
       pushUndo();
       rasterizePolygon(layer, d.vertices, opts);
-      state.dirty.add(activeKey());
+      markWorldRect(activeKey(), ...bbox);
+      markEdited();
     } else if (d.type === 'line' && d.vertices.length >= 2) {
       pushUndo();
       rasterizeStrokedLine(layer, d.vertices, state.brush.radius * 2, { ...opts, hardness: state.brush.hardness });
-      state.dirty.add(activeKey());
+      markWorldRect(activeKey(), ...bbox, state.brush.radius);
+      markEdited();
     }
   }
 
@@ -215,6 +300,7 @@ export function installPainter(MapShine) {
       return state.snap ? state.ctx.snapWorld(raw.x, raw.y) : raw;
     };
     const onDown = (e) => {
+      if (state.modalOpen) return; // a confirm dialog is up
       if (e.button !== 0) return; // left button only; right/middle fall through to Foundry (pan)
       if (e.target !== state.ctx.boardElement) return; // not the map -> let the UI (ours or Foundry's) have it
       if (state.tool === 'brush') {
@@ -268,13 +354,14 @@ export function installPainter(MapShine) {
       }
     };
     const onKey = (e) => {
+      if (state.modalOpen) return; // the dialog owns the keyboard
       if (e.key === 'Escape') {
         if (state.draft) {
-          cancelDraft(); // Esc cancels the in-progress shape first; a second Esc exits
+          cancelDraft(); // Esc cancels the in-progress shape first; a second Esc closes
           e.preventDefault();
           return;
         }
-        return exit();
+        return requestExit();
       }
       if (e.key === 'Enter') {
         if (state.draft) {
@@ -340,7 +427,7 @@ export function installPainter(MapShine) {
     buildOverlay();
     installHandlers();
     state.active = true;
-    for (const key of Object.keys(state.layers)) state.dirty.add(key);
+    for (const key of Object.keys(state.layers)) markFull(key);
     loop();
   }
 
@@ -354,6 +441,78 @@ export function installPainter(MapShine) {
     state.overlay?.remove();
     state.toolbar?.remove();
     state.overlay = state.toolbar = state.canvas = null;
+  }
+
+  // Exit, but guard unsaved work first (the data-loss point — masks live in
+  // memory + the scene flag, so closing without saving loses the in-memory edits).
+  async function requestExit() {
+    if (!state.dirtySinceSave) return exit();
+    const choice = await confirmModal(
+      'Unsaved painting',
+      'You have unsaved changes. Save them to the scene before closing?',
+      [
+        { action: 'save', label: '💾 Save & close', accent: '167,255,196' },
+        { action: 'discard', label: 'Discard & close', accent: '255,120,120' },
+        { action: 'cancel', label: 'Keep editing', accent: '143,214,255' },
+      ]
+    );
+    if (choice === 'save') {
+      await save();
+      exit();
+    } else if (choice === 'discard') {
+      exit();
+    }
+    // cancel / dismissed -> stay in Author Mode
+  }
+
+  // A small self-contained confirm dialog (no Foundry-Dialog API dependency);
+  // resolves to the chosen button's `action`, or 'cancel' if dismissed.
+  function confirmModal(title, message, buttons) {
+    return new Promise((resolve) => {
+      state.modalOpen = true;
+      const back = document.createElement('div');
+      Object.assign(back.style, {
+        position: 'fixed',
+        inset: '0',
+        zIndex: '200',
+        pointerEvents: 'auto',
+        background: 'rgba(0,0,0,0.45)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      });
+      const card = document.createElement('div');
+      Object.assign(card.style, {
+        background: 'rgba(14,18,28,0.98)',
+        border: '1px solid rgba(143,214,255,0.35)',
+        borderRadius: '12px',
+        padding: '16px 18px',
+        maxWidth: '440px',
+        color: '#dcecff',
+        font: '12px/1.45 Signika, sans-serif',
+        boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
+      });
+      const finish = (action) => {
+        state.modalOpen = false;
+        back.remove();
+        resolve(action);
+      };
+      const h = document.createElement('div');
+      h.textContent = title;
+      Object.assign(h.style, { fontWeight: '700', fontSize: '13px', marginBottom: '8px' });
+      const m = document.createElement('div');
+      m.textContent = message;
+      Object.assign(m.style, { marginBottom: '14px', opacity: '0.9' });
+      const btnRow = document.createElement('div');
+      Object.assign(btnRow.style, { display: 'flex', gap: '8px', justifyContent: 'flex-end', flexWrap: 'wrap' });
+      for (const b of buttons) btnRow.append(button(b.label, () => finish(b.action), b.accent ?? '143,214,255'));
+      back.addEventListener('pointerdown', (ev) => {
+        if (ev.target === back) finish('cancel');
+      });
+      card.append(h, m, btnRow);
+      back.append(card);
+      document.body.appendChild(back);
+    });
   }
 
   // ---- overlay + toolbar -------------------------------------------------
@@ -416,8 +575,20 @@ export function installPainter(MapShine) {
     snapCb.checked = state.snap;
     snapCb.addEventListener('change', () => (state.snap = snapCb.checked));
     snapWrap.append(snapCb, document.createTextNode('Snap ¼-grid'));
+    // floor stepper — masks are per-floor; this picks which floor you paint
+    const floorLabelEl = document.createElement('span');
+    Object.assign(floorLabelEl.style, { minWidth: '54px', textAlign: 'center', opacity: '0.9' });
+    floorLabelEl.textContent = `Floor ${state.floor}`;
+    const floorWrap = document.createElement('div');
+    Object.assign(floorWrap.style, { display: 'flex', alignItems: 'center', gap: '3px' });
+    floorWrap.append(
+      button('◀', () => changeFloor(-1), '143,214,255'),
+      floorLabelEl,
+      button('▶', () => changeFloor(1), '143,214,255')
+    );
+
     const toolRow = row();
-    toolRow.append(label('Tool'), toolSeg.el, snapWrap);
+    toolRow.append(label('Tool'), toolSeg.el, snapWrap, label('Floor'), floorWrap);
 
     // kind picker — labelled by the catalog's own suffix, never a literal
     const kindSel = document.createElement('select');
@@ -429,10 +600,35 @@ export function installPainter(MapShine) {
       kindSel.append(o);
     }
     kindSel.value = state.kind;
-    kindSel.addEventListener('change', () => {
-      state.kind = kindSel.value;
+    let revertingKind = false;
+    kindSel.addEventListener('change', async () => {
+      if (revertingKind) return;
+      const target = kindSel.value;
+      // Guard unsaved work when swapping effects (author ask): the mask you were
+      // on stays in memory either way, but remind so it isn't forgotten.
+      if (state.dirtySinceSave) {
+        const suffix = PAINTABLE_KINDS.find((k) => k.id === target)?.suffixes[0] ?? target;
+        const choice = await confirmModal(
+          'Unsaved painting',
+          `Save your changes before switching to ${suffix}? Your masks stay in memory either way — Save writes them all to the scene at once.`,
+          [
+            { action: 'save', label: '💾 Save & switch', accent: '167,255,196' },
+            { action: 'switch', label: 'Switch without saving', accent: '143,214,255' },
+            { action: 'cancel', label: 'Cancel', accent: '255,196,120' },
+          ]
+        );
+        if (choice === 'cancel') {
+          revertingKind = true;
+          kindSel.value = state.kind; // put the dropdown back
+          revertingKind = false;
+          return;
+        }
+        if (choice === 'save') await save();
+      }
+      state.kind = target;
       layerFor(state.kind);
-      state.dirty.add(activeKey());
+      markFull(activeKey());
+      state.refreshToolbar?.();
     });
 
     const modeSeg = segmented(
@@ -471,12 +667,13 @@ export function installPainter(MapShine) {
     top.append(label('Mask'), kindSel, modeSeg.el);
     const mid = row();
     mid.append(sizeR.el, strengthR.el, hardR.el);
+    const saveBtn = button('💾 Save', save, '167,255,196');
     const bottom = row();
     bottom.append(
       button('↶ Undo', undo, '143,214,255'),
       button('Clear', clearActive, '255,196,120'),
-      button('💾 Save', save, '167,255,196'),
-      button('Exit', exit, '143,214,255')
+      saveBtn,
+      button('Exit', requestExit, '143,214,255')
     );
 
     const legendRow = row();
@@ -504,7 +701,12 @@ export function installPainter(MapShine) {
       hardR.sync();
       modeSeg.sync();
       snapCb.checked = state.snap;
+      kindSel.value = state.kind;
+      floorLabelEl.textContent = `Floor ${state.floor}`;
+      saveBtn.textContent = state.dirtySinceSave ? '💾 Save •' : '💾 Saved';
+      saveBtn.style.opacity = state.dirtySinceSave ? '1' : '0.55';
     };
+    state.refreshToolbar();
     return bar;
   }
 
@@ -532,15 +734,20 @@ export function installPainter(MapShine) {
           '/'
         )} KB) — saved fine, but very fine painted detail will eventually want file-based storage (not yet built).`;
     }
+    state.dirtySinceSave = false;
+    state.refreshToolbar?.();
     notify(msg, heavy.length ? 'warn' : 'info');
   }
 
   // ---- preview loop ------------------------------------------------------
-  // PAINT_GRID_MAX_DIM (2026-07-20: 512 -> 2048, so the smallest brush can
-  // actually resolve — see that constant's comment) makes this run against
-  // up to 16x more texels than before, so two things that didn't matter at
-  // 512 now do: reallocating an ImageData every dirty frame, and writing
-  // four separate bytes per texel instead of one.
+  // At PAINT_GRID_MAX_DIM=4096 a full re-pack is ~16M texels — too slow per
+  // frame while painting. So the offscreen ImageData is allocated ONCE and
+  // reused, packed as one 32-bit RGBA per texel, and — the load-bearing part —
+  // only the DIRTY RECTANGLE is re-packed and uploaded (`putImageData` with a
+  // sub-rect). Per-frame cost is O(changed area), independent of grid size.
+  // A fresh ImageData is zeroed = transparent, so an unpainted mask needs no
+  // full pack; only whole-grid changes (undo/clear/switch -> previewRect===true)
+  // pack everything.
   function renderGrid(key) {
     const layer = state.layers[key];
     if (!layer) return;
@@ -554,13 +761,21 @@ export function installPainter(MapShine) {
     if (g.width !== spec.w || g.height !== spec.h || !img) {
       g.width = spec.w;
       g.height = spec.h;
-      img = state.gridImageData[key] = gctx.createImageData(spec.w, spec.h); // allocate ONCE, reuse every frame
+      img = state.gridImageData[key] = gctx.createImageData(spec.w, spec.h);
     }
-    // One 32-bit write per texel (packed little-endian RGBA — standard for
-    // fast canvas pixel fills) instead of four byte writes; R/G/B are
-    // constant per mask, so only the alpha nibble actually varies per texel.
     const packed = new Uint32Array(img.data.buffer);
     const rgbBase = cr | (cg << 8) | (cb << 16);
+    const rect = state.previewRect[key];
+    delete state.previewRect[key];
+    if (rect && rect !== true) {
+      const { x0, y0, x1, y1 } = rect;
+      for (let y = y0; y <= y1; y++) {
+        const base = y * spec.w;
+        for (let x = x0; x <= x1; x++) packed[base + x] = rgbBase | (data[base + x] << 24);
+      }
+      gctx.putImageData(img, 0, 0, x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+      return;
+    }
     for (let i = 0; i < data.length; i++) packed[i] = rgbBase | (data[i] << 24);
     gctx.putImageData(img, 0, 0);
   }
@@ -678,12 +893,16 @@ export function installPainter(MapShine) {
       if (!payload) {
         state.layers = {};
         state.undo = [];
+        state.previewRect = {};
+        state.dirtySinceSave = false;
         return { loaded: false };
       }
       const { layers, mismatched } = hydratePaintedMasks(payload, ctx.sceneRect);
       state.layers = layers;
       state.undo = [];
-      for (const key of Object.keys(layers)) state.dirty.add(key);
+      state.previewRect = {};
+      state.dirtySinceSave = false; // freshly loaded from the scene = clean
+      for (const key of Object.keys(layers)) markFull(key);
       return { loaded: Object.keys(layers).length > 0, mismatched };
     },
   };

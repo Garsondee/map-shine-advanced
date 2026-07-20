@@ -41,7 +41,8 @@ function activeCanvas() {
  * @returns {{ready:false}|{ready:true, sceneRect:{x:number,y:number,width:number,height:number},
  *   boardElement: (Element|null),
  *   screenToWorld:(cx:number,cy:number)=>{x:number,y:number},
- *   worldToClient:(wx:number,wy:number)=>{x:number,y:number}}}
+ *   worldToClient:(wx:number,wy:number)=>{x:number,y:number},
+ *   snapWorld:(wx:number,wy:number)=>{x:number,y:number}}}
  */
 export function readPaintContext() {
   const c = activeCanvas();
@@ -80,6 +81,20 @@ export function readPaintContext() {
       const g = c.stage.toGlobal(new PIXI.Point(wx, wy));
       const b = view.getBoundingClientRect();
       return { x: b.left + g.x, y: b.top + g.y };
+    },
+    // Snap a world point to the scene grid at 4× resolution — a 4×4 lattice of
+    // snap points per grid square (Shapes-and-Regions.md §4.3, author decision).
+    // Uses Foundry's OWN grid snapper (grid-origin- and grid-type-aware) when
+    // available; falls back to a manual quarter-cell round from the grid size.
+    snapWorld: (wx, wy) => {
+      const grid = c.grid;
+      const modes = globalThis.CONST?.GRID_SNAPPING_MODES;
+      if (grid && typeof grid.getSnappedPoint === 'function' && modes) {
+        const p = grid.getSnappedPoint({ x: wx, y: wy }, { mode: modes.VERTEX, resolution: 4 });
+        if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) return { x: p.x, y: p.y };
+      }
+      const q = (grid?.size || 100) / 4;
+      return { x: Math.round(wx / q) * q, y: Math.round(wy / q) * q };
     },
   };
 }

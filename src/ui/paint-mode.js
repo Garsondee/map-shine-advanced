@@ -4,7 +4,7 @@
  * A modal AUTHORING surface (map-maker, opt-in). The overlay is VISUAL ONLY
  * (`pointer-events: none`); input is captured at the window in the capture
  * phase so that:
- *   - LEFT-drag   → paints (captured; Foundry never sees it)
+ *   - LEFT        → paint (brush) or place a vertex (point/line/polygon tools)
  *   - RIGHT-drag  → Foundry pans NATIVELY (we don't touch it — confirmed
  *                   against source: board.mjs's `_onDragRightStart` is
  *                   Foundry's OWN canvas-pan handler, distinct from
@@ -34,10 +34,12 @@
  * All Foundry/PIXI access: foundry/paint-adapter.js. This file is DOM glue,
  * verified live.
  *
- * TIER 1 SCOPE: any authored mask kind (dropdown), floor 0, embed persistence,
- * spray/paint/erase, interpolated strokes, stroke-level undo, a cursor ring,
- * keyboard shortcuts. Deferred: bake-to-file (Mode B), stamps/anchors,
- * per-floor binding, the package gate (docs/planning/Authoring-and-Distribution.md §6).
+ * SCOPE: any authored mask kind (dropdown), floor 0, embed persistence, a
+ * spray/paint/erase brush, AND the Author-Mode vector tools — point / line
+ * (stroked) / polygon (filled) — all rasterizing into the SAME mask the brush
+ * writes (Shapes-and-Regions.md), with an optional 4×4 sub-grid snap, shared
+ * undo, and a live draft preview. Deferred: retained/editable vector shapes +
+ * a Select tool, bake-to-file (Mode B), per-floor binding, the package gate.
  *
  * @module ui/paint-mode
  */
@@ -45,6 +47,8 @@
 import {
   createPaintLayer,
   stampBrushWorld,
+  rasterizePolygon,
+  rasterizeStrokedLine,
   serializePaintedMasks,
   hydratePaintedMasks,
   encodedByteEstimate,
@@ -91,6 +95,10 @@ export function installPainter(MapShine) {
     mouseClient: null,
     hoverOnBoard: false, // is the CURRENT hover over Foundry's board (not a UI panel)? gates the ring
     brush: { radius: 90, strength: 180, hardness: 0.55, mode: 'add' }, // mode: paint | add | erase
+    tool: 'brush', // brush | point | line | polygon
+    draft: null, // in-progress line/polygon: { type, vertices: [{x,y}...] }
+    snap: false, // 4×4 sub-grid snap for vector vertices — OFF by default (precision-first)
+    cursorWorld: null, // live cursor in world coords, for the rubber-band preview
     undo: [],
     handlers: null,
     refreshToolbar: null,
@@ -158,42 +166,129 @@ export function installPainter(MapShine) {
     state.dirty.add(activeKey());
   }
 
+  // ---- vector tools (point / line / polygon) -----------------------------
+  // All rasterize into the SAME MaskGrid the brush writes (Shapes-and-Regions.md):
+  // a drawn shape and a painted region are one mask. Shapes are NOT retained as
+  // editable vector objects yet (that + a Select tool are the next tier) — they
+  // commit straight to pixels, undoable as a whole, exactly like a brush stroke.
+  function setTool(t) {
+    cancelDraft();
+    state.tool = t;
+    state.refreshToolbar?.();
+  }
+
+  function cancelDraft() {
+    state.draft = null;
+  }
+
+  function commitDraft() {
+    const d = state.draft;
+    state.draft = null;
+    if (!d) return;
+    const layer = layerFor(state.kind);
+    const opts = { value: state.brush.strength, mode: state.brush.mode };
+    if (d.type === 'polygon' && d.vertices.length >= 3) {
+      pushUndo();
+      rasterizePolygon(layer, d.vertices, opts);
+      state.dirty.add(activeKey());
+    } else if (d.type === 'line' && d.vertices.length >= 2) {
+      pushUndo();
+      rasterizeStrokedLine(layer, d.vertices, state.brush.radius * 2, { ...opts, hardness: state.brush.hardness });
+      state.dirty.add(activeKey());
+    }
+  }
+
+  function nearFirstVertex(e) {
+    if (!state.draft || !state.draft.vertices.length) return false;
+    const p0 = state.ctx.worldToClient(state.draft.vertices[0].x, state.draft.vertices[0].y);
+    return Math.hypot(e.clientX - p0.x, e.clientY - p0.y) <= 10;
+  }
+
   // ---- input (window, capture phase — see the file header) ---------------
   function installHandlers() {
     const suppress = (e) => {
       e.preventDefault();
       e.stopPropagation();
     };
+    const worldAt = (e) => {
+      const raw = state.ctx.screenToWorld(e.clientX, e.clientY);
+      return state.snap ? state.ctx.snapWorld(raw.x, raw.y) : raw;
+    };
     const onDown = (e) => {
       if (e.button !== 0) return; // left button only; right/middle fall through to Foundry (pan)
       if (e.target !== state.ctx.boardElement) return; // not the map -> let the UI (ours or Foundry's) have it
-      state.painting = true;
-      state.lastWorld = null;
-      pushUndo();
-      const w = state.ctx.screenToWorld(e.clientX, e.clientY);
-      paintTo(w.x, w.y);
+      if (state.tool === 'brush') {
+        state.painting = true;
+        state.lastWorld = null;
+        pushUndo();
+        const raw = state.ctx.screenToWorld(e.clientX, e.clientY); // the brush ignores snap (smooth strokes)
+        paintTo(raw.x, raw.y);
+        suppress(e);
+        return;
+      }
+      const p = worldAt(e);
+      if (state.tool === 'point') {
+        pushUndo();
+        stampWorld(p.x, p.y);
+      } else if (state.tool === 'line' || state.tool === 'polygon') {
+        // A click near the first vertex closes a polygon; otherwise add a vertex.
+        if (state.tool === 'polygon' && state.draft && state.draft.vertices.length >= 3 && nearFirstVertex(e)) {
+          commitDraft();
+        } else {
+          if (!state.draft) state.draft = { type: state.tool, vertices: [] };
+          state.draft.vertices.push(p);
+        }
+      }
       suppress(e);
     };
     const onMove = (e) => {
       state.mouseClient = { x: e.clientX, y: e.clientY };
-      // Tracked on every move (not just while painting) so the brush ring hides
-      // over UI. Once a stroke is underway, painting deliberately continues even
-      // if the drag crosses a panel (matches ordinary paint-tool drag behaviour)
-      // — this flag only affects the RING and starting a NEW stroke (onDown).
       state.hoverOnBoard = e.target === state.ctx.boardElement;
-      if (!state.painting) return; // not painting → Foundry keeps the move (hover, native drag)
-      const w = state.ctx.screenToWorld(e.clientX, e.clientY);
-      paintTo(w.x, w.y);
-      suppress(e);
+      const raw = state.ctx.screenToWorld(e.clientX, e.clientY);
+      state.cursorWorld = state.snap ? state.ctx.snapWorld(raw.x, raw.y) : raw;
+      // Once a brush stroke is underway, painting continues even if the drag
+      // crosses a panel (ordinary paint-tool behaviour); vector tools are
+      // click-based, so a move only updates the rubber-band cursor.
+      if (state.tool === 'brush' && state.painting) {
+        paintTo(raw.x, raw.y);
+        suppress(e);
+      }
     };
     const onUp = (e) => {
-      if (!state.painting) return;
-      state.painting = false;
-      state.lastWorld = null;
-      suppress(e);
+      if (state.tool === 'brush' && state.painting) {
+        state.painting = false;
+        state.lastWorld = null;
+        suppress(e);
+      }
+    };
+    const onDbl = (e) => {
+      if (state.draft) {
+        commitDraft(); // double-click finishes a line/polygon
+        suppress(e);
+      }
     };
     const onKey = (e) => {
-      if (e.key === 'Escape') return exit();
+      if (e.key === 'Escape') {
+        if (state.draft) {
+          cancelDraft(); // Esc cancels the in-progress shape first; a second Esc exits
+          e.preventDefault();
+          return;
+        }
+        return exit();
+      }
+      if (e.key === 'Enter') {
+        if (state.draft) {
+          commitDraft();
+          e.preventDefault();
+        }
+        return;
+      }
+      if (e.key === 'Backspace' && state.draft) {
+        state.draft.vertices.pop();
+        if (!state.draft.vertices.length) state.draft = null;
+        e.preventDefault();
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
         undo();
         e.preventDefault();
@@ -202,6 +297,11 @@ export function installPainter(MapShine) {
       if (e.key === '[') state.brush.radius = Math.max(5, state.brush.radius - 10);
       else if (e.key === ']') state.brush.radius = Math.min(400, state.brush.radius + 10);
       else if (e.key.toLowerCase() === 'e') state.brush.mode = state.brush.mode === 'erase' ? 'add' : 'erase';
+      else if (e.key.toLowerCase() === 'b') setTool('brush');
+      else if (e.key.toLowerCase() === 'p') setTool('point');
+      else if (e.key.toLowerCase() === 'l') setTool('line');
+      else if (e.key.toLowerCase() === 'g') setTool('polygon');
+      else if (e.key.toLowerCase() === 's') state.snap = !state.snap;
       else return;
       state.refreshToolbar?.();
     };
@@ -211,8 +311,9 @@ export function installPainter(MapShine) {
     window.addEventListener('pointerdown', onDown, true);
     window.addEventListener('pointermove', onMove, true);
     window.addEventListener('pointerup', onUp, true);
+    window.addEventListener('dblclick', onDbl, true);
     window.addEventListener('keydown', onKey, true);
-    state.handlers = { onDown, onMove, onUp, onKey };
+    state.handlers = { onDown, onMove, onUp, onDbl, onKey };
   }
 
   function removeHandlers() {
@@ -221,6 +322,7 @@ export function installPainter(MapShine) {
     window.removeEventListener('pointerdown', h.onDown, true);
     window.removeEventListener('pointermove', h.onMove, true);
     window.removeEventListener('pointerup', h.onUp, true);
+    window.removeEventListener('dblclick', h.onDbl, true);
     window.removeEventListener('keydown', h.onKey, true);
     state.handlers = null;
   }
@@ -296,6 +398,27 @@ export function installPainter(MapShine) {
       return r;
     };
 
+    // tool switcher — the brush and the vector tools, all feeding the same masks
+    const toolSeg = segmented(
+      [
+        ['🖌 Brush', 'brush'],
+        ['• Point', 'point'],
+        ['╱ Line', 'line'],
+        ['⬠ Poly', 'polygon'],
+      ],
+      () => state.tool,
+      (v) => setTool(v)
+    );
+    const snapWrap = document.createElement('label');
+    Object.assign(snapWrap.style, { display: 'flex', alignItems: 'center', gap: '4px', pointerEvents: 'auto' });
+    const snapCb = document.createElement('input');
+    snapCb.type = 'checkbox';
+    snapCb.checked = state.snap;
+    snapCb.addEventListener('change', () => (state.snap = snapCb.checked));
+    snapWrap.append(snapCb, document.createTextNode('Snap ¼-grid'));
+    const toolRow = row();
+    toolRow.append(label('Tool'), toolSeg.el, snapWrap);
+
     // kind picker — labelled by the catalog's own suffix, never a literal
     const kindSel = document.createElement('select');
     styleControl(kindSel);
@@ -364,21 +487,23 @@ export function installPainter(MapShine) {
       borderTop: '1px solid rgba(143,214,255,0.14)',
     });
     legendRow.append(
-      legendItem('LMB', 'paint'),
+      legendItem('LMB', 'paint / add point'),
       legendItem('RMB', 'pan'),
       legendItem('Wheel', 'zoom'),
-      legendItem('[ ]', 'size'),
-      legendItem('E', 'erase'),
+      legendItem('Enter', 'finish'),
+      legendItem('Bksp', 'undo point'),
       legendItem('Ctrl+Z', 'undo'),
-      legendItem('Esc', 'exit')
+      legendItem('Esc', 'cancel / exit')
     );
 
-    bar.append(top, mid, bottom, legendRow);
+    bar.append(toolRow, top, mid, bottom, legendRow);
     state.refreshToolbar = () => {
+      toolSeg.sync();
       sizeR.sync();
       strengthR.sync();
       hardR.sync();
       modeSeg.sync();
+      snapCb.checked = state.snap;
     };
     return bar;
   }
@@ -475,10 +600,12 @@ export function installPainter(MapShine) {
       cctx.globalAlpha = 1;
     }
 
+    drawDraft(cctx);
     drawBrushRing(cctx);
   }
 
   function drawBrushRing(cctx) {
+    if (state.tool !== 'brush' && state.tool !== 'point') return; // vector tools show the draft, not a ring
     const m = state.mouseClient;
     if (!m || !state.hoverOnBoard) return; // don't float a paint-radius circle over the toolbar
     const w0 = state.ctx.screenToWorld(m.x, m.y);
@@ -497,6 +624,39 @@ export function installPainter(MapShine) {
     cctx.strokeStyle = 'rgba(0,0,0,0.5)';
     cctx.lineWidth = 0.75;
     cctx.stroke();
+  }
+
+  // The in-progress line/polygon: placed vertices, edges, a rubber-band to the
+  // live cursor, and (polygon) the closing edge + a ring on the first vertex
+  // once it can be clicked to close.
+  function drawDraft(cctx) {
+    const d = state.draft;
+    if (!d || !d.vertices.length) return;
+    const pts = d.vertices.map((v) => state.ctx.worldToClient(v.x, v.y));
+    const cur = state.cursorWorld ? state.ctx.worldToClient(state.cursorWorld.x, state.cursorWorld.y) : null;
+    const [cr, cg, cb] = colorFor(state.kind);
+    const col = `rgba(${cr},${cg},${cb},0.95)`;
+    cctx.strokeStyle = col;
+    cctx.lineWidth = 2;
+    cctx.beginPath();
+    cctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) cctx.lineTo(pts[i].x, pts[i].y);
+    if (cur) cctx.lineTo(cur.x, cur.y);
+    if (d.type === 'polygon' && pts.length >= 2) cctx.lineTo(pts[0].x, pts[0].y);
+    cctx.stroke();
+    for (const p of pts) {
+      cctx.beginPath();
+      cctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+      cctx.fillStyle = col;
+      cctx.fill();
+    }
+    if (d.type === 'polygon' && pts.length >= 3) {
+      cctx.beginPath();
+      cctx.arc(pts[0].x, pts[0].y, 8, 0, Math.PI * 2);
+      cctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      cctx.lineWidth = 2;
+      cctx.stroke();
+    }
   }
 
   MapShine.debug?.registerAction(

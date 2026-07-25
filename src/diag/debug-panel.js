@@ -1,9 +1,33 @@
 /**
- * src/diag/debug-panel.js — the temporary Keyhole debugging control panel.
+ * src/diag/debug-panel.js — the Map Shine Advanced control panel (Tier 0 shell).
  *
- * Lives in the same corner box as the boot heartbeat triangle. A growing set
- * of buttons, one per registered "report" — click one and its output is
- * copied to the clipboard as text, ready to paste back into chat. This is the
+ * WHAT THIS IS NOW (2026-07-20): the single control surface from
+ * docs/planning/Control-Panel.md — a SHELL with a five-zone icon rail:
+ * Bridge · Workshop · Toolbox · Lab · Settings. Only the LAB is fully built —
+ * it is the debug registry described below, unchanged. The other four zones show
+ * their few already-working controls beside 🚧 stubs: the scaffold for working
+ * out the final arrangement before the real (Effects-UI / astrolabe) renderers
+ * land. The public API (registerReport/registerAction/registerSelect) is
+ * unchanged; an entry is routed to a zone by the ZONES map (default: Lab), so
+ * every existing registration keeps working with no change at the call site.
+ * A FOURTH primitive, `registerPanel` (2026-07-22), renders a rich composite
+ * DOM block instead of a button/dropdown — an effect's whole FOH/ROH config
+ * card (`diag/effect-controls.js`), so registering one is still one call.
+ *
+ * PERMISSION IS A FILTER, NOT A FORK (Control-Panel.md §2, landed 2026-07-20):
+ * `isGM()` below reads the one live fact (`game.user.isGM`); a non-GM sees only
+ * the Settings icon (the whole rail hides itself when there is nothing to
+ * choose between) and the panel opens straight into it. A GM sees all five —
+ * this file has exactly ONE render path for both, never a duplicated layout.
+ * Opening/closing is driven by the scene-controls toolbar button
+ * (foundry/scene-controls-button.js) via `showPanel`/`hidePanel`/`togglePanel`;
+ * the panel itself decides its OWN default (open for a GM, closed for a
+ * player) the moment it attaches, per the author's standing directive to keep
+ * that GM auto-open until the module ships and it becomes a real setting.
+ *
+ * Lives in the same corner box as the boot heartbeat. A growing set of
+ * buttons, one per registered "report" — click one and its output is copied
+ * to the clipboard as text, ready to paste back into chat. This is the
  * standing debugging protocol for the rest of the Keyhole build: when
  * something breaks, the fix comes with "run report X (and Y)" instead of "can
  * you paste your console" — structured, consistent, and it survives across
@@ -43,12 +67,33 @@
  * old buffer kept the complaints and threw away the plot.
  */
 
+import { createLogger } from '../core/log.js';
+// The panel's reusable DOM vocabulary (drag, stylesheet, the shared control
+// builders, the Tier-0 zone scaffold), split out 2026-07-25 — the size-ratchet
+// god-object reversal; this file was 1,321 lines / a 1,249-line closure.
+import {
+  makeDraggable,
+  ensurePanelStyle,
+  sectionLabel,
+  zoneIntro,
+  createControlBuilders,
+  REPORT_SKIN,
+  ACTION_SKIN,
+} from './debug-panel-controls.js';
+
 export function installDebugPanel(MapShine) {
   if (MapShine.debug) return MapShine.debug; // idempotent
+
+  // core/log.js (log/one-door): this file's OWN pre-existing console.* calls
+  // are pre-2026-07-22 ratcheted debt (tools/verify-structure.mjs names this
+  // file in that ratchet's backlog comment) — not this change's to clean up.
+  // NEW call sites (registerPanel's build-failure guard) go through the door.
+  const log = createLogger('debug-panel');
 
   const reports = new Map(); // id -> { label, fn } — PURE READOUTS. The exporter runs these.
   const actions = new Map(); // id -> { label, fn } — side effects. The exporter never runs these.
   const controls = new Map(); // id -> { label, options, getValue, onChange } — live controls, rendered first
+  const panels = new Map(); // id -> { label, buildFn } — a rich composite DOM block (Effects-UI.md FOH/ROH cards); see registerPanel
 
   function envelope(id, payload) {
     return {
@@ -90,7 +135,7 @@ export function installDebugPanel(MapShine) {
    */
   function registerSelect(id, label, options, getValue, onChange, opts = {}) {
     controls.set(id, { label, options, getValue, onChange, group: opts.group });
-    if (listEl) renderButtons();
+    if (bodyEl) renderBody();
   }
 
   /**
@@ -114,7 +159,32 @@ export function installDebugPanel(MapShine) {
    * `applyArtSuppression()`/`restoreFoundryArt()` attempt, seam settled or not.
    */
   function refreshControls() {
-    if (listEl) renderButtons();
+    if (bodyEl) renderBody();
+  }
+
+  /**
+   * A RICH PANEL — a composite DOM block a report/action/select cannot
+   * express (Effects-UI.md's FOH/ROH effect card: sliders, a colour swatch,
+   * an "Advanced" disclosure, together). Exists so registering an effect's
+   * config UI is `registerPanel(id, label, () => buildEffectCard({...}))` —
+   * ONE line, same velocity-test spirit as the registry's own "one manifest +
+   * one schema + one registry line" (Effect-Registration.md §6) — rather than
+   * hand-laying-out a card in this file per effect, which is exactly the
+   * hand-wiring disease this whole panel exists to avoid.
+   *
+   * `buildFn` is called FRESH on every render (same contract as `makeControl`/
+   * `makeRunnable` below) and must return a plain `HTMLElement` — this file
+   * never inspects or mutates it, it only mounts it. A panel that needs to
+   * reflect state changed elsewhere calls `MapShine.debug.refreshControls()`,
+   * the same "instrument must not lie" mechanism every other live control uses.
+   *
+   * @param {string} id
+   * @param {string} label - shown nowhere yet (panels render unlabelled, full-width); kept for parity with the other three registries and future use (e.g. an index/search).
+   * @param {() => HTMLElement} buildFn
+   */
+  function registerPanel(id, label, buildFn, opts = {}) {
+    panels.set(id, { label, buildFn, group: opts.group, zone: opts.zone });
+    if (bodyEl) renderBody();
   }
 
   /**
@@ -136,7 +206,7 @@ export function installDebugPanel(MapShine) {
    */
   function registerReport(id, label, fn, opts = {}) {
     reports.set(id, { label, fn, group: opts.group, primary: opts.primary });
-    if (panelEl) renderButtons();
+    if (bodyEl) renderBody();
   }
 
   /**
@@ -151,7 +221,7 @@ export function installDebugPanel(MapShine) {
    */
   function registerAction(id, label, fn, opts = {}) {
     actions.set(id, { label, fn, group: opts.group, primary: opts.primary });
-    if (panelEl) renderButtons();
+    if (bodyEl) renderBody();
   }
 
   /**
@@ -196,9 +266,64 @@ export function installDebugPanel(MapShine) {
   // ---- UI ------------------------------------------------------------------
   let panelEl = null;
   let statusEl = null;
-  let listEl = null;
+  let bodyEl = null; // the ACTIVE zone's content — re-rendered on zone switch and on every registration
+  let railEl = null; // the zone rail (built once); its highlight updates on zone switch
+  let shellRowEl = null; // rail + body; hidden when the panel is collapsed
+  let zoneHeadEl = null; // the active zone's title/subtitle strip
   let footerEl = null;
   let collapsed = false;
+  // The shell opens on the Bridge for a GM (the design's home per
+  // docs/planning/Control-Panel.md) or Settings for a player — set for real in
+  // buildUI(), once game.user is readable. The Lab (today's debug registry) is
+  // one rail-click away for a GM, never reachable for a player.
+  let activeZone = 'bridge';
+  // Whole-panel visibility (the scene-controls toolbar button + its own Close
+  // button both drive this) — SEPARATE from `collapsed`, which only shrinks it
+  // to its header bar. A closed panel is not in the document flow at all.
+  // Starts `null` (not `false`) so the FIRST setPanelVisible call always
+  // applies its CSS — the panel's own base style defaults to visible, and a
+  // real write is what actually hides it for a player.
+  let panelVisible = null;
+  let visibilityListener = null; // notified on every showPanel/hidePanel/togglePanel — see onVisibilityChange
+
+  /**
+   * The one live fact permission is filtered on (Control-Panel.md §2). Reads
+   * `game.user.isGM` directly — `diag/` is one of the two zones the
+   * `foundry/adapter-only` wall exempts, exactly for live reads like this one.
+   * Falls back to true outside a Foundry context (Node harnesses, no `game`
+   * global) so nothing here becomes untestable.
+   */
+  function isGM() {
+    return typeof game !== 'undefined' ? !!game.user?.isGM : true;
+  }
+
+  /** Show/hide the whole panel (not the heartbeat/FPS strip above it — that
+   * stays up independently) and tell whoever is listening (the scene-controls
+   * toolbar button) so its highlight never drifts from what's actually on
+   * screen — the same "don't let a control lie about live state" rule as
+   * `refreshControls` above, applied to visibility instead of a dropdown. */
+  function setPanelVisible(next) {
+    if (panelVisible === next) return;
+    panelVisible = next;
+    if (panelEl) panelEl.style.display = panelVisible ? 'flex' : 'none';
+    visibilityListener?.(panelVisible);
+  }
+  function showPanel() {
+    setPanelVisible(true);
+  }
+  function hidePanel() {
+    setPanelVisible(false);
+  }
+  function togglePanel() {
+    setPanelVisible(!panelVisible);
+  }
+  function isPanelVisible() {
+    return !!panelVisible;
+  }
+  /** @param {(visible: boolean) => void} fn */
+  function onVisibilityChange(fn) {
+    visibilityListener = fn;
+  }
 
   // Accordion layout — PRESENTATION ONLY (media ladder L4, cosmetic). A
   // mis-grouped button still works; it just lands visibly in "More". Nothing
@@ -239,12 +364,9 @@ export function installDebugPanel(MapShine) {
       title: 'Run & stress',
       icon: '▶️',
       ids: [
-        'vt-pan-viewer-start',
         'vt-pan-viewer-start-real-scene',
         'vt-pan-viewer-stop',
-        'vt-pan-viewer-cycle-layer',
         'vt-zoom-thrash-active',
-        'vt-zoom-thrash-torture',
         'vt-live-decode',
         'orientation-self-test',
         'soak',
@@ -253,8 +375,86 @@ export function installDebugPanel(MapShine) {
   ];
   const openFolders = new Set(); // folder ids the author has expanded; preserved across re-renders
 
-  /** Pointer travel (px) below which a pointerdown→up counts as a CLICK, not a drag. */
-  const DRAG_CLICK_SLOP_PX = 4;
+  // ---- THE FIVE ZONES (docs/planning/Control-Panel.md) ---------------------
+  // The rail switches between them; every registered report/action/select is
+  // routed to exactly ONE zone. This is presentation-only config, exactly like
+  // FOLDERS above — a mis-routed id still works, it just shows in the wrong
+  // zone. The DEFAULT zone is 'lab' (the dev suite = the debug registry), so a
+  // newly-registered diagnostic needs no entry here. Only the Lab is fully
+  // built; the four product zones are 🚧-stubbed scaffolds for now.
+  const ZONE_ORDER = ['bridge', 'workshop', 'toolbox', 'lab', 'settings'];
+  const ZONE_META = {
+    bridge: { icon: '🧭', tag: 'Bridge', title: 'The Bridge', sub: 'live world control' },
+    workshop: { icon: '🔥', tag: 'Make', title: 'The Workshop', sub: 'add & author effects' },
+    toolbox: { icon: '🧰', tag: 'Tools', title: 'The Toolbox', sub: 'occasional utilities' },
+    lab: { icon: '🔬', tag: 'Lab', title: 'The Lab', sub: 'diagnostics & dev tools', dev: true },
+    settings: { icon: '⚙️', tag: 'Setup', title: 'Settings', sub: 'graphics & performance' },
+  };
+  /** The permission filter (Control-Panel.md §2): a GM gets all five zones; a
+   * player gets exactly one. Everything downstream (the rail, the default
+   * zone, whether the rail even renders) reads THIS, never `isGM()` directly —
+   * one seam if the player's set ever grows past Settings alone. */
+  const visibleZones = () => (isGM() ? ZONE_ORDER : ['settings']);
+  // id → zone override; unlisted ids default to 'lab'. These are the handful of
+  // already-working controls that belong in a product zone, not the dev suite —
+  // so each product zone shows at least one real control beside its stubs.
+  const ZONES = {
+    'darkness-realism': 'bridge',
+    'render-compare': 'bridge',
+    'camera-path-open': 'bridge',
+    paint: 'workshop',
+    anchors: 'workshop',
+    'live-markers-toggle': 'workshop',
+    'candle-markers-once': 'workshop',
+    'wind-overlay-toggle': 'workshop',
+    'wind-overlay-resolution': 'workshop',
+    'wind-particles-toggle': 'workshop',
+    // ('wind-ambient-direction'/'wind-ambient-speed' were routed here until
+    // 2026-07-23; the astrolabe replaced both and they are deleted, not moved.)
+    astrolabe: 'bridge',
+    'wind-rebake': 'workshop',
+    'wind-test-gust': 'workshop',
+    'wind-force-thaw': 'workshop',
+    'wind-sim-status': 'workshop',
+    'loading-screen-arm': 'toolbox',
+    'loading-screen-state': 'toolbox',
+    'ui-shadow': 'settings',
+    'ui-shadow-status': 'settings',
+  };
+  const zoneOf = (id, entry) => entry.zone ?? ZONES[id] ?? 'lab';
+
+  const ZONE_INTRO = {
+    bridge:
+      'Steer the world live. The <b style="color:#cfe0f5">astrolabe</b> (time &amp; wind) is the hero here; a couple of real world levers work today.',
+    workshop:
+      'Add an effect and paint it where it belongs. <b style="color:#cfe0f5">Painting masks works today</b>; the effect gallery + “need fire” flow are planned.',
+    toolbox:
+      'Occasional GM utilities. The loading-screen tools work today; the rest are planned (confirm-first where heavy).',
+    settings:
+      'Graphics &amp; performance — the player-facing face. <b style="color:#cfe0f5">Window shadows work today</b>; the profile + per-effect rows are planned.',
+  };
+  // The 🚧 stub scaffold per product zone — labels the author is arranging, not
+  // wired to anything. See renderProductZone.
+  const STUBS = {
+    bridge: { quick: ['Toggle darkness', 'Recall camera', 'Floor ▸', 'Streaming minimap'] },
+    // Candles graduated from stub to a real registered panel (boot.js) — no
+    // longer listed here; every other entry is still 🚧 planned.
+    workshop: { gallery: ['Fire', 'Water', 'Fog', 'Dust', 'Lightning', 'Smoke', 'Puddles', 'Glow'] },
+    toolbox: {
+      items: [
+        'Texture Manager',
+        'Effect Stack',
+        'Apply look to all scenes…',
+        'Package-readiness check',
+        'Scene Reset',
+        'Scene Recovery',
+      ],
+    },
+    settings: {
+      profile: ['Low', 'Performance', 'Standard', 'Quality', 'Extreme'],
+      effects: ['Fire', 'Water', 'Lightning'],
+    },
+  };
 
   /**
    * Make `handle` drag whatever `getHost()` returns.
@@ -274,75 +474,17 @@ export function installDebugPanel(MapShine) {
    * @returns {() => number} total pointer travel of the last gesture (for the
    *   click-vs-drag test).
    */
-  function makeDraggable(handle, getHost) {
-    let dragging = false;
-    let grabOffsetX = 0;
-    let grabOffsetY = 0;
-    let moved = 0;
-
-    handle.addEventListener('pointerdown', (e) => {
-      const host = getHost();
-      if (!host) return;
-      const r = host.getBoundingClientRect();
-      // Anchor swap — see this function's doc, point 1.
-      host.style.left = `${r.left}px`;
-      host.style.top = `${r.top}px`;
-      host.style.right = 'auto';
-      host.style.bottom = 'auto';
-      grabOffsetX = e.clientX - r.left;
-      grabOffsetY = e.clientY - r.top;
-      dragging = true;
-      moved = 0;
-      handle.style.cursor = 'grabbing';
-      try {
-        handle.setPointerCapture(e.pointerId); // keep the drag alive off-handle
-      } catch (_) {}
-      e.preventDefault();
+  // The shared control builders, bound to this panel's registries. `statusEl`
+  // is passed as a GETTER, not a value: it does not exist until buildUI runs.
+  const { makeButton, makeRunnable, makeControl, folderOf, stubRow, stubGallery, stubSegmented } =
+    createControlBuilders({
+      runReport,
+      copyToClipboard,
+      getStatusEl: () => statusEl,
+      PRIMARY,
+      FOLDERS,
     });
 
-    handle.addEventListener('pointermove', (e) => {
-      if (!dragging) return;
-      const host = getHost();
-      if (!host) return;
-      moved += Math.abs(e.movementX) + Math.abs(e.movementY);
-      const r = host.getBoundingClientRect();
-      // Clamp — see this function's doc, point 2. A strip stays reachable.
-      const maxX = Math.max(0, window.innerWidth - 60);
-      const maxY = Math.max(0, window.innerHeight - 24);
-      host.style.left = `${Math.max(0, Math.min(maxX, e.clientX - grabOffsetX))}px`;
-      host.style.top = `${Math.max(0, Math.min(maxY, e.clientY - grabOffsetY))}px`;
-      void r;
-    });
-
-    const end = (e) => {
-      if (!dragging) return;
-      dragging = false;
-      handle.style.cursor = 'grab';
-      try {
-        handle.releasePointerCapture(e.pointerId);
-      } catch (_) {}
-    };
-    handle.addEventListener('pointerup', end);
-    handle.addEventListener('pointercancel', end);
-
-    return () => moved;
-  }
-
-  /** Inject the panel's stylesheet once — the pseudo-element bits inline styles can't reach. */
-  function ensurePanelStyle() {
-    if (document.getElementById('msa-debug-panel-style')) return;
-    const s = document.createElement('style');
-    s.id = 'msa-debug-panel-style';
-    s.textContent =
-      '#msa-debug-panel summary::-webkit-details-marker{display:none}' +
-      '#msa-debug-panel summary:hover{background:rgba(143,214,255,0.09)}' +
-      '#msa-debug-panel .msa-chev{display:inline-block;transition:transform .12s ease;opacity:.55}' +
-      '#msa-debug-panel details[open] .msa-chev{transform:rotate(90deg)}' +
-      '#msa-debug-panel button:active{transform:translateY(1px)}';
-    document.head.appendChild(s);
-  }
-
-  /** The vanity footer — bug report + Patreon, carried over from V2's config menu. */
   function buildFooter() {
     const foot = document.createElement('div');
     Object.assign(foot.style, {
@@ -377,6 +519,10 @@ export function installDebugPanel(MapShine) {
 
   function buildUI() {
     ensurePanelStyle();
+    // The permission-appropriate home zone (Control-Panel.md §2) — decided once,
+    // here, because this is the first point game.user is reliably readable
+    // (attachPanel runs on Foundry's 'ready' hook).
+    activeZone = visibleZones()[0];
     const panel = document.createElement('div');
     panelEl = panel;
     panel.id = 'msa-debug-panel';
@@ -386,61 +532,119 @@ export function installDebugPanel(MapShine) {
       background: 'rgba(12,16,26,0.93)',
       border: '1px solid rgba(143,214,255,0.28)',
       borderRadius: '10px',
-      padding: '8px 8px 6px',
       font: '11px/1.35 Signika, sans-serif',
       color: '#dcecff',
-      width: '440px',
-      maxHeight: '72vh',
-      overflowY: 'auto',
+      width: '498px',
       boxShadow: '0 10px 30px rgba(0,0,0,0.45)',
       backdropFilter: 'blur(7px)',
+      overflow: 'hidden',
+      display: 'flex',
+      flexDirection: 'column',
     });
 
-    // Brand header — in V3 this panel becomes the home of MSA, so its first
-    // layer reads as a product surface (friendly, branded), not a raw dev
-    // readout. It is still the drag handle and the collapse toggle.
+    // Brand header — the product surface's title bar, and still the drag handle
+    // (author-reported, 2026-07-16: the panel sits under Foundry's right-hand
+    // sidebar; the whole HOST moves as one unit — heartbeat strip + panel).
     const header = document.createElement('div');
     Object.assign(header.style, {
       display: 'flex',
       justifyContent: 'space-between',
       alignItems: 'center',
       cursor: 'grab',
-      marginBottom: '7px',
-      paddingBottom: '6px',
+      padding: '8px 10px',
       borderBottom: '1px solid rgba(143,214,255,0.16)',
       touchAction: 'none', // let pointermove reach us instead of becoming a scroll gesture
     });
     const ver = MapShine.version ? ` v${MapShine.version}` : '';
-    header.innerHTML =
-      '<span style="display:flex;align-items:center;gap:8px">' +
+    const brand = document.createElement('span');
+    Object.assign(brand.style, { display: 'flex', alignItems: 'center', gap: '8px' });
+    brand.innerHTML =
       '<span style="font-size:15px">🗝️</span>' +
       '<span><span style="font-weight:700;letter-spacing:.2px">Map Shine Advanced</span>' +
-      `<span style="opacity:.5;font-size:9px;display:block;margin-top:-1px">dev console${ver}</span></span>` +
-      '</span><span id="msa-debug-toggle" style="opacity:.7;font-size:13px">▾</span>';
+      `<span style="opacity:.5;font-size:9px;display:block;margin-top:-1px">control panel${ver}</span></span>`;
 
-    // DRAGGABLE (author-reported, 2026-07-16: the panel sits under Foundry's
-    // right-hand sidebar). Dragging solves "the right default" for any layout at
-    // any resolution. The whole HOST moves — heartbeat + panel are one unit.
-    const dragMoved = makeDraggable(header, () => panelEl?.parentElement);
+    makeDraggable(header, () => panelEl?.parentElement);
 
-    header.addEventListener('click', () => {
-      // Only collapse on a genuine CLICK, so a drag that ends over the header
-      // does not also fold the panel up.
-      if (dragMoved() > DRAG_CLICK_SLOP_PX) return;
+    // MINIMIZE / CLOSE — two explicit buttons (author, 2026-07-20: "we also
+    // need a button to close this dialogue as well as minimise it"), replacing
+    // the old implicit "click anywhere on the header" gesture that was easy to
+    // confuse with the drag it shares a hit area with. Minimize shrinks to just
+    // this header bar (the panel is still "open" — the toolbar stays lit).
+    // Close hides the whole panel and dims the toolbar button; reopen from
+    // there (foundry/scene-controls-button.js).
+    const headerBtn = (glyph, title) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = glyph;
+      b.title = title;
+      Object.assign(b.style, {
+        pointerEvents: 'auto',
+        background: 'transparent',
+        border: '1px solid rgba(143,214,255,0.22)',
+        borderRadius: '5px',
+        color: '#9fb6d8',
+        font: '11px/1 Signika, sans-serif',
+        width: '20px',
+        height: '20px',
+        cursor: 'pointer',
+      });
+      b.addEventListener('mouseenter', () => {
+        b.style.background = 'rgba(143,214,255,0.14)';
+        b.style.color = '#eaf4ff';
+      });
+      b.addEventListener('mouseleave', () => {
+        b.style.background = 'transparent';
+        b.style.color = '#9fb6d8';
+      });
+      // The header's own pointerdown starts a drag (setPointerCapture) — without
+      // this, that capture swallows the button's matching pointerup and the
+      // click event never fires at all, not just "sometimes".
+      b.addEventListener('pointerdown', (e) => e.stopPropagation());
+      return b;
+    };
+    const minimizeBtn = headerBtn('▾', 'Minimize');
+    minimizeBtn.addEventListener('click', () => {
       collapsed = !collapsed;
-      const d = collapsed ? 'none' : '';
-      listEl.style.display = d;
-      statusEl.style.display = d;
-      if (footerEl) footerEl.style.display = d;
-      header.querySelector('#msa-debug-toggle').textContent = collapsed ? '▸' : '▾';
+      shellRowEl.style.display = collapsed ? 'none' : 'flex';
+      minimizeBtn.textContent = collapsed ? '▸' : '▾';
     });
+    const closeBtn = headerBtn('✕', 'Close (reopen from the scene-controls toolbar)');
+    closeBtn.addEventListener('click', hidePanel);
 
-    listEl = document.createElement('div');
-    Object.assign(listEl.style, { display: 'flex', flexDirection: 'column', gap: '6px' });
+    const btnRow = document.createElement('span');
+    Object.assign(btnRow.style, { display: 'flex', alignItems: 'center', gap: '4px' });
+    btnRow.append(minimizeBtn, closeBtn);
+
+    header.append(brand, btnRow);
+
+    // The shell row: the zone rail (left) + the active zone (right).
+    shellRowEl = document.createElement('div');
+    Object.assign(shellRowEl.style, { display: 'flex', alignItems: 'stretch' });
+
+    railEl = buildRail();
+    // A rail with one icon is chrome for a choice that doesn't exist — a player
+    // has exactly one zone (Settings), so it opens straight into it instead.
+    if (visibleZones().length <= 1) railEl.style.display = 'none';
+
+    const main = document.createElement('div');
+    Object.assign(main.style, { display: 'flex', flexDirection: 'column', flex: '1', minWidth: '0' });
+
+    zoneHeadEl = document.createElement('div');
+    Object.assign(zoneHeadEl.style, { padding: '9px 12px 8px', borderBottom: '1px solid rgba(143,214,255,0.10)' });
+
+    bodyEl = document.createElement('div');
+    Object.assign(bodyEl.style, {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '6px',
+      padding: '11px 12px',
+      maxHeight: '60vh',
+      overflowY: 'auto',
+    });
 
     statusEl = document.createElement('div');
     Object.assign(statusEl.style, {
-      marginTop: '7px',
+      margin: '0 12px',
       color: '#9fdcc0',
       minHeight: '14px',
       fontSize: '10px',
@@ -449,145 +653,173 @@ export function installDebugPanel(MapShine) {
     statusEl.textContent = 'Pick a tool — its output copies to your clipboard, ready to paste back.';
 
     footerEl = buildFooter();
+    footerEl.style.margin = '6px 12px 8px';
+
+    main.appendChild(zoneHeadEl);
+    main.appendChild(bodyEl);
+    main.appendChild(statusEl);
+    main.appendChild(footerEl);
+
+    shellRowEl.appendChild(railEl);
+    shellRowEl.appendChild(main);
 
     panel.appendChild(header);
-    panel.appendChild(listEl);
-    panel.appendChild(statusEl);
-    panel.appendChild(footerEl);
+    panel.appendChild(shellRowEl);
+    updateZoneHead();
+    // "Always opens for the GM at the moment" (author, 2026-07-20) — a
+    // temporary default kept until the module ships and this becomes a real
+    // per-user setting. A player starts closed and reaches Settings via the
+    // scene-controls toolbar button (foundry/scene-controls-button.js).
+    setPanelVisible(isGM());
     return panel;
   }
 
-  function renderButtons() {
-    listEl.innerHTML = '';
+  // ---- the zone rail -------------------------------------------------------
 
-    /**
-     * @param {string} label @param {{rgb: string, flexBasis?: string, weight?: string}} skin
-     * @returns {HTMLButtonElement}
-     */
-    const makeButton = (label, skin) => {
-      const btn = document.createElement('button');
-      btn.textContent = label;
-      const idle = `rgba(${skin.rgb},0.14)`;
-      const hover = `rgba(${skin.rgb},0.30)`;
-      Object.assign(btn.style, {
-        pointerEvents: 'auto',
-        background: idle,
-        border: `1px solid rgba(${skin.rgb},0.42)`,
-        borderRadius: '6px',
-        color: '#eaf4ff',
-        font: '10px/1.2 Signika, sans-serif',
-        fontWeight: skin.weight ?? 'normal',
-        padding: '5px 8px',
-        cursor: 'pointer',
-        transition: 'background .1s ease',
-        ...(skin.flexBasis ? { flexBasis: skin.flexBasis } : {}),
-      });
-      btn.addEventListener('mouseenter', () => {
-        btn.style.background = hover;
-      });
-      btn.addEventListener('mouseleave', () => {
-        btn.style.background = idle;
-      });
-      return btn;
-    };
-
-    // A report/action button: click → run → copy to clipboard → report status.
-    const makeRunnable = (id, label, skin) => {
-      const btn = makeButton(label, skin);
-      btn.addEventListener('click', async () => {
-        statusEl.textContent = `Running "${id}"…`;
-        try {
-          const text = await runReport(id);
-          const copied = await copyToClipboard(text);
-          statusEl.textContent = copied
-            ? `✔ Copied "${id}" (${text.length.toLocaleString()} chars, ${new Date().toLocaleTimeString()}).`
-            : `⚠ "${id}" generated but clipboard copy failed — check console (also logged).`;
-          if (!copied) console.log(`[debug-panel] ${id}:\n${text}`);
-        } catch (e) {
-          statusEl.textContent = `✘ "${id}" threw: ${e?.message || e}`;
-          console.error(`[debug-panel] report "${id}" failed:`, e);
-        }
-      });
-      return btn;
-    };
-
-    // A live select control (renderer switch, darkness lever, …). Fill logic is
-    // unchanged: re-read on open so a thunk-options menu can't show stale choices.
-    const makeControl = (id, { label, options, getValue, onChange }) => {
-      const wrap = document.createElement('label');
-      Object.assign(wrap.style, {
+  function buildRail() {
+    const rail = document.createElement('div');
+    Object.assign(rail.style, {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '3px',
+      padding: '9px 6px',
+      background: 'rgba(6,10,20,0.5)',
+      borderRight: '1px solid rgba(143,214,255,0.12)',
+    });
+    for (const z of visibleZones()) {
+      const m = ZONE_META[z];
+      const b = document.createElement('button');
+      b.dataset.zone = z;
+      b.type = 'button';
+      b.innerHTML =
+        `<span style="font-size:16px;line-height:1">${m.icon}</span>` +
+        `<span style="font-size:8px;letter-spacing:.3px;opacity:.9">${m.tag}</span>`;
+      Object.assign(b.style, {
         pointerEvents: 'auto',
         display: 'flex',
+        flexDirection: 'column',
         alignItems: 'center',
-        gap: '5px',
-        flexBasis: '100%',
-        font: '10px/1.2 Signika, sans-serif',
+        gap: '2px',
+        width: '46px',
+        padding: '7px 2px 5px',
+        background: 'transparent',
+        border: '1px solid transparent',
+        borderRadius: '8px',
+        color: '#9fb6d8',
+        cursor: 'pointer',
       });
-      wrap.append(label);
-      const sel = document.createElement('select');
-      Object.assign(sel.style, {
-        pointerEvents: 'auto',
-        flex: '1',
-        background: 'rgba(10,14,22,0.9)',
-        border: '1px solid rgba(143,214,255,0.4)',
-        borderRadius: '5px',
-        color: '#cfe8ff',
-        font: '10px/1.2 Signika, sans-serif',
-        padding: '3px',
+      if (m.dev) b.title = 'Developer tools (dev-gated in the real shell)';
+      b.addEventListener('mouseenter', () => {
+        if (b.dataset.zone !== activeZone) b.style.background = 'rgba(143,214,255,0.08)';
       });
-      const fill = () => {
-        let list;
-        try {
-          list = typeof options === 'function' ? options() : options;
-        } catch (err) {
-          console.error(`[debug-panel] control "${id}" could not list its options:`, err);
-          list = [];
-        }
-        sel.innerHTML = '';
-        for (const o of list) {
-          const opt = document.createElement('option');
-          opt.value = o.value;
-          opt.textContent = o.label;
-          sel.append(opt);
-        }
-        try {
-          sel.value = getValue() ?? '';
-        } catch {
-          /* a control that cannot read its own state still renders; it just starts blank */
-        }
-      };
-      fill();
-      sel.addEventListener('mousedown', fill); // re-read on open — menu reflects the click, not page load
-      sel.addEventListener('change', async () => {
-        statusEl.textContent = `${label}: ${sel.value || 'off'}…`;
-        try {
-          await onChange(sel.value);
-          statusEl.textContent = `${label}: ${sel.value || 'off'} ✓`;
-        } catch (err) {
-          statusEl.textContent = `${label} failed: ${err?.message ?? err}`;
-          console.error(`[debug-panel] control "${id}" failed:`, err);
-        }
-      });
-      wrap.append(sel);
-      return wrap;
-    };
+      b.addEventListener('mouseleave', () => updateRail());
+      b.addEventListener('click', () => selectZone(z));
+      rail.appendChild(b);
+    }
+    return rail;
+  }
 
-    // Readouts in blue, actions in amber — the colour is not decoration: a button
-    // that restarts your scene must not look identical to one that reads a counter.
-    const REPORT_SKIN = { rgb: '143,214,255' };
-    const ACTION_SKIN = { rgb: '255,196,120' };
+  function updateRail() {
+    if (!railEl) return;
+    for (const b of railEl.children) {
+      const on = b.dataset.zone === activeZone;
+      b.style.background = on ? 'rgba(143,214,255,0.14)' : 'transparent';
+      b.style.borderColor = on ? 'rgba(143,214,255,0.30)' : 'transparent';
+      b.style.color = on ? '#eaf4ff' : '#9fb6d8';
+    }
+  }
 
-    // Which folder an entry belongs to. A declared `{ group }`/`{ primary }`
-    // wins; else the FOLDERS membership map; else "More" (visible, never a
-    // guessed wrong folder).
-    const folderOf = (id, entry) => {
-      if (entry.primary || PRIMARY.has(id)) return '__primary__';
-      if (entry.group) return entry.group;
-      for (const f of FOLDERS) if (f.ids.includes(id)) return f.id;
-      return '__more__';
-    };
+  function updateZoneHead() {
+    if (!zoneHeadEl) return;
+    const m = ZONE_META[activeZone];
+    zoneHeadEl.innerHTML =
+      `<span style="font-weight:700;font-size:12.5px;color:#eaf4ff">${m.title}</span>` +
+      `<span style="opacity:.5;font-size:9px;margin-left:7px">${m.sub}</span>`;
+  }
 
-    // ---- 1. Quick-reach zone (always visible) ------------------------------
+  function selectZone(z) {
+    activeZone = z;
+    updateRail();
+    updateZoneHead();
+    renderBody();
+  }
+
+  // ---- rendering: dispatch to the active zone ------------------------------
+
+  function renderBody() {
+    if (!bodyEl) return;
+    bodyEl.innerHTML = '';
+    updateRail();
+    if (activeZone === 'lab') renderLab();
+    else renderProductZone(activeZone);
+  }
+
+  // A collapsed-by-default accordion folder; open/closed state remembered across
+  // re-renders via openFolders.
+  function makeFolder(fid, icon, title, items) {
+    const details = document.createElement('details');
+    details.open = openFolders.has(fid);
+    Object.assign(details.style, {
+      border: '1px solid rgba(143,214,255,0.14)',
+      borderRadius: '8px',
+      background: 'rgba(143,214,255,0.04)',
+    });
+    const summary = document.createElement('summary');
+    Object.assign(summary.style, {
+      cursor: 'pointer',
+      listStyle: 'none',
+      padding: '6px 9px',
+      fontWeight: '600',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '7px',
+      userSelect: 'none',
+    });
+    summary.innerHTML =
+      '<span class="msa-chev">▸</span>' +
+      `<span>${icon}</span><span>${title}</span>` +
+      `<span style="margin-left:auto;opacity:.4;font-weight:400">${items.length}</span>`;
+    const body = document.createElement('div');
+    Object.assign(body.style, { display: 'flex', flexWrap: 'wrap', gap: '4px', padding: '0 9px 9px' });
+    for (const el of items) body.appendChild(el);
+    details.addEventListener('toggle', () => {
+      if (details.open) openFolders.add(fid);
+      else openFolders.delete(fid);
+    });
+    details.appendChild(summary);
+    details.appendChild(body);
+    return details;
+  }
+
+  /**
+   * Build every registered panel routed to `zone`, as plain DOM elements ready
+   * to mount — shared by `renderLab` and `renderProductZone` so a panel is
+   * genuinely zone-agnostic (registerPanel's own doc). A panel that throws
+   * while building is logged and skipped — one broken card must not blank the
+   * rest of the zone (the same "a failure degrades, never crashes the host"
+   * stance every other report/action already gets via runReport's try/catch).
+   * @param {string} zone
+   * @returns {HTMLElement[]}
+   */
+  function buildRoutedPanels(zone) {
+    const out = [];
+    for (const [id, entry] of panels) {
+      if (zoneOf(id, entry) !== zone) continue;
+      try {
+        const built = entry.buildFn();
+        if (built instanceof HTMLElement) out.push(built);
+      } catch (err) {
+        log.error(`panel "${id}" failed to build:`, err);
+      }
+    }
+    return out;
+  }
+
+  // ---- THE LAB — today's debug registry, behaviour unchanged ---------------
+  // The "Export everything" button + quick-reach primaries + the accordion
+  // folders. Only entries routed to the Lab (zoneOf === 'lab', the default)
+  // render here — the handful routed to product zones show up there instead.
+  function renderLab() {
     const quick = document.createElement('div');
     Object.assign(quick.style, { display: 'flex', flexWrap: 'wrap', gap: '5px' });
 
@@ -615,7 +847,6 @@ export function installDebugPanel(MapShine) {
       quick.appendChild(exportBtn);
     }
 
-    // ---- 2. Bucket every registered entry by folder ------------------------
     const buckets = new Map();
     const push = (fid, el) => {
       if (!buckets.has(fid)) buckets.set(fid, []);
@@ -625,8 +856,7 @@ export function installDebugPanel(MapShine) {
       const fid = folderOf(id, entry);
       const btn = makeRunnable(id, entry.label, skin);
       if (fid === '__primary__') {
-        // Vital tools (Pixel Probe) sit in the quick-reach row; one grows to
-        // fill, two share the row.
+        // Vital tools (Pixel Probe, Performance) sit in the quick-reach row.
         btn.style.flexGrow = '1';
         btn.style.flexBasis = 'calc(50% - 3px)';
         quick.appendChild(btn);
@@ -634,13 +864,14 @@ export function installDebugPanel(MapShine) {
         push(fid, btn);
       }
     };
-    for (const [id, entry] of reports) place(id, entry, REPORT_SKIN);
-    for (const [id, entry] of actions) place(id, entry, ACTION_SKIN);
-    for (const [id, entry] of controls) push(entry.group ?? 'levers', makeControl(id, entry));
+    for (const [id, entry] of reports) if (zoneOf(id, entry) === 'lab') place(id, entry, REPORT_SKIN);
+    for (const [id, entry] of actions) if (zoneOf(id, entry) === 'lab') place(id, entry, ACTION_SKIN);
+    for (const [id, entry] of controls)
+      if (zoneOf(id, entry) === 'lab') push(entry.group ?? 'levers', makeControl(id, entry));
 
-    listEl.appendChild(quick);
+    bodyEl.appendChild(quick);
+    for (const el of buildRoutedPanels('lab')) bodyEl.appendChild(el);
 
-    // ---- 3. Accordion folders, collapsed unless the author opened them -----
     const order = FOLDERS.map((f) => f.id);
     for (const fid of buckets.keys()) if (!order.includes(fid) && fid !== '__more__') order.push(fid);
     order.push('__more__');
@@ -652,42 +883,54 @@ export function installDebugPanel(MapShine) {
       const items = buckets.get(fid);
       if (!items || !items.length) continue;
       const { title, icon } = metaOf(fid);
+      bodyEl.appendChild(makeFolder(fid, icon, title, items));
+    }
+  }
 
-      const details = document.createElement('details');
-      details.open = openFolders.has(fid);
-      Object.assign(details.style, {
-        border: '1px solid rgba(143,214,255,0.14)',
-        borderRadius: '8px',
-        background: 'rgba(143,214,255,0.04)',
-      });
+  // ---- THE PRODUCT ZONES — Tier 0 scaffold ---------------------------------
+  // Each shows (a) whatever already-working controls are routed to it, then
+  // (b) a 🚧 stub scaffold of what's planned — so the final arrangement can be
+  // judged before the real (Effects-UI / astrolabe) renderers exist. Nothing
+  // here is load-bearing; it is the skeleton of docs/planning/Control-Panel.md.
 
-      const summary = document.createElement('summary');
-      Object.assign(summary.style, {
-        cursor: 'pointer',
-        listStyle: 'none',
-        padding: '6px 9px',
-        fontWeight: '600',
-        display: 'flex',
-        alignItems: 'center',
-        gap: '7px',
-        userSelect: 'none',
-      });
-      summary.innerHTML =
-        '<span class="msa-chev">▸</span>' +
-        `<span>${icon}</span><span>${title}</span>` +
-        `<span style="margin-left:auto;opacity:.4;font-weight:400">${items.length}</span>`;
+  function renderProductZone(z) {
+    bodyEl.appendChild(zoneIntro(ZONE_INTRO[z]));
 
-      const body = document.createElement('div');
-      Object.assign(body.style, { display: 'flex', flexWrap: 'wrap', gap: '4px', padding: '0 9px 9px' });
-      for (const el of items) body.appendChild(el);
+    // (a) real controls routed to this zone
+    const realReports = [...reports].filter(([id, e]) => zoneOf(id, e) === z);
+    const realActions = [...actions].filter(([id, e]) => zoneOf(id, e) === z);
+    const realControls = [...controls].filter(([id, e]) => zoneOf(id, e) === z);
+    if (realReports.length || realActions.length || realControls.length) {
+      bodyEl.appendChild(sectionLabel('Working now'));
+      const real = document.createElement('div');
+      Object.assign(real.style, { display: 'flex', flexWrap: 'wrap', gap: '5px' });
+      for (const [id, e] of realControls) real.appendChild(makeControl(id, e));
+      for (const [id, e] of realActions) real.appendChild(makeRunnable(id, e.label, ACTION_SKIN));
+      for (const [id, e] of realReports) real.appendChild(makeRunnable(id, e.label, REPORT_SKIN));
+      bodyEl.appendChild(real);
+    }
 
-      details.addEventListener('toggle', () => {
-        if (details.open) openFolders.add(fid);
-        else openFolders.delete(fid);
-      });
-      details.appendChild(summary);
-      details.appendChild(body);
-      listEl.appendChild(details);
+    // (b) rich panels routed to this zone (Effects-UI.md FOH/ROH cards) — each
+    // is its own full-width block, never squeezed into the small-control row.
+    for (const el of buildRoutedPanels(z)) bodyEl.appendChild(el);
+
+    // (c) the planned scaffold, per zone
+    bodyEl.appendChild(sectionLabel('Planned'));
+    if (z === 'bridge') {
+      // The dashed "🧭 Astrolabe — time & wind hero dial" placeholder that
+      // stood here is GONE (2026-07-23): the real dial is a registered panel
+      // (`ui/astrolabe.js`, boot.js) and renders above, via buildRoutedPanels.
+      // A stub left beside the thing it was standing in for is a dead control.
+      bodyEl.appendChild(stubRow(STUBS.bridge.quick));
+    } else if (z === 'workshop') {
+      bodyEl.appendChild(stubGallery(STUBS.workshop.gallery));
+    } else if (z === 'toolbox') {
+      bodyEl.appendChild(stubRow(STUBS.toolbox.items));
+    } else if (z === 'settings') {
+      bodyEl.appendChild(sectionLabel('Performance profile'));
+      bodyEl.appendChild(stubSegmented(STUBS.settings.profile));
+      bodyEl.appendChild(sectionLabel('Per-effect enable'));
+      bodyEl.appendChild(stubRow(STUBS.settings.effects.map((e) => `${e} · enable`)));
     }
   }
 
@@ -696,7 +939,7 @@ export function installDebugPanel(MapShine) {
     if (panelEl) return panelEl;
     panelEl = buildUI();
     panelHost.appendChild(panelEl);
-    renderButtons();
+    renderBody();
     return panelEl;
   }
 
@@ -803,10 +1046,18 @@ export function installDebugPanel(MapShine) {
     registerReport,
     registerAction,
     registerSelect,
+    registerPanel,
     refreshControls,
     runReport,
     copyToClipboard,
     attachPanel,
+    // Whole-panel visibility — driven by the scene-controls toolbar button
+    // (foundry/scene-controls-button.js) and the panel's own Close button.
+    showPanel,
+    hidePanel,
+    togglePanel,
+    isPanelVisible,
+    onVisibilityChange,
     /** Pure readouts. The flight recorder runs all of these on export. */
     get reports() {
       return reports;

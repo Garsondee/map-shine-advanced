@@ -7,9 +7,6 @@
     "file": 1321,
     "fn": 1249
   },
-  "src/effects/candle-flame-render.js": {
-    "file": 1010
-  },
   "src/effects/particles/gust-runtime.js": {
     "fn": 590
   },
@@ -19,10 +16,6 @@
   },
   "src/scene/mask-authority.js": {
     "fn": 596
-  },
-  "src/ui/paint-mode.js": {
-    "file": 1083,
-    "fn": 867
   },
   "src/vt/vt-pan-viewer.js": {
     "file": 11870,

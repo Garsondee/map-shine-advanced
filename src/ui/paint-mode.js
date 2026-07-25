@@ -63,22 +63,15 @@ import {
 } from '../scene/index.js';
 import { readPaintContext, savePaintedMasks, loadPaintedMasks } from '../foundry/index.js';
 import { setVtPanViewerFloor } from '../vt/index.js';
+// The painter's DOM chrome + preview renderer, split out 2026-07-25 (the
+// size-ratchet god-object reversal — this file was 1,083 lines / an 867-line
+// installPainter). Each is a factory bound to the SAME `state` object below,
+// so the moved bodies still close over exactly what they always did.
+import { createConfirmModal } from './paint-mode-widgets.js';
+import { createPaintCanvas } from './paint-mode-canvas.js';
+import { createToolbar } from './paint-mode-toolbar.js';
 
 const UNDO_LIMIT = 10; // at PAINT_GRID_MAX_DIM=4096 each undo snapshot is ~16MB — keep the stack bounded
-
-/** Preview tints per mask kind (kind IDs, not suffixes — the catalog owns suffixes). */
-const KIND_COLORS = {
-  fire: [255, 70, 0],
-  water: [40, 130, 255],
-  dust: [210, 190, 130],
-  outdoors: [130, 230, 130],
-  shadow: [40, 30, 70],
-  specular: [255, 240, 170],
-  window: [255, 215, 120],
-  tree: [70, 180, 90],
-  bush: [110, 200, 110],
-};
-const colorFor = (kind) => KIND_COLORS[kind] ?? [255, 70, 0];
 
 /** Authored (paintable) kinds only — derived products (skyReach…) have no suffix. */
 const PAINTABLE_KINDS = MASK_KINDS.filter((k) => Array.isArray(k.suffixes) && k.suffixes.length > 0);
@@ -125,55 +118,28 @@ export function installPainter(MapShine) {
     return state.layers[key];
   }
 
-  // ---- dirty tracking ----------------------------------------------------
-  // Which cells changed since the last render, so the preview re-packs ONLY
-  // that rectangle (O(changed), not O(grid)) — the whole reason a 4096² grid
-  // can stay smooth. `true` means the whole grid changed (undo/clear/switch).
-  function markCells(key, x0, y0, x1, y1) {
-    const spec = state.layers[key]?.spec;
-    if (!spec) return;
-    x0 = Math.max(0, Math.floor(x0));
-    y0 = Math.max(0, Math.floor(y0));
-    x1 = Math.min(spec.w - 1, Math.ceil(x1));
-    y1 = Math.min(spec.h - 1, Math.ceil(y1));
-    if (x1 < x0 || y1 < y0) return;
-    state.dirty.add(key);
-    const cur = state.previewRect[key];
-    if (cur === true) return;
-    if (!cur) state.previewRect[key] = { x0, y0, x1, y1 };
-    else {
-      cur.x0 = Math.min(cur.x0, x0);
-      cur.y0 = Math.min(cur.y0, y0);
-      cur.x1 = Math.max(cur.x1, x1);
-      cur.y1 = Math.max(cur.y1, y1);
-    }
-  }
-  function markFull(key) {
-    state.dirty.add(key);
-    state.previewRect[key] = true;
-  }
-  function markWorldDisc(key, wx, wy, r) {
-    const spec = state.layers[key]?.spec;
-    if (!spec) return;
-    markCells(
-      key,
-      (wx - r - spec.x) / spec.texelW,
-      (wy - r - spec.y) / spec.texelH,
-      (wx + r - spec.x) / spec.texelW,
-      (wy + r - spec.y) / spec.texelH
-    );
-  }
-  function markWorldRect(key, minX, minY, maxX, maxY, pad = 0) {
-    const spec = state.layers[key]?.spec;
-    if (!spec) return;
-    markCells(
-      key,
-      (minX - pad - spec.x) / spec.texelW,
-      (minY - pad - spec.y) / spec.texelH,
-      (maxX + pad - spec.x) / spec.texelW,
-      (maxY + pad - spec.y) / spec.texelH
-    );
-  }
+  // ---- the extracted halves, bound to this painter's state ----------------
+  // Order matters: the toolbar's callbacks include `markFull` (from the canvas
+  // factory) and `confirmModal` (from widgets), so both must exist first. The
+  // painter's own actions (setTool/save/undo/…) are function DECLARATIONS
+  // below, hoisted, so naming them here is safe.
+  const confirmModal = createConfirmModal(state);
+  // markCells stays internal to the canvas module — only markWorldDisc/
+  // markWorldRect (both there) ever call it; the painter itself never does.
+  const { markFull, markWorldDisc, markWorldRect, loop } = createPaintCanvas(state, { activeKey });
+  const buildToolbar = createToolbar(state, {
+    setTool,
+    changeFloor,
+    save,
+    undo,
+    clearActive,
+    requestExit,
+    layerFor,
+    markFull,
+    activeKey,
+    confirmModal,
+    paintableKinds: PAINTABLE_KINDS,
+  });
 
   // Flip the unsaved flag on the first edit of a save-cycle (and refresh the
   // toolbar once on that transition — cheap, not per-stamp).
@@ -499,56 +465,6 @@ export function installPainter(MapShine) {
     // cancel / dismissed -> stay in Author Mode
   }
 
-  // A small self-contained confirm dialog (no Foundry-Dialog API dependency);
-  // resolves to the chosen button's `action`, or 'cancel' if dismissed.
-  function confirmModal(title, message, buttons) {
-    return new Promise((resolve) => {
-      state.modalOpen = true;
-      const back = document.createElement('div');
-      Object.assign(back.style, {
-        position: 'fixed',
-        inset: '0',
-        zIndex: '200',
-        pointerEvents: 'auto',
-        background: 'rgba(0,0,0,0.45)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-      });
-      const card = document.createElement('div');
-      Object.assign(card.style, {
-        background: 'rgba(14,18,28,0.98)',
-        border: '1px solid rgba(143,214,255,0.35)',
-        borderRadius: '12px',
-        padding: '16px 18px',
-        maxWidth: '440px',
-        color: '#dcecff',
-        font: '12px/1.45 Signika, sans-serif',
-        boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
-      });
-      const finish = (action) => {
-        state.modalOpen = false;
-        back.remove();
-        resolve(action);
-      };
-      const h = document.createElement('div');
-      h.textContent = title;
-      Object.assign(h.style, { fontWeight: '700', fontSize: '13px', marginBottom: '8px' });
-      const m = document.createElement('div');
-      m.textContent = message;
-      Object.assign(m.style, { marginBottom: '14px', opacity: '0.9' });
-      const btnRow = document.createElement('div');
-      Object.assign(btnRow.style, { display: 'flex', gap: '8px', justifyContent: 'flex-end', flexWrap: 'wrap' });
-      for (const b of buttons) btnRow.append(button(b.label, () => finish(b.action), b.accent ?? '143,214,255'));
-      back.addEventListener('pointerdown', (ev) => {
-        if (ev.target === back) finish('cancel');
-      });
-      card.append(h, m, btnRow);
-      back.append(card);
-      document.body.appendChild(back);
-    });
-  }
-
   // ---- overlay + toolbar -------------------------------------------------
   function buildOverlay() {
     const overlay = document.createElement('div');
@@ -563,189 +479,6 @@ export function installPainter(MapShine) {
     state.canvas = canvas;
     state.toolbar = buildToolbar();
     document.body.appendChild(state.toolbar);
-  }
-
-  function buildToolbar() {
-    const bar = document.createElement('div');
-    Object.assign(bar.style, {
-      position: 'fixed',
-      top: '12px',
-      left: '50%',
-      transform: 'translateX(-50%)',
-      zIndex: '101',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '6px',
-      padding: '9px 13px',
-      background: 'rgba(12,16,26,0.95)',
-      border: '1px solid rgba(143,214,255,0.28)',
-      borderRadius: '11px',
-      boxShadow: '0 10px 30px rgba(0,0,0,0.5)',
-      font: '11px/1.3 Signika, sans-serif',
-      color: '#dcecff',
-      pointerEvents: 'auto',
-    });
-    const row = () => {
-      const r = document.createElement('div');
-      Object.assign(r.style, { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' });
-      return r;
-    };
-
-    // tool switcher — the brush and the vector tools, all feeding the same masks
-    const toolSeg = segmented(
-      [
-        ['🖌 Brush', 'brush'],
-        ['• Point', 'point'],
-        ['╱ Line', 'line'],
-        ['⬠ Poly', 'polygon'],
-      ],
-      () => state.tool,
-      (v) => setTool(v)
-    );
-    const snapWrap = document.createElement('label');
-    Object.assign(snapWrap.style, { display: 'flex', alignItems: 'center', gap: '4px', pointerEvents: 'auto' });
-    const snapCb = document.createElement('input');
-    snapCb.type = 'checkbox';
-    snapCb.checked = state.snap;
-    snapCb.addEventListener('change', () => (state.snap = snapCb.checked));
-    snapWrap.append(snapCb, document.createTextNode('Snap ¼-grid'));
-    // floor stepper — masks are per-floor AND this drives the live 3D view to
-    // match (changeFloor), so the label doubles as a busy indicator while that
-    // switch is in flight and the buttons disable to block rapid re-clicks.
-    const floorLabelEl = document.createElement('span');
-    Object.assign(floorLabelEl.style, { minWidth: '60px', textAlign: 'center', opacity: '0.9' });
-    floorLabelEl.textContent = `Floor ${state.floor}`;
-    const floorPrevBtn = button('◀', () => changeFloor(-1), '143,214,255');
-    const floorNextBtn = button('▶', () => changeFloor(1), '143,214,255');
-    const floorWrap = document.createElement('div');
-    Object.assign(floorWrap.style, { display: 'flex', alignItems: 'center', gap: '3px' });
-    floorWrap.append(floorPrevBtn, floorLabelEl, floorNextBtn);
-
-    const toolRow = row();
-    toolRow.append(label('Tool'), toolSeg.el, snapWrap, label('Floor'), floorWrap);
-
-    // kind picker — labelled by the catalog's own suffix, never a literal
-    const kindSel = document.createElement('select');
-    styleControl(kindSel);
-    for (const k of PAINTABLE_KINDS) {
-      const o = document.createElement('option');
-      o.value = k.id;
-      o.textContent = k.suffixes[0];
-      kindSel.append(o);
-    }
-    kindSel.value = state.kind;
-    let revertingKind = false;
-    kindSel.addEventListener('change', async () => {
-      if (revertingKind) return;
-      const target = kindSel.value;
-      // Guard unsaved work when swapping effects (author ask): the mask you were
-      // on stays in memory either way, but remind so it isn't forgotten.
-      if (state.dirtySinceSave) {
-        const suffix = PAINTABLE_KINDS.find((k) => k.id === target)?.suffixes[0] ?? target;
-        const choice = await confirmModal(
-          'Unsaved painting',
-          `Save your changes before switching to ${suffix}? Your masks stay in memory either way — Save writes them all to the scene at once.`,
-          [
-            { action: 'save', label: '💾 Save & switch', accent: '167,255,196' },
-            { action: 'switch', label: 'Switch without saving', accent: '143,214,255' },
-            { action: 'cancel', label: 'Cancel', accent: '255,196,120' },
-          ]
-        );
-        if (choice === 'cancel') {
-          revertingKind = true;
-          kindSel.value = state.kind; // put the dropdown back
-          revertingKind = false;
-          return;
-        }
-        if (choice === 'save') await save();
-      }
-      state.kind = target;
-      layerFor(state.kind);
-      markFull(activeKey());
-      state.refreshToolbar?.();
-    });
-
-    const modeSeg = segmented(
-      [
-        ['Spray', 'add'],
-        ['Paint', 'paint'],
-        ['Erase', 'erase'],
-      ],
-      () => state.brush.mode,
-      (v) => (state.brush.mode = v)
-    );
-
-    const sizeR = range(
-      'Size',
-      5,
-      400,
-      () => state.brush.radius,
-      (v) => (state.brush.radius = v)
-    );
-    const strengthR = range(
-      'Strength',
-      5,
-      255,
-      () => state.brush.strength,
-      (v) => (state.brush.strength = v)
-    );
-    const hardR = range(
-      'Hardness',
-      0,
-      100,
-      () => Math.round(state.brush.hardness * 100),
-      (v) => (state.brush.hardness = v / 100)
-    );
-
-    const top = row();
-    top.append(label('Mask'), kindSel, modeSeg.el);
-    const mid = row();
-    mid.append(sizeR.el, strengthR.el, hardR.el);
-    const saveBtn = button('💾 Save', save, '167,255,196');
-    const bottom = row();
-    bottom.append(
-      button('↶ Undo', undo, '143,214,255'),
-      button('Clear', clearActive, '255,196,120'),
-      saveBtn,
-      button('Exit', requestExit, '143,214,255')
-    );
-
-    const legendRow = row();
-    Object.assign(legendRow.style, {
-      gap: '6px',
-      paddingTop: '5px',
-      marginTop: '2px',
-      borderTop: '1px solid rgba(143,214,255,0.14)',
-    });
-    legendRow.append(
-      legendItem('LMB', 'paint / add point'),
-      legendItem('RMB', 'pan'),
-      legendItem('Wheel', 'zoom'),
-      legendItem('Enter', 'finish'),
-      legendItem('Bksp', 'undo point'),
-      legendItem('Ctrl+Z', 'undo'),
-      legendItem('Esc', 'cancel / exit')
-    );
-
-    bar.append(toolRow, top, mid, bottom, legendRow);
-    state.refreshToolbar = () => {
-      toolSeg.sync();
-      sizeR.sync();
-      strengthR.sync();
-      hardR.sync();
-      modeSeg.sync();
-      snapCb.checked = state.snap;
-      kindSel.value = state.kind;
-      floorLabelEl.textContent = state.floorSwitching ? `Floor ${state.floor} ⏳` : `Floor ${state.floor}`;
-      floorPrevBtn.disabled = state.floorSwitching;
-      floorNextBtn.disabled = state.floorSwitching;
-      floorPrevBtn.style.opacity = state.floorSwitching ? '0.4' : '1';
-      floorNextBtn.style.opacity = state.floorSwitching ? '0.4' : '1';
-      saveBtn.textContent = state.dirtySinceSave ? '💾 Save •' : '💾 Saved';
-      saveBtn.style.opacity = state.dirtySinceSave ? '1' : '0.55';
-    };
-    state.refreshToolbar();
-    return bar;
   }
 
   async function save() {
@@ -783,139 +516,6 @@ export function installPainter(MapShine) {
   // reused, packed as one 32-bit RGBA per texel, and — the load-bearing part —
   // only the DIRTY RECTANGLE is re-packed and uploaded (`putImageData` with a
   // sub-rect). Per-frame cost is O(changed area), independent of grid size.
-  // A fresh ImageData is zeroed = transparent, so an unpainted mask needs no
-  // full pack; only whole-grid changes (undo/clear/switch -> previewRect===true)
-  // pack everything.
-  function renderGrid(key) {
-    const layer = state.layers[key];
-    if (!layer) return;
-    const kind = key.split('::')[0];
-    const [cr, cg, cb] = colorFor(kind);
-    const { spec, data } = layer;
-    let g = state.gridCanvases[key];
-    if (!g) g = state.gridCanvases[key] = document.createElement('canvas');
-    const gctx = g.getContext('2d');
-    let img = state.gridImageData[key];
-    if (g.width !== spec.w || g.height !== spec.h || !img) {
-      g.width = spec.w;
-      g.height = spec.h;
-      img = state.gridImageData[key] = gctx.createImageData(spec.w, spec.h);
-    }
-    const packed = new Uint32Array(img.data.buffer);
-    const rgbBase = cr | (cg << 8) | (cb << 16);
-    const rect = state.previewRect[key];
-    delete state.previewRect[key];
-    if (rect && rect !== true) {
-      const { x0, y0, x1, y1 } = rect;
-      for (let y = y0; y <= y1; y++) {
-        const base = y * spec.w;
-        for (let x = x0; x <= x1; x++) packed[base + x] = rgbBase | (data[base + x] << 24);
-      }
-      gctx.putImageData(img, 0, 0, x0, y0, x1 - x0 + 1, y1 - y0 + 1);
-      return;
-    }
-    for (let i = 0; i < data.length; i++) packed[i] = rgbBase | (data[i] << 24);
-    gctx.putImageData(img, 0, 0);
-  }
-
-  function loop() {
-    if (!state.active) return;
-    state.raf = requestAnimationFrame(loop);
-    const cv = state.canvas;
-    if (!cv) return;
-    if (cv.width !== window.innerWidth || cv.height !== window.innerHeight) {
-      cv.width = window.innerWidth;
-      cv.height = window.innerHeight;
-    }
-    for (const key of state.dirty) renderGrid(key);
-    state.dirty.clear();
-
-    const cctx = cv.getContext('2d');
-    cctx.clearRect(0, 0, cv.width, cv.height);
-
-    const r = state.ctx.sceneRect;
-    const tl = state.ctx.worldToClient(r.x, r.y);
-    const br = state.ctx.worldToClient(r.x + r.width, r.y + r.height);
-    const left = Math.min(tl.x, br.x);
-    const top = Math.min(tl.y, br.y);
-    const w = Math.abs(br.x - tl.x);
-    const h = Math.abs(br.y - tl.y);
-    if (w > 0 && h > 0) {
-      cctx.imageSmoothingEnabled = true;
-      const ak = activeKey();
-      const floorSuffix = `::${state.floor}`;
-      // Painted kinds under the map, active one brightest, others dimmed —
-      // but ONLY this floor. Masks are per-floor (Floor stepper), so another
-      // floor's layers must be invisible here, not just dimmed, or switching
-      // floors looks like a no-op (the old floor's paint barely fades).
-      for (const key of Object.keys(state.layers)) {
-        if (!key.endsWith(floorSuffix)) continue;
-        const g = state.gridCanvases[key];
-        if (!g) continue;
-        cctx.globalAlpha = key === ak ? 0.8 : 0.32;
-        cctx.drawImage(g, left, top, w, h);
-      }
-      cctx.globalAlpha = 1;
-    }
-
-    drawDraft(cctx);
-    drawBrushRing(cctx);
-  }
-
-  function drawBrushRing(cctx) {
-    if (state.tool !== 'brush' && state.tool !== 'point') return; // vector tools show the draft, not a ring
-    const m = state.mouseClient;
-    if (!m || !state.hoverOnBoard) return; // don't float a paint-radius circle over the toolbar
-    const w0 = state.ctx.screenToWorld(m.x, m.y);
-    const a = state.ctx.worldToClient(w0.x, w0.y);
-    const b = state.ctx.worldToClient(w0.x + state.brush.radius, w0.y);
-    const rpx = Math.hypot(b.x - a.x, b.y - a.y);
-    const erase = state.brush.mode === 'erase';
-    const [cr, cg, cb] = erase ? [255, 90, 90] : colorFor(state.kind);
-    cctx.beginPath();
-    cctx.arc(m.x, m.y, Math.max(2, rpx), 0, Math.PI * 2);
-    cctx.strokeStyle = `rgba(${cr},${cg},${cb},0.9)`;
-    cctx.lineWidth = 1.5;
-    cctx.stroke();
-    cctx.beginPath();
-    cctx.arc(m.x, m.y, Math.max(2, rpx), 0, Math.PI * 2);
-    cctx.strokeStyle = 'rgba(0,0,0,0.5)';
-    cctx.lineWidth = 0.75;
-    cctx.stroke();
-  }
-
-  // The in-progress line/polygon: placed vertices, edges, a rubber-band to the
-  // live cursor, and (polygon) the closing edge + a ring on the first vertex
-  // once it can be clicked to close.
-  function drawDraft(cctx) {
-    const d = state.draft;
-    if (!d || !d.vertices.length) return;
-    const pts = d.vertices.map((v) => state.ctx.worldToClient(v.x, v.y));
-    const cur = state.cursorWorld ? state.ctx.worldToClient(state.cursorWorld.x, state.cursorWorld.y) : null;
-    const [cr, cg, cb] = colorFor(state.kind);
-    const col = `rgba(${cr},${cg},${cb},0.95)`;
-    cctx.strokeStyle = col;
-    cctx.lineWidth = 2;
-    cctx.beginPath();
-    cctx.moveTo(pts[0].x, pts[0].y);
-    for (let i = 1; i < pts.length; i++) cctx.lineTo(pts[i].x, pts[i].y);
-    if (cur) cctx.lineTo(cur.x, cur.y);
-    if (d.type === 'polygon' && pts.length >= 2) cctx.lineTo(pts[0].x, pts[0].y);
-    cctx.stroke();
-    for (const p of pts) {
-      cctx.beginPath();
-      cctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
-      cctx.fillStyle = col;
-      cctx.fill();
-    }
-    if (d.type === 'polygon' && pts.length >= 3) {
-      cctx.beginPath();
-      cctx.arc(pts[0].x, pts[0].y, 8, 0, Math.PI * 2);
-      cctx.strokeStyle = 'rgba(255,255,255,0.9)';
-      cctx.lineWidth = 2;
-      cctx.stroke();
-    }
-  }
 
   MapShine.debug?.registerAction(
     'paint',
@@ -949,134 +549,4 @@ export function installPainter(MapShine) {
       return { loaded: Object.keys(layers).length > 0, mismatched };
     },
   };
-}
-
-// ---- small DOM helpers ---------------------------------------------------
-function styleControl(el) {
-  Object.assign(el.style, {
-    pointerEvents: 'auto',
-    background: 'rgba(10,14,22,0.9)',
-    border: '1px solid rgba(143,214,255,0.4)',
-    borderRadius: '5px',
-    color: '#cfe8ff',
-    font: '10px/1.2 Signika, sans-serif',
-    padding: '3px 5px',
-  });
-}
-
-function label(text) {
-  const s = document.createElement('span');
-  s.textContent = text;
-  s.style.opacity = '0.7';
-  return s;
-}
-
-/** A keyboard/mouse-button "key" chip — the visible-shortcuts legend's unit. */
-function keycap(text) {
-  const s = document.createElement('span');
-  s.textContent = text;
-  Object.assign(s.style, {
-    display: 'inline-block',
-    fontFamily: "'Courier New', monospace",
-    fontSize: '9.5px',
-    fontWeight: '700',
-    lineHeight: '1',
-    padding: '3px 6px',
-    borderRadius: '4px',
-    border: '1px solid rgba(143,214,255,0.45)',
-    background: 'rgba(143,214,255,0.1)',
-    color: '#eaf4ff',
-  });
-  return s;
-}
-
-/** One "KEY does X" pair for the legend row. */
-function legendItem(keyText, desc) {
-  const wrap = document.createElement('span');
-  Object.assign(wrap.style, { display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '10px' });
-  wrap.append(keycap(keyText));
-  const d = document.createElement('span');
-  d.textContent = desc;
-  d.style.opacity = '0.7';
-  wrap.append(d);
-  return wrap;
-}
-
-function button(text, onClick, accent) {
-  const b = document.createElement('button');
-  b.textContent = text;
-  Object.assign(b.style, {
-    pointerEvents: 'auto',
-    background: `rgba(${accent},0.16)`,
-    border: `1px solid rgba(${accent},0.45)`,
-    borderRadius: '6px',
-    color: '#eaf4ff',
-    font: '11px Signika, sans-serif',
-    padding: '5px 10px',
-    cursor: 'pointer',
-  });
-  b.addEventListener('click', onClick);
-  return b;
-}
-
-/** A labelled range that reads its value from a getter and shows the number. */
-function range(labelText, min, max, get, set) {
-  const wrap = document.createElement('label');
-  Object.assign(wrap.style, { display: 'flex', alignItems: 'center', gap: '5px' });
-  const name = label(labelText);
-  const val = document.createElement('span');
-  Object.assign(val.style, { minWidth: '26px', textAlign: 'right', opacity: '0.85' });
-  const input = document.createElement('input');
-  input.type = 'range';
-  input.min = String(min);
-  input.max = String(max);
-  input.value = String(get());
-  input.style.width = '84px';
-  input.style.pointerEvents = 'auto';
-  const paint = () => (val.textContent = String(get()));
-  paint();
-  input.addEventListener('input', () => {
-    set(Number(input.value));
-    paint();
-  });
-  wrap.append(name, input, val);
-  return {
-    el: wrap,
-    sync: () => {
-      input.value = String(get());
-      paint();
-    },
-  };
-}
-
-/** A segmented 3-way control (Spray/Paint/Erase). */
-function segmented(options, get, set) {
-  const el = document.createElement('div');
-  Object.assign(el.style, { display: 'inline-flex', gap: '3px' });
-  const btns = options.map(([text, value]) => {
-    const b = document.createElement('button');
-    b.textContent = text;
-    Object.assign(b.style, {
-      pointerEvents: 'auto',
-      border: '1px solid rgba(143,214,255,0.4)',
-      borderRadius: '5px',
-      color: '#cfe8ff',
-      font: '10px Signika, sans-serif',
-      padding: '4px 8px',
-      cursor: 'pointer',
-    });
-    b.addEventListener('click', () => {
-      set(value);
-      sync();
-    });
-    return { b, value };
-  });
-  el.append(...btns.map((x) => x.b));
-  function sync() {
-    const cur = get();
-    for (const { b, value } of btns)
-      b.style.background = value === cur ? 'rgba(143,214,255,0.32)' : 'rgba(143,214,255,0.1)';
-  }
-  sync();
-  return { el, sync };
 }

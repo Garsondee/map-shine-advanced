@@ -136,6 +136,22 @@ export { buildGradePass } from './grade/grade-pass.js';
 export { buildWaterPass, buildFluidSimPass } from './water/water-pass.js';
 export { WATER, WATER_PARAMS } from './water/water.js';
 export { resolveWaterFloor } from './water/water-floor.js';
+// THE BODY PACK (docs/planning/Water.md §5.1) — one jump-flood signed distance
+// field, baked on mask change. The subsystem owns the targets and the version
+// poll; `water-body.js` is its TSL half plus the arithmetic the Node suite
+// pins (the flood is exact, and only a brute-force comparison can say so).
+export { createWaterBodySubsystem } from './water/water-body-subsystem.js';
+export {
+  buildWaterSeedMaterial,
+  buildWaterJfaStepMaterial,
+  buildWaterBodyResolveMaterial,
+  jfaStepCount,
+  jfaStrideForStep,
+  rebaseNeighborOffset,
+  flowFromTangent,
+  WATER_PRESENCE_EPS,
+  WATER_MASK_FILTER,
+} from './water/water-body.js';
 export { buildSurfaceResponsePass } from './surface-response.js';
 
 // ── EFFECT REGISTRATION (docs/planning/Effect-Registration.md) ──────────────

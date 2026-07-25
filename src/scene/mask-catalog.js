@@ -72,6 +72,22 @@
  *   the FORMER throws). Absent for every OTHER kind — an unpainted `_Fire` or
  *   `_Water` mask staying a harmless default is still correct; only
  *   `outdoors` has been declared a hard content requirement.
+ * @property {boolean} [rasterize] - the authority rasterizes this AUTHORED
+ *   kind into its own per-floor grid, served by `getDerived(kind.id, floor)`
+ *   and extracted at decode time, EVEN IF no `DerivedKind` lists it as an
+ *   input.
+ *
+ *   Before this flag (2026-07-25) the rule was implicit and wrong in one
+ *   direction: `extractionPlanForLayer` extracted a kind only if some
+ *   `DerivedKind` named it, so `outdoors` rode along purely because `skyReach`
+ *   happens to consume it — and `mask-authority.js#getDerived`'s own doc had to
+ *   say "currently 'outdoors' only" about a behaviour nothing declared. The
+ *   rule that was actually wanted is "some CONSUMER needs this authored grid
+ *   directly", and a GPU consumer is a consumer: the water body pack
+ *   (docs/planning/Water.md §5.1) bakes its distance field from the raw
+ *   `water` grid and feeds no CPU derivation at all. Adding a sham
+ *   `DerivedKind` to make the extraction happen would have been a lie in the
+ *   catalog; declaring the real property is one word.
  * @property {string} meaning - the polarity, spelled out. White = ?
  */
 
@@ -96,6 +112,9 @@ export const MASK_KINDS = Object.freeze([
     packChannel: 'g',
     absentValue: 1,
     required: true,
+    // Was already true in behaviour, declared by nothing — see `rasterize`'s
+    // own doc. `skyReach` consuming it made the extraction happen by accident.
+    rasterize: true,
     meaning:
       'white = outdoors, black = indoors. REQUIRED (2026-07-21, author directive): a level with no ' +
       'discovered `_Outdoors` file no longer silently serves `absentValue` — sampleWorld/getDerived THROW ' +
@@ -153,7 +172,16 @@ export const MASK_KINDS = Object.freeze([
     channels: 'rgba',
     packChannel: null,
     absentValue: 0,
-    meaning: 'Water DATA mask (docs/planning/Water.md: depth in R, authored shore band in G). Absent = no water.',
+    // The water body pack (Water.md §5.1) bakes its jump-flood distance field
+    // from this grid on the GPU. It feeds no CPU derivation, which is exactly
+    // the case `rasterize` exists to declare.
+    rasterize: true,
+    meaning:
+      'Water DATA mask (docs/planning/Water.md §5.1). R = depth, and R DOUBLES AS PRESENCE — R>0 is ' +
+      'water this deep, R=0 is land. That is why one channel is enough for the body pack: the ' +
+      'jump-flood seeds its shore from where R crosses zero and reads depth01 from the same fetch. ' +
+      "G (authored shore band) is V2's idea and is deliberately NOT read — the SDF gives a shore band " +
+      'of any width for free, which is the whole point of storing distance. Absent = no water.',
   },
 ]);
 
@@ -281,6 +309,7 @@ export function validateMaskCatalog(kinds = MASK_KINDS, derived = DERIVED_KINDS)
     }
     if (!(k.absentValue >= 0 && k.absentValue <= 1)) fail(`${k.id}: absentValue must be 0..1`);
     if (k.required !== undefined && typeof k.required !== 'boolean') fail(`${k.id}: required must be a boolean`);
+    if (k.rasterize !== undefined && typeof k.rasterize !== 'boolean') fail(`${k.id}: rasterize must be a boolean`);
     if (!k.meaning || k.meaning.length < 10) fail(`${k.id}: must state its polarity/meaning`);
   }
 
@@ -373,18 +402,40 @@ export function assembleLayerDescriptors(urlByKindId) {
 }
 
 /**
- * What the authority should EXTRACT from a decoded page of a given layer, for
- * derivation input. Maps the renderer's layer name back to catalog content:
- * the packed trio carries three kinds (one per channel); an unpacked gray
- * mask's content is its R channel (grayscale file, R=G=B); albedo's coverage
- * is its alpha. Kinds no derivation reads are simply not extracted.
+ * Every authored kind whose own grid some consumer needs — the union of what
+ * the CPU derivations read and what `rasterize: true` declares. This IS the
+ * extraction set; see `MaskKind.rasterize` for why the two halves are
+ * genuinely different questions and why neither subsumes the other.
+ *
+ * @param {ReadonlyArray<MaskKind>} [kinds] @param {ReadonlyArray<DerivedKind>} [derived]
+ * @returns {Set<string>} kind ids, plus possibly the `albedo` input token.
+ */
+export function wantedContentIds(kinds = MASK_KINDS, derived = DERIVED_KINDS) {
+  const wanted = new Set();
+  for (const d of derived) for (const input of d.inputs) wanted.add(input);
+  for (const k of kinds) if (k.rasterize) wanted.add(k.id);
+  return wanted;
+}
+
+/**
+ * What the authority should EXTRACT from a decoded page of a given layer.
+ * Maps the renderer's layer name back to catalog content: the packed trio
+ * carries three kinds (one per channel); an unpacked mask's content is its R
+ * channel; albedo's coverage is its alpha. Kinds nothing consumes are simply
+ * not extracted.
+ *
+ * ⚠️ **R, for an `rgba` kind too.** `water` is an RGBA file and only its R
+ * survives this extraction. That is correct and deliberate rather than a gap:
+ * R carries depth AND presence (see the `water` kind's own `meaning`), which
+ * is everything the body pack needs. A kind that genuinely needed a second
+ * channel on the CPU would extend this plan to return two entries — the shape
+ * already supports it (the packed trio returns three).
  *
  * @param {string} layerName - 'albedo', PACKED_TRIO_LAYER_NAME, or a kind id.
  * @returns {Array<{contentId: string, channel: 'r'|'g'|'b'|'a'}>}
  */
 export function extractionPlanForLayer(layerName) {
-  const wanted = new Set();
-  for (const d of DERIVED_KINDS) for (const input of d.inputs) wanted.add(input);
+  const wanted = wantedContentIds();
 
   if (layerName === 'albedo') {
     return wanted.has(ALBEDO_INPUT) ? [{ contentId: ALBEDO_INPUT, channel: 'a' }] : [];
@@ -398,8 +449,13 @@ export function extractionPlanForLayer(layerName) {
   }
   const kind = maskKindById(layerName);
   if (kind && wanted.has(kind.id)) {
-    // Unpacked gray masks are grayscale files: R carries the value.
     return [{ contentId: kind.id, channel: 'r' }];
   }
   return [];
+}
+
+/** Every authored kind the authority rasterizes into its own per-floor grid.
+ * @param {ReadonlyArray<MaskKind>} [kinds] @returns {ReadonlyArray<MaskKind>} */
+export function rasterizedKinds(kinds = MASK_KINDS) {
+  return kinds.filter((k) => k.rasterize === true);
 }

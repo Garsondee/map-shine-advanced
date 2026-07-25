@@ -13,6 +13,8 @@ import {
   packedTrioKinds,
   assembleLayerDescriptors,
   extractionPlanForLayer,
+  rasterizedKinds,
+  wantedContentIds,
 } from '../mask-catalog.js';
 
 export async function run(t) {
@@ -59,6 +61,57 @@ export async function run(t) {
   t.ok(
     'a non-boolean required flag is rejected',
     !badRequired.ok && badRequired.errors.some((e) => e.includes('required must be a boolean'))
+  );
+
+  // --- `rasterize`: the authority serves this AUTHORED kind's own grid -----
+  // (2026-07-25, Water.md Phase 2a. Before this flag the extraction set was
+  // "whatever a DERIVED kind names", so `outdoors` rode along only because
+  // `skyReach` consumes it — and `water`, whose only consumer is a GPU bake,
+  // was never extracted at all.)
+  t.ok(
+    'outdoors and water are the rasterized kinds',
+    rasterizedKinds()
+      .map((k) => k.id)
+      .join(',') === 'outdoors,water'
+  );
+  t.ok(
+    'water is NOT required — an unpainted _Water mask is a harmless default, unlike _Outdoors',
+    maskKindById('water').rasterize === true && !maskKindById('water').required
+  );
+  t.ok(
+    'a rasterized kind is extracted even though NO derived kind names it as an input',
+    !DERIVED_KINDS.some((d) => d.inputs.includes('water')) && wantedContentIds().has('water')
+  );
+  t.ok(
+    'extractionPlanForLayer now yields a plan for the water layer (it yielded none before the flag)',
+    extractionPlanForLayer('water').length === 1 && extractionPlanForLayer('water')[0].contentId === 'water'
+  );
+  t.ok(
+    'water extracts its R channel — depth AND presence ride there (see the kind`s own meaning)',
+    extractionPlanForLayer('water')[0].channel === 'r'
+  );
+  t.ok(
+    'a kind that is neither rasterized nor a derivation input is still not extracted',
+    !maskKindById('bush').rasterize && extractionPlanForLayer('bush').length === 0
+  );
+
+  const badRasterize = validateMaskCatalog(
+    [
+      {
+        id: 'alpha',
+        suffixes: ['_A'],
+        channels: 'gray',
+        packChannel: null,
+        absentValue: 0,
+        rasterize: 'yes', // must be a boolean
+        meaning: 'x'.repeat(20),
+      },
+    ],
+    []
+  );
+  t.ok(
+    'a non-boolean rasterize flag is rejected',
+    !badRasterize.ok && badRasterize.errors.some((e) => e.includes('rasterize must be a boolean'))
   );
 
   // --- validation actually bites ------------------------------------------

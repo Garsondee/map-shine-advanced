@@ -1,14 +1,19 @@
 /**
- * src/effects/water/ verification — the water declaration and the cross-
- * floor rule. Pure logic; the TSL render modules land in later phases
- * (`docs/planning/Water.md` §10) and get debug-panel reports instead
- * (CONVENTIONS.md §4 — browser-only, no Node test to force).
+ * src/effects/water/ verification — the water declaration, the cross-floor
+ * rule, and the body pack's arithmetic.
+ *
+ * The TSL builders themselves are browser-only and get debug-panel reports
+ * instead (CONVENTIONS.md §4). What CAN be tested here is every formula they
+ * evaluate, extracted as plain functions and run against brute force — see
+ * `water-body.test.mjs`'s own header for why the jump flood in particular
+ * cannot be left to a live eyeball.
  *
  * Discovered and run by tools/run-tests.mjs (glob of __tests__/run-tests.mjs);
  * `npm test` / `npm run verify` picks it up for free.
  */
 import { run as runWater } from './water.test.mjs';
 import { run as runWaterFloor } from './water-floor.test.mjs';
+import { run as runWaterBody } from './water-body.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -40,6 +45,7 @@ const t = {
 const suites = [
   ['water', runWater],
   ['water-floor', runWaterFloor],
+  ['water-body', runWaterBody],
 ];
 for (const [name, fn] of suites) {
   const before = failed;

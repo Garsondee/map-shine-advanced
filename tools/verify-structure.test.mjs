@@ -730,6 +730,22 @@ export function run(t) {
       '...shrinking tightens the budget with no violation',
       shrink.violations.length === 0 && shrink.tightened.some((x) => x.to === 1200)
     );
+    // THE HALF THAT WAS NEVER CHECKED (2026-07-25). `tightened` is what gets
+    // PRINTED; `newBudgets` is what gets WRITTEN. Asserting only the first is
+    // how the gate printed "budget tightened 607 → 606" on every run for weeks
+    // while tools/size-budgets.json still said 607 — the improvement was real,
+    // the message was real, and nothing recorded it (main() only wrote under
+    // `--update-ratchets`). An instrument that reports an action it did not
+    // take is the exact failure this suite exists to prevent, so the WRITTEN
+    // value gets its own assertion now.
+    t.ok(
+      '...and the value that gets WRITTEN is the tighter one, not the old bound',
+      shrink.newBudgets['src/x.js'].file === 1200
+    );
+    t.ok(
+      '...a VIOLATION leaves the frozen budget alone (never auto-loosens)',
+      evaluateSizeBudgets(over, { 'src/x.js': { file: 1500 } }, caps).newBudgets['src/x.js'].file === 1500
+    );
     const under = evaluateSizeBudgets([{ rel: 'src/y.js', fileLines: 800, fnName: null, fnLines: 0 }], {}, caps);
     t.ok(
       'a file UNDER the cap needs no budget and never fails',
@@ -763,6 +779,16 @@ export function run(t) {
     t.ok(
       '...shrinking tightens the uniform budget with no violation',
       uniformShrink.violations.length === 0 && uniformShrink.tightened.some((x) => x.to === cap + 5)
+    );
+    // Same written-vs-printed split as the size ratchet above — this family
+    // shipped with the identical gap, built the same day.
+    t.ok(
+      '...and the WRITTEN uniform budget is the tighter one',
+      uniformShrink.newBudgets['src/effects/foo.js'] === cap + 5
+    );
+    t.ok(
+      '...a uniform VIOLATION leaves the frozen budget alone (never auto-loosens)',
+      evaluateUniformBudgets(overUniform, { 'src/effects/foo.js': 50 }, cap).newBudgets['src/effects/foo.js'] === 50
     );
     const underUniform = evaluateUniformBudgets([{ rel: 'src/effects/bar.js', uniformCount: 12 }], {}, cap);
     t.ok(

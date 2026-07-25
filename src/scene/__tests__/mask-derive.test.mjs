@@ -14,6 +14,7 @@ import {
   itemWorldCorners,
   compositeItemMax,
   deriveFloorProducts,
+  rasterizeAuthored,
   makeUniformContent,
   sampleMaskGridWorld,
   maskGridMean,
@@ -186,6 +187,74 @@ export async function run(t) {
     'outside the mask`s own placement, the RAW outdoors value falls back to the absent value, not 0',
     authored[0].outdoors.data[5 * 10 + 7] === 255
   );
+
+  // --- rasterizeAuthored: the shared helper the outdoors block became -------
+  // (2026-07-25, Water.md Phase 2a — `water` is the second `rasterize: true`
+  // kind, so the outdoors block was extracted rather than copied.)
+  {
+    const placed = {
+      placement: { x: 25, y: 50, width: 50, height: 100 },
+      content: makeUniformContent(1, 40),
+    };
+    const g = rasterizeAuthored(gspec, placed, 0);
+    t.ok('rasterizeAuthored writes the painted value where the art reaches', g.data[5 * 10 + 2] === 40);
+    t.ok('rasterizeAuthored writes the ABSENT value outside the art', g.data[5 * 10 + 7] === 0);
+
+    // The distinction the `covered` pass exists for, stated as a test: a mask
+    // painted BLACK inside its own reach must read 0, while a texel the art
+    // never reaches reads absentValue. With absentValue 1 the two are visibly
+    // different numbers; a plain compositeItemMax would give 0 for both.
+    const black = rasterizeAuthored(gspec, { ...placed, content: makeUniformContent(1, 0) }, 1);
+    t.ok('painted-black inside the art reads 0, not the absent value', black.data[5 * 10 + 2] === 0);
+    t.ok('unreached texels read the absent value, not 0', black.data[5 * 10 + 7] === 255);
+
+    const none = rasterizeAuthored(gspec, null, 0.5);
+    t.ok(
+      'no authored content at all fills the whole grid with the absent value',
+      none.data.every((v) => v === 128)
+    );
+  }
+
+  // --- the `authored` product bag: water rides here, not on a top-level key -
+  {
+    const waterFloors = [
+      {
+        index: 0,
+        ceilingElevation: 10,
+        outdoors: null,
+        authored: {
+          water: {
+            placement: { x: 25, y: 50, width: 50, height: 100 },
+            content: makeUniformContent(1, 200),
+            absentValue: 0,
+          },
+        },
+      },
+      { index: 1, ceilingElevation: 20, outdoors: null, authored: { water: { absentValue: 0 } } },
+    ];
+    const wp = deriveFloorProducts({ gridSpec: gspec, items: [], floors: waterFloors, outdoorsAbsentValue: 1 });
+    t.ok(
+      'an authored rasterize kind lands under products.authored[kindId]',
+      wp[0].authored.water.data[5 * 10 + 2] === 200
+    );
+    t.ok('its absent value fills outside the art', wp[0].authored.water.data[5 * 10 + 7] === 0);
+    t.ok(
+      'a floor with no content for the kind still gets a grid (absent-filled), never undefined',
+      wp[1].authored.water instanceof Object && wp[1].authored.water.data.every((v) => v === 0)
+    );
+    // THE FACT THE BODY PACK TURNS ON: both grids above are all-zero in
+    // places, so the DATA cannot distinguish "painted no water" from "no mask
+    // at all". Provenance can, and must — otherwise floor 1 would borrow the
+    // river from below purely because its own mask happens to be empty.
+    t.ok(
+      'provenance separates authored-but-empty from never-authored',
+      wp[0].completeness.authoredSources.water === 'authored' && wp[1].completeness.authoredSources.water === 'default'
+    );
+    t.ok(
+      'a floor input with no `authored` bag at all is legal and yields an empty bag',
+      Object.keys(f0.authored).length === 0 && Object.keys(f0.completeness.authoredSources).length === 0
+    );
+  }
 
   // --- sampling + stats ----------------------------------------------------
   t.ok('sampleMaskGridWorld reads the covering texel', sampleMaskGridWorld(f0.coverAbove, 25, 55) === 255);

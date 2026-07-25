@@ -1582,6 +1582,60 @@ function main() {
     if (deadControls.length > 10) console.error(`     ... and ${deadControls.length - 10} more`);
   }
 
+  // ── AUTO-TIGHTEN, FOR REAL ───────────────────────────────────────────────
+  //
+  // All three ratchet families above have ALWAYS printed `✅ … tightened X → Y`
+  // on an ordinary run, and until 2026-07-25 not one of them wrote anything:
+  // the new bound was persisted only under `--update-ratchets`, so the next
+  // run printed the identical "tightened" line again, forever, while the
+  // frozen bound never actually moved.
+  //
+  // That is this file's own doctrine turned against itself. Its header
+  // promises *"a DECREASE auto-tightens the bound. This suite never claims
+  // virtue it does not have"*, and `feedback_instruments_must_not_lie` is a
+  // standing rule of this project — a gate that reports an improvement it did
+  // not record is precisely the failure it exists to catch, in the one file
+  // whose whole job is catching it. Found while extracting
+  // `mask-authority-report.js`: the shrink was real, the message was real, and
+  // `tools/size-budgets.json` still said the old number afterwards.
+  //
+  // DOWNWARD ONLY. A tightening can only make the next run stricter, so
+  // recording it unattended is always safe; every LOOSENING still requires the
+  // explicit, loud `npm run ratchets:update`, unchanged. Writing it here also
+  // means the improvement shows up as a diff in `tools/*.json`, which is what
+  // Skeleton.md §2.5 wants shrinkage to look like — loud, not silent.
+  if (!updating) {
+    let wroteFiles = 0;
+    // Rule ratchets: `newRatchets` was built as `min(count, bound)` for every
+    // ratcheted rule, so it is already the tightened set; merge it over the
+    // loaded object rather than replacing, so a bound for a rule that no
+    // longer exists is left alone instead of being silently dropped (that is a
+    // deletion, and deletions go through the loud path).
+    const nextRatchets = { ...ratchets };
+    let ratchetTightened = false;
+    for (const [id, value] of Object.entries(newRatchets)) {
+      if (ratchets[id] != null && value < ratchets[id]) {
+        nextRatchets[id] = value;
+        ratchetTightened = true;
+      }
+    }
+    if (ratchetTightened) {
+      writeFileSync(RATCHET_FILE, JSON.stringify(nextRatchets, null, 2) + '\n');
+      wroteFiles++;
+    }
+    if (size.tightened.length) {
+      writeFileSync(SIZE_BUDGET_FILE, JSON.stringify(size.newBudgets, null, 2) + '\n');
+      wroteFiles++;
+    }
+    if (uniformBudgetResult.tightened.length) {
+      writeFileSync(UNIFORM_BUDGET_FILE, JSON.stringify(uniformBudgetResult.newBudgets, null, 2) + '\n');
+      wroteFiles++;
+    }
+    if (wroteFiles) {
+      console.log(`📌 ${wroteFiles} budget file(s) rewritten with the tighter bounds — commit the diff.`);
+    }
+  }
+
   if (updating) {
     for (const rule of RULES) {
       if (rule.ratchet) newRatchets[rule.id] = hits.get(rule.id).length;

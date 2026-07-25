@@ -203,6 +203,12 @@ export function compositeItemMax(grid, content, placement, valueScale = 1) {
  *   reported rather than guessed at zero.
  * @property {{placement: Parameters<typeof worldToItemUv>[0], content: ContentGrid}|null} outdoors -
  *   the floor's authored outdoors content, or null to serve the catalog default.
+ * @property {Record<string, {placement: Parameters<typeof worldToItemUv>[0],
+ *   content: ContentGrid, absentValue: number}|null>} [authored] - every OTHER
+ *   `rasterize: true` kind (mask-catalog.js), keyed by kind id. `outdoors`
+ *   keeps its own dedicated field because two DERIVED products are built on
+ *   top of it here (`skyReach`, the caster building channel) and those reads
+ *   should not go through a string lookup that could silently miss.
  */
 
 /**
@@ -247,10 +253,51 @@ export function compositeItemMax(grid, content, placement, valueScale = 1) {
  *   separable for exactly two reasons: the author's isolation toggles, and the
  *   pixel probe being able to answer "which of the three is missing" instead of
  *   "the shadow looks wrong".
+ * @property {Record<string, MaskGrid>} authored - every OTHER `rasterize: true`
+ *   kind's raw grid (`water` today), keyed by kind id. No derivation on top:
+ *   these exist because a GPU consumer bakes from the authored value directly.
  * @property {{expectedItemIds: string[], missingItemIds: string[], hiddenExcludedIds: string[],
- *             outdoorsSource: 'authored'|'default', ceilingElevation: number,
+ *             outdoorsSource: 'authored'|'default',
+ *             authoredSources: Record<string, 'authored'|'default'>,
+ *             ceilingElevation: number,
  *             bottomElevation: number, overheadItemIds: string[], skyReachItemIds: string[]}} completeness
  */
+
+/**
+ * Rasterize ONE authored mask through its own placement onto the scene grid,
+ * filling every texel the art does not reach with the kind's absent value.
+ *
+ * Extracted 2026-07-25 from the outdoors block below, unchanged, when `water`
+ * became the second kind to need exactly this (`MaskKind.rasterize`). The
+ * `covered` pass is the load-bearing half and the reason a plain
+ * `compositeItemMax` will not do: `compositeItemMax` MAXes, so a texel outside
+ * the art keeps its initial 0 — indistinguishable from art that painted black.
+ * Compositing a uniform-1 grid through the SAME placement records reach
+ * separately, so "outside the mask" can serve `absentValue` while "painted
+ * black" serves 0. Getting that backwards is how a missing mask reads as a
+ * confident measurement.
+ *
+ * @param {MaskGridSpec} gridSpec
+ * @param {{placement: Parameters<typeof worldToItemUv>[0], content: ContentGrid}|null} authored
+ * @param {number} absentValue - 0..1, the catalog's own.
+ * @returns {MaskGrid}
+ */
+export function rasterizeAuthored(gridSpec, authored, absentValue) {
+  const grid = createMaskGrid(gridSpec);
+  const absentByte = Math.round(Math.max(0, Math.min(1, absentValue)) * 255);
+  if (!authored?.content || !authored?.placement) {
+    grid.data.fill(absentByte);
+    return grid;
+  }
+  const painted = createMaskGrid(gridSpec);
+  compositeItemMax(painted, authored.content, authored.placement);
+  const covered = createMaskGrid(gridSpec);
+  compositeItemMax(covered, makeUniformContent(1, 255), authored.placement);
+  for (let i = 0; i < grid.data.length; i++) {
+    grid.data[i] = covered.data[i] > 0 ? painted.data[i] : absentByte;
+  }
+  return grid;
+}
 
 /**
  * Derive every floor's products in one pass over the item set.
@@ -344,27 +391,21 @@ export function deriveFloorProducts({ gridSpec, items, floors, outdoorsAbsentVal
     }
 
     const sky = createMaskGrid(gridSpec);
-    const outdoors = createMaskGrid(gridSpec);
-    const absentByte = Math.round(outdoorsAbsentValue * 255);
-    if (floor.outdoors) {
-      // Rasterize the authored outdoors through ITS OWN placement (the mask
-      // file's native size can legitimately differ from the albedo's), then
-      // combine. Texels the outdoors art does not reach read the absent value.
-      const outdoorsGrid = createMaskGrid(gridSpec);
-      compositeItemMax(outdoorsGrid, floor.outdoors.content, floor.outdoors.placement);
-      const covered = createMaskGrid(gridSpec);
-      compositeItemMax(covered, makeUniformContent(1, 255), floor.outdoors.placement);
-      for (let i = 0; i < sky.data.length; i++) {
-        const o = covered.data[i] > 0 ? outdoorsGrid.data[i] : absentByte;
-        outdoors.data[i] = o; // the RAW value — see this file's own DerivedFloorProducts typedef
-        sky.data[i] = Math.round((o * (255 - cover.data[i])) / 255);
-      }
-    } else {
-      outdoors.data.fill(absentByte);
-      for (let i = 0; i < sky.data.length; i++) {
-        sky.data[i] = Math.round((absentByte * (255 - cover.data[i])) / 255);
-      }
+    const outdoors = rasterizeAuthored(gridSpec, floor.outdoors, outdoorsAbsentValue);
+    for (let i = 0; i < sky.data.length; i++) {
+      sky.data[i] = Math.round((outdoors.data[i] * (255 - cover.data[i])) / 255);
     }
+
+    // Every OTHER `rasterize: true` kind (mask-catalog.js) — `water` today.
+    // Same rasterizer, no derivation on top: the consumer is a GPU bake, and
+    // the authority's job ends at "here is the authored value on the grid".
+    const authored = {};
+    for (const [kindId, input] of Object.entries(floor.authored ?? {})) {
+      authored[kindId] = rasterizeAuthored(gridSpec, input?.content ? input : null, input?.absentValue ?? 0);
+    }
+    const authoredSources = Object.fromEntries(
+      Object.entries(floor.authored ?? {}).map(([id, input]) => [id, input?.content ? 'authored' : 'default'])
+    );
 
     // THE BUILDING CHANNEL — the dark of `_Outdoors` IS the building footprint.
     // No item, no alpha, no elevation: the author already painted where the
@@ -414,6 +455,7 @@ export function deriveFloorProducts({ gridSpec, items, floors, outdoorsAbsentVal
       coverAbove: cover,
       skyReach: sky,
       outdoors,
+      authored,
       casterHeight,
       casterChannels: { building: casterBuilding, overhead: casterOverhead, skyReach: casterSkyReach },
       completeness: {
@@ -421,6 +463,14 @@ export function deriveFloorProducts({ gridSpec, items, floors, outdoorsAbsentVal
         missingItemIds: missing,
         hiddenExcludedIds: hiddenExcluded,
         outdoorsSource: floor.outdoors ? 'authored' : 'default',
+        // Per rasterized kind: did real authored content reach this floor, or
+        // is the grid an absent-fill? `water` reads this to decide whether the
+        // floor genuinely HAS water — an all-zero grid from a real all-land
+        // mask and an all-zero grid from no mask at all are different facts,
+        // and only one of them means "do not bake" (feedback_required_masks_fail_loud
+        // applied to a kind that is not required: report the difference rather
+        // than throw on it).
+        authoredSources,
         ceilingElevation: floor.ceilingElevation,
         // null (not 0) when the floor declares no ground: "we do not know" and
         // "it is at zero" produce very different shadows, and only one of them

@@ -113,17 +113,25 @@ This was V2's hardest plumbing and Keyhole's §9 risk 4. **The rule is small and
 
 The spine is the pattern this codebase has already proven twice: sun shadows (building + overhead + sky-reach = **one** height field, **one** march) and wind (**one** field, three fetch strategies). Water is the third and the largest.
 
-### 5.1 The BODY pack — `res:waterBody`
+### 5.1 The BODY pack — `res:waterBody` ✅ BUILT (Phase 2, 2026-07-25)
 
-Baked **on mask version change, never per frame**. One allocator-owned **1024² RGBA16F** target (`screenSized: false`, comfortably under `LAW_MAX_WORLD_RES_DIM`), built by GPU **jump-flood** ping-pong — ~10 `QuadMesh` draws — from the `water` mask VT layer:
+Baked **on mask version change, never per frame**, by GPU **jump-flood** ping-pong (seed + ceil(log2 dim) rounds + resolve) from the `water` mask. `effects/water/water-body.js` builds the three materials; `water-body-subsystem.js` owns the targets and the version poll.
 
 | Ch | Contents |
 | --- | --- |
 | **R** | **signed distance to shore**, world px. Negative inside water. |
-| **G** | **depth01** — authored where the mask paints it, else derived from `\|SDF\|`. |
-| **BA** | **flow vector** — SDF gradient rotated to the channel tangent (water follows the bank, never into it) + authored flow + a global current param. |
+| **G** | **depth01**, straight from the mask's R — which carries depth *and* presence, so one channel is the whole input. |
+| **BA** | the unit **shore tangent** — the direction the bank runs here. |
 
-A distance field is low-frequency by construction, so 1024² over a 12K map is not a compromise — a coarse SDF still yields an accurate distance, because distance is what is stored.
+**Three corrections the build made to this section, each with its reason:**
+
+1. **Resolution is the INPUT's, not a fixed 1024².** The mask arrives as the authority's per-floor grid, capped at `MASK_GRID_MAX_DIM` (512) on the long side; a flood run at 2× its input stores interpolation, not information. So all three targets are allocated at the grid's own dimensions — 4× cheaper (≈6 MB, not ≈24 MB) and self-tracking if the mask grid ever gets finer.
+2. **BA stores the bare TANGENT, not the finished flow vector.** The original text ("gradient rotated to the tangent + authored flow + a global current param") glued together two different lifetimes: the tangent is *geometry* (changes when the mask is repainted), the current is a *param* (changes when a slider moves). Baking the current in would re-run the whole flood on every drag — the exact "bake count tracks frame count" failure this phase's exit criterion exists to catch. The consumer applies the current at read time for one dot product: `flow = mix(current, tangent·dot(current,tangent), bankInfluence)`, where `bankInfluence` derives from R, which is already in the same fetch. That projection is chosen over a rotation because it is **invariant under `tangent → −tangent`**, so the tangent's unavoidable sign flip at a river's medial axis cancels instead of putting a seam down the middle. `flowFromTangent()` is that formula as a Node-tested function.
+3. **The gradient is analytic.** The flood already stores the offset to the nearest shore point, and ∇|SDF| *is* that offset normalised — no finite differences, no dependent fetches, and no `dFdx`-in-divergent-flow undefined behaviour of the kind V2's caustics were built on (§2.9).
+
+A distance field is low-frequency by construction, so a coarse grid is not a compromise — a coarse SDF still yields an accurate distance, because distance is what is stored.
+
+> 🐛 **The bug this phase caught, recorded because nothing live would have.** The first draft *clamped* out-of-bounds neighbour samples during the flood — the correct reflex everywhere else in this codebase, and wrong here: a clamped neighbour is not one stride away, so re-basing its offset fabricates a seed where none exists. The field stayed smooth and plausible and **understated** distance near the map border by up to 2√2 texels, which would have crept the shore band inward along all four edges of every scene with no nameable symptom. A distance field can only ever *over*estimate; the Node suite's brute-force comparison is the only instrument that can see the difference. Out-of-bounds is now treated as invalid, and the flood is **exact** on every fixture including two disjoint water bodies (jump flood's classic approximation case).
 
 **One SDF replaces four V2 systems:** the shore band (at any width, with no bake-time `shoreWidthPx` decision), the depth ramp, foam placement, and — because the field is *signed* — the wet-ground band **outside** the water, which V2 never had and which costs nothing.
 
@@ -268,7 +276,7 @@ Each phase ends green on `npm run verify` and is independently shippable.
 | **0a** | ✅ DONE, live-verified — `vt-pan-viewer` extraction steps 2–3 (vegetation shadows, point-light pool) | the size ratchet goes **down** twice |
 | **0b** | ✅ DONE, live-verified — **`buf:scene.attr`** — MRT, RGBA8/Nearest/NoColorSpace; opaques write; every transparent outputs `gAttr = vec4(0)` | a debug view shows floorId / outdoors / coverage / solidity; `geometry.world`'s partial-claim note is deleted (⚠️ bit 1/levelsHidden and the clear-value sentinel are the two honest gaps, see §12) |
 | **1** | ✅ DONE — Declaration + `resolveWaterFloor` + walls §8.1–8.3 | manifest + schema validate; `water-floor.test.mjs` green; the three walls sit at zero |
-| **2** | Body pack — JFA SDF, depth, flow; version-polled rebake | debug views of SDF/depth/flow; **bake count is not frame count** |
+| **2** | 🔶 BUILT, NOT WIRED — Body pack: JFA SDF, depth, tangent; version-polled rebake | debug views of SDF/depth/flow; **bake count is not frame count** |
 | **3** | **Tier 0** — placement, borrow, punch; registered, panelled, in the frame graph | S3: river visible through the planks, occluded by the planks |
 | **4** | **Tiers 1–3** — volume, motion, light | side-by-side vs 0.5.x reference, author sign-off |
 | **5** | **Tier 4** — shore + caustics | |
@@ -277,6 +285,10 @@ Each phase ends green on `npm run verify` and is independently shippable.
 | **8** | **Tier 8** — spray, through the one particle engine | |
 
 **Phase 0a is not optional.** `src/vt/vt-pan-viewer.js` is 11,957 lines with a 10,484-line function, frozen shrink-only by `tools/size-budgets.json`. Attr MRT and water wiring will grow it, and that fails the build — by design. `VT-Pan-Viewer-Extraction.md` is written, author-approved, and step 1 is done. Water is the forcing function for work already agreed.
+
+> ⛔ **Phase 2's remaining half is blocked on that same forcing function, and this is the honest record of it.** The body pack is built, exported and Node-green, but it is **not wired into the viewer**: `startVtPanViewer()` sits at its frozen budget with zero headroom, and the ~20 lines of construction + `maybeBake()` + teardown fail the build. That is the ratchet working, not an obstacle to route around. The unblock is **extraction step 5** (`getDiagnostics`, 533 lines) — deferred in the extraction plan precisely until the subsystems it reports on exposed `getStatus()`, which they now all do. Water's own report is one more thing that body of code has to grow, so extracting it first is the cheaper order regardless.
+>
+> An input-side note worth keeping: **the water mask had no route to the GPU at all** before Phase 2a. `extractionPlanForLayer` extracted a kind only if some `DerivedKind` named it as an input, so `outdoors` rode along by accident (because `skyReach` consumes it) and `water` — whose only consumer is a GPU bake — was never extracted. `MaskKind.rasterize` now declares that property instead of leaving it implicit, and `floorsWithAuthored('water')` gives the cross-floor rule its real input.
 
 Phases 3–8 each carry a **live-confirmed** line, not just verify-green. Too much of the tree currently reads *"verify-green, NOT live-tested"*; `V3-Development-Timeline.md` §6 asks for exactly this ledger.
 

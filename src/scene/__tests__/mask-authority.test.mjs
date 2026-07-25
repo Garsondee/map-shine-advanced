@@ -312,6 +312,109 @@ export async function run(t) {
     report.floors[1].authored.outdoors.includes('THROWS')
   );
 
+  // ------------------------------------------------------------------
+  // WATER — a `rasterize: true` kind whose ONLY consumer is a GPU bake
+  // (2026-07-25, Water.md Phase 2a). The whole point of this block is that
+  // nothing in DERIVED_KINDS mentions water, so before the flag existed the
+  // extraction plan was empty and this ingest would have been counted as
+  // IGNORED. Everything below is the body pack's actual input path.
+  // ------------------------------------------------------------------
+  {
+    const beforeWater = authority.getReport().ingest.pagesIngested;
+    t.ok(
+      'no floor has authored water before any water page arrives',
+      authority.floorsWithAuthored('water').length === 0
+    );
+    // getDerived still SERVES a water grid before any ingest — absent-filled,
+    // provenance 'default'. A consumer must read provenance, not emptiness.
+    const preWater = authority.getDerived('water', 0);
+    t.ok(
+      'water serves an absent-filled grid before ingest, never null/undefined',
+      !!preWater?.grid && preWater.grid.data.every((v) => v === 0)
+    );
+
+    authority.setDiscovery({
+      byLevelId: new Map([
+        [
+          'L0',
+          new Map([
+            ['shadow', 'art/base_Shadow.png'],
+            ['outdoors', 'art/base_Outdoors.png'],
+            ['fire', 'art/base_Fire.png'],
+            ['specular', 'art/base_Specular.png'],
+            ['water', 'art/base_Water.png'],
+          ]),
+        ],
+      ]),
+      method: 'listing',
+      failures: [],
+      probesAttempted: 0,
+    });
+    t.ok(
+      'a discovered water mask ships as its own unpacked layer (rgba kinds never channel-pack)',
+      authority.layersForItem(items[0]).some((d) => d.name === 'water' && d.url === 'art/base_Water.png')
+    );
+
+    // Re-ingest outdoors: setDiscovery() touched the authority, and the packed
+    // trio page above was ingested against the PREVIOUS descriptor set.
+    authority.ingestDecodedPage({
+      ownerId: 'level:L0:background',
+      layerName: PACKED_TRIO_LAYER_NAME,
+      table,
+      page: { mip: 3, px: 0, py: 0 },
+      contentWindow: fullWindow(8),
+      bitmap: syntheticPage(8, { g: 0 }),
+    });
+    // R = 128: mid-depth water over L0's whole rect. R carries depth AND
+    // presence — see the `water` kind's own `meaning`.
+    authority.ingestDecodedPage({
+      ownerId: 'level:L0:background',
+      layerName: 'water',
+      table,
+      page: { mip: 3, px: 0, py: 0 },
+      contentWindow: fullWindow(8),
+      bitmap: syntheticPage(8, { r: 128 }),
+    });
+    t.ok(
+      'the water page INGESTS (it was silently ignored before `rasterize`)',
+      authority.getReport().ingest.pagesIngested === beforeWater + 2
+    );
+
+    const water0 = authority.getDerived('water', 0);
+    t.ok(
+      'water grid carries the mask`s R channel as depth',
+      water0.grid.data.some((v) => v === 128)
+    );
+    t.ok(
+      'sampleWorld serves water as 0..1 depth',
+      Math.abs(authority.sampleWorld('water', 0, 75, 50) - 128 / 255) < 0.01
+    );
+    t.ok(
+      'a floor with no water mask serves the absent value (0 = no water), and does NOT throw — water is not required',
+      authority.sampleWorld('water', 1, 25, 50) === 0
+    );
+
+    // THE CROSS-FLOOR RULE'S INPUT (effects/water/water-floor.js). L1 has no
+    // water authoring at all, so it is absent from this list and will borrow.
+    t.ok(
+      'floorsWithAuthored reports only the floor whose water mask actually arrived',
+      authority.floorsWithAuthored('water').join(',') === '0'
+    );
+    t.ok(
+      'floorsWithAuthored also answers for outdoors, through its own provenance field',
+      authority.floorsWithAuthored('outdoors').join(',') === '0'
+    );
+    t.ok(
+      'floorsWithAuthored for a kind nothing rasterizes is empty rather than an error',
+      authority.floorsWithAuthored('bush').length === 0
+    );
+
+    // A kind that is legal in the catalog but NOT rasterized has no per-floor
+    // product to serve — null, not `{grid: undefined}` (an instrument that
+    // says "I have nothing" beats one that hands back a broken object).
+    t.ok('a legal but unrasterized kind serves null from getDerived', authority.getDerived('bush', 0) === null);
+  }
+
   // --- versioning: reads are always fresh ----------------------------------
   const v1 = authority.getDerived('coverAbove', 0).version;
   authority.ingestDecodedPage({
@@ -361,8 +464,16 @@ export async function run(t) {
   }
 
   // --- setItems: removed items drop their ingested content -----------------
+  // Counted RELATIVE to the pre-removal total, not against a literal: this
+  // assertion was `=== 2` and broke the moment the water ingest above added a
+  // third content grid, which is a fixture change, not a regression in the
+  // behaviour under test (that behaviour is "tile:T1's one grid goes away").
+  const gridsBeforeRemoval = authority.getReport().ingestedContentGrids;
   authority.setItems(items.filter((i) => i.id !== 'tile:T1'));
-  t.ok('removing an item drops its ingest', authority.getReport().ingestedContentGrids === 2);
+  t.ok(
+    'removing an item drops its ingest (exactly one grid, tile:T1`s albedo)',
+    authority.getReport().ingestedContentGrids === gridsBeforeRemoval - 1
+  );
   t.ok(
     'cover recomputes without the removed item',
     authority.getDerived('coverAbove', 0).grid.data[1 * gridW + Math.floor(gridW * 0.75)] === 0

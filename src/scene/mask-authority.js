@@ -62,14 +62,10 @@ import {
   derivedKindById,
   assembleLayerDescriptors,
   extractionPlanForLayer,
+  rasterizedKinds,
 } from './mask-catalog.js';
-import {
-  computeMaskGridSpec,
-  deriveFloorProducts,
-  sampleMaskGridWorld,
-  maskGridMean,
-  extractContentWindow,
-} from './mask-derive.js';
+import { buildMaskAuthorityReport } from './mask-authority-report.js';
+import { computeMaskGridSpec, deriveFloorProducts, sampleMaskGridWorld, extractContentWindow } from './mask-derive.js';
 
 const EXTRACT_ERROR_LOG_MAX = 10;
 
@@ -410,14 +406,34 @@ export function createMaskAuthority({ readPageImageData, log }) {
       });
     }
 
+    // Every `rasterize: true` kind EXCEPT outdoors, which keeps its own field
+    // (two derived products are built on it — see mask-derive's DeriveFloorInput).
+    const extraRasterized = rasterizedKinds().filter((k) => k.id !== 'outdoors');
+
     const floors = scene.floors.map((floor) => {
       const bgItem = backgroundItemOf(floor);
       const outdoors = bgItem ? (scene.ingests.get(`${bgItem.id}/outdoors`) ?? null) : null;
+      const authored = {};
+      for (const kind of extraRasterized) {
+        const ingest = bgItem ? (scene.ingests.get(`${bgItem.id}/${kind.id}`) ?? null) : null;
+        // `absentValue` rides even when there is NO ingest — the entry must
+        // still be present so the rasterizer fills with the KIND's absent
+        // value rather than a positional default. (Dropping the entry to
+        // `null` would make every unauthored kind fill 0 regardless of what
+        // the catalog declares — correct for `water`, silently wrong for the
+        // next kind with `absentValue: 1`.)
+        authored[kind.id] = {
+          placement: ingest?.placement ?? null,
+          content: ingest?.content ?? null,
+          absentValue: kind.absentValue,
+        };
+      }
       return {
         index: floor.index,
         ceilingElevation: floor.ceilingElevation,
         bottomElevation: floor.bottomElevation,
         outdoors: outdoors ? { placement: outdoors.placement, content: outdoors.content } : null,
+        authored,
       };
     });
 
@@ -439,12 +455,18 @@ export function createMaskAuthority({ readPageImageData, log }) {
 
   /**
    * A product for one floor: the grid + completeness, always fresh. Accepts
-   * EITHER a DERIVED id ('coverAbove'/'skyReach') or an AUTHORED kind id that
-   * `deriveFloorProducts` also rasterizes on its own (currently 'outdoors'
-   * only — see mask-derive.js's own `DerivedFloorProducts` typedef for why a
-   * raw authored value needs to be point-sampleable independent of any
-   * derived product built from it).
-   * @param {string} id - 'coverAbove' | 'skyReach' | 'outdoors'
+   * EITHER a DERIVED id ('coverAbove'/'skyReach'/'casterHeight') or an AUTHORED
+   * kind id declared `rasterize: true` in mask-catalog.js ('outdoors',
+   * 'water') — see that flag's own doc for why a raw authored value needs to
+   * be served independent of any derived product built from it, and
+   * `DerivedFloorProducts` for where each one is stored.
+   *
+   * Returns `null` for an id that resolves to no grid at all, which now
+   * includes a legal-but-unrasterized authored kind (`fire`, `tree`, …): those
+   * have no per-floor product to serve, and `null` says so rather than
+   * `{ grid: undefined }`.
+   *
+   * @param {string} id - a derived id, or a `rasterize: true` kind id
    * @param {number} floorIndex
    * @returns {{grid: import('./mask-derive.js').MaskGrid, completeness: object, version: number}|null}
    * @throws {RequiredMaskMissingError} for a `required` kind (or anything
@@ -475,8 +497,15 @@ export function createMaskAuthority({ readPageImageData, log }) {
     // casts no shadow on the river below it purely because a scene with no
     // interiors never had a mask painted.
     if (floorMeta && !acknowledgeMissingRequired) assertMaskAvailable(id, floorMeta.id, floorMeta.name);
+    // A `rasterize: true` kind other than `outdoors` lives under `authored`,
+    // keyed by kind id (mask-derive's DerivedFloorProducts). `outdoors` keeps
+    // its own top-level field, so `floor[id]` still finds it — checking
+    // `authored` FIRST would be equally correct today and would silently
+    // shadow a future top-level product that shares a name, so it is second.
+    const grid = floor[id] ?? floor.authored?.[id] ?? null;
+    if (!grid) return null;
     return {
-      grid: floor[id],
+      grid,
       // `casterHeight` alone also serves its three UNMERGED producer channels —
       // the GPU bake packs them into RGB so the author's isolation toggles and
       // the pixel probe can tell building from overhead from sky-reach. Every
@@ -604,76 +633,16 @@ export function createMaskAuthority({ readPageImageData, log }) {
   /** The debug-panel report payload — the whole story, one click. */
   function getReport() {
     recomputeIfDirty();
-    const tail = (u) => (typeof u === 'string' && u.length > 60 ? `…${u.slice(-57)}` : u);
-    return {
-      catalog: { ok: catalog.ok, errors: catalog.errors, kinds: MASK_KINDS.length, derived: DERIVED_KINDS.length },
-      sceneKey: scene.sceneKey,
-      grid: scene.gridSpec ? { w: scene.gridSpec.w, h: scene.gridSpec.h } : null,
+    return buildMaskAuthorityReport({
+      catalog,
+      scene,
+      products,
       version,
       productsVersion,
-      discovery: scene.discovery
-        ? {
-            method: scene.discovery.method ?? null,
-            failures: scene.discovery.failures ?? [],
-            probesAttempted: scene.discovery.probesAttempted ?? 0,
-          }
-        : 'NOT RUN — authored masks cannot exist yet this session',
-      floors: scene.floors.map((floor) => {
-        const found = scene.discovery?.byLevelId?.get(floor.id);
-        const product = products.find((p) => p.index === floor.index);
-        // Required-and-missing, ONLY the authored kinds themselves (not the
-        // derived ids their absence also blocks) — the ACTIONABLE list: what
-        // needs painting, not everything that will throw as a consequence.
-        const requiredMasksMissing = [...requiredMissingAuthoredIds(floor.id)];
-        return {
-          index: floor.index,
-          name: floor.name,
-          ceilingElevation: floor.ceilingElevation,
-          authored: Object.fromEntries(
-            MASK_KINDS.map((k) => {
-              const url = found?.get(k.id);
-              if (url) return [k.id, tail(url)];
-              // A required kind's absence is no longer "served as a default"
-              // (2026-07-21) — say so plainly rather than print a number
-              // (`default(1)`) that would misdescribe what actually happens now.
-              return [k.id, k.required ? 'MISSING — REQUIRED, sampling THROWS' : `default(${k.absentValue})`];
-            })
-          ),
-          // Empty array = nothing required is missing on this floor (the
-          // common, healthy case) — an explicit empty list, never absent,
-          // so a report reader never has to wonder whether this was checked.
-          requiredMasksMissing,
-          derived: product
-            ? {
-                coverAbovePct: Math.round(maskGridMean(product.coverAbove) * 100),
-                skyReachPct: Math.round(maskGridMean(product.skyReach) * 100),
-                // THE CASTER HEIGHT FIELD, per producer, in world px — the ONE
-                // block that answers "why is there no shadow" without a guess.
-                // A zero here with a non-empty `skyReachItemIds` means the art
-                // arrived but casts nothing (check the floor's elevation band);
-                // a zero WITH `missingItemIds` means the art never arrived.
-                casterHeightPx: {
-                  scalePx: CASTER_HEIGHT_SCALE_PX,
-                  building: Math.round(maskGridMean(product.casterChannels.building) * CASTER_HEIGHT_SCALE_PX),
-                  overhead: Math.round(maskGridMean(product.casterChannels.overhead) * CASTER_HEIGHT_SCALE_PX),
-                  skyReach: Math.round(maskGridMean(product.casterChannels.skyReach) * CASTER_HEIGHT_SCALE_PX),
-                  combinedMean: Math.round(maskGridMean(product.casterHeight) * CASTER_HEIGHT_SCALE_PX),
-                },
-                // The RAW outdoors mean (2026-07-21) — check THIS first when a
-                // shelter effect looks wrong: if it reads 100 with no authored
-                // outdoors art, nothing was painted for this floor at all, and
-                // that is a content gap, not a code bug (see this floor's own
-                // `authored.outdoors` field just above for provenance).
-                outdoorsPct: Math.round(maskGridMean(product.outdoors) * 100),
-                completeness: product.completeness,
-              }
-            : 'no products (floor unknown to derivation)',
-        };
-      }),
-      ingest: { ...counters, extractErrors: [...extractErrors] },
-      trackedItems: scene.items.size,
-      ingestedContentGrids: scene.ingests.size,
-    };
+      counters,
+      extractErrors,
+      requiredMissingAuthoredIds,
+    });
   }
 
   return {
@@ -740,6 +709,32 @@ export function createMaskAuthority({ readPageImageData, log }) {
     getProductsVersion() {
       recomputeIfDirty();
       return productsVersion;
+    },
+    /**
+     * Which floors have AUTHORED content for a `rasterize: true` kind — the
+     * input `resolveWaterFloor` (effects/water/water-floor.js) needs to decide
+     * whether the viewed floor has its own water or must borrow from below.
+     *
+     * "Authored" here means the completeness record says `authored`, NOT that
+     * the grid is non-empty: a floor whose `_Water` mask exists but is painted
+     * entirely black HAS water authoring (the author said "no water here"),
+     * and must not silently borrow the river from the floor beneath. Those two
+     * are the same all-zero grid and different facts — which is the whole
+     * reason `authoredSources` is recorded separately from the data.
+     *
+     * @param {string} kindId - a `rasterize: true` kind ('water').
+     * @returns {number[]} floor indices, ascending.
+     */
+    floorsWithAuthored(kindId) {
+      recomputeIfDirty();
+      return products
+        .filter((p) =>
+          kindId === 'outdoors'
+            ? p.completeness.outdoorsSource === 'authored'
+            : p.completeness.authoredSources?.[kindId] === 'authored'
+        )
+        .map((p) => p.index)
+        .sort((a, b) => a - b);
     },
   };
 }

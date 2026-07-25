@@ -1,7 +1,9 @@
 /**
- * Node verification for vt/decode-pool.js's pure part (pageWorldRect).
- * getSourceBitmap/decodePage use fetch/createImageBitmap (browser-only) --
- * verified live via the debug panel's "VT Live Decode Test" report instead.
+ * Node verification for vt/decode-primitives.js — decode-pool.js's pure half
+ * (split out 2026-07-25, the size-ratchet god-object reversal). decode-pool.js
+ * itself now has no Node-testable part left: getSourceBitmap/decodePage use
+ * fetch/createImageBitmap (browser-only) -- verified live via the debug
+ * panel's "VT Live Decode Test" report instead.
  */
 import { PageTable } from '../page-table.js';
 import {
@@ -13,7 +15,7 @@ import {
   __readLeadingBytes,
   parseImageDimensions,
   toRootAbsoluteAssetUrl,
-} from '../decode-pool.js';
+} from '../decode-primitives.js';
 
 export async function run(t) {
   const { ok } = t;

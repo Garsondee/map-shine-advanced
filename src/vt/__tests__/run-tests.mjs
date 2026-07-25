@@ -9,7 +9,7 @@
  */
 import { run as runVtCore } from './vt-core.test.mjs';
 import { run as runAtlas } from './atlas.test.mjs';
-import { run as runDecodePool } from './decode-pool.test.mjs';
+import { run as runDecodePrimitives } from './decode-primitives.test.mjs';
 import { run as runViewState } from './view-state.test.mjs';
 import { run as runTextureLimits } from './texture-limits.test.mjs';
 import { run as runBlockCompress } from './block-compress.test.mjs';
@@ -50,7 +50,7 @@ const t = {
 const suites = [
   ['vt-core', runVtCore],
   ['atlas', runAtlas],
-  ['decode-pool', runDecodePool],
+  ['decode-primitives', runDecodePrimitives],
   ['view-state', runViewState],
   ['texture-limits', runTextureLimits],
   ['block-compress', runBlockCompress],

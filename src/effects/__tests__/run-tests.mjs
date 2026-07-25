@@ -8,7 +8,7 @@
  */
 import { run as runEffectRegistration } from './effect-registration.test.mjs';
 import { run as runCandleFlame } from './candle-flame.test.mjs';
-import { run as runCandleFlameRender } from './candle-flame-render.test.mjs';
+import { run as runCandleFlameGeometry } from './candle-flame-geometry.test.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -40,7 +40,7 @@ const t = {
 const suites = [
   ['effect-registration', runEffectRegistration],
   ['candle-flame', runCandleFlame],
-  ['candle-flame-render', runCandleFlameRender],
+  ['candle-flame-geometry', runCandleFlameGeometry],
 ];
 for (const [name, fn] of suites) {
   const before = failed;
